@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.480.0 - Bug-hunt round 28: logic/SQL data-truth (spill rate + billed empty-vs-zero) (2026-09-05)
+
+Pivoted the hunt to the un-swept data-truth core (app/logic + app/data). **2 confirmed defects**
+(both pre-existing, both MED, neither from the UI refactor) + 1 refuted. No mart/query source changed.
+
+- **[MED, rate/unit] The Operations-page verdict compared WINDOW-TOTAL remote spill against a
+  PER-DAY threshold.** `verdict.operations_signals` normalizes queueing by `ndays` but left spill as
+  the window sum, then compared it to the 5-GB onset — which the platform score (and this function's
+  own docstring) define as **5 GB/day**. So a benign steady 0.3 GB/day over a 30-day window (= 9 GB
+  total) fired a false "Watch — remote spill", escalating to a false "Attention" at ~0.67 GB/day, and
+  the false-alarm magnitude scaled with window length — directly contradicting the platform score on
+  the same page. Fixed: spill is normalized `/ndays` like queue and phrased "GB/day".
+- **[MED, bare-aggregate empty-vs-zero] Decision Studio ▸ Cost Truth "Billed credits" fabricated
+  "$0.00" on an empty window.** `mart_sql.billed_split` is a bare aggregate (SUM, no GROUP BY), so an
+  empty window returns one all-NULL row and `.usable()` is True; `_billed_present = present["BILLED"]
+  or split.usable()` then went True even when the correct `present["BILLED"]` gate (a non-NULL key
+  column) was False, rendering a measured "$0.00" beside the sibling lenses' honest "No evidence".
+  Fixed: gate on the split's `CREDITS_BILLED` key column being non-NULL — the same guard `spend.py`
+  already uses for `TOTAL_USD` / `DAYS_AVERAGED`. Both locked by `test_bughunt_round28`.
+
 ## 4.479.0 - Bug-hunt round 27: Control Room Incidents false-all-clear (2026-09-05)
 
 Fresh-angle sweep over the refactor (empty-vs-zero on folds, session-state stickiness, hero/caption

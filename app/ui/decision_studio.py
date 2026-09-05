@@ -550,21 +550,29 @@ def _cost_truth(company: str, days: int, *, bounds: tuple | None = None) -> None
     split = run(mart_sql.billed_split(days, bounds=bounds), page=_PAGE,
                 key=f"decision_billed_split_{days}{_lm}", tier="historical",
                 source="FACT_METERING_DAILY (billed AI/OTHER split)")
-    if split.usable():
+    # r28 (bug-hunt): billed_split is a BARE AGGREGATE (SUM, no GROUP BY), so an empty
+    # window returns one all-NULL row and split.usable() is True with NO billed data —
+    # which would render a fabricated "$0.00" beside the sibling lenses' honest "No
+    # evidence". Gate on the key column being non-NULL (the same guard spend.py uses for
+    # TOTAL_USD / DAYS_AVERAGED) so an empty window reads "No evidence", not $0.00.
+    _split_has = split.usable() and pd.notna(split.df.iloc[0].get("CREDITS_BILLED"))
+    if _split_has:
         _s = split.df.iloc[0]
         billed_usd = blended_billed_usd(safe_float(_s.get("CREDITS_BILLED_OTHER")),
                                         safe_float(_s.get("CREDITS_BILLED_AI")), rate, ai_rate)
         _billed_help = ("Account-wide billing basis; Company does not apply. AI/Cortex "
                         "credits priced at the AI rate, compute at the compute rate.")
     else:
-        # Degrade only when the AI/OTHER split read fails: a flat compute rate on the
-        # whole billed total slightly overstates AI — say so rather than claiming AI-aware.
+        # Degrade when the split read fails OR is empty: a flat compute rate on the
+        # cost_truth billed total slightly overstates AI — say so rather than claiming
+        # AI-aware. (When the window is empty, _billed_present below is False, so this
+        # value is never shown — the tile reads "No evidence".)
         billed_usd = credits_to_usd(billed, rate)
         _billed_help = ("Account-wide billing basis; Company does not apply. AI/OTHER split "
                         "unavailable — priced at the flat compute rate (AI slightly overstated).")
     # DS #4: billed is account-wide (the cost_truth row OR the account-wide split); the
     # other three are company-scoped and can be legitimately absent. "No evidence" != $0.
-    _billed_present = present.get("BILLED", False) or split.usable()
+    _billed_present = present.get("BILLED", False) or _split_has
     _no_ev = "No evidence"
     kpi_row([
         {"label": "Billed credits (modeled $)",

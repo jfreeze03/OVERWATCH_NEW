@@ -16,8 +16,10 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 # Wave 1 #7 — the Operations page verdict signals
 def test_operations_signals_from_score_inputs():
-    # two days of per-day aggregates: 10% query fails, 6% task fails, ~40 min/day
-    # queueing (48000s over 2 days), 30 GB spill -> all four bad; plus 2 stale sources
+    # two days of per-day aggregates: 10% query fails (bad), 6% task fails, ~40 min/day
+    # queueing (2400s/day = 40 min/day, bad); spill 15 GB/day (30 GB / 2 days) -> warn
+    # (r28: spill is a PER-DAY onset of 5 GB/day, normalized by ndays like queue, not a
+    # window total); plus 2 stale sources.
     df = pd.DataFrame({
         "QUERY_COUNT": [500, 500], "FAILED_COUNT": [50, 50],
         "TASK_RUNS": [100, 100], "TASK_FAILED": [6, 6],
@@ -28,7 +30,8 @@ def test_operations_signals_from_score_inputs():
     assert any(s.level == "bad" and "query failures" in s.phrase for s in sigs)
     assert any("task failures" in s.phrase for s in sigs)
     assert any("warehouse queueing" in s.phrase for s in sigs)
-    assert any("remote spill" in s.phrase for s in sigs)
+    # r28: spill reads per-day (15 GB/day -> warn), phrased "GB/day", not a window total
+    assert any("remote spill" in s.phrase and "GB/day" in s.phrase for s in sigs)
     assert "2 stale sources" in phrases
     # it composes into an Attention verdict
     assert page_verdict(sigs, healthy="ok")["level"] == "bad"

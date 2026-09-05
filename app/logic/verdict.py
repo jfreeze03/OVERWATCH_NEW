@@ -126,10 +126,16 @@ def operations_signals(inputs: pd.DataFrame | None, stale_sources: int = 0) -> l
             sigs.append(Signal("bad", f"warehouse queueing {queue_min_day:.0f} min/day"))
         elif queue_min_day >= 10:
             sigs.append(Signal("warn", f"warehouse queueing {queue_min_day:.0f} min/day"))
-        if spill_gb >= 20:
-            sigs.append(Signal("bad", f"remote spill {spill_gb:,.0f} GB"))
-        elif spill_gb >= 5:
-            sigs.append(Signal("warn", f"remote spill {spill_gb:,.0f} GB"))
+        # r28 (bug-hunt): remote spill is a PER-DAY rate (5 GB/day onset, matching the
+        # platform score in scoring.py; the docstring above says "spill 5 GB"). It was
+        # compared as a WINDOW TOTAL while queue above is correctly /ndays — so the
+        # verdict over-fired ~Nx the window length (0.3 GB/day steady × 30d = 9 GB total
+        # → false "Watch") and contradicted the score. Normalize per-day like queue.
+        spill_gb_day = spill_gb / ndays
+        if spill_gb_day >= 20:
+            sigs.append(Signal("bad", f"remote spill {spill_gb_day:,.1f} GB/day"))
+        elif spill_gb_day >= 5:
+            sigs.append(Signal("warn", f"remote spill {spill_gb_day:,.1f} GB/day"))
 
     ss = int(stale_sources or 0)
     if ss >= 3:
