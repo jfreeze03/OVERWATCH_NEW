@@ -361,7 +361,7 @@ def test_batch_member_cache_reuses_unchanged_siblings(monkeypatch) -> None:
         # the per-member timing sentinel so _batch_cache_hit() is False and the member cache
         # is populated (r29b: the member put is now guarded by `if not cache_hit_batch`, so a
         # stub that leaves _BATCH_MEMBER_MS=None would read as a tuple-cache hit and skip it).
-        query._BATCH_MEMBER_MS.set({i: 0.0 for i in range(len(sqls))})
+        query._BATCH_MEMBER_MS.set(dict.fromkeys(range(len(sqls)), 0.0))
         return tuple(pd.DataFrame({"SQL": [statement]}) for statement in sqls)
 
     query._batch_member_cache_clear()
