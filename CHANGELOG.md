@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.485.0 - Bug-hunt round 29b: cache-correctness (batch member-cache TTL) (2026-09-05)
+
+Re-ran the cache-correctness dimension the r29 finder had errored on. **1 confirmed / 5** (the
+scope-key finder errored again, so the cross-viewer question was ground-truthed by hand). No
+mart/query semantics changed.
+
+- **[MED, batch-cache] `run_batch` re-stamped the member cache with a fresh TTL on a tuple-cache
+  HIT.** The success loop calls `_batch_member_cache_put` for every member unconditionally — but on
+  a tuple-cache HIT the replayed frames are already up to `CACHE_TTLS[tier]` old, so re-putting an
+  evicted member with a fresh `now+TTL` expiry extended its effective freshness toward ~2× the tier
+  TTL. `run_batch_mixed` (no tuple layer to bound it) then served that member stale. Fixed: only
+  (re)put the member cache on a FRESH tuple fetch (`if not cache_hit_batch:`) — an evicted member
+  re-serves from the tuple until the tuple's real TTL lapses, then re-fetches.
+- **[LOW, docstring] mart-fail backoff comment corrected.** It claimed the backoff "clears the
+  instant the mart succeeds", but inside the 120s window the on-demand mart read is skipped, so it
+  clears only on window expiry or a healthy preloaded prefetch. Comment now says so.
+
+**Refuted (agreed):** cross-viewer cache leak (verified directly — the only viewer-scoped builder
+is `prefs_sql`/USER_PREFS, which `_cache_scope` keys by `user_part`; account-wide reads are
+role-keyed and viewer-independent under owner's-rights SiS, and company filters are baked into the
+SQL text = a cache-key argument); the (page,key) backoff coarseness (a spurious live-fallback for
+an unaffected company under a partial mart outage is perf, not wrong data). Locks in
+`tests/test_bughunt_round29b.py`.
+
 ## 4.484.0 - Bug-hunt round 29: read-execution + formatting core (row-cap + telemetry) (2026-09-05)
 
 Adversarial sweep of the un-swept read/format core (query.py, result.py, formulas.py,

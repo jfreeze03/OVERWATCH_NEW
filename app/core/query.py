@@ -953,7 +953,14 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
             df=df, ok=True, truncated=truncated, source=str(spec.get("source", "")),
             tier=tier, fetched_at=datetime.now(), elapsed_ms=member_ms,
         )
-        _batch_member_cache_put(tier, capped[idx], member_scopes[idx], df, truncated)
+        # r29b: only (re)stamp the member cache from a FRESH tuple fetch. On a tuple-cache
+        # HIT `frames` is already up to CACHE_TTLS[tier] old, so re-putting it with a fresh
+        # now+TTL expiry would extend a member's effective freshness toward ~2x the tier TTL
+        # (an evicted member re-served here, then served that stale by run_batch_mixed, which
+        # has no tuple layer to bound it). Skipping the put leaves the member bounded by the
+        # tuple's real TTL: it re-serves from the tuple until that expires, then re-fetches.
+        if not cache_hit_batch:
+            _batch_member_cache_put(tier, capped[idx], member_scopes[idx], df, truncated)
     # P3: the members now carry their own slices, so the batch's END-TO-END cost
     # (submits + gather + Snowpark overhead) would vanish from telemetry. Record
     # it ONCE under its own key. Aggregators that SUM elapsed must exclude

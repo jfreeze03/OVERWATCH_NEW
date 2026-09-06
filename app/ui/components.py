@@ -1107,7 +1107,11 @@ def coverage_contract(days: int, *, day_col: str = "DAY", freshness_days: int = 
 # run_mart_first would re-probe it — re-paying the round-trip — on EVERY render
 # during an outage, always before falling to the live scan anyway. This short,
 # process-local backoff skips re-probing a recently-failed mart so the panel goes
-# straight to the (cached) live fallback; it clears the instant the mart succeeds.
+# straight to the (cached) live fallback. It clears when the window expires (the next
+# render re-probes) or sooner if a healthy PRELOADED prefetch for the same key calls
+# _note_mart_health(ok=True) — during the window the on-demand mart read is skipped, so
+# that path cannot itself detect recovery (r29b: docstring was "clears the instant the
+# mart succeeds", which overstated it — the skipped read never gets to succeed).
 # It only ever skips a read that was going to fail, so it never changes a result —
 # and never touches the coverage-gate path (that mart SUCCEEDS and its partial data
 # is a kept fallback), only the failed-read path.

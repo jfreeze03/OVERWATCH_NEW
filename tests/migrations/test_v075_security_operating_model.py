@@ -357,6 +357,11 @@ def test_batch_member_cache_reuses_unchanged_siblings(monkeypatch) -> None:
 
     def fake_fetch(sqls: tuple, scope: str, page: str) -> tuple:
         calls.append(sqls)
+        # simulate a cache MISS / fresh server-side fetch the way _execute_batch does — set
+        # the per-member timing sentinel so _batch_cache_hit() is False and the member cache
+        # is populated (r29b: the member put is now guarded by `if not cache_hit_batch`, so a
+        # stub that leaves _BATCH_MEMBER_MS=None would read as a tuple-cache hit and skip it).
+        query._BATCH_MEMBER_MS.set({i: 0.0 for i in range(len(sqls))})
         return tuple(pd.DataFrame({"SQL": [statement]}) for statement in sqls)
 
     query._batch_member_cache_clear()
@@ -421,7 +426,7 @@ def test_security_page_wires_decisions_drills_and_fact_fallbacks() -> None:
 
 
 def test_deploy_and_rebuild_surfaces_track_v075() -> None:
-    assert 'APP_VERSION = "4.484.0"' in _read("app/config.py")
+    assert 'APP_VERSION = "4.485.0"' in _read("app/config.py")
     assert "## 4.146.0 - Security page trimmed to read-only posture" in _read(
         "CHANGELOG.md"
     )
