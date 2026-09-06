@@ -113,7 +113,11 @@ def test_clustering_by_table_reader_and_panel():
 
 def test_year_projection_is_unclamped_and_labeled():
     sql = mart_sql.fact_daily_spend_year()
-    assert "DATE_TRUNC('year', CURRENT_DATE())" in sql    # true calendar year
+    # r30 #1: true calendar year anchored on the ACCOUNT clock (account_today_sql), not
+    # session-tz CURRENT_DATE() -- the latter is UTC under SiS and emptied the YTD window on
+    # New Year's Eve evening (America/Chicago).
+    assert "DATE_TRUNC('year', CONVERT_TIMEZONE('America/Chicago'" in sql
+    assert "DATE_TRUNC('year', CURRENT_DATE())" not in sql
     ct = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "contract.py").read_text(encoding="utf-8")
     assert "_year_projection_strip" in ct
     assert "Straight-line" in ct                          # honesty label

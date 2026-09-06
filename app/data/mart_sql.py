@@ -251,7 +251,12 @@ def fact_daily_spend_year() -> str:
     return f"""
 SELECT DAY, {_billed_split_cols()}
 FROM {mart_object("FACT_METERING_DAILY")}
-WHERE DAY >= DATE_TRUNC('year', CURRENT_DATE())
+-- r30 #1: anchor the year boundary to the ACCOUNT clock, matching the MTD (account_
+-- month_start_sql) and quarter (account_today_sql) sibling builders. Session-tz
+-- CURRENT_DATE() is UTC under SiS, so on New Year's Eve evening (America/Chicago) it
+-- already reads Jan 1 and DATE_TRUNC('year', ...) jumped to the new year -> the YTD
+-- chart went empty for the last ~6 hours of the year.
+WHERE DAY >= DATE_TRUNC('year', {account_today_sql()})
 GROUP BY DAY
 ORDER BY DAY
 """

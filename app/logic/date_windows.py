@@ -38,17 +38,31 @@ def _last_month_bounds(current: date) -> tuple[date, date]:
 
 
 def window_bounds(value: object, today: date | None = None) -> tuple[date, date] | None:
-    """Explicit (start, end_exclusive) dates for a BOUNDED calendar window, else None.
+    """Explicit (start, end_exclusive) dates for a calendar-anchored window, else None.
 
-    Only LAST_MONTH is bounded today. Trailing windows (7/30/...) and the period-to-date
-    presets (current month/year) all end at today and return None — callers use the
-    trailing `resolve_window_days` offset for those. A builder that wants to support
-    Last month reads these bounds and emits `col >= start AND col < end` instead of the
-    `DATEADD('day', -days, CURRENT_DATE())` trailing predicate.
+    Returned for the three calendar presets — LAST_MONTH (a complete previous month) and
+    the period-to-date presets CURRENT_MONTH / CURRENT_YEAR (first-of-period through today,
+    inclusive) — all computed on the ACCOUNT clock (account_today). Trailing windows
+    (7/30/...) end at "now" and return None; callers use the `resolve_window_days` offset.
+
+    A builder that honors these emits `col >= start AND col < end` instead of the
+    `DATEADD('day', -days, CURRENT_DATE())` trailing predicate. r30 #2: the period-to-date
+    presets USED to return None and fall back to that trailing predicate — but its
+    session-tz CURRENT_DATE() anchor disagreed with the account-clock day OFFSET
+    (resolve_window_days uses account_today), so MTD/YTD drifted a day at the evening
+    boundary (e.g. "Current month" dropped the 1st). Returning explicit account-clock
+    bounds here anchors both the window and its label to the same clock, like LAST_MONTH.
     """
-    if normalize_window(value) != LAST_MONTH_WINDOW:
-        return None
-    return _last_month_bounds(today or account_today())
+    selection = normalize_window(value)
+    current = today or account_today()
+    if selection == LAST_MONTH_WINDOW:
+        return _last_month_bounds(current)
+    # period-to-date: first of the period (inclusive) .. tomorrow (exclusive, so today is in)
+    if selection == CURRENT_MONTH_WINDOW:
+        return current.replace(day=1), current + timedelta(days=1)
+    if selection == CURRENT_YEAR_WINDOW:
+        return current.replace(month=1, day=1), current + timedelta(days=1)
+    return None
 
 
 def normalize_window(value: object) -> int | str:

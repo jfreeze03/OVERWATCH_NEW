@@ -64,10 +64,13 @@ def test_last_month_is_a_bounded_previous_calendar_month():
     # the resolved day-offset is the SPAN of last month (August = 31d), not a today-anchored
     # rolling window — used for /day math and as a trailing fallback only
     assert resolve_window_days(LAST_MONTH_WINDOW, today) == 31
-    # trailing/period windows are NOT bounded (they end today) -> None
+    # trailing windows are NOT bounded (they end at "now") -> None
     assert window_bounds(30, today) is None
-    assert window_bounds(CURRENT_MONTH_WINDOW, today) is None
-    assert window_bounds(CURRENT_YEAR_WINDOW, today) is None
+    # r30 #2: the period-to-date presets ARE bounded on the account clock now (first of the
+    # period through today inclusive = end-exclusive at today+1), so the SQL window is
+    # account-anchored like the label and no longer drifts a day at the session-tz boundary
+    assert window_bounds(CURRENT_MONTH_WINDOW, today) == (date(2026, 9, 1), date(2026, 9, 18))
+    assert window_bounds(CURRENT_YEAR_WINDOW, today) == (date(2026, 1, 1), date(2026, 9, 18))
 
 
 def test_last_month_handles_year_and_feb_boundaries():

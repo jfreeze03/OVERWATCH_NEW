@@ -1,5 +1,34 @@
 # Changelog
 
+## 4.486.0 - Bug-hunt round 30: computation core (account-tz calendar boundaries) (2026-09-05)
+
+Adversarial sweep of the pure computation core (date_windows, scoring, verdict, governance,
+anomaly). **2 confirmed / 6** — both account-tz-vs-UTC temporal-edge bugs of a class the codebase
+already fixed elsewhere (exec board, MTD strip, quarter, cost-vs-last-month all anchor on the
+account clock), leaving these as the odd ones out. The scoring/governance/anomaly candidates were
+all refuted (page_verdict unknown-level never supplied; governance NaN can't occur; C8
+present-but-NULL unreachable). No mart/query source or score math changed.
+
+- **[MED] Calendar-year spend chart emptied on New Year's Eve evening.** `fact_daily_spend_year()`
+  anchored its window on session-tz `DATE_TRUNC('year', CURRENT_DATE())` — which is UTC under SiS,
+  so on Dec 31 evening (America/Chicago) it already read Jan 1 and `DAY >= 2027-01-01` matched no
+  rows, dropping the whole YTD projection strip for ~6 hours. Fixed:
+  `DATE_TRUNC('year', account_today_sql())`, matching the MTD (`account_month_start_sql`) and
+  quarter (`account_today_sql`) sibling builders.
+- **[MED] MTD/YTD window drifted a day at the evening boundary.** The CURRENT_MONTH / CURRENT_YEAR
+  presets computed their day OFFSET on the account clock (`resolve_window_days` → `account_today`)
+  but `window_bounds()` returned None for them, so they fell back to the trailing
+  `DATEADD(-offset, CURRENT_DATE())` predicate — a session-tz anchor that disagreed with the
+  account-clock offset. When the session/account default TZ differs from America/Chicago, "Current
+  month" on the 15th at 23:00 resolved to `DAY >= Sep 2` (dropping the 1st) while the label still
+  read "Sep 1 - Sep 15". Fixed: `window_bounds()` now returns explicit account-clock
+  `(first-of-period, today+1)` bounds for CURRENT_MONTH/CURRENT_YEAR (like LAST_MONTH), so the
+  window and its label share one clock; every bounds-honoring builder (incl. the headline
+  `fact_metering_by_service`) gets the account-anchored range instead of the drifting trailing one.
+
+Locks in `tests/test_bughunt_round30.py`; `test_v4138_calendar_windows` updated (period-to-date
+presets are now bounded, not None).
+
 ## 4.485.0 - Bug-hunt round 29b: cache-correctness (batch member-cache TTL) (2026-09-05)
 
 Re-ran the cache-correctness dimension the r29 finder had errored on. **1 confirmed / 5** (the
