@@ -502,7 +502,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                     _nb_ok = notebooks is not None and notebooks.usable()
                     _users = compute_pool_user_costs(notebooks.df if _nb_ok else None,
                                                      _pool_name, rate)
-                    section_header(f"Users driving {_pool_name}", "info", "chargeback")
+                    section_header(f"Users driving {_pool_name}", "", "chargeback")
                     if _users.empty:
                         # Be honest about WHY there's no per-user split — don't brand every
                         # empty case a "native-app pool" (a user-owned non-notebook pool

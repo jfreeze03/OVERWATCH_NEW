@@ -98,7 +98,7 @@ def _date_value(value: object, fallback_days: int = 7):
 def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
     action_id = str(row.get("ACTION_ID") or "")
     section_header(str(row.get("TITLE") or "Work item"),
-                   "warn" if str(row.get("SEVERITY", "")).upper() in ("CRITICAL", "HIGH") else "info",
+                   "warn" if str(row.get("SEVERITY", "")).upper() in ("CRITICAL", "HIGH") else "",
                    "action")
     status_chips([
         (str(row.get("SEVERITY") or "UNSET"),
@@ -315,7 +315,11 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
 
 def render_action_center(company: str) -> None:
     """Persistent owner queue with exact-row navigation and lifecycle controls."""
-    section_header("Action Center", "warn", "action")
+    # Codex-adj P1: the header stripe was a CONSTANT "warn" (amber on every render, incl. a
+    # fully clean/empty queue) — a false alarm. The exception_summary + kpi_row below carry the
+    # real data-derived severity; the header is a neutral label (renders before the toggle-gated
+    # read, and across the not-installed / empty early-returns, so a constant colour is wrong).
+    section_header("Action Center", "", "action")
     include_closed = st.toggle("Include completed work", key="action_include_closed")
     read_model_caption("action_center")
     extended_res = run(
@@ -582,7 +586,7 @@ def _render_data_product_detail(product: str) -> None:
 def render_entity_360(company: str) -> None:
     """One context surface for ownership, work, changes, savings and evidence."""
     _seed_entity_context()
-    section_header("Entity 360", "info", "search")
+    section_header("Entity 360", "", "search")
     c1, c2 = st.columns([0.85, 2.15])
     with c1:
         kind = st.selectbox("Entity type", ENTITY_TYPES, key="entity_360_type")

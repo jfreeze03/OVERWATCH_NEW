@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.487.0 - Codex UI/UX review, adjudicated: kill decorative section-header colour (2026-09-06)
+
+Ground-truthed the Codex UI/UX review against the current post-refactor code (most of it already
+shipped, wrong-premise, or SiS-inappropriate) and implemented the genuinely-actionable P1s — the
+same static-semantic-colour class the v4.461-477 refactor removed everywhere else and missed here.
+Presentation-only: no data/calc/query change.
+
+- **[P1] Action Center header no longer cries wolf.** `render_action_center` set the header stripe
+  to a constant `"warn"` (amber on every render, incl. a fully clean/empty queue). The
+  exception_summary + kpi_row below already carry the data-derived severity, and the header renders
+  before the toggle-gated read and across the not-installed / empty early-returns — so it's now a
+  neutral label (`section_header("Action Center", "", "action")`).
+- **[P1] Eliminated 26 constant blue "info" section headers app-wide.** Security alone had 16;
+  another 10 were scattered across brief / overview / decision_studio / security_center / workbench /
+  cost spend (plus a `else "info"` fallback). Blue/"info" carries no severity meaning — pure
+  decoration the refactor missed. All → neutral `""` (colour now comes only from data-derived
+  `alarm_health` / `warn` / the exception surfaces).
+- **[P2] One markdown pseudo-heading → the primitive.** Decision Studio's "Cost per consumer &
+  retirement candidates" used a bold-Markdown pseudo-heading, bypassing the `section_header` primitive
+  (icon + a11y heading) the page uses elsewhere; migrated. (The wider 134-heading and hero_metric
+  migrations are the remaining incremental/selective P2s.)
+
+Locks in `tests/test_codex_adjudication_p1.py` (no constant/decorative "info" header may return;
+Action Center stays neutral). Full adjudication artifact published for reference.
+
 ## 4.486.0 - Bug-hunt round 30: computation core (account-tz calendar boundaries) (2026-09-05)
 
 Adversarial sweep of the pure computation core (date_windows, scoring, verdict, governance,

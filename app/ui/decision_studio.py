@@ -417,7 +417,9 @@ def _products(company: str, days: int, rate: float, *, bounds: tuple | None = No
     verdicts = insights.product_retirement(
         result.df, reads.df if reads.usable() else pd.DataFrame(), rate)
     if not verdicts.empty:
-        st.markdown("**Cost per consumer & retirement candidates**")
+        # Codex-adj P2: use the section_header primitive (icon + a11y heading) this page already
+        # uses elsewhere, instead of a bold-Markdown pseudo-heading that bypasses it.
+        section_header("Cost per consumer & retirement candidates", "", "cost")
         # Three degrade states, distinguished honestly: ACCESS_HISTORY absent (edition/
         # permission), present-but-empty (queried, no reads for mapped products), or
         # measured. `_measured` gates the consumer surfaces so "couldn't measure" never
@@ -686,7 +688,7 @@ def _scorecard(company: str, rate: float) -> None:
     evidence coverage — into one director-facing scorecard + a one-line verdict. The gate
     the owner set before going autonomous. Account-wide; reuses the ledger/queue/alert
     marts and adds no new scan (only the small account roll-ups in app/logic/proof.py)."""
-    section_header("Does OVERWATCH earn its keep?", "info", "target")
+    section_header("Does OVERWATCH earn its keep?", "", "target")
     st.caption("Account-wide proof: what the tool recommended, how much the team acted on, what "
                "verified out in dollars vs OVERWATCH's own run cost, and how much of the advice "
                "rests on labeled evidence. Resolve alerts with a kind and verify savings to grow it.")
@@ -784,7 +786,7 @@ def _roi(company: str) -> None:
     OVERWATCH has verifiably saved, how well the estimates held up, the monthly run-rate,
     and which levers produced it. The director-facing proof that the loop closes. All from
     the SAVINGS_LEDGER the app already books (no new source)."""
-    section_header("Return on OVERWATCH — verified savings", "info", "target")
+    section_header("Return on OVERWATCH — verified savings", "", "target")
     st.caption("Account-wide — SAVINGS_LEDGER has no company grain, so this track record does "
                "not narrow to the Company filter.")
     ledger = run(mart_sql.savings_ledger(limit=None), page=_PAGE, key="decision_roi_ledger_full",

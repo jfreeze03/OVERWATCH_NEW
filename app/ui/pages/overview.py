@@ -755,7 +755,7 @@ def render() -> None:
     # month" scope (_ov_bounds set), so the badge says "last month" then, matching this section's
     # KPI label (f["window_label"]) and the page scope note — not a trailing "{days}d".
     _ce_wlab = "last month" if _ov_bounds is not None else f"{days}d"
-    section_header("Company economics", "info", "spend", badge=f"{company} · {_ce_wlab}")
+    section_header("Company economics", "", "spend", badge=f"{company} · {_ce_wlab}")
     section_filter_contract(
         f,
         applies=("company", "days"),
@@ -777,7 +777,7 @@ def render() -> None:
         as_of=_ov_asof_company or "",
         key=f"ow_case_add_ov_spend_{company}_{days}")
 
-    section_header("Account risk & contract", "warn" if critical_alerts else "info", "contract")
+    section_header("Account risk & contract", "warn" if critical_alerts else "", "contract")
     section_filter_contract(
         f,
         applies=(),

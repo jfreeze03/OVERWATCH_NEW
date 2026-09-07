@@ -186,7 +186,7 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
 
     left, right = st.columns(2)
     with left:
-        section_header("Failed logins", "info", "alerts", anchor="sec-faillog")
+        section_header("Failed logins", "", "alerts", anchor="sec-faillog")
         res = batch.get("logins") or run(
             _logins_sql, page=_PAGE, key=f"faillog_{company}_{days}{_lm}",
             tier="hourly" if use_security_fact else "recent", source=_activity_source,
@@ -198,7 +198,7 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
             entity_nav_table(with_user_names(res.df, _PAGE), key=f"sec_faillog_{company}_{days}",
                              key_col="USER_NAME", entity_type="USER")
     with right:
-        section_header("Privileged role holders", "info", "admin", anchor="sec-privroles")
+        section_header("Privileged role holders", "", "admin", anchor="sec-privroles")
         res = stable_batch.get("admins") or run(
                   security_sql.admin_role_holders(company), page=_PAGE,
                   key=f"admins_{company}",
@@ -258,7 +258,7 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
 
     # Moved from Changes (v4.49): decomposes the Failed-logins panel above —
     # login telemetry, not change evidence.
-    section_header("Failed-login reasons (network policy vs credentials)", "info", "alerts",
+    section_header("Failed-login reasons (network policy vs credentials)", "", "alerts",
                    anchor="sec-failreasons")
     reasons = batch.get("login_reasons") or run(
         _reasons_sql, page=_PAGE, key=f"login_reasons_{company}_{days}{_lm}",
@@ -306,7 +306,7 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
         methodology_note("The hourly scan raises SEC_CRED_EXPIRY for these — re-raised weekly until rotated.")
         result_caption(creds)
 
-    section_header("Dormant users still holding access (90d+)", "info", "security",
+    section_header("Dormant users still holding access (90d+)", "", "security",
                    anchor="sec-dormant")
     from app.ui.components import toggle_cost_hint
     st.caption(toggle_cost_hint("dormant"))
@@ -373,7 +373,7 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
 
     # Moved from Changes (v4.49): entitlement hygiene — who still holds access
     # nobody uses — reads with dormant users, not with DDL evidence.
-    section_header("Unused roles (90d) — revoke candidates (account-wide)", "info", "admin")
+    section_header("Unused roles (90d) — revoke candidates (account-wide)", "", "admin")
     ur = run_mart_first(
         mart27_sql.unused_roles_via_fact(90), security_sql.unused_roles(90),
         page=_PAGE, key="unused_roles",
@@ -440,7 +440,7 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
     both start as 'bytes moved that nobody was watching'."""
     _lm = "_lm" if bounds is not None else ""
     st.caption("Data leaving the account: outbound transfer by destination, and who unloads to stages.")
-    section_header("Outbound transfer (account-wide)", "info", "security")
+    section_header("Outbound transfer (account-wide)", "", "security")
     st.caption("The dollar egress story — outbound transfer by destination region — lives on "
                "Cost ▸ Spend & Attribution, which owns it. This section keeps only the "
                "security lenses: new/spiking destinations and unload activity.")
@@ -466,7 +466,7 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
             styled_table(bdf, height=240, sort_label="new or spiking, then current GB")
             result_caption(baseline)
 
-    section_header("Unload activity (COPY INTO stage)", "info", "security")
+    section_header("Unload activity (COPY INTO stage)", "", "security")
     panel_help(
         "QUERY_HISTORY filtered to QUERY_TYPE='UNLOAD' — every successful COPY INTO "
         "<location>, grouped per user/day. GB_OUT sums the query's byte counters (for "
@@ -602,7 +602,7 @@ def _exposure_tab() -> None:
             st.session_state["_sec_share_sel"] = sel
         share = str(frame.iloc[sel]["SHARE_NAME"]) if sel is not None and 0 <= sel < len(frame) else ""
         if share:
-            section_header(f"Objects exposed by {share}", "info", "security")
+            section_header(f"Objects exposed by {share}", "", "security")
             # Metadata SHOW (not a usage-view scan), interaction-gated. No LIMIT
             # is legal on SHOW, so max_rows=0 — mirrors show_shares_sql's run pattern.
             g = run(security_sql.show_grants_to_share_sql(share), page=_PAGE,
@@ -620,7 +620,7 @@ def _exposure_tab() -> None:
                 result_caption(g)
     inbound = classified[classified["KIND"] == "INBOUND"]
     if not inbound.empty:
-        section_header("Inbound shares (data we consume)", "info", "security")
+        section_header("Inbound shares (data we consume)", "", "security")
         styled_table(inbound, height=200, slug="share-inbound")
     st.caption("New consumer accounts or a newly-published listing are the findings to chase. Alerting on *changes* to this surface is the next slice.")
     result_caption(shares)
@@ -947,7 +947,7 @@ def _tag_governance_panel(company: str) -> None:
     governance tags (COST_OWNER / SENSITIVITY / SERVICE_TIER / APP_OWNER), scored,
     with a per-tag breakdown and an untagged-asset worklist. Coverage is a current-
     state fact, so the window filter does not apply (only Company scopes it)."""
-    section_header("Object-tag governance coverage", "info", "security")
+    section_header("Object-tag governance coverage", "", "security")
     probe = run(security_sql.object_tag_probe(), page=_PAGE, key="tag_probe",
                 tier="metadata", source="ACCOUNT_USAGE.TAG_REFERENCES (probe)", probe=True)
     if not probe.ok:
@@ -1014,7 +1014,7 @@ def _tag_governance_panel(company: str) -> None:
 def _export_pack(company: str, days: int, window_label: str, *, bounds: tuple | None = None) -> None:
     """One-click access-review bundle: CSVs zipped in memory, stdlib only."""
     _lm = "_lm" if bounds is not None else ""
-    section_header("Auditor export pack", "info", "security")
+    section_header("Auditor export pack", "", "security")
     st.caption("Ten CSVs — dormant users, MFA gaps, privileged holders, window grants, plus the "
                "audit sheets (failed logins, credentials, role matrix, unused roles, 90d grant diff). "
                "The manifest labels company-scoped and account-wide sheets separately; actionable "
@@ -1184,7 +1184,7 @@ def _posture_trend_panel(trend) -> None:
 def _clients_tab(company: str, days: int, *, bounds: tuple | None = None) -> None:
     """Driver/version inventory — the 'when do we need to upgrade' sheet."""
     _lm = "_lm" if bounds is not None else ""
-    section_header("Client drivers & versions — who connects with what", "info", "operations")
+    section_header("Client drivers & versions — who connects with what", "", "operations")
     panel_help(
         "Source: ACCOUNT_USAGE.SESSIONS (lags up to ~3h, 365d retention). DRIVER and "
         "VERSION parse from CLIENT_APPLICATION_ID; PROGRAM is whatever the client "
@@ -1269,7 +1269,7 @@ def _ai_guardrails_tab(company: str) -> None:
                        "someone looks. Baselines are each user's own prior 28 days.")
         result_caption(usage)
 
-    section_header("Guardrail flags (Cortex Guardrails)", "info", "security",
+    section_header("Guardrail flags (Cortex Guardrails)", "", "security",
                    anchor="sec-ai-guardrails")
     gr = run(cortex_sql.guardrails_daily(30), page=_PAGE, key="ai_guardrails_daily",
              tier="historical", source="CORTEX_AI_GUARDRAILS_USAGE_HISTORY", probe=True)
@@ -1303,7 +1303,7 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
     # Recent grant changes feed (owner ask 2026-08-17): the granular "who granted
     # what to whom, and when" access-change log, newest first — one row per grant or
     # revoke across role->user and privilege->object, from GRANTS_TO_USERS/ROLES.
-    section_header("Recent grant changes", "info", "security", anchor="sec-grant-changes")
+    section_header("Recent grant changes", "", "security", anchor="sec-grant-changes")
     _gc_days = st.selectbox("Window", [7, 30, 90, 180], index=1, key="sec_grant_days",
                             format_func=lambda d: f"last {d} days")
     # tier=historical (owner telemetry 2026-08-17: this union scans GRANTS_TO_ROLES
@@ -1348,7 +1348,7 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
     # r23 #4 (the Access-tab pattern): the tab's two independent live reads
     # submit server-side async in one shot; any failure falls back to the
     # serial per-query calls below, unchanged.
-    section_header("Who changed what (DDL/DCL)", "info", "admin")
+    section_header("Who changed what (DDL/DCL)", "", "admin")
     if str(company or "ALL").upper() != "ALL":
         st.caption(
             "Scope: change evidence follows the actor's company OR the object's — so "
@@ -1503,7 +1503,7 @@ def render() -> None:
     section_filter_contract(f, **_contracts[section])
     if section == "Decision queue":
         render_security_overview(f["company"])
-        section_header("Operational governance", "info", "security")
+        section_header("Operational governance", "", "security")
         section_filter_contract(
             f, applies=("company",),
             note="Governance score and posture trend are account-wide fixed-horizon "

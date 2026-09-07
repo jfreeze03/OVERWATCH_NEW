@@ -367,7 +367,7 @@ def render() -> None:
         else:
             empty_state("needs_setup", "Alerting not installed yet.")
 
-    section_header("Asks", "info", "bolt")
+    section_header("Asks", "", "bolt")
     brief_action_lines: list[str] = []
     actions = _b_live.get(f"acts_{company}") or run(mart_sql.action_queue(100, company), page=_PAGE,
                   key=f"brief_actions_{company}", tier="live", source="ACTION_QUEUE")

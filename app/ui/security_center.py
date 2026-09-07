@@ -360,7 +360,7 @@ def _dot_text(value: object) -> str:
 
 def render_effective_access(company: str) -> None:
     """On-demand inherited-role graph and risk-ranked access paths."""
-    section_header("Effective access paths", "info", "security", anchor="sec-effective")
+    section_header("Effective access paths", "", "security", anchor="sec-effective")
     panel_help(
         "Direct grants are only the first hop. This recursive view expands inherited roles, "
         "counts sensitive privileges, and exposes the exact path used to reach them."
