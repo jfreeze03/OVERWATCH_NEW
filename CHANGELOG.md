@@ -1,5 +1,40 @@
 # Changelog
 
+## 4.491.0 - Bug-hunt round 33: forecast / runway edge cases (2026-09-07)
+
+Adversarial sweep of the month-end projection + contract runway/pacing surface. **4 distinct fixes,
+1 finding refuted on deeper ground-truth, 3 refuted earlier** — a floor signal for this well-worked
+money-math surface.
+
+- **[MED] Month-end projection dropped COMPLETE days that were MISSING from the frame.**
+  `fact_daily_spend` GROUPs BY DAY with no date spine, so an ingest-lagged (or genuinely idle) day
+  simply has no row — and `month_end_projection` counted it in neither `mtd_complete` nor `add`
+  (which starts at today), so the projection read low by that day's spend until ingest caught up. The
+  projection already models every FUTURE calendar day at ~the recent mean rate; a past GAP day is the
+  same under that model, so it now fills the missing COMPLETE days at the baseline mean. Two guards
+  keep it honest: only days inside the LOADED coverage (>= the earliest row) count as gaps — days
+  before the frame's first row are un-loaded history, never fabricated — and the fill engages only for
+  a DENSE window (majority of covered days present), so a genuinely sparse/idle account is not handed
+  a fabricated month.
+- **[MED] An unconfigured contract start fabricated a healthy runway.** `mart_sql.contract_exhaustion`
+  summed `CONTRACT_CREDITS` into TOTAL while CONSUMED fell back to ~today (=0) when
+  `CONTRACT_START_DATE` was unset — a green, ~0%-consumed runway bar on the always-on Overview/Brief
+  surfaces. TOTAL is now gated on a configured start (0 when unset) so `contract_runway()` returns
+  None and the bars render nothing, matching the Contract page's own start gate.
+- **[LOW] Contract-exhaustion date drifted a day near midnight.** `contract_exhaustion` anchored the
+  displayed EXHAUST_DATE on session-tz `CURRENT_DATE()` (UTC under SiS), a day off from the app's
+  account calendar; the anchor now rides `account_today_sql()`. The DAILY_BURN window deliberately
+  stays session-tz — it must byte-match the V064 COST_CONTRACT_BREACH paging alert
+  (`test_rec20_alert_matches_app_mart_window`), and realigning both to the account clock needs an
+  owner-applied migration to alter the alert proc (deferred; the residual drift is a rounding-scale
+  bias on a 30-day mean).
+- **[LOW] `plan_scenarios` could raise OverflowError.** A near-idle burn × a large remaining balance
+  yields a days-left of ~1e12; `anchor + timedelta(days=int(days_left))` overflowed `date.max`. Capped
+  at a ~10-year horizon, reported `">10y"`.
+- **Refuted ([6]):** `contract_pace` term-day count looked off-by-one, but the app treats
+  `CONTRACT_END_DATE` as an EXCLUSIVE boundary (pinned by `test_contract_pace_hand`) and the function
+  is internally consistent with it. The convention is now locked so a future "fix" can't flip it.
+
 ## 4.490.0 - Bug-hunt round 32: serverless-cost window honors Last month (2026-09-06)
 
 Adversarial sweep of the cost attribution & chargeback money-math. **1 confirmed / 2** — a strong

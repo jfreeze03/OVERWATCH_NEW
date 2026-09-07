@@ -103,6 +103,23 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
     _, _, remaining = month_days(today)
     project_days = remaining + 1   # codex#16: today (incomplete) + every day after it
 
+    # r33: a completed day MISSING from the frame is counted in NEITHER mtd_complete NOR
+    # `add` (which starts at today), so the month-end number reads low by that day's spend.
+    # fact_daily_spend GROUPs BY DAY with no date spine, so an ingest-lagged (or genuinely
+    # idle) day simply has no row. The projection already models every FUTURE calendar day
+    # at ~the recent mean rate; a past GAP day is the same under that model, so fill the
+    # missing COMPLETE days at the baseline mean instead of counting them as zero. Only days
+    # inside the LOADED coverage (>= the earliest row) count as gaps — days before the
+    # frame's first row are un-loaded history, not gaps, and must never be fabricated. Guard
+    # to a DENSE window (majority of covered days present) so a genuinely sparse/idle account
+    # is not handed a fabricated month.
+    cover_start = max(month_start, frame["DAY"].min())
+    covered_days = max(0, (today - cover_start).days)
+    present_days = int(((frame["DAY"] >= cover_start) & (frame["DAY"] < today)).sum())
+    missing_days = max(0, covered_days - present_days)
+    gap_fill = (missing_days * float(baseline["USD"].mean())
+                if missing_days and present_days >= covered_days / 2 else 0.0)
+
     # rec#15: a 14-day window gives day-of-week means only 2 samples each, so the
     # seasonal band came out over-narrow and over-confident. Widen the seasonal
     # baseline to 6 weeks and refuse the DOW split below 4 weeks (falls through to
@@ -120,7 +137,7 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
         # month-end is monotonic: it can never fall below spend-to-date (mtd, which
         # already includes today's partial). Flooring here keeps the point estimate
         # and its band self-consistent (low <= projected <= high) under any trend.
-        projected = max(mtd_complete + add, mtd)
+        projected = max(mtd_complete + add + gap_fill, mtd)
         spread = _band(resid_std, project_days, len(frame_b))
         return MonthEndForecast(
             ok=True,
@@ -148,7 +165,7 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
     # it can never be below `mtd` (which counts today's partial) — so floor the point
     # estimate there. This keeps low <= projected <= high even on a clean decline
     # (zero residual -> zero band) instead of inverting the interval.
-    projected = max(mtd_complete + add, mtd)
+    projected = max(mtd_complete + add + gap_fill, mtd)
     resid = [ys[i] - (intercept + slope * xs[i]) for i in range(len(ys))]
     resid_std = float(pd.Series(resid).std(ddof=1)) if len(resid) > 1 else 0.0
     spread = _band(resid_std, project_days, len(baseline))

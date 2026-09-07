@@ -1201,14 +1201,28 @@ def contract_exhaustion() -> str:
 SELECT TOTAL, CONSUMED, DAILY_BURN,
        CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)) AS DAYS_LEFT,
        DATEADD('day', CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)),
-               CURRENT_DATE()) AS EXHAUST_DATE
+               {account_today_sql()}) AS EXHAUST_DATE
 FROM (
     SELECT
-        (SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CONTRACT_CREDITS', VALUE, NULL))), 0)
+        -- r33: gate TOTAL on a CONFIGURED contract start. CONTRACT_CREDITS and
+        -- CONTRACT_START_DATE are independent SETTINGS keys; with credits set but start unset the
+        -- CONSUMED sub-select fell back to today and summed ~0, fabricating a healthy runway
+        -- (~0% consumed, huge days, green) on the always-on Overview/Brief bars for a possibly-
+        -- exhausted contract. TOTAL=0 when start is unset -> contract_runway() (guards TOTAL<=0)
+        -- returns None -> the bars render nothing, matching the Contract page's own start gate.
+        (SELECT IFF(TRY_TO_DATE(MAX(IFF(KEY = 'CONTRACT_START_DATE', VALUE, NULL))) IS NULL, 0,
+                    COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CONTRACT_CREDITS', VALUE, NULL))), 0))
          FROM {core_object("SETTINGS")}) AS TOTAL,
         (SELECT COALESCE(SUM(CREDITS_BILLED), 0) FROM {mart_object("FACT_METERING_DAILY")}
          WHERE DAY >= COALESCE((SELECT TRY_TO_DATE(MAX(IFF(KEY = 'CONTRACT_START_DATE', VALUE, NULL)))
-                                FROM {core_object("SETTINGS")}), CURRENT_DATE())) AS CONSUMED,
+                                FROM {core_object("SETTINGS")}), {account_today_sql()})) AS CONSUMED,
+        -- r33: the DAILY_BURN window stays session-tz CURRENT_DATE() ON PURPOSE — it must
+        -- byte-match the COST_CONTRACT_BREACH paging alert (V064 SP_ALERT_SCAN_DAILY) or the KPI
+        -- and the alert diverge (test_rec20_alert_matches_app_mart_window). Realigning both to the
+        -- account clock would take an owner-applied migration to alter the alert proc, deferred
+        -- until then; the residual ~6h/day account-vs-UTC boundary drift is a rounding-scale bias
+        -- on a 30-day mean. (EXHAUST_DATE's anchor above is account-tz — a displayed date, not
+        -- part of the alert-matched burn.)
         (SELECT COALESCE(SUM(CREDITS_BILLED), 0) / NULLIF(COUNT(DISTINCT DAY), 0)
          FROM {mart_object("FACT_METERING_DAILY")}
          WHERE DAY BETWEEN DATEADD('day', -30, CURRENT_DATE())

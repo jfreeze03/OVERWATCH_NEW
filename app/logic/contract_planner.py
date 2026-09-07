@@ -13,6 +13,10 @@ import pandas as pd
 
 from app.logic.formulas import account_today
 
+# r33: cap the exhaustion horizon (~10y) so a near-idle account's huge days-left can't overflow
+# anchor + timedelta past date.max; anything beyond is reported ">10y", not a fabricated date.
+_HORIZON_DAYS = 3653
+
 
 def remaining_balance_summary(df: pd.DataFrame, burn_window_days: int = 14) -> dict:
     """Summarize ORGANIZATION_USAGE.REMAINING_BALANCE_DAILY rows.
@@ -111,8 +115,14 @@ def plan_scenarios(daily_burn_usd: float, term_months: int, buffer_pct: float,
         term_usd = rate * 30.44 * months
         if rate > 0 and remaining > 0:
             days_left = remaining / rate
-            exhaustion = anchor + timedelta(days=int(days_left))
-            exhaustion_s = exhaustion.isoformat()
+            # r33: a near-idle account (tiny rate) x a large remaining balance yields a huge
+            # days_left; anchor + timedelta(days=int(days_left)) then raises OverflowError
+            # (beyond date.max). Past a ~10y horizon a runway is not meaningfully a date anyway.
+            if days_left >= _HORIZON_DAYS:
+                exhaustion_s = ">10y"
+            else:
+                exhaustion = anchor + timedelta(days=int(days_left))
+                exhaustion_s = exhaustion.isoformat()
         else:
             exhaustion_s = "n/a"
         rows.append({
