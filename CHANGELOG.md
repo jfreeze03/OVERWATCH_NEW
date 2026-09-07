@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.490.0 - Bug-hunt round 32: serverless-cost window honors Last month (2026-09-06)
+
+Adversarial sweep of the cost attribution & chargeback money-math. **1 confirmed / 2** — a strong
+floor signal for this well-worked surface (V126 pipeline WH_CREDITS, V127 idle credits, round-28
+billed empty-vs-zero already closed the big ones; two dimensions came back empty and the rate/rebate
+finder erred). No rate/rebate/allocation defect surfaced.
+
+- **[MED, WLA-1] The "Serverless tasks (billed separately)" table ignored the Last-month scope.**
+  `graph_sql.serverless_task_daily` hard-coded a trailing `START_TIME >= DATEADD('day', -days,
+  CURRENT_DATE())` and its caller omitted `bounds`, while the pipeline-cost KPIs directly above it
+  in the same panel honor `bounds` via `scope_window_where`. So under "Last month" the serverless
+  dollars covered a rolling ~month ending today (session-tz) instead of the account-clock-bounded
+  prior month — a wrong serverless total, inconsistent with the pipeline costs beside it. Fixed:
+  the builder takes `bounds` and windows through `scope_window_where`; the caller threads `bounds`
+  and adds the `_lm` cache-key suffix so trailing and Last-month reads don't collide.
+
+Locks in `tests/test_bughunt_round32.py`.
+
 ## 4.489.0 - Bug-hunt round 31: security correctness (coverage-gating, spray IP, escalation) (2026-09-06)
 
 Adversarial sweep of the security logic + SQL. **6 confirmed / 8** (the coverage-posture finder

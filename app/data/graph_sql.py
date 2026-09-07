@@ -104,7 +104,7 @@ LIMIT 50000
 
 
 def serverless_task_daily(days: int, company: str = "ALL", database: str = "",
-                          schema_contains: str = "") -> str:
+                          schema_contains: str = "", *, bounds: tuple | None = None) -> str:
     """Serverless task credits per DAY x task (task-day grain, exact).
 
     Guarded at the caller: accounts without serverless tasks return empty;
@@ -112,7 +112,11 @@ def serverless_task_daily(days: int, company: str = "ALL", database: str = "",
     """
     days = bounded_days(days)
     where = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        # r32/WLA-1: honor 'Last month' bounds like the pipeline-cost twin graph_daily_costs
+        # above it in the same panel — the hard-coded trailing window scanned a rolling ~month
+        # ending today, so under Last month the serverless dollars covered a different (and
+        # session-tz-anchored) window than the account-clock-bounded pipeline costs beside them.
+        scope_window_where("START_TIME", days, bounds=bounds),
         companies.database_company_scope(company, "DATABASE_NAME"),
         companies.database_equals_clause(database, "DATABASE_NAME"),
         contains_filter("SCHEMA_NAME", schema_contains),

@@ -580,8 +580,8 @@ def _graphs_tab(company: str, days: int, rate: float, database: str = "",
     result_caption(res, note="TREND compares $/run between window halves (±10% = FLAT). "
                              "Pipeline label = the graph's root task.")
 
-    sls = run(graph_sql.serverless_task_daily(days, company, database, schema_contains),
-              page=_PAGE, key=f"sls_costs_{company}_{days}_{database}_{schema_contains}",
+    sls = run(graph_sql.serverless_task_daily(days, company, database, schema_contains, bounds=bounds),
+              page=_PAGE, key=f"sls_costs_{company}_{days}_{database}_{schema_contains}{_lm}",
               tier="historical", source="SERVERLESS_TASK_HISTORY")
     st.markdown("**Serverless tasks (billed separately, task-day grain)**")
     if not sls.ok:
