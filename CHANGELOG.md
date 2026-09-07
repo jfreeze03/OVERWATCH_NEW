@@ -1,5 +1,33 @@
 # Changelog
 
+## 4.489.0 - Bug-hunt round 31: security correctness (coverage-gating, spray IP, escalation) (2026-09-06)
+
+Adversarial sweep of the security logic + SQL. **6 confirmed / 8** (the coverage-posture finder
+errored = known gap; 1 refuted as scoring-calibration, not correctness). 5 fixed in app code here;
+the 6th (a HIGH over-broad change-risk exclusion in the V088 view) is owner-gated and authored as a
+migration separately. No score math changed except where it was a false all-clear.
+
+- **[MED] `failed_login_reasons_fact` counted the '(none)' sentinel as a distinct source IP** —
+  the missed sibling of the r28b `failed_logins_fact` fix. `NULLIF(CLIENT_IP,'(none)')` so the spray
+  signal matches the live twin (raw `LOGIN_HISTORY` drops NULL).
+- **[MED, false-all-clear] Trust Center painted "every scanner came back clean" on an empty read.**
+  The live-fallback path runs precisely when the mart's freshness could NOT be confirmed, and a
+  clean scanner that ran still emits a row — so an *empty* `FINDINGS` read means nothing was scanned,
+  not nothing at risk. Now a `needs_setup` state, not a green all-clear.
+- **[MED, false-all-clear] CHANGE RISK coverage keyed only on loader-run freshness.**
+  `SP_LOAD_SECURITY_FACTS` stamps `FACT_SECURITY_CHANGE` OK/now every hour regardless of whether the
+  separate `OW_QH_EXTRACT` delivered rows, so a stalled extract read as Healthy-100 with no fresh
+  changes. The coverage gate now also requires the **extract** to be fresh — which distinguishes a
+  stalled feed (coverage unknown) from a legitimately quiet account (fresh extract, no changes).
+- **[LOW, C8] governance MFA-gap scored a clean 0 without login coverage.** `governance_counts`
+  now returns `NULL` for `MFA_GAP_USERS` when `FACT_LOGIN_DAILY` has no trailing-30d rows, and the
+  panel drops NULL/NaN signals so they surface as unresolved instead of a false clean signal.
+- **[LOW] `effective_access` could truncate a self-escalation path.** A MANAGE-GRANTS-only path
+  scores just 25, so on a huge account it could fall past the `LIMIT 3000` behind ownership-heavy
+  non-escalators — a false negative. The `ORDER BY` now floats any manage-bearing path to the top.
+
+Locks in `tests/test_bughunt_round31.py`; test_v075 freshness-count updated (+1 for the extract gate).
+
 ## 4.488.0 - Codex adjudication P2: remove resource monitors, migrate Admin headings (2026-09-06)
 
 Owner decisions on the adjudicated P2s.

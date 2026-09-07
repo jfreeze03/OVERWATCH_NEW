@@ -309,7 +309,9 @@ def test_new_readers_parse_and_preserve_expected_shapes() -> None:
     # builder no longer probes the removed ACCESS_REVIEW_CAMPAIGNS table.
     assert "ACCESS REVIEW" not in domain_sql
     assert "ACCESS_REVIEW_CAMPAIGNS" not in domain_sql
-    assert domain_sql.count("SNAPSHOT_TS >= DATEADD('hour', -3, CURRENT_TIMESTAMP())") == 2
+    # r31: 3, not 2 — CHANGE RISK + TRUST CENTER branches PLUS the qhx CTE's OW_QH_EXTRACT
+    # extract-freshness check (CHANGE RISK now also requires a fresh extract, not just a fresh loader).
+    assert domain_sql.count("SNAPSHOT_TS >= DATEADD('hour', -3, CURRENT_TIMESTAMP())") == 3
 
 
 def test_large_batches_are_executed_in_waves_of_four(monkeypatch) -> None:
@@ -426,7 +428,7 @@ def test_security_page_wires_decisions_drills_and_fact_fallbacks() -> None:
 
 
 def test_deploy_and_rebuild_surfaces_track_v075() -> None:
-    assert 'APP_VERSION = "4.488.0"' in _read("app/config.py")
+    assert 'APP_VERSION = "4.489.0"' in _read("app/config.py")
     assert "## 4.146.0 - Security page trimmed to read-only posture" in _read(
         "CHANGELOG.md"
     )

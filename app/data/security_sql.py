@@ -507,16 +507,22 @@ def governance_counts() -> str:
     from SHOW WAREHOUSES client-side — this account lacks the WAREHOUSES view)."""
     return """
 SELECT
-    (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.USERS U
-      WHERE U.DELETED_ON IS NULL AND COALESCE(U.DISABLED, FALSE) = FALSE
-        AND U.HAS_PASSWORD = TRUE AND COALESCE(U.HAS_MFA, FALSE) = FALSE
-        -- ONE definition of "MFA gap" app-wide (review #10): the same
-        -- password-login evidence the Access panel lists, not the old
-        -- created-7-days-ago proxy that disagreed with it on one page.
-        AND EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY L
-                    WHERE L.USER_NAME = U.NAME
-                      AND L.DAY >= DATEADD('day', -30, CURRENT_DATE())
-                      AND L.PASSWORD_LOGINS > 0)) AS MFA_GAP_USERS,
+    -- r31: NULL (not 0) when FACT_LOGIN_DAILY has NO trailing-30d coverage, so a stale/empty
+    -- login fact reads as UNKNOWN in the governance-drift score rather than a clean "no MFA gap"
+    -- (C8 no-data-vs-clean). Otherwise the per-user EXISTS matches nothing and the gap silently
+    -- scores 0. The dedicated MFA panel already gates on fact coverage the same way.
+    IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY
+         WHERE DAY >= DATEADD('day', -30, CURRENT_DATE())) = 0, NULL,
+        (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.USERS U
+          WHERE U.DELETED_ON IS NULL AND COALESCE(U.DISABLED, FALSE) = FALSE
+            AND U.HAS_PASSWORD = TRUE AND COALESCE(U.HAS_MFA, FALSE) = FALSE
+            -- ONE definition of "MFA gap" app-wide (review #10): the same
+            -- password-login evidence the Access panel lists, not the old
+            -- created-7-days-ago proxy that disagreed with it on one page.
+            AND EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY L
+                        WHERE L.USER_NAME = U.NAME
+                          AND L.DAY >= DATEADD('day', -30, CURRENT_DATE())
+                          AND L.PASSWORD_LOGINS > 0))) AS MFA_GAP_USERS,
     -- CREDENTIALS on this account exposes no DELETED_ON (live 2026-07-08).
     -- One scan serves both credential counts (r20 #17).
     C.EXPIRED_CREDENTIALS,
@@ -1479,7 +1485,18 @@ WITH posture AS (
 ), fresh AS (
     SELECT SOURCE_NAME, SNAPSHOT_TS, STATUS
     FROM {core_object('SOURCE_FRESHNESS_STATE')}
-    WHERE SOURCE_NAME IN ('FACT_SECURITY_CHANGE', 'SECURITY_TRUST_SNAPSHOT')
+    WHERE SOURCE_NAME IN ('FACT_SECURITY_CHANGE', 'SECURITY_TRUST_SNAPSHOT', 'OW_QH_EXTRACT')
+), qhx AS (
+    -- r31: the CHANGE RISK feed loads from OW_QH_EXTRACT, but SP_LOAD_SECURITY_FACTS stamps
+    -- FACT_SECURITY_CHANGE OK/now every hour regardless of whether the extract delivered recent
+    -- rows — so a STALLED OW_QH_EXTRACT left CHANGE RISK reading COMPLETE/Healthy-100 with no fresh
+    -- changes (a false all-clear). Also require the EXTRACT to be fresh. Gating on the extract's
+    -- recency (not the change fact's newest row) distinguishes a stalled feed (coverage unknown)
+    -- from a legitimately QUIET account (fresh extract, simply no changes = coverage complete).
+    SELECT COUNT_IF(SOURCE_NAME = 'OW_QH_EXTRACT'
+                    AND COALESCE(STATUS, '') = 'OK'
+                    AND SNAPSHOT_TS >= DATEADD('hour', -3, CURRENT_TIMESTAMP())) > 0 AS QHX_FRESH
+    FROM fresh
 )
 SELECT 'IDENTITY' AS DOMAIN,
        IFF(ID_SIGNALS >= 3 AND NEWEST >= DATEADD('day', -2, CURRENT_DATE()),
@@ -1493,10 +1510,11 @@ SELECT 'PRIVILEGE',
 UNION ALL
 SELECT 'CHANGE RISK',
        IFF(COALESCE(STATUS, '') = 'OK'
-           AND SNAPSHOT_TS >= DATEADD('hour', -3, CURRENT_TIMESTAMP()),
+           AND SNAPSHOT_TS >= DATEADD('hour', -3, CURRENT_TIMESTAMP())
+           AND QHX_FRESH,
            'COMPLETE', IFF(COALESCE(STATUS, '') = 'OK', 'STALE', 'INCOMPLETE')),
        SNAPSHOT_TS
-FROM fresh WHERE SOURCE_NAME = 'FACT_SECURITY_CHANGE'
+FROM fresh, qhx WHERE SOURCE_NAME = 'FACT_SECURITY_CHANGE'
 UNION ALL
 SELECT 'DATA MOVEMENT', 'ON_DEMAND', NULL
 UNION ALL
@@ -1588,7 +1606,11 @@ SELECT ERROR_CATEGORY AS REASON,
        IFF(ERROR_CATEGORY = 'NETWORK POLICY', 'NETWORK POLICY', 'CREDENTIAL / OTHER') AS CATEGORY,
        SUM(FAILURES) AS ATTEMPTS,
        COUNT(DISTINCT USER_NAME) AS USERS,
-       COUNT(DISTINCT CLIENT_IP) AS SOURCE_IPS,
+       -- r31: the loader stores CLIENT_IP as COALESCE(CLIENT_IP,'(none)') (V105), so a bare
+       -- COUNT(DISTINCT) counts that sentinel as a real source IP, inflating the spray signal
+       -- by 1 vs the live twin failed_login_reasons (raw LOGIN_HISTORY drops NULL). NULLIF it —
+       -- the same fix r28b applied to the sibling failed_logins_fact's DISTINCT_IPS.
+       COUNT(DISTINCT NULLIF(CLIENT_IP, '(none)')) AS SOURCE_IPS,
        MAX(LAST_SEEN) AS LAST_SEEN
 FROM {core_object('FACT_SECURITY_LOGIN_DAILY')}
 WHERE {where}
@@ -1757,7 +1779,13 @@ SELECT r.USER_NAME, r.DIRECT_ROLE, r.EFFECTIVE_ROLE, r.DEPTH, r.ACCESS_PATH,
                                 'SECURITYADMIN'), TRUE, FALSE) AS REACHES_ADMIN
 FROM role_tree r
 LEFT JOIN privilege_rollup p ON p.ROLE_NAME = r.EFFECTIVE_ROLE
-ORDER BY RISK_SCORE DESC, r.USER_NAME, r.DEPTH
+-- r31: a MANAGE GRANTS-only path scores just manage*25=25, so on an account whose recursive
+-- role expansion exceeds the 3000-row cap it could be truncated out by higher-scoring
+-- ownership-heavy (non-escalating) paths — a self-escalation FALSE NEGATIVE, since
+-- escalation_flags/the "can self-escalate" KPI only see returned rows. Float any manage-bearing
+-- path to the top so the self-escalation signal always survives the cap.
+ORDER BY GREATEST(RISK_SCORE, IFF(COALESCE(p.MANAGE_GRANTS, 0) > 0, 100, 0)) DESC,
+         r.USER_NAME, r.DEPTH
 LIMIT 3000
 """
 

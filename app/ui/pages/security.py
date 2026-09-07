@@ -814,7 +814,14 @@ def _trust_center_tab() -> None:
     tcf = run(security_sql.trust_center_findings(), page=_PAGE, key="trust_center",
               tier="historical", source="SNOWFLAKE.TRUST_CENTER.FINDINGS (pre-V075 fallback)")
     if tcf.ok and tcf.empty:
-        empty_state("clean", "No findings — every scanner came back clean.")
+        # r31: this fallback runs precisely when the materialized snapshot's freshness could NOT
+        # be confirmed (the mart path above is gated on _domain_covered). A clean scanner that RAN
+        # still emits a row (TOTAL_AT_RISK_COUNT=0), so an EMPTY read means no scanner has produced
+        # any finding — nothing was scanned, NOT "nothing at risk". Don't paint a green all-clear
+        # (false-all-clear class); surface it as a not-configured/no-data state instead.
+        empty_state("needs_setup", "No Trust Center scanner results — confirm scanner packages "
+                    "are enabled and have run. An empty read means nothing was scanned, not that "
+                    "nothing is at risk.")
     elif guard(tcf, "", setup_hint="Grant SNOWFLAKE.TRUST_CENTER_VIEWER to your role and enable Trust Center scanners."):
         fdf = tcf.df.copy()
         sev = fdf["SEVERITY"].astype(str).str.upper()
@@ -890,12 +897,16 @@ def _governance_score_panel():
                      tier="historical", source="USERS + CREDENTIALS + GRANTS_TO_USERS (live fallback)")
         if counts.usable():
             row = counts.df.iloc[0]
-            inputs = {
+            # r31: a NULL signal (MFA_GAP_USERS when FACT_LOGIN_DAILY has no trailing-30d coverage)
+            # must NOT enter as a clean 0 (C8 no-data-vs-clean). Drop unresolved (NULL/NaN) signals
+            # so they land in `unresolved` / the "treat as ceiling" caption rather than scoring a
+            # perfect signal — matching how the score fails OPEN-EYED on a missing input.
+            inputs = {k: v for k, v in {
                 "mfa_gap_users": row.get("MFA_GAP_USERS"),
                 "expired_credentials": row.get("EXPIRED_CREDENTIALS"),
                 "expiring_credentials": row.get("EXPIRING_CREDENTIALS"),
                 "breakglass_grants_30d": row.get("BREAKGLASS_GRANTS_30D"),
-            }
+            }.items() if v is not None and not (isinstance(v, float) and pd.isna(v))}
     if whs is not None and whs.ok and not whs.empty:
         wdf = whs.df.copy()
         wdf.columns = [str(c).lower() for c in wdf.columns]
