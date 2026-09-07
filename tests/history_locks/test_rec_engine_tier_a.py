@@ -183,10 +183,16 @@ def test_a3_show_warehouses_merge_preserves_disabled_vs_unknown():
 
 def test_a3_generated_sql_never_raises_the_timer():
     opt = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "optimize.py").read_text(encoding="utf-8")
-    # The generator never raises an already-short warehouse's timer. The bulk
-    # idle-suspend copy-expander (Idle & sizing) was removed as a duplicate booking
-    # surface (audit); the guard now lives in the single-warehouse Remediation & ledger
-    # path — an already-short WH is skipped (no ALTER), else target = min(current, 60).
-    assert "elif 0 < _current <= IDLE_TARGET_SUSPEND_SEC:" in opt
-    assert "min(_current, IDLE_TARGET_SUSPEND_SEC)" in opt
-    assert "remediation.auto_suspend_fix(wh_pick, _target)" in opt
+    # The generator never raises an already-short warehouse's timer. r34: the guard was factored
+    # into the shared remediation.tighten_suspend_plan (also used by the alert closed-loop, so the
+    # two surfaces cannot drift). The Remediation & ledger path routes through it; the A3 guarantee
+    # is verified directly against the helper (stronger than a source grep of the old inline form).
+    from app.logic import remediation
+    assert "remediation.tighten_suspend_plan(wh_pick, _current, _known" in opt
+    # already-short -> no ALTER (never raise a tight timer)
+    assert remediation.tighten_suspend_plan("WH", 30, known=True, target=60)["stmt"] == ""
+    # a long timer -> target = min(current, 60)
+    assert "SET AUTO_SUSPEND = 60;" in remediation.tighten_suspend_plan(
+        "WH", 600, known=True, target=60)["stmt"]
+    # unknown current setting -> no executable ALTER
+    assert remediation.tighten_suspend_plan("WH", None, known=False, target=60)["stmt"] == ""

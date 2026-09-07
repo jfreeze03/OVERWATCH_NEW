@@ -52,6 +52,12 @@ def steering_plan(
             "EST_PER_DAY_USD": round(per_day, 2),
         })
     coverage_pct = (covered / needed_per_day * 100.0) if needed_per_day > 0 else 100.0
+    # r34: round coverage ONCE and use the SAME value for the verdict branch below AND the
+    # returned field. contract.py picks st.success vs st.warning from the returned (rounded)
+    # coverage_pct; when the branch read the RAW value instead, a coverage in [99.95, 100)
+    # took the shortfall ("else") verdict while the rounded 100.0 painted a GREEN success box
+    # around that shortfall text — a color/verdict contradiction. One source of truth fixes both.
+    coverage_pct = round(min(coverage_pct, 999.0), 1)
     if gap_usd <= 0:
         verdict = "On track to land within commit at the current burn."
     elif coverage_pct >= 100:
@@ -68,6 +74,6 @@ def steering_plan(
         "ok": True, "gap_usd": round(gap_usd, 0),
         "needed_per_day_usd": round(needed_per_day, 2),
         "covered_per_day_usd": round(covered, 2),
-        "coverage_pct": round(min(coverage_pct, 999.0), 1),
+        "coverage_pct": coverage_pct,
         "rows": rows, "verdict": verdict,
     }

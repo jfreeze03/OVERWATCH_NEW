@@ -1160,7 +1160,8 @@ ORDER BY (m.TIME_TRAVEL_BYTES + m.FAILSAFE_BYTES + m.RETAINED_FOR_CLONE_BYTES) D
 LIMIT 50
 """
 
-def expensive_patterns_usd(days: int, company: str = "ALL", limit: int = 30) -> str:
+def expensive_patterns_usd(days: int, company: str = "ALL", limit: int = 30, *,
+                           bounds: tuple | None = None) -> str:
     """Recurring cost patterns: the SAME hour-share allocation as
     expensive_queries_usd, grouped by QUERY_PARAMETERIZED_HASH.
 
@@ -1177,14 +1178,24 @@ def expensive_patterns_usd(days: int, company: str = "ALL", limit: int = 30) -> 
     days = bounded_days(days)
     min_runs = max(2, (5 * days + 29) // 30)
     limit = max(5, min(int(limit or 30), 100))
+    # r34 WLA-1: honor the 'Last month' calendar window like the sibling panels in the SAME
+    # 'Queries & patterns' section (expensive_queries_usd / measured_query_costs), so all three
+    # scan one identical range instead of this one showing a rolling last-31d under a Last-month
+    # scope chip. Trailing branch (bounds=None) stays byte-identical; CREDITS_PER_DAY divides by
+    # the served span so a bounded month isn't divided by a mismatched day count.
+    if bounds is not None:
+        _span_days, _win = resolve_effective_window(days, "START_TIME", bounds=bounds)
+    else:
+        _span_days = days
+        _win = f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
     where_q = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        _win,
         "WAREHOUSE_NAME IS NOT NULL",
         "COALESCE(EXECUTION_TIME, 0) > 0",
         _wh_company_scope(company),
     )
     where_m = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        _win,
         _wh_company_scope(company),
     )
     return f"""
@@ -1213,7 +1224,7 @@ SELECT
     COUNT(DISTINCT q.USER_NAME) AS USERS,
     COUNT(DISTINCT q.WAREHOUSE_NAME) AS WAREHOUSES,
     SUM(m.HOUR_CREDITS * q.EXEC_MS / NULLIF(t.TOTAL_EXEC_MS, 0)) AS ALLOCATED_CREDITS,
-    SUM(m.HOUR_CREDITS * q.EXEC_MS / NULLIF(t.TOTAL_EXEC_MS, 0)) / {days} AS CREDITS_PER_DAY,
+    SUM(m.HOUR_CREDITS * q.EXEC_MS / NULLIF(t.TOTAL_EXEC_MS, 0)) / {_span_days} AS CREDITS_PER_DAY,
     ANY_VALUE(q.QUERY_SNIPPET)  AS QUERY_SNIPPET
 FROM q
 JOIN t ON t.WAREHOUSE_NAME = q.WAREHOUSE_NAME AND t.HOUR_TS = q.HOUR_TS

@@ -141,6 +141,16 @@ def size_recommendations(df: pd.DataFrame, credit_rate_usd: float, window_days: 
                 f"({row['ACTIVE_DAYS_PER_30D']:.1f}/30d); do not resize from episodic evidence.")
         if (queued < 1 and spill < SPILL_DOWN_MAX_GB_PER_DAY
                 and p95 <= DOWN_P95_SEC and idle >= DOWN_IDLE_PCT):
+            # r34: never recommend a size-DOWN (or book its saving) for a warehouse already at
+            # the smallest size — there is no target below XSMALL, so "one size down at half the
+            # rate" is impossible advice and POTENTIAL_MONTHLY_SAVING_USD would be unrealizable.
+            # When the current size is supplied (CURRENT_SIZE, from SHOW WAREHOUSES) and IS the
+            # floor, route to cadence/consolidation instead. Size unknown -> unchanged behavior
+            # (we can't prove it's the floor, so the fail-open path keeps the DOWN candidate).
+            if normalize_size(row.get("CURRENT_SIZE")) == SIZE_ORDER[0]:
+                return RECOMMEND_CADENCE, (
+                    f"Already at the smallest size (X-Small), {idle:.0f}% idle - no size-down "
+                    "target; reduce idle via AUTO_SUSPEND cadence or consolidation.")
             return RECOMMEND_DOWN, (
                 f"No queueing, no spill, p95 {p95:.1f}s, {idle:.0f}% idle - "
                 "one size down likely holds SLAs at half the rate.")
@@ -210,11 +220,16 @@ def _unused_guard() -> float:  # pragma: no cover - keeps safe_div imported for 
 # Interactive what-if simulator (pure; the UI supplies observed inputs)
 # ---------------------------------------------------------------------------
 
+# r34: Snowflake's warehouse ladder runs XS..6X-Large. The simulator stopped at 4X-Large,
+# so normalize_size('5X-Large'/'6X-Large') fell through to '' (simulate refused these highest-
+# rate warehouses) and shifted_size('4X-Large', +1) clamped to itself (a real upsize reported
+# as 'unchanged'). Extend the ladder + aliases through 6X so the two priciest sizes simulate.
 SIZE_ORDER = ("XSMALL", "SMALL", "MEDIUM", "LARGE", "XLARGE",
-              "2XLARGE", "3XLARGE", "4XLARGE")
+              "2XLARGE", "3XLARGE", "4XLARGE", "5XLARGE", "6XLARGE")
 _SIZE_ALIASES = {"X-SMALL": "XSMALL", "XS": "XSMALL", "S": "SMALL", "M": "MEDIUM",
                  "L": "LARGE", "X-LARGE": "XLARGE", "XL": "XLARGE",
-                 "2X-LARGE": "2XLARGE", "3X-LARGE": "3XLARGE", "4X-LARGE": "4XLARGE"}
+                 "2X-LARGE": "2XLARGE", "3X-LARGE": "3XLARGE", "4X-LARGE": "4XLARGE",
+                 "5X-LARGE": "5XLARGE", "6X-LARGE": "6XLARGE", "5X": "5XLARGE", "6X": "6XLARGE"}
 
 
 def normalize_size(size: object) -> str:

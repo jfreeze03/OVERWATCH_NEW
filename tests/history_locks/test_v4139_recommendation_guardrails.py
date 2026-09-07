@@ -35,9 +35,13 @@ def test_idle_actionability_is_used_by_every_savings_consumer():
 def test_remediation_fails_closed_when_current_timer_is_unknown_or_tuned():
     optimize = _source("app/ui/pages/cost_parts/optimize.py")
     block = optimize.split('if fix_kind.startswith("Tighten"):', 1)[1]
-    assert "if not _known:" in block[:1800]
-    assert "elif 0 < _current <= IDLE_TARGET_SUSPEND_SEC:" in block[:1800]
-    assert "stmt = remediation.auto_suspend_fix(wh_pick, _target)" in block[:1800]
+    # v4.139 fail-closed intent (unknown/already-tuned -> no executable ALTER) now lives in the
+    # SHARED guard remediation.tighten_suspend_plan (r34: the alert closed-loop uses the same one,
+    # so the two surfaces cannot drift). The unit behavior is pinned in test_bughunt_round34; here
+    # we lock that the Remediation tab routes through it and only captions/executes a real statement.
+    assert "remediation.tighten_suspend_plan(wh_pick, _current, _known" in block[:1800]
+    assert "if stmt:" in block[:1800]
+    assert 'if _plan["level"] == "warning":' in block[:1800]
 
 
 def test_repeat_scan_and_capacity_ui_adopt_normalized_and_stale_contracts():

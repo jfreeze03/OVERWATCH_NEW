@@ -167,8 +167,12 @@ def _whatif_panel(sized, days: int, rate: float) -> None:
             st.info(str(sim.get("reason", "Cannot simulate this warehouse."))
                     + (" (SHOW WAREHOUSES did not return its size.)" if not live_size else ""))
         else:
+            # r34: live_suspend<=0 means NEVER-suspend (preserved as a real 0 above), the WORST
+            # idle posture — labeling it "0s suspend" reads as suspend-immediately (the BEST) and
+            # contradicts the model + the "Auto-suspend never" assumption caption below. Match them.
+            _now_susp_lbl = "never suspends" if live_suspend <= 0 else f"{live_suspend}s suspend"
             kpi_row([
-                {"label": f"Now ({sim['size_now']}, {live_suspend}s suspend)",
+                {"label": f"Now ({sim['size_now']}, {_now_susp_lbl})",
                  "value": format_usd(sim["monthly_now_usd"]),
                  "help": "Observed window scaled to 30 days at the configured rate."},
                 {"label": f"Scenario ({sim['size_new']}, {int(sus_wi)}s)",
@@ -273,10 +277,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             {"label": f"Idle credit waste ({_iw_wlab})", "value": format_usd(_iw["IDLE_USD"]),
              "severity": "warn" if _iw["IDLE_SHARE_PCT"] >= 20 else "",
              "help": "Credits billed in warehouse-hours with ZERO queries, priced at the configured "
-                     "rate — the account-level auto-suspend opportunity. GROSS idle (the recoverable "
+                     "rate — the account-level auto-suspend opportunity. GROSS idle; the recoverable "
                      "net, after the resume/suspend tail, is 'Actionable via timer' in Idle & sizing "
-                     "below). This is the SAME figure as 'Idle spend' inside Idle & sizing — the "
-                     "headline, detailed there. Top-100 warehouses by idle."},
+                     "below, where the per-warehouse idle evidence is detailed. Top-100 warehouses by "
+                     "idle."},
             {"label": "Idle share of WH credits", "value": f"{_iw['IDLE_SHARE_PCT']:.1f}%",
              "help": "Idle credits / total warehouse credits this window."},
             {"label": "Projected monthly", "value": format_usd(_iw["PROJECTED_MONTHLY_USD"]),
@@ -321,6 +325,16 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             _idle_profiles_tx = advisor
             flagged = advisor[advisor["FLAGGED"]]
             actionable = advisor[advisor["ACTIONABLE"]]
+            # r34 false-all-clear: without SHOW WAREHOUSES every row is AUTO_SUSPEND_KNOWN=False,
+            # so idle_advisor marks nothing ACTIONABLE and the headline reads "$0 / 0 warehouses".
+            # When idle rows DID meet the gate, that $0 is "unverified", not "no opportunity" —
+            # say so at the headline (the per-row VERIFY SETTING status is only in the table body).
+            if not (_whs.ok and not _whs.empty) and len(flagged):
+                st.warning(
+                    f"Current AUTO_SUSPEND settings could not be verified (SHOW WAREHOUSES returned "
+                    f"nothing): {len(flagged)} warehouse(s) met the idle gate but none can be confirmed "
+                    "as a timer target, so 'Actionable via timer' below reads $0 — that is unverified, "
+                    "not zero opportunity.")
             _savings_opps.extend(     # rec#16: idle-timer opportunities (net actionable)
                 SavingsOpportunity("IDLE", str(r["WAREHOUSE_NAME"]),
                                    safe_float(r["ACTIONABLE_MONTHLY_USD"]),
@@ -439,11 +453,12 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 prof_res.df,
                 _sizing_whs.df if _sizing_whs.ok and not _sizing_whs.empty else pd.DataFrame(),
             )
-            sized = size_recommendations(_sizing_df, rate, sizing_days)
-            # Round-3 hunt: carry the current warehouse SIZE (SHOW WAREHOUSES, already
-            # loaded above) so a resize saving is computed from the operator's ACTUAL
-            # target vs the current size — not a fixed half-rate that ignores the pick.
-            if not sized.empty and _sizing_whs.ok and not _sizing_whs.empty:
+            # Round-3 hunt + r34: carry the current warehouse SIZE (SHOW WAREHOUSES, loaded
+            # above) onto the profile BEFORE size_recommendations, so (a) a resize saving is
+            # computed from the operator's ACTUAL current size and (b) the recommender can
+            # refuse a size-DOWN on a warehouse already at the smallest size (no target below
+            # XSMALL). size_recommendations copies the frame, so CURRENT_SIZE flows to `sized`.
+            if _sizing_whs.ok and not _sizing_whs.empty:
                 _wcols = {str(c).lower(): c for c in _sizing_whs.df.columns}
                 if "name" in _wcols and "size" in _wcols:
                     _size_map = {
@@ -451,8 +466,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         for n, s in zip(_sizing_whs.df[_wcols["name"]],
                                         _sizing_whs.df[_wcols["size"]], strict=False)
                     }
-                    sized["CURRENT_SIZE"] = (sized["WAREHOUSE_NAME"].astype(str)
-                                             .str.strip().str.upper().map(_size_map))
+                    _sizing_df["CURRENT_SIZE"] = (_sizing_df["WAREHOUSE_NAME"].astype(str)
+                                                  .str.strip().str.upper().map(_size_map))
+            sized = size_recommendations(_sizing_df, rate, sizing_days)
             _sizing_profiles_tx = sized
             _savings_opps.extend(     # rec#16: right-sizing opportunities (overlaps idle per warehouse)
                 SavingsOpportunity("RESIZE", str(r["WAREHOUSE_NAME"]),
@@ -889,13 +905,15 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                      key="cost_exppat_toggle",
                      help="Its own scan, independent of the expensive-query one above — "
                           "it was hidden inside that toggle before v4.49."):
-            pats = run(insights_sql.expensive_patterns_usd(days, company, 30), page=_PAGE,
-                       key=f"exppat_{company}_{days}", tier="historical",
+            pats = run(insights_sql.expensive_patterns_usd(days, company, 30, bounds=bounds), page=_PAGE,
+                       key=f"exppat_{company}_{days}{_lm}", tier="historical",
                        source="QUERY_HISTORY x METERING (hour-share, by QUERY_PARAMETERIZED_HASH)")
             if guard(pats, "No fingerprint with 5+ runs carrying allocated credits in this window."):
-                # E2: expensive_patterns_usd is a plain live builder, so the window it
-                # scanned is the CLAMPED one — the labels must say what was measured.
-                pat_days = bounded_days(days)
+                # E2/r34: labels must say what was actually measured. Under 'Last month' the builder
+                # scans the bounded calendar month (WLA-1); otherwise it is a plain live builder
+                # clamped to the trailing window. pat_wlab drives every window label below.
+                pat_days = days if bounds is not None else bounded_days(days)
+                pat_wlab = "last month" if bounds is not None else f"{pat_days}d"
                 pdf_c = pats.df.copy()
                 pdf_c["USD_TOTAL"] = pdf_c["ALLOCATED_CREDITS"].map(lambda c: round(safe_float(c) * rate, 2))
                 pdf_c["USD_PER_DAY"] = pdf_c["CREDITS_PER_DAY"].map(lambda c: round(safe_float(c) * rate, 2))
@@ -904,7 +922,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                            "QUERY_SNIPPET", "PATTERN_HASH"]],
                     column_config={
                         "USD_PER_DAY": st.column_config.NumberColumn("$/day", format="$%.2f"),
-                        "USD_TOTAL": st.column_config.NumberColumn(f"$ ({pat_days}d)", format="$%.2f"),
+                        "USD_TOTAL": st.column_config.NumberColumn(f"$ ({pat_wlab})", format="$%.2f"),
                     },
                 )
                 result_caption(pats, note="candidates for result-cache reuse, materialization, or a schedule")
@@ -919,7 +937,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                               int(prow["RUNS"]), rate, int(delta_pr))
                 kpi_row([
                     {"label": "Observed $/run", "value": f"${bounds['per_run_now_usd']:.4f}",
-                     "help": f"{int(prow['RUNS'])} runs in {pat_days}d, hour-share allocated."},
+                     "help": f"{int(prow['RUNS'])} runs in {pat_wlab}, hour-share allocated."},
                     {"label": f"At {'+' if delta_pr > 0 else ''}{delta_pr} size step",
                      "value": f"${bounds['per_run_low_usd']:.4f} – ${bounds['per_run_high_usd']:.4f}",
                      "help": "Bounds: rate-scaled (same wall time) vs cost-neutral "
@@ -1497,20 +1515,18 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             stmt = ""
             if fix_kind.startswith("Tighten"):
                 _known = bool(_rec_row["AUTO_SUSPEND_KNOWN"].iloc[0]) if not _rec_row.empty else False
-                _current = safe_float(_rec_row["AUTO_SUSPEND"].iloc[0]) if _known else 0.0
-                if not _known:
-                    st.warning(
-                        "Current AUTO_SUSPEND could not be verified. No executable ALTER or savings "
-                        "entry is generated until SHOW WAREHOUSES returns this setting."
-                    )
-                elif 0 < _current <= IDLE_TARGET_SUSPEND_SEC:
-                    st.info(
-                        f"{wh_pick} is already at AUTO_SUSPEND={_current:.0f}s. A 60s change would "
-                        "raise or preserve the timer, so this engine will not generate it."
-                    )
-                else:
-                    _target = int(min(_current, IDLE_TARGET_SUSPEND_SEC)) if _current > 0 else IDLE_TARGET_SUSPEND_SEC
-                    stmt = remediation.auto_suspend_fix(wh_pick, _target)
+                _current = _rec_row["AUTO_SUSPEND"].iloc[0] if not _rec_row.empty else None
+                # r34: shared A3 guard (remediation.tighten_suspend_plan — also used by the alert
+                # closed-loop, so the two surfaces cannot drift): never RAISE an already-tight timer,
+                # and generate nothing for an unverified setting.
+                _plan = remediation.tighten_suspend_plan(wh_pick, _current, _known,
+                                                         target=IDLE_TARGET_SUSPEND_SEC)
+                stmt = _plan["stmt"]
+                if _plan["level"] == "warning":
+                    st.warning(_plan["message"])
+                elif _plan["level"] == "info":
+                    st.info(_plan["message"])
+                if stmt:
                     _rw_wlab = "last month" if bounds is not None else f"{remed_days}d"
                     st.caption(f"Idle credits in window ({_rw_wlab}): {idle_credits:,.1f} → actionable "
                                f"${est_monthly:,.0f}/mo once the unavoidable ~{IDLE_TARGET_SUSPEND_SEC}s resume tail per "

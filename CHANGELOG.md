@@ -1,5 +1,44 @@
 # Changelog
 
+## 4.492.0 - Bug-hunt round 34: warehouse efficiency / rightsizing / idle & auto-suspend (2026-09-07)
+
+Multi-agent adversarial sweep (6 finder dimensions → per-finder refute → completeness critic) over the
+action-driving efficiency/sizing/idle surface. **8 fixes shipped; 2 deep coverage/twin findings deferred
+to a focused follow-up.**
+
+- **[MED] The alert closed-loop "Tighten auto-suspend to 60s" had no current-setting guard.** On a
+  warehouse already at, say, 30s it generated `ALTER … SET AUTO_SUSPEND = 60`, RAISING the timer and
+  INCREASING idle burn — the A3 hazard the idle advisor was built to prevent, unguarded on the alert
+  surface. Added `remediation.tighten_suspend_plan`, a single shared guard now used by BOTH the alert
+  responder and the Optimize Remediation tab (so they can't drift): unknown setting → no statement +
+  a verify warning; already at/below target → no statement; otherwise tighten toward `min(current,60)`.
+- **[MED] `size_recommendations` could recommend a size-DOWN (and book its saving) on a warehouse
+  already at the smallest size.** There is no target below X-Small, so the advice was impossible and the
+  booked saving unrealizable. The current size is now threaded into the recommender, which routes a
+  would-be DOWN on the floor size to a cadence/consolidation review instead. Size unknown → unchanged.
+- **[MED] `expensive_patterns_usd` ignored the "Last month" scope** while the two sibling panels beside
+  it in "Queries & patterns" honored it — same section, same scope chip, two different windows. It now
+  threads `bounds` and divides `CREDITS_PER_DAY` by the served span; the trailing branch is byte-identical.
+- **[MED] The idle-waste headline help claimed equality with an "Idle spend" tile that had been
+  consolidated away** — the nearest same-named tile is a different (monthly, suspend-subset) number.
+  Corrected the cross-reference.
+- **[MED] The what-if "Now" tile labeled a never-suspend warehouse "0s suspend"** (reads as
+  suspend-immediately — the opposite of never, and the worst idle posture), contradicting the model and
+  the tile's own "never" assumption caption. It now reads "never suspends".
+- **[LOW] The right-sizing simulator's size ladder stopped at 4X-Large** — 5X/6X-Large warehouses (the
+  priciest) were refused and a 4XL "+1" scenario clamped to itself. Extended the ladder + aliases to 6X.
+- **[LOW] The idle advisor showed "$0 actionable / 0 warehouses" with no headline warning when SHOW
+  WAREHOUSES failed** — a false all-clear on an action headline. It now warns that idle rows met the gate
+  but settings are unverified (not zero opportunity).
+- **[LOW] Steering coverage in [99.95%, 100%) painted a GREEN success box around the shortfall verdict**
+  — the verdict branch read the raw coverage while the color read the rounded value. Now rounded once and
+  read the same way in both places.
+- **Deferred (documented follow-ups):** a stale/young `MART_WAREHOUSE_EFFICIENCY_DAILY` is accepted and
+  its idle/sizing projections divided by the full requested window rather than the days actually covered
+  (touches the shared `served_days`/`run_mart_first` serving contract + both readers), and the
+  live-vs-mart `METERED_HOURS`/`ACTIVE_HOURS` twin feeding the recoverable-net figure (needs builder
+  alignment). Both warrant their own focused change.
+
 ## 4.491.0 - Bug-hunt round 33: forecast / runway edge cases (2026-09-07)
 
 Adversarial sweep of the month-end projection + contract runway/pacing surface. **4 distinct fixes,

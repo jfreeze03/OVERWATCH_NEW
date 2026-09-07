@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 
+from .formulas import safe_float
+
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
 _SIZES = ("XSMALL", "SMALL", "MEDIUM", "LARGE", "XLARGE", "XXLARGE")
 
@@ -24,6 +26,35 @@ def auto_suspend_fix(warehouse: str, seconds: int = 60) -> str:
     """The single highest-ROI knob for an idle-heavy warehouse."""
     seconds = max(30, min(int(seconds), 3600))
     return f"ALTER WAREHOUSE {_ident(warehouse, 'warehouse')} SET AUTO_SUSPEND = {seconds};"
+
+
+def tighten_suspend_plan(warehouse: str, current_suspend: object, known: bool,
+                         target: int = 60) -> dict:
+    """Decide whether a 'tighten AUTO_SUSPEND' ALTER should be generated for ``warehouse``.
+
+    The A3 hazard (idle_advisor, insights.py): blindly ``SET AUTO_SUSPEND = target`` on a
+    warehouse already tuned at/below ``target`` RAISES the timer, lengthening the post-query
+    idle tail and INCREASING burn — the exact opposite of the intended saving. Every surface
+    that offers this fix must first read the CURRENT setting; this is the one shared decision so
+    the closed-loop responder (alerts) and the Remediation tab (optimize) cannot drift apart.
+
+    Returns ``{stmt, message, level}``: ``stmt`` is '' (no executable change) when the current
+    setting is unknown (direction unprovable) or already 0<current<=target; otherwise a tighten
+    ALTER toward ``min(current, target)`` (or ``target`` for a never-suspend / <=0 warehouse,
+    where enabling the timer is a real saving). ``level`` is 'warning' | 'info' | 'none' telling
+    the caller how to render ``message`` ('' when a statement was produced).
+    """
+    if not known:
+        return {"stmt": "", "level": "warning",
+                "message": ("Current AUTO_SUSPEND could not be verified. No executable ALTER or "
+                            "savings entry is generated until SHOW WAREHOUSES returns this setting.")}
+    cur = safe_float(current_suspend, 0.0)
+    if 0 < cur <= target:
+        return {"stmt": "", "level": "info",
+                "message": (f"{warehouse} is already at AUTO_SUSPEND={cur:.0f}s. A {target}s change "
+                            "would raise or preserve the timer, so this engine will not generate it.")}
+    tgt = int(min(cur, target)) if cur > 0 else target
+    return {"stmt": auto_suspend_fix(warehouse, tgt), "level": "none", "message": ""}
 
 
 def resize_fix(warehouse: str, to_size: str) -> str:

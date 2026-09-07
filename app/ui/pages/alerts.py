@@ -22,7 +22,7 @@ from app.core.query import execute_action, execute_statement, run, run_batch
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters, navigation_context, request_navigation
-from app.data import alert_evidence_sql, mart_sql, recheck_sql
+from app.data import alert_evidence_sql, mart_sql, recheck_sql, security_sql
 from app.logic import remediation, tuning
 from app.logic.ai_prompts import alert_evidence_prompt
 from app.logic.alert_evidence import plan_for_alert
@@ -1131,13 +1131,38 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                                         "Cap clusters at 1"],
                                                 horizontal=True, key=f"clf_kind_{event_id[:8]}")
                             if fix_kind.startswith("Tighten"):
-                                stmt_cl = remediation.auto_suspend_fix(wh_inline, 60)
+                                # r34: read the CURRENT AUTO_SUSPEND before generating a tighten — a
+                                # blind SET=60 RAISES an already-30s timer (the A3 hazard), the
+                                # unguarded twin of the Remediation tab guard (optimize.py). Reuses
+                                # the cached 'jump_wh' SHOW WAREHOUSES read (no extra query).
+                                _cl_known, _cl_cur = False, None
+                                _cl_whs = run(security_sql.show_warehouses_sql(), page=_PAGE,
+                                              key="jump_wh", tier="metadata",
+                                              source="SHOW WAREHOUSES", max_rows=0)
+                                if _cl_whs.ok and not _cl_whs.empty:
+                                    _clw = _cl_whs.df.copy()
+                                    _clw.columns = [str(c).lower() for c in _clw.columns]
+                                    if "name" in _clw.columns:
+                                        _clm = _clw[_clw["name"].astype(str).str.strip().str.upper()
+                                                    == str(wh_inline).strip().upper()]
+                                        if not _clm.empty and "auto_suspend" in _clw.columns:
+                                            _clv = pd.to_numeric(_clm.iloc[0].get("auto_suspend"),
+                                                                 errors="coerce")
+                                            if pd.notna(_clv):
+                                                _cl_known, _cl_cur = True, float(_clv)
+                                _cl_plan = remediation.tighten_suspend_plan(wh_inline, _cl_cur, _cl_known)
+                                stmt_cl = _cl_plan["stmt"]
+                                if _cl_plan["level"] == "warning":
+                                    st.warning(_cl_plan["message"])
+                                elif _cl_plan["level"] == "info":
+                                    st.info(_cl_plan["message"])
                             elif fix_kind.startswith("Statement"):
                                 stmt_cl = remediation.statement_timeout_fix(wh_inline, 3600)
                             else:
                                 stmt_cl = remediation.cluster_range_fix(wh_inline, 1, 1)
-                            st.code(stmt_cl, language="sql")
-                            if is_operator:
+                            if stmt_cl:
+                                st.code(stmt_cl, language="sql")
+                            if stmt_cl and is_operator:
                                 from app.ui.components import blast_radius
                                 blast_radius(wh_inline, _PAGE)
                                 # R3-6: key the reverse-hint off the SAME fix_kind branching that
@@ -1173,7 +1198,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                             page=_PAGE)
                                     stamp_write(f"clf_exec_{event_id[:8]}", ok)  # C48
                                     notify(ok, msg)
-                            else:
+                            elif stmt_cl and not is_operator:
                                 st.caption("Copy the SQL; executing needs SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
                             booked = run(mart_sql.ledger_for_event(event_id[:8]), page=_PAGE,
                                          key=f"clf_led_{event_id[:8]}", tier="live",
