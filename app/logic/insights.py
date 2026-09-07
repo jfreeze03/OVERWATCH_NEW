@@ -457,8 +457,12 @@ def compare_release_periods(df: pd.DataFrame) -> list[dict]:
             # introduced-from-zero move is a real regression/improvement, not "n/a" —
             # a 0%->8% fail rate must read "Worse" (else the Operations release-compare
             # excludes it and shows a green "no regression" banner on a clean->broken
-            # deploy). Judge by the sign of (a - b); only 'n/a' when lower_better is None.
-            if a == b:
+            # deploy). Judge by the sign of (a - b) — but still honor the per-metric absolute
+            # floor (r35): a from-zero move BELOW min_abs_delta is sub-noise (e.g. 0 -> 0.0000002
+            # GB/q remote spill), the SAME noise the nonzero-baseline path suppresses in the elif
+            # below. Without this the exactly-zero baseline was the only way to escape the floor,
+            # so trivial spill/queue blips read "Worse" on the release board.
+            if a == b or _abs_delta < min_abs_delta:
                 verdict = "Flat"
             elif (a < b) == lower_better:
                 verdict = "Better"
@@ -718,7 +722,7 @@ def duration_sla_forecast(df: pd.DataFrame) -> pd.DataFrame:
     trailing-window forecast, not a live in-flight detector. Empty in -> empty out.
     """
     cols = ["DATABASE_NAME", "SCHEMA_NAME", "TASK_NAME", "DAY", "BASELINE_SEC",
-            "LATEST_SEC", "SLOWER_X", "FORECAST", "SEVERITY"]
+            "RECENT_MED_SEC", "LATEST_SEC", "SLOWER_X", "FORECAST", "SEVERITY"]
     if (df is None or df.empty
             or not {"DAY", "AVG_SEC", "TASK_NAME", "DATABASE_NAME"}.issubset(df.columns)):
         return pd.DataFrame(columns=cols)
@@ -751,8 +755,13 @@ def duration_sla_forecast(df: pd.DataFrame) -> pd.DataFrame:
         recent_level = float(pd.Series(recent).median())   # robust to a one-day spike
         latest = float(recent[-1])
         climbing = latest > float(recent[0])               # ended above the window start
+        # r35: a SUSTAINED plateau is a standing regression, not a recovery — the strict-'>' climbing
+        # gate alone vetoed a task that stepped up (e.g. 3x) and then HELD flat, a false all-clear on
+        # the forecast board. Admit it when the LOW end of the recent window is already >= AT_RISK_X x
+        # baseline (robust to a late one-day dip). The ratio gate below still excludes flat-at-baseline.
+        sustained = baseline > 0 and float(min(recent)) >= DURATION_FORECAST_AT_RISK_X * baseline
         ratio = round(recent_level / baseline, 1) if baseline > 0 else 0.0
-        if not (climbing and ratio >= DURATION_FORECAST_AT_RISK_X):
+        if not ((climbing or sustained) and ratio >= DURATION_FORECAST_AT_RISK_X):
             continue
         forecast, severity = (("Predicted miss", "High") if ratio >= DURATION_FORECAST_MISS_X
                               else ("At risk", "Medium"))
@@ -763,6 +772,10 @@ def duration_sla_forecast(df: pd.DataFrame) -> pd.DataFrame:
             "TASK_NAME": last["TASK_NAME"],
             "DAY": last["DAY"],
             "BASELINE_SEC": round(baseline, 1),
+            # RECENT_MED_SEC is the value SLOWER_X actually divides (recent-window median), exposed so
+            # the table reconciles: SLOWER_X == RECENT_MED_SEC / BASELINE_SEC (r35, was implied to be
+            # LATEST_SEC / BASELINE_SEC by the old caption).
+            "RECENT_MED_SEC": round(recent_level, 1),
             "LATEST_SEC": round(latest, 1),
             "SLOWER_X": ratio,
             "FORECAST": forecast,
@@ -962,8 +975,16 @@ def task_freshness_status(df: pd.DataFrame) -> pd.DataFrame:
     out["OVERDUE_MIN"] = overdue
     out["STATUS"] = statuses
     out["SEVERITY"] = severities
-    return out.sort_values("OVERDUE_MIN", ascending=False,
-                           na_position="first").reset_index(drop=True)
+    # r35: severity-first, mirroring dormant_severity / reawakening_severity / takeover_severity —
+    # this on-call silent-stop table is read top-down as a triage list, so a High 'Stale' row must
+    # never sort below a Medium 'Late' one just because its OVERDUE_MIN is smaller. The two axes are
+    # not monotonic: OVERDUE_MIN is m - MEDIAN gap, but the Stale/Late verdict is judged against the
+    # p90 'yard', so a long-cadence Late task can carry a larger overdue than a short-cadence Stale
+    # one. Within a tier, largest overdue first; no-success (NaN-overdue) Stale rows stay on top.
+    _rank = {"Stale": 0, "Late": 1, "On-time": 2}
+    return (out.assign(_o=out["STATUS"].map(_rank).fillna(9))
+            .sort_values(["_o", "OVERDUE_MIN"], ascending=[True, False], na_position="first")
+            .drop(columns="_o").reset_index(drop=True))
 
 
 def takeover_severity(df: pd.DataFrame) -> pd.DataFrame:
@@ -1201,6 +1222,7 @@ def pipeline_sla_forecast(df: pd.DataFrame, *, overdue_k: float = 1.5) -> pd.Dat
     if runway.isna().all():
         runway = max_age - hours_since
     median_gap = pd.to_numeric(out.get("MEDIAN_GAP_MIN"), errors="coerce")
+    long_gap = pd.to_numeric(out.get("LONG_GAP_MIN", pd.Series(pd.NA, index=out.index)), errors="coerce")
     refreshes = pd.to_numeric(out.get("REFRESHES", pd.Series(pd.NA, index=out.index)), errors="coerce")
     k = float(overdue_k)
 
@@ -1213,6 +1235,14 @@ def pipeline_sla_forecast(df: pd.DataFrame, *, overdue_k: float = 1.5) -> pd.Dat
         rw_raw = runway.iloc[i]
         rw = safe_float(rw_raw)
         gap_raw = median_gap.iloc[i]
+        # r35: judge "overdue" against the p90 gap (LONG_GAP_MIN — the longest NORMAL refresh
+        # interval), not the median, so a weekend/overnight-idle table (median ~1 day but real gaps
+        # include the ~3-day weekend) is not flagged Overdue/High every Monday while within SLA.
+        # Mirrors task_freshness_status's p90 'yard'; falls back to the median for a uniform cadence
+        # and for old-shape frames without the column. The displayed "typical" cadence stays median.
+        _lg = long_gap.iloc[i]
+        yard_gap = (safe_float(_lg) if pd.notna(_lg) and safe_float(_lg) > safe_float(gap_raw)
+                    else safe_float(gap_raw))
         # Min-interval guard: a cadence built from a single observed gap (e.g. a one-time backfill
         # burst of two DML events) is not a "typical" refresh rhythm, so it must not drive the
         # Overdue/High or At-risk forecast for a table otherwise within SLA -- that fired a false High
@@ -1226,7 +1256,7 @@ def pipeline_sla_forecast(df: pd.DataFrame, *, overdue_k: float = 1.5) -> pd.Dat
             severities.append("High")
             details.append(f"already {hs:.1f}h old (past its {safe_float(max_age.iloc[i]):.0f}h limit)")
             continue
-        if has_cadence and hs * 60.0 > k * safe_float(gap_raw):
+        if has_cadence and hs * 60.0 > k * yard_gap:
             forecasts.append("Overdue")
             severities.append("High")
             details.append(

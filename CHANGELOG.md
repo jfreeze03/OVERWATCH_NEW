@@ -1,5 +1,39 @@
 # Changelog
 
+## 4.494.0 - Bug-hunt round 35: operations & pipeline intelligence (2026-09-07)
+
+Multi-agent adversarial sweep (6 finder dimensions → per-finder refute → completeness critic) over the
+operations/pipeline surface — query performance, task/pipeline failure, SLA forecasting, severity. **5
+fixes shipped; the freshness dead-Late-tier, a LOW row-cap ordering, and three unverified critic gaps are
+deferred to a focused follow-up.**
+
+- **[MED] `pipeline_sla_forecast` flagged "Overdue" against the MEDIAN refresh gap.** A table that idles
+  on weekends/overnight (median cadence ~1 day, but real gaps include the ~3-day weekend) read
+  Overdue/High every Monday even while within SLA. It now judges lateness against the p90 gap
+  (`LONG_GAP_MIN`, added to the cadence CTE), mirroring the task-freshness p90 fix; it falls back to the
+  median for a uniform cadence and for old-shape frames.
+- **[MED] `compare_release_periods` marked trivial from-zero moves "Worse".** The zero-baseline branch
+  decided purely by the sign of the change, skipping the per-metric absolute floor that the nonzero path
+  applies — so a sub-noise move like 0 → 0.0000002 GB/query remote spill read "Worse" on the release
+  board while an equal move off a nonzero baseline read "Flat". The floor is now honored in both branches.
+- **[MED] The task-freshness silent-stop table could list a Medium 'Late' row above a High 'Stale' one.**
+  It sorted by (median-based) `OVERDUE_MIN` with no severity key, but the Stale/Late verdict is judged
+  against the p90 gap, so the two axes aren't monotonic. It now sorts severity-first (then overdue within
+  tier), matching the `dormant_severity` / `reawakening_severity` / `takeover_severity` triage pattern.
+- **[MED] `duration_sla_forecast` gave a false all-clear on a sustained runtime regression.** Its
+  "climbing" gate is a strict `>`, so a task that stepped up (e.g. 3×) and then held flat was vetoed —
+  the forecast board painted green on a task running 3× baseline for days. It now also admits a recent
+  window whose low end is already ≥ the at-risk multiple of baseline (a standing regression, robust to a
+  late one-day dip); the ratio gate still excludes flat-at-baseline tasks.
+- **[LOW] The duration-forecast table's ratio didn't reconcile with its columns.** `SLOWER_X` is
+  recent-window-median ÷ baseline, but it sat beside `LATEST_SEC` under a caption reading "latest vs
+  baseline". Added a `RECENT_MED_SEC` column so the numbers reconcile and reworded the caption.
+- **Deferred (documented follow-ups):** the freshness Late/Medium tier is unreachable for sub-45-min
+  crons (the reporting-lag floor interacts with the 2× cadence threshold — a behavioral change to a
+  tested paging classifier); `task_recent_states` caps at 4000 rows ordered alphabetically, which can
+  drop late-alphabet broken tasks on a very large account; and three unverified completeness-critic leads
+  (query_optimization_triage cold-scan cache label, error-classification precedence, egress-exfil weights).
+
 ## 4.493.0 - Efficiency-mart coverage denominator + live/mart hour-count twin (2026-09-07)
 
 The two coverage/twin findings deferred from round 34, now fixed. Reader/serving-layer only, no migration.

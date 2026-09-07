@@ -1235,13 +1235,15 @@ def _task_health_view(company: str, days: int, database: str = "",
                      "severity": ("bad" if _miss else "ok")},
                 ])
                 _fc_cols = [c for c in ["FORECAST", "SEVERITY", "DATABASE_NAME", "SCHEMA_NAME",
-                                        "TASK_NAME", "BASELINE_SEC", "LATEST_SEC", "SLOWER_X", "DAY"]
+                                        "TASK_NAME", "BASELINE_SEC", "RECENT_MED_SEC", "LATEST_SEC",
+                                        "SLOWER_X", "DAY"]
                             if c in _fc.columns]
                 styled_table(_fc[_fc_cols], slug="task-duration-forecast",
                              sort_label="x over baseline desc")
                 st.caption(
-                    "Latest daily runtime vs the task's own median baseline, shown only when the "
-                    "last few days are climbing — a leading indicator that complements the drift "
+                    "Recent-window median runtime vs the task's own baseline (SLOWER_X = recent "
+                    "median / baseline), shown when the recent days are climbing OR holding "
+                    "materially above baseline — a leading indicator that complements the drift "
                     "above (which flags a task already slow on some day). Trailing completed-run "
                     "averages; ACCOUNT_USAGE.TASK_HISTORY lags ~45min, so this forecasts a trend, "
                     "not a live in-flight run.")

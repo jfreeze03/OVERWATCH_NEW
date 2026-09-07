@@ -597,6 +597,11 @@ WITH intervals AS (
 ), cadence AS (
     SELECT DB, SCH, TBL,
            MEDIAN(GAP_MIN) AS MEDIAN_GAP_MIN,
+           -- r35: the p90 gap is the LONGEST NORMAL refresh interval. The logic scorer judges
+           -- "overdue" against this, not the median, so a table that idles on weekends/overnight
+           -- (median ~1 day but real gaps include the ~3-day weekend) is not flagged Overdue/High
+           -- every Monday while within SLA. Mirrors task_freshness_sla's LONG_GAP_MIN p90 fix.
+           APPROX_PERCENTILE(GAP_MIN, 0.9) AS LONG_GAP_MIN,
            COUNT(*) AS REFRESHES
     FROM intervals
     WHERE GAP_MIN IS NOT NULL AND GAP_MIN > 0
@@ -604,7 +609,7 @@ WITH intervals AS (
 )
 SELECT s.DATABASE_NAME, s.SCHEMA_NAME, s.TABLE_NAME, s.OWNER,
        s.MAX_AGE_HOURS, s.HOURS_SINCE, s.SLA_MET,
-       c.MEDIAN_GAP_MIN, c.REFRESHES,
+       c.MEDIAN_GAP_MIN, c.LONG_GAP_MIN, c.REFRESHES,
        ROUND(s.MAX_AGE_HOURS - s.HOURS_SINCE, 2) AS RUNWAY_HOURS
 FROM {core_object("PIPELINE_SLA_STATUS")} s
 LEFT JOIN cadence c
