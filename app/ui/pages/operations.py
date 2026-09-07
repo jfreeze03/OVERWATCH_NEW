@@ -1857,7 +1857,7 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
 def _wh_sizing_efficiency(company: str, rate: float, days: int, *,
                           bounds: tuple | None = None) -> None:
     """Warehouse 'Sizing & efficiency' lens: utilization & right-sizing (+ cost-per-
-    query outliers), quiet-hours, resource-monitor coverage, and adaptive-compute
+    query outliers), quiet-hours, and adaptive-compute
     candidacy. (deferred-item: extracted from _warehouses_tab; its reads — including
     the adaptive-candidacy hourly scan — are paid only when this lens is opened.)"""
     _lm = "_lm" if bounds is not None else ""
@@ -1981,7 +1981,6 @@ def _wh_sizing_efficiency(company: str, rate: float, days: int, *,
                        "(sparse or all-day-idle profiles route to auto-suspend instead).")
         result_caption(_hh)
 
-    _monitor_coverage_panel()
     _adaptive_candidacy_panel(company, days, bounds=bounds)
 
 
@@ -2039,64 +2038,6 @@ def _adaptive_candidacy_panel(company: str, days: int, *, bounds: tuple | None =
                "lever); flat load ⇒ a fixed size is fine. An ordering heuristic — the rationale "
                "shows the inputs.")
     result_caption(hourly)
-
-
-def _monitor_coverage_panel() -> None:
-    """Resource-monitor coverage map (repo review wave 2): the app can't CREATE
-    monitors (read-only), but it CAN show which warehouses run with NO spend cap
-    at all — the governance blind spot Snowsight never rolls up."""
-    from app.logic.wave2 import monitor_coverage
-
-    _whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="rmcov_wh",
-               tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
-    _mons = run(ops_sql.show_resource_monitors_sql(), page=_PAGE, key="rmcov_mons",
-                tier="metadata", source="SHOW RESOURCE MONITORS", max_rows=0, probe=True)
-    if not _whs.ok:
-        section_header("Resource-monitor coverage", "", "cost")
-        st.caption("SHOW WAREHOUSES failed — coverage can't be assessed this pass.")
-        return
-    cov = monitor_coverage(_whs.df, _mons.df if _mons.ok else None)
-    # C23: amber only when warehouses are genuinely uncapped — an ACCOUNT-level
-    # monitor caps everything, so per-warehouse non-assignment stays calm.
-    # F6: a FAILED SHOW RESOURCE MONITORS read (probe=True; needs the MONITOR privilege a
-    # limited SiS role often lacks) means the monitor list is UNKNOWN, not "no account
-    # monitor" — so an account-level cap can't be ruled out. Render neutral and disclose,
-    # never assert warehouses are uncapped off an unread list (bug-hunt 2026-08-30).
-    section_header("Resource-monitor coverage",
-                   alarm_health(None) if not _mons.ok
-                   else alarm_health(0 if bool(cov.get("account_monitor"))
-                                     else int(cov["uncovered"])), "cost")
-    # Review #4: a LEVEL=ACCOUNT monitor caps every warehouse — per-warehouse
-    # non-assignment is then a detail, not an "uncapped" alarm.
-    _acct = bool(cov.get("account_monitor"))
-    _unc_label = ("No dedicated monitor (account cap applies)" if _acct
-                  else "No monitor — uncapped")
-    kpi_row([
-        {"label": "Warehouses with a monitor", "value": f"{cov['covered']:,}"},
-        {"label": _unc_label, "value": f"{cov['uncovered']:,}",
-         "delta_color": "off" if (_acct or not _mons.ok) else ("inverse" if cov["uncovered"] else "off"),
-         "help": ("An ACCOUNT-level monitor caps all warehouses; these just lack a "
-                  "dedicated per-warehouse quota." if _acct else
-                  "No resource monitor = no credit quota, no suspend threshold — a runaway "
-                  "workload on these has no automatic ceiling. Monitors are created by an "
-                  "admin in Snowsight; this map is the coverage picture for monitors this "
-                  "role can see.")},
-    ])
-    if cov["uncovered_names"] and not _acct and _mons.ok:
-        st.warning("Uncapped warehouses: " + ", ".join(cov["uncovered_names"][:20])
-                   + (" …" if len(cov["uncovered_names"]) > 20 else ""))
-    if not _mons.ok:
-        st.caption("Resource-monitor list unreadable this pass (SHOW RESOURCE MONITORS needs "
-                   "the MONITOR privilege) — cap coverage can't be confirmed, so warehouses "
-                   "are not branded uncapped here.")
-    if not cov["monitors_df"].empty:
-        st.markdown("**Existing monitors — quota consumed**")
-        styled_table(cov["monitors_df"], height=200)
-    elif _mons.ok:
-        st.caption("No resource monitors are visible to this role (SHOW returns only "
-                   "monitors it can MONITOR) — none may exist, or the grant is missing.")
-    result_caption(_whs)
-
 
 def _contention_tab(company: str, days: int, *, bounds: tuple | None = None) -> None:
     _lm = "_lm" if bounds is not None else ""

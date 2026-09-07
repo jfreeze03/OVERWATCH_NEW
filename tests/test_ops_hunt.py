@@ -84,16 +84,6 @@ def test_release_verdict_flat_when_absolute_move_below_floor():
     assert v["p95 runtime (s)"] == "Flat"
 
 
-# ---- F6 (MED): monitor-coverage panel never paints a false green -------------------
-def test_monitor_coverage_panel_neutral_when_probe_fails():
-    body = _src("app/ui/pages/operations.py")
-    panel = body.split("def _monitor_coverage_panel", 1)[1].split("\ndef ", 1)[0]
-    # probe failure (or account scope) drops the section to neutral + a caveat, never a green
-    # "all monitored" all-clear computed from an empty/failed read
-    assert "not _mons.ok" in panel
-    assert "alarm_health(None)" in panel
-
-
 # ---- F9 (LOW): duration detectors disclose sub-baseline windows --------------------
 def test_duration_detectors_gate_on_min_active_days():
     body = _src("app/ui/pages/operations.py")

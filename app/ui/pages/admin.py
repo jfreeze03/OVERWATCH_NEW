@@ -41,6 +41,7 @@ from app.ui.components import (
     result_caption,
     run_mart_first,
     section_filter_contract,
+    section_header,
     selectable_table,
     snowsight_profile_column,
     stamp_write,
@@ -637,7 +638,7 @@ def _settings_tab(is_operator: bool) -> None:
         except (KeyError, TypeError):
             pass
 
-    st.markdown("**Change a setting**")
+    section_header("Change a setting", "", "admin")
     # rec45: seed the typed editors from the live values so number/date/enum
     # widgets open on the current setting, not an empty box.
     current: dict[str, str] = {}
@@ -724,7 +725,7 @@ def _migrations_tab() -> None:
                    "procurement lands, docs/FLYWAY_ADOPTION.md is the adoption runbook; "
                    "this panel lights up on its own once flyway_schema_history exists.")
 
-    st.markdown("**Source freshness**")
+    section_header("Source freshness", "", "admin")
     fresh = run_mart_first(
         mart_sql.source_freshness_state(), mart_sql.source_freshness(),
         page=_PAGE, key="adm_freshness",
@@ -831,7 +832,7 @@ def _access_self_check() -> None:
     """r27 H3: probe every privileged source the app reads and hand back the
     exact missing grant — the next access error becomes a checklist row,
     not a debugging session."""
-    st.markdown("**Access self-check**")
+    section_header("Access self-check", "", "security")
     st.caption("Probes each privileged source with a 1-row read. Run after a rebuild, "
                "a role change, or when any panel reports an access error.")
     if not st.button("Run access self-check", key="adm_access_check"):
@@ -886,7 +887,7 @@ def _access_self_check() -> None:
 
 def _observability_tab() -> None:
     _access_self_check()
-    st.markdown("**Recent app errors (this session)**")
+    section_header("Recent app errors (this session)", "", "alerts")
     buffer = error_buffer()
     if not buffer:
         empty_state("clean", "No errors recorded in this session.")
@@ -896,7 +897,7 @@ def _observability_tab() -> None:
         styled_table(pd.DataFrame(buffer).reindex(columns=["at", "ref", "page", "type", "message"]))
     sink = run(mart_sql.app_error_log(100), page=_PAGE, key="error_sink", tier="live",
                source="APP_ERROR_LOG")
-    st.markdown("**Persisted error log (all sessions)**")
+    section_header("Persisted error log (all sessions)", "", "alerts")
     if sink.ok and sink.empty:
         empty_state("clean", "Error sink is empty.")
     elif guard(sink, "", setup_hint="Sink table comes from V001."):
@@ -928,7 +929,7 @@ def _observability_tab() -> None:
         except (KeyError, TypeError):
             styled_table(sink.df)
 
-    st.markdown("**Query telemetry (this session)**")
+    section_header("Query telemetry (this session)", "", "operations")
     telemetry = query_telemetry()
     if telemetry.empty:
         st.caption("No queries have run yet this session.")
@@ -945,7 +946,7 @@ def _observability_tab() -> None:
 
 def _performance_tab() -> None:
     """Prove (or disprove) that the app is fast: its own statement stats."""
-    st.markdown("**Performance SLO scorecard (7d)**")
+    section_header("Performance SLO scorecard (7d)", "", "operations")
     slo = run(
         mart_sql.app_performance_slo(7), page=_PAGE, key="app_perf_slo",
         tier="recent", source="APP_USAGE + APP_QUERY_TELEMETRY",
@@ -1065,7 +1066,7 @@ def _performance_tab() -> None:
             result_caption(scan)
             st.caption("Interactive statements only; the OVERWATCH query tag excludes loader and task work.")
 
-    st.markdown("**Page adoption (30d)**")
+    section_header("Page adoption (30d)", "", "operations")
     usage = run(mart_sql.app_usage_summary(30), page=_PAGE, key="app_usage", tier="recent",
                 source="APP_USAGE")
     if usage.ok and usage.empty:
@@ -1079,7 +1080,7 @@ def _performance_tab() -> None:
     # across ALL viewers over 7d (fleet_query_stats -> APP_QUERY_TELEMETRY). Different
     # populations answering different questions — the audit's "same population" flag was
     # a false positive.
-    st.markdown("**Fleet slow/failed fetches (all viewers, 7d)**")
+    section_header("Fleet slow/failed fetches (all viewers, 7d)", "", "operations")
     fq = run(mart_sql.fleet_query_stats(7), page=_PAGE, key="fleet_qstats", tier="recent",
              source="APP_QUERY_TELEMETRY (V021)")
     if not fq.ok:
@@ -1104,7 +1105,7 @@ def _performance_tab() -> None:
 
 def _perf_rider_panels(fq_df=None) -> None:
     """V027 telemetry-rider readouts (Codex r6 #8, #12, #19)."""
-    st.markdown("**Fleet telemetry by page (7d)**")
+    section_header("Fleet telemetry by page (7d)", "", "operations")
     tbp = run(mart_sql.telemetry_by_page(7), page=_PAGE, key="tel_by_page", tier="recent",
               source="APP_QUERY_TELEMETRY (persisted = slow/failed + 2% sample)")
     if tbp.usable():
@@ -1175,7 +1176,7 @@ def _perf_rider_panels(fq_df=None) -> None:
     else:
         st.caption("Per-page telemetry appears after V027 and a day of traffic.")
 
-    st.markdown("**Usage events (30d) & remediation acceptance (90d)**")
+    section_header("Usage events (30d) & remediation acceptance (90d)", "", "operations")
     ue = run(mart_sql.usage_event_summary(30), page=_PAGE, key="usage_events", tier="recent",
              source="APP_USAGE.EVENT_KIND (V027 rider)")
     if ue.usable():
@@ -1288,7 +1289,7 @@ def _canary_tab() -> None:
         _styled(view, height=420)
 
     st.divider()
-    st.markdown("**Mart reconciliation — do the numbers MATCH the source?**")
+    section_header("Mart reconciliation — do the numbers MATCH the source?", "", "cost")
     st.caption(
         "Freshness proves the loaders ran; this compares mart totals against live "
         "ACCOUNT_USAGE over the same complete window. ±2% is normal late-arrival noise; "
@@ -1318,7 +1319,7 @@ def _canary_tab() -> None:
         result_caption(recon)
 
     st.divider()
-    st.markdown("**Fire-drill scoreboard — does the page reach a human?**")
+    section_header("Fire-drill scoreboard — does the page reach a human?", "", "alerts")
     from app.logic.drill import drill_report
     drills = run(mart_sql.drill_history(14), page=_PAGE, key="drill_hist", tier="recent",
                  source="ALERT_EVENTS (OPS_ALERT_DRILL)")
@@ -1355,7 +1356,7 @@ def _canary_tab() -> None:
             st.caption("Resolve drills as EXPECTED — they're excluded from rule precision.")
 
     st.divider()
-    st.markdown("**Restated days — did a reported number move after close?**")
+    section_header("Restated days — did a reported number move after close?", "", "admin")
     rest = run(mart_sql.metering_restatements(60), page=_PAGE, key="restatements",
                tier="recent", source="FACT_METERING_DAILY LOAD_TS lag")
     if rest.ok and rest.empty:
@@ -1374,7 +1375,7 @@ def _metric_registry_tab() -> None:
     """Phase 1 (architectural): the single semantic contract for every cost
     number — method, grain, source, timezone, latency, formula version."""
     from app.logic import metric_registry as mr
-    st.markdown("**Cost metric registry — what every number means**")
+    section_header("Cost metric registry — what every number means", "", "cost")
     st.caption(
         "Read a figure by its METHOD: BILLED uses Snowflake's billed-credit basis "
         "(organization currency is invoice truth), METERED is "

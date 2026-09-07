@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.488.0 - Codex adjudication P2: remove resource monitors, migrate Admin headings (2026-09-06)
+
+Owner decisions on the adjudicated P2s.
+
+- **Removed the resource-monitor coverage panel** (owner keep/kill → kill). It had returned after
+  the standing "Resource monitors are GONE" decision; though it was read-only visibility (which
+  warehouses lack a spend cap), the owner wants zero RM surface. Deleted the Operations panel + its
+  call site, `ops_sql.show_resource_monitors_sql`, `wave2.monitor_coverage` (+ its dead `_col`
+  helper), and their tests. Auto-suspend / quiet-hours / adaptive-candidacy analysis is untouched;
+  the sibling wave-2 logic (token economics, fleet cache-hit) stays.
+- **Migrated Admin's 15 bold-Markdown pseudo-headings to `section_header`** — the page used *zero*
+  of the primitive before, so its headings had no icon, health-stripe, or a11y heading role.
+- **hero_metric — investigated, not extended.** The adjudicator's suggested tiles aren't clean
+  single-number leads: Overview's spend headline carries a sparkline `hero_metric` can't render (a
+  downgrade), and Brief/Security are intentionally multi-metric. `hero_metric` is already on the two
+  surfaces where one number genuinely dominates; extending it here would regress those pages. (A
+  spark-capable `hero_metric` would be the prerequisite for more — a separate feature.)
+
+Locks in `tests/test_codex_adjudication_p2.py` (RM surface fully gone; Admin uses the primitive).
+
 ## 4.487.0 - Codex UI/UX review, adjudicated: kill decorative section-header colour (2026-09-06)
 
 Ground-truthed the Codex UI/UX review against the current post-refactor code (most of it already

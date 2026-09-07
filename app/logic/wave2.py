@@ -1,4 +1,4 @@
-"""Repo-review wave-2 pure logic: resource-monitor coverage + token economics.
+"""Repo-review wave-2 pure logic: token economics.
 
 Pure pandas over frames the UI already fetched; no Streamlit, no Snowflake.
 Tested in tests/test_repo_wave2.py.
@@ -34,61 +34,6 @@ def _peer_ratio(values: pd.Series, *, positive_baseline: bool = False) -> pd.Ser
         med = float(np.median(others)) if others.size else 0.0
         ratios[i] = (arr[i] / med) if med > 0 else 0.0
     return pd.Series(ratios, index=values.index)
-
-
-def _col(df: pd.DataFrame, *names: str) -> str:
-    """First matching column name (SHOW output is lowercase; be tolerant)."""
-    lower = {str(c).lower(): c for c in df.columns}
-    for name in names:
-        if name.lower() in lower:
-            return lower[name.lower()]
-    return ""
-
-
-def monitor_coverage(warehouses: pd.DataFrame | None,
-                     monitors: pd.DataFrame | None) -> dict:
-    """The resource-monitor governance blind-spot map (repo review wave 2).
-
-    From SHOW WAREHOUSES (carries per-warehouse ``resource_monitor``) and SHOW
-    RESOURCE MONITORS: which warehouses have NO monitor (no spend cap at all),
-    plus the monitor list with % consumed. Returns
-    {covered, uncovered, uncovered_names, monitors_df} — zeros/empties in, out.
-    """
-    out = {"covered": 0, "uncovered": 0, "uncovered_names": [],
-           "monitors_df": pd.DataFrame(), "account_monitor": False}
-    if warehouses is not None and not warehouses.empty:
-        name_c = _col(warehouses, "name")
-        mon_c = _col(warehouses, "resource_monitor")
-        if name_c and mon_c:
-            mon = warehouses[mon_c].astype(str).str.strip().str.lower()
-            uncovered = warehouses[mon.isin(("", "null", "none", "nan"))]
-            out["uncovered"] = len(uncovered)
-            out["covered"] = int(len(warehouses) - len(uncovered))
-            out["uncovered_names"] = sorted(
-                str(v) for v in uncovered[name_c].dropna().tolist())
-    # Review #4: a LEVEL=ACCOUNT monitor caps EVERY warehouse even though SHOW
-    # WAREHOUSES shows no per-warehouse assignment — without this flag the map
-    # branded account-governed warehouses "uncapped".
-    if monitors is not None and not monitors.empty:
-        level_c = _col(monitors, "level")
-        if level_c:
-            out["account_monitor"] = bool(
-                monitors[level_c].astype(str).str.strip().str.upper().eq("ACCOUNT").any())
-    if monitors is not None and not monitors.empty:
-        m = monitors.copy()
-        quota_c = _col(m, "credit_quota")
-        used_c = _col(m, "used_credits")
-        if quota_c and used_c:
-            quota = pd.to_numeric(m[quota_c], errors="coerce")
-            used = pd.to_numeric(m[used_c], errors="coerce")
-            m["PCT_CONSUMED"] = (used / quota.where(quota > 0) * 100).round(1)
-        keep = [c for c in (_col(m, "name"), quota_c, used_c,
-                            _col(m, "remaining_credits"), "PCT_CONSUMED",
-                            _col(m, "frequency"), _col(m, "start_time"),
-                            _col(m, "end_time"), _col(m, "level")) if c and c in m.columns]
-        out["monitors_df"] = m[keep] if keep else m
-    return out
-
 
 def token_economics(frame: pd.DataFrame | None) -> pd.DataFrame:
     """Per-user prompt-cache economics from token-type grain rows
