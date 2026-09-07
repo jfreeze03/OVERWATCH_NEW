@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.493.0 - Efficiency-mart coverage denominator + live/mart hour-count twin (2026-09-07)
+
+The two coverage/twin findings deferred from round 34, now fixed. Reader/serving-layer only, no migration.
+
+- **[MED] A stale or young `MART_WAREHOUSE_EFFICIENCY_DAILY` divided its idle/sizing projections by the
+  full requested window instead of the days it actually covers.** `served_days()` stamped the requested
+  window (`int(days)`) on the mart leg, and the pre-aggregated readers (`eff_idle_analysis` /
+  `eff_sizing_profile`, GROUP BY WAREHOUSE_NAME) carry no DAY column to correct it — so a loader lagged
+  by a couple of days (5 of 7 present → ~29% low) or a mart younger than the window (120 of 365 → ~3×
+  low) understated idle credits, projected-monthly, and the size-down savings, and mislabeled the
+  window. Both readers now emit `COVERED_DAYS = COUNT(DISTINCT DAY)` over the window (a window-level
+  scalar), and `served_days()` honors it over the stamp — so the run-rate and the window label reflect
+  the days actually present. The live twin carries no `COVERED_DAYS` and keeps its honest clamp.
+- **[MED] The live idle twin and the mart twin counted metered hours differently.** Live used
+  `METERED_HOURS = COUNT(*)` over every metering row; the mart used `BILLED_HOURS = COUNT_IF(CREDITS_USED
+  > 0)`. That divergence moved `idle_advisor`'s `credits_per_hour` resume-tail denominator (and the
+  "Actionable via timer" net figure) between the mart-cold and mart-warm legs even though V127 had
+  aligned the gross idle credits. The live twin now counts billed hours too, and gates `IDLE_HOURS` the
+  same way — which also makes it consistent with `IDLE_CREDITS` (credits from billed idle hours). A
+  residual span-vs-start-hour difference in the ACTIVE-hour basis remains between the legs (the mart
+  precomputes distinct start-hours daily; the live join is span-based); it moves only the sub-credit
+  resume-tail correction and would need a mart-loader migration to fully reconcile.
+
 ## 4.492.0 - Bug-hunt round 34: warehouse efficiency / rightsizing / idle & auto-suspend (2026-09-07)
 
 Multi-agent adversarial sweep (6 finder dimensions → per-finder refute → completeness critic) over the

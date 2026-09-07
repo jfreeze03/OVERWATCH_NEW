@@ -222,7 +222,15 @@ SELECT
     SUM(BILLED_HOURS) AS METERED_HOURS,
     GREATEST(SUM(BILLED_HOURS) - SUM(ACTIVE_HOURS), 0) AS IDLE_HOURS,
     ROUND(SUM(CREDITS_TOTAL), 4) AS TOTAL_CREDITS,
-    ROUND(SUM(COALESCE(IDLE_CREDITS, CREDITS_TOTAL * COALESCE(IDLE_PCT, 0) / 100)), 4) AS IDLE_CREDITS
+    ROUND(SUM(COALESCE(IDLE_CREDITS, CREDITS_TOTAL * COALESCE(IDLE_PCT, 0) / 100)), 4) AS IDLE_CREDITS,
+    -- r34 follow-up: the DISTINCT days this pre-aggregated mart actually covers IN THE WINDOW
+    -- (a window-level constant on every row). served_days() divides the x30 monthly projection by
+    -- THIS, not the requested window — so a loader-lagged or young mart (fewer DAYs present than
+    -- asked) reports an honest run-rate and window label instead of dividing N days of idle by the
+    -- full ask (~29% low at 5-of-7d, ~3x low at 120-of-365d). No DAY column survives the GROUP BY,
+    -- so this scalar carries the span the frame otherwise couldn't.
+    (SELECT COUNT(DISTINCT DAY) FROM {mart_object("MART_WAREHOUSE_EFFICIENCY_DAILY")}
+     WHERE {where}) AS COVERED_DAYS
 FROM {mart_object("MART_WAREHOUSE_EFFICIENCY_DAILY")}
 WHERE {where}
   AND UPPER(WAREHOUSE_NAME) <> 'CLOUD_SERVICES_ONLY'
@@ -241,6 +249,9 @@ def eff_sizing_profile(days: int, company: str = "ALL", *, bounds: tuple | None 
     days = bounded_days(days, 400)
     where = and_where(scope_window_where("e.DAY", days, bounds=bounds),
                       _company_arm(company, "e.COMPANY"))
+    # r34 follow-up: unqualified twin of `where` for the covered-span scalar subquery below.
+    cov_where = and_where(scope_window_where("DAY", days, bounds=bounds),
+                          _company_arm(company))
     return f"""
 SELECT
     e.WAREHOUSE_NAME,
@@ -252,7 +263,12 @@ SELECT
     COUNT_IF(COALESCE(e.QUERIES, 0) > 0) AS ACTIVE_QUERY_DAYS,
     MAX(COALESCE(e.P95_S, 0)) AS P95_ELAPSED_SEC,
     ROUND(SUM(COALESCE(e.QUEUED_MIN, 0)) * 60, 1) AS QUEUED_SEC,
-    ROUND(SUM(COALESCE(e.SPILL_GB, 0)), 2) AS SPILL_REMOTE_GB
+    ROUND(SUM(COALESCE(e.SPILL_GB, 0)), 2) AS SPILL_REMOTE_GB,
+    -- r34 follow-up: DISTINCT days the mart covers IN THE WINDOW (see eff_idle_analysis) — every
+    -- per-day rate in size_recommendations (MONTHLY_USD_NOW, IDLE_MONTHLY_USD, the x30 scenarios)
+    -- divides by served_days(); COVERED_DAYS makes that the days actually present, not the full ask.
+    (SELECT COUNT(DISTINCT DAY) FROM {mart_object("MART_WAREHOUSE_EFFICIENCY_DAILY")}
+     WHERE {cov_where}) AS COVERED_DAYS
 FROM {mart_object("MART_WAREHOUSE_EFFICIENCY_DAILY")} e
 WHERE {where}
   AND UPPER(e.WAREHOUSE_NAME) <> 'CLOUD_SERVICES_ONLY'

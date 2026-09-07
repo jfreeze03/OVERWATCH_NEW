@@ -1028,7 +1028,20 @@ def served_days(result, requested_days: int) -> int:
     Falls back to ``requested_days`` for any result that did not come through
     run_mart_first — an honest no-op, never a wrong clamp."""
     from app.config import clamp_days
-    attrs = getattr(getattr(result, "df", None), "attrs", None) or {}
+    df = getattr(result, "df", None)
+    # r34 follow-up: a reader that emits its OWN covered span (COVERED_DAYS — the DISTINCT days it
+    # actually returned in the window) is authoritative over the _mark_served stamp, which records the
+    # REQUESTED window on the mart leg with no knowledge of how many days the pre-aggregated mart
+    # actually holds. Without this, a loader-lagged or young MART_WAREHOUSE_EFFICIENCY_DAILY divides N
+    # days of idle/sizing credits by the full ask (~29% low at 5-of-7d, ~3x low at 120-of-365d) and
+    # mislabels the window. The live twin carries no COVERED_DAYS -> it falls through to the honest
+    # clamp below, so this only re-bases the mart leg.
+    if df is not None and len(df) and "COVERED_DAYS" in getattr(df, "columns", ()):
+        import pandas as pd
+        cov = pd.to_numeric(df["COVERED_DAYS"].iloc[0], errors="coerce")
+        if pd.notna(cov) and cov > 0:
+            return max(1, min(int(cov), int(requested_days or 1)))
+    attrs = getattr(df, "attrs", None) or {}
     effective = attrs.get("_ow_effective_days")
     if isinstance(effective, int) and effective > 0:
         return effective

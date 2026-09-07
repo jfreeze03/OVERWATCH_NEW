@@ -90,8 +90,15 @@ WITH {_active_hours_cte(days, company, bounds=bounds)}
 SELECT
     M.WAREHOUSE_NAME,
     {companies.company_case_sql("M.WAREHOUSE_NAME")} AS COMPANY,
-    COUNT(*) AS METERED_HOURS,
-    SUM(IFF(Q.HOUR_TS IS NULL, 1, 0)) AS IDLE_HOURS,
+    -- r34 twin-alignment: count only BILLED warehouse-hours (CREDITS_USED > 0), matching the mart
+    -- twin's BILLED_HOURS = COUNT_IF(CREDITS_USED > 0) (eff_idle_analysis). The old COUNT(*) counted
+    -- every metering row including zero-credit slices, so METERED_HOURS (and idle_advisor's
+    -- credits_per_hour = TOTAL_CREDITS / METERED_HOURS resume-tail denominator) jumped between the
+    -- live and mart legs. Gating IDLE_HOURS the same way also makes it consistent with IDLE_CREDITS,
+    -- which only sums credits from billed idle hours. (A residual span-vs-start-hour difference in
+    -- the ACTIVE-hour basis remains between the legs; it moves only the sub-credit-scale resume tail.)
+    COUNT_IF(COALESCE(M.CREDITS_USED, 0) > 0) AS METERED_HOURS,
+    SUM(IFF(Q.HOUR_TS IS NULL AND COALESCE(M.CREDITS_USED, 0) > 0, 1, 0)) AS IDLE_HOURS,
     SUM(COALESCE(M.CREDITS_USED, 0)) AS TOTAL_CREDITS,
     SUM(IFF(Q.HOUR_TS IS NULL, COALESCE(M.CREDITS_USED, 0), 0)) AS IDLE_CREDITS
 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY M
