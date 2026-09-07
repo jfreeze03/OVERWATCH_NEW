@@ -1271,9 +1271,11 @@ def _storage_table_drill(company: str, settings: dict, db_names: list) -> None:
         {"label": "On STALE tables (90d no writes)",
          "value": f"{format_usd(float(t.loc[is_stale, 'Non-active $'].sum()))}/mo",
          "delta_color": "inverse" if bool(is_stale.any()) else "off",
-         "help": "Non-active storage on tables with no WRITES in 90 days — the clearest "
-                 "reduce-retention candidates. STALE does not consider READS: verify there are no "
-                 "consumers before dropping a table."},
+         "help": "Non-active storage on tables with no WRITES in 90 days. Only the time-travel share "
+                 "is reducible via DATA_RETENTION_TIME_IN_DAYS (and only its tail past the new window); "
+                 "the fail-safe and clone-retained portions here aren't deletable and shrink only once "
+                 "the data drops / the clone is removed. STALE does not consider READS: verify there "
+                 "are no consumers before dropping a table."},
     ])
     show_cols = ["SCHEMA_NAME", "TABLE_NAME", "Active $", "Time-travel $", "Fail-safe $",
                  "Clone $", "Total $", "STATUS", "RETENTION_DAYS", "LAST_DML"]

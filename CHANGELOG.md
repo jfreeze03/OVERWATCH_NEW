@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.495.0 - Bug-hunt round 36: storage / retention / clone (2026-09-07)
+
+Multi-agent adversarial sweep (6 finder dimensions → per-finder refute → completeness critic) over the
+storage-optimization / retention / clone surface. Two finder dims returned empty and the byte-unit basis
+audited consistent (binary GiB/TiB app-wide) — floor signals. **3 fixes shipped; a real-time retention
+read, a storage-mart freshness gate, and two unverified critic leads deferred.**
+
+- **[MED] The Enterprise storage-waste board could bury real waste behind never-cloned tables.**
+  `storage_reclaim` (the primary frame on Enterprise) ordered by `TIME_TRAVEL_BYTES + FAILSAFE_BYTES +
+  RETAINED_FOR_CLONE_BYTES` without a `COALESCE` on the clone term. That column is NULL for never-cloned
+  tables (the common case), so `TT + FS + NULL = NULL`, and Snowflake sorts NULLs first under `DESC` — so
+  never-cloned tables flooded the top-50 and evicted genuine time-travel/fail-safe waste past the cap
+  (and the clone column rendered NaN). Now `COALESCE(...,0)` at both the projection and the ORDER BY,
+  matching the sibling `table_storage_breakdown` and the V124 loader, which already guard this column.
+- **[LOW] A storage KPI overstated what a retention change can recover.** The "on STALE tables" KPI in
+  the spend storage drill summed time-travel + fail-safe + clone and called it "the clearest
+  reduce-retention candidates", though only the time-travel share is reducible via
+  `DATA_RETENTION_TIME_IN_DAYS`. Its help now carries the same time-travel-only caveat the sibling KPI
+  beside it already has.
+- **[MED, partial] The retention remediation trusted a lagged current-setting.** It read the table's
+  `DATA_RETENTION_TIME_IN_DAYS` only from ACCOUNT_USAGE / the daily mart (lags ~1–2h) and labeled it
+  "verified current"; if retention was lowered within that lag, the panel could propose raising it back
+  (the A3 wrong direction) and book a fictitious saving. Dropped the false "verified" claim and added a
+  lag warning on the ALTER path. The full guard — a real-time `SHOW TABLES` read at decision time, as the
+  auto-suspend sibling does — is deferred.
+- **Deferred (documented):** the real-time retention read above; a freshness gate for the per-table
+  storage mart-first sites (a multi-day-stale `MART_TABLE_STORAGE_DAILY` snapshot is served silently —
+  same class as the deferred efficiency-mart freshness, and needs the mart SQL to expose `MAX(DAY)`); and
+  two unverified critic leads (the growth/movers `LIMIT 100`-by-endpoint-diff cut, and the
+  `storage_by_database_calendar` mart-vs-live `DB_BYTES` composition).
+
 ## 4.494.0 - Bug-hunt round 35: operations & pipeline intelligence (2026-09-07)
 
 Multi-agent adversarial sweep (6 finder dimensions → per-finder refute → completeness critic) over the

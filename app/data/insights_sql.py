@@ -1151,7 +1151,7 @@ SELECT
     ROUND(m.ACTIVE_BYTES / POWER(1024, 3), 2)      AS ACTIVE_GB,
     ROUND(m.TIME_TRAVEL_BYTES / POWER(1024, 3), 2) AS TIME_TRAVEL_GB,
     ROUND(m.FAILSAFE_BYTES / POWER(1024, 3), 2)    AS FAILSAFE_GB,
-    ROUND(m.RETAINED_FOR_CLONE_BYTES / POWER(1024, 3), 2) AS CLONE_RETAINED_GB,
+    ROUND(COALESCE(m.RETAINED_FOR_CLONE_BYTES, 0) / POWER(1024, 3), 2) AS CLONE_RETAINED_GB,
     rt.RETENTION_DAYS,
     IFF(rt.RETENTION_DAYS IS NULL, FALSE, TRUE) AS RETENTION_KNOWN,
     d.LAST_DML,
@@ -1168,7 +1168,11 @@ LEFT JOIN (
 {_RETENTION_JOIN_SQL}
 LEFT JOIN reads r ON r.TABLE_ID = m.ID
 WHERE {where}
-ORDER BY (m.TIME_TRAVEL_BYTES + m.FAILSAFE_BYTES + m.RETAINED_FOR_CLONE_BYTES) DESC
+-- r36: COALESCE the clone term — RETAINED_FOR_CLONE_BYTES is NULL for never-cloned tables (the
+-- common case), and TT + FS + NULL = NULL, which Snowflake sorts NULLS-FIRST under DESC, so
+-- never-cloned tables flooded the top-50 and evicted genuine time-travel/fail-safe waste. Mirrors
+-- table_storage_breakdown's ORDER BY and the V124 loader, which both COALESCE this exact column.
+ORDER BY (m.TIME_TRAVEL_BYTES + m.FAILSAFE_BYTES + COALESCE(m.RETAINED_FOR_CLONE_BYTES, 0)) DESC
 LIMIT 50
 """
 

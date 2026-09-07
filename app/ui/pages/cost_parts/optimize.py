@@ -1395,7 +1395,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         )
                     elif not _can_reduce:
                         st.info(
-                            f"Choose a value below the verified current {_cur_ret:.0f}d retention "
+                            f"Choose a value below the current {_cur_ret:.0f}d retention "
                             "to generate a reduction. The control defaults to no change."
                         )
                     else:
@@ -1410,8 +1410,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                   f"{_freed_gb:,.0f} of {_tt_gb:,.0f} GB of Time Travel")
                         est_w = round(_freed_gb / 1024 * _rate_tb, 2)
                         st.caption(
-                            f"{_basis} (~${est_w:,.2f}/mo, ESTIMATED). Time-Travel bytes also age out on "
-                            f"their own as the existing window rolls forward. The {_fs_gb:,.0f} GB of "
+                            f"{_basis} (~${est_w:,.2f}/mo, ESTIMATED). Current retention is read from a "
+                            "usage view that lags ~1-2h; if it was lowered more recently, confirm before "
+                            "executing so this ALTER does not RAISE it back up. Time-Travel bytes also age "
+                            f"out on their own as the existing window rolls forward. The {_fs_gb:,.0f} GB of "
                             "failsafe is NOT included: it drains on a fixed 7-day schedule regardless of "
                             "this setting."
                         )
