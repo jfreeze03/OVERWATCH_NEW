@@ -1124,11 +1124,11 @@ def _perf_rider_panels(fq_df=None) -> None:
         # where they belong; p95 stays on the table as the severity lens.
         _tt = tbp.df.copy()
         try:
-            _tt["PAIN"] = _tt["EST_WAIT_S"].astype(float).round(1)
+            _tt["PAIN_SEC"] = _tt["EST_WAIT_S"].astype(float).round(1)
             # D5: a page with no measurable wait is not a tuning target — it used
             # to fill the board with PAIN=0 rows whenever fewer than five pages
             # had any, and every one of those was an un-drillable dead end.
-            _tt = _tt[_tt["PAIN"] > 0].sort_values("PAIN", ascending=False).head(5)
+            _tt = _tt[_tt["PAIN_SEC"] > 0].sort_values("PAIN_SEC", ascending=False).head(5)
             st.markdown("**Next tuning targets** — pain = estimated total fleet seconds "
                         "waited (sample-reweighted); the telemetry picks, not opinions.")
             if _tt.empty:
@@ -1136,7 +1136,7 @@ def _perf_rider_panels(fq_df=None) -> None:
                 _sel = None
             else:
                 _sel = selectable_table(
-                    _tt[["PAGE", "PAIN", "P95_S", "SLOW_2S", "FAILED"]],  # r24: CACHE_HIT_PCT off — 0.0 by construction until weighted telemetry (review #3/#4)
+                    _tt[["PAGE", "PAIN_SEC", "P95_S", "SLOW_2S", "FAILED"]],  # r24: CACHE_HIT_PCT off — 0.0 by construction until weighted telemetry (review #3/#4)
                     key="adm_tt_sel", height=160)
                 st.caption(
                     "Sub-2s pain is invisible here except through the ~2% healthy sample; "

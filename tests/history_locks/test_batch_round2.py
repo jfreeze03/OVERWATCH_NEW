@@ -36,5 +36,5 @@ def test_kpi_cards_carry_source_badges():
 def test_admin_ranks_next_tuning_targets_from_telemetry():
     adm = (_ROOT / "app" / "ui" / "pages" / "admin.py").read_text(encoding="utf-8")
     assert "Next tuning targets" in adm
-    assert '_tt["PAIN"]' in adm                                   # pain = p95 x slow count
+    assert '_tt["PAIN_SEC"]' in adm                               # pain = fleet seconds waited (humanized)
     assert "the telemetry picks, not opinions" in adm             # no speculative fix text

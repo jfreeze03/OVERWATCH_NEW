@@ -319,8 +319,9 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             key="ops_top_sel",
             column_config={
                 "START_TIME": st.column_config.DatetimeColumn("Started", format="MMM DD, HH:mm"),
-                "ELAPSED_SEC": st.column_config.NumberColumn("Elapsed (s)", format="%.1f"),
-                "QUEUED_SEC": st.column_config.NumberColumn("Queued (s)", format="%.1f"),
+                # ELAPSED_SEC / QUEUED_SEC carry NO explicit format — durations humanize to Hr/Min/Sec
+                # by convention (an explicit NumberColumn("%.1f") rendered raw seconds and is now stripped
+                # by the shared machinery anyway; same lesson as SPILL_REMOTE_GB below).
                 # FC-1 (round 12): NO explicit SPILL_REMOTE_GB format — let it fall through to
                 # the byte-humanize convention (_auto_formats -> "30.7 MB"), matching this page's
                 # Optimization-triage table, the warehouse KPI card, and the drill card. An
@@ -2325,7 +2326,7 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
                 match = df[(df["OBJECT_TYPE"] == otype) & (df["OBJECT_NAME"] == name)]
                 if not match.empty:
                     rule_at = match["CHANGE_SEEN_AT"].max()
-                charts.daily_metric_line(hist.df, "DAY", "P95_S", "p95 runtime (s)",
+                charts.daily_metric_line(hist.df, "DAY", "P95_S", "p95 runtime",
                                          unit="sec", rule_date=rule_at, rule_label="registered change")
                 styled_table(hist.df)
                 result_caption(hist)

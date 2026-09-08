@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.497.0 - Time/duration display is consistent everywhere (2026-09-08)
+
+Recurring frustration finally fixed at the ROOT: raw seconds kept appearing in tables (a query
+"Elapsed (s) = 6008.4", a task "Avg = 145.0s") while KPI cards showed the app's Hr/Min/Sec format. It kept
+coming back because two things silently defeated the shared humanizer — and both are now closed in one place.
+
+- **Duration humanize is now AUTHORITATIVE in the shared table machinery.** A caller
+  `NumberColumn(format="%.1f")` on a duration column used to override the humanize (Streamlit's column
+  formatting beats the styled cell), and tables over 400 rows skip the styler entirely (no printf renders
+  Hr/Min/Sec). `styled_table`/`selectable_table` now drop any caller number-format on a duration column and
+  pre-format durations to Hr/Min/Sec strings on the large-frame path — so `6008.4 → "1h 40m"`,
+  `145.0s → "2m 25s"`, while sub-minute correctly stays `"4.4s"`. This fixes every table in the app at once.
+- **Swept every page** and fixed the cases the machinery couldn't reach on its own: duration columns whose
+  names hid the unit (`PAIN` → `PAIN_SEC`, `MINS_TO_BREAKTHROUGH` → `BREAKTHROUGH_MIN`, and the "Queued"
+  row of the Compare volume-shape table); the Ask evidence table (was a raw `st.dataframe`) now routes
+  through the shared formatter; and chart durations (the Control-Room incident-Gantt tooltip and the
+  change-impact p95 line chart) now humanize, as do all chart metric tooltips/peaks for `sec`/`min`/`h`/`ms`.
+- **A guard test now fails CI** if any page pins a duration column to a raw number format, or renders a
+  page table with a bare `st.dataframe` — so this class stops recurring.
+
 ## 4.496.0 - Real-time current-setting + mart-freshness hardening (2026-09-08)
 
 The two deferred storage cousins from round 36, done as one focused pass. Reader/serving/UI only, no

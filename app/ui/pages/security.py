@@ -244,7 +244,7 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
             styled_table(
                 with_user_names(ranked, _PAGE)[[
                     "SEVERITY", "USER", "USER_NAME", "SUCCEEDED_AFTER", "FAILURES", "FAIL_IPS",
-                    "FIRST_FAILURE", "FIRST_SUCCESS_AFTER", "MINS_TO_BREAKTHROUGH", "LAST_ERROR"]],
+                    "FIRST_FAILURE", "FIRST_SUCCESS_AFTER", "BREAKTHROUGH_MIN", "LAST_ERROR"]],
             )
             st.caption("A burst followed by a success is the signal; a burst with no later success is "
                        "a locked-out user. Confirm against expected activity before acting — read-only.")

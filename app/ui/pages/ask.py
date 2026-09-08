@@ -24,7 +24,7 @@ from app.logic.ask import REGISTRY, route
 from app.logic.ask.pricing import add_usd_estimates, is_ai_credit_column
 from app.logic.ask.types import AnswerResult, AskParams
 from app.logic.formulas import safe_float
-from app.ui.components import load_settings, page_header
+from app.ui.components import load_settings, page_header, styled_table
 
 _PAGE = "Ask"
 
@@ -149,8 +149,10 @@ def _render_result(result: AnswerResult, company: str, params: AskParams,
                     c[:-4].replace("_", " ").title() + " ($)", format="$%.2f")
                 for c in usd_cols
             }
-            st.dataframe(ev, width="stretch", hide_index=True,
-                         column_config=colcfg or None)
+            # route through styled_table so the evidence rows get the SAME conventions as every
+            # other table — Hr/Min/Sec durations, humanized bytes, $ formatting, prettified headers —
+            # instead of raw values from a bare st.dataframe.
+            styled_table(ev, column_config=colcfg or None)
             if usd_cols:
                 # Label by each column's ACTUAL kind (via the pricing helper), not by
                 # comparing the two configured rates — an admin may set them equal.

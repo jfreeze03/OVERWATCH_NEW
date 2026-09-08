@@ -44,7 +44,7 @@ def test_dead_cache_gauge_is_off_the_pain_board():
     adm = (_ROOT / "app" / "ui" / "pages" / "admin.py").read_text(encoding="utf-8")
     # D5 re-ranked the board on EST_WAIT_S and moved PAIN to the front; the
     # point of this lock is that CACHE_HIT_PCT stays OFF the board.
-    assert '_tt[["PAGE", "PAIN", "P95_S", "SLOW_2S", "FAILED"]]' in adm
+    assert '_tt[["PAGE", "PAIN_SEC", "P95_S", "SLOW_2S", "FAILED"]]' in adm
     # the by-page table keeps the column WITH its floor-not-census caption
     assert "CACHE_HIT_PCT" in adm and "a floor, not a census" in adm
 

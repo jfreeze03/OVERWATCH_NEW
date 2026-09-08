@@ -143,8 +143,8 @@ def test_telemetry_by_page_exposes_reweighted_wait_and_excludes_wall_rows():
 
 def test_pain_board_ranks_on_wait_and_drops_zero_pain_rows():
     adm = (_ROOT / "app" / "ui" / "pages" / "admin.py").read_text(encoding="utf-8")
-    assert '_tt["PAIN"] = _tt["EST_WAIT_S"]' in adm
-    assert '_tt[_tt["PAIN"] > 0]' in adm
+    assert '_tt["PAIN_SEC"] = _tt["EST_WAIT_S"]' in adm
+    assert '_tt[_tt["PAIN_SEC"] > 0]' in adm
     assert "Sub-2s pain is invisible here" in adm and "exception-weighted" in adm
 
 

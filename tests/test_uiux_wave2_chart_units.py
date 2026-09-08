@@ -40,7 +40,11 @@ def test_f41_unit_formatter_spells_each_unit():
     f = charts._fmt_metric_value
     assert f(742389.5, "usd") == "$742,390"        # $ + separators, 0 dp
     assert f(93.14, "pct") == "93.1%"              # % suffix, 1 dp
-    assert f(12.34, "sec") == "12.3s"
+    # duration units (sec/s/ms/min/h) humanize to Hr/Min/Sec so chart tooltips + peaks match the
+    # tables and KPI cards, never raw "145.0s"
+    assert f(12.34, "sec") == "12s"        # 10-59s -> whole seconds
+    assert f(145.0, "sec") == "2m 25s"     # >= 60s rolls up to min/sec
+    assert f(4.4, "sec") == "4.4s"         # sub-10s keeps a decimal
     # r25: credits carry 3 dp so a sub-unit single-warehouse series isn't rounded to "0 cr"
     assert f(1234, "credits") == "1,234.000 cr"
     assert f(0.28, "credits") == "0.280 cr"

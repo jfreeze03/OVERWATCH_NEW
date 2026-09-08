@@ -252,7 +252,9 @@ SELECT f.USER_NAME,
        f.LAST_FAILURE,
        fb.FIRST_SUCCESS_AFTER,
        IFF(fb.FIRST_SUCCESS_AFTER IS NOT NULL, TRUE, FALSE) AS SUCCEEDED_AFTER,
-       DATEDIFF('minute', fb.BREAKTHROUGH_FROM, fb.FIRST_SUCCESS_AFTER) AS MINS_TO_BREAKTHROUGH,
+       -- _MIN suffix (not the MINS_TO_ prefix) so the shared table machinery auto-humanizes this
+       -- duration to Hr/Min instead of a raw minutes count (the prettifier drops _MIN -> "Breakthrough").
+       DATEDIFF('minute', fb.BREAKTHROUGH_FROM, fb.FIRST_SUCCESS_AFTER) AS BREAKTHROUGH_MIN,
        f.LAST_ERROR
 FROM fails f
 LEFT JOIN first_break fb ON fb.USER_NAME = f.USER_NAME

@@ -1996,6 +1996,17 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
     data = display_df
     data_columns = list(display_df.columns)
     fmts = _auto_formats(df, set(column_config or {}))
+    # DURATION DISPLAY IS AUTHORITATIVE (recurring consistency ask): every duration column shows the
+    # Hr/Min/Sec humanize, and NO caller can override it. A caller NumberColumn(format="%.1f") on a
+    # duration column silently defeated the humanize — on the Styler path Streamlit's column_config
+    # printf overrides the styled cell (the same reason an explicit SPILL_REMOTE_GB "%.2f" beats the
+    # byte-humanize), and on the >400-row path there is no printf that renders Hr/Min/Sec at all. So we
+    # DROP any caller config for a duration column here (the prettifier relabels the header from the SQL
+    # name, e.g. ELAPSED_SEC -> "Elapsed"), and the large-frame branch below pre-formats the cells to
+    # Hr/Min/Sec strings. _duration_unit_for_column already avoids false hits (e.g. MIN_CLUSTER_COUNT).
+    _dur_cols = [c for c in df.columns if c in fmts and _duration_unit_for_column(c)]
+    if _dur_cols and column_config:
+        column_config = {k: v for k, v in column_config.items() if k not in _dur_cols} or None
     # F26: wrap the ranked table's primary $/credits column in a native progress
     # bar so magnitude reads at a glance. The bar carries its own printf format,
     # so the column leaves the Styler format map (the two would fight over the
@@ -2046,6 +2057,17 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
     else:
         # Large frame: skip Styler entirely; carry the number formats through
         # column_config so display stays consistent (minus thousands commas).
+        # Duration columns cannot be humanized by a printf column_config, so pre-format them to
+        # Hr/Min/Sec STRINGS on this display copy (df stays numeric -> CSV + source-frame sort unchanged),
+        # instead of printing raw seconds-with-unit (145.0s) on a >400-row table.
+        if _dur_cols:
+            from app.logic.formulas import humanize_duration
+            if data is df:                       # display_df was never copied -> copy so df stays numeric
+                data = df.copy()
+            for _dc in _dur_cols:
+                _du = _duration_unit_for_column(_dc)
+                data[_dc] = data[_dc].map(lambda v, _u=_du: humanize_duration(v, _u))
+                fmts.pop(_dc, None)              # now a string cell; no printf NumberColumn needed
         cfg = dict(column_config or {})
         for col, fmt in fmts.items():
             if col in cfg and not callable(fmt):

@@ -307,13 +307,23 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
     # ---- volume shape ---------------------------------------------------------
     if act.usable():
         st.markdown("**Volume shape**")
+        # A/B is a long-format, mixed-unit column (counts, a duration, GB), so the shared machinery
+        # can't unit-format it by column name. Format EACH cell to its own unit here — the queued row
+        # humanizes to Hr/Min/Sec (matching the Queued KPI above) instead of raw minutes. DELTA_PCT is
+        # scale-invariant and stays numeric in its own column.
+        def _cmp_cell(v, kind):
+            if kind == "dur_s":
+                return humanize_duration(v, "s")
+            if kind == "gb":
+                return f"{v:,.2f} GB"
+            return f"{v:,.0f}"
         rows = []
-        for metric, col, scale in (("Queries", "QUERIES", 1.0), ("Fails", "FAILS", 1.0),
-                                   ("Queued min", "QUEUED_SEC", 1 / 60), ("Remote spill GB", "SPILL_REMOTE_GB", 1.0)):
-            a_v = _side_value(act.df, "A", col) * scale
-            b_v = _side_value(act.df, "B", col) * scale
+        for metric, col, kind in (("Queries", "QUERIES", "count"), ("Fails", "FAILS", "count"),
+                                  ("Queued", "QUEUED_SEC", "dur_s"), ("Remote spill", "SPILL_REMOTE_GB", "gb")):
+            a_v = _side_value(act.df, "A", col)
+            b_v = _side_value(act.df, "B", col)
             d = pct_delta(a_v, b_v)          # None when B is zero — never format it
-            rows.append({"METRIC": metric, "A": round(a_v, 1), "B": round(b_v, 1),
+            rows.append({"METRIC": metric, "A": _cmp_cell(a_v, kind), "B": _cmp_cell(b_v, kind),
                          "DELTA_PCT": d})
         styled_table(pd.DataFrame(rows), height=180, column_config={
             "DELTA_PCT": st.column_config.NumberColumn("Δ %", format="%.1f%%")})

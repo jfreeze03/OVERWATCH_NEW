@@ -1413,6 +1413,11 @@ def incident_gantt(df: pd.DataFrame, now: object = None) -> None:
     _iid = (data["INCIDENT_ID"].astype(str) if "INCIDENT_ID" in data.columns
             else data.index.astype(str))
     data["LANE"] = data["TITLE"].astype(str) + "  ·  " + _iid.str.slice(0, 8)
+    if "DURATION_MIN" in data.columns:
+        # humanize the incident duration for the tooltip (raw "Duration (min): 6,008" -> "4d 4h"),
+        # matching every other duration in the app. Altair tooltips take strings directly.
+        data["DURATION_HUMAN"] = data["DURATION_MIN"].map(
+            lambda m: humanize_duration(float(m) * 60.0, "s") if pd.notna(m) else "")
     domain = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
     colors = [SEV_COLORS[level] for level in domain]
     bars = (
@@ -1430,7 +1435,7 @@ def incident_gantt(df: pd.DataFrame, now: object = None) -> None:
                      alt.Tooltip("STATUS:N", title="Status"),
                      alt.Tooltip("STARTED:T", title="Detected"),
                      alt.Tooltip("ENDED:T", title="Resolved / now"),
-                     alt.Tooltip("DURATION_MIN:Q", title="Duration (min)", format=",.0f")],
+                     alt.Tooltip("DURATION_HUMAN:N", title="Duration")],
         )
     )
     # C38: an open incident's end edge is a projected 'now' (COALESCE to now in the SQL),
@@ -1551,6 +1556,13 @@ def _fmt_metric_value(v: object, unit: str) -> str:
         return str(v)
     if abs(f) == float("inf"):   # degenerate -> em-dash, never "inf"
         return "—"
+    _du = str(unit or "").strip().lower()
+    if _du in ("sec", "s", "ms", "min", "mins", "minutes", "h", "hr", "hour", "hours"):
+        # durations humanize to Hr/Min/Sec everywhere — a chart tooltip / peak callout must match the
+        # tables and KPI cards, not print raw "145.0s". Sub-minute stays "4.4s" (humanize_duration).
+        _u = ("s" if _du in ("sec", "s") else "ms" if _du == "ms"
+              else "min" if _du in ("min", "mins", "minutes") else "h")
+        return humanize_duration(f, _u)
     spec = _METRIC_UNIT.get(str(unit or "").strip().lower())
     if spec is None:
         # N7: a unit outside this chart-local vocabulary (e.g. a metric_registry
