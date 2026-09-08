@@ -64,6 +64,7 @@ from app.ui.components import (
     section_header,
     selectable_table,
     served_days,
+    storage_snapshot_fresh,
     styled_table,
     user_display_map,
     with_user_name_parts,
@@ -1239,10 +1240,11 @@ def _storage_table_drill(company: str, settings: dict, db_names: list) -> None:
         page=_PAGE, key=f"storage_drill_{pick}",
         mart_source="MART_TABLE_STORAGE_DAILY (daily snapshot)",
         live_source="ACCOUNT_USAGE.TABLE_STORAGE_METRICS + TABLE_DML_HISTORY (live)",
-        mart_tier="hourly", live_tier="historical")
+        mart_tier="hourly", live_tier="historical",
+        mart_accept=storage_snapshot_fresh)   # r36: stale snapshot -> live scan
     if not guard(res, f"No table storage rows for {pick} (or TABLE_STORAGE_METRICS is unavailable)."):
         return
-    t = res.df.copy()
+    t = res.df.copy().drop(columns=["SNAPSHOT_DAY"], errors="ignore")
 
     def _usd(gb_col: str) -> pd.Series:
         col = t[gb_col] if gb_col in t.columns else pd.Series(0.0, index=t.index)

@@ -63,11 +63,12 @@ def test_round36_stale_kpi_help_scopes_reducible_to_time_travel():
     assert "aren't deletable and shrink only once" in spend
 
 
-# --- R36-RET-01 (partial): honest current-retention framing ----------------
-def test_round36_retention_panel_drops_verified_claim_and_warns_on_lag():
+# --- R36-RET-01: current-retention framing (superseded by the round-37 live read) ---
+def test_round36_retention_panel_uses_live_setting_not_a_verified_lagged_one():
     optimize = _read("app/ui/pages/cost_parts/optimize.py")
-    # the lagged ACCOUNT_USAGE value is no longer called "verified current"
+    # the lagged storage-scan value is no longer called "verified current"
     assert "verified current" not in optimize
-    # the ALTER-generating path warns that current retention is lagged and could be RAISED
-    assert "lags ~1-2h" in optimize
-    assert "does not RAISE it back up" in optimize
+    # the round-37 hardening reads the current retention LIVE (INFORMATION_SCHEMA.TABLES) for the
+    # direction decision, superseding the round-36 partial "lag warning" mitigation
+    assert "insights_sql.table_retention_live(" in optimize
+    assert "read live from" in optimize

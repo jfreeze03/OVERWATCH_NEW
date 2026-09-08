@@ -81,6 +81,7 @@ from app.ui.components import (
     served_days,
     snowsight_profile_column,
     stamp_write,
+    storage_snapshot_fresh,
     styled_table,
     toggle_cost_hint,
     with_user_names,
@@ -1181,11 +1182,12 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         page=_PAGE, key=f"storgrow_drill_{company}_{_db}",
                         mart_source="MART_TABLE_STORAGE_DAILY (daily snapshot)",
                         live_source="ACCOUNT_USAGE.TABLE_STORAGE_METRICS + TABLE_DML_HISTORY (live)",
-                        mart_tier="hourly", live_tier="historical")
+                        mart_tier="hourly", live_tier="historical",
+                        mart_accept=storage_snapshot_fresh)   # r36: stale snapshot -> live scan
                     if not guard(_res, f"No table storage rows for {_db} "
                                        "(or TABLE_STORAGE_METRICS is unavailable)."):
                         return
-                    _t = _res.df.copy()
+                    _t = _res.df.copy().drop(columns=["SNAPSHOT_DAY"], errors="ignore")
                     _rate_tb = safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0)
 
                     def _usd(gb_col: str) -> pd.Series:
@@ -1286,11 +1288,12 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         page=_PAGE, key=f"waste_{company}",
                         mart_source="MART_TABLE_STORAGE_DAILY (daily snapshot)",
                         live_source="TABLE_STORAGE_METRICS + TABLE_DML_HISTORY (live)",
-                        mart_tier="hourly", live_tier="historical")
+                        mart_tier="hourly", live_tier="historical",
+                        mart_accept=storage_snapshot_fresh)   # r36: stale snapshot -> live scan
             if waste.ok and waste.empty:
                 empty_state("clean", "No table above 1 GB of combined active + retention bytes in this scope.")
             elif guard(waste, ""):
-                sdf = waste.df.copy()
+                sdf = waste.df.copy().drop(columns=["SNAPSHOT_DAY"], errors="ignore")
                 if "DML_STATUS" in sdf.columns:
                     sdf = sdf.rename(columns={"DML_STATUS": "STATUS"})
                 stale = sdf[sdf["STATUS"].astype(str) == "STALE"]
@@ -1379,8 +1382,33 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     wrow = sdf.iloc[int(sel_w)]
                     _tt_gb = safe_float(wrow.get("TIME_TRAVEL_GB"))
                     _fs_gb = safe_float(wrow.get("FAILSAFE_GB"))
-                    _ret_known = bool(wrow.get("RETENTION_KNOWN", False))
-                    _cur_ret = safe_float(wrow.get("RETENTION_DAYS"), 0.0)
+                    # r36 follow-up: read the current DATA_RETENTION_TIME_IN_DAYS LIVE from the table's
+                    # metadata at selection — NOT wrow's lagged storage-scan value (the scan reads a
+                    # ~1-2h-lagged usage view / daily snapshot). A retention ALTER decides a DIRECTION,
+                    # so a stale higher reading could otherwise let this RAISE a retention already lowered
+                    # elsewhere (the A3 class the auto-suspend guard avoids the same way). Fail closed: an
+                    # unavailable or exotic-identifier read leaves _ret_known False -> the "unavailable, no
+                    # ALTER" branch below, never a blind ALTER off a stale number.
+                    _ret_known, _cur_ret = False, 0.0
+                    try:
+                        from app.core.sqlsafe import safe_identifier as _safe_ident
+                        # Validate the schema+table are scriptable identifiers up front (the database is
+                        # validated inside table_retention_live). A table the live read can match as a
+                        # string LITERAL but remediation.retention_fix() cannot safely NAME (an exotic /
+                        # quote-requiring identifier) then stays fail-closed here instead of crashing the
+                        # ALTER build later — same fail-closed contract, no ungraceful render error.
+                        _safe_ident(str(wrow["SCHEMA_NAME"]))
+                        _safe_ident(str(wrow["TABLE_NAME"]))
+                        _rl = run(insights_sql.table_retention_live(
+                            str(wrow["DATABASE_NAME"]), str(wrow["SCHEMA_NAME"]), str(wrow["TABLE_NAME"])),
+                            page=_PAGE,
+                            key=f"retlive_{wrow['DATABASE_NAME']}_{wrow['SCHEMA_NAME']}_{wrow['TABLE_NAME']}",
+                            tier="metadata", source="live table retention (metadata view)")
+                        if _rl.usable():
+                            _cur_ret = safe_float(_rl.df.iloc[0].get("RETENTION_DAYS"), 0.0)
+                            _ret_known = True
+                    except ValueError:
+                        pass   # exotic db/schema/table identifier -> stays fail-closed (unavailable)
                     _default_ret = int(max(0, min(_cur_ret, 90))) if _ret_known else 0
                     keep_days = st.number_input(
                         "Set retention days", min_value=0, max_value=90,
@@ -1410,12 +1438,11 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                   f"{_freed_gb:,.0f} of {_tt_gb:,.0f} GB of Time Travel")
                         est_w = round(_freed_gb / 1024 * _rate_tb, 2)
                         st.caption(
-                            f"{_basis} (~${est_w:,.2f}/mo, ESTIMATED). Current retention is read from a "
-                            "usage view that lags ~1-2h; if it was lowered more recently, confirm before "
-                            "executing so this ALTER does not RAISE it back up. Time-Travel bytes also age "
-                            f"out on their own as the existing window rolls forward. The {_fs_gb:,.0f} GB of "
-                            "failsafe is NOT included: it drains on a fixed 7-day schedule regardless of "
-                            "this setting."
+                            f"{_basis} (~${est_w:,.2f}/mo, ESTIMATED). Current retention is read live from "
+                            "the table's metadata at selection, so this reduction can't silently raise a "
+                            "retention that was lowered elsewhere. Time-Travel bytes also age out on their "
+                            f"own as the existing window rolls forward. The {_fs_gb:,.0f} GB of failsafe is "
+                            "NOT included: it drains on a fixed 7-day schedule regardless of this setting."
                         )
                         if (confirm_gate(str(wrow["TABLE_NAME"]), "Execute retention change + log", key="waste",
                                          prompt="Type the table name to confirm", object_name=True)

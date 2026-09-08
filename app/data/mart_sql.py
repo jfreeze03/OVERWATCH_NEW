@@ -2544,7 +2544,11 @@ SELECT
     RETENTION_DAYS,
     IFF(RETENTION_DAYS IS NULL, FALSE, TRUE) AS RETENTION_KNOWN,
     LAST_DML,
-    IFF(LAST_DML IS NULL, 'STALE', 'ACTIVE') AS STATUS
+    IFF(LAST_DML IS NULL, 'STALE', 'ACTIVE') AS STATUS,
+    -- r36 follow-up: expose the snapshot day (latest loaded MART_TABLE_STORAGE_DAILY DAY) so the
+    -- caller's mart_accept can reject a multi-day-stale snapshot (a stalled daily loader) and fall to
+    -- the live TABLE_STORAGE_METRICS scan instead of serving out-of-date bytes as current.
+    (SELECT MAX(DAY) FROM {_tbl}) AS SNAPSHOT_DAY
 FROM {_tbl}
 WHERE {where}
 ORDER BY TIME_TRAVEL_BYTES + FAILSAFE_BYTES DESC
@@ -2578,7 +2582,9 @@ SELECT
     RETENTION_DAYS,
     LAST_DML,
     IFF(LAST_DML IS NULL, 'STALE', 'ACTIVE') AS STATUS,
-    IFF(RETENTION_DAYS IS NULL, TRUE, FALSE) AS DROPPED
+    IFF(RETENTION_DAYS IS NULL, TRUE, FALSE) AS DROPPED,
+    -- r36 follow-up: snapshot-day scalar for the caller's freshness mart_accept (see waste_mart).
+    (SELECT MAX(DAY) FROM {_tbl}) AS SNAPSHOT_DAY
 FROM {_tbl}
 WHERE {where}
 ORDER BY ACTIVE_BYTES + TIME_TRAVEL_BYTES + FAILSAFE_BYTES + RETAINED_FOR_CLONE_BYTES DESC

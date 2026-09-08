@@ -1176,6 +1176,28 @@ ORDER BY (m.TIME_TRAVEL_BYTES + m.FAILSAFE_BYTES + COALESCE(m.RETAINED_FOR_CLONE
 LIMIT 50
 """
 
+
+def table_retention_live(database: str, schema: str, table: str) -> str:
+    """Real-time DATA_RETENTION_TIME_IN_DAYS for ONE table from its database's INFORMATION_SCHEMA
+    (a live view — NOT the ~1-2h-lagged ACCOUNT_USAGE.TABLES / daily mart the storage scan reads).
+
+    A retention-reduction ALTER decides a DIRECTION, so the current setting must be read as it is NOW:
+    if retention was lowered since the storage snapshot, a stale higher reading would let the panel SET
+    it back UP (the A3 wrong-direction class the auto-suspend guard already avoids via a live read).
+    schema/table are string literals (injection-safe); the database is a validated identifier, so an
+    exotic/unsafe name raises ValueError and the caller fails closed (no ALTER). An empty result (table
+    not visible to the app role) likewise leaves the caller fail-closed."""
+    from app.core.sqlsafe import safe_identifier, sql_literal
+    db = safe_identifier(str(database))
+    return f"""
+SELECT RETENTION_TIME AS RETENTION_DAYS
+FROM {db}.INFORMATION_SCHEMA.TABLES
+WHERE TABLE_SCHEMA = {sql_literal(str(schema))}
+  AND TABLE_NAME = {sql_literal(str(table))}
+LIMIT 1
+"""
+
+
 def expensive_patterns_usd(days: int, company: str = "ALL", limit: int = 30, *,
                            bounds: tuple | None = None) -> str:
     """Recurring cost patterns: the SAME hour-share allocation as

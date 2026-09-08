@@ -1050,6 +1050,25 @@ def served_days(result, requested_days: int) -> int:
     return max(1, int(requested_days))
 
 
+def storage_snapshot_fresh(df, max_age_days: int = 2) -> bool:
+    """run_mart_first mart_accept for the per-table storage marts (r36 follow-up).
+
+    True only when the mart's SNAPSHOT_DAY (its latest loaded MART_TABLE_STORAGE_DAILY day) is within
+    ``max_age_days`` of account today. A stalled daily loader then yields to the live
+    TABLE_STORAGE_METRICS scan instead of serving a multi-day-stale snapshot's bytes as current — which
+    would otherwise drive a retention/reclaim remediation off phantom time-travel/fail-safe bytes. A
+    missing/unparseable SNAPSHOT_DAY, or an empty frame, returns False (fall to live), so freshness is
+    never silently assumed. The live twin carries no SNAPSHOT_DAY, so only the mart leg is gated."""
+    import pandas as pd
+    if df is None or getattr(df, "empty", True) or "SNAPSHOT_DAY" not in getattr(df, "columns", ()):
+        return False
+    from app.logic.formulas import account_today
+    snap = pd.to_datetime(df["SNAPSHOT_DAY"].iloc[0], errors="coerce")
+    if pd.isna(snap):
+        return False
+    return (account_today() - snap.date()).days <= max_age_days
+
+
 # ---------------------------------------------------------------------------
 # Cluster-3 coverage contract (finding #16). One shared acceptance test for
 # mart-first reads so a stale / short / gappy mart yields to the (correct) live

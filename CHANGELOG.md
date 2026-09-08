@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.496.0 - Real-time current-setting + mart-freshness hardening (2026-09-08)
+
+The two deferred storage cousins from round 36, done as one focused pass. Reader/serving/UI only, no
+migration.
+
+- **[MED] The retention remediation now reads the current setting LIVE.** It decided the direction of a
+  `DATA_RETENTION_TIME_IN_DAYS` reduction off the storage scan's value, which comes from a ~1–2h-lagged
+  usage view / daily snapshot — so a retention lowered elsewhere within that window could be silently
+  raised back (the A3 wrong direction) and book a fictitious saving. A new `table_retention_live` builder
+  reads the current value from the table's `INFORMATION_SCHEMA.TABLES` (a live view) at selection, and the
+  panel uses that for the direction gate and the savings basis. Fail-closed: an unavailable or
+  exotic-identifier read leaves the setting unknown, so no ALTER and no ledger row are generated — the
+  same real-time-read contract the auto-suspend guard already follows.
+- **[LOW] The per-table storage marts no longer serve a stale snapshot silently.** The mart readers now
+  expose `SNAPSHOT_DAY` (their latest loaded day), and the three storage mart-first sites (the Optimize
+  waste scan + growth drill and the Spend storage drill) gate on `storage_snapshot_fresh` — so a
+  multi-day-stale `MART_TABLE_STORAGE_DAILY` (a stalled daily loader) yields to the live
+  `TABLE_STORAGE_METRICS` scan instead of driving a waste figure or a retention/reclaim remediation off
+  out-of-date bytes. A missing/unparseable snapshot day fails closed to the live scan.
+
 ## 4.495.0 - Bug-hunt round 36: storage / retention / clone (2026-09-07)
 
 Multi-agent adversarial sweep (6 finder dimensions → per-finder refute → completeness critic) over the

@@ -53,10 +53,19 @@ def test_v124_snapshot_reads_the_shared_storage_views_and_stamps_company():
     assert "SOURCE_FRESHNESS_STATE" in _MIG                      # loader-owned freshness
 
 
+def _cols_no_snapshot(sql: str) -> list[str]:
+    # r36 follow-up: the mart carries a SNAPSHOT_DAY freshness scalar the live twin doesn't (it drives
+    # the storage_snapshot_fresh mart_accept and the callers drop it before display), so it is excluded
+    # from the column-parity contract below — both legs still RENDER identical columns.
+    return [c for c in _cols(sql) if c != "SNAPSHOT_DAY"]
+
+
 def test_mart_readers_match_the_live_builders_column_for_column():
-    # run_mart_first can only swap the mart in if the columns are identical to the live builder.
-    assert _cols(mart_sql.table_storage_waste_mart("ALFA", 1.0)) == _cols(insights_sql.storage_waste("ALFA", 1.0))
-    assert _cols(mart_sql.table_storage_breakdown_mart("Trexis", "ALFA_EDW_PRD", 50)) \
+    # run_mart_first can only swap the mart in if the columns are identical to the live builder
+    # (apart from the mart-only SNAPSHOT_DAY freshness scalar the callers drop — see _cols_no_snapshot).
+    assert _cols_no_snapshot(mart_sql.table_storage_waste_mart("ALFA", 1.0)) \
+        == _cols(insights_sql.storage_waste("ALFA", 1.0))
+    assert _cols_no_snapshot(mart_sql.table_storage_breakdown_mart("Trexis", "ALFA_EDW_PRD", 50)) \
         == _cols(insights_sql.table_storage_breakdown("Trexis", "ALFA_EDW_PRD", 50))
     # readers parse for every company + read the latest snapshot; ALL adds no company filter
     for comp in ("ALFA", "Trexis", "UNKNOWN", "ALL"):
