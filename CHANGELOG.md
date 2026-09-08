@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.504.0 - Data-quality anomalies now alert: DQ_BREACH (Codex R24) (2026-09-08)
+
+The Operations data-quality panel scores each registered-product table's most recent rows-added load by
+robust z and flags spikes/drops — but nothing booked those findings as alerts (dq.py's docstring names the
+`DQ_BREACH` alert a deferred owner-migration half). Now a serious data-quality issue stays actionable after
+the operator leaves the panel.
+
+- **V132** adds a `DQ_BREACH` arm to `SP_ANOMALY_SWEEP` — the DB-side twin of
+  `logic/dq.row_volume_anomalies`: per registered table, the latest rows-added load scored against a
+  **baseline of its prior loads** (robust z = `(latest − median) / GREATEST(MAD·1.4826, 0.15·median)`,
+  the same 15%-of-median dispersion floor), gated on ≥10 baseline loads and a baseline median ≥ 100 rows,
+  flagged when `|z| ≥ 3.5` in **either direction** — so it catches volume **bloat and thin loads** that
+  `PIPE_VOLUME_DROP`'s %-collapse rule misses. A test pins these constants to dq.py's defaults so the panel
+  and the alert can never disagree.
+- Plus the `DQ_BREACH` `ALERT_CONFIG` rule (PIPELINE / MEDIUM / threshold 3.5). It reads only internal
+  `ACCOUNT_USAGE` + `ENTITY_CATALOG` (no external grants), so it ships **ENABLED**; the arm is
+  exception-guarded like the sweep's other `ACCOUNT_USAGE` arms, and the migration re-runs the sweep once
+  so the last 3 days' anomalies populate immediately. Proc byte-identical otherwise; owner applies after V131.
+
 ## 4.503.0 - Manual incident declare is atomic (Codex R34) (2026-09-08)
 
 The manual "Declare incident + link alerts" flow ran two separate `INSERT`s — the incident, then its

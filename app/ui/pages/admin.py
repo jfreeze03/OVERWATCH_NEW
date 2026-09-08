@@ -502,6 +502,12 @@ _EXPECTED_MIGRATIONS = {
          "inserts in ONE transaction, replacing the app's two separate execute_statement INSERTs that "
          "could half-apply a titled member-less incident on a mid-failure. Reproduces the family-open "
          "guard + conditional entity filter server-side (static, no dynamic SQL); no schema change",
+    132: "DQ_BREACH data-quality alert (R24): SP_ANOMALY_SWEEP re-derived from V122 with a DQ_BREACH arm "
+         "that scores each registered-product table's latest rows-added load by robust z vs a baseline of "
+         "its prior loads (twin of logic/dq.row_volume_anomalies) and books one alert per flagged table "
+         "(spike OR drop — catches bloat + thin loads PIPE_VOLUME_DROP's %-collapse misses), plus the "
+         "DQ_BREACH ALERT_CONFIG rule (PIPELINE/MEDIUM/3.5). Internal reads only (ships ENABLED); proc "
+         "byte-identical otherwise",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

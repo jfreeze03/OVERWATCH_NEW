@@ -44,6 +44,6 @@ def test_raise_arms_still_date_stamp_their_keys():
 
 def test_validate_floor_and_docs_track_v119():
     val = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V131 applied" in val and "VERSION BETWEEN 1 AND 131) = 131" in val
+    assert "V001..V132 applied" in val and "VERSION BETWEEN 1 AND 132) = 132" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V119__alert_autoclear_hysteresis_fix.sql" in (_ROOT / rel).read_text(encoding="utf-8")

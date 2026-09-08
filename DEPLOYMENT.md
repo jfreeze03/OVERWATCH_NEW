@@ -147,6 +147,7 @@ snowflake/migrations/V128__seed_etl_ref_gap_config.sql
 snowflake/migrations/V129__pipe_ref_gap_alert.sql
 snowflake/migrations/V130__experiment_verify_proof_guard.sql
 snowflake/migrations/V131__incident_declare_atomic.sql
+snowflake/migrations/V132__dq_breach_alert.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -459,7 +460,7 @@ surgical by design — the schema is shared with the old app, so it never drops
 `DBA_MAINT_DB.OVERWATCH` itself, only named objects:
 
 - **Section A (live):** tasks, alerts, procs, functions, views, transient
-  facts/marts. Safe anytime — re-run the migrations in order (V001..V131) and the loaders repopulate.
+  facts/marts. Safe anytime — re-run the migrations in order (V001..V132) and the loaders repopulate.
 - **Section B (commented):** operator data — settings, company scope, alert
   config/events/audit, action queue, savings ledger, error log,
   schema_version. Uncomment only for a factory reset, and run the provided
@@ -481,7 +482,7 @@ Restore = migrations in order -> roles.sql -> validate.sql (all rows OK).
 - **Fine-grained undo:** Time Travel — `SELECT * FROM <t> AT(OFFSET => -3600)`
   or `UNDROP TABLE <t>` within the retention window.
 - **Schema dropped:** `UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH;` first. If gone,
-  re-run all migrations in order (V001..V131) + roles.sql + validate.sql; facts refill from
+  re-run all migrations in order (V001..V132) + roles.sql + validate.sql; facts refill from
   the loader tasks (history limited to ACCOUNT_USAGE retention); operator
   tables restore from `*_BAK_LAST` clones if they survived, else re-seed.
 - **App broken after deploy:** `snow streamlit deploy --replace` with the
