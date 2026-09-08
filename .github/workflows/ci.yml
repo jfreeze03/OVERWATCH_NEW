@@ -117,11 +117,12 @@ jobs:
   #      DBA_MAINT_DB or DBA_MAINT_DB.OVERWATCH.*, and must NOT inherit them via
   #      SNOW_SYSADMINS or any prod admin role. Cloning READS prod; it never
   #      writes, so USAGE + SELECT on the source is sufficient and fail-closed.
-  #   6. GRANT ROLE OVERWATCH_CI_SMOKE TO USER <ci_user>; and set repo secret
-  #      SNOWFLAKE_CI_ROLE=OVERWATCH_CI_SMOKE.
-  # Until SNOWFLAKE_CI_ROLE is set, sql() falls back to SNOWFLAKE_ROLE (a prod
-  # admin) and prod safety rests SOLELY on the text-rewrite + guard above. That
-  # is acceptable ONLY because the job stays opt-in + continue-on-error (below).
+  #   6. GRANT ROLE OVERWATCH_CI_SMOKE TO USER <ci_user>; and set repo secrets
+  #      SNOWFLAKE_CI_ROLE=OVERWATCH_CI_SMOKE and SNOWFLAKE_CI_WAREHOUSE=<dedicated wh>.
+  # R38 (fail-closed): if SNOWFLAKE_CI_ROLE or SNOWFLAKE_CI_WAREHOUSE is unset, the run
+  # step SKIPS (exit 0) instead of falling back to the prod role / prod admin warehouse —
+  # the isolation prerequisites are now enforced, not merely preferred. Prod safety still
+  # ALSO rests on the text-rewrite + guard below; the job stays opt-in + continue-on-error.
   # ============================================================================
   snowflake-smoke:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_snowflake_smoke }}
@@ -140,6 +141,9 @@ jobs:
       # SNOWFLAKE_ROLE when set.
       SNOWFLAKE_CI_ROLE: ${{ secrets.SNOWFLAKE_CI_ROLE }}
       SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+      # Dedicated CI warehouse (R38). Required alongside SNOWFLAKE_CI_ROLE — the smoke
+      # SKIPS rather than run on the prod admin warehouse if this is unset.
+      SNOWFLAKE_CI_WAREHOUSE: ${{ secrets.SNOWFLAKE_CI_WAREHOUSE }}
       SNOWFLAKE_DATABASE: DBA_MAINT_DB
     steps:
       - uses: actions/checkout@v4
@@ -165,14 +169,24 @@ jobs:
           CLONE_DB: OVERWATCH_CI_SMOKE_${{ github.run_id }}
         run: |
           set -euo pipefail
-          # Prefer the dedicated fail-closed CI role; fall back to the prod role
-          # only until the OWNER provisions SNOWFLAKE_CI_ROLE (see contract above).
-          CI_ROLE="${SNOWFLAKE_CI_ROLE:-${SNOWFLAKE_ROLE:-SNOW_SYSADMINS}}"
-          echo "Smoke will connect under role: $CI_ROLE"
+          # R38: fail CLOSED on the isolation prerequisites. The smoke must run under a
+          # DEDICATED, least-privilege CI role on a DEDICATED warehouse — never silently
+          # fall back to the prod role / prod admin warehouse. If either isn't provisioned,
+          # SKIP the smoke rather than touch production-capable compute. (The job is already
+          # opt-in via workflow_dispatch + continue-on-error; skipping here is safe.)
+          if [ -z "${SNOWFLAKE_CI_ROLE:-}" ] || [ -z "${SNOWFLAKE_CI_WAREHOUSE:-}" ]; then
+            echo "SKIP: SNOWFLAKE_CI_ROLE and/or SNOWFLAKE_CI_WAREHOUSE not set — refusing to run"
+            echo "the smoke under a prod-capable role/warehouse. Provision the isolated CI role"
+            echo "+ warehouse (see the contract above) to enable it."
+            exit 0
+          fi
+          CI_ROLE="$SNOWFLAKE_CI_ROLE"
+          CI_WAREHOUSE="$SNOWFLAKE_CI_WAREHOUSE"
+          echo "Smoke will connect under role: $CI_ROLE / warehouse: $CI_WAREHOUSE"
           sql() { snow sql --temporary-connection \
                     --account "$SNOWFLAKE_ACCOUNT" --user "$SNOWFLAKE_USER" \
                     --role "$CI_ROLE" \
-                    --warehouse "${SNOWFLAKE_WAREHOUSE:-WH_ALFA_ADMIN}" \
+                    --warehouse "$CI_WAREHOUSE" \
                     --database "$CLONE_DB" "$@"; }
 
           # ---- Rewrite SQL onto the clone (ISOLATION, layer 1) ---------------
@@ -203,12 +217,12 @@ jobs:
           # (CREATE/DROP need the connection role; sql() targets the clone db.)
           snow sql --temporary-connection --account "$SNOWFLAKE_ACCOUNT" \
                    --user "$SNOWFLAKE_USER" --role "$CI_ROLE" \
-                   --warehouse "${SNOWFLAKE_WAREHOUSE:-WH_ALFA_ADMIN}" \
+                   --warehouse "$CI_WAREHOUSE" \
                    -q "CREATE DATABASE $CLONE_DB CLONE $SNOWFLAKE_DATABASE;"
           cleanup() {
             snow sql --temporary-connection --account "$SNOWFLAKE_ACCOUNT" \
                      --user "$SNOWFLAKE_USER" --role "$CI_ROLE" \
-                     --warehouse "${SNOWFLAKE_WAREHOUSE:-WH_ALFA_ADMIN}" \
+                     --warehouse "$CI_WAREHOUSE" \
                      -q "DROP DATABASE IF EXISTS $CLONE_DB;" || true
           }
           trap cleanup EXIT

@@ -881,7 +881,12 @@ def result_caption(result: QueryResult, note: str = "") -> None:
     if result.source:
         bits.append(f"Source: {result.source}")
     if result.fetched_at and _audit:
-        bits.append(f"fetched {result.fetched_at.strftime('%H:%M:%S')}")
+        # R12: a cache hit's stamp is "served now", not a fresh Snowflake fetch — label it
+        # honestly (served … cached) so an old cached frame never reads as freshly fetched.
+        if result.cache_hit:
+            bits.append(f"served {result.fetched_at.strftime('%H:%M:%S')} · cached (≤ tier TTL)")
+        else:
+            bits.append(f"fetched {result.fetched_at.strftime('%H:%M:%S')}")
     if note and _audit:
         bits.append(note)
     if bits:

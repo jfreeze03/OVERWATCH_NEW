@@ -37,6 +37,7 @@ from app.logic.workbench import (
     experiment_age_days,
     mark_watched,
     mark_watched_pairs,
+    overdue_verification,
     stale_planning,
     update_experiment_sql,
 )
@@ -1104,6 +1105,9 @@ def _experiments() -> None:
     frame["AGE_DAYS"] = experiment_age_days(frame, account_now())
     _active = status.isin(("PLANNED", "RUNNING", "OBSERVING"))
     _oldest_active = int(frame.loc[_active, "AGE_DAYS"].max()) if bool(_active.any()) else 0
+    # R40: verification-side sibling of an overdue action — an experiment whose observation
+    # window has elapsed but is still RUNNING/OBSERVING is ready to verify and hasn't been.
+    _overdue_verify = int(overdue_verification(frame, account_now()).sum())
     # Verified count + value are all-time totals, so read them from the UNCAPPED aggregate rather than
     # the LIMIT-300 display frame — else the oldest settled VERIFIED experiments (which sort past the
     # active-first cap) silently drop from these director-facing headlines (ds-hunt 2026-08-30).
@@ -1124,6 +1128,11 @@ def _experiments() -> None:
          "severity": "warn" if _oldest_active >= 30 else "",
          "help": "Longest-running planned/running/observing experiment (days since it was "
                  "created). A long-lived active experiment may be stuck — verify or close it."},
+        {"label": "Overdue verification", "value": f"{_overdue_verify:,}",
+         "severity": "warn" if _overdue_verify else "",
+         "help": "Experiments whose observation window has elapsed but are still active and "
+                 "unverified — ready to verify or reject. The verification-side sibling of an "
+                 "overdue action."},
         {"label": "Verified", "value": f"{_verified_ct:,}", "severity": "ok"},
         {"label": "Verified value", "value": format_usd(_verified_usd)},
     ])

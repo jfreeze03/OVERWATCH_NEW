@@ -314,6 +314,20 @@ def experiment_age_days(frame: pd.DataFrame | None, now: object) -> pd.Series:
     return age.fillna(0).clip(lower=0).astype("int64")
 
 
+def overdue_verification(frame: pd.DataFrame | None, now: object) -> pd.Series:
+    """Bool Series: has each experiment's observation window elapsed while it is still
+    active and unverified (R40)? An experiment past OBSERVATION_END but still RUNNING /
+    OBSERVING is ready to verify but hasn't been — the verification-side sibling of an
+    overdue action. Aligned to ``frame``; all-False on empty/absent columns, never a raise."""
+    if frame is None or frame.empty:
+        return pd.Series(dtype=bool)
+    if "OBSERVATION_END" not in frame.columns or "STATUS" not in frame.columns:
+        return pd.Series(False, index=frame.index, dtype=bool)
+    obs_end = pd.to_datetime(frame["OBSERVATION_END"], errors="coerce")
+    active = frame["STATUS"].astype(str).isin(("RUNNING", "OBSERVING"))
+    return (active & obs_end.notna() & (obs_end <= pd.Timestamp(now))).fillna(False)
+
+
 def stale_planning(frame: pd.DataFrame | None, now: object, days: int = 30) -> pd.Series:
     """Bool Series: has each open action gone untouched for >= ``days`` (DS #34)?
 

@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.501.0 - Codex review, Tier 1: six trust + safety fixes (2026-09-08)
+
+Six small, high-value fixes from ground-truthing an external 50-rec review against the code (most of the
+50 turned out already-built or half-built; these are the real, cheap wins):
+
+- **R12 — honest cache provenance.** `run()` stamped `fetched_at = now()` even on a cache hit, so an
+  audit-mode caption claimed a fresh fetch for data up to a tier-TTL old. `QueryResult` gains `cache_hit`,
+  and the provenance line now reads `served … · cached (≤ tier TTL)` on a hit vs `fetched …` on a real read.
+- **R27 — forecast intervals, not just the point.** Backtesting already computed a `[low, high]` band per
+  checkpoint but discarded it; it now keeps `LOW_USD`/`HIGH_USD` and a `COVERED` flag (did the actual land
+  in the band?), so interval coverage and directional bias are reportable, not just point error.
+- **R38 — CI fails closed on isolation.** The optional Snowflake smoke could silently fall back to the prod
+  role (`SNOW_SYSADMINS`) and prod admin warehouse (`WH_ALFA_ADMIN`); it now **skips** unless a dedicated
+  `SNOWFLAKE_CI_ROLE` **and** `SNOWFLAKE_CI_WAREHOUSE` are provisioned.
+- **R40 — overdue verification.** Decision Studio gains an "Overdue verification" KPI — experiments whose
+  observation window elapsed but are still active and unverified — the verification-side sibling of an
+  overdue action (new pure `workbench.overdue_verification`).
+- **R43 — the real timeout ceiling is visible.** Admin ▸ Performance now reads and shows the actual
+  `STATEMENT_TIMEOUT_IN_SECONDS` in force on the app warehouse, since the app's per-tier `ALTER SESSION`
+  timeouts are a no-op under owner's-rights SiS.
+- **R41 — per-interaction rerun budget.** The usage simulator's filter-rerun measurement (previously never
+  asserted) is now a test: a whole-script rerun from a filter tweak must not amplify the cold-query count.
+
 ## 4.500.0 - The reference-data gap now pages: PIPE_REF_GAP daily alert (2026-09-08)
 
 ETL process-control, Phase 1b. The 4.499.0 panel shows reference-data gaps live on page-open; this makes

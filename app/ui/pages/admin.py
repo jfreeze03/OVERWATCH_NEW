@@ -14,6 +14,7 @@ import streamlit as st
 
 from app.config import (
     APP_VERSION,
+    APP_WAREHOUSE,
     DEFAULT_SETTINGS,
     THRESHOLDS,
     core_object,
@@ -956,6 +957,37 @@ def _observability_tab() -> None:
 
 def _performance_tab() -> None:
     """Prove (or disprove) that the app is fast: its own statement stats."""
+    # R43: the app's per-tier ALTER SESSION timeouts (30/120/180s) are a no-op under
+    # owner's-rights SiS (core.session.apply_statement_timeout documents this) — the REAL
+    # ceiling every app query runs against is the warehouse/account STATEMENT_TIMEOUT_IN_SECONDS.
+    # Read + show it so the true wall is visible, not just described in a code comment.
+    section_header("Production statement-timeout ceiling", "", "operations")
+    panel_help(
+        "The app's per-tier query timeouts (30/120/180s) do NOT apply on owner's-rights "
+        "Streamlit-in-Snowflake — ALTER SESSION is rejected there. Every app query is instead "
+        f"governed by STATEMENT_TIMEOUT_IN_SECONDS on {APP_WAREHOUSE} (or the account; 300s "
+        "default). To enforce a tighter ceiling, SET it on the warehouse or account."
+    )
+    _to = run(f"SHOW PARAMETERS LIKE 'STATEMENT_TIMEOUT_IN_SECONDS' IN WAREHOUSE {APP_WAREHOUSE}",
+              page=_PAGE, key="stmt_timeout", tier="metadata",
+              source=f"SHOW PARAMETERS IN WAREHOUSE {APP_WAREHOUSE}", max_rows=0, probe=True)
+    if _to.usable():
+        _tdf = _to.df.copy()
+        _tdf.columns = [str(c).lower() for c in _tdf.columns]
+        if "value" in _tdf.columns:
+            _val = str(_tdf.iloc[0].get("value", "") or "")
+            _lvl = str(_tdf.iloc[0].get("level", "") or "").upper() or "ACCOUNT (default)"
+            kpi_row([{"label": "Real statement-timeout ceiling",
+                      "value": f"{_val}s" if _val else "—",
+                      "delta": f"set at: {_lvl}", "delta_color": "off",
+                      "help": "The STATEMENT_TIMEOUT_IN_SECONDS actually in force on the app "
+                              "warehouse — the true wall every app query runs against, regardless "
+                              "of the app's per-tier values."}])
+        styled_table(_tdf)
+    else:
+        empty_state("no_data_yet", "Could not read the warehouse timeout parameter (needs "
+                    "MONITOR/USAGE on the warehouse). The 300s account default likely applies.")
+
     section_header("Performance SLO scorecard (7d)", "", "operations")
     slo = run(
         mart_sql.app_performance_slo(7), page=_PAGE, key="app_perf_slo",

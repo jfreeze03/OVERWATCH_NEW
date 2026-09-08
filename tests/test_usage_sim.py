@@ -71,6 +71,26 @@ def test_simulate_renders_pages_and_records_reads():
 
 
 @pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
+def test_filter_rerun_stays_within_budget():
+    """R41: a whole-script rerun from a filter tweak (no navigation) must not amplify the
+    per-interaction read count — the core Streamlit rerun concern. Exercises the previously
+    unasserted measure_rerun path (the existing tests all pass measure_rerun=False)."""
+    report = usage_sim.simulate(pages=_SUBSET, scopes={"default": {}}, measure_rerun=True)
+    rerun = report.get("rerun")
+    assert rerun is not None, "measure_rerun=True should produce a rerun measurement"
+    assert "error" not in rerun, f"rerun measurement failed: {rerun.get('error')}"
+    nav, tweak = rerun["on_nav"], rerun["on_filter_tweak"]
+    assert not nav["error"] and not tweak["error"], f"nav={nav['error']!r} tweak={tweak['error']!r}"
+    # the chattiness ceiling holds on a rerun too — a filter tweak that suddenly issues far
+    # more cold queries than a normal render is exactly the regression this catches.
+    assert tweak["total"] <= 60, f"filter-tweak rerun issued {tweak['total']} cold queries"
+    # a filter tweak re-runs the SAME page: it must not MULTIPLY the read count vs the initial
+    # nav (allow the schema-filter live-path delta, but not runaway per-rerun amplification).
+    assert tweak["total"] <= nav["total"] * 2 + 10, (
+        f"filter-tweak rerun ({tweak['total']}) amplified vs nav ({nav['total']})")
+
+
+@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_report_formats_without_error():
     report = usage_sim.simulate(pages=["Brief"], scopes={"default": {}}, measure_rerun=False)
     text = usage_sim.format_report(report)

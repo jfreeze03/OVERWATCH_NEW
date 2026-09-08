@@ -237,7 +237,8 @@ def backtest_forecasts(daily: pd.DataFrame, months: int = 3,
     projects month-end using only the history available on that day, then
     compares with the month's actual total. Pure — the page supplies the
     daily USD frame. Columns: MONTH, CHECKPOINT_DAY, ENGINE, PROJECTED_USD,
-    ACTUAL_USD, ERROR_PCT.
+    LOW_USD, HIGH_USD, ACTUAL_USD, ERROR_PCT, COVERED (actual within the band —
+    for interval-coverage and directional-bias reporting, not just point error).
     """
     if daily is None or daily.empty or not {"DAY", "USD"}.issubset(daily.columns):
         return pd.DataFrame()
@@ -265,13 +266,20 @@ def backtest_forecasts(daily: pd.DataFrame, months: int = 3,
                 if not cast.ok:
                     continue
                 err = (cast.projected_usd - actual) / actual * 100 if actual else 0.0
+                # R27: score the INTERVAL, not just the point. The band [low,high] is already
+                # computed per checkpoint but was discarded; keep it and flag whether the actual
+                # landed inside, so the panel can report interval coverage (are the bands
+                # trustworthy?) and directional bias (signed ERROR_PCT), not just point error.
                 rows.append({
                     "MONTH": month_start.strftime("%Y-%m"),
                     "CHECKPOINT_DAY": checkpoint,
                     "ENGINE": engine,
                     "PROJECTED_USD": round(cast.projected_usd, 0),
+                    "LOW_USD": round(cast.low_usd, 0),
+                    "HIGH_USD": round(cast.high_usd, 0),
                     "ACTUAL_USD": round(actual, 0),
                     "ERROR_PCT": round(err, 1),
+                    "COVERED": bool(cast.low_usd <= actual <= cast.high_usd),
                 })
         month_end = month_start
     return pd.DataFrame(rows)

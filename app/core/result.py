@@ -29,6 +29,11 @@ class QueryResult:
     source: str = ""
     tier: str = "recent"
     fetched_at: datetime | None = None
+    # R12: fetched_at is stamped at RETURN, so on a cache hit it is the "served now"
+    # time, NOT when Snowflake was actually hit (which was up to the tier TTL earlier).
+    # cache_hit lets the provenance caption say "served … (cached)" instead of claiming
+    # a fresh "fetched …", so an old result never carries a fresh-looking fetch time.
+    cache_hit: bool = False
     elapsed_ms: float = 0.0
 
     @property
