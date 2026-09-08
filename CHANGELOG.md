@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.505.0 - Schema drift on registered tables now alerts: DQ_SCHEMA_DRIFT (Codex R23) (2026-09-08)
+
+Extends data-quality monitoring beyond volume — the schema-drift half of R23 (dq.py names schema-drift +
+null-rate the deferred owner-migration halves). A column silently added, dropped, or retyped on a
+registered product table now pages, instead of surfacing only when something downstream breaks.
+
+- **V133** adds `SP_SCAN_SCHEMA_DRIFT`, which snapshots each catalog-registered `OBJECT` table's column set
+  (name + type) from `ACCOUNT_USAGE.COLUMNS` into a new `DQ_SCHEMA_SNAPSHOT` baseline table (90-day
+  retention), then diffs today's snapshot against the latest prior one and books one `DQ_SCHEMA_DRIFT`
+  alert per table with **added / removed / retyped** columns. **Metadata only — no table-data scan and no
+  external grants** (a table with no prior snapshot just establishes a baseline and never alerts).
+- Plus the `DQ_SCHEMA_DRIFT` `ALERT_CONFIG` rule (PIPELINE / MEDIUM). The scan rides the existing daily
+  `TASK_ANOMALY_SWEEP` cadence via a `CALL` arm in `SP_ANOMALY_SWEEP` (re-derived from V132) inside the
+  standard per-arm exception guard — **no new task**, and a `COLUMNS`/catalog issue can't break the
+  cost/volume/DQ arms. Internal reads only, so the rule ships ENABLED; proc byte-identical otherwise.
+- **Deferred:** the **null-rate** half of R23 — it reads each table's *data* (`COUNT_IF(col IS NULL)`) and
+  needs `SELECT` grants on the registered tables, so it wants to be config-gated + opt-in, not on by default.
+
 ## 4.504.0 - Data-quality anomalies now alert: DQ_BREACH (Codex R24) (2026-09-08)
 
 The Operations data-quality panel scores each registered-product table's most recent rows-added load by

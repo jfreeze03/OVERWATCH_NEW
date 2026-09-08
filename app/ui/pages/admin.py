@@ -508,6 +508,12 @@ _EXPECTED_MIGRATIONS = {
          "(spike OR drop — catches bloat + thin loads PIPE_VOLUME_DROP's %-collapse misses), plus the "
          "DQ_BREACH ALERT_CONFIG rule (PIPELINE/MEDIUM/3.5). Internal reads only (ships ENABLED); proc "
          "byte-identical otherwise",
+    133: "DQ_SCHEMA_DRIFT schema-drift monitor (R23, schema-drift half): DQ_SCHEMA_SNAPSHOT table + "
+         "SP_SCAN_SCHEMA_DRIFT (snapshots each catalog-registered OBJECT table's columns from "
+         "ACCOUNT_USAGE.COLUMNS, diffs today vs the latest prior snapshot, books one DQ_SCHEMA_DRIFT alert "
+         "per table with added/removed/retyped columns — metadata only, no data scan, no grants) + the "
+         "DQ_SCHEMA_DRIFT rule + a CALL arm in SP_ANOMALY_SWEEP riding the daily task (no new task). Ships "
+         "ENABLED; first scan baselines only. Null-rate half stays deferred",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
