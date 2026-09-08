@@ -179,15 +179,18 @@ def _magnitude_usd(value: float) -> str:
 
 
 def _share_note(label: str, amount: float, total: float, *, dollars: bool = True,
-                value_fmt: str | None = None) -> str:
+                value_fmt: str | None = None, value_fn=None) -> str:
     """rec35 helper: 'Top: X $Y (Z% of $total).' — the lead-with-the-conclusion
     line, computed from the data the chart already has. The share is omitted when
     it would be nonsensical (categories that net out negative make a positive top
     exceed 100% of the total). `value_fmt` (non-dollar charts) overrides the default
-    ',.0f' so a fractional metric (e.g. seconds/query) isn't rounded to 0."""
+    ',.0f' so a fractional metric (e.g. seconds/query) isn't rounded to 0; `value_fn`
+    (a callable) overrides both for a humanized display (e.g. Hr/Min/Sec durations)."""
     def _fmt(v: float) -> str:
         if dollars:
             return _magnitude_usd(v)
+        if value_fn is not None:
+            return value_fn(v)
         return format(v, value_fmt) if value_fmt else f"{v:,.0f}"
     a = _fmt(amount)
     share = (amount / total * 100) if total else 0.0
@@ -1129,23 +1132,33 @@ def daily_stacked_count(df: pd.DataFrame, day_col: str, category_col: str,
 
 
 def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "", top_n: int = 10,
-              *, takeaway: bool = False, value_fmt: str = ",.0f") -> None:
+              *, takeaway: bool = False, value_fmt: str = ",.0f", unit: str = "") -> None:
     # value_fmt defaults to integer (",.0f") for the count callers (statements, failures);
     # pass a fractional format (e.g. ",.1f") for a rate metric like avg seconds/query, else
     # the axis/tooltip/takeaway round a genuine 0.4s to "0".
+    # `unit`: a DURATION unit (sec/s/ms/min/h) humanizes the tooltip + takeaway to Hr/Min/Sec so a
+    # bar-chart duration matches the tables/KPIs ("1h 40m", not raw "6008"); the numeric x-axis stays
+    # a bar-length scale (Altair axes can't render Hr/Min/Sec). Non-duration units are unchanged.
     data = df[[label_col, value_col]].head(top_n).copy()
     data.columns = ["Label", "Value"]
     data["Value"] = pd.to_numeric(data["Value"], errors="coerce").fillna(0.0)
     if data.empty:
         _empty_note()
         return
+    _dur = str(unit or "").strip().lower() in (
+        "sec", "s", "ms", "min", "mins", "minutes", "h", "hr", "hour", "hours")
+    if _dur:
+        data["ValueText"] = data["Value"].map(lambda v: _fmt_metric_value(v, unit))
+        _value_tip = alt.Tooltip("ValueText:N", title=title or "Value")
+    else:
+        _value_tip = alt.Tooltip("Value:Q", format=value_fmt)
     chart = (
         _base(data)
         .mark_bar()
         .encode(
             y=alt.Y("Label:N", sort="-x", title=None, axis=alt.Axis(labelLimit=260)),
             x=alt.X("Value:Q", title=title or "Count", axis=alt.Axis(format=value_fmt)),
-            tooltip=[alt.Tooltip("Label:N"), alt.Tooltip("Value:Q", format=value_fmt)],
+            tooltip=[alt.Tooltip("Label:N"), _value_tip],
         )
     )
     st.altair_chart(chart, width="stretch")
@@ -1155,8 +1168,10 @@ def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "",
         _full_total = float(pd.to_numeric(df[value_col], errors="coerce").fillna(0).sum())
         if _full_total > 0:
             top = data.loc[data["Value"].idxmax()]
-            st.caption(_share_note(str(top["Label"]), float(top["Value"]),
-                                   _full_total, dollars=False, value_fmt=value_fmt))
+            st.caption(_share_note(
+                str(top["Label"]), float(top["Value"]), _full_total, dollars=False,
+                value_fmt=value_fmt,
+                value_fn=(lambda v: _fmt_metric_value(v, unit)) if _dur else None))
 
 
 def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col: str,

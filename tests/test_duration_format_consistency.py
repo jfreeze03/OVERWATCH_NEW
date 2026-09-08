@@ -80,6 +80,22 @@ def test_no_page_overrides_a_duration_column_with_a_raw_number_format():
         "by convention (the shared machinery strips this anyway). Offenders:\n" + "\n".join(offenders))
 
 
+def test_bar_count_humanizes_a_duration_metric():
+    import app.ui.charts as charts
+    # the takeaway/share-note humanizes a duration via value_fn (was raw seconds)
+    note = charts._share_note("WH_A", 6008.0, 6008.0, dollars=False,
+                              value_fn=lambda v: charts._fmt_metric_value(v, "sec"))
+    assert "1h 40m" in note and "6008" not in note
+    # bar_count exposes a duration `unit` that routes the tooltip AND takeaway through the humanizer
+    bar = (_ROOT / "app" / "ui" / "charts.py").read_text(encoding="utf-8")
+    bar = bar.split("def bar_count", 1)[1].split("\ndef ", 1)[0]
+    assert 'data["ValueText"] = data["Value"].map(lambda v: _fmt_metric_value(v, unit))' in bar
+    assert "value_fn=(lambda v: _fmt_metric_value(v, unit)) if _dur else None" in bar
+    # the warehouse-contention bar chart (the last deferred raw-seconds case) now passes unit="sec"
+    ops = (_ROOT / "app" / "ui" / "pages" / "operations.py").read_text(encoding="utf-8")
+    assert 'takeaway=True, unit="sec"' in ops
+
+
 def test_pages_do_not_bypass_the_table_machinery_with_raw_dataframe():
     # every page renders tabular data through styled_table/selectable_table (which humanize durations),
     # not a bare st.dataframe that would show raw values. (KPI cards use humanize_duration directly.)

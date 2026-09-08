@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.498.0 - Duration humanize reaches the bar charts too (2026-09-08)
+
+Closes the one duration display left raw after 4.497.0. `charts.bar_count` now takes a `unit`: a duration
+unit (sec/s/ms/min/h) humanizes the bar tooltip AND the "Top: …" takeaway caption to Hr/Min/Sec (the
+numeric x-axis stays a bar-length scale — Altair axes can't render Hr/Min/Sec), via a new `value_fn`
+override on the share-note helper. Wired the warehouse-contention "queue & spill pressure" chart to
+`unit="sec"`, so its total-queued-time fallback reads "1h 40m" instead of a bare "6008", matching the
+evidence table beneath it and every other duration in the app.
+
 ## 4.497.0 - Time/duration display is consistent everywhere (2026-09-08)
 
 Recurring frustration finally fixed at the ROOT: raw seconds kept appearing in tables (a query
