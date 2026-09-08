@@ -482,6 +482,11 @@ _EXPECTED_MIGRATIONS = {
          "readers pro-rated the day's total credits by an hour-count IDLE_PCT, over-stating idle for scale-out "
          "warehouses and disagreeing with the live fallback feeding the same idle-$ KPI. Readers COALESCE to the "
          "legacy pro-rate for pre-re-stamp rows. Adds one column (ALTER ADD COLUMN)",
+    128: "Seed the ETL reference-data gap monitor config (ETL_REF_GAP_XLAT + ETL_REF_GAP_CHECKS) with the "
+         "pinned pc_uwissuetype.code check, so Operations ▸ Pipeline ▸ 'Reference-data gaps' is live on apply — "
+         "the manual morning MINUS (staging codes missing from the XLAT translation table, which hard-fails the "
+         "nightly load), now watched across the whole XLAT code family. Data-seed only (SETTINGS MERGE, WHEN NOT "
+         "MATCHED); the app role needs SELECT on the staging + XLAT tables (granted separately) for the live read",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

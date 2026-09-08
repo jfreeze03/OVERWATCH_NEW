@@ -19,6 +19,7 @@ from app.core.state import filters, navigation_context, request_navigation
 from app.data import (
     change_impact_sql,
     dq_sql,
+    etl_control_sql,
     insights_sql,
     mart27_sql,
     mart_sql,
@@ -970,11 +971,73 @@ def _dq_row_volume_panel(preloaded=None) -> None:
     result_caption(rv)
 
 
-def _pipeline_sla_tab(is_operator: bool, company: str = "ALL") -> None:
+def _reference_gap_panel(database: str = "") -> None:
+    """Codes present in a staging table but missing from the XLAT reference table.
+
+    The nightly ETL load hard-fails when a source system emits a code that has no
+    translation row, so this is the operator's manual morning MINUS check —
+    generalized across the whole XLAT code family and run live for every check
+    configured in SETTINGS. Honors the scope-bar Database filter (pinned checks
+    like pc_uwissuetype always show); dormant (setup hint) until ETL_REF_GAP_XLAT
+    + ETL_REF_GAP_CHECKS are set; a red banner + the new codes when there is a gap."""
+    section_header("Reference-data gaps — new source codes missing from XLAT",
+                   "warn", "pipeline", anchor="ops-ref-gaps")
+    settings = load_settings(_PAGE)
+    xlat = str(settings.get("ETL_REF_GAP_XLAT") or "").strip()
+    raw = str(settings.get("ETL_REF_GAP_CHECKS") or "").strip()
+    if not xlat or not raw:
+        empty_state(
+            "needs_setup",
+            "Not configured. Set ETL_REF_GAP_XLAT (the translation table FQN) and "
+            "ETL_REF_GAP_CHECKS (one `[*]name | staging_table | code_column` per line; a "
+            "leading `*` pins a check past the Database filter) on Admin ▸ SETTINGS. The "
+            "nightly load fails when a source emits a code with no XLAT translation row — this "
+            "is that morning MINUS check, watched for you across every code type.")
+        return
+    all_checks, warns = etl_control_sql.parse_ref_gap_checks(raw)
+    checks = etl_control_sql.filter_checks_by_database(all_checks, database)
+    scan_sql, build_errs = etl_control_sql.reference_gap_scan(checks, xlat)
+    for msg in warns + build_errs:
+        st.caption(f"⚠ {msg}")
+    _scope = f" in {database}" if database else ""
+    if not scan_sql:
+        if all_checks and not checks:
+            empty_state("clean", f"No reference-gap checks configured for {database} "
+                                 "(pinned checks always show).")
+        else:
+            empty_state("needs_setup", "No valid checks parsed from ETL_REF_GAP_CHECKS.")
+        return
+    res = run(scan_sql, page=_PAGE, key=f"etl_ref_gaps_{database or 'ALL'}", tier="recent",
+              source="staging tables MINUS XLAT reference", max_rows=etl_control_sql.MAX_CODES)
+    n_checks = len(checks)
+    if res.ok and res.empty:
+        empty_state("clean", f"Every source code across {n_checks} check(s){_scope} has an "
+                             "XLAT translation — nothing to add before the next cycle.")
+    elif guard(res, "", setup_hint="The app role needs SELECT on the staging + XLAT tables "
+               "(GRANT SELECT ON <table> TO ROLE <app role>)."):
+        df = res.df.copy()
+        n_codes = len(df)
+        n_types = int(df["CHECK_NAME"].nunique()) if "CHECK_NAME" in df.columns else 0
+        st.error(f"🔴 {n_codes} new code(s) across {n_types} code type(s){_scope} have NO XLAT "
+                 "translation. Add the translation rows before the next cycle or the load "
+                 "will fail on the missing code.")
+        styled_table(df, height=280)
+        st.caption(f"Each row is a code present in the staging table but missing from {xlat}. "
+                   "This is the generalized form of the manual morning check, run live across "
+                   "every configured code type (pinned checks show under any Database scope). "
+                   "The daily PIPE_REF_GAP alert (once installed) pages on the same gap.")
+        result_caption(res)
+
+
+def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "") -> None:
     """Metadata-driven table freshness SLAs (config in PIPELINE_SLA_CONFIG).
 
     Owner ask 2026-08-17: the DB-grain diagnostics honor the company filter; the
     SLA-horizon config/forecast is account-wide (thresholds are account policy)."""
+    # First panel by design: a source code missing from XLAT hard-fails the nightly
+    # load, so this leads the Pipeline tab (config-gated; dormant until set up). Honors
+    # the scope-bar Database filter (pinned checks always show).
+    _reference_gap_panel(database)
     res = run(insights_sql.pipeline_sla_forecast(14), page=_PAGE, key="sla_status", tier="recent",
               source="ACCOUNT_USAGE.TABLE_DML_HISTORY x PIPELINE_SLA_STATUS")
     if not res.ok:
@@ -2644,10 +2707,11 @@ def render() -> None:
         },
         "Pipeline SLA": {
             "applies": (),
-            "partial": ("company",),
+            "partial": ("company", "database"),
             "note": "SLA horizons are account-wide policy; the file-load-failure panel "
-                    "narrows to the selected Company. (Volume/DT/row-volume panels remain "
-                    "account-wide — a follow-up will scope them.)",
+                    "narrows to the selected Company; the reference-data-gap panel narrows to "
+                    "the selected Database (pinned checks always show). (Volume/DT/row-volume "
+                    "panels remain account-wide — a follow-up will scope them.)",
         },
         "Release compare": {
             "applies": ("company",),
@@ -2677,7 +2741,7 @@ def render() -> None:
     elif section == "Change impact":
         _change_impact_tab(f["company"], f["database"], f["schema_contains"], is_operator)
     elif section == "Pipeline SLA":
-        _pipeline_sla_tab(is_operator, f["company"])
+        _pipeline_sla_tab(is_operator, f["company"], f["database"])
     elif section == "Emergency":
         # C23: deliberately amber — dangerous controls warrant standing caution.
         section_header("Emergency levers", "warn", "warehouse")

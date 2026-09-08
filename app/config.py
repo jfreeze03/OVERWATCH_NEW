@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.498.0"
+APP_VERSION = "4.499.0"
 
 # The build's load-bearing schema floor. main() reads the live max(SCHEMA_VERSION)
 # once per session and, if it is BELOW this, renders ONE actionable blocked state
@@ -90,6 +90,18 @@ DEFAULT_SETTINGS = {
     # MONTH_END:<n> | QUARTER_END:<n> | YYYY-MM-DD..YYYY-MM-DD:<label>.
     # Collapses (z<0) are never suppressed. Empty = no suppression.
     "EXPECTED_SPIKE_CALENDAR": "MONTH_END:1;QUARTER_END:2",
+    # ETL reference-data gap monitor (Operations ▸ Pipeline). The nightly load
+    # fails when a source system emits a code with no translation row, so this
+    # watches for staging codes missing from the XLAT reference table — the manual
+    # morning MINUS check, generalized across the whole code family. Both empty =
+    # dormant (the panel shows a setup hint); set on Admin ▸ SETTINGS:
+    #   ETL_REF_GAP_XLAT   the translation table FQN, e.g.
+    #     ALFA_EDW_PRD.DB_V_PROD_BASE.TERADATA_ETL_REF_XLAT
+    #   ETL_REF_GAP_CHECKS one check per entry (newline- or ';'-separated):
+    #     <src_idntftn_nm> | <staging_fqn> | <staging_code_col>
+    #     e.g. pc_uwissuetype.code | ALFA_EDW_PRD.DB_T_PROD_STAG.PC_UWISSUETYPE | CODE_STG
+    "ETL_REF_GAP_XLAT": "",
+    "ETL_REF_GAP_CHECKS": "",
     # Governance-drift weights (per-unit penalties; caps fixed in governance.py).
     "GOV_PTS_MFA_GAP": "5",
     "GOV_PTS_EXPIRED_CRED": "8",

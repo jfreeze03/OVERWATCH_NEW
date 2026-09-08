@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.499.0 - Reference-data gap monitor: the manual morning MINUS, watched (2026-09-08)
+
+ETL process-control, Phase 1. The nightly load hard-fails when a source system emits a code that has no
+translation row in the XLAT reference table, so the operator runs a manual `MINUS` every morning to catch
+new codes before the cycle breaks. That check is now a live panel — **Operations ▸ Pipeline ▸
+"Reference-data gaps"** — generalized across the whole XLAT code family and driven from SETTINGS config
+(adding a check is an Admin edit, not a code change).
+
+- **Config-driven, generalized.** A new `app/data/etl_control_sql.py` parses `ETL_REF_GAP_CHECKS` (one
+  `name | staging_table | code_column` per line; newline- or `;`-separated) and builds a UNION-ALL of
+  per-check `MINUS` subqueries against the reference table in `ETL_REF_GAP_XLAT`. The family name drives
+  both the label and the `SRC_IDNTFTN_NM` filter, so a check is three fields. Every table/column is
+  validated with `safe_identifier` — a malformed or hostile config row is dropped and reported, never
+  emitted as SQL. `ORDER BY` + `LIMIT` live in the SQL so the row cap truncates deterministically.
+- **Dormant until configured.** Both settings default empty; the panel shows a setup hint (the
+  "nothing is assumed" gating pattern) until `ETL_REF_GAP_XLAT` + `ETL_REF_GAP_CHECKS` are set on
+  Admin ▸ SETTINGS. When configured: a red banner + the new codes when there is a gap, a clean
+  "nothing to add" when there isn't, and a grant hint if the app role can't yet read the source tables.
+- **Next (Phase 1b, owner-applied migration):** the daily `PIPE_REF_GAP` alert (`ALERT_CONFIG` row +
+  `SP_ALERT_SCAN_DAILY` arm) so the same gap pages/emails on the nightly cadence, not only on page-open.
+
 ## 4.498.0 - Duration humanize reaches the bar charts too (2026-09-08)
 
 Closes the one duration display left raw after 4.497.0. `charts.bar_count` now takes a `unit`: a duration
