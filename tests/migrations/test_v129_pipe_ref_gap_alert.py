@@ -69,7 +69,7 @@ def test_v129_is_proc_and_seed_only_no_destructive_schema():
 
 def test_validate_and_docs_track_v129():
     val = _read("snowflake/validate.sql")
-    assert "V001..V129 applied" in val and "VERSION BETWEEN 1 AND 129) = 129" in val
+    assert "V001..V130 applied" in val and "VERSION BETWEEN 1 AND 130) = 130" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V129__pipe_ref_gap_alert.sql" in _read(rel)
 

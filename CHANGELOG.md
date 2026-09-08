@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.502.0 - Experiment settlement is proof-gated at the database (Codex R32) (2026-09-08)
+
+Codex review, Tier 2 (first migration). The Decision Studio UI already blocked saving an experiment as
+VERIFIED without a result note, positive verified savings, and a closed observation window — but the
+settlement **procedure** (`SP_VERIFY_EXPERIMENT`) validated only the status enum, existence, and
+request-key idempotency. So a VERIFIED call with an empty note and `$0` — the owner hand-calling it in
+Snowsight, the one path that bypasses the UI — would book a `$0`, no-evidence `SAVINGS_LEDGER` row.
+
+- **V130** re-derives `SP_VERIFY_EXPERIMENT` from V081 with proc-level proof enforcement: a VERIFIED
+  verdict now returns `BLOCKED: …` (before the transaction opens) if it lacks a result note or positive
+  verified savings, or if the observation window has not closed — **regardless of caller**. `REJECTED` /
+  `ROLLED_BACK` verdicts are unaffected; everything else in the proc is byte-identical, no schema change.
+  Owner applies after V129.
+
 ## 4.501.0 - Codex review, Tier 1: six trust + safety fixes (2026-09-08)
 
 Six small, high-value fixes from ground-truthing an external 50-rec review against the code (most of the

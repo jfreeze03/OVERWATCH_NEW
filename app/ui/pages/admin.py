@@ -493,6 +493,11 @@ _EXPECTED_MIGRATIONS = {
          "SP_ALERT_SCAN_DAILY re-derived from V111 with a 7th arm that CALLs the scan and raises one alert per "
          "code type missing from XLAT. Same per-arm EXCEPTION isolation (a missing grant never breaks the other "
          "rules); HIGH severity routes to the OVERWATCH_EMAIL path (JDees). Everything else in the proc byte-identical",
+    130: "Proc-level proof enforcement in SP_VERIFY_EXPERIMENT (R32): re-derived from V081 to REJECT a "
+         "VERIFIED settlement lacking a result note or positive verified savings, or whose observation "
+         "window has not closed, regardless of caller (the UI already gated these; this closes the "
+         "hand-called-Snowsight bypass that could book a $0 no-evidence SAVINGS_LEDGER row). Everything "
+         "else byte-identical, no schema change",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
