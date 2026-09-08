@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.500.0 - The reference-data gap now pages: PIPE_REF_GAP daily alert (2026-09-08)
+
+ETL process-control, Phase 1b. The 4.499.0 panel shows reference-data gaps live on page-open; this makes
+the same gap **page and email autonomously**, so a new source code with no XLAT translation row is caught
+before the nightly load fails — even on a day nobody opens the app.
+
+- **`PIPE_REF_GAP` alert rule** (ALERT_CONFIG, PIPELINE / HIGH / threshold 1). HIGH severity means the
+  existing (opt-in) `NATIVE_ALERT_NEW_EVENTS` email path delivers it to the configured `OVERWATCH_EMAIL`
+  recipient (**JDees@alfains.com**) — *not* the ETL team's `zzALFA_EIM` group — and it always reaches the
+  in-app Alerts feed.
+- **Isolated dynamic scan.** The config-driven, cross-database `MINUS` (which can't be a static-SQL arm
+  like the others) lives in a dedicated `SP_SCAN_REF_GAPS()` proc that parses the same SETTINGS config,
+  allowlist-validates every identifier, and writes the current gaps to a small `ETL_REF_GAP_RESULTS` table.
+  `SP_ALERT_SCAN_DAILY` gains a 7th arm that `CALL`s it and raises one alert per code type — **inside the
+  same per-arm exception guard as every other rule**, so a missing `SELECT` grant on the customer's
+  staging/XLAT tables logs to `APP_ERROR_LOG` and never breaks the other six alerts.
+- **Fails safe during grant setup.** The ref-gap arm logs any scan error to `APP_ERROR_LOG` but does
+  *not* count toward the 6-core-rule scan-health self-alert, so the out-of-band `SELECT` grants landing
+  after the migration can't make `OPS_SCAN_DEGRADED` fire every day in the meantime — and the alert
+  self-heals the moment the grants exist. The family name is allowlist-validated alongside the table/column
+  identifiers, matching the app's `sql_literal` hardening (no backslash-break or injection via config).
+- Owner applies **V129** after V128 (re-derives `SP_ALERT_SCAN_DAILY` from V111 — only the new arm is
+  inserted, everything else byte-identical). The app role still needs `SELECT` on the staging + XLAT
+  tables (granted separately) for the scan to read them.
+
 ## 4.499.0 - Reference-data gap monitor: the manual morning MINUS, watched (2026-09-08)
 
 ETL process-control, Phase 1. The nightly load hard-fails when a source system emits a code that has no

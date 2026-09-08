@@ -487,6 +487,11 @@ _EXPECTED_MIGRATIONS = {
          "the manual morning MINUS (staging codes missing from the XLAT translation table, which hard-fails the "
          "nightly load), now watched across the whole XLAT code family. Data-seed only (SETTINGS MERGE, WHEN NOT "
          "MATCHED); the app role needs SELECT on the staging + XLAT tables (granted separately) for the live read",
+    129: "PIPE_REF_GAP daily alert (ETL Phase 1b): ETL_REF_GAP_RESULTS table + SP_SCAN_REF_GAPS() (isolated "
+         "config-driven cross-DB MINUS scan) + a PIPE_REF_GAP ALERT_CONFIG rule (PIPELINE/HIGH) + "
+         "SP_ALERT_SCAN_DAILY re-derived from V111 with a 7th arm that CALLs the scan and raises one alert per "
+         "code type missing from XLAT. Same per-arm EXCEPTION isolation (a missing grant never breaks the other "
+         "rules); HIGH severity routes to the OVERWATCH_EMAIL path (JDees). Everything else in the proc byte-identical",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
