@@ -158,20 +158,19 @@ def test_stamps_precede_reruns_everywhere():
             assert "st.rerun()" not in before, f"{rel}: rerun before stamp near {m.group(0)}"
 
 
-def test_declare_incident_loop_stops_at_first_failure():
-    # site-audit fix: INCIDENT_MEMBERS must never run after a failed INCIDENTS
-    # insert (half-applied declare)
-    # the declare exec keys are now scoped per proposal (_exec_key = inc_prop_exec_{_pick})
+def test_declare_incident_is_one_atomic_call():
+    # R34 (V131): INCIDENT_MEMBERS can never run after a failed INCIDENTS insert because both now
+    # commit in ONE transaction inside SP_INCIDENT_DECLARE — the app runs a single atomic CALL, not
+    # a two-statement loop that could half-apply the declare (a titled, member-less incident).
     src = _src("app/ui/pages/control_room.py")
     idx = src.index("write_gate_open(_exec_key)")
     block = src[idx:idx + 2400]
     # INC-1: a family already open pre-empts the declare (honest no-op, no phantom "declared")
     assert "ALREADY_OPEN" in block
-    # within the declare loop, break precedes the loop's stamp_write, so a failed
-    # INCIDENTS insert never runs INCIDENT_MEMBERS
-    loop = block.split("for _stmt in _dec:", 1)[1]
-    assert "break" in loop
-    assert loop.index("break") < loop.index("stamp_write(_exec_key")
+    # the two-statement loop is gone; the declare is one atomic CALL to the proc
+    assert "for _stmt in _dec:" not in block
+    assert "execute_statement(_call" in block          # single atomic CALL in the declare branch
+    assert "_incident_declare_call_sql" in src          # the CALL builder targets SP_INCIDENT_DECLARE
 
 
 def test_ai_hypothesis_save_swallow_is_calm():

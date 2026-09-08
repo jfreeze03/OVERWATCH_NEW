@@ -188,6 +188,22 @@ def _incident_declare_sql(title: str, severity: str, company: str, proposal_key:
     return [incidents_insert, members_insert]
 
 
+def _incident_declare_call_sql(title: str, severity: str, company: str, proposal_key: str) -> str:
+    """R34: one ATOMIC declare via SP_INCIDENT_DECLARE (V131). The proc does the INCIDENTS +
+    INCIDENT_MEMBERS inserts in a single transaction (they commit together or not at all),
+    replacing the two separate execute_statement INSERTs that could half-apply a titled,
+    member-less incident on a mid-failure. The proc reproduces this file's family-already-open
+    guard + conditional entity filter server-side; ``_incident_declare_sql`` above stays as the
+    test-covered reference the proc mirrors. Params are bound (injection-safe)."""
+    from app.config import core_object
+    from app.core.sqlsafe import sql_literal
+    return (
+        f"CALL {core_object('SP_INCIDENT_DECLARE')}("
+        f"{sql_literal(str(title)[:300])}, {sql_literal(str(severity).upper())}, "
+        f"{sql_literal(str(company))}, {sql_literal(str(proposal_key))})"
+    )
+
+
 def _incident_close_sql(incident_id: str, kind: str, note: str) -> str:
     """Forward-only close: only OPEN/MITIGATED rows move; reopen is a NEW
     incident with REOPENED_FROM — history never rewrites."""
@@ -998,9 +1014,9 @@ def render() -> None:
                     f"Scope: {_entity_kind} {_entity_name} | confidence {_confidence}. "
                     f"Evidence: {_evidence} Human confirmation is still required."
                 )
-                _dec = _incident_declare_sql(str(_prow["SUGGESTED_TITLE"]), str(_prow["SEVERITY"]),
-                                             str(_prow["COMPANY"]), _pick)
-                st.code(";\n\n".join(_dec) + ";", language="sql")
+                _call = _incident_declare_call_sql(str(_prow["SUGGESTED_TITLE"]), str(_prow["SEVERITY"]),
+                                                   str(_prow["COMPANY"]), _pick)
+                st.code(_call + ";", language="sql")
                 # Scope the confirm/latch keys by the selected proposal so a typed DECLARE
                 # authorizes only THAT proposal — a fixed key let a confirmation typed for
                 # one proposal re-arm the button after switching to another (bug-hunt
@@ -1023,14 +1039,10 @@ def render() -> None:
                         notify(False, "No new incident — this family already has an open "
                                       "incident; its alerts stay linked there.")
                     else:
-                        _ok_all = True
-                        for _stmt in _dec:
-                            _ok, _m = execute_statement(_stmt + ";", page=_PAGE)
-                            _ok_all = _ok_all and _ok
-                            if not _ok:
-                                # Stop at the first failure — running INCIDENT_MEMBERS
-                                # after a failed INCIDENTS insert half-applies the declare.
-                                break
+                        # R34: one ATOMIC CALL (SP_INCIDENT_DECLARE, V131) instead of two separate
+                        # INSERTs — the incident and its member links commit together or not at all,
+                        # so a mid-failure can no longer leave a titled, member-less incident behind.
+                        _ok_all, _m = execute_statement(_call + ";", page=_PAGE)
                         notify(_ok_all, "Incident declared with members linked." if _ok_all
                                else "Declare failed — see the error log.")
                         if _ok_all:

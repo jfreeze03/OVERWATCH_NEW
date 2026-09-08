@@ -50,12 +50,14 @@ def test_declare_incidents_insert_guards_family_already_open_by_company():
     assert "AND EXISTS (SELECT 1 FROM" in stmts[1] and "i2.INCIDENT_ID =" in stmts[1]
 
 
-def test_declare_caller_iterates_the_list_and_scopes_keys_by_proposal():
+def test_declare_caller_runs_one_atomic_call_and_scopes_keys_by_proposal():
     body = _CR.split('elif section == "Incidents & triage":', 1)[1]
-    # F9: no split-on-';'
-    assert '_dec.split(";")' not in body
-    assert "for _stmt in _dec:" in body
-    # F8: confirm/latch keys carry the selected proposal so a typed DECLARE authorizes
+    # R34 (V131): the two-statement loop is replaced by ONE atomic CALL (SP_INCIDENT_DECLARE),
+    # so a mid-failure can't half-apply the declare (a titled, member-less incident).
+    assert "for _stmt in _dec:" not in body
+    assert "_incident_declare_call_sql" in body
+    assert "SP_INCIDENT_DECLARE" in _CR   # the CALL builder targets the atomic proc
+    # F8 preserved: confirm/latch keys carry the selected proposal so a typed DECLARE authorizes
     # only that proposal (mirrors the close flow's per-incident key scoping)
     assert '_exec_key = f"inc_prop_exec_{_pick}"' in body
     assert 'key="inc_prop_exec"' not in body

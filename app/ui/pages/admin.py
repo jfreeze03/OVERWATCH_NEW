@@ -498,6 +498,10 @@ _EXPECTED_MIGRATIONS = {
          "window has not closed, regardless of caller (the UI already gated these; this closes the "
          "hand-called-Snowsight bypass that could book a $0 no-evidence SAVINGS_LEDGER row). Everything "
          "else byte-identical, no schema change",
+    131: "Atomic manual incident declare (R34): SP_INCIDENT_DECLARE does the INCIDENTS + INCIDENT_MEMBERS "
+         "inserts in ONE transaction, replacing the app's two separate execute_statement INSERTs that "
+         "could half-apply a titled member-less incident on a mid-failure. Reproduces the family-open "
+         "guard + conditional entity filter server-side (static, no dynamic SQL); no schema change",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

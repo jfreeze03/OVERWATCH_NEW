@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.503.0 - Manual incident declare is atomic (Codex R34) (2026-09-08)
+
+The manual "Declare incident + link alerts" flow ran two separate `INSERT`s — the incident, then its
+member alerts — as two `execute_statement` round-trips. If the members insert failed (or the session
+dropped) after the incident insert committed, a **titled, member-less incident** was left behind.
+
+- **V131** adds `SP_INCIDENT_DECLARE`, which does both inserts in **one transaction** (they commit
+  together or not at all). It reproduces the app's declare logic server-side and injection-safely via
+  bound params: the family-already-open guard, the conditional entity filter (expressed statically as
+  `NOT :apply_entity OR <match>` — **no dynamic SQL**), the 48h open/ack member window, per-alert dedup,
+  and the "only link members if the incident was actually created" guard.
+- The app now runs **one `CALL`** instead of the two-statement loop (keeping its family-open pre-check for
+  the honest "already open" message, since `execute_statement` can't see the proc's return). The
+  test-covered `_incident_declare_sql` stays as the reference the proc mirrors. No schema change; owner
+  applies after V130.
+
 ## 4.502.0 - Experiment settlement is proof-gated at the database (Codex R32) (2026-09-08)
 
 Codex review, Tier 2 (first migration). The Decision Studio UI already blocked saving an experiment as
