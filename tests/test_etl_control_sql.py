@@ -249,6 +249,8 @@ def test_run_inventory_scan_basic() -> None:
     assert "GROUP BY RUN_ID" in sql
     assert "COUNT(DISTINCT TASK_NAME) AS TASKS" in sql
     assert "MIN(INSERT_TS) AS STARTED_AT" in sql and "MAX(INSERT_TS) AS LAST_SEEN_AT" in sql
+    # calculated runtime (Last Seen - Started); _SEC name humanizes to Hr/Min/Sec
+    assert "DATEDIFF('second', MIN(INSERT_TS), MAX(INSERT_TS)) AS RUNTIME_SEC" in sql
     assert "WHERE RUN_ID IS NOT NULL" in sql  # no phantom NULL-key run (matches siblings)
     assert "ORDER BY STARTED_AT DESC" in sql and "LIMIT" in sql
 
@@ -256,10 +258,34 @@ def test_run_inventory_scan_basic() -> None:
 def test_run_params_scan_latest_run_only() -> None:
     sql = etl.run_params_scan(_PARAMS)
     assert _PARAMS in sql
-    # latest run only (newest INSERT_TS), its params by scope then name
+    # no run_id -> latest run only (newest INSERT_TS), its params by scope then name
     assert "QUALIFY ROW_NUMBER() OVER (ORDER BY INSERT_TS DESC) = 1" in sql
     assert "p.PARAM_NAME, p.PARAM_VALUE, p.SCOPE_TYPE, p.SCOPE_NAME" in sql
     assert "ORDER BY p.SCOPE_TYPE, p.PARAM_NAME" in sql
+
+
+def test_run_params_scan_specific_run_binds_a_literal() -> None:
+    sql = etl.run_params_scan(_PARAMS, run_id="abc-123")
+    # a chosen run filters to that RUN_ID as an escaped literal, NOT the latest CTE
+    assert "WHERE p.RUN_ID = 'abc-123'" in sql
+    assert "QUALIFY" not in sql
+    # a hostile run id is escaped (single-quote doubled) so it stays one string literal
+    evil = etl.run_params_scan(_PARAMS, run_id="x' OR '1'='1")
+    assert "'x'' OR ''1''=''1'" in evil  # doubled quotes = no break-out of the literal
+
+
+def test_run_tasks_scan_basic_and_bound() -> None:
+    sql = etl.run_tasks_scan(_CTRL, "run-42")
+    assert _CTRL in sql
+    assert "WHERE s.RUN_ID = 'run-42'" in sql
+    assert "AS RUNTIME_SEC" in sql and "COALESCE(s.TASK_END_DTTM, CURRENT_TIMESTAMP())" in sql
+    assert "ORDER BY RUNTIME_SEC DESC" in sql
+    # fail-closed: bad FQN or empty run id -> no SQL
+    assert etl.run_tasks_scan("", "r") == ""
+    assert etl.run_tasks_scan(_CTRL, "") == ""
+    assert etl.run_tasks_scan("a b c", "r") == ""
+    # hostile run id escaped
+    assert "'r'' OR 1=1--'" in etl.run_tasks_scan(_CTRL, "r' OR 1=1--")
 
 
 def test_inventory_and_params_fail_closed() -> None:
@@ -270,11 +296,13 @@ def test_inventory_and_params_fail_closed() -> None:
         assert fn("a b c") == ""
 
 
-def test_inventory_and_params_parse() -> None:
+def test_inventory_params_tasks_parse() -> None:
     import pytest
     sqlglot = pytest.importorskip("sqlglot")
     sqlglot.parse(etl.run_inventory_scan(_RUNID), dialect="snowflake")
     sqlglot.parse(etl.run_params_scan(_PARAMS), dialect="snowflake")
+    sqlglot.parse(etl.run_params_scan(_PARAMS, run_id="abc"), dialect="snowflake")
+    sqlglot.parse(etl.run_tasks_scan(_CTRL, "abc"), dialect="snowflake")
 
 
 # --- recon_errors_scan (Phase 3: RECON_MTRC_ERROR) ---------------------------

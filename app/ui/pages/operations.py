@@ -1134,18 +1134,18 @@ def _workflow_drift_panel() -> None:
 
 
 def _run_inventory_panel() -> None:
-    """Recent ETL run inventory (CONTROL_RUN_ID) + the latest run's parameters (CONTROL_PARAMS).
+    """Recent ETL run inventory (CONTROL_RUN_ID) + a run picker that drills into any run's
+    tasks (CONTROL_STATUS) and parameters (CONTROL_PARAMS).
 
-    The registry side of the Informatica cycle: which runs happened, when, and what
-    parameters they executed with (RUN_DATE, thresholds, load indicators). Two separate
-    config keys / grants, each independently config-gated + fail-silent — the inventory
-    shows whatever is configured; the parameters sit in an expander so the ~100 knobs of a
-    run don't dominate the tab."""
+    The registry side of the Informatica cycle: which runs happened, how long they ran, and
+    — for a chosen run — its tasks and the parameters it executed with (RUN_DATE, thresholds,
+    load indicators). Each source is independently config-gated + fail-silent."""
     section_header("Run inventory & parameters — recent ETL runs",
                    "warn", "pipeline", anchor="ops-run-inventory")
     settings = load_settings(_PAGE)
     run_fqn = str(settings.get("ETL_CONTROL_RUN_ID_FQN") or "").strip()
     params_fqn = str(settings.get("ETL_CONTROL_PARAMS_FQN") or "").strip()
+    status_fqn = str(settings.get("ETL_CONTROL_STATUS_FQN") or "").strip()
     if not run_fqn and not params_fqn:
         empty_state("needs_setup",
                     "Not configured — set ETL_CONTROL_RUN_ID_FQN and ETL_CONTROL_PARAMS_FQN on "
@@ -1154,6 +1154,9 @@ def _run_inventory_panel() -> None:
         return
     _hint = ("The app role needs SELECT on the control table "
              "(GRANT SELECT ON <table> TO ROLE <app role>).")
+    # 1) the inventory table (one row per run, with a calculated Runtime); collect the run
+    #    ids so the picker below can drill into any of them.
+    _run_labels: dict[str, str] = {}
     if run_fqn:
         inv_sql = etl_control_sql.run_inventory_scan(run_fqn)
         if not inv_sql:
@@ -1165,9 +1168,45 @@ def _run_inventory_panel() -> None:
             if guard(res, "No ETL runs recorded yet.", setup_hint=_hint):
                 styled_table(res.df, height=300)
                 st.caption("Recent ETL runs from CONTROL_RUN_ID — one row per run (workflow(s), "
-                           "distinct task count, first/last seen), newest first.")
+                           "distinct task count, first/last seen, and Runtime = Last Seen − Started), "
+                           "newest first. RUNTIME_SEC humanizes to Hr/Min/Sec.")
                 result_caption(res)
-    if params_fqn:
+                if "RUN_ID" in res.df.columns:
+                    for _, _r in res.df.iterrows():
+                        _rid = str(_r["RUN_ID"])
+                        _wf = str(_r.get("WORKFLOWS", "") or "")[:44]
+                        _run_labels[_rid] = f"{_r.get('STARTED_AT', '')} · {_wf} · {_rid[:8]}"
+    # 2) run picker → drill into the chosen run's tasks (CONTROL_STATUS) + parameters
+    #    (CONTROL_PARAMS). Defaults to the latest run (the inventory is newest-first).
+    if _run_labels and (status_fqn or params_fqn):
+        _ids = list(_run_labels)
+        picked = st.selectbox("Inspect a run", _ids, index=0,
+                              format_func=lambda rid: _run_labels.get(rid, rid), key="etl_run_pick")
+        if status_fqn:
+            tasks_sql = etl_control_sql.run_tasks_scan(status_fqn, picked)
+            if tasks_sql:
+                tres = run(tasks_sql, page=_PAGE, key=f"etl_run_tasks_{picked}", tier="recent",
+                           source="CONTROL_STATUS (chosen run)", max_rows=etl_control_sql.MAX_TASKS)
+                if guard(tres, "No tasks recorded for the chosen run.", setup_hint=_hint):
+                    st.markdown(f"**Tasks in this run** — slowest first · `{picked}`")
+                    styled_table(tres.df, height=320)
+                    st.caption("Each task in the chosen run (workflow, status, start/end, runtime) "
+                               "from CONTROL_STATUS. RUNTIME_SEC humanizes to Hr/Min/Sec.")
+                    result_caption(tres)
+        if params_fqn:
+            params_sql = etl_control_sql.run_params_scan(params_fqn, run_id=picked)
+            if params_sql:
+                with st.expander("Parameters for this run"):
+                    pres = run(params_sql, page=_PAGE, key=f"etl_run_params_{picked}", tier="recent",
+                               source="CONTROL_PARAMS (chosen run)", max_rows=etl_control_sql.MAX_PARAMS)
+                    if guard(pres, "No parameters recorded for the chosen run.", setup_hint=_hint):
+                        styled_table(pres.df, height=340)
+                        st.caption("The parameters this run executed with (RUN_DATE, thresholds, "
+                                   "load indicators…), ordered by scope then name. From CONTROL_PARAMS.")
+                        result_caption(pres)
+    elif params_fqn and not _run_labels:
+        # No run inventory to pick from (CONTROL_RUN_ID unconfigured/empty/invalid) — fall back
+        # to the latest run's parameters so they are still reachable on their own.
         params_sql = etl_control_sql.run_params_scan(params_fqn)
         if not params_sql:
             empty_state("needs_setup", "ETL_CONTROL_PARAMS_FQN is not a valid table name.")
@@ -1177,8 +1216,8 @@ def _run_inventory_panel() -> None:
                            source="CONTROL_PARAMS (latest run)", max_rows=etl_control_sql.MAX_PARAMS)
                 if guard(pres, "No parameters recorded for the latest run.", setup_hint=_hint):
                     styled_table(pres.df, height=340)
-                    st.caption("The parameters the latest run executed with (RUN_DATE, thresholds, "
-                               "load indicators…), ordered by scope then name. From CONTROL_PARAMS.")
+                    st.caption("The parameters the latest run executed with, ordered by scope then "
+                               "name. From CONTROL_PARAMS.")
                     result_caption(pres)
 
 

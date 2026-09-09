@@ -1,5 +1,20 @@
 # Changelog
 
+## 4.516.0 - ETL run inventory: calculated runtime + a run picker that drills into tasks (2026-09-09)
+
+The run inventory panel gains the three things the live view was missing:
+
+- **A calculated Runtime column** — `RUNTIME_SEC` = Last Seen − Started per run (from `CONTROL_RUN_ID`),
+  humanized to Hr/Min/Sec like every other duration.
+- **A run picker** — a selectbox of recent runs (defaulting to the latest); the parameters expander now
+  shows the *chosen* run's parameters, not just the latest.
+- **Task drill-down** — picking a run lists that run's tasks from `CONTROL_STATUS` (workflow, status,
+  start/end, runtime, slowest first), so any historical run is inspectable, not just the latest.
+
+Pure app-code: builders `run_tasks_scan` (new) and `run_params_scan` (now takes a `run_id`, bound as an
+escaped SQL literal — a run id is data, not an identifier); reuses the existing `ETL_CONTROL_*` config
+and grants, so **no migration or new grant** is required.
+
 ## 4.515.0 - Recon alert: tunable window + null-metric hardening (2026-09-09)
 
 Adversarial-verify follow-up to 4.514.0 (two MEDIUM findings, both fixed) — V137 re-generated:

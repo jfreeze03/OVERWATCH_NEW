@@ -305,9 +305,10 @@ MAX_PARAMS = 2000   # one run's parameters (the global + per-session knobs)
 def run_inventory_scan(run_id_fqn: object, *, max_runs: int = MAX_RUNS) -> str:
     """Recent ETL runs from the Informatica CONTROL_RUN_ID registry.
 
-    One row per RUN_ID: the workflow(s) it registered, the distinct task count, and the
-    first/last INSERT_TS seen for the run (STARTED_AT / LAST_SEEN_AT). Newest run first.
-    Fail-closed on a bad FQN. Pure: bounded output, no Streamlit."""
+    One row per RUN_ID: the workflow(s) it registered, the distinct task count, the
+    first/last INSERT_TS seen for the run (STARTED_AT / LAST_SEEN_AT), and RUNTIME_SEC =
+    the span between them (Last Seen − Started, humanizes to Hr/Min/Sec). Newest run
+    first. Fail-closed on a bad FQN. Pure: bounded output, no Streamlit."""
     from app.core.sqlsafe import safe_identifier
 
     fqn = str(run_id_fqn or "").strip()
@@ -322,7 +323,8 @@ def run_inventory_scan(run_id_fqn: object, *, max_runs: int = MAX_RUNS) -> str:
         "       LISTAGG(DISTINCT WORKFLOW_NAME, ', ') AS WORKFLOWS,\n"
         "       COUNT(DISTINCT TASK_NAME) AS TASKS,\n"
         "       MIN(INSERT_TS) AS STARTED_AT,\n"
-        "       MAX(INSERT_TS) AS LAST_SEEN_AT\n"
+        "       MAX(INSERT_TS) AS LAST_SEEN_AT,\n"
+        "       DATEDIFF('second', MIN(INSERT_TS), MAX(INSERT_TS)) AS RUNTIME_SEC\n"
         f"  FROM {tbl}\n"
         "  WHERE RUN_ID IS NOT NULL\n"  # no phantom NULL-key run row (matches sibling builders)
         "  GROUP BY RUN_ID\n"
@@ -331,13 +333,15 @@ def run_inventory_scan(run_id_fqn: object, *, max_runs: int = MAX_RUNS) -> str:
     )
 
 
-def run_params_scan(params_fqn: object, *, max_params: int = MAX_PARAMS) -> str:
-    """Parameters the LATEST ETL run executed with, from CONTROL_PARAMS.
+def run_params_scan(params_fqn: object, *, run_id: object = "", max_params: int = MAX_PARAMS) -> str:
+    """Parameters an ETL run executed with, from CONTROL_PARAMS.
 
-    Isolates the newest RUN_ID (max INSERT_TS) and returns its parameters ordered by
-    scope then name — the run-level knobs (RUN_DATE, thresholds, load indicators) and
-    the per-session ones. Fail-closed on a bad FQN. Pure: bounded output, no Streamlit."""
-    from app.core.sqlsafe import safe_identifier
+    With ``run_id`` set, returns that specific run's parameters (the value is bound as a
+    SQL literal, escaped — a run id is data, not an identifier); otherwise isolates the
+    newest RUN_ID (max INSERT_TS). Ordered by scope then name — the run-level knobs
+    (RUN_DATE, thresholds, load indicators) and the per-session ones. Fail-closed on a
+    bad FQN. Pure: bounded output, no Streamlit."""
+    from app.core.sqlsafe import safe_identifier, sql_literal
 
     fqn = str(params_fqn or "").strip()
     if not fqn:
@@ -346,16 +350,51 @@ def run_params_scan(params_fqn: object, *, max_params: int = MAX_PARAMS) -> str:
         tbl = safe_identifier(fqn, allow_qualified=True)
     except ValueError:
         return ""
+    _rid = str(run_id or "").strip()
+    if _rid:
+        where = f"  WHERE p.RUN_ID = {sql_literal(_rid)}\n"
+    else:
+        where = (
+            "  WHERE p.RUN_ID = (\n"
+            f"    SELECT RUN_ID FROM {tbl}\n"
+            "    WHERE INSERT_TS IS NOT NULL AND RUN_ID IS NOT NULL\n"
+            "    QUALIFY ROW_NUMBER() OVER (ORDER BY INSERT_TS DESC) = 1)\n"
+        )
     return (
-        "WITH latest AS (\n"
-        f"  SELECT RUN_ID FROM {tbl}\n"
-        "  WHERE INSERT_TS IS NOT NULL AND RUN_ID IS NOT NULL\n"
-        "  QUALIFY ROW_NUMBER() OVER (ORDER BY INSERT_TS DESC) = 1\n"
-        ")\n"
         "SELECT p.PARAM_NAME, p.PARAM_VALUE, p.SCOPE_TYPE, p.SCOPE_NAME\n"
-        f"  FROM {tbl} p JOIN latest l ON p.RUN_ID = l.RUN_ID\n"
+        f"  FROM {tbl} p\n"
+        f"{where}"
         "  ORDER BY p.SCOPE_TYPE, p.PARAM_NAME\n"
         f"  LIMIT {int(max_params)}"
+    )
+
+
+def run_tasks_scan(control_fqn: object, run_id: object, *, max_tasks: int = MAX_TASKS) -> str:
+    """Per-task runtimes for ONE chosen ETL run, from the CONTROL_STATUS table.
+
+    The drill-down behind the run picker: given a RUN_ID (bound as an escaped SQL literal
+    — a run id is data, not an identifier), returns that run's tasks with WORKFLOW_NAME,
+    TASK_NAME, TASK_STATUS, the start/end window, and RUNTIME_SEC (end − start; a running
+    task measured to now), slowest first. Fail-closed on a bad FQN or an empty run id."""
+    from app.core.sqlsafe import safe_identifier, sql_literal
+
+    fqn = str(control_fqn or "").strip()
+    _rid = str(run_id or "").strip()
+    if not fqn or not _rid:
+        return ""
+    try:
+        tbl = safe_identifier(fqn, allow_qualified=True)
+    except ValueError:
+        return ""
+    return (
+        "SELECT s.WORKFLOW_NAME, s.TASK_NAME, s.TASK_STATUS,\n"
+        "       s.TASK_START_DTTM, s.TASK_END_DTTM,\n"
+        "       DATEDIFF('second', s.TASK_START_DTTM,\n"
+        "                COALESCE(s.TASK_END_DTTM, CURRENT_TIMESTAMP())) AS RUNTIME_SEC\n"
+        f"  FROM {tbl} s\n"
+        f"  WHERE s.RUN_ID = {sql_literal(_rid)}\n"
+        "  ORDER BY RUNTIME_SEC DESC, s.TASK_START_DTTM\n"
+        f"  LIMIT {int(max_tasks)}"
     )
 
 
