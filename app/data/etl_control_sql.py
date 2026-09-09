@@ -193,11 +193,9 @@ def _window_clause(days: object, col: str = "TASK_START_DTTM", indent: str = "  
 
     ``days <= 0`` (the default / 'all') returns ``""`` — no window filter — so callers
     that don't scope a window behave exactly as before. Shared by the runtimes, list, and
-    drift readers so the scope bar means the same thing everywhere."""
-    try:
-        n = int(days or 0)
-    except (TypeError, ValueError):
-        n = 0
+    drift readers so the scope bar means the same thing everywhere. A non-numeric ``days``
+    (None, a stray string) is treated as unscoped, never a crash."""
+    n = int(days) if isinstance(days, (int, float)) else 0
     if n <= 0:
         return ""
     return f"{indent}AND {col} >= DATEADD('day', -{n}, CURRENT_TIMESTAMP())\n"
