@@ -1154,25 +1154,32 @@ def _run_inventory_panel() -> None:
         return
     _hint = ("The app role needs SELECT on the control table "
              "(GRANT SELECT ON <table> TO ROLE <app role>).")
-    inv_sql = etl_control_sql.run_inventory_scan(run_fqn) if run_fqn else ""
-    if inv_sql:
-        res = run(inv_sql, page=_PAGE, key="etl_run_inventory", tier="recent",
-                  source="CONTROL_RUN_ID inventory", max_rows=etl_control_sql.MAX_RUNS)
-        if guard(res, "No ETL runs recorded yet.", setup_hint=_hint):
-            styled_table(res.df, height=300)
-            st.caption("Recent ETL runs from CONTROL_RUN_ID — one row per run (workflow(s), distinct "
-                       "task count, first/last seen), newest first.")
-            result_caption(res)
-    params_sql = etl_control_sql.run_params_scan(params_fqn) if params_fqn else ""
-    if params_sql:
-        with st.expander("Parameters for the latest run"):
-            pres = run(params_sql, page=_PAGE, key="etl_run_params", tier="recent",
-                       source="CONTROL_PARAMS (latest run)", max_rows=etl_control_sql.MAX_PARAMS)
-            if guard(pres, "No parameters recorded for the latest run.", setup_hint=_hint):
-                styled_table(pres.df, height=340)
-                st.caption("The parameters the latest run executed with (RUN_DATE, thresholds, load "
-                           "indicators…), ordered by scope then name. From CONTROL_PARAMS.")
-                result_caption(pres)
+    if run_fqn:
+        inv_sql = etl_control_sql.run_inventory_scan(run_fqn)
+        if not inv_sql:
+            # set-but-invalid must surface, not vanish (mirrors the drift panel)
+            empty_state("needs_setup", "ETL_CONTROL_RUN_ID_FQN is not a valid table name.")
+        else:
+            res = run(inv_sql, page=_PAGE, key="etl_run_inventory", tier="recent",
+                      source="CONTROL_RUN_ID inventory", max_rows=etl_control_sql.MAX_RUNS)
+            if guard(res, "No ETL runs recorded yet.", setup_hint=_hint):
+                styled_table(res.df, height=300)
+                st.caption("Recent ETL runs from CONTROL_RUN_ID — one row per run (workflow(s), "
+                           "distinct task count, first/last seen), newest first.")
+                result_caption(res)
+    if params_fqn:
+        params_sql = etl_control_sql.run_params_scan(params_fqn)
+        if not params_sql:
+            empty_state("needs_setup", "ETL_CONTROL_PARAMS_FQN is not a valid table name.")
+        else:
+            with st.expander("Parameters for the latest run"):
+                pres = run(params_sql, page=_PAGE, key="etl_run_params", tier="recent",
+                           source="CONTROL_PARAMS (latest run)", max_rows=etl_control_sql.MAX_PARAMS)
+                if guard(pres, "No parameters recorded for the latest run.", setup_hint=_hint):
+                    styled_table(pres.df, height=340)
+                    st.caption("The parameters the latest run executed with (RUN_DATE, thresholds, "
+                               "load indicators…), ordered by scope then name. From CONTROL_PARAMS.")
+                    result_caption(pres)
 
 
 def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "") -> None:

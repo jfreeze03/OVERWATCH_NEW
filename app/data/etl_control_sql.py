@@ -324,6 +324,7 @@ def run_inventory_scan(run_id_fqn: object, *, max_runs: int = MAX_RUNS) -> str:
         "       MIN(INSERT_TS) AS STARTED_AT,\n"
         "       MAX(INSERT_TS) AS LAST_SEEN_AT\n"
         f"  FROM {tbl}\n"
+        "  WHERE RUN_ID IS NOT NULL\n"  # no phantom NULL-key run row (matches sibling builders)
         "  GROUP BY RUN_ID\n"
         "  ORDER BY STARTED_AT DESC\n"
         f"  LIMIT {int(max_runs)}"

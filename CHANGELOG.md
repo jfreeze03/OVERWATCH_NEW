@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.512.0 - Run-inventory panel surfaces a bad FQN instead of vanishing (2026-09-09)
+
+Adversarial-verify follow-up to 4.511.0 (one LOW finding, fixed). The "Run inventory & parameters"
+panel only showed its "Not configured" state when *both* FQN keys were empty — so a **set-but-invalid**
+FQN (a typo) made that source silently disappear with no feedback, unlike the sibling drift panel which
+says "not a valid table name." Each source now surfaces that hint when its configured FQN is malformed.
+Also added `WHERE RUN_ID IS NOT NULL` to `run_inventory_scan` so an orphan NULL-key registry row can't
+render as a phantom run (matching the other builders); the verify otherwise refuted it.
+
 ## 4.511.0 - ETL run inventory & parameters from CONTROL_RUN_ID / CONTROL_PARAMS (2026-09-09)
 
 The registry side of the Informatica cycle: which runs happened, when, and what parameters they

@@ -249,6 +249,7 @@ def test_run_inventory_scan_basic() -> None:
     assert "GROUP BY RUN_ID" in sql
     assert "COUNT(DISTINCT TASK_NAME) AS TASKS" in sql
     assert "MIN(INSERT_TS) AS STARTED_AT" in sql and "MAX(INSERT_TS) AS LAST_SEEN_AT" in sql
+    assert "WHERE RUN_ID IS NOT NULL" in sql  # no phantom NULL-key run (matches siblings)
     assert "ORDER BY STARTED_AT DESC" in sql and "LIMIT" in sql
 
 

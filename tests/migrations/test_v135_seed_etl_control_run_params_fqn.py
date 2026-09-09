@@ -43,6 +43,9 @@ def test_inventory_wired_across_config_sites():
     assert hasattr(etl_control_sql, "run_params_scan")
     ops = _read("app/ui/pages/operations.py")
     assert "_run_inventory_panel" in ops
+    # a set-but-invalid FQN must surface, not silently vanish (verify LOW fix)
+    assert "ETL_CONTROL_RUN_ID_FQN is not a valid table name." in ops
+    assert "ETL_CONTROL_PARAMS_FQN is not a valid table name." in ops
 
 
 def test_validate_and_docs_track_v135():
