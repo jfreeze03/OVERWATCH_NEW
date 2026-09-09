@@ -1068,13 +1068,16 @@ def _workflow_runtimes_panel() -> None:
         n_fail = int(_status.isin(_FAILED).sum()) if _status is not None else 0
         n_running = int(_status.isin(_RUNNING).sum()) if _status is not None else 0
         _wf = ", ".join(sorted(df["WORKFLOW_NAME"].astype(str).unique())[:3]) if "WORKFLOW_NAME" in df.columns else ""
-        # Total wall-clock = span of the run (max end − min start), NOT the sum of
-        # RUNTIME_SEC: tasks overlap, so summing would over-count. Guarded — a
-        # non-datetime frame (unexpected driver typing) just drops the headline.
+        # Total wall-clock = the run's span (NOT the sum of RUNTIME_SEC — tasks overlap).
+        # Derive each task's effective end from start + RUNTIME_SEC (already coalesced to
+        # now in SQL for a running task) rather than max(TASK_END_DTTM): a NaT end would be
+        # skipped by max() and understate the span BELOW a single running row's shown
+        # runtime. Guarded — a non-datetime frame just drops the headline.
         _span = ""
         try:
-            _span_sec = (df["TASK_END_DTTM"].max() - df["TASK_START_DTTM"].min()).total_seconds()
-            if _span_sec and _span_sec > 0:
+            _rel_start = (df["TASK_START_DTTM"] - df["TASK_START_DTTM"].min()).dt.total_seconds()
+            _span_sec = float((_rel_start + df["RUNTIME_SEC"]).max())
+            if _span_sec > 0:
                 _span = f" · wall-clock {humanize_duration(_span_sec, 's')}"
         except Exception:  # noqa: BLE001 - a headline extra must never break the panel
             _span = ""

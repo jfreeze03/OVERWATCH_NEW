@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.508.0 - Workflow-runtimes wall-clock span is consistent with a running task (2026-09-09)
+
+Adversarial-verify follow-up to 4.507.0. The "Workflow runtimes" panel's headline wall-clock span
+was computed as `max(TASK_END_DTTM) − min(TASK_START_DTTM)`, but a still-running task has a NULL end
+that `Series.max()` skips — so for a mid-cycle run the span was measured only to the last *completed*
+task's end and could read **smaller** than a single running row's `RUNTIME_SEC` (which the SQL
+coalesces to now), the exact hung-task case the panel exists to surface. The span now derives from
+each task's `start + RUNTIME_SEC`, so it matches the to-now runtimes shown in the table.
+
 ## 4.507.0 - ETL workflow runtimes from Informatica CONTROL_STATUS (ETL Phase 2) (2026-09-09)
 
 Alfa's nightly cycle is Informatica-orchestrated stored-proc `CALL`s, which are **invisible to
