@@ -1,11 +1,11 @@
 -- =====================================================================
 --  OVERWATCH -- RUN_NEXT.sql   (owner-applied Snowsight migration handoff)
---  Schema catch-up V125 -> V135  +  ETL Phase 2 grants.
+--  Schema catch-up V125 -> V136  +  ETL Phase 1-3 grants.
 --
 --  WHAT THIS DOES
---    Brings DBA_MAINT_DB.OVERWATCH up to schema v135 (applies V125..V135 in
---    order) and grants the app role read access to the three Informatica
---    CONTROL_* tables, so the ETL panels + Brief signals go live.
+--    Brings DBA_MAINT_DB.OVERWATCH up to schema v136 (applies V125..V136 in
+--    order) and grants the app role read access to the Informatica control +
+--    reconciliation tables, so the ETL panels + Brief signals go live.
 --
 --  CONTENTS (in order)
 --    V125 MFA-gap posture COALESCE (security)            [proc re-derive]
@@ -19,7 +19,8 @@
 --    V133 DQ_SCHEMA_DRIFT schema-drift monitor           [table + proc + rule + arm]
 --    V134 seed ETL CONTROL_STATUS config (Phase 2)       [data seed]
 --    V135 seed ETL CONTROL_RUN_ID / CONTROL_PARAMS config[data seed]
---    + ETL Phase 2 GRANT block (run AS ACCOUNTADMIN) at the very bottom.
+--    V136 seed ETL RECON_MTRC_ERROR config (Phase 3)     [data seed]
+--    + ETL GRANT block (run AS ACCOUNTADMIN) at the very bottom.
 --
 --  SAFE TO RE-RUN. Every migration is guarded (it RAISEs only if a PRIOR
 --  migration is missing) and idempotent: procs are CREATE OR REPLACE, the
@@ -32,10 +33,11 @@
 --    2) Run All. The preamble sets the role to SNOW_ACCOUNTADMINS (the app owner)
 --       so every NEW object is owned by the app role -- required for the
 --       owner's-rights app to read it.
---    3) Confirm SCHEMA_VERSION_BEFORE >= 124, SCHEMA_VERSION_AFTER = 135, and the
---       V001..V135 completeness check reads OK.
+--    3) Confirm SCHEMA_VERSION_BEFORE >= 124, SCHEMA_VERSION_AFTER = 136, and the
+--       V001..V136 completeness check reads OK.
 --    4) The GRANT block at the bottom switches to ACCOUNTADMIN and grants the app
---       role SELECT on the three ALFA_EDW_PRD.PUBLIC.CONTROL_* tables. Then REDEPLOY.
+--       role SELECT on the CONTROL_* tables (PUBLIC) + RECON_MTRC_ERROR
+--       (DB_T_PROD_CORE). Then REDEPLOY the app.
 --    5) Paste the RESULT blocks back into the chat.
 -- =====================================================================
 
@@ -4916,34 +4918,94 @@ SELECT 135 AS VERSION,
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 135);
 
 
+-- ================================================================
+-- APPLY V136__seed_etl_recon_error_fqn.sql
+-- ================================================================
+
+-- V136__seed_etl_recon_error_fqn.sql
+--
+-- Seed the ETL process-control Phase 3 config (Operations ▸ Pipeline ▸ "Reconciliation
+-- errors"). The nightly cycle reconciles each metric's SOURCE_LAYER against its
+-- TARGET_LAYER and logs a RECON_MTRC_ERROR row when they don't tie out (over the recon
+-- threshold). This panel surfaces recent reconciliation errors so a source-vs-target
+-- mismatch is caught before the numbers are trusted downstream:
+--
+--   ETL_RECON_ERROR_FQN  the RECON_MTRC_ERROR table FQN.
+--
+-- Seeded to ALFA_EDW_PRD.DB_T_PROD_CORE.RECON_MTRC_ERROR (owner ask 2026-09-09: focus on
+-- the PRD database). NOTE the recon table lives in DB_T_PROD_CORE, NOT the PUBLIC schema
+-- the CONTROL_* tables use — so it needs its own SELECT grant. The key is in
+-- DEFAULT_SETTINGS ('' code default) and auto-appears in the Admin editor. WHEN NOT
+-- MATCHED only (never overwrites an operator's edited value), mirroring V135/V134/V093.
+--
+-- GRANTS: the app role needs SELECT on the recon table for the live panel to read it
+-- (GRANT SELECT ON TABLE ALFA_EDW_PRD.DB_T_PROD_CORE.RECON_MTRC_ERROR TO ROLE <app role>;,
+-- plus USAGE on the DB_T_PROD_CORE schema). Until granted, the panel fails closed with a
+-- grant hint — no error. Grants are outside DBA_MAINT_DB and applied separately.
+--
+-- Data-seed only: no schema change, no proc/view/task, no reload. Owner applies in
+-- Snowsight after V135. The app never runs this migration.
+
+EXECUTE IMMEDIATE
+$$
+DECLARE
+    v NUMBER;
+    not_ready EXCEPTION (-20136, 'V136 requires V135 first - apply migrations in order.');
+BEGIN
+    SELECT MAX(VERSION) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 135) THEN
+        RAISE not_ready;
+    END IF;
+END;
+$$;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SETTINGS t
+USING (
+    SELECT * FROM VALUES
+        ('ETL_RECON_ERROR_FQN', 'ALFA_EDW_PRD.DB_T_PROD_CORE.RECON_MTRC_ERROR')
+    AS s(KEY, VALUE)
+) s
+ON t.KEY = s.KEY
+WHEN NOT MATCHED THEN INSERT (KEY, VALUE) VALUES (s.KEY, s.VALUE);
+
+INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
+SELECT 136 AS VERSION,
+       'Seed the ETL process-control Phase 3 config (ETL_RECON_ERROR_FQN) to ALFA_EDW_PRD.DB_T_PROD_CORE.RECON_MTRC_ERROR, so Operations Pipeline Reconciliation errors surfaces recent source-vs-target layer mismatches the nightly recon logged. WHEN NOT MATCHED only. Data-seed only, no schema change. App role needs SELECT on the recon table (granted separately, DB_T_PROD_CORE schema) for the live read.' AS DESCRIPTION
+WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 136);
+
+
 -- =====================================================================
 -- POST-FLIGHT
 -- =====================================================================
--- RESULT: expect SCHEMA_VERSION_AFTER = 135
+-- RESULT: expect SCHEMA_VERSION_AFTER = 136
 SELECT MAX(VERSION) AS SCHEMA_VERSION_AFTER FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
 
--- RESULT: expect COMPLETE = 'OK - V001..V135 all present'
+-- RESULT: expect COMPLETE = 'OK - V001..V136 all present'
 SELECT IFF(
          (SELECT COUNT(DISTINCT VERSION) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION
-           WHERE VERSION BETWEEN 1 AND 135) = 135,
-         'OK - V001..V135 all present',
-         'MISSING a version below 135 - check the run log above') AS COMPLETE;
+           WHERE VERSION BETWEEN 1 AND 136) = 136,
+         'OK - V001..V136 all present',
+         'MISSING a version below 136 - check the run log above') AS COMPLETE;
 
 -- =====================================================================
--- ETL PHASE 2 GRANTS  --  run AS ACCOUNTADMIN (or a role with grant authority on
+-- ETL GRANTS  --  run AS ACCOUNTADMIN (or a role with grant authority on
 -- ALFA_EDW_PRD). These grants live OUTSIDE DBA_MAINT_DB, so they are NOT in a
 -- migration. The app runs owner's-rights AS SNOW_ACCOUNTADMINS, so that role
 -- (the app owner) is what needs SELECT on the source tables it reads.
 -- =====================================================================
 USE ROLE ACCOUNTADMIN;
 
--- The Informatica control tables feed: "Workflow runtimes", "Runtime drift",
--- "Run inventory & parameters" (Operations > Pipeline) + the Brief failed-task signal.
-GRANT USAGE  ON DATABASE ALFA_EDW_PRD                     TO ROLE SNOW_ACCOUNTADMINS;
-GRANT USAGE  ON SCHEMA   ALFA_EDW_PRD.PUBLIC              TO ROLE SNOW_ACCOUNTADMINS;
+-- Phase 2 control tables (PUBLIC): Workflow runtimes, Runtime drift, Run inventory
+-- & parameters (Operations > Pipeline) + the Brief failed-task signal.
+GRANT USAGE  ON DATABASE ALFA_EDW_PRD                        TO ROLE SNOW_ACCOUNTADMINS;
+GRANT USAGE  ON SCHEMA   ALFA_EDW_PRD.PUBLIC                 TO ROLE SNOW_ACCOUNTADMINS;
 GRANT SELECT ON TABLE    ALFA_EDW_PRD.PUBLIC.CONTROL_STATUS  TO ROLE SNOW_ACCOUNTADMINS;
 GRANT SELECT ON TABLE    ALFA_EDW_PRD.PUBLIC.CONTROL_RUN_ID  TO ROLE SNOW_ACCOUNTADMINS;
 GRANT SELECT ON TABLE    ALFA_EDW_PRD.PUBLIC.CONTROL_PARAMS  TO ROLE SNOW_ACCOUNTADMINS;
+
+-- Phase 3 reconciliation table -- DIFFERENT schema (DB_T_PROD_CORE, not PUBLIC):
+GRANT USAGE  ON SCHEMA ALFA_EDW_PRD.DB_T_PROD_CORE                    TO ROLE SNOW_ACCOUNTADMINS;
+GRANT SELECT ON TABLE  ALFA_EDW_PRD.DB_T_PROD_CORE.RECON_MTRC_ERROR   TO ROLE SNOW_ACCOUNTADMINS;
 
 -- Phase 1 (already applied during the ref-gap fix; shown for reference, safe to
 -- re-run if you ever need to re-provision the reference-data-gap panel):
@@ -4952,15 +5014,14 @@ GRANT SELECT ON TABLE    ALFA_EDW_PRD.PUBLIC.CONTROL_PARAMS  TO ROLE SNOW_ACCOUN
 --   GRANT SELECT ON ALL TABLES IN SCHEMA ALFA_EDW_PRD.DB_T_PROD_STAG TO ROLE SNOW_ACCOUNTADMINS;
 --   GRANT SELECT ON ALFA_EDW_PRD.DB_V_PROD_BASE.TERADATA_ETL_REF_XLAT TO ROLE SNOW_ACCOUNTADMINS;
 
--- ---- verify the APP OWNER role can now read the control tables ------
+-- ---- verify the APP OWNER role can now read the source tables ------
 -- (reproduces owner's-rights: run the reads AS the role the app executes as)
 USE ROLE SNOW_ACCOUNTADMINS;
--- RESULT: expect three row counts (0 or more), NOT a "does not exist or not authorized" error
-SELECT 'CONTROL_STATUS'  AS TABLE_NAME, COUNT(*) AS ROWS_AS_APP_OWNER FROM ALFA_EDW_PRD.PUBLIC.CONTROL_STATUS
-UNION ALL
-SELECT 'CONTROL_RUN_ID', COUNT(*) FROM ALFA_EDW_PRD.PUBLIC.CONTROL_RUN_ID
-UNION ALL
-SELECT 'CONTROL_PARAMS', COUNT(*) FROM ALFA_EDW_PRD.PUBLIC.CONTROL_PARAMS;
+-- RESULT: expect four row counts (0 or more), NOT a "does not exist or not authorized" error
+SELECT 'CONTROL_STATUS'   AS TABLE_NAME, COUNT(*) AS ROWS_AS_APP_OWNER FROM ALFA_EDW_PRD.PUBLIC.CONTROL_STATUS
+UNION ALL SELECT 'CONTROL_RUN_ID',   COUNT(*) FROM ALFA_EDW_PRD.PUBLIC.CONTROL_RUN_ID
+UNION ALL SELECT 'CONTROL_PARAMS',   COUNT(*) FROM ALFA_EDW_PRD.PUBLIC.CONTROL_PARAMS
+UNION ALL SELECT 'RECON_MTRC_ERROR', COUNT(*) FROM ALFA_EDW_PRD.DB_T_PROD_CORE.RECON_MTRC_ERROR;
 
 -- =====================================================================
 --  DONE. Now REDEPLOY the app (snow streamlit deploy --replace) so the new
