@@ -838,7 +838,7 @@ def etl_runtime_creep(
         projected = latest + slope * horizon_runs
         target = 2.0 * baseline
         # runs until the projection reaches 2× baseline; 0 = already there. slope > 0 here, so safe.
-        runs_to_2x = 0 if latest >= target else int(ceil((target - latest) / slope))
+        runs_to_2x = 0 if latest >= target else ceil((target - latest) / slope)
         rows.append({
             "WORKFLOW_NAME": wf, "TASK_NAME": task, "RUNS": n,
             "LATEST_SEC": round(latest, 1), "BASELINE_SEC": round(baseline, 1),
