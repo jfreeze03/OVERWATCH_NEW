@@ -529,6 +529,13 @@ _EXPECTED_MIGRATIONS = {
          "errors' surfaces recent source-vs-target layer mismatches the nightly recon logged. Data-seed "
          "only (SETTINGS MERGE, WHEN NOT MATCHED); the app role needs SELECT on the recon table "
          "(granted separately, DB_T_PROD_CORE schema) for the live read",
+    137: "DQ_RECON_ERROR daily alert (ETL Phase 3, DB-side twin of the Reconciliation-errors panel): "
+         "ETL_RECON_RESULTS table + SP_SCAN_RECON_ERRORS() (isolated config-driven read of the "
+         "RECON_MTRC_ERROR table, FQN-allowlisted, per-metric recent error counts) + a DQ_RECON_ERROR "
+         "ALERT_CONFIG rule (PIPELINE/HIGH) + SP_ALERT_SCAN_DAILY re-derived from V129 with an 8th arm "
+         "that CALLs the scan and raises one summary alert. Same per-arm EXCEPTION isolation; NOT counted "
+         "toward OPS_SCAN_DEGRADED. HIGH routes to the OVERWATCH_EMAIL path (JDees). App role needs SELECT "
+         "on RECON_MTRC_ERROR (granted separately)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

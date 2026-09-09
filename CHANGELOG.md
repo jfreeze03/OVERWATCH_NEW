@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.514.0 - Reconciliation errors now page overnight: DQ_RECON_ERROR alert (2026-09-09)
+
+The DB-side twin of the Phase 3 panel — a fresh reconciliation break now pages and emails
+autonomously, the same way the reference-data gap does, instead of only showing when someone opens
+the panel.
+
+- **V137** adds `SP_SCAN_RECON_ERRORS()` — an isolated, config-driven read of the configured
+  `RECON_MTRC_ERROR` table (FQN allowlist-validated) that writes recent per-metric error counts to a
+  new `ETL_RECON_RESULTS` table — plus a `DQ_RECON_ERROR` `ALERT_CONFIG` rule (PIPELINE / **HIGH**),
+  and re-derives `SP_ALERT_SCAN_DAILY` from V129 with an 8th arm that calls the scan and raises one
+  summary alert ("N reconciliation error(s) across M metric(s)"), deduped per day.
+- Same isolation as the ref-gap arm: it sits in its own `EXCEPTION` guard and **does not** count
+  toward the `OPS_SCAN_DEGRADED` self-alert, so a missing `SELECT` grant on the external recon table
+  never breaks the other alert rules and self-heals when the grant lands.
+- HIGH severity routes through the existing `NATIVE_ALERT_NEW_EVENTS` email path to the
+  `OVERWATCH_EMAIL` recipient (JDees). Owner-applied after V136; the next daily scan evaluates it.
+
 ## 4.513.0 - ETL Phase 3: reconciliation DQ from RECON_MTRC_ERROR (2026-09-09)
 
 The last ETL phase: the nightly cycle reconciles each metric's source layer against its target layer,
