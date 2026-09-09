@@ -203,12 +203,14 @@ def test_task_status_sets_are_disjoint_and_shared() -> None:
 def test_drift_scan_basic() -> None:
     sql = etl.workflow_runtime_drift_scan(_CTRL, baseline_runs=5)
     assert _CTRL in sql
-    # ranked PER WORKFLOW (a task vs its OWN prior runs, not other workflows same night)
-    assert "QUALIFY ROW_NUMBER() OVER (PARTITION BY WORKFLOW_NAME ORDER BY RUN_START DESC) <= 6" in sql
+    # ranked PER WORKFLOW (a task vs its OWN prior runs, not other workflows same night);
+    # RUN_ID DESC tiebreaker makes 'latest' deterministic on a same-second tie
+    assert "QUALIFY ROW_NUMBER() OVER (PARTITION BY WORKFLOW_NAME ORDER BY RUN_START DESC, RUN_ID DESC) <= 6" in sql
     assert "MEDIAN(RUNTIME_SEC) AS BASELINE_SEC" in sql
     assert "WHERE RN = 1" in sql and "WHERE RN > 1" in sql
-    # crash-short: FAILED tasks dropped from the runtime series so a crash can't depress the baseline
-    assert "UPPER(s.TASK_STATUS) NOT IN (" in sql and "'FAILED'" in sql
+    # crash-short: KNOWN-FAILED tasks dropped so a crash can't depress the baseline, but a
+    # NULL/unknown status is KEPT (matches the runtimes panel), so the NOT IN is NULL-guarded
+    assert "s.TASK_STATUS IS NULL OR UPPER(s.TASK_STATUS) NOT IN (" in sql and "'FAILED'" in sql
     # matched per task on workflow+task; biggest slowdown first
     assert "b.WORKFLOW_NAME = l.WORKFLOW_NAME AND b.TASK_NAME = l.TASK_NAME" in sql
     assert "ORDER BY SLOWER_BY_SEC DESC" in sql

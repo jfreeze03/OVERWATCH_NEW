@@ -270,11 +270,12 @@ def workflow_runtime_drift_scan(
         f"  SELECT RUN_ID, WORKFLOW_NAME, MAX(TASK_START_DTTM) AS RUN_START FROM {tbl}\n"
         "  WHERE TASK_START_DTTM IS NOT NULL AND RUN_ID IS NOT NULL\n"
         "  GROUP BY RUN_ID, WORKFLOW_NAME\n"
-        f"  QUALIFY ROW_NUMBER() OVER (PARTITION BY WORKFLOW_NAME ORDER BY RUN_START DESC) <= {keep}\n"
+        # RUN_ID DESC tiebreaker so 'latest' is deterministic on a same-second RUN_START tie
+        f"  QUALIFY ROW_NUMBER() OVER (PARTITION BY WORKFLOW_NAME ORDER BY RUN_START DESC, RUN_ID DESC) <= {keep}\n"
         "),\n"
         "ranked AS (\n"
         "  SELECT RUN_ID, WORKFLOW_NAME,\n"
-        "         ROW_NUMBER() OVER (PARTITION BY WORKFLOW_NAME ORDER BY RUN_START DESC) AS RN\n"
+        "         ROW_NUMBER() OVER (PARTITION BY WORKFLOW_NAME ORDER BY RUN_START DESC, RUN_ID DESC) AS RN\n"
         "  FROM runs\n"
         "),\n"
         "task_runtimes AS (\n"
@@ -283,7 +284,9 @@ def workflow_runtime_drift_scan(
         "             COALESCE(s.TASK_END_DTTM, CURRENT_TIMESTAMP()))) AS RUNTIME_SEC\n"
         f"  FROM {tbl} s JOIN ranked r ON s.RUN_ID = r.RUN_ID AND s.WORKFLOW_NAME = r.WORKFLOW_NAME\n"
         "  WHERE s.TASK_START_DTTM IS NOT NULL\n"
-        f"    AND UPPER(s.TASK_STATUS) NOT IN ({_failed})\n"
+        # NULL-safe: an unknown-status task is KEPT (NOT IN is NULL-blind), matching the
+        # runtimes panel's 'unknown status still shows' rule — only KNOWN failures drop.
+        f"    AND (s.TASK_STATUS IS NULL OR UPPER(s.TASK_STATUS) NOT IN ({_failed}))\n"
         "  GROUP BY s.WORKFLOW_NAME, s.TASK_NAME, r.RN\n"
         "),\n"
         "latest AS (\n"

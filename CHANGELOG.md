@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.518.0 - Drift hardening: NULL-status consistency + deterministic tiebreak (2026-09-09)
+
+Adversarial-verify follow-up to 4.517.0 (verify was clean; these are the two optional hardenings it
+flagged, both cheap):
+- **NULL-status consistency** — the crash-short `NOT IN` silently dropped an unknown/NULL-status task
+  (the classic `NOT IN`/NULL trap), while the runtimes panel *shows* unknown-status tasks. The filter
+  is now NULL-safe (`TASK_STATUS IS NULL OR …`), so only KNOWN failures drop and the two surfaces agree.
+- **Deterministic "latest"** — added a `RUN_ID DESC` tiebreaker to the per-workflow ranking so which run
+  is treated as "latest" can't flip between renders when two runs share a same-second `RUN_START`.
+
 ## 4.517.0 - Runtime drift fixed: compares each workflow to its OWN history (2026-09-09)
 
 The "Runtime drift" board was dead — it always reported "runtimes are stable." Root cause: each
