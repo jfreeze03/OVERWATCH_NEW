@@ -235,3 +235,42 @@ def test_drift_scan_parses() -> None:
     import pytest
     sqlglot = pytest.importorskip("sqlglot")
     sqlglot.parse(etl.workflow_runtime_drift_scan(_CTRL), dialect="snowflake")
+
+
+# --- run_inventory_scan / run_params_scan (CONTROL_RUN_ID / CONTROL_PARAMS) ---
+
+_RUNID = "ALFA_EDW_PRD.PUBLIC.CONTROL_RUN_ID"
+_PARAMS = "ALFA_EDW_PRD.PUBLIC.CONTROL_PARAMS"
+
+
+def test_run_inventory_scan_basic() -> None:
+    sql = etl.run_inventory_scan(_RUNID)
+    assert _RUNID in sql
+    assert "GROUP BY RUN_ID" in sql
+    assert "COUNT(DISTINCT TASK_NAME) AS TASKS" in sql
+    assert "MIN(INSERT_TS) AS STARTED_AT" in sql and "MAX(INSERT_TS) AS LAST_SEEN_AT" in sql
+    assert "ORDER BY STARTED_AT DESC" in sql and "LIMIT" in sql
+
+
+def test_run_params_scan_latest_run_only() -> None:
+    sql = etl.run_params_scan(_PARAMS)
+    assert _PARAMS in sql
+    # latest run only (newest INSERT_TS), its params by scope then name
+    assert "QUALIFY ROW_NUMBER() OVER (ORDER BY INSERT_TS DESC) = 1" in sql
+    assert "p.PARAM_NAME, p.PARAM_VALUE, p.SCOPE_TYPE, p.SCOPE_NAME" in sql
+    assert "ORDER BY p.SCOPE_TYPE, p.PARAM_NAME" in sql
+
+
+def test_inventory_and_params_fail_closed() -> None:
+    for fn in (etl.run_inventory_scan, etl.run_params_scan):
+        assert fn("") == ""
+        assert fn(None) == ""
+        assert fn("T; DROP TABLE X") == ""
+        assert fn("a b c") == ""
+
+
+def test_inventory_and_params_parse() -> None:
+    import pytest
+    sqlglot = pytest.importorskip("sqlglot")
+    sqlglot.parse(etl.run_inventory_scan(_RUNID), dialect="snowflake")
+    sqlglot.parse(etl.run_params_scan(_PARAMS), dialect="snowflake")

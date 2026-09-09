@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.511.0 - ETL run inventory & parameters from CONTROL_RUN_ID / CONTROL_PARAMS (2026-09-09)
+
+The registry side of the Informatica cycle: which runs happened, when, and what parameters they
+executed with — none of which Snowflake's own task history records.
+
+- **Operations ▸ Pipeline ▸ "Run inventory & parameters"** lists recent runs from `CONTROL_RUN_ID`
+  (one row per `RUN_ID`: workflow(s), distinct task count, first/last seen, newest first) and, in an
+  expander, the latest run's parameters from `CONTROL_PARAMS` (RUN_DATE, thresholds, load indicators…)
+  ordered by scope then name. The two sources are independently config-gated + fail-silent, so the panel
+  shows whatever is configured and granted.
+- Builders `etl_control_sql.run_inventory_scan` / `run_params_scan` validate the FQN with
+  `safe_identifier` (fail-closed). Two new Admin-editable config keys.
+- **V135** seeds `ETL_CONTROL_RUN_ID_FQN` / `ETL_CONTROL_PARAMS_FQN` to `ALFA_EDW_PRD.PUBLIC.CONTROL_RUN_ID`
+  / `CONTROL_PARAMS` (owner focus: the PRD database). Data-seed only (SETTINGS MERGE, WHEN NOT MATCHED);
+  the app role needs `SELECT` on both control tables (granted separately) for the live read — owner-applied.
+
 ## 4.510.0 - Run-over-run drift: which ETL task got materially slower (2026-09-09)
 
 Beyond pass/fail and raw runtimes, the highest-signal thing `CONTROL_STATUS` can tell you is *which

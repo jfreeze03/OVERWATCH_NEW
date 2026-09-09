@@ -295,3 +295,64 @@ def workflow_runtime_drift_scan(
         "  ORDER BY SLOWER_BY_SEC DESC\n"
         f"  LIMIT {int(max_rows)}"
     )
+
+
+# --- Phase 2: run inventory + parameters (CONTROL_RUN_ID / CONTROL_PARAMS) ----
+MAX_RUNS = 100      # recent-run inventory cap
+MAX_PARAMS = 2000   # one run's parameters (the global + per-session knobs)
+
+
+def run_inventory_scan(run_id_fqn: object, *, max_runs: int = MAX_RUNS) -> str:
+    """Recent ETL runs from the Informatica CONTROL_RUN_ID registry.
+
+    One row per RUN_ID: the workflow(s) it registered, the distinct task count, and the
+    first/last INSERT_TS seen for the run (STARTED_AT / LAST_SEEN_AT). Newest run first.
+    Fail-closed on a bad FQN. Pure: bounded output, no Streamlit."""
+    from app.core.sqlsafe import safe_identifier
+
+    fqn = str(run_id_fqn or "").strip()
+    if not fqn:
+        return ""
+    try:
+        tbl = safe_identifier(fqn, allow_qualified=True)
+    except ValueError:
+        return ""
+    return (
+        "SELECT RUN_ID,\n"
+        "       LISTAGG(DISTINCT WORKFLOW_NAME, ', ') AS WORKFLOWS,\n"
+        "       COUNT(DISTINCT TASK_NAME) AS TASKS,\n"
+        "       MIN(INSERT_TS) AS STARTED_AT,\n"
+        "       MAX(INSERT_TS) AS LAST_SEEN_AT\n"
+        f"  FROM {tbl}\n"
+        "  GROUP BY RUN_ID\n"
+        "  ORDER BY STARTED_AT DESC\n"
+        f"  LIMIT {int(max_runs)}"
+    )
+
+
+def run_params_scan(params_fqn: object, *, max_params: int = MAX_PARAMS) -> str:
+    """Parameters the LATEST ETL run executed with, from CONTROL_PARAMS.
+
+    Isolates the newest RUN_ID (max INSERT_TS) and returns its parameters ordered by
+    scope then name — the run-level knobs (RUN_DATE, thresholds, load indicators) and
+    the per-session ones. Fail-closed on a bad FQN. Pure: bounded output, no Streamlit."""
+    from app.core.sqlsafe import safe_identifier
+
+    fqn = str(params_fqn or "").strip()
+    if not fqn:
+        return ""
+    try:
+        tbl = safe_identifier(fqn, allow_qualified=True)
+    except ValueError:
+        return ""
+    return (
+        "WITH latest AS (\n"
+        f"  SELECT RUN_ID FROM {tbl}\n"
+        "  WHERE INSERT_TS IS NOT NULL AND RUN_ID IS NOT NULL\n"
+        "  QUALIFY ROW_NUMBER() OVER (ORDER BY INSERT_TS DESC) = 1\n"
+        ")\n"
+        "SELECT p.PARAM_NAME, p.PARAM_VALUE, p.SCOPE_TYPE, p.SCOPE_NAME\n"
+        f"  FROM {tbl} p JOIN latest l ON p.RUN_ID = l.RUN_ID\n"
+        "  ORDER BY p.SCOPE_TYPE, p.PARAM_NAME\n"
+        f"  LIMIT {int(max_params)}"
+    )

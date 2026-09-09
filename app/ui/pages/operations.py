@@ -1133,6 +1133,48 @@ def _workflow_drift_panel() -> None:
         result_caption(res)
 
 
+def _run_inventory_panel() -> None:
+    """Recent ETL run inventory (CONTROL_RUN_ID) + the latest run's parameters (CONTROL_PARAMS).
+
+    The registry side of the Informatica cycle: which runs happened, when, and what
+    parameters they executed with (RUN_DATE, thresholds, load indicators). Two separate
+    config keys / grants, each independently config-gated + fail-silent — the inventory
+    shows whatever is configured; the parameters sit in an expander so the ~100 knobs of a
+    run don't dominate the tab."""
+    section_header("Run inventory & parameters — recent ETL runs",
+                   "warn", "pipeline", anchor="ops-run-inventory")
+    settings = load_settings(_PAGE)
+    run_fqn = str(settings.get("ETL_CONTROL_RUN_ID_FQN") or "").strip()
+    params_fqn = str(settings.get("ETL_CONTROL_PARAMS_FQN") or "").strip()
+    if not run_fqn and not params_fqn:
+        empty_state("needs_setup",
+                    "Not configured — set ETL_CONTROL_RUN_ID_FQN and ETL_CONTROL_PARAMS_FQN on "
+                    "Admin ▸ SETTINGS to the Informatica CONTROL_RUN_ID / CONTROL_PARAMS table FQNs "
+                    "(e.g. ALFA_EDW_PRD.PUBLIC.CONTROL_RUN_ID / ...CONTROL_PARAMS).")
+        return
+    _hint = ("The app role needs SELECT on the control table "
+             "(GRANT SELECT ON <table> TO ROLE <app role>).")
+    inv_sql = etl_control_sql.run_inventory_scan(run_fqn) if run_fqn else ""
+    if inv_sql:
+        res = run(inv_sql, page=_PAGE, key="etl_run_inventory", tier="recent",
+                  source="CONTROL_RUN_ID inventory", max_rows=etl_control_sql.MAX_RUNS)
+        if guard(res, "No ETL runs recorded yet.", setup_hint=_hint):
+            styled_table(res.df, height=300)
+            st.caption("Recent ETL runs from CONTROL_RUN_ID — one row per run (workflow(s), distinct "
+                       "task count, first/last seen), newest first.")
+            result_caption(res)
+    params_sql = etl_control_sql.run_params_scan(params_fqn) if params_fqn else ""
+    if params_sql:
+        with st.expander("Parameters for the latest run"):
+            pres = run(params_sql, page=_PAGE, key="etl_run_params", tier="recent",
+                       source="CONTROL_PARAMS (latest run)", max_rows=etl_control_sql.MAX_PARAMS)
+            if guard(pres, "No parameters recorded for the latest run.", setup_hint=_hint):
+                styled_table(pres.df, height=340)
+                st.caption("The parameters the latest run executed with (RUN_DATE, thresholds, load "
+                           "indicators…), ordered by scope then name. From CONTROL_PARAMS.")
+                result_caption(pres)
+
+
 def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "") -> None:
     """Metadata-driven table freshness SLAs (config in PIPELINE_SLA_CONFIG).
 
@@ -1147,6 +1189,8 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
     _workflow_runtimes_panel()
     # Then run-over-run drift on that same control table: which task got materially slower.
     _workflow_drift_panel()
+    # Then the run inventory (CONTROL_RUN_ID) + the latest run's parameters (CONTROL_PARAMS).
+    _run_inventory_panel()
     res = run(insights_sql.pipeline_sla_forecast(14), page=_PAGE, key="sla_status", tier="recent",
               source="ACCOUNT_USAGE.TABLE_DML_HISTORY x PIPELINE_SLA_STATUS")
     if not res.ok:

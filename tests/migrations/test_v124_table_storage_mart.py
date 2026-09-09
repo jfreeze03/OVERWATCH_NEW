@@ -87,6 +87,6 @@ def test_storage_panels_read_the_mart_first():
 
 def test_validate_floor_and_docs_track_v124():
     val = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V134 applied" in val and "VERSION BETWEEN 1 AND 134) = 134" in val
+    assert "V001..V135 applied" in val and "VERSION BETWEEN 1 AND 135) = 135" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V124__table_storage_mart.sql" in (_ROOT / rel).read_text(encoding="utf-8")

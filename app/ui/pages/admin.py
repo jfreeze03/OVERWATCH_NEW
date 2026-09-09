@@ -519,6 +519,11 @@ _EXPECTED_MIGRATIONS = {
          "Informatica CONTROL_STATUS table (per-task start/end/status per run) that Snowflake "
          "TASK_HISTORY can't see. Data-seed only (SETTINGS MERGE, WHEN NOT MATCHED); the app role needs "
          "SELECT on the control table (granted separately) for the live read",
+    135: "ETL run-inventory config seed: ETL_CONTROL_RUN_ID_FQN + ETL_CONTROL_PARAMS_FQN = "
+         "ALFA_EDW_PRD.PUBLIC.CONTROL_RUN_ID / CONTROL_PARAMS, so Operations ▸ Pipeline ▸ 'Run "
+         "inventory & parameters' reads the Informatica run registry + per-run parameters. Data-seed "
+         "only (SETTINGS MERGE, WHEN NOT MATCHED); the app role needs SELECT on both control tables "
+         "(granted separately) for the live read",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
