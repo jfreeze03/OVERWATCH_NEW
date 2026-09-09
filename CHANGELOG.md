@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.506.0 - Reference-data gaps lead the morning Brief (2026-09-09)
+
+A source code with no XLAT translation hard-fails the nightly ETL load, so the every-morning
+reference-gap check now surfaces on the **Brief** landing page — you see it the moment you open
+OVERWATCH, not three tabs deep in Operations ▸ Pipeline.
+
+- The Brief's "should I worry?" verdict line now folds in an unmapped-code signal
+  (e.g. *"1 source code missing XLAT translation (pc_uwissuetype.code)"*), and a red primary
+  button — mirroring the undelivered-critical banner — names the affected check type(s) and jumps
+  straight to the Operations panel that lists the exact codes to translate.
+- Reuses the Operations panel's existing scan (`etl_control_sql.reference_gap_scan`) run
+  account-wide (pinned + every configured check), so the Brief and the "All databases" Operations
+  view **share one `(sql, scope)` cache entry** — no extra query on the hot landing page.
+- **Config-gated and fail-silent**: a `probe=True` read means unset config or a missing SELECT
+  grant classifies as an expected absence — the signal simply doesn't appear, with no error banner
+  and no `APP_ERROR_LOG` spam. The Operations ▸ Pipeline panel remains the one place that shows the
+  setup / grant hints.
+
 ## 4.505.0 - Schema drift on registered tables now alerts: DQ_SCHEMA_DRIFT (Codex R23) (2026-09-08)
 
 Extends data-quality monitoring beyond volume — the schema-drift half of R23 (dq.py names schema-drift +

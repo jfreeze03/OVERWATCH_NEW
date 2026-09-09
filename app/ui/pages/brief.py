@@ -13,7 +13,7 @@ from app.core.errors import safe_page
 from app.core.identity import viewer_name
 from app.core.query import run, run_batch
 from app.core.state import filters, request_navigation
-from app.data import mart_sql
+from app.data import etl_control_sql, mart_sql
 from app.logic import case_file
 from app.logic.actions import rank_actions
 from app.logic.formulas import (
@@ -71,6 +71,35 @@ def _stalest_label(vals: dict) -> str:
     if not (_h >= 0):
         return f"{src}never loaded" if src else "no data yet"
     return f"{src}{humanize_duration(_h, 'h')}"
+
+
+def _reference_gap_summary(settings: dict) -> tuple[int, str]:
+    """Source codes with no XLAT translation across every configured check.
+
+    Reuses the Operations ▸ Pipeline reference-gap scan (etl_control_sql), run
+    account-wide — pinned checks plus every configured check, no Database filter,
+    the widest morning read. Config-gated and FAIL-SILENT: unset config, no valid
+    check, or a missing SELECT grant (a probe read → the 'absent' branch, so it is
+    neither error-logged nor counted as a failed fetch) all return (0, "") so the
+    Brief never shows a setup or grant hint — the Operations panel owns that.
+    Returns (code_count, label) where label names the affected check type(s),
+    e.g. 'pc_uwissuetype.code'."""
+    xlat = str(settings.get("ETL_REF_GAP_XLAT") or "").strip()
+    raw = str(settings.get("ETL_REF_GAP_CHECKS") or "").strip()
+    if not xlat or not raw:
+        return 0, ""
+    checks, _ = etl_control_sql.parse_ref_gap_checks(raw)
+    scan_sql, _ = etl_control_sql.reference_gap_scan(checks, xlat)
+    if not scan_sql:
+        return 0, ""
+    res = run(scan_sql, page=_PAGE, key="brief_ref_gaps", tier="recent",
+              source="staging tables MINUS XLAT reference",
+              max_rows=etl_control_sql.MAX_CODES, probe=True)
+    if not (res.ok and not res.empty) or "CHECK_NAME" not in res.df.columns:
+        return 0, ""
+    types = list(dict.fromkeys(res.df["CHECK_NAME"].astype(str)))
+    label = ", ".join(types) if len(types) <= 2 else f"{types[0]}, {types[1]} +{len(types) - 2} more"
+    return len(res.df), label
 
 
 @safe_page(_PAGE)
@@ -263,6 +292,13 @@ def render() -> None:
                     "matching Control Room). The Control Room owns the queue; this is the "
                     "executive glance.",
         })
+    # Reference-data gaps (ETL Phase 1): a source code with no XLAT translation
+    # hard-fails tonight's load, so it belongs in the morning "should I worry?" read
+    # like a fire. Reuses the Operations panel's scan, account-wide (pinned + every
+    # configured check); config-gated and FAIL-SILENT (unset config / a missing grant
+    # returns 0 — the Operations ▸ Pipeline panel owns the setup + grant hints).
+    _ref_gap_n, _ref_gap_types = _reference_gap_summary(settings)
+
     # CoCo do-first #1: a computed "should I worry?" opener, worst-first, above the
     # numbers — built from signals already on the page (no new query).
     _vsig = []
@@ -284,6 +320,10 @@ def render() -> None:
         # not len() of the LIMIT-5 feed — else the verdict says "5" while the KPI says the true
         # count for >5 open incidents (round-2 bug hunt; the KPI was hardened, this sibling wasn't).
         _vsig.append(Signal("bad", f"{_n_inc} open incident(s)"))
+    if _ref_gap_n:
+        _rg_word = "code" if _ref_gap_n == 1 else "codes"
+        _vsig.append(Signal(
+            "bad", f"{_ref_gap_n} source {_rg_word} missing XLAT translation ({_ref_gap_types})"))
     if exh.usable():
         _erow = exh.df.iloc[0]
         if safe_float(_erow.get("TOTAL")) > 0:
@@ -333,6 +373,16 @@ def render() -> None:
                           "check delivery →", key="brief_undelivered", type="primary",
                           width="stretch"):
         request_navigation("Alerts", "Native delivery")
+
+    # A source code with no XLAT translation hard-fails tonight's ETL load — the
+    # DBA's every-morning MINUS check, surfaced on the landing page so it can't
+    # hide three tabs deep. Jumps to the panel that lists the exact codes to add.
+    if _ref_gap_n:
+        _rg_word = "code" if _ref_gap_n == 1 else "codes"
+        if st.button(f"⚠ {_ref_gap_n} source {_rg_word} with no XLAT translation "
+                     f"({_ref_gap_types}) — add the translation rows before tonight's load →",
+                     key="brief_ref_gap", type="primary", width="stretch"):
+            request_navigation("Operations", "Pipeline SLA")
 
     # Honor the company filter (live finding 2026-07-08: Trexis warehouse
     # fires showed under an ALFA scope). Account-level events always show.
