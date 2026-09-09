@@ -1,11 +1,11 @@
 -- =====================================================================
 --  OVERWATCH -- RUN_NEXT.sql   (owner-applied Snowsight migration handoff)
---  Schema catch-up V125 -> V134  +  ETL Phase 2 grant.
+--  Schema catch-up V125 -> V135  +  ETL Phase 2 grants.
 --
 --  WHAT THIS DOES
---    Brings DBA_MAINT_DB.OVERWATCH up to schema v134 (applies V125..V134 in
---    order) and grants the app role read access to the Informatica
---    CONTROL_STATUS table, so the ETL panels + Brief signals go live.
+--    Brings DBA_MAINT_DB.OVERWATCH up to schema v135 (applies V125..V135 in
+--    order) and grants the app role read access to the three Informatica
+--    CONTROL_* tables, so the ETL panels + Brief signals go live.
 --
 --  CONTENTS (in order)
 --    V125 MFA-gap posture COALESCE (security)            [proc re-derive]
@@ -18,6 +18,7 @@
 --    V132 DQ_BREACH volume-anomaly alert                 [proc re-derive + rule]
 --    V133 DQ_SCHEMA_DRIFT schema-drift monitor           [table + proc + rule + arm]
 --    V134 seed ETL CONTROL_STATUS config (Phase 2)       [data seed]
+--    V135 seed ETL CONTROL_RUN_ID / CONTROL_PARAMS config[data seed]
 --    + ETL Phase 2 GRANT block (run AS ACCOUNTADMIN) at the very bottom.
 --
 --  SAFE TO RE-RUN. Every migration is guarded (it RAISEs only if a PRIOR
@@ -31,10 +32,10 @@
 --    2) Run All. The preamble sets the role to SNOW_ACCOUNTADMINS (the app owner)
 --       so every NEW object is owned by the app role -- required for the
 --       owner's-rights app to read it.
---    3) Confirm SCHEMA_VERSION_BEFORE >= 124, SCHEMA_VERSION_AFTER = 134, and the
---       V001..V134 completeness check reads OK.
+--    3) Confirm SCHEMA_VERSION_BEFORE >= 124, SCHEMA_VERSION_AFTER = 135, and the
+--       V001..V135 completeness check reads OK.
 --    4) The GRANT block at the bottom switches to ACCOUNTADMIN and grants the app
---       role SELECT on ALFA_EDW_PRD.PUBLIC.CONTROL_STATUS. Then REDEPLOY the app.
+--       role SELECT on the three ALFA_EDW_PRD.PUBLIC.CONTROL_* tables. Then REDEPLOY.
 --    5) Paste the RESULT blocks back into the chat.
 -- =====================================================================
 
@@ -4858,32 +4859,91 @@ SELECT 134 AS VERSION,
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 134);
 
 
+-- ================================================================
+-- APPLY V135__seed_etl_control_run_params_fqn.sql
+-- ================================================================
+
+-- V135__seed_etl_control_run_params_fqn.sql
+--
+-- Seed the ETL process-control run-inventory config (Operations ▸ Pipeline ▸ "Run
+-- inventory & parameters"). The Informatica cycle registers each run in CONTROL_RUN_ID
+-- and records the parameters it ran with in CONTROL_PARAMS; this panel reads both so
+-- the operator can see which runs happened, when, and what knobs they used (RUN_DATE,
+-- thresholds, load indicators) — none of which Snowflake's own task history captures:
+--
+--   ETL_CONTROL_RUN_ID_FQN  the CONTROL_RUN_ID registry table FQN.
+--   ETL_CONTROL_PARAMS_FQN  the CONTROL_PARAMS parameters table FQN.
+--
+-- Seeded to the PRD database (owner ask 2026-09-09: focus on ALFA_EDW_PRD). Both keys
+-- are in DEFAULT_SETTINGS ('' code default) and auto-appear in the Admin editor, so
+-- re-pointing them elsewhere is an Admin edit, not a code change. WHEN NOT MATCHED only
+-- (never overwrites an operator's edited value), mirroring V134/V128/V093/V121.
+--
+-- GRANTS: the app role needs SELECT on both control tables for the live panel to read
+-- them (GRANT SELECT ON TABLE ALFA_EDW_PRD.PUBLIC.CONTROL_RUN_ID / CONTROL_PARAMS TO
+-- ROLE <app role>;). Until granted, the panel fails closed with a grant hint — no error.
+-- Grants are outside DBA_MAINT_DB and are applied separately (not in this migration).
+--
+-- Data-seed only: no schema change, no proc/view/task, no reload. Owner applies in
+-- Snowsight after V134. The app never runs this migration.
+
+EXECUTE IMMEDIATE
+$$
+DECLARE
+    v NUMBER;
+    not_ready EXCEPTION (-20135, 'V135 requires V134 first - apply migrations in order.');
+BEGIN
+    SELECT MAX(VERSION) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 134) THEN
+        RAISE not_ready;
+    END IF;
+END;
+$$;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SETTINGS t
+USING (
+    SELECT * FROM VALUES
+        ('ETL_CONTROL_RUN_ID_FQN', 'ALFA_EDW_PRD.PUBLIC.CONTROL_RUN_ID'),
+        ('ETL_CONTROL_PARAMS_FQN', 'ALFA_EDW_PRD.PUBLIC.CONTROL_PARAMS')
+    AS s(KEY, VALUE)
+) s
+ON t.KEY = s.KEY
+WHEN NOT MATCHED THEN INSERT (KEY, VALUE) VALUES (s.KEY, s.VALUE);
+
+INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
+SELECT 135 AS VERSION,
+       'Seed the ETL run-inventory config (ETL_CONTROL_RUN_ID_FQN + ETL_CONTROL_PARAMS_FQN) to ALFA_EDW_PRD.PUBLIC.CONTROL_RUN_ID / CONTROL_PARAMS, so Operations Pipeline Run inventory and parameters reads the Informatica run registry + parameters that Snowflake task history cannot see. WHEN NOT MATCHED only. Data-seed only, no schema change. App role needs SELECT on both control tables (granted separately) for the live read.' AS DESCRIPTION
+WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 135);
+
+
 -- =====================================================================
 -- POST-FLIGHT
 -- =====================================================================
--- RESULT: expect SCHEMA_VERSION_AFTER = 134
+-- RESULT: expect SCHEMA_VERSION_AFTER = 135
 SELECT MAX(VERSION) AS SCHEMA_VERSION_AFTER FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
 
--- RESULT: expect COMPLETE = 'OK - V001..V134 all present'
+-- RESULT: expect COMPLETE = 'OK - V001..V135 all present'
 SELECT IFF(
          (SELECT COUNT(DISTINCT VERSION) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION
-           WHERE VERSION BETWEEN 1 AND 134) = 134,
-         'OK - V001..V134 all present',
-         'MISSING a version below 134 - check the run log above') AS COMPLETE;
+           WHERE VERSION BETWEEN 1 AND 135) = 135,
+         'OK - V001..V135 all present',
+         'MISSING a version below 135 - check the run log above') AS COMPLETE;
 
 -- =====================================================================
--- ETL PHASE 2 GRANT  --  run AS ACCOUNTADMIN (or a role with grant authority on
+-- ETL PHASE 2 GRANTS  --  run AS ACCOUNTADMIN (or a role with grant authority on
 -- ALFA_EDW_PRD). These grants live OUTSIDE DBA_MAINT_DB, so they are NOT in a
 -- migration. The app runs owner's-rights AS SNOW_ACCOUNTADMINS, so that role
--- (the app owner) is what needs SELECT on the source table it reads.
+-- (the app owner) is what needs SELECT on the source tables it reads.
 -- =====================================================================
 USE ROLE ACCOUNTADMIN;
 
--- Phase 2 (NEW): the "Workflow runtimes" + "Runtime drift" panels and the Brief
--- failed-ETL-task signal all read the Informatica CONTROL_STATUS table.
-GRANT USAGE  ON DATABASE ALFA_EDW_PRD                    TO ROLE SNOW_ACCOUNTADMINS;
-GRANT USAGE  ON SCHEMA   ALFA_EDW_PRD.PUBLIC             TO ROLE SNOW_ACCOUNTADMINS;
-GRANT SELECT ON TABLE    ALFA_EDW_PRD.PUBLIC.CONTROL_STATUS TO ROLE SNOW_ACCOUNTADMINS;
+-- The Informatica control tables feed: "Workflow runtimes", "Runtime drift",
+-- "Run inventory & parameters" (Operations > Pipeline) + the Brief failed-task signal.
+GRANT USAGE  ON DATABASE ALFA_EDW_PRD                     TO ROLE SNOW_ACCOUNTADMINS;
+GRANT USAGE  ON SCHEMA   ALFA_EDW_PRD.PUBLIC              TO ROLE SNOW_ACCOUNTADMINS;
+GRANT SELECT ON TABLE    ALFA_EDW_PRD.PUBLIC.CONTROL_STATUS  TO ROLE SNOW_ACCOUNTADMINS;
+GRANT SELECT ON TABLE    ALFA_EDW_PRD.PUBLIC.CONTROL_RUN_ID  TO ROLE SNOW_ACCOUNTADMINS;
+GRANT SELECT ON TABLE    ALFA_EDW_PRD.PUBLIC.CONTROL_PARAMS  TO ROLE SNOW_ACCOUNTADMINS;
 
 -- Phase 1 (already applied during the ref-gap fix; shown for reference, safe to
 -- re-run if you ever need to re-provision the reference-data-gap panel):
@@ -4892,12 +4952,15 @@ GRANT SELECT ON TABLE    ALFA_EDW_PRD.PUBLIC.CONTROL_STATUS TO ROLE SNOW_ACCOUNT
 --   GRANT SELECT ON ALL TABLES IN SCHEMA ALFA_EDW_PRD.DB_T_PROD_STAG TO ROLE SNOW_ACCOUNTADMINS;
 --   GRANT SELECT ON ALFA_EDW_PRD.DB_V_PROD_BASE.TERADATA_ETL_REF_XLAT TO ROLE SNOW_ACCOUNTADMINS;
 
--- ---- verify the APP OWNER role can now read CONTROL_STATUS ----------
--- (reproduces owner's-rights: run the read AS the role the app executes as)
+-- ---- verify the APP OWNER role can now read the control tables ------
+-- (reproduces owner's-rights: run the reads AS the role the app executes as)
 USE ROLE SNOW_ACCOUNTADMINS;
--- RESULT: expect a row count (0 or more), NOT a "does not exist or not authorized" error
-SELECT COUNT(*) AS CONTROL_STATUS_ROWS_AS_APP_OWNER
-  FROM ALFA_EDW_PRD.PUBLIC.CONTROL_STATUS;
+-- RESULT: expect three row counts (0 or more), NOT a "does not exist or not authorized" error
+SELECT 'CONTROL_STATUS'  AS TABLE_NAME, COUNT(*) AS ROWS_AS_APP_OWNER FROM ALFA_EDW_PRD.PUBLIC.CONTROL_STATUS
+UNION ALL
+SELECT 'CONTROL_RUN_ID', COUNT(*) FROM ALFA_EDW_PRD.PUBLIC.CONTROL_RUN_ID
+UNION ALL
+SELECT 'CONTROL_PARAMS', COUNT(*) FROM ALFA_EDW_PRD.PUBLIC.CONTROL_PARAMS;
 
 -- =====================================================================
 --  DONE. Now REDEPLOY the app (snow streamlit deploy --replace) so the new
