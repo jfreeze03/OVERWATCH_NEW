@@ -53,6 +53,7 @@ from app.logic.insights import (
     cluster_failures_by_family,
     compare_release_periods,
     duration_sla_forecast,
+    etl_runtime_creep,
     pipeline_sla_forecast,
     rank_release_candidates,
     task_duration_anomalies,
@@ -1179,6 +1180,67 @@ def _workflow_drift_panel() -> None:
         result_caption(res)
 
 
+def _runtime_creep_panel(days: int = 0) -> None:
+    """Tasks whose runtime is CREEPING up run-over-run — projected before they breach.
+
+    The forward-looking companion to the drift panel: drift catches a task that already jumped;
+    this fits a robust Theil-Sen trend over each task's recent runs and projects where it's headed,
+    so a task marching toward its window is caught while there's still time to act. For each
+    creeping task: the per-run gain, the projected runtime a horizon ahead, and ~how many runs
+    until it doubles its baseline. Config-gated on ETL_CONTROL_STATUS_FQN; honors the scope-bar
+    Window; a clean state when nothing is trending materially slower."""
+    section_header("Runtime creep — tasks trending slower, projected to breach",
+                   "warn", "pipeline", anchor="ops-wf-creep")
+    fqn = str(load_settings(_PAGE).get("ETL_CONTROL_STATUS_FQN") or "").strip()
+    if not fqn:
+        empty_state("needs_setup", "Not configured — set ETL_CONTROL_STATUS_FQN on Admin ▸ "
+                    "SETTINGS (shared with the runtimes panel above).")
+        return
+    hist_sql = etl_control_sql.task_runtime_history_scan(fqn, days=days)
+    if not hist_sql:
+        empty_state("needs_setup", "ETL_CONTROL_STATUS_FQN is not a valid table name.")
+        return
+    res = run(hist_sql, page=_PAGE, key=f"etl_runtime_history_{days}", tier="recent",
+              source="CONTROL_STATUS (per-task runtime series)",
+              max_rows=etl_control_sql.MAX_HISTORY_ROWS)
+    if guard(res, "No runtime history yet to fit a trend.",
+             setup_hint="The app role needs SELECT on the CONTROL_STATUS table "
+                        "(GRANT SELECT ON <table> TO ROLE <app role>)."):
+        creep = etl_runtime_creep(res.df)
+        # Honesty: the builder caps by whole series (never bisects one), but if that cap was hit
+        # some tasks weren't fetched for the fit — say so rather than imply full coverage.
+        if ({"WORKFLOW_NAME", "TASK_NAME"}.issubset(res.df.columns)
+                and res.df[["WORKFLOW_NAME", "TASK_NAME"]].drop_duplicates().shape[0]
+                >= etl_control_sql.MAX_HISTORY_SERIES):
+            st.caption(f"⚠ Fitted the first {etl_control_sql.MAX_HISTORY_SERIES} task series — some "
+                       "tasks were not analyzed at this scale.")
+        if creep.empty:
+            empty_state("clean", "No task is trending materially slower run-over-run — the fitted "
+                        "trends are flat or improving. (A task needs a few runs of history to trend.)")
+            return
+        n = len(creep)
+        top = creep.iloc[0]
+        _gain = humanize_duration(safe_float(top.get("SLOPE_SEC_PER_RUN")), "s")
+        _r2x = int(safe_float(top.get("RUNS_TO_2X")))
+        _when = "already ≥2× its baseline" if _r2x <= 0 else f"~{_r2x} run(s) from 2× its baseline"
+        st.warning(f"🟠 {n} task(s) are trending slower run-over-run. Steepest: "
+                   f"**{top.get('TASK_NAME')}** gaining {_gain}/run — {_when}.")
+        # Show the slope as a humanized per-run rate (a raw '45.0' would read as a bare duration);
+        # the _SEC columns (LATEST/BASELINE/PROJECTED) humanize themselves in the table machinery.
+        disp = creep.copy()
+        disp.insert(disp.columns.get_loc("SLOPE_SEC_PER_RUN"), "GAINING_PER_RUN",
+                    disp["SLOPE_SEC_PER_RUN"].map(lambda s: f"{humanize_duration(safe_float(s), 's')}/run"))
+        disp = disp.drop(columns=["SLOPE_SEC_PER_RUN"])
+        styled_table(disp, height=300)
+        st.caption("Each task's runtime fitted with a robust Theil-Sen slope over its recent runs "
+                   "(oldest→newest), so one spike can't fake a trend. Only material upward creep shows "
+                   "(≥ 5s/run), steepest first. PROJECTED_SEC = latest + gain × 7 runs; RUNS_TO_2X = "
+                   "runs until the projection reaches 2× the task's baseline median — a leading "
+                   "indicator to act on before the window is breached. LATEST/BASELINE/PROJECTED_SEC "
+                   "humanize to Hr/Min/Sec.")
+        result_caption(res)
+
+
 def _run_inventory_panel() -> None:
     """Recent ETL run inventory (CONTROL_RUN_ID) + a run picker that drills into any run's
     tasks (CONTROL_STATUS) and parameters (CONTROL_PARAMS).
@@ -1403,6 +1465,9 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
     _workflow_runtimes_panel(days)
     # Then run-over-run drift on that same control table: which task got materially slower.
     _workflow_drift_panel()
+    # Then the forward-looking companion: which tasks are CREEPING toward a breach (trend fit),
+    # scoped to the Window so the trend reflects the selected history.
+    _runtime_creep_panel(days)
     # Then the run inventory (CONTROL_RUN_ID) + the latest run's parameters (CONTROL_PARAMS).
     _run_inventory_panel()
     # Then Phase 3 reconciliation DQ: metrics whose source vs target layer didn't tie out.

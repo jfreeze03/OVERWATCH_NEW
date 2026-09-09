@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.521.0 - Runtime-creep forecaster: predict the breach before it happens (2026-09-09)
+
+The forward-looking companion to runtime drift. Drift catches a task that already jumped; this fits
+a trend over each task's recent runs and projects where it's headed — so a task marching toward its
+window is caught while there's still time to act (the owner's "predict future issues before they occur").
+
+- **New SQL builder** `etl_control_sql.task_runtime_history_scan` — per-(workflow, task) runtime across
+  the last N runs (reuses the drift builder's per-workflow run ranking; whole series, RN=1 = newest;
+  FAILED runs dropped so a crash can't fake a downward blip; honors the scope-bar Window).
+- **New pure forecaster** `insights.etl_runtime_creep` — fits a robust **Theil-Sen** slope
+  (`forecast._robust_slope`, the median pairwise slope, so one spike can't fake a trend) over each
+  task's runs oldest→newest. Flags only material upward creep (≥ 5s/run) on non-trivial tasks;
+  emits per-run gain, `PROJECTED_SEC` (latest + gain × 7 runs), and `RUNS_TO_2X` (runs until the
+  projection reaches 2× the task's baseline median — a **config-free breach proxy**, no new SETTINGS
+  key, no owner-apply). Steepest first; robust to a lone spike; empty-in → empty-out.
+- **New panel** `operations._runtime_creep_panel` — sits after Runtime drift on Pipeline SLA; headline
+  names the steepest creeper and its runs-to-2×, table shows each task's gain (humanized per-run rate)
+  + projection. Config-gated on the existing `ETL_CONTROL_STATUS_FQN`, honors the Window — **app code
+  only, no migration, no owner-apply.**
+- **Adversarial verify (3 agents) caught 1 LOW, fixed:** the history builder's flat row `LIMIT`
+  (ordered by task) could bisect the boundary task's series at scale — keeping its newest runs,
+  dropping its oldest — biasing that one task's fit and dropping later series. Now capped by WHOLE
+  series (`QUALIFY DENSE_RANK() OVER (ORDER BY WORKFLOW_NAME, TASK_NAME) <= MAX_HISTORY_SERIES`), with
+  the row `LIMIT` demoted to a backstop sized strictly above the series bound so it can never bind; the
+  panel notes when the series cap is hit rather than implying full coverage.
+
 ## 4.520.0 - Workflow runtimes: per-workflow + Window + child↔total reconciliation (2026-09-09)
 
 The "Workflow runtimes" panel now shows the run you mean, in the scope you set, and reconciles the

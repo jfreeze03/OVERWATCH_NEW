@@ -367,6 +367,71 @@ def workflow_runtime_drift_scan(
     )
 
 
+# --- Phase 2b: runtime-creep forecaster (per-task runtime series) ------------
+CREEP_BASELINE_RUNS = 10    # runs of history to fit the trend over (the forecaster reads a series)
+MAX_HISTORY_SERIES = 500    # distinct (workflow, task) series to analyze — the REAL cap
+# Row backstop, sized STRICTLY above the series bound (series × runs) so neither this LIMIT nor the
+# read-layer row cap can ever bisect a task's series mid-way (which would corrupt its trend fit) —
+# the whole-series QUALIFY is the only cap that actually bounds the result.
+MAX_HISTORY_ROWS = MAX_HISTORY_SERIES * CREEP_BASELINE_RUNS + 500
+
+
+def task_runtime_history_scan(
+    control_fqn: object, *, baseline_runs: int = CREEP_BASELINE_RUNS, days: object = 0,
+    max_series: int = MAX_HISTORY_SERIES, max_rows: int = MAX_HISTORY_ROWS,
+) -> str:
+    """Per-(workflow, task) runtime across the last N runs — the series the creep forecaster fits.
+
+    Reuses the drift builder's per-workflow run ranking (each RUN_ID is one workflow's execution,
+    so runs are ranked WITHIN a workflow), but returns the WHOLE series (one row per run, RN=1 =
+    newest) rather than latest-vs-baseline — the Python Theil-Sen fit needs every point. Columns:
+    WORKFLOW_NAME, TASK_NAME, RN, RUN_START, RUNTIME_SEC (end − start, a running task measured to
+    now). FAILED tasks are dropped so a crashed-short run can't fake a downward blip. ``days`` (> 0)
+    honors the scope-bar Window.
+
+    The result is capped by whole SERIES (``max_series`` via DENSE_RANK), never by a flat row cap:
+    a row-only LIMIT ordered by task would bisect the boundary task's series (keeping its newest
+    runs, dropping its oldest) and bias its fit. A series is therefore wholly present or wholly
+    absent; ``max_rows`` is a backstop sized above the series bound so it can never bind. Fail-closed
+    on a bad FQN. Pure: bounded output, no Streamlit."""
+    from app.core.sqlsafe import safe_identifier
+
+    fqn = str(control_fqn or "").strip()
+    if not fqn:
+        return ""
+    try:
+        tbl = safe_identifier(fqn, allow_qualified=True)
+    except ValueError:
+        return ""
+    keep = max(2, int(baseline_runs))
+    _failed = ", ".join(f"'{s}'" for s in sorted(FAILED_TASK_STATUSES))
+    return (
+        "WITH runs AS (\n"
+        f"  SELECT RUN_ID, WORKFLOW_NAME, MAX(TASK_START_DTTM) AS RUN_START FROM {tbl}\n"
+        "  WHERE TASK_START_DTTM IS NOT NULL AND RUN_ID IS NOT NULL\n"
+        f"{_window_clause(days, indent='  ')}"
+        "  GROUP BY RUN_ID, WORKFLOW_NAME\n"
+        f"  QUALIFY ROW_NUMBER() OVER (PARTITION BY WORKFLOW_NAME ORDER BY RUN_START DESC, RUN_ID DESC) <= {keep}\n"
+        "),\n"
+        "ranked AS (\n"
+        "  SELECT RUN_ID, WORKFLOW_NAME, RUN_START,\n"
+        "         ROW_NUMBER() OVER (PARTITION BY WORKFLOW_NAME ORDER BY RUN_START DESC, RUN_ID DESC) AS RN\n"
+        "  FROM runs\n"
+        ")\n"
+        "SELECT s.WORKFLOW_NAME, s.TASK_NAME, r.RN, r.RUN_START,\n"
+        "       MAX(DATEDIFF('second', s.TASK_START_DTTM,\n"
+        "           COALESCE(s.TASK_END_DTTM, CURRENT_TIMESTAMP()))) AS RUNTIME_SEC\n"
+        f"  FROM {tbl} s JOIN ranked r ON s.RUN_ID = r.RUN_ID AND s.WORKFLOW_NAME = r.WORKFLOW_NAME\n"
+        "  WHERE s.TASK_START_DTTM IS NOT NULL\n"
+        f"    AND (s.TASK_STATUS IS NULL OR UPPER(s.TASK_STATUS) NOT IN ({_failed}))\n"
+        "  GROUP BY s.WORKFLOW_NAME, s.TASK_NAME, r.RN, r.RUN_START\n"
+        # cap by WHOLE series so the row cap can never bisect a task's series mid-fit
+        f"  QUALIFY DENSE_RANK() OVER (ORDER BY s.WORKFLOW_NAME, s.TASK_NAME) <= {int(max_series)}\n"
+        "  ORDER BY s.WORKFLOW_NAME, s.TASK_NAME, r.RN\n"
+        f"  LIMIT {int(max_rows)}"
+    )
+
+
 # --- Phase 2: run inventory + parameters (CONTROL_RUN_ID / CONTROL_PARAMS) ----
 MAX_RUNS = 100      # recent-run inventory cap
 MAX_PARAMS = 2000   # one run's parameters (the global + per-session knobs)

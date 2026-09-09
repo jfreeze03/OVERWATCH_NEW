@@ -786,6 +786,70 @@ def duration_sla_forecast(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("SLOWER_X", ascending=False).reset_index(drop=True)[cols]
 
 
+# --- ETL runtime-creep forecaster (Informatica CONTROL_STATUS per-run series) ----
+CREEP_MIN_RUNS = 4            # need at least this many runs before a trend is trusted
+CREEP_HORIZON_RUNS = 7        # project this many runs ahead
+CREEP_MIN_SLOPE_SEC = 5.0     # ignore < 5 sec/run drift (noise, not a trend)
+CREEP_MIN_LATEST_SEC = 30.0   # ignore trivially short tasks (seconds-long steps)
+
+
+def etl_runtime_creep(
+    df: pd.DataFrame, *, min_runs: int = CREEP_MIN_RUNS, horizon_runs: int = CREEP_HORIZON_RUNS,
+    min_slope_sec: float = CREEP_MIN_SLOPE_SEC, min_latest_sec: float = CREEP_MIN_LATEST_SEC,
+) -> pd.DataFrame:
+    """Per-(workflow, task) runtime CREEP: which tasks are trending slower run-over-run, and
+    ~how many runs until each doubles its baseline — a leading indicator, caught before a breach.
+
+    From ``task_runtime_history_scan`` rows (WORKFLOW_NAME, TASK_NAME, RN [1 = newest],
+    RUNTIME_SEC): each task with >= ``min_runs`` runs is fitted with a robust Theil-Sen slope
+    (the median pairwise slope — one spike can't fake a trend) over its runs oldest→newest. A task
+    is flagged only on a MATERIAL upward slope (>= ``min_slope_sec`` per run) and a non-trivial
+    latest runtime. For each: PROJECTED_SEC = latest + slope × ``horizon_runs``, and RUNS_TO_2X =
+    runs until the projected runtime reaches 2× the task's median baseline (0 if already there) — a
+    config-free breach proxy. Steepest creep first. FAILED runs are already excluded upstream.
+    Empty in → empty out. Pure: no Streamlit, no I/O."""
+    cols = ["WORKFLOW_NAME", "TASK_NAME", "RUNS", "LATEST_SEC", "BASELINE_SEC",
+            "SLOPE_SEC_PER_RUN", "PROJECTED_SEC", "RUNS_TO_2X"]
+    if (df is None or df.empty
+            or not {"WORKFLOW_NAME", "TASK_NAME", "RN", "RUNTIME_SEC"}.issubset(df.columns)):
+        return pd.DataFrame(columns=cols)
+    from app.logic.forecast import _robust_slope
+    work = df.copy()
+    work["RUNTIME_SEC"] = pd.to_numeric(work["RUNTIME_SEC"], errors="coerce")
+    work["RN"] = pd.to_numeric(work["RN"], errors="coerce")
+    work = work.dropna(subset=["RUNTIME_SEC", "RN"])
+    if work.empty:
+        return pd.DataFrame(columns=cols)
+    rows = []
+    for (wf, task), g in work.groupby(["WORKFLOW_NAME", "TASK_NAME"]):
+        gg = g.sort_values("RN", ascending=False)     # oldest (highest RN) → newest (RN=1) last
+        ys = [float(v) for v in gg["RUNTIME_SEC"].tolist()]
+        n = len(ys)
+        if n < min_runs:
+            continue
+        latest = ys[-1]
+        if latest < min_latest_sec:
+            continue
+        xs = [float(i) for i in range(n)]             # chronological run index, 0 = oldest
+        slope, _intercept = _robust_slope(xs, ys)
+        if slope < min_slope_sec:                     # only material UPWARD creep survives
+            continue
+        baseline = float(pd.Series(ys).median())
+        projected = latest + slope * horizon_runs
+        target = 2.0 * baseline
+        # runs until the projection reaches 2× baseline; 0 = already there. slope > 0 here, so safe.
+        runs_to_2x = 0 if latest >= target else int(ceil((target - latest) / slope))
+        rows.append({
+            "WORKFLOW_NAME": wf, "TASK_NAME": task, "RUNS": n,
+            "LATEST_SEC": round(latest, 1), "BASELINE_SEC": round(baseline, 1),
+            "SLOPE_SEC_PER_RUN": round(slope, 1), "PROJECTED_SEC": round(projected, 1),
+            "RUNS_TO_2X": runs_to_2x,
+        })
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame(rows).sort_values("SLOPE_SEC_PER_RUN", ascending=False).reset_index(drop=True)[cols]
+
+
 def flag_clustering_churn(df: pd.DataFrame, *, rate: float | None = None,
                           min_credits: float = 1.0) -> pd.DataFrame:
     """Auto-clustering churn (repo wave-2 #6): tables paying credits to recluster

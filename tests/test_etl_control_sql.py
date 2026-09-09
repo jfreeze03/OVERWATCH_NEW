@@ -278,6 +278,40 @@ def test_drift_scan_fail_closed() -> None:
     assert etl.workflow_runtime_drift_scan("a b c") == ""
 
 
+def test_task_runtime_history_scan_basic_and_window() -> None:
+    sql = etl.task_runtime_history_scan(_CTRL, baseline_runs=10, days=30)
+    assert _CTRL in sql
+    # per-workflow run ranking (the same foundation as the drift builder), whole series kept
+    assert "PARTITION BY WORKFLOW_NAME ORDER BY RUN_START DESC, RUN_ID DESC" in sql
+    assert "AS RN" in sql and "AS RUNTIME_SEC" in sql
+    # one row per (workflow, task, run), ordered so the forecaster reads a clean per-task series
+    assert "ORDER BY s.WORKFLOW_NAME, s.TASK_NAME, r.RN" in sql
+    # cap by WHOLE series (DENSE_RANK), not a flat row cap: a row LIMIT ordered by task would
+    # bisect the boundary task's series and bias its fit. The row LIMIT is only a backstop, sized
+    # strictly above the series bound so it can never bind.
+    assert "QUALIFY DENSE_RANK() OVER (ORDER BY s.WORKFLOW_NAME, s.TASK_NAME) <=" in sql
+    assert etl.MAX_HISTORY_ROWS > etl.MAX_HISTORY_SERIES * etl.CREEP_BASELINE_RUNS
+    # FAILED tasks dropped (a crashed-short run must not fake a downward blip); window honored
+    assert "NOT IN (" in sql and "'FAILED'" in sql
+    assert "TASK_START_DTTM >= DATEADD('day', -30, CURRENT_TIMESTAMP())" in sql
+
+
+def test_task_runtime_history_scan_fail_closed() -> None:
+    assert etl.task_runtime_history_scan("") == ""
+    assert etl.task_runtime_history_scan(None) == ""
+    assert etl.task_runtime_history_scan("T; DROP TABLE X") == ""
+    assert etl.task_runtime_history_scan("a b c") == ""
+    # no window filter when unscoped
+    assert "DATEADD" not in etl.task_runtime_history_scan(_CTRL)
+
+
+def test_task_runtime_history_scan_parses() -> None:
+    import pytest
+    sqlglot = pytest.importorskip("sqlglot")
+    sqlglot.parse(etl.task_runtime_history_scan(_CTRL, days=14), dialect="snowflake")
+    sqlglot.parse(etl.task_runtime_history_scan(_CTRL), dialect="snowflake")
+
+
 def test_drift_scan_parses() -> None:
     import pytest
     sqlglot = pytest.importorskip("sqlglot")
