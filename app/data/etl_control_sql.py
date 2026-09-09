@@ -173,6 +173,17 @@ def reference_gap_scan(
 
 MAX_TASKS = 1000  # a nightly run is a few hundred tasks; the cap only guards a misconfig
 
+# TASK_STATUS interpretation (Informatica), shared by the Operations panel and the
+# Brief signal so both read failures the same way. Only KNOWN failure states are a
+# failure (red / a morning fire); RUNNING states are in-progress, never a failure; an
+# unknown status is neither and still shows verbatim in the runtimes table.
+FAILED_TASK_STATUSES = frozenset(
+    {"FAILED", "ABORTED", "ERROR", "ERRORED", "STOPPED", "TERMINATED", "KILLED"}
+)
+RUNNING_TASK_STATUSES = frozenset(
+    {"RUNNING", "STARTED", "IN PROGRESS", "IN-PROGRESS", "SCHEDULED", "QUEUED"}
+)
+
 
 def workflow_runtimes_scan(control_fqn: object, *, max_tasks: int = MAX_TASKS) -> str:
     """Latest run's per-task runtimes from the Informatica CONTROL_STATUS table.

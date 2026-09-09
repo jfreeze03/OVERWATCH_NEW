@@ -186,3 +186,13 @@ def test_workflow_runtimes_scan_injection_fail_closed() -> None:
     # a hostile / malformed FQN must yield no SQL, never an unsafe fragment
     assert etl.workflow_runtimes_scan("T; DROP TABLE X") == ""
     assert etl.workflow_runtimes_scan("a b c") == ""
+
+
+def test_task_status_sets_are_disjoint_and_shared() -> None:
+    # the panel + the Brief signal both read these, so a status is never BOTH a
+    # failure and a running state (that would make the two surfaces disagree)
+    assert etl.FAILED_TASK_STATUSES and etl.RUNNING_TASK_STATUSES
+    assert not (etl.FAILED_TASK_STATUSES & etl.RUNNING_TASK_STATUSES)
+    assert "FAILED" in etl.FAILED_TASK_STATUSES and "ABORTED" in etl.FAILED_TASK_STATUSES
+    assert "RUNNING" in etl.RUNNING_TASK_STATUSES
+    assert "SUCCEEDED" not in etl.FAILED_TASK_STATUSES  # success is never a failure

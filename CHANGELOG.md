@@ -1,5 +1,20 @@
 # Changelog
 
+## 4.509.0 - A failed nightly ETL task now leads the morning Brief (2026-09-09)
+
+Completes the Brief coverage of the ETL cycle: a FAILED task in the latest Informatica run (from
+`CONTROL_STATUS`) usually breaks a downstream load, so — like the reference-data gap — it now
+surfaces on the landing page instead of only inside Operations ▸ Pipeline.
+
+- The Brief's "should I worry?" verdict line folds in a failed-ETL-task signal, and a red primary
+  button names the failed count + workflow and jumps to the Operations panel that lists every task.
+- Reuses the Operations workflow-runtimes scan (the same `(sql, scope)` cache entry — **no extra
+  query**) and a **shared `FAILED_TASK_STATUSES` set** (hoisted into `etl_control_sql`), so the Brief
+  and the panel can never disagree on what counts as a failure. Only real FAILED states fire — a
+  mid-run `RUNNING` task is never a failure.
+- Config-gated + fail-silent via a `probe=True` read (unset config or a missing `SELECT` grant just
+  means the signal doesn't appear). No new migration or grant — reuses `ETL_CONTROL_STATUS_FQN`.
+
 ## 4.508.0 - Workflow-runtimes wall-clock span is consistent with a running task (2026-09-09)
 
 Adversarial-verify follow-up to 4.507.0. The "Workflow runtimes" panel's headline wall-clock span

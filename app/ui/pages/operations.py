@@ -1063,10 +1063,9 @@ def _workflow_runtimes_panel() -> None:
         _status = df["TASK_STATUS"].astype(str).str.upper() if "TASK_STATUS" in df.columns else None
         # Only KNOWN failure states flag red: a RUNNING/in-progress task in a mid-cycle
         # view must NOT read as a failure (an unknown state still shows in the table).
-        _FAILED = {"FAILED", "ABORTED", "ERROR", "ERRORED", "STOPPED", "TERMINATED", "KILLED"}
-        _RUNNING = {"RUNNING", "STARTED", "IN PROGRESS", "IN-PROGRESS", "SCHEDULED", "QUEUED"}
-        n_fail = int(_status.isin(_FAILED).sum()) if _status is not None else 0
-        n_running = int(_status.isin(_RUNNING).sum()) if _status is not None else 0
+        # Same sets the Brief failure signal reads, so the two never disagree.
+        n_fail = int(_status.isin(etl_control_sql.FAILED_TASK_STATUSES).sum()) if _status is not None else 0
+        n_running = int(_status.isin(etl_control_sql.RUNNING_TASK_STATUSES).sum()) if _status is not None else 0
         _wf = ", ".join(sorted(df["WORKFLOW_NAME"].astype(str).unique())[:3]) if "WORKFLOW_NAME" in df.columns else ""
         # Total wall-clock = the run's span (NOT the sum of RUNTIME_SEC — tasks overlap).
         # Derive each task's effective end from start + RUNTIME_SEC (already coalesced to

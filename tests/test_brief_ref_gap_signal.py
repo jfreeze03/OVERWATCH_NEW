@@ -1,11 +1,13 @@
-"""Locks for the Brief reference-data-gap signal (v4.506.0).
+"""Locks for the Brief ETL signals (ref-data gap v4.506.0; failed ETL task v4.509.0).
 
-A source code with no XLAT translation hard-fails the nightly ETL load, so the
-Operations ▸ Pipeline reference-gap check now also leads the Brief landing page:
-a verdict-line signal + a red primary button that jumps to the panel listing the
-codes. The Brief read MUST be config-gated and fail-silent (probe read) so an
-unset config or a missing SELECT grant never shows a setup/grant hint or spams
-APP_ERROR_LOG on the hottest page — the Operations panel owns those hints.
+Two ETL fires now lead the Brief landing page: a source code with no XLAT translation
+(hard-fails the nightly load), and a FAILED task in the latest Informatica run (breaks a
+downstream load). Each is a verdict-line signal + a red primary button that jumps to the
+Operations ▸ Pipeline panel with the detail. Both reads MUST be config-gated and
+fail-silent (probe read) so unset config or a missing SELECT grant never shows a
+setup/grant hint or spams APP_ERROR_LOG on the hottest page — the Operations panels own
+those hints. The failed-task signal reuses the workflow-runtimes scan + the shared
+FAILED_TASK_STATUSES set, so the Brief and the panel never disagree.
 """
 
 from __future__ import annotations
@@ -44,3 +46,17 @@ def test_brief_surfaces_the_gap_in_verdict_and_a_jump_button():
     assert 'key="brief_ref_gap"' in _BRIEF
     assert 'type="primary"' in _BRIEF
     assert 'request_navigation("Operations", "Pipeline SLA")' in _BRIEF
+
+
+def test_brief_surfaces_failed_etl_task_signal():
+    # a FAILED task in the latest ETL run leads the Brief like the ref-gap fire
+    assert "def _workflow_failure_summary(settings: dict)" in _BRIEF
+    # reuses the SAME workflow-runtimes scan + shared failure set (no fork, no disagreement)
+    assert "etl_control_sql.workflow_runtimes_scan(fqn)" in _BRIEF
+    assert "etl_control_sql.FAILED_TASK_STATUSES" in _BRIEF
+    # config-gated + fail-silent probe read, only fires on a real failure
+    assert 'get("ETL_CONTROL_STATUS_FQN")' in _BRIEF
+    assert "probe=True" in _BRIEF
+    # verdict signal + its own jump button
+    assert 'failed ETL {_wf_word} in the latest run' in _BRIEF
+    assert 'key="brief_wf_fail"' in _BRIEF

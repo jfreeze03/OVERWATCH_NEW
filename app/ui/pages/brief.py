@@ -102,6 +102,36 @@ def _reference_gap_summary(settings: dict) -> tuple[int, str]:
     return len(res.df), label
 
 
+def _workflow_failure_summary(settings: dict) -> tuple[int, str]:
+    """Count FAILED tasks in the latest Informatica ETL run (CONTROL_STATUS).
+
+    A failed nightly task usually breaks a downstream load, so it belongs on the
+    morning read like a fire. Reuses the Operations workflow-runtimes scan (the same
+    ``(sql, scope)`` cache entry — no extra query) and the shared FAILED_TASK_STATUSES
+    set, so the Brief and the panel never disagree on what counts as a failure. Only
+    real FAILED states count — a RUNNING task is not a failure. Config-gated and
+    FAIL-SILENT (a probe read → unset config or a missing grant returns (0, "")).
+    Returns (failed_count, workflow_label)."""
+    fqn = str(settings.get("ETL_CONTROL_STATUS_FQN") or "").strip()
+    if not fqn:
+        return 0, ""
+    scan_sql = etl_control_sql.workflow_runtimes_scan(fqn)
+    if not scan_sql:
+        return 0, ""
+    res = run(scan_sql, page=_PAGE, key="brief_wf_runtimes", tier="recent",
+              source="CONTROL_STATUS (latest run)", max_rows=etl_control_sql.MAX_TASKS, probe=True)
+    if not (res.ok and not res.empty) or "TASK_STATUS" not in res.df.columns:
+        return 0, ""
+    status = res.df["TASK_STATUS"].astype(str).str.upper()
+    n_fail = int(status.isin(etl_control_sql.FAILED_TASK_STATUSES).sum())
+    if not n_fail:
+        return 0, ""
+    wf = ""
+    if "WORKFLOW_NAME" in res.df.columns:
+        wf = ", ".join(sorted(res.df["WORKFLOW_NAME"].astype(str).unique())[:2])
+    return n_fail, wf
+
+
 @safe_page(_PAGE)
 def render() -> None:
     f = filters()
@@ -298,6 +328,10 @@ def render() -> None:
     # configured check); config-gated and FAIL-SILENT (unset config / a missing grant
     # returns 0 — the Operations ▸ Pipeline panel owns the setup + grant hints).
     _ref_gap_n, _ref_gap_types = _reference_gap_summary(settings)
+    # A FAILED task in the latest Informatica ETL run is a morning fire too (it usually
+    # breaks a downstream load). Same reused scan + shared failure set as the Operations
+    # panel; config-gated + fail-silent. Only fires when a real failure exists.
+    _wf_fail_n, _wf_fail_wf = _workflow_failure_summary(settings)
 
     # CoCo do-first #1: a computed "should I worry?" opener, worst-first, above the
     # numbers — built from signals already on the page (no new query).
@@ -324,6 +358,11 @@ def render() -> None:
         _rg_word = "code" if _ref_gap_n == 1 else "codes"
         _vsig.append(Signal(
             "bad", f"{_ref_gap_n} source {_rg_word} missing XLAT translation ({_ref_gap_types})"))
+    if _wf_fail_n:
+        _wf_word = "task" if _wf_fail_n == 1 else "tasks"
+        _vsig.append(Signal(
+            "bad", f"{_wf_fail_n} failed ETL {_wf_word} in the latest run"
+                   + (f" ({_wf_fail_wf})" if _wf_fail_wf else "")))
     if exh.usable():
         _erow = exh.df.iloc[0]
         if safe_float(_erow.get("TOTAL")) > 0:
@@ -382,6 +421,16 @@ def render() -> None:
         if st.button(f"⚠ {_ref_gap_n} source {_rg_word} with no XLAT translation "
                      f"({_ref_gap_types}) — add the translation rows before tonight's load →",
                      key="brief_ref_gap", type="primary", width="stretch"):
+            request_navigation("Operations", "Pipeline SLA")
+
+    # A FAILED task in the latest Informatica ETL run — surfaced here (the panel that
+    # lists every task lives in Operations ▸ Pipeline). Only shows on a real failure.
+    if _wf_fail_n:
+        _wf_word = "task" if _wf_fail_n == 1 else "tasks"
+        if st.button(f"⚠ {_wf_fail_n} ETL {_wf_word} FAILED in the latest run"
+                     + (f" ({_wf_fail_wf})" if _wf_fail_wf else "")
+                     + " — check the run before its downstream loads →",
+                     key="brief_wf_fail", type="primary", width="stretch"):
             request_navigation("Operations", "Pipeline SLA")
 
     # Honor the company filter (live finding 2026-07-08: Trexis warehouse
