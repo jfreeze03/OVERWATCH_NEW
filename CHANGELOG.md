@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.507.0 - ETL workflow runtimes from Informatica CONTROL_STATUS (ETL Phase 2) (2026-09-09)
+
+Alfa's nightly cycle is Informatica-orchestrated stored-proc `CALL`s, which are **invisible to
+Snowflake's `ACCOUNT_USAGE.TASK_HISTORY`** — so OVERWATCH never saw the real ETL task runtimes or
+failures. The `CONTROL_STATUS` table is the only record of them, and a new panel reads it directly.
+
+- **Operations ▸ Pipeline ▸ "Workflow runtimes — latest ETL run"** shows one row per task of the
+  most recent run — `WORKFLOW_NAME`, `TASK_NAME`, `TASK_STATUS`, the start/end window, and
+  `RUNTIME_SEC` (end − start; a still-running task is measured to now) — slowest first, with a red
+  banner when any task did not succeed and a wall-clock span for the whole run. The `_SEC` column
+  humanizes to Hr/Min/Sec via the shared table machinery.
+- Builder `etl_control_sql.workflow_runtimes_scan` isolates the latest `RUN_ID` and validates the
+  table FQN with `safe_identifier` (fail-closed). Config-gated + fail-closed-with-grant-hint, the
+  same pattern as the reference-gap panel.
+- **V134** seeds `ETL_CONTROL_STATUS_FQN = ALFA_EDW_PRD.PUBLIC.CONTROL_STATUS` (owner focus: the
+  PRD database). Data-seed only (SETTINGS
+  MERGE, WHEN NOT MATCHED); the key is Admin-editable, so re-pointing it is a config edit. The app
+  role needs `SELECT` on the control table (granted separately) for the live read — owner-applied.
+
 ## 4.506.0 - Reference-data gaps lead the morning Brief (2026-09-09)
 
 A source code with no XLAT translation hard-fails the nightly ETL load, so the every-morning

@@ -1029,6 +1029,71 @@ def _reference_gap_panel(database: str = "") -> None:
         result_caption(res)
 
 
+def _workflow_runtimes_panel() -> None:
+    """Latest ETL run's per-task runtimes + status from the Informatica CONTROL_STATUS table.
+
+    Alfa's nightly cycle is Informatica-orchestrated stored-proc CALLs, invisible to
+    Snowflake's own task history — so CONTROL_STATUS is the only record of
+    each task's runtime and success/failure. Account-wide (a run is one nightly
+    cycle); config-gated via ETL_CONTROL_STATUS_FQN and fail-closed with a grant hint
+    until the app role has SELECT on the control table. Slowest task first; RUNTIME_SEC
+    humanizes to Hr/Min/Sec, and any non-succeeded task raises a red banner."""
+    section_header("Workflow runtimes — latest ETL run (tasks, slowest first)",
+                   "warn", "pipeline", anchor="ops-wf-runtimes")
+    fqn = str(load_settings(_PAGE).get("ETL_CONTROL_STATUS_FQN") or "").strip()
+    if not fqn:
+        empty_state(
+            "needs_setup",
+            "Not configured. Set ETL_CONTROL_STATUS_FQN (the Informatica CONTROL_STATUS table "
+            "FQN, e.g. ALFA_EDW_PRD.PUBLIC.CONTROL_STATUS) on Admin ▸ SETTINGS. The nightly cycle "
+            "is Informatica-orchestrated proc CALLs that Snowflake's TASK_HISTORY can't see — this "
+            "surfaces each task's runtime and status for the latest run straight from the log.")
+        return
+    scan_sql = etl_control_sql.workflow_runtimes_scan(fqn)
+    if not scan_sql:
+        empty_state("needs_setup", "ETL_CONTROL_STATUS_FQN is not a valid table name.")
+        return
+    res = run(scan_sql, page=_PAGE, key="etl_wf_runtimes", tier="recent",
+              source="CONTROL_STATUS (latest run)", max_rows=etl_control_sql.MAX_TASKS)
+    if guard(res, "No workflow task rows found in the latest run.",
+             setup_hint="The app role needs SELECT on the CONTROL_STATUS table "
+                        "(GRANT SELECT ON <table> TO ROLE <app role>)."):
+        df = res.df.copy()
+        n_tasks = len(df)
+        _status = df["TASK_STATUS"].astype(str).str.upper() if "TASK_STATUS" in df.columns else None
+        # Only KNOWN failure states flag red: a RUNNING/in-progress task in a mid-cycle
+        # view must NOT read as a failure (an unknown state still shows in the table).
+        _FAILED = {"FAILED", "ABORTED", "ERROR", "ERRORED", "STOPPED", "TERMINATED", "KILLED"}
+        _RUNNING = {"RUNNING", "STARTED", "IN PROGRESS", "IN-PROGRESS", "SCHEDULED", "QUEUED"}
+        n_fail = int(_status.isin(_FAILED).sum()) if _status is not None else 0
+        n_running = int(_status.isin(_RUNNING).sum()) if _status is not None else 0
+        _wf = ", ".join(sorted(df["WORKFLOW_NAME"].astype(str).unique())[:3]) if "WORKFLOW_NAME" in df.columns else ""
+        # Total wall-clock = span of the run (max end − min start), NOT the sum of
+        # RUNTIME_SEC: tasks overlap, so summing would over-count. Guarded — a
+        # non-datetime frame (unexpected driver typing) just drops the headline.
+        _span = ""
+        try:
+            _span_sec = (df["TASK_END_DTTM"].max() - df["TASK_START_DTTM"].min()).total_seconds()
+            if _span_sec and _span_sec > 0:
+                _span = f" · wall-clock {humanize_duration(_span_sec, 's')}"
+        except Exception:  # noqa: BLE001 - a headline extra must never break the panel
+            _span = ""
+        if n_fail:
+            st.error(f"🔴 {n_fail} of {n_tasks} task(s) in the latest run FAILED — see TASK_STATUS "
+                     "below (a failed nightly task usually breaks a downstream load).")
+        styled_table(df, height=320)
+        _bits = [f"{n_tasks} task(s)"]
+        if n_fail:
+            _bits.append(f"{n_fail} failed")
+        if n_running:
+            _bits.append(f"{n_running} still running")
+        st.caption(f"Latest run of {_wf or 'the nightly cycle'}{_span} — {' · '.join(_bits)}. Slowest "
+                   "task first; runtime is end − start (a still-running task is measured to now). "
+                   "CONTROL_STATUS is the only record of these Informatica proc runtimes — "
+                   "Snowflake's task history never sees them.")
+        result_caption(res)
+
+
 def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "") -> None:
     """Metadata-driven table freshness SLAs (config in PIPELINE_SLA_CONFIG).
 
@@ -1038,6 +1103,9 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
     # load, so this leads the Pipeline tab (config-gated; dormant until set up). Honors
     # the scope-bar Database filter (pinned checks always show).
     _reference_gap_panel(database)
+    # Then the latest nightly run's per-task runtimes (Informatica CONTROL_STATUS) —
+    # account-wide (one cycle), config-gated + fail-silent-with-grant-hint like above.
+    _workflow_runtimes_panel()
     res = run(insights_sql.pipeline_sla_forecast(14), page=_PAGE, key="sla_status", tier="recent",
               source="ACCOUNT_USAGE.TABLE_DML_HISTORY x PIPELINE_SLA_STATUS")
     if not res.ok:

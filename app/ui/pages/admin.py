@@ -514,6 +514,11 @@ _EXPECTED_MIGRATIONS = {
          "per table with added/removed/retyped columns — metadata only, no data scan, no grants) + the "
          "DQ_SCHEMA_DRIFT rule + a CALL arm in SP_ANOMALY_SWEEP riding the daily task (no new task). Ships "
          "ENABLED; first scan baselines only. Null-rate half stays deferred",
+    134: "ETL process-control Phase 2 config seed: ETL_CONTROL_STATUS_FQN = "
+         "ALFA_EDW_PRD.PUBLIC.CONTROL_STATUS, so Operations ▸ Pipeline ▸ 'Workflow runtimes' reads the "
+         "Informatica CONTROL_STATUS table (per-task start/end/status per run) that Snowflake "
+         "TASK_HISTORY can't see. Data-seed only (SETTINGS MERGE, WHEN NOT MATCHED); the app role needs "
+         "SELECT on the control table (granted separately) for the live read",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

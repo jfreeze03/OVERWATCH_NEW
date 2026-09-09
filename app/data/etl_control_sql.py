@@ -163,3 +163,49 @@ def reference_gap_scan(
         f") ORDER BY CHECK_NAME, NEW_CODE\nLIMIT {int(max_codes)}"
     )
     return sql, errors
+
+
+# --- Phase 2: workflow runtimes / status (Informatica CONTROL_STATUS) --------
+# Alfa's nightly cycle is Informatica-orchestrated stored-proc CALLs, so the task
+# runtimes + statuses are INVISIBLE to Snowflake's ACCOUNT_USAGE.TASK_HISTORY (which
+# only records native Snowflake TASKs). CONTROL_STATUS is the only record of each
+# task's start/end/status per run, keyed by RUN_ID. Config: ETL_CONTROL_STATUS_FQN.
+
+MAX_TASKS = 1000  # a nightly run is a few hundred tasks; the cap only guards a misconfig
+
+
+def workflow_runtimes_scan(control_fqn: object, *, max_tasks: int = MAX_TASKS) -> str:
+    """Latest run's per-task runtimes from the Informatica CONTROL_STATUS table.
+
+    Isolates the most recent RUN_ID (the run holding the newest TASK_START_DTTM) and
+    returns one row per task: WORKFLOW_NAME, TASK_NAME, TASK_STATUS, the start/end
+    window, and RUNTIME_SEC = end − start (a still-running task with a NULL end is
+    measured to CURRENT_TIMESTAMP(), so a hung task surfaces). Ordered slowest-first
+    so the long pole leads; the ``_SEC`` column name humanizes to Hr/Min/Sec in the
+    shared table machinery. The table FQN is validated with ``safe_identifier``
+    (fail-closed): an unset or malformed FQN returns ``""`` and the caller renders a
+    setup hint rather than running unsafe SQL. Pure: bounded output, no Streamlit."""
+    from app.core.sqlsafe import safe_identifier
+
+    fqn = str(control_fqn or "").strip()
+    if not fqn:
+        return ""
+    try:
+        tbl = safe_identifier(fqn, allow_qualified=True)
+    except ValueError:
+        return ""
+    return (
+        "WITH latest AS (\n"
+        f"  SELECT RUN_ID FROM {tbl}\n"
+        "  WHERE TASK_START_DTTM IS NOT NULL\n"
+        "  QUALIFY ROW_NUMBER() OVER (ORDER BY TASK_START_DTTM DESC) = 1\n"
+        ")\n"
+        "SELECT s.WORKFLOW_NAME, s.TASK_NAME, s.TASK_STATUS,\n"
+        "       s.TASK_START_DTTM, s.TASK_END_DTTM,\n"
+        "       DATEDIFF('second', s.TASK_START_DTTM,\n"
+        "                COALESCE(s.TASK_END_DTTM, CURRENT_TIMESTAMP())) AS RUNTIME_SEC\n"
+        f"  FROM {tbl} s\n"
+        "  JOIN latest l ON s.RUN_ID = l.RUN_ID\n"
+        "  ORDER BY RUNTIME_SEC DESC, s.TASK_START_DTTM\n"
+        f"  LIMIT {int(max_tasks)}"
+    )

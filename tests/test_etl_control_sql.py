@@ -158,3 +158,31 @@ def test_scan_all_unsafe_yields_no_sql() -> None:
     sql, errs = etl.reference_gap_scan([bad], _XLAT)
     assert sql == ""
     assert len(errs) == 1
+
+
+# --- workflow_runtimes_scan (Phase 2: CONTROL_STATUS) -----------------------
+
+_CTRL = "ALFA_EDW_PRD.PUBLIC.CONTROL_STATUS"
+
+
+def test_workflow_runtimes_scan_basic() -> None:
+    sql = etl.workflow_runtimes_scan(_CTRL)
+    assert _CTRL in sql
+    # latest run only, per-task runtime, running task measured to now, slowest first
+    assert "QUALIFY ROW_NUMBER() OVER (ORDER BY TASK_START_DTTM DESC) = 1" in sql
+    assert "AS RUNTIME_SEC" in sql                      # _SEC name -> Hr/Min/Sec humanize
+    assert "COALESCE(s.TASK_END_DTTM, CURRENT_TIMESTAMP())" in sql
+    assert "ORDER BY RUNTIME_SEC DESC" in sql
+    assert "LIMIT" in sql
+
+
+def test_workflow_runtimes_scan_dormant_when_unset() -> None:
+    assert etl.workflow_runtimes_scan("") == ""
+    assert etl.workflow_runtimes_scan(None) == ""
+    assert etl.workflow_runtimes_scan("   ") == ""
+
+
+def test_workflow_runtimes_scan_injection_fail_closed() -> None:
+    # a hostile / malformed FQN must yield no SQL, never an unsafe fragment
+    assert etl.workflow_runtimes_scan("T; DROP TABLE X") == ""
+    assert etl.workflow_runtimes_scan("a b c") == ""

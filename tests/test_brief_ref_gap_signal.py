@@ -44,7 +44,3 @@ def test_brief_surfaces_the_gap_in_verdict_and_a_jump_button():
     assert 'key="brief_ref_gap"' in _BRIEF
     assert 'type="primary"' in _BRIEF
     assert 'request_navigation("Operations", "Pipeline SLA")' in _BRIEF
-
-
-def test_brief_version_is_current():
-    assert 'APP_VERSION = "4.506.0"' in (_ROOT / "app" / "config.py").read_text(encoding="utf-8")

@@ -70,7 +70,7 @@ def test_v132_rederives_proc_nothing_dropped():
 
 def test_validate_and_docs_track_v132():
     val = _read("snowflake/validate.sql")
-    assert "V001..V133 applied" in val and "VERSION BETWEEN 1 AND 133) = 133" in val
+    assert "V001..V134 applied" in val and "VERSION BETWEEN 1 AND 134) = 134" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V132__dq_breach_alert.sql" in _read(rel)
 

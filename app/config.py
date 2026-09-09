@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.506.0"
+APP_VERSION = "4.507.0"
 
 # The build's load-bearing schema floor. main() reads the live max(SCHEMA_VERSION)
 # once per session and, if it is BELOW this, renders ONE actionable blocked state
@@ -102,6 +102,12 @@ DEFAULT_SETTINGS = {
     #     e.g. pc_uwissuetype.code | ALFA_EDW_PRD.DB_T_PROD_STAG.PC_UWISSUETYPE | CODE_STG
     "ETL_REF_GAP_XLAT": "",
     "ETL_REF_GAP_CHECKS": "",
+    # ETL process control — Phase 2: workflow runtimes / status. Alfa's nightly cycle
+    # is Informatica-orchestrated proc CALLs, invisible to Snowflake TASK_HISTORY, so
+    # this reads the CONTROL_STATUS table (per-task start/end/status per run) directly.
+    # Empty = dormant (setup hint); set on Admin ▸ SETTINGS to the table FQN, e.g.
+    #   ETL_CONTROL_STATUS_FQN  ALFA_EDW_PRD.PUBLIC.CONTROL_STATUS
+    "ETL_CONTROL_STATUS_FQN": "",
     # Governance-drift weights (per-unit penalties; caps fixed in governance.py).
     "GOV_PTS_MFA_GAP": "5",
     "GOV_PTS_EXPIRED_CRED": "8",

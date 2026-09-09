@@ -149,6 +149,7 @@ snowflake/migrations/V130__experiment_verify_proof_guard.sql
 snowflake/migrations/V131__incident_declare_atomic.sql
 snowflake/migrations/V132__dq_breach_alert.sql
 snowflake/migrations/V133__dq_schema_drift.sql
+snowflake/migrations/V134__seed_etl_control_status_fqn.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
