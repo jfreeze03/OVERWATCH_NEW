@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.513.0 - ETL Phase 3: reconciliation DQ from RECON_MTRC_ERROR (2026-09-09)
+
+The last ETL phase: the nightly cycle reconciles each metric's source layer against its target layer,
+and a mismatch means the numbers don't tie out — a data-integrity problem OVERWATCH couldn't see.
+
+- **Operations ▸ Pipeline ▸ "Reconciliation errors — source vs target layer mismatches"** surfaces
+  recent `RECON_MTRC_ERROR` rows (last 30 days, newest first): the metric, frequency, value type, the
+  reconciliation/source/target layers, and the source/target error values. A red banner counts the
+  errors and affected metrics; a verified-clean state when everything reconciles.
+- Builder `etl_control_sql.recon_errors_scan` validates the FQN with `safe_identifier` (fail-closed).
+  One new Admin-editable config key.
+- **V136** seeds `ETL_RECON_ERROR_FQN` to `ALFA_EDW_PRD.DB_T_PROD_CORE.RECON_MTRC_ERROR` (owner focus:
+  the PRD database). Data-seed only (SETTINGS MERGE, WHEN NOT MATCHED). Note this table lives in the
+  `DB_T_PROD_CORE` schema (not `PUBLIC` like the CONTROL_* tables), so it needs its own `SELECT` grant —
+  owner-applied.
+
 ## 4.512.0 - Run-inventory panel surfaces a bad FQN instead of vanishing (2026-09-09)
 
 Adversarial-verify follow-up to 4.511.0 (one LOW finding, fixed). The "Run inventory & parameters"

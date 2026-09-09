@@ -275,3 +275,31 @@ def test_inventory_and_params_parse() -> None:
     sqlglot = pytest.importorskip("sqlglot")
     sqlglot.parse(etl.run_inventory_scan(_RUNID), dialect="snowflake")
     sqlglot.parse(etl.run_params_scan(_PARAMS), dialect="snowflake")
+
+
+# --- recon_errors_scan (Phase 3: RECON_MTRC_ERROR) ---------------------------
+
+_RECON = "ALFA_EDW_PRD.DB_T_PROD_CORE.RECON_MTRC_ERROR"
+
+
+def test_recon_errors_scan_basic() -> None:
+    sql = etl.recon_errors_scan(_RECON, days=30)
+    assert _RECON in sql
+    assert "SOURCE_LAYER, TARGET_LAYER, SOURCE_ERROR, TARGET_ERROR" in sql
+    # recent-window (lookback) + newest first
+    assert "WHERE LOAD_DTTM >= DATEADD('day', -30, CURRENT_TIMESTAMP())" in sql
+    assert "ORDER BY LOAD_DTTM DESC, MTRC" in sql
+    assert "LIMIT" in sql
+
+
+def test_recon_errors_scan_fail_closed() -> None:
+    assert etl.recon_errors_scan("") == ""
+    assert etl.recon_errors_scan(None) == ""
+    assert etl.recon_errors_scan("T; DROP TABLE X") == ""
+    assert etl.recon_errors_scan("a b c") == ""
+
+
+def test_recon_errors_scan_parses() -> None:
+    import pytest
+    sqlglot = pytest.importorskip("sqlglot")
+    sqlglot.parse(etl.recon_errors_scan(_RECON), dialect="snowflake")

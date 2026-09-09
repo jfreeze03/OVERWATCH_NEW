@@ -524,6 +524,11 @@ _EXPECTED_MIGRATIONS = {
          "inventory & parameters' reads the Informatica run registry + per-run parameters. Data-seed "
          "only (SETTINGS MERGE, WHEN NOT MATCHED); the app role needs SELECT on both control tables "
          "(granted separately) for the live read",
+    136: "ETL Phase 3 reconciliation-DQ config seed: ETL_RECON_ERROR_FQN = "
+         "ALFA_EDW_PRD.DB_T_PROD_CORE.RECON_MTRC_ERROR, so Operations ▸ Pipeline ▸ 'Reconciliation "
+         "errors' surfaces recent source-vs-target layer mismatches the nightly recon logged. Data-seed "
+         "only (SETTINGS MERGE, WHEN NOT MATCHED); the app role needs SELECT on the recon table "
+         "(granted separately, DB_T_PROD_CORE schema) for the live read",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

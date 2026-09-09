@@ -1182,6 +1182,43 @@ def _run_inventory_panel() -> None:
                     result_caption(pres)
 
 
+def _recon_error_panel() -> None:
+    """Recent data-reconciliation errors from the Informatica RECON_MTRC_ERROR table.
+
+    Phase 3: the nightly recon compares each metric's SOURCE_LAYER against its TARGET_LAYER
+    and logs a row when they don't tie out. Account-wide; config-gated + fail-silent-with-
+    grant-hint; a verified-clean state when everything reconciles. NOTE this table lives in
+    DB_T_PROD_CORE (not PUBLIC), so it needs its own SELECT grant."""
+    section_header("Reconciliation errors — source vs target layer mismatches",
+                   "warn", "pipeline", anchor="ops-recon-dq")
+    fqn = str(load_settings(_PAGE).get("ETL_RECON_ERROR_FQN") or "").strip()
+    if not fqn:
+        empty_state("needs_setup", "Not configured — set ETL_RECON_ERROR_FQN on Admin ▸ SETTINGS to "
+                    "the RECON_MTRC_ERROR table FQN (e.g. ALFA_EDW_PRD.DB_T_PROD_CORE.RECON_MTRC_ERROR).")
+        return
+    scan_sql = etl_control_sql.recon_errors_scan(fqn)
+    if not scan_sql:
+        empty_state("needs_setup", "ETL_RECON_ERROR_FQN is not a valid table name.")
+        return
+    _days = etl_control_sql.RECON_LOOKBACK_DAYS
+    res = run(scan_sql, page=_PAGE, key="etl_recon_errors", tier="recent",
+              source="RECON_MTRC_ERROR (recent)", max_rows=etl_control_sql.MAX_RECON_ROWS)
+    if guard(res, f"No reconciliation errors in the last {_days} days — source and target layers "
+             "reconcile.", kind="clean",
+             setup_hint="The app role needs SELECT on the RECON_MTRC_ERROR table "
+                        "(GRANT SELECT ON <table> TO ROLE <app role>)."):
+        df = res.df.copy()
+        n = len(df)
+        n_mtrc = int(df["MTRC"].nunique()) if "MTRC" in df.columns else 0
+        st.error(f"🔴 {n} reconciliation error(s) across {n_mtrc} metric(s) in the last {_days} days "
+                 "— source and target layers disagree. Investigate before the numbers are trusted "
+                 "downstream.")
+        styled_table(df, height=320)
+        st.caption(f"From RECON_MTRC_ERROR — each row is a metric whose SOURCE_LAYER and TARGET_LAYER "
+                   f"did not reconcile in the last {_days} days, newest first.")
+        result_caption(res)
+
+
 def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "") -> None:
     """Metadata-driven table freshness SLAs (config in PIPELINE_SLA_CONFIG).
 
@@ -1198,6 +1235,8 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
     _workflow_drift_panel()
     # Then the run inventory (CONTROL_RUN_ID) + the latest run's parameters (CONTROL_PARAMS).
     _run_inventory_panel()
+    # Then Phase 3 reconciliation DQ: metrics whose source vs target layer didn't tie out.
+    _recon_error_panel()
     res = run(insights_sql.pipeline_sla_forecast(14), page=_PAGE, key="sla_status", tier="recent",
               source="ACCOUNT_USAGE.TABLE_DML_HISTORY x PIPELINE_SLA_STATUS")
     if not res.ok:

@@ -54,7 +54,7 @@ def test_v131_app_runs_one_atomic_call_not_two_inserts():
 
 def test_validate_and_docs_track_v131():
     val = _read("snowflake/validate.sql")
-    assert "V001..V135 applied" in val and "VERSION BETWEEN 1 AND 135) = 135" in val
+    assert "V001..V136 applied" in val and "VERSION BETWEEN 1 AND 136) = 136" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V131__incident_declare_atomic.sql" in _read(rel)
     assert "SP_INCIDENT_DECLARE" in _read("snowflake/teardown.sql")

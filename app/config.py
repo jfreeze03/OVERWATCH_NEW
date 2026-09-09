@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.512.0"
+APP_VERSION = "4.513.0"
 
 # The build's load-bearing schema floor. main() reads the live max(SCHEMA_VERSION)
 # once per session and, if it is BELOW this, renders ONE actionable blocked state
@@ -115,6 +115,11 @@ DEFAULT_SETTINGS = {
     #   ETL_CONTROL_PARAMS_FQN  ALFA_EDW_PRD.PUBLIC.CONTROL_PARAMS
     "ETL_CONTROL_RUN_ID_FQN": "",
     "ETL_CONTROL_PARAMS_FQN": "",
+    # ETL process control — Phase 3: reconciliation DQ. The nightly recon logs a
+    # RECON_MTRC_ERROR row when a metric's SOURCE_LAYER and TARGET_LAYER don't tie out.
+    # Empty = dormant; set on Admin ▸ SETTINGS to the table FQN, e.g.
+    #   ETL_RECON_ERROR_FQN  ALFA_EDW_PRD.DB_T_PROD_CORE.RECON_MTRC_ERROR
+    "ETL_RECON_ERROR_FQN": "",
     # Governance-drift weights (per-unit penalties; caps fixed in governance.py).
     "GOV_PTS_MFA_GAP": "5",
     "GOV_PTS_EXPIRED_CRED": "8",

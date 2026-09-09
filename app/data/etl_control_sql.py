@@ -357,3 +357,39 @@ def run_params_scan(params_fqn: object, *, max_params: int = MAX_PARAMS) -> str:
         "  ORDER BY p.SCOPE_TYPE, p.PARAM_NAME\n"
         f"  LIMIT {int(max_params)}"
     )
+
+
+# --- Phase 3: reconciliation DQ (RECON_MTRC_ERROR) ---------------------------
+# The nightly cycle reconciles each metric's SOURCE_LAYER against its TARGET_LAYER and
+# logs a RECON_MTRC_ERROR row when they don't tie out (over the recon threshold). Config:
+# ETL_RECON_ERROR_FQN. NOTE this table lives in DB_T_PROD_CORE, not PUBLIC — its own grant.
+RECON_LOOKBACK_DAYS = 30   # recent recon errors (covers daily + monthly reconciliations)
+MAX_RECON_ROWS = 500
+
+
+def recon_errors_scan(
+    recon_fqn: object, *, days: int = RECON_LOOKBACK_DAYS, max_rows: int = MAX_RECON_ROWS
+) -> str:
+    """Recent reconciliation errors from the Informatica RECON_MTRC_ERROR table.
+
+    Each row is a metric (MTRC) at a frequency / value-type / layer whose SOURCE_LAYER and
+    TARGET_LAYER did not reconcile — a source-vs-target mismatch the nightly recon logged.
+    Returns the errors loaded in the last ``days`` days, newest first. Fail-closed on a bad
+    FQN. Pure: bounded output, no Streamlit."""
+    from app.core.sqlsafe import safe_identifier
+
+    fqn = str(recon_fqn or "").strip()
+    if not fqn:
+        return ""
+    try:
+        tbl = safe_identifier(fqn, allow_qualified=True)
+    except ValueError:
+        return ""
+    return (
+        "SELECT MTRC, FRQCY, VALUE_TYPE, RECON_MTRC_LAYER,\n"
+        "       SOURCE_LAYER, TARGET_LAYER, SOURCE_ERROR, TARGET_ERROR, LOAD_DTTM\n"
+        f"  FROM {tbl}\n"
+        f"  WHERE LOAD_DTTM >= DATEADD('day', -{int(days)}, CURRENT_TIMESTAMP())\n"
+        "  ORDER BY LOAD_DTTM DESC, MTRC\n"
+        f"  LIMIT {int(max_rows)}"
+    )
