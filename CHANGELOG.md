@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.520.0 - Workflow runtimes: per-workflow + Window + child↔total reconciliation (2026-09-09)
+
+The "Workflow runtimes" panel now shows the run you mean, in the scope you set, and reconciles the
+child tasks against the run's total — two queued asks landed together because they live on one panel.
+
+- **Per-workflow picker** — each `RUN_ID` is ONE workflow's execution, so the old "latest run"
+  only ever showed whichever workflow finished most recently. New `workflow_list_scan` lists the
+  workflows with a run in the Window; a picker chooses whose latest run to show. `workflow_runtimes_scan`
+  gained `workflow=` (bound as an escaped literal — a name is data) and picks that workflow's latest run.
+- **Honors the scope-bar Window** — `workflow_runtimes_scan` / `workflow_list_scan` gained `days=`; the
+  Pipeline tab now threads `f["days"]` through `_pipeline_sla_tab`, so the runtimes reader is bounded to
+  the scoped Window (`days<=0` = all time, back-compatible; the Brief signal + the basic call are unchanged).
+- **Child↔total reconciliation** — a new KPI row ties the child tasks to the run's total, computed in
+  pure Python on the frame the panel already fetched (no extra scan): **Wall-clock (total)** vs **Task
+  time (sum)** yields **Parallelism** (`sum/span` > 1× → tasks overlapped) or **Idle / gaps** (`span −
+  sum` → wall-clock spent outside any task). This is the child↔ROOT view: sum of children vs the run's
+  own elapsed, surfacing overlap vs waits without touching CONTROL_RUN_ID.
+
 ## 4.519.0 - ETL cost attribution: credits & $ per task (2026-09-09)
 
 **Which task cost the most last night?** — a new Operations ▸ Pipeline panel and builder that

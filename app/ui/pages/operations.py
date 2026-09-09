@@ -1029,16 +1029,18 @@ def _reference_gap_panel(database: str = "") -> None:
         result_caption(res)
 
 
-def _workflow_runtimes_panel() -> None:
-    """Latest ETL run's per-task runtimes + status from the Informatica CONTROL_STATUS table.
+def _workflow_runtimes_panel(days: int = 0) -> None:
+    """A chosen workflow's latest ETL run — per-task runtimes + a child↔total reconciliation.
 
     Alfa's nightly cycle is Informatica-orchestrated stored-proc CALLs, invisible to
-    Snowflake's own task history — so CONTROL_STATUS is the only record of
-    each task's runtime and success/failure. Account-wide (a run is one nightly
-    cycle); config-gated via ETL_CONTROL_STATUS_FQN and fail-closed with a grant hint
-    until the app role has SELECT on the control table. Slowest task first; RUNTIME_SEC
-    humanizes to Hr/Min/Sec, and any non-succeeded task raises a red banner."""
-    section_header("Workflow runtimes — latest ETL run (tasks, slowest first)",
+    Snowflake's own task history — so CONTROL_STATUS is the only record of each task's
+    runtime and success/failure. Each RUN_ID is ONE workflow's execution, so a single
+    "latest run" only shows one workflow — a picker lists the workflows active in the scoped
+    Window and shows the chosen one's latest run. A reconciliation line ties the child tasks
+    back to the run's total: sum of task time vs wall-clock span reveals parallelism (sum >
+    span, tasks overlap) or idle gaps (sum < span, waits between tasks). Config-gated via
+    ETL_CONTROL_STATUS_FQN, fail-closed with a grant hint; RUNTIME_SEC humanizes to Hr/Min/Sec."""
+    section_header("Workflow runtimes — a workflow's latest run (tasks, slowest first)",
                    "warn", "pipeline", anchor="ops-wf-runtimes")
     fqn = str(load_settings(_PAGE).get("ETL_CONTROL_STATUS_FQN") or "").strip()
     if not fqn:
@@ -1049,13 +1051,33 @@ def _workflow_runtimes_panel() -> None:
             "is Informatica-orchestrated proc CALLs that Snowflake's TASK_HISTORY can't see — this "
             "surfaces each task's runtime and status for the latest run straight from the log.")
         return
-    scan_sql = etl_control_sql.workflow_runtimes_scan(fqn)
+    _scope = f" (last {days}d)" if days else ""
+    # Picker: which workflow's latest run to show. Each RUN_ID is one workflow, so without a
+    # picker the panel only ever shows whichever workflow finished most recently. The list is
+    # scoped to the Window, so it also honors the scope bar.
+    list_sql = etl_control_sql.workflow_list_scan(fqn, days=days)
+    if not list_sql:
+        empty_state("needs_setup", "ETL_CONTROL_STATUS_FQN is not a valid table name.")
+        return
+    lres = run(list_sql, page=_PAGE, key=f"etl_wf_list_{days}", tier="recent",
+               source="CONTROL_STATUS (workflows in window)", max_rows=etl_control_sql.MAX_WORKFLOWS)
+    _wf_pick = ""
+    if lres.ok and not lres.empty and "WORKFLOW_NAME" in lres.df.columns:
+        _wfs = [str(w) for w in lres.df["WORKFLOW_NAME"].tolist()]
+        _wf_pick = st.selectbox("Workflow", _wfs, index=0, key="etl_wf_runtimes_pick",
+                                help="Each run is one workflow; pick which workflow's latest run "
+                                     "to show. Only workflows with a run in the scoped Window are listed.") \
+            if len(_wfs) > 1 else (_wfs[0] if _wfs else "")
+    elif lres.ok and lres.empty:
+        empty_state("clean", f"No ETL runs recorded{_scope}. Widen the scope-bar Window to see older runs.")
+        return
+    scan_sql = etl_control_sql.workflow_runtimes_scan(fqn, workflow=_wf_pick, days=days)
     if not scan_sql:
         empty_state("needs_setup", "ETL_CONTROL_STATUS_FQN is not a valid table name.")
         return
-    res = run(scan_sql, page=_PAGE, key="etl_wf_runtimes", tier="recent",
-              source="CONTROL_STATUS (latest run)", max_rows=etl_control_sql.MAX_TASKS)
-    if guard(res, "No workflow task rows found in the latest run.",
+    res = run(scan_sql, page=_PAGE, key=f"etl_wf_runtimes_{_wf_pick or 'latest'}_{days}", tier="recent",
+              source="CONTROL_STATUS (workflow latest run)", max_rows=etl_control_sql.MAX_TASKS)
+    if guard(res, f"No task rows found for the chosen workflow{_scope}.",
              setup_hint="The app role needs SELECT on the CONTROL_STATUS table "
                         "(GRANT SELECT ON <table> TO ROLE <app role>)."):
         df = res.df.copy()
@@ -1067,32 +1089,53 @@ def _workflow_runtimes_panel() -> None:
         n_fail = int(_status.isin(etl_control_sql.FAILED_TASK_STATUSES).sum()) if _status is not None else 0
         n_running = int(_status.isin(etl_control_sql.RUNNING_TASK_STATUSES).sum()) if _status is not None else 0
         _wf = ", ".join(sorted(df["WORKFLOW_NAME"].astype(str).unique())[:3]) if "WORKFLOW_NAME" in df.columns else ""
-        # Total wall-clock = the run's span (NOT the sum of RUNTIME_SEC — tasks overlap).
-        # Derive each task's effective end from start + RUNTIME_SEC (already coalesced to
-        # now in SQL for a running task) rather than max(TASK_END_DTTM): a NaT end would be
-        # skipped by max() and understate the span BELOW a single running row's shown
-        # runtime. Guarded — a non-datetime frame just drops the headline.
-        _span = ""
+        # Child↔total reconciliation. Wall-clock span = the run's total elapsed (its 'ROOT'
+        # time): NOT the sum of RUNTIME_SEC (tasks overlap). Derive each task's effective end
+        # from start + RUNTIME_SEC (already coalesced to now in SQL for a running task) rather
+        # than max(TASK_END_DTTM): a NaT end would be skipped by max() and understate the span
+        # below a single running row's runtime. sum(RUNTIME_SEC) = total child task-time.
+        #   sum > span  → the tasks overlapped (parallelism factor = sum/span)
+        #   sum < span  → wall-clock has idle gaps not charged to any task (span − sum)
+        # Guarded — a non-datetime frame just drops the reconciliation, never the table.
+        _span_sec = _sum_sec = 0.0
         try:
             _rel_start = (df["TASK_START_DTTM"] - df["TASK_START_DTTM"].min()).dt.total_seconds()
             _span_sec = float((_rel_start + df["RUNTIME_SEC"]).max())
-            if _span_sec > 0:
-                _span = f" · wall-clock {humanize_duration(_span_sec, 's')}"
+            _sum_sec = float(df["RUNTIME_SEC"].map(safe_float).sum())
         except Exception:  # noqa: BLE001 - a headline extra must never break the panel
-            _span = ""
+            _span_sec = _sum_sec = 0.0
         if n_fail:
-            st.error(f"🔴 {n_fail} of {n_tasks} task(s) in the latest run FAILED — see TASK_STATUS "
+            st.error(f"🔴 {n_fail} of {n_tasks} task(s) in this run FAILED — see TASK_STATUS "
                      "below (a failed nightly task usually breaks a downstream load).")
+        if _span_sec > 0:
+            # reconciliation KPIs: total elapsed, summed task-time, and the parallelism/idle read
+            if _sum_sec >= _span_sec:
+                _recon_lbl, _recon_val = "Parallelism", f"{_sum_sec / _span_sec:,.1f}×"
+                _recon_help = ("Sum of task time ÷ wall-clock. >1× means tasks ran concurrently — "
+                               "the run is shorter than its tasks would be run one after another.")
+            else:
+                _recon_lbl, _recon_val = "Idle / gaps", humanize_duration(_span_sec - _sum_sec, "s")
+                _recon_help = ("Wall-clock minus summed task time: elapsed the run spent NOT inside "
+                               "any task (waits, scheduling, setup) — a target to shorten the cycle.")
+            kpi_row([
+                {"label": "Wall-clock (total)", "value": humanize_duration(_span_sec, "s"),
+                 "delta": f"{n_tasks} task(s)", "delta_color": "off"},
+                {"label": "Task time (sum)", "value": humanize_duration(_sum_sec, "s"),
+                 "delta_color": "off"},
+                {"label": _recon_lbl, "value": _recon_val, "delta_color": "off", "help": _recon_help},
+            ])
         styled_table(df, height=320)
         _bits = [f"{n_tasks} task(s)"]
         if n_fail:
             _bits.append(f"{n_fail} failed")
         if n_running:
             _bits.append(f"{n_running} still running")
-        st.caption(f"Latest run of {_wf or 'the nightly cycle'}{_span} — {' · '.join(_bits)}. Slowest "
-                   "task first; runtime is end − start (a still-running task is measured to now). "
-                   "CONTROL_STATUS is the only record of these Informatica proc runtimes — "
-                   "Snowflake's task history never sees them.")
+        st.caption(f"Latest run of {_wf or 'the nightly cycle'}{_scope} — {' · '.join(_bits)}. Slowest "
+                   "task first; runtime is end − start (a still-running task is measured to now). The "
+                   "reconciliation ties the child tasks to the run total: sum of task time vs wall-clock "
+                   "shows parallelism (tasks overlap) or idle gaps (waits between tasks). CONTROL_STATUS "
+                   "is the only record of these Informatica proc runtimes — Snowflake's task history "
+                   "never sees them.")
         result_caption(res)
 
 
@@ -1345,18 +1388,19 @@ def _cost_attribution_panel() -> None:
         result_caption(res)
 
 
-def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "") -> None:
+def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "", days: int = 0) -> None:
     """Metadata-driven table freshness SLAs (config in PIPELINE_SLA_CONFIG).
 
     Owner ask 2026-08-17: the DB-grain diagnostics honor the company filter; the
-    SLA-horizon config/forecast is account-wide (thresholds are account policy)."""
+    SLA-horizon config/forecast is account-wide (thresholds are account policy). The ETL
+    runtimes reader honors the scope-bar Window (``days``) to bound which runs it lists."""
     # First panel by design: a source code missing from XLAT hard-fails the nightly
     # load, so this leads the Pipeline tab (config-gated; dormant until set up). Honors
     # the scope-bar Database filter (pinned checks always show).
     _reference_gap_panel(database)
-    # Then the latest nightly run's per-task runtimes (Informatica CONTROL_STATUS) —
-    # account-wide (one cycle), config-gated + fail-silent-with-grant-hint like above.
-    _workflow_runtimes_panel()
+    # Then a chosen workflow's latest run's per-task runtimes (Informatica CONTROL_STATUS),
+    # scoped to the Window; config-gated + fail-silent-with-grant-hint like above.
+    _workflow_runtimes_panel(days)
     # Then run-over-run drift on that same control table: which task got materially slower.
     _workflow_drift_panel()
     # Then the run inventory (CONTROL_RUN_ID) + the latest run's parameters (CONTROL_PARAMS).
@@ -3068,7 +3112,7 @@ def render() -> None:
     elif section == "Change impact":
         _change_impact_tab(f["company"], f["database"], f["schema_contains"], is_operator)
     elif section == "Pipeline SLA":
-        _pipeline_sla_tab(is_operator, f["company"], f["database"])
+        _pipeline_sla_tab(is_operator, f["company"], f["database"], f["days"])
     elif section == "Emergency":
         # C23: deliberately amber — dangerous controls warrant standing caution.
         section_header("Emergency levers", "warn", "warehouse")

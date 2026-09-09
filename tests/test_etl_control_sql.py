@@ -188,6 +188,49 @@ def test_workflow_runtimes_scan_injection_fail_closed() -> None:
     assert etl.workflow_runtimes_scan("a b c") == ""
 
 
+def test_workflow_runtimes_scan_default_has_no_workflow_or_window_filter() -> None:
+    # back-compat: the no-arg form (Brief signal + basic call) is unchanged — no per-workflow
+    # filter, no window filter, so existing callers keep the global-latest-run behavior.
+    sql = etl.workflow_runtimes_scan(_CTRL)
+    assert "WORKFLOW_NAME =" not in sql
+    assert "DATEADD" not in sql
+
+
+def test_workflow_runtimes_scan_per_workflow_binds_a_literal() -> None:
+    sql = etl.workflow_runtimes_scan(_CTRL, workflow="WF_SP_SEMANTIC_PC")
+    # the chosen workflow filters the latest-run CTE as an escaped literal (data, not identifier)
+    assert "AND WORKFLOW_NAME = 'WF_SP_SEMANTIC_PC'" in sql
+    # a hostile workflow name stays inside the literal (single-quote doubled)
+    assert "'x'' OR ''1''=''1'" in etl.workflow_runtimes_scan(_CTRL, workflow="x' OR '1'='1")
+
+
+def test_workflow_runtimes_scan_honors_window() -> None:
+    # days > 0 bounds the run to the scope-bar Window; days <= 0 adds no window filter
+    assert "TASK_START_DTTM >= DATEADD('day', -7, CURRENT_TIMESTAMP())" in \
+        etl.workflow_runtimes_scan(_CTRL, days=7)
+    assert "DATEADD" not in etl.workflow_runtimes_scan(_CTRL, days=0)
+    assert "DATEADD" not in etl.workflow_runtimes_scan(_CTRL, days=-3)
+
+
+def test_workflow_list_scan_basic_and_window() -> None:
+    sql = etl.workflow_list_scan(_CTRL, days=14)
+    assert _CTRL in sql
+    assert "MAX(TASK_START_DTTM) AS LAST_RUN_AT" in sql
+    assert "COUNT(DISTINCT RUN_ID) AS RUNS" in sql
+    assert "GROUP BY WORKFLOW_NAME" in sql and "ORDER BY LAST_RUN_AT DESC" in sql
+    assert "TASK_START_DTTM >= DATEADD('day', -14, CURRENT_TIMESTAMP())" in sql
+    # fail-closed on a bad FQN; no window filter when unscoped
+    assert etl.workflow_list_scan("") == "" and etl.workflow_list_scan("a b c") == ""
+    assert "DATEADD" not in etl.workflow_list_scan(_CTRL)
+
+
+def test_workflow_runtimes_and_list_parse() -> None:
+    import pytest
+    sqlglot = pytest.importorskip("sqlglot")
+    sqlglot.parse(etl.workflow_runtimes_scan(_CTRL, workflow="WF_X", days=7), dialect="snowflake")
+    sqlglot.parse(etl.workflow_list_scan(_CTRL, days=30), dialect="snowflake")
+
+
 def test_task_status_sets_are_disjoint_and_shared() -> None:
     # the panel + the Brief signal both read these, so a status is never BOTH a
     # failure and a running state (that would make the two surfaces disagree)

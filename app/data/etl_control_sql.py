@@ -185,17 +185,31 @@ RUNNING_TASK_STATUSES = frozenset(
 )
 
 
-def workflow_runtimes_scan(control_fqn: object, *, max_tasks: int = MAX_TASKS) -> str:
-    """Latest run's per-task runtimes from the Informatica CONTROL_STATUS table.
+MAX_WORKFLOWS = 200  # distinct workflows for the runtimes picker (a cycle has dozens; bounded)
 
-    Isolates the most recent RUN_ID (the run holding the newest TASK_START_DTTM) and
-    returns one row per task: WORKFLOW_NAME, TASK_NAME, TASK_STATUS, the start/end
-    window, and RUNTIME_SEC = end − start (a still-running task with a NULL end is
-    measured to CURRENT_TIMESTAMP(), so a hung task surfaces). Ordered slowest-first
-    so the long pole leads; the ``_SEC`` column name humanizes to Hr/Min/Sec in the
-    shared table machinery. The table FQN is validated with ``safe_identifier``
-    (fail-closed): an unset or malformed FQN returns ``""`` and the caller renders a
-    setup hint rather than running unsafe SQL. Pure: bounded output, no Streamlit."""
+
+def _window_clause(days: object, col: str = "TASK_START_DTTM", indent: str = "  ") -> str:
+    """A ``AND <col> >= DATEADD('day', -N, now)`` line honoring the scope-bar Window.
+
+    ``days <= 0`` (the default / 'all') returns ``""`` — no window filter — so callers
+    that don't scope a window behave exactly as before. Shared by the runtimes, list, and
+    drift readers so the scope bar means the same thing everywhere."""
+    try:
+        n = int(days or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n <= 0:
+        return ""
+    return f"{indent}AND {col} >= DATEADD('day', -{n}, CURRENT_TIMESTAMP())\n"
+
+
+def workflow_list_scan(control_fqn: object, *, days: object = 0, max_rows: int = MAX_WORKFLOWS) -> str:
+    """Distinct workflows with a run in the Window, for the runtimes picker.
+
+    One row per WORKFLOW_NAME: LAST_RUN_AT (newest TASK_START_DTTM) and RUNS (distinct
+    RUN_IDs seen in the window), most-recent first — so the picker defaults to the workflow
+    that ran most recently and only lists workflows actually active in the scoped Window.
+    Fail-closed on a bad FQN. Pure: bounded output, no Streamlit."""
     from app.core.sqlsafe import safe_identifier
 
     fqn = str(control_fqn or "").strip()
@@ -206,9 +220,49 @@ def workflow_runtimes_scan(control_fqn: object, *, max_tasks: int = MAX_TASKS) -
     except ValueError:
         return ""
     return (
+        "SELECT WORKFLOW_NAME, MAX(TASK_START_DTTM) AS LAST_RUN_AT,\n"
+        "       COUNT(DISTINCT RUN_ID) AS RUNS\n"
+        f"  FROM {tbl}\n"
+        "  WHERE TASK_START_DTTM IS NOT NULL AND WORKFLOW_NAME IS NOT NULL\n"
+        f"{_window_clause(days)}"
+        "  GROUP BY WORKFLOW_NAME\n"
+        "  ORDER BY LAST_RUN_AT DESC\n"
+        f"  LIMIT {int(max_rows)}"
+    )
+
+
+def workflow_runtimes_scan(
+    control_fqn: object, *, workflow: object = "", days: object = 0, max_tasks: int = MAX_TASKS
+) -> str:
+    """A workflow's latest run's per-task runtimes from the Informatica CONTROL_STATUS table.
+
+    With ``workflow`` set, isolates the newest RUN_ID FOR THAT WORKFLOW (bound as an escaped
+    literal — a name is data, not an identifier) within the scoped Window; otherwise the
+    globally-newest run (back-compatible default). Per-workflow matters because each RUN_ID is
+    ONE workflow's execution, so the single globally-latest run only ever shows one workflow —
+    the picker lets the operator see any workflow's latest run, not just whichever finished last.
+    ``days`` (> 0) honors the scope-bar Window; ``0`` means all time. Returns one row per task:
+    WORKFLOW_NAME, TASK_NAME, TASK_STATUS, the start/end window, and RUNTIME_SEC = end − start (a
+    still-running task with a NULL end is measured to CURRENT_TIMESTAMP(), so a hung task
+    surfaces). Slowest-first; the ``_SEC`` name humanizes to Hr/Min/Sec. Fail-closed on a bad
+    FQN. Pure: bounded output, no Streamlit."""
+    from app.core.sqlsafe import safe_identifier, sql_literal
+
+    fqn = str(control_fqn or "").strip()
+    if not fqn:
+        return ""
+    try:
+        tbl = safe_identifier(fqn, allow_qualified=True)
+    except ValueError:
+        return ""
+    _wf = str(workflow or "").strip()
+    wf_filter = f"    AND WORKFLOW_NAME = {sql_literal(_wf)}\n" if _wf else ""
+    return (
         "WITH latest AS (\n"
         f"  SELECT RUN_ID FROM {tbl}\n"
         "  WHERE TASK_START_DTTM IS NOT NULL\n"
+        f"{wf_filter}"
+        f"{_window_clause(days, indent='  ')}"
         "  QUALIFY ROW_NUMBER() OVER (ORDER BY TASK_START_DTTM DESC) = 1\n"
         ")\n"
         "SELECT s.WORKFLOW_NAME, s.TASK_NAME, s.TASK_STATUS,\n"

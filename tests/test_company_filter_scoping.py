@@ -38,5 +38,6 @@ def test_every_owner_queue_reader_passes_company():
 def test_pipeline_load_failures_scopes_to_company():
     ops = (_ROOT / "app" / "ui" / "pages" / "operations.py").read_text(encoding="utf-8")
     assert "copy_load_failures(7, company)" in ops           # was hardcoded 'ALL'
-    # database added v4.499.0: the reference-data-gap panel honors the scope-bar Database filter
-    assert "_pipeline_sla_tab(is_operator, f[\"company\"], f[\"database\"])" in ops
+    # database added v4.499.0: the reference-data-gap panel honors the scope-bar Database filter;
+    # days added v4.520.0: the ETL workflow-runtimes reader honors the scope-bar Window
+    assert "_pipeline_sla_tab(is_operator, f[\"company\"], f[\"database\"], f[\"days\"])" in ops
