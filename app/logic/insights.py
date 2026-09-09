@@ -850,6 +850,151 @@ def etl_runtime_creep(
     return pd.DataFrame(rows).sort_values("SLOPE_SEC_PER_RUN", ascending=False).reset_index(drop=True)[cols]
 
 
+# --- ETL failure-recurrence ("which task fails the next run") -----------------
+FAILREC_DECAY = 0.7          # recency weight per run older (newest run weighted 1.0)
+FAILREC_CHRONIC_RATE = 0.5   # fails >= this share of analyzed runs -> "chronic" (gated by MIN_RUNS)
+FAILREC_FLAKY_RATE = 0.2     # recency-weighted failure share above which a green task is "intermittent"
+FAILREC_MIN_RUNS = 4         # below this the rate is untrustworthy -> withhold chronic/flaky labels
+
+_SEV_RANK = {"High": 0, "Medium": 1, "Low": 2}
+
+
+def task_failure_recurrence(
+    df: pd.DataFrame, *, decay: float = FAILREC_DECAY, chronic_rate: float = FAILREC_CHRONIC_RATE,
+    flaky_rate: float = FAILREC_FLAKY_RATE, min_runs: int = FAILREC_MIN_RUNS,
+) -> pd.DataFrame:
+    """Per-(workflow, task) failure recurrence from task_status_history_scan rows.
+
+    Folds each task's recent run outcomes into a leading-FAILED streak, a failure rate, a
+    recency-weighted propensity, and an evidence-gated VERDICT/SEVERITY — an honest "likely to
+    fail again" signal that NEVER manufactures a probability a tiny sample can't support. A
+    still-running run is excluded from the denominator (it neither counts nor clears a streak); a
+    NULL/unknown non-running status counts as a completed non-failure (the app-wide drift/creep
+    convention). Only tasks that failed >= once in the window surface (a triage list, not an
+    inventory). The CHRONIC / INTERMITTENT labels are withheld when there is too little history
+    (LOW_HISTORY), but an observed latest failure surfaces regardless of sample size — a failure is
+    a fact, not an estimate. Worst-first. Empty / mis-shaped in -> empty out; never raises. Pure."""
+    cols = ["WORKFLOW_NAME", "TASK_NAME", "FAIL_STREAK", "RUNS_ANALYZED", "FAILS",
+            "FAIL_RATE_PCT", "RECENCY_SCORE_PCT", "LATEST_FAILED", "LAST_FAILED_AT",
+            "LOW_HISTORY", "VERDICT", "SEVERITY"]
+    need = {"WORKFLOW_NAME", "TASK_NAME", "RN", "IS_FAILED"}
+    if df is None or df.empty or not need.issubset(df.columns):
+        return pd.DataFrame(columns=cols)
+    work = df.copy()
+    work["RN"] = pd.to_numeric(work["RN"], errors="coerce")
+    work["IS_FAILED"] = pd.to_numeric(work["IS_FAILED"], errors="coerce").fillna(0).astype(int)
+    work["IS_RUNNING"] = (pd.to_numeric(work["IS_RUNNING"], errors="coerce").fillna(0).astype(int)
+                          if "IS_RUNNING" in work.columns else 0)
+    work["RUN_START"] = pd.to_datetime(work.get("RUN_START"), errors="coerce")
+    work = work.dropna(subset=["RN"])
+    rows = []
+    for (wf, task), g in work.groupby(["WORKFLOW_NAME", "TASK_NAME"]):
+        gg = g[g["IS_RUNNING"] == 0].sort_values("RN")   # newest (RN=1) first; drop in-flight runs
+        n = len(gg)
+        if n == 0:
+            continue
+        failed = gg["IS_FAILED"].tolist()                # newest-first
+        fails = int(sum(failed))
+        if fails == 0:
+            continue                                     # only tasks that failed in the window surface
+        streak = 0
+        for f in failed:                                 # leading consecutive failures from newest
+            if f == 1:
+                streak += 1
+            else:
+                break
+        fail_rate = fails / n
+        _w = [decay ** i for i in range(n)]
+        recency = sum(wt * f for wt, f in zip(_w, failed, strict=True)) / sum(_w) if _w else 0.0
+        _failed_starts = gg.loc[gg["IS_FAILED"] == 1, "RUN_START"].dropna()
+        last_failed_at = _failed_starts.max() if not _failed_starts.empty else pd.NaT
+        low_history = n < min_runs
+        chronic = (not low_history) and fail_rate >= chronic_rate
+        if streak >= 3:
+            verdict, sev = f"Actively broken — failed the last {streak} runs", "High"
+        elif streak == 2:
+            verdict, sev = "Failing repeatedly — failed the last 2 runs", "High"
+        elif streak == 1:
+            verdict, sev = "Failed the latest run", "Medium"
+        elif chronic:
+            verdict, sev = f"Chronic — fails ~{fail_rate * 100:.0f}% of runs", "Medium"
+        elif (not low_history) and recency >= flaky_rate:
+            # judged on the recency-weighted score, so report THAT number (agrees with
+            # RECENCY_SCORE_PCT) — not the whole-window fail_rate, which would contradict it.
+            verdict, sev = f"Intermittent — ~{recency * 100:.0f}% recency-weighted failures", "Low"
+        else:
+            verdict, sev = "Occasional failure", "Low"
+        rows.append({
+            "WORKFLOW_NAME": wf, "TASK_NAME": task, "FAIL_STREAK": streak,
+            "RUNS_ANALYZED": n, "FAILS": fails, "FAIL_RATE_PCT": round(fail_rate * 100, 1),
+            "RECENCY_SCORE_PCT": round(recency * 100, 1), "LATEST_FAILED": bool(streak >= 1),
+            "LAST_FAILED_AT": last_failed_at, "LOW_HISTORY": bool(low_history),
+            "VERDICT": verdict, "SEVERITY": sev,
+        })
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    out = pd.DataFrame(rows)
+    out["_o"] = out["SEVERITY"].map(_SEV_RANK)
+    return (out.sort_values(["_o", "FAIL_STREAK", "RECENCY_SCORE_PCT", "FAIL_RATE_PCT"],
+                            ascending=[True, False, False, False])
+            .drop(columns="_o").reset_index(drop=True)[cols])
+
+
+# --- ETL reconciliation recurrence (which metric keeps breaking) --------------
+RECON_CHRONIC_PCT = 60.0   # recurs in >= this % of error-cycles -> chronic (gated by MIN_CYCLES)
+RECON_MIN_CYCLES = 3       # denominator floor: below this a fraction is not yet a trend
+RECON_EMERGING_MAX = 2     # broke in only the last 1-2 cohort cycles -> a fresh regression ("NEW")
+
+
+def recon_recurrence(
+    df: pd.DataFrame, *, chronic_pct: float = RECON_CHRONIC_PCT, chronic_min: int = RECON_MIN_CYCLES,
+    emerging_max: int = RECON_EMERGING_MAX,
+) -> pd.DataFrame:
+    """Classify recon_recurrence_scan rows into a tier ladder + a testable rank. No I/O.
+
+    TIER: RESOLVED (didn't break in the latest cohort cycle — demote), else CHRONIC (recurs >=
+    chronic_pct of error-cycles, broke >= chronic_min cycles, and enough history), else NEW (broke
+    in only the last 1-2 cycles — a fresh regression), else INTERMITTENT (flapping). LOW_CONFIDENCE
+    guards a thin denominator (< chronic_min error-cycles) from minting a false chronic off a 1/1.
+    RANK_SCORE puts active-and-recurring on top and sinks resolved one-offs. Empty / mis-shaped in ->
+    empty out; never raises. Pure."""
+    cols = ["MTRC", "FRQCY", "VALUE_TYPE", "RECON_MTRC_LAYER", "TIER", "SEVERITY",
+            "RECURRENCE_PCT", "BROKEN_CYCLES", "TOTAL_ERROR_CYCLES", "RECENT_BROKEN",
+            "RECENT_WINDOW", "BROKE_LATEST_CYCLE", "LOW_CONFIDENCE", "FIRST_BROKEN_ON",
+            "LAST_BROKEN_ON", "ERROR_ROWS", "SOURCE_LAYER", "TARGET_LAYER",
+            "SOURCE_ERROR", "TARGET_ERROR", "RANK_SCORE"]
+    need = {"MTRC", "BROKEN_CYCLES", "TOTAL_ERROR_CYCLES", "RECURRENCE_PCT", "BROKE_LATEST_CYCLE"}
+    if df is None or df.empty or not need.issubset(df.columns):
+        return pd.DataFrame(columns=cols)
+    out = df.copy()
+    for c in ("BROKEN_CYCLES", "TOTAL_ERROR_CYCLES", "RECURRENCE_PCT", "RECENT_BROKEN"):
+        out[c] = pd.to_numeric(out.get(c), errors="coerce").fillna(0)
+    out["BROKE_LATEST_CYCLE"] = out["BROKE_LATEST_CYCLE"].astype(bool)
+    out["LOW_CONFIDENCE"] = out["TOTAL_ERROR_CYCLES"] < chronic_min
+
+    def _tier(r: pd.Series) -> str:
+        if not r["BROKE_LATEST_CYCLE"]:
+            return "RESOLVED"
+        if (r["RECURRENCE_PCT"] >= chronic_pct and r["BROKEN_CYCLES"] >= chronic_min
+                and not r["LOW_CONFIDENCE"]):
+            return "CHRONIC"
+        if r["BROKEN_CYCLES"] <= emerging_max:
+            return "NEW"
+        return "INTERMITTENT"
+
+    out["TIER"] = out.apply(_tier, axis=1)
+    out["SEVERITY"] = out.apply(
+        lambda r: "High" if r["TIER"] == "CHRONIC"
+        else "Medium" if r["BROKE_LATEST_CYCLE"] else "Low", axis=1)
+    out["RANK_SCORE"] = ((out["BROKE_LATEST_CYCLE"].astype(int) * 1000)
+                         + out["RECENT_BROKEN"] * 50 + out["RECURRENCE_PCT"]).round(1)
+    for c in cols:
+        if c not in out.columns:
+            out[c] = None
+    return out.sort_values(["RANK_SCORE", "BROKEN_CYCLES"],
+                           ascending=[False, False]).reset_index(drop=True)[cols]
+
+
 def flag_clustering_churn(df: pd.DataFrame, *, rate: float | None = None,
                           min_credits: float = 1.0) -> pd.DataFrame:
     """Auto-clustering churn (repo wave-2 #6): tables paying credits to recluster

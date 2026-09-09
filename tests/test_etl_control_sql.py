@@ -470,3 +470,62 @@ def test_cost_attribution_scan_parses() -> None:
     sqlglot = pytest.importorskip("sqlglot")
     sqlglot.parse(etl.run_cost_attribution_scan(_CTRL), dialect="snowflake")
     sqlglot.parse(etl.run_cost_attribution_scan(_CTRL, run_id="abc-123"), dialect="snowflake")
+
+
+# --- task_status_history_scan (Phase 2c: failure-recurrence series) ----------
+
+def test_task_status_history_scan_basic() -> None:
+    sql = etl.task_status_history_scan(_CTRL, lookback_runs=20, days=14)
+    assert _CTRL in sql
+    assert "PARTITION BY WORKFLOW_NAME ORDER BY RUN_START DESC, RUN_ID DESC" in sql
+    # KEEPS failed runs (the signal); terminal status via MAX_BY collapses an Informatica retry
+    assert "MAX_BY(s.TASK_STATUS, COALESCE(s.TASK_END_DTTM, s.TASK_START_DTTM)) AS TERMINAL_STATUS" in sql
+    assert "AS IS_FAILED" in sql and "AS IS_RUNNING" in sql
+    assert "'FAILED'" in sql and "'RUNNING'" in sql   # both shared status sets inlined
+    # whole-series cap so the row cap can't bisect a task's status series mid-streak; window honored
+    assert "QUALIFY DENSE_RANK() OVER (ORDER BY s.WORKFLOW_NAME, s.TASK_NAME) <=" in sql
+    assert "TASK_START_DTTM >= DATEADD('day', -14, CURRENT_TIMESTAMP())" in sql
+
+
+def test_task_status_history_scan_fail_closed_and_parse() -> None:
+    assert etl.task_status_history_scan("") == ""
+    assert etl.task_status_history_scan(None) == ""
+    assert etl.task_status_history_scan("a b c") == ""
+    assert "DATEADD" not in etl.task_status_history_scan(_CTRL)   # no window filter when unscoped
+    import pytest
+    sqlglot = pytest.importorskip("sqlglot")
+    sqlglot.parse(etl.task_status_history_scan(_CTRL, days=7), dialect="snowflake")
+
+
+# --- recon_recurrence_scan (Phase 3b: reconciliation recurrence) -------------
+
+def test_recon_recurrence_scan_basic() -> None:
+    sql = etl.recon_recurrence_scan(_RECON, days=45)
+    assert _RECON in sql
+    # a cycle = DATE(LOAD_DTTM); the denominator is a per-FRQCY cohort (never global)
+    assert "CAST(LOAD_DTTM AS DATE) AS CYCLE_DATE" in sql
+    assert "DENSE_RANK() OVER (PARTITION BY FRQCY ORDER BY CYCLE_DATE DESC)" in sql
+    # COALESCE all THREE nullable grain columns before any GROUP BY / equijoin (NULL=NULL trap)
+    assert "COALESCE(FRQCY, '(unknown)')" in sql
+    assert "COALESCE(VALUE_TYPE, '(unknown)')" in sql
+    assert "COALESCE(RECON_MTRC_LAYER, '(unknown)')" in sql
+    # conditional recurrence fraction + the layer hop context
+    assert "AS RECURRENCE_PCT" in sql and "AS TOTAL_ERROR_CYCLES" in sql
+    assert "MAX_BY(SOURCE_LAYER, LOAD_DTTM)" in sql
+    assert "WHERE LOAD_DTTM >= DATEADD('day', -45, CURRENT_TIMESTAMP())" in sql
+
+
+def test_recon_recurrence_scan_default_window_and_fail_closed() -> None:
+    # unscoped -> the 90-day default (so monthly cadences recur), NOT the raw panel's 30
+    assert "-90, CURRENT_TIMESTAMP()" in etl.recon_recurrence_scan(_RECON)
+    assert etl.recon_recurrence_scan("") == ""
+    assert etl.recon_recurrence_scan(None) == ""
+    assert etl.recon_recurrence_scan("T; DROP TABLE X") == ""
+    assert etl.recon_recurrence_scan("a b c") == ""
+
+
+def test_recon_recurrence_scan_parses() -> None:
+    import pytest
+    sqlglot = pytest.importorskip("sqlglot")
+    sqlglot.parse(etl.recon_recurrence_scan(_RECON, days=90), dialect="snowflake")
+    sqlglot.parse(etl.recon_recurrence_scan(_RECON), dialect="snowflake")

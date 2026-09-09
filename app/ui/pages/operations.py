@@ -56,7 +56,9 @@ from app.logic.insights import (
     etl_runtime_creep,
     pipeline_sla_forecast,
     rank_release_candidates,
+    recon_recurrence,
     task_duration_anomalies,
+    task_failure_recurrence,
     task_release_deltas,
     with_auto_suspend_settings,
 )
@@ -1140,6 +1142,56 @@ def _workflow_runtimes_panel(days: int = 0) -> None:
         result_caption(res)
 
 
+def _failure_recurrence_panel(days: int = 0) -> None:
+    """Tasks that keep failing — which is likely to fail the next run.
+
+    A FAILED task outranks a slow one at 7am, so this leads the drift/creep panels. From each task's
+    recent run outcomes (CONTROL_STATUS terminal status per run) it derives a leading-FAILED streak, a
+    failure rate, and a recency-weighted propensity, then an evidence-gated verdict — actively broken,
+    chronic, intermittent — never a manufactured probability. Config-gated on ETL_CONTROL_STATUS_FQN;
+    honors the scope-bar Window; clean when nothing has failed in the scoped runs."""
+    section_header("Failure recurrence — tasks likely to fail again",
+                   "warn", "pipeline", anchor="ops-failure-recurrence")
+    fqn = str(load_settings(_PAGE).get("ETL_CONTROL_STATUS_FQN") or "").strip()
+    if not fqn:
+        empty_state("needs_setup", "Not configured — set ETL_CONTROL_STATUS_FQN on Admin ▸ "
+                    "SETTINGS (shared with the runtimes panel above).")
+        return
+    hist_sql = etl_control_sql.task_status_history_scan(fqn, days=days)
+    if not hist_sql:
+        empty_state("needs_setup", "ETL_CONTROL_STATUS_FQN is not a valid table name.")
+        return
+    res = run(hist_sql, page=_PAGE, key=f"etl_status_history_{days}", tier="recent",
+              source="CONTROL_STATUS (per-task run status series)",
+              max_rows=etl_control_sql.MAX_FAILREC_ROWS)
+    if guard(res, "No run history yet to judge recurrence.",
+             setup_hint="The app role needs SELECT on the CONTROL_STATUS table "
+                        "(GRANT SELECT ON <table> TO ROLE <app role>)."):
+        rec = task_failure_recurrence(res.df)
+        if ({"WORKFLOW_NAME", "TASK_NAME"}.issubset(res.df.columns)
+                and res.df[["WORKFLOW_NAME", "TASK_NAME"]].drop_duplicates().shape[0]
+                >= etl_control_sql.MAX_HISTORY_SERIES):
+            st.caption(f"⚠ Judged the first {etl_control_sql.MAX_HISTORY_SERIES} task series — some "
+                       "tasks were not analyzed at this scale.")
+        if rec.empty:
+            empty_state("clean", "No task has failed in the scoped runs — nothing is trending toward a "
+                        "repeat failure. (A task needs a failure in the window to appear.)")
+            return
+        n = len(rec)
+        active = int((rec["SEVERITY"] == "High").sum())
+        top = rec.iloc[0]
+        st.warning(f"🔴 {n} task(s) failing or at risk of failing again — {active} actively broken. "
+                   f"Top: **{top.get('TASK_NAME')}** — {top.get('VERDICT')}.")
+        styled_table(rec, height=320)
+        st.caption("Each RUN_ID is one workflow's nightly execution. FAIL_STREAK = consecutive failed "
+                   "runs from newest; FAIL_RATE_PCT = failed ÷ analyzed runs; RECENCY_SCORE_PCT = "
+                   "decay-weighted failure share (newest weighted most) — a 'likely to fail next run' "
+                   "PROXY, not a guaranteed forecast. Still-running runs are excluded; LOW_HISTORY marks "
+                   "tasks with too few runs to trust the rate (their chronic/intermittent labels are "
+                   "withheld). Ranked worst-first.")
+        result_caption(res)
+
+
 def _workflow_drift_panel() -> None:
     """Tasks in the latest ETL run that ran materially SLOWER than their recent baseline.
 
@@ -1366,6 +1418,61 @@ def _recon_error_panel() -> None:
         result_caption(res)
 
 
+def _recon_recurrence_panel(days: int = 0) -> None:
+    """Which reconciliation checks KEEP breaking (vs the raw 'what broke' panel above).
+
+    RECON_MTRC_ERROR logs only failures, so recurrence is CONDITIONAL: of the distinct cycles ANY
+    same-frequency check broke, on how many did THIS check break — a failures-only proxy, never a
+    pass-rate. Chronic (recurs in most cycles) leads; a fresh regression (broke only the last 1-2
+    cycles) is flagged NEW; a check that stopped breaking is demoted RESOLVED. Config-gated on the
+    same ETL_RECON_ERROR_FQN as the raw recon panel; honors the scope-bar Window."""
+    section_header("Reconciliation recurrence — metrics that keep breaking",
+                   "warn", "pipeline", anchor="ops-recon-recurrence")
+    fqn = str(load_settings(_PAGE).get("ETL_RECON_ERROR_FQN") or "").strip()
+    if not fqn:
+        empty_state("needs_setup", "Not configured — set ETL_RECON_ERROR_FQN on Admin ▸ SETTINGS "
+                    "(shared with the reconciliation-errors panel above).")
+        return
+    scan_sql = etl_control_sql.recon_recurrence_scan(fqn, days=days)
+    if not scan_sql:
+        empty_state("needs_setup", "ETL_RECON_ERROR_FQN is not a valid table name.")
+        return
+    _win = days if days else etl_control_sql.RECON_RECURRENCE_LOOKBACK_DAYS
+    res = run(scan_sql, page=_PAGE, key=f"etl_recon_recurrence_{days}", tier="recent",
+              source="RECON_MTRC_ERROR (recurrence)", max_rows=etl_control_sql.MAX_RECON_RECURRENCE_ROWS)
+    if guard(res, f"No reconciliation errors in the last {_win} days — every metric ties out.",
+             kind="clean",
+             setup_hint="The app role needs SELECT on the RECON_MTRC_ERROR table "
+                        "(GRANT SELECT ON <table> TO ROLE <app role>)."):
+        rec = recon_recurrence(res.df)
+        if rec.empty:
+            empty_state("clean", f"No reconciliation errors in the last {_win} days — every metric ties out.")
+            return
+        chronic = int((rec["TIER"] == "CHRONIC").sum())
+        active = int(rec["BROKE_LATEST_CYCLE"].astype(bool).sum())
+        newb = int((rec["TIER"] == "NEW").sum())
+        top = rec.iloc[0]
+        _hop = f"{top.get('SOURCE_LAYER', '')}→{top.get('TARGET_LAYER', '')}"
+        if chronic or active:
+            st.error(f"🔴 {active} metric(s) still breaking as of the latest cycle "
+                     f"({chronic} chronic, {newb} newly-breaking). Worst: {top.get('MTRC')} "
+                     f"({top.get('FRQCY')}) broke {int(safe_float(top.get('BROKEN_CYCLES')))}/"
+                     f"{int(safe_float(top.get('TOTAL_ERROR_CYCLES')))} cycles "
+                     f"({safe_float(top.get('RECURRENCE_PCT')):.0f}%) at {_hop} — investigate the "
+                     "source feed before the next cycle.")
+        else:
+            st.warning(f"🟠 {len(rec)} metric(s) broke recon in this window, but all are isolated or "
+                       "resolved — none broke in the latest cycle.")
+        styled_table(rec, height=320)
+        st.caption("Recurrence = distinct cycles THIS check broke ÷ distinct cycles ANY check of the "
+                   "same frequency broke — a cycle = one night's recon batch (DATE(LOAD_DTTM)). This "
+                   "table logs only failures, so cycles where everything reconciled are NOT counted: a "
+                   "100% row means it broke every night that anything broke, not every night. "
+                   "Frequency-scoped so a monthly check isn't diluted by nightly cycles; SOURCE→TARGET "
+                   "names the failing hop. Chronic first; RESOLVED = stopped breaking.")
+        result_caption(res)
+
+
 def _cost_attribution_panel() -> None:
     """Attributed Snowflake credits/$ per task for the latest ETL run.
 
@@ -1463,6 +1570,9 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
     # Then a chosen workflow's latest run's per-task runtimes (Informatica CONTROL_STATUS),
     # scoped to the Window; config-gated + fail-silent-with-grant-hint like above.
     _workflow_runtimes_panel(days)
+    # Then failure recurrence: which task keeps failing / is likely to fail again — a FAILED task
+    # outranks a slow one at 7am, so this leads the drift/creep slowdown panels.
+    _failure_recurrence_panel(days)
     # Then run-over-run drift on that same control table: which task got materially slower.
     _workflow_drift_panel()
     # Then the forward-looking companion: which tasks are CREEPING toward a breach (trend fit),
@@ -1472,6 +1582,8 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
     _run_inventory_panel()
     # Then Phase 3 reconciliation DQ: metrics whose source vs target layer didn't tie out.
     _recon_error_panel()
+    # Then which metrics KEEP breaking (recurrence), vs the raw 'what broke' panel above.
+    _recon_recurrence_panel(days)
     # Then Phase 4 cost attribution: which task spent the most measured credits/$ last night.
     _cost_attribution_panel()
     res = run(insights_sql.pipeline_sla_forecast(14), page=_PAGE, key="sla_status", tier="recent",

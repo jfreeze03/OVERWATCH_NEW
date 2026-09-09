@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.522.0 - ETL failure-recurrence + reconciliation-recurrence (2026-09-09)
+
+Two config-free predictive panels on Operations ▸ Pipeline SLA — no migration, no owner-apply, live on
+redeploy. Both answer "what keeps breaking" (vs the existing "what broke last night" panels).
+
+- **Failure recurrence — "which task fails the next run"** (leads the drift/creep panels; a FAILED task
+  outranks a slow one at 7am). New `task_status_history_scan` emits each task's TERMINAL status per recent
+  run (`MAX_BY` collapses an Informatica retry to its last attempt; `IS_FAILED`/`IS_RUNNING` off the shared
+  status sets; whole-series `DENSE_RANK` cap). New pure `insights.task_failure_recurrence` folds it into a
+  leading-FAILED streak, a failure rate, and a decay-weighted recency propensity, then an **evidence-gated**
+  verdict — actively broken / chronic / intermittent — that **never manufactures a probability**: a
+  `LOW_HISTORY` (<4 runs) gate withholds the chronic/intermittent labels so a 1/1 sample can't mint a scary
+  one, while an observed latest failure surfaces regardless (a failure is a fact, not an estimate). Running
+  runs are excluded from the denominator; only tasks that failed in the window surface.
+- **Reconciliation recurrence — "which metric keeps breaking".** `RECON_MTRC_ERROR` logs only failures, so
+  recurrence is **conditional**: of the distinct cycles ANY same-frequency check broke, on how many did THIS
+  check break — the honest denominator for a failures-only table, never a pass-rate. New
+  `recon_recurrence_scan` (cycle = `DATE(LOAD_DTTM)`, denominator `COUNT(DISTINCT cycle)` **per FRQCY** so a
+  monthly break isn't diluted by nightly cohorts, full check identity with all nullable grain columns
+  `COALESCE`d before the joins, `MAX_BY` for the newest cycle's SOURCE→TARGET hop) + pure
+  `insights.recon_recurrence` (tier ladder CHRONIC / NEW / INTERMITTENT / RESOLVED, `LOW_CONFIDENCE` gate on
+  a thin denominator, a testable `RANK_SCORE`).
+- Designed by a 10-agent adversarial panel; adversarial verify (4 refuters) caught 1 LOW, fixed: the
+  Intermittent verdict now reports the recency-weighted number it's judged on (was printing the whole-window
+  rate with the word "recently").
+
 ## 4.521.0 - Runtime-creep forecaster: predict the breach before it happens (2026-09-09)
 
 The forward-looking companion to runtime drift. Drift catches a task that already jumped; this fits

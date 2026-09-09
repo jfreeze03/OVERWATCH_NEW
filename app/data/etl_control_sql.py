@@ -432,6 +432,72 @@ def task_runtime_history_scan(
     )
 
 
+# --- Phase 2c: failure-recurrence (per-task run STATUS series) ---------------
+# Unlike task_runtime_history_scan (which DROPS failed runs — they'd depress the runtime
+# baseline), this KEEPS them: a failed run is the whole signal. Per (workflow, task) it emits
+# the TERMINAL status of each recent run (RN=1 newest). MAX_BY(TASK_STATUS, COALESCE(end,start))
+# collapses an Informatica retry to the run's LAST attempt in one aggregate — a FAILED-then-
+# retried-SUCCESS run reads SUCCESS (the honest operational outcome). IS_FAILED / IS_RUNNING are
+# flagged off the SHARED status sets so this, the runtimes panel, and the Brief never disagree.
+FAILREC_LOOKBACK_RUNS = 20   # ~3 weeks of nightly runs — a stabler failure rate than the last few
+MAX_FAILREC_ROWS = MAX_HISTORY_SERIES * FAILREC_LOOKBACK_RUNS + 500  # backstop above the series bound
+
+
+def task_status_history_scan(
+    control_fqn: object, *, lookback_runs: int = FAILREC_LOOKBACK_RUNS, days: object = 0,
+    max_series: int = MAX_HISTORY_SERIES, max_rows: int = MAX_FAILREC_ROWS,
+) -> str:
+    """Per-(workflow, task) TERMINAL status across the last N runs — the series the recurrence
+    estimator folds. One row per (workflow, task, run): RN (1 = newest), RUN_START, TERMINAL_STATUS,
+    IS_FAILED, IS_RUNNING.
+
+    KEEPS failed runs (the signal). MAX_BY(TASK_STATUS, COALESCE(TASK_END_DTTM, TASK_START_DTTM))
+    collapses retries to the run's terminal attempt in one aggregate. Reuses the drift builder's
+    per-workflow run ranking + whole-series DENSE_RANK cap so a task's status series is never bisected
+    mid-streak. ``days`` (> 0) honors the scope-bar Window. Fail-closed on a bad FQN. Pure, bounded."""
+    from app.core.sqlsafe import safe_identifier
+
+    fqn = str(control_fqn or "").strip()
+    if not fqn:
+        return ""
+    try:
+        tbl = safe_identifier(fqn, allow_qualified=True)
+    except ValueError:
+        return ""
+    keep = max(2, int(lookback_runs))
+    _failed = ", ".join(f"'{s}'" for s in sorted(FAILED_TASK_STATUSES))
+    _running = ", ".join(f"'{s}'" for s in sorted(RUNNING_TASK_STATUSES))
+    return (
+        "WITH runs AS (\n"
+        f"  SELECT RUN_ID, WORKFLOW_NAME, MAX(TASK_START_DTTM) AS RUN_START FROM {tbl}\n"
+        "  WHERE TASK_START_DTTM IS NOT NULL AND RUN_ID IS NOT NULL\n"
+        f"{_window_clause(days, indent='  ')}"
+        "  GROUP BY RUN_ID, WORKFLOW_NAME\n"
+        f"  QUALIFY ROW_NUMBER() OVER (PARTITION BY WORKFLOW_NAME ORDER BY RUN_START DESC, RUN_ID DESC) <= {keep}\n"
+        "),\n"
+        "ranked AS (\n"
+        "  SELECT RUN_ID, WORKFLOW_NAME, RUN_START,\n"
+        "         ROW_NUMBER() OVER (PARTITION BY WORKFLOW_NAME ORDER BY RUN_START DESC, RUN_ID DESC) AS RN\n"
+        "  FROM runs\n"
+        "),\n"
+        # one row per (workflow, task, run) with the run's TERMINAL status (retries collapsed).
+        "per_task AS (\n"
+        "  SELECT s.WORKFLOW_NAME, s.TASK_NAME, r.RN, r.RUN_START,\n"
+        "         MAX_BY(s.TASK_STATUS, COALESCE(s.TASK_END_DTTM, s.TASK_START_DTTM)) AS TERMINAL_STATUS\n"
+        f"  FROM {tbl} s JOIN ranked r ON s.RUN_ID = r.RUN_ID AND s.WORKFLOW_NAME = r.WORKFLOW_NAME\n"
+        "  WHERE s.TASK_START_DTTM IS NOT NULL AND s.TASK_NAME IS NOT NULL\n"
+        "  GROUP BY s.WORKFLOW_NAME, s.TASK_NAME, r.RN, r.RUN_START\n"
+        f"  QUALIFY DENSE_RANK() OVER (ORDER BY s.WORKFLOW_NAME, s.TASK_NAME) <= {int(max_series)}\n"
+        ")\n"
+        "SELECT WORKFLOW_NAME, TASK_NAME, RN, RUN_START, TERMINAL_STATUS,\n"
+        f"       CASE WHEN UPPER(TERMINAL_STATUS) IN ({_failed})  THEN 1 ELSE 0 END AS IS_FAILED,\n"
+        f"       CASE WHEN UPPER(TERMINAL_STATUS) IN ({_running}) THEN 1 ELSE 0 END AS IS_RUNNING\n"
+        "  FROM per_task\n"
+        "  ORDER BY WORKFLOW_NAME, TASK_NAME, RN\n"
+        f"  LIMIT {int(max_rows)}"
+    )
+
+
 # --- Phase 2: run inventory + parameters (CONTROL_RUN_ID / CONTROL_PARAMS) ----
 MAX_RUNS = 100      # recent-run inventory cap
 MAX_PARAMS = 2000   # one run's parameters (the global + per-session knobs)
@@ -565,6 +631,104 @@ def recon_errors_scan(
         f"  FROM {tbl}\n"
         f"  WHERE LOAD_DTTM >= DATEADD('day', -{int(days)}, CURRENT_TIMESTAMP())\n"
         "  ORDER BY LOAD_DTTM DESC, MTRC\n"
+        f"  LIMIT {int(max_rows)}"
+    )
+
+
+# --- Phase 3b: reconciliation RECURRENCE (which metric keeps breaking) --------
+# RECON_MTRC_ERROR logs ONLY failed reconciliations — there is no "passed" row and no
+# total-cycles column. So the only honest recurrence is CONDITIONAL: of the distinct CYCLES
+# in which ANY check of the same FRQCY broke, on how many did THIS check break. The denominator
+# is COUNT(DISTINCT cycle) PER FRQCY (a monthly break isn't diluted by nightly cohorts); the
+# numerator is COUNT(DISTINCT cycle) for the check (a chatty metric can't inflate itself); a
+# cycle = DATE(LOAD_DTTM). It is a failures-only PROXY for "chances to break", never a pass-rate.
+RECON_RECURRENCE_LOOKBACK_DAYS = 90   # default (unscoped) — long enough for monthly cadences to recur
+MAX_RECON_RECURRENCE_ROWS = 300
+RECON_RECENT_K = 5                    # "recent" = broke in N of the last K cohort cycles
+
+
+def recon_recurrence_scan(
+    recon_fqn: object, *, days: object = 0, max_rows: int = MAX_RECON_RECURRENCE_ROWS
+) -> str:
+    """Which reconciliation checks keep breaking — conditional recurrence across recon cycles.
+
+    One row per full check identity (MTRC, FRQCY, VALUE_TYPE, RECON_MTRC_LAYER): BROKEN_CYCLES (distinct
+    cycles it broke), TOTAL_ERROR_CYCLES (distinct cycles ANY same-FRQCY check broke — the honest
+    denominator for a failures-only table), RECURRENCE_PCT, RECENT_BROKEN of the last K cohort cycles,
+    BROKE_LATEST_CYCLE, first/last broken dates, and the newest broken cycle's SOURCE→TARGET layer +
+    sample errors (the 'where to fix' hop). A cycle = DATE(LOAD_DTTM); the denominator is scoped PER
+    FRQCY. ``days`` (> 0) honors the scope-bar Window; unscoped defaults to a 90-day lookback so monthly
+    cadences reach several cohort cycles. One-row-per-check output, so ORDER BY + LIMIT truncate
+    deterministically (no series to bisect). Fail-closed on a bad FQN. Pure: bounded, no Streamlit."""
+    from app.core.sqlsafe import safe_identifier
+
+    fqn = str(recon_fqn or "").strip()
+    if not fqn:
+        return ""
+    try:
+        tbl = safe_identifier(fqn, allow_qualified=True)
+    except ValueError:
+        return ""
+    _d = int(days) if isinstance(days, (int, float)) and int(days) > 0 else RECON_RECURRENCE_LOOKBACK_DAYS
+    _k = int(RECON_RECENT_K)
+    return (
+        # COALESCE all three NULLABLE grain columns to '(unknown)' BEFORE any GROUP BY / equijoin —
+        # a NULL grain both splits into an uncomparable pool and fails the NULL=NULL joins below.
+        "WITH errs AS (\n"
+        "  SELECT MTRC,\n"
+        "         COALESCE(FRQCY, '(unknown)') AS FRQCY,\n"
+        "         COALESCE(VALUE_TYPE, '(unknown)') AS VALUE_TYPE,\n"
+        "         COALESCE(RECON_MTRC_LAYER, '(unknown)') AS RECON_MTRC_LAYER,\n"
+        "         SOURCE_LAYER, TARGET_LAYER, SOURCE_ERROR, TARGET_ERROR,\n"
+        "         CAST(LOAD_DTTM AS DATE) AS CYCLE_DATE, LOAD_DTTM\n"
+        f"  FROM {tbl}\n"
+        f"  WHERE LOAD_DTTM >= DATEADD('day', -{_d}, CURRENT_TIMESTAMP())\n"
+        "    AND MTRC IS NOT NULL AND LOAD_DTTM IS NOT NULL\n"
+        "),\n"
+        # per-FRQCY cohort cycle sequence: newest cohort cycle = CYCLE_RN 1 (the denominator + recency axis)
+        "cohort AS (\n"
+        "  SELECT FRQCY, CYCLE_DATE,\n"
+        "         DENSE_RANK() OVER (PARTITION BY FRQCY ORDER BY CYCLE_DATE DESC) AS CYCLE_RN\n"
+        "  FROM (SELECT DISTINCT FRQCY, CYCLE_DATE FROM errs)\n"
+        "),\n"
+        "freq AS (\n"
+        "  SELECT FRQCY, MAX(CYCLE_RN) AS TOTAL_ERROR_CYCLES FROM cohort GROUP BY FRQCY\n"
+        "),\n"
+        "chk_cycles AS (\n"
+        "  SELECT d.MTRC, d.FRQCY, d.VALUE_TYPE, d.RECON_MTRC_LAYER, d.CYCLE_DATE, c.CYCLE_RN\n"
+        "  FROM (SELECT DISTINCT MTRC, FRQCY, VALUE_TYPE, RECON_MTRC_LAYER, CYCLE_DATE FROM errs) d\n"
+        "  JOIN cohort c ON c.FRQCY = d.FRQCY AND c.CYCLE_DATE = d.CYCLE_DATE\n"
+        "),\n"
+        "agg AS (\n"
+        "  SELECT MTRC, FRQCY, VALUE_TYPE, RECON_MTRC_LAYER,\n"
+        "         COUNT(*) AS BROKEN_CYCLES,\n"
+        f"         SUM(CASE WHEN CYCLE_RN <= {_k} THEN 1 ELSE 0 END) AS RECENT_BROKEN,\n"
+        "         MIN(CYCLE_RN) AS NEWEST_BROKEN_RN,\n"
+        "         MIN(CYCLE_DATE) AS FIRST_BROKEN_ON, MAX(CYCLE_DATE) AS LAST_BROKEN_ON\n"
+        "  FROM chk_cycles GROUP BY 1, 2, 3, 4\n"
+        "),\n"
+        # newest broken cycle's layer/error context (the 'where to fix' hop + sample errors)
+        "ctx AS (\n"
+        "  SELECT MTRC, FRQCY, VALUE_TYPE, RECON_MTRC_LAYER,\n"
+        "         COUNT(*) AS ERROR_ROWS,\n"
+        "         MAX_BY(SOURCE_LAYER, LOAD_DTTM) AS SOURCE_LAYER,\n"
+        "         MAX_BY(TARGET_LAYER, LOAD_DTTM) AS TARGET_LAYER,\n"
+        "         MAX_BY(SOURCE_ERROR, LOAD_DTTM) AS SOURCE_ERROR,\n"
+        "         MAX_BY(TARGET_ERROR, LOAD_DTTM) AS TARGET_ERROR\n"
+        "  FROM errs GROUP BY 1, 2, 3, 4\n"
+        ")\n"
+        "SELECT a.MTRC, a.FRQCY, a.VALUE_TYPE, a.RECON_MTRC_LAYER,\n"
+        "       a.BROKEN_CYCLES, f.TOTAL_ERROR_CYCLES,\n"
+        "       ROUND(100.0 * a.BROKEN_CYCLES / NULLIF(f.TOTAL_ERROR_CYCLES, 0), 0) AS RECURRENCE_PCT,\n"
+        f"       a.RECENT_BROKEN, LEAST({_k}, f.TOTAL_ERROR_CYCLES) AS RECENT_WINDOW,\n"
+        "       (a.NEWEST_BROKEN_RN = 1) AS BROKE_LATEST_CYCLE,\n"
+        "       a.FIRST_BROKEN_ON, a.LAST_BROKEN_ON, x.ERROR_ROWS,\n"
+        "       x.SOURCE_LAYER, x.TARGET_LAYER, x.SOURCE_ERROR, x.TARGET_ERROR\n"
+        "  FROM agg a\n"
+        "  JOIN freq f ON f.FRQCY = a.FRQCY\n"
+        "  JOIN ctx  x ON x.MTRC = a.MTRC AND x.FRQCY = a.FRQCY\n"
+        "               AND x.VALUE_TYPE = a.VALUE_TYPE AND x.RECON_MTRC_LAYER = a.RECON_MTRC_LAYER\n"
+        "  ORDER BY RECURRENCE_PCT DESC, a.RECENT_BROKEN DESC, a.BROKEN_CYCLES DESC, x.ERROR_ROWS DESC\n"
         f"  LIMIT {int(max_rows)}"
     )
 
