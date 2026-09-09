@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 from math import ceil
 
 import pandas as pd
@@ -993,6 +994,153 @@ def recon_recurrence(
             out[c] = None
     return out.sort_values(["RANK_SCORE", "BROKEN_CYCLES"],
                            ascending=[False, False]).reset_index(drop=True)[cols]
+
+
+# --- ETL SLA finish forecast (the whole nightly cycle vs a clock deadline) -----
+SLA_FORECAST_MIN_RUNS = 4          # complete nights needed before a trend is fitted
+SLA_FORECAST_HORIZON_RUNS = 7      # project the margin this many nights ahead
+SLA_FORECAST_MIN_SLOPE_SEC = 120.0  # < 2 min/night margin drift is noise, not a trend
+
+
+def _parse_hhmm(raw: object, fallback: tuple[int, int]) -> tuple[int, int]:
+    """'HH:MM' (24h) -> (hour, minute); fail-closed to ``fallback`` on anything malformed."""
+    try:
+        h_s, m_s = str(raw).strip().split(":", 1)
+        h, m = int(h_s), int(m_s)
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            return h, m
+    except (ValueError, AttributeError, TypeError):
+        pass
+    return fallback
+
+
+def _deadline_after(start_ts: pd.Timestamp, offset_min: int) -> pd.Timestamp:
+    """The first (midnight + offset_min) STRICTLY after ``start_ts`` (cross-midnight-safe)."""
+    cand = start_ts.normalize() + timedelta(minutes=offset_min)
+    if cand <= start_ts:
+        cand = cand + timedelta(days=1)
+    return cand
+
+
+def etl_cycle_sla_forecast(
+    df: pd.DataFrame, *, target_hhmm: str = "07:00", breach_hhmm: str = "08:00",
+    min_runs: int = SLA_FORECAST_MIN_RUNS, horizon_runs: int = SLA_FORECAST_HORIZON_RUNS,
+    min_slope_sec: float = SLA_FORECAST_MIN_SLOPE_SEC,
+) -> dict:
+    """Forecast whether the nightly cycle will finish before its clock deadline.
+
+    From cycle_finish_history_scan rows (one per night: CYCLE_DATE, CYCLE_START, CYCLE_FINISH,
+    N_FAILED, N_RUNNING, SNAPSHOT_TS). Per night the deadline = the first target-time (then hard-time)
+    STRICTLY after CYCLE_START (cross-midnight); margin = deadline − finish (+ = early). A robust
+    Theil-Sen slope over the COMPLETE nights' target-margins (FAILED / still-running nights are
+    excluded — their finish is crash-short / provisional and would fake an early margin) gives the
+    trend; the projection, nights-to-breach, and a start-drift read follow. The tier reads the last
+    COMPLETE night's actual margins first (a real breach isn't hidden by a flat trend), then the trend.
+    Returns a summary dict — empty ``{}`` when there is no cycle data. Pure; never raises."""
+    need = {"CYCLE_START", "CYCLE_FINISH", "N_FAILED", "N_RUNNING"}
+    if df is None or df.empty or not need.issubset(df.columns):
+        return {}
+    from app.logic.forecast import _robust_slope
+    t_h, t_m = _parse_hhmm(target_hhmm, (7, 0))
+    b_h, b_m = _parse_hhmm(breach_hhmm, (8, 0))
+    target_off = t_h * 60 + t_m
+    breach_off = b_h * 60 + b_m
+    if breach_off <= target_off:                       # never invert; hard is >= 60 min past target
+        breach_off = target_off + 60
+    hard_extra = timedelta(minutes=breach_off - target_off)
+
+    def _tz_strip(s: pd.Series) -> pd.Series:
+        # SNAPSHOT_TS is TIMESTAMP_LTZ (tz-aware) but CYCLE_DATE / CYCLE_START are naive; mixing them
+        # in a subtraction raises TypeError on live Snowflake data. Normalize everything to naive.
+        return s.dt.tz_localize(None) if getattr(s.dt, "tz", None) is not None else s
+
+    work = df.copy()
+    work["CYCLE_START"] = _tz_strip(pd.to_datetime(work["CYCLE_START"], errors="coerce"))
+    work["CYCLE_FINISH"] = _tz_strip(pd.to_datetime(work["CYCLE_FINISH"], errors="coerce"))
+    if "CYCLE_DATE" in work.columns:
+        work["CYCLE_DATE"] = _tz_strip(pd.to_datetime(work["CYCLE_DATE"], errors="coerce"))
+    work["N_FAILED"] = pd.to_numeric(work["N_FAILED"], errors="coerce").fillna(0)
+    work["N_RUNNING"] = pd.to_numeric(work["N_RUNNING"], errors="coerce").fillna(0)
+    work = work.dropna(subset=["CYCLE_START"]).sort_values("CYCLE_START")   # oldest -> newest
+    if work.empty:
+        return {}
+    snapshot = pd.to_datetime(work.iloc[-1].get("SNAPSHOT_TS"), errors="coerce")
+    if pd.notna(snapshot) and snapshot.tzinfo is not None:
+        snapshot = snapshot.tz_localize(None)
+    nights = []
+    for _, r in work.iterrows():
+        start, finish = r["CYCLE_START"], r["CYCLE_FINISH"]
+        dl_t = _deadline_after(start, target_off)
+        dl_h = dl_t + hard_extra
+        if r["N_FAILED"] > 0:
+            state = "FAILED"
+        elif r["N_RUNNING"] > 0 or pd.isna(finish):
+            state = "INCOMPLETE"
+        else:
+            state = "COMPLETE"
+        ref = pd.to_datetime(r.get("CYCLE_DATE"), errors="coerce")
+        if pd.isna(ref):
+            ref = start.normalize()
+        nights.append({
+            "cycle_date": r.get("CYCLE_DATE"), "start": start, "finish": finish, "state": state,
+            "margin_t": (dl_t - finish).total_seconds() if pd.notna(finish) else None,
+            "margin_h": (dl_h - finish).total_seconds() if pd.notna(finish) else None,
+            "start_off": (start - ref).total_seconds() / 60.0, "dl_t": dl_t, "dl_h": dl_h,
+        })
+    latest = nights[-1]
+    complete = [nt for nt in nights if nt["state"] == "COMPLETE" and nt["margin_t"] is not None]
+    last_complete = complete[-1] if complete else None
+    latest_margin = last_complete["margin_t"] if last_complete else None
+    margin_hard = last_complete["margin_h"] if last_complete else None
+    latest_complete_finish = last_complete["finish"] if last_complete else None
+    slope = projected = nights_to_breach = start_slope = None
+    if len(complete) >= min_runs:
+        ys = [nt["margin_t"] for nt in complete]        # oldest -> newest
+        xs = [float(i) for i in range(len(ys))]
+        slope, _ = _robust_slope(xs, ys)                # sec/night; negative = eroding
+        projected = (latest_margin + slope * horizon_runs) if latest_margin is not None else None
+        if latest_margin is not None and latest_margin <= 0:
+            nights_to_breach = 0
+        elif slope < -min_slope_sec and latest_margin is not None:
+            nights_to_breach = ceil(latest_margin / -slope)
+        start_slope, _ = _robust_slope(xs, [nt["start_off"] for nt in complete])  # min/night
+    # tier: actual margins of the last COMPLETE night first (a real breach isn't hidden by a flat
+    # trend), then the trend; short history caps at an on-track-with-caveat read.
+    if last_complete is None:
+        forecast, sev = "Insufficient history", "Low"
+    elif margin_hard is not None and margin_hard < 0:
+        forecast, sev = "Breaching", "High"             # finished after the hard (08:00) deadline
+    elif latest_margin is not None and latest_margin < 0:
+        forecast, sev = "Missed target", "High"         # after 07:00 but before 08:00
+    elif (slope is not None and slope < -min_slope_sec
+          and nights_to_breach is not None and nights_to_breach <= horizon_runs):
+        forecast, sev = "Trending to miss", "Medium"
+    elif slope is None:
+        forecast, sev = "On track (short history)", "OK"
+    else:
+        forecast, sev = "On track", "OK"
+    live_runway = ((latest["dl_t"] - snapshot).total_seconds()
+                   if latest["state"] == "INCOMPLETE" and pd.notna(snapshot) else None)
+    return {
+        "ok": True, "forecast": forecast, "severity": sev,
+        "target_hhmm": f"{t_h:02d}:{t_m:02d}", "breach_hhmm": f"{b_h:02d}:{b_m:02d}",
+        "latest_cycle_date": latest["cycle_date"], "latest_start": latest["start"],
+        "latest_finish": latest["finish"], "latest_state": latest["state"],
+        "latest_complete_finish": latest_complete_finish,   # the finish the margin/tier is judged on
+        "latest_failed": bool(latest["state"] == "FAILED"),
+        "latest_margin_sec": latest_margin, "margin_hard_sec": margin_hard,
+        "slope_sec_per_night": (round(slope, 1) if slope is not None else None),
+        "projected_margin_sec": (round(projected, 1) if projected is not None else None),
+        "nights_to_breach": nights_to_breach,
+        "start_slope_min_per_night": (round(start_slope, 1) if start_slope is not None else None),
+        "nights_fit": len(complete), "nights_total": len(nights),
+        "live_runway_sec": live_runway,
+        # newest-first per-night detail for the panel table
+        "nights": [{"CYCLE_DATE": nt["cycle_date"], "CYCLE_START": nt["start"],
+                    "CYCLE_FINISH": nt["finish"], "RUN_STATE": nt["state"],
+                    "MARGIN_SEC": (round(nt["margin_t"], 1) if nt["margin_t"] is not None else None)}
+                   for nt in reversed(nights)],
+    }
 
 
 def flag_clustering_churn(df: pd.DataFrame, *, rate: float | None = None,

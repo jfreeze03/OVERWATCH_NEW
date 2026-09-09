@@ -536,6 +536,11 @@ _EXPECTED_MIGRATIONS = {
          "that CALLs the scan and raises one summary alert. Same per-arm EXCEPTION isolation; NOT counted "
          "toward OPS_SCAN_DEGRADED. HIGH routes to the OVERWATCH_EMAIL path (JDees). App role needs SELECT "
          "on RECON_MTRC_ERROR (granted separately)",
+    138: "Seed the ETL SLA finish-forecast config (ETL_CYCLE_START_WORKFLOW / ETL_CYCLE_END_WORKFLOW / "
+         "ETL_SLA_TARGET_HHMM / ETL_SLA_BREACH_HHMM) to the ALFA PRD nightly-cycle bookends + 07:00 target "
+         "/ 08:00 hard deadline, so Operations ▸ Pipeline ▸ SLA finish forecast trends cycle completion vs "
+         "the clock. WHEN NOT MATCHED only (never clobbers an operator edit). Data-seed only; reads only "
+         "CONTROL_STATUS (already granted). The panel works from the DEFAULT_SETTINGS defaults pre-apply",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

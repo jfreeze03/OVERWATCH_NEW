@@ -529,3 +529,40 @@ def test_recon_recurrence_scan_parses() -> None:
     sqlglot = pytest.importorskip("sqlglot")
     sqlglot.parse(etl.recon_recurrence_scan(_RECON, days=90), dialect="snowflake")
     sqlglot.parse(etl.recon_recurrence_scan(_RECON), dialect="snowflake")
+
+
+# --- cycle_finish_history_scan (Phase 5: SLA finish forecast) ----------------
+
+def test_cycle_finish_history_scan_basic() -> None:
+    sql = etl.cycle_finish_history_scan(_CTRL, start_workflow="WF_START", end_workflow="WF_END", days=14)
+    assert _CTRL in sql
+    # night-key groups the ~22:00 start and the early-AM finish into ONE cycle
+    assert "DATE(DATEADD('hour', -12, TASK_START_DTTM)) AS CYCLE_DATE" in sql
+    # starter -> CYCLE_START (MIN start); terminal -> CYCLE_FINISH (MAX end) + health flags
+    assert "MIN(TASK_START_DTTM) AS CYCLE_START" in sql
+    assert "MAX(TASK_END_DTTM) AS CYCLE_FINISH" in sql
+    assert "AS N_FAILED" in sql and "AS N_RUNNING" in sql
+    # anchor workflow names bound as escaped literals (data, not identifiers)
+    assert "WORKFLOW_NAME = 'WF_START'" in sql and "WORKFLOW_NAME = 'WF_END'" in sql
+    assert "CURRENT_TIMESTAMP() AS SNAPSHOT_TS" in sql
+    assert "TASK_START_DTTM >= DATEADD('day', -14, CURRENT_TIMESTAMP())" in sql
+
+
+def test_cycle_finish_history_scan_fail_closed_and_injection() -> None:
+    # needs BOTH anchor workflows AND a valid FQN
+    assert etl.cycle_finish_history_scan(_CTRL, start_workflow="", end_workflow="WF_END") == ""
+    assert etl.cycle_finish_history_scan(_CTRL, start_workflow="WF_START", end_workflow="") == ""
+    assert etl.cycle_finish_history_scan("", start_workflow="A", end_workflow="B") == ""
+    assert etl.cycle_finish_history_scan("a b c", start_workflow="A", end_workflow="B") == ""
+    # a hostile workflow name stays inside the literal (single-quote doubled)
+    evil = etl.cycle_finish_history_scan(_CTRL, start_workflow="x' OR '1'='1", end_workflow="B")
+    assert "'x'' OR ''1''=''1'" in evil
+
+
+def test_cycle_finish_history_scan_parses() -> None:
+    import pytest
+    sqlglot = pytest.importorskip("sqlglot")
+    sqlglot.parse(etl.cycle_finish_history_scan(_CTRL, start_workflow="A", end_workflow="B", days=7),
+                  dialect="snowflake")
+    sqlglot.parse(etl.cycle_finish_history_scan(_CTRL, start_workflow="A", end_workflow="B"),
+                  dialect="snowflake")

@@ -46,7 +46,7 @@ def test_v130_is_proc_only_no_schema_change():
 
 def test_validate_and_docs_track_v130():
     val = _read("snowflake/validate.sql")
-    assert "V001..V137 applied" in val and "VERSION BETWEEN 1 AND 137) = 137" in val
+    assert "V001..V138 applied" in val and "VERSION BETWEEN 1 AND 138) = 138" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V130__experiment_verify_proof_guard.sql" in _read(rel)
 

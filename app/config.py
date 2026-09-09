@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.522.0"
+APP_VERSION = "4.523.0"
 
 # The build's load-bearing schema floor. main() reads the live max(SCHEMA_VERSION)
 # once per session and, if it is BELOW this, renders ONE actionable blocked state
@@ -120,6 +120,16 @@ DEFAULT_SETTINGS = {
     # Empty = dormant; set on Admin ▸ SETTINGS to the table FQN, e.g.
     #   ETL_RECON_ERROR_FQN  ALFA_EDW_PRD.DB_T_PROD_CORE.RECON_MTRC_ERROR
     "ETL_RECON_ERROR_FQN": "",
+    # ETL process control — SLA finish forecast. The nightly cycle must finish before a
+    # clock deadline (target / hard). It is bracketed by two anchor workflows: the STARTER
+    # (kicks off the cycle ~10pm) and the TERMINAL (its finish = the cycle's completion).
+    # The forecast trends each night's cycle-finish-vs-deadline margin. Times are HH:MM
+    # (24h) and the deadline is the first target-time after the cycle START (cross-midnight).
+    # Seeded by V138; the forecast works from these defaults on redeploy before it's applied.
+    "ETL_CYCLE_START_WORKFLOW": "WF_BASE_GW_CLOSEOUT_CTL_DLY",
+    "ETL_CYCLE_END_WORKFLOW": "WF_BASE_RECON_MTRC_CMPSIT_DAILY",
+    "ETL_SLA_TARGET_HHMM": "07:00",
+    "ETL_SLA_BREACH_HHMM": "08:00",
     # Governance-drift weights (per-unit penalties; caps fixed in governance.py).
     "GOV_PTS_MFA_GAP": "5",
     "GOV_PTS_EXPIRED_CRED": "8",

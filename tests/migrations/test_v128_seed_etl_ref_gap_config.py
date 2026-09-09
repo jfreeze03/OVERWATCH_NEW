@@ -51,7 +51,7 @@ def test_ref_gap_wired_across_config_sites():
 
 def test_validate_and_docs_track_v128():
     val = _read("snowflake/validate.sql")
-    assert "V001..V137 applied" in val and "VERSION BETWEEN 1 AND 137) = 137" in val
+    assert "V001..V138 applied" in val and "VERSION BETWEEN 1 AND 138) = 138" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V128__seed_etl_ref_gap_config.sql" in _read(rel)
 

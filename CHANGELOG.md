@@ -1,5 +1,39 @@
 # Changelog
 
+## 4.523.0 - ETL SLA finish forecast: will the nightly cycle beat 7am? (2026-09-09)
+
+Forecasts the WHOLE nightly cycle's completion against a clock deadline. The cycle is bracketed by two
+owner-identified anchor workflows — the STARTER (`WF_BASE_GW_CLOSEOUT_CTL_DLY`, ~10pm) and the TERMINAL
+(`WF_BASE_RECON_MTRC_CMPSIT_DAILY`, whose finish IS the cycle's completion) — and must land before the
+07:00 target / 08:00 hard deadline. New Operations ▸ Pipeline ▸ "SLA finish forecast" panel.
+
+- **New builder** `etl_control_sql.cycle_finish_history_scan` — one row per NIGHT: CYCLE_START (the
+  starter's earliest task start), CYCLE_FINISH (the terminal's latest task end), and the terminal's
+  health flags, night-keyed by `DATE(TASK_START_DTTM − 12h)` so the ~22:00 start and the early-AM finish
+  join as one cycle. The anchor workflow names are bound as escaped literals (data, not identifiers);
+  honors the scope-bar Window; fail-closed.
+- **New pure logic** `insights.etl_cycle_sla_forecast` (+ `_parse_hhmm`, `_deadline_after`) — per night the
+  deadline = the first target-time strictly after the cycle's own start (cross-midnight-safe); margin =
+  deadline − finish. A robust Theil-Sen slope over the COMPLETE nights' margins (FAILED / still-running
+  nights excluded — their finish is crash-short / provisional) gives the trend → projection,
+  nights-to-breach, and a **start-drift** read (a cycle that begins later cascades into a later finish).
+  Tier reads the last complete night's actual margins first (a real breach isn't hidden by a flat trend).
+- **New panel** `operations._sla_finish_forecast_panel` — KPIs (latest finish vs 7am, margin trend,
+  nights-to-breach, start drift), a tier headline, the recent-nights margin table (signed
+  early/late, humanized), and a live-runway line for an in-flight cycle.
+- **Config**: four Admin-editable keys (`ETL_CYCLE_START_WORKFLOW`, `ETL_CYCLE_END_WORKFLOW`,
+  `ETL_SLA_TARGET_HHMM` = 07:00, `ETL_SLA_BREACH_HHMM` = 08:00), seeded by **migration V138**
+  (WHEN NOT MATCHED, data-seed only, reads only CONTROL_STATUS — no new grant). The forecast works from
+  the code defaults on redeploy before V138 is applied; applying it makes the keys Admin-editable.
+  **Owner-apply: V138** (the one owner step in this arc). Full migration lockstep + rebuild bundle regen.
+- Designed by a 10-agent adversarial panel (reframed to whole-cycle per the owner's cycle bookends).
+- Adversarial verify (3 refuters) caught 3, all fixed: **[MED]** a tz-aware `SNAPSHOT_TS` (TIMESTAMP_LTZ)
+  mixed with tz-naive cycle timestamps would `TypeError` on live data (the fit strips tz to a common
+  naive basis now; regression-tested); **[MED]** an all-failed / insufficient-history cycle rendered the
+  green "✔ margin stable or improving" all-clear — now only a genuine on-track state gets the ✔; **[LOW]**
+  the "latest finish" KPI paired the last-complete margin with the *newest* night's finish (showed "NaT"
+  when the latest was in-flight) — now uses the last-complete finish so both halves are the same night.
+
 ## 4.522.0 - ETL failure-recurrence + reconciliation-recurrence (2026-09-09)
 
 Two config-free predictive panels on Operations ▸ Pipeline SLA — no migration, no owner-apply, live on

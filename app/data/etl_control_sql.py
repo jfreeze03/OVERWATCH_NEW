@@ -856,3 +856,77 @@ def run_cost_attribution_scan(
         "  ORDER BY CREDITS_ATTRIBUTED DESC NULLS LAST\n"
         f"  LIMIT {int(max_rows)}"
     )
+
+
+# --- Phase 5: SLA finish forecast (whole-cycle vs clock deadline) -------------
+# The nightly cycle must finish before a clock deadline (07:00 target / 08:00 hard). It is
+# bracketed by two anchor workflows: the STARTER (kicks off ~10pm) and the TERMINAL (its finish =
+# the cycle's completion). This emits one row per NIGHT with the cycle's clock envelope
+# (CYCLE_START from the starter, CYCLE_FINISH from the terminal) + the terminal's health flags,
+# night-keyed by DATE(TASK_START_DTTM - 12h) so the ~22:00 start and the ~02:47 finish belong to
+# the SAME cycle. All deadline / margin / trend math is Python (the clock times never touch SQL);
+# this builder is config-driven only by the two anchor WORKFLOW NAMES (escaped literals — data).
+SLA_BASELINE_RUNS = 14      # ~2 weeks of nightly cycles to fit the margin trend
+MAX_SLA_NIGHTS = 400        # recent cycles cap (one night per row; bounded)
+
+
+def cycle_finish_history_scan(
+    control_fqn: object, *, start_workflow: object, end_workflow: object,
+    baseline_runs: int = SLA_BASELINE_RUNS, days: object = 0, max_rows: int = MAX_SLA_NIGHTS,
+) -> str:
+    """One row per NIGHT: the nightly cycle's clock envelope (CYCLE_START, CYCLE_FINISH) + health.
+
+    CYCLE_START = the STARTER workflow's earliest task start that night; CYCLE_FINISH = the TERMINAL
+    workflow's latest task end that night; N_FAILED / N_RUNNING = the terminal's health (a failed or
+    still-running terminal makes the finish provisional — the forecaster excludes it from the fit).
+    A cycle is night-keyed by DATE(TASK_START_DTTM - 12h) so the ~22:00 start and the early-AM finish
+    join as one cycle. SNAPSHOT_TS = CURRENT_TIMESTAMP() (SQL clock, for the in-flight runway line).
+    Both workflow names are bound as escaped literals (data, not identifiers). ``days`` (> 0) honors
+    the scope-bar Window. Fail-closed on a bad FQN or an empty anchor workflow. Pure, bounded."""
+    from app.core.sqlsafe import safe_identifier, sql_literal
+
+    fqn = str(control_fqn or "").strip()
+    _sw = str(start_workflow or "").strip()
+    _ew = str(end_workflow or "").strip()
+    if not fqn or not _sw or not _ew:
+        return ""
+    try:
+        tbl = safe_identifier(fqn, allow_qualified=True)
+    except ValueError:
+        return ""
+    keep = max(2, int(baseline_runs))
+    start_lit = sql_literal(_sw)
+    end_lit = sql_literal(_ew)
+    _failed = ", ".join(f"'{s}'" for s in sorted(FAILED_TASK_STATUSES))
+    win = _window_clause(days, indent="    ")
+    return (
+        # cycle START = the starter workflow's earliest start per night
+        "WITH cyc_start AS (\n"
+        "  SELECT DATE(DATEADD('hour', -12, TASK_START_DTTM)) AS CYCLE_DATE,\n"
+        "         MIN(TASK_START_DTTM) AS CYCLE_START\n"
+        f"  FROM {tbl}\n"
+        f"  WHERE WORKFLOW_NAME = {start_lit} AND TASK_START_DTTM IS NOT NULL\n"
+        f"{win}"
+        "  GROUP BY 1\n"
+        "),\n"
+        # cycle FINISH = the terminal workflow's latest end per night, + its health flags
+        "cyc_end AS (\n"
+        "  SELECT DATE(DATEADD('hour', -12, TASK_START_DTTM)) AS CYCLE_DATE,\n"
+        "         MAX(TASK_END_DTTM) AS CYCLE_FINISH,\n"
+        f"         SUM(CASE WHEN UPPER(TASK_STATUS) IN ({_failed}) THEN 1 ELSE 0 END) AS N_FAILED,\n"
+        "         SUM(CASE WHEN TASK_END_DTTM IS NULL\n"
+        f"                   AND (TASK_STATUS IS NULL OR UPPER(TASK_STATUS) NOT IN ({_failed}))\n"
+        "                  THEN 1 ELSE 0 END) AS N_RUNNING\n"
+        f"  FROM {tbl}\n"
+        f"  WHERE WORKFLOW_NAME = {end_lit} AND TASK_START_DTTM IS NOT NULL\n"
+        f"{win}"
+        "  GROUP BY 1\n"
+        ")\n"
+        "SELECT s.CYCLE_DATE, s.CYCLE_START, e.CYCLE_FINISH, e.N_FAILED, e.N_RUNNING,\n"
+        "       CURRENT_TIMESTAMP() AS SNAPSHOT_TS,\n"
+        "       ROW_NUMBER() OVER (ORDER BY s.CYCLE_DATE DESC) AS RN\n"
+        "  FROM cyc_start s JOIN cyc_end e ON s.CYCLE_DATE = e.CYCLE_DATE\n"
+        f"  QUALIFY ROW_NUMBER() OVER (ORDER BY s.CYCLE_DATE DESC) <= {keep}\n"
+        "  ORDER BY RN\n"
+        f"  LIMIT {int(max_rows)}"
+    )

@@ -53,6 +53,7 @@ from app.logic.insights import (
     cluster_failures_by_family,
     compare_release_periods,
     duration_sla_forecast,
+    etl_cycle_sla_forecast,
     etl_runtime_creep,
     pipeline_sla_forecast,
     rank_release_candidates,
@@ -1293,6 +1294,108 @@ def _runtime_creep_panel(days: int = 0) -> None:
         result_caption(res)
 
 
+def _sla_finish_forecast_panel(days: int = 0) -> None:
+    """Will the whole nightly cycle finish before the 7am target (8am hard)?
+
+    The cycle is bracketed by two anchor workflows: the STARTER (~10pm kickoff) and the TERMINAL
+    (its finish = the cycle's completion). Each night's finish is measured against a clock deadline
+    anchored to that night's start (cross-midnight), the finish-vs-deadline margin is trended across
+    nights, and a breach is projected before it happens. Start-drift (the cycle beginning later) is
+    called out as a second cause, since a late start alone can blow the deadline. Config-gated on
+    ETL_CONTROL_STATUS_FQN; the deadline + anchor workflows are Admin-editable (7am/8am defaults)."""
+    section_header("SLA finish forecast — will the nightly cycle beat 7am?",
+                   "warn", "pipeline", anchor="ops-sla-finish")
+    settings = load_settings(_PAGE)
+    fqn = str(settings.get("ETL_CONTROL_STATUS_FQN") or "").strip()
+    if not fqn:
+        empty_state("needs_setup", "Not configured — set ETL_CONTROL_STATUS_FQN on Admin ▸ "
+                    "SETTINGS (shared with the runtimes panel above).")
+        return
+    start_wf = str(settings.get("ETL_CYCLE_START_WORKFLOW") or "").strip()
+    end_wf = str(settings.get("ETL_CYCLE_END_WORKFLOW") or "").strip()
+    target = str(settings.get("ETL_SLA_TARGET_HHMM") or "07:00").strip()
+    breach = str(settings.get("ETL_SLA_BREACH_HHMM") or "08:00").strip()
+    scan_sql = etl_control_sql.cycle_finish_history_scan(fqn, start_workflow=start_wf, end_workflow=end_wf, days=days)
+    if not scan_sql:
+        empty_state("needs_setup", "Set ETL_CYCLE_START_WORKFLOW and ETL_CYCLE_END_WORKFLOW (the "
+                    "cycle's first and last workflow) on Admin ▸ SETTINGS, and a valid "
+                    "ETL_CONTROL_STATUS_FQN, to forecast cycle completion.")
+        return
+    res = run(scan_sql, page=_PAGE, key=f"etl_cycle_finish_{days}", tier="recent",
+              source="CONTROL_STATUS (cycle finish vs deadline)", max_rows=etl_control_sql.MAX_SLA_NIGHTS)
+    if guard(res, "No completed nightly cycles in the window — the starter and terminal workflows "
+             "haven't both run. Check the two anchor workflow names on Admin ▸ SETTINGS.", kind="clean",
+             setup_hint="The app role needs SELECT on the CONTROL_STATUS table "
+                        "(GRANT SELECT ON <table> TO ROLE <app role>)."):
+        fc = etl_cycle_sla_forecast(res.df, target_hhmm=target, breach_hhmm=breach)
+        if not fc:
+            empty_state("clean", "No completed nightly cycles in the window yet.")
+            return
+
+        def _signed(sec: object, early: str = "early", late: str = "late") -> str:
+            if sec is None:
+                return "—"
+            s = safe_float(sec)
+            return f"{humanize_duration(abs(s), 's')} {early if s >= 0 else late}"
+
+        _tgt = fc.get("target_hhmm", "07:00")
+        _margin = _signed(fc.get("latest_margin_sec"))
+        _slope = fc.get("slope_sec_per_night")
+        _trend = (f"{humanize_duration(abs(safe_float(_slope)), 's')}/night "
+                  f"{'earlier' if safe_float(_slope) >= 0 else 'later'}") if _slope is not None else "—"
+        _n2b = fc.get("nights_to_breach")
+        _n2b_lbl = "—" if _n2b is None else ("already past" if _n2b <= 0 else f"~{_n2b} night(s)")
+        _sd = fc.get("start_slope_min_per_night")
+        _sd_lbl = ("—" if _sd is None
+                   else f"{abs(safe_float(_sd)):.0f} min/night {'later' if safe_float(_sd) > 0 else 'earlier'}")
+        # the finish the margin/tier is judged on (last COMPLETE night), so the KPI's value and
+        # its timestamp describe the SAME night — not the newest night, which may be failed/in-flight.
+        _fin = fc.get("latest_complete_finish")   # never NaT (a complete night has a finish) or None
+        kpi_row([
+            {"label": f"Latest finish vs {_tgt}", "value": _margin,
+             "delta": (str(_fin)[:16] if _fin is not None else ""), "delta_color": "off"},
+            {"label": "Margin trend", "value": _trend, "delta_color": "off",
+             "help": "Robust (Theil-Sen) slope of the finish-vs-target margin across the recent "
+                     "COMPLETE nights. 'later/night' means the cycle is finishing later each night."},
+            {"label": "Nights to breach", "value": _n2b_lbl, "delta_color": "off",
+             "help": f"At the current trend, nights until the cycle finishes after {_tgt}."},
+            {"label": "Start drift", "value": _sd_lbl, "delta_color": "off",
+             "help": "Trend of the cycle's START time. Starting later cascades into a later finish "
+                     "even if nothing runs slower — a separate cause to fix (the ~10pm kickoff)."},
+        ])
+        _fore = fc.get("forecast", "")
+        _sev = fc.get("severity")
+        if _sev == "High":
+            st.error(f"🔴 {_fore} — the nightly cycle's latest completed finish is {_margin} vs the "
+                     f"{_tgt} target. Investigate before tonight's run.")
+        elif _sev == "Medium":
+            st.warning(f"🟠 {_fore} — meets {_tgt} now but the finish is trending later "
+                       f"({_trend}); projected to miss in {_n2b_lbl}.")
+        elif _sev == "OK":
+            st.caption(f"✔ {_fore} — finishing {_margin} vs the {_tgt} target, margin stable or improving.")
+        else:
+            # no completed baseline yet (all nights failed / in-flight) — never a green all-clear
+            st.caption(f"{_fore} — not enough cleanly-completed cycles to forecast the trend yet.")
+        if fc.get("latest_failed"):
+            st.warning("🟠 The latest cycle's terminal workflow FAILED — its finish time is unreliable; "
+                       "the forecast uses the last cleanly-completed cycle.")
+        elif fc.get("live_runway_sec") is not None:
+            st.caption(f"Tonight's cycle is still running — {_signed(fc.get('live_runway_sec'), 'until', 'past')} "
+                       f"the {_tgt} target (live, advisory).")
+        import pandas as pd
+        nights_df = pd.DataFrame(fc.get("nights", []))
+        if not nights_df.empty and "MARGIN_SEC" in nights_df.columns:
+            nights_df["MARGIN"] = nights_df["MARGIN_SEC"].map(lambda s: _signed(s))
+            nights_df = nights_df.drop(columns=["MARGIN_SEC"])
+            styled_table(nights_df, height=280)
+        st.caption(f"Each night's cycle finish (the {end_wf or 'terminal'} workflow's last task end) vs a "
+                   f"deadline anchored to that night's start (the {start_wf or 'starter'} workflow, "
+                   f"cross-midnight). Margin = deadline − finish (+ = before {_tgt}). Trend fitted with a "
+                   "robust Theil-Sen slope over the complete nights; failed / still-running nights are "
+                   "excluded from the fit. Deadline + anchor workflows are editable on Admin ▸ SETTINGS.")
+        result_caption(res)
+
+
 def _run_inventory_panel() -> None:
     """Recent ETL run inventory (CONTROL_RUN_ID) + a run picker that drills into any run's
     tasks (CONTROL_STATUS) and parameters (CONTROL_PARAMS).
@@ -1578,6 +1681,8 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
     # Then the forward-looking companion: which tasks are CREEPING toward a breach (trend fit),
     # scoped to the Window so the trend reflects the selected history.
     _runtime_creep_panel(days)
+    # Then the whole-cycle SLA: will the nightly cycle (starter → terminal) finish before 7am?
+    _sla_finish_forecast_panel(days)
     # Then the run inventory (CONTROL_RUN_ID) + the latest run's parameters (CONTROL_PARAMS).
     _run_inventory_panel()
     # Then Phase 3 reconciliation DQ: metrics whose source vs target layer didn't tie out.

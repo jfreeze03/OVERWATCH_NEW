@@ -65,7 +65,7 @@ def test_v137_arm_isolation_and_no_fails_bump():
 
 def test_validate_teardown_and_docs_track_v137():
     val = _read("snowflake/validate.sql")
-    assert "V001..V137 applied" in val and "VERSION BETWEEN 1 AND 137) = 137" in val
+    assert "V001..V138 applied" in val and "VERSION BETWEEN 1 AND 138) = 138" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V137__dq_recon_error_alert.sql" in _read(rel)
     teardown = _read("snowflake/teardown.sql")
