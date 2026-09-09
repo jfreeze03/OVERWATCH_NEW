@@ -196,3 +196,42 @@ def test_task_status_sets_are_disjoint_and_shared() -> None:
     assert "FAILED" in etl.FAILED_TASK_STATUSES and "ABORTED" in etl.FAILED_TASK_STATUSES
     assert "RUNNING" in etl.RUNNING_TASK_STATUSES
     assert "SUCCEEDED" not in etl.FAILED_TASK_STATUSES  # success is never a failure
+
+
+# --- workflow_runtime_drift_scan (Phase 2: run-over-run drift) ---------------
+
+def test_drift_scan_basic() -> None:
+    sql = etl.workflow_runtime_drift_scan(_CTRL, baseline_runs=5)
+    assert _CTRL in sql
+    # latest = newest run; baseline = the next N runs, compared per task
+    assert "QUALIFY ROW_NUMBER() OVER (ORDER BY RUN_START DESC) <= 6" in sql  # 1 + 5
+    assert "MEDIAN(RUNTIME_SEC) AS BASELINE_SEC" in sql
+    assert "WHERE RN = 1" in sql and "WHERE RN > 1" in sql
+    # matched per task on workflow+task; biggest slowdown first
+    assert "b.WORKFLOW_NAME = l.WORKFLOW_NAME AND b.TASK_NAME = l.TASK_NAME" in sql
+    assert "ORDER BY SLOWER_BY_SEC DESC" in sql
+    # SLOWER_BY_* (not DELTA_*) so the _SEC humanizes as a duration, not a signed delta
+    assert "SLOWER_BY_SEC" in sql and "SLOWER_BY_PCT" in sql
+    assert "DELTA" not in sql
+
+
+def test_drift_scan_materiality_gate_in_sql() -> None:
+    # both the absolute-seconds AND the ratio gate live in the SQL (deterministic,
+    # not a post-filter), and divide-by-zero on a 0-second baseline is guarded
+    sql = etl.workflow_runtime_drift_scan(_CTRL, min_abs_sec=60, min_ratio=1.5)
+    assert "l.LATEST_SEC - b.BASELINE_SEC) >= 60" in sql
+    assert "l.LATEST_SEC >= b.BASELINE_SEC * 1.5" in sql
+    assert "NULLIF(b.BASELINE_SEC, 0)" in sql
+
+
+def test_drift_scan_fail_closed() -> None:
+    assert etl.workflow_runtime_drift_scan("") == ""
+    assert etl.workflow_runtime_drift_scan(None) == ""
+    assert etl.workflow_runtime_drift_scan("T; DROP TABLE X") == ""
+    assert etl.workflow_runtime_drift_scan("a b c") == ""
+
+
+def test_drift_scan_parses() -> None:
+    import pytest
+    sqlglot = pytest.importorskip("sqlglot")
+    sqlglot.parse(etl.workflow_runtime_drift_scan(_CTRL), dialect="snowflake")

@@ -1096,6 +1096,43 @@ def _workflow_runtimes_panel() -> None:
         result_caption(res)
 
 
+def _workflow_drift_panel() -> None:
+    """Tasks in the latest ETL run that ran materially SLOWER than their recent baseline.
+
+    Run-over-run drift on the same Informatica CONTROL_STATUS the runtimes panel reads:
+    for each task, the latest runtime vs the MEDIAN of the prior runs, surfaced only on a
+    material slowdown (≥ 1 min AND ≥ 1.5×) so a task drifting toward its window is caught
+    before it breaches. Account-wide; config-gated + fail-silent-with-grant-hint, and a
+    clean state when runtimes are stable."""
+    section_header("Runtime drift — tasks slower than their recent baseline",
+                   "warn", "pipeline", anchor="ops-wf-drift")
+    fqn = str(load_settings(_PAGE).get("ETL_CONTROL_STATUS_FQN") or "").strip()
+    if not fqn:
+        empty_state("needs_setup", "Not configured — set ETL_CONTROL_STATUS_FQN on Admin ▸ "
+                    "SETTINGS (shared with the runtimes panel above).")
+        return
+    scan_sql = etl_control_sql.workflow_runtime_drift_scan(fqn)
+    if not scan_sql:
+        empty_state("needs_setup", "ETL_CONTROL_STATUS_FQN is not a valid table name.")
+        return
+    res = run(scan_sql, page=_PAGE, key="etl_wf_drift", tier="recent",
+              source="CONTROL_STATUS (run-over-run drift)", max_rows=etl_control_sql.MAX_DRIFT_ROWS)
+    if guard(res, "No task ran materially slower than its recent baseline — runtimes are stable.",
+             kind="clean",
+             setup_hint="The app role needs SELECT on the CONTROL_STATUS table "
+                        "(GRANT SELECT ON <table> TO ROLE <app role>)."):
+        df = res.df.copy()
+        n = len(df)
+        st.warning(f"🟠 {n} task(s) in the latest run ran materially slower than their recent "
+                   "baseline — a task drifting toward its window is worth a look before it breaches.")
+        styled_table(df, height=300)
+        st.caption("Latest run vs the MEDIAN of the prior runs, per task (matched on workflow + "
+                   "task name). Only material slowdowns show — at least 1 minute AND at least 1.5× "
+                   "the baseline — biggest first. A brand-new task (no baseline) is omitted. "
+                   "LATEST_SEC / BASELINE_SEC / SLOWER_BY_SEC humanize to Hr/Min/Sec.")
+        result_caption(res)
+
+
 def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "") -> None:
     """Metadata-driven table freshness SLAs (config in PIPELINE_SLA_CONFIG).
 
@@ -1108,6 +1145,8 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
     # Then the latest nightly run's per-task runtimes (Informatica CONTROL_STATUS) —
     # account-wide (one cycle), config-gated + fail-silent-with-grant-hint like above.
     _workflow_runtimes_panel()
+    # Then run-over-run drift on that same control table: which task got materially slower.
+    _workflow_drift_panel()
     res = run(insights_sql.pipeline_sla_forecast(14), page=_PAGE, key="sla_status", tier="recent",
               source="ACCOUNT_USAGE.TABLE_DML_HISTORY x PIPELINE_SLA_STATUS")
     if not res.ok:

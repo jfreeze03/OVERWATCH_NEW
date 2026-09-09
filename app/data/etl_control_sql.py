@@ -220,3 +220,78 @@ def workflow_runtimes_scan(control_fqn: object, *, max_tasks: int = MAX_TASKS) -
         "  ORDER BY RUNTIME_SEC DESC, s.TASK_START_DTTM\n"
         f"  LIMIT {int(max_tasks)}"
     )
+
+
+MAX_DRIFT_ROWS = 200     # material slowdowns are few; bounded output
+DRIFT_MIN_ABS_SEC = 60   # ignore a < 1-minute absolute change (noise)
+DRIFT_MIN_RATIO = 1.5    # AND require the latest to be >= 1.5x the baseline median
+
+
+def workflow_runtime_drift_scan(
+    control_fqn: object,
+    *,
+    baseline_runs: int = 5,
+    min_abs_sec: int = DRIFT_MIN_ABS_SEC,
+    min_ratio: float = DRIFT_MIN_RATIO,
+    max_rows: int = MAX_DRIFT_ROWS,
+) -> str:
+    """Tasks in the latest run that ran materially SLOWER than their recent baseline.
+
+    Ranks runs by recency, takes the newest as 'latest' and the next ``baseline_runs``
+    as the comparison window, and for each task matched on (WORKFLOW_NAME, TASK_NAME)
+    compares the latest runtime to the MEDIAN of its baseline runtimes. Only a material
+    slowdown surfaces — at least ``min_abs_sec`` seconds AND at least ``min_ratio``x the
+    baseline — so a 2s→4s task never fires while a 5m→15m one does. Biggest slowdown
+    first. Runtime per (task, run) is MAX-collapsed (defensive against a dup task row);
+    a task with no baseline history (a brand-new task) is absent by design. Fail-closed
+    on a bad FQN. The _SEC columns humanize to Hr/Min/Sec; SLOWER_BY_* stay positive so
+    they read as a duration, not a signed delta. Pure: bounded output, no Streamlit."""
+    from app.core.sqlsafe import safe_identifier
+
+    fqn = str(control_fqn or "").strip()
+    if not fqn:
+        return ""
+    try:
+        tbl = safe_identifier(fqn, allow_qualified=True)
+    except ValueError:
+        return ""
+    keep = 1 + max(1, int(baseline_runs))
+    return (
+        "WITH runs AS (\n"
+        f"  SELECT RUN_ID, MAX(TASK_START_DTTM) AS RUN_START FROM {tbl}\n"
+        "  WHERE TASK_START_DTTM IS NOT NULL AND RUN_ID IS NOT NULL\n"
+        "  GROUP BY RUN_ID\n"
+        f"  QUALIFY ROW_NUMBER() OVER (ORDER BY RUN_START DESC) <= {keep}\n"
+        "),\n"
+        "ranked AS (\n"
+        "  SELECT RUN_ID, ROW_NUMBER() OVER (ORDER BY RUN_START DESC) AS RN FROM runs\n"
+        "),\n"
+        "task_runtimes AS (\n"
+        "  SELECT s.WORKFLOW_NAME, s.TASK_NAME, r.RN,\n"
+        "         MAX(DATEDIFF('second', s.TASK_START_DTTM,\n"
+        "             COALESCE(s.TASK_END_DTTM, CURRENT_TIMESTAMP()))) AS RUNTIME_SEC\n"
+        f"  FROM {tbl} s JOIN ranked r ON s.RUN_ID = r.RUN_ID\n"
+        "  WHERE s.TASK_START_DTTM IS NOT NULL\n"
+        "  GROUP BY s.WORKFLOW_NAME, s.TASK_NAME, r.RN\n"
+        "),\n"
+        "latest AS (\n"
+        "  SELECT WORKFLOW_NAME, TASK_NAME, RUNTIME_SEC AS LATEST_SEC\n"
+        "  FROM task_runtimes WHERE RN = 1\n"
+        "),\n"
+        "baseline AS (\n"
+        "  SELECT WORKFLOW_NAME, TASK_NAME, MEDIAN(RUNTIME_SEC) AS BASELINE_SEC,\n"
+        "         COUNT(*) AS BASELINE_RUNS\n"
+        "  FROM task_runtimes WHERE RN > 1\n"
+        "  GROUP BY WORKFLOW_NAME, TASK_NAME\n"
+        ")\n"
+        "SELECT l.WORKFLOW_NAME, l.TASK_NAME,\n"
+        "       l.LATEST_SEC, b.BASELINE_SEC, b.BASELINE_RUNS,\n"
+        "       (l.LATEST_SEC - b.BASELINE_SEC) AS SLOWER_BY_SEC,\n"
+        "       ROUND(100.0 * (l.LATEST_SEC - b.BASELINE_SEC) / NULLIF(b.BASELINE_SEC, 0), 0) AS SLOWER_BY_PCT\n"
+        "  FROM latest l\n"
+        "  JOIN baseline b ON b.WORKFLOW_NAME = l.WORKFLOW_NAME AND b.TASK_NAME = l.TASK_NAME\n"
+        f"  WHERE (l.LATEST_SEC - b.BASELINE_SEC) >= {int(min_abs_sec)}\n"
+        f"    AND l.LATEST_SEC >= b.BASELINE_SEC * {float(min_ratio)}\n"
+        "  ORDER BY SLOWER_BY_SEC DESC\n"
+        f"  LIMIT {int(max_rows)}"
+    )

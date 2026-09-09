@@ -1,5 +1,20 @@
 # Changelog
 
+## 4.510.0 - Run-over-run drift: which ETL task got materially slower (2026-09-09)
+
+Beyond pass/fail and raw runtimes, the highest-signal thing `CONTROL_STATUS` can tell you is *which
+task suddenly slowed down* — the early warning before a task blows its load window.
+
+- **Operations ▸ Pipeline ▸ "Runtime drift — tasks slower than their recent baseline"** compares each
+  task's latest runtime to the **MEDIAN of its prior runs** (matched on workflow + task name) and lists
+  only material slowdowns — **≥ 1 minute AND ≥ 1.5× the baseline** — biggest first, with the baseline,
+  the absolute slowdown, and the percent. A median (not a single prior run) so one slow night doesn't
+  cry wolf; a brand-new task with no baseline is omitted by design.
+- Builder `etl_control_sql.workflow_runtime_drift_scan` ranks runs by recency, collapses any duplicate
+  task row (MAX), and validates the FQN with `safe_identifier`. Reuses the existing
+  `ETL_CONTROL_STATUS_FQN` config — **no new migration or grant**. Config-gated + fail-silent, with a
+  verified-clean state when runtimes are stable. `_SEC` columns humanize to Hr/Min/Sec.
+
 ## 4.509.0 - A failed nightly ETL task now leads the morning Brief (2026-09-09)
 
 Completes the Brief coverage of the ETL cycle: a FAILED task in the latest Informatica run (from
