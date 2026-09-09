@@ -242,10 +242,11 @@ def workflow_runtime_drift_scan(
     task is compared to its OWN prior runs, never to a different workflow from the same
     night. For each (WORKFLOW_NAME, TASK_NAME) it compares the newest run's runtime to
     the MEDIAN of the baseline runs; only a material slowdown surfaces — at least
-    ``min_abs_sec`` seconds AND at least ``min_ratio``x the baseline. TASK_NAME='ROOT'
-    is the workflow's TOTAL runtime, so a ROOT row = the whole workflow drifted while a
-    step row = which child task caused it. FAILED tasks are dropped from the runtime
-    series (a crashed-short run must not depress the baseline). A workflow with only one
+    ``min_abs_sec`` seconds AND at least ``min_ratio``x the baseline. CONTROL_STATUS holds
+    the mapping + child tasks (SP_*/M_*), not a 'ROOT' total row (that lives in
+    CONTROL_RUN_ID), so each drifting row is the specific child task, not the whole
+    workflow. FAILED tasks are dropped from the runtime series (a crashed-short run must
+    not depress the baseline). A workflow with only one
     run has no baseline and is absent by design. Fail-closed on a bad FQN. The _SEC
     columns humanize to Hr/Min/Sec; SLOWER_BY_* stay positive (a duration, not a signed
     delta). Pure: bounded output, no Streamlit."""
@@ -299,8 +300,8 @@ def workflow_runtime_drift_scan(
         "  FROM task_runtimes WHERE RN > 1\n"
         "  GROUP BY WORKFLOW_NAME, TASK_NAME\n"
         ")\n"
-        # TASK_NAME='ROOT' is the workflow's TOTAL runtime; the other rows are its steps,
-        # so a ROOT row = the whole workflow drifted, a step row = which step caused it.
+        # Each row is a mapping / child task (SP_*/M_*) — CONTROL_STATUS has no 'ROOT' total
+        # row (that lives in CONTROL_RUN_ID), so a drifting row names the specific step.
         "SELECT l.WORKFLOW_NAME, l.TASK_NAME,\n"
         "       l.LATEST_SEC, b.BASELINE_SEC, b.BASELINE_RUNS,\n"
         "       (l.LATEST_SEC - b.BASELINE_SEC) AS SLOWER_BY_SEC,\n"
@@ -447,5 +448,130 @@ def recon_errors_scan(
         f"  FROM {tbl}\n"
         f"  WHERE LOAD_DTTM >= DATEADD('day', -{int(days)}, CURRENT_TIMESTAMP())\n"
         "  ORDER BY LOAD_DTTM DESC, MTRC\n"
+        f"  LIMIT {int(max_rows)}"
+    )
+
+
+# --- Phase 4: cost attribution (CONTROL_STATUS x ACCOUNT_USAGE) ---------------
+# The nightly cycle is Informatica proc CALLs, so Snowflake bills the compute to a
+# WAREHOUSE, never to a task — "which task cost the most last night?" has no billed
+# answer. We ATTRIBUTE it: each query's measured credits (the fair share Snowflake
+# itself computes in QUERY_ATTRIBUTION_HISTORY.CREDITS_ATTRIBUTED_COMPUTE) is charged
+# to the CONTROL_STATUS task whose run window CONTAINS the query AND whose task name
+# appears in the query text. The query tags carry no PRCS_ID / RUN_ID (verified live —
+# every tag was blank), so text + window is the only join available. Among several
+# task names that match one query the LONGEST wins, so a nested task name
+# (SP_D_PLCY_TSACTN_STS_CANCLTN_RSN) never double-counts its credits onto its shorter
+# prefix (SP_D_PLCY_TSACTN). A query that matches NO task is kept in an '(unattributed)'
+# bucket so the panel can show coverage honestly: this is a best-effort attribution
+# model, not a billed invoice. Credits stay credits here (the module takes no dollar
+# rate, by design); the panel converts to USD with CREDIT_PRICE_USD.
+MAX_COST_ROWS = 500
+
+# The two ACCOUNT_USAGE views the attribution joins across (already reachable from the
+# Operations page). QAH is the credit source + the query-tree root; QH is the text.
+_QAH_FQN = "SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY"
+_QH_FQN = "SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY"
+# Labels for the coverage bucket (queries in the run window that matched no task).
+UNATTRIBUTED_WORKFLOW = "(unattributed)"
+UNATTRIBUTED_TASK = "(window overhead / other queries)"
+
+
+def run_cost_attribution_scan(
+    control_fqn: object, *, run_id: object = "", max_rows: int = MAX_COST_ROWS
+) -> str:
+    """Attribute a run's measured Snowflake credits to its CONTROL_STATUS tasks.
+
+    With ``run_id`` set, attributes that specific run (the id is bound as an escaped SQL
+    literal — a run id is data, not an identifier); otherwise the latest run (the one
+    holding the newest TASK_START_DTTM). Returns one row per task: WORKFLOW_NAME,
+    TASK_NAME, MATCHED_QUERIES, and CREDITS_ATTRIBUTED (the summed fair-share compute
+    credits of every query charged to it), most expensive task first. Queries that ran
+    in the run window but matched no task land in one '(unattributed)' row, so the caller
+    can show attributed-vs-total coverage rather than silently dropping them.
+
+    The join: candidate queries are QUERY_ATTRIBUTION_HISTORY (credits) ⋈ QUERY_HISTORY
+    (text) inside the run's [min start, max end] window; each is charged to the LONGEST
+    task name whose window contains it AND whose name is in its text. Fail-closed on a bad
+    or empty CONTROL_STATUS FQN. Pure: bounded output, no Streamlit, no dollar rate."""
+    from app.core.sqlsafe import safe_identifier, sql_literal
+
+    fqn = str(control_fqn or "").strip()
+    if not fqn:
+        return ""
+    try:
+        tbl = safe_identifier(fqn, allow_qualified=True)
+    except ValueError:
+        return ""
+    _rid = str(run_id or "").strip()
+    if _rid:
+        run_filter = f"    AND RUN_ID = {sql_literal(_rid)}\n"
+    else:
+        # latest run = the RUN_ID holding the newest TASK_START_DTTM (matches the
+        # runtimes / drift panels, so all three read the same 'latest run').
+        run_filter = (
+            "    AND RUN_ID = (\n"
+            f"      SELECT RUN_ID FROM {tbl}\n"
+            "      WHERE TASK_START_DTTM IS NOT NULL AND RUN_ID IS NOT NULL\n"
+            "      QUALIFY ROW_NUMBER() OVER (ORDER BY TASK_START_DTTM DESC) = 1)\n"
+        )
+    unattr_wf = sql_literal(UNATTRIBUTED_WORKFLOW)
+    unattr_task = sql_literal(UNATTRIBUTED_TASK)
+    return (
+        "WITH tasks AS (\n"
+        "  SELECT WORKFLOW_NAME, TASK_NAME, TASK_START_DTTM,\n"
+        "         COALESCE(TASK_END_DTTM, CURRENT_TIMESTAMP()) AS TASK_END\n"
+        f"  FROM {tbl}\n"
+        "  WHERE TASK_START_DTTM IS NOT NULL AND TASK_NAME IS NOT NULL\n"
+        f"{run_filter}"
+        "),\n"
+        # one narrow time window bounds BOTH ACCOUNT_USAGE reads (a time-partitioned slice,
+        # so the scan is cheap even though the views are account-wide + huge).
+        "bounds AS (\n"
+        "  SELECT MIN(TASK_START_DTTM) AS RUN_START, MAX(TASK_END) AS RUN_END FROM tasks\n"
+        "),\n"
+        # QAH can carry MORE THAN ONE row per QUERY_ID (a query split across warehouse
+        # slices), so SUM the credits per query FIRST. Otherwise the later RN=1 — which
+        # exists only to de-dup TASK matches — would also silently drop a query's other
+        # credit slices and undercount the run. HAVING keeps queries whose TOTAL is > 0.
+        "qah_agg AS (\n"
+        "  SELECT QUERY_ID, SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CREDITS\n"
+        f"  FROM {_QAH_FQN}\n"
+        "  WHERE START_TIME >= (SELECT RUN_START FROM bounds)\n"
+        "    AND START_TIME <= (SELECT RUN_END FROM bounds)\n"
+        "  GROUP BY QUERY_ID\n"
+        "  HAVING SUM(CREDITS_ATTRIBUTED_COMPUTE) > 0\n"
+        "),\n"
+        # attach the text (QUERY_HISTORY is one row per QUERY_ID) inside the same window.
+        "cand AS (\n"
+        "  SELECT a.QUERY_ID, a.CREDITS, qh.QUERY_TEXT, qh.START_TIME\n"
+        "  FROM qah_agg a\n"
+        f"  JOIN {_QH_FQN} qh ON qh.QUERY_ID = a.QUERY_ID\n"
+        "  WHERE qh.START_TIME >= (SELECT RUN_START FROM bounds)\n"
+        "    AND qh.START_TIME <= (SELECT RUN_END FROM bounds)\n"
+        "),\n"
+        # charge each query to the LONGEST task name whose window + text both match. The
+        # LEFT JOIN keeps unmatched queries (their task columns NULL) so coverage is honest;
+        # NULLS LAST means a genuinely-matched query never picks the NULL fallback row.
+        # CONTAINS(UPPER(...)) is a LITERAL case-insensitive substring test — unlike ILIKE
+        # it does not treat the '_' in SP_*/M_* task names as a single-char wildcard, so a
+        # task name can't loosely match (and mis-charge) an unrelated query's text.
+        "assigned AS (\n"
+        "  SELECT c.QUERY_ID, c.CREDITS, t.WORKFLOW_NAME, t.TASK_NAME,\n"
+        "         ROW_NUMBER() OVER (PARTITION BY c.QUERY_ID\n"
+        "           ORDER BY LENGTH(t.TASK_NAME) DESC NULLS LAST) AS RN\n"
+        "  FROM cand c\n"
+        "  LEFT JOIN tasks t\n"
+        "    ON c.START_TIME >= t.TASK_START_DTTM AND c.START_TIME <= t.TASK_END\n"
+        "   AND CONTAINS(UPPER(c.QUERY_TEXT), UPPER(t.TASK_NAME))\n"
+        ")\n"
+        f"SELECT COALESCE(WORKFLOW_NAME, {unattr_wf}) AS WORKFLOW_NAME,\n"
+        f"       COALESCE(TASK_NAME, {unattr_task}) AS TASK_NAME,\n"
+        "       COUNT(DISTINCT QUERY_ID) AS MATCHED_QUERIES,\n"
+        "       ROUND(SUM(CREDITS), 4) AS CREDITS_ATTRIBUTED\n"
+        "  FROM assigned\n"
+        "  WHERE RN = 1\n"
+        "  GROUP BY 1, 2\n"
+        "  ORDER BY CREDITS_ATTRIBUTED DESC NULLS LAST\n"
         f"  LIMIT {int(max_rows)}"
     )

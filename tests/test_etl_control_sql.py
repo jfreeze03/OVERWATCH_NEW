@@ -335,3 +335,61 @@ def test_recon_errors_scan_parses() -> None:
     import pytest
     sqlglot = pytest.importorskip("sqlglot")
     sqlglot.parse(etl.recon_errors_scan(_RECON), dialect="snowflake")
+
+
+# --- run_cost_attribution_scan (Phase 4: CONTROL_STATUS x ACCOUNT_USAGE) ------
+
+def test_cost_attribution_scan_latest_run() -> None:
+    sql = etl.run_cost_attribution_scan(_CTRL)
+    assert _CTRL in sql
+    # joins the two ACCOUNT_USAGE views: credits (QAH) + text (QH)
+    assert "SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY" in sql
+    assert "SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY" in sql
+    # QAH can have >1 row per QUERY_ID (a query split across warehouse slices): SUM the
+    # credits per query FIRST so the RN=1 task-dedup can't drop a query's other slices.
+    assert "SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CREDITS" in sql
+    assert "GROUP BY QUERY_ID" in sql
+    assert "HAVING SUM(CREDITS_ATTRIBUTED_COMPUTE) > 0" in sql
+    assert "ON qh.QUERY_ID = a.QUERY_ID" in sql
+    # no run_id -> latest run (newest TASK_START_DTTM), same rule the sibling panels use
+    assert "QUALIFY ROW_NUMBER() OVER (ORDER BY TASK_START_DTTM DESC) = 1" in sql
+    # the substring guard: charge each query to the LONGEST matching task name (so a nested
+    # task name never double-counts onto its shorter prefix)
+    assert "ORDER BY LENGTH(t.TASK_NAME) DESC NULLS LAST" in sql
+    assert "WHERE RN = 1" in sql
+    # window containment + LITERAL text match are the whole join (tags are empty here).
+    # CONTAINS(UPPER(...)) not ILIKE: the '_' in SP_*/M_* task names must NOT act as a
+    # single-char wildcard and loosely match (mis-charge) an unrelated query.
+    assert "c.START_TIME >= t.TASK_START_DTTM AND c.START_TIME <= t.TASK_END" in sql
+    assert "CONTAINS(UPPER(c.QUERY_TEXT), UPPER(t.TASK_NAME))" in sql
+    assert "ILIKE" not in sql  # no wildcard-bearing operator on the task-name match
+    # honest coverage: unmatched queries kept via LEFT JOIN into one labelled bucket
+    assert "LEFT JOIN tasks t" in sql
+    assert etl.UNATTRIBUTED_WORKFLOW in sql and etl.UNATTRIBUTED_TASK in sql
+    # credits summed then reported; most-expensive task first; bounded
+    assert "SUM(CREDITS)" in sql and "AS CREDITS_ATTRIBUTED" in sql
+    assert "ORDER BY CREDITS_ATTRIBUTED DESC NULLS LAST" in sql and "LIMIT" in sql
+
+
+def test_cost_attribution_scan_specific_run_binds_a_literal() -> None:
+    sql = etl.run_cost_attribution_scan(_CTRL, run_id="dd1ecdac-ea2e")
+    # a chosen run filters to that RUN_ID as an escaped literal, NOT the latest CTE
+    assert "AND RUN_ID = 'dd1ecdac-ea2e'" in sql
+    assert "QUALIFY" not in sql
+    # a hostile run id is escaped (single-quote doubled) so it stays one string literal
+    evil = etl.run_cost_attribution_scan(_CTRL, run_id="x' OR '1'='1")
+    assert "'x'' OR ''1''=''1'" in evil
+
+
+def test_cost_attribution_scan_fail_closed() -> None:
+    assert etl.run_cost_attribution_scan("") == ""
+    assert etl.run_cost_attribution_scan(None) == ""
+    assert etl.run_cost_attribution_scan("T; DROP TABLE X") == ""
+    assert etl.run_cost_attribution_scan("a b c") == ""
+
+
+def test_cost_attribution_scan_parses() -> None:
+    import pytest
+    sqlglot = pytest.importorskip("sqlglot")
+    sqlglot.parse(etl.run_cost_attribution_scan(_CTRL), dialect="snowflake")
+    sqlglot.parse(etl.run_cost_attribution_scan(_CTRL, run_id="abc-123"), dialect="snowflake")

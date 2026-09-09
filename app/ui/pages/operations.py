@@ -1127,11 +1127,12 @@ def _workflow_drift_panel() -> None:
                    "— a task drifting toward its window is worth a look before it breaches.")
         styled_table(df, height=300)
         st.caption("Each workflow's newest run vs the MEDIAN of ITS OWN prior runs, per task. "
-                   "TASK_NAME='ROOT' is the workflow's total runtime (the whole workflow drifted); "
-                   "the other rows are the child steps that caused it. Only material slowdowns show "
-                   "— at least 1 minute AND at least 1.5× the baseline — biggest first; a workflow "
-                   "with no prior runs is omitted. LATEST_SEC / BASELINE_SEC / SLOWER_BY_SEC "
-                   "humanize to Hr/Min/Sec.")
+                   "CONTROL_STATUS holds the mapping + child tasks (SP_*/M_*) — there is no 'ROOT' "
+                   "total row here (that lives in CONTROL_RUN_ID), so each row is the specific child "
+                   "task that drifted, not the whole workflow. Only material slowdowns show — at "
+                   "least 1 minute AND at least 1.5× the baseline — biggest first; a workflow with no "
+                   "prior runs is omitted. LATEST_SEC / BASELINE_SEC / SLOWER_BY_SEC humanize to "
+                   "Hr/Min/Sec.")
         result_caption(res)
 
 
@@ -1260,6 +1261,90 @@ def _recon_error_panel() -> None:
         result_caption(res)
 
 
+def _cost_attribution_panel() -> None:
+    """Attributed Snowflake credits/$ per task for the latest ETL run.
+
+    The nightly cycle is Informatica proc CALLs, so Snowflake bills compute to a
+    WAREHOUSE, never to a task — this attributes each query's measured fair-share credits
+    (QUERY_ATTRIBUTION_HISTORY) to the CONTROL_STATUS task whose run window contains it and
+    whose name is in its text. The tags carry no run/task id (verified live), so text+window
+    is the join; the longest matching task name wins so nested names never double-count.
+    Queries that match no task stay in one '(unattributed)' row, so the coverage figure is
+    honest — this is a best-effort model, not a billed invoice. Account-wide (one nightly
+    cycle); config-gated on ETL_CONTROL_STATUS_FQN + fail-silent-with-grant-hint. Reads the
+    same 'latest run' the runtimes/drift panels do, so the three line up."""
+    section_header("Cost attribution — credits & $ per task, latest ETL run",
+                   "warn", "pipeline", anchor="ops-cost-attribution")
+    settings = load_settings(_PAGE)
+    fqn = str(settings.get("ETL_CONTROL_STATUS_FQN") or "").strip()
+    if not fqn:
+        empty_state("needs_setup", "Not configured — set ETL_CONTROL_STATUS_FQN on Admin ▸ SETTINGS "
+                    "(shared with the runtimes panel). This charges each night's measured Snowflake "
+                    "credits to the task that spent them, so you can see which task costs the most.")
+        return
+    scan_sql = etl_control_sql.run_cost_attribution_scan(fqn)
+    if not scan_sql:
+        empty_state("needs_setup", "ETL_CONTROL_STATUS_FQN is not a valid table name.")
+        return
+    # On-demand: the attribution join (tasks x QUERY_ATTRIBUTION_HISTORY x QUERY_HISTORY) is the only
+    # genuinely NEW usage scan on this tab, so it runs ONLY when the operator asks — no first-paint or
+    # tab-open cost. run() then caches the result, so re-renders while toggled on are free.
+    if not st.toggle("Compute attributed cost (on-demand usage scan)", key="etl_cost_attr_toggle",
+                     help="Charges the latest run's measured credits to its tasks by joining "
+                          "CONTROL_STATUS to QUERY_ATTRIBUTION_HISTORY x QUERY_HISTORY. Off by default "
+                          "so the tab adds no scan cost until you ask."):
+        st.caption("Toggle on to attribute the latest run's measured Snowflake credits to its tasks. "
+                   "It reuses the usage views the app already reads and runs only on demand, so it "
+                   "adds no cost until requested. Credits lag ~6h.")
+        return
+    res = run(scan_sql, page=_PAGE, key="etl_cost_attribution", tier="recent",
+              source="CONTROL_STATUS x QUERY_ATTRIBUTION_HISTORY (attributed credits, on demand)",
+              max_rows=etl_control_sql.MAX_COST_ROWS)
+    if guard(res, "No attributed credits for the latest run yet — Snowflake's usage metering lags up "
+             "to ~6h, so a run from the last few hours appears here once it finishes metering.",
+             setup_hint="The app role needs SELECT on the CONTROL_STATUS table "
+                        "(GRANT SELECT ON <table> TO ROLE <app role>); the usage views it already reads."):
+        df = res.df.copy()
+        rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
+        _unattr = etl_control_sql.UNATTRIBUTED_WORKFLOW
+        _credits = df["CREDITS_ATTRIBUTED"].map(safe_float) if "CREDITS_ATTRIBUTED" in df.columns else None
+        # Coverage = attributed vs (attributed + unattributed). Sum credits, THEN convert once
+        # (credits_to_usd's own docstring warns against round-then-sum). Div-guarded so an
+        # all-overhead or not-yet-metered frame can't blow up the headline.
+        total_credits = float(_credits.sum()) if _credits is not None else 0.0
+        _is_unattr = df["WORKFLOW_NAME"].astype(str).eq(_unattr) if "WORKFLOW_NAME" in df.columns else None
+        attr_credits = float(_credits[~_is_unattr].sum()) if (_credits is not None and _is_unattr is not None) else total_credits
+        coverage = (attr_credits / total_credits * 100.0) if total_credits > 0 else 0.0
+        # per-row $ for the table (round_cents=False keeps sub-cent tasks visible)
+        if _credits is not None:
+            df["COST_USD"] = _credits.map(lambda c: format_usd(credits_to_usd(c, rate, round_cents=False)))
+        # top REAL task (exclude the overhead bucket); df is already credits-desc from SQL
+        _real = df[~_is_unattr] if _is_unattr is not None else df
+        _top_lbl, _top_val = "—", "—"
+        if not _real.empty:
+            _tr = _real.iloc[0]
+            _top_lbl = str(_tr.get("TASK_NAME", "—"))[:28]
+            _top_val = format_usd(credits_to_usd(safe_float(_tr.get("CREDITS_ATTRIBUTED")), rate, round_cents=False))
+        kpi_row([
+            {"label": "Attributed run cost", "value": format_usd(credits_to_usd(attr_credits, rate, round_cents=False)),
+             "delta": f"{attr_credits:,.2f} credits", "delta_color": "off"},
+            {"label": "Coverage", "value": f"{coverage:,.0f}%", "delta_color": "off",
+             "help": "Share of the run window's metered credits that mapped to a task. The rest is "
+                     "warehouse overhead or queries whose text didn't name a task — kept visible in "
+                     "the '(unattributed)' row, never hidden. Low coverage on a fresh run usually "
+                     "means Snowflake hasn't finished metering it (~6h usage lag)."},
+            {"label": "Costliest task", "value": _top_val, "delta": _top_lbl, "delta_color": "off"},
+        ])
+        styled_table(df, height=320)
+        st.caption("Each night's measured Snowflake credits, charged to the task that spent them: a "
+                   "query's fair-share compute credits (QUERY_ATTRIBUTION_HISTORY) attributed to the "
+                   "CONTROL_STATUS task whose window contains it and whose name is in its text (longest "
+                   "name wins, so nested task names never double-count). COST_USD prices CREDITS_ATTRIBUTED "
+                   "at CREDIT_PRICE_USD. Best-effort attribution, not a billed invoice — the "
+                   "'(unattributed)' row is the honest remainder. Credits lag up to ~6h.")
+        result_caption(res)
+
+
 def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "") -> None:
     """Metadata-driven table freshness SLAs (config in PIPELINE_SLA_CONFIG).
 
@@ -1278,6 +1363,8 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
     _run_inventory_panel()
     # Then Phase 3 reconciliation DQ: metrics whose source vs target layer didn't tie out.
     _recon_error_panel()
+    # Then Phase 4 cost attribution: which task spent the most measured credits/$ last night.
+    _cost_attribution_panel()
     res = run(insights_sql.pipeline_sla_forecast(14), page=_PAGE, key="sla_status", tier="recent",
               source="ACCOUNT_USAGE.TABLE_DML_HISTORY x PIPELINE_SLA_STATUS")
     if not res.ok:

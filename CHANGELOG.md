@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.519.0 - ETL cost attribution: credits & $ per task (2026-09-09)
+
+**Which task cost the most last night?** — a new Operations ▸ Pipeline panel and builder that
+attribute the nightly Informatica cycle's *measured* Snowflake credits down to the individual
+CONTROL_STATUS task. Snowflake bills compute to a warehouse, never to an Informatica proc CALL, so
+there is no billed per-task answer; this reconstructs one.
+
+- **New builder** `etl_control_sql.run_cost_attribution_scan(control_fqn, *, run_id="")` — joins the
+  latest (or a chosen) run's CONTROL_STATUS tasks to `SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY`
+  (the fair-share `CREDITS_ATTRIBUTED_COMPUTE`) ⋈ `QUERY_HISTORY` (text), charging each query to the
+  task whose run window contains it AND whose name is in its text. **The join was chosen from live
+  evidence**: the query tags carry no PRCS_ID / RUN_ID (every tag was blank), so text+window is the
+  only key. Nested task names (`SP_D_PLCY_TSACTN_STS_CANCLTN_RSN` ⊃ `SP_D_PLCY_TSACTN`) are
+  de-collided by **charging the longest matching name** (`ROW_NUMBER() … ORDER BY LENGTH(TASK_NAME)
+  DESC`). Unmatched queries survive a `LEFT JOIN` into one `(unattributed)` row so coverage is honest.
+  Pure, bounded, injection-fail-closed, no dollar rate in the builder.
+- **New panel** `operations._cost_attribution_panel` — Attributed run cost, coverage %, and the
+  costliest task as KPIs; per-task credits + `COST_USD` (priced at `CREDIT_PRICE_USD`) table. Labelled
+  a best-effort attribution model, not a billed invoice; notes the ~6h ACCOUNT_USAGE credit lag.
+  Config-gated on the existing `ETL_CONTROL_STATUS_FQN` — **no migration, no new grant, no owner
+  apply**: app code + redeploy.
+- **Doc fix** — the runtime-drift panel/builder no longer claim `TASK_NAME='ROOT'` is the workflow
+  total. CONTROL_STATUS holds only mapping + child tasks; ROOT lives in CONTROL_RUN_ID (confirmed
+  live). Each drift row now correctly reads as the specific child task, not the whole workflow.
+- **Adversarial verify (3 refuters + adjudicator) caught 2 MEDIUM, both fixed:** (1) `QUERY_ATTRIBUTION_HISTORY`
+  can hold >1 row per `QUERY_ID` (a query split across warehouse slices); the credits are now `SUM`-ed
+  per query BEFORE the task join, so the task-dedup `RN=1` can't drop a query's other slices and
+  undercount the run. (2) the task-name text match was `ILIKE '%'||TASK_NAME||'%'`, where the `_` in
+  `SP_*`/`M_*` names acts as a single-char wildcard and can loosely mis-charge an unrelated query —
+  replaced with `CONTAINS(UPPER(…), UPPER(…))`, a literal case-insensitive substring test.
+
 ## 4.518.0 - Drift hardening: NULL-status consistency + deterministic tiebreak (2026-09-09)
 
 Adversarial-verify follow-up to 4.517.0 (verify was clean; these are the two optional hardenings it
