@@ -67451,7 +67451,8 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --   * ETL_RECON_RESULTS      - a small table holding the recent per-metric error counts.
 --   * SP_SCAN_RECON_ERRORS() - isolates the dynamic read of the configured RECON_MTRC_ERROR table:
 --                              allowlist-validates the FQN and replaces ETL_RECON_RESULTS with the
---                              per-metric count of errors loaded in the last 2 days.
+--                              per-metric count of errors loaded within the rule's WINDOW_HOURS
+--                              (default 48h); a NULL metric key is kept as '(unknown metric)'.
 --   * DQ_RECON_ERROR rule    - ALERT_CONFIG row (PIPELINE, HIGH, threshold 1, 48h), WHEN NOT MATCHED.
 --   * SP_ALERT_SCAN_DAILY re-derived from V129 with an 8th arm that CALLs SP_SCAN_RECON_ERRORS()
 --     and raises ONE summary ALERT_EVENTS row (N errors across M metrics), deduped per day. The arm
@@ -67503,17 +67504,21 @@ EXECUTE AS OWNER
 AS
 $$
 -- Config-driven reconciliation-error scan (ETL Phase 3). Reads ETL_RECON_ERROR_FQN from SETTINGS
--- and replaces ETL_RECON_RESULTS with a per-metric count of RECON_MTRC_ERROR rows loaded in the last
--- 2 days (recent source-vs-target mismatches). The DQ_RECON_ERROR arm of SP_ALERT_SCAN_DAILY reads
--- that table and raises one summary alert. The FQN is allowlist-validated so the built SQL is always
--- well-formed; the caller wraps CALL in its own EXCEPTION guard, so a missing grant is contained.
+-- and replaces ETL_RECON_RESULTS with a per-metric count of RECON_MTRC_ERROR rows loaded within the
+-- DQ_RECON_ERROR rule's WINDOW_HOURS (default 48h -- recent source-vs-target mismatches; an operator
+-- can widen it toward the 30-day panel view by editing ALERT_CONFIG). The DQ_RECON_ERROR arm of
+-- SP_ALERT_SCAN_DAILY reads that table and raises one summary alert. The FQN is allowlist-validated
+-- so the built SQL is always well-formed; the caller wraps CALL in its own EXCEPTION guard, so a
+-- missing grant is contained. A NULL metric key is kept (labelled) so one anomalous row can never
+-- void the whole scan.
 DECLARE
     recon_fqn STRING;
     enabled_cnt INT;
+    window_hours INT;
     ins_sql STRING;
 BEGIN
-    -- gate: only scan when DQ_RECON_ERROR exists AND is enabled (skip the external read otherwise).
-    SELECT COUNT(*) INTO :enabled_cnt
+    -- gate: only scan when DQ_RECON_ERROR exists AND is enabled; read its tunable window.
+    SELECT COUNT(*), MAX(WINDOW_HOURS) INTO :enabled_cnt, :window_hours
     FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
     WHERE RULE_ID = 'DQ_RECON_ERROR' AND ENABLED;
 
@@ -67522,6 +67527,7 @@ BEGIN
     IF (:enabled_cnt = 0) THEN
         RETURN 'recon scan skipped (rule disabled)';
     END IF;
+    window_hours := COALESCE(:window_hours, 48);
 
     SELECT MAX(IFF(KEY = 'ETL_RECON_ERROR_FQN', VALUE, NULL)) INTO :recon_fqn
     FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;
@@ -67532,10 +67538,13 @@ BEGIN
     END IF;
 
     -- per-metric recent error counts. The FQN is validated above (a bare, well-formed identifier),
-    -- so it is safe to concatenate; LOAD_DTTM is the recon's per-row load timestamp.
+    -- so it is safe to concatenate; window_hours is a NUMBER from ALERT_CONFIG. A NULL MTRC groups
+    -- under '(unknown metric)' (never dropped, never a NOT NULL violation on ETL_RECON_RESULTS.MTRC).
+    -- LOAD_DTTM is the recon's per-row load timestamp.
     ins_sql := 'INSERT INTO DBA_MAINT_DB.OVERWATCH.ETL_RECON_RESULTS (MTRC, N, LATEST_LOAD) '
-               || 'SELECT TO_VARCHAR(MTRC), COUNT(*), MAX(LOAD_DTTM) FROM ' || :recon_fqn
-               || ' WHERE LOAD_DTTM >= DATEADD(''day'', -2, CURRENT_TIMESTAMP()) '
+               || 'SELECT COALESCE(TO_VARCHAR(MTRC), ''(unknown metric)''), COUNT(*), MAX(LOAD_DTTM) FROM '
+               || :recon_fqn
+               || ' WHERE LOAD_DTTM >= DATEADD(''hour'', -' || :window_hours || ', CURRENT_TIMESTAMP()) '
                || 'GROUP BY MTRC';
     EXECUTE IMMEDIATE :ins_sql;
 
@@ -67943,7 +67952,8 @@ BEGIN
         FROM (
         SELECT c.RULE_ID, 'ALL', c.SEVERITY,
                r.ERRORS || ' reconciliation error(s) across ' || r.METRICS || ' metric(s)',
-               'Source and target layers did not reconcile -- investigate before the numbers are '
+               'Source and target layers did not reconcile in the last '
+                   || COALESCE(c.WINDOW_HOURS, 48) || 'h -- investigate before the numbers are '
                    || 'trusted downstream. Metric(s): ' || LEFT(r.TOP_METRICS, 1700),
                r.ERRORS,
                c.RULE_ID || '|' || TO_VARCHAR(CURRENT_DATE())
@@ -67990,5 +68000,5 @@ $$;
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 137 AS VERSION,
-       'DQ_RECON_ERROR daily alert (ETL Phase 3, DB-side twin of the Reconciliation-errors panel): ETL_RECON_RESULTS table + SP_SCAN_RECON_ERRORS() (isolated config-driven read of the ETL_RECON_ERROR_FQN table, FQN-allowlisted, per-metric counts of errors loaded in the last 2 days) + a DQ_RECON_ERROR ALERT_CONFIG rule (PIPELINE/HIGH) + SP_ALERT_SCAN_DAILY re-derived from V129 with an 8th arm that CALLs the scan and raises one summary alert (N errors across M metrics), deduped per day. Same per-arm EXCEPTION isolation, and NOT counted toward OPS_SCAN_DEGRADED (external-dependency add-on), so a missing grant never breaks the other rules. HIGH severity routes to the existing OVERWATCH_EMAIL path (JDees). App role needs SELECT on RECON_MTRC_ERROR (granted separately, DB_T_PROD_CORE). Everything else in the proc byte-identical; forward-healing on the next daily scan.' AS DESCRIPTION
+       'DQ_RECON_ERROR daily alert (ETL Phase 3, DB-side twin of the Reconciliation-errors panel): ETL_RECON_RESULTS table + SP_SCAN_RECON_ERRORS() (isolated config-driven read of the ETL_RECON_ERROR_FQN table, FQN-allowlisted, per-metric counts of errors loaded within the rule WINDOW_HOURS window default 48h, NULL metric kept as unknown) + a DQ_RECON_ERROR ALERT_CONFIG rule (PIPELINE/HIGH) + SP_ALERT_SCAN_DAILY re-derived from V129 with an 8th arm that CALLs the scan and raises one summary alert (N errors across M metrics), deduped per day. Same per-arm EXCEPTION isolation, and NOT counted toward OPS_SCAN_DEGRADED (external-dependency add-on), so a missing grant never breaks the other rules. HIGH severity routes to the existing OVERWATCH_EMAIL path (JDees). App role needs SELECT on RECON_MTRC_ERROR (granted separately, DB_T_PROD_CORE). Everything else in the proc byte-identical; forward-healing on the next daily scan.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 137);

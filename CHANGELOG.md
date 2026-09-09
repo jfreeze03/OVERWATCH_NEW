@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.515.0 - Recon alert: tunable window + null-metric hardening (2026-09-09)
+
+Adversarial-verify follow-up to 4.514.0 (two MEDIUM findings, both fixed) — V137 re-generated:
+
+- **A null metric key no longer voids the whole day's alert.** `ETL_RECON_RESULTS.MTRC` is
+  `NOT NULL`; a single `RECON_MTRC_ERROR` row with a null `MTRC` used to fail the scan's `INSERT`
+  *after* it had already `DELETE`d the table, leaving it empty so no alert fired for any metric that
+  day. The scan now keeps a null key as `'(unknown metric)'` (`COALESCE`), so one anomalous row can't
+  silence the alert — matching the `IS NOT NULL` guard in the V129 ref-gap scan.
+- **The alert window is now the rule's `WINDOW_HOURS`** (default 48h) instead of a hardcoded 2 days,
+  and the alert text states the window — so it reads as a deliberate "fresh break" cadence rather than
+  falsely matching the panel's 30-day count, and an operator can widen it toward the panel view by
+  editing `ALERT_CONFIG`.
+
 ## 4.514.0 - Reconciliation errors now page overnight: DQ_RECON_ERROR alert (2026-09-09)
 
 The DB-side twin of the Phase 3 panel — a fresh reconciliation break now pages and emails

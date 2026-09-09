@@ -32,9 +32,12 @@ def test_v137_creates_results_table_and_scan_proc():
     # the scan reads the CONFIGURED table and allowlist-validates the FQN (no injection)
     assert "'ETL_RECON_ERROR_FQN'" in _MIG
     assert "RLIKE(TRIM(:recon_fqn)" in _MIG
-    # the scan gate: only scan when the rule is enabled; a fixed 2-day recent window
+    # the scan gate: only scan when the rule is enabled; window is the rule's WINDOW_HOURS
+    # (tunable, default 48h) so the alert cadence is config-driven, not hardcoded
     assert "WHERE RULE_ID = 'DQ_RECON_ERROR' AND ENABLED" in _MIG
-    assert "DATEADD(''day'', -2, CURRENT_TIMESTAMP())" in _MIG
+    assert "MAX(WINDOW_HOURS)" in _MIG and "DATEADD(''hour''" in _MIG
+    # a NULL metric key is KEPT (labelled), so one anomalous row can't void the whole day's alert
+    assert "COALESCE(TO_VARCHAR(MTRC), ''(unknown metric)'')" in _MIG
     # no backslash escapes in the generated SQL
     assert "\\" not in _MIG
 
