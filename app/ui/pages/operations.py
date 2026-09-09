@@ -1123,13 +1123,15 @@ def _workflow_drift_panel() -> None:
                         "(GRANT SELECT ON <table> TO ROLE <app role>)."):
         df = res.df.copy()
         n = len(df)
-        st.warning(f"🟠 {n} task(s) in the latest run ran materially slower than their recent "
-                   "baseline — a task drifting toward its window is worth a look before it breaches.")
+        st.warning(f"🟠 {n} task(s) ran materially slower than the same workflow's recent baseline "
+                   "— a task drifting toward its window is worth a look before it breaches.")
         styled_table(df, height=300)
-        st.caption("Latest run vs the MEDIAN of the prior runs, per task (matched on workflow + "
-                   "task name). Only material slowdowns show — at least 1 minute AND at least 1.5× "
-                   "the baseline — biggest first. A brand-new task (no baseline) is omitted. "
-                   "LATEST_SEC / BASELINE_SEC / SLOWER_BY_SEC humanize to Hr/Min/Sec.")
+        st.caption("Each workflow's newest run vs the MEDIAN of ITS OWN prior runs, per task. "
+                   "TASK_NAME='ROOT' is the workflow's total runtime (the whole workflow drifted); "
+                   "the other rows are the child steps that caused it. Only material slowdowns show "
+                   "— at least 1 minute AND at least 1.5× the baseline — biggest first; a workflow "
+                   "with no prior runs is omitted. LATEST_SEC / BASELINE_SEC / SLOWER_BY_SEC "
+                   "humanize to Hr/Min/Sec.")
         result_caption(res)
 
 

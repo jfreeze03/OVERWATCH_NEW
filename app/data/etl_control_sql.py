@@ -235,17 +235,20 @@ def workflow_runtime_drift_scan(
     min_ratio: float = DRIFT_MIN_RATIO,
     max_rows: int = MAX_DRIFT_ROWS,
 ) -> str:
-    """Tasks in the latest run that ran materially SLOWER than their recent baseline.
+    """Tasks that ran materially SLOWER than the same workflow's recent baseline.
 
-    Ranks runs by recency, takes the newest as 'latest' and the next ``baseline_runs``
-    as the comparison window, and for each task matched on (WORKFLOW_NAME, TASK_NAME)
-    compares the latest runtime to the MEDIAN of its baseline runtimes. Only a material
-    slowdown surfaces — at least ``min_abs_sec`` seconds AND at least ``min_ratio``x the
-    baseline — so a 2s→4s task never fires while a 5m→15m one does. Biggest slowdown
-    first. Runtime per (task, run) is MAX-collapsed (defensive against a dup task row);
-    a task with no baseline history (a brand-new task) is absent by design. Fail-closed
-    on a bad FQN. The _SEC columns humanize to Hr/Min/Sec; SLOWER_BY_* stay positive so
-    they read as a duration, not a signed delta. Pure: bounded output, no Streamlit."""
+    Ranks each workflow's runs by recency (PARTITION BY WORKFLOW_NAME) — because each
+    RUN_ID is one workflow's execution and the same workflow runs on a cadence, so a
+    task is compared to its OWN prior runs, never to a different workflow from the same
+    night. For each (WORKFLOW_NAME, TASK_NAME) it compares the newest run's runtime to
+    the MEDIAN of the baseline runs; only a material slowdown surfaces — at least
+    ``min_abs_sec`` seconds AND at least ``min_ratio``x the baseline. TASK_NAME='ROOT'
+    is the workflow's TOTAL runtime, so a ROOT row = the whole workflow drifted while a
+    step row = which child task caused it. FAILED tasks are dropped from the runtime
+    series (a crashed-short run must not depress the baseline). A workflow with only one
+    run has no baseline and is absent by design. Fail-closed on a bad FQN. The _SEC
+    columns humanize to Hr/Min/Sec; SLOWER_BY_* stay positive (a duration, not a signed
+    delta). Pure: bounded output, no Streamlit."""
     from app.core.sqlsafe import safe_identifier
 
     fqn = str(control_fqn or "").strip()
@@ -256,22 +259,31 @@ def workflow_runtime_drift_scan(
     except ValueError:
         return ""
     keep = 1 + max(1, int(baseline_runs))
+    # crash-short guard: a FAILED task's truncated runtime must not depress the baseline
+    # median or read as "fast" (shared set, so the panel + this never disagree).
+    _failed = ", ".join(f"'{s}'" for s in sorted(FAILED_TASK_STATUSES))
     return (
+        # Rank runs PER WORKFLOW: each RUN_ID is one workflow's execution and the SAME
+        # workflow runs on a cadence, so a task must be compared to its OWN prior runs.
+        # (Ranking globally compares different workflows from one night → empty baseline.)
         "WITH runs AS (\n"
-        f"  SELECT RUN_ID, MAX(TASK_START_DTTM) AS RUN_START FROM {tbl}\n"
+        f"  SELECT RUN_ID, WORKFLOW_NAME, MAX(TASK_START_DTTM) AS RUN_START FROM {tbl}\n"
         "  WHERE TASK_START_DTTM IS NOT NULL AND RUN_ID IS NOT NULL\n"
-        "  GROUP BY RUN_ID\n"
-        f"  QUALIFY ROW_NUMBER() OVER (ORDER BY RUN_START DESC) <= {keep}\n"
+        "  GROUP BY RUN_ID, WORKFLOW_NAME\n"
+        f"  QUALIFY ROW_NUMBER() OVER (PARTITION BY WORKFLOW_NAME ORDER BY RUN_START DESC) <= {keep}\n"
         "),\n"
         "ranked AS (\n"
-        "  SELECT RUN_ID, ROW_NUMBER() OVER (ORDER BY RUN_START DESC) AS RN FROM runs\n"
+        "  SELECT RUN_ID, WORKFLOW_NAME,\n"
+        "         ROW_NUMBER() OVER (PARTITION BY WORKFLOW_NAME ORDER BY RUN_START DESC) AS RN\n"
+        "  FROM runs\n"
         "),\n"
         "task_runtimes AS (\n"
         "  SELECT s.WORKFLOW_NAME, s.TASK_NAME, r.RN,\n"
         "         MAX(DATEDIFF('second', s.TASK_START_DTTM,\n"
         "             COALESCE(s.TASK_END_DTTM, CURRENT_TIMESTAMP()))) AS RUNTIME_SEC\n"
-        f"  FROM {tbl} s JOIN ranked r ON s.RUN_ID = r.RUN_ID\n"
+        f"  FROM {tbl} s JOIN ranked r ON s.RUN_ID = r.RUN_ID AND s.WORKFLOW_NAME = r.WORKFLOW_NAME\n"
         "  WHERE s.TASK_START_DTTM IS NOT NULL\n"
+        f"    AND UPPER(s.TASK_STATUS) NOT IN ({_failed})\n"
         "  GROUP BY s.WORKFLOW_NAME, s.TASK_NAME, r.RN\n"
         "),\n"
         "latest AS (\n"
@@ -284,6 +296,8 @@ def workflow_runtime_drift_scan(
         "  FROM task_runtimes WHERE RN > 1\n"
         "  GROUP BY WORKFLOW_NAME, TASK_NAME\n"
         ")\n"
+        # TASK_NAME='ROOT' is the workflow's TOTAL runtime; the other rows are its steps,
+        # so a ROOT row = the whole workflow drifted, a step row = which step caused it.
         "SELECT l.WORKFLOW_NAME, l.TASK_NAME,\n"
         "       l.LATEST_SEC, b.BASELINE_SEC, b.BASELINE_RUNS,\n"
         "       (l.LATEST_SEC - b.BASELINE_SEC) AS SLOWER_BY_SEC,\n"

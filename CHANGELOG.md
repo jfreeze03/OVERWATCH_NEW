@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.517.0 - Runtime drift fixed: compares each workflow to its OWN history (2026-09-09)
+
+The "Runtime drift" board was dead — it always reported "runtimes are stable." Root cause: each
+`RUN_ID` is one workflow's execution, and the builder ranked the **last 6 `RUN_ID`s globally**, so it
+compared six *different* workflows from the same night; matched on `(WORKFLOW_NAME, TASK_NAME)` that
+baseline was always empty, so nothing ever surfaced.
+
+- Now ranks runs **`PARTITION BY WORKFLOW_NAME`**, so each task is compared to **its own workflow's
+  prior runs** across days — the history you actually have. This resurrects the board and is the
+  foundation for the predictive work.
+- `TASK_NAME='ROOT'` is the workflow's **total** runtime, so a `ROOT` row now reads as "the whole
+  workflow drifted" and the step rows as "which child task caused it" — the two grains at once.
+- **Crash-short guard**: `FAILED` tasks are dropped from the runtime series (reusing the shared
+  `FAILED_TASK_STATUSES`) so a task that crashed after 3 seconds can't masquerade as "fast" and drag
+  down the baseline median.
+
+Pure app-code (no migration/grant). Next: a runtime-creep forecaster ("~N nights to breach at the
+current trend") and a child↔ROOT reconciliation view on top of this corrected per-workflow spine.
+
 ## 4.516.0 - ETL run inventory: calculated runtime + a run picker that drills into tasks (2026-09-09)
 
 The run inventory panel gains the three things the live view was missing:
