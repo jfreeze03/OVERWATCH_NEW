@@ -685,8 +685,18 @@ def render() -> None:
         # all three feeding builders anchor on CURRENT_DATE, so days=1 covers
         # yesterday 00:00 -> now (24-48h) — labels say "since yday", not "24h".
         pulse, pulse_from_mart = None, False
+        # B5 (v4.530): on the mart branch the Pulse KPI summary and the 14d activity
+        # sparkline are two FACT_QUERY_HOURLY reads at tier='hourly' — co-schedule them in
+        # ONE round trip (mirrors the Operations Queries _mart_pf batch). Each keeps its run()
+        # fallback below, so a None/failed prefetch member just re-reads serially.
+        _pulse_pf = (run_batch([
+            {"key": "pulse", "sql": mart_sql.fact_query_window_summary(1, company, "", "", f["database"]),
+             "source": "FACT_QUERY_HOURLY (mart, loaded hourly)"},
+            {"key": "act", "sql": mart_sql.fact_daily_activity(14, company, f["database"]),
+             "source": "FACT_QUERY_HOURLY (daily)"},
+        ], page=_PAGE, tier="hourly") or {}) if not f["schema_contains"] else {}
         if not f["schema_contains"]:
-            m_pulse = run(mart_sql.fact_query_window_summary(1, company, "", "", f["database"]),
+            m_pulse = _pulse_pf.get("pulse") or run(mart_sql.fact_query_window_summary(1, company, "", "", f["database"]),
                           page=_PAGE, key=f"pulse_fact_{company}", tier="hourly",
                           source="FACT_QUERY_HOURLY (mart, loaded hourly)")
             if m_pulse.ok and not m_pulse.empty and safe_float(m_pulse.df.iloc[0].get("QUERY_COUNT")) > 0:
@@ -711,8 +721,8 @@ def render() -> None:
         # (and skip the fetch) rather than show a database-wide line beneath a
         # schema-filtered number.
         _spark_ok = not f["schema_contains"]
-        act = (run(mart_sql.fact_daily_activity(14, company, f["database"]), page=_PAGE,
-                   key="cr_activity", tier="hourly", source="FACT_QUERY_HOURLY (daily)")
+        act = ((_pulse_pf.get("act") or run(mart_sql.fact_daily_activity(14, company, f["database"]), page=_PAGE,
+                   key="cr_activity", tier="hourly", source="FACT_QUERY_HOURLY (daily)"))
                if _spark_ok else None)
         _activity_cols = {"DAY", "QUERIES", "FAILS"}
         _activity_ready = act is not None and act.usable() and _activity_cols.issubset(act.df.columns)
@@ -820,7 +830,7 @@ def render() -> None:
         # ---- Incidents (V032) ------------------------------------------------------
         # deferred-item: the header is rendered below, AFTER the open-incident count
         # resolves, so its severity is data-driven (was a constant chrome title).
-        from app.core.query import execute_statement, run_batch
+        from app.core.query import execute_statement  # run_batch is module-level (used above at Pulse)
         from app.core.session import is_operator
         from app.ui.components import log_ui_event, notify
         # correctness #3: entitle operator UI from the VIEWER identity, not

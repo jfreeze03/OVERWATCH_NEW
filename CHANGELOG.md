@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.530.0 - Read-layer batching: three first-paint fetches co-scheduled (2026-09-10)
+
+Phase 2 (part 1) of the reviewed performance/polish plan — three contained read-layer consolidations,
+each collapsing serial first-paint round-trips into one parallel batch. App-code only (redeploy); no
+query, mart, threshold, or number changed. Each keeps its existing serial `run()` as the per-member
+fallback, so a missing/failed prefetch just re-reads. Adversarially verified (3-agent refute pass, all
+clean: prefetch SQL is byte-identical to each fallback so it's genuinely used; the tier move is
+cache-equivalent; hot-page ACCOUNT_USAGE budgets unchanged).
+
+- **Control Room ▸ Pulse (B5):** the mart-branch Pulse KPI summary and the 14-day activity sparkline —
+  both `FACT_QUERY_HOURLY` reads at `tier="hourly"` — now co-schedule in one `run_batch`, mirroring the
+  Operations Queries `_mart_pf` pattern the tab already uses. One fewer round-trip.
+- **Operations ▸ Warehouses / Activity lens (B6):** the 30-day warehouse-spend fact (`hourly`) and the
+  14-day concurrency-peaks read (`recent`) co-schedule in one `run_batch_mixed`. One fewer round-trip on
+  the default Warehouses lens.
+- **Cost ▸ Spend (B2):** the all-in org-billing companion (`org_all_in_window_usd`, `historical`) is
+  folded into the Spend default view's first-paint batch — which becomes `run_batch_mixed` so the three
+  mart reads (`hourly`) and the all-in read (`historical`) ride one round-trip instead of two.
+
+Still open in workstream B (each its own focused pass): **B1** — the Operations Pipeline SLA tab's ~8
+serial CONTROL_STATUS/RECON reads, which needs a shared prefetch helper since each panel builds its SQL
+internally (the standout latency win); **B4** — the Chargeback tab's four reads (its role-share leg is a
+coverage-gated `run_mart_first`); **B3** — collapsing the three per-task CONTROL_STATUS history scans into
+one (a new builder, do after B1).
+
 ## 4.529.0 - Voice & type quick-wins: less-AI copy pass + one page-title size (2026-09-10)
 
 Phase 1 of the reviewed performance/polish plan — copy voice and typography only. No query, mart,

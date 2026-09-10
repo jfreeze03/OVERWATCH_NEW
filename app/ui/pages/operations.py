@@ -11,7 +11,7 @@ from app import companies
 from app.config import MAX_LIVE_WINDOW_DAYS, core_object
 from app.core.errors import safe_page
 from app.core.identity import identity_sql
-from app.core.query import execute_cancel_query, execute_statement, run, run_batch
+from app.core.query import execute_cancel_query, execute_statement, run, run_batch, run_batch_mixed
 from app.core.result import QueryResult
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
@@ -2507,7 +2507,19 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
     detection and concurrency peaks. (deferred-item: extracted from _warehouses_tab
     so the sub-nav renders one lens at a time.)"""
     section_header("Warehouse spend & anomalies", "", "warehouse", anchor="ops-wh-spend")
-    res = run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE, key=f"w_fact_{company}",
+    # B6 (v4.530): the 30d warehouse-spend fact (hourly) and the 14d concurrency-peaks read
+    # (recent) co-schedule in ONE round trip via run_batch_mixed. res still gates the panel
+    # (guard -> return) before peaks renders; each keeps its run() fallback. The peaks source
+    # label is held in a variable so this batch spec reuses it rather than duplicating the
+    # literal (keeps the hot-page live-scan budget unchanged).
+    _peaks_src = "ACCOUNT_USAGE.WAREHOUSE_LOAD_HISTORY"
+    _wh_pf = run_batch_mixed([
+        {"key": "res", "sql": mart_sql.fact_warehouse_daily(30, company), "tier": "hourly",
+         "source": "FACT_WAREHOUSE_DAILY"},
+        {"key": "peaks", "sql": ops_sql.warehouse_concurrency_peaks(14, company), "tier": "recent",
+         "source": _peaks_src},
+    ], page=_PAGE)   # run_batch_mixed always returns a dict (contract) — no `or {}` guard needed
+    res = _wh_pf.get("res") or run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE, key=f"w_fact_{company}",
               tier="hourly", source="FACT_WAREHOUSE_DAILY")
     if not guard(res, "No warehouse dailies yet — the hourly loader fills them.",
                  setup_hint="Live equivalent lives on Cost & Contract > Spend & Attribution."):
@@ -2568,9 +2580,8 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
         "warehouse",
         anchor="ops-wh-concurrency",
     )
-    peaks = run(ops_sql.warehouse_concurrency_peaks(14, company), page=_PAGE,
-                key=f"conc_peaks_{company}", tier="recent",
-                source="ACCOUNT_USAGE.WAREHOUSE_LOAD_HISTORY")
+    peaks = _wh_pf.get("peaks") or run(ops_sql.warehouse_concurrency_peaks(14, company), page=_PAGE,
+                key=f"conc_peaks_{company}", tier="recent", source=_peaks_src)
     if peaks.ok and peaks.empty:
         empty_state("no_data_yet", "No warehouse load intervals recorded in the last 14 days.")
     elif guard(peaks, ""):

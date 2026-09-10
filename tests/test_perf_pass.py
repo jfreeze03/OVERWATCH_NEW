@@ -67,10 +67,11 @@ def test_overview_decoupled_and_day_replay_batched():
     assert "fact_daily" not in _batch_block
     cr = (_ROOT / "app" / "ui" / "pages" / "control_room.py").read_text(encoding="utf-8")
     # PERF #58: the day-replay's recent + historical groups merged into ONE cross-tier
-    # run_batch_mixed. The remaining run_batch( calls are the T2.1 live-trio group (open incidents
-    # / proposals / triage alerts as one live round trip) and the incident auto-investigation batch
-    # (change/task/grant/anomaly signals, on incident-select only).
-    assert cr.count("run_batch(") == 2
+    # run_batch_mixed. The run_batch( calls are the T2.1 live-trio group (open incidents /
+    # proposals / triage alerts as one live round trip), the incident auto-investigation batch
+    # (change/task/grant/anomaly signals, on incident-select only), and (v4.530 B5) the Pulse
+    # summary + 14d activity sparkline co-scheduled as one hourly round trip.
+    assert cr.count("run_batch(") == 3
     assert cr.count("run_batch_mixed(") == 1
     assert 'run_batch(_live_specs, page=_PAGE, tier="live")' in cr
     assert "else:" in cr.split("run_batch_mixed(", 1)[1][:2500]   # serial fallback survives

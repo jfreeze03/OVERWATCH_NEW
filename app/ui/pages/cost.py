@@ -10,7 +10,7 @@ from __future__ import annotations
 import streamlit as st
 
 from app.config import core_object
-from app.core.query import execute_statement, run, run_batch
+from app.core.query import execute_statement, run, run_batch, run_batch_mixed
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
@@ -191,13 +191,21 @@ def render() -> None:
         # (wh/daily) run on demand behind its own toggle. Each panel keeps its serial
         # fallback (a None/empty prefetch triggers the panel's existing read).
         _all_jobs = _spend_attr_recent_jobs(f["company"], f["days"], f["bounds"])
-        _pf = run_batch([j for j in _all_jobs if j["key"] in ("metering", "csr", "coco")],
-                        page=_PAGE, tier="hourly") or {}
+        # B2 (v4.530): the Spend default view's three mart reads (hourly) co-schedule with the
+        # all-in org-billing companion (historical) in ONE round trip via run_batch_mixed;
+        # allin used to fire as a separate serial read on every Spend first paint (spend.py:270).
+        _spend_specs = [dict(j, tier="hourly") for j in _all_jobs
+                        if j["key"] in ("metering", "csr", "coco")]
+        _spend_specs.append({
+            "key": "allin", "tier": "historical",
+            "sql": cost_sql.org_all_in_window_usd(f["days"], bounds=f["bounds"]),
+            "source": "ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY (this account, all-in)"})
+        _pf = run_batch_mixed(_spend_specs, page=_PAGE) or {}
         section_header("Spend", "", "spend", anchor="cost-spend")
         _spend_tab(f["company"], f["days"], rate, ai_rate, f["database"],
                    bounds=f["bounds"],
                    metering_res=_pf.get("metering"), csr_res=_pf.get("csr"),
-                   coco_res=_pf.get("coco"))
+                   coco_res=_pf.get("coco"), allin_res=_pf.get("allin"))
         st.divider()
         if st.toggle("Load company attribution (cost by company & user)",
                      key="cost_attribution_load",

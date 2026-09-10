@@ -51,8 +51,12 @@ def test_t1_1_cost_batch_and_unmapped_on_hourly_tier():
     # deferred-item: the combined spec still carries bounds; first paint batches only
     # Spend's three reads (metering/csr/coco), Attribution's two run behind a toggle.
     assert '_all_jobs = _spend_attr_recent_jobs(f["company"], f["days"], f["bounds"])' in cost
-    assert 'run_batch([j for j in _all_jobs if j["key"] in ("metering", "csr", "coco")]' in cost
-    assert 'page=_PAGE, tier="hourly") or {}' in cost
+    # v4.530 B2: the three Spend mart reads (hourly) now co-schedule with the all-in org-billing
+    # companion (historical) in ONE run_batch_mixed round trip; each spec is tagged with its tier.
+    assert '[dict(j, tier="hourly") for j in _all_jobs' in cost
+    assert 'if j["key"] in ("metering", "csr", "coco")]' in cost
+    assert '"key": "allin", "tier": "historical"' in cost
+    assert "_pf = run_batch_mixed(_spend_specs, page=_PAGE) or {}" in cost
     assert 'key=f"unmapped_{f[\'days\']}", tier="hourly"' in cost
 
 

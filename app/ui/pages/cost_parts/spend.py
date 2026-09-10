@@ -188,7 +188,7 @@ def _spend_attribution_capability(df, rate: float, ai_rate: float,
 
 def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: str = "",
                *, bounds: tuple | None = None,
-               metering_res=None, csr_res=None, coco_res=None) -> None:
+               metering_res=None, csr_res=None, coco_res=None, allin_res=None) -> None:
     # Hot path: the daily metering fact carries the same columns; fall back
     # to live ACCOUNT_USAGE only when the fact has no rows yet. metering_res is
     # the prefetched batch result (perf #15); None -> read it serially here.
@@ -267,7 +267,10 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
     # storage / transfer / marketplace / adjustments the metering credit-spend tile
     # structurally omits, so the headline reconciles to the invoice. Degrades quietly
     # (org visibility required); org data is UTC and lags ~72h so it trails near today.
-    allin_res = run(cost_sql.org_all_in_window_usd(days, bounds=bounds), page=_PAGE, key=f"org_allin_{days}",
+    # B2 (v4.530): prefer the prefetched all-in result co-scheduled by cost.py's Spend
+    # batch; fall back to a serial read when the prefetch is unavailable (attribution-only
+    # path, or a None batch on a cold first paint).
+    allin_res = allin_res or run(cost_sql.org_all_in_window_usd(days, bounds=bounds), page=_PAGE, key=f"org_allin_{days}",
                     tier="historical",
                     source="ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY (this account, all-in)")
     # v4.461 P1: primary-metric hierarchy — Credit spend is the ONE dominant number;
