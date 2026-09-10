@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.532.0 - Chargeback tab: four first-paint reads co-scheduled (2026-09-10)
+
+Phase 2 (part 3) — B4, and the last read-layer batch of workstream B. The Cost ▸ Chargeback & AI
+tab fired four independent reads serially on first paint; they now co-schedule in ONE
+`run_batch_mixed` round trip. App-code only (redeploy); no query, mart, threshold, or number changed.
+Adversarially verified (2-agent refute pass; 1 LOW efficiency regression found and fixed before ship).
+
+- Department credits (historical), the role-share **mart leg** (hourly), department budgets (live), and
+  the department map (recent, **operator-only**) are batched together. Department credits still gates
+  the tab (guard → return); the role-share panel stays `run_mart_first`, now with the batched mart leg
+  passed as its `preloaded=` — a cold/short mart still abstains (its coverage gate) and falls through to
+  the live share read exactly as before. Each other read keeps its serial `run()` fallback.
+- **Verify catch (fixed):** `run_batch_mixed` caches members in a layer `run()` doesn't consult, so an
+  operator would have fetched `DEPARTMENT_MAP` twice on first paint (the batched member plus the
+  "Manage mapping" expander's own read). The expander now reuses the batched member; non-operators are
+  unchanged. `ai_chargeback.py` ACCOUNT_USAGE literal budget unchanged (4).
+
+**Workstream B (read-layer consolidation) is complete:** B1 (Pipeline SLA, 8→1), B2 (Cost Spend + all-in),
+B4 (Chargeback, 4→1), B5 (Control Room Pulse), B6 (Operations Warehouses). B3 (merging the three
+CONTROL_STATUS history scans) was consciously dropped — B1 already batched those into one round-trip, so
+its remaining benefit was modest scan-work on a small control table while its risk (divergence across
+three statistical annotators, and drift being account-wide + SQL-computed) was real.
+
 ## 4.531.0 - Pipeline SLA tab: 8 first-paint reads co-scheduled into one batch (2026-09-10)
 
 Phase 2 (part 2) of the reviewed plan — B1, the standout read-layer latency win. The Operations ▸

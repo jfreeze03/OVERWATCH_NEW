@@ -15,7 +15,7 @@ import streamlit as st
 from app import companies
 from app.config import MAX_LIVE_WINDOW_DAYS, core_object
 from app.core.identity import identity_sql
-from app.core.query import execute_statement, run
+from app.core.query import execute_statement, run, run_batch_mixed
 from app.core.sqlsafe import sql_literal, sql_number
 from app.data import chargeback_sql, cortex_sql, cost_sql, mart27_sql, mart_sql
 from app.logic.cortex import (
@@ -592,7 +592,26 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *, 
     _lm = "_lm" if bounds is not None else ""
     # WLA-1 (round 18): "last month" when bounded to the prior calendar month, else "{days}d".
     _wlab = "last month" if bounds is not None else f"{days}d"
-    dept_res = run(chargeback_sql.department_window_credits(days, company, bounds=bounds), page=_PAGE,
+    # B4 (v4.532): the four independent first-paint reads — dept credits (historical), the
+    # role-share MART leg (hourly), department budgets (live), and the department map (recent,
+    # operator only) — co-schedule in ONE run_batch_mixed round trip instead of four serial ones.
+    # dept still gates the tab; share stays run_mart_first with the batched mart leg passed as its
+    # `preloaded` (a cold/short mart still falls through to the live share read); each other read
+    # keeps its serial run() fallback (a missing/failed member just re-reads).
+    _cb_specs = [
+        {"key": "dept", "tier": "historical",
+         "sql": chargeback_sql.department_window_credits(days, company, bounds=bounds),
+         "source": "WAREHOUSE_METERING_HISTORY x DEPARTMENT_MAP"},
+        {"key": "share", "tier": "hourly",
+         "sql": mart27_sql.role_share(days, company, bounds=bounds),
+         "source": "FACT_QUERY_ROLE_HOURLY (mart — exec-sec share)"},
+        {"key": "bud", "tier": "live", "sql": mart_sql.dept_budgets(), "source": "DEPT_BUDGETS"},
+    ]
+    if is_operator:
+        _cb_specs.append({"key": "dmap", "tier": "recent",
+                          "sql": chargeback_sql.department_map(), "source": "DEPARTMENT_MAP"})
+    _pf = run_batch_mixed(_cb_specs, page=_PAGE) or {}
+    dept_res = _pf.get("dept") or run(chargeback_sql.department_window_credits(days, company, bounds=bounds), page=_PAGE,
                    key=f"cb_dept_{company}_{days}{_lm}", tier="historical",
                    source="WAREHOUSE_METERING_HISTORY x DEPARTMENT_MAP")
     if not guard(dept_res, "No warehouse credits in this window.",
@@ -639,7 +658,8 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *, 
         chargeback_sql.role_share_within_warehouse(days, company, bounds=bounds),
         page=_PAGE, key=f"cb_share_{company}_{days}{_lm}",
         mart_source="FACT_QUERY_ROLE_HOURLY (mart — exec-sec share)",
-        live_source="QUERY_HISTORY (elapsed share per warehouse, live fallback)")
+        live_source="QUERY_HISTORY (elapsed share per warehouse, live fallback)",
+        preloaded=_pf.get("share"))
     if share_res.usable():
         # r6-bug8: match the pool window to the share window. When the role mart is cold,
         # the live share leg (role_share_within_warehouse) clamps to <=90d while the pool
@@ -687,14 +707,14 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *, 
         "department runs ahead of pace (threshold on the Alerts page). Spend is the "
         "department's warehouses — exact billing, same as the table above."
     )
-    bud = run(mart_sql.dept_budgets(), page=_PAGE, key="dept_budgets", tier="live",
+    bud = _pf.get("bud") or run(mart_sql.dept_budgets(), page=_PAGE, key="dept_budgets", tier="live",
               source="DEPT_BUDGETS")
     if bud.ok and not bud.empty:
         styled_table(with_user_names(bud.df, _PAGE, user_col="UPDATED_BY", display_col="Updated by"))
     elif bud.ok:
         empty_state("needs_setup", "No department budgets set yet — add one below and the pace alert goes live.")
     if is_operator:
-        dmap = run(chargeback_sql.department_map(), page=_PAGE, key="cb_dmap_bud", tier="recent",
+        dmap = _pf.get("dmap") or run(chargeback_sql.department_map(), page=_PAGE, key="cb_dmap_bud", tier="recent",
                    source="DEPARTMENT_MAP")
         dept_opts = (sorted(dmap.df["DEPARTMENT"].astype(str).unique())
                      if dmap.usable() and "DEPARTMENT" in dmap.df.columns else [])
@@ -732,7 +752,11 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *, 
     _statement_export(company, rate)
 
     with st.expander("Manage mapping"):
-        map_res = run(chargeback_sql.department_map(), page=_PAGE, key="cb_map", tier="recent",
+        # B4 (v4.532): reuse the batched department_map member for operators (identical
+        # department_map() sql). run_batch_mixed caches its member in a layer run() doesn't
+        # consult, so WITHOUT this an operator would fetch DEPARTMENT_MAP twice on first paint;
+        # a non-operator (dmap not batched) falls through to the serial read exactly as before.
+        map_res = _pf.get("dmap") or run(chargeback_sql.department_map(), page=_PAGE, key="cb_map", tier="recent",
                       source="DEPARTMENT_MAP")
         if map_res.usable():
             styled_table(with_user_names(map_res.df, _PAGE, user_col="UPDATED_BY", display_col="Updated by"),
