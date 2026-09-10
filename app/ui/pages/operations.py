@@ -1041,7 +1041,7 @@ def _reference_gap_panel(database: str = "") -> None:
         result_caption(res)
 
 
-def _workflow_runtimes_panel(days: int = 0) -> None:
+def _workflow_runtimes_panel(days: int = 0, *, pf: dict | None = None) -> None:
     """A chosen workflow's latest ETL run — per-task runtimes + a child↔total reconciliation.
 
     Alfa's nightly cycle is Informatica-orchestrated stored-proc CALLs, invisible to
@@ -1071,7 +1071,7 @@ def _workflow_runtimes_panel(days: int = 0) -> None:
     if not list_sql:
         empty_state("needs_setup", "ETL_CONTROL_STATUS_FQN is not a valid table name.")
         return
-    lres = run(list_sql, page=_PAGE, key=f"etl_wf_list_{days}", tier="recent",
+    lres = (pf or {}).get("wf_list") or run(list_sql, page=_PAGE, key=f"etl_wf_list_{days}", tier="recent",
                source="CONTROL_STATUS (workflows in window)", max_rows=etl_control_sql.MAX_WORKFLOWS)
     _wf_pick = ""
     if lres.ok and not lres.empty and "WORKFLOW_NAME" in lres.df.columns:
@@ -1155,7 +1155,7 @@ def _workflow_runtimes_panel(days: int = 0) -> None:
         result_caption(res)
 
 
-def _failure_recurrence_panel(days: int = 0) -> None:
+def _failure_recurrence_panel(days: int = 0, *, pf: dict | None = None) -> None:
     """Tasks that keep failing — which is likely to fail the next run.
 
     A FAILED task outranks a slow one at 7am, so this leads the drift/creep panels. From each task's
@@ -1174,7 +1174,7 @@ def _failure_recurrence_panel(days: int = 0) -> None:
     if not hist_sql:
         empty_state("needs_setup", "ETL_CONTROL_STATUS_FQN is not a valid table name.")
         return
-    res = run(hist_sql, page=_PAGE, key=f"etl_status_history_{days}", tier="recent",
+    res = (pf or {}).get("status_history") or run(hist_sql, page=_PAGE, key=f"etl_status_history_{days}", tier="recent",
               source="CONTROL_STATUS (per-task run status series)",
               max_rows=etl_control_sql.MAX_FAILREC_ROWS)
     if guard(res, "No run history yet to judge recurrence.",
@@ -1205,7 +1205,7 @@ def _failure_recurrence_panel(days: int = 0) -> None:
         result_caption(res)
 
 
-def _workflow_drift_panel() -> None:
+def _workflow_drift_panel(*, pf: dict | None = None) -> None:
     """Tasks in the latest ETL run that ran materially SLOWER than their recent baseline.
 
     Run-over-run drift on the same Informatica CONTROL_STATUS the runtimes panel reads:
@@ -1224,7 +1224,7 @@ def _workflow_drift_panel() -> None:
     if not scan_sql:
         empty_state("needs_setup", "ETL_CONTROL_STATUS_FQN is not a valid table name.")
         return
-    res = run(scan_sql, page=_PAGE, key="etl_wf_drift", tier="recent",
+    res = (pf or {}).get("wf_drift") or run(scan_sql, page=_PAGE, key="etl_wf_drift", tier="recent",
               source="CONTROL_STATUS (run-over-run drift)", max_rows=etl_control_sql.MAX_DRIFT_ROWS)
     if guard(res, "No task ran materially slower than its recent baseline — runtimes are stable.",
              kind="clean",
@@ -1245,7 +1245,7 @@ def _workflow_drift_panel() -> None:
         result_caption(res)
 
 
-def _runtime_creep_panel(days: int = 0) -> None:
+def _runtime_creep_panel(days: int = 0, *, pf: dict | None = None) -> None:
     """Tasks whose runtime is CREEPING up run-over-run — projected before they breach.
 
     The forward-looking companion to the drift panel: drift catches a task that already jumped;
@@ -1265,7 +1265,7 @@ def _runtime_creep_panel(days: int = 0) -> None:
     if not hist_sql:
         empty_state("needs_setup", "ETL_CONTROL_STATUS_FQN is not a valid table name.")
         return
-    res = run(hist_sql, page=_PAGE, key=f"etl_runtime_history_{days}", tier="recent",
+    res = (pf or {}).get("runtime_history") or run(hist_sql, page=_PAGE, key=f"etl_runtime_history_{days}", tier="recent",
               source="CONTROL_STATUS (per-task runtime series)",
               max_rows=etl_control_sql.MAX_HISTORY_ROWS)
     if guard(res, "No runtime history yet to fit a trend.",
@@ -1306,7 +1306,7 @@ def _runtime_creep_panel(days: int = 0) -> None:
         result_caption(res)
 
 
-def _sla_finish_forecast_panel(days: int = 0) -> None:
+def _sla_finish_forecast_panel(days: int = 0, *, pf: dict | None = None) -> None:
     """Will the whole nightly cycle finish before the 7am target (8am hard)?
 
     The cycle is bracketed by two anchor workflows: the STARTER (~10pm kickoff) and the TERMINAL
@@ -1333,7 +1333,7 @@ def _sla_finish_forecast_panel(days: int = 0) -> None:
                     "cycle's first and last workflow) on Admin ▸ SETTINGS, and a valid "
                     "ETL_CONTROL_STATUS_FQN, to forecast cycle completion.")
         return
-    res = run(scan_sql, page=_PAGE, key=f"etl_cycle_finish_{days}", tier="recent",
+    res = (pf or {}).get("cycle_finish") or run(scan_sql, page=_PAGE, key=f"etl_cycle_finish_{days}", tier="recent",
               source="CONTROL_STATUS (cycle finish vs deadline)", max_rows=etl_control_sql.MAX_SLA_NIGHTS)
     if guard(res, "No completed nightly cycles in the window — the starter and terminal workflows "
              "haven't both run. Check the two anchor workflow names on Admin ▸ SETTINGS.", kind="clean",
@@ -1408,7 +1408,7 @@ def _sla_finish_forecast_panel(days: int = 0) -> None:
         result_caption(res)
 
 
-def _run_inventory_panel() -> None:
+def _run_inventory_panel(*, pf: dict | None = None) -> None:
     """Recent ETL run inventory (CONTROL_RUN_ID) + a run picker that drills into any run's
     tasks (CONTROL_STATUS) and parameters (CONTROL_PARAMS).
 
@@ -1438,7 +1438,7 @@ def _run_inventory_panel() -> None:
             # set-but-invalid must surface, not vanish (mirrors the drift panel)
             empty_state("needs_setup", "ETL_CONTROL_RUN_ID_FQN is not a valid table name.")
         else:
-            res = run(inv_sql, page=_PAGE, key="etl_run_inventory", tier="recent",
+            res = (pf or {}).get("run_inventory") or run(inv_sql, page=_PAGE, key="etl_run_inventory", tier="recent",
                       source="CONTROL_RUN_ID inventory", max_rows=etl_control_sql.MAX_RUNS)
             if guard(res, "No ETL runs recorded yet.", setup_hint=_hint):
                 styled_table(res.df, height=300)
@@ -1496,7 +1496,7 @@ def _run_inventory_panel() -> None:
                     result_caption(pres)
 
 
-def _recon_error_panel() -> None:
+def _recon_error_panel(*, pf: dict | None = None) -> None:
     """Recent data-reconciliation errors from the Informatica RECON_MTRC_ERROR table.
 
     Phase 3: the nightly recon compares each metric's SOURCE_LAYER against its TARGET_LAYER
@@ -1515,7 +1515,7 @@ def _recon_error_panel() -> None:
         empty_state("needs_setup", "ETL_RECON_ERROR_FQN is not a valid table name.")
         return
     _days = etl_control_sql.RECON_LOOKBACK_DAYS
-    res = run(scan_sql, page=_PAGE, key="etl_recon_errors", tier="recent",
+    res = (pf or {}).get("recon_errors") or run(scan_sql, page=_PAGE, key="etl_recon_errors", tier="recent",
               source="RECON_MTRC_ERROR (recent)", max_rows=etl_control_sql.MAX_RECON_ROWS)
     if guard(res, f"No reconciliation errors in the last {_days} days — source and target layers "
              "reconcile.", kind="clean",
@@ -1533,7 +1533,7 @@ def _recon_error_panel() -> None:
         result_caption(res)
 
 
-def _recon_recurrence_panel(days: int = 0) -> None:
+def _recon_recurrence_panel(days: int = 0, *, pf: dict | None = None) -> None:
     """Which reconciliation checks KEEP breaking (vs the raw 'what broke' panel above).
 
     RECON_MTRC_ERROR logs only failures, so recurrence is CONDITIONAL: of the distinct cycles ANY
@@ -1553,7 +1553,7 @@ def _recon_recurrence_panel(days: int = 0) -> None:
         empty_state("needs_setup", "ETL_RECON_ERROR_FQN is not a valid table name.")
         return
     _win = days if days else etl_control_sql.RECON_RECURRENCE_LOOKBACK_DAYS
-    res = run(scan_sql, page=_PAGE, key=f"etl_recon_recurrence_{days}", tier="recent",
+    res = (pf or {}).get("recon_recurrence") or run(scan_sql, page=_PAGE, key=f"etl_recon_recurrence_{days}", tier="recent",
               source="RECON_MTRC_ERROR (recurrence)", max_rows=etl_control_sql.MAX_RECON_RECURRENCE_ROWS)
     if guard(res, f"No reconciliation errors in the last {_win} days — every metric ties out.",
              kind="clean",
@@ -1672,6 +1672,56 @@ def _cost_attribution_panel() -> None:
         result_caption(res)
 
 
+def _pipeline_prefetch(days: int) -> dict:
+    """B1 (v4.531): co-schedule the Pipeline SLA tab's independent, picker-free control-table
+    reads into ONE run_batch, so the tab's cold first paint pays ~MAX(scan) instead of the sum
+    of ~8 serial round-trips. Each panel still owns its SQL, guards, and config-gate, and keeps
+    its serial run() fallback: a missing prefetch member (unconfigured/invalid FQN, a None batch)
+    just re-reads. All members are tier='recent', so a plain run_batch is right (not mixed).
+
+    Deliberately EXCLUDED — they aren't independent first-paint reads: the chosen workflow's
+    runtimes and a chosen run's tasks/params need a selectbox value that doesn't exist yet, and
+    the cost-attribution scan is behind its own on-demand toggle (batching it would pay that scan
+    on every tab open). The builder calls here mirror each panel's exactly, so the batched SQL is
+    byte-identical to the panel's fallback — the member is genuinely used, not silently re-read."""
+    s = load_settings(_PAGE)
+    ctrl = str(s.get("ETL_CONTROL_STATUS_FQN") or "").strip()
+    run_fqn = str(s.get("ETL_CONTROL_RUN_ID_FQN") or "").strip()
+    recon = str(s.get("ETL_RECON_ERROR_FQN") or "").strip()
+    start_wf = str(s.get("ETL_CYCLE_START_WORKFLOW") or "").strip()
+    end_wf = str(s.get("ETL_CYCLE_END_WORKFLOW") or "").strip()
+    specs: list[dict] = []
+
+    def _add(key: str, sql: str, source: str, max_rows: int) -> None:
+        if sql:   # skip an unconfigured/invalid FQN — the panel handles that state itself
+            specs.append({"key": key, "sql": sql, "source": source, "max_rows": max_rows})
+
+    if ctrl:
+        _add("wf_list", etl_control_sql.workflow_list_scan(ctrl, days=days),
+             "CONTROL_STATUS (workflows in window)", etl_control_sql.MAX_WORKFLOWS)
+        _add("status_history", etl_control_sql.task_status_history_scan(ctrl, days=days),
+             "CONTROL_STATUS (per-task run status series)", etl_control_sql.MAX_FAILREC_ROWS)
+        _add("wf_drift", etl_control_sql.workflow_runtime_drift_scan(ctrl),
+             "CONTROL_STATUS (run-over-run drift)", etl_control_sql.MAX_DRIFT_ROWS)
+        _add("runtime_history", etl_control_sql.task_runtime_history_scan(ctrl, days=days),
+             "CONTROL_STATUS (per-task runtime series)", etl_control_sql.MAX_HISTORY_ROWS)
+        _add("cycle_finish",
+             etl_control_sql.cycle_finish_history_scan(ctrl, start_workflow=start_wf, end_workflow=end_wf, days=days),
+             "CONTROL_STATUS (cycle finish vs deadline)", etl_control_sql.MAX_SLA_NIGHTS)
+    if run_fqn:
+        _add("run_inventory", etl_control_sql.run_inventory_scan(run_fqn),
+             "CONTROL_RUN_ID inventory", etl_control_sql.MAX_RUNS)
+    if recon:
+        _add("recon_errors", etl_control_sql.recon_errors_scan(recon),
+             "RECON_MTRC_ERROR (recent)", etl_control_sql.MAX_RECON_ROWS)
+        _add("recon_recurrence", etl_control_sql.recon_recurrence_scan(recon, days=days),
+             "RECON_MTRC_ERROR (recurrence)", etl_control_sql.MAX_RECON_RECURRENCE_ROWS)
+    if not specs:
+        return {}
+    out = run_batch(specs, page=_PAGE, tier="recent")
+    return out if out is not None else {}
+
+
 def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "", days: int = 0) -> None:
     """Metadata-driven table freshness SLAs (config in PIPELINE_SLA_CONFIG).
 
@@ -1682,26 +1732,31 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
     # load, so this leads the Pipeline tab (config-gated; dormant until set up). Honors
     # the scope-bar Database filter (pinned checks always show).
     _reference_gap_panel(database)
+    # B1 (v4.531): prefetch the 8 independent, picker-free control-table reads in ONE round trip
+    # so the tab's cold first paint pays ~MAX(scan), not the sum of ~8 serial reads. Each panel
+    # below consumes its member via (pf or {}).get(key) and keeps its serial run() fallback.
+    _pf = _pipeline_prefetch(days)
     # Then a chosen workflow's latest run's per-task runtimes (Informatica CONTROL_STATUS),
     # scoped to the Window; config-gated + fail-silent-with-grant-hint like above.
-    _workflow_runtimes_panel(days)
+    _workflow_runtimes_panel(days, pf=_pf)
     # Then failure recurrence: which task keeps failing / is likely to fail again — a FAILED task
     # outranks a slow one at 7am, so this leads the drift/creep slowdown panels.
-    _failure_recurrence_panel(days)
+    _failure_recurrence_panel(days, pf=_pf)
     # Then run-over-run drift on that same control table: which task got materially slower.
-    _workflow_drift_panel()
+    _workflow_drift_panel(pf=_pf)
     # Then the forward-looking companion: which tasks are CREEPING toward a breach (trend fit),
     # scoped to the Window so the trend reflects the selected history.
-    _runtime_creep_panel(days)
+    _runtime_creep_panel(days, pf=_pf)
     # Then the whole-cycle SLA: will the nightly cycle (starter → terminal) finish before 7am?
-    _sla_finish_forecast_panel(days)
+    _sla_finish_forecast_panel(days, pf=_pf)
     # Then the run inventory (CONTROL_RUN_ID) + the latest run's parameters (CONTROL_PARAMS).
-    _run_inventory_panel()
+    _run_inventory_panel(pf=_pf)
     # Then Phase 3 reconciliation DQ: metrics whose source vs target layer didn't tie out.
-    _recon_error_panel()
+    _recon_error_panel(pf=_pf)
     # Then which metrics KEEP breaking (recurrence), vs the raw 'what broke' panel above.
-    _recon_recurrence_panel(days)
-    # Then Phase 4 cost attribution: which task spent the most measured credits/$ last night.
+    _recon_recurrence_panel(days, pf=_pf)
+    # Then Phase 4 cost attribution (on-demand toggle, so NOT prefetched): which task spent the
+    # most measured credits/$ last night.
     _cost_attribution_panel()
     res = run(insights_sql.pipeline_sla_forecast(14), page=_PAGE, key="sla_status", tier="recent",
               source="ACCOUNT_USAGE.TABLE_DML_HISTORY x PIPELINE_SLA_STATUS")

@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.531.0 - Pipeline SLA tab: 8 first-paint reads co-scheduled into one batch (2026-09-10)
+
+Phase 2 (part 2) of the reviewed plan — B1, the standout read-layer latency win. The Operations ▸
+Pipeline SLA tab fired ~8 independent CONTROL_STATUS / CONTROL_RUN_ID / RECON reads serially on its
+cold first paint; they now prefetch in ONE `run_batch`, so cold latency drops from the sum of the
+scans to roughly the slowest single scan. App-code only (redeploy); no query, mart, threshold, or
+number changed. Adversarially verified (3-agent refute pass, all clean).
+
+- **New `_pipeline_prefetch(days)` helper** reads the pipeline settings once and `run_batch`es the 8
+  independent, picker-free reads at `tier="recent"`: workflow list, per-task status history
+  (failure-recurrence), run-over-run drift, per-task runtime history (creep), cycle-finish forecast,
+  run inventory, recon errors, and recon recurrence. `_pipeline_sla_tab` calls it once and threads the
+  result into each panel; every panel consumes its member via `(pf or {}).get(key) or run(…)` and keeps
+  its serial `run()` as the per-member fallback (a missing/unconfigured member just re-reads).
+- **Correctness:** each helper builder call is byte-identical to the panel's own — same builder, FQN,
+  window, and anchor-workflow args from the same memoized settings — so the prefetched member renders
+  exactly what the panel would have read. The batched SQL and the fallback share the same `source`
+  label and row cap.
+- **Deliberately left serial:** the chosen-workflow runtimes and a chosen run's tasks/parameters (they
+  need a picker value that doesn't exist at first paint), and the on-demand cost-attribution scan
+  (behind its own toggle — batching it would pay that scan on every tab open). ACCOUNT_USAGE literal
+  budget on `operations.py` unchanged (41); the control tables aren't ACCOUNT_USAGE.
+
+Remaining in workstream B (own passes): **B4** — the Chargeback tab's four reads (its role-share leg is
+a coverage-gated `run_mart_first`); **B3** — collapsing the three per-task CONTROL_STATUS history scans
+(failure-recurrence / creep / drift) into one shared frame, now that they're batch members.
+
 ## 4.530.0 - Read-layer batching: three first-paint fetches co-scheduled (2026-09-10)
 
 Phase 2 (part 1) of the reviewed performance/polish plan — three contained read-layer consolidations,
