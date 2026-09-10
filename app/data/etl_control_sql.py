@@ -272,8 +272,10 @@ def workflow_runtimes_scan(
         "       MAX_BY(s.TASK_STATUS, COALESCE(s.TASK_END_DTTM, s.TASK_START_DTTM)) AS TASK_STATUS,\n"
         "       MIN(s.TASK_START_DTTM) AS TASK_START_DTTM,\n"
         "       MAX(s.TASK_END_DTTM) AS TASK_END_DTTM,\n"
-        "       MAX(DATEDIFF('second', s.TASK_START_DTTM,\n"
-        "           COALESCE(s.TASK_END_DTTM, CURRENT_TIMESTAMP()))) AS RUNTIME_SEC\n"
+        # ENVELOPE runtime (first attempt start -> last attempt end), so start + RUNTIME_SEC == end
+        # holds for a retried task and matches the panel's 'runtime is end - start' caption + span math.
+        "       DATEDIFF('second', MIN(s.TASK_START_DTTM),\n"
+        "           MAX(COALESCE(s.TASK_END_DTTM, CURRENT_TIMESTAMP()))) AS RUNTIME_SEC\n"
         f"  FROM {tbl} s\n"
         "  JOIN latest l ON s.RUN_ID = l.RUN_ID\n"
         "  WHERE s.TASK_START_DTTM IS NOT NULL AND s.TASK_NAME IS NOT NULL\n"
@@ -824,19 +826,30 @@ def run_cost_attribution_scan(
         # slices), so SUM the credits per query FIRST. Otherwise the later RN=1 — which
         # exists only to de-dup TASK matches — would also silently drop a query's other
         # credit slices and undercount the run. HAVING keeps queries whose TOTAL is > 0.
+        # Roll each statement's credits up to its CALL's query id via COALESCE(ROOT_QUERY_ID,
+        # QUERY_ID): a task's body is a stored proc, so Snowflake attributes the compute to the
+        # proc's CHILD statements (MERGE/INSERT/…), which carry the CALL's id only as ROOT_QUERY_ID
+        # — the CALL row itself is ~0 credits. Grouping on the bare QUERY_ID (and matching child text)
+        # would collapse proc-driven cost to '(unattributed)'; rolling up to the CALL means the CALL
+        # text (which carries the SP_/task name) is what gets matched. Credits = compute + query
+        # acceleration, the app-wide credit definition. (Mirrors graph_sql / insights_sql.)
         "qah_agg AS (\n"
-        "  SELECT QUERY_ID, SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CREDITS\n"
+        "  SELECT COALESCE(ROOT_QUERY_ID, QUERY_ID) AS RID,\n"
+        "         SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0)\n"
+        "             + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS\n"
         f"  FROM {_QAH_FQN}\n"
         "  WHERE START_TIME >= (SELECT RUN_START FROM bounds)\n"
         "    AND START_TIME <= (SELECT RUN_END FROM bounds)\n"
-        "  GROUP BY QUERY_ID\n"
-        "  HAVING SUM(CREDITS_ATTRIBUTED_COMPUTE) > 0\n"
+        "  GROUP BY COALESCE(ROOT_QUERY_ID, QUERY_ID)\n"
+        "  HAVING SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0)\n"
+        "              + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) > 0\n"
         "),\n"
-        # attach the text (QUERY_HISTORY is one row per QUERY_ID) inside the same window.
+        # attach the CALL's text (QUERY_HISTORY is one row per QUERY_ID) inside the same window;
+        # RID = the CALL's own query id, so qh.QUERY_TEXT is the CALL (carrying the task name).
         "cand AS (\n"
-        "  SELECT a.QUERY_ID, a.CREDITS, qh.QUERY_TEXT, qh.START_TIME\n"
+        "  SELECT a.RID AS QUERY_ID, a.CREDITS, qh.QUERY_TEXT, qh.START_TIME\n"
         "  FROM qah_agg a\n"
-        f"  JOIN {_QH_FQN} qh ON qh.QUERY_ID = a.QUERY_ID\n"
+        f"  JOIN {_QH_FQN} qh ON qh.QUERY_ID = a.RID\n"
         "  WHERE qh.START_TIME >= (SELECT RUN_START FROM bounds)\n"
         "    AND qh.START_TIME <= (SELECT RUN_END FROM bounds)\n"
         "),\n"
@@ -941,10 +954,15 @@ def cycle_finish_history_scan(
         "  FROM term\n"
         "  GROUP BY 1\n"
         ")\n"
-        "SELECT s.CYCLE_DATE, s.CYCLE_START, e.CYCLE_FINISH, e.N_FAILED, e.N_RUNNING,\n"
+        # LEFT JOIN, not INNER: a night whose terminal workflow never dispatched (the cycle hung
+        # upstream) has a start but no cyc_end row. Keep it with CYCLE_FINISH NULL + zero counts so
+        # the forecaster classifies it INCOMPLETE and surfaces the outage — an inner join would drop
+        # the night and read the PRIOR clean night as a false 'on track' all-clear.
+        "SELECT s.CYCLE_DATE, s.CYCLE_START, e.CYCLE_FINISH,\n"
+        "       COALESCE(e.N_FAILED, 0) AS N_FAILED, COALESCE(e.N_RUNNING, 0) AS N_RUNNING,\n"
         "       CURRENT_TIMESTAMP() AS SNAPSHOT_TS,\n"
         "       ROW_NUMBER() OVER (ORDER BY s.CYCLE_DATE DESC) AS RN\n"
-        "  FROM cyc_start s JOIN cyc_end e ON s.CYCLE_DATE = e.CYCLE_DATE\n"
+        "  FROM cyc_start s LEFT JOIN cyc_end e ON s.CYCLE_DATE = e.CYCLE_DATE\n"
         f"  QUALIFY ROW_NUMBER() OVER (ORDER BY s.CYCLE_DATE DESC) <= {keep}\n"
         "  ORDER BY RN\n"
         f"  LIMIT {int(max_rows)}"

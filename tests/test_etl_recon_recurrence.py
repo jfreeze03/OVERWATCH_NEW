@@ -69,6 +69,21 @@ def test_ranking_active_chronic_above_resolved() -> None:
     assert out.iloc[0]["RANK_SCORE"] > out.iloc[1]["RANK_SCORE"]
 
 
+def test_severity_leads_ranking_over_rank_score() -> None:
+    # a High CHRONIC (lower RANK_SCORE) must outrank a Medium NEW (higher RANK_SCORE) as the worst row
+    rows = [
+        _row("M_NEW", broken=2, total=4, pct=50, latest=True, recent=2),      # NEW, Medium, higher score
+        _row("M_CHRONIC", broken=6, total=9, pct=67, latest=True, recent=1),  # CHRONIC, High, lower score
+    ]
+    out = recon_recurrence(pd.DataFrame(rows))
+    assert out.iloc[0]["MTRC"] == "M_CHRONIC"
+    assert out.iloc[0]["SEVERITY"] == "High"
+    # confirm the Medium NEW really has the higher RANK_SCORE, so severity (not score) drove the order
+    _new = out[out["MTRC"] == "M_NEW"].iloc[0]
+    _chr = out[out["MTRC"] == "M_CHRONIC"].iloc[0]
+    assert _new["RANK_SCORE"] > _chr["RANK_SCORE"]
+
+
 def test_empty_and_malformed_in_empty_out() -> None:
     assert recon_recurrence(pd.DataFrame()).empty
     assert recon_recurrence(pd.DataFrame({"X": [1]})).empty

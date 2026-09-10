@@ -212,6 +212,9 @@ def test_workflow_runtimes_scan_collapses_retries_and_drops_null_start() -> None
     assert "GROUP BY s.WORKFLOW_NAME, s.TASK_NAME" in sql
     # outer NULL-start filter so a queued-but-unstarted task can't sort to the top under DESC
     assert "WHERE s.TASK_START_DTTM IS NOT NULL AND s.TASK_NAME IS NOT NULL" in sql
+    # ENVELOPE runtime (MIN start -> MAX end) so start + RUNTIME_SEC == end for a retried task
+    assert "DATEDIFF('second', MIN(s.TASK_START_DTTM)," in sql
+    assert "MAX(COALESCE(s.TASK_END_DTTM, CURRENT_TIMESTAMP())))" in sql
 
 
 def test_workflow_runtimes_scan_honors_window() -> None:
@@ -434,10 +437,15 @@ def test_cost_attribution_scan_latest_run() -> None:
     assert "SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY" in sql
     # QAH can have >1 row per QUERY_ID (a query split across warehouse slices): SUM the
     # credits per query FIRST so the RN=1 task-dedup can't drop a query's other slices.
-    assert "SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CREDITS" in sql
-    assert "GROUP BY QUERY_ID" in sql
-    assert "HAVING SUM(CREDITS_ATTRIBUTED_COMPUTE) > 0" in sql
-    assert "ON qh.QUERY_ID = a.QUERY_ID" in sql
+    # roll child-statement credits up to the CALL via COALESCE(ROOT_QUERY_ID, QUERY_ID): a proc's
+    # credits live on its child statements (ROOT_QUERY_ID = the CALL), not the ~0-credit CALL row, so
+    # grouping on the bare QUERY_ID would collapse proc-driven cost to (unattributed)
+    assert "COALESCE(ROOT_QUERY_ID, QUERY_ID) AS RID" in sql
+    assert "GROUP BY COALESCE(ROOT_QUERY_ID, QUERY_ID)" in sql
+    # credits = compute + query acceleration (the app-wide credit definition)
+    assert "COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)" in sql
+    # join QH on the CALL's id so the matched text carries the SP_/task name
+    assert "ON qh.QUERY_ID = a.RID" in sql
     # no run_id -> latest run (newest TASK_START_DTTM), same rule the sibling panels use
     assert "QUALIFY ROW_NUMBER() OVER (ORDER BY TASK_START_DTTM DESC) = 1" in sql
     # the substring guard: charge each query to the LONGEST matching task name (so a nested
@@ -555,6 +563,10 @@ def test_cycle_finish_history_scan_basic() -> None:
     # terminal task must NOT count as a failed night)
     assert "MAX_BY(TASK_STATUS, COALESCE(TASK_END_DTTM, TASK_START_DTTM)) AS TERMINAL_STATUS" in sql
     assert "AS N_FAILED" in sql and "AS N_RUNNING" in sql
+    # LEFT JOIN so a night whose terminal workflow never ran (hung cycle) isn't dropped into a
+    # false all-clear — it arrives with a NULL finish and is classified INCOMPLETE downstream
+    assert "LEFT JOIN cyc_end e ON s.CYCLE_DATE = e.CYCLE_DATE" in sql
+    assert "COALESCE(e.N_FAILED, 0) AS N_FAILED" in sql
     # anchor workflow names bound as escaped literals (data, not identifiers)
     assert "WORKFLOW_NAME = 'WF_START'" in sql and "WORKFLOW_NAME = 'WF_END'" in sql
     assert "CURRENT_TIMESTAMP() AS SNAPSHOT_TS" in sql

@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.525.0 - ETL bug-hunt round 2: 5 more fixes (incl. a HIGH + a round-1 regression) (2026-09-09)
+
+Second loop-until-dry adversarial hunt (35 agents), with a lens dedicated to regression-reviewing the
+round-1 fixes. 5 confirmed, all fixed:
+
+- **[HIGH] cost attribution joined `QAH`/`QH` on the bare `QUERY_ID`** — the nightly workload is stored-proc
+  CALLs, and Snowflake attributes the compute to the proc's CHILD statements (which carry the CALL's id
+  only as `ROOT_QUERY_ID`; the CALL row is ~0 credits). So the join matched child DML text (no task name)
+  and every credit collapsed to `(unattributed)` — the panel read ~$0 on exactly the workload it targets.
+  Now rolls up by `COALESCE(ROOT_QUERY_ID, QUERY_ID)` and matches the CALL's text, mirroring
+  `graph_sql`/`insights_sql`.
+- **[MED, round-1 regression] `workflow_runtimes_scan` `RUNTIME_SEC` was `MAX(single attempt)`** while the
+  row emitted `MIN(start)`/`MAX(end)` — for a retried task the displayed row self-contradicted
+  (`end − start` ≠ runtime) and the reconciliation understated the wall-clock span (could invert the
+  Parallelism/Idle verdict). Now the envelope `DATEDIFF(MIN start, MAX end)`, so `start + runtime == end`.
+- **[MED] `cycle_finish_history_scan` inner-joined the two bookends** — a night whose terminal workflow
+  never dispatched (a cycle that hung upstream) was dropped, and the SLA panel read the prior clean night
+  as a false "on track" all-clear. Now a `LEFT JOIN` surfaces it as INCOMPLETE.
+- **[MED] recon-recurrence ranking omitted severity** — `RANK_SCORE` (where `RECENT_BROKEN` can dwarf
+  `RECURRENCE_PCT`) let a Medium NEW outrank a High CHRONIC as the "Worst" metric. Severity now leads the
+  sort, matching the failure-recurrence panel.
+- **[LOW] cost attribution summed only `CREDITS_ATTRIBUTED_COMPUTE`**, omitting
+  `CREDITS_USED_QUERY_ACCELERATION` that every other cost reader includes. Now sums both.
+
 ## 4.524.0 - ETL bug-hunt round 1: 7 fixes across today's predictive suite (2026-09-09)
 
 A loop-until-dry adversarial bug-hunt (56 agents, 3 rounds, each finding double-refuted then adjudicated

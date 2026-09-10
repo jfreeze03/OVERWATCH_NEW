@@ -997,8 +997,12 @@ def recon_recurrence(
     for c in cols:
         if c not in out.columns:
             out[c] = None
-    return out.sort_values(["RANK_SCORE", "BROKEN_CYCLES"],
-                           ascending=[False, False]).reset_index(drop=True)[cols]
+    # severity LEADS the sort (like task_failure_recurrence) so a Medium NEW can't outrank a High
+    # CHRONIC as the 'Worst' row — RANK_SCORE (where RECENT_BROKEN can dwarf RECURRENCE_PCT) only
+    # orders WITHIN a severity tier, keeping the table consistent with its SEVERITY column.
+    out["_sev"] = out["SEVERITY"].map(_SEV_RANK)
+    return (out.sort_values(["_sev", "RANK_SCORE", "BROKEN_CYCLES"], ascending=[True, False, False])
+            .drop(columns="_sev").reset_index(drop=True)[cols])
 
 
 # --- ETL SLA finish forecast (the whole nightly cycle vs a clock deadline) -----
