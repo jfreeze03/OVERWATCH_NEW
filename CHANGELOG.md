@@ -1,5 +1,34 @@
 # Changelog
 
+## 4.533.0 - Visual "less-AI" pass: honest font, flat CTA, normal-case structure (2026-09-10)
+
+The visual completion of the "make it look less AI" work, on three owner decisions. App-code CSS only
+(redeploy); no query, mart, threshold, or number changed.
+
+- **E1 — honest font stack (owner: platform stack).** The `--ow-font` stack led with `Inter var` /
+  `Inter` / `SF Pro Display`, none of which were ever loaded (no `@font-face` anywhere) — so the app
+  silently rendered in Segoe UI on Windows and SF via `-apple-system` on Mac. The stack now names only
+  faces that actually resolve, and `app/ui/charts.py` is synced to match.
+- **E3 — flatten the gradient CTA (owner: flatten it).** The teal→blue `linear-gradient(180deg,
+  accent2, accent)` on the primary button, the active segmented-control segment, and the active
+  pills is now a **solid single accent** (`--ow-accent`). The "connected" brand dot drops its
+  teal→blue radial gradient + infinite pulse for a **solid dot with a faint static glow**. `--ow-accent2`
+  is retained for the palette contract but is no longer used for any fill — this retires the last
+  gradient chrome and the vestigial second accent, the single biggest "operator tool, not AI dashboard"
+  move.
+- **E4 — uppercase restraint.** The structural/navigational labels — the breadcrumb, the section
+  kicker, and the brand sub-label — switch from tracked ALL-CAPS to normal case. The data micro-labels
+  that sit directly above a number (KPI/metric/hero/stat labels) keep their tracked caps, where the
+  treatment aids scanning.
+
+Lock tests updated for the intended visual changes: `test_uiux_wave2_active_grammar` (active fill is now
+solid accent, not the gradient) and `test_uiux_wave1_visual::test_c4_brand_dot_binds_to_connection` (the
+dot is static; the `ow-pulse` keyframe is retired).
+
+Deferred owner-decision items still open: **A1 + A4** stored-proc migrations (alert cadence approved;
+migration bundle to author for you to apply) and the deeper copy pass (D2 section headers, D6 Brief help)
++ the builder de-dup (WS-C, incl. the admin-role tiers you approved codifying as-is).
+
 ## 4.532.0 - Chargeback tab: four first-paint reads co-scheduled (2026-09-10)
 
 Phase 2 (part 3) — B4, and the last read-layer batch of workstream B. The Cost ▸ Chargeback & AI

@@ -25,6 +25,8 @@ _TOKENS = """
      muted labels clear WCAG AA 4.5:1 on every surface they land on (bg 6.1, surface 5.7,
      raised 5.4). Every muted label references this one token, so one change fixes all. */
   --ow-ink:#f8fafc; --ow-ink-soft:#cbd5e1; --ow-ink-mute:#94a3b8;
+  /* one accent. --ow-accent2 (teal) is RETAINED for the palette contract (test_palette_drift)
+     but is no longer used for any fill — the v4.533 flatten retired the teal→blue gradients. */
   --ow-accent:#60a5fa; --ow-accent2:#2dd4bf;
   --ow-ok:#34d399; --ow-warn:#f59e0b; --ow-bad:#f87171; --ow-info:#60a5fa;
   --ow-ok-dim:rgba(52,211,153,0.13); --ow-warn-dim:rgba(245,158,11,0.13);
@@ -39,7 +41,12 @@ _TOKENS = """
   --ow-shadow:0 1px 2px rgba(0,0,0,0.30),0 6px 20px -12px rgba(0,0,0,0.55);
   --ow-shadow2:0 2px 6px rgba(0,0,0,0.35),0 18px 40px -18px rgba(0,0,0,0.65);
   --ow-ease:150ms cubic-bezier(0.22,1,0.36,1);
-  --ow-font:'Inter var','Inter','SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
+  /* v4.533 E1 (owner decision): an HONEST platform stack — the leading 'Inter var'/
+     'Inter'/'SF Pro Display' names were never loaded (no @font-face anywhere), so the app
+     silently rendered in the real platform font anyway (Segoe UI on Windows, SF via
+     -apple-system on Mac). Naming only faces that actually resolve keeps app/ui/charts.py
+     in sync and the intent honest. */
+  --ow-font:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
   --ow-mono:'SF Mono','JetBrains Mono','Roboto Mono',ui-monospace,Menlo,Consolas,monospace;
   /* Named type scale (v4.529 E2): one source for the heading sizes so every page
      title is the SAME size regardless of whether the caller passed an icon (the raw
@@ -82,8 +89,8 @@ p,li,span,label,.stMarkdown { color:var(--ow-ink-soft); }
 [data-testid="stMetricValue"],.ow-num,td,th { font-variant-numeric:tabular-nums; }
 
 /* F9: Group ▸ Page ▸ Section orientation kicker above the page title. */
-.ow-breadcrumb { font-size:0.68rem; font-weight:600; letter-spacing:0.06em;
-  text-transform:uppercase; color:var(--ow-ink-mute); margin:0 0 2px 1px; }
+.ow-breadcrumb { font-size:0.68rem; font-weight:600; letter-spacing:0.01em;
+  color:var(--ow-ink-mute); margin:0 0 2px 1px; }
 .ow-page-heading { display:flex; align-items:center; gap:11px; margin:-2px 0 2px 0; }
 .ow-page-heading h1 { margin:0; padding:0; font-size:var(--fs-title); font-weight:750; letter-spacing:0; }
 .ow-page-heading__icon { color:var(--ow-accent); display:inline-flex; flex:0 0 auto; }
@@ -299,23 +306,22 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.ow-scope-active){
   letter-spacing:0.06em;text-transform:uppercase;flex:0 0 auto;}
 .ow-triage-sub{line-height:1;color:var(--ow-ink-mute);font-size:0.66rem;font-weight:600;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;}
-.ow-kicker { font-size:0.75rem; letter-spacing:0; font-weight:750; color:var(--ow-ink-mute); text-transform:uppercase; margin-bottom:0.1rem; }
+.ow-kicker { font-size:0.75rem; letter-spacing:0; font-weight:750; color:var(--ow-ink-mute); margin-bottom:0.1rem; }
 .ow-brand { display:flex; align-items:center; gap:9px; }
-/* C4: the pulse now MEANS "connected to Snowflake" — _sidebar binds the class to
-   the live connection, and the disconnected dot is static grey, so the animation
-   no longer implies a liveness the app isn't asserting. */
+/* v4.533 E3 (owner decision): the connected dot is a solid single-accent dot with a
+   faint STATIC glow — the teal→blue radial gradient + infinite pulse were retired for
+   the operator aesthetic (a tool, not an AI dashboard). _sidebar still binds
+   .ow-brand-dot--off (static grey) when disconnected. */
 .ow-brand-dot { width:11px; height:11px; border-radius:999px;
-  background:radial-gradient(circle at 30% 30%,var(--ow-accent2),var(--ow-accent));
-  box-shadow:0 0 10px rgba(96,165,250,0.72),0 0 2px rgba(45,212,191,0.82); animation:ow-pulse 2.8s ease-in-out infinite; }
-.ow-brand-dot--off { background:var(--ow-ink-mute); box-shadow:none; animation:none; opacity:0.6; }
-@keyframes ow-pulse { 0%,100% { opacity:1; } 50% { opacity:0.55; } }
+  background:var(--ow-accent); box-shadow:0 0 4px rgba(96,165,250,0.45); }
+.ow-brand-dot--off { background:var(--ow-ink-mute); box-shadow:none; opacity:0.6; }
 /* v4.461 P3: the wordmark is solid ink. The gradient text-clip (F22) was a classic
    AI-startup flourish — retired for the operator aesthetic, so the single brand
    anchor in the chrome reads as plain, confident type. */
 .ow-brand-word { font-weight:850; letter-spacing:0.08em; font-size:1.55rem; line-height:1.02;
   color:var(--ow-ink); }
 .ow-brand-sub { font-size:0.72rem; font-weight:600; color:var(--ow-ink-mute);
-  letter-spacing:0.04em; margin:1px 0 0 20px; text-transform:uppercase; }
+  letter-spacing:0.01em; margin:1px 0 0 20px; }
 
 /* Native segmented controls (stButtonGroup) wrap every option and retain a
    visible keyboard focus ring. The role/label rules below are the old-radio
@@ -335,7 +341,7 @@ div[data-testid="stButtonGroup"] button:focus-visible { outline:2px solid var(--
    the 2026-07-10 primary-button lesson). */
 div[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_controlActive"],
 div[data-testid="stButtonGroup"] button[aria-checked="true"] {
-  background:linear-gradient(180deg,var(--ow-accent2),var(--ow-accent)) !important;
+  background:var(--ow-accent) !important;
   border-color:transparent !important; }
 div[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_controlActive"] p,
 div[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_controlActive"] span,
@@ -349,11 +355,11 @@ div[role="radiogroup"][aria-label="Section"] label, div[role="radiogroup"][aria-
 div[role="radiogroup"][aria-label="Section"] label:hover,
 div[role="radiogroup"][aria-label^="Window"] label:hover { background:rgba(148,163,184,0.10); }
 /* F5: the FILLED variant of the active grammar — a segmented control fills its
-   current segment (accent gradient + dark ink on it), the convention for a compact
+   current segment (solid accent fill + dark ink on it), the convention for a compact
    horizontal selector. Same accent as the nav rail and the tab underline. */
 div[role="radiogroup"][aria-label="Section"] label:has(input:checked),
 div[role="radiogroup"][aria-label^="Window"] label:has(input:checked) {
-  background:linear-gradient(180deg,var(--ow-accent2),var(--ow-accent)); color:#0f172a; }
+  background:var(--ow-accent); color:#0f172a; }
 /* the dark ink must be FORCED onto the option's text node — a direct global
    `p,span { color:ink-soft }` (line ~56) beats an inherited label colour, which
    would leave near-white text on the bright accent fill (the primary-button lesson). */
@@ -410,7 +416,7 @@ section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:focus-vi
 .stButton > button[data-testid="stBaseButton-primary"]:not(:disabled),
 button[data-testid="stBaseButton-primary"]:not(:disabled),
 button[data-testid="baseButton-primary"]:not(:disabled) {
-  background:linear-gradient(180deg,var(--ow-accent2),var(--ow-accent)) !important;
+  background:var(--ow-accent) !important;
   color:#0f172a !important; border:none !important; }
 /* SiS builds vary the button markup; force dark ink on every descendant so
    an accent pill can never render pale-on-pale (live finding 2026-07-10:

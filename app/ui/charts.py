@@ -424,7 +424,7 @@ _TASK_DAG_TEMPLATE = r"""<!doctype html>
 html, body {
   margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent;
 }
-body { font-family: Inter, "Segoe UI", Arial, sans-serif; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; }
 .dag-host {
   position: relative; width: 100%; height: __HEIGHT__px; overflow: hidden;
   background: #111827; border: 1px solid rgba(148,163,184,.28); border-radius: 6px;

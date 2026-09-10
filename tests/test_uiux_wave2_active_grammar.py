@@ -33,7 +33,10 @@ def test_f5_both_section_and_window_pills_get_the_filled_active():
     pill_block = _THEME.split("FILLED variant of the active grammar", 1)[1][:500]
     assert 'div[role="radiogroup"][aria-label="Section"] label:has(input:checked)' in pill_block
     assert 'div[role="radiogroup"][aria-label^="Window"] label:has(input:checked)' in pill_block
-    assert "linear-gradient(180deg,var(--ow-accent2),var(--ow-accent))" in pill_block
+    # v4.533 E3 (owner decision): the active fill is a SOLID single accent (the teal→blue
+    # accent2→accent gradient was flattened for the operator aesthetic).
+    assert "background:var(--ow-accent); color:#0f172a" in pill_block
+    assert "accent2" not in pill_block
 
 
 def test_f5_modern_segmented_control_active_segment_is_filled():
@@ -43,7 +46,8 @@ def test_f5_modern_segmented_control_active_segment_is_filled():
     assert 'button[data-testid="stBaseButton-segmented_controlActive"]' in _THEME
     assert 'button[aria-checked="true"]' in _THEME
     seg = _THEME.split('stBaseButton-segmented_controlActive"', 1)[1][:200]
-    assert "linear-gradient(180deg,var(--ow-accent2),var(--ow-accent))" in seg
+    # v4.533 E3: solid single-accent fill on the active segment (gradient flattened)
+    assert "background:var(--ow-accent) !important" in seg
 
 
 def test_f5_active_pill_text_is_dark_ink_not_pale_on_accent():

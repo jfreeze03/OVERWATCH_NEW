@@ -60,9 +60,15 @@ def test_f14_focus_visible_grammar_covers_the_controls():
 
 
 def test_c4_brand_dot_binds_to_connection():
-    assert ".ow-brand-dot--off" in _CSS                     # the disconnected variant
-    off = _CSS.split(".ow-brand-dot--off", 1)[1].split("}", 1)[0]
-    assert "animation:none" in off
+    assert ".ow-brand-dot--off {" in _CSS                    # the disconnected variant exists
+    # v4.533 E3 (owner decision): the connected dot is now a SOLID static dot — the teal→blue
+    # radial gradient + infinite pulse were retired for the operator aesthetic, so nothing
+    # animates (no ow-pulse keyframe) and the disconnected variant is just static grey.
+    assert "ow-pulse" not in _CSS                            # the pulse keyframe + animation are gone
+    dot = _CSS.split(".ow-brand-dot {", 1)[1].split("}", 1)[0]
+    assert "animation:" not in dot                           # connected dot no longer pulses
+    off = _CSS.split(".ow-brand-dot--off {", 1)[1].split("}", 1)[0]
+    assert "var(--ow-ink-mute)" in off                       # disconnected = static grey
     # main.py binds the class to the live connection
     assert '"ow-brand-dot" if connected else "ow-brand-dot ow-brand-dot--off"' in _MAIN
 
