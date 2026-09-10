@@ -1103,9 +1103,13 @@ def _workflow_runtimes_panel(days: int = 0) -> None:
         # Guarded — a non-datetime frame just drops the reconciliation, never the table.
         _span_sec = _sum_sec = 0.0
         try:
+            # coerce RUNTIME_SEC ONCE (the DATEDIFF NUMBER arrives as Decimal/object; a float64
+            # _rel_start + a Decimal Series raises TypeError, which would silently void the whole
+            # reconciliation KPI row). Use the same safe_float coercion the sum already uses.
+            _rt = df["RUNTIME_SEC"].map(safe_float)
             _rel_start = (df["TASK_START_DTTM"] - df["TASK_START_DTTM"].min()).dt.total_seconds()
-            _span_sec = float((_rel_start + df["RUNTIME_SEC"]).max())
-            _sum_sec = float(df["RUNTIME_SEC"].map(safe_float).sum())
+            _span_sec = float((_rel_start + _rt).max())
+            _sum_sec = float(_rt.sum())
         except Exception:  # noqa: BLE001 - a headline extra must never break the panel
             _span_sec = _sum_sec = 0.0
         if n_fail:

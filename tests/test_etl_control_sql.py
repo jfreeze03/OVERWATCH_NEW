@@ -204,6 +204,16 @@ def test_workflow_runtimes_scan_per_workflow_binds_a_literal() -> None:
     assert "'x'' OR ''1''=''1'" in etl.workflow_runtimes_scan(_CTRL, workflow="x' OR '1'='1")
 
 
+def test_workflow_runtimes_scan_collapses_retries_and_drops_null_start() -> None:
+    sql = etl.workflow_runtimes_scan(_CTRL)
+    # ONE row per (workflow, task): MAX_BY collapses an Informatica retry to the terminal attempt, so
+    # a FAILED-then-retried-SUCCESS task reads SUCCESS (matches the failure-recurrence panel + Brief).
+    assert "MAX_BY(s.TASK_STATUS, COALESCE(s.TASK_END_DTTM, s.TASK_START_DTTM)) AS TASK_STATUS" in sql
+    assert "GROUP BY s.WORKFLOW_NAME, s.TASK_NAME" in sql
+    # outer NULL-start filter so a queued-but-unstarted task can't sort to the top under DESC
+    assert "WHERE s.TASK_START_DTTM IS NOT NULL AND s.TASK_NAME IS NOT NULL" in sql
+
+
 def test_workflow_runtimes_scan_honors_window() -> None:
     # days > 0 bounds the run to the scope-bar Window; days <= 0 adds no window filter
     assert "TASK_START_DTTM >= DATEADD('day', -7, CURRENT_TIMESTAMP())" in \
@@ -538,9 +548,12 @@ def test_cycle_finish_history_scan_basic() -> None:
     assert _CTRL in sql
     # night-key groups the ~22:00 start and the early-AM finish into ONE cycle
     assert "DATE(DATEADD('hour', -12, TASK_START_DTTM)) AS CYCLE_DATE" in sql
-    # starter -> CYCLE_START (MIN start); terminal -> CYCLE_FINISH (MAX end) + health flags
+    # starter -> CYCLE_START (MIN start); terminal -> CYCLE_FINISH (latest terminal-attempt end)
     assert "MIN(TASK_START_DTTM) AS CYCLE_START" in sql
-    assert "MAX(TASK_END_DTTM) AS CYCLE_FINISH" in sql
+    assert "MAX(TERMINAL_END) AS CYCLE_FINISH" in sql
+    # retries collapsed to each task's TERMINAL attempt before counting failures (a retried-to-success
+    # terminal task must NOT count as a failed night)
+    assert "MAX_BY(TASK_STATUS, COALESCE(TASK_END_DTTM, TASK_START_DTTM)) AS TERMINAL_STATUS" in sql
     assert "AS N_FAILED" in sql and "AS N_RUNNING" in sql
     # anchor workflow names bound as escaped literals (data, not identifiers)
     assert "WORKFLOW_NAME = 'WF_START'" in sql and "WORKFLOW_NAME = 'WF_END'" in sql

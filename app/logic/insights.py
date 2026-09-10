@@ -788,7 +788,9 @@ def duration_sla_forecast(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # --- ETL runtime-creep forecaster (Informatica CONTROL_STATUS per-run series) ----
-CREEP_MIN_RUNS = 4            # need at least this many runs before a trend is trusted
+CREEP_MIN_RUNS = 5            # need at least this many runs before a trend is trusted (at n=4 a lone
+#                              newest spike corrupts half the Theil-Sen pairwise slopes and fakes a
+#                              "creep"; at n>=5 a single outlier is a minority and yields ~0 slope)
 CREEP_HORIZON_RUNS = 7        # project this many runs ahead
 CREEP_MIN_SLOPE_SEC = 5.0     # ignore < 5 sec/run drift (noise, not a trend)
 CREEP_MIN_LATEST_SEC = 30.0   # ignore trivially short tasks (seconds-long steps)
@@ -979,7 +981,10 @@ def recon_recurrence(
         if (r["RECURRENCE_PCT"] >= chronic_pct and r["BROKEN_CYCLES"] >= chronic_min
                 and not r["LOW_CONFIDENCE"]):
             return "CHRONIC"
-        if r["BROKEN_CYCLES"] <= emerging_max:
+        # NEW = a FRESH regression: broke only a cycle or two AND all of those breaks are recent.
+        # Without the recency check, a metric that broke once ~80 days ago and once just now (total 2)
+        # would be mislabeled "newly-breaking" while its own FIRST_BROKEN_ON is months old.
+        if r["BROKEN_CYCLES"] <= emerging_max and r["RECENT_BROKEN"] >= r["BROKEN_CYCLES"]:
             return "NEW"
         return "INTERMITTENT"
 
@@ -1135,10 +1140,13 @@ def etl_cycle_sla_forecast(
         "start_slope_min_per_night": (round(start_slope, 1) if start_slope is not None else None),
         "nights_fit": len(complete), "nights_total": len(nights),
         "live_runway_sec": live_runway,
-        # newest-first per-night detail for the panel table
+        # newest-first per-night detail for the panel table. MARGIN only for a COMPLETE night — a
+        # FAILED night's finish is crash-short and an in-flight night's is partial, so a margin off
+        # either would render a misleading "early" for a cycle that didn't cleanly finish.
         "nights": [{"CYCLE_DATE": nt["cycle_date"], "CYCLE_START": nt["start"],
                     "CYCLE_FINISH": nt["finish"], "RUN_STATE": nt["state"],
-                    "MARGIN_SEC": (round(nt["margin_t"], 1) if nt["margin_t"] is not None else None)}
+                    "MARGIN_SEC": (round(nt["margin_t"], 1)
+                                   if nt["state"] == "COMPLETE" and nt["margin_t"] is not None else None)}
                    for nt in reversed(nights)],
     }
 

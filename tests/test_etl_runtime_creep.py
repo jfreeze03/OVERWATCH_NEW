@@ -56,6 +56,13 @@ def test_creep_is_robust_to_a_single_spike() -> None:
     assert etl_runtime_creep(df).empty
 
 
+def test_creep_n4_single_spike_not_flagged() -> None:
+    # exactly 4 runs with a lone newest spike: at n=4 half the Theil-Sen pairwise slopes involve the
+    # spike so the median falsely clears the gate -> the min_runs=5 floor must reject it (regression).
+    df = _series("WF_A", "SP_N4", [120, 120, 120, 600])
+    assert etl_runtime_creep(df).empty
+
+
 def test_creep_already_doubled_reports_zero_runs_to_2x() -> None:
     # an ACCELERATING task whose latest is already >= 2x its baseline median -> RUNS_TO_2X
     # clamps to 0 (already there), and it is still flagged (material upward slope).

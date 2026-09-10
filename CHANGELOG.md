@@ -1,5 +1,34 @@
 # Changelog
 
+## 4.524.0 - ETL bug-hunt round 1: 7 fixes across today's predictive suite (2026-09-09)
+
+A loop-until-dry adversarial bug-hunt (56 agents, 3 rounds, each finding double-refuted then adjudicated
+against the real code) over everything shipped today (v4.519-v4.523). 7 confirmed, all fixed:
+
+- **[MED] `workflow_runtimes_scan` didn't collapse Informatica retries** — a FAILED-then-retried-SUCCESS
+  task returned both rows, so `_workflow_runtimes_panel` raised a false "N task(s) FAILED" banner AND the
+  morning Brief (which reuses this scan) led with a false fire, contradicting the failure-recurrence panel.
+  Now one row per `(workflow, task)` with `MAX_BY` terminal status + `MAX(DATEDIFF)` runtime.
+- **[MED] `cycle_finish_history_scan` `N_FAILED` counted raw failed terminal rows** — a retried-to-success
+  terminal task wrongly marked the whole night FAILED and dropped it from the SLA fit. Now collapses the
+  terminal workflow to each task's terminal attempt (`MAX_BY`) before counting.
+- **[MED] child↔total reconciliation crashed on live data** — the span term added a float64 series to an
+  un-coerced `RUNTIME_SEC` (Decimal from `DATEDIFF`), a `TypeError` that silently voided the whole
+  Wall-clock/Task-time/Parallelism KPI row. Coerced with `safe_float`, matching the sum term.
+- **[MED] `workflow_runtimes_scan` null-start rows sorted to the top** — a queued-but-unstarted task's NULL
+  runtime lands first under `ORDER BY … DESC` (NULLs first) and inflates the task count. Added the outer
+  `TASK_START_DTTM IS NOT NULL` filter every sibling builder already has.
+- **[MED] runtime-creep false alarm at n=4** — a lone newest spike corrupts half the Theil-Sen pairwise
+  slopes at n=4 and faked an "already ≥2× baseline" creep. Raised `CREEP_MIN_RUNS` to 5 (n≥5 is robust to a
+  single outlier anywhere).
+- **[MED] SLA nights-detail showed a rosy "early" margin for FAILED / in-flight nights** — their finish is
+  crash-short / partial. The detail table now shows "—" for any non-COMPLETE night.
+- **[LOW] recon `NEW` tier keyed on total break-count, not recency** — a metric that broke once months ago
+  and once now was mislabeled a "fresh regression". `NEW` now also requires all its breaks to be recent.
+
+The hunt also **refuted** a tz-offset claim on cost-attribution (the session/account timezone is pinned
+`America/Chicago`, so its naive CONTROL_STATUS vs ACCOUNT_USAGE timestamps align).
+
 ## 4.523.0 - ETL SLA finish forecast: will the nightly cycle beat 7am? (2026-09-09)
 
 Forecasts the WHOLE nightly cycle's completion against a clock deadline. The cycle is bracketed by two

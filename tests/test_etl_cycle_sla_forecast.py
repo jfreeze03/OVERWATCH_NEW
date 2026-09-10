@@ -139,6 +139,15 @@ def test_custom_deadline_keys() -> None:
     assert late["forecast"] == "Missed target"
 
 
+def test_nights_detail_hides_margin_for_non_complete() -> None:
+    # a FAILED night's finish is crash-short — its detail-row margin must be None (not a rosy "early")
+    nights = [_night("2026-09-01", "05:00"), _night("2026-09-02", "23:30", failed=1)]
+    fc = etl_cycle_sla_forecast(_df(nights))
+    by_state = {n["RUN_STATE"]: n["MARGIN_SEC"] for n in fc["nights"]}
+    assert by_state["COMPLETE"] is not None
+    assert by_state["FAILED"] is None
+
+
 def test_empty_in_empty_out() -> None:
     assert etl_cycle_sla_forecast(pd.DataFrame()) == {}
     assert etl_cycle_sla_forecast(pd.DataFrame({"X": [1]})) == {}

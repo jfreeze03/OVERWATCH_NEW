@@ -263,13 +263,22 @@ def workflow_runtimes_scan(
         f"{_window_clause(days, indent='  ')}"
         "  QUALIFY ROW_NUMBER() OVER (ORDER BY TASK_START_DTTM DESC) = 1\n"
         ")\n"
-        "SELECT s.WORKFLOW_NAME, s.TASK_NAME, s.TASK_STATUS,\n"
-        "       s.TASK_START_DTTM, s.TASK_END_DTTM,\n"
-        "       DATEDIFF('second', s.TASK_START_DTTM,\n"
-        "                COALESCE(s.TASK_END_DTTM, CURRENT_TIMESTAMP())) AS RUNTIME_SEC\n"
+        # ONE row per (workflow, task): MAX_BY collapses an Informatica retry to the run's TERMINAL
+        # attempt, so a FAILED-then-retried-SUCCESS task reads SUCCESS — matching the failure-recurrence
+        # panel + the Brief (which reuse this) instead of double-counting a false FAILED. The outer
+        # NULL-start filter drops a queued-but-unstarted task (its NULL runtime would sort to the top
+        # under DESC and inflate the task count).
+        "SELECT s.WORKFLOW_NAME, s.TASK_NAME,\n"
+        "       MAX_BY(s.TASK_STATUS, COALESCE(s.TASK_END_DTTM, s.TASK_START_DTTM)) AS TASK_STATUS,\n"
+        "       MIN(s.TASK_START_DTTM) AS TASK_START_DTTM,\n"
+        "       MAX(s.TASK_END_DTTM) AS TASK_END_DTTM,\n"
+        "       MAX(DATEDIFF('second', s.TASK_START_DTTM,\n"
+        "           COALESCE(s.TASK_END_DTTM, CURRENT_TIMESTAMP()))) AS RUNTIME_SEC\n"
         f"  FROM {tbl} s\n"
         "  JOIN latest l ON s.RUN_ID = l.RUN_ID\n"
-        "  ORDER BY RUNTIME_SEC DESC, s.TASK_START_DTTM\n"
+        "  WHERE s.TASK_START_DTTM IS NOT NULL AND s.TASK_NAME IS NOT NULL\n"
+        "  GROUP BY s.WORKFLOW_NAME, s.TASK_NAME\n"
+        "  ORDER BY RUNTIME_SEC DESC, TASK_START_DTTM\n"
         f"  LIMIT {int(max_tasks)}"
     )
 
@@ -909,17 +918,27 @@ def cycle_finish_history_scan(
         f"{win}"
         "  GROUP BY 1\n"
         "),\n"
-        # cycle FINISH = the terminal workflow's latest end per night, + its health flags
-        "cyc_end AS (\n"
-        "  SELECT DATE(DATEADD('hour', -12, TASK_START_DTTM)) AS CYCLE_DATE,\n"
-        "         MAX(TASK_END_DTTM) AS CYCLE_FINISH,\n"
-        f"         SUM(CASE WHEN UPPER(TASK_STATUS) IN ({_failed}) THEN 1 ELSE 0 END) AS N_FAILED,\n"
-        "         SUM(CASE WHEN TASK_END_DTTM IS NULL\n"
-        f"                   AND (TASK_STATUS IS NULL OR UPPER(TASK_STATUS) NOT IN ({_failed}))\n"
-        "                  THEN 1 ELSE 0 END) AS N_RUNNING\n"
+        # terminal workflow's tasks with retries COLLAPSED to each task's TERMINAL attempt per night
+        # (MAX_BY by COALESCE(end,start)) — so a FAILED-then-retried-SUCCESS terminal task reads SUCCESS
+        # and the night isn't wrongly dropped from the SLA fit. TERMINAL_END = that attempt's end.
+        "term AS (\n"
+        "  SELECT DATE(DATEADD('hour', -12, TASK_START_DTTM)) AS CYCLE_DATE, TASK_NAME,\n"
+        "         MAX_BY(TASK_STATUS, COALESCE(TASK_END_DTTM, TASK_START_DTTM)) AS TERMINAL_STATUS,\n"
+        "         MAX_BY(TASK_END_DTTM, COALESCE(TASK_END_DTTM, TASK_START_DTTM)) AS TERMINAL_END\n"
         f"  FROM {tbl}\n"
-        f"  WHERE WORKFLOW_NAME = {end_lit} AND TASK_START_DTTM IS NOT NULL\n"
+        f"  WHERE WORKFLOW_NAME = {end_lit} AND TASK_START_DTTM IS NOT NULL AND TASK_NAME IS NOT NULL\n"
         f"{win}"
+        "  GROUP BY 1, 2\n"
+        "),\n"
+        # cycle FINISH = the latest terminal-attempt end per night, + health off the TERMINAL status
+        "cyc_end AS (\n"
+        "  SELECT CYCLE_DATE,\n"
+        "         MAX(TERMINAL_END) AS CYCLE_FINISH,\n"
+        f"         SUM(CASE WHEN UPPER(TERMINAL_STATUS) IN ({_failed}) THEN 1 ELSE 0 END) AS N_FAILED,\n"
+        "         SUM(CASE WHEN TERMINAL_END IS NULL\n"
+        f"                   AND (TERMINAL_STATUS IS NULL OR UPPER(TERMINAL_STATUS) NOT IN ({_failed}))\n"
+        "                  THEN 1 ELSE 0 END) AS N_RUNNING\n"
+        "  FROM term\n"
         "  GROUP BY 1\n"
         ")\n"
         "SELECT s.CYCLE_DATE, s.CYCLE_START, e.CYCLE_FINISH, e.N_FAILED, e.N_RUNNING,\n"

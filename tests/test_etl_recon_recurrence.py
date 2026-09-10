@@ -52,6 +52,13 @@ def test_intermittent_flapping() -> None:
     assert out.iloc[0]["TIER"] == "INTERMITTENT"
 
 
+def test_new_tier_requires_recency() -> None:
+    # broke twice — once long ago and once on the latest cycle (RECENT_BROKEN=1 < BROKEN_CYCLES=2):
+    # a low break count alone must NOT read as a fresh regression; recency gates it to INTERMITTENT.
+    out = recon_recurrence(pd.DataFrame([_row("M_OLD", broken=2, total=8, pct=25, latest=True, recent=1)]))
+    assert out.iloc[0]["TIER"] == "INTERMITTENT"
+
+
 def test_ranking_active_chronic_above_resolved() -> None:
     rows = [
         _row("M_RESOLVED", broken=9, total=10, pct=90, latest=False),   # RESOLVED, sinks
