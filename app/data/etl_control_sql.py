@@ -115,9 +115,12 @@ def _check_sql(check: RefGapCheck, xlat_fqn: str) -> str:
 
     MINUS (not NOT IN) mirrors the operator's proven manual query and is NULL-safe
     — a NULL in the reference column can't swallow the whole result the way a
-    NOT-IN subquery would. The outer TO_VARCHAR keeps NEW_CODE type-stable so the
-    per-check subqueries UNION cleanly even when their code columns differ in type.
-    Identifiers are validated (fail-closed); the family name is a quoted literal.
+    NOT-IN subquery would. BOTH MINUS operands are cast with TO_VARCHAR so a NUMBER/
+    DATE staging code column vs the VARCHAR SRC_IDNTFTN_VAL can't force a numeric
+    coercion that throws 'Numeric value not recognized' (Snowpark re-wraps that as
+    SnowparkFetchDataException 1406 and sinks the whole UNION-ALL scan) — the compare
+    is string-vs-string, and the outer TO_VARCHAR keeps NEW_CODE type-stable for the
+    UNION. Identifiers are validated (fail-closed); the family name is a quoted literal.
     """
     from app.core.sqlsafe import safe_identifier, sql_literal
 
@@ -127,9 +130,9 @@ def _check_sql(check: RefGapCheck, xlat_fqn: str) -> str:
     name_lit = sql_literal(check.name)
     return (
         f"SELECT {name_lit} AS CHECK_NAME, TO_VARCHAR(g.NEW_CODE) AS NEW_CODE FROM (\n"
-        f"  SELECT s.{col} AS NEW_CODE FROM {stg} s WHERE s.{col} IS NOT NULL\n"
+        f"  SELECT TO_VARCHAR(s.{col}) AS NEW_CODE FROM {stg} s WHERE s.{col} IS NOT NULL\n"
         f"  MINUS\n"
-        f"  SELECT x.{XLAT_VALUE_COL} FROM {xlat} x WHERE x.{XLAT_NAME_COL} = {name_lit}\n"
+        f"  SELECT TO_VARCHAR(x.{XLAT_VALUE_COL}) FROM {xlat} x WHERE x.{XLAT_NAME_COL} = {name_lit}\n"
         f") g"
     )
 
@@ -759,6 +762,12 @@ def recon_recurrence_scan(
 # model, not a billed invoice. Credits stay credits here (the module takes no dollar
 # rate, by design); the panel converts to USD with CREDIT_PRICE_USD.
 MAX_COST_ROWS = 500
+# Literal recent-date floor to prune QAH/QH (latest-run path only). Sized to comfortably exceed the
+# max realistic gap between nightly runs (weekends/holidays/short outages) so the floor never narrows
+# BELOW the run's own window — a run whose window predates the floor would return empty. 14d still
+# prunes QUERY_HISTORY hard (~4% of its 365d retention) while covering any normal multi-day gap; a
+# latest run older than 14d means a 2-week ETL outage, where an empty cost panel is the honest read.
+COST_ATTR_FLOOR_DAYS = 14
 
 # The two ACCOUNT_USAGE views the attribution joins across (already reachable from the
 # Operations page). QAH is the credit source + the query-tree root; QH is the text.
@@ -809,6 +818,19 @@ def run_cost_attribution_scan(
         )
     unattr_wf = sql_literal(UNATTRIBUTED_WORKFLOW)
     unattr_task = sql_literal(UNATTRIBUTED_TASK)
+    # A LITERAL, statically-prunable recent-date floor so Snowflake prunes the huge QAH/QH
+    # micro-partitions to the last few days — the scalar-subquery bounds ((SELECT RUN_START/END
+    # FROM bounds)) alone don't prune, so without this the account-wide views get scanned (the
+    # ~96s the fleet telemetry flagged; same antipattern fixed in graph_sql perf pass #9). Only on
+    # the latest-run path (run_id=''); COST_ATTR_FLOOR_DAYS is sized to comfortably exceed any realistic
+    # gap to the latest run (weekends/holidays/short outages) so the floor can never land INSIDE the
+    # run's own [RUN_START, RUN_END] window and drop rows (the v4.526 3-day floor did exactly that on a
+    # multi-day ETL gap — silent zero/undercount). A picked OLDER run gets no floor at all (it must not
+    # be truncated), so it is scanned exactly like the no-floor SQL; the scalar bounds narrow it either way.
+    _floor = (f"    AND START_TIME >= DATEADD('day', -{COST_ATTR_FLOOR_DAYS}, CURRENT_TIMESTAMP())\n"
+              if not _rid else "")
+    _floor_qh = (f"    AND qh.START_TIME >= DATEADD('day', -{COST_ATTR_FLOOR_DAYS}, CURRENT_TIMESTAMP())\n"
+                 if not _rid else "")
     return (
         "WITH tasks AS (\n"
         "  SELECT WORKFLOW_NAME, TASK_NAME, TASK_START_DTTM,\n"
@@ -840,6 +862,7 @@ def run_cost_attribution_scan(
         f"  FROM {_QAH_FQN}\n"
         "  WHERE START_TIME >= (SELECT RUN_START FROM bounds)\n"
         "    AND START_TIME <= (SELECT RUN_END FROM bounds)\n"
+        f"{_floor}"
         "  GROUP BY COALESCE(ROOT_QUERY_ID, QUERY_ID)\n"
         "  HAVING SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0)\n"
         "              + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) > 0\n"
@@ -852,6 +875,7 @@ def run_cost_attribution_scan(
         f"  JOIN {_QH_FQN} qh ON qh.QUERY_ID = a.RID\n"
         "  WHERE qh.START_TIME >= (SELECT RUN_START FROM bounds)\n"
         "    AND qh.START_TIME <= (SELECT RUN_END FROM bounds)\n"
+        f"{_floor_qh}"
         "),\n"
         # charge each query to the LONGEST task name whose window + text both match. The
         # LEFT JOIN keeps unmatched queries (their task columns NULL) so coverage is honest;

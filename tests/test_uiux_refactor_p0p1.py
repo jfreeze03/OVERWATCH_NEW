@@ -92,15 +92,18 @@ def test_p1_hero_metric_renders_primary_metric_hierarchy(monkeypatch: pytest.Mon
     assert "ow-hero__companions" not in out[-1]
 
 
-def test_p1_spend_leads_with_hero_and_gates_capability_panels():
+def test_p1_spend_leads_with_hero_and_shows_capability_panels():
     src = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "spend.py").read_text(encoding="utf-8")
     # the headline is a hero (one dominant value + companions), not a flat kpi_row
     assert "hero_metric(_hero, _companions)" in src
     assert "_companions = []" in src
     # the WLA-1 credit-spend label is preserved verbatim as the hero (round-13 ally)
     assert 'f"Credit spend, {_wlab} (account)"' in src
-    # the two attribution-capability meta-panels are audit-gated via the helper
+    # the two attribution-capability meta-panels live in the extracted helper
     assert "def _spend_attribution_capability(" in src          # extracted helper exists
-    # and it is invoked ONLY under an audit_mode() gate in the default Spend flow
+    # v4.527 (owner request): the panels are restored to the DEFAULT Spend view — the
+    # drill-coverage table (per-service $ + Share % + native-drill status) is the owner's
+    # primary cost-driver breakdown, so it renders unconditionally, not behind audit_mode.
+    assert "\n    _spend_attribution_capability(df, rate, ai_rate, billed_usd, _wlab)\n" in src
     assert ("    if audit_mode():\n"
-            "        _spend_attribution_capability(df, rate, ai_rate, billed_usd, _wlab)") in src
+            "        _spend_attribution_capability(") not in src

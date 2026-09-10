@@ -485,12 +485,17 @@ LIMIT 25
 """
 
 
-def cs_by_query_type_mart(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
+def cs_by_query_type_mart(days: int, company: str = "ALL", warehouse: str = "",
+                          *, bounds: tuple | None = None) -> str:
     """K2: cost_sql.cs_by_query_type served from MART_CLOUD_SVC_DAILY.
 
     Byte-identical output contract to the live builder — QUERY_TYPE, QUERIES,
     CS_CREDITS, CS_CREDITS_PER_1K, same ORDER BY / LIMIT 12 — so spend.py can
-    put the two behind run_mart_first without touching the render.
+    put the two behind run_mart_first without touching the render. ``warehouse``
+    scopes to one warehouse for the per-warehouse elevation drill (MART_CLOUD_SVC_DAILY
+    carries WAREHOUSE_NAME); as with the live builder, callers pass company='ALL' with a
+    warehouse so the company predicate — which the live path drops for an exact warehouse —
+    is not AND-ed in.
 
     Two honest differences from the live path, both in the mart's favour:
     the mart is loaded from the QH extract at CS>0 only (matching the live
@@ -508,7 +513,7 @@ SELECT
     ROUND(SUM(CS_CREDITS), 4) AS CS_CREDITS,
     ROUND(SUM(CS_CREDITS) / NULLIF(SUM(RUNS), 0) * 1000, 4) AS CS_CREDITS_PER_1K
 FROM {mart_object("MART_CLOUD_SVC_DAILY")}
-WHERE {_cloud_svc_where(days, company, "", bounds=bounds)}
+WHERE {_cloud_svc_where(days, company, warehouse, bounds=bounds)}
 GROUP BY QUERY_TYPE
 ORDER BY CS_CREDITS DESC
 LIMIT 12

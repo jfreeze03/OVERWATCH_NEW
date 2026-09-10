@@ -129,9 +129,11 @@ def test_scan_matches_the_manual_morning_query_shape() -> None:
     # The proven manual check: staging code column MINUS the XLAT values for its family.
     checks, _ = etl.parse_ref_gap_checks(_ONE)
     sql, _ = etl.reference_gap_scan(checks, _XLAT)
-    assert "SELECT s.CODE_STG AS NEW_CODE" in sql
+    # BOTH MINUS operands cast to text so a NUMBER/DATE staging code column can't force a numeric
+    # coercion that throws the SnowparkFetchDataException 1406 and sinks the whole UNION-ALL scan.
+    assert "SELECT TO_VARCHAR(s.CODE_STG) AS NEW_CODE" in sql
     assert f"FROM {_STG} s WHERE s.CODE_STG IS NOT NULL" in sql
-    assert f"SELECT x.{etl.XLAT_VALUE_COL} FROM {_XLAT} x" in sql
+    assert f"SELECT TO_VARCHAR(x.{etl.XLAT_VALUE_COL}) FROM {_XLAT} x" in sql
 
 
 def test_scan_empty_when_unconfigured() -> None:
@@ -474,6 +476,33 @@ def test_cost_attribution_scan_specific_run_binds_a_literal() -> None:
     # a hostile run id is escaped (single-quote doubled) so it stays one string literal
     evil = etl.run_cost_attribution_scan(_CTRL, run_id="x' OR '1'='1")
     assert "'x'' OR ''1''=''1'" in evil
+
+
+def test_cost_attribution_scan_literal_floor_prunes_latest_only() -> None:
+    # latest-run path gets a LITERAL recent-date floor so Snowflake prunes the huge QAH/QH
+    # micro-partitions (the scalar-subquery bounds alone don't prune -> the ~96s wide scan).
+    floor = f"DATEADD('day', -{etl.COST_ATTR_FLOOR_DAYS}, CURRENT_TIMESTAMP())"
+    sql = etl.run_cost_attribution_scan(_CTRL)
+    assert sql.count(floor) == 2   # both qah_agg + cand
+
+
+def test_cost_attribution_scan_floor_wide_enough_for_gaps() -> None:
+    # v4.527 regression guard (verify wfu27z6wk): the floor is sized to comfortably EXCEED any realistic
+    # gap to the latest run (weekends/holidays/short outages). The v4.526 3-day floor could land INSIDE
+    # the latest run's own [RUN_START, RUN_END] window on a multi-day ETL gap -> both bound predicates
+    # unsatisfiable -> the cost panel silently showed $0 / undercounted. Keep it wide so that can't recur.
+    assert etl.COST_ATTR_FLOOR_DAYS >= 14
+
+
+def test_cost_attribution_scan_picked_old_run_is_no_floor_equivalent() -> None:
+    # A specific picked run may be OLDER than the floor, so it must NOT be truncated: the explicit-run
+    # path emits NO literal floor at all, so its QAH/QH reads are bounded ONLY by the run's exact
+    # [RUN_START, RUN_END] bounds -> output-equivalent to the no-floor SQL for a run of any age.
+    sql = etl.run_cost_attribution_scan(_CTRL, run_id="abc-123")
+    assert "DATEADD('day', -" not in sql   # no recent-date floor on either the QAH or the QH read
+    # both ACCOUNT_USAGE reads are still narrowed to the run's exact window (correctness preserved)
+    assert sql.count("START_TIME >= (SELECT RUN_START FROM bounds)") == 2
+    assert sql.count("START_TIME <= (SELECT RUN_END FROM bounds)") == 2
 
 
 def test_cost_attribution_scan_fail_closed() -> None:

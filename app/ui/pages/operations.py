@@ -640,6 +640,14 @@ def _query_insights_panel() -> None:
     QUERY_INSIGHTS) — free, vendor-written fixes beside our own heuristics.
     Optional view: probe-gated, honest not-available state."""
     section_header("Query insights (Snowflake-authored)", "", "search")
+    # On-demand: this is the one unconditional live account-usage read on the default Queries landing;
+    # every summary/heaviest/failures panel here is mart-served. Gate it behind a toggle (like the
+    # Optimization-triage / Wasted-spend panels) so the Queries first paint doesn't pay for it.
+    if not st.toggle("Load Snowflake query insights", key="ops_query_insights_toggle",
+                     help="Reads Snowflake's own QUERY_INSIGHTS view (account-wide, 7d) — its per-query "
+                          "suggestions. Off by default so the Queries tab's first paint stays fast."):
+        st.caption("Toggle on to load Snowflake's own per-query improvement insights (7d).")
+        return
     qi = run(insights_sql.query_insights_feed(7), page=_PAGE, key="query_insights_7",
              tier="historical", source="ACCOUNT_USAGE.QUERY_INSIGHTS", probe=True)
     if not qi.ok:

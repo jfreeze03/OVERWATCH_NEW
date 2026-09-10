@@ -1,5 +1,38 @@
 # Changelog
 
+## 4.527.0 - Restore Spend drill-coverage table + performance now-wins (2026-09-09)
+
+**Owner request — the Cost ▸ Spend "Cost drill coverage" table is back in the default view.**
+The v4.461 "Spend hierarchy" refactor had moved the two attribution-capability panels behind an
+`audit_mode()` gate; the owner uses the drill-coverage table (per-service **$** + **Share %** of spend +
+native-drill status) as the primary "what's driving cost / can I drill it" breakdown. It — and its
+companion "Billed vs attributed" panel — now render in the default Spend view **exactly as before**.
+Both read the already-fetched metering frame (`service_coverage_inventory` / `attribution_gap` are
+pure-Python over `df`), so this adds **no** new Snowflake scan, live read, or mart. Lock test updated.
+
+**Performance now-wins (from the app telemetry review):**
+
+- **Cost ▸ Spend, per-warehouse cloud-services drill goes mart-first.** The warehouse-scoped
+  "cloud-services credits by statement type" read was the fleet's #1 CS slow key (~1m36s per warehouse
+  pick) because it always hit live `QUERY_HISTORY`. `MART_CLOUD_SVC_DAILY` already carries a
+  `WAREHOUSE_NAME` dimension, so both the account view and the per-warehouse drill now go
+  `run_mart_first(...)` with the live scan only as the fallback (`cs_by_query_type_mart` gained a
+  `warehouse=` param; K2 contract preserved — identical columns to the live builder).
+- **Operations query-insights panel is now toggle-gated** (off by default) so the Pipeline landing
+  doesn't pay for it on first paint.
+- **`etl_ref_gaps` MINUS both operands `TO_VARCHAR`-cast** — avoids a type-mismatch edge on the
+  reference-gap set difference.
+
+**Adversarial verify fix (verify wfu27z6wk, 1 confirmed MEDIUM):** the v4.526 cost-attribution literal
+recent-date floor (`DATEADD('day', -3, ...)`, added to prune the huge QAH/QH partitions on the
+latest-run path) could land **inside** the latest run's own `[RUN_START, RUN_END]` window on a
+multi-day ETL gap (holiday / weekend / short outage): both bound predicates then went unsatisfiable and
+the cost panel silently showed **$0 / undercounted**. `COST_ATTR_FLOOR_DAYS` widened **3 → 14** so the
+floor comfortably exceeds any realistic gap to the latest run while still pruning `QUERY_HISTORY` hard
+(~4% of its 365-day retention). An explicitly-picked older run still gets **no** floor at all (scanned
+by its exact bounds — no-floor-equivalent). Two regression tests added (floor-wide-enough guard +
+picked-old-run no-floor-equivalence).
+
 ## 4.526.0 - Brief: "Nightly cycle" tile replaces "Open incidents" (2026-09-09)
 
 The morning Brief now leads with nightly-ETL-cycle health instead of the open-incidents count (owner ask).

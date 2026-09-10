@@ -347,13 +347,14 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
             ))
     result_caption(res)
 
-    # v4.461 P1: the attribution-CAPABILITY panels (drill coverage + billed-vs-
-    # attributed) are meta-metrics about the attribution MODEL, not spend itself, so
-    # they are audit-gated — the default Spend view leads with the money. The daily
-    # by-service chart above and the on-demand service detail below stay in the
-    # default view.
-    if audit_mode():
-        _spend_attribution_capability(df, rate, ai_rate, billed_usd, _wlab)
+    # v4.527 (owner request): restore the attribution-CAPABILITY panels to the DEFAULT
+    # Spend view exactly as they rendered before the v4.461 audit-gating. The owner uses
+    # the "Cost drill coverage" table (per-service $ + Share % of spend + native-drill
+    # status) as the primary "what's driving cost / can I drill it" breakdown, followed
+    # by "Billed vs attributed". Both read the already-fetched metering `df`
+    # (service_coverage_inventory / attribution_gap are pure-Python over df), so this
+    # adds NO Snowflake scan — no new live read, mart, or metadata-view literal.
+    _spend_attribution_capability(df, rate, ai_rate, billed_usd, _wlab)
 
     if st.toggle(
         "Load detailed service attribution",
@@ -749,14 +750,19 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 styled_table(comp.df)
                 result_caption(comp)
             st.markdown("**Cloud-services credits by statement type**")
-            # MART_CLOUD_SVC_DAILY carries per-query CS credits (mart-first, K2 contract:
-            # cs_by_query_type_mart emits the same columns as cost_sql.cs_by_query_type);
-            # a warehouse selection uses the live per-warehouse read instead.
+            # MART_CLOUD_SVC_DAILY carries per-query CS credits WITH a WAREHOUSE_NAME dimension
+            # (K2 contract: cs_by_query_type_mart emits the same columns as cost_sql.cs_by_query_type),
+            # so BOTH the account view and the per-warehouse drill go mart-first — the live QUERY_HISTORY
+            # scan is only the fallback (it was the fleet's #1 CS slow key at ~1m36s per warehouse pick).
+            # A warehouse is a complete scope: pass company='ALL' so the mart's WHERE doesn't AND the
+            # company predicate (the live builder deliberately drops it for an exact warehouse).
             if _sel_wh:
-                cs_types = run(
+                cs_types = run_mart_first(
+                    mart_sql.cs_by_query_type_mart(days, company="ALL", warehouse=_sel_wh, bounds=bounds),
                     cost_sql.cs_by_query_type(days, company, warehouse=_sel_wh, bounds=bounds),
-                    page=_PAGE, key=f"cs_types_{company}_{days}_{_sel_wh}", tier="recent",
-                    source="ACCOUNT_USAGE.QUERY_HISTORY (CS credits by QUERY_TYPE, per warehouse)")
+                    page=_PAGE, key=f"cs_types_{company}_{days}_{_sel_wh}",
+                    mart_source="MART_CLOUD_SVC_DAILY (CS credits by QUERY_TYPE, per warehouse, loaded hourly)",
+                    live_source="ACCOUNT_USAGE.QUERY_HISTORY (CS credits by QUERY_TYPE, per warehouse, live fallback)")
             else:
                 cs_types = run_mart_first(
                     mart_sql.cs_by_query_type_mart(days, company, bounds=bounds),
