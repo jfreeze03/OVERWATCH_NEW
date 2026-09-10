@@ -99,11 +99,17 @@ def test_incident_readers_shapes():
     assert "CHANGE_PCT" not in met and "('WH_CHANGE', 'DEPLOY')" not in met
     assert "MTTA_MIN" not in met and "REOPEN_PCT" not in met and "REOPENED_FROM" not in met
     gantt = mart_sql.incident_gantt(14, "ALFA")               # CR5 lifecycle-span reader
-    for col in ("STARTED", "ENDED", "DURATION_MIN", "SEVERITY", "TITLE"):
+    for col in ("STARTED", "ENDED", "DURATION_MIN", "SEVERITY", "TITLE", "IS_OPEN"):
         assert col in gantt, col
     assert "COALESCE(RESOLVED_AT, CURRENT_TIMESTAMP())" in gantt   # open bars run to now
     assert "DATEADD('day', -14," in gantt                         # 14d window
     assert "(COMPANY = 'ALFA'" in gantt                           # company arm (incl. account-level)
+    # v4.528 perf: the SQL is now-free (uses the CURRENT_TIMESTAMP() token, not a baked
+    # datetime literal) so run()'s (sql,scope) cache is shared across renders instead of
+    # churning every minute. Guard: identical text render-to-render + no NTZ datetime literal.
+    assert mart_sql.incident_gantt(14, "ALFA") == mart_sql.incident_gantt(14, "ALFA")
+    assert "'::TIMESTAMP_NTZ" not in gantt   # no baked '<datetime>'::TIMESTAMP_NTZ literal
+    assert "(RESOLVED_AT IS NULL) AS IS_OPEN" in gantt            # open flag for the reader's re-anchor
     canary = (_ROOT / "app" / "data" / "canary.py").read_text(encoding="utf-8")
     for name in ("open_incidents", "incident_members_detail", "incident_proposals",
                  "incident_metrics"):
@@ -122,11 +128,11 @@ def test_control_room_incidents_section():
     assert "is_operator()" in _CR
     assert "mart_sql.incident_metrics(90, company)" in _CR      # triage filter honored
     assert "mart_sql.open_incidents(50, company)" in _CR
-    # CR5 lifecycle Gantt wired; passes account-time now (minute-rounded) so an OPEN
-    # incident's live duration measures against account time, not server CURRENT_TIMESTAMP().
-    assert "mart_sql.incident_gantt(14, company," in _CR
-    assert "account_now().replace(second=0, microsecond=0).isoformat()" in _CR
-    assert "charts.incident_gantt(" in _CR
+    # CR5 lifecycle Gantt wired; the SQL is now-free (cache-stable) and the OPEN bar's
+    # end is re-anchored to account time in charts.incident_gantt (keyed off IS_OPEN),
+    # not baked into the SQL — so no minute-rounded now literal on the call anymore.
+    assert "mart_sql.incident_gantt(14, company)" in _CR
+    assert "charts.incident_gantt(_ig.df, now=account_now())" in _CR
     assert "nothing groups silently" in _CR                   # proposals expander says so
 
 

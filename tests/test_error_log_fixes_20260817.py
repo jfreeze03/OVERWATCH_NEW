@@ -34,7 +34,7 @@ def test_resolutions_for_rule_reads_note_from_alert_audit():
 
 
 def test_token_types_flatten_is_not_left_of_join():
-    sql = cortex_sql.cortex_code_token_types(30)
+    sql = cortex_sql.cortex_code_token_types()   # v4.528: days-independent, no args
     assert _parses(sql)
     # FLATTEN lives in its own CTE; the LEFT JOIN USERS is on that CTE, so no
     # LATERAL view sits on the left of the join (001072).

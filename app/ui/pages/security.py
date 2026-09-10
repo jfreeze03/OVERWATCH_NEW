@@ -1229,8 +1229,10 @@ def _ai_guardrails_tab(company: str) -> None:
     """AI Trust & Guardrails (repo review 2026-08-17; owner: CoCo spend is ~13%
     of total and growing). Two halves:
     1. BEHAVIOR — per-user Cortex Code flags (velocity vs own baseline, token
-       outliers, new+heavy) derived in pandas from the SAME cached user-day scan
-       the Cost page pays for (cortex_code_user_daily) — zero new scans.
+       outliers, new+heavy) derived in pandas from a user-day frame read
+       fact-first (mart27_sql.ai_code_user_daily) with the live 365d scan
+       (cortex_code_user_daily) as a coverage-gated fallback that shares the
+       Cost page's cached scan.
     2. GUARDRAILS — flag telemetry from the optional Cortex Guardrails usage
        view, probe-gated with an honest not-enabled state."""
     from app.logic.ai_guardrails import (
@@ -1244,9 +1246,28 @@ def _ai_guardrails_tab(company: str) -> None:
 
     section_header("AI usage behavior (Cortex Code)", "warn", "security",
                    anchor="sec-ai-behavior")
-    usage = run(cortex_sql.cortex_code_user_daily(company), page=_PAGE,
-                key=f"coco_user_daily_{company}", tier="historical",
-                source="CORTEX_CODE_*_USAGE_HISTORY (user-day grain, shared cache)")
+    # v4.528 perf: this tab was the ONE live-only caller of the ~22-32s Cortex Code
+    # secure-view scan (the Cost page already serves it fact-first), so it re-paid the
+    # full scan on the first render per TTL. Go fact-first from FACT_AI_USAGE_DAILY; the
+    # live 365d scan runs only when the fact can't cover the full year — user_behavior's
+    # NEW_USER flag derives a per-user first_seen, so mart27_sql's coverage gate returns
+    # zero rows (not a short answer) on a young fact and we fall back. Both legs emit the
+    # same user-day grain, so no folding is needed.
+    # max_rows=200_000 matches the builders' own LIMIT: the frame is ORDER BY USAGE_DATE
+    # ASC, so the default 5000-row cap would keep the OLDEST days and DROP the most RECENT
+    # ones — rotting every velocity / NEW_USER flag (the flags read the last 7 days).
+    # The live fallback uses the SAME sql + tier="metadata" as the Cost page's live leg, so
+    # its (sql,scope) cache is shared — the heavy scan is paid at most once across both
+    # pages per TTL. probe=True suppresses the expected 002139 no-subscription absence.
+    usage = run(mart27_sql.ai_code_user_daily(company), page=_PAGE,
+                key=f"coco_user_daily_fact_{company}", tier="hourly",
+                source="FACT_AI_USAGE_DAILY (Cortex Code, daily loader)",
+                max_rows=200_000)
+    if not usage.usable():
+        usage = run(cortex_sql.cortex_code_user_daily(company), page=_PAGE,
+                    key=f"coco_user_daily_{company}", tier="metadata",
+                    source="CORTEX_CODE_*_USAGE_HISTORY (365d live fallback)",
+                    probe=True, max_rows=200_000)
     if guard(usage, "No Cortex Code usage recorded for this scope."):
         behavior = user_behavior(usage.df, pd.Timestamp(account_now()))
         k = behavior_kpis(behavior)

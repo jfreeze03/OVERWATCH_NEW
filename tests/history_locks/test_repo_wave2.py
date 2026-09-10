@@ -26,14 +26,17 @@ def test_wave2_builders_shapes():
     assert "QUERY_INSIGHTS" in qi and "GROUP BY 1" in qi and "LIMIT 50" in qi
     na = cost_sql.native_anomaly_insights()
     assert "SNOWFLAKE.LOCAL.ANOMALY_INSIGHTS" in na and "LIMIT 200" in na
-    tt = cortex_sql.cortex_code_token_types(30)
+    tt = cortex_sql.cortex_code_token_types()   # v4.528: days-independent, no args
     # TOKENS_GRANULAR is nested BY MODEL, so a single flatten read NULL keys and zeroed
     # everything (owner 2026-08-19). A RECURSIVE flatten + numeric-leaf filter pulls the
     # (token_type -> count) leaves keyed by F.KEY regardless of nesting.
     assert "LATERAL FLATTEN(INPUT => C.TOKENS_GRANULAR, RECURSIVE => TRUE)" in tt
     assert "F.KEY::VARCHAR) AS TOKEN_TYPE" in tt and "CORTEX_CODE_CLI_USAGE_HISTORY" in tt
     assert "IS NOT NULL" in tt        # numeric-leaf filter drops the model-object rows
-    assert "DATEADD('day', -30," in tt
+    # v4.528: fetches the full retention once and keeps a date column so the caller slices
+    # the window in pandas (one cache entry per every window), instead of a per-window scan.
+    assert "DATEADD('day', -365," in tt
+    assert "USAGE_DATE" in tt
 
 
 def test_wave2_reads_are_probe_gated_with_honest_degrades():
@@ -46,7 +49,10 @@ def test_wave2_reads_are_probe_gated_with_honest_degrades():
     assert "native_anomaly_insights()" in spend
     assert "native ANOMALY_INSIGHTS feed isn't available" in spend
     ai = _src("app/ui/pages/cost_parts/ai_chargeback.py")
-    assert "cortex_code_token_types(days, bounds=bounds)" in ai   # tracks the page Window filter (v4.275)
+    # v4.528: days-independent read (one cache entry for every window); the page Window
+    # filter is applied in pandas via cortex.token_types_window, not in the SQL.
+    assert "cortex_code_token_types()" in ai
+    assert "token_types_window(te_res.df, days, bounds=bounds)" in ai
     assert "TOKENS_GRANULAR isn't available" in ai
 
 

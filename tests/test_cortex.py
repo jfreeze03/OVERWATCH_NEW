@@ -15,9 +15,11 @@ from app.logic.cortex import (
     enrich_user_rollup,
     rollup_from_user_daily,
     rollup_summary,
+    token_types_window,
     with_aggregate_budget_row,
 )
 from app.logic.formulas import account_today
+from app.logic.wave2 import token_economics
 
 # ---- SQL builders ---------------------------------------------------------
 
@@ -307,11 +309,29 @@ def test_ai_code_daily_matches_the_live_daily_contract():
     assert mart_cols == live_cols
 
 
+def test_ai_code_user_daily_matches_the_live_user_daily_contract():
+    # v4.528: the Security guardrails tab reads ai_code_user_daily fact-first with the live
+    # cortex_code_user_daily as fallback; both feed user_behavior, so their column contracts
+    # must match. The live builder is SELECT * over the user_daily CTE (indented, so parsed
+    # against the explicit contract, which is tied back to the live CTE below).
+    expected = ["USER_NAME", "EMAIL", "FIRST_NAME", "LAST_NAME", "SOURCE",
+                "USAGE_DATE", "REQUESTS", "CREDITS", "TOKENS", "FIRST_TS", "LAST_TS"]
+    assert _select_columns(mart27_sql.ai_code_user_daily("ALL")) == expected
+    live_cte = (cortex_sql.cortex_code_user_daily("ALL")
+                .split("user_daily AS (", 1)[1].split("FROM combined", 1)[0])
+    for col in expected:                       # a live rename would break the twin -> caught here
+        assert col in live_cte, col
+    # company scope applied ONCE post-aggregation (per grouped user), not per fact row
+    assert mart27_sql.ai_code_user_daily("Trexis").count("COMPANY_FOR_USER") == 1
+    assert "COMPANY_FOR_USER" not in mart27_sql.ai_code_user_daily("ALL")
+
+
 def test_fact_readers_exclude_the_functions_arm():
     # The live builders read ONLY the Snowsight/CLI code views; the fact also
     # carries the account-wide Functions arm (USER_NAME 'ACCOUNT').
     for sql in (mart27_sql.ai_code_user_rollup(30, "ALL"),
-                mart27_sql.ai_code_daily(30, "ALL")):
+                mart27_sql.ai_code_daily(30, "ALL"),
+                mart27_sql.ai_code_user_daily("ALL")):
         assert "SOURCE <> 'Functions'" in sql
 
 
@@ -322,6 +342,12 @@ def test_fact_readers_are_coverage_gated():
                 mart27_sql.ai_code_daily(180, "ALL")):
         assert "MIN(DAY) AS FIRST_DAY" in sql
         assert "(SELECT FIRST_DAY FROM cov) <= DATEADD('day', -180 + 1, CURRENT_DATE())" in sql
+    # ai_code_user_daily is days-independent (365d, matching the live builder), so it gates
+    # on a full year of fact history — a returning-after-dormancy user needs the full lookback
+    # for a correct NEW_USER first_seen, so a young fact must yield to live, not truncate.
+    ud = mart27_sql.ai_code_user_daily("ALL")
+    assert "MIN(DAY) AS FIRST_DAY" in ud
+    assert "(SELECT FIRST_DAY FROM cov) <= DATEADD('day', -365 + 1, CURRENT_DATE())" in ud
 
 
 def test_ai_costs_by_model_is_coverage_gated_all_source():
@@ -395,6 +421,47 @@ def test_window_slice_drops_days_outside_the_asked_window():
     frame = pd.concat([_user_daily((0, 1)), _user_daily((200,))], ignore_index=True)
     assert rollup_from_user_daily(frame, 7).iloc[0]["ACTIVE_DAYS"] == 2
     assert rollup_from_user_daily(frame, 365).iloc[0]["ACTIVE_DAYS"] == 3
+
+
+def test_token_types_fetch_is_days_independent():
+    # v4.528: the builder takes NO days/bounds knob — it fetches the full retention once
+    # and keeps a date column, so a single (sql,scope) cache entry serves every window.
+    sql = cortex_sql.cortex_code_token_types()
+    assert "-365," in sql.replace(" ", "")
+    assert cortex_sql.cortex_code_token_types() == sql        # stable text, no window knob
+    assert "USAGE_DATE" in sql                                # date kept for the pandas slice
+    # every window shares ONE cache -> the SQL must not vary with any arg (there are none)
+
+
+def _token_daily(days_back, *, user="KEBARR1", ttype="input", tokens=100):
+    today = account_today()
+    return pd.DataFrame([
+        {"USER_NAME": user, "USAGE_DATE": today - timedelta(days=d),
+         "TOKEN_TYPE": ttype, "TOKENS": tokens}
+        for d in days_back
+    ])
+
+
+def test_token_types_window_reproduces_window_totals():
+    # a frame spanning inside AND outside the window; the pandas window-slice must reproduce
+    # exactly the per-(user,type) totals the old per-window SQL returned for that window, and
+    # feed token_economics the (USER_NAME, TOKEN_TYPE, TOKENS) grain it expects.
+    frame = pd.concat([
+        _token_daily((0, 1, 2), ttype="input", tokens=100),      # 3 in-window days
+        _token_daily((200,), ttype="input", tokens=999),         # far outside a 7d window
+        _token_daily((0,), ttype="cache_read_input", tokens=50),
+    ], ignore_index=True)
+    win = token_types_window(frame, 7)
+    assert set(win.columns) == {"USER_NAME", "TOKEN_TYPE", "TOKENS"}   # grain token_economics wants
+    got = {(r.USER_NAME, r.TOKEN_TYPE): r.TOKENS for r in win.itertuples()}
+    assert got[("KEBARR1", "input")] == 300           # 3 x 100, the 200d-old 999 excluded
+    assert got[("KEBARR1", "cache_read_input")] == 50
+    # widening the window pulls in the far day
+    assert {(r.USER_NAME, r.TOKEN_TYPE): r.TOKENS
+            for r in token_types_window(frame, 365).itertuples()}[("KEBARR1", "input")] == 1299
+    # end-to-end: token_economics over the sliced 7d frame sees only the windowed tokens
+    econ = token_economics(win)
+    assert econ.iloc[0]["INPUT"] == 300 and econ.iloc[0]["CACHE_READ"] == 50
 
 
 # ---- C7: classifier corrections -------------------------------------------

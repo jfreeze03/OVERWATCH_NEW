@@ -105,6 +105,34 @@ def test_incident_gantt_lanes_distinct_same_title_incidents(monkeypatch):
     assert '"layer"' in spec and '"NOW"' in spec
 
 
+def test_incident_gantt_reanchors_open_bar_to_account_now(monkeypatch):
+    # v4.528 perf: the builder SQL is now-free (cache-stable) and COALESCEs an OPEN
+    # incident's ENDED to the server/UTC CURRENT_TIMESTAMP(), which overshoots account
+    # time by the server-vs-account offset. The chart re-anchors OPEN rows (IS_OPEN) to
+    # the caller's account `now`, while RESOLVED rows keep their real measured ENDED.
+    rendered = []
+    monkeypatch.setattr(charts.st, "altair_chart", lambda c, **k: rendered.append(c))
+    monkeypatch.setattr(charts, "_empty_note", lambda *a, **k: None)
+    now = pd.Timestamp("2026-09-09 08:00:00")
+    df = pd.DataFrame({
+        "INCIDENT_ID": ["open0001-1", "resl0002-2"],
+        "TITLE": ["Open incident", "Resolved incident"],
+        "SEVERITY": ["HIGH", "LOW"],
+        "STATUS": ["OPEN", "RESOLVED"],
+        "IS_OPEN": [True, False],
+        "STARTED": pd.to_datetime(["2026-09-09 02:00", "2026-09-08 01:00"]),
+        # the open bar's ENDED is a UTC-overshoot server-now (~5h past account now); the
+        # resolved bar's ENDED is a real resolution timestamp.
+        "ENDED": pd.to_datetime(["2026-09-09 13:00", "2026-09-08 03:00"]),
+        "DURATION_MIN": [660, 120],
+    })
+    charts.incident_gantt(df, now=now)
+    spec = json.dumps(rendered[0].to_dict())
+    assert "2026-09-09T08:00:00" in spec       # OPEN bar re-anchored to account now
+    assert "2026-09-09T13:00:00" not in spec   # the UTC overshoot is gone
+    assert "2026-09-08T03:00:00" in spec       # RESOLVED bar keeps its real end
+
+
 # --- F10: exception-summary won't false-all-clear when a feed is unknown ----------------
 
 def test_incidents_section_flags_partial_telemetry_before_all_clear():

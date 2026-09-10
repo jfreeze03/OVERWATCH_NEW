@@ -1,5 +1,42 @@
 # Changelog
 
+## 4.528.0 - Tier-A performance now-wins: 4 hot reads cut, adversarially verified (2026-09-10)
+
+Four Tier-A (app-code-only, no migration) performance wins from the telemetry review, each
+blueprinted against the real code, built, then adversarially verified (9-agent refute-by-default
+pass; 1 HIGH + 1 MEDIUM + 2 LOW confirmed and fixed before ship). A 5th candidate (Brief
+`incident_metrics` tier flip) was **dropped** — `tier` only controls cache TTL, not query cost, and
+the read is already batched over tiny core tables, so the flip would only add staleness skew.
+
+- **Security ▸ AI guardrails goes fact-first.** This tab was the one live-only caller of the ~22–32s
+  Cortex Code secure-view scan (the Cost page already serves it fact-first). New
+  `mart27_sql.ai_code_user_daily` reproduces `cortex_code_user_daily`'s 11-column contract from
+  `FACT_AI_USAGE_DAILY`, days-independent (365d) and coverage-gated so a fact younger than a full
+  year yields to the live scan (the NEW_USER `first_seen` needs the full lookback). The live fallback
+  now shares the Cost page's cached scan (same sql + `tier="metadata"`), so the heavy scan is paid at
+  most once across both pages per TTL.
+- **Cost ▸ Chargeback & AI token-type economics is now days-independent.** `cortex_code_token_types`
+  fetches the full 365d retention once (keeping a `USAGE_DATE` column) under one stable cache key;
+  the window is sliced in pandas (`cortex.token_types_window`, reusing the same `_window_slice` the
+  credit lens uses — which also removes a latent token-vs-credit off-by-a-day). Every window/company
+  now shares one fetch instead of re-paying the secure-view + RECURSIVE-FLATTEN scan per window.
+- **Security ▸ recent grant changes: 4 scans → 2.** `recent_grant_changes` scanned
+  `GRANTS_TO_USERS`/`GRANTS_TO_ROLES` twice each (a CREATED_ON→GRANTED arm and a DELETED_ON→REVOKED
+  arm; ~1–2 min). It now cross-joins each table once to a 2-row event generator and picks the arm's
+  timestamp with `IFF`. Proven row-equivalent; a redundant `(CREATED_ON >= cutoff OR DELETED_ON >=
+  cutoff)` predicate is kept because it (not the IFF) is what lets Snowflake prune partitions.
+- **Control Room ▸ incident Gantt no longer churns its cache.** `incident_gantt` baked a
+  minute-rounded `now` literal into the SQL text, so `run()`'s (sql,scope) cache missed every minute.
+  The SQL is now `now`-free (stable `CURRENT_TIMESTAMP()` token) and returns `IS_OPEN`; the chart
+  re-anchors open bars to account-time in Python, fixing the ~5–6h server-vs-account overshoot
+  without a per-minute cache miss.
+
+**Adversarial-verify fixes (confirmed, fixed before ship):** (HIGH) the new Security fact read
+omitted `max_rows`, so the default 5000-row cap over an `ORDER BY USAGE_DATE ASC … LIMIT 200000`
+frame would have kept the OLDEST days and dropped the most RECENT — rotting the behavior flags;
+now passes `max_rows=200_000` (+ a regression test). (MEDIUM) the live fallback's tier was realigned
+to `metadata` so it actually shares the Cost page's cached scan. (LOW) stale docstring corrected.
+
 ## 4.527.0 - Restore Spend drill-coverage table + performance now-wins (2026-09-09)
 
 **Owner request — the Cost ▸ Spend "Cost drill coverage" table is back in the default view.**

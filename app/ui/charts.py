@@ -1419,6 +1419,19 @@ def incident_gantt(df: pd.DataFrame, now: object = None) -> None:
     data = df.copy()
     data["STARTED"] = pd.to_datetime(data["STARTED"], errors="coerce")
     data["ENDED"] = pd.to_datetime(data["ENDED"], errors="coerce")
+    # Re-anchor OPEN incidents' end to account-now (the caller's `now`). The builder's
+    # SQL is intentionally now-free for cache stability and COALESCEs an open bar's ENDED
+    # to the server/UTC CURRENT_TIMESTAMP(), which overshoots account time by the server-
+    # vs-account offset (~5-6h). IS_OPEN (RESOLVED_AT IS NULL) marks the still-running
+    # bars; recompute their end + duration against account time here. With now=None (unit
+    # tests) this is skipped and the SQL's non-null ENDED is used as-is.
+    if now is not None and "IS_OPEN" in data.columns:
+        _now_ts = pd.Timestamp(now)
+        _open = data["IS_OPEN"].fillna(False).astype(bool)
+        data.loc[_open, "ENDED"] = _now_ts
+        if "DURATION_MIN" in data.columns:
+            data.loc[_open, "DURATION_MIN"] = (
+                (_now_ts - data.loc[_open, "STARTED"]).dt.total_seconds() / 60.0)
     data = data.dropna(subset=["STARTED", "ENDED"])
     if data.empty:
         _empty_note("No timestamped incidents to chart.")

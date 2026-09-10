@@ -600,6 +600,70 @@ LIMIT 500
 """
 
 
+def ai_code_user_daily(company: str = "ALL") -> str:
+    """cortex_sql.cortex_code_user_daily contract from FACT_AI_USAGE_DAILY.
+
+    The user-day-source frame behind the Security AI-guardrails tab (user_behavior).
+    Days-INDEPENDENT (365d) exactly like the live builder: user_behavior derives a
+    per-user first_seen for its NEW_USER flag, so the frame MUST span the full lookback
+    or a returning-after-dormancy user false-flags as new. The coverage gate therefore
+    requires the fact to reach back a full year (_ai_code_window(365)); a younger fact
+    yields zero rows so the reader falls back to the live 365d scan rather than serving
+    a truncated first_seen.
+
+    FIRST_NAME/LAST_NAME are not on the fact but ARE part of the live contract, so they
+    ride a post-aggregation join to the small USERS dimension, pre-collapsed to one row
+    per NAME (a recreated login would otherwise fan out and double a user's day). Company
+    scope is applied ONCE per grouped user, not per fact row. Emits the live builder's 11
+    columns in the same order (USER_NAME, EMAIL, FIRST_NAME, LAST_NAME, SOURCE, USAGE_DATE,
+    REQUESTS, CREDITS, TOKENS, FIRST_TS, LAST_TS).
+    """
+    scope = ""
+    if str(company or "ALL").upper() != "ALL":
+        scope = f"WHERE {companies.COMPANY_FOR_USER_FN}(b.USER_NAME) = {sql_literal(company)}"
+    return f"""
+WITH {_ai_code_coverage_cte()},
+by_day AS (
+    SELECT
+        USER_NAME,
+        ANY_VALUE(EMAIL) AS EMAIL,
+        SOURCE,
+        DAY AS USAGE_DATE,
+        SUM(COALESCE(REQUESTS, 0)) AS REQUESTS,
+        SUM(COALESCE(CREDITS, 0)) AS CREDITS,
+        SUM(COALESCE(TOKENS, 0)) AS TOKENS,
+        MIN(FIRST_TS) AS FIRST_TS,
+        MAX(LAST_TS) AS LAST_TS
+    FROM {mart_object("FACT_AI_USAGE_DAILY")}
+    WHERE {_ai_code_window(365, None)}
+    GROUP BY USER_NAME, SOURCE, DAY
+),
+named AS (
+    SELECT NAME, ANY_VALUE(FIRST_NAME) AS FIRST_NAME, ANY_VALUE(LAST_NAME) AS LAST_NAME
+    FROM SNOWFLAKE.ACCOUNT_USAGE.USERS
+    WHERE DELETED_ON IS NULL
+    GROUP BY NAME
+)
+SELECT
+    b.USER_NAME,
+    b.EMAIL,
+    n.FIRST_NAME,
+    n.LAST_NAME,
+    b.SOURCE,
+    b.USAGE_DATE,
+    b.REQUESTS,
+    b.CREDITS,
+    b.TOKENS,
+    b.FIRST_TS,
+    b.LAST_TS
+FROM by_day b
+LEFT JOIN named n ON n.NAME = b.USER_NAME
+{scope}
+ORDER BY b.USAGE_DATE, b.USER_NAME
+LIMIT 200000
+"""
+
+
 def ai_code_daily(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """cortex_sql.cortex_code_daily contract from FACT_AI_USAGE_DAILY.
 

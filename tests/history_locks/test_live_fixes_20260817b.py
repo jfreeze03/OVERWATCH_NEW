@@ -20,11 +20,13 @@ def test_grant_feed_excludes_ownership_self_grants():
     # object-lifecycle noise that buried the feed. Excluded on BOTH role arms; a
     # real ownership TRANSFER (different grantor) still shows.
     sql = security_sql.recent_grant_changes(30, "ALL")
-    assert sql.count("NOT (PRIVILEGE = 'OWNERSHIP'") == 2
+    # v4.528: each source is now scanned ONCE (a CROSS JOIN event generator replaced the
+    # per-timestamp arms), so self_own is applied once on the single GRANTS_TO_ROLES branch.
+    assert sql.count("NOT (PRIVILEGE = 'OWNERSHIP'") == 1
     assert "COALESCE(GRANTED_BY, '') = GRANTEE_NAME" in sql
-    # only the two GRANTS_TO_ROLES arms carry it (OWNERSHIP is a privilege->role grant,
-    # never a role->user grant), and the user arms are untouched.
-    assert sql.count("GRANTS_TO_USERS") == 2 and sql.count("GRANTS_TO_ROLES") == 2
+    # only the GRANTS_TO_ROLES branch carries it (OWNERSHIP is a privilege->role grant,
+    # never a role->user grant), and the user branch is untouched.
+    assert sql.count("GRANTS_TO_USERS") == 1 and sql.count("GRANTS_TO_ROLES") == 1
 
 
 def test_humanize_bytes_scales_below_tb():

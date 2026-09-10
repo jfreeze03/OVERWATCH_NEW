@@ -820,29 +820,33 @@ def recent_grant_changes(days: int = 30, company: str = "ALL", limit: int = 500)
     # matches the grantee, so it stays visible.
     self_own = ("NOT (PRIVILEGE = 'OWNERSHIP' "
                 "AND COALESCE(GRANTED_BY, '') = GRANTEE_NAME)")
+    # v4.528 perf: each source table was scanned TWICE (a CREATED_ON->GRANTED arm and a
+    # DELETED_ON->REVOKED arm), and for a company scope the u_scope DISTINCT sub-scan ran
+    # in both user arms — measured 1-2 min. Cross-join each row to a 2-row event generator
+    # and pick the arm's timestamp with IFF, so each table (and each scope sub-scan) is read
+    # ONCE. Row-equivalent: the GRANTED candidate survives iff CREATED_ON >= cutoff, the
+    # REVOKED iff DELETED_ON >= cutoff (DELETED_ON NULL -> NULL>=cutoff is UNKNOWN -> dropped),
+    # exactly the old per-arm predicates; every column expression, the self_own filter, the
+    # outer CHANGED_AT-IS-NOT-NULL / ORDER BY / LIMIT are unchanged. The extra
+    # (CREATED_ON >= cutoff OR DELETED_ON >= cutoff) predicate is redundant with the IFF filter
+    # but LOAD-BEARING for micro-partition pruning: the IFF-over-the-join-column alone cannot
+    # prune, so this literal-cutoff predicate keeps the base scan pruned to relevant partitions.
+    ev = "(SELECT 'GRANTED' AS CHG UNION ALL SELECT 'REVOKED' AS CHG)"
     return f"""
 WITH changes AS (
-    SELECT CREATED_ON AS CHANGED_AT, 'GRANTED' AS CHANGE, 'Role -> user' AS GRANT_TYPE,
+    SELECT IFF(ev.CHG = 'GRANTED', CREATED_ON, DELETED_ON) AS CHANGED_AT,
+           ev.CHG AS CHANGE, 'Role -> user' AS GRANT_TYPE,
            GRANTED_BY AS CHANGED_BY, GRANTEE_NAME AS GRANTEE, ROLE AS WHAT
     FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
-    WHERE {and_where(f"CREATED_ON >= {cutoff}", u_scope)}
+    CROSS JOIN {ev} ev
+    WHERE {and_where(f"(CREATED_ON >= {cutoff} OR DELETED_ON >= {cutoff})", f"IFF(ev.CHG = 'GRANTED', CREATED_ON, DELETED_ON) >= {cutoff}", u_scope)}
     UNION ALL
-    SELECT DELETED_ON, 'REVOKED', 'Role -> user',
-           GRANTED_BY, GRANTEE_NAME, ROLE
-    FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
-    WHERE {and_where(f"DELETED_ON >= {cutoff}", u_scope)}
-    UNION ALL
-    SELECT CREATED_ON, 'GRANTED', 'Privilege -> role',
+    SELECT IFF(ev.CHG = 'GRANTED', CREATED_ON, DELETED_ON), ev.CHG, 'Privilege -> role',
            GRANTED_BY, GRANTEE_NAME,
            PRIVILEGE || ' ON ' || GRANTED_ON || ' ' || COALESCE(NAME, '')
     FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES
-    WHERE {and_where(f"CREATED_ON >= {cutoff}", r_scope, self_own)}
-    UNION ALL
-    SELECT DELETED_ON, 'REVOKED', 'Privilege -> role',
-           GRANTED_BY, GRANTEE_NAME,
-           PRIVILEGE || ' ON ' || GRANTED_ON || ' ' || COALESCE(NAME, '')
-    FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES
-    WHERE {and_where(f"DELETED_ON >= {cutoff}", r_scope, self_own)}
+    CROSS JOIN {ev} ev
+    WHERE {and_where(f"(CREATED_ON >= {cutoff} OR DELETED_ON >= {cutoff})", f"IFF(ev.CHG = 'GRANTED', CREATED_ON, DELETED_ON) >= {cutoff}", r_scope, self_own)}
 )
 SELECT CHANGED_AT, CHANGE, GRANT_TYPE,
        COALESCE(NULLIF(TRIM(CHANGED_BY), ''), '(system)') AS CHANGED_BY,

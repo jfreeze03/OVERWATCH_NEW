@@ -17,8 +17,10 @@ def test_feed_unions_user_and_object_grants_both_directions():
     sql = security_sql.recent_grant_changes(30)
     # both sources: role->user AND privilege->role (objects).
     assert "GRANTS_TO_USERS" in sql and "GRANTS_TO_ROLES" in sql
-    # each grant AND revoke is its own event (CREATED_ON / DELETED_ON arms).
-    assert sql.count("'GRANTED'") == 2 and sql.count("'REVOKED'") == 2
+    # each grant AND revoke is still its own event; v4.528 emits both via a CROSS JOIN
+    # event generator instead of a per-timestamp arm, so assert both directions exist
+    # rather than a branch count.
+    assert "'GRANTED'" in sql and "'REVOKED'" in sql
     assert "CREATED_ON >= DATEADD" in sql and "DELETED_ON >= DATEADD" in sql
     # the who/what/whom/when columns.
     for col in ("CHANGED_AT", "CHANGE", "GRANT_TYPE", "CHANGED_BY", "GRANTEE", "WHAT"):
@@ -28,6 +30,19 @@ def test_feed_unions_user_and_object_grants_both_directions():
     # newest first; system grantor is labeled, not blank.
     assert "ORDER BY CHANGED_AT DESC" in sql
     assert "'(system)'" in sql
+
+
+def test_feed_scans_each_source_once_via_event_generator():
+    # v4.528 perf lock: each source table is read ONCE (a CROSS JOIN to a 2-row
+    # GRANTED/REVOKED generator picks the arm's timestamp with IFF), not twice — so a
+    # future regression back to the CREATED_ON/DELETED_ON double-scan fails here.
+    sql = security_sql.recent_grant_changes(30, "ALL")   # ALL = no scope sub-scan
+    assert sql.count("SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS") == 1
+    assert sql.count("SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES") == 1
+    assert "CROSS JOIN" in sql and "'GRANTED' AS CHG" in sql
+    assert "IFF(ev.CHG = 'GRANTED', CREATED_ON, DELETED_ON)" in sql
+    # the load-bearing prune predicate (IFF-over-join-column can't prune on its own)
+    assert "(CREATED_ON >= DATEADD('day', -30, CURRENT_TIMESTAMP()) OR DELETED_ON >= DATEADD" in sql
 
 
 def test_feed_window_and_limit_are_bounded():

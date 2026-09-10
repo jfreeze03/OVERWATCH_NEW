@@ -153,3 +153,20 @@ def test_ai_guardrails_section_is_wired_into_security():
     assert "guardrails_daily(30)" in src and "probe=True" in src
     # honest degrade when the optional guardrails view is absent.
     assert "isn't available on this account" in src
+
+
+def test_ai_guardrails_fact_read_is_not_row_capped_below_the_builder_limit():
+    # v4.528 regression guard: the behavior frame is ORDER BY USAGE_DATE ASC with a
+    # LIMIT 200000, so a default 5000-row cap would keep the OLDEST days and DROP the most
+    # RECENT ones — corrupting the last-7-day velocity / NEW_USER flags. Both the fact-first
+    # read AND the live fallback must pass max_rows=200_000 so the recent days survive.
+    src = (_ROOT / "app" / "ui" / "pages" / "security.py").read_text(encoding="utf-8")
+    tab = src.split("def _ai_guardrails_tab", 1)[1].split("\ndef ", 1)[0]
+    assert "mart27_sql.ai_code_user_daily(company)" in tab
+    # the fact read block must carry max_rows=200_000 (not the default 5000 cap)
+    fact = tab.split("mart27_sql.ai_code_user_daily(company)", 1)[1].split("if not usage", 1)[0]
+    assert "max_rows=200_000" in fact
+    # the live fallback shares the Cost page's cached scan (same sql + tier="metadata")
+    fallback = tab.split("if not usage.usable():", 1)[1]
+    assert 'cortex_sql.cortex_code_user_daily(company)' in fallback
+    assert 'tier="metadata"' in fallback and "max_rows=200_000" in fallback

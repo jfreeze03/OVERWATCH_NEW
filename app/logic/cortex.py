@@ -119,6 +119,24 @@ def _window_slice(user_daily: pd.DataFrame, days: int,
     return user_daily[dates >= cutoff]      # NaT compares False — unparseable rows drop
 
 
+def token_types_window(token_daily: pd.DataFrame, days: int,
+                       *, bounds: tuple | None = None) -> pd.DataFrame:
+    """cortex_sql.cortex_code_token_types (USER_NAME, USAGE_DATE, TOKEN_TYPE, TOKENS)
+    sliced to the asked window and collapsed to the (USER_NAME, TOKEN_TYPE, TOKENS)
+    grain wave2.token_economics() consumes.
+
+    The builder is now days-independent (one 365d fetch, one cache entry); the window is
+    applied HERE via the SAME _window_slice the per-user credit signals use, so the token
+    lens and the credit lens of the CoCo-efficiency panel can never disagree by a day (the
+    old form sliced the token grain in SQL on USAGE_TIME while the credit grain was sliced
+    in pandas — a latent off-by-a-day at the window edge, now removed)."""
+    win = _window_slice(token_daily, days, bounds=bounds)
+    if win is None or win.empty:
+        return pd.DataFrame(columns=["USER_NAME", "TOKEN_TYPE", "TOKENS"])
+    return (win.groupby(["USER_NAME", "TOKEN_TYPE"], dropna=False)["TOKENS"]
+               .sum().reset_index())
+
+
 def rollup_from_user_daily(user_daily: pd.DataFrame, days: int,
                            *, bounds: tuple | None = None) -> pd.DataFrame:
     """cortex_sql.cortex_code_user_rollup's output, folded in pandas."""

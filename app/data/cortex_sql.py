@@ -253,30 +253,32 @@ ORDER BY DAY
 """
 
 
-def cortex_code_token_types(days: int = 30, *, bounds: tuple | None = None) -> str:
-    """Per-user token-TYPE decomposition (repo review wave 2: TOKENS_GRANULAR)
-    — input / output / cache_read / cache_write — the prompt-cache-efficiency
-    lens raw token totals can't show.
+def cortex_code_token_types() -> str:
+    """Per-user, per-day token-TYPE decomposition (repo review wave 2: TOKENS_GRANULAR)
+    — input / output / cache_read / cache_write — the prompt-cache-efficiency lens raw
+    token totals can't show.
 
-    OPTIONAL column (newer view versions; VARIANT shape may drift) — callers
-    MUST pass probe=True and degrade honestly to the token-total view.
+    OPTIONAL column (newer view versions; VARIANT shape may drift) — callers MUST pass
+    probe=True and degrade honestly to the token-total view.
 
-    Honors the long window (v4.54): per-user token telemetry is low-volume, like the
-    sibling cortex_code_* scans, so it tracks the page window up to 365d rather than the
-    90d ACCOUNT_USAGE cap — the panel ties to the page's Window filter."""
-    days = bounded_days(days, 365)
-    scope = (resolve_effective_window(days, "USAGE_TIME", bounds=bounds)[1]
-             if bounds is not None
-             else f"USAGE_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
+    Days-independent (v4.528): scans the full LIVE_DERIVE_DAYS retention ONCE and keeps a
+    USAGE_DATE column, so ONE (sql,scope) cache entry serves EVERY window — the caller
+    slices the window in pandas via app.logic.cortex.token_types_window. The old form baked
+    the window into the SQL text AND keyed the read per-window, so every window move was a
+    fresh cache miss re-paying the whole secure-view UNION + RECURSIVE FLATTEN scan (whose
+    dominant cost — secure-view expansion + the subscription probe — is window-FLAT, so a
+    narrow window bought nothing while the churn cost a full re-scan each time). Per-user
+    token telemetry is low-volume, like the sibling cortex_code_* scans, so the 365d fetch
+    is cheap and shares its cache across every window and company (the grain is account-wide)."""
     return f"""
 WITH combined AS (
     SELECT USER_ID, USAGE_TIME, TOKENS_GRANULAR
     FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY
-    WHERE {scope}
+    WHERE USAGE_TIME >= DATEADD('day', -{LIVE_DERIVE_DAYS}, CURRENT_TIMESTAMP())
     UNION ALL
     SELECT USER_ID, USAGE_TIME, TOKENS_GRANULAR
     FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_CLI_USAGE_HISTORY
-    WHERE {scope}
+    WHERE USAGE_TIME >= DATEADD('day', -{LIVE_DERIVE_DAYS}, CURRENT_TIMESTAMP())
 ),
 flat AS (
     -- TOKENS_GRANULAR on this account is nested BY MODEL: each model name maps to an
@@ -290,6 +292,7 @@ flat AS (
     -- cache_write_input). FLATTEN stays in its own CTE, LEFT JOIN USERS on it (a LATERAL
     -- cannot sit on the LEFT of a LEFT JOIN -- Snowflake 001072).
     SELECT C.USER_ID,
+           C.USAGE_TIME::DATE AS USAGE_DATE,
            LOWER(F.KEY::VARCHAR) AS TOKEN_TYPE,
            TRY_TO_NUMBER(TO_VARCHAR(F.VALUE)) AS TOKENS
     FROM combined C,
@@ -298,11 +301,12 @@ flat AS (
 )
 SELECT
     COALESCE(U.NAME, 'UNKNOWN (' || flat.USER_ID || ')') AS USER_NAME,
+    flat.USAGE_DATE,
     flat.TOKEN_TYPE,
     SUM(COALESCE(flat.TOKENS, 0)) AS TOKENS
 FROM flat
 LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.USERS U ON flat.USER_ID = U.USER_ID
-GROUP BY 1, 2
-ORDER BY USER_NAME, TOKEN_TYPE
-LIMIT 20000
+GROUP BY 1, 2, 3
+ORDER BY USER_NAME, USAGE_DATE, TOKEN_TYPE
+LIMIT 200000
 """

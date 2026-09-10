@@ -906,12 +906,12 @@ def render() -> None:
         # exception summary above (OPEN_NOW), so the standalone KPI is dropped.
         # CR5: a lifecycle Gantt — detected->resolved spans (open runs to now), so
         # the shape of the last 14 days of incidents reads at a glance.
-        # Pass account-time now (minute-rounded so the SQL-keyed cache doesn't churn
-        # every render) so an OPEN incident's live duration measures against account
-        # time, not the server's UTC CURRENT_TIMESTAMP() (unset account TZ = a false
-        # multi-hour bar).
-        _ig = run(mart_sql.incident_gantt(14, company,
-                                          account_now().replace(second=0, microsecond=0).isoformat()),
+        # The SQL is intentionally now-free (CURRENT_TIMESTAMP() token) so its
+        # (sql,scope) cache is shared across renders instead of churning every minute;
+        # an OPEN incident's live end is re-anchored to account time in the chart
+        # reader (charts.incident_gantt keyed off IS_OPEN), not in the SQL, so the
+        # server-vs-account offset never inflates an open bar.
+        _ig = run(mart_sql.incident_gantt(14, company),
                   page=_PAGE, key=f"incident_gantt_{company}", tier="recent",
                   source="INCIDENTS (14d lifecycle spans)")
         if _ig.usable():

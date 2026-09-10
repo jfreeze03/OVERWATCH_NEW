@@ -29,6 +29,7 @@ from app.logic.cortex import (
     enrich_user_rollup,
     rollup_from_user_daily,
     rollup_summary,
+    token_types_window,
     with_aggregate_budget_row,
 )
 from app.logic.formulas import account_today, credits_to_usd, format_usd, md_dollars, safe_float
@@ -386,19 +387,22 @@ def _token_economics_panel(company: str, days: int, cap_credits: float, *, bound
                           "per user and merges daily credits into peer-relative efficiency "
                           "signals — on demand; needs the newer view shape."):
         return
-    _lm = "_lm" if bounds is not None else ""
     # WLA-1 (round 18): honest window label — "last month" when the scope bounds the read
     # to the previous calendar month, else the trailing "{days}d" (see _ai_users_tab).
     _wlab = "last month" if bounds is not None else f"{days}d"
     _when = "last month" if bounds is not None else f"in the last {days} days"
-    te_res = run(cortex_sql.cortex_code_token_types(days, bounds=bounds), page=_PAGE, key=f"cortex_token_types_{days}{_lm}",
-                 tier="historical", source="CORTEX_CODE_*_USAGE_HISTORY (TOKENS_GRANULAR)",
-                 probe=True)
+    # v4.528: days-independent read (one 365d fetch, ONE cache entry shared across every
+    # window/company); slice the window in pandas via cortex.token_types_window. The key is
+    # now window-free so a window change reuses the cached fetch instead of re-scanning.
+    te_res = run(cortex_sql.cortex_code_token_types(), page=_PAGE, key="cortex_token_types",
+                 tier="historical",
+                 source="CORTEX_CODE_*_USAGE_HISTORY (TOKENS_GRANULAR, window derived in-app)",
+                 probe=True, max_rows=200_000)
     if not te_res.ok:
         st.caption("TOKENS_GRANULAR isn't available on this account's Cortex Code views yet — "
                    "token-type economics appear here automatically once the column exists.")
         return
-    econ = token_economics(te_res.df)
+    econ = token_economics(token_types_window(te_res.df, days, bounds=bounds))
     if econ.empty:
         empty_state("no_data_yet", "No token-type rows in the selected window.")
         return

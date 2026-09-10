@@ -2333,38 +2333,41 @@ LIMIT {limit}
 """
 
 
-def incident_gantt(days: int = 14, company: str = "ALL", now_iso: str = "") -> str:
+def incident_gantt(days: int = 14, company: str = "ALL") -> str:
     """CR5: per-incident lifecycle spans for a Gantt view — DETECTED_AT to
     RESOLVED_AT (or to now for an open incident). Includes RESOLVED incidents so
     completed spans render, not just the open queue. ACK/MITIGATE timestamps are
     not consistently written, so the bar is the detected->resolved span.
 
-    ``now_iso`` is the account-aligned 'now' (account_now().isoformat()); the
-    caller passes it so an OPEN incident's live end/duration measure against
-    account time. DETECTED_AT is written in account time, so mixing it with the
-    server CURRENT_TIMESTAMP() (ALTER SESSION TIMEZONE is a no-op under SiS)
-    otherwise adds the server-vs-account offset to every open span. Defaults to
-    CURRENT_TIMESTAMP() when unset, so an un-updated caller still renders."""
-    from datetime import datetime
+    The SQL is intentionally 'now'-free — it uses CURRENT_TIMESTAMP() (a stable
+    SQL token, not a baked datetime literal), so run()'s (sql,scope) memo is shared
+    across renders. The old form interpolated the caller's minute-rounded account
+    'now' as a literal, which still churned the cache key every minute (a fresh miss
+    + INCIDENTS re-scan whenever a render crossed a minute boundary, and two viewers
+    never shared the memo unless within the same minute).
 
+    DETECTED_AT is written in account time while the SiS CURRENT_TIMESTAMP() is
+    server/UTC (ALTER SESSION TIMEZONE is a no-op), so an OPEN incident's server-UTC
+    end would overshoot account time by the offset (~5-6h). IS_OPEN (RESOLVED_AT IS
+    NULL) is returned so the reader (charts.incident_gantt) re-anchors exactly those
+    bars' end/duration to account time — precise, not inferred from the STATUS text.
+    ENDED stays non-null (COALESCE to now) so open bars are never dropped by the
+    reader's dropna."""
     days = bounded_days(days, 90)
     comp = ("" if str(company or "ALL").upper() == "ALL"
             else f" AND (COMPANY = {sql_literal(company)} OR UPPER(COMPANY) = 'ALL')")
-    if str(now_iso or "").strip():
-        _now = "'" + datetime.fromisoformat(str(now_iso)).strftime("%Y-%m-%d %H:%M:%S") + "'::TIMESTAMP_NTZ"
-    else:
-        _now = "CURRENT_TIMESTAMP()"
     return f"""
 SELECT
     INCIDENT_ID,
     LEFT(COALESCE(TITLE, 'incident ' || INCIDENT_ID), 60) AS TITLE,
     UPPER(COALESCE(SEVERITY, 'INFO')) AS SEVERITY,
     STATUS,
+    (RESOLVED_AT IS NULL) AS IS_OPEN,
     DETECTED_AT::TIMESTAMP_NTZ AS STARTED,
-    COALESCE(RESOLVED_AT, {_now})::TIMESTAMP_NTZ AS ENDED,
-    DATEDIFF('minute', DETECTED_AT, COALESCE(RESOLVED_AT, {_now})) AS DURATION_MIN
+    COALESCE(RESOLVED_AT, CURRENT_TIMESTAMP())::TIMESTAMP_NTZ AS ENDED,
+    DATEDIFF('minute', DETECTED_AT, COALESCE(RESOLVED_AT, CURRENT_TIMESTAMP())) AS DURATION_MIN
 FROM {core_object("INCIDENTS")}
-WHERE DETECTED_AT >= DATEADD('day', -{days}, {_now}){comp}
+WHERE DETECTED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP()){comp}
 ORDER BY DETECTED_AT DESC
 LIMIT 60
 """
