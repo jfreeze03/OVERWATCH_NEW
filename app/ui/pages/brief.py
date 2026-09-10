@@ -30,6 +30,7 @@ from app.logic.formulas import (
     md_dollars,
     safe_float,
 )
+from app.logic.insights import etl_cycle_sla_forecast
 from app.logic.verdict import Signal, oldest_open_hours, page_verdict
 from app.ui import charts
 from app.ui.components import (
@@ -130,6 +131,89 @@ def _workflow_failure_summary(settings: dict) -> tuple[int, str]:
     if "WORKFLOW_NAME" in res.df.columns:
         wf = ", ".join(sorted(res.df["WORKFLOW_NAME"].astype(str).unique())[:2])
     return n_fail, wf
+
+
+def _nightly_cycle_forecast(settings: dict) -> dict:
+    """Whole-cycle SLA finish forecast for the Brief 'Nightly cycle' tile (fail-silent probe read).
+
+    Reuses the Operations SLA-finish builder (cycle_finish_history_scan) + etl_cycle_sla_forecast: the
+    cycle STARTER workflow → the TERMINAL workflow, each night's finish vs the clock deadline, trended.
+    The anchor workflows + clock times default in DEFAULT_SETTINGS, so this works before V138 is applied.
+    Config-gated on ETL_CONTROL_STATUS_FQN + both anchor workflows; returns {} when unconfigured or when
+    there is no cycle data (a probe read — a missing grant is silent; Operations ▸ Pipeline owns hints)."""
+    fqn = str(settings.get("ETL_CONTROL_STATUS_FQN") or "").strip()
+    start_wf = str(settings.get("ETL_CYCLE_START_WORKFLOW") or "").strip()
+    end_wf = str(settings.get("ETL_CYCLE_END_WORKFLOW") or "").strip()
+    if not fqn or not start_wf or not end_wf:
+        return {}
+    scan_sql = etl_control_sql.cycle_finish_history_scan(
+        fqn, start_workflow=start_wf, end_workflow=end_wf)
+    if not scan_sql:
+        return {}
+    res = run(scan_sql, page=_PAGE, key="brief_cycle_finish", tier="recent",
+              source="CONTROL_STATUS (cycle finish forecast)",
+              max_rows=etl_control_sql.MAX_SLA_NIGHTS, probe=True)
+    if not (res.ok and not res.empty):
+        return {}
+    fc = etl_cycle_sla_forecast(
+        res.df,
+        target_hhmm=str(settings.get("ETL_SLA_TARGET_HHMM") or "07:00").strip(),
+        breach_hhmm=str(settings.get("ETL_SLA_BREACH_HHMM") or "08:00").strip())
+    return fc or {}
+
+
+def _nightly_cycle_kpi(fc: dict, wf_fail_n: int) -> dict:
+    """The Brief 'Nightly cycle' KPI (replaces Open incidents): the SLA finish forecast + any failures.
+
+    Worst-first — Failures → Overdue/In flight → Late → Regressing → On track — and it paints the
+    green 'On track' ONLY when the LATEST night actually COMPLETED on time. A hung/in-flight or FAILED
+    latest night, or a forecast with no completed baseline, must never read green off an older night's
+    margin (that would be a false all-clear on the executive Brief). Pure: no I/O; takes the already-read
+    forecast dict + the latest-run failure count."""
+    tgt = (fc.get("target_hhmm") if fc else None) or "07:00"
+    help_txt = ("Whole nightly ETL cycle: the SLA finish forecast (the cycle's finish vs the "
+                f"{tgt} target, trended across nights) plus any failed tasks in the latest run. "
+                "Operations ▸ Pipeline owns the detail.")
+
+    def _tile(value: str, severity: str, delta: str) -> dict:
+        return {"label": "Nightly cycle", "value": value, "severity": severity,
+                "delta": delta, "help": help_txt}
+
+    # 1. failures — a failed task in the latest run, OR the cycle's terminal workflow failed
+    #    (checked directly off the forecast so a differently-scoped wf_fail_n read can't miss it).
+    if wf_fail_n:
+        _w = "task" if wf_fail_n == 1 else "tasks"
+        return _tile("Failures", "bad", f"{wf_fail_n} failed {_w}")
+    if fc and fc.get("latest_failed"):
+        return _tile("Failures", "bad", "terminal workflow failed")
+    # 2. no forecast data at all — never fake green
+    if not fc:
+        return _tile("—", "info", "awaiting cycle data")
+    sev = fc.get("severity")
+    margin = fc.get("latest_margin_sec")
+    latest_state = fc.get("latest_state")
+    # 3. latest night still running / hung — overdue if already past the target, else in flight
+    if latest_state == "INCOMPLETE":
+        runway = fc.get("live_runway_sec")
+        if runway is not None and safe_float(runway) < 0:
+            return _tile("Overdue", "bad",
+                         f"{humanize_duration(abs(safe_float(runway)), 's')} past {tgt}, still running")
+        return _tile("In flight", "info", "cycle still running")
+    # 4. last completed night finished after the deadline
+    if sev == "High":
+        _late = (f"{humanize_duration(abs(safe_float(margin)), 's')} past {tgt}"
+                 if margin is not None else (fc.get("forecast") or "late"))
+        return _tile("Late", "bad", _late)
+    # 5. finish trending later
+    if sev == "Medium":
+        n2b = fc.get("nights_to_breach")
+        _when = f"trending later · ~{n2b} night(s) to miss" if n2b else "finishing later each night"
+        return _tile("Regressing", "warn", _when)
+    # 6. GREEN only when the latest night COMPLETED with a real on-time margin
+    if latest_state == "COMPLETE" and margin is not None and safe_float(margin) >= 0:
+        return _tile("On track", "ok", f"{humanize_duration(safe_float(margin), 's')} before {tgt}")
+    # 7. anything else (insufficient history / no completed baseline) — neutral, never green
+    return _tile("—", "info", "awaiting cycle data")
 
 
 @safe_page(_PAGE)
@@ -314,14 +398,9 @@ def render() -> None:
             _n_inc = int(safe_float(_inc_met.df.iloc[0].get("OPEN_NOW")))
         else:
             _n_inc = len(_inc.df)
-        kpis.append({
-            "label": "Open incidents",
-            "value": f"{_n_inc}",
-            "severity": "bad" if _n_inc else "ok",
-            "help": "Lifecycle objects — declared or auto-declared CRITICALs (true open count, "
-                    "matching Control Room). The Control Room owns the queue; this is the "
-                    "executive glance.",
-        })
+        # (The "Open incidents" KPI tile was replaced by the "Nightly cycle" tile below — owner ask
+        # 2026-09-09. _n_inc still feeds the verdict line + the Fires detail; the Control Room owns
+        # the incident queue and the executive incident glance.)
     # Reference-data gaps (ETL Phase 1): a source code with no XLAT translation
     # hard-fails tonight's load, so it belongs in the morning "should I worry?" read
     # like a fire. Reuses the Operations panel's scan, account-wide (pinned + every
@@ -332,6 +411,13 @@ def render() -> None:
     # breaks a downstream load). Same reused scan + shared failure set as the Operations
     # panel; config-gated + fail-silent. Only fires when a real failure exists.
     _wf_fail_n, _wf_fail_wf = _workflow_failure_summary(settings)
+    # Nightly-cycle health tile (replaces Open incidents, owner ask 2026-09-09): the whole-cycle SLA
+    # finish forecast (good / regressing / late) plus any failed tasks in the latest run. Config-gated
+    # on the ETL control table + fail-silent (probe reads); shown whenever ETL is configured so the
+    # morning read leads with "is the nightly cycle OK?".
+    _cyc = _nightly_cycle_forecast(settings)
+    if str(settings.get("ETL_CONTROL_STATUS_FQN") or "").strip():
+        kpis.append(_nightly_cycle_kpi(_cyc, _wf_fail_n))
 
     # CoCo do-first #1: a computed "should I worry?" opener, worst-first, above the
     # numbers — built from signals already on the page (no new query).
@@ -363,6 +449,29 @@ def render() -> None:
         _vsig.append(Signal(
             "bad", f"{_wf_fail_n} failed ETL {_wf_word} in the latest run"
                    + (f" ({_wf_fail_wf})" if _wf_fail_wf else "")))
+    # The nightly cycle failing / hanging / finishing late (or trending later) is a morning worry too,
+    # from the same whole-cycle SLA forecast the tile shows — so the verdict is never silently green on
+    # a non-completed latest night. Worst-first, one signal; task-level failures are covered above.
+    if _cyc:
+        _c_tgt = _cyc.get("target_hhmm", "07:00")
+        _c_state = _cyc.get("latest_state")
+        _c_rw = _cyc.get("live_runway_sec")
+        if _cyc.get("latest_failed") and not _wf_fail_n:
+            _vsig.append(Signal("bad", "nightly cycle's terminal workflow failed — finish unconfirmed"))
+        elif _c_state == "INCOMPLETE" and _c_rw is not None and safe_float(_c_rw) < 0:
+            _vsig.append(Signal(
+                "bad", f"nightly cycle still running, "
+                       f"{humanize_duration(abs(safe_float(_c_rw)), 's')} past the {_c_tgt} target"))
+        elif _cyc.get("severity") == "High":
+            _c_margin = _cyc.get("latest_margin_sec")
+            _c_late = (f", {humanize_duration(abs(safe_float(_c_margin)), 's')} past {_c_tgt}"
+                       if _c_margin is not None else "")
+            _vsig.append(Signal("bad", f"nightly cycle finished after the {_c_tgt} target{_c_late}"))
+        elif _cyc.get("severity") == "Medium":
+            _c_n2b = _cyc.get("nights_to_breach")
+            _c_when = f", ~{_c_n2b} night(s) to miss" if _c_n2b else ""
+            _vsig.append(Signal(
+                "warn", f"nightly cycle finish trending later vs the {_c_tgt} target{_c_when}"))
     if exh.usable():
         _erow = exh.df.iloc[0]
         if safe_float(_erow.get("TOTAL")) > 0:

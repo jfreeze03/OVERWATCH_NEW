@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.526.0 - Brief: "Nightly cycle" tile replaces "Open incidents" (2026-09-09)
+
+The morning Brief now leads with nightly-ETL-cycle health instead of the open-incidents count (owner ask).
+
+- **New "Nightly cycle" KPI tile** — worst-first: **Failures** (red, `N failed tasks`) → **Overdue**
+  (red, still running past 7am) → **In flight** (neutral) → **Late** (red, finished past 7am) →
+  **Regressing** (amber, `trending later · ~N nights to miss`) → **On track** (green, `Xh before 7am`).
+  Driven by the whole-cycle SLA finish forecast (`etl_cycle_sla_forecast`) plus the latest-run failure
+  count, both via fail-silent probe reads (Operations ▸ Pipeline owns setup/grant hints). Anchor
+  workflows + clock times default in `DEFAULT_SETTINGS`, so it works before V138 is applied.
+- **Verdict line** gains a matching cycle signal (failed / overdue / late / trending) so the
+  "should I worry?" opener is never silently green on a bad cycle.
+- Open incidents stay in the verdict line + the Fires detail feed + Control Room (only the KPI tile
+  changed); `_n_inc` and its guards are untouched.
+- Adversarial verify (2 refuters) caught **3 false-green defects, all fixed**: a hung/INCOMPLETE latest
+  cycle, a FAILED latest night, and an "insufficient history" forecast each used to fall through to a
+  green "On track" off an older night's margin. The tile now paints green **only** when the latest night
+  actually COMPLETED on time, and consults `latest_state`/`latest_failed` directly rather than trusting
+  the differently-scoped failure count.
+
 ## 4.525.0 - ETL bug-hunt round 2: 5 more fixes (incl. a HIGH + a round-1 regression) (2026-09-09)
 
 Second loop-until-dry adversarial hunt (35 agents), with a lens dedicated to regression-reviewing the
