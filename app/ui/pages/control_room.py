@@ -334,7 +334,7 @@ def _auto_investigation(inc_row, company: str, rate: float) -> None:
         _started if pd.notna(_started) else inc_row.get("DETECTED_AT"), errors="coerce")
     if pd.isna(onset_dt):
         return
-    section_header("Auto-investigation — ranked root cause", "", "incident")
+    section_header("Auto-investigation (ranked root cause)", "", "incident")
     st.caption("Read-only synthesis: the changes, task failures, spend anomalies and grant "
                "changes around this incident's onset, ranked as candidate causes by timing "
                "(a trigger precedes onset), magnitude, and entity match. It explains — it never "

@@ -1465,7 +1465,7 @@ def _metric_registry_tab() -> None:
     """Phase 1 (architectural): the single semantic contract for every cost
     number — method, grain, source, timezone, latency, formula version."""
     from app.logic import metric_registry as mr
-    section_header("Cost metric registry — what every number means", "", "cost")
+    section_header("Cost metric registry", "", "cost")
     st.caption(
         "Read a figure by its METHOD: BILLED uses Snowflake's billed-credit basis "
         "(organization currency is invoice truth), METERED is "

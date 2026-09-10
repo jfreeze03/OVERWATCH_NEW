@@ -723,7 +723,7 @@ def _failure_timeline_section(company: str, database: str = "", schema_contains:
     _clusters = cluster_failures_by_family(timeline)
     _systemic = _clusters[_clusters["SYSTEMIC"]] if not _clusters.empty else _clusters
     if not _systemic.empty:
-        section_header("Systemic errors — one cause, many tasks", "warn", "alerts")
+        section_header("Systemic errors", "warn", "alerts")
         kpi_row([
             {"label": "Systemic error families", "value": f"{len(_systemic)}"},
             {"label": "Distinct tasks hit", "value": f"{int(_systemic['DISTINCT_TASKS'].sum())}",
@@ -765,7 +765,7 @@ def _incident_routing_panel(timeline) -> None:
     the entity catalog for owner/on-call, so an incident carries a name and a next
     move. Routing to ACTION_QUEUE / Teams and ack-timeout escalation from an on-call
     rotation are the deferred owner-migration half."""
-    section_header("Incident routing — owner + first response (root causes)", "warn", "alerts")
+    section_header("Incident routing (owner + first response)", "warn", "alerts")
     panel_help(
         "Each root-cause failure is matched to a first-response remediation by its error "
         "family (classify_task_error) and to an owner/on-call resolved from the catalog "
@@ -928,7 +928,7 @@ def _dq_row_volume_panel(preloaded=None) -> None:
     finding to the catalog owner. Null-rate / schema-drift monitors (which need a
     stored baseline) and the DQ_BREACH alert are the deferred owner-migration
     halves."""
-    section_header("Row-volume anomalies — registered products (robust-z, 28d)", "", "pipeline")
+    section_header("Row-volume anomalies (registered products, 28d)", "", "pipeline")
     panel_help(
         "Robust z-score (median / MAD, floored at 15% of the median so a rock-steady table "
         "doesn't fire on jitter; threshold 3.5) of each table's MOST RECENT load of "
@@ -992,7 +992,7 @@ def _reference_gap_panel(database: str = "") -> None:
     configured in SETTINGS. Honors the scope-bar Database filter (pinned checks
     like pc_uwissuetype always show); dormant (setup hint) until ETL_REF_GAP_XLAT
     + ETL_REF_GAP_CHECKS are set; a red banner + the new codes when there is a gap."""
-    section_header("Reference-data gaps — new source codes missing from XLAT",
+    section_header("Reference-data gaps (codes missing from XLAT)",
                    "warn", "pipeline", anchor="ops-ref-gaps")
     settings = load_settings(_PAGE)
     xlat = str(settings.get("ETL_REF_GAP_XLAT") or "").strip()
@@ -1052,7 +1052,7 @@ def _workflow_runtimes_panel(days: int = 0, *, pf: dict | None = None) -> None:
     back to the run's total: sum of task time vs wall-clock span reveals parallelism (sum >
     span, tasks overlap) or idle gaps (sum < span, waits between tasks). Config-gated via
     ETL_CONTROL_STATUS_FQN, fail-closed with a grant hint; RUNTIME_SEC humanizes to Hr/Min/Sec."""
-    section_header("Workflow runtimes — a workflow's latest run (tasks, slowest first)",
+    section_header("Workflow runtimes (latest run, slowest first)",
                    "warn", "pipeline", anchor="ops-wf-runtimes")
     fqn = str(load_settings(_PAGE).get("ETL_CONTROL_STATUS_FQN") or "").strip()
     if not fqn:
@@ -1163,7 +1163,7 @@ def _failure_recurrence_panel(days: int = 0, *, pf: dict | None = None) -> None:
     failure rate, and a recency-weighted propensity, then an evidence-gated verdict — actively broken,
     chronic, intermittent — never a manufactured probability. Config-gated on ETL_CONTROL_STATUS_FQN;
     honors the scope-bar Window; clean when nothing has failed in the scoped runs."""
-    section_header("Failure recurrence — tasks likely to fail again",
+    section_header("Failure recurrence",
                    "warn", "pipeline", anchor="ops-failure-recurrence")
     fqn = str(load_settings(_PAGE).get("ETL_CONTROL_STATUS_FQN") or "").strip()
     if not fqn:
@@ -1213,7 +1213,7 @@ def _workflow_drift_panel(*, pf: dict | None = None) -> None:
     material slowdown (≥ 1 min AND ≥ 1.5×) so a task drifting toward its window is caught
     before it breaches. Account-wide; config-gated + fail-silent-with-grant-hint, and a
     clean state when runtimes are stable."""
-    section_header("Runtime drift — tasks slower than their recent baseline",
+    section_header("Runtime drift (vs recent baseline)",
                    "warn", "pipeline", anchor="ops-wf-drift")
     fqn = str(load_settings(_PAGE).get("ETL_CONTROL_STATUS_FQN") or "").strip()
     if not fqn:
@@ -1254,7 +1254,7 @@ def _runtime_creep_panel(days: int = 0, *, pf: dict | None = None) -> None:
     creeping task: the per-run gain, the projected runtime a horizon ahead, and ~how many runs
     until it doubles its baseline. Config-gated on ETL_CONTROL_STATUS_FQN; honors the scope-bar
     Window; a clean state when nothing is trending materially slower."""
-    section_header("Runtime creep — tasks trending slower, projected to breach",
+    section_header("Runtime creep (projected SLA breach)",
                    "warn", "pipeline", anchor="ops-wf-creep")
     fqn = str(load_settings(_PAGE).get("ETL_CONTROL_STATUS_FQN") or "").strip()
     if not fqn:
@@ -1415,7 +1415,7 @@ def _run_inventory_panel(*, pf: dict | None = None) -> None:
     The registry side of the Informatica cycle: which runs happened, how long they ran, and
     — for a chosen run — its tasks and the parameters it executed with (RUN_DATE, thresholds,
     load indicators). Each source is independently config-gated + fail-silent."""
-    section_header("Run inventory & parameters — recent ETL runs",
+    section_header("Run inventory & parameters",
                    "warn", "pipeline", anchor="ops-run-inventory")
     settings = load_settings(_PAGE)
     run_fqn = str(settings.get("ETL_CONTROL_RUN_ID_FQN") or "").strip()
@@ -1503,7 +1503,7 @@ def _recon_error_panel(*, pf: dict | None = None) -> None:
     and logs a row when they don't tie out. Account-wide; config-gated + fail-silent-with-
     grant-hint; a verified-clean state when everything reconciles. NOTE this table lives in
     DB_T_PROD_CORE (not PUBLIC), so it needs its own SELECT grant."""
-    section_header("Reconciliation errors — source vs target layer mismatches",
+    section_header("Reconciliation errors (source vs target)",
                    "warn", "pipeline", anchor="ops-recon-dq")
     fqn = str(load_settings(_PAGE).get("ETL_RECON_ERROR_FQN") or "").strip()
     if not fqn:
@@ -1541,7 +1541,7 @@ def _recon_recurrence_panel(days: int = 0, *, pf: dict | None = None) -> None:
     pass-rate. Chronic (recurs in most cycles) leads; a fresh regression (broke only the last 1-2
     cycles) is flagged NEW; a check that stopped breaking is demoted RESOLVED. Config-gated on the
     same ETL_RECON_ERROR_FQN as the raw recon panel; honors the scope-bar Window."""
-    section_header("Reconciliation recurrence — metrics that keep breaking",
+    section_header("Reconciliation recurrence",
                    "warn", "pipeline", anchor="ops-recon-recurrence")
     fqn = str(load_settings(_PAGE).get("ETL_RECON_ERROR_FQN") or "").strip()
     if not fqn:
@@ -1600,7 +1600,7 @@ def _cost_attribution_panel() -> None:
     honest — this is a best-effort model, not a billed invoice. Account-wide (one nightly
     cycle); config-gated on ETL_CONTROL_STATUS_FQN + fail-silent-with-grant-hint. Reads the
     same 'latest run' the runtimes/drift panels do, so the three line up."""
-    section_header("Cost attribution — credits & $ per task, latest ETL run",
+    section_header("Cost attribution (credits & $ per task, latest run)",
                    "warn", "pipeline", anchor="ops-cost-attribution")
     settings = load_settings(_PAGE)
     fqn = str(settings.get("ETL_CONTROL_STATUS_FQN") or "").strip()
@@ -1984,7 +1984,7 @@ def _task_health_view(company: str, days: int, database: str = "",
             # Render neutral + a "needs history" note, never a green all-clear (bug-hunt 2026-08-30).
             _enough_hist = days >= DURATION_MIN_ACTIVE_DAYS
             _drift = task_duration_anomalies(res.df)
-            section_header("Duration drift — tasks slower than their own baseline",
+            section_header("Duration drift (vs own baseline)",
                            alarm_health(len(_drift)) if _enough_hist else alarm_health(None), "clock")
             if _drift.empty:
                 st.caption("No task is running materially slower than its own recent baseline."
@@ -2003,7 +2003,7 @@ def _task_health_view(company: str, days: int, database: str = "",
             # whose daily runtime is climbing toward a miss, before they cross. Same
             # already-loaded daily frame as the drift above; no extra scan.
             _fc = duration_sla_forecast(res.df)
-            section_header("Predicted SLA miss — tasks trending slower",
+            section_header("Predicted SLA miss",
                            alarm_health(len(_fc)) if _enough_hist else alarm_health(None), "schedule")
             if _fc.empty:
                 st.caption("No task's recent runtime is climbing toward a miss."
@@ -2087,7 +2087,7 @@ def _task_sla_view(company: str, days: int, database: str = "",
     fresh = task_freshness_status(_fres.df) if _fresh_known else None
     late = (fresh[fresh["STATUS"].isin(["Late", "Stale"])]
             if _fresh_known and not fresh.empty else fresh)
-    section_header("Task freshness — silent-stop detection",
+    section_header("Task freshness (silent-stop)",
                    alarm_health(len(late)) if _fresh_known else "", "clock")
     if not _fresh_known:
         st.caption("Not enough scheduled history to derive task cadence in this window/scope.")

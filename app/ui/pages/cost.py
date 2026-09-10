@@ -388,10 +388,10 @@ def render() -> None:
                           "this section stays cheap without it."):
             _ai_users_tab(f["company"], f["days"], ai_rate, settings, is_operator, bounds=f["bounds"])
     elif section == "Unit costs":
-        section_header("Unit costs — one query, one call, one AI request", "", "cost")
+        section_header("Unit costs", "", "cost")
         _unit_costs_tab(f, rate, ai_rate)
     elif section == "Compare":
-        section_header("Compare — period vs period", "", "cost")
+        section_header("Compare periods", "", "cost")
         from app.ui.pages.cost_parts.compare import _compare_tab
         _compare_tab(f["company"], rate, ai_rate)
     else:

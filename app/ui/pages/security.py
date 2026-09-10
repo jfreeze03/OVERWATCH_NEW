@@ -373,7 +373,7 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
 
     # Moved from Changes (v4.49): entitlement hygiene — who still holds access
     # nobody uses — reads with dormant users, not with DDL evidence.
-    section_header("Unused roles (90d) — revoke candidates (account-wide)", "", "admin")
+    section_header("Unused roles (90d, account-wide)", "", "admin")
     ur = run_mart_first(
         mart27_sql.unused_roles_via_fact(90), security_sql.unused_roles(90),
         page=_PAGE, key="unused_roles",
@@ -730,7 +730,7 @@ def _least_privilege_tab() -> None:
         if unused.ok and unused.empty:
             empty_state("clean", "Every granted table was read or modified within the covered window.")
         elif guard(unused, ""):
-            section_header("Untouched table grants — review before revoking", "warn", "security")
+            section_header("Untouched table grants", "warn", "security")
             # #4: when a scope row is selected above, post-filter this same loaded
             # frame (no new read) to that role + db.schema so the shortlist matches
             # the scope the reviewer is inspecting. Pure pandas; guards missing cols.
@@ -1195,7 +1195,7 @@ def _posture_trend_panel(trend) -> None:
 def _clients_tab(company: str, days: int, *, bounds: tuple | None = None) -> None:
     """Driver/version inventory — the 'when do we need to upgrade' sheet."""
     _lm = "_lm" if bounds is not None else ""
-    section_header("Client drivers & versions — who connects with what", "", "operations")
+    section_header("Client drivers & versions", "", "operations")
     panel_help(
         "Source: ACCOUNT_USAGE.SESSIONS (lags up to ~3h, 365d retention). DRIVER and "
         "VERSION parse from CLIENT_APPLICATION_ID; PROGRAM is whatever the client "

@@ -484,11 +484,11 @@ def render() -> None:
         _vsig, healthy="no open criticals or incidents; contract runway healthy"))
     contract_runway_bar(contract_runway(exh.df.iloc[0]) if exh.usable() else None)
     panel_help(
-        "Your one-scroll morning read: the headline numbers, then open fires, then the "
-        "top asks. A dash (—) means telemetry was unreachable, not zero. When a figure "
-        "turns red — open criticals above zero, or contract/savings in the danger band — "
-        "work the Fires and Asks below, then drill into the linked full page "
-        "(Alerts, Cost & Contract, Control Room)."
+        "Your one-scroll morning read: the headline numbers, then open fires, then the top "
+        "asks. A dash means telemetry was unreachable, not zero. A figure turns red when open "
+        "criticals are above zero, or when contract or savings fall into the danger band. Work "
+        "the Fires and Asks below, then open the linked full page (Alerts, Cost & Contract, "
+        "Control Room)."
     )
     kpi_row(kpis)
     # N7: same disclosure as Overview — the headline dollars are credit-billed

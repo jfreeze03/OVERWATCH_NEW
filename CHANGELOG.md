@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.534.0 - Deeper copy pass: section headers de-glossed, Brief help split (2026-09-10)
+
+Ship #2 of the reviewed less-AI plan — the copy that matches the flat visuals from v4.533. App-code
+only (redeploy); every rewrite preserves the exact facts, numbers, and scope caveats, changing only
+the voice.
+
+- **D2 — 22 section headers de-glossed.** The dominant "Title — appositive gloss" structure (a mini-
+  sentence in every header) becomes a plain noun phrase, with a short parenthetical kept only for a
+  real qualifier (a window, scope, or method) and pure descriptive glosses dropped. Examples: "Runtime
+  creep — tasks trending slower, projected to breach" → "Runtime creep (projected SLA breach)";
+  "Reconciliation errors — source vs target layer mismatches" → "Reconciliation errors (source vs
+  target)"; "Systemic errors — one cause, many tasks" → "Systemic errors"; "Unused roles (90d) —
+  revoke candidates (account-wide)" → "Unused roles (90d, account-wide)". Every leading noun and every
+  number (28d, 90d, 7am) is preserved; the removed detail already lives in each panel's caption/help.
+  Spans operations.py (15), security.py (3), cost.py (2), admin.py (1), control_room.py (1).
+- **D6 — the Brief's run-on panel_help.** The one-scroll morning-read help was a single sentence chained
+  by em-dashes ("…When a figure turns red — open criticals above zero, or contract/savings in the
+  danger band — work the Fires…"); it's now three short sentences, no em-dash chain, with the red
+  triggers (open criticals above zero, contract or savings in the danger band) preserved verbatim. The
+  two Brief KPI helps a prior pass had already reduced to two clean sentences needed no change.
+
 ## 4.533.0 - Visual "less-AI" pass: honest font, flat CTA, normal-case structure (2026-09-10)
 
 The visual completion of the "make it look less AI" work, on three owner decisions. App-code CSS only
