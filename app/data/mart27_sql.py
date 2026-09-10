@@ -27,6 +27,17 @@ def _company_arm(company: str, column: str = "COMPANY") -> str:
     return f"{column} = {sql_literal(company)}"
 
 
+def _covered_days_scalar(where: str) -> str:
+    # r34 follow-up: the served-span scalar shared by eff_idle_analysis and
+    # eff_sizing_profile — DISTINCT DAYs the mart covers IN THE WINDOW, a
+    # window-level constant carried on every grouped row (see the callers).
+    # Emits byte-identically to the two-line form both readers inlined before.
+    return (
+        f'(SELECT COUNT(DISTINCT DAY) FROM {mart_object("MART_WAREHOUSE_EFFICIENCY_DAILY")}\n'
+        f'     WHERE {where}) AS COVERED_DAYS'
+    )
+
+
 def warehouse_efficiency(days: int, company: str = "ALL") -> str:
     days = bounded_days(days, 400)
     where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
@@ -229,8 +240,7 @@ SELECT
     -- asked) reports an honest run-rate and window label instead of dividing N days of idle by the
     -- full ask (~29% low at 5-of-7d, ~3x low at 120-of-365d). No DAY column survives the GROUP BY,
     -- so this scalar carries the span the frame otherwise couldn't.
-    (SELECT COUNT(DISTINCT DAY) FROM {mart_object("MART_WAREHOUSE_EFFICIENCY_DAILY")}
-     WHERE {where}) AS COVERED_DAYS
+    {_covered_days_scalar(where)}
 FROM {mart_object("MART_WAREHOUSE_EFFICIENCY_DAILY")}
 WHERE {where}
   AND UPPER(WAREHOUSE_NAME) <> 'CLOUD_SERVICES_ONLY'
@@ -267,8 +277,7 @@ SELECT
     -- r34 follow-up: DISTINCT days the mart covers IN THE WINDOW (see eff_idle_analysis) — every
     -- per-day rate in size_recommendations (MONTHLY_USD_NOW, IDLE_MONTHLY_USD, the x30 scenarios)
     -- divides by served_days(); COVERED_DAYS makes that the days actually present, not the full ask.
-    (SELECT COUNT(DISTINCT DAY) FROM {mart_object("MART_WAREHOUSE_EFFICIENCY_DAILY")}
-     WHERE {cov_where}) AS COVERED_DAYS
+    {_covered_days_scalar(cov_where)}
 FROM {mart_object("MART_WAREHOUSE_EFFICIENCY_DAILY")} e
 WHERE {where}
   AND UPPER(e.WAREHOUSE_NAME) <> 'CLOUD_SERVICES_ONLY'

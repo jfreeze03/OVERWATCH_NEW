@@ -36,6 +36,34 @@ _COMBINED_CODE_USAGE = """
 LIVE_DERIVE_DAYS = 365
 
 
+def _user_daily_cte(days: int) -> str:
+    """Shared ``combined`` + ``user_daily`` CTE for the Cortex Code user-grain
+    builders (cortex_code_user_daily, cortex_code_user_rollup). Returns the
+    fragment with NO leading/trailing newline so callers interpolate it as
+    ``{_user_daily_cte(...)}`` on its own line; byte-identical to the inline
+    text it replaces. cortex_code_daily uses a DIFFERENT (raw combined) grain
+    and is intentionally not a caller.
+    """
+    return f"""WITH combined AS ({_COMBINED_CODE_USAGE.format(days=days)}),
+user_daily AS (
+    SELECT
+        COALESCE(U.NAME, 'UNKNOWN (' || C.USER_ID || ')') AS USER_NAME,
+        U.EMAIL,
+        U.FIRST_NAME,
+        U.LAST_NAME,
+        C.SOURCE,
+        C.USAGE_TIME::DATE AS USAGE_DATE,
+        COUNT(*) AS REQUESTS,
+        SUM(COALESCE(C.TOKEN_CREDITS, 0)) AS CREDITS,
+        SUM(COALESCE(C.TOKENS, 0)) AS TOKENS,
+        MIN(C.USAGE_TIME) AS FIRST_TS,
+        MAX(C.USAGE_TIME) AS LAST_TS
+    FROM combined C
+    LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.USERS U ON C.USER_ID = U.USER_ID
+    GROUP BY 1, 2, 3, 4, 5, 6
+)"""
+
+
 def cortex_code_user_daily(company: str = "ALL") -> str:
     """The ONE live Cortex Code scan: 365d at user-day-source grain.
 
@@ -57,24 +85,7 @@ def cortex_code_user_daily(company: str = "ALL") -> str:
     """
     outer_scope = companies.user_clause(company, "USER_NAME")
     return f"""
-WITH combined AS ({_COMBINED_CODE_USAGE.format(days=LIVE_DERIVE_DAYS)}),
-user_daily AS (
-    SELECT
-        COALESCE(U.NAME, 'UNKNOWN (' || C.USER_ID || ')') AS USER_NAME,
-        U.EMAIL,
-        U.FIRST_NAME,
-        U.LAST_NAME,
-        C.SOURCE,
-        C.USAGE_TIME::DATE AS USAGE_DATE,
-        COUNT(*) AS REQUESTS,
-        SUM(COALESCE(C.TOKEN_CREDITS, 0)) AS CREDITS,
-        SUM(COALESCE(C.TOKENS, 0)) AS TOKENS,
-        MIN(C.USAGE_TIME) AS FIRST_TS,
-        MAX(C.USAGE_TIME) AS LAST_TS
-    FROM combined C
-    LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.USERS U ON C.USER_ID = U.USER_ID
-    GROUP BY 1, 2, 3, 4, 5, 6
-)
+{_user_daily_cte(LIVE_DERIVE_DAYS)}
 SELECT * FROM user_daily
 WHERE {outer_scope if outer_scope else '1 = 1'}
 ORDER BY USAGE_DATE, USER_NAME
@@ -97,24 +108,7 @@ def cortex_code_user_rollup(days: int, company: str = "ALL") -> str:
     # ~50-row set), not per raw usage row — COMPANY_FOR_USER stays cheap.
     outer_scope = companies.user_clause(company, "USER_NAME")
     return f"""
-WITH combined AS ({_COMBINED_CODE_USAGE.format(days=days)}),
-user_daily AS (
-    SELECT
-        COALESCE(U.NAME, 'UNKNOWN (' || C.USER_ID || ')') AS USER_NAME,
-        U.EMAIL,
-        U.FIRST_NAME,
-        U.LAST_NAME,
-        C.SOURCE,
-        C.USAGE_TIME::DATE AS USAGE_DATE,
-        COUNT(*) AS REQUESTS,
-        SUM(COALESCE(C.TOKEN_CREDITS, 0)) AS CREDITS,
-        SUM(COALESCE(C.TOKENS, 0)) AS TOKENS,
-        MIN(C.USAGE_TIME) AS FIRST_TS,
-        MAX(C.USAGE_TIME) AS LAST_TS
-    FROM combined C
-    LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.USERS U ON C.USER_ID = U.USER_ID
-    GROUP BY 1, 2, 3, 4, 5, 6
-),
+{_user_daily_cte(days)},
 by_user AS (
 SELECT
     USER_NAME,

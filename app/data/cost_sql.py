@@ -18,6 +18,7 @@ from app.data.common import (
     ai_service_predicate,
     and_where,
     bounded_days,
+    cs_by_query_type_projection,
     resolve_effective_window,
     scope_window_where,
 )
@@ -472,6 +473,21 @@ ORDER BY DB_BYTES DESC
 """
 
 
+def _calendar_month_span(prior: bool) -> tuple[str, str]:
+    """Account-tz (America/Chicago) month-to-date ``[lo, hi)`` span, or the prior
+    completed calendar month when ``prior``. Shared verbatim by
+    storage_by_database_calendar and its _live twin so the two never drift.
+    Session-tz CURRENT_DATE() drifts a day at the month boundary — blanking the
+    current-month panel and mislabeling the prior month; see the callers."""
+    if prior:
+        lo = f"DATE_TRUNC('month', DATEADD('month', -1, {account_today_sql()}))"
+        hi = account_month_start_sql()
+    else:
+        lo = account_month_start_sql()
+        hi = account_today_sql()
+    return lo, hi
+
+
 def storage_by_database_calendar(company: str = "ALL", database: str = "", prior: bool = False) -> str:
     """Per-database storage on the CALENDAR-month billing basis (item 7,
     2026-07-14): average of daily bytes over the current month-to-date
@@ -481,12 +497,7 @@ def storage_by_database_calendar(company: str = "ALL", database: str = "", prior
     # other calendar-month surfaces. Session-tz CURRENT_DATE() drifts a day at the month
     # boundary — blanking the current-month panel and mislabeling the prior month, and
     # disagreeing with account-anchored siblings (round-2 bug hunt).
-    if prior:
-        lo = f"DATE_TRUNC('month', DATEADD('month', -1, {account_today_sql()}))"
-        hi = account_month_start_sql()
-    else:
-        lo = account_month_start_sql()
-        hi = account_today_sql()
+    lo, hi = _calendar_month_span(prior)
     where = and_where(f"DAY >= {lo}", f"DAY < {hi}",
                       companies.database_company_scope(company),
                       companies.database_equals_clause(database))
@@ -516,12 +527,7 @@ def storage_by_database_calendar_live(company: str = "ALL", database: str = "", 
     # other calendar-month surfaces. Session-tz CURRENT_DATE() drifts a day at the month
     # boundary — blanking the current-month panel and mislabeling the prior month, and
     # disagreeing with account-anchored siblings (round-2 bug hunt).
-    if prior:
-        lo = f"DATE_TRUNC('month', DATEADD('month', -1, {account_today_sql()}))"
-        hi = account_month_start_sql()
-    else:
-        lo = account_month_start_sql()
-        hi = account_today_sql()
+    lo, hi = _calendar_month_span(prior)
     where = and_where(f"USAGE_DATE >= {lo}", f"USAGE_DATE < {hi}",
                       companies.database_company_scope(company),
                       companies.database_equals_clause(database))
@@ -1043,18 +1049,12 @@ def cs_by_query_type(days: int, company: str = "ALL", warehouse: str = "", *, bo
         _wh_company_scope(company) if not warehouse else "",   # MC-1: COMPANY_SCOPE-aware
         f"WAREHOUSE_NAME = {sql_literal(warehouse)}" if warehouse else "",
     )
-    return f"""
-SELECT
-    QUERY_TYPE,
-    COUNT(*) AS QUERIES,
-    ROUND(SUM(CREDITS_USED_CLOUD_SERVICES), 4) AS CS_CREDITS,
-    ROUND(SUM(CREDITS_USED_CLOUD_SERVICES) / NULLIF(COUNT(*), 0) * 1000, 4) AS CS_CREDITS_PER_1K
-FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE {where}
-GROUP BY QUERY_TYPE
-ORDER BY CS_CREDITS DESC
-LIMIT 12
-"""
+    return cs_by_query_type_projection(
+        "COUNT(*)",
+        "SUM(CREDITS_USED_CLOUD_SERVICES)",
+        "SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY",
+        where,
+    )
 
 
 def object_cost_recon(days: int = 7) -> str:

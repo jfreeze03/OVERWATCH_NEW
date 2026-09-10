@@ -149,3 +149,27 @@ def day_literal(day: object) -> str:
         return f"'{day.isoformat()}'::DATE"
     parsed = _date.fromisoformat(str(day).strip())
     return f"'{parsed.isoformat()}'::DATE"
+
+
+def cs_by_query_type_projection(count_expr: str, credits_expr: str,
+                                source: str, where: str) -> str:
+    """Shared SELECT tail for the cs_by_query_type live/mart twins (dedup C4).
+
+    The two builders emit a byte-identical projection + ORDER/LIMIT tail; they
+    differ only in the count expr (``COUNT(*)`` live vs ``SUM(RUNS)`` mart), the
+    credits expr (``SUM(CREDITS_USED_CLOUD_SERVICES)`` vs ``SUM(CS_CREDITS)``),
+    the FROM object, and the WHERE clause. Keep this string byte-for-byte — it
+    is a documented live/mart twin contract (tests/test_perf_group_a.py).
+    """
+    return f"""
+SELECT
+    QUERY_TYPE,
+    {count_expr} AS QUERIES,
+    ROUND({credits_expr}, 4) AS CS_CREDITS,
+    ROUND({credits_expr} / NULLIF({count_expr}, 0) * 1000, 4) AS CS_CREDITS_PER_1K
+FROM {source}
+WHERE {where}
+GROUP BY QUERY_TYPE
+ORDER BY CS_CREDITS DESC
+LIMIT 12
+"""

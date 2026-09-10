@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.535.0 - WS-C builder de-duplication: five shared SQL helpers, byte-identical (2026-09-10)
+
+Ship #3 of the reviewed performance/consolidation plan — the query-consolidation work-stream (WS-C).
+Five families of duplicated SQL were collapsed to a single source of truth each, with **zero change
+to the emitted SQL**: every builder still produces the exact same string, proved by a full
+arg-matrix diff of all ~20k emitted-SQL lines against the prior release (only the new helper
+functions themselves appear as additions; no existing builder's output changed a byte). App-code
+only (redeploy); no migration. The SQL-substring lock tests remain the drift safety net going forward.
+
+- **C1 — admin-role tiers codified (as-is).** The five inlined `ROLE IN (...)` / `ROLE_NAME IN (...)`
+  admin-role literals scattered across `security_sql.py` are now four named tuples
+  (`ADMIN_HOLDER_ROLES`, `BREAK_GLASS_ROLES`, `ELEVATED_ROLES`, `REACHES_ADMIN_ROLES`) emitted through
+  one `_admin_roles_in(column, roles)` helper — one source of truth, exact membership and order
+  preserved. Seven call sites de-duplicated; two single-use sites (governance_counts' plain-string
+  literal, effective_access' genuine two-line SQL list) stay inline for byte-identity and are
+  documented at the definition.
+- **C2 — Cortex Code user-daily CTE shared.** The identical `combined` + `user_daily` CTE inlined in
+  both `cortex_code_user_daily` and `cortex_code_user_rollup` becomes one `_user_daily_cte(days)`
+  helper. `cortex_code_daily` (different grain) is intentionally left alone.
+- **C3 — calendar-month span shared.** The seven-line account-tz month-anchor block duplicated verbatim
+  in `storage_by_database_calendar` and its `_live` twin becomes `_calendar_month_span(prior)`; the two
+  can no longer drift at a month boundary. (The SELECT/projection skeleton for the six storage builders
+  was reviewed and deliberately NOT extracted — its hand-tuned per-column alignment is literal
+  formatting, not a computable rule, so a shared emitter would be anti-dedup.)
+- **C4 — cs_by_query_type projection tail shared.** The identical SELECT/GROUP/ORDER/LIMIT tail of the
+  live `cs_by_query_type` and its `cs_by_query_type_mart` twin becomes one
+  `cs_by_query_type_projection(count_expr, credits_expr, source, where)` helper in `common.py`,
+  parameterized by only the four points where the two genuinely differ.
+- **C5 — COVERED_DAYS served-span scalar shared.** The window-level `(SELECT COUNT(DISTINCT DAY) ...)`
+  scalar duplicated in `eff_idle_analysis` and `eff_sizing_profile` becomes `_covered_days_scalar(where)`.
+
 ## 4.534.0 - Deeper copy pass: section headers de-glossed, Brief help split (2026-09-10)
 
 Ship #2 of the reviewed less-AI plan — the copy that matches the flat visuals from v4.533. App-code

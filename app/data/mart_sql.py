@@ -21,6 +21,7 @@ from app.data.common import (
     ai_service_predicate,
     and_where,
     bounded_days,
+    cs_by_query_type_projection,
     not_ai_service_predicate,
     resolve_effective_window,
     scope_window_where,
@@ -506,18 +507,12 @@ def cs_by_query_type_mart(days: int, company: str = "ALL", warehouse: str = "",
     which is exactly why callers must read the served window via
     components.served_days() instead of assuming the requested one.
     """
-    return f"""
-SELECT
-    QUERY_TYPE,
-    SUM(RUNS) AS QUERIES,
-    ROUND(SUM(CS_CREDITS), 4) AS CS_CREDITS,
-    ROUND(SUM(CS_CREDITS) / NULLIF(SUM(RUNS), 0) * 1000, 4) AS CS_CREDITS_PER_1K
-FROM {mart_object("MART_CLOUD_SVC_DAILY")}
-WHERE {_cloud_svc_where(days, company, warehouse, bounds=bounds)}
-GROUP BY QUERY_TYPE
-ORDER BY CS_CREDITS DESC
-LIMIT 12
-"""
+    return cs_by_query_type_projection(
+        "SUM(RUNS)",
+        "SUM(CS_CREDITS)",
+        mart_object("MART_CLOUD_SVC_DAILY"),
+        _cloud_svc_where(days, company, warehouse, bounds=bounds),
+    )
 
 
 def open_alert_events(limit: int = 200, company: str = "ALL") -> str:

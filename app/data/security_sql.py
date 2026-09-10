@@ -12,6 +12,26 @@ from app.data.common import (
     scope_window_where,
 )
 
+# --- Admin-role tiers (codified AS-IS per owner decision 2026-09-10; byte-identical to the
+# former inlined literals — one source of truth, no behaviour change). Two single-use sites
+# stay inline for byte-identity and are commented at their call sites: governance_counts uses
+# BREAK_GLASS on column ROLE inside a plain (non-f) SQL string, and role_access_paths applies
+# REACHES_ADMIN_ROLES as a genuine two-line SQL list. -------------------------------------
+ADMIN_HOLDER_ROLES: tuple[str, ...] = ("SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS")
+BREAK_GLASS_ROLES: tuple[str, ...] = ("ACCOUNTADMIN", "SNOW_ACCOUNTADMINS")
+ELEVATED_ROLES: tuple[str, ...] = (
+    "SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS", "ACCOUNTADMIN", "SECURITYADMIN", "SYSADMIN",
+)
+REACHES_ADMIN_ROLES: tuple[str, ...] = (
+    "SNOW_ACCOUNTADMINS", "ACCOUNTADMIN", "SNOW_SYSADMINS", "SECURITYADMIN",
+)
+
+
+def _admin_roles_in(column: str, roles: tuple[str, ...]) -> str:
+    """Emit ``<column> IN ('R1', 'R2', ...)`` — byte-identical to the former inlined
+    single-line literals (single quotes, ', ' separators, exact role order)."""
+    return f"{column} IN (" + ", ".join(f"'{r}'" for r in roles) + ")"
+
 
 def users_without_mfa(company: str = "ALL") -> str:
     """Users lacking MFA who actually password-login — evidence from
@@ -322,7 +342,7 @@ def admin_role_holders(company: str = "ALL") -> str:
     with access are SNOW_ACCOUNTADMINS / SNOW_SYSADMINS); short, known list."""
     where = and_where(
         "DELETED_ON IS NULL",
-        "ROLE IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS')",
+        _admin_roles_in("ROLE", ADMIN_HOLDER_ROLES),
         companies.user_clause(company, "GRANTEE_NAME"),
     )
     return f"""
@@ -385,7 +405,7 @@ WITH grouped AS (
                WHEN q.QUERY_TYPE IN ('CREATE_TABLE', 'CREATE_TABLE_AS_SELECT')
                     AND MAX(IFF(q.QUERY_TEXT ILIKE '%OR REPLACE%', 1, 0)) = 1 THEN 55
                ELSE 30 END
-          + IFF(q.ROLE_NAME IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS'), 10, 0)
+          + IFF({_admin_roles_in('q.ROLE_NAME', BREAK_GLASS_ROLES)}, 10, 0)
           + IFF(COALESCE(q.DATABASE_NAME, '') ILIKE '%PROD%', 10, 0)
         ) AS RISK_SCORE
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
@@ -470,7 +490,7 @@ def admin_role_activity(days: int, company: str = "ALL", *, bounds: tuple | None
               else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     where = and_where(
         _scope,
-        "ROLE_NAME IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')",
+        _admin_roles_in("ROLE_NAME", BREAK_GLASS_ROLES),
         companies.user_scope_subquery(company, "USER_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY",
                                       distinct_where=_scope),
     )
@@ -878,8 +898,7 @@ def admin_grant_context(days: int = 90, company: str = "ALL") -> str:
     days = bounded_days(days, 180)
     date_pred = f"g.CREATED_ON >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
     where = and_where(
-        "g.ROLE IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS', 'ACCOUNTADMIN', "
-        "'SECURITYADMIN', 'SYSADMIN')",
+        _admin_roles_in("g.ROLE", ELEVATED_ROLES),
         date_pred,
         companies.user_clause(company, "g.GRANTEE_NAME"),
     )
@@ -1171,7 +1190,7 @@ def new_network_logins(days: int = 7, company: str = "ALL", *, bounds: tuple | N
                          else f"F.FIRST_SEEN >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     admin_where = and_where(
         "DELETED_ON IS NULL",
-        "ROLE IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS')",
+        _admin_roles_in("ROLE", ADMIN_HOLDER_ROLES),
         companies.user_clause(company, "GRANTEE_NAME"),
     )
     return f"""
@@ -1633,7 +1652,7 @@ def new_network_logins_fact(days: int = 7, company: str = "ALL", *, bounds: tupl
                          else f"f.FIRST_SEEN >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     admin_where = and_where(
         "DELETED_ON IS NULL",
-        "ROLE IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS')",
+        _admin_roles_in("ROLE", ADMIN_HOLDER_ROLES),
         companies.user_clause(company, "GRANTEE_NAME"),
     )
     return f"""
@@ -1732,7 +1751,7 @@ def admin_role_activity_fact(days: int, company: str = "ALL") -> str:
     days = bounded_days(days, maximum=90)
     where = and_where(
         f"EVENT_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
-        "ROLE_NAME IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')",
+        _admin_roles_in("ROLE_NAME", BREAK_GLASS_ROLES),
         companies.user_clause(company, "USER_NAME"),
     )
     return f"""
