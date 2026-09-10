@@ -1476,7 +1476,7 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
 def render() -> None:
     f = filters()
     # F1: H1 matches the sidebar nav label; the subtitle already carries governance.
-    page_header("Security", "Hygiene and governance posture — not a threat-detection SOC.", icon_name="security",
+    page_header("Security", "Hygiene and governance posture. Not a threat-detection SOC.", icon_name="security",
                 scope_note=f"{f['company']} · {f['window_label']}")
     st.caption(
         "Access control is Snowflake RBAC — this page reports posture and grants or revokes "

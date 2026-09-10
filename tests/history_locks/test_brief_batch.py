@@ -28,7 +28,7 @@ def test_brief_reads_go_out_as_two_batches():
 
 def test_brief_keeps_its_honesty_and_scope():
     assert _BRIEF.count("ACCOUNT_USAGE") == 0                 # budget stays zero
-    assert "refuses to invent numbers" in _BRIEF              # telemetry honesty survives
+    assert "Figures withheld until they load" in _BRIEF       # unreachable telemetry still withholds, not zero
     assert "f = filters()" in _BRIEF                          # hoisted once
     assert 'company = f["company"]' in _BRIEF
     assert _BRIEF.count("filters()") == 1

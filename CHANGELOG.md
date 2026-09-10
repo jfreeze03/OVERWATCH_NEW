@@ -1,5 +1,42 @@
 # Changelog
 
+## 4.529.0 - Voice & type quick-wins: less-AI copy pass + one page-title size (2026-09-10)
+
+Phase 1 of the reviewed performance/polish plan — copy voice and typography only. No query, mart,
+threshold, or number changed; every rewrite preserves the exact facts, scope caveats, and 7am/8am SLA
+targets, and only changes the voice. App-code only (ships on the next redeploy).
+
+**Copy — read less like a bot (WS-D quick-wins):**
+
+- **Page-header subtitles** rewritten on 7 pages from rhetorical questions / tricolons / colon-lists to
+  flat noun phrases — e.g. Admin "…can you trust its numbers?" → "Deployment health: installed, current,
+  and internally consistent."; Cost → "Spend, contract runway, and proven savings."; Brief "numbers first,
+  fires second, asks third" → "Top numbers, open fires, and the day's asks." (Overview + Operations were
+  already fine and are untouched.)
+- **Rhetorical-question section headers → declarative labels** (5): "SLA finish forecast — will the nightly
+  cycle beat 7am?" → "SLA finish forecast (vs 7am target)"; "Mart reconciliation — do the numbers MATCH the
+  source?" → "Mart reconciliation (marts vs source)"; plus Fire-drill scoreboard, Restated days, Day replay.
+- **"Honesty theatre" removed** — the app no longer narrates its own virtue: "the Brief refuses to invent
+  numbers" → "Figures withheld until they load"; "Green means OVERWATCH pays for itself" → "Green: verified
+  savings exceed the app's run cost"; "a real score would be a lie" → "the score is withheld until both are
+  present"; and the "(never template rows)"/"no placeholder rows"/"never invented"/"stays honest and empty"
+  tics dropped.
+- **"deliberately" deleted** from user-visible strings (3); Overview empty-states switched from an appended
+  em-dash justification to two short clauses; the green verdict line drops the soft adjective "comfortable".
+
+**Typography (WS-E quick-wins):**
+
+- **One page-title size.** The global `h1` rendered 1.72rem while the icon page-heading rendered 1.4rem, so
+  a page's title size depended on whether the caller passed an icon. Both now resolve from a named
+  `--fs-title` (1.4rem) token — the start of a single-source type scale (`--fs-title`, `--fs-h3`).
+- **tabular-nums honesty.** The `td,th` figure rule only reaches HTML tables; annotated it so it's clear the
+  real numeral-alignment mechanism for the canvas data tables is `st.column_config.NumberColumn` / the Styler
+  path, not the (inert-for-st.dataframe) CSS.
+
+Deferred to later phases (need your call): the phantom "Inter" font stack (E1 — font decision), the
+gradient-CTA flatten (E3 — needs an eyeball), and the ~25 "Title — gloss" section headers + Brief help
+rewrites + uppercase-label restraint (WS-D/E medium pass).
+
 ## 4.528.0 - Tier-A performance now-wins: 4 hot reads cut, adversarially verified (2026-09-10)
 
 Four Tier-A (app-code-only, no migration) performance wins from the telemetry review, each

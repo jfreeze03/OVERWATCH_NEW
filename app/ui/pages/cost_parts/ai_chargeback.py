@@ -165,7 +165,7 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
         rollup_res = replace(live_res, df=rollup_from_user_daily(live_res.df, days, bounds=bounds))
     if not guard(rollup_res,
                  "No Cortex Code usage (Snowsight or CLI) recorded in this window for this scope.",
-                 setup_hint="If these views are not enabled in this account, this tab stays honest and empty."):
+                 setup_hint="If these views aren't enabled in this account, this tab stays empty."):
         return
 
     # P8/C7: one divisor for the whole tab — days the scope has actually been

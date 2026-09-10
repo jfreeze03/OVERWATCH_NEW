@@ -669,8 +669,8 @@ def render() -> None:
             "severity": _score_sev,
             "spark": (None if _score_incomplete else score_series["SCORE"].tail(14).tolist()
                       if not score_series.empty else None),
-            "help": ("Throughput or alerts didn't load — a real score would be a lie while "
-                     "health signals are missing (see the deductions below)."
+            "help": ("Throughput or alerts didn't load; the score is withheld until both are "
+                     "present (see the deductions below)."
                      if _score_incomplete
                      else "Throughput & pressure (queries, failures, queue, spill) read the "
                           "previous + current calendar day and are company-scoped; budget "
@@ -845,18 +845,18 @@ def render() -> None:
         )
         panel_help(
             "The real ACTION_QUEUE — the work waiting on an owner — ranked by severity, then "
-            "overdue, then estimated dollars, then age (never template rows). When rows appear "
+            "overdue, then estimated dollars, then age. When rows appear "
             "here, click one to open it in the Control Room queue and assign or resolve it."
         )
         # actions_res loaded above the score (triage #3) — reused here.
         if not actions_res.ok:
-            empty_state("needs_setup", "Action queue isn't installed yet — no placeholder rows.")
+            empty_state("needs_setup", "Action queue isn't installed yet.")
         elif actions_res.empty:
-            empty_state("clean", "Action queue is empty — nothing is waiting on an owner.")
+            empty_state("clean", "Action queue is empty. Nothing waiting on an owner.")
         else:
             ranked = rank_actions(actions_res.df, limit=5)
             if ranked.empty:
-                empty_state("clean", "No OPEN actions — everything in the queue is done or dropped.")
+                empty_state("clean", "No open actions. Everything in the queue is done or dropped.")
             else:
                 # rec10: a clickable surface, not a dead read-only wall — a row click
                 # jumps to the Control Room where the queue is triaged (matching CR).
@@ -1043,8 +1043,8 @@ def render() -> None:
         else:
             empty_state(
                 "needs_setup",
-                "No spend history for this scope yet — the hourly task fills it in "
-                "once installed. Empty until then, never invented."
+                "No spend history for this scope yet. The hourly task fills it in "
+                "once installed."
             )
     else:
         daily_budget = (budget / month_days(account_today())[0]) if budget > 0 else 0.0

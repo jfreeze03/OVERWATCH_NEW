@@ -116,7 +116,7 @@ def render() -> None:
     rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
     ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
     page_header("Cost & Contract",
-                "Where the money goes, whether the contract holds, and what savings are proven.",
+                "Spend, contract runway, and proven savings.",
                 scope_note=f"{f['company']} · {f['window_label']}", icon_name="cost")
     # #3: operator gating from the VIEWER identity + allowlist, not CURRENT_ROLE().
     is_operator = _is_operator()

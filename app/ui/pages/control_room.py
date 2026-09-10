@@ -410,7 +410,7 @@ def _day_replay() -> None:
     from app.logic.formulas import account_today
     from app.logic.replay import replay_headlines
 
-    section_header("Day replay — what changed?")
+    section_header("Day replay")
     pick = st.date_input("Day", value=account_today() - timedelta(days=1),
                          min_value=account_today() - timedelta(days=120),
                          max_value=account_today(), key="cr_replay_day")
@@ -567,7 +567,7 @@ def render() -> None:
     company, days = f["company"], f["days"]
     settings = load_settings(_PAGE)
     rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
-    page_header("Control Room", "Morning triage: what broke, what's burning, what's stale.", icon_name="control",
+    page_header("Control Room", "Triage: recent breaks, active fires, and stale sources.", icon_name="control",
                 scope_note=f"{company} · {f['window_label']}"
                            + (f" · {f['database']}" if f["database"] else ""))
 

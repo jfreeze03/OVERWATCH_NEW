@@ -222,7 +222,7 @@ def render() -> None:
     company = f["company"]
     # F1: H1 matches the sidebar nav label verbatim; the subtitle keeps the
     # morning identity.
-    page_header("Brief", "Your morning one-scroll: numbers first, fires second, asks third.", icon_name="brief")
+    page_header("Brief", "Top numbers, open fires, and the day's asks.", icon_name="brief")
     section_filter_contract(
         f,
         applies=(),
@@ -330,7 +330,7 @@ def render() -> None:
                     "raised — the responsiveness signal a raw count hides. Work the Fires below.",
         })
     if not strip_up:
-        st.warning("Telemetry marts unreachable — the Brief refuses to invent numbers. "
+        st.warning("Telemetry marts unreachable. Figures withheld until they load. "
                    + (strip.error or ""))
     exh = _b_rec.get("exh") or run(mart_sql.contract_exhaustion(), page=_PAGE, key="brief_exhaustion",
               tier="recent", source="SETTINGS + FACT_METERING_DAILY")
@@ -373,8 +373,8 @@ def render() -> None:
                            if app_usd is not None else "off",
             "help": "VERIFIED ledger items only — proven by before/after actuals, never "
                     "mixed with estimates. App cost = the shared app/loader warehouse's trailing 30-day "
-                    "(monthly) run cost -- same horizon as the monthly-magnitude savings. Green means "
-                    "OVERWATCH pays for itself.",
+                    "(monthly) run cost -- same horizon as the monthly-magnitude savings. Green: "
+                    "verified savings exceed the app's run cost.",
         })
         if pipeline > 0:
             kpis.append({
@@ -382,7 +382,7 @@ def render() -> None:
                 "value": format_usd(pipeline),
                 "delta_color": "off",
                 "help": "Open ESTIMATED items awaiting the monthly verifier. "
-                        "Deliberately shown apart from verified.",
+                        "Shown separately from verified savings.",
             })
     _inc_company = company
     _inc = _b_live.get("inc") or run(mart_sql.open_incidents(5, _inc_company), page=_PAGE,
@@ -481,7 +481,7 @@ def render() -> None:
             elif 0 <= _dl <= 90:
                 _vsig.append(Signal("warn", f"contract runway {_dl:,.0f} days"))
     page_verdict_line(page_verdict(
-        _vsig, healthy="no open criticals or incidents, and contract runway is comfortable"))
+        _vsig, healthy="no open criticals or incidents; contract runway healthy"))
     contract_runway_bar(contract_runway(exh.df.iloc[0]) if exh.usable() else None)
     panel_help(
         "Your one-scroll morning read: the headline numbers, then open fires, then the "

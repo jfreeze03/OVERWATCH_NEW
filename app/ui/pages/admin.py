@@ -1379,7 +1379,7 @@ def _canary_tab() -> None:
         _styled(view, height=420)
 
     st.divider()
-    section_header("Mart reconciliation — do the numbers MATCH the source?", "", "cost")
+    section_header("Mart reconciliation (marts vs source)", "", "cost")
     st.caption(
         "Freshness proves the loaders ran; this compares mart totals against live "
         "ACCOUNT_USAGE over the same complete window. ±2% is normal late-arrival noise; "
@@ -1409,7 +1409,7 @@ def _canary_tab() -> None:
         result_caption(recon)
 
     st.divider()
-    section_header("Fire-drill scoreboard — does the page reach a human?", "", "alerts")
+    section_header("Fire-drill scoreboard (delivery reach)", "", "alerts")
     from app.logic.drill import drill_report
     drills = run(mart_sql.drill_history(14), page=_PAGE, key="drill_hist", tier="recent",
                  source="ALERT_EVENTS (OPS_ALERT_DRILL)")
@@ -1446,7 +1446,7 @@ def _canary_tab() -> None:
             st.caption("Resolve drills as EXPECTED — they're excluded from rule precision.")
 
     st.divider()
-    section_header("Restated days — did a reported number move after close?", "", "admin")
+    section_header("Restated days (post-close changes)", "", "admin")
     rest = run(mart_sql.metering_restatements(60), page=_PAGE, key="restatements",
                tier="recent", source="FACT_METERING_DAILY LOAD_TS lag")
     if rest.ok and rest.empty:
@@ -1568,7 +1568,7 @@ def _setup_progress_tab() -> None:
 @safe_page(_PAGE)
 def render() -> None:
     f = filters()
-    page_header("Admin", "Is this deployment installed, current, and internally healthy — can you trust its numbers?", icon_name="admin")
+    page_header("Admin", "Deployment health: installed, current, and internally consistent.", icon_name="admin")
     # #3: operator gating resolves the VIEWER identity against the allowlist, not
     # CURRENT_ROLE() (which is the app owner's role for every viewer under owner's-rights
     # SiS). Falls back to the role->profile check off-SiS. `profile` still drives page nav.

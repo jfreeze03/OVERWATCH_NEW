@@ -1315,7 +1315,7 @@ def _sla_finish_forecast_panel(days: int = 0) -> None:
     nights, and a breach is projected before it happens. Start-drift (the cycle beginning later) is
     called out as a second cause, since a late start alone can blow the deadline. Config-gated on
     ETL_CONTROL_STATUS_FQN; the deadline + anchor workflows are Admin-editable (7am/8am defaults)."""
-    section_header("SLA finish forecast — will the nightly cycle beat 7am?",
+    section_header("SLA finish forecast (vs 7am target)",
                    "warn", "pipeline", anchor="ops-sla-finish")
     settings = load_settings(_PAGE)
     fqn = str(settings.get("ETL_CONTROL_STATUS_FQN") or "").strip()

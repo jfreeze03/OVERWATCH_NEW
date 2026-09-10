@@ -57,7 +57,11 @@ def test_p0_neutral_section_header_has_no_resting_gradient():
 
 
 def test_p0_hero_header_shrunk():
-    assert "font-size:1.4rem" in _rule(".ow-page-heading h1 {")
+    # v4.529 E2: the page-title size is now a named token so the icon and no-icon paths
+    # (and the global h1) are one size; the token resolves to 1.4rem.
+    assert "font-size:var(--fs-title)" in _rule(".ow-page-heading h1 {")
+    assert "font-size:var(--fs-title)" in _rule("h1 {")   # raw st.title path matches too
+    assert "--fs-title:1.4rem" in _CSS
     comp = (_ROOT / "app" / "ui" / "components.py").read_text(encoding="utf-8")
     assert "icon(icon_name, 20)" in comp   # 26 -> 20
 

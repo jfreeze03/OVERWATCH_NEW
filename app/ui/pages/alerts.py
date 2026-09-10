@@ -1519,7 +1519,7 @@ def render() -> None:
             st.caption(
                 "Thresholds are data, not code: update ALERT_CONFIG and the next scan uses them. "
                 "Statistical anomaly detection runs in-app (Cost & Contract > Spend & Attribution, Operations > Warehouses) "
-                "and is deliberately separate from these deterministic rules."
+                "and is separate from these deterministic rules."
             )
             st.markdown("**Rule precision (90d)** — is each rule worth its pages?")
             prec = run(mart_sql.rule_precision(90), page=_PAGE, key="rule_precision",

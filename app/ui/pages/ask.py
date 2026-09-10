@@ -187,8 +187,8 @@ def _render_result(result: AnswerResult, company: str, params: AskParams,
 def render() -> None:
     page_header(
         "Ask OVERWATCH",
-        "Ask in plain English. Answers are grounded in real query output — "
-        "or you get an honest \"I can't answer that yet,\" never a guess.",
+        "Ask in plain English. Answers come from real query output, or a clear "
+        "\"I can't answer that yet.\" No guesses.",
     )
 
     f = filters()

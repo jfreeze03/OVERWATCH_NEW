@@ -42,7 +42,7 @@ def render() -> None:
     bounds = f["bounds"]
     page_header(
         "Decision Studio",
-        "Plan the work: portfolio, objectives, product economics, cost truth, scenarios, experiments.",
+        "Portfolio, objectives, product economics, scenarios, and experiments.",
         icon_name="target",
         scope_note=f"{f['company']} · {f['window_label']}",
     )

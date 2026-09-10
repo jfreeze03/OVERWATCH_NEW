@@ -402,7 +402,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             st.caption(
                 f"Actionable $ = idle minus one ~{IDLE_TARGET_SUSPEND_SEC}s suspend/resume tail per active "
                 "metered hour, and only where SHOW WAREHOUSES confirms the current timer is above the "
-                "target or disabled. Unknown and already-tuned settings are deliberately excluded."
+                "target or disabled. Unknown and already-tuned settings are excluded."
             )
             if not actionable.empty:
                 st.caption(

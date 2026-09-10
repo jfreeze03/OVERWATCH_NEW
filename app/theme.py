@@ -41,6 +41,11 @@ _TOKENS = """
   --ow-ease:150ms cubic-bezier(0.22,1,0.36,1);
   --ow-font:'Inter var','Inter','SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
   --ow-mono:'SF Mono','JetBrains Mono','Roboto Mono',ui-monospace,Menlo,Consolas,monospace;
+  /* Named type scale (v4.529 E2): one source for the heading sizes so every page
+     title is the SAME size regardless of whether the caller passed an icon (the raw
+     st.title path used to render 1.72rem while the icon path rendered --fs-title).
+     Migrate the remaining scattered magic sizes here over time. */
+  --fs-title:1.4rem; --fs-h3:1.06rem;
 }
 </style>
 """
@@ -66,17 +71,21 @@ _CSS = """
 .main .block-container > div { gap:0.42rem; }
 html, body, [class*="css"] { font-family:var(--ow-font); }
 h1,h2,h3,h4 { letter-spacing:0; color:var(--ow-ink); }
-h1 { font-weight:750; font-size:1.72rem; } h2 { font-weight:700; }
-h3 { font-weight:680; font-size:1.06rem; }
+h1 { font-weight:750; font-size:var(--fs-title); } h2 { font-weight:700; }
+h3 { font-weight:680; font-size:var(--fs-h3); }
 p,li,span,label,.stMarkdown { color:var(--ow-ink-soft); }
 [data-testid="stCaptionContainer"],.stCaption,small { color:var(--ow-ink-mute) !important; }
+/* tabular figures. NOTE: the td,th arm only reaches HTML tables (st.table / markdown);
+   st.dataframe paints to a canvas grid that CSS can't style, so aligned numerals in the
+   real data tables are guaranteed by st.column_config.NumberColumn / the Styler printf
+   path in components._render_table, NOT by this rule. */
 [data-testid="stMetricValue"],.ow-num,td,th { font-variant-numeric:tabular-nums; }
 
 /* F9: Group ▸ Page ▸ Section orientation kicker above the page title. */
 .ow-breadcrumb { font-size:0.68rem; font-weight:600; letter-spacing:0.06em;
   text-transform:uppercase; color:var(--ow-ink-mute); margin:0 0 2px 1px; }
 .ow-page-heading { display:flex; align-items:center; gap:11px; margin:-2px 0 2px 0; }
-.ow-page-heading h1 { margin:0; padding:0; font-size:1.4rem; font-weight:750; letter-spacing:0; }
+.ow-page-heading h1 { margin:0; padding:0; font-size:var(--fs-title); font-weight:750; letter-spacing:0; }
 .ow-page-heading__icon { color:var(--ow-accent); display:inline-flex; flex:0 0 auto; }
 
 /* v4.461 P0 flatten: cards/metrics/stats communicate elevation with a slightly
