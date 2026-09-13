@@ -1256,7 +1256,7 @@ def _ai_guardrails_tab(company: str) -> None:
     # max_rows=200_000 matches the builders' own LIMIT: the frame is ORDER BY USAGE_DATE
     # ASC, so the default 5000-row cap would keep the OLDEST days and DROP the most RECENT
     # ones — rotting every velocity / NEW_USER flag (the flags read the last 7 days).
-    # The live fallback uses the SAME sql + tier="metadata" as the Cost page's live leg, so
+    # The live fallback uses the SAME sql + tier="recent" as the Cost page's live leg, so
     # its (sql,scope) cache is shared — the heavy scan is paid at most once across both
     # pages per TTL. probe=True suppresses the expected 002139 no-subscription absence.
     usage = run(mart27_sql.ai_code_user_daily(company), page=_PAGE,
@@ -1265,7 +1265,7 @@ def _ai_guardrails_tab(company: str) -> None:
                 max_rows=200_000)
     if not usage.usable():
         usage = run(cortex_sql.cortex_code_user_daily(company), page=_PAGE,
-                    key=f"coco_user_daily_{company}", tier="metadata",
+                    key=f"coco_user_daily_{company}", tier="recent",
                     source="CORTEX_CODE_*_USAGE_HISTORY (365d live fallback)",
                     probe=True, max_rows=200_000)
     if guard(usage, "No Cortex Code usage recorded for this scope."):

@@ -507,8 +507,9 @@ LIMIT 200
 # 15s EVERY render — 30 of the Cost page's 88 slow fetches — and the numbers
 # they compute are already in FACT_AI_USAGE_DAILY at (DAY, USER_NAME, SOURCE,
 # MODEL_NAME) grain from V061 loader arm [9]. These two readers reproduce the
-# live builders' output contracts column-for-column so the panel can go
-# fact-first with the live scans as fallback.
+# live builders' output contracts column-for-column. The Security AI-guardrails
+# panel reads them fact-first (live scan as fallback); the Cost user-attribution
+# panel is live-first as of 2026-09-13 and uses ai_code_user_rollup as its fallback.
 #
 # SOURCE <> 'Functions' on both: the live builders read ONLY the Snowsight/CLI
 # code views. The fact also carries the Functions arm (USER_NAME 'ACCOUNT',

@@ -123,11 +123,13 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
     computed in tested logic, and budget severities only exist when an AI
     budget is actually configured."""
     ai_budget = safe_float(settings.get("AI_MONTHLY_BUDGET_USD"))
-    # P2: FACT_AI_USAGE_DAILY (V061 loader arm [9]) already holds exactly what
-    # the two live CORTEX_CODE_* scans compute — 22s + 15s on EVERY render, 30
-    # of this page's 88 slow fetches. Go fact-first; the live scan only runs
-    # when the fact cannot cover the asked window (mart27_sql's coverage gate
-    # returns zero rows rather than a short answer).
+    # Live-first (owner ask 2026-09-13): the User attribution detail shows CURRENT
+    # Cortex Code usage, read straight from the live CORTEX_CODE_* usage views; the
+    # daily FACT_AI_USAGE_DAILY snapshot (V061 loader arm [9]) is kept ONLY as a
+    # resilience fallback on a transient live error. (It was fact-first in P2 to
+    # dodge the ~22s scan on every render; the owner accepts that cost here for
+    # freshness, and the whole tab is gated behind a "Load AI user attribution"
+    # toggle so the scan is opt-in, not ambient.)
     #
     # Deliberately NOT run_mart_first, for two reasons the helper cannot serve:
     #  1. probe=True. Accounts with no Cortex Code subscription fail with 002139
@@ -137,32 +139,41 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
     #  2. The live leg answers at a DIFFERENT grain on purpose (P9): ONE 365d
     #     user-day-source fetch under a days-independent cache key, from which
     #     BOTH this rollup and the daily-by-source chart are folded in pandas.
-    #     One 22s payment per TTL instead of two per window.
+    #     One scan per TTL instead of two per window.
     _lm = "_lm" if bounds is not None else ""
-    rollup_res = run(mart27_sql.ai_code_user_rollup(days, company, bounds=bounds), page=_PAGE,
-                     key=f"cortex_users_{company}_{days}{_lm}", tier="hourly",
-                     source="FACT_AI_USAGE_DAILY (Cortex Code, daily loader)")
-    live_res = None
-    if not rollup_res.usable():
-        live_res = run(cortex_sql.cortex_code_user_daily(company), page=_PAGE,
-                       key=f"cortex_user_daily_{company}", tier="metadata",
-                       source=("ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY "
-                               "(365d live fallback, window derived in-app)"),
-                       probe=True, max_rows=200_000)
-        if not live_res.ok and live_res.error_kind == "unknown_function":
-            # Live finding 2026-07-10 (Joe traced it): the CORTEX_CODE_* views
-            # internally call SYSTEM$GET_CORTEX_CODE_CLI_SUBSCRIPTION; without a
-            # Cortex Code subscription that function does not exist (002139), so
-            # OUR read throws even though our SQL never names it.
-            empty_state(
-                "needs_setup",
-                "Cortex Code usage telemetry is not available in this account/region yet - "
-                "Snowflake's usage views probe a subscription that is not present (002139). "
-                "This tab lights up on its own if Cortex Code lands; nothing is misconfigured.")
-            return
-        # Keep the live result's source/freshness/error for the caption and the
-        # guard; swap in the window-sliced rollup the panel actually renders.
+    # tier="recent": 5-min freshness with a 120s statement timeout — headroom for
+    # the ~25s secure-view scan that "metadata"'s 30s timeout could not safely carry
+    # as a primary read. The identical scan (same sql + tier) also backs the
+    # CoCo-efficiency panel and the Security AI-guardrails fallback via one shared
+    # (sql,scope) cache entry, so freshening it here freshens all three together.
+    live_res = run(cortex_sql.cortex_code_user_daily(company), page=_PAGE,
+                   key=f"cortex_user_daily_{company}", tier="recent",
+                   source=("ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY "
+                           "(365d live, window derived in-app)"),
+                   probe=True, max_rows=200_000)
+    if not live_res.ok and live_res.error_kind == "unknown_function":
+        # Live finding 2026-07-10 (Joe traced it): the CORTEX_CODE_* views
+        # internally call SYSTEM$GET_CORTEX_CODE_CLI_SUBSCRIPTION; without a
+        # Cortex Code subscription that function does not exist (002139), so
+        # OUR read throws even though our SQL never names it.
+        empty_state(
+            "needs_setup",
+            "Cortex Code usage telemetry is not available in this account/region yet - "
+            "Snowflake's usage views probe a subscription that is not present (002139). "
+            "This tab lights up on its own if Cortex Code lands; nothing is misconfigured.")
+        return
+    if live_res.ok:
+        # Live is the source of truth. An empty-but-ok frame = genuinely no usage
+        # (reported by the guard below); never fall back to a staler fact on empty.
         rollup_res = replace(live_res, df=rollup_from_user_daily(live_res.df, days, bounds=bounds))
+    else:
+        # Transient live error (timeout/other): degrade to the daily FACT snapshot so
+        # the panel still answers with the last loaded day rather than an error. The
+        # result_caption discloses the fact source and its older freshness.
+        live_res = None
+        rollup_res = run(mart27_sql.ai_code_user_rollup(days, company, bounds=bounds), page=_PAGE,
+                         key=f"cortex_users_{company}_{days}{_lm}", tier="hourly",
+                         source="FACT_AI_USAGE_DAILY (Cortex Code, daily loader - live scan unavailable)")
     if not guard(rollup_res,
                  "No Cortex Code usage (Snowsight or CLI) recorded in this window for this scope.",
                  setup_hint="If these views aren't enabled in this account, this tab stays empty."):
@@ -407,9 +418,9 @@ def _token_economics_panel(company: str, days: int, cap_credits: float, *, bound
         empty_state("no_data_yet", "No token-type rows in the selected window.")
         return
     # Per-user daily credits drive the credit / session / over-cap signals. Same days-independent
-    # cache key as _ai_users_tab's live leg, so this reuses that fetch when it ran.
+    # scan + tier ("recent") as _ai_users_tab's live leg, so this reuses that one shared fetch.
     ud_res = run(cortex_sql.cortex_code_user_daily(company), page=_PAGE,
-                 key=f"cortex_user_daily_{company}", tier="metadata",
+                 key=f"cortex_user_daily_{company}", tier="recent",
                  source="ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY (daily, window derived in-app)",
                  probe=True, max_rows=200_000)
     # econ (token grain) is ACCOUNT-WIDE — cortex_code_token_types has no company clause — so the

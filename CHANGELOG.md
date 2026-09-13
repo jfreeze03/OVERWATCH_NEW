@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.536.0 - Cost ▸ AI users: the User attribution detail is now live-first (2026-09-13)
+
+Owner ask: the CoCo **User attribution detail** should show CURRENT Cortex Code usage, not the daily-loader
+snapshot. The panel now reads the live 365d user-day-source scan (`cortex_code_user_daily`) FIRST and keeps
+the daily `FACT_AI_USAGE_DAILY` rollup only as a resilience fallback taken on a transient live error — so in
+normal operation the table (and its per-user token credits, spend, and projections) reflects live usage.
+App-code only (redeploy); no migration. The whole tab stays gated behind the "Load AI user attribution"
+toggle, so the ~25s live scan is opt-in, not ambient.
+
+- **Live-first read.** `_ai_users_tab` inverts its read order: live primary, fact fallback. The 002139
+  "no Cortex Code subscription" needs-setup state and the empty-window "no usage" state are preserved
+  exactly (an ok-but-empty live frame is the genuine answer and is never masked by falling back to a staler
+  fact). The daily-by-source chart continues to fold from the same single live fetch.
+- **Freshness / timeout.** The live read moves from `tier="metadata"` (4h cache, 30s statement timeout —
+  dangerously close to the scan's ~27s worst case) to `tier="recent"` (5-min freshness, 120s timeout). This
+  is both fresher and safer as a primary read.
+- **Shared scan kept coherent.** That same live scan is shared, through one `(sql, scope)` cache entry, by
+  the CoCo-efficiency review (same page) and the Security ▸ AI-guardrails fallback. All three consumers move
+  to `tier="recent"` together, so the single shared scan is preserved (no redundant double-scan) and the
+  latent 30s-timeout risk is removed everywhere it was read.
+- Verified by an adversarial pass (correctness + cache/tier/perf + completeness lenses); the perf-budget
+  `ACCOUNT_USAGE` count for `ai_chargeback.py` is unchanged (4). Lock tests updated: `test_v041`'s tab test
+  now asserts live-first order + `tier="recent"`; `test_ai_guardrails` and the sibling `test_v042` /
+  `test_prep_iac` narratives updated to match.
+
 ## 4.535.0 - WS-C builder de-duplication: five shared SQL helpers, byte-identical (2026-09-10)
 
 Ship #3 of the reviewed performance/consolidation plan — the query-consolidation work-stream (WS-C).

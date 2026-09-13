@@ -142,21 +142,23 @@ def test_purge_covers_the_v027_and_v041_tables():
     assert purge.count("DELETE FROM") == 24              # 8 original + 16 new
 
 
-def test_ai_fact_gains_exact_stamps_and_the_tab_is_now_fact_first():
+def test_ai_fact_gains_exact_stamps_and_backs_the_live_first_tab():
     assert "ADD COLUMN IF NOT EXISTS EMAIL VARCHAR(320)" in _V42
     assert "ADD COLUMN IF NOT EXISTS FIRST_TS TIMESTAMP_NTZ" in _V42
     marts = _proc(_V42, "SP_LOAD_MARTS_V27")
     assert "ANY_VALUE(u.EMAIL) AS EMAIL" in marts
     assert "MIN(c.USAGE_TIME) AS FIRST_TS" in marts
     assert marts.count("FIRST_TS = s.FIRST_TS") == 2      # code + functions arms
-    # Owner decision 2026-07-12 held the tab live-first "until the fact proves
-    # it can serve the FULL contract". These very columns are that proof: with
-    # EMAIL + FIRST_TS/LAST_TS on the fact (V042) and populated (V061 arm [9]),
-    # the tab went fact-first in P2. The 002139 probe semantics and the live
-    # fallback both survive — the reasons for the original revert do not recur.
+    # Owner decision 2026-07-12 held the tab live-first "until the fact proves it
+    # can serve the FULL contract". These very columns are that proof: with EMAIL +
+    # FIRST_TS/LAST_TS on the fact (V042) and populated (V061 arm [9]), the fact can
+    # back the tab. As of 2026-09-13 the tab is live-first again (owner ask) with the
+    # fact as its resilience fallback — so these stamped columns are still exercised
+    # (on the fallback path). Order is locked by test_v041's _is_live_first; here we
+    # only guard that both legs and the probe semantics are present.
     cb = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "ai_chargeback.py").read_text(encoding="utf-8")
-    assert "mart27_sql.ai_code_user_rollup(days, company, bounds=bounds)" in cb
-    assert "cortex_sql.cortex_code_user_daily(company)" in cb      # live leg kept
+    assert "mart27_sql.ai_code_user_rollup(days, company, bounds=bounds)" in cb  # fact fallback kept
+    assert "cortex_sql.cortex_code_user_daily(company)" in cb      # live leg (now primary)
     assert "probe=True" in cb
     assert "ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY" in cb       # still labeled as such
 
