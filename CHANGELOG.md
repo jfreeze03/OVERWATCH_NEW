@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.538.0 - V140: change-impact detector stops flagging OVERWATCH's own maintenance procs (2026-09-14)
+
+Owner migration (author here + apply via runbox). Hardens the self-monitoring false-positive class
+behind the oldest-open CRITICAL ("PROCEDURE SP_LOAD_PATTERN_COST regressed after 2026-09-02").
+
+- **Root cause.** `SP_CHANGE_IMPACT_SCAN` registers every changed PROCEDURE/TASK into
+  `OBJECT_CHANGE_REGISTRY` and alerts when runtime/credits regress after the change — but it also
+  tracked OVERWATCH's *own* maintenance procs. Those are `CREATE OR REPLACE`'d on every migration and
+  often run a one-time apply-time backfill `CALL` (V120 re-stamped 90 days at apply on 2026-09-02).
+  That single heavy call inflates the after-window p95/credits vs the daily baseline → a false
+  "regressed after" CRITICAL, even though the daily runtime is fine. V139's `SP_LOAD_OBJECT_COST`
+  (same `CREATE OR REPLACE` + apply-time backfill pattern) would have tripped the identical alert.
+- **V140** re-derives `SP_CHANGE_IMPACT_SCAN` from V061, adding a single `DBA_MAINT_DB` exclusion to
+  **each** registration arm (procedures 1a, tasks 1b) — everything else byte-identical (a lock test
+  proves proc == V061 modulo the two lines). OVERWATCH's own plumbing stays monitored the right way:
+  `SOURCE_FRESHNESS_STATE` staleness + per-loader error logging + the OPS scan-health tally.
+- **One-time cleanup** in the migration resolves the open self-object change-impact alerts
+  (`RESOLUTION_KIND='EXPECTED'`) and drops their `OBJECT_CHANGE_REGISTRY` rows, so the existing
+  ~171h false critical clears on apply.
+- Full lockstep: `admin._EXPECTED_MIGRATIONS[140]`, `validate.sql` tip `V001..V140`,
+  DEPLOYMENT/README, regenerated rebuild bundle, `test_v140` (+ generator `outputs/gen_v140.py`).
+  Owner applies V140 in Snowsight after V139.
+
 ## 4.537.0 - V139: object-cost loader fix after a Snowflake ACCOUNT_USAGE column rename (2026-09-14)
 
 Owner migration (author here + apply via runbox). `FACT_OBJECT_COST_DAILY` had been stale since

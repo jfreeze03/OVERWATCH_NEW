@@ -547,6 +547,12 @@ _EXPECTED_MIGRATIONS = {
          "at its 2026-09-09 fill). Re-derived from V067 changing ONLY the search-opt arm's object-name "
          "column; the clustering/MV (TABLE_NAME), serverless-task (TASK_NAME) and snowpipe (PIPE_NAME) "
          "arms are byte-identical. Backfills 14d on apply",
+    140: "Change-impact detector hardening: SP_CHANGE_IMPACT_SCAN no longer registers OVERWATCH's "
+         "own DBA_MAINT_DB procedures/tasks into OBJECT_CHANGE_REGISTRY (they are self-monitored via "
+         "SOURCE_FRESHNESS_STATE + per-loader error logging), so a maintenance-proc redeploy plus a "
+         "one-time apply-time backfill can no longer trip a false PERF_CHANGE_REGRESSION alert (e.g. "
+         "SP_LOAD_PATTERN_COST after V120). Re-derived from V061 with a DBA_MAINT_DB exclusion in each "
+         "registration arm; one-time resolves the open self-object alerts + drops their registry rows",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
