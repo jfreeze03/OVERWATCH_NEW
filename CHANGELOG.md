@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.537.0 - V139: object-cost loader fix after a Snowflake ACCOUNT_USAGE column rename (2026-09-14)
+
+Owner migration (author here + apply via runbox). `FACT_OBJECT_COST_DAILY` had been stale since
+2026-09-09 while every other fact loaded daily. Root cause: Snowflake renamed
+`SNOWFLAKE.ACCOUNT_USAGE.SEARCH_OPTIMIZATION_HISTORY.TABLE_NAME` → `BASE_TABLE_NAME`. Because a
+Snowflake Scripting procedure compiles its inner statements at run time, `SP_LOAD_OBJECT_COST`'s
+search-optimization arm threw `invalid identifier 'TABLE_NAME'` every night; the load is one atomic
+`DELETE`+`INSERT`, so it rolled back and retained the 2026-09-09 fill (stale `LOAD_TS` with a full
+row count — and the task reported SUCCEEDED because the proc catches its own error). Not a timeout
+(account/warehouse/task timeouts all healthy) and not an OVERWATCH code change — confirmed from
+`APP_ERROR_LOG` (`PAGE='ObjectCost'`).
+
+- **V139** re-derives `SP_LOAD_OBJECT_COST` from V067, changing **only** the search-opt arm's
+  object-name column to `BASE_TABLE_NAME`. The clustering / MV (`TABLE_NAME`), serverless-task
+  (`TASK_NAME`) and snowpipe (`PIPE_NAME`) arms were verified against the live view columns and are
+  byte-identical — a lock test asserts the proc equals V067's modulo that one token. The migration
+  ends with `CALL SP_LOAD_OBJECT_COST(14)` so the 2026-09-10→present gap backfills on apply.
+- Full migration lockstep: `admin._EXPECTED_MIGRATIONS[139]`, `validate.sql` tip `V001..V139`,
+  DEPLOYMENT/README run-lists, regenerated rebuild bundle (`02_migrations_V001_V139.sql`), and
+  `test_v139` (incl. the byte-equivalence proof). Owner applies V139 in Snowsight after V138; the
+  daily `TASK_LOAD_OBJECT_COST` (06:45 CT) then runs clean.
+
 ## 4.536.0 - Cost ▸ AI users: the User attribution detail is now live-first (2026-09-13)
 
 Owner ask: the CoCo **User attribution detail** should show CURRENT Cortex Code usage, not the daily-loader

@@ -541,6 +541,12 @@ _EXPECTED_MIGRATIONS = {
          "/ 08:00 hard deadline, so Operations ▸ Pipeline ▸ SLA finish forecast trends cycle completion vs "
          "the clock. WHEN NOT MATCHED only (never clobbers an operator edit). Data-seed only; reads only "
          "CONTROL_STATUS (already granted). The panel works from the DEFAULT_SETTINGS defaults pre-apply",
+    139: "Object-cost loader search-opt column fix: Snowflake renamed "
+         "SEARCH_OPTIMIZATION_HISTORY.TABLE_NAME -> BASE_TABLE_NAME, so SP_LOAD_OBJECT_COST failed "
+         "nightly with 'invalid identifier TABLE_NAME' and rolled back (FACT_OBJECT_COST_DAILY frozen "
+         "at its 2026-09-09 fill). Re-derived from V067 changing ONLY the search-opt arm's object-name "
+         "column; the clustering/MV (TABLE_NAME), serverless-task (TASK_NAME) and snowpipe (PIPE_NAME) "
+         "arms are byte-identical. Backfills 14d on apply",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

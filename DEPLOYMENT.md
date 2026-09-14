@@ -154,6 +154,7 @@ snowflake/migrations/V135__seed_etl_control_run_params_fqn.sql
 snowflake/migrations/V136__seed_etl_recon_error_fqn.sql
 snowflake/migrations/V137__dq_recon_error_alert.sql
 snowflake/migrations/V138__seed_etl_sla_clock.sql
+snowflake/migrations/V139__object_cost_search_opt_column.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
