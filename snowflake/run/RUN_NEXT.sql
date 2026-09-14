@@ -1,74 +1,45 @@
 -- =====================================================================
---  OVERWATCH -- RUN_NEXT.sql   (DIAGNOSTIC: why is FACT_OBJECT_COST_DAILY stale?)
+--  OVERWATCH -- RUN_NEXT.sql   (FIX PREP: object-cost loader broke on a Snowflake
+--  ACCOUNT_USAGE schema change -- get the current view columns so the fix compiles)
 --
---  SYMPTOM (dashboard, 2026-09-14): FACT_OBJECT_COST_DAILY last load 2026-09-09
---  06:45, ~123h stale, ROW COUNT still full (916,574). Every OTHER fact loaded
---  this morning. This is the ONE source on its own standalone task.
+--  ROOT CAUSE FOUND (from the prior RUN_NEXT results): SP_LOAD_OBJECT_COST fails
+--  every night with
+--      SQL compilation error: ... invalid identifier 'TABLE_NAME'
+--  It is NOT a timeout (account 21600s / WH 1800s / task 3600000ms are all healthy)
+--  and NOT an OVERWATCH code change (proc unchanged since V067). Snowflake changed
+--  the columns of one or more ACCOUNT_USAGE views the loader reads, so its
+--      ... || COALESCE(TABLE_NAME, 'UNKNOWN')
+--  no longer compiles. The atomic load rolls back -> the 2026-09-09 fill is retained.
 --
---  MECHANISM: TASK_LOAD_OBJECT_COST (own task, WH_ALFA_ADMIN, cron 45 6 * * * CT)
---  calls SP_LOAD_OBJECT_COST, an ATOMIC DELETE+INSERT that ROLLS BACK on error and
---  KEEPS the last good fill (V062/V067). So a frozen LOAD_TS + full row count = the
---  loader is FAILING every night, not idle. It is the heaviest loader in the system
---  (ACCESS_HISTORY flatten x QUERY_ATTRIBUTION_HISTORY, 1 query -> N objects), so a
---  statement/resource timeout is the prime suspect -- see the customer ETL p95 blowups
---  and the open "SP_LOAD_PATTERN_COST regressed" critical (same cost-attribution family).
---
---  GOAL: pull the ACTUAL failure so the fix targets the real cause, not a guess.
---  READ-ONLY. Run All as SNOW_ACCOUNTADMINS. Paste each RESULT block back to Claude.
---
---  NOTE: the prior ETL cost-attribution-join diagnostic that was here is preserved in
---  git history on the runbox branch (commit 303ac7e); nothing below re-runs it.
+--  GOAL: list the CURRENT columns of the 5 "direct arm" views the proc reads, so the
+--  fix targets the real column names (was TABLE_NAME renamed, or removed?). The proc
+--  uses TABLE_NAME in [A],[B],[C]; TASK_NAME in [D]; PIPE_NAME in [E].
+--  READ-ONLY. Run each; paste each column list back (especially [A],[B],[C]).
 -- =====================================================================
 
-USE ROLE SNOW_ACCOUNTADMINS;      -- ACCOUNT_USAGE + the OVERWATCH objects need the admin role
-USE WAREHOUSE WH_ALFA_ADMIN;      -- any running warehouse is fine
+USE ROLE SNOW_ACCOUNTADMINS;      -- reading the shared SNOWFLAKE.ACCOUNT_USAGE views
+USE WAREHOUSE WH_ALFA_QUERY;      -- DESCRIBE needs no real compute; any running WH is fine
 
--- [1] THE ANSWER ------------------------------------------------------------
---  SP_LOAD_OBJECT_COST self-logs its real Snowflake error here on rollback.
---  ERROR_MESSAGE = the actual SQLERRM (expect a timeout / resource / spill line).
---  If this returns rows dated 2026-09-10 onward, the load is failing-and-rolling-back
---  (confirmed). If it returns NOTHING, the failure is a TASK-level abort -> see [2].
-SELECT LOGGED_AT, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME
-FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
-WHERE PAGE = 'ObjectCost'
-ORDER BY LOGGED_AT DESC
-LIMIT 20;
---  >>> paste RESULT [1] <<<
+-- [A] The view the error points at (clustering arm, first TABLE_NAME reference).
+DESCRIBE VIEW SNOWFLAKE.ACCOUNT_USAGE.AUTOMATIC_CLUSTERING_HISTORY;
+--  >>> paste RESULT [A] (the "name" column is enough) <<<
 
--- [2] TASK RUN HISTORY (last 10 days) ---------------------------------------
---  IMPORTANT: STATE may read SUCCEEDED even on a failed load, because the proc
---  CATCHES its own error and RETURNS a string. So the truth is in RETURN_VALUE
---  ('FAILED: object-cost load rolled back ...' vs 'OK'). A STATE=FAILED row with a
---  timeout ERROR_MESSAGE instead means the TASK itself was killed (task-level timeout,
---  the proc never got to log to [1]). RUN_SEC shows how long each attempt ran.
-SELECT SCHEDULED_TIME, STATE, RETURN_VALUE, ERROR_CODE, ERROR_MESSAGE,
-       DATEDIFF('second', QUERY_START_TIME, COMPLETED_TIME) AS RUN_SEC
-FROM TABLE(DBA_MAINT_DB.INFORMATION_SCHEMA.TASK_HISTORY(
-        TASK_NAME => 'TASK_LOAD_OBJECT_COST',
-        SCHEDULED_TIME_RANGE_START => DATEADD('day', -10, CURRENT_TIMESTAMP())))
-ORDER BY SCHEDULED_TIME DESC;
---  >>> paste RESULT [2] <<<
+-- [B] Materialized-view refresh arm (also uses TABLE_NAME).
+DESCRIBE VIEW SNOWFLAKE.ACCOUNT_USAGE.MATERIALIZED_VIEW_REFRESH_HISTORY;
+--  >>> paste RESULT [B] <<<
 
--- [3] TASK STATE / SCHEDULE / WAREHOUSE -------------------------------------
---  Confirm the task is 'started' (not suspended), on WH_ALFA_ADMIN, cron 45 6 * * *.
-SHOW TASKS LIKE 'TASK_LOAD_OBJECT_COST' IN SCHEMA DBA_MAINT_DB.OVERWATCH;
---  >>> paste RESULT [3] <<<
+-- [C] Search-optimization arm (also uses TABLE_NAME).
+DESCRIBE VIEW SNOWFLAKE.ACCOUNT_USAGE.SEARCH_OPTIMIZATION_HISTORY;
+--  >>> paste RESULT [C] <<<
 
--- [4] THE FRESHNESS STAMP THE DASHBOARD READS -------------------------------
---  Confirms the stale LAST_LOAD_TS + full ROW_COUNT (= the rollback signature).
-SELECT SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, SNAPSHOT_TS
-FROM DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE
-WHERE SOURCE_NAME = 'FACT_OBJECT_COST_DAILY';
---  >>> paste RESULT [4] <<<
+-- [D] Serverless-task arm (uses TASK_NAME -- confirm it still exists).
+DESCRIBE VIEW SNOWFLAKE.ACCOUNT_USAGE.SERVERLESS_TASK_HISTORY;
+--  >>> paste RESULT [D] <<<
 
--- [5] TIMEOUTS IN EFFECT FOR THE TASK (the likely fix lever) -----------------
---  USER_TASK_TIMEOUT_MS (task-level, default 3600000 = 60m) and the statement timeout
---  that applies to the proc's INSERTs. If the run in [2] died near one of these, that
---  is the knob to raise.
-SHOW PARAMETERS LIKE '%TIMEOUT%' IN TASK DBA_MAINT_DB.OVERWATCH.TASK_LOAD_OBJECT_COST;
---  >>> paste RESULT [5] <<<
+-- [E] Snowpipe arm (uses PIPE_NAME -- confirm it still exists).
+DESCRIBE VIEW SNOWFLAKE.ACCOUNT_USAGE.PIPE_USAGE_HISTORY;
+--  >>> paste RESULT [E] <<<
 
--- [6] WAREHOUSE STATEMENT TIMEOUT -------------------------------------------
---  The account/warehouse STATEMENT_TIMEOUT_IN_SECONDS the object-cost INSERTs run under.
-SHOW PARAMETERS LIKE 'STATEMENT_TIMEOUT_IN_SECONDS' IN WAREHOUSE WH_ALFA_ADMIN;
---  >>> paste RESULT [6] <<<
+-- If DESCRIBE VIEW is blocked on the shared DB for any of the above, use this instead
+-- and read the column headers off the result grid:
+--   SELECT * FROM SNOWFLAKE.ACCOUNT_USAGE.AUTOMATIC_CLUSTERING_HISTORY LIMIT 1;
