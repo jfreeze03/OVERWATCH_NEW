@@ -1,5 +1,38 @@
 # Changelog
 
+## 4.542.0 - Spend ceilings & resource-monitor coverage panel (2026-09-17)
+
+App-code only (no migration). First of the cost-audit backlog: OVERWATCH tracked a
+`WH_NO_MONITOR` *count* as a security-posture metric but never surfaced *which* warehouses have
+no Snowflake spend ceiling, nor the resource monitors themselves. New panel on **Cost
+Intelligence ▸ Optimization & Savings** (above the sub-sections):
+
+- **`app/logic/monitors.py`** (pure, tested): `resource_monitor_inventory` (quota / used / remaining /
+  used %, level, reset frequency, an ENFORCED flag = has a SUSPEND/SUSPEND_IMMEDIATE trigger vs
+  notify-only, a human trigger summary), `account_monitor` (detects a `LEVEL='ACCOUNT'` monitor,
+  which caps every unassigned warehouse), and `unmonitored_warehouses` (no per-warehouse monitor
+  **and** no account monitor → uncapped; ranked by recent credit burn). Every SHOW column is picked
+  case-insensitively and tolerated-if-absent — SHOW output drifts across releases (the same
+  silent-break class as the `SEARCH_OPTIMIZATION_HISTORY.TABLE_NAME` rename).
+- **`security_sql.show_resource_monitors_sql()`** = bare `SHOW RESOURCE MONITORS` (metadata only, no
+  ACCOUNT_USAGE view, no new grant). Read at `tier="metadata"`, `max_rows=0` (the row-cap layer
+  passes a bare SHOW verbatim, so this never depends on `LIMIT` being valid for that SHOW).
+- **`_spend_ceilings_panel`** reuses the already-cached `SHOW WAREHOUSES` read and the idle-headline
+  frame's per-warehouse `TOTAL_CREDITS` — so it adds **one** metadata SHOW and **no** usage-history
+  scan. KPIs (monitors / uncapped warehouses / uncapped recent spend) + an expander with the monitor
+  inventory and the ranked uncapped-warehouse list (a `CEILING` column says *why* — "none" vs
+  "notify-only") and a `CREATE RESOURCE MONITOR … DO SUSPEND` remedy hint. Degrades cleanly: no
+  monitors visible (or no MONITOR privilege) → treat all as uncapped; account-level monitor present
+  → nothing uncapped.
+- **Uncapped = no hard ceiling, not merely unmonitored.** A NOTIFY-only monitor (no SUSPEND trigger)
+  enforces nothing, so a warehouse attached to one — and every warehouse under a notify-only
+  *account* monitor — is surfaced as uncapped; a monitor whose enforcement is unknown (drifted SHOW
+  missing the trigger columns) gets the benefit of the doubt so drift can't fabricate a fleet-wide
+  false alarm.
+- Adversarially verified (3 lenses vs live Snowflake docs). Fixed before ship: the credit column was
+  read as `CREDITS_TOTAL` when both idle builders emit `TOTAL_CREDITS` (would have zeroed every
+  "recent spend"), and the notify-only conflation above — both pinned by new locks.
+
 ## 4.541.0 - Rename "Cost & Contract" page to "Cost Intelligence" (2026-09-17)
 
 App-code only (no migration). The page's scope has broadened well past its label — compute,

@@ -674,6 +674,17 @@ def show_warehouses_sql() -> str:
     return "SHOW WAREHOUSES LIMIT 500"
 
 
+def show_resource_monitors_sql() -> str:
+    """Resource-monitor inventory: name, credit quota, used/remaining credits,
+    LEVEL (ACCOUNT / WAREHOUSE / unassigned), reset frequency, and the NOTIFY /
+    SUSPEND / SUSPEND_IMMEDIATE trigger thresholds. Metadata only — no
+    ACCOUNT_USAGE view is involved. Columns are parsed client-side by
+    ``logic/monitors``, tolerant of SHOW column drift. No LIMIT: monitors are few
+    and the run-layer row cap is disabled with ``max_rows=0`` (a bare SHOW is
+    passed verbatim, so this never depends on LIMIT being valid for this SHOW)."""
+    return "SHOW RESOURCE MONITORS"
+
+
 def show_databases_sql() -> str:
     """SHOW-based database inventory (ACCOUNT_USAGE.DATABASES absent on this
     account, mirroring SHOW WAREHOUSES). Feeds the sidebar picker so new

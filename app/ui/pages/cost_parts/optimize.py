@@ -44,6 +44,11 @@ from app.logic.insights import (
     suspend_recluster_sql,
     with_auto_suspend_settings,
 )
+from app.logic.monitors import (
+    account_monitor,
+    resource_monitor_inventory,
+    unmonitored_warehouses,
+)
 from app.logic.savings_rollup import (
     SavingsOpportunity,
     confidence_weight,
@@ -251,6 +256,106 @@ def _capacity_forecast_panel(company: str) -> None:
     result_caption(result)
 
 
+def _spend_ceilings_panel(idle_head, rate: float) -> None:
+    """Resource-monitor coverage — which warehouses have NO Snowflake spend
+    ceiling. Metadata only: SHOW RESOURCE MONITORS + the already-cached SHOW
+    WAREHOUSES read, joined to the idle-headline frame's per-warehouse credits
+    (no new metering scan). A warehouse is uncapped when it has no monitor of its
+    own AND there is no account-level monitor covering the account."""
+    whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="jump_wh",
+              tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
+    if not (whs.ok and not whs.empty):
+        return  # no warehouse metadata on this account; the idle advisor already flags it
+    mon = run(security_sql.show_resource_monitors_sql(), page=_PAGE,
+              key="resource_monitors", tier="metadata",
+              source="SHOW RESOURCE MONITORS", max_rows=0)
+    mon_df = mon.df if (mon.ok and not mon.empty) else pd.DataFrame()
+
+    # Recent per-warehouse credits come free from the idle-headline frame — no
+    # extra scan. Both legs of that run_mart_first (eff_idle_analysis /
+    # idle_warehouse_analysis) are already grouped per warehouse and alias the
+    # total as TOTAL_CREDITS; group-and-sum anyway to be robust to any duplicate.
+    credits_by_wh: dict[str, float] = {}
+    if idle_head.ok and not idle_head.empty:
+        _d = idle_head.df
+        if {"WAREHOUSE_NAME", "TOTAL_CREDITS"}.issubset(_d.columns):
+            _g = _d.groupby("WAREHOUSE_NAME")["TOTAL_CREDITS"].apply(
+                lambda s: sum(safe_float(x) for x in s))
+            credits_by_wh = {str(k).strip().upper(): float(v) for k, v in _g.items()}
+
+    inv = resource_monitor_inventory(mon_df)
+    acct = account_monitor(mon_df)
+    uncapped = unmonitored_warehouses(whs.df, mon_df, credits_by_wh)
+    uncapped_usd = float((uncapped["RECENT_CREDITS"] * rate).sum()) if not uncapped.empty else 0.0
+
+    st.markdown("**Spend ceilings & resource monitors**")
+    panel_help(
+        "Snowflake resource monitors are the only HARD credit ceiling on a warehouse — a "
+        "warehouse with no monitor (and no account-level monitor) can burn credits without "
+        "limit. When red, attach a monitor with a SUSPEND trigger to the warehouses listed. "
+        "Metadata only, no usage-history scan.")
+    kpi_row([
+        {"label": "Resource monitors", "value": f"{len(inv)}",
+         "help": "Monitors visible via SHOW RESOURCE MONITORS. 0 can also mean the app's "
+                 "role lacks the MONITOR privilege."},
+        {"label": "Uncapped warehouses", "value": f"{len(uncapped)}",
+         "severity": "warn" if len(uncapped) else "",
+         "help": "Warehouses with no per-warehouse monitor and no account-level monitor — "
+                 "no hard spend ceiling."},
+        {"label": "Uncapped recent spend", "value": format_usd(uncapped_usd),
+         "severity": "warn" if uncapped_usd > 0 else "",
+         "help": "Credits burned by uncapped warehouses over this window at the configured "
+                 "rate — spend that had no ceiling."},
+    ])
+    if acct is not None:
+        if acct["enforced"] is False:
+            st.warning(f"Account monitor **{acct['name']}** covers every warehouse, but it is "
+                       "notify-only — no SUSPEND trigger, so it warns without enforcing a ceiling.")
+        else:
+            st.caption(f"Account-level monitor **{acct['name']}** caps every warehouse without "
+                       "its own monitor, so nothing is uncapped.")
+
+    with st.expander("Monitor inventory & uncapped warehouses", expanded=bool(len(uncapped))):
+        if not inv.empty:
+            _inv = inv.copy()
+            _inv["ENFORCED"] = _inv["ENFORCED"].map(
+                {True: "Yes", False: "Notify-only"}).fillna("Unknown")
+            styled_table(
+                _inv.rename(columns={
+                    "MONITOR": "Monitor", "LEVEL": "Level", "FREQUENCY": "Resets",
+                    "QUOTA_CREDITS": "Quota (cr)", "USED_CREDITS": "Used (cr)",
+                    "REMAINING_CREDITS": "Remaining (cr)", "USED_PCT": "Used %",
+                    "ENFORCED": "Hard ceiling", "TRIGGERS": "Triggers"}),
+                slug="resource-monitors", size_note=False,
+                column_config={
+                    "Used %": st.column_config.NumberColumn("Used %", format="%.0f%%")})
+            _notify_only = inv[inv["ENFORCED"].eq(False)]["MONITOR"].tolist()
+            if _notify_only:
+                st.caption("Notify-only (no hard ceiling): " + ", ".join(_notify_only))
+        else:
+            st.caption("No resource monitors are visible — either none are configured, or the "
+                       "app's role lacks the MONITOR privilege. Treat every warehouse below as "
+                       "uncapped unless an account monitor exists.")
+        if not uncapped.empty:
+            st.markdown("**Warehouses with no spend ceiling** — ranked by recent credit burn. "
+                        "'Ceiling' shows why: no monitor, or a notify-only monitor that never suspends.")
+            _u = uncapped.copy()
+            _u["RECENT_USD"] = _u["RECENT_CREDITS"] * rate
+            _u = _u[["WAREHOUSE_NAME", "SIZE", "CEILING", "RECENT_CREDITS", "RECENT_USD"]]
+            styled_table(
+                _u.rename(columns={
+                    "WAREHOUSE_NAME": "Warehouse", "SIZE": "Size", "CEILING": "Ceiling",
+                    "RECENT_CREDITS": "Recent credits", "RECENT_USD": "Recent spend"}),
+                slug="uncapped-warehouses", sort_label="by recent spend desc",
+                column_config={
+                    "Recent spend": st.column_config.NumberColumn("Recent spend", format="$%.0f")})
+            st.caption("Fix: attach a resource monitor with a SUSPEND trigger "
+                       "(CREATE RESOURCE MONITOR … CREDIT_QUOTA=… TRIGGERS ON 100 PERCENT DO "
+                       "SUSPEND), or set an account-level monitor to cap the whole account.")
+        elif acct is None:
+            empty_state("clean", "Every active warehouse is attached to a resource monitor.")
+
+
 def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_operator: bool, *, bounds: tuple | None = None) -> None:
     """Optimization insights: idle/right-sizing advisors, expensive queries and
     patterns, the object-cost ledger, efficiency/storage/clustering scans, and
@@ -287,6 +392,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             {"label": "Projected monthly", "value": format_usd(_iw["PROJECTED_MONTHLY_USD"]),
              "help": "Gross idle, monthly-ized. Recoverable/actionable net is in Idle & sizing."},
         ])
+    # Spend-ceiling governance sits above the sub-sections: it reuses the idle
+    # headline's per-warehouse credits (already fetched) + cached SHOW WAREHOUSES,
+    # so it costs one metadata SHOW and no usage-history scan.
+    _spend_ceilings_panel(_idle_head, rate)
     opt_section = lazy_sections(["Idle & sizing", "Queries & patterns", "Storage & waste", "Remediation & ledger"], key="opt_section", deep_link=False)
 
     if opt_section == "Idle & sizing":
