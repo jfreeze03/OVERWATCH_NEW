@@ -496,6 +496,51 @@ LIMIT 25
 """
 
 
+def table_pruning_candidates(days: int, company: str = "ALL", database: str = "",
+                             schema_contains: str = "", *, bounds: tuple | None = None) -> str:
+    """Tables that read most of their micro-partitions on every scan — clustering
+    candidates — from ACCOUNT_USAGE.TABLE_PRUNING_HISTORY (per-table, hourly-aggregated;
+    GA). The complement of poor_pruning_queries: that names the query SHAPES scanning
+    badly; this names the TABLES to cluster, across all queries.
+
+    Pruning efficiency = PARTITIONS_PRUNED / (PARTITIONS_SCANNED + PARTITIONS_PRUNED);
+    LOW (near 0) = poor pruning. There is NO PARTITIONS_TOTAL column — the denominator is
+    scanned + pruned (GREATEST-guarded). The time column is START_TIME (NOT the sibling
+    TABLE_QUERY_PRUNING_HISTORY's INTERVAL_START_TIME — a silent-break trap). Ranked
+    worst-first, heaviest-scanned breaking ties. ~6h latency. Company-scoped by database
+    (companies.database_company_scope) to match the rest of the tab.
+
+    TWO floors so the advice is sound (clustering only helps LARGE tables): a >=1000
+    total-considered-partitions activity floor, AND an average >=100 partitions-considered-
+    per-scan SIZE floor — the latter drops a small table that is merely full-scanned many
+    times (which the activity floor alone would let masquerade as a candidate, since
+    PARTITIONS_SCANNED accumulates per scan). The reader passes probe=True: some accounts
+    expose this view only via the SNOWFLAKE.USAGE_VIEWER database role, not IMPORTED
+    PRIVILEGES."""
+    where = and_where(
+        scope_window_where("START_TIME", bounded_days(days), bounds=bounds),
+        companies.database_company_scope(company, "DATABASE_NAME"),
+        f"UPPER(DATABASE_NAME) = {sql_literal(database.upper())}" if database else "",
+        contains_filter("SCHEMA_NAME", schema_contains) if schema_contains else "",
+    )
+    return f"""
+SELECT
+    DATABASE_NAME || '.' || SCHEMA_NAME || '.' || TABLE_NAME AS TABLE_FQN,
+    SUM(NUM_SCANS) AS NUM_SCANS,
+    SUM(PARTITIONS_SCANNED) AS PARTITIONS_SCANNED,
+    SUM(PARTITIONS_PRUNED) AS PARTITIONS_PRUNED,
+    ROUND(SUM(PARTITIONS_PRUNED)
+          / GREATEST(SUM(PARTITIONS_SCANNED) + SUM(PARTITIONS_PRUNED), 1) * 100, 1) AS PRUNE_PCT
+FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_PRUNING_HISTORY
+WHERE {where}
+GROUP BY DATABASE_NAME, SCHEMA_NAME, TABLE_NAME
+HAVING SUM(PARTITIONS_SCANNED) + SUM(PARTITIONS_PRUNED) >= 1000
+   AND (SUM(PARTITIONS_SCANNED) + SUM(PARTITIONS_PRUNED)) / GREATEST(SUM(NUM_SCANS), 1) >= 100
+ORDER BY PRUNE_PCT ASC, PARTITIONS_SCANNED DESC
+LIMIT 50
+"""
+
+
 def query_optimization_triage(days: int, company: str = "ALL", warehouse_contains: str = "",
                               user_contains: str = "", database: str = "",
                               schema_contains: str = "", limit: int = 50, *,

@@ -1155,6 +1155,30 @@ def etl_cycle_sla_forecast(
     }
 
 
+def poor_pruning_summary(df: pd.DataFrame) -> dict:
+    """Headline for the at-rest pruning panel (``ops_sql.table_pruning_candidates``:
+    TABLE_FQN, NUM_SCANS, PARTITIONS_SCANNED, PARTITIONS_PRUNED, PRUNE_PCT — already
+    ranked worst-pruning-first). Returns the candidate count, the worst table + its
+    pruning %, and total partitions scanned across the shortlist. Empty/missing-column
+    in -> zeros; never raises. A LOW PRUNE_PCT means the table reads most of its
+    micro-partitions on every scan — a clustering-key candidate."""
+    zero = {"n_candidates": 0, "worst_table": "", "worst_prune_pct": None,
+            "total_partitions_scanned": 0.0}
+    if df is None or df.empty or "PRUNE_PCT" not in df.columns:
+        return zero
+    out = df.copy()
+    out["PRUNE_PCT"] = pd.to_numeric(out["PRUNE_PCT"], errors="coerce")
+    scanned = (pd.to_numeric(out["PARTITIONS_SCANNED"], errors="coerce").fillna(0.0)
+               if "PARTITIONS_SCANNED" in out.columns else pd.Series(0.0, index=out.index))
+    worst = out.sort_values("PRUNE_PCT", ascending=True, kind="stable").iloc[0]
+    return {
+        "n_candidates": len(out),
+        "worst_table": str(worst.get("TABLE_FQN", "")),
+        "worst_prune_pct": (None if pd.isna(worst["PRUNE_PCT"]) else float(worst["PRUNE_PCT"])),
+        "total_partitions_scanned": float(scanned.sum()),
+    }
+
+
 def flag_clustering_churn(df: pd.DataFrame, *, rate: float | None = None,
                           min_credits: float = 1.0) -> pd.DataFrame:
     """Auto-clustering churn (repo wave-2 #6): tables paying credits to recluster

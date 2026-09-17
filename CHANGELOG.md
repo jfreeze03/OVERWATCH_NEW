@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.546.0 - Per-table at-rest pruning advisor (2026-09-17)
+
+App-code only (no migration). Fills a verified query-optimization gap: OVERWATCH flagged poorly-pruned
+query *shapes* (`poor_pruning_queries`, per query family) but never named the *tables* that scan most
+of their micro-partitions across all queries — the actual clustering targets. New panel on
+**Cost Intelligence ▸ Optimization & Savings ▸ Storage & waste**, inside the existing "Run
+query-efficiency scan" toggle.
+
+- **`ops_sql.table_pruning_candidates(days, database, schema_contains, bounds)`** reads
+  `ACCOUNT_USAGE.TABLE_PRUNING_HISTORY` (GA; per-table, hourly) and ranks tables by pruning
+  efficiency `PARTITIONS_PRUNED / (PARTITIONS_SCANNED + PARTITIONS_PRUNED)` — **low = poor → cluster
+  it** — worst-first, heaviest-scanned breaking ties, with a `>=1000` considered-partition noise
+  floor. Confirmed schema (2-agent research): time column is `START_TIME` (NOT the sibling
+  `TABLE_QUERY_PRUNING_HISTORY`'s `INTERVAL_START_TIME`), there is **no** `PARTITIONS_TOTAL` (denominator
+  is scanned+pruned, `GREATEST`-guarded). `probe=True` — some accounts expose the view only via
+  `SNOWFLAKE.USAGE_VIEWER`, so a missing grant degrades silently.
+- **`app/logic/insights.poor_pruning_summary`** (pure, tested): candidate count + worst table and its
+  pruning %, for the KPI row.
+- **Panel:** KPIs (clustering candidates / worst-pruned %, warn under 30%) + a ranked table
+  (Table / Scans / Partitions read / pruned / Pruned %), with a "add a clustering key on the most
+  filtered/joined columns" hint. Toggle-gated (off first paint); optimize.py ACCOUNT_USAGE budget
+  4 -> 5 (justified) + `test_v451_trust` pin updated for the reachable `TABLE_PRUNING_HISTORY`.
+- Adversarially verified (2 lenses vs live docs). Semantics refuted clean (columns, the efficiency
+  DIRECTION, and the probe degradation all correct). Fixed: company-scoped the panel by database
+  (`companies.database_company_scope`) to match the rest of the tab (it was showing cross-company
+  tables under a scoped view); added a table-size floor (>=100 partitions considered per scan) so a
+  small table merely full-scanned many times isn't mislabeled a clustering candidate (the >=1000
+  activity floor alone let it through); and renamed a pre-existing `bounds = price_per_run_bounds(...)`
+  local that shadowed the window parameter (latent, not a reachable crash -- lazy_sections isolates
+  the branches -- but removed for safety).
+
 ## 4.545.0 - Native-apps rollup on the Spend summary (2026-09-17)
 
 App-code only (no migration). Native-app compute (app-owned warehouses, and especially **Snowpark

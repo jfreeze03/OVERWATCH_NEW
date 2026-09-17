@@ -39,6 +39,7 @@ from app.logic.insights import (
     flag_repeat_candidates,
     idle_advisor,
     idle_waste_summary,
+    poor_pruning_summary,
     repeat_min_runs,
     storage_movers,
     suspend_recluster_sql,
@@ -1043,13 +1044,14 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 prow = pdf_c[pdf_c["PATTERN_HASH"].astype(str) == pat_pick].iloc[0]
                 delta_pr = st.select_slider("At size step", options=[-2, -1, 0, 1, 2], value=0,
                                             key="price_delta")
-                bounds = price_per_run_bounds(safe_float(prow["ALLOCATED_CREDITS"]),
-                                              int(prow["RUNS"]), rate, int(delta_pr))
+                # Don't shadow the window `bounds` (tuple|None) parameter with the pricing dict.
+                _pr_bounds = price_per_run_bounds(safe_float(prow["ALLOCATED_CREDITS"]),
+                                                  int(prow["RUNS"]), rate, int(delta_pr))
                 kpi_row([
-                    {"label": "Observed $/run", "value": f"${bounds['per_run_now_usd']:.4f}",
+                    {"label": "Observed $/run", "value": f"${_pr_bounds['per_run_now_usd']:.4f}",
                      "help": f"{int(prow['RUNS'])} runs in {pat_wlab}, hour-share allocated."},
                     {"label": f"At {'+' if delta_pr > 0 else ''}{delta_pr} size step",
-                     "value": f"${bounds['per_run_low_usd']:.4f} – ${bounds['per_run_high_usd']:.4f}",
+                     "value": f"${_pr_bounds['per_run_low_usd']:.4f} – ${_pr_bounds['per_run_high_usd']:.4f}",
                      "help": "Bounds: rate-scaled (same wall time) vs cost-neutral "
                              "(perfect runtime scaling) — same assumptions as the what-if."},
                 ])
@@ -1367,6 +1369,42 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                            "better predicates would cut both runtime and credits.")
                 styled_table(prune.df)
                 result_caption(prune)
+            # Per-TABLE at-rest pruning (TABLE_PRUNING_HISTORY): the query view above names
+            # the SHAPES scanning badly; this names the TABLES to cluster, across all queries.
+            # probe=True — some accounts expose this view only via SNOWFLAKE.USAGE_VIEWER.
+            _tp = run(ops_sql.table_pruning_candidates(
+                days, company, database=st.session_state.get("flt_database", ""),
+                schema_contains=st.session_state.get("flt_schema_contains", ""), bounds=bounds),
+                page=_PAGE, key=f"tprune_{company}_{days}{_lm}", tier="historical",
+                source="ACCOUNT_USAGE.TABLE_PRUNING_HISTORY (at-rest pruning by table)", probe=True)
+            if _tp.ok and not _tp.empty:
+                st.markdown("**Poor at-rest pruning (by table)**")
+                _tps = poor_pruning_summary(_tp.df)
+                kpi_row([
+                    {"label": "Clustering candidates", "value": f"{_tps['n_candidates']:,}",
+                     "help": "Large tables reading most of their micro-partitions across all queries "
+                             "this window (pruning efficiency low), from TABLE_PRUNING_HISTORY. ~6h "
+                             "lag; floored at 1,000 considered partitions AND ~100/scan (a size gate, "
+                             "so a small full-scanned table isn't mistaken for a clustering win)."},
+                    {"label": "Worst pruned",
+                     "value": (f"{_tps['worst_prune_pct']:.0f}%"
+                               if _tps["worst_prune_pct"] is not None else "—"),
+                     "severity": ("warn" if (_tps["worst_prune_pct"] is not None
+                                             and _tps["worst_prune_pct"] < 30) else ""),
+                     "help": f"Lowest pruning % — {_tps['worst_table'] or 'n/a'}. Near 0 = the table "
+                             "reads almost every micro-partition on every scan."},
+                ])
+                styled_table(
+                    _tp.df.rename(columns={
+                        "TABLE_FQN": "Table", "NUM_SCANS": "Scans",
+                        "PARTITIONS_SCANNED": "Partitions read",
+                        "PARTITIONS_PRUNED": "Partitions pruned", "PRUNE_PCT": "Pruned %"}),
+                    slug="table-pruning", size_note=False,
+                    column_config={"Pruned %": st.column_config.NumberColumn("Pruned %", format="%.1f%%")})
+                st.caption("A low Pruned % is a clustering-key candidate: the table scans most of its "
+                           "micro-partitions on every query. Add a clustering key on the most "
+                           "filtered/joined columns, or search optimization for point lookups.")
+                result_caption(_tp)
             cache = run(ops_sql.result_cache_daily(days, company, bounds=bounds), page=_PAGE,
                         key=f"cachehit_{company}_{days}{_lm}", tier="historical",
                         source="ACCOUNT_USAGE.QUERY_HISTORY (BYTES_SCANNED = 0)")
