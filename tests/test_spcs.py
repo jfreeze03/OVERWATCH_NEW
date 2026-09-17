@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from app.logic.spcs import compute_pool_user_costs
+from app.logic.spcs import compute_pool_user_costs, native_app_rollup
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -83,3 +83,54 @@ def test_drill_is_wired_into_spend_page():
     assert "native-app pool" in src            # genuine native-app pool
     assert "non-notebook Snowpark" in src      # user-owned 'Unassigned' pool
     assert "rows for this window" in src        # notebook feed empty this window
+
+
+# ---- native-apps rollup (Spend summary) ------------------------------------
+def _pools():
+    """compute_pool_usage-shaped rows: two native apps + one Unassigned user pool."""
+    return pd.DataFrame([
+        {"COMPUTE_POOL_NAME": "POSIT_POOL", "APPLICATION_NAME": "POSIT_TEAM", "CREDITS": 80.0},
+        {"COMPUTE_POOL_NAME": "POSIT_POOL2", "APPLICATION_NAME": "POSIT_TEAM", "CREDITS": 6.9},
+        {"COMPUTE_POOL_NAME": "OTHER_APP_POOL", "APPLICATION_NAME": "SOME_APP", "CREDITS": 10.0},
+        {"COMPUTE_POOL_NAME": "MY_POOL", "APPLICATION_NAME": "Unassigned", "CREDITS": 5.0},
+    ])
+
+
+def test_rollup_groups_by_application_and_splits_unassigned():
+    summary, apps = native_app_rollup(_pools(), 2.0)
+    # native-app spend excludes 'Unassigned'; POSIT_TEAM's two pools are summed
+    assert summary["n_apps"] == 2
+    assert round(summary["app_credits"], 1) == 96.9        # 86.9 + 10.0, NOT the 5.0 unassigned
+    assert summary["app_usd"] == round(96.9 * 2.0, 4)
+    assert summary["top_app"] == "POSIT_TEAM" and round(summary["top_app_usd"], 1) == round(86.9 * 2.0, 1)
+    assert summary["unassigned_usd"] == 10.0               # 5.0 credits * $2
+    # per-app frame is sorted desc and priced, Unassigned excluded
+    assert list(apps["APPLICATION"]) == ["POSIT_TEAM", "SOME_APP"]
+    assert apps.iloc[0]["USD"] == round(86.9 * 2.0, 4)
+
+
+def test_rollup_unassigned_only_reports_zero_apps():
+    only_unassigned = pd.DataFrame([{"COMPUTE_POOL_NAME": "P", "APPLICATION_NAME": "Unassigned",
+                                     "CREDITS": 9.0}])
+    summary, apps = native_app_rollup(only_unassigned, 3.0)
+    assert summary["n_apps"] == 0 and summary["app_usd"] == 0.0
+    assert summary["unassigned_usd"] == 27.0 and apps.empty
+
+
+def test_rollup_empty_and_missing_columns():
+    z, empty = native_app_rollup(pd.DataFrame(), 3.68)
+    assert z["n_apps"] == 0 and z["app_usd"] == 0.0 and empty.empty
+    assert native_app_rollup(None, 3.68)[0]["app_usd"] == 0.0
+    # a drifted frame without the expected columns degrades to zero, never crashes
+    assert native_app_rollup(pd.DataFrame([{"X": 1}]), 1.0)[0]["n_apps"] == 0
+
+
+def test_rollup_is_wired_onto_the_spend_summary():
+    src = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "spend.py").read_text(encoding="utf-8")
+    # rendered on the summary (before the detail toggle), reusing the prefetched pool read
+    assert "_native_apps_rollup(_pool_res, rate)" in src
+    assert "napp_res" in src and "Installed native apps" in src
+    # the detail reuses the same pool read (no double SPCS scan)
+    assert "pools = _pool_res" in src
+    cost = (_ROOT / "app" / "ui" / "pages" / "cost.py").read_text(encoding="utf-8")
+    assert '"key": "napp"' in cost and "napp_res=_pf.get(\"napp\")" in cost

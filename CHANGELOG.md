@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.545.0 - Native-apps rollup on the Spend summary (2026-09-17)
+
+App-code only (no migration). Native-app compute (app-owned warehouses, and especially **Snowpark
+Container Services / compute pools**) is billed to the consumer account; OVERWATCH already captured
+it in the account total and attributed SPCS credits by owning `APPLICATION_NAME` in the "Compute
+pools & notebooks" detail — but that took two clicks to reach. This surfaces it on the Spend summary.
+
+- **`app/logic/spcs.native_app_rollup`** (pure, tested): rolls `compute_pool_usage` rows
+  (COMPUTE_POOL_NAME, APPLICATION_NAME, CREDITS) up to per-application spend. Installed native apps =
+  rows with a real `APPLICATION_NAME`; `'Unassigned'` (your own SPCS services) is summed separately
+  and never counted as a native app. Returns totals + a per-app frame.
+- **Spend summary** now shows an **"Installed native apps (Snowpark Container Services)"** line —
+  KPIs (native-app spend / # apps / unassigned SPCS) + a per-app table — rendered only when the
+  account has SPCS spend. A native app like the Posit Team app appears by name.
+- **One SPCS read, not two.** The rollup's `compute_pool_usage` read is co-scheduled into cost.py's
+  Spend prefetch batch (`run_batch_mixed`) and **reused** by the "Compute pools & notebooks" detail
+  (which dropped its own `run_batch` for pools) — so the summary line and the detail share one pool
+  scan instead of double-fetching. Budget-neutral (SPCS source labels omit the `ACCOUNT_USAGE`
+  literal, as the detail already did); `test_v451_trust` cost.py pin updated deliberately for the
+  co-scheduled `SNOWPARK_CONTAINER_SERVICES_HISTORY`.
+- Adversarially verified (2 lenses). The refactor was refuted clean (no double-fetch, `_pool_res`
+  always defined before the detail reuses it). Fixed two LOW consistency findings: the summary and
+  the detail now count installed apps the same way (both exclude the `'Unassigned'` pseudo-app), and
+  the summary line is suppressed when there is SPCS but no installed app (no misleading "$0 · 0 apps").
+
 ## 4.544.0 - Native Snowflake budget panel (2026-09-17)
 
 App-code only (no migration). New panel on **Cost Intelligence ▸ Contract & Forecast**

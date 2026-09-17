@@ -15,7 +15,7 @@ import pandas as pd
 import streamlit as st
 
 from app.config import MAX_LIVE_WINDOW_DAYS
-from app.core.query import run, run_batch
+from app.core.query import run
 from app.data import app_cost_sql, cost_sql, insights_sql, mart27_sql, mart_sql
 from app.data.common import resolve_effective_window
 from app.logic.anomaly import (
@@ -186,9 +186,40 @@ def _spend_attribution_capability(df, rate: float, ai_rate: float,
     )
 
 
+def _native_apps_rollup(pool_res, rate: float) -> None:
+    """Installed-native-app SPCS spend rolled up by APPLICATION_NAME, on the Spend
+    summary — so a native app's cost (e.g. a Posit native app) is visible without opening
+    the Compute-pools detail. Reuses the pool read already fetched for first paint; renders
+    nothing when the account has no Snowpark Container Services spend."""
+    if not (pool_res is not None and pool_res.ok and not pool_res.empty):
+        return
+    from app.logic.spcs import native_app_rollup
+    summary, apps = native_app_rollup(pool_res.df, rate)
+    if summary["n_apps"] == 0:
+        return  # SPCS may still run (your own 'Unassigned' pools) but no INSTALLED app to roll up
+    st.markdown("**Installed native apps (Snowpark Container Services)**")
+    kpi_row([
+        {"label": "Native app spend", "value": format_usd(summary["app_usd"]),
+         "help": "Compute-pool (SPCS) credits attributed to installed native applications "
+                 "(APPLICATION_NAME) this window, at the configured rate — native-app compute is "
+                 "billed to your account. Per-pool and per-user detail is under 'Compute pools & "
+                 "notebooks' below."},
+        {"label": "Apps", "value": str(summary["n_apps"])},
+        {"label": "Unassigned SPCS", "value": format_usd(summary["unassigned_usd"]),
+         "help": "Compute-pool credits with no owning application (your own SPCS services), kept "
+                 "separate from native-app spend."},
+    ])
+    if not apps.empty:
+        styled_table(
+            apps.rename(columns={"APPLICATION": "Application", "CREDITS": "Credits", "USD": "Spend"}),
+            slug="native-apps", size_note=False,
+            column_config={"Spend": st.column_config.NumberColumn("Spend", format="$%.0f")})
+
+
 def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: str = "",
                *, bounds: tuple | None = None,
-               metering_res=None, csr_res=None, coco_res=None, allin_res=None) -> None:
+               metering_res=None, csr_res=None, coco_res=None, allin_res=None,
+               napp_res=None) -> None:
     # Hot path: the daily metering fact carries the same columns; fall back
     # to live ACCOUNT_USAGE only when the fact has no rows yet. metering_res is
     # the prefetched batch result (perf #15); None -> read it serially here.
@@ -359,6 +390,15 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
     # adds NO Snowflake scan — no new live read, mart, or metadata-view literal.
     _spend_attribution_capability(df, rate, ai_rate, billed_usd, _wlab)
 
+    # Native-apps rollup: SPCS credits by owning application (installed native apps like a
+    # Posit native app), so app spend is on the summary, not only in the pool detail below.
+    # One pool read, prefetched with the Spend batch; reused by the detail section (no re-scan).
+    _pool_res = napp_res if napp_res is not None else run(
+        cost_sql.compute_pool_usage(days, bounds=bounds), page=_PAGE,
+        key=f"spcs_pools_{days}{_lm}", tier="historical",
+        source="SNOWPARK_CONTAINER_SERVICES_HISTORY (native apps rollup)")
+    _native_apps_rollup(_pool_res, rate)
+
     if st.toggle(
         "Load detailed service attribution",
         key="cost_service_attribution_detail",
@@ -459,33 +499,27 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 )
                 result_caption(rep)
         elif detail == "Compute pools & notebooks":
-            batch = run_batch(
-                [
-                    {
-                        "key": "pools",
-                        "sql": cost_sql.compute_pool_usage(days, bounds=bounds),
-                        "source": "SNOWPARK_CONTAINER_SERVICES_HISTORY (native pool detail)",
-                    },
-                    {
-                        "key": "notebooks",
-                        "sql": cost_sql.notebook_container_usage(days, bounds=bounds),
-                        "source": "NOTEBOOKS_CONTAINER_RUNTIME_HISTORY (native notebook detail)",
-                    },
-                ],
-                page=_PAGE,
-                tier="historical",
-            ) or {}
-            pools = batch.get("pools")
-            notebooks = batch.get("notebooks")
+            # Reuse the pool read already fetched for the summary "Installed native apps"
+            # rollup (first paint) instead of re-scanning SPCS; only the notebook subset
+            # is fetched on demand here.
+            pools = _pool_res
+            notebooks = run(cost_sql.notebook_container_usage(days, bounds=bounds), page=_PAGE,
+                            key=f"spcs_notebooks_{days}{_lm}", tier="historical",
+                            source="NOTEBOOKS_CONTAINER_RUNTIME_HISTORY (native notebook detail)")
             if pools is not None and pools.ok and pools.empty:
                 empty_state("clean", "No Snowpark Container Services credits were recorded in this window.")
             elif pools is not None and guard(pools, ""):
                 pool_df = pools.df.copy()
                 pool_df["USD"] = pd.to_numeric(pool_df["CREDITS"], errors="coerce").fillna(0.0) * rate
+                # 'Applications' counts INSTALLED apps only — exclude the 'Unassigned'
+                # pseudo-app (your own pools) so it matches the summary rollup's "Apps".
+                _apps_n = int(pool_df.loc[
+                    pool_df["APPLICATION_NAME"].astype(str).str.strip().str.lower() != "unassigned",
+                    "APPLICATION_NAME"].nunique())
                 kpi_row([
                     {"label": "SPCS spend", "value": format_usd(float(pool_df["USD"].sum()))},
                     {"label": "Compute pools", "value": str(pool_df["COMPUTE_POOL_NAME"].nunique())},
-                    {"label": "Applications", "value": str(pool_df["APPLICATION_NAME"].nunique())},
+                    {"label": "Applications", "value": str(_apps_n)},
                 ])
                 _pool_sel = selectable_table(pool_df, key="spcs_pool_sel", height=300,
                                              sort_label="credits desc")

@@ -200,12 +200,19 @@ def render() -> None:
             "key": "allin", "tier": "historical",
             "sql": cost_sql.org_all_in_window_usd(f["days"], bounds=f["bounds"]),
             "source": "ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY (this account, all-in)"})
+        # Native-apps rollup (SPCS by owning application) co-scheduled here so the Spend
+        # summary line and the "Compute pools & notebooks" detail share ONE pool read.
+        _spend_specs.append({
+            "key": "napp", "tier": "historical",
+            "sql": cost_sql.compute_pool_usage(f["days"], bounds=f["bounds"]),
+            "source": "SNOWPARK_CONTAINER_SERVICES_HISTORY (native apps rollup)"})
         _pf = run_batch_mixed(_spend_specs, page=_PAGE) or {}
         section_header("Spend", "", "spend", anchor="cost-spend")
         _spend_tab(f["company"], f["days"], rate, ai_rate, f["database"],
                    bounds=f["bounds"],
                    metering_res=_pf.get("metering"), csr_res=_pf.get("csr"),
-                   coco_res=_pf.get("coco"), allin_res=_pf.get("allin"))
+                   coco_res=_pf.get("coco"), allin_res=_pf.get("allin"),
+                   napp_res=_pf.get("napp"))
         st.divider()
         if st.toggle("Load company attribution (cost by company & user)",
                      key="cost_attribution_load",

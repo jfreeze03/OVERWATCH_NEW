@@ -44,7 +44,9 @@ _REACHABLE = {
         # when a DBA selects an incident — the same drill-scoped scan class as day-replay.
         "GRANTS_TO_ROLES", "GRANTS_TO_USERS", "QUERY_HISTORY", "TASK_HISTORY",
         "WAREHOUSE_METERING_HISTORY"),
-    "app/ui/pages/cost.py": ("QUERY_HISTORY",),
+    # v4.545: the Spend batch co-schedules the native-apps rollup (compute_pool_usage)
+    # so the summary line + the Compute-pools detail share one SPCS read.
+    "app/ui/pages/cost.py": ("QUERY_HISTORY", "SNOWPARK_CONTAINER_SERVICES_HISTORY"),
     "app/ui/pages/cost_parts/spend.py": (
         # V077 cost-by-application panel adds QUERY_ATTRIBUTION_HISTORY + SESSIONS
         # (the live 3-way join fallback behind the toggle).

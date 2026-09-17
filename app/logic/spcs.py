@@ -16,6 +16,43 @@ import pandas as pd
 from app.logic.formulas import safe_float
 
 _USER_COST_COLS = ["USER_NAME", "CREDITS", "EXECUTION_TIME_SEC", "SESSIONS", "NOTEBOOKS", "USD"]
+_APP_COLS = ["APPLICATION", "CREDITS", "USD"]
+
+
+def native_app_rollup(pool_df: pd.DataFrame | None, credit_rate: float) -> tuple[dict, pd.DataFrame]:
+    """Roll compute-pool rows (``compute_pool_usage``: APPLICATION_NAME, CREDITS) up to
+    per-application spend — the Spend-summary "installed native apps" line, so a native
+    app's SPCS cost (e.g. a Posit native app) is visible without opening the pool detail.
+
+    Installed native apps = rows with a real APPLICATION_NAME. ``'Unassigned'`` (the
+    builder's COALESCE for a pool with no owning app — your own SPCS services) is summed
+    separately and is NEVER counted as a native app. Native-app compute is billed to the
+    consumer account, so this is real spend, not the provider's. Empty/missing-column in
+    -> zero totals + an empty typed frame. Returns ``(summary, per_app_frame)`` with the
+    frame sorted by credits desc."""
+    zero = {"app_credits": 0.0, "app_usd": 0.0, "n_apps": 0,
+            "top_app": "", "top_app_usd": 0.0, "unassigned_usd": 0.0}
+    if (pool_df is None or pool_df.empty
+            or "APPLICATION_NAME" not in pool_df.columns or "CREDITS" not in pool_df.columns):
+        return zero, pd.DataFrame(columns=_APP_COLS)
+    df = pool_df.copy()
+    df["_C"] = df["CREDITS"].map(safe_float)
+    grouped = (df.groupby("APPLICATION_NAME", as_index=False)["_C"].sum()
+               .rename(columns={"APPLICATION_NAME": "APPLICATION", "_C": "CREDITS"}))
+    grouped["USD"] = grouped["CREDITS"] * safe_float(credit_rate)
+    _is_unassigned = grouped["APPLICATION"].map(lambda v: str(v).strip().lower() == "unassigned")
+    unassigned_usd = float(grouped.loc[_is_unassigned, "USD"].sum())
+    apps = (grouped.loc[~_is_unassigned]
+            .sort_values("CREDITS", ascending=False, kind="stable").reset_index(drop=True))
+    summary = {
+        "app_credits": float(apps["CREDITS"].sum()),
+        "app_usd": float(apps["USD"].sum()),
+        "n_apps": len(apps),
+        "top_app": str(apps.iloc[0]["APPLICATION"]) if len(apps) else "",
+        "top_app_usd": float(apps.iloc[0]["USD"]) if len(apps) else 0.0,
+        "unassigned_usd": unassigned_usd,
+    }
+    return summary, apps[_APP_COLS]
 
 
 def compute_pool_user_costs(notebook_df: pd.DataFrame | None, pool_name: object,
