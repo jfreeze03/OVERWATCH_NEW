@@ -992,3 +992,30 @@ new_way AS (
 SELECT o.METRIC, o.VAL AS OLD_VALUE, n.VAL AS NEW_VALUE, (o.VAL = n.VAL) AS MATCH
 FROM old_way o JOIN new_way n ON o.METRIC = n.METRIC
 ORDER BY o.METRIC;
+
+
+-- =====================================================================
+--  PART B: NATIVE BUDGET READ GRANTS  (for the v4.544 "Native Snowflake budget" panel)
+--
+--  Lets the app's owner's-rights role read Snowflake's native account budget
+--  (SNOWFLAKE.CORE.BUDGET) on Cost Intelligence > Contract & Forecast. Read-only:
+--  BUDGET_VIEWER is the READ app role (BUDGET_ADMIN, the write one, is NOT granted).
+--  IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE is very likely ALREADY held (the app reads
+--  ACCOUNT_USAGE broadly) -> that grant is then a harmless no-op. Independent of the V142
+--  apply above; safe to run any time. The panel is toggle-gated + probe=True, so until
+--  these are granted (or a budget is configured) it simply shows a "needs setup" note.
+-- =====================================================================
+
+USE ROLE ACCOUNTADMIN;
+GRANT APPLICATION ROLE SNOWFLAKE.BUDGET_VIEWER TO ROLE SNOW_ACCOUNTADMINS;
+GRANT IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE TO ROLE SNOW_ACCOUNTADMINS;
+
+-- Verify the app role can now read the account budget's month-to-date spend (paste the result).
+-- Runs AS the app's role to prove the panel will work. If the table function rejects the
+-- expression args, replace both with a literal for the current month, e.g. '2026-09'.
+USE ROLE SNOW_ACCOUNTADMINS;
+SELECT SERVICE_TYPE, SUM(CREDITS_USED) AS CREDITS
+FROM TABLE(SNOWFLAKE.LOCAL.ACCOUNT_ROOT_BUDGET!GET_SERVICE_TYPE_USAGE_V2(
+        TO_CHAR(CURRENT_DATE(), 'YYYY-MM'), TO_CHAR(CURRENT_DATE(), 'YYYY-MM')))
+GROUP BY SERVICE_TYPE
+ORDER BY CREDITS DESC;
