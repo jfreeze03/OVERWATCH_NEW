@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.540.0 - V142 (A4): posture arm single-scans CREDENTIALS + GRANTS_TO_USERS (2026-09-17)
+
+Owner migration (author here + apply via runbox). Second half of the A1+A4 bundle.
+
+- **What.** `SP_LOAD_MARTS_V27`'s `[7]` security-posture arm scanned `ACCOUNT_USAGE.CREDENTIALS` twice
+  (`EXPIRING_CRED_10D` + `EXPIRED_CRED`) and `GRANTS_TO_USERS` twice (`GRANT_CHANGES_24H` +
+  `BREAKGLASS_GRANTS_30D`) as separate UNION members. V142 re-derives the proc so each source is
+  scanned **once** with `COUNT_IF` conditional aggregation, `UNPIVOT`ed back to the identical
+  `(DAY, METRIC, COMPANY, VALUE)` rows the MERGE consumes.
+- **Output-equivalent by construction.** `COUNT_IF(cond) ≡ COUNT(*) WHERE cond`, and the GRANTS
+  one-scan `WHERE (created ≥ −30d OR deleted ≥ −24h)` is a **superset** of the rows either metric
+  counts, with each `COUNT_IF` re-applying its exact original predicate — so no counted row is
+  dropped and the `MART_SECURITY_POSTURE_DAILY` MERGE still lands one row per `(DAY, METRIC, COMPANY)`.
+  A lock test proves the proc is byte-identical to V127 everywhere outside the posture arm; the apply
+  is staged with a live equivalence check (old counts == new counts) to confirm at runtime.
+- **Scoped down from the plan.** A4 also named the `SP_ANOMALY_SWEEP` `TABLE_DML_HISTORY` "double-scan",
+  but those two scans use different windows (8d vs 28d), filters, and grains, and live in **separately
+  exception-isolated arms on purpose** ("so an ACCOUNT_USAGE gap can't break the sweep's cost/volume
+  halves"). Collapsing them needs shared temp-staging that would couple their failure modes — that's
+  the A3 pattern (deferred), not a low-risk quick-win — so it was left as-is.
+- Full lockstep: `admin._EXPECTED_MIGRATIONS[142]`, `validate.sql` tip `V001..V142`, DEPLOYMENT/README,
+  regenerated rebuild bundle, `test_v142` (+ generator `outputs/gen_v142.py`). Owner applies after V141.
+
 ## 4.539.0 - V141 (A1): 3 daily-grain cost alerts moved off the hourly scan onto the daily scan (2026-09-17)
 
 Owner migration (author here + apply via runbox). First half of the approved A1+A4 bundle.

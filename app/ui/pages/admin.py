@@ -558,6 +558,12 @@ _EXPECTED_MIGRATIONS = {
          "SP_ALERT_SCAN_DAILY, so they no longer re-evaluate the same day up to 24x (they dedupe per "
          "day/week already). Arm SQL lifted verbatim from V119; hourly core tally 16->13, daily 6->9. "
          "Same dedupe keys, same alerts, once/day. Proc-only, no schema/rule/task change",
+    142: "A4 posture-arm single-scan: SP_LOAD_MARTS_V27's [7] security-posture arm now scans "
+         "ACCOUNT_USAGE.CREDENTIALS once (EXPIRING_CRED_10D + EXPIRED_CRED via COUNT_IF + UNPIVOT) and "
+         "GRANTS_TO_USERS once (GRANT_CHANGES_24H + BREAKGLASS_GRANTS_30D, superset WHERE + COUNT_IF) "
+         "instead of twice each. Output-equivalent (COUNT_IF(cond)==COUNT(*) WHERE cond; posture MERGE "
+         "still lands one row per DAY/METRIC/COMPANY); byte-identical outside the posture arm. Left the "
+         "SP_ANOMALY_SWEEP TABLE_DML scans alone (different grains + per-arm isolation = the A3 pattern)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

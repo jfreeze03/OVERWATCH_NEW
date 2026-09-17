@@ -157,6 +157,7 @@ snowflake/migrations/V138__seed_etl_sla_clock.sql
 snowflake/migrations/V139__object_cost_search_opt_column.sql
 snowflake/migrations/V140__change_impact_exclude_self_procs.sql
 snowflake/migrations/V141__alert_cadence_daily_cost_rules.sql
+snowflake/migrations/V142__posture_arm_single_scan.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

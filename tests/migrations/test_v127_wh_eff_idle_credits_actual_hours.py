@@ -111,13 +111,15 @@ def test_v127_is_the_latest_full_loader_definition() -> None:
     defs = sorted(p for p in _MIG_DIR.glob("V[0-9]*.sql")
                   if "CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27"
                   in p.read_text(encoding="utf-8"))
-    assert defs[-1].name == "V127__wh_eff_idle_credits_actual_hours.sql"
+    # V142 (A4) re-derived SP_LOAD_MARTS_V27 to single-scan the posture arm, so it is now the
+    # latest full-loader definition; V127 remains the byte baseline V142 was derived from.
+    assert defs[-1].name == "V142__posture_arm_single_scan.sql"
 
 
 def test_v127_floor_tracks_the_tip() -> None:
     v = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V141 applied" in v
-    assert "BETWEEN 1 AND 141) = 141" in v
+    assert "V001..V142 applied" in v
+    assert "BETWEEN 1 AND 142) = 142" in v
 
 
 def test_v127_is_tracked_in_deploy_and_admin_surfaces() -> None:
