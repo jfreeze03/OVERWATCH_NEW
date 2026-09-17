@@ -553,6 +553,11 @@ _EXPECTED_MIGRATIONS = {
          "one-time apply-time backfill can no longer trip a false PERF_CHANGE_REGRESSION alert (e.g. "
          "SP_LOAD_PATTERN_COST after V120). Re-derived from V061 with a DBA_MAINT_DB exclusion in each "
          "registration arm; one-time resolves the open self-object alerts + drops their registry rows",
+    141: "A1 alert cadence: moved the 3 daily-grain cost alerts (COST_STORAGE_SURGE, "
+         "COST_SERVERLESS_CREEP, COST_EGRESS_SPIKE) off the hourly SP_ALERT_SCAN onto the daily "
+         "SP_ALERT_SCAN_DAILY, so they no longer re-evaluate the same day up to 24x (they dedupe per "
+         "day/week already). Arm SQL lifted verbatim from V119; hourly core tally 16->13, daily 6->9. "
+         "Same dedupe keys, same alerts, once/day. Proc-only, no schema/rule/task change",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

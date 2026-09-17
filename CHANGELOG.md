@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.539.0 - V141 (A1): 3 daily-grain cost alerts moved off the hourly scan onto the daily scan (2026-09-17)
+
+Owner migration (author here + apply via runbox). First half of the approved A1+A4 bundle.
+
+- **What.** `COST_STORAGE_SURGE` (day-over-day storage growth), `COST_SERVERLESS_CREEP` (week-over-week
+  serverless credits) and `COST_EGRESS_SPIKE` (24h egress vs 14d average) all read daily-grain
+  `ACCOUNT_USAGE` and dedupe per day/week, so running them on the **hourly** `SP_ALERT_SCAN` re-evaluated
+  the same day up to 24× for no added coverage (the dedupe key already collapsed them to one alert/day).
+  V141 moves all three onto the **daily** `SP_ALERT_SCAN_DAILY`.
+- **How.** Re-derives both procs, lifting the three arms **verbatim** from V119 into V137 — the arm SQL
+  is byte-identical (two lock tests prove `hourly == V119 − 3 arms` and `daily == V137 + 3 arms`, modulo
+  the tally strings). Only the `OPS_SCAN_DEGRADED` denominators and RETURN strings change: hourly core
+  tally 16→13, daily 6→9. Same dedupe keys ⇒ the same alerts fire, just once/day. Proc-only — no
+  schema, rule-seed, or task change.
+- **One behaviour note.** `COST_EGRESS_SPIKE` uses a rolling trailing-24h window, so on the daily scan an
+  intraday egress spike is detected at the next daily run rather than the next hour. This is inherent to
+  moving it to daily and was accepted with the "all three to daily" decision; if a shorter egress
+  detection latency matters, that one rule can stay hourly (say the word).
+- Full lockstep: `admin._EXPECTED_MIGRATIONS[141]`, `validate.sql` tip `V001..V141`, DEPLOYMENT/README,
+  regenerated rebuild bundle, `test_v141` (+ generator `outputs/gen_v141.py`). Owner applies after V140.
+
 ## 4.538.0 - V140: change-impact detector stops flagging OVERWATCH's own maintenance procs (2026-09-14)
 
 Owner migration (author here + apply via runbox). Hardens the self-monitoring false-positive class
