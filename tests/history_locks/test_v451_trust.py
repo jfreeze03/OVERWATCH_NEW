@@ -64,7 +64,9 @@ _REACHABLE = {
     "app/ui/pages/cost_parts/ai_chargeback.py": (
         "CORTEX_AI_FUNCTIONS_USAGE_HISTORY", "CORTEX_CODE_CLI_USAGE_HISTORY",
         "CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY", "METERING_DAILY_HISTORY",
-        "QUERY_HISTORY", "USERS"),
+        # v4.543: per-user AI-quota block history — the one account-wide read for
+        # native per-user AI quotas (probe- + toggle-gated in _ai_quota_panel).
+        "QUERY_HISTORY", "QUOTA_ACCESS_BLOCK_HISTORY", "USERS"),
     "app/ui/pages/cost_parts/unit_costs.py": (
         "CORTEX_CODE_CLI_USAGE_HISTORY", "CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY",
         "CORTEX_FUNCTIONS_USAGE_HISTORY", "QUERY_ATTRIBUTION_HISTORY",

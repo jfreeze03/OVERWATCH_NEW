@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pandas as pd
 import streamlit as st
 
 from app import companies
@@ -33,6 +34,7 @@ from app.logic.cortex import (
     with_aggregate_budget_row,
 )
 from app.logic.formulas import account_today, credits_to_usd, format_usd, md_dollars, safe_float
+from app.logic.quotas import block_history
 from app.ui import charts
 from app.ui.components import (
     empty_state,
@@ -377,8 +379,67 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
             elif not is_operator:
                 st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")
 
+    _ai_quota_panel(enriched, summary, days, bounds=bounds)
+
     _coco_cap = safe_float(settings.get("COCO_DAILY_CAP_CREDITS"), 15.0)
     _token_economics_panel(company, days, _coco_cap if _coco_cap > 0 else 15.0, bounds=bounds)
+
+
+def _ai_quota_panel(enriched: pd.DataFrame, summary: dict, days: int,
+                    *, bounds: tuple | None = None) -> None:
+    """Native per-user AI cost quotas — who Snowflake has BLOCKED for hitting a
+    per-user AI credit ceiling (SNOWFLAKE.CORE.QUOTA), from the account-wide
+    QUOTA_ACCESS_BLOCK_HISTORY view (the one read a console can do; quota limits
+    live in Snowsight, admin-scoped). When nothing is blocking, it quantifies the
+    unguarded AI exposure from the per-user spend already fetched above. Reuses the
+    tab's `enriched` frame + `summary` — no new per-user scan; only the block read."""
+    # WLA-1: match the tab's window label — "last month" under bounded scope, else "{days}d".
+    _wlab = "last month" if bounds is not None else f"{days}d"
+    _wphrase = "last month" if bounds is not None else f"the last {days} days"
+    st.markdown("**Per-user AI quotas & blocks**")
+    panel_help(
+        "Snowflake per-user AI quotas (SNOWFLAKE.CORE.QUOTA) cap a user's daily/monthly AI "
+        "credits and can AUTO-BLOCK new AI requests at the limit. OVERWATCH surfaces who is "
+        "currently blocked — the one account-wide read Snowflake exposes; the quota limits "
+        "themselves are set in Snowsight, Cost Management, Budgets. A blocked power user is an "
+        "incident: raise or reset the quota, or investigate the runaway usage.")
+    blk = run(cortex_sql.quota_access_block_history(days, bounds=bounds), page=_PAGE,
+              key=f"ai_quota_blocks_{days}{'_lm' if bounds is not None else ''}", tier="recent",
+              source="ACCOUNT_USAGE.QUOTA_ACCESS_BLOCK_HISTORY", probe=True, max_rows=1000)
+    blocks, mapped = (block_history(blk.df) if (blk.ok and not blk.empty)
+                      else (pd.DataFrame(), True))
+    if not blocks.empty:
+        has_active = "IS_ACTIVE" in blocks.columns
+        active = int(blocks["IS_ACTIVE"].sum()) if has_active else 0
+        kpis = [{"label": f"AI-quota blocks ({_wlab})", "value": f"{len(blocks):,}",
+                 "help": "Times a user hit a per-user AI quota and was blocked in this window."}]
+        if has_active:
+            kpis.append(
+                {"label": "Currently blocked", "value": f"{active:,}",
+                 "severity": "warn" if active else "",
+                 "help": "Users whose AI access is blocked right now (no release timestamp) — "
+                         "each is a live incident until the quota resets or is raised."})
+        if "USER" in blocks.columns:
+            kpis.append({"label": "Users affected", "value": f"{blocks['USER'].nunique():,}"})
+        kpi_row(kpis)
+        _disp = (with_user_names(blocks.rename(columns={"USER": "USER_NAME"}), _PAGE)
+                 if (mapped and "USER" in blocks.columns) else blocks)
+        styled_table(_disp, slug="ai-quota-blocks", size_note=False)
+        return
+    # No blocks (or the view is not enabled here). Quantify the unguarded exposure
+    # from the per-user spend already on screen — the case for setting a quota.
+    empty_state("clean", f"No per-user AI-quota blocks in {_wphrase}.")
+    spend = safe_float(summary.get("spend_usd"))
+    n_users = int(summary.get("active_users") or 0)
+    if spend > 0 and n_users > 0 and "SPEND_USD" in enriched.columns and len(enriched):
+        _top = enriched.sort_values("SPEND_USD", ascending=False).iloc[0]
+        _top_name = str(_top.get("DISPLAY_NAME") or _top.get("USER_NAME") or "the top user")
+        st.caption(md_dollars(
+            f"No per-user AI credit quota is enforcing here. OVERWATCH sees {format_usd(spend)} of "
+            f"AI spend across {n_users:,} user(s) this window — top: {_top_name} at "
+            f"{format_usd(safe_float(_top.get('SPEND_USD')))}. A per-user AI quota (Snowsight, "
+            "Cost Management, Budgets) would cap and auto-block runaway usage before it lands on "
+            "the bill."))
 
 
 def _token_economics_panel(company: str, days: int, cap_credits: float, *, bounds: tuple | None = None) -> None:

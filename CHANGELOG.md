@@ -1,5 +1,37 @@
 # Changelog
 
+## 4.543.0 - Per-user AI quota & block panel (2026-09-17)
+
+App-code only (no migration). The boss's "cost quota budgets for AI" item. New panel on **Cost
+Intelligence ▸ Chargeback & AI ▸ AI users** (`_ai_quota_panel`, inside the toggle-gated
+`_ai_users_tab`), surfacing Snowflake's native per-user AI cost quotas.
+
+- **What the API actually allows (researched vs live docs).** The only account-wide, plain-SELECT,
+  ACCOUNT_USAGE-grade read Snowflake exposes for quotas is the block-history view
+  `ACCOUNT_USAGE.QUOTA_ACCESS_BLOCK_HISTORY` (GA, rel 10.29). Per-quota config / limits / consumption
+  are admin-scoped CALL methods on each `SNOWFLAKE.CORE.QUOTA` object with no SQL enumeration and no
+  read-only viewer path — deliberately **out of scope** for a read-only console (documented in
+  `cortex_sql.quota_access_block_history`).
+- **`cortex_sql.quota_access_block_history(days)`** = `SELECT *` from that view, windowed + ordered on
+  `CREATED_ON` (the one confirmed column; days clamped ≥ 1). Read `probe=True` (the view is absent on
+  accounts without the feature — an expected absence, not an error) at `tier="recent"`.
+- **`app/logic/quotas.block_history`** (pure, tested): the view's columns are **undocumented** (its
+  SQL-reference page 404s), so it binds USER / QUOTA / DOMAIN / REASON / BLOCKED_ON / RELEASED_ON at
+  runtime, derives `IS_ACTIVE` (still blocked = no release timestamp), and — if nothing maps — hands
+  back the **raw** frame rather than a blank one. Same silent-break defense as `logic/monitors.py`.
+- **Panel.** When blocks exist: KPIs (blocks in window / currently blocked [warn] / users affected)
+  + the block table. When nothing is blocking (the likely day-1 state): a clean empty state that
+  **quantifies the unguarded exposure** from the per-user AI spend already fetched in the tab ("$X
+  across N users; top: … — a per-user quota would cap and auto-block this"), reusing `enriched` +
+  `summary` (no new per-user scan). `ai_chargeback.py` ACCOUNT_USAGE budget 4 -> 5 (the one block
+  read; probe- and toggle-gated, off first paint / not ambient), reachable-table pin updated.
+- Adversarially verified (2 lenses). Fixed before ship: `IS_ACTIVE` inverted on live data --
+  Snowpark returns a NULL release timestamp as `pd.NaT` in a datetime64 column, and the old blank
+  test (`_txt(NaT)` -> `"NaT"`) flipped every still-blocked user to *released*, so "Currently
+  blocked" would have read 0 (the whole point of the panel); now a vectorized `isna()` check with a
+  `pd.NaT` regression test in the real Snowpark shape. Also threaded the tab's "Last month" bounds
+  into the block window + labels so it no longer mixes a trailing window with the bounded spend.
+
 ## 4.542.0 - Spend ceilings & resource-monitor coverage panel (2026-09-17)
 
 App-code only (no migration). First of the cost-audit backlog: OVERWATCH tracked a

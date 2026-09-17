@@ -304,3 +304,27 @@ GROUP BY 1, 2, 3
 ORDER BY USER_NAME, USAGE_DATE, TOKEN_TYPE
 LIMIT 200000
 """
+
+
+def quota_access_block_history(days: int, *, bounds: tuple | None = None) -> str:
+    """Account-wide per-user AI-quota block history — who Snowflake blocked for
+    hitting a per-user AI credit quota (SNOWFLAKE.CORE.QUOTA), and when.
+
+    This is the ONE account-level, plain-SELECT read Snowflake exposes for native
+    quotas; the per-quota config / limits / consumption are admin-scoped CALL methods
+    on each quota object (no SQL enumeration, no read-only viewer path), so they are
+    deliberately out of scope for a read-only console. The view's columns are
+    UNDOCUMENTED as of 2026-09 (its SQL-reference page 404s) — SELECT * and bind
+    client-side (logic/quotas.block_history); CREATED_ON is the one confirmed column,
+    used to window and order. The reader passes probe=True: the view is absent on
+    accounts without the feature, an EXPECTED absence, not an error to log. Honors the
+    scope-bar 'Last month' bounds so the block window matches the tab's spend window."""
+    d = max(1, int(days))
+    scope = (resolve_effective_window(d, "CREATED_ON", bounds=bounds)[1]
+             if bounds is not None
+             else f"CREATED_ON >= DATEADD('day', -{d}, CURRENT_TIMESTAMP())")
+    return (
+        "SELECT * FROM SNOWFLAKE.ACCOUNT_USAGE.QUOTA_ACCESS_BLOCK_HISTORY\n"
+        f"WHERE {scope}\n"
+        "ORDER BY CREATED_ON DESC"
+    )
