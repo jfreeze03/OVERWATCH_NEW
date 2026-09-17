@@ -1,5 +1,34 @@
 # Changelog
 
+## 4.544.0 - Native Snowflake budget panel (2026-09-17)
+
+App-code only (no migration). New panel on **Cost Intelligence ▸ Contract & Forecast**
+(`_native_budget_panel`, toggle-gated, beside OVERWATCH's own contract/budget pacing), surfacing
+Snowflake's native account budget (`SNOWFLAKE.CORE.BUDGET`).
+
+- **What the API allows (researched vs live docs, 2-agent corroborated).** The budget's spend/limit
+  read via CALL methods on the instance; the ONE method usable in a single SELECT is
+  `GET_SERVICE_TYPE_USAGE_V2` (a documented table function). So OVERWATCH reads the account budget's
+  **month-to-date spend by service type live** — `cost_sql.native_budget_service_usage(month)` =
+  `SELECT SERVICE_TYPE, SUM(CREDITS_USED) FROM TABLE(SNOWFLAKE.LOCAL.ACCOUNT_ROOT_BUDGET!GET_SERVICE_TYPE_USAGE_V2('YYYY-MM','YYYY-MM')) …`,
+  read `probe=True, tier="historical"` (same family as the existing `ANOMALY_INSIGHTS` feed; **no
+  migration, no ACCOUNT_USAGE budget impact**).
+- **`app/logic/budgets.py`** (pure, tested): `native_budget_summary` (fold to MTD credits + USD + a
+  by-service breakdown) and `project_month_end` (straight-line by day-of-month). The panel reconciles
+  native MTD spend against the account's own `MONTHLY_BUDGET_USD` with a warn on projected overage,
+  and a by-service table.
+- **Deliberately scoped out (CALL-only):** the native spending LIMIT (`GET_SPENDING_LIMIT`) and daily
+  history — a SELECT of the scalar method compile-errors, so spend-vs-native-limit lands only via a
+  budget mart (a follow-up; a scheduled proc `CALL`s them into a FACT). The panel frames this and
+  reconciles against the app budget meanwhile.
+- Reading needs owner grants `SNOWFLAKE.BUDGET_VIEWER` (application role) + `IMPORTED PRIVILEGES ON
+  DATABASE SNOWFLAKE` — staged on runbox.
+- Adversarially verified (2 lenses vs live docs). The verify **refuted** the main risk (the
+  table-function builder is GA-valid: right args, right columns) and caught: a doomed scalar
+  `GET_SPENDING_LIMIT()` SELECT probe that would compile-error and **spam `APP_ERROR_LOG` every
+  render** (the V139/V140 false-error-noise class) — **removed** it entirely; and the wrong staged
+  grant (`USAGE_VIEWER` → the documented `IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE`) — corrected.
+
 ## 4.543.0 - Per-user AI quota & block panel (2026-09-17)
 
 App-code only (no migration). The boss's "cost quota budgets for AI" item. New panel on **Cost
