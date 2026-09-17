@@ -17,7 +17,7 @@ def test_record_error_returns_a_stamped_reference(monkeypatch):
     # entry, and prepends it into the persisted CONTEXT so the operator-visible ref
     # matches its APP_ERROR_LOG row.
     monkeypatch.setattr(errors, "st", SimpleNamespace(session_state={}))
-    ref = errors.record_error("Cost & Contract", ValueError("boom"), context="page render")
+    ref = errors.record_error("Cost Intelligence", ValueError("boom"), context="page render")
     assert re.fullmatch(r"OW-\d{8}-\d{6}-[0-9A-F]{6}", ref)
     entry = errors.st.session_state[errors._BUFFER_KEY][-1]
     assert entry["ref"] == ref

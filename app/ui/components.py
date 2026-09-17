@@ -190,7 +190,7 @@ def _section_slug(label: str) -> str:
 # Review fix: Control Room (Pulse/Triage live-fallback to QUERY_HISTORY /
 # TASK_HISTORY) and Brief (its headline MTD credit spend is FACT_METERING_DAILY,
 # up to 24h behind) both surface lagging data prominently, so they belong here.
-_LAGGING_SURFACES = {"Cost & Contract", "Operations", "Security", "Overview",
+_LAGGING_SURFACES = {"Cost Intelligence", "Operations", "Security", "Overview",
                      "Control Room", "Brief"}
 
 # F9: the section bar's session key per page — lazy_sections stores the CHOSEN
@@ -198,7 +198,7 @@ _LAGGING_SURFACES = {"Cost & Contract", "Operations", "Security", "Overview",
 # authoritative section BEFORE the bar re-renders. The ?section= query param it
 # also writes lags a rerun and is shared across pages, so it is not used here.
 _PAGE_SECTION_KEY = {
-    "Control Room": "cr_section", "Cost & Contract": "cost_section",
+    "Control Room": "cr_section", "Cost Intelligence": "cost_section",
     "Operations": "ops_section", "Decision Studio": "decision_section",
     "Alerts": "alerts_section", "Security": "sec_section", "Admin": "adm_section",
 }

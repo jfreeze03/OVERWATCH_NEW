@@ -7,7 +7,7 @@ from app.ui import status_colors
 def test_investigation_targets_known_rules():
     t = navigate.investigation_target(
         "COST_CLOUD_SVC_RATIO", "WH_TRXS_TRANSFORM cloud-services ratio 31.2% (24h)")
-    assert t["page"] == "Cost & Contract" and t["section"] == "Spend & Attribution"
+    assert t["page"] == "Cost Intelligence" and t["section"] == "Spend & Attribution"
     assert t["filters"]["warehouse_contains"] == "WH_TRXS_TRANSFORM"
 
     t = navigate.investigation_target(
@@ -18,14 +18,14 @@ def test_investigation_targets_known_rules():
 
 def test_investigation_falls_back_by_family_prefix():
     t = navigate.investigation_target("COST_SOMETHING_NEW", "no entities here")
-    assert t["page"] == "Cost & Contract"
+    assert t["page"] == "Cost Intelligence"
     assert navigate.investigation_target("SEC_NEW_RULE")["page"] == "Security"
     assert navigate.investigation_target("UNKNOWN")["page"] == "Overview"
 
 
 def test_section_keys_cover_all_lazy_pages():
     assert set(navigate.PAGE_SECTION_KEYS) == {
-        "Control Room", "Cost & Contract", "Operations", "Decision Studio",
+        "Control Room", "Cost Intelligence", "Operations", "Decision Studio",
         "Security", "Alerts", "Admin"}
 
 

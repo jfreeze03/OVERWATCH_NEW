@@ -28,7 +28,7 @@ def test_glossary_exists_and_is_substantial():
 
 def test_glossary_covers_every_page():
     text = _text()
-    for page in ("Brief", "Overview", "Control Room", "Cost & Contract", "Operations",
+    for page in ("Brief", "Overview", "Control Room", "Cost Intelligence", "Operations",
                  "Decision Studio", "Alerts", "Security", "Admin"):
         assert f"## {page}" in text, f"glossary missing page: {page}"
 

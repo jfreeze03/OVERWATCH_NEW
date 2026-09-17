@@ -1,4 +1,4 @@
-"""Cost & Contract — Compare: period vs period (Phase 1).
+"""Cost Intelligence — Compare: period vs period (Phase 1).
 
 The spreadsheet-killer: "spend is up 12% — WHICH warehouses/patterns did
 it?" answered from existing facts/marts only — no live Account Usage scans
@@ -43,7 +43,7 @@ from app.ui.components import (
     styled_table,
 )
 
-_PAGE = "Cost & Contract"
+_PAGE = "Cost Intelligence"
 
 _PAIRINGS = {
     "Last full month vs prior": "month",

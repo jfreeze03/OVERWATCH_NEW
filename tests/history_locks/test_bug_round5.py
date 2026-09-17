@@ -54,15 +54,15 @@ def test_request_navigation_still_jumps_cross_page(monkeypatch):
     import app.core.session as session
     monkeypatch.setattr(session, "current_role", lambda: "ALFA_PDMWMGMT")  # -> EXECUTIVE
 
-    # Cost & Contract IS in the EXECUTIVE profile -> a real jump still queues + reruns.
-    state.request_navigation("Cost & Contract")
-    assert fake.session_state["_ow_nav_pending"]["page"] == "Cost & Contract"
+    # Cost Intelligence IS in the EXECUTIVE profile -> a real jump still queues + reruns.
+    state.request_navigation("Cost Intelligence")
+    assert fake.session_state["_ow_nav_pending"]["page"] == "Cost Intelligence"
     assert fake.reran == 1
 
     # a same-page jump that carries a section is NOT a no-op (section drill still fires).
-    fake.session_state["_ow_page"] = "Cost & Contract"
+    fake.session_state["_ow_page"] = "Cost Intelligence"
     fake.session_state.pop("_ow_nav_pending", None)
-    state.request_navigation("Cost & Contract", "Contract")
+    state.request_navigation("Cost Intelligence", "Contract")
     assert fake.session_state["_ow_nav_pending"]["section"] == "Contract"
 
 

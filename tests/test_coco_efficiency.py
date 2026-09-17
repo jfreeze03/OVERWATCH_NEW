@@ -1,4 +1,4 @@
-"""CoCo efficiency + coaching-flag logic (Cost & Contract ▸ Chargeback & AI)."""
+"""CoCo efficiency + coaching-flag logic (Cost Intelligence ▸ Chargeback & AI)."""
 
 from __future__ import annotations
 

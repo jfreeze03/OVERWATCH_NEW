@@ -34,7 +34,7 @@ seed, with a unit test that keeps the two in sync).
 - Trexis: `COMPANY_SCOPE` mapping rows, `WH_TRXS_*`/`TRXS_*` prefixes, `%TRXS%` roles.
 - ALFA: needs evidence too (V044) — `WH_ALFA_*` warehouses, `ALFA%`/`ADMIN`
   databases, `%ALFA%` or DBA roles.
-- Everything else classifies **UNKNOWN** and surfaces on Cost & Contract →
+- Everything else classifies **UNKNOWN** and surfaces on Cost Intelligence →
   Spend & Attribution (Unmapped entities) until a `COMPANY_SCOPE` row maps it —
   nothing silently bills ALFA.
 - Exception: user `KEBARR1` holds both ALFA and Trexis roles and is classified
@@ -51,7 +51,7 @@ security boundary is Snowflake roles under Streamlit-in-Snowflake.
 | Overview | Exec glance: spend vs budget, month-end forecast, alerts, platform score, real top actions. |
 | Control Room | DBA morning triage: ranked issue queue, source freshness, 24h failures, spend movers. |
 | Alerts | Alert rules, open events, ack/resolve workflow, generated native ALERT SQL. |
-| Cost & Contract | Service/warehouse/user attribution, contract pacing, Cortex + storage, savings ledger (estimated vs verified). |
+| Cost Intelligence | Service/warehouse/user attribution, contract pacing, Cortex + storage, savings ledger (estimated vs verified). |
 | Operations | Queries, tasks, warehouses, contention, change impact — p95, failures, queue, spill, anomalies, post-change regression verdicts. |
 | Decision Studio | Optimization experiments, savings verification, the SLO cockpit, and the workload portfolio. |
 | Security | MFA gaps (login-evidence based), failed logins, grants, recent DDL changes. |

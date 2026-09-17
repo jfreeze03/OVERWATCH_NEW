@@ -1331,14 +1331,14 @@ def render() -> None:
                 "Δ USD": [format_usd(safe_float(v)) for v in top["DELTA_USD"]],
             })
             styled_table(_mv)
-            if st.button("Full spend movers → Cost & Contract", key="cr_movers_cost"):
+            if st.button("Full spend movers → Cost Intelligence", key="cr_movers_cost"):
                 # r26 (bug-hunt): the full by-warehouse movers table lives in the
                 # Attribution panel, which v4.475 deferred behind the
                 # cost_attribution_load toggle (off by default). Seed it OPEN so this
                 # deep-link lands directly on the promised table; ordinary entries into
                 # Spend & Attribution keep the toggle off (the first-paint perf default).
                 st.session_state["cost_attribution_load"] = True
-                request_navigation("Cost & Contract", "Spend & Attribution")
+                request_navigation("Cost Intelligence", "Spend & Attribution")
             result_caption(movers)
 
     elif section == "Freshness & replay":

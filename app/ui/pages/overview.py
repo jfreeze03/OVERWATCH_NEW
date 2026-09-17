@@ -73,7 +73,7 @@ _PAGE = "Overview"
 # N8: each score-deduction driver → the page that lets you act on it. Off-profile
 # targets are clamped to Overview by consume_pending_navigation (B8), so this is safe.
 _SCORE_DRIVER_NAV = {
-    "Budget pace": "Cost & Contract",
+    "Budget pace": "Cost Intelligence",
     "Critical alerts": "Alerts",
     "High alerts": "Alerts",
     "Query failures": "Operations",
@@ -617,10 +617,10 @@ def render() -> None:
             "help": "Warehouse metering credits x "
                     f"${rate:.2f}/credit ({settings.get('_source')}) — the "
                     "company-scopable lens, complete days only (today's partial excluded). "
-                    "Reconciles with Cost & Contract -> By warehouse for windows up to 182 days; "
+                    "Reconciles with Cost Intelligence -> By warehouse for windows up to 182 days; "
                     "beyond that the exact-usage table clamps to its 182-day vs-prior half-window "
                     "while this headline sums the full selected window, so at 365d/current-year the "
-                    "two differ. Serverless/AI and the cloud-services rebate are on Cost & Contract "
+                    "two differ. Serverless/AI and the cloud-services rebate are on Cost Intelligence "
                     "-> Spend & Attribution; Snowsight adds storage and transfer, so it reads higher.",
         },
     ]
@@ -763,7 +763,7 @@ def render() -> None:
     )
     panel_help(
         "Company-scoped warehouse economics for the selected window. Serverless, AI, storage, "
-        "transfer, and the cloud-services rebate remain on Cost & Contract so this additive "
+        "transfer, and the cloud-services rebate remain on Cost Intelligence so this additive "
         "warehouse lens continues to reconcile."
     )
     kpi_row(company_kpis)
@@ -773,7 +773,7 @@ def render() -> None:
         "Overview · Spend", _vp,
         title=f"Spend {str(f['window_label']).lower()} ({company}) — by warehouse vs prior",
         summary=format_usd(window_spend) + (f" ({_ov_spend_delta})" if _ov_spend_delta else ""),
-        next_action="Drill into Cost & Contract ▸ Spend & Attribution for the driver.",
+        next_action="Drill into Cost Intelligence ▸ Spend & Attribution for the driver.",
         as_of=_ov_asof_company or "",
         key=f"ow_case_add_ov_spend_{company}_{days}")
 
@@ -829,7 +829,7 @@ def render() -> None:
     # Projected KPIs, so it must stay visible in operator mode.
     st.caption("MTD & Projected are configured-rate credit-spend models for compute, serverless, "
                "and AI. Storage, transfer, and organization currency adjustments are separate — "
-               "Cost & Contract → org rate card is billing truth.")
+               "Cost Intelligence → org rate card is billing truth.")
 
     # ---- The work + the drivers (rec4: above the charts, not buried below) ----
     # An executive landing page leads with what needs an owner, not two charts.

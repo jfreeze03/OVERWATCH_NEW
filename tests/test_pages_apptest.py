@@ -123,11 +123,11 @@ def test_nav_single_select_across_groups():
     at = AppTest.from_function(_entry, default_timeout=20)
     at.run()
     assert not at.exception
-    _nav_to(at, "Cost & Contract")          # Watch -> Analyze
+    _nav_to(at, "Cost Intelligence")          # Watch -> Analyze
     at.run()
     assert not at.exception
-    assert _ss(at, "_ow_page") == "Cost & Contract"
-    assert _selected_pages(at, "Cost & Contract") == {"Cost & Contract"}
+    assert _ss(at, "_ow_page") == "Cost Intelligence"
+    assert _selected_pages(at, "Cost Intelligence") == {"Cost Intelligence"}
     _nav_to(at, "Admin")                    # Analyze -> Govern
     at.run()
     assert not at.exception
@@ -147,7 +147,7 @@ def test_each_page_renders(page):
     assert at.title or at.markdown, page
 
 
-@pytest.mark.parametrize("page", ["Overview", "Cost & Contract", "Operations",
+@pytest.mark.parametrize("page", ["Overview", "Cost Intelligence", "Operations",
                                   "Security", "Control Room", "Decision Studio"])
 def test_scope_pages_render_with_last_month_selected(page):
     # Exercises the bounded 'Last month' path THROUGH the UI (filters() -> f["bounds"]

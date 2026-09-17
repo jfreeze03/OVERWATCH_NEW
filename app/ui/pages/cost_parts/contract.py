@@ -1,4 +1,4 @@
-"""Cost & Contract — the Contract & Forecast section bodies (year projection,
+"""Cost Intelligence — the Contract & Forecast section bodies (year projection,
 rate-card reconciliation, org billing truth, pacing, steering, renewal planner).
 
 Formula honesty rules: billed dollars always include the cloud-services
@@ -41,7 +41,7 @@ from app.ui.components import (
     styled_table,
 )
 
-_PAGE = "Cost & Contract"
+_PAGE = "Cost Intelligence"
 
 
 # Split out of app/ui/pages/cost.py (V028): section bodies only —

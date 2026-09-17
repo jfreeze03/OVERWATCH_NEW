@@ -23,7 +23,7 @@ DEFAULT_STORAGE_USD_PER_TB_MONTH = 23.00
 # ACCOUNT_USAGE storage views (DATABASE_STORAGE_USAGE_HISTORY, STORAGE_USAGE)
 # are explicitly an estimate that "won't match your invoice exactly"
 # (docs.snowflake.com/en/sql-reference/account-usage/storage_usage). Billing
-# truth is ORGANIZATION_USAGE.USAGE_IN_CURRENCY, surfaced on Cost & Contract →
+# truth is ORGANIZATION_USAGE.USAGE_IN_CURRENCY, surfaced on Cost Intelligence →
 # Contract & Forecast's rate-card reconciliation panel (on Admin before v4.48).
 # Keep this divisor consistent with the $/TB SETTING.
 

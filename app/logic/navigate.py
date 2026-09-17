@@ -12,7 +12,7 @@ import re
 # page label -> the lazy_sections widget key on that page
 PAGE_SECTION_KEYS = {
     "Control Room": "cr_section",
-    "Cost & Contract": "cost_section",
+    "Cost Intelligence": "cost_section",
     "Operations": "ops_section",
     "Decision Studio": "decision_section",
     "Security": "sec_section",
@@ -28,7 +28,7 @@ PAGE_SECTION_KEYS = {
 PAGE_SECTION_LABELS = {
     "Control Room": ["Action Center", "Pulse", "Incidents & triage", "Timeline & movers",
                      "Freshness & replay", "Entity 360"],
-    "Cost & Contract": ["Spend & Attribution", "Contract & Forecast", "Chargeback & AI",
+    "Cost Intelligence": ["Spend & Attribution", "Contract & Forecast", "Chargeback & AI",
                          "Unit costs", "Compare", "Optimization & Savings"],
     "Operations": ["Queries", "Tasks", "Warehouses", "Change impact",
                    "Pipeline SLA", "Release compare", "Emergency"],
@@ -41,11 +41,11 @@ PAGE_SECTION_LABELS = {
 
 _RULE_TARGETS = {
     "PERF_CHANGE_REGRESSION": ("Operations", "Change impact"),
-    "COST_CLOUD_SVC_RATIO": ("Cost & Contract", "Spend & Attribution"),
-    "COST_STORAGE_SURGE": ("Cost & Contract", "Optimization & Savings"),
-    "COST_SERVERLESS_CREEP": ("Cost & Contract", "Spend & Attribution"),
-    "COST_ANOMALY_SWEEP": ("Cost & Contract", "Spend & Attribution"),
-    "COST_DEPT_BUDGET_PACE": ("Cost & Contract", "Chargeback & AI"),
+    "COST_CLOUD_SVC_RATIO": ("Cost Intelligence", "Spend & Attribution"),
+    "COST_STORAGE_SURGE": ("Cost Intelligence", "Optimization & Savings"),
+    "COST_SERVERLESS_CREEP": ("Cost Intelligence", "Spend & Attribution"),
+    "COST_ANOMALY_SWEEP": ("Cost Intelligence", "Spend & Attribution"),
+    "COST_DEPT_BUDGET_PACE": ("Cost Intelligence", "Chargeback & AI"),
     "PIPE_COPY_FAILURES": ("Operations", "Pipeline SLA"),
     "PIPE_DT_FAILURES": ("Operations", "Pipeline SLA"),
     "SEC_CRED_EXPIRY": ("Security", "Access"),
@@ -53,8 +53,8 @@ _RULE_TARGETS = {
 }
 
 _FAMILY_DEFAULTS = (
-    ("BUDGET", ("Cost & Contract", "Contract & Forecast")),
-    ("COST", ("Cost & Contract", "Spend & Attribution")),
+    ("BUDGET", ("Cost Intelligence", "Contract & Forecast")),
+    ("COST", ("Cost Intelligence", "Spend & Attribution")),
     ("PERF", ("Operations", "Queries")),
     ("PIPE", ("Operations", "Pipeline SLA")),
     ("TASK", ("Operations", "Tasks")),
@@ -64,12 +64,12 @@ _FAMILY_DEFAULTS = (
 # Rules with a mechanical fix: the drawer offers "Generate fix ->" landing on
 # the remediation/optimization surface with the event's filters applied.
 FIX_TARGETS = {
-    "COST_CLOUD_SVC_RATIO": ("Cost & Contract", "Optimization & Savings"),
-    "COST_WH_DAILY_CREDITS": ("Cost & Contract", "Optimization & Savings"),
-    "COST_ANOMALY_SWEEP": ("Cost & Contract", "Optimization & Savings"),
-    "COST_STORAGE_SURGE": ("Cost & Contract", "Optimization & Savings"),
-    "PERF_QUEUED_MINUTES": ("Cost & Contract", "Optimization & Savings"),
-    "PERF_SPILL_GB": ("Cost & Contract", "Optimization & Savings"),
+    "COST_CLOUD_SVC_RATIO": ("Cost Intelligence", "Optimization & Savings"),
+    "COST_WH_DAILY_CREDITS": ("Cost Intelligence", "Optimization & Savings"),
+    "COST_ANOMALY_SWEEP": ("Cost Intelligence", "Optimization & Savings"),
+    "COST_STORAGE_SURGE": ("Cost Intelligence", "Optimization & Savings"),
+    "PERF_QUEUED_MINUTES": ("Cost Intelligence", "Optimization & Savings"),
+    "PERF_SPILL_GB": ("Cost Intelligence", "Optimization & Savings"),
 }
 
 

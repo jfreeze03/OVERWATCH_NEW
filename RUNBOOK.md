@@ -200,7 +200,7 @@ Admin → Settings, never in code.
 - **Spend movers** — window vs prior window per warehouse
   (`warehouse_window_vs_prior`, lag-offset so both windows are complete).
 
-### Cost & Contract (sections)
+### Cost Intelligence (sections)
 - **Spend** — daily billed by service category; KPIs: billed $, cloud-
   services rebate (always shown separately), AI spend at the AI rate.
   **Cloud-services health**: per-warehouse ratio = cloud-services credits ÷
@@ -645,7 +645,7 @@ everywhere: password-login evidence within 30d (FACT_LOGIN_DAILY-backed,
 live LOGIN_HISTORY fallback). Storage panels read FACT_STORAGE_DAILY
 first. Window anchoring convention lives in `app/data/common.py`.
 
-**Code layout.** Cost & Contract sections live in
+**Code layout.** Cost Intelligence sections live in
 `app/ui/pages/cost_parts/{spend,contract,ai_chargeback,optimize}.py`;
 `cost.py` is dispatch only. Wave-era test locks live under
 `tests/history_locks/` (see `tests/README.md`).

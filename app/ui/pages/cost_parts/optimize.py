@@ -1,4 +1,4 @@
-"""Cost & Contract — the Optimization & Savings section bodies (advisors,
+"""Cost Intelligence — the Optimization & Savings section bodies (advisors,
 scans, guarded remediation, savings ledger).
 
 Formula honesty rules: billed dollars always include the cloud-services
@@ -88,7 +88,7 @@ from app.ui.components import (
     write_gate_open,
 )
 
-_PAGE = "Cost & Contract"
+_PAGE = "Cost Intelligence"
 
 
 # Split out of app/ui/pages/cost.py (V028): section bodies only —

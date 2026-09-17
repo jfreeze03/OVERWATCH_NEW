@@ -38,7 +38,7 @@ _PATHS = {
 
 _PAGE_ICON = {
     "Brief": "brief", "Overview": "overview", "Control Room": "control",
-    "Cost & Contract": "cost", "Operations": "operations", "Alerts": "alerts",
+    "Cost Intelligence": "cost", "Operations": "operations", "Alerts": "alerts",
     "Decision Studio": "target", "Security & Governance": "security",
     "Security": "security", "Admin": "admin",
 }

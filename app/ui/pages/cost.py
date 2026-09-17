@@ -1,4 +1,4 @@
-"""Cost & Contract — attribution, contract pacing, Cortex/storage, savings.
+"""Cost Intelligence — attribution, contract pacing, Cortex/storage, savings.
 
 Formula honesty rules: billed dollars always include the cloud-services
 adjustment; warehouse spend is exact; user/database spend is share-allocated
@@ -41,7 +41,7 @@ from app.ui.components import (
     write_gate_open,
 )
 
-_PAGE = "Cost & Contract"
+_PAGE = "Cost Intelligence"
 
 
 from app.ui.pages.cost_parts.ai_chargeback import (  # noqa: E402
@@ -115,7 +115,7 @@ def render() -> None:
     settings = load_settings(_PAGE)
     rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
     ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
-    page_header("Cost & Contract",
+    page_header("Cost Intelligence",
                 "Spend, contract runway, and proven savings.",
                 scope_note=f"{f['company']} · {f['window_label']}", icon_name="cost")
     # #3: operator gating from the VIEWER identity + allowlist, not CURRENT_ROLE().

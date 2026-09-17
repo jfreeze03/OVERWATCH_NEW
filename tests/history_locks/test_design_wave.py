@@ -19,7 +19,7 @@ def _src(rel: str) -> str:
 # rec14 — self-identifying CSV exports
 def test_rec14_export_filename_is_page_scoped():
     from app.ui.components import _slugify
-    assert _slugify("Cost & Contract") == "cost-contract"
+    assert _slugify("Cost Intelligence") == "cost-intelligence"
     assert _slugify("") == "table" and _slugify(None) == "table"
     comp = _src("app/ui/components.py")
     assert "_export_filename(seq, slug)" in comp          # both download buttons use it

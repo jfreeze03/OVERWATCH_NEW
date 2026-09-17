@@ -77,7 +77,7 @@ from app.ui.pages import (  # noqa: E402
 _RENDERERS = {
     "Overview": overview.render,
     "Control Room": control_room.render,
-    "Cost & Contract": cost.render,
+    "Cost Intelligence": cost.render,
     "Operations": operations.render,
     "Decision Studio": decision_studio.render,
     "Alerts": alerts.render,
@@ -611,7 +611,7 @@ def _persistent_status_bar(pages: tuple[str, ...], vals: object = _UNSET) -> Non
             "v": f"{format_usd(usd)} · {credits:,.0f} cr",
             "icon": "cost",
             "sev": "info",
-            "target": _target("Cost & Contract", "Spend & Attribution"),
+            "target": _target("Cost Intelligence", "Spend & Attribution"),
         })
     status_bar(stats)
 

@@ -321,7 +321,7 @@ def test_spend_answer_uses_the_cost_pages_attribution_builder():
     # today-excluded builder the Cost page serves, so the two never contradict.
     from app.logic.ask.registry import _needs_spend_by_user
     sql = _needs_spend_by_user(AskParams(30, "ALFA"))[0].sql
-    assert "FACT_COST_ALLOC_XDIM_DAILY" in sql          # same mart as Cost & Contract
+    assert "FACT_COST_ALLOC_XDIM_DAILY" in sql          # same mart as Cost Intelligence
     assert "DAY < CURRENT_DATE()" in sql                # half-open window (excludes today)
     assert "MART_COST_ALLOCATION_DAILY" not in sql      # not the abandoned owner-scoped mart
 

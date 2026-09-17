@@ -1,4 +1,4 @@
-"""Cost & Contract — the Chargeback & AI section bodies (department chargeback,
+"""Cost Intelligence — the Chargeback & AI section bodies (department chargeback,
 Cortex & storage, AI user attribution).
 
 Formula honesty rules: billed dollars always include the cloud-services
@@ -51,7 +51,7 @@ from app.ui.components import (
     write_gate_open,
 )
 
-_PAGE = "Cost & Contract"
+_PAGE = "Cost Intelligence"
 
 
 # Split out of app/ui/pages/cost.py (V028): section bodies only —
@@ -351,7 +351,7 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
                 statements.append(
                     f"INSERT INTO {core_object('ACTION_QUEUE')} (COMPANY, SEVERITY, TITLE, DETAIL, OWNER, SOURCE, ESTIMATED_USD, PERIOD)\n"
                     f"SELECT {company_expr}, {sql_literal(str(r['SEVERITY']).upper())}, {sql_literal(title)}, "
-                    f"{sql_literal(detail)}, 'DBA / AI Governance', 'Cost & Contract > Chargeback & AI > AI users', "
+                    f"{sql_literal(detail)}, 'DBA / AI Governance', 'Cost Intelligence > Chargeback & AI > AI users', "
                     f"{sql_number(_est)}, 'MONTHLY'\n"
                     f"WHERE NOT EXISTS (SELECT 1 FROM {core_object('ACTION_QUEUE')} q "
                     f"WHERE q.COMPANY = {company_expr} AND q.TITLE = {sql_literal(title)} "
@@ -638,7 +638,7 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *, 
         {"label": f"Chargeback total ({_wlab})", "value": format_usd(total_usd),
          "help": "Exact WAREHOUSE-COMPUTE metering x rate — includes each warehouse's "
                  "cloud-services credits, unadjusted (the account-level rebate lives "
-                 "on Cost & Contract → Spend & Attribution). Reconciles to the scoped "
+                 "on Cost Intelligence → Spend & Attribution). Reconciles to the scoped "
                  "warehouse spend by construction; storage, serverless, AI, and transfer "
                  "are not allocated here."},
         {"label": "Departments", "value": f"{dept['DEPARTMENT'].nunique()}"},

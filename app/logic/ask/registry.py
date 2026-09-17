@@ -90,7 +90,7 @@ _SPEND_INTENT = "spend_spike_by_user"
 
 
 def _needs_spend_by_user(params: AskParams) -> list[QuerySpec]:
-    # Use the SAME builder the Cost & Contract page serves for per-user attribution
+    # Use the SAME builder the Cost Intelligence page serves for per-user attribution
     # (alloc_xdim_attribution over FACT_COST_ALLOC_XDIM_DAILY): warehouse-grain
     # company scope, per-warehouse-hour credit weighting, and the resolved
     # today-excluded window — so Ask's "top spender" reconciles with the Cost page

@@ -346,7 +346,7 @@ def render() -> None:
                 "delta_color": "inverse" if days_left <= 90 else "off",
                 "help": "Configured-rate credit runway from trailing 30 complete days. "
                         "It excludes storage, transfer, and organization currency adjustments; "
-                        "billing-truth runway is on Cost & Contract > Contract & Forecast.",
+                        "billing-truth runway is on Cost Intelligence > Contract & Forecast.",
             })
     roi = _b_rec.get("roi") or run(mart_sql.savings_summary_quarter(), page=_PAGE, key="brief_roi",
               tier="recent", source="SAVINGS_LEDGER")
@@ -487,12 +487,12 @@ def render() -> None:
         "Your one-scroll morning read: the headline numbers, then open fires, then the top "
         "asks. A dash means telemetry was unreachable, not zero. A figure turns red when open "
         "criticals are above zero, or when contract or savings fall into the danger band. Work "
-        "the Fires and Asks below, then open the linked full page (Alerts, Cost & Contract, "
+        "the Fires and Asks below, then open the linked full page (Alerts, Cost Intelligence, "
         "Control Room)."
     )
     kpi_row(kpis)
     # N7: same disclosure as Overview — the headline dollars are credit-billed
-    # services; storage and data-transfer bill separately (Cost & Contract).
+    # services; storage and data-transfer bill separately (Cost Intelligence).
     # #1: pure billing-basis disclosure → audit-mode only (the note Overview also hides).
     methodology_note("Spend covers credit-billed services (compute, serverless, AI); "
                      "storage and data-transfer bill separately.")

@@ -424,10 +424,10 @@ def test_rec14_nav_groups_partition_and_preserve_role_scope():
     assert dict(dba)["Watch"] == ["Brief", "Overview", "Alerts"]
     assert dict(dba)["Govern"] == ["Security", "Admin"]
     # EXECUTIVE cannot see Operations/Control Room/Security/Admin/Ask -> no Govern
-    # or Ask group, and only the allowed Analyze member (Cost & Contract) appears
+    # or Ask group, and only the allowed Analyze member (Cost Intelligence) appears
     exe = dict(nav_groups_for(PAGES_BY_PROFILE["EXECUTIVE"]))
     assert "Govern" not in exe and "Ask OVERWATCH" not in exe
-    assert exe["Analyze"] == ["Cost & Contract"]
+    assert exe["Analyze"] == ["Cost Intelligence"]
     assert exe["Watch"] == ["Brief", "Overview", "Alerts"]
     # a page in no group is never dropped -- it trails under "More"
     got = dict(nav_groups_for(("Brief", "Mystery")))

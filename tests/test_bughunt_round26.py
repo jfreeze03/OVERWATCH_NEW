@@ -7,7 +7,7 @@ color, which the round explicitly excluded as a style preference).
 DEEP-LINK REGRESSION (r26 #1, confirmed): v4.475 deferred the Cost ▸ Attribution
 panel — which OWNS the by-warehouse "full spend movers" table — behind the
 `cost_attribution_load` toggle (off by default, for a lighter first paint). But the
-Control Room "Full spend movers → Cost & Contract" button deep-links to that section
+Control Room "Full spend movers → Cost Intelligence" button deep-links to that section
 expecting the table visible; after the split it landed on the Spend view with the
 table hidden and no cue. Fix: the CR button seeds the toggle OPEN before navigating,
 so the deep-link lands directly on the promised table while ordinary entries into
@@ -29,7 +29,7 @@ def test_cr_full_movers_deeplink_opens_the_deferred_attribution_toggle():
     cr = _read("app/ui/pages/control_room.py")
     seg = cr.split('key="cr_movers_cost"', 1)[1].split("result_caption", 1)[0]
     # the deep-link still targets Spend & Attribution
-    assert 'request_navigation("Cost & Contract", "Spend & Attribution")' in seg
+    assert 'request_navigation("Cost Intelligence", "Spend & Attribution")' in seg
     # and it seeds the deferred movers-table toggle OPEN, BEFORE navigating
     assert 'st.session_state["cost_attribution_load"] = True' in seg
     assert seg.index("cost_attribution_load") < seg.index("request_navigation("), \

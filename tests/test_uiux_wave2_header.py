@@ -51,7 +51,7 @@ def test_f6_lag_caption_is_gated_to_metering_surfaces():
     # review fix: Control Room (live QUERY_HISTORY/TASK_HISTORY fallback) and
     # Brief (FACT_METERING_DAILY headline) surface lagging data prominently too.
     _expected = {
-        "Cost & Contract", "Operations", "Security", "Overview", "Control Room", "Brief"}
+        "Cost Intelligence", "Operations", "Security", "Overview", "Control Room", "Brief"}
     assert _expected == components._LAGGING_SURFACES
     body = _COMP.split("def page_header(", 1)[1].split("\ndef ", 1)[0]
     # the note is no longer unconditional — it's gated to the lagging surfaces

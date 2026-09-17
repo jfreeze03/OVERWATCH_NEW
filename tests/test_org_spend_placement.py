@@ -1,4 +1,4 @@
-"""Lock: the org-spend surfaces live on Cost & Contract, not Admin (v4.48).
+"""Lock: the org-spend surfaces live on Cost Intelligence, not Admin (v4.48).
 
 Moved 2026-07-15 (owner: "move them"). The Accounts Spend Summary and the
 rate-card reconciliation are cost analysis, not app plumbing: Admin's other

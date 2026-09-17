@@ -2577,7 +2577,7 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
     res = _wh_pf.get("res") or run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE, key=f"w_fact_{company}",
               tier="hourly", source="FACT_WAREHOUSE_DAILY")
     if not guard(res, "No warehouse dailies yet — the hourly loader fills them.",
-                 setup_hint="Live equivalent lives on Cost & Contract > Spend & Attribution."):
+                 setup_hint="Live equivalent lives on Cost Intelligence > Spend & Attribution."):
         return
     df = res.df.copy()
     df["USD"] = df["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))
@@ -2660,7 +2660,7 @@ def _wh_sizing_efficiency(company: str, rate: float, days: int, *,
     _lm = "_lm" if bounds is not None else ""
     # O12: warehouse utilization & right-sizing — reuse the Cost-side profile
     # (idle share, queue/spill, size verdict) here as a DIAGNOSTIC; execution
-    # (the ALTER + savings booking) stays on Cost & Contract -> Optimize.
+    # (the ALTER + savings booking) stays on Cost Intelligence -> Optimize.
     section_header("Utilization & right-sizing", "", "warehouse", anchor="ops-wh-utilization")
     if not st.toggle("Load utilization profile (heavy scan)", key="ops_wh_sizing_load",
                      help="Per-warehouse idle %, queue/spill, p95 and a size verdict over the window."):
@@ -2712,7 +2712,7 @@ def _wh_sizing_efficiency(company: str, rate: float, days: int, *,
         st.caption("Health = 100 − capped penalties for queueing, remote spill, long p95 runtime, "
                    "and low utilization (evidence-gated). On the mart path p95 is the PEAK-DAY "
                    "value (one bad day penalizes), not the window p95. Diagnostic only — generate "
-                   "the ALTER and book the saving on Cost & Contract → Optimize → Idle & sizing.")
+                   "the ALTER and book the saving on Cost Intelligence → Optimize → Idle & sizing.")
 
         # Wave 3: cost-per-query outliers — cross-sectional (peer) z-score of $/query
         # against the fleet, from the same cached profile (no new scan).
@@ -2758,7 +2758,7 @@ def _wh_sizing_efficiency(company: str, rate: float, days: int, *,
         charts.hour_heatmap(_hh.df, "WAREHOUSE_NAME", "HOUR_OF_DAY", "AVG_CREDITS",
                             title="avg credits/hour", value_fmt=",.3f")
         st.caption("Dark cells with credits but no matching query activity are the schedule "
-                   "opportunity. Generate the SUSPEND/RESUME schedule on Cost & Contract → Optimize.")
+                   "opportunity. Generate the SUSPEND/RESUME schedule on Cost Intelligence → Optimize.")
         _windows = []
         for _wh in sorted(_hh.df["WAREHOUSE_NAME"].astype(str).unique()):
             _p = remediation.propose_quiet_window(

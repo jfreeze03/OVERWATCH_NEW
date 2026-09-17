@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.541.0 - Rename "Cost & Contract" page to "Cost Intelligence" (2026-09-17)
+
+App-code only (no migration). The page's scope has broadened well past its label — compute,
+Cortex/AI, storage, data transfer, attribution, contract pacing, chargeback, savings
+verification — so the page identity token `"Cost & Contract"` is renamed to `"Cost Intelligence"`
+everywhere it is the routing key **and** the display label (they are the same token by design):
+`app/main.py` registry, `NAV_GROUPS`, all `VIEWER_PROFILES`, `request_navigation`/`_target`
+call-sites in `app/logic/navigate.py` + pages, the icon/section maps, `cost.py` `_PAGE` +
+`page_header`, plus the READER/nav-consistency/apptest locks and the live docs (README,
+FEATURE_GLOSSARY, RUNBOOK).
+
+- **113 occurrences across 48 files** swapped as one atomic token rename; the string is
+  unambiguous so no partial matches. Verified: zero `"Cost & Contract"` left in app/tests/live-docs.
+- **Left untouched (by rule):** the immutable applied migration `V008__chargeback.sql` (its lone
+  reference is a comment) and its mirror in the regenerated rebuild bundle; dated historical
+  review/design docs; prior CHANGELOG entries.
+- **Behavior:** navigation, routing, icons, and section state are unchanged (all moved together).
+  Known one-time consequence on redeploy: telemetry rows and saved page-settings keyed by the old
+  page tag (`_PAGE`) do not carry forward — the page re-keys to `"Cost Intelligence"`. A one-line
+  owner `UPDATE` can migrate saved settings/telemetry `PAGE` values if continuity is wanted.
+
 ## 4.540.0 - V142 (A4): posture arm single-scans CREDENTIALS + GRANTS_TO_USERS (2026-09-17)
 
 Owner migration (author here + apply via runbox). Second half of the A1+A4 bundle.

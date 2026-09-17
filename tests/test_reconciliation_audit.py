@@ -37,9 +37,9 @@ def test_health_strip_mtd_partitions_are_raw_for_the_blend() -> None:
 
 def test_overview_spend_help_states_the_182d_reconciliation_bound() -> None:
     src = _src("app/ui/pages/overview.py")
-    assert "Reconciles with Cost & Contract -> By warehouse for windows up to 182 days" in src
+    assert "Reconciles with Cost Intelligence -> By warehouse for windows up to 182 days" in src
     # the old unconditional claim is gone
-    assert "so it reconciles with Cost & Contract -> By warehouse). Serverless" not in src
+    assert "so it reconciles with Cost Intelligence -> By warehouse). Serverless" not in src
 
 
 def test_brief_open_incidents_uses_uncapped_open_now() -> None:

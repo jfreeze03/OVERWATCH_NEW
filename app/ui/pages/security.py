@@ -445,7 +445,7 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
                "Cost ▸ Spend & Attribution, which owns it. This section keeps only the "
                "security lenses: new/spiking destinations and unload activity.")
     if st.button("Open Cost ▸ Spend & Attribution →", key="sec_egress_cost_link"):
-        request_navigation("Cost & Contract", "Spend & Attribution")
+        request_navigation("Cost Intelligence", "Spend & Attribution")
 
     if st.toggle("Compare destinations with the prior period", key="sec_egress_baseline_on"):
         baseline = run(
@@ -1285,7 +1285,7 @@ def _ai_guardrails_tab(company: str) -> None:
         st.caption("The CoCo dollar picture — spend, chargeback, and AI rate — lives on "
                    "Cost ▸ Chargeback & AI, which owns it.")
         if st.button("Open Cost ▸ Chargeback & AI →", key="sec_ai_cost_link"):
-            request_navigation("Cost & Contract", "Chargeback & AI")
+            request_navigation("Cost Intelligence", "Chargeback & AI")
         if behavior.empty:
             empty_state("clean", "No Cortex Code activity in the last 7 days.")
         else:

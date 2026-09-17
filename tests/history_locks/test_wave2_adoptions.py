@@ -149,7 +149,7 @@ def test_chargeback_role_share_goes_mart_first():
 
 
 def test_operations_adopts_graph_and_schema_marts():
-    # v4.50: the graphs tab moved to Cost & Contract > Unit costs; its
+    # v4.50: the graphs tab moved to Cost Intelligence > Unit costs; its
     # mart-first adoption moved with it, unchanged.
     _UC = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "unit_costs.py").read_text(encoding="utf-8")
     assert "mart27_sql.task_graphs" in _UC

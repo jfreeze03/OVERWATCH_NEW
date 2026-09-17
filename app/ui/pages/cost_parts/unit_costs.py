@@ -1,4 +1,4 @@
-"""Cost & Contract — Unit costs: the price tag on one query, one CALL, one
+"""Cost Intelligence — Unit costs: the price tag on one query, one CALL, one
 AI request.
 
 Measurement honesty (the panel's whole point):
@@ -42,7 +42,7 @@ from app.ui.components import (
     with_user_names,
 )
 
-_PAGE = "Cost & Contract"
+_PAGE = "Cost Intelligence"
 
 # P5 (audit 2026-07-31): a unit cost is a PRICE, not a trend. Scanning
 # QUERY_ATTRIBUTION_HISTORY over the full page window (up to 365d) took ~48s to

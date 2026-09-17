@@ -1102,7 +1102,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                         with st.expander(f"Respond — closed loop on {wh_inline}", expanded=False):
                             st.caption("Playbook above says what; this generates the how. Execute is "
                                        "operator-gated, audited to REMEDIATION_LOG, and books an "
-                                       "ESTIMATED ledger item — verify it on Cost & Contract > "
+                                       "ESTIMATED ledger item — verify it on Cost Intelligence > "
                                        "Optimization & Savings. The change scan settles its own "
                                        "measured row for warehouse-setting changes (V038).")
                             try:
@@ -1518,7 +1518,7 @@ def render() -> None:
             styled_table(rules.df)
             st.caption(
                 "Thresholds are data, not code: update ALERT_CONFIG and the next scan uses them. "
-                "Statistical anomaly detection runs in-app (Cost & Contract > Spend & Attribution, Operations > Warehouses) "
+                "Statistical anomaly detection runs in-app (Cost Intelligence > Spend & Attribution, Operations > Warehouses) "
                 "and is separate from these deterministic rules."
             )
             st.markdown("**Rule precision (90d)** — is each rule worth its pages?")

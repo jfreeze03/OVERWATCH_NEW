@@ -1,4 +1,4 @@
-"""Cost & Contract — the Spend & Attribution section bodies (spend by service,
+"""Cost Intelligence — the Spend & Attribution section bodies (spend by service,
 cloud-services health, company attribution).
 
 Formula honesty rules: billed dollars always include the cloud-services
@@ -71,7 +71,7 @@ from app.ui.components import (
     with_user_names,
 )
 
-_PAGE = "Cost & Contract"
+_PAGE = "Cost Intelligence"
 
 _SERVICE_CATEGORY = SERVICE_CATEGORY
 

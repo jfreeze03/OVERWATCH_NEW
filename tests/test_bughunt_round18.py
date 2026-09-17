@@ -2,7 +2,7 @@
 
 WLA-1(AI)  The Spend tab (round 13) relabels its tiles "last month" when the global window
            bounds the read to the previous calendar month; the sibling AI/Cortex/CoCo/Chargeback
-           tabs on the SAME Cost & Contract page still hard-coded the trailing "{days}d", so under
+           tabs on the SAME Cost Intelligence page still hard-coded the trailing "{days}d", so under
            "Last month" scope they named a trailing N-day window ending today — a different window
            than the bounded data, disagreeing with the scope chip and the Spend tiles. Fix: the
            same `_wlab`/`_when` derivation on every AI/Cortex/CoCo/Chargeback label.

@@ -42,7 +42,7 @@ def test_wandering_off_the_destination_drops_the_origin(monkeypatch):
     s = _with_session(monkeypatch, {
         "_ow_nav_origin": {"page": "Alerts", "section": "Open events", "dest": "Operations"},
     })
-    assert state.nav_return_target("Cost & Contract") is None
+    assert state.nav_return_target("Cost Intelligence") is None
     assert "_ow_nav_origin" not in s                   # stale origin removed
 
 
