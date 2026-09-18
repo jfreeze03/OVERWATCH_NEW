@@ -1,5 +1,37 @@
 # Changelog
 
+## 4.549.0 - QOIE Slice 2: operator-stats collector migration (2026-09-17)
+
+Migration-only (owner-applied via runbox; no app-behavior change yet — the reader panel is a
+follow-up once V143 is applied). QOIE Slice 1 ranks recurring queries from QUERY-level stats;
+the operator-level pathologies it can't see — exploding joins, which operator spilled, where a
+query's time goes — live only in the Query Profile, exposed by `GET_QUERY_OPERATOR_STATS`. That
+function is per-query-id, has no bulk view, and reaches back only 14 days, so V143 **collects**
+operator stats into a fact the app can read set-based.
+
+- **`snowflake/migrations/V143__query_operator_stats_collector.sql`** — `FACT_QUERY_OPERATOR_STATS_DAILY`
+  (one row per operator; `QUERY_PARAMETERIZED_HASH` joins back to the Slice-1 fingerprint; `ROW_MULTIPLE`
+  = join explosion, `REMOTE/LOCAL_SPILL_GB` = spill causation, `OPERATOR_TYPE`+`OP_TIME_PCT` = anatomy,
+  `SCAN_PCT` = per-scan pruning; suffix-typed display columns) + `SP_LOAD_QUERY_OPERATOR_STATS`
+  (incremental cursor over the top-250 recent expensive queries — 2-day window inside the 14-day reach,
+  `query_optimization_triage`'s self-noise filters, `NOT EXISTS` skip of already-collected ids — per-id
+  `EXECUTE IMMEDIATE` calling the table function with the UUID as a literal, each wrapped in
+  `EXCEPTION WHEN OTHER` to tolerate aged/utility/unauthorized ids, then a set-based enrichment `UPDATE`,
+  retention prune, freshness MERGE) + a daily 07:20 CT task on `WH_ALFA_ADMIN`.
+- **Research-first** (5-agent workflow): pinned the function's exact return schema (incl. `PARENT_OPERATORS`
+  being an ARRAY per BCR-1175), the `OPERATOR_STATISTICS` VARIANT paths, the 14-day/privilege/no-bulk-form
+  constraints, and the repo's collector/task/lockstep idioms — before writing a line of SQL.
+- **Adversarial verify** (4-lens + synthesis) = STAGE-WITH-FIXES (no HIGH/compile blocker; the 15-column
+  dynamic-INSERT mapping, quote-balance, version guard, and idempotency all confirmed sound). Bundled four
+  hardenings: count rows *landed* via `SQLROWCOUNT` (not INSERT attempts) so an all-empty return can't
+  report false success; capture `SQLERRM` so a systematic dynamic-SQL bug is distinguishable from an
+  expected skip in the all-empty alert; widen the enrichment self-heal window −3d→−5d; and soften the
+  header comment. The one CI-unprovable item — whether `overall_percentage` is a 0-1 fraction or 0-100 —
+  is resolved by a mandatory STEP-2 live probe in the runbox apply, not a blind code change.
+- Full migration lockstep: validate.sql tip → V143, `admin._EXPECTED_MIGRATIONS[143]`, 30 per-migration
+  tip pins, DEPLOYMENT/README, rebuild bundle regenerated, new `test_v143_*.py`. **Owner applies V143 via
+  runbox** (Slice-2 reader panel to follow).
+
 ## 4.548.0 - Query Optimization Intelligence, Slice 1 (2026-09-17)
 
 Turns the per-query advisor into a fleet-level **optimization-opportunity board** on

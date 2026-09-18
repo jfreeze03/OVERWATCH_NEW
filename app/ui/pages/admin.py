@@ -564,6 +564,14 @@ _EXPECTED_MIGRATIONS = {
          "instead of twice each. Output-equivalent (COUNT_IF(cond)==COUNT(*) WHERE cond; posture MERGE "
          "still lands one row per DAY/METRIC/COMPANY); byte-identical outside the posture arm. Left the "
          "SP_ANOMALY_SWEEP TABLE_DML scans alone (different grains + per-arm isolation = the A3 pattern)",
+    143: "QOIE Slice 2 operator-stats collector: FACT_QUERY_OPERATOR_STATS_DAILY + "
+         "SP_LOAD_QUERY_OPERATOR_STATS + daily 07:20 task. Loops the recent (2-day) expensive "
+         "query_ids (query_optimization_triage filter set; incremental) and calls "
+         "GET_QUERY_OPERATOR_STATS per id, landing one row per operator — INPUT/OUTPUT_ROWS + "
+         "ROW_MULTIPLE (exploding joins), REMOTE/LOCAL_SPILL_GB (spill causation), OPERATOR_TYPE + "
+         "OP_TIME_PCT (operator anatomy), SCAN_PCT (per-scan pruning), enriched with "
+         "QUERY_PARAMETERIZED_HASH to join Slice-1 fingerprints. Per-id EXCEPTION-isolated; new "
+         "proc/task, no re-derivation of the byte-locked loaders",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
