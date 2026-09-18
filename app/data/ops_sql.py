@@ -541,8 +541,10 @@ LIMIT 50
 """
 
 
-def query_opportunity_fingerprints(days: int, company: str = "ALL", database: str = "",
-                                   schema_contains: str = "", *, bounds: tuple | None = None) -> str:
+def query_opportunity_fingerprints(days: int, company: str = "ALL",
+                                   warehouse_contains: str = "", user_contains: str = "",
+                                   database: str = "", schema_contains: str = "", *,
+                                   bounds: tuple | None = None) -> str:
     """Per-FINGERPRINT query profile for the optimization-opportunity engine — one row per
     recurring logical query (QUERY_PARAMETERIZED_HASH), aggregating QUERY_HISTORY so the
     scoring layer (logic/query_opt) can run each fingerprint's TYPICAL execution through
@@ -564,7 +566,8 @@ def query_opportunity_fingerprints(days: int, company: str = "ALL", database: st
     burn, and the per-QUERY_ID triage table catches the individual catastrophic executions."""
     days = bounded_days(days)
     where = and_where(
-        _query_scope(days, company, "", "", database, schema_contains, bounds=bounds),
+        _query_scope(days, company, warehouse_contains, user_contains, database, schema_contains,
+                     bounds=bounds),
         "EXECUTION_STATUS = 'SUCCESS'",
         "QUERY_PARAMETERIZED_HASH IS NOT NULL",
         "QUERY_TYPE <> 'CALL'",
@@ -591,7 +594,8 @@ SELECT
     ROUND(AVG(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3), 3) AS REMOTE_SPILL_GB,
     ROUND(AVG(COALESCE(ROWS_PRODUCED, 0)), 0) AS ROWS_PRODUCED,
     ROUND(AVG(COALESCE(PARTITIONS_SCANNED, 0)), 0) AS PARTITIONS_SCANNED,
-    ROUND(AVG(COALESCE(PARTITIONS_TOTAL, 0)), 0) AS PARTITIONS_TOTAL
+    ROUND(AVG(COALESCE(PARTITIONS_TOTAL, 0)), 0) AS PARTITIONS_TOTAL,
+    MAX(END_TIME) AS LAST_SEEN
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE {where}
 GROUP BY QUERY_PARAMETERIZED_HASH
@@ -684,14 +688,17 @@ def _fact_operator_company(company: str) -> str:
     return "" if comp.upper() == "ALL" else f"COMPANY = {sql_literal(comp)}"
 
 
-def operator_stats_summary(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
+def operator_stats_summary(days: int, company: str = "ALL", warehouse_contains: str = "", *,
+                           bounds: tuple | None = None) -> str:
     """One-row KPI summary of the collected operator profiles in the window — how many
     queries/operators were profiled and the counts of the two headline pathologies
-    (exploding-join operators, spill operators) plus the worst blow-up and total spill."""
+    (exploding-join operators, spill operators) plus the worst blow-up and total spill.
+    Scoped by company + window + (optional) warehouse; the fact has no user/database grain."""
     days = bounded_days(days)
     where = and_where(
         scope_window_where("QUERY_DAY", days, bounds=bounds),
         _fact_operator_company(company),
+        contains_filter("WAREHOUSE_NAME", warehouse_contains),
     )
     return f"""
 SELECT
@@ -709,18 +716,20 @@ WHERE {where}
 """
 
 
-def operator_problem_board(days: int, company: str = "ALL", *,
+def operator_problem_board(days: int, company: str = "ALL", warehouse_contains: str = "", *,
                            bounds: tuple | None = None, limit: int = 50) -> str:
     """Top problem OPERATORS across the two pathologies Slice 1 cannot see, tagged by
     PATHOLOGY: 'Exploding join' (a Join whose output rows dwarf its input rows, ranked by
     ROW_MULTIPLE) and 'Memory spill' (an operator that spilled to remote storage, ranked by
     REMOTE_SPILL_GB). Returns up to `limit` per pathology (QUALIFY ROW_NUMBER partitioned by
     PATHOLOGY); the reader splits it into two boards. FINGERPRINT cross-links to Slice-1;
-    QUERY_ID drives the operator-anatomy drill."""
+    QUERY_ID drives the operator-anatomy drill. Scoped by company + window + (optional)
+    warehouse; the fact has no user/database grain."""
     lim = max(1, min(int(limit), 200))
     where = and_where(
         scope_window_where("QUERY_DAY", bounded_days(days), bounds=bounds),
         _fact_operator_company(company),
+        contains_filter("WAREHOUSE_NAME", warehouse_contains),
     )
     return f"""
 WITH scoped AS (
@@ -756,17 +765,24 @@ ORDER BY PATHOLOGY,
 
 
 def operator_anatomy(query_id: str) -> str:
-    """The full operator tree for one collected query_id, ordered by where the time went
-    (OP_TIME_PCT desc) then plan order — the 'operator anatomy' drill. query_id comes from a
-    board row (a collected UUID); sql_literal-quoted for hygiene."""
+    """The full operator tree for one collected query_id = the query PROFILE, ordered by where
+    the time went. query_id comes from a board row (a collected UUID); sql_literal-quoted.
+
+    TIME_SHARE_PCT = each operator's SCALE-INVARIANT share of the query's time:
+    OP_TIME_PCT / SUM(OP_TIME_PCT) over the query x 100. This is trustworthy regardless of
+    whether the collector stored overall_percentage as a 0-1 fraction or a 0-100 percent (the
+    ratio cancels the unit), and NULLIF guards the all-zero/all-null case to NULL (-> em-dash),
+    never a fake 0. Raw OP_TIME_PCT is kept beside it for provenance."""
     return f"""
 SELECT
     STEP_ID, OPERATOR_ID, PARENT_OPERATOR_ID, OPERATOR_TYPE,
-    OP_TIME_PCT, INPUT_ROWS, OUTPUT_ROWS, ROUND(ROW_MULTIPLE, 1) AS ROW_MULTIPLE,
+    ROUND(100.0 * OP_TIME_PCT / NULLIF(SUM(OP_TIME_PCT) OVER (), 0), 1) AS TIME_SHARE_PCT,
+    OP_TIME_PCT,
+    INPUT_ROWS, OUTPUT_ROWS, ROUND(ROW_MULTIPLE, 1) AS ROW_MULTIPLE,
     REMOTE_SPILL_GB, LOCAL_SPILL_GB, GB_SCANNED, SCAN_PCT
 FROM {core_object('FACT_QUERY_OPERATOR_STATS_DAILY')}
 WHERE QUERY_ID = {sql_literal(query_id)}
-ORDER BY OP_TIME_PCT DESC NULLS LAST, STEP_ID, OPERATOR_ID
+ORDER BY TIME_SHARE_PCT DESC NULLS LAST, STEP_ID, OPERATOR_ID
 """
 
 
@@ -801,6 +817,7 @@ WITH calls AS (
         DATABASE_NAME,
         SCHEMA_NAME,
         EXECUTION_STATUS,
+        START_TIME,
         IFF(EXECUTION_STATUS = 'SUCCESS', TOTAL_ELAPSED_TIME, NULL) AS OK_MS
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
     WHERE {where}
@@ -814,7 +831,8 @@ SELECT
     ROUND(AVG(OK_MS) / 1000, 1) AS AVG_S,
     ROUND(APPROX_PERCENTILE(OK_MS, 0.95) / 1000, 1) AS P95_S,
     ROUND(MAX(OK_MS) / 1000, 1) AS MAX_S,
-    ROUND(SUM(COALESCE(OK_MS, 0)) / 60000, 1) AS TOTAL_MIN
+    ROUND(SUM(COALESCE(OK_MS, 0)) / 60000, 1) AS TOTAL_MIN,
+    MAX(START_TIME) AS LAST_RUN
 FROM calls
 WHERE PROC_NAME IS NOT NULL
 GROUP BY 1, 2, 3
@@ -876,6 +894,7 @@ WITH calls AS (
         DATABASE_NAME,
         SCHEMA_NAME,
         EXECUTION_STATUS,
+        START_TIME,
         IFF({cur_from}, 'CUR', 'PRIOR') AS WIN,
         IFF(EXECUTION_STATUS = 'SUCCESS', TOTAL_ELAPSED_TIME, NULL) AS OK_MS
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
@@ -888,6 +907,7 @@ agg AS (
         SCHEMA_NAME,
         COUNT_IF(WIN = 'CUR') AS CUR_CALLS,
         COUNT_IF(WIN = 'PRIOR') AS PRIOR_CALLS,
+        MAX(IFF(WIN = 'CUR', START_TIME, NULL)) AS CUR_LAST_RUN,
         -- Unrounded ms percentiles/means drive the delta; the *_S columns below
         -- are display-only. Rounding to 0.1s before the ratio would null a fast
         -- proc's prior p95 to 0.0 and hide a real regression.
@@ -921,7 +941,8 @@ SELECT
     ROUND((CUR_P95_MS - PRIOR_P95_MS) / NULLIF(PRIOR_P95_MS, 0) * 100, 1) AS P95_DELTA_PCT,
     ROUND((CUR_AVG_MS - PRIOR_AVG_MS) / NULLIF(PRIOR_AVG_MS, 0) * 100, 1) AS AVG_DELTA_PCT,
     CUR_FAIL_PCT,
-    PRIOR_FAIL_PCT
+    PRIOR_FAIL_PCT,
+    CUR_LAST_RUN
 FROM agg
 -- Rank by the STRONGER of the two regression signals, so the LIMIT keeps both the
 -- slower procs AND the High-severity 'faster but failing' class (a proc that now errors

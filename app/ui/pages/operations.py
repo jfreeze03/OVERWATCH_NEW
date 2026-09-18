@@ -27,7 +27,15 @@ from app.data import (
     security_sql,
     workbench_sql,
 )
-from app.logic import proc_regression, query_advisor, query_opt, remediation, verdict, wh_change
+from app.logic import (
+    failure_advisor,
+    proc_regression,
+    query_advisor,
+    query_opt,
+    remediation,
+    verdict,
+    wh_change,
+)
 from app.logic.ai_prompts import release_compare_prompt, task_failure_prompt
 from app.logic.anomaly import (
     ANOMALY_MIN_ACTIVE_DAYS,
@@ -354,7 +362,8 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
              "SQL. One live QUERY_HISTORY scan; off first paint.")
     if _qopp_on:
         _qopp = run(
-            ops_sql.query_opportunity_fingerprints(days, company, database, schema_contains, bounds=bounds),
+            ops_sql.query_opportunity_fingerprints(
+                days, company, wh_filter, user_filter, database, schema_contains, bounds=bounds),
             page=_PAGE, key=f"q_opp_{company}_{days}{_lm}", tier="historical",
             source="ACCOUNT_USAGE.QUERY_HISTORY (optimization opportunities by fingerprint)")
         if _qopp.ok and _qopp.empty:
@@ -380,7 +389,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             _disp["SAMPLE"] = _disp["SAMPLE_TEXT"].str.slice(0, 60)
             _sel = selectable_table(
                 _disp[["FINGERPRINT", "QUERY_TYPE", "WAREHOUSE_NAME", "PATHOLOGY", "OOS", "QOP",
-                       "CONFIDENCE", "RUNS", "TOTAL_EXEC_SEC", "SAMPLE"]],
+                       "CONFIDENCE", "RUNS", "TOTAL_EXEC_SEC", "LAST_SEEN", "SAMPLE"]],
                 key="ops_qopp_sel", sort_label="by OOS (opportunity) desc",
                 column_config={
                     "OOS": st.column_config.NumberColumn("OOS", format="%.0f"),
@@ -416,13 +425,14 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
     _opp_on = st.toggle(
         "Profile the collected queries at the operator level (join explosion, spill, anatomy)",
         key="ops_opprofile_toggle",
-        help="Reads the V143 operator-stats collector: per-operator input/output rows "
-             "(exploding joins), which operator spilled to memory, and where each query's time "
-             "went. This is the Query Profile data QOIE Slice 1 (query-level) cannot see. "
-             "Mart-first (pre-collected) — no live scan; off first paint.")
+        help="Reads the operator-stats collector: per-operator input/output rows (exploding "
+             "joins), which operator spilled to memory, and where each query's time went. This is "
+             "the Query Profile data QOIE Slice 1 (query-level) cannot see. Mart-first "
+             "(pre-collected) — no live scan; off first paint. Scoped by company, warehouse and "
+             "window (the operator collector has no user/database grain, so those filters don't apply here).")
     if _opp_on:
         _opsum = run(
-            ops_sql.operator_stats_summary(days, company, bounds=bounds),
+            ops_sql.operator_stats_summary(days, company, wh_filter, bounds=bounds),
             page=_PAGE, key=f"q_opsum_{company}_{days}{_lm}", tier="recent",
             source="FACT_QUERY_OPERATOR_STATS_DAILY", probe=True)
         if not _opsum.ok and _opsum.error_kind == "absent":
@@ -457,62 +467,76 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                          "(not only joins — a huge FLATTEN/generator counts too)."},
             ])
             _board = run(
-                ops_sql.operator_problem_board(days, company, bounds=bounds),
+                ops_sql.operator_problem_board(days, company, wh_filter, bounds=bounds),
                 page=_PAGE, key=f"q_opboard_{company}_{days}{_lm}", tier="recent",
                 source="FACT_QUERY_OPERATOR_STATS_DAILY", probe=True)
             if guard(_board, "No exploding joins or spilling operators in this window — nothing to open up."):
                 _bdf = _board.df
+                _bqids = set(_bdf["QUERY_ID"].astype(str))
                 _ex = _bdf[_bdf["PATHOLOGY"] == "Exploding join"].reset_index(drop=True)
                 _sp = _bdf[_bdf["PATHOLOGY"] == "Memory spill"].reset_index(drop=True)
+
+                def _drill_anatomy(_dqid: str) -> None:
+                    # The operator tree for one query = its Query Profile (from
+                    # GET_QUERY_OPERATOR_STATS), rendered directly under the board that was clicked.
+                    _anat = run(
+                        ops_sql.operator_anatomy(_dqid), page=_PAGE,
+                        key=f"q_opanat_{_dqid}", tier="recent",
+                        source="FACT_QUERY_OPERATOR_STATS_DAILY", probe=True)
+                    if guard(_anat, "That query's operator tree is no longer in the collected window."):
+                        st.markdown(f"**Query profile — operator anatomy** for query `{_dqid[:16]}…` "
+                                    "(each operator's share of the query's time, highest first)")
+                        styled_table(
+                            _anat.df[["STEP_ID", "OPERATOR_ID", "PARENT_OPERATOR_ID", "OPERATOR_TYPE",
+                                      "TIME_SHARE_PCT", "INPUT_ROWS", "OUTPUT_ROWS", "ROW_MULTIPLE",
+                                      "REMOTE_SPILL_GB", "SCAN_PCT"]], size_note=False,
+                            column_config={
+                                # NUMBER(9,0) ids arrive as float64 (Snowpark maps the root's NULL
+                                # PARENT to NaN); %d blanks NaN and drops the decimals.
+                                "STEP_ID": st.column_config.NumberColumn("Step", format="%d"),
+                                "OPERATOR_ID": st.column_config.NumberColumn("Op", format="%d"),
+                                "PARENT_OPERATOR_ID": st.column_config.NumberColumn("Parent", format="%d"),
+                                "TIME_SHARE_PCT": st.column_config.NumberColumn("Time share %", format="%.1f"),
+                                "ROW_MULTIPLE": st.column_config.NumberColumn("Row ×", format="%.1f")})
+                        st.caption("This IS the query profile (per operator). Time share % is normalized "
+                                   "within the query, so it's reliable regardless of the raw scale; Parent "
+                                   "is the operator this one feeds into (the final/root operator has none).")
+
+                st.caption("Click a row on either board to open that query's full operator tree — its "
+                           "query profile — directly below it.")
                 if not _ex.empty:
                     st.markdown("**Exploding joins** — a join whose output rows dwarf its input "
                                 "rows (row multiplication). Fix the join keys / add a missing predicate.")
                     _ex_sel = selectable_table(
-                        _ex[["FINGERPRINT", "WAREHOUSE_NAME", "OPERATOR_TYPE", "INPUT_ROWS",
-                             "OUTPUT_ROWS", "ROW_MULTIPLE", "OP_TIME_PCT", "QUERY_ELAPSED_SEC"]],
+                        _ex[["FINGERPRINT", "WAREHOUSE_NAME", "QUERY_DAY", "OPERATOR_TYPE", "INPUT_ROWS",
+                             "OUTPUT_ROWS", "ROW_MULTIPLE", "QUERY_ELAPSED_SEC"]],
                         key="ops_opprofile_ex_sel", sort_label="by row blow-up desc",
                         column_config={"ROW_MULTIPLE": st.column_config.NumberColumn("Row blow-up ×", format="%.1f")})
+                    # Set the active drill only on a GENUINELY-NEW selection, then always track
+                    # THIS board's own current selection. (st.dataframe selections are sticky and
+                    # re-emit every rerun; the old cross-reset of the other board's _last made both
+                    # boards look "new" alternately -> two profiles ping-ponged. One src wins now.)
                     if _ex_sel is not None and _ex_sel != st.session_state.get("_ops_opprofile_ex_last"):
-                        st.session_state["_ops_opprofile_ex_last"] = _ex_sel
-                        st.session_state["_ops_opprofile_sp_last"] = None   # let the other board re-fire on a re-click
+                        st.session_state["_ops_opprofile_src"] = "ex"
                         st.session_state["_ops_opprofile_qid"] = str(_ex.iloc[int(_ex_sel)]["QUERY_ID"])
+                    st.session_state["_ops_opprofile_ex_last"] = _ex_sel
+                    _qid = st.session_state.get("_ops_opprofile_qid")
+                    if _qid and _qid in _bqids and st.session_state.get("_ops_opprofile_src") == "ex":
+                        _drill_anatomy(_qid)   # the profile renders under THIS board (exactly one site fires)
                 if not _sp.empty:
                     st.markdown("**Memory spill by operator** — the specific operator that spilled "
                                 "to remote storage. Size the warehouse up, or shrink that step's working set.")
                     _sp_sel = selectable_table(
-                        _sp[["FINGERPRINT", "WAREHOUSE_NAME", "OPERATOR_TYPE", "REMOTE_SPILL_GB",
-                             "GB_SCANNED", "OP_TIME_PCT", "QUERY_ELAPSED_SEC"]],
+                        _sp[["FINGERPRINT", "WAREHOUSE_NAME", "QUERY_DAY", "OPERATOR_TYPE", "REMOTE_SPILL_GB",
+                             "GB_SCANNED", "QUERY_ELAPSED_SEC"]],
                         key="ops_opprofile_sp_sel", sort_label="by remote spill desc")
                     if _sp_sel is not None and _sp_sel != st.session_state.get("_ops_opprofile_sp_last"):
-                        st.session_state["_ops_opprofile_sp_last"] = _sp_sel
-                        st.session_state["_ops_opprofile_ex_last"] = None   # let the other board re-fire on a re-click
+                        st.session_state["_ops_opprofile_src"] = "sp"
                         st.session_state["_ops_opprofile_qid"] = str(_sp.iloc[int(_sp_sel)]["QUERY_ID"])
-                st.caption("Click a row to open that query's full operator tree — where its time "
-                           "went, per operator (OP_TIME_PCT is each operator's share of query time).")
-                # Only drill a query that is in the CURRENT board — a sticky _qid from a prior
-                # company/day/bounds scope must not render its tree beneath this scope's board.
-                _qid = st.session_state.get("_ops_opprofile_qid")
-                if _qid and _qid in set(_bdf["QUERY_ID"].astype(str)):
-                    _anat = run(
-                        ops_sql.operator_anatomy(_qid), page=_PAGE,
-                        key=f"q_opanat_{_qid}", tier="recent",
-                        source="FACT_QUERY_OPERATOR_STATS_DAILY", probe=True)
-                    if guard(_anat, "That query's operator tree is no longer in the collected window."):
-                        st.markdown(f"**Operator anatomy** — query `{_qid[:16]}…` (ordered by share of query time)")
-                        styled_table(
-                            _anat.df[["STEP_ID", "OPERATOR_ID", "PARENT_OPERATOR_ID", "OPERATOR_TYPE",
-                                      "OP_TIME_PCT", "INPUT_ROWS", "OUTPUT_ROWS", "ROW_MULTIPLE",
-                                      "REMOTE_SPILL_GB", "SCAN_PCT"]], size_note=False,
-                            column_config={
-                                # NUMBER(9,0) ids arrive as float64 (Snowpark maps the root's NULL
-                                # PARENT to NaN) and would render "1.000000"/"nan"; %d blanks NaN and
-                                # drops the decimals so the tree reads as clean integers.
-                                "STEP_ID": st.column_config.NumberColumn("Step", format="%d"),
-                                "OPERATOR_ID": st.column_config.NumberColumn("Op", format="%d"),
-                                "PARENT_OPERATOR_ID": st.column_config.NumberColumn("Parent", format="%d"),
-                                "ROW_MULTIPLE": st.column_config.NumberColumn("Row ×", format="%.1f")})
-                        st.caption("PARENT_OPERATOR_ID is the operator this one feeds into; the root "
-                                   "(final) operator has none.")
+                    st.session_state["_ops_opprofile_sp_last"] = _sp_sel
+                    _qid = st.session_state.get("_ops_opprofile_qid")
+                    if _qid and _qid in _bqids and st.session_state.get("_ops_opprofile_src") == "sp":
+                        _drill_anatomy(_qid)   # the profile renders under THIS board (exactly one site fires)
 
     section_header("Optimization triage", "", "optimize")
     _triage_on = st.toggle(
@@ -531,9 +555,9 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         elif guard(_triage, "No queries in this window/scope."):
             _tr, _tr_cfg = snowsight_profile_column(_triage.df, _PAGE)
             _tr = with_user_names(_tr, _PAGE)
-            _tr_cols = [c for c in ["REASON", "QUERY_ID", "USER", "WAREHOUSE_NAME", "SPILL_REMOTE_GB",
-                                    "GB_SCANNED", "SCAN_PCT", "CACHE_PCT", "ELAPSED_SEC", "QUERY_PREVIEW",
-                                    "PROFILE"] if c in _tr.columns]
+            _tr_cols = [c for c in ["REASON", "QUERY_ID", "START_TIME", "USER", "WAREHOUSE_NAME",
+                                    "SPILL_REMOTE_GB", "GB_SCANNED", "SCAN_PCT", "CACHE_PCT",
+                                    "ELAPSED_SEC", "QUERY_PREVIEW", "PROFILE"] if c in _tr.columns]
             _tri_sel = selectable_table(_tr[_tr_cols], key="ops_triage_sel", column_config=_tr_cfg,
                                         sort_label="spill, then pruning, then scan")
             if _tri_sel is not None and _tri_sel != st.session_state.get("_ops_tri_sel_last"):
@@ -579,7 +603,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         elif _roll is not None and guard(_roll, "No stored-procedure CALLs in this window/scope."):
             st.markdown("**Busiest procedures — by SLA impact (calls × p95)**")
             _roll_cols = [c for c in ["PROC_NAME", "DATABASE_NAME", "SCHEMA_NAME", "CALLS",
-                                      "FAIL_PCT", "AVG_S", "P95_S", "MAX_S", "TOTAL_MIN"]
+                                      "FAIL_PCT", "AVG_S", "P95_S", "MAX_S", "TOTAL_MIN", "LAST_RUN"]
                           if c in _roll.df.columns]
             styled_table(_roll.df[_roll_cols], slug="proc_sla_rollup", days=days,
                          sort_label="failing first, then calls × p95")
@@ -607,7 +631,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             ])
             _pr_cols = [c for c in ["VERDICT", "PROC_NAME", "DATABASE_NAME", "SCHEMA_NAME",
                                     "CUR_CALLS", "PRIOR_CALLS", "CUR_P95_S", "PRIOR_P95_S",
-                                    "P95_DELTA_PCT", "CUR_FAIL_PCT", "PRIOR_FAIL_PCT"]
+                                    "P95_DELTA_PCT", "CUR_FAIL_PCT", "PRIOR_FAIL_PCT", "CUR_LAST_RUN"]
                         if c in _pr.columns]
             # proc_regression.annotate orders by severity band then composite score (worst first),
             # NOT by P95_DELTA_PCT — a "Faster but failing" proc (negative p95 growth) can top the
@@ -745,7 +769,13 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
     # C23: amber only when failures exist; a clean window reads verified-green.
     section_header("Failures by error", alarm_health(fails), "alerts")
     if guard(fails, "No failed queries in this window.", kind="clean"):
-        styled_table(fails.df)
+        # Not just the pattern — a deterministic next step per error family, so a DBA sees
+        # "how to fix", not only "what/how-many". Blank for an unrecognized family.
+        _fdf = fails.df.copy()
+        _fdf["FIX"] = _fdf.apply(
+            lambda r: failure_advisor.fix_for(r.get("ERROR_CODE"), r.get("ERROR_MESSAGE")), axis=1)
+        styled_table(_fdf, column_config={
+            "FIX": st.column_config.TextColumn("Likely cause / fix", width="large")})
 
     # rec#17: failed / killed / aborted queries that consumed warehouse compute produced
     # zero value — allocate the hour-share credits to non-success queries and rank the
@@ -798,9 +828,9 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                 st.caption("Showing the top 50 fingerprints by wasted $ — the window "
                            "total is higher than the figure above.")
             wdf = with_user_names(wdf, _PAGE)
-            _wcols = [c for c in ["WASTED_USD", "FAILED_RUNS", "USER", "USER_NAME", "WAREHOUSE_NAME",
-                                  "EXECUTION_STATUS", "ERROR_CODE", "QUERY_TYPE", "QUERY_SNIPPET",
-                                  "FINGERPRINT"] if c in wdf.columns]
+            _wcols = [c for c in ["WASTED_USD", "FAILED_RUNS", "LAST_SEEN", "USER", "USER_NAME",
+                                  "WAREHOUSE_NAME", "EXECUTION_STATUS", "ERROR_CODE", "QUERY_TYPE",
+                                  "QUERY_SNIPPET", "FINGERPRINT"] if c in wdf.columns]
             styled_table(
                 wdf[_wcols], height=320, sort_label="wasted $ desc",
                 column_config={"WASTED_USD": st.column_config.NumberColumn("Wasted $", format="$%.2f")})

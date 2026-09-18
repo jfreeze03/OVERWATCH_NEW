@@ -69,7 +69,11 @@ def test_board_limit_is_clamped():
 def test_anatomy_is_per_query_ordered_by_time_share():
     sql = ops_sql.operator_anatomy("01b2c3d4-dead-beef")
     assert "WHERE QUERY_ID = '01b2c3d4-dead-beef'" in sql            # sql_literal-quoted id
-    assert "ORDER BY OP_TIME_PCT DESC" in sql
+    # TIME_SHARE_PCT = a SCALE-INVARIANT per-operator share (raw OP_TIME_PCT / SUM over the
+    # query x 100) so the profile reads right whether the collector stored 0-1 or 0-100.
+    assert "SUM(OP_TIME_PCT) OVER ()" in sql and "AS TIME_SHARE_PCT" in sql
+    assert "NULLIF(SUM(OP_TIME_PCT) OVER (), 0)" in sql              # all-zero/null -> NULL, not fake 0
+    assert "ORDER BY TIME_SHARE_PCT DESC" in sql
     assert "PARENT_OPERATOR_ID" in sql                               # the tree edge
 
 

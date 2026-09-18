@@ -43,7 +43,7 @@ _PATHOLOGY = {
 _SQL_CLEAN_QOP = 15
 _OUTPUT_COLS = ["FINGERPRINT", "SAMPLE_TEXT", "QUERY_TYPE", "WAREHOUSE_NAME", "RUNS",
                 "TOTAL_EXEC_SEC", "QOP", "SQL_QOP", "OOS", "PATHOLOGY", "CONFIDENCE",
-                "FIRST_ACTION", "_FINDINGS"]
+                "FIRST_ACTION", "LAST_SEEN", "_FINDINGS"]
 
 
 def _confidence(n_findings: int, runs: float) -> int:
@@ -102,6 +102,7 @@ def score_opportunities(df: pd.DataFrame | None) -> tuple[pd.DataFrame, dict]:
             "PATHOLOGY": _pathology(findings, sql_qop),
             "CONFIDENCE": _confidence(len(findings), safe_float(r.get("RUNS"))),
             "FIRST_ACTION": (top.detail if top is not None else "No actionable finding."),
+            "LAST_SEEN": r.get("LAST_SEEN"),   # passthrough for the panel's "Last seen" column
             "_FINDINGS": len(findings),
         })
     out = pd.DataFrame(rows)

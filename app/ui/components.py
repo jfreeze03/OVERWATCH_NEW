@@ -1942,6 +1942,45 @@ def _width_for_column(col) -> str | None:
     return None
 
 
+def _coerce_object_numerics(df):
+    """Snowpark maps a Snowflake NUMBER/FLOAT column that CONTAINS NULLS to an OBJECT-dtype
+    pandas column (Decimal/float cells + Python ``None``), not float64+NaN. Two bugs follow:
+    ``_auto_formats`` skips object columns (so no %/byte/duration humanize), and the Styler's
+    ``na_rep`` is scoped to formatted columns only, so the ``None`` cells render as the literal
+    "None"/"nan" instead of the em-dash (exactly the owner's operator-panel screenshot).
+
+    Root-fix it here so EVERY table benefits: coerce an object column to a real numeric dtype
+    when its non-null CELLS are already numeric (Decimal/float/int) — NOT when its strings merely
+    parse as numbers, so a zero-padded numeric STRING like ERROR_CODE '002043' stays text and never
+    becomes 2043.0. Returns df unchanged (same object) when nothing needs coercing."""
+    import pandas as pd
+    from pandas.api.types import infer_dtype
+    out = df
+    for c in df.columns:
+        if df[c].dtype != object:
+            continue
+        if infer_dtype(df[c], skipna=True) in ("decimal", "floating", "integer", "mixed-integer-float"):
+            if out is df:
+                out = df.copy()   # never mutate the caller's frame (the CSV keeps raw values)
+            out[c] = pd.to_numeric(df[c], errors="coerce")
+    return out
+
+
+def _clean_numeric_cell(v) -> str:
+    """Clean display for a numeric cell that matched no _auto_formats convention (a ratio /
+    score / generic id). Whole values show comma-grouped with no decimals; fractions keep up
+    to 4 decimals with trailing zeros trimmed — never the Styler default 6-decimal tail."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    if f != f:            # NaN (na_rep handles the real NA path; defensive)
+        return "—"
+    if f == int(f):
+        return f"{int(f):,}"
+    return f"{f:,.4f}".rstrip("0").rstrip(".")
+
+
 def _render_table(df, *, height: int | None, column_config: dict | None,
                   key: str | None = None, selectable: bool = False,
                   slug: str | None = None, days: int | None = None,
@@ -1950,6 +1989,7 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
     if df is None or getattr(df, "empty", True):
         st.dataframe(df, hide_index=True, width="stretch")
         return [] if multi else None
+    df = _coerce_object_numerics(df)   # NULL-bearing NUMBER cols arrive object-dtype from Snowpark
     # C35: any table carrying real QUERY_IDs gets the Snowsight profile link
     # AUTOMATICALLY — the helper no-ops on blank/absent ids, on manual call
     # sites (the PROFILE column already exists), and when the org/account
@@ -2056,6 +2096,20 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                 styler = styler.map(_mute_zero_css, subset=[col])
             if fmts:
                 styler = styler.format(fmts, na_rep="—")  # rec27: one no-value glyph (em-dash)
+            # Every column NOT in fmts (text/id, or a numeric column matching no naming
+            # convention — a ratio/score/generic id) also gets the em-dash for NULLs. The
+            # NUMERIC ones additionally get a clean formatter: Styler's default float precision
+            # is 6, so a coerced float64 would otherwise render "2.500000" (and worse now that
+            # _coerce_object_numerics turns a null-bearing Decimal column into float64). Whole
+            # values show with no decimals, fractions trimmed — never a 6-decimal tail.
+            _rest = [c for c in display_df.columns if c not in fmts]
+            if _rest:
+                _rest_num = [c for c in _rest if _ptypes.is_numeric_dtype(display_df[c])]
+                _rest_txt = [c for c in _rest if c not in _rest_num]
+                if _rest_num:
+                    styler = styler.format(_clean_numeric_cell, na_rep="—", subset=_rest_num)
+                if _rest_txt:
+                    styler = styler.format(na_rep="—", subset=_rest_txt)
             data = styler
         except Exception:  # noqa: BLE001 - styling is cosmetic, table must render
             data = display_df

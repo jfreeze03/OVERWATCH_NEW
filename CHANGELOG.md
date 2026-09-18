@@ -1,5 +1,38 @@
 # Changelog
 
+## 4.552.0 - Operations query panels: actionable failures, dates, full scope, null-render fix (2026-09-18)
+
+Owner feedback on the Operations ▸ Queries panels: add dates, make "Failures by error"
+actionable, confirm the exploding-join drill opens the query profile, and make the new panels
+respect the scope bar.
+
+- **Null cells render `—`, not `None` (shared root fix)** — Snowpark returns a NULL-bearing
+  Snowflake NUMBER column as object-dtype (Decimal/float + Python `None`), which the table
+  machinery skipped for humanize AND rendered as the literal `None`. `_render_table` now coerces
+  object-but-numeric columns to a real numeric dtype (discriminating on the cell TYPE via
+  `infer_dtype`, so a zero-padded string code like `002043` stays text), and gives every
+  un-formatted numeric column a clean formatter (no 6-decimal tail) + `—` for NULLs. Fixes the
+  operator panel's `None`/`0.0` cells — and the `None` in Decision Studio's Realization %, and
+  anywhere else a nullable metric slipped through.
+- **Failures by error → a "Likely cause / fix" column** — new pure `app/logic/failure_advisor.py`
+  maps an error family (code + message substring) to a concrete next step (no current database →
+  `USE DATABASE`; already a live version → commit it; object does not exist → check name/grants;
+  Cortex/DMF views → grant/enable; timeout → raise `STATEMENT_TIMEOUT_IN_SECONDS`).
+- **Dates** — a last-seen/run/date column on the wasted-spend, optimization-triage, optimization-
+  opportunities, operator boards, and both stored-procedure panels.
+- **Scope** — Slice-1 opportunities now honors warehouse + user (+ company/db/window); the operator
+  boards honor warehouse (+ company/window). The operator collector fact has no user/database
+  grain, noted in the toggle.
+- **Exploding join → query profile** — the operator-anatomy drill now renders directly under the
+  board you clicked, titled "Query profile — operator anatomy", with a scale-invariant
+  `TIME_SHARE_PCT` (each operator's normalized share of the query's time — correct regardless of
+  the raw `OP_TIME_PCT` scale, which the owner's probe confirmed is a 0-1 fraction).
+- **Adversarial verify** (4-lens) = SHIP-WITH-FIXES; applied: the timeout rule's substring now
+  matches the real Snowflake message; the null-render belt gives un-formatted numerics a clean
+  (non-6-decimal) format; and the two operator boards no longer double-render / ping-pong the
+  anatomy across reruns (a single drill fires under the clicked board). New tests for the coercion,
+  the clean formatter, and the failure advisor.
+
 ## 4.551.0 - Nav order: Cost Intelligence + Operations ahead of Control Room (2026-09-18)
 
 Owner ask: in the Analyze nav section, put Cost Intelligence and Operations before Control
