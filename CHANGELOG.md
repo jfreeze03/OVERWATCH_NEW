@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.551.0 - Nav order: Cost Intelligence + Operations ahead of Control Room (2026-09-18)
+
+Owner ask: in the Analyze nav section, put Cost Intelligence and Operations before Control
+Room. The within-group display order is driven by each profile's page tuple in
+`PAGES_BY_PROFILE` (`nav_groups_for` filters the ordered profile list per group), so the
+Analyze order is now **Cost Intelligence → Operations → Control Room → Decision Studio**
+across every profile that shows them (ANALYST/MANAGER/DBA/READER), with `NAV_GROUPS["Analyze"]`
+kept consistent. Config-only; group order (Watch/Analyze/Govern/Ask) and the Brief default
+landing (`pages[0]`) are unchanged.
+
 ## 4.550.0 - QOIE Slice 2: operator-profile reader panel (2026-09-17)
 
 The app-side of Slice 2 — reads the V143 operator-stats collector fact and surfaces the
