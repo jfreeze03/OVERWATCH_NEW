@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from app.companies import classify_warehouse
 from app.logic.formulas import safe_float
 
 # A SHOW WAREHOUSES ``resource_monitor`` cell reads one of these when the
@@ -121,7 +122,8 @@ def account_monitor(mon_df: pd.DataFrame | None) -> dict | None:
 
 
 def unmonitored_warehouses(wh_df: pd.DataFrame | None, mon_df: pd.DataFrame | None,
-                           credits_by_wh: dict[str, float] | None = None) -> pd.DataFrame:
+                           credits_by_wh: dict[str, float] | None = None,
+                           *, company: str = "ALL") -> pd.DataFrame:
     """Warehouses with NO hard spend ceiling. A warehouse is uncapped when it has
     no resource monitor at all, OR its monitor is a KNOWN notify-only monitor (a
     NOTIFY trigger with no SUSPEND enforces nothing — the warehouse keeps running).
@@ -133,7 +135,9 @@ def unmonitored_warehouses(wh_df: pd.DataFrame | None, mon_df: pd.DataFrame | No
     suppress the list. A monitor whose enforcement is UNKNOWN (trigger columns
     absent from a drifted SHOW) is given the benefit of the doubt — treated as a
     ceiling — so schema drift never fabricates a fleet-wide false alarm.
-    ``wh_df`` is a raw SHOW WAREHOUSES frame (columns lower-cased here)."""
+    ``wh_df`` is a raw SHOW WAREHOUSES frame (columns lower-cased here). ``company``
+    (non-ALL) drops warehouses that classify to another tenant — SHOW WAREHOUSES is
+    account-wide and can't be server-scoped, so the caller passes the tab's company."""
     if wh_df is None or wh_df.empty:
         return pd.DataFrame(columns=_WH_COLS)
     acct = account_monitor(mon_df)
@@ -153,10 +157,19 @@ def unmonitored_warehouses(wh_df: pd.DataFrame | None, mon_df: pd.DataFrame | No
     c_rm = _pick(df, "resource_monitor")
     c_size = _pick(df, "size")
     credits_by_wh = credits_by_wh or {}
+    # NB: compare against the RAW company (classify_warehouse returns 'ALFA'/'Trexis' in
+    # canonical case) — only upper-case to detect the ALL no-op, exactly like companies.classify_databases.
+    _co = str(company or "ALL")
+    _scoped = _co.upper() not in ("ALL", "")
     rows = []
     for _, r in df.iterrows():
         name = _txt(r[c_name])
         if not name:
+            continue
+        # SHOW WAREHOUSES is account-wide; under a company scope drop other tenants'
+        # warehouses (names encode the tenant) so the uncapped list + count don't leak
+        # cross-company AND agree with the company-scoped RECENT_CREDITS (R1 fix).
+        if _scoped and classify_warehouse(name) != _co:
             continue
         assigned = _txt(r[c_rm]) if c_rm else ""
         if assigned.lower() in _NO_MONITOR:

@@ -1,5 +1,37 @@
 # Changelog
 
+## 4.557.0 - Bug-hunt round 1: new-section fixes (2026-09-18)
+
+Round-1 adversarial sweep (6 finders + refute-by-default verify) across the new sections
+(cost-governance panels, QOIE query panels, ledger/ROI, Cortex repoint) surfaced 11 verified
+bugs — 0 HIGH, 9 MED, 2 LOW. Fixed 10 (the 11th, a rare quota-panel gating edge, deferred).
+Two systemic themes: account-wide reads left un-scoped inside the company tab, and single-row
+advisor logic reused over averaged fingerprints.
+
+- **Cross-company scope leaks:** the "Uncapped warehouses" panel listed other tenants'
+  warehouses (SHOW WAREHOUSES is account-wide) while its spend KPI counted only the scoped
+  ones — now company-scoped via `classify_warehouse` (`monitors.unmonitored_warehouses`, raw-case
+  compare so Trexis scope isn't wrongly emptied); the per-user AI-quota block panel is
+  account-wide (Snowflake exposes no company grain) — labeled honestly rather than passed off
+  as company-scoped.
+- **QOIE:** `advise`'s >0 remote-spill trip, reused over `AVG(remote spill)` per fingerprint,
+  fired "Spilled 0.0 GB — ran out of memory, size up" on a rare 1-in-N spill — now floored at
+  0.5 GB on the fingerprint grain (per-query drill unchanged); the "first fix" / drill top row
+  led with the max-points queue row on a queued-but-dirty-SQL fingerprint (the
+  capacity-not-rewrite steer) — now leads with the SQL driver, matching the pathology label
+  (`_lead_finding`); the "Opportunities" KPI counted clean fingerprints — now counts QOP>0.
+- **Cost:** token-less AI functions (NULL $/1M tokens) rendered a fabricated $0.00 unit price —
+  NULL now preserved through dollarization so it blanks; the at-rest pruning advisor counted
+  well-clustered tables as clustering candidates — added an efficiency<0.5 ceiling;
+  `poor_pruning_queries` ignored the "Last month" window while its co-rendered panels honored it
+  — now threads `bounds`; the "Currently blocked" quota KPI counted block rows, not distinct
+  users (a user can hold >1) — now `nunique`.
+- **QOIE Slice 2:** the two operator boards double-rendered the anatomy for one rerun when
+  switching boards (stale src) — the anatomy now renders once, after both boards commit.
+
+Regression locks in `tests/test_bughunt_r1.py`. Deferred: the AI-quota panel is hidden when a
+window has active blocks but zero Cortex Code usage (relocating it is a UX change for a later round).
+
 ## 4.556.0 - Repoint AI-cost reads onto the canonical CORTEX_AI_FUNCTIONS_USAGE_HISTORY (2026-09-18)
 
 Owner asked to update any deprecated / future-deprecated view. A 3-agent docs+repo sweep found

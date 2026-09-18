@@ -257,7 +257,7 @@ def _capacity_forecast_panel(company: str) -> None:
     result_caption(result)
 
 
-def _spend_ceilings_panel(idle_head, rate: float) -> None:
+def _spend_ceilings_panel(idle_head, rate: float, company: str = "ALL") -> None:
     """Resource-monitor coverage — which warehouses have NO Snowflake spend
     ceiling. Metadata only: SHOW RESOURCE MONITORS + the already-cached SHOW
     WAREHOUSES read, joined to the idle-headline frame's per-warehouse credits
@@ -286,7 +286,7 @@ def _spend_ceilings_panel(idle_head, rate: float) -> None:
 
     inv = resource_monitor_inventory(mon_df)
     acct = account_monitor(mon_df)
-    uncapped = unmonitored_warehouses(whs.df, mon_df, credits_by_wh)
+    uncapped = unmonitored_warehouses(whs.df, mon_df, credits_by_wh, company=company)
     uncapped_usd = float((uncapped["RECENT_CREDITS"] * rate).sum()) if not uncapped.empty else 0.0
 
     st.markdown("**Spend ceilings & resource monitors**")
@@ -396,7 +396,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     # Spend-ceiling governance sits above the sub-sections: it reuses the idle
     # headline's per-warehouse credits (already fetched) + cached SHOW WAREHOUSES,
     # so it costs one metadata SHOW and no usage-history scan.
-    _spend_ceilings_panel(_idle_head, rate)
+    _spend_ceilings_panel(_idle_head, rate, company)
     opt_section = lazy_sections(["Idle & sizing", "Queries & patterns", "Storage & waste", "Remediation & ledger"], key="opt_section", deep_link=False)
 
     if opt_section == "Idle & sizing":
@@ -1359,8 +1359,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             prune = run(ops_sql.poor_pruning_queries(
                 days, company,
                 database=st.session_state.get("flt_database", ""),
-                schema_contains=st.session_state.get("flt_schema_contains", "")), page=_PAGE,
-                        key=f"prune_{company}_{days}", tier="historical",
+                schema_contains=st.session_state.get("flt_schema_contains", ""), bounds=bounds), page=_PAGE,
+                        key=f"prune_{company}_{days}{_lm}", tier="historical",
                         source="ACCOUNT_USAGE.QUERY_HISTORY (PARTITIONS_SCANNED)")
             if prune.ok and prune.empty:
                 empty_state("clean", "No query family scans >80% of a 100+-partition table in this window.")

@@ -471,11 +471,12 @@ LIMIT {limit}
 
 
 def poor_pruning_queries(days: int, company: str = "ALL", database: str = "",
-                         schema_contains: str = "") -> str:
+                         schema_contains: str = "", *, bounds: tuple | None = None) -> str:
     """Query families scanning >80% of a 100+-partition table — missing
-    clustering keys or unpruned predicates."""
+    clustering keys or unpruned predicates. Honors the 'Last month' calendar
+    window (bounds) so it shares the date range of its co-rendered panels (R1 fix)."""
     days = bounded_days(days)
-    scope = _query_scope(days, company, "", "", database, schema_contains)
+    scope = _query_scope(days, company, "", "", database, schema_contains, bounds=bounds)
     return f"""
 SELECT
     QUERY_PARAMETERIZED_HASH,
@@ -514,7 +515,11 @@ def table_pruning_candidates(days: int, company: str = "ALL", database: str = ""
     total-considered-partitions activity floor, AND an average >=100 partitions-considered-
     per-scan SIZE floor — the latter drops a small table that is merely full-scanned many
     times (which the activity floor alone would let masquerade as a candidate, since
-    PARTITIONS_SCANNED accumulates per scan). The reader passes probe=True: some accounts
+    PARTITIONS_SCANNED accumulates per scan). PLUS a pruning-quality CEILING (efficiency
+    < 0.5, i.e. prunes less than half its partitions): a heavily-scanned but already
+    well-clustered table (e.g. 98% pruned) is NOT a clustering candidate, so it must not
+    be counted/mislabeled as one (R1 fix; mirrors the sibling poor_pruning_queries's
+    scan-ratio threshold). The reader passes probe=True: some accounts
     expose this view only via the SNOWFLAKE.USAGE_VIEWER database role, not IMPORTED
     PRIVILEGES."""
     where = and_where(
@@ -536,6 +541,8 @@ WHERE {where}
 GROUP BY DATABASE_NAME, SCHEMA_NAME, TABLE_NAME
 HAVING SUM(PARTITIONS_SCANNED) + SUM(PARTITIONS_PRUNED) >= 1000
    AND (SUM(PARTITIONS_SCANNED) + SUM(PARTITIONS_PRUNED)) / GREATEST(SUM(NUM_SCANS), 1) >= 100
+   AND SUM(PARTITIONS_PRUNED)
+       / GREATEST(SUM(PARTITIONS_SCANNED) + SUM(PARTITIONS_PRUNED), 1) < 0.5
 ORDER BY PRUNE_PCT ASC, PARTITIONS_SCANNED DESC
 LIMIT 50
 """

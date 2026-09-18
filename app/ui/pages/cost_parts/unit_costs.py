@@ -396,8 +396,12 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     else:
         adf = ai_res.df.copy()
         adf["USD"] = adf["CREDITS"].map(lambda c: credits_to_usd(c, ai_rate))
+        # A token-less AI function (e.g. AI_PARSE_DOCUMENT — the FLATTEN repoint excludes
+        # non-token metrics) yields NULL CREDITS_PER_1M_TOKENS; keep it NULL through
+        # dollarization so "$/1M tokens" blanks like its raw sibling instead of fabricating
+        # a measured $0.00 unit price (R1 fix). c == c is False only for NaN.
         adf["USD_PER_1M_TOKENS"] = adf["CREDITS_PER_1M_TOKENS"].map(
-            lambda c: credits_to_usd(c, ai_rate))
+            lambda c: credits_to_usd(c, ai_rate) if (c is not None and c == c) else float("nan"))
         styled_table(adf, height=240, column_config={
             "USD": st.column_config.NumberColumn("$", format="$%.2f"),
             "USD_PER_1M_TOKENS": st.column_config.NumberColumn("$/1M tokens", format="$%.2f"),

@@ -41,6 +41,10 @@ _PATHOLOGY = {
 }
 # SQL badness (QOP minus the queue driver) at/below this = the SQL is not the problem
 _SQL_CLEAN_QOP = 15
+# The fingerprint grain feeds advise AVG(remote spill): a rare 1-in-N spill averages to
+# ~0, so require a meaningful average before firing advise's "ran out of memory" finding
+# (on a single QUERY_HISTORY row the >0 default is correct; here it over-fires). Bug-hunt R1.
+_FINGERPRINT_REMOTE_SPILL_FLOOR_GB = 0.5
 _OUTPUT_COLS = ["FINGERPRINT", "SAMPLE_TEXT", "QUERY_TYPE", "WAREHOUSE_NAME", "RUNS",
                 "TOTAL_EXEC_SEC", "QOP", "SQL_QOP", "OOS", "PATHOLOGY", "CONFIDENCE",
                 "FIRST_ACTION", "LAST_SEEN", "_FINDINGS"]
@@ -73,6 +77,21 @@ def _pathology(findings: list, sql_qop: int) -> str:
     return _PATHOLOGY.get(top_sql.code, "Other") if top_sql is not None else "Concurrency starvation"
 
 
+def _lead_finding(findings: list, sql_qop: int):
+    """The finding whose fix to LEAD with — mirrors _pathology's label choice so the
+    'first fix' (and the drill's top row) never disagrees with the pathology. A
+    queued-TOP fingerprint that still carries material SQL badness leads with its
+    dominant SQL driver, never the queue finding (which says 'don't rewrite the query')."""
+    if not findings:
+        return None
+    top = findings[0]
+    if top.code == "queued" and sql_qop > _SQL_CLEAN_QOP:
+        top_sql = next((f for f in findings if f.code != "queued"), None)
+        if top_sql is not None:
+            return top_sql
+    return top
+
+
 def score_opportunities(df: pd.DataFrame | None) -> tuple[pd.DataFrame, dict]:
     """Score + rank the fingerprint frame. Returns ``(ranked_frame, breakdowns)`` where
     ``breakdowns`` maps FINGERPRINT -> list of ``(title, points, detail)`` for the QOP
@@ -82,14 +101,19 @@ def score_opportunities(df: pd.DataFrame | None) -> tuple[pd.DataFrame, dict]:
     rows: list[dict] = []
     breakdowns: dict = {}
     for _, r in df.iterrows():
-        findings, qop = query_advisor.advise(r)
+        findings, qop = query_advisor.advise(
+            r, remote_spill_floor_gb=_FINGERPRINT_REMOTE_SPILL_FLOOR_GB)
         # SQL badness = the non-queue drivers, capped the same way advise caps the total.
         # (Subtracting a queue finding's points from the CAPPED qop would understate this
         # when the raw point-sum already saturates at 100 — identical in the uncapped regime.)
         sql_qop = min(100, sum(f.points for f in findings if f.code != "queued"))
-        top = findings[0] if findings else None
+        lead = _lead_finding(findings, sql_qop)
         fp = str(r.get("FINGERPRINT", ""))
-        breakdowns[fp] = [(f.title, f.points, f.detail) for f in findings]
+        # Lead the breakdown with the fix-to-take (so the drill's "top row is the first fix"
+        # caption is honest) — the rest stay in points order for the additive-score story.
+        _ordered = ([lead, *(f for f in findings if f is not lead)] if lead is not None
+                    else findings)
+        breakdowns[fp] = [(f.title, f.points, f.detail) for f in _ordered]
         rows.append({
             "FINGERPRINT": fp,
             "SAMPLE_TEXT": str(r.get("SAMPLE_TEXT", "")),
@@ -101,7 +125,7 @@ def score_opportunities(df: pd.DataFrame | None) -> tuple[pd.DataFrame, dict]:
             "SQL_QOP": int(sql_qop),
             "PATHOLOGY": _pathology(findings, sql_qop),
             "CONFIDENCE": _confidence(len(findings), safe_float(r.get("RUNS"))),
-            "FIRST_ACTION": (top.detail if top is not None else "No actionable finding."),
+            "FIRST_ACTION": (lead.detail if lead is not None else "No actionable finding."),
             "LAST_SEEN": r.get("LAST_SEEN"),   # passthrough for the panel's "Last seen" column
             "_FINDINGS": len(findings),
         })

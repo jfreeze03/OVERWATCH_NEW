@@ -373,10 +373,12 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             _crit = int((_scored["QOP"] >= 60).sum())
             _conc = int((_scored["PATHOLOGY"] == "Concurrency starvation").sum())
             _spill = int(_scored["PATHOLOGY"].str.startswith("Spill").sum())
+            _actionable = int((_scored["QOP"] > 0).sum()) if len(_scored) else 0
             kpi_row([
-                {"label": "Opportunities", "value": f"{len(_scored):,}",
-                 "help": "Recurring queries (fingerprints) scored this window, ranked by OOS "
-                         "(a typical run's inefficiency x the fingerprint's compute footprint)."},
+                {"label": "Opportunities", "value": f"{_actionable:,}",
+                 "help": "Recurring queries (fingerprints) with an ACTIONABLE inefficiency (QOP>0) "
+                         "this window, ranked by OOS (a typical run's inefficiency x the "
+                         "fingerprint's compute footprint). Clean queries are scored but not counted."},
                 {"label": "High QOP (>=60)", "value": f"{_crit:,}",
                  "severity": "warn" if _crit else "",
                  "help": "Fingerprints whose typical execution is badly inefficient."},
@@ -513,16 +515,15 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                         key="ops_opprofile_ex_sel", sort_label="by row blow-up desc",
                         column_config={"ROW_MULTIPLE": st.column_config.NumberColumn("Row blow-up ×", format="%.1f")})
                     # Set the active drill only on a GENUINELY-NEW selection, then always track
-                    # THIS board's own current selection. (st.dataframe selections are sticky and
-                    # re-emit every rerun; the old cross-reset of the other board's _last made both
-                    # boards look "new" alternately -> two profiles ping-ponged. One src wins now.)
+                    # THIS board's own current selection (st.dataframe selections are sticky and
+                    # re-emit every rerun). The anatomy is NOT rendered here — it renders ONCE after
+                    # BOTH boards commit (see below); rendering inside each board fired the LOSING
+                    # board on a stale src when switching exploding->spill, showing two profiles in
+                    # one rerun (R1 fix).
                     if _ex_sel is not None and _ex_sel != st.session_state.get("_ops_opprofile_ex_last"):
                         st.session_state["_ops_opprofile_src"] = "ex"
                         st.session_state["_ops_opprofile_qid"] = str(_ex.iloc[int(_ex_sel)]["QUERY_ID"])
                     st.session_state["_ops_opprofile_ex_last"] = _ex_sel
-                    _qid = st.session_state.get("_ops_opprofile_qid")
-                    if _qid and _qid in _bqids and st.session_state.get("_ops_opprofile_src") == "ex":
-                        _drill_anatomy(_qid)   # the profile renders under THIS board (exactly one site fires)
                 if not _sp.empty:
                     st.markdown("**Memory spill by operator** — the specific operator that spilled "
                                 "to remote storage. Size the warehouse up, or shrink that step's working set.")
@@ -534,9 +535,12 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                         st.session_state["_ops_opprofile_src"] = "sp"
                         st.session_state["_ops_opprofile_qid"] = str(_sp.iloc[int(_sp_sel)]["QUERY_ID"])
                     st.session_state["_ops_opprofile_sp_last"] = _sp_sel
-                    _qid = st.session_state.get("_ops_opprofile_qid")
-                    if _qid and _qid in _bqids and st.session_state.get("_ops_opprofile_src") == "sp":
-                        _drill_anatomy(_qid)   # the profile renders under THIS board (exactly one site fires)
+                # Render the operator anatomy exactly ONCE for the winning selection, AFTER both
+                # boards have committed their src/qid — so switching boards can't fire the losing
+                # board on a stale src and double-render (R1 fix).
+                _qid = st.session_state.get("_ops_opprofile_qid")
+                if _qid and _qid in _bqids and st.session_state.get("_ops_opprofile_src") in ("ex", "sp"):
+                    _drill_anatomy(_qid)
 
     section_header("Optimization triage", "", "optimize")
     _triage_on = st.toggle(

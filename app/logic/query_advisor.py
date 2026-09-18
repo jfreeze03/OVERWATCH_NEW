@@ -62,11 +62,18 @@ def _size(row: Mapping[str, object]) -> str:
     return s or "current"
 
 
-def advise(row: Mapping[str, object]) -> tuple[list[Finding], int]:
+def advise(row: Mapping[str, object], *,
+           remote_spill_floor_gb: float = REMOTE_SPILL_MIN_GB) -> tuple[list[Finding], int]:
     """Return (findings, score). `row` is one query_detail row (Series or dict).
 
     score is 0-100 ("optimize me first"): the capped sum of fired findings.
     An empty list + score 0 means nothing actionable was detected.
+
+    ``remote_spill_floor_gb`` overrides the >0 remote-spill trip. It stays 0.0 for a
+    single QUERY_HISTORY row (any real spill = memory exhaustion), but the fleet
+    fingerprint path passes a small floor because it feeds AVG(remote spill): a rare
+    1-in-N spill averages to ~0 and must NOT fire the "ran out of memory, size up"
+    finding (that both misreads and recommends a cost increase — bug-hunt R1).
     """
     findings: list[Finding] = []
 
@@ -82,7 +89,7 @@ def advise(row: Mapping[str, object]) -> tuple[list[Finding], int]:
     rows_produced = _f(row, "ROWS_PRODUCED", -1.0)  # -1 = column absent/unknown
 
     # 1) remote spill — the query ran out of memory (worst signal)
-    if remote_spill > REMOTE_SPILL_MIN_GB:
+    if remote_spill > remote_spill_floor_gb:
         pts = _cap(40 + remote_spill * 5, _CAP["remote_spill"])
         findings.append(Finding(
             "remote_spill", "bad", "Remote spill",

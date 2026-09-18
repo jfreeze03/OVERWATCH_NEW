@@ -410,21 +410,35 @@ def _ai_quota_panel(enriched: pd.DataFrame, summary: dict, days: int,
                       else (pd.DataFrame(), True))
     if not blocks.empty:
         has_active = "IS_ACTIVE" in blocks.columns
-        active = int(blocks["IS_ACTIVE"].sum()) if has_active else 0
+        has_user = "USER" in blocks.columns
+        _act = blocks["IS_ACTIVE"].astype(bool) if has_active else None
         kpis = [{"label": f"AI-quota blocks ({_wlab})", "value": f"{len(blocks):,}",
-                 "help": "Times a user hit a per-user AI quota and was blocked in this window."}]
-        if has_active:
+                 "help": "Times a user hit a per-user AI quota and was blocked in this window. "
+                         "Account-wide — Snowflake exposes no company grain on this view."}]
+        # "Currently blocked" counts distinct BLOCKED USERS (a user can hold >1 active block,
+        # e.g. daily + monthly), not active rows — else it overcounts live incidents vs
+        # "Users affected" (R1 fix). Falls back to an event count when USER is unmapped.
+        if has_active and has_user:
             kpis.append(
-                {"label": "Currently blocked", "value": f"{active:,}",
-                 "severity": "warn" if active else "",
-                 "help": "Users whose AI access is blocked right now (no release timestamp) — "
-                         "each is a live incident until the quota resets or is raised."})
-        if "USER" in blocks.columns:
+                {"label": "Currently blocked",
+                 "value": f"{int(blocks.loc[_act, 'USER'].nunique()):,}",
+                 "severity": "warn" if bool(_act.any()) else "",
+                 "help": "Distinct users whose AI access is blocked right now (no release "
+                         "timestamp) — each is a live incident until the quota resets. Account-wide."})
+        elif has_active:
+            kpis.append(
+                {"label": "Active block events", "value": f"{int(_act.sum()):,}",
+                 "severity": "warn" if bool(_act.any()) else "",
+                 "help": "Block rows with no release timestamp (a user can hold more than one). "
+                         "Account-wide."})
+        if has_user:
             kpis.append({"label": "Users affected", "value": f"{blocks['USER'].nunique():,}"})
         kpi_row(kpis)
         _disp = (with_user_names(blocks.rename(columns={"USER": "USER_NAME"}), _PAGE)
-                 if (mapped and "USER" in blocks.columns) else blocks)
+                 if (mapped and has_user) else blocks)
         styled_table(_disp, slug="ai-quota-blocks", size_note=False)
+        st.caption("Per-user AI quotas are account-wide — these blocks are NOT filtered to this "
+                   "tab's company scope (the block view carries no company grain).")
         return
     # No blocks (or the view is not enabled here). Quantify the unguarded exposure
     # from the per-user spend already on screen — the case for setting a quota.
