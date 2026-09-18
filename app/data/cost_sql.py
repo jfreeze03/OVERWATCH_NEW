@@ -1141,31 +1141,3 @@ SELECT *
 FROM SNOWFLAKE.LOCAL.ANOMALY_INSIGHTS
 LIMIT 200
 """
-
-
-def native_budget_service_usage(month: str) -> str:
-    """Snowflake NATIVE account budget (SNOWFLAKE.CORE.BUDGET) — month-to-date spend
-    by service type, read LIVE via the documented ``GET_SERVICE_TYPE_USAGE_V2`` table
-    function on the pre-created account budget instance SNOWFLAKE.LOCAL.ACCOUNT_ROOT_BUDGET.
-    No migration: it is a single SELECT (same family as native_anomaly_insights).
-
-    ``month`` is 'YYYY-MM' (the account's current month; both bounds equal = MTD). Callers
-    MUST pass probe=True: the object is absent — or the app role lacks SNOWFLAKE.BUDGET_VIEWER
-    / SNOWFLAKE.USAGE_VIEWER — on accounts that have not set this up, an EXPECTED absence, not
-    an error. The native budget counts only its linked/supported resources and lags up to
-    ~6.5h, so it will NOT equal the metering-based Spend total — it is a second view, reconciled
-    in-app against the account's own MONTHLY_BUDGET_USD pacing. The scalar spending LIMIT and the
-    daily history are CALL-only (see native_budget_spending_limit) and land fully only via a
-    budget mart."""
-    m = sql_literal(month)
-    return (
-        "SELECT SERVICE_TYPE, SUM(CREDITS_USED) AS CREDITS\n"
-        f"FROM TABLE(SNOWFLAKE.LOCAL.ACCOUNT_ROOT_BUDGET!GET_SERVICE_TYPE_USAGE_V2({m}, {m}))\n"
-        "GROUP BY SERVICE_TYPE\n"
-        "ORDER BY CREDITS DESC"
-    )
-    # NOTE: the account budget's scalar spending LIMIT is GET_SPENDING_LIMIT(), which is
-    # documented CALL-only and is NOT invocable inside a SELECT (it compile-errors and would
-    # spam APP_ERROR_LOG every render). The native limit + daily history therefore land only
-    # via a budget mart (a scheduled proc CALLs them into a FACT table) — a follow-up. Here we
-    # read live MTD spend and reconcile it against the account's own MONTHLY_BUDGET_USD.

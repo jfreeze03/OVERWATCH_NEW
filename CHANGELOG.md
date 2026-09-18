@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.555.0 - Remove native Snowflake budget panel (2026-09-18)
+
+Owner call: the native Snowflake budget panel is "really unnecessary" — removed entirely.
+The `SNOWFLAKE.LOCAL.ACCOUNT_ROOT_BUDGET` MTD-vs-`MONTHLY_BUDGET_USD` read (added v4.544.0)
+depended on the `GET_SERVICE_TYPE_USAGE_V2` table function + `BUDGET_VIEWER` grants and rendered
+empty after the grants landed; rather than chase the wiring, we drop the surface. OVERWATCH's
+own spend-ceiling / resource-monitor panel (v4.542.0) and per-user AI quota panel (v4.543.0)
+remain and cover the cost-governance story.
+
+Removed:
+- `app/logic/budgets.py` (native-budget-only: `native_budget_summary`, `project_month_end`).
+- `app/data/cost_sql.py::native_budget_service_usage`.
+- The `_native_budget_panel` block + its call on the Cost ▸ Contract page.
+- `tests/test_budgets.py`.
+
+The staged `BUDGET_VIEWER` role + `IMPORTED PRIVILEGES` grants (runbox 36aef9a) are now unused;
+they can be revoked at the owner's discretion (harmless read-only grants, left as-is).
+
 ## 4.554.0 - Savings ledger books its lever (no more "unclassified") (2026-09-18)
 
 Owner: the Decision Studio ROI "Where the realized savings come from — by lever" chart showed

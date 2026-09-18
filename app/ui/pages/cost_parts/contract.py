@@ -16,7 +16,6 @@ import streamlit as st
 from app.core.query import run
 from app.data import cost_sql, insights_sql, mart27_sql, mart_sql, security_sql
 from app.logic import contract_planner, steering
-from app.logic.budgets import native_budget_summary, project_month_end
 from app.logic.forecast import contract_pace
 from app.logic.formulas import (
     account_now,
@@ -446,77 +445,6 @@ def _org_accounts_spend() -> None:
     result_caption(res)
 
 
-def _native_budget_panel(settings: dict) -> None:
-    """Snowflake's NATIVE account budget (SNOWFLAKE.CORE.BUDGET), beside OVERWATCH's own
-    pacing. Live, single-SELECT read of month-to-date spend by service type via the
-    documented GET_SERVICE_TYPE_USAGE_V2 table function (no migration, same family as the
-    ANOMALY_INSIGHTS feed). Toggle-gated: a failed probe is not cached, so this is opt-in,
-    never ambient. Reconciles the native number against the account's own MONTHLY_BUDGET_USD —
-    the native budget counts only its linked resources and lags ~6.5h, so it is a second view,
-    not the metering total. The native LIMIT is GET_SPENDING_LIMIT(), documented CALL-only (a
-    SELECT of it compile-errors and would spam APP_ERROR_LOG), so spend-vs-native-limit lands
-    only via a budget mart — a follow-up; here we reconcile against the app budget."""
-    st.markdown("**Native Snowflake budget (account)**")
-    panel_help(
-        "Snowflake's native account budget (SNOWFLAKE.CORE.BUDGET) tracks account credit spend "
-        "against a monthly limit set in Snowsight, Cost Management, Budgets. OVERWATCH reads its "
-        "month-to-date spend live and reconciles it against your configured MONTHLY_BUDGET_USD. "
-        "The native limit and daily history are CALL-only in Snowflake, so 'spend vs native "
-        "limit' lands fully only once the budget mart is enabled. Reading needs the "
-        "SNOWFLAKE.BUDGET_VIEWER application role + IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE "
-        "(staged for the owner).")
-    if not st.toggle("Load native Snowflake budget", key="native_budget_toggle",
-                     help="One live read of the account budget's month-to-date spend. Opt-in."):
-        return
-    rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
-    month = account_today().strftime("%Y-%m")
-    usage = run(cost_sql.native_budget_service_usage(month), page=_PAGE, key="native_budget_usage",
-                tier="historical", probe=True,
-                source="SNOWFLAKE.LOCAL.ACCOUNT_ROOT_BUDGET (GET_SERVICE_TYPE_USAGE_V2)")
-    if not (usage.ok and not usage.empty):
-        empty_state(
-            "needs_setup",
-            "Snowflake's native account budget is not readable here yet. Either no budget is "
-            "configured (set one in Snowsight, Cost Management, Budgets), or the app's role needs "
-            "the SNOWFLAKE.BUDGET_VIEWER application role + IMPORTED PRIVILEGES ON DATABASE "
-            "SNOWFLAKE (staged for the owner). Once readable, this shows the account budget's "
-            "month-to-date spend by service type.")
-        return
-    summary, by_service = native_budget_summary(usage.df, rate)
-    projected = project_month_end(summary["mtd_usd"], account_today())
-    own_budget = safe_float(settings.get("MONTHLY_BUDGET_USD"))
-
-    kpis = [
-        {"label": "Native budget MTD spend",
-         "value": format_usd(summary["mtd_usd"]),
-         "help": f"{summary['mtd_credits']:,.1f} credits month-to-date in the native account "
-                 f"budget's own accounting (linked resources only; lags up to ~6.5h), at "
-                 f"${rate:.2f}/credit."},
-        {"label": "Projected month-end", "value": format_usd(projected),
-         "help": "Straight-line from month-to-date by day-of-month."},
-    ]
-    if own_budget > 0:
-        pct = summary["mtd_usd"] / own_budget * 100.0
-        kpis.append(
-            {"label": "% of OVERWATCH budget", "value": f"{pct:.0f}%",
-             "severity": "warn" if projected > own_budget else "",
-             "help": f"Native spend vs your configured MONTHLY_BUDGET_USD ({format_usd(own_budget)}); "
-                     "the native limit is CALL-only, so we reconcile against the app budget here."})
-    kpi_row(kpis)
-
-    if not by_service.empty:
-        styled_table(
-            by_service.rename(columns={"SERVICE_TYPE": "Service", "CREDITS": "Credits (MTD)",
-                                       "USD": "Spend (MTD)"}),
-            slug="native-budget-by-service", size_note=False,
-            column_config={"Spend (MTD)": st.column_config.NumberColumn("Spend (MTD)", format="$%.0f")})
-    st.caption(md_dollars(
-        "Native budget counts only its linked/supported resources and lags up to ~6.5h, so it "
-        "won't equal the metering-based Spend total above. The native spending limit is CALL-only "
-        "in Snowflake and isn't live-readable; enable the budget mart to track spend vs the native "
-        "limit and its projected overage."))
-
-
 def _contract_tab(settings: dict) -> None:
     _year_projection_strip(settings)
     _rate_card_reconciliation(settings)
@@ -524,7 +452,6 @@ def _contract_tab(settings: dict) -> None:
     org_shown = _org_truth_panel()
     _org_accounts_spend()
     st.divider()
-    _native_budget_panel(settings)
     contract_credits = safe_float(settings.get("CONTRACT_CREDITS"))
     start_s = str(settings.get("CONTRACT_START_DATE") or "").strip()
     end_s = str(settings.get("CONTRACT_END_DATE") or "").strip()
