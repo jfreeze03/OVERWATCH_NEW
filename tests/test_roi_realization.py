@@ -62,6 +62,10 @@ def test_month_and_lever_safe_on_empty():
 def test_ledger_builder_carries_finding_type():
     sql = mart_sql.savings_ledger()
     assert "FINDING_TYPE" in sql and "unclassified" in sql
+    # recovers the lever for autobook rows (which leave FINDING_TYPE NULL) from the source
+    # registry SETTING, SIZE -> RESIZE, so the by-lever rollup isn't all 'unclassified'
+    assert "WAREHOUSE_CHANGE_REGISTRY" in sql and "SOURCE_CHANGE_ID = r.CHANGE_ID" in sql
+    assert "WHEN r.SETTING = 'SIZE' THEN 'RESIZE'" in sql
 
 
 def test_roi_is_a_first_class_decision_studio_section():

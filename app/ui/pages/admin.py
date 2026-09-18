@@ -577,6 +577,12 @@ _EXPECTED_MIGRATIONS = {
          "fraction), so the *_PCT column is 0-100 like SCAN_PCT. Proc-only, byte-identical to V143 "
          "except the one overall_percentage extraction; fact/task unchanged, no backfill (0-1 rows "
          "age out in 30d, never displayed raw — the reader shows scale-invariant TIME_SHARE_PCT)",
+    145: "SP_LEDGER_AUTOBOOK stamps FINDING_TYPE (the savings lever) from the source "
+         "WAREHOUSE_CHANGE_REGISTRY.SETTING (SIZE -> RESIZE), so autobooked savings stop pooling into "
+         "'unclassified' in the Decision Studio ROI by-lever chart. Proc-only re-derive (byte-identical "
+         "to V118 except the INSERT FINDING_TYPE column+value) + a one-time idempotent backfill of "
+         "existing autobook rows (FINDING_TYPE-is-empty guard; NULL-source manual rows stay "
+         "unclassified). The savings_ledger() reader also recovers the lever via the registry join",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

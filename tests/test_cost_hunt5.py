@@ -61,7 +61,7 @@ def test_savings_ledger_limit_is_optional() -> None:
     default = mart_sql.savings_ledger()
     explicit = mart_sql.savings_ledger(500)
     assert "LIMIT" not in full
-    assert "ORDER BY CREATED_AT DESC" in full           # ordering preserved for the capped reads
+    assert "ORDER BY l.CREATED_AT DESC" in full          # ordering preserved for the capped reads
     assert "LIMIT 500" in default and "LIMIT 500" in explicit
     # no float literal ever reaches the LIMIT clause
     assert "LIMIT 500.0" not in default

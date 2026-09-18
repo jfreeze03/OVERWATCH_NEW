@@ -90,7 +90,7 @@ def test_v141_rules_moved_and_tallies_updated():
 
 def test_validate_and_docs_track_v141():
     val = _read("snowflake/validate.sql")
-    assert "V001..V144 applied" in val and "VERSION BETWEEN 1 AND 144) = 144" in val
+    assert "V001..V145 applied" in val and "VERSION BETWEEN 1 AND 145) = 145" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V141__alert_cadence_daily_cost_rules.sql" in _read(rel)
 

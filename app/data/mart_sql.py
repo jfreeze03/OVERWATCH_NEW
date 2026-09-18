@@ -733,12 +733,19 @@ def savings_ledger(limit: int | None = 500) -> str:
     Brief/Scorecard cite for the same quarter (cost-hunt5 2026-08-30)."""
     limit_clause = f"\nLIMIT {int(limit)}" if limit is not None else ""
     return f"""
-SELECT ITEM_ID, ACTION_ID, CREATED_AT, DESCRIPTION, STATE, ESTIMATED_USD, VERIFIED_USD,
-       VERIFIED_AT, VERIFIED_BY, PROOF_SQL, NOTES,
-       COALESCE(NULLIF(TRIM(FINDING_TYPE), ''), 'unclassified') AS FINDING_TYPE,
-       IFF(SOURCE_CHANGE_ID IS NULL, 'manual', 'auto') AS SOURCE
-FROM {core_object("SAVINGS_LEDGER")}
-ORDER BY CREATED_AT DESC{limit_clause}
+SELECT l.ITEM_ID, l.ACTION_ID, l.CREATED_AT, l.DESCRIPTION, l.STATE, l.ESTIMATED_USD, l.VERIFIED_USD,
+       l.VERIFIED_AT, l.VERIFIED_BY, l.PROOF_SQL, l.NOTES,
+       -- The dominant autobook path leaves FINDING_TYPE NULL and encodes the lever only in the
+       -- source registry SETTING; recover it (SIZE -> RESIZE, matching the app RESIZE bucket) so
+       -- the by-lever rollup isn't one big 'unclassified' pile. Mirrors verified_wins; a no-op
+       -- once V145 stamps/backfills the stored column (COALESCE takes the real value first).
+       COALESCE(NULLIF(TRIM(l.FINDING_TYPE), ''),
+                CASE WHEN r.SETTING = 'SIZE' THEN 'RESIZE' ELSE r.SETTING END,
+                'unclassified') AS FINDING_TYPE,
+       IFF(l.SOURCE_CHANGE_ID IS NULL, 'manual', 'auto') AS SOURCE
+FROM {core_object("SAVINGS_LEDGER")} l
+LEFT JOIN {core_object("WAREHOUSE_CHANGE_REGISTRY")} r ON l.SOURCE_CHANGE_ID = r.CHANGE_ID
+ORDER BY l.CREATED_AT DESC{limit_clause}
 """
 
 

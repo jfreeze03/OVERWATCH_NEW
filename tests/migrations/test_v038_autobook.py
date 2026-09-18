@@ -51,7 +51,7 @@ def test_teardown_covers_the_new_objects():
 def test_ui_and_reader_carry_the_source_and_the_reframe():
     from app.data import mart_sql
     sql = mart_sql.savings_ledger()
-    assert "IFF(SOURCE_CHANGE_ID IS NULL, 'manual', 'auto') AS SOURCE" in sql
+    assert "IFF(l.SOURCE_CHANGE_ID IS NULL, 'manual', 'auto') AS SOURCE" in sql
     opt = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "optimize.py").read_text(encoding="utf-8")
     assert "Books itself since V038" in opt               # the reframe caption
     assert '"SOURCE"' in opt                              # auto/manual visible per row

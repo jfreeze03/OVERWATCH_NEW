@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.554.0 - Savings ledger books its lever (no more "unclassified") (2026-09-18)
+
+Owner: the Decision Studio ROI "Where the realized savings come from — by lever" chart showed
+ALL verified savings as **"unclassified"**. Root cause: `SP_LEDGER_AUTOBOOK` — the dominant
+booking path (every detected warehouse cost-lever change) — never set `SAVINGS_LEDGER.FINDING_TYPE`
+(added later by V053), even though the lever is right there in the source row
+(`WAREHOUSE_CHANGE_REGISTRY.SETTING`). So every autobooked row landed with `FINDING_TYPE = NULL`
+and the by-lever rollup pooled them all together. (The `$0` estimate — by design, no invented
+numbers — is why Realization % is N/A there; the `None` display was fixed in v4.552.)
+
+- **App-side (immediate, no owner apply)** — `mart_sql.savings_ledger()` now recovers the lever
+  for autobook rows via the `WAREHOUSE_CHANGE_REGISTRY` join (`SETTING`, `SIZE → RESIZE`), exactly
+  as `verified_wins()` already does. So the ROI by-lever chart is correct on the next deploy,
+  regardless of when the migration is applied.
+- **Migration V145 (root fix)** — re-derives `SP_LEDGER_AUTOBOOK` to STAMP `FINDING_TYPE` from the
+  source `SETTING` at booking time (proc byte-identical to V118 except the INSERT column+value; a
+  parity test enforces this), plus a one-time idempotent backfill of existing autobook rows
+  (guarded by `FINDING_TYPE`-is-empty; NULL-source manual rows stay "unclassified"). Owner-applied
+  via runbox.
+- Full migration lockstep (validate tip → V145, `_EXPECTED_MIGRATIONS[145]`, 32 tip pins,
+  DEPLOYMENT/README, rebuild bundle, `test_v145`) + a `savings_ledger()` recovery lock in
+  `test_roi_realization`.
+
 ## 4.553.0 - V144: operator OP_TIME_PCT stored on a 0-100 scale (2026-09-18)
 
 Owner-applied migration. The V143 collector stored `OP_TIME_PCT` =
