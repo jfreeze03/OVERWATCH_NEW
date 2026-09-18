@@ -1022,10 +1022,17 @@ WHERE USAGE_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP());
 --  enrich_user_rollup) -- same columns, same $2.20 AI-credit rate
 --  (config AI_CREDIT_PRICE_USD). ONE self-contained statement; to slice a
 --  different window edit ONLY the `params` CTE, then run the whole statement:
---    * Last N days:   DATEADD('day', -30, CURRENT_TIMESTAMP()) AS WINDOW_START
+--    * Last N days:   DATEADD('day', -30, CURRENT_DATE()) AS WINDOW_START   (day-anchored!)
 --    * A fixed range: '2026-08-01'::TIMESTAMP_LTZ AS WINDOW_START,
 --                     '2026-09-01'::TIMESTAMP_LTZ AS WINDOW_END   -- the WHOLE of Aug 2026
 --  WINDOW_START inclusive, WINDOW_END exclusive. Default below = last 7 days.
+--  IMPORTANT (this is what makes it MATCH Overwatch): the ALTER SESSION below puts
+--  this query on the ACCOUNT clock (America/Chicago). The app buckets usage by whole
+--  CENTRAL calendar days (USAGE_DATE >= today - N days) and displays timestamps in
+--  Central; Snowsight defaults to UTC, so without it the day boundaries shift -- the
+--  oldest day gets clipped (undercounting credits/tokens) and FIRST/LAST_USAGE read
+--  5-6 h off. Then anchor WINDOW_START on CURRENT_DATE (whole-day grain, now Central)
+--  and keep WINDOW_END as CURRENT_TIMESTAMP so today's in-progress day stays in-window.
 --    SPEND_USD         = TOTAL_CREDITS * 2.20  (the exact per-user cost).
 --    PROJECTED_30D_USD = the app's monthly projection: credits / the user's OWN
 --                        observable days (first-seen -> window end, capped at the
@@ -1036,11 +1043,14 @@ WHERE USAGE_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP());
 -- =====================================================================
 USE ROLE SNOW_ACCOUNTADMINS;
 USE WAREHOUSE WH_ALFA_ADMIN;
+-- Put this session on the account clock so day-bucketing + timestamps match Overwatch
+-- (the app runs in America/Chicago; Snowsight defaults to UTC). Run this WITH the query.
+ALTER SESSION SET TIMEZONE = 'America/Chicago';
 
 WITH params AS (
     -- ---- THE ONLY KNOB: your window (defaults = last 7 days) ----
-    SELECT DATEADD('day', -7, CURRENT_TIMESTAMP()) AS WINDOW_START,   -- inclusive
-           CURRENT_TIMESTAMP()                     AS WINDOW_END      -- exclusive
+    SELECT DATEADD('day', -7, CURRENT_DATE()) AS WINDOW_START,   -- inclusive; whole-day grain (Central)
+           CURRENT_TIMESTAMP()                AS WINDOW_END       -- exclusive; = now, keeps today in-window
 ),
 combined AS (
     SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'Snowsight' AS SOURCE
