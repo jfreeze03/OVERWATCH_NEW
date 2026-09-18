@@ -298,7 +298,9 @@ def _spend_ceilings_panel(idle_head, rate: float, company: str = "ALL") -> None:
     kpi_row([
         {"label": "Resource monitors", "value": f"{len(inv)}",
          "help": "Monitors visible via SHOW RESOURCE MONITORS. 0 can also mean the app's "
-                 "role lacks the MONITOR privilege."},
+                 "role lacks the MONITOR privilege. ACCOUNT-wide — resource monitors are "
+                 "account objects, not narrowed by the company filter (only 'Uncapped "
+                 "warehouses' below is)."},
         {"label": "Uncapped warehouses", "value": f"{len(uncapped)}",
          "severity": "warn" if len(uncapped) else "",
          "help": "Warehouses with no per-warehouse monitor and no account-level monitor — "
@@ -306,7 +308,9 @@ def _spend_ceilings_panel(idle_head, rate: float, company: str = "ALL") -> None:
         {"label": "Uncapped recent spend", "value": format_usd(uncapped_usd),
          "severity": "warn" if uncapped_usd > 0 else "",
          "help": "Credits burned by uncapped warehouses over this window at the configured "
-                 "rate — spend that had no ceiling."},
+                 "rate — spend that had no ceiling. Sourced from the idle-ranked warehouse "
+                 "frame, so a very busy but low-idle uncapped warehouse beyond that frame's "
+                 "cap can under-contribute here (a floor, not an exact total)."},
     ])
     if acct is not None:
         if acct["enforced"] is False:
@@ -317,6 +321,9 @@ def _spend_ceilings_panel(idle_head, rate: float, company: str = "ALL") -> None:
                        "its own monitor, so nothing is uncapped.")
 
     with st.expander("Monitor inventory & uncapped warehouses", expanded=bool(len(uncapped))):
+        st.caption("Resource monitors are ACCOUNT-wide objects (no company grain) — this "
+                   "inventory is NOT filtered to the tab's company; only the uncapped-warehouse "
+                   "list below is company-scoped.")
         if not inv.empty:
             _inv = inv.copy()
             _inv["ENFORCED"] = _inv["ENFORCED"].map(
@@ -1084,8 +1091,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     insights_sql.repeat_query_fingerprints(
                         _rq_days, company, repeat_min_runs(_rq_days),
                         database=st.session_state.get("flt_database", ""),
-                        schema_contains=st.session_state.get("flt_schema_contains", "")),
-                    page=_PAGE, key=f"repeatq_{company}_{days}", tier="historical",
+                        schema_contains=st.session_state.get("flt_schema_contains", ""), bounds=bounds),
+                    page=_PAGE, key=f"repeatq_{company}_{days}{_lm}", tier="historical",
                     source="QUERY_HISTORY (QUERY_PARAMETERIZED_HASH, live)")
             if guard(rq_res, "No query fingerprints meet the normalized recurrence gate.",
                      setup_hint="Needs QUERY_PARAMETERIZED_HASH (standard in current Snowflake accounts)."):

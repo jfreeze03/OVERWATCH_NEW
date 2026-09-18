@@ -384,8 +384,8 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         # This account bills AI through Cortex CODE (Snowsight/CLI token
         # credits), not SQL Cortex functions — fall back to those views
         # (live finding 2026-07-08: model view empty, code credits real).
-        ai_res = run(cortex_sql.cortex_source_costs(days), page=_PAGE,
-                     key=f"unit_ai_src_{days}", tier="historical",
+        ai_res = run(cortex_sql.cortex_source_costs(days, bounds=bounds), page=_PAGE,
+                     key=f"unit_ai_src_{days}{_lm}", tier="historical",
                      source="CORTEX_CODE_*_USAGE_HISTORY (source grain)")
     if not ai_res.ok:
         st.caption("Neither CORTEX_AI_FUNCTIONS_USAGE_HISTORY nor the Cortex Code usage views "

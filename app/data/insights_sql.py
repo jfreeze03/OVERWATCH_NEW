@@ -134,7 +134,8 @@ _SIZE_CREDIT_FACTOR_SQL = """CASE UPPER(COALESCE(WAREHOUSE_SIZE, ''))
 
 
 def repeat_query_fingerprints(days: int, company: str = "ALL", min_runs: int = 10,
-                              database: str = "", schema_contains: str = "") -> str:
+                              database: str = "", schema_contains: str = "", *,
+                              bounds: tuple | None = None) -> str:
     """Repeated query shapes ranked by ESTIMATED credits x cache-miss.
 
     D3 (audit 2026-07-31): the old ORDER BY was TOTAL_ELAPSED_HOURS — wall
@@ -152,7 +153,7 @@ def repeat_query_fingerprints(days: int, company: str = "ALL", min_runs: int = 1
     days = bounded_days(days)
     min_runs = max(2, min(int(min_runs), 1000))
     where = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        scope_window_where("START_TIME", days, bounds=bounds),
         "EXECUTION_STATUS = 'SUCCESS'",
         "QUERY_TYPE = 'SELECT'",
         "QUERY_PARAMETERIZED_HASH IS NOT NULL",

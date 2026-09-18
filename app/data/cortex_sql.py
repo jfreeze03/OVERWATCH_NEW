@@ -15,7 +15,7 @@ Sources:
 from __future__ import annotations
 
 from app import companies
-from app.data.common import and_where, bounded_days, resolve_effective_window
+from app.data.common import and_where, bounded_days, resolve_effective_window, scope_window_where
 
 _COMBINED_CODE_USAGE = """
     SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'Snowsight' AS SOURCE
@@ -222,11 +222,27 @@ LIMIT 200
 """
 
 
-def cortex_source_costs(days: int) -> str:
+def cortex_source_costs(days: int, *, bounds: tuple | None = None) -> str:
     """AI credits by SOURCE from the Cortex Code usage views — the views
     that actually bill this account (live finding 2026-07-08: the model
-    view was empty while Snowsight/CLI code credits carried the AI spend)."""
+    view was empty while Snowsight/CLI code credits carried the AI spend).
+
+    Honors the 'Last month' calendar window (bounds) so this fallback — which is the
+    ONLY AI-spend surface on the Unit-costs tab when the model view + mart are empty —
+    shares the date range of the scope chip and its neighbors (R2 fix). The no-bounds
+    path is byte-identical to before (reuses _COMBINED_CODE_USAGE)."""
     days = bounded_days(days)
+    if bounds is not None:
+        _win = scope_window_where("USAGE_TIME", days, bounds=bounds)
+        combined = f"""
+    SELECT USAGE_TIME, TOKEN_CREDITS, TOKENS, 'Snowsight' AS SOURCE
+    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY WHERE {_win}
+    UNION ALL
+    SELECT USAGE_TIME, TOKEN_CREDITS, TOKENS, 'CLI' AS SOURCE
+    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_CLI_USAGE_HISTORY WHERE {_win}
+"""
+    else:
+        combined = _COMBINED_CODE_USAGE.format(days=days)
     return f"""
 SELECT
     SOURCE AS FUNCTION_NAME,
@@ -236,7 +252,7 @@ SELECT
     ROUND(SUM(COALESCE(TOKEN_CREDITS, 0)), 4) AS CREDITS,
     ROUND(SUM(COALESCE(TOKEN_CREDITS, 0)) * 1000000
           / NULLIF(SUM(COALESCE(TOKENS, 0)), 0), 4) AS CREDITS_PER_1M_TOKENS
-FROM ({_COMBINED_CODE_USAGE.format(days=days)})
+FROM ({combined})
 GROUP BY 1
 ORDER BY CREDITS DESC
 """

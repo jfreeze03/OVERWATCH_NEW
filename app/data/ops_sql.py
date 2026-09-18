@@ -600,6 +600,16 @@ SELECT
     ROUND(AVG(COALESCE(BYTES_SPILLED_TO_LOCAL_STORAGE, 0)) / POWER(1024, 3), 3) AS LOCAL_SPILL_GB,
     ROUND(AVG(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3), 3) AS REMOTE_SPILL_GB,
     ROUND(AVG(COALESCE(ROWS_PRODUCED, 0)), 0) AS ROWS_PRODUCED,
+    -- Typical-run guards for advise()'s per-run gates: an AVG hides a bimodal fingerprint,
+    -- so QUEUED_RUN_PCT = share of runs that were MEANINGFULLY queued (>=1s and >50% of
+    -- elapsed), and MAX_ROWS_PRODUCED lets zero_result fire only when NO run ever returned
+    -- rows. Without these, one queue-storm run or one row-producing run mislabels the
+    -- fingerprint (bug-hunt R2). Absent on the per-QUERY drill grain -> advise falls back to
+    -- the per-run test there, which is correct.
+    AVG(IFF((COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) >= 1000
+            AND (COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0))
+                / NULLIF(TOTAL_ELAPSED_TIME, 0) > 0.5, 1, 0)) AS QUEUED_RUN_PCT,
+    MAX(COALESCE(ROWS_PRODUCED, 0)) AS MAX_ROWS_PRODUCED,
     ROUND(AVG(COALESCE(PARTITIONS_SCANNED, 0)), 0) AS PARTITIONS_SCANNED,
     ROUND(AVG(COALESCE(PARTITIONS_TOTAL, 0)), 0) AS PARTITIONS_TOTAL,
     MAX(END_TIME) AS LAST_SEEN

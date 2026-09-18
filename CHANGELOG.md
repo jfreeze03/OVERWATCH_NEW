@@ -1,5 +1,35 @@
 # Changelog
 
+## 4.558.0 - Bug-hunt round 2: deeper new-section fixes (2026-09-18)
+
+Round-2 adversarial sweep (4 deep finders + refute-by-default verify) went deeper on the three
+systemic classes round 1 opened, finding 6 verified bugs — 0 HIGH, 3 MED, 3 LOW, exactly 2 per
+class. All 6 fixed.
+
+- **Grain-threshold (root fix for #2 + #6):** `advise()`'s per-run `queued` and `zero_result`
+  gates were applied to `AVG(...)` fingerprint columns, so one queue-storm run mislabeled a
+  mostly-instant fingerprint "Concurrency starvation, size up" and a rounded `AVG(rows)`
+  mislabeled a query that does return rows "returned 0 rows". The builder now emits two
+  typical-run guards — `QUEUED_RUN_PCT` (share of runs meaningfully queued) and
+  `MAX_ROWS_PRODUCED` — and `advise` fires `queued` only when queueing is typical (≥50% of runs)
+  and `zero_result` only when NO run ever returned rows. Both no-op on the per-QUERY drill grain
+  (where the per-run test is correct), extending the round-1 remote-spill-floor mechanism to the
+  whole averaged-per-run family.
+- **Window/bounds parity:** `insights_sql.repeat_query_fingerprints` (Repeat-query panel) and
+  `cortex_sql.cortex_source_costs` (the AI-spend fallback, the ONLY AI surface on Unit costs when
+  the model view + mart are empty) ignored the "Last month" calendar window while their
+  co-rendered neighbors honored it — both now thread `bounds` + an `_lm` cache-key discriminator
+  (cortex's no-bounds path stays byte-identical).
+- **Scope parity (disclosure):** the spend-ceilings panel's "Resource monitors" count + monitor
+  inventory are account-wide objects with no company grain shown beside company-scoped uncapped
+  warehouses — now disclosed (KPI help + expander caption), like the round-1 quota panel; and
+  "Uncapped recent spend" is disclosed as an idle-ranked-frame floor (a very busy, low-idle
+  uncapped warehouse beyond that frame's cap can under-contribute).
+
+Regression locks in `tests/test_bughunt_r2.py`. A round 3 is warranted (the audit flagged the
+remaining `advise` ratio gates over averaged grain, a repo-wide bounds sweep, and other
+account-grain panels) — to be scoped next.
+
 ## 4.557.0 - Bug-hunt round 1: new-section fixes (2026-09-18)
 
 Round-1 adversarial sweep (6 finders + refute-by-default verify) across the new sections

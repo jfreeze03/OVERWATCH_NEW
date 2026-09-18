@@ -31,6 +31,9 @@ COMPILE_MIN_ELAPSED_SEC = 1.0    # ignore trivially short queries
 QUEUE_FRACTION = 0.5             # queued this share of elapsed = concurrency/resume
 QUEUE_MIN_SEC = 1.0
 ZERO_RESULT_MIN_GB = 10.0        # scanned a lot and produced nothing
+# R2: on the fingerprint grain (AVG'd columns), the queued gate fires only when queueing is
+# TYPICAL (>= this share of runs), not when one queue-storm run inflated AVG(queued).
+FINGERPRINT_QUEUE_TYPICAL_SHARE = 0.5
 
 # --- per-driver score weights + caps (a query maxes at 100) -----------------
 # base points + a size-scaled bonus, each capped so one axis can't dominate.
@@ -74,6 +77,12 @@ def advise(row: Mapping[str, object], *,
     fingerprint path passes a small floor because it feeds AVG(remote spill): a rare
     1-in-N spill averages to ~0 and must NOT fire the "ran out of memory, size up"
     finding (that both misreads and recommends a cost increase — bug-hunt R1).
+
+    Two more fingerprint-grain guards (R2), read from ``row`` when the builder supplies them:
+    ``QUEUED_RUN_PCT`` (queued fires only when queueing is TYPICAL, not one storm run inflating
+    the AVG ratio) and ``MAX_ROWS_PRODUCED`` (zero_result fires only when NO run ever returned
+    rows, since AVG(rows) can round to 0). Both are absent on the per-QUERY grain, where the
+    per-run gates are themselves correct, so they no-op there.
     """
     findings: list[Finding] = []
 
@@ -87,6 +96,10 @@ def advise(row: Mapping[str, object], *,
     parts_scanned = _f(row, "PARTITIONS_SCANNED")
     parts_total = _f(row, "PARTITIONS_TOTAL")
     rows_produced = _f(row, "ROWS_PRODUCED", -1.0)  # -1 = column absent/unknown
+    # R2 typical-run guards: present only on the fingerprint (AVG) grain; -1 = per-QUERY grain,
+    # where the per-run gates below are themselves correct so the guard is a no-op.
+    queued_run_pct = _f(row, "QUEUED_RUN_PCT", -1.0)
+    max_rows = _f(row, "MAX_ROWS_PRODUCED", -1.0)
 
     # 1) remote spill — the query ran out of memory (worst signal)
     if remote_spill > remote_spill_floor_gb:
@@ -142,8 +155,10 @@ def advise(row: Mapping[str, object], *,
             "IN-list (bind or a temp table) or simplify the statement.",
             pts))
 
-    # 6) queued
-    if queued_sec >= QUEUE_MIN_SEC and elapsed > 0 and safe_div(queued_sec, elapsed) > QUEUE_FRACTION:
+    # 6) queued — on the fingerprint grain, only when queueing is TYPICAL (not one storm run
+    #    inflating AVG(queued) past the ratio gate). queued_run_pct < 0 = per-query grain.
+    if (queued_sec >= QUEUE_MIN_SEC and elapsed > 0 and safe_div(queued_sec, elapsed) > QUEUE_FRACTION
+            and (queued_run_pct < 0 or queued_run_pct >= FINGERPRINT_QUEUE_TYPICAL_SHARE)):
         pts = _cap(8 + queued_sec, _CAP["queued"])
         findings.append(Finding(
             "queued", "warn", "Queued",
@@ -152,8 +167,10 @@ def advise(row: Mapping[str, object], *,
             "resume overhead (lengthen AUTO_SUSPEND / keep it warm).",
             pts))
 
-    # 7) zero-result-expensive
-    if gb_scanned > ZERO_RESULT_MIN_GB and rows_produced == 0.0:
+    # 7) zero-result-expensive — on the fingerprint grain, only when NO run ever returned rows
+    #    (AVG(rows) can round to 0 while a minority of runs do return rows). max_rows < 0 = per-query.
+    if (gb_scanned > ZERO_RESULT_MIN_GB and rows_produced == 0.0
+            and (max_rows < 0 or max_rows == 0.0)):
         pts = _cap(8 + gb_scanned / 50.0 * 4, _CAP["zero_result"])
         findings.append(Finding(
             "zero_result", "warn", "Expensive empty result",
