@@ -120,7 +120,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     ]
     if not _ai_m.usable():
         _jobs.append({"key": "ai", "sql": cortex_sql.cortex_model_costs(days, bounds=bounds),
-                      "source": "CORTEX_AISQL_USAGE_HISTORY", "max_rows": 200})
+                      "source": "CORTEX_AI_FUNCTIONS_USAGE_HISTORY", "max_rows": 200})
     _ub = run_batch(_jobs, page=_PAGE, tier="historical")
     if _ub is not None:
         q_res, p_res = _ub["q"], _ub["p"]
@@ -141,7 +141,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         ai_res = _ai_m if _ai_m.usable() else run(
             cortex_sql.cortex_model_costs(days, bounds=bounds), page=_PAGE,
             key=f"unit_ai_{days}{_lm}", tier="historical",
-            source="CORTEX_AISQL_USAGE_HISTORY")
+            source="CORTEX_AI_FUNCTIONS_USAGE_HISTORY")
 
     kpis = []
     if q_res.usable():
@@ -388,7 +388,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                      key=f"unit_ai_src_{days}", tier="historical",
                      source="CORTEX_CODE_*_USAGE_HISTORY (source grain)")
     if not ai_res.ok:
-        st.caption("Neither CORTEX_AISQL_USAGE_HISTORY nor the Cortex Code usage views "
+        st.caption("Neither CORTEX_AI_FUNCTIONS_USAGE_HISTORY nor the Cortex Code usage views "
                    "are accessible on this account/role — per-user AI spend remains "
                    "available under Chargeback & AI.")
     elif ai_res.empty:

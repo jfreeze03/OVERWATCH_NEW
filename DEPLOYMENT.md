@@ -161,6 +161,7 @@ snowflake/migrations/V142__posture_arm_single_scan.sql
 snowflake/migrations/V143__query_operator_stats_collector.sql
 snowflake/migrations/V144__operator_time_pct_scale.sql
 snowflake/migrations/V145__ledger_autobook_stamp_finding_type.sql
+snowflake/migrations/V146__ai_usage_loader_repoint_ai_functions.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

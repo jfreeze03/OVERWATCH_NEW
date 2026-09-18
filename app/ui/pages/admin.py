@@ -583,6 +583,17 @@ _EXPECTED_MIGRATIONS = {
          "to V118 except the INSERT FINDING_TYPE column+value) + a one-time idempotent backfill of "
          "existing autobook rows (FINDING_TYPE-is-empty guard; NULL-source manual rows stay "
          "unclassified). The savings_ledger() reader also recovers the lever via the registry join",
+    146: "SP_LOAD_MARTS_V27 FACT_AI_USAGE_DAILY ai_functions arm repointed off the FROZEN "
+         "ACCOUNT_USAGE.CORTEX_FUNCTIONS_USAGE_HISTORY onto the canonical "
+         "CORTEX_AI_FUNCTIONS_USAGE_HISTORY, so the mart's AI-Functions cost rows keep updating. "
+         "Not a drop-in: CREDITS (not TOKEN_CREDITS); START_TIME is TIMESTAMP_LTZ so FIRST_TS/LAST_TS "
+         "cast ::TIMESTAMP_NTZ (TZ->NTZ MERGE guard, like the ai_code arm); tokens summed from the "
+         "METRICS array via LATERAL FLATTEN where unit=tokens (no scalar TOKENS column), "
+         "CREDITS+REQUESTS deduped once per source row via COALESCE(m.INDEX,0)=0. Re-derived from "
+         "V142, byte-identical outside the ai_functions arm. Backfill after apply as one step (loader "
+         "is upsert-only): DELETE FROM FACT_AI_USAGE_DAILY WHERE SOURCE=Functions AND DAY>=2026-01-05, "
+         "then CALL SP_LOAD_MARTS_V27(DAILY, 365) -- scoped purge clears double-counting orphans, "
+         "preserves pre-horizon history",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

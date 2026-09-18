@@ -562,7 +562,7 @@ _CORTEX_INTENT = "cortex_spend_by_model"
 
 
 def _needs_cortex_by_model(params: AskParams) -> list[QuerySpec]:
-    # CORTEX_AISQL_USAGE_HISTORY has no company/db grain, so the page company
+    # CORTEX_AI_FUNCTIONS_USAGE_HISTORY has no company/db grain, so the page company
     # filter does not apply — the answer is honestly account-wide.
     return [
         QuerySpec(
@@ -583,13 +583,13 @@ def _analyze_cortex_by_model(
     # never labels a 90-day figure as a 365-day result (grounding honesty).
     eff = bounded_days(params.days)
     src = (f"cortex_sql.cortex_model_costs({eff}d) — "
-           "ACCOUNT_USAGE.CORTEX_AISQL_USAGE_HISTORY (account-wide)")
+           "ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY (account-wide)")
     # account_wide flags the caption to say 'scope: account-wide' rather than pinning
     # this whole-account AI spend to the page company filter (the view has no company grain).
     meta: dict[str, object] = {"days": eff, "company": params.company, "account_wide": True}
     no_data = (
         f"No Cortex/AI function spend in the last {eff}d — "
-        "CORTEX_AISQL_USAGE_HISTORY is empty or unavailable on this account "
+        "CORTEX_AI_FUNCTIONS_USAGE_HISTORY is empty or unavailable on this account "
         "(Cortex Code via Snowsight/CLI bills through a separate usage view)."
     )
     df = frames.get("cortex")

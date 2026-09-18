@@ -181,31 +181,40 @@ ORDER BY DAY
 def cortex_model_costs(days: int, *, bounds: tuple | None = None) -> str:
     """AI credits by function and model, with a credits/1M-token unit rate.
 
-    Reads CORTEX_AISQL_USAGE_HISTORY — the GA successor to CORTEX_FUNCTIONS_USAGE_HISTORY,
-    which Snowflake froze ("no longer updated") with the new view carrying data from
-    2025-11-17. The SELECT contract is unchanged: FUNCTION_NAME, MODEL_NAME, TOKENS and
-    TOKEN_CREDITS keep their names, so SUM(TOKENS)/SUM(TOKEN_CREDITS) and the per-1M-token
-    math are identical; only the time column changed START_TIME -> USAGE_TIME (there is no
-    START_TIME on the new view — leaving it would compile-error and blank the panel). The
-    finer grain (per query+warehouse) collapses to the same totals under this GROUP BY.
+    Reads CORTEX_AI_FUNCTIONS_USAGE_HISTORY — the canonical Cortex AI-functions usage
+    view (GA; data from 2026-01-05). It is NOT a drop-in for the older
+    CORTEX_FUNCTIONS_USAGE_HISTORY / CORTEX_AISQL_USAGE_HISTORY reads:
+      * the credits column is CREDITS, not TOKEN_CREDITS;
+      * the time column is START_TIME (TIMESTAMP_LTZ), windowed on the raw value;
+      * there is NO scalar TOKENS column — token counts live inside the METRICS ARRAY,
+        one element per metric as
+        {"key":{"metric":"input"|"output","unit":"tokens"},"value":N}. LATERAL FLATTEN
+        sums the value where unit='tokens' (so non-token metrics, e.g. a 'pages' unit
+        from document parsing, are correctly excluded), and CREDITS is deduped to once
+        per source row via COALESCE(M.INDEX,0)=0 so the FLATTEN fan-out can't multiply it
+        (OUTER=>TRUE emits a NULL-index row for empty METRICS, which is still counted once).
 
     No database dimension — account-wide by definition; per-user attribution stays in the
     rollup. View/column availability varies by account: the runtime error path is the
-    compatibility guard (same pattern as cortex_ai_functions_daily).
+    compatibility guard (same pattern as cortex_ai_functions_daily, which reads this view).
     """
     days = bounded_days(days)
-    scope = (resolve_effective_window(days, "USAGE_TIME", bounds=bounds)[1]
+    scope = (resolve_effective_window(days, "F.START_TIME", bounds=bounds)[1]
              if bounds is not None
-             else f"USAGE_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
+             else f"F.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     return f"""
 SELECT
-    FUNCTION_NAME,
-    COALESCE(MODEL_NAME, 'n/a') AS MODEL_NAME,
-    SUM(COALESCE(TOKENS, 0)) AS TOKENS,
-    ROUND(SUM(COALESCE(TOKEN_CREDITS, 0)), 4) AS CREDITS,
-    ROUND(SUM(COALESCE(TOKEN_CREDITS, 0)) * 1000000
-          / NULLIF(SUM(COALESCE(TOKENS, 0)), 0), 4) AS CREDITS_PER_1M_TOKENS
-FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_AISQL_USAGE_HISTORY
+    F.FUNCTION_NAME,
+    COALESCE(NULLIF(F.MODEL_NAME, ''), 'n/a') AS MODEL_NAME,
+    SUM(CASE WHEN M.VALUE:key:unit::STRING = 'tokens'
+             THEN M.VALUE:value::NUMBER ELSE 0 END) AS TOKENS,
+    ROUND(SUM(CASE WHEN COALESCE(M.INDEX, 0) = 0
+                   THEN COALESCE(F.CREDITS, 0) ELSE 0 END), 4) AS CREDITS,
+    ROUND(SUM(CASE WHEN COALESCE(M.INDEX, 0) = 0 THEN COALESCE(F.CREDITS, 0) ELSE 0 END) * 1000000
+          / NULLIF(SUM(CASE WHEN M.VALUE:key:unit::STRING = 'tokens'
+                            THEN M.VALUE:value::NUMBER ELSE 0 END), 0), 4) AS CREDITS_PER_1M_TOKENS
+FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY F,
+     LATERAL FLATTEN(input => F.METRICS, OUTER => TRUE) M
 WHERE {scope}
 GROUP BY 1, 2
 ORDER BY CREDITS DESC

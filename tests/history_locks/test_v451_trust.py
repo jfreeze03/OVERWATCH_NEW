@@ -70,9 +70,10 @@ _REACHABLE = {
         # native per-user AI quotas (probe- + toggle-gated in _ai_quota_panel).
         "QUERY_HISTORY", "QUOTA_ACCESS_BLOCK_HISTORY", "USERS"),
     "app/ui/pages/cost_parts/unit_costs.py": (
-        # v4.547: cortex_model_costs repointed off the deprecated CORTEX_FUNCTIONS_USAGE_HISTORY
-        # onto its GA successor CORTEX_AISQL_USAGE_HISTORY (same TOKENS/TOKEN_CREDITS contract).
-        "CORTEX_AISQL_USAGE_HISTORY", "CORTEX_CODE_CLI_USAGE_HISTORY",
+        # v4.556: cortex_model_costs repointed onto the canonical CORTEX_AI_FUNCTIONS_USAGE_HISTORY
+        # (off CORTEX_AISQL_USAGE_HISTORY). Not a drop-in: CREDITS (not TOKEN_CREDITS) + tokens
+        # summed from the METRICS array via LATERAL FLATTEN (unit='tokens').
+        "CORTEX_AI_FUNCTIONS_USAGE_HISTORY", "CORTEX_CODE_CLI_USAGE_HISTORY",
         "CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY", "QUERY_ATTRIBUTION_HISTORY",
         "QUERY_HISTORY", "SERVERLESS_TASK_HISTORY", "TASK_HISTORY"),
     # +QUERY_HISTORY/QUERY_ATTRIBUTION_HISTORY v4.269 (UX sweep #6): a warehouse row-click

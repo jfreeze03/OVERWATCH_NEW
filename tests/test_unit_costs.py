@@ -77,15 +77,21 @@ def test_procedure_costs_reports_reliability_too():
 
 def test_cortex_model_costs_shape():
     sql = cortex_sql.cortex_model_costs(30)
-    # repointed off the deprecated CORTEX_FUNCTIONS_USAGE_HISTORY onto its GA successor
-    assert "CORTEX_AISQL_USAGE_HISTORY" in sql
-    assert "CORTEX_FUNCTIONS_USAGE_HISTORY" not in sql
-    # the new view's time column is USAGE_TIME, not START_TIME (a leftover START_TIME would
-    # compile-error and silently blank the panel)
-    assert "USAGE_TIME >= DATEADD" in sql and "START_TIME" not in sql
+    # v4.556: repointed onto the canonical CORTEX_AI_FUNCTIONS_USAGE_HISTORY, off both the
+    # frozen CORTEX_FUNCTIONS_USAGE_HISTORY and the interim CORTEX_AISQL_USAGE_HISTORY.
+    assert "CORTEX_AI_FUNCTIONS_USAGE_HISTORY" in sql
+    assert "CORTEX_FUNCTIONS_USAGE_HISTORY" not in sql   # frozen view gone
+    assert "CORTEX_AISQL_USAGE_HISTORY" not in sql       # interim view gone
+    # the canonical view's time column is START_TIME (LTZ); USAGE_TIME does not exist on it
+    assert "F.START_TIME >= DATEADD" in sql and "USAGE_TIME" not in sql
     assert "MODEL_NAME" in sql and "FUNCTION_NAME" in sql
-    assert "SUM(COALESCE(TOKENS, 0))" in sql and "SUM(COALESCE(TOKEN_CREDITS, 0))" in sql
-    assert "CREDITS_PER_1M_TOKENS" in sql              # unit rate, not just totals
+    # credits column is CREDITS (not TOKEN_CREDITS), deduped once per source row across the
+    # FLATTEN fan-out; tokens are summed from the METRICS array where unit='tokens'
+    assert "COALESCE(F.CREDITS, 0)" in sql and "TOKEN_CREDITS" not in sql
+    assert "LATERAL FLATTEN(input => F.METRICS, OUTER => TRUE) M" in sql
+    assert "M.VALUE:key:unit::STRING = 'tokens'" in sql
+    assert "COALESCE(M.INDEX, 0) = 0" in sql             # per-row credit dedup
+    assert "CREDITS_PER_1M_TOKENS" in sql                # unit rate, not just totals
     assert "-30," in sql and "-90," in cortex_sql.cortex_model_costs(999999)
 
 

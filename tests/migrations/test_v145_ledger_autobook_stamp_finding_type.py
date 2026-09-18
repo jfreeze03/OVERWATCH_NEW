@@ -68,7 +68,7 @@ def test_v145_proc_matches_v118_except_the_finding_type_stamp():
 
 def test_validate_and_docs_track_v145():
     val = _read("snowflake/validate.sql")
-    assert "V001..V145 applied" in val and "VERSION BETWEEN 1 AND 145) = 145" in val
+    assert "V001..V146 applied" in val and "VERSION BETWEEN 1 AND 146) = 146" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V145__ledger_autobook_stamp_finding_type.sql" in _read(rel)
 

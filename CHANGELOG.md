@@ -1,5 +1,34 @@
 # Changelog
 
+## 4.556.0 - Repoint AI-cost reads onto the canonical CORTEX_AI_FUNCTIONS_USAGE_HISTORY (2026-09-18)
+
+Owner asked to update any deprecated / future-deprecated view. A 3-agent docs+repo sweep found
+the real open gap and corrected two dates from the deprecation reference (per docs.snowflake.com:
+`CORTEX_AISQL_USAGE_HISTORY` carries **no** deprecation notice, and the
+`CORTEX_FUNCTIONS_QUERY_USAGE_HISTORY` "Nov 2026" removal isn't published — OVERWATCH never used
+that view anyway). The genuinely-broken read: the **`FACT_AI_USAGE_DAILY` mart loader** still read
+the **frozen** `CORTEX_FUNCTIONS_USAGE_HISTORY` ("no longer updated"), so its AI-Functions cost
+rows were going stale. Owner chose the canonical `CORTEX_AI_FUNCTIONS_USAGE_HISTORY` as the target.
+
+The canonical view is **not a drop-in** (pinned by an in-account owner probe, 2026-09-18):
+`CREDITS` (not `TOKEN_CREDITS`); `START_TIME` is `TIMESTAMP_LTZ`; and there is **no scalar `TOKENS`
+column** — token counts live in a `METRICS` array, one element per metric as
+`{"key":{"metric":"input"|"output","unit":"tokens"},"value":N}`.
+
+- **App (`cortex_sql.cortex_model_costs`, the live-fallback on Unit costs + Ask):** repointed onto
+  the canonical view. Tokens are summed from `METRICS` via `LATERAL FLATTEN` where `unit='tokens'`
+  (so non-token metrics, e.g. a `pages` unit, are correctly excluded — more accurate than the old
+  blind `SUM(TOKENS)`); `CREDITS` is deduped to once per source row via `COALESCE(M.INDEX,0)=0` so
+  the FLATTEN fan-out can't multiply it (`OUTER=>TRUE` emits a NULL-index row for empty `METRICS`,
+  still counted once). Output aliases (`TOKENS`, `CREDITS`, `CREDITS_PER_1M_TOKENS`) preserved, so
+  the Unit-costs panel + the Ask "which model drives AI spend?" answerer read unchanged. Source
+  labels/captions + the `test_v451_trust` reachable pin moved to the canonical view.
+- **Migration V146 (owner-applied):** re-derives `SP_LOAD_MARTS_V27` from V142, repointing ONLY the
+  `[9] ai_functions` arm — byte-identical outside it (parity test). `FIRST_TS`/`LAST_TS` cast
+  `::TIMESTAMP_NTZ` because `START_TIME` is LTZ and the fact columns are NTZ (the same TZ→NTZ MERGE
+  guard the ai_code arm already applies to `CORTEX_CODE_*`, V078). Backfill after apply:
+  `CALL SP_LOAD_MARTS_V27('DAILY', 365)`. Staged via runbox.
+
 ## 4.555.0 - Remove native Snowflake budget panel (2026-09-18)
 
 Owner call: the native Snowflake budget panel is "really unnecessary" — removed entirely.
