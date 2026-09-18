@@ -1012,3 +1012,67 @@ UNION ALL
 SELECT 'AISQL (interim)', ROUND(SUM(TOKEN_CREDITS), 4)
 FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_AISQL_USAGE_HISTORY
 WHERE USAGE_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP());
+
+-- =====================================================================
+--  BONUS (READ-ONLY, independent of STEP 1-3 above) -- CORTEX CODE
+--  PER-USER ATTRIBUTION, 7-DAY TREND.
+--
+--  This is the EXACT raw query behind the app's AI Chargeback > AI users
+--  per-user table: app/data/cortex_sql.py :: cortex_code_user_rollup(7). It
+--  attributes Cortex Code (Snowsight + CLI) credits / tokens / requests to each
+--  NAMED user by joining the two usage views to ACCOUNT_USAGE.USERS on USER_ID,
+--  windowed to the last 7 days. Per-user token telemetry is low-volume, so the
+--  365d live cap doesn't apply. Run standalone anytime; it changes nothing.
+--  (USER_NAME shows 'UNKNOWN (<id>)' when a USER_ID no longer resolves in USERS.)
+-- =====================================================================
+USE ROLE SNOW_ACCOUNTADMINS;
+USE WAREHOUSE WH_ALFA_ADMIN;
+
+WITH combined AS (
+    SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'Snowsight' AS SOURCE
+    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY
+    WHERE USAGE_TIME >= DATEADD('day', -7, CURRENT_TIMESTAMP())
+    UNION ALL
+    SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'CLI' AS SOURCE
+    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_CLI_USAGE_HISTORY
+    WHERE USAGE_TIME >= DATEADD('day', -7, CURRENT_TIMESTAMP())
+),
+user_daily AS (
+    SELECT
+        COALESCE(U.NAME, 'UNKNOWN (' || C.USER_ID || ')') AS USER_NAME,
+        U.EMAIL,
+        U.FIRST_NAME,
+        U.LAST_NAME,
+        C.SOURCE,
+        C.USAGE_TIME::DATE AS USAGE_DATE,
+        COUNT(*) AS REQUESTS,
+        SUM(COALESCE(C.TOKEN_CREDITS, 0)) AS CREDITS,
+        SUM(COALESCE(C.TOKENS, 0)) AS TOKENS,
+        MIN(C.USAGE_TIME) AS FIRST_TS,
+        MAX(C.USAGE_TIME) AS LAST_TS
+    FROM combined C
+    LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.USERS U ON C.USER_ID = U.USER_ID
+    GROUP BY 1, 2, 3, 4, 5, 6
+),
+by_user AS (
+SELECT
+    USER_NAME,
+    EMAIL,
+    FIRST_NAME,
+    LAST_NAME,
+    SOURCE,
+    COUNT(DISTINCT USAGE_DATE) AS ACTIVE_DAYS,
+    SUM(REQUESTS) AS TOTAL_REQUESTS,
+    SUM(CREDITS) AS TOTAL_CREDITS,
+    SUM(TOKENS) AS TOTAL_TOKENS,
+    MIN(FIRST_TS) AS FIRST_USAGE,
+    MAX(LAST_TS) AS LAST_USAGE,
+    SUM(CREDITS) / NULLIF(SUM(REQUESTS), 0) AS CREDITS_PER_REQUEST,
+    SUM(CREDITS) / NULLIF(COUNT(DISTINCT USAGE_DATE), 0) AS AVG_DAILY_CREDITS
+FROM user_daily
+GROUP BY USER_NAME, EMAIL, FIRST_NAME, LAST_NAME, SOURCE
+)
+SELECT * FROM by_user
+WHERE 1 = 1
+ORDER BY TOTAL_CREDITS DESC
+LIMIT 500;
