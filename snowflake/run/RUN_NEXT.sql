@@ -1015,27 +1015,35 @@ WHERE USAGE_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP());
 
 -- =====================================================================
 --  BONUS (READ-ONLY, independent of STEP 1-3 above) -- CORTEX CODE
---  PER-USER ATTRIBUTION, 7-DAY TREND.
+--  PER-USER ATTRIBUTION, SLICEABLE TO ANY TIMEFRAME.
 --
---  This is the EXACT raw query behind the app's AI Chargeback > AI users
---  per-user table: app/data/cortex_sql.py :: cortex_code_user_rollup(7). It
---  attributes Cortex Code (Snowsight + CLI) credits / tokens / requests to each
---  NAMED user by joining the two usage views to ACCOUNT_USAGE.USERS on USER_ID,
---  windowed to the last 7 days. Per-user token telemetry is low-volume, so the
---  365d live cap doesn't apply. Run standalone anytime; it changes nothing.
+--  Same per-user attribution as the app's AI Chargeback > AI users table
+--  (app/data/cortex_sql.py :: cortex_code_user_rollup), with the window as a
+--  KNOB -- edit the two SET lines below to slice ANY timeframe, then run the rest:
+--    * Last N days:   SET WINDOW_START = DATEADD('day', -30, CURRENT_TIMESTAMP());
+--                     SET WINDOW_END   = CURRENT_TIMESTAMP();
+--    * A fixed range: SET WINDOW_START = '2026-08-01';
+--                     SET WINDOW_END   = '2026-09-01';   -- the WHOLE of August 2026
+--  WINDOW_START is INCLUSIVE, WINDOW_END EXCLUSIVE. Defaults below = last 7 days.
+--  Attributes Cortex Code (Snowsight + CLI) credits/tokens/requests to each NAMED
+--  user via ACCOUNT_USAGE.USERS on USER_ID. Read-only; changes nothing.
 --  (USER_NAME shows 'UNKNOWN (<id>)' when a USER_ID no longer resolves in USERS.)
 -- =====================================================================
 USE ROLE SNOW_ACCOUNTADMINS;
 USE WAREHOUSE WH_ALFA_ADMIN;
 
+-- ---- THE ONLY KNOBS: set your window here (defaults = last 7 days) ---------
+SET WINDOW_START = DATEADD('day', -7, CURRENT_TIMESTAMP());   -- inclusive lower bound
+SET WINDOW_END   = CURRENT_TIMESTAMP();                       -- exclusive upper bound
+
 WITH combined AS (
     SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'Snowsight' AS SOURCE
     FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY
-    WHERE USAGE_TIME >= DATEADD('day', -7, CURRENT_TIMESTAMP())
+    WHERE USAGE_TIME >= $WINDOW_START AND USAGE_TIME < $WINDOW_END
     UNION ALL
     SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'CLI' AS SOURCE
     FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_CLI_USAGE_HISTORY
-    WHERE USAGE_TIME >= DATEADD('day', -7, CURRENT_TIMESTAMP())
+    WHERE USAGE_TIME >= $WINDOW_START AND USAGE_TIME < $WINDOW_END
 ),
 user_daily AS (
     SELECT
