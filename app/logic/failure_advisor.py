@@ -35,7 +35,11 @@ _FIXES: tuple[tuple[str, str, str], ...] = (
     ("", "data_quality_monitoring",
      "A SNOWFLAKE.LOCAL data-quality view isn't available — the DMF/data-metric feature may be off, "
      "or the role lacks IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE."),
-    ("", "cortex_code",
+    # R3: match CORTEX_CODE only as a QUOTED database identifier ('cortex_code'), not the bare
+    # token — a bare "cortex_code" also matched existence/grant errors on OVERWATCH's own
+    # ACCOUNT_USAGE.CORTEX_CODE_* views (fix_for is first-match-wins) and mis-routed them here
+    # instead of to the generic grant fix below; the quotes distinguish the database from the views.
+    ("", "'cortex_code'",
      "The CORTEX_CODE database isn't provisioned/visible for this role — enable Cortex Code or grant "
      "access; the tool is calling a database that doesn't exist here."),
     # --- missing object / privilege ---

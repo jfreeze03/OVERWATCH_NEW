@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.559.0 - Bug-hunt round 3 (close-out): last-twin new-section fixes (2026-09-18)
+
+Round-3 close-out sweep (4 finders + refute-by-default verify) found 5 verified bugs — 0 HIGH,
+4 MED, 1 LOW — all "last-twin" mirrors of already-fixed patterns (severity decayed, no novel
+class emerged): the expected diminishing-returns signal. All 5 fixed.
+
+- **Grain-threshold (the last per-run gate over averaged grain):** `advise`'s `compile_bound`
+  gate (a ratio of AVG'd fingerprint columns) could mislabel a typically-instant fingerprint
+  "Compilation heavy" off one compile-heavy run — now guarded by a builder-emitted
+  `COMPILE_RUN_PCT`, exactly like R2's queued/zero_result guards.
+- **Window/bounds (the last two un-bounded builders):** `clustering_by_table` (Storage & waste)
+  and `proc_cost_trend` (the "Trend one procedure" drill) ignored the "Last month" window while
+  their co-rendered neighbors honored it — both now thread `bounds` + an `_lm` cache key.
+- **Account-grain disclosure:** the native `ANOMALY_INSIGHTS` "second opinion" is account/org-wide
+  but its "flagged by BOTH = high-confidence" caption cross-referenced the company-scoped z-score
+  sweep (invalid under a company scope) — now discloses account-wide and softens the corroboration
+  claim when `company != ALL`.
+- **failure_advisor:** the bare `cortex_code` rule matched (first-match-wins) existence/grant
+  errors on OVERWATCH's own `ACCOUNT_USAGE.CORTEX_CODE_*` views and mis-routed them to "enable
+  Cortex Code" — now guarded to a quoted database identifier (`'cortex_code'`) so it fires only for
+  a genuine missing CORTEX_CODE database.
+
+Regression locks in `tests/test_bughunt_r3.py`. Across 3 rounds: **21 bugs found, 20 fixed, 0
+HIGH** (1 LOW deferred — the quota-panel gating edge). The three systemic classes are near-
+exhausted; a final short scoped confirmation pass would formally close them.
+
 ## 4.558.0 - Bug-hunt round 2: deeper new-section fixes (2026-09-18)
 
 Round-2 adversarial sweep (4 deep finders + refute-by-default verify) went deeper on the three

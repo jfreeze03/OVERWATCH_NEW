@@ -31,9 +31,10 @@ COMPILE_MIN_ELAPSED_SEC = 1.0    # ignore trivially short queries
 QUEUE_FRACTION = 0.5             # queued this share of elapsed = concurrency/resume
 QUEUE_MIN_SEC = 1.0
 ZERO_RESULT_MIN_GB = 10.0        # scanned a lot and produced nothing
-# R2: on the fingerprint grain (AVG'd columns), the queued gate fires only when queueing is
-# TYPICAL (>= this share of runs), not when one queue-storm run inflated AVG(queued).
+# R2/R3: on the fingerprint grain (AVG'd columns), the queued/compile gates fire only when the
+# pathology is TYPICAL (>= this share of runs), not when one storm run inflated the AVG ratio.
 FINGERPRINT_QUEUE_TYPICAL_SHARE = 0.5
+FINGERPRINT_COMPILE_TYPICAL_SHARE = 0.5
 
 # --- per-driver score weights + caps (a query maxes at 100) -----------------
 # base points + a size-scaled bonus, each capped so one axis can't dominate.
@@ -78,11 +79,12 @@ def advise(row: Mapping[str, object], *,
     1-in-N spill averages to ~0 and must NOT fire the "ran out of memory, size up"
     finding (that both misreads and recommends a cost increase — bug-hunt R1).
 
-    Two more fingerprint-grain guards (R2), read from ``row`` when the builder supplies them:
-    ``QUEUED_RUN_PCT`` (queued fires only when queueing is TYPICAL, not one storm run inflating
-    the AVG ratio) and ``MAX_ROWS_PRODUCED`` (zero_result fires only when NO run ever returned
-    rows, since AVG(rows) can round to 0). Both are absent on the per-QUERY grain, where the
-    per-run gates are themselves correct, so they no-op there.
+    More fingerprint-grain guards (R2/R3), read from ``row`` when the builder supplies them:
+    ``QUEUED_RUN_PCT`` and ``COMPILE_RUN_PCT`` (queued / compile_bound fire only when the
+    pathology is TYPICAL — a majority of runs — not one storm run inflating the AVG ratio) and
+    ``MAX_ROWS_PRODUCED`` (zero_result fires only when NO run ever returned rows, since AVG(rows)
+    can round to 0). All are absent on the per-QUERY grain, where the per-run gates are
+    themselves correct, so they no-op there (sentinel -1).
     """
     findings: list[Finding] = []
 
@@ -99,6 +101,7 @@ def advise(row: Mapping[str, object], *,
     # R2 typical-run guards: present only on the fingerprint (AVG) grain; -1 = per-QUERY grain,
     # where the per-run gates below are themselves correct so the guard is a no-op.
     queued_run_pct = _f(row, "QUEUED_RUN_PCT", -1.0)
+    compile_run_pct = _f(row, "COMPILE_RUN_PCT", -1.0)
     max_rows = _f(row, "MAX_ROWS_PRODUCED", -1.0)
 
     # 1) remote spill — the query ran out of memory (worst signal)
@@ -145,7 +148,8 @@ def advise(row: Mapping[str, object], *,
             pts))
 
     # 5) compile-bound
-    if elapsed >= COMPILE_MIN_ELAPSED_SEC and safe_div(compile_sec, elapsed) > COMPILE_FRACTION:
+    if (elapsed >= COMPILE_MIN_ELAPSED_SEC and safe_div(compile_sec, elapsed) > COMPILE_FRACTION
+            and (compile_run_pct < 0 or compile_run_pct >= FINGERPRINT_COMPILE_TYPICAL_SHARE)):
         frac = safe_div(compile_sec, elapsed) * 100
         pts = _cap(10 + (frac - 50) / 5, _CAP["compile_bound"])
         findings.append(Finding(

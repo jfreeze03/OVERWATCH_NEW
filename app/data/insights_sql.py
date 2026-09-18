@@ -1507,7 +1507,8 @@ LIMIT 500
 
 def proc_cost_trend(proc_name: str, days: int, company: str = "ALL",
                     database: str = "", schema_contains: str = "", *,
-                    warehouse_contains: str = "", user_contains: str = "") -> str:
+                    warehouse_contains: str = "", user_contains: str = "",
+                    bounds: tuple | None = None) -> str:
     """Daily measured $ for ONE named procedure (owner ask 2026-07-11:
     "can I enter it myself" — yes, this is the type-the-name panel).
 
@@ -1526,7 +1527,7 @@ def proc_cost_trend(proc_name: str, days: int, company: str = "ALL",
     _esc = name.replace("~", "~~").replace("%", "~%").replace("_", "~_")
     suffix = sql_literal("%." + _esc)
     where = and_where(
-        f"c.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        scope_window_where("c.START_TIME", days, bounds=bounds),
         "c.QUERY_TYPE = 'CALL'",
         _wh_company_scope(company, "c.WAREHOUSE_NAME"),
         companies.database_equals_clause(database, "c.DATABASE_NAME"),
@@ -1569,13 +1570,16 @@ LIMIT 400
 """
 
 
-def clustering_by_table(days: int = 30, company: str = "ALL") -> str:
+def clustering_by_table(days: int = 30, company: str = "ALL", *,
+                        bounds: tuple | None = None) -> str:
     """Automatic-clustering spend per table (COST_DB recon R7) — serverless
     reclustering credits are the classic silent burner; a table rewriting
-    itself daily shows up here long before anyone looks for it."""
+    itself daily shows up here long before anyone looks for it. Honors the
+    'Last month' calendar window (bounds) so its per-table $ reconciles with the
+    bounded object-cost ledger + pruning panels alongside it (R3 fix)."""
     days = bounded_days(days, 90)
     where = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        scope_window_where("START_TIME", days, bounds=bounds),
         "CREDITS_USED > 0",
         companies.database_company_scope(company, "DATABASE_NAME"),
     )

@@ -1624,8 +1624,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         if st.toggle("Run clustering-spend scan", key="cost_clustering_toggle",
                      help="Serverless reclustering credits per table over the window — "
                           "a table rewriting itself daily is a silent burner."):
-            clu = run(insights_sql.clustering_by_table(max(days, 30), company), page=_PAGE,
-                      key=f"clustering_{company}_{days}", tier="historical",
+            clu = run(insights_sql.clustering_by_table(max(days, 30), company, bounds=bounds), page=_PAGE,
+                      key=f"clustering_{company}_{days}{_lm}", tier="historical",
                       source="ACCOUNT_USAGE.AUTOMATIC_CLUSTERING_HISTORY")
             if clu.ok and clu.empty:
                 empty_state("clean", "No automatic-clustering credits in this window.")

@@ -1186,10 +1186,20 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
             empty_state("clean", "Snowflake's native model reports no cost anomalies.")
         else:
             styled_table(na.df, height=240)
-            st.caption("Snowflake's own ML anomaly verdicts, raw. A day flagged by BOTH this "
-                       "feed and the z-score sweep above is high-confidence; native-only rows "
-                       "catch multi-factor/seasonal shifts the z-score misses; z-score-only "
-                       "flags are tuning candidates.")
+            if str(company or "ALL").upper() != "ALL":
+                # R3: ANOMALY_INSIGHTS is ACCOUNT-wide (no company grain) but the z-score sweep
+                # above is company-scoped — so under a company scope a day in both is NOT a valid
+                # cross-scope corroboration (a native flag can be driven by another tenant's spend).
+                st.caption("Snowflake's own ML anomaly verdicts, raw. NOTE: this native feed is "
+                           "ACCOUNT-wide (no company grain), while the z-score sweep above is scoped "
+                           "to this company — a day in both is not a valid cross-scope match here, "
+                           "and a native flag may be driven by another company's spend. View at "
+                           "company = ALL for the both-flagged high-confidence read.")
+            else:
+                st.caption("Snowflake's own ML anomaly verdicts, raw. A day flagged by BOTH this "
+                           "feed and the z-score sweep above is high-confidence; native-only rows "
+                           "catch multi-factor/seasonal shifts the z-score misses; z-score-only "
+                           "flags are tuning candidates.")
             result_caption(na)
 
 
