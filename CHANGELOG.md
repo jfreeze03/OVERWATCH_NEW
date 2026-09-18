@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.550.0 - QOIE Slice 2: operator-profile reader panel (2026-09-17)
+
+The app-side of Slice 2 — reads the V143 operator-stats collector fact and surfaces the
+operator-level pathologies Slice 1 (query-level) can't see, on Operations ▸ Queries beside
+the Slice-1 opportunity board. **Mart-first**: reads `FACT_QUERY_OPERATOR_STATS_DAILY`, never
+a live scan — so it adds no ACCOUNT_USAGE budget and no reachable-table pin, and it degrades
+to a calm needs-setup until the owner applies V143.
+
+- **`app/data/ops_sql.py`** — three mart readers: `operator_stats_summary` (KPI counts),
+  `operator_problem_board` (top exploding-join + spill operators, one QUALIFY per pathology,
+  the exploding-join floor = `ROW_MULTIPLE >= 10` on a materially large result), and
+  `operator_anatomy(query_id)` (a query's operator tree, ordered by share of query time).
+  Company-scoped on the fact's stamped `COMPANY`; `probe=True` so a not-yet-applied V143
+  (table absent) is silenced, never logged.
+- **`app/ui/pages/operations.py`** — the toggle-gated "Operator profile" section: KPIs
+  (queries profiled / exploding-join ops / spill operators / worst row blow-up), an
+  exploding-joins board and a spill-by-operator board (each selectable), and a shared
+  operator-anatomy drill. Robust to the unconfirmed `OP_TIME_PCT` scale (display + ordering
+  only). New `tests/test_query_operator_stats.py` locks the mart-first contract + scope + grain.
+- **Adversarial verify** (3-lens + synthesis) = SHIP-WITH-FIXES; applied: the id columns
+  (`STEP_ID`/`OPERATOR_ID`/`PARENT_OPERATOR_ID`, `float64` from the root's NULL parent) now
+  carry `%d` column_config so the tree reads as clean integers, not `1.000000`/`nan` (the
+  recurring raw-number complaint); session-state hygiene so a re-click on one board re-fires
+  and a stale cross-scope selection can't render its tree under a different scope's board; a
+  dead `_opsum.empty` branch replaced with a value-based `QUERIES_PROFILED == 0` check (a
+  COUNT summary always returns one row); and the "Worst row blow-up" KPI relabeled "(any op)".
+
 ## 4.549.0 - QOIE Slice 2: operator-stats collector migration (2026-09-17)
 
 Migration-only (owner-applied via runbox; no app-behavior change yet — the reader panel is a

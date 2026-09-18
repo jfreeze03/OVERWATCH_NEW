@@ -658,6 +658,118 @@ LIMIT {limit}
 """
 
 
+# ---------------------------------------------------------------------------
+# QOIE Slice 2 readers — the operator-level query profile (join explosion, spill
+# causation, operator anatomy). These read the V143 COLLECTOR MART
+# DBA_MAINT_DB.OVERWATCH.FACT_QUERY_OPERATOR_STATS_DAILY (populated by
+# SP_LOAD_QUERY_OPERATOR_STATS from GET_QUERY_OPERATOR_STATS) — NOT a live
+# ACCOUNT_USAGE scan (operator stats have no bulk ACCOUNT_USAGE view). Mart-first:
+# no page ACCOUNT_USAGE budget, no reachable-table pin. Call with probe=True so a
+# not-yet-applied V143 (table absent) degrades to a calm needs-setup state, not an
+# APP_ERROR_LOG write. Scope axis = COMPANY (stamped at load via COMPANY_FOR_WAREHOUSE,
+# the same axis the Cost pages use); the fact has no database/schema grain.
+# ---------------------------------------------------------------------------
+
+# join explosion floor: a Join operator whose output rows dwarf its input rows AND
+# the blow-up is materially large (so a 10x on 200 rows is not flagged).
+_EXPLODING_ROW_MULTIPLE_MIN = 10
+_EXPLODING_OUTPUT_ROWS_MIN = 1000000
+
+
+def _fact_operator_company(company: str) -> str:
+    """COMPANY-column scope for the operator-stats fact (mart-first): a plain equality on
+    the pre-stamped COMPANY, skipped for the ALL rollup. NOT the ACCOUNT_USAGE name-pattern
+    helpers — the fact already carries COMPANY."""
+    comp = str(company or "ALL")
+    return "" if comp.upper() == "ALL" else f"COMPANY = {sql_literal(comp)}"
+
+
+def operator_stats_summary(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
+    """One-row KPI summary of the collected operator profiles in the window — how many
+    queries/operators were profiled and the counts of the two headline pathologies
+    (exploding-join operators, spill operators) plus the worst blow-up and total spill."""
+    days = bounded_days(days)
+    where = and_where(
+        scope_window_where("QUERY_DAY", days, bounds=bounds),
+        _fact_operator_company(company),
+    )
+    return f"""
+SELECT
+    COUNT(DISTINCT QUERY_ID) AS QUERIES_PROFILED,
+    COUNT(*) AS OPERATORS,
+    COUNT_IF(OPERATOR_TYPE IN ('Join', 'CartesianJoin')
+             AND ROW_MULTIPLE >= {_EXPLODING_ROW_MULTIPLE_MIN}
+             AND COALESCE(OUTPUT_ROWS, 0) >= {_EXPLODING_OUTPUT_ROWS_MIN}) AS EXPLODING_JOIN_OPS,
+    COUNT_IF(COALESCE(REMOTE_SPILL_GB, 0) > 0) AS SPILL_OPS,
+    ROUND(MAX(ROW_MULTIPLE), 1) AS MAX_ROW_MULTIPLE,
+    ROUND(SUM(COALESCE(REMOTE_SPILL_GB, 0)), 3) AS TOTAL_REMOTE_SPILL_GB,
+    MAX(QUERY_DAY) AS NEWEST_QUERY_DAY
+FROM {core_object('FACT_QUERY_OPERATOR_STATS_DAILY')}
+WHERE {where}
+"""
+
+
+def operator_problem_board(days: int, company: str = "ALL", *,
+                           bounds: tuple | None = None, limit: int = 50) -> str:
+    """Top problem OPERATORS across the two pathologies Slice 1 cannot see, tagged by
+    PATHOLOGY: 'Exploding join' (a Join whose output rows dwarf its input rows, ranked by
+    ROW_MULTIPLE) and 'Memory spill' (an operator that spilled to remote storage, ranked by
+    REMOTE_SPILL_GB). Returns up to `limit` per pathology (QUALIFY ROW_NUMBER partitioned by
+    PATHOLOGY); the reader splits it into two boards. FINGERPRINT cross-links to Slice-1;
+    QUERY_ID drives the operator-anatomy drill."""
+    lim = max(1, min(int(limit), 200))
+    where = and_where(
+        scope_window_where("QUERY_DAY", bounded_days(days), bounds=bounds),
+        _fact_operator_company(company),
+    )
+    return f"""
+WITH scoped AS (
+    SELECT
+        QUERY_DAY, QUERY_ID, QUERY_PARAMETERIZED_HASH AS FINGERPRINT,
+        WAREHOUSE_NAME, COMPANY, QUERY_ELAPSED_SEC,
+        OPERATOR_ID, OPERATOR_TYPE, INPUT_ROWS, OUTPUT_ROWS, ROW_MULTIPLE,
+        REMOTE_SPILL_GB, GB_SCANNED, SCAN_PCT, OP_TIME_PCT,
+        CASE
+            WHEN OPERATOR_TYPE IN ('Join', 'CartesianJoin')
+                 AND ROW_MULTIPLE >= {_EXPLODING_ROW_MULTIPLE_MIN}
+                 AND COALESCE(OUTPUT_ROWS, 0) >= {_EXPLODING_OUTPUT_ROWS_MIN} THEN 'Exploding join'
+            WHEN COALESCE(REMOTE_SPILL_GB, 0) > 0 THEN 'Memory spill'
+            ELSE NULL
+        END AS PATHOLOGY
+    FROM {core_object('FACT_QUERY_OPERATOR_STATS_DAILY')}
+    WHERE {where}
+)
+SELECT
+    QUERY_DAY, QUERY_ID, FINGERPRINT, WAREHOUSE_NAME, COMPANY, QUERY_ELAPSED_SEC,
+    OPERATOR_ID, OPERATOR_TYPE, PATHOLOGY, INPUT_ROWS, OUTPUT_ROWS,
+    ROUND(ROW_MULTIPLE, 1) AS ROW_MULTIPLE,
+    REMOTE_SPILL_GB, GB_SCANNED, SCAN_PCT, OP_TIME_PCT
+FROM scoped
+WHERE PATHOLOGY IS NOT NULL
+QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY PATHOLOGY
+    ORDER BY IFF(PATHOLOGY = 'Exploding join', ROW_MULTIPLE, REMOTE_SPILL_GB) DESC NULLS LAST
+) <= {lim}
+ORDER BY PATHOLOGY,
+    IFF(PATHOLOGY = 'Exploding join', ROW_MULTIPLE, REMOTE_SPILL_GB) DESC NULLS LAST
+"""
+
+
+def operator_anatomy(query_id: str) -> str:
+    """The full operator tree for one collected query_id, ordered by where the time went
+    (OP_TIME_PCT desc) then plan order — the 'operator anatomy' drill. query_id comes from a
+    board row (a collected UUID); sql_literal-quoted for hygiene."""
+    return f"""
+SELECT
+    STEP_ID, OPERATOR_ID, PARENT_OPERATOR_ID, OPERATOR_TYPE,
+    OP_TIME_PCT, INPUT_ROWS, OUTPUT_ROWS, ROUND(ROW_MULTIPLE, 1) AS ROW_MULTIPLE,
+    REMOTE_SPILL_GB, LOCAL_SPILL_GB, GB_SCANNED, SCAN_PCT
+FROM {core_object('FACT_QUERY_OPERATOR_STATS_DAILY')}
+WHERE QUERY_ID = {sql_literal(query_id)}
+ORDER BY OP_TIME_PCT DESC NULLS LAST, STEP_ID, OPERATOR_ID
+"""
+
+
 def proc_sla_rollup(days: int, company: str = "ALL", warehouse_contains: str = "",
                     user_contains: str = "", database: str = "",
                     schema_contains: str = "", limit: int = 50, *,

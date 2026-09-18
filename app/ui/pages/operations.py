@@ -408,6 +408,112 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                 else:
                     st.caption("No actionable finding for this fingerprint (it ran cleanly).")
 
+    # Query Optimization Intelligence (Slice 2): the OPERATOR-level profile Slice 1 can't
+    # see. Reads the operator-stats collector mart (FACT_QUERY_OPERATOR_STATS_DAILY,
+    # populated per-id from GET_QUERY_OPERATOR_STATS) — mart-first, NO live scan (no page
+    # budget cost), probe-gated so a not-yet-collected fact shows a calm needs-setup, not an error.
+    section_header("Operator profile", "", "optimize")
+    _opp_on = st.toggle(
+        "Profile the collected queries at the operator level (join explosion, spill, anatomy)",
+        key="ops_opprofile_toggle",
+        help="Reads the V143 operator-stats collector: per-operator input/output rows "
+             "(exploding joins), which operator spilled to memory, and where each query's time "
+             "went. This is the Query Profile data QOIE Slice 1 (query-level) cannot see. "
+             "Mart-first (pre-collected) — no live scan; off first paint.")
+    if _opp_on:
+        _opsum = run(
+            ops_sql.operator_stats_summary(days, company, bounds=bounds),
+            page=_PAGE, key=f"q_opsum_{company}_{days}{_lm}", tier="recent",
+            source="FACT_QUERY_OPERATOR_STATS_DAILY", probe=True)
+        if not _opsum.ok and _opsum.error_kind == "absent":
+            empty_state(
+                "needs_setup",
+                "The operator-stats collector isn't set up yet. Once an admin installs the "
+                "pending Operations objects (Admin ▸ Migrations & freshness), this profiles the "
+                "recent expensive queries at the operator level — exploding joins, spill causes, "
+                "and per-operator anatomy.")
+        elif _opsum.ok and int(_opsum.df.iloc[0].get("QUERIES_PROFILED") or 0) == 0:
+            # operator_stats_summary is a COUNT aggregate — it always returns ONE row, so
+            # _opsum.empty is never true; the deployed-but-nothing-collected case is QUERIES==0.
+            empty_state("no_data_yet", "No operator profiles collected in this window yet — "
+                        "the collector runs daily and needs recent expensive queries to profile.")
+        elif guard(_opsum, "No operator profiles in this window/scope."):
+            _s = _opsum.df.iloc[0]
+            _ej = int(_s.get("EXPLODING_JOIN_OPS") or 0)
+            _so = int(_s.get("SPILL_OPS") or 0)
+            _mrm = _s.get("MAX_ROW_MULTIPLE")
+            kpi_row([
+                {"label": "Queries profiled", "value": f"{int(_s.get('QUERIES_PROFILED') or 0):,}",
+                 "help": "Distinct queries whose operator tree was collected in this window."},
+                {"label": "Exploding-join ops", "value": f"{_ej:,}", "severity": "warn" if _ej else "",
+                 "help": "Join operators whose output rows are >=10x their input rows on a "
+                         "materially large result — the row-multiplication Slice 1 can't see."},
+                {"label": "Spill operators", "value": f"{_so:,}", "severity": "warn" if _so else "",
+                 "help": "Operators that spilled to remote storage — the specific step that "
+                         "ran out of memory."},
+                {"label": "Worst row blow-up (any op)",
+                 "value": (f"{float(_mrm):,.1f}×" if _mrm is not None and _mrm == _mrm else "—"),
+                 "help": "The largest output/input row multiple across ALL collected operators "
+                         "(not only joins — a huge FLATTEN/generator counts too)."},
+            ])
+            _board = run(
+                ops_sql.operator_problem_board(days, company, bounds=bounds),
+                page=_PAGE, key=f"q_opboard_{company}_{days}{_lm}", tier="recent",
+                source="FACT_QUERY_OPERATOR_STATS_DAILY", probe=True)
+            if guard(_board, "No exploding joins or spilling operators in this window — nothing to open up."):
+                _bdf = _board.df
+                _ex = _bdf[_bdf["PATHOLOGY"] == "Exploding join"].reset_index(drop=True)
+                _sp = _bdf[_bdf["PATHOLOGY"] == "Memory spill"].reset_index(drop=True)
+                if not _ex.empty:
+                    st.markdown("**Exploding joins** — a join whose output rows dwarf its input "
+                                "rows (row multiplication). Fix the join keys / add a missing predicate.")
+                    _ex_sel = selectable_table(
+                        _ex[["FINGERPRINT", "WAREHOUSE_NAME", "OPERATOR_TYPE", "INPUT_ROWS",
+                             "OUTPUT_ROWS", "ROW_MULTIPLE", "OP_TIME_PCT", "QUERY_ELAPSED_SEC"]],
+                        key="ops_opprofile_ex_sel", sort_label="by row blow-up desc",
+                        column_config={"ROW_MULTIPLE": st.column_config.NumberColumn("Row blow-up ×", format="%.1f")})
+                    if _ex_sel is not None and _ex_sel != st.session_state.get("_ops_opprofile_ex_last"):
+                        st.session_state["_ops_opprofile_ex_last"] = _ex_sel
+                        st.session_state["_ops_opprofile_sp_last"] = None   # let the other board re-fire on a re-click
+                        st.session_state["_ops_opprofile_qid"] = str(_ex.iloc[int(_ex_sel)]["QUERY_ID"])
+                if not _sp.empty:
+                    st.markdown("**Memory spill by operator** — the specific operator that spilled "
+                                "to remote storage. Size the warehouse up, or shrink that step's working set.")
+                    _sp_sel = selectable_table(
+                        _sp[["FINGERPRINT", "WAREHOUSE_NAME", "OPERATOR_TYPE", "REMOTE_SPILL_GB",
+                             "GB_SCANNED", "OP_TIME_PCT", "QUERY_ELAPSED_SEC"]],
+                        key="ops_opprofile_sp_sel", sort_label="by remote spill desc")
+                    if _sp_sel is not None and _sp_sel != st.session_state.get("_ops_opprofile_sp_last"):
+                        st.session_state["_ops_opprofile_sp_last"] = _sp_sel
+                        st.session_state["_ops_opprofile_ex_last"] = None   # let the other board re-fire on a re-click
+                        st.session_state["_ops_opprofile_qid"] = str(_sp.iloc[int(_sp_sel)]["QUERY_ID"])
+                st.caption("Click a row to open that query's full operator tree — where its time "
+                           "went, per operator (OP_TIME_PCT is each operator's share of query time).")
+                # Only drill a query that is in the CURRENT board — a sticky _qid from a prior
+                # company/day/bounds scope must not render its tree beneath this scope's board.
+                _qid = st.session_state.get("_ops_opprofile_qid")
+                if _qid and _qid in set(_bdf["QUERY_ID"].astype(str)):
+                    _anat = run(
+                        ops_sql.operator_anatomy(_qid), page=_PAGE,
+                        key=f"q_opanat_{_qid}", tier="recent",
+                        source="FACT_QUERY_OPERATOR_STATS_DAILY", probe=True)
+                    if guard(_anat, "That query's operator tree is no longer in the collected window."):
+                        st.markdown(f"**Operator anatomy** — query `{_qid[:16]}…` (ordered by share of query time)")
+                        styled_table(
+                            _anat.df[["STEP_ID", "OPERATOR_ID", "PARENT_OPERATOR_ID", "OPERATOR_TYPE",
+                                      "OP_TIME_PCT", "INPUT_ROWS", "OUTPUT_ROWS", "ROW_MULTIPLE",
+                                      "REMOTE_SPILL_GB", "SCAN_PCT"]], size_note=False,
+                            column_config={
+                                # NUMBER(9,0) ids arrive as float64 (Snowpark maps the root's NULL
+                                # PARENT to NaN) and would render "1.000000"/"nan"; %d blanks NaN and
+                                # drops the decimals so the tree reads as clean integers.
+                                "STEP_ID": st.column_config.NumberColumn("Step", format="%d"),
+                                "OPERATOR_ID": st.column_config.NumberColumn("Op", format="%d"),
+                                "PARENT_OPERATOR_ID": st.column_config.NumberColumn("Parent", format="%d"),
+                                "ROW_MULTIPLE": st.column_config.NumberColumn("Row ×", format="%.1f")})
+                        st.caption("PARENT_OPERATOR_ID is the operator this one feeds into; the root "
+                                   "(final) operator has none.")
+
     section_header("Optimization triage", "", "optimize")
     _triage_on = st.toggle(
         "Run optimization triage (rank statements by spill / pruning / cold scan)",
