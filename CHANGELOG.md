@@ -1,5 +1,42 @@
 # Changelog
 
+## 4.548.0 - Query Optimization Intelligence, Slice 1 (2026-09-17)
+
+Turns the per-query advisor into a fleet-level **optimization-opportunity board** on
+Operations ▸ Queries: rank the RECURRING logical queries (grouped by
+`QUERY_PARAMETERIZED_HASH`) by *where the compute actually goes*, not by a single slow
+run. App-code only — no migration, one toggle-gated `QUERY_HISTORY` scan off first paint.
+
+- **New builder** `ops_sql.query_opportunity_fingerprints` — one row per fingerprint,
+  `SUM`ming the compute footprint (`TOTAL_EXEC_SEC`, `RUNS`) and `AVG`ing the per-run profile
+  under the EXACT column names `query_advisor.advise` reads, so the existing deterministic
+  advisor scores each fingerprint's typical execution with zero new logic.
+- **New scoring layer** `logic/query_opt.score_opportunities` — for each fingerprint:
+  **QOP** (advise's 0-100 badness of the typical run, kept explainable via the finding
+  breakdown), **SQL_QOP** (QOP minus the queue driver — SQL badness isolated from
+  concurrency), a **primary pathology** label, a **confidence** score (corroborating findings
+  + sample size), and **OOS** = QOP × the fingerprint's compute-footprint *percentile* — an
+  ordinal impact rank, so a moderately-bad query run thousands of times outranks a one-off
+  catastrophe WITHOUT one giant footprint dominating via a naive multiply.
+- **Panel**: KPIs (opportunities / high-QOP / concurrency-starved / memory-spill), an
+  OOS-ranked selectable table (durations auto-humanized to Hr/Min/Sec), and a per-row
+  additive score breakdown + recommended first fix.
+- **Adversarial verify (4-lens + synthesis) caught two real bugs, fixed here:**
+  - `_pathology` mislabeled a **queued-top fingerprint that still has dirty SQL**
+    (`sql_qop` over the clean bar) as "Concurrency starvation" via the fallback map —
+    telling a DBA "don't rewrite the query" for a query that genuinely needs it. Now
+    "Concurrency starvation" is returned ONLY when the SQL underneath is clean; otherwise the
+    fingerprint is named by its dominant SQL driver (regression test added).
+  - The new builder **omitted the self-noise/`CALL` exclusions** its QUERY_ID sibling
+    (`query_optimization_triage`) uses, so it could rank OVERWATCH's own recurring queries as
+    top "opportunities" and double-count `CALL` child compute in the footprint. Now shares
+    the sibling's filter set (`QUERY_TYPE <> 'CALL'`, `EXECUTE STREAMLIT%`, `%OVERWATCH_APP%`,
+    `OVERWATCH%` tag) — pinned by a parity test.
+  - Also future-proofed `SQL_QOP` (cap the non-queue sum directly instead of subtracting from
+    the capped total) and tightened the OOS caption to say it is a footprint *percentile*, not
+    a raw credit gap. Added an OOS discriminator test that fails under a naive multiply.
+- Perf budget for `operations.py` bumped 41 → 42 (one toggle-gated literal, off first paint).
+
 ## 4.547.0 - Repoint off the deprecated Cortex functions usage view (2026-09-17)
 
 App-code only (the live fallback path). Snowflake FROZE `ACCOUNT_USAGE.CORTEX_FUNCTIONS_USAGE_HISTORY`

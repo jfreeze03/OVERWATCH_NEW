@@ -541,6 +541,66 @@ LIMIT 50
 """
 
 
+def query_opportunity_fingerprints(days: int, company: str = "ALL", database: str = "",
+                                   schema_contains: str = "", *, bounds: tuple | None = None) -> str:
+    """Per-FINGERPRINT query profile for the optimization-opportunity engine — one row per
+    recurring logical query (QUERY_PARAMETERIZED_HASH), aggregating QUERY_HISTORY so the
+    scoring layer (logic/query_opt) can run each fingerprint's TYPICAL execution through
+    query_advisor.advise() for a QOP, then rank by OOS (inefficiency x how much it runs).
+
+    The per-run metric columns (ELAPSED_SEC, *_SPILL_GB, GB_SCANNED, CACHE_PCT, COMPILE_SEC,
+    QUEUED_SEC, PARTITIONS_*, ROWS_PRODUCED, WAREHOUSE_SIZE) are AVG'd = the typical
+    execution's profile, and use the EXACT names query_advisor expects. RUNS and
+    TOTAL_EXEC_SEC (summed execution seconds = the compute footprint) drive OOS. Ordered by
+    footprint and capped at 500 candidates. account-wide unless company-scoped by warehouse
+    (same axis as the other query builders).
+
+    Shares the self-noise/`CALL` exclusion set with ``query_optimization_triage`` (its
+    QUERY_ID sibling) so the two never contradict: dropping `CALL` wrappers also stops the
+    procedure's rolled-up child stats from double-counting compute in the SUM footprint, and
+    the OVERWATCH filters keep the console from ranking its own recurring queries as top
+    "opportunities". CAVEAT: the AVG collapses a bimodal fingerprint (usually cheap, rarely
+    catastrophic) toward its cheap typical run — the SUM footprint still counts the total
+    burn, and the per-QUERY_ID triage table catches the individual catastrophic executions."""
+    days = bounded_days(days)
+    where = and_where(
+        _query_scope(days, company, "", "", database, schema_contains, bounds=bounds),
+        "EXECUTION_STATUS = 'SUCCESS'",
+        "QUERY_PARAMETERIZED_HASH IS NOT NULL",
+        "QUERY_TYPE <> 'CALL'",
+        "UPPER(COALESCE(QUERY_TEXT, '')) NOT LIKE 'EXECUTE STREAMLIT%'",
+        "UPPER(COALESCE(QUERY_TEXT, '')) NOT LIKE '%OVERWATCH_APP%'",
+        "COALESCE(QUERY_TAG, '') NOT LIKE 'OVERWATCH%'",
+    )
+    return f"""
+SELECT
+    QUERY_PARAMETERIZED_HASH AS FINGERPRINT,
+    ANY_VALUE(LEFT(QUERY_TEXT, 140)) AS SAMPLE_TEXT,
+    ANY_VALUE(QUERY_TYPE) AS QUERY_TYPE,
+    ANY_VALUE(WAREHOUSE_NAME) AS WAREHOUSE_NAME,
+    ANY_VALUE(WAREHOUSE_SIZE) AS WAREHOUSE_SIZE,
+    COUNT(*) AS RUNS,
+    ROUND(SUM(EXECUTION_TIME) / 1000.0, 1) AS TOTAL_EXEC_SEC,
+    ROUND(AVG(TOTAL_ELAPSED_TIME) / 1000.0, 2) AS ELAPSED_SEC,
+    ROUND(AVG(COMPILATION_TIME) / 1000.0, 2) AS COMPILE_SEC,
+    ROUND(AVG(EXECUTION_TIME) / 1000.0, 2) AS EXECUTION_SEC,
+    ROUND(AVG(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000.0, 2) AS QUEUED_SEC,
+    ROUND(AVG(BYTES_SCANNED) / POWER(1024, 3), 3) AS GB_SCANNED,
+    ROUND(AVG(COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0)) * 100, 1) AS CACHE_PCT,
+    ROUND(AVG(COALESCE(BYTES_SPILLED_TO_LOCAL_STORAGE, 0)) / POWER(1024, 3), 3) AS LOCAL_SPILL_GB,
+    ROUND(AVG(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3), 3) AS REMOTE_SPILL_GB,
+    ROUND(AVG(COALESCE(ROWS_PRODUCED, 0)), 0) AS ROWS_PRODUCED,
+    ROUND(AVG(COALESCE(PARTITIONS_SCANNED, 0)), 0) AS PARTITIONS_SCANNED,
+    ROUND(AVG(COALESCE(PARTITIONS_TOTAL, 0)), 0) AS PARTITIONS_TOTAL
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE {where}
+GROUP BY QUERY_PARAMETERIZED_HASH
+HAVING SUM(EXECUTION_TIME) > 0
+ORDER BY TOTAL_EXEC_SEC DESC
+LIMIT 500
+"""
+
+
 def query_optimization_triage(days: int, company: str = "ALL", warehouse_contains: str = "",
                               user_contains: str = "", database: str = "",
                               schema_contains: str = "", limit: int = 50, *,

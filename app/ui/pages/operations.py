@@ -27,7 +27,7 @@ from app.data import (
     security_sql,
     workbench_sql,
 )
-from app.logic import proc_regression, query_advisor, remediation, verdict, wh_change
+from app.logic import proc_regression, query_advisor, query_opt, remediation, verdict, wh_change
 from app.logic.ai_prompts import release_compare_prompt, task_failure_prompt
 from app.logic.anomaly import (
     ANOMALY_MIN_ACTIVE_DAYS,
@@ -340,6 +340,74 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
     # deliberate drill, so toggle-gate it off first paint — the Heaviest-queries scan
     # above already pays one live round-trip for this section.
     # C23: a toggle-gated TOOL, not a findings surface — neutral until it runs.
+    # Query Optimization Intelligence (Slice 1): rank RECURRING queries (fingerprints) by
+    # OOS = a typical run's inefficiency (QOP, via the reused query_advisor) x how much
+    # compute the fingerprint burns — so a moderately-bad query run thousands of times beats
+    # a one-off catastrophe, and warehouse-queueing is separated from bad SQL. Toggle-gated.
+    section_header("Optimization opportunities", "", "optimize")
+    _qopp_on = st.toggle(
+        "Rank recurring queries by optimization opportunity (QOP + impact)",
+        key="ops_qopp_toggle",
+        help="Scores each recurring query (fingerprint): QOP = how inefficient a typical run is; "
+             "OOS = QOP x how much compute it burns, so a moderately-bad query run thousands of "
+             "times ranks above a one-off catastrophe. Concurrency queueing is separated from bad "
+             "SQL. One live QUERY_HISTORY scan; off first paint.")
+    if _qopp_on:
+        _qopp = run(
+            ops_sql.query_opportunity_fingerprints(days, company, database, schema_contains, bounds=bounds),
+            page=_PAGE, key=f"q_opp_{company}_{days}{_lm}", tier="historical",
+            source="ACCOUNT_USAGE.QUERY_HISTORY (optimization opportunities by fingerprint)")
+        if _qopp.ok and _qopp.empty:
+            empty_state("clean", "No successful recurring queries with compute in this window.")
+        elif guard(_qopp, "No queries in this window/scope."):
+            _scored, _breakdowns = query_opt.score_opportunities(_qopp.df)
+            _crit = int((_scored["QOP"] >= 60).sum())
+            _conc = int((_scored["PATHOLOGY"] == "Concurrency starvation").sum())
+            _spill = int(_scored["PATHOLOGY"].str.startswith("Spill").sum())
+            kpi_row([
+                {"label": "Opportunities", "value": f"{len(_scored):,}",
+                 "help": "Recurring queries (fingerprints) scored this window, ranked by OOS "
+                         "(a typical run's inefficiency x the fingerprint's compute footprint)."},
+                {"label": "High QOP (>=60)", "value": f"{_crit:,}",
+                 "severity": "warn" if _crit else "",
+                 "help": "Fingerprints whose typical execution is badly inefficient."},
+                {"label": "Concurrency-starved", "value": f"{_conc:,}",
+                 "help": "Fast SQL stuck behind warehouse queueing — a capacity problem, not bad "
+                         "SQL. Size or split the warehouse; don't rewrite the query."},
+                {"label": "Memory spill", "value": f"{_spill:,}"},
+            ])
+            _disp = _scored.head(50).copy()
+            _disp["SAMPLE"] = _disp["SAMPLE_TEXT"].str.slice(0, 60)
+            _sel = selectable_table(
+                _disp[["FINGERPRINT", "QUERY_TYPE", "WAREHOUSE_NAME", "PATHOLOGY", "OOS", "QOP",
+                       "CONFIDENCE", "RUNS", "TOTAL_EXEC_SEC", "SAMPLE"]],
+                key="ops_qopp_sel", sort_label="by OOS (opportunity) desc",
+                column_config={
+                    "OOS": st.column_config.NumberColumn("OOS", format="%.0f"),
+                    "QOP": st.column_config.NumberColumn("QOP", format="%d"),
+                    "CONFIDENCE": st.column_config.NumberColumn("Conf %", format="%d"),
+                })
+            st.caption("OOS = optimization opportunity: a typical run's inefficiency (QOP) x how much "
+                       "the fingerprint runs (its compute-footprint percentile, not the raw credit gap) "
+                       "— an ordinal impact rank, so a moderately-bad query run thousands of times beats "
+                       "a one-off catastrophe. QOP = how bad a typical run is; RUNS and total time show "
+                       "the footprint itself. Click a row for the additive breakdown and the first fix.")
+            if _sel is not None and 0 <= int(_sel) < len(_disp):
+                _drow = _disp.iloc[int(_sel)]
+                _fp = str(_drow["FINGERPRINT"])
+                st.markdown(f"**Why QOP {int(_drow['QOP'])} — {_drow['PATHOLOGY']}** "
+                            f"(confidence {int(_drow['CONFIDENCE'])}%)")
+                _bd = _breakdowns.get(_fp, [])
+                if _bd:
+                    import pandas as pd
+                    styled_table(
+                        pd.DataFrame(_bd, columns=["Signal", "Points", "Fix"]), size_note=False,
+                        column_config={"Points": st.column_config.NumberColumn("Points", format="+%d")})
+                    st.caption("Additive, per-driver-capped — no single signal saturates the score "
+                               "(the PlatformScore pattern). The top row is the recommended first fix.")
+                else:
+                    st.caption("No actionable finding for this fingerprint (it ran cleanly).")
+
     section_header("Optimization triage", "", "optimize")
     _triage_on = st.toggle(
         "Run optimization triage (rank statements by spill / pruning / cold scan)",
