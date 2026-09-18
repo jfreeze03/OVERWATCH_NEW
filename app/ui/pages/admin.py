@@ -572,6 +572,11 @@ _EXPECTED_MIGRATIONS = {
          "OP_TIME_PCT (operator anatomy), SCAN_PCT (per-scan pruning), enriched with "
          "QUERY_PARAMETERIZED_HASH to join Slice-1 fingerprints. Per-id EXCEPTION-isolated; new "
          "proc/task, no re-derivation of the byte-locked loaders",
+    144: "Operator-stats OP_TIME_PCT scale fix: re-derive SP_LOAD_QUERY_OPERATOR_STATS to store "
+         "EXECUTION_TIME_BREAKDOWN:overall_percentage * 100 (owner probe confirmed it is a 0-1 "
+         "fraction), so the *_PCT column is 0-100 like SCAN_PCT. Proc-only, byte-identical to V143 "
+         "except the one overall_percentage extraction; fact/task unchanged, no backfill (0-1 rows "
+         "age out in 30d, never displayed raw — the reader shows scale-invariant TIME_SHARE_PCT)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

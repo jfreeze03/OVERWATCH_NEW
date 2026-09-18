@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.553.0 - V144: operator OP_TIME_PCT stored on a 0-100 scale (2026-09-18)
+
+Owner-applied migration. The V143 collector stored `OP_TIME_PCT` =
+`EXECUTION_TIME_BREAKDOWN:overall_percentage` as-is; the owner's STEP-2 probe confirmed
+Snowflake returns that as a **0-1 fraction** (`MAX(OP_TIME_PCT)=1.0` vs `MAX(SCAN_PCT)=100`), so
+a `*_PCT` column was holding 0-1. **V144** re-derives `SP_LOAD_QUERY_OPERATOR_STATS` to store
+`overall_percentage * 100`, matching `SCAN_PCT` and the `_PCT` humanize convention.
+
+- **Proc-only**: byte-identical to V143 except the single `overall_percentage` extraction (a
+  parity test asserts this). The fact table + daily task are unchanged (same `NUMBER(9,2)`
+  column); no first-fill (the task runs it); **no backfill** — existing 0-1 rows age out within
+  the 30-day retention and are never displayed raw. The reader already shows a scale-invariant
+  `TIME_SHARE_PCT` (per-operator share normalized within the query), which is correct under either
+  scale and consistent within a query (all its operators share one collection run), so the app is
+  correct before and after the apply.
+- Full migration lockstep: validate.sql tip → V144, `_EXPECTED_MIGRATIONS[144]`, 31 tip pins,
+  DEPLOYMENT/README, rebuild bundle regenerated, `test_v144`. **Owner applies V144 via runbox.**
+
 ## 4.552.0 - Operations query panels: actionable failures, dates, full scope, null-render fix (2026-09-18)
 
 Owner feedback on the Operations ▸ Queries panels: add dates, make "Failures by error"
