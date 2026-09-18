@@ -1,36 +1,61 @@
 -- =====================================================================
---  OVERWATCH -- RUN_NEXT.sql   (DIAGNOSE: native Snowflake budget panel is empty)
+--  OVERWATCH -- RUN_NEXT.sql
+--  PROBE: pin the CORTEX_AI_FUNCTIONS_USAGE_HISTORY schema before repointing
+--  the AI-cost reads onto it (the canonical Cortex AI-functions usage view).
 --
---  After the PART B grants (BUDGET_VIEWER + IMPORTED PRIVILEGES) + a redeploy, the
---  Cost Intelligence > Contract & Forecast "Native Snowflake budget" panel still reads
---  empty. This isolates WHY: a privilege gap (the application role isn't active in the
---  app's owner's-rights context), a config gap (no account budget configured in Snowsight),
---  or the table function genuinely returning nothing.
+--  WHY: we're moving OVERWATCH's AI-cost reads off the FROZEN
+--  ACCOUNT_USAGE.CORTEX_FUNCTIONS_USAGE_HISTORY (the mart loader) and off
+--  CORTEX_AISQL_USAGE_HISTORY (cortex_model_costs) onto the canonical
+--  CORTEX_AI_FUNCTIONS_USAGE_HISTORY. That view is NOT a drop-in: it exposes
+--  CREDITS (not TOKEN_CREDITS) and has NO scalar TOKENS column -- token counts
+--  live inside a METRICS ARRAY whose element structure the docs don't fully
+--  specify. This probe pins the exact columns + the METRICS shape so the
+--  token-sum and the credits-per-1M-token math get written correctly, not guessed.
 --
---  Run each STEP as SNOW_ACCOUNTADMINS (the app's OWNING role -- same context the app runs
---  in). READ-ONLY: nothing is changed. Paste STEP 2's output back (and STEP 1 if short).
+--  Run as SNOW_ACCOUNTADMINS (the app's OWNING role -- same context the app runs
+--  in). 100% READ-ONLY: nothing is created, altered or dropped.
+--  Paste back: STEP 1 (grid), a few rows of STEP 2, all of STEP 3, and STEP 4.
 -- =====================================================================
 
--- ---- STEP 1: are the grants actually on the app's role? --------------------
--- Look in the output for:  APPLICATION ROLE  SNOWFLAKE.BUDGET_VIEWER
---                    and:  IMPORTED PRIVILEGES  on DATABASE SNOWFLAKE
-USE ROLE SNOW_ACCOUNTADMINS;
-SHOW GRANTS TO ROLE SNOW_ACCOUNTADMINS;
-
--- ---- STEP 2 (KEY): the app's EXACT read, run directly as the owning role ----
--- Three possible outcomes -- tell me which:
---   (a) an ERROR (e.g. "... does not exist or not authorized")  -> paste the full error
---   (b) "0 rows"                                                 -> budget not configured
---   (c) rows come back                                          -> works for the role but not the app
 USE ROLE SNOW_ACCOUNTADMINS;
 USE WAREHOUSE WH_ALFA_ADMIN;
-SELECT SERVICE_TYPE, SUM(CREDITS_USED) AS CREDITS
-FROM TABLE(SNOWFLAKE.LOCAL.ACCOUNT_ROOT_BUDGET!GET_SERVICE_TYPE_USAGE_V2('2026-09', '2026-09'))
-GROUP BY SERVICE_TYPE
-ORDER BY CREDITS DESC;
 
--- ---- STEP 3: is a spending limit even set on the account budget? ------------
--- NULL or an error => no account budget is configured. Set one in Snowsight >
--- Admin > Cost Management > Budgets (the account budget), then the panel populates.
-USE ROLE SNOW_ACCOUNTADMINS;
-CALL SNOWFLAKE.LOCAL.ACCOUNT_ROOT_BUDGET!GET_SPENDING_LIMIT();
+-- ---- STEP 1: the exact column list + types --------------------------------
+-- Confirm three things from the grid:
+--   * CREDITS         -> exact name + it's a NUMBER (vs TOKEN_CREDITS)
+--   * START_TIME      -> TIMESTAMP_LTZ vs TIMESTAMP_NTZ  (tells me whether the
+--                        loader's FIRST_TS/LAST_TS need a ::TIMESTAMP_NTZ cast)
+--   * METRICS         -> it's an ARRAY
+DESCRIBE VIEW SNOWFLAKE.ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY;
+
+-- ---- STEP 2: a few raw rows (sanity: is there data in-window?) -------------
+-- If 0 rows, note it -- data only exists on/after 2026-01-05. If MODEL_NAME is
+-- blank for some functions that's expected (empty when not applicable).
+SELECT START_TIME, FUNCTION_NAME, MODEL_NAME, CREDITS, METRICS
+FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY
+WHERE START_TIME >= DATEADD('day', -60, CURRENT_TIMESTAMP())
+  AND METRICS IS NOT NULL
+LIMIT 5;
+
+-- ---- STEP 3 (KEY): the METRICS array element structure ---------------------
+-- FLATTEN exposes each element's exact JSON. I need the KEY NAMES that carry the
+-- token count -- e.g. {"name":"tokens","value":N} vs
+-- {"metric":{"type":"tokens","unit":"token"},"value":N} vs something else.
+-- Paste the whole METRIC_ELEMENT column (the JSON is what matters).
+SELECT f.value AS METRIC_ELEMENT
+FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY,
+     LATERAL FLATTEN(input => METRICS) f
+WHERE START_TIME >= DATEADD('day', -60, CURRENT_TIMESTAMP())
+LIMIT 25;
+
+-- ---- STEP 4: the DISTINCT set of element key-layouts -----------------------
+-- OBJECT_KEYS lists each element's top-level keys, so I definitively know the
+-- layout (and whether inputs/outputs are separate metric rows). Paste the grid.
+SELECT
+    ARRAY_TO_STRING(OBJECT_KEYS(f.value), ', ') AS ELEMENT_KEYS,
+    COUNT(*)                                    AS N
+FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY,
+     LATERAL FLATTEN(input => METRICS) f
+WHERE START_TIME >= DATEADD('day', -60, CURRENT_TIMESTAMP())
+GROUP BY 1
+ORDER BY N DESC;
