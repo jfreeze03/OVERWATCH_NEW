@@ -1017,17 +1017,22 @@ WHERE USAGE_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP());
 --  BONUS (READ-ONLY, independent of STEP 1-3 above) -- CORTEX CODE
 --  PER-USER ATTRIBUTION, SLICEABLE TO ANY TIMEFRAME.
 --
---  Same per-user attribution as the app's AI Chargeback > AI users table
---  (app/data/cortex_sql.py :: cortex_code_user_rollup). ONE self-contained
---  statement -- to slice a different window, edit ONLY the `params` CTE at the
---  top, then run the whole statement:
+--  Mirrors the app's AI Chargeback > "User attribution detail" table
+--  (app/data/cortex_sql.py :: cortex_code_user_rollup + app/logic/cortex.py ::
+--  enrich_user_rollup) -- same columns, same $2.20 AI-credit rate
+--  (config AI_CREDIT_PRICE_USD). ONE self-contained statement; to slice a
+--  different window edit ONLY the `params` CTE, then run the whole statement:
 --    * Last N days:   DATEADD('day', -30, CURRENT_TIMESTAMP()) AS WINDOW_START
 --    * A fixed range: '2026-08-01'::TIMESTAMP_LTZ AS WINDOW_START,
---                     '2026-09-01'::TIMESTAMP_LTZ AS WINDOW_END   -- WHOLE of Aug 2026
---  WINDOW_START is INCLUSIVE, WINDOW_END EXCLUSIVE. Default below = last 7 days.
---  Attributes Cortex Code (Snowsight + CLI) credits/tokens/requests to each NAMED
---  user via ACCOUNT_USAGE.USERS on USER_ID. Read-only; changes nothing.
---  (USER_NAME shows 'UNKNOWN (<id>)' when a USER_ID no longer resolves in USERS.)
+--                     '2026-09-01'::TIMESTAMP_LTZ AS WINDOW_END   -- the WHOLE of Aug 2026
+--  WINDOW_START inclusive, WINDOW_END exclusive. Default below = last 7 days.
+--    SPEND_USD         = TOTAL_CREDITS * 2.20  (the exact per-user cost).
+--    PROJECTED_30D_USD = the app's monthly projection: credits / the user's OWN
+--                        observable days (first-seen -> window end, capped at the
+--                        window size) * 30 * 2.20 -- exact for a live last-N-days
+--                        window; a fixed historical range can differ by ~1 day at
+--                        the boundary (the app anchors bounded windows one day in).
+--  Read-only; changes nothing. USER_NAME falls back to 'UNKNOWN (<id>)'.
 -- =====================================================================
 USE ROLE SNOW_ACCOUNTADMINS;
 USE WAREHOUSE WH_ALFA_ADMIN;
@@ -1066,24 +1071,43 @@ user_daily AS (
     GROUP BY 1, 2, 3, 4, 5, 6
 ),
 by_user AS (
-SELECT
-    USER_NAME,
-    EMAIL,
-    FIRST_NAME,
-    LAST_NAME,
-    SOURCE,
-    COUNT(DISTINCT USAGE_DATE) AS ACTIVE_DAYS,
-    SUM(REQUESTS) AS TOTAL_REQUESTS,
-    SUM(CREDITS) AS TOTAL_CREDITS,
-    SUM(TOKENS) AS TOTAL_TOKENS,
-    MIN(FIRST_TS) AS FIRST_USAGE,
-    MAX(LAST_TS) AS LAST_USAGE,
-    SUM(CREDITS) / NULLIF(SUM(REQUESTS), 0) AS CREDITS_PER_REQUEST,
-    SUM(CREDITS) / NULLIF(COUNT(DISTINCT USAGE_DATE), 0) AS AVG_DAILY_CREDITS
-FROM user_daily
-GROUP BY USER_NAME, EMAIL, FIRST_NAME, LAST_NAME, SOURCE
+    SELECT
+        USER_NAME,
+        EMAIL,
+        FIRST_NAME,
+        LAST_NAME,
+        SOURCE,
+        COUNT(DISTINCT USAGE_DATE) AS ACTIVE_DAYS,
+        SUM(REQUESTS) AS TOTAL_REQUESTS,
+        SUM(CREDITS) AS TOTAL_CREDITS,
+        SUM(TOKENS) AS TOTAL_TOKENS,
+        MIN(FIRST_TS) AS FIRST_USAGE,
+        MAX(LAST_TS) AS LAST_USAGE,
+        SUM(CREDITS) / NULLIF(SUM(REQUESTS), 0) AS CREDITS_PER_REQUEST
+    FROM user_daily
+    GROUP BY USER_NAME, EMAIL, FIRST_NAME, LAST_NAME, SOURCE
 )
-SELECT * FROM by_user
-WHERE 1 = 1
-ORDER BY TOTAL_CREDITS DESC
+-- Column set + order match the app's "User attribution detail" table exactly.
+SELECT
+    b.USER_NAME,
+    b.FIRST_NAME,
+    b.LAST_NAME,
+    b.EMAIL,
+    b.SOURCE,
+    b.ACTIVE_DAYS,
+    b.TOTAL_REQUESTS,
+    b.TOTAL_CREDITS,
+    b.TOTAL_TOKENS,
+    ROUND(b.CREDITS_PER_REQUEST, 4)              AS CREDITS_PER_REQUEST,   -- "Cr/request"
+    ROUND(b.TOTAL_CREDITS * 2.20, 2)             AS SPEND_USD,             -- "Spend $"  (credits * $2.20)
+    ROUND(b.TOTAL_CREDITS
+          / GREATEST(1, LEAST(
+                DATEDIFF('day', b.FIRST_USAGE::DATE, p.WINDOW_END::DATE) + 1,   -- user's observable days
+                DATEDIFF('day', p.WINDOW_START::DATE, p.WINDOW_END::DATE)))     -- capped at the window size
+          * 30.0 * 2.20, 2)                      AS PROJECTED_30D_USD,     -- "Proj. 30d $"
+    b.FIRST_USAGE,
+    b.LAST_USAGE
+FROM by_user b
+CROSS JOIN params p
+ORDER BY SPEND_USD DESC
 LIMIT 500;
