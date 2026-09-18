@@ -181,15 +181,22 @@ ORDER BY DAY
 def cortex_model_costs(days: int, *, bounds: tuple | None = None) -> str:
     """AI credits by function and model, with a credits/1M-token unit rate.
 
-    CORTEX_FUNCTIONS_USAGE_HISTORY carries no database dimension — this is
-    account-wide by definition; per-user attribution stays in the rollup.
-    View/column availability varies by account: the runtime error path is
-    the compatibility guard (same pattern as cortex_ai_functions_daily).
+    Reads CORTEX_AISQL_USAGE_HISTORY — the GA successor to CORTEX_FUNCTIONS_USAGE_HISTORY,
+    which Snowflake froze ("no longer updated") with the new view carrying data from
+    2025-11-17. The SELECT contract is unchanged: FUNCTION_NAME, MODEL_NAME, TOKENS and
+    TOKEN_CREDITS keep their names, so SUM(TOKENS)/SUM(TOKEN_CREDITS) and the per-1M-token
+    math are identical; only the time column changed START_TIME -> USAGE_TIME (there is no
+    START_TIME on the new view — leaving it would compile-error and blank the panel). The
+    finer grain (per query+warehouse) collapses to the same totals under this GROUP BY.
+
+    No database dimension — account-wide by definition; per-user attribution stays in the
+    rollup. View/column availability varies by account: the runtime error path is the
+    compatibility guard (same pattern as cortex_ai_functions_daily).
     """
     days = bounded_days(days)
-    scope = (resolve_effective_window(days, "START_TIME", bounds=bounds)[1]
+    scope = (resolve_effective_window(days, "USAGE_TIME", bounds=bounds)[1]
              if bounds is not None
-             else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
+             else f"USAGE_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     return f"""
 SELECT
     FUNCTION_NAME,
@@ -198,7 +205,7 @@ SELECT
     ROUND(SUM(COALESCE(TOKEN_CREDITS, 0)), 4) AS CREDITS,
     ROUND(SUM(COALESCE(TOKEN_CREDITS, 0)) * 1000000
           / NULLIF(SUM(COALESCE(TOKENS, 0)), 0), 4) AS CREDITS_PER_1M_TOKENS
-FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_FUNCTIONS_USAGE_HISTORY
+FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_AISQL_USAGE_HISTORY
 WHERE {scope}
 GROUP BY 1, 2
 ORDER BY CREDITS DESC

@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.547.0 - Repoint off the deprecated Cortex functions usage view (2026-09-17)
+
+App-code only (the live fallback path). Snowflake FROZE `ACCOUNT_USAGE.CORTEX_FUNCTIONS_USAGE_HISTORY`
+("no longer updated"; its GA successor carries data from 2025-11-17), so `cortex_sql.cortex_model_costs`
+(AI credits by function x model, on Cost Intelligence > Unit costs and answered by Ask) is repointed
+onto `CORTEX_AISQL_USAGE_HISTORY`.
+
+- **Contract preserved** (2-agent research): `FUNCTION_NAME`, `MODEL_NAME`, `TOKENS`, `TOKEN_CREDITS`
+  keep their names, so the SELECT + `SUM`/per-1M-token math are unchanged. The **one** breaking change
+  is the time column `START_TIME` -> `USAGE_TIME` (both call sites); a leftover `START_TIME` would
+  compile-error and silently blank the panel. The finer grain collapses to identical totals under the
+  `GROUP BY FUNCTION_NAME, MODEL_NAME`.
+- Source labels/captions in `unit_costs.py` + `ask/registry.py` renamed; `test_v451_trust` unit-costs
+  pin now lists `CORTEX_AISQL_USAGE_HISTORY`. Deliberately NOT routed to `CORTEX_AI_FUNCTIONS_USAGE_HISTORY`
+  (different `CREDITS` contract; OVERWATCH already reads that view correctly elsewhere).
+- **Follow-up (owner migration, not in this ship):** the primary `FACT_AI_USAGE_DAILY` mart loader arm
+  also reads the deprecated view's `START_TIME` and needs the same repoint (re-derived proc + `USAGE_TIME`,
+  minding the `TIMESTAMP_LTZ` grain) — to be authored + staged via runbox.
+
+# Changelog
+
 ## 4.546.0 - Per-table at-rest pruning advisor (2026-09-17)
 
 App-code only (no migration). Fills a verified query-optimization gap: OVERWATCH flagged poorly-pruned

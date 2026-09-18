@@ -77,8 +77,14 @@ def test_procedure_costs_reports_reliability_too():
 
 def test_cortex_model_costs_shape():
     sql = cortex_sql.cortex_model_costs(30)
-    assert "CORTEX_FUNCTIONS_USAGE_HISTORY" in sql
+    # repointed off the deprecated CORTEX_FUNCTIONS_USAGE_HISTORY onto its GA successor
+    assert "CORTEX_AISQL_USAGE_HISTORY" in sql
+    assert "CORTEX_FUNCTIONS_USAGE_HISTORY" not in sql
+    # the new view's time column is USAGE_TIME, not START_TIME (a leftover START_TIME would
+    # compile-error and silently blank the panel)
+    assert "USAGE_TIME >= DATEADD" in sql and "START_TIME" not in sql
     assert "MODEL_NAME" in sql and "FUNCTION_NAME" in sql
+    assert "SUM(COALESCE(TOKENS, 0))" in sql and "SUM(COALESCE(TOKEN_CREDITS, 0))" in sql
     assert "CREDITS_PER_1M_TOKENS" in sql              # unit rate, not just totals
     assert "-30," in sql and "-90," in cortex_sql.cortex_model_costs(999999)
 

@@ -70,8 +70,10 @@ _REACHABLE = {
         # native per-user AI quotas (probe- + toggle-gated in _ai_quota_panel).
         "QUERY_HISTORY", "QUOTA_ACCESS_BLOCK_HISTORY", "USERS"),
     "app/ui/pages/cost_parts/unit_costs.py": (
-        "CORTEX_CODE_CLI_USAGE_HISTORY", "CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY",
-        "CORTEX_FUNCTIONS_USAGE_HISTORY", "QUERY_ATTRIBUTION_HISTORY",
+        # v4.547: cortex_model_costs repointed off the deprecated CORTEX_FUNCTIONS_USAGE_HISTORY
+        # onto its GA successor CORTEX_AISQL_USAGE_HISTORY (same TOKENS/TOKEN_CREDITS contract).
+        "CORTEX_AISQL_USAGE_HISTORY", "CORTEX_CODE_CLI_USAGE_HISTORY",
+        "CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY", "QUERY_ATTRIBUTION_HISTORY",
         "QUERY_HISTORY", "SERVERLESS_TASK_HISTORY", "TASK_HISTORY"),
     # +QUERY_HISTORY/QUERY_ATTRIBUTION_HISTORY v4.269 (UX sweep #6): a warehouse row-click
     # scopes the pattern-movers table via a live per-warehouse read (the pattern mart has no
