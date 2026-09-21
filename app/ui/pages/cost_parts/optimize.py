@@ -773,10 +773,36 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 ])
                 _qcols = [c for c in ["WAREHOUSE_NAME", "QAS_USD", "ELIGIBLE_QUERIES", "ELIGIBLE_SEC",
                                       "MAX_SCALE_FACTOR", "VERDICT"] if c in qdf.columns]
-                styled_table(
-                    qdf[_qcols], height=320, sort_label="QAS $ desc",
+                _qsel = selectable_table(
+                    qdf[_qcols], key="opt_qas_sel", height=320, sort_label="QAS $ desc",
                     column_config={"QAS_USD": st.column_config.NumberColumn("QAS $", format="$%.2f")})
-                result_caption(qas, note="eligibility is utilization, not a dollarized compute saving")
+                result_caption(qas, note="eligibility is utilization, not a dollarized compute saving. "
+                                         "Click a warehouse to list the queries eligible for acceleration.")
+                # Drill: which queries on the clicked warehouse are eligible for acceleration —
+                # the "next question" after a verdict (owner ask 2026-09-21). A pure drop
+                # candidate (spends QAS credits, 0 eligible) has nothing to list.
+                if _qsel is not None and 0 <= int(_qsel) < len(qdf):
+                    _qwh = str(qdf.iloc[int(_qsel)]["WAREHOUSE_NAME"])
+                    _elig_n = safe_float(qdf.iloc[int(_qsel)].get("ELIGIBLE_QUERIES"))
+                    st.markdown(f"**Eligible queries on `{_qwh}` — most acceleration-eligible first**")
+                    if not _elig_n:
+                        st.caption("This warehouse has no acceleration-eligible queries in the "
+                                   "window — it only spends QAS credits (a drop candidate), so "
+                                   "there is nothing to accelerate here.")
+                    else:
+                        _eq = run(cost_sql.qas_eligible_queries(_qwh, days, bounds=bounds), page=_PAGE,
+                                  key=f"qas_elig_{_qwh}_{days}{_lm}", tier="historical",
+                                  source="QUERY_ACCELERATION_ELIGIBLE (per query, one warehouse)")
+                        if guard(_eq, "No eligible queries returned for this warehouse in the window."):
+                            _eqdf, _eq_cfg = snowsight_profile_column(_eq.df, _PAGE)
+                            styled_table(_eqdf, height=280, column_config={
+                                "SCALE_FACTOR": st.column_config.NumberColumn("Max scale ×", format="%d"),
+                                **_eq_cfg})
+                            st.caption("ELIGIBLE_SEC = query time Snowflake reports as eligible for "
+                                       "acceleration; SCALE_FACTOR = the largest scale it would have "
+                                       "used. Enable QAS on the warehouse (with a max scale factor) to "
+                                       "accelerate these — eligibility is utilization, not a guaranteed "
+                                       "dollar saving.")
 
         st.divider()
         # rec#16: one de-duplicated headline across the advisors. Idle-tune and

@@ -216,6 +216,8 @@ def test_remaining_cost_builders_honor_last_month_bounds():
         cost_sql.storage_account_truth(31, bounds=_AUG),
         cost_sql.tag_coverage(31, "ALL", bounds=_AUG),
         cost_sql.qas_roi(31, "ALL", bounds=_AUG),                 # two predicates, both bound
+        cost_sql.qas_eligible_queries("WH_ALFA_QUERY", 31, bounds=_AUG),  # QAS drill window
+        insights_sql.procedure_child_cost_breakdown("SP_X", 31, "ALL", bounds=_AUG),  # SP child drill
         cost_sql.transfer_egress_priced(31, bounds=_AUG),          # CURRENT_TIMESTAMP anchor
         mart_sql.fact_cortex_daily_spend(31, bounds=_AUG),
         mart27_sql.pattern_cost(31, "ALL", bounds=_AUG),

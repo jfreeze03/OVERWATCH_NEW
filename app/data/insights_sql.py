@@ -1570,6 +1570,94 @@ LIMIT 400
 """
 
 
+def procedure_child_cost_breakdown(proc_name: str, days: int, company: str = "ALL",
+                                   database: str = "", schema: str = "", *,
+                                   warehouse_contains: str = "", user_contains: str = "",
+                                   bounds: tuple | None = None) -> str:
+    """Triage WHAT inside a stored proc drives its cost: the proc's child statements,
+    aggregated by parameterized hash, ranked by measured $ — so "SP looks costly" resolves
+    to "this one INSERT, run 60×, is 80% of it" instead of a single opaque total.
+
+    This is a DRILL into ONE $/call-leaderboard ROW (procedure_costs_usd groups by exact
+    PROC_NAME + DATABASE + SCHEMA), so to RECONCILE to that row's TOTAL_CREDITS it matches the
+    SAME way the leaderboard does — the CALL scan anchors CURRENT_TIMESTAMP (not the day-grain
+    CURRENT_DATE), PROC_NAME is matched EXACTLY (no bare→qualified suffix arm — that would pull
+    in a sibling leaderboard row), and DATABASE + SCHEMA are matched EXACTLY (not contains). Its
+    EXECUTIONS×credits then sum to the clicked row's TOTAL_CREDITS. The ROOT_QUERY_ID rollup and
+    the +1d attribution lag headroom mirror the leaderboard's att read. The CALL's own attribution
+    row (ROOT_QUERY_ID IS NULL) becomes one 'CALL (own overhead)' bucket; child statements group by
+    QUERY_PARAMETERIZED_HASH (a pruned-history child with no hash falls into one 'history pruned'
+    bucket). Attribution lags ~6h; idle time excluded (same caveats)."""
+    from app.core.sqlsafe import contains_filter, sql_literal
+
+    days = bounded_days(days)
+    name = str(proc_name or "").strip().upper().rstrip("(")
+    lit = sql_literal(name)
+    # EXACT database + schema (the leaderboard's own group keys), so the drill can't pull a
+    # substring-colliding sibling schema's calls into this row's total.
+    schema_exact = (f"UPPER(c.SCHEMA_NAME) = {sql_literal(str(schema).strip().upper())}"
+                    if str(schema or "").strip() else "")
+    # CALL-scan window IDENTICAL to procedure_costs_usd (CURRENT_TIMESTAMP trailing / bounded
+    # calendar), so the drill's call set equals the leaderboard row's — a CURRENT_DATE anchor
+    # would start at midnight and over-count the boundary slice in the trailing view.
+    call_win = (resolve_effective_window(days, "c.START_TIME", bounds=bounds)[1]
+                if bounds is not None
+                else f"c.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
+    where = and_where(
+        call_win,
+        "c.QUERY_TYPE = 'CALL'",
+        _wh_company_scope(company, "c.WAREHOUSE_NAME"),
+        companies.database_equals_clause(database, "c.DATABASE_NAME"),
+        schema_exact,
+        contains_filter("c.WAREHOUSE_NAME", warehouse_contains),
+        contains_filter("c.USER_NAME", user_contains),
+    )
+    # The attribution + child-history reads span the leaderboard's own att window (+1d lag
+    # headroom); bounds keeps the calendar range so the drill matches under "Last month".
+    att_win = (resolve_effective_window(days, "a.START_TIME", bounds=bounds)[1]
+               if bounds is not None
+               else f"a.START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())")
+    q_win = (resolve_effective_window(days, "q.START_TIME", bounds=bounds)[1]
+             if bounds is not None
+             else f"q.START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())")
+    return f"""
+WITH calls AS (
+    SELECT c.QUERY_ID,
+           REGEXP_SUBSTR(UPPER(c.QUERY_TEXT), 'CALL[[:space:]]+([A-Z0-9_.$]+)', 1, 1, 'e', 1) AS PROC_NAME
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY c
+    WHERE {where}
+),
+named AS (
+    SELECT QUERY_ID FROM calls
+    WHERE PROC_NAME = {lit}
+),
+att AS (
+    SELECT a.QUERY_ID, a.ROOT_QUERY_ID,
+           SUM(COALESCE(a.CREDITS_ATTRIBUTED_COMPUTE, 0)
+               + COALESCE(a.CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY a
+    WHERE {att_win}
+      AND COALESCE(a.ROOT_QUERY_ID, a.QUERY_ID) IN (SELECT QUERY_ID FROM named)
+    GROUP BY a.QUERY_ID, a.ROOT_QUERY_ID
+)
+SELECT
+    ANY_VALUE(CASE WHEN att.ROOT_QUERY_ID IS NULL THEN 'CALL (own overhead)'
+                   ELSE COALESCE(q.QUERY_TYPE, 'unknown') END) AS STEP_TYPE,
+    ANY_VALUE(CASE WHEN att.ROOT_QUERY_ID IS NULL THEN '(the CALL statement itself)'
+                   ELSE LEFT(COALESCE(q.QUERY_TEXT, '(history pruned)'), 140) END) AS STEP_SAMPLE,
+    COUNT(*) AS EXECUTIONS,
+    ROUND(AVG(COALESCE(q.TOTAL_ELAPSED_TIME, 0)) / 1000.0, 1) AS AVG_ELAPSED_SEC,
+    ROUND(SUM(att.CREDITS), 6) AS CREDITS
+FROM att
+LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+       ON q.QUERY_ID = att.QUERY_ID AND {q_win}
+GROUP BY COALESCE(CASE WHEN att.ROOT_QUERY_ID IS NULL THEN 'CALL_OWN'
+                       ELSE q.QUERY_PARAMETERIZED_HASH END, 'PRUNED')
+ORDER BY CREDITS DESC
+LIMIT 100
+"""
+
+
 def clustering_by_table(days: int = 30, company: str = "ALL", *,
                         bounds: tuple | None = None) -> str:
     """Automatic-clustering spend per table (COST_DB recon R7) — serverless

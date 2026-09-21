@@ -353,6 +353,38 @@ LIMIT 200
 """
 
 
+def qas_eligible_queries(warehouse: str, days: int, *, bounds: tuple | None = None) -> str:
+    """The drill behind a QAS ROI row: the individual queries ELIGIBLE for acceleration on ONE
+    warehouse (QUERY_ACCELERATION_ELIGIBLE, per query_id), ranked by eligible acceleration time —
+    so "eligible workload, QAS off" resolves to exactly WHICH queries would benefit and by how
+    much (UPPER_LIMIT_SCALE_FACTOR = the largest scale factor Snowflake would have used).
+
+    Warehouse-exact scope (the clicked row already carries the company via the ROI table), so no
+    separate company predicate is needed. Eligibility is Snowflake's own utilization signal, not
+    a dollarized saving (same caveat as the parent table)."""
+    from app.core.sqlsafe import sql_literal
+
+    days = bounded_days(days, 365)
+    wh = str(warehouse or "").strip()
+    win = (resolve_effective_window(days, "START_TIME", bounds=bounds)[1]
+           if bounds is not None
+           else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
+    where = and_where(win, f"WAREHOUSE_NAME = {sql_literal(wh)}")
+    return f"""
+SELECT
+    QUERY_ID,
+    LEFT(QUERY_TEXT, 140) AS QUERY_PREVIEW,
+    START_TIME,
+    WAREHOUSE_SIZE,
+    ROUND(COALESCE(ELIGIBLE_QUERY_ACCELERATION_TIME, 0), 1) AS ELIGIBLE_SEC,
+    UPPER_LIMIT_SCALE_FACTOR AS SCALE_FACTOR
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ACCELERATION_ELIGIBLE
+WHERE {where}
+ORDER BY ELIGIBLE_QUERY_ACCELERATION_TIME DESC NULLS LAST
+LIMIT 100
+"""
+
+
 def compute_pool_usage(days: int, *, bounds: tuple | None = None) -> str:
     """SPCS credits by compute pool and owning application (account-wide)."""
     days = bounded_days(days, 365)

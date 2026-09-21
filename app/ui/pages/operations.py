@@ -1973,12 +1973,14 @@ def _pipeline_prefetch(days: int) -> dict:
     return out if out is not None else {}
 
 
-def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "", days: int = 0) -> None:
+def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "", days: int = 0,
+                      schema_contains: str = "") -> None:
     """Metadata-driven table freshness SLAs (config in PIPELINE_SLA_CONFIG).
 
     Owner ask 2026-08-17: the DB-grain diagnostics honor the company filter; the
     SLA-horizon config/forecast is account-wide (thresholds are account policy). The ETL
-    runtimes reader honors the scope-bar Window (``days``) to bound which runs it lists."""
+    runtimes reader honors the scope-bar Window (``days``) to bound which runs it lists.
+    Volume drops honors company/database/schema too (2026-09-21 owner: it was mixing companies)."""
     # First panel by design: a source code missing from XLAT hard-fails the nightly
     # load, so this leads the Pipeline tab (config-gated; dormant until set up). Honors
     # the scope-bar Database filter (pinned checks always show).
@@ -2096,7 +2098,8 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
     # scans fire and the render order are unchanged. Cold latency ~MAX(scan) instead of SUM(scans).
     _psb = run_batch([
         {"key": "cpf", "sql": ops_sql.copy_load_failures(7, company), "source": "ACCOUNT_USAGE.COPY_HISTORY"},
-        {"key": "vd", "sql": ops_sql.volume_deltas(), "source": "ACCOUNT_USAGE.TABLE_DML_HISTORY"},
+        {"key": "vd", "sql": ops_sql.volume_deltas(company, database, schema_contains),
+         "source": "ACCOUNT_USAGE.TABLE_DML_HISTORY"},
         {"key": "rv", "sql": dq_sql.product_row_volume(28),
          "source": "ACCOUNT_USAGE.TABLE_DML_HISTORY x ENTITY_CATALOG"},
         {"key": "dth", "sql": ops_sql.dynamic_table_health(7),
@@ -2125,9 +2128,11 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
         "one-shot tables are now excluded — so this shows persistent movers only. The "
         "PIPE_VOLUME_DROP alert fires past a 50% drop on PROD databases (SP_ANOMALY_SWEEP / "
         "TASK_ANOMALY_SWEEP, HIGH, gated on ALERT_CONFIG.ENABLED). DAYS_ACTIVE_7D shows how "
-        "many of the prior 7 days the table actually moved."
+        "many of the prior 7 days the table actually moved. Honors the scope-bar "
+        "company/database/schema filter (account-wide when unset)."
     )
-    vd = _psb.get("vd") or run(ops_sql.volume_deltas(), page=_PAGE, key="volume_deltas", tier="recent",
+    vd = _psb.get("vd") or run(ops_sql.volume_deltas(company, database, schema_contains), page=_PAGE,
+             key=f"volume_deltas_{company}_{database}", tier="recent",
              source="ACCOUNT_USAGE.TABLE_DML_HISTORY")
     if vd.ok and vd.empty:
         empty_state("clean", "Every moving table is within its normal daily volume.")
@@ -3723,7 +3728,7 @@ def render() -> None:
     elif section == "Change impact":
         _change_impact_tab(f["company"], f["database"], f["schema_contains"], is_operator)
     elif section == "Pipeline SLA":
-        _pipeline_sla_tab(is_operator, f["company"], f["database"], f["days"])
+        _pipeline_sla_tab(is_operator, f["company"], f["database"], f["days"], f["schema_contains"])
     elif section == "Emergency":
         # C23: deliberately amber — dangerous controls warrant standing caution.
         section_header("Emergency levers", "warn", "warehouse")

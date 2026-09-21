@@ -229,14 +229,70 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         if _psel is not None and _psel != st.session_state.get("_uc_proc_sel_last"):
             st.session_state["_uc_proc_sel_last"] = _psel
             st.session_state["uc_proc_trend_name"] = str(pdf.iloc[int(_psel)]["PROC_NAME"])
-            st.caption(f"Selected **{st.session_state['uc_proc_trend_name']}** — "
-                       "the trend panel below is prefilled.")
         result_caption(p_res, note="Database/schema = the CALL's session context; procs may "
                                    "read other databases. ATTRIBUTED_CALLS = calls the "
                                    "attribution view matched; $0 with calls = attribution "
                                    "lag (~8h) or children ran without a warehouse. "
                                    "Change-impact (Operations) watches these numbers around "
                                    "each ALTER.")
+
+        # Drill (owner ask 2026-09-21: the old click only prefilled a COLLAPSED trend
+        # expander, so it "did nothing" visibly). Selecting a proc renders its child-statement
+        # cost breakdown right here — WHAT inside the proc drives the cost — so a costly-looking
+        # SP resolves to its main driver. Selection is sticky, so this shows on every rerun while
+        # a row is selected. Same attribution rollup + scope as the leaderboard, so it reconciles.
+        if _psel is not None and 0 <= int(_psel) < len(pdf):
+            _brow = pdf.iloc[int(_psel)]
+            _bd_name = str(_brow["PROC_NAME"])
+            # Scope to the CLICKED row's own DATABASE/SCHEMA (the CALL's session context, the
+            # leaderboard's own group keys) — not the page Database filter — so the breakdown
+            # sums to exactly that row's $ even when the same proc name runs in more than one
+            # database context (the page filters would over-count across the sibling rows).
+            # NaN-safe: a NULL leaderboard db/schema arrives as a pandas NaN (v == v is False),
+            # which `or ""` would NOT catch (NaN is truthy) — that would send "nan" as a filter.
+            def _cell(v: object) -> str:
+                return str(v) if (v is not None and v == v) else ""
+            _bd_db = _cell(_brow.get("DATABASE_NAME"))
+            _bd_sch = _cell(_brow.get("SCHEMA_NAME"))
+            st.markdown(md_dollars(f"**Cost breakdown for `{_bd_name}` — what drives the $**"))
+            _bd = run(insights_sql.procedure_child_cost_breakdown(
+                          _bd_name, uc_days, company, _bd_db, _bd_sch,
+                          warehouse_contains=f["warehouse_contains"], user_contains=f["user_contains"],
+                          bounds=bounds),
+                      page=_PAGE, key=f"uc_proc_kids_{_bd_name[:30]}_{_bd_db}_{company}_{uc_days}{_lm}",
+                      tier="historical",
+                      source=f"QUERY_ATTRIBUTION_HISTORY (child statements rolled up, {uc_days}d)")
+            if guard(_bd, "No attributed child statements for this proc in the window "
+                          "(attribution lags ~8h)."):
+                _bdf = _bd.df.copy()
+                # round_cents=False: per-step $ renders at $%.4f — child steps are routinely
+                # sub-cent, so cents-rounding would show real drivers as $0.0000.
+                _bdf["USD"] = _bdf["CREDITS"].map(lambda c: credits_to_usd(c, rate, round_cents=False))
+                _tot = float(_bdf["USD"].sum())
+                _bdf["PCT"] = _bdf["USD"].map(lambda u: (u / _tot * 100) if _tot else 0.0)
+                _top = _bdf.iloc[0] if len(_bdf) else None
+                kpi_row([
+                    {"label": f"Proc total ({uc_days}d)", "value": format_usd(_tot)},
+                    {"label": "Distinct child steps", "value": f"{len(_bdf):,}"},
+                    {"label": "Top cost driver",
+                     "value": f"{safe_float(_top['PCT']):.0f}%" if _top is not None else "n/a",
+                     "delta": (str(_top["STEP_TYPE"]) if _top is not None else ""),
+                     "delta_color": "off",
+                     "help": "Share of the proc's measured $ from its single most expensive "
+                             "child statement — the main thing to fix first."},
+                ])
+                _bd_cols = [c for c in ["STEP_TYPE", "STEP_SAMPLE", "EXECUTIONS",
+                                        "AVG_ELAPSED_SEC", "USD", "PCT"] if c in _bdf.columns]
+                styled_table(_bdf[_bd_cols], height=300, column_config={
+                    "USD": st.column_config.NumberColumn("$", format="$%.4f"),
+                    "PCT": st.column_config.NumberColumn("% of proc", format="%.1f%%"),
+                })
+                st.caption(md_dollars(
+                    "Child statements grouped by parameterized hash and ranked by measured "
+                    "$ — the top row is the main cost driver. EXECUTIONS = child runs across "
+                    "all calls in the window; 'CALL (own overhead)' is the CALL statement's "
+                    "own time. Sums to the leaderboard row's $ (window) under the same scope; "
+                    "attribution lags ~8h."))
 
     st.markdown("**Repeated patterns — the silent spend (measured $)**")
     # Owner ask (2026-07-11): "a visual of bad code and how it could cost us

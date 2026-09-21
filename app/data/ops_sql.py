@@ -1382,14 +1382,22 @@ LIMIT 2000
 """
 
 
-def volume_deltas() -> str:
+def volume_deltas(company: str = "ALL", database: str = "", schema_contains: str = "") -> str:
     """Yesterday's rows-added vs prior-7d average per moving table — the panel behind
     the PIPE_VOLUME_DROP alert. That alert is LIVE: SP_ANOMALY_SWEEP (TASK_ANOMALY_SWEEP,
     06:40 CT daily) raises a HIGH event when a PROD table's rows-added collapses past a 50%
     drop vs its prior-7-day average, gated on ALERT_CONFIG.ENABLED (so it can be turned off).
-    This panel is the account-wide informational view (all databases + the 30-50% WATCH
-    band), so it intentionally shows rows that do not page."""
-    return """
+
+    Honors the scope-bar company/database/schema filters (the DB-grain diagnostics on this tab
+    are company-scoped by design); with everything unset it stays the account-wide informational
+    view (all databases + the 30-50% WATCH band), so it intentionally shows rows that do not page.
+    The yesterday-vs-prior-7d comparison window is fixed (not the scope-bar Window)."""
+    scope = and_where(
+        companies.database_company_scope(company, "d.DATABASE_NAME"),
+        companies.database_equals_clause(database, "d.DATABASE_NAME"),
+        contains_filter("d.SCHEMA_NAME", schema_contains),
+    )
+    return f"""
 SELECT DB AS DATABASE_NAME, SCH AS SCHEMA_NAME, TBL AS TABLE_NAME,
        Y_ROWS, ROUND(AVG_ROWS, 0) AS AVG_ROWS_PRIOR_7D, DAYS_ACTIVE_7D,
        ROUND((1 - Y_ROWS / NULLIF(AVG_ROWS, 0)) * 100, 1) AS DROP_PCT,
@@ -1411,13 +1419,14 @@ FROM (
     FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_DML_HISTORY d
     WHERE d.START_TIME >= DATEADD('day', -8, CURRENT_DATE())
       AND d.START_TIME < CURRENT_DATE()
+      AND {scope}
       -- Exclude transient / per-run staging tables: dated (name_YYYYMMDD_...)
       -- load tables, staging schemas (delimited *_STAG / *_STG suffix so we don't
       -- catch POSTGRES etc.), and the SNOWFLAKE internal database. These
       -- truncate-reload or write once, so 'yesterday = 0 rows' is their normal
       -- pattern, not a real loss (the owner's DB_T_PROD_STAG case). Ephemeral
       -- temp tables are already excluded by the steady-baseline gate below.
-      AND NOT REGEXP_LIKE(d.TABLE_NAME, '.*_[0-9]{8}(_[0-9]+)+', 'i')
+      AND NOT REGEXP_LIKE(d.TABLE_NAME, '.*_[0-9]{{8}}(_[0-9]+)+', 'i')
       AND UPPER(d.SCHEMA_NAME) NOT LIKE '%!_STAG' ESCAPE '!'
       AND UPPER(d.SCHEMA_NAME) NOT LIKE '%!_STG' ESCAPE '!'
       AND UPPER(d.SCHEMA_NAME) NOT LIKE '%!_STAGING' ESCAPE '!'

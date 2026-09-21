@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.562.0 - Ops drills: QAS eligible queries, SP cost breakdown, Volume-drops scope (2026-09-21)
+
+Three owner-reported gaps across Operations & Cost Intelligence:
+
+- **Volume drops now honors the scope bar.** `ops_sql.volume_deltas` was account-wide with no
+  scope args, so under a company/database filter it still mixed every database (ALFA + Trexis in
+  one table). It now applies company (by `COMPANY_FOR_DATABASE`) + database + schema, threaded
+  through the Pipeline SLA tab; account-wide only when the scope is unset. The yesterday-vs-prior-7d
+  comparison window is unchanged.
+- **QAS ROI drills into the eligible queries.** The Serverless-ROI table is now selectable — click
+  a warehouse and it lists exactly which queries are acceleration-eligible (`QUERY_ACCELERATION_
+  ELIGIBLE` per query, ranked by eligible time, with the max scale factor Snowflake would use), so
+  "eligible workload, QAS off" resolves to the concrete queries. A pure drop-candidate (spends QAS
+  credits, 0 eligible) says so instead of showing an empty list.
+- **SP $/call leaderboard drills into the cost driver.** Clicking a proc used to only prefill a
+  *collapsed* trend expander, so it appeared to do nothing. It now renders the proc's child-statement
+  cost breakdown directly — child statements grouped by parameterized hash and ranked by measured $,
+  with the CALL's own overhead as its own bucket — so a costly-looking proc resolves to "this one
+  INSERT, run 60×, is 80% of it." Same `ROOT_QUERY_ID` rollup + proc-name match as the leaderboard,
+  so it reconciles to the row's $ (window) under the same scope.
+
+New builders: `cost_sql.qas_eligible_queries`, `insights_sql.procedure_child_cost_breakdown`; both
+honor the "Last month" bounds. No new reachable ACCOUNT_USAGE tables or live-scan budget changes.
+
 ## 4.561.0 - Operator profile honors User/Database/Schema scope (2026-09-21)
 
 The QOIE Slice 2 **Operator profile** (Operations ▸ Queries) was the one new section that
