@@ -132,7 +132,7 @@ def _bounds_preset(bounds: tuple[date, date] | None, today: date | None = None) 
     return "last month"                              # ends at a month boundary
 
 
-def window_label(bounds: tuple[date, date] | None, days: object, today: date | None = None) -> str:
+def window_label(bounds: tuple[date, date] | None, days: int, today: date | None = None) -> str:
     """Short scope label for a KPI/caption: 'last month' / 'current month' / 'current year' for a
     calendar preset (inferred from the bounds shape), else '{days}d' for a trailing window.
     Replaces the `"last month" if bounds is not None else f"{days}d"` idiom, which mislabeled the
@@ -140,7 +140,7 @@ def window_label(bounds: tuple[date, date] | None, days: object, today: date | N
     return _bounds_preset(bounds, today) or f"{int(days)}d"
 
 
-def window_phrase(bounds: tuple[date, date] | None, days: object, today: date | None = None) -> str:
+def window_phrase(bounds: tuple[date, date] | None, days: int, today: date | None = None) -> str:
     """Sentence-fragment form of window_label: 'last month' / 'the current month' /
     'the current year' / 'the last N days' (for a caption like '... spent {phrase}')."""
     preset = _bounds_preset(bounds, today)
