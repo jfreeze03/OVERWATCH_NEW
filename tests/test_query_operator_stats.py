@@ -90,3 +90,25 @@ def test_slice2_builders_parse_under_snowflake_dialect():
                 ops_sql.operator_problem_board(7, "ALFA"),
                 ops_sql.operator_anatomy("abc-123")):
         sqlglot.parse_one(sql, dialect="snowflake")
+
+
+def test_identity_grain_referenced_only_when_the_filter_is_set():
+    """V147 adds USER_NAME/DATABASE_NAME/SCHEMA_NAME to the fact so the profile can honor the
+    User/Database/Schema scope filters. The columns exist ONLY after V147, so the reader must
+    reference them ONLY when the arg is non-empty — operations.py passes them empty (and gates
+    on 147 being applied) until the migration lands, so nothing compile-errors pre-V147."""
+    sqlglot = pytest.importorskip("sqlglot")
+    for fn in (ops_sql.operator_stats_summary, ops_sql.operator_problem_board):
+        bare = fn(7, "ALFA", "WH_ALFA")
+        for col in ("USER_NAME", "DATABASE_NAME", "SCHEMA_NAME"):
+            assert col not in bare, f"{fn.__name__}: references {col} with no identity filter set"
+        scoped = fn(7, "ALFA", "WH_ALFA", user_contains="jdoe",
+                    database="ALFA_EDW_PRD", schema_contains="STG")
+        assert "USER_NAME" in scoped and "jdoe" in scoped
+        assert "DATABASE_NAME" in scoped and "ALFA_EDW_PRD" in scoped
+        assert "SCHEMA_NAME" in scoped and "STG" in scoped
+        sqlglot.parse_one(scoped, dialect="snowflake")   # still valid with all three predicates
+        # the identity axes mirror the query-level _query_scope: user/schema are contains
+        # (ILIKE), database is an exact match — same operators, so the profile scopes exactly
+        # like the query-level sections once the grain is present.
+        assert "USER_NAME ILIKE" in scoped and "SCHEMA_NAME ILIKE" in scoped

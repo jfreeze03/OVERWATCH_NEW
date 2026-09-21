@@ -594,6 +594,16 @@ _EXPECTED_MIGRATIONS = {
          "is upsert-only): DELETE FROM FACT_AI_USAGE_DAILY WHERE SOURCE=Functions AND DAY>=2026-01-05, "
          "then CALL SP_LOAD_MARTS_V27(DAILY, 365) -- scoped purge clears double-counting orphans, "
          "preserves pre-horizon history",
+    147: "Operator-stats identity grain: ADD COLUMN USER_NAME/DATABASE_NAME/SCHEMA_NAME to "
+         "FACT_QUERY_OPERATOR_STATS_DAILY (V143/V144 stamped only COMPANY + WAREHOUSE_NAME), so the "
+         "QOIE Slice 2 Operator profile honors the User/Database/Schema scope filters, not just "
+         "company/warehouse/window. Re-derive SP_LOAD_QUERY_OPERATOR_STATS from V144 to also fill "
+         "the three in the set-based enrich UPDATE that already joins the query's QUERY_HISTORY row "
+         "(byte-identical to V144 otherwise; the OP_TIME_PCT*100 scale fix preserved) + a one-time "
+         "-35d idempotent backfill of existing rows (USER_NAME-is-NULL guard). Column names mirror "
+         "QUERY_HISTORY so the app reuses _query_scope's predicates; the reader references them only "
+         "when the filter is set and operations.py gates on 147 in the applied set, so nothing "
+         "references the columns until this applies and the grain self-heals with no redeploy",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

@@ -708,16 +708,25 @@ def _fact_operator_company(company: str) -> str:
 
 
 def operator_stats_summary(days: int, company: str = "ALL", warehouse_contains: str = "", *,
+                           user_contains: str = "", database: str = "", schema_contains: str = "",
                            bounds: tuple | None = None) -> str:
     """One-row KPI summary of the collected operator profiles in the window — how many
     queries/operators were profiled and the counts of the two headline pathologies
     (exploding-join operators, spill operators) plus the worst blow-up and total spill.
-    Scoped by company + window + (optional) warehouse; the fact has no user/database grain."""
+
+    Scoped by company + window + (optional) warehouse. The user/database/schema grain exists
+    ONLY after V147 stamps USER_NAME/DATABASE_NAME/SCHEMA_NAME onto the fact; before then the
+    caller passes those empty (the columns don't exist), so this builder references them ONLY
+    when the arg is non-empty — matching _query_scope's identity axes so the operator profile
+    scopes exactly like the query-level sections once the grain is present."""
     days = bounded_days(days)
     where = and_where(
         scope_window_where("QUERY_DAY", days, bounds=bounds),
         _fact_operator_company(company),
         contains_filter("WAREHOUSE_NAME", warehouse_contains),
+        contains_filter("USER_NAME", user_contains),
+        companies.database_equals_clause(database),
+        contains_filter("SCHEMA_NAME", schema_contains),
     )
     return f"""
 SELECT
@@ -736,19 +745,26 @@ WHERE {where}
 
 
 def operator_problem_board(days: int, company: str = "ALL", warehouse_contains: str = "", *,
+                           user_contains: str = "", database: str = "", schema_contains: str = "",
                            bounds: tuple | None = None, limit: int = 50) -> str:
     """Top problem OPERATORS across the two pathologies Slice 1 cannot see, tagged by
     PATHOLOGY: 'Exploding join' (a Join whose output rows dwarf its input rows, ranked by
     ROW_MULTIPLE) and 'Memory spill' (an operator that spilled to remote storage, ranked by
     REMOTE_SPILL_GB). Returns up to `limit` per pathology (QUALIFY ROW_NUMBER partitioned by
     PATHOLOGY); the reader splits it into two boards. FINGERPRINT cross-links to Slice-1;
-    QUERY_ID drives the operator-anatomy drill. Scoped by company + window + (optional)
-    warehouse; the fact has no user/database grain."""
+    QUERY_ID drives the operator-anatomy drill.
+
+    Scoped by company + window + (optional) warehouse, and — once V147 stamps the identity
+    grain — user/database/schema (see operator_stats_summary: the caller passes those empty
+    until the columns exist, so they are referenced only when non-empty)."""
     lim = max(1, min(int(limit), 200))
     where = and_where(
         scope_window_where("QUERY_DAY", bounded_days(days), bounds=bounds),
         _fact_operator_company(company),
         contains_filter("WAREHOUSE_NAME", warehouse_contains),
+        contains_filter("USER_NAME", user_contains),
+        companies.database_equals_clause(database),
+        contains_filter("SCHEMA_NAME", schema_contains),
     )
     return f"""
 WITH scoped AS (

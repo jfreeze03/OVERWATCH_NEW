@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.561.0 - Operator profile honors User/Database/Schema scope (2026-09-21)
+
+The QOIE Slice 2 **Operator profile** (Operations ▸ Queries) was the one new section that
+ignored the scope filters: its collector fact (`FACT_QUERY_OPERATOR_STATS_DAILY`) was stamped
+with only `COMPANY` + `WAREHOUSE_NAME`, so a User/Database/Schema filter left it showing data
+broader than the active scope (its "Queries profiled" count wouldn't reconcile with the scoped
+KPI tiles above). The other four new sections (Optimization opportunities/triage, Stored-proc
+regression, Failures by error) already thread all six axes through `_query_scope`.
+
+Two-part fix (owner chose "both"):
+- **App-side, ships now (grain-aware, self-healing):** `operator_stats_summary` /
+  `operator_problem_board` now accept `user_contains` / `database` / `schema_contains` and emit
+  those predicates (mirroring `_query_scope`: user/schema ILIKE-contains, database exact). The
+  Operator profile gates on whether **V147** is in the applied `SCHEMA_VERSION` set: until it is,
+  the columns don't exist, so the section is **suppressed with a clear notice** when a
+  User/Database/Schema filter is active (never referencing a missing column), rather than showing
+  out-of-scope data; once V147 lands, the filters apply for real — no redeploy needed.
+- **Migration V147 (owner-applied, staged):** `ALTER FACT_QUERY_OPERATOR_STATS_DAILY ADD COLUMN
+  IF NOT EXISTS USER_NAME / DATABASE_NAME / SCHEMA_NAME` (names mirror QUERY_HISTORY) + re-derive
+  `SP_LOAD_QUERY_OPERATOR_STATS` from V144 so the set-based enrich UPDATE (already joining the
+  query's QUERY_HISTORY row) also fills the three — byte-identical to V144 otherwise, the
+  OP_TIME_PCT×100 scale fix preserved — plus a one-time, idempotent, `-35d` backfill of the
+  already-collected rows.
+
 ## 4.560.0 - Timezone standard guard (no behavior change) (2026-09-21)
 
 The timezone-consistency audit resolved to a **non-issue**: the owner diagnostic
