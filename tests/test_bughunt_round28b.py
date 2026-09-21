@@ -53,7 +53,7 @@ def test_operations_task_health_labels_served_window_on_live_cap():
     body = _region(src, "def _task_health_view", "def ")
     # honesty mirrors the Queries tile (:_served_days): live path clamps to the live window
     assert "_tr_served = days if _from_mart else min(days, MAX_LIVE_WINDOW_DAYS)" in body
-    assert 'f"{_tr_served}d"' in body
+    assert 'window_label(bounds, _tr_served)' in body
     # the raw "{days}d" label is gone from the tile
     assert 'else f"{days}d"' not in body
 

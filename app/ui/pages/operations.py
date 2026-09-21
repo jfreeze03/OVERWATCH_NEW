@@ -45,6 +45,7 @@ from app.logic.anomaly import (
     flag_anomalies,
     suppress_expected_spikes,
 )
+from app.logic.date_windows import window_label
 from app.logic.dq import row_volume_anomalies, summarize_row_volume
 from app.logic.formulas import (
     account_today,
@@ -282,7 +283,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         _served_days = days if used_mart else min(days, MAX_LIVE_WINDOW_DAYS)
         # WLA-1: the summary reads are bounded to the prior calendar month under "Last month"
         # scope, so label "last month" then; the served-days honesty applies on the trailing branch.
-        _q_wlab = "last month" if bounds is not None else f"{_served_days}d"
+        _q_wlab = window_label(bounds, _served_days)
         kpi_row([
             {"label": f"Queries ({_q_wlab})", "value": f"{qcount:,.0f}", "spark": q_spark},
             {"label": "Fail rate", "value": f"{fail_pct:.2f}%" if fail_pct is not None else "n/a",
@@ -860,7 +861,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             # WLA-1: on the non-truncated branch the label names the window; the waste read is
             # bounded to the prior calendar month under "Last month" scope, so say "last month".
             _scope_lbl = (f"top {len(wdf)} fingerprints" if _truncated
-                          else ("last month" if bounds is not None else f"{days}d"))
+                          else (window_label(bounds, days)))
             kpi_row([
                 {"label": f"Wasted spend ({_scope_lbl})", "value": format_usd(_wasted_total),
                  "help": ("Allocated compute on non-success queries, summed over the "
@@ -2102,7 +2103,7 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
          "source": "ACCOUNT_USAGE.TABLE_DML_HISTORY"},
         {"key": "rv", "sql": dq_sql.product_row_volume(28),
          "source": "ACCOUNT_USAGE.TABLE_DML_HISTORY x ENTITY_CATALOG"},
-        {"key": "dth", "sql": ops_sql.dynamic_table_health(7),
+        {"key": "dth", "sql": ops_sql.dynamic_table_health(7, company, database, schema_contains),
          "source": "ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY"},
     ], page=_PAGE, tier="recent")
 
@@ -2144,11 +2145,15 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
 
     section_header("Dynamic table refresh health (7d)", "", "pipeline")
     panel_help(
-        "Source: ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY (up to ~3h lag). A FAILED "
-        "row means every downstream consumer is reading stale data. The daily "
-        "PIPE_DT_FAILURES alert fires on 24h failures; this is the weekly picture."
+        "Source: ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY (up to ~3h lag). STATUS is the "
+        "CURRENT condition from the newest refresh: STALE NOW = the latest refresh failed/was "
+        "skipped, so downstream is reading stale data; RECOVERED = failed earlier in the window "
+        "but the latest refresh succeeded; HEALTHY = no failures. FAILURES = count in the window. "
+        "Honors the company/database/schema scope. The daily PIPE_DT_FAILURES alert fires on 24h "
+        "failures; this is the weekly picture."
     )
-    dth = _psb.get("dth") or run(ops_sql.dynamic_table_health(7), page=_PAGE, key="dt_health", tier="recent",
+    dth = _psb.get("dth") or run(ops_sql.dynamic_table_health(7, company, database, schema_contains),
+              page=_PAGE, key=f"dt_health_{company}_{database}", tier="recent",
               source="ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY")
     if dth.ok and dth.empty:
         empty_state("no_data_yet", "No dynamic-table refreshes recorded in 7 days (none defined, or the view is empty).")
@@ -2210,7 +2215,7 @@ def _task_health_view(company: str, days: int, database: str = "",
             # default 90), so a >90d request served live counts fewer days than "{days}d"
             # claims. Mirror the Queries tile's served-window honesty (:247) instead.
             _tr_served = days if _from_mart else min(days, MAX_LIVE_WINDOW_DAYS)
-            _tr_wlab = "last month" if bounds is not None else f"{_tr_served}d"
+            _tr_wlab = window_label(bounds, _tr_served)
             kpi_row([
                 {"label": f"Task runs ({_tr_wlab})", "value": f"{total_runs:,.0f}"},
                 {"label": "Failed runs", "value": f"{total_failed:,.0f}",
@@ -3694,11 +3699,11 @@ def render() -> None:
         },
         "Pipeline SLA": {
             "applies": (),
-            "partial": ("company", "database"),
-            "note": "SLA horizons are account-wide policy; the file-load-failure panel "
-                    "narrows to the selected Company; the reference-data-gap panel narrows to "
-                    "the selected Database (pinned checks always show). (Volume/DT/row-volume "
-                    "panels remain account-wide — a follow-up will scope them.)",
+            "partial": ("company", "database", "schema_contains"),
+            "note": "SLA horizons are account-wide policy; File-load failures narrows to Company; "
+                    "Reference-data-gap narrows to Database (pinned checks always show); Volume "
+                    "drops and Dynamic-table refresh health honor Company/Database/Schema. (The DQ "
+                    "row-volume panel is still account-wide.)",
         },
         "Release compare": {
             "applies": ("company",),

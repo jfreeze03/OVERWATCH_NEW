@@ -41,21 +41,21 @@ def _src(rel: str) -> str:
 # --- WLA-1 sweep: every remaining trailing-window label switches to "last month" when bounded ----
 def test_overview_company_economics_badge_switches_to_last_month():
     src = _src("app/ui/pages/overview.py")
-    assert '_ce_wlab = "last month" if _ov_bounds is not None else f"{days}d"' in src
+    assert '_ce_wlab = window_label(_ov_bounds, days)' in src
     assert "badge=f\"{company} · {_ce_wlab}\"" in src
     assert 'badge=f"{company} · {days}d"' not in src
 
 
 def test_operations_window_labels_switch_to_last_month():
     src = _src("app/ui/pages/operations.py")
-    assert '_q_wlab = "last month" if bounds is not None else f"{_served_days}d"' in src
+    assert '_q_wlab = window_label(bounds, _served_days)' in src
     assert 'f"Queries ({_q_wlab})"' in src
     # r28b: the tasks tile now labels the SERVED window (live path clamps to the live
     # window), mirroring the Queries tile's _served_days honesty rather than raw {days}d.
     assert '_tr_served = days if _from_mart else min(days, MAX_LIVE_WINDOW_DAYS)' in src
-    assert '_tr_wlab = "last month" if bounds is not None else f"{_tr_served}d"' in src
+    assert '_tr_wlab = window_label(bounds, _tr_served)' in src
     assert 'f"Task runs ({_tr_wlab})"' in src
-    assert '"last month" if bounds is not None else f"{days}d"' in src  # wasted-spend _scope_lbl
+    assert 'window_label(bounds, days)' in src  # wasted-spend _scope_lbl
     # the raw trailing forms are gone
     assert 'f"Queries ({_served_days}d)"' not in src
     assert 'f"Task runs ({days}d)"' not in src
@@ -63,17 +63,17 @@ def test_operations_window_labels_switch_to_last_month():
 
 def test_unit_costs_ai_spend_label_switches_to_last_month():
     src = _src("app/ui/pages/cost_parts/unit_costs.py")
-    assert '_ai_wlab = "last month" if bounds is not None else f"{_ai_days}d"' in src
+    assert '_ai_wlab = window_label(bounds, _ai_days)' in src
     assert 'f"AI spend ({_ai_wlab})"' in src
     assert 'f"AI spend ({_ai_days}d)"' not in src
 
 
 def test_optimize_window_labels_switch_to_last_month():
     src = _src("app/ui/pages/cost_parts/optimize.py")
-    assert '_iw_wlab = "last month" if bounds is not None else f"{_iw_days}d"' in src
+    assert '_iw_wlab = window_label(bounds, _iw_days)' in src
     assert 'f"Idle credit waste ({_iw_wlab})"' in src
-    assert "'last month' if bounds is not None else f'{days}d'" in src  # QAS
-    assert '_rw_wlab = "last month" if bounds is not None else f"{remed_days}d"' in src
+    assert "window_label(bounds, days)" in src  # QAS
+    assert '_rw_wlab = window_label(bounds, remed_days)' in src
     assert 'f"Idle credit waste ({_iw_days}d)"' not in src
     assert 'f"QAS spend ({days}d)"' not in src
     assert "Idle credits in window ({remed_days}d)" not in src
@@ -81,7 +81,7 @@ def test_optimize_window_labels_switch_to_last_month():
 
 def test_cortex_spend_tab_label_switches_to_last_month():
     src = _src("app/ui/pages/cost_parts/ai_chargeback.py")
-    assert '_wlab = "last month" if bounds is not None else f"{_win}d"' in src
+    assert '_wlab = window_label(bounds, _win)' in src
     assert 'f"Cortex spend, {_wlab}"' in src
     assert 'f"Cortex spend, {_win}d"' not in src
 

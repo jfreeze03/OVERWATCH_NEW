@@ -109,6 +109,46 @@ def window_option_label(value: object) -> str:
     return f"{int(selection)}d"
 
 
+def _bounds_preset(bounds: tuple[date, date] | None, today: date | None = None) -> str | None:
+    """Which calendar preset a filters()['bounds'] pair came from, inferred from its SHAPE, as a
+    lowercase label ('last month' / 'current month' / 'current year'), or None for a trailing window.
+
+    bounds always comes from window_bounds(), so it is one of exactly three shapes or None —
+    the label idiom `"last month" if bounds is not None` was WRONG for the two period-to-date
+    presets (it labeled Current-month and Current-year "last month" too). Period-to-date windows
+    end tomorrow-exclusive (they include today); LAST_MONTH ends at the first of this month. In
+    January the current-month and current-year ranges coincide, so current-month wins that one
+    edge (same dates, so the label still describes the shown data). Lowercase keeps 'last month'
+    byte-identical to the idiom it replaces, so only the two mislabeled presets change."""
+    if bounds is None:
+        return None
+    start, end = bounds
+    current = today or account_today()
+    if end == current + timedelta(days=1):          # period-to-date (includes today)
+        if start == current.replace(day=1):
+            return "current month"
+        if start == current.replace(month=1, day=1):
+            return "current year"
+    return "last month"                              # ends at a month boundary
+
+
+def window_label(bounds: tuple[date, date] | None, days: object, today: date | None = None) -> str:
+    """Short scope label for a KPI/caption: 'last month' / 'current month' / 'current year' for a
+    calendar preset (inferred from the bounds shape), else '{days}d' for a trailing window.
+    Replaces the `"last month" if bounds is not None else f"{days}d"` idiom, which mislabeled the
+    period-to-date presets. ``days`` is the served-days number the trailing branch should show."""
+    return _bounds_preset(bounds, today) or f"{int(days)}d"
+
+
+def window_phrase(bounds: tuple[date, date] | None, days: object, today: date | None = None) -> str:
+    """Sentence-fragment form of window_label: 'last month' / 'the current month' /
+    'the current year' / 'the last N days' (for a caption like '... spent {phrase}')."""
+    preset = _bounds_preset(bounds, today)
+    if preset is None:
+        return f"the last {int(days)} days"
+    return preset if preset == "last month" else f"the {preset}"
+
+
 def _short_date(value: date) -> str:
     return f"{value:%b} {value.day}"
 

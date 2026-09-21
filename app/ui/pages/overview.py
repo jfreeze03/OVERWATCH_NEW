@@ -23,6 +23,7 @@ from app.data import cost_sql, mart27_sql, mart_sql
 from app.data.common import resolve_effective_window
 from app.logic import scoring
 from app.logic.actions import rank_actions
+from app.logic.date_windows import window_label
 from app.logic.forecast import MonthEndForecast, backtest_forecasts, month_end_projection
 from app.logic.formulas import (
     ExecutiveSummaryView,
@@ -754,7 +755,7 @@ def render() -> None:
     # WLA-1: the section's headline reads are bounded to the prior calendar month under "Last
     # month" scope (_ov_bounds set), so the badge says "last month" then, matching this section's
     # KPI label (f["window_label"]) and the page scope note — not a trailing "{days}d".
-    _ce_wlab = "last month" if _ov_bounds is not None else f"{days}d"
+    _ce_wlab = window_label(_ov_bounds, days)
     section_header("Company economics", "", "spend", badge=f"{company} · {_ce_wlab}")
     section_filter_contract(
         f,

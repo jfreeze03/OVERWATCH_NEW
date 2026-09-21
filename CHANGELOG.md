@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.564.0 - Bug-hunt round 2: 8 defects across the active panels (2026-09-21)
+
+Adversarial bug-hunt (`wf_9eabfa90`, 4 finders + refute-by-default verify) across the actively-used
+Operations + Cost Intelligence panels found 8 real defects, all fixed:
+
+- **Window labels said "last month" for Current-month / Current-year too (systemic).** `window_bounds`
+  returns a non-None range for all three calendar presets, so the pervasive `"last month" if bounds`
+  idiom mislabeled period-to-date scopes across 16 sites in 5 files. New shared `window_label` /
+  `window_phrase` helpers infer the real label from the bounds shape; every site now uses them.
+- **Clustering-spend caption mislabeled a 90-day figure as up to 365 days** (~4x under-projection) —
+  now labeled with the served window.
+- **"Object-attributed spend" KPI included the non-object residual arm** and disagreed with the
+  reconciliation footer under the same words — the KPI now excludes `QUERY_COMPUTE_RESIDUAL`.
+- **Dynamic-table refresh health ignored company/database/schema** (mixed companies, same class as
+  Volume drops) — now scoped; and its STATUS was "any failure in the window", flagging recovered
+  tables as stale — now a current-condition STALE NOW / RECOVERED / HEALTHY from the newest refresh.
+- **QAS drill told you to "Enable QAS" on a warehouse that already had it on** — caption now branches
+  on whether the clicked warehouse already pays for QAS.
+- **SP breakdown "Distinct child steps" counted the CALL-overhead bucket** — now counts children only.
+- **Pipeline SLA filter-contract banner was stale** ("Volume/DT remain account-wide") — updated.
+
 ## 4.563.0 - Bug-hunt round: fix 3 defects in the v4.562 drills (2026-09-21)
 
 Adversarial bug-hunt (`wf_7ae05925`) on the just-shipped drills confirmed three real defects, all fixed:

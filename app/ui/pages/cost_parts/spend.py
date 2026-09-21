@@ -35,6 +35,7 @@ from app.logic.cost_coverage import (
     service_category,
     service_coverage_inventory,
 )
+from app.logic.date_windows import window_label
 from app.logic.directory import resolve_display
 from app.logic.formulas import (
     account_today,
@@ -261,7 +262,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
     # scanned in the label (bounds windows are <=31d, so the clamp never bites there).
     _served_days = (min(int(days), MAX_LIVE_WINDOW_DAYS)
                     if (_metering_live and bounds is None) else int(days))
-    _wlab = "last month" if bounds is not None else f"{_served_days}d"
+    _wlab = window_label(bounds, _served_days)
     if not guard(res, "No metering rows in this window yet (the view lags up to 24h)."):
         return
     panel_help(

@@ -1069,24 +1069,36 @@ LIMIT 100
 """
 
 
-def dynamic_table_health(days: int) -> str:
-    """Refresh outcomes per dynamic table; failures mean downstream tables
-    are silently serving stale data."""
+def dynamic_table_health(days: int, company: str = "ALL", database: str = "",
+                         schema_contains: str = "") -> str:
+    """Refresh outcomes per dynamic table. FAILURES = failed/upstream-failed/cancelled refreshes
+    in the window; LAST_STATE + STATUS reflect the CURRENT condition, so a table that failed then
+    recovered is not flagged as stale. Honors the company/database/schema scope."""
     days = bounded_days(days, 14)
+    where = and_where(
+        f"REFRESH_END_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        companies.database_company_scope(company, "DATABASE_NAME"),
+        companies.database_equals_clause(database, "DATABASE_NAME"),
+        contains_filter("SCHEMA_NAME", schema_contains),
+    )
     return f"""
 SELECT
     DATABASE_NAME, SCHEMA_NAME, NAME,
     COUNT(*) AS REFRESHES,
-    -- UPSTREAM_FAILED (skipped because an upstream base/DT failed) and CANCELLED are
-    -- also non-success terminal states: the dynamic table did NOT refresh and is serving
-    -- stale data, exactly what this panel warns about — counting only 'FAILED' gave a
+    -- UPSTREAM_FAILED (skipped because an upstream base/DT failed) and CANCELLED are also
+    -- non-success terminal states: the table did NOT refresh — counting only 'FAILED' gave a
     -- false all-clear for a table stale via an upstream break (bug-hunt 2026-08-30).
     COUNT_IF(STATE IN ('FAILED', 'UPSTREAM_FAILED', 'CANCELLED')) AS FAILURES,
     MAX_BY(STATE, REFRESH_END_TIME) AS LAST_STATE,
     MAX(REFRESH_END_TIME) AS LAST_REFRESH,
-    IFF(COUNT_IF(STATE IN ('FAILED', 'UPSTREAM_FAILED', 'CANCELLED')) > 0, 'FAILED', 'SUCCEEDED') AS STATUS
+    -- STATUS = CURRENT condition from the NEWEST refresh, not "any failure in the window":
+    -- STALE NOW (latest refresh failed/skipped → downstream IS stale), RECOVERED (failed earlier
+    -- but the latest succeeded → not stale now), HEALTHY (no failures). A recovered table used to
+    -- read 'FAILED' + "reading stale data", which overclaimed (bug-hunt wwhfz4mq1).
+    IFF(MAX_BY(STATE, REFRESH_END_TIME) IN ('FAILED', 'UPSTREAM_FAILED', 'CANCELLED'), 'STALE NOW',
+        IFF(COUNT_IF(STATE IN ('FAILED', 'UPSTREAM_FAILED', 'CANCELLED')) > 0, 'RECOVERED', 'HEALTHY')) AS STATUS
 FROM SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY
-WHERE REFRESH_END_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+WHERE {where}
 GROUP BY 1, 2, 3
 ORDER BY FAILURES DESC, LAST_REFRESH DESC
 LIMIT 200

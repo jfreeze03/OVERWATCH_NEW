@@ -32,6 +32,7 @@ from app.logic.actions import LEDGER_ESTIMATED, can_verify
 from app.logic.ai_prompts import idle_warehouse_prompt
 from app.logic.capacity import capacity_forecasts
 from app.logic.consolidation import WarehouseProfile, consolidation_candidates
+from app.logic.date_windows import window_label, window_phrase
 from app.logic.formulas import format_usd, humanize_duration, md_dollars, safe_float
 from app.logic.insights import (
     IDLE_TARGET_SUSPEND_SEC,
@@ -386,7 +387,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         _iw = idle_waste_summary(_idle_head.df, rate, _iw_days)
         # WLA-1: the idle read is bounded to the prior calendar month under "Last month" scope,
         # so label "last month" then; served-days honesty applies on the trailing branch.
-        _iw_wlab = "last month" if bounds is not None else f"{_iw_days}d"
+        _iw_wlab = window_label(bounds, _iw_days)
         kpi_row([
             {"label": f"Idle credit waste ({_iw_wlab})", "value": format_usd(_iw["IDLE_USD"]),
              "severity": "warn" if _iw["IDLE_SHARE_PCT"] >= 20 else "",
@@ -763,7 +764,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 _drop = sum(1 for v in verdicts if v.action == "drop")
                 _enable = sum(1 for v in verdicts if v.action == "enable")
                 kpi_row([
-                    {"label": f"QAS spend ({'last month' if bounds is not None else f'{days}d'})",
+                    {"label": f"QAS spend ({window_label(bounds, days)})",
                      "value": format_usd(float(qdf["QAS_USD"].sum()))},
                     {"label": "Drop candidates", "value": str(_drop),
                      "severity": "warn" if _drop else "",
@@ -782,8 +783,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 # the "next question" after a verdict (owner ask 2026-09-21). A pure drop
                 # candidate (spends QAS credits, 0 eligible) has nothing to list.
                 if _qsel is not None and 0 <= int(_qsel) < len(qdf):
-                    _qwh = str(qdf.iloc[int(_qsel)]["WAREHOUSE_NAME"])
-                    _elig_n = safe_float(qdf.iloc[int(_qsel)].get("ELIGIBLE_QUERIES"))
+                    _qrow = qdf.iloc[int(_qsel)]
+                    _qwh = str(_qrow["WAREHOUSE_NAME"])
+                    _elig_n = safe_float(_qrow.get("ELIGIBLE_QUERIES"))
+                    _qas_on = safe_float(_qrow.get("QAS_USD")) > 0   # already paying for QAS?
                     st.markdown(f"**Eligible queries on `{_qwh}` — most acceleration-eligible first**")
                     if not _elig_n:
                         st.caption("This warehouse has no acceleration-eligible queries in the "
@@ -798,11 +801,16 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             styled_table(_eqdf, height=280, column_config={
                                 "SCALE_FACTOR": st.column_config.NumberColumn("Max scale ×", format="%d"),
                                 **_eq_cfg})
+                            _qas_advice = (
+                                "QAS is already enabled here — these are its acceleration-eligible "
+                                "queries; if it rarely helps, lower the max scale factor or drop QAS."
+                                if _qas_on else
+                                "QAS is off here — enable it (with a max scale factor) to accelerate "
+                                "these queries.")
                             st.caption("ELIGIBLE_SEC = query time Snowflake reports as eligible for "
                                        "acceleration; SCALE_FACTOR = the largest scale it would have "
-                                       "used. Enable QAS on the warehouse (with a max scale factor) to "
-                                       "accelerate these — eligibility is utilization, not a guaranteed "
-                                       "dollar saving.")
+                                       "used. " + _qas_advice + " Eligibility is utilization, not a "
+                                       "guaranteed dollar saving.")
 
         st.divider()
         # rec#16: one de-duplicated headline across the advisors. Idle-tune and
@@ -1057,7 +1065,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 # scans the bounded calendar month (WLA-1); otherwise it is a plain live builder
                 # clamped to the trailing window. pat_wlab drives every window label below.
                 pat_days = days if bounds is not None else bounded_days(days)
-                pat_wlab = "last month" if bounds is not None else f"{pat_days}d"
+                pat_wlab = window_label(bounds, pat_days)
                 pdf_c = pats.df.copy()
                 pdf_c["USD_TOTAL"] = pdf_c["ALLOCATED_CREDITS"].map(lambda c: round(safe_float(c) * rate, 2))
                 pdf_c["USD_PER_DAY"] = pdf_c["CREDITS_PER_DAY"].map(lambda c: round(safe_float(c) * rate, 2))
@@ -1220,8 +1228,13 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         if _oc.ok and not _oc.empty:
             _adf = _oc.df.copy()
             _adf["USD"] = _adf["CREDITS"].map(safe_float) * rate
-            kpi_row([{"label": "Object-attributed spend", "value": format_usd(float(_adf["USD"].sum())),
-                      "help": "Sum across arms x the configured rate. Additive by construction."}])
+            # "Object-attributed" EXCLUDES the QUERY_COMPUTE_RESIDUAL arm (credits for queries that
+            # neither read nor wrote a base object — NOT attributed to any object), so this tile
+            # matches its own label AND the reconciliation footer below (same residual-excluded sum).
+            _obj_attr = float(_adf[_adf["COST_ARM"] != "QUERY_COMPUTE_RESIDUAL"]["USD"].sum())
+            kpi_row([{"label": "Object-attributed spend", "value": format_usd(_obj_attr),
+                      "help": "Sum of the OBJECT arms x the configured rate (excludes the non-object "
+                              "QUERY_COMPUTE_RESIDUAL arm, shown separately in the chart). Additive."}])
             charts.bar_usd(_adf.sort_values("USD", ascending=False), "COST_ARM", "USD",
                            title="$ by cost arm", takeaway=True)
             _top = run(cost_sql.object_cost_top(days, company, 25, database=_oc_db, bounds=bounds), page=_PAGE,
@@ -1670,9 +1683,13 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 _churny = _clu[_clu["CHURNY"]] if "CHURNY" in _clu.columns else _clu.iloc[0:0]
                 if not _churny.empty and "TABLE_FQN" in _churny.columns:
                     _recover = float(safe_float(_churny.get("RECOVERABLE_USD", pd.Series(dtype=float)).sum()))
+                    # The scan is clamped to 90d (clustering_by_table -> bounded_days(days, 90)), so
+                    # label the SERVED window, not the picked one — else a 365d pick reads a 90d
+                    # figure as an annual total (~4x low). Bounds -> the calendar phrase.
+                    _clu_served = min(max(int(days), 30), 90)
                     st.markdown(
                         f"**{len(_churny)} churny table(s) — est. {format_usd(_recover)} recoverable over "
-                        f"the last {max(days, 30)} days by suspending automatic clustering.**")
+                        f"{window_phrase(bounds, _clu_served)} by suspending automatic clustering.**")
                     st.caption("Review-only candidates. SUSPEND RECLUSTER stops the reclustering spend; the "
                                "table stays queryable and can be RESUME'd. Confirm the key is genuinely a "
                                "poor fit (not a transient load pattern) before applying.")
@@ -1736,7 +1753,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 elif _plan["level"] == "info":
                     st.info(_plan["message"])
                 if stmt:
-                    _rw_wlab = "last month" if bounds is not None else f"{remed_days}d"
+                    _rw_wlab = window_label(bounds, remed_days)
                     st.caption(f"Idle credits in window ({_rw_wlab}): {idle_credits:,.1f} → actionable "
                                f"${est_monthly:,.0f}/mo once the unavoidable ~{IDLE_TARGET_SUSPEND_SEC}s resume tail per "
                                "active hour is deducted (ESTIMATED until verified).")

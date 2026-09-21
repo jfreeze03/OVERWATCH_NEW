@@ -122,5 +122,5 @@ def test_proc_regression_ranks_by_stronger_of_slowdown_and_fail_jump():
 # ---- LOW: clustering 'recoverable' names its real span ------------------------------
 def test_clustering_recoverable_discloses_its_span():
     opt = _src("app/ui/pages/cost_parts/optimize.py")
-    assert "recoverable over " in opt and "the last {max(days, 30)} days" in opt
+    assert "recoverable over " in opt and "window_phrase(bounds, _clu_served)" in opt
     assert "/window recoverable" not in opt

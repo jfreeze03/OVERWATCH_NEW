@@ -20,6 +20,7 @@ from app.core.query import run, run_batch
 from app.data import cortex_sql, etl_sql, graph_sql, insights_sql, mart27_sql
 from app.logic import graphs
 from app.logic.call_tree import build_call_tree
+from app.logic.date_windows import window_label
 from app.logic.directory import resolve_display
 from app.logic.formulas import (
     credits_to_usd,
@@ -179,7 +180,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         # WLA-1: the AI read is bounded to the prior calendar month under "Last month" scope, so
         # label "last month" then rather than the trailing "{days}d" (which would name a window
         # ending today). The served-days honesty only matters on the trailing branch.
-        _ai_wlab = "last month" if bounds is not None else f"{_ai_days}d"
+        _ai_wlab = window_label(bounds, _ai_days)
         kpis.append({"label": f"AI spend ({_ai_wlab})" + ("" if _ai_full else " · Functions only"),
                      "value": format_usd(credits_to_usd(ai_credits, ai_rate)),
                      "delta": f"{len(ai_res.df)} source/model pair(s)",
@@ -271,9 +272,12 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                 _tot = float(_bdf["USD"].sum())
                 _bdf["PCT"] = _bdf["USD"].map(lambda u: (u / _tot * 100) if _tot else 0.0)
                 _top = _bdf.iloc[0] if len(_bdf) else None
+                # "child steps" excludes the 'CALL (own overhead)' bucket (that is the CALL itself,
+                # not a child); a pruned-history child stays counted (it is a real child statement).
+                _n_children = int((_bdf["STEP_TYPE"] != "CALL (own overhead)").sum())
                 kpi_row([
                     {"label": f"Proc total ({uc_days}d)", "value": format_usd(_tot)},
-                    {"label": "Distinct child steps", "value": f"{len(_bdf):,}"},
+                    {"label": "Distinct child steps", "value": f"{_n_children:,}"},
                     {"label": "Top cost driver",
                      "value": f"{safe_float(_top['PCT']):.0f}%" if _top is not None else "n/a",
                      "delta": (str(_top["STEP_TYPE"]) if _top is not None else ""),

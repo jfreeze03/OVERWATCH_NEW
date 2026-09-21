@@ -42,11 +42,11 @@ def test_spend_metering_tiles_label_the_served_window():
     assert "_metering_live = True" in src
     assert ("_served_days = (min(int(days), MAX_LIVE_WINDOW_DAYS)\n"
             "                    if (_metering_live and bounds is None) else int(days))") in src
-    assert '_wlab = "last month" if bounds is not None else f"{_served_days}d"' in src
+    assert '_wlab = window_label(bounds, _served_days)' in src
     # the served-window disclosure mirrors the sibling cloud-services panel
     assert "Scanned {_served_days}d of the {days}d window (the live fallback caps its scan)." in src
     # the old raw-days label (labeling a 90d answer as the full window) is gone
-    assert '_wlab = "last month" if bounds is not None else f"{days}d"' not in src
+    assert '_wlab = window_label(bounds, days)' not in src
 
 
 # --- IDLE-FMT: IDLE_PCT is 0dp on all four surfaces that render the same idle share ------------

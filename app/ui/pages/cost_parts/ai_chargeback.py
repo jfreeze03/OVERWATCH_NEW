@@ -33,6 +33,7 @@ from app.logic.cortex import (
     token_types_window,
     with_aggregate_budget_row,
 )
+from app.logic.date_windows import window_label, window_phrase
 from app.logic.formulas import account_today, credits_to_usd, format_usd, md_dollars, safe_float
 from app.logic.quotas import block_history
 from app.ui import charts
@@ -85,7 +86,7 @@ def _cortex_spend_tab(days: int, ai_rate: float, *, bounds: tuple | None = None)
         # WLA-1: this read honors bounds, so under "Last month" the data is bounded to the prior
         # calendar month — say "last month" then, matching the sibling AI tiles; the served-days
         # honesty (>90d live clamp) only bites on the trailing branch.
-        _wlab = "last month" if bounds is not None else f"{_win}d"
+        _wlab = window_label(bounds, _win)
         kpi_row([{"label": f"Cortex spend, {_wlab}", "value": format_usd(float(df["USD"].sum())),
                   "help": f"Billed AI-service credits x ${ai_rate:.2f}."}])
         charts.daily_stacked_usd(df, "DAY", "SERVICE_TYPE", "USD")
@@ -202,7 +203,7 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
     # are bounded to that month. A raw "{days}d" label then reads as a trailing window
     # ending today (a DIFFERENT window than the data) and disagrees with the scope chip's
     # "Last month (Aug 1 - Aug 31)". Use "last month" when bounded, else the trailing "{days}d".
-    _wlab = "last month" if bounds is not None else f"{days}d"
+    _wlab = window_label(bounds, days)
     kpi_row([
         {"label": f"Active AI users ({_wlab})", "value": f"{summary['active_users']:,}"},
         {"label": "Requests", "value": f"{summary['total_requests']:,}"},
@@ -394,8 +395,8 @@ def _ai_quota_panel(enriched: pd.DataFrame, summary: dict, days: int,
     unguarded AI exposure from the per-user spend already fetched above. Reuses the
     tab's `enriched` frame + `summary` — no new per-user scan; only the block read."""
     # WLA-1: match the tab's window label — "last month" under bounded scope, else "{days}d".
-    _wlab = "last month" if bounds is not None else f"{days}d"
-    _wphrase = "last month" if bounds is not None else f"the last {days} days"
+    _wlab = window_label(bounds, days)
+    _wphrase = window_phrase(bounds, days)
     st.markdown("**Per-user AI quotas & blocks**")
     panel_help(
         "Snowflake per-user AI quotas (SNOWFLAKE.CORE.QUOTA) cap a user's daily/monthly AI "
@@ -475,8 +476,8 @@ def _token_economics_panel(company: str, days: int, cap_credits: float, *, bound
         return
     # WLA-1 (round 18): honest window label — "last month" when the scope bounds the read
     # to the previous calendar month, else the trailing "{days}d" (see _ai_users_tab).
-    _wlab = "last month" if bounds is not None else f"{days}d"
-    _when = "last month" if bounds is not None else f"in the last {days} days"
+    _wlab = window_label(bounds, days)
+    _when = ("in " + window_phrase(bounds, days))
     # v4.528: days-independent read (one 365d fetch, ONE cache entry shared across every
     # window/company); slice the window in pandas via cortex.token_types_window. The key is
     # now window-free so a window change reuses the cached fetch instead of re-scanning.
@@ -677,7 +678,7 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *, 
     """Department chargeback: warehouse = exact usage (idle + unadjusted CS), role = allocated usage lens."""
     _lm = "_lm" if bounds is not None else ""
     # WLA-1 (round 18): "last month" when bounded to the prior calendar month, else "{days}d".
-    _wlab = "last month" if bounds is not None else f"{days}d"
+    _wlab = window_label(bounds, days)
     # B4 (v4.532): the four independent first-paint reads — dept credits (historical), the
     # role-share MART leg (hourly), department budgets (live), and the department map (recent,
     # operator only) — co-schedule in ONE run_batch_mixed round trip instead of four serial ones.

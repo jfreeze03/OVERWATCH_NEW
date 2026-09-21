@@ -35,8 +35,8 @@ def test_ai_chargeback_tabs_use_bounded_window_label_not_raw_days():
     src = _src("app/ui/pages/cost_parts/ai_chargeback.py")
     # each of the three bounded tabs (_ai_users_tab, _token_economics_panel, _chargeback_tab)
     # derives the same honest label the Spend tab uses.
-    assert src.count('_wlab = "last month" if bounds is not None else f"{days}d"') >= 3
-    assert '_when = "last month" if bounds is not None else f"in the last {days} days"' in src
+    assert src.count('_wlab = window_label(bounds, days)') >= 3
+    assert '_when = ("in " + window_phrase(bounds, days))' in src
     # the fixed labels/captions read from _wlab/_when ...
     assert 'f"Active AI users ({_wlab})"' in src
     assert 'f"Credits ({_wlab})"' in src
