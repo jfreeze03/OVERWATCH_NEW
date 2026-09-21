@@ -76,6 +76,41 @@ def test_qas_drill_is_wired_in_optimize():
     assert "cost_sql.qas_eligible_queries(_qwh, days, bounds=bounds)" in src
 
 
+def test_qas_eligible_queries_only_selects_real_view_columns():
+    # bug-hunt wwhfz4mq1: QUERY_ACCELERATION_ELIGIBLE has NO WAREHOUSE_SIZE column (only
+    # WAREHOUSE_ID/NAME) — selecting it compile-errors on every drill click + writes APP_ERROR_LOG.
+    sql = cost_sql.qas_eligible_queries("WH_ALFA_QUERY", 60)
+    assert "WAREHOUSE_SIZE" not in sql
+    # the proven sibling qas_roi reads the same view and also never selects WAREHOUSE_SIZE
+    assert "WAREHOUSE_SIZE" not in cost_sql.qas_roi(30, "ALFA")
+
+
+# --------------------------------------------------------------------------- SP breakdown edge fixes
+def test_breakdown_null_context_row_matches_is_null_not_all_contexts():
+    # bug-hunt wwhfz4mq1: the drill targets ONE leaderboard group. A NULL db/schema row (a
+    # fully-qualified CALL from a session with no USE DATABASE) is its OWN group — an empty
+    # db/schema arg must match IS NULL, NOT drop the predicate (which would pool every context
+    # and over-count the clicked row, breaking the "sums to the row's $" claim).
+    null_ctx = insights_sql.procedure_child_cost_breakdown("SP_X", 30, "ALFA", "", "")
+    assert "c.DATABASE_NAME IS NULL" in null_ctx and "c.SCHEMA_NAME IS NULL" in null_ctx
+    # real context still matches exactly (no IS NULL on the scope columns)
+    exact = insights_sql.procedure_child_cost_breakdown("SP_X", 30, "ALFA", "MYDB", "PUBLIC")
+    assert "c.DATABASE_NAME IS NULL" not in exact and "c.SCHEMA_NAME IS NULL" not in exact
+    assert "UPPER(c.SCHEMA_NAME) = 'PUBLIC'" in exact and "MYDB" in exact
+    # a real-db / NULL-schema row is expressible too
+    mixed = insights_sql.procedure_child_cost_breakdown("SP_X", 30, "ALFA", "MYDB", "")
+    assert "MYDB" in mixed and "c.SCHEMA_NAME IS NULL" in mixed and "c.DATABASE_NAME IS NULL" not in mixed
+
+
+def test_breakdown_call_own_bucket_excludes_full_proc_wallclock_from_elapsed():
+    # bug-hunt wwhfz4mq1: the CALL's own row's TOTAL_ELAPSED_TIME is the whole proc's wall-clock
+    # (a CALL blocks until children finish), so 'CALL (own overhead)' must NOT average it in —
+    # else that bucket shows the entire proc duration as its "own overhead" time.
+    sql = insights_sql.procedure_child_cost_breakdown("SP_X", 30, "ALFA", "MYDB", "PUBLIC")
+    assert "CASE WHEN att.ROOT_QUERY_ID IS NULL THEN NULL" in sql
+    assert "AS AVG_ELAPSED_SEC" in sql
+
+
 # --------------------------------------------------------------------------- SP child-cost drill
 def test_procedure_child_cost_breakdown_structure():
     sql = insights_sql.procedure_child_cost_breakdown(

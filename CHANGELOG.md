@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.563.0 - Bug-hunt round: fix 3 defects in the v4.562 drills (2026-09-21)
+
+Adversarial bug-hunt (`wf_7ae05925`) on the just-shipped drills confirmed three real defects, all fixed:
+
+- **QAS drill compile-errored on every click (MED).** `cost_sql.qas_eligible_queries` selected
+  `WAREHOUSE_SIZE`, which `QUERY_ACCELERATION_ELIGIBLE` doesn't have (only `WAREHOUSE_ID`/`_NAME`) —
+  so clicking an enable-candidate warehouse raised `invalid identifier` and wrote APP_ERROR_LOG
+  instead of listing queries. Column removed (the drill is already scoped to one warehouse).
+- **SP breakdown over-counted a NULL-context row (MED).** A leaderboard row for a proc called with
+  no session database (NULL db/schema) is its own group; the drill passed empty strings, which the
+  builder read as "no filter" and pooled every context's calls — inflating the total and breaking
+  the "sums to the row's $" claim. Empty db/schema now matches `IS NULL` (the actual group), so
+  NULL-context rows reconcile too.
+- **'CALL (own overhead)' showed the whole proc's runtime (LOW).** A synchronous CALL's
+  `TOTAL_ELAPSED_TIME` is the full proc wall-clock, so averaging it into that bucket made "own
+  overhead" look like it took the entire proc. The CALL's own row is now excluded from the
+  breakdown's `AVG_ELAPSED_SEC` (that bucket shows "—"; its $ is still the honest own-overhead).
+
 ## 4.562.0 - Ops drills: QAS eligible queries, SP cost breakdown, Volume-drops scope (2026-09-21)
 
 Three owner-reported gaps across Operations & Cost Intelligence:

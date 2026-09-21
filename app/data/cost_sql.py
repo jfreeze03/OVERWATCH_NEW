@@ -370,12 +370,13 @@ def qas_eligible_queries(warehouse: str, days: int, *, bounds: tuple | None = No
            if bounds is not None
            else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     where = and_where(win, f"WAREHOUSE_NAME = {sql_literal(wh)}")
+    # NOTE: QUERY_ACCELERATION_ELIGIBLE has NO WAREHOUSE_SIZE column (only WAREHOUSE_ID/NAME) —
+    # selecting it compile-errors; the drill is scoped to one warehouse so its size is redundant.
     return f"""
 SELECT
     QUERY_ID,
     LEFT(QUERY_TEXT, 140) AS QUERY_PREVIEW,
     START_TIME,
-    WAREHOUSE_SIZE,
     ROUND(COALESCE(ELIGIBLE_QUERY_ACCELERATION_TIME, 0), 1) AS ELIGIBLE_SEC,
     UPPER_LIMIT_SCALE_FACTOR AS SCALE_FACTOR
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ACCELERATION_ELIGIBLE

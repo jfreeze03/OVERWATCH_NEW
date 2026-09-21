@@ -1594,9 +1594,14 @@ def procedure_child_cost_breakdown(proc_name: str, days: int, company: str = "AL
     name = str(proc_name or "").strip().upper().rstrip("(")
     lit = sql_literal(name)
     # EXACT database + schema (the leaderboard's own group keys), so the drill can't pull a
-    # substring-colliding sibling schema's calls into this row's total.
+    # substring-colliding sibling schema's calls into this row's total. CRITICAL: the leaderboard
+    # GROUPs NULL db/schema (a fully-qualified CALL from a session with no USE DATABASE) into its
+    # OWN row, so an EMPTY db/schema arg here means "match that NULL group" (IS NULL) — NOT "no
+    # filter", which would pool every context's calls and over-count the clicked NULL-context row.
+    db_exact = (companies.database_equals_clause(database, "c.DATABASE_NAME")
+                if str(database or "").strip() else "c.DATABASE_NAME IS NULL")
     schema_exact = (f"UPPER(c.SCHEMA_NAME) = {sql_literal(str(schema).strip().upper())}"
-                    if str(schema or "").strip() else "")
+                    if str(schema or "").strip() else "c.SCHEMA_NAME IS NULL")
     # CALL-scan window IDENTICAL to procedure_costs_usd (CURRENT_TIMESTAMP trailing / bounded
     # calendar), so the drill's call set equals the leaderboard row's — a CURRENT_DATE anchor
     # would start at midnight and over-count the boundary slice in the trailing view.
@@ -1607,7 +1612,7 @@ def procedure_child_cost_breakdown(proc_name: str, days: int, company: str = "AL
         call_win,
         "c.QUERY_TYPE = 'CALL'",
         _wh_company_scope(company, "c.WAREHOUSE_NAME"),
-        companies.database_equals_clause(database, "c.DATABASE_NAME"),
+        db_exact,
         schema_exact,
         contains_filter("c.WAREHOUSE_NAME", warehouse_contains),
         contains_filter("c.USER_NAME", user_contains),
@@ -1646,7 +1651,12 @@ SELECT
     ANY_VALUE(CASE WHEN att.ROOT_QUERY_ID IS NULL THEN '(the CALL statement itself)'
                    ELSE LEFT(COALESCE(q.QUERY_TEXT, '(history pruned)'), 140) END) AS STEP_SAMPLE,
     COUNT(*) AS EXECUTIONS,
-    ROUND(AVG(COALESCE(q.TOTAL_ELAPSED_TIME, 0)) / 1000.0, 1) AS AVG_ELAPSED_SEC,
+    -- The CALL's own row's TOTAL_ELAPSED_TIME is the FULL proc wall-clock (a synchronous CALL
+    -- blocks until every child returns), NOT incremental overhead — averaging it in would make
+    -- 'CALL (own overhead)' show the entire proc duration. Exclude it -> that bucket's elapsed is
+    -- NULL ("—"); its CREDITS are the honest own-overhead measure. Child buckets average normally.
+    ROUND(AVG(CASE WHEN att.ROOT_QUERY_ID IS NULL THEN NULL
+                   ELSE COALESCE(q.TOTAL_ELAPSED_TIME, 0) END) / 1000.0, 1) AS AVG_ELAPSED_SEC,
     ROUND(SUM(att.CREDITS), 6) AS CREDITS
 FROM att
 LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
