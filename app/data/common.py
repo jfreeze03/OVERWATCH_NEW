@@ -111,6 +111,28 @@ def lag_offset_start(days: int, lag_hours: int = 24) -> str:
 
 
 # ---------------------------------------------------------------------------
+# TIMEZONE STANDARD (see the timezone-consistency audit). OVERWATCH runs in the
+# Snowflake ACCOUNT default TIMEZONE, which IS 'America/Chicago' (verified
+# 2026-09-21: SHOW PARAMETERS ... IN ACCOUNT -> value=America/Chicago, level=
+# ACCOUNT). The deployed Streamlit-in-Snowflake app CANNOT ALTER SESSION (an
+# owner's-rights no-op), so that account default is the ONLY lever keeping the
+# app's clock Central -- every session-tz read (CURRENT_DATE()/CURRENT_TIMESTAMP()/
+# a bare ts::DATE, and any raw timestamp rendered to a user) resolves in Central
+# ONLY because the account default is Central. Rules for NEW builders:
+#   * A displayed timestamp or a day/month BOUNDARY that must be account-correct
+#     REGARDLESS of the session zone MUST pin Central explicitly -- use
+#     account_today_sql() / account_month_start_sql(), or wrap the column in
+#     CONVERT_TIMEZONE('America/Chicago', ts) -- never a bare CURRENT_DATE()/
+#     CURRENT_TIMESTAMP()/ts::DATE, which resolve in the session zone.
+#   * scope_window_where()/resolve_effective_window() intentionally use session-tz
+#     CURRENT_DATE() for rolling trailing windows (the convention above); that is
+#     correct while the account is Central and is the accepted pattern.
+# tests/test_timezone_standard.py locks ACCOUNT_TIMEZONE and the Central-pinned
+# helpers so a future edit can't silently re-anchor the app's clock.
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
 # Canonical AI/Cortex service-type predicate (v4.158.0). MUST stay byte-equal
 # to app.logic.cost_coverage._is_ai_family — the SQL predicates had diverged and
 # dropped SNOWFLAKE_COCO_SNOWSIGHT (Cortex Code / CoWork), so CoCo was excluded

@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.560.0 - Timezone standard guard (no behavior change) (2026-09-21)
+
+The timezone-consistency audit resolved to a **non-issue**: the owner diagnostic
+(`SHOW PARAMETERS LIKE 'TIMEZONE' IN ACCOUNT`) returned `value=America/Chicago,
+level=ACCOUNT` — the account is explicitly Central, so the deployed SiS app (which
+can't `ALTER SESSION`) inherits Central and already renders every timestamp in
+America/Chicago. The audit's ~30 "session-dependent" sites are correct, not drifting;
+the Snowsight-vs-app mismatch that prompted this was a UTC *worksheet* session, not the
+app. No account change, no mart reload.
+
+Light defensive hardening only (blast-radius-free, no owner migration): a documented
+**TIMEZONE STANDARD** in `app/data/common.py` (new builders whose date boundary must be
+account-correct pin Central via `account_today_sql()`/`account_month_start_sql()` or
+`CONVERT_TIMEZONE('America/Chicago', …)`, never a bare `CURRENT_DATE()`), plus a guard
+test (`tests/test_timezone_standard.py`) locking `ACCOUNT_TIMEZONE='America/Chicago'`, the
+Central-pinned SQL helpers, and the TZ-aware Python clock — so a future edit can't silently
+re-anchor the app's clock. No app behavior changes.
+
 ## 4.559.0 - Bug-hunt round 3 (close-out): last-twin new-section fixes (2026-09-18)
 
 Round-3 close-out sweep (4 finders + refute-by-default verify) found 5 verified bugs — 0 HIGH,
