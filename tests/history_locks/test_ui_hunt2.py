@@ -58,7 +58,11 @@ def test_budget_burndown_uses_full_month_account_frame():
 def test_queries_sparkline_suppressed_under_unhonored_filters():
     ops = _src("app/ui/pages/operations.py")
     assert "_spark_ok = not (wh_filter or user_filter or schema_contains)" in ops
-    assert "if _spark_ok and activity.usable()" in ops
+    # v4.573 perf: suppression now also SKIPS the fetch (the feed was fetched then discarded under
+    # an unhonored filter). The spark still renders only when _spark_ok — via the gated fetch
+    # (activity stays None otherwise) — so a filtered KPI is never paired with a company-wide trend.
+    assert "activity = None\n        if _spark_ok:" in ops
+    assert 'if activity is not None and activity.usable() and "QUERIES" in activity.df.columns else None' in ops
 
 
 # 5) operations failure-timeline header alarm — driven by the ACTUAL 7d failures the

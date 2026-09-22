@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.573.0 - Performance pass: mart-first + read batching (2026-09-22)
+
+Grounded in the `tests/usage_sim.py` headless profiler (cold logical reads per interaction). The
+app was already lean — most reads hit fast marts — so this is targeted: 1 metered-scan removal + 3
+cold-paint round-trip trims, each aligned with the existing mart-first / batching patterns and
+verified net-positive.
+
+- **Overview "Last month" no longer fires a live ACCOUNT_USAGE scan** — `fact_warehouse_daily` now
+  accepts `bounds` (via `scope_window_where`, exactly like its sibling `fact_task_daily`), so the
+  day-grain mart can express a bounded calendar month. `_live_fallback_daily` is now mart-first
+  (FACT_WAREHOUSE_DAILY, with the WAREHOUSE_METERING_HISTORY scan as the labeled fallback). Removes
+  the 1 AU scan on Overview's Last-month cold paint when the fact is warm; trailing scope unchanged.
+- **Operations skips a discarded read** — the `activity` sparkline feed was fetched even when a
+  warehouse/user/schema filter suppresses the spark (its result was then dropped). Now gated behind
+  `_spark_ok`, saving one fast-mart read per filtered Queries interaction.
+- **Decision Studio batches its scorecard reads** — the three independent, non-probe scorecard reads
+  (sc_quarter / sc_appcost / sc_accept) now co-schedule into one `run_batch` (prefetch-else-run),
+  saving 2 round trips per cold page open. The ledger gate and the probe read stay separate.
+- **Overview folds `score_inputs` into the existing score batch** — it was its own round trip right
+  after the 2-member `_score_pf` batch; now a 3rd member consumed via `run_mart_first(preloaded=…)`,
+  saving 1 round trip per cold Overview paint.
+
 ## 4.572.0 - Bug-hunt round 10: bounds-into-prior-calendar-month sweep (2026-09-22)
 
 Adversarial bug-hunt round 10 (`wf_da49e8c1-d73`) — a targeted sweep of the round-9 lead (the

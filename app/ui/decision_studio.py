@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from app.core.identity import content_request_key, viewer_name
-from app.core.query import execute_statement, run
+from app.core.query import execute_statement, run, run_batch
 from app.core.session import is_operator
 from app.core.state import request_navigation
 from app.data import mart_sql, workbench_sql
@@ -650,12 +650,23 @@ def _proof_signals(rate: float) -> dict | None:
     if not ledger.ok:
         _PROOF_MEMO.update(rate=_k, sig=None)
         return None
-    _q = run(mart_sql.savings_summary_quarter(), page=_PAGE, key="sc_quarter",
-             tier="recent", source="SAVINGS_LEDGER (QTD)")
-    _ac = run(mart_sql.app_cost_last_30d(), page=_PAGE, key="sc_appcost",
-              tier="recent", source="FACT_WAREHOUSE_DAILY (app warehouse, trailing 30d)")
-    _acc = run(mart_sql.action_acceptance(90), page=_PAGE, key="sc_accept",
-               tier="recent", source="ACTION_QUEUE (decided in 90d)")
+    # perf: the ledger gate above must run first (it early-returns), but these three scorecard
+    # reads are independent + non-probe — co-schedule them into ONE round trip instead of three
+    # serial run()s (prefetch-else-run: a missing/failed member falls back to its serial read).
+    # sc_precision stays a separate run() to keep its probe=True (classified-absence silencing).
+    _sc_pf = run_batch([
+        {"key": "sc_quarter", "sql": mart_sql.savings_summary_quarter(), "source": "SAVINGS_LEDGER (QTD)"},
+        {"key": "sc_appcost", "sql": mart_sql.app_cost_last_30d(),
+         "source": "FACT_WAREHOUSE_DAILY (app warehouse, trailing 30d)"},
+        {"key": "sc_accept", "sql": mart_sql.action_acceptance(90), "source": "ACTION_QUEUE (decided in 90d)"},
+    ], page=_PAGE, tier="recent") or {}
+    _q = _sc_pf.get("sc_quarter") or run(mart_sql.savings_summary_quarter(), page=_PAGE,
+                                         key="sc_quarter", tier="recent", source="SAVINGS_LEDGER (QTD)")
+    _ac = _sc_pf.get("sc_appcost") or run(mart_sql.app_cost_last_30d(), page=_PAGE, key="sc_appcost",
+                                          tier="recent",
+                                          source="FACT_WAREHOUSE_DAILY (app warehouse, trailing 30d)")
+    _acc = _sc_pf.get("sc_accept") or run(mart_sql.action_acceptance(90), page=_PAGE, key="sc_accept",
+                                          tier="recent", source="ACTION_QUEUE (decided in 90d)")
     _prec = run(mart_sql.rule_precision(90), page=_PAGE, key="sc_precision",
                 tier="recent", source="ALERT_EVENTS resolution kinds", probe=True)
     totals = ledger_totals(ledger.df)

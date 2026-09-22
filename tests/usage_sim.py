@@ -132,6 +132,13 @@ def _rec_batch(specs, **kwargs):
 
 
 def _rec_mart_first(mart_sql, live_sql="", **kwargs):
+    # Prefetch-else-run: when a usable `preloaded` batch result is passed, run_mart_first serves
+    # from it and issues NO read of its own (the run_batch that produced it already logged the
+    # read) — model that so the ledger counts round trips, not a double-count of a co-scheduled
+    # member (else every run_mart_first(preloaded=...) site reads as a phantom duplicate).
+    pre = kwargs.get("preloaded")
+    if pre is not None and getattr(pre, "usable", lambda: False)():
+        return pre
     # Hot path: the mart answers (a shaped frame is non-empty), so exactly ONE mart read.
     # A real mart MISS would additionally issue the live ACCOUNT_USAGE leg — noted in the report.
     _record("mart_first", mart_sql, kwargs.get("page"), kwargs.get("key"), "hourly")

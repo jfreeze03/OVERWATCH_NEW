@@ -33,20 +33,39 @@ def _counting_run(counter: Counter):
     return _run
 
 
+def _counting_run_batch(counter: Counter):
+    # perf: sc_quarter/sc_appcost/sc_accept now co-schedule through run_batch (one round trip);
+    # count each batched member by key so the once-per-render assertion still holds across both seams.
+    def _run_batch(specs, *, page, tier=None, **_kw):
+        out = {}
+        for spec in specs or []:
+            counter[spec["key"]] += 1
+            out[spec["key"]] = _shaped_from_sql(spec.get("sql", ""))
+        return out
+    return _run_batch
+
+
+def _patch_reads(monkeypatch, counter: Counter) -> None:
+    monkeypatch.setattr(ds, "run", _counting_run(counter))
+    monkeypatch.setattr(ds, "run_batch", _counting_run_batch(counter))
+
+
 def test_proof_signals_shared_once_per_render(monkeypatch):
     counter: Counter = Counter()
-    monkeypatch.setattr(ds, "run", _counting_run(counter))
+    _patch_reads(monkeypatch, counter)
     ds.reset_proof_memo()
     a = ds._proof_signals(3.68)
     b = ds._proof_signals(3.68)               # same render (no reset) -> memo hit, no new reads
     assert a is b                             # identical object => one computation, not two
+    # ledger + sc_precision go through run(); sc_quarter/sc_appcost/sc_accept through run_batch —
+    # each still exactly once per render (the batch is one round trip, but each member reads once).
     for k in _PROOF_KEYS:
         assert counter[k] == 1, f"{k} read {counter[k]}x within one render (expected 1)"
 
 
 def test_reset_re_enables_reads_next_render(monkeypatch):
     counter: Counter = Counter()
-    monkeypatch.setattr(ds, "run", _counting_run(counter))
+    _patch_reads(monkeypatch, counter)
     ds._proof_signals(3.68)
     ds._proof_signals(3.68)                   # memo hit
     assert counter["decision_roi_ledger_full"] == 1
@@ -57,7 +76,7 @@ def test_reset_re_enables_reads_next_render(monkeypatch):
 
 
 def test_reset_clears_the_memo(monkeypatch):
-    monkeypatch.setattr(ds, "run", _counting_run(Counter()))
+    _patch_reads(monkeypatch, Counter())
     ds._proof_signals(3.68)
     assert ds._PROOF_MEMO                       # populated
     ds.reset_proof_memo()

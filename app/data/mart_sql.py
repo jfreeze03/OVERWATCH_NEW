@@ -305,9 +305,13 @@ ORDER BY DAY
 """
 
 
-def fact_warehouse_daily(days: int, company: str = "ALL") -> str:
+def fact_warehouse_daily(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     days = bounded_days(days, MAX_MART_WINDOW_DAYS)
-    where = [f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())"]
+    # perf: honor a bounded calendar window (Last month) via scope_window_where — the day-grain
+    # fact CAN express a [start, end) month (unlike the trailing-window-keyed exec_board), so
+    # Overview's Last-month daily-spend read can serve from this mart instead of a live
+    # WAREHOUSE_METERING_HISTORY scan. The trailing (bounds=None) predicate stays byte-identical.
+    where = [scope_window_where("DAY", days, bounds=bounds)]
     if str(company).upper() != "ALL":
         where.append(f"COMPANY = {sql_literal(company)}")
     return f"""

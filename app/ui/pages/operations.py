@@ -270,20 +270,25 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         qcount = safe_float(row.get("QUERY_COUNT"))
         failed = safe_float(row.get("FAILED_COUNT"))
         fail_pct = (failed / qcount * 100) if qcount else None
-        activity = _mart_pf.get("activity") if isinstance(_mart_pf, dict) else None
-        if activity is None or not activity.ok:
-            activity = run(_activity_sql, page=_PAGE, key="ops_spark_activity",
-                           tier="hourly", source="FACT_QUERY_HOURLY (daily)")
         # The activity feed (fact_daily_activity) honors only company + database, but
         # the KPI VALUES beside these sparks are also scoped by warehouse/user/schema.
         # Suppress the trend glyph when one of those filters is active rather than pair
         # a filtered number with a company/DB-wide shape it doesn't describe. (database
         # IS honored by the feed, so it does not suppress.)
         _spark_ok = not (wh_filter or user_filter or schema_contains)
+        # perf: only FETCH the feed when the spark will render — under a warehouse/user/schema
+        # filter q_spark/f_spark are None regardless, so the read (which fell through to its own
+        # `ops_spark_activity` key on the live path) was fetched and then discarded.
+        activity = None
+        if _spark_ok:
+            activity = _mart_pf.get("activity") if isinstance(_mart_pf, dict) else None
+            if activity is None or not activity.ok:
+                activity = run(_activity_sql, page=_PAGE, key="ops_spark_activity",
+                               tier="hourly", source="FACT_QUERY_HOURLY (daily)")
         q_spark = (activity.df["QUERIES"].tolist()
-                   if _spark_ok and activity.usable() and "QUERIES" in activity.df.columns else None)
+                   if activity is not None and activity.usable() and "QUERIES" in activity.df.columns else None)
         f_spark = (activity.df["FAILS"].tolist()
-                   if _spark_ok and activity.usable() and "FAILS" in activity.df.columns else None)
+                   if activity is not None and activity.usable() and "FAILS" in activity.df.columns else None)
         # The mart honors the full window (up to 365d); the live fallback clamps to the
         # 90-day live-scan horizon. Label the tile with the window actually SERVED, so a
         # >90d selection served live isn't captioned as its full requested span (the

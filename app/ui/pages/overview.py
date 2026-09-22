@@ -107,15 +107,20 @@ def _load_board(company: str, days: int, window: object = None) -> QueryResult:
 
 def _live_fallback_daily(company: str, days: int, rate: float,
                          bounds: tuple | None = None) -> tuple[pd.DataFrame, QueryResult]:
-    """Bounded live aggregate when the mart is not deployed — real data,
-    clearly labeled, never fabricated. Also the 'Last month' path: the exec board is
-    keyed by trailing WINDOW_DAYS and cannot express a bounded calendar month, so
-    Overview routes Last month here with the explicit (start, end) range."""
+    """Daily warehouse-spend series for the paths the trailing-window exec_board can't serve —
+    the 'Last month' calendar window (its explicit (start, end) range) and the mart-not-deployed
+    fallback. perf: MART-FIRST — FACT_WAREHOUSE_DAILY carries the same DAY/WAREHOUSE_NAME/
+    CREDITS_TOTAL columns for 365d and CAN express a bounded month, so it serves this read and the
+    live WAREHOUSE_METERING_HISTORY scan is only the labeled fallback (Last month is a closed
+    calendar period, so the fact's hourly loader lag is immaterial). Real data, never fabricated."""
     _lm = "_lm" if bounds is not None else ""
-    res = run(
+    res = run_mart_first(
+        mart_sql.fact_warehouse_daily(days, company, bounds=bounds),
         cost_sql.warehouse_daily_credits(days, company, bounds=bounds),
-        page=_PAGE, key=f"live_wh_daily_{company}_{days}{_lm}", tier="historical",
-        source="Live ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY (bounded)",
+        page=_PAGE, key=f"live_wh_daily_{company}_{days}{_lm}",
+        mart_source="FACT_WAREHOUSE_DAILY (bounded)",
+        live_source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY (bounded fallback)",
+        mart_tier="hourly", live_tier="historical",
     )
     if not res.usable():
         return pd.DataFrame(), res
@@ -420,6 +425,11 @@ def render() -> None:
          "source": "FACT_QUERY_HOURLY (prev + current calendar day)"},
         {"key": f"score_tasks_{company}", "sql": _tk_sql,
          "source": "FACT_TASK_DAILY (prev + current calendar day)"},
+        # perf: fold the score-inputs mart leg (fixed 30d/account, hourly tier) into this same
+        # round trip — it was its own physical read immediately after this batch; run_mart_first
+        # below consumes it via preloaded= and only fires the live fallback on a mart miss.
+        {"key": "score_inputs", "sql": mart27_sql.platform_score_inputs(30),
+         "source": "FACT_PLATFORM_SCORE_DAILY (daily snapshot)"},
     ], page=_PAGE, tier="hourly") or {}
     _thr = _score_pf.get(f"score_throughput_{company}") or run(
         _thr_sql, page=_PAGE, key=f"score_throughput_{company}", tier="hourly",
@@ -470,7 +480,8 @@ def render() -> None:
         page=_PAGE, key="score_inputs",
         mart_source="FACT_PLATFORM_SCORE_DAILY (daily snapshot)",
         live_source="facts + ALERT_EVENTS (retro score inputs, live fallback)",
-        mart_tier="hourly", live_tier="hourly")  # rec 10: score facts refresh daily
+        mart_tier="hourly", live_tier="hourly",  # rec 10: score facts refresh daily
+        preloaded=_score_pf.get("score_inputs"))  # perf: served from the batch above
     score_series = (scoring.score_history(score_inputs.df, scoring.resolve_weights(settings),
                                           budget, rate, ai_rate)  # C1: AI-rate-blended budget
                     if score_inputs.usable() else pd.DataFrame())
