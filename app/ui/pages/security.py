@@ -13,6 +13,7 @@ from app.core.errors import safe_page
 from app.core.query import cache_scope, run, run_batch
 from app.core.state import filters, request_navigation
 from app.data import cortex_sql, insights_sql, mart27_sql, security_sql
+from app.logic.date_windows import is_prior_month_window
 from app.logic.directory import resolve_display
 from app.logic.exposure import classify_share_exposure, summarize_exposure
 from app.logic.governance import governance_drift, resolve_gov_weights, tag_coverage_score
@@ -449,7 +450,13 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
 
     if st.toggle("Compare destinations with the prior period", key="sec_egress_baseline_on"):
         baseline = run(
-            security_sql.egress_baseline(days, bounds=bounds), page=_PAGE,
+            # r10: egress_baseline compares CURRENT vs the PRIOR CALENDAR MONTH under bounds — valid
+            # only for LAST_MONTH. Under the period-to-date presets (Current month / Current year) the
+            # current side is PARTIAL, so it flagged spurious NEW/SPIKE destinations (false exfil
+            # alarms) and missed real spikes. Pass calendar bounds only for Last month; else None
+            # (the builder's trailing equal-length span/2*span branch).
+            security_sql.egress_baseline(days, bounds=bounds if is_prior_month_window(bounds) else None),
+            page=_PAGE,
             key=f"sec_egress_baseline_{days}{_lm}", tier="historical",
             source="DATA_TRANSFER_HISTORY current vs prior (on demand)",
         )

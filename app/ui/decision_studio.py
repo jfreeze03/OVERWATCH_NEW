@@ -14,6 +14,7 @@ from app.core.state import request_navigation
 from app.data import mart_sql, workbench_sql
 from app.logic import insights
 from app.logic.actions import ledger_totals, savings_by_lever, savings_by_month
+from app.logic.date_windows import is_prior_month_window
 from app.logic.decision import prioritize_workloads, scenario_projection, slo_summary
 from app.logic.formulas import (
     account_now,
@@ -412,7 +413,14 @@ def _products(company: str, days: int, rate: float, *, bounds: tuple | None = No
     # #28: cost-per-consumer + retirement candidates. Which products cost real money but
     # have lost their readers? Consumer reach + reads trend from ACCESS_HISTORY
     # (Enterprise-only, degrade-safe) joined to the object cost above.
-    reads = run(workbench_sql.product_consumer_reads(days, company, bounds=bounds), page=_PAGE,
+    # r10: the RECENT-vs-PRIOR reads trend compares CURRENT vs the PRIOR CALENDAR MONTH under bounds —
+    # valid only for LAST_MONTH. Under the period-to-date presets the current side is PARTIAL, so the
+    # trend flipped retirement verdicts (false REVIEW / false RETIRE_CANDIDATE; Current-year masked
+    # real declines). Pass calendar bounds only for Last month; else None (trailing equal-length).
+    # DISTINCT_CONSUMERS / cost-per-consumer already align to the bounded current window separately.
+    reads = run(workbench_sql.product_consumer_reads(
+                    days, company, bounds=bounds if is_prior_month_window(bounds) else None),
+                page=_PAGE,
                 key=f"decision_product_consumers_{company}_{days}{_lm}", tier="recent",
                 source="ENTITY_CATALOG + ACCESS_HISTORY reads", probe=True)
     verdicts = insights.product_retirement(

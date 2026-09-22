@@ -1,5 +1,35 @@
 # Changelog
 
+## 4.572.0 - Bug-hunt round 10: bounds-into-prior-calendar-month sweep (2026-09-22)
+
+Adversarial bug-hunt round 10 (`wf_da49e8c1-d73`) — a targeted sweep of the round-9 lead (the
+`bounds`-into-a-prior-calendar-month class) plus fresh axes. 6 confirmed findings deduped to 3
+distinct defects, all siblings of the r9 class the sweep was aimed at. `window_bounds` is non-None
+for all three calendar presets, but a "current vs PRIOR CALENDAR MONTH" comparison is valid only for
+Last month; the two period-to-date presets (Current month / Current year) have a PARTIAL current side.
+
+- **(HIGH) Spend → Attribution "By warehouse" vs-prior table** (`spend.py`, behind the "Load company
+  attribution" toggle, also reached via Control Room's "Full spend movers →" deep-link) compared a
+  PARTIAL current period against a FULL prior calendar month for the period-to-date presets: every
+  warehouse showed a spurious ~-29% "spend drop" mid-month (rendered GREEN by the delta tint) and
+  ~+800% under Current year, with a totals row and a caption that literally claimed "Equal-length
+  windows". The bounded current side IS the (correct) allocation pool and stays; the misleading
+  vs-prior columns / "Prior spend" total are now suppressed for the period-to-date presets (with an
+  honest caption), the false "equal-length windows" note is dropped there, and the half-window "caps
+  at N days" disclosure is gated to trailing windows (under bounds the builder scans the full range).
+- **(MED) Security ▸ Egress "compare with prior period"** (`security.py`) flagged spurious NEW/SPIKE
+  destinations (false exfiltration alarms) under Current year and missed real spikes under Current
+  month — same partial-vs-full baseline. `egress_baseline` is now called with calendar bounds only
+  for Last month (else trailing equal-length), via `is_prior_month_window`.
+- **(MED) Decision Studio ▸ Products retirement trend** (`decision_studio.py`) — the RECENT-vs-PRIOR
+  reads trend compared a partial current period against a full prior calendar month, flipping
+  retirement verdicts (false REVIEW / RETIRE_CANDIDATE; Current year masked real declines). Now gated
+  on `is_prior_month_window` (trailing equal-length for the period-to-date presets); the object-cost
+  and consumer counts are unaffected.
+
+(The third r9-flagged sibling, `ops_sql.proc_regression`, was checked and is clean. The fresh
+data_editor/bulk-write and sign/delta-direction axes surfaced no new confirmed defects.)
+
 ## 4.571.0 - Bug-hunt round 9: write-safety, allocation windows, period-to-date comparisons (2026-09-22)
 
 Adversarial bug-hunt round 9 (`wf_287a1ca2-ff3`) on FRESH axes — write-path correctness,

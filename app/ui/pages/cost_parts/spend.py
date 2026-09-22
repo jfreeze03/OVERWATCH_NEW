@@ -35,7 +35,7 @@ from app.logic.cost_coverage import (
     service_category,
     service_coverage_inventory,
 )
-from app.logic.date_windows import window_label
+from app.logic.date_windows import is_prior_month_window, window_label, window_phrase
 from app.logic.directory import resolve_display
 from app.logic.formulas import (
     account_today,
@@ -892,20 +892,42 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
     if guard(wh, "No warehouse credits in this window."):
         view = wh.df.copy()
         view["USD_CURRENT"] = view["CREDITS_CURRENT"].map(lambda c: credits_to_usd(c, rate))
-        view["USD_PRIOR"] = view["CREDITS_PRIOR"].map(lambda c: credits_to_usd(c, rate))
-        view["DELTA_PCT"] = view.apply(lambda r: pct_delta(r["USD_CURRENT"], r["USD_PRIOR"]), axis=1)
         window_usd = float(view["USD_CURRENT"].sum())
-        prior_window_usd = float(view["USD_PRIOR"].sum())
-        styled_table(  # rec21: + delta sign-coloring, status tint, CSV
-            view[["WAREHOUSE_NAME", "COMPANY", "USD_CURRENT", "USD_PRIOR", "DELTA_PCT"]],
-            column_config={
-                "USD_CURRENT": st.column_config.NumberColumn("Current $", format="$%.2f"),
-                "USD_PRIOR": st.column_config.NumberColumn("Prior $", format="$%.2f"),
-                "DELTA_PCT": st.column_config.NumberColumn("Δ %", format="%.1f%%"),
-            },
-            totals=(("Current spend", format_usd(window_usd)),
-                    ("Prior spend", format_usd(prior_window_usd))),
-        )
+        # r10: the builder's PRIOR side is a FULL prior calendar month, so comparing it to CURRENT is
+        # valid only for LAST_MONTH (two full months) or a trailing window (equal lengths). Under the
+        # period-to-date presets (Current month / Current year) CURRENT is PARTIAL, so Prior $ / Δ %
+        # were partial-vs-full — a false ~-30% "spend drop" (rendered GREEN by the delta tint) mid-
+        # month and ~+800% for Current year, disagreeing with Overview/Control Room. window_usd
+        # (CURRENT) is the correct BOUNDED allocation pool and stays; suppress the misleading vs-prior
+        # columns/total for those presets. (Overview/Control Room fall back to a trailing comparison,
+        # but here CURRENT $ IS the allocation pool below, so a trailing prior would break pool
+        # reconciliation — hide the comparison rather than mix bases.)
+        _show_vs_prior = bounds is None or is_prior_month_window(bounds)
+        if _show_vs_prior:
+            view["USD_PRIOR"] = view["CREDITS_PRIOR"].map(lambda c: credits_to_usd(c, rate))
+            view["DELTA_PCT"] = view.apply(lambda r: pct_delta(r["USD_CURRENT"], r["USD_PRIOR"]), axis=1)
+            prior_window_usd = float(view["USD_PRIOR"].sum())
+            styled_table(  # rec21: + delta sign-coloring, status tint, CSV
+                view[["WAREHOUSE_NAME", "COMPANY", "USD_CURRENT", "USD_PRIOR", "DELTA_PCT"]],
+                column_config={
+                    "USD_CURRENT": st.column_config.NumberColumn("Current $", format="$%.2f"),
+                    "USD_PRIOR": st.column_config.NumberColumn("Prior $", format="$%.2f"),
+                    "DELTA_PCT": st.column_config.NumberColumn("Δ %", format="%.1f%%"),
+                },
+                totals=(("Current spend", format_usd(window_usd)),
+                        ("Prior spend", format_usd(prior_window_usd))),
+            )
+        else:
+            styled_table(
+                view[["WAREHOUSE_NAME", "COMPANY", "USD_CURRENT"]],
+                column_config={
+                    "USD_CURRENT": st.column_config.NumberColumn("Current $", format="$%.2f"),
+                },
+                totals=(("Current spend", format_usd(window_usd)),),
+            )
+            st.caption(f"Exact per-warehouse usage for {window_phrase(bounds, int(days))}. A vs-prior "
+                       "comparison is hidden for a period-to-date window — it would compare a partial "
+                       "period against a full prior calendar month.")
         # fact_warehouse_window_vs_prior clamps to the vs-prior half-window so its
         # current+prior pair fits in retention. Disclose it when the selection is wider,
         # so "Current spend" is not read as the full (e.g. 365d) window it isn't.
@@ -915,7 +937,11 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         # (cost-hunt5 2026-08-30; mirrors the alloc-pool re-derivation below).
         _eff_wh, _ = (resolve_effective_window(days, max_days=MAX_LIVE_WINDOW_DAYS)
                       if _wh_live else resolve_effective_window(days))
-        if _eff_wh < int(days):
+        # r10: the half-window clamp only applies to a TRAILING vs-prior read; under any calendar
+        # preset (bounds set) the builder scans the full bounded range (the clamp is inert), so this
+        # "caps at N days" disclosure would be wrong (e.g. it printed "last 182 days" under a full
+        # Current-year scan). Only disclose it for the trailing windows where it genuinely bites.
+        if _eff_wh < int(days) and bounds is None:
             st.caption(f"Exact-usage window is the last {_eff_wh} days (today excluded) — the "
                        f"vs-prior comparison caps there so the current and prior halves both "
                        f"fit in retention, even though the page scope is {int(days)}d.")
@@ -955,8 +981,11 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                     if _wp.usable() else window_usd)
             return _live_pool[0]
 
-        result_caption(wh, note="Equal-length windows excluding the current partial day for "
-                                "completeness. Exact USAGE, not billed: totals include each "
+        # r10: the "equal-length windows" clause only holds when a vs-prior comparison is shown
+        # (trailing or Last month); for the suppressed period-to-date presets it would be false.
+        _eq_note = ("Equal-length windows excluding the current partial day for completeness. "
+                    if _show_vs_prior else "")
+        result_caption(wh, note=_eq_note + "Exact USAGE, not billed: totals include each "
                                 "warehouse's idle time and its unadjusted cloud-services credits "
                                 "— the account-level rebate lives on the Spend panel. "
                                 "Company-wide: the database/schema filters don't narrow this table.")
