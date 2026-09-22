@@ -912,7 +912,8 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                 column_config={
                     "USD_CURRENT": st.column_config.NumberColumn("Current $", format="$%.2f"),
                     "USD_PRIOR": st.column_config.NumberColumn("Prior $", format="$%.2f"),
-                    "DELTA_PCT": st.column_config.NumberColumn("Δ %", format="%.1f%%"),
+                    # r-ux (rec33): signed so direction survives color-blindness — matches Overview.
+                    "DELTA_PCT": st.column_config.NumberColumn("Δ %", format="%+.1f%%"),
                 },
                 totals=(("Current spend", format_usd(window_usd)),
                         ("Prior spend", format_usd(prior_window_usd))),

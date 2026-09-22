@@ -248,8 +248,10 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
             column_config={
                 "A_USD": st.column_config.NumberColumn(f"A $ ({pair['label_a']})", format="$%.0f"),
                 "B_USD": st.column_config.NumberColumn(f"B $ ({pair['label_b']})", format="$%.0f"),
-                "DELTA_USD": st.column_config.NumberColumn("Δ $", format="$%.0f"),
-                "DELTA_PCT": st.column_config.NumberColumn("Δ %", format="%.1f%%"),
+                # r-ux (rec33): movement columns carry a leading sign so direction survives red-
+                # green color-blindness (delta_css is color-only) — matches Overview's signed format.
+                "DELTA_USD": st.column_config.NumberColumn("Δ $", format="$%+.0f"),
+                "DELTA_PCT": st.column_config.NumberColumn("Δ %", format="%+.1f%%"),
             })
         _sel_wh = (str(disp.iloc[int(_wh_sel)]["WAREHOUSE_NAME"])
                    if _wh_sel is not None and 0 <= int(_wh_sel) < len(disp) else "")
@@ -301,7 +303,7 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
             column_config={
                 "A_USD": st.column_config.NumberColumn("A $", format="$%.2f"),
                 "B_USD": st.column_config.NumberColumn("B $", format="$%.2f"),
-                "DELTA_USD": st.column_config.NumberColumn("Δ $", format="$%.2f"),
+                "DELTA_USD": st.column_config.NumberColumn("Δ $", format="$%+.2f"),  # r-ux: signed (rec33)
             })
         result_caption(_pat, note=_pat_note)
 
@@ -329,5 +331,5 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
             rows.append({"METRIC": metric, "A": _cmp_cell(a_v, kind), "B": _cmp_cell(b_v, kind),
                          "DELTA_PCT": d})
         styled_table(pd.DataFrame(rows), height=180, column_config={
-            "DELTA_PCT": st.column_config.NumberColumn("Δ %", format="%.1f%%")})
+            "DELTA_PCT": st.column_config.NumberColumn("Δ %", format="%+.1f%%")})  # r-ux: signed (rec33)
         result_caption(act)

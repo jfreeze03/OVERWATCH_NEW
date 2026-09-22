@@ -917,12 +917,15 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                             # confirm field nor the button state carries across events.
                             # ACK (reversible OPEN->ACK) and SNOOZE (auto-reverses on wake) are
                             # one click; RESOLVE classifies the event, so it keeps the confirm gate.
+                            # r-ux: label by the outcome verb, not the generic "Execute with audit row".
+                            _act_label = {"ACK": "Acknowledge", "SNOOZE": "Snooze",
+                                          "RESOLVE": "Resolve"}.get(action, action.title()) + " + audit"
                             if action in ("ACK", "SNOOZE"):
-                                _fire = st.button("Execute with audit row", type="primary",
+                                _fire = st.button(_act_label, type="primary",
                                                   width="stretch",
                                                   key=f"alert_exec_ack_{event_id[:8]}_{_sel_nonce}")
                             else:
-                                _fire = confirm_gate(action, "Execute with audit row",
+                                _fire = confirm_gate(action, _act_label,
                                                      key=f"alert_exec_{event_id[:8]}_{_sel_nonce}",
                                                      prompt=f"Type {action} to confirm execution")
                             if _fire and write_gate_open(f"alert_exec_{event_id[:8]}_{action}"):
@@ -1529,6 +1532,18 @@ def render() -> None:
             ])
         _open_events_section(events, is_operator, company)
     elif section == "Rules":
+        # r-ux: a "Jump to > Rule · X" palette pick lands here with rule_id in the nav context —
+        # seed the precision drill (rule_prec_sel_last) + threshold generator (rule_pick) to THAT
+        # rule so it renders ready to inspect, matching every other palette target. Consume-once
+        # (a later manual pick then sticks; re-searching the same rule re-seeds via
+        # request_navigation) — the Entity 360 / ops-drill pattern, not a never-cleared signature.
+        # rule_id is always a valid rule_pick option (both come from ALERT_CONFIG / alert_rules()).
+        _nav = st.session_state.get("_ow_nav_context")
+        _nav_rule = str((_nav or {}).get("rule_id") or "").strip() if isinstance(_nav, dict) else ""
+        if _nav_rule:
+            st.session_state["rule_prec_sel_last"] = _nav_rule
+            st.session_state["rule_pick"] = _nav_rule
+            st.session_state["_ow_nav_context"] = {k: v for k, v in _nav.items() if k != "rule_id"}
         rules = run(mart_sql.alert_rules(), page=_PAGE, key="alert_rules", tier="recent",
                     source="ALERT_CONFIG")
         if guard(rules, "No alert rules found.", setup_hint=_SETUP_HINT):

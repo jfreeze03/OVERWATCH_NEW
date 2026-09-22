@@ -79,7 +79,7 @@ def test_ack_one_click_resolve_typed():
     # longer lands on the drawer.
     assert 'if action in ("ACK", "SNOOZE"):' in body          # ACK + SNOOZE = one click (V086)
     seg = body.split('if action in ("ACK", "SNOOZE"):', 1)[1][:1500]
-    assert 'st.button("Execute with audit row"' in seg       # ACK = one click
+    assert "st.button(_act_label" in seg       # ACK = one click (v4.575: outcome-labeled, not "Execute…")
     assert "confirm_gate(action" in seg                        # RESOLVE keeps the gate
 
 

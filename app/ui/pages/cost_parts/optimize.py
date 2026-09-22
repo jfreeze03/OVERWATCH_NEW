@@ -729,7 +729,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             "'Booked from sizing simulator; verify with a proof run on the Savings ledger.', "
                             f"'RESIZE', {sql_literal(str(srow['WAREHOUSE_NAME']))}", page=_PAGE)
                     stamp_write("sizing", ok)  # C48
-                    notify(ok, msg)
+                    # r-ux: name the object + effect (was generic "Statement executed.")
+                    notify(ok, msg if not ok else f"Resized {srow['WAREHOUSE_NAME']} to {target_size}.")
             _whatif_panel(sized, sizing_days, rate)
             result_caption(prof_res)
 
@@ -1384,8 +1385,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         "FAILSAFE_SHARE_PCT": st.column_config.NumberColumn("Failsafe %", format="%.1f%%"),
                         "LOW_CONFIDENCE": st.column_config.CheckboxColumn("Low confidence"),
                     },
+                    # r-ux: the richer hint renders ABOVE via the primitive (was a duplicate caption
+                    # below, now doubled by the primitive's default) — one affordance, at the table.
+                    hint="Click a database row to drill to the tables driving its storage.",
                 )
-                st.caption("Click a database row to drill to the tables driving its storage.")
                 result_caption(sg_res, note=(f"Window widened to {days_storage}d for a stable growth slope."
                                              if days < days_storage else f"{days_storage}d window."))
                 _low = int(movers["LOW_CONFIDENCE"].sum()) if "LOW_CONFIDENCE" in movers.columns else 0
@@ -1656,7 +1659,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                     "'Booked from storage-waste scan.', "
                                     f"'RETENTION', {sql_literal('.'.join([str(wrow['DATABASE_NAME']), str(wrow['SCHEMA_NAME']), str(wrow['TABLE_NAME'])]))}", page=_PAGE)
                             stamp_write("waste", ok)  # C48
-                            notify(ok, msg)
+                            notify(ok, msg if not ok else
+                                   f"Retention set to {int(keep_days)}d on {wrow['TABLE_NAME']}.")
 
         st.markdown("**Automatic clustering spend (per table)**")
         st.caption(toggle_cost_hint("clustering_"))
@@ -1816,7 +1820,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             )
                             execute_statement(ledger_sql, page=_PAGE)
                         stamp_write("remed", ok)  # C48
-                        notify(ok, msg)
+                        notify(ok, msg if not ok else f"{fix_kind} on {wh_pick} — executed and booked.")
                 else:
                     st.caption("Copy the SQL freely; executing from the app requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
 
@@ -1879,11 +1883,11 @@ def _savings_tab() -> None:
             f"VALUES ({sql_literal(desc)}, {sql_literal(LEDGER_ESTIMATED)}, {sql_number(est)}, {sql_literal(proof)});"
         )
         st.code(insert_sql, language="sql")
-        if (is_operator and desc and st.button("Execute insert", key="ledger_add_exec")
+        if (is_operator and desc and st.button("Add savings item", key="ledger_add_exec")
                 and write_gate_open("ledger_add_exec")):
             ok, msg = execute_statement(insert_sql, page=_PAGE)
             stamp_write("ledger_add_exec", ok)  # C48
-            notify(ok, msg)
+            notify(ok, msg if not ok else f"Added savings item: {desc}.")
         elif not is_operator:
             st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS — in-app execution needs an admin profile.")
 
@@ -1912,8 +1916,8 @@ def _savings_tab() -> None:
                 st.code(update_sql, language="sql")
                 if not allowed:
                     st.warning(why)
-                elif (is_operator and st.button("Execute verification", key="ledger_verify_exec")
+                elif (is_operator and st.button("Verify savings item", key="ledger_verify_exec")
                         and write_gate_open("ledger_verify_exec")):
                     ok, msg = execute_statement(update_sql, page=_PAGE)
                     stamp_write("ledger_verify_exec", ok)  # C48
-                    notify(ok, msg)
+                    notify(ok, msg if not ok else f"Verified savings item {row['ITEM_ID']}.")

@@ -1200,6 +1200,12 @@ def render() -> None:
                         _ctx["event_id"] = _eid
                 elif _kind == "Task failure":
                     _dest = ("Operations", "Tasks")  # the section that owns tasks
+                    # r-ux: carry the row's DATABASE scope (the Tasks view consumes it) so the
+                    # drill lands on the failing task's database, not account-wide — matching the
+                    # Alert (event_id) and Spend (warehouse) siblings that already scope.
+                    _db = str(_qr.get("DATABASE") or "").strip()
+                    if _db:
+                        _flt["database"] = _db
                 elif _kind in ("Spend anomaly", "Spend collapse"):
                     # Operations -> Queries is the section that actually CONSUMES
                     # warehouse_contains (_queries_tab takes it; its contract lists it).

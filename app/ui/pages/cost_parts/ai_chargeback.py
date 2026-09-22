@@ -884,10 +884,10 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *, 
             f"VALUES (s.MAP_TYPE, s.NAME, s.DEPARTMENT, s.OWNER, {identity_sql()});"
         )
         st.code(merge_sql, language="sql")
-        if (is_operator and name and department and st.button("Execute mapping", key="cb_map_exec")
+        if (is_operator and name and department and st.button("Map to department", key="cb_map_exec")
                 and write_gate_open(f"cb_map_exec:{name}")):
             ok, msg = execute_statement(merge_sql.replace("\n", " "), page=_PAGE)
             stamp_write(f"cb_map_exec:{name}", ok)  # C48
-            notify(ok, msg)
+            notify(ok, msg if not ok else f"Mapped {name} → {department}.")
         elif not is_operator:
             st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")

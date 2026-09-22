@@ -790,11 +790,11 @@ def _settings_tab(is_operator: bool) -> None:
     st.code(upsert_sql, language="sql")
     if is_operator:
         # rec42: one type-to-confirm gate (setting KEY, EXACT case) + action button.
-        if confirm_gate(key, "Execute update", key="adm_setting",
+        if confirm_gate(key, "Save setting", key="adm_setting",
                         prompt="Type the setting key to confirm") and write_gate_open("adm_setting"):
             ok, msg = execute_statement(upsert_sql, page=_PAGE)
             stamp_write("adm_setting", ok)  # C48
-            notify(ok, msg)
+            notify(ok, msg if not ok else f"Setting {key} saved.")
             if ok:
                 st.caption("New value takes effect within one cache cycle (≤5 min) or after Refresh.")
     else:
@@ -1397,7 +1397,8 @@ def _canary_tab() -> None:
                               tier="live", source="FACT_OBJECT_COST_DAILY vs QAH + serverless histories")
                 if guard(_oc_res, "Object-cost ledger has no rows yet (V048+ not deployed or first load pending)."):
                     styled_table(_oc_res.df, column_config={
-                        "DELTA_PCT": st.column_config.NumberColumn("Delta %", format="%.2f%%")})
+                        # r-ux: align the delta glyph + sign with the cost pages (was "Delta %", "%.2f%%")
+                        "DELTA_PCT": st.column_config.NumberColumn("Δ %", format="%+.2f%%")})
                     result_caption(_oc_res)
 
     st.markdown(f"**{len(CANARIES)} registered statements**")

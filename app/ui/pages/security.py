@@ -45,6 +45,7 @@ from app.ui.components import (
     load_settings,
     methodology_note,
     page_header,
+    page_verdict_line,
     panel_help,
     result_caption,
     run_mart_first,
@@ -62,6 +63,7 @@ from app.ui.security_center import (
     render_admin_grant_anomalies,
     render_effective_access,
     render_security_overview,
+    security_posture_verdict,
 )
 
 _PAGE = "Security"
@@ -1532,6 +1534,12 @@ def render() -> None:
     )
     # C18: "since your last visit" opener — renders nothing mid-session or anonymous.
     since_last_visit_opener(_PAGE, f["company"])
+    # r-ux: the "should I worry?" posture verdict renders ABOVE the section bar on EVERY section,
+    # matching Overview/Cost/Operations/Decision Studio (it used to live only inside the Decision-
+    # queue section). Reuses the cached domain-posture marts — no metered scan, no live section read.
+    _sec_verdict = security_posture_verdict(f["company"])
+    if _sec_verdict:
+        page_verdict_line(_sec_verdict)
     section = lazy_sections(
         ["Decision queue", "Access", "AI guardrails", "Changes", "Clients", "Egress",
          "Exposure", "Least privilege", "Trust Center"],

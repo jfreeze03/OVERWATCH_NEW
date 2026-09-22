@@ -54,6 +54,13 @@ COLUMN_HELP = {
     "ESTIMATED_USD": "ESTIMATED — modeled from bytes/credits x a configured rate, not billed.",
     "SPEND_USD": "USD = credits x the contract rate ($3.68 compute / $2.20 Cortex). Display-only conversion.",
     "USD": "USD = credits x the contract rate ($3.68 compute / $2.20 Cortex). Display-only conversion.",
+    # r-ux: the Operations query-optimization jargon columns — meaning lived only in a caption.
+    "OOS": "Optimization opportunity score — a typical run's inefficiency (QOP) x its compute "
+           "footprint percentile; higher = fix first.",
+    "QOP": "Query optimization potential (0-100) — how inefficient a typical run of this "
+           "fingerprint is (spill, poor pruning, exploding joins).",
+    "SCAN_PCT": "% of partitions scanned; high = poor pruning (the filter isn't eliminating micro-partitions).",
+    "CACHE_PCT": "% of scan bytes served from cache; low = cold scans hitting storage.",
 }
 
 

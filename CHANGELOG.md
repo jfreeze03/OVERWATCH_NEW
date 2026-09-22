@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.575.0 - UX pass: drill discoverability, cross-page consistency, write feedback (2026-09-22)
+
+Code-level UX review Themes C, D, E — the remaining ground-truthed recs. Presentation-only; no
+query/behavior change (except the drill-context carries, which add no reads), no ACCOUNT_USAGE cost.
+
+- **Drillable tables announce themselves.** `entity_nav_table` and `selectable_nav_table` now default
+  their `hint` (the "↳ …" affordance that had been dead app-wide), so an entity table announces its
+  silent cross-page jump ("Select a row to open it in Control Room ▸ Entity 360") and a selection
+  table says its rows open detail. The top "Heaviest queries" table (a raw `selectable_table`) gets
+  an explicit hint. De-duplicated where a call site already had a richer caption.
+- **"Jump to → Rule · X" lands on that rule.** The palette now carries the rule identity; Alerts ▸
+  Rules seeds its precision drill + threshold generator to it (consume-once). Was: the full rules
+  wall with nothing selected.
+- **Control Room "Task failure" triage drill carries the DATABASE scope** (its Alert/Spend siblings
+  already scope), so it lands on the failing task's database, not account-wide.
+- **Delta columns are signed** on Compare and Spend (`%+`), matching Overview and the rec33 color-
+  blind-safe convention; Admin's object-cost recon delta aligned to "Δ %".
+- **Security's "should I worry?" verdict now renders above the section bar on every section** (via a
+  new `security_posture_verdict` helper reusing the cached domain-posture marts), like every other
+  console page — it used to appear only inside the default Decision-queue section.
+- **Write success toasts name the object + effect** at 10 sites (e.g. "Resized WH_X to MEDIUM.",
+  "Mapped Payments → Finance.", "Setting … saved.") instead of the generic "Statement executed.";
+  write buttons are labeled by outcome ("Save setting", "Add savings item", "Verify savings item",
+  "Map to department", "Acknowledge/Resolve/Snooze + audit") instead of the SQL verb.
+- **Jargon score columns (OOS, QOP, SCAN_PCT, CACHE_PCT) gain header help** via
+  `metric_registry.COLUMN_HELP`.
+
 ## 4.574.0 - UX pass: color/signal honesty + error-state consistency (2026-09-22)
 
 From the code-level UX/design review (Themes A & B) — restores conventions the codebase already

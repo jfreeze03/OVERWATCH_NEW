@@ -2373,7 +2373,7 @@ def row_select_hint(text: str) -> None:
 def selectable_nav_table(df, key: str, on_select, *, height: int | None = None,
                          column_config: dict | None = None, slug: str | None = None,
                          days: int | None = None, size_note: bool = True,
-                         sort_label: str = "", hint: str = "") -> None:
+                         sort_label: str = "", hint: str = "Select a row to open its detail.") -> None:
     """selectable_table with the sticky-selection guard built in (rec29).
 
     st.dataframe's selection is sticky and re-emits on EVERY rerun, so acting on
@@ -2395,7 +2395,8 @@ def entity_nav_table(df, key: str, *, key_col: str, entity_type: str = "",
                      type_col: str | None = None, height: int | None = None,
                      column_config: dict | None = None, slug: str | None = None,
                      days: int | None = None, size_note: bool = True,
-                     sort_label: str = "", hint: str = "") -> None:
+                     sort_label: str = "",
+                     hint: str = "Select a row to open it in Control Room ▸ Entity 360.") -> None:
     """Universal entity drill (UI22): a table whose row click opens that entity
     in Control Room -> Entity 360.
 
@@ -2414,7 +2415,8 @@ def entity_nav_table(df, key: str, *, key_col: str, entity_type: str = "",
         styled_table(frame, height=height, column_config=column_config, slug=slug,
                      days=days, size_note=size_note, sort_label=sort_label)
         return
-    row_select_hint(hint)   # Wave 1 #24: consistent clickable-row affordance
+    row_select_hint(hint)   # Wave 1 #24: consistent clickable-row affordance (announces the
+    #                         cross-page Entity 360 jump; r-ux gave it a non-empty default)
 
     def _open(index: int) -> None:
         from app.core.state import request_navigation
@@ -2427,9 +2429,11 @@ def entity_nav_table(df, key: str, *, key_col: str, entity_type: str = "",
             request_navigation("Control Room", "Entity 360",
                                context={"entity_type": kind, "entity_key": entity_key})
 
+    # hint="" here: entity_nav_table already rendered its own hint above, so suppress the inner
+    # selectable_nav_table default to avoid a double affordance.
     selectable_nav_table(frame, key=key, on_select=_open, height=height,
                          column_config=column_config, slug=slug, days=days,
-                         size_note=size_note, sort_label=sort_label)
+                         size_note=size_note, sort_label=sort_label, hint="")
 
 
 # F59: ONE watch affordance across every surface. Before this, Watch spoke three

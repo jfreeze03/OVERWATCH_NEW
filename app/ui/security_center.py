@@ -32,7 +32,6 @@ from app.ui.components import (
     empty_state,
     kpi_row,
     notify,
-    page_verdict_line,
     panel_help,
     result_caption,
     section_header,
@@ -141,6 +140,31 @@ def _render_change_risk_diagnostic() -> None:
         result_caption(res)
 
 
+def security_posture_verdict(company: str) -> dict | None:
+    """The Security page's 'should I worry?' verdict, from the domain posture the decision queue
+    computes. r-ux: security.render() calls this ABOVE the section bar so the verdict shows on
+    EVERY section (like Overview/Cost/Operations/Decision Studio), not only the default Decision
+    queue. The reads are marts (V_SECURITY_EXCEPTION_QUEUE + coverage contract), cached under the
+    same keys the decision queue uses — so it costs nothing on that section and only 2 cached mart
+    reads on the others (no ACCOUNT_USAGE, no live section scan). None when the queue is unresolved."""
+    queue = _optional_result(
+        security_sql.security_exception_queue(company, 100),
+        f"sec_exception_queue_{company}", "V_SECURITY_EXCEPTION_QUEUE")
+    if not queue.ok:
+        return None
+    coverage = _optional_result(
+        security_sql.security_domain_coverage(),
+        "sec_domain_coverage", "Security domain coverage contract")
+    posture = domain_posture(queue.df, coverage.df if coverage.ok else pd.DataFrame())
+    _act = [p for p in posture if p.state == "Act"]
+    _open_n = sum(int(safe_float(getattr(p, "findings", 0))) for p in posture)
+    return page_verdict([
+        Signal("bad", f"{len(_act)} domain(s) need action: "
+                      + ", ".join(p.domain.title() for p in _act[:3])) if _act else None,
+        Signal("warn", f"{_open_n} open finding(s)") if _open_n else None,
+    ], healthy="no security domain needs action")
+
+
 def render_security_overview(company: str) -> None:
     """Exceptions-first domain posture with Action Center and Entity 360 drills."""
     queue = _optional_result(
@@ -170,15 +194,11 @@ def render_security_overview(company: str) -> None:
         queue.df,
         coverage.df if coverage.ok else pd.DataFrame(),
     )
-    # C17: one "should I worry?" line from the posture the queue already computed,
-    # and (C23) the section header's severity derives from the same data.
+    # C17/C23: the "should I worry?" verdict now renders ABOVE the section bar for EVERY section
+    # (security.render() -> security_posture_verdict), so it is not repeated here; the section
+    # header's severity still derives from the same posture data.
     _act = [p for p in posture if p.state == "Act"]
     _open_n = sum(int(safe_float(getattr(p, "findings", 0))) for p in posture)
-    page_verdict_line(page_verdict([
-        Signal("bad", f"{len(_act)} domain(s) need action: "
-                      + ", ".join(p.domain.title() for p in _act[:3])) if _act else None,
-        Signal("warn", f"{_open_n} open finding(s)") if _open_n else None,
-    ], healthy="no security domain needs action"))
     section_header("Security decision queue",
                    alarm_health(len(_act) or _open_n), "security")
     kpi_row([

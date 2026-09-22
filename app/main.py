@@ -485,7 +485,10 @@ def _dispatch_jump(pick: str, pages: tuple) -> None:
         # "Active but ignored: Warehouse" no-op) — route the WH pick to Queries like the DB pick.
         request_navigation("Operations", "Queries", {"warehouse_contains": name})
     elif kind == "Rule":
-        request_navigation("Alerts", "Rules")
+        # r-ux: carry the searched rule's identity so Alerts ▸ Rules lands ON that rule (its
+        # precision drill + threshold generator preselect it), like every other palette target —
+        # not the full rules wall with nothing selected.
+        request_navigation("Alerts", "Rules", context={"rule_id": name})
 
 
 # r6-bug4: a sentinel that lets the health-status caller tell "not passed" (fetch it

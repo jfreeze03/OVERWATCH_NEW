@@ -101,6 +101,7 @@ from app.ui.components import (
     page_verdict_line,
     panel_help,
     result_caption,
+    row_select_hint,
     run_mart_first,
     section_filter_contract,
     section_header,
@@ -353,6 +354,10 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             page=_PAGE, key=f"q_top_{company}_{days}{_lm}", tier="recent",
             source="ACCOUNT_USAGE.QUERY_HISTORY", max_rows=50)
     if guard(top, "No queries in this window/scope."):
+        # r-ux: the page's most prominent table is clickable but gave no cue (the only hint was
+        # 350+ lines below in the drill-through selectbox) — announce it at the point of use, like
+        # the page's other drill tables do.
+        row_select_hint("Click a query to load it in the drill-through below.")
         # r24: every QUERY_ID row links straight to its Snowsight profile
         # (owner ask — the drill's single link earned its keep).
         _tp, _tp_cfg = snowsight_profile_column(top.df, _PAGE)
@@ -3323,7 +3328,7 @@ def _wh_change_block(company: str, is_operator: bool) -> None:
                 and write_gate_open("whchg_scan_now")):
             ok, msg = execute_statement(change_impact_sql.run_wh_scan_call(), page=_PAGE)
             stamp_write("whchg_scan_now", ok)  # C48
-            notify(ok, msg)
+            notify(ok, msg if not ok else "Warehouse scan complete — settings snapshotted, verdicts refreshed.")
     else:
         st.caption("The warehouse scan runs daily at 06:40; admins can trigger it on demand.")
 
@@ -3443,7 +3448,7 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
                 and write_gate_open("chg_scan_now")):
             ok, msg = execute_statement(change_impact_sql.run_scan_call(), page=_PAGE)
             stamp_write("chg_scan_now", ok)  # C48
-            notify(ok, msg)
+            notify(ok, msg if not ok else "Change-impact scan complete — changes registered, verdicts refreshed.")
     else:
         st.caption("The scan runs daily at 06:50; admins can also trigger it on demand.")
 
@@ -3599,7 +3604,7 @@ def _emergency_tab(is_operator: bool) -> None:
                 )
                 execute_statement(log_sql, page=_PAGE)
                 stamp_write(_emg_key, ok)  # C48
-                notify(ok, msg)
+                notify(ok, msg if not ok else f"Executed: {action}.")
 
         if not is_operator:
             _emg_preview()

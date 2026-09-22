@@ -97,8 +97,14 @@ def test_alerts_page_verdict_is_data_derived_and_never_a_false_all_clear():
 
 def test_security_verdict_composes_from_posture_and_header_is_data_derived():
     src = _src("app/ui/security_center.py")
-    assert "page_verdict_line(page_verdict([" in src
+    # v4.575 r-ux: the verdict now composes in the security_posture_verdict helper (page_verdict)
+    # and RENDERS above the section bar in security.render() (page_verdict_line) — on every section,
+    # not just the decision queue.
+    assert "def security_posture_verdict(company: str) -> dict | None:" in src
+    assert "return page_verdict([" in src
     assert '[p for p in posture if p.state == "Act"]' in src
+    sec = _src("app/ui/pages/security.py")
+    assert "page_verdict_line(_sec_verdict)" in sec
     # the old static amber header is gone; severity comes from the same posture
     assert 'section_header("Security decision queue", "warn", "security")' not in src
     assert 'alarm_health(len(_act) or _open_n)' in src
