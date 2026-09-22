@@ -1728,7 +1728,10 @@ def day_task_failures(day: object, company: str = "ALL") -> str:
     comp = ("" if str(company or "ALL").upper() == "ALL"
             else f" AND COMPANY = {sql_literal(company)}")
     return f"""
-SELECT DATABASE_NAME, SCHEMA_NAME, TASK_NAME, COMPANY, RUNS, FAILED, LAST_ERROR
+SELECT DATABASE_NAME, SCHEMA_NAME, TASK_NAME, COMPANY, RUNS, FAILED, LAST_ERROR,
+       -- Uncapped day total (pre-LIMIT): the day-replay headline sums THIS, not the
+       -- top-50-by-FAILED display frame, so >50 distinct failing tasks isn't undercounted.
+       SUM(FAILED) OVER () AS TOTAL_FAILED_WIN
 FROM {core_object("FACT_TASK_DAILY")}
 WHERE DAY = {lit} AND FAILED > 0{comp}
 ORDER BY FAILED DESC
@@ -2497,23 +2500,34 @@ def unmapped_entities(days: int = 7) -> str:
     go-forward hourly). Fix = a COMPANY_SCOPE mapping row; the panel
     prints the exact INSERT."""
     days = bounded_days(days, 30)
+    # r7 uncapped-aggregate: only the WAREHOUSE grain carries credits, and it sorts LAST
+    # alphabetically (DATABASE < USER < WAREHOUSE), so >300 unmapped DB+USER rows would
+    # evict every credit-bearing warehouse row past the LIMIT — the "billed blind" $ then
+    # reads $0 in exactly the worst case. Wrap the union so the page can read the uncapped
+    # blind-$ (SUM of credit VALUE) and entity count from a pre-LIMIT window total.
     return f"""
-SELECT 'WAREHOUSE' AS GRAIN, WAREHOUSE_NAME AS ENTITY,
-       'credits' AS MEASURE, ROUND(SUM(CREDITS_TOTAL), 2) AS VALUE,
-       MAX(DAY) AS LAST_SEEN
-FROM {core_object("FACT_WAREHOUSE_DAILY")}
-WHERE COMPANY = 'UNKNOWN' AND DAY >= DATEADD('day', -{days}, CURRENT_DATE())
-GROUP BY 2
-UNION ALL
-SELECT 'DATABASE', DATABASE_NAME, 'queries', SUM(QUERIES), MAX(DATE(HOUR_TS))
-FROM {core_object("FACT_QUERY_SCHEMA_HOURLY")}
-WHERE COMPANY = 'UNKNOWN' AND HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())
-GROUP BY 2
-UNION ALL
-SELECT 'USER', USER_NAME, 'logins', SUM(LOGINS), MAX(DAY)
-FROM {core_object("FACT_LOGIN_DAILY")}
-WHERE COMPANY = 'UNKNOWN' AND DAY >= DATEADD('day', -{days}, CURRENT_DATE())
-GROUP BY 2
+WITH unm AS (
+    SELECT 'WAREHOUSE' AS GRAIN, WAREHOUSE_NAME AS ENTITY,
+           'credits' AS MEASURE, ROUND(SUM(CREDITS_TOTAL), 2) AS VALUE,
+           MAX(DAY) AS LAST_SEEN
+    FROM {core_object("FACT_WAREHOUSE_DAILY")}
+    WHERE COMPANY = 'UNKNOWN' AND DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+    GROUP BY 2
+    UNION ALL
+    SELECT 'DATABASE', DATABASE_NAME, 'queries', SUM(QUERIES), MAX(DATE(HOUR_TS))
+    FROM {core_object("FACT_QUERY_SCHEMA_HOURLY")}
+    WHERE COMPANY = 'UNKNOWN' AND HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())
+    GROUP BY 2
+    UNION ALL
+    SELECT 'USER', USER_NAME, 'logins', SUM(LOGINS), MAX(DAY)
+    FROM {core_object("FACT_LOGIN_DAILY")}
+    WHERE COMPANY = 'UNKNOWN' AND DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+    GROUP BY 2
+)
+SELECT GRAIN, ENTITY, MEASURE, VALUE, LAST_SEEN,
+       COUNT(*) OVER () AS TOTAL_ENTITIES_WIN,
+       SUM(CASE WHEN MEASURE = 'credits' THEN VALUE ELSE 0 END) OVER () AS TOTAL_CREDITS_WIN
+FROM unm
 ORDER BY GRAIN, VALUE DESC
 LIMIT 300
 """

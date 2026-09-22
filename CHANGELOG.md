@@ -1,5 +1,39 @@
 # Changelog
 
+## 4.569.0 - Bug-hunt round 7: uncapped-aggregate sweep, export fidelity (2026-09-22)
+
+Adversarial bug-hunt round 7 (`wf_a1e5de10-831` — exhaustive uncapped-aggregate sweep, export/CSV
+fidelity, write-paths, deep data-layer SQL; refute-by-default verify) confirmed 8 findings that
+deduped to 6 real defects (2 MED, 4 LOW). The uncapped-aggregate class paid out again — 4 of 6 are
+siblings — and the long-deferred Control Room replay-counts item is fixed here:
+
+- **(MED) Task-health "Task runs"/"Fail rate" summed a LIMIT-200 frame on the live-fallback path** —
+  when the `FACT_TASK_DAILY` mart read is unusable (loader lag / fresh install / stress harness), the
+  KPIs fell back to `ops_sql.task_runs` (one row per task, `ORDER BY FAILED DESC LIMIT 200`). On an
+  account with >200 tasks, every failing task survives but healthy high-volume tasks are evicted, so
+  the run DENOMINATOR shrinks and the fail rate overstates — silently disagreeing with the mart path.
+  `task_runs` now carries `SUM(COUNT(*)) OVER ()` / `SUM(SUM(...)) OVER ()` pre-LIMIT window totals; the
+  KPI reads those (mart path keeps its no-LIMIT frame sum). The helper columns are dropped before display.
+- **(MED) Auditor export pack stamped its "generated" time + ZIP filename with the UTC wall clock** —
+  `datetime.now()` under SiS is UTC, not the account's `America/Chicago`, so the compliance pack read
+  ~5h ahead and, evenings Central, tomorrow's DATE — self-contradicting the account-time timestamps in
+  the very CSVs it packages. Now uses `account_now()` like every other "generated" stamp.
+- **(LOW) Control Room day-replay headline counts summed LIMIT-capped feeds** — the deferred item.
+  Task-failures/DDL/grants headlines `len()`/`sum()`-ed the display frames (task 50, DDL 500/300,
+  grants 200) with no truncation disclosure, undercounting on a busy migration/onboarding day. The
+  three builders now carry `SUM(FAILED) OVER ()` / `COUNT(*) OVER ()` pre-LIMIT totals; the replay reads
+  those (fallback to the frame for old-shape results) and drops the helper columns before the detail
+  tables. (crit_n stays a frame sum — `day_alerts` orders CRITICAL first, exact unless >200/day.)
+- **(LOW) "Unmapped spend, billed blind" could read $0 in exactly the worst case** — only the WAREHOUSE
+  grain carries credits and it sorts LAST alphabetically, so >300 unmapped DATABASE+USER rows evicted
+  every credit-bearing warehouse row past `LIMIT 300`. `unmapped_entities` now wraps the union and adds
+  `COUNT(*) OVER ()` / `SUM(credit VALUE) OVER ()` totals; the tile reads the uncapped blind-$ and count.
+- **(LOW) Overview exec-summary HTML sparkline claimed "last {days}d" but plotted only the last 30** —
+  a hard `.tail(30)` overstated coverage up to 12x at 365d. Now spans the full windowed series.
+- **(LOW) "Repeat offenders" KPI counted over the top-50-by-wasted-$ frame yet claimed "in the window"** —
+  a cheap fast-failing retrier ranked past #50 was never counted. `wasted_query_spend_usd` now carries a
+  pre-LIMIT `SUM(IFF(FAILED_RUNS>=5,1,0)) OVER ()`; the KPI reads it, making "in the window" honest.
+
 ## 4.568.0 - Bug-hunt round 6: forecast anchor, uncapped-aggregate siblings (2026-09-22)
 
 Adversarial bug-hunt round 6 (`wf_b64c483b` — data-layer SQL, deep logic, class-sibling sweep,

@@ -254,9 +254,21 @@ def render() -> None:
                 _credits = pd.to_numeric(_disp["VALUE"], errors="coerce").where(
                     _disp["MEASURE"].astype(str).eq("credits"))
                 _disp["EST_USD"] = (_credits * float(rate)).round(2)
-                _at_stake = float(_disp["EST_USD"].sum())
+                # r7 uncapped-aggregate: the worklist is LIMIT-300 ORDER BY GRAIN, and the only
+                # credit-bearing grain (WAREHOUSE) sorts LAST alphabetically — so >300 unmapped
+                # DATABASE+USER rows would evict every warehouse row and read "$0 billed blind" in
+                # exactly the worst case it exists to catch. Read the blind-$ (sum of credit VALUE)
+                # and entity count from the pre-LIMIT window totals when the builder supplies them.
+                if "TOTAL_CREDITS_WIN" in _disp.columns and not _disp.empty:
+                    _at_stake = float(safe_float(_disp["TOTAL_CREDITS_WIN"].iloc[0]) * float(rate))
+                    _entity_ct = int(safe_float(_disp["TOTAL_ENTITIES_WIN"].iloc[0]))
+                    _disp = _disp.drop(columns=[c for c in ("TOTAL_CREDITS_WIN", "TOTAL_ENTITIES_WIN")
+                                                if c in _disp.columns])
+                else:
+                    _at_stake = float(_disp["EST_USD"].sum())
+                    _entity_ct = len(unm.df)
                 kpi_row([
-                    {"label": "Unmapped entities", "value": f"{len(unm.df)}", "delta_color": "inverse",
+                    {"label": "Unmapped entities", "value": f"{_entity_ct}", "delta_color": "inverse",
                      "help": "Facts re-stamp trailing 3 days nightly; older rows keep their "
                              "original company until a backfill re-run."},
                     {"label": "Unmapped spend, billed blind", "value": format_usd(_at_stake),

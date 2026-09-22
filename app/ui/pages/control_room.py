@@ -459,12 +459,32 @@ def _day_replay() -> None:
                        tier="recent", source="ALERT_EVENTS (that day)")
     crit_n = int((alerts_d.df["SEVERITY"].astype(str).str.upper() == "CRITICAL").sum()) \
         if alerts_d.usable() else 0
+
+    # r7 uncapped-aggregate: the replay feeds are LIMIT-capped (DDL 500/300, grants 200,
+    # task failures 50), so len()/sum() over the display frame undercounts the headline on a
+    # busy migration/onboarding day — with NO truncation disclosure. Read the pre-LIMIT window
+    # totals the builders now carry; fall back to the frame for old-shape results, and drop the
+    # helper columns before the detail tables render so they aren't shown. (crit_n stays a frame
+    # sum: day_alerts orders CRITICAL first, so it's exact unless >200 criticals in one day.)
+    def _replay_total(res, col: str, fallback: int) -> int:
+        if res.usable() and col in res.df.columns and not res.df.empty:
+            return int(safe_float(res.df[col].iloc[0]))
+        return fallback
+
+    ddl_count = _replay_total(ddl, "TOTAL_DDL_WIN", len(ddl.df) if ddl.usable() else 0)
+    grants_count = _replay_total(grants, "TOTAL_GRANTS_WIN", len(grants.df) if grants.usable() else 0)
+    task_failures = _replay_total(tasks, "TOTAL_FAILED_WIN",
+                                  int(tasks.df["FAILED"].sum()) if tasks.usable() else 0)
+    _tasks_disp = tasks.df.drop(columns=["TOTAL_FAILED_WIN"], errors="ignore") \
+        if tasks.usable() else tasks.df
+    _ddl_disp = ddl.df.drop(columns=["TOTAL_DDL_WIN"], errors="ignore") \
+        if ddl.usable() else ddl.df
+    _grants_disp = grants.df.drop(columns=["TOTAL_GRANTS_WIN"], errors="ignore") \
+        if grants.usable() else grants.df
     heads = replay_headlines(
         movers.df if movers.usable() else None,
         activity.df if activity.usable() else None,
-        len(ddl.df) if ddl.usable() else 0,
-        len(grants.df) if grants.usable() else 0,
-        int(tasks.df["FAILED"].sum()) if tasks.usable() else 0,
+        ddl_count, grants_count, task_failures,
         crit_n, rate,
     )
     if not any(r.usable() for r in (movers, activity, ddl, grants, tasks, alerts_d)):
@@ -495,18 +515,18 @@ def _day_replay() -> None:
         if tasks.ok and tasks.empty:
             empty_state("clean", "No task failures that day.")
         elif guard(tasks, ""):
-            styled_table(tasks.df, height=200)
+            styled_table(_tasks_disp, height=200)
     with c2:
         st.markdown("**DDL that landed**")
         if ddl.ok and ddl.empty:
             empty_state("clean", "No DDL that day.")
         elif guard(ddl, ""):
-            styled_table(with_user_names(ddl.df, _PAGE), height=240)
+            styled_table(with_user_names(_ddl_disp, _PAGE), height=240)
         st.markdown("**Grant changes**")
         if grants.ok and grants.empty:
             empty_state("clean", "No grant changes that day.")
         elif guard(grants, ""):
-            styled_table(with_user_names(grants.df, _PAGE, user_col="GRANTEE_NAME"), height=200)
+            styled_table(with_user_names(_grants_disp, _PAGE, user_col="GRANTEE_NAME"), height=200)
     st.markdown("**Alerts raised that day**")
     if alerts_d.ok and alerts_d.empty:
         empty_state("clean", "No alerts raised that day.")

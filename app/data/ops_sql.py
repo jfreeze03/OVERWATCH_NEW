@@ -233,7 +233,14 @@ SELECT
     AVG(DATEDIFF('second', QUERY_START_TIME, COMPLETED_TIME)) AS AVG_SEC,
     MAX(QUERY_START_TIME) AS LAST_RUN,
     MAX_BY(STATE, QUERY_START_TIME) AS LAST_STATE,
-    MAX_BY(LEFT(COALESCE(ERROR_MESSAGE, ''), 200), QUERY_START_TIME) AS LAST_ERROR
+    MAX_BY(LEFT(COALESCE(ERROR_MESSAGE, ''), 200), QUERY_START_TIME) AS LAST_ERROR,
+    -- Uncapped window totals (evaluated pre-LIMIT over ALL tasks in scope): the KPI tiles
+    -- must read RUNS/FAILED window sums from these, not sum the LIMIT-200 display frame.
+    -- ORDER BY FAILED DESC keeps every failing task but evicts healthy high-volume tasks
+    -- past row 200, so summing the frame shrinks the run DENOMINATOR and inflates fail rate
+    -- (uncapped-aggregate class; mirrors the mart path's no-LIMIT total). (bug-hunt r7)
+    SUM(COUNT(*)) OVER () AS TOTAL_RUNS_WIN,
+    SUM(SUM(IFF(STATE = 'FAILED', 1, 0))) OVER () AS TOTAL_FAILED_WIN
 FROM runs
 GROUP BY 1, 2, 3
 ORDER BY FAILED DESC, LAST_RUN DESC

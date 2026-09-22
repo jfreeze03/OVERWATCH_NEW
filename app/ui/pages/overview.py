@@ -1202,7 +1202,11 @@ def render() -> None:
         _uc = next((c for c in daily.columns if "USD" in str(c).upper() or "CREDIT" in str(c).upper()),
                    daily.columns[-1] if len(daily.columns) else None)
         if _uc is not None:
-            _export_spark = [safe_float(v) for v in daily[_uc].tail(30).tolist()]
+            # r7: span the full windowed series so it matches the export's
+            # "Spend trend (last {days}d)" label — a hard .tail(30) plotted only the last
+            # month while the label claimed 60/90/180/365d (up to a 12x coverage overstatement).
+            # `daily` is already windowed to `days`, so this draws exactly the labeled period.
+            _export_spark = [safe_float(v) for v in daily[_uc].tolist()]
     _export_view = ExecutiveSummaryView(
         company=company,
         days=days,

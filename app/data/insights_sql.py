@@ -1103,7 +1103,11 @@ SELECT
     COUNT(DISTINCT a.QUERY_ID) AS FAILED_RUNS,
     ROUND(SUM(a.ALLOC_CREDITS), 4) AS WASTED_CREDITS,
     MAX(a.QUERY_SNIPPET)    AS QUERY_SNIPPET,
-    MAX(a.HOUR_TS)          AS LAST_SEEN
+    MAX(a.HOUR_TS)          AS LAST_SEEN,
+    -- Uncapped "repeat offenders" count (pre-LIMIT, over every fingerprint with wasted
+    -- spend in the window): the KPI reads THIS, not a count over the top-50-by-$ display
+    -- frame, so a cheap fast-failing retrier ranked past #50 is still counted. (bug-hunt r7)
+    SUM(IFF(COUNT(DISTINCT a.QUERY_ID) >= 5, 1, 0)) OVER () AS REPEAT_OFFENDERS_WIN
 FROM a
 WHERE {vis}
 GROUP BY 1

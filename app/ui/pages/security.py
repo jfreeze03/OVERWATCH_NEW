@@ -1051,8 +1051,8 @@ def _export_pack(company: str, days: int, window_label: str, *, bounds: tuple | 
         return
     import io
     import zipfile
-    from datetime import datetime
 
+    from app.logic.formulas import account_now
     from app.ui.components import log_ui_event
 
     sheets = {
@@ -1069,7 +1069,11 @@ def _export_pack(company: str, days: int, window_label: str, *, bounds: tuple | 
     }
     if build and cached.get("key") != pack_key:
         log_ui_event("csv_export", page="Security")
-        stamp = datetime.now().strftime("%Y%m%d_%H%M")
+        # r7: stamp the pack in ACCOUNT time (America/Chicago), like every other "generated"
+        # line and the per-table CSV filenames — the container clock is UTC under SiS, which
+        # put the wrong hour (and, evenings Central, tomorrow's DATE) on a compliance artifact
+        # that self-contradicted the account-time timestamps in the CSVs it packages.
+        stamp = account_now().strftime("%Y%m%d_%H%M")
         buffer = io.BytesIO()
         rows_written = {}
         failures: dict[str, str] = {}
@@ -1140,7 +1144,7 @@ def _export_pack(company: str, days: int, window_label: str, *, bounds: tuple | 
 
     if cached.get("key") != pack_key:
         return
-    stamp = str(cached.get("stamp") or datetime.now().strftime("%Y%m%d_%H%M"))
+    stamp = str(cached.get("stamp") or account_now().strftime("%Y%m%d_%H%M"))
     cached_rows = cached.get("rows")
     cached_failures = cached.get("failures")
     rows_written = dict(cached_rows) if isinstance(cached_rows, dict) else {}

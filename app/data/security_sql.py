@@ -1153,7 +1153,10 @@ def day_ddl(day: object, company: str = "ALL") -> str:
     )
     return f"""
 SELECT START_TIME, USER_NAME, ROLE_NAME, QUERY_TYPE, DATABASE_NAME, SCHEMA_NAME,
-       LEFT(QUERY_TEXT, 140) AS DDL_PREVIEW
+       LEFT(QUERY_TEXT, 140) AS DDL_PREVIEW,
+       -- Uncapped day total (pre-LIMIT): the replay headline reads THIS so a busy
+       -- migration day (>500/300 DDL) reports the true count, not the display cap.
+       COUNT(*) OVER () AS TOTAL_DDL_WIN
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE {where}
 ORDER BY START_TIME DESC
@@ -1179,7 +1182,10 @@ def day_grants(day: object, company: str = "ALL") -> str:
         _companies.user_clause(company, "GRANTEE_NAME"),
     )
     return f"""
-SELECT CREATED_ON AS GRANTED_AT, DELETED_ON, ROLE, GRANTED_TO, GRANTEE_NAME, GRANTED_BY
+SELECT CREATED_ON AS GRANTED_AT, DELETED_ON, ROLE, GRANTED_TO, GRANTEE_NAME, GRANTED_BY,
+       -- Uncapped day total (pre-LIMIT): the replay headline reads THIS so >200 grant
+       -- changes in a day reports the true count, not the display cap.
+       COUNT(*) OVER () AS TOTAL_GRANTS_WIN
 FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
 WHERE {where}
 ORDER BY GRANTED_AT

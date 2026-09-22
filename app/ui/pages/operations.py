@@ -875,7 +875,12 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                              if _truncated else "window; ") + "monthly-ized at right.")},
                 {"label": "Monthly-ized", "value": format_usd(monthly)},
                 {"label": "Repeat offenders",
-                 "value": str(int((wdf["FAILED_RUNS"].map(safe_float) >= 5).sum())),
+                 # r7: count over the pre-LIMIT window total, not the top-50-by-$ display
+                 # frame — a cheap fast-failing retrier ranked past #50 still counts, so the
+                 # "in the window" claim is honest even when the wasted-$ table is truncated.
+                 "value": str(int(safe_float(wdf["REPEAT_OFFENDERS_WIN"].iloc[0]))
+                               if "REPEAT_OFFENDERS_WIN" in wdf.columns and not wdf.empty
+                               else int((wdf["FAILED_RUNS"].map(safe_float) >= 5).sum())),
                  "help": "Fingerprints that failed 5+ times in the window."},
             ])
             if _truncated:
@@ -2211,8 +2216,19 @@ def _task_health_view(company: str, days: int, database: str = "",
         failed_col = "FAILED" if "FAILED" in df.columns else None
         task_sort_label = ""
         if failed_col:
-            total_runs = safe_float(df.get("RUNS", 0).sum() if "RUNS" in df.columns else 0)
-            total_failed = safe_float(df[failed_col].sum())
+            # r7 uncapped-aggregate: the live fallback (ops_sql.task_runs) is LIMIT-200 by
+            # FAILED DESC, so summing the display frame drops healthy high-volume tasks past
+            # row 200 -> undercounts RUNS and inflates the fail rate. Read the pre-LIMIT window
+            # totals when the live builder supplied them; the mart path (fact_task_daily) has no
+            # LIMIT, so its per-day frame sum is already a true window total (fallback branch).
+            if "TOTAL_RUNS_WIN" in df.columns and not df.empty:
+                total_runs = safe_float(df["TOTAL_RUNS_WIN"].iloc[0])
+                total_failed = safe_float(df["TOTAL_FAILED_WIN"].iloc[0])
+                df = df.drop(columns=[c for c in ("TOTAL_RUNS_WIN", "TOTAL_FAILED_WIN")
+                                      if c in df.columns])
+            else:
+                total_runs = safe_float(df.get("RUNS", 0).sum() if "RUNS" in df.columns else 0)
+                total_failed = safe_float(df[failed_col].sum())
             task_fail_pct = (total_failed / total_runs * 100) if total_runs else None
             known_failed = total_failed
             # WLA-1: both task reads are bounded to the prior calendar month under "Last month"
