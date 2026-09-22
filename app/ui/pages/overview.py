@@ -23,7 +23,7 @@ from app.data import cost_sql, mart27_sql, mart_sql
 from app.data.common import resolve_effective_window
 from app.logic import scoring
 from app.logic.actions import rank_actions
-from app.logic.date_windows import window_label
+from app.logic.date_windows import window_label, window_phrase
 from app.logic.forecast import MonthEndForecast, backtest_forecasts, month_end_projection
 from app.logic.formulas import (
     ExecutiveSummaryView,
@@ -942,7 +942,10 @@ def render() -> None:
                 # reconcile exactly by design, and the caption says "through today" so the
                 # reader isn't misled. (The Last-month path re-derives drivers today-excluded
                 # from the bounded frame, so it DOES reconcile there.)
-                _drv_thru = "through today" if _ov_bounds is None else "last month"
+                # Bounds is non-None for ALL three calendar presets, not just Last month — name
+                # the actual window (last month / the current month / the current year) instead of
+                # collapsing Current-month/Current-year to "last month".
+                _drv_thru = "through today" if _ov_bounds is None else window_phrase(_ov_bounds, days)
                 st.caption(f"Top driver: **{_d0['DIMENSION']}** — {format_usd(safe_float(_d0['VALUE_USD']))} "
                            f"({safe_float(_d0['VALUE_USD']) / _dtot * 100:.0f}% of warehouse compute "
                            f"spend, {_drv_thru} — serverless & AI shown separately below).")

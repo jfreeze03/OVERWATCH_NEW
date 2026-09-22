@@ -35,7 +35,7 @@ def test_wasted_spend_sums_unrounded_then_rounds_once() -> None:
     assert "_wasted_total = float(_wasted_raw.sum())" in src
     assert 'wdf["WASTED_USD"] = _wasted_raw.round(2)' in src
     assert 'format_usd(_wasted_total)' in src
-    assert "monthly = _wasted_total / max(days, 1) * 30.0" in src
+    assert "monthly = _wasted_total / max(_waste_served, 1) * 30.0" in src
     # the old round-then-sum construction is gone
     assert "round(credits_to_usd(safe_float(c), rate, round_cents=False), 2)" not in src
 

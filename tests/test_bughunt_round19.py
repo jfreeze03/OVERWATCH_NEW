@@ -55,7 +55,7 @@ def test_operations_window_labels_switch_to_last_month():
     assert '_tr_served = days if _from_mart else min(days, MAX_LIVE_WINDOW_DAYS)' in src
     assert '_tr_wlab = window_label(bounds, _tr_served)' in src
     assert 'f"Task runs ({_tr_wlab})"' in src
-    assert 'window_label(bounds, days)' in src  # wasted-spend _scope_lbl
+    assert 'window_label(bounds, _waste_served)' in src  # wasted-spend _scope_lbl (served window)
     # the raw trailing forms are gone
     assert 'f"Queries ({_served_days}d)"' not in src
     assert 'f"Task runs ({days}d)"' not in src

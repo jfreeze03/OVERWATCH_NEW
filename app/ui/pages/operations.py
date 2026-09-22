@@ -853,7 +853,13 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                 lambda c: credits_to_usd(safe_float(c), rate, round_cents=False))
             _wasted_total = float(_wasted_raw.sum())
             wdf["WASTED_USD"] = _wasted_raw.round(2)
-            monthly = _wasted_total / max(days, 1) * 30.0
+            # The live QUERY_HISTORY read clamps a trailing window to 90d (wasted_query_spend_usd
+            # -> bounded_days). Monthly-ize AND label by the window ACTUALLY SCANNED, not the raw
+            # 180/365 pick — else the run-rate is divided by up to 365 over a 90-day sum (~4x low)
+            # and the tile lies about its window (same served-window rule as the Queries/clustering
+            # tiles). Bounded presets scan the full [start,end) range, so days is already right.
+            _waste_served = days if bounds is not None else min(int(days), MAX_LIVE_WINDOW_DAYS)
+            monthly = _wasted_total / max(_waste_served, 1) * 30.0
             # TLH-1: the scan is LIMIT-50 by wasted $ desc, so this sum is the top-50
             # fingerprints, NOT the whole-window waste. Label + monthly-ize the shown
             # scope honestly; disclose when the frame is truncated at the cap.
@@ -861,7 +867,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             # WLA-1: on the non-truncated branch the label names the window; the waste read is
             # bounded to the prior calendar month under "Last month" scope, so say "last month".
             _scope_lbl = (f"top {len(wdf)} fingerprints" if _truncated
-                          else (window_label(bounds, days)))
+                          else (window_label(bounds, _waste_served)))
             kpi_row([
                 {"label": f"Wasted spend ({_scope_lbl})", "value": format_usd(_wasted_total),
                  "help": ("Allocated compute on non-success queries, summed over the "

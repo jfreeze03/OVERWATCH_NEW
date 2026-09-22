@@ -27,7 +27,7 @@ def test_cost_driver_reconciliation_claim_is_honest():
     # the stale "drivers reconcile to the KPI total" claim is gone
     assert "the drivers reconcile to the KPI total" not in ov
     # the caption discloses the driver window basis (through today vs last month)
-    assert '_drv_thru = "through today" if _ov_bounds is None else "last month"' in ov
+    assert '_drv_thru = "through today" if _ov_bounds is None else window_phrase(_ov_bounds, days)' in ov
     assert "can slightly EXCEED the headline" in ov       # honest note in the comment
 
 

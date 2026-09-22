@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.565.0 - Bug-hunt round 3: wasted-spend run-rate, Overview label, Security selection (2026-09-21)
+
+Adversarial bug-hunt round 3 (`wf_90058f36`) across the panels not yet covered this session
+(regression-check of the window-label change + Cost Intelligence + Operations tabs + Security) found
+3 real defects, all fixed:
+
+- **Wasted-spend "Monthly-ized" understated the run-rate ~2–4x** (Operations ▸ Queries). The live
+  scan clamps a trailing window to 90 days, but the monthly-ize divided the 90-day total by the raw
+  180/365 pick, and the tile label named the raw window. Both now use the served window (same fix as
+  the clustering tile in v4.564 — this site was missed).
+- **Overview "Top cost drivers" caption said "last month" for Current-month / Current-year** — the
+  last straggler of the systemic label idiom (a `"through today" … else "last month"` conditional,
+  not the `{days}d` form the round-2 sweep caught). Now uses `window_phrase`.
+- **Security ▸ Effective access paths reverted your selectbox pick.** The table-row selection is
+  sticky and re-emitted every rerun, so picking a different user in the "Access path for" box got
+  overwritten back to the last-clicked row. Guarded with a change-detection sentinel.
+
 ## 4.564.0 - Bug-hunt round 2: 8 defects across the active panels (2026-09-21)
 
 Adversarial bug-hunt (`wf_9eabfa90`, 4 finders + refute-by-default verify) across the actively-used

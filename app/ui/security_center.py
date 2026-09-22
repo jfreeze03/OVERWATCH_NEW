@@ -424,7 +424,11 @@ def render_effective_access(company: str) -> None:
     users = summary["USER_NAME"].astype(str).tolist()
     if not users:
         return
-    if selection is not None:
+    # Only act on a GENUINELY-NEW row click: st.dataframe selection is sticky and re-emits every
+    # rerun, so an unconditional write reverts the user's OWN selectbox pick back to the last-clicked
+    # row on the next rerun. Change-detection sentinel, like operations.py's drill selections.
+    if selection is not None and selection != st.session_state.get("_sec_effective_sel_last"):
+        st.session_state["_sec_effective_sel_last"] = selection
         try:
             chosen = str(summary.iloc[int(selection)]["USER_NAME"])
             # Drive the selectbox by ITS OWN key: a keyed widget reads session_state[key]
