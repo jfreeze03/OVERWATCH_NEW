@@ -1,247 +1,308 @@
 -- =====================================================================
 --  OVERWATCH -- RUN_NEXT.sql
---  APPLY V147 (operator-stats identity grain) + STEP-2 verify.
+--  APPLY V148 (exec-board CoCo/CoWork AI-rate restore) + STEP-2 verify.
 --
---  WHAT & WHY: the QOIE Slice 2 "Operator profile" (Operations > Queries)
---  ignored the User/Database/Schema scope filters because its collector fact
---  FACT_QUERY_OPERATOR_STATS_DAILY was stamped with only COMPANY + WAREHOUSE_NAME.
---  V147 adds USER_NAME/DATABASE_NAME/SCHEMA_NAME (names mirror QUERY_HISTORY),
---  re-derives SP_LOAD_QUERY_OPERATOR_STATS from V144 so the enrich UPDATE also
---  stamps them (byte-identical otherwise; the V144 OP_TIME_PCT*100 fix preserved),
---  and backfills the already-collected rows once. The deployed app already
---  gates on 147 being in the applied SCHEMA_VERSION set, so it SELF-HEALS the
---  moment this applies -- no redeploy needed to start honoring the filters.
+--  WHAT & WHY: the Overview "Cost drivers -- serverless & AI" panel
+--  (PANEL='COST_DRIVER_SVC', fed by SP_REFRESH_EXEC_BOARD -> MART_EXEC_BOARD)
+--  has been pricing Cortex Code / CoWork (SERVICE_TYPE 'SNOWFLAKE_COCO_SNOWSIGHT')
+--  at the COMPUTE rate ($3.68) and labeling it "Serverless:" instead of the AI
+--  rate ($2.20) / "AI/Cortex:". Root cause: V079 broadened the proc's sv_daily AI
+--  predicate to include '%COCO%'/'%COWORK%' (CoCo matches none of the narrow terms
+--  '%CORTEX%','AI%','%INTELLIGENCE%'), but V123 -- which re-derived the proc from
+--  the PRE-V079 ancestor V073 to move the calendar windows onto the account clock --
+--  SILENTLY dropped that broadening. Since V123 is the live proc, CoCo has been
+--  mispriced ~1.67x on this panel and disagrees with Cost > Spend & Attribution,
+--  which prices the same credits at the AI rate via ai_service_predicate().
+--
+--  V148 re-derives SP_REFRESH_EXEC_BOARD from V123 (KEEPING every CONVERT_TIMEZONE
+--  account-clock change) and RESTORES `OR SERVICE_TYPE ILIKE '%COCO%' OR
+--  SERVICE_TYPE ILIKE '%COWORK%'` in BOTH sv_daily predicates (the IS_AI flag and
+--  the DRIVER_LABEL prefix), so IS_AI/DRIVER_LABEL match ai_service_predicate()
+--  again. Byte-identical to V123 otherwise (a guard test locks that only the
+--  predicate + its comment changed). Proc only, NO schema change.
 --
 --  Run top-to-bottom as SNOW_ACCOUNTADMINS. PART A applies the migration
---  (idempotent: ADD COLUMN IF NOT EXISTS / CREATE OR REPLACE / NULL-guarded
---  backfill / SCHEMA_VERSION insert WHERE NOT EXISTS -- safe to re-run).
---  Then paste back the PART B (STEP-2) grids.
+--  (idempotent: CREATE OR REPLACE PROCEDURE / a CALL that atomically SWAPs the
+--  mart / SCHEMA_VERSION insert WHERE NOT EXISTS -- safe to re-run). The tail CALL
+--  re-stamps the board at the corrected rate immediately (it would otherwise
+--  self-heal on the next hourly task). Then paste back the PART B grids.
 --
---  Requires V146 already applied (guard raises -20147 otherwise). V146 was
---  confirmed applied 2026-09-21, so PART A should proceed.
+--  Requires V147 already applied (guard raises -20148 otherwise). V147 was
+--  confirmed applied + STEP-2 verified 2026-09-21, so PART A should proceed.
 --
---  NOTE (Claude/owner): this REPLACES the prior TIMEZONE DIAGNOSTIC on runbox.
---  That TZ work is CLOSED -- STEP 1 already confirmed the account TIMEZONE is
---  explicitly America/Chicago (level=ACCOUNT), so the app renders Central and no
---  account flip / mart reload is needed (shipped v4.560.0, light guard only).
---  The only TZ item that never came back was the optional STEP-2 warehouse-
---  override cross-check (WH_ALFA_QUERY / WH_ALFA_ADMIN) -- re-run it any time if
---  you still want it; it does not gate anything. (The older native-budget
---  GET_SERVICE_TYPE_USAGE_V2 diagnostic is separate and still open; ping me to
---  re-stage it -- the migration/app files are all safe in the repo.)
+--  NOTE (Claude/owner): this REPLACES the prior V147 apply on runbox -- V147 is
+--  DONE (its STEP-2 grids confirmed the identity columns + backfill). If for any
+--  reason V147 is NOT yet in SCHEMA_VERSION, PART A raises -20148 and does nothing;
+--  apply V147 (snowflake/migrations/V147__operator_stats_identity_grain.sql) first.
 -- =====================================================================
 
 -- =====================================================================
---  PART A -- APPLY V147 (idempotent). Source: snowflake/migrations/V147__operator_stats_identity_grain.sql
+--  PART A -- APPLY V148 (idempotent). Source: snowflake/migrations/V148__exec_board_ai_predicate_restore_coco.sql
 -- =====================================================================
-
--- V147__operator_stats_identity_grain.sql
+-- V148__exec_board_ai_predicate_restore_coco.sql
 --
--- Stamp USER_NAME / DATABASE_NAME / SCHEMA_NAME onto the QOIE Slice 2 operator-stats fact so
--- the Operator profile (Operations ▸ Queries) can honor the User/Database/Schema scope filters,
--- not just company/warehouse/window. V143/V144 stamped only COMPANY + WAREHOUSE_NAME, so the
--- panel silently showed data broader than the active scope when one of those filters was set.
+-- Restore the CoCo/CoWork AI-rate broadening on the exec board's cost-driver panel.
 --
---   * ALTER FACT_QUERY_OPERATOR_STATS_DAILY ADD COLUMN IF NOT EXISTS the three identity columns
---     (idempotent; named to match ACCOUNT_USAGE.QUERY_HISTORY so the app reuses _query_scope's
---     USER_NAME / DATABASE_NAME / SCHEMA_NAME predicates).
---   * Re-derive SP_LOAD_QUERY_OPERATOR_STATS from V144 (the current live proc): the set-based
---     enrich UPDATE, which already joins the query's QUERY_HISTORY row, now also fills the three.
---     That is the ONLY change to the proc (byte-identical otherwise; test_v147 proves it).
---   * One-time backfill of existing rows: they carry QUERY_DAY, so the proc's QUERY_DAY-IS-NULL
---     enrich never revisits them and the NOT-EXISTS candidate gate blocks re-collection — the
---     USER_NAME-IS-NULL backfill is the only fill path. Bounded to -35d (30-day retention +
---     2-day collection lag), inside QUERY_HISTORY's 365-day retention; idempotent.
+-- V079 broadened SP_REFRESH_EXEC_BOARD's sv_daily AI predicate (both the IS_AI flag and the
+-- DRIVER_LABEL prefix) to include '%COCO%' / '%COWORK%', because Cortex Code / CoWork bills to
+-- this account under SERVICE_TYPE 'SNOWFLAKE_COCO_SNOWSIGHT', which matches NONE of the narrow
+-- terms ('%CORTEX%','AI%','%INTELLIGENCE%'). That broadening is the canonical AI predicate the
+-- app applies everywhere else (app/data/common.ai_service_predicate + AI_SERVICE_TOKENS, and the
+-- still-broad SP_LOAD_PLATFORM_SCORE / SP_ALERT_SCAN* procs).
 --
--- App-side (already shipped): operator_stats_summary / operator_problem_board reference the
--- three columns ONLY when the arg is non-empty, and operations.py passes them empty until 147
--- is in the applied SCHEMA_VERSION set — so nothing references the columns before this applies,
--- and the grain self-heals the moment it does (no redeploy). Apply AFTER V146. Safe to re-run.
+-- V123 later re-derived SP_REFRESH_EXEC_BOARD from the PRE-V079 ancestor V073 to move the calendar
+-- windows onto the account clock, and SILENTLY dropped the V079 broadening (its header only claimed
+-- "V073 with CURRENT_DATE -> account clock", "otherwise byte-identical"). Since V123 is the live
+-- definition of the proc, MART_EXEC_BOARD has since priced CoCo/CoWork credits at the COMPUTE rate
+-- ($3.68) instead of the AI rate ($2.20) and labeled them 'Serverless:' instead of 'AI/Cortex:' on
+-- the Overview cost-driver panel (app/ui/pages/overview.py COST_DRIVER_SVC) -- a ~1.67x overstatement
+-- of that line and a live cross-page mismatch with the Cost > Spend & Attribution page, which prices
+-- the same credits at the AI rate.
+--
+-- This re-derives SP_REFRESH_EXEC_BOARD from V123 (KEEPING every CONVERT_TIMEZONE account-clock
+-- change) and RESTORES `OR SERVICE_TYPE ILIKE '%COCO%' OR SERVICE_TYPE ILIKE '%COWORK%'` in both
+-- sv_daily predicates, so IS_AI/DRIVER_LABEL match ai_service_predicate() again. Output contract,
+-- windows, scopes, atomic stage swap and freshness stamp are byte-identical to V123. The tail
+-- re-runs the refresh so the board re-stamps with the corrected rate immediately (it would otherwise
+-- self-heal on the next hourly task). Proc only, no schema change.
+--
+-- Owner applies in Snowsight after V147. This file never runs from the app.
 
 EXECUTE IMMEDIATE
 $$
 DECLARE
     v NUMBER;
-    not_ready EXCEPTION (-20147, 'V147 requires V146 first - apply migrations in order.');
+    not_ready EXCEPTION (-20148, 'V148 requires V147 first - apply migrations in order.');
 BEGIN
     SELECT MAX(VERSION) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
-    IF (v < 146) THEN
+    IF (v < 147) THEN
         RAISE not_ready;
     END IF;
 END;
 $$;
 
--- Identity grain (idempotent). Names mirror ACCOUNT_USAGE.QUERY_HISTORY so the app reuses the
--- same USER_NAME / DATABASE_NAME / SCHEMA_NAME predicates the query-level sections apply.
-ALTER TABLE DBA_MAINT_DB.OVERWATCH.FACT_QUERY_OPERATOR_STATS_DAILY ADD COLUMN IF NOT EXISTS USER_NAME VARCHAR(256);
-ALTER TABLE DBA_MAINT_DB.OVERWATCH.FACT_QUERY_OPERATOR_STATS_DAILY ADD COLUMN IF NOT EXISTS DATABASE_NAME VARCHAR(256);
-ALTER TABLE DBA_MAINT_DB.OVERWATCH.FACT_QUERY_OPERATOR_STATS_DAILY ADD COLUMN IF NOT EXISTS SCHEMA_NAME VARCHAR(256);
-
--- >>> derived:SP_LOAD_QUERY_OPERATOR_STATS (from V144; enrich UPDATE now also stamps USER_NAME/DATABASE_NAME/SCHEMA_NAME, V147)
-CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_QUERY_OPERATOR_STATS(DAYS_BACK FLOAT)
+-- >>> derived:SP_REFRESH_EXEC_BOARD  (V123 with the V079 CoCo/CoWork AI predicate restored)
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_REFRESH_EXEC_BOARD()
 RETURNS VARCHAR
 LANGUAGE SQL
 EXECUTE AS OWNER
 AS
 $$
 DECLARE
-    keep INT;
-    landed INT DEFAULT 0;      -- operator ROWS actually inserted (SQLROWCOUNT sum)
-    collected INT DEFAULT 0;   -- candidate queries that landed >= 1 operator row
-    skipped INT DEFAULT 0;     -- candidates that errored OR returned empty (aged/utility)
-    emsg VARCHAR;              -- last per-id SQLERRM sample (distinguishes a SQL bug from a skip)
-    ins VARCHAR;
-    -- Candidate query_ids: the recent (2-day, inside the 14-day operator-stats window)
-    -- expensive queries, using query_optimization_triage's EXACT filter set (self-noise
-    -- dropped, a genuine-inefficiency gate) so the two surfaces agree. INCREMENTAL: skip
-    -- any query already collected. Capped at 250/run (one table-function call per row).
-    c_qids CURSOR FOR
-        SELECT qh.QUERY_ID
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY qh
-        WHERE qh.START_TIME >= DATEADD('day', -2, CURRENT_TIMESTAMP())
-          AND qh.EXECUTION_STATUS = 'SUCCESS'
-          AND qh.QUERY_TYPE <> 'CALL'
-          AND UPPER(COALESCE(qh.QUERY_TEXT, '')) NOT LIKE 'EXECUTE STREAMLIT%'
-          AND UPPER(COALESCE(qh.QUERY_TEXT, '')) NOT LIKE '%OVERWATCH_APP%'
-          AND COALESCE(qh.QUERY_TAG, '') NOT LIKE 'OVERWATCH%'
-          AND (COALESCE(qh.BYTES_SPILLED_TO_REMOTE_STORAGE, 0) > 0
-               OR COALESCE(qh.BYTES_SCANNED, 0) > 50 * POWER(1024, 3))
-          AND NOT EXISTS (
-              SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_OPERATOR_STATS_DAILY f
-              WHERE f.QUERY_ID = qh.QUERY_ID)
-        ORDER BY COALESCE(qh.BYTES_SPILLED_TO_REMOTE_STORAGE, 0) DESC,
-                 qh.BYTES_SCANNED DESC
-        LIMIT 250;
+    credit_price FLOAT;
+    ai_credit_price FLOAT;   -- V069: AI/Cortex credits bill at their OWN rate (house rate law)
 BEGIN
-    -- DAYS_BACK bounds how many days of collected operator stats to RETAIN (default 30);
-    -- the collection window itself is a fixed 2 days (inside the function's 14-day reach).
-    keep := GREATEST(COALESCE(:DAYS_BACK, 30), 1)::INT;
+    -- V069: both rates in ONE read, the canonical house form (V061..V067 alert scans).
+    -- The COALESCE fallbacks mirror the V001 SETTINGS seeds; no rate is ever written
+    -- into the SQL below.
+    SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CREDIT_PRICE_USD', VALUE, NULL))), 3.68),
+           COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'AI_CREDIT_PRICE_USD', VALUE, NULL))), 2.20)
+      INTO :credit_price, :ai_credit_price
+    FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;
 
-    -- Land the raw operator rows per query_id. The query_id is a Snowflake UUID from
-    -- ACCOUNT_USAGE (safe to embed); the table-function argument cannot be bound, so build
-    -- the INSERT with EXECUTE IMMEDIATE. QUERY_* enrichment columns are filled set-based
-    -- below. PARENT_OPERATORS is an ARRAY (BCR-1175) - store the first parent, NULL at root.
-    FOR q IN c_qids DO
-        BEGIN
-            ins := 'INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_QUERY_OPERATOR_STATS_DAILY '
-                || '(QUERY_ID, STEP_ID, OPERATOR_ID, PARENT_OPERATOR_ID, OPERATOR_TYPE, '
-                || 'INPUT_ROWS, OUTPUT_ROWS, ROW_MULTIPLE, REMOTE_SPILL_GB, LOCAL_SPILL_GB, '
-                || 'GB_SCANNED, PARTITIONS_SCANNED, PARTITIONS_TOTAL, SCAN_PCT, OP_TIME_PCT) '
-                || 'SELECT ' || '''' || q.QUERY_ID || '''' || ', STEP_ID, OPERATOR_ID, '
-                || 'PARENT_OPERATORS[0]::NUMBER, OPERATOR_TYPE, '
-                || 'OPERATOR_STATISTICS:input_rows::NUMBER, '
-                || 'OPERATOR_STATISTICS:output_rows::NUMBER, '
-                || 'ROUND(OPERATOR_STATISTICS:output_rows::FLOAT '
-                || '/ NULLIF(OPERATOR_STATISTICS:input_rows::FLOAT, 0), 3), '
-                || 'ROUND(OPERATOR_STATISTICS:spilling:bytes_spilled_remote_storage::FLOAT '
-                || '/ POWER(1024, 3), 3), '
-                || 'ROUND(OPERATOR_STATISTICS:spilling:bytes_spilled_local_storage::FLOAT '
-                || '/ POWER(1024, 3), 3), '
-                || 'ROUND(OPERATOR_STATISTICS:io:bytes_scanned::FLOAT / POWER(1024, 3), 3), '
-                || 'OPERATOR_STATISTICS:pruning:partitions_scanned::NUMBER, '
-                || 'OPERATOR_STATISTICS:pruning:partitions_total::NUMBER, '
-                || 'ROUND(OPERATOR_STATISTICS:pruning:partitions_scanned::FLOAT '
-                || '/ NULLIF(OPERATOR_STATISTICS:pruning:partitions_total::FLOAT, 0) * 100, 2), '
-                -- V144: overall_percentage is a 0-1 fraction (owner probe) -> * 100 for a 0-100 _PCT.
-                || 'ROUND(EXECUTION_TIME_BREAKDOWN:overall_percentage::FLOAT * 100, 2) '
-                || 'FROM TABLE(GET_QUERY_OPERATOR_STATS(' || '''' || q.QUERY_ID || '''' || '))';
-            EXECUTE IMMEDIATE :ins;
-            -- SQLROWCOUNT = operator rows the table function returned for this id. It can
-            -- legitimately be 0 WITHOUT raising (an aged/utility id returns empty), so count
-            -- ROWS LANDED, not INSERT successes — otherwise an all-empty run reports false
-            -- success and the all-empty alert below never fires.
-            landed := landed + SQLROWCOUNT;
-            IF (SQLROWCOUNT > 0) THEN
-                collected := collected + 1;
-            ELSE
-                skipped := skipped + 1;
-            END IF;
-        EXCEPTION
-            WHEN OTHER THEN
-                -- An aged (>14d), non-existent, utility (no profile), or unauthorized
-                -- query_id: skip it (expected), do not abort the run. Keep the last SQLERRM
-                -- so a SYSTEMATIC dynamic-SQL bug (every id raises) is distinguishable from
-                -- an expected skip when the all-empty alert fires (no CI executes this SQL).
-                emsg := SQLERRM;
-                skipped := skipped + 1;
-        END;
-    END FOR;
+    -- Build into the stage; readers keep the old board until the SWAP (the
+    -- V003 DELETE+INSERT gap stranded Overview on the live fallback hourly).
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.OW_EXEC_BOARD_STAGE;
 
-    -- Enrich the just-landed rows (QUERY_DAY IS NULL) from QUERY_HISTORY: the fingerprint
-    -- hash to join Slice-1, the warehouse/company scope axis, and the query's elapsed time
-    -- (so the app can turn OP_TIME_PCT into per-operator seconds). Set-based, no injection.
-    UPDATE DBA_MAINT_DB.OVERWATCH.FACT_QUERY_OPERATOR_STATS_DAILY f
-    SET QUERY_DAY = TO_DATE(qh.START_TIME),
-        QUERY_PARAMETERIZED_HASH = qh.QUERY_PARAMETERIZED_HASH,
-        WAREHOUSE_NAME = qh.WAREHOUSE_NAME,
-        WAREHOUSE_SIZE = qh.WAREHOUSE_SIZE,
-        COMPANY = DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(qh.WAREHOUSE_NAME),
-        QUERY_ELAPSED_SEC = ROUND(qh.TOTAL_ELAPSED_TIME / 1000.0, 3),
-        -- V147: identity grain so the Operator profile honors the User/Database/Schema scope
-        -- filters (same QUERY_HISTORY columns the query-level _query_scope filters on).
-        USER_NAME = qh.USER_NAME,
-        DATABASE_NAME = qh.DATABASE_NAME,
-        SCHEMA_NAME = qh.SCHEMA_NAME
-    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY qh
-    WHERE f.QUERY_ID = qh.QUERY_ID
-      AND f.QUERY_DAY IS NULL
-      -- -5d (candidate window is only -2d): if a prior run aborted between INSERT and this
-      -- enrich, the NOT-EXISTS gate blocks re-collection, so a following run's QUERY_DAY-IS-
-      -- NULL retry is the only self-heal path; the wider window gives it real grace to catch up.
-      AND qh.START_TIME >= DATEADD('day', -5, CURRENT_TIMESTAMP());
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.OW_EXEC_BOARD_STAGE
+        (COMPANY, WINDOW_DAYS, PANEL, METRIC, DIMENSION, PERIOD_START, VALUE, VALUE_USD, UNIT, SORT_ORDER)
+    WITH scopes AS (
+        SELECT 'ALFA' AS COMPANY UNION ALL SELECT 'Trexis' UNION ALL SELECT 'ALL'
+        UNION ALL SELECT 'UNKNOWN'  -- V044 (#18): the unmapped bucket is a first-class pill
+    ),
+    windows AS (
+        -- V073: fixed rolling windows plus Snowsight-style calendar presets.
+        -- MTD/YTD are day OFFSETS because the joins are inclusive of CURRENT_DATE.
+        -- DISTINCT prevents a duplicate board when today's offset equals a fixed pill.
+        SELECT DISTINCT WINDOW_DAYS
+        FROM (
+            SELECT 7 AS WINDOW_DAYS UNION ALL SELECT 14 UNION ALL SELECT 30
+            UNION ALL SELECT 60 UNION ALL SELECT 90
+            UNION ALL SELECT 180 UNION ALL SELECT 365
+            UNION ALL
+            SELECT DATEDIFF('day', DATE_TRUNC('month', CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE), CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE)
+            UNION ALL
+            SELECT DATEDIFF('day', DATE_TRUNC('year', CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE), CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE)
+        ) calendar_windows
+    ),
+    -- Aggregate each fact ONCE at (COMPANY, DAY[, dim]) grain; the
+    -- scope-window expansion joins these small frames, never the raw facts.
+    wh_daily AS (
+        SELECT COMPANY, DAY, WAREHOUSE_NAME, SUM(CREDITS_TOTAL) AS CREDITS
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+        WHERE DAY >= DATEADD('day', -365, CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE)
+        GROUP BY 1, 2, 3
+    ),
+    qh_daily AS (
+        -- r22 #1: the day fact is backfillable a year, so 14/60/90-day
+        -- windows hold real totals right after a rebuild (the hourly fact
+        -- only accrues from install day).
+        SELECT COMPANY, DAY,
+               SUM(QUERY_COUNT) AS QUERIES, SUM(FAILED_COUNT) AS FAILED,
+               SUM(QUEUED_SEC_SUM) AS QUEUED_SEC, SUM(SPILL_REMOTE_GB) AS SPILL_GB
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_DAILY
+        WHERE DAY >= DATEADD('day', -365, CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE)
+        GROUP BY 1, 2
+    ),
+    tk_daily AS (
+        SELECT COMPANY, DAY, SUM(RUNS) AS RUNS, SUM(FAILED) AS FAILED
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY
+        WHERE DAY >= DATEADD('day', -365, CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE)
+        GROUP BY 1, 2
+    ),
+    -- V069 (audit C5): serverless + AI/Cortex spend, so the driver panel can show what
+    -- the KPI row already counts. Source is FACT_METERING_DAILY -- the app's own daily
+    -- fact (SP_LOAD_DAILY_FACTS), never a live ACCOUNT_USAGE scan -- on the SAME -365d
+    -- horizon as the three arms above. Warehouse metering is excluded because wh_daily
+    -- already carries it: the canonical exclusion list COST_SERVERLESS_CREEP spells in
+    -- V066, minus its AI_SERVICES entry (AI is what this arm exists to surface).
+    -- CREDITS_BILLED (adjustment applied) is the same base the page's MTD/Projected KPIs
+    -- dollarize, so the driver panel and the KPI row agree. IS_AI evaluates the canonical
+    -- AI predicate ONCE, here, so the label and the rate can never disagree.
+    -- V148: restore V079's CoCo/CoWork broadening (dropped by V123's V073 re-derivation) so
+    -- SNOWFLAKE_COCO_SNOWSIGHT (Cortex Code / CoWork) prices at the AI rate and labels 'AI/Cortex:',
+    -- matching app/data/common.ai_service_predicate() and every other AI-rate surface.
+    sv_daily AS (
+        SELECT DAY, SERVICE_TYPE,
+               (SERVICE_TYPE ILIKE '%CORTEX%' OR SERVICE_TYPE ILIKE 'AI%' OR SERVICE_TYPE ILIKE '%INTELLIGENCE%' OR SERVICE_TYPE ILIKE '%COCO%' OR SERVICE_TYPE ILIKE '%COWORK%') AS IS_AI,
+               IFF((SERVICE_TYPE ILIKE '%CORTEX%' OR SERVICE_TYPE ILIKE 'AI%' OR SERVICE_TYPE ILIKE '%INTELLIGENCE%' OR SERVICE_TYPE ILIKE '%COCO%' OR SERVICE_TYPE ILIKE '%COWORK%'), 'AI/Cortex: ', 'Serverless: ') || SERVICE_TYPE AS DRIVER_LABEL,
+               SUM(CREDITS_BILLED) AS CREDITS
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+        WHERE DAY >= DATEADD('day', -365, CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE)
+          AND SERVICE_TYPE NOT IN ('WAREHOUSE_METERING', 'WAREHOUSE_METERING_READER')
+        GROUP BY 1, 2, 3, 4
+    ),
+    wh AS (
+        SELECT s.COMPANY AS SCOPE_COMPANY, w.WINDOW_DAYS, f.DAY, f.WAREHOUSE_NAME, f.CREDITS
+        FROM wh_daily f
+        JOIN scopes s ON (s.COMPANY = 'ALL' OR f.COMPANY = s.COMPANY)
+        JOIN windows w ON f.DAY >= DATEADD('day', -w.WINDOW_DAYS, CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE)
+    ),
+    qh AS (
+        SELECT s.COMPANY AS SCOPE_COMPANY, w.WINDOW_DAYS,
+               f.QUERIES, f.FAILED, f.QUEUED_SEC, f.SPILL_GB
+        FROM qh_daily f
+        JOIN scopes s ON (s.COMPANY = 'ALL' OR f.COMPANY = s.COMPANY)
+        JOIN windows w ON f.DAY >= DATEADD('day', -w.WINDOW_DAYS, CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE)
+    ),
+    tk AS (
+        SELECT s.COMPANY AS SCOPE_COMPANY, w.WINDOW_DAYS, f.RUNS, f.FAILED
+        FROM tk_daily f
+        JOIN scopes s ON (s.COMPANY = 'ALL' OR f.COMPANY = s.COMPANY)
+        JOIN windows w ON f.DAY >= DATEADD('day', -w.WINDOW_DAYS, CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE)
+    ),
+    -- V069: the SAME windows expansion the three arms above use. There is deliberately NO
+    -- scopes join -- FACT_METERING_DAILY carries no company dimension (account-level
+    -- metering), so these rows are emitted for the 'ALL' pill ONLY. Fanning them across
+    -- ALFA/Trexis would invent an attribution the source does not carry, and parking them
+    -- in the V044 UNKNOWN pill would poison that pill's "go map this" signal with spend
+    -- that can never be mapped.
+    sv AS (
+        SELECT 'ALL' AS SCOPE_COMPANY, w.WINDOW_DAYS, f.DRIVER_LABEL, f.IS_AI, f.CREDITS
+        FROM sv_daily f
+        JOIN windows w ON f.DAY >= DATEADD('day', -w.WINDOW_DAYS, CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE)
+    ),
+    -- One aggregation pass per source; the KPI arms below just unpivot these.
+    wh_kpi AS (
+        SELECT SCOPE_COMPANY, WINDOW_DAYS, SUM(CREDITS) AS CREDITS
+        FROM wh GROUP BY 1, 2
+    ),
+    qh_kpi AS (
+        SELECT SCOPE_COMPANY, WINDOW_DAYS, SUM(QUERIES) AS QUERIES, SUM(FAILED) AS FAILED,
+               SUM(QUEUED_SEC) AS QUEUED_SEC, SUM(SPILL_GB) AS SPILL_GB
+        FROM qh GROUP BY 1, 2
+    ),
+    tk_kpi AS (
+        SELECT SCOPE_COMPANY, WINDOW_DAYS, SUM(RUNS) AS RUNS, SUM(FAILED) AS FAILED
+        FROM tk GROUP BY 1, 2
+    )
+    -- KPI panel (unpivoted from the single-pass aggregates) ------------------
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'KPI', 'CREDITS', NULL, NULL,
+           CREDITS, ROUND(CREDITS * :credit_price, 2), 'credits', 10
+    FROM wh_kpi
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'KPI', 'QUERIES', NULL, NULL,
+           QUERIES, NULL, 'count', 20
+    FROM qh_kpi
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'KPI', 'FAILED_QUERIES', NULL, NULL,
+           FAILED, NULL, 'count', 30
+    FROM qh_kpi
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'KPI', 'QUEUED_MINUTES', NULL, NULL,
+           ROUND(QUEUED_SEC / 60, 1), NULL, 'minutes', 40
+    FROM qh_kpi
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'KPI', 'SPILL_GB', NULL, NULL,
+           ROUND(SPILL_GB, 2), NULL, 'gb', 50
+    FROM qh_kpi
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'KPI', 'TASK_RUNS', NULL, NULL,
+           RUNS, NULL, 'count', 60
+    FROM tk_kpi
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'KPI', 'TASK_FAILURES', NULL, NULL,
+           FAILED, NULL, 'count', 70
+    FROM tk_kpi
+    -- Daily spend panel -------------------------------------------------------
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'DAILY_SPEND', 'CREDITS', NULL, DAY,
+           SUM(CREDITS), ROUND(SUM(CREDITS) * :credit_price, 2), 'credits/day', 10
+    FROM wh GROUP BY 1, 2, DAY
+    -- Cost drivers ------------------------------------------------------------
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'COST_DRIVER', 'CREDITS', WAREHOUSE_NAME, NULL,
+           SUM(CREDITS), ROUND(SUM(CREDITS) * :credit_price, 2), 'credits', 10
+    FROM wh GROUP BY 1, 2, WAREHOUSE_NAME
+    -- V069 (audit C5): serverless + AI/Cortex cost drivers on their OWN panel. The
+    -- warehouse arm above reads FACT_WAREHOUSE_DAILY ONLY, so a Cortex or auto-clustering
+    -- line could be the account's fastest-growing cost and never reach the driver panel,
+    -- while this page's KPI caption promises compute + serverless + AI. These rows go under
+    -- PANEL='COST_DRIVER_SVC' -- a DISTINCT panel from the warehouse 'COST_DRIVER' -- so
+    -- the warehouse drivers keep summing to the warehouse-only headline KPIs and the page's
+    -- "% of warehouse compute spend" caption stays true; the app renders this as a separate
+    -- table beneath the warehouse drivers. Same column contract; the kind rides in the
+    -- DIMENSION label because the board has no KIND column.
+    -- BASIS: this panel is BILLED $ -- CREDITS_BILLED (adjustment applied), AI/Cortex
+    -- credits x :ai_credit_price and everything else x :credit_price (the two-partition
+    -- dollarization of V064/V065's alert blocks, over the canonical AI predicate resolved
+    -- once as sv_daily.IS_AI). The warehouse panel is operational CREDITS_TOTAL at the
+    -- compute rate -- the two panels never mix bases.
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'COST_DRIVER_SVC', 'CREDITS', DRIVER_LABEL, NULL,
+           SUM(CREDITS),
+           ROUND(SUM(CASE WHEN IS_AI THEN 0 ELSE CREDITS END) * :credit_price
+                 + SUM(CASE WHEN IS_AI THEN CREDITS ELSE 0 END) * :ai_credit_price, 2),
+           'credits', 20
+    FROM sv GROUP BY 1, 2, DRIVER_LABEL;
 
-    -- Retain `keep` days of collected operator stats (LOAD_TS is always set).
-    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_OPERATOR_STATS_DAILY
-    WHERE LOAD_TS < DATEADD('day', -:keep, CURRENT_TIMESTAMP());
+    ALTER TABLE DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD
+        SWAP WITH DBA_MAINT_DB.OVERWATCH.OW_EXEC_BOARD_STAGE;
 
     MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE t
     USING (
-        SELECT 'FACT_QUERY_OPERATOR_STATS_DAILY' AS SOURCE_NAME,
-               MAX(LOAD_TS) AS LAST_LOAD_TS, COUNT(*) AS ROW_COUNT
-        FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_OPERATOR_STATS_DAILY
+        SELECT 'MART_EXEC_BOARD' AS SOURCE_NAME, MAX(REFRESHED_AT) AS LAST_LOAD_TS,
+               COUNT(*) AS ROW_COUNT
+        FROM DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD
     ) s
     ON t.SOURCE_NAME = s.SOURCE_NAME
-    WHEN MATCHED THEN UPDATE SET
-        t.LAST_LOAD_TS = s.LAST_LOAD_TS, t.ROW_COUNT = s.ROW_COUNT,
-        t.SNAPSHOT_TS = CURRENT_TIMESTAMP()
-    WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT)
-    VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT);
+    WHEN MATCHED THEN UPDATE SET LAST_LOAD_TS = s.LAST_LOAD_TS, ROW_COUNT = s.ROW_COUNT,
+        SNAPSHOT_TS = CURRENT_TIMESTAMP(), GENERATION = COALESCE(t.GENERATION, 0) + 1,
+        STATUS = 'loader'
+    WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
+    VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, 'loader');
 
-    -- 0 rows landed while candidates existed is a real signal: log ONE summary line, not
-    -- one per skipped id (the false-error-noise lesson). emsg present => a per-id error
-    -- (likely a systematic dynamic-SQL bug); emsg NULL => all-empty returns (privilege gap
-    -- on the fleet warehouses for the owning role, or nothing inside the 14-day window).
-    IF (landed = 0 AND skipped > 0) THEN
-        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
-        SELECT 'OperatorStatsCollector', 'operator_stats_all_empty',
-               'GET_QUERY_OPERATOR_STATS landed 0 operator rows for ' || :skipped || ' candidate queries'
-               || COALESCE(' | last per-id error: ' || :emsg, ' | no per-id error raised (all empty returns)'),
-               'if an error is shown: likely a dynamic-SQL defect; if all empty: check OPERATE/MONITOR '
-               || 'on the fleet warehouses for the owning role, or the 14-day operator-stats window',
-               CURRENT_ROLE();
-    END IF;
-
-    RETURN 'OK landed=' || :landed || ' queries=' || :collected || ' skipped=' || :skipped;
+    RETURN 'exec board refreshed (atomic swap)';
 END;
 $$;
 
--- One-time backfill of the already-collected rows (QUERY_DAY set => the proc's enrich skips
--- them; NOT-EXISTS gate blocks re-collection). Fills only NULLs, so it is idempotent and a
--- re-run is a no-op. -35d covers the 30-day retention + 2-day collection lag, well inside
--- QUERY_HISTORY's 365-day retention.
-UPDATE DBA_MAINT_DB.OVERWATCH.FACT_QUERY_OPERATOR_STATS_DAILY f
-SET USER_NAME = qh.USER_NAME,
-    DATABASE_NAME = qh.DATABASE_NAME,
-    SCHEMA_NAME = qh.SCHEMA_NAME
-FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY qh
-WHERE f.QUERY_ID = qh.QUERY_ID
-  AND f.USER_NAME IS NULL
-  AND qh.START_TIME >= DATEADD('day', -35, CURRENT_TIMESTAMP());
+-- Re-stamp the board with the corrected AI predicate immediately; the hourly task keeps it fresh.
+CALL DBA_MAINT_DB.OVERWATCH.SP_REFRESH_EXEC_BOARD();
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
-SELECT 147 AS VERSION,
-       'Operator-stats identity grain: ADD COLUMN USER_NAME/DATABASE_NAME/SCHEMA_NAME to FACT_QUERY_OPERATOR_STATS_DAILY (V143/V144 stamped only COMPANY + WAREHOUSE_NAME) so the QOIE Slice 2 Operator profile honors the User/Database/Schema scope filters, not just company/warehouse/window. Re-derive SP_LOAD_QUERY_OPERATOR_STATS from V144 to also fill the three in the set-based enrich UPDATE that already joins the query QUERY_HISTORY row (byte-identical to V144 otherwise; the V144 overall_percentage*100 scale fix preserved). One-time -35d idempotent backfill of existing rows (USER_NAME-IS-NULL guard; QUERY_DAY-set rows are skipped by the proc enrich). Column names mirror ACCOUNT_USAGE.QUERY_HISTORY so the app reuses _query_scope predicates; the reader references them only when the filter is set and operations.py gates on 147 in the applied set, so nothing references the columns until this applies and the grain self-heals with no redeploy.' AS DESCRIPTION
-WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 147);
+SELECT 148 AS VERSION,
+       'Exec board AI-predicate restore: SP_REFRESH_EXEC_BOARD re-derived from V123 (account clock kept) with V079''s CoCo/CoWork broadening restored in both sv_daily predicates (IS_AI + DRIVER_LABEL), so SNOWFLAKE_COCO_SNOWSIGHT prices at the AI rate and labels AI/Cortex on the COST_DRIVER_SVC panel, matching ai_service_predicate() and every other AI-rate surface. V123 had silently dropped it when re-derived from V073. Proc only, no schema change.' AS DESCRIPTION
+WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 148);
 
 
 -- =====================================================================
@@ -249,27 +310,36 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 -- =====================================================================
 USE ROLE SNOW_ACCOUNTADMINS;
 
--- (1) the three identity columns now exist on the fact (look for USER_NAME,
---     DATABASE_NAME, SCHEMA_NAME as VARCHAR(256) in the "type" column).
-DESCRIBE TABLE DBA_MAINT_DB.OVERWATCH.FACT_QUERY_OPERATOR_STATS_DAILY;
+-- (1) the LIVE proc now carries the CoCo/CoWork broadening (both should be TRUE;
+--     HAS_NARROW_ONLY is a belt-and-suspenders check that the narrow-only form is gone).
+SELECT CONTAINS(GET_DDL('PROCEDURE', 'DBA_MAINT_DB.OVERWATCH.SP_REFRESH_EXEC_BOARD()'), '%COCO%')   AS HAS_COCO,
+       CONTAINS(GET_DDL('PROCEDURE', 'DBA_MAINT_DB.OVERWATCH.SP_REFRESH_EXEC_BOARD()'), '%COWORK%') AS HAS_COWORK;
 
--- (2) the backfill populated existing rows. WITH_USER/WITH_DB/WITH_SCHEMA should be
---     ~= TOTAL (rows are all inside the -35d backfill window given 30-day retention);
---     a small shortfall is only rows whose QUERY_HISTORY row aged past 35d.
-SELECT COUNT(*)             AS TOTAL_ROWS,
-       COUNT(USER_NAME)     AS WITH_USER,
-       COUNT(DATABASE_NAME) AS WITH_DB,
-       COUNT(SCHEMA_NAME)   AS WITH_SCHEMA,
-       COUNT(DISTINCT QUERY_ID) AS QUERIES
-FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_OPERATOR_STATS_DAILY;
+-- (2) the CoCo/CoWork lines on the board are now labeled 'AI/Cortex:' and priced at
+--     the AI rate (~2.20/credit), NOT 'Serverless:' at ~3.68. IMPLIED_RATE = $/credit.
+--     EMPTY result just means no CoCo/CoWork spend landed inside these windows -- the
+--     restore is still correct (defensive); check grid (3) for the general AI split.
+SELECT COMPANY, WINDOW_DAYS, DIMENSION,
+       ROUND(VALUE, 2)     AS CREDITS,
+       VALUE_USD,
+       ROUND(VALUE_USD / NULLIF(VALUE, 0), 3) AS IMPLIED_RATE
+FROM DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD
+WHERE PANEL = 'COST_DRIVER_SVC'
+  AND (DIMENSION ILIKE '%COCO%' OR DIMENSION ILIKE '%COWORK%')
+ORDER BY WINDOW_DAYS, VALUE DESC;
 
--- (3) a few enriched rows (sanity: user/db/schema look like real identities, not NULL).
-SELECT QUERY_ID, WAREHOUSE_NAME, COMPANY, USER_NAME, DATABASE_NAME, SCHEMA_NAME
-FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_OPERATOR_STATS_DAILY
-WHERE USER_NAME IS NOT NULL
-LIMIT 5;
+-- (3) the two-partition dollarization is intact across the whole panel: every
+--     'AI/Cortex:' line prices at ~2.20 and every 'Serverless:' line at ~3.68.
+SELECT SPLIT_PART(DIMENSION, ':', 1)          AS KIND,
+       COUNT(*)                               AS LINES,
+       ROUND(AVG(VALUE_USD / NULLIF(VALUE, 0)), 3) AS AVG_IMPLIED_RATE,
+       ROUND(SUM(VALUE_USD), 2)               AS TOTAL_USD
+FROM DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD
+WHERE PANEL = 'COST_DRIVER_SVC' AND VALUE > 0
+GROUP BY 1
+ORDER BY 1;
 
--- (4) V147 is registered.
+-- (4) V148 is registered.
 SELECT VERSION, DESCRIPTION, APPLIED_AT
 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION
-WHERE VERSION = 147;
+WHERE VERSION = 148;
