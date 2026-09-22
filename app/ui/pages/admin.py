@@ -604,6 +604,12 @@ _EXPECTED_MIGRATIONS = {
          "QUERY_HISTORY so the app reuses _query_scope's predicates; the reader references them only "
          "when the filter is set and operations.py gates on 147 in the applied set, so nothing "
          "references the columns until this applies and the grain self-heals with no redeploy",
+    148: "Exec board AI-predicate restore: SP_REFRESH_EXEC_BOARD re-derived from V123 (account "
+         "clock kept) with V079's CoCo/CoWork broadening restored in both sv_daily predicates "
+         "(IS_AI + DRIVER_LABEL), so SNOWFLAKE_COCO_SNOWSIGHT (Cortex Code / CoWork) prices at the "
+         "AI rate ($2.20) and labels 'AI/Cortex:' on the Overview COST_DRIVER_SVC panel, matching "
+         "ai_service_predicate() and every other AI-rate surface. V123 silently dropped it when "
+         "re-derived from the pre-V079 V073 base. Proc-only re-derive + re-CALL; no schema change",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

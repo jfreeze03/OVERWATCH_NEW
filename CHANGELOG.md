@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.577.0 - Migration V148: restore CoCo/CoWork AI-rate broadening on the exec board (2026-09-22)
+
+Bug-hunt round 13 found the one loader-side defect the read-layer hunts couldn't see: V123
+re-derived `SP_REFRESH_EXEC_BOARD` from the pre-V079 ancestor V073 to move the calendar windows onto
+the account clock, and SILENTLY dropped V079's CoCo/CoWork broadening of the `sv_daily` AI predicate.
+Since V123 is the live proc, `MART_EXEC_BOARD` has since priced `SNOWFLAKE_COCO_SNOWSIGHT` (Cortex
+Code / CoWork) credits at the COMPUTE rate ($3.68) instead of the AI rate ($2.20) and labeled them
+"Serverless:" instead of "AI/Cortex:" on the Overview `COST_DRIVER_SVC` panel — a ~1.67x
+overstatement of that line and a live cross-page mismatch with Cost ▸ Spend & Attribution (which
+prices the same credits at the AI rate via `ai_service_predicate()`).
+
+- **V148** (owner-applied) re-derives the proc from V123 — KEEPING every `CONVERT_TIMEZONE`
+  account-clock change — and restores `OR SERVICE_TYPE ILIKE '%COCO%' OR SERVICE_TYPE ILIKE
+  '%COWORK%'` in BOTH `sv_daily` predicates (the `IS_AI` flag and the `DRIVER_LABEL` prefix), so
+  they match `ai_service_predicate()` again. Byte-identical to V123 otherwise; a guard test locks
+  that only the predicate + its comment changed. The migration tail re-CALLs the refresh so the
+  board re-stamps at the corrected rate immediately (it would otherwise self-heal on the next hourly
+  task). Proc only, no schema change.
+
 ## 4.576.0 - Bug-hunt round 12: self-review of the perf + UX diff (2026-09-22)
 
 Adversarial review of the v4.573-v4.575 diff (the perf + UX waves) found 6 defects it INTRODUCED —

@@ -82,7 +82,7 @@ def test_v147_backfills_existing_rows_idempotently():
 
 def test_validate_and_docs_track_v147():
     val = _read("snowflake/validate.sql")
-    assert "V001..V147 applied" in val and "VERSION BETWEEN 1 AND 147) = 147" in val
+    assert "V001..V148 applied" in val and "VERSION BETWEEN 1 AND 148) = 148" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V147__operator_stats_identity_grain.sql" in _read(rel)
 

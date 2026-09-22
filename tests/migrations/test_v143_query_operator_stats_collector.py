@@ -107,7 +107,7 @@ def test_v143_enriches_set_based_and_registers_freshness():
 
 def test_validate_and_docs_track_v143():
     val = _read("snowflake/validate.sql")
-    assert "V001..V147 applied" in val and "VERSION BETWEEN 1 AND 147) = 147" in val
+    assert "V001..V148 applied" in val and "VERSION BETWEEN 1 AND 148) = 148" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V143__query_operator_stats_collector.sql" in _read(rel)
 
