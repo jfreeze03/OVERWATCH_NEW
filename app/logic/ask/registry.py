@@ -218,11 +218,11 @@ def _analyze_spend_by_user(
             )
 
     ev = d.head(15)[["DIMENSION", "ALLOC_CREDITS"]].copy()
-    # CREDIT_SHARE is recomputed from the SAME named-user total the headline and
+    # CREDIT_SHARE_PCT is recomputed from the SAME named-user total the headline and
     # bullets use — NOT the builder's ELAPSED_SHARE, whose denominator is the whole
     # scoped pool INCLUDING the NONE/UNKNOWN load we dropped, which would show a
     # different (smaller) share than the headline for the very same row.
-    ev["CREDIT_SHARE"] = ev["ALLOC_CREDITS"] / total
+    ev["CREDIT_SHARE_PCT"] = ev["ALLOC_CREDITS"] / total * 100
     return AnswerResult(
         intent=_SPEND_INTENT,
         headline=headline,
@@ -345,7 +345,7 @@ def _analyze_cs_by_query(
             )
             bullets.append(f"Elevated cloud-services share on: {names}")
 
-    ev_cols = [c for c in ("QUERY_TYPE", "SAMPLE_TEXT", "RUNS", "CS_CREDITS", "CS_PER_1K_RUNS") if c in s.columns]
+    ev_cols = [c for c in ("QUERY_TYPE", "SAMPLE_TEXT", "RUNS", "CS_CREDITS", "CS_CREDITS_PER_1K") if c in s.columns]
     ev = s.head(10)[ev_cols].copy()
     if "SAMPLE_TEXT" in ev.columns:
         ev["SAMPLE_TEXT"] = ev["SAMPLE_TEXT"].map(lambda t: _sample(t, 100))
@@ -660,7 +660,7 @@ def _analyze_cortex_by_model(
             )
 
     ev = agg.head(15)[["MODEL_NAME", "AI_CREDITS"]].copy()
-    ev["CREDIT_SHARE"] = ev["AI_CREDITS"] / total
+    ev["CREDIT_SHARE_PCT"] = ev["AI_CREDITS"] / total * 100
     return AnswerResult(
         intent=_CORTEX_INTENT,
         headline=headline,

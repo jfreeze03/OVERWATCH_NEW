@@ -1400,10 +1400,21 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                             f"{sql_literal(idempotency_key('ALERT_UNSNOOZE', ''.join(_uids)))})")
                     ok_s, msg_s = execute_action(call, _unsnooze_stmts(_uids), page=_PAGE)
                     stamp_write(_unsz_key, ok_s)  # C48
-                    notify(ok_s, f"Un-snooze: {len(_uids)} event(s) — {msg_s}")
+                    # Report the count the PROC actually MOVED (msg_s = 'OK: N event(s) ...'), not
+                    # the selected count: a same-selection re-click hits DUPLICATE (0 rows) and
+                    # len(_uids) would overstate N.
+                    _n_moved = _proc_event_count(msg_s)
+                    _uns_txt = (f"{_n_moved:,} event(s)" if _n_moved is not None
+                                else f"{len(_uids):,} selected")
+                    notify(ok_s, f"Un-snooze: {_uns_txt} — {msg_s}")
                     if ok_s:
                         from app.ui.components import log_ui_event
                         log_ui_event("alert_unsnooze", page=_PAGE)
+                        # Same durable-receipt hygiene as the drawer/bulk writes (which all rerun):
+                        # a non-idempotent write MUST st.rerun() so the woken events leave the tray
+                        # immediately instead of lingering until the next manual refresh.
+                        st.session_state["_ow_alert_receipt"] = f"Un-snooze recorded — {_uns_txt}"
+                        st.rerun()
             else:
                 st.caption("Un-snoozing requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
 

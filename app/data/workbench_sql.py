@@ -176,7 +176,8 @@ def experiment_verified_totals() -> str:
     oldest settled VERIFIED experiments once the account holds > 300 -- this aggregate is not capped,
     so the director-facing totals stay complete (ds-hunt 2026-08-30)."""
     return f"""
-SELECT COUNT_IF(UPPER(STATUS) = 'VERIFIED') AS VERIFIED_COUNT,
+SELECT COUNT(*) AS TOTAL_COUNT,
+       COUNT_IF(UPPER(STATUS) = 'VERIFIED') AS VERIFIED_COUNT,
        ROUND(COALESCE(SUM(IFF(UPPER(STATUS) = 'VERIFIED', VERIFIED_USD, 0)), 0), 2) AS VERIFIED_USD
 FROM {core_object("OPTIMIZATION_EXPERIMENTS")}
 """

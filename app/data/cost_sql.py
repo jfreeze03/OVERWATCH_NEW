@@ -11,6 +11,7 @@ Dollarization happens in app/logic/formulas.py, not in SQL.
 from __future__ import annotations
 
 from app import companies
+from app.config import MAX_MART_WINDOW_DAYS
 from app.core.sqlsafe import sql_literal
 from app.data.common import (
     account_month_start_sql,
@@ -920,8 +921,15 @@ def org_all_in_window_usd(days: int, *, bounds: tuple | None = None) -> str:
     credit-spend tile so the two reconcile side by side. Org data is UTC, lags
     up to ~72h, and mutates until month close, so it reads a bit behind the
     credit tile near the trailing edge.
+
+    Honors the FULL requested window (up to MAX_MART_WINDOW_DAYS): ORGANIZATION_USAGE.
+    USAGE_IN_CURRENCY_DAILY is one tiny row per day/service, so it is NOT a live-scan that
+    needs the 90-day clamp — clamping it to 90 made the All-in tile (and the egress $/TB
+    reconciliation that divides this by a 365-day billable-TB) render a ~90-day figure under a
+    365-day label, understating ~4x and rendering SMALLER than the credit-spend tile it must
+    reconcile with (bug-hunt wwa4zcfky). It shares the credit tile's window so the two align.
     """
-    days = bounded_days(days)
+    days = bounded_days(days, MAX_MART_WINDOW_DAYS)
     where = scope_window_where("USAGE_DATE", days, bounds=bounds)
     return f"""
 SELECT

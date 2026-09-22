@@ -844,7 +844,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                          "(the mart loads hourly; needs V055 deployed)."):
             st.caption("Gross cloud-services credits per shape (before the account-level 10% rebate "
                        "shown above). High RUNS + tiny AVG_EXEC_S + high AVG_CACHE_PCT = a polling / "
-                       "metadata storm; a heavy CS_PER_1K_RUNS on a SELECT = a compile-heavy plan. "
+                       "metadata storm; a heavy CS_CREDITS_PER_1K on a SELECT = a compile-heavy plan. "
                        "That triage is the fix.")
             styled_table(shapes.df, height=300, column_config={
                 "CS_CREDITS": st.column_config.NumberColumn("CS credits", format="%.4f"),

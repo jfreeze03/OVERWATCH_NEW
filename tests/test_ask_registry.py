@@ -136,7 +136,7 @@ def test_spend_answer_is_honest_when_no_single_outlier():
     assert res.confidence == "grounded"
     assert "outlier" not in res.headline.lower()   # nobody stands out
     assert any("spread across the cohort" in b for b in res.bullets)
-    assert "CREDIT_SHARE" in res.evidence.columns  # honest column label (not ELAPSED_SHARE)
+    assert "CREDIT_SHARE_PCT" in res.evidence.columns  # honest column label (not ELAPSED_SHARE)
 
 
 def test_spend_answer_does_not_claim_spread_when_too_few_to_test():
@@ -269,9 +269,9 @@ def test_spend_evidence_credit_share_matches_headline_base():
     df = pd.DataFrame({"DIMENSION": list(c), "ELAPSED_SHARE": [v / tot for v in c.values()],
                        "ALLOC_CREDITS": list(c.values())})
     res = _analyze_spend_by_user(AskParams(30, "ALL"), {"alloc": df})
-    # named-user total = 150; ETL_SVC share = 100/150 = 0.667, matching "67%".
-    etl = float(res.evidence[res.evidence["DIMENSION"] == "ETL_SVC"]["CREDIT_SHARE"].iloc[0])
-    assert round(etl, 3) == 0.667
+    # named-user total = 150; ETL_SVC share = 100/150 = 66.7% (0-100, matching "67%").
+    etl = float(res.evidence[res.evidence["DIMENSION"] == "ETL_SVC"]["CREDIT_SHARE_PCT"].iloc[0])
+    assert round(etl, 1) == 66.7
     assert "67% of named-user spend" in res.headline
 
 

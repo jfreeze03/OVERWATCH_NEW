@@ -1118,11 +1118,19 @@ def _experiments() -> None:
         _vrow = _vtot.df.iloc[0]
         _verified_ct = int(safe_float(_vrow.get("VERIFIED_COUNT")))
         _verified_usd = safe_float(_vrow.get("VERIFIED_USD"))
+        # Total is uncapped too — the display frame is LIMIT-300 active-first, so len(frame)
+        # understates the "Experiments" headline once the account holds > 300 (same cap that
+        # dropped old VERIFIED rows from the tiles above).
+        _total_ct = int(safe_float(_vrow.get("TOTAL_COUNT"))) or len(frame)
     else:   # fall back to the capped frame if the aggregate read is unavailable
         _verified_ct = int(status.eq("VERIFIED").sum())
         _verified_usd = float(frame.loc[status.eq("VERIFIED"), "VERIFIED_USD"].map(safe_float).sum())
+        _total_ct = len(frame)
     kpi_row([
-        {"label": "Experiments", "value": f"{len(frame):,}"},
+        {"label": "Experiments", "value": f"{_total_ct:,}",
+         "help": ("Total experiments (all statuses). The table below lists the 300 most active; "
+                  "older settled ones beyond that cap are still counted here."
+                  if _total_ct > len(frame) else None)},
         {"label": "Running / observing", "value": f"{status.isin(('RUNNING', 'OBSERVING')).sum():,}"},
         {"label": "Oldest active", "value": (f"{_oldest_active:,} d" if _oldest_active else "—"),
          "severity": "warn" if _oldest_active >= 30 else "",

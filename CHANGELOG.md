@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.566.0 - Bug-hunt round 4: class sweeps + Cost/Ask/Alerts/DS (2026-09-22)
+
+Adversarial bug-hunt round 4 (`wf_6d70dac6` — sticky-selection + served-window class sweeps plus the
+surfaces not yet hunted) found 7 real defects, all fixed:
+
+- **(HIGH) "All-in billed" tile showed ~90 days under a 180/365-day label** and rendered *smaller*
+  than the credit-spend tile it must reconcile with. `org_all_in_window_usd` clamped its
+  ORGANIZATION_USAGE read (a tiny per-day view, not a live scan) to 90 days. Raised to the full
+  window — this also fixes the **egress $/TB reconciliation** (MED) that divided 90-day org $ by
+  365-day billable TB (~4× low).
+- **(MED) Ask evidence cloud-services rate rendered "0"** — the column name ended in `RUNS`, so the
+  auto-formatter treated the fractional rate as an integer count. Renamed to the canonical
+  `CS_CREDITS_PER_1K`.
+- **(MED) Ask evidence "Credit Share" showed a 0–1 fraction ("0.4") next to a "44%" headline** — now
+  a 0–100 `CREDIT_SHARE_PCT`.
+- **(LOW) Decision Studio "Experiments" total showed the capped (300) list count** — now the uncapped
+  aggregate.
+- **(LOW) Admin error-family drill re-resolved from a sticky row index every rerun** (could switch
+  the drill as new errors re-sort the table) — change-detection sentinel added.
+- **(LOW) Alert un-snooze didn't rerun** (woken events lingered in the tray) and reported the
+  selected count, not the moved count — now reruns with the proc-moved count, like its siblings.
+
 ## 4.565.0 - Bug-hunt round 3: wasted-spend run-rate, Overview label, Security selection (2026-09-21)
 
 Adversarial bug-hunt round 3 (`wf_90058f36`) across the panels not yet covered this session

@@ -169,7 +169,7 @@ def release_compare_prompt(verdicts: list[dict], task_deltas: pd.DataFrame,
 # Cortex-spend alert with daily Cortex credits, etc. (See app.logic.alert_evidence.)
 _EVIDENCE_COLUMNS: dict[str, list[str]] = {
     "cloud_svc": ["SAMPLE_TEXT", "QUERY_TYPE", "RUNS", "CS_CREDITS",
-                  "CS_PER_1K_RUNS", "AVG_EXEC_S", "AVG_CACHE_PCT"],
+                  "CS_CREDITS_PER_1K", "AVG_EXEC_S", "AVG_CACHE_PCT"],
     "cortex": ["DAY", "SERVICE_TYPE", "CREDITS_BILLED"],
     "metering_service": ["DAY", "SERVICE_TYPE", "CREDITS_USED",
                          "CREDITS_COMPUTE", "CREDITS_CLOUD_SERVICES"],
@@ -180,7 +180,7 @@ _EVIDENCE_COLUMNS: dict[str, list[str]] = {
 
 _EVIDENCE_FRAMING: dict[str, str] = {
     "cloud_svc": ("Top query shapes by cloud-services credits on the warehouse "
-                  "(higher CS_PER_1K_RUNS = more metadata/compile overhead per run)"),
+                  "(higher CS_CREDITS_PER_1K = more metadata/compile overhead per run)"),
     "cortex": "Daily AI/Cortex billed credits by service type",
     "metering_service": "Daily billed credits for this service type",
     "query_family": "This query family's daily run count and p50/p95 latency in seconds",

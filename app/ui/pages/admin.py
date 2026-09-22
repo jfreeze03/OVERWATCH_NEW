@@ -1033,11 +1033,16 @@ def _observability_tab() -> None:
                             LAST_SEEN=("LOGGED_AT", "max")))
             gsorted = grouped.sort_values("LAST_SEEN", ascending=False).reset_index(drop=True)
             _fam_sel = selectable_table(gsorted, key="err_family_sel", height=240)
-            # Click a family -> the raw rows behind it (this PAGE + FAMILY) inline. Store
-            # (PAGE, FAMILY) so the sticky re-emit just re-filters the frame already in hand.
-            if _fam_sel is not None and 0 <= _fam_sel < len(gsorted):
-                _fr = gsorted.iloc[int(_fam_sel)]
-                st.session_state["err_family_sel_last"] = (str(_fr["PAGE"]), str(_fr["FAMILY"]))
+            # Click a family -> the raw rows behind it (this PAGE + FAMILY) inline. Resolve
+            # (PAGE, FAMILY) only on a GENUINELY-NEW click (change-detection sentinel): the
+            # selection is sticky and re-emits every rerun, and gsorted re-sorts by LAST_SEEN as
+            # new errors arrive, so re-resolving the same sticky INDEX every rerun would silently
+            # switch the drill to whatever family now sits at that row (bug-hunt wwa4zcfky).
+            if _fam_sel is not None and _fam_sel != st.session_state.get("_err_family_sel_seen"):
+                st.session_state["_err_family_sel_seen"] = _fam_sel
+                if 0 <= _fam_sel < len(gsorted):
+                    _fr = gsorted.iloc[int(_fam_sel)]
+                    st.session_state["err_family_sel_last"] = (str(_fr["PAGE"]), str(_fr["FAMILY"]))
             _fam_pick = st.session_state.get("err_family_sel_last")
             if _fam_pick:
                 _fp_page, _fp_family = _fam_pick

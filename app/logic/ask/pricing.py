@@ -23,7 +23,7 @@ _AI_SEGMENTS = frozenset({"AI", "GENAI", "CORTEX", "COCO", "LLM", "TOKEN", "TOKE
 def _is_credit_quantity(col: object) -> bool:
     """A column that holds an amount OF credits (ALLOC_CREDITS, CS_CREDITS, CREDITS).
 
-    Deliberately narrow: a ratio/share (CREDIT_SHARE) or a rate (CS_PER_1K_RUNS) is NOT
+    Deliberately narrow: a ratio/share (CREDIT_SHARE_PCT) or a rate (CS_CREDITS_PER_1K) is NOT
     a credit amount and must not be dollarized.
     """
     u = str(col).upper()
