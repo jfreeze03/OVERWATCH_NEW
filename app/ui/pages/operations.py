@@ -1569,7 +1569,7 @@ def _runtime_creep_panel(days: int = 0, *, pf: dict | None = None) -> None:
         result_caption(res)
 
 
-def _sla_finish_forecast_panel(days: int = 0, *, pf: dict | None = None) -> None:
+def _sla_finish_forecast_panel(*, pf: dict | None = None) -> None:
     """Will the whole nightly cycle finish before the 7am target (8am hard)?
 
     The cycle is bracketed by two anchor workflows: the STARTER (~10pm kickoff) and the TERMINAL
@@ -1590,13 +1590,19 @@ def _sla_finish_forecast_panel(days: int = 0, *, pf: dict | None = None) -> None
     end_wf = str(settings.get("ETL_CYCLE_END_WORKFLOW") or "").strip()
     target = str(settings.get("ETL_SLA_TARGET_HHMM") or "07:00").strip()
     breach = str(settings.get("ETL_SLA_BREACH_HHMM") or "08:00").strip()
-    scan_sql = etl_control_sql.cycle_finish_history_scan(fqn, start_workflow=start_wf, end_workflow=end_wf, days=days)
+    # r8: this forecast is a FIXED SLA_BASELINE_RUNS=14-night baseline (the scan's QUALIFY keeps the
+    # most-recent 14 nights) — the SAME builder + design the Brief's "Nightly cycle" tile reuses. It
+    # must NOT thread the scope-bar Window: the Pipeline SLA tab's own scope contract declares Window
+    # "Active but ignored" (SLA horizons are account-wide policy), and threading days=7 (the default)
+    # truncated the fit below the forecaster's designed baseline and made the panel contradict Brief
+    # (Brief amber "Regressing" vs a falsely-green "On track" here). Call all-time (days=0 default).
+    scan_sql = etl_control_sql.cycle_finish_history_scan(fqn, start_workflow=start_wf, end_workflow=end_wf)
     if not scan_sql:
         empty_state("needs_setup", "Set ETL_CYCLE_START_WORKFLOW and ETL_CYCLE_END_WORKFLOW (the "
                     "cycle's first and last workflow) on Admin ▸ SETTINGS, and a valid "
                     "ETL_CONTROL_STATUS_FQN, to forecast cycle completion.")
         return
-    res = (pf or {}).get("cycle_finish") or run(scan_sql, page=_PAGE, key=f"etl_cycle_finish_{days}", tier="recent",
+    res = (pf or {}).get("cycle_finish") or run(scan_sql, page=_PAGE, key="etl_cycle_finish", tier="recent",
               source="CONTROL_STATUS (cycle finish vs deadline)", max_rows=etl_control_sql.MAX_SLA_NIGHTS)
     if guard(res, "No completed nightly cycles in the window — the starter and terminal workflows "
              "haven't both run. Check the two anchor workflow names on Admin ▸ SETTINGS.", kind="clean",
@@ -1968,8 +1974,10 @@ def _pipeline_prefetch(days: int) -> dict:
              "CONTROL_STATUS (run-over-run drift)", etl_control_sql.MAX_DRIFT_ROWS)
         _add("runtime_history", etl_control_sql.task_runtime_history_scan(ctrl, days=days),
              "CONTROL_STATUS (per-task runtime series)", etl_control_sql.MAX_HISTORY_ROWS)
+        # cycle_finish is a FIXED 14-night baseline (like wf_drift above) — NOT windowed, so the
+        # prefetch stays byte-identical to the panel's all-time fallback (r8: matches Brief).
         _add("cycle_finish",
-             etl_control_sql.cycle_finish_history_scan(ctrl, start_workflow=start_wf, end_workflow=end_wf, days=days),
+             etl_control_sql.cycle_finish_history_scan(ctrl, start_workflow=start_wf, end_workflow=end_wf),
              "CONTROL_STATUS (cycle finish vs deadline)", etl_control_sql.MAX_SLA_NIGHTS)
     if run_fqn:
         _add("run_inventory", etl_control_sql.run_inventory_scan(run_fqn),
@@ -2013,7 +2021,8 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
     # scoped to the Window so the trend reflects the selected history.
     _runtime_creep_panel(days, pf=_pf)
     # Then the whole-cycle SLA: will the nightly cycle (starter → terminal) finish before 7am?
-    _sla_finish_forecast_panel(days, pf=_pf)
+    # Window-independent by design (fixed 14-night baseline, matches Brief) — see the panel.
+    _sla_finish_forecast_panel(pf=_pf)
     # Then the run inventory (CONTROL_RUN_ID) + the latest run's parameters (CONTROL_PARAMS).
     _run_inventory_panel(pf=_pf)
     # Then Phase 3 reconciliation DQ: metrics whose source vs target layer didn't tie out.
@@ -2216,11 +2225,13 @@ def _task_health_view(company: str, days: int, database: str = "",
         failed_col = "FAILED" if "FAILED" in df.columns else None
         task_sort_label = ""
         if failed_col:
-            # r7 uncapped-aggregate: the live fallback (ops_sql.task_runs) is LIMIT-200 by
-            # FAILED DESC, so summing the display frame drops healthy high-volume tasks past
-            # row 200 -> undercounts RUNS and inflates the fail rate. Read the pre-LIMIT window
-            # totals when the live builder supplied them; the mart path (fact_task_daily) has no
-            # LIMIT, so its per-day frame sum is already a true window total (fallback branch).
+            # r7/r8 uncapped-aggregate: BOTH paths would undercount if we summed the display frame.
+            # The live fallback (ops_sql.task_runs) is LIMIT-200 by FAILED DESC; the mart path
+            # (fact_task_daily) is (DAY x TASK) grain and run() caps transport at 5000 rows ordered
+            # FAILED DESC — either way the dropped rows are the zero-failure high-volume task-days,
+            # so a frame sum undercounts RUNS and inflates the fail rate. Both builders now carry
+            # TOTAL_RUNS_WIN/TOTAL_FAILED_WIN (window totals computed pre-cap), so read those; the
+            # else branch only fires for an old-shape frame with neither total column.
             if "TOTAL_RUNS_WIN" in df.columns and not df.empty:
                 total_runs = safe_float(df["TOTAL_RUNS_WIN"].iloc[0])
                 total_failed = safe_float(df["TOTAL_FAILED_WIN"].iloc[0])

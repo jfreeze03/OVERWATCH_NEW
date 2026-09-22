@@ -802,7 +802,15 @@ def _trust_center_tab() -> None:
     )
     if delta.ok and _domain_covered(coverage, "TRUST CENTER"):
         if delta.empty:
-            empty_state("clean", "No Trust Center findings in the latest materialized snapshot.")
+            # r8 false-all-clear: an empty delta means NO scanner emitted a row. A clean scanner
+            # that RAN still emits one row per SCANNER_ID (TOTAL_AT_RISK_COUNT=0), so empty ==
+            # nothing scanned, NOT "nothing at risk". Coverage=COMPLETE only proves the snapshot
+            # LOADER's freshness is OK (security_domain_coverage's TRUST CENTER leg has no row-count
+            # check), not that the snapshot holds scanner rows. Mirror the r31 fallback below
+            # (needs_setup, neutral) — never a green "clean" all-clear for a never-scanned posture.
+            empty_state("needs_setup", "No Trust Center scanner results in the latest snapshot — "
+                        "confirm scanner packages are enabled and have run. An empty read means "
+                        "nothing was scanned, not that nothing is at risk.")
             result_caption(delta)
             return
         fdf = delta.df.copy()

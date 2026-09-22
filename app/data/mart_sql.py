@@ -334,7 +334,13 @@ def fact_task_daily(days: int, company: str = "ALL", database: str = "",
     if schema_clause:
         where.append(schema_clause)
     return f"""
-SELECT DAY, DATABASE_NAME, SCHEMA_NAME, TASK_NAME, COMPANY, RUNS, FAILED, AVG_SEC, LAST_STATE, LAST_ERROR
+SELECT DAY, DATABASE_NAME, SCHEMA_NAME, TASK_NAME, COMPANY, RUNS, FAILED, AVG_SEC, LAST_STATE, LAST_ERROR,
+       -- r8: uncapped window totals (computed server-side BEFORE run()'s 5000-row transport cap).
+       -- This frame is (DAY x TASK) grain ordered FAILED DESC, so a >5000-row truncation would drop
+       -- the zero-failure high-volume task-days and make a plain df["RUNS"].sum() UNDERCOUNT runs +
+       -- INFLATE the fail-rate. The KPI reads these totals (mirrors the r7 live-path task_runs fix).
+       SUM(RUNS) OVER () AS TOTAL_RUNS_WIN,
+       SUM(FAILED) OVER () AS TOTAL_FAILED_WIN
 FROM {mart_object("FACT_TASK_DAILY")}
 WHERE {and_where(*where)}
 ORDER BY FAILED DESC, DAY DESC

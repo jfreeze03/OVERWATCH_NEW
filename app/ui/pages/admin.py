@@ -1094,7 +1094,9 @@ def _performance_tab() -> None:
             _val = str(_tdf.iloc[0].get("value", "") or "")
             _lvl = str(_tdf.iloc[0].get("level", "") or "").upper() or "ACCOUNT (default)"
             kpi_row([{"label": "Real statement-timeout ceiling",
-                      "value": f"{_val}s" if _val else "—",
+                      # r8: humanize on the KPI card (300s -> "5m", 28800s -> "8h") per the
+                      # duration standard; the raw SHOW PARAMETERS row stays verbatim in the table.
+                      "value": humanize_duration(safe_float(_val), "s") if _val else "—",
                       "delta": f"set at: {_lvl}", "delta_color": "off",
                       "help": "The STATEMENT_TIMEOUT_IN_SECONDS actually in force on the app "
                               "warehouse — the true wall every app query runs against, regardless "

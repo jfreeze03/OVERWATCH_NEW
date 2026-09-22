@@ -1,5 +1,39 @@
 # Changelog
 
+## 4.570.0 - Bug-hunt round 8: cross-page reconciliation, render consistency, silent-failure (2026-09-22)
+
+Adversarial bug-hunt round 8 (`wf_b1adcea0-f8c`) pivoted to FRESH axes — cross-page metric
+reconciliation, render/humanization consistency, silent-failure guards, and AI/incident/RCA logic
+(refute-by-default verify). 5 confirmed defects (3 MED, 2 LOW); the AI/incident-logic dimension came
+back clean. One is an incomplete round-7 fix.
+
+- **(MED) Nightly-cycle SLA finish forecast diverged between Brief and Operations** — Brief calls the
+  shared `cycle_finish_history_scan` with the all-time default (its QUALIFY keeps the fixed
+  `SLA_BASELINE_RUNS`=14-night baseline), but the Operations Pipeline-SLA panel threaded the scope-bar
+  Window (default 7d) into the same builder — so the two surfaces could show contradicting verdicts
+  (Brief amber "Regressing" vs a falsely-green "On track"), and Operations silently violated its own
+  tab scope contract, which declares Window "Active but ignored" for SLA horizons. The panel + its
+  prefetch now call the scan all-time (fixed 14-night baseline), matching Brief.
+- **(MED) Task-health mart path undercounted "Task runs" / inflated "Fail rate"** — the round-7 fix
+  hardened only the live-fallback `task_runs` builder; the primary (mart) `fact_task_daily` path summed
+  its display frame, which `run()` truncates at 5000 rows ordered `FAILED DESC` — so on an account with
+  ~14+ daily tasks over a 365d window the dropped rows were the zero-failure high-volume task-days,
+  undercounting runs and inflating the fail rate. `fact_task_daily` now carries `SUM(RUNS) OVER ()` /
+  `SUM(FAILED) OVER ()` (computed server-side before the transport cap); the KPI's existing window-total
+  branch now covers both paths. (Corrects the round-7 comment that wrongly assumed the mart path had no cap.)
+- **(MED) Trust Center painted a green "clean" all-clear when no scanner had run** — the covered
+  mart-delta path rendered `empty_state("clean", …)` on an empty delta, while the r31-hardened live
+  fallback rendered `needs_setup` for the identical empty read. A clean scanner that RAN still emits a
+  row per scanner, so an empty delta means nothing was scanned, not "nothing at risk" — and coverage
+  =COMPLETE only proves the loader's freshness, not that the snapshot holds scanner rows. The covered
+  path now mirrors the fallback (`needs_setup`, neutral) rather than a false all-clear.
+- **(LOW) Admin "Real statement-timeout ceiling" KPI showed raw seconds** ("300s" / "28800s") instead
+  of the humanized duration ("5m" / "8h") the duration standard requires on a KPI card; now
+  `humanize_duration(…, "s")`. The raw SHOW PARAMETERS row stays verbatim in the table below.
+- **(LOW) Compare "Volume shape" rendered remote spill as a fixed "{v:.2f} GB"** instead of
+  `humanize_gb` (so 0.03 GiB read "0.03 GB" not "30.7 MB", 1500 GiB read "1,500.00 GB" not "1.5 TB") —
+  cross-surface byte-humanization drift; now humanized like every other spill surface.
+
 ## 4.569.0 - Bug-hunt round 7: uncapped-aggregate sweep, export fidelity (2026-09-22)
 
 Adversarial bug-hunt round 7 (`wf_a1e5de10-831` — exhaustive uncapped-aggregate sweep, export/CSV

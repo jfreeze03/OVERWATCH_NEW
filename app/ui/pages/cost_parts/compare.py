@@ -29,6 +29,7 @@ from app.logic.formulas import (
     blended_billed_usd,
     format_usd,
     humanize_duration,
+    humanize_gb,
     pct_delta,
     safe_float,
 )
@@ -315,7 +316,9 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
             if kind == "dur_s":
                 return humanize_duration(v, "s")
             if kind == "gb":
-                return f"{v:,.2f} GB"
+                # r8: humanize like every other spill surface (30.7 MB / 1.5 TB) instead of a
+                # fixed "GB" unit, matching the Queued row's humanize_duration just above.
+                return humanize_gb(v)
             return f"{v:,.0f}"
         rows = []
         for metric, col, kind in (("Queries", "QUERIES", "count"), ("Fails", "FAILS", "count"),
