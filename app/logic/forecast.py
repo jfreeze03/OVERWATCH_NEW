@@ -152,8 +152,8 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
         )
 
     # Linear engine (rec#15): a robust Theil-Sen daily trend, not a flat mean —
-    # future days ride the fitted line from the last complete day (clamped at 0),
-    # and the band uses residuals against THAT line, not the raw scatter.
+    # future days ride the fitted line from TODAY (clamped at 0), and the band uses residuals
+    # against THAT line, not the raw scatter.
     # Fit on CALENDAR-DAY offsets, not row indices (like capacity._theil_sen): the baseline
     # has no date spine (an ingest-lagged or idle day simply has no row, r33), so a row-index
     # slope is per-ROW and a gap inflates/deflates the forward extrapolation — a per-DAY slope
@@ -161,12 +161,18 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
     if len(baseline):
         _origin = baseline["DAY"].iloc[0]
         xs = [float((_d - _origin).days) for _d in baseline["DAY"]]
+        today_x = float((today - _origin).days)
     else:
         xs = []
+        today_x = 0.0
     ys = [safe_float(value) for value in baseline["USD"]]
     slope, intercept = _robust_slope(xs, ys)
-    last_x = xs[-1] if xs else 0.0
-    fitted_future = [max(0.0, intercept + slope * (last_x + k)) for k in range(1, project_days + 1)]
+    # Anchor the forward window on TODAY (k=0 is today, the incomplete day), NOT the last PRESENT
+    # complete day: metering lags ~1-2d so the last present day is routinely today-2, and a last_x
+    # anchor would project days that gap_fill ALREADY estimates (double-count) and drop the month
+    # tail — gap_fill's own r33 comment says `add` "starts at today" (bug-hunt wdmz68vd4). Matches
+    # the seasonal engine's today-anchored future window; with no trailing gap today_x == last_x+1.
+    fitted_future = [max(0.0, intercept + slope * (today_x + k)) for k in range(project_days)]
     add = sum(fitted_future)
     # rec#15 guard: a steep downward trend can extrapolate below spend-to-date (and
     # every clamped-to-0 future day drives `add` toward 0). Month-end is monotonic —

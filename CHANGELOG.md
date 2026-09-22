@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.568.0 - Bug-hunt round 6: forecast anchor, uncapped-aggregate siblings (2026-09-22)
+
+Adversarial bug-hunt round 6 (`wf_b64c483b` — data-layer SQL, deep logic, class-sibling sweep,
+reconciliation) found 5 real defects; 4 fixed here, 1 low-priority deferred:
+
+- **(MED) Month-end forecast anchored the projection on the last PRESENT day, not today** — a
+  follow-on to round 5's slope fix. Snowflake metering lags ~1–2 days, so the last present complete
+  day is routinely today−2, and the `last_x` anchor double-counted the trailing gap (which `gap_fill`
+  already estimates) and dropped the month tail. Now anchors on today, matching the seasonal engine.
+- **(MED) Security unload KPIs (runs / GB out / users) summed a LIMIT-300 feed** — understated on a
+  wide-window, multi-user account. Now read an uncapped `unload_activity_totals` aggregate.
+- **(LOW) Control Room "vs prior day" query delta compared the last two *present* rows** — a quiet
+  day has no row, so the delta could span a gap (Fri vs Wed). Now compares yesterday vs
+  day-before-yesterday by calendar date, hiding the delta if either is absent.
+- **(LOW) Overview platform-score card** plotted an account-wide sparkline beside a company-scoped
+  value with no note — added the disclosure (the retro score-input marts have no company grain).
+- **Deferred (LOW):** the Control Room day-replay headline counts derive from LIMIT-capped feeds; a
+  clean fix needs uncapped aggregates on 4 builders + display-column handling, disproportionate for a
+  pathological-single-day undercount whose detail is visible in the sub-panels below.
+
 ## 4.567.0 - Bug-hunt round 5: reconciliation + forecast + last served-window siblings (2026-09-22)
 
 Adversarial bug-hunt round 5 (`wf_878c18dc` — cross-page reconciliation, Brief/Control Room, a

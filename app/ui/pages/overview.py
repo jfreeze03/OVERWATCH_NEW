@@ -685,7 +685,10 @@ def render() -> None:
                           "and stale telemetry are account-wide, and open alerts and the owner "
                           "queue are company plus account-level "
                           "— so the score does NOT move when you change the spend window. "
-                          "Every deduction is itemized below the trend; sparkline = 14d retro."),
+                          "Every deduction is itemized below the trend. The 14d sparkline is the "
+                          "retro platform-score trend and is ACCOUNT-WIDE even under a company "
+                          "filter (the retro score-input marts carry no company grain), so it can "
+                          "differ from the company-scoped value beside it."),
         },
     ]
     # Ov15: stamp the two headline $ account cards with the last metering day.

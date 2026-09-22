@@ -73,7 +73,7 @@ def test_kpi_byte_sites_use_humanize_gb():
     sec = _src("app/ui/pages/security.py")
     # The egress $ KPI moved to Cost ▸ Spend (audit consolidation); the unload
     # "GB written out" KPI is the byte site that stays on Security.
-    assert "humanize_gb(float(udf['GB_OUT'].sum()))" in sec
+    assert "humanize_gb(_u_gb)" in sec  # uncapped unload-total GB (v4.568), still humanized
 
 
 def test_per_table_storage_dollars_show_cents():

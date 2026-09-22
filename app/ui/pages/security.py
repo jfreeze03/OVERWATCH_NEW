@@ -481,15 +481,28 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
     if unl.ok and unl.empty:
         empty_state("clean", "No unloads to stages in this window for this scope.")
     elif guard(unl, ""):
-        from app.logic.formulas import humanize_gb
+        from app.logic.formulas import humanize_gb, safe_float
         udf = unl.df.copy()
         udf, profile_config = snowsight_profile_column(udf, _PAGE)
+        # KPI totals come from the UNCAPPED aggregate: the feed above is LIMIT-300 per
+        # (day,user,role), so summing it understates once the window has > 300 groups
+        # (bug-hunt wdmz68vd4). Fall back to the feed sums only if the totals read is unavailable.
+        _utot = run(security_sql.unload_activity_totals(days, company, database, schema_contains, bounds=bounds),
+                    page=_PAGE, key=f"unload_tot_{company}_{days}_{database}_{schema_contains}{_lm}",
+                    tier="recent", source="QUERY_HISTORY (unload window totals, uncapped)")
+        if _utot.usable():
+            _ur = _utot.df.iloc[0]
+            _u_runs, _u_gb = int(safe_float(_ur.get("UNLOADS"))), float(safe_float(_ur.get("GB_OUT")))
+            _u_users = int(safe_float(_ur.get("USERS")))
+        else:
+            _u_runs, _u_gb = int(udf["UNLOADS"].sum()), float(udf["GB_OUT"].sum())
+            _u_users = int(udf["USER_NAME"].nunique())
         kpi_row([
-            {"label": "Unload runs", "value": f"{int(udf['UNLOADS'].sum())}"},
+            {"label": "Unload runs", "value": f"{_u_runs}"},
             # humanize_gb so this MB/GB/TB scale matches the Egress KPI + the table's
             # auto-humanized GB_OUT column (was a raw 1-dp GB float).
-            {"label": "GB written out", "value": humanize_gb(float(udf['GB_OUT'].sum()))},
-            {"label": "Users unloading", "value": f"{udf['USER_NAME'].nunique()}"},
+            {"label": "GB written out", "value": humanize_gb(_u_gb)},
+            {"label": "Users unloading", "value": f"{_u_users}"},
         ])
         styled_table(with_user_names(udf, _PAGE), height=320, column_config=profile_config,
                      sort_label="day then GB written")

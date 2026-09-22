@@ -734,11 +734,20 @@ def render() -> None:
         # hidden when the prior day is zero (pct_delta -> None).
         _q_delta = None
         if _activity_ready:
+            from datetime import timedelta
+
             from app.logic.formulas import account_today
-            _ca = act.df[pd.to_datetime(act.df["DAY"], errors="coerce").dt.date < account_today()]
-            if len(_ca) >= 2:
-                _qd = pct_delta(safe_float(_ca["QUERIES"].iloc[-1]),
-                                safe_float(_ca["QUERIES"].iloc[-2]))
+            # "vs prior day" must compare the two CONSECUTIVE calendar days, not the last two
+            # PRESENT rows: fact_daily_activity has no date spine, so a quiet/zero day has no row
+            # and iloc[-1]/iloc[-2] would span a gap (e.g. Fri vs Wed labeled "vs prior day")
+            # (bug-hunt wdmz68vd4). Look yesterday + day-before up BY DATE; hide the delta if
+            # either is absent.
+            _ca = act.df.copy()
+            _ca["_D"] = pd.to_datetime(_ca["DAY"], errors="coerce").dt.date
+            _yday, _pday = account_today() - timedelta(days=1), account_today() - timedelta(days=2)
+            _y, _p = _ca[_ca["_D"] == _yday]["QUERIES"], _ca[_ca["_D"] == _pday]["QUERIES"]
+            if not _y.empty and not _p.empty:
+                _qd = pct_delta(safe_float(_y.iloc[0]), safe_float(_p.iloc[0]))
                 if _qd is not None:
                     _q_delta = f"{_qd:+,.0f}% vs prior day"
         if pulse.usable():

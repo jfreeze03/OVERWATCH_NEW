@@ -1373,6 +1373,35 @@ LIMIT 300
 """
 
 
+def unload_activity_totals(days: int = 30, company: str = "ALL", database: str = "",
+                           schema_contains: str = "", *, bounds: tuple | None = None) -> str:
+    """Uncapped window totals for the unload KPI tiles (runs / GB out / distinct users). The
+    ``unload_activity`` feed groups per (day, user, role) and is LIMIT-300, so SUMMING it
+    understates the tiles once the window has > 300 (day,user,role) groups — a wide-window,
+    multi-user account (bug-hunt wdmz68vd4). Same scope, aggregated to ONE uncapped row."""
+    days = bounded_days(days)
+    _scope = (resolve_effective_window(days, "START_TIME", bounds=bounds)[1]
+              if bounds is not None
+              else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
+    where = and_where(
+        _scope,
+        "QUERY_TYPE = 'UNLOAD'",
+        "EXECUTION_STATUS = 'SUCCESS'",
+        companies.user_scope_subquery(company, "USER_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY",
+                                      distinct_where=_scope),
+        companies.database_equals_clause(database),
+        contains_filter("SCHEMA_NAME", schema_contains),
+    )
+    return f"""
+SELECT COUNT(*) AS UNLOADS,
+       ROUND((SUM(COALESCE(BYTES_WRITTEN, 0))
+             + SUM(COALESCE(BYTES_WRITTEN_TO_RESULT, 0))) / POWER(1024, 3), 3) AS GB_OUT,
+       COUNT(DISTINCT USER_NAME) AS USERS
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE {where}
+"""
+
+
 def unload_risk_events(days: int = 30, company: str = "ALL", database: str = "",
                        schema_contains: str = "", *, bounds: tuple | None = None) -> str:
     """#18: per-EVENT unload egress for the behavioral exfiltration score.
