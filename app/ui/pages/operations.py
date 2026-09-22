@@ -162,11 +162,19 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                  bounds: tuple | None = None) -> None:
     _lm = "_lm" if bounds is not None else ""
     nav_query = str(navigation_context().get("query_id") or "").strip()
-    nav_signature = f"query:{nav_query}"
-    if nav_query and st.session_state.get("_ow_ops_context_applied") != nav_signature:
+    if nav_query:
+        # r9: seed the drill box from the cross-page nav context, then CONSUME query_id from
+        # _ow_nav_context (mirrors Entity 360's _seed_entity_context) so a drill delivers ONCE per
+        # arrival — a later manual paste / row-click into the drill box then STICKS, and re-
+        # investigating the SAME query re-seeds because request_navigation re-populates the context.
+        # The old never-cleared `_ow_ops_context_applied` signature swallowed a re-drill after the
+        # box had diverged, silently leaving the operator on the wrong query's profile.
         st.session_state["_ops_drill_target"] = nav_query
         st.session_state["ops_drill_manual"] = nav_query
-        st.session_state["_ow_ops_context_applied"] = nav_signature
+        _nav = st.session_state.get("_ow_nav_context")
+        if isinstance(_nav, dict):
+            st.session_state["_ow_nav_context"] = {
+                k: v for k, v in _nav.items() if k != "query_id"}
     if str(company or "ALL").upper() != "ALL":
         st.caption(
             f"Scope: queries on {company} warehouses (by COMPANY_FOR_WAREHOUSE, matching "
@@ -3563,7 +3571,13 @@ def _emergency_tab(is_operator: bool) -> None:
             # actions under pressure.
             _emg_key = f"emg:{action}:{stmt[:64]}"
             # rec42: one type-to-confirm gate (input + button); EMERGENCY matches EXACT case.
-            if (confirm_gate("EMERGENCY", "Execute + audit", key="emg",
+            # r9 SAFETY: the confirm widget key MUST be lever-scoped too (was fixed "emg"). The
+            # expected value is the fixed verb "EMERGENCY", so a confirmation typed for one lever
+            # stayed satisfied after the operator switched the selectbox to a higher-blast lever
+            # (ACCOUNT statement timeout / block-all-AI) — re-arming Execute+audit for a single click
+            # with the deliberate per-action friction skipped. Scope the key like the write latch
+            # (mirrors the per-proposal fix in control_room.py) so a lever switch clears the confirm.
+            if (confirm_gate("EMERGENCY", "Execute + audit", key=_emg_key,
                              prompt="Type EMERGENCY to confirm execution", enabled=is_operator)
                     and write_gate_open(_emg_key, backstop=15.0)):
                 ok, msg = execute_statement(stmt, page=_PAGE)

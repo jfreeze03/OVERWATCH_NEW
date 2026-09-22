@@ -758,7 +758,13 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *, 
         # a reach-back coverage gate that makes it abstain in that case, so the live leg serves and
         # this same rematch fires — no separate mart-path branch needed.
         _pool_df = df
-        if "QUERY_HISTORY" in str(share_res.source) and days > MAX_LIVE_WINDOW_DAYS:
+        # r9: this trailing-90d rematch is ONLY correct for a TRAILING >90d window. Under a calendar
+        # preset (bounds set) the live share leg does NOT clamp to 90d — scope_window_where ignores
+        # the bounded_days clamp once bounds is set and scans the FULL bounded range — so ELAPSED_SHARE
+        # is a true full-window share, and `df` (department_window_credits(days, company, bounds=bounds))
+        # is already the matching bounded pool. Rebuilding a trailing-90d pool here would scale a full
+        # Current-year share by a last-90-days pool (~3x under-scale + a distorted split). Skip it.
+        if bounds is None and "QUERY_HISTORY" in str(share_res.source) and days > MAX_LIVE_WINDOW_DAYS:
             _pr = run(chargeback_sql.department_window_credits(MAX_LIVE_WINDOW_DAYS, company),
                       page=_PAGE, key=f"cb_dept_{company}_{MAX_LIVE_WINDOW_DAYS}", tier="historical",
                       source="WAREHOUSE_METERING_HISTORY x DEPARTMENT_MAP (share-matched window)")

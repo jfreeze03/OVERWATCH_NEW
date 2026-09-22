@@ -113,8 +113,11 @@ def test_overview_economics_route_last_month_to_the_bounded_live_path():
     assert "warehouse_daily_credits(days, company, bounds=bounds)" in ov
     # top drivers for Last month are derived from that same bounded warehouse frame
     assert '_ov_bounds is not None and trend_source.usable()' in ov
-    # the vs-prior spend delta honors the bounded window too
-    assert "fact_warehouse_window_vs_prior(days, company, bounds=_ov_bounds)" in ov
+    # the vs-prior spend delta honors the bounded window too — r9 gates the CALENDAR vs-prior-month
+    # comparison to LAST_MONTH only (via is_prior_month_window), so _vp_bounds == _ov_bounds for Last
+    # month and None for the partial period-to-date presets (which fall back to trailing).
+    assert "fact_warehouse_window_vs_prior(days, company, bounds=_vp_bounds)" in ov
+    assert "_vp_bounds = _ov_bounds if is_prior_month_window(_ov_bounds) else None" in ov
 
 
 # ---------------------------------------------------------------------------

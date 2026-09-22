@@ -1,5 +1,43 @@
 # Changelog
 
+## 4.571.0 - Bug-hunt round 9: write-safety, allocation windows, period-to-date comparisons (2026-09-22)
+
+Adversarial bug-hunt round 9 (`wf_287a1ca2-ff3`) on FRESH axes — write-path correctness,
+chargeback/allocation share math, session-state key collisions, boundary/off-by-one
+(refute-by-default verify). 6 confirmed defects (1 safety-MED + 5 MED). Four share ONE root: the
+calendar-preset `bounds` is non-None for **all three** presets (Last month, Current month, Current
+year), but code treated it as "Last month" — an equal full-calendar comparison — when the two
+period-to-date presets are PARTIAL. (Round 2 fixed the labels from this root; these are the value/pool bugs.)
+
+- **(MED — safety) Emergency-lever type-to-confirm carried across lever switches** — `confirm_gate`
+  used a fixed `key="emg"` with the fixed verb "EMERGENCY", so a confirmation typed for one lever
+  (e.g. Resume warehouse) stayed satisfied after switching the selectbox to a higher-blast lever
+  (ACCOUNT statement timeout / block-all-AI), re-arming Execute+audit for a single click with the
+  per-action friction skipped. The confirm key is now scoped per lever+statement (like the write
+  latch and the control_room per-proposal fix), so a lever switch clears the confirmation.
+- **(MED) Chargeback role-allocation scaled a full-window share by a trailing-90d pool** under a
+  >90-day calendar preset (Current year, live-fallback share): the live share spans the full bounded
+  window but the pool rematch rebuilt a last-90-days pool → ~3x under-scale + a distorted per-role
+  split that disagreed with the Chargeback-total KPI on the same tab. Rematch now guarded by
+  `bounds is None`; under a preset the already-bounded pool is kept.
+- **(MED) Spend attribution had the identical bounds-blind pool rematch** — `_alloc_pool` now returns
+  the bounded `window_usd` pool early when `bounds` is set, so the "By user and database (allocated)"
+  bars no longer scale a full-window share by a trailing-90d pool (they matched the exact-usage table
+  directly above only for trailing windows before).
+- **(MED) Overview flagship spend delta compared partial-current vs full-prior-month** for the
+  period-to-date presets — "-30% vs prior month" mid-month purely from elapse, and "+800% vs prior
+  month" for Current year (YTD vs a single December). The calendar vs-prior comparison is now gated
+  to Last month; the period-to-date presets fall back to a trailing equal-length comparison, labeled
+  honestly ("vs prior Nd").
+- **(MED) Control Room "Spend movers (window vs prior)" had the same partial-vs-full comparison** for
+  the period-to-date presets (every warehouse showed a spurious mid-month drop). Same fix: calendar
+  bounds only for Last month, else the trailing equal-length window.
+- **(MED) Ops query-drill showed the wrong query after a re-investigation** — the `_ow_ops_context_applied`
+  signature sentinel was never cleared, so after the drill box diverged (manual paste/row-click),
+  re-investigating the SAME query_id was swallowed and the operator kept seeing the diverged query's
+  profile. Now consumes `query_id` from the nav context on arrival (mirrors Entity 360), so each
+  navigation delivers once and a repeat drill re-seeds.
+
 ## 4.570.0 - Bug-hunt round 8: cross-page reconciliation, render consistency, silent-failure (2026-09-22)
 
 Adversarial bug-hunt round 8 (`wf_b1adcea0-f8c`) pivoted to FRESH axes — cross-page metric

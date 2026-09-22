@@ -23,7 +23,7 @@ from app.data import cost_sql, mart27_sql, mart_sql
 from app.data.common import resolve_effective_window
 from app.logic import scoring
 from app.logic.actions import rank_actions
-from app.logic.date_windows import window_label, window_phrase
+from app.logic.date_windows import is_prior_month_window, window_label, window_phrase
 from app.logic.forecast import MonthEndForecast, backtest_forecasts, month_end_projection
 from app.logic.formulas import (
     ExecutiveSummaryView,
@@ -583,8 +583,15 @@ def render() -> None:
     # overview's live-scan budget at 1); hidden when the mart is absent or the
     # prior window is zero (pct_delta returns None — never a fabricated 0%).
     _ov_spend_delta = None
-    _vp = run(mart_sql.fact_warehouse_window_vs_prior(days, company, bounds=_ov_bounds), page=_PAGE,
-              key=f"ov_spend_vs_prior_{company}_{days}{'_lm' if _ov_bounds is not None else ''}",
+    # r9: fact_warehouse_window_vs_prior compares CURRENT vs the PRIOR CALENDAR MONTH when given
+    # bounds — valid ONLY for LAST_MONTH (two equal full months). CURRENT_MONTH / CURRENT_YEAR are
+    # also bounded but period-to-date, so a vs-prior-calendar comparison is partial-vs-full (mid-
+    # month read a spurious ~-30%; current-year compared YTD vs a single December ~+800%). Pass the
+    # calendar bounds ONLY for Last month; the period-to-date presets fall back to the trailing
+    # equal-length window (bounds=None), which the "vs prior {eff}d" branch below labels honestly.
+    _vp_bounds = _ov_bounds if is_prior_month_window(_ov_bounds) else None
+    _vp = run(mart_sql.fact_warehouse_window_vs_prior(days, company, bounds=_vp_bounds), page=_PAGE,
+              key=f"ov_spend_vs_prior_{company}_{days}{'_lm' if _vp_bounds is not None else ''}",
               tier="recent",
               source="FACT_WAREHOUSE_DAILY (window vs prior, loaded hourly)")
     if _vp.usable():
@@ -597,7 +604,7 @@ def render() -> None:
             # current-year selection compares 182-vs-182 — label it with the REAL
             # comparison window, not the unclamped `days`, or the delta reads as a
             # year-over-prior-year move that is actually a half-year one.
-            if _ov_bounds is not None:
+            if _vp_bounds is not None:
                 # Last month compares whole calendar months (August vs July), not a
                 # trailing day-count — label it as such.
                 _ov_spend_delta = f"{_pct:+,.0f}% vs prior month"

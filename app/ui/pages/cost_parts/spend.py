@@ -933,6 +933,15 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         _live_pool: list[float] = []
 
         def _alloc_pool(res_source: str) -> float:
+            # r9: under a calendar preset (bounds set) the live allocation share scans the FULL
+            # bounded window (resolve_effective_window ignores the 90d clamp once bounds is set), and
+            # window_usd — from fact_warehouse_window_vs_prior(days, company, bounds=bounds), the
+            # "By warehouse (exact usage)" pool above — spans that SAME bounded range. The trailing-
+            # only _live_eff/_pool_eff re-derivation below is bounds-blind (both computed without
+            # bounds), so it would rebuild a trailing-90d pool and scale a full Current-year share by
+            # a last-90-days pool (~3x under-scale). The bounded pool already matches — keep it.
+            if bounds is not None:
+                return window_usd
             if _live_eff >= _pool_eff or "QUERY_HISTORY" not in str(res_source):
                 return window_usd            # mart-served, or the windows already match
             if not _live_pool:

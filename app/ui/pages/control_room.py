@@ -28,6 +28,7 @@ from app.logic.anomaly import (
     flag_anomalies,
     suppress_expected_spikes,
 )
+from app.logic.date_windows import is_prior_month_window
 from app.logic.formulas import (
     account_now,
     credits_to_usd,
@@ -1332,6 +1333,12 @@ def render() -> None:
         if f["database"]:
             st.caption("Warehouse grain — the database filter doesn't narrow this.")
         _bounds = f["bounds"]
+        # r9: window-vs-prior compares CURRENT vs the PRIOR CALENDAR MONTH under bounds — valid only
+        # for Last month (two equal full months). CURRENT_MONTH / CURRENT_YEAR are period-to-date, so
+        # that comparison is partial-vs-full (every warehouse shows a spurious mid-month "drop";
+        # Current year compares YTD vs a single December). Pass calendar bounds ONLY for Last month;
+        # the period-to-date presets fall back to the trailing equal-length window (bounds=None).
+        _bounds = _bounds if is_prior_month_window(_bounds) else None
         _lm = "_lm" if _bounds is not None else ""
         movers = run(mart_sql.fact_warehouse_window_vs_prior(days, company, bounds=_bounds), page=_PAGE,
                      key=f"cr_movers_fact_{company}_{days}{_lm}", tier="recent",

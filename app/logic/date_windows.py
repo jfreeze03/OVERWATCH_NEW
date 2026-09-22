@@ -132,6 +132,19 @@ def _bounds_preset(bounds: tuple[date, date] | None, today: date | None = None) 
     return "last month"                              # ends at a month boundary
 
 
+def is_prior_month_window(bounds: tuple[date, date] | None, today: date | None = None) -> bool:
+    """True iff ``bounds`` is the LAST_MONTH preset — the ONLY calendar window whose "current vs
+    the PRIOR CALENDAR MONTH" comparison is valid (two equal, complete calendar months).
+
+    CURRENT_MONTH / CURRENT_YEAR are period-to-date: the current side is PARTIAL (first-of-period
+    through today), so comparing them against a full prior calendar month is partial-vs-full
+    (Current-month reads a spurious mid-month drop; Current-year compares YTD against a single
+    prior December). A `bounds is not None` test wrongly treats all three presets alike — callers
+    that do a vs-prior-calendar-month comparison must gate on THIS and pass bounds=None (a trailing
+    equal-length window) for the period-to-date presets."""
+    return _bounds_preset(bounds, today) == "last month"
+
+
 def window_label(bounds: tuple[date, date] | None, days: int, today: date | None = None) -> str:
     """Short scope label for a KPI/caption: 'last month' / 'current month' / 'current year' for a
     calendar preset (inferred from the bounds shape), else '{days}d' for a trailing window.
