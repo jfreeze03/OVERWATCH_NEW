@@ -1820,7 +1820,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             )
                             execute_statement(ledger_sql, page=_PAGE)
                         stamp_write("remed", ok)  # C48
-                        notify(ok, msg if not ok else f"{fix_kind} on {wh_pick} — executed and booked.")
+                        # "booked" only when a SAVINGS_LEDGER row was actually inserted (est_monthly>0,
+                        # the same gate as line ~1811) — else it over-claims a booking that didn't happen.
+                        notify(ok, msg if not ok else
+                               f"{fix_kind} on {wh_pick} — executed" + (" and booked." if est_monthly > 0 else "."))
                 else:
                     st.caption("Copy the SQL freely; executing from the app requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
 

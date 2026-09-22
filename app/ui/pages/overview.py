@@ -913,6 +913,9 @@ def render() -> None:
                     ranked[_ov_action_cols],
                     key="ov_actions_sel", slug="top-actions",
                     on_select=_open_action,
+                    # hint="": the caption below already carries the (more accurate) drill affordance
+                    # ("open it in the Control Room queue") — avoid a double after the v4.575 default.
+                    hint="",
                     column_config={"ESTIMATED_USD": st.column_config.NumberColumn("Est. $", format="$%.0f"),
                                    "PERIOD": st.column_config.TextColumn("Basis")})
                 # D1: say what "top" means. The ranking is severity, then overdue,
@@ -1118,7 +1121,13 @@ def render() -> None:
             ("Queries, 14d", adf, "DAY", "QUERIES"),
             ("Failures, 14d", adf, "DAY", "FAILS"),
         ])
-        result_caption(trend_source, note="mart-first" if using_mart else "live fallback — deploy marts for cheaper loads")
+        # The note reflects which LEG actually served. _live_fallback_daily is now mart-first, so
+        # `using_mart` (which tracks only the exec_board leg) being False no longer implies a live
+        # scan — a FACT_WAREHOUSE_DAILY-served fallback would otherwise falsely read "live fallback —
+        # deploy marts" while a mart served it. Derive from the served source instead.
+        _served_live = "WAREHOUSE_METERING_HISTORY" in str(getattr(trend_source, "source", "") or "")
+        result_caption(trend_source, note="live fallback — deploy marts for cheaper loads"
+                       if _served_live else "mart-first")
         _bt = pd.DataFrame()
         if _bt_hist.usable() and len(_bt_hist.df) >= 50:
             _bt_daily = _bt_hist.df.copy()

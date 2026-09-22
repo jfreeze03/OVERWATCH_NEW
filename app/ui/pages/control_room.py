@@ -1220,7 +1220,8 @@ def render() -> None:
                     _dest = ("Alerts", "")
                 request_navigation(_dest[0], _dest[1], _flt or None, _ctx or None)
             selectable_nav_table(_qdisp[_disp], key="cr_triage_sel", on_select=_open_triage,
-                                 height=260, size_note=False)  # the caption below states the count
+                                 height=260, size_note=False,  # the caption below states the count
+                                 hint="")  # caption below carries the affordance — no double (v4.575 default)
             st.caption(f"{len(queue)} item(s), ranked by severity then by dollars at risk "
                        "— select one to open its page. Sources: alerts, task facts, spend "
                        "anomalies. Task rows are one per task (failures summed across the "

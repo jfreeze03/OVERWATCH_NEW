@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.576.0 - Bug-hunt round 12: self-review of the perf + UX diff (2026-09-22)
+
+Adversarial review of the v4.573-v4.575 diff (the perf + UX waves) found 6 defects it INTRODUCED —
+all LOW/cosmetic (no crash, wrong number, or data issue), all fixed here.
+
+- **Double row-select affordance** at 4 nav-table sites — the v4.575 default `hint` on the nav
+  primitives doubled with a caption those sites already carried (Overview top-actions, Control Room
+  triage, Operations concurrency-peaks + queue-per-warehouse). Passed `hint=""` there (their own
+  captions are richer / more accurate); the caption-less sites keep the new default. (My earlier
+  reconciliation grep missed these because the drill phrase was mid-caption, not at the start.)
+- **Overview daily-spend trend note** said "live fallback — deploy marts for cheaper loads" even when
+  the v4.573 mart-first change had FACT_WAREHOUSE_DAILY serve it (the note was keyed on `using_mart`,
+  which tracks only the exec_board leg). Now derived from the served source (audit-mode caption).
+- **Remediation write-toast** claimed "and booked" unconditionally, but the SAVINGS_LEDGER insert is
+  gated on `est_monthly > 0` — so tightening auto-suspend on a low-idle warehouse executed the ALTER
+  but booked nothing, while the toast said it did. "and booked" is now conditional on the same gate.
+
 ## 4.575.0 - UX pass: drill discoverability, cross-page consistency, write feedback (2026-09-22)
 
 Code-level UX review Themes C, D, E — the remaining ground-truthed recs. Presentation-only; no

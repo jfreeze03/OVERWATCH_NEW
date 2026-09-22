@@ -2961,7 +2961,7 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
                    "or split workloads — before users feel it. Select a warehouse to open its "
                    "Entity 360.")
         entity_nav_table(peaks.df, key=f"ops_wh_peaks_{company}", key_col="WAREHOUSE_NAME",
-                         entity_type="WAREHOUSE", column_config={
+                         entity_type="WAREHOUSE", hint="", column_config={  # caption above says it
             "PEAK_RUNNING": st.column_config.NumberColumn("Peak Running", format="%.1f"),
             "PEAK_QUEUED": st.column_config.NumberColumn("Peak Queued", format="%.1f"),
         })
@@ -3189,7 +3189,7 @@ def _contention_tab(company: str, days: int, *, bounds: tuple | None = None) -> 
             entity_nav_table(pdf.sort_values("AVG_QUEUE_SEC", ascending=False)
                              if "AVG_QUEUE_SEC" in pdf.columns else pdf,
                              key=f"ops_wh_pressure_{company}_{days}", key_col="WAREHOUSE_NAME",
-                             entity_type="WAREHOUSE")
+                             entity_type="WAREHOUSE", hint="")  # caption above says it
             # r28b: surface the source so the p95 basis is disclosed — the mart_source above
             # carries the "p95 is peak hourly" caveat, but without this it was never rendered,
             # leaving the peak-hourly (mart) vs window-p95 (live) divergence invisible.
