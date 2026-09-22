@@ -412,7 +412,8 @@ def _org_accounts_spend() -> None:
             "needs_setup",
             "ORGANIZATION_USAGE is not visible to this role/account. Grant the "
             "ORGANIZATION_USAGE_VIEWER application role (or enable org views on this account) "
-            f"to light this up. Detail: {res.error}"
+            "to light this up.",
+            detail=res.error,   # r-ux: full error in the collapsed expander, not the message body
         )
         return
     if res.empty:

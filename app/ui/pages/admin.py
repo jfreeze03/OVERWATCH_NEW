@@ -630,7 +630,7 @@ def _context_section() -> None:
             _ident += f" · {_region}"
         st.caption(_ident + f" · app v{APP_VERSION}")
     elif not ctx.ok:
-        st.error(f"No Snowflake session: {ctx.error}")
+        empty_state("unavailable", "No Snowflake session.", detail=ctx.error)
 
 
 # rec45: typed editors for the "Change a setting" changer. Driven by an EXPLICIT
@@ -811,7 +811,7 @@ def _migrations_tab() -> None:
     res = run(mart_sql.schema_version(), page=_PAGE, key="schema_version", tier="metadata",  # r24 #8: changes only at migrations
               source="SCHEMA_VERSION")
     if not res.ok:
-        st.error(f"Cannot read SCHEMA_VERSION: {res.error}")
+        empty_state("unavailable", "Cannot read SCHEMA_VERSION.", detail=res.error)
         empty_state("needs_setup", "Run snowflake/migrations/V001__core.sql first.")
         return
     applied = set()

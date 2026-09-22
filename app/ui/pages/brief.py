@@ -335,8 +335,12 @@ def render() -> None:
                     "raised — the responsiveness signal a raw count hides. Work the Fires below.",
         })
     if not strip_up:
-        st.warning("Telemetry marts unreachable. Figures withheld until they load. "
-                   + (strip.error or ""))
+        # r-ux: keep the one-line reason (amber, "withheld until load"); move the raw Snowflake
+        # error out of the message body into a collapsed detail expander (rec49 idiom).
+        st.warning("Telemetry marts unreachable. Figures withheld until they load.")
+        if strip.error:
+            with st.expander("Error detail"):
+                st.caption(str(strip.error))
     exh = _b_rec.get("exh") or run(mart_sql.contract_exhaustion(), page=_PAGE, key="brief_exhaustion",
               tier="recent", source="SETTINGS + FACT_METERING_DAILY")
     if exh.usable():

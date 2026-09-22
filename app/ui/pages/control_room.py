@@ -832,7 +832,7 @@ def render() -> None:
             ])
             result_caption(pulse)
         elif not pulse.ok:
-            st.error(f"Pulse unavailable: {pulse.error}")
+            empty_state("unavailable", "Pulse unavailable.", detail=pulse.error)
         else:
             empty_state("no_data_yet", "No queries recorded since yesterday 00:00 for this scope.")
         # The pulse is the distinct "since yesterday" glance; Operations ▸ Queries
@@ -850,7 +850,7 @@ def render() -> None:
                 charts.daily_metric_line(act.df, "DAY", "FAILS", "Failed queries", unit="count")
             result_caption(act)
         elif not act.ok:
-            st.warning(f"Activity trend unavailable: {act.error}")
+            empty_state("unavailable", "Activity trend unavailable.", detail=act.error)
         elif act.usable():
             st.warning("Activity trend returned an unexpected data shape.")
         else:

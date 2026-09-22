@@ -974,7 +974,7 @@ def _failure_timeline_section(company: str, database: str = "", schema_contains:
               source="ACCOUNT_USAGE.TASK_HISTORY (failures, ~45 min source lag)")
     if not res.ok:
         section_header(_TITLE, alarm_health(None), "alerts")   # unknown — no data, no claim
-        st.error(f"Failure detail unavailable: {res.error}")
+        empty_state("unavailable", "Failure detail unavailable.", detail=res.error)
         return
     if res.empty:
         section_header(_TITLE, alarm_health(0), "alerts")
@@ -1290,8 +1290,11 @@ def _reference_gap_panel(database: str = "") -> None:
     _scope = f" in {database}" if database else ""
     if not scan_sql:
         if all_checks and not checks:
-            empty_state("clean", f"No reference-gap checks configured for {database} "
-                                 "(pinned checks always show).")
+            # r-ux: NOT a green all-clear — "nothing is being checked for this database" is not
+            # "every code translates". Neutral no_data_yet so an unchecked DB doesn't read as verified.
+            empty_state("no_data_yet", f"No reference-gap checks configured for {database} "
+                                       "(pinned checks always show). Add a check for this database "
+                                       "to verify its XLAT coverage.")
         else:
             empty_state("needs_setup", "No valid checks parsed from ETL_REF_GAP_CHECKS.")
         return
@@ -1357,7 +1360,9 @@ def _workflow_runtimes_panel(days: int = 0, *, pf: dict | None = None) -> None:
                                      "to show. Only workflows with a run in the scoped Window are listed.") \
             if len(_wfs) > 1 else (_wfs[0] if _wfs else "")
     elif lres.ok and lres.empty:
-        empty_state("clean", f"No ETL runs recorded{_scope}. Widen the scope-bar Window to see older runs.")
+        # r-ux: "no runs in this window" is a no-data/scope state, not a healthy all-clear (the
+        # message itself says to widen the Window) — neutral no_data_yet, not green "clean".
+        empty_state("no_data_yet", f"No ETL runs recorded{_scope}. Widen the scope-bar Window to see older runs.")
         return
     scan_sql = etl_control_sql.workflow_runtimes_scan(fqn, workflow=_wf_pick, days=days)
     if not scan_sql:

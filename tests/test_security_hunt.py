@@ -61,7 +61,9 @@ def test_failed_login_reasons_uses_coarse_error_categories():
 
 # --- H1: break-glass panel reads all statements live; the fact twin is documented ------
 def test_breakglass_panel_reads_live_all_statements():
-    tab = _SEC.split("Break-glass role activity", 1)[1].split("section_header", 1)[0]
+    # r-ux (v4.574): the live read now PRECEDES its header (the header stripe is data-derived via
+    # alarm_health(bga)), so anchor the slice on the panel's lead comment, not the header text.
+    tab = _SEC.split('# This panel asks "ALL statement volume', 1)[1].split("\n@safe_page", 1)[0]
     assert "security_sql.admin_role_activity(days, company, bounds=bounds)" in tab
     assert "admin_role_activity_fact" not in tab
     # the change-only fact builder now warns against reuse behind an all-statements panel

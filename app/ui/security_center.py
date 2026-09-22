@@ -493,7 +493,9 @@ def render_effective_access(company: str) -> None:
 
 def render_admin_grant_anomalies(company: str) -> None:
     """Sec2 time-context: admin-role grants flagged by when + to whom they landed."""
-    section_header("Admin grants — timing check", "warn", "admin", anchor="sec-admin-grants")
+    # r-ux: neutral until the on-demand check runs (header renders before the toggle at line below),
+    # not a standing false "warn" over a not-yet-loaded / verified-clean section.
+    section_header("Admin grants — timing check", "", "admin", anchor="sec-admin-grants")
     panel_help(
         "A count of admin grants is volume; the *context* is what matters. This flags a "
         "grant of an admin role to a user who has none on record (a first-ever elevation) "

@@ -288,6 +288,12 @@ def _last_delivery_card() -> None:
     res = run(mart_sql.last_delivery_health(), page=_PAGE, key="last_delivery_health",
               tier="live", source="ALERT_DELIVERIES + ALERT_EVENTS/ROUTES + APP_ERROR_LOG")
     if not res.usable():
+        # r-ux: this card exists to separate "quiet" from "broken"; the builder always returns
+        # >=1 row, so not usable() here means the read FAILED. Disclose it (a suspended notify
+        # task / dead integration must not hide behind a blank card) rather than vanish silently —
+        # matching the snoozed-events sibling panel, whose failed read shows a caption too.
+        empty_state("unavailable", "Delivery health unavailable — a notification outage may be hidden.",
+                    detail=res.error)
         return
     df = res.df
     routes_n = int(safe_float(df["ENABLED_ROUTES"].iloc[0])) if "ENABLED_ROUTES" in df else 0

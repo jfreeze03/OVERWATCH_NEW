@@ -1,5 +1,35 @@
 # Changelog
 
+## 4.574.0 - UX pass: color/signal honesty + error-state consistency (2026-09-22)
+
+From the code-level UX/design review (Themes A & B) — restores conventions the codebase already
+documents (green never means "nothing loaded"; a color must carry state; errors lead with one line
+and hide detail in an expander). Presentation-only, no query/behavior change, no ACCOUNT_USAGE cost.
+
+- **Security section stripes are data-derived, not hardcoded amber.** Seven headers hardcoded
+  `"warn"`, painting a permanent amber "there's a problem" stripe over verified-clean / not-yet-
+  scanned sections (alarm fatigue on the safety page). Now: eager panels (new networks, expiring
+  credentials, break-glass activity) read before the header and derive the stripe via `alarm_health`
+  (amber only when findings exist, green when clean, neutral on a failed read); toggle-gated scans
+  (takeover, dormant-reawakening, admin-grant timing, AI-usage behavior) render neutral until scanned.
+- **Overview's alerts KPI no longer turns green on a failed read.** The severity ternary fell through
+  to "ok" (green "Setup") when the alert-tables read failed — a false all-clear on the front page's
+  safety tile. Now amber "Unavailable"; the good-path bad/warn/ok colors are unchanged, and the raw
+  error is dropped from the tooltip.
+- **Two ETL panels stop using green "clean" for "nothing configured"/"nothing in window."** The
+  reference-gap "no checks for {database}" and "no ETL runs in this window" states now render neutral
+  `no_data_yet`, so a DBA doesn't read a false all-clear over an unchecked DB or an empty window.
+- **The delivery-health card no longer vanishes on a failed read** — it renders an `unavailable`
+  disclosure (a suspended notify task / dead integration must not hide behind a blank card), matching
+  its snoozed-events sibling.
+- **Ask answers render neutral, not green.** A grounded/partial answer is as often bad news as good
+  ("Spend is up 42%"), so the green `st.success` banner collided with green=healthy; the headline now
+  sits in a neutral bordered container and the evidence bullets carry polarity.
+- **Nine raw-Snowflake-error dumps now use the lead-line + detail-expander idiom** (`empty_state
+  ("unavailable", …, detail=err)`) across Control Room, Operations, Overview, Admin, Cost (contract /
+  AI chargeback) and Brief — a long compile/permission error no longer swamps the panel, and every
+  failed panel reads the same way.
+
 ## 4.573.0 - Performance pass: mart-first + read batching (2026-09-22)
 
 Grounded in the `tests/usage_sim.py` headless profiler (cold logical reads per interaction). The

@@ -122,7 +122,12 @@ def _render_result(result: AnswerResult, company: str, params: AskParams,
         # empty-state vocabulary (quiet caption) does not apply here.
         st.info(result.headline)
     else:
-        st.success(result.headline)
+        # r-ux: a grounded/partial answer is as often bad news as good ("Spend is up 42%"), so a
+        # green st.success banner collides with the app-wide "green = healthy" convention. Render
+        # the headline NEUTRAL (bordered container) and let the evidence bullets below carry any
+        # good/bad polarity.
+        with st.container(border=True):
+            st.markdown(f"**{result.headline}**")
 
     for b in result.bullets:
         st.markdown(f"- {b}")

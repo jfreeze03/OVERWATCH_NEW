@@ -626,7 +626,13 @@ def _statement_export(company: str, rate: float) -> None:
                         key=f"cb_month_{company}_{month}", tier="historical",
                         source="WAREHOUSE_METERING_HISTORY (calendar month)")
         if not month_res.usable():
-            st.error(month_res.error or "No credits recorded for that month/scope.")
+            # r-ux: separate a clean EMPTY month (no credits — neutral no_data) from a FAILED read
+            # (unavailable + the error in a collapsed detail expander), instead of dumping either
+            # into a red st.error blob.
+            if month_res.ok:
+                empty_state("no_data_yet", "No credits recorded for that month/scope.")
+            else:
+                empty_state("unavailable", "Month credits could not be read.", detail=month_res.error)
         else:
             frame = month_res.df.copy()
             frame["USD"] = frame["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))

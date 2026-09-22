@@ -680,12 +680,16 @@ def render() -> None:
         },
         {
             "label": "Open critical / high alerts",
-            "value": f"{critical_alerts} / {high_alerts}" if alerts_res.ok else "Setup",
-            "severity": ("bad" if (alerts_res.ok and critical_alerts) else
-                         "warn" if (alerts_res.ok and high_alerts) else "ok"),
+            # r-ux: a FAILED alerts read is a watch state, never a green all-clear on the front
+            # page's safety tile — amber "Unavailable", not green "Setup" (the ok=False branches
+            # used to fall through to "ok"). Good-path colors (bad/warn/ok) unchanged.
+            "value": f"{critical_alerts} / {high_alerts}" if alerts_res.ok else "Unavailable",
+            "severity": ("warn" if not alerts_res.ok else
+                         "bad" if critical_alerts else
+                         "warn" if high_alerts else "ok"),
             "help": f"{company} plus account-level events — the same scope as the Alerts queue."
                     if alerts_res.ok
-                    else f"Alert tables unreachable: {alerts_res.error}",
+                    else "Alert tables could not be read — open the Alerts queue to check delivery.",
         },
         {
             "label": "Platform score",
@@ -1071,7 +1075,7 @@ def render() -> None:
     )
     if daily.empty:
         if not trend_source.ok:
-            st.error(f"Spend history unavailable: {trend_source.error}")
+            empty_state("unavailable", "Spend history unavailable.", detail=trend_source.error)
         else:
             empty_state(
                 "needs_setup",

@@ -215,7 +215,10 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
     # live LOGIN_HISTORY scan, so toggle-gated (off first paint) like the other
     # heavy security scans.
     from app.ui.components import toggle_cost_hint as _toggle_cost_hint
-    section_header("Account-takeover candidates (failed burst → success)", "warn", "security",
+    # r-ux: neutral until the on-demand scan runs (the header renders before the toggle) — a
+    # hardcoded "warn" was a standing false alarm over a not-yet-scanned / verified-clean section
+    # (alarm_health contract: amber ONLY when there are findings). Matches the dormant header below.
+    section_header("Account-takeover candidates (failed burst → success)", "", "security",
                    anchor="sec-ato")
     st.caption(_toggle_cost_hint("takeover"))
     _ato_on = st.toggle(
@@ -271,11 +274,14 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
         styled_table(reasons.df)
         result_caption(reasons)
 
-    section_header("New networks for privileged users (90-day baseline)", "warn", "alerts",
-                   anchor="sec-newnet")
+    # r-ux: read before the header so the stripe is DATA-derived (alarm_health): amber only when a
+    # new (user, network) pair exists, green when clean, neutral on a failed read — never the
+    # standing false "warn" the hardcoded value painted over a green body.
     nn = batch.get("newnet") or run(_newnet_sql, page=_PAGE,
               key=f"newnet_{days}{_lm}", tier="recent",
               source=_network_source)
+    section_header("New networks for privileged users (90-day baseline)", alarm_health(nn), "alerts",
+                   anchor="sec-newnet")
     if nn.ok and nn.empty:
         empty_state("clean", "No break-glass account logged in from a network unseen in the last 90 days.")
     elif guard(nn, ""):
@@ -286,10 +292,12 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
                    "Expected after travel, VPN changes, or a new automation host — anything else is the finding.")
         result_caption(nn)
 
-    section_header("Expiring credentials (10-day horizon)", "warn", "clock", anchor="sec-creds")
+    # r-ux: read before the header so the stripe is DATA-derived (amber only when a credential is
+    # actually expiring/expired, green when clean, neutral on a failed read) — not a standing "warn".
     creds = stable_batch.get("creds") or run(security_sql.expiring_credentials(10, company), page=_PAGE,
                 key=f"creds_{company}", tier="recent",
                 source="ACCOUNT_USAGE.CREDENTIALS")
+    section_header("Expiring credentials (10-day horizon)", alarm_health(creds), "clock", anchor="sec-creds")
     if creds.ok and creds.empty:
         empty_state("clean", "No credentials expiring within 10 days for this scope.")
     elif guard(creds, "", setup_hint="Needs the ACCOUNT_USAGE.CREDENTIALS view (newer accounts expose it by default)."):
@@ -339,7 +347,9 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
 
     # Sec5: the transition LAST_SUCCESS_LOGIN can't express — a long-dormant
     # account that just logged in. Toggle-gated (off first paint), read-only.
-    section_header("Dormant accounts that just woke up (long-gap logins)", "warn", "security",
+    # r-ux: neutral until the on-demand scan runs (header renders before the toggle) — not a
+    # standing false "warn" over a not-yet-scanned section. Matches the dormant header above.
+    section_header("Dormant accounts that just woke up (long-gap logins)", "", "security",
                    anchor="sec-reawakening")
     _wake_on = st.toggle("Run dormant-reawakening scan (365 days of login history)",
                          key="sec_reawakening_toggle",
@@ -1276,7 +1286,10 @@ def _ai_guardrails_tab(company: str) -> None:
     )
     from app.logic.formulas import account_now
 
-    section_header("AI usage behavior (Cortex Code)", "warn", "security",
+    # r-ux: neutral rather than a hardcoded "warn" — the behavior flags (velocity/token-z anomalies)
+    # are computed below from the loaded frame, so a standing amber over a clean/unresolved read was
+    # a false alarm. (The per-user anomaly chips still carry the real good/bad signal.)
+    section_header("AI usage behavior (Cortex Code)", "", "security",
                    anchor="sec-ai-behavior")
     # v4.528 perf: this tab was the ONE live-only caller of the ~22-32s Cortex Code
     # secure-view scan (the Cost page already serves it fact-first), so it re-paid the
@@ -1484,7 +1497,6 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
     # account-wide by design (all statement volume under admin roles); the Changes section
     # declares Database/Schema applied, so mark this panel account-wide like its siblings —
     # object filters don't narrow admin-role oversight (and admin_role_activity has no db/schema grain).
-    section_header("Break-glass role activity (account-wide; should hug zero)", "warn", "admin")
     # This panel asks "ALL statement volume under break-glass admin roles" — routine
     # SELECT/COPY/CALL work is exactly the misuse it exists to catch. FACT_SECURITY_CHANGE
     # holds only DDL/DCL change statements, so the fact twin structurally cannot see that
@@ -1495,6 +1507,9 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
         key=f"breakglass_{days}_{company}{_lm}", tier="recent",
         source="ACCOUNT_USAGE.QUERY_HISTORY (all statements under admin roles)",
     )
+    # r-ux: this panel "should hug zero", so the stripe is DATA-derived — amber ONLY when there IS
+    # admin-role activity, green when it hugs zero, neutral on a failed read (was a standing "warn").
+    section_header("Break-glass role activity (account-wide; should hug zero)", alarm_health(bga), "admin")
     if bga.ok and bga.empty:
         empty_state("clean", "No statements ran under ACCOUNTADMIN / SNOW_ACCOUNTADMINS in the window.")
     elif guard(bga, ""):
