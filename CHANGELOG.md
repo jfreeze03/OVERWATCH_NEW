@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.567.0 - Bug-hunt round 5: reconciliation + forecast + last served-window siblings (2026-09-22)
+
+Adversarial bug-hunt round 5 (`wf_878c18dc` — cross-page reconciliation, Brief/Control Room, a
+confirming class sweep, and the pure-logic layers) found 5 real defects, all fixed:
+
+- **(MED) Month-end forecast fit the trend on row indices, not calendar days** — a missing
+  (ingest-lagged/idle) day in the baseline inflated the linear slope, biasing the projected
+  month-end. Now fits on calendar-day offsets (like `capacity._theil_sen`).
+- **(MED) Brief "Oldest open critical" age used the capped 50-row feed** — in a >50-critical storm
+  the truly-oldest critical is evicted from the feed, so the Brief under-reported the age (and its
+  severity color) and disagreed with the Alerts page. Now uses the uncapped `OLDEST_CRIT_MIN`
+  aggregate (already fetched).
+- **(LOW) Brief "Generated" footer + Case File export stamped the server (UTC) clock** — now
+  `account_now()` (account time), matching the rest of the page.
+- **(LOW) Two more served-window siblings:** the Overview "Spend" tile labeled a 90-day mart-offline
+  fallback total as the full 180/365-day window; the Spend CoCo/Egress tiles reused metering's
+  served-days label even though they honor the full window. Both now label their actual served window.
+
 ## 4.566.0 - Bug-hunt round 4: class sweeps + Cost/Ask/Alerts/DS (2026-09-22)
 
 Adversarial bug-hunt round 4 (`wf_6d70dac6` — sticky-selection + served-window class sweeps plus the

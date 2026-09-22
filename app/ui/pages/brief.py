@@ -6,7 +6,6 @@ sparkline. Everything links into the full pages for depth.
 
 from __future__ import annotations
 
-import pandas as pd
 import streamlit as st
 
 from app.core.errors import safe_page
@@ -31,7 +30,7 @@ from app.logic.formulas import (
     safe_float,
 )
 from app.logic.insights import etl_cycle_sla_forecast
-from app.logic.verdict import Signal, oldest_open_hours, page_verdict
+from app.logic.verdict import Signal, page_verdict
 from app.ui import charts
 from app.ui.components import (
     alarm_health,
@@ -291,12 +290,18 @@ def render() -> None:
     scoped_crit: int | None = None
     if alert_counts is not None and alert_counts.usable():
         scoped_crit = int(safe_float(alert_counts.df.iloc[0].get("CRIT")))
-    # CoCo do-first (duration, not count): the oldest still-open CRITICAL drives MTTR
-    # urgency a raw count hides. Reuse the events already fetched in the batch — no query.
+    # CoCo do-first (duration, not count): the oldest still-open CRITICAL drives MTTR urgency a
+    # raw count hides. Use the UNCAPPED OLDEST_CRIT_MIN aggregate (already in alert_counts), NOT
+    # oldest_open_hours over the LIMIT-50 feed: criticals sort first + newest, so a >50-critical
+    # storm evicts the truly-oldest from the feed and the age (and its severity color) would
+    # under-report AND disagree with the Alerts page's uncapped age (bug-hunt we2ahd4d0). The feed
+    # (_ev) stays for the Fires list below.
     _ev = _b_live.get("events")
-    _oldest_crit_h = oldest_open_hours(
-        _ev.df if (_ev is not None and _ev.usable()) else None,
-        now=account_now(), severity="CRITICAL")
+    _oldest_crit_h = None
+    if scoped_crit and alert_counts is not None and alert_counts.usable():
+        _ocm = safe_float(alert_counts.df.iloc[0].get("OLDEST_CRIT_MIN"))
+        if _ocm == _ocm:   # not NaN
+            _oldest_crit_h = max(0.0, _ocm) / 60.0
     # Honesty contract: when telemetry is unreachable the Brief says SO —
     # a zero here reads as "we spent nothing", which is a lie (review #5).
     kpis = [
@@ -678,7 +683,7 @@ def render() -> None:
             st.caption("The case is empty.")
         else:
             _md = case_file.assemble_markdown(
-                _case_items, generated=pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"))
+                _case_items, generated=account_now().strftime("%Y-%m-%d %H:%M"))
             _dl, _clr = st.columns([3, 1])
             with _dl:
                 download_text_button("Case File (.md)", _md, "overwatch_case_file.md")
@@ -701,5 +706,5 @@ def render() -> None:
             # download button is inert, and it sidesteps $-as-LaTeX in st.markdown.
             st.code(_md, language="markdown")
 
-    st.caption(pd.Timestamp.now().strftime("Generated %Y-%m-%d %H:%M") +
+    st.caption(account_now().strftime("Generated %Y-%m-%d %H:%M") +
                " · full detail lives on Overview and Control Room.")

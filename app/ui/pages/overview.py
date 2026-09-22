@@ -605,9 +605,16 @@ def render() -> None:
                 _eff, _ = resolve_effective_window(days)
                 _ov_spend_delta = f"{_pct:+,.0f}% vs prior {_eff}d"
 
+    # Served-window honesty: on the mart-offline LIVE fallback a trailing window is clamped to
+    # 90d (warehouse_daily_credits -> bounded_days default), so a 180/365d pick sums only ~90
+    # complete days — label the served window then, not the raw pick (bug-hunt we2ahd4d0). The
+    # mart path and all calendar presets span the full window, so keep the scope label there.
+    _ov_spend_lbl = str(f["window_label"]).lower()
+    if (not using_mart) and _ov_bounds is None and int(days) > 90:
+        _ov_spend_lbl = "last 90 days (mart offline)"
     company_kpis = [
         {
-            "label": f"Spend, {str(f['window_label']).lower()} ({company})",
+            "label": f"Spend, {_ov_spend_lbl} ({company})",
             "value": format_usd(window_spend),
             "as_of": _ov_asof_company,
             "delta": _ov_spend_delta,

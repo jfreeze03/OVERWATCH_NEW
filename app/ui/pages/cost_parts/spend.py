@@ -263,6 +263,12 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
     _served_days = (min(int(days), MAX_LIVE_WINDOW_DAYS)
                     if (_metering_live and bounds is None) else int(days))
     _wlab = window_label(bounds, _served_days)
+    # _wlab tracks the METERING read's served window (clamped to 90d on the live fallback). The
+    # CoCo (ai_code_daily, 400-clamp) and Egress (transfer_egress_priced, 365-clamp) tiles honor
+    # the FULL picked window (max pick 365 <= their clamps), so they must NOT reuse the possibly-
+    # 90d-clamped _wlab — that would mislabel a full-window figure when metering fell to the live
+    # fallback (bug-hunt we2ahd4d0). In the normal (mart-warm) case the two labels are identical.
+    _wlab_full = window_label(bounds, int(days))
     if not guard(res, "No metering rows in this window yet (the view lags up to 24h)."):
         return
     panel_help(
@@ -342,7 +348,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
          "help": "Billed credits across all services this window (compute + serverless + AI, "
                  "cloud-services rebate applied). Credits are additive; the dollar split is on "
                  "the Credit-spend tile."},
-        {"label": f"— of which CoCo, {_wlab}",
+        {"label": f"— of which CoCo, {_wlab_full}",
          "value": format_usd(coco_usd) if coco_usd is not None else "—",
          "help": "Cortex Code (Snowsight + CLI) token credits x the configured AI rate, from "
                  "FACT_AI_USAGE_DAILY (loaded daily). rec #7: a NON-ADDITIVE subset already "
@@ -644,13 +650,13 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 rate_per_tb, used_org = egress_effective_rate_per_tb(org_usd, billable_tb, fallback)
                 edf["EST_USD"] = (edf["TB"] * rate_per_tb).where(edf["BILLABLE"], 0.0).round(2)
                 kpi_row([
-                    {"label": f"Total transferred ({_wlab})",
+                    {"label": f"Total transferred ({_wlab_full})",
                      "value": humanize_bytes(total_bytes),
                      "help": "ALL outbound + cross-region bytes, billable and free — the figure "
                              "that reconciles to Snowsight ▸ Cost Management ▸ Consumption ▸ Data "
                              "Transfer for this account. Most of it is usually free same-region "
                              "transfer; only the billable slice below carries a $."},
-                    {"label": f"Estimated egress ({_wlab})",
+                    {"label": f"Estimated egress ({_wlab_full})",
                      "value": format_usd(float(edf["EST_USD"].sum())),
                      "help": "Billable (cross-region / cross-cloud) transfer x the $/TB at right. "
                              "Same-region transfer is free and priced at $0 — so this is often "
@@ -678,14 +684,14 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 )
                 if used_org:
                     st.caption(
-                        f"Reconciliation: billed data transfer ({_wlab}) is {format_usd(org_transfer)} "
+                        f"Reconciliation: billed data transfer ({_wlab_full}) is {format_usd(org_transfer)} "
                         "on the org rate card; the estimate distributes that across source/target/type "
                         "by billable bytes. BILLABLE is the app's cross-boundary estimate — Snowflake "
                         "owns the exact billing determination."
                     )
                 elif org_transfer > 0.0:
                     st.caption(
-                        f"Org billed {org_transfer:,.2f} {ccy} for data transfer ({_wlab}), shown for "
+                        f"Org billed {org_transfer:,.2f} {ccy} for data transfer ({_wlab_full}), shown for "
                         "reference; the USD estimate above uses the DATA_TRANSFER_USD_PER_TB setting "
                         "(org bill non-USD, or the implied $/TB was implausibly high because the app's "
                         "cross-boundary billable estimate under-counts). Edit the rate on Admin."

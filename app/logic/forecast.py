@@ -154,10 +154,18 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
     # Linear engine (rec#15): a robust Theil-Sen daily trend, not a flat mean —
     # future days ride the fitted line from the last complete day (clamped at 0),
     # and the band uses residuals against THAT line, not the raw scatter.
-    xs = [float(i) for i in range(len(baseline))]
+    # Fit on CALENDAR-DAY offsets, not row indices (like capacity._theil_sen): the baseline
+    # has no date spine (an ingest-lagged or idle day simply has no row, r33), so a row-index
+    # slope is per-ROW and a gap inflates/deflates the forward extrapolation — a per-DAY slope
+    # stays correct regardless of gaps (bug-hunt we2ahd4d0).
+    if len(baseline):
+        _origin = baseline["DAY"].iloc[0]
+        xs = [float((_d - _origin).days) for _d in baseline["DAY"]]
+    else:
+        xs = []
     ys = [safe_float(value) for value in baseline["USD"]]
     slope, intercept = _robust_slope(xs, ys)
-    last_x = len(baseline) - 1
+    last_x = xs[-1] if xs else 0.0
     fitted_future = [max(0.0, intercept + slope * (last_x + k)) for k in range(1, project_days + 1)]
     add = sum(fitted_future)
     # rec#15 guard: a steep downward trend can extrapolate below spend-to-date (and

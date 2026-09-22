@@ -82,4 +82,4 @@ def test_spend_tiles_label_last_month_honestly():
     assert 'f"Credit spend, {days}d (account)"' not in tab
     assert 'f"Total transferred ({days}d)"' not in tab
     assert 'f"Credit spend, {_wlab} (account)"' in tab
-    assert 'f"Total transferred ({_wlab})"' in tab
+    assert 'f"Total transferred ({_wlab_full})"' in tab  # full-window read, own served label

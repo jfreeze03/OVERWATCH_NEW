@@ -138,4 +138,7 @@ def test_brief_surfaces_oldest_open_critical():
     # Label says "open" not "unacked": the feed is STATUS IN ('OPEN','ACK'), so an
     # ACK'd critical still drives this tile — "unacked" was a mislabel (audit fix).
     brief = (_ROOT / "app" / "ui" / "pages" / "brief.py").read_text(encoding="utf-8")
-    assert "oldest_open_hours(" in brief and "Oldest open critical" in brief
+    assert "Oldest open critical" in brief
+    # sourced from the UNCAPPED OLDEST_CRIT_MIN aggregate (not the capped feed) so it agrees
+    # with the Alerts page in a >50-critical storm (bug-hunt we2ahd4d0).
+    assert 'alert_counts.df.iloc[0].get("OLDEST_CRIT_MIN")' in brief
