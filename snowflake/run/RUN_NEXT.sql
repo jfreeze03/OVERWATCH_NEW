@@ -1,43 +1,28 @@
 -- =====================================================================
 --  OVERWATCH -- RUN_NEXT.sql
---  APPLY V148 (exec-board CoCo/CoWork AI-rate restore) + STEP-2 verify.
+--  APPLY V148 then V149 (in order) + STEP-2 verify. TWO pending migrations.
 --
---  WHAT & WHY: the Overview "Cost drivers -- serverless & AI" panel
---  (PANEL='COST_DRIVER_SVC', fed by SP_REFRESH_EXEC_BOARD -> MART_EXEC_BOARD)
---  has been pricing Cortex Code / CoWork (SERVICE_TYPE 'SNOWFLAKE_COCO_SNOWSIGHT')
---  at the COMPUTE rate ($3.68) and labeling it "Serverless:" instead of the AI
---  rate ($2.20) / "AI/Cortex:". Root cause: V079 broadened the proc's sv_daily AI
---  predicate to include '%COCO%'/'%COWORK%' (CoCo matches none of the narrow terms
---  '%CORTEX%','AI%','%INTELLIGENCE%'), but V123 -- which re-derived the proc from
---  the PRE-V079 ancestor V073 to move the calendar windows onto the account clock --
---  SILENTLY dropped that broadening. Since V123 is the live proc, CoCo has been
---  mispriced ~1.67x on this panel and disagrees with Cost > Spend & Attribution,
---  which prices the same credits at the AI rate via ai_service_predicate().
+--  WHY TWO: V148 (exec-board CoCo/CoWork AI-rate restore) was staged but is not
+--  yet confirmed applied; V149 (OW_QH_EXTRACT session/client columns) GUARDS on
+--  V148 (raises -20149 if V148 is missing). Apply top-to-bottom as
+--  SNOW_ACCOUNTADMINS -- V148 first, then V149 -- then paste back the PART B grids.
+--  Both are idempotent (CREATE OR REPLACE / ADD COLUMN IF NOT EXISTS / SCHEMA_VERSION
+--  insert WHERE NOT EXISTS), safe to re-run. If V148 is already applied its
+--  guard/inserts no-op and you flow straight into V149.
 --
---  V148 re-derives SP_REFRESH_EXEC_BOARD from V123 (KEEPING every CONVERT_TIMEZONE
---  account-clock change) and RESTORES `OR SERVICE_TYPE ILIKE '%COCO%' OR
---  SERVICE_TYPE ILIKE '%COWORK%'` in BOTH sv_daily predicates (the IS_AI flag and
---  the DRIVER_LABEL prefix), so IS_AI/DRIVER_LABEL match ai_service_predicate()
---  again. Byte-identical to V123 otherwise (a guard test locks that only the
---  predicate + its comment changed). Proc only, NO schema change.
+--  V148: re-derive SP_REFRESH_EXEC_BOARD (account clock kept) restoring the
+--        CoCo/CoWork AI predicate so SNOWFLAKE_COCO_SNOWSIGHT prices at $2.20 and
+--        labels 'AI/Cortex:' on the Overview cost-driver panel.
+--  V149: ADD SESSION_ID + IS_CLIENT_GENERATED_STATEMENT to OW_QH_EXTRACT and
+--        re-derive SP_LOAD_QH_EXTRACT (from V094, the current definition) to fill
+--        them; tail CALL(3) reloads the 72h extract. Foundation for cloud-services
+--        driver/application attribution; nothing reads the columns yet.
 --
---  Run top-to-bottom as SNOW_ACCOUNTADMINS. PART A applies the migration
---  (idempotent: CREATE OR REPLACE PROCEDURE / a CALL that atomically SWAPs the
---  mart / SCHEMA_VERSION insert WHERE NOT EXISTS -- safe to re-run). The tail CALL
---  re-stamps the board at the corrected rate immediately (it would otherwise
---  self-heal on the next hourly task). Then paste back the PART B grids.
---
---  Requires V147 already applied (guard raises -20148 otherwise). V147 was
---  confirmed applied + STEP-2 verified 2026-09-21, so PART A should proceed.
---
---  NOTE (Claude/owner): this REPLACES the prior V147 apply on runbox -- V147 is
---  DONE (its STEP-2 grids confirmed the identity columns + backfill). If for any
---  reason V147 is NOT yet in SCHEMA_VERSION, PART A raises -20148 and does nothing;
---  apply V147 (snowflake/migrations/V147__operator_stats_identity_grain.sql) first.
+--  Requires V147 already applied (V148's guard). V147 confirmed applied 2026-09-21.
 -- =====================================================================
 
 -- =====================================================================
---  PART A -- APPLY V148 (idempotent). Source: snowflake/migrations/V148__exec_board_ai_predicate_restore_coco.sql
+--  MIGRATION 1 of 2 -- APPLY V148 (idempotent). Source: snowflake/migrations/V148__exec_board_ai_predicate_restore_coco.sql
 -- =====================================================================
 -- V148__exec_board_ai_predicate_restore_coco.sql
 --
@@ -304,42 +289,294 @@ SELECT 148 AS VERSION,
        'Exec board AI-predicate restore: SP_REFRESH_EXEC_BOARD re-derived from V123 (account clock kept) with V079''s CoCo/CoWork broadening restored in both sv_daily predicates (IS_AI + DRIVER_LABEL), so SNOWFLAKE_COCO_SNOWSIGHT prices at the AI rate and labels AI/Cortex on the COST_DRIVER_SVC panel, matching ai_service_predicate() and every other AI-rate surface. V123 had silently dropped it when re-derived from V073. Proc only, no schema change.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 148);
 
+-- =====================================================================
+--  MIGRATION 2 of 2 -- APPLY V149 (idempotent; GUARDS on V148). Source: snowflake/migrations/V149__qh_extract_session_client_columns.sql
+-- =====================================================================
+-- V149__qh_extract_session_client_columns.sql
+--
+-- Foundation for cloud-services driver / application attribution (Phase 1). Adds SESSION_ID
+-- and IS_CLIENT_GENERATED_STATEMENT to OW_QH_EXTRACT so a later phase can (a) join
+-- ACCOUNT_USAGE.SESSIONS on SESSION_ID to attribute metadata chatter to a client
+-- application / driver, and (b) separate platform/driver-issued statements from
+-- user-authored ones. Both columns already exist on ACCOUNT_USAGE.QUERY_HISTORY; nothing
+-- reads them yet (the reader panel is the next app-side step), so this is purely additive.
+--
+-- Re-derives SP_LOAD_QH_EXTRACT from its CURRENT definition -- V094, NOT V055: the loader
+-- was re-derived across V041/V042/V055/V056/V062/V094, so an older base would silently
+-- drop the intervening changes -- byte-identically plus two edits appending the two columns
+-- to the extract INSERT column list and SELECT. Every other arm is untouched. The tail
+-- CALL(3) reloads the 72h extract so the columns carry values immediately.
+--
+-- ALTER ... ADD COLUMN IF NOT EXISTS is idempotent; the proc re-derivation and CALL are
+-- safe to re-run. Owner applies in Snowsight after V148. This file never runs from the app.
+
+EXECUTE IMMEDIATE
+$$
+DECLARE
+    v NUMBER;
+    not_ready EXCEPTION (-20149, 'V149 requires V148 first - apply migrations in order.');
+BEGIN
+    SELECT MAX(VERSION) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 148) THEN
+        RAISE not_ready;
+    END IF;
+END;
+$$;
+
+-- Additive columns on the single-scan staging copy (names mirror ACCOUNT_USAGE.QUERY_HISTORY
+-- so the SELECT below fills them directly). Idempotent.
+ALTER TABLE DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT ADD COLUMN IF NOT EXISTS SESSION_ID NUMBER;
+ALTER TABLE DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT ADD COLUMN IF NOT EXISTS IS_CLIENT_GENERATED_STATEMENT BOOLEAN;
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(DAYS_BACK FLOAT)
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    lo TIMESTAMP_NTZ;  -- reload lower bound
+    d INT;
+    emsg VARCHAR;
+    ok BOOLEAN DEFAULT FALSE;  -- r22 #7: extract arm committed this cycle
+BEGIN
+    -- DAYS_BACK > 0 = explicit backfill window; 0 or NULL = watermark mode.
+    -- The tasks pass 0 (never a bare NULL — no signature-resolution
+    -- questions on any runtime).
+    IF (COALESCE(DAYS_BACK, 0) > 0) THEN
+        d := GREATEST(1, LEAST(DAYS_BACK, 400))::INT;
+        lo := DATEADD('day', -:d, CURRENT_DATE())::TIMESTAMP_NTZ;
+    ELSE
+        -- watermark - 45 min (ACCOUNT_USAGE lag overlap), first run 48h,
+        -- catch-up clamped at the 3-day retention (wider gaps: backfill).
+        SELECT GREATEST(
+                   COALESCE(DATEADD('minute', -45, MAX(WM_TS)),
+                            DATEADD('hour', -48, CURRENT_TIMESTAMP())::TIMESTAMP_NTZ),
+                   DATEADD('day', -3, CURRENT_TIMESTAMP())::TIMESTAMP_NTZ)
+          INTO :lo
+        FROM DBA_MAINT_DB.OVERWATCH.OW_LOAD_WATERMARKS
+        WHERE SOURCE = 'QH_EXTRACT';
+    END IF;
+
+    -- The one QUERY_HISTORY scan of the hourly cycle. Retention trim rides
+    -- the same DELETE; an explicit backfill keeps its wider window until the
+    -- next watermark-mode run trims back to 3 days. Both arms carry V017
+    -- isolation (v4.36.1): a failed extract fill must not fail the task —
+    -- the facts keep their last load and the freshness labels say so.
+    -- r22 #7: the arm is one TRANSACTION — a failed INSERT rolls the DELETE
+    -- back (no hole; consumers really do read the previous fill) and the
+    -- watermark below only advances on COMMIT.
+    BEGIN
+    BEGIN TRANSACTION;
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+     WHERE START_TIME >= :lo
+        OR START_TIME < LEAST(:lo, DATEADD('day', -3, CURRENT_TIMESTAMP())::TIMESTAMP_NTZ);
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+        (QUERY_ID, START_TIME, WAREHOUSE_NAME, WAREHOUSE_SIZE, DATABASE_NAME, SCHEMA_NAME,
+         USER_NAME, ROLE_NAME, QUERY_TYPE, EXECUTION_STATUS, ERROR_CODE, ERROR_MESSAGE,
+         TOTAL_ELAPSED_TIME, EXECUTION_TIME, COMPILATION_TIME, QUEUED_OVERLOAD_TIME,
+         QUEUED_PROVISIONING_TIME, BYTES_SPILLED_TO_REMOTE_STORAGE, BYTES_SCANNED,
+         PERCENTAGE_SCANNED_FROM_CACHE, QUERY_TAG, QUERY_PARAMETERIZED_HASH, QUERY_TEXT,
+         CREDITS_USED_CLOUD_SERVICES, SESSION_ID, IS_CLIENT_GENERATED_STATEMENT)
+    SELECT QUERY_ID, START_TIME, WAREHOUSE_NAME, WAREHOUSE_SIZE, DATABASE_NAME, SCHEMA_NAME,
+           USER_NAME, ROLE_NAME, QUERY_TYPE, EXECUTION_STATUS, ERROR_CODE::VARCHAR,
+           LEFT(ERROR_MESSAGE, 200), TOTAL_ELAPSED_TIME, EXECUTION_TIME, COMPILATION_TIME,
+           QUEUED_OVERLOAD_TIME, QUEUED_PROVISIONING_TIME, BYTES_SPILLED_TO_REMOTE_STORAGE,
+           BYTES_SCANNED, PERCENTAGE_SCANNED_FROM_CACHE, QUERY_TAG, QUERY_PARAMETERIZED_HASH,
+           LEFT(QUERY_TEXT, 200), COALESCE(CREDITS_USED_CLOUD_SERVICES, 0),
+           SESSION_ID, IS_CLIENT_GENERATED_STATEMENT
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE START_TIME >= :lo;
+    COMMIT;
+    ok := TRUE;
+    EXCEPTION
+        WHEN OTHER THEN
+            ROLLBACK;
+            emsg := SQLERRM;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'ExtractLoader', 'extract_load_failed', :emsg, 'OW_QH_EXTRACT - consumers read the previous fill', CURRENT_ROLE();
+    END;
+
+    BEGIN
+    BEGIN TRANSACTION;
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+     WHERE HOUR_TS >= DATE_TRUNC('hour', DATEADD('hour', -48, CURRENT_TIMESTAMP()));
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+        (HOUR_TS, WAREHOUSE_NAME, DATABASE_NAME, USER_NAME, COMPANY, QUERY_COUNT,
+         FAILED_COUNT, ELAPSED_SEC_SUM, P95_ELAPSED_SEC, QUEUED_SEC_SUM, SPILL_REMOTE_GB)
+    SELECT
+        DATE_TRUNC('hour', START_TIME),
+        WAREHOUSE_NAME,
+        DATABASE_NAME,
+        USER_NAME,
+        DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME),
+        COUNT(*),
+        SUM(IFF(EXECUTION_STATUS <> 'SUCCESS', 1, 0)),
+        SUM(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 1000,
+        APPROX_PERCENTILE(TOTAL_ELAPSED_TIME / 1000, 0.95),
+        SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000,
+        SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3)
+    FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+    WHERE START_TIME >= DATE_TRUNC('hour', DATEADD('hour', -48, CURRENT_TIMESTAMP()))
+    GROUP BY 1, 2, 3, 4, 5;
+    COMMIT;
+    EXCEPTION
+        WHEN OTHER THEN
+            ROLLBACK;
+            emsg := SQLERRM;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'ExtractLoader', 'fact_load_failed', :emsg, 'FACT_QUERY_HOURLY - extract unaffected', CURRENT_ROLE();
+    END;
+
+    -- r22 #1: the day-grain query fact — same dims as the hourly fact, 1/24th
+    -- the rows, backfillable a full year (backfill_365.sql owns history; this
+    -- arm keeps the trailing 3 days current). Company via the UDF on a plain
+    -- column OUTSIDE the aggregation (V030 shape law). 'FAIL' matches the
+    -- V002 hourly-fact convention.
+    BEGIN
+    BEGIN TRANSACTION;
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_QUERY_DAILY t
+    USING (
+        SELECT g.DAY, g.WAREHOUSE_NAME, g.DATABASE_NAME, g.USER_NAME,
+               DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(g.WAREHOUSE_NAME) AS COMPANY,
+               g.QUERY_COUNT, g.FAILED_COUNT, g.ELAPSED_SEC_SUM, g.QUEUED_SEC_SUM, g.SPILL_REMOTE_GB
+        FROM (
+            SELECT DATE(START_TIME) AS DAY,
+                   COALESCE(WAREHOUSE_NAME, 'NONE') AS WAREHOUSE_NAME,
+                   COALESCE(DATABASE_NAME, 'NONE') AS DATABASE_NAME,
+                   COALESCE(USER_NAME, 'UNKNOWN') AS USER_NAME,
+                   COUNT(*) AS QUERY_COUNT,
+                   SUM(IFF(EXECUTION_STATUS <> 'SUCCESS', 1, 0)) AS FAILED_COUNT,
+                   SUM(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 1000 AS ELAPSED_SEC_SUM,
+                   SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000 AS QUEUED_SEC_SUM,
+                   SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_REMOTE_GB
+            FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+            -- Day-aligned (audit #6): only WHOLE days inside the 72h extract,
+            -- so an aging day freezes COMPLETE, not at its last partial hour.
+            WHERE START_TIME >= DATEADD('day', -2, CURRENT_DATE())
+            GROUP BY 1, 2, 3, 4
+        ) g
+    ) s
+    ON t.DAY = s.DAY AND t.WAREHOUSE_NAME = s.WAREHOUSE_NAME
+       AND t.DATABASE_NAME = s.DATABASE_NAME AND t.USER_NAME = s.USER_NAME
+    WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, QUERY_COUNT = s.QUERY_COUNT,
+        FAILED_COUNT = s.FAILED_COUNT, ELAPSED_SEC_SUM = s.ELAPSED_SEC_SUM,
+        QUEUED_SEC_SUM = s.QUEUED_SEC_SUM, SPILL_REMOTE_GB = s.SPILL_REMOTE_GB,
+        LOAD_TS = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT
+        (DAY, WAREHOUSE_NAME, DATABASE_NAME, USER_NAME, COMPANY, QUERY_COUNT,
+         FAILED_COUNT, ELAPSED_SEC_SUM, QUEUED_SEC_SUM, SPILL_REMOTE_GB)
+    VALUES (s.DAY, s.WAREHOUSE_NAME, s.DATABASE_NAME, s.USER_NAME, s.COMPANY, s.QUERY_COUNT,
+            s.FAILED_COUNT, s.ELAPSED_SEC_SUM, s.QUEUED_SEC_SUM, s.SPILL_REMOTE_GB);
+    COMMIT;
+    EXCEPTION
+        WHEN OTHER THEN
+            ROLLBACK;
+            emsg := SQLERRM;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'ExtractLoader', 'fact_load_failed', :emsg, 'FACT_QUERY_DAILY - extract unaffected', CURRENT_ROLE();
+    END;
+
+    -- V055: cloud-services breakdown mart, from the extract just filled.
+    -- Isolated (V017): its failure must not break the extract or the
+    -- watermark — consumers keep the previous mart fill.
+    BEGIN
+        CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_CLOUD_SVC_MART();
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'ExtractLoader', 'cloud_svc_mart_failed', :emsg, 'MART_CLOUD_SVC_DAILY - extract unaffected', CURRENT_ROLE();
+    END;
+
+    -- R5: advance the watermark; R6: loader-owned freshness — ONLY when the
+    -- extract arm committed (r22 #7: a failed cycle must re-cover its window).
+    IF (ok) THEN
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.OW_LOAD_WATERMARKS t
+    USING (SELECT 'QH_EXTRACT' AS SOURCE, CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS WM_TS) s
+    ON t.SOURCE = s.SOURCE
+    WHEN MATCHED THEN UPDATE SET WM_TS = s.WM_TS
+    WHEN NOT MATCHED THEN INSERT (SOURCE, WM_TS) VALUES (s.SOURCE, s.WM_TS);
+
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE t
+    USING (
+        SELECT 'OW_QH_EXTRACT' AS SOURCE_NAME, MAX(LOAD_TS) AS LAST_LOAD_TS,
+               COUNT(*) AS ROW_COUNT
+        FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+        UNION ALL
+        SELECT 'FACT_QUERY_HOURLY', MAX(LOAD_TS), COUNT(*)
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+        UNION ALL
+        SELECT 'FACT_QUERY_DAILY', MAX(LOAD_TS), COUNT(*)
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_DAILY
+    ) s
+    ON t.SOURCE_NAME = s.SOURCE_NAME
+    WHEN MATCHED THEN UPDATE SET LAST_LOAD_TS = s.LAST_LOAD_TS, ROW_COUNT = s.ROW_COUNT,
+        SNAPSHOT_TS = CURRENT_TIMESTAMP(), GENERATION = COALESCE(t.GENERATION, 0) + 1,
+        STATUS = 'loader'
+    WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
+    VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, 'loader');
+    END IF;
+
+    RETURN 'qh extract + query facts loaded (extract committed: ' || :ok || ')';
+END;
+$$;
+
+-- Reload the whole 72h extract so SESSION_ID / IS_CLIENT_GENERATED_STATEMENT carry values
+-- immediately (a plain watermark-mode hourly run would only fill them from the watermark
+-- forward, leaving the rest of the retention window NULL until it ages out).
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(3);
+
+INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
+SELECT 149 AS VERSION,
+       'OW_QH_EXTRACT session/client columns: ADD COLUMN SESSION_ID + IS_CLIENT_GENERATED_STATEMENT (both on ACCOUNT_USAGE.QUERY_HISTORY) to the single-scan staging copy, and re-derive SP_LOAD_QH_EXTRACT from V094 (the current definition; the loader was re-derived across V041/V042/V055/V056/V062/V094) so the extract INSERT/SELECT fill them -- byte-identical otherwise. Foundation for cloud-services driver/application attribution (join ACCOUNT_USAGE.SESSIONS on SESSION_ID; split client-generated vs user statements); nothing reads them yet. Tail CALL(3) reloads the 72h extract so the columns populate immediately. Additive schema change, no backfill.' AS DESCRIPTION
+WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 149);
 
 -- =====================================================================
---  PART B -- STEP-2 VERIFY (read-only). Paste all four grids back.
+--  PART B -- STEP-2 VERIFY (read-only). Paste all grids back.
 -- =====================================================================
 USE ROLE SNOW_ACCOUNTADMINS;
 
--- (1) the LIVE proc now carries the CoCo/CoWork broadening (both should be TRUE;
---     HAS_NARROW_ONLY is a belt-and-suspenders check that the narrow-only form is gone).
+-- ---- V148 checks -----------------------------------------------------
+-- (V148.1) the live proc carries the CoCo/CoWork broadening (both TRUE).
 SELECT CONTAINS(GET_DDL('PROCEDURE', 'DBA_MAINT_DB.OVERWATCH.SP_REFRESH_EXEC_BOARD()'), '%COCO%')   AS HAS_COCO,
        CONTAINS(GET_DDL('PROCEDURE', 'DBA_MAINT_DB.OVERWATCH.SP_REFRESH_EXEC_BOARD()'), '%COWORK%') AS HAS_COWORK;
 
--- (2) the CoCo/CoWork lines on the board are now labeled 'AI/Cortex:' and priced at
---     the AI rate (~2.20/credit), NOT 'Serverless:' at ~3.68. IMPLIED_RATE = $/credit.
---     EMPTY result just means no CoCo/CoWork spend landed inside these windows -- the
---     restore is still correct (defensive); check grid (3) for the general AI split.
+-- (V148.2) CoCo/CoWork lines on the board now price at the AI rate (~2.20/credit),
+--          labeled 'AI/Cortex:'. EMPTY just means no CoCo/CoWork spend in-window.
 SELECT COMPANY, WINDOW_DAYS, DIMENSION,
-       ROUND(VALUE, 2)     AS CREDITS,
-       VALUE_USD,
+       ROUND(VALUE, 2) AS CREDITS, VALUE_USD,
        ROUND(VALUE_USD / NULLIF(VALUE, 0), 3) AS IMPLIED_RATE
 FROM DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD
 WHERE PANEL = 'COST_DRIVER_SVC'
   AND (DIMENSION ILIKE '%COCO%' OR DIMENSION ILIKE '%COWORK%')
 ORDER BY WINDOW_DAYS, VALUE DESC;
 
--- (3) the two-partition dollarization is intact across the whole panel: every
---     'AI/Cortex:' line prices at ~2.20 and every 'Serverless:' line at ~3.68.
-SELECT SPLIT_PART(DIMENSION, ':', 1)          AS KIND,
-       COUNT(*)                               AS LINES,
-       ROUND(AVG(VALUE_USD / NULLIF(VALUE, 0)), 3) AS AVG_IMPLIED_RATE,
-       ROUND(SUM(VALUE_USD), 2)               AS TOTAL_USD
-FROM DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD
-WHERE PANEL = 'COST_DRIVER_SVC' AND VALUE > 0
-GROUP BY 1
-ORDER BY 1;
+-- ---- V149 checks -----------------------------------------------------
+-- (V149.1) the two columns now exist on OW_QH_EXTRACT (look for SESSION_ID = NUMBER
+--          and IS_CLIENT_GENERATED_STATEMENT = BOOLEAN in the "type" column).
+DESCRIBE TABLE DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT;
 
--- (4) V148 is registered.
+-- (V149.2) the CALL(3) reload populated them. WITH_SESSION should be ~= TOTAL (SESSION_ID
+--          is set for nearly every statement); CLIENT_GEN counts platform/driver-issued rows.
+SELECT COUNT(*)                                              AS TOTAL_ROWS,
+       COUNT(SESSION_ID)                                     AS WITH_SESSION,
+       COUNT_IF(IS_CLIENT_GENERATED_STATEMENT)               AS CLIENT_GEN_ROWS,
+       COUNT_IF(NOT COALESCE(IS_CLIENT_GENERATED_STATEMENT, FALSE)) AS USER_STMT_ROWS,
+       COUNT(DISTINCT SESSION_ID)                            AS SESSIONS
+FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT;
+
+-- (V149.3) a few client-generated rows (sanity: SESSION_ID + the flag look real).
+SELECT SESSION_ID, IS_CLIENT_GENERATED_STATEMENT, USER_NAME, QUERY_TYPE,
+       LEFT(QUERY_TEXT, 60) AS SAMPLE
+FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+WHERE IS_CLIENT_GENERATED_STATEMENT = TRUE
+LIMIT 5;
+
+-- (both) V148 and V149 are registered.
 SELECT VERSION, DESCRIPTION, APPLIED_AT
 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION
-WHERE VERSION = 148;
+WHERE VERSION IN (148, 149)
+ORDER BY VERSION;
