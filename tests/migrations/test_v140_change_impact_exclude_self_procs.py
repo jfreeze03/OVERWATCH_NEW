@@ -73,7 +73,7 @@ def test_v140_clears_the_existing_false_self_alerts():
 
 def test_validate_and_docs_track_v140():
     val = _read("snowflake/validate.sql")
-    assert "V001..V149 applied" in val and "VERSION BETWEEN 1 AND 149) = 149" in val
+    assert "V001..V150 applied" in val and "VERSION BETWEEN 1 AND 150) = 150" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V140__change_impact_exclude_self_procs.sql" in _read(rel)
 

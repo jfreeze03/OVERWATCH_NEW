@@ -28,6 +28,16 @@ PLAYBOOKS: dict[str, str] = {
         "table churn justifies it.\n"
         "3. If not intentional, suspend the feature before month-end, then resolve."
     ),
+    "COST_CLOUD_SVC_ANOMALY": (
+        "**Means:** this warehouse's cloud-services credits stepped far outside its own 28-day "
+        "baseline — a per-warehouse signal, so a warehouse that is chronically compile-heavy stays "
+        "quiet and only a real change surfaces.\n\n"
+        "1. Operations > Queries → *Cloud-services chatter by application*: which client/driver moved.\n"
+        "2. Cost > Spend → *Cloud-services health*: the compile-heavy families under that warehouse.\n"
+        "3. Fix = quiet the chatty tool / cache metadata / cut reconnects (credits shown are gross "
+        "usage, before the account-level ~10% rebate); recurring on the same warehouse = raise the "
+        "threshold on the rule."
+    ),
     "COST_ANOMALY_SWEEP": (
         "**Means:** yesterday's credits for this series sit far outside its 28-day pattern.\n\n"
         "1. Investigate → lands on Cost Intelligence > Spend & Attribution scoped to the entity; check the day's attribution.\n"
