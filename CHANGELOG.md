@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.584.0 - Codex visual review — structure wave (rec 26 / 9 / 10) (2026-09-23)
+
+The three deferred structural recs from the same adjudication, browser-verified and lock-preserving.
+Presentation/layout only; no query added or removed (per-page `ACCOUNT_USAGE` literal counts and the
+`test_v451_trust` reachable-table sets are unchanged), no preserved item touched.
+
+- **rec 26** — master/detail responsive restack fix (`theme.py`). Below 1180px a bare descendant
+  selector flattened *every* nested `st.columns` grid a detail pane draws (KPI/metric rows collapsed
+  into one tall stack), not just the two panes. Verified in the live Streamlit 1.58 DOM: a scoped
+  `:not()` now restacks only top-level panes (flex-basis:100%) while nested columns keep their
+  side-by-side calc widths. Version-agnostic (no reliance on the `stLayoutWrapper` depth); lock in
+  `test_uiux_wave2_masterdetail.py` strengthened to pin the exclusion.
+- **rec 9** — Operations ▸ Pipeline SLA is chaptered via `nested_sections` into **Tonight** (cycle
+  finish forecast, this run's runtimes, run inventory + the XLAT reference gap), **Recurring failures**
+  (task failure recurrence, file-load and dynamic-table failures), **Performance** (runtime drift,
+  creep, cost attribution), and **Data checks** (freshness SLAs + register, reconciliation DQ, volume
+  drops, row-volume, streams). Each chapter prefetches only its own reads (`_pipeline_prefetch(want=…)`
+  / a scoped `run_batch`), so opening the tab pays one chapter's ~MAX(scan), not every panel's. The
+  freshness read no longer early-returns the whole tab — an uninstalled `PIPELINE_SLA_STATUS` skips
+  only the forecast + register, leaving the independent volume/stream signals visible.
+- **rec 10** — Security ▸ Access is chaptered via `nested_sections` into **Authentication** (MFA gaps,
+  single-factor, failed logins + reasons, takeover bursts, new networks), **Privileged access** (admin
+  role holders, unused roles + revoke-safety drill, effective access, grant anomalies), and **Account
+  lifecycle** (expiring credentials, dormant users, reawakened accounts). The shared identity-evidence
+  reads stay hoisted (they feed all three chapters and the login-coverage dance runs once), so read
+  behavior never regresses; the self-reading Privileged/Lifecycle panels now fire only when their
+  chapter opens. Drills, toggles, the cross-page grant-activity pointer, and the Auditor export pack
+  (always full) are unchanged.
+
+4-pin version bump 4.583.0 → 4.584.0 + CHANGELOG.
+
 ## 4.583.0 - Codex visual review — first wave (2026-09-23)
 
 The high-confidence, Streamlit-in-Snowflake-safe wins from the ground-truth adjudication of Codex's 50

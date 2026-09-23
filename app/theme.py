@@ -486,10 +486,17 @@ section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked)
    first — so restack them explicitly on narrow viewports. The generous 1180px
    breakpoint keys off VIEWPORT width while the content area is viewport minus
    the sidebar, so it fires before the panes cramp. `st-key-ow_md_*` is the
-   shared container key every master-detail surface wraps its columns in. */
+   shared container key every master-detail surface wraps its columns in.
+   rec26: restack ONLY the two top-level panes — the `:not()` excludes any
+   stColumn nested inside another stColumn within the container, so KPI/metric
+   rows a detail pane lays out with its own st.columns stay side-by-side (a bare
+   descendant selector flattened those too, turning every nested grid into a
+   single tall stack). Descendant `flex-wrap` is intentional: it lets the outer
+   pane row wrap regardless of Streamlit's wrapper depth and is harmless on
+   nested rows (permits wrapping, never forces it). */
 @media (max-width:1180px) {
   [class*="st-key-ow_md_"] [data-testid="stHorizontalBlock"] { flex-wrap:wrap; }
-  [class*="st-key-ow_md_"] [data-testid="stColumn"] {
+  [class*="st-key-ow_md_"] [data-testid="stColumn"]:not([class*="st-key-ow_md_"] [data-testid="stColumn"] [data-testid="stColumn"]) {
     flex:1 1 100% !important; min-width:100% !important; width:100% !important;
   }
 }

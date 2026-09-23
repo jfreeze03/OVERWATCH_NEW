@@ -2028,12 +2028,17 @@ def _cost_attribution_panel() -> None:
         result_caption(res)
 
 
-def _pipeline_prefetch(days: int) -> dict:
+def _pipeline_prefetch(days: int, want: set[str] | None = None) -> dict:
     """B1 (v4.531): co-schedule the Pipeline SLA tab's independent, picker-free control-table
     reads into ONE run_batch, so the tab's cold first paint pays ~MAX(scan) instead of the sum
     of ~8 serial round-trips. Each panel still owns its SQL, guards, and config-gate, and keeps
     its serial run() fallback: a missing prefetch member (unconfigured/invalid FQN, a None batch)
     just re-reads. All members are tier='recent', so a plain run_batch is right (not mixed).
+
+    rec9 (v4.584): the tab is now chaptered (nested_sections), so only ONE chapter renders per
+    view. `want` names the member keys that chapter needs — the batch prefetches ONLY those, so
+    a chapter still pays ~MAX(scan) across its own reads and never fetches the other chapters'
+    reads it won't render. want=None keeps the full list (unused now, kept for safety).
 
     Deliberately EXCLUDED — they aren't independent first-paint reads: the chosen workflow's
     runtimes and a chosen run's tasks/params need a selectbox value that doesn't exist yet, and
@@ -2049,7 +2054,9 @@ def _pipeline_prefetch(days: int) -> dict:
     specs: list[dict] = []
 
     def _add(key: str, sql: str, source: str, max_rows: int) -> None:
-        if sql:   # skip an unconfigured/invalid FQN — the panel handles that state itself
+        # skip an unconfigured/invalid FQN (the panel handles that state itself) and any key the
+        # calling chapter didn't ask for (rec9: only prefetch the reads this chapter renders).
+        if sql and (want is None or key in want):
             specs.append({"key": key, "sql": sql, "source": source, "max_rows": max_rows})
 
     if ctrl:
@@ -2087,129 +2094,63 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
     Owner ask 2026-08-17: the DB-grain diagnostics honor the company filter; the
     SLA-horizon config/forecast is account-wide (thresholds are account policy). The ETL
     runtimes reader honors the scope-bar Window (``days``) to bound which runs it lists.
-    Volume drops honors company/database/schema too (2026-09-21 owner: it was mixing companies)."""
+    Volume drops honors company/database/schema too (2026-09-21 owner: it was mixing companies).
+
+    rec9 (v4.584): the tab was one ~15-panel scroll; it now reads as four chapters via
+    nested_sections — **Tonight** (did/will the nightly cycle finish clean before 07:00),
+    **Recurring failures** (what keeps breaking), **Performance** (runtime drift/creep/cost),
+    **Data checks** (freshness SLAs, reconciliation DQ, volume, streams). Each chapter is a
+    helper that renders one lens and prefetches ONLY its own reads (_pipeline_prefetch(want=…)
+    / a scoped run_batch), so opening the tab pays one chapter's ~MAX(scan), never every
+    panel's. Every panel, scope contract, config-gate, alert reference, and register/execute
+    control is unchanged — only regrouped."""
+    view = nested_sections(
+        ["Tonight", "Recurring failures", "Performance", "Data checks"],
+        key="ops_pipeline_view",
+    )
+    if view == "Tonight":
+        _pipeline_tonight(days, database)
+    elif view == "Recurring failures":
+        _pipeline_recurring(days, company, database, schema_contains)
+    elif view == "Performance":
+        _pipeline_performance(days)
+    else:
+        _pipeline_data_checks(is_operator, company, database, days, schema_contains)
+
+
+def _pipeline_tonight(days: int = 0, database: str = "") -> None:
+    """rec9 'Tonight': did/will the nightly cycle finish clean before the 07:00 deadline.
+
+    Leads with the XLAT reference gap (a missing source code HARD-FAILS the load), then the
+    whole-cycle finish forecast, this run's per-task runtimes, and the run/params inventory."""
     # First panel by design: a source code missing from XLAT hard-fails the nightly
-    # load, so this leads the Pipeline tab (config-gated; dormant until set up). Honors
+    # load, so this leads the chapter (config-gated; dormant until set up). Honors
     # the scope-bar Database filter (pinned checks always show).
     _reference_gap_panel(database)
-    # B1 (v4.531): prefetch the 8 independent, picker-free control-table reads in ONE round trip
-    # so the tab's cold first paint pays ~MAX(scan), not the sum of ~8 serial reads. Each panel
-    # below consumes its member via (pf or {}).get(key) and keeps its serial run() fallback.
-    _pf = _pipeline_prefetch(days)
-    # Then a chosen workflow's latest run's per-task runtimes (Informatica CONTROL_STATUS),
-    # scoped to the Window; config-gated + fail-silent-with-grant-hint like above.
-    _workflow_runtimes_panel(days, pf=_pf)
-    # Then failure recurrence: which task keeps failing / is likely to fail again — a FAILED task
-    # outranks a slow one at 7am, so this leads the drift/creep slowdown panels.
-    _failure_recurrence_panel(days, pf=_pf)
-    # Then run-over-run drift on that same control table: which task got materially slower.
-    _workflow_drift_panel(pf=_pf)
-    # Then the forward-looking companion: which tasks are CREEPING toward a breach (trend fit),
-    # scoped to the Window so the trend reflects the selected history.
-    _runtime_creep_panel(days, pf=_pf)
-    # Then the whole-cycle SLA: will the nightly cycle (starter → terminal) finish before 7am?
+    # Prefetch only this chapter's picker-free control-table reads in ONE round trip so the
+    # chapter's cold paint pays ~MAX(scan). Each panel keeps its (pf or {}).get(key) + run() fallback.
+    _pf = _pipeline_prefetch(days, want={"cycle_finish", "wf_list", "run_inventory"})
+    # The whole-cycle SLA: will the nightly cycle (starter → terminal) finish before 7am?
     # Window-independent by design (fixed 14-night baseline, matches Brief) — see the panel.
     _sla_finish_forecast_panel(pf=_pf)
-    # Then the run inventory (CONTROL_RUN_ID) + the latest run's parameters (CONTROL_PARAMS).
+    # A chosen workflow's latest run's per-task runtimes (Informatica CONTROL_STATUS),
+    # scoped to the Window; config-gated + fail-silent-with-grant-hint.
+    _workflow_runtimes_panel(days, pf=_pf)
+    # The run inventory (CONTROL_RUN_ID) + the latest run's parameters (CONTROL_PARAMS).
     _run_inventory_panel(pf=_pf)
-    # Then Phase 3 reconciliation DQ: metrics whose source vs target layer didn't tie out.
-    _recon_error_panel(pf=_pf)
-    # Then which metrics KEEP breaking (recurrence), vs the raw 'what broke' panel above.
-    _recon_recurrence_panel(days, pf=_pf)
-    # Then Phase 4 cost attribution (on-demand toggle, so NOT prefetched): which task spent the
-    # most measured credits/$ last night.
-    _cost_attribution_panel()
-    res = run(insights_sql.pipeline_sla_forecast(14), page=_PAGE, key="sla_status", tier="recent",
-              source="ACCOUNT_USAGE.TABLE_DML_HISTORY x PIPELINE_SLA_STATUS")
-    if not res.ok:
-        empty_state("needs_setup", "Pipeline SLAs are not installed yet — an admin can verify on Admin → Migrations & freshness.")
-        return
-    if res.empty:
-        empty_state("needs_setup", "No tables registered. Add rows to PIPELINE_SLA_CONFIG below; the view scores them automatically.")
-    else:
-        # O10: fold each table's refresh cadence into a forward-looking tier so the
-        # tab warns BEFORE a miss, not only after. On-track/at-risk/overdue/breached.
-        df = pipeline_sla_forecast(res.df.copy())
-        met = int(df["SLA_MET"].fillna(False).astype(bool).sum())
-        total = len(df)
-        overdue = int((df["FORECAST"] == "Overdue").sum())
-        at_risk = int((df["FORECAST"] == "At risk").sum())
-        kpi_row([
-            {"label": "SLA compliance", "value": f"{met / total * 100:,.1f}%",
-             "delta": f"{met}/{total} tables", "delta_color": "off"},
-            {"label": "Breaching now", "value": f"{total - met}",
-             "delta_color": "inverse" if total - met else "off"},
-            {"label": "Trending to miss", "value": f"{overdue + at_risk}",
-             "delta": f"{overdue} overdue · {at_risk} at risk", "delta_color": "off",
-             "help": "Meets SLA now but overdue vs its own refresh cadence, or within "
-                     "one refresh cycle of the deadline — a leading indicator, not a miss yet."},
-        ])
-        _fcols = ["DATABASE_NAME", "SCHEMA_NAME", "TABLE_NAME", "OWNER", "FORECAST",
-                  "DETAIL", "HOURS_SINCE", "MAX_AGE_HOURS"]
-        forecast_rows = df[df["FORECAST"].isin(["Overdue", "At risk"])]
-        if not forecast_rows.empty:
-            st.warning("Forecast — registered tables trending toward a miss (still within SLA now):")
-            styled_table(forecast_rows[_fcols], sort_label="soonest to miss")
-        breaching = df[~df["SLA_MET"].fillna(False).astype(bool)]
-        if not breaching.empty:
-            st.warning("Tables past their freshness SLA:")
-            styled_table(breaching[_fcols])
-        with st.expander("All registered tables"):
-            styled_table(df)
-        result_caption(res, note="Freshness from ACCOUNT_USAGE.TABLES.LAST_ALTERED (metadata lag "
-                                  "up to ~2h); refresh cadence from TABLE_DML_HISTORY over 14 days.")
 
-    with st.expander("Register a table"):
-        # rec43 NOT applied here: st.form would freeze the live SQL preview until
-        # submit, so the operator couldn't review the EXACT INSERT before running
-        # it (the submit both shows and runs). The "see the SQL first" contract
-        # wins over batched submit — keep the live preview + a separate button.
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            db = st.text_input("Database", key="sla_db")
-        with c2:
-            schema = st.text_input("Schema", key="sla_schema")
-        with c3:
-            table = st.text_input("Table", key="sla_table")
-        max_age = st.number_input("Max age (hours)", min_value=1.0, max_value=168.0, value=24.0, key="sla_age")
-        owner = st.text_input("Owner", value="Data Engineering", key="sla_owner")
-        # MERGE, not INSERT: PIPELINE_SLA_CONFIG has no unique key and no edit UI, so
-        # re-registering a table (the only way to change its SLA) with a bare INSERT wrote a
-        # SECOND config row -> two PIPELINE_SLA_STATUS rows for one table that disagree on
-        # SLA_MET. Upsert on (DB, SCHEMA, TABLE), like every sibling config write.
-        merge_sql = (
-            f"MERGE INTO {core_object('PIPELINE_SLA_CONFIG')} t\n"
-            f"USING (SELECT {sql_literal(db.upper())} AS DATABASE_NAME, "
-            f"{sql_literal(schema.upper())} AS SCHEMA_NAME, {sql_literal(table.upper())} AS TABLE_NAME, "
-            f"{max_age} AS MAX_AGE_HOURS, {sql_literal(owner)} AS OWNER) s\n"
-            "ON t.DATABASE_NAME = s.DATABASE_NAME AND t.SCHEMA_NAME = s.SCHEMA_NAME "
-            "AND t.TABLE_NAME = s.TABLE_NAME\n"
-            "WHEN MATCHED THEN UPDATE SET MAX_AGE_HOURS = s.MAX_AGE_HOURS, OWNER = s.OWNER\n"
-            "WHEN NOT MATCHED THEN INSERT (DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, MAX_AGE_HOURS, OWNER)\n"
-            "VALUES (s.DATABASE_NAME, s.SCHEMA_NAME, s.TABLE_NAME, s.MAX_AGE_HOURS, s.OWNER);"
-        )
-        st.code(merge_sql, language="sql")
-        if (is_operator and st.button("Register table", key="sla_exec",
-                                      disabled=not (db and schema and table))
-                and write_gate_open("sla_exec")):
-            ok, msg = execute_statement(merge_sql, page=_PAGE)
-            stamp_write("sla_exec", ok)  # C48
-            notify(ok, "SLA registered." if ok else msg)
-            if ok:
-                st.rerun()  # the updated 'All registered tables' list is the durable receipt
-        if not is_operator:
-            st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")
 
-    # Perf: the tab's FOUR independent 'recent' reads (COPY failures, volume deltas,
-    # registered-product row-volume, dynamic-table health) prefetch in ONE parallel batch instead
-    # of four serial account-usage scans; each keeps its render point and run() fallback, so which
-    # scans fire and the render order are unchanged. Cold latency ~MAX(scan) instead of SUM(scans).
+def _pipeline_recurring(days: int = 0, company: str = "ALL", database: str = "",
+                        schema_contains: str = "") -> None:
+    """rec9 'Recurring failures': what keeps breaking. Task failure recurrence first (a FAILED
+    task outranks a slow one at 07:00), then the 7-day file-load and dynamic-table failure pictures."""
+    # Failure recurrence: which task keeps failing / is likely to fail again.
+    _pf = _pipeline_prefetch(days, want={"status_history"})
+    _failure_recurrence_panel(days, pf=_pf)
+    # The two independent 'recent' failure reads co-schedule in ONE batch (each keeps its render
+    # point + run() fallback); cold latency ~MAX(scan) instead of the sum.
     _psb = run_batch([
         {"key": "cpf", "sql": ops_sql.copy_load_failures(7, company), "source": "ACCOUNT_USAGE.COPY_HISTORY"},
-        {"key": "vd", "sql": ops_sql.volume_deltas(company, database, schema_contains),
-         "source": "ACCOUNT_USAGE.TABLE_DML_HISTORY"},
-        {"key": "rv", "sql": dq_sql.product_row_volume(28),
-         "source": "ACCOUNT_USAGE.TABLE_DML_HISTORY x ENTITY_CATALOG"},
         {"key": "dth", "sql": ops_sql.dynamic_table_health(7, company, database, schema_contains),
          "source": "ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY"},
     ], page=_PAGE, tier="recent")
@@ -2224,6 +2165,146 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
         st.caption("The PIPE_COPY_FAILURES alert fires on these within the hour; "
                    "this table is the 7-day picture with sample errors.")
         result_caption(cpf)
+
+    section_header("Dynamic table refresh health (7d)", "", "pipeline")
+    panel_help(
+        "Source: ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY (up to ~3h lag). STATUS is the "
+        "CURRENT condition from the newest refresh: STALE NOW = the latest refresh failed/was "
+        "skipped, so downstream is reading stale data; RECOVERED = failed earlier in the window "
+        "but the latest refresh succeeded; HEALTHY = no failures. FAILURES = count in the window. "
+        "Honors the company/database/schema scope. The daily PIPE_DT_FAILURES alert fires on 24h "
+        "failures; this is the weekly picture."
+    )
+    dth = _psb.get("dth") or run(ops_sql.dynamic_table_health(7, company, database, schema_contains),
+              page=_PAGE, key=f"dt_health_{company}_{database}", tier="recent",
+              source="ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY")
+    if dth.ok and dth.empty:
+        empty_state("no_data_yet", "No dynamic-table refreshes recorded in 7 days (none defined, or the view is empty).")
+    elif guard(dth, "", setup_hint="Needs the DYNAMIC_TABLE_REFRESH_HISTORY view (standard on current accounts)."):
+        styled_table(dth.df, height=240)
+        result_caption(dth)
+
+
+def _pipeline_performance(days: int = 0) -> None:
+    """rec9 'Performance': runtime drift, creep, and cost. Which task got materially slower
+    run-over-run, which are creeping toward a breach, and which spent the most credits last night."""
+    _pf = _pipeline_prefetch(days, want={"wf_drift", "runtime_history"})
+    # Run-over-run drift on the control table: which task got materially slower.
+    _workflow_drift_panel(pf=_pf)
+    # The forward-looking companion: which tasks are CREEPING toward a breach (trend fit),
+    # scoped to the Window so the trend reflects the selected history.
+    _runtime_creep_panel(days, pf=_pf)
+    # Phase 4 cost attribution (on-demand toggle, so NOT prefetched): which task spent the
+    # most measured credits/$ last night.
+    _cost_attribution_panel()
+
+
+def _pipeline_data_checks(is_operator: bool, company: str = "ALL", database: str = "", days: int = 0,
+                          schema_contains: str = "") -> None:
+    """rec9 'Data checks': is the data fresh, complete, and reconciled. Freshness SLAs
+    (+ table registration), reconciliation DQ (source vs target ties out / what keeps breaking),
+    volume drops, row-volume anomalies, and stream staleness.
+
+    rec9 note: the freshness read no longer early-returns the whole tab — its ``not res.ok``
+    (PIPELINE_SLA_STATUS not installed) skips only the freshness forecast + register expander;
+    the volume/row-volume/stream signals below read their own independent metering views and
+    stay visible (the old linear layout gated them behind the freshness read only incidentally)."""
+    # Freshness SLA forecast (account-wide; thresholds are account policy).
+    res = run(insights_sql.pipeline_sla_forecast(14), page=_PAGE, key="sla_status", tier="recent",
+              source="ACCOUNT_USAGE.TABLE_DML_HISTORY x PIPELINE_SLA_STATUS")
+    if not res.ok:
+        empty_state("needs_setup", "Pipeline SLAs are not installed yet — an admin can verify on Admin → Migrations & freshness.")
+    else:
+        if res.empty:
+            empty_state("needs_setup", "No tables registered. Add rows to PIPELINE_SLA_CONFIG below; the view scores them automatically.")
+        else:
+            # O10: fold each table's refresh cadence into a forward-looking tier so the
+            # tab warns BEFORE a miss, not only after. On-track/at-risk/overdue/breached.
+            df = pipeline_sla_forecast(res.df.copy())
+            met = int(df["SLA_MET"].fillna(False).astype(bool).sum())
+            total = len(df)
+            overdue = int((df["FORECAST"] == "Overdue").sum())
+            at_risk = int((df["FORECAST"] == "At risk").sum())
+            kpi_row([
+                {"label": "SLA compliance", "value": f"{met / total * 100:,.1f}%",
+                 "delta": f"{met}/{total} tables", "delta_color": "off"},
+                {"label": "Breaching now", "value": f"{total - met}",
+                 "delta_color": "inverse" if total - met else "off"},
+                {"label": "Trending to miss", "value": f"{overdue + at_risk}",
+                 "delta": f"{overdue} overdue · {at_risk} at risk", "delta_color": "off",
+                 "help": "Meets SLA now but overdue vs its own refresh cadence, or within "
+                         "one refresh cycle of the deadline — a leading indicator, not a miss yet."},
+            ])
+            _fcols = ["DATABASE_NAME", "SCHEMA_NAME", "TABLE_NAME", "OWNER", "FORECAST",
+                      "DETAIL", "HOURS_SINCE", "MAX_AGE_HOURS"]
+            forecast_rows = df[df["FORECAST"].isin(["Overdue", "At risk"])]
+            if not forecast_rows.empty:
+                st.warning("Forecast — registered tables trending toward a miss (still within SLA now):")
+                styled_table(forecast_rows[_fcols], sort_label="soonest to miss")
+            breaching = df[~df["SLA_MET"].fillna(False).astype(bool)]
+            if not breaching.empty:
+                st.warning("Tables past their freshness SLA:")
+                styled_table(breaching[_fcols])
+            with st.expander("All registered tables"):
+                styled_table(df)
+            result_caption(res, note="Freshness from ACCOUNT_USAGE.TABLES.LAST_ALTERED (metadata lag "
+                                      "up to ~2h); refresh cadence from TABLE_DML_HISTORY over 14 days.")
+
+        with st.expander("Register a table"):
+            # rec43 NOT applied here: st.form would freeze the live SQL preview until
+            # submit, so the operator couldn't review the EXACT INSERT before running
+            # it (the submit both shows and runs). The "see the SQL first" contract
+            # wins over batched submit — keep the live preview + a separate button.
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                db = st.text_input("Database", key="sla_db")
+            with c2:
+                schema = st.text_input("Schema", key="sla_schema")
+            with c3:
+                table = st.text_input("Table", key="sla_table")
+            max_age = st.number_input("Max age (hours)", min_value=1.0, max_value=168.0, value=24.0, key="sla_age")
+            owner = st.text_input("Owner", value="Data Engineering", key="sla_owner")
+            # MERGE, not INSERT: PIPELINE_SLA_CONFIG has no unique key and no edit UI, so
+            # re-registering a table (the only way to change its SLA) with a bare INSERT wrote a
+            # SECOND config row -> two PIPELINE_SLA_STATUS rows for one table that disagree on
+            # SLA_MET. Upsert on (DB, SCHEMA, TABLE), like every sibling config write.
+            merge_sql = (
+                f"MERGE INTO {core_object('PIPELINE_SLA_CONFIG')} t\n"
+                f"USING (SELECT {sql_literal(db.upper())} AS DATABASE_NAME, "
+                f"{sql_literal(schema.upper())} AS SCHEMA_NAME, {sql_literal(table.upper())} AS TABLE_NAME, "
+                f"{max_age} AS MAX_AGE_HOURS, {sql_literal(owner)} AS OWNER) s\n"
+                "ON t.DATABASE_NAME = s.DATABASE_NAME AND t.SCHEMA_NAME = s.SCHEMA_NAME "
+                "AND t.TABLE_NAME = s.TABLE_NAME\n"
+                "WHEN MATCHED THEN UPDATE SET MAX_AGE_HOURS = s.MAX_AGE_HOURS, OWNER = s.OWNER\n"
+                "WHEN NOT MATCHED THEN INSERT (DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, MAX_AGE_HOURS, OWNER)\n"
+                "VALUES (s.DATABASE_NAME, s.SCHEMA_NAME, s.TABLE_NAME, s.MAX_AGE_HOURS, s.OWNER);"
+            )
+            st.code(merge_sql, language="sql")
+            if (is_operator and st.button("Register table", key="sla_exec",
+                                          disabled=not (db and schema and table))
+                    and write_gate_open("sla_exec")):
+                ok, msg = execute_statement(merge_sql, page=_PAGE)
+                stamp_write("sla_exec", ok)  # C48
+                notify(ok, "SLA registered." if ok else msg)
+                if ok:
+                    st.rerun()  # the updated 'All registered tables' list is the durable receipt
+            if not is_operator:
+                st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")
+
+    # Phase 3 reconciliation DQ: metrics whose source vs target layer didn't tie out, then
+    # which metrics KEEP breaking (recurrence). Prefetch both recon reads in ONE round trip.
+    _pf = _pipeline_prefetch(days, want={"recon_errors", "recon_recurrence"})
+    _recon_error_panel(pf=_pf)
+    _recon_recurrence_panel(days, pf=_pf)
+
+    # Volume drops + registered-product row-volume are independent 'recent' reads — co-schedule
+    # them in ONE batch (each keeps its render point + run() fallback). Cold ~MAX(scan) not sum.
+    _psb = run_batch([
+        {"key": "vd", "sql": ops_sql.volume_deltas(company, database, schema_contains),
+         "source": "ACCOUNT_USAGE.TABLE_DML_HISTORY"},
+        {"key": "rv", "sql": dq_sql.product_row_volume(28),
+         "source": "ACCOUNT_USAGE.TABLE_DML_HISTORY x ENTITY_CATALOG"},
+    ], page=_PAGE, tier="recent")
 
     section_header("Volume drops (yesterday vs prior-7d average)", "", "pipeline")
     panel_help(
@@ -2249,24 +2330,6 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
         result_caption(vd)
 
     _dq_row_volume_panel(_psb.get("rv"))
-
-    section_header("Dynamic table refresh health (7d)", "", "pipeline")
-    panel_help(
-        "Source: ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY (up to ~3h lag). STATUS is the "
-        "CURRENT condition from the newest refresh: STALE NOW = the latest refresh failed/was "
-        "skipped, so downstream is reading stale data; RECOVERED = failed earlier in the window "
-        "but the latest refresh succeeded; HEALTHY = no failures. FAILURES = count in the window. "
-        "Honors the company/database/schema scope. The daily PIPE_DT_FAILURES alert fires on 24h "
-        "failures; this is the weekly picture."
-    )
-    dth = _psb.get("dth") or run(ops_sql.dynamic_table_health(7, company, database, schema_contains),
-              page=_PAGE, key=f"dt_health_{company}_{database}", tier="recent",
-              source="ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY")
-    if dth.ok and dth.empty:
-        empty_state("no_data_yet", "No dynamic-table refreshes recorded in 7 days (none defined, or the view is empty).")
-    elif guard(dth, "", setup_hint="Needs the DYNAMIC_TABLE_REFRESH_HISTORY view (standard on current accounts)."):
-        styled_table(dth.df, height=240)
-        result_caption(dth)
 
     section_header("Stream staleness", "", "pipeline")
     panel_help(

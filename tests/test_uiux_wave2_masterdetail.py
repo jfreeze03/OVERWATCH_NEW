@@ -74,10 +74,19 @@ def test_decision_studio_experiments_is_master_detail():
     assert "frame.iloc[int(selected)]" not in detail        # no positional re-derive
 
 
-def test_narrow_viewport_restacks_the_columns():
+def test_narrow_viewport_restacks_only_the_top_level_panes():
+    # rec26: the restack must hit ONLY the two top-level panes. A bare descendant
+    # selector also flattened every nested st.columns grid a detail pane draws
+    # (KPI/metric rows -> one tall stack); the `:not()` excludes any stColumn
+    # nested inside another stColumn within the ow_md container. Verified in the
+    # live Streamlit DOM: outer panes -> flex-basis:100%, nested cols keep
+    # calc(50%/33%) side-by-side. Guards against regressing to the flatten-all rule.
     theme = _src("app/theme.py")
     assert '@media (max-width:1180px)' in theme
-    assert '[class*="st-key-ow_md_"] [data-testid="stColumn"]' in theme
+    assert (
+        '[class*="st-key-ow_md_"] [data-testid="stColumn"]'
+        ':not([class*="st-key-ow_md_"] [data-testid="stColumn"] [data-testid="stColumn"])'
+    ) in theme
     assert "flex:1 1 100%" in theme
 
 
