@@ -257,6 +257,9 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
             res = run(cost_sql.metering_daily_by_service(days, bounds=bounds), page=_PAGE,
                       key=f"metering_{days}{_lm}",
                       tier="historical", source="ACCOUNT_USAGE.METERING_DAILY_HISTORY")
+    # Codex-review rec20: relabel the auto-completed status to a done state.
+    if hasattr(_load_status, "update"):
+        _load_status.update(label="Spend & Attribution", state="complete")
     # K1 served-window honesty (round 20): the live metering fallback clamps to
     # MAX_LIVE_WINDOW_DAYS while the mart honors 365, so on a >90d trailing selection served live
     # the SUM tiles would otherwise label a 90-day answer "365d". Reflect the window ACTUALLY

@@ -858,11 +858,14 @@ def _roi(company: str) -> None:
     if not lever_df.empty:
         st.markdown("**Where the realized savings come from — by lever**")
         charts.bar_usd(lever_df, "LEVER", "VERIFIED_USD", "verified $ by lever", top_n=10)
-        styled_table(lever_df, height=220, column_config={
-            "VERIFIED_USD": st.column_config.NumberColumn("Verified $", format="$%.2f"),
-            "REALIZATION_PCT": st.column_config.NumberColumn("Realization %", format="%.0f%%"),
-            "ITEMS": st.column_config.NumberColumn("Items", format="%d"),
-        })
+        # Codex-review rec30: the lever chart leads; its numeric breakdown (which duplicated the
+        # chart at equal weight) moves into an expander. The CSV export rides along inside.
+        with st.expander("Lever breakdown table"):
+            styled_table(lever_df, height=220, column_config={
+                "VERIFIED_USD": st.column_config.NumberColumn("Verified $", format="$%.2f"),
+                "REALIZATION_PCT": st.column_config.NumberColumn("Realization %", format="%.0f%%"),
+                "ITEMS": st.column_config.NumberColumn("Items", format="%d"),
+            })
     result_caption(ledger)
 
 

@@ -50,10 +50,14 @@ def test_p0_card_floor_lowered_and_single_sourced():
 def test_p0_neutral_section_header_has_no_resting_gradient():
     base = _rule(".ow-section {")
     assert "linear-gradient" not in base
-    assert "background:transparent" in base
-    # severity tints still fill from data-derived alarm_health
+    # Codex-review rec4: the neutral header is now typography + a bottom hairline (no box), so the
+    # framed card is RESERVED for severity — neutral carries no all-around border or radius.
+    assert "border-bottom:1px solid var(--ow-hairline)" in base
+    assert "border-radius" not in base and "border:1px" not in base
+    # severity variants carry the framed card + tinted left stripe from data-derived alarm_health
     for sev in ("ok", "warn", "bad", "info"):
         assert f".ow-section--{sev}" in _CSS
+    assert "border-left:3px solid var(--ow-bad)" in _CSS
 
 
 def test_p0_hero_header_shrunk():

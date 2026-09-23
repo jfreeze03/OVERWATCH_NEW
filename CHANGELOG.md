@@ -1,5 +1,33 @@
 # Changelog
 
+## 4.583.0 - Codex visual review — first wave (2026-09-23)
+
+The high-confidence, Streamlit-in-Snowflake-safe wins from the ground-truth adjudication of Codex's 50
+visual recs (`docs/reviews/CODEX_VISUAL_REVIEW_50REC_ADJUDICATION_2026-09-23.md`). Presentation-only; no
+query/behaviour change, no preserved item (blue selection, exports, billing-basis, Cost tables) touched.
+
+- **rec 4** — the section-heading box is reserved for severity. A neutral heading is now typography + a
+  subtle bottom hairline (no all-around border/radius); the `--ok/warn/bad/info` variants keep the framed
+  card + tinted stripe. Extends the v4.461 "tint means severity" law to the box itself (`theme.py`).
+- **rec 20** — the three auto-completing `st.status` panels (Operations / Control Room / Spend) now
+  relabel to a done state on exit, so a finished page stops reading as still-loading.
+- **rec 34** — count/rate bars (`charts.bar_count`) get endpoint value labels, mirroring `bar_usd`, so a
+  comparison no longer depends on hover (respects the duration-humanized text for `_dur` callers).
+- **rec 37** — `daily_metric_line` drops the per-day point markers on long (30/90-day) series that
+  carpeted the line; short series (≤14 pts) keep them.
+- **rec 39** — heatmap correctness fix: rows are *selected* by total value but were *displayed* unsorted;
+  the y encoding now sorts by that same impact order.
+- **rec 27** — the queue/spill contention table gets a wider column than the lock-wait diagnostic
+  (`[1.4, 1]`) instead of two cramped 50% columns.
+- **rec 30** — Decision Studio's ROI lever chart leads; its duplicate numeric breakdown moves into an
+  expander (CSV export stays reachable inside).
+
+Deferred to a browser-verified follow-up (documented in the review): rec 26 (child-combinator selector
+needs live DOM depth), rec 38 (threads a unit through every sparkline caller), rec 8 (a large worklist
+relocation in a dense function), rec 25 (test-pinned empty-branch), rec 41 (takeaway-vs-footnote judgment
+across ~7 chart fns), and the M/L projects (5, 9/10, 3/6, 33/36) + taste calls (12/13). 4-pin version
+bump 4.582.0 → 4.583.0 + CHANGELOG.
+
 ## 4.582.0 - Cloud-services driver intelligence, Phase 3: metadata-chatter Finding in the OOS scorer (2026-09-23)
 
 Teaches the shipped Query Optimization (QOP/OOS) engine to see compile-dominated **metadata chatter** —

@@ -1152,15 +1152,16 @@ def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "",
         _value_tip = alt.Tooltip("ValueText:N", title=title or "Value")
     else:
         _value_tip = alt.Tooltip("Value:Q", format=value_fmt)
-    chart = (
-        _base(data)
-        .mark_bar()
-        .encode(
-            y=alt.Y("Label:N", sort="-x", title=None, axis=alt.Axis(labelLimit=260)),
-            x=alt.X("Value:Q", title=title or "Count", axis=alt.Axis(format=value_fmt)),
-            tooltip=[alt.Tooltip("Label:N"), _value_tip],
-        )
+    _enc = _base(data).encode(
+        y=alt.Y("Label:N", sort="-x", title=None, axis=alt.Axis(labelLimit=260)),
+        x=alt.X("Value:Q", title=title or "Count", axis=alt.Axis(format=value_fmt)),
     )
+    bars = _enc.mark_bar().encode(tooltip=[alt.Tooltip("Label:N"), _value_tip])
+    # Codex-review rec34: endpoint value labels (mirrors bar_usd) so a count/rate comparison
+    # doesn't depend on hover. Duration callers show the humanized text, else the formatted number.
+    labels = _enc.mark_text(align="left", dx=5, color=_LABEL, fontSize=11).encode(
+        text=alt.Text("ValueText:N") if _dur else alt.Text("Value:Q", format=value_fmt))
+    chart = bars + labels
     st.altair_chart(chart, width="stretch")
     if takeaway:
         # Full-frame total as the share denominator (see bar_usd): a head(top_n) sum
@@ -1271,7 +1272,11 @@ def hour_heatmap(df: pd.DataFrame, row_col: str, hour_col: str, value_col: str,
             # reading as unlit gaps in their true clock position.
             x=alt.X("Hour:O", title="hour of day",
                     scale=alt.Scale(domain=list(range(24)))),
-            y=alt.Y("Row:N", title=None),
+            # Codex-review rec39: rows are SELECTED by total value (the head() cap above), so
+            # DISPLAY them in that same impact order — highest-total entity on top — instead of
+            # Altair's default order, which diverged from the ranking used to pick them.
+            y=alt.Y("Row:N", title=None,
+                    sort=alt.EncodingSortField("Value", op="sum", order="descending")),
             color=alt.Color("Value:Q", title=title or value_col,
                             scale=alt.Scale(range=_HEATMAP_RANGE)),  # rec38: one orange heat ramp
             tooltip=["Row:N", "Hour:O", alt.Tooltip("Value:Q", format=value_fmt)],
@@ -1663,7 +1668,9 @@ def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,
     _yfmt = _METRIC_AXIS_FMT.get(unit)
     chart = (
         _base(data)
-        .mark_line(point=True)
+        # Codex-review rec37: a per-day dot on a 30/90-day line is a dense carpet; keep the
+        # markers only on short series (<=14 pts) where they aid reading, drop them on long ones.
+        .mark_line(point=len(data) <= 14)
         .encode(
             x=alt.X("Day:T", title=None, axis=_day_axis(data["Day"])),
             y=alt.Y("Value:Q", title=title or value_col,

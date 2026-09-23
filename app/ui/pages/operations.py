@@ -3219,7 +3219,9 @@ def _adaptive_candidacy_panel(company: str, days: int, *, bounds: tuple | None =
 
 def _contention_tab(company: str, days: int, *, bounds: tuple | None = None) -> None:
     _lm = "_lm" if bounds is not None else ""
-    left, right = st.columns(2)
+    # Codex-review rec27: give the queue/spill pressure table (the wider, drillable primary)
+    # more room than the lock-wait diagnostic, instead of two cramped equal columns.
+    left, right = st.columns([1.4, 1])
     with left:
         section_header("Warehouse queue & spill pressure", "", "warehouse")
         # r23 #1: the hourly fact answers this without a QUERY_HISTORY scan
@@ -3777,6 +3779,10 @@ def render() -> None:
             live_source="facts (retro score inputs, live fallback)")
         _hs = run(mart_sql.health_strip(), page=_PAGE, key="health_strip", tier="recent",
                   source="ALERT_EVENTS + SOURCE_FRESHNESS_STATE + FACT_METERING_DAILY")
+    # Codex-review rec20: the block auto-completes on exit, but the present-continuous label
+    # lingers under the checkmark — relabel to a done state so a finished page reads as ready.
+    if hasattr(_ops_load, "update"):
+        _ops_load.update(label="Operations health", state="complete")
     _stale = 0
     if _hs.ok and not _hs.empty:
         _sr = _hs.df[_hs.df["METRIC"].astype(str) == "STALE_SOURCES"]

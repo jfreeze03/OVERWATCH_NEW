@@ -892,6 +892,9 @@ def render() -> None:
                         if hasattr(st, "status") else contextlib.nullcontext())
         with _load_status:
             _live_pf = run_batch(_live_specs, page=_PAGE, tier="live") or {}
+        # Codex-review rec20: relabel the auto-completed status to a done state.
+        if hasattr(_load_status, "update"):
+            _load_status.update(label="Control Room loaded", state="complete")
         inc_met = run(mart_sql.incident_metrics(90, company), page=_PAGE,
                       key=f"inc_metrics_{company}", tier="recent",
                       source=f"INCIDENTS lifecycle (90d, {company} + account-level)")

@@ -201,13 +201,18 @@ div[data-testid="stMetric"]::before { content:""; position:absolute; left:0; top
    not a tinted banner — the resting 90deg wash is gone so a tinted header ALWAYS
    means the section carries real, data-derived severity (the --ok/warn/bad/info
    variants below still fill their tint from alarm_health). */
-.ow-section { display:flex; align-items:center; gap:10px; margin:14px 0 8px; padding:6px 12px; border-radius:var(--ow-r-sm);
-  border:1px solid var(--ow-hairline); border-left:3px solid var(--ow-ink-mute);
-  background:transparent; }
-.ow-section--ok { border-left-color:var(--ow-ok); background:linear-gradient(90deg,var(--ow-ok-dim),transparent 60%); }
-.ow-section--warn { border-left-color:var(--ow-warn); background:linear-gradient(90deg,var(--ow-warn-dim),transparent 60%); }
-.ow-section--bad { border-left-color:var(--ow-bad); background:linear-gradient(90deg,var(--ow-bad-dim),transparent 60%); }
-.ow-section--info { border-left-color:var(--ow-info); background:linear-gradient(90deg,var(--ow-info-dim),transparent 60%); }
+/* Codex-review rec4: a NEUTRAL heading is typography + a subtle bottom hairline (no box),
+   so the framed card is RESERVED for real severity — extending the v4.461 "tint means
+   severity" law to the box itself. The --ok/warn/bad/info variants restore the full
+   framed card (border + radius + tinted left stripe) on top of the neutral base. */
+.ow-section { display:flex; align-items:center; gap:10px; margin:16px 0 8px; padding:4px 2px 6px;
+  border-bottom:1px solid var(--ow-hairline); }
+.ow-section--ok, .ow-section--warn, .ow-section--bad, .ow-section--info {
+  padding:6px 12px; border:1px solid var(--ow-hairline); border-radius:var(--ow-r-sm); }
+.ow-section--ok { border-left:3px solid var(--ow-ok); background:linear-gradient(90deg,var(--ow-ok-dim),transparent 60%); }
+.ow-section--warn { border-left:3px solid var(--ow-warn); background:linear-gradient(90deg,var(--ow-warn-dim),transparent 60%); }
+.ow-section--bad { border-left:3px solid var(--ow-bad); background:linear-gradient(90deg,var(--ow-bad-dim),transparent 60%); }
+.ow-section--info { border-left:3px solid var(--ow-info); background:linear-gradient(90deg,var(--ow-info-dim),transparent 60%); }
 .ow-section__title { font-weight:700; color:var(--ow-ink); font-size:1.02rem; }
 .ow-section__icon { display:inline-flex; color:var(--ow-ink-soft); }
 .ow-section__badge { margin-left:auto; font-size:0.72rem; font-weight:650; letter-spacing:0.04em; text-transform:uppercase; padding:2px 9px; border-radius:var(--ow-r-pill); border:1px solid var(--ow-hairline2); color:var(--ow-ink-soft); }
