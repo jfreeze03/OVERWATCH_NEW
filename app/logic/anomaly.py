@@ -229,6 +229,74 @@ def anomaly_summary(df: pd.DataFrame, label_col: str, value_col: str,
     ]
 
 
+def warehouse_attention_ranking(anomalies: pd.DataFrame, peaks: pd.DataFrame | None,
+                                *, queue_floor: float = 1.0) -> pd.DataFrame:
+    """rec5: merge the two ALREADY-loaded warehouse signals — daily-spend anomalies and
+    sustained concurrency queueing — into one worst-first "needs attention now" table for
+    the Warehouses opener. Pure pandas: no Streamlit, no new read.
+
+    ``anomalies`` is the flagged-anomaly subset (the IS_ANOMALY rows, cols WAREHOUSE_NAME,
+    USD, Z_SCORE). ``peaks`` is the concurrency-peaks frame (WAREHOUSE_NAME, PEAK_QUEUED),
+    or None when that read failed. Returns one row per flagged warehouse with WORST_Z
+    (max |z|), ANOM_DAYS (count of anomalous days), ANOM_USD (summed anomalous-day spend),
+    PEAK_QUEUED, and a human REASON — sorted queueing-first, then by |z|, then queue depth.
+    Empty frame when nothing is anomalous or queueing (so the opener shows the clean state).
+    Column names carry no _SEC/_MS suffix: these are counts and dollars, not durations."""
+    cols = ["WAREHOUSE_NAME", "WORST_Z", "ANOM_DAYS", "ANOM_USD", "PEAK_QUEUED", "REASON"]
+    if anomalies is not None and not anomalies.empty \
+            and {"WAREHOUSE_NAME", "Z_SCORE"}.issubset(anomalies.columns):
+        _a = anomalies.copy()
+        _a["_ABSZ"] = pd.to_numeric(_a["Z_SCORE"], errors="coerce").abs()
+        _a["_USD"] = pd.to_numeric(_a["USD"], errors="coerce") if "USD" in _a.columns else 0.0
+        spend = _a.groupby("WAREHOUSE_NAME", as_index=False).agg(
+            WORST_Z=("_ABSZ", "max"), ANOM_DAYS=("_ABSZ", "size"), ANOM_USD=("_USD", "sum"))
+    else:
+        # NUMERIC dtypes on the empty placeholder: in the common "no spend anomalies but a
+        # warehouse is queueing" shape the outer merge below would otherwise return these
+        # columns as object/all-NaN, and the opener's `ANOM_DAYS.fillna(0).gt(0)` then trips a
+        # pandas FutureWarning (object-dtype downcast) and presents non-numeric "numbers".
+        spend = pd.DataFrame({
+            "WAREHOUSE_NAME": pd.Series(dtype=object),
+            "WORST_Z": pd.Series(dtype="float64"),
+            "ANOM_DAYS": pd.Series(dtype="float64"),
+            "ANOM_USD": pd.Series(dtype="float64"),
+        })
+    if peaks is not None and not peaks.empty \
+            and {"WAREHOUSE_NAME", "PEAK_QUEUED"}.issubset(peaks.columns):
+        _p = peaks.copy()
+        _p["PEAK_QUEUED"] = pd.to_numeric(_p["PEAK_QUEUED"], errors="coerce")
+        queue = (_p[_p["PEAK_QUEUED"] >= queue_floor]
+                 .groupby("WAREHOUSE_NAME", as_index=False)["PEAK_QUEUED"].max())
+    else:
+        queue = pd.DataFrame({
+            "WAREHOUSE_NAME": pd.Series(dtype=object),
+            "PEAK_QUEUED": pd.Series(dtype="float64"),
+        })
+    if spend.empty and queue.empty:
+        return pd.DataFrame(columns=cols)
+    merged = spend.merge(queue, on="WAREHOUSE_NAME", how="outer")
+
+    def _reason(row) -> str:
+        parts = []
+        _z = row.get("WORST_Z")
+        if pd.notna(_z):
+            _d = int(row.get("ANOM_DAYS") or 0)
+            parts.append(f"spend anomaly z={float(_z):.1f} on {_d} day{'s' if _d != 1 else ''}")
+        _q = row.get("PEAK_QUEUED")
+        if pd.notna(_q):
+            parts.append(f"queued ~{float(_q):.1f} sustained")
+        return " · ".join(parts)
+
+    merged["REASON"] = merged.apply(_reason, axis=1)
+    # Worst-first: a queueing warehouse (users feeling it now) outranks a pure spend
+    # anomaly, then by |z|, then by queue depth.
+    merged["_HAS_Q"] = merged["PEAK_QUEUED"].notna()
+    merged = (merged.sort_values(by=["_HAS_Q", "WORST_Z", "PEAK_QUEUED"],
+                                 ascending=[False, False, False], na_position="last")
+              .drop(columns="_HAS_Q"))
+    return merged.reindex(columns=cols).reset_index(drop=True)
+
+
 def anomaly_markers(df: pd.DataFrame, day_col: str = "DAY",
                     label_col: str | None = None) -> pd.DataFrame:
     """Collapse flagged-anomaly rows to one spend-trend marker per day (UI15/Ov5).

@@ -46,3 +46,11 @@ def test_incidents_header_renders_after_the_exception_list_so_it_cannot_disagree
     assert inc.index('section_header("Incidents", _inc_health)') < inc.index("exception_summary(_exc")
     # partial-telemetry must gate to neutral BEFORE the ok branch (never a false green)
     assert inc.index("if _partial:\n            _inc_health") < inc.index('_inc_health = "ok"')
+
+
+def test_rec8_open_incident_worklist_renders_above_the_lifecycle_gantt():
+    inc = _incidents_block()
+    # count/summary still leads of all
+    assert inc.index("exception_summary(_exc") < inc.index('key="cr_inc_sel"')
+    # the actionable worklist now leads the 14d lifecycle Gantt (rec8 reorder)
+    assert inc.index('key="cr_inc_sel"') < inc.index("charts.incident_gantt(_ig.df, now=account_now())")

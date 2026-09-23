@@ -1,5 +1,122 @@
 # Changelog
 
+## 4.586.0 - Codex visual review — backlog wave (rec 25 / 8 / 38 / 41) (2026-09-23)
+
+The remaining small valid-gap recs from the adjudication, each grounded in a parallel understand
+pass. Presentation/structure only; per-page `ACCOUNT_USAGE` counts (control_room 4, overview 1,
+brief 0) and the `test_v451_trust` reachable sets are unchanged; no preserved item touched.
+
+- **rec 25** — the master/detail empty detail pane now renders through the shared `empty_state`
+  primitive (kind `no_data_yet`) instead of a bare `st.caption`, so an unselected pane speaks the
+  same empty-state vocabulary as the rest of the app. Pixel-identical output (that kind renders a
+  quiet caption); fixes every master_detail site at once.
+- **rec 8** — Control Room ▸ Incidents & triage now leads with the actionable open-incident
+  worklist and trails it with the 14-day lifecycle Gantt (the count/summary still leads of all). A
+  pure render reorder — the dense worklist (selection, drill, close, bulk-resolve, every widget
+  key) is untouched; only the inert Gantt block moved down.
+- **rec 38** — sparklines thread the real measure + unit into the tooltip (via the shared
+  `_fmt_metric_value`): a date reads "Aug 12, 2026" instead of a midnight timestamp, and the value
+  carries its unit ("$1,240" / "1,240 cr" / "5,432") titled by its measure instead of a generic
+  "Day"/"Value". The unit rides as an optional 5th tuple element, so 4-tuple callers are unchanged.
+- **rec 41** — genuine one-line takeaways (top contributor, peak day, hottest cell) now render
+  ABOVE their chart in 8 chart helpers, so the reader gets the conclusion first; caveats/legends/
+  lag notes (spend_trend, workload_portfolio, the heatmap's "Top 20 of N" cap) deliberately stay
+  BELOW. The takeaway-computing code is byte-identical — only the emit order changed.
+
+4-pin version bump 4.585.0 → 4.586.0 + CHANGELOG.
+
+## 4.585.0 - Codex visual review — M/L projects wave (rec 5 / 3 / 6 / 33 / 36) (2026-09-23)
+
+The five worthwhile M/L projects from the adjudication, each grounded in a parallel understand
+pass against the current code + its locking tests. Presentation/structure only; per-page
+`ACCOUNT_USAGE` literal counts (operations 42, security 31, overview 1, brief 0) and the
+`test_v451_trust` reachable-table sets are unchanged; no preserved item touched.
+
+- **rec 5** — Operations ▸ Warehouses ▸ Activity now LEADS with a "Warehouses that need attention
+  now" opener: a worst-first table merged (new pure `anomaly.warehouse_attention_ranking`) from the
+  two frames the lens already loads — daily-spend anomalies + sustained concurrency queueing — with
+  a REASON per warehouse and the blue-selection Entity 360 drill. Zero new first-paint scans (idle/
+  resize candidacy stay on the toggle-gated Sizing lens); the concurrency-peaks read is hoisted so
+  the opener and the existing section share one read.
+- **rec 3** — Overview's company-economics headline is now a `hero_metric` (one dominant Spend value
+  + the per-day average as an inline companion) instead of a flat equal-weight KPI row. `hero_metric`
+  was extended to render the freshness/method/scope chips, the "as of" stamp, and the sparkline the
+  flat card carried, so the billing-basis provenance the owner requires is preserved (existing hero
+  callers render byte-identically — every new block is empty when its key is absent).
+- **rec 6** — the Brief headline band has three FIXED slots (MTD spend / Open criticals / Nightly
+  cycle) that never reflow; Nightly cycle gets an honest neutral placeholder ("ETL not monitored")
+  on non-ETL accounts instead of vanishing, and the other conditional cards move to a separate
+  secondary band. The Executive export still receives every card (`headline + secondary`).
+- **rec 33** — chart color de-collision (`charts._stable_color`): two simultaneously-visible entities
+  that crc32-hash to the same palette slot now get distinct fills (the first-sorted claimant keeps
+  its natural color; a collider takes the next free slot, with a deterministic shade only if all 10
+  are used). The pinned pure `_stable_color_map` is untouched.
+- **rec 36** — `charts.paired_bars` is now a horizontal dumbbell (signature unchanged) so long
+  warehouse/entity names read left-to-right instead of angled/truncated on the x-axis; A=accent /
+  B=gray coding, the $-format axis+tooltip, the top legend, and the caller's |delta| sort order are
+  preserved.
+
+4-pin version bump 4.584.0 → 4.585.0 + CHANGELOG.
+
+## 4.584.0 - Codex visual review — structure wave (rec 26 / 9 / 10) (2026-09-23)
+
+The three deferred structural recs from the same adjudication, browser-verified and lock-preserving.
+Presentation/layout only; no query added or removed (per-page `ACCOUNT_USAGE` literal counts and the
+`test_v451_trust` reachable-table sets are unchanged), no preserved item touched.
+
+- **rec 26** — master/detail responsive restack fix (`theme.py`). Below 1180px a bare descendant
+  selector flattened *every* nested `st.columns` grid a detail pane draws (KPI/metric rows collapsed
+  into one tall stack), not just the two panes. Verified in the live Streamlit 1.58 DOM: a scoped
+  `:not()` now restacks only top-level panes (flex-basis:100%) while nested columns keep their
+  side-by-side calc widths. Version-agnostic (no reliance on the `stLayoutWrapper` depth); lock in
+  `test_uiux_wave2_masterdetail.py` strengthened to pin the exclusion.
+- **rec 9** — Operations ▸ Pipeline SLA is chaptered via `nested_sections` into **Tonight** (cycle
+  finish forecast, this run's runtimes, run inventory + the XLAT reference gap), **Recurring failures**
+  (task failure recurrence, file-load and dynamic-table failures), **Performance** (runtime drift,
+  creep, cost attribution), and **Data checks** (freshness SLAs + register, reconciliation DQ, volume
+  drops, row-volume, streams). Each chapter prefetches only its own reads (`_pipeline_prefetch(want=…)`
+  / a scoped `run_batch`), so opening the tab pays one chapter's ~MAX(scan), not every panel's. The
+  freshness read no longer early-returns the whole tab — an uninstalled `PIPELINE_SLA_STATUS` skips
+  only the forecast + register, leaving the independent volume/stream signals visible.
+- **rec 10** — Security ▸ Access is chaptered via `nested_sections` into **Authentication** (MFA gaps,
+  single-factor, failed logins + reasons, takeover bursts, new networks), **Privileged access** (admin
+  role holders, unused roles + revoke-safety drill, effective access, grant anomalies), and **Account
+  lifecycle** (expiring credentials, dormant users, reawakened accounts). The shared identity-evidence
+  reads stay hoisted (they feed all three chapters and the login-coverage dance runs once), so read
+  behavior never regresses; the self-reading Privileged/Lifecycle panels now fire only when their
+  chapter opens. Drills, toggles, the cross-page grant-activity pointer, and the Auditor export pack
+  (always full) are unchanged.
+
+4-pin version bump 4.583.0 → 4.584.0 + CHANGELOG.
+
+## 4.583.0 - Codex visual review — first wave (2026-09-23)
+
+The high-confidence, Streamlit-in-Snowflake-safe wins from the ground-truth adjudication of Codex's 50
+visual recs (`docs/reviews/CODEX_VISUAL_REVIEW_50REC_ADJUDICATION_2026-09-23.md`). Presentation-only; no
+query/behaviour change, no preserved item (blue selection, exports, billing-basis, Cost tables) touched.
+
+- **rec 4** — the section-heading box is reserved for severity. A neutral heading is now typography + a
+  subtle bottom hairline (no all-around border/radius); the `--ok/warn/bad/info` variants keep the framed
+  card + tinted stripe. Extends the v4.461 "tint means severity" law to the box itself (`theme.py`).
+- **rec 20** — the three auto-completing `st.status` panels (Operations / Control Room / Spend) now
+  relabel to a done state on exit, so a finished page stops reading as still-loading.
+- **rec 34** — count/rate bars (`charts.bar_count`) get endpoint value labels, mirroring `bar_usd`, so a
+  comparison no longer depends on hover (respects the duration-humanized text for `_dur` callers).
+- **rec 37** — `daily_metric_line` drops the per-day point markers on long (30/90-day) series that
+  carpeted the line; short series (≤14 pts) keep them.
+- **rec 39** — heatmap correctness fix: rows are *selected* by total value but were *displayed* unsorted;
+  the y encoding now sorts by that same impact order.
+- **rec 27** — the queue/spill contention table gets a wider column than the lock-wait diagnostic
+  (`[1.4, 1]`) instead of two cramped 50% columns.
+- **rec 30** — Decision Studio's ROI lever chart leads; its duplicate numeric breakdown moves into an
+  expander (CSV export stays reachable inside).
+
+Deferred to a browser-verified follow-up (documented in the review): rec 26 (child-combinator selector
+needs live DOM depth), rec 38 (threads a unit through every sparkline caller), rec 8 (a large worklist
+relocation in a dense function), rec 25 (test-pinned empty-branch), rec 41 (takeaway-vs-footnote judgment
+across ~7 chart fns), and the M/L projects (5, 9/10, 3/6, 33/36) + taste calls (12/13). 4-pin version
+bump 4.582.0 → 4.583.0 + CHANGELOG.
+
 ## 4.582.0 - Cloud-services driver intelligence, Phase 3: metadata-chatter Finding in the OOS scorer (2026-09-23)
 
 Teaches the shipped Query Optimization (QOP/OOS) engine to see compile-dominated **metadata chatter** —

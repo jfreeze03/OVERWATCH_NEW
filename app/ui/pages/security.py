@@ -44,6 +44,7 @@ from app.ui.components import (
     lazy_sections,
     load_settings,
     methodology_note,
+    nested_sections,
     page_header,
     page_verdict_line,
     panel_help,
@@ -120,75 +121,88 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
     ], page=_PAGE,
        tier="hourly" if use_security_fact and use_security_network_fact else "recent")
 
-    mfa = stable_batch.get("mfa") or run(security_sql.users_without_mfa(company), page=_PAGE, key=f"mfa_{company}",
-              tier="historical", source="USERS + FACT_LOGIN_DAILY (mart-first)")
-    _mfa_unproven = False
-    if not mfa.ok or (mfa.empty and not fact_coverage_complete(legacy_coverage, 30)):
-        # Fact empty/undeployed: an empty evidence set must never read as
-        # "all clear" — prove it against live LOGIN_HISTORY before celebrating.
-        live_mfa = run(security_sql.users_without_mfa_live(company), page=_PAGE,
-                       key=f"mfa_live_{company}", tier="historical",
-                       source="ACCOUNT_USAGE.USERS + LOGIN_HISTORY (live fallback)")
-        if live_mfa.ok:
-            mfa = live_mfa
+    # rec10 (v4.584): three chapters via nested_sections. The shared identity-evidence reads
+    # above stay hoisted (their members feed all three chapters and the coverage/fact dance runs
+    # once), so read behavior never regresses; the self-reading Privileged/Lifecycle panels below
+    # (single-factor, unused roles, effective access, grant anomalies, dormancy) now fire only
+    # when their chapter opens. The Auditor export pack (rendered by the caller) still bundles
+    # every scan regardless of the visible chapter.
+    view = nested_sections(
+        ["Authentication", "Privileged access", "Account lifecycle"],
+        key="sec_access_view",
+    )
+    if view == "Authentication":
+        # How identities prove themselves: MFA posture, single-factor bypass, failed logins and
+        # their reasons, brute-force takeover bursts, and privileged-user network anchoring.
+        mfa = stable_batch.get("mfa") or run(security_sql.users_without_mfa(company), page=_PAGE, key=f"mfa_{company}",
+                  tier="historical", source="USERS + FACT_LOGIN_DAILY (mart-first)")
+        _mfa_unproven = False
+        if not mfa.ok or (mfa.empty and not fact_coverage_complete(legacy_coverage, 30)):
+            # Fact empty/undeployed: an empty evidence set must never read as
+            # "all clear" — prove it against live LOGIN_HISTORY before celebrating.
+            live_mfa = run(security_sql.users_without_mfa_live(company), page=_PAGE,
+                           key=f"mfa_live_{company}", tier="historical",
+                           source="ACCOUNT_USAGE.USERS + LOGIN_HISTORY (live fallback)")
+            if live_mfa.ok:
+                mfa = live_mfa
+            elif mfa.ok and mfa.empty:
+                # The mart was empty AND the live fallback itself failed — neither source
+                # proved MFA posture, so an empty result here is UNKNOWN, not clean. Do not
+                # let it fall through to the green "no gaps" state (bug-hunt 2026-08-30).
+                _mfa_unproven = True
+        # C23: severity comes from the data — amber only when the gap list has rows.
+        section_header("MFA gaps with password-login evidence (30d)", alarm_health(mfa),
+                       "security", anchor="sec-mfa",
+                       badge=(f"{len(mfa.df)} to fix" if (mfa.usable() and not mfa.empty) else ""))
+        if _mfa_unproven:
+            empty_state("no_data_yet", "MFA evidence did not resolve — neither the login fact nor "
+                        "the live LOGIN_HISTORY fallback returned. MFA posture is unconfirmed, not clear.")
         elif mfa.ok and mfa.empty:
-            # The mart was empty AND the live fallback itself failed — neither source
-            # proved MFA posture, so an empty result here is UNKNOWN, not clean. Do not
-            # let it fall through to the green "no gaps" state (bug-hunt 2026-08-30).
-            _mfa_unproven = True
-    # C23: severity comes from the data — amber only when the gap list has rows.
-    section_header("MFA gaps with password-login evidence (30d)", alarm_health(mfa),
-                   "security", anchor="sec-mfa",
-                   badge=(f"{len(mfa.df)} to fix" if (mfa.usable() and not mfa.empty) else ""))
-    if _mfa_unproven:
-        empty_state("no_data_yet", "MFA evidence did not resolve — neither the login fact nor "
-                    "the live LOGIN_HISTORY fallback returned. MFA posture is unconfirmed, not clear.")
-    elif mfa.ok and mfa.empty:
-        empty_state("clean", "No active user logs in with a password but no MFA. SSO/key-pair users are excluded by design.")
-    elif guard(mfa, ""):
-        # v4.461 P2: the count lives in the section-header badge; the table (one row
-        # per user) IS the list, so a single-metric card restating len() is dropped.
-        st.caption("Password logins in the last 30 days with no MFA. "
-                   "SSO/key-pair-only users are excluded by design.")
-        # #25: rows are users → drill to Entity 360 (mirrors the dormant-users table).
-        entity_nav_table(with_user_names(mfa.df, _PAGE), key=f"sec_mfa_{company}",
-                         key_col="USER_NAME", entity_type="USER")
-        result_caption(mfa)
+            empty_state("clean", "No active user logs in with a password but no MFA. SSO/key-pair users are excluded by design.")
+        elif guard(mfa, ""):
+            # v4.461 P2: the count lives in the section-header badge; the table (one row
+            # per user) IS the list, so a single-metric card restating len() is dropped.
+            st.caption("Password logins in the last 30 days with no MFA. "
+                       "SSO/key-pair-only users are excluded by design.")
+            # #25: rows are users → drill to Entity 360 (mirrors the dormant-users table).
+            entity_nav_table(with_user_names(mfa.df, _PAGE), key=f"sec_mfa_{company}",
+                             key_col="USER_NAME", entity_type="USER")
+            result_caption(mfa)
 
-    # #16: the behavioral counterpart to the config-anchored MFA lens above — a
-    # successful PASSWORD login with NO second factor. Unlike HAS_MFA=FALSE, this
-    # surfaces an ENROLLED user (HAS_MFA=TRUE) who still landed single-factor (a real
-    # bypass/misconfig). Live LOGIN_HISTORY, companion to MFA gaps.
-    sf = run(security_sql.single_factor_logins(min(days, 30), company, bounds=bounds), page=_PAGE,
-             key=f"single_factor_{company}_{days}{_lm}", tier="recent",
-             source="ACCOUNT_USAGE.LOGIN_HISTORY (PASSWORD, no second factor, success)")
-    # C23: the (cached) read moves above the header so severity is data-derived.
-    section_header("Single-factor logins (MFA-bypassed, 30d)", alarm_health(sf),
-                   "security", anchor="sec-single-factor")
-    if sf.ok and sf.empty:
-        empty_state("clean", "No successful password login landed without a second factor in this window "
-                             "(reader capped at 30d).")
-    elif guard(sf, ""):
-        _bypass = sf.df[sf.df["HAS_MFA"].astype(bool)]
-        kpi_row([
-            {"label": "Users with single-factor logins", "value": f"{len(sf.df)}"},
-            {"label": "Enrolled yet single-factor", "value": f"{len(_bypass)}",
-             "help": "HAS_MFA is TRUE now yet they authenticated single-factor — a bypass CANDIDATE "
-                     "to verify. HAS_MFA is a current snapshot, so a login made before they enrolled, "
-                     "MFA caching, or a temporary admin bypass also land here.",
-             "delta_color": "inverse" if len(_bypass) else "off"},
-        ])
-        # #25: rows are users → drill to Entity 360.
-        entity_nav_table(with_user_names(sf.df, _PAGE), key=f"sec_single_factor_{company}_{days}",
-                         key_col="USER_NAME", entity_type="USER")
-        st.caption("PASSWORD logins with an empty SECOND_AUTHENTICATION_FACTOR; currently-enrolled "
-                   "users sort first. HAS_MFA is a point-in-time snapshot — a login before MFA "
-                   "enrollment, MFA caching, or a temporary admin bypass can also appear here; verify "
-                   "enrollment timing before acting. Read-only.")
-        result_caption(sf)
+        # #16: the behavioral counterpart to the config-anchored MFA lens above — a
+        # successful PASSWORD login with NO second factor. Unlike HAS_MFA=FALSE, this
+        # surfaces an ENROLLED user (HAS_MFA=TRUE) who still landed single-factor (a real
+        # bypass/misconfig). Live LOGIN_HISTORY, companion to MFA gaps.
+        sf = run(security_sql.single_factor_logins(min(days, 30), company, bounds=bounds), page=_PAGE,
+                 key=f"single_factor_{company}_{days}{_lm}", tier="recent",
+                 source="ACCOUNT_USAGE.LOGIN_HISTORY (PASSWORD, no second factor, success)")
+        # C23: the (cached) read moves above the header so severity is data-derived.
+        section_header("Single-factor logins (MFA-bypassed, 30d)", alarm_health(sf),
+                       "security", anchor="sec-single-factor")
+        if sf.ok and sf.empty:
+            empty_state("clean", "No successful password login landed without a second factor in this window "
+                                 "(reader capped at 30d).")
+        elif guard(sf, ""):
+            _bypass = sf.df[sf.df["HAS_MFA"].astype(bool)]
+            kpi_row([
+                {"label": "Users with single-factor logins", "value": f"{len(sf.df)}"},
+                {"label": "Enrolled yet single-factor", "value": f"{len(_bypass)}",
+                 "help": "HAS_MFA is TRUE now yet they authenticated single-factor — a bypass CANDIDATE "
+                         "to verify. HAS_MFA is a current snapshot, so a login made before they enrolled, "
+                         "MFA caching, or a temporary admin bypass also land here.",
+                 "delta_color": "inverse" if len(_bypass) else "off"},
+            ])
+            # #25: rows are users → drill to Entity 360.
+            entity_nav_table(with_user_names(sf.df, _PAGE), key=f"sec_single_factor_{company}_{days}",
+                             key_col="USER_NAME", entity_type="USER")
+            st.caption("PASSWORD logins with an empty SECOND_AUTHENTICATION_FACTOR; currently-enrolled "
+                       "users sort first. HAS_MFA is a point-in-time snapshot — a login before MFA "
+                       "enrollment, MFA caching, or a temporary admin bypass can also appear here; verify "
+                       "enrollment timing before acting. Read-only.")
+            result_caption(sf)
 
-    left, right = st.columns(2)
-    with left:
+        # rec10: the "Privileged role holders" panel that shared this row moved to the Privileged
+        # access chapter; Failed logins now spans the width as the lead login-failure lens.
         section_header("Failed logins", "", "alerts", anchor="sec-faillog")
         res = batch.get("logins") or run(
             _logins_sql, page=_PAGE, key=f"faillog_{company}_{days}{_lm}",
@@ -200,7 +214,92 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
             # #25: failed_logins aggregates one row per user (GROUP BY USER_NAME) → drill.
             entity_nav_table(with_user_names(res.df, _PAGE), key=f"sec_faillog_{company}_{days}",
                              key_col="USER_NAME", entity_type="USER")
-    with right:
+
+        # Moved from Changes (v4.49): decomposes the Failed-logins panel above —
+        # login telemetry, not change evidence.
+        section_header("Failed-login reasons (network policy vs credentials)", "", "alerts",
+                       anchor="sec-failreasons")
+        reasons = batch.get("login_reasons") or run(
+            _reasons_sql, page=_PAGE, key=f"login_reasons_{company}_{days}{_lm}",
+            tier="hourly" if use_security_fact else "recent", source=_activity_source,
+        )
+        if reasons.ok and reasons.empty:
+            empty_state("clean", "No failed logins in the window.")
+        elif guard(reasons, ""):
+            styled_table(reasons.df)
+            result_caption(reasons)
+
+        # r-ux: read before the header so the stripe is DATA-derived (alarm_health): amber only when a
+        # new (user, network) pair exists, green when clean, neutral on a failed read — never the
+        # standing false "warn" the hardcoded value painted over a green body.
+        nn = batch.get("newnet") or run(_newnet_sql, page=_PAGE,
+                  key=f"newnet_{days}{_lm}", tier="recent",
+                  source=_network_source)
+        section_header("New networks for privileged users (90-day baseline)", alarm_health(nn), "alerts",
+                       anchor="sec-newnet")
+        if nn.ok and nn.empty:
+            empty_state("clean", "No break-glass account logged in from a network unseen in the last 90 days.")
+        elif guard(nn, ""):
+            # v4.461 P2: the count folds into the caption; the table is the evidence.
+            styled_table(with_user_names(nn.df, _PAGE))
+            st.caption(f"{len(nn.df)} new (user, network) pair(s) — an admin-role user's (user, IP) "
+                       "first appeared inside this window (an IP quiet 90+ days re-flags on purpose). "
+                       "Expected after travel, VPN changes, or a new automation host — anything else is the finding.")
+            result_caption(nn)
+
+        # Account-takeover candidates: a failed-login burst FOLLOWED BY a success —
+        # the breakthrough failed_logins' count-only lens can't express. Event-grain
+        # live LOGIN_HISTORY scan, so toggle-gated (off first paint) like the other
+        # heavy security scans.
+        from app.ui.components import toggle_cost_hint as _toggle_cost_hint
+        # r-ux: neutral until the on-demand scan runs (the header renders before the toggle) — a
+        # hardcoded "warn" was a standing false alarm over a not-yet-scanned / verified-clean section
+        # (alarm_health contract: amber ONLY when there are findings). Matches the dormant header below.
+        section_header("Account-takeover candidates (failed burst → success)", "", "security",
+                       anchor="sec-ato")
+        st.caption(_toggle_cost_hint("takeover"))
+        _ato_on = st.toggle(
+            "Run account-takeover scan (correlates failed then successful logins)",
+            key="sec_takeover_toggle",
+            help="Flags a user with a burst of failed logins followed by a successful one — the "
+                 "brute-force breakthrough a failure count alone can't show.")
+        if _ato_on:
+            ato = run(security_sql.login_takeover_candidates(days=min(days, 30), company=company, bounds=bounds),
+                      page=_PAGE, key=f"takeover_{company}_{days}{_lm}", tier="recent",
+                      source="ACCOUNT_USAGE.LOGIN_HISTORY (fail-burst → success correlation)")
+            if ato.ok and ato.empty:
+                empty_state("clean", "No user shows a failed-login burst in this window (reader capped at 30d).")
+            elif guard(ato, ""):
+                ranked = takeover_severity(ato.df)
+                broke = ranked[ranked["SUCCEEDED_AFTER"].astype(bool)]
+                high = ranked[ranked["SEVERITY"] == "High"]
+                kpi_row([
+                    {"label": "Failure bursts", "value": f"{len(ranked)}",
+                     "help": "Users with 5+ failed logins in the window."},
+                    {"label": "Succeeded after (breakthrough)", "value": f"{len(broke)}",
+                     "help": "A successful login followed the failure burst — the dangerous case.",
+                     "delta_color": "inverse" if len(broke) else "off"},
+                    {"label": "High severity", "value": f"{len(high)}",
+                     "delta_color": "inverse" if len(high) else "off"},
+                ])
+                styled_table(
+                    with_user_names(ranked, _PAGE)[[
+                        "SEVERITY", "USER", "USER_NAME", "SUCCEEDED_AFTER", "FAILURES", "FAIL_IPS",
+                        "FIRST_FAILURE", "FIRST_SUCCESS_AFTER", "BREAKTHROUGH_MIN", "LAST_ERROR"]],
+                )
+                st.caption("A burst followed by a success is the signal; a burst with no later success is "
+                           "a locked-out user. Confirm against expected activity before acting — read-only.")
+                result_caption(ato)
+                add_to_case_button(
+                    "Security · Access", ato,
+                    title="Failed-login bursts (credential-compromise candidates)",
+                    summary=f"{len(ranked)} burst(s); {len(broke)} with a later success, {len(high)} high severity.",
+                    next_action="Confirm against expected activity; reset credentials if a success was unexpected.",
+                    key="ow_case_add_sec_burst")
+
+    elif view == "Privileged access":
+        # Who holds elevated rights: admin role holders, unused roles + revoke-safety drill,
+        # effective access, and admin-grant anomalies.
         section_header("Privileged role holders", "", "admin", anchor="sec-privroles")
         res = stable_batch.get("admins") or run(
                   security_sql.admin_role_holders(company), page=_PAGE,
@@ -212,238 +311,159 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
                                          user_col="GRANTED_BY", display_col="Granted by"))
             st.caption("This list should be short and every name should be expected.")
 
-    # Account-takeover candidates: a failed-login burst FOLLOWED BY a success —
-    # the breakthrough failed_logins' count-only lens can't express. Event-grain
-    # live LOGIN_HISTORY scan, so toggle-gated (off first paint) like the other
-    # heavy security scans.
-    from app.ui.components import toggle_cost_hint as _toggle_cost_hint
-    # r-ux: neutral until the on-demand scan runs (the header renders before the toggle) — a
-    # hardcoded "warn" was a standing false alarm over a not-yet-scanned / verified-clean section
-    # (alarm_health contract: amber ONLY when there are findings). Matches the dormant header below.
-    section_header("Account-takeover candidates (failed burst → success)", "", "security",
-                   anchor="sec-ato")
-    st.caption(_toggle_cost_hint("takeover"))
-    _ato_on = st.toggle(
-        "Run account-takeover scan (correlates failed then successful logins)",
-        key="sec_takeover_toggle",
-        help="Flags a user with a burst of failed logins followed by a successful one — the "
-             "brute-force breakthrough a failure count alone can't show.")
-    if _ato_on:
-        ato = run(security_sql.login_takeover_candidates(days=min(days, 30), company=company, bounds=bounds),
-                  page=_PAGE, key=f"takeover_{company}_{days}{_lm}", tier="recent",
-                  source="ACCOUNT_USAGE.LOGIN_HISTORY (fail-burst → success correlation)")
-        if ato.ok and ato.empty:
-            empty_state("clean", "No user shows a failed-login burst in this window (reader capped at 30d).")
-        elif guard(ato, ""):
-            ranked = takeover_severity(ato.df)
-            broke = ranked[ranked["SUCCEEDED_AFTER"].astype(bool)]
-            high = ranked[ranked["SEVERITY"] == "High"]
+        # Moved from Changes (v4.49): entitlement hygiene — who still holds access
+        # nobody uses — reads with dormant users, not with DDL evidence.
+        section_header("Unused roles (90d, account-wide)", "", "admin")
+        ur = run_mart_first(
+            mart27_sql.unused_roles_via_fact(90), security_sql.unused_roles(90),
+            page=_PAGE, key="unused_roles",
+            mart_source="ROLES x FACT_QUERY_ROLE_HOURLY (mart — active once 90d coverage exists)",
+            live_source="ROLES x QUERY_HISTORY (90d, live fallback)")
+        if ur.ok and ur.empty:
+            empty_state("clean", "Every active role was assumed in the last 90 days.")
+        elif guard(ur, ""):
+            # #26: click a role -> who holds it + what it grants (confirm before revoke).
+            # ur.df arrives index-reset from run, but reset again defensively so
+            # selectable_table's POSITIONAL index maps back through .iloc.
+            frame = ur.df.reset_index(drop=True)
+            sel = selectable_table(frame, key="sec_unused_role_drill",
+                                   sort_label="most-granted first")
+            if sel is not None and sel != st.session_state.get("_sec_unused_role_sel"):
+                st.session_state["_sec_unused_role_sel"] = sel
+            st.caption("These roles were never *directly assumed* as the executing role in 90d — a role "
+                       "exercised only through inheritance (granted to a role users actually SET) won't "
+                       "appear here, so confirm holders + grants (click a row) before revoking. "
+                       "Also in the Auditor export pack with the full grant matrix and 90d diff.")
+            result_caption(ur)
+            role = str(frame.iloc[sel]["ROLE_NAME"]) if sel is not None and 0 <= sel < len(frame) else ""
+            if role:
+                section_header(f"Before revoking {role}: who holds it, what it grants", "warn", "admin")
+                # Both reads are interaction-gated (fire only after a row click), so
+                # they are NOT first-paint usage-view scans; tier="historical"
+                # makes a re-click on the same role a cache hit. Perf: the two independent
+                # historical reads prefetch in one parallel batch, halving click-to-render.
+                _rb = run_batch([
+                    {"key": "h", "sql": security_sql.role_holders(role),
+                     "source": "ACCOUNT_USAGE.GRANTS_TO_USERS (role holders)"},
+                    {"key": "p", "sql": security_sql.role_privileges(role),
+                     "source": "ACCOUNT_USAGE.GRANTS_TO_ROLES (role privileges)"},
+                ], page=_PAGE, tier="historical")
+                h = _rb.get("h") or run(security_sql.role_holders(role), page=_PAGE,
+                        key=f"sec_role_holders_{role}", tier="historical",
+                        source="ACCOUNT_USAGE.GRANTS_TO_USERS (role holders)")
+                st.markdown("**Holders**")
+                if guard(h, f"No active user currently holds {role} (revoke-safe on the holder axis).",
+                         kind="clean"):
+                    styled_table(with_user_names(h.df, _PAGE) if "USER_NAME" in h.df.columns else h.df,
+                                 height=200)
+                p = _rb.get("p") or run(security_sql.role_privileges(role), page=_PAGE,
+                        key=f"sec_role_privs_{role}", tier="historical",
+                        source="ACCOUNT_USAGE.GRANTS_TO_ROLES (role privileges)")
+                st.markdown("**Privileges this role grants**")
+                if guard(p, f"{role} grants no object privileges — it confers no direct access.",
+                         kind="clean"):
+                    styled_table(p.df, height=240, sort_label="by object type")
+                st.caption("This reports; it revokes nothing. Confirm holders and privileges "
+                           "with the owner first (up to ~2h usage-view latency).")
+
+        st.caption("Role and privilege grant activity — grants, revokes, and privilege changes, "
+                   "newest first — lives on the Changes section (Recent grant changes).")
+
+        render_effective_access(company)
+        render_admin_grant_anomalies(company)
+
+    else:
+        # Account lifecycle: credential aging + dormancy — expiring credentials, dormant users
+        # still holding access, and long-silent accounts that just woke up.
+        # r-ux: read before the header so the stripe is DATA-derived (amber only when a credential is
+        # actually expiring/expired, green when clean, neutral on a failed read) — not a standing "warn".
+        creds = stable_batch.get("creds") or run(security_sql.expiring_credentials(10, company), page=_PAGE,
+                    key=f"creds_{company}", tier="recent",
+                    source="ACCOUNT_USAGE.CREDENTIALS")
+        section_header("Expiring credentials (10-day horizon)", alarm_health(creds), "clock", anchor="sec-creds")
+        if creds.ok and creds.empty:
+            empty_state("clean", "No credentials expiring within 10 days for this scope.")
+        elif guard(creds, "", setup_hint="Needs the ACCOUNT_USAGE.CREDENTIALS view (newer accounts expose it by default)."):
+            cdf = creds.df.copy()
+            expired = int((cdf["STATUS"].astype(str).str.upper() == "EXPIRED").sum())
             kpi_row([
-                {"label": "Failure bursts", "value": f"{len(ranked)}",
-                 "help": "Users with 5+ failed logins in the window."},
-                {"label": "Succeeded after (breakthrough)", "value": f"{len(broke)}",
-                 "help": "A successful login followed the failure burst — the dangerous case.",
-                 "delta_color": "inverse" if len(broke) else "off"},
-                {"label": "High severity", "value": f"{len(high)}",
-                 "delta_color": "inverse" if len(high) else "off"},
+                {"label": "Expiring ≤10d", "value": f"{len(cdf) - expired}",
+                 "delta_color": "inverse" if len(cdf) - expired else "off"},
+                {"label": "Already expired", "value": f"{expired}",
+                 "delta_color": "inverse" if expired else "off",
+                 "help": "Still-active rows past EXPIRES_AT — jobs using these will start failing."},
             ])
-            styled_table(
-                with_user_names(ranked, _PAGE)[[
-                    "SEVERITY", "USER", "USER_NAME", "SUCCEEDED_AFTER", "FAILURES", "FAIL_IPS",
-                    "FIRST_FAILURE", "FIRST_SUCCESS_AFTER", "BREAKTHROUGH_MIN", "LAST_ERROR"]],
-            )
-            st.caption("A burst followed by a success is the signal; a burst with no later success is "
-                       "a locked-out user. Confirm against expected activity before acting — read-only.")
-            result_caption(ato)
-            add_to_case_button(
-                "Security · Access", ato,
-                title="Failed-login bursts (credential-compromise candidates)",
-                summary=f"{len(ranked)} burst(s); {len(broke)} with a later success, {len(high)} high severity.",
-                next_action="Confirm against expected activity; reset credentials if a success was unexpected.",
-                key="ow_case_add_sec_burst")
+            styled_table(with_user_names(cdf, _PAGE), height=280)
+            # #1: pure alert-provenance (what the scan raises + cadence) → audit-mode only.
+            methodology_note("The hourly scan raises SEC_CRED_EXPIRY for these — re-raised weekly until rotated.")
+            result_caption(creds)
 
-    # Moved from Changes (v4.49): decomposes the Failed-logins panel above —
-    # login telemetry, not change evidence.
-    section_header("Failed-login reasons (network policy vs credentials)", "", "alerts",
-                   anchor="sec-failreasons")
-    reasons = batch.get("login_reasons") or run(
-        _reasons_sql, page=_PAGE, key=f"login_reasons_{company}_{days}{_lm}",
-        tier="hourly" if use_security_fact else "recent", source=_activity_source,
-    )
-    if reasons.ok and reasons.empty:
-        empty_state("clean", "No failed logins in the window.")
-    elif guard(reasons, ""):
-        styled_table(reasons.df)
-        result_caption(reasons)
+        section_header("Dormant users still holding access (90d+)", "", "security",
+                       anchor="sec-dormant")
+        from app.ui.components import toggle_cost_hint
+        st.caption(toggle_cost_hint("dormant"))
+        _dorm_on = st.toggle("Run dormant-user scan (90 days of login + grant history)",
+                             key="sec_dormant_toggle",
+                             help="The heaviest scan on this page — runs only when you ask. The export pack always includes it.")
+        if _dorm_on:
+            res = run(insights_sql.dormant_users(90, company), page=_PAGE, key=f"dormant_{company}",
+                      tier="historical", source="ACCOUNT_USAGE.USERS + GRANTS_TO_USERS")
+            if res.ok and res.empty:
+                empty_state("clean", "No enabled users dormant 90+ days in this scope.")
+            elif guard(res, ""):
+                ranked = dormant_severity(res.df)
+                high = ranked[ranked["SEVERITY"] == "High"]
+                kpi_row([
+                    {"label": "Dormant users", "value": f"{len(ranked)}"},
+                    {"label": "High severity", "value": f"{len(high)}",
+                     "help": "180+ days dormant, or 5+ roles still granted.",
+                     "delta_color": "inverse" if len(high) else "off"},
+                ])
+                entity_nav_table(
+                    with_user_names(ranked, _PAGE)[[
+                        "SEVERITY", "USER", "USER_NAME", "EMAIL", "DAYS_DORMANT",
+                        "ROLE_COUNT", "ROLES", "LAST_SUCCESS_LOGIN"]],
+                    key=f"sec_dormant_{company}", key_col="USER_NAME", entity_type="USER",
+                )
+                st.caption("Review with the owner before disabling; service accounts may log in rarely by design.")
+                result_caption(res)
 
-    # r-ux: read before the header so the stripe is DATA-derived (alarm_health): amber only when a
-    # new (user, network) pair exists, green when clean, neutral on a failed read — never the
-    # standing false "warn" the hardcoded value painted over a green body.
-    nn = batch.get("newnet") or run(_newnet_sql, page=_PAGE,
-              key=f"newnet_{days}{_lm}", tier="recent",
-              source=_network_source)
-    section_header("New networks for privileged users (90-day baseline)", alarm_health(nn), "alerts",
-                   anchor="sec-newnet")
-    if nn.ok and nn.empty:
-        empty_state("clean", "No break-glass account logged in from a network unseen in the last 90 days.")
-    elif guard(nn, ""):
-        # v4.461 P2: the count folds into the caption; the table is the evidence.
-        styled_table(with_user_names(nn.df, _PAGE))
-        st.caption(f"{len(nn.df)} new (user, network) pair(s) — an admin-role user's (user, IP) "
-                   "first appeared inside this window (an IP quiet 90+ days re-flags on purpose). "
-                   "Expected after travel, VPN changes, or a new automation host — anything else is the finding.")
-        result_caption(nn)
-
-    # r-ux: read before the header so the stripe is DATA-derived (amber only when a credential is
-    # actually expiring/expired, green when clean, neutral on a failed read) — not a standing "warn".
-    creds = stable_batch.get("creds") or run(security_sql.expiring_credentials(10, company), page=_PAGE,
-                key=f"creds_{company}", tier="recent",
-                source="ACCOUNT_USAGE.CREDENTIALS")
-    section_header("Expiring credentials (10-day horizon)", alarm_health(creds), "clock", anchor="sec-creds")
-    if creds.ok and creds.empty:
-        empty_state("clean", "No credentials expiring within 10 days for this scope.")
-    elif guard(creds, "", setup_hint="Needs the ACCOUNT_USAGE.CREDENTIALS view (newer accounts expose it by default)."):
-        cdf = creds.df.copy()
-        expired = int((cdf["STATUS"].astype(str).str.upper() == "EXPIRED").sum())
-        kpi_row([
-            {"label": "Expiring ≤10d", "value": f"{len(cdf) - expired}",
-             "delta_color": "inverse" if len(cdf) - expired else "off"},
-            {"label": "Already expired", "value": f"{expired}",
-             "delta_color": "inverse" if expired else "off",
-             "help": "Still-active rows past EXPIRES_AT — jobs using these will start failing."},
-        ])
-        styled_table(with_user_names(cdf, _PAGE), height=280)
-        # #1: pure alert-provenance (what the scan raises + cadence) → audit-mode only.
-        methodology_note("The hourly scan raises SEC_CRED_EXPIRY for these — re-raised weekly until rotated.")
-        result_caption(creds)
-
-    section_header("Dormant users still holding access (90d+)", "", "security",
-                   anchor="sec-dormant")
-    from app.ui.components import toggle_cost_hint
-    st.caption(toggle_cost_hint("dormant"))
-    _dorm_on = st.toggle("Run dormant-user scan (90 days of login + grant history)",
-                         key="sec_dormant_toggle",
-                         help="The heaviest scan on this page — runs only when you ask. The export pack always includes it.")
-    if _dorm_on:
-        res = run(insights_sql.dormant_users(90, company), page=_PAGE, key=f"dormant_{company}",
-                  tier="historical", source="ACCOUNT_USAGE.USERS + GRANTS_TO_USERS")
-        if res.ok and res.empty:
-            empty_state("clean", "No enabled users dormant 90+ days in this scope.")
-        elif guard(res, ""):
-            ranked = dormant_severity(res.df)
-            high = ranked[ranked["SEVERITY"] == "High"]
-            kpi_row([
-                {"label": "Dormant users", "value": f"{len(ranked)}"},
-                {"label": "High severity", "value": f"{len(high)}",
-                 "help": "180+ days dormant, or 5+ roles still granted.",
-                 "delta_color": "inverse" if len(high) else "off"},
-            ])
-            entity_nav_table(
-                with_user_names(ranked, _PAGE)[[
-                    "SEVERITY", "USER", "USER_NAME", "EMAIL", "DAYS_DORMANT",
-                    "ROLE_COUNT", "ROLES", "LAST_SUCCESS_LOGIN"]],
-                key=f"sec_dormant_{company}", key_col="USER_NAME", entity_type="USER",
-            )
-            st.caption("Review with the owner before disabling; service accounts may log in rarely by design.")
-            result_caption(res)
-
-    # Sec5: the transition LAST_SUCCESS_LOGIN can't express — a long-dormant
-    # account that just logged in. Toggle-gated (off first paint), read-only.
-    # r-ux: neutral until the on-demand scan runs (header renders before the toggle) — not a
-    # standing false "warn" over a not-yet-scanned section. Matches the dormant header above.
-    section_header("Dormant accounts that just woke up (long-gap logins)", "", "security",
-                   anchor="sec-reawakening")
-    _wake_on = st.toggle("Run dormant-reawakening scan (365 days of login history)",
-                         key="sec_reawakening_toggle",
-                         help="Flags a user whose recent login followed a long silence — the signal "
-                              "LAST_SUCCESS_LOGIN can't show (it keeps only the latest login).")
-    if _wake_on:
-        wres = run(security_sql.dormant_reawakening(company=company), page=_PAGE,
-                   key=f"reawakening_{company}", tier="historical",
-                   source="ACCOUNT_USAGE.LOGIN_HISTORY (login-gap scan)")
-        if wres.ok and wres.empty:
-            empty_state("clean", "No dormant account woke up in the last 7 days in this scope.")
-        elif guard(wres, ""):
-            wranked = reawakening_severity(wres.df)
-            whigh = wranked[wranked["SEVERITY"] == "High"]
-            kpi_row([
-                {"label": "Reawakened accounts", "value": f"{len(wranked)}"},
-                {"label": "High severity", "value": f"{len(whigh)}",
-                 "help": "180+ day silence, or 5+ roles still held.",
-                 "delta_color": "inverse" if len(whigh) else "off"},
-            ])
-            # #25: rows are users → drill to Entity 360 (mirrors the dormant-users table).
-            entity_nav_table(
-                with_user_names(wranked, _PAGE)[[
-                    "SEVERITY", "USER", "USER_NAME", "EMAIL", "GAP_DAYS",
-                    "LAST_ACTIVE_BEFORE", "WAKE_LOGIN", "CLIENT_IP", "AUTH_FACTOR",
-                    "ROLE_COUNT", "ROLES"]],
-                key=f"sec_reawakening_{company}", key_col="USER_NAME", entity_type="USER",
-            )
-            st.caption("Review with the owner; service accounts may log in rarely by design, and a "
-                       ">365-day silence shows a single login here (gap measured from account creation).")
-            result_caption(wres)
-
-    # Moved from Changes (v4.49): entitlement hygiene — who still holds access
-    # nobody uses — reads with dormant users, not with DDL evidence.
-    section_header("Unused roles (90d, account-wide)", "", "admin")
-    ur = run_mart_first(
-        mart27_sql.unused_roles_via_fact(90), security_sql.unused_roles(90),
-        page=_PAGE, key="unused_roles",
-        mart_source="ROLES x FACT_QUERY_ROLE_HOURLY (mart — active once 90d coverage exists)",
-        live_source="ROLES x QUERY_HISTORY (90d, live fallback)")
-    if ur.ok and ur.empty:
-        empty_state("clean", "Every active role was assumed in the last 90 days.")
-    elif guard(ur, ""):
-        # #26: click a role -> who holds it + what it grants (confirm before revoke).
-        # ur.df arrives index-reset from run, but reset again defensively so
-        # selectable_table's POSITIONAL index maps back through .iloc.
-        frame = ur.df.reset_index(drop=True)
-        sel = selectable_table(frame, key="sec_unused_role_drill",
-                               sort_label="most-granted first")
-        if sel is not None and sel != st.session_state.get("_sec_unused_role_sel"):
-            st.session_state["_sec_unused_role_sel"] = sel
-        st.caption("These roles were never *directly assumed* as the executing role in 90d — a role "
-                   "exercised only through inheritance (granted to a role users actually SET) won't "
-                   "appear here, so confirm holders + grants (click a row) before revoking. "
-                   "Also in the Auditor export pack with the full grant matrix and 90d diff.")
-        result_caption(ur)
-        role = str(frame.iloc[sel]["ROLE_NAME"]) if sel is not None and 0 <= sel < len(frame) else ""
-        if role:
-            section_header(f"Before revoking {role}: who holds it, what it grants", "warn", "admin")
-            # Both reads are interaction-gated (fire only after a row click), so
-            # they are NOT first-paint usage-view scans; tier="historical"
-            # makes a re-click on the same role a cache hit. Perf: the two independent
-            # historical reads prefetch in one parallel batch, halving click-to-render.
-            _rb = run_batch([
-                {"key": "h", "sql": security_sql.role_holders(role),
-                 "source": "ACCOUNT_USAGE.GRANTS_TO_USERS (role holders)"},
-                {"key": "p", "sql": security_sql.role_privileges(role),
-                 "source": "ACCOUNT_USAGE.GRANTS_TO_ROLES (role privileges)"},
-            ], page=_PAGE, tier="historical")
-            h = _rb.get("h") or run(security_sql.role_holders(role), page=_PAGE,
-                    key=f"sec_role_holders_{role}", tier="historical",
-                    source="ACCOUNT_USAGE.GRANTS_TO_USERS (role holders)")
-            st.markdown("**Holders**")
-            if guard(h, f"No active user currently holds {role} (revoke-safe on the holder axis).",
-                     kind="clean"):
-                styled_table(with_user_names(h.df, _PAGE) if "USER_NAME" in h.df.columns else h.df,
-                             height=200)
-            p = _rb.get("p") or run(security_sql.role_privileges(role), page=_PAGE,
-                    key=f"sec_role_privs_{role}", tier="historical",
-                    source="ACCOUNT_USAGE.GRANTS_TO_ROLES (role privileges)")
-            st.markdown("**Privileges this role grants**")
-            if guard(p, f"{role} grants no object privileges — it confers no direct access.",
-                     kind="clean"):
-                styled_table(p.df, height=240, sort_label="by object type")
-            st.caption("This reports; it revokes nothing. Confirm holders and privileges "
-                       "with the owner first (up to ~2h usage-view latency).")
-
-    st.caption("Role and privilege grant activity — grants, revokes, and privilege changes, "
-               "newest first — lives on the Changes section (Recent grant changes).")
-
-    render_effective_access(company)
-    render_admin_grant_anomalies(company)
+        # Sec5: the transition LAST_SUCCESS_LOGIN can't express — a long-dormant
+        # account that just logged in. Toggle-gated (off first paint), read-only.
+        # r-ux: neutral until the on-demand scan runs (header renders before the toggle) — not a
+        # standing false "warn" over a not-yet-scanned section. Matches the dormant header above.
+        section_header("Dormant accounts that just woke up (long-gap logins)", "", "security",
+                       anchor="sec-reawakening")
+        _wake_on = st.toggle("Run dormant-reawakening scan (365 days of login history)",
+                             key="sec_reawakening_toggle",
+                             help="Flags a user whose recent login followed a long silence — the signal "
+                                  "LAST_SUCCESS_LOGIN can't show (it keeps only the latest login).")
+        if _wake_on:
+            wres = run(security_sql.dormant_reawakening(company=company), page=_PAGE,
+                       key=f"reawakening_{company}", tier="historical",
+                       source="ACCOUNT_USAGE.LOGIN_HISTORY (login-gap scan)")
+            if wres.ok and wres.empty:
+                empty_state("clean", "No dormant account woke up in the last 7 days in this scope.")
+            elif guard(wres, ""):
+                wranked = reawakening_severity(wres.df)
+                whigh = wranked[wranked["SEVERITY"] == "High"]
+                kpi_row([
+                    {"label": "Reawakened accounts", "value": f"{len(wranked)}"},
+                    {"label": "High severity", "value": f"{len(whigh)}",
+                     "help": "180+ day silence, or 5+ roles still held.",
+                     "delta_color": "inverse" if len(whigh) else "off"},
+                ])
+                # #25: rows are users → drill to Entity 360 (mirrors the dormant-users table).
+                entity_nav_table(
+                    with_user_names(wranked, _PAGE)[[
+                        "SEVERITY", "USER", "USER_NAME", "EMAIL", "GAP_DAYS",
+                        "LAST_ACTIVE_BEFORE", "WAKE_LOGIN", "CLIENT_IP", "AUTH_FACTOR",
+                        "ROLE_COUNT", "ROLES"]],
+                    key=f"sec_reawakening_{company}", key_col="USER_NAME", entity_type="USER",
+                )
+                st.caption("Review with the owner; service accounts may log in rarely by design, and a "
+                           ">365-day silence shows a single login here (gap measured from account creation).")
+                result_caption(wres)
 
 
 def _egress_tab(company: str, days: int, database: str = "", schema_contains: str = "", *, bounds: tuple | None = None) -> None:

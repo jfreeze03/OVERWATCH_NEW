@@ -55,6 +55,7 @@ from app.ui.components import (
     empty_state,
     entity_nav_table,
     export_button,
+    hero_metric,
     kpi_row,
     load_settings,
     page_header,
@@ -799,7 +800,11 @@ def render() -> None:
         "transfer, and the cloud-services rebate remain on Cost Intelligence so this additive "
         "warehouse lens continues to reconcile."
     )
-    kpi_row(company_kpis)
+    # rec3: lead the company economics with a hero (one dominant Spend value + the
+    # per-day average as an inline companion) instead of a flat equal-weight KPI row.
+    # hero_metric now renders company_kpis[0]'s method/scope chips, "as of" stamp, and
+    # sparkline, so the billing-basis provenance the flat card showed is preserved.
+    hero_metric(company_kpis[0], company_kpis[1:])
     add_to_case_button(
         # _vp is the per-warehouse credits-vs-prior frame; the title names that so
         # the preview reconciles with what it shows (the $ headline is in the summary).
@@ -1118,8 +1123,8 @@ def render() -> None:
         # sparkline_row keeps only the series that chart does NOT carry (queries,
         # failures) so it stops duplicating the trend chart.
         charts.sparkline_row([
-            ("Queries, 14d", adf, "DAY", "QUERIES"),
-            ("Failures, 14d", adf, "DAY", "FAILS"),
+            ("Queries, 14d", adf, "DAY", "QUERIES", "count"),
+            ("Failures, 14d", adf, "DAY", "FAILS", "count"),
         ])
         # The note reflects which LEG actually served. _live_fallback_daily is now mart-first, so
         # `using_mart` (which tracks only the exec_board leg) being False no longer implies a live

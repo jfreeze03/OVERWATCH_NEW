@@ -1030,8 +1030,7 @@ def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top
         bars = base.mark_bar(color=_ACCENT, cornerRadiusEnd=4).encode(y=enc_y, x=enc_x, tooltip=tip)
     labels = base.mark_text(align="left", dx=5, color=_LABEL, fontSize=11).encode(
         y=enc_y, x=enc_x, text=alt.Text("USD:Q", format=_fmt))
-    st.altair_chart(bars + labels, width="stretch")
-    if takeaway:
+    if takeaway:  # rec41: lead with the conclusion, above the chart
         # Share denominator is the FULL frame's total, not the head(top_n) sum — else
         # the top contributor's "% of $total" is overstated and the "$total" label
         # misrepresents the universe when the caller passes more than top_n rows
@@ -1040,6 +1039,7 @@ def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top
         if _full_total > 0:
             top = data.loc[data["USD"].idxmax()]
             st.caption(md_dollars(_share_note(str(top["Label"]), float(top["USD"]), _full_total)))
+    st.altair_chart(bars + labels, width="stretch")
 
 
 def clickable_bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, *, key: str,
@@ -1091,10 +1091,58 @@ def _stable_color_map(names) -> dict:
     return {n: _STABLE_PALETTE[zlib.crc32(n.encode("utf-8")) % len(_STABLE_PALETTE)] for n in uniq}
 
 
+def _shade_hex(hex_color: str, factor: float) -> str:
+    """Blend a hex toward white (factor>0) or black (factor<0) by |factor| in [0,1].
+    Deterministic last-resort so >10 simultaneously-visible series still get distinct
+    fills once the 10-slot palette is exhausted (rec33)."""
+    try:
+        h = hex_color.lstrip("#")
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    except (ValueError, IndexError):
+        return hex_color
+    if factor >= 0:
+        r, g, b = (round(c + (255 - c) * factor) for c in (r, g, b))
+    else:
+        r, g, b = (round(c * (1 + factor)) for c in (r, g, b))
+    return "#{:02x}{:02x}{:02x}".format(*(max(0, min(255, c)) for c in (r, g, b)))
+
+
 def _stable_color(field: str, names, legend=None) -> alt.Color:
+    # C15: the crc32-keyed base map keeps a given entity's color stable run-to-run, but its
+    # 10 slots mean two SIMULTANEOUSLY-visible entities can hash to the same hex and become
+    # indistinguishable in a stacked bar (rec33). De-collide HERE, never in the pure
+    # _stable_color_map (the C15 test pins that map's crc32 slots).
+    #
+    # TWO passes, so rehoming a collider can never displace a non-colliding entity: pass 1
+    # reserves EVERY naturally-claimed hex (the first sorted claimant of each hex keeps it),
+    # so an entity whose crc32 color is unique among the visible names ALWAYS keeps it; pass 2
+    # rehomes the leftover colliders (secondary claimants of a shared hex) to a still-free
+    # palette slot — which, because all naturals are already reserved, is never another
+    # entity's natural color — or, only when all 10 slots are taken (>10 visible series), to a
+    # deterministic shade. (A single interleaved pass could bump a collider into a
+    # not-yet-assigned entity's natural slot — the review's rec33 finding.)
     cmap = _stable_color_map(names)
     uniq = list(cmap.keys())
-    kwargs = {"scale": alt.Scale(domain=uniq, range=[cmap[n] for n in uniq])}
+    used: set[str] = set()
+    resolved: dict[str, str] = {}
+    for n in uniq:                       # pass 1: first claimant of each hex keeps it
+        h = cmap[n]
+        if h not in used:
+            resolved[n] = h
+            used.add(h)
+    exhausted = 0
+    for n in uniq:                       # pass 2: rehome the colliders left over
+        if n in resolved:
+            continue
+        free = next((c for c in _STABLE_PALETTE if c not in used), "")
+        if free:
+            resolved[n] = free
+        else:
+            exhausted += 1
+            step = min(0.7, 0.22 * exhausted)
+            resolved[n] = _shade_hex(cmap[n], step if exhausted % 2 else -step)
+        used.add(resolved[n])
+    kwargs = {"scale": alt.Scale(domain=uniq, range=[resolved[n] for n in uniq])}
     if legend is not None:
         kwargs["legend"] = legend
     return alt.Color(f"{field}:N", **kwargs)
@@ -1124,11 +1172,11 @@ def daily_stacked_count(df: pd.DataFrame, day_col: str, category_col: str,
                      alt.Tooltip("sum(Value):Q", format=",.0f", title=title)],
         )
     )
-    st.altair_chart(chart, width="stretch")
-    if takeaway:  # rec35: lead with the conclusion
+    if takeaway:  # rec41: lead with the conclusion, above the chart
         _g = data.assign(_v=pd.to_numeric(data["Value"], errors="coerce")).groupby("Category")["_v"].sum()
         if float(_g.sum()) > 0:
             st.caption(_share_note(str(_g.idxmax()), float(_g.max()), float(_g.sum()), dollars=False))
+    st.altair_chart(chart, width="stretch")
 
 
 def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "", top_n: int = 10,
@@ -1152,17 +1200,17 @@ def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "",
         _value_tip = alt.Tooltip("ValueText:N", title=title or "Value")
     else:
         _value_tip = alt.Tooltip("Value:Q", format=value_fmt)
-    chart = (
-        _base(data)
-        .mark_bar()
-        .encode(
-            y=alt.Y("Label:N", sort="-x", title=None, axis=alt.Axis(labelLimit=260)),
-            x=alt.X("Value:Q", title=title or "Count", axis=alt.Axis(format=value_fmt)),
-            tooltip=[alt.Tooltip("Label:N"), _value_tip],
-        )
+    _enc = _base(data).encode(
+        y=alt.Y("Label:N", sort="-x", title=None, axis=alt.Axis(labelLimit=260)),
+        x=alt.X("Value:Q", title=title or "Count", axis=alt.Axis(format=value_fmt)),
     )
-    st.altair_chart(chart, width="stretch")
-    if takeaway:
+    bars = _enc.mark_bar().encode(tooltip=[alt.Tooltip("Label:N"), _value_tip])
+    # Codex-review rec34: endpoint value labels (mirrors bar_usd) so a count/rate comparison
+    # doesn't depend on hover. Duration callers show the humanized text, else the formatted number.
+    labels = _enc.mark_text(align="left", dx=5, color=_LABEL, fontSize=11).encode(
+        text=alt.Text("ValueText:N") if _dur else alt.Text("Value:Q", format=value_fmt))
+    chart = bars + labels
+    if takeaway:  # rec41: lead with the conclusion, above the chart
         # Full-frame total as the share denominator (see bar_usd): a head(top_n) sum
         # would overstate the top contributor's share of the universe.
         _full_total = float(pd.to_numeric(df[value_col], errors="coerce").fillna(0).sum())
@@ -1172,6 +1220,7 @@ def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "",
                 str(top["Label"]), float(top["Value"]), _full_total, dollars=False,
                 value_fmt=value_fmt,
                 value_fn=(lambda v: _fmt_metric_value(v, unit)) if _dur else None))
+    st.altair_chart(chart, width="stretch")
 
 
 def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col: str,
@@ -1213,18 +1262,25 @@ def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col
             ],
         )
     )
-    st.altair_chart(chart, width="stretch")
-    if takeaway:  # rec35: lead with the conclusion
+    if takeaway:  # rec41: lead with the conclusion, above the chart
         _g = data.assign(_v=pd.to_numeric(data["USD"], errors="coerce")).groupby("Category")["_v"].sum()
         if float(_g.sum()) > 0:
             st.caption(md_dollars(_share_note(str(_g.idxmax()), float(_g.max()), float(_g.sum()))))
+    st.altair_chart(chart, width="stretch")
 
 
-def sparkline_row(items: list[tuple[str, pd.DataFrame, str, str]]) -> None:
-    """Row of tiny trend lines: [(label, df, day_col, value_col), ...].
-    A KPI without direction is half a number — these add the direction."""
+def sparkline_row(items: list[tuple]) -> None:
+    """Row of tiny trend lines: [(label, df, day_col, value_col[, unit]), ...].
+    A KPI without direction is half a number — these add the direction.
+
+    rec38: the tooltip now reads the real measure + unit instead of a generic "Day"/"Value".
+    `label` titles the value line; the optional 5th tuple element is the unit token
+    (usd|credits|count|sec|...) formatted via _fmt_metric_value, so a $ spark reads "$1,240"
+    and a credit spark "1,240 cr". A 4-tuple (no unit) stays backward-compatible (unit "")."""
     cols = st.columns(len(items))
-    for slot, (label, df, day_col, value_col) in zip(cols, items, strict=True):
+    for slot, item in zip(cols, items, strict=True):
+        label, df, day_col, value_col = item[0], item[1], item[2], item[3]
+        unit = item[4] if len(item) > 4 else ""
         with slot:
             st.caption(label)
             if df is None or getattr(df, "empty", True):
@@ -1232,13 +1288,18 @@ def sparkline_row(items: list[tuple[str, pd.DataFrame, str, str]]) -> None:
                 continue
             data = df[[day_col, value_col]].copy()
             data.columns = ["Day", "Value"]
+            data["Day"] = pd.to_datetime(data["Day"], errors="coerce")
+            # Altair d3 formats can't do the ' cr' suffix or Hr/Min/Sec, so pre-format the
+            # value into a text column (the bar_count pattern) and tooltip that instead.
+            data["ValueText"] = data["Value"].map(lambda v, u=unit: _fmt_metric_value(v, u))
             chart = (
                 _base(data)
                 .mark_area(line={"size": 2}, opacity=0.25)
                 .encode(
                     x=alt.X("Day:T", axis=None),
                     y=alt.Y("Value:Q", axis=None),
-                    tooltip=["Day:T", "Value:Q"],
+                    tooltip=[alt.Tooltip("Day:T", title="Day", format=_DAY_TIP_FMT),
+                             alt.Tooltip("ValueText:N", title=label)],
                 )
                 .properties(height=56)
             )
@@ -1271,18 +1332,19 @@ def hour_heatmap(df: pd.DataFrame, row_col: str, hour_col: str, value_col: str,
             # reading as unlit gaps in their true clock position.
             x=alt.X("Hour:O", title="hour of day",
                     scale=alt.Scale(domain=list(range(24)))),
-            y=alt.Y("Row:N", title=None),
+            # Codex-review rec39: rows are SELECTED by total value (the head() cap above), so
+            # DISPLAY them in that same impact order — highest-total entity on top — instead of
+            # Altair's default order, which diverged from the ranking used to pick them.
+            y=alt.Y("Row:N", title=None,
+                    sort=alt.EncodingSortField("Value", op="sum", order="descending")),
             color=alt.Color("Value:Q", title=title or value_col,
                             scale=alt.Scale(range=_HEATMAP_RANGE)),  # rec38: one orange heat ramp
             tooltip=["Row:N", "Hour:O", alt.Tooltip("Value:Q", format=value_fmt)],
         )
         .properties(height=max(120, 24 * data["Row"].nunique()))
     )
-    st.altair_chart(chart, width="stretch")
-    if capped_note:
-        st.caption(capped_note)
-    if takeaway:  # rec35: name the hottest cell (positional + coerced, so a
-        # non-unique index or a non-integer Hour can never crash the render)
+    if takeaway:  # rec41: name the hottest cell FIRST, above the heatmap (positional +
+        # coerced, so a non-unique index or a non-integer Hour can never crash the render)
         _v = pd.to_numeric(data["Value"], errors="coerce").reset_index(drop=True)
         _h = pd.to_numeric(data["Hour"], errors="coerce").reset_index(drop=True)
         _r = data["Row"].reset_index(drop=True)
@@ -1291,6 +1353,9 @@ def hour_heatmap(df: pd.DataFrame, row_col: str, hour_col: str, value_col: str,
             if pd.notna(_h.iloc[_p]):
                 st.caption(f"Hottest: {_r.iloc[_p]} at hour "
                            f"{int(_h.iloc[_p]):02d} ({format(float(_v.iloc[_p]), value_fmt)}).")
+    st.altair_chart(chart, width="stretch")
+    if capped_note:  # a cap CAVEAT stays BELOW the chart (rec41: footnotes don't lead)
+        st.caption(capped_note)
 
 
 def operational_replay(df: pd.DataFrame, credits: pd.DataFrame | None = None) -> None:
@@ -1663,7 +1728,9 @@ def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,
     _yfmt = _METRIC_AXIS_FMT.get(unit)
     chart = (
         _base(data)
-        .mark_line(point=True)
+        # Codex-review rec37: a per-day dot on a 30/90-day line is a dense carpet; keep the
+        # markers only on short series (<=14 pts) where they aid reading, drop them on long ones.
+        .mark_line(point=len(data) <= 14)
         .encode(
             x=alt.X("Day:T", title=None, axis=_day_axis(data["Day"])),
             y=alt.Y("Value:Q", title=title or value_col,
@@ -1693,8 +1760,7 @@ def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,
                 .encode(x="Day:T", y=alt.value(2), text="_t:N")
             )
             chart = chart + label
-    st.altair_chart(chart.properties(height=CHART_H_SM), width="stretch")
-    # rec35 / CoCo UI#14: name the peak day so the line leads with a conclusion.
+    # rec41 (was rec35 / CoCo UI#14): name the peak day ABOVE the line so it leads with a conclusion.
     if takeaway and not data.empty:
         _v = pd.to_numeric(data["Value"], errors="coerce").dropna()
         if not _v.empty and float(_v.max()) > 0:
@@ -1702,6 +1768,7 @@ def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,
             _pday = pd.to_datetime(data.loc[_v.idxmax(), "Day"], errors="coerce")
             _ds = _pday.strftime("%b %d") if pd.notna(_pday) else str(data.loc[_v.idxmax(), "Day"])
             st.caption(f"Peak {_fmt_metric_value(_peak, unit)} on {_ds}.")
+    st.altair_chart(chart.properties(height=CHART_H_SM), width="stretch")
 
 
 def events_by_day(df: pd.DataFrame, day_col: str = "DAY", severity_col: str = "SEVERITY",
@@ -1735,13 +1802,13 @@ def events_by_day(df: pd.DataFrame, day_col: str = "DAY", severity_col: str = "S
                      "Severity:N", alt.Tooltip("sum(Events):Q", title="Events")],
         )
     )
-    st.altair_chart(chart, width="stretch")
-    if takeaway:  # rec35: name the worst day
+    if takeaway:  # rec41: name the worst day, above the chart
         _by_day = data.assign(_v=pd.to_numeric(data["Events"], errors="coerce")).groupby("Day")["_v"].sum()
         if float(_by_day.sum()) > 0:
             _dl = pd.to_datetime(_by_day.idxmax(), errors="coerce")
             _ds = _dl.strftime("%b %d") if pd.notna(_dl) else str(_by_day.idxmax())
             st.caption(f"Most events: {_ds} ({float(_by_day.max()):,.0f}).")
+    st.altair_chart(chart, width="stretch")
 
 def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
                         usd_col: str, partial_month: str = "",
@@ -1801,38 +1868,55 @@ def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
             opacity=_provisional_opacity("_PARTIAL"),   # C38: label dims with its bar
         )
     )
-    st.altair_chart((bars + labels).properties(height=280), width="stretch")
-    # rec35 / CoCo UI#14: lead the boss chart with its conclusion — the top spender.
+    # rec41 (was rec35 / CoCo UI#14): lead the boss chart with its conclusion — the top spender.
     if takeaway and float(totals.sum()) > 0:
         st.caption(md_dollars(_share_note(str(totals.index[0]), float(totals.iloc[0]), float(totals.sum()))))
+    st.altair_chart((bars + labels).properties(height=280), width="stretch")
 
 
 def paired_bars(df: pd.DataFrame, label_col: str, a_col: str, b_col: str,
                 a_label: str = "A", b_label: str = "B", title: str = "",
                 top_n: int = 10, unit: str = "$") -> None:
-    """Two-side grouped bars for compare mode: side A in accent, side B
-    dimmed gray — the eye reads 'now vs then' without a legend hunt."""
+    """rec36: a HORIZONTAL dumbbell for compare mode — one row per entity, side A in
+    accent and side B dimmed gray joined by a connector, so long warehouse/entity names
+    read left-to-right (the old vertical grouped bars angled the x labels to -30° and
+    truncated them at 140px). The caller's row order (pre-sorted by |delta|) is kept
+    top-to-bottom; A=accent / B=gray coding, the $-unit axis+tooltip, and the top legend
+    are unchanged."""
     data = df[[label_col, a_col, b_col]].head(top_n).copy()
-    data.columns = ["Label", a_label, b_label]
+    # Internal, whitespace-safe wide columns for the connector's x/x2 (a_label/b_label may
+    # carry spaces, which break an Altair "field:Q" reference); the human labels come back
+    # on the folded Side below for the legend/tooltip.
+    data.columns = ["Label", "A_VAL", "B_VAL"]
+    data["Label"] = data["Label"].astype(str)
+    for _c in ("A_VAL", "B_VAL"):
+        data[_c] = pd.to_numeric(data[_c], errors="coerce").fillna(0.0)
+    if data.empty:
+        _empty_note()
+        return
+    order = list(dict.fromkeys(data["Label"]))   # caller's |delta|-desc order, top-to-bottom
     folded = data.melt("Label", var_name="Side", value_name="Value")
-    chart = (
-        alt.Chart(folded)
-        .mark_bar()
-        .encode(
-            x=alt.X("Label:N", sort=None, title=None,
-                    axis=alt.Axis(labelAngle=-30, labelLimit=140)),
-            xOffset=alt.XOffset("Side:N", sort=[a_label, b_label]),
-            # rec41: dollar unit -> format axis + tooltip like every sibling
-            # ($,.0f axis, $,.2f tooltip); a non-$ unit keeps the plain format.
-            y=alt.Y("Value:Q", title=unit or None,
-                    axis=alt.Axis(format=_usd_fmt(folded["Value"].max())) if unit == "$" else alt.Axis()),
-            color=alt.Color("Side:N",
-                            scale=alt.Scale(domain=[a_label, b_label],
-                                            range=[_ACCENT, "#64748b"]),
-                            legend=_legend()),  # rec39: 2-series compare reads at the top
-            tooltip=["Label:N", "Side:N",
-                     alt.Tooltip("Value:Q", format="$,.2f" if unit == "$" else ",.2f")],
-        )
-        .properties(height=CHART_H_MD, title=title or "")
+    folded["Side"] = folded["Side"].map({"A_VAL": a_label, "B_VAL": b_label})
+    _vmax = float(folded["Value"].max())
+    _scale = alt.Scale(domain=[0, _vmax * 1.16]) if _vmax > 0 else alt.Scale()
+    # rec41: dollar unit -> $-format axis + $,.2f tooltip like every sibling.
+    _xaxis = alt.Axis(format=_usd_fmt(_vmax)) if unit == "$" else alt.Axis()
+    enc_y = alt.Y("Label:N", sort=order, title=None, axis=alt.Axis(labelLimit=220))
+    connector = alt.Chart(data).mark_rule(color="#94a3b8", strokeWidth=2).encode(
+        y=enc_y,
+        x=alt.X("A_VAL:Q", axis=None, scale=_scale),   # shared x scale; points layer owns the axis
+        x2="B_VAL:Q",
     )
+    points = alt.Chart(folded).mark_point(filled=True, size=95, opacity=1).encode(
+        y=enc_y,
+        x=alt.X("Value:Q", title=unit or None, axis=_xaxis, scale=_scale),
+        color=alt.Color("Side:N",
+                        scale=alt.Scale(domain=[a_label, b_label],
+                                        range=[_ACCENT, "#64748b"]),
+                        legend=_legend()),  # rec39: 2-series compare reads at the top
+        tooltip=["Label:N", "Side:N",
+                 alt.Tooltip("Value:Q", format="$,.2f" if unit == "$" else ",.2f")],
+    )
+    chart = (connector + points).properties(
+        height=max(_HEIGHT, 34 * len(order)), title=title or "")
     st.altair_chart(chart, width="stretch")

@@ -491,21 +491,54 @@ def hero_metric(item: dict, companions: list[dict] | None = None) -> None:
     _sub = str(item.get("sub", "") or "")
     if _sub:
         sub = f'<div class="ow-card__meta">{html.escape(_sub)}</div>'
+    # rec3: render the provenance chips (freshness badge + method + scope), the "as of"
+    # data-through watermark, and the trend sparkline that the flat KPI card carries — so a
+    # billed headline (Overview/Spend) routed through the hero never DROPS its billing-basis/
+    # method chips or its freshness stamp. Duplicated VERBATIM from metric_card_html rather
+    # than extracted to a shared helper (test_batch_round2 pins those chip literals inside
+    # metric_card_html's own body); identical CSS classes, so no theme change. Every block is
+    # empty when its key is absent, so existing callers (spend.py, decision_studio.py) that
+    # pass none of these render byte-identically.
+    badge = ""
+    _b = str(item.get("badge", "") or "")
+    if _b:
+        _bk = _b.lower() if _b.lower() in ("mart", "live", "stale") else "other"
+        badge = f'<span class="ow-src-badge ow-src-badge--{_bk}">{html.escape(_b)}</span>'
+    for _kind in ("method", "scope"):
+        _v = str(item.get(_kind, "") or "")
+        if _v:
+            badge += f'<span class="ow-src-badge ow-src-badge--{_kind}">{html.escape(_v)}</span>'
+    chips = f'<span class="ow-card__chips">{badge}</span>' if badge else ""
+    as_of = ""
+    _asof = str(item.get("as_of", "") or "")
+    if _asof:
+        as_of = f'<div class="ow-card__meta">as of {html.escape(_asof)}</div>'
+    spark = ""
+    if item.get("spark"):
+        spark = ('<div class="ow-card__meta" style="margin-top:6px">'
+                 + spark_svg(item["spark"], color=_spark_color_for(item, sev)) + "</div>")
     comp_html = ""
     for c in (companions or []):
         c_label = html.escape(str(c.get("label", "")))
         c_value = html.escape(_display_value(c))
         c_help = _help_badge(str(c.get("help", "") or ""))
+        # rec3: keep method/scope provenance on companions too, as chips — a DIFFERENT node
+        # than ow-hero__c-value (which the P1 hierarchy test counts).
+        c_badge = ""
+        for _kind in ("method", "scope"):
+            _cv = str(c.get(_kind, "") or "")
+            if _cv:
+                c_badge += f'<span class="ow-src-badge ow-src-badge--{_kind}">{html.escape(_cv)}</span>'
         comp_html += (f'<div class="ow-hero__c">'
-                      f'<div class="ow-hero__c-label">{c_label}{c_help}</div>'
+                      f'<div class="ow-hero__c-label">{c_label}{c_help}{c_badge}</div>'
                       f'<div class="ow-hero__c-value">{c_value}</div></div>')
     comps = f'<div class="ow-hero__companions">{comp_html}</div>' if comp_html else ""
     sev_cls = f" ow-hero--{sev}" if sev in ("ok", "warn", "bad", "info") else ""
     st.markdown(
         f'<div class="ow-hero{sev_cls}">'
         f'<div class="ow-hero__main">'
-        f'<div class="ow-hero__label">{label}{help_html}</div>'
-        f'<div class="ow-hero__value">{value}</div>{delta}{sub}</div>'
+        f'<div class="ow-hero__label">{label}{help_html}{chips}</div>'
+        f'<div class="ow-hero__value">{value}</div>{delta}{sub}{as_of}{spark}</div>'
         f'{comps}</div>',
         unsafe_allow_html=True,
     )
@@ -2620,7 +2653,11 @@ def master_detail(df, *, key: str, id_col: str, list_render_fn, detail_render_fn
             if row is not None:
                 detail_render_fn(row)
             else:
-                st.caption(empty_detail_msg)
+                # rec25: dress the empty detail pane with the shared empty_state primitive
+                # instead of a bare caption. "no_data_yet" is the neutral quiet-caption kind
+                # (its render is st.caption(message)), so this is pixel-identical to before but
+                # routes through the same empty-state vocabulary as the rest of the app.
+                empty_state("no_data_yet", empty_detail_msg)
 
 
 def blast_radius(warehouse: str, page: str) -> None:

@@ -892,6 +892,9 @@ def render() -> None:
                         if hasattr(st, "status") else contextlib.nullcontext())
         with _load_status:
             _live_pf = run_batch(_live_specs, page=_PAGE, tier="live") or {}
+        # Codex-review rec20: relabel the auto-completed status to a done state.
+        if hasattr(_load_status, "update"):
+            _load_status.update(label="Control Room loaded", state="complete")
         inc_met = run(mart_sql.incident_metrics(90, company), page=_PAGE,
                       key=f"inc_metrics_{company}", tier="recent",
                       source=f"INCIDENTS lifecycle (90d, {company} + account-level)")
@@ -944,20 +947,6 @@ def render() -> None:
         # change-correlated) moved to Alerts > History — retrospective process
         # health, not morning triage. Open incidents now surfaces once, via the
         # exception summary above (OPEN_NOW), so the standalone KPI is dropped.
-        # CR5: a lifecycle Gantt — detected->resolved spans (open runs to now), so
-        # the shape of the last 14 days of incidents reads at a glance.
-        # The SQL is intentionally now-free (CURRENT_TIMESTAMP() token) so its
-        # (sql,scope) cache is shared across renders instead of churning every minute;
-        # an OPEN incident's live end is re-anchored to account time in the chart
-        # reader (charts.incident_gantt keyed off IS_OPEN), not in the SQL, so the
-        # server-vs-account offset never inflates an open bar.
-        _ig = run(mart_sql.incident_gantt(14, company),
-                  page=_PAGE, key=f"incident_gantt_{company}", tier="recent",
-                  source="INCIDENTS (14d lifecycle spans)")
-        if _ig.usable():
-            st.caption("Recent incidents (14d) — bar = detected → resolved; an open incident's bar "
-                       "reaches now. Account time.")
-            charts.incident_gantt(_ig.df, now=account_now())
         oi = _live_pf.get("oi") or run(mart_sql.open_incidents(50, company), page=_PAGE,
                  key=f"open_incidents_{company}", tier="live",
                  source=f"INCIDENTS (open + mitigated, {company} + account-level)")
@@ -1028,6 +1017,20 @@ def render() -> None:
                                 if ok:
                                     log_ui_event("incident_close", page=_PAGE)
                             stamp_write(f"inc_close_{_iid[:8]}", ok)  # C48 (single stamp, both paths)
+        # rec8: the 14d lifecycle Gantt now TRAILS the actionable open-incident worklist above —
+        # the count/summary leads, then the list you work, then this shape-at-a-glance context.
+        # CR5: detected->resolved spans (open runs to now). The SQL is intentionally now-free
+        # (CURRENT_TIMESTAMP() token) so its (sql,scope) cache is shared across renders instead of
+        # churning every minute; an OPEN incident's live end is re-anchored to account time in the
+        # chart reader (charts.incident_gantt keyed off IS_OPEN), not in the SQL, so the
+        # server-vs-account offset never inflates an open bar.
+        _ig = run(mart_sql.incident_gantt(14, company),
+                  page=_PAGE, key=f"incident_gantt_{company}", tier="recent",
+                  source="INCIDENTS (14d lifecycle spans)")
+        if _ig.usable():
+            st.caption("Recent incidents (14d) — bar = detected → resolved; an open incident's bar "
+                       "reaches now. Account time.")
+            charts.incident_gantt(_ig.df, now=account_now())
         # Read proposals only for operators (they alone can act on them) — prefetched in
         # the live batch above when _is_op, else read serially here.
         props = (_live_pf.get("props") or run(mart_sql.incident_proposals(20, company), page=_PAGE,

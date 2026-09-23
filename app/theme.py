@@ -201,13 +201,18 @@ div[data-testid="stMetric"]::before { content:""; position:absolute; left:0; top
    not a tinted banner — the resting 90deg wash is gone so a tinted header ALWAYS
    means the section carries real, data-derived severity (the --ok/warn/bad/info
    variants below still fill their tint from alarm_health). */
-.ow-section { display:flex; align-items:center; gap:10px; margin:14px 0 8px; padding:6px 12px; border-radius:var(--ow-r-sm);
-  border:1px solid var(--ow-hairline); border-left:3px solid var(--ow-ink-mute);
-  background:transparent; }
-.ow-section--ok { border-left-color:var(--ow-ok); background:linear-gradient(90deg,var(--ow-ok-dim),transparent 60%); }
-.ow-section--warn { border-left-color:var(--ow-warn); background:linear-gradient(90deg,var(--ow-warn-dim),transparent 60%); }
-.ow-section--bad { border-left-color:var(--ow-bad); background:linear-gradient(90deg,var(--ow-bad-dim),transparent 60%); }
-.ow-section--info { border-left-color:var(--ow-info); background:linear-gradient(90deg,var(--ow-info-dim),transparent 60%); }
+/* Codex-review rec4: a NEUTRAL heading is typography + a subtle bottom hairline (no box),
+   so the framed card is RESERVED for real severity — extending the v4.461 "tint means
+   severity" law to the box itself. The --ok/warn/bad/info variants restore the full
+   framed card (border + radius + tinted left stripe) on top of the neutral base. */
+.ow-section { display:flex; align-items:center; gap:10px; margin:16px 0 8px; padding:4px 2px 6px;
+  border-bottom:1px solid var(--ow-hairline); }
+.ow-section--ok, .ow-section--warn, .ow-section--bad, .ow-section--info {
+  padding:6px 12px; border:1px solid var(--ow-hairline); border-radius:var(--ow-r-sm); }
+.ow-section--ok { border-left:3px solid var(--ow-ok); background:linear-gradient(90deg,var(--ow-ok-dim),transparent 60%); }
+.ow-section--warn { border-left:3px solid var(--ow-warn); background:linear-gradient(90deg,var(--ow-warn-dim),transparent 60%); }
+.ow-section--bad { border-left:3px solid var(--ow-bad); background:linear-gradient(90deg,var(--ow-bad-dim),transparent 60%); }
+.ow-section--info { border-left:3px solid var(--ow-info); background:linear-gradient(90deg,var(--ow-info-dim),transparent 60%); }
 .ow-section__title { font-weight:700; color:var(--ow-ink); font-size:1.02rem; }
 .ow-section__icon { display:inline-flex; color:var(--ow-ink-soft); }
 .ow-section__badge { margin-left:auto; font-size:0.72rem; font-weight:650; letter-spacing:0.04em; text-transform:uppercase; padding:2px 9px; border-radius:var(--ow-r-pill); border:1px solid var(--ow-hairline2); color:var(--ow-ink-soft); }
@@ -481,10 +486,17 @@ section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked)
    first — so restack them explicitly on narrow viewports. The generous 1180px
    breakpoint keys off VIEWPORT width while the content area is viewport minus
    the sidebar, so it fires before the panes cramp. `st-key-ow_md_*` is the
-   shared container key every master-detail surface wraps its columns in. */
+   shared container key every master-detail surface wraps its columns in.
+   rec26: restack ONLY the two top-level panes — the `:not()` excludes any
+   stColumn nested inside another stColumn within the container, so KPI/metric
+   rows a detail pane lays out with its own st.columns stay side-by-side (a bare
+   descendant selector flattened those too, turning every nested grid into a
+   single tall stack). Descendant `flex-wrap` is intentional: it lets the outer
+   pane row wrap regardless of Streamlit's wrapper depth and is harmless on
+   nested rows (permits wrapping, never forces it). */
 @media (max-width:1180px) {
   [class*="st-key-ow_md_"] [data-testid="stHorizontalBlock"] { flex-wrap:wrap; }
-  [class*="st-key-ow_md_"] [data-testid="stColumn"] {
+  [class*="st-key-ow_md_"] [data-testid="stColumn"]:not([class*="st-key-ow_md_"] [data-testid="stColumn"] [data-testid="stColumn"]) {
     flex:1 1 100% !important; min-width:100% !important; width:100% !important;
   }
 }

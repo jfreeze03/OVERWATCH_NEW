@@ -37,8 +37,11 @@ def test_usd_axes_are_magnitude_aware_at_the_big_sites():
                    "_usd_fmt(_max_stack)",
                    '_usd_fmt(credit_data["USD"].max())',
                    '_usd_fmt(data["IMPACT_USD_30D"].max())',
-                   '_usd_fmt(folded["Value"].max())'):
+                   # rec36: paired_bars is now a horizontal dumbbell; its $-axis still keys off the
+                   # folded values, just via a _vmax local instead of the inline .max() expression.
+                   "_usd_fmt(_vmax)"):
         assert needle in _SRC, needle
+    assert '_vmax = float(folded["Value"].max())' in _SRC   # rec36: _vmax IS the folded max
 
 
 # ---- F40: day-grain tooltips -------------------------------------------------
