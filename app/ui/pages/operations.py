@@ -46,6 +46,7 @@ from app.logic.anomaly import (
     complete_days_only,
     flag_anomalies,
     suppress_expected_spikes,
+    warehouse_attention_ranking,
 )
 from app.logic.date_windows import window_label
 from app.logic.dq import row_volume_anomalies, summarize_row_volume
@@ -3005,12 +3006,11 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
     """Warehouse 'Activity & anomalies' lens: daily spend + per-warehouse anomaly
     detection and concurrency peaks. (deferred-item: extracted from _warehouses_tab
     so the sub-nav renders one lens at a time.)"""
-    section_header("Warehouse spend & anomalies", "", "warehouse", anchor="ops-wh-spend")
-    # B6 (v4.530): the 30d warehouse-spend fact (hourly) and the 14d concurrency-peaks read
-    # (recent) co-schedule in ONE round trip via run_batch_mixed. res still gates the panel
-    # (guard -> return) before peaks renders; each keeps its run() fallback. The peaks source
-    # label is held in a variable so this batch spec reuses it rather than duplicating the
-    # literal (keeps the hot-page live-scan budget unchanged).
+    # Data prep (no render yet): co-schedule both frames, resolve, guard, then score the
+    # daily-spend anomalies. B6 (v4.530): the 30d warehouse-spend fact (hourly) and the 14d
+    # concurrency-peaks read (recent) ride ONE round trip via run_batch_mixed; each keeps its
+    # run() fallback. The peaks source label is a variable so this batch spec reuses it rather
+    # than duplicating the literal (keeps the hot-page live-scan budget unchanged).
     _peaks_src = "ACCOUNT_USAGE.WAREHOUSE_LOAD_HISTORY"
     _wh_pf = run_batch_mixed([
         {"key": "res", "sql": mart_sql.fact_warehouse_daily(30, company), "tier": "hourly",
@@ -3033,6 +3033,43 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
     # never reads "expected" there but anomalous here.
     flagged = suppress_expected_spikes(
         flagged, str(load_settings(_PAGE).get("EXPECTED_SPIKE_CALENDAR") or ""))
+    anomalies = flagged[flagged["IS_ANOMALY"]]
+    # Hoisted (was below the concurrency header): the opener merges it with the anomalies,
+    # and the concurrency section below still consumes this same object — one read, one fallback.
+    peaks = _wh_pf.get("peaks") or run(ops_sql.warehouse_concurrency_peaks(14, company), page=_PAGE,
+                key=f"conc_peaks_{company}", tier="recent", source=_peaks_src)
+
+    # rec5: lead with WHAT'S WRONG — a worst-first opener merged from the two frames already
+    # loaded above (spend anomalies + sustained queueing), so the tab answers "which warehouses
+    # need me now?" before the full activity scroll. Zero new reads; idle-waste and adaptive-resize
+    # candidacy stay on the Sizing lens (toggle-gated) so first-paint cost is unchanged.
+    ranked = warehouse_attention_ranking(anomalies, peaks.df if peaks.ok else None)
+    _n_anom = int(ranked["ANOM_DAYS"].fillna(0).gt(0).sum()) if not ranked.empty else 0
+    _n_queue = int(ranked["PEAK_QUEUED"].notna().sum()) if not ranked.empty else 0
+    section_header("Warehouses that need attention now", alarm_health(len(ranked)),
+                   "warehouse", anchor="ops-wh-attention")
+    kpi_row([
+        {"label": "Warehouses flagged", "value": f"{len(ranked)}",
+         "severity": "warn" if len(ranked) else "ok"},
+        {"label": "With anomalous spend", "value": f"{_n_anom}"},
+        {"label": "Queueing", "value": f"{_n_queue}"},
+    ])
+    if ranked.empty:
+        empty_state("clean",
+                    "No warehouse is anomalous or queueing right now — full activity below.")
+    else:
+        st.caption("Merged from the spend-anomaly and concurrency signals below, worst-first "
+                   "(queueing outranks a spend anomaly). Select a warehouse to open its Entity 360.")
+        entity_nav_table(
+            ranked.head(5)[["WAREHOUSE_NAME", "REASON", "WORST_Z", "PEAK_QUEUED", "ANOM_USD"]],
+            key=f"ops_wh_attention_{company}", key_col="WAREHOUSE_NAME",
+            entity_type="WAREHOUSE", size_note=False, column_config={
+                "WORST_Z": st.column_config.NumberColumn("Robust z", format="%.1f"),
+                "PEAK_QUEUED": st.column_config.NumberColumn("Peak queued", format="%.1f"),
+                "ANOM_USD": st.column_config.NumberColumn("Anomalous $", format="$%.0f"),
+            })
+
+    section_header("Warehouse spend & anomalies", "", "warehouse", anchor="ops-wh-spend")
     daily = df.groupby("DAY", as_index=False)["USD"].sum()
     st.caption("Click a day in the trend to break its spend down by warehouse. "
                "Dashed rules flag anomalous warehouse-days.")
@@ -3055,7 +3092,6 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
                 breakdown, key=f"ops_wh_day_break_{company}", key_col="WAREHOUSE_NAME",
                 entity_type="WAREHOUSE", size_note=False,
                 column_config={"USD": st.column_config.NumberColumn("Spend $", format="$%.0f")})
-    anomalies = flagged[flagged["IS_ANOMALY"]]
     if anomalies.empty:
         empty_state("clean", "No per-warehouse daily anomalies (30d, median/MAD z ≥ 3.5).")
     else:
@@ -3079,8 +3115,6 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
         "warehouse",
         anchor="ops-wh-concurrency",
     )
-    peaks = _wh_pf.get("peaks") or run(ops_sql.warehouse_concurrency_peaks(14, company), page=_PAGE,
-                key=f"conc_peaks_{company}", tier="recent", source=_peaks_src)
     if peaks.ok and peaks.empty:
         empty_state("no_data_yet", "No warehouse load intervals recorded in the last 14 days.")
     elif guard(peaks, ""):

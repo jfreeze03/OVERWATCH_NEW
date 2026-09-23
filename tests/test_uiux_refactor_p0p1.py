@@ -98,6 +98,33 @@ def test_p1_hero_metric_renders_primary_metric_hierarchy(monkeypatch: pytest.Mon
     out.clear()
     components.hero_metric({"label": "X", "value": "1"})
     assert "ow-hero__companions" not in out[-1]
+    # rec3: a billed headline routed through the hero keeps its provenance — the
+    # freshness/method/scope chips, the "as of" stamp, and the trend sparkline that the
+    # flat KPI card carried (else routing Overview's spend through the hero would silently
+    # drop the billing-basis chips the owner requires).
+    out.clear()
+    components.hero_metric(
+        {"label": "Spend", "value": "$142,392", "badge": "mart",
+         "method": "metering", "scope": "company", "as_of": "2026-09-22",
+         "spark": [1, 2, 3, 4, 5]},
+        [{"label": "Per day", "value": "$4,700", "method": "metering", "scope": "company"}],
+    )
+    h = out[-1]
+    assert "ow-src-badge--method" in h and "ow-src-badge--scope" in h   # billing-basis chips
+    assert "ow-src-badge--mart" in h                                    # freshness badge
+    assert "as of 2026-09-22" in h                                      # data-through stamp
+    assert "<svg" in h                                                  # trend sparkline
+    assert h.count("ow-hero__c-value") == 1                             # companion chip != c-value node
+
+
+def test_rec3_overview_leads_company_economics_with_hero():
+    src = (_ROOT / "app" / "ui" / "pages" / "overview.py").read_text(encoding="utf-8")
+    # the company economics headline is a hero (dominant Spend + per-day companion),
+    # not a flat equal-weight kpi_row
+    assert "hero_metric(company_kpis[0], company_kpis[1:])" in src
+    assert "kpi_row(company_kpis)" not in src
+    # the billed-headline provenance the rec13 lock pins is untouched (still on company_kpis[0])
+    assert '"method": "metering", "scope": "company"' in src
 
 
 def test_p1_spend_leads_with_hero_and_shows_capability_panels():

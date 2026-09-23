@@ -1,5 +1,38 @@
 # Changelog
 
+## 4.585.0 - Codex visual review — M/L projects wave (rec 5 / 3 / 6 / 33 / 36) (2026-09-23)
+
+The five worthwhile M/L projects from the adjudication, each grounded in a parallel understand
+pass against the current code + its locking tests. Presentation/structure only; per-page
+`ACCOUNT_USAGE` literal counts (operations 42, security 31, overview 1, brief 0) and the
+`test_v451_trust` reachable-table sets are unchanged; no preserved item touched.
+
+- **rec 5** — Operations ▸ Warehouses ▸ Activity now LEADS with a "Warehouses that need attention
+  now" opener: a worst-first table merged (new pure `anomaly.warehouse_attention_ranking`) from the
+  two frames the lens already loads — daily-spend anomalies + sustained concurrency queueing — with
+  a REASON per warehouse and the blue-selection Entity 360 drill. Zero new first-paint scans (idle/
+  resize candidacy stay on the toggle-gated Sizing lens); the concurrency-peaks read is hoisted so
+  the opener and the existing section share one read.
+- **rec 3** — Overview's company-economics headline is now a `hero_metric` (one dominant Spend value
+  + the per-day average as an inline companion) instead of a flat equal-weight KPI row. `hero_metric`
+  was extended to render the freshness/method/scope chips, the "as of" stamp, and the sparkline the
+  flat card carried, so the billing-basis provenance the owner requires is preserved (existing hero
+  callers render byte-identically — every new block is empty when its key is absent).
+- **rec 6** — the Brief headline band has three FIXED slots (MTD spend / Open criticals / Nightly
+  cycle) that never reflow; Nightly cycle gets an honest neutral placeholder ("ETL not monitored")
+  on non-ETL accounts instead of vanishing, and the other conditional cards move to a separate
+  secondary band. The Executive export still receives every card (`headline + secondary`).
+- **rec 33** — chart color de-collision (`charts._stable_color`): two simultaneously-visible entities
+  that crc32-hash to the same palette slot now get distinct fills (the first-sorted claimant keeps
+  its natural color; a collider takes the next free slot, with a deterministic shade only if all 10
+  are used). The pinned pure `_stable_color_map` is untouched.
+- **rec 36** — `charts.paired_bars` is now a horizontal dumbbell (signature unchanged) so long
+  warehouse/entity names read left-to-right instead of angled/truncated on the x-axis; A=accent /
+  B=gray coding, the $-format axis+tooltip, the top legend, and the caller's |delta| sort order are
+  preserved.
+
+4-pin version bump 4.584.0 → 4.585.0 + CHANGELOG.
+
 ## 4.584.0 - Codex visual review — structure wave (rec 26 / 9 / 10) (2026-09-23)
 
 The three deferred structural recs from the same adjudication, browser-verified and lock-preserving.

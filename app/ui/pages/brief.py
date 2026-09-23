@@ -304,7 +304,11 @@ def render() -> None:
             _oldest_crit_h = max(0.0, _ocm) / 60.0
     # Honesty contract: when telemetry is unreachable the Brief says SO —
     # a zero here reads as "we spent nothing", which is a lie (review #5).
-    kpis = [
+    # rec6: three FIXED headline slots — MTD spend / Open criticals / Nightly cycle — so the
+    # top band never reflows as conditional metrics come and go; the nightly-cycle slot is
+    # appended once its forecast is computed (~a hundred lines down), with an honest neutral
+    # placeholder on non-ETL accounts. Every other card goes to a separate SECONDARY band.
+    headline = [
         {"label": "MTD credit spend (account)",
          "badge": "mart" if strip_up else "stale",
          "value": format_usd(mtd_usd) if strip_up else "—",
@@ -320,6 +324,8 @@ def render() -> None:
          "severity": "bad" if scoped_crit else ("" if scoped_crit is not None else "warn"),
          "delta_color": "inverse" if scoped_crit else "off",
          "help": f"Open criticals for {company} plus account-level events — the same scope as Fires."},
+    ]
+    secondary = [
         {"label": "Stalest telemetry",
          # N15: name the source, not just the age — "which one?" is the DBA's
          # first question. N14: the strip's age arm is already cadence-aware.
@@ -327,7 +333,7 @@ def render() -> None:
          "severity": "" if strip_up else "warn"},
     ]
     if _oldest_crit_h is not None:
-        kpis.append({
+        secondary.append({
             "label": "Oldest open critical",
             "value": humanize_duration(_oldest_crit_h, "h"),
             "severity": "bad" if _oldest_crit_h >= 24 else "warn",
@@ -348,7 +354,7 @@ def render() -> None:
         total = safe_float(erow.get("TOTAL"))
         days_left = safe_float(erow.get("DAYS_LEFT"), -1.0)
         if total > 0 and days_left >= 0:
-            kpis.append({
+            secondary.append({
                 "label": "Credit commitment exhausts",
                 "value": str(erow.get("EXHAUST_DATE")),
                 "delta": f"{days_left:,.0f} days at current burn",
@@ -373,7 +379,7 @@ def render() -> None:
         # proof.roi_multiple's `run_cost > 0` guard + the DS "not measured yet" state.
         _app_credits = safe_float(cost_q.df.iloc[0].get("APP_CREDITS_30D")) if cost_q.usable() else 0.0
         app_usd = _app_credits * rate if _app_credits > 0 else None
-        kpis.append({
+        secondary.append({
             "label": "Verified savings (QTD)",
             "value": format_usd(verified),
             "delta": (f"vs {format_usd(app_usd)} monthly run cost" if app_usd is not None
@@ -386,7 +392,7 @@ def render() -> None:
                     "verified savings exceed the app's run cost.",
         })
         if pipeline > 0:
-            kpis.append({
+            secondary.append({
                 "label": "Estimated pipeline",
                 "value": format_usd(pipeline),
                 "delta_color": "off",
@@ -425,8 +431,19 @@ def render() -> None:
     # on the ETL control table + fail-silent (probe reads); shown whenever ETL is configured so the
     # morning read leads with "is the nightly cycle OK?".
     _cyc = _nightly_cycle_forecast(settings)
+    # rec6: Nightly cycle is a FIXED 3rd headline slot. On an ETL-monitored account it shows
+    # the real forecast; otherwise an honest neutral placeholder (never a green all-clear) so
+    # the band keeps the same three positions instead of dropping to two.
     if str(settings.get("ETL_CONTROL_STATUS_FQN") or "").strip():
-        kpis.append(_nightly_cycle_kpi(_cyc, _wf_fail_n))
+        _nightly_card = _nightly_cycle_kpi(_cyc, _wf_fail_n)
+    else:
+        _nightly_card = {
+            "label": "Nightly cycle", "value": "—", "severity": "info",
+            "delta": "ETL not monitored",
+            "help": "Whole nightly ETL cycle SLA finish forecast. Configure the ETL control "
+                    "table in Admin to monitor it here.",
+        }
+    headline.append(_nightly_card)
 
     # CoCo do-first #1: a computed "should I worry?" opener, worst-first, above the
     # numbers — built from signals already on the page (no new query).
@@ -499,7 +516,12 @@ def render() -> None:
         "the Fires and Asks below, then open the linked full page (Alerts, Cost Intelligence, "
         "Control Room)."
     )
-    kpi_row(kpis)
+    # rec6: two bands — the fixed three headline slots, then the conditional context cards.
+    # `kpis` (full ordered set) still feeds the Executive export below, dropping nothing.
+    kpis = headline + secondary
+    kpi_row(headline)
+    if secondary:
+        kpi_row(secondary)
     # N7: same disclosure as Overview — the headline dollars are credit-billed
     # services; storage and data-transfer bill separately (Cost Intelligence).
     # #1: pure billing-basis disclosure → audit-mode only (the note Overview also hides).

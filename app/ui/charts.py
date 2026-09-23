@@ -1091,10 +1091,58 @@ def _stable_color_map(names) -> dict:
     return {n: _STABLE_PALETTE[zlib.crc32(n.encode("utf-8")) % len(_STABLE_PALETTE)] for n in uniq}
 
 
+def _shade_hex(hex_color: str, factor: float) -> str:
+    """Blend a hex toward white (factor>0) or black (factor<0) by |factor| in [0,1].
+    Deterministic last-resort so >10 simultaneously-visible series still get distinct
+    fills once the 10-slot palette is exhausted (rec33)."""
+    try:
+        h = hex_color.lstrip("#")
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    except (ValueError, IndexError):
+        return hex_color
+    if factor >= 0:
+        r, g, b = (round(c + (255 - c) * factor) for c in (r, g, b))
+    else:
+        r, g, b = (round(c * (1 + factor)) for c in (r, g, b))
+    return "#{:02x}{:02x}{:02x}".format(*(max(0, min(255, c)) for c in (r, g, b)))
+
+
 def _stable_color(field: str, names, legend=None) -> alt.Color:
+    # C15: the crc32-keyed base map keeps a given entity's color stable run-to-run, but its
+    # 10 slots mean two SIMULTANEOUSLY-visible entities can hash to the same hex and become
+    # indistinguishable in a stacked bar (rec33). De-collide HERE, never in the pure
+    # _stable_color_map (the C15 test pins that map's crc32 slots).
+    #
+    # TWO passes, so rehoming a collider can never displace a non-colliding entity: pass 1
+    # reserves EVERY naturally-claimed hex (the first sorted claimant of each hex keeps it),
+    # so an entity whose crc32 color is unique among the visible names ALWAYS keeps it; pass 2
+    # rehomes the leftover colliders (secondary claimants of a shared hex) to a still-free
+    # palette slot — which, because all naturals are already reserved, is never another
+    # entity's natural color — or, only when all 10 slots are taken (>10 visible series), to a
+    # deterministic shade. (A single interleaved pass could bump a collider into a
+    # not-yet-assigned entity's natural slot — the review's rec33 finding.)
     cmap = _stable_color_map(names)
     uniq = list(cmap.keys())
-    kwargs = {"scale": alt.Scale(domain=uniq, range=[cmap[n] for n in uniq])}
+    used: set[str] = set()
+    resolved: dict[str, str] = {}
+    for n in uniq:                       # pass 1: first claimant of each hex keeps it
+        h = cmap[n]
+        if h not in used:
+            resolved[n] = h
+            used.add(h)
+    exhausted = 0
+    for n in uniq:                       # pass 2: rehome the colliders left over
+        if n in resolved:
+            continue
+        free = next((c for c in _STABLE_PALETTE if c not in used), "")
+        if free:
+            resolved[n] = free
+        else:
+            exhausted += 1
+            step = min(0.7, 0.22 * exhausted)
+            resolved[n] = _shade_hex(cmap[n], step if exhausted % 2 else -step)
+        used.add(resolved[n])
+    kwargs = {"scale": alt.Scale(domain=uniq, range=[resolved[n] for n in uniq])}
     if legend is not None:
         kwargs["legend"] = legend
     return alt.Color(f"{field}:N", **kwargs)
@@ -1817,29 +1865,46 @@ def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
 def paired_bars(df: pd.DataFrame, label_col: str, a_col: str, b_col: str,
                 a_label: str = "A", b_label: str = "B", title: str = "",
                 top_n: int = 10, unit: str = "$") -> None:
-    """Two-side grouped bars for compare mode: side A in accent, side B
-    dimmed gray — the eye reads 'now vs then' without a legend hunt."""
+    """rec36: a HORIZONTAL dumbbell for compare mode — one row per entity, side A in
+    accent and side B dimmed gray joined by a connector, so long warehouse/entity names
+    read left-to-right (the old vertical grouped bars angled the x labels to -30° and
+    truncated them at 140px). The caller's row order (pre-sorted by |delta|) is kept
+    top-to-bottom; A=accent / B=gray coding, the $-unit axis+tooltip, and the top legend
+    are unchanged."""
     data = df[[label_col, a_col, b_col]].head(top_n).copy()
-    data.columns = ["Label", a_label, b_label]
+    # Internal, whitespace-safe wide columns for the connector's x/x2 (a_label/b_label may
+    # carry spaces, which break an Altair "field:Q" reference); the human labels come back
+    # on the folded Side below for the legend/tooltip.
+    data.columns = ["Label", "A_VAL", "B_VAL"]
+    data["Label"] = data["Label"].astype(str)
+    for _c in ("A_VAL", "B_VAL"):
+        data[_c] = pd.to_numeric(data[_c], errors="coerce").fillna(0.0)
+    if data.empty:
+        _empty_note()
+        return
+    order = list(dict.fromkeys(data["Label"]))   # caller's |delta|-desc order, top-to-bottom
     folded = data.melt("Label", var_name="Side", value_name="Value")
-    chart = (
-        alt.Chart(folded)
-        .mark_bar()
-        .encode(
-            x=alt.X("Label:N", sort=None, title=None,
-                    axis=alt.Axis(labelAngle=-30, labelLimit=140)),
-            xOffset=alt.XOffset("Side:N", sort=[a_label, b_label]),
-            # rec41: dollar unit -> format axis + tooltip like every sibling
-            # ($,.0f axis, $,.2f tooltip); a non-$ unit keeps the plain format.
-            y=alt.Y("Value:Q", title=unit or None,
-                    axis=alt.Axis(format=_usd_fmt(folded["Value"].max())) if unit == "$" else alt.Axis()),
-            color=alt.Color("Side:N",
-                            scale=alt.Scale(domain=[a_label, b_label],
-                                            range=[_ACCENT, "#64748b"]),
-                            legend=_legend()),  # rec39: 2-series compare reads at the top
-            tooltip=["Label:N", "Side:N",
-                     alt.Tooltip("Value:Q", format="$,.2f" if unit == "$" else ",.2f")],
-        )
-        .properties(height=CHART_H_MD, title=title or "")
+    folded["Side"] = folded["Side"].map({"A_VAL": a_label, "B_VAL": b_label})
+    _vmax = float(folded["Value"].max())
+    _scale = alt.Scale(domain=[0, _vmax * 1.16]) if _vmax > 0 else alt.Scale()
+    # rec41: dollar unit -> $-format axis + $,.2f tooltip like every sibling.
+    _xaxis = alt.Axis(format=_usd_fmt(_vmax)) if unit == "$" else alt.Axis()
+    enc_y = alt.Y("Label:N", sort=order, title=None, axis=alt.Axis(labelLimit=220))
+    connector = alt.Chart(data).mark_rule(color="#94a3b8", strokeWidth=2).encode(
+        y=enc_y,
+        x=alt.X("A_VAL:Q", axis=None, scale=_scale),   # shared x scale; points layer owns the axis
+        x2="B_VAL:Q",
     )
+    points = alt.Chart(folded).mark_point(filled=True, size=95, opacity=1).encode(
+        y=enc_y,
+        x=alt.X("Value:Q", title=unit or None, axis=_xaxis, scale=_scale),
+        color=alt.Color("Side:N",
+                        scale=alt.Scale(domain=[a_label, b_label],
+                                        range=[_ACCENT, "#64748b"]),
+                        legend=_legend()),  # rec39: 2-series compare reads at the top
+        tooltip=["Label:N", "Side:N",
+                 alt.Tooltip("Value:Q", format="$,.2f" if unit == "$" else ",.2f")],
+    )
+    chart = (connector + points).properties(
+        height=max(_HEIGHT, 34 * len(order)), title=title or "")
     st.altair_chart(chart, width="stretch")
