@@ -36,6 +36,7 @@ _PATHOLOGY = {
     "poor_pruning": "Pruning failure",
     "cold_scan": "Scan amplification",
     "compile_bound": "Compilation heavy",
+    "metadata_chatter": "Metadata chatter",
     "queued": "Concurrency starvation",
     "zero_result": "Expensive empty result",
 }
@@ -121,6 +122,7 @@ def score_opportunities(df: pd.DataFrame | None) -> tuple[pd.DataFrame, dict]:
             "WAREHOUSE_NAME": str(r.get("WAREHOUSE_NAME", "")),
             "RUNS": int(safe_float(r.get("RUNS"))),
             "TOTAL_EXEC_SEC": safe_float(r.get("TOTAL_EXEC_SEC")),
+            "TOTAL_COMPILE_SEC": safe_float(r.get("TOTAL_COMPILE_SEC")),
             "QOP": int(qop),
             "SQL_QOP": int(sql_qop),
             "PATHOLOGY": _pathology(findings, sql_qop),
@@ -130,10 +132,19 @@ def score_opportunities(df: pd.DataFrame | None) -> tuple[pd.DataFrame, dict]:
             "_FINDINGS": len(findings),
         })
     out = pd.DataFrame(rows)
-    # OOS impact leg = percentile rank of the compute footprint (bounded 0-100, winsorized by
-    # construction) so one giant footprint can't dominate; combined with the QOP fraction.
-    impact_pct = (out["TOTAL_EXEC_SEC"].rank(pct=True) * 100.0 if len(out) > 1
-                  else pd.Series(100.0, index=out.index))
+    # OOS impact leg = percentile rank of the FOOTPRINT (bounded 0-100, winsorized by construction)
+    # so one giant footprint can't dominate; combined with the QOP fraction. The footprint is the
+    # GREATER of the compute (exec-seconds) and the compile-seconds percentile: a metadata /
+    # compile-dominated family does ~no warehouse execution, so ranking it by exec-seconds alone
+    # (the old leg) buried it — its compile-seconds footprint is the honest "how much work" axis.
+    # Guarded so a frame with no compile footprint (older callers / tests) keeps the exec-only leg.
+    if len(out) > 1:
+        impact_pct = out["TOTAL_EXEC_SEC"].rank(pct=True) * 100.0
+        if "TOTAL_COMPILE_SEC" in out.columns and out["TOTAL_COMPILE_SEC"].sum() > 0:
+            compile_pct = out["TOTAL_COMPILE_SEC"].rank(pct=True) * 100.0
+            impact_pct = pd.concat([impact_pct, compile_pct], axis=1).max(axis=1)
+    else:
+        impact_pct = pd.Series(100.0, index=out.index)
     out["OOS"] = (out["QOP"] / 100.0 * impact_pct).round(1)
     out = out.sort_values(["OOS", "QOP"], ascending=[False, False],
                           kind="stable").reset_index(drop=True)
