@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.582.0 - Cloud-services driver intelligence, Phase 3: metadata-chatter Finding in the OOS scorer (2026-09-23)
+
+Teaches the shipped Query Optimization (QOP/OOS) engine to see compile-dominated **metadata chatter** —
+**reusing** `query_advisor.advise` + `score_opportunities` rather than shipping a second, divergent
+0–100 scorer (the investigation's MODIFY verdict). App-only, no migration.
+
+- **New `metadata_chatter` Finding** in `query_advisor.advise` (its own `_CAP` weight + `_PATHOLOGY`
+  label "Metadata chatter"): fires when a query is compile-dominated (≥70% of runtime) with trivial
+  warehouse execution (≤0.5s) — a SHOW / INFORMATION_SCHEMA / SYSTEM$ / driver metadata call. It says
+  the cost is in the cloud-services layer, **a resize won't help**, and the fix is behavioural (cadence
+  — cache/batch/pool, or quiet the tool; points at the Phase-1b chatter-by-application panel). It fires
+  ahead of and **suppresses** `compile_bound` (the specific label wins), and is typical-run-guarded on
+  the fingerprint grain by a dedicated `COMPILE_DOMINANT_RUN_PCT` (the existing `COMPILE_RUN_PCT` gates
+  on ≥1s compile; chatter is sub-second all-compile, e.g. FBE ~540ms).
+- **OOS impact leg now uses the greater of the compute and compile footprints.** OOS previously ranked
+  by exec-seconds percentile alone, so a near-zero-execution chatter family scored ~0 and was buried;
+  its compile-seconds footprint is now the honest "how much work" axis. Backward-compatible — a frame
+  with no compile footprint (older callers / tests) keeps the exec-only leg unchanged, so every existing
+  OOS ranking assertion still holds.
+- **Builder** (`ops_sql.query_opportunity_fingerprints`): adds `TOTAL_COMPILE_SEC` +
+  `COMPILE_DOMINANT_RUN_PCT`, and orders candidates by `GREATEST(exec, compile)` footprint so a
+  compile-dominated family isn't starved out of the top-500. No new scan, no ACCOUNT_USAGE budget change.
+- Tests: the Finding fires / suppresses `compile_bound` / is typical-run-guarded; the compile-footprint
+  leg surfaces a chatter family in the OOS ranking. 4-pin version bump 4.581.0 → 4.582.0 + CHANGELOG.
+
 ## 4.581.0 - Cloud-services driver intelligence, Phase 2: per-entity anomaly baseline (V150) (2026-09-23)
 
 Replaces the fixed 10/20% cloud-services **ratio** threshold as the primary "is this warehouse's cloud

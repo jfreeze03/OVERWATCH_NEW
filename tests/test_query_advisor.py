@@ -48,6 +48,34 @@ def test_local_spill_only_when_no_remote():
     assert "remote_spill" in codes and "local_spill" not in codes
 
 
+# ================================================= metadata chatter (Phase 3) =
+
+def test_metadata_chatter_fires_on_compile_dominated_trivial_execution():
+    # FBE-like: 0.55s runtime, 0.54s of it compile, ~no execution -> metadata chatter, not SQL work
+    findings, score = advise(_row(ELAPSED_SEC=0.55, COMPILE_SEC=0.54, QUEUED_SEC=0.0))
+    codes = {f.code for f in findings}
+    assert "metadata_chatter" in codes
+    assert "compile_bound" not in codes         # suppressed — metadata_chatter is the specific label
+    assert score > 0
+    detail = next(f for f in findings if f.code == "metadata_chatter").detail
+    assert "resize" in detail.lower() and "cadence" in detail.lower()
+
+
+def test_compile_bound_not_chatter_for_real_compile_work():
+    # 75% compile but 3s of REAL execution -> compile_bound (expensive compile on real work),
+    # NOT metadata chatter (which requires trivial execution)
+    codes = _codes(_row(ELAPSED_SEC=12.0, COMPILE_SEC=9.0, EXECUTION_SEC=3.0, QUEUED_SEC=0.0))
+    assert "compile_bound" in codes and "metadata_chatter" not in codes
+
+
+def test_metadata_chatter_typical_run_guard_on_fingerprint_grain():
+    # AVG looks chatter-shaped, but the dedicated guard only fires when a MAJORITY of runs are
+    # compile-dominated (COMPILE_DOMINANT_RUN_PCT) — one storm run can't mislabel the fingerprint.
+    base = {"ELAPSED_SEC": 0.55, "COMPILE_SEC": 0.54, "QUEUED_SEC": 0.0}
+    assert "metadata_chatter" not in _codes(_row(**base, COMPILE_DOMINANT_RUN_PCT=0.2))
+    assert "metadata_chatter" in _codes(_row(**base, COMPILE_DOMINANT_RUN_PCT=0.9))
+
+
 def test_poor_pruning_needs_both_partition_floor_and_ratio():
     assert "poor_pruning" in _codes(_row(PARTITIONS_TOTAL=1000.0, PARTITIONS_SCANNED=950.0))
     # high ratio but too few partitions -> not meaningful

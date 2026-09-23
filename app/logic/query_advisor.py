@@ -30,6 +30,12 @@ COMPILE_FRACTION = 0.5           # compile time this share of elapsed = compile-
 COMPILE_MIN_ELAPSED_SEC = 1.0    # ignore trivially short queries
 QUEUE_FRACTION = 0.5             # queued this share of elapsed = concurrency/resume
 QUEUE_MIN_SEC = 1.0
+# metadata chatter / compile-dominated discovery: almost ALL compile with ~no warehouse
+# execution (a SYSTEM$/SHOW/INFORMATION_SCHEMA/driver metadata call). Its cost is in the
+# cloud-services layer, so a resize cannot touch it — distinct from compile_bound (a genuinely
+# expensive compile on real warehouse work, where execution is non-trivial).
+METADATA_COMPILE_FRACTION = 0.7  # compile this share of elapsed AND ...
+METADATA_MAX_EXEC_SEC = 0.5      # ... execution at/below this = no real warehouse work
 ZERO_RESULT_MIN_GB = 10.0        # scanned a lot and produced nothing
 # R2/R3: on the fingerprint grain (AVG'd columns), the queued/compile gates fire only when the
 # pathology is TYPICAL (>= this share of runs), not when one storm run inflated the AVG ratio.
@@ -39,7 +45,8 @@ FINGERPRINT_COMPILE_TYPICAL_SHARE = 0.5
 # --- per-driver score weights + caps (a query maxes at 100) -----------------
 # base points + a size-scaled bonus, each capped so one axis can't dominate.
 _CAP = {"remote_spill": 55, "poor_pruning": 30, "cold_scan": 25,
-        "compile_bound": 20, "queued": 15, "local_spill": 12, "zero_result": 12}
+        "compile_bound": 20, "metadata_chatter": 18, "queued": 15,
+        "local_spill": 12, "zero_result": 12}
 
 
 @dataclass(frozen=True)
@@ -147,8 +154,36 @@ def advise(row: Mapping[str, object], *,
             "reads stay warm.",
             pts))
 
+    # 5a) metadata chatter / compile-dominated discovery — almost ALL compile with trivial
+    #     warehouse execution. The cost lives in the cloud-services layer, so a resize can't touch
+    #     it and the fix is behavioural (cadence, not SQL). Fires ahead of compile_bound and
+    #     SUPPRESSES it (more specific label). EXECUTION_SEC when the builder supplies it, else
+    #     derived as elapsed - compile - queued. Typical-run guarded on the fingerprint grain.
+    execution_sec = _f(row, "EXECUTION_SEC", -1.0)
+    if execution_sec < 0:
+        execution_sec = max(0.0, elapsed - compile_sec - queued_sec)
+    compile_frac = safe_div(compile_sec, elapsed)
+    # dedicated typical-run guard (COMPILE_RUN_PCT gates on >=1s compile; chatter is sub-second):
+    metadata_run_pct = _f(row, "COMPILE_DOMINANT_RUN_PCT", -1.0)
+    metadata_chatter = (
+        elapsed > 0 and compile_frac >= METADATA_COMPILE_FRACTION
+        and execution_sec <= METADATA_MAX_EXEC_SEC
+        and (metadata_run_pct < 0 or metadata_run_pct >= FINGERPRINT_COMPILE_TYPICAL_SHARE))
+    if metadata_chatter:
+        pts = _cap(10 + (compile_frac * 100 - 70) / 3, _CAP["metadata_chatter"])
+        findings.append(Finding(
+            "metadata_chatter", "warn", "Metadata chatter",
+            f"Compilation was {compile_frac * 100:.0f}% of a {elapsed:.1f}s runtime with only "
+            f"{execution_sec:.1f}s of execution — this is a metadata / discovery call (SHOW, "
+            "INFORMATION_SCHEMA, a SYSTEM$ probe, or a driver's schema introspection), not "
+            "warehouse work. A resize won't help. Reduce the CADENCE: cache the metadata, batch "
+            "the calls, pool connections, or quiet the tool issuing it (Operations > Queries > "
+            "cloud-services chatter by application shows who).",
+            pts))
+
     # 5) compile-bound
-    if (elapsed >= COMPILE_MIN_ELAPSED_SEC and safe_div(compile_sec, elapsed) > COMPILE_FRACTION
+    if (not metadata_chatter
+            and elapsed >= COMPILE_MIN_ELAPSED_SEC and safe_div(compile_sec, elapsed) > COMPILE_FRACTION
             and (compile_run_pct < 0 or compile_run_pct >= FINGERPRINT_COMPILE_TYPICAL_SHARE)):
         frac = safe_div(compile_sec, elapsed) * 100
         pts = _cap(10 + (frac - 50) / 5, _CAP["compile_bound"])

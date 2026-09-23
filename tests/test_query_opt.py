@@ -22,10 +22,13 @@ def test_builder_is_fingerprint_grain_with_the_advisor_columns():
     assert "COUNT(*) AS RUNS" in sql and "AS TOTAL_EXEC_SEC" in sql
     # the per-run columns the advisor reads must be present, by name
     for col in ("ELAPSED_SEC", "REMOTE_SPILL_GB", "LOCAL_SPILL_GB", "GB_SCANNED",
-                "COMPILE_SEC", "QUEUED_SEC", "PARTITIONS_SCANNED", "PARTITIONS_TOTAL",
-                "ROWS_PRODUCED", "WAREHOUSE_SIZE"):
+                "COMPILE_SEC", "EXECUTION_SEC", "QUEUED_SEC", "PARTITIONS_SCANNED",
+                "PARTITIONS_TOTAL", "ROWS_PRODUCED", "WAREHOUSE_SIZE"):
         assert f"AS {col}" in sql or col in sql, col
-    assert "ORDER BY TOTAL_EXEC_SEC DESC" in sql
+    # metadata-chatter surfacing (Phase 3): the compile-seconds footprint + its typical-run guard,
+    # and candidate selection by the GREATER footprint so a compile-dominated family isn't starved.
+    assert "AS TOTAL_COMPILE_SEC" in sql and "AS COMPILE_DOMINANT_RUN_PCT" in sql
+    assert "ORDER BY GREATEST(SUM(EXECUTION_TIME), SUM(COMPILATION_TIME)) DESC" in sql
     assert "EXECUTION_STATUS = 'SUCCESS'" in sql
     # Must share the QUERY_ID sibling's self-noise / CALL exclusions so the fingerprint
     # surface never ranks OVERWATCH's own queries, never double-counts CALL child compute in
@@ -118,6 +121,31 @@ def test_confidence_separate_from_severity_and_small_sample_penalised():
     assert by.loc["D", "CONFIDENCE"] < by.loc["B", "CONFIDENCE"]
     # confidence is not just severity: D has a high QOP but low confidence
     assert by.loc["D", "QOP"] >= 55 and by.loc["D", "CONFIDENCE"] <= 45
+
+
+def test_metadata_chatter_surfaces_via_the_compile_footprint_leg():
+    """A compile-dominated / metadata family does ~no warehouse execution, so ranking it by
+    exec-seconds alone buried it (OOS ~0). The compile-seconds impact leg gives it its honest
+    footprint, and advise labels it Metadata chatter with a resize-won't-help fix."""
+    frame = pd.DataFrame([
+        # two clean, execution-heavy families (no findings) — the chatter must not need them to be dirty
+        _row(FINGERPRINT="big", TOTAL_EXEC_SEC=10000.0, TOTAL_COMPILE_SEC=5.0, ELAPSED_SEC=10.0,
+             COMPILE_SEC=0.1, EXECUTION_SEC=9.9),
+        _row(FINGERPRINT="mid", TOTAL_EXEC_SEC=100.0, TOTAL_COMPILE_SEC=5.0, ELAPSED_SEC=5.0,
+             COMPILE_SEC=0.1, EXECUTION_SEC=4.9),
+        # chatter: tiny execution footprint, HUGE compile footprint, compile-dominated shape
+        _row(FINGERPRINT="chatter", TOTAL_EXEC_SEC=2.0, TOTAL_COMPILE_SEC=8000.0, ELAPSED_SEC=0.55,
+             COMPILE_SEC=0.54, EXECUTION_SEC=0.0, QUEUED_SEC=0.0, RUNS=10000,
+             COMPILE_DOMINANT_RUN_PCT=1.0, GB_SCANNED=0.0, PARTITIONS_TOTAL=0.0),
+    ])
+    by = score_opportunities(frame)[0].set_index("FINGERPRINT")
+    assert by.loc["chatter", "PATHOLOGY"] == "Metadata chatter"
+    assert by.loc["chatter", "QOP"] > 0
+    # its compile footprint is the largest -> impact ~100 via the compile leg -> OOS ~= QOP,
+    # not the ~QOP*0.33 it would get from its bottom exec-footprint percentile.
+    assert by.loc["chatter", "OOS"] >= by.loc["chatter", "QOP"] * 0.99
+    # it is the only family with an actionable finding, so it tops the board
+    assert score_opportunities(frame)[0].iloc[0]["FINGERPRINT"] == "chatter"
 
 
 def test_empty_in_empty_out():
