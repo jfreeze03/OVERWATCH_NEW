@@ -18,6 +18,7 @@ from app.config import MAX_LIVE_WINDOW_DAYS
 from app.core.query import run
 from app.data import app_cost_sql, cost_sql, insights_sql, mart27_sql, mart_sql
 from app.data.common import resolve_effective_window
+from app.logic import cs_driver
 from app.logic.anomaly import (
     ANOMALY_MIN_ACTIVE_DAYS,
     ANOMALY_MIN_USD,
@@ -791,8 +792,21 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
             # failed diagnosis redirecting the reader, not a good outcome.
             if guard(comp, f"No query family with {_fam_floor}+ runs averages >0.5s compile time — the "
                            "ratio driver is likely many tiny/metadata queries (see statement types below)."):
-                styled_table(comp.df)
+                # Phase 0 CS-driver intelligence: classify each family (metadata chatter /
+                # discovery / compile-heavy) and say whether a resize could even help, so the
+                # reader gets WHY it is elevated and WHO owns the fix, not just a compile list.
+                # Pure pandas over the already-fetched frame — no extra read, no new scan.
+                _fam_df = cs_driver.classify_families(comp.df)
+                styled_table(_fam_df)
                 result_caption(comp)
+                _summ = cs_driver.driver_summary(_fam_df)
+                if _summ["not_indicated"]:
+                    st.caption(
+                        f"{_summ['not_indicated']} of {_summ['total']} families are compile/metadata-shaped — "
+                        "**resize not indicated** (the cost lives in the cloud-services / compile layer, which a "
+                        "warehouse resize does not change). Route by the *Remediation owner* column — the fix is "
+                        "behavioural (cache metadata, cut polling / reconnects), not sizing. Cloud-services credits "
+                        "are gross usage, before the account-level ~10% rebate.")
             st.markdown("**Cloud-services credits by statement type**")
             # MART_CLOUD_SVC_DAILY carries per-query CS credits WITH a WAREHOUSE_NAME dimension
             # (K2 contract: cs_by_query_type_mart emits the same columns as cost_sql.cs_by_query_type),

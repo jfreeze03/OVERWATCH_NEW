@@ -61,6 +61,15 @@ COLUMN_HELP = {
            "fingerprint is (spill, poor pruning, exploding joins).",
     "SCAN_PCT": "% of partitions scanned; high = poor pruning (the filter isn't eliminating micro-partitions).",
     "CACHE_PCT": "% of scan bytes served from cache; low = cold scans hitting storage.",
+    # cloud-services driver intelligence (Phase 0)
+    "DRIVER_CLASS": "What this family IS — metadata chatter, discovery (JDBC/INFORMATION_SCHEMA/"
+                    "governance/stage), compile-heavy SQL, or normal work. Text-signature + compile-share based.",
+    "RESIZE_VERDICT": "Whether a warehouse resize could plausibly help. 'Resize not indicated' = the cost is "
+                      "compile/metadata in the cloud-services layer, which resizing does not touch.",
+    "REMEDIATION_OWNER": "Who most likely owns the fix (application / BI-IDE / data-eng / governance / platform) — "
+                         "behavioural (cache metadata, cut polling/reconnects), not a resize.",
+    "DRIVER_CONFIDENCE": "Classification confidence — HIGH for an unambiguous query-text signature, MEDIUM for a "
+                         "shape-only call, LOW for a thin sample.",
 }
 
 
