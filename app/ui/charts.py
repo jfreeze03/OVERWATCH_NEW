@@ -1030,8 +1030,7 @@ def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top
         bars = base.mark_bar(color=_ACCENT, cornerRadiusEnd=4).encode(y=enc_y, x=enc_x, tooltip=tip)
     labels = base.mark_text(align="left", dx=5, color=_LABEL, fontSize=11).encode(
         y=enc_y, x=enc_x, text=alt.Text("USD:Q", format=_fmt))
-    st.altair_chart(bars + labels, width="stretch")
-    if takeaway:
+    if takeaway:  # rec41: lead with the conclusion, above the chart
         # Share denominator is the FULL frame's total, not the head(top_n) sum — else
         # the top contributor's "% of $total" is overstated and the "$total" label
         # misrepresents the universe when the caller passes more than top_n rows
@@ -1040,6 +1039,7 @@ def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top
         if _full_total > 0:
             top = data.loc[data["USD"].idxmax()]
             st.caption(md_dollars(_share_note(str(top["Label"]), float(top["USD"]), _full_total)))
+    st.altair_chart(bars + labels, width="stretch")
 
 
 def clickable_bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, *, key: str,
@@ -1172,11 +1172,11 @@ def daily_stacked_count(df: pd.DataFrame, day_col: str, category_col: str,
                      alt.Tooltip("sum(Value):Q", format=",.0f", title=title)],
         )
     )
-    st.altair_chart(chart, width="stretch")
-    if takeaway:  # rec35: lead with the conclusion
+    if takeaway:  # rec41: lead with the conclusion, above the chart
         _g = data.assign(_v=pd.to_numeric(data["Value"], errors="coerce")).groupby("Category")["_v"].sum()
         if float(_g.sum()) > 0:
             st.caption(_share_note(str(_g.idxmax()), float(_g.max()), float(_g.sum()), dollars=False))
+    st.altair_chart(chart, width="stretch")
 
 
 def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "", top_n: int = 10,
@@ -1210,8 +1210,7 @@ def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "",
     labels = _enc.mark_text(align="left", dx=5, color=_LABEL, fontSize=11).encode(
         text=alt.Text("ValueText:N") if _dur else alt.Text("Value:Q", format=value_fmt))
     chart = bars + labels
-    st.altair_chart(chart, width="stretch")
-    if takeaway:
+    if takeaway:  # rec41: lead with the conclusion, above the chart
         # Full-frame total as the share denominator (see bar_usd): a head(top_n) sum
         # would overstate the top contributor's share of the universe.
         _full_total = float(pd.to_numeric(df[value_col], errors="coerce").fillna(0).sum())
@@ -1221,6 +1220,7 @@ def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "",
                 str(top["Label"]), float(top["Value"]), _full_total, dollars=False,
                 value_fmt=value_fmt,
                 value_fn=(lambda v: _fmt_metric_value(v, unit)) if _dur else None))
+    st.altair_chart(chart, width="stretch")
 
 
 def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col: str,
@@ -1262,18 +1262,25 @@ def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col
             ],
         )
     )
-    st.altair_chart(chart, width="stretch")
-    if takeaway:  # rec35: lead with the conclusion
+    if takeaway:  # rec41: lead with the conclusion, above the chart
         _g = data.assign(_v=pd.to_numeric(data["USD"], errors="coerce")).groupby("Category")["_v"].sum()
         if float(_g.sum()) > 0:
             st.caption(md_dollars(_share_note(str(_g.idxmax()), float(_g.max()), float(_g.sum()))))
+    st.altair_chart(chart, width="stretch")
 
 
-def sparkline_row(items: list[tuple[str, pd.DataFrame, str, str]]) -> None:
-    """Row of tiny trend lines: [(label, df, day_col, value_col), ...].
-    A KPI without direction is half a number — these add the direction."""
+def sparkline_row(items: list[tuple]) -> None:
+    """Row of tiny trend lines: [(label, df, day_col, value_col[, unit]), ...].
+    A KPI without direction is half a number — these add the direction.
+
+    rec38: the tooltip now reads the real measure + unit instead of a generic "Day"/"Value".
+    `label` titles the value line; the optional 5th tuple element is the unit token
+    (usd|credits|count|sec|...) formatted via _fmt_metric_value, so a $ spark reads "$1,240"
+    and a credit spark "1,240 cr". A 4-tuple (no unit) stays backward-compatible (unit "")."""
     cols = st.columns(len(items))
-    for slot, (label, df, day_col, value_col) in zip(cols, items, strict=True):
+    for slot, item in zip(cols, items, strict=True):
+        label, df, day_col, value_col = item[0], item[1], item[2], item[3]
+        unit = item[4] if len(item) > 4 else ""
         with slot:
             st.caption(label)
             if df is None or getattr(df, "empty", True):
@@ -1281,13 +1288,18 @@ def sparkline_row(items: list[tuple[str, pd.DataFrame, str, str]]) -> None:
                 continue
             data = df[[day_col, value_col]].copy()
             data.columns = ["Day", "Value"]
+            data["Day"] = pd.to_datetime(data["Day"], errors="coerce")
+            # Altair d3 formats can't do the ' cr' suffix or Hr/Min/Sec, so pre-format the
+            # value into a text column (the bar_count pattern) and tooltip that instead.
+            data["ValueText"] = data["Value"].map(lambda v, u=unit: _fmt_metric_value(v, u))
             chart = (
                 _base(data)
                 .mark_area(line={"size": 2}, opacity=0.25)
                 .encode(
                     x=alt.X("Day:T", axis=None),
                     y=alt.Y("Value:Q", axis=None),
-                    tooltip=["Day:T", "Value:Q"],
+                    tooltip=[alt.Tooltip("Day:T", title="Day", format=_DAY_TIP_FMT),
+                             alt.Tooltip("ValueText:N", title=label)],
                 )
                 .properties(height=56)
             )
@@ -1331,11 +1343,8 @@ def hour_heatmap(df: pd.DataFrame, row_col: str, hour_col: str, value_col: str,
         )
         .properties(height=max(120, 24 * data["Row"].nunique()))
     )
-    st.altair_chart(chart, width="stretch")
-    if capped_note:
-        st.caption(capped_note)
-    if takeaway:  # rec35: name the hottest cell (positional + coerced, so a
-        # non-unique index or a non-integer Hour can never crash the render)
+    if takeaway:  # rec41: name the hottest cell FIRST, above the heatmap (positional +
+        # coerced, so a non-unique index or a non-integer Hour can never crash the render)
         _v = pd.to_numeric(data["Value"], errors="coerce").reset_index(drop=True)
         _h = pd.to_numeric(data["Hour"], errors="coerce").reset_index(drop=True)
         _r = data["Row"].reset_index(drop=True)
@@ -1344,6 +1353,9 @@ def hour_heatmap(df: pd.DataFrame, row_col: str, hour_col: str, value_col: str,
             if pd.notna(_h.iloc[_p]):
                 st.caption(f"Hottest: {_r.iloc[_p]} at hour "
                            f"{int(_h.iloc[_p]):02d} ({format(float(_v.iloc[_p]), value_fmt)}).")
+    st.altair_chart(chart, width="stretch")
+    if capped_note:  # a cap CAVEAT stays BELOW the chart (rec41: footnotes don't lead)
+        st.caption(capped_note)
 
 
 def operational_replay(df: pd.DataFrame, credits: pd.DataFrame | None = None) -> None:
@@ -1748,8 +1760,7 @@ def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,
                 .encode(x="Day:T", y=alt.value(2), text="_t:N")
             )
             chart = chart + label
-    st.altair_chart(chart.properties(height=CHART_H_SM), width="stretch")
-    # rec35 / CoCo UI#14: name the peak day so the line leads with a conclusion.
+    # rec41 (was rec35 / CoCo UI#14): name the peak day ABOVE the line so it leads with a conclusion.
     if takeaway and not data.empty:
         _v = pd.to_numeric(data["Value"], errors="coerce").dropna()
         if not _v.empty and float(_v.max()) > 0:
@@ -1757,6 +1768,7 @@ def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,
             _pday = pd.to_datetime(data.loc[_v.idxmax(), "Day"], errors="coerce")
             _ds = _pday.strftime("%b %d") if pd.notna(_pday) else str(data.loc[_v.idxmax(), "Day"])
             st.caption(f"Peak {_fmt_metric_value(_peak, unit)} on {_ds}.")
+    st.altair_chart(chart.properties(height=CHART_H_SM), width="stretch")
 
 
 def events_by_day(df: pd.DataFrame, day_col: str = "DAY", severity_col: str = "SEVERITY",
@@ -1790,13 +1802,13 @@ def events_by_day(df: pd.DataFrame, day_col: str = "DAY", severity_col: str = "S
                      "Severity:N", alt.Tooltip("sum(Events):Q", title="Events")],
         )
     )
-    st.altair_chart(chart, width="stretch")
-    if takeaway:  # rec35: name the worst day
+    if takeaway:  # rec41: name the worst day, above the chart
         _by_day = data.assign(_v=pd.to_numeric(data["Events"], errors="coerce")).groupby("Day")["_v"].sum()
         if float(_by_day.sum()) > 0:
             _dl = pd.to_datetime(_by_day.idxmax(), errors="coerce")
             _ds = _dl.strftime("%b %d") if pd.notna(_dl) else str(_by_day.idxmax())
             st.caption(f"Most events: {_ds} ({float(_by_day.max()):,.0f}).")
+    st.altair_chart(chart, width="stretch")
 
 def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
                         usd_col: str, partial_month: str = "",
@@ -1856,10 +1868,10 @@ def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
             opacity=_provisional_opacity("_PARTIAL"),   # C38: label dims with its bar
         )
     )
-    st.altair_chart((bars + labels).properties(height=280), width="stretch")
-    # rec35 / CoCo UI#14: lead the boss chart with its conclusion — the top spender.
+    # rec41 (was rec35 / CoCo UI#14): lead the boss chart with its conclusion — the top spender.
     if takeaway and float(totals.sum()) > 0:
         st.caption(md_dollars(_share_note(str(totals.index[0]), float(totals.iloc[0]), float(totals.sum()))))
+    st.altair_chart((bars + labels).properties(height=280), width="stretch")
 
 
 def paired_bars(df: pd.DataFrame, label_col: str, a_col: str, b_col: str,

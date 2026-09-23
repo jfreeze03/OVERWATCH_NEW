@@ -2653,7 +2653,11 @@ def master_detail(df, *, key: str, id_col: str, list_render_fn, detail_render_fn
             if row is not None:
                 detail_render_fn(row)
             else:
-                st.caption(empty_detail_msg)
+                # rec25: dress the empty detail pane with the shared empty_state primitive
+                # instead of a bare caption. "no_data_yet" is the neutral quiet-caption kind
+                # (its render is st.caption(message)), so this is pixel-identical to before but
+                # routes through the same empty-state vocabulary as the rest of the app.
+                empty_state("no_data_yet", empty_detail_msg)
 
 
 def blast_radius(warehouse: str, page: str) -> None:

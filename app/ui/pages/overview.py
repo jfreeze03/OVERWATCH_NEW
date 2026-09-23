@@ -1123,8 +1123,8 @@ def render() -> None:
         # sparkline_row keeps only the series that chart does NOT carry (queries,
         # failures) so it stops duplicating the trend chart.
         charts.sparkline_row([
-            ("Queries, 14d", adf, "DAY", "QUERIES"),
-            ("Failures, 14d", adf, "DAY", "FAILS"),
+            ("Queries, 14d", adf, "DAY", "QUERIES", "count"),
+            ("Failures, 14d", adf, "DAY", "FAILS", "count"),
         ])
         # The note reflects which LEG actually served. _live_fallback_daily is now mart-first, so
         # `using_mart` (which tracks only the exec_board leg) being False no longer implies a live

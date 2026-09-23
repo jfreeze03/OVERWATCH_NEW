@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.586.0 - Codex visual review — backlog wave (rec 25 / 8 / 38 / 41) (2026-09-23)
+
+The remaining small valid-gap recs from the adjudication, each grounded in a parallel understand
+pass. Presentation/structure only; per-page `ACCOUNT_USAGE` counts (control_room 4, overview 1,
+brief 0) and the `test_v451_trust` reachable sets are unchanged; no preserved item touched.
+
+- **rec 25** — the master/detail empty detail pane now renders through the shared `empty_state`
+  primitive (kind `no_data_yet`) instead of a bare `st.caption`, so an unselected pane speaks the
+  same empty-state vocabulary as the rest of the app. Pixel-identical output (that kind renders a
+  quiet caption); fixes every master_detail site at once.
+- **rec 8** — Control Room ▸ Incidents & triage now leads with the actionable open-incident
+  worklist and trails it with the 14-day lifecycle Gantt (the count/summary still leads of all). A
+  pure render reorder — the dense worklist (selection, drill, close, bulk-resolve, every widget
+  key) is untouched; only the inert Gantt block moved down.
+- **rec 38** — sparklines thread the real measure + unit into the tooltip (via the shared
+  `_fmt_metric_value`): a date reads "Aug 12, 2026" instead of a midnight timestamp, and the value
+  carries its unit ("$1,240" / "1,240 cr" / "5,432") titled by its measure instead of a generic
+  "Day"/"Value". The unit rides as an optional 5th tuple element, so 4-tuple callers are unchanged.
+- **rec 41** — genuine one-line takeaways (top contributor, peak day, hottest cell) now render
+  ABOVE their chart in 8 chart helpers, so the reader gets the conclusion first; caveats/legends/
+  lag notes (spend_trend, workload_portfolio, the heatmap's "Top 20 of N" cap) deliberately stay
+  BELOW. The takeaway-computing code is byte-identical — only the emit order changed.
+
+4-pin version bump 4.585.0 → 4.586.0 + CHANGELOG.
+
 ## 4.585.0 - Codex visual review — M/L projects wave (rec 5 / 3 / 6 / 33 / 36) (2026-09-23)
 
 The five worthwhile M/L projects from the adjudication, each grounded in a parallel understand

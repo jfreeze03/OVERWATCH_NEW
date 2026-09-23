@@ -532,7 +532,7 @@ def render() -> None:
     brief_spend_series: list[float] = []
     if spend.ok and not spend.empty:
         spark_df = daily_spend_last_n(spend.df, 14)
-        charts.sparkline_row([("Spend, 14 days", spark_df, "DAY", "CREDITS_BILLED")])
+        charts.sparkline_row([("Spend, 14 days", spark_df, "DAY", "CREDITS_BILLED", "credits")])
         if {"CREDITS_BILLED_OTHER", "CREDITS_BILLED_AI"}.issubset(spark_df.columns):
             brief_spend_series = [
                 blended_billed_usd(row["CREDITS_BILLED_OTHER"], row["CREDITS_BILLED_AI"],

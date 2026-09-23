@@ -37,8 +37,9 @@ def test_primitive_binds_by_identity_and_persists_stickily():
     # a deep-link preselect wins and clears the sticky selection so it can't clobber
     assert "if preselect_id:" in body
     assert "st.session_state.pop(table_key, None)" in body
-    # nothing selected -> the empty hint, never row 0's editor
-    assert "if row is not None:" in body and "st.caption(empty_detail_msg)" in body
+    # nothing selected -> the empty hint (rec25: via the shared empty_state primitive,
+    # kind no_data_yet = a quiet caption), never row 0's editor
+    assert "if row is not None:" in body and 'empty_state("no_data_yet", empty_detail_msg)' in body
 
 
 def test_action_center_deeplink_is_one_shot():
