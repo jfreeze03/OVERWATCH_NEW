@@ -119,8 +119,8 @@ def test_v127_is_the_latest_full_loader_definition() -> None:
 
 def test_v127_floor_tracks_the_tip() -> None:
     v = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V149 applied" in v
-    assert "BETWEEN 1 AND 149) = 149" in v
+    assert "V001..V150 applied" in v
+    assert "BETWEEN 1 AND 150) = 150" in v
 
 
 def test_v127_is_tracked_in_deploy_and_admin_surfaces() -> None:

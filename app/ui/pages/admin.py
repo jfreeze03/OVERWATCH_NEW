@@ -615,6 +615,12 @@ _EXPECTED_MIGRATIONS = {
          "SP_LOAD_QH_EXTRACT from V094 (the current definition) so the extract INSERT/SELECT fill them "
          "-- byte-identical otherwise. Foundation for cloud-services driver/application attribution; "
          "nothing reads them yet. Tail CALL(3) reloads the 72h extract. Additive, no backfill",
+    150: "COST_CLOUD_SVC_ANOMALY per-entity cloud-services baseline: SP_SCAN_CLOUD_SVC_ANOMALY books an "
+         "alert per (warehouse, day) whose gross CS credits from MART_CLOUD_SVC_DAILY are a robust-z "
+         "(0.6745/0.7979, 28d) outlier vs the warehouse's own baseline -- the per-entity replacement for "
+         "the fixed 10/20% CS-ratio threshold (a chronically compile-heavy warehouse stays in-baseline). "
+         "CS-credit volume floor, not the $50 compute floor. Adds the COST_CLOUD_SVC_ANOMALY rule + a CALL "
+         "arm in SP_ANOMALY_SWEEP (re-derived from V133); rides TASK_ANOMALY_SWEEP, no new task",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

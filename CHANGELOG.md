@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.581.0 - Cloud-services driver intelligence, Phase 2: per-entity anomaly baseline (V150) (2026-09-23)
+
+Replaces the fixed 10/20% cloud-services **ratio** threshold as the primary "is this warehouse's cloud
+services a problem" signal with a **per-warehouse robust-z baseline** — so a chronically compile-heavy
+discovery warehouse (like WH_ALFA_QA) sits in-baseline instead of re-alerting every day, while a genuine
+step-change fires. This is the alert-fatigue fix the investigation called for.
+
+- **V150** (owner-applied): new `SP_SCAN_CLOUD_SVC_ANOMALY` books one `COST_CLOUD_SVC_ANOMALY` alert per
+  `(warehouse, day)` whose gross CS credits from `MART_CLOUD_SVC_DAILY` are a robust median/MAD modified-z
+  outlier (0.6745 / 0.7979 fallback, 28-day window — the same engine as the `COST_ANOMALY_SWEEP` arm and
+  `app/logic/anomaly.robust_zscores`) vs the warehouse's own prior baseline. Materiality is a **CS-credit
+  volume floor, not the $50 compute floor** (cloud-services credits are tiny — a dollar gate would suppress
+  real CS step-changes). CS credits are gross usage, never billable.
+- Adds the `COST_CLOUD_SVC_ANOMALY` `ALERT_CONFIG` rule (COST / MEDIUM, ENABLED) + a guarded CALL arm in
+  `SP_ANOMALY_SWEEP` **re-derived from V133 — its current definition** (the sweep was re-derived across
+  V012…V097…V122…V132/V133; an older base would drop the intervening arms). Rides the existing daily
+  `TASK_ANOMALY_SWEEP` cadence — **no new task**; proc otherwise byte-identical (`outputs/gen_v150.py` +
+  `test_v150_regenerates_byte_identical`). A `COST_CLOUD_SVC_ANOMALY` playbook routes first response.
+- Full lockstep: validate floor 150, `_EXPECTED_MIGRATIONS[150]`, rebuild bundle regen, teardown drop,
+  37 migration-test pins, DEPLOYMENT/README, 4-pin version bump 4.580.0 → 4.581.0 + CHANGELOG. The fixed
+  `COST_CLOUD_SVC_RATIO` rule is left in place (retiring it is a separate owner call).
+
 ## 4.580.0 - Cloud-services driver intelligence, Phase 1b: chatter-by-application panel (2026-09-23)
 
 The **WHO** axis of cloud-services driver intelligence: a new Operations ▸ Queries panel that

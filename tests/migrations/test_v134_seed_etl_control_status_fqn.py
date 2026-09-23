@@ -52,7 +52,7 @@ def test_control_status_wired_across_config_sites():
 
 def test_validate_and_docs_track_v134():
     val = _read("snowflake/validate.sql")
-    assert "V001..V149 applied" in val and "VERSION BETWEEN 1 AND 149) = 149" in val
+    assert "V001..V150 applied" in val and "VERSION BETWEEN 1 AND 150) = 150" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V134__seed_etl_control_status_fqn.sql" in _read(rel)
 
