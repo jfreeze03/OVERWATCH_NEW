@@ -1,5 +1,37 @@
 # Changelog
 
+## 4.578.0 - Cloud-services driver intelligence, Phase 0 (app-only, no migration) (2026-09-23)
+
+First slice of the Cloud Services Driver / Metadata Chatter investigation (see
+`docs/reviews/CLOUD_SERVICES_DRIVER_INTELLIGENCE_INVESTIGATION_2026-09-23.md`). Turns the
+existing Cost ▸ Spend & Attribution "compile-heavy query families" panel from a compile-time
+list into a **classified, owner-routed, resize-aware** driver view — with no schema change and
+no new query (pure decoration over the already-fetched frame).
+
+- **New pure module `app/logic/cs_driver.py`** — classifies each family into a Phase-0 subset
+  of the driver taxonomy (System generated / Governance-Cortex / JDBC-ODBC / INFORMATION_SCHEMA /
+  Stage-file discovery, Compile heavy, Metadata chatter, Normal, Unknown) from the query-text
+  signature + compile share + run count, with HIGH/MEDIUM/LOW confidence; emits a **resize
+  verdict** (`Resize not indicated` for anything whose cost lives in the compile/cloud-services
+  layer, else `Insufficient evidence` — the two states Phase 0 can support honestly) and a
+  **remediation owner** (application / BI-IDE / data-eng / governance / platform). Reuses
+  `query_advisor.COMPILE_FRACTION` so "compile-dominated" matches the per-query advisor.
+- **Panel (`cost_parts/spend.py`)** now shows Driver class / Confidence / Resize verdict /
+  Remediation owner on the compile-heavy family table, plus a disclosure caption: how many
+  families are compile/metadata-shaped (resize not indicated), route by owner, and that
+  cloud-services credits are **gross usage before the account-level ~10% rebate**. No extra read,
+  no scan-budget change.
+- **`metric_registry.COLUMN_HELP`** entries for the four new columns; **15 tests** in
+  `tests/test_cs_driver.py` (the observed FBE / JDBC / INFORMATION_SCHEMA / stage / governance
+  families classify correctly; thin samples decay confidence; never mutates the caller frame;
+  never crashes on NaN/missing columns).
+
+Deliberate Phase-0 boundaries (documented in the module): the per-warehouse drill stays on the
+live builder rather than the CS>0 mart (so zero-credit metadata storms like FBE are not censored);
+`RESIZE MAY HELP` is never asserted without spill/queue evidence; the `IS_CLIENT_GENERATED_STATEMENT`
+flag, APP-INIT correlation, and connection-churn detection are deferred to Phase 1 (they need
+columns not in the mart/extract today). No migration; owner-applied phases follow.
+
 ## 4.577.0 - Migration V148: restore CoCo/CoWork AI-rate broadening on the exec board (2026-09-22)
 
 Bug-hunt round 13 found the one loader-side defect the read-layer hunts couldn't see: V123
