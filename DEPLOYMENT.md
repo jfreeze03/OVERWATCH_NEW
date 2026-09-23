@@ -164,6 +164,7 @@ snowflake/migrations/V145__ledger_autobook_stamp_finding_type.sql
 snowflake/migrations/V146__ai_usage_loader_repoint_ai_functions.sql
 snowflake/migrations/V147__operator_stats_identity_grain.sql
 snowflake/migrations/V148__exec_board_ai_predicate_restore_coco.sql
+snowflake/migrations/V149__qh_extract_session_client_columns.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

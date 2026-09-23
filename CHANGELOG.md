@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.579.0 - Cloud-services driver intelligence, Phase 1: migration V149 (2026-09-23)
+
+Foundation for **application/driver attribution** of cloud-services metadata chatter. Adds
+`SESSION_ID` and `IS_CLIENT_GENERATED_STATEMENT` to the single-scan staging table
+`OW_QH_EXTRACT` so a later phase can join `ACCOUNT_USAGE.SESSIONS` on `SESSION_ID` to name the
+client application / driver behind a chatter family, and separate platform/driver-issued
+statements from user-authored ones. Both columns already exist on `ACCOUNT_USAGE.QUERY_HISTORY`.
+
+- **V149** (owner-applied): `ALTER OW_QH_EXTRACT ADD COLUMN IF NOT EXISTS SESSION_ID` /
+  `IS_CLIENT_GENERATED_STATEMENT` (idempotent), then re-derive `SP_LOAD_QH_EXTRACT` so the extract
+  INSERT/SELECT fill them. **Derived from V094 — the *current* definition** (the loader was
+  re-derived across V041/V042/V055/V056/V062/V094; deriving from an older base would silently drop
+  the intervening changes, the V047-from-V036 / V148-from-V073 class). Byte-identical to V094
+  otherwise; the byte-lock is `outputs/gen_v149.py` + `test_v149_regenerates_byte_identical`. The
+  tail `CALL SP_LOAD_QH_EXTRACT(3)` reloads the 72h extract so the columns populate immediately.
+- **Nothing reads the columns yet** — the driver/application attribution panel is the next app
+  step (a live `SESSIONS × QUERY_HISTORY` cut, or a properly-designed mart cut that avoids the
+  grain-key-change double-count hazard). Additive schema change, no backfill. Full migration
+  lockstep (validate floor 149, `_EXPECTED_MIGRATIONS[149]`, rebuild bundle regen, 36 migration-test
+  pins, DEPLOYMENT/README, 4-pin version bump + CHANGELOG). Staged on `runbox` after V148.
+
 ## 4.578.0 - Cloud-services driver intelligence, Phase 0 (app-only, no migration) (2026-09-23)
 
 First slice of the Cloud Services Driver / Metadata Chatter investigation (see

@@ -610,6 +610,11 @@ _EXPECTED_MIGRATIONS = {
          "AI rate ($2.20) and labels 'AI/Cortex:' on the Overview COST_DRIVER_SVC panel, matching "
          "ai_service_predicate() and every other AI-rate surface. V123 silently dropped it when "
          "re-derived from the pre-V079 V073 base. Proc-only re-derive + re-CALL; no schema change",
+    149: "OW_QH_EXTRACT session/client columns: ADD COLUMN SESSION_ID + IS_CLIENT_GENERATED_STATEMENT "
+         "(both on ACCOUNT_USAGE.QUERY_HISTORY) to the single-scan staging copy and re-derive "
+         "SP_LOAD_QH_EXTRACT from V094 (the current definition) so the extract INSERT/SELECT fill them "
+         "-- byte-identical otherwise. Foundation for cloud-services driver/application attribution; "
+         "nothing reads them yet. Tail CALL(3) reloads the 72h extract. Additive, no backfill",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
