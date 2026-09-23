@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.587.0 - Codex visual review — taste calls (rec 12 / 13) (2026-09-23)
+
+The two owner-approved taste calls from the adjudication, CSS-only in `theme.py`. No page/query
+change; per-page `ACCOUNT_USAGE` counts and `test_v451_trust` sets untouched.
+
+- **rec 12** — small metadata that rendered ~10.5–11px now sits at the ~11.5–12px small floor:
+  the breadcrumb (0.68→0.75rem), the provenance chip (11→12px), the hero companion label and the
+  triage sub-label (0.66/0.68→0.72rem). Nothing metadata remains below the floor.
+- **rec 13** — metric/data labels are now **sentence-case**: dropped `text-transform:uppercase`
+  and the 0.06em tracking from the st.metric label, KPI card title, hero label + companion label,
+  stat key, and triage label (the label strings are already written sentence-case in Python, so
+  they now render as authored). The provenance and section **chips keep their uppercase tracking**
+  — a chip reads as a chip. This reverses the earlier "uppercase tracked labels are deliberate"
+  choice (`test_ui_round4`) per owner request; that lock is updated accordingly.
+
+4-pin version bump 4.586.0 → 4.587.0 + CHANGELOG.
+
 ## 4.586.0 - Codex visual review — backlog wave (rec 25 / 8 / 38 / 41) (2026-09-23)
 
 The remaining small valid-gap recs from the adjudication, each grounded in a parallel understand

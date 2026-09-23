@@ -89,7 +89,7 @@ p,li,span,label,.stMarkdown { color:var(--ow-ink-soft); }
 [data-testid="stMetricValue"],.ow-num,td,th { font-variant-numeric:tabular-nums; }
 
 /* F9: Group ▸ Page ▸ Section orientation kicker above the page title. */
-.ow-breadcrumb { font-size:0.68rem; font-weight:600; letter-spacing:0.01em;
+.ow-breadcrumb { font-size:0.75rem; font-weight:600; letter-spacing:0.01em;  /* rec12: ~11px -> 12px */
   color:var(--ow-ink-mute); margin:0 0 2px 1px; }
 .ow-page-heading { display:flex; align-items:center; gap:11px; margin:-2px 0 2px 0; }
 .ow-page-heading h1 { margin:0; padding:0; font-size:var(--fs-title); font-weight:750; letter-spacing:0; }
@@ -110,7 +110,7 @@ div[data-testid="stMetric"] {
    on every card and taught the eye that color carries nothing. */
 div[data-testid="stMetric"]::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px;
   background:var(--ow-ink-mute); opacity:0.55; }
-[data-testid="stMetricLabel"] p { font-size:0.76rem !important; letter-spacing:0.06em; text-transform:uppercase; color:var(--ow-ink-mute) !important; font-weight:640; }
+[data-testid="stMetricLabel"] p { font-size:0.76rem !important; letter-spacing:0; color:var(--ow-ink-mute) !important; font-weight:640; }  /* rec13: sentence-case, no tracking */
 /* F13: one KPI value size on both KPI surfaces (st.metric + metric_card_html). */
 [data-testid="stMetricValue"] { font-size:1.55rem; font-weight:720; color:var(--ow-ink); }
 .ow-sev-bad div[data-testid="stMetric"]::before { background:var(--ow-bad); opacity:1; }
@@ -137,7 +137,7 @@ div[data-testid="stMetric"]::before { content:""; position:absolute; left:0; top
 .ow-card::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px; border-radius:var(--ow-r) 0 0 var(--ow-r); background:var(--ow-ink-mute); }
 .ow-card--ok::before { background:var(--ow-ok); } .ow-card--warn::before { background:var(--ow-warn); }
 .ow-card--bad::before { background:var(--ow-bad); } .ow-card--info::before { background:var(--ow-info); }
-.ow-src-badge { font-size:11px; letter-spacing:0.08em; text-transform:uppercase; border:1px solid; border-radius:8px; padding:1px 6px; white-space:nowrap; }
+.ow-src-badge { font-size:12px; letter-spacing:0.08em; text-transform:uppercase; border:1px solid; border-radius:8px; padding:1px 6px; white-space:nowrap; }  /* rec12: 11px -> 12px; chip stays uppercase */
 /* the chips group right-aligns and, on a long two-chip $ card, wraps to its own
    line instead of shrinking the label (the old float:right was dead on a flex child). */
 .ow-card__chips { margin-left:auto; display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
@@ -147,7 +147,7 @@ div[data-testid="stMetric"]::before { content:""; position:absolute; left:0; top
 .ow-src-badge--other { color:#8b98ad; border-color:rgba(139,152,173,0.3); }
 .ow-src-badge--method { color:#c084fc; border-color:rgba(192,132,252,0.35); }  /* rec 13: how derived */
 .ow-src-badge--scope { color:#a5b4cf; border-color:rgba(165,180,207,0.4); }    /* rec 13: account-wide / company */
-.ow-card__title { font-size:0.76rem; letter-spacing:0.06em; text-transform:uppercase; color:var(--ow-ink-mute); font-weight:640; display:flex; align-items:center; gap:7px; }
+.ow-card__title { font-size:0.76rem; letter-spacing:0; color:var(--ow-ink-mute); font-weight:640; display:flex; align-items:center; gap:7px; }  /* rec13: sentence-case */
 .ow-card__value { font-size:1.55rem; font-weight:720; color:var(--ow-ink); margin-top:3px; font-variant-numeric:tabular-nums; }
 .ow-card__meta { font-size:0.78rem; color:var(--ow-ink-soft); margin-top:2px; }
 
@@ -158,7 +158,7 @@ div[data-testid="stMetric"]::before { content:""; position:absolute; left:0; top
 .ow-hero { display:flex; flex-wrap:wrap; align-items:flex-end; justify-content:space-between;
   gap:10px 34px; margin:2px 0 10px; padding:0 0 12px; border-bottom:1px solid var(--ow-hairline); }
 .ow-hero__main { display:flex; flex-direction:column; gap:2px; min-width:0; }
-.ow-hero__label { font-size:0.74rem; letter-spacing:0.06em; text-transform:uppercase;
+.ow-hero__label { font-size:0.74rem; letter-spacing:0;  /* rec13: sentence-case */
   color:var(--ow-ink-mute); font-weight:640; display:flex; align-items:center; gap:7px; }
 .ow-hero__value { font-size:2.3rem; font-weight:770; color:var(--ow-ink); line-height:1.04;
   font-variant-numeric:tabular-nums; }
@@ -167,7 +167,7 @@ div[data-testid="stMetric"]::before { content:""; position:absolute; left:0; top
 .ow-hero--ok .ow-hero__value { color:var(--ow-ok); }
 .ow-hero__companions { display:flex; flex-wrap:wrap; gap:8px 26px; align-items:flex-end; }
 .ow-hero__c { display:flex; flex-direction:column; gap:1px; }
-.ow-hero__c-label { font-size:0.68rem; letter-spacing:0.05em; text-transform:uppercase;
+.ow-hero__c-label { font-size:0.72rem; letter-spacing:0;  /* rec12 ~11px->11.5px + rec13 sentence-case */
   color:var(--ow-ink-mute); font-weight:600; display:flex; align-items:center; gap:5px; }
 .ow-hero__c-value { font-size:1.18rem; font-weight:700; color:var(--ow-ink-soft);
   font-variant-numeric:tabular-nums; }
@@ -275,7 +275,7 @@ div[data-testid="stMetric"]::before { content:""; position:absolute; left:0; top
 .ow-stat::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px; border-radius:var(--ow-r-sm) 0 0 var(--ow-r-sm); background:var(--ow-accent); }
 .ow-stat--ok::before { background:var(--ow-ok); } .ow-stat--warn::before { background:var(--ow-warn); }
 .ow-stat--bad::before { background:var(--ow-bad); } .ow-stat--info::before { background:var(--ow-info); }
-.ow-stat__k { font-size:0.72rem; letter-spacing:0.06em; text-transform:uppercase; color:var(--ow-ink-mute); font-weight:640; }
+.ow-stat__k { font-size:0.72rem; letter-spacing:0; color:var(--ow-ink-mute); font-weight:640; }  /* rec13: sentence-case */
 .ow-stat__v { font-size:1.04rem; font-weight:720; color:var(--ow-ink); font-variant-numeric:tabular-nums; display:flex; align-items:center; gap:6px; }
 .ow-stat__spark { margin-top:2px; opacity:0.9; }
 .st-key-ow_status_actions { margin-top:-14px; margin-bottom:8px; }
@@ -308,8 +308,8 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.ow-scope-active){
 .ow-triage-title{height:2.28rem;display:flex;align-items:center;gap:0.4rem;
   overflow:hidden;white-space:nowrap;}
 .ow-triage-label{line-height:1;color:var(--ow-ink);font-size:0.73rem;font-weight:760;
-  letter-spacing:0.06em;text-transform:uppercase;flex:0 0 auto;}
-.ow-triage-sub{line-height:1;color:var(--ow-ink-mute);font-size:0.66rem;font-weight:600;
+  letter-spacing:0;flex:0 0 auto;}  /* rec13: sentence-case */
+.ow-triage-sub{line-height:1;color:var(--ow-ink-mute);font-size:0.72rem;font-weight:600;  /* rec12: ~10.5px->11.5px */
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;}
 .ow-kicker { font-size:0.75rem; letter-spacing:0; font-weight:750; color:var(--ow-ink-mute); margin-bottom:0.1rem; }
 .ow-brand { display:flex; align-items:center; gap:9px; }

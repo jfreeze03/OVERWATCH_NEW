@@ -80,5 +80,9 @@ def test_dashboard_surfaces_hold_still():
     assert "translateY" not in _THEME                              # calm hover (r4 #11)
     assert "--ow-r:8px" in _THEME                                  # tightened radii (r4 #12)
     assert "letter-spacing:0; color:var(--ow-ink)" in _THEME       # zero heading tracking
-    # the kicker's uppercase tracking is a deliberate label style — keep it
-    assert "letter-spacing:0.06em" in _THEME
+    # rec13 (owner taste call, v4.587.0): metric/data labels are now SENTENCE-CASE — the old
+    # uppercase + 0.06em tracking on stMetricLabel/ow-card__title/ow-hero__label/ow-stat__k/
+    # ow-triage-label was dropped. Deliberate uppercase tracking now lives ONLY on the chips
+    # (provenance src-badge, section badge), which read as chips, not labels.
+    assert "letter-spacing:0.06em" not in _THEME                   # no metric-label tracking remains
+    assert ".ow-src-badge { font-size:12px; letter-spacing:0.08em; text-transform:uppercase" in _THEME
