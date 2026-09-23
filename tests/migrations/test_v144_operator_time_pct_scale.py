@@ -59,7 +59,7 @@ def test_v144_is_proc_only_and_matches_v143_except_the_scale():
 
 def test_validate_and_docs_track_v144():
     val = _read("snowflake/validate.sql")
-    assert "V001..V148 applied" in val and "VERSION BETWEEN 1 AND 148) = 148" in val
+    assert "V001..V149 applied" in val and "VERSION BETWEEN 1 AND 149) = 149" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V144__operator_time_pct_scale.sql" in _read(rel)
 
