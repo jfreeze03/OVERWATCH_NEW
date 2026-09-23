@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.580.0 - Cloud-services driver intelligence, Phase 1b: chatter-by-application panel (2026-09-23)
+
+The **WHO** axis of cloud-services driver intelligence: a new Operations ▸ Queries panel that
+attributes metadata / compile chatter to the **client application / driver** generating it —
+the complement to the Cost ▸ Spend compile-heavy family panel (the WHAT axis, Phase 0). App-only,
+live, **no migration dependency** (the `SESSION_ID` join is valid at the live `QUERY_HISTORY` grain,
+and `IS_CLIENT_GENERATED_STATEMENT` is a live `QUERY_HISTORY` column — V149's extract columns only
+matter for a future mart-backed cut).
+
+- **New `app/data/chatter_sql.py`**: `chatter_by_application` joins `QUERY_HISTORY` to `SESSIONS`
+  on `SESSION_ID` (reusing the V077 `_APP_EXPR` application identifier) and groups the chatter
+  footprint (metadata-only OR compile-dominated, self-noise excluded) by application — RUNS,
+  footprint-weighted compile %, total compile seconds, gross CS credits, distinct users/sessions,
+  and client-generated %. `chatter_families_for_application` returns a selected app's chatter
+  families shaped for the Phase-0 `cs_driver` classifier. SESSIONS is scanned 7d wider (it lags
+  ~3h) so an in-window statement keeps its application.
+- **Operations ▸ Queries panel** (toggle-gated, off first paint): the application table + KPIs,
+  then a per-application drill that classifies that app's families (JDBC / INFORMATION_SCHEMA /
+  metadata chatter / …) and says whether a resize could help. Account-wide by nature (metadata
+  has no warehouse — disclosed); a warehouse filter narrows to the compile-heavy portion. CS
+  credits labeled gross usage before the ~10% account rebate; application name is self-reported.
+- **Locks**: operations.py reachable-tables pin gains `SESSIONS` (deliberate, `test_v451_trust`);
+  page live-scan budget unchanged (source labels name the views without the "ACCOUNT_USAGE"
+  literal, the at-budget convention — the builders' real reads live in the data layer).
+  `tests/test_chatter_sql.py` (shape / parse / scope-escaping / bounds / reachable-set / feeds the
+  classifier). 4-pin version bump 4.579.0 → 4.580.0 + CHANGELOG.
+
 ## 4.579.0 - Cloud-services driver intelligence, Phase 1: migration V149 (2026-09-23)
 
 Foundation for **application/driver attribution** of cloud-services metadata chatter. Adds
