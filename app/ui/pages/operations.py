@@ -18,6 +18,7 @@ from app.core.sqlsafe import sql_literal
 from app.core.state import filters, navigation_context, request_navigation
 from app.data import (
     change_impact_sql,
+    chatter_sql,
     dq_sql,
     etl_control_sql,
     insights_sql,
@@ -28,6 +29,7 @@ from app.data import (
     workbench_sql,
 )
 from app.logic import (
+    cs_driver,
     failure_advisor,
     proc_regression,
     query_advisor,
@@ -603,6 +605,68 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                     _qid = st.session_state.get("_ops_opprofile_qid")
                     if _qid and _qid in _bqids and st.session_state.get("_ops_opprofile_src") in ("ex", "sp"):
                         _drill_anatomy(_qid)
+
+    # Phase 1b — Cloud-services chatter by application: WHO (client app / driver) generates
+    # the metadata / compile chatter, the complement to the Cost ▸ Spend family panel (WHAT).
+    # Live QUERY_HISTORY × SESSIONS (no mart), account-wide (metadata has no warehouse),
+    # toggle-gated off first paint. Reuses the Phase-0 cs_driver classifier on the per-app drill.
+    section_header("Cloud-services chatter by application", "", "search")
+    _chat_on = st.toggle(
+        "Attribute metadata / compile chatter to the client application & driver",
+        key="ops_chatter_toggle",
+        help="Joins each metadata / compile statement to the session that ran it, to name the "
+             "client application / driver behind the chatter (who to talk to). Account-wide — "
+             "metadata statements have no warehouse. One live QUERY_HISTORY × SESSIONS scan; off first paint.")
+    if _chat_on:
+        _chat = run(
+            chatter_sql.chatter_by_application(days, wh_filter, user_filter, bounds=bounds),
+            page=_PAGE, key=f"chatter_app_{company}_{days}{_lm}", tier="historical",
+            source="QUERY_HISTORY × SESSIONS (chatter by application, live)")
+        if _chat.ok and _chat.empty:
+            empty_state("clean", "No metadata / compile chatter in this window / scope.")
+        elif guard(_chat, "No metadata / compile chatter in this window / scope."):
+            _cdf = _chat.df
+            _apps = len(_cdf)
+            _top = str(_cdf.iloc[0]["APPLICATION"]) if _apps else "—"
+            _unknown = int(_cdf[_cdf["APPLICATION"] == "(unknown)"]["RUNS"].sum()) if _apps else 0
+            kpi_row([
+                {"label": "Applications", "value": f"{_apps:,}",
+                 "help": "Distinct client applications / drivers generating metadata or compile-heavy "
+                         "statements this window (self-reported; unresolved sessions bucket as '(unknown)')."},
+                {"label": "Top driver", "value": _top},
+                {"label": "Unresolved runs", "value": f"{_unknown:,}",
+                 "help": "Runs from sessions whose client program did not self-report (many ODBC / "
+                         "legacy tools leave it blank)."},
+            ])
+            _sel_app = selectable_table(
+                _cdf, key="ops_chatter_sel", sort_label="by runs desc",
+                column_config={
+                    "COMPILE_PCT": st.column_config.NumberColumn("Compile %", format="%.1f%%"),
+                    "CLIENT_GEN_PCT": st.column_config.NumberColumn("Client-gen %", format="%d%%"),
+                    "CS_CREDITS": st.column_config.NumberColumn("CS credits", format="%.4f"),
+                })
+            result_caption(_chat)
+            st.caption("Who is generating the chatter. Client-gen % = the share issued by the driver / "
+                       "UI itself (not a user). Cloud-services credits are gross usage, before the "
+                       "account-level ~10% rebate; the application name is self-reported. Click an "
+                       "application to classify its chatter families and see whether a resize could help.")
+            if _sel_app is not None and 0 <= int(_sel_app) < len(_cdf):
+                _app = str(_cdf.iloc[int(_sel_app)]["APPLICATION"])
+                _fam = run(
+                    chatter_sql.chatter_families_for_application(_app, days, wh_filter, user_filter, bounds=bounds),
+                    page=_PAGE, key=f"chatter_fam_{company}_{days}_{_app}{_lm}", tier="historical",
+                    source="QUERY_HISTORY × SESSIONS (chatter families for application, live)")
+                if guard(_fam, f"No classifiable chatter families for {_app} in this window."):
+                    st.markdown(f"**Chatter families for {_app}**")
+                    _cls = cs_driver.classify_families(_fam.df)
+                    styled_table(_cls)
+                    result_caption(_fam)
+                    _summ = cs_driver.driver_summary(_cls)
+                    if _summ["not_indicated"]:
+                        st.caption(
+                            f"{_summ['not_indicated']} of {_summ['total']} families are compile / "
+                            "metadata-shaped — resize not indicated; the fix is behavioural (cache "
+                            "metadata, cut polling / reconnects), owned by this application's team.")
 
     section_header("Optimization triage", "", "optimize")
     _triage_on = st.toggle(
