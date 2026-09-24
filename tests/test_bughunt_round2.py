@@ -84,9 +84,12 @@ def test_brief_verdict_uses_uncapped_incident_count():
     # v4.457 (round 23): the success-only `if _inc.ok and _n_inc > 0` became
     # `if not _inc.ok: warn / elif _n_inc > 0: bad` so a FAILED incident read no longer
     # reads as a green all-clear — but the uncapped-count intent is unchanged.
-    assert "elif _n_inc > 0:" in brief
-    assert 'f"{_n_inc} open incident(s)"' in brief
-    assert 'Signal("warn", "open-incident count unavailable")' in brief   # failed-read guard
+    # Next-Fifty #1: the Signal moved into the shared verdict.attention_signals; the Brief passes the
+    # UNCAPPED _n_inc (or None on a failed read -> the warn) into the bundle.
+    verdict = _src("app/logic/verdict.py")
+    assert "open_incidents=(_n_inc if _inc.ok else None)" in brief
+    assert 'f"{b.open_incidents} open incident(s)"' in verdict
+    assert 'Signal("warn", "open-incident count unavailable")' in verdict   # failed-read guard
     assert "len(_inc.df)} open incident(s)" not in brief   # the capped form is gone
 
 

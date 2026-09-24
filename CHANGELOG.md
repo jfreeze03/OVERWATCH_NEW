@@ -1,5 +1,88 @@
 # Changelog
 
+## 4.589.0 - Next Fifty — wave 1b (ranks 1 / 5 / 9 / 19 / 20 / 21 / 25 / 7A / 4) (2026-09-24)
+
+Second slice of the "OVERWATCH Next Fifty" review's wave 1, stacked on 4.588.0. App-only (no numbered
+migration); per-page `ACCOUNT_USAGE` counts are unchanged (operations 42, security 31, brief 0,
+overview 1, control_room 4). `test_v451_trust` reachable pins grow deliberately: Security
++POLICY_REFERENCES (#9, toggle + probe gated), Admin +WAREHOUSE_METERING_HISTORY + the three Cortex usage
+views (#25, toggle-gated Canary tab).
+
+- **#1 one morning truth** — the Brief's ETL fire read ONE workflow (the globally-newest RUN_ID), so a
+  failure elsewhere — or a nightly workflow that never ran — was a false morning all-clear. New
+  `etl_control_sql.cycle_night_health_scan` rolls up EVERY workflow for tonight (FAILED / MISSING /
+  RUNNING / PENDING, retries collapsed, uncapped totals) and the Brief and the Control Room verdicts now
+  compose the SAME shared `verdict.attention_signals` from the SAME reads (new `app/ui/attention.py`).
+  Operations ▸ Pipeline ▸ Tonight leads with a "Tonight at a glance" panel. Visible changes: the Brief
+  verdict now also fires on undelivered criticals / stale telemetry; the Control Room verdict now fires on
+  open incidents, ETL failed / missing / not-started, the cycle SLA and XLAT gaps.
+- **#5 one change is never booked twice** — the app no longer inserts a manual ledger row for a guarded
+  resize / auto-suspend change (the daily change scan autobooks and settles it on measured actuals); a
+  manual row the settled auto row supersedes is excluded from every ledger read and rollup (Brief
+  "Estimated pipeline", DS ROI, proven-fix evidence) and offered for an audited REJECT on Cost ▸ Optimize ▸
+  Savings ledger. Policy call to confirm: when the auto row settled REJECTED but a manual twin was
+  operator-VERIFIED, the measured verdict wins.
+- **#9 password sign-in deprecation readiness** — Security ▸ Access grades every enabled password holder /
+  LEGACY_SERVICE user / admin WILL BREAK / MIGRATE / READY for Snowflake's single-factor password
+  retirement (rolling Aug–Oct 2026) with review-then-run ALTER USER stubs, an "Admins with password and no
+  MFA" KPI (regardless of recent logins), probe-gated admin network-policy coverage, and a service-account
+  band on the dormant / reawakening scans. Every new read degrades to needs-setup, never a false red/green.
+- **#19 exec runway from billing truth** — Brief, Overview and the Cost verdict read the org
+  REMAINING_BALANCE_DAILY (storage + transfer included) when readable and <=3 days old, else the
+  configured-credits model; the basis is badged and a >15% gap is disclosed. COST_CONTRACT_BREACH stays on
+  credits. Expect the runway to read shorter on accounts with org visibility.
+- **#20 the action queue names a person** — an owner picker (OPERATOR_USERS) replaces the free-text 'DBA'
+  default; team labels count as Unassigned (expect the Unassigned KPI to jump on first deploy); 'Assigned
+  to me'; DEFER_UNTIL honored in counts and top-N; acceptance dated by COMPLETED_AT; Brief asks open their
+  item. Fixes a live defect: unassign wrote OWNER = NULL into a NOT NULL column (V005) and failed — it now
+  writes the 'UNASSIGNED' sentinel.
+- **#21 ETL rows name the redeploy** — failure-recurrence / drift / creep rows gain CHANGED_RECENTLY (the
+  task's stored-procedure redeploy from OBJECT_CHANGE_REGISTRY: date · who · verdict).
+- **#25 the recon covers what chargeback is built on** — mart-vs-live reconciliation adds warehouse credits
+  and (separately, probe-gated) the AI facts; a NULL drift with credits still in the mart now reads BAD
+  (was OK). Drill coverage made honest both ways: QAS and PIPE are drillable, Snowflake Intelligence is a
+  service total, the AI-functions grain is function × model.
+- **#7 Slice A (self-traffic)** — one shared tag-or-marker predicate (`common.app_self_sql` /
+  `not_app_self_sql`) for every self-noise filter; the Admin note no longer claims app queries are tagged
+  (owner's-rights SiS rejects ALTER SESSION) and the always-0 "App queries" shows "—"; new OVERWATCH
+  run-cost $ (attributed per pipeline vs metered) and shared-warehouse queueing by hour. The per-statement
+  tagging transport (Slice B) waits for the owner's probe.
+- **#4 out-of-band dead-man emails** — the opt-in email template gains three watchers (stale telemetry OR
+  a loader failure, a lost alert-scan heartbeat, failing Teams delivery), aligned to the hourly chain's
+  warm window; teardown + rebuild bundle updated; the runbook's Diagnose query fixed (SQL_ERROR_MESSAGE);
+  Alerts ▸ Native delivery gains an "Email path" health row (red only on positive failure evidence).
+
+**Adversarial review (10 agents; 21 findings confirmed — 19 fixed before commit, 2 documented):**
+- #1: the next-cycle-overdue check grades EVERY expected night since the last kickoff (a missed Monday after
+  a weekday-only Friday was a false 'nightly ETL cycle clean'); the healthy text only claims 'clean' when no
+  workflow is still running/pending; the Control Room reads incident metrics at the Brief's live tier.
+- #5: a new pure `remediation.autobook_books_change` mirrors the change scan's direction filters, so the app
+  still books what the scan CAN'T (a first auto-suspend on a never-suspend warehouse; a resize from 5X/6X-Large);
+  the Alerts closed loop stamps its lever + warehouse so its $0 row is twin-matchable (MAX_CLUSTERS joins the
+  autobooked levers); the acceptance funnel drops twins from estimated/rejected too.
+- #9: the auth inventory is risk-ordered before its 1000-row cap and a capped read never shows the green
+  'everyone is ready'; an unset-TYPE password user whose disuse is unproven grades WILL BREAK.
+- #19: the org-balance 'not visible' memo re-probes after the app's Refresh.
+- #20: 'Assigned to me' keeps the open/deep-linked item; the action feed sorts deferred items last before
+  the cap and carries uncapped deferred totals; Overview no longer calls an all-deferred queue 'done'.
+- #21: a dedicated PROCEDURE-only, one-row-per-object feed (the shared registry read was LIMIT 200 over every
+  change type) and the CHANGED_RECENTLY label names the database.
+- #7A: the marker is spelled as a split constant so the diagnostic builders don't count themselves as app
+  traffic; run-cost shows '—' (not $0) with no pipeline rows; 'worst hour' names an hour only if one queued.
+- #4: a readable send / evaluation failure is red even when the alerts themselves aren't visible.
+- #4 (owner probe 2026-09-24): the send-history read passes `START_TIME =>` —
+  `NOTIFICATION_HISTORY` rejects `START_TIME_RANGE_START`, so the Email path row could never read its
+  send history; the runbook pre-flight's `AS SAMPLE` alias (a reserved word) is now `SAMPLE_MSG`.
+- Documented, not changed: a re-run started after noon keys to the next night (the house night-key
+  convention shared with the SLA forecast); Overview's platform score still counts deferred HIGH/CRITICAL
+  items (changing the headline score is an owner decision).
+
+Owner-side (none blocking): re-run `snowflake/native_alert_templates.sql` with the real recipient after the
+pre-flight (#4); the read-only probes for #4 / #7 / #9 / #25 are staged as a separate runbox file (never over
+the pending V148-V150).
+
+4-pin version bump 4.588.0 → 4.589.0 + CHANGELOG.
+
 ## 4.588.0 - Next Fifty — wave 1a (ranks 3 / 16 / 17 / 18 / 22 / 23 / 24 / 6) (2026-09-24)
 
 First slice of the "OVERWATCH Next Fifty" review's wave 1. App-only, no migrations; per-page

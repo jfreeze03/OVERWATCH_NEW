@@ -21,6 +21,23 @@ _TYPES = ("PROCEDURE", "TASK")
 _NAME_RE = re.compile(r"^[A-Za-z0-9_$.]{1,600}$")
 
 
+def proc_redeploys(days: int = 30) -> str:
+    """Next-Fifty #21: the latest PROCEDURE redeploy per object in the trailing ``days`` — the feed the ETL
+    failure / drift / creep panels annotate from. PROCEDURE-only and one row per object BEFORE the LIMIT,
+    so TASK rows and other environments' churn can't push a recent redeploy past the cap (the generic
+    change_registry read is LIMIT 200 over every change type)."""
+    days = bounded_days(days, 120)
+    return f"""
+SELECT OBJECT_TYPE, DATABASE_NAME, SCHEMA_NAME, OBJECT_NAME, CHANGE_SEEN_AT, CHANGED_BY, VERDICT
+FROM {core_object("OBJECT_CHANGE_REGISTRY")}
+WHERE OBJECT_TYPE = 'PROCEDURE'
+  AND CHANGE_SEEN_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+QUALIFY ROW_NUMBER() OVER (PARTITION BY OBJECT_NAME ORDER BY CHANGE_SEEN_AT DESC) = 1
+ORDER BY CHANGE_SEEN_AT DESC
+LIMIT 2000
+"""
+
+
 def change_registry(days: int, company: str = "ALL", database: str = "",
                     schema_contains: str = "") -> str:
     """Tracked object changes: frozen baseline vs post-change stats + verdict."""

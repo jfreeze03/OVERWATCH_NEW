@@ -45,7 +45,7 @@ def _fake_execute(*_args, **_kwargs):
 def _stub_runtime(monkeypatch):
     import app.main as main_mod
     from app.config import DEFAULT_SETTINGS
-    from app.ui import ai_panel, components
+    from app.ui import ai_panel, attention, components
     from app.ui.pages import admin, alerts, control_room, cost, operations, overview, security
     from app.ui.pages.cost_parts import ai_chargeback, contract, optimize, spend
 
@@ -57,7 +57,7 @@ def _stub_runtime(monkeypatch):
     monkeypatch.setattr(components, "load_settings", lambda _page: dict(settings))
 
     for module in (overview, control_room, cost, operations, alerts, security, admin,
-                   spend, contract, ai_chargeback, optimize):
+                   spend, contract, ai_chargeback, optimize, attention):
         if hasattr(module, "run"):
             monkeypatch.setattr(module, "run", _fake_run)
         if hasattr(module, "execute_statement"):

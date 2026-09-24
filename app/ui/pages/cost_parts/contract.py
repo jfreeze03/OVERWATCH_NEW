@@ -14,6 +14,7 @@ import pandas as pd
 import streamlit as st
 
 from app.core.query import run
+from app.core.result import QueryResult
 from app.data import cost_sql, insights_sql, mart27_sql, mart_sql, security_sql
 from app.logic import contract_planner, steering
 from app.logic.forecast import contract_pace
@@ -42,6 +43,25 @@ from app.ui.components import (
 )
 
 _PAGE = "Cost Intelligence"
+
+_ORG_BAL_ABSENT = "_ow_org_balance_absent"
+
+
+def org_balance_result(page: str) -> QueryResult | None:
+    """cost-08: THE org-balance read (Brief/Overview/Cost verdict/Contract share ONE (sql,scope)
+    cache entry via ORG_BALANCE_DAYS). probe=True: an ungranted org view is the expected
+    answer, not an error. run() never caches failures, so an 'absent' answer is memoized for
+    the session and callers get None instead of re-paying a failing query every rerun."""
+    # the memo carries the refresh generation, so the app's Refresh re-probes (a new org grant is seen)
+    _gen = str(st.session_state.get("_ow_refresh_salt") or "")
+    if st.session_state.get(_ORG_BAL_ABSENT) == ("absent", _gen):
+        return None
+    res = run(cost_sql.org_remaining_balance(contract_planner.ORG_BALANCE_DAYS), page=page,
+              key="org_balance", tier="historical",
+              source="ORGANIZATION_USAGE.REMAINING_BALANCE_DAILY", probe=True)
+    if not res.ok and res.error_kind == "absent":
+        st.session_state[_ORG_BAL_ABSENT] = ("absent", _gen)
+    return res
 
 
 # Split out of app/ui/pages/cost.py (V028): section bodies only —
@@ -108,9 +128,8 @@ def _org_truth_panel() -> bool:
     dates. Zero configuration — when the role can see the views this panel
     is the truth, and the SETTINGS-based credits pacing below becomes the
     steering layer. Returns True when it rendered."""
-    bal = run(cost_sql.org_remaining_balance(120), page=_PAGE, key="org_balance",
-              tier="historical", source="ORGANIZATION_USAGE.REMAINING_BALANCE_DAILY")
-    if not bal.usable():
+    bal = org_balance_result(_PAGE)   # the ONE shared read (Brief / Overview / Cost verdict share it)
+    if bal is None or not bal.usable():
         st.caption(
             "Snowflake's contract balance (ORGANIZATION_USAGE.REMAINING_BALANCE_DAILY) "
             "isn't visible to this role, so pacing uses SETTINGS below. Granting org "
@@ -713,7 +732,8 @@ def _contract_tab(settings: dict) -> None:
                    f"{contract_credits - consumed:,.0f} credits (SETTINGS) at that rate."
                    + (" The 'Runway at this burn' KPI above is the BALANCE-based answer "
                       "(org billing dollars, which also carry storage and transfer) — it "
-                      "normally lands earlier, and it is the one to trust."
+                      "normally lands earlier, and it is the one to trust. Brief, Overview and the "
+                      "Cost verdict use it whenever it is readable."
                       if org_shown else
                       " Grant ORGANIZATION_USAGE for the balance-based answer, which "
                       "also counts the storage and transfer dollars this one cannot see.")))

@@ -23,7 +23,7 @@ from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters, navigation_context, request_navigation
 from app.data import alert_evidence_sql, mart_sql, recheck_sql, security_sql
-from app.logic import remediation, tuning
+from app.logic import email_path, remediation, tuning
 from app.logic.ai_prompts import alert_evidence_prompt
 from app.logic.alert_evidence import plan_for_alert
 from app.logic.formulas import account_now, humanize_age, humanize_duration, md_dollars, safe_float
@@ -463,6 +463,24 @@ def _delivery_status() -> None:
                  f"({', '.join(missing)}) — alerts stay in-app only. One-time setup: "
                  "snowflake/webhook_delivery.sql (SNOW_ACCOUNTADMINS pastes the channel URL), "
                  "or repoint the route in ALERT_ROUTES.")
+
+
+def _email_path_status() -> None:
+    """Next-Fifty #4: health of the opt-in EMAIL path (SHOW ALERTS + ALERT_HISTORY +
+    NOTIFICATION_HISTORY(OVERWATCH_EMAIL)). Red only on positive failure evidence; a privilege
+    gap or an uninstalled opt-in reads unverifiable / not visible, never red."""
+    objs = run(mart_sql.email_alert_objects(), page=_PAGE, key="email_alert_objs", tier="recent",
+               source="SHOW ALERTS", max_rows=0, probe=True)
+    hist = run(mart_sql.email_alert_history(3), page=_PAGE, key="email_alert_hist", tier="recent",
+               source="INFORMATION_SCHEMA.ALERT_HISTORY", probe=True)
+    notif = run(mart_sql.email_notification_history(7), page=_PAGE, key="email_notif_hist",
+                tier="recent", source="INFORMATION_SCHEMA.NOTIFICATION_HISTORY (OVERWATCH_EMAIL)",
+                probe=True)
+    v = email_path.email_path_verdict(objs.df if objs.ok else None, hist.df if hist.ok else None,
+                                      notif.df if notif.ok else None, mart_sql.EMAIL_ALERT_NAMES)
+    {"ok": st.success, "warn": st.warning, "bad": st.error}.get(v.severity, st.info)(md_dollars(v.headline))
+    if v.detail:
+        st.caption(md_dollars(v.detail))
 
 
 def _stale_rebind(sel: int, event_id: str, bound: object) -> bool:
@@ -1198,12 +1216,19 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                         from app.ui.components import log_ui_event
                                         log_ui_event("remediation_exec", page=_PAGE)
                                     if ok:
+                                        # Next-Fifty #5 (review fix): stamp the lever + warehouse so the ledger's
+                                        # twin rule supersedes this $0 row once the change scan's measured row settles
+                                        # (the scan books auto-suspend and cluster-cap changes itself).
+                                        _cl_lever = ("AUTO_SUSPEND" if fix_kind.startswith("Tighten")
+                                                     else "STATEMENT_TIMEOUT" if fix_kind.startswith("Statement")
+                                                     else "MAX_CLUSTERS")
                                         execute_statement(
                                             f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
-                                            "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES) "
+                                            "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES, FINDING_TYPE, TARGET_OBJECT) "
                                             f"SELECT {sql_literal(fix_kind + ' on ' + wh_inline + ' (alert closed loop)')}, "
                                             f"'ESTIMATED', 0, {sql_literal(stmt_cl)}, "
-                                            f"{sql_literal('From alert event ' + event_id[:8] + '; verifier measures actuals.')}",
+                                            f"{sql_literal('From alert event ' + event_id[:8] + '; verifier measures actuals.')}, "
+                                            f"{sql_literal(_cl_lever)}, {sql_literal(wh_inline)}",
                                             page=_PAGE)
                                     stamp_write(f"clf_exec_{event_id[:8]}", ok)  # C48
                                     notify(ok, msg)
@@ -1789,6 +1814,7 @@ def render() -> None:
 
     else:
         _delivery_status()
+        _email_path_status()
         _last_delivery_card()
         st.markdown("**Routing (family → channel)**")
         panel_help(

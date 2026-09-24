@@ -48,8 +48,11 @@ def test_effect_line_offers_clear_owner_and_defer_via_v092_flags():
     assert '"unassign the owner"' in block
     assert '"clear the defer (resume now)"' in block
     assert 'elif owner.strip() and owner.strip() != _cur_owner:' in block
-    # the flags are threaded into the write
-    assert "clear_owner=_clear_owner," in block and "clear_defer=_clear_defer," in block
+    # the flags are threaded into the write. Next-Fifty #20: OWNER is NOT NULL (V005), so an unassign
+    # writes the UNASSIGNED sentinel through the COALESCE-keep path instead of V092's NULL clear.
+    assert "clear_owner=False," in block
+    assert "owner=UNASSIGNED_OWNER if _clear_owner else owner," in block
+    assert "clear_defer=_clear_defer," in block
     # unchanged: null-aware due (an undated row is never sent a fabricated today+7)
     assert "_due_arg = due if (_had_due or _due_changed) else None" in block
     assert "due_date=_due_arg," in block

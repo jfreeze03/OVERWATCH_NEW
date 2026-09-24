@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from app import companies
 from app.config import core_object, mart_object
-from app.core.sqlsafe import contains_filter, sql_literal
+from app.core.sqlsafe import contains_filter, in_list, sql_literal
 from app.data.common import (
     and_where,
     bounded_days,
     resolve_effective_window,
     scope_window_where,
 )
+from app.logic.identity_auth import SERVICE_TYPES
 
 # --- Admin-role tiers (codified AS-IS per owner decision 2026-09-10; byte-identical to the
 # former inlined literals — one source of truth, no behaviour change). Two single-use sites
@@ -354,6 +355,119 @@ SELECT
 FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
 WHERE {where}
 ORDER BY ROLE, USER_NAME
+"""
+
+
+def user_auth_inventory(company: str = "ALL") -> str:
+    """rank 9: auth-readiness inventory for the single-factor password deprecation — every
+    enabled user who holds a password, is LEGACY_SERVICE, or DIRECTLY holds an ELEVATED_ROLES
+    role, with TYPE / HAS_RSA_PUBLIC_KEY / HAS_PASSWORD / HAS_MFA and 30-day password-login
+    evidence (LEFT-joined: a no-recent-login admin must still surface, unlike users_without_mfa).
+    Pre-LIMIT window totals (TOTAL_CANDIDATES, ADMIN_PW_NO_MFA_TOTAL) keep headline counts honest
+    under the cap. The page runs this probe=True — TYPE / HAS_RSA_PUBLIC_KEY are first reads here."""
+    where = and_where(
+        "U.DELETED_ON IS NULL",
+        "COALESCE(U.DISABLED, FALSE) = FALSE",
+        "(COALESCE(U.HAS_PASSWORD, FALSE) = TRUE"
+        " OR UPPER(COALESCE(U.TYPE, '')) = 'LEGACY_SERVICE'"
+        " OR A.GRANTEE_NAME IS NOT NULL)",
+        companies.user_clause(company, "U.NAME"),
+    )
+    return f"""
+WITH password_logins AS (
+    SELECT USER_NAME,
+           SUM(PASSWORD_LOGINS) AS PASSWORD_LOGINS_30D,
+           MAX(IFF(PASSWORD_LOGINS > 0, DAY, NULL)) AS LAST_PASSWORD_LOGIN
+    FROM {core_object('FACT_LOGIN_DAILY')}
+    WHERE DAY >= DATEADD('day', -30, CURRENT_DATE())
+    GROUP BY USER_NAME
+), admin_grants AS (
+    SELECT GRANTEE_NAME,
+           LISTAGG(ROLE, ', ') WITHIN GROUP (ORDER BY ROLE) AS ADMIN_ROLES
+    FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
+    WHERE DELETED_ON IS NULL
+      AND {_admin_roles_in("ROLE", ELEVATED_ROLES)}
+    GROUP BY GRANTEE_NAME
+), inv AS (
+    SELECT
+        U.NAME AS USER_NAME,
+        U.LOGIN_NAME,
+        U.EMAIL,
+        NULLIF(UPPER(TRIM(U.TYPE)), '') AS USER_TYPE,
+        COALESCE(U.HAS_PASSWORD, FALSE) AS HAS_PASSWORD,
+        COALESCE(U.HAS_MFA, FALSE) AS HAS_MFA,
+        COALESCE(U.HAS_RSA_PUBLIC_KEY, FALSE) AS HAS_RSA_PUBLIC_KEY,
+        U.LAST_SUCCESS_LOGIN,
+        PL.PASSWORD_LOGINS_30D,
+        PL.LAST_PASSWORD_LOGIN,
+        A.GRANTEE_NAME IS NOT NULL AS IS_ADMIN,
+        A.ADMIN_ROLES
+    FROM SNOWFLAKE.ACCOUNT_USAGE.USERS U
+    LEFT JOIN password_logins PL ON PL.USER_NAME = U.NAME
+    LEFT JOIN admin_grants A ON A.GRANTEE_NAME = U.NAME
+    WHERE {where}
+)
+SELECT inv.*,
+       COUNT(*) OVER () AS TOTAL_CANDIDATES,
+       SUM(IFF(IS_ADMIN AND HAS_PASSWORD AND NOT HAS_MFA, 1, 0)) OVER () AS ADMIN_PW_NO_MFA_TOTAL
+FROM inv
+-- risk first before the cap: LEGACY_SERVICE, then password-without-MFA, then admins, then usage
+ORDER BY IFF(USER_TYPE = 'LEGACY_SERVICE', 0, 1), IFF(HAS_PASSWORD AND NOT HAS_MFA, 0, 1),
+         IS_ADMIN DESC, COALESCE(PASSWORD_LOGINS_30D, 0) DESC, USER_NAME
+LIMIT 1000
+"""
+
+
+def service_users() -> str:
+    """rank 9: names of non-human users (USERS.TYPE in identity_auth.SERVICE_TYPES) so the dormant
+    and reawakening scans can band service accounts separately. Account-wide name membership only;
+    the page runs it probe=True and falls back to one unbanded table if TYPE is unreadable."""
+    where = and_where("U.DELETED_ON IS NULL", in_list("U.TYPE", tuple(sorted(SERVICE_TYPES))))
+    return f"""
+SELECT U.NAME AS USER_NAME, UPPER(U.TYPE) AS USER_TYPE
+FROM SNOWFLAKE.ACCOUNT_USAGE.USERS U
+WHERE {where}
+ORDER BY U.NAME
+"""
+
+
+def admin_network_policy_coverage(company: str = "ALL") -> str:
+    """rank 9: which directly-granted admin users (ELEVATED_ROLES) carry a USER-level network
+    policy. POLICY_REFERENCES is UNVERIFIED on this account for USER-domain network-policy rows
+    (docs list network policies as supported, up to 2h latency), so the page runs this probe=True
+    and treats USER_POLICY_REFS = 0 as needs_setup, never as 'no admin is covered'. Account-level
+    (CIS 3.1) and service-account (CIS 3.2) coverage are Trust Center CIS scanners — not duplicated."""
+    where = and_where(
+        "DELETED_ON IS NULL",
+        _admin_roles_in("ROLE", ELEVATED_ROLES),
+        companies.user_clause(company, "GRANTEE_NAME"),
+    )
+    return f"""
+WITH admins AS (
+    SELECT GRANTEE_NAME AS USER_NAME,
+           LISTAGG(ROLE, ', ') WITHIN GROUP (ORDER BY ROLE) AS ADMIN_ROLES
+    FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
+    WHERE {where}
+    GROUP BY GRANTEE_NAME
+), np AS (
+    SELECT UPPER(REF_ENTITY_DOMAIN) AS REF_DOMAIN, REF_ENTITY_NAME, POLICY_NAME
+    FROM SNOWFLAKE.ACCOUNT_USAGE.POLICY_REFERENCES
+    WHERE POLICY_KIND = 'NETWORK_POLICY'
+), np_totals AS (
+    SELECT COUNT(*) AS NETWORK_POLICY_REFS,
+           COUNT_IF(REF_DOMAIN = 'USER') AS USER_POLICY_REFS
+    FROM np
+)
+SELECT A.USER_NAME,
+       A.ADMIN_ROLES,
+       MAX(NP.POLICY_NAME) AS USER_NETWORK_POLICY,
+       T.NETWORK_POLICY_REFS,
+       T.USER_POLICY_REFS
+FROM admins A
+CROSS JOIN np_totals T
+LEFT JOIN np NP ON NP.REF_DOMAIN = 'USER' AND NP.REF_ENTITY_NAME = A.USER_NAME
+GROUP BY A.USER_NAME, A.ADMIN_ROLES, T.NETWORK_POLICY_REFS, T.USER_POLICY_REFS
+ORDER BY USER_NETWORK_POLICY NULLS FIRST, A.USER_NAME
 """
 
 

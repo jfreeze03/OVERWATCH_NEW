@@ -118,18 +118,23 @@ _REACHABLE = {
         # v4.300 (Upgrade Board P1 #20): + TABLES & TAG_REFERENCES for the
         # object-tag governance coverage panel (probe-gated; TABLES is the verified
         # inventory denominator, TAG_REFERENCES the unverified tag-assignment side).
+        # v4.589 (Next-Fifty #9): + POLICY_REFERENCES for the admin network-policy coverage panel
+        # (toggle- and probe-gated, off first paint).
         "ACCESS_HISTORY", "CORTEX_AI_GUARDRAILS_USAGE_HISTORY",
         "CORTEX_CODE_CLI_USAGE_HISTORY", "CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY",
         "CREDENTIALS", "DATA_TRANSFER_HISTORY", "GRANTS_TO_ROLES",
-        "GRANTS_TO_USERS", "LOGIN_HISTORY", "QUERY_HISTORY", "ROLES", "SESSIONS",
+        "GRANTS_TO_USERS", "LOGIN_HISTORY", "POLICY_REFERENCES", "QUERY_HISTORY", "ROLES", "SESSIONS",
         "TABLES", "TABLE_STORAGE_METRICS", "TAG_REFERENCES", "USERS"),
     "app/ui/pages/alerts.py": (),
     # v4.52: + the object-ledger recon builder (Codex #7) — QAH and the five
     # maintenance-arm source histories, click-gated on the Canary tab.
+    # v4.589 (Next-Fifty #25): mart-vs-live recon gains the warehouse + AI arms (toggle-gated Canary tab).
     "app/ui/pages/admin.py": (
-        "AUTOMATIC_CLUSTERING_HISTORY", "MATERIALIZED_VIEW_REFRESH_HISTORY",
-        "METERING_DAILY_HISTORY", "PIPE_USAGE_HISTORY", "QUERY_ATTRIBUTION_HISTORY",
-        "QUERY_HISTORY", "SEARCH_OPTIMIZATION_HISTORY", "SERVERLESS_TASK_HISTORY"),
+        "AUTOMATIC_CLUSTERING_HISTORY", "CORTEX_AI_FUNCTIONS_USAGE_HISTORY",
+        "CORTEX_CODE_CLI_USAGE_HISTORY", "CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY",
+        "MATERIALIZED_VIEW_REFRESH_HISTORY", "METERING_DAILY_HISTORY", "PIPE_USAGE_HISTORY",
+        "QUERY_ATTRIBUTION_HISTORY", "QUERY_HISTORY", "SEARCH_OPTIMIZATION_HISTORY",
+        "SERVERLESS_TASK_HISTORY", "WAREHOUSE_METERING_HISTORY"),
 }
 
 

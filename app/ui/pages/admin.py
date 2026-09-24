@@ -627,6 +627,21 @@ _EXPECTED_MIGRATIONS = {
 # reported "all applied" while V021-V025 were missing from the expectation).
 
 
+def _recon_state(row) -> str:
+    """Next-Fifty #25: +-2 OK / +-5 WARN / else BAD, but a NULL drift (live side 0) is BAD when the
+    mart still holds credits (orphans / double-count), OK when both are ~0; sub-0.01-credit deltas
+    are noise (AI totals are small). The old DRIFT_PCT-only map read a NULL drift as 0 -> OK."""
+    fact, live = safe_float(row.get("FACT_VALUE")), safe_float(row.get("LIVE_VALUE"))
+    if abs(fact - live) < 0.01:
+        return "OK"
+    d = row.get("DRIFT_PCT")
+    if d is None or pd.isna(d):
+        return "BAD"
+    a = abs(safe_float(d))
+    return "OK" if a <= 2 else ("WARN" if a <= 5 else "BAD")
+
+
+
 def _context_section() -> None:
     ctx = run(
         "SELECT CURRENT_ACCOUNT() AS ACCOUNT, CURRENT_REGION() AS REGION, CURRENT_ROLE() AS ROLE, "
@@ -939,32 +954,108 @@ _SCAN_NOTE = ("First load scans ACCOUNT_USAGE directly (a few seconds on a cold 
               "cache); results cache for an hour, so repeat views are instant.")
 
 
+def _run_cost_panel() -> None:
+    """Next-Fifty #7: what OVERWATCH costs to run, in dollars. Task-graph compute ATTRIBUTED per pipeline
+    (QUERY_ATTRIBUTION_HISTORY via MART_TASK_GRAPH_DAILY, excluding idle) beside the app warehouse's
+    METERED compute; the remainder is idle tails, the app's own reads and the native email alerts.
+    Mart-only (no live scan); complete days only."""
+    section_header("OVERWATCH run-cost (30 complete days)", "", "cost")
+    rate = safe_float(load_settings(_PAGE).get("CREDIT_PRICE_USD"), DEFAULT_SETTINGS["CREDIT_PRICE_USD"])
+    res = run(mart_sql.app_self_cost_usd(30), page=_PAGE, key="self_cost_usd", tier="hourly",
+              source=f"MART_TASK_GRAPH_DAILY (DBA_MAINT_DB.OVERWATCH) + FACT_WAREHOUSE_DAILY ({APP_WAREHOUSE})")
+    if not guard(res, "Run-cost appears once the task-graph mart and warehouse fact have loaded."):
+        return
+    df = res.df
+    _att_raw = (pd.to_numeric(df["TOTAL_ATTRIBUTED_CREDITS"], errors="coerce").max()
+                if "TOTAL_ATTRIBUTED_CREDITS" in df.columns else float("nan"))
+    att_known = bool(pd.notna(_att_raw))          # NULL = no OVERWATCH task-graph rows in the window
+    att = float(_att_raw) if att_known else 0.0
+    met = safe_float(df["METERED_CREDITS"].iloc[0]) if "METERED_CREDITS" in df.columns else 0.0
+    rem = max(met - att, 0.0) if (met > 0 and att_known) else None
+    kpi_row([
+        {"label": "OVERWATCH pipelines (30d)", "value": format_usd(att * rate) if att_known else "—",
+         "method": "attributed (excl. idle)", "badge": "mart",
+         "help": "Task-graph compute attributed per query (QUERY_ATTRIBUTION_HISTORY via "
+                 "MART_TASK_GRAPH_DAILY), idle excluded, at the configured credit rate."},
+        {"label": f"{APP_WAREHOUSE} metered (30d)", "value": format_usd(met * rate) if met > 0 else "—",
+         "method": "metered", "badge": "mart",
+         "help": "The shared warehouse's metered compute from the warehouse fact."},
+        {"label": "Remainder: idle + app reads + email alerts",
+         "value": format_usd(rem * rate) if rem is not None else "—", "method": "metered − attributed",
+         "help": "Metered minus attributed: idle / auto-suspend tails, the app's interactive reads and "
+                 "the native email alerts. Clamped at zero."},
+    ])
+    if not att_known:
+        st.caption("No OVERWATCH task-graph rows in the task-graph mart for these 30 days yet — attributed "
+                   "run-cost (and the remainder) are unknown, not zero.")
+    if "PIPELINE" in df.columns:
+        tbl = df[df["PIPELINE"].notna()][[c for c in ("PIPELINE", "GRAPH_RUNS", "RUNS_WITH_FAILURES",
+                                                      "ATTRIBUTED_CREDITS") if c in df.columns]].copy()
+        if not tbl.empty:
+            tbl["ATTRIBUTED_USD"] = pd.to_numeric(tbl["ATTRIBUTED_CREDITS"], errors="coerce") * rate
+            styled_table(tbl)
+    result_caption(res)
+
+
 def _self_cost_tab() -> None:
-    # #1: self-cost measurement provenance (how UI vs loader traffic is separated) → audit-mode only.
+    # #1: self-cost measurement provenance → audit-mode only. Next-Fifty #7: the old note claimed every
+    # interactive app query is tagged — false on owner's-rights SiS (no ALTER SESSION).
     methodology_note(
-        "The monitoring app and loader tasks share WH_ALFA_ADMIN (XSMALL, 60-second "
-        "auto-suspend). Every interactive app query carries an OVERWATCH query tag, so "
-        "the table separates UI traffic from loader and task work without another warehouse."
-    )
+        f"OVERWATCH's loader tasks, its native email alerts and the app's own reads all run on {APP_WAREHOUSE} "
+        "(XSMALL, 60-second auto-suspend). Run-cost is task-graph compute ATTRIBUTED per pipeline "
+        "(QUERY_ATTRIBUTION_HISTORY via MART_TASK_GRAPH_DAILY, excluding idle) against the warehouse's METERED "
+        "compute; the remainder is idle/auto-suspend tails, the app's interactive reads and the email alerts. "
+        "Owner's-rights Streamlit-in-Snowflake rejects ALTER SESSION, so the app's interactive queries are NOT "
+        "query-tagged yet: the per-query table counts only tagged/marked statements as INTERACTIVE APP and "
+        "everything else as TASKS + UNTAGGED APP.")
     methodology_note(_SCAN_NOTE)  # #1: scan/cache provenance → audit-mode only
-    res = run(mart_sql.app_self_cost(14), page=_PAGE, key="self_cost", tier="historical",
-              source="ACCOUNT_USAGE.QUERY_HISTORY (WH_ALFA_ADMIN, split by query tag)")
-    if guard(res, "No OVERWATCH-tagged or app-warehouse queries in the last 14 days (fresh install)."):
+    _run_cost_panel()
+    # the per-query split and the queueing view read the same 14d window — one parallel batch
+    _pf = run_batch([
+        {"key": "self_cost", "sql": mart_sql.app_self_cost(14),
+         "source": "QUERY_HISTORY (WH_ALFA_ADMIN; app vs tasks by tag/marker)"},
+        {"key": "self_queue", "sql": mart_sql.app_warehouse_queue_by_hour(14),
+         "source": "QUERY_HISTORY (WH_ALFA_ADMIN, QUEUED_OVERLOAD_TIME by hour)"},
+    ], page=_PAGE, tier="historical") or {}
+    section_header("App vs tasks on the shared warehouse (14d)", "", "cost")
+    res = _pf.get("self_cost") or run(mart_sql.app_self_cost(14), page=_PAGE, key="self_cost", tier="historical",
+                                      source="QUERY_HISTORY (WH_ALFA_ADMIN; app vs tasks by tag/marker)")
+    if guard(res, "No queries on WH_ALFA_ADMIN in the last 14 days (fresh install)."):
         df = res.df.copy()
-        # app_self_cost returns one row per (DAY, WORKLOAD); the caption promises
-        # UI-vs-loader separation, so the headline counts the INTERACTIVE APP
-        # workload only — summing every row folded loader/task statements into
-        # "App queries". The table below keeps the full per-workload split.
+        # app_self_cost returns one row per (DAY, WORKLOAD); the headline counts the INTERACTIVE APP
+        # workload only. Untagged on SiS until per-statement tagging ships, so 0 renders '—' (unknown),
+        # never a false zero.
         _app = df[df["WORKLOAD"].astype(str) == "INTERACTIVE APP"]
         total = int(pd.to_numeric(_app["APP_QUERIES"], errors="coerce").fillna(0).sum())
         failed = int(pd.to_numeric(_app["FAILED"], errors="coerce").fillna(0).sum())
         kpi_row([
-            {"label": "App queries (14d)", "value": f"{total:,}"},
+            {"label": "App queries (14d)", "value": f"{total:,}" if total else "—",
+             "help": "Untagged on Streamlit-in-Snowflake until per-statement tagging ships — see the note."},
             {"label": "Failed", "value": f"{failed:,}",
              "delta_color": "inverse" if failed else "off"},
         ])
         styled_table(df)
         result_caption(res)
+
+    section_header("Shared-warehouse queueing by hour (14d, Central)", "", "cost")
+    q = _pf.get("self_queue") or run(mart_sql.app_warehouse_queue_by_hour(14), page=_PAGE, key="self_queue",
+                                     tier="historical",
+                                     source="QUERY_HISTORY (WH_ALFA_ADMIN, QUEUED_OVERLOAD_TIME by hour)")
+    if guard(q, "No queries on WH_ALFA_ADMIN in the last 14 days."):
+        qdf = q.df
+        p95 = pd.to_numeric(qdf["P95_QUEUED_OVERLOAD_SEC"], errors="coerce").fillna(0.0)
+        worst = qdf.loc[p95.idxmax()] if len(qdf) else None
+        if worst is not None:
+            _p = safe_float(worst.get("P95_QUEUED_OVERLOAD_SEC"))
+            kpi_row([{"label": "Worst hour p95 overload queue",
+                      "value": humanize_duration(_p, "s") if _p > 0 else "none",
+                      "delta": (f"{int(safe_float(worst.get('HOUR_OF_DAY'))):02d}:00 Central · {worst.get('WORKLOAD')}"
+                                if _p > 0 else "no overload queueing in any hour"),
+                      "delta_color": "off"}])
+        styled_table(qdf)
+        st.caption("The morning cron cluster (06:30-07:20 Central) is the hypothesis to test: sustained "
+                   "overload queueing there says staggering those schedules would pay; flat means it won't.")
+        result_caption(q)
 
 
 def _access_self_check() -> None:
@@ -1469,31 +1560,39 @@ def _canary_tab() -> None:
     st.divider()
     section_header("Mart reconciliation (marts vs source)", "", "cost")
     st.caption(
-        "Freshness proves the loaders ran; this compares mart totals against live "
-        "ACCOUNT_USAGE over the same complete window. ±2% is normal late-arrival noise; "
+        "Freshness proves the loaders ran; this compares metering, warehouse, query-count and AI "
+        "facts against the live views they load from, over the same complete window. ±2% is normal "
+        "late-arrival noise; "
         "beyond ±5%, re-run the backfill for that window (snowflake/backfill_365.sql, scoped)."
     )
     # r21 #7: merely opening this tab paid a 28d metering + 7d history scan.
     if not st.toggle("Run reconciliation", key="adm_recon_on",
-                     help="Compares 28d metering and 7d query totals, mart vs live. "
-                          "Cached for an hour once run."):
+                     help="Compares 28d metering, warehouse and AI credits plus 7d query counts, "
+                          "mart vs live. Cached for an hour once run."):
         return
     recon = run(mart_sql.mart_vs_live_recon(), page=_PAGE, key="mart_recon", tier="historical",
-                source="FACT_* vs METERING_DAILY_HISTORY / QUERY_HISTORY")
+                source="FACT_METERING/WAREHOUSE/QUERY facts vs METERING_DAILY_HISTORY / "
+                       "WAREHOUSE_METERING_HISTORY / QUERY_HISTORY")
+    ai_recon = run(mart_sql.mart_vs_live_ai_recon(), page=_PAGE, key="mart_recon_ai",
+                   tier="historical", probe=True,
+                   source="FACT_AI_USAGE_DAILY vs CORTEX_CODE_* / CORTEX_AI_FUNCTIONS_USAGE_HISTORY")
     if guard(recon, "Reconciliation needs the facts (V002) installed.",
              setup_hint="Runs the mart and the live aggregate side by side; deploy marts first."):
         rdf = recon.df.copy()
-        rdf["STATE"] = rdf["DRIFT_PCT"].map(
-            lambda d: "OK" if abs(safe_float(d)) <= 2 else ("WARN" if abs(safe_float(d)) <= 5 else "BAD"))
+        if ai_recon.usable():
+            rdf = pd.concat([rdf, ai_recon.df], ignore_index=True)
+        rdf["STATE"] = rdf.apply(_recon_state, axis=1)
         styled_table(rdf, column_config={
             "DRIFT_PCT": st.column_config.NumberColumn("Drift %", format="%.2f%%")})
-        worst = rdf["DRIFT_PCT"].map(lambda d: abs(safe_float(d))).max()
-        if worst > 5:
+        if (rdf["STATE"] == "BAD").any():
             st.error("Mart drift beyond ±5%: chargeback and exec numbers are off until the "
                      "backfill re-runs. This is exactly what this panel exists to catch.")
-        elif worst > 2:
+        elif (rdf["STATE"] == "WARN").any():
             st.warning("Mart drift in the 2-5% band — usually late-arriving metering rows; "
                        "re-check tomorrow before re-running backfills.")
+        if not ai_recon.ok:
+            st.caption("AI checks skipped: the Cortex usage views are not readable on this account "
+                       "(subscription/region), so FACT_AI_USAGE_DAILY cannot be reconciled here.")
         result_caption(recon)
 
     st.divider()

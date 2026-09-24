@@ -10,9 +10,12 @@ by every surface; the rendering lives in ui.components.page_verdict_line.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 import pandas as pd
+
+from app.logic.formulas import humanize_duration, safe_float
 
 # Mirrors the app's severity vocabulary (kpi_row / section_header: ok|warn|bad).
 _RANK = {"bad": 3, "warn": 2, "ok": 1, "": 0}
@@ -167,3 +170,124 @@ def decision_studio_signals(proof: dict | None) -> list[Signal]:
     if reasons:
         return [Signal("warn", r) for r in reasons]
     return [Signal("warn", "providing value, but some proof signals need watching")]
+
+
+ATTENTION_HEALTHY = "no open criticals or incidents, delivery clear, telemetry fresh"
+
+
+@dataclass(frozen=True)
+class AttentionBundle:
+    """rec1: the shared morning-attention inputs the Brief AND the Control Room verdicts read.
+    None = the read failed / is unknown (-> a warn, never a silent all-clear); 0 = verified none."""
+    open_crit: int | None = None
+    oldest_crit_h: float | None = None
+    undelivered: int = 0
+    stale_sources: int | None = None        # None = health strip unavailable
+    open_incidents: int | None = None
+    ref_gap_n: int = 0
+    ref_gap_label: str = ""
+    night: dict[str, Any] = field(default_factory=dict)   # insights.cycle_night_summary(...)
+    cycle: dict[str, Any] = field(default_factory=dict)   # insights.etl_cycle_sla_forecast(...)
+
+
+def attention_bundle(*, strip_vals: dict | None, crit_row: dict | None,
+                     open_incidents: int | None, etl: dict | None = None) -> AttentionBundle:
+    """The ONE mapping from the pages' already-fetched reads (health_strip METRIC->VALUE dict,
+    open_alert_severity_counts row, the uncapped open-incident count, attention.etl_attention()) onto
+    the bundle — so Brief and Control Room cannot map them differently. Pure."""
+    sv = strip_vals or None
+    open_crit: int | None = None
+    oldest: float | None = None
+    if crit_row is not None:
+        open_crit = int(safe_float(crit_row.get("CRIT")))
+        if open_crit > 0:
+            ocm = safe_float(crit_row.get("OLDEST_CRIT_MIN"), default=float("nan"))
+            if ocm == ocm:
+                oldest = max(0.0, ocm) / 60.0
+    e = etl or {}
+    return AttentionBundle(
+        open_crit=open_crit, oldest_crit_h=oldest,
+        undelivered=int(safe_float(sv.get("UNDELIVERED_CRITICAL"))) if sv else 0,
+        stale_sources=int(safe_float(sv.get("STALE_SOURCES"))) if sv else None,
+        open_incidents=open_incidents,
+        ref_gap_n=int(safe_float(e.get("ref_gap_n"))),
+        ref_gap_label=str(e.get("ref_gap_label") or ""),
+        night=dict(e.get("night") or {}),
+        cycle=dict(e.get("cycle") or {}),
+    )
+
+
+def _plural(n: int, one: str, many: str) -> str:
+    return one if n == 1 else many
+
+
+def attention_signals(b: AttentionBundle) -> list[Signal]:
+    """rec1: the shared 'should I worry?' Signals — criticals, undelivered, stale telemetry, open
+    incidents, XLAT gaps, whole-night ETL (failed / did-not-run / cycle not started) and the cycle
+    SLA. Brief and Control Room both compose from this (parity-locked); pages add only their own
+    page-specific signals (Brief: contract runway). Pure."""
+    sigs: list[Signal] = []
+    if b.open_crit is None:
+        sigs.append(Signal("warn", "open-critical count unavailable"))
+    elif b.open_crit > 0:
+        _age = (f", oldest {humanize_duration(b.oldest_crit_h, 'h')}"
+                if b.oldest_crit_h is not None else "")
+        sigs.append(Signal("bad", f"{b.open_crit} open critical alert(s){_age}"))
+    if b.undelivered > 0:
+        sigs.append(Signal("bad", f"{b.undelivered} critical(s) reached nobody"))
+    if b.stale_sources is None:
+        sigs.append(Signal("warn", "health telemetry unavailable"))
+    elif b.stale_sources > 0:
+        sigs.append(Signal("warn", f"{b.stale_sources} telemetry source(s) stale or not loaded"))
+    if b.open_incidents is None:
+        sigs.append(Signal("warn", "open-incident count unavailable"))
+    elif b.open_incidents > 0:
+        sigs.append(Signal("bad", f"{b.open_incidents} open incident(s)"))
+    if b.ref_gap_n > 0:
+        sigs.append(Signal("bad", f"{b.ref_gap_n} source {_plural(b.ref_gap_n, 'code', 'codes')} "
+                                  "missing XLAT translation"
+                                  + (f" ({b.ref_gap_label})" if b.ref_gap_label else "")))
+    night = b.night or {}
+    n_fail = int(safe_float(night.get("failed_tasks")))
+    if n_fail > 0:
+        _l = str(night.get("failed_label") or "")
+        sigs.append(Signal("bad", f"{n_fail} failed ETL {_plural(n_fail, 'task', 'tasks')} tonight"
+                                  + (f" ({_l})" if _l else "")))
+    n_miss = int(safe_float(night.get("missing_wf")))
+    if n_miss > 0:
+        _l = str(night.get("missing_label") or "")
+        sigs.append(Signal("bad", f"{n_miss} nightly {_plural(n_miss, 'workflow', 'workflows')} did not run"
+                                  + (f" ({_l})" if _l else "")))
+    if night.get("next_cycle_overdue"):
+        _a = night.get("cycle_age_sec")
+        sigs.append(Signal("bad", "nightly cycle hasn't started"
+                                  + (f" — last start {humanize_duration(safe_float(_a), 's')} ago"
+                                     if _a is not None else "")))
+    cyc = b.cycle or {}
+    if cyc:   # MOVED verbatim from brief.py:481-500, with `not n_fail` in place of `not _wf_fail_n`
+        tgt = cyc.get("target_hhmm", "07:00")
+        state = cyc.get("latest_state")
+        rw = cyc.get("live_runway_sec")
+        if cyc.get("latest_failed") and not n_fail:
+            sigs.append(Signal("bad", "nightly cycle's terminal workflow failed — finish unconfirmed"))
+        elif state == "INCOMPLETE" and rw is not None and safe_float(rw) < 0:
+            sigs.append(Signal("bad", f"nightly cycle still running, "
+                                      f"{humanize_duration(abs(safe_float(rw)), 's')} past the {tgt} target"))
+        elif cyc.get("severity") == "High":
+            m = cyc.get("latest_margin_sec")
+            late = (f", {humanize_duration(abs(safe_float(m)), 's')} past {tgt}" if m is not None else "")
+            sigs.append(Signal("bad", f"nightly cycle finished after the {tgt} target{late}"))
+        elif cyc.get("severity") == "Medium":
+            n2b = cyc.get("nights_to_breach")
+            when = f", ~{n2b} night(s) to miss" if n2b else ""
+            sigs.append(Signal("warn", f"nightly cycle finish trending later vs the {tgt} target{when}"))
+    return sigs
+
+
+def attention_healthy(b: AttentionBundle) -> str:
+    """The shared all-clear sentence; claims the ETL cycle only when the night roll-up actually
+    loaded (a silent/unconfigured probe must never read as 'cycle clean')."""
+    if not b.night:
+        return ATTENTION_HEALTHY
+    _open = int(safe_float(b.night.get("running_wf"))) + int(safe_float(b.night.get("pending_wf")))
+    return ATTENTION_HEALTHY + ("; nightly ETL: no failures so far" if _open else "; nightly ETL cycle clean")

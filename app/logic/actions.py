@@ -7,6 +7,8 @@ query and a verified dollar amount.
 
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
 
 from app.config import SAVINGS_ACTIVE_MONTHS
@@ -14,6 +16,37 @@ from app.logic.formulas import account_now, safe_float
 
 SEVERITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
 OPEN_STATUSES = ("OPEN", "IN_PROGRESS")
+
+
+def deferred_mask(df: pd.DataFrame | None, today: object) -> pd.Series:
+    """True for OPEN/IN_PROGRESS rows parked by SP_ACTION_LIFECYCLE until a FUTURE account day
+    (DEFER_UNTIL > today) — Next-Fifty #20. DEFER_UNTIL == today means the item resumed today.
+    Frames without DEFER_UNTIL (legacy shape) are never deferred."""
+    if df is None:
+        return pd.Series(dtype=bool)
+    if df.empty or "DEFER_UNTIL" not in df.columns:
+        return pd.Series(False, index=df.index, dtype=bool)
+    status = (df["STATUS"] if "STATUS" in df.columns
+              else pd.Series("", index=df.index)).astype(str).str.upper().str.strip()
+    until = pd.to_datetime(df["DEFER_UNTIL"], errors="coerce").dt.normalize()
+    day = pd.Timestamp(today).normalize()
+    return (status.isin(OPEN_STATUSES) & until.notna() & (until > day)).astype(bool)
+
+
+def deferred_summary(df: pd.DataFrame | None, today: object) -> tuple[int, date | None]:
+    """(count of deferred open rows, earliest resume date) for the 'Deferred (N), next resumes D' line.
+    Prefers the UNCAPPED DEFERRED_TOTAL / NEXT_RESUME_DATE window columns when the feed carries them
+    (mart_sql.action_queue), so a LIMIT-N feed never undercounts."""
+    if df is not None and not df.empty and "DEFERRED_TOTAL" in df.columns:
+        total = int(pd.to_numeric(df["DEFERRED_TOTAL"], errors="coerce").fillna(0).max())
+        nxt_raw = (pd.to_datetime(df["NEXT_RESUME_DATE"], errors="coerce").min()
+                   if "NEXT_RESUME_DATE" in df.columns else pd.NaT)
+        return total, (None if pd.isna(nxt_raw) else nxt_raw.date())
+    mask = deferred_mask(df, today)
+    if df is None or not bool(mask.any()):
+        return 0, None
+    nxt = pd.to_datetime(df.loc[mask, "DEFER_UNTIL"], errors="coerce").min()
+    return int(mask.sum()), (None if pd.isna(nxt) else nxt.date())
 
 #: C2: rules whose server-side events DUPLICATE a signal the app computes itself.
 #: SP_ANOMALY_SWEEP writes COST_ANOMALY_SWEEP events from the same
@@ -57,11 +90,13 @@ def _datetime_col(view: pd.DataFrame, column: str) -> pd.Series:
     return pd.to_datetime(view[column], errors="coerce")
 
 
-def rank_actions(df: pd.DataFrame, limit: int = 25) -> pd.DataFrame:
+def rank_actions(df: pd.DataFrame, limit: int = 25, *, include_deferred: bool = False) -> pd.DataFrame:
     """Rank open actions: severity, then overdue-ness, then dollars, then age.
 
     Expects columns SEVERITY, STATUS, DUE_DATE, CREATED_AT, ESTIMATED_USD (extra
-    columns pass through untouched). Non-open rows are dropped.
+    columns pass through untouched). Non-open rows are dropped. Next-Fifty #20: rows
+    deferred to a future DEFER_UNTIL are dropped by default (Brief top-3, Overview top-5),
+    or kept but sunk below every active row when include_deferred=True (the Action Center).
     """
     if df is None or df.empty:
         return pd.DataFrame()
@@ -70,6 +105,17 @@ def rank_actions(df: pd.DataFrame, limit: int = 25) -> pd.DataFrame:
     view = view[view["STATUS"].isin(OPEN_STATUSES)].copy()
     if view.empty:
         return view
+    # Account time: DUE_DATE and CREATED_AT are mart columns and the marts store
+    # account time. A server-clock now() runs 5-6 hours ahead under SiS and would
+    # flag rows overdue before they are.
+    now = pd.Timestamp(account_now())
+    parked = deferred_mask(view, now)
+    if not include_deferred:
+        view = view[~parked].copy()
+        if view.empty:
+            return view
+        parked = parked[~parked]
+    view["_DEFERRED"] = parked.reindex(view.index, fill_value=False).astype(int)
     # Same reason as _datetime_col: `view.get("SEVERITY", "")` hands back a bare str
     # when the column is absent, and str has no .astype.
     _sev_raw = (view["SEVERITY"] if "SEVERITY" in view.columns
@@ -87,10 +133,6 @@ def rank_actions(df: pd.DataFrame, limit: int = 25) -> pd.DataFrame:
         view.loc[_unknown, "SEVERITY"] = _sev_raw[_unknown].replace("", "UNSET") + "?"
     due = _datetime_col(view, "DUE_DATE")
     created = _datetime_col(view, "CREATED_AT")
-    # Account time: DUE_DATE and CREATED_AT are mart columns and the marts store
-    # account time. A server-clock now() runs 5-6 hours ahead under SiS and would
-    # flag rows overdue before they are.
-    now = pd.Timestamp(account_now())
     # D1: compare DAYS, not instants. DUE_DATE is a date and lands at midnight, so
     # `due < now` called an action due TODAY overdue from 00:00:01 of its own due
     # day — the owner lost the whole day they were given. Normalizing both sides
@@ -103,9 +145,9 @@ def rank_actions(df: pd.DataFrame, limit: int = 25) -> pd.DataFrame:
     view["_USD"] = (pd.to_numeric(view["ESTIMATED_USD"], errors="coerce").fillna(0.0)
                     if "ESTIMATED_USD" in view.columns else 0.0)
     view["_AGE_H"] = ((now - created).dt.total_seconds() / 3600).fillna(0).clip(lower=0)
-    view = view.sort_values(["_SEV", "_OVERDUE", "_USD", "_AGE_H"],
-                            ascending=[True, False, False, False])
-    return view.drop(columns=["_SEV", "_OVERDUE", "_USD", "_AGE_H"]).head(limit)
+    view = view.sort_values(["_DEFERRED", "_SEV", "_OVERDUE", "_USD", "_AGE_H"],
+                            ascending=[True, True, False, False, False])
+    return view.drop(columns=["_DEFERRED", "_SEV", "_OVERDUE", "_USD", "_AGE_H"]).head(limit)
 
 
 def can_verify(row: dict) -> tuple[bool, str]:
@@ -125,6 +167,19 @@ def can_verify(row: dict) -> tuple[bool, str]:
     return True, ""
 
 
+def split_superseded(df: pd.DataFrame | None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(live, superseded): rows whose SUPERSEDED_BY_CHANGE_ID (mart_sql.savings_ledger) is set are manual
+    twins of a settled autobook row — excluded from every rollup so one change is never counted twice
+    (Next-Fifty #5). A frame without the column (older reads, tests) is all-live."""
+    if df is None:
+        return pd.DataFrame(), pd.DataFrame()
+    if df.empty or "SUPERSEDED_BY_CHANGE_ID" not in df.columns:
+        return df, df.iloc[0:0]
+    sup = df["SUPERSEDED_BY_CHANGE_ID"]
+    mask = sup.notna() & (sup.astype(str).str.strip() != "")
+    return df[~mask], df[mask]
+
+
 def ledger_totals(df: pd.DataFrame, active_months: int = SAVINGS_ACTIVE_MONTHS) -> dict:
     """Estimated vs verified totals (never mixed), plus the realization story — the
     verified dollars as a share of what those verified items were originally estimated
@@ -134,13 +189,26 @@ def ledger_totals(df: pd.DataFrame, active_months: int = SAVINGS_ACTIVE_MONTHS) 
 
     verified_active_usd (Next-Fifty #3) mirrors mart_sql.savings_summary_quarter's
     VERIFIED_ACTIVE_MONTHLY_USD: the monthly run-rate of every item VERIFIED in the last
-    ``active_months`` months — the ROI numerator, which does not reset when a quarter starts."""
+    ``active_months`` months — the ROI numerator, which does not reset when a quarter starts.
+
+    Next-Fifty #5: superseded manual twins (split_superseded) are excluded from every figure and
+    disclosed separately as superseded_count / superseded_estimated_usd (not-yet-REJECTED twins)."""
     empty = {"estimated_usd": 0.0, "verified_usd": 0.0, "estimated_count": 0,
              "verified_count": 0, "verified_estimated_usd": 0.0, "realization_pct": None,
-             "verified_qtd_usd": 0.0, "verified_active_usd": 0.0, "avg_days_to_verify": None}
+             "verified_qtd_usd": 0.0, "verified_active_usd": 0.0, "avg_days_to_verify": None,
+             "superseded_count": 0, "superseded_estimated_usd": 0.0}
     if df is None or df.empty or "STATE" not in df.columns:
         return empty
-    view = df.copy()
+    live, sup = split_superseded(df)
+    sup_open = sup[sup["STATE"].astype(str).str.upper() != LEDGER_REJECTED]
+    sup_fields = {
+        "superseded_count": len(sup_open),
+        "superseded_estimated_usd": round(float(
+            pd.to_numeric(sup_open.get("ESTIMATED_USD"), errors="coerce").fillna(0).sum()), 2),
+    }
+    if live.empty:
+        return {**empty, **sup_fields}
+    view = live.copy()
     view["STATE"] = view["STATE"].astype(str).str.upper()
     est = view[view["STATE"] == LEDGER_ESTIMATED]
     ver = view[view["STATE"] == LEDGER_VERIFIED]
@@ -189,6 +257,7 @@ def ledger_totals(df: pd.DataFrame, active_months: int = SAVINGS_ACTIVE_MONTHS) 
         "verified_qtd_usd": round(qtd, 2),
         "verified_active_usd": round(active, 2),
         "avg_days_to_verify": avg_days,
+        **sup_fields,
     }
 
 
@@ -200,6 +269,9 @@ def savings_by_month(df: pd.DataFrame, months: int = 12) -> pd.DataFrame:
     Empty in, empty out."""
     cols = ["MONTH", "VERIFIED_USD"]
     if df is None or df.empty or "STATE" not in df.columns:
+        return pd.DataFrame(columns=cols)
+    df, _ = split_superseded(df)
+    if df.empty:
         return pd.DataFrame(columns=cols)
     ver = df[df["STATE"].astype(str).str.upper() == LEDGER_VERIFIED].copy()
     if ver.empty:
@@ -228,6 +300,9 @@ def savings_by_lever(df: pd.DataFrame) -> pd.DataFrame:
     (verified vs what those items were estimated to save). Empty in, empty out."""
     cols = ["LEVER", "VERIFIED_USD", "ITEMS", "REALIZATION_PCT"]
     if df is None or df.empty or "STATE" not in df.columns:
+        return pd.DataFrame(columns=cols)
+    df, _ = split_superseded(df)
+    if df.empty:
         return pd.DataFrame(columns=cols)
     ver = df[df["STATE"].astype(str).str.upper() == LEDGER_VERIFIED].copy()
     if ver.empty:

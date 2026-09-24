@@ -82,7 +82,9 @@ def test_app_stamps_finding_type_on_booking_inserts():
     """The app closes P1-A by typing its EXISTING ledger inserts — no proc,
     the existing guarded execute_statement path stays."""
     opt = _read("app/ui/pages/cost_parts/optimize.py")
-    assert opt.count("NOTES, FINDING_TYPE, TARGET_OBJECT)") == 3        # resize/retention/guarded
+    # resize (only when the change scan can't book it) / retention / guarded remediation (SCHEDULE, or an
+    # auto-suspend the scan can't book) — Next-Fifty #5: each is gated on autobook_books_change
+    assert opt.count("NOTES, FINDING_TYPE, TARGET_OBJECT)") == 3
     assert "'AUTO_SUSPEND' if fix_kind.startswith('Tighten') else 'SCHEDULE'" in opt
     assert "SP_EXECUTE_REMEDIATION" not in opt and "SP_VERIFY_SAVINGS" not in opt
 

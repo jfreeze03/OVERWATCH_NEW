@@ -7,9 +7,13 @@ lifecycle INSERT/UPDATE statements are built in the pages that own them.
 from __future__ import annotations
 
 from app.config import (
+    CORE_SCHEMA,
     CURRENT_MONTH_WINDOW,
     CURRENT_YEAR_WINDOW,
+    LEDGER_AUTOBOOKED_LEVERS,
+    LEDGER_TWIN_MATCH_DAYS,
     MAX_MART_WINDOW_DAYS,
+    OVERWATCH_DB,
     SAVINGS_ACTIVE_MONTHS,
     THRESHOLDS,
     core_object,
@@ -21,6 +25,7 @@ from app.data.common import (
     account_today_sql,
     ai_service_predicate,
     and_where,
+    app_self_sql,
     bounded_days,
     cs_by_query_type_projection,
     not_ai_service_predicate,
@@ -151,7 +156,7 @@ SELECT
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
   AND WAREHOUSE_NAME = {sql_literal(APP_WAREHOUSE)}
-  AND QUERY_TAG LIKE 'OVERWATCH%'
+  AND {app_self_sql()}
   AND QUERY_PARAMETERIZED_HASH IS NOT NULL
 GROUP BY 1
 ORDER BY P95_S DESC
@@ -719,20 +724,56 @@ def action_queue(limit: int = 200, company: str = "ALL") -> str:
 
     ``company`` (owner ask 2026-08-17: the triage filter must apply) scopes to that
     company's actions PLUS account-level ('ALL') actions that apply to everyone.
-    'ALL' is a no-op — the full queue, same as before."""
+    'ALL' is a no-op — the full queue, same as before.
+
+    DEFER_UNTIL (V074, below floor 88) lets rank_actions / action_summary drop parked items (Next-Fifty #20);
+    parked rows sort LAST before the cap and DEFERRED_TOTAL / NEXT_RESUME_DATE are uncapped."""
     limit = max(1, min(int(limit), 1000))
+    _aq_today = account_today_sql()
     comp = str(company or "ALL").strip()
     company_clause = ("" if comp.upper() == "ALL"
                       else f"\n  AND UPPER(COALESCE(COMPANY, 'ALL')) IN ('ALL', {sql_literal(comp.upper())})")
     return f"""
 SELECT ACTION_ID, CREATED_AT, COMPANY, SEVERITY, TITLE, DETAIL, OWNER, STATUS, DUE_DATE,
-       SOURCE, PROOF_SQL, ESTIMATED_USD, PERIOD, UPDATED_AT
+       SOURCE, PROOF_SQL, ESTIMATED_USD, PERIOD, DEFER_UNTIL, UPDATED_AT,
+       COUNT_IF(DEFER_UNTIL > {_aq_today}) OVER () AS DEFERRED_TOTAL,
+       MIN(IFF(DEFER_UNTIL > {_aq_today}, DEFER_UNTIL, NULL)) OVER () AS NEXT_RESUME_DATE
 FROM {core_object("ACTION_QUEUE")}
 WHERE UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS'){company_clause}
-ORDER BY CASE UPPER(SEVERITY) WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
+ORDER BY CASE WHEN DEFER_UNTIL > {_aq_today} THEN 1 ELSE 0 END,
+         CASE UPPER(SEVERITY) WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
               WHEN 'MEDIUM' THEN 2 ELSE 3 END, CREATED_AT DESC
 LIMIT {limit}
 """
+
+
+def _ledger_twin_select() -> str:
+    """One row per MANUAL ledger item (SOURCE_CHANGE_ID NULL) that the autobook has ALSO booked from
+    the change scan: same warehouse, same lever (app RESIZE == registry SIZE), registry CHANGE_SEEN_AT
+    within LEDGER_TWIN_MATCH_DAYS after the manual CREATED_AT, and the auto row already SETTLED. The
+    settled auto row is the measured booking-of-record; the manual twin is excluded from every total
+    (Next-Fifty #5, double-booking). While the auto row is still ESTIMATED it carries $0, so nothing
+    double-counts yet. CHANGE_SEEN_AT is LTZ, CREATED_AT NTZ (V005) — the cast uses the session TZ,
+    the account's America/Chicago, the same clock as the NTZ defaults; -1h slack covers a scan that
+    lands between the ALTER and the ledger INSERT."""
+    levers = ", ".join(sql_literal(x) for x in sorted(LEDGER_AUTOBOOKED_LEVERS))
+    return f"""SELECT m.ITEM_ID AS TWIN_ITEM_ID, r.CHANGE_ID AS TWIN_CHANGE_ID, a.ITEM_ID AS TWIN_AUTO_ITEM_ID
+    FROM {core_object("SAVINGS_LEDGER")} m
+    JOIN {core_object("WAREHOUSE_CHANGE_REGISTRY")} r
+      ON UPPER(r.WAREHOUSE_NAME) = UPPER(TRIM(m.TARGET_OBJECT))
+     AND r.SETTING = IFF(UPPER(TRIM(m.FINDING_TYPE)) = 'RESIZE', 'SIZE', UPPER(TRIM(m.FINDING_TYPE)))
+     AND r.CHANGE_SEEN_AT::TIMESTAMP_NTZ >= DATEADD('hour', -1, m.CREATED_AT)
+     AND r.CHANGE_SEEN_AT::TIMESTAMP_NTZ < DATEADD('day', {int(LEDGER_TWIN_MATCH_DAYS)}, m.CREATED_AT)
+    JOIN {core_object("SAVINGS_LEDGER")} a
+      ON a.SOURCE_CHANGE_ID = r.CHANGE_ID
+     AND a.STATE <> 'ESTIMATED'
+    WHERE m.SOURCE_CHANGE_ID IS NULL
+      AND UPPER(TRIM(m.FINDING_TYPE)) IN ({levers})
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY m.ITEM_ID ORDER BY r.CHANGE_SEEN_AT, r.CHANGE_ID) = 1"""
+
+
+def _ledger_twin_cte() -> str:
+    return f"twin AS (\n    {_ledger_twin_select()}\n)"
 
 
 def savings_ledger(limit: int | None = 500) -> str:
@@ -741,9 +782,13 @@ def savings_ledger(limit: int | None = 500) -> str:
     per-lever) so those totals sum the WHOLE ledger. A row cap silently truncates the oldest-
     CREATED rows, which understates all-time verified savings (it shrinks as the ledger grows)
     and makes the ledger's QTD disagree with the uncapped savings_summary_quarter mart that the
-    Brief/Scorecard cite for the same quarter (cost-hunt5 2026-08-30)."""
+    Brief/Scorecard cite for the same quarter (cost-hunt5 2026-08-30).
+
+    SUPERSEDED_BY_CHANGE_ID (Next-Fifty #5): set on a manual row whose change the autobook ALSO booked
+    and settled (_ledger_twin_select) — actions.split_superseded drops it from every rollup."""
     limit_clause = f"\nLIMIT {int(limit)}" if limit is not None else ""
     return f"""
+WITH {_ledger_twin_cte()}
 SELECT l.ITEM_ID, l.ACTION_ID, l.CREATED_AT, l.DESCRIPTION, l.STATE, l.ESTIMATED_USD, l.VERIFIED_USD,
        l.VERIFIED_AT, l.VERIFIED_BY, l.PROOF_SQL, l.NOTES,
        -- The dominant autobook path leaves FINDING_TYPE NULL and encodes the lever only in the
@@ -753,9 +798,11 @@ SELECT l.ITEM_ID, l.ACTION_ID, l.CREATED_AT, l.DESCRIPTION, l.STATE, l.ESTIMATED
        COALESCE(NULLIF(TRIM(l.FINDING_TYPE), ''),
                 CASE WHEN r.SETTING = 'SIZE' THEN 'RESIZE' ELSE r.SETTING END,
                 'unclassified') AS FINDING_TYPE,
-       IFF(l.SOURCE_CHANGE_ID IS NULL, 'manual', 'auto') AS SOURCE
+       IFF(l.SOURCE_CHANGE_ID IS NULL, 'manual', 'auto') AS SOURCE,
+       t.TWIN_CHANGE_ID AS SUPERSEDED_BY_CHANGE_ID
 FROM {core_object("SAVINGS_LEDGER")} l
 LEFT JOIN {core_object("WAREHOUSE_CHANGE_REGISTRY")} r ON l.SOURCE_CHANGE_ID = r.CHANGE_ID
+LEFT JOIN twin t ON t.TWIN_ITEM_ID = l.ITEM_ID
 ORDER BY l.CREATED_AT DESC{limit_clause}
 """
 
@@ -774,6 +821,7 @@ def verified_wins(company: str = "ALL") -> str:
     _scope = ("" if str(company or "ALL").upper() == "ALL"
               else f"\n  AND {companies.company_case_sql(_target)} = {sql_literal(str(company))}")
     return f"""
+WITH {_ledger_twin_cte()}
 SELECT
     l.ITEM_ID,
     l.CREATED_AT,
@@ -785,11 +833,28 @@ SELECT
     r.NEW_VALUE
 FROM {core_object("SAVINGS_LEDGER")} l
 LEFT JOIN {core_object("WAREHOUSE_CHANGE_REGISTRY")} r ON l.SOURCE_CHANGE_ID = r.CHANGE_ID
+LEFT JOIN twin t ON t.TWIN_ITEM_ID = l.ITEM_ID
 WHERE l.STATE = 'VERIFIED'
-  AND COALESCE(l.VERIFIED_USD, 0) > 0{_scope}
+  AND COALESCE(l.VERIFIED_USD, 0) > 0
+  AND t.TWIN_ITEM_ID IS NULL{_scope}
 ORDER BY l.VERIFIED_USD DESC
 LIMIT 200
 """
+
+
+def supersede_ledger_twins_sql(actor_sql: str) -> str:
+    """Idempotent cleanup: REJECT every manual ledger row the autobook's settled row supersedes
+    (see _ledger_twin_select), stamping the linked CHANGE_ID + auto ITEM_ID + the viewer in NOTES.
+    `actor_sql` is app.core.identity.identity_sql() (a quoted literal or CURRENT_USER()). REJECTED rows
+    leave every total already; the stamp makes the dedupe durable and stops the monthly verifier
+    re-proposing on an ESTIMATED twin. VERIFIED_USD is left as-is for the audit trail."""
+    return f"""UPDATE {core_object('SAVINGS_LEDGER')} l
+SET STATE = 'REJECTED',
+    NOTES = LEFT(COALESCE(l.NOTES, '') || ' | superseded by auto-measured change ' || t.TWIN_CHANGE_ID
+                 || ' (ledger row ' || t.TWIN_AUTO_ITEM_ID || '); double-booking cleanup by ' || {actor_sql}, 2000)
+FROM ({_ledger_twin_select()}) t
+WHERE l.ITEM_ID = t.TWIN_ITEM_ID
+  AND l.STATE <> 'REJECTED';"""
 
 
 def latest_digest() -> str:
@@ -802,11 +867,18 @@ LIMIT 1
 
 
 def savings_verification_runs() -> str:
+    """The monthly verifier's latest proposal per ledger item. Next-Fifty #5: hides proposals for
+    autobook rows (they settle themselves; the verifier proposes $0 for them) and for a manual row an
+    autobook row supersedes (applying one would verify the same saving twice). A proposal whose ledger
+    row is gone (L NULL) still shows."""
     return f"""
+WITH {_ledger_twin_cte()}
 SELECT V.RUN_AT, V.ITEM_ID, V.WAREHOUSE_NAME, V.BASELINE_EST_USD,
        V.MEASURED_IDLE_USD_30D, V.PROPOSED_VERIFIED_USD, L.STATE
 FROM {core_object("SAVINGS_VERIFICATION_RUNS")} V
 LEFT JOIN {core_object("SAVINGS_LEDGER")} L ON L.ITEM_ID = V.ITEM_ID
+LEFT JOIN twin t ON t.TWIN_ITEM_ID = V.ITEM_ID
+WHERE L.SOURCE_CHANGE_ID IS NULL AND t.TWIN_ITEM_ID IS NULL
 QUALIFY ROW_NUMBER() OVER (PARTITION BY V.ITEM_ID ORDER BY V.RUN_AT DESC) = 1
 ORDER BY V.PROPOSED_VERIFIED_USD DESC
 LIMIT 200
@@ -832,14 +904,15 @@ LIMIT {limit}
 
 
 def app_self_cost(days: int) -> str:
-    """What OVERWATCH itself spends, split by query tag on the shared warehouse."""
+    """What OVERWATCH itself spends on the shared warehouse, split by tag/marker (common.app_self_sql):
+    owner's-rights SiS cannot tag via ALTER SESSION, so untagged app reads land in 'TASKS + UNTAGGED APP'."""
     from app.config import APP_WAREHOUSE
 
     days = bounded_days(days, maximum=30)
     return f"""
 SELECT
     DATE(START_TIME) AS DAY,
-    IFF(QUERY_TAG LIKE 'OVERWATCH%', 'INTERACTIVE APP', 'LOADERS / TASKS') AS WORKLOAD,
+    IFF({app_self_sql()}, 'INTERACTIVE APP', 'TASKS + UNTAGGED APP') AS WORKLOAD,
     COUNT(*) AS APP_QUERIES,
     SUM(TOTAL_ELAPSED_TIME) / 1000.0 AS ELAPSED_SEC,
     SUM(IFF(EXECUTION_STATUS <> 'SUCCESS', 1, 0)) AS FAILED
@@ -848,6 +921,118 @@ WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
   AND WAREHOUSE_NAME = {sql_literal(APP_WAREHOUSE)}
 GROUP BY 1, 2
 ORDER BY DAY, WORKLOAD
+"""
+
+
+def app_self_cost_usd(days: int = 30) -> str:
+    """OVERWATCH run-cost basis for trailing COMPLETE days, mart-only (no ACCOUNT_USAGE):
+    per-pipeline ATTRIBUTED compute (MART_TASK_GRAPH_DAILY.WH_CREDITS = QUERY_ATTRIBUTION_HISTORY,
+    excl. idle) for DBA_MAINT_DB.OVERWATCH task graphs, beside the app warehouse's METERED
+    compute. TOTAL_ATTRIBUTED via SUM() OVER () (uncapped-aggregate rule). No $ in SQL."""
+    from app.config import APP_WAREHOUSE
+    days = bounded_days(days, 90)
+    win = f"DAY >= DATEADD('day', -{days}, CURRENT_DATE()) AND DAY < CURRENT_DATE()"
+    return f"""
+WITH pipes AS (
+    SELECT PIPELINE, SUM(GRAPH_RUNS) AS GRAPH_RUNS, SUM(RUNS_WITH_FAILURES) AS RUNS_WITH_FAILURES,
+           SUM(WH_CREDITS) AS ATTRIBUTED_CREDITS
+    FROM {mart_object("MART_TASK_GRAPH_DAILY")}
+    WHERE {win}
+      AND UPPER(DATABASE_NAME) = {sql_literal(OVERWATCH_DB)}
+      AND UPPER(SCHEMA_NAME) = {sql_literal(CORE_SCHEMA)}
+    GROUP BY PIPELINE
+),
+metered AS (
+    SELECT COALESCE(SUM(CREDITS_COMPUTE), 0) AS METERED_CREDITS
+    FROM {mart_object("FACT_WAREHOUSE_DAILY")}
+    WHERE WAREHOUSE_NAME = {sql_literal(APP_WAREHOUSE)} AND {win}
+)
+SELECT p.PIPELINE, p.GRAPH_RUNS, p.RUNS_WITH_FAILURES,
+       ROUND(p.ATTRIBUTED_CREDITS, 4) AS ATTRIBUTED_CREDITS,
+       ROUND(SUM(p.ATTRIBUTED_CREDITS) OVER (), 4) AS TOTAL_ATTRIBUTED_CREDITS,
+       ROUND(m.METERED_CREDITS, 4) AS METERED_CREDITS
+FROM metered m
+LEFT JOIN pipes p ON 1 = 1
+ORDER BY p.ATTRIBUTED_CREDITS DESC NULLS LAST
+LIMIT 500
+"""
+
+
+def app_warehouse_queue_by_hour(days: int = 14) -> str:
+    """p95 QUEUED_OVERLOAD_TIME on the shared app warehouse by Central hour-of-day, split
+    app vs tasks by the shared marker - the data behind 'is staggering the 06:30-07:20
+    crons worth it'. Durations end _SEC so the table machinery humanizes them."""
+    from app.config import APP_WAREHOUSE
+    from app.logic.formulas import ACCOUNT_TIMEZONE
+    days = bounded_days(days, 30)
+    return f"""
+SELECT
+    HOUR(CONVERT_TIMEZONE('{ACCOUNT_TIMEZONE}', START_TIME)) AS HOUR_OF_DAY,
+    IFF({app_self_sql()}, 'INTERACTIVE APP', 'TASKS + UNTAGGED APP') AS WORKLOAD,
+    COUNT(*) AS QUERIES,
+    COUNT_IF(COALESCE(QUEUED_OVERLOAD_TIME, 0) > 0) AS QUEUED_QUERIES,
+    ROUND(APPROX_PERCENTILE(COALESCE(QUEUED_OVERLOAD_TIME, 0), 0.95) / 1000, 2) AS P95_QUEUED_OVERLOAD_SEC,
+    ROUND(MAX(COALESCE(QUEUED_OVERLOAD_TIME, 0)) / 1000, 2) AS MAX_QUEUED_OVERLOAD_SEC
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+  AND WAREHOUSE_NAME = {sql_literal(APP_WAREHOUSE)}
+GROUP BY 1, 2
+ORDER BY 1, 2
+"""
+
+
+# Next-Fifty #4: the opt-in EMAIL path's own objects (snowflake/native_alert_templates.sql).
+EMAIL_ALERT_NAMES = ("NATIVE_ALERT_NEW_EVENTS", "NATIVE_ALERT_STALE_FACTS",
+                     "NATIVE_ALERT_SCAN_HEARTBEAT", "NATIVE_ALERT_DELIVERY_FAILING")
+EMAIL_INTEGRATION = "OVERWATCH_EMAIL"
+_ALERT_FAIL_STATES = "('FAILED', 'CONDITION_FAILED', 'ACTION_FAILED')"
+
+
+def email_alert_objects() -> str:
+    """SHOW ALERTS for the email path (metadata; lists only alerts the app role can see —
+    an empty answer means not-installed-or-not-visible, never 'down')."""
+    return f"SHOW ALERTS LIKE 'NATIVE_ALERT%' IN SCHEMA {OVERWATCH_DB}.{CORE_SCHEMA}"
+
+
+def email_alert_history(days: int = 3) -> str:
+    """Per-alert last OK / last FAILED evaluation (INFORMATION_SCHEMA — no ACCOUNT_USAGE lag).
+    Timestamps pinned to the account's Central clock (TIMEZONE STANDARD)."""
+    from app.logic.formulas import ACCOUNT_TIMEZONE
+    days = bounded_days(days, 7)
+    names = ", ".join(sql_literal(n) for n in EMAIL_ALERT_NAMES)
+    _t = "COALESCE(COMPLETED_TIME, SCHEDULED_TIME)"
+    return f"""
+SELECT NAME,
+       COUNT_IF(STATE = 'TRIGGERED') AS TRIGGERED_N,
+       COUNT_IF(STATE IN {_ALERT_FAIL_STATES}) AS FAILED_N,
+       CONVERT_TIMEZONE('{ACCOUNT_TIMEZONE}', MAX(IFF(STATE IN ('TRIGGERED', 'CONDITION_FALSE'), {_t}, NULL)))::TIMESTAMP_NTZ AS LAST_OK_AT,
+       CONVERT_TIMEZONE('{ACCOUNT_TIMEZONE}', MAX(IFF(STATE IN {_ALERT_FAIL_STATES}, {_t}, NULL)))::TIMESTAMP_NTZ AS LAST_FAIL_AT,
+       MAX_BY(SQL_ERROR_MESSAGE, IFF(STATE IN {_ALERT_FAIL_STATES}, {_t}, NULL)) AS LAST_FAIL_ERROR
+FROM TABLE({OVERWATCH_DB}.INFORMATION_SCHEMA.ALERT_HISTORY(
+         SCHEDULED_TIME_RANGE_START => DATEADD('day', -{days}, CURRENT_TIMESTAMP()),
+         RESULT_LIMIT => 1000))
+WHERE DATABASE_NAME = '{OVERWATCH_DB}' AND SCHEMA_NAME = '{CORE_SCHEMA}' AND NAME IN ({names})
+GROUP BY NAME
+"""
+
+
+def email_notification_history(days: int = 7) -> str:
+    """OVERWATCH_EMAIL send outcomes (one aggregate row; zero sends = readable + quiet).
+    NOTIFICATION_HISTORY takes START_TIME => (owner probe 2026-09-24: it rejects the
+    START_TIME_RANGE_START argument ALERT_HISTORY / TASK_HISTORY use)."""
+    from app.logic.formulas import ACCOUNT_TIMEZONE
+    days = bounded_days(days, 14)
+    _fail = "UPPER(STATUS) LIKE 'FAIL%'"
+    return f"""
+SELECT COUNT_IF(UPPER(STATUS) = 'SUCCESS') AS SENT_N,
+       COUNT_IF({_fail}) AS FAILED_N,
+       CONVERT_TIMEZONE('{ACCOUNT_TIMEZONE}', MAX(IFF(UPPER(STATUS) = 'SUCCESS', CREATED, NULL)))::TIMESTAMP_NTZ AS LAST_SENT_AT,
+       CONVERT_TIMEZONE('{ACCOUNT_TIMEZONE}', MAX(IFF({_fail}, CREATED, NULL)))::TIMESTAMP_NTZ AS LAST_FAILED_AT,
+       MAX_BY(ERROR_MESSAGE, IFF({_fail}, CREATED, NULL)) AS LAST_ERROR
+FROM TABLE({OVERWATCH_DB}.INFORMATION_SCHEMA.NOTIFICATION_HISTORY(
+         START_TIME => DATEADD('day', -{days}, CURRENT_TIMESTAMP()),
+         INTEGRATION_NAME => {sql_literal(EMAIL_INTEGRATION)},
+         RESULT_LIMIT => 1000))
 """
 
 
@@ -1262,24 +1447,32 @@ def savings_summary_quarter() -> str:
 
     Both windows anchor on the ACCOUNT clock (account_today_sql), matching Decision Studio's
     account-time quarter — session-tz DATE_TRUNC('quarter', CURRENT_DATE()) drifted a day at a
-    quarter change and disagreed with the DS surface (round-2 bug hunt)."""
+    quarter change and disagreed with the DS surface (round-2 bug hunt).
+
+    Next-Fifty #5: every aggregate excludes a manual row the autobook's settled row supersedes (the
+    same change booked twice); SUPERSEDED_ITEMS is the UNCAPPED count of such twins still awaiting the
+    operator's cleanup (Cost ▸ Optimize ▸ Savings ledger)."""
     _today = account_today_sql()
     _q0 = f"DATE_TRUNC('quarter', {_today})"
     _a0 = f"DATEADD('month', -{int(SAVINGS_ACTIVE_MONTHS)}, {_today})"
     return f"""
+WITH {_ledger_twin_cte()}
 SELECT
-    ROUND(SUM(IFF(STATE = 'VERIFIED'
-                  AND VERIFIED_AT >= {_q0},
-                  COALESCE(VERIFIED_USD, 0), 0)), 2) AS VERIFIED_QTD_USD,
-    COUNT_IF(STATE = 'VERIFIED'
-             AND VERIFIED_AT >= {_q0}) AS VERIFIED_ITEMS,
-    ROUND(SUM(IFF(STATE = 'VERIFIED'
-                  AND VERIFIED_AT >= {_a0},
-                  COALESCE(VERIFIED_USD, 0), 0)), 2) AS VERIFIED_ACTIVE_MONTHLY_USD,
-    COUNT_IF(STATE = 'VERIFIED'
-             AND VERIFIED_AT >= {_a0}) AS VERIFIED_ACTIVE_ITEMS,
-    ROUND(SUM(IFF(STATE = 'ESTIMATED', COALESCE(ESTIMATED_USD, 0), 0)), 2) AS ESTIMATED_OPEN_USD
-FROM {core_object("SAVINGS_LEDGER")}
+    ROUND(SUM(IFF(l.STATE = 'VERIFIED' AND t.TWIN_ITEM_ID IS NULL
+                  AND l.VERIFIED_AT >= {_q0},
+                  COALESCE(l.VERIFIED_USD, 0), 0)), 2) AS VERIFIED_QTD_USD,
+    COUNT_IF(l.STATE = 'VERIFIED' AND t.TWIN_ITEM_ID IS NULL
+             AND l.VERIFIED_AT >= {_q0}) AS VERIFIED_ITEMS,
+    ROUND(SUM(IFF(l.STATE = 'VERIFIED' AND t.TWIN_ITEM_ID IS NULL
+                  AND l.VERIFIED_AT >= {_a0},
+                  COALESCE(l.VERIFIED_USD, 0), 0)), 2) AS VERIFIED_ACTIVE_MONTHLY_USD,
+    COUNT_IF(l.STATE = 'VERIFIED' AND t.TWIN_ITEM_ID IS NULL
+             AND l.VERIFIED_AT >= {_a0}) AS VERIFIED_ACTIVE_ITEMS,
+    ROUND(SUM(IFF(l.STATE = 'ESTIMATED' AND t.TWIN_ITEM_ID IS NULL,
+                  COALESCE(l.ESTIMATED_USD, 0), 0)), 2) AS ESTIMATED_OPEN_USD,
+    COUNT_IF(t.TWIN_ITEM_ID IS NOT NULL AND l.STATE <> 'REJECTED') AS SUPERSEDED_ITEMS
+FROM {core_object("SAVINGS_LEDGER")} l
+LEFT JOIN twin t ON t.TWIN_ITEM_ID = l.ITEM_ID
 """
 
 
@@ -1415,9 +1608,11 @@ LIMIT 100
 
 def mart_vs_live_recon() -> str:
     """Mart totals vs live ACCOUNT_USAGE over the same complete window —
-    freshness says the loaders RAN; this says the numbers MATCH.
+    freshness says the loaders RAN; this says the numbers MATCH. Three checks: billed metering,
+    warehouse credits (FACT_WAREHOUSE_DAILY vs WAREHOUSE_METERING_HISTORY, Next-Fifty #25) and
+    query counts; the AI facts reconcile in the separate mart_vs_live_ai_recon.
 
-    Metering compares 28 complete days ending 3 days ago (metering-daily can
+    Metering + warehouse compare 28 complete days ending 3 days ago (metering can
     lag 24-72h); query counts compare 7 days ending 2 days ago. DRIFT_PCT
     within ±2% is normal (late-arriving rows); beyond ±5% means a loader gap
     — re-run the backfill for that window.
@@ -1434,6 +1629,22 @@ l_met AS (
     FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY
     WHERE USAGE_DATE >= DATEADD('day', -31, CURRENT_DATE())
       AND USAGE_DATE <  DATEADD('day', -3,  CURRENT_DATE())
+),
+f_wh AS (
+    -- Next-Fifty #25: FACT_WAREHOUSE_DAILY vs the metering it is loaded from. Mirrors the V062
+    -- loader: DATE(START_TIME) day key, WAREHOUSE_ID > 0 (no CLOUD_SERVICES_ONLY pseudo-row),
+    -- CREDITS_TOTAL = SUM(CREDITS_USED). Same lag-safe 28d window as the metering arm.
+    SELECT SUM(CREDITS_TOTAL) AS V
+    FROM {core_object("FACT_WAREHOUSE_DAILY")}
+    WHERE DAY >= DATEADD('day', -31, CURRENT_DATE())
+      AND DAY <  DATEADD('day', -3,  CURRENT_DATE())
+),
+l_wh AS (
+    SELECT SUM(CREDITS_USED) AS V
+    FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+    WHERE START_TIME >= DATEADD('day', -31, CURRENT_DATE())
+      AND START_TIME <  DATEADD('day', -3,  CURRENT_DATE())
+      AND WAREHOUSE_ID > 0
 ),
 f_q AS (
     -- Warehouse-bound only, to match l_q. The hourly fact retains warehouse-less
@@ -1466,11 +1677,75 @@ SELECT 'Billed credits (28d, mart vs metering-daily)' AS CHECK_NAME,
        ROUND(100 * (f_met.V - l_met.V) / NULLIF(l_met.V, 0), 2) AS DRIFT_PCT
 FROM f_met, l_met
 UNION ALL
+SELECT 'Warehouse credits (28d, mart vs warehouse-metering)',
+       'credits',
+       ROUND(f_wh.V, 2), ROUND(l_wh.V, 2),
+       ROUND(100 * (f_wh.V - l_wh.V) / NULLIF(l_wh.V, 0), 2)
+FROM f_wh, l_wh
+UNION ALL
 SELECT 'Query count (7d, mart vs query-history)',
        'statements',
        f_q.V, l_q.V,
        ROUND(100 * (f_q.V - l_q.V) / NULLIF(l_q.V, 0), 2)
 FROM f_q, l_q
+"""
+
+
+def mart_vs_live_ai_recon() -> str:
+    """Next-Fifty #25: FACT_AI_USAGE_DAILY vs the Cortex usage views it is loaded from, same 28d
+    lag-safe window as mart_vs_live_recon (the DAILY task reloads only 3 days, so days older
+    than today-3 are final). Day keys MIRROR THE LOADER byte-for-byte (USAGE_TIME::DATE /
+    START_TIME::DATE, session tz = account tz) -- this checks loader fidelity, so it must not
+    re-key days differently from V146. The Functions live side is a PLAIN SUM(CREDITS) (one row
+    per source row, no FLATTEN): the independent answer the loader's FLATTEN + INDEX=0 dedupe
+    must equal. Same columns as mart_vs_live_recon so Admin can concat the frames."""
+    return f"""
+WITH f_code AS (
+    SELECT SUM(CREDITS) AS V
+    FROM {core_object("FACT_AI_USAGE_DAILY")}
+    WHERE SOURCE IN ('Snowsight', 'CLI')
+      AND DAY >= DATEADD('day', -31, CURRENT_DATE())
+      AND DAY <  DATEADD('day', -3,  CURRENT_DATE())
+),
+l_code AS (
+    SELECT SUM(COALESCE(TOKEN_CREDITS, 0)) AS V
+    FROM (
+        SELECT USAGE_TIME, TOKEN_CREDITS
+        FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY
+        WHERE USAGE_TIME >= DATEADD('day', -33, CURRENT_DATE())
+        UNION ALL
+        SELECT USAGE_TIME, TOKEN_CREDITS
+        FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_CLI_USAGE_HISTORY
+        WHERE USAGE_TIME >= DATEADD('day', -33, CURRENT_DATE())
+    )
+    WHERE USAGE_TIME::DATE >= DATEADD('day', -31, CURRENT_DATE())
+      AND USAGE_TIME::DATE <  DATEADD('day', -3,  CURRENT_DATE())
+),
+f_fn AS (
+    SELECT SUM(CREDITS) AS V
+    FROM {core_object("FACT_AI_USAGE_DAILY")}
+    WHERE SOURCE = 'Functions'
+      AND DAY >= DATEADD('day', -31, CURRENT_DATE())
+      AND DAY <  DATEADD('day', -3,  CURRENT_DATE())
+),
+l_fn AS (
+    SELECT SUM(COALESCE(CREDITS, 0)) AS V
+    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY
+    WHERE START_TIME >= DATEADD('day', -33, CURRENT_DATE())
+      AND START_TIME::DATE >= DATEADD('day', -31, CURRENT_DATE())
+      AND START_TIME::DATE <  DATEADD('day', -3,  CURRENT_DATE())
+)
+SELECT 'AI credits - Cortex Code (28d, mart vs CORTEX_CODE_* views)' AS CHECK_NAME,
+       'credits' AS UNIT,
+       ROUND(f_code.V, 4) AS FACT_VALUE, ROUND(l_code.V, 4) AS LIVE_VALUE,
+       ROUND(100 * (COALESCE(f_code.V, 0) - COALESCE(l_code.V, 0)) / NULLIF(l_code.V, 0), 2) AS DRIFT_PCT
+FROM f_code, l_code
+UNION ALL
+SELECT 'AI credits - Functions (28d, mart vs CORTEX_AI_FUNCTIONS_USAGE_HISTORY)',
+       'credits',
+       ROUND(f_fn.V, 4), ROUND(l_fn.V, 4),
+       ROUND(100 * (COALESCE(f_fn.V, 0) - COALESCE(l_fn.V, 0)) / NULLIF(l_fn.V, 0), 2)
+FROM f_fn, l_fn
 """
 
 
@@ -2194,16 +2469,20 @@ SELECT
     -- verified/rejected and let the "N estimated -> M verified" funnel show verified > estimated. Every
     -- ledger item enters as an estimate, so all CREATED_AT-in-window rows are the true entry (ds-hunt).
     (SELECT COUNT(*) FROM {core_object("SAVINGS_LEDGER")}
-      WHERE CREATED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())) AS SAVINGS_ESTIMATED,
+      WHERE CREATED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+        AND ITEM_ID NOT IN (SELECT TWIN_ITEM_ID FROM ({_ledger_twin_select()}))) AS SAVINGS_ESTIMATED,
     (SELECT COUNT(*) FROM {core_object("SAVINGS_LEDGER")}
       WHERE CREATED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
-        AND STATE = 'VERIFIED') AS SAVINGS_VERIFIED,
+        AND STATE = 'VERIFIED'
+        AND ITEM_ID NOT IN (SELECT TWIN_ITEM_ID FROM ({_ledger_twin_select()}))) AS SAVINGS_VERIFIED,
     (SELECT COUNT(*) FROM {core_object("SAVINGS_LEDGER")}
       WHERE CREATED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
-        AND STATE = 'REJECTED') AS SAVINGS_REJECTED,
+        AND STATE = 'REJECTED'
+        AND ITEM_ID NOT IN (SELECT TWIN_ITEM_ID FROM ({_ledger_twin_select()}))) AS SAVINGS_REJECTED,
     (SELECT ROUND(COALESCE(SUM(VERIFIED_USD), 0), 2) FROM {core_object("SAVINGS_LEDGER")}
       WHERE CREATED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
-        AND STATE = 'VERIFIED') AS VERIFIED_USD
+        AND STATE = 'VERIFIED'
+        AND ITEM_ID NOT IN (SELECT TWIN_ITEM_ID FROM ({_ledger_twin_select()}))) AS VERIFIED_USD
 """
 
 
@@ -2212,16 +2491,20 @@ def action_acceptance(days: int = 90) -> str:
     many were acted on (DONE) vs dismissed (DROPPED) — the honest 'does the team act on
     its advice' rate the acceptance_funnel couldn't give (no impression denominator, but
     a decided-then-DONE vs decided-then-DROPPED ratio is real). Terminal decisions are
-    dated by UPDATED_AT (when the row was closed); OPEN/IN_PROGRESS is the current
-    still-undecided backlog. Account-wide (ACTION_QUEUE is the account queue)."""
+    dated by COMPLETED_AT (set once on close by SP_ACTION_LIFECYCLE / SP_VERIFY_EXPERIMENT, kept
+    through later comments), falling back to UPDATED_AT for rows closed before V074 or by a path that
+    never stamps it — so a comment on an old closed item no longer re-enters the window (Next-Fifty
+    #20). OPEN/IN_PROGRESS is the current still-undecided backlog. Account-wide (ACTION_QUEUE is the
+    account queue)."""
     days = bounded_days(days, 365)
     since = f"DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
+    decided = "COALESCE(COMPLETED_AT, UPDATED_AT)"
     return f"""
 SELECT
-    COUNT_IF(UPPER(STATUS) = 'DONE'    AND UPDATED_AT >= {since}) AS DONE_N,
-    COUNT_IF(UPPER(STATUS) = 'DROPPED' AND UPDATED_AT >= {since}) AS DROPPED_N,
+    COUNT_IF(UPPER(STATUS) = 'DONE'    AND {decided} >= {since}) AS DONE_N,
+    COUNT_IF(UPPER(STATUS) = 'DROPPED' AND {decided} >= {since}) AS DROPPED_N,
     COUNT_IF(UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS'))           AS OPEN_N,
-    ROUND(SUM(IFF(UPPER(STATUS) = 'DONE' AND UPDATED_AT >= {since},
+    ROUND(SUM(IFF(UPPER(STATUS) = 'DONE' AND {decided} >= {since},
                   COALESCE(ESTIMATED_USD, 0), 0)), 2)             AS DONE_USD
 FROM {core_object("ACTION_QUEUE")}
 """

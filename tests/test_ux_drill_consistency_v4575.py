@@ -60,7 +60,7 @@ def test_security_verdict_renders_above_the_section_bar():
 
 def test_write_toasts_name_the_outcome():
     opt = _read("app/ui/pages/cost_parts/optimize.py")
-    assert 'f"Resized {srow[\'WAREHOUSE_NAME\']} to {target_size}."' in opt
+    assert 'f"Resized {srow[\'WAREHOUSE_NAME\']} to {target_size}; "' in opt
     assert 'f"Added savings item: {desc}."' in opt
     assert 'notify(ok, msg)' not in _read("app/ui/pages/admin.py").split("adm_setting", 1)[1][:120]
     assert 'f"Mapped {name} → {department}."' in _read("app/ui/pages/cost_parts/ai_chargeback.py")

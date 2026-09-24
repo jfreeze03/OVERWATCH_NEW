@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.588.0"
+APP_VERSION = "4.589.0"
 
 # The build's load-bearing schema floor. main() reads the live max(SCHEMA_VERSION)
 # once per session and, if it is BELOW this, renders ONE actionable blocked state
@@ -167,6 +167,12 @@ MAX_MART_WINDOW_DAYS = 365         # mart-backed facts (400-800d retention) hono
 # Next-Fifty #3: the ROI numerator counts a VERIFIED monthly saving until it ages past this many
 # months (a verified saving keeps saving after its quarter; revert detection is not built yet).
 SAVINGS_ACTIVE_MONTHS = 12
+# Next-Fifty #5: the app FINDING_TYPEs SP_LEDGER_AUTOBOOK (V145) ALSO books from the daily change scan
+# (the registry's SIZE == the app's RESIZE); SCHEDULE is invisible to the scan, so the app still books it.
+LEDGER_AUTOBOOKED_LEVERS = ("AUTO_SUSPEND", "MAX_CLUSTERS", "RESIZE")
+# a manual row and a registry change are the same change when the scan saw it within this many days
+# (the scan runs daily 06:40 America/Chicago: <= 24h lag + one missed run)
+LEDGER_TWIN_MATCH_DAYS = 3
 # The 90d live cap bounds expensive QUERY_HISTORY-scale scans. The window
 # picker offers 180/365 for mart-history (exec board, storage, chargeback)
 # and the one low-volume live exception the owner named: Cortex user costs.

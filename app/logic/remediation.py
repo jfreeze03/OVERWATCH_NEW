@@ -230,3 +230,26 @@ def reverse_hint(finding_type: str, target: str) -> str:
     }.get(kind, f"Reverse: re-apply the previous setting on {tgt}")
     return (lead + ". Previous value: WAREHOUSE_CHANGE_REGISTRY (old->new, within the "
             "hour). What ran: REMEDIATION_LOG.STATEMENT_SQL.")
+
+
+# Next-Fifty #5 (review fix): mirrors SP_LEDGER_AUTOBOOK's (V145) direction filters, so the app books a
+# manual ESTIMATED row exactly when the daily change scan will NOT book the change itself.
+_AUTOBOOK_SIZE_RANK = {"XSMALL": 1, "SMALL": 2, "MEDIUM": 3, "LARGE": 4, "XLARGE": 5,
+                       "2XLARGE": 6, "XXLARGE": 6, "3XLARGE": 7, "4XLARGE": 8}
+
+
+def autobook_books_change(lever: str, old_value: object) -> bool:
+    """True when SP_LEDGER_AUTOBOOK books a DOWNWARD change of ``lever`` from ``old_value``.
+
+    AUTO_SUSPEND / MAX_CLUSTERS: only from a positive numeric old value (V145 COALESCEs a NULL/0 old
+    value to 0, and 'new < 0' is never true — so enabling a never-suspend timer is NOT autobooked).
+    RESIZE: only from a size in V145's map (XSMALL..4XLARGE; 5X/6X-LARGE fall to ELSE 0)."""
+    lv = str(lever or "").strip().upper()
+    if lv in ("AUTO_SUSPEND", "MAX_CLUSTERS"):
+        try:
+            return float(old_value) > 0  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return False
+    if lv == "RESIZE":
+        return str(old_value or "").strip().upper().replace("-", "") in _AUTOBOOK_SIZE_RANK
+    return False

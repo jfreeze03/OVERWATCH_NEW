@@ -13,7 +13,7 @@ from app.core.session import is_operator
 from app.core.state import filters, navigation_context, request_navigation
 from app.data import graph_sql, mart27_sql, mart_sql, workbench_sql
 from app.logic import lineage
-from app.logic.actions import rank_actions
+from app.logic.actions import deferred_mask, deferred_summary, rank_actions
 from app.logic.formulas import (
     account_today,
     credits_to_usd,
@@ -30,12 +30,14 @@ from app.logic.workbench import (
     ACTION_STATUSES,
     CRITICALITIES,
     ENTITY_TYPES,
+    UNASSIGNED_OWNER,
     action_summary,
     action_transition_sql,
     create_action_sql,
     create_experiment_sql,
     entity_catalog_merge_sql,
     evidence_link_sql,
+    owned_by,
     watchlist_sql,
     watchlist_threshold_status,
 )
@@ -52,6 +54,7 @@ from app.ui.components import (
     load_settings,
     master_detail,
     notify,
+    owner_picker,
     read_model_caption,
     section_header,
     selectable_table,
@@ -106,6 +109,8 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
         (str(row.get("STATUS") or "OPEN"), "ok" if str(row.get("STATUS", "")).upper() == "DONE" else ""),
         (f"Owner: {row.get('OWNER') or 'unassigned'}", ""),
         (f"Due: {row.get('DUE_DATE') or 'none'}", ""),
+        *([(f"Deferred until {row.get('DEFER_UNTIL')}", "warn")]
+          if extended and bool(deferred_mask(pd.DataFrame([row]), account_today()).iloc[0]) else []),
     ])
     if str(row.get("DETAIL") or "").strip():
         st.write(str(row.get("DETAIL")))
@@ -131,6 +136,9 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
 
     if is_operator():
         st.markdown("**Update work item**")
+        # Next-Fifty #20: the UNASSIGNED sentinel reads as no owner (no spurious 'unassign' effect).
+        _cur_owner = ("" if str(row.get("OWNER") or "").strip().upper() == UNASSIGNED_OWNER
+                      else str(row.get("OWNER") or "").strip())
         c1, c2, c3 = st.columns([1, 1.2, 1])
         current_status = str(row.get("STATUS") or "OPEN").upper()
         with c1:
@@ -140,10 +148,8 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
                 key=f"action_status_{action_id}",
             )
         with c2:
-            owner = st.text_input(
-                "Owner", value=str(row.get("OWNER") or ""),
-                key=f"action_owner_{action_id}", max_chars=200,
-            )
+            owner = owner_picker("Owner", key=f"action_owner_pick_{action_id}", current=_cur_owner,
+                                 default_to_viewer=False)
         with c3:
             due = st.date_input(
                 "Due", value=_date_value(row.get("DUE_DATE")),
@@ -172,7 +178,6 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
         # P_CLEAR_OWNER / P_CLEAR_DEFER flags, so blanking a set owner and toggling
         # a set defer OFF are real, savable effects again (they were dropped in
         # v4.318 while the proc could only COALESCE-keep).
-        _cur_owner = str(row.get("OWNER") or "").strip()
         _cur_defer_on = bool(row.get("DEFER_UNTIL") and not pd.isna(row.get("DEFER_UNTIL")))
         _had_due = not pd.isna(row.get("DUE_DATE"))
         _due_changed = due != _date_value(row.get("DUE_DATE"))
@@ -201,7 +206,7 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
         statement = action_transition_sql(
             action_id,
             status=status,
-            owner=owner,
+            owner=UNASSIGNED_OWNER if _clear_owner else owner,
             due_date=_due_arg,
             defer_until=defer,
             note=note,
@@ -215,7 +220,7 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
             request_key=content_request_key(
                 "ui_action",
                 f"{action_id}|{status}|{owner}|{_due_arg}|{defer}|{note}|{_clear_owner}|{_clear_defer}"),
-            clear_owner=_clear_owner,
+            clear_owner=False,  # OWNER is NOT NULL (V005): unassign writes the UNASSIGNED sentinel via COALESCE-keep; V092's NULL clear would fail
             clear_defer=_clear_defer,
         )
         st.caption("This will " + ", ".join(_effects) + " — audited." if _dirty
@@ -321,6 +326,10 @@ def render_action_center(company: str) -> None:
     # read, and across the not-installed / empty early-returns, so a constant colour is wrong).
     section_header("Action Center", "", "action")
     include_closed = st.toggle("Include completed work", key="action_include_closed")
+    _me = viewer_name()
+    mine_only = st.toggle("Assigned to me", key="action_assigned_to_me", disabled=not _me,
+                          help=f"Only work whose Owner is you ({_me or 'viewer unknown'}). Team labels "
+                               "like DBA count as Unassigned.")
     read_model_caption("action_center")
     extended_res = run(
         workbench_sql.action_center(company, include_closed, 500), page=_PAGE,
@@ -345,8 +354,21 @@ def render_action_center(company: str) -> None:
             "V074 is pending. Showing the existing read-only queue; lifecycle, evidence, ownership, and experiments unlock after the owner applies it.",
         )
 
+    # A pending deep link bypasses the mine filter, so a Brief / Overview click to someone else's item
+    # is never swallowed (Next-Fifty #20).
+    _deep_link = str(navigation_context().get("action_id") or "").strip()
+    # the deep-linked / currently-open item stays in the filtered list, so a same-page jump to someone
+    # else's item is never swallowed on the next rerun (review fix)
+    _pin = _deep_link or str(st.session_state.get("_ow_md_sel_action_center") or "")
+    if mine_only and _me and not frame.empty:
+        _keep = owned_by(frame, _me)
+        if _pin and "ACTION_ID" in frame.columns:
+            _keep = _keep | (frame["ACTION_ID"].astype(str) == _pin)
+        frame = frame[_keep].reset_index(drop=True)
+
     if frame.empty:
-        empty_state("clean", "No work is waiting in the selected scope.")
+        empty_state("clean", "Nothing assigned to you in this scope." if mine_only and _me
+                    else "No work is waiting in the selected scope.")
     else:
         summary = action_summary(frame)
         exceptions = []
@@ -368,7 +390,8 @@ def render_action_center(company: str) -> None:
             exceptions.append({
                 "label": "Unassigned",
                 "value": f"{summary['unassigned']:,.0f}",
-                "detail": "Open work has no accountable owner.",
+                "detail": "Open work has no named owner (blank, UNASSIGNED, or a team label such as DBA). "
+                          "Assign a person.",
                 "severity": "warn",
             })
         exception_summary(
@@ -376,7 +399,8 @@ def render_action_center(company: str) -> None:
             "No critical/high, overdue, or unassigned open work in this scope.",
         )
         kpi_row([
-            {"label": "Open work", "value": f"{summary['open']:,.0f}"},
+            {"label": "Open work", "value": f"{summary['open']:,.0f}",
+             "help": "OPEN/IN_PROGRESS items, excluding ones deferred to a future resume date."},
             {"label": "Critical / high", "value": f"{summary['critical_high']:,.0f}",
              "severity": "bad" if summary["critical_high"] else "ok"},
             {"label": "Overdue", "value": f"{summary['overdue']:,.0f}",
@@ -389,9 +413,13 @@ def render_action_center(company: str) -> None:
                      "read the per-row basis before trusting the total. Never mixed with "
                      "verified savings."},
         ])
+        n_def, next_resume = deferred_summary(frame, account_today())
+        if n_def:
+            st.caption(f"Deferred ({n_def}): parked until their resume date and left out of the counts "
+                       f"above; next resumes {next_resume}.")
         display = frame.reset_index(drop=True)
         if not include_closed:
-            ranked = rank_actions(display, limit=1000)
+            ranked = rank_actions(display, limit=1000, include_deferred=True)
             if not ranked.empty:
                 display = ranked.reset_index(drop=True)
         # C47: ranked work LEFT, the selected item's editor RIGHT (was stacked).
@@ -404,7 +432,7 @@ def render_action_center(company: str) -> None:
                 decision_col="TITLE", why_col="DETAIL", impact_col="ESTIMATED_USD",
                 confidence_col="CONFIDENCE", owner_col="OWNER", status_col="STATUS",
                 next_col="DUE_DATE",
-                context_cols=("SEVERITY", "PERIOD", "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY"),
+                context_cols=("SEVERITY", "PERIOD", "DEFER_UNTIL", "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY"),
                 height=340, sort_label="severity, overdue, estimated value, then age",
                 impact_help="Authored ESTIMATE (modeled, not billed). Scenarios de-duplicate "
                             "these by entity and never mix them with verified savings.",
@@ -436,7 +464,7 @@ def render_action_center(company: str) -> None:
             with c1:
                 severity = st.selectbox("Severity", ("HIGH", "MEDIUM", "LOW", "INFO"), key="action_new_sev")
             with c2:
-                owner = st.text_input("Owner", value="DBA", key="action_new_owner", max_chars=200)
+                owner = owner_picker("Owner", key="action_new_owner_pick")
             with c3:
                 due = st.date_input("Due", value=account_today() + timedelta(days=7), key="action_new_due")
             entity_type = st.selectbox("Entity type", ENTITY_TYPES, key="action_new_type")

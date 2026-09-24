@@ -40,8 +40,8 @@ from app.logic.formulas import (
     pct_delta,
     safe_float,
 )
-from app.logic.verdict import Signal, page_verdict
-from app.ui import charts
+from app.logic.verdict import attention_bundle, attention_healthy, attention_signals, page_verdict
+from app.ui import attention, charts
 from app.ui.components import (
     confirm_gate,
     empty_state,
@@ -626,32 +626,23 @@ def render() -> None:
     # the shell fetched (zero extra queries), same precedent as Alerts "Open events (N)".
     # rec8: Decision Studio moved out to its own Analyze page — Control Room is now the
     # pure triage console (Entity 360 stays; it is the drill target for cross-jumps).
-    # CoCo do-first #1: a page-level "should I worry?" opener from the health strip
-    # the shell already fetched (zero extra queries) + the scoped critical count.
-    _vsig = []
-    if _crit_known and _open_crit:
-        _vsig.append(Signal("bad", f"{_open_crit} open critical alert(s)"))
-    _und_n = int(safe_float(_sv.get("UNDELIVERED_CRITICAL", "0")))
-    if _und_n:
-        _vsig.append(Signal("bad", f"{_und_n} critical(s) reached nobody"))
-    # health_strip STALE_SOURCES = COUNT_IF(LAST_LOAD_TS IS NULL OR AGE_H > LIM), i.e. it
-    # folds NEVER-LOADED sources into the count. The freshness board below splits those out
-    # (STALE vs NOT LOADED), so phrase this "stale or not loaded" to reconcile with it — a
-    # bare "N stale" contradicted the board's "2 stale + 1 never loaded" (bug-hunt round 6).
-    _stale_n = int(safe_float(_sv.get("STALE_SOURCES", "0")))
-    if _stale_n:
-        _vsig.append(Signal("warn", f"{_stale_n} telemetry source(s) stale or not loaded"))
-    # DDR-1 (round 13): the open-critical count is a SEPARATE live read from the health
-    # strip. When it fails, _crit_known is False and no bad critical Signal is emitted.
-    # Without this warn the verdict falls through to the green "no open criticals"
-    # all-clear even though the count is UNKNOWN, not zero. Mirrors Brief's
-    # "open-critical count unavailable" and this page's own exception-summary guard.
-    if not _crit_known:
-        _vsig.append(Signal("warn", "open-critical count unavailable"))
-    if not (_strip.ok and not _strip.empty):
-        _vsig.append(Signal("warn", "health telemetry unavailable"))
-    page_verdict_line(page_verdict(
-        _vsig, healthy="no open criticals, delivery clear, telemetry fresh"))
+    # CoCo do-first #1 / Next-Fifty #1: the SAME attention composition as the Brief — criticals,
+    # undelivered, stale, open incidents, whole-night ETL, cycle SLA, XLAT gaps — from the SAME shared
+    # reads, so the triage console can't say Healthy while the Brief says Attention. incident_metrics
+    # is hoisted from the Incidents section (same SQL/tier/key -> one cache entry, reused there).
+    # The phrases live (test-locked) only in verdict.py — the stale-telemetry phrase reconciles with the
+    # freshness board's STALE vs NOT LOADED split; an unknown critical count is a warn, never green.
+    _inc_met = run(mart_sql.incident_metrics(90, company), page=_PAGE,
+                   key=f"inc_metrics_{company}", tier="live",   # the Brief's tier: the verdicts agree
+                   source=f"INCIDENTS lifecycle (90d, {company} + account-level)")
+    _etl = attention.etl_attention(settings, page=_PAGE)
+    _attn = attention_bundle(
+        strip_vals=(_sv or None),
+        crit_row=(_crit_counts.df.iloc[0].to_dict() if _crit_known else None),
+        open_incidents=(int(safe_float(_inc_met.df.iloc[0].get("OPEN_NOW")))
+                        if _inc_met.usable() else None),
+        etl=_etl)
+    page_verdict_line(page_verdict(attention_signals(_attn), healthy=attention_healthy(_attn)))
 
     section = lazy_sections(["Action Center", "Pulse", "Incidents & triage",
                              "Timeline & movers", "Freshness & replay", "Entity 360"],
@@ -895,9 +886,7 @@ def render() -> None:
         # Codex-review rec20: relabel the auto-completed status to a done state.
         if hasattr(_load_status, "update"):
             _load_status.update(label="Control Room loaded", state="complete")
-        inc_met = run(mart_sql.incident_metrics(90, company), page=_PAGE,
-                      key=f"inc_metrics_{company}", tier="recent",
-                      source=f"INCIDENTS lifecycle (90d, {company} + account-level)")
+        inc_met = _inc_met   # hoisted to the verdict above (same SQL/tier/key -> one cache entry)
         # rec10: lead the section with the house exception-first summary — the DBA's
         # first triage question is "what needs me", answered from numbers already in
         # hand (health strip + incident metrics), zero extra queries.

@@ -61,12 +61,16 @@ from app.logic.formulas import (
 from app.logic.incident import route_incidents, summarize_incidents
 from app.logic.insights import (
     DURATION_MIN_ACTIVE_DAYS,
+    ETL_CHANGE_LOOKBACK_DAYS,
+    annotate_proc_changes,
     build_failure_timeline,
     cluster_failures_by_family,
     compare_release_periods,
+    cycle_night_summary,
     duration_sla_forecast,
     etl_cycle_sla_forecast,
     etl_runtime_creep,
+    latest_proc_changes,
     pipeline_sla_forecast,
     rank_release_candidates,
     recon_recurrence,
@@ -82,7 +86,7 @@ from app.logic.task_graph import (
     compare_task_versions,
     inspect_task_graph,
 )
-from app.ui import charts
+from app.ui import attention, charts
 from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import (
     add_to_case_button,
@@ -1512,6 +1516,26 @@ def _workflow_runtimes_panel(days: int = 0, *, pf: dict | None = None) -> None:
         result_caption(res)
 
 
+# Next-Fifty #21: appended to the failure-recurrence / drift / creep captions.
+_CHANGED_RECENTLY_NOTE = (" CHANGED_RECENTLY = the latest redeploy of a stored procedure with the task's name "
+                          "in the last 30 days (Change impact registry: date · database · who · verdict) — "
+                          "matched by name across databases, so check the database; M_* mapping rows "
+                          "have no proc and stay blank.")
+
+
+def _etl_proc_changes(pf: dict | None = None):
+    """Recent PROCEDURE redeploys (OBJECT_CHANGE_REGISTRY) to annotate the ETL failure/drift/creep
+    panels — the Informatica tasks are SP_* CALLs, so 'it got slower' can name the redeploy behind
+    it. The SAME change_registry(90) render as the Change-impact tab at account scope; the 30-day
+    annotation window is applied in pandas. Fail-silent: a missing registry leaves panels unannotated."""
+    res = (pf or {}).get("chg_registry") or run(
+        change_impact_sql.proc_redeploys(ETL_CHANGE_LOOKBACK_DAYS), page=_PAGE, key="etl_chg_registry",
+        tier="recent", source="OBJECT_CHANGE_REGISTRY (proc redeploys)", max_rows=2000, probe=True)
+    if not (res.ok and not res.empty):
+        return None
+    return latest_proc_changes(res.df)
+
+
 def _failure_recurrence_panel(days: int = 0, *, pf: dict | None = None) -> None:
     """Tasks that keep failing — which is likely to fail the next run.
 
@@ -1547,10 +1571,13 @@ def _failure_recurrence_panel(days: int = 0, *, pf: dict | None = None) -> None:
             empty_state("clean", "No task has failed in the scoped runs — nothing is trending toward a "
                         "repeat failure. (A task needs a failure in the window to appear.)")
             return
+        rec, _nchg = annotate_proc_changes(rec, _etl_proc_changes(pf))
+        _lead = (f"{_nchg} of these tasks match a proc (by name) redeployed in the last 7 days — check "
+                 "CHANGED_RECENTLY (it names the database) first. " if _nchg else "")
         n = len(rec)
         active = int((rec["SEVERITY"] == "High").sum())
         top = rec.iloc[0]
-        st.warning(f"🔴 {n} task(s) failing or at risk of failing again — {active} actively broken. "
+        st.warning(f"🔴 {_lead}{n} task(s) failing or at risk of failing again — {active} actively broken. "
                    f"Top: **{top.get('TASK_NAME')}** — {top.get('VERDICT')}.")
         styled_table(rec, height=320)
         st.caption("Each RUN_ID is one workflow's nightly execution. FAIL_STREAK = consecutive failed "
@@ -1558,7 +1585,7 @@ def _failure_recurrence_panel(days: int = 0, *, pf: dict | None = None) -> None:
                    "decay-weighted failure share (newest weighted most) — a 'likely to fail next run' "
                    "PROXY, not a guaranteed forecast. Still-running runs are excluded; LOW_HISTORY marks "
                    "tasks with too few runs to trust the rate (their chronic/intermittent labels are "
-                   "withheld). Ranked worst-first.")
+                   "withheld). Ranked worst-first." + _CHANGED_RECENTLY_NOTE)
         result_caption(res)
 
 
@@ -1588,8 +1615,11 @@ def _workflow_drift_panel(*, pf: dict | None = None) -> None:
              setup_hint="The app role needs SELECT on the CONTROL_STATUS table "
                         "(GRANT SELECT ON <table> TO ROLE <app role>)."):
         df = res.df.copy()
+        df, _nchg = annotate_proc_changes(df, _etl_proc_changes(pf))
+        _lead = (f"{_nchg} of these tasks match a proc (by name) redeployed in the last 7 days — check "
+                 "CHANGED_RECENTLY (it names the database) first. " if _nchg else "")
         n = len(df)
-        st.warning(f"🟠 {n} task(s) ran materially slower than the same workflow's recent baseline "
+        st.warning(f"🟠 {_lead}{n} task(s) ran materially slower than the same workflow's recent baseline "
                    "— a task drifting toward its window is worth a look before it breaches.")
         styled_table(df, height=300)
         st.caption("Each workflow's newest run vs the MEDIAN of ITS OWN prior runs, per task. "
@@ -1598,7 +1628,7 @@ def _workflow_drift_panel(*, pf: dict | None = None) -> None:
                    "task that drifted, not the whole workflow. Only material slowdowns show — at "
                    "least 1 minute AND at least 1.5× the baseline — biggest first; a workflow with no "
                    "prior runs is omitted. LATEST_SEC / BASELINE_SEC / SLOWER_BY_SEC humanize to "
-                   "Hr/Min/Sec.")
+                   "Hr/Min/Sec." + _CHANGED_RECENTLY_NOTE)
         result_caption(res)
 
 
@@ -1640,12 +1670,15 @@ def _runtime_creep_panel(days: int = 0, *, pf: dict | None = None) -> None:
             empty_state("clean", "No task is trending materially slower run-over-run — the fitted "
                         "trends are flat or improving. (A task needs a few runs of history to trend.)")
             return
+        creep, _nchg = annotate_proc_changes(creep, _etl_proc_changes(pf))
+        _lead = (f"{_nchg} of these tasks match a proc (by name) redeployed in the last 7 days — check "
+                 "CHANGED_RECENTLY (it names the database) first. " if _nchg else "")
         n = len(creep)
         top = creep.iloc[0]
         _gain = humanize_duration(safe_float(top.get("SLOPE_SEC_PER_RUN")), "s")
         _r2x = int(safe_float(top.get("RUNS_TO_2X")))
         _when = "already ≥2× its baseline" if _r2x <= 0 else f"~{_r2x} run(s) from 2× its baseline"
-        st.warning(f"🟠 {n} task(s) are trending slower run-over-run. Steepest: "
+        st.warning(f"🟠 {_lead}{n} task(s) are trending slower run-over-run. Steepest: "
                    f"**{top.get('TASK_NAME')}** gaining {_gain}/run — {_when}.")
         # Show the slope as a humanized per-run rate (a raw '45.0' would read as a bare duration);
         # the _SEC columns (LATEST/BASELINE/PROJECTED) humanize themselves in the table machinery.
@@ -1659,7 +1692,7 @@ def _runtime_creep_panel(days: int = 0, *, pf: dict | None = None) -> None:
                    "(≥ 5s/run), steepest first. PROJECTED_SEC = latest + gain × 7 runs; RUNS_TO_2X = "
                    "runs until the projection reaches 2× the task's baseline median — a leading "
                    "indicator to act on before the window is breached. LATEST/BASELINE/PROJECTED_SEC "
-                   "humanize to Hr/Min/Sec.")
+                   "humanize to Hr/Min/Sec." + _CHANGED_RECENTLY_NOTE)
         result_caption(res)
 
 
@@ -2076,7 +2109,8 @@ def _pipeline_prefetch(days: int, want: set[str] | None = None) -> dict:
     runtimes and a chosen run's tasks/params need a selectbox value that doesn't exist yet, and
     the cost-attribution scan is behind its own on-demand toggle (batching it would pay that scan
     on every tab open). The builder calls here mirror each panel's exactly, so the batched SQL is
-    byte-identical to the panel's fallback — the member is genuinely used, not silently re-read."""
+    byte-identical to the panel's fallback — the member is genuinely used, not silently re-read.
+    Plus the account-scope OBJECT_CHANGE_REGISTRY read the ETL panels annotate from (Next-Fifty #21)."""
     s = load_settings(_PAGE)
     ctrl = str(s.get("ETL_CONTROL_STATUS_FQN") or "").strip()
     run_fqn = str(s.get("ETL_CONTROL_RUN_ID_FQN") or "").strip()
@@ -2105,6 +2139,10 @@ def _pipeline_prefetch(days: int, want: set[str] | None = None) -> dict:
         _add("cycle_finish",
              etl_control_sql.cycle_finish_history_scan(ctrl, start_workflow=start_wf, end_workflow=end_wf),
              "CONTROL_STATUS (cycle finish vs deadline)", etl_control_sql.MAX_SLA_NIGHTS)
+        # Next-Fifty #21: the account-scope OBJECT_CHANGE_REGISTRY read the ETL panels annotate from
+        # (byte-identical to _etl_proc_changes' fallback).
+        _add("chg_registry", change_impact_sql.proc_redeploys(ETL_CHANGE_LOOKBACK_DAYS),
+             "OBJECT_CHANGE_REGISTRY (proc redeploys)", 2000)
     if run_fqn:
         _add("run_inventory", etl_control_sql.run_inventory_scan(run_fqn),
              "CONTROL_RUN_ID inventory", etl_control_sql.MAX_RUNS)
@@ -2150,14 +2188,81 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
         _pipeline_data_checks(is_operator, company, database, days, schema_contains)
 
 
+def _tonight_glance_panel() -> None:
+    """rec1: the WHOLE night in one read — every workflow's tonight status from the shared
+    attention.cycle_night_read (the SAME run() entry the Brief + Control Room verdicts read). Fixed
+    14-night baseline, Window-independent like the SLA forecast below. NOT prefetched on purpose:
+    run_batch members cache in a separate store and would forfeit the cross-page hit."""
+    settings = load_settings(_PAGE)
+    res = attention.cycle_night_read(settings, page=_PAGE)
+    if res is None:
+        section_header("Tonight at a glance", "", "pipeline", anchor="ops-tonight-glance")
+        empty_state("needs_setup", "Not configured — set ETL_CONTROL_STATUS_FQN (a valid table name) on "
+                    "Admin ▸ SETTINGS to roll up every workflow's run tonight.")
+        return
+    night = cycle_night_summary(res.df) if (res.ok and not res.empty) else {}
+    if night:
+        _bad = night["failed_wf"] or night["missing_wf"] or night["next_cycle_overdue"]
+        _health = "bad" if _bad else ("warn" if night["running_wf"] else "ok")
+    else:
+        _health = ""
+    section_header("Tonight at a glance", _health, "pipeline", anchor="ops-tonight-glance")
+    panel_help(
+        "Every workflow in tonight's cycle, night-keyed like the SLA forecast (the ~22:00 start and the "
+        "early-morning tail are one night; retries collapse to each task's final attempt). FAILED: a task "
+        "ended in a failure state. RUNNING: a task has no end yet. DID NOT RUN: ran on at least "
+        f"{etl_control_sql.NIGHT_REGULAR_MIN_NIGHTS} of the last {etl_control_sql.NIGHT_LOOKBACK_NIGHTS} "
+        "nights and on this night last week, but has no run tonight past its usual start + 1h. PENDING: "
+        "not due yet. The Brief and Control Room verdicts read this same roll-up.")
+    if not guard(res, "No nightly cycle found in CONTROL_STATUS — the cycle starter workflow has no runs. "
+                 "Check ETL_CYCLE_START_WORKFLOW on Admin ▸ SETTINGS.",
+                 setup_hint="The app role needs SELECT on the CONTROL_STATUS table "
+                            "(GRANT SELECT ON <table> TO ROLE <app role>)."):
+        return
+    tiles = [
+        {"label": "Failed", "value": f"{night.get('failed_wf', 0):,}",
+         "severity": "bad" if night.get("failed_wf") else "ok",
+         "delta": f"{night.get('failed_tasks', 0):,} failed task(s)", "delta_color": "off"},
+        {"label": "Did not run", "value": f"{night.get('missing_wf', 0):,}",
+         "severity": "bad" if night.get("missing_wf") else "ok"},
+        {"label": "Running", "value": f"{night.get('running_wf', 0):,}",
+         "severity": "warn" if night.get("running_wf") else "",
+         "delta": f"{night.get('pending_wf', 0):,} pending", "delta_color": "off"},
+        {"label": "Finished clean", "value": f"{night.get('ok_wf', 0):,} of {night.get('workflows', 0):,}",
+         "severity": "ok" if night.get("ok_wf") else ""},
+    ]
+    if night.get("next_cycle_overdue"):
+        _age = night.get("cycle_age_sec")
+        tiles.insert(0, {"label": "Cycle start", "value": "Overdue", "severity": "bad",
+                         "delta": (f"last start {humanize_duration(_age, 's')} ago" if _age is not None else ""),
+                         "delta_color": "off"})
+    kpi_row(tiles)
+    df = res.df
+    _cols = [c for c in ("WORKFLOW_NAME", "NIGHT_STATUS", "FAILED_TASK_COUNT", "RUNNING_TASK_COUNT",
+                         "TASK_COUNT", "FIRST_START_AT", "LAST_END_AT", "NIGHTS_RAN_COUNT",
+                         "TYPICAL_OFFSET_SEC") if c in df.columns]
+    _att = df[df["NIGHT_STATUS"].astype(str).str.upper() != "OK"][_cols]
+    if _att.empty:
+        empty_state("clean", f"All {night.get('workflows', 0):,} workflow(s) in tonight's cycle finished "
+                    "clean, and every regular nightly workflow ran.")
+    else:
+        styled_table(_att, height=240, slug="etl_tonight")
+    if len(df) >= etl_control_sql.MAX_NIGHT_WORKFLOWS:
+        st.caption(f"⚠ Listing the first {etl_control_sql.MAX_NIGHT_WORKFLOWS} workflows — the counts "
+                   "above cover every workflow.")
+    result_caption(res)
+
+
 def _pipeline_tonight(days: int = 0, database: str = "") -> None:
     """rec9 'Tonight': did/will the nightly cycle finish clean before the 07:00 deadline.
 
-    Leads with the XLAT reference gap (a missing source code HARD-FAILS the load), then the
-    whole-cycle finish forecast, this run's per-task runtimes, and the run/params inventory."""
-    # First panel by design: a source code missing from XLAT hard-fails the nightly
-    # load, so this leads the chapter (config-gated; dormant until set up). Honors
-    # the scope-bar Database filter (pinned checks always show).
+    Leads with the whole-night roll-up (every workflow: failed / did not run / running), then the
+    XLAT reference gap (a missing source code HARD-FAILS the load), the whole-cycle finish forecast,
+    this run's per-task runtimes, and the run/params inventory."""
+    # Next-Fifty #1: the whole night first — the same shared read the Brief + Control Room verdicts use.
+    _tonight_glance_panel()
+    # Second: a source code missing from XLAT hard-fails the nightly load (config-gated; dormant
+    # until set up). Honors the scope-bar Database filter (pinned checks always show).
     _reference_gap_panel(database)
     # Prefetch only this chapter's picker-free control-table reads in ONE round trip so the
     # chapter's cold paint pays ~MAX(scan). Each panel keeps its (pf or {}).get(key) + run() fallback.
@@ -2177,7 +2282,7 @@ def _pipeline_recurring(days: int = 0, company: str = "ALL", database: str = "",
     """rec9 'Recurring failures': what keeps breaking. Task failure recurrence first (a FAILED
     task outranks a slow one at 07:00), then the 7-day file-load and dynamic-table failure pictures."""
     # Failure recurrence: which task keeps failing / is likely to fail again.
-    _pf = _pipeline_prefetch(days, want={"status_history"})
+    _pf = _pipeline_prefetch(days, want={"status_history", "chg_registry"})
     _failure_recurrence_panel(days, pf=_pf)
     # The two independent 'recent' failure reads co-schedule in ONE batch (each keeps its render
     # point + run() fallback); cold latency ~MAX(scan) instead of the sum.
@@ -2220,7 +2325,7 @@ def _pipeline_recurring(days: int = 0, company: str = "ALL", database: str = "",
 def _pipeline_performance(days: int = 0) -> None:
     """rec9 'Performance': runtime drift, creep, and cost. Which task got materially slower
     run-over-run, which are creeping toward a breach, and which spent the most credits last night."""
-    _pf = _pipeline_prefetch(days, want={"wf_drift", "runtime_history"})
+    _pf = _pipeline_prefetch(days, want={"wf_drift", "runtime_history", "chg_registry"})
     # Run-over-run drift on the control table: which task got materially slower.
     _workflow_drift_panel(pf=_pf)
     # The forward-looking companion: which tasks are CREEPING toward a breach (trend fit),

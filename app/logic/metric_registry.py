@@ -264,12 +264,22 @@ METRICS: tuple[Metric, ...] = (
     Metric("contract_runway", "Credit commitment runway (modeled)", ESTIMATED,
            "account", "FACT_METERING_DAILY (trailing-30-complete-day burn) vs CONTRACT_CREDITS",
            ACCOUNT_TZ, "up to 24h", "rec20",
-           "days-left = (contracted - consumed) / trailing-30-COMPLETE-day burn. The ONE "
-           "canonical runway feeding the Contract KPI, the Brief, and COST_CONTRACT_BREACH — "
+           "days-left = (contracted - consumed) / trailing-30-COMPLETE-day burn. The canonical "
+           "CREDITS runway: the Contract planner, COST_CONTRACT_BREACH (always), and the "
+           "Brief/Overview/Cost-verdict fallback when the billing balance is unreadable — "
            "burn averages complete days only (today's partial EXCLUDED), never a literal /30.",
            window="trailing-complete-days", partial_day="excluded", unit="days", filters=(),
            required_sources=("FACT_METERING_DAILY",),
            coverage="days = (contract - consumed) / trailing-30-complete-day burn", owner="finops"),
+    Metric("contract_balance_runway", "Contract balance runway (billing)", BILLED,
+           "account (org contract)", "ORGANIZATION_USAGE.REMAINING_BALANCE_DAILY",
+           UTC, "up to ~72h", "cost-08",
+           "days = org balance / trailing non-top-up-day burn (renewal top-ups excluded), less "
+           "the as-of lag. Preferred exec runway on Brief/Overview/Cost verdict when readable and "
+           "<=3 days old; includes storage/transfer dollars the credits model cannot see.",
+           window="trailing-complete-days", partial_day="excluded", unit="days", filters=(),
+           required_sources=("ORGANIZATION_USAGE.REMAINING_BALANCE_DAILY",),
+           coverage="days = balance / trailing-14 non-top-up-day burn, minus as-of lag", owner="finops"),
     Metric("month_end_forecast", "Month-end forecast", ESTIMATED,
            "account / month", "linear / seasonal / opt-in ML over FACT_METERING_DAILY",
            ACCOUNT_TZ, "as of last loaded day", "v4.4",

@@ -21,8 +21,8 @@ from app.core.result import QueryResult
 from app.core.state import filters, request_navigation
 from app.data import cost_sql, mart27_sql, mart_sql
 from app.data.common import resolve_effective_window
-from app.logic import scoring
-from app.logic.actions import rank_actions
+from app.logic import contract_planner, scoring
+from app.logic.actions import deferred_summary, rank_actions
 from app.logic.date_windows import is_prior_month_window, window_label, window_phrase
 from app.logic.forecast import MonthEndForecast, backtest_forecasts, month_end_projection
 from app.logic.formulas import (
@@ -68,6 +68,7 @@ from app.ui.components import (
     selectable_nav_table,
     styled_table,
 )
+from app.ui.pages.cost_parts.contract import org_balance_result
 from app.ui.sizing import TABLE_H_MD
 
 _PAGE = "Overview"
@@ -782,8 +783,14 @@ def render() -> None:
     # needs on every visit — a persistent %-consumed bar (cheap cached mart read).
     _rw = run(mart_sql.contract_exhaustion(), page=_PAGE, key="ov_contract_runway",
               tier="recent", source="SETTINGS + FACT_METERING_DAILY")
-    contract_runway_bar(contract_runway(_rw.df.iloc[0]) if _rw.usable() else None)
-    st.caption("Whole-account contract commitment — not narrowed by the company filter.")
+    # Next-Fifty #19: billing-balance runway when readable (one shared org read), else the credits model
+    _rw_bal = org_balance_result(_PAGE)
+    _rw_best = contract_planner.best_runway(
+        _rw_bal.df if (_rw_bal is not None and _rw_bal.usable()) else None,
+        contract_runway(_rw.df.iloc[0]) if _rw.usable() else None)
+    contract_runway_bar(_rw_best)
+    st.caption("Whole-account contract commitment — not narrowed by the company filter."
+               + (" " + contract_planner.runway_basis_note(_rw_best) if _rw_best else ""))
 
     # WLA-1: the section's headline reads are bounded to the prior calendar month under "Last
     # month" scope (_ov_bounds set), so the badge says "last month" then, matching this section's
@@ -893,7 +900,10 @@ def render() -> None:
             empty_state("clean", "Action queue is empty. Nothing waiting on an owner.")
         else:
             ranked = rank_actions(actions_res.df, limit=5)
-            if ranked.empty:
+            _n_def, _next_res = deferred_summary(actions_res.df, account_today())
+            if ranked.empty and _n_def:
+                empty_state("no_data_yet", f"All {_n_def} open item(s) are deferred; next resumes {_next_res}.")
+            elif ranked.empty:
                 empty_state("clean", "No open actions. Everything in the queue is done or dropped.")
             else:
                 # rec10: a clickable surface, not a dead read-only wall — a row click
@@ -929,6 +939,8 @@ def render() -> None:
                 # only breaks ties inside a severity band).
                 st.caption("Ranked by severity, then overdue, then estimated $, then age. "
                            "Click a row to open it in the Control Room queue.")
+                if _n_def:
+                    st.caption(f"{_n_def} deferred item(s) hidden until they resume (next {_next_res}).")
                 result_caption(actions_res)
                 action_lines = [
                     f"[{a['SEVERITY']}] {a['TITLE']} — owner {a.get('OWNER') or 'unassigned'}"

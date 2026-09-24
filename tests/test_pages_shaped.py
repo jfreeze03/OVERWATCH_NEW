@@ -117,7 +117,7 @@ _READ_STUBS = {
 def _stub_shaped(monkeypatch):
     import app.main as main_mod
     from app.config import DEFAULT_SETTINGS
-    from app.ui import ai_panel, components, security_center, workbench
+    from app.ui import ai_panel, attention, components, security_center, workbench
     from app.ui import decision_studio as ds_render
     from app.ui.pages import (
         admin,
@@ -143,7 +143,7 @@ def _stub_shaped(monkeypatch):
     settings = dict(DEFAULT_SETTINGS)
     settings["_source"] = "stub"
 
-    for module in (main_mod, components, ai_panel, ds_render, security_center, workbench,
+    for module in (main_mod, components, ai_panel, ds_render, security_center, workbench, attention,
                    overview, control_room, cost, operations, alerts, security, admin, brief,
                    ask, decision_studio, ai_chargeback, compare, contract, optimize, spend,
                    unit_costs):
@@ -244,3 +244,32 @@ def test_operations_warehouses_sizing_lens_renders_shaped():
     assert "Utilization &amp; right-sizing" in blob or "Utilization & right-sizing" in blob, \
         "sizing lens did not paint its right-sizing header"
     assert "Adaptive-compute candidacy" in blob, "adaptive-candidacy panel did not paint"
+
+
+@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
+def test_etl_configured_morning_surfaces_render(monkeypatch):
+    """Next-Fifty #1: with the default (empty) ETL_CONTROL_STATUS_FQN the whole-night glance, the
+    Brief tile's populated branches and the shared attention verdict stay dormant. Configure it and
+    render Brief, Control Room and Operations ▸ Pipeline SLA (default 'Tonight' chapter) under shaped
+    data so those branches actually execute."""
+    from app.config import DEFAULT_SETTINGS
+    from app.ui import components
+    from app.ui.pages import brief, control_room, operations
+
+    etl_settings = dict(DEFAULT_SETTINGS)
+    etl_settings.update({"_source": "stub", "ETL_CONTROL_STATUS_FQN": "DB.SCH.CONTROL_STATUS"})
+    for mod in (brief, control_room, operations, components):
+        monkeypatch.setattr(mod, "load_settings", lambda _page: dict(etl_settings))
+    for page, state in (("Brief", {}), ("Control Room", {}),
+                        ("Operations", {"ops_section": "Pipeline SLA"})):
+        at = AppTest.from_function(_entry, default_timeout=30)
+        at.run()
+        assert not at.exception
+        _nav_to(at, page)
+        for k, v in state.items():
+            at.session_state[k] = v
+        at.run()
+        assert not at.exception, f"{page} (ETL configured, shaped): {at.exception}"
+        assert not any("could not finish rendering" in str(getattr(e, "value", "")) for e in at.error), page
+    blob = " ".join(m.value for m in at.markdown)
+    assert "Tonight at a glance" in blob, "the whole-night glance did not paint on Operations"

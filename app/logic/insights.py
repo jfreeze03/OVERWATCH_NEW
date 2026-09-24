@@ -10,7 +10,7 @@ import pandas as pd
 
 from app.logic.anomaly import expected_spike_labels, flag_anomalies
 
-from .formulas import credits_to_usd, humanize_duration, safe_div, safe_float
+from .formulas import ACCOUNT_TIMEZONE, credits_to_usd, humanize_duration, safe_div, safe_float
 
 # ---- 1. Idle warehouse advisor ---------------------------------------------
 
@@ -979,6 +979,73 @@ RECON_MIN_CYCLES = 3       # denominator floor: below this a fraction is not yet
 RECON_EMERGING_MAX = 2     # broke in only the last 1-2 cohort cycles -> a fresh regression ("NEW")
 
 
+ETL_CHANGE_LOOKBACK_DAYS = 30   # annotate with a proc redeploy at most this old
+ETL_CHANGE_RECENT_DAYS = 7      # the banner's "changed in the last N days" count
+
+
+# Next-Fifty #21: link an ETL task (SP_* CALL) to its stored-procedure redeploy.
+def proc_key(name: object) -> str:
+    """Bare upper-case proc name for matching CONTROL_STATUS TASK_NAME to OBJECT_CHANGE_REGISTRY
+    OBJECT_NAME: drop any '(...)' arg list, keep the last dot-segment, strip quotes/whitespace."""
+    s = "" if name is None else str(name).strip()
+    if not s or s.lower() in ("nan", "none", "<na>"):
+        return ""
+    s = s.split("(", 1)[0].rsplit(".", 1)[-1]
+    return s.strip().strip('"').strip().upper()
+
+
+def latest_proc_changes(registry: pd.DataFrame | None, *, now: pd.Timestamp | None = None,
+                        lookback_days: int = ETL_CHANGE_LOOKBACK_DAYS) -> pd.DataFrame:
+    """Latest PROCEDURE redeploy per bare proc name within ``lookback_days`` (change_registry rows).
+    Same-named procs in different schemas collapse to the newest change (name-level match, like
+    the registry's own call matching). Empty/missing columns -> empty frame. Pure."""
+    cols = ["PROC_KEY", "CHANGE_SEEN_AT", "DATABASE_NAME", "CHANGED_BY", "VERDICT", "AGE_DAYS"]
+    need = {"OBJECT_TYPE", "OBJECT_NAME", "CHANGE_SEEN_AT"}
+    if registry is None or registry.empty or not need.issubset(registry.columns):
+        return pd.DataFrame(columns=cols)
+    df = registry[registry["OBJECT_TYPE"].astype(str).str.upper() == "PROCEDURE"].copy()
+    ts = pd.to_datetime(df["CHANGE_SEEN_AT"], errors="coerce")
+    if getattr(ts.dt, "tz", None) is not None:
+        ts = ts.dt.tz_convert(ACCOUNT_TIMEZONE).dt.tz_localize(None)
+    ref = now if now is not None else pd.Timestamp.now(tz=ACCOUNT_TIMEZONE).tz_localize(None)
+    df["CHANGE_SEEN_AT"] = ts
+    df["AGE_DAYS"] = (ref - ts).dt.total_seconds() / 86400.0
+    df["PROC_KEY"] = df["OBJECT_NAME"].map(proc_key)
+    df = df[(df["PROC_KEY"] != "") & df["AGE_DAYS"].between(-1.0, float(lookback_days))]
+    for c in ("DATABASE_NAME", "CHANGED_BY", "VERDICT"):
+        if c not in df.columns:
+            df[c] = None
+    return (df.sort_values("CHANGE_SEEN_AT", ascending=False)
+              .drop_duplicates("PROC_KEY", keep="first")[cols].reset_index(drop=True))
+
+
+def annotate_proc_changes(frame: pd.DataFrame, changes: pd.DataFrame | None, *,
+                          task_col: str = "TASK_NAME",
+                          recent_days: int = ETL_CHANGE_RECENT_DAYS) -> tuple[pd.DataFrame, int]:
+    """Insert CHANGED_RECENTLY ('YYYY-MM-DD · WHO · VERDICT') right after ``task_col`` for rows whose
+    proc was redeployed within the lookback; returns (frame, n rows changed within ``recent_days``).
+    Row order/index preserved (map, not merge). No match anywhere -> frame returned unchanged, 0."""
+    if frame is None or frame.empty or task_col not in frame.columns or changes is None or changes.empty:
+        return frame, 0
+    by_key = {r.PROC_KEY: r for r in changes.itertuples(index=False)}
+    keys = frame[task_col].map(proc_key)
+    hits = keys.map(lambda k: by_key.get(k))
+    if not hits.notna().any():
+        return frame, 0
+    def _label(r):
+        if r is None:
+            return None
+        who = str(r.CHANGED_BY) if r.CHANGED_BY is not None and str(r.CHANGED_BY) not in ("", "nan", "None") else "—"
+        ver = str(r.VERDICT) if r.VERDICT is not None and str(r.VERDICT) not in ("", "nan", "None") else "PENDING"
+        db = getattr(r, "DATABASE_NAME", None)
+        db_txt = f"{db} · " if db is not None and str(db) not in ("", "nan", "None") else ""
+        return f"{pd.Timestamp(r.CHANGE_SEEN_AT):%Y-%m-%d} · {db_txt}{who} · {ver}"
+    out = frame.copy()
+    out.insert(out.columns.get_loc(task_col) + 1, "CHANGED_RECENTLY", hits.map(_label))
+    n_recent = int(sum(1 for r in hits if r is not None and safe_float(r.AGE_DAYS) <= recent_days))
+    return out, n_recent
+
+
 def recon_recurrence(
     df: pd.DataFrame, *, chronic_pct: float = RECON_CHRONIC_PCT, chronic_min: int = RECON_MIN_CYCLES,
     emerging_max: int = RECON_EMERGING_MAX,
@@ -1235,6 +1302,57 @@ def etl_cycle_sla_forecast(
                                    if nt["state"] == "COMPLETE" and nt["margin_t"] is not None else None),
                     "EXPECTED_SPIKE": (nt["spike"] or None)}
                    for nt in reversed(nights)],
+    }
+
+
+def cycle_night_summary(df: pd.DataFrame | None) -> dict:
+    """Fold cycle_night_health_scan rows into the whole-night roll-up the Brief / Control Room /
+    Operations glance share. Counts come from the UNCAPPED TOTAL_* window columns on row 0 (never a
+    len()/sum over the LIMITed frame); falls back to frame counts only when a TOTAL_* is absent.
+    Labels name up to two workflows (+N more). {} when there is no data. Pure; never raises."""
+    if df is None or df.empty or not {"WORKFLOW_NAME", "NIGHT_STATUS"}.issubset(df.columns):
+        return {}
+    status = df["NIGHT_STATUS"].astype(str).str.upper()
+    r0 = df.iloc[0]
+
+    def _num(col: str) -> float:
+        if col not in df.columns:
+            return float("nan")
+        return safe_float(r0.get(col), default=float("nan"))
+
+    def _total(col: str, state: str | None) -> int:
+        v = _num(col)
+        if v == v:
+            return max(0, int(v))
+        return len(df) if state is None else int((status == state).sum())
+
+    def _label(state: str) -> str:
+        names = sorted(df.loc[status == state, "WORKFLOW_NAME"].astype(str).unique())
+        if not names:
+            return ""
+        return ", ".join(names[:2]) + (f" +{len(names) - 2} more" if len(names) > 2 else "")
+
+    workflows = _total("TOTAL_WORKFLOWS", None)
+    failed_wf = _total("TOTAL_FAILED_WF", "FAILED")
+    missing_wf = _total("TOTAL_MISSING_WF", "MISSING")
+    running_wf = _total("TOTAL_RUNNING_WF", "RUNNING")
+    pending_wf = _total("TOTAL_PENDING_WF", "PENDING")
+    ft = _num("TOTAL_FAILED_TASKS")
+    if ft != ft:
+        ft = (float(pd.to_numeric(df["FAILED_TASK_COUNT"], errors="coerce").fillna(0).sum())
+              if "FAILED_TASK_COUNT" in df.columns else 0.0)
+    age = _num("CYCLE_AGE_SEC")
+    overdue = _num("NEXT_CYCLE_OVERDUE")
+    return {
+        "cycle_date": r0.get("CYCLE_DATE"),
+        "workflows": workflows,
+        "failed_tasks": max(0, int(ft)),
+        "failed_wf": failed_wf, "failed_label": _label("FAILED"),
+        "missing_wf": missing_wf, "missing_label": _label("MISSING"),
+        "running_wf": running_wf, "pending_wf": pending_wf,
+        "ok_wf": max(0, workflows - failed_wf - missing_wf - running_wf - pending_wf),
+        "next_cycle_overdue": bool(overdue == overdue and overdue > 0),
+        "cycle_age_sec": age if age == age else None,
     }
 
 

@@ -65,3 +65,4 @@ def test_profiler_shows_overview_last_month_zero_account_usage():
     ov = next(f for f in report["flows"] if f["page"] == "Overview" and f["scope"] == "last_month")
     assert ov["error"] == "", ov["error"]
     assert ov["account_usage"] == 0, f"Overview Last-month still issues {ov['account_usage']} AU scan(s)"
+    assert ov["org_usage"] <= 1   # Next-Fifty #19: the one shared billing-balance runway read

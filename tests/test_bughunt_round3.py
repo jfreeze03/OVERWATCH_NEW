@@ -48,7 +48,8 @@ def test_markdown_sinks_escape_data_derived_text():
     assert 'md_dollars(f"**[{row[\'SEVERITY\']}] {row[\'TITLE\']}**")' in alerts
     cost = _src("app/ui/pages/cost.py")
     assert "md_dollars(\n                    f\"**Untagged executions" in cost
-    assert "from app.logic.formulas import format_usd, humanize_duration, md_dollars, safe_float" in cost
+    assert ("from app.logic.formulas import contract_runway, format_usd, humanize_duration, md_dollars, "
+            "safe_float") in cost   # + contract_runway (Next-Fifty #19); md_dollars stays imported
     cr = _src("app/ui/pages/control_room.py")
     assert 'str(anchor["LABEL"]).replace("`", "")' in cr   # backtick break-out closed
 

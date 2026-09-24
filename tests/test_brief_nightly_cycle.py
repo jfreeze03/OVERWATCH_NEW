@@ -90,3 +90,21 @@ def test_failures_still_win_without_a_forecast() -> None:
 
 def test_label_is_nightly_cycle() -> None:
     assert _nightly_cycle_kpi({}, 0)["label"] == "Nightly cycle"
+
+
+# --- Next-Fifty #1: the whole-night roll-up feeds the tile too ------------------------------------
+_FC_OK = {"severity": "OK", "latest_state": "COMPLETE", "latest_margin_sec": 3600, "target_hhmm": "07:00"}
+
+
+def test_missing_runs_after_failures() -> None:
+    k = _nightly_cycle_kpi(_FC_OK, 0, 2)
+    assert k["value"] == "Missing runs" and k["severity"] == "bad" and "2 workflows" in k["delta"]
+
+
+def test_failures_outrank_missing() -> None:
+    assert _nightly_cycle_kpi(_FC_OK, 1, 3)["value"] == "Failures"
+
+
+def test_not_started_is_bad() -> None:
+    k = _nightly_cycle_kpi(_FC_OK, 0, 0, not_started=True)
+    assert k["value"] == "Not started" and k["severity"] == "bad"

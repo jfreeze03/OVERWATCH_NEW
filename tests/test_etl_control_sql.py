@@ -6,6 +6,8 @@ MINUS scan, the dormant/empty paths, and injection fail-closed behavior.
 
 from __future__ import annotations
 
+import pytest
+
 from app.data import etl_control_sql as etl
 
 _XLAT = "ALFA_EDW_PRD.DB_V_PROD_BASE.TERADATA_ETL_REF_XLAT"
@@ -620,3 +622,51 @@ def test_cycle_finish_history_scan_parses() -> None:
                   dialect="snowflake")
     sqlglot.parse(etl.cycle_finish_history_scan(_CTRL, start_workflow="A", end_workflow="B"),
                   dialect="snowflake")
+
+
+# --- cycle_night_health_scan (Next-Fifty #1: whole-night roll-up) ----------------------------------
+def test_cycle_night_health_scan_basic():
+    sql = etl.cycle_night_health_scan(_CTRL, start_workflow="WF_START")
+    assert "DATE(DATEADD('hour', -12, TASK_START_DTTM))" in sql
+    assert "MAX_BY(s.TASK_STATUS, COALESCE(s.TASK_END_DTTM, s.TASK_START_DTTM))" in sql
+    for status in etl.FAILED_TASK_STATUSES:
+        assert f"'{status}'" in sql
+    for state in ("'FAILED'", "'RUNNING'", "'MISSING'", "'PENDING'"):
+        assert state in sql
+    assert "NIGHTS_RAN_COUNT >= 10 AND RAN_LAST_WEEK = 1" in sql
+    assert "SUM(FAILED_TASK_COUNT) OVER ()" in sql          # uncapped totals, never len() of the LIMIT
+    assert f"LIMIT {etl.MAX_WORKFLOWS}" in sql
+    assert _CTRL in sql
+    assert "ACCOUNT_USAGE" not in sql
+
+
+def test_cycle_night_health_scan_binds_starter_as_literal():
+    sql = etl.cycle_night_health_scan(_CTRL, start_workflow="WF_START")
+    assert sql.count("WORKFLOW_NAME = 'WF_START'") == 2      # anchor + cycle-start CTE
+    inj = etl.cycle_night_health_scan(_CTRL, start_workflow="x' OR '1'='1")
+    assert "'x'' OR ''1''=''1'" in inj
+    assert "WORKFLOW_NAME = '" not in etl.cycle_night_health_scan(_CTRL)
+
+
+def test_cycle_night_health_scan_fail_closed():
+    for bad in ("", None, "   ", "T; DROP TABLE X", "a b c"):
+        assert etl.cycle_night_health_scan(bad) == ""
+
+
+def test_cycle_night_health_scan_is_anchor_bounded():
+    sql = etl.cycle_night_health_scan(_CTRL)
+    assert "DATEADD('day', -15, a.CYCLE_DATE)" in sql
+    assert "BETWEEN DATEADD('day', -14, a.CYCLE_DATE) AND a.CYCLE_DATE" in sql
+    assert "-3, a.CYCLE_DATE" in etl.cycle_night_health_scan(_CTRL, lookback_nights=1)   # clamps to 2
+    assert "NIGHTS_RAN_COUNT >= 14" in etl.cycle_night_health_scan(_CTRL, min_nights=99)  # <= lookback
+
+
+def test_cycle_night_health_scan_parses():
+    sqlglot = pytest.importorskip("sqlglot")
+    cols = ["WORKFLOW_NAME", "NIGHT_STATUS", "CYCLE_DATE", "CYCLE_START_AT", "FIRST_START_AT", "LAST_END_AT",
+            "TASK_COUNT", "FAILED_TASK_COUNT", "RUNNING_TASK_COUNT", "NIGHTS_RAN_COUNT", "TYPICAL_OFFSET_SEC",
+            "CYCLE_AGE_SEC", "NEXT_CYCLE_OVERDUE", "TOTAL_WORKFLOWS", "TOTAL_FAILED_TASKS", "TOTAL_FAILED_WF",
+            "TOTAL_MISSING_WF", "TOTAL_RUNNING_WF", "TOTAL_PENDING_WF", "SNAPSHOT_TS"]
+    for sw in ("WF_START", ""):
+        tree = sqlglot.parse_one(etl.cycle_night_health_scan(_CTRL, start_workflow=sw), read="snowflake")
+        assert tree.named_selects == cols    # the column contract the summarizer + shaped harness share

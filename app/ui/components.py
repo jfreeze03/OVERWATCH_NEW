@@ -744,15 +744,24 @@ def contract_runway_bar(runway: dict | None) -> None:
         return
     sev = str(runway.get("severity", "") or "")
     cls = f" ow-runway--{sev}" if sev in ("ok", "warn", "bad") else ""
-    pct = max(0.0, min(float(runway.get("pct_consumed") or 0.0), 100.0))
+    # Next-Fifty #19: a billing-balance runway has no committed-total denominator -> no %-fill
+    pct_raw = runway.get("pct_consumed")
+    basis = str(runway.get("basis_label") or "")
+    tail = (f" · {basis}" + (f" as of {runway['as_of']}" if runway.get("as_of") else "")) if basis else ""
     days_left = runway.get("days_left")
     left = (f"{float(days_left):,.0f} days left"
             if isinstance(days_left, (int, float)) and days_left >= 0 else "runway n/a")
     exhaust = runway.get("exhaust_date") or "—"
     decide_by = runway.get("decide_by")
     decide = f" · decide by {decide_by}" if decide_by else ""
+    if pct_raw is None:   # balance basis: label only, with a severity stripe instead of a fill
+        label = html.escape(f"Contract runway: {left} (exhausts {exhaust}{decide}){tail}")
+        st.markdown(f'<div class="ow-runway{cls}"><div class="ow-runway__label ow-runway__label--solo">'
+                    f'{label}</div></div>', unsafe_allow_html=True)
+        return
+    pct = max(0.0, min(float(pct_raw), 100.0))
     label = html.escape(
-        f"{pct:.0f}% of contract consumed · {left} (exhausts {exhaust}{decide})")
+        f"{pct:.0f}% of contract consumed · {left} (exhausts {exhaust}{decide}){tail}")
     st.markdown(
         f'<div class="ow-runway{cls}">'
         f'<div class="ow-runway__track">'
@@ -1520,6 +1529,23 @@ def severity_sort(df, sev_col: str = "SEVERITY", time_col: str = "RAISED_AT"):
         by.append(time_col)
         ascending.append(False)
     return out.sort_values(by, ascending=ascending).drop(columns=["_SEV_RANK"]).reset_index(drop=True)
+
+
+def owner_picker(label: str, *, key: str, current: str = "", default_to_viewer: bool = True) -> str:
+    """Owner selectbox seeded from config.OPERATOR_USERS + 'Other…' (free text) + '(unassigned)'
+    (Next-Fifty #20). Returns the owner string to write ('' = unassigned). A team label such as
+    'DBA' names nobody, so it is never the default."""
+    from app.config import OPERATOR_USERS
+    from app.core.identity import viewer_name
+    from app.logic.workbench import OWNER_OTHER_CHOICE, owner_choices, resolve_owner
+    options, idx = owner_choices(OPERATOR_USERS, current=current,
+                                 viewer=viewer_name() if default_to_viewer else "")
+    choice = st.selectbox(label, options, index=idx, key=key,
+                          help="Assign a person so the item is someone's commitment. Team labels "
+                               "such as DBA name nobody and count as Unassigned.")
+    other = (st.text_input("Owner name", key=f"{key}_other", max_chars=200)
+             if choice == OWNER_OTHER_CHOICE else "")
+    return resolve_owner(choice, other)
 
 
 def status_chips(pairs: list[tuple[str, str]]) -> None:

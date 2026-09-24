@@ -995,3 +995,166 @@ def cycle_finish_history_scan(
         "  ORDER BY RN\n"
         f"  LIMIT {int(max_rows)}"
     )
+
+
+# --- Phase 6: whole-night health roll-up (EVERY workflow, tonight) -------------
+# rec1 (Next-Fifty): the Brief's old ETL fire read ONE RUN_ID (= one workflow) and the SLA
+# forecast's N_FAILED is the TERMINAL workflow only, so a failure in any other workflow — or a
+# workflow that never ran — was invisible on the first screen. This rolls up every workflow for
+# TONIGHT (night-keyed like cycle_finish_history_scan; retries collapsed via the MAX_BY idiom).
+# TONIGHT = the newest night the cycle STARTER ran (any workflow when no starter is set), so
+# the day before the ~22:00 kickoff still reads last night instead of an empty 'today'.
+NIGHT_LOOKBACK_NIGHTS = 14        # prior nights that define a 'regular nightly' workflow
+NIGHT_REGULAR_MIN_NIGHTS = 10     # ran >= this many of them AND on this night-of-week last week
+NIGHT_PENDING_GRACE_SEC = 3600    # absent + not yet past its typical start offset + grace -> PENDING
+NIGHT_NOT_STARTED_SEC = 26 * 3600 # starter silent > a nightly cadence + 2h -> the next cycle is overdue
+MAX_NIGHT_WORKFLOWS = MAX_WORKFLOWS
+
+
+def cycle_night_health_scan(
+    control_fqn: object, *, start_workflow: object = "",
+    lookback_nights: int = NIGHT_LOOKBACK_NIGHTS, min_nights: int = NIGHT_REGULAR_MIN_NIGHTS,
+    grace_sec: int = NIGHT_PENDING_GRACE_SEC, not_started_sec: int = NIGHT_NOT_STARTED_SEC,
+    max_rows: int = MAX_NIGHT_WORKFLOWS,
+) -> str:
+    """One row per workflow for TONIGHT: NIGHT_STATUS = FAILED | MISSING | RUNNING | PENDING | OK.
+
+    FAILED = a task's terminal attempt is in FAILED_TASK_STATUSES; RUNNING = a terminal attempt with
+    no end (same formula as cycle_finish_history_scan's N_RUNNING); MISSING = a REGULAR workflow (ran
+    >= min_nights of the prior lookback_nights AND on the same night-of-week last week, so weekday-only
+    jobs stay quiet on weekends) with no run tonight past its median start offset into the cycle +
+    grace; PENDING = the same but not due yet. NEXT_CYCLE_OVERDUE = the starter hasn't kicked off for
+    > not_started_sec AND a night-of-week it ran on last week has since come round (+2h) with no run (the whole-cycle-never-ran case the
+    per-workflow MISSING can't see). TOTAL_* are UNCAPPED window roll-ups over every row (never derive
+    counts from the LIMITed frame). The starter name is an escaped literal (data). Account-wide (no
+    company grain in CONTROL_STATUS). Fixed baseline — no scope-bar Window (like the SLA forecast).
+    Fail-closed on a bad FQN. Pure, bounded."""
+    from app.core.sqlsafe import safe_identifier, sql_literal
+
+    fqn = str(control_fqn or "").strip()
+    if not fqn:
+        return ""
+    try:
+        tbl = safe_identifier(fqn, allow_qualified=True)
+    except ValueError:
+        return ""
+    _sw = str(start_workflow or "").strip()
+    anchor_starter = f"    AND WORKFLOW_NAME = {sql_literal(_sw)}\n" if _sw else ""
+    cyc_starter = f"  WHERE WORKFLOW_NAME = {sql_literal(_sw)}\n" if _sw else ""
+    look = max(2, int(lookback_nights))
+    need = max(1, min(int(min_nights), look))
+    grace = max(0, int(grace_sec))
+    late = max(3600, int(not_started_sec))
+    _failed = ", ".join(f"'{s}'" for s in sorted(FAILED_TASK_STATUSES))
+    return (
+        "WITH anchor AS (\n"
+        "  SELECT MAX(DATE(DATEADD('hour', -12, TASK_START_DTTM))) AS CYCLE_DATE\n"
+        f"  FROM {tbl}\n"
+        "  WHERE TASK_START_DTTM IS NOT NULL\n"
+        f"{anchor_starter}"
+        "),\n"
+        "per_task AS (\n"
+        "  SELECT DATE(DATEADD('hour', -12, s.TASK_START_DTTM)) AS CYCLE_DATE, s.WORKFLOW_NAME, s.TASK_NAME,\n"
+        "         MAX_BY(s.TASK_STATUS, COALESCE(s.TASK_END_DTTM, s.TASK_START_DTTM)) AS TERMINAL_STATUS,\n"
+        "         MAX_BY(s.TASK_END_DTTM, COALESCE(s.TASK_END_DTTM, s.TASK_START_DTTM)) AS TERMINAL_END,\n"
+        "         MIN(s.TASK_START_DTTM) AS FIRST_START\n"
+        f"  FROM {tbl} s CROSS JOIN anchor a\n"
+        "  WHERE s.TASK_START_DTTM IS NOT NULL AND s.WORKFLOW_NAME IS NOT NULL AND s.TASK_NAME IS NOT NULL\n"
+        f"    AND s.TASK_START_DTTM >= DATEADD('day', -{look + 1}, a.CYCLE_DATE)\n"
+        "    AND DATE(DATEADD('hour', -12, s.TASK_START_DTTM))\n"
+        f"        BETWEEN DATEADD('day', -{look}, a.CYCLE_DATE) AND a.CYCLE_DATE\n"
+        "  GROUP BY 1, 2, 3\n"
+        "),\n"
+        "per_wf AS (\n"
+        "  SELECT CYCLE_DATE, WORKFLOW_NAME,\n"
+        "         COUNT(*) AS TASK_COUNT,\n"
+        f"         SUM(CASE WHEN UPPER(TERMINAL_STATUS) IN ({_failed}) THEN 1 ELSE 0 END) AS FAILED_TASK_COUNT,\n"
+        "         SUM(CASE WHEN TERMINAL_END IS NULL\n"
+        f"                   AND (TERMINAL_STATUS IS NULL OR UPPER(TERMINAL_STATUS) NOT IN ({_failed}))\n"
+        "                  THEN 1 ELSE 0 END) AS RUNNING_TASK_COUNT,\n"
+        "         MIN(FIRST_START) AS FIRST_START_AT,\n"
+        "         MAX(TERMINAL_END) AS LAST_END_AT\n"
+        "  FROM per_task\n"
+        "  GROUP BY 1, 2\n"
+        "),\n"
+        "cyc AS (\n"
+        "  SELECT CYCLE_DATE, MIN(FIRST_START_AT) AS CYCLE_START_AT\n"
+        "  FROM per_wf\n"
+        f"{cyc_starter}"
+        "  GROUP BY 1\n"
+        "),\n"
+        "hist AS (\n"
+        "  SELECT w.WORKFLOW_NAME,\n"
+        "         COUNT(DISTINCT w.CYCLE_DATE) AS NIGHTS_RAN_COUNT,\n"
+        "         MAX(CASE WHEN w.CYCLE_DATE = DATEADD('day', -7, a.CYCLE_DATE) THEN 1 ELSE 0 END) AS RAN_LAST_WEEK,\n"
+        "         MEDIAN(DATEDIFF('second', c.CYCLE_START_AT, w.FIRST_START_AT)) AS TYPICAL_OFFSET_SEC\n"
+        "  FROM per_wf w\n"
+        "  CROSS JOIN anchor a\n"
+        "  LEFT JOIN cyc c ON c.CYCLE_DATE = w.CYCLE_DATE\n"
+        "  WHERE w.CYCLE_DATE < a.CYCLE_DATE\n"
+        "  GROUP BY w.WORKFLOW_NAME\n"
+        "),\n"
+        "tonight AS (\n"
+        "  SELECT w.* FROM per_wf w JOIN anchor a ON w.CYCLE_DATE = a.CYCLE_DATE\n"
+        "),\n"
+        # overdue = a night-of-week the starter ran on LAST week has come round again since the anchor,
+        # 2h past last week's kickoff, with no run (every expected night since the anchor is graded, so a
+        # missed Monday after a weekday-only Friday anchor is caught — not just anchor+1). Review fix.
+        "missed AS (\n"
+        "  SELECT MAX(IFF(DATEADD('second', 7 * 86400 + 7200, p.CYCLE_START_AT) < CURRENT_TIMESTAMP(), 1, 0))\n"
+        "           AS MISSED_NIGHT\n"
+        "  FROM cyc p CROSS JOIN anchor a\n"
+        "  WHERE p.CYCLE_DATE BETWEEN DATEADD('day', -6, a.CYCLE_DATE)\n"
+        "                         AND DATEADD('day', -7, DATE(DATEADD('hour', -12, CURRENT_TIMESTAMP())))\n"
+        "),\n"
+        "cyc_now AS (\n"
+        "  SELECT c.CYCLE_START_AT,\n"
+        "         DATEDIFF('second', c.CYCLE_START_AT, CURRENT_TIMESTAMP()) AS CYCLE_AGE_SEC,\n"
+        f"         CASE WHEN DATEDIFF('second', c.CYCLE_START_AT, CURRENT_TIMESTAMP()) > {late}\n"
+        "               AND COALESCE(m.MISSED_NIGHT, 0) = 1 THEN 1 ELSE 0 END AS NEXT_CYCLE_OVERDUE\n"
+        "  FROM cyc c\n"
+        "  JOIN anchor a ON c.CYCLE_DATE = a.CYCLE_DATE\n"
+        "  CROSS JOIN missed m\n"
+        "),\n"
+        "universe AS (\n"
+        "  SELECT WORKFLOW_NAME FROM tonight\n"
+        "  UNION\n"
+        f"  SELECT WORKFLOW_NAME FROM hist WHERE NIGHTS_RAN_COUNT >= {need} AND RAN_LAST_WEEK = 1\n"
+        "),\n"
+        "graded AS (\n"
+        "  SELECT u.WORKFLOW_NAME, a.CYCLE_DATE, n.CYCLE_START_AT,\n"
+        "         CASE\n"
+        "           WHEN t.WORKFLOW_NAME IS NOT NULL AND t.FAILED_TASK_COUNT > 0 THEN 'FAILED'\n"
+        "           WHEN t.WORKFLOW_NAME IS NOT NULL AND t.RUNNING_TASK_COUNT > 0 THEN 'RUNNING'\n"
+        "           WHEN t.WORKFLOW_NAME IS NOT NULL THEN 'OK'\n"
+        f"           WHEN n.CYCLE_AGE_SEC < COALESCE(h.TYPICAL_OFFSET_SEC, 0) + {grace} THEN 'PENDING'\n"
+        "           ELSE 'MISSING'\n"
+        "         END AS NIGHT_STATUS,\n"
+        "         COALESCE(t.TASK_COUNT, 0) AS TASK_COUNT,\n"
+        "         COALESCE(t.FAILED_TASK_COUNT, 0) AS FAILED_TASK_COUNT,\n"
+        "         COALESCE(t.RUNNING_TASK_COUNT, 0) AS RUNNING_TASK_COUNT,\n"
+        "         t.FIRST_START_AT, t.LAST_END_AT,\n"
+        "         COALESCE(h.NIGHTS_RAN_COUNT, 0) AS NIGHTS_RAN_COUNT,\n"
+        "         h.TYPICAL_OFFSET_SEC, n.CYCLE_AGE_SEC, n.NEXT_CYCLE_OVERDUE\n"
+        "  FROM universe u\n"
+        "  CROSS JOIN anchor a\n"
+        "  CROSS JOIN cyc_now n\n"
+        "  LEFT JOIN tonight t ON t.WORKFLOW_NAME = u.WORKFLOW_NAME\n"
+        "  LEFT JOIN hist h ON h.WORKFLOW_NAME = u.WORKFLOW_NAME\n"
+        ")\n"
+        "SELECT WORKFLOW_NAME, NIGHT_STATUS, CYCLE_DATE, CYCLE_START_AT, FIRST_START_AT, LAST_END_AT,\n"
+        "       TASK_COUNT, FAILED_TASK_COUNT, RUNNING_TASK_COUNT, NIGHTS_RAN_COUNT, TYPICAL_OFFSET_SEC,\n"
+        "       CYCLE_AGE_SEC, NEXT_CYCLE_OVERDUE,\n"
+        "       COUNT(*) OVER () AS TOTAL_WORKFLOWS,\n"
+        "       SUM(FAILED_TASK_COUNT) OVER () AS TOTAL_FAILED_TASKS,\n"
+        "       SUM(CASE WHEN NIGHT_STATUS = 'FAILED' THEN 1 ELSE 0 END) OVER () AS TOTAL_FAILED_WF,\n"
+        "       SUM(CASE WHEN NIGHT_STATUS = 'MISSING' THEN 1 ELSE 0 END) OVER () AS TOTAL_MISSING_WF,\n"
+        "       SUM(CASE WHEN NIGHT_STATUS = 'RUNNING' THEN 1 ELSE 0 END) OVER () AS TOTAL_RUNNING_WF,\n"
+        "       SUM(CASE WHEN NIGHT_STATUS = 'PENDING' THEN 1 ELSE 0 END) OVER () AS TOTAL_PENDING_WF,\n"
+        "       CURRENT_TIMESTAMP() AS SNAPSHOT_TS\n"
+        "  FROM graded\n"
+        "  ORDER BY CASE NIGHT_STATUS WHEN 'FAILED' THEN 1 WHEN 'MISSING' THEN 2 WHEN 'RUNNING' THEN 3\n"
+        "                             WHEN 'PENDING' THEN 4 ELSE 5 END,\n"
+        "           WORKFLOW_NAME\n"
+        f"  LIMIT {int(max_rows)}"
+    )

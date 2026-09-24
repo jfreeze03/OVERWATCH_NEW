@@ -10,13 +10,21 @@ Throughout, `<recipient>` means the destination address you want, e.g.
 OVERWATCH's primary alert channel is the **Teams webhook** (`OVERWATCH_WEBHOOK`
 notification integration). Email is a **separate, opt-in** path defined in
 [`snowflake/native_alert_templates.sql`](../snowflake/native_alert_templates.sql):
-two native Snowflake `ALERT` objects that call `SYSTEM$SEND_EMAIL` through an
-email notification integration named **`OVERWATCH_EMAIL`**.
+four native Snowflake `ALERT` objects that call `SYSTEM$SEND_EMAIL` through an
+email notification integration named **`OVERWATCH_EMAIL`**. Three of them are
+out-of-band **dead-man** watchers: they email when OVERWATCH itself goes quiet, and
+they do not depend on the in-app notifier, so they still fire when that is what broke.
 
 | Alert | Fires | Subject |
 |---|---|---|
 | `NATIVE_ALERT_NEW_EVENTS` | new OPEN critical/high alert events (every 30 min) | `OVERWATCH: new critical/high alerts` |
-| `NATIVE_ALERT_STALE_FACTS` | `FACT_QUERY_HOURLY` unloaded > 3h (hourly) | `OVERWATCH: telemetry loads are stale` |
+| `NATIVE_ALERT_STALE_FACTS` | any source stale past its cadence (3h hourly / 30h daily) or a loader failure (hourly at :10) | `OVERWATCH: telemetry stale or a loader failed` |
+| `NATIVE_ALERT_SCAN_HEARTBEAT` | no SUCCEEDED `TASK_ALERT_SCAN` / `TASK_ALERT_NOTIFY` run in 3h (hourly at :10) | `OVERWATCH: alert scan/notify heartbeat lost` |
+| `NATIVE_ALERT_DELIVERY_FAILING` | a Teams/webhook send failure, or a CRITICAL open > 60 min with no delivery (hourly at :10) | `OVERWATCH: alert delivery failing` |
+
+**Alerts > Native delivery** shows an **Email path** row (LIVE / FAILING / SUSPENDED /
+PARTIAL / not visible) read from `SHOW ALERTS`, `ALERT_HISTORY` and
+`NOTIFICATION_HISTORY`. It turns red only on a real send or evaluation failure.
 
 **There is no app-side email setting.** Nothing in the Streamlit app, `SETTINGS`,
 or a numbered migration holds the recipient. (The `EMAIL` column on
@@ -29,7 +37,7 @@ or a numbered migration holds the recipient. (The `EMAIL` column on
    address.
 2. **Integration allow-list** — `OVERWATCH_EMAIL`'s `ALLOWED_RECIPIENTS` must
    include the address, and the integration must be `ENABLED`.
-3. **Alert bodies** — each `SYSTEM$SEND_EMAIL(...)` call in the two alerts names
+3. **Alert bodies** — each `SYSTEM$SEND_EMAIL(...)` call in the four alerts names
    the recipient literally.
 
 Change all three and the alerts must be `RESUME`d (they are created suspended).
@@ -51,14 +59,50 @@ numbered migrations — task-graph or migration changes do not affect them.
 -- Integration enabled? Who is allowed to receive?
 DESC NOTIFICATION INTEGRATION OVERWATCH_EMAIL;          -- check ENABLED + ALLOWED_RECIPIENTS
 
--- Both alerts present and started (not suspended)?
+-- All four alerts present and started (not suspended)?
 SHOW ALERTS IN SCHEMA DBA_MAINT_DB.OVERWATCH;
 
 -- Did they run and fail to send recently?
-SELECT NAME, SCHEDULED_TIME, STATE, ERROR
+SELECT NAME, SCHEDULED_TIME, STATE, SQL_ERROR_MESSAGE
   FROM TABLE(INFORMATION_SCHEMA.ALERT_HISTORY(
          SCHEDULED_TIME_RANGE_START => DATEADD('day', -3, CURRENT_TIMESTAMP())))
- WHERE NAME IN ('NATIVE_ALERT_NEW_EVENTS','NATIVE_ALERT_STALE_FACTS')
+ WHERE NAME IN ('NATIVE_ALERT_NEW_EVENTS', 'NATIVE_ALERT_STALE_FACTS',
+                'NATIVE_ALERT_SCAN_HEARTBEAT', 'NATIVE_ALERT_DELIVERY_FAILING')
+ ORDER BY SCHEDULED_TIME DESC;
+```
+
+## Pre-flight before RESUME
+
+Any row these return will email **hourly** until it is fixed, so they must come back
+empty before you resume the dead-man alerts:
+
+```sql
+-- (1) Sources that would email now
+SELECT SOURCE_NAME, LAST_LOAD_TS,
+       ROUND(DATEDIFF('minute', LAST_LOAD_TS, CURRENT_TIMESTAMP()) / 60.0, 1) AS HOURS_BEHIND,
+       IFF(SOURCE_NAME LIKE '%DAILY%' OR SOURCE_NAME LIKE '%METERING%', 30.0, 3.0) AS LIMIT_H
+  FROM DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE
+ WHERE LAST_LOAD_TS IS NULL
+    OR DATEDIFF('minute', LAST_LOAD_TS, CURRENT_TIMESTAMP()) / 60.0
+       > IFF(SOURCE_NAME LIKE '%DAILY%' OR SOURCE_NAME LIKE '%METERING%', 30.0, 3.0)
+ ORDER BY 3 DESC;
+
+-- (2) Chronic loader-failure / delivery-failure types in the last 24h
+SELECT ERROR_TYPE, PAGE, COUNT(*) AS N_24H, MAX(LOGGED_AT) AS LAST_AT,
+       ANY_VALUE(LEFT(ERROR_MESSAGE, 160)) AS SAMPLE_MSG
+  FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+ WHERE LOGGED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+   AND (ERROR_TYPE IN ('mart_load_failed', 'fact_load_failed', 'extract_load_failed',
+                       'cloud_svc_mart_failed', 'object_cost_load_failed')
+        OR PAGE = 'NotifyWebhook')
+ GROUP BY 1, 2 ORDER BY 3 DESC;
+
+-- (3) Heartbeat ground truth
+SELECT NAME, STATE, SCHEDULED_TIME, COMPLETED_TIME, LEFT(ERROR_MESSAGE, 160)
+  FROM TABLE(DBA_MAINT_DB.INFORMATION_SCHEMA.TASK_HISTORY(
+         SCHEDULED_TIME_RANGE_START => DATEADD('hour', -3, CURRENT_TIMESTAMP()),
+         RESULT_LIMIT => 10000))
+ WHERE SCHEMA_NAME = 'OVERWATCH' AND NAME IN ('TASK_ALERT_SCAN', 'TASK_ALERT_NOTIFY')
  ORDER BY SCHEDULED_TIME DESC;
 ```
 
@@ -80,10 +124,11 @@ ALTER NOTIFICATION INTEGRATION OVERWATCH_EMAIL
 ALTER NOTIFICATION INTEGRATION OVERWATCH_EMAIL SET ENABLED = TRUE;
 ```
 
-### Step 3 — point both alerts at it
+### Step 3 — point all four alerts at it
 
-Re-run [`snowflake/native_alert_templates.sql`](../snowflake/native_alert_templates.sql),
-replacing the recipient in **both** `SYSTEM$SEND_EMAIL(...)` calls:
+Re-run [`snowflake/native_alert_templates.sql`](../snowflake/native_alert_templates.sql)
+as **SNOW_ACCOUNTADMINS** (the app owner role, so the app can see the alerts), replacing
+the recipient in **all four** `SYSTEM$SEND_EMAIL(...)` calls:
 
 ```sql
     CALL SYSTEM$SEND_EMAIL(
@@ -92,11 +137,13 @@ replacing the recipient in **both** `SYSTEM$SEND_EMAIL(...)` calls:
         ... );
 ```
 
-Then resume them:
+Then, once the pre-flight above is clean, resume all four:
 
 ```sql
-ALTER ALERT DBA_MAINT_DB.OVERWATCH.NATIVE_ALERT_NEW_EVENTS  RESUME;
-ALTER ALERT DBA_MAINT_DB.OVERWATCH.NATIVE_ALERT_STALE_FACTS RESUME;
+ALTER ALERT DBA_MAINT_DB.OVERWATCH.NATIVE_ALERT_NEW_EVENTS       RESUME;
+ALTER ALERT DBA_MAINT_DB.OVERWATCH.NATIVE_ALERT_STALE_FACTS      RESUME;
+ALTER ALERT DBA_MAINT_DB.OVERWATCH.NATIVE_ALERT_SCAN_HEARTBEAT   RESUME;
+ALTER ALERT DBA_MAINT_DB.OVERWATCH.NATIVE_ALERT_DELIVERY_FAILING RESUME;
 ```
 
 ### Step 4 — smoke test
@@ -113,6 +160,6 @@ If this errors with a recipient/verification message, Step 1 has not completed
 
 The repo copy of `native_alert_templates.sql` ships a **placeholder** recipient
 (`dba-team@example.com`) on purpose, so it is not tenant-specific. If you want a
-redeploy to carry your real default, edit those three lines locally — but that is
+redeploy to carry your real default, edit those lines locally (never commit them) — but that is
 cosmetic: it changes nothing about live delivery, which is governed entirely by
 the three requirements above.

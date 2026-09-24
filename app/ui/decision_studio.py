@@ -853,6 +853,14 @@ def _roi(company: str) -> None:
          "help": "Estimated savings still unverified — the opportunity ahead. Verify them on "
                  "Experiments (below) or Cost ▸ Optimize."},
     ])
+    if totals["superseded_count"]:
+        # Next-Fifty #5: one warehouse change booked twice (the app's manual row + the change scan's
+        # measured row) — the manual twin is excluded above; say so, and where to clean it up.
+        st.caption(md_dollars(
+            f"{totals['superseded_count']:,} manual booking(s) "
+            f"({format_usd(totals['superseded_estimated_usd'])} estimated) were superseded by the "
+            "auto-measured change row for the same warehouse change — excluded here so one change is "
+            "never counted twice. Clean them up on Cost ▸ Optimize ▸ Savings ledger."))
     if totals["verified_usd"] > 0:
         st.markdown(md_dollars(
             f"OVERWATCH has verified **{format_usd(totals['verified_usd'])}** in savings across "

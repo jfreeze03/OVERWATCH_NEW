@@ -19,7 +19,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from app.config import core_object
+from app.config import LEDGER_AUTOBOOKED_LEVERS, core_object
 from app.core.identity import identity_sql
 from app.core.query import execute_statement, run
 from app.core.session import is_operator as _is_operator
@@ -28,7 +28,7 @@ from app.core.state import request_navigation
 from app.data import cost_sql, insights_sql, mart27_sql, mart_sql, ops_sql, security_sql, workbench_sql
 from app.data.common import bounded_days
 from app.logic import proven_fix_transfer, remediation
-from app.logic.actions import LEDGER_ESTIMATED, can_verify
+from app.logic.actions import LEDGER_ESTIMATED, can_verify, split_superseded
 from app.logic.ai_prompts import idle_warehouse_prompt
 from app.logic.capacity import capacity_forecasts
 from app.logic.consolidation import WarehouseProfile, consolidation_candidates
@@ -687,8 +687,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         est_sz = round(max(0.0, _idle * (1.0 - 2.0 ** _steps)), 2)
                         st.caption(f"Projected saving ~${est_sz:,.0f}/mo resizing {_cur_size} → "
                                    f"{_tgt_norm} (only idle-hour credits reliably shrink; busy "
-                                   "compute-bound work runs ~2x longer on a smaller size. ESTIMATED "
-                                   "until you verify it on the Savings ledger below).")
+                                   "compute-bound work runs ~2x longer on a smaller size). The daily "
+                                   "change scan books this resize to the Savings ledger and settles it "
+                                   "against 14 days of measured actuals — the app logs the estimate to "
+                                   "REMEDIATION_LOG instead of booking a second ledger row.")
                     else:  # an upsize is a cost increase — never a booked saving
                         st.caption(f"Resizing UP {_cur_size} → {_tgt_norm} raises cost — no saving booked.")
                 elif not _cur_size:
@@ -710,7 +712,11 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     if ok:
                         from app.ui.components import log_ui_event
                         log_ui_event("remediation_exec", page=_PAGE)
-                    if ok and est_sz > 0:
+                    # Next-Fifty #5: the change scan (V038/V145) books a resize from XSMALL..4XLARGE and
+                    # settles it on measured actuals, so no manual row for those (it was a double-booking).
+                    # From a size the scan's map can't rank (5X/6X-LARGE) the app still books it.
+                    _sz_autobooked = remediation.autobook_books_change("RESIZE", _cur_size)
+                    if ok and est_sz > 0 and not _sz_autobooked:
                         execute_statement(
                             f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
                             "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES, FINDING_TYPE, TARGET_OBJECT) "
@@ -720,7 +726,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             f"'RESIZE', {sql_literal(str(srow['WAREHOUSE_NAME']))}", page=_PAGE)
                     stamp_write("sizing", ok)  # C48
                     # r-ux: name the object + effect (was generic "Statement executed.")
-                    notify(ok, msg if not ok else f"Resized {srow['WAREHOUSE_NAME']} to {target_size}.")
+                    notify(ok, msg if not ok else
+                           f"Resized {srow['WAREHOUSE_NAME']} to {target_size}; "
+                           + ("the daily change scan books and settles the measured saving." if _sz_autobooked
+                              else "booked an estimated saving — verify it on the Savings ledger."))
             _whatif_panel(sized, sizing_days, rate)
             result_caption(prof_res)
 
@@ -1694,12 +1703,12 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     elif opt_section == "Remediation & ledger":
         st.markdown("**Guarded remediation (generate → review → execute)**")
         panel_help(
-            "Turns findings into exact `ALTER` statements. Execution needs the "
-            "admin profile, writes a REMEDIATION_LOG audit row, and books an "
-            "ESTIMATED savings-ledger item — verify it on the Savings ledger below. "
-            "Warehouse-setting changes are also caught by the change scan, which "
-            "books and settles its own measured row (V038). "
-            "Anyone can copy the SQL for review."
+            "Turns findings into exact `ALTER` statements. Execution needs the admin profile and "
+            "writes a REMEDIATION_LOG audit row with the estimate. Auto-suspend and resize changes are "
+            "then booked and settled by the daily change scan against 14 days of measured actuals "
+            "(V038) — the app no longer books a second, manual ledger row for them. An off-hours "
+            "schedule (invisible to the scan) still books an ESTIMATED ledger item — verify it on the "
+            "Savings ledger below. Anyone can copy the SQL for review."
         )
         # Same builder PAIR as the advisor above (r20 #1): identical SQL identity
         # means this is served from the advisor's cache — the remediation block
@@ -1785,8 +1794,13 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
 
             if stmt:
                 st.code(stmt, language="sql")
+                _lever = ('AUTO_SUSPEND' if fix_kind.startswith('Tighten') else 'SCHEDULE')
+                # autobooked only when the scan's direction filter books THIS change (a never-suspend
+                # warehouse getting its first timer is not — the app keeps booking that one).
+                _autobooked = (_lever in LEDGER_AUTOBOOKED_LEVERS and remediation.autobook_books_change(
+                    _lever, _rec_row["AUTO_SUSPEND"].iloc[0] if not _rec_row.empty else None))
                 if is_operator:
-                    if (confirm_gate(wh_pick, "Execute + log + book estimated savings", key="remed",
+                    if (confirm_gate(wh_pick, "Execute + log" if _autobooked else "Execute + log + book estimated savings", key="remed",
                                      prompt="Type the warehouse name to confirm execution", object_name=True)
                             and write_gate_open("remed")):
                         ok, msg = execute_statement(stmt, page=_PAGE)
@@ -1798,7 +1812,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}, {identity_sql()}"
                         )
                         execute_statement(log_sql, page=_PAGE)
-                        if ok and est_monthly > 0:
+                        _book_ledger = ok and est_monthly > 0 and not _autobooked
+                        if _book_ledger:
+                            # SCHEDULE only: the change scan cannot see a suspend/resume schedule, so the
+                            # app books it; AUTO_SUSPEND is autobooked (V038/V145) — Next-Fifty #5.
                             ledger_sql = (
                                 f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
                                 "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES, FINDING_TYPE, TARGET_OBJECT) "
@@ -1810,10 +1827,13 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             )
                             execute_statement(ledger_sql, page=_PAGE)
                         stamp_write("remed", ok)  # C48
-                        # "booked" only when a SAVINGS_LEDGER row was actually inserted (est_monthly>0,
-                        # the same gate as line ~1811) — else it over-claims a booking that didn't happen.
+                        # "booked" only when a SAVINGS_LEDGER row was actually inserted (_book_ledger)
+                        # — else it over-claims a booking that didn't happen.
                         notify(ok, msg if not ok else
-                               f"{fix_kind} on {wh_pick} — executed" + (" and booked." if est_monthly > 0 else "."))
+                               f"{fix_kind} on {wh_pick} — executed"
+                               + (" and booked." if _book_ledger
+                                  else "; the daily change scan books and settles its measured saving."
+                                  if _autobooked else "."))
                 else:
                     st.caption("Copy the SQL freely; executing from the app requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
 
@@ -1846,11 +1866,31 @@ def _savings_tab() -> None:
                     "cost-lever changes are detected (needs migration V038).")
     else:
         styled_table(res.df[[c for c in ("CREATED_AT", "SOURCE", "DESCRIPTION", "STATE",
-                                          "ESTIMATED_USD", "VERIFIED_USD", "VERIFIED_BY")
-                             if c in res.df.columns]])
+                                          "ESTIMATED_USD", "VERIFIED_USD", "VERIFIED_BY",
+                                          "SUPERSEDED_BY_CHANGE_ID")
+                             if c in res.df.columns]],
+                     column_config={"SUPERSEDED_BY_CHANGE_ID":
+                                    st.column_config.TextColumn("Superseded by change")})
 
     # #3: operator gating from the VIEWER identity + allowlist, not CURRENT_ROLE().
     is_operator = _is_operator()
+
+    # Next-Fifty #5: manual rows the change scan ALSO booked + settled (one change counted twice). The
+    # count is the UNCAPPED builder (never len() of the LIMIT-500 frame above); the cleanup is uncapped too.
+    _sq = run(mart_sql.savings_summary_quarter(), page=_PAGE, key="savings_twin_count", tier="live",
+              source="SAVINGS_LEDGER x WAREHOUSE_CHANGE_REGISTRY (superseded manual twins)")
+    _n_twins = int(safe_float(_sq.df.iloc[0].get("SUPERSEDED_ITEMS"))) if _sq.usable() else 0
+    if _n_twins > 0:
+        st.warning(f"{_n_twins:,} manual booking(s) duplicate a warehouse change the daily scan already "
+                   "booked and settled — they are excluded from every total. Reject them to make the "
+                   "cleanup permanent.")
+        _twin_sql = mart_sql.supersede_ledger_twins_sql(identity_sql())
+        st.code(_twin_sql, language="sql")
+        if (is_operator and st.button("Reject superseded duplicates", key="ledger_twin_reject")
+                and write_gate_open("ledger_twin_reject")):
+            ok, msg = execute_statement(_twin_sql, page=_PAGE)
+            stamp_write("ledger_twin_reject", ok)  # C48
+            notify(ok, msg if not ok else f"Rejected {_n_twins:,} superseded duplicate(s).")
 
     runs = run(mart_sql.savings_verification_runs(), page=_PAGE, key="savings_runs",
                tier="recent", source="SAVINGS_VERIFICATION_RUNS")
@@ -1858,7 +1898,8 @@ def _savings_tab() -> None:
         st.markdown("**Auto-verification (monthly re-measurement)**")
         st.caption(
             "TASK_VERIFY_SAVINGS re-measures each ESTIMATED auto-suspend item's idle spend and "
-            "proposes a verified amount. Apply it below with the standard proof-gated verify flow."
+            "proposes a verified amount. Apply it below with the standard proof-gated verify flow. "
+            "Auto-booked change rows settle themselves and superseded duplicates are hidden here."
         )
         styled_table(runs.df, height=260,
                      column_config={
@@ -1886,7 +1927,8 @@ def _savings_tab() -> None:
 
     if not res.empty:
         with st.expander("Verify an estimated item (proof required)"):
-            estimated = res.df[res.df["STATE"].astype(str).str.upper() == LEDGER_ESTIMATED]
+            _live = split_superseded(res.df)[0]      # a superseded twin can't be verified again
+            estimated = _live[_live["STATE"].astype(str).str.upper() == LEDGER_ESTIMATED]
             if estimated.empty:
                 st.caption("No ESTIMATED items to verify.")
             else:

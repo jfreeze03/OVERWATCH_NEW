@@ -32,6 +32,7 @@ LIVE_BUILDERS = [
     lambda: security_sql.recent_role_grants(7),
     lambda: security_sql.recent_ddl_changes(7, "ALFA"),
     lambda: mart_sql.app_self_cost(7),
+    lambda: mart_sql.app_warehouse_queue_by_hour(7),   # Next-Fifty #7
 ]
 
 
