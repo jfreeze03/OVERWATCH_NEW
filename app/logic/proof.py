@@ -73,7 +73,11 @@ def acceptance_summary(row: pd.DataFrame | pd.Series | dict | None) -> dict:
 
 def roi_multiple(verified_usd: float, run_cost_usd: float) -> dict:
     """Does OVERWATCH pay for itself: verified savings as a multiple of its own run cost.
-    RATIO None when run cost is unknown/zero (can't divide). PAYS = ratio >= 1."""
+    RATIO None when run cost is unknown/zero (can't divide). PAYS = ratio >= 1.
+
+    ``verified_usd`` is the ACTIVE verified monthly run-rate (mart_sql.savings_summary_quarter
+    VERIFIED_ACTIVE_MONTHLY_USD), never a quarter-to-date sum — a QTD numerator reset to 0x on the
+    first day of every quarter (Next-Fifty #3)."""
     verified = safe_float(verified_usd)
     run_cost = safe_float(run_cost_usd)
     ratio = round(verified / run_cost, 1) if run_cost > 0 else None

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from app.config import SAVINGS_ACTIVE_MONTHS
 from app.core.errors import safe_page
 from app.core.identity import viewer_name
 from app.core.query import run, run_batch
@@ -157,7 +158,8 @@ def _nightly_cycle_forecast(settings: dict) -> dict:
     fc = etl_cycle_sla_forecast(
         res.df,
         target_hhmm=str(settings.get("ETL_SLA_TARGET_HHMM") or "07:00").strip(),
-        breach_hhmm=str(settings.get("ETL_SLA_BREACH_HHMM") or "08:00").strip())
+        breach_hhmm=str(settings.get("ETL_SLA_BREACH_HHMM") or "08:00").strip(),
+        spike_calendar=str(settings.get("EXPECTED_SPIKE_CALENDAR") or ""))
     return fc or {}
 
 
@@ -210,7 +212,12 @@ def _nightly_cycle_kpi(fc: dict, wf_fail_n: int) -> dict:
         return _tile("Regressing", "warn", _when)
     # 6. GREEN only when the latest night COMPLETED with a real on-time margin
     if latest_state == "COMPLETE" and margin is not None and safe_float(margin) >= 0:
-        return _tile("On track", "ok", f"{humanize_duration(safe_float(margin), 's')} before {tgt}")
+        _d = f"{humanize_duration(safe_float(margin), 's')} before {tgt}"
+        # Next-Fifty #18: name a known-heavy (month/quarter-end) night tonight on the green tile.
+        _lab, _x = fc.get("upcoming_spike_label"), safe_float(fc.get("spike_extra_sec"))
+        if _lab and _x > 0:
+            _d += f" · {_lab} tonight (~+{humanize_duration(_x, 's')} typical)"
+        return _tile("On track", "ok", _d)
     # 7. anything else (insufficient history / no completed baseline) — neutral, never green
     return _tile("—", "info", "awaiting cycle data")
 
@@ -369,7 +376,10 @@ def render() -> None:
                  tier="recent", source="FACT_WAREHOUSE_DAILY (WH_ALFA_ADMIN trailing 30d)")
     if roi.usable():
         rrow = roi.df.iloc[0]
-        verified = safe_float(rrow.get("VERIFIED_QTD_USD"))
+        # Next-Fifty #3: the tile compares the ACTIVE verified monthly run-rate with the monthly
+        # app run cost — a this-quarter sum reset to $0 (red) on the first day of every quarter.
+        verified = safe_float(rrow.get("VERIFIED_ACTIVE_MONTHLY_USD"))
+        verified_qtd = safe_float(rrow.get("VERIFIED_QTD_USD"))
         pipeline = safe_float(rrow.get("ESTIMATED_OPEN_USD"))
         # A zero APP_CREDITS_30D is a MISSING/degenerate denominator (renamed app
         # warehouse, empty FACT_WAREHOUSE_DAILY) — the builder always returns one
@@ -380,16 +390,17 @@ def render() -> None:
         _app_credits = safe_float(cost_q.df.iloc[0].get("APP_CREDITS_30D")) if cost_q.usable() else 0.0
         app_usd = _app_credits * rate if _app_credits > 0 else None
         secondary.append({
-            "label": "Verified savings (QTD)",
+            "label": "Verified savings run-rate",
             "value": format_usd(verified),
-            "delta": (f"vs {format_usd(app_usd)} monthly run cost" if app_usd is not None
+            "delta": (f"/mo vs {format_usd(app_usd)} monthly run cost" if app_usd is not None
                       else "app cost unavailable"),
             "delta_color": ("normal" if verified >= app_usd else "inverse")
                            if app_usd is not None else "off",
-            "help": "VERIFIED ledger items only — proven by before/after actuals, never "
-                    "mixed with estimates. App cost = the shared app/loader warehouse's trailing 30-day "
-                    "(monthly) run cost -- same horizon as the monthly-magnitude savings. Green: "
-                    "verified savings exceed the app's run cost.",
+            "help": f"Monthly run-rate of VERIFIED ledger items verified in the last {SAVINGS_ACTIVE_MONTHS} "
+                    "months — proven by before/after actuals, never mixed with estimates, and it does not "
+                    f"reset when a quarter starts ({format_usd(verified_qtd)} verified this quarter; detail "
+                    "on Decision Studio ▸ ROI). App cost = the shared app/loader warehouse's trailing 30-day "
+                    "(monthly) run cost — same horizon. Green: the verified run-rate covers the app's run cost.",
         })
         if pipeline > 0:
             secondary.append({
@@ -653,7 +664,7 @@ def render() -> None:
     if digest.usable():
         drow = digest.df.iloc[0]
         with st.expander(f"AI morning narrative — {drow.get('DIGEST_DATE')}", expanded=False):
-            st.markdown(str(drow.get("BODY") or ""))
+            st.markdown(md_dollars(str(drow.get("BODY") or "")))
 
     _brief_view = ExecutiveSummaryView(
         company=company,

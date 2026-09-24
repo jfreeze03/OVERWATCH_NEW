@@ -371,13 +371,19 @@ LIMIT 200
 
 
 def warehouse_pressure(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
-    """Queue and spill pressure per warehouse for the window."""
+    """Queue and spill pressure per warehouse for the window.
+
+    Next-Fifty #17: the live path also splits overload (concurrency) from provisioning (the warehouse
+    resuming from suspend = a cold start); the hourly fact carries only the combined sum until the
+    wave-2 loader change, so QUEUED_SEC stays combined for the mart/live column contract."""
     days = bounded_days(days)
     return f"""
 SELECT
     WAREHOUSE_NAME,
     COUNT(*) AS QUERY_COUNT,
     SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000.0 AS QUEUED_SEC,
+    SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0)) / 1000.0 AS QUEUED_OVERLOAD_SEC,
+    SUM(COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000.0 AS QUEUED_PROVISIONING_SEC,
     SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_REMOTE_GB,
     APPROX_PERCENTILE(TOTAL_ELAPSED_TIME / 1000, 0.95) AS P95_ELAPSED_SEC
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
@@ -603,6 +609,10 @@ SELECT
     ROUND(AVG(COMPILATION_TIME) / 1000.0, 2) AS COMPILE_SEC,
     ROUND(AVG(EXECUTION_TIME) / 1000.0, 2) AS EXECUTION_SEC,
     ROUND(AVG(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000.0, 2) AS QUEUED_SEC,
+    -- Next-Fifty #17: split the combined wait so advise() names a cold start (warehouse resume)
+    -- apart from concurrency overload — sizing up fixes neither the same way.
+    ROUND(AVG(COALESCE(QUEUED_OVERLOAD_TIME, 0)) / 1000.0, 2) AS QUEUED_OVERLOAD_SEC,
+    ROUND(AVG(COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000.0, 2) AS QUEUED_PROVISIONING_SEC,
     ROUND(AVG(BYTES_SCANNED) / POWER(1024, 3), 3) AS GB_SCANNED,
     ROUND(AVG(COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0)) * 100, 1) AS CACHE_PCT,
     ROUND(AVG(COALESCE(BYTES_SPILLED_TO_LOCAL_STORAGE, 0)) / POWER(1024, 3), 3) AS LOCAL_SPILL_GB,
@@ -617,6 +627,19 @@ SELECT
     AVG(IFF((COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) >= 1000
             AND (COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0))
                 / NULLIF(TOTAL_ELAPSED_TIME, 0) > 0.5, 1, 0)) AS QUEUED_RUN_PCT,
+    -- Next-Fifty #17 (adversarial review): the overload/provisioning AVGs are time-weighted, so one
+    -- minutes-long overload storm outweighs ninety 1-second cold starts. These split the MEANINGFULLY
+    -- queued runs by which component dominated EACH run, so advise() names the typical cause.
+    AVG(IFF((COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) >= 1000
+            AND (COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0))
+                / NULLIF(TOTAL_ELAPSED_TIME, 0) > 0.5
+            AND COALESCE(QUEUED_PROVISIONING_TIME, 0) > COALESCE(QUEUED_OVERLOAD_TIME, 0), 1, 0))
+        AS PROVISIONING_QUEUED_RUN_PCT,
+    AVG(IFF((COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) >= 1000
+            AND (COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0))
+                / NULLIF(TOTAL_ELAPSED_TIME, 0) > 0.5
+            AND COALESCE(QUEUED_OVERLOAD_TIME, 0) >= COALESCE(QUEUED_PROVISIONING_TIME, 0), 1, 0))
+        AS OVERLOAD_QUEUED_RUN_PCT,
     AVG(IFF(COALESCE(COMPILATION_TIME, 0) >= 1000
             AND COALESCE(COMPILATION_TIME, 0) / NULLIF(TOTAL_ELAPSED_TIME, 0) > 0.5, 1, 0)) AS COMPILE_RUN_PCT,
     -- metadata-chatter typical-run guard: share of runs that are compile-DOMINATED with ~no

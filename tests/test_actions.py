@@ -82,6 +82,7 @@ def test_ledger_totals_realization_none_without_verified():
     assert totals["realization_pct"] is None and totals["verified_estimated_usd"] == 0.0
     # DS flagship: the timing/QTD fields are None/0 with nothing verified, never a raise.
     assert totals["avg_days_to_verify"] is None and totals["verified_qtd_usd"] == 0.0
+    assert totals["verified_active_usd"] == 0.0
 
 
 def test_ledger_totals_realization_story(monkeypatch):
@@ -102,6 +103,24 @@ def test_ledger_totals_realization_story(monkeypatch):
     assert t["verified_qtd_usd"] == 90.0                       # only the in-quarter verify
     assert t["avg_days_to_verify"] == 12.0                     # (14 + 10) / 2
     assert t["realization_pct"] == round(130 / 150 * 100, 1)   # 130 verified of a 150 estimate
+
+
+def test_ledger_totals_active_run_rate_survives_quarter_reset(monkeypatch):
+    # Next-Fifty #3: on the first day of a quarter the QTD sum restarts at 0, but the ACTIVE
+    # verified monthly run-rate (the ROI numerator) keeps every item verified in the last 12
+    # months — a saving verified in Q3 is still saving money in Q4.
+    import app.logic.actions as actions_mod
+    monkeypatch.setattr(actions_mod, "account_now", lambda: pd.Timestamp("2026-10-01 00:30:00"))
+    df = pd.DataFrame([
+        {"STATE": "VERIFIED", "ESTIMATED_USD": 100, "VERIFIED_USD": 100, "VERIFIED_AT": "2026-09-30 23:59:00"},  # just before Q4
+        {"STATE": "VERIFIED", "ESTIMATED_USD": 40, "VERIFIED_USD": 40, "VERIFIED_AT": "2026-10-01 00:10:00"},   # just after
+        {"STATE": "VERIFIED", "ESTIMATED_USD": 5, "VERIFIED_USD": 5, "VERIFIED_AT": "2025-10-01 00:00:00"},    # on the 12-month edge
+        {"STATE": "VERIFIED", "ESTIMATED_USD": 7, "VERIFIED_USD": 7, "VERIFIED_AT": "2025-09-30 12:00:00"},    # older than 12 months
+    ])
+    t = ledger_totals(df)
+    assert t["verified_qtd_usd"] == 40.0          # the quarter KPI restarts
+    assert t["verified_active_usd"] == 145.0      # 100 + 40 + 5: the ROI numerator does not
+    assert t["verified_usd"] == 152.0             # all-time is unaffected
 
 
 def test_triage_queue_merges_and_ranks():

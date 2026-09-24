@@ -8,7 +8,7 @@ from math import ceil
 
 import pandas as pd
 
-from app.logic.anomaly import flag_anomalies
+from app.logic.anomaly import expected_spike_labels, flag_anomalies
 
 from .formulas import credits_to_usd, humanize_duration, safe_div, safe_float
 
@@ -56,6 +56,36 @@ def with_auto_suspend_settings(idle: pd.DataFrame, warehouses: pd.DataFrame) -> 
     mapped = out["WAREHOUSE_NAME"].astype(str).str.strip().str.upper().map(values)
     out["AUTO_SUSPEND"] = pd.to_numeric(mapped, errors="coerce").astype("Float64")
     out["AUTO_SUSPEND_KNOWN"] = out["AUTO_SUSPEND"].notna()
+    return out
+
+
+def with_warehouse_settings(profile: pd.DataFrame, warehouses: pd.DataFrame) -> pd.DataFrame:
+    """with_auto_suspend_settings + the rest of the SHOW WAREHOUSES config a sizing verdict needs:
+    CURRENT_SIZE (raw SHOW 'size', e.g. 'X-Small'), MIN_CLUSTER_COUNT / MAX_CLUSTER_COUNT (numeric)
+    and SCALING_POLICY (upper). ONE shared mapping for Operations ▸ Sizing and Cost ▸ Optimize so the
+    two can never disagree — an XSMALL warehouse must never be a size-DOWN candidate on either page
+    (Next-Fifty #16). Case-insensitive on warehouse name; a column is added only when SHOW supplied
+    its source column. Unmatched warehouses get NaN, never pd.NA (NaN is truthy, so a caller must
+    not `row.get(col) or default` these). Pure."""
+    out = with_auto_suspend_settings(profile, warehouses)
+    if (out is None or out.empty or warehouses is None or warehouses.empty
+            or "WAREHOUSE_NAME" not in out.columns):
+        return out
+    settings = warehouses.copy()
+    settings.columns = [str(c).lower() for c in settings.columns]
+    if "name" not in settings.columns:
+        return out
+    keys = out["WAREHOUSE_NAME"].astype(str).str.strip().str.upper()
+    names = settings["name"].astype(str).str.strip().str.upper()
+    if "size" in settings.columns:
+        out["CURRENT_SIZE"] = keys.map(dict(zip(names, settings["size"].astype(str), strict=False)))
+    for src, dst in (("min_cluster_count", "MIN_CLUSTER_COUNT"), ("max_cluster_count", "MAX_CLUSTER_COUNT")):
+        if src in settings.columns:
+            vals = pd.to_numeric(settings[src], errors="coerce")
+            out[dst] = pd.to_numeric(keys.map(dict(zip(names, vals, strict=False))), errors="coerce")
+    if "scaling_policy" in settings.columns:
+        policy = settings["scaling_policy"].astype(str).str.strip().str.upper()
+        out["SCALING_POLICY"] = keys.map(dict(zip(names, policy, strict=False)))
     return out
 
 
@@ -1009,6 +1039,9 @@ def recon_recurrence(
 SLA_FORECAST_MIN_RUNS = 4          # complete nights needed before a trend is fitted
 SLA_FORECAST_HORIZON_RUNS = 7      # project the margin this many nights ahead
 SLA_FORECAST_MIN_SLOPE_SEC = 120.0  # < 2 min/night margin drift is noise, not a trend
+# Next-Fifty #18: the trend fits the newest N nights (mirrors etl_control_sql.SLA_BASELINE_RUNS — the
+# logic layer must not import the data layer); older returned nights feed only the month-end history.
+SLA_FORECAST_FIT_NIGHTS = 14
 
 
 def _parse_hhmm(raw: object, fallback: tuple[int, int]) -> tuple[int, int]:
@@ -1034,7 +1067,8 @@ def _deadline_after(start_ts: pd.Timestamp, offset_min: int) -> pd.Timestamp:
 def etl_cycle_sla_forecast(
     df: pd.DataFrame, *, target_hhmm: str = "07:00", breach_hhmm: str = "08:00",
     min_runs: int = SLA_FORECAST_MIN_RUNS, horizon_runs: int = SLA_FORECAST_HORIZON_RUNS,
-    min_slope_sec: float = SLA_FORECAST_MIN_SLOPE_SEC,
+    min_slope_sec: float = SLA_FORECAST_MIN_SLOPE_SEC, fit_nights: int = SLA_FORECAST_FIT_NIGHTS,
+    spike_calendar: str | None = None,
 ) -> dict:
     """Forecast whether the nightly cycle will finish before its clock deadline.
 
@@ -1045,7 +1079,15 @@ def etl_cycle_sla_forecast(
     excluded — their finish is crash-short / provisional and would fake an early margin) gives the
     trend; the projection, nights-to-breach, and a start-drift read follow. The tier reads the last
     COMPLETE night's actual margins first (a real breach isn't hidden by a flat trend), then the trend.
-    Returns a summary dict — empty ``{}`` when there is no cycle data. Pure; never raises."""
+    Returns a summary dict — empty ``{}`` when there is no cycle data. Pure; never raises.
+
+    Next-Fifty #18: the slope is per CALENDAR night ((night key - first key).days), so a failed night
+    leaves a gap instead of compressing the axis (the CALENDAR-DAY-SLOPE class). Nights labelled by
+    ``spike_calendar`` (EXPECTED_SPIKE_CALENDAR, e.g. month-end) are excluded from the trend FIT only —
+    they are expected to run long — but the tier still judges their ACTUAL margins, so a real month-end
+    miss still reads Missed target / Breaching. The fit, the tier and the table use the newest
+    ``fit_nights`` nights; the whole returned history sizes the typical labelled-night extra time and
+    flags when tonight is itself a labelled night."""
     need = {"CYCLE_START", "CYCLE_FINISH", "N_FAILED", "N_RUNNING"}
     if df is None or df.empty or not need.issubset(df.columns):
         return {}
@@ -1091,28 +1133,61 @@ def etl_cycle_sla_forecast(
         if pd.isna(ref):
             ref = start.normalize()
         nights.append({
+            "key": ref.normalize(),     # the night key (calendar day) the slope is fitted over
             "cycle_date": r.get("CYCLE_DATE"), "start": start, "finish": finish, "state": state,
             "margin_t": (dl_t - finish).total_seconds() if pd.notna(finish) else None,
             "margin_h": (dl_h - finish).total_seconds() if pd.notna(finish) else None,
             "start_off": (start - ref).total_seconds() / 60.0, "dl_t": dl_t, "dl_h": dl_h,
         })
+    hist = nights                                          # the WHOLE returned history, oldest -> newest
+    _labels = (expected_spike_labels(pd.Series([nt["key"] for nt in hist]), spike_calendar).tolist()
+               if spike_calendar else [""] * len(hist))
+    for nt, lab in zip(hist, _labels, strict=True):
+        nt["spike"] = str(lab or "")
+    nights = hist[-max(1, int(fit_nights)):]               # the newest-N window: fit, tier, latest, table
     latest = nights[-1]
     complete = [nt for nt in nights if nt["state"] == "COMPLETE" and nt["margin_t"] is not None]
     last_complete = complete[-1] if complete else None
     latest_margin = last_complete["margin_t"] if last_complete else None
     margin_hard = last_complete["margin_h"] if last_complete else None
     latest_complete_finish = last_complete["finish"] if last_complete else None
-    slope = projected = nights_to_breach = start_slope = None
-    if len(complete) >= min_runs:
-        ys = [nt["margin_t"] for nt in complete]        # oldest -> newest
-        xs = [float(i) for i in range(len(ys))]
-        slope, _ = _robust_slope(xs, ys)                # sec/night; negative = eroding
-        projected = (latest_margin + slope * horizon_runs) if latest_margin is not None else None
-        if latest_margin is not None and latest_margin <= 0:
+    fit = [nt for nt in complete if not nt["spike"]]       # labelled nights are EXPECTED to run long
+    # TONIGHT's night key. The data says the night after the newest row (or the in-flight night); the
+    # clock says today's night once the hard deadline has passed, else yesterday's (still inside its
+    # window) — so a night with NO row at all (the starter never fired) still advances the key.
+    upcoming = latest["key"] if latest["state"] == "INCOMPLETE" else latest["key"] + timedelta(days=1)
+    if pd.notna(snapshot):
+        _past_deadline = snapshot.hour * 60 + snapshot.minute >= breach_off
+        upcoming = max(upcoming, snapshot.normalize() - timedelta(days=0 if _past_deadline else 1))
+    upcoming_label = (str(expected_spike_labels(pd.Series([upcoming]), spike_calendar).iloc[0] or "")
+                      if spike_calendar else "")
+    slope = projected = nights_to_breach = start_slope = typical_tonight = None
+    # nights from the newest TYPICAL night to tonight: 1 normally, more when labelled / failed nights sit
+    # between (2-4 at every month/quarter boundary) — the projection counts from TONIGHT, not the anchor.
+    gap = max(1, int((upcoming - fit[-1]["key"]).days)) if fit else 1
+    if len(fit) >= min_runs:
+        origin = fit[0]["key"]
+        xs = [float((nt["key"] - origin).days) for nt in fit]   # CALENDAR nights, never the row index
+        ys = [nt["margin_t"] for nt in fit]
+        slope, _ = _robust_slope(xs, ys)                   # sec per calendar night; negative = eroding
+        anchor = fit[-1]["margin_t"]                       # the newest TYPICAL night's margin
+        projected = anchor + slope * (gap - 1 + horizon_runs)
+        if (latest_margin is not None and latest_margin <= 0) or anchor <= 0:
             nights_to_breach = 0
-        elif slope < -min_slope_sec and latest_margin is not None:
-            nights_to_breach = ceil(latest_margin / -slope)
-        start_slope, _ = _robust_slope(xs, [nt["start_off"] for nt in complete])  # min/night
+        elif slope < -min_slope_sec:
+            nights_to_breach = max(1, ceil(anchor / -slope) - (gap - 1))   # 1 = tonight
+        start_slope, _ = _robust_slope(xs, [nt["start_off"] for nt in fit])  # min per calendar night
+    if fit:   # tonight's TYPICAL margin (trend-adjusted) — the base a labelled night's extra is taken off
+        typical_tonight = fit[-1]["margin_t"] + (slope * gap if slope is not None else 0.0)
+    # Expected-spike history over the WHOLE returned history (not just the fit window): how much
+    # later a labelled night typically finishes (+ = later). When TONIGHT is labelled, only nights with
+    # the SAME label size it (a quarter-end is not sized from month-ends).
+    h_complete = [nt for nt in hist if nt["state"] == "COMPLETE" and nt["margin_t"] is not None]
+    h_typ = [nt["margin_t"] for nt in h_complete if not nt["spike"]]
+    h_spk = [nt["margin_t"] for nt in h_complete
+             if nt["spike"] and (not upcoming_label or nt["spike"] == upcoming_label)]
+    spike_extra = (round(float(pd.Series(h_typ).median() - pd.Series(h_spk).median()), 1)
+                   if h_typ and h_spk else None)
     # tier: actual margins of the last COMPLETE night first (a real breach isn't hidden by a flat
     # trend), then the trend; short history caps at an on-track-with-caveat read.
     if last_complete is None:
@@ -1141,16 +1216,24 @@ def etl_cycle_sla_forecast(
         "slope_sec_per_night": (round(slope, 1) if slope is not None else None),
         "projected_margin_sec": (round(projected, 1) if projected is not None else None),
         "nights_to_breach": nights_to_breach,
+        "typical_margin_sec": (round(typical_tonight, 1) if typical_tonight is not None else None),
         "start_slope_min_per_night": (round(start_slope, 1) if start_slope is not None else None),
-        "nights_fit": len(complete), "nights_total": len(nights),
+        "nights_fit": len(fit), "nights_total": len(nights),
         "live_runway_sec": live_runway,
+        # Next-Fifty #18: expected-spike (month/quarter-end) context
+        "spike_nights_excluded": sum(1 for nt in complete if nt["spike"]),
+        "spike_extra_sec": spike_extra,
+        "spike_nights_seen": len(h_spk),
+        "upcoming_night_key": upcoming,
+        "upcoming_spike_label": upcoming_label,
         # newest-first per-night detail for the panel table. MARGIN only for a COMPLETE night — a
         # FAILED night's finish is crash-short and an in-flight night's is partial, so a margin off
         # either would render a misleading "early" for a cycle that didn't cleanly finish.
         "nights": [{"CYCLE_DATE": nt["cycle_date"], "CYCLE_START": nt["start"],
                     "CYCLE_FINISH": nt["finish"], "RUN_STATE": nt["state"],
                     "MARGIN_SEC": (round(nt["margin_t"], 1)
-                                   if nt["state"] == "COMPLETE" and nt["margin_t"] is not None else None)}
+                                   if nt["state"] == "COMPLETE" and nt["margin_t"] is not None else None),
+                    "EXPECTED_SPIKE": (nt["spike"] or None)}
                    for nt in reversed(nights)],
     }
 

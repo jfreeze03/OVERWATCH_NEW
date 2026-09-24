@@ -73,7 +73,7 @@ from app.logic.insights import (
     task_duration_anomalies,
     task_failure_recurrence,
     task_release_deltas,
-    with_auto_suspend_settings,
+    with_warehouse_settings,
 )
 from app.logic.sizing import size_recommendations, sizing_summary
 from app.logic.task_graph import (
@@ -402,8 +402,8 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         key="ops_qopp_toggle",
         help="Scores each recurring query (fingerprint): QOP = how inefficient a typical run is; "
              "OOS = QOP x how much compute it burns, so a moderately-bad query run thousands of "
-             "times ranks above a one-off catastrophe. Concurrency queueing is separated from bad "
-             "SQL. One live QUERY_HISTORY scan; off first paint.")
+             "times ranks above a one-off catastrophe. Concurrency queueing and cold-start (resume) "
+             "waits are separated from bad SQL. One live QUERY_HISTORY scan; off first paint.")
     if _qopp_on:
         _qopp = run(
             ops_sql.query_opportunity_fingerprints(
@@ -416,6 +416,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             _scored, _breakdowns = query_opt.score_opportunities(_qopp.df)
             _crit = int((_scored["QOP"] >= 60).sum())
             _conc = int((_scored["PATHOLOGY"] == "Concurrency starvation").sum())
+            _cold = int((_scored["PATHOLOGY"] == "Cold-start wait").sum())
             _spill = int(_scored["PATHOLOGY"].str.startswith("Spill").sum())
             _actionable = int((_scored["QOP"] > 0).sum()) if len(_scored) else 0
             kpi_row([
@@ -427,8 +428,13 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                  "severity": "warn" if _crit else "",
                  "help": "Fingerprints whose typical execution is badly inefficient."},
                 {"label": "Concurrency-starved", "value": f"{_conc:,}",
-                 "help": "Fast SQL stuck behind warehouse queueing — a capacity problem, not bad "
-                         "SQL. Size or split the warehouse; don't rewrite the query."},
+                 "help": "Fast SQL stuck behind warehouse OVERLOAD queueing — a capacity problem, not "
+                         "bad SQL. Add a cluster (multi-cluster) or split the workload; don't rewrite "
+                         "the query. Resume (cold-start) waits are counted separately."},
+                {"label": "Cold-start wait", "value": f"{_cold:,}",
+                 "help": "Recurring queries whose wait is mostly the warehouse RESUMING from suspend "
+                         "(provisioning), not overload. Sizing up buys nothing here — keep it warm "
+                         "across the schedule or accept the resume latency."},
                 {"label": "Memory spill", "value": f"{_spill:,}"},
             ])
             _disp = _scored.head(50).copy()
@@ -1678,8 +1684,9 @@ def _sla_finish_forecast_panel(*, pf: dict | None = None) -> None:
     end_wf = str(settings.get("ETL_CYCLE_END_WORKFLOW") or "").strip()
     target = str(settings.get("ETL_SLA_TARGET_HHMM") or "07:00").strip()
     breach = str(settings.get("ETL_SLA_BREACH_HHMM") or "08:00").strip()
-    # r8: this forecast is a FIXED SLA_BASELINE_RUNS=14-night baseline (the scan's QUALIFY keeps the
-    # most-recent 14 nights) — the SAME builder + design the Brief's "Nightly cycle" tile reuses. It
+    # r8: this forecast FITS a fixed SLA_BASELINE_RUNS=14-night baseline (the scan returns
+    # SLA_HISTORY_NIGHTS; the forecaster fits the newest 14 and uses the rest only for month-end
+    # history) — the SAME builder + design the Brief's "Nightly cycle" tile reuses. It
     # must NOT thread the scope-bar Window: the Pipeline SLA tab's own scope contract declares Window
     # "Active but ignored" (SLA horizons are account-wide policy), and threading days=7 (the default)
     # truncated the fit below the forecaster's designed baseline and made the panel contradict Brief
@@ -1696,7 +1703,8 @@ def _sla_finish_forecast_panel(*, pf: dict | None = None) -> None:
              "haven't both run. Check the two anchor workflow names on Admin ▸ SETTINGS.", kind="clean",
              setup_hint="The app role needs SELECT on the CONTROL_STATUS table "
                         "(GRANT SELECT ON <table> TO ROLE <app role>)."):
-        fc = etl_cycle_sla_forecast(res.df, target_hhmm=target, breach_hhmm=breach)
+        fc = etl_cycle_sla_forecast(res.df, target_hhmm=target, breach_hhmm=breach,
+                                    spike_calendar=str(settings.get("EXPECTED_SPIKE_CALENDAR") or ""))
         if not fc:
             empty_state("clean", "No completed nightly cycles in the window yet.")
             return
@@ -1751,6 +1759,25 @@ def _sla_finish_forecast_panel(*, pf: dict | None = None) -> None:
         elif fc.get("live_runway_sec") is not None:
             st.caption(f"Tonight's cycle is still running — {_signed(fc.get('live_runway_sec'), 'until', 'past')} "
                        f"the {_tgt} target (live, advisory).")
+        # Next-Fifty #18: a heads-up BEFORE a known-heavy night (EXPECTED_SPIKE_CALENDAR), sized from
+        # how much later past labelled nights actually finished.
+        _lab = fc.get("upcoming_spike_label") or ""
+        if _lab:
+            _xtra = fc.get("spike_extra_sec")
+            if _xtra is not None and safe_float(_xtra) > 0:
+                # off tonight's TYPICAL margin — last night may itself have been labelled (heavy)
+                _at_pace = (safe_float(fc.get("typical_margin_sec")) - safe_float(_xtra)
+                            if fc.get("typical_margin_sec") is not None else None)
+                _msg = (f"📅 Tonight is a {_lab} night — historically ~{humanize_duration(safe_float(_xtra), 's')} "
+                        f"later than a typical night ({fc.get('spike_nights_seen', 0)} seen).")
+                if _at_pace is not None and _at_pace < 0:
+                    st.warning(_msg + f" At that pace tonight's finish would miss {_tgt} by "
+                               f"{humanize_duration(abs(_at_pace), 's')}.")
+                else:
+                    st.caption(_msg)
+            else:
+                st.caption(f"📅 Tonight is a {_lab} night (EXPECTED_SPIKE_CALENDAR) — no completed "
+                           f"{_lab} night in the history yet to size it.")
         import pandas as pd
         nights_df = pd.DataFrame(fc.get("nights", []))
         if not nights_df.empty and "MARGIN_SEC" in nights_df.columns:
@@ -1761,7 +1788,11 @@ def _sla_finish_forecast_panel(*, pf: dict | None = None) -> None:
                    f"deadline anchored to that night's start (the {start_wf or 'starter'} workflow, "
                    f"cross-midnight). Margin = deadline − finish (+ = before {_tgt}). Trend fitted with a "
                    "robust Theil-Sen slope over the complete nights; failed / still-running nights are "
-                   "excluded from the fit. Deadline + anchor workflows are editable on Admin ▸ SETTINGS.")
+                   "excluded from the fit. The slope is per CALENDAR night (a failed night leaves a gap, "
+                   "it doesn't compress the trend). Nights labelled by EXPECTED_SPIKE_CALENDAR (month/"
+                   "quarter-end) are excluded from the trend fit because they're expected to run long, "
+                   "but are still judged for an actual miss. Deadline + anchor workflows are editable "
+                   "on Admin ▸ SETTINGS.")
         result_caption(res)
 
 
@@ -3155,8 +3186,10 @@ def _wh_sizing_efficiency(company: str, rate: float, days: int, *,
                    tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
         from app.logic.cost_peers import cost_per_query_peers
         from app.logic.wh_health import warehouse_health
+        # Next-Fifty #16: the SAME settings mapping as Cost ▸ Optimize (CURRENT_SIZE included), so an
+        # XSMALL warehouse is never a "Size down candidate" here while Optimize correctly refuses it.
         _sized = size_recommendations(
-            with_auto_suspend_settings(
+            with_warehouse_settings(
                 _prof.df, _whs.df if _whs.ok and not _whs.empty else pd.DataFrame()),
             rate, served_days(_prof, days))
         _sum = sizing_summary(_sized)
@@ -3349,6 +3382,16 @@ def _contention_tab(company: str, days: int, *, bounds: tuple | None = None) -> 
             st.caption("Ranked by **Avg queue per query**, the user-felt stall signal. Query count "
                        "and total queued time remain in the evidence table so sustained materiality "
                        "is visible beside the rate. Select a warehouse to open its Entity 360.")
+            # Next-Fifty #17: only a concurrency (overload) wait is a capacity signal — a resume
+            # (provisioning) wait is a cold start that a bigger warehouse does not fix.
+            if "QUEUED_PROVISIONING_SEC" in pdf.columns:
+                st.caption("Live path: QUEUED_OVERLOAD_SEC is concurrency (add a cluster / split the "
+                           "workload); QUEUED_PROVISIONING_SEC is the warehouse resuming from suspend — "
+                           "a cold-start / auto-suspend cadence signal where sizing up buys nothing.")
+            else:
+                st.caption("Queued time here combines overload and resume (provisioning) wait; the "
+                           "live fallback splits them. Right-sizing on Warehouses ▸ Sizing already "
+                           "uses overload only.")
             entity_nav_table(pdf.sort_values("AVG_QUEUE_SEC", ascending=False)
                              if "AVG_QUEUE_SEC" in pdf.columns else pdf,
                              key=f"ops_wh_pressure_{company}_{days}", key_col="WAREHOUSE_NAME",

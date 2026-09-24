@@ -1,5 +1,76 @@
 # Changelog
 
+## 4.588.0 - Next Fifty — wave 1a (ranks 3 / 16 / 17 / 18 / 22 / 23 / 24 / 6) (2026-09-24)
+
+First slice of the "OVERWATCH Next Fifty" review's wave 1. App-only, no migrations; per-page
+`ACCOUNT_USAGE` counts (operations 42, security 31, overview 1, brief 0, control_room 4) and the
+`test_v451_trust` reachable sets are unchanged. Owner PRESERVE list untouched.
+
+- **#3 ROI no longer resets to 0x on Oct 1** — the Decision Studio ROI multiple and the Brief
+  "Verified savings" tile now use an ACTIVE monthly run-rate (verified ledger rows over the last
+  `SAVINGS_ACTIVE_MONTHS`=12 months, `savings_summary_quarter` → `VERIFIED_ACTIVE_MONTHLY_USD`)
+  instead of quarter-to-date, which fell to $0 on every quarter boundary. QTD stays visible as
+  context; `ledger_totals` gains `verified_active_usd`. **Time-sensitive: deploy before 2026-10-01.**
+- **#16 X-Small is never a "size down" candidate** — Operations' sizing-efficiency panel now joins
+  the warehouse's current size/cluster settings through the same `with_warehouse_settings` helper
+  Cost ▸ Optimize uses (one join, not two); `normalize_size` tolerates NaN.
+- **#17 cold-start wait vs concurrency starvation** — queue time is split into
+  `QUEUED_PROVISIONING_SEC` (resume/cold start) and `QUEUED_OVERLOAD_SEC` (concurrency) in the QOIE
+  fingerprints, warehouse pressure and query detail. A provisioning-dominant wait now raises a
+  "Cold-start wait" finding (auto-suspend / keep-warm advice) instead of the multi-cluster advice;
+  a new KPI tile and a live/mart-aware Contention caption. Unknown split = legacy text unchanged.
+- **#18 SLA-finish forecast** — the slope is fitted over CALENDAR nights (a failed night leaves a
+  gap, it no longer compresses the axis); `EXPECTED_SPIKE_CALENDAR` nights (month/quarter-end) are
+  excluded from the trend fit but still judged for an actual miss; Operations and the Brief warn
+  ahead of a known-heavy night with how much later past labelled nights finished (100-night history,
+  14-night fit).
+- **#22 action-proc CALLs invalidate only their own cache domains** — ack/resolve/snooze/declare/
+  lifecycle/verify no longer bump the GLOBAL salt (cold-starting every cached read). `_PROC_DOMAINS`
+  maps each CALLed proc to the domains of its DML targets; a test re-derives the map from each
+  proc's latest migration and fails on drift or an unmapped CALL. Scans/unknown CALLs stay global.
+- **#23 operator entitlement re-checked inside the executors** — under owner's-rights SiS every
+  viewer runs as the owner, so the ALTER levers and query cancel now re-check `is_operator()` in
+  `execute_statement(_async)` / `execute_action` / `execute_cancel_query` (fail closed, audited to
+  APP_ERROR_LOG). OVERWATCH-table writes never consult it. The stale "RBAC is the real boundary"
+  config comment is corrected.
+- **#24 AI grounding check** — the AI evaluation panel now runs an advisory numeric check (new
+  pure `app/logic/ai_grounding.py`): every $/% figure in the answer is matched against the evidence
+  within rounding tolerance, unmatched ones get a warn chip ("may be derived; verify"), and the
+  caption states the measured result instead of claiming "grounded". `ai_eval` / `ai_ungrounded`
+  usage events log once per generation. Ask's strict `numbers_preserved` moved verbatim into the
+  module; the Ask phrasing normalizes the model and $-escapes; both digest renders $-escape.
+- **#6 CI guards** — new `tests/test_proc_lineage.py` (every re-derived proc's declared base must
+  be its immediately previous definer — the V123 class; from V151 a `-- >>> derived:` marker or a
+  `-- LINEAGE-WAIVER:` line is required). `test_alert_rule_consistency` replays only statements
+  that TARGET `ALERT_CONFIG` (the V034 DELETE is no longer undone), widens the rule namespace to
+  DQ/WH/PERF, and adds Guard D (dead raiser arms) + Guard E (every raised rule has a playbook). 13
+  new first-response playbooks (OPS_SCAN_DEGRADED, OPS_CANARY_FAIL, OPS_SLOW_RENDER, DQ_BREACH,
+  DQ_RECON_ERROR, DQ_SCHEMA_DRIFT, WH_CHANGE_REGRESSION, SEC_FAILED_LOGINS, SEC_NEW_ADMIN_NETWORK,
+  SEC_NEW_EXPOSURE, PIPE_TASK_FAILURES, PIPE_VOLUME_DROP, PIPE_REF_GAP). CLAUDE.md house law 1 notes
+  the enforcement.
+
+**Adversarial review (10 agents; 10 findings confirmed, all fixed before commit):**
+- #3 — the verified-USD inputs (DS experiments, Cost ▸ Optimize verify) now say **per month
+  (recurring)** with help to convert annual/one-time figures, since the ROI run-rate sums them as
+  monthly for 12 months; the DS "by month" chart is retitled *Newly verified savings* (the run-rate
+  ADDED each month — the active run-rate is their trailing-12-month sum).
+- #17 — the fingerprint AVGs are time-weighted (one overload storm outweighed ninety cold starts), so
+  the builder now emits per-run dominance shares (`PROVISIONING_/OVERLOAD_QUEUED_RUN_PCT`) and the
+  advisor names a cause only when it dominates ≥60% of the queued runs; a mixed fingerprint keeps the
+  hedged wording.
+- #18 — the projection and nights-to-breach now count from TONIGHT (the anchor is 2-5 nights old at
+  every month/quarter boundary, which showed a false *On track*); the Ops "would miss" check starts
+  from tonight's typical margin (a labelled last night was double-counted); a labelled night is sized
+  only from nights with the SAME label (quarter-end ≠ month-end) over a 100-night history; tonight's
+  key advances at the hard deadline even when a whole night has no row.
+- #24 — the grounding check licenses figures only from the prompt's evidence section, never from
+  timestamp/ID pieces or instruction text, and a `COL=value` pair only for its column's unit (hours
+  never license a $); the tokenizer drops trailing commas and reads Million/bn/MM. The new
+  WH_CHANGE_REGRESSION playbook says USD/day (two bare `$` paired into a KaTeX span); a lock test
+  keeps bare `$` out of every playbook.
+
+4-pin version bump 4.587.0 → 4.588.0 + CHANGELOG.
+
 ## 4.587.0 - Codex visual review — taste calls (rec 12 / 13) (2026-09-23)
 
 The two owner-approved taste calls from the adjudication, CSS-only in `theme.py`. No page/query

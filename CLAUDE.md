@@ -28,6 +28,10 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
    forward-generation script in `outputs/gen_v0XX.py`; the matching
    `tests/test_v0XX_*.py` regenerates and byte-compares. Derive from the
    LATEST definition (V047 broke by deriving from V036 instead of V037).
+   Enforced by `tests/test_proc_lineage.py`: every re-derived proc's declared
+   base must be its immediately previous definer (the V123 class); from V151
+   every re-definition must carry `-- >>> derived:<PROC>  (from Vnnn; <what
+   changed>)` above its CREATE, or a `-- LINEAGE-WAIVER: <PROC> <reason>` line.
 2. **V030 shape law.** `COMPANY_FOR_*` UDFs apply to plain columns only,
    never inside aggregation. Since V044, classification is evidence-based
    BOTH ways: Trexis by mapping/prefix/role, ALFA by WH_ALFA_* names /

@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.587.0"
+APP_VERSION = "4.588.0"
 
 # The build's load-bearing schema floor. main() reads the live max(SCHEMA_VERSION)
 # once per session and, if it is BELOW this, renders ONE actionable blocked state
@@ -164,6 +164,9 @@ TRIAGE_WINDOW_OPTIONS = (
 )
 MAX_LIVE_WINDOW_DAYS = 90          # hard clamp for live ACCOUNT_USAGE scans
 MAX_MART_WINDOW_DAYS = 365         # mart-backed facts (400-800d retention) honor the long window
+# Next-Fifty #3: the ROI numerator counts a VERIFIED monthly saving until it ages past this many
+# months (a verified saving keeps saving after its quarter; revert detection is not built yet).
+SAVINGS_ACTIVE_MONTHS = 12
 # The 90d live cap bounds expensive QUERY_HISTORY-scale scans. The window
 # picker offers 180/365 for mart-history (exec board, storage, chargeback)
 # and the one low-volume live exception the owner named: Cortex user costs.
@@ -249,9 +252,11 @@ OPERATOR_PROFILES = ("DBA",)  # profiles allowed to execute state-changing SQL i
 # under an owner's-rights SiS app CURRENT_ROLE() is the app OWNER's role for
 # EVERY viewer — so it never differentiates people, and an accidental app grant
 # would expose DBA actions to any viewer. Entitle by the viewer's identity
-# instead (session.is_operator()). Snowflake RBAC stays the REAL boundary (a
-# non-privileged role's write still fails server-side); this only decides what
-# the app OFFERS. Store bare Snowflake usernames; matching is case-insensitive.
+# instead (session.is_operator()). Under owner's-rights SiS, Snowflake RBAC is NOT a
+# backstop (every viewer runs as the owner) — this allowlist is the app's authorization
+# boundary, re-checked inside the query executors for owner-privileged statements
+# (query._PRIVILEGED_PREFIXES, Next-Fifty #23). Store bare Snowflake usernames; matching is
+# case-insensitive.
 # Empty tuple = no viewer is an in-app operator (secure default); the owner adds
 # the specific usernames who may operate. Off-SiS (local dev/tests) there is no
 # viewer identity, so session.is_operator() falls back to the role->profile check.

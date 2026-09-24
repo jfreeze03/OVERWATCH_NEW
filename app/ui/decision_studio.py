@@ -7,6 +7,7 @@ import contextlib
 import pandas as pd
 import streamlit as st
 
+from app.config import SAVINGS_ACTIVE_MONTHS
 from app.core.identity import content_request_key, viewer_name
 from app.core.query import execute_statement, run, run_batch
 from app.core.session import is_operator
@@ -655,13 +656,15 @@ def _proof_signals(rate: float) -> dict | None:
     # serial run()s (prefetch-else-run: a missing/failed member falls back to its serial read).
     # sc_precision stays a separate run() to keep its probe=True (classified-absence silencing).
     _sc_pf = run_batch([
-        {"key": "sc_quarter", "sql": mart_sql.savings_summary_quarter(), "source": "SAVINGS_LEDGER (QTD)"},
+        {"key": "sc_quarter", "sql": mart_sql.savings_summary_quarter(),
+         "source": "SAVINGS_LEDGER (active run-rate + QTD)"},
         {"key": "sc_appcost", "sql": mart_sql.app_cost_last_30d(),
          "source": "FACT_WAREHOUSE_DAILY (app warehouse, trailing 30d)"},
         {"key": "sc_accept", "sql": mart_sql.action_acceptance(90), "source": "ACTION_QUEUE (decided in 90d)"},
     ], page=_PAGE, tier="recent") or {}
     _q = _sc_pf.get("sc_quarter") or run(mart_sql.savings_summary_quarter(), page=_PAGE,
-                                         key="sc_quarter", tier="recent", source="SAVINGS_LEDGER (QTD)")
+                                         key="sc_quarter", tier="recent",
+                                         source="SAVINGS_LEDGER (active run-rate + QTD)")
     _ac = _sc_pf.get("sc_appcost") or run(mart_sql.app_cost_last_30d(), page=_PAGE, key="sc_appcost",
                                           tier="recent",
                                           source="FACT_WAREHOUSE_DAILY (app warehouse, trailing 30d)")
@@ -671,10 +674,16 @@ def _proof_signals(rate: float) -> dict | None:
                 tier="recent", source="ALERT_EVENTS resolution kinds", probe=True)
     totals = ledger_totals(ledger.df)
     verified_qtd = safe_float(_q.df.iloc[0].get("VERIFIED_QTD_USD")) if _q.usable() else 0.0
+    # Next-Fifty #3: the ROI numerator is the ACTIVE verified monthly run-rate (verified in the
+    # last SAVINGS_ACTIVE_MONTHS months), not this quarter's sum — a quarter-scoped numerator fell
+    # to 0x on the first day of every quarter while the trailing-30d run cost did not.
+    verified_active = (safe_float(_q.df.iloc[0].get("VERIFIED_ACTIVE_MONTHLY_USD"))
+                       if _q.usable() else 0.0)
     run_cost = safe_float(_ac.df.iloc[0].get("APP_CREDITS_30D")) * rate if _ac.usable() else 0.0
     sig = {
         "ledger": ledger, "totals": totals, "realization": totals["realization_pct"],
-        "roi": roi_multiple(verified_qtd, run_cost),
+        "roi": roi_multiple(verified_active, run_cost),
+        "verified_qtd": verified_qtd,
         "acc": acceptance_summary(_acc.df if _acc.usable() else None),
         "prec": account_precision(_prec.df if _prec.usable() else None),
     }
@@ -745,12 +754,17 @@ def _scorecard(company: str, rate: float) -> None:
         "label": "Pays for itself",
         "value": (f"{roi['RATIO']:.1f}×" if roi["RATIO"] is not None else "—"),
         "severity": ("ok" if roi["PAYS"] else ("warn" if roi["RATIO"] is not None else "")),
-        "delta": (f"{format_usd(roi['VERIFIED_USD'])} monthly verified vs {format_usd(roi['RUN_COST_USD'])} monthly run cost"
+        "delta": (f"{format_usd(roi['VERIFIED_USD'])}/mo verified run-rate vs "
+                  f"{format_usd(roi['RUN_COST_USD'])}/mo run cost · "
+                  f"{format_usd(sig.get('verified_qtd', 0.0))} verified this quarter"
                   if roi["RATIO"] is not None else "run cost or verified $ not measured yet"),
         "delta_color": "off",
-        "help": "This quarter's verified savings (a 30-day/monthly-magnitude rate) as a multiple of "
-                "OVERWATCH's own trailing-30-day warehouse run cost (APP_WAREHOUSE credits × rate) — "
-                "same horizon on both sides. ≥1× means it pays for itself."})
+        "help": f"Monthly savings run-rate of every item VERIFIED in the last {SAVINGS_ACTIVE_MONTHS} months "
+                "(each verified amount is a monthly saving that keeps counting after its quarter, so this "
+                "does not reset on the first day of a quarter), as a multiple of OVERWATCH's own "
+                "trailing-30-day warehouse run cost (APP_WAREHOUSE credits × rate) — same monthly horizon "
+                "on both sides. ≥1× means it pays for itself. Reverted changes are not detected yet, so an "
+                f"item counts until it is {SAVINGS_ACTIVE_MONTHS} months old."})
     kpi_row([
         {"label": "Realization",
          "value": (f"{realization:,.0f}%" if realization is not None else "—"),
@@ -820,6 +834,9 @@ def _roi(company: str) -> None:
     kpi_row([
         {"label": "Verified savings (all time)", "value": format_usd(totals["verified_usd"]),
          "severity": "ok" if totals["verified_usd"] else "",
+         "delta": (f"{format_usd(totals['verified_active_usd'])}/mo active run-rate "
+                   f"(last {SAVINGS_ACTIVE_MONTHS} months)"),
+         "delta_color": "off",
          "help": "Measured, proof-backed savings booked to the ledger — never mixes in estimates."},
         {"label": "Verified this quarter", "value": format_usd(totals["verified_qtd_usd"])},
         {"label": "Realization rate",
@@ -853,8 +870,10 @@ def _roi(company: str) -> None:
     month_df = savings_by_month(ledger.df, 12)
     lever_df = savings_by_lever(ledger.df)
     if not month_df.empty:
-        st.markdown("**Verified-savings run-rate — by month**")
-        charts.daily_metric_line(month_df, "MONTH", "VERIFIED_USD", "verified $ / month", unit="usd")
+        # Newly-verified per month (the run-rate ADDED that month) — not the active run-rate above,
+        # which is the trailing-12-month sum of these (adversarial review of #3).
+        st.markdown("**Newly verified savings — by month** (monthly run-rate added each month)")
+        charts.daily_metric_line(month_df, "MONTH", "VERIFIED_USD", "run-rate added / month", unit="usd")
     if not lever_df.empty:
         st.markdown("**Where the realized savings come from — by lever**")
         charts.bar_usd(lever_df, "LEVER", "VERIFIED_USD", "verified $ by lever", top_n=10)
@@ -1020,8 +1039,11 @@ def _render_experiment_detail(row) -> None:
             key=f"experiment_result_{experiment_id}", max_chars=4000,
         )
         verified_value = st.number_input(
-            "Verified USD", min_value=0.0, value=safe_float(row.get("VERIFIED_USD")),
+            "Verified USD per month (recurring)", min_value=0.0, value=safe_float(row.get("VERIFIED_USD")),
             step=25.0, key=f"experiment_value_{experiment_id}",
+            help="The MONTHLY recurring saving the experiment proved. The ROI multiple sums verified "
+                 "items as a monthly run-rate over the last 12 months — convert an annual figure (divide "
+                 "by 12); a one-time saving is not a run-rate.",
         )
         # Codex #22: a VERIFIED experiment books SAVINGS_LEDGER and feeds the director-
         # facing "Verified savings / Realization" headline, so it must be evidence-backed.
