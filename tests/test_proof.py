@@ -99,7 +99,7 @@ def test_action_acceptance_sql_shape():
     sqlglot.parse(sql, dialect="snowflake")
     for col in ("DONE_N", "DROPPED_N", "OPEN_N", "DONE_USD"):
         assert col in sql
-    assert "ACTION_QUEUE" in sql and "UPDATED_AT >=" in sql
+    assert "ACTION_QUEUE" in sql and "COALESCE(COMPLETED_AT, UPDATED_AT) >=" in sql   # Next-Fifty #20
 
 
 def test_proof_is_wired_into_decision_studio():

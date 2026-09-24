@@ -17,6 +17,17 @@ from app.logic.date_windows import is_prior_month_window
 from app.logic.directory import resolve_display
 from app.logic.exposure import classify_share_exposure, summarize_exposure
 from app.logic.governance import governance_drift, resolve_gov_weights, tag_coverage_score
+from app.logic.identity_auth import (
+    ROLLOUT_NOTE,
+    VERDICT_MIGRATE,
+    VERDICT_READY,
+    VERDICT_WILL_BREAK,
+    admins_without_mfa,
+    alter_user_stubs,
+    auth_readiness,
+    readiness_counts,
+    with_account_band,
+)
 from app.logic.insights import (
     dormant_severity,
     egress_exfil_severity,
@@ -68,6 +79,161 @@ from app.ui.security_center import (
 )
 
 _PAGE = "Security"
+
+
+_PROBE_ABSENT = ("absent", "missing_column", "unknown_function")
+
+
+def _auth_inventory(company: str):
+    """rank 9: one USERS read shared by the Authentication and Privileged access chapters
+    (run() caches by SQL, so the second chapter is a cache hit). probe=True: a USERS view
+    without TYPE / HAS_RSA_PUBLIC_KEY degrades to needs_setup, not an error on every render."""
+    return run(security_sql.user_auth_inventory(company), page=_PAGE,
+               key=f"auth_inventory_{company}", tier="hourly", probe=True,
+               source="USERS + FACT_LOGIN_DAILY + GRANTS_TO_USERS (auth readiness)")
+
+
+def _render_auth_readiness(auth, company: str, *, evidence_ok: bool) -> None:
+    ready = auth_readiness(auth.df, evidence_ok=evidence_ok) if auth.ok else pd.DataFrame()
+    counts = readiness_counts(ready)
+    n_break, n_mig, n_ready = (counts[VERDICT_WILL_BREAK], counts[VERDICT_MIGRATE],
+                               counts[VERDICT_READY])
+    _t0 = (pd.to_numeric(auth.df["TOTAL_CANDIDATES"], errors="coerce").max()
+           if auth.ok and not auth.empty and "TOTAL_CANDIDATES" in auth.df.columns else float("nan"))
+    _capped = bool(pd.notna(_t0) and int(_t0) > len(ready))
+    # a capped read with nothing to fix in the rows shown is UNKNOWN (neutral), never a green all-clear
+    _hdr = None if not auth.ok or (_capped and not (n_break + n_mig)) else (n_break + n_mig)
+    section_header("Password sign-in deprecation readiness",
+                   alarm_health(_hdr), "security",
+                   anchor="sec-auth-readiness",
+                   badge=(f"{n_break} will break" if n_break else ""))
+    st.caption(ROLLOUT_NOTE)
+    if not auth.ok and auth.error_kind in _PROBE_ABSENT:
+        empty_state("needs_setup", "The USERS view doesn't expose TYPE / HAS_RSA_PUBLIC_KEY to this "
+                    "app, so readiness can't be classified here. The MFA-gap list above still applies.")
+        return
+    if auth.ok and auth.empty:
+        empty_state("clean", "No enabled user in this scope holds a password, is LEGACY_SERVICE, "
+                             "or holds an admin role.")
+        return
+    if not guard(auth, ""):
+        return
+    _tot = (pd.to_numeric(auth.df["TOTAL_CANDIDATES"], errors="coerce").max()
+            if "TOTAL_CANDIDATES" in auth.df.columns else float("nan"))
+    total = int(_tot) if pd.notna(_tot) else len(ready)
+    sfx = "+" if total > len(ready) else ""
+    kpi_row([
+        {"label": "Will break", "value": f"{n_break}{sfx}",
+         "help": "LEGACY_SERVICE users with a password in use (or unproven), and unset-TYPE accounts "
+                 "signing in by password without MFA — an ETL/BI outage when enforcement lands.",
+         "delta_color": "inverse" if n_break else "off"},
+        {"label": "Migrate", "value": f"{n_mig}{sfx}",
+         "help": "Password without MFA on a person account, or a LEGACY_SERVICE user with no live "
+                 "password use — act before enforcement; no known outage.",
+         "delta_color": "inverse" if n_mig else "off"},
+        {"label": "Ready", "value": f"{n_ready}{sfx}",
+         "help": "No password, password with MFA, or already a SERVICE-type user."},
+    ])
+    todo = ready[ready["VERDICT"] != VERDICT_READY].reset_index(drop=True)
+    if todo.empty and sfx:
+        empty_state("no_data_yet", f"No account needing work among the first {len(ready)} of {total} shown "
+                    "(the riskiest accounts are listed first); the rest were not loaded here.")
+    elif todo.empty:
+        empty_state("clean", "Every password holder, LEGACY_SERVICE user and admin in this scope is ready.")
+    else:
+        view = with_user_names(todo, _PAGE)
+        cols = [c for c in ("VERDICT", "USER", "USER_NAME", "TYPE_LABEL", "IS_ADMIN", "ADMIN_ROLES",
+                            "HAS_PASSWORD", "HAS_MFA", "HAS_RSA_PUBLIC_KEY", "PASSWORD_LOGINS_30D",
+                            "LAST_PASSWORD_LOGIN", "LAST_SUCCESS_LOGIN", "REASON") if c in view.columns]
+        entity_nav_table(view[cols], key=f"sec_auth_ready_{company}",
+                         key_col="USER_NAME", entity_type="USER")
+        st.caption(("Password sign-ins come from the 30-day login fact. " if evidence_ok else
+                    "The 30-day login fact isn't fully covered yet, so an account with no recorded "
+                    "password sign-in is treated as possibly still using its password. ")
+                   + "An unset TYPE reads as PERSON (unset). Trust Center's CIS checks also flag MFA "
+                     "and key-pair gaps; this list adds the break-risk verdict and the fix script.")
+        if sfx:
+            st.caption(f"Showing the first {len(ready)} of {total} accounts (admins and password "
+                       "holders first); the counts above cover the rows shown.")
+        stubs = alter_user_stubs(todo)
+        if stubs:
+            with st.expander(f"Generate ALTER USER statements ({len(todo)} accounts)"):
+                st.code("-- Password-deprecation fixes — REVIEW before running, as a role that owns "
+                        "these users (e.g. SECURITYADMIN).\n-- Key-pair first; confirm a KEY_PAIR "
+                        "sign-in before UNSET PASSWORD.\n\n" + "\n".join(stubs), language="sql")
+                st.caption("This app never runs these — copy, review, and execute them yourself.")
+    result_caption(auth)
+
+
+def _render_admin_network_policy(company: str) -> None:
+    section_header("Network policies on admin users", "", "security", anchor="sec-admin-netpol")
+    st.caption("Account-level and service-account network policies are Trust Center CIS checks "
+               "3.1 and 3.2 (see the Trust Center section); this covers the admins they don't.")
+    if not st.toggle("Check admin network-policy coverage", key="sec_admin_netpol_toggle",
+                     help="One read of Snowflake's policy-reference view (up to 2 hours behind)."):
+        return
+    npc = run(security_sql.admin_network_policy_coverage(company), page=_PAGE,
+              key=f"admin_netpol_{company}", tier="hourly", probe=True,
+              source="POLICY_REFERENCES x GRANTS_TO_USERS (admin network policies)")
+    if not npc.ok and npc.error_kind in _PROBE_ABSENT:
+        empty_state("needs_setup", "The policy-reference view isn't readable by this app here, so admin "
+                    "network-policy coverage can't be checked. Verify one admin with "
+                    "SHOW PARAMETERS LIKE 'NETWORK_POLICY' IN USER <name>.")
+        return
+    if npc.ok and npc.empty:
+        empty_state("no_data_yet", "No admin-role grants visible in this scope.")
+        return
+    if not guard(npc, ""):
+        return
+    df = npc.df
+    if int(pd.to_numeric(df["USER_POLICY_REFS"], errors="coerce").fillna(0).max()) == 0:
+        empty_state("needs_setup", "The policy-reference view lists no user-level network policy on this "
+                    "account — either none is set, or this view doesn't expose them here. Coverage is "
+                    "unconfirmed, not zero; verify with SHOW PARAMETERS LIKE 'NETWORK_POLICY' IN USER <admin>.")
+        return
+    uncovered = int(df["USER_NETWORK_POLICY"].isna().sum())
+    kpi_row([
+        {"label": "Admins without a user network policy", "value": f"{uncovered}",
+         "delta_color": "inverse" if uncovered else "off",
+         "help": "Directly granted " + ", ".join(security_sql.ELEVATED_ROLES) + "."},
+        {"label": "Admins with one", "value": f"{len(df) - uncovered}"},
+    ])
+    styled_table(with_user_names(df, _PAGE)[["USER", "USER_NAME", "ADMIN_ROLES", "USER_NETWORK_POLICY"]],
+                 height=240)
+    st.caption("A user-level policy overrides the account policy and pins an admin to known networks; "
+               "an admin without one still falls under the account-level policy if one is set.")
+    result_caption(npc)
+
+
+def _service_user_names() -> set[str] | None:
+    """rank 9: service-typed user names for the dormant/reawakening bands. None = TYPE unreadable."""
+    svc = run(security_sql.service_users(), page=_PAGE, key="service_users", tier="hourly",
+              probe=True, source="USERS.TYPE (service accounts)")
+    if not svc.ok:
+        return None
+    return set() if svc.empty else {str(n) for n in svc.df["USER_NAME"]}
+
+
+def _banded_user_tables(ranked: pd.DataFrame, cols: list[str], *, key: str,
+                        service_names: set[str] | None) -> None:
+    """rank 9: person accounts first, then service accounts in their own band; both keep the
+    ranked worst-first order. Index-reset so the positional row drill maps back."""
+    people = ranked[ranked["ACCOUNT_BAND"] == "Person"].reset_index(drop=True)
+    services = ranked[ranked["ACCOUNT_BAND"] == "Service"].reset_index(drop=True)
+    if people.empty:
+        st.caption("No person accounts here — service accounts only (below).")
+    else:
+        entity_nav_table(with_user_names(people, _PAGE)[cols], key=key,
+                         key_col="USER_NAME", entity_type="USER")
+    if not services.empty:
+        st.markdown(f"**Service accounts ({len(services)})**")
+        entity_nav_table(with_user_names(services, _PAGE)[cols], key=f"{key}_svc",
+                         key_col="USER_NAME", entity_type="USER")
+        st.caption("Integrations sign in on their own schedule — confirm with the owning application "
+                   "before disabling.")
+    if service_names is None:
+        st.caption("Service-account split unavailable (USERS.TYPE isn't readable here), so every "
+                   "account is listed together.")
 
 
 def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None:
@@ -168,6 +334,10 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
             entity_nav_table(with_user_names(mfa.df, _PAGE), key=f"sec_mfa_{company}",
                              key_col="USER_NAME", entity_type="USER")
             result_caption(mfa)
+
+        # Next-Fifty #9: password sign-in deprecation readiness (WILL BREAK / MIGRATE / READY + ALTER USER stubs).
+        _render_auth_readiness(_auth_inventory(company), company,
+                               evidence_ok=fact_coverage_complete(legacy_coverage, 30))
 
         # #16: the behavioral counterpart to the config-anchored MFA lens above — a
         # successful PASSWORD login with NO second factor. Unlike HAS_MFA=FALSE, this
@@ -301,6 +471,29 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
         # Who holds elevated rights: admin role holders, unused roles + revoke-safety drill,
         # effective access, and admin-grant anomalies.
         section_header("Privileged role holders", "", "admin", anchor="sec-privroles")
+        # Next-Fifty #9: admins with a password and no MFA — pre-LIMIT window total, regardless of recent
+        # password-login evidence (the Authentication MFA list needs a 30-day password login).
+        auth = _auth_inventory(company)
+        _adm_total: int | None = None
+        if auth.ok:
+            _adm_total = (int(pd.to_numeric(auth.df["ADMIN_PW_NO_MFA_TOTAL"], errors="coerce").fillna(0).max())
+                          if not auth.empty and "ADMIN_PW_NO_MFA_TOTAL" in auth.df.columns else 0)
+        kpi_row([{
+            "label": "Admins with password and no MFA",
+            "value": "—" if _adm_total is None else f"{_adm_total}",
+            "help": ("Users directly granted " + ", ".join(security_sql.ELEVATED_ROLES)
+                     + " who have a password and no MFA enrolled, whether or not they signed in by "
+                       "password recently. Admin rights inherited through another role aren't traced here."),
+            "delta_color": "inverse" if _adm_total else "off",
+        }])
+        if _adm_total:
+            _adm = admins_without_mfa(auth_readiness(
+                auth.df, evidence_ok=fact_coverage_complete(legacy_coverage, 30)))
+            if not _adm.empty:
+                _av = with_user_names(_adm, _PAGE)
+                styled_table(_av[[c for c in ("USER", "USER_NAME", "ADMIN_ROLES", "TYPE_LABEL", "VERDICT",
+                                              "PASSWORD_LOGINS_30D", "LAST_PASSWORD_LOGIN",
+                                              "LAST_SUCCESS_LOGIN") if c in _av.columns]], height=200)
         res = stable_batch.get("admins") or run(
                   security_sql.admin_role_holders(company), page=_PAGE,
                   key=f"admins_{company}",
@@ -310,6 +503,7 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
             styled_table(with_user_names(with_user_names(_admin_frame, _PAGE), _PAGE,
                                          user_col="GRANTED_BY", display_col="Granted by"))
             st.caption("This list should be short and every name should be expected.")
+        _render_admin_network_policy(company)
 
         # Moved from Changes (v4.49): entitlement hygiene — who still holds access
         # nobody uses — reads with dormant users, not with DDL evidence.
@@ -411,21 +605,23 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
             if res.ok and res.empty:
                 empty_state("clean", "No enabled users dormant 90+ days in this scope.")
             elif guard(res, ""):
-                ranked = dormant_severity(res.df)
+                _svc = _service_user_names()
+                ranked = with_account_band(dormant_severity(res.df), _svc)
                 high = ranked[ranked["SEVERITY"] == "High"]
+                n_svc = int((ranked["ACCOUNT_BAND"] == "Service").sum())
                 kpi_row([
                     {"label": "Dormant users", "value": f"{len(ranked)}"},
                     {"label": "High severity", "value": f"{len(high)}",
                      "help": "180+ days dormant, or 5+ roles still granted.",
                      "delta_color": "inverse" if len(high) else "off"},
+                    {"label": "Service accounts", "value": "—" if _svc is None else f"{n_svc}",
+                     "help": "USERS.TYPE is SERVICE, LEGACY_SERVICE, SNOWFLAKE_SERVICE or SERVICE_AGENT — "
+                             "listed in their own band below."},
                 ])
-                entity_nav_table(
-                    with_user_names(ranked, _PAGE)[[
-                        "SEVERITY", "USER", "USER_NAME", "EMAIL", "DAYS_DORMANT",
-                        "ROLE_COUNT", "ROLES", "LAST_SUCCESS_LOGIN"]],
-                    key=f"sec_dormant_{company}", key_col="USER_NAME", entity_type="USER",
-                )
-                st.caption("Review with the owner before disabling; service accounts may log in rarely by design.")
+                _banded_user_tables(ranked, ["SEVERITY", "USER", "USER_NAME", "EMAIL", "DAYS_DORMANT",
+                                             "ROLE_COUNT", "ROLES", "LAST_SUCCESS_LOGIN"],
+                                    key=f"sec_dormant_{company}", service_names=_svc)
+                st.caption("Review with the owner before disabling.")
                 result_caption(res)
 
         # Sec5: the transition LAST_SUCCESS_LOGIN can't express — a long-dormant
@@ -445,24 +641,26 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
             if wres.ok and wres.empty:
                 empty_state("clean", "No dormant account woke up in the last 7 days in this scope.")
             elif guard(wres, ""):
-                wranked = reawakening_severity(wres.df)
+                _svc = _service_user_names()
+                wranked = with_account_band(reawakening_severity(wres.df), _svc)
                 whigh = wranked[wranked["SEVERITY"] == "High"]
+                n_wsvc = int((wranked["ACCOUNT_BAND"] == "Service").sum())
                 kpi_row([
                     {"label": "Reawakened accounts", "value": f"{len(wranked)}"},
                     {"label": "High severity", "value": f"{len(whigh)}",
                      "help": "180+ day silence, or 5+ roles still held.",
                      "delta_color": "inverse" if len(whigh) else "off"},
+                    {"label": "Service accounts", "value": "—" if _svc is None else f"{n_wsvc}",
+                     "help": "USERS.TYPE is SERVICE, LEGACY_SERVICE, SNOWFLAKE_SERVICE or SERVICE_AGENT — "
+                             "listed in their own band below."},
                 ])
                 # #25: rows are users → drill to Entity 360 (mirrors the dormant-users table).
-                entity_nav_table(
-                    with_user_names(wranked, _PAGE)[[
-                        "SEVERITY", "USER", "USER_NAME", "EMAIL", "GAP_DAYS",
-                        "LAST_ACTIVE_BEFORE", "WAKE_LOGIN", "CLIENT_IP", "AUTH_FACTOR",
-                        "ROLE_COUNT", "ROLES"]],
-                    key=f"sec_reawakening_{company}", key_col="USER_NAME", entity_type="USER",
-                )
-                st.caption("Review with the owner; service accounts may log in rarely by design, and a "
-                           ">365-day silence shows a single login here (gap measured from account creation).")
+                _banded_user_tables(wranked, ["SEVERITY", "USER", "USER_NAME", "EMAIL", "GAP_DAYS",
+                                              "LAST_ACTIVE_BEFORE", "WAKE_LOGIN", "CLIENT_IP", "AUTH_FACTOR",
+                                              "ROLE_COUNT", "ROLES"],
+                                    key=f"sec_reawakening_{company}", service_names=_svc)
+                st.caption("Review with the owner; a >365-day silence shows a single login here "
+                           "(gap measured from account creation).")
                 result_caption(wres)
 
 

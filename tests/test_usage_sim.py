@@ -25,6 +25,9 @@ def test_classify_source_covers_the_axes():
     assert usage_sim.classify_source(au) == "account_usage"          # AU wins over the UDF ref
     assert usage_sim.classify_source("SELECT * FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY") == "mart"
     assert usage_sim.classify_source("SHOW DATABASES") == "metadata"
+    # Next-Fifty #19: the tiny per-day org views get their own bucket (not a metered history scan)
+    assert usage_sim.classify_source(
+        "SELECT * FROM SNOWFLAKE.ORGANIZATION_USAGE.REMAINING_BALANCE_DAILY") == "org_usage"
     assert usage_sim.classify_source("SELECT * FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY())") == "metadata"
     assert usage_sim.classify_source("SELECT 1") == "other"
     # a mart read that also calls a company UDF is still a mart, not 'other'
@@ -39,7 +42,7 @@ def test_patched_module_set_covers_the_pages():
     names = {m.__name__ for m in modules}
     expected = {
         "app.main", "app.ui.components", "app.ui.ai_panel", "app.ui.decision_studio",
-        "app.ui.security_center", "app.ui.workbench",
+        "app.ui.security_center", "app.ui.workbench", "app.ui.attention",
         "app.ui.pages.overview", "app.ui.pages.control_room", "app.ui.pages.cost",
         "app.ui.pages.operations", "app.ui.pages.alerts", "app.ui.pages.security",
         "app.ui.pages.admin", "app.ui.pages.brief", "app.ui.pages.ask",
@@ -61,7 +64,7 @@ def test_simulate_renders_pages_and_records_reads():
         # branches run — same guarantee as the render-contract harness)
         assert not f["error"], f"{f['page']}: {f['error']}"
         # the source buckets partition the total
-        assert f["account_usage"] + f["mart"] + f["metadata"] + f["other"] == f["total"]
+        assert f["account_usage"] + f["org_usage"] + f["mart"] + f["metadata"] + f["other"] == f["total"]
         # chattiness ceiling: catches a page that suddenly issues far more queries per render
         assert f["total"] <= 60, f"{f['page']} issued {f['total']} cold queries"
     # the mart-heavy pages actually recorded reads (proves the stubs were installed)

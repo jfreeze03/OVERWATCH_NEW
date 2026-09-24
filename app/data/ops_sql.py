@@ -5,7 +5,7 @@ from __future__ import annotations
 from app import companies
 from app.config import core_object
 from app.core.sqlsafe import contains_filter, sql_literal
-from app.data.common import and_where, bounded_days, scope_window_where
+from app.data.common import and_where, bounded_days, not_app_self_sql, scope_window_where
 
 
 def _query_scope(days: int, company: str, warehouse_contains: str = "", user_contains: str = "",
@@ -593,7 +593,7 @@ def query_opportunity_fingerprints(days: int, company: str = "ALL",
         "QUERY_TYPE <> 'CALL'",
         "UPPER(COALESCE(QUERY_TEXT, '')) NOT LIKE 'EXECUTE STREAMLIT%'",
         "UPPER(COALESCE(QUERY_TEXT, '')) NOT LIKE '%OVERWATCH_APP%'",
-        "COALESCE(QUERY_TAG, '') NOT LIKE 'OVERWATCH%'",
+        not_app_self_sql(),
     )
     return f"""
 SELECT
@@ -685,7 +685,7 @@ def query_optimization_triage(days: int, company: str = "ALL", warehouse_contain
         "QUERY_TYPE <> 'CALL'",
         "UPPER(COALESCE(QUERY_TEXT, '')) NOT LIKE 'EXECUTE STREAMLIT%'",
         "UPPER(COALESCE(QUERY_TEXT, '')) NOT LIKE '%OVERWATCH_APP%'",
-        "COALESCE(QUERY_TAG, '') NOT LIKE 'OVERWATCH%'",
+        not_app_self_sql(),
         "(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0) > 0 "
         "OR COALESCE(BYTES_SCANNED, 0) > 50 * POWER(1024, 3))",
     )
@@ -871,7 +871,7 @@ def proc_sla_rollup(days: int, company: str = "ALL", warehouse_contains: str = "
     surfaced separately. Proc identity is REGEXP_SUBSTR'd from QUERY_TEXT (there is
     no proc-name column) and grouped with DB+SCHEMA to partially disambiguate
     same-named procs, mirroring insights_sql.procedure_costs_usd. App-issued CALLs
-    (QUERY_TAG 'OVERWATCH%') are dropped as self-noise; the task-issued proc runs a
+    (OVERWATCH's own tag/marker, common.not_app_self_sql) are dropped as self-noise; the task-issued proc runs a
     DBA cares about are kept. Ranked by frequency x duration so the procs that
     dominate the CALL workload surface first. ~6h ACCOUNT_USAGE latency applies.
     """
@@ -881,7 +881,7 @@ def proc_sla_rollup(days: int, company: str = "ALL", warehouse_contains: str = "
         _query_scope(days, company, warehouse_contains, user_contains, database, schema_contains,
                      bounds=bounds),
         "QUERY_TYPE = 'CALL'",
-        "COALESCE(QUERY_TAG, '') NOT LIKE 'OVERWATCH%'",
+        not_app_self_sql(),
     )
     return f"""
 WITH calls AS (
@@ -958,7 +958,7 @@ def proc_regression(days: int, company: str = "ALL", warehouse_contains: str = "
         _query_scope(2 * days, company, warehouse_contains, user_contains, database,
                      schema_contains, bounds=outer_bounds),
         "QUERY_TYPE = 'CALL'",
-        "COALESCE(QUERY_TAG, '') NOT LIKE 'OVERWATCH%'",
+        not_app_self_sql(),
     )
     return f"""
 WITH calls AS (

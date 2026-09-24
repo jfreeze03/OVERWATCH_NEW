@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from app.core.sqlsafe import sql_literal
 from app.data.app_cost_sql import _APP_EXPR  # the canonical application identifier (V077)
-from app.data.common import and_where, bounded_days
+from app.data.common import and_where, bounded_days, not_app_self_sql
 
 # chatter = metadata-only (no warehouse) OR compile-dominated (compile >= half the elapsed).
 _CHATTER_PREDICATE = (
@@ -33,11 +33,9 @@ _CHATTER_PREDICATE = (
     "AND q.COMPILATION_TIME >= 0.5 * q.TOTAL_ELAPSED_TIME))"
 )
 # exclude OVERWATCH's own statements (the shared self-noise set the triage builder uses).
-_SELF_NOISE = (
-    "COALESCE(q.QUERY_TAG, '') NOT LIKE 'OVERWATCH%' "
-    "AND UPPER(COALESCE(q.QUERY_TEXT, '')) NOT LIKE 'EXECUTE STREAMLIT%' "
-    "AND UPPER(COALESCE(q.QUERY_TEXT, '')) NOT LIKE '%OVERWATCH_APP%'"
-)
+_SELF_NOISE = (f"{not_app_self_sql('q')} "
+               "AND UPPER(COALESCE(q.QUERY_TEXT, '')) NOT LIKE 'EXECUTE STREAMLIT%' "
+               "AND UPPER(COALESCE(q.QUERY_TEXT, '')) NOT LIKE '%OVERWATCH_APP%'")
 
 
 def _windows(days: int, bounds: tuple | None) -> tuple[str, str]:

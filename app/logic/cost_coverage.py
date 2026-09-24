@@ -65,18 +65,29 @@ _DRILL_COVERAGE: dict[str, tuple[str, str, str]] = {
         "Container-services usage",
         "Drill ready",
     ),
-    # rec #42: a per-user/model Cortex drill exists, but no warehouse-grain one —
-    # drop "warehouse" from the advertised grain.
-    "CORTEX": ("User / model", "Cortex usage", "Drill ready"),
-    "AI": ("User / model", "Cortex usage", "Drill ready"),
-    # rec #43: no PIPE_USAGE_HISTORY / SNOWPIPE_STREAMING_CLIENT_HISTORY /
-    # QUERY_ACCELERATION_HISTORY is read anywhere, so only the service total holds.
-    "PIPE": ("Service total", "Pipe usage (no per-pipe drill wired)", "Service total only"),
-    "SNOWPIPE": ("Service total", "Pipe usage (no per-pipe drill wired)", "Service total only"),
+    # rec #42 / Next-Fifty #25: the only AI-functions drill wired is function x model
+    # (cortex_sql.cortex_model_costs); USER grain exists only for Cortex Code (COCO below).
+    "CORTEX": ("Function / model", "Cortex AI-functions usage", "Drill ready"),
+    "AI": ("Function / model", "Cortex AI-functions usage", "Drill ready"),
+    # rec #48: Cortex Code / CoWork IS drilled to USER grain by the AI Chargeback tab.
+    "COCO": ("User / day", "FACT_AI_USAGE_DAILY (Cortex Code)", "Drill ready"),
+    # rec #42: AI_SERVICES aggregates Cortex functions PLUS Analyst / Search / Document AI /
+    # Fine-tuning — none with a per-user drill.
+    "AI_SERVICE": ("Service total", "AI services metering (no per-feature drill wired)",
+                   "Service total only"),
+    # Next-Fifty #25: no per-user Snowflake Intelligence source is read — it was wrongly routed
+    # to the Cortex "Drill ready" tuple.
+    "INTELLIGENCE": ("Service total", "Snowflake Intelligence metering (no per-user drill wired)",
+                     "Service total only"),
+    # Next-Fifty #25 (corrects rec #43): PIPE_USAGE_HISTORY IS read — the V139 SNOWPIPE arm into
+    # FACT_OBJECT_COST_DAILY, surfaced by object_cost_top / object_cost_by_arm and reconciled by
+    # object_cost_recon; QUERY_ACCELERATION_HISTORY IS read per warehouse by cost_sql.qas_roi.
+    # No SNOWPIPE_STREAMING_CLIENT_HISTORY reader exists, so streaming stays a service total.
+    "PIPE": ("Pipe / day", "Pipe usage history (object ledger)", "Object-ledger drill"),
+    "SNOWPIPE": ("Pipe / day", "Pipe usage history (object ledger)", "Object-ledger drill"),
     "SNOWPIPE_STREAMING": ("Service total", "Streaming usage (no per-client drill wired)",
                            "Service total only"),
-    "QUERY_ACCELERATION": ("Service total", "QAS (folded into pattern cost only)",
-                           "Service total only"),
+    "QUERY_ACCELERATION": ("Warehouse / window", "QAS history (per-warehouse ROI)", "Drill ready"),
     # rec #44: each of these has an EXACT native per-object *_HISTORY key AND is
     # materialized in the object cost ledger (FACT_OBJECT_COST_DAILY /
     # clustering_by_table / serverless_task_daily) — a real, shipping drill.
@@ -125,28 +136,50 @@ def service_category(service: object) -> str:
     return SERVICE_CATEGORY.get(normalized, "Other")
 
 
+def _coverage_key(service: object) -> str:
+    """ONE routing function for the drill labels AND their backing builders, so they cannot diverge.
+    Order matters: CoCo before the AI prefix; INTELLIGENCE before the Cortex route (Next-Fifty #25)."""
+    n = str(service or "").upper()
+    if "COCO" in n or "COWORK" in n:
+        return "COCO"
+    if n.startswith("AI_SERVICE"):
+        return "AI_SERVICE"
+    if "INTELLIGENCE" in n:
+        return "INTELLIGENCE"
+    if "CORTEX" in n or n.startswith("AI"):
+        return "CORTEX"
+    return n
+
+
+_DEFAULT_COVERAGE = ("Service total", "Metering daily history", "Service total only")
+
+
 def _coverage_for(service: str) -> tuple[str, str, str]:
-    normalized = str(service or "").upper()
-    # rec #48: Cortex Code / CoWork (CoCo) IS drilled to USER grain by the AI
-    # Chargeback tab via FACT_AI_USAGE_DAILY (mart27_sql.ai_code_daily). The old
-    # code left it on the "Service total only" default, marking a material AI line
-    # as an un-drillable gap while the app already drilled it.
-    if "COCO" in normalized or "COWORK" in normalized:
-        return ("User / day", "FACT_AI_USAGE_DAILY (Cortex Code)", "Drill ready")
-    # rec #42: AI_SERVICES aggregates Cortex functions PLUS Analyst / Search /
-    # Document AI / Fine-tuning — none with a per-user drill — so it must NOT
-    # inherit the Cortex "Drill ready" grain until per-service views back it.
-    if normalized.startswith("AI_SERVICE"):
-        return ("Service total", "AI services metering (no per-feature drill wired)",
-                "Service total only")
-    # The genuine CORTEX_* functions do have a per-user/model drill (grain fixed
-    # to "User / model" — no warehouse-grain drill exists, rec #42).
-    if "CORTEX" in normalized or normalized.startswith("AI") or "INTELLIGENCE" in normalized:
-        return _DRILL_COVERAGE["CORTEX"]
-    return _DRILL_COVERAGE.get(
-        normalized,
-        ("Service total", "Metering daily history", "Service total only"),
-    )
+    return _DRILL_COVERAGE.get(_coverage_key(service), _DEFAULT_COVERAGE)
+
+
+# Next-Fifty #25: the builders that BACK each drillable status ("module.function" in app.data).
+# Guard test (tests/test_cost_coverage_builders.py): every drillable status names >=1 existing,
+# page-wired builder; every "Service total only" names none.
+_DRILL_BUILDERS: dict[str, tuple[str, ...]] = {
+    "WAREHOUSE_METERING": ("mart_sql.fact_warehouse_daily",),
+    "SNOWPARK_CONTAINER_SERVICES": ("cost_sql.compute_pool_usage",),
+    "CORTEX": ("cortex_sql.cortex_model_costs",),
+    "AI": ("cortex_sql.cortex_model_costs",),
+    "COCO": ("mart27_sql.ai_code_daily", "cortex_sql.cortex_code_user_daily"),
+    "QUERY_ACCELERATION": ("cost_sql.qas_roi", "cost_sql.qas_eligible_queries"),
+    "PIPE": ("cost_sql.object_cost_top", "cost_sql.object_cost_by_arm"),
+    "SNOWPIPE": ("cost_sql.object_cost_top", "cost_sql.object_cost_by_arm"),
+    "SERVERLESS_TASK": ("cost_sql.object_cost_top", "graph_sql.serverless_task_daily"),
+    "AUTO_CLUSTERING": ("cost_sql.object_cost_top", "insights_sql.clustering_by_table"),
+    "AUTOMATIC_CLUSTERING": ("cost_sql.object_cost_top", "insights_sql.clustering_by_table"),
+    "MATERIALIZED_VIEW": ("cost_sql.object_cost_top",),
+    "SEARCH_OPTIMIZATION": ("cost_sql.object_cost_top",),
+}
+
+
+def drill_builders_for(service: object) -> tuple[str, ...]:
+    return _DRILL_BUILDERS.get(_coverage_key(service), ())
 
 
 def service_coverage_inventory(

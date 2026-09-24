@@ -93,8 +93,12 @@ def test_sidebar_open_criticals_labeled_account_wide():
 
 # --- XM-2 (MED): control-room verdict reconciles with the freshness board -----------
 def test_control_room_stale_verdict_matches_the_board():
-    cr = _src("app/ui/pages/control_room.py")
-    assert 'f"{_stale_n} telemetry source(s) stale or not loaded"' in cr
+    # Next-Fifty #1: the phrase lives in the shared verdict.attention_signals the Control Room composes
+    from app.logic.verdict import AttentionBundle, Signal, attention_signals
+    assert 'f"{b.stale_sources} telemetry source(s) stale or not loaded"' in _src("app/logic/verdict.py")
+    assert "attention_signals(_attn)" in _src("app/ui/pages/control_room.py")
+    assert attention_signals(AttentionBundle(open_crit=0, stale_sources=2, open_incidents=0)) == [
+        Signal("warn", "2 telemetry source(s) stale or not loaded")]
 
 
 # --- SR-2 (MED): task-failure AI panel key folds the filters that change evidence ---

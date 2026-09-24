@@ -9,7 +9,13 @@ from __future__ import annotations
 
 from app import companies
 from app.config import core_object
-from app.data.common import and_where, bounded_days, resolve_effective_window, scope_window_where
+from app.data.common import (
+    and_where,
+    bounded_days,
+    not_app_self_sql,
+    resolve_effective_window,
+    scope_window_where,
+)
 
 
 def _iso_date(value: str, name: str) -> str:
@@ -157,7 +163,7 @@ def repeat_query_fingerprints(days: int, company: str = "ALL", min_runs: int = 1
         "EXECUTION_STATUS = 'SUCCESS'",
         "QUERY_TYPE = 'SELECT'",
         "QUERY_PARAMETERIZED_HASH IS NOT NULL",
-        "COALESCE(QUERY_TAG, '') NOT LIKE 'OVERWATCH%'",
+        not_app_self_sql(),
         # C10 doctrine (ops_sql._query_scope): scope QUERY_HISTORY by WAREHOUSE
         # company only — NOT warehouse AND user. The old intersection dropped
         # cross-company activity (a Trexis/UNKNOWN principal on an ALFA warehouse
@@ -350,7 +356,7 @@ def detect_release_days(days: int, company: str = "ALL") -> str:
         "EXECUTION_STATUS = 'SUCCESS'",
         _RELEASE_DDL_PREDICATE,
         _RELEASE_DDL_NOISE,
-        "COALESCE(QUERY_TAG, '') NOT LIKE 'OVERWATCH%'",
+        not_app_self_sql(text=False),
         companies.database_company_scope(company, "DATABASE_NAME"),
     )
     return f"""

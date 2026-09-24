@@ -64,10 +64,14 @@ def test_tagged_share_kpi_reads_account_wide_totals():
 
 # --- DDR-1: control_room verdict warns when the open-critical read fails ----------------
 def test_control_room_verdict_warns_on_unknown_open_criticals():
+    # Next-Fifty #1: the verdict is the shared attention composition — an unknown critical count
+    # (crit_row None) maps to a warn, never the green "no open criticals" all-clear.
+    from app.logic.verdict import Signal, attention_bundle, attention_signals
     cr = _src("app/ui/pages/control_room.py")
-    blk = cr.split("_vsig = []", 1)[1].split("page_verdict_line", 1)[0]
-    assert "if not _crit_known:" in blk
-    assert 'Signal("warn", "open-critical count unavailable")' in blk
+    assert "crit_row=(_crit_counts.df.iloc[0].to_dict() if _crit_known else None)" in cr
+    b = attention_bundle(strip_vals={"STALE_SOURCES": "0", "UNDELIVERED_CRITICAL": "0"},
+                         crit_row=None, open_incidents=0)
+    assert Signal("warn", "open-critical count unavailable") in attention_signals(b)
 
 
 # --- WLA-1: spend tiles use the honest window label, not raw {days}d --------------------

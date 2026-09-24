@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.config import clamp_days
+from app.config import APP_QUERY_TAG_PREFIX, clamp_days
 
 
 def and_where(*clauses: str) -> str:
@@ -130,6 +130,43 @@ def lag_offset_start(days: int, lag_hours: int = 24) -> str:
 # tests/test_timezone_standard.py locks ACCOUNT_TIMEZONE and the Central-pinned
 # helpers so a future edit can't silently re-anchor the app's clock.
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# OVERWATCH SELF-TRAFFIC MARKER (Next-Fifty #7) - ONE definition every self-noise predicate
+# and the Admin self-cost split key on. Owner's-rights SiS rejects ALTER SESSION, so
+# core.session.apply_query_tag() never tags production app queries; the app marks its
+# own statements PER STATEMENT instead (QUERY_TAG via Snowpark statement_params, or an
+# appended SQL comment - see core.session) and these predicates accept EITHER signal,
+# so they are correct before, during and after the transport lands. APP_SQL_MARKER
+# deliberately contains 'OVERWATCH_APP' so the legacy '%OVERWATCH_APP%' text filters
+# (ops/chatter/workbench builders and the DB-side V147 collector) also exclude
+# comment-marked statements with no migration. Locked by tests/test_app_self_marker.py.
+# ---------------------------------------------------------------------------
+APP_QUERY_TAG_LIKE = f"{APP_QUERY_TAG_PREFIX}%"
+APP_SQL_MARKER = "OVERWATCH_APP|"
+APP_SQL_MARKER_OPEN = f"/* {APP_SQL_MARKER}"
+# the predicate spells the marker as a SPLIT constant ('/* OVERWATCH' || '_APP|'): Snowflake folds it, but
+# QUERY_TEXT records it split, so these builders' own statements never match their own predicate.
+_MARKER_SQL = "'/* OVERWATCH' || '_APP|'"
+
+
+def app_self_sql(alias: str = "", *, text: bool = True) -> str:
+    """TRUE for OVERWATCH's own statements (tagged OR comment-marked). A NULL tag with no
+    marker is NULL -> the IFF else-branch, so untagged rows never read as app traffic."""
+    p = f"{alias}." if alias else ""
+    tag = f"{p}QUERY_TAG LIKE '{APP_QUERY_TAG_LIKE}'"
+    return f"({tag} OR CONTAINS({p}QUERY_TEXT, {_MARKER_SQL}))" if text else f"({tag})"
+
+
+def not_app_self_sql(alias: str = "", *, text: bool = True) -> str:
+    """NULL-safe exclusion of OVERWATCH's own statements. text=False skips the QUERY_TEXT
+    read for builders that do not otherwise read it (detect_release_days)."""
+    p = f"{alias}." if alias else ""
+    tag = f"COALESCE({p}QUERY_TAG, '') NOT LIKE '{APP_QUERY_TAG_LIKE}'"
+    if not text:
+        return tag
+    return f"({tag} AND NOT CONTAINS(COALESCE({p}QUERY_TEXT, ''), {_MARKER_SQL}))"
 
 
 # ---------------------------------------------------------------------------

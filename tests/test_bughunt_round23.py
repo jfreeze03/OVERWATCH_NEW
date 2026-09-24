@@ -81,10 +81,12 @@ def test_ai_governance_queue_message_is_honest_about_idempotency():
 
 
 def test_brief_verdict_guards_a_failed_incident_read():
+    # Next-Fifty #1: a failed incident read maps to open_incidents=None -> the shared warn signal
+    from app.logic.verdict import AttentionBundle, Signal, attention_signals
     src = _src("app/ui/pages/brief.py")
-    assert 'if not _inc.ok:' in src
-    assert 'Signal("warn", "open-incident count unavailable")' in src
-    assert "elif _n_inc > 0:" in src
+    assert "open_incidents=(_n_inc if _inc.ok else None)" in src
+    assert Signal("warn", "open-incident count unavailable") in attention_signals(
+        AttentionBundle(open_crit=0, stale_sources=0, open_incidents=None))
     # the old unconditional success-only branch is gone
     assert "if _inc.ok and _n_inc > 0:" not in src
 

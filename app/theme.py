@@ -260,6 +260,10 @@ div[data-testid="stMetric"]::before { content:""; position:absolute; left:0; top
 .ow-runway--ok .ow-runway__fill { background:var(--ow-ok); }
 .ow-runway--warn .ow-runway__fill { background:var(--ow-warn); }
 .ow-runway--bad .ow-runway__fill { background:var(--ow-bad); }
+.ow-runway__label--solo { margin-top:0; padding-left:8px; border-left:3px solid var(--ow-info); }
+.ow-runway--ok .ow-runway__label--solo { border-left-color:var(--ow-ok); }
+.ow-runway--warn .ow-runway__label--solo { border-left-color:var(--ow-warn); }
+.ow-runway--bad .ow-runway__label--solo { border-left-color:var(--ow-bad); }
 .ow-exception__label { color:var(--ow-ink); font-size:0.78rem; font-weight:700; }
 .ow-exception__value { color:var(--ow-ink); font-size:0.84rem; font-weight:750;
   font-variant-numeric:tabular-nums; }

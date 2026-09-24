@@ -16,6 +16,10 @@ from app.logic.formulas import account_today
 # r33: cap the exhaustion horizon (~10y) so a near-idle account's huge days-left can't overflow
 # anchor + timedelta past date.max; anything beyond is reported ">10y", not a fabricated date.
 _HORIZON_DAYS = 3653
+# Next-Fifty #19 (cost-08): the exec runway from billing truth
+ORG_BALANCE_DAYS = 120          # the ONE window every org-balance read uses -> one shared cache entry
+BALANCE_MAX_LAG_DAYS = 3        # ORG_USAGE latency up to ~72h (metric_registry org_reconciliation)
+RUNWAY_GAP_DISCLOSE_PCT = 15.0  # disclose when balance vs credits runways differ by more
 
 
 def remaining_balance_summary(df: pd.DataFrame, burn_window_days: int = 14) -> dict:
@@ -133,3 +137,93 @@ def plan_scenarios(daily_burn_usd: float, term_months: int, buffer_pct: float,
             "RECOMMENDED_COMMIT_USD": round(term_usd * (1 + buffer), 0),
         })
     return rows
+
+
+def _runway_severity(days_left: float) -> str:
+    if days_left < 0:
+        return "warn"
+    if days_left <= 30:
+        return "bad"
+    if days_left <= 90:
+        return "warn"
+    return "ok"
+
+
+def best_runway(balance_df: pd.DataFrame | None, credits_runway: dict | None, *,
+                today: date | None = None, lead_days: int = 30,
+                max_lag_days: int = BALANCE_MAX_LAG_DAYS) -> dict | None:
+    """cost-08: the exec runway from BILLING TRUTH when readable, else the credits model.
+
+    balance_df = ORGANIZATION_USAGE.REMAINING_BALANCE_DAILY rows (org_remaining_balance) or None;
+    credits_runway = formulas.contract_runway(<contract_exhaustion row>) or None. Uses the
+    balance basis only when remaining_balance_summary is ok, the as-of is <= max_lag_days old,
+    and a burn was observed (or the balance is already exhausted). Days are currency-neutral
+    (balance/burn in the same org currency), so a non-USD org still gets a runway. Days count
+    from TODAY (runway minus the as-of lag). Falls back to credits_runway tagged basis='credits'
+    with the reason; None when neither basis is available."""
+    anchor = today or account_today()
+    reason = "billing balance not readable"
+    if balance_df is not None and len(balance_df):
+        s = remaining_balance_summary(balance_df)
+        if not s.get("ok"):
+            reason = str(s.get("reason") or reason)
+        else:
+            ts = pd.to_datetime(s.get("as_of"), errors="coerce")
+            if pd.isna(ts):
+                reason = "balance as-of date unreadable"
+            else:
+                as_of = ts.date()
+                lag = max(0, (anchor - as_of).days)
+                remaining = float(s.get("remaining_usd") or 0.0)
+                runway = s.get("runway_days")
+                if lag > max_lag_days:
+                    reason = f"billing balance stale (as of {as_of.isoformat()})"
+                elif remaining <= 0 or runway is not None:
+                    days_left = 0.0 if remaining <= 0 else max(0.0, float(runway or 0.0) - lag)
+                    exhaust = (anchor + timedelta(days=int(days_left))
+                               if days_left < _HORIZON_DAYS else None)
+                    decide_by = exhaust - timedelta(days=max(0, int(lead_days))) if exhaust else None
+                    alt = None
+                    if credits_runway is not None and float(credits_runway.get("days_left", -1)) >= 0:
+                        alt = float(credits_runway["days_left"])
+                    gap = abs(days_left - alt) / alt * 100.0 if alt else None
+                    return {
+                        "pct_consumed": None, "days_left": days_left,
+                        "exhaust_date": exhaust.isoformat() if exhaust else None,
+                        "decide_by": decide_by.isoformat() if decide_by else None,
+                        "severity": _runway_severity(days_left), "lead_days": int(lead_days),
+                        "basis": "balance", "basis_label": "billing balance",
+                        "as_of": as_of.isoformat(), "currency": s.get("currency", "USD"),
+                        "remaining": remaining, "fallback_reason": None,
+                        "alt_days_left": alt,
+                        "gap_pct": round(gap, 1) if gap is not None else None,
+                        "gap_disclose": gap is not None and gap > RUNWAY_GAP_DISCLOSE_PCT,
+                    }
+                else:
+                    reason = "no balance burn observed"
+    if credits_runway is None:
+        return None
+    return {**credits_runway, "basis": "credits", "basis_label": "configured credits",
+            "as_of": None, "currency": None, "remaining": None, "fallback_reason": reason,
+            "alt_days_left": None, "gap_pct": None, "gap_disclose": False}
+
+
+def runway_basis_note(best: dict | None) -> str:
+    """One plain sentence naming the runway basis (help text / caption). No '$' (Markdown math)."""
+    if not best:
+        return ""
+    if best.get("basis") == "balance":
+        note = (f"Runway from the Snowflake billing balance (as of {best.get('as_of')}, "
+                f"{best.get('currency')}), which includes storage and transfer.")
+        alt = best.get("alt_days_left")
+        if alt is not None:
+            note += f" The configured-credits model says {alt:,.0f} days"
+            note += (f", {best.get('gap_pct'):.0f}% apart. Check CONTRACT_CREDITS in Settings."
+                     if best.get("gap_disclose") else ".")
+            note += " The COST_CONTRACT_BREACH paging alert stays on the configured-credits basis."
+        return note
+    note = ("Configured-rate credit runway from trailing 30 complete days. It excludes storage, "
+            "transfer, and organization currency adjustments.")
+    if best.get("fallback_reason"):
+        note += f" Billing balance not used: {best['fallback_reason']}."
+    return note

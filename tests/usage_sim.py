@@ -86,8 +86,10 @@ _MART_REF = re.compile(r"DBA_MAINT_DB\.OVERWATCH\.([A-Z0-9_]+)")
 def classify_source(sql: str) -> str:
     """Coarsely classify a query by its most expensive data source."""
     s = str(sql or "").upper()
-    if "SNOWFLAKE.ACCOUNT_USAGE." in s or "SNOWFLAKE.ORGANIZATION_USAGE." in s:
+    if "SNOWFLAKE.ACCOUNT_USAGE." in s:
         return "account_usage"                       # slow / metered ACCOUNT_USAGE scan
+    if "SNOWFLAKE.ORGANIZATION_USAGE." in s:
+        return "org_usage"                           # tiny per-day org views, not a metered history scan
     if s.lstrip().startswith("SHOW ") or "INFORMATION_SCHEMA." in s:
         return "metadata"                            # SHOW / INFORMATION_SCHEMA
     if any(ref not in _COMPANY_UDFS for ref in _MART_REF.findall(s)):
@@ -165,7 +167,7 @@ def _patched_modules():
     """The UI modules whose directly-imported read names must be stubbed. Mirrors the
     tests/test_pages_shaped.py::_stub_shaped list; kept honest by test_usage_sim.py."""
     import app.main as main_mod
-    from app.ui import ai_panel, components, security_center, workbench
+    from app.ui import ai_panel, attention, components, security_center, workbench
     from app.ui import decision_studio as ds_render
     from app.ui.pages import (
         admin,
@@ -181,7 +183,7 @@ def _patched_modules():
     )
     from app.ui.pages.cost_parts import ai_chargeback, compare, contract, optimize, spend, unit_costs
     return main_mod, [
-        main_mod, components, ai_panel, ds_render, security_center, workbench,
+        main_mod, components, ai_panel, ds_render, security_center, workbench, attention,
         overview, control_room, cost, operations, alerts, security, admin, brief,
         ask, decision_studio, ai_chargeback, compare, contract, optimize, spend, unit_costs,
     ]
@@ -233,6 +235,7 @@ def _summarize(page: str, scope: str, ledger: list[dict], error: str) -> dict:
         "scope": scope,
         "total": len(ledger),
         "account_usage": by_source.get("account_usage", 0),
+        "org_usage": by_source.get("org_usage", 0),
         "mart": by_source.get("mart", 0),
         "metadata": by_source.get("metadata", 0),
         "other": by_source.get("other", 0),
@@ -315,14 +318,14 @@ def format_report(report: dict) -> str:
     lines.append("OVERWATCH usage simulation — COLD logical queries per interaction")
     lines.append("(run()/run_batch stubbed => cache bypassed; counts are per-interaction reads)")
     lines.append("")
-    header = f"{'PAGE':<16}{'SCOPE':<13}{'TOTAL':>6}{'AU':>5}{'MART':>6}{'META':>6}{'DUP':>5}  NOTE"
+    header = f"{'PAGE':<16}{'SCOPE':<13}{'TOTAL':>6}{'AU':>5}{'ORG':>5}{'MART':>6}{'META':>6}{'DUP':>5}  NOTE"
     lines.append(header)
     lines.append("-" * len(header))
     for f in flows:
         dup = sum(c - 1 for c in f["duplicates"].values())
         note = "ERROR: " + f["error"][:48] if f["error"] else ""
         lines.append(
-            f"{f['page']:<16}{f['scope']:<13}{f['total']:>6}{f['account_usage']:>5}"
+            f"{f['page']:<16}{f['scope']:<13}{f['total']:>6}{f['account_usage']:>5}{f['org_usage']:>5}"
             f"{f['mart']:>6}{f['metadata']:>6}{dup:>5}  {note}"
         )
     lines.append("")

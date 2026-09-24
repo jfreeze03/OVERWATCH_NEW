@@ -24,7 +24,7 @@ def _src(rel: str) -> str:
 
 # every file with operator-write click blocks -> expected latched-block count
 LATCHED_FILES = {
-    "app/ui/pages/cost_parts/optimize.py": 5,
+    "app/ui/pages/cost_parts/optimize.py": 6,   # +1 Next-Fifty #5 twin cleanup (ledger_twin_reject)
     "app/ui/pages/operations.py": 5,
     "app/ui/pages/alerts.py": 6,
     "app/ui/workbench.py": 6,
@@ -138,11 +138,21 @@ def test_high_risk_ledger_blocks_stamp_after_the_conditional_booking():
     # the three optimize.py blocks book conditional SAVINGS_LEDGER rows — the
     # stamp must come AFTER the booking (all writes covered), before notify
     src = _src("app/ui/pages/cost_parts/optimize.py")
-    for key, est in (("sizing", "est_sz"), ("waste", "est_w"), ("remed", "est_monthly")):
-        idx = src.index(f'write_gate_open("{key}")')
-        block = src[idx:idx + 2600]
-        assert f'stamp_write("{key}", ok)' in block, key
-        assert block.index(f"if ok and {est} > 0:") < block.index(f'stamp_write("{key}"'), key
+    idx = src.index('write_gate_open("waste")')
+    block = src[idx:idx + 2600]
+    assert 'stamp_write("waste", ok)' in block
+    assert block.index("if ok and est_w > 0:") < block.index('stamp_write("waste"')
+    # remed: the ledger booking is now conditional on the lever NOT being autobooked (Next-Fifty #5)
+    idx = src.index('write_gate_open("remed")')
+    block = src[idx:idx + 2600]
+    assert "_book_ledger = ok and est_monthly > 0 and not _autobooked" in block
+    assert block.index("if _book_ledger:") < block.index('stamp_write("remed"')
+    # sizing: a manual ledger row only when the change scan can't book the resize (Next-Fifty #5);
+    # the REMEDIATION_LOG audit row and that conditional booking both precede the stamp
+    idx = src.index('write_gate_open("sizing")')
+    block = src[idx:src.index('stamp_write("sizing"', idx)]
+    assert "REMEDIATION_LOG" in block
+    assert "if ok and est_sz > 0 and not _sz_autobooked:" in block
 
 
 def test_stamps_precede_reruns_everywhere():

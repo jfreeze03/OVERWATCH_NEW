@@ -88,7 +88,8 @@ def test_brief_on_track_tile_names_a_month_end_night():
 
 
 def test_both_surfaces_pass_the_spike_calendar():
-    for rel in ("app/ui/pages/operations.py", "app/ui/pages/brief.py"):
+    # the Brief's forecast read moved to the shared app/ui/attention.py (Next-Fifty #1)
+    for rel in ("app/ui/pages/operations.py", "app/ui/attention.py"):
         src = (_ROOT / rel).read_text(encoding="utf-8")
         assert 'spike_calendar=str(settings.get("EXPECTED_SPIKE_CALENDAR")' in src, rel
 

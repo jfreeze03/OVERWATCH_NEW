@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from uuid import uuid4
@@ -10,6 +11,7 @@ import pandas as pd
 
 from app.config import core_object
 from app.core.sqlsafe import sql_literal, sql_number
+from app.logic.actions import OPEN_STATUSES, deferred_mask
 from app.logic.formulas import account_today, safe_float
 
 ENTITY_TYPES = (
@@ -133,7 +135,7 @@ INSERT INTO {core_object('ACTION_QUEUE')}
      SOURCE_ENTITY_TYPE, SOURCE_ENTITY_KEY, CONFIDENCE, ESTIMATED_USD, PERIOD)
 SELECT {sql_literal(str(company or 'ALL'), 40)}, {sql_literal(sev, 20)},
        {sql_literal(clean_title, 300)}, {sql_literal(str(detail or ''), 2000)},
-       {sql_literal(str(owner or 'DBA'), 200)}, 'OPEN', {_date_sql(due_date)},
+       {sql_literal(str(owner or '').strip() or UNASSIGNED_OWNER, 200)}, 'OPEN', {_date_sql(due_date)},
        {sql_literal(str(source or 'Action Center'), 120)}, {sql_literal(kind, 40)},
        {sql_literal(str(entity_key or '').strip(), 500)}, {conf_sql}, {usd_sql}, {period_sql}
 """.strip()
@@ -531,10 +533,87 @@ SELECT {sql_literal(clean_name, 300)}, {sql_literal(kind, 40)},
 """.strip()
 
 
+#: Team labels that name nobody. Creators historically defaulted OWNER to these, so an item
+#: 'owned' by one is counted Unassigned (Next-Fifty #20 / decision-03). Upper-cased compare.
+TEAM_PLACEHOLDER_OWNERS: frozenset[str] = frozenset({"", "UNASSIGNED", "DBA", "DBA TEAM", "DBA / AI GOVERNANCE"})
+#: What the app writes for 'no owner'. ACTION_QUEUE.OWNER is NOT NULL (V005), so V092's
+#: P_CLEAR_OWNER (sets NULL) cannot be used; this sentinel goes through the COALESCE-keep path.
+UNASSIGNED_OWNER = "UNASSIGNED"
+OWNER_UNASSIGNED_CHOICE = "(unassigned)"
+OWNER_OTHER_CHOICE = "Other…"
+
+
+def is_unassigned_owner(value: object) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip().upper() in TEAM_PLACEHOLDER_OWNERS
+
+
+def owner_choices(roster: Sequence[str], *, current: str = "", viewer: str = "",
+                  allow_unassigned: bool = True) -> tuple[list[str], int]:
+    """Selectbox options + default index for an owner picker. Roster = config.OPERATOR_USERS
+    (upper, de-duplicated). A current owner is ALWAYS selectable verbatim (a legacy 'DBA' or a
+    different-case username keeps its exact spelling, so opening the editor never reads as a
+    reassignment). Default: current owner, else the viewer if on the roster, else unassigned."""
+    cur = str(current or "").strip()
+    if cur.upper() == UNASSIGNED_OWNER:
+        cur = ""
+    names: list[str] = []
+    for n in roster:
+        u = str(n or "").strip().upper()
+        if u and u not in [x.upper() for x in names]:
+            names.append(cur if cur and cur.upper() == u else u)
+    if cur and cur.upper() not in [x.upper() for x in names]:
+        names.append(cur)
+    options = ([OWNER_UNASSIGNED_CHOICE] if allow_unassigned else []) + names + [OWNER_OTHER_CHOICE]
+    pick = (cur or str(viewer or "").strip()).upper()
+    for i, o in enumerate(options):
+        if pick and o.upper() == pick:
+            return options, i
+    return options, (0 if allow_unassigned else len(options) - 1)
+
+
+def resolve_owner(choice: str, other_text: str = "") -> str:
+    if choice == OWNER_UNASSIGNED_CHOICE:
+        return ""
+    if choice == OWNER_OTHER_CHOICE:
+        return str(other_text or "").strip()
+    return str(choice or "").strip()
+
+
+def owned_by(frame: pd.DataFrame | None, viewer: str) -> pd.Series:
+    v = str(viewer or "").strip().upper()
+    if frame is None:
+        return pd.Series(dtype=bool)
+    if frame.empty or not v or "OWNER" not in frame.columns:
+        return pd.Series(False, index=frame.index, dtype=bool)
+    return frame["OWNER"].fillna("").astype(str).str.strip().str.upper() == v
+
+
+def my_queue_counts(frame: pd.DataFrame | None, viewer: str) -> dict[str, int]:
+    """Active (open, not deferred) items the viewer owns, and how many are overdue."""
+    if frame is None or frame.empty:
+        return {"mine": 0, "mine_overdue": 0}
+    today = pd.Timestamp(account_today())
+    status = frame.get("STATUS", pd.Series("", index=frame.index)).astype(str).str.upper()
+    active = status.isin(OPEN_STATUSES) & ~deferred_mask(frame, today)
+    mine = active & owned_by(frame, viewer)
+    due = pd.to_datetime(frame.get("DUE_DATE", pd.Series(pd.NaT, index=frame.index)), errors="coerce")
+    late = mine & due.notna() & (due.dt.normalize() < today)
+    return {"mine": int(mine.sum()), "mine_overdue": int(late.sum())}
+
+
 def action_summary(frame: pd.DataFrame | None) -> dict[str, float]:
+    """Action Center KPIs. Next-Fifty #20: items deferred to a future resume date are left out of
+    every count (and counted in 'deferred'); a team placeholder owner such as 'DBA' is Unassigned."""
     if frame is None or frame.empty:
         return {"open": 0.0, "critical_high": 0.0, "overdue": 0.0,
-                "unassigned": 0.0, "estimated_usd": 0.0}
+                "unassigned": 0.0, "estimated_usd": 0.0, "deferred": 0.0}
     view = frame.copy()
     status = view.get("STATUS", pd.Series("", index=view.index)).astype(str).str.upper()
     open_mask = status.isin(("OPEN", "IN_PROGRESS"))
@@ -545,12 +624,15 @@ def action_summary(frame: pd.DataFrame | None) -> dict[str, float]:
         view.get("ESTIMATED_USD", pd.Series(0.0, index=view.index)), errors="coerce"
     ).fillna(0.0)
     today = pd.Timestamp(account_today())
+    parked = deferred_mask(view, today)
+    active = open_mask & ~parked
     return {
-        "open": float(open_mask.sum()),
-        "critical_high": float((open_mask & severity.isin(("CRITICAL", "HIGH"))).sum()),
-        "overdue": float((open_mask & due.notna() & (due.dt.normalize() < today)).sum()),
-        "unassigned": float((open_mask & owner.isin(("", "UNASSIGNED"))).sum()),
-        "estimated_usd": round(float(dollars[open_mask].sum()), 2),
+        "open": float(active.sum()),
+        "critical_high": float((active & severity.isin(("CRITICAL", "HIGH"))).sum()),
+        "overdue": float((active & due.notna() & (due.dt.normalize() < today)).sum()),
+        "unassigned": float((active & owner.str.upper().isin(TEAM_PLACEHOLDER_OWNERS)).sum()),
+        "estimated_usd": round(float(dollars[active].sum()), 2),
+        "deferred": float(parked.sum()),
     }
 
 

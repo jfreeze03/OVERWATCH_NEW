@@ -32,6 +32,7 @@ from app.ui.components import (
     empty_state,
     kpi_row,
     notify,
+    owner_picker,
     panel_help,
     result_caption,
     section_header,
@@ -302,7 +303,7 @@ def render_security_overview(company: str) -> None:
 
     if not action_id and is_operator() and entity_key:
         with st.expander("Track as work item"):
-            owner = st.text_input("Owner", value="DBA", key="sec_exception_owner", max_chars=200)
+            owner = owner_picker("Owner", key="sec_exception_owner_pick")
             due = st.date_input(
                 "Due", value=account_today() + timedelta(days=7), key="sec_exception_due"
             )

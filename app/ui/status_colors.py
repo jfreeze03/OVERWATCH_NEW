@@ -84,6 +84,8 @@ _VERDICTS = {
     "NO_BASELINE": _MUTED, "INSUFFICIENT_AFTER": _MUTED,
     # stored-procedure regression advisor (F7) — REGRESSED/IMPROVED reused above
     "SLOWER": _WARN, "STABLE": _MUTED, "FASTER BUT FAILING": _BAD,
+    # identity auth readiness — password sign-in deprecation (Next-Fifty #9)
+    "WILL BREAK": _BAD, "MIGRATE": _WARN, "READY": _OK,
 }
 
 

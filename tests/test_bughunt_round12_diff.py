@@ -36,7 +36,7 @@ def test_overview_trend_note_reflects_served_leg_not_using_mart():
 
 def test_remediation_toast_only_says_booked_when_booked():
     opt = _read("app/ui/pages/cost_parts/optimize.py")
-    assert '(" and booked." if est_monthly > 0 else ".")' in opt
+    assert '(" and booked." if _book_ledger' in opt       # _book_ledger = the ledger INSERT's own gate
     assert 'executed and booked."' not in opt   # the unconditional claim is gone
 
 

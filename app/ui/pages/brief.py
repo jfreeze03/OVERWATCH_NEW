@@ -13,9 +13,9 @@ from app.core.errors import safe_page
 from app.core.identity import viewer_name
 from app.core.query import run, run_batch
 from app.core.state import filters, request_navigation
-from app.data import etl_control_sql, mart_sql
-from app.logic import case_file
-from app.logic.actions import rank_actions
+from app.data import mart_sql
+from app.logic import case_file, contract_planner
+from app.logic.actions import deferred_summary, rank_actions
 from app.logic.formulas import (
     ExecutiveSummaryView,
     account_now,
@@ -30,9 +30,9 @@ from app.logic.formulas import (
     md_dollars,
     safe_float,
 )
-from app.logic.insights import etl_cycle_sla_forecast
-from app.logic.verdict import Signal, page_verdict
-from app.ui import charts
+from app.logic.verdict import Signal, attention_bundle, attention_healthy, attention_signals, page_verdict
+from app.logic.workbench import my_queue_counts
+from app.ui import attention, charts
 from app.ui.components import (
     alarm_health,
     contract_runway_bar,
@@ -50,6 +50,7 @@ from app.ui.components import (
     section_header,
     selectable_table,
 )
+from app.ui.pages.cost_parts.contract import org_balance_result
 from app.ui.sizing import TABLE_H_SM
 from app.ui.workbench import render_watch_badge
 
@@ -74,96 +75,7 @@ def _stalest_label(vals: dict) -> str:
     return f"{src}{humanize_duration(_h, 'h')}"
 
 
-def _reference_gap_summary(settings: dict) -> tuple[int, str]:
-    """Source codes with no XLAT translation across every configured check.
-
-    Reuses the Operations ▸ Pipeline reference-gap scan (etl_control_sql), run
-    account-wide — pinned checks plus every configured check, no Database filter,
-    the widest morning read. Config-gated and FAIL-SILENT: unset config, no valid
-    check, or a missing SELECT grant (a probe read → the 'absent' branch, so it is
-    neither error-logged nor counted as a failed fetch) all return (0, "") so the
-    Brief never shows a setup or grant hint — the Operations panel owns that.
-    Returns (code_count, label) where label names the affected check type(s),
-    e.g. 'pc_uwissuetype.code'."""
-    xlat = str(settings.get("ETL_REF_GAP_XLAT") or "").strip()
-    raw = str(settings.get("ETL_REF_GAP_CHECKS") or "").strip()
-    if not xlat or not raw:
-        return 0, ""
-    checks, _ = etl_control_sql.parse_ref_gap_checks(raw)
-    scan_sql, _ = etl_control_sql.reference_gap_scan(checks, xlat)
-    if not scan_sql:
-        return 0, ""
-    res = run(scan_sql, page=_PAGE, key="brief_ref_gaps", tier="recent",
-              source="staging tables MINUS XLAT reference",
-              max_rows=etl_control_sql.MAX_CODES, probe=True)
-    if not (res.ok and not res.empty) or "CHECK_NAME" not in res.df.columns:
-        return 0, ""
-    types = list(dict.fromkeys(res.df["CHECK_NAME"].astype(str)))
-    label = ", ".join(types) if len(types) <= 2 else f"{types[0]}, {types[1]} +{len(types) - 2} more"
-    return len(res.df), label
-
-
-def _workflow_failure_summary(settings: dict) -> tuple[int, str]:
-    """Count FAILED tasks in the latest Informatica ETL run (CONTROL_STATUS).
-
-    A failed nightly task usually breaks a downstream load, so it belongs on the
-    morning read like a fire. Reuses the Operations workflow-runtimes scan (the same
-    ``(sql, scope)`` cache entry — no extra query) and the shared FAILED_TASK_STATUSES
-    set, so the Brief and the panel never disagree on what counts as a failure. Only
-    real FAILED states count — a RUNNING task is not a failure. Config-gated and
-    FAIL-SILENT (a probe read → unset config or a missing grant returns (0, "")).
-    Returns (failed_count, workflow_label)."""
-    fqn = str(settings.get("ETL_CONTROL_STATUS_FQN") or "").strip()
-    if not fqn:
-        return 0, ""
-    scan_sql = etl_control_sql.workflow_runtimes_scan(fqn)
-    if not scan_sql:
-        return 0, ""
-    res = run(scan_sql, page=_PAGE, key="brief_wf_runtimes", tier="recent",
-              source="CONTROL_STATUS (latest run)", max_rows=etl_control_sql.MAX_TASKS, probe=True)
-    if not (res.ok and not res.empty) or "TASK_STATUS" not in res.df.columns:
-        return 0, ""
-    status = res.df["TASK_STATUS"].astype(str).str.upper()
-    n_fail = int(status.isin(etl_control_sql.FAILED_TASK_STATUSES).sum())
-    if not n_fail:
-        return 0, ""
-    wf = ""
-    if "WORKFLOW_NAME" in res.df.columns:
-        wf = ", ".join(sorted(res.df["WORKFLOW_NAME"].astype(str).unique())[:2])
-    return n_fail, wf
-
-
-def _nightly_cycle_forecast(settings: dict) -> dict:
-    """Whole-cycle SLA finish forecast for the Brief 'Nightly cycle' tile (fail-silent probe read).
-
-    Reuses the Operations SLA-finish builder (cycle_finish_history_scan) + etl_cycle_sla_forecast: the
-    cycle STARTER workflow → the TERMINAL workflow, each night's finish vs the clock deadline, trended.
-    The anchor workflows + clock times default in DEFAULT_SETTINGS, so this works before V138 is applied.
-    Config-gated on ETL_CONTROL_STATUS_FQN + both anchor workflows; returns {} when unconfigured or when
-    there is no cycle data (a probe read — a missing grant is silent; Operations ▸ Pipeline owns hints)."""
-    fqn = str(settings.get("ETL_CONTROL_STATUS_FQN") or "").strip()
-    start_wf = str(settings.get("ETL_CYCLE_START_WORKFLOW") or "").strip()
-    end_wf = str(settings.get("ETL_CYCLE_END_WORKFLOW") or "").strip()
-    if not fqn or not start_wf or not end_wf:
-        return {}
-    scan_sql = etl_control_sql.cycle_finish_history_scan(
-        fqn, start_workflow=start_wf, end_workflow=end_wf)
-    if not scan_sql:
-        return {}
-    res = run(scan_sql, page=_PAGE, key="brief_cycle_finish", tier="recent",
-              source="CONTROL_STATUS (cycle finish forecast)",
-              max_rows=etl_control_sql.MAX_SLA_NIGHTS, probe=True)
-    if not (res.ok and not res.empty):
-        return {}
-    fc = etl_cycle_sla_forecast(
-        res.df,
-        target_hhmm=str(settings.get("ETL_SLA_TARGET_HHMM") or "07:00").strip(),
-        breach_hhmm=str(settings.get("ETL_SLA_BREACH_HHMM") or "08:00").strip(),
-        spike_calendar=str(settings.get("EXPECTED_SPIKE_CALENDAR") or ""))
-    return fc or {}
-
-
-def _nightly_cycle_kpi(fc: dict, wf_fail_n: int) -> dict:
+def _nightly_cycle_kpi(fc: dict, wf_fail_n: int, missing_n: int = 0, *, not_started: bool = False) -> dict:
     """The Brief 'Nightly cycle' KPI (replaces Open incidents): the SLA finish forecast + any failures.
 
     Worst-first — Failures → Overdue/In flight → Late → Regressing → On track — and it paints the
@@ -172,9 +84,9 @@ def _nightly_cycle_kpi(fc: dict, wf_fail_n: int) -> dict:
     margin (that would be a false all-clear on the executive Brief). Pure: no I/O; takes the already-read
     forecast dict + the latest-run failure count."""
     tgt = (fc.get("target_hhmm") if fc else None) or "07:00"
-    help_txt = ("Whole nightly ETL cycle: the SLA finish forecast (the cycle's finish vs the "
-                f"{tgt} target, trended across nights) plus any failed tasks in the latest run. "
-                "Operations ▸ Pipeline owns the detail.")
+    help_txt = ("Whole nightly ETL cycle: every workflow tonight (failed or did-not-run, retries "
+                "collapsed) plus the SLA finish forecast (the cycle's finish vs the "
+                f"{tgt} target, trended across nights). Operations ▸ Pipeline ▸ Tonight owns the detail.")
 
     def _tile(value: str, severity: str, delta: str) -> dict:
         return {"label": "Nightly cycle", "value": value, "severity": severity,
@@ -185,6 +97,12 @@ def _nightly_cycle_kpi(fc: dict, wf_fail_n: int) -> dict:
     if wf_fail_n:
         _w = "task" if wf_fail_n == 1 else "tasks"
         return _tile("Failures", "bad", f"{wf_fail_n} failed {_w}")
+    # Next-Fifty #1: a regular nightly workflow that never ran, or a cycle that never kicked off
+    if missing_n:
+        _w = "workflow" if missing_n == 1 else "workflows"
+        return _tile("Missing runs", "bad", f"{missing_n} {_w} didn't run")
+    if not_started:
+        return _tile("Not started", "bad", "cycle hasn't kicked off")
     if fc and fc.get("latest_failed"):
         return _tile("Failures", "bad", "terminal workflow failed")
     # 2. no forecast data at all — never fake green
@@ -356,20 +274,21 @@ def render() -> None:
                 st.caption(str(strip.error))
     exh = _b_rec.get("exh") or run(mart_sql.contract_exhaustion(), page=_PAGE, key="brief_exhaustion",
               tier="recent", source="SETTINGS + FACT_METERING_DAILY")
-    if exh.usable():
-        erow = exh.df.iloc[0]
-        total = safe_float(erow.get("TOTAL"))
-        days_left = safe_float(erow.get("DAYS_LEFT"), -1.0)
-        if total > 0 and days_left >= 0:
-            secondary.append({
-                "label": "Credit commitment exhausts",
-                "value": str(erow.get("EXHAUST_DATE")),
-                "delta": f"{days_left:,.0f} days at current burn",
-                "delta_color": "inverse" if days_left <= 90 else "off",
-                "help": "Configured-rate credit runway from trailing 30 complete days. "
-                        "It excludes storage, transfer, and organization currency adjustments; "
-                        "billing-truth runway is on Cost Intelligence > Contract & Forecast.",
-            })
+    # Next-Fifty #19 (cost-08): the runway from the Snowflake billing balance when it is readable and
+    # fresh (storage + transfer included), else the configured-credits model — the basis is badged.
+    _bal = org_balance_result(_PAGE)
+    _best = contract_planner.best_runway(
+        _bal.df if (_bal is not None and _bal.usable()) else None,
+        contract_runway(exh.df.iloc[0]) if exh.usable() else None)
+    if _best is not None and _best["days_left"] >= 0:
+        secondary.append({
+            "label": ("Contract balance exhausts" if _best["basis"] == "balance"
+                      else "Credit commitment exhausts"),
+            "value": _best["exhaust_date"] or ">10y",
+            "delta": f"{_best['days_left']:,.0f} days at current burn",
+            "delta_color": "inverse" if _best["days_left"] <= 90 else "off",
+            "help": contract_planner.runway_basis_note(_best),
+        })
     roi = _b_rec.get("roi") or run(mart_sql.savings_summary_quarter(), page=_PAGE, key="brief_roi",
               tier="recent", source="SAVINGS_LEDGER")
     cost_q = _b_rec.get("appq") or run(mart_sql.app_cost_last_30d(), page=_PAGE, key="brief_app_cost",
@@ -427,26 +346,24 @@ def render() -> None:
         # (The "Open incidents" KPI tile was replaced by the "Nightly cycle" tile below — owner ask
         # 2026-09-09. _n_inc still feeds the verdict line + the Fires detail; the Control Room owns
         # the incident queue and the executive incident glance.)
-    # Reference-data gaps (ETL Phase 1): a source code with no XLAT translation
-    # hard-fails tonight's load, so it belongs in the morning "should I worry?" read
-    # like a fire. Reuses the Operations panel's scan, account-wide (pinned + every
-    # configured check); config-gated and FAIL-SILENT (unset config / a missing grant
-    # returns 0 — the Operations ▸ Pipeline panel owns the setup + grant hints).
-    _ref_gap_n, _ref_gap_types = _reference_gap_summary(settings)
-    # A FAILED task in the latest Informatica ETL run is a morning fire too (it usually
-    # breaks a downstream load). Same reused scan + shared failure set as the Operations
-    # panel; config-gated + fail-silent. Only fires when a real failure exists.
-    _wf_fail_n, _wf_fail_wf = _workflow_failure_summary(settings)
-    # Nightly-cycle health tile (replaces Open incidents, owner ask 2026-09-09): the whole-cycle SLA
-    # finish forecast (good / regressing / late) plus any failed tasks in the latest run. Config-gated
-    # on the ETL control table + fail-silent (probe reads); shown whenever ETL is configured so the
-    # morning read leads with "is the nightly cycle OK?".
-    _cyc = _nightly_cycle_forecast(settings)
+    # Next-Fifty #1: ONE shared read path with the Control Room (app/ui/attention.py) — the XLAT
+    # reference gap, the whole-night ETL roll-up (every workflow tonight: failed / did not run,
+    # retries collapsed) and the cycle SLA forecast. Config-gated + fail-silent (probe reads);
+    # Operations ▸ Pipeline ▸ Tonight owns the setup + grant hints.
+    _etl = attention.etl_attention(settings, page=_PAGE)
+    _ref_gap_n, _ref_gap_types = _etl["ref_gap_n"], _etl["ref_gap_label"]
+    _night = _etl["night"]
+    _wf_fail_n = int(_night.get("failed_tasks") or 0)
+    _wf_fail_wf = str(_night.get("failed_label") or "")
+    _wf_miss_n = int(_night.get("missing_wf") or 0)
+    _wf_miss_wf = str(_night.get("missing_label") or "")
+    _cyc = _etl["cycle"]
     # rec6: Nightly cycle is a FIXED 3rd headline slot. On an ETL-monitored account it shows
     # the real forecast; otherwise an honest neutral placeholder (never a green all-clear) so
     # the band keeps the same three positions instead of dropping to two.
     if str(settings.get("ETL_CONTROL_STATUS_FQN") or "").strip():
-        _nightly_card = _nightly_cycle_kpi(_cyc, _wf_fail_n)
+        _nightly_card = _nightly_cycle_kpi(_cyc, _wf_fail_n, _wf_miss_n,
+                                           not_started=bool(_night.get("next_cycle_overdue")))
     else:
         _nightly_card = {
             "label": "Nightly cycle", "value": "—", "severity": "info",
@@ -456,70 +373,25 @@ def render() -> None:
         }
     headline.append(_nightly_card)
 
-    # CoCo do-first #1: a computed "should I worry?" opener, worst-first, above the
-    # numbers — built from signals already on the page (no new query).
-    _vsig = []
-    if not strip_up:
-        _vsig.append(Signal("warn", "telemetry marts unreachable — figures withheld"))
-    if scoped_crit is None:
-        _vsig.append(Signal("warn", "open-critical count unavailable"))
-    elif scoped_crit > 0:
-        _age = (f", oldest {humanize_duration(_oldest_crit_h, 'h')}"
-                if _oldest_crit_h is not None else "")
-        _vsig.append(Signal("bad", f"{scoped_crit} open critical alert(s){_age}"))
-    if not _inc.ok:
-        # A FAILED incident read must NOT read as a green "no incidents" all-clear (the healthy
-        # verdict below explicitly asserts "no ... incidents"). Mirror the critical-side guard
-        # above (open-critical count unavailable) so open-incident status is disclosed, not assumed.
-        _vsig.append(Signal("warn", "open-incident count unavailable"))
-    elif _n_inc > 0:
-        # Use the UNCAPPED count (_n_inc, from incident_metrics.OPEN_NOW) the KPI above uses,
-        # not len() of the LIMIT-5 feed — else the verdict says "5" while the KPI says the true
-        # count for >5 open incidents (round-2 bug hunt; the KPI was hardened, this sibling wasn't).
-        _vsig.append(Signal("bad", f"{_n_inc} open incident(s)"))
-    if _ref_gap_n:
-        _rg_word = "code" if _ref_gap_n == 1 else "codes"
-        _vsig.append(Signal(
-            "bad", f"{_ref_gap_n} source {_rg_word} missing XLAT translation ({_ref_gap_types})"))
-    if _wf_fail_n:
-        _wf_word = "task" if _wf_fail_n == 1 else "tasks"
-        _vsig.append(Signal(
-            "bad", f"{_wf_fail_n} failed ETL {_wf_word} in the latest run"
-                   + (f" ({_wf_fail_wf})" if _wf_fail_wf else "")))
-    # The nightly cycle failing / hanging / finishing late (or trending later) is a morning worry too,
-    # from the same whole-cycle SLA forecast the tile shows — so the verdict is never silently green on
-    # a non-completed latest night. Worst-first, one signal; task-level failures are covered above.
-    if _cyc:
-        _c_tgt = _cyc.get("target_hhmm", "07:00")
-        _c_state = _cyc.get("latest_state")
-        _c_rw = _cyc.get("live_runway_sec")
-        if _cyc.get("latest_failed") and not _wf_fail_n:
-            _vsig.append(Signal("bad", "nightly cycle's terminal workflow failed — finish unconfirmed"))
-        elif _c_state == "INCOMPLETE" and _c_rw is not None and safe_float(_c_rw) < 0:
-            _vsig.append(Signal(
-                "bad", f"nightly cycle still running, "
-                       f"{humanize_duration(abs(safe_float(_c_rw)), 's')} past the {_c_tgt} target"))
-        elif _cyc.get("severity") == "High":
-            _c_margin = _cyc.get("latest_margin_sec")
-            _c_late = (f", {humanize_duration(abs(safe_float(_c_margin)), 's')} past {_c_tgt}"
-                       if _c_margin is not None else "")
-            _vsig.append(Signal("bad", f"nightly cycle finished after the {_c_tgt} target{_c_late}"))
-        elif _cyc.get("severity") == "Medium":
-            _c_n2b = _cyc.get("nights_to_breach")
-            _c_when = f", ~{_c_n2b} night(s) to miss" if _c_n2b else ""
-            _vsig.append(Signal(
-                "warn", f"nightly cycle finish trending later vs the {_c_tgt} target{_c_when}"))
-    if exh.usable():
-        _erow = exh.df.iloc[0]
-        if safe_float(_erow.get("TOTAL")) > 0:
-            _dl = safe_float(_erow.get("DAYS_LEFT"), -1.0)
-            if 0 <= _dl <= 30:
-                _vsig.append(Signal("bad", f"contract runway {_dl:,.0f} days"))
-            elif 0 <= _dl <= 90:
-                _vsig.append(Signal("warn", f"contract runway {_dl:,.0f} days"))
+    # CoCo do-first #1 / Next-Fifty #1: the "should I worry?" opener is the SAME shared attention
+    # composition as the Control Room (parity-locked in tests/test_attention_parity.py); page-specific
+    # on top: contract runway only.
+    _attn = attention_bundle(
+        strip_vals=vals if strip_up else None,
+        crit_row=(alert_counts.df.iloc[0].to_dict()
+                  if alert_counts is not None and alert_counts.usable() else None),
+        open_incidents=(_n_inc if _inc.ok else None),
+        etl=_etl)
+    _vsig = attention_signals(_attn)
+    if _best is not None:
+        _dl = _best["days_left"]
+        if 0 <= _dl <= 30:
+            _vsig.append(Signal("bad", f"contract runway {_dl:,.0f} days"))
+        elif 0 <= _dl <= 90:
+            _vsig.append(Signal("warn", f"contract runway {_dl:,.0f} days"))
     page_verdict_line(page_verdict(
-        _vsig, healthy="no open criticals or incidents; contract runway healthy"))
-    contract_runway_bar(contract_runway(exh.df.iloc[0]) if exh.usable() else None)
+        _vsig, healthy=attention_healthy(_attn) + "; contract runway healthy"))
+    contract_runway_bar(_best)
     panel_help(
         "Your one-scroll morning read: the headline numbers, then open fires, then the top "
         "asks. A dash means telemetry was unreachable, not zero. A figure turns red when open "
@@ -574,14 +446,22 @@ def render() -> None:
                      key="brief_ref_gap", type="primary", width="stretch"):
             request_navigation("Operations", "Pipeline SLA")
 
-    # A FAILED task in the latest Informatica ETL run — surfaced here (the panel that
-    # lists every task lives in Operations ▸ Pipeline). Only shows on a real failure.
+    # A FAILED task in ANY workflow of tonight's Informatica cycle — surfaced here (the panel that
+    # lists every workflow lives in Operations ▸ Pipeline ▸ Tonight). Only shows on a real failure.
     if _wf_fail_n:
         _wf_word = "task" if _wf_fail_n == 1 else "tasks"
-        if st.button(f"⚠ {_wf_fail_n} ETL {_wf_word} FAILED in the latest run"
+        if st.button(f"⚠ {_wf_fail_n} ETL {_wf_word} FAILED tonight"
                      + (f" ({_wf_fail_wf})" if _wf_fail_wf else "")
                      + " — check the run before its downstream loads →",
                      key="brief_wf_fail", type="primary", width="stretch"):
+            request_navigation("Operations", "Pipeline SLA")
+    # Next-Fifty #1: a regular nightly workflow that did not run at all is a morning fire too.
+    if _wf_miss_n:
+        _wm_word = "workflow" if _wf_miss_n == 1 else "workflows"
+        if st.button(f"⚠ {_wf_miss_n} nightly {_wm_word} did not run tonight"
+                     + (f" ({_wf_miss_wf})" if _wf_miss_wf else "")
+                     + " — check the cycle before its downstream loads →",
+                     key="brief_wf_missing", type="primary", width="stretch"):
             request_navigation("Operations", "Pipeline SLA")
 
     # Honor the company filter (live finding 2026-07-08: Trexis warehouse
@@ -626,6 +506,7 @@ def render() -> None:
         if ranked.empty:
             empty_state("clean", "Nothing waiting on an owner.")
         else:
+            _me = viewer_name().strip().upper()
             for _, a in ranked.iterrows():
                 est = safe_float(a.get("ESTIMATED_USD"))
                 # DS #7: disclose the estimate's time basis inline so a monthly run-rate
@@ -636,14 +517,32 @@ def render() -> None:
                     f"[{a['SEVERITY']}] {a['TITLE']} - owner {a.get('OWNER') or 'unassigned'}"
                     + (f" - about {format_usd(est)}{_basis}" if est > 0 else "")
                 )
-                # $-escape: TITLE is data — a '$' in it pairs with format_usd's '$'
-                st.markdown(md_dollars(f"- **[{a['SEVERITY']}]** {a['TITLE']} — owner "
-                            f"{a.get('OWNER') or 'unassigned'}"
-                            + (f" · ~{format_usd(est)}{_basis}" if est > 0 else "")))
+                # $-escape: TITLE is data — a '$' in it pairs with format_usd's '$' (widget labels render
+                # markdown too). Next-Fifty #20: each ask opens its item in the Action Center.
+                _aid = str(a.get("ACTION_ID") or "").strip()
+                _mine = bool(_me) and str(a.get("OWNER") or "").strip().upper() == _me
+                _label = md_dollars(f"**[{a['SEVERITY']}]** {a['TITLE']} — owner {a.get('OWNER') or 'unassigned'}"
+                                    + (" (yours)" if _mine else "")
+                                    + (f" · ~{format_usd(est)}{_basis}" if est > 0 else ""))
+                if not _aid:
+                    st.markdown(_label)
+                elif st.button(_label, key=f"brief_ask_{_aid}", type="tertiary"):
+                    request_navigation("Control Room", "Action Center", context={"action_id": _aid})
             # D1: the top three, by WHAT? Severity first, dollars only as a tiebreak
             # inside a band — without this line a reader takes a $-annotated list for
             # a $-ordered one and asks why the biggest number is not on top.
-            st.caption("Top 3 by severity, then overdue, then estimated $, then age.")
+            st.caption("Top 3 by severity, then overdue, then estimated $, then age. "
+                       "Click one to open it in the Action Center.")
+        # UNCAPPED-AGGREGATE: counts from the LIMIT-100 feed are labelled when it hit its cap.
+        _cap = len(actions.df) >= 100
+        _mc = my_queue_counts(actions.df, viewer_name())
+        if _mc["mine"]:
+            st.caption(f"You own {_mc['mine']} open item{'s' if _mc['mine'] != 1 else ''}"
+                       + (f", {_mc['mine_overdue']} overdue" if _mc["mine_overdue"] else "")
+                       + (" (among the 100 highest-severity open items)" if _cap else "") + ".")
+        n_def, next_resume = deferred_summary(actions.df, account_now())
+        if n_def:
+            st.caption(f"Deferred ({n_def}): parked, not in the top 3; next resumes {next_resume}.")
     else:
         if actions.ok:
             empty_state("clean", "Action queue is empty.")

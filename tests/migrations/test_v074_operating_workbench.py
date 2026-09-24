@@ -201,8 +201,9 @@ def test_action_summary_uses_real_non_empty_shape(monkeypatch: pytest.MonkeyPatc
         "open": 3.0,
         "critical_high": 2.0,
         "overdue": 1.0,
-        "unassigned": 2.0,
+        "unassigned": 3.0,      # Next-Fifty #20: row b's 'DBA' is a team placeholder -> Unassigned
         "estimated_usd": 200.0,
+        "deferred": 0.0,
     }
 
 

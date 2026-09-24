@@ -15,8 +15,9 @@ from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
 from app.data import cost_sql, mart27_sql, mart_sql
+from app.logic import contract_planner
 from app.logic.directory import resolve_display
-from app.logic.formulas import format_usd, humanize_duration, md_dollars, safe_float
+from app.logic.formulas import contract_runway, format_usd, humanize_duration, md_dollars, safe_float
 from app.logic.verdict import Signal, page_verdict
 from app.ui.components import (
     alarm_health,
@@ -49,7 +50,7 @@ from app.ui.pages.cost_parts.ai_chargeback import (  # noqa: E402
     _chargeback_tab,
     _cortex_spend_tab,
 )
-from app.ui.pages.cost_parts.contract import _contract_tab  # noqa: E402
+from app.ui.pages.cost_parts.contract import _contract_tab, org_balance_result  # noqa: E402
 from app.ui.pages.cost_parts.optimize import _optimization_tab, _savings_tab  # noqa: E402
 from app.ui.pages.cost_parts.spend import (  # noqa: E402,F401
     _attribution_tab,
@@ -126,18 +127,24 @@ def render() -> None:
     # forward-looking cost signal; a cheap recent-tier (cached, mart-first) read.
     _exh = run(mart_sql.contract_exhaustion(), page=_PAGE, key="cost_verdict_exhaustion",
                tier="recent", source="SETTINGS + FACT_METERING_DAILY")
+    # Next-Fifty #19: billing-balance runway when readable (one shared org read), else credits.
+    _bal = org_balance_result(_PAGE)
+    _best = contract_planner.best_runway(
+        _bal.df if (_bal is not None and _bal.usable()) else None,
+        contract_runway(_exh.df.iloc[0]) if _exh.usable() else None)
     _vsig = []
-    if not _exh.usable():
+    if _best is not None:
+        _dl = _best["days_left"]
+        _b = "billing balance" if _best["basis"] == "balance" else "configured credits"
+        if 0 <= _dl <= 30:
+            _vsig.append(Signal("bad", f"contract runway {_dl:,.0f} days at current burn ({_b})"))
+        elif 0 <= _dl <= 90:
+            _vsig.append(Signal("warn", f"contract runway {_dl:,.0f} days at current burn ({_b})"))
+    elif not _exh.usable():
         # A failed runway read must NOT read as green "contract on track" — that is a
         # positive claim on missing data (the false-all-clear class the sibling pages
         # guard). Surface Watch instead. (bug-hunt round 5)
         _vsig.append(Signal("warn", "contract runway unavailable — telemetry not read"))
-    elif safe_float(_exh.df.iloc[0].get("TOTAL")) > 0:
-        _dl = safe_float(_exh.df.iloc[0].get("DAYS_LEFT"), -1.0)
-        if 0 <= _dl <= 30:
-            _vsig.append(Signal("bad", f"contract runway {_dl:,.0f} days at current burn"))
-        elif 0 <= _dl <= 90:
-            _vsig.append(Signal("warn", f"contract runway {_dl:,.0f} days at current burn"))
     page_verdict_line(page_verdict(
         _vsig, healthy="contract on track at the current burn — open a section for detail"))
     # Cost3/C18: the "what changed since your last visit" opener, now the shared

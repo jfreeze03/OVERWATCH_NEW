@@ -85,6 +85,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("security.single_factor_logins", lambda: security_sql.single_factor_logins(30, "ALFA")),
     ("security.recent_role_grants", lambda: security_sql.recent_role_grants(1)),
     ("security.admin_role_holders", security_sql.admin_role_holders),
+    ("security.user_auth_inventory", lambda: security_sql.user_auth_inventory("ALFA")),
+    ("security.service_users", security_sql.service_users),
     ("security.recent_ddl_changes", lambda: security_sql.recent_ddl_changes(1, "ALFA")),
     ("security.expiring_credentials", lambda: security_sql.expiring_credentials(10, "ALFA")),
     ("security.client_drivers", lambda: security_sql.client_drivers(30, "ALFA")),
@@ -254,6 +256,7 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("insights.expensive_queries_usd", lambda: insights_sql.expensive_queries_usd(1, "ALFA", 5)),
     ("mart.rule_precision", lambda: mart_sql.rule_precision(7)),
     ("mart.mart_vs_live_recon", mart_sql.mart_vs_live_recon),
+    ("cortex.mart_vs_live_ai_recon", mart_sql.mart_vs_live_ai_recon),
     ("mart.fleet_query_stats", lambda: mart_sql.fleet_query_stats(2)),
     ("mart.rule_metric_kinds", lambda: mart_sql.rule_metric_kinds(7)),
     ("mart.score_inputs_daily", lambda: mart_sql.score_inputs_daily(7)),
@@ -303,4 +306,5 @@ EXPECTED_GAPS: frozenset[str] = frozenset({
     "cortex.ai_functions_daily",
     "cortex.model_costs",
     "cortex.source_costs",
+    "cortex.mart_vs_live_ai_recon",   # reads the subscription-gated CORTEX_CODE_* views
 })
