@@ -88,7 +88,7 @@ def record_error(page: str, error: BaseException, context: str = "") -> str:
         pass  # session not available (import-time failure); nothing else to do
 
     try:  # best-effort off-box sink; never blocks or raises into the UI
-        from app.core.session import get_cached_session
+        from app.core.session import get_cached_session, statement_params, submit_collect
         from app.core.sqlsafe import sql_literal
 
         session = get_cached_session()
@@ -100,12 +100,14 @@ def record_error(page: str, error: BaseException, context: str = "") -> str:
                 f"{sql_literal(entry['message'])}, {sql_literal(entry['context'])}, "
                 "CURRENT_ROLE())"
             )
+            # Next-Fifty #7 Slice B: the sink's INSERT is the app's own statement too — tag it.
+            params = statement_params(session, page=entry["page"], tier="write")
             try:
                 # Async: an error path should not pay a SECOND blocking round
                 # trip just to log the first failure.
-                statement.collect_nowait()
+                submit_collect(session, statement, params, nowait=True)
             except AttributeError:  # older Snowpark: no async API
-                statement.collect()
+                submit_collect(session, statement, params)
     except Exception:
         pass  # the ring buffer above still has it; Admin page shows it
     return ref

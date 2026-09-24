@@ -19,6 +19,13 @@ _TIMEOUT_ATTR = "_ow_stmt_timeout"
 _ALTER_SUPPORT_ATTR = "_ow_alter_session_supported"  # None unknown / True / False
 _SIS_ATTR = "_ow_is_sis"
 _TAG_MAX = 200
+_PARAMS_ATTR = "_ow_stmt_params_ok"  # False once this Snowpark rejects statement_params
+# Next-Fifty #7 Slice B: tiers whose per-tier STATEMENT_TIMEOUT_IN_SECONDS also rides statement_params
+# on SiS. The owner probe (2026-09-24) proved an owner's-rights statement honors it, but the READ
+# tiers' 30/120/180s ceilings have never been enforced in production (the real wall is the 300s
+# warehouse default), so they stay off until the now-tagged per-tier durations are measured. Cortex's
+# 90s ceiling is the documented intent for an explicit, spinner-backed button (core.ai).
+STATEMENT_PARAMS_TIMEOUT_TIERS: frozenset[str] = frozenset({"cortex"})
 
 
 def _sanitize_tag_part(value: object, max_len: int = 60) -> str:
@@ -35,6 +42,54 @@ def build_query_tag(page: str = "", tier: str = "") -> str:
     return "|".join(parts)[:_TAG_MAX]
 
 
+def statement_params(session, *, page: str, tier: str, timeout_s: int | None = None) -> dict[str, str] | None:
+    """Per-statement QUERY_TAG for owner's-rights SiS, where ALTER SESSION is rejected (Next-Fifty #7
+    Slice B). Rides the statement's own request - no extra statement, unlike the per-query ALTER SESSION
+    that was declined. The owner probe (2026-09-24) proved an owner's-rights statement records it.
+    Off-SiS returns None: the ALTER SESSION path already tags there, and test fakes stay untouched.
+    STATEMENT_TIMEOUT_IN_SECONDS is added only for STATEMENT_PARAMS_TIMEOUT_TIERS."""
+    if session is None or not getattr(session, _SIS_ATTR, False) or getattr(session, _PARAMS_ATTR, None) is False:
+        return None
+    params = {"QUERY_TAG": build_query_tag(page=page, tier=tier)}
+    if timeout_s and tier in STATEMENT_PARAMS_TIMEOUT_TIERS:
+        params["STATEMENT_TIMEOUT_IN_SECONDS"] = str(max(10, min(int(timeout_s), 900)))
+    return params
+
+
+def _params_rejected(session, exc: Exception) -> bool:
+    """A Snowpark too old for statement_params raises TypeError naming it at SUBMIT (nothing ran yet):
+    remember that on the session (one rejection, not one per query) so the caller resubmits untagged.
+    Any other TypeError is a real failure and propagates."""
+    if isinstance(exc, TypeError) and "statement_params" in str(exc):
+        setattr(session, _PARAMS_ATTR, False)
+        return True
+    return False
+
+
+def submit_pandas(session, statement, params: dict[str, str] | None, **kwargs):
+    """statement.to_pandas(**kwargs), carrying statement_params when there are any."""
+    if params:
+        try:
+            return statement.to_pandas(statement_params=params, **kwargs)
+        except TypeError as exc:
+            if not _params_rejected(session, exc):
+                raise
+    return statement.to_pandas(**kwargs)
+
+
+def submit_collect(session, statement, params: dict[str, str] | None, *, nowait: bool = False):
+    """statement.collect() / collect_nowait(), carrying statement_params when there are any. A missing
+    collect_nowait (older Snowpark) still raises AttributeError for the caller's blocking fallback."""
+    submit = statement.collect_nowait if nowait else statement.collect
+    if params:
+        try:
+            return submit(statement_params=params)
+        except TypeError as exc:
+            if not _params_rejected(session, exc):
+                raise
+    return submit()
+
+
 @st.cache_resource(show_spinner=False)
 def _connect():
     """One Snowpark session per server process/user context."""
@@ -47,8 +102,10 @@ def _connect():
         # front so we never spray failed statements into QUERY_HISTORY.
         # Consequence (#31): the per-tier STATEMENT_TIMEOUT the app tries to set
         # via apply_statement_timeout() cannot take effect here — the warehouse/
-        # account STATEMENT_TIMEOUT_IN_SECONDS (300s default) is the only ceiling
-        # in production. See apply_statement_timeout() for the owner action.
+        # account STATEMENT_TIMEOUT_IN_SECONDS (300s default) is the ceiling in
+        # production. Next-Fifty #7 Slice B: the QUERY_TAG (and, for the tiers in
+        # STATEMENT_PARAMS_TIMEOUT_TIERS, the timeout) now ride each statement via
+        # statement_params() instead.
         setattr(session, _SIS_ATTR, True)
         setattr(session, _ALTER_SUPPORT_ATTR, False)
         return session
@@ -159,7 +216,9 @@ def apply_statement_timeout(session, seconds: int) -> None:
     the app warehouse (or account). Follow-up: a QUERY_HISTORY monitor on long
     app-tagged queries (the APP_QUERY_TAG_PREFIX QUERY_TAG) to catch anything
     approaching that 300s wall. This call still does real work OFF-SiS (local dev,
-    tests) where ALTER SESSION is accepted.
+    tests) where ALTER SESSION is accepted. Next-Fifty #7 Slice B: on SiS the timeout can
+    ride the statement itself (statement_params) — enabled per tier in
+    STATEMENT_PARAMS_TIMEOUT_TIERS once that tier's tagged durations are measured.
     """
     if not alter_session_supported(session):
         return
@@ -181,7 +240,9 @@ def current_role() -> str:
     if cached is not None:
         return str(cached)
     try:
-        rows = get_session().sql("SELECT CURRENT_ROLE() AS R, CURRENT_USER() AS U").collect()
+        _s = get_session()
+        rows = submit_collect(_s, _s.sql("SELECT CURRENT_ROLE() AS R, CURRENT_USER() AS U"),
+                              statement_params(_s, page="session", tier="metadata"))
         role = str(rows[0]["R"] or "").upper() if rows else ""
         user = str(rows[0]["U"] or "").upper() if rows else ""
     except Exception:

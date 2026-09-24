@@ -1,5 +1,34 @@
 # Changelog
 
+## 4.590.0 - Next Fifty — #7 Slice B: per-statement query tags (2026-09-24)
+
+- Every statement the app runs on Streamlit-in-Snowflake now carries its own QUERY_TAG
+  (`OVERWATCH|page=…|tier=…`) through Snowpark `statement_params`. Owner's-rights SiS rejects ALTER SESSION,
+  so the session-level tag never applied in production. The owner probe (2026-09-24, an owner's-rights proc
+  as the SiS proxy) proved the tag is recorded and a per-statement timeout is honored. Covered seams: cached
+  reads (`_execute`), batches (`_execute_batch`; a mixed-tier batch tags `tier=mixed`), writes
+  (`execute_statement`, the async telemetry/usage flushes, `execute_action`, `execute_cancel_query`), Cortex
+  (`cortex_complete`), the error sink and the role probe. No extra statements: the tag rides each request. An
+  older Snowpark that rejects the argument is remembered on the session, and statements resubmit untagged.
+- Per-statement timeout: on for Cortex only (its documented 90s ceiling, never enforced in production
+  before). The read tiers' 30/120/180s ceilings stay off. They were never enforced on SiS (the 300s warehouse
+  default is the real wall), so turning them on blind could cancel reads that succeed today.
+  `STATEMENT_PARAMS_TIMEOUT_TIERS` extends it tier by tier once the post-deploy check measures tagged durations.
+- Admin > App self-cost: the note says the app tags each statement since v4.590.0. The non-app side of the
+  shared-warehouse split is renamed `TASKS / ALERTS / OTHER`: the loader tasks, the email alerts, ad-hoc use,
+  and the app's own untagged reads from before this release while they are still inside the trailing window.
+- New toggle-gated card: the app's own Cortex AI cost by page (CORTEX_AI_FUNCTIONS_USAGE_HISTORY joined to
+  the tagged QUERY_HISTORY rows, priced at the AI rate, probe-gated, '—' when there is none).
+- Intended side effects: the app's own statements now drop out of every self-noise-filtered view (query
+  triage and fingerprints, proc SLA and regression, chatter, repeat queries, V147 operator stats), and the
+  tag-coverage metrics count them as tagged.
+
+Owner-side: after `snow streamlit deploy --replace`, use the app for a few minutes, then run
+`snowflake/run/POSTDEPLOY_7B_CHECK.sql` from runbox about an hour later (ACCOUNT_USAGE lag). It confirms that
+production statements carry the tag and shows per-tier durations, the evidence for turning on more timeouts.
+
+4-pin version bump 4.589.0 → 4.590.0 + CHANGELOG.
+
 ## 4.589.0 - Next Fifty — wave 1b (ranks 1 / 5 / 9 / 19 / 20 / 21 / 25 / 7A / 4) (2026-09-24)
 
 Second slice of the "OVERWATCH Next Fifty" review's wave 1, stacked on 4.588.0. App-only (no numbered

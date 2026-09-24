@@ -903,16 +903,23 @@ LIMIT {limit}
 """
 
 
+# Next-Fifty #7 Slice B: the non-app side of the shared-warehouse split. Since v4.590.0 the app tags every
+# statement per statement, so this is the loader tasks, the native email alerts and any ad-hoc use of the
+# warehouse (plus the app's own UNTAGGED reads from before that release, inside a trailing window).
+APP_OTHER_WORKLOAD = "TASKS / ALERTS / OTHER"
+
+
 def app_self_cost(days: int) -> str:
     """What OVERWATCH itself spends on the shared warehouse, split by tag/marker (common.app_self_sql):
-    owner's-rights SiS cannot tag via ALTER SESSION, so untagged app reads land in 'TASKS + UNTAGGED APP'."""
+    INTERACTIVE APP = the app's per-statement tagged reads (v4.590.0+); everything else is
+    APP_OTHER_WORKLOAD."""
     from app.config import APP_WAREHOUSE
 
     days = bounded_days(days, maximum=30)
     return f"""
 SELECT
     DATE(START_TIME) AS DAY,
-    IFF({app_self_sql()}, 'INTERACTIVE APP', 'TASKS + UNTAGGED APP') AS WORKLOAD,
+    IFF({app_self_sql()}, 'INTERACTIVE APP', '{APP_OTHER_WORKLOAD}') AS WORKLOAD,
     COUNT(*) AS APP_QUERIES,
     SUM(TOTAL_ELAPSED_TIME) / 1000.0 AS ELAPSED_SEC,
     SUM(IFF(EXECUTION_STATUS <> 'SUCCESS', 1, 0)) AS FAILED
@@ -958,6 +965,35 @@ LIMIT 500
 """
 
 
+def app_cortex_self_cost(days: int = 30) -> str:
+    """Next-Fifty #7 Slice B: the app's OWN Cortex AI spend, by page. CORTEX_AI_FUNCTIONS_USAGE_HISTORY
+    rows (plain SUM(CREDITS) per QUERY_ID - no METRICS fan-out here) joined to the QUERY_HISTORY rows the
+    app tagged per statement. Tag-only (text=False): the join never reads QUERY_TEXT. Counts only
+    statements from releases that tag (v4.590.0+). Window totals via SUM() OVER () so the headline is
+    never derived from the capped page rows. Priced at the AI credit rate in the page, never in SQL."""
+    days = bounded_days(days, 30)
+    return f"""
+WITH ai AS (
+    SELECT F.QUERY_ID, SUM(COALESCE(F.CREDITS, 0)) AS AI_CREDITS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY F
+    WHERE F.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+    GROUP BY F.QUERY_ID
+)
+SELECT COALESCE(REGEXP_SUBSTR(Q.QUERY_TAG, 'page=([^|]+)', 1, 1, 'e'), 'unknown') AS PAGE,
+       COUNT(*) AS REQUESTS,
+       ROUND(SUM(ai.AI_CREDITS), 6) AS AI_CREDITS,
+       SUM(COUNT(*)) OVER () AS TOTAL_REQUESTS,
+       ROUND(SUM(SUM(ai.AI_CREDITS)) OVER (), 6) AS TOTAL_AI_CREDITS
+FROM ai
+JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY Q ON Q.QUERY_ID = ai.QUERY_ID
+WHERE Q.START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())
+  AND {app_self_sql('Q', text=False)}
+GROUP BY 1
+ORDER BY AI_CREDITS DESC
+LIMIT 50
+"""
+
+
 def app_warehouse_queue_by_hour(days: int = 14) -> str:
     """p95 QUEUED_OVERLOAD_TIME on the shared app warehouse by Central hour-of-day, split
     app vs tasks by the shared marker - the data behind 'is staggering the 06:30-07:20
@@ -968,7 +1004,7 @@ def app_warehouse_queue_by_hour(days: int = 14) -> str:
     return f"""
 SELECT
     HOUR(CONVERT_TIMEZONE('{ACCOUNT_TIMEZONE}', START_TIME)) AS HOUR_OF_DAY,
-    IFF({app_self_sql()}, 'INTERACTIVE APP', 'TASKS + UNTAGGED APP') AS WORKLOAD,
+    IFF({app_self_sql()}, 'INTERACTIVE APP', '{APP_OTHER_WORKLOAD}') AS WORKLOAD,
     COUNT(*) AS QUERIES,
     COUNT_IF(COALESCE(QUEUED_OVERLOAD_TIME, 0) > 0) AS QUEUED_QUERIES,
     ROUND(APPROX_PERCENTILE(COALESCE(QUEUED_OVERLOAD_TIME, 0), 0.95) / 1000, 2) AS P95_QUEUED_OVERLOAD_SEC,
