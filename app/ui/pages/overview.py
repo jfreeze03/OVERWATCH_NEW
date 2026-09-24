@@ -1212,7 +1212,7 @@ def render() -> None:
         row = digest.df.iloc[0]
         with st.expander(f"Morning AI digest — {row.get('DIGEST_DATE')} ({row.get('MODEL')})",
                          expanded=False):
-            st.markdown(str(row.get("BODY") or ""))
+            st.markdown(md_dollars(str(row.get("BODY") or "")))
             # KEPT: "Account-wide narrative — does not change with the company filter" is a
             # scope caveat (parity with the kept whole-account contract note) — stays visible.
             st.caption("Written daily by TASK_DAILY_DIGEST from exec-board facts and alert counts "

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from app.config import SAVINGS_ACTIVE_MONTHS
 from app.logic.formulas import account_now, safe_float
 
 SEVERITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
@@ -124,15 +125,19 @@ def can_verify(row: dict) -> tuple[bool, str]:
     return True, ""
 
 
-def ledger_totals(df: pd.DataFrame) -> dict:
+def ledger_totals(df: pd.DataFrame, active_months: int = SAVINGS_ACTIVE_MONTHS) -> dict:
     """Estimated vs verified totals (never mixed), plus the realization story — the
     verified dollars as a share of what those verified items were originally estimated
     to save (Cost #9), how much was verified THIS QUARTER, and the average time from
     booking to verification (DS #40/#31/#19, the ROI/track-record the ledger already
-    holds). realization_pct / avg_days_to_verify are None until something is verified."""
+    holds). realization_pct / avg_days_to_verify are None until something is verified.
+
+    verified_active_usd (Next-Fifty #3) mirrors mart_sql.savings_summary_quarter's
+    VERIFIED_ACTIVE_MONTHLY_USD: the monthly run-rate of every item VERIFIED in the last
+    ``active_months`` months — the ROI numerator, which does not reset when a quarter starts."""
     empty = {"estimated_usd": 0.0, "verified_usd": 0.0, "estimated_count": 0,
              "verified_count": 0, "verified_estimated_usd": 0.0, "realization_pct": None,
-             "verified_qtd_usd": 0.0, "avg_days_to_verify": None}
+             "verified_qtd_usd": 0.0, "verified_active_usd": 0.0, "avg_days_to_verify": None}
     if df is None or df.empty or "STATE" not in df.columns:
         return empty
     view = df.copy()
@@ -162,6 +167,9 @@ def ledger_totals(df: pd.DataFrame) -> dict:
     now = pd.Timestamp(account_now())
     q_start = pd.Timestamp(year=now.year, month=((now.month - 1) // 3) * 3 + 1, day=1)
     qtd = float(ver_usd_col[verified_at >= q_start].sum())
+    # Same anchor as the SQL builder: account-today at midnight minus N months.
+    a_start = now.normalize() - pd.DateOffset(months=int(active_months))
+    active = float(ver_usd_col[verified_at >= a_start].sum())
     days = (verified_at - created_at).dt.total_seconds() / 86400.0
     days = days[days.notna() & (days >= 0)]
     avg_days = round(float(days.mean()), 1) if not days.empty else None
@@ -179,13 +187,15 @@ def ledger_totals(df: pd.DataFrame) -> dict:
         "realized_estimated_usd": round(_real_den, 2),
         "realization_pct": realization,
         "verified_qtd_usd": round(qtd, 2),
+        "verified_active_usd": round(active, 2),
         "avg_days_to_verify": avg_days,
     }
 
 
 def savings_by_month(df: pd.DataFrame, months: int = 12) -> pd.DataFrame:
-    """Verified savings per calendar month (the run-rate the ROI story needs) —
-    VERIFIED items only, bucketed by VERIFIED_AT, most recent ``months`` months,
+    """Newly verified savings per calendar month — the monthly run-rate ADDED that month (each
+    VERIFIED_USD is a recurring monthly saving; the ACTIVE run-rate is the trailing-12-month sum,
+    ``ledger_totals``' verified_active_usd). VERIFIED items only, bucketed by VERIFIED_AT, most recent ``months`` months,
     oldest-first for a time-ordered chart. Columns MONTH (YYYY-MM), VERIFIED_USD.
     Empty in, empty out."""
     cols = ["MONTH", "VERIFIED_USD"]

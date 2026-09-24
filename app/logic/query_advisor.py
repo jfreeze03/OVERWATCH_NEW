@@ -41,11 +41,14 @@ ZERO_RESULT_MIN_GB = 10.0        # scanned a lot and produced nothing
 # pathology is TYPICAL (>= this share of runs), not when one storm run inflated the AVG ratio.
 FINGERPRINT_QUEUE_TYPICAL_SHARE = 0.5
 FINGERPRINT_COMPILE_TYPICAL_SHARE = 0.5
+# Next-Fifty #17: a queued fingerprint is named a cold start (or overload) only when that component
+# dominated at least this share of its meaningfully-queued runs; a mixed fingerprint keeps the hedge.
+FINGERPRINT_SPLIT_DOMINANT_SHARE = 0.6
 
 # --- per-driver score weights + caps (a query maxes at 100) -----------------
 # base points + a size-scaled bonus, each capped so one axis can't dominate.
 _CAP = {"remote_spill": 55, "poor_pruning": 30, "cold_scan": 25,
-        "compile_bound": 20, "metadata_chatter": 18, "queued": 15,
+        "compile_bound": 20, "metadata_chatter": 18, "queued": 15, "cold_start": 15,
         "local_spill": 12, "zero_result": 12}
 
 
@@ -196,15 +199,55 @@ def advise(row: Mapping[str, object], *,
 
     # 6) queued — on the fingerprint grain, only when queueing is TYPICAL (not one storm run
     #    inflating AVG(queued) past the ratio gate). queued_run_pct < 0 = per-query grain.
+    #    Next-Fifty #17: when the overload/provisioning split is known, name the DOMINANT component —
+    #    a resume (provisioning) wait is a cold start that a bigger warehouse does not fix. Points stay on
+    #    the combined wait, so QOP/SQL_QOP/OOS and the ranking are byte-stable; only the label + fix move.
+    over_sec = _f(row, "QUEUED_OVERLOAD_SEC", -1.0)
+    prov_sec = _f(row, "QUEUED_PROVISIONING_SEC", -1.0)
+    split_known = over_sec >= 0 and prov_sec >= 0
+    # Which component to name. On the fingerprint grain the AVGs are time-weighted (one overload storm
+    # outweighs ninety cold starts), so decide from the per-run dominance shares when the builder
+    # supplies them, and name a cause only when it dominates most queued runs; else keep the hedged
+    # wording. Per-QUERY grain (no shares): the two components are that run's real values.
+    prov_runs = _f(row, "PROVISIONING_QUEUED_RUN_PCT", -1.0)
+    over_runs = _f(row, "OVERLOAD_QUEUED_RUN_PCT", -1.0)
+    wait_cause: str | None = None
+    if split_known and prov_runs >= 0 and over_runs >= 0 and (prov_runs + over_runs) > 0:
+        prov_share = prov_runs / (prov_runs + over_runs)
+        if prov_share >= FINGERPRINT_SPLIT_DOMINANT_SHARE:
+            wait_cause = "provisioning"
+        elif 1.0 - prov_share >= FINGERPRINT_SPLIT_DOMINANT_SHARE:
+            wait_cause = "overload"
+    elif split_known:
+        wait_cause = "provisioning" if prov_sec > over_sec else "overload"
     if (queued_sec >= QUEUE_MIN_SEC and elapsed > 0 and safe_div(queued_sec, elapsed) > QUEUE_FRACTION
             and (queued_run_pct < 0 or queued_run_pct >= FINGERPRINT_QUEUE_TYPICAL_SHARE)):
         pts = _cap(8 + queued_sec, _CAP["queued"])
-        findings.append(Finding(
-            "queued", "warn", "Queued",
-            f"Spent {queued_sec:.0f}s queued (of {elapsed:.1f}s total) — either "
-            "concurrency (add a cluster or size up for parallelism) or warehouse "
-            "resume overhead (lengthen AUTO_SUSPEND / keep it warm).",
-            pts))
+        if wait_cause == "provisioning":
+            findings.append(Finding(
+                "cold_start", "warn", "Cold-start wait",
+                f"Waited {queued_sec:.0f}s (of {elapsed:.1f}s total), {prov_sec:.0f}s of it PROVISIONING — "
+                "the warehouse was resuming from suspend, not overloaded. A bigger warehouse won't help "
+                "(each size step doubles the per-second rate). If the wait matters, keep it warm across "
+                "this query's schedule (co-schedule it with other work on the warehouse, or lengthen "
+                "AUTO_SUSPEND just enough to span the gap between runs — that costs idle credits); "
+                "otherwise accept the resume latency.",
+                pts))
+        elif wait_cause == "overload":
+            findings.append(Finding(
+                "queued", "warn", "Queued",
+                f"Spent {queued_sec:.0f}s queued (of {elapsed:.1f}s total), {over_sec:.0f}s of it OVERLOAD — "
+                "the warehouse was saturated. A concurrency problem, not bad SQL: raise MAX_CLUSTER_COUNT "
+                "(multi-cluster) or move this workload to its own warehouse; size up only if single "
+                "queries are also slow or spilling.",
+                pts))
+        else:  # split unknown (older row shape) or no dominant cause: the original combined wording
+            findings.append(Finding(
+                "queued", "warn", "Queued",
+                f"Spent {queued_sec:.0f}s queued (of {elapsed:.1f}s total) — either "
+                "concurrency (add a cluster or size up for parallelism) or warehouse "
+                "resume overhead (lengthen AUTO_SUSPEND / keep it warm).",
+                pts))
 
     # 7) zero-result-expensive — on the fingerprint grain, only when NO run ever returned rows
     #    (AVG(rows) can round to 0 while a minority of runs do return rows). max_rows < 0 = per-query.

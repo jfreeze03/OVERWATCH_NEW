@@ -913,12 +913,16 @@ def run_cost_attribution_scan(
 # the SAME cycle. All deadline / margin / trend math is Python (the clock times never touch SQL);
 # this builder is config-driven only by the two anchor WORKFLOW NAMES (escaped literals — data).
 SLA_BASELINE_RUNS = 14      # ~2 weeks of nightly cycles to fit the margin trend
+# Next-Fifty #18: nights RETURNED — the forecaster fits only the newest SLA_BASELINE_RUNS; the older
+# nights size the month/quarter-end history. > one quarter (~91 nights) so a quarter-end night is
+# always sized from a PREVIOUS quarter-end. days=0 already scans every row, so no extra scan.
+SLA_HISTORY_NIGHTS = 100
 MAX_SLA_NIGHTS = 400        # recent cycles cap (one night per row; bounded)
 
 
 def cycle_finish_history_scan(
     control_fqn: object, *, start_workflow: object, end_workflow: object,
-    baseline_runs: int = SLA_BASELINE_RUNS, days: object = 0, max_rows: int = MAX_SLA_NIGHTS,
+    baseline_runs: int = SLA_HISTORY_NIGHTS, days: object = 0, max_rows: int = MAX_SLA_NIGHTS,
 ) -> str:
     """One row per NIGHT: the nightly cycle's clock envelope (CYCLE_START, CYCLE_FINISH) + health.
 

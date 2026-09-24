@@ -233,6 +233,11 @@ _SIZE_ALIASES = {"X-SMALL": "XSMALL", "XS": "XSMALL", "S": "SMALL", "M": "MEDIUM
 
 
 def normalize_size(size: object) -> str:
+    try:
+        if pd.isna(size):          # None / NaN / pd.NA -> unknown (`pd.NA or ""` would raise)
+            return ""
+    except (TypeError, ValueError):   # list-likes etc. — fall through to the string path
+        pass
     text = str(size or "").strip().upper().replace("_", "-")
     text = _SIZE_ALIASES.get(text, text.replace("-", ""))
     return text if text in SIZE_ORDER else ""

@@ -450,16 +450,19 @@ _FETCHERS = {
 
 # r27 #14: writes to app tables invalidate only their domain; anything we
 # can't classify (ALTER WAREHOUSE, CALLs into loader procs) still bumps the
-# global salt — conservative, never stale.
+# global salt — conservative, never stale. Next-Fifty #22: action-proc CALLs now resolve
+# through _PROC_DOMAINS below (unmapped CALLs, loaders, scans and ALTERs still bump global).
+# A VIEW the app reads over a domain table must carry the view name in that domain (enforced
+# by tests/test_proc_domain_invalidation.py::test_app_read_views_carry_their_base_domains).
 _DOMAIN_TOKENS = {
-    "alerts": ("ALERT_EVENTS", "ALERT_AUDIT", "ALERT_CONFIG", "ALERT_ROUTES"),
+    "alerts": ("ALERT_EVENTS", "ALERT_AUDIT", "ALERT_CONFIG", "ALERT_ROUTES", "INCIDENT_PROPOSALS"),
     "settings": ("OVERWATCH.SETTINGS",),
     "prefs": ("USER_PREFS",),
     "budgets": ("DEPT_BUDGETS",),
     "ledger": ("SAVINGS_LEDGER",),
-    "queue": ("ACTION_QUEUE", "ACTION_ACTIVITY"),
+    "queue": ("ACTION_QUEUE", "ACTION_ACTIVITY", "V_SECURITY_EXCEPTION_QUEUE"),
     "remediation": ("REMEDIATION_LOG",),
-    "incidents": ("OVERWATCH.INCIDENTS", "INCIDENT_MEMBERS"),
+    "incidents": ("OVERWATCH.INCIDENTS", "INCIDENT_MEMBERS", "INCIDENT_PROPOSALS"),
     "mappings": ("DEPARTMENT_MAP", "ENTITY_CATALOG"),   # codex#45: the table is DEPARTMENT_MAP (was 'DEPT_MAPPING', which matched nothing -> every mapping write fell through to a global cache bump)
     "evidence": ("EVIDENCE_LINKS",),
     "watchlist": ("USER_WATCHLIST",),
@@ -473,10 +476,41 @@ def _domains_in(sql: str) -> list[str]:
     return [d for d, toks in _DOMAIN_TOKENS.items() if any(tok in up for tok in toks)]
 
 
+# Next-Fifty #22: action-proc CALLs name no table, so _domains_in() matched nothing and every
+# ack/resolve/snooze/lifecycle click bumped the GLOBAL salt (cold-starting every cached read,
+# 1h ACCOUNT_USAGE reads included). Each proc the app CALLs maps to the domains of its DML
+# targets in its LATEST defining migration; tests/test_proc_domain_invalidation.py re-derives
+# them and fails on drift or on an unmapped CALL. Scans/loaders stay GLOBAL (broad writes).
+_GLOBAL_BUMP: tuple[str, ...] = ("GLOBAL",)
+_PROC_DOMAINS: dict[str, tuple[str, ...]] = {
+    "SP_ALERT_LIFECYCLE": ("alerts",),                           # V051: ALERT_AUDIT, ALERT_EVENTS (+OW_ACTION_INTENTS: no app read)
+    "SP_ALERT_SNOOZE": ("alerts",),                              # V086: same targets
+    "SP_ALERT_CLEAR_SCOPE": ("alerts",),                         # V116: same targets
+    "SP_INCIDENT_DECLARE": ("incidents",),                       # V131: INCIDENTS, INCIDENT_MEMBERS
+    "SP_ACTION_LIFECYCLE": ("queue",),                           # V092: ACTION_QUEUE, ACTION_ACTIVITY
+    "SP_VERIFY_EXPERIMENT": ("experiments", "ledger", "queue"),  # V130: OPTIMIZATION_EXPERIMENTS, SAVINGS_LEDGER, ACTION_QUEUE, ACTION_ACTIVITY
+    "SP_CHANGE_IMPACT_SCAN": _GLOBAL_BUMP,                       # V140 scan
+    "SP_WAREHOUSE_CHANGE_SCAN": _GLOBAL_BUMP,                    # V109 scan
+}
+_CALL_PROC_RE = re.compile(r'^\s*CALL\s+(?:[A-Za-z0-9_$"]+\.)*"?([A-Za-z0-9_$]+)"?\s*\(', re.IGNORECASE)
+
+
+def _proc_domains(sql: str) -> list[str] | None:
+    """Domains a CALL invalidates: None when ``sql`` is not a CALL (use the table-token path);
+    [] (= global bump) for a scan or an UNMAPPED proc — conservative, never stale. A CALL's
+    literal args are never token-scanned (a note mentioning USER_PREFS must not mis-scope)."""
+    m = _CALL_PROC_RE.match(str(sql or ""))
+    if not m:
+        return None
+    doms = _PROC_DOMAINS.get(m.group(1).upper(), _GLOBAL_BUMP)
+    return [] if doms == _GLOBAL_BUMP else list(doms)
+
+
 def _bump_refresh(sql: str) -> None:
     """Post-write invalidation: domain-scoped when the target is known."""
     stamp = datetime.now().isoformat()
-    doms = _domains_in(sql)
+    _pd = _proc_domains(sql)
+    doms = _pd if _pd is not None else _domains_in(sql)
     if doms:
         salts = st.session_state.setdefault("_ow_domain_salts", {})
         for d in doms:
@@ -513,7 +547,43 @@ _WRITE_PREFIXES = (
     "CALL DBA_MAINT_DB.OVERWATCH.",
 )
 
+# Next-Fifty #23: the owner-privileged subset of the allow-list. Every SiS viewer executes with
+# the app OWNER's rights, so ACCOUNT-object levers (and query cancel) must not depend on each call
+# site remembering is_operator(). DERIVED from _WRITE_PREFIXES, so any future ALTER lever is
+# privileged the moment it is allow-listed; OVERWATCH-table DML/CALLs stay open (prefs, watchlist,
+# comments, audit rows).
+_PRIVILEGED_PREFIXES: tuple[str, ...] = tuple(p for p in _WRITE_PREFIXES if p.startswith("ALTER "))
+_ENTITLEMENT_REFUSAL = ("operator entitlement required — this viewer is not on the in-app "
+                        "operator allowlist (OPERATOR_USERS).")
+
 _QUERY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _is_privileged(sql: str) -> bool:
+    body = str(sql or "").strip().rstrip(";").strip().upper()   # same normalization as _statement_allowed
+    return body.startswith(_PRIVILEGED_PREFIXES)
+
+
+def _entitlement_refusal(sql: str, *, page: str, seam: str, privileged: bool | None = None) -> str | None:
+    """None when the statement may run; else the refusal message, already audited to APP_ERROR_LOG.
+    Non-privileged statements never consult is_operator() (telemetry flushes stay free of an
+    identity/role probe). Fails CLOSED if the entitlement check itself raises."""
+    if not (_is_privileged(sql) if privileged is None else privileged):
+        return None
+    from app.core import session as _session  # module attribute lookup: one monkeypatch point
+    try:
+        if _session.is_operator():
+            return None
+    except Exception:  # an entitlement probe failure must refuse, never allow
+        pass
+    try:
+        from app.core.identity import viewer_name
+        who = viewer_name() or "?"
+    except Exception:  # the audit context is best-effort
+        who = "?"
+    record_error(page, PermissionError(_ENTITLEMENT_REFUSAL),
+                 context=f"{seam} refused (viewer={who}): {str(sql)[:200]}")
+    return _ENTITLEMENT_REFUSAL
 
 
 def _statement_allowed(sql: str) -> tuple[bool, str]:
@@ -1177,6 +1247,8 @@ def execute_statement_async(sql: str, *, page: str) -> bool:
     if not ok:
         record_error(page, RuntimeError(why), context=f"execute_statement_async blocked: {sql[:200]}")
         return False
+    if _entitlement_refusal(sql, page=page, seam="execute_statement_async"):
+        return False
     try:
         session = get_session()
         apply_query_tag(session, build_query_tag(page=page, tier="write"))
@@ -1287,6 +1359,9 @@ def execute_statement(sql: str, *, page: str) -> tuple[bool, str]:
     ok, why = _statement_allowed(sql)
     if not ok:
         return False, why
+    denied = _entitlement_refusal(sql, page=page, seam="execute_statement")
+    if denied:
+        return False, denied
     try:
         # C48: the in-flight state lives HERE, at the one seam every write
         # crosses — the initiating button freezes for the round-trip, and the
@@ -1317,6 +1392,10 @@ def execute_cancel_query(query_id: str, *, page: str) -> tuple[bool, str]:
     qid = str(query_id or "").strip()
     if not _QUERY_ID_RE.match(qid):
         return False, f"Invalid query id: {query_id!r}"
+    denied = _entitlement_refusal(f"SYSTEM$CANCEL_QUERY({qid})", page=page,
+                                  seam="execute_cancel_query", privileged=True)
+    if denied:
+        return False, denied
     from app.core.sqlsafe import sql_literal
     try:
         with st.spinner("Cancelling query…"):   # C48 in-flight state
@@ -1380,6 +1459,9 @@ def execute_action(call_sql: str, fallback: list[str], *, page: str) -> tuple[bo
     ok, why = _statement_allowed(call_sql)
     if not ok:
         return False, why
+    denied = _entitlement_refusal(call_sql, page=page, seam="execute_action")
+    if denied:
+        return False, denied
     try:
         with st.spinner("Executing action…"):   # C48 in-flight state
             session = get_session()

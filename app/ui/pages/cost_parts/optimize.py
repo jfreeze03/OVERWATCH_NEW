@@ -45,6 +45,7 @@ from app.logic.insights import (
     storage_movers,
     suspend_recluster_sql,
     with_auto_suspend_settings,
+    with_warehouse_settings,
 )
 from app.logic.monitors import (
     account_monitor,
@@ -568,25 +569,14 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             sizing_days = served_days(prof_res, days)
             _sizing_whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="jump_wh",
                               tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
-            _sizing_df = with_auto_suspend_settings(
+            # Round-3 hunt + r34 + Next-Fifty #16: ONE shared SHOW-WAREHOUSES mapping (auto-suspend +
+            # CURRENT_SIZE + cluster config) carried onto the profile BEFORE size_recommendations, so
+            # (a) a resize saving uses the operator's ACTUAL current size and (b) the recommender
+            # refuses a size-DOWN on a warehouse already at XSMALL — identically on Operations ▸ Sizing.
+            _sizing_df = with_warehouse_settings(
                 prof_res.df,
                 _sizing_whs.df if _sizing_whs.ok and not _sizing_whs.empty else pd.DataFrame(),
             )
-            # Round-3 hunt + r34: carry the current warehouse SIZE (SHOW WAREHOUSES, loaded
-            # above) onto the profile BEFORE size_recommendations, so (a) a resize saving is
-            # computed from the operator's ACTUAL current size and (b) the recommender can
-            # refuse a size-DOWN on a warehouse already at the smallest size (no target below
-            # XSMALL). size_recommendations copies the frame, so CURRENT_SIZE flows to `sized`.
-            if _sizing_whs.ok and not _sizing_whs.empty:
-                _wcols = {str(c).lower(): c for c in _sizing_whs.df.columns}
-                if "name" in _wcols and "size" in _wcols:
-                    _size_map = {
-                        str(n).strip().upper(): str(s)
-                        for n, s in zip(_sizing_whs.df[_wcols["name"]],
-                                        _sizing_whs.df[_wcols["size"]], strict=False)
-                    }
-                    _sizing_df["CURRENT_SIZE"] = (_sizing_df["WAREHOUSE_NAME"].astype(str)
-                                                  .str.strip().str.upper().map(_size_map))
             sized = size_recommendations(_sizing_df, rate, sizing_days)
             _sizing_profiles_tx = sized
             _savings_opps.extend(     # rec#16: right-sizing opportunities (overlaps idle per warehouse)
@@ -1903,8 +1893,12 @@ def _savings_tab() -> None:
                 options = {f"{r['DESCRIPTION'][:60]} ({r['ITEM_ID'][:8]})": r for _, r in estimated.iterrows()}
                 chosen = st.selectbox("Item", list(options), key="ledger_verify_pick")
                 row = options[chosen]
-                verified_usd = st.number_input("Verified USD (measured, post-period)",
-                                               min_value=0.0, step=50.0, key="ledger_verified_usd")
+                verified_usd = st.number_input(
+                    "Verified USD per month (measured, post-period)",
+                    min_value=0.0, step=50.0, key="ledger_verified_usd",
+                    help="The MONTHLY recurring saving measured after the change. The ROI multiple sums "
+                         "verified items as a monthly run-rate over the last 12 months — convert a "
+                         "total over the measured window to a monthly figure.")
                 check = {"STATE": row["STATE"], "PROOF_SQL": row["PROOF_SQL"], "VERIFIED_USD": verified_usd}
                 allowed, why = can_verify(check)
                 update_sql = (

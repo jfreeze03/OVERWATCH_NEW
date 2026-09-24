@@ -12,18 +12,18 @@ Revert: see the authoritative REVERT PATH in app/logic/ask/__init__.py (delete
 
 from __future__ import annotations
 
-import re
-
 import streamlit as st
 
+from app.core.ai import normalize_model
 from app.core.errors import safe_page
 from app.core.query import run, run_batch_mixed
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
+from app.logic.ai_grounding import numbers_preserved as _numbers_preserved  # moved (Next-Fifty #24)
 from app.logic.ask import REGISTRY, route
 from app.logic.ask.pricing import add_usd_estimates, is_ai_credit_column
 from app.logic.ask.types import AnswerResult, AskParams
-from app.logic.formulas import safe_float
+from app.logic.formulas import md_dollars, safe_float
 from app.ui.components import load_settings, page_header, styled_table
 
 _PAGE = "Ask"
@@ -54,29 +54,6 @@ def _test_cases() -> list[str]:
     return cases
 
 
-_NUM_RE = re.compile(r"\d[\d,]*\.?\d*")
-_PCT_RE = re.compile(r"(\d[\d,]*\.?\d*)\s*%")
-
-
-def _numbers_preserved(grounded: str, phrased: str) -> bool:
-    """Enforce the 'grounded numbers unchanged' promise: every numeric token in the AI
-    phrasing must already appear in the grounded finding. The prompt TELLS the model not to
-    change numbers, but nothing made it true — a drifted figure would render under a caption
-    claiming the numbers are unchanged. Thousands-commas are normalized so '1,234' == '1234'.
-
-    ASK-G1: also bind PERCENTAGES to their role. The flat set alone let a bare number in
-    one role license the same digits as a percentage in another — e.g. the window '30d'
-    licensed a wrong '30%' when the grounded share was 60%. So every phrased ``N%`` must
-    also appear as a percentage in the grounded text, not merely as some bare digit."""
-    def toks(s: str) -> set[str]:
-        return {m.group().replace(",", "").rstrip(".") for m in _NUM_RE.finditer(s)}
-
-    def pct_toks(s: str) -> set[str]:
-        return {m.group(1).replace(",", "").rstrip(".") for m in _PCT_RE.finditer(s)}
-
-    return toks(phrased) <= toks(grounded) and pct_toks(phrased) <= pct_toks(grounded)
-
-
 def _ai_phrasing(result: AnswerResult, model: str) -> str | None:
     """Reword the grounded result via Cortex. Given ONLY the deterministic
     finding and told to change no number/name. Degrades silently to None —
@@ -90,7 +67,7 @@ def _ai_phrasing(result: AnswerResult, model: str) -> str | None:
     )
     try:
         sql = (
-            f"SELECT SNOWFLAKE.CORTEX.COMPLETE({sql_literal(model)}, "
+            f"SELECT SNOWFLAKE.CORTEX.COMPLETE({sql_literal(normalize_model(model))}, "
             f"{sql_literal(prompt)}) AS TXT"
         )
         res = run(sql, page=_PAGE, key="ask_narrate", tier="live",
@@ -136,7 +113,7 @@ def _render_result(result: AnswerResult, company: str, params: AskParams,
         phrased = _ai_phrasing(result, model)
         if phrased:
             st.caption("AI phrasing (grounded numbers unchanged):")
-            st.markdown(f"> {phrased}")
+            st.markdown(md_dollars(f"> {phrased}"))
 
     if result.evidence is not None and not result.evidence.empty:
         # Dollarize any credit-quantity column at the current compute rate ($3.68) or the

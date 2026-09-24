@@ -433,9 +433,11 @@ integrations and two `ALERT_ROUTES` rows — copy-paste blocks live in
 integration with per-route failure isolation; MIN_SEVERITY is a rank filter
 (CRITICAL ⊂ HIGH ⊂ MEDIUM ⊂ LOW).
 
-**ROI (Brief):** "Verified savings (QTD)" = VERIFIED ledger items only,
-shown against the app's own quarterly warehouse cost (green = pays for
-itself); the open ESTIMATED pipeline is a separate figure by design.
+**ROI (Brief):** "Verified savings run-rate" = the monthly run-rate of VERIFIED
+ledger items verified in the last 12 months (never estimates), shown against the
+app's own trailing-30-day warehouse cost (green = pays for itself). It does not
+reset when a quarter starts; "verified this quarter" lives in the help text and on
+Decision Studio ▸ ROI. The open ESTIMATED pipeline is a separate figure by design.
 
 **Isolation (v7):** every rule block runs in its own INSERT with its own
 exception handler — a broken rule logs `rule_block_failed` to APP_ERROR_LOG

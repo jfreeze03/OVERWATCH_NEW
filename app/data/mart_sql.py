@@ -10,6 +10,7 @@ from app.config import (
     CURRENT_MONTH_WINDOW,
     CURRENT_YEAR_WINDOW,
     MAX_MART_WINDOW_DAYS,
+    SAVINGS_ACTIVE_MONTHS,
     THRESHOLDS,
     core_object,
     mart_object,
@@ -1249,13 +1250,22 @@ FROM (
 
 
 def savings_summary_quarter() -> str:
-    """The ROI numerator: VERIFIED savings this quarter (never mixed with
-    estimates) plus the open estimated pipeline, labeled separately.
+    """The ROI numerator + the quarter KPI, never mixed with estimates, plus the open estimated
+    pipeline labeled separately.
 
-    Quarter start is anchored on the ACCOUNT clock (account_today_sql), matching Decision
-    Studio's account-time quarter — session-tz DATE_TRUNC('quarter', CURRENT_DATE()) drifted
-    a day at a quarter change and disagreed with the DS surface (round-2 bug hunt)."""
-    _q0 = f"DATE_TRUNC('quarter', {account_today_sql()})"
+    VERIFIED_ACTIVE_MONTHLY_USD is the ROI numerator (Next-Fifty #3): every item VERIFIED in the
+    last SAVINGS_ACTIVE_MONTHS months. Each VERIFIED_USD is a monthly run-rate that keeps saving
+    after the quarter it was verified in, so the old quarter-scoped numerator fell to 0x on the
+    first day of every quarter while the trailing-30d run cost did not. VERIFIED_QTD_USD stays as
+    the separate "verified this quarter" KPI. Reverts are not detected yet, so the 12-month cap is
+    the conservative stand-in. (The name is kept: the canary, Brief, DS and tests reference it.)
+
+    Both windows anchor on the ACCOUNT clock (account_today_sql), matching Decision Studio's
+    account-time quarter — session-tz DATE_TRUNC('quarter', CURRENT_DATE()) drifted a day at a
+    quarter change and disagreed with the DS surface (round-2 bug hunt)."""
+    _today = account_today_sql()
+    _q0 = f"DATE_TRUNC('quarter', {_today})"
+    _a0 = f"DATEADD('month', -{int(SAVINGS_ACTIVE_MONTHS)}, {_today})"
     return f"""
 SELECT
     ROUND(SUM(IFF(STATE = 'VERIFIED'
@@ -1263,6 +1273,11 @@ SELECT
                   COALESCE(VERIFIED_USD, 0), 0)), 2) AS VERIFIED_QTD_USD,
     COUNT_IF(STATE = 'VERIFIED'
              AND VERIFIED_AT >= {_q0}) AS VERIFIED_ITEMS,
+    ROUND(SUM(IFF(STATE = 'VERIFIED'
+                  AND VERIFIED_AT >= {_a0},
+                  COALESCE(VERIFIED_USD, 0), 0)), 2) AS VERIFIED_ACTIVE_MONTHLY_USD,
+    COUNT_IF(STATE = 'VERIFIED'
+             AND VERIFIED_AT >= {_a0}) AS VERIFIED_ACTIVE_ITEMS,
     ROUND(SUM(IFF(STATE = 'ESTIMATED', COALESCE(ESTIMATED_USD, 0), 0)), 2) AS ESTIMATED_OPEN_USD
 FROM {core_object("SAVINGS_LEDGER")}
 """
