@@ -19,6 +19,7 @@ from app.config import (
     THRESHOLDS,
     core_object,
 )
+from app.core.ai import CORTEX_TIMEOUT_SECONDS
 from app.core.errors import error_buffer, safe_page
 from app.core.identity import identity_sql
 from app.core.query import bump_refresh_salt, execute_statement, query_telemetry, run, run_batch
@@ -26,7 +27,7 @@ from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
 from app.data import cost_sql, mart_sql
-from app.logic.formulas import format_usd, humanize_duration, md_dollars, safe_float
+from app.logic.formulas import format_usd, format_usd_precise, humanize_duration, md_dollars, safe_float
 from app.ui.components import (
     audit_mode,
     confirm_gate,
@@ -1017,7 +1018,8 @@ def _app_cortex_cost() -> None:
           if "TOTAL_REQUESTS" in df.columns else float("nan"))
     kpi_row([
         {"label": "App AI (Cortex) cost (30d)",
-         "value": format_usd(float(_cr) * ai_rate) if pd.notna(_cr) and _cr > 0 else "—",
+         # precise: one small-model evaluation costs a fraction of a cent — format_usd would show $0.00
+         "value": format_usd_precise(float(_cr) * ai_rate) if pd.notna(_cr) and _cr > 0 else "—",
          "method": "AI rate", "badge": "live",
          "help": "Cortex AI-function credits on the statements the app tagged per statement, at the "
                  "configured AI credit rate (AI_CREDIT_PRICE_USD)."},
@@ -1027,7 +1029,11 @@ def _app_cortex_cost() -> None:
     tbl = df[[c for c in ("PAGE", "REQUESTS", "AI_CREDITS") if c in df.columns]].copy()
     if "AI_CREDITS" in tbl.columns:
         tbl["AI_USD"] = pd.to_numeric(tbl["AI_CREDITS"], errors="coerce") * ai_rate
-    styled_table(tbl)
+    # explicit formats: the CREDITS/USD auto-formats round to 2 decimals and would print 0.00 / $0.00
+    styled_table(tbl, column_config={
+        "AI_CREDITS": st.column_config.NumberColumn("AI credits", format="%.6f"),
+        "AI_USD": st.column_config.NumberColumn("AI $", format="$%.4f"),
+    })
     result_caption(res)
 
 
@@ -1041,10 +1047,13 @@ def _self_cost_tab() -> None:
         "(QUERY_ATTRIBUTION_HISTORY via MART_TASK_GRAPH_DAILY, excluding idle) against the warehouse's METERED "
         "compute; the remainder is idle/auto-suspend tails, the app's interactive reads and the email alerts. "
         "Owner's-rights Streamlit-in-Snowflake rejects ALTER SESSION, so since "
-        f"{_TAGGED_SINCE} the app tags each of its own statements individually (Snowpark statement_params, "
-        "QUERY_TAG 'OVERWATCH|page=…|tier=…'). The per-query table counts those as INTERACTIVE APP and "
-        "everything else — the loader tasks, the email alerts, any ad-hoc use of the warehouse, and the app's "
-        f"own reads from before {_TAGGED_SINCE} — as {mart_sql.APP_OTHER_WORKLOAD}.")
+        f"{_TAGGED_SINCE} the app tags each statement it submits (Snowpark statement_params, "
+        "QUERY_TAG 'OVERWATCH|page=…|tier=…') — counted as INTERACTIVE APP. Two app statements no client-side "
+        "tag can reach get their own rows: the Streamlit runtime's session statement (EXECUTE STREAMLIT … "
+        f"OVERWATCH_APP(), {mart_sql.APP_RUNTIME_WORKLOAD}) and the connector's untagged result fetch after each "
+        f"async read (select * from table(result_scan(…)), {mart_sql.APP_FETCH_WORKLOAD}). Everything else — "
+        "the loader tasks, the email alerts, any ad-hoc use of the warehouse, and the app's own reads from before "
+        f"{_TAGGED_SINCE} — is {mart_sql.APP_OTHER_WORKLOAD}.")
     methodology_note(_SCAN_NOTE)  # #1: scan/cache provenance → audit-mode only
     _run_cost_panel()
     _app_cortex_cost()
@@ -1068,8 +1077,9 @@ def _self_cost_tab() -> None:
         failed = int(pd.to_numeric(_app["FAILED"], errors="coerce").fillna(0).sum())
         kpi_row([
             {"label": "App queries (14d)", "value": f"{total:,}" if total else "—",
-             "help": f"Statements the app tagged per statement (since {_TAGGED_SINCE}); the app's reads from "
-                     f"before that release count under {mart_sql.APP_OTHER_WORKLOAD} — see the note."},
+             "help": f"Statements the app tagged per statement (since {_TAGGED_SINCE}). The Streamlit runtime "
+                     "and the connector's untagged result fetches have their own rows in the table; the "
+                     f"app's reads from before that release count under {mart_sql.APP_OTHER_WORKLOAD}."},
             {"label": "Failed", "value": f"{failed:,}",
              "delta_color": "inverse" if failed else "off"},
         ])
@@ -1222,14 +1232,18 @@ def _performance_tab() -> None:
     """Prove (or disprove) that the app is fast: its own statement stats."""
     # R43: the app's per-tier ALTER SESSION timeouts (30/120/180s) are a no-op under
     # owner's-rights SiS (core.session.apply_statement_timeout documents this) — the REAL
-    # ceiling every app query runs against is the warehouse/account STATEMENT_TIMEOUT_IN_SECONDS.
+    # ceiling every app READ runs against is the warehouse/account STATEMENT_TIMEOUT_IN_SECONDS.
+    # Next-Fifty #7 Slice B: Cortex evaluations also carry their own per-statement ceiling.
     # Read + show it so the true wall is visible, not just described in a code comment.
     section_header("Production statement-timeout ceiling", "", "operations")
     panel_help(
-        "The app's per-tier query timeouts (30/120/180s) do NOT apply on owner's-rights "
-        "Streamlit-in-Snowflake — ALTER SESSION is rejected there. Every app query is instead "
-        f"governed by STATEMENT_TIMEOUT_IN_SECONDS on {APP_WAREHOUSE} (or the account; 300s "
-        "default). To enforce a tighter ceiling, SET it on the warehouse or account."
+        "The app's per-tier read timeouts (30/120/180s) do NOT apply on owner's-rights "
+        "Streamlit-in-Snowflake — ALTER SESSION is rejected there, and they are deliberately not sent "
+        "per statement until the tagged read durations are measured. Reads are governed by "
+        f"STATEMENT_TIMEOUT_IN_SECONDS on {APP_WAREHOUSE} (or the account; 300s default). Since "
+        f"{_TAGGED_SINCE}, Cortex evaluations carry their own {CORTEX_TIMEOUT_SECONDS}s per-statement "
+        "ceiling (the lower of the two wins). To enforce a tighter read ceiling, SET it on the "
+        "warehouse or account."
     )
     _to = run(f"SHOW PARAMETERS LIKE 'STATEMENT_TIMEOUT_IN_SECONDS' IN WAREHOUSE {APP_WAREHOUSE}",
               page=_PAGE, key="stmt_timeout", tier="metadata",
@@ -1246,8 +1260,9 @@ def _performance_tab() -> None:
                       "value": humanize_duration(safe_float(_val), "s") if _val else "—",
                       "delta": f"set at: {_lvl}", "delta_color": "off",
                       "help": "The STATEMENT_TIMEOUT_IN_SECONDS actually in force on the app "
-                              "warehouse — the true wall every app query runs against, regardless "
-                              "of the app's per-tier values."}])
+                              "warehouse — the true wall every app READ runs against, regardless "
+                              "of the app's per-tier values. Cortex evaluations are additionally "
+                              "capped per statement."}])
         styled_table(_tdf)
     else:
         empty_state("no_data_yet", "Could not read the warehouse timeout parameter (needs "

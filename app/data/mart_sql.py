@@ -903,23 +903,39 @@ LIMIT {limit}
 """
 
 
-# Next-Fifty #7 Slice B: the non-app side of the shared-warehouse split. Since v4.590.0 the app tags every
-# statement per statement, so this is the loader tasks, the native email alerts and any ad-hoc use of the
-# warehouse (plus the app's own UNTAGGED reads from before that release, inside a trailing window).
+# Next-Fifty #7 Slice B: the shared-warehouse self-cost split. INTERACTIVE APP = the statements the app tags
+# per statement (v4.590.0+). Two app statements NO client-side tag can reach get their own buckets: the SiS
+# runtime's session statement (`execute streamlit ... OVERWATCH_APP()`, issued by Snowflake, not the app's
+# seams) and the connector's untagged `select * from table(result_scan('<qid>'))` fetch that follows every
+# ASYNC read (snowflake.connector cursor.get_results_from_sfqid). Everything else - the loader tasks, the
+# native email alerts, ad-hoc use of the warehouse, and the app's untagged reads from before that release
+# while they are still inside a trailing window - is APP_OTHER_WORKLOAD.
+APP_RUNTIME_WORKLOAD = "APP RUNTIME (SiS)"
+APP_FETCH_WORKLOAD = "APP RESULT FETCH (untagged)"
 APP_OTHER_WORKLOAD = "TASKS / ALERTS / OTHER"
+
+
+def _self_workload_sql() -> str:
+    """The WORKLOAD CASE both self-cost builders share (they already read QUERY_TEXT via app_self_sql).
+    STARTSWITH keeps each builder's own statement (which starts with SELECT) out of the text arms."""
+    return (f"CASE WHEN {app_self_sql()} THEN 'INTERACTIVE APP' "
+            f"WHEN STARTSWITH(UPPER(COALESCE(QUERY_TEXT, '')), 'EXECUTE STREAMLIT') "
+            f"AND CONTAINS(UPPER(QUERY_TEXT), 'OVERWATCH_APP') THEN '{APP_RUNTIME_WORKLOAD}' "
+            f"WHEN STARTSWITH(LOWER(COALESCE(QUERY_TEXT, '')), 'select * from table(result_scan(''') "
+            f"THEN '{APP_FETCH_WORKLOAD}' ELSE '{APP_OTHER_WORKLOAD}' END")
 
 
 def app_self_cost(days: int) -> str:
     """What OVERWATCH itself spends on the shared warehouse, split by tag/marker (common.app_self_sql):
-    INTERACTIVE APP = the app's per-statement tagged reads (v4.590.0+); everything else is
-    APP_OTHER_WORKLOAD."""
+    INTERACTIVE APP = the app's per-statement tagged reads (v4.590.0+), plus the SiS runtime and the
+    connector's untagged result fetches as their own app buckets; everything else is APP_OTHER_WORKLOAD."""
     from app.config import APP_WAREHOUSE
 
     days = bounded_days(days, maximum=30)
     return f"""
 SELECT
     DATE(START_TIME) AS DAY,
-    IFF({app_self_sql()}, 'INTERACTIVE APP', '{APP_OTHER_WORKLOAD}') AS WORKLOAD,
+    {_self_workload_sql()} AS WORKLOAD,
     COUNT(*) AS APP_QUERIES,
     SUM(TOTAL_ELAPSED_TIME) / 1000.0 AS ELAPSED_SEC,
     SUM(IFF(EXECUTION_STATUS <> 'SUCCESS', 1, 0)) AS FAILED
@@ -1004,7 +1020,7 @@ def app_warehouse_queue_by_hour(days: int = 14) -> str:
     return f"""
 SELECT
     HOUR(CONVERT_TIMEZONE('{ACCOUNT_TIMEZONE}', START_TIME)) AS HOUR_OF_DAY,
-    IFF({app_self_sql()}, 'INTERACTIVE APP', '{APP_OTHER_WORKLOAD}') AS WORKLOAD,
+    {_self_workload_sql()} AS WORKLOAD,
     COUNT(*) AS QUERIES,
     COUNT_IF(COALESCE(QUEUED_OVERLOAD_TIME, 0) > 0) AS QUEUED_QUERIES,
     ROUND(APPROX_PERCENTILE(COALESCE(QUEUED_OVERLOAD_TIME, 0), 0.95) / 1000, 2) AS P95_QUEUED_OVERLOAD_SEC,

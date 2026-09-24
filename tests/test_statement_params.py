@@ -180,7 +180,7 @@ def test_every_seam_routes_through_the_transport():
         src = inspect.getsource(fn)
         assert "statement_params(" in src, fn.__name__
         # no bare submit left behind: every Snowpark submit goes through submit_pandas/submit_collect
-        for bare in (".to_pandas(block", ".collect()", ".collect_nowait()"):
+        for bare in (".to_pandas(block", ".to_pandas()", ".collect()", ".collect_nowait()"):
             assert bare not in src, (fn.__name__, bare)
 
 
@@ -188,6 +188,22 @@ def test_self_cost_split_names_the_other_side_honestly():
     assert mart_sql.APP_OTHER_WORKLOAD == "TASKS / ALERTS / OTHER"
     for sql in (mart_sql.app_self_cost(14), mart_sql.app_warehouse_queue_by_hour(14)):
         assert "'TASKS / ALERTS / OTHER'" in sql and "UNTAGGED APP" not in sql
+        # review fix: the SiS runtime statement and the connector's untagged async result fetch are the
+        # app's too - no client-side tag reaches either, so they get their own buckets
+        assert "STARTSWITH(UPPER(COALESCE(QUERY_TEXT, '')), 'EXECUTE STREAMLIT')" in sql
+        assert "'APP RUNTIME (SiS)'" in sql
+        assert "STARTSWITH(LOWER(COALESCE(QUERY_TEXT, '')), 'select * from table(result_scan(''')" in sql
+        assert "'APP RESULT FETCH (untagged)'" in sql
+        assert sql.index("'INTERACTIVE APP'") < sql.index("'APP RUNTIME (SiS)'") < sql.index(
+            "'APP RESULT FETCH (untagged)'") < sql.index("'TASKS / ALERTS / OTHER'")
+    sqlglot = pytest.importorskip("sqlglot")
+    sqlglot.parse_one(mart_sql.app_self_cost(14), read="snowflake")
+
+
+def test_result_fetch_arm_matches_the_connector_text():
+    # the exact statement snowflake.connector's get_results_from_sfqid issues after an async job
+    fetch = "select * from table(result_scan('01b2c3d4-0000-1111-0000-000000000001'))"
+    assert fetch.lower().startswith("select * from table(result_scan('")
 
 
 def test_app_cortex_self_cost_builder():
@@ -207,6 +223,11 @@ def test_admin_cortex_card_is_toggle_and_probe_gated():
     body = src.split("def _app_cortex_cost(", 1)[1].split("\ndef ", 1)[0]
     assert body.index("st.toggle(") < body.index("run(mart_sql.app_cortex_self_cost(30)")
     assert "probe=True" in body and '"method": "AI rate"' in body and "AI_CREDIT_PRICE_USD" in body
+    # review fix: sub-cent spend is shown precisely, never as a rounded $0.00 / 0.00
+    assert "format_usd_precise(float(_cr) * ai_rate)" in body
+    assert 'format="%.6f"' in body and 'format="$%.4f"' in body
     assert 'else "—"' in body                                     # zero/unknown never renders a false $0
     tab = src.split("def _self_cost_tab(", 1)[1].split("\ndef ", 1)[0]
+    perf = src.split("def _performance_tab(", 1)[1].split("\ndef ", 1)[0]
+    assert "Every app query is instead" not in perf and "{CORTEX_TIMEOUT_SECONDS}s per-statement" in perf
     assert tab.index("_run_cost_panel()") < tab.index("_app_cortex_cost()")

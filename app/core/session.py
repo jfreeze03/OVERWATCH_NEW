@@ -209,7 +209,7 @@ def apply_statement_timeout(session, seconds: int) -> None:
     """Per-tier session statement timeout — INEFFECTIVE on the owner's-rights SiS path.
 
     #31: ALTER SESSION is rejected under owner's-rights SiS, so the app's per-tier
-    timeouts (30/120/180s) never actually apply there. Every app query is instead
+    timeouts (30/120/180s) never actually apply there. Every app READ is instead
     governed by the warehouse/account STATEMENT_TIMEOUT_IN_SECONDS — 300s by
     default — which is the REAL contract in production, not the values passed here.
     To enforce a tighter ceiling the OWNER must SET STATEMENT_TIMEOUT_IN_SECONDS on
@@ -217,8 +217,9 @@ def apply_statement_timeout(session, seconds: int) -> None:
     app-tagged queries (the APP_QUERY_TAG_PREFIX QUERY_TAG) to catch anything
     approaching that 300s wall. This call still does real work OFF-SiS (local dev,
     tests) where ALTER SESSION is accepted. Next-Fifty #7 Slice B: on SiS the timeout can
-    ride the statement itself (statement_params) — enabled per tier in
-    STATEMENT_PARAMS_TIMEOUT_TIERS once that tier's tagged durations are measured.
+    ride the statement itself (statement_params), per tier in STATEMENT_PARAMS_TIMEOUT_TIERS:
+    Cortex is on now (its documented 90s intent); a read tier joins once its tagged
+    durations are measured (the post-deploy check).
     """
     if not alter_session_supported(session):
         return

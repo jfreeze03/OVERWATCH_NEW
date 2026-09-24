@@ -65,3 +65,4 @@ def test_admin_note_is_honest():
     # Slice B (v4.590.0): the note now says the app tags per statement, and names the other side honestly
     assert "rejects ALTER SESSION" in body and "statement_params" in body
     assert "mart_sql.APP_OTHER_WORKLOAD" in body and "UNTAGGED APP" not in src
+    assert "mart_sql.APP_RUNTIME_WORKLOAD" in body and "mart_sql.APP_FETCH_WORKLOAD" in body
