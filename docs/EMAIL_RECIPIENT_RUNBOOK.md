@@ -89,7 +89,7 @@ SELECT SOURCE_NAME, LAST_LOAD_TS,
 
 -- (2) Chronic loader-failure / delivery-failure types in the last 24h
 SELECT ERROR_TYPE, PAGE, COUNT(*) AS N_24H, MAX(LOGGED_AT) AS LAST_AT,
-       ANY_VALUE(LEFT(ERROR_MESSAGE, 160)) AS SAMPLE
+       ANY_VALUE(LEFT(ERROR_MESSAGE, 160)) AS SAMPLE_MSG
   FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
  WHERE LOGGED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
    AND (ERROR_TYPE IN ('mart_load_failed', 'fact_load_failed', 'extract_load_failed',

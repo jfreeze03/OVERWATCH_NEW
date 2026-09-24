@@ -70,6 +70,9 @@ views (#25, toggle-gated Canary tab).
 - #7A: the marker is spelled as a split constant so the diagnostic builders don't count themselves as app
   traffic; run-cost shows '—' (not $0) with no pipeline rows; 'worst hour' names an hour only if one queued.
 - #4: a readable send / evaluation failure is red even when the alerts themselves aren't visible.
+- #4 (owner probe 2026-09-24): the send-history read passes `START_TIME =>` —
+  `NOTIFICATION_HISTORY` rejects `START_TIME_RANGE_START`, so the Email path row could never read its
+  send history; the runbook pre-flight's `AS SAMPLE` alias (a reserved word) is now `SAMPLE_MSG`.
 - Documented, not changed: a re-run started after noon keys to the next night (the house night-key
   convention shared with the SLA forecast); Overview's platform score still counts deferred HIGH/CRITICAL
   items (changing the headline score is an owner decision).

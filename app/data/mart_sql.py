@@ -1017,7 +1017,9 @@ GROUP BY NAME
 
 
 def email_notification_history(days: int = 7) -> str:
-    """OVERWATCH_EMAIL send outcomes (one aggregate row; zero sends = readable + quiet)."""
+    """OVERWATCH_EMAIL send outcomes (one aggregate row; zero sends = readable + quiet).
+    NOTIFICATION_HISTORY takes START_TIME => (owner probe 2026-09-24: it rejects the
+    START_TIME_RANGE_START argument ALERT_HISTORY / TASK_HISTORY use)."""
     from app.logic.formulas import ACCOUNT_TIMEZONE
     days = bounded_days(days, 14)
     _fail = "UPPER(STATUS) LIKE 'FAIL%'"
@@ -1028,7 +1030,7 @@ SELECT COUNT_IF(UPPER(STATUS) = 'SUCCESS') AS SENT_N,
        CONVERT_TIMEZONE('{ACCOUNT_TIMEZONE}', MAX(IFF({_fail}, CREATED, NULL)))::TIMESTAMP_NTZ AS LAST_FAILED_AT,
        MAX_BY(ERROR_MESSAGE, IFF({_fail}, CREATED, NULL)) AS LAST_ERROR
 FROM TABLE({OVERWATCH_DB}.INFORMATION_SCHEMA.NOTIFICATION_HISTORY(
-         START_TIME_RANGE_START => DATEADD('day', -{days}, CURRENT_TIMESTAMP()),
+         START_TIME => DATEADD('day', -{days}, CURRENT_TIMESTAMP()),
          INTEGRATION_NAME => {sql_literal(EMAIL_INTEGRATION)},
          RESULT_LIMIT => 1000))
 """

@@ -5,6 +5,7 @@ visible — never a false red."""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -74,7 +75,17 @@ def test_builders_read_information_schema_and_clamp():
         assert "ACCOUNT_USAGE" not in sql and "CONVERT_TIMEZONE('America/Chicago'" in sql
     assert "INFORMATION_SCHEMA.ALERT_HISTORY" in hist and "DATEADD('day', -7," in hist
     assert "NOTIFICATION_HISTORY" in notif and "'OVERWATCH_EMAIL'" in notif and "DATEADD('day', -14," in notif
+    # owner probe 2026-09-24: NOTIFICATION_HISTORY rejects START_TIME_RANGE_START (ALERT_HISTORY's name)
+    assert "START_TIME => DATEADD" in notif and "START_TIME_RANGE_START" not in notif
+    assert "SCHEDULED_TIME_RANGE_START =>" in hist
     assert mart_sql.email_alert_objects().startswith("SHOW ALERTS")
+
+
+def test_runbook_preflight_avoids_reserved_aliases():
+    # owner probe 2026-09-24: 'AS SAMPLE' is a Snowflake syntax error (SAMPLE is reserved)
+    doc = (_ROOT / "docs/EMAIL_RECIPIENT_RUNBOOK.md").read_text(encoding="utf-8")
+    assert "AS SAMPLE_MSG" in doc
+    assert not re.search(r"\bAS\s+(SAMPLE|TABLESAMPLE|QUALIFY|ILIKE|REGEXP)\s*$", doc, re.MULTILINE)
 
 
 def test_alerts_page_wires_the_email_path_row():
