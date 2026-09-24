@@ -135,10 +135,11 @@ def lag_offset_start(days: int, lag_hours: int = 24) -> str:
 # ---------------------------------------------------------------------------
 # OVERWATCH SELF-TRAFFIC MARKER (Next-Fifty #7) - ONE definition every self-noise predicate
 # and the Admin self-cost split key on. Owner's-rights SiS rejects ALTER SESSION, so
-# core.session.apply_query_tag() never tags production app queries; the app marks its
-# own statements PER STATEMENT instead (QUERY_TAG via Snowpark statement_params, or an
-# appended SQL comment - see core.session) and these predicates accept EITHER signal,
-# so they are correct before, during and after the transport lands. APP_SQL_MARKER
+# core.session.apply_query_tag() never tags production app queries; since v4.590.0 the app
+# tags its own statements PER STATEMENT instead (QUERY_TAG via Snowpark statement_params -
+# core.session.statement_params; the owner probe chose it over an appended SQL comment) and
+# these predicates accept EITHER signal, so pre-release history and the comment leg stay
+# correct. APP_SQL_MARKER
 # deliberately contains 'OVERWATCH_APP' so the legacy '%OVERWATCH_APP%' text filters
 # (ops/chatter/workbench builders and the DB-side V147 collector) also exclude
 # comment-marked statements with no migration. Locked by tests/test_app_self_marker.py.

@@ -19,6 +19,7 @@ from app.config import (
     THRESHOLDS,
     core_object,
 )
+from app.core.ai import CORTEX_TIMEOUT_SECONDS
 from app.core.errors import error_buffer, safe_page
 from app.core.identity import identity_sql
 from app.core.query import bump_refresh_salt, execute_statement, query_telemetry, run, run_batch
@@ -26,7 +27,7 @@ from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
 from app.data import cost_sql, mart_sql
-from app.logic.formulas import format_usd, humanize_duration, md_dollars, safe_float
+from app.logic.formulas import format_usd, format_usd_precise, humanize_duration, md_dollars, safe_float
 from app.ui.components import (
     audit_mode,
     confirm_gate,
@@ -950,6 +951,8 @@ def _migrations_tab() -> None:
                                "(tasks suspend if a migration half-applied).")))
 
 
+# Next-Fifty #7 Slice B: the release from which every app statement carries its own QUERY_TAG.
+_TAGGED_SINCE = "v4.590.0"
 _SCAN_NOTE = ("First load scans ACCOUNT_USAGE directly (a few seconds on a cold "
               "cache); results cache for an hour, so repeat views are instant.")
 
@@ -997,19 +1000,63 @@ def _run_cost_panel() -> None:
     result_caption(res)
 
 
+def _app_cortex_cost() -> None:
+    """Next-Fifty #7 Slice B: the app's OWN Cortex spend — AI-function credits on the statements the app
+    tagged per statement, by page, at the AI credit rate. Toggle-gated (an ACCOUNT_USAGE join, off first
+    paint) and probe=True (the canonical AI view is absent on some accounts)."""
+    if not st.toggle("Load the app's own AI (Cortex) cost (30d)", key="adm_self_cortex"):
+        return
+    ai_rate = safe_float(load_settings(_PAGE).get("AI_CREDIT_PRICE_USD"), DEFAULT_SETTINGS["AI_CREDIT_PRICE_USD"])
+    res = run(mart_sql.app_cortex_self_cost(30), page=_PAGE, key="self_cortex", tier="historical",
+              source="ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY × QUERY_HISTORY (app-tagged)", probe=True)
+    if not guard(res, f"No app-tagged Cortex calls in the last 30 days (the app tags its statements from {_TAGGED_SINCE})."):
+        return
+    df = res.df
+    _cr = (pd.to_numeric(df["TOTAL_AI_CREDITS"], errors="coerce").max()
+           if "TOTAL_AI_CREDITS" in df.columns else float("nan"))
+    _n = (pd.to_numeric(df["TOTAL_REQUESTS"], errors="coerce").max()
+          if "TOTAL_REQUESTS" in df.columns else float("nan"))
+    kpi_row([
+        {"label": "App AI (Cortex) cost (30d)",
+         # precise: one small-model evaluation costs a fraction of a cent — format_usd would show $0.00
+         "value": format_usd_precise(float(_cr) * ai_rate) if pd.notna(_cr) and _cr > 0 else "—",
+         "method": "AI rate", "badge": "live",
+         "help": "Cortex AI-function credits on the statements the app tagged per statement, at the "
+                 "configured AI credit rate (AI_CREDIT_PRICE_USD)."},
+        {"label": "App AI calls (30d)", "value": f"{int(_n):,}" if pd.notna(_n) and _n > 0 else "—",
+         "badge": "live"},
+    ])
+    tbl = df[[c for c in ("PAGE", "REQUESTS", "AI_CREDITS") if c in df.columns]].copy()
+    if "AI_CREDITS" in tbl.columns:
+        tbl["AI_USD"] = pd.to_numeric(tbl["AI_CREDITS"], errors="coerce") * ai_rate
+    # explicit formats: the CREDITS/USD auto-formats round to 2 decimals and would print 0.00 / $0.00
+    styled_table(tbl, column_config={
+        "AI_CREDITS": st.column_config.NumberColumn("AI credits", format="%.6f"),
+        "AI_USD": st.column_config.NumberColumn("AI $", format="$%.4f"),
+    })
+    result_caption(res)
+
+
 def _self_cost_tab() -> None:
     # #1: self-cost measurement provenance → audit-mode only. Next-Fifty #7: the old note claimed every
-    # interactive app query is tagged — false on owner's-rights SiS (no ALTER SESSION).
+    # interactive app query is tagged — false before Slice B (owner's-rights SiS has no ALTER SESSION);
+    # since v4.590.0 each statement carries its own QUERY_TAG (core.session.statement_params).
     methodology_note(
         f"OVERWATCH's loader tasks, its native email alerts and the app's own reads all run on {APP_WAREHOUSE} "
         "(XSMALL, 60-second auto-suspend). Run-cost is task-graph compute ATTRIBUTED per pipeline "
         "(QUERY_ATTRIBUTION_HISTORY via MART_TASK_GRAPH_DAILY, excluding idle) against the warehouse's METERED "
         "compute; the remainder is idle/auto-suspend tails, the app's interactive reads and the email alerts. "
-        "Owner's-rights Streamlit-in-Snowflake rejects ALTER SESSION, so the app's interactive queries are NOT "
-        "query-tagged yet: the per-query table counts only tagged/marked statements as INTERACTIVE APP and "
-        "everything else as TASKS + UNTAGGED APP.")
+        "Owner's-rights Streamlit-in-Snowflake rejects ALTER SESSION, so since "
+        f"{_TAGGED_SINCE} the app tags each statement it submits (Snowpark statement_params, "
+        "QUERY_TAG 'OVERWATCH|page=…|tier=…') — counted as INTERACTIVE APP. Two app statements no client-side "
+        "tag can reach get their own rows: the Streamlit runtime's session statement (EXECUTE STREAMLIT … "
+        f"OVERWATCH_APP(), {mart_sql.APP_RUNTIME_WORKLOAD}) and the connector's untagged result fetch after each "
+        f"async read (select * from table(result_scan(…)), {mart_sql.APP_FETCH_WORKLOAD}). Everything else — "
+        "the loader tasks, the email alerts, any ad-hoc use of the warehouse, and the app's own reads from before "
+        f"{_TAGGED_SINCE} — is {mart_sql.APP_OTHER_WORKLOAD}.")
     methodology_note(_SCAN_NOTE)  # #1: scan/cache provenance → audit-mode only
     _run_cost_panel()
+    _app_cortex_cost()
     # the per-query split and the queueing view read the same 14d window — one parallel batch
     _pf = run_batch([
         {"key": "self_cost", "sql": mart_sql.app_self_cost(14),
@@ -1023,14 +1070,16 @@ def _self_cost_tab() -> None:
     if guard(res, "No queries on WH_ALFA_ADMIN in the last 14 days (fresh install)."):
         df = res.df.copy()
         # app_self_cost returns one row per (DAY, WORKLOAD); the headline counts the INTERACTIVE APP
-        # workload only. Untagged on SiS until per-statement tagging ships, so 0 renders '—' (unknown),
-        # never a false zero.
+        # workload only. Tagged per statement since v4.590.0; a 0 still renders '—' (days before that
+        # release carry no tag), never a false zero.
         _app = df[df["WORKLOAD"].astype(str) == "INTERACTIVE APP"]
         total = int(pd.to_numeric(_app["APP_QUERIES"], errors="coerce").fillna(0).sum())
         failed = int(pd.to_numeric(_app["FAILED"], errors="coerce").fillna(0).sum())
         kpi_row([
             {"label": "App queries (14d)", "value": f"{total:,}" if total else "—",
-             "help": "Untagged on Streamlit-in-Snowflake until per-statement tagging ships — see the note."},
+             "help": f"Statements the app tagged per statement (since {_TAGGED_SINCE}). The Streamlit runtime "
+                     "and the connector's untagged result fetches have their own rows in the table; the "
+                     f"app's reads from before that release count under {mart_sql.APP_OTHER_WORKLOAD}."},
             {"label": "Failed", "value": f"{failed:,}",
              "delta_color": "inverse" if failed else "off"},
         ])
@@ -1183,14 +1232,18 @@ def _performance_tab() -> None:
     """Prove (or disprove) that the app is fast: its own statement stats."""
     # R43: the app's per-tier ALTER SESSION timeouts (30/120/180s) are a no-op under
     # owner's-rights SiS (core.session.apply_statement_timeout documents this) — the REAL
-    # ceiling every app query runs against is the warehouse/account STATEMENT_TIMEOUT_IN_SECONDS.
+    # ceiling every app READ runs against is the warehouse/account STATEMENT_TIMEOUT_IN_SECONDS.
+    # Next-Fifty #7 Slice B: Cortex evaluations also carry their own per-statement ceiling.
     # Read + show it so the true wall is visible, not just described in a code comment.
     section_header("Production statement-timeout ceiling", "", "operations")
     panel_help(
-        "The app's per-tier query timeouts (30/120/180s) do NOT apply on owner's-rights "
-        "Streamlit-in-Snowflake — ALTER SESSION is rejected there. Every app query is instead "
-        f"governed by STATEMENT_TIMEOUT_IN_SECONDS on {APP_WAREHOUSE} (or the account; 300s "
-        "default). To enforce a tighter ceiling, SET it on the warehouse or account."
+        "The app's per-tier read timeouts (30/120/180s) do NOT apply on owner's-rights "
+        "Streamlit-in-Snowflake — ALTER SESSION is rejected there, and they are deliberately not sent "
+        "per statement until the tagged read durations are measured. Reads are governed by "
+        f"STATEMENT_TIMEOUT_IN_SECONDS on {APP_WAREHOUSE} (or the account; 300s default). Since "
+        f"{_TAGGED_SINCE}, Cortex evaluations carry their own {CORTEX_TIMEOUT_SECONDS}s per-statement "
+        "ceiling (the lower of the two wins). To enforce a tighter read ceiling, SET it on the "
+        "warehouse or account."
     )
     _to = run(f"SHOW PARAMETERS LIKE 'STATEMENT_TIMEOUT_IN_SECONDS' IN WAREHOUSE {APP_WAREHOUSE}",
               page=_PAGE, key="stmt_timeout", tier="metadata",
@@ -1207,8 +1260,9 @@ def _performance_tab() -> None:
                       "value": humanize_duration(safe_float(_val), "s") if _val else "—",
                       "delta": f"set at: {_lvl}", "delta_color": "off",
                       "help": "The STATEMENT_TIMEOUT_IN_SECONDS actually in force on the app "
-                              "warehouse — the true wall every app query runs against, regardless "
-                              "of the app's per-tier values."}])
+                              "warehouse — the true wall every app READ runs against, regardless "
+                              "of the app's per-tier values. Cortex evaluations are additionally "
+                              "capped per statement."}])
         styled_table(_tdf)
     else:
         empty_state("no_data_yet", "Could not read the warehouse timeout parameter (needs "

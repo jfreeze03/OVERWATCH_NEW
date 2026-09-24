@@ -903,16 +903,39 @@ LIMIT {limit}
 """
 
 
+# Next-Fifty #7 Slice B: the shared-warehouse self-cost split. INTERACTIVE APP = the statements the app tags
+# per statement (v4.590.0+). Two app statements NO client-side tag can reach get their own buckets: the SiS
+# runtime's session statement (`execute streamlit ... OVERWATCH_APP()`, issued by Snowflake, not the app's
+# seams) and the connector's untagged `select * from table(result_scan('<qid>'))` fetch that follows every
+# ASYNC read (snowflake.connector cursor.get_results_from_sfqid). Everything else - the loader tasks, the
+# native email alerts, ad-hoc use of the warehouse, and the app's untagged reads from before that release
+# while they are still inside a trailing window - is APP_OTHER_WORKLOAD.
+APP_RUNTIME_WORKLOAD = "APP RUNTIME (SiS)"
+APP_FETCH_WORKLOAD = "APP RESULT FETCH (untagged)"
+APP_OTHER_WORKLOAD = "TASKS / ALERTS / OTHER"
+
+
+def _self_workload_sql() -> str:
+    """The WORKLOAD CASE both self-cost builders share (they already read QUERY_TEXT via app_self_sql).
+    STARTSWITH keeps each builder's own statement (which starts with SELECT) out of the text arms."""
+    return (f"CASE WHEN {app_self_sql()} THEN 'INTERACTIVE APP' "
+            f"WHEN STARTSWITH(UPPER(COALESCE(QUERY_TEXT, '')), 'EXECUTE STREAMLIT') "
+            f"AND CONTAINS(UPPER(QUERY_TEXT), 'OVERWATCH_APP') THEN '{APP_RUNTIME_WORKLOAD}' "
+            f"WHEN STARTSWITH(LOWER(COALESCE(QUERY_TEXT, '')), 'select * from table(result_scan(''') "
+            f"THEN '{APP_FETCH_WORKLOAD}' ELSE '{APP_OTHER_WORKLOAD}' END")
+
+
 def app_self_cost(days: int) -> str:
     """What OVERWATCH itself spends on the shared warehouse, split by tag/marker (common.app_self_sql):
-    owner's-rights SiS cannot tag via ALTER SESSION, so untagged app reads land in 'TASKS + UNTAGGED APP'."""
+    INTERACTIVE APP = the app's per-statement tagged reads (v4.590.0+), plus the SiS runtime and the
+    connector's untagged result fetches as their own app buckets; everything else is APP_OTHER_WORKLOAD."""
     from app.config import APP_WAREHOUSE
 
     days = bounded_days(days, maximum=30)
     return f"""
 SELECT
     DATE(START_TIME) AS DAY,
-    IFF({app_self_sql()}, 'INTERACTIVE APP', 'TASKS + UNTAGGED APP') AS WORKLOAD,
+    {_self_workload_sql()} AS WORKLOAD,
     COUNT(*) AS APP_QUERIES,
     SUM(TOTAL_ELAPSED_TIME) / 1000.0 AS ELAPSED_SEC,
     SUM(IFF(EXECUTION_STATUS <> 'SUCCESS', 1, 0)) AS FAILED
@@ -958,6 +981,35 @@ LIMIT 500
 """
 
 
+def app_cortex_self_cost(days: int = 30) -> str:
+    """Next-Fifty #7 Slice B: the app's OWN Cortex AI spend, by page. CORTEX_AI_FUNCTIONS_USAGE_HISTORY
+    rows (plain SUM(CREDITS) per QUERY_ID - no METRICS fan-out here) joined to the QUERY_HISTORY rows the
+    app tagged per statement. Tag-only (text=False): the join never reads QUERY_TEXT. Counts only
+    statements from releases that tag (v4.590.0+). Window totals via SUM() OVER () so the headline is
+    never derived from the capped page rows. Priced at the AI credit rate in the page, never in SQL."""
+    days = bounded_days(days, 30)
+    return f"""
+WITH ai AS (
+    SELECT F.QUERY_ID, SUM(COALESCE(F.CREDITS, 0)) AS AI_CREDITS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY F
+    WHERE F.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+    GROUP BY F.QUERY_ID
+)
+SELECT COALESCE(REGEXP_SUBSTR(Q.QUERY_TAG, 'page=([^|]+)', 1, 1, 'e'), 'unknown') AS PAGE,
+       COUNT(*) AS REQUESTS,
+       ROUND(SUM(ai.AI_CREDITS), 6) AS AI_CREDITS,
+       SUM(COUNT(*)) OVER () AS TOTAL_REQUESTS,
+       ROUND(SUM(SUM(ai.AI_CREDITS)) OVER (), 6) AS TOTAL_AI_CREDITS
+FROM ai
+JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY Q ON Q.QUERY_ID = ai.QUERY_ID
+WHERE Q.START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())
+  AND {app_self_sql('Q', text=False)}
+GROUP BY 1
+ORDER BY AI_CREDITS DESC
+LIMIT 50
+"""
+
+
 def app_warehouse_queue_by_hour(days: int = 14) -> str:
     """p95 QUEUED_OVERLOAD_TIME on the shared app warehouse by Central hour-of-day, split
     app vs tasks by the shared marker - the data behind 'is staggering the 06:30-07:20
@@ -968,7 +1020,7 @@ def app_warehouse_queue_by_hour(days: int = 14) -> str:
     return f"""
 SELECT
     HOUR(CONVERT_TIMEZONE('{ACCOUNT_TIMEZONE}', START_TIME)) AS HOUR_OF_DAY,
-    IFF({app_self_sql()}, 'INTERACTIVE APP', 'TASKS + UNTAGGED APP') AS WORKLOAD,
+    {_self_workload_sql()} AS WORKLOAD,
     COUNT(*) AS QUERIES,
     COUNT_IF(COALESCE(QUEUED_OVERLOAD_TIME, 0) > 0) AS QUEUED_QUERIES,
     ROUND(APPROX_PERCENTILE(COALESCE(QUEUED_OVERLOAD_TIME, 0), 0.95) / 1000, 2) AS P95_QUEUED_OVERLOAD_SEC,

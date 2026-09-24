@@ -23,7 +23,15 @@ import streamlit as st
 from app.config import DEFAULT_MAX_ROWS, core_object
 from app.core.errors import format_snowflake_error, record_error
 from app.core.result import QueryResult
-from app.core.session import apply_query_tag, apply_statement_timeout, build_query_tag, get_session
+from app.core.session import (
+    apply_query_tag,
+    apply_statement_timeout,
+    build_query_tag,
+    get_session,
+    statement_params,
+    submit_collect,
+    submit_pandas,
+)
 from app.core.sqlsafe import sql_literal
 
 CACHE_TTLS = {"live": 30, "recent": 300, "hourly": 3600, "historical": 3600, "metadata": 14400}
@@ -399,16 +407,19 @@ def _execute(sql: str, tier: str, page: str) -> pd.DataFrame:
     _FETCH_MISS.set(True)
     session = get_session()
     apply_query_tag(session, build_query_tag(page=page, tier=tier))
-    apply_statement_timeout(session, STATEMENT_TIMEOUTS.get(tier, 120))
+    timeout_s = STATEMENT_TIMEOUTS.get(tier, 120)
+    apply_statement_timeout(session, timeout_s)
+    # Next-Fifty #7 Slice B: on owner's-rights SiS (no ALTER SESSION) the tag rides the statement.
+    params = statement_params(session, page=page, tier=tier, timeout_s=timeout_s)
     # Async submit purely to get the job handle: it carries the Snowflake
     # QUERY_ID (v4.51, Codex #16) — the sync path never exposed it.
     try:
-        job = session.sql(sql).to_pandas(block=False)
+        job = submit_pandas(session, session.sql(sql), params, block=False)
         _LAST_QUERY_ID.set(str(getattr(job, "query_id", "") or ""))
         return _normalize(job.result())
     except AttributeError:
         _LAST_QUERY_ID.set("")
-        return _normalize(session.sql(sql).to_pandas())
+        return _normalize(submit_pandas(session, session.sql(sql), params))
 
 
 # One cached function per tier: st.cache_data TTL is fixed at decoration time.
@@ -706,8 +717,10 @@ def _execute_batch(sqls: tuple, tier: str, page: str, *, timeout_s: int | None =
         return _execute_batch_bounded(sqls, tier, page, timeout_s=timeout_s)
     session = get_session()
     apply_query_tag(session, build_query_tag(page=page, tier=tier))
-    apply_statement_timeout(session,
-                            timeout_s if timeout_s is not None else STATEMENT_TIMEOUTS.get(tier, 120))
+    _tmo = timeout_s if timeout_s is not None else STATEMENT_TIMEOUTS.get(tier, 120)
+    apply_statement_timeout(session, _tmo)
+    # Next-Fifty #7 Slice B: one per-statement tag for every member (a mixed batch tags tier=mixed).
+    params = statement_params(session, page=page, tier=tier, timeout_s=_tmo)
     # P3: INCREMENTAL gather time per member, not the batch wall clock. Every
     # member used to be stamped with the whole batch's duration, so a 2-query
     # batch reported two identical inflated samples — batch:q and batch:p read
@@ -739,7 +752,7 @@ def _execute_batch(sqls: tuple, tier: str, page: str, *, timeout_s: int | None =
         for sql in sqls:
             # incremental on purpose (r10 #3): a comprehension loses the in-flight handles
             # when submission N fails, and #43 needs each handle's query_id at submit time.
-            job = session.sql(sql).to_pandas(block=False)
+            job = submit_pandas(session, session.sql(sql), params, block=False)
             member_qid[len(jobs)] = str(getattr(job, "query_id", "") or "")
             jobs.append(job)
     except Exception as sub_exc:
@@ -1253,10 +1266,11 @@ def execute_statement_async(sql: str, *, page: str) -> bool:
         session = get_session()
         apply_query_tag(session, build_query_tag(page=page, tier="write"))
         statement = session.sql(sql)
+        params = statement_params(session, page=page, tier="write")
         try:
-            statement.collect_nowait()
+            submit_collect(session, statement, params, nowait=True)
         except AttributeError:  # older Snowpark: no async API
-            statement.collect()
+            submit_collect(session, statement, params)
         return True
     except Exception as exc:
         record_error(page, exc, context=f"execute_statement_async: {sql[:200]}")
@@ -1369,7 +1383,7 @@ def execute_statement(sql: str, *, page: str) -> tuple[bool, str]:
         with st.spinner("Executing write…"):
             session = get_session()
             apply_query_tag(session, build_query_tag(page=page, tier="write"))
-            session.sql(sql).collect()
+            submit_collect(session, session.sql(sql), statement_params(session, page=page, tier="write"))
         # r24 #8 + r27 #14: a successful action invalidates cached reads —
         # domain-scoped when the write target is a known app table, global
         # otherwise — so post-action freshness never depends on live tiers.
@@ -1401,7 +1415,8 @@ def execute_cancel_query(query_id: str, *, page: str) -> tuple[bool, str]:
         with st.spinner("Cancelling query…"):   # C48 in-flight state
             session = get_session()
             apply_query_tag(session, build_query_tag(page=page, tier="write"))
-            session.sql(f"SELECT SYSTEM$CANCEL_QUERY({sql_literal(qid)})").collect()
+            submit_collect(session, session.sql(f"SELECT SYSTEM$CANCEL_QUERY({sql_literal(qid)})"),
+                           statement_params(session, page=page, tier="write"))
         return True, f"Cancel requested for {qid}."
     except Exception as exc:
         record_error(page, exc, context=f"execute_cancel_query: {qid}")
@@ -1466,7 +1481,8 @@ def execute_action(call_sql: str, fallback: list[str], *, page: str) -> tuple[bo
         with st.spinner("Executing action…"):   # C48 in-flight state
             session = get_session()
             apply_query_tag(session, build_query_tag(page=page, tier="write"))
-            rows = session.sql(call_sql).collect()
+            rows = submit_collect(session, session.sql(call_sql),
+                                  statement_params(session, page=page, tier="write"))
         verdict = str(rows[0][0]) if rows and rows[0] else ""
         _bump_refresh(call_sql)
         # codex#7: ALLOWLIST explicit success verdicts. Only OK / VERIFIED / DUPLICATE

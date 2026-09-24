@@ -72,7 +72,9 @@ labels its source and lag.
 
 **Streamlit-in-Snowflake specifics:** each viewer runs under their own
 role. `ALTER SESSION` is not available to the app (capability detected at
-connect; query tags/timeouts degrade to warehouse-level backstops). The app
+connect). Since v4.590.0 the QUERY_TAG rides each statement instead (Snowpark
+`statement_params`); Cortex evaluations carry a 90s per-statement timeout, and reads
+fall back to the warehouse STATEMENT_TIMEOUT_IN_SECONDS. The app
 and all tasks run on the dedicated XSMALL warehouse **WH_ALFA_ADMIN**
 (no resource monitor since v4.45 — OVERWATCH_RM was suspending it mid-use).
 
@@ -527,7 +529,7 @@ Snowflake release note that mentions ACCOUNT_USAGE, and after migrations.
 | Cortex/model unavailable | Digest row says so; AI panels surface the error; nothing else breaks |
 | FORECAST_ML_DAILY absent | Forecast engine silently uses seasonal, basis string says so |
 | Webhook integration missing | SP_NOTIFY_WEBHOOK returns a friendly failure; per-route errors log to APP_ERROR_LOG; events stay queued (NOTIFIED_AT null) |
-| ALTER SESSION unsupported (SiS) | Query tags/timeouts no-op; warehouse-level timeout backstops apply |
+| ALTER SESSION unsupported (SiS) | Tags ride each statement (statement_params, v4.590.0+); per-statement timeout for Cortex only; the warehouse-level timeout is the backstop for reads |
 | Schema/db filters on mart-only panels | Panels that lack the dimension switch to live sources automatically |
 
 ## 15. Troubleshooting

@@ -17,6 +17,8 @@ from app.core.session import (
     apply_statement_timeout,
     build_query_tag,
     get_session,
+    statement_params,
+    submit_collect,
 )
 from app.core.sqlsafe import sql_literal
 
@@ -46,7 +48,11 @@ def cortex_complete(prompt: str, model: object = _DEFAULT_MODEL, *, page: str = 
         session = get_session()
         apply_query_tag(session, build_query_tag(page=page, tier="cortex"))
         apply_statement_timeout(session, CORTEX_TIMEOUT_SECONDS)
-        rows = session.sql(sql).collect()
+        # Next-Fifty #7 Slice B: on owner's-rights SiS the tag AND the 90s ceiling ride the statement
+        # (ALTER SESSION is rejected there, so this cap never applied in production before).
+        rows = submit_collect(session, session.sql(sql),
+                              statement_params(session, page=page, tier="cortex",
+                                               timeout_s=CORTEX_TIMEOUT_SECONDS))
         # Coalesce a SQL NULL result BEFORE stringifying: str(None) -> the literal "None",
         # which is truthy and would render a non-answer as a confident answer. `or ""`
         # routes NULL/blank to the honest empty-answer path (mirrors session.py's convention).
