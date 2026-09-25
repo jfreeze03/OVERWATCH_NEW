@@ -2213,7 +2213,10 @@ def _tonight_glance_panel() -> None:
         "ended in a failure state. RUNNING: a task has no end yet. DID NOT RUN: ran on at least "
         f"{etl_control_sql.NIGHT_REGULAR_MIN_NIGHTS} of the last {etl_control_sql.NIGHT_LOOKBACK_NIGHTS} "
         "nights and on this night last week, but has no run tonight past its usual start + 1h. PENDING: "
-        "not due yet. The Brief and Control Room verdicts read this same roll-up.")
+        "not due yet. The Brief and Control Room verdicts read this same roll-up. Once V156 and V157 are "
+        "applied, the hourly alert scan also pushes these signals as PIPE_ETL_TASK_FAILED / "
+        "PIPE_ETL_CYCLE_NOT_STARTED / PIPE_ETL_CYCLE_LATE events (HIGH and CRITICAL reach email when "
+        "native delivery is on).")
     if not guard(res, "No nightly cycle found in CONTROL_STATUS — the cycle starter workflow has no runs. "
                  "Check ETL_CYCLE_START_WORKFLOW on Admin ▸ SETTINGS.",
                  setup_hint="The app role needs SELECT on the CONTROL_STATUS table "

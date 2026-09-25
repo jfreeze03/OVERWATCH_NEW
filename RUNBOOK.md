@@ -473,6 +473,9 @@ blocks others).
 | PIPE_TASK_FAILURES | PIPELINE | task failures in window over threshold | daily per task |
 | PIPE_COPY_FAILURES | PIPELINE | failed/partial file loads 24h (CRITICAL ≥10 files) | daily per table |
 | PIPE_DT_FAILURES | PIPELINE | dynamic-table refresh failures 24h (CRITICAL ≥5) | daily per DT |
+| PIPE_ETL_TASK_FAILED | PIPELINE | a workflow's tasks failed on their final attempt tonight (≥ threshold, never below 1; HIGH for the terminal workflow; auto-clears on a successful retry) — V156, hourly via the V157 scan arm | per workflow per night |
+| PIPE_ETL_CYCLE_NOT_STARTED | PIPELINE | cycle starter silent past last week's same-night kickoff + threshold min (the Tonight *Cycle start: Overdue* test) — V156, hourly via the V157 scan arm | per missed night |
+| PIPE_ETL_CYCLE_LATE | PIPELINE | terminal unfinished within threshold min of ETL_SLA_TARGET_HHMM, or projected past the hard deadline (WARN); past the target (CRIT) / hard deadline (EXH): HIGH when the cycle already finished, CRITICAL (auto-declares an incident) when still unfinished — V156, hourly via the V157 scan arm | per night per band |
 | SEC_FAILED_LOGINS | SECURITY | failed logins over threshold | daily |
 | SEC_CRED_EXPIRY | SECURITY | credential expires ≤ threshold days — 10 by default since V028 (CRITICAL if expired) | weekly until rotated |
 | ~~SEC_BREAK_GLASS_USE~~ | SECURITY | retired at V034 (muted since V025) — admin-role activity stays as evidence on Security -> Changes | — |

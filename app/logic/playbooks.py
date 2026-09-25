@@ -211,6 +211,52 @@ PLAYBOOKS: dict[str, str] = {
         "3. Fix the root error, `EXECUTE TASK <DB.SCHEMA.TASK>;` once to prove it, confirm "
         "SUCCEEDED, resolve. A failed root also skipped its children — check Tasks > Graph."
     ),
+    # V156 (Next-Fifty rank 2): the nightly Informatica cycle, pushed by SP_SCAN_ETL_CYCLE (hourly via the
+    # V157 alert-scan add-on arm). Same night key / retry collapse as Operations > Pipeline SLA > Tonight.
+    "PIPE_ETL_TASK_FAILED": (
+        "**Means:** at least the threshold number (never fewer than one) of one workflow's tasks in "
+        "tonight's Informatica cycle ended FAILED on their final attempt (retries collapse to the last "
+        "attempt, so a failure a retry fixed auto-clears). A failure in the cycle TERMINAL workflow is "
+        "raised HIGH — the cycle cannot finish until it is re-run. Snoozing one night's event also "
+        "snoozes that workflow's later nights until it wakes.\n\n"
+        "1. Operations > Pipeline SLA → *Tonight* → *Tonight at a glance* (failed workflows), then "
+        "*Recurring failures* → *Failure recurrence* for whether this task is chronic.\n"
+        "2. Snowsight: `SELECT CYCLE_DATE, TASK_NAME, TERMINAL_STATUS, FIRST_START, TERMINAL_START, "
+        "TERMINAL_END FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS WHERE WORKFLOW_NAME = '<workflow>' "
+        "ORDER BY CYCLE_DATE DESC, FIRST_START;` then the Informatica session log for the error.\n"
+        "3. Fix and re-run the failed session(s) before the SLA target; resolve ACTIONED (NOISE if "
+        "Informatica already handled it)."
+    ),
+    "PIPE_ETL_CYCLE_NOT_STARTED": (
+        "**Means:** the cycle STARTER workflow (ETL_CYCLE_START_WORKFLOW) has no run for a night it ran on "
+        "the same weekday last week, and it is past last week's kickoff + the rule's grace minutes — the "
+        "same test as the *Cycle start: Overdue* tile. Nothing downstream loads tonight. Snoozing it also "
+        "snoozes the next missed nights until it wakes.\n\n"
+        "1. Operations > Pipeline SLA → *Tonight* → *Tonight at a glance*: confirm Cycle start = Overdue and "
+        "when it last ran.\n"
+        "2. Check the Informatica scheduler / integration service and the starter's schedule: `SELECT "
+        "MAX(TASK_START_DTTM) FROM <ETL_CONTROL_STATUS_FQN> WHERE WORKFLOW_NAME = '<starter>';`\n"
+        "3. Start the cycle, confirm the starter lands in CONTROL_STATUS, resolve ACTIONED. A planned no-run "
+        "night (holiday, change freeze) = resolve as EXPECTED."
+    ),
+    "PIPE_ETL_CYCLE_LATE": (
+        "**Means:** tonight's cycle (starter → terminal workflow) is at risk of, or past, its SLA clock. "
+        "WARN (the rule severity, HIGH by default) = the terminal is unfinished inside the rule's lead "
+        "window (threshold minutes before ETL_SLA_TARGET_HHMM) or a late start projects past the hard "
+        "deadline. Past the target or the hard deadline: a cycle that already FINISHED late keeps the rule "
+        "severity (email, no incident); a cycle still unfinished is CRITICAL and auto-declares an incident "
+        "(when incident auto-declare is on). Each crossing re-alerts and supersedes the lower band. "
+        "Snoozing one night's WARN also snoozes later nights' WARN, never a CRIT/EXH.\n\n"
+        "1. Operations > Pipeline SLA → *Tonight* → *Tonight at a glance* (what failed / did not run / is "
+        "still running), then *SLA finish forecast* for how late it usually runs.\n"
+        "2. Snowsight: `SELECT WORKFLOW_NAME, TASK_NAME, TERMINAL_STATUS, FIRST_START FROM "
+        "DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS WHERE CYCLE_DATE = (SELECT MAX(CYCLE_DATE) FROM "
+        "DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS) AND TERMINAL_END IS NULL ORDER BY FIRST_START;` — the hung "
+        "step on the critical path.\n"
+        "3. Unblock / re-run it, tell report owners if the target will be missed, resolve ACTIONED; a known-"
+        "long night (month-end) = EXPECTED. Only lead-window WARN tags tune THRESHOLD_NUM: recurring "
+        "lead-window WARNs on nights that finish on time = lower the rule's lead threshold."
+    ),
     "PIPE_VOLUME_DROP": (
         "**Means:** a PROD table that normally adds 1,000+ rows/day loaded far fewer yesterday "
         "than its prior-7-day average.\n\n"
