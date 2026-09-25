@@ -127,7 +127,10 @@ def classify_row(row: pd.Series | dict) -> tuple[str, str]:
         return base
 
     # --- text-signature classes (most specific first) ------------------------
-    _tag = _text(row, "QUERY_TAG")            # upper-cased; SiS stamps its app tag on every app statement
+    # upper-cased. SiS stamps its app tag on every app statement, but today's family builders
+    # (compile_heavy_families, the mart twin, chatter families) do not select QUERY_TAG, so this arm only
+    # fires for a frame that carries it; it keeps the classifier correct if one ever does.
+    _tag = _text(row, "QUERY_TAG")
     if ("SYSTEM$FBE" in text or "EXECUTE STREAMLIT" in text or _tag.startswith("OVERWATCH")
             or APP_SIS_QUERY_TAG_FRAGMENT.upper() in _tag):
         return SYSTEM_GENERATED, conf("HIGH")

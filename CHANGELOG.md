@@ -11,8 +11,10 @@
 - `common.app_self_sql` / `not_app_self_sql` now recognise that stamp (`config.APP_SIS_QUERY_TAG_FRAGMENT`,
   tied to snowflake.yml's identifier by a test), alongside the old prefix and comment marker. Every
   self-noise view (query triage and fingerprints, proc SLA and regression, chatter, repeat queries, release
-  days) now actually drops the app's own statements, and the Spend panel's driver classifier calls them
-  system-generated.
+  days) now actually drops the app's own statements. Admin > Performance's statement-family scan keys on the
+  stamp and leaves out the Streamlit session statement (it runs for the whole viewer session). Known gap:
+  the DB-side operator-stats collector (V147) still filters only on the old tag and marker, so the app's
+  heavy reads can reach the operator boards while triage hides them; a wave-2 migration aligns it.
 - Admin > App self-cost: `INTERACTIVE APP` is every statement the app ran; `APP RUNTIME (SiS)` is the
   Streamlit session statement (tested first, since it carries the same stamp); the `APP RESULT FETCH`
   bucket is gone (the fetches carry the stamp). The split now holds for the whole 14-day window, not just

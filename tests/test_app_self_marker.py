@@ -43,10 +43,12 @@ def test_exact_renders():
 def test_sis_tag_fragment_names_the_deployed_app():
     # the fragment must track snowflake.yml's Streamlit identifier, or the app stops recognising itself
     yml = (_ROOT / "snowflake.yml").read_text(encoding="utf-8")
-    ident = yml.split("identifier:", 1)[1]
-    assert f"name: {config.APP_STREAMLIT_NAME}" in ident and f"database: {config.OVERWATCH_DB}" in ident
-    assert f"schema: {config.CORE_SCHEMA}" in ident
-    assert config.APP_SIS_QUERY_TAG_FRAGMENT == '"StreamlitName":"DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP"'
+    block = yml.split("identifier:", 1)[1].split("\n")[1:4]          # the three indented key: value lines
+    ident = dict(line.strip().split(": ", 1) for line in block)
+    assert (ident["database"], ident["schema"], ident["name"]) == (
+        config.OVERWATCH_DB, config.CORE_SCHEMA, config.APP_STREAMLIT_NAME)
+    expected = f'"StreamlitName":"{ident["database"]}.{ident["schema"]}.{ident["name"]}"'
+    assert expected == config.APP_SIS_QUERY_TAG_FRAGMENT
     assert "'" not in config.APP_SIS_QUERY_TAG_FRAGMENT                  # safe as a SQL literal
 
 
@@ -78,6 +80,13 @@ def test_marked_builders_parse():
         sqlglot.parse_one(sql, read="snowflake")
 
 
+def test_app_statement_stats_leaves_out_the_streamlit_session_statement():
+    # review fix: the EXECUTE STREAMLIT statement carries the same SiS stamp but spans a whole session
+    sql = mart_sql.app_statement_stats(7)
+    assert common.APP_SIS_TAG_SQL in sql
+    assert "AND NOT STARTSWITH(UPPER(COALESCE(QUERY_TEXT, '')), 'EXECUTE STREAMLIT')" in sql
+
+
 def test_admin_note_is_honest():
     src = (_ROOT / "app/ui/pages/admin.py").read_text(encoding="utf-8")
     assert "carries an OVERWATCH query tag" not in src
@@ -87,3 +96,5 @@ def test_admin_note_is_honest():
     assert "mart_sql.APP_OTHER_WORKLOAD" in body and "UNTAGGED APP" not in src
     assert "mart_sql.APP_RUNTIME_WORKLOAD" in body and "APP_FETCH_WORKLOAD" not in src
     assert "_TAGGED_SINCE" not in src                                 # nothing claims our tag lands
+    perf = src.split("def _performance_tab(", 1)[1].split("\ndef ", 1)[0]
+    assert "OVERWATCH-tagged" not in perf and "OVERWATCH query tag" not in perf

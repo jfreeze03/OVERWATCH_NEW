@@ -1,4 +1,8 @@
-"""Next-Fifty #7 Slice B (v4.590.0): every app statement carries its OWN QUERY_TAG on owner's-rights SiS.
+"""Next-Fifty #7 Slice B (v4.590.0): the app sends its OWN QUERY_TAG with every statement on owner's-rights SiS.
+
+v4.591.0 note: the owner's post-deploy diagnostic showed Streamlit-in-Snowflake OVERRIDES that tag with its
+own app stamp, so self-traffic keys on SiS's stamp (tests/test_app_self_marker.py); this transport still
+carries Cortex's per-statement timeout and tags off-SiS.
 
 ALTER SESSION is rejected there, so the session-level tag never applied in production. The owner's probe
 (2026-09-24, an owner's-rights proc as the SiS proxy) proved Snowpark ``statement_params`` records the

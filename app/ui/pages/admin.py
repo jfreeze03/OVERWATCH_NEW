@@ -1316,7 +1316,7 @@ def _performance_tab() -> None:
     st.caption(
         "Every fetch the app persisted, grouped by page and query key — the slowest "
         "rows are the builders worth optimizing next, and the key names the call site. "
-        "The OVERWATCH-tagged WH_ALFA_ADMIN statement-family scan (grouped by parameterized "
+        "The WH_ALFA_ADMIN scan of the app's own statement families (grouped by parameterized "
         "hash, with bytes scanned) is one toggle below."
     )
     telemetry = query_telemetry()
@@ -1363,9 +1363,9 @@ def _performance_tab() -> None:
                         "one thing the app's own telemetry cannot record."):
         methodology_note(_SCAN_NOTE)  # #1: scan/cache provenance → audit-mode only
         scan = run(mart_sql.app_statement_stats(7), page=_PAGE, key="app_stmt_stats",
-                   tier="historical", source="ACCOUNT_USAGE.QUERY_HISTORY (tagged WH_ALFA_ADMIN)")
+                   tier="historical", source="ACCOUNT_USAGE.QUERY_HISTORY (WH_ALFA_ADMIN, the app's SiS tag)")
         if guard(scan, "No statements on the app warehouse in the last 7 days.",
-                 setup_hint="Stats appear after OVERWATCH-tagged app traffic runs on WH_ALFA_ADMIN."):
+                 setup_hint="Stats appear after the app has run statements on WH_ALFA_ADMIN."):
             # House convention: styled_table, not a raw st.dataframe — it carries the
             # status/delta coloring, header prettifier, pinned identity column, and the
             # self-identifying CSV export that every other table on the page has.
@@ -1386,7 +1386,8 @@ def _performance_tab() -> None:
                     **_scan_cfg,
                 })
             result_caption(scan)
-            st.caption("Interactive statements only; the OVERWATCH query tag excludes loader and task work.")
+            st.caption("The app's own statements only (Streamlit-in-Snowflake tags each one with the app's name), "
+                       "so loader and task work is excluded; the Streamlit session statement itself is left out.")
 
     section_header("Page adoption (30d)", "", "operations")
     usage = run(mart_sql.app_usage_summary(30), page=_PAGE, key="app_usage", tier="recent",

@@ -134,11 +134,13 @@ WHERE {and_where(*where)}
 
 
 def app_statement_stats(days: int = 7) -> str:
-    """The app's own slowest tagged statement families on its shared warehouse.
+    """The app's own slowest statement families on its shared warehouse, identified by the QUERY_TAG
+    Streamlit-in-Snowflake stamps on every app statement (common.app_self_sql).
 
     Groups by QUERY_PARAMETERIZED_HASH so each app query pattern (all pages,
     all filter values) collapses to one row — the honest way to find which
-    builder to optimize next.
+    builder to optimize next. The Streamlit session statement (EXECUTE STREAMLIT ...) carries the
+    same stamp but runs for the whole viewer session, so it is excluded - it is not a builder.
     """
     from app.config import APP_WAREHOUSE
 
@@ -157,6 +159,7 @@ FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
   AND WAREHOUSE_NAME = {sql_literal(APP_WAREHOUSE)}
   AND {app_self_sql()}
+  AND NOT STARTSWITH(UPPER(COALESCE(QUERY_TEXT, '')), 'EXECUTE STREAMLIT')
   AND QUERY_PARAMETERIZED_HASH IS NOT NULL
 GROUP BY 1
 ORDER BY P95_S DESC

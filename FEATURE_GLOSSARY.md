@@ -956,10 +956,10 @@ What OVERWATCH itself spends on its shared warehouse WH_ALFA_ADMIN over 14 days,
 
 | Metric | Means | Formula | Unit | Source |
 |---|---|---|---|---|
-| **App queries (14d)** | Headline count of queries on WH_ALFA_ADMIN in 14 days. NOTE: sums BOTH workload rows (interactive + loaders/tasks), so it is total warehouse queries, not only tagged app UI queries. | total = sum(APP_QUERIES) over all rows; APP_QUERIES = COUNT(*) per DAY,WORKLOAD | count | mart_sql.app_self_cost(14) -> ACCOUNT_USAGE.QUERY_HISTORY WHERE WAREHOUSE_NAME='WH_ALFA_ADMIN', GROUP BY DAY, tag-split |
+| **App queries (14d)** | Count of the app's own statements on WH_ALFA_ADMIN in 14 days (the INTERACTIVE APP rows: statements Streamlit-in-Snowflake tagged as this app). '—' when none. | total = sum(APP_QUERIES) over WORKLOAD = 'INTERACTIVE APP'; APP_QUERIES = COUNT(*) per DAY,WORKLOAD | count | mart_sql.app_self_cost(14) -> ACCOUNT_USAGE.QUERY_HISTORY WHERE WAREHOUSE_NAME='WH_ALFA_ADMIN', GROUP BY DAY, tag-split |
 | **Failed** | Total failed queries on the warehouse in 14d (both workloads). | failed = sum(FAILED); FAILED = SUM(IFF(EXECUTION_STATUS<>'SUCCESS',1,0)) | count | same builder; delta_color inverse when >0 |
 
-*Columns:* **DAY** — DATE(START_TIME) of the queries (last 14 complete-ish days from CURRENT_DATE).; **WORKLOAD** — IFF(QUERY_TAG LIKE 'OVERWATCH%','INTERACTIVE APP','LOADERS / TASKS') — the tag split.; **APP_QUERIES** — COUNT(*) of queries in that DAY/WORKLOAD bucket.; **ELAPSED_SEC** — SUM(TOTAL_ELAPSED_TIME)/1000 seconds; column named _SEC so styled_table humanizes it (h/m/s).; **FAILED** — Count of non-SUCCESS queries in that bucket.
+*Columns:* **DAY** — DATE(START_TIME) of the queries (last 14 complete-ish days from CURRENT_DATE).; **WORKLOAD** — mart_sql._self_workload_sql: 'APP RUNTIME (SiS)' for the EXECUTE STREAMLIT session statement (tested first), 'INTERACTIVE APP' for statements carrying the app's SiS tag (common.app_self_sql), else 'TASKS / ALERTS / OTHER'.; **APP_QUERIES** — COUNT(*) of queries in that DAY/WORKLOAD bucket.; **ELAPSED_SEC** — SUM(TOTAL_ELAPSED_TIME)/1000 seconds; column named _SEC so styled_table humanizes it (h/m/s).; **FAILED** — Count of non-SUCCESS queries in that bucket.
 
 ### Performance
 Prove (or disprove) the app is fast from its own persisted evidence: per-page SLO scorecard, this-session statement stats, the app's own slowest builders (telemetry, with an optional QUERY_HISTORY GB-scan), page adoption, and fleet-wide slow/failed fetches with per-page tuning targets.
