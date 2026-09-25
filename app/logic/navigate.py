@@ -107,6 +107,13 @@ def fix_target(rule_id: str, text: str = "") -> dict | None:
 _WH_RE = re.compile(r"\bWH_[A-Z0-9_]+\b")
 _DB_RE = re.compile(r"\b([A-Z][A-Z0-9_]{2,})\.([A-Z][A-Z0-9_]{2,})\.")
 
+# Account-wide self-watch rules whose text carries file names and raw loader error messages, not
+# entities: OPS_PIPELINE_DEGRADED's STALE leg ends "snowflake/loader_chain_check.sql." (read as database
+# LOADER_CHAIN_CHECK) and its ERR leg embeds a free-text SQLERRM ("Object 'DBA_MAINT_DB.OVERWATCH.X' does
+# not exist" -> database DBA_MAINT_DB; a 'WH_...' name -> warehouse). A sticky top-bar filter taken from
+# that text would scope every later page to a bogus or OVERWATCH-only entity, so Investigate applies none.
+_NO_ENTITY_FILTER_RULES = frozenset({"OPS_PIPELINE_DEGRADED"})
+
 
 def investigation_target(rule_id: str, text: str = "") -> dict:
     """-> {"page": str, "section": str, "filters": {...}} for one event."""
@@ -121,6 +128,8 @@ def investigation_target(rule_id: str, text: str = "") -> dict:
             # OPS_* (canary/render/scan) deliberately lands on Overview: their
             # home is Admin, which non-DBA profiles cannot navigate to.
             page, section = "Overview", ""
+    if rid in _NO_ENTITY_FILTER_RULES:
+        return {"page": page, "section": section, "filters": {}}
     filters: dict = {}
     upper = str(text or "").upper()
     wh = _WH_RE.search(upper)

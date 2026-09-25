@@ -199,8 +199,16 @@ def test_alert_closed_loop_notes_are_lever_aware_and_adoptable():
     # ledger_for_event matches NOTES LIKE '%event <id8>%': the substring must survive
     assert "_cl_note = ('From alert event ' + event_id[:8]" in src
     assert "f\"{sql_literal(_cl_note)}, \"" in src
-    assert "; verify with a proof run on the Savings ledger." in src          # STATEMENT_TIMEOUT
-    assert "; the daily change scan adopts and settles it on " in src          # AUTO_SUSPEND / MAX_CLUSTERS
+    # V157 review fix: the tail comes from the pure, lever-and-direction-aware helper (unit-tested in
+    # tests/migrations/test_v157_alert_scan_self_watch_idle_push.py), fed the SAME verified current timer the tighten plan used
+    assert ("+ remediation.closed_loop_note_suffix(\n"
+            "                                                        _cl_lever,\n"
+            "                                                        _cl_cur if _cl_lever == \"AUTO_SUSPEND\" else None))"
+            ) in src
+    from app.logic.remediation import closed_loop_note_suffix
+    assert closed_loop_note_suffix("STATEMENT_TIMEOUT") == "; verify with a proof run on the Savings ledger."
+    for lever, cur in (("AUTO_SUSPEND", 600), ("MAX_CLUSTERS", None)):
+        assert closed_loop_note_suffix(lever, cur).startswith("; the daily change scan adopts and settles it on ")
 
 
 def test_optimize_shows_the_remeasure_and_keeps_auto_rows_out_of_hand_verify():

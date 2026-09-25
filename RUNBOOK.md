@@ -472,6 +472,16 @@ SEC_CRED_EXPIRY / SEC_NEW_EXPOSURE event once ACCOUNT_USAGE shows the credential
 rotated/removed or the PUBLIC grant batch fully revoked; ≥1h dwell, ACK'd and
 snoozed events are left for a human).
 
+**Rolling back V157 (order matters).** FIRST switch the two security rules' auto-clear
+flag off, by hand in a worksheet (never inside a migration):
+`UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG SET AUTO_CLEAR_ENABLED = FALSE WHERE RULE_ID IN ('SEC_CRED_EXPIRY','SEC_NEW_EXPOSURE');`
+Only THEN re-run V141's `CREATE OR REPLACE PROCEDURE ... SP_ALERT_SCAN()` and
+`... SP_ALERT_SCAN_DAILY()`. Reversed, an hourly TASK_ALERT_SCAN that lands between
+the two steps runs V141's unscoped V091 sweep, which resolves every OPEN
+SEC_CRED_EXPIRY / SEC_NEW_EXPOSURE event as AUTO_CLEARED 1h after raise, and V141's
+arms [10]/[20] never re-raise an auto-cleared key: expiring credentials and new
+PUBLIC grants silently leave the queue.
+
 | Rule | Family | Fires when (threshold = THRESHOLD_NUM, editable) | Recurrence |
 |---|---|---|---|
 | COST_DAILY_CREDITS | COST | account credits/day over threshold | daily key |
