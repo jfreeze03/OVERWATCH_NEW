@@ -139,8 +139,14 @@ def test_v154_mitigate_sweep_is_forward_only_and_never_closes():
     assert "WHERE i.STATUS = 'OPEN'\n" in m and "AND i.STATUS = 'OPEN';" in m
     assert "SET STATUS = 'RESOLVED'" not in _PROC and "'RESOLVED'," not in m
     assert "HAVING COUNT_IF(e.EVENT_ID IS NULL OR e.STATUS <> 'RESOLVED') = 0" in m
-    assert "AND MAX(e.RESOLVED_AT) <= DATEADD('hour', -1, CURRENT_TIMESTAMP());" in m   # 1h dwell
-    assert "MITIGATED_AT = r.MITIGATED_TS" in m and "GREATEST(MAX(e.RESOLVED_AT), MAX(i.DETECTED_AT))" in m
+    # 1h dwell and the stamp both use the LATER of the last member resolve and, for a machine hand-off
+    # member (SUPERSEDED / SNOOZE_SUPPRESSED), its same-rule successor's resolve (review fix, wave 2a)
+    last = "GREATEST(MAX(e.RESOLVED_AT), COALESCE(MAX(s.RESOLVED_AT), MAX(e.RESOLVED_AT))"
+    assert f"AND {last})\n               <= DATEADD('hour', -1, CURRENT_TIMESTAMP());" in m
+    assert "MITIGATED_AT = r.MITIGATED_TS" in m and f"{last},\n                        MAX(i.DETECTED_AT)) AS MITIGATED_TS" in m
+    succ = m.split("LEFT JOIN DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS s", 1)[1].split("WHERE i.STATUS", 1)[0]
+    assert "IN ('SUPERSEDED', 'SNOOZE_SUPPRESSED')" in succ and "s.RAISED_AT >= e.RAISED_AT" in succ
+    assert "s.RULE_ID = e.RULE_ID" in succ and "s.COMPANY = e.COMPANY" in succ and "s.STATUS = 'RESOLVED'" in succ
     assert "MITIGATED_BY = 'SP_INCIDENT_AUTODECLARE'" in m
     assert "mitigated := SQLROWCOUNT;" in m
     # OWNER / ACK_AT stay human numbers: never in the sweep's SET

@@ -314,6 +314,28 @@ def test_v151_semantics_truth_table(row, surfaced):
     assert _surfaces(*row) is surfaced
 
 
+def test_truth_table_mirror_matches_the_v151_predicate_shape():
+    """Review fix (wave 2a): _surfaces() hand-codes `not (DESTRUCTIVE and scope and not keep)`, so a
+    mis-nested SQL predicate (e.g. `OR NOT` for `AND NOT`) would pass every truth-table row. Lock the view's
+    boolean shape to that exact form; the literal lives HERE, independent of outputs/gen_v151.py."""
+    blk = _block(_view(_V151), _V151_BLOCK_START)
+    code = _norm(" ".join(ln for ln in blk.splitlines() if not ln.lstrip().startswith("--")))
+    types, previews = _keep_lists(code)
+
+    def q(xs: tuple[str, ...]) -> str:
+        return ", ".join(f"'{x}'" for x in xs)
+
+    assert code == (
+        "AND NOT (CHANGE_KIND = 'DESTRUCTIVE' AND ( "
+        "UPPER(COALESCE(ROLE_NAME, '')) LIKE 'TF~_%' ESCAPE '~' "
+        "OR (UPPER(COALESCE(DATABASE_NAME, '')) = 'DBA_MAINT_DB' "
+        "AND UPPER(COALESCE(SCHEMA_NAME, '')) = 'PUBLIC')) "
+        f"AND NOT (COALESCE(QUERY_TYPE, '') ILIKE ANY ({q(types)}) "
+        "OR LTRIM(REGEXP_REPLACE(UPPER(COALESCE(QUERY_PREVIEW, '')), '[[:space:]]+', ' ')) "
+        f"LIKE ANY ({q(previews)})))"
+    ), "V151 exclusion shape changed -- update _surfaces() to match"
+
+
 def test_tf_create_or_replace_never_reaches_the_arm():
     """Why the exclusion need not special-case CREATE OR REPLACE: a TF_* role is never an admin
     role, so its DESTRUCTIVE CREATE OR REPLACE tops out at 55 + 10 (PROD db) = 65 < 70."""

@@ -186,18 +186,80 @@ def _in_handler_at(body: str) -> list[tuple[int, bool]]:
     return marks
 
 
+def _block_spans(body: str) -> list[tuple[int, int, int, int]]:
+    """[(body_start, body_end, full_end, depth)] for every BEGIN...END; block (depth 0 = the proc's outer
+    block). body_end is where the block's EXCEPTION handler starts (or its END; when it has none)."""
+    stack: list[list[int]] = []
+    spans: list[tuple[int, int, int, int]] = []
+    for m in _BLOCK_KW_RE.finditer(_mask(body)):
+        kw = m.group(0)
+        if kw == "BEGIN":
+            stack.append([m.end(), -1, len(stack)])
+        elif kw == "EXCEPTION":
+            assert stack, f"EXCEPTION outside any block at {m.start()}"
+            stack[-1][1] = m.start()
+        else:
+            assert stack, f"unbalanced END; at {m.start()}"
+            start, exc, depth = stack.pop()
+            spans.append((start, exc if exc >= 0 else m.start(), m.start(), depth))
+    assert not stack, "block scanner drifted: BEGIN/END; do not balance over the proc body"
+    return spans
+
+
+def _token_violations(body: str, pairs: list[tuple[str, str]]) -> list[str]:
+    """Each ``loaded := loaded || '<tok> '`` must sit in a NESTED arm block's body (before its handler, not in
+    the proc's outer block - there it would advance freshness even when the arm's load failed, the V066 #11
+    class), and that arm must itself MERGE/INSERT into every table the srcmap maps the token to (a token
+    appended by the wrong arm stamps the wrong source fresh)."""
+    names_by_token: dict[str, set[str]] = {}
+    for name, tok in pairs:
+        names_by_token.setdefault(tok, set()).add(name)
+    spans = _block_spans(body)
+    problems: list[str] = []
+    for m in _TOKEN_RE.finditer(body):
+        pos, tok = m.start(), m.group(1)
+        enclosing = [s for s in spans if s[0] <= pos < s[2]]
+        if not enclosing:
+            problems.append(f"{tok}: outside every block")
+            continue
+        start, body_end, _full, depth = max(enclosing, key=lambda s: s[0])      # innermost block
+        if depth < 1:
+            problems.append(f"{tok}: appended in the proc's outer block, not inside its arm")
+            continue
+        if pos >= body_end:
+            problems.append(f"{tok}: appended inside an EXCEPTION handler")
+            continue
+        arm = body[start:body_end]
+        for name in sorted(names_by_token.get(tok, ())):
+            loads = rf"(?:MERGE\s+INTO|INSERT\s+(?:OVERWRITE\s+)?INTO)\s+DBA_MAINT_DB\.OVERWATCH\.{name}\b"
+            if not re.search(loads, arm):
+                problems.append(f"{tok}: its arm never loads {name}, the table the srcmap maps it to")
+    return problems
+
+
 def test_every_token_is_appended_on_its_arms_success_path():
     body = _latest_proc_bodies()["SP_LOAD_MARTS_V27"]
-    marks = _in_handler_at(body)
     split = body.index(_DAILY_SPLIT)
     stamps = [m.start() for m in re.finditer(r"MERGE INTO DBA_MAINT_DB\.OVERWATCH\.SOURCE_FRESHNESS_STATE t", body)]
     assert len(stamps) == 2 and stamps[0] < split < stamps[1]
+    pairs = [p for block in _scope_blocks().values() for p in _PAIR_RE.findall(_SRCMAP_RE.findall(block)[0])]
+    problems = _token_violations(body, pairs)
+    assert not problems, problems
     for m in _TOKEN_RE.finditer(body):
-        pos = m.start()
-        in_handler = [h for p, h in marks if p <= pos][-1]
-        assert not in_handler, f"token {m.group(1)!r} is appended inside an EXCEPTION handler"
-        stamp = stamps[0] if pos < split else stamps[1]
-        assert pos < stamp, f"token {m.group(1)!r} is appended after its scope's freshness stamp"
+        stamp = stamps[0] if m.start() < split else stamps[1]
+        assert m.start() < stamp, f"token {m.group(1)!r} is appended after its scope's freshness stamp"
+
+
+def test_token_guard_catches_the_v066_class_and_a_wrong_mapping():
+    """Review fix (wave 2a): a token moved OUT of its arm (appended even when the arm's MERGE failed) and a
+    token appended by an arm that loads a different table must both be caught."""
+    arm = ("BEGIN\n  BEGIN\n    MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_A t USING x ON 1=1;\n{inside}"
+           "  EXCEPTION\n    WHEN OTHER THEN\n      NULL;\n  END;\n{outside}END;\n")
+    ok = arm.format(inside="    loaded := loaded || 'a ';\n", outside="")
+    moved_out = arm.format(inside="", outside="  loaded := loaded || 'a ';\n")
+    assert _token_violations(ok, [("MART_A", "a")]) == []
+    assert any("outer block" in p for p in _token_violations(moved_out, [("MART_A", "a")]))
+    assert any("never loads MART_B" in p for p in _token_violations(ok, [("MART_B", "a")]))
 
 
 def test_block_scanner_sees_handlers():

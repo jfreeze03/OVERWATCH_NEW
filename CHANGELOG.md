@@ -42,6 +42,16 @@ Five owner-applied migrations (none writes ALERT_EVENTS, emails, or DROPs an obj
   load target to have a stamp; NOTIFICATION_HISTORY reads clamp to 13 days (the 336-hour limit, owner probe);
   CONDITION_ENDED joins the machine-close kinds excluded from human metrics, shipped ahead of wave 2b's sweep.
 
+- **Review fixes (adversarial review, 10 agents, 6 confirmed).** V154's auto-mitigate times a hand-off member
+  (SUPERSEDED / SNOOZE_SUPPRESSED) by its successor's resolve, so time-to-mitigate is not understated and
+  the 1-hour dwell cannot pass on a stale timestamp. V038's first-pass autobook run is guarded to a genuine
+  first apply, so a full rebuild that keeps operator data can no longer settle V153's in-flight rows with
+  V038's old logic (the already-applied account is unaffected). The opt-in historical re-settle ships as
+  `snowflake/resettle_autobook_14d.sql` (read-only preview grids; the one UPDATE stays commented). The V151
+  predicate shape and the freshness token chain (each token inside the arm that loads its mapped table) are
+  now locked by tests that fail on a mis-nested or misplaced edit. Viewers see ready-to-close text that
+  does not point at operator-only controls.
+
 Owner-side: run `snowflake/run/PROBES_WAVE2.sql` (A1/A2, B, C) first if you want the previews; apply
 V151 → V155 in order from the runbox RUN_NEXT (each guards on the previous; V153's tail runs the autobook
 once); then `snow streamlit deploy --replace`. Wave 2b (overnight ETL alerts, the merged alert-scan rework,

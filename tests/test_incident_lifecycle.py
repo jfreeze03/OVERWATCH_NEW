@@ -127,6 +127,9 @@ def test_each_lifecycle_write_is_prechecked_and_latched():
     # non-operators still see the note + provenance: the write gate returns AFTER both
     assert body.index("if not can_write:") > body.index('st.caption("Lifecycle: "')
     assert body.index("if not can_write:") > body.index("Ready to close")
+    # review fix: a viewer (no write) is never told to use a control it is not shown
+    assert "an operator records the root " in body and "cause and closes it." in body
+    assert "An operator closes each with its root cause." in _CR
 
 
 def test_ready_count_comes_from_the_uncapped_metrics_row():

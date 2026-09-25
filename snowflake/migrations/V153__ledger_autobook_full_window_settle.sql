@@ -29,7 +29,7 @@
 --   closes), not ~3; "verified this quarter" / the active run-rate move accordingly.
 --   SP_VERIFY_IDLE_SAVINGS is re-derived from V053 to skip rows tied to a detected change.
 --   Forward-only: already-settled rows are never rewritten here (re-settling them is a separate owner
---   opt-in, RESETTLE_AUTOBOOK_14D.sql on the runbox). No schema change, no task change, teardown
+--   opt-in, snowflake/resettle_autobook_14d.sql). No schema change, no task change, teardown
 --   unchanged. Apply AFTER V152. Idempotent.
 
 EXECUTE IMMEDIATE
@@ -287,8 +287,9 @@ $$;
 
 -- Run once at apply (the same work TASK_LEDGER_AUTOBOOK does after the 06:40 America/Chicago change
 -- scan). This is NOT a no-op: it can ADOPT a manual ESTIMATED row booked in the last 3 days whose change
--- the scan has already seen but not yet booked. Nothing is settle-eligible yet (the V145 gate already
--- settled every non-PENDING row, and a closed window is never PENDING). Run it under the
+-- the scan has already seen but not yet booked. On a FIRST apply nothing is settle-eligible yet (the V145
+-- gate already settled every non-PENDING row, and a closed window is never PENDING); on a rebuild
+-- replay it simply settles whatever windows have closed, with this file's logic. Run it under the
 -- RUN_NEXT prelude ALTER SESSION SET TIMEZONE = 'America/Chicago' so CURRENT_DATE() and ADOPT's
 -- LTZ -> NTZ cast use the task clock, not a UTC worksheet's. If it errors, SCHEMA_VERSION 153 is not
 -- written; ADOPT stamps may already be committed (harmless under V145) -- roll back by re-running the

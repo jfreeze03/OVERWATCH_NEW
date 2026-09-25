@@ -646,7 +646,7 @@ _EXPECTED_MIGRATIONS = {
          "and a perf-regressed marker; FLOAT credit rate (TRY_TO_NUMBER priced 3.68 as 4, +8.7%); a "
          "matching manual row is ADOPTED instead of double-booked. SP_VERIFY_IDLE_SAVINGS (from V053) "
          "skips change-tied rows. Proc-only; the tail runs the autobook once (it can adopt manual rows "
-         "from the last 3 days). Historical rows untouched unless the owner runs the re-settle opt-in",
+         "from the last 3 days). Historical rows untouched unless the owner runs snowflake/resettle_autobook_14d.sql",
     154: "Incident loop: SP_INCIDENT_AUTODECLARE re-derived from V099 (V098 re-link guard + V099 "
          "company scope kept) now links a later unlinked OPEN/ACK CRITICAL to the OPEN/MITIGATED "
          "incident its family already has open (timelines, RCA and member counts stop missing it) and "

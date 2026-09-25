@@ -313,7 +313,9 @@ def _incident_lifecycle_controls(inc_row, iid: str, *, can_write: bool) -> None:
     if ready:
         # a context note, not an absence — st.caption keeps the page's raw-info ceiling
         st.caption("Ready to close — every member alert is resolved. Record the root cause in "
-                   "'Close this incident' below; closing stays human.")
+                   "'Close this incident' below; closing stays human." if can_write else
+                   "Ready to close — every member alert is resolved; an operator records the root "
+                   "cause and closes it.")
     owner_raw = inc_row.get("OWNER")
     owner = str(owner_raw).strip() if pd.notna(owner_raw) else ""   # NULL renders '—', never 'nan'
     bits = []
@@ -1096,7 +1098,8 @@ def render() -> None:
         _ready_n = int(safe_float(inc_met.df.iloc[0].get("READY_TO_CLOSE_N"))) if inc_met.usable() else 0
         if _ready_n:
             st.caption(f"{_ready_n:,} open incident(s) ready to close — every member alert is resolved. "
-                       "Select one and close it with its root cause (closing stays human).")
+                       + ("Select one and close it with its root cause (closing stays human)." if _is_op
+                          else "An operator closes each with its root cause."))
         if oi.ok and oi.empty:
             empty_state("clean", "No open incidents.")
         elif guard(oi, "", setup_hint="Incident tables are not installed yet — an admin can apply the pending schema update on Admin → Migrations & freshness."):

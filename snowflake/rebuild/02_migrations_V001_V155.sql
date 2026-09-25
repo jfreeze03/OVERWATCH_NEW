@@ -12430,7 +12430,22 @@ $$;
 
 -- First pass now: books + settles from the registry's existing 90 days,
 -- so the ledger stops being empty the moment V038 applies.
-CALL DBA_MAINT_DB.OVERWATCH.SP_LEDGER_AUTOBOOK();
+-- Rebuild-replay guard (added with V153, 2026-09-24): only on a GENUINE first apply (SCHEMA_VERSION
+-- max 37). A full rebuild that keeps operator data replays this file with SCHEMA_VERSION already at the
+-- tip; running V038's original settle logic then (3-day gate, rate read as a whole number, no V118
+-- dedup) would permanently settle V153's in-flight rows before V153 re-derives the proc. This does not
+-- change anything already applied in the account.
+EXECUTE IMMEDIATE
+$$
+DECLARE
+    v NUMBER;
+BEGIN
+    SELECT MAX(VERSION) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 38) THEN
+        CALL DBA_MAINT_DB.OVERWATCH.SP_LEDGER_AUTOBOOK();
+    END IF;
+END;
+$$;
 
 CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LEDGER_AUTOBOOK
     WAREHOUSE = WH_ALFA_ADMIN
@@ -75351,7 +75366,7 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --   closes), not ~3; "verified this quarter" / the active run-rate move accordingly.
 --   SP_VERIFY_IDLE_SAVINGS is re-derived from V053 to skip rows tied to a detected change.
 --   Forward-only: already-settled rows are never rewritten here (re-settling them is a separate owner
---   opt-in, RESETTLE_AUTOBOOK_14D.sql on the runbox). No schema change, no task change, teardown
+--   opt-in, snowflake/resettle_autobook_14d.sql). No schema change, no task change, teardown
 --   unchanged. Apply AFTER V152. Idempotent.
 
 EXECUTE IMMEDIATE
@@ -75609,8 +75624,9 @@ $$;
 
 -- Run once at apply (the same work TASK_LEDGER_AUTOBOOK does after the 06:40 America/Chicago change
 -- scan). This is NOT a no-op: it can ADOPT a manual ESTIMATED row booked in the last 3 days whose change
--- the scan has already seen but not yet booked. Nothing is settle-eligible yet (the V145 gate already
--- settled every non-PENDING row, and a closed window is never PENDING). Run it under the
+-- the scan has already seen but not yet booked. On a FIRST apply nothing is settle-eligible yet (the V145
+-- gate already settled every non-PENDING row, and a closed window is never PENDING); on a rebuild
+-- replay it simply settles whatever windows have closed, with this file's logic. Run it under the
 -- RUN_NEXT prelude ALTER SESSION SET TIMEZONE = 'America/Chicago' so CURRENT_DATE() and ADOPT's
 -- LTZ -> NTZ cast use the task clock, not a UTC worksheet's. If it errors, SCHEMA_VERSION 153 is not
 -- written; ADOPT stamps may already be committed (harmless under V145) -- roll back by re-running the
@@ -75797,10 +75813,13 @@ BEGIN
     -- never to RESOLVED: closing stays human so the root cause is captured (the app surfaces these
     -- as 'ready to close'). A member closed as SUPERSEDED / SNOOZE_SUPPRESSED is a machine hand-off
     -- to a successor, so it blocks while a same-rule same-company event raised at/after it is still
-    -- OPEN/ACK/SNOOZED. >=1h dwell on the LAST member resolve (anti-flap). MITIGATED_AT = when the
-    -- last member resolved (not this sweep's clock), so time-to-mitigate is not inflated by the dwell
-    -- or the hourly cadence; MITIGATED_BY names the machine (a human Mark mitigated leaves it NULL).
-    -- OWNER / ACK_AT are never touched here (MTTA stays a human number). Isolated like [attach].
+    -- OPEN/ACK/SNOOZED. >=1h dwell on the LAST resolve (anti-flap). MITIGATED_AT = when the last
+    -- member resolved (not this sweep's clock), so time-to-mitigate is not inflated by the dwell or the
+    -- hourly cadence -- and for a machine hand-off member, when its same-rule successor resolved (the
+    -- condition really ended then; review fix: the member's own machine-close time understated MTTM and
+    -- let the dwell pass on stale timestamps). MITIGATED_BY names the machine (a human Mark mitigated
+    -- leaves it NULL). OWNER / ACK_AT are never touched here (MTTA stays a human number). Isolated like
+    -- [attach].
     BEGIN
         CREATE OR REPLACE TEMPORARY TABLE _OW_INC_MITIGATE AS
         WITH live AS (
@@ -75810,7 +75829,8 @@ BEGIN
             GROUP BY RULE_ID, COMPANY
         )
         SELECT i.INCIDENT_ID,
-               GREATEST(MAX(e.RESOLVED_AT), MAX(i.DETECTED_AT)) AS MITIGATED_TS
+               GREATEST(MAX(e.RESOLVED_AT), COALESCE(MAX(s.RESOLVED_AT), MAX(e.RESOLVED_AT)),
+                        MAX(i.DETECTED_AT)) AS MITIGATED_TS
         FROM DBA_MAINT_DB.OVERWATCH.INCIDENTS i
         JOIN DBA_MAINT_DB.OVERWATCH.INCIDENT_MEMBERS m
           ON m.INCIDENT_ID = i.INCIDENT_ID
@@ -75820,12 +75840,19 @@ BEGIN
         LEFT JOIN live l
           ON l.RULE_ID = e.RULE_ID
          AND l.COMPANY = e.COMPANY
+        LEFT JOIN DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS s
+          ON COALESCE(e.RESOLUTION_KIND, '') IN ('SUPERSEDED', 'SNOOZE_SUPPRESSED')
+         AND s.RULE_ID = e.RULE_ID
+         AND s.COMPANY = e.COMPANY
+         AND s.RAISED_AT >= e.RAISED_AT
+         AND s.STATUS = 'RESOLVED'
         WHERE i.STATUS = 'OPEN'
         GROUP BY i.INCIDENT_ID
         HAVING COUNT_IF(e.EVENT_ID IS NULL OR e.STATUS <> 'RESOLVED') = 0
            AND COUNT_IF(COALESCE(e.RESOLUTION_KIND, '') IN ('SUPERSEDED', 'SNOOZE_SUPPRESSED')
                         AND l.LAST_LIVE_AT >= e.RAISED_AT) = 0
-           AND MAX(e.RESOLVED_AT) <= DATEADD('hour', -1, CURRENT_TIMESTAMP());
+           AND GREATEST(MAX(e.RESOLVED_AT), COALESCE(MAX(s.RESOLVED_AT), MAX(e.RESOLVED_AT)))
+               <= DATEADD('hour', -1, CURRENT_TIMESTAMP());
 
         UPDATE DBA_MAINT_DB.OVERWATCH.INCIDENTS i
            SET STATUS = 'MITIGATED',
