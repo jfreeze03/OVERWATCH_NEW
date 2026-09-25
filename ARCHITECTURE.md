@@ -54,7 +54,10 @@ Snowflake connection, and it is enforced by code review + the CI test matrix
   No silent LIMIT injection (old-app M1).
 - Statement timeout and query tag are tracked **on the session object**, not in
   `st.session_state`, so a recycled connection cannot desync (old-app M4).
-- Query tag: `OVERWATCH|page=<page>|tier=<tier>` for self-cost attribution.
+- Query tag: the app sends `OVERWATCH|page=<page>|tier=<tier>` (ALTER SESSION off-SiS, statement_params
+  on SiS), but Streamlit-in-Snowflake overrides it with its own stamp on every app statement
+  (`"StreamlitName":"DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP"`); self-cost attribution and every
+  self-noise filter key on that stamp (`app.data.common.app_self_sql`).
 
 ## Error handling contract
 

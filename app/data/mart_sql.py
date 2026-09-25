@@ -134,11 +134,13 @@ WHERE {and_where(*where)}
 
 
 def app_statement_stats(days: int = 7) -> str:
-    """The app's own slowest tagged statement families on its shared warehouse.
+    """The app's own slowest statement families on its shared warehouse, identified by the QUERY_TAG
+    Streamlit-in-Snowflake stamps on every app statement (common.app_self_sql).
 
     Groups by QUERY_PARAMETERIZED_HASH so each app query pattern (all pages,
     all filter values) collapses to one row — the honest way to find which
-    builder to optimize next.
+    builder to optimize next. The Streamlit session statement (EXECUTE STREAMLIT ...) carries the
+    same stamp but runs for the whole viewer session, so it is excluded - it is not a builder.
     """
     from app.config import APP_WAREHOUSE
 
@@ -157,6 +159,7 @@ FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
   AND WAREHOUSE_NAME = {sql_literal(APP_WAREHOUSE)}
   AND {app_self_sql()}
+  AND NOT STARTSWITH(UPPER(COALESCE(QUERY_TEXT, '')), 'EXECUTE STREAMLIT')
   AND QUERY_PARAMETERIZED_HASH IS NOT NULL
 GROUP BY 1
 ORDER BY P95_S DESC
@@ -903,32 +906,30 @@ LIMIT {limit}
 """
 
 
-# Next-Fifty #7 Slice B: the shared-warehouse self-cost split. INTERACTIVE APP = the statements the app tags
-# per statement (v4.590.0+). Two app statements NO client-side tag can reach get their own buckets: the SiS
-# runtime's session statement (`execute streamlit ... OVERWATCH_APP()`, issued by Snowflake, not the app's
-# seams) and the connector's untagged `select * from table(result_scan('<qid>'))` fetch that follows every
-# ASYNC read (snowflake.connector cursor.get_results_from_sfqid). Everything else - the loader tasks, the
-# native email alerts, ad-hoc use of the warehouse, and the app's untagged reads from before that release
-# while they are still inside a trailing window - is APP_OTHER_WORKLOAD.
+# Next-Fifty #7: the shared-warehouse self-cost split, keyed on the QUERY_TAG Streamlit-in-Snowflake stamps on
+# every app statement (common.app_self_sql; config.APP_SIS_QUERY_TAG_FRAGMENT). INTERACTIVE APP = every
+# statement the app ran, including the connector's result_scan fetches. APP RUNTIME (SiS) = the Streamlit
+# session statement itself (`execute streamlit ... OVERWATCH_APP()`), which carries the same app tag, so
+# that arm is tested FIRST. Everything else - the loader tasks, the native email alerts and ad-hoc use of
+# the warehouse - is APP_OTHER_WORKLOAD. SiS has stamped this tag all along, so the split holds for history.
 APP_RUNTIME_WORKLOAD = "APP RUNTIME (SiS)"
-APP_FETCH_WORKLOAD = "APP RESULT FETCH (untagged)"
 APP_OTHER_WORKLOAD = "TASKS / ALERTS / OTHER"
 
 
 def _self_workload_sql() -> str:
     """The WORKLOAD CASE both self-cost builders share (they already read QUERY_TEXT via app_self_sql).
-    STARTSWITH keeps each builder's own statement (which starts with SELECT) out of the text arms."""
-    return (f"CASE WHEN {app_self_sql()} THEN 'INTERACTIVE APP' "
-            f"WHEN STARTSWITH(UPPER(COALESCE(QUERY_TEXT, '')), 'EXECUTE STREAMLIT') "
-            f"AND CONTAINS(UPPER(QUERY_TEXT), 'OVERWATCH_APP') THEN '{APP_RUNTIME_WORKLOAD}' "
-            f"WHEN STARTSWITH(LOWER(COALESCE(QUERY_TEXT, '')), 'select * from table(result_scan(''') "
-            f"THEN '{APP_FETCH_WORKLOAD}' ELSE '{APP_OTHER_WORKLOAD}' END")
+    The runtime arm comes FIRST: the EXECUTE STREAMLIT statement carries the same SiS app tag as the
+    app's own statements. STARTSWITH keeps each builder's own statement (starts with SELECT) out of it."""
+    from app.config import APP_STREAMLIT_NAME
+    return (f"CASE WHEN STARTSWITH(UPPER(COALESCE(QUERY_TEXT, '')), 'EXECUTE STREAMLIT') "
+            f"AND CONTAINS(UPPER(QUERY_TEXT), '{APP_STREAMLIT_NAME}') THEN '{APP_RUNTIME_WORKLOAD}' "
+            f"WHEN {app_self_sql()} THEN 'INTERACTIVE APP' ELSE '{APP_OTHER_WORKLOAD}' END")
 
 
 def app_self_cost(days: int) -> str:
     """What OVERWATCH itself spends on the shared warehouse, split by tag/marker (common.app_self_sql):
-    INTERACTIVE APP = the app's per-statement tagged reads (v4.590.0+), plus the SiS runtime and the
-    connector's untagged result fetches as their own app buckets; everything else is APP_OTHER_WORKLOAD."""
+    INTERACTIVE APP = every statement SiS ran for the app (its own app tag), APP RUNTIME (SiS) = the Streamlit
+    session statement, everything else is APP_OTHER_WORKLOAD (see _self_workload_sql)."""
     from app.config import APP_WAREHOUSE
 
     days = bounded_days(days, maximum=30)
@@ -982,29 +983,32 @@ LIMIT 500
 
 
 def app_cortex_self_cost(days: int = 30) -> str:
-    """Next-Fifty #7 Slice B: the app's OWN Cortex AI spend, by page. CORTEX_AI_FUNCTIONS_USAGE_HISTORY
-    rows (plain SUM(CREDITS) per QUERY_ID - no METRICS fan-out here) joined to the QUERY_HISTORY rows the
-    app tagged per statement. Tag-only (text=False): the join never reads QUERY_TEXT. Counts only
-    statements from releases that tag (v4.590.0+). Window totals via SUM() OVER () so the headline is
-    never derived from the capped page rows. Priced at the AI credit rate in the page, never in SQL."""
+    """Next-Fifty #7: the app's OWN Cortex AI spend, by function and model. CORTEX_AI_FUNCTIONS_USAGE_HISTORY
+    rows (plain SUM(CREDITS) per query - no METRICS fan-out here) joined to the QUERY_HISTORY rows that carry
+    the app's tag (SiS stamps it on every app statement, all history). Tag-only (text=False): the join never
+    reads QUERY_TEXT. SiS's tag has no page, so the split is by function/model. Window totals via
+    SUM() OVER () so the headline is never derived from the capped rows. Priced in the page, never in SQL.
+    The app issues one COMPLETE per query, so the per-model DISTINCT query counts sum without overlap."""
     days = bounded_days(days, 30)
     return f"""
 WITH ai AS (
-    SELECT F.QUERY_ID, SUM(COALESCE(F.CREDITS, 0)) AS AI_CREDITS
+    SELECT F.QUERY_ID, F.FUNCTION_NAME, COALESCE(NULLIF(F.MODEL_NAME, ''), 'n/a') AS MODEL_NAME,
+           SUM(COALESCE(F.CREDITS, 0)) AS AI_CREDITS
     FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY F
     WHERE F.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
-    GROUP BY F.QUERY_ID
+    GROUP BY 1, 2, 3
 )
-SELECT COALESCE(REGEXP_SUBSTR(Q.QUERY_TAG, 'page=([^|]+)', 1, 1, 'e'), 'unknown') AS PAGE,
-       COUNT(*) AS REQUESTS,
+SELECT ai.FUNCTION_NAME,
+       ai.MODEL_NAME,
+       COUNT(DISTINCT ai.QUERY_ID) AS REQUESTS,
        ROUND(SUM(ai.AI_CREDITS), 6) AS AI_CREDITS,
-       SUM(COUNT(*)) OVER () AS TOTAL_REQUESTS,
+       SUM(COUNT(DISTINCT ai.QUERY_ID)) OVER () AS TOTAL_REQUESTS,
        ROUND(SUM(SUM(ai.AI_CREDITS)) OVER (), 6) AS TOTAL_AI_CREDITS
 FROM ai
 JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY Q ON Q.QUERY_ID = ai.QUERY_ID
 WHERE Q.START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())
   AND {app_self_sql('Q', text=False)}
-GROUP BY 1
+GROUP BY 1, 2
 ORDER BY AI_CREDITS DESC
 LIMIT 50
 """

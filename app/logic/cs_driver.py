@@ -34,6 +34,7 @@ from collections import Counter
 
 import pandas as pd
 
+from app.config import APP_SIS_QUERY_TAG_FRAGMENT
 from app.logic.query_advisor import COMPILE_FRACTION
 
 # --- driver classes (a Phase-0 subset of the 12-class taxonomy) --------------
@@ -126,7 +127,12 @@ def classify_row(row: pd.Series | dict) -> tuple[str, str]:
         return base
 
     # --- text-signature classes (most specific first) ------------------------
-    if "SYSTEM$FBE" in text or "EXECUTE STREAMLIT" in text or _text(row, "QUERY_TAG").startswith("OVERWATCH"):
+    # upper-cased. SiS stamps its app tag on every app statement, but today's family builders
+    # (compile_heavy_families, the mart twin, chatter families) do not select QUERY_TAG, so this arm only
+    # fires for a frame that carries it; it keeps the classifier correct if one ever does.
+    _tag = _text(row, "QUERY_TAG")
+    if ("SYSTEM$FBE" in text or "EXECUTE STREAMLIT" in text or _tag.startswith("OVERWATCH")
+            or APP_SIS_QUERY_TAG_FRAGMENT.upper() in _tag):
         return SYSTEM_GENERATED, conf("HIGH")
     if ("SYSTEM$GET_CLASSIFICATION" in text or "SYSTEM$CLASSIFY" in text
             or "SYSTEM$CORTEX_MODEL_ACCESSIBLE" in text or "SHOW CORTEX" in text):

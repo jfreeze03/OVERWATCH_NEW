@@ -951,8 +951,8 @@ def _migrations_tab() -> None:
                                "(tasks suspend if a migration half-applied).")))
 
 
-# Next-Fifty #7 Slice B: the release from which every app statement carries its own QUERY_TAG.
-_TAGGED_SINCE = "v4.590.0"
+# Next-Fifty #7 Slice B: the release from which the app sends per-statement parameters (Cortex's timeout).
+_STMT_PARAMS_SINCE = "v4.590.0"
 _SCAN_NOTE = ("First load scans ACCOUNT_USAGE directly (a few seconds on a cold "
               "cache); results cache for an hour, so repeat views are instant.")
 
@@ -1001,15 +1001,15 @@ def _run_cost_panel() -> None:
 
 
 def _app_cortex_cost() -> None:
-    """Next-Fifty #7 Slice B: the app's OWN Cortex spend — AI-function credits on the statements the app
-    tagged per statement, by page, at the AI credit rate. Toggle-gated (an ACCOUNT_USAGE join, off first
+    """Next-Fifty #7: the app's OWN Cortex spend — AI-function credits on the statements Streamlit-in-Snowflake
+    tagged as this app, by function and model, at the AI credit rate. Toggle-gated (an ACCOUNT_USAGE join, off first
     paint) and probe=True (the canonical AI view is absent on some accounts)."""
     if not st.toggle("Load the app's own AI (Cortex) cost (30d)", key="adm_self_cortex"):
         return
     ai_rate = safe_float(load_settings(_PAGE).get("AI_CREDIT_PRICE_USD"), DEFAULT_SETTINGS["AI_CREDIT_PRICE_USD"])
     res = run(mart_sql.app_cortex_self_cost(30), page=_PAGE, key="self_cortex", tier="historical",
-              source="ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY × QUERY_HISTORY (app-tagged)", probe=True)
-    if not guard(res, f"No app-tagged Cortex calls in the last 30 days (the app tags its statements from {_TAGGED_SINCE})."):
+              source="ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY × QUERY_HISTORY (the app's SiS tag)", probe=True)
+    if not guard(res, "No Cortex calls by the app in the last 30 days."):
         return
     df = res.df
     _cr = (pd.to_numeric(df["TOTAL_AI_CREDITS"], errors="coerce").max()
@@ -1021,12 +1021,12 @@ def _app_cortex_cost() -> None:
          # precise: one small-model evaluation costs a fraction of a cent — format_usd would show $0.00
          "value": format_usd_precise(float(_cr) * ai_rate) if pd.notna(_cr) and _cr > 0 else "—",
          "method": "AI rate", "badge": "live",
-         "help": "Cortex AI-function credits on the statements the app tagged per statement, at the "
+         "help": "Cortex AI-function credits on the statements Streamlit-in-Snowflake tagged as this app, at the "
                  "configured AI credit rate (AI_CREDIT_PRICE_USD)."},
         {"label": "App AI calls (30d)", "value": f"{int(_n):,}" if pd.notna(_n) and _n > 0 else "—",
          "badge": "live"},
     ])
-    tbl = df[[c for c in ("PAGE", "REQUESTS", "AI_CREDITS") if c in df.columns]].copy()
+    tbl = df[[c for c in ("FUNCTION_NAME", "MODEL_NAME", "REQUESTS", "AI_CREDITS") if c in df.columns]].copy()
     if "AI_CREDITS" in tbl.columns:
         tbl["AI_USD"] = pd.to_numeric(tbl["AI_CREDITS"], errors="coerce") * ai_rate
     # explicit formats: the CREDITS/USD auto-formats round to 2 decimals and would print 0.00 / $0.00
@@ -1039,21 +1039,21 @@ def _app_cortex_cost() -> None:
 
 def _self_cost_tab() -> None:
     # #1: self-cost measurement provenance → audit-mode only. Next-Fifty #7: the old note claimed every
-    # interactive app query is tagged — false before Slice B (owner's-rights SiS has no ALTER SESSION);
-    # since v4.590.0 each statement carries its own QUERY_TAG (core.session.statement_params).
+    # interactive app query carries an OVERWATCH tag — never true on owner's-rights SiS. The owner's diagnostic
+    # (2026-09-24) showed SiS stamps its OWN app tag on every statement instead; the split keys on that.
     methodology_note(
         f"OVERWATCH's loader tasks, its native email alerts and the app's own reads all run on {APP_WAREHOUSE} "
         "(XSMALL, 60-second auto-suspend). Run-cost is task-graph compute ATTRIBUTED per pipeline "
         "(QUERY_ATTRIBUTION_HISTORY via MART_TASK_GRAPH_DAILY, excluding idle) against the warehouse's METERED "
         "compute; the remainder is idle/auto-suspend tails, the app's interactive reads and the email alerts. "
-        "Owner's-rights Streamlit-in-Snowflake rejects ALTER SESSION, so since "
-        f"{_TAGGED_SINCE} the app tags each statement it submits (Snowpark statement_params, "
-        "QUERY_TAG 'OVERWATCH|page=…|tier=…') — counted as INTERACTIVE APP. Two app statements no client-side "
-        "tag can reach get their own rows: the Streamlit runtime's session statement (EXECUTE STREAMLIT … "
-        f"OVERWATCH_APP(), {mart_sql.APP_RUNTIME_WORKLOAD}) and the connector's untagged result fetch after each "
-        f"async read (select * from table(result_scan(…)), {mart_sql.APP_FETCH_WORKLOAD}). Everything else — "
-        "the loader tasks, the email alerts, any ad-hoc use of the warehouse, and the app's own reads from before "
-        f"{_TAGGED_SINCE} — is {mart_sql.APP_OTHER_WORKLOAD}.")
+        "Owner's-rights Streamlit-in-Snowflake rejects ALTER SESSION, and it stamps every statement the app runs "
+        "with its own QUERY_TAG naming the app ({\"StreamlitName\":\"DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP\", …}), "
+        "overriding any per-statement tag the app sends (statement_params). The split keys on that stamp: "
+        "INTERACTIVE APP is every statement the app ran, including the connector's result fetches; "
+        f"{mart_sql.APP_RUNTIME_WORKLOAD} is the Streamlit session statement itself (EXECUTE STREAMLIT … "
+        "OVERWATCH_APP()); everything else — the loader tasks, the email alerts and any ad-hoc use of the "
+        f"warehouse — is {mart_sql.APP_OTHER_WORKLOAD}. SiS has always stamped this tag, so the split holds "
+        "for the whole window.")
     methodology_note(_SCAN_NOTE)  # #1: scan/cache provenance → audit-mode only
     _run_cost_panel()
     _app_cortex_cost()
@@ -1070,16 +1070,15 @@ def _self_cost_tab() -> None:
     if guard(res, "No queries on WH_ALFA_ADMIN in the last 14 days (fresh install)."):
         df = res.df.copy()
         # app_self_cost returns one row per (DAY, WORKLOAD); the headline counts the INTERACTIVE APP
-        # workload only. Tagged per statement since v4.590.0; a 0 still renders '—' (days before that
-        # release carry no tag), never a false zero.
+        # workload only (SiS's app tag). A 0 still renders '—' (unknown), never a false zero.
         _app = df[df["WORKLOAD"].astype(str) == "INTERACTIVE APP"]
         total = int(pd.to_numeric(_app["APP_QUERIES"], errors="coerce").fillna(0).sum())
         failed = int(pd.to_numeric(_app["FAILED"], errors="coerce").fillna(0).sum())
         kpi_row([
             {"label": "App queries (14d)", "value": f"{total:,}" if total else "—",
-             "help": f"Statements the app tagged per statement (since {_TAGGED_SINCE}). The Streamlit runtime "
-                     "and the connector's untagged result fetches have their own rows in the table; the "
-                     f"app's reads from before that release count under {mart_sql.APP_OTHER_WORKLOAD}."},
+             "help": "Every statement Streamlit-in-Snowflake ran for the app (it tags each one with the "
+                     f"app's name). The Streamlit session statement itself is its own row "
+                     f"({mart_sql.APP_RUNTIME_WORKLOAD})."},
             {"label": "Failed", "value": f"{failed:,}",
              "delta_color": "inverse" if failed else "off"},
         ])
@@ -1239,11 +1238,12 @@ def _performance_tab() -> None:
     panel_help(
         "The app's per-tier read timeouts (30/120/180s) do NOT apply on owner's-rights "
         "Streamlit-in-Snowflake — ALTER SESSION is rejected there, and they are deliberately not sent "
-        "per statement until the tagged read durations are measured. Reads are governed by "
+        "per statement until the read durations are measured. Reads are governed by "
         f"STATEMENT_TIMEOUT_IN_SECONDS on {APP_WAREHOUSE} (or the account; 300s default). Since "
-        f"{_TAGGED_SINCE}, Cortex evaluations carry their own {CORTEX_TIMEOUT_SECONDS}s per-statement "
-        "ceiling (the lower of the two wins). To enforce a tighter read ceiling, SET it on the "
-        "warehouse or account."
+        f"{_STMT_PARAMS_SINCE}, each Cortex evaluation also sends its own {CORTEX_TIMEOUT_SECONDS}s "
+        "per-statement ceiling (the lower of the two wins). That is unverified under Streamlit-in-Snowflake, "
+        "which is confirmed to override per-statement query tags. To enforce a tighter read ceiling, SET it "
+        "on the warehouse or account."
     )
     _to = run(f"SHOW PARAMETERS LIKE 'STATEMENT_TIMEOUT_IN_SECONDS' IN WAREHOUSE {APP_WAREHOUSE}",
               page=_PAGE, key="stmt_timeout", tier="metadata",
@@ -1316,7 +1316,7 @@ def _performance_tab() -> None:
     st.caption(
         "Every fetch the app persisted, grouped by page and query key — the slowest "
         "rows are the builders worth optimizing next, and the key names the call site. "
-        "The OVERWATCH-tagged WH_ALFA_ADMIN statement-family scan (grouped by parameterized "
+        "The WH_ALFA_ADMIN scan of the app's own statement families (grouped by parameterized "
         "hash, with bytes scanned) is one toggle below."
     )
     telemetry = query_telemetry()
@@ -1363,9 +1363,9 @@ def _performance_tab() -> None:
                         "one thing the app's own telemetry cannot record."):
         methodology_note(_SCAN_NOTE)  # #1: scan/cache provenance → audit-mode only
         scan = run(mart_sql.app_statement_stats(7), page=_PAGE, key="app_stmt_stats",
-                   tier="historical", source="ACCOUNT_USAGE.QUERY_HISTORY (tagged WH_ALFA_ADMIN)")
+                   tier="historical", source="ACCOUNT_USAGE.QUERY_HISTORY (WH_ALFA_ADMIN, the app's SiS tag)")
         if guard(scan, "No statements on the app warehouse in the last 7 days.",
-                 setup_hint="Stats appear after OVERWATCH-tagged app traffic runs on WH_ALFA_ADMIN."):
+                 setup_hint="Stats appear after the app has run statements on WH_ALFA_ADMIN."):
             # House convention: styled_table, not a raw st.dataframe — it carries the
             # status/delta coloring, header prettifier, pinned identity column, and the
             # self-identifying CSV export that every other table on the page has.
@@ -1386,7 +1386,8 @@ def _performance_tab() -> None:
                     **_scan_cfg,
                 })
             result_caption(scan)
-            st.caption("Interactive statements only; the OVERWATCH query tag excludes loader and task work.")
+            st.caption("The app's own statements only (Streamlit-in-Snowflake tags each one with the app's name), "
+                       "so loader and task work is excluded; the Streamlit session statement itself is left out.")
 
     section_header("Page adoption (30d)", "", "operations")
     usage = run(mart_sql.app_usage_summary(30), page=_PAGE, key="app_usage", tier="recent",

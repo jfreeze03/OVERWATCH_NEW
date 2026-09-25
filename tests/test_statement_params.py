@@ -1,4 +1,8 @@
-"""Next-Fifty #7 Slice B (v4.590.0): every app statement carries its OWN QUERY_TAG on owner's-rights SiS.
+"""Next-Fifty #7 Slice B (v4.590.0): the app sends its OWN QUERY_TAG with every statement on owner's-rights SiS.
+
+v4.591.0 note: the owner's post-deploy diagnostic showed Streamlit-in-Snowflake OVERRIDES that tag with its
+own app stamp, so self-traffic keys on SiS's stamp (tests/test_app_self_marker.py); this transport still
+carries Cortex's per-statement timeout and tags off-SiS.
 
 ALTER SESSION is rejected there, so the session-level tag never applied in production. The owner's probe
 (2026-09-24, an owner's-rights proc as the SiS proxy) proved Snowpark ``statement_params`` records the
@@ -17,7 +21,7 @@ import pytest
 import app.core.query as q
 from app.core import ai, errors, session
 from app.core.session import STATEMENT_PARAMS_TIMEOUT_TIERS, statement_params, submit_collect, submit_pandas
-from app.data import mart_sql
+from app.data import common, mart_sql
 
 
 class _Sis:
@@ -188,22 +192,23 @@ def test_self_cost_split_names_the_other_side_honestly():
     assert mart_sql.APP_OTHER_WORKLOAD == "TASKS / ALERTS / OTHER"
     for sql in (mart_sql.app_self_cost(14), mart_sql.app_warehouse_queue_by_hour(14)):
         assert "'TASKS / ALERTS / OTHER'" in sql and "UNTAGGED APP" not in sql
-        # review fix: the SiS runtime statement and the connector's untagged async result fetch are the
-        # app's too - no client-side tag reaches either, so they get their own buckets
+        # owner diagnostic 2026-09-24: SiS stamps its app tag on EVERY app statement (the connector's result
+        # fetches too), and on the EXECUTE STREAMLIT session statement - so the runtime arm is tested FIRST
         assert "STARTSWITH(UPPER(COALESCE(QUERY_TEXT, '')), 'EXECUTE STREAMLIT')" in sql
-        assert "'APP RUNTIME (SiS)'" in sql
-        assert "STARTSWITH(LOWER(COALESCE(QUERY_TEXT, '')), 'select * from table(result_scan(''')" in sql
-        assert "'APP RESULT FETCH (untagged)'" in sql
-        assert sql.index("'INTERACTIVE APP'") < sql.index("'APP RUNTIME (SiS)'") < sql.index(
-            "'APP RESULT FETCH (untagged)'") < sql.index("'TASKS / ALERTS / OTHER'")
+        assert "'APP RUNTIME (SiS)'" in sql and "result_scan" not in sql
+        assert sql.index("'APP RUNTIME (SiS)'") < sql.index("'INTERACTIVE APP'") < sql.index(
+            "'TASKS / ALERTS / OTHER'")
+        assert common.APP_SIS_TAG_SQL in sql
     sqlglot = pytest.importorskip("sqlglot")
     sqlglot.parse_one(mart_sql.app_self_cost(14), read="snowflake")
 
 
-def test_result_fetch_arm_matches_the_connector_text():
-    # the exact statement snowflake.connector's get_results_from_sfqid issues after an async job
-    fetch = "select * from table(result_scan('01b2c3d4-0000-1111-0000-000000000001'))"
-    assert fetch.lower().startswith("select * from table(result_scan('")
+def test_cs_driver_treats_sis_tagged_app_statements_as_system_generated():
+    from app.logic.cs_driver import SYSTEM_GENERATED, classify_row
+    row = {"SAMPLE_TEXT": "SELECT A FROM T", "RUNS": 100, "AVG_TOTAL_S": 1.0, "COMPILE_PCT": 90.0,
+           "QUERY_TAG": '{"StreamlitEngine":"ExecuteStreamlit","StreamlitName":'
+                        '"DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP","ChildQuery":true}'}
+    assert classify_row(row)[0] == SYSTEM_GENERATED
 
 
 def test_app_cortex_self_cost_builder():
@@ -211,8 +216,10 @@ def test_app_cortex_self_cost_builder():
     sql = mart_sql.app_cortex_self_cost(999)
     assert "DATEADD('day', -30," in sql and "DATEADD('day', -31," in sql          # clamped to 30d
     assert "CORTEX_AI_FUNCTIONS_USAGE_HISTORY" in sql and "QUERY_HISTORY Q ON Q.QUERY_ID = ai.QUERY_ID" in sql
-    assert "(Q.QUERY_TAG LIKE 'OVERWATCH%')" in sql and "QUERY_TEXT" not in sql     # tag-only join
-    assert "SUM(SUM(ai.AI_CREDITS)) OVER ()" in sql and "SUM(COUNT(*)) OVER ()" in sql   # uncapped totals
+    assert common.app_self_sql("Q", text=False) in sql and "QUERY_TEXT" not in sql   # tag-only join
+    assert common.APP_SIS_TAG_SQL in sql                                          # SiS's app tag
+    assert "page=" not in sql and "GROUP BY 1, 2" in sql                         # by function/model
+    assert "SUM(SUM(ai.AI_CREDITS)) OVER ()" in sql and "SUM(COUNT(DISTINCT ai.QUERY_ID)) OVER ()" in sql
     assert "FLATTEN" not in sql                                                     # no METRICS fan-out
     sqlglot.parse_one(sql, read="snowflake")
 
@@ -229,5 +236,7 @@ def test_admin_cortex_card_is_toggle_and_probe_gated():
     assert 'else "—"' in body                                     # zero/unknown never renders a false $0
     tab = src.split("def _self_cost_tab(", 1)[1].split("\ndef ", 1)[0]
     perf = src.split("def _performance_tab(", 1)[1].split("\ndef ", 1)[0]
-    assert "Every app query is instead" not in perf and "{CORTEX_TIMEOUT_SECONDS}s per-statement" in perf
+    assert "Every app query is instead" not in perf and "{CORTEX_TIMEOUT_SECONDS}s" in perf
+    assert "unverified under Streamlit-in-Snowflake" in perf
+    assert '("FUNCTION_NAME", "MODEL_NAME", "REQUESTS", "AI_CREDITS")' in body
     assert tab.index("_run_cost_panel()") < tab.index("_app_cortex_cost()")
