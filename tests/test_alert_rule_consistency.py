@@ -128,18 +128,25 @@ def _config_deleted() -> set[str]:
     return gone
 
 
+# wave 2a: the column must be ENABLED itself, never a suffix of another flag. Unanchored, V091's
+# `SET AUTO_CLEAR_ENABLED = TRUE` read as "re-arm the 3 PERF rules" (harmless only because they were
+# already enabled), and a future `AUTO_CLEAR_ENABLED = FALSE` would have read as "disable".
+_ENABLED_SET_RE = re.compile(r"(?<![A-Z_])ENABLED\s*=\s*(FALSE|TRUE)", re.I)
+
+
 def _config_enabled() -> set[str]:
     """Rule ids seeded into ALERT_CONFIG and not later disabled/deleted (replayed in order)."""
     enabled: set[str] = set()
     for kind, stmt in _config_statements():
         rules = set(_RULE_RE.findall(stmt))
+        sets = {v.upper() for v in _ENABLED_SET_RE.findall(stmt)}
         if kind in ("MERGE", "INSERT"):
             # a seed row carries ENABLED=FALSE only if the statement says so per-rule; the house
             # seeds are all TRUE, so a seeded rule is enabled unless a later UPDATE/DELETE turns it off.
             enabled |= {r for r in rules if not re.search(rf"'{r}'[^)]*\bFALSE\b", stmt)}
-        elif kind == "DELETE" or re.search(r"ENABLED\s*=\s*FALSE", stmt, re.I):
+        elif kind == "DELETE" or "FALSE" in sets:
             enabled -= rules
-        elif re.search(r"ENABLED\s*=\s*TRUE", stmt, re.I):
+        elif "TRUE" in sets:
             enabled |= rules      # V020 re-armed SEC_CRED_EXPIRY; V045 re-armed PIPE_TASK_FAILURES
     return enabled
 
@@ -256,6 +263,51 @@ def test_config_replay_sees_the_v034_delete():
     assert "SEC_BREAK_GLASS_USE" in _config_deleted()
     assert "SEC_BREAK_GLASS_USE" not in _config_enabled()
     assert {"DQ_BREACH", "DQ_SCHEMA_DRIFT", "WH_CHANGE_REGRESSION", "PERF_SLO_BREACH"} <= _config_enabled()
+
+
+def test_enabled_replay_ignores_other_flag_columns():
+    """wave 2a: only the ENABLED column itself toggles a rule -- AUTO_CLEAR_ENABLED (V091) and any
+    other *_ENABLED flag must never read as an enable/disable."""
+    assert _ENABLED_SET_RE.findall("UPDATE X SET ENABLED = FALSE WHERE RULE_ID = 'A'") == ["FALSE"]
+    assert _ENABLED_SET_RE.findall("SET c.ENABLED=TRUE") == ["TRUE"]
+    for flag in ("AUTO_CLEAR_ENABLED", "auto_clear_enabled", "XENABLED", "EMAIL_ENABLED"):
+        assert not _ENABLED_SET_RE.findall(f"UPDATE X SET {flag} = FALSE WHERE RULE_ID = 'A'"), flag
+    # the one real flag-only UPDATE in the migration set (V091's PERF opt-in) is a no-op for the replay
+    auto = [s for k, s in _config_statements() if k == "UPDATE" and "SET AUTO_CLEAR_ENABLED" in s]
+    assert auto, "V091's AUTO_CLEAR_ENABLED opt-in UPDATE should be visible to the replay"
+    assert not [s for s in auto if _ENABLED_SET_RE.findall(s)], "a flag-only UPDATE read as enable/disable"
+
+
+# ---------------------------------------------------------------------------
+# Scan tallies (Next-Fifty wave 2a drift lock). SP_ALERT_SCAN / SP_ALERT_SCAN_DAILY report
+# "N of <total> ... rule block(s) failed this run" (the OPS_SCAN_DEGRADED self-alert) and
+# "(<total> - :fails) || '/<total> rule blocks ok" (the RETURN the task history shows). <total> is a
+# hand-typed literal, so adding or removing a counting arm (one whose EXCEPTION handler does
+# `fails := fails + 1`) without re-typing it silently mis-states health. Add-on arms and sweeps never
+# increment `fails`, so they never count.
+_FAILS_INC_RE = re.compile(r"\bfails\s*:=\s*:?fails\s*\+\s*1\s*;")
+_SCAN_DENOMINATORS = {
+    "SP_ALERT_SCAN": (r"' of (\d+) alert rule block\(s\) failed this run'",
+                      r"\((\d+) - :fails\) \|\| '/(\d+) rule blocks ok'"),
+    "SP_ALERT_SCAN_DAILY": (r"' of (\d+) daily alert rule block\(s\) failed this run'",
+                            r"\((\d+) - :fails\) \|\| '/(\d+) rule blocks ok \(daily\)'"),
+}
+
+
+def test_scan_denominators_match_counting_arms():
+    bodies = _latest_proc_bodies()
+    for proc, (self_alert_re, return_re) in _SCAN_DENOMINATORS.items():
+        body = bodies[proc]
+        n = len(_FAILS_INC_RE.findall(body))
+        assert n >= 5, f"{proc}: only {n} counting arms parsed -- regex drift?"
+        self_alert = [int(x) for x in re.findall(self_alert_re, body)]
+        assert self_alert, f"{proc}: self-alert ' of <total> ... block(s) failed this run' literal not found"
+        assert set(self_alert) == {n}, (
+            f"{proc}: self-alert denominator {self_alert} but {n} arms do `fails := fails + 1`")
+        ret = [(int(a), int(b)) for a, b in re.findall(return_re, body)]
+        assert ret, f"{proc}: RETURN '(<total> - :fails) || '/<total> rule blocks ok' not found"
+        assert set(ret) == {(n, n)}, (
+            f"{proc}: RETURN denominators {ret} but {n} arms do `fails := fails + 1`")
 
 
 # ---------------------------------------------------------------------------

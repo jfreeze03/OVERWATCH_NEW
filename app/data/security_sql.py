@@ -1627,32 +1627,70 @@ ORDER BY {_sev_order}, DETECTED_AT DESC
 """
 
 
+# V151 lockstep (tests/migrations/test_v151_security_change_risk_identity_policy_drops.py): the
+# CHANGE RISK queue KEEPS a TF_* / DBA_MAINT_DB.PUBLIC DESTRUCTIVE row when its QUERY_TYPE names a
+# USER / ROLE / POLICY object or its whitespace-normalized statement opens with one of these
+# keyword-anchored DROP openers (4 identity + 13 policy kinds). Byte-equal to the V151 view's
+# ILIKE ANY / LIKE ANY lists -- extend both together. Never a bare '%POLICY%' preview substring:
+# a TF_* TRUNCATE of an insurance FACT_POLICY table is routine ETL and must stay excluded.
+CHANGE_RISK_KEEP_QUERY_TYPES: tuple[str, ...] = ("%USER%", "%ROLE%", "%POLICY%")
+CHANGE_RISK_KEEP_PREVIEWS: tuple[str, ...] = (
+    "DROP USER %", "DROP ROLE %", "DROP DATABASE ROLE %", "DROP APPLICATION ROLE %",
+    "DROP MASKING POLICY %", "DROP ROW ACCESS POLICY %", "DROP NETWORK POLICY %",
+    "DROP PASSWORD POLICY %", "DROP SESSION POLICY %", "DROP AUTHENTICATION POLICY %",
+    "DROP AGGREGATION POLICY %", "DROP PROJECTION POLICY %", "DROP JOIN POLICY %",
+    "DROP PACKAGES POLICY %", "DROP PRIVACY POLICY %", "DROP STORAGE LIFECYCLE POLICY %",
+    "DROP BACKUP POLICY %",
+)
+# The Terraform service-role test, byte-identical to the V088/V151 view's (literal '_' via ~ ESCAPE).
+_TF_ROLE_SQL = "UPPER(COALESCE(ROLE_NAME, '')) LIKE 'TF~_%' ESCAPE '~'"
+
+
+def _identity_policy_drop_predicate() -> str:
+    """The V151 keep test as a boolean SQL expression over FACT_SECURITY_CHANGE columns. The
+    patterns are module constants, rendered through sql_literal (never raw text)."""
+    types = ", ".join(sql_literal(p) for p in CHANGE_RISK_KEEP_QUERY_TYPES)
+    previews = ", ".join(sql_literal(p) for p in CHANGE_RISK_KEEP_PREVIEWS)
+    return (f"(COALESCE(QUERY_TYPE, '') ILIKE ANY ({types})"
+            " OR LTRIM(REGEXP_REPLACE(UPPER(COALESCE(QUERY_PREVIEW, '')), '[[:space:]]+', ' '))"
+            f" LIKE ANY ({previews}))")
+
+
 def change_risk_destructive_breakdown(days: int = 7) -> str:
     """Diagnostic (owner 2026-08-17): the ACTUAL actors and objects behind the
     CHANGE RISK "DESTRUCTIVE" flood, so an exclusion can be precise instead of a
-    guess. Groups exactly the rows the exception queue's CHANGE RISK arm counts
-    (CHANGE_KIND='DESTRUCTIVE', RISK_SCORE>=70, trailing window) by role / database
-    / schema, and flags whether each role matches the Terraform service-role
-    convention (TF_*) so it's visible at a glance whether a TF_* exclusion would
-    actually clear the noise or whether the drivers are something else."""
+    guess. Groups the DROP/TRUNCATE rows at RISK_SCORE>=70: the rows the CHANGE RISK
+    arm evaluates before its TF_* / app-scratch exclusion (CHANGE_KIND='DESTRUCTIVE',
+    trailing window) by role / database / schema / QUERY_TYPE, and flags whether each
+    role matches the Terraform service-role convention (TF_*) so it's visible at a
+    glance whether a TF_* exclusion would actually clear the noise or whether the
+    drivers are something else. DROP_CLASS splits identity / policy drops (the V151
+    keep list: DROP USER / ROLE / (kind) POLICY, which the queue keeps even for TF_*
+    roles once V151 is applied) from every other object; TF_IDENTITY_POLICY_EVENTS is
+    the pre-LIMIT count of TF_* identity / policy drops."""
     days = bounded_days(days, 30)
+    keep = _identity_policy_drop_predicate()
     return f"""
 SELECT
     COALESCE(NULLIF(TRIM(ROLE_NAME), ''), '(no role attributed)') AS ROLE_NAME,
     COALESCE(NULLIF(TRIM(DATABASE_NAME), ''), '(no database)') AS DATABASE_NAME,
     COALESCE(NULLIF(TRIM(SCHEMA_NAME), ''), '(none)') AS SCHEMA_NAME,
-    IFF(UPPER(COALESCE(ROLE_NAME, '')) LIKE 'TF~_%' ESCAPE '~', 'TF_* service', 'other') AS ROLE_CLASS,
+    COALESCE(NULLIF(TRIM(QUERY_TYPE), ''), '(unknown)') AS QUERY_TYPE,
+    IFF({keep}, 'identity / policy', 'other object') AS DROP_CLASS,
+    IFF({_TF_ROLE_SQL}, 'TF_* service', 'other') AS ROLE_CLASS,
     COUNT(*) AS EVENTS,
     -- Grand total across ALL groups, evaluated BEFORE the LIMIT 200, so the headline
     -- KPI counts every destructive event even when the per-group table is capped.
     SUM(COUNT(*)) OVER () AS TOTAL_EVENTS,
+    -- V151: TF_* identity / policy drops the CHANGE RISK queue keeps (pre-LIMIT total).
+    SUM(COUNT_IF({_TF_ROLE_SQL} AND {keep})) OVER () AS TF_IDENTITY_POLICY_EVENTS,
     COUNT(DISTINCT USER_NAME) AS USERS,
     MAX(EVENT_TS) AS LAST_SEEN
 FROM {core_object('FACT_SECURITY_CHANGE')}
 WHERE CHANGE_KIND = 'DESTRUCTIVE'
   AND RISK_SCORE >= 70
   AND EVENT_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
-GROUP BY 1, 2, 3, 4
+GROUP BY 1, 2, 3, 4, 5, 6
 ORDER BY EVENTS DESC
 LIMIT 200
 """

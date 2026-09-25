@@ -116,12 +116,18 @@ def _render_change_risk_diagnostic() -> None:
         tf = _events_where(df["ROLE_CLASS"] == "TF_* service")
         no_role = _events_where(df["ROLE_NAME"] == "(no role attributed)")
         app_db = _events_where(df["DATABASE_NAME"] == "DBA_MAINT_DB")
+        # V151: TF_* DROP USER / ROLE / POLICY in the window — the SQL's pre-LIMIT window total,
+        # never summed from the capped per-group table (uncapped-aggregate rule).
+        tf_kept = (int(safe_float(df["TF_IDENTITY_POLICY_EVENTS"].iloc[0]))
+                   if "TF_IDENTITY_POLICY_EVENTS" in df.columns else 0)
         kpi_row([
             {"label": "Destructive events (7d)", "value": f"{total:,}",
-             "help": "DROP/TRUNCATE at RISK_SCORE>=70 — the rows the CHANGE RISK queue counts."},
+             "help": "DROP/TRUNCATE at RISK_SCORE>=70 — the rows the CHANGE RISK arm evaluates "
+                     "before its TF_* / app-scratch exclusion."},
             {"label": "By TF_* roles", "value": _pct(tf), "delta": f"{tf:,} events",
-             "help": "Share attributable to Terraform service roles. If this is most of the "
-                     "flood a TF_* exclusion clears it; if it's small, the drivers are elsewhere."},
+             "help": "Share attributable to Terraform service roles. The queue excludes their "
+                     "table/schema DROP/TRUNCATE as routine ETL; their DROP USER / ROLE / POLICY "
+                     "are security events and stay in the queue once V151 is applied."},
             {"label": "No role attributed", "value": _pct(no_role), "delta_color": "off",
              "help": "Unattributed drops. These stay visible on purpose — a security queue must "
                      "not silently hide an actor-less destructive event."},
@@ -134,10 +140,18 @@ def _render_change_risk_diagnostic() -> None:
             "score: if a few named roles dominate, exclude those roles; if it's TF_*-dominated a "
             "pattern works; unattributed and human drops on real data should stay visible."
         )
+        if tf_kept:
+            st.caption(
+                f"{tf_kept:,} of these are Terraform-role DROP USER / ROLE / POLICY events "
+                "(DROP_CLASS = identity / policy) — identity and governance deletions, not routine "
+                "ETL. Once V151 is applied the CHANGE RISK queue keeps them; TF_* table/schema "
+                "drops stay excluded."
+            )
         if total > _shown:
-            st.caption(f"Showing the top 200 role/database/schema groups of {total:,} total "
+            st.caption(f"Showing the top 200 role/database/schema/type groups of {total:,} total "
                        f"destructive events; the shares above are of the {_shown:,} shown.")
-        styled_table(df.drop(columns=["TOTAL_EVENTS"], errors="ignore"), height=300)
+        styled_table(df.drop(columns=["TOTAL_EVENTS", "TF_IDENTITY_POLICY_EVENTS"], errors="ignore"),
+                     height=300)
         result_caption(res)
 
 

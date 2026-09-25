@@ -16,6 +16,11 @@ def test_v038_guard_shape_and_chain():
     assert "IF (v < 37) THEN" in _MIG and "SELECT 38 AS VERSION" in _MIG
     assert "ADD COLUMN IF NOT EXISTS SOURCE_CHANGE_ID" in _MIG
     assert "CALL DBA_MAINT_DB.OVERWATCH.SP_LEDGER_AUTOBOOK();" in _MIG  # instant first pass
+    # ...but only on a genuine first apply: a full rebuild replays V038 over the kept ledger (V153 review)
+    first = _MIG.split("-- First pass now:", 1)[1].split("CREATE TASK IF NOT EXISTS", 1)[0]
+    guarded = "IF (v < 38) THEN\n        CALL DBA_MAINT_DB.OVERWATCH.SP_LEDGER_AUTOBOOK();\n    END IF;"
+    assert guarded in first
+    assert first.count("CALL DBA_MAINT_DB.OVERWATCH.SP_LEDGER_AUTOBOOK();") == 1
     assert "AFTER DBA_MAINT_DB.OVERWATCH.TASK_WAREHOUSE_CHANGE_SCAN" in _MIG
     tail = _MIG.split("TASK_LEDGER_AUTOBOOK RESUME", 1)[1]
     assert "TASK_WAREHOUSE_CHANGE_SCAN RESUME" in tail    # root resumes after child lands

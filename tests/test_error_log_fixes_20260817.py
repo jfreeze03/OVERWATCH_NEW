@@ -52,10 +52,12 @@ def test_incident_metrics_has_no_nested_scalar_subquery():
     assert "NULLIF((SELECT" not in sql
     assert "wn AS (SELECT COUNT(*) AS N FROM w)" in sql
     assert "FROM wn CROSS JOIN compression" in sql        # reopen CTE dropped (LBA-1, below)
-    # semantics preserved: the surviving output columns. Three dead metrics dropped, each
-    # counting a column no writer persists: CHANGE_PCT (v4.351), MTTA_MIN (ALC-2:
-    # INCIDENTS.ACK_AT never set), REOPEN_PCT (ALC-1: INCIDENTS.REOPENED_FROM never set).
-    for col in ("OPEN_NOW", "DECLARED_N", "TTD_MIN", "MTTR_MIN", "COMPRESSION"):
+    # semantics preserved: the surviving output columns. Two dead metrics stay dropped, each
+    # counting a column no writer persists: CHANGE_PCT (v4.351), REOPEN_PCT (ALC-1:
+    # INCIDENTS.REOPENED_FROM never set). MTTA_MIN (ALC-2) is RESTORED by Next-Fifty #12a now
+    # that the Control Room writes INCIDENTS.ACK_AT — still no nested scalar subquery.
+    for col in ("OPEN_NOW", "DECLARED_N", "TTD_MIN", "MTTR_MIN", "COMPRESSION",
+                "MTTA_MIN", "ACKED_N", "MTTM_MIN", "READY_TO_CLOSE_N"):
         assert f"AS {col}" in sql, col
     assert "CHANGE_PCT" not in sql
-    assert "MTTA_MIN" not in sql and "REOPEN_PCT" not in sql and "reopen" not in sql
+    assert "REOPEN_PCT" not in sql and "reopen" not in sql

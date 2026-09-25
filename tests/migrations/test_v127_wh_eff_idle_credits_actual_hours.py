@@ -111,16 +111,17 @@ def test_v127_is_the_latest_full_loader_definition() -> None:
     defs = sorted(p for p in _MIG_DIR.glob("V[0-9]*.sql")
                   if "CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27"
                   in p.read_text(encoding="utf-8"))
-    # V146 repointed the ai_functions arm onto the canonical CORTEX_AI_FUNCTIONS_USAGE_HISTORY, so it
-    # is now the latest full-loader definition; V142 (A4 single-scan) is the byte baseline V146 was
-    # derived from, and V127 the baseline before that.
-    assert defs[-1].name == "V146__ai_usage_loader_repoint_ai_functions.sql"
+    # V152 (Next-Fifty #10c) added the MART_TASK_NODE_DAILY row to the HOURLY freshness srcmap, so it
+    # is now the latest full-loader definition; it was re-derived from V146 (the ai_functions repoint
+    # onto the canonical CORTEX_AI_FUNCTIONS_USAGE_HISTORY), which was re-derived from V142 (A4
+    # single-scan), and V127 the baseline before that.
+    assert defs[-1].name == "V152__pipeline_freshness_coverage.sql"
 
 
 def test_v127_floor_tracks_the_tip() -> None:
     v = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V150 applied" in v
-    assert "BETWEEN 1 AND 150) = 150" in v
+    assert "V001..V155 applied" in v
+    assert "BETWEEN 1 AND 155) = 155" in v
 
 
 def test_v127_is_tracked_in_deploy_and_admin_surfaces() -> None:

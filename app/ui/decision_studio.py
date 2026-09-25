@@ -835,6 +835,10 @@ def _roi(company: str) -> None:
     _no_est = int(totals.get("verified_no_estimate_count") or 0)
     _no_est_auto = int(totals.get("verified_no_estimate_auto_count") or 0)
     _avgd = totals["avg_days_to_verify"]
+    # Next-Fifty #11 (V153): change-scan rows stay ESTIMATED until their 14-day measured window closes and
+    # then settle themselves -- split them out so the delta never asks an operator to hand-verify them.
+    _auto_pending = int(totals.get("auto_settle_pending_count") or 0)
+    _by_hand = max(0, int(totals["estimated_count"]) - _auto_pending)
     kpi_row([
         # D4 (owner screenshot 2026-09-24): every VERIFIED_USD is a MONTHLY saving, so these sums are a
         # run-rate in $/mo - the old "Verified savings (all time)" label read like cumulative dollars
@@ -864,9 +868,13 @@ def _roi(company: str) -> None:
                  "estimate-vs-actual (verified items that carried an estimate). Near 100% means the "
                  "estimates held up; above 100% means realized savings beat the estimate."},
         {"label": "Open pipeline", "value": format_usd(totals["estimated_usd"]),
-         "delta": f"{totals['estimated_count']:,} item(s) awaiting proof", "delta_color": "off",
-         "help": "Estimated savings still unverified — the opportunity ahead. Changes the daily change "
-                 "scan detects settle automatically; the rest verify on Cost ▸ Optimize."},
+         "delta": (f"{_by_hand:,} awaiting proof, {_auto_pending:,} settle automatically when their "
+                   "14-day window closes" if _auto_pending
+                   else f"{totals['estimated_count']:,} item(s) awaiting proof"),
+         "delta_color": "off",
+         "help": "Estimated savings still unverified — the opportunity ahead. Rows the daily change scan "
+                 "booked settle themselves on 14 days of measured actuals, 15–16 days after the change "
+                 "(V153); verify the rest on Cost ▸ Optimize."},
     ])
     if totals["superseded_count"]:
         # Next-Fifty #5: one warehouse change booked twice (the app's manual row + the change scan's
@@ -876,6 +884,13 @@ def _roi(company: str) -> None:
             f"({format_usd(totals['superseded_estimated_usd'])} estimated) were superseded by the "
             "auto-measured change row for the same warehouse change — excluded here so one change is "
             "never counted twice. Clean them up on Cost ▸ Optimize ▸ Savings ledger."))
+    if totals.get("volume_confounded_count"):
+        # Next-Fifty #11: disclosure only -- the measured dollars are never adjusted for volume.
+        st.caption(md_dollars(
+            f"{int(totals['volume_confounded_count']):,} verified item(s) "
+            f"({format_usd(totals['volume_confounded_usd'])}/mo) whose 14-day measured window shows query "
+            "volume outside 0.7–1.3x of baseline — part of that measured delta may be workload, not the "
+            "lever. Counted as measured, not adjusted."))
     if totals["verified_active_usd"] > 0:
         # the SAME active figure as the run-rate KPI above (review fix: the all-time sum read as a run-rate)
         _older = totals["verified_count"] - totals["verified_active_count"]

@@ -74,7 +74,8 @@ def test_builders_read_information_schema_and_clamp():
     for sql in (hist, notif):
         assert "ACCOUNT_USAGE" not in sql and "CONVERT_TIMEZONE('America/Chicago'" in sql
     assert "INFORMATION_SCHEMA.ALERT_HISTORY" in hist and "DATEADD('day', -7," in hist
-    assert "NOTIFICATION_HISTORY" in notif and "'OVERWATCH_EMAIL'" in notif and "DATEADD('day', -14," in notif
+    # owner probe R2: NOTIFICATION_HISTORY rejects a range over 336h, so 999 clamps to 13 days, not 14
+    assert "NOTIFICATION_HISTORY" in notif and "'OVERWATCH_EMAIL'" in notif and "DATEADD('day', -13," in notif
     # owner probe 2026-09-24: NOTIFICATION_HISTORY rejects START_TIME_RANGE_START (ALERT_HISTORY's name)
     assert "START_TIME => DATEADD" in notif and "START_TIME_RANGE_START" not in notif
     assert "SCHEDULED_TIME_RANGE_START =>" in hist

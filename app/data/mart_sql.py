@@ -691,13 +691,16 @@ SELECT
     DATE_TRUNC('week', RAISED_AT)::DATE AS WEEK,
     COUNT(*) AS EVENTS,
     SUM(IFF(ACK_AT IS NOT NULL, 1, 0)) AS ACKED,
-    -- codex#40 companion: a MACHINE close (V067 escalation SUPERSEDED, or the V091
-    -- auto-clear sweep marking a cleared condition AUTO_CLEARED) is NOT a human
-    -- resolution — exclude both from the RESOLVED count and MTTR so machine closes
-    -- don't pollute the operator panel.
-    SUM(IFF(RESOLVED_AT IS NOT NULL AND COALESCE(RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED'), 1, 0)) AS RESOLVED,
+    -- codex#40 companion: a MACHINE close (V067 escalation SUPERSEDED, the V091
+    -- auto-clear sweep marking a cleared condition AUTO_CLEARED, the V117 snooze
+    -- sweep's SNOOZE_SUPPRESSED, or the V156 condition-ended sweep's CONDITION_ENDED
+    -- when a SEC_CRED_EXPIRY / SEC_NEW_EXPOSURE condition goes away) is NOT a human
+    -- resolution — exclude all four from the RESOLVED count and MTTR so machine
+    -- closes don't pollute the operator panel. Ships before V156 so its first
+    -- CONDITION_ENDED close is never counted as a human resolve.
+    SUM(IFF(RESOLVED_AT IS NOT NULL AND COALESCE(RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED', 'CONDITION_ENDED'), 1, 0)) AS RESOLVED,
     ROUND(AVG(DATEDIFF('minute', RAISED_AT, ACK_AT)), 1) AS MTTA_MIN,
-    ROUND(AVG(IFF(COALESCE(RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED'),
+    ROUND(AVG(IFF(COALESCE(RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED', 'CONDITION_ENDED'),
                   DATEDIFF('minute', RAISED_AT, RESOLVED_AT), NULL)), 1) AS MTTR_MIN
 FROM {core_object("ALERT_EVENTS")}
 WHERE RAISED_AT >= DATEADD('day', -{days}, CURRENT_DATE())
@@ -758,7 +761,11 @@ def _ledger_twin_select() -> str:
     (Next-Fifty #5, double-booking). While the auto row is still ESTIMATED it carries $0, so nothing
     double-counts yet. CHANGE_SEEN_AT is LTZ, CREATED_AT NTZ (V005) — the cast uses the session TZ,
     the account's America/Chicago, the same clock as the NTZ defaults; -1h slack covers a scan that
-    lands between the ALTER and the ledger INSERT."""
+    lands between the ALTER and the ledger INSERT.
+
+    V153 (Next-Fifty #11): SP_LEDGER_AUTOBOOK now ADOPTS a matching manual ESTIMATED row (stamps its
+    SOURCE_CHANGE_ID) when it sees the change first — its ADOPT UPDATE uses these same ON/WHERE lines —
+    so new twins arise only from history (pre-V153 rows) or from pairings the 1:1 adopt leaves unpaired."""
     levers = ", ".join(sql_literal(x) for x in sorted(LEDGER_AUTOBOOKED_LEVERS))
     return f"""SELECT m.ITEM_ID AS TWIN_ITEM_ID, r.CHANGE_ID AS TWIN_CHANGE_ID, a.ITEM_ID AS TWIN_AUTO_ITEM_ID
     FROM {core_object("SAVINGS_LEDGER")} m
@@ -788,8 +795,28 @@ def savings_ledger(limit: int | None = 500) -> str:
     Brief/Scorecard cite for the same quarter (cost-hunt5 2026-08-30).
 
     SUPERSEDED_BY_CHANGE_ID (Next-Fifty #5): set on a manual row whose change the autobook ALSO booked
-    and settled (_ledger_twin_select) — actions.split_superseded drops it from every rollup."""
+    and settled (_ledger_twin_select) — actions.split_superseded drops it from every rollup.
+
+    Full-window re-measure (Next-Fifty #11 / V153) — read-only disclosure from the linked registry row,
+    never written back:
+      MEASURED_AFTER_DAYS — the after-window the change scan measured (~14 once it closed).
+      REMEASURED_14D_MONTHLY_USD — the V153 settle recomputed on the CLOSED window: the same gate as the
+        proc (the 5 closed verdicts, window closed, credits metered after), the same $5 floor, the same
+        LBA-1 RN (a co-attributed row reads $0) and the FLOAT credit rate from SETTINGS. NULL until the
+        window closes, below the floor, or on a manual row. A row settled before V153 on ~3 days of
+        after-data (and priced at 4 instead of 3.68) keeps its stored VERIFIED_USD; this column shows the
+        full-window figure beside it.
+      VOLUME_RATIO / VOLUME_CONFOUNDED — per-day query volume after vs the 14-day baseline, and whether it
+        sits outside 0.7-1.3x (the proc's VOLUME_CONFOUNDED note; dollars are never adjusted for it).
+    The window function evaluates before ORDER BY / LIMIT, so the RN ranks the whole ledger, not the
+    capped page."""
     limit_clause = f"\nLIMIT {int(limit)}" if limit is not None else ""
+    # mirrors the V153 SP_LEDGER_AUTOBOOK settle gate on the app clock (account_today_sql, the TZ standard)
+    _closed = ("r.VERDICT IN ('IMPROVED', 'NEUTRAL', 'REGRESSED', 'NO_BASELINE', 'INSUFFICIENT_AFTER')\n"
+               f"           AND {account_today_sql()} > r.TRACKING_UNTIL\n"
+               "           AND r.AFTER_CREDITS_PER_DAY IS NOT NULL")
+    _usd = "(COALESCE(r.BASELINE_CREDITS_PER_DAY, 0) - COALESCE(r.AFTER_CREDITS_PER_DAY, 0)) * px.RATE * 30"
+    _vol = "(r.AFTER_QUERIES / NULLIF(r.AFTER_DAYS, 0)) / NULLIF(r.BASELINE_QUERIES / 14.0, 0)"
     return f"""
 WITH {_ledger_twin_cte()}
 SELECT l.ITEM_ID, l.ACTION_ID, l.CREATED_AT, l.DESCRIPTION, l.STATE, l.ESTIMATED_USD, l.VERIFIED_USD,
@@ -802,10 +829,26 @@ SELECT l.ITEM_ID, l.ACTION_ID, l.CREATED_AT, l.DESCRIPTION, l.STATE, l.ESTIMATED
                 CASE WHEN r.SETTING = 'SIZE' THEN 'RESIZE' ELSE r.SETTING END,
                 'unclassified') AS FINDING_TYPE,
        IFF(l.SOURCE_CHANGE_ID IS NULL, 'manual', 'auto') AS SOURCE,
-       t.TWIN_CHANGE_ID AS SUPERSEDED_BY_CHANGE_ID
+       t.TWIN_CHANGE_ID AS SUPERSEDED_BY_CHANGE_ID,
+       r.AFTER_DAYS AS MEASURED_AFTER_DAYS,
+       IFF({_closed},
+           IFF({_usd} >= 5,
+               IFF(ROW_NUMBER() OVER (
+                       PARTITION BY r.WAREHOUSE_NAME, r.BASELINE_CREDITS_PER_DAY,
+                                    r.AFTER_CREDITS_PER_DAY, r.AFTER_DAYS
+                       ORDER BY r.CHANGE_SEEN_AT, r.CHANGE_ID) = 1,
+                   ROUND({_usd}, 2), 0),
+               NULL),
+           NULL) AS REMEASURED_14D_MONTHLY_USD,
+       IFF({_closed},
+           ROUND({_vol}, 2), NULL) AS VOLUME_RATIO,
+       IFF({_closed},
+           {_vol} NOT BETWEEN 0.7 AND 1.3, NULL) AS VOLUME_CONFOUNDED
 FROM {core_object("SAVINGS_LEDGER")} l
 LEFT JOIN {core_object("WAREHOUSE_CHANGE_REGISTRY")} r ON l.SOURCE_CHANGE_ID = r.CHANGE_ID
 LEFT JOIN twin t ON t.TWIN_ITEM_ID = l.ITEM_ID
+CROSS JOIN (SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CREDIT_PRICE_USD', VALUE, NULL))), 3.68) AS RATE
+            FROM {core_object("SETTINGS")}) px
 ORDER BY l.CREATED_AT DESC{limit_clause}
 """
 
@@ -1075,9 +1118,11 @@ GROUP BY NAME
 def email_notification_history(days: int = 7) -> str:
     """OVERWATCH_EMAIL send outcomes (one aggregate row; zero sends = readable + quiet).
     NOTIFICATION_HISTORY takes START_TIME => (owner probe 2026-09-24: it rejects the
-    START_TIME_RANGE_START argument ALERT_HISTORY / TASK_HISTORY use)."""
+    START_TIME_RANGE_START argument ALERT_HISTORY / TASK_HISTORY use) and rejects
+    END_TIME-START_TIME > 336h (owner probe R2), so the clamp is 13 days: a 14-day START_TIME
+    against the default END_TIME (now, evaluated later) lands just past 336h."""
     from app.logic.formulas import ACCOUNT_TIMEZONE
-    days = bounded_days(days, 14)
+    days = bounded_days(days, 13)
     _fail = "UPPER(STATUS) LIKE 'FAIL%'"
     return f"""
 SELECT COUNT_IF(UPPER(STATUS) = 'SUCCESS') AS SENT_N,
@@ -1594,7 +1639,8 @@ def resolutions_for_rule(rule_id: str, days: int = 180, limit: int = 5) -> str:
     """rec26 / CoCo Alerts #26: how the SAME rule was resolved before — the last few
     RESOLVED events for this rule with their resolution kind + note, newest first, so
     the drawer offers a playbook from the account's own history instead of generic
-    guidance. SUPERSEDED closes are excluded (they carry no human decision). Rule id
+    guidance. Machine closes (SUPERSEDED / AUTO_CLEARED / SNOOZE_SUPPRESSED / CONDITION_ENDED)
+    are excluded (they carry no human decision). Rule id
     validated (identifier allowlist)."""
     import re as _re
 
@@ -1620,7 +1666,7 @@ LEFT JOIN (
 ) a ON a.EVENT_ID = e.EVENT_ID
 WHERE e.RULE_ID = {sql_literal(rid)}
   AND e.STATUS = 'RESOLVED'
-  AND COALESCE(e.RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED')
+  AND COALESCE(e.RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED', 'CONDITION_ENDED')
   AND e.RESOLVED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
 ORDER BY e.RESOLVED_AT DESC
 LIMIT {cap}
@@ -1639,9 +1685,10 @@ def rule_precision(days: int = 90) -> str:
     return f"""
 SELECT
     RULE_ID,
-    -- codex#40 companion: exclude machine SUPERSEDED closes so RESOLVED_EVENTS ties to the
-    -- ACTIONED+NOISE+EXPECTED+UNTAGGED buckets (PRECISION_PCT was already unaffected).
-    COUNT_IF(COALESCE(RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED')) AS RESOLVED_EVENTS,
+    -- codex#40 companion: exclude machine closes (SUPERSEDED / AUTO_CLEARED / SNOOZE_SUPPRESSED /
+    -- CONDITION_ENDED) so RESOLVED_EVENTS ties to the ACTIONED+NOISE+EXPECTED+UNTAGGED buckets
+    -- (PRECISION_PCT was already unaffected).
+    COUNT_IF(COALESCE(RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED', 'CONDITION_ENDED')) AS RESOLVED_EVENTS,
     COUNT_IF(RESOLUTION_KIND = 'ACTIONED')            AS ACTIONED,
     COUNT_IF(RESOLUTION_KIND = 'NOISE')               AS NOISE,
     COUNT_IF(RESOLUTION_KIND = 'EXPECTED')            AS EXPECTED,
@@ -2651,20 +2698,58 @@ LIMIT 40
 # V032 incident object — readers (tiny operator-curated tables, live tier).
 # ---------------------------------------------------------------------------
 
-def open_incidents(limit: int = 50, company: str = "ALL") -> str:
+def _incident_ready_cte() -> str:
+    """Next-Fifty #12: the per-incident ALERT-member roll-up shared by open_incidents(lifecycle=True)
+    and incident_metrics. LIVE_MEMBERS counts members that are not RESOLVED (a member whose event row
+    is gone counts as live); LIVE_SUCCESSORS counts SUPERSEDED / SNOOZE_SUPPRESSED members whose
+    same-rule same-company successor is still OPEN/ACK/SNOOZED (a machine hand-off, not an end).
+    Both zero = READY TO CLOSE. This mirrors V154's SP_INCIDENT_AUTODECLARE [auto-mitigate] HAVING
+    minus its 1h dwell (tests/migrations/test_v154 locks the shared tokens). Uncorrelated aggregates
+    over small operator tables only -- no nested scalar subquery (the 002031 shape)."""
+    return f"""inc_ready AS (
+    SELECT m.INCIDENT_ID,
+           COUNT_IF(e.EVENT_ID IS NULL OR e.STATUS <> 'RESOLVED') AS LIVE_MEMBERS,
+           COUNT_IF(COALESCE(e.RESOLUTION_KIND, '') IN ('SUPERSEDED', 'SNOOZE_SUPPRESSED')
+                    AND l.LAST_LIVE_AT >= e.RAISED_AT) AS LIVE_SUCCESSORS
+    FROM {core_object("INCIDENT_MEMBERS")} m
+    JOIN {core_object("INCIDENTS")} ri
+      ON ri.INCIDENT_ID = m.INCIDENT_ID AND ri.STATUS IN ('OPEN', 'MITIGATED')
+    LEFT JOIN {core_object("ALERT_EVENTS")} e ON e.EVENT_ID = m.REF_ID
+    LEFT JOIN (
+        SELECT RULE_ID, COMPANY, MAX(RAISED_AT) AS LAST_LIVE_AT
+        FROM {core_object("ALERT_EVENTS")}
+        WHERE STATUS IN ('OPEN', 'ACK', 'SNOOZED')
+        GROUP BY RULE_ID, COMPANY
+    ) l ON l.RULE_ID = e.RULE_ID AND l.COMPANY = e.COMPANY
+    WHERE m.MEMBER_KIND = 'ALERT'
+    GROUP BY m.INCIDENT_ID
+)"""
+
+
+def open_incidents(limit: int = 50, company: str = "ALL", lifecycle: bool = False) -> str:
     """Company keeps that company's rows PLUS account-level (COMPANY='ALL')
     incidents — the open_alert_events convention (live round 8: the panel
-    ignored the triage filter and showed both companies under ALFA)."""
+    ignored the triage filter and showed both companies under ALFA).
+
+    Next-Fifty #12a: ``lifecycle=True`` (Control Room only — its drawer drives Acknowledge /
+    Mark mitigated) adds ACK_AT, OWNER, MITIGATED_AT and READY_TO_CLOSE (every ALERT member
+    resolved, no live successor — the shared _incident_ready_cte). Brief and the canary only
+    count the rows, so they keep the cheap read (the default renders the pre-#12 SQL unchanged)."""
     limit = max(1, min(int(limit or 50), 200))
     comp = ("" if str(company or "ALL").upper() == "ALL"
             else f" AND (i.COMPANY = {sql_literal(company)} OR UPPER(i.COMPANY) = 'ALL')")
+    head = f"WITH {_incident_ready_cte()}\n" if lifecycle else ""
+    lifecycle_cols = ("       i.ACK_AT, i.OWNER, i.MITIGATED_AT,\n"
+                      "       COALESCE(r.LIVE_MEMBERS = 0 AND r.LIVE_SUCCESSORS = 0, FALSE) AS READY_TO_CLOSE,\n"
+                      if lifecycle else "")
+    ready_join = "LEFT JOIN inc_ready r ON r.INCIDENT_ID = i.INCIDENT_ID\n" if lifecycle else ""
     return f"""
-SELECT i.INCIDENT_ID, i.SEVERITY, i.STATUS, i.COMPANY, i.TITLE,
+{head}SELECT i.INCIDENT_ID, i.SEVERITY, i.STATUS, i.COMPANY, i.TITLE,
        i.DETECTED_AT, i.STARTED_AT, i.DECLARED_BY,
-       (SELECT COUNT(*) FROM {core_object("INCIDENT_MEMBERS")} m
+{lifecycle_cols}       (SELECT COUNT(*) FROM {core_object("INCIDENT_MEMBERS")} m
          WHERE m.INCIDENT_ID = i.INCIDENT_ID) AS MEMBERS
 FROM {core_object("INCIDENTS")} i
-WHERE i.STATUS IN ('OPEN', 'MITIGATED'){comp}
+{ready_join}WHERE i.STATUS IN ('OPEN', 'MITIGATED'){comp}
 ORDER BY CASE UPPER(i.SEVERITY) WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 ELSE 2 END,
          i.DETECTED_AT DESC
 LIMIT {limit}
@@ -2705,8 +2790,11 @@ LIMIT {limit}
 def incident_gantt(days: int = 14, company: str = "ALL") -> str:
     """CR5: per-incident lifecycle spans for a Gantt view — DETECTED_AT to
     RESOLVED_AT (or to now for an open incident). Includes RESOLVED incidents so
-    completed spans render, not just the open queue. ACK/MITIGATE timestamps are
-    not consistently written, so the bar is the detected->resolved span.
+    completed spans render, not just the open queue. The bar stays the
+    detected->resolved span: ACK_AT / MITIGATED_AT are written only since
+    Next-Fifty #12 (Control Room Acknowledge / Mark mitigated, the Close back-fill,
+    and V154's auto-mitigate sweep), so older incidents carry neither and a
+    mid-bar marker would be missing on most of the 14d window.
 
     The SQL is intentionally 'now'-free — it uses CURRENT_TIMESTAMP() (a stable
     SQL token, not a baked datetime literal), so run()'s (sql,scope) memo is shared
@@ -2715,11 +2803,15 @@ def incident_gantt(days: int = 14, company: str = "ALL") -> str:
     + INCIDENTS re-scan whenever a render crossed a minute boundary, and two viewers
     never shared the memo unless within the same minute).
 
-    DETECTED_AT is written in account time while the SiS CURRENT_TIMESTAMP() is
-    server/UTC (ALTER SESSION TIMEZONE is a no-op), so an OPEN incident's server-UTC
-    end would overshoot account time by the offset (~5-6h). IS_OPEN (RESOLVED_AT IS
-    NULL) is returned so the reader (charts.incident_gantt) re-anchors exactly those
-    bars' end/duration to account time — precise, not inferred from the STATUS text.
+    Clock: the 2026-09-21 diagnostic showed the account TIMEZONE is America/Chicago
+    (common.py TIMEZONE STANDARD), so the SiS session's CURRENT_TIMESTAMP() — which
+    also stamps DETECTED_AT, ACK_AT, MITIGATED_AT and RESOLVED_AT — is already Central
+    and today's open-bar end matches account time. The re-anchor below is kept as
+    defense in depth (ALTER SESSION TIMEZONE is a no-op under owner's-rights SiS, so a
+    changed account/warehouse zone would otherwise overshoot an open bar by the
+    offset): IS_OPEN (RESOLVED_AT IS NULL) is returned so the reader
+    (charts.incident_gantt) re-anchors exactly those bars' end/duration to the
+    caller's account now — precise, not inferred from the STATUS text.
     ENDED stays non-null (COALESCE to now) so open bars are never dropped by the
     reader's dropna."""
     days = bounded_days(days, 90)
@@ -2743,15 +2835,25 @@ LIMIT 60
 
 
 def incident_metrics(days: int = 90, company: str = "ALL") -> str:
-    """One row of lifecycle truth: TTD/MTTR medians and storm compression
-    (alerts absorbed per incident).
+    """One row of lifecycle truth: TTD/MTTA/MTTM/MTTR medians, storm compression
+    (alerts absorbed per incident) and the ready-to-close count.
 
-    Two structurally-dead metrics removed (round-4 hunt), each following the
-    change-correlated % precedent from v4.351 — all three counted a column no
-    writer ever persists, so each was a permanent misleading value:
-      * MTTA_MIN (ALC-2): DATEDIFF to INCIDENTS.ACK_AT, but ACK_AT is an
-        ALERT_EVENTS lifecycle field — no incident writer ever sets it, so the
-        median was always NULL. The real detected->ack median is alert-grain.
+    Next-Fifty #12 restored the incident lifecycle columns now that writers exist:
+      * MTTA_MIN / ACKED_N: detected -> the FIRST human response (Control Room
+        Acknowledge, Mark mitigated, or a single-incident Close, each of which
+        back-fills INCIDENTS.ACK_AT only when empty). AUTO-declared incidents
+        only (owner decision O-6): a manual declare is itself the response, so
+        including it would pull the median toward seconds. Before #12 no writer set
+        INCIDENTS.ACK_AT, which is why ALC-2 had dropped it.
+      * MTTM_MIN: detected -> MITIGATED_AT (an operator's Mark mitigated, or V154's
+        SP_INCIDENT_AUTODECLARE sweep, which stamps the last member resolve time).
+      * READY_TO_CLOSE_N: open incidents in scope whose every ALERT member is
+        resolved with no live successor (the shared _incident_ready_cte), from the
+        uncapped table, never len() of the LIMIT-50 open list.
+
+    Two structurally-dead metrics stay removed (round-4 hunt), each following the
+    change-correlated % precedent from v4.351 — each counted a column no writer
+    ever persists, so each was a permanent misleading value:
       * REOPEN_PCT (ALC-1): counted INCIDENTS.REOPENED_FROM parents, but no
         writer ever populates REOPENED_FROM (declare/autodeclare insert neither
         it nor a reopen child), so it was a permanent 0.0%.
@@ -2761,6 +2863,10 @@ def incident_metrics(days: int = 90, company: str = "ALL") -> str:
     days = bounded_days(days, 365)
     comp = ("" if str(company or "ALL").upper() == "ALL"
             else f" AND (COMPANY = {sql_literal(company)} OR UPPER(COMPANY) = 'ALL')")
+    # The ready count joins INCIDENTS aliased i, so its company arm is the i.-qualified twin
+    # (the bare company-scope arm above stays at exactly 2 uses: the w CTE + OPEN_NOW).
+    comp_i = ("" if str(company or "ALL").upper() == "ALL"
+              else f" AND (i.COMPANY = {sql_literal(company)} OR UPPER(i.COMPANY) = 'ALL')")
     # COMPRESSION previously nested (SELECT COUNT(*) FROM w) inside NULLIF inside a scalar
     # subquery — Snowflake 002031 "Unsupported subquery type cannot be evaluated" (owner
     # error log 2026-08-17). Hoist the incident count and the numerator into single-row
@@ -2778,6 +2884,14 @@ compression AS (
     FROM {core_object("INCIDENT_MEMBERS")} m
     JOIN w ON w.INCIDENT_ID = m.INCIDENT_ID
     WHERE m.MEMBER_KIND = 'ALERT'
+),
+{_incident_ready_cte()},
+ready AS (
+    SELECT COUNT(*) AS READY_N
+    FROM {core_object("INCIDENTS")} i
+    JOIN inc_ready r ON r.INCIDENT_ID = i.INCIDENT_ID
+    WHERE i.STATUS IN ('OPEN', 'MITIGATED'){comp_i}
+      AND r.LIVE_MEMBERS = 0 AND r.LIVE_SUCCESSORS = 0
 )
 SELECT
     (SELECT COUNT(*) FROM {core_object("INCIDENTS")}
@@ -2785,10 +2899,19 @@ SELECT
     wn.N AS DECLARED_N,
     (SELECT ROUND(MEDIAN(DATEDIFF('minute', STARTED_AT, DETECTED_AT)), 1) FROM w
       WHERE STARTED_AT IS NOT NULL AND STARTED_AT < DETECTED_AT) AS TTD_MIN,
+    (SELECT ROUND(MEDIAN(DATEDIFF('minute', DETECTED_AT, ACK_AT)), 1) FROM w
+      WHERE ACK_AT IS NOT NULL AND ACK_AT >= DETECTED_AT
+        AND DECLARED_BY = 'SP_INCIDENT_AUTODECLARE') AS MTTA_MIN,
+    (SELECT COUNT(*) FROM w
+      WHERE ACK_AT IS NOT NULL AND ACK_AT >= DETECTED_AT
+        AND DECLARED_BY = 'SP_INCIDENT_AUTODECLARE') AS ACKED_N,
+    (SELECT ROUND(MEDIAN(DATEDIFF('minute', DETECTED_AT, MITIGATED_AT)), 1) FROM w
+      WHERE MITIGATED_AT IS NOT NULL AND MITIGATED_AT >= DETECTED_AT) AS MTTM_MIN,
     (SELECT ROUND(MEDIAN(DATEDIFF('minute', DETECTED_AT, RESOLVED_AT)), 1) FROM w
       WHERE RESOLVED_AT IS NOT NULL) AS MTTR_MIN,
-    ROUND(compression.ALERT_MEMBERS / NULLIF(wn.N, 0), 1) AS COMPRESSION
-FROM wn CROSS JOIN compression
+    ROUND(compression.ALERT_MEMBERS / NULLIF(wn.N, 0), 1) AS COMPRESSION,
+    ready.READY_N AS READY_TO_CLOSE_N
+FROM wn CROSS JOIN compression CROSS JOIN ready
 """
 
 

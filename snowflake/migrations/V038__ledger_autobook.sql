@@ -102,7 +102,22 @@ $$;
 
 -- First pass now: books + settles from the registry's existing 90 days,
 -- so the ledger stops being empty the moment V038 applies.
-CALL DBA_MAINT_DB.OVERWATCH.SP_LEDGER_AUTOBOOK();
+-- Rebuild-replay guard (added with V153, 2026-09-24): only on a GENUINE first apply (SCHEMA_VERSION
+-- max 37). A full rebuild that keeps operator data replays this file with SCHEMA_VERSION already at the
+-- tip; running V038's original settle logic then (3-day gate, rate read as a whole number, no V118
+-- dedup) would permanently settle V153's in-flight rows before V153 re-derives the proc. This does not
+-- change anything already applied in the account.
+EXECUTE IMMEDIATE
+$$
+DECLARE
+    v NUMBER;
+BEGIN
+    SELECT MAX(VERSION) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 38) THEN
+        CALL DBA_MAINT_DB.OVERWATCH.SP_LEDGER_AUTOBOOK();
+    END IF;
+END;
+$$;
 
 CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LEDGER_AUTOBOOK
     WAREHOUSE = WH_ALFA_ADMIN

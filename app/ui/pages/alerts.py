@@ -1129,9 +1129,11 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                         with st.expander(f"Respond — closed loop on {wh_inline}", expanded=False):
                             st.caption("Playbook above says what; this generates the how. Execute is "
                                        "operator-gated, audited to REMEDIATION_LOG, and books an "
-                                       "ESTIMATED ledger item — verify it on Cost Intelligence > "
-                                       "Optimization & Savings. The change scan settles its own "
-                                       "measured row for warehouse-setting changes (V038).")
+                                       "ESTIMATED ledger item. For an auto-suspend or cluster-cap change "
+                                       "the daily change scan adopts this item and settles it on 14 days "
+                                       "of measured actuals, when the scan sees a saving-direction change "
+                                       "(V153); verify anything else on Cost Intelligence > "
+                                       "Optimization & Savings.")
                             try:
                                 prior = run(mart_sql.ledger_for_event(event_id[:8].lower()), page=_PAGE,
                                             key=f"clf_led_{event_id[:8]}", tier="live",
@@ -1147,10 +1149,11 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                             usd_s = "n/a"
                                         # $-escape: DESCRIPTION is data — a '$' in it pairs with usd_s
                                         st.markdown(md_dollars(f"- **{state}** — {li.get('DESCRIPTION')} ({usd_s})"))
-                                    st.caption("VERIFIED comes from a manual proof-backed verify on the "
-                                               "Savings ledger; the change scan (V038) additionally books "
-                                               "and settles its own measured row for warehouse-setting "
-                                               "changes.")
+                                    st.caption("Auto-suspend and cluster-cap fixes settle on this same row "
+                                               "once the change scan's 14-day window closes, when the scan "
+                                               "sees a saving-direction change (V153); other fixes (e.g. a "
+                                               "statement timeout) are VERIFIED by a proof-backed verify on "
+                                               "the Savings ledger.")
                             except ValueError:
                                 pass  # non-uuid event id shapes: chip simply doesn't render
                             fix_kind = st.radio("Fix", ["Tighten auto-suspend to 60s",
@@ -1216,18 +1219,25 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                         from app.ui.components import log_ui_event
                                         log_ui_event("remediation_exec", page=_PAGE)
                                     if ok:
-                                        # Next-Fifty #5 (review fix): stamp the lever + warehouse so the ledger's
-                                        # twin rule supersedes this $0 row once the change scan's measured row settles
-                                        # (the scan books auto-suspend and cluster-cap changes itself).
+                                        # Next-Fifty #5 (review fix) + #11: stamp the lever + warehouse so the change
+                                        # scan's autobook ADOPTS this $0 row when it sees a saving-direction change
+                                        # (V153; pre-V153 the twin rule superseded it once the scan's own measured row
+                                        # settled). STATEMENT_TIMEOUT is invisible to the scan: a proof run verifies it.
                                         _cl_lever = ("AUTO_SUSPEND" if fix_kind.startswith("Tighten")
                                                      else "STATEMENT_TIMEOUT" if fix_kind.startswith("Statement")
                                                      else "MAX_CLUSTERS")
+                                        # keep the 'event <id8>' substring: ledger_for_event matches NOTES on it
+                                        _cl_note = ('From alert event ' + event_id[:8]
+                                                    + ("; verify with a proof run on the Savings ledger."
+                                                       if _cl_lever == "STATEMENT_TIMEOUT"
+                                                       else "; the daily change scan adopts and settles it on "
+                                                            "its 14-day measured window."))
                                         execute_statement(
                                             f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
                                             "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES, FINDING_TYPE, TARGET_OBJECT) "
                                             f"SELECT {sql_literal(fix_kind + ' on ' + wh_inline + ' (alert closed loop)')}, "
                                             f"'ESTIMATED', 0, {sql_literal(stmt_cl)}, "
-                                            f"{sql_literal('From alert event ' + event_id[:8] + '; verifier measures actuals.')}, "
+                                            f"{sql_literal(_cl_note)}, "
                                             f"{sql_literal(_cl_lever)}, {sql_literal(wh_inline)}",
                                             page=_PAGE)
                                     stamp_write(f"clf_exec_{event_id[:8]}", ok)  # C48
@@ -1242,8 +1252,10 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                 styled_table(booked.df[["DESCRIPTION", "STATE", "ESTIMATED_USD",
                                                         "VERIFIED_USD", "CREATED_AT"]], height=140)
                                 st.caption("ESTIMATED flips to VERIFIED when verified on the Savings "
-                                           "ledger (proof + measured amount). Warehouse-setting changes "
-                                           "also get a separate change-scan row that settles itself (V038).")
+                                           "ledger (proof + measured amount). Auto-suspend and cluster-cap "
+                                           "fixes instead settle on this row automatically after the change "
+                                           "scan's 14-day window, when the scan sees a saving-direction "
+                                           "change (V153).")
                     # Per-family evidence: each alert gets the evidence pack that matches
                     # the metric it fired on, not one query-latency pack for everything
                     # (which fed cost/serverless/Cortex alerts unrelated latency rows).
@@ -1711,10 +1723,20 @@ def render() -> None:
         if inc_met.usable():
             im = inc_met.df.iloc[0]
             kpi_row([
-                # ALC-2: MTTA dropped at incident grain — no writer ever sets
-                # INCIDENTS.ACK_AT (ACK_AT is an ALERT_EVENTS lifecycle field), so the
-                # incident-grain MTTA was structurally always NULL ("—"). The real
-                # detected->ack median is the alert-grain MTTA shown just above.
+                # Next-Fifty #12a: incident-grain MTTA is back now that a writer exists (Control
+                # Room Acknowledge / Mark mitigated / Close back-fill INCIDENTS.ACK_AT). NULL
+                # renders '—' through humanize_duration until the first auto-declared ack.
+                {"label": "MTTA (90d)",
+                 "value": humanize_duration(im.get("MTTA_MIN"), "min"),
+                 "help": "Detected -> first response (Acknowledge, Mark mitigated or Close in the "
+                         "Control Room incident drawer), median over AUTO-declared incidents "
+                         f"({int(safe_float(im.get('ACKED_N'))):,} responded to). Manual declares "
+                         "are excluded — declaring was the response."},
+                {"label": "Time to mitigate (90d)",
+                 "value": humanize_duration(im.get("MTTM_MIN"), "min"),
+                 "help": "Detected -> MITIGATED (median): when an operator marked it mitigated, or "
+                         "when its last member alert resolved (the auto-mitigate sweep records "
+                         "that time, not its own run time)."},
                 {"label": "MTTR (90d)",
                  "value": humanize_duration(im.get("MTTR_MIN"), "min"),
                  "help": "Detected -> resolved at INCIDENT grain — the alert-grain pair "

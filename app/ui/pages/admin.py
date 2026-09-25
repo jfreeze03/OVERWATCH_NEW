@@ -622,6 +622,42 @@ _EXPECTED_MIGRATIONS = {
          "the fixed 10/20% CS-ratio threshold (a chronically compile-heavy warehouse stays in-baseline). "
          "CS-credit volume floor, not the $50 compute floor. Adds the COST_CLOUD_SVC_ANOMALY rule + a CALL "
          "arm in SP_ANOMALY_SWEEP (re-derived from V133); rides TASK_ANOMALY_SWEEP, no new task",
+    151: "Security change-risk identity/policy drops: the CHANGE RISK queue now keeps Terraform-role (TF_*) "
+         "DROP USER / ROLE / DATABASE ROLE / APPLICATION ROLE / (kind) POLICY that V088's TF_* / "
+         "DBA_MAINT_DB.PUBLIC DESTRUCTIVE exclusion hid (kept when QUERY_TYPE names USER/ROLE/POLICY or the "
+         "statement opens with one of 17 keyword-anchored DROP openers, so TF_* table/schema drops and a "
+         "TRUNCATE of a FACT_POLICY table stay excluded). V_SECURITY_EXCEPTION_QUEUE re-derived from V088, "
+         "byte-identical otherwise; each surfaced row is CRITICAL, so CHANGE RISK can drop to Watch/Act. "
+         "View-only, no reload",
+    152: "Pipeline freshness coverage: the two loaded marts with no loader-owned freshness stamp now get one, "
+         "so a stalled load shows on the health strip, the freshness boards and NATIVE_ALERT_STALE_FACTS. "
+         "MART_CLOUD_SVC_DAILY (the V150 COST_CLOUD_SVC_ANOMALY baseline) is stamped by SP_LOAD_QH_EXTRACT "
+         "(re-derived from V149) inside its IF (ok) freshness MERGE, advancing only when the mart MERGE succeeded; "
+         "MART_TASK_NODE_DAILY gets both halves of the token-gated HOURLY stamp (a MART_SOURCE_FRESHNESS row, "
+         "view re-created from V045, and a task_node srcmap row in SP_LOAD_MARTS_V27, re-derived from V146). "
+         "Insertions only; both names read at the 30h DAILY cadence although they load hourly. No task or rule "
+         "change; the next hourly run stamps both rows",
+    153: "Autobook full-window settle: SP_LEDGER_AUTOBOOK re-derived from V145 (V118 LBA-1 + V038 core "
+         "byte-identical) settles a detected warehouse change only once its 14-day window has closed and "
+         "credits were metered after it -- 15-16 days after the change, not ~3. NO_BASELINE / "
+         "INSUFFICIENT_AFTER settle on the metered credits (latency axes marked unjudged) and close "
+         "REJECTED only when nothing was metered (V145 booked the whole baseline as saved); the settle "
+         "note carries the query-volume ratio (volume-confounded outside 0.7-1.3x, dollars not adjusted) "
+         "and a perf-regressed marker; FLOAT credit rate (TRY_TO_NUMBER priced 3.68 as 4, +8.7%); a "
+         "matching manual row is ADOPTED instead of double-booked. SP_VERIFY_IDLE_SAVINGS (from V053) "
+         "skips change-tied rows. Proc-only; the tail runs the autobook once (it can adopt manual rows "
+         "from the last 3 days). Historical rows untouched unless the owner runs snowflake/resettle_autobook_14d.sql",
+    154: "Incident loop: SP_INCIDENT_AUTODECLARE re-derived from V099 (V098 re-link guard + V099 "
+         "company scope kept) now links a later unlinked OPEN/ACK CRITICAL to the OPEN/MITIGATED "
+         "incident its family already has open (timelines, RCA and member counts stop missing it) and "
+         "moves an OPEN incident to MITIGATED once every member alert has been resolved for an hour "
+         "(MITIGATED_AT = the last resolve; never RESOLVED -- closing stays human, the Control Room "
+         "lists it as ready to close). Adds INCIDENTS.MITIGATED_BY (machine provenance; NULL = a human). "
+         "Both arms are off while INCIDENT_AUTO_DECLARE_CRITICAL is off; no task change, no backfill",
+    155: "Operator-stats collector ignores the app's own statements: SP_LOAD_QUERY_OPERATOR_STATS "
+         "re-derived from V147 (byte-identical except one cursor predicate) also skips statements "
+         "carrying the QUERY_TAG Streamlit-in-Snowflake stamps on every app statement, so the Operator "
+         "boards agree with Operations query triage again. No schema change, no backfill",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
