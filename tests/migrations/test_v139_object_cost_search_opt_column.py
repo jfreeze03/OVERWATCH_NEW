@@ -74,7 +74,7 @@ def test_v139_backfills_the_gap_on_apply():
 
 def test_validate_and_docs_track_v139():
     val = _read("snowflake/validate.sql")
-    assert "V001..V150 applied" in val and "VERSION BETWEEN 1 AND 150) = 150" in val
+    assert "V001..V155 applied" in val and "VERSION BETWEEN 1 AND 155) = 155" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V139__object_cost_search_opt_column.sql" in _read(rel)
 

@@ -1,5 +1,54 @@
 # Changelog
 
+## 4.593.0 - Next Fifty wave 2a (V151–V155): security drops, freshness, autobook settle, incident loop, collector parity (2026-09-24)
+
+Five owner-applied migrations (none writes ALERT_EVENTS, emails, or DROPs an object) plus app pieces.
+
+- **V151 (#8, confirmed defect): Terraform-role identity/policy drops reach the Security queue.** V088's
+  CHANGE RISK exclusion hid every DESTRUCTIVE row by a TF_* role or on DBA_MAINT_DB.PUBLIC, and the V105
+  classifier files DROP USER / DROP ROLE / DROP … POLICY as DESTRUCTIVE. V_SECURITY_EXCEPTION_QUEUE is
+  re-derived from V088 and keeps a row when QUERY_TYPE names USER/ROLE/POLICY or the statement opens with
+  one of 17 keyword-anchored DROP openers. Not the rec's bare '%POLICY%' (it would re-flood TF_* TRUNCATEs of
+  FACT_POLICY tables) and not DATABASE_NAME IS NOT NULL (NULL-database drops were the flood). View-only. The
+  Security change-risk diagnostic gains QUERY_TYPE / DROP_CLASS. **Disclosure:** each surfaced row is
+  CRITICAL, so one in 7 days reads CHANGE RISK Watch (75) and two read Act (50).
+- **V152 (#10c): freshness coverage for the two unstamped marts.** MART_CLOUD_SVC_DAILY (the V150 anomaly
+  baseline) is stamped by SP_LOAD_QH_EXTRACT (re-derived from V149); MART_TASK_NODE_DAILY gets a
+  MART_SOURCE_FRESHNESS row (view from V045) and its srcmap row in SP_LOAD_MARTS_V27 (from V146). Insertions
+  only. Both names read at the 30h daily cadence though they load hourly (lenient, never a false stale).
+- **V153 (#11 + #5 adopt): autobooked savings settle on the full 14-day window.** SP_LEDGER_AUTOBOOK
+  (from V145; V038 core and V118 LBA-1 byte-identical) settles only once CURRENT_DATE() > TRACKING_UNTIL and
+  credits were metered after the change. Two LIVE defects fixed: TRY_TO_NUMBER('3.68') priced every
+  autobook at 4 (+8.7%), and NO_BASELINE settled on day 0 booking the whole baseline as saved. A matching
+  app-booked manual row is ADOPTED instead of double-booked; SP_VERIFY_IDLE_SAVINGS (from V053) skips
+  change-tied rows. **Disclosures:** settles 15–16 days after the change (a late-quarter change lands next
+  quarter); NO_BASELINE / INSUFFICIENT_AFTER settle on metered credits with PERF_UNJUDGED and close REJECTED
+  only when nothing was metered; the note carries the query-volume ratio (VOLUME_CONFOUNDED outside
+  0.7–1.3×, dollars never adjusted) and PERF_REGRESSED; historical rows are untouched (the Savings ledger's
+  new "Remeasured 14d monthly USD" column shows the gap). The Decision Studio pipeline KPI splits
+  hand-verified from auto-settling items.
+- **V154 (#12b) + app (#12a): incidents close their own loop.** SP_INCIDENT_AUTODECLARE (from V099) attaches a
+  later unlinked CRITICAL to its family's open incident and moves an OPEN incident to MITIGATED once every
+  member alert has been resolved for an hour (never RESOLVED; closing stays human). Adds INCIDENTS.MITIGATED_BY.
+  Control Room gains Acknowledge + take ownership and Mark mitigated (forward-only, latched, logged), a
+  ready-to-close count, and Alerts ▸ History gets MTTA and time-to-mitigate. **Disclosure:** the first run
+  moves stale OPEN incidents whose members all resolved to MITIGATED.
+- **V155: the operator-stats collector ignores the app's own statements.** SP_LOAD_QUERY_OPERATOR_STATS (from
+  V147) also skips statements carrying the QUERY_TAG Streamlit-in-Snowflake stamps on every app statement, so
+  the Operator boards agree with Operations query triage again (closes the gap disclosed in 4.591.0).
+- **Guards and small fixes.** The lineage guard now covers views and UDFs (one waived historical supersede,
+  V088); the alert-config replay reads only the ENABLED flag (never AUTO_CLEAR_ENABLED); a drift lock ties
+  each alert scan's denominators to its counting arms; a freshness-coverage test requires every FACT_/MART_
+  load target to have a stamp; NOTIFICATION_HISTORY reads clamp to 13 days (the 336-hour limit, owner probe);
+  CONDITION_ENDED joins the machine-close kinds excluded from human metrics, shipped ahead of wave 2b's sweep.
+
+Owner-side: run `snowflake/run/PROBES_WAVE2.sql` (A1/A2, B, C) first if you want the previews; apply
+V151 → V155 in order from the runbox RUN_NEXT (each guards on the previous; V153's tail runs the autobook
+once); then `snow streamlit deploy --replace`. Wave 2b (overnight ETL alerts, the merged alert-scan rework,
+daily backups) must wait until this build is DEPLOYED (the CONDITION_ENDED exclusion).
+
+4-pin version bump 4.592.0 → 4.593.0 + CHANGELOG.
+
 ## 4.592.0 - Decision Studio ROI: honest units, realization, NULLs, chart and verdict (2026-09-24)
 
 From the owner's Decision Studio screenshots (2026-09-24). App-only.

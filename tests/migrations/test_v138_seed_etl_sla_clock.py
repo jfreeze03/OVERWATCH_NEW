@@ -60,7 +60,7 @@ def test_sla_forecast_wired_across_config_sites():
 
 def test_validate_and_docs_track_v138():
     val = _read("snowflake/validate.sql")
-    assert "V001..V150 applied" in val and "VERSION BETWEEN 1 AND 150) = 150" in val
+    assert "V001..V155 applied" in val and "VERSION BETWEEN 1 AND 155) = 155" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V138__seed_etl_sla_clock.sql" in _read(rel)
 

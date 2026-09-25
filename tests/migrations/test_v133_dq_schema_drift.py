@@ -67,7 +67,7 @@ def test_v133_rides_the_sweep_with_no_new_task():
 
 def test_validate_and_docs_track_v133():
     val = _read("snowflake/validate.sql")
-    assert "V001..V150 applied" in val and "VERSION BETWEEN 1 AND 150) = 150" in val
+    assert "V001..V155 applied" in val and "VERSION BETWEEN 1 AND 155) = 155" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V133__dq_schema_drift.sql" in _read(rel)
     assert "SP_SCAN_SCHEMA_DRIFT" in _read("snowflake/teardown.sql")
