@@ -452,10 +452,11 @@ def test_v156_late_tunes_lower_is_worse():
 
 def test_v156_part_b_ddl_fragments_are_in_the_migration():
     """RUN_NEXT PART B (V156.1) reads GET_DDL('PROCEDURE', '...SP_SCAN_ETL_CYCLE()') for these fragments;
-    a fragment that is not literally in the proc body would read FALSE on a correct apply."""
+    a fragment that is not literally in the proc body would read FALSE on a correct apply. Quote-free, so
+    GET_DDL's re-quoting of the body can never change the match (the house grid precedent)."""
     for frag in ("t.TERMINAL_START >= s.CYCLE_START", "GREATEST(c.MIN_FAILED, 1)", "CROSS JOIN term_lw tl",
-                 "IFF(g.BAND = 'WARN' OR g.IS_COMPLETE, g.SEVERITY, 'CRITICAL')"):
-        assert _BODY.count(frag) == 1, frag
+                 "OR g.IS_COMPLETE, g.SEVERITY", "NOT COALESCE(g.PROJECTED_FINISH > g.DL_H, FALSE)"):
+        assert "'" not in frag and _BODY.count(frag) == 1, frag
 
 
 # ---------------------------------------------------------------------------------------------------
