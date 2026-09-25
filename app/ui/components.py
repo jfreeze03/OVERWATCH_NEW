@@ -2040,30 +2040,17 @@ def _clean_numeric_cell(v) -> str:
     return f"{f:,.4f}".rstrip("0").rstrip(".")
 
 
-def _nullable_printf_columns(frame, column_config: dict | None) -> dict:
-    """Caller NumberColumn printf formats on columns that actually hold NULLs: {column: format}.
-
-    On the Styler path Streamlit's column_config printf overrides the styled cell, so the house
-    em-dash (na_rep) never reached those NULLs - they rendered as the literal 'None' (the Decision
-    Studio lever table's Realization %, owner screenshot 2026-09-24). _render_table moves each such
-    format onto the Styler WITH na_rep and keeps only the caller's label/help/width. Only plain printf
-    strings Python can apply ('$%.2f', '%.0f%%', '%d') qualify; named formats are left alone."""
-    out: dict = {}
-    for col, cfg in (column_config or {}).items():
-        if col not in getattr(frame, "columns", ()) or not isinstance(cfg, dict):
-            continue
-        tc = cfg.get("type_config")
-        fmt = tc.get("format") if isinstance(tc, dict) else None
-        if not isinstance(tc, dict) or tc.get("type") != "number" or not isinstance(fmt, str) or "%" not in fmt:
-            continue
-        try:
-            if not bool(frame[col].isna().any()):
-                continue
-            fmt % 1.0                                   # Python-applicable printf only
-        except Exception:  # noqa: BLE001 - an exotic format keeps Streamlit's own rendering
-            continue
-        out[col] = fmt
-    return out
+def _st_dataframe(data, **kwargs):
+    """st.dataframe with the house em-dash for missing cells. Streamlit's grid draws a NULL cell with its
+    own missing-value placeholder (default 'None') BEFORE it looks at any Styler text, so Styler na_rep never
+    reached a NULL - every table showed 'None' (owner screenshot 2026-09-24, verified against the 1.52 grid).
+    placeholder= is the grid's own knob; a runtime without it retries without, so a table always renders."""
+    try:
+        return st.dataframe(data, **kwargs)
+    except TypeError as exc:
+        if "placeholder" not in kwargs or "placeholder" not in str(exc):
+            raise
+        return st.dataframe(data, **{k: v for k, v in kwargs.items() if k != "placeholder"})
 
 
 def _render_table(df, *, height: int | None, column_config: dict | None,
@@ -2158,7 +2145,6 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
         except Exception:  # noqa: BLE001 - the bar is cosmetic, the table must render
             pass
     _cell_count = len(df) * max(1, len(df.columns))
-    _na_printf = _nullable_printf_columns(display_df, column_config)   # NULL '—' vs a caller printf
     if len(df) <= STYLER_MAX_ROWS and _cell_count <= STYLER_MAX_CELLS:
         try:
             styler = display_df.style
@@ -2196,16 +2182,6 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                     styler = styler.format(_clean_numeric_cell, na_rep="—", subset=_rest_num)
                 if _rest_txt:
                     styler = styler.format(na_rep="—", subset=_rest_txt)
-            # A caller's printf on a NULL-bearing column: format on the Styler (last, so it wins) WITH
-            # na_rep, and strip the printf from the column_config so it cannot override the em-dash.
-            if _na_printf:
-                _cfg_na = dict(column_config or {})
-                for _nc, _pf in _na_printf.items():
-                    styler = styler.format(lambda v, _p=_pf: _p % v, na_rep="—", subset=[_nc])
-                    _entry = dict(_cfg_na[_nc])
-                    _entry["type_config"] = {**dict(_entry.get("type_config") or {}), "format": None}
-                    _cfg_na[_nc] = _entry
-                column_config = _cfg_na
             data = styler
         except Exception:  # noqa: BLE001 - styling is cosmetic, table must render
             data = display_df
@@ -2310,7 +2286,8 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
     column_config = _cfg or None
     if height is None and len(df) > 10:
         height = TABLE_H_XL
-    kwargs = {"hide_index": True, "width": "stretch", "column_config": column_config}
+    # placeholder: the grid's own missing-value text (Styler na_rep never reaches a NULL cell) - the house "—"
+    kwargs = {"hide_index": True, "width": "stretch", "column_config": column_config, "placeholder": "—"}
     if isinstance(height, int) and height > 0:  # newer Streamlit rejects height=None
         kwargs["height"] = height
     if totals:
@@ -2322,7 +2299,7 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
     selected: int | list[int] | None = [] if multi else None
     if selectable and key:
         try:
-            event = st.dataframe(data, key=key, on_select="rerun",
+            event = _st_dataframe(data, key=key, on_select="rerun",
                                  selection_mode="multi-row" if multi else "single-row",
                                  **kwargs)
             rows = list(getattr(getattr(event, "selection", None), "rows", None) or [])
@@ -2337,9 +2314,9 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
             _valid = [int(r) for r in rows if 0 <= int(r) < len(df)]
             selected = _valid if multi else (_valid[0] if _valid else None)
         except TypeError:  # runtime without selection support: render, no selection
-            st.dataframe(data, **kwargs)
+            _st_dataframe(data, **kwargs)
     else:
-        st.dataframe(data, **kwargs)
+        _st_dataframe(data, **kwargs)
     try:  # every real table is exportable; tiny KPI-ish frames skip the button
         if len(df) >= 4:
             seq = int(st.session_state.get("_ow_dl_seq", 0))

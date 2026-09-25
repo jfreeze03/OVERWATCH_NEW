@@ -317,7 +317,7 @@ def render() -> None:
                            if app_usd is not None else "off",
             "help": f"Monthly run-rate of VERIFIED ledger items verified in the last {SAVINGS_ACTIVE_MONTHS} "
                     "months — proven by before/after actuals, never mixed with estimates, and it does not "
-                    f"reset when a quarter starts ({format_usd(verified_qtd)} verified this quarter; detail "
+                    f"reset when a quarter starts ({format_usd(verified_qtd)}/mo added this quarter; detail "
                     "on Decision Studio ▸ ROI). App cost = the shared app/loader warehouse's trailing 30-day "
                     "(monthly) run cost — same horizon. Green: the verified run-rate covers the app's run cost.",
         })
