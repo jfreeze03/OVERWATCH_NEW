@@ -755,7 +755,7 @@ def _scorecard(company: str, rate: float) -> None:
         "severity": ("ok" if roi["PAYS"] else ("warn" if roi["RATIO"] is not None else "")),
         "delta": (f"{format_usd(roi['VERIFIED_USD'])}/mo verified run-rate vs "
                   f"{format_usd(roi['RUN_COST_USD'])}/mo run cost · "
-                  f"{format_usd(sig.get('verified_qtd', 0.0))} verified this quarter"
+                  f"{format_usd(sig.get('verified_qtd', 0.0))}/mo added this quarter"
                   if roi["RATIO"] is not None else "run cost or verified $ not measured yet"),
         "delta_color": "off",
         "help": f"Monthly savings run-rate of every item VERIFIED in the last {SAVINGS_ACTIVE_MONTHS} months "
@@ -770,8 +770,8 @@ def _scorecard(company: str, rate: float) -> None:
                    else ("n/a" if sig["totals"]["verified_count"] else "—")),
          "help": "Of what verified items were estimated to save, how much actually measured out. "
                  "Near 100% means the estimates held up (verified items that carried an estimate). "
-                 "n/a = every verified item was auto-measured from a detected change, which books no "
-                 "up-front estimate to compare against."},
+                 "n/a = no verified item carried an up-front estimate to compare against (changes the "
+                 "daily scan auto-measured, and experiments verified by hand, book none)."},
         {"label": "Acted on",
          "value": (f"{acc['ACCEPTANCE_PCT']:,.0f}%" if acc["ACCEPTANCE_PCT"] is not None else "—"),
          "delta": f"{acc['DONE_N']} done · {acc['DROPPED_N']} dismissed · {acc['OPEN_N']} open",
@@ -832,6 +832,8 @@ def _roi(company: str) -> None:
         return
     totals = ledger_totals(ledger.df)
     _real = totals["realization_pct"]
+    _no_est = int(totals.get("verified_no_estimate_count") or 0)
+    _no_est_auto = int(totals.get("verified_no_estimate_auto_count") or 0)
     _avgd = totals["avg_days_to_verify"]
     # Next-Fifty #11 (V153): change-scan rows stay ESTIMATED until their 14-day measured window closes and
     # then settle themselves -- split them out so the delta never asks an operator to hand-verify them.
@@ -854,10 +856,12 @@ def _roi(company: str) -> None:
         {"label": "Realization rate",
          "value": (f"{_real:,.0f}%" if _real is not None
                    else ("n/a" if totals["verified_count"] else "—")),
-         "delta": (f"{format_usd(totals['realized_verified_usd'])} of "
-                   f"{format_usd(totals['realized_estimated_usd'])} estimated"
+         "delta": ((f"{format_usd(totals['realized_verified_usd'])} of "
+                    f"{format_usd(totals['realized_estimated_usd'])} estimated"
+                    + (f" · {_no_est:,} item(s) without an estimate not in the ratio" if _no_est else ""))
                    if _real is not None else
-                   (f"auto-measured — no up-front estimate ({totals['verified_count']:,} item(s))"
+                   (f"no up-front estimate on the {_no_est:,} verified item(s) ({_no_est_auto:,} auto-measured, "
+                    f"{_no_est - _no_est_auto:,} verified by hand)"
                     if totals["verified_count"] else "nothing verified yet")),
          "delta_color": "off",
          "help": "Verified $ as a share of what those items were estimated to save — the honest "
@@ -887,10 +891,13 @@ def _roi(company: str) -> None:
             f"({format_usd(totals['volume_confounded_usd'])}/mo) whose 14-day measured window shows query "
             "volume outside 0.7–1.3x of baseline — part of that measured delta may be workload, not the "
             "lever. Counted as measured, not adjusted."))
-    if totals["verified_usd"] > 0:
+    if totals["verified_active_usd"] > 0:
+        # the SAME active figure as the run-rate KPI above (review fix: the all-time sum read as a run-rate)
+        _older = totals["verified_count"] - totals["verified_active_count"]
         st.markdown(md_dollars(
-            f"OVERWATCH has verified **{format_usd(totals['verified_usd'])}/mo** of savings run-rate across "
-            f"**{totals['verified_count']:,}** item(s)"
+            f"OVERWATCH has verified **{format_usd(totals['verified_active_usd'])}/mo** of active savings run-rate "
+            f"across **{totals['verified_active_count']:,}** item(s) verified in the last {SAVINGS_ACTIVE_MONTHS} months"
+            + (f" ({_older:,} older item(s) no longer counted)" if _older > 0 else "")
             + (f", realizing **{_real:,.0f}%** of what they were estimated to save"
                if _real is not None else "")
             + (f", closing the loop in **{_avgd:g} days** on average." if _avgd is not None else ".")

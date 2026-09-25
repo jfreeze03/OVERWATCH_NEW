@@ -25,31 +25,31 @@ def _src(rel: str) -> str:
     return (_ROOT / rel).read_text(encoding="utf-8")
 
 
-def test_null_printf_columns_detects_only_nullable_printf_numbers():
-    df = pd.DataFrame({"REALIZATION_PCT": [90.0, float("nan")], "VERIFIED_USD": [1.0, 2.0], "LEVER": ["A", "B"]})
-    cfg = {"REALIZATION_PCT": st.column_config.NumberColumn("Realization %", format="%.0f%%"),
-           "VERIFIED_USD": st.column_config.NumberColumn("Verified $", format="$%.2f"),   # no NULLs
-           "LEVER": st.column_config.TextColumn("Lever")}
-    assert components._nullable_printf_columns(df, cfg) == {"REALIZATION_PCT": "%.0f%%"}
-    named = {"REALIZATION_PCT": st.column_config.NumberColumn("R", format="percent")}   # not printf
-    assert components._nullable_printf_columns(df, named) == {}
-
-
-def test_render_table_shows_the_em_dash_for_a_caller_printf_null(monkeypatch):
-    seen: dict = {}
-
-    def _capture(data, **kw):
-        seen["data"], seen["cfg"] = data, kw.get("column_config")
-
-    monkeypatch.setattr(components.st, "dataframe", _capture)
+def test_every_table_asks_the_grid_for_the_em_dash(monkeypatch):
+    # Streamlit's grid draws a NULL with its own placeholder (default 'None') before any Styler text, so the
+    # house '—' must be the grid's placeholder - on every render path (plain, selectable)
+    calls: list = []
+    monkeypatch.setattr(components.st, "dataframe", lambda data, **kw: calls.append(kw))
     df = pd.DataFrame({"LEVER": ["RESIZE", "AUTO_SUSPEND"], "REALIZATION_PCT": [None, 88.0]})
-    components._render_table(df, height=None, size_note=False, column_config={
-        "REALIZATION_PCT": st.column_config.NumberColumn("Realization %", format="%.0f%%")})
-    cfg = seen["cfg"]["REALIZATION_PCT"]
-    assert cfg["label"] == "Realization %"                   # the caller's label survives
-    assert cfg["type_config"]["format"] is None              # its printf no longer overrides the cell
-    html = seen["data"].to_html()
-    assert "—" in html and "88%" in html and ">None<" not in html
+    cfg = {"REALIZATION_PCT": st.column_config.NumberColumn("Realization %", format="%.0f%%")}
+    components._render_table(df, height=None, size_note=False, column_config=cfg)
+    components._render_table(df, height=None, size_note=False, column_config=cfg, key="k", selectable=True)
+    assert calls and all(kw.get("placeholder") == "—" for kw in calls)
+    # the caller's printf is left to Streamlit (one renderer for every row count, JS rounding)
+    assert calls[0]["column_config"]["REALIZATION_PCT"]["type_config"]["format"] == "%.0f%%"
+
+
+def test_old_runtime_without_placeholder_still_renders(monkeypatch):
+    seen: list = []
+
+    def _old(data, **kw):
+        if "placeholder" in kw:
+            raise TypeError("dataframe() got an unexpected keyword argument 'placeholder'")
+        seen.append(kw)
+
+    monkeypatch.setattr(components.st, "dataframe", _old)
+    components._render_table(pd.DataFrame({"A": [1.0, None]}), height=None, size_note=False, column_config=None)
+    assert len(seen) == 1 and "placeholder" not in seen[0]
 
 
 def test_month_calendar_zero_fills_and_keeps_the_month_to_date(monkeypatch):
@@ -76,8 +76,9 @@ def test_roi_labels_are_a_monthly_run_rate():
     body = ds.split("def _roi(", 1)[1].split("\ndef ", 1)[0]
     assert '"label": "Verified savings (all time)"' not in body and "Verified savings run-rate" in body
     assert "Added this quarter" in body and '"method": "measured"' in body
-    assert "}/mo** of savings run-rate across" in body
-    assert "auto-measured — no up-front estimate" in body
+    assert "}/mo** of active savings run-rate" in body and "totals['verified_active_usd']" in body
+    assert "older item(s) no longer counted" in body
+    assert "no up-front estimate on the" in body
     assert 'charts.monthly_bars_usd(month_df, "MONTH_LABEL", "VERIFIED_USD"' in body
     assert "Experiments (below)" not in ds                               # stale copy
 
@@ -88,11 +89,32 @@ def test_verdict_names_only_measured_facts():
     assert v["level"] == "good" and "earning its keep" in v["headline"]
     assert "pays for itself 3.2x" in v["headline"]
     assert "not yet measured: realization, alert precision, team follow-through" in v["headline"]
+    no_cost = proof_verdict({"RATIO": None, "PAYS": False}, 95.0, None, {"PRECISION_PCT": None, "UNTAGGED_SHARE_PCT": 0})
+    assert "not yet measured: ROI multiple (run cost)" in no_cost["headline"]
     full = proof_verdict(roi, 95.0, 80.0, {"PRECISION_PCT": 90.0, "UNTAGGED_SHARE_PCT": 0})
     assert "not yet measured" not in full["headline"] and "the team acts on 80%" in full["headline"]
     ds = _src("app/ui/decision_studio.py")
     verdict = ds.split("def decision_verdict(", 1)[1].split("\ndef ", 1)[0]
     assert "savings realize, alerts stay precise" not in verdict and 'proof["headline"]' in verdict
+
+
+def test_realization_counts_split_auto_from_hand_verified():
+    from app.logic.actions import ledger_totals
+    ledger = pd.DataFrame({
+        "STATE": ["VERIFIED"] * 4,
+        "ESTIMATED_USD": [0.0, None, 100.0, 0.0],
+        "VERIFIED_USD": [500.0, 250.0, 10.0, 1000.0],
+        "VERIFIED_AT": ["2026-09-01", "2026-09-02", "2026-09-03", "2024-01-01"],
+        "SOURCE_CHANGE_ID": ["CHG1", None, None, "CHG2"],
+    })
+    t = ledger_totals(ledger)
+    assert t["verified_no_estimate_count"] == 3 and t["verified_no_estimate_auto_count"] == 2
+    assert t["verified_active_count"] == 3                       # the 2024 item is past the active window
+    ds = _src("app/ui/decision_studio.py")
+    assert "auto-measured, " in ds and "verified by hand)" in ds and "not in the ratio" in ds
+    assert "every verified item was auto-measured" not in ds
+    assert "} verified this quarter\"" not in ds and "/mo added this quarter" in ds
+    assert "/mo added this quarter" in _src("app/ui/pages/brief.py")
 
 
 def test_operations_points_catalog_edits_at_entity_360():

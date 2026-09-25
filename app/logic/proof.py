@@ -142,8 +142,9 @@ def proof_verdict(roi: dict, realization_pct: float | None, acceptance_pct: floa
         if acceptance_pct is not None:
             bits.append(f"the team acts on {acceptance_pct:.0f}%")
         # name what is NOT measured yet, so a 'good' verdict never implies proof it does not have
-        missing = [name for name, v in (("realization", realization_pct), ("alert precision", prec),
-                                        ("team follow-through", acceptance_pct)) if v is None]
+        missing = [name for name, v in (("ROI multiple (run cost)", roi.get("RATIO")), ("realization", realization_pct),
+                                        ("alert precision", prec), ("team follow-through", acceptance_pct))
+                   if v is None]
         headline = ("OVERWATCH is earning its keep" + (" — " + ", ".join(bits) if bits else "")
                     + (f" (not yet measured: {', '.join(missing)})" if missing else "") + ".")
     else:

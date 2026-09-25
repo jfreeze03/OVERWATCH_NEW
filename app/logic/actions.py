@@ -213,6 +213,7 @@ def ledger_totals(df: pd.DataFrame, active_months: int = SAVINGS_ACTIVE_MONTHS) 
     empty = {"estimated_usd": 0.0, "verified_usd": 0.0, "estimated_count": 0,
              "verified_count": 0, "verified_estimated_usd": 0.0, "realization_pct": None,
              "verified_qtd_usd": 0.0, "verified_active_usd": 0.0, "avg_days_to_verify": None,
+             "verified_active_count": 0, "verified_no_estimate_count": 0, "verified_no_estimate_auto_count": 0,
              "superseded_count": 0, "superseded_estimated_usd": 0.0,
              "auto_settle_pending_count": 0, "volume_confounded_count": 0, "volume_confounded_usd": 0.0}
     if df is None or df.empty or "STATE" not in df.columns:
@@ -256,6 +257,12 @@ def ledger_totals(df: pd.DataFrame, active_months: int = SAVINGS_ACTIVE_MONTHS) 
     # Same anchor as the SQL builder: account-today at midnight minus N months.
     a_start = now.normalize() - pd.DateOffset(months=int(active_months))
     active = float(ver_usd_col[verified_at >= a_start].sum())
+    active_count = int((verified_at >= a_start).sum())
+    # verified items the realization ratio cannot include (no positive up-front estimate), and how many of
+    # them the daily change scan auto-measured (SOURCE_CHANGE_ID) vs verified by hand (experiments, manual)
+    _auto = (ver["SOURCE_CHANGE_ID"].notna() & (ver["SOURCE_CHANGE_ID"].astype(str).str.strip() != "")
+             if "SOURCE_CHANGE_ID" in ver.columns else pd.Series(False, index=ver.index))
+    no_est = ~_est_pos
     days = (verified_at - created_at).dt.total_seconds() / 86400.0
     days = days[days.notna() & (days >= 0)]
     avg_days = round(float(days.mean()), 1) if not days.empty else None
@@ -278,6 +285,9 @@ def ledger_totals(df: pd.DataFrame, active_months: int = SAVINGS_ACTIVE_MONTHS) 
         "realization_pct": realization,
         "verified_qtd_usd": round(qtd, 2),
         "verified_active_usd": round(active, 2),
+        "verified_active_count": active_count,
+        "verified_no_estimate_count": int(no_est.sum()),
+        "verified_no_estimate_auto_count": int((no_est & _auto).sum()),
         "avg_days_to_verify": avg_days,
         "auto_settle_pending_count": auto_pending,
         "volume_confounded_count": int(_vc.sum()),
