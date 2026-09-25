@@ -631,6 +631,26 @@ def test_v157_inserted_select_statements_parse():
         sqlglot.parse(gate, dialect="snowflake")
 
 
+# The RUN_NEXT PART B grid (V157.1) checks these with CONTAINS(GET_DDL('PROCEDURE', ...), '<frag>'): each must
+# literally be in the proc it is checked against (GET_DDL returns the stored body, comments included) and stay
+# quote-free so it pastes into a SQL literal unchanged. SEC_BREAK_GLASS_USE is the expected-FALSE probe.
+_PART_B_FRAGMENTS = {
+    "SP_ALERT_SCAN()": ("OPS_PIPELINE_DEGRADED", "SP_SCAN_ETL_CYCLE", "CONDITION_ENDED",
+                        "V157: only rules whose still-firing set this sweep recomputes",
+                        "ALERT_SCAN_HOURLY heartbeat stamp", "alert scan v12 (V157:"),
+    "SP_ALERT_SCAN_DAILY()": ("COST_IDLE_OPPORTUNITY", "OPS_PIPELINE_DEGRADED", "ALERT_SCAN_DAILY heartbeat stamp",
+                              "alert scan daily v3 (V157:"),
+}
+
+
+def test_v157_part_b_get_ddl_fragments_are_in_the_procs():
+    for proc, frags in _PART_B_FRAGMENTS.items():
+        body = _proc(_MIG, proc)
+        for frag in frags:
+            assert frag in body and "'" not in frag, (proc, frag)
+    assert "SEC_BREAK_GLASS_USE" not in _H                  # H_DEAD_ARM_LEFT must read FALSE
+
+
 # -- integration lockstep (validate floor / docs / Admin). Pinned to the WAVE TIP V158; these are completed
 #    by the wave-2b integrator (snowflake/validate.sql, DEPLOYMENT.md, README.md and
 #    admin._EXPECTED_MIGRATIONS are shared files a single slice does not edit).
