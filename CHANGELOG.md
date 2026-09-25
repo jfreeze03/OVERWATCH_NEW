@@ -1,5 +1,37 @@
 # Changelog
 
+## 4.592.0 - Decision Studio ROI: honest units, realization, NULLs, chart and verdict (2026-09-24)
+
+From the owner's Decision Studio screenshots (2026-09-24). App-only.
+
+- **Units.** Every VERIFIED_USD is a recurring MONTHLY saving, but the ROI tab summed them as "Verified
+  savings (all time)" (equal to the "/mo" line beneath it, which is what an auditor reading SAVINGS_LEDGER
+  would flag). The KPIs now read "Verified savings run-rate $X/mo" (active: verified in the last 12
+  months) and "Added this quarter $X/mo", with a measured-method chip; the narrative says "/mo of savings
+  run-rate" and uses the same active (last-12-months) figure as the KPI, naming older items no longer
+  counted. The Scorecard hero and the Brief help say "/mo added this quarter".
+- **Realization.** It read "— nothing verified yet" beside $1,864.51 verified, because auto-measured
+  (autobook) items carry no up-front estimate. It now reads "n/a — auto-measured, no up-front estimate
+  (N items)"; "nothing verified yet" only when nothing is. Same on the Scorecard tile.
+- **"None" in tables (root fix, every table).** Streamlit's grid draws a missing cell with its own
+  placeholder (default "None") before it looks at any styled text, so the table machinery's `na_rep="—"`
+  never reached a NULL cell — the lever table's Realization % showed "None", and so did NULLs app-wide. The
+  shared renderer now passes `placeholder="—"` to the grid on every path (retrying without it on an older
+  runtime).
+- **Monthly chart.** It was a line over complete months only, so one verified month was a lone dot
+  ("Peak $683 on Aug 01") while most of the quarter had verified in September. It is now 12 zero-filled
+  monthly bars ending with the current month, dimmed and labelled "(MTD)", with "Aug 2026"-style labels.
+- **Verdict.** The green "Healthy" line was hard-coded ("savings realize, alerts stay precise, and the
+  team acts on the advice") and showed even when realization and follow-through were unmeasured. It now
+  uses the proof headline, which names only measured facts and lists what is not yet measured.
+- **Stale copy.** "Verify … on Experiments (below)" (autobooked changes settle on their own) and
+  Operations' "register … in Decision Studio" (the catalog editor is Control Room ▸ Entity 360).
+
+Next (owner decision 2026-09-24, Option C): Portfolio moves to Operations ▸ Optimize as an automated fix
+queue, and Decision Studio becomes a two-tab "Proof" page visible to the EXECUTIVE profile.
+
+4-pin version bump 4.591.0 → 4.592.0 + CHANGELOG.
+
 ## 4.591.0 - Next Fifty #7 correction: key self-traffic on the tag Streamlit-in-Snowflake stamps itself (2026-09-24)
 
 - The owner's post-deploy diagnostic (DIAG_7B_TAGS, app confirmed on v4.590.0) showed the per-statement

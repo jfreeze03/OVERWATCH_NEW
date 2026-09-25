@@ -196,6 +196,7 @@ def ledger_totals(df: pd.DataFrame, active_months: int = SAVINGS_ACTIVE_MONTHS) 
     empty = {"estimated_usd": 0.0, "verified_usd": 0.0, "estimated_count": 0,
              "verified_count": 0, "verified_estimated_usd": 0.0, "realization_pct": None,
              "verified_qtd_usd": 0.0, "verified_active_usd": 0.0, "avg_days_to_verify": None,
+             "verified_active_count": 0, "verified_no_estimate_count": 0, "verified_no_estimate_auto_count": 0,
              "superseded_count": 0, "superseded_estimated_usd": 0.0}
     if df is None or df.empty or "STATE" not in df.columns:
         return empty
@@ -238,6 +239,12 @@ def ledger_totals(df: pd.DataFrame, active_months: int = SAVINGS_ACTIVE_MONTHS) 
     # Same anchor as the SQL builder: account-today at midnight minus N months.
     a_start = now.normalize() - pd.DateOffset(months=int(active_months))
     active = float(ver_usd_col[verified_at >= a_start].sum())
+    active_count = int((verified_at >= a_start).sum())
+    # verified items the realization ratio cannot include (no positive up-front estimate), and how many of
+    # them the daily change scan auto-measured (SOURCE_CHANGE_ID) vs verified by hand (experiments, manual)
+    _auto = (ver["SOURCE_CHANGE_ID"].notna() & (ver["SOURCE_CHANGE_ID"].astype(str).str.strip() != "")
+             if "SOURCE_CHANGE_ID" in ver.columns else pd.Series(False, index=ver.index))
+    no_est = ~_est_pos
     days = (verified_at - created_at).dt.total_seconds() / 86400.0
     days = days[days.notna() & (days >= 0)]
     avg_days = round(float(days.mean()), 1) if not days.empty else None
@@ -256,6 +263,9 @@ def ledger_totals(df: pd.DataFrame, active_months: int = SAVINGS_ACTIVE_MONTHS) 
         "realization_pct": realization,
         "verified_qtd_usd": round(qtd, 2),
         "verified_active_usd": round(active, 2),
+        "verified_active_count": active_count,
+        "verified_no_estimate_count": int(no_est.sum()),
+        "verified_no_estimate_auto_count": int((no_est & _auto).sum()),
         "avg_days_to_verify": avg_days,
         **sup_fields,
     }
@@ -292,6 +302,39 @@ def savings_by_month(df: pd.DataFrame, months: int = 12) -> pd.DataFrame:
     if out.empty:
         return pd.DataFrame(columns=cols)
     return out.tail(max(1, int(months))).reset_index(drop=True)[cols]
+
+
+def savings_month_calendar(df: pd.DataFrame, months: int = 12) -> pd.DataFrame:
+    """Newly verified run-rate per calendar month for the Decision Studio ROI bars: the LAST ``months``
+    calendar months ending with the CURRENT month, zero-filled (a month with nothing verified is a real
+    $0 bar, not a missing point), the current month flagged PARTIAL and labelled month-to-date. Unlike
+    savings_by_month (a complete-months series for trend lines), bars show the partial month honestly
+    instead of hiding it: the owner's screenshot (2026-09-24) showed one August dot while most of the
+    quarter had verified in September. Columns MONTH (YYYY-MM), MONTH_LABEL, VERIFIED_USD, PARTIAL.
+    Empty (no verified rows at all) in -> empty out."""
+    cols = ["MONTH", "MONTH_LABEL", "VERIFIED_USD", "PARTIAL"]
+    if df is None or df.empty or "STATE" not in df.columns:
+        return pd.DataFrame(columns=cols)
+    df, _ = split_superseded(df)
+    ver = df[df["STATE"].astype(str).str.upper() == LEDGER_VERIFIED].copy() if not df.empty else df
+    if ver.empty:
+        return pd.DataFrame(columns=cols)
+    ver["_AT"] = pd.to_datetime(ver.get("VERIFIED_AT"), errors="coerce")
+    ver = ver.dropna(subset=["_AT"])
+    if ver.empty:
+        return pd.DataFrame(columns=cols)
+    ver["MONTH"] = ver["_AT"].dt.strftime("%Y-%m")
+    ver["VERIFIED_USD"] = pd.to_numeric(ver.get("VERIFIED_USD"), errors="coerce").fillna(0.0)
+    by = ver.groupby("MONTH")["VERIFIED_USD"].sum()
+    now = pd.Timestamp(account_now())
+    span = pd.period_range(end=now.to_period("M"), periods=max(1, int(months)), freq="M")
+    rows = []
+    for p in span:
+        key = p.strftime("%Y-%m")
+        partial = p == span[-1]
+        label = p.strftime("%b %Y") + (" (MTD)" if partial else "")
+        rows.append((key, label, round(float(by.get(key, 0.0)), 2), partial))
+    return pd.DataFrame(rows, columns=cols)
 
 
 def savings_by_lever(df: pd.DataFrame) -> pd.DataFrame:
