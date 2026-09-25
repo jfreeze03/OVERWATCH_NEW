@@ -76081,16 +76081,20 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 -- only seed its settings). Config-driven, same SETTINGS as those panels: ETL_CONTROL_STATUS_FQN plus the V138
 -- keys ETL_CYCLE_START_WORKFLOW / ETL_CYCLE_END_WORKFLOW / ETL_SLA_TARGET_HHMM / ETL_SLA_BREACH_HHMM (a missing
 -- row falls back to the app DEFAULT_SETTINGS value, a blank row disables the rule that needs it). Adds:
---   * ETL_CYCLE_TASKS     - transient scan cache: the last 23 nights of CONTROL_STATUS, one row per
---                           (night, workflow, task) with Informatica retries collapsed to the terminal attempt
---                           (the MAX_BY idiom; TERMINAL_START = that attempt's own start), night-keyed by
---                           DATE(TASK_START_DTTM - 12h) like the app.
+--   * ETL_CYCLE_TASKS     - transient scan cache: the last 23 WHOLE nights of CONTROL_STATUS (cut by night
+--                           key, so the oldest cached night is never partial), one row per (night, workflow,
+--                           task) with Informatica retries collapsed to the terminal attempt (the MAX_BY idiom;
+--                           TERMINAL_START = that attempt's own start), night-keyed by DATE(TASK_START_DTTM -
+--                           12h) like the app, plus FIRST_OK_END = the earliest clean finish among the attempts
+--                           that started at/after that night's cycle start (the starter name is a bound value).
 --   * SP_SCAN_ETL_CYCLE() - allowlist-validates the FQN, rebuilds ETL_CYCLE_TASKS with one EXECUTE IMMEDIATE,
 --                           then raises three rules itself, each inside its own EXCEPTION guard:
 --       PIPE_ETL_TASK_FAILED       MEDIUM (HIGH for the terminal workflow). One event per (workflow, night)
 --                                  whose final-attempt failed-task count >= THRESHOLD_NUM (1; a threshold
 --                                  below 1 still needs one failure). Auto-clears (AUTO_CLEARED, OPEN-only)
---                                  when a retry later succeeds.
+--                                  when a retry later succeeds: every final attempt of that workflow-night has
+--                                  FINISHED and none failed (a retry still running keeps the event OPEN, so a
+--                                  retry that fails again never re-raises it).
 --       PIPE_ETL_CYCLE_NOT_STARTED HIGH. The app NEXT_CYCLE_OVERDUE test: the starter has been silent longer
 --                                  than 24h + grace AND a night it ran on last week has come round again, past
 --                                  last week kickoff + grace, with no run. THRESHOLD_NUM = grace minutes (120 =
@@ -76109,7 +76113,10 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --                                  The V067 supersede sweep in SP_ALERT_SCAN resolves the lower band on
 --                                  escalation. METRIC_VALUE = minutes left to the target, written only for a
 --                                  lead-window WARN (NULL otherwise), so LOWER_IS_WORSE tuning reads only the
---                                  lead THRESHOLD_NUM actually sets. Terminal tasks count only when their
+--                                  lead THRESHOLD_NUM actually sets. A terminal task is done at its first
+--                                  clean in-cycle finish (FIRST_OK_END), so a re-run of it after the night
+--                                  finished (e.g. a next-morning recon re-run keyed to the same night) never
+--                                  re-grades an on-time night; a task without one counts only when its
 --                                  terminal attempt started at/after that night's cycle start (an afternoon
 --                                  terminal re-run keyed to the same night neither completes nor hides the
 --                                  night); a night whose terminal has not dispatched is judged only when the
@@ -76123,8 +76130,12 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 -- The clock is pinned to America/Chicago (CONTROL_STATUS timestamps are naive Central, like the app assumes).
 -- Known edges (documented, not fixed): when BOTH the starter and the terminal are re-run in the afternoon
 -- before the night's real kickoff, CYCLE_START = MIN(starter start) is the afternoon run (the app has the same
--- MIN semantics), so that night can read complete until the real terminal starts; a terminal task removed for
--- good reads the first night after as incomplete (the usual task count comes from the prior clean nights).
+-- MIN semantics), so the afternoon terminal finish is that night's first clean in-cycle finish and LATE reads
+-- the night complete all night, the real terminal run included (TASK_FAILED still reports a failed real run);
+-- a terminal task removed for good reads the first night after as incomplete (the usual task count comes from
+-- the prior clean nights). Divergence from the app (deliberate): the pull side (cycle_finish_history_scan,
+-- the SLA finish forecast) reads each terminal task's LATEST attempt, so a next-morning re-run of a night that
+-- already finished shows there as running / failed while LATE stays quiet (the push never pages a met SLA).
 -- Wiring: V157 re-derives the hourly alert scan with an add-on CALL arm [23] for this proc, outside the core
 -- tally (a CONTROL_STATUS grant gap logs etl_cycle_scan_failed and never trips OPS_SCAN_DEGRADED); until V157
 -- is applied nothing calls it. HIGH/CRITICAL reach the OVERWATCH_EMAIL path (NATIVE_ALERT_NEW_EVENTS) and any
@@ -76152,6 +76163,7 @@ CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS (
     FIRST_START     TIMESTAMP_NTZ NOT NULL,
     TERMINAL_START  TIMESTAMP_NTZ,
     TERMINAL_END    TIMESTAMP_NTZ,
+    FIRST_OK_END    TIMESTAMP_NTZ,
     SCANNED_AT      TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
 );
 
@@ -76247,23 +76259,40 @@ BEGIN
     now_ct := CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ;
 
     -- The ONLY dynamic statement. The FQN is validated above (a bare, well-formed identifier), so it is safe
-    -- to concatenate; lookback_days is an INT. One row per (night, workflow, task): the terminal attempt's
-    -- status / start / end by COALESCE(end, start) (a FAILED-then-retried-SUCCESS task reads SUCCESS), plus the
-    -- first start of any attempt.
+    -- to concatenate; lookback_days is an INT; the starter name is BOUND as data (USING), never concatenated.
+    -- WHOLE nights only: a row is kept when its night key is one of the newest lookback_days nights (the
+    -- timestamp prefilter, one day wider, only prunes), so the oldest cached night is never a partial night
+    -- (a partial one would let the retry auto-clear below resolve a failure that was never re-run). One row per
+    -- (night, workflow, task): the terminal attempt's status / start / end by COALESCE(end, start) (a
+    -- FAILED-then-retried-SUCCESS task reads SUCCESS), the first start of any attempt, and FIRST_OK_END = the
+    -- earliest clean finish (ended, not a failed status) among the attempts that started at/after that night's
+    -- cycle start (MIN starter start, as [C] starts), so a re-run after the night already finished (a next
+    -- morning recon re-run keyed to the same night) never re-opens it, while an afternoon re-run before the
+    -- kickoff never counts as the night's finish.
     ins_sql := 'INSERT INTO DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS '
-               || '(CYCLE_DATE, WORKFLOW_NAME, TASK_NAME, TERMINAL_STATUS, FIRST_START, TERMINAL_START, TERMINAL_END) '
-               || 'SELECT DATE(DATEADD(''hour'', -12, TASK_START_DTTM::TIMESTAMP_NTZ)), '
-               || 'LEFT(TO_VARCHAR(WORKFLOW_NAME), 500), LEFT(TO_VARCHAR(TASK_NAME), 500), '
+               || '(CYCLE_DATE, WORKFLOW_NAME, TASK_NAME, TERMINAL_STATUS, FIRST_START, TERMINAL_START, TERMINAL_END, FIRST_OK_END) '
+               || 'WITH src AS ('
+               || 'SELECT DATE(DATEADD(''hour'', -12, TASK_START_DTTM::TIMESTAMP_NTZ)) AS CD, '
+               || 'LEFT(TO_VARCHAR(WORKFLOW_NAME), 500) AS WF, LEFT(TO_VARCHAR(TASK_NAME), 500) AS TN, '
+               || 'TASK_STATUS, TASK_START_DTTM, TASK_END_DTTM '
+               || 'FROM ' || TRIM(:ctl_fqn) || ' '
+               || 'WHERE TASK_START_DTTM IS NOT NULL AND WORKFLOW_NAME IS NOT NULL AND TASK_NAME IS NOT NULL '
+               || 'AND TASK_START_DTTM >= DATEADD(''day'', -' || (:lookback_days + 1) || ', '
+               || 'CONVERT_TIMEZONE(''America/Chicago'', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ) '
+               || 'AND DATE(DATEADD(''hour'', -12, TASK_START_DTTM::TIMESTAMP_NTZ)) > DATEADD(''day'', -' || :lookback_days || ', '
+               || 'DATE(DATEADD(''hour'', -12, CONVERT_TIMEZONE(''America/Chicago'', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ)))), '
+               || 'cs AS (SELECT CD AS CS_NIGHT, MIN(TASK_START_DTTM) AS CYC_START FROM src WHERE WF = ? GROUP BY CD) '
+               || 'SELECT CD, WF, TN, '
                || 'LEFT(TO_VARCHAR(MAX_BY(TASK_STATUS, COALESCE(TASK_END_DTTM, TASK_START_DTTM))), 100), '
                || 'MIN(TASK_START_DTTM)::TIMESTAMP_NTZ, '
                || 'MAX_BY(TASK_START_DTTM, COALESCE(TASK_END_DTTM, TASK_START_DTTM))::TIMESTAMP_NTZ, '
-               || 'MAX_BY(TASK_END_DTTM, COALESCE(TASK_END_DTTM, TASK_START_DTTM))::TIMESTAMP_NTZ '
-               || 'FROM ' || TRIM(:ctl_fqn) || ' '
-               || 'WHERE TASK_START_DTTM IS NOT NULL AND WORKFLOW_NAME IS NOT NULL AND TASK_NAME IS NOT NULL '
-               || 'AND TASK_START_DTTM >= DATEADD(''day'', -' || :lookback_days || ', '
-               || 'CONVERT_TIMEZONE(''America/Chicago'', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ) '
-               || 'GROUP BY 1, 2, 3';
-    EXECUTE IMMEDIATE :ins_sql;
+               || 'MAX_BY(TASK_END_DTTM, COALESCE(TASK_END_DTTM, TASK_START_DTTM))::TIMESTAMP_NTZ, '
+               || 'MIN(IFF(TASK_END_DTTM IS NOT NULL '
+               || 'AND COALESCE(UPPER(TASK_STATUS), '''') NOT IN (''ABORTED'', ''ERROR'', ''ERRORED'', ''FAILED'', ''KILLED'', ''STOPPED'', ''TERMINATED'') '
+               || 'AND TASK_START_DTTM >= CYC_START, TASK_END_DTTM, NULL))::TIMESTAMP_NTZ '
+               || 'FROM src LEFT JOIN cs ON cs.CS_NIGHT = src.CD '
+               || 'GROUP BY CD, WF, TN';
+    EXECUTE IMMEDIATE :ins_sql USING (start_wf);
 
     SELECT COUNT(*), COUNT_IF(WORKFLOW_NAME = :start_wf), COUNT_IF(WORKFLOW_NAME = :end_wf)
       INTO :n_rows, :n_start_rows, :n_end_rows
@@ -76341,7 +76370,10 @@ BEGIN
         n_failed := SQLROWCOUNT;
 
         -- retry recovered: resolve the still-OPEN event whose (workflow, night) is in the cache with zero
-        -- final-attempt failures now. OPEN-only (an ACK or SNOOZE is a human decision, left alone).
+        -- final-attempt failures AND every final attempt finished: a retry that has only STARTED (no end yet)
+        -- keeps the event OPEN, so a retry that then fails again never mints a second event and email.
+        -- OPEN-only (an ACK or SNOOZE is a human decision, left alone). The cache holds whole nights only, so
+        -- its oldest night is never a partial one whose failed tasks were cut away.
         UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
            SET STATUS = 'RESOLVED', RESOLVED_AT = CURRENT_TIMESTAMP(), RESOLUTION_KIND = 'AUTO_CLEARED'
          WHERE RULE_ID = 'PIPE_ETL_TASK_FAILED'
@@ -76351,6 +76383,7 @@ BEGIN
                FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS t
                GROUP BY t.WORKFLOW_NAME, t.CYCLE_DATE
                HAVING COUNT_IF(UPPER(t.TERMINAL_STATUS) IN ('ABORTED', 'ERROR', 'ERRORED', 'FAILED', 'KILLED', 'STOPPED', 'TERMINATED')) = 0
+                  AND COUNT_IF(t.TERMINAL_END IS NULL) = 0
            );
     EXCEPTION
         WHEN OTHER THEN
@@ -76431,7 +76464,8 @@ BEGIN
     -- [C] PIPE_ETL_CYCLE_LATE: tonight = the newest night the starter ran (cycle_finish_history_scan
     --     cyc_start / term / cyc_end). Deadline = the first target clock time STRICTLY after the cycle start
     --     (insights._deadline_after, cross-midnight); hard = target + (breach - target). Complete = the terminal
-    --     has run at least its usual task count, none still running, none failed (retries collapsed).
+    --     has run at least its usual task count, none still running, none failed (retries collapsed; a task
+    --     with a clean in-cycle finish is done at FIRST_OK_END, whatever a later re-run of it is doing).
     --     Severity: WARN and a night that FINISHED late take the rule severity (HIGH: email, no incident); an
     --     unfinished CRIT / EXH is CRITICAL (SP_INCIDENT_AUTODECLARE opens an incident). METRIC_VALUE is the
     --     minutes left to the target for a lead-window WARN only (NULL for a projection WARN, CRIT and EXH).
@@ -76451,18 +76485,24 @@ BEGIN
                 GROUP BY CYCLE_DATE
             ),
             ends AS (
-                -- terminal tasks of the SAME night whose TERMINAL attempt started at/after that night's cycle
-                -- start: an afternoon re-run keyed to the night (before the ~22:00 kickoff) is not the night's
-                -- completion, and once the real in-cycle run supersedes it the task counts again.
+                -- terminal tasks of the SAME night. A task with a clean in-cycle finish (FIRST_OK_END) is DONE
+                -- at that first clean finish: a later re-run of it (the next morning, after the night already
+                -- finished) neither re-opens nor re-grades the night. A task without one counts only when its
+                -- TERMINAL attempt started at/after that night's cycle start: an afternoon re-run keyed to the
+                -- night (before the ~22:00 kickoff) is not the night's completion, and once the real in-cycle
+                -- run supersedes it the task counts again.
                 SELECT t.CYCLE_DATE,
                        COUNT(*) AS TERM_TASKS,
-                       MAX(t.TERMINAL_END) AS CYCLE_FINISH,
-                       COUNT_IF(UPPER(t.TERMINAL_STATUS) IN ('ABORTED', 'ERROR', 'ERRORED', 'FAILED', 'KILLED', 'STOPPED', 'TERMINATED')) AS N_FAILED,
-                       COUNT_IF(t.TERMINAL_END IS NULL
+                       MAX(COALESCE(t.FIRST_OK_END, t.TERMINAL_END)) AS CYCLE_FINISH,
+                       COUNT_IF(t.FIRST_OK_END IS NULL
+                                AND UPPER(t.TERMINAL_STATUS) IN ('ABORTED', 'ERROR', 'ERRORED', 'FAILED', 'KILLED', 'STOPPED', 'TERMINATED')) AS N_FAILED,
+                       COUNT_IF(t.FIRST_OK_END IS NULL
+                                AND t.TERMINAL_END IS NULL
                                 AND (t.TERMINAL_STATUS IS NULL
                                      OR UPPER(t.TERMINAL_STATUS) NOT IN ('ABORTED', 'ERROR', 'ERRORED', 'FAILED', 'KILLED', 'STOPPED', 'TERMINATED'))) AS N_RUNNING
                 FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS t
-                JOIN starts s ON s.CYCLE_DATE = t.CYCLE_DATE AND t.TERMINAL_START >= s.CYCLE_START
+                JOIN starts s ON s.CYCLE_DATE = t.CYCLE_DATE
+                             AND (t.FIRST_OK_END IS NOT NULL OR t.TERMINAL_START >= s.CYCLE_START)
                 WHERE t.WORKFLOW_NAME = :end_wf
                 GROUP BY t.CYCLE_DATE
             ),
@@ -76593,7 +76633,7 @@ $$;
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 156 AS VERSION,
-       'Nightly ETL cycle PUSH alerts (Next-Fifty rank 2): ETL_CYCLE_TASKS transient cache + SP_SCAN_ETL_CYCLE() (isolated config-driven read of ETL_CONTROL_STATUS_FQN, FQN-allowlisted, 23 nights, retries collapsed to the terminal attempt via MAX_BY with that attempt''s start kept as TERMINAL_START, night key DATE(TASK_START_DTTM - 12h), clock pinned America/Chicago) raising PIPE_ETL_TASK_FAILED (MEDIUM, HIGH for the terminal workflow, threshold never below 1, auto-clears on retry success), PIPE_ETL_CYCLE_NOT_STARTED (HIGH, the app NEXT_CYCLE_OVERDUE test, grace = THRESHOLD_NUM min) and PIPE_ETL_CYCLE_LATE (WARN/CRIT/EXH bands superseded by the V067 sweep; lead = THRESHOLD_NUM min before ETL_SLA_TARGET_HHMM, or the start-shifted median of the newest 14 prior clean nights projects past ETL_SLA_BREACH_HHMM; a night that finished late is HIGH, an unfinished miss CRITICAL, which auto-declares an incident; terminal tasks count only when their terminal attempt started at/after the night''s cycle start; an undispatched terminal is judged only when it ran the same night last week; METRIC_VALUE only on a lead-window WARN), each in its own EXCEPTION guard. Three PIPELINE ALERT_CONFIG rules, WHEN NOT MATCHED, AUTO_CLEAR left at its default. Called hourly once V157 adds the SP_ALERT_SCAN add-on CALL arm (not counted toward OPS_SCAN_DEGRADED). Needs SELECT on CONTROL_STATUS (already granted for the app panels).' AS DESCRIPTION
+       'Nightly ETL cycle PUSH alerts (Next-Fifty rank 2): ETL_CYCLE_TASKS transient cache + SP_SCAN_ETL_CYCLE() (isolated config-driven read of ETL_CONTROL_STATUS_FQN, FQN-allowlisted, the 23 newest WHOLE nights cut by night key, retries collapsed to the terminal attempt via MAX_BY with that attempt''s start kept as TERMINAL_START, plus FIRST_OK_END = the first clean finish among attempts started at/after the night''s cycle start (starter name bound via USING), night key DATE(TASK_START_DTTM - 12h), clock pinned America/Chicago) raising PIPE_ETL_TASK_FAILED (MEDIUM, HIGH for the terminal workflow, threshold never below 1, auto-clears on retry success: every final attempt finished and none failed, so a retry still running keeps it OPEN), PIPE_ETL_CYCLE_NOT_STARTED (HIGH, the app NEXT_CYCLE_OVERDUE test, grace = THRESHOLD_NUM min) and PIPE_ETL_CYCLE_LATE (WARN/CRIT/EXH bands superseded by the V067 sweep; lead = THRESHOLD_NUM min before ETL_SLA_TARGET_HHMM, or the start-shifted median of the newest 14 prior clean nights projects past ETL_SLA_BREACH_HHMM; a night that finished late is HIGH, an unfinished miss CRITICAL, which auto-declares an incident; a terminal task is done at its first clean in-cycle finish (FIRST_OK_END), so a next-morning re-run never re-grades a finished night, else counts only when its terminal attempt started at/after the night''s cycle start; an undispatched terminal is judged only when it ran the same night last week; METRIC_VALUE only on a lead-window WARN), each in its own EXCEPTION guard. Three PIPELINE ALERT_CONFIG rules, WHEN NOT MATCHED, AUTO_CLEAR left at its default. Called hourly once V157 adds the SP_ALERT_SCAN add-on CALL arm (not counted toward OPS_SCAN_DEGRADED). Needs SELECT on CONTROL_STATUS (already granted for the app panels).' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 156);
 
 -- ===========================================================================
@@ -76616,15 +76656,19 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --       fully revoked (OPEN only, 1h dwell, positive evidence only);
 --     ~ the V091 auto-clear sweep is scoped to its 3 PERF rules (the only rules whose still-firing set it
 --       recomputes), so opting another rule into AUTO_CLEAR_ENABLED never blanket-clears it after 1h;
---     ~ arm [10]: a CONDITION_ENDED / SUPERSEDED prior event no longer blocks a rotated credential's next
---       expiry cycle, and EXPIRING is never minted while that credential's EXPIRED event is live;
+--     ~ arm [10]: a prior event closed before the current expiry's warning window opened (by anyone -- a
+--       human ACTIONED/NOISE/EXPECTED resolve included) or machine-closed (CONDITION_ENDED / SUPERSEDED)
+--       no longer blocks the credential's key, so a rotated credential's next expiry cycle re-alerts (the
+--       key itself is unchanged; a live event or a close inside the current window still blocks), and
+--       EXPIRING is never minted while that credential's EXPIRED event is live;
 --     + [hb] heartbeat: stamps SOURCE_FRESHNESS_STATE 'ALERT_SCAN_HOURLY' last in every run.
 --     Counting arms stay 13 (13 - [15] + [22]); the self-alert literal is unchanged.
 --   SP_ALERT_SCAN_DAILY:
 --     + [22] OPS_PIPELINE_DEGRADED (byte-identical to the hourly copy; shared dedupe keys, so whichever
 --       graph is alive raises each finding once);
 --     + [24] COST_IDLE_OPPORTUNITY (counting): weekly idle-waste push, the DB-side twin of the Optimize
---       ACTIONABLE figure (net of the 60s resume tail, settings-verified timer, 14 complete Central days);
+--       ACTIONABLE figure (net of the 60s resume tail, settings-verified timer from the newest SHOW
+--       WAREHOUSES snapshot batch -- a dropped/renamed warehouse never raises -- 14 complete Central days);
 --     + [hb] heartbeat 'ALERT_SCAN_DAILY'. Counting arms 9 -> 11.
 --   ALERT_CONFIG: OPS_PIPELINE_DEGRADED (PLATFORM, HIGH) and COST_IDLE_OPPORTUNITY (COST, MEDIUM, 100 USD/month,
 --   HIGH band at 5x) are seeded WHEN NOT MATCHED only. SEC_CRED_EXPIRY and SEC_NEW_EXPOSURE are opted into
@@ -76637,10 +76681,16 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --
 -- FIRST RUN: every SOURCE_FRESHNESS_STATE row already past its cadence raises one HIGH OPS_PIPELINE_DEGRADED
 -- event, and the first daily run raises this ISO week's COST_IDLE_OPPORTUNITY events (preview with the
--- separate read-only PREFLIGHT_WAVE2B.sql). Deploy the app build that excludes CONDITION_ENDED from the
+-- separate read-only PREFLIGHT_WAVE2B.sql). A credential already inside its expiry window whose only prior
+-- SEC_CRED_EXPIRY event for that key was closed before this expiry's window opened (an earlier cycle, e.g.
+-- human-resolved) raises its previously suppressed event once (CRITICAL if already expired). A close inside
+-- the current window still suppresses it. Deploy the app build that excludes CONDITION_ENDED from the
 -- human-resolution metrics BEFORE applying (it shipped in wave 2a). No procedure runs at apply time: the scans
--- pick this up on their next scheduled run. ROLLBACK: re-run V141's two procs AND, by hand (never inside a
--- migration), switch AUTO_CLEAR_ENABLED back off for SEC_CRED_EXPIRY and SEC_NEW_EXPOSURE.
+-- pick this up on their next scheduled run.
+-- ROLLBACK (order matters): FIRST, by hand (never inside a migration), switch AUTO_CLEAR_ENABLED off for
+-- SEC_CRED_EXPIRY and SEC_NEW_EXPOSURE; only THEN re-run V141's two procs (RUNBOOK section 12, "Rolling back
+-- V157"). Reversed, an hourly scan landing between the two steps runs V141's unscoped V091 sweep, which
+-- AUTO_CLEARs their OPEN events 1h after raise -- and V141's arms [10]/[20] never re-raise an auto-cleared key.
 -- Apply AFTER V156 (SP_SCAN_ETL_CYCLE must exist for [23]; before it, the arm only logs
 -- etl_cycle_scan_failed). Idempotent; safe to re-run.
 
@@ -76921,7 +76971,9 @@ BEGIN
                'Rotate before ' || TO_VARCHAR(cr.EXPIRATION_DATE, 'YYYY-MM-DD') ||
                    ' to avoid auth failures for jobs and integrations using this credential.',
                DATEDIFF('day', CURRENT_TIMESTAMP(), cr.EXPIRATION_DATE),
-               c.RULE_ID || '|' || cr.USER_NAME || '|' || cr.NAME || '|' || IFF(cr.EXPIRATION_DATE < CURRENT_TIMESTAMP(), 'EXPIRED', 'EXPIRING')
+               c.RULE_ID || '|' || cr.USER_NAME || '|' || cr.NAME || '|' || IFF(cr.EXPIRATION_DATE < CURRENT_TIMESTAMP(), 'EXPIRED', 'EXPIRING'),
+               cr.EXPIRATION_DATE,   -- V157: EXP_TS (this cycle's expiry; dedupe only, not inserted)
+               c.THRESHOLD_NUM       -- V157: WIN_DAYS (the raise window)
         FROM cfg c
         JOIN SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS cr
           ON c.RULE_ID = 'SEC_CRED_EXPIRY'
@@ -76932,11 +76984,16 @@ BEGIN
          AND cr.EXPIRATION_DATE IS NOT NULL
          AND cr.EXPIRATION_DATE <= DATEADD('day', c.THRESHOLD_NUM, CURRENT_TIMESTAMP())
 
-        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY, EXP_TS, WIN_DAYS)
         WHERE NOT EXISTS (
             SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
             WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
-              AND COALESCE(e.RESOLUTION_KIND, '') NOT IN ('CONDITION_ENDED', 'SUPERSEDED')   -- V157: a rotated credential's next expiry cycle re-alerts (key has no date)
+              AND COALESCE(e.RESOLUTION_KIND, '') NOT IN ('CONDITION_ENDED', 'SUPERSEDED')   -- V157: a machine close never blocks
+              -- V157: the key has no date, so a row closed (by anyone: ACTIONED, NOISE, EXPECTED, a bulk clear) before THIS
+              -- expiry's warning window opened is an earlier cycle and never blocks -- a rotated credential's next expiry
+              -- re-alerts. A live row (RESOLVED_AT NULL) or a close inside this window still blocks. Central wall-clock.
+              AND COALESCE(e.RESOLVED_AT, CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ)
+                  >= DATEADD('day', -b.WIN_DAYS, CONVERT_TIMEZONE('America/Chicago', b.EXP_TS)::TIMESTAMP_NTZ)
         )
           -- V157: never mint EXPIRING while this credential's EXPIRED event is live (the supersede sweep would resolve it in the same run: hourly churn)
           AND NOT EXISTS (
@@ -78277,7 +78334,8 @@ BEGIN
     --      ALTER -> change scan + SP_LEDGER_AUTOBOOK. DB-side twin of the Cost Intelligence > Optimization &
     --      Savings > Idle & sizing ACTIONABLE figure (insights.idle_advisor + remediation.tighten_suspend_plan):
     --      FLAGGED = >=20% idle AND >=1 idle credit; recoverable = idle minus one 60s resume tail per active
-    --      metered hour; only a settings-VERIFIED timer (latest WAREHOUSE_CONFIG_SNAPSHOT <=36h old) that is
+    --      metered hour; only a settings-VERIFIED timer (the newest WAREHOUSE_CONFIG_SNAPSHOT batch, <=36h
+    --      old -- a warehouse missing from it, dropped or renamed, never raises) that is
     --      disabled (<=0) or above 60s. Trailing 14 COMPLETE Central days, run-rated over the days the mart
     --      covers (at least 7). One event per warehouse per ISO week (Monday, Central); the HIGH band (>= 5x
     --      threshold) re-fires mid-week and the V067 sweep supersedes the MED one.)
@@ -78320,11 +78378,16 @@ BEGIN
             FROM idle i
             CROSS JOIN cov v
         ),
-        cur AS (
-            SELECT WAREHOUSE_NAME, AUTO_SUSPEND, SNAPSHOT_AT
+        newest AS (
+            SELECT MAX(SNAPSHOT_AT) AS BATCH_AT
             FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CONFIG_SNAPSHOT
             WHERE SNAPSHOT_AT >= DATEADD('hour', -36, CURRENT_TIMESTAMP())
-            QUALIFY ROW_NUMBER() OVER (PARTITION BY UPPER(WAREHOUSE_NAME) ORDER BY SNAPSHOT_AT DESC) = 1
+        ),
+        cur AS (
+            SELECT s.WAREHOUSE_NAME, s.AUTO_SUSPEND, s.SNAPSHOT_AT
+            FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CONFIG_SNAPSHOT s
+            JOIN newest n ON s.SNAPSHOT_AT >= DATEADD('minute', -10, n.BATCH_AT)
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY UPPER(s.WAREHOUSE_NAME) ORDER BY s.SNAPSHOT_AT DESC) = 1
         ),
         opp AS (
             SELECT s.WAREHOUSE_NAME, s.TOTAL_CREDITS, s.IDLE_CREDITS, s.COVERED_DAYS, s.IDLE_PCT,
@@ -78356,7 +78419,7 @@ BEGIN
                           'ALTER WAREHOUSE ' || UPPER(o.WAREHOUSE_NAME) || ' SET AUTO_SUSPEND = ' || o.TARGET_SEC || ';',
                           'the name needs quoting - generate the statement in Cost Intelligence > Optimization & Savings > Remediation & ledger.')
                    || IFF(o.AUTO_SUSPEND > 0,
-                          ' The next daily change scan registers the lower timer and SP_LEDGER_AUTOBOOK books and settles the measured saving (an in-app $0 twin, if any, is superseded).',
+                          ' The next daily change scan registers the lower timer and SP_LEDGER_AUTOBOOK books and settles the measured saving (a $0 closed-loop row booked from this alert is adopted as that booking, not duplicated).',
                           ' Enabling a timer on a never-suspend warehouse is not auto-booked (SP_LEDGER_AUTOBOOK books only a decrease from a positive timer) - book it in Cost Intelligence > Optimization & Savings > Remediation & ledger.'),
                    2000),
                o.MONTHLY_USD,
@@ -78533,7 +78596,7 @@ UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 157 AS VERSION,
-       'Next-Fifty wave 2b (ranks 10a/b/d, 13, 2, 12c): the single wave-2 re-derivation of SP_ALERT_SCAN and SP_ALERT_SCAN_DAILY from V141, byte-identical otherwise. Hourly: dead break-glass arm [15] removed (its rule was deleted at V034; it was the scan''s only ACCOUNT_USAGE.QUERY_HISTORY read); + [22] OPS_PIPELINE_DEGRADED self-watch (a SOURCE_FRESHNESS_STATE row past the shared DAILY/METERING 30h else 3h name rule, at most one event per source per last-load day; a swallowed loader failure of the five NATIVE_ALERT_STALE_FACTS error types, one per type, source and Central day, the three optional mart arms left to the stale leg; an idle alert notifier via OW_SENDER_LEASE while a route is enabled); + [23] add-on arm running SP_SCAN_ETL_CYCLE (V156; not counted toward OPS_SCAN_DEGRADED, logs etl_cycle_scan_failed); + #12c condition-ended sweep (an OPEN SEC_CRED_EXPIRY or SEC_NEW_EXPOSURE event resolves CONDITION_ENDED once CREDENTIALS or GRANTS_TO_ROLES show the condition ended; 1h dwell, positive evidence only, opt-in via AUTO_CLEAR_ENABLED); the V091 auto-clear sweep scoped to its 3 PERF rules; arm [10] ignores CONDITION_ENDED and SUPERSEDED rows so a rotated credential''s next expiry re-alerts, and never mints EXPIRING while the EXPIRED event is live; + [hb] ALERT_SCAN_HOURLY heartbeat. Tally 13 -> 13. Daily: + [22] (byte-identical, shared keys) + [24] COST_IDLE_OPPORTUNITY (weekly per warehouse, net recoverable USD/month after the 60s resume tail, settings-verified timer disabled or above 60s, 14 complete Central days with at least 7 covered; MEDIUM at 100 USD/month, HIGH band at 5x) + [hb] ALERT_SCAN_DAILY heartbeat. Tally 9 -> 11. Seeds OPS_PIPELINE_DEGRADED (PLATFORM, HIGH) and COST_IDLE_OPPORTUNITY (COST, MEDIUM, 100, 336h) WHEN NOT MATCHED only; opts SEC_CRED_EXPIRY and SEC_NEW_EXPOSURE into auto-clear after both procs are replaced. No task change, no procedure run at apply time.' AS DESCRIPTION
+       'Next-Fifty wave 2b (ranks 10a/b/d, 13, 2, 12c): the single wave-2 re-derivation of SP_ALERT_SCAN and SP_ALERT_SCAN_DAILY from V141, byte-identical otherwise. Hourly: dead break-glass arm [15] removed (its rule was deleted at V034; it was the scan''s only ACCOUNT_USAGE.QUERY_HISTORY read); + [22] OPS_PIPELINE_DEGRADED self-watch (a SOURCE_FRESHNESS_STATE row past the shared DAILY/METERING 30h else 3h name rule, at most one event per source per last-load day; a swallowed loader failure of the five NATIVE_ALERT_STALE_FACTS error types, one per type, source and Central day, the three optional mart arms left to the stale leg; an idle alert notifier via OW_SENDER_LEASE while a route is enabled); + [23] add-on arm running SP_SCAN_ETL_CYCLE (V156; not counted toward OPS_SCAN_DEGRADED, logs etl_cycle_scan_failed); + #12c condition-ended sweep (an OPEN SEC_CRED_EXPIRY or SEC_NEW_EXPOSURE event resolves CONDITION_ENDED once CREDENTIALS or GRANTS_TO_ROLES show the condition ended; 1h dwell, positive evidence only, opt-in via AUTO_CLEAR_ENABLED); the V091 auto-clear sweep scoped to its 3 PERF rules; arm [10] (key unchanged) ignores CONDITION_ENDED and SUPERSEDED rows and any row closed before the current expiry''s warning window opened, human resolves included, so a rotated credential''s next expiry re-alerts, and never mints EXPIRING while the EXPIRED event is live; + [hb] ALERT_SCAN_HOURLY heartbeat. Tally 13 -> 13. Daily: + [22] (byte-identical, shared keys) + [24] COST_IDLE_OPPORTUNITY (weekly per warehouse, net recoverable USD/month after the 60s resume tail, settings-verified timer (newest SHOW WAREHOUSES snapshot batch) disabled or above 60s, 14 complete Central days with at least 7 covered; MEDIUM at 100 USD/month, HIGH band at 5x) + [hb] ALERT_SCAN_DAILY heartbeat. Tally 9 -> 11. Seeds OPS_PIPELINE_DEGRADED (PLATFORM, HIGH) and COST_IDLE_OPPORTUNITY (COST, MEDIUM, 100, 336h) WHEN NOT MATCHED only; opts SEC_CRED_EXPIRY and SEC_NEW_EXPOSURE into auto-clear after both procs are replaced. No task change, no procedure run at apply time.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 157);
 
 -- ===========================================================================
@@ -78553,7 +78616,8 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --   OVERWATCH_BAK.<T>_OWBAK_D<yyyymmdd> (Central day). Sundays also clone <T>_OWBAK_W<yyyymmdd> from
 --   that D generation and run the V089 <T>_BAK_LAST statement unchanged (still weekly). A table
 --   missing on this install is a logged skip, not a failure.
--- * Backup-vs-source row counts go to the new OPERATOR_BACKUP_LOG (the proc trims it at 400 days).
+-- * Backup-vs-source row counts go to the new OPERATOR_BACKUP_LOG, one CLONED row per generation (the
+--   daily D; Sundays also the weekly W). The proc trims the log at 400 days.
 -- * Prune: newest SETTINGS BACKUP_KEEP_DAILY (14) / BACKUP_KEEP_WEEKLY (8) generations per table and
 --   kind (floors 7 / 4, ceilings 60 / 52). Only TRANSIENT base tables in OVERWATCH_BAK whose whole
 --   name is one of the 25 + _OWBAK_[DW] + 8 digits, dated before today, re-checked before each DROP.
@@ -78571,6 +78635,9 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 -- CLONE back into a permanent table, and a CLONE restore would re-apply the schema FUTURE grants.
 -- The tail starts the first generation through the TASK (asynchronous; it runs as SYSTEM, inside the
 -- carve-out, keyed on the Central day whatever the worksheet zone). Nothing is pruned on day 1.
+-- DR replay (schema gone, or a factory reset): apply V001..V157, restore the operator tables
+-- (SETTINGS first), THEN this file. Its tail backs up whatever the tables hold and prunes with the
+-- retention SETTINGS holds (RUNBOOK section 16 step 3).
 -- Owner applies in Snowsight after V157. This file never runs from the app.
 -- Rollback: V089:27-71 proc, ALTER TASK ... SET SCHEDULE = 'USING CRON 40 5 * * 0 America/Chicago',
 -- and the V151 view.
@@ -78736,9 +78803,10 @@ BEGIN
         END IF;
     END FOR;
 
-    -- Row counts: INFORMATION_SCHEMA metadata only, no table scan. One CLONED row per generation
-    -- taken today, backup vs source, so a restore can pick a generation on evidence. Isolated: a
-    -- failure here never blocks the prune, the freshness stamp or the RETURN.
+    -- Row counts: INFORMATION_SCHEMA metadata only, no table scan. One CLONED row per OVERWATCH_BAK
+    -- generation taken today (the daily D; on Sundays also the weekly W), backup vs source, so a
+    -- restore can pick any kept generation on evidence (the Sunday *_BAK_LAST pointer is not logged).
+    -- Isolated: a failure here never blocks the prune, the freshness stamp or the RETURN.
     BEGIN
         INSERT INTO DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG
             (RUN_ID, GENERATION, SOURCE_TABLE, BACKUP_TABLE, ACTION, ROW_COUNT, SOURCE_ROW_COUNT, BYTES)
@@ -78749,9 +78817,23 @@ BEGIN
          AND b.TABLE_NAME = s.TABLE_NAME || '_OWBAK_' || :gen_d
         WHERE b.TABLE_SCHEMA = 'OVERWATCH_BAK'
           AND REGEXP_LIKE(b.TABLE_NAME, :prune_re);
+        IF (is_sunday) THEN
+            -- The weekly generation outlives its D twin (kept in weeks, not days), so it gets its own
+            -- CLONED row: once the D generation is pruned, the log still names a table that exists.
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG
+                (RUN_ID, GENERATION, SOURCE_TABLE, BACKUP_TABLE, ACTION, ROW_COUNT, SOURCE_ROW_COUNT, BYTES)
+            SELECT :run_id, :gen_w, s.TABLE_NAME, b.TABLE_NAME, 'CLONED', b.ROW_COUNT, s.ROW_COUNT, b.BYTES
+            FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES b
+            JOIN DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES s
+              ON s.TABLE_SCHEMA = 'OVERWATCH' AND s.TABLE_TYPE = 'BASE TABLE'
+             AND b.TABLE_NAME = s.TABLE_NAME || '_OWBAK_' || :gen_w
+            WHERE b.TABLE_SCHEMA = 'OVERWATCH_BAK'
+              AND REGEXP_LIKE(b.TABLE_NAME, :prune_re);
+        END IF;
+        -- The freshness ROW_COUNT is the daily generation's rows only (never doubled on a Sunday).
         SELECT COALESCE(SUM(ROW_COUNT), 0) INTO :total_rows
           FROM DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG
-         WHERE RUN_ID = :run_id AND ACTION = 'CLONED';
+         WHERE RUN_ID = :run_id AND ACTION = 'CLONED' AND GENERATION = :gen_d;
     EXCEPTION
         WHEN OTHER THEN
             emsg := SQLERRM;
