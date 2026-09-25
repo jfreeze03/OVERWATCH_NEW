@@ -7,16 +7,20 @@
 -- only seed its settings). Config-driven, same SETTINGS as those panels: ETL_CONTROL_STATUS_FQN plus the V138
 -- keys ETL_CYCLE_START_WORKFLOW / ETL_CYCLE_END_WORKFLOW / ETL_SLA_TARGET_HHMM / ETL_SLA_BREACH_HHMM (a missing
 -- row falls back to the app DEFAULT_SETTINGS value, a blank row disables the rule that needs it). Adds:
---   * ETL_CYCLE_TASKS     - transient scan cache: the last 23 nights of CONTROL_STATUS, one row per
---                           (night, workflow, task) with Informatica retries collapsed to the terminal attempt
---                           (the MAX_BY idiom; TERMINAL_START = that attempt's own start), night-keyed by
---                           DATE(TASK_START_DTTM - 12h) like the app.
+--   * ETL_CYCLE_TASKS     - transient scan cache: the last 23 WHOLE nights of CONTROL_STATUS (cut by night
+--                           key, so the oldest cached night is never partial), one row per (night, workflow,
+--                           task) with Informatica retries collapsed to the terminal attempt (the MAX_BY idiom;
+--                           TERMINAL_START = that attempt's own start), night-keyed by DATE(TASK_START_DTTM -
+--                           12h) like the app, plus FIRST_OK_END = the earliest clean finish among the attempts
+--                           that started at/after that night's cycle start (the starter name is a bound value).
 --   * SP_SCAN_ETL_CYCLE() - allowlist-validates the FQN, rebuilds ETL_CYCLE_TASKS with one EXECUTE IMMEDIATE,
 --                           then raises three rules itself, each inside its own EXCEPTION guard:
 --       PIPE_ETL_TASK_FAILED       MEDIUM (HIGH for the terminal workflow). One event per (workflow, night)
 --                                  whose final-attempt failed-task count >= THRESHOLD_NUM (1; a threshold
 --                                  below 1 still needs one failure). Auto-clears (AUTO_CLEARED, OPEN-only)
---                                  when a retry later succeeds.
+--                                  when a retry later succeeds: every final attempt of that workflow-night has
+--                                  FINISHED and none failed (a retry still running keeps the event OPEN, so a
+--                                  retry that fails again never re-raises it).
 --       PIPE_ETL_CYCLE_NOT_STARTED HIGH. The app NEXT_CYCLE_OVERDUE test: the starter has been silent longer
 --                                  than 24h + grace AND a night it ran on last week has come round again, past
 --                                  last week kickoff + grace, with no run. THRESHOLD_NUM = grace minutes (120 =
@@ -35,7 +39,10 @@
 --                                  The V067 supersede sweep in SP_ALERT_SCAN resolves the lower band on
 --                                  escalation. METRIC_VALUE = minutes left to the target, written only for a
 --                                  lead-window WARN (NULL otherwise), so LOWER_IS_WORSE tuning reads only the
---                                  lead THRESHOLD_NUM actually sets. Terminal tasks count only when their
+--                                  lead THRESHOLD_NUM actually sets. A terminal task is done at its first
+--                                  clean in-cycle finish (FIRST_OK_END), so a re-run of it after the night
+--                                  finished (e.g. a next-morning recon re-run keyed to the same night) never
+--                                  re-grades an on-time night; a task without one counts only when its
 --                                  terminal attempt started at/after that night's cycle start (an afternoon
 --                                  terminal re-run keyed to the same night neither completes nor hides the
 --                                  night); a night whose terminal has not dispatched is judged only when the
@@ -49,8 +56,12 @@
 -- The clock is pinned to America/Chicago (CONTROL_STATUS timestamps are naive Central, like the app assumes).
 -- Known edges (documented, not fixed): when BOTH the starter and the terminal are re-run in the afternoon
 -- before the night's real kickoff, CYCLE_START = MIN(starter start) is the afternoon run (the app has the same
--- MIN semantics), so that night can read complete until the real terminal starts; a terminal task removed for
--- good reads the first night after as incomplete (the usual task count comes from the prior clean nights).
+-- MIN semantics), so the afternoon terminal finish is that night's first clean in-cycle finish and LATE reads
+-- the night complete all night, the real terminal run included (TASK_FAILED still reports a failed real run);
+-- a terminal task removed for good reads the first night after as incomplete (the usual task count comes from
+-- the prior clean nights). Divergence from the app (deliberate): the pull side (cycle_finish_history_scan,
+-- the SLA finish forecast) reads each terminal task's LATEST attempt, so a next-morning re-run of a night that
+-- already finished shows there as running / failed while LATE stays quiet (the push never pages a met SLA).
 -- Wiring: V157 re-derives the hourly alert scan with an add-on CALL arm [23] for this proc, outside the core
 -- tally (a CONTROL_STATUS grant gap logs etl_cycle_scan_failed and never trips OPS_SCAN_DEGRADED); until V157
 -- is applied nothing calls it. HIGH/CRITICAL reach the OVERWATCH_EMAIL path (NATIVE_ALERT_NEW_EVENTS) and any
@@ -78,6 +89,7 @@ CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS (
     FIRST_START     TIMESTAMP_NTZ NOT NULL,
     TERMINAL_START  TIMESTAMP_NTZ,
     TERMINAL_END    TIMESTAMP_NTZ,
+    FIRST_OK_END    TIMESTAMP_NTZ,
     SCANNED_AT      TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
 );
 
@@ -173,23 +185,40 @@ BEGIN
     now_ct := CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ;
 
     -- The ONLY dynamic statement. The FQN is validated above (a bare, well-formed identifier), so it is safe
-    -- to concatenate; lookback_days is an INT. One row per (night, workflow, task): the terminal attempt's
-    -- status / start / end by COALESCE(end, start) (a FAILED-then-retried-SUCCESS task reads SUCCESS), plus the
-    -- first start of any attempt.
+    -- to concatenate; lookback_days is an INT; the starter name is BOUND as data (USING), never concatenated.
+    -- WHOLE nights only: a row is kept when its night key is one of the newest lookback_days nights (the
+    -- timestamp prefilter, one day wider, only prunes), so the oldest cached night is never a partial night
+    -- (a partial one would let the retry auto-clear below resolve a failure that was never re-run). One row per
+    -- (night, workflow, task): the terminal attempt's status / start / end by COALESCE(end, start) (a
+    -- FAILED-then-retried-SUCCESS task reads SUCCESS), the first start of any attempt, and FIRST_OK_END = the
+    -- earliest clean finish (ended, not a failed status) among the attempts that started at/after that night's
+    -- cycle start (MIN starter start, as [C] starts), so a re-run after the night already finished (a next
+    -- morning recon re-run keyed to the same night) never re-opens it, while an afternoon re-run before the
+    -- kickoff never counts as the night's finish.
     ins_sql := 'INSERT INTO DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS '
-               || '(CYCLE_DATE, WORKFLOW_NAME, TASK_NAME, TERMINAL_STATUS, FIRST_START, TERMINAL_START, TERMINAL_END) '
-               || 'SELECT DATE(DATEADD(''hour'', -12, TASK_START_DTTM::TIMESTAMP_NTZ)), '
-               || 'LEFT(TO_VARCHAR(WORKFLOW_NAME), 500), LEFT(TO_VARCHAR(TASK_NAME), 500), '
+               || '(CYCLE_DATE, WORKFLOW_NAME, TASK_NAME, TERMINAL_STATUS, FIRST_START, TERMINAL_START, TERMINAL_END, FIRST_OK_END) '
+               || 'WITH src AS ('
+               || 'SELECT DATE(DATEADD(''hour'', -12, TASK_START_DTTM::TIMESTAMP_NTZ)) AS CD, '
+               || 'LEFT(TO_VARCHAR(WORKFLOW_NAME), 500) AS WF, LEFT(TO_VARCHAR(TASK_NAME), 500) AS TN, '
+               || 'TASK_STATUS, TASK_START_DTTM, TASK_END_DTTM '
+               || 'FROM ' || TRIM(:ctl_fqn) || ' '
+               || 'WHERE TASK_START_DTTM IS NOT NULL AND WORKFLOW_NAME IS NOT NULL AND TASK_NAME IS NOT NULL '
+               || 'AND TASK_START_DTTM >= DATEADD(''day'', -' || (:lookback_days + 1) || ', '
+               || 'CONVERT_TIMEZONE(''America/Chicago'', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ) '
+               || 'AND DATE(DATEADD(''hour'', -12, TASK_START_DTTM::TIMESTAMP_NTZ)) > DATEADD(''day'', -' || :lookback_days || ', '
+               || 'DATE(DATEADD(''hour'', -12, CONVERT_TIMEZONE(''America/Chicago'', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ)))), '
+               || 'cs AS (SELECT CD AS CS_NIGHT, MIN(TASK_START_DTTM) AS CYC_START FROM src WHERE WF = ? GROUP BY CD) '
+               || 'SELECT CD, WF, TN, '
                || 'LEFT(TO_VARCHAR(MAX_BY(TASK_STATUS, COALESCE(TASK_END_DTTM, TASK_START_DTTM))), 100), '
                || 'MIN(TASK_START_DTTM)::TIMESTAMP_NTZ, '
                || 'MAX_BY(TASK_START_DTTM, COALESCE(TASK_END_DTTM, TASK_START_DTTM))::TIMESTAMP_NTZ, '
-               || 'MAX_BY(TASK_END_DTTM, COALESCE(TASK_END_DTTM, TASK_START_DTTM))::TIMESTAMP_NTZ '
-               || 'FROM ' || TRIM(:ctl_fqn) || ' '
-               || 'WHERE TASK_START_DTTM IS NOT NULL AND WORKFLOW_NAME IS NOT NULL AND TASK_NAME IS NOT NULL '
-               || 'AND TASK_START_DTTM >= DATEADD(''day'', -' || :lookback_days || ', '
-               || 'CONVERT_TIMEZONE(''America/Chicago'', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ) '
-               || 'GROUP BY 1, 2, 3';
-    EXECUTE IMMEDIATE :ins_sql;
+               || 'MAX_BY(TASK_END_DTTM, COALESCE(TASK_END_DTTM, TASK_START_DTTM))::TIMESTAMP_NTZ, '
+               || 'MIN(IFF(TASK_END_DTTM IS NOT NULL '
+               || 'AND COALESCE(UPPER(TASK_STATUS), '''') NOT IN (''ABORTED'', ''ERROR'', ''ERRORED'', ''FAILED'', ''KILLED'', ''STOPPED'', ''TERMINATED'') '
+               || 'AND TASK_START_DTTM >= CYC_START, TASK_END_DTTM, NULL))::TIMESTAMP_NTZ '
+               || 'FROM src LEFT JOIN cs ON cs.CS_NIGHT = src.CD '
+               || 'GROUP BY CD, WF, TN';
+    EXECUTE IMMEDIATE :ins_sql USING (start_wf);
 
     SELECT COUNT(*), COUNT_IF(WORKFLOW_NAME = :start_wf), COUNT_IF(WORKFLOW_NAME = :end_wf)
       INTO :n_rows, :n_start_rows, :n_end_rows
@@ -267,7 +296,10 @@ BEGIN
         n_failed := SQLROWCOUNT;
 
         -- retry recovered: resolve the still-OPEN event whose (workflow, night) is in the cache with zero
-        -- final-attempt failures now. OPEN-only (an ACK or SNOOZE is a human decision, left alone).
+        -- final-attempt failures AND every final attempt finished: a retry that has only STARTED (no end yet)
+        -- keeps the event OPEN, so a retry that then fails again never mints a second event and email.
+        -- OPEN-only (an ACK or SNOOZE is a human decision, left alone). The cache holds whole nights only, so
+        -- its oldest night is never a partial one whose failed tasks were cut away.
         UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
            SET STATUS = 'RESOLVED', RESOLVED_AT = CURRENT_TIMESTAMP(), RESOLUTION_KIND = 'AUTO_CLEARED'
          WHERE RULE_ID = 'PIPE_ETL_TASK_FAILED'
@@ -277,6 +309,7 @@ BEGIN
                FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS t
                GROUP BY t.WORKFLOW_NAME, t.CYCLE_DATE
                HAVING COUNT_IF(UPPER(t.TERMINAL_STATUS) IN ('ABORTED', 'ERROR', 'ERRORED', 'FAILED', 'KILLED', 'STOPPED', 'TERMINATED')) = 0
+                  AND COUNT_IF(t.TERMINAL_END IS NULL) = 0
            );
     EXCEPTION
         WHEN OTHER THEN
@@ -357,7 +390,8 @@ BEGIN
     -- [C] PIPE_ETL_CYCLE_LATE: tonight = the newest night the starter ran (cycle_finish_history_scan
     --     cyc_start / term / cyc_end). Deadline = the first target clock time STRICTLY after the cycle start
     --     (insights._deadline_after, cross-midnight); hard = target + (breach - target). Complete = the terminal
-    --     has run at least its usual task count, none still running, none failed (retries collapsed).
+    --     has run at least its usual task count, none still running, none failed (retries collapsed; a task
+    --     with a clean in-cycle finish is done at FIRST_OK_END, whatever a later re-run of it is doing).
     --     Severity: WARN and a night that FINISHED late take the rule severity (HIGH: email, no incident); an
     --     unfinished CRIT / EXH is CRITICAL (SP_INCIDENT_AUTODECLARE opens an incident). METRIC_VALUE is the
     --     minutes left to the target for a lead-window WARN only (NULL for a projection WARN, CRIT and EXH).
@@ -377,18 +411,24 @@ BEGIN
                 GROUP BY CYCLE_DATE
             ),
             ends AS (
-                -- terminal tasks of the SAME night whose TERMINAL attempt started at/after that night's cycle
-                -- start: an afternoon re-run keyed to the night (before the ~22:00 kickoff) is not the night's
-                -- completion, and once the real in-cycle run supersedes it the task counts again.
+                -- terminal tasks of the SAME night. A task with a clean in-cycle finish (FIRST_OK_END) is DONE
+                -- at that first clean finish: a later re-run of it (the next morning, after the night already
+                -- finished) neither re-opens nor re-grades the night. A task without one counts only when its
+                -- TERMINAL attempt started at/after that night's cycle start: an afternoon re-run keyed to the
+                -- night (before the ~22:00 kickoff) is not the night's completion, and once the real in-cycle
+                -- run supersedes it the task counts again.
                 SELECT t.CYCLE_DATE,
                        COUNT(*) AS TERM_TASKS,
-                       MAX(t.TERMINAL_END) AS CYCLE_FINISH,
-                       COUNT_IF(UPPER(t.TERMINAL_STATUS) IN ('ABORTED', 'ERROR', 'ERRORED', 'FAILED', 'KILLED', 'STOPPED', 'TERMINATED')) AS N_FAILED,
-                       COUNT_IF(t.TERMINAL_END IS NULL
+                       MAX(COALESCE(t.FIRST_OK_END, t.TERMINAL_END)) AS CYCLE_FINISH,
+                       COUNT_IF(t.FIRST_OK_END IS NULL
+                                AND UPPER(t.TERMINAL_STATUS) IN ('ABORTED', 'ERROR', 'ERRORED', 'FAILED', 'KILLED', 'STOPPED', 'TERMINATED')) AS N_FAILED,
+                       COUNT_IF(t.FIRST_OK_END IS NULL
+                                AND t.TERMINAL_END IS NULL
                                 AND (t.TERMINAL_STATUS IS NULL
                                      OR UPPER(t.TERMINAL_STATUS) NOT IN ('ABORTED', 'ERROR', 'ERRORED', 'FAILED', 'KILLED', 'STOPPED', 'TERMINATED'))) AS N_RUNNING
                 FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS t
-                JOIN starts s ON s.CYCLE_DATE = t.CYCLE_DATE AND t.TERMINAL_START >= s.CYCLE_START
+                JOIN starts s ON s.CYCLE_DATE = t.CYCLE_DATE
+                             AND (t.FIRST_OK_END IS NOT NULL OR t.TERMINAL_START >= s.CYCLE_START)
                 WHERE t.WORKFLOW_NAME = :end_wf
                 GROUP BY t.CYCLE_DATE
             ),
@@ -519,5 +559,5 @@ $$;
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 156 AS VERSION,
-       'Nightly ETL cycle PUSH alerts (Next-Fifty rank 2): ETL_CYCLE_TASKS transient cache + SP_SCAN_ETL_CYCLE() (isolated config-driven read of ETL_CONTROL_STATUS_FQN, FQN-allowlisted, 23 nights, retries collapsed to the terminal attempt via MAX_BY with that attempt''s start kept as TERMINAL_START, night key DATE(TASK_START_DTTM - 12h), clock pinned America/Chicago) raising PIPE_ETL_TASK_FAILED (MEDIUM, HIGH for the terminal workflow, threshold never below 1, auto-clears on retry success), PIPE_ETL_CYCLE_NOT_STARTED (HIGH, the app NEXT_CYCLE_OVERDUE test, grace = THRESHOLD_NUM min) and PIPE_ETL_CYCLE_LATE (WARN/CRIT/EXH bands superseded by the V067 sweep; lead = THRESHOLD_NUM min before ETL_SLA_TARGET_HHMM, or the start-shifted median of the newest 14 prior clean nights projects past ETL_SLA_BREACH_HHMM; a night that finished late is HIGH, an unfinished miss CRITICAL, which auto-declares an incident; terminal tasks count only when their terminal attempt started at/after the night''s cycle start; an undispatched terminal is judged only when it ran the same night last week; METRIC_VALUE only on a lead-window WARN), each in its own EXCEPTION guard. Three PIPELINE ALERT_CONFIG rules, WHEN NOT MATCHED, AUTO_CLEAR left at its default. Called hourly once V157 adds the SP_ALERT_SCAN add-on CALL arm (not counted toward OPS_SCAN_DEGRADED). Needs SELECT on CONTROL_STATUS (already granted for the app panels).' AS DESCRIPTION
+       'Nightly ETL cycle PUSH alerts (Next-Fifty rank 2): ETL_CYCLE_TASKS transient cache + SP_SCAN_ETL_CYCLE() (isolated config-driven read of ETL_CONTROL_STATUS_FQN, FQN-allowlisted, the 23 newest WHOLE nights cut by night key, retries collapsed to the terminal attempt via MAX_BY with that attempt''s start kept as TERMINAL_START, plus FIRST_OK_END = the first clean finish among attempts started at/after the night''s cycle start (starter name bound via USING), night key DATE(TASK_START_DTTM - 12h), clock pinned America/Chicago) raising PIPE_ETL_TASK_FAILED (MEDIUM, HIGH for the terminal workflow, threshold never below 1, auto-clears on retry success: every final attempt finished and none failed, so a retry still running keeps it OPEN), PIPE_ETL_CYCLE_NOT_STARTED (HIGH, the app NEXT_CYCLE_OVERDUE test, grace = THRESHOLD_NUM min) and PIPE_ETL_CYCLE_LATE (WARN/CRIT/EXH bands superseded by the V067 sweep; lead = THRESHOLD_NUM min before ETL_SLA_TARGET_HHMM, or the start-shifted median of the newest 14 prior clean nights projects past ETL_SLA_BREACH_HHMM; a night that finished late is HIGH, an unfinished miss CRITICAL, which auto-declares an incident; a terminal task is done at its first clean in-cycle finish (FIRST_OK_END), so a next-morning re-run never re-grades a finished night, else counts only when its terminal attempt started at/after the night''s cycle start; an undispatched terminal is judged only when it ran the same night last week; METRIC_VALUE only on a lead-window WARN), each in its own EXCEPTION guard. Three PIPELINE ALERT_CONFIG rules, WHEN NOT MATCHED, AUTO_CLEAR left at its default. Called hourly once V157 adds the SP_ALERT_SCAN add-on CALL arm (not counted toward OPS_SCAN_DEGRADED). Needs SELECT on CONTROL_STATUS (already granted for the app panels).' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 156);
