@@ -49,9 +49,12 @@ PLAYBOOKS: dict[str, str] = {
         "2. Apply the ALTER in the alert detail, the *Respond — closed loop* panel in this drawer, or "
         "*Remediation & ledger* (both re-read the live setting and never raise an already-tight timer). "
         "A latency-sensitive workload pays a cold resume on its first query — check that first.\n"
-        "3. A timer decrease is picked up by the next daily change scan and auto-booked; "
+        "3. A timer decrease is picked up by the next daily change scan and auto-booked (a zero-dollar row "
+        "the closed loop booked from this alert is adopted as that booking, not duplicated); "
         "SP_LEDGER_AUTOBOOK settles the measured saving once the 14-day tracking window closes. Enabling "
-        "a timer on a never-suspend warehouse is not auto-booked — book it in *Remediation & ledger*."
+        "a timer on a never-suspend warehouse is not auto-booked — book it once (a closed-loop run already "
+        "booked its zero-dollar row; otherwise use *Remediation & ledger*) and verify it on the Savings "
+        "ledger."
     ),
     "COST_ANOMALY_SWEEP": (
         "**Means:** yesterday's credits for this series sit far outside its 28-day pattern.\n\n"

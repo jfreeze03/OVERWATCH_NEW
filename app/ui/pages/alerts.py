@@ -1226,12 +1226,14 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                         _cl_lever = ("AUTO_SUSPEND" if fix_kind.startswith("Tighten")
                                                      else "STATEMENT_TIMEOUT" if fix_kind.startswith("Statement")
                                                      else "MAX_CLUSTERS")
-                                        # keep the 'event <id8>' substring: ledger_for_event matches NOTES on it
+                                        # keep the 'event <id8>' substring: ledger_for_event matches NOTES on it.
+                                        # V157: the tail is lever-AND-direction aware -- enabling a timer on a
+                                        # never-suspend (<=0) warehouse (a COST_IDLE_OPPORTUNITY event) is never
+                                        # adopted by the autobook, so its row must not promise that.
                                         _cl_note = ('From alert event ' + event_id[:8]
-                                                    + ("; verify with a proof run on the Savings ledger."
-                                                       if _cl_lever == "STATEMENT_TIMEOUT"
-                                                       else "; the daily change scan adopts and settles it on "
-                                                            "its 14-day measured window."))
+                                                    + remediation.closed_loop_note_suffix(
+                                                        _cl_lever,
+                                                        _cl_cur if _cl_lever == "AUTO_SUSPEND" else None))
                                         execute_statement(
                                             f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
                                             "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES, FINDING_TYPE, TARGET_OBJECT) "
