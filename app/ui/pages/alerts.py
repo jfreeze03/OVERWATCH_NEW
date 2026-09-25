@@ -1711,10 +1711,20 @@ def render() -> None:
         if inc_met.usable():
             im = inc_met.df.iloc[0]
             kpi_row([
-                # ALC-2: MTTA dropped at incident grain — no writer ever sets
-                # INCIDENTS.ACK_AT (ACK_AT is an ALERT_EVENTS lifecycle field), so the
-                # incident-grain MTTA was structurally always NULL ("—"). The real
-                # detected->ack median is the alert-grain MTTA shown just above.
+                # Next-Fifty #12a: incident-grain MTTA is back now that a writer exists (Control
+                # Room Acknowledge / Mark mitigated / Close back-fill INCIDENTS.ACK_AT). NULL
+                # renders '—' through humanize_duration until the first auto-declared ack.
+                {"label": "MTTA (90d)",
+                 "value": humanize_duration(im.get("MTTA_MIN"), "min"),
+                 "help": "Detected -> first response (Acknowledge, Mark mitigated or Close in the "
+                         "Control Room incident drawer), median over AUTO-declared incidents "
+                         f"({int(safe_float(im.get('ACKED_N'))):,} responded to). Manual declares "
+                         "are excluded — declaring was the response."},
+                {"label": "Time to mitigate (90d)",
+                 "value": humanize_duration(im.get("MTTM_MIN"), "min"),
+                 "help": "Detected -> MITIGATED (median): when an operator marked it mitigated, or "
+                         "when its last member alert resolved (the auto-mitigate sweep records "
+                         "that time, not its own run time)."},
                 {"label": "MTTR (90d)",
                  "value": humanize_duration(im.get("MTTR_MIN"), "min"),
                  "help": "Detected -> resolved at INCIDENT grain — the alert-grain pair "

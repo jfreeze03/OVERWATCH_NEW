@@ -207,14 +207,23 @@ def _incident_declare_call_sql(title: str, severity: str, company: str, proposal
 
 def _incident_close_sql(incident_id: str, kind: str, note: str) -> str:
     """Forward-only close: only OPEN/MITIGATED rows move; reopen is a NEW
-    incident with REOPENED_FROM — history never rewrites."""
+    incident with REOPENED_FROM — history never rewrites.
+
+    Next-Fifty #12a (owner decision O-6): a close is also a first human response, so it
+    back-fills ACK_AT / OWNER only when they are still empty (COALESCE keeps an earlier
+    Acknowledge). Without this, incidents closed directly — historically the common path —
+    never entered the incident MTTA. The bulk reset below deliberately does NOT back-fill:
+    clearing a board is not a response to each incident."""
     from app.config import core_object
+    from app.core.identity import identity_sql
     from app.core.sqlsafe import sql_literal
     return (
         f"UPDATE {core_object('INCIDENTS')} "
         f"SET STATUS = 'RESOLVED', RESOLVED_AT = CURRENT_TIMESTAMP(), "
         f"ROOT_CAUSE_KIND = {sql_literal(str(kind).upper())}, "
         f"ROOT_CAUSE_NOTE = {sql_literal(str(note)[:2000])}, "
+        "ACK_AT = COALESCE(ACK_AT, CURRENT_TIMESTAMP()), "
+        f"OWNER = COALESCE(OWNER, {identity_sql()}), "
         "UPDATED_AT = CURRENT_TIMESTAMP() "
         f"WHERE INCIDENT_ID = {sql_literal(str(incident_id))} "
         "AND STATUS IN ('OPEN', 'MITIGATED');"
@@ -234,6 +243,146 @@ def _incident_open_check_sql(incident_id: str) -> str:
         f"WHERE INCIDENT_ID = {sql_literal(str(incident_id))} "
         "AND STATUS IN ('OPEN', 'MITIGATED')"
     )
+
+
+def _incident_ack_sql(incident_id: str) -> str:
+    """Next-Fifty #12a: forward-only Acknowledge. Stamps ACK_AT (the FIRST human response =
+    the incident MTTA) and takes OWNER on an OPEN/MITIGATED incident nobody has acknowledged.
+    The ``ACK_AT IS NULL`` guard means a re-click or a second operator never re-stamps; COALESCE
+    keeps an existing OWNER. The viewer comes from identity_sql() (st.user under owner's-rights
+    SiS, CURRENT_USER() outside it). CURRENT_TIMESTAMP() is the same session clock that stamps
+    DETECTED_AT / RESOLVED_AT, so MTTA compares like with like (common.py TIMEZONE STANDARD)."""
+    from app.config import core_object
+    from app.core.identity import identity_sql
+    from app.core.sqlsafe import sql_literal
+    return (
+        f"UPDATE {core_object('INCIDENTS')} "
+        f"SET ACK_AT = CURRENT_TIMESTAMP(), OWNER = COALESCE(OWNER, {identity_sql()}), "
+        "UPDATED_AT = CURRENT_TIMESTAMP() "
+        f"WHERE INCIDENT_ID = {sql_literal(str(incident_id))} "
+        "AND STATUS IN ('OPEN', 'MITIGATED') AND ACK_AT IS NULL;"
+    )
+
+
+def _incident_mitigate_sql(incident_id: str) -> str:
+    """Next-Fifty #12a: forward-only OPEN -> MITIGATED. Also a first human response, so it
+    back-fills ACK_AT / OWNER only when empty. Never moves back, and RESOLVED stays the close
+    path's job (the root cause is captured there). Leaves MITIGATED_BY NULL: only V154's
+    SP_INCIDENT_AUTODECLARE sweep stamps it (machine provenance), and the app never reads it."""
+    from app.config import core_object
+    from app.core.identity import identity_sql
+    from app.core.sqlsafe import sql_literal
+    return (
+        f"UPDATE {core_object('INCIDENTS')} "
+        "SET STATUS = 'MITIGATED', MITIGATED_AT = CURRENT_TIMESTAMP(), "
+        "ACK_AT = COALESCE(ACK_AT, CURRENT_TIMESTAMP()), "
+        f"OWNER = COALESCE(OWNER, {identity_sql()}), "
+        "UPDATED_AT = CURRENT_TIMESTAMP() "
+        f"WHERE INCIDENT_ID = {sql_literal(str(incident_id))} AND STATUS = 'OPEN';"
+    )
+
+
+def _incident_state_sql(incident_id: str) -> str:
+    """The INC-1 twin for Acknowledge / Mark mitigated: read the live row first so a guarded
+    UPDATE that would no-op (another operator got there first) never claims a write —
+    execute_statement cannot see the 0 rowcount."""
+    from app.config import core_object
+    from app.core.sqlsafe import sql_literal
+    return (
+        "SELECT STATUS, (ACK_AT IS NULL) AS UNACKED "
+        f"FROM {core_object('INCIDENTS')} "
+        f"WHERE INCIDENT_ID = {sql_literal(str(incident_id))}"
+    )
+
+
+def _incident_lifecycle_controls(inc_row, iid: str, *, can_write: bool) -> None:
+    """Next-Fifty #12a: the selected incident's lifecycle — a ready-to-close note, the ack /
+    mitigate provenance line, and (operators only) Acknowledge + take ownership (one click, the
+    alert-ACK parity) and Mark mitigated (typed MITIGATE). Both writes are forward-only guarded
+    UPDATEs, INC-1 pre-checked, latched (write_gate_open / stamp_write) and logged. Non-operators
+    still see the note and the provenance. Closing stays in 'Close this incident' below."""
+    from app.core.query import execute_statement
+    from app.ui.components import log_ui_event, notify
+
+    status = str(inc_row.get("STATUS") or "").upper()
+    ack_at = inc_row.get("ACK_AT")
+    mit_at = inc_row.get("MITIGATED_AT")
+    ready_raw = inc_row.get("READY_TO_CLOSE")
+    ready = bool(ready_raw) if pd.notna(ready_raw) else False
+    now = account_now()
+    if ready:
+        # a context note, not an absence — st.caption keeps the page's raw-info ceiling
+        st.caption("Ready to close — every member alert is resolved. Record the root cause in "
+                   "'Close this incident' below; closing stays human.")
+    owner_raw = inc_row.get("OWNER")
+    owner = str(owner_raw).strip() if pd.notna(owner_raw) else ""   # NULL renders '—', never 'nan'
+    bits = []
+    if pd.notna(ack_at):
+        bits.append(f"acknowledged {humanize_age(ack_at, now)} by {owner or '—'}")
+    if status == "MITIGATED" and pd.notna(mit_at):
+        bits.append(f"mitigated {humanize_age(mit_at, now)}")
+    if bits:
+        st.caption("Lifecycle: " + " · ".join(bits))
+    if not can_write:
+        return
+    can_ack = pd.isna(ack_at) and status in ("OPEN", "MITIGATED")   # nobody has responded yet
+    can_mit = status == "OPEN"                                         # forward-only: OPEN -> MITIGATED
+    if not (can_ack or can_mit):
+        return
+    ack_sql = _incident_ack_sql(iid)
+    mit_sql = _incident_mitigate_sql(iid)
+    with st.expander("Lifecycle SQL that will run"):
+        st.code("\n\n".join(q for q, on in ((ack_sql, can_ack), (mit_sql, can_mit)) if on),
+                language="sql")
+    c_ack, c_mit = st.columns(2)
+    with c_ack:
+        if can_ack and st.button("Acknowledge + take ownership", key=f"inc_ack_{iid[:8]}_btn",
+                                 type="primary", width="stretch") and write_gate_open(f"inc_ack_{iid[:8]}"):
+            chk = run(_incident_state_sql(iid), page=_PAGE, key=f"inc_state_{iid[:8]}",
+                      tier="live", source="INCIDENTS forward-only lifecycle pre-check")
+            row0 = chk.df.iloc[0] if chk.usable() else None
+            gone = chk.ok and row0 is None   # the row no longer exists: the guarded UPDATE would no-op
+            if gone or (row0 is not None and not (str(row0.get("STATUS") or "").upper() in ("OPEN", "MITIGATED")
+                                                  and bool(row0.get("UNACKED")))):
+                ok = True   # a no-op resolved cleanly; the latch closes
+                notify(False, "Already acknowledged or closed — no change.")
+            else:
+                ok, msg = execute_statement(ack_sql, page=_PAGE)
+                notify(ok, "Incident acknowledged — you own it." if ok else msg)
+                if ok:
+                    log_ui_event("incident_ack", page=_PAGE)
+            stamp_write(f"inc_ack_{iid[:8]}", ok)  # C48 (single stamp, both paths)
+    with c_mit:
+        if can_mit and confirm_gate("MITIGATE", "Mark mitigated", key=f"inc_mit_{iid[:8]}",
+                                    prompt="Type MITIGATE to confirm") and write_gate_open(f"inc_mit_{iid[:8]}"):
+            chk = run(_incident_state_sql(iid), page=_PAGE, key=f"inc_state_{iid[:8]}",
+                      tier="live", source="INCIDENTS forward-only lifecycle pre-check")
+            if (chk.ok and chk.empty) or (
+                    chk.usable() and str(chk.df.iloc[0].get("STATUS") or "").upper() != "OPEN"):
+                ok = True   # a no-op resolved cleanly; the latch closes
+                notify(False, "Not OPEN any more — no change (already mitigated or closed).")
+            else:
+                ok, msg = execute_statement(mit_sql, page=_PAGE)
+                notify(ok, "Incident marked mitigated." if ok else msg)
+                if ok:
+                    log_ui_event("incident_mitigate", page=_PAGE)
+            stamp_write(f"inc_mit_{iid[:8]}", ok)  # C48 (single stamp, both paths)
+
+
+def _v154_applied() -> bool:
+    """True once V154 is in the applied SCHEMA_VERSION set — the Incidents caption only claims the
+    [attach] arm and the [auto-mitigate] sweep once they exist (a deploy can land before the apply).
+    The same cheap metadata read Admin ▸ Migrations uses (operations._operator_identity_grain_available
+    pattern); an unreadable version table reads as not-applied, so the caption never overclaims."""
+    res = run(mart_sql.schema_version(), page=_PAGE, key="cr_incident_loop_migver",
+              tier="metadata", source="SCHEMA_VERSION", probe=True)
+    if not res.ok or not res.usable() or "VERSION" not in res.df.columns:
+        return False
+    try:
+        applied = {int(v) for v in pd.to_numeric(res.df["VERSION"], errors="coerce").dropna()}
+    except (TypeError, ValueError):
+        return False
+    return 154 in applied
 
 
 def _clear_open_incidents_sql(company: str, kind: str, note: str) -> str:
@@ -301,8 +450,8 @@ def _incident_reset_panel(company: str, open_now: int, is_op: bool) -> None:
             ok, msg = execute_statement(stmt, page=_PAGE)
             stamp_write(key, ok)  # C48
             # INC-1: open_now is the render-time CACHED count; the open set may have been resolved
-            # since (the hourly auto-resolve task, or another operator), and execute_statement can't
-            # see the 0-row rowcount — so don't assert a possibly-stale N. Report honestly.
+            # since (e.g. another operator), and execute_statement can't see the 0-row rowcount —
+            # so don't assert a possibly-stale N. Report honestly.
             notify(ok, msg if not ok else "Resolved the open (OPEN/MITIGATED) incidents in this "
                                           "scope. The board refreshes on the next read.")
             if ok:
@@ -864,8 +1013,10 @@ def render() -> None:
         # render for operators only, so the batch carries that member only when _is_op —
         # non-operators stop paying for it. Each read keeps its own serial fallback if
         # the batch is unavailable or a member misses (prefetch-else-run).
+        # Next-Fifty #12a: lifecycle=True adds ACK_AT / OWNER / MITIGATED_AT / READY_TO_CLOSE for
+        # the drawer's Acknowledge / Mark mitigated (Brief + canary keep the cheap default read).
         _live_specs = [
-            {"key": "oi", "sql": mart_sql.open_incidents(50, company),
+            {"key": "oi", "sql": mart_sql.open_incidents(50, company, lifecycle=True),
              "source": f"INCIDENTS (open + mitigated, {company} + account-level)"},
             {"key": "cra", "sql": mart_sql.open_alert_events(500, company),
              "source": "ALERT_EVENTS" if company == "ALL"
@@ -936,15 +1087,23 @@ def render() -> None:
         # change-correlated) moved to Alerts > History — retrospective process
         # health, not morning triage. Open incidents now surfaces once, via the
         # exception summary above (OPEN_NOW), so the standalone KPI is dropped.
-        oi = _live_pf.get("oi") or run(mart_sql.open_incidents(50, company), page=_PAGE,
+        oi = _live_pf.get("oi") or run(mart_sql.open_incidents(50, company, lifecycle=True), page=_PAGE,
                  key=f"open_incidents_{company}", tier="live",
                  source=f"INCIDENTS (open + mitigated, {company} + account-level)")
         _incident_reset_panel(company, _open_now, _is_op)
+        # Next-Fifty #12a: the ready-to-close count comes from the UNCAPPED incident_metrics row
+        # (READY_TO_CLOSE_N), never len() of the LIMIT-50 open list below.
+        _ready_n = int(safe_float(inc_met.df.iloc[0].get("READY_TO_CLOSE_N"))) if inc_met.usable() else 0
+        if _ready_n:
+            st.caption(f"{_ready_n:,} open incident(s) ready to close — every member alert is resolved. "
+                       "Select one and close it with its root cause (closing stays human).")
         if oi.ok and oi.empty:
             empty_state("clean", "No open incidents.")
         elif guard(oi, "", setup_hint="Incident tables are not installed yet — an admin can apply the pending schema update on Admin → Migrations & freshness."):
             sel_i = selectable_table(
-                with_user_names(oi.df, _PAGE, user_col="DECLARED_BY", display_col="Declared by"),
+                with_user_names(
+                    with_user_names(oi.df, _PAGE, user_col="DECLARED_BY", display_col="Declared by"),
+                    _PAGE, user_col="OWNER", display_col="Owner"),
                 key="cr_inc_sel", height=190)
             requested_incident = str(
                 navigation_context().get("incident_id") or ""
@@ -975,6 +1134,8 @@ def render() -> None:
                     selectable_nav_table(
                         with_user_names(mem.df, _PAGE, user_col="LINKED_BY", display_col="Linked by"),
                         key=f"cr_inc_mem_sel_{_iid[:8]}", on_select=_open_member)
+                # Next-Fifty #12a: acknowledge / mitigate (forward-only), before the RCA and the close.
+                _incident_lifecycle_controls(oi.df.iloc[int(sel_i)], _iid, can_write=_is_op)
                 # Incidents that investigate themselves: the auto-assembled ranked root cause.
                 _auto_investigation(oi.df.iloc[int(sel_i)], company, rate)
                 if _is_op:
@@ -989,17 +1150,17 @@ def render() -> None:
                                         prompt="Type RESOLVE to confirm"
                                         ) and write_gate_open(f"inc_close_{_iid[:8]}"):
                             # INC-1: the guarded UPDATE no-ops if this incident was resolved
-                            # externally since render (the hourly auto-resolve task or another
-                            # operator), and execute_statement can't see the 0 rowcount — so
-                            # pre-check FIRST and only claim a close (+ fire incident_close) when a
-                            # row actually moves, mirroring the DECLARE family-open guard below.
+                            # externally since render (another operator), and execute_statement
+                            # can't see the 0 rowcount — so pre-check FIRST and only claim a close
+                            # (+ fire incident_close) when a row actually moves, mirroring the
+                            # DECLARE family-open guard below.
                             _still = run(_incident_open_check_sql(_iid), page=_PAGE,
                                          key=f"inc_stillopen_{_iid[:8]}", tier="live",
                                          source="INCIDENTS forward-only close pre-check")
                             if _still.usable() and not bool(_still.df.iloc[0].get("STILL_OPEN")):
                                 ok = True   # a no-op resolved cleanly; the latch closes
-                                notify(False, "Already resolved — no change (another operator or "
-                                              "the auto-resolve task closed it).")
+                                notify(False, "Already resolved — no change (another operator "
+                                              "closed it).")
                             else:
                                 ok, msg = execute_statement(_close, page=_PAGE)
                                 notify(ok, "Incident resolved." if ok else msg)
@@ -1080,9 +1241,14 @@ def render() -> None:
                         if _ok_all:
                             log_ui_event("incident_declare", page=_PAGE)
                     stamp_write(_exec_key, _ok_all)  # C48: single stamp, both paths
+        # Next-Fifty #12b: the attach / auto-mitigate sentence is claimed only once V154 is applied
+        # (schema-gated like operations._operator_identity_grain_available) — a deploy can land first.
+        _loop_txt = (" With auto-declare on, later CRITICALs of an already-open family attach to it, and "
+                     "an OPEN incident whose member alerts have all been resolved for an hour moves to "
+                     "MITIGATED — closing stays human." if _v154_applied() else "")
         st.caption("DBA-gated, audited, forward-only (reopen = new incident with REOPENED_FROM). "
                    "CRITICALs auto-declare hourly — one incident per dedupe family per 24h — "
-                   "unless INCIDENT_AUTO_DECLARE_CRITICAL is off in Settings.")
+                   "unless INCIDENT_AUTO_DECLARE_CRITICAL is off in Settings." + _loop_txt)
 
         # ---- Triage queue ----------------------------------------------------------
         section_header("Triage queue")

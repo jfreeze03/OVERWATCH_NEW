@@ -35,7 +35,7 @@ def test_incident_readers_take_company_with_account_rows():
 
 
 def test_control_room_and_brief_pass_the_scope():
-    for call in ("incident_metrics(90, company)", "open_incidents(50, company)",
+    for call in ("incident_metrics(90, company)", "open_incidents(50, company, lifecycle=True)",
                  "incident_proposals(20, company)"):
         assert call in _CR, call
     assert 'key=f"inc_metrics_{company}"' in _CR                     # cache keys scoped too
