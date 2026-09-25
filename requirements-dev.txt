@@ -2,7 +2,7 @@
 # app/logic and app/data are Streamlit-free by design, so tests only need these.
 pandas~=2.2
 pytest~=8.3
-ruff~=0.9
+ruff~=0.16
 # AppTest page-smoke suite (tests/test_pages_apptest.py)
 # Floors kept in lockstep with requirements.txt: streamlit~=1.52 (width='stretch'
 # API) forbids altair 5.4.0/5.4.1, so altair~=5.5 is the lowest co-installable.
