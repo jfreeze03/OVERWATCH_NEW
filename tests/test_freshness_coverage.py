@@ -27,7 +27,8 @@ from tests.test_alert_rule_consistency import _latest_proc_bodies, _mig_files
 UNSTAMPED_OK: dict[str, str] = {}
 
 # Stamped sources the shared name rule judges at 3h (no DAILY/METERING in the name). Each one must be
-# loaded by the hourly graph (TASK_LOAD_HOURLY and its children). Wave 2b adds ALERT_SCAN_HOURLY.
+# loaded by the hourly graph (TASK_LOAD_HOURLY and its children). V157 adds the hourly alert scan's own
+# [hb] heartbeat, ALERT_SCAN_HOURLY; its daily twin ALERT_SCAN_DAILY is judged at 30h by its name.
 HOURLY_NAMED = frozenset({
     "OW_QH_EXTRACT", "FACT_QUERY_HOURLY",                      # SP_LOAD_QH_EXTRACT
     "FACT_QUERY_ROLE_HOURLY", "FACT_QUERY_SCHEMA_HOURLY",       # SP_LOAD_MARTS_V27('HOURLY')
@@ -35,6 +36,7 @@ HOURLY_NAMED = frozenset({
     "MART_OPS_DIAG_HOURLY",                                     # SP_LOAD_OPS_DIAG
     "MART_EXEC_BOARD",                                          # SP_REFRESH_EXEC_BOARD
     "FACT_SECURITY_CHANGE", "SECURITY_TRUST_SNAPSHOT",          # SP_LOAD_SECURITY_FACTS
+    "ALERT_SCAN_HOURLY",                                        # SP_ALERT_SCAN [hb] (V157; TASK_ALERT_SCAN)
 })
 
 _NAME_RE = re.compile(r"^(FACT|MART|OW|SECURITY|ALERT)_[A-Z0-9_]+$")   # drops 'OK'/'ERROR' STATUS literals
@@ -288,3 +290,12 @@ def test_sources_judged_hourly_by_the_name_rule_really_load_hourly():
     assert judged_3h == HOURLY_NAMED, (
         "a source judged at 3h by the shared name rule must actually load hourly; name it *_DAILY if it "
         f"loads daily. New: {sorted(judged_3h - HOURLY_NAMED)}; gone: {sorted(HOURLY_NAMED - judged_3h)}")
+
+
+def test_v157_scan_heartbeats_are_stamped_by_their_own_scans():
+    """V157 [hb]: each alert scan stamps its own row, so the OTHER graph's [22] arm (and every freshness
+    board) sees a stopped scan by the same name rule -- hourly judged at 3h, daily at 30h."""
+    stamped = _stamped()
+    assert stamped.get("ALERT_SCAN_HOURLY") == {"SP_ALERT_SCAN"}
+    assert stamped.get("ALERT_SCAN_DAILY") == {"SP_ALERT_SCAN_DAILY"}
+    assert "ALERT_SCAN_HOURLY" in HOURLY_NAMED and "ALERT_SCAN_DAILY" not in HOURLY_NAMED

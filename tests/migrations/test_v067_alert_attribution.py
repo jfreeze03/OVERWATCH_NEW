@@ -80,7 +80,7 @@ def test_supersede_excluded_from_operator_mttr():
     from app.data import mart_sql
     mttr = mart_sql.alert_mttr(90)
     # V117: SNOOZE_SUPPRESSED joins the machine-close exclusion (RESOLVED + MTTR); wave 2a adds
-    # CONDITION_ENDED (the V156 condition-ended sweep) ahead of V156 so it never counts as human
+    # CONDITION_ENDED (the V157 condition-ended sweep) ahead of V157 so it never counts as human
     assert mttr.count("COALESCE(RESOLUTION_KIND, '') NOT IN "
                       "('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED', 'CONDITION_ENDED')") == 2
     ms = (_ROOT / "app" / "data" / "mart_sql.py").read_text(encoding="utf-8")

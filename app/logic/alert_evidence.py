@@ -132,6 +132,12 @@ def plan_for_alert(rule_id: str, title: str, detail: str = "",
             return None
         return EvidencePlan("queueing", "last 7 days", days=7, warehouse=warehouse, day=day)
 
+    if rid == "COST_IDLE_OPPORTUNITY":
+        # V157: idle waste is hours with ZERO queries — the generic query-families-by-elapsed pack
+        # would ground the explanation on off-topic latency rows. No bespoke idle pack yet, so the
+        # AI-explain affordance is withheld (the alert DETAIL already carries the idle arithmetic).
+        return None
+
     if rid.startswith(("COST_", "PERF_")):
         # A query-latency-shaped anomaly we don't have a bespoke pack for: the
         # original query-families-by-elapsed pack is the right generic evidence.

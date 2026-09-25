@@ -50,6 +50,10 @@ _RULE_TARGETS = {
     "PIPE_DT_FAILURES": ("Operations", "Pipeline SLA"),
     "SEC_CRED_EXPIRY": ("Security", "Access"),
     "SEC_BREAK_GLASS_USE": ("Security", "Changes"),
+    # V157: the freshness board lives on Control Room (an EXECUTIVE viewer, who has no Control Room,
+    # is clamped to Overview by request_navigation like every other unreachable target).
+    "OPS_PIPELINE_DEGRADED": ("Control Room", "Freshness & replay"),
+    "COST_IDLE_OPPORTUNITY": ("Cost Intelligence", "Optimization & Savings"),
 }
 
 _FAMILY_DEFAULTS = (
@@ -70,13 +74,15 @@ FIX_TARGETS = {
     "COST_STORAGE_SURGE": ("Cost Intelligence", "Optimization & Savings"),
     "PERF_QUEUED_MINUTES": ("Cost Intelligence", "Optimization & Savings"),
     "PERF_SPILL_GB": ("Cost Intelligence", "Optimization & Savings"),
+    "COST_IDLE_OPPORTUNITY": ("Cost Intelligence", "Optimization & Savings"),
 }
 
 
 # Warehouse-lever rules: the drawer generates the fix INLINE (no navigation)
 # because the target and the statement are both unambiguous.
 INLINE_FIX_RULES = ("COST_CLOUD_SVC_RATIO", "COST_WH_DAILY_CREDITS",
-                    "COST_ANOMALY_SWEEP", "PERF_QUEUED_MINUTES", "PERF_SPILL_GB")
+                    "COST_ANOMALY_SWEEP", "PERF_QUEUED_MINUTES", "PERF_SPILL_GB",
+                    "COST_IDLE_OPPORTUNITY")
 
 
 def inline_fix_warehouse(rule_id: str, text: str = "") -> str:
