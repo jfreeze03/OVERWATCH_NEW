@@ -76656,11 +76656,13 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --       fully revoked (OPEN only, 1h dwell, positive evidence only);
 --     ~ the V091 auto-clear sweep is scoped to its 3 PERF rules (the only rules whose still-firing set it
 --       recomputes), so opting another rule into AUTO_CLEAR_ENABLED never blanket-clears it after 1h;
---     ~ arm [10]: a prior event closed before the current expiry's warning window opened (by anyone -- a
---       human ACTIONED/NOISE/EXPECTED resolve included) or machine-closed (CONDITION_ENDED / SUPERSEDED)
---       no longer blocks the credential's key, so a rotated credential's next expiry cycle re-alerts (the
---       key itself is unchanged; a live event or a close inside the current window still blocks), and
---       EXPIRING is never minted while that credential's EXPIRED event is live;
+--     ~ arm [10]: a prior event closed for an EARLIER expiry (by anyone -- a human ACTIONED/NOISE/EXPECTED
+--       resolve included, however late) or machine-closed (CONDITION_ENDED / SUPERSEDED) no longer blocks
+--       the credential's key, so a rotated credential's next expiry cycle re-alerts. The key itself is
+--       unchanged: the cycle id is the expiry date every arm [10] since V009 writes at the head of DETAIL
+--       ('Rotate before YYYY-MM-DD', both bands), now pinned to Central on both the write and the match.
+--       A live (OPEN/ACK/SNOOZED) event, or a close for this same expiry, still blocks; EXPIRING is never
+--       minted while that credential's EXPIRED event is live;
 --     + [hb] heartbeat: stamps SOURCE_FRESHNESS_STATE 'ALERT_SCAN_HOURLY' last in every run.
 --     Counting arms stay 13 (13 - [15] + [22]); the self-alert literal is unchanged.
 --   SP_ALERT_SCAN_DAILY:
@@ -76682,11 +76684,14 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 -- FIRST RUN: every SOURCE_FRESHNESS_STATE row already past its cadence raises one HIGH OPS_PIPELINE_DEGRADED
 -- event, and the first daily run raises this ISO week's COST_IDLE_OPPORTUNITY events (preview with the
 -- separate read-only PREFLIGHT_WAVE2B.sql). A credential already inside its expiry window whose only prior
--- SEC_CRED_EXPIRY event for that key was closed before this expiry's window opened (an earlier cycle, e.g.
--- human-resolved) raises its previously suppressed event once (CRITICAL if already expired). A close inside
--- the current window still suppresses it. Deploy the app build that excludes CONDITION_ENDED from the
--- human-resolution metrics BEFORE applying (it shipped in wave 2a). No procedure runs at apply time: the scans
--- pick this up on their next scheduled run.
+-- SEC_CRED_EXPIRY event for that key was closed for an EARLIER expiry date (an earlier cycle, e.g.
+-- human-resolved, however late) raises its previously suppressed event once (CRITICAL, and an auto-declared
+-- incident, if already expired). A close for the SAME expiry date, or a still-live event, still suppresses
+-- it. Known edge: a row written before V157 by a hand-run scan from a session in another timezone carries
+-- that zone's date; if the expiry fell on a different calendar date there, the row reads as an earlier cycle
+-- and the event re-raises once (a duplicate, not a missed alert). Deploy the app build that excludes
+-- CONDITION_ENDED from the human-resolution metrics BEFORE applying (it shipped in wave 2a). No procedure runs
+-- at apply time: the scans pick this up on their next scheduled run.
 -- ROLLBACK (order matters): FIRST, by hand (never inside a migration), switch AUTO_CLEAR_ENABLED off for
 -- SEC_CRED_EXPIRY and SEC_NEW_EXPOSURE; only THEN re-run V141's two procs (RUNBOOK section 12, "Rolling back
 -- V157"). Reversed, an hourly scan landing between the two steps runs V141's unscoped V091 sweep, which
@@ -76968,12 +76973,13 @@ BEGIN
                    IFF(cr.EXPIRATION_DATE < CURRENT_TIMESTAMP(),
                        'EXPIRED ' || ABS(DATEDIFF('day', cr.EXPIRATION_DATE, CURRENT_TIMESTAMP())) || ' day(s) ago',
                        'expires in ' || DATEDIFF('day', CURRENT_TIMESTAMP(), cr.EXPIRATION_DATE) || ' day(s)'),
-               'Rotate before ' || TO_VARCHAR(cr.EXPIRATION_DATE, 'YYYY-MM-DD') ||
+               -- V157: this date is the cycle id the dedupe below matches; pinned to Central so a hand-run scan in another
+               -- session timezone writes the same date the scheduled scans always have
+               'Rotate before ' || TO_VARCHAR(CONVERT_TIMEZONE('America/Chicago', cr.EXPIRATION_DATE)::TIMESTAMP_NTZ, 'YYYY-MM-DD') ||
                    ' to avoid auth failures for jobs and integrations using this credential.',
                DATEDIFF('day', CURRENT_TIMESTAMP(), cr.EXPIRATION_DATE),
                c.RULE_ID || '|' || cr.USER_NAME || '|' || cr.NAME || '|' || IFF(cr.EXPIRATION_DATE < CURRENT_TIMESTAMP(), 'EXPIRED', 'EXPIRING'),
-               cr.EXPIRATION_DATE,   -- V157: EXP_TS (this cycle's expiry; dedupe only, not inserted)
-               c.THRESHOLD_NUM       -- V157: WIN_DAYS (the raise window)
+               cr.EXPIRATION_DATE    -- V157: EXP_TS (this cycle's expiry: the dedupe's cycle id, not inserted)
         FROM cfg c
         JOIN SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS cr
           ON c.RULE_ID = 'SEC_CRED_EXPIRY'
@@ -76984,16 +76990,17 @@ BEGIN
          AND cr.EXPIRATION_DATE IS NOT NULL
          AND cr.EXPIRATION_DATE <= DATEADD('day', c.THRESHOLD_NUM, CURRENT_TIMESTAMP())
 
-        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY, EXP_TS, WIN_DAYS)
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY, EXP_TS)
         WHERE NOT EXISTS (
             SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
             WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
               AND COALESCE(e.RESOLUTION_KIND, '') NOT IN ('CONDITION_ENDED', 'SUPERSEDED')   -- V157: a machine close never blocks
-              -- V157: the key has no date, so a row closed (by anyone: ACTIONED, NOISE, EXPECTED, a bulk clear) before THIS
-              -- expiry's warning window opened is an earlier cycle and never blocks -- a rotated credential's next expiry
-              -- re-alerts. A live row (RESOLVED_AT NULL) or a close inside this window still blocks. Central wall-clock.
-              AND COALESCE(e.RESOLVED_AT, CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ)
-                  >= DATEADD('day', -b.WIN_DAYS, CONVERT_TIMEZONE('America/Chicago', b.EXP_TS)::TIMESTAMP_NTZ)
+              -- V157: the key has no date, so the cycle id is the expiry date every arm [10] since V009 writes at the head
+              -- of DETAIL (Rotate before YYYY-MM-DD, both bands). A CLOSED row (by anyone: ACTIONED, NOISE, EXPECTED, a bulk
+              -- clear, however late) blocks only when it was raised for THIS expiry, never by when it was raised or closed,
+              -- so a rotated credential's next expiry re-alerts. A live row (RESOLVED_AT NULL) always blocks.
+              AND (e.RESOLVED_AT IS NULL
+                   OR e.DETAIL LIKE ('Rotate before ' || TO_VARCHAR(CONVERT_TIMEZONE('America/Chicago', b.EXP_TS)::TIMESTAMP_NTZ, 'YYYY-MM-DD') || '%'))
         )
           -- V157: never mint EXPIRING while this credential's EXPIRED event is live (the supersede sweep would resolve it in the same run: hourly churn)
           AND NOT EXISTS (
@@ -78596,7 +78603,7 @@ UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 157 AS VERSION,
-       'Next-Fifty wave 2b (ranks 10a/b/d, 13, 2, 12c): the single wave-2 re-derivation of SP_ALERT_SCAN and SP_ALERT_SCAN_DAILY from V141, byte-identical otherwise. Hourly: dead break-glass arm [15] removed (its rule was deleted at V034; it was the scan''s only ACCOUNT_USAGE.QUERY_HISTORY read); + [22] OPS_PIPELINE_DEGRADED self-watch (a SOURCE_FRESHNESS_STATE row past the shared DAILY/METERING 30h else 3h name rule, at most one event per source per last-load day; a swallowed loader failure of the five NATIVE_ALERT_STALE_FACTS error types, one per type, source and Central day, the three optional mart arms left to the stale leg; an idle alert notifier via OW_SENDER_LEASE while a route is enabled); + [23] add-on arm running SP_SCAN_ETL_CYCLE (V156; not counted toward OPS_SCAN_DEGRADED, logs etl_cycle_scan_failed); + #12c condition-ended sweep (an OPEN SEC_CRED_EXPIRY or SEC_NEW_EXPOSURE event resolves CONDITION_ENDED once CREDENTIALS or GRANTS_TO_ROLES show the condition ended; 1h dwell, positive evidence only, opt-in via AUTO_CLEAR_ENABLED); the V091 auto-clear sweep scoped to its 3 PERF rules; arm [10] (key unchanged) ignores CONDITION_ENDED and SUPERSEDED rows and any row closed before the current expiry''s warning window opened, human resolves included, so a rotated credential''s next expiry re-alerts, and never mints EXPIRING while the EXPIRED event is live; + [hb] ALERT_SCAN_HOURLY heartbeat. Tally 13 -> 13. Daily: + [22] (byte-identical, shared keys) + [24] COST_IDLE_OPPORTUNITY (weekly per warehouse, net recoverable USD/month after the 60s resume tail, settings-verified timer (newest SHOW WAREHOUSES snapshot batch) disabled or above 60s, 14 complete Central days with at least 7 covered; MEDIUM at 100 USD/month, HIGH band at 5x) + [hb] ALERT_SCAN_DAILY heartbeat. Tally 9 -> 11. Seeds OPS_PIPELINE_DEGRADED (PLATFORM, HIGH) and COST_IDLE_OPPORTUNITY (COST, MEDIUM, 100, 336h) WHEN NOT MATCHED only; opts SEC_CRED_EXPIRY and SEC_NEW_EXPOSURE into auto-clear after both procs are replaced. No task change, no procedure run at apply time.' AS DESCRIPTION
+       'Next-Fifty wave 2b (ranks 10a/b/d, 13, 2, 12c): the single wave-2 re-derivation of SP_ALERT_SCAN and SP_ALERT_SCAN_DAILY from V141, byte-identical otherwise. Hourly: dead break-glass arm [15] removed (its rule was deleted at V034; it was the scan''s only ACCOUNT_USAGE.QUERY_HISTORY read); + [22] OPS_PIPELINE_DEGRADED self-watch (a SOURCE_FRESHNESS_STATE row past the shared DAILY/METERING 30h else 3h name rule, at most one event per source per last-load day; a swallowed loader failure of the five NATIVE_ALERT_STALE_FACTS error types, one per type, source and Central day, the three optional mart arms left to the stale leg; an idle alert notifier via OW_SENDER_LEASE while a route is enabled); + [23] add-on arm running SP_SCAN_ETL_CYCLE (V156; not counted toward OPS_SCAN_DEGRADED, logs etl_cycle_scan_failed); + #12c condition-ended sweep (an OPEN SEC_CRED_EXPIRY or SEC_NEW_EXPOSURE event resolves CONDITION_ENDED once CREDENTIALS or GRANTS_TO_ROLES show the condition ended; 1h dwell, positive evidence only, opt-in via AUTO_CLEAR_ENABLED); the V091 auto-clear sweep scoped to its 3 PERF rules; arm [10] (key unchanged) ignores CONDITION_ENDED and SUPERSEDED rows and any row closed for an earlier expiry, human resolves included however late (the cycle id is the expiry date every arm [10] since V009 writes at the head of DETAIL, now pinned to Central on write and match; a live row always blocks), so a rotated credential''s next expiry re-alerts, and never mints EXPIRING while the EXPIRED event is live; + [hb] ALERT_SCAN_HOURLY heartbeat. Tally 13 -> 13. Daily: + [22] (byte-identical, shared keys) + [24] COST_IDLE_OPPORTUNITY (weekly per warehouse, net recoverable USD/month after the 60s resume tail, settings-verified timer (newest SHOW WAREHOUSES snapshot batch) disabled or above 60s, 14 complete Central days with at least 7 covered; MEDIUM at 100 USD/month, HIGH band at 5x) + [hb] ALERT_SCAN_DAILY heartbeat. Tally 9 -> 11. Seeds OPS_PIPELINE_DEGRADED (PLATFORM, HIGH) and COST_IDLE_OPPORTUNITY (COST, MEDIUM, 100, 336h) WHEN NOT MATCHED only; opts SEC_CRED_EXPIRY and SEC_NEW_EXPOSURE into auto-clear after both procs are replaced. No task change, no procedure run at apply time.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 157);
 
 -- ===========================================================================

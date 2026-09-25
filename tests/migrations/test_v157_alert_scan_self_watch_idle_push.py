@@ -69,34 +69,42 @@ _RET_D141 = ("    RETURN 'alert scan daily v2 (V141: storage-surge/serverless-cr
 _C1_LINE = ("           AND ev.RULE_ID IN ('PERF_QUERY_FAIL_PCT', 'PERF_QUEUED_MINUTES', 'PERF_SPILL_GB')   "
             "-- V157: only rules whose still-firing set this sweep recomputes; other opt-ins have their own "
             "clear sweep\n")
-# arm [10] recurrence fix (#12c + review fix): the key is unchanged; EXP_TS / WIN_DAYS ride out of b so a closed
-# row blocks only inside THIS expiry's warning window. Test-side copies, independent of the generator.
+# arm [10] recurrence fix (#12c + review fixes): the key is unchanged; EXP_TS rides out of b and a CLOSED row
+# blocks only when the expiry date at the head of its DETAIL -- the cycle id every arm [10] since V009 writes --
+# is THIS expiry's (never by when it was raised or closed). The writer's date and the match are both pinned to
+# Central. Test-side copies, independent of the generator.
 _H2A_V141 = ("               c.RULE_ID || '|' || cr.USER_NAME || '|' || cr.NAME || '|' || "
              "IFF(cr.EXPIRATION_DATE < CURRENT_TIMESTAMP(), 'EXPIRED', 'EXPIRING')\n        FROM cfg c\n")
 _H2A_NEW = ("               c.RULE_ID || '|' || cr.USER_NAME || '|' || cr.NAME || '|' || "
             "IFF(cr.EXPIRATION_DATE < CURRENT_TIMESTAMP(), 'EXPIRED', 'EXPIRING'),\n"
-            "               cr.EXPIRATION_DATE,   -- V157: EXP_TS (this cycle's expiry; dedupe only, not inserted)\n"
-            "               c.THRESHOLD_NUM       -- V157: WIN_DAYS (the raise window)\n"
+            "               cr.EXPIRATION_DATE    -- V157: EXP_TS (this cycle's expiry: the dedupe's cycle id, not "
+            "inserted)\n"
             "        FROM cfg c\n")
 _H2B_V141 = "        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)\n        WHERE NOT EXISTS (\n"
-_H2B_NEW = ("        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY, EXP_TS, WIN_DAYS)\n"
+_H2B_NEW = ("        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY, EXP_TS)\n"
             "        WHERE NOT EXISTS (\n")
-_H2_WINDOW = ("              AND COALESCE(e.RESOLVED_AT, CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())"
-              "::TIMESTAMP_NTZ)\n"
-              "                  >= DATEADD('day', -b.WIN_DAYS, CONVERT_TIMEZONE('America/Chicago', b.EXP_TS)"
-              "::TIMESTAMP_NTZ)\n")
+_H2D_V141 = "               'Rotate before ' || TO_VARCHAR(cr.EXPIRATION_DATE, 'YYYY-MM-DD') ||\n"
+_H2D_NEW = ("               -- V157: this date is the cycle id the dedupe below matches; pinned to Central so a hand-run "
+            "scan in another\n"
+            "               -- session timezone writes the same date the scheduled scans always have\n"
+            "               'Rotate before ' || TO_VARCHAR(CONVERT_TIMEZONE('America/Chicago', cr.EXPIRATION_DATE)"
+            "::TIMESTAMP_NTZ, 'YYYY-MM-DD') ||\n")
+_H2_CYCLE = ("              AND (e.RESOLVED_AT IS NULL\n"
+             "                   OR e.DETAIL LIKE ('Rotate before ' || TO_VARCHAR(CONVERT_TIMEZONE('America/Chicago', "
+             "b.EXP_TS)::TIMESTAMP_NTZ, 'YYYY-MM-DD') || '%'))\n")
 _H2_V141 = "            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY\n        );\n"
 _H2_NEW = (
     "            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY\n"
     "              AND COALESCE(e.RESOLUTION_KIND, '') NOT IN ('CONDITION_ENDED', 'SUPERSEDED')   "
     "-- V157: a machine close never blocks\n"
-    "              -- V157: the key has no date, so a row closed (by anyone: ACTIONED, NOISE, EXPECTED, a bulk "
-    "clear) before THIS\n"
-    "              -- expiry's warning window opened is an earlier cycle and never blocks -- a rotated "
-    "credential's next expiry\n"
-    "              -- re-alerts. A live row (RESOLVED_AT NULL) or a close inside this window still blocks. "
-    "Central wall-clock.\n"
-    + _H2_WINDOW +
+    "              -- V157: the key has no date, so the cycle id is the expiry date every arm [10] since V009 writes "
+    "at the head\n"
+    "              -- of DETAIL (Rotate before YYYY-MM-DD, both bands). A CLOSED row (by anyone: ACTIONED, NOISE, "
+    "EXPECTED, a bulk\n"
+    "              -- clear, however late) blocks only when it was raised for THIS expiry, never by when it was "
+    "raised or closed,\n"
+    "              -- so a rotated credential's next expiry re-alerts. A live row (RESOLVED_AT NULL) always blocks.\n"
+    + _H2_CYCLE +
     "        )\n"
     "          -- V157: never mint EXPIRING while this credential's EXPIRED event is live (the supersede sweep "
     "would resolve it in the same run: hourly churn)\n"
@@ -237,8 +245,10 @@ def test_v157_hourly_normalizes_back_to_v141_byte_for_byte():
     assert h.count(_C1_LINE) == 1
     h = h.replace(_C1_LINE, "", 1)                                               # V091 scope line
     assert h.count(_H2_NEW) == 1 and h.count(_H2A_NEW) == 1 and h.count(_H2B_NEW) == 1
+    assert h.count(_H2D_NEW) == 1
     h = h.replace(_H2_NEW, _H2_V141, 1)                                          # arm [10] recurrence fix
-    h = h.replace(_H2A_NEW, _H2A_V141, 1).replace(_H2B_NEW, _H2B_V141, 1)          # + carried EXP_TS/WIN_DAYS
+    h = h.replace(_H2A_NEW, _H2A_V141, 1).replace(_H2B_NEW, _H2B_V141, 1)          # + carried EXP_TS
+    h = h.replace(_H2D_NEW, _H2D_V141, 1)                                        # + DETAIL date pinned
     i = h.index("    -- [hb] scan heartbeat")
     j = h.index("\n", h.index("    RETURN ", i)) + 1
     h = h[:i] + _RET_H141 + h[j:]                                                # [hb] + RETURN
@@ -335,10 +345,18 @@ def test_v157_arm10_recurrence_fix_lives_only_in_arm10():
     for frag in ("COALESCE(e.RESOLUTION_KIND, '') NOT IN ('CONDITION_ENDED', 'SUPERSEDED')",
                  "REPLACE(b.DEDUPE_KEY, '|EXPIRING', '|EXPIRED')",
                  "WHERE b.DEDUPE_KEY LIKE '%|EXPIRING'",
-                 _H2_WINDOW, "DEDUPE_KEY, EXP_TS, WIN_DAYS)", "b.WIN_DAYS", "b.EXP_TS"):
+                 _H2_CYCLE, "DEDUPE_KEY, EXP_TS)", "b.EXP_TS"):
         assert _H.count(frag) == 1 and frag in _ARM10, frag
-    assert _H2_NEW in _ARM10 and _H2A_NEW in _ARM10 and _H2B_NEW in _ARM10
-    # EXP_TS / WIN_DAYS feed the dedupe only: the INSERT still writes exactly the 7 event columns
+    assert _H.count("'Rotate before '") == _ARM10.count("'Rotate before '") == 2      # the writer + the match
+    assert _H2_NEW in _ARM10 and _H2A_NEW in _ARM10 and _H2B_NEW in _ARM10 and _H2D_NEW in _ARM10
+    assert "WIN_DAYS" not in _MIG                    # the close-time window of round 1 is gone, not dead code
+    # the cycle id the dedupe matches is the writer's own DETAIL date expression (same text, same Central pin)
+    written = re.search(r"'Rotate before ' \|\| (TO_VARCHAR\(.*?, 'YYYY-MM-DD'\)) \|\|\n", _ARM10).group(1)
+    assert written == ("TO_VARCHAR(CONVERT_TIMEZONE('America/Chicago', cr.EXPIRATION_DATE)::TIMESTAMP_NTZ, "
+                       "'YYYY-MM-DD')")
+    assert ("e.DETAIL LIKE ('Rotate before ' || " + written.replace("cr.EXPIRATION_DATE", "b.EXP_TS")
+            + " || '%'))") in _ARM10
+    # EXP_TS feeds the dedupe only: the INSERT still writes exactly the 7 event columns
     assert ("        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY\n"
             "        FROM (\n") in _ARM10
     # correlated subqueries only at top-level AND (error 002031 class): both sit in the outer WHERE
@@ -625,57 +643,180 @@ def _ckey(u: str, band: str) -> str:
 
 
 def _ev(key: str, status: str, kind: str | None = None, raised: float | None = None,
-        resolved: float | None = None) -> dict:
+        resolved: float | None = None, detail: str | None = None) -> dict:
     return {"EVENT_ID": key, "RULE_ID": key.split("|", 1)[0], "DEDUPE_KEY": key, "STATUS": status,
-            "RESOLUTION_KIND": kind, "RAISED_AT": raised, "RESOLVED_AT": resolved}
+            "RESOLUTION_KIND": kind, "RAISED_AT": raised, "RESOLVED_AT": resolved, "DETAIL": detail}
 
 
-# -- #12c / review fix: arm [10] dedupe is cycle-aware (EXECUTED) ------------------------------------------------
+def _day(x: float) -> str:
+    return _dt(x).strftime("%Y-%m-%d")
 
-def test_v157_arm10_prior_cycle_close_never_blocks_a_same_cycle_close_does():
-    """The key has no date. A row closed (by ANYONE -- a human ACTIONED/NOISE/EXPECTED or a blank-kind bulk
-    clear) before this expiry's warning window opened (EXP - THRESHOLD_NUM days) is an earlier cycle and must
-    not block; a live row or a close inside the window still blocks; a machine close never blocks; and the
-    h-leg still never mints EXPIRING while the EXPIRED event is live."""
+
+def _detail(exp: float) -> str:
+    """The DETAIL arm [10] itself writes for a credential expiring at ``exp`` (EXECUTED, never hand-typed), so a
+    fixture row carries exactly the cycle id a real row of that cycle carries."""
+    (row,) = _run_arm(_ARM10, {"ALERT_CONFIG": [_cfg("SEC_CRED_EXPIRY")], "CREDENTIALS": [_cred("W", exp)]},
+                      exp - 1)
+    return row["DETAIL"]
+
+
+_SUPERSEDE = _between(_H, "    -- V067 #40: supersede the lower-severity OPEN event", "\n    -- [auto-clear sweep] V091:")
+
+
+def _scan_pass(events: list[dict], creds: list[dict], cfg: list[dict], now: float,
+               tag: str) -> tuple[list[dict], list[dict]]:
+    """One hourly pass over SEC_CRED_EXPIRY in SP_ALERT_SCAN's order, every step EXECUTED from the shipped text:
+    arm [10] raises (RAISED_AT = now), then the V067 supersede sweep, then the #12c condition-ended sweep.
+    -> (the arm's rows, every event afterwards)."""
+    rows = _run_arm(_ARM10, {"ALERT_CONFIG": cfg, "CREDENTIALS": creds, "ALERT_EVENTS": events}, now)
+    con = _connect({"ALERT_CONFIG": cfg, "CREDENTIALS": creds,
+                    "ALERT_EVENTS": [*events, *_raised(rows, now, tag)]}, now)
+    (supersede,) = re.findall(r"UPDATE DBA_MAINT_DB\.OVERWATCH\.ALERT_EVENTS lo\n.*?;\n", _SUPERSEDE, re.S)
+    for stmt in (supersede, _ce_updates(_CE)["SEC_CRED_EXPIRY"]):
+        con.execute(_to_sqlite(stmt))
+    cur = con.execute("SELECT * FROM ALERT_EVENTS ORDER BY rowid")
+    cols = [c[0] for c in cur.description]
+    return rows, [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+
+
+def _act(events: list[dict], event_id: str, at: float, status: str, kind: str | None = None) -> list[dict]:
+    """A human ACKs or resolves one event (the app's own transition: RESOLVED stamps RESOLVED_AT + a kind)."""
+    out = [dict(e) for e in events]
+    (e,) = [e for e in out if e["EVENT_ID"] == event_id]
+    e["STATUS"] = status
+    if status == "RESOLVED":
+        e["RESOLVED_AT"], e["RESOLUTION_KIND"] = at, kind
+    return out
+
+
+def _state(events: list[dict]) -> dict:
+    return {e["EVENT_ID"]: (e["STATUS"], e["RESOLUTION_KIND"]) for e in events}
+
+
+def _keys(rows: list[dict]) -> list[tuple]:
+    return [(r["DEDUPE_KEY"], r["SEVERITY"]) for r in rows]
+
+
+# -- #12c / review fixes: arm [10] dedupe is cycle-aware (EXECUTED) ---------------------------------------------
+# The key has no date. Round 2: a CLOSED row's cycle is the expiry date at the head of its DETAIL -- never when
+# it was raised or closed -- so neither a prior cycle resolved late nor a credential whose lifetime is at most
+# THRESHOLD_NUM days can suppress the next cycle.
+
+def test_v157_arm10_cycle_id_is_the_detail_expiry_date_never_the_close_time():
+    """A row closed (by ANYONE -- a human ACTIONED/NOISE/EXPECTED or a blank-kind bulk clear) blocks only when it
+    was raised for THIS expiry date, however early or late it was closed; a live row always blocks; a machine
+    close never blocks; and the h-leg still never mints EXPIRING while the EXPIRED event is live."""
     n = _NOW
-    creds = [_cred(u, n + 5) for u in "ABDEFGIJ"] + [_cred("C", n - 1), _cred("H", n + 30)]
+    this = _detail(n + 5)
+    assert this == (f"Rotate before {_day(n + 5)} to avoid auth failures for jobs and integrations using this "
+                    "credential.")
+    creds = [_cred(u, n + 5) for u in "ABDEFGIJKLS"] + [_cred("C", n - 1), _cred("H", n + 30)]
     events = [
-        # prior cycle, rotated early and resolved ACTIONED by a human -> must NOT block (re-alerts)
-        _ev(_ckey("A", "EXPIRING"), "RESOLVED", "ACTIONED", raised=n - 100, resolved=n - 95),
-        # same cycle, resolved NOISE after the window opened (n - 9) -> MUST block
-        _ev(_ckey("B", "EXPIRING"), "RESOLVED", "NOISE", raised=n - 3, resolved=n - 2),
-        # the finding's scenario (b): cycle 1 EXPIRING superseded, EXPIRED ACK'd then resolved ACTIONED;
-        # cycle 2 has now expired -> the CRITICAL EXPIRED must raise again
-        _ev(_ckey("C", "EXPIRING"), "RESOLVED", "SUPERSEDED", raised=n - 75, resolved=n - 61),
-        _ev(_ckey("C", "EXPIRED"), "RESOLVED", "ACTIONED", raised=n - 61, resolved=n - 60),
-        # a live row blocks however old it is (RESOLVED_AT NULL)
-        _ev(_ckey("D", "EXPIRING"), "OPEN", raised=n - 100),
+        # prior cycle (that token expired at n - 85), resolved ACTIONED by a human -> never blocks (re-alerts)
+        _ev(_ckey("A", "EXPIRING"), "RESOLVED", "ACTIONED", raised=n - 99, resolved=n - 95, detail=_detail(n - 85)),
+        # the finding: a prior cycle resolved LATE -- inside THIS expiry's window -- is still a prior cycle
+        _ev(_ckey("K", "EXPIRING"), "RESOLVED", "ACTIONED", raised=n - 99, resolved=n - 1, detail=_detail(n - 85)),
+        # same cycle, resolved NOISE -> MUST block
+        _ev(_ckey("B", "EXPIRING"), "RESOLVED", "NOISE", raised=n - 3, resolved=n - 2, detail=this),
+        # scenario (b) in one frame (T = 14): C's second 16-day token expired at n - 1 (its window opened n - 15);
+        # cycle 1 (expired n - 17) EXPIRING was superseded and its EXPIRED resolved ACTIONED at n - 10, AFTER the
+        # new window opened -> the CRITICAL EXPIRED must raise again
+        _ev(_ckey("C", "EXPIRING"), "RESOLVED", "SUPERSEDED", raised=n - 31, resolved=n - 16.9,
+            detail=_detail(n - 17)),
+        _ev(_ckey("C", "EXPIRED"), "RESOLVED", "ACTIONED", raised=n - 16.9, resolved=n - 10, detail=_detail(n - 17)),
+        # a LIVE row blocks whatever cycle it was raised for (OPEN / SNOOZED; the ACK'd F below via the h-leg)
+        _ev(_ckey("D", "EXPIRING"), "OPEN", raised=n - 100, detail=_detail(n - 85)),
+        _ev(_ckey("S", "EXPIRING"), "SNOOZED", raised=n - 100, detail=_detail(n - 85)),
         # a same-cycle machine close never blocks (the #12c exemption, kept)
-        _ev(_ckey("E", "EXPIRING"), "RESOLVED", "CONDITION_ENDED", raised=n - 3, resolved=n - 1),
+        _ev(_ckey("E", "EXPIRING"), "RESOLVED", "CONDITION_ENDED", raised=n - 3, resolved=n - 1, detail=this),
         # h-leg: the credential's EXPIRED event is still live -> EXPIRING is never minted
-        _ev(_ckey("F", "EXPIRED"), "ACK", raised=n - 20),
+        _ev(_ckey("F", "EXPIRED"), "ACK", raised=n - 20, detail=_detail(n - 20)),
         # a same-cycle blank-kind bulk clear (SP_ALERT_CLEAR_SCOPE) -> MUST block
-        _ev(_ckey("G", "EXPIRING"), "RESOLVED", None, raised=n - 3, resolved=n - 2),
-        # the window edge (opens at n + 5 - 14 = n - 9): EXPECTED just inside blocks, just before does not
-        _ev(_ckey("I", "EXPIRING"), "RESOLVED", "EXPECTED", raised=n - 9.5, resolved=n - 8.99),
-        _ev(_ckey("J", "EXPIRING"), "RESOLVED", "EXPECTED", raised=n - 9.5, resolved=n - 9.01),
+        _ev(_ckey("G", "EXPIRING"), "RESOLVED", None, raised=n - 3, resolved=n - 2, detail=this),
+        # same cycle raised AND closed long before this window opened (n - 9; the threshold was 45 then) -> the
+        # close time is irrelevant: it is THIS expiry, so it MUST block
+        _ev(_ckey("I", "EXPIRING"), "RESOLVED", "EXPECTED", raised=n - 30, resolved=n - 29, detail=this),
+        # the cycle id is the exact date: the adjacent calendar days are other expiries -> never block, however
+        # recently they were raised and closed
+        _ev(_ckey("J", "EXPIRING"), "RESOLVED", "EXPECTED", raised=n - 2, resolved=n - 1, detail=_detail(n + 4)),
+        _ev(_ckey("L", "EXPIRING"), "RESOLVED", "EXPECTED", raised=n - 2, resolved=n - 1, detail=_detail(n + 6)),
     ]
     rows = _run_arm(_ARM10, {"ALERT_CONFIG": [_cfg("SEC_CRED_EXPIRY")], "CREDENTIALS": creds,
                              "ALERT_EVENTS": events}, n)
     by_key = {r["DEDUPE_KEY"]: r for r in rows}
-    assert set(by_key) == {_ckey("A", "EXPIRING"), _ckey("C", "EXPIRED"), _ckey("E", "EXPIRING"),
-                           _ckey("J", "EXPIRING")}, sorted(by_key)
+    assert set(by_key) == {_ckey("A", "EXPIRING"), _ckey("K", "EXPIRING"), _ckey("C", "EXPIRED"),
+                           _ckey("E", "EXPIRING"), _ckey("J", "EXPIRING"), _ckey("L", "EXPIRING")}, sorted(by_key)
     assert by_key[_ckey("C", "EXPIRED")]["SEVERITY"] == "CRITICAL"          # pages + auto-declares again
+    assert by_key[_ckey("C", "EXPIRED")]["DETAIL"] == _detail(n - 1)
     assert by_key[_ckey("A", "EXPIRING")]["SEVERITY"] == "HIGH"
     assert by_key[_ckey("A", "EXPIRING")]["TITLE"] == "SVC_A programmatic_access_token 'TOK_A' expires in 5 day(s)"
+    assert all(r["DETAIL"] == this for k, r in by_key.items() if k != _ckey("C", "EXPIRED"))
+
+
+def test_v157_arm10_scenario_b_fifteen_day_pat_resolved_late_re_raises_the_critical_expired():
+    """Round-2 finding, the verifier's scenario (b) EXECUTED pass by pass at the production threshold (V028: 10):
+    a 15-day PAT; cycle 1's EXPIRING is SUPERSEDED and its EXPIRED ACK'd; the token is rotated at exp1 + 1
+    (exp2 = exp1 + 16) and the EXPIRED resolved ACTIONED only at exp1 + 7 -- after cycle 2's window opened
+    (exp2 - 10 = exp1 + 6). Cycle 2 raises EXPIRING once the h-leg clears and the CRITICAL EXPIRED at exp2, and
+    the V067 sweep supersedes the stale EXPIRING: nothing is left live but the current CRITICAL."""
+    cfg = [_cfg("SEC_CRED_EXPIRY", THRESHOLD_NUM=10)]
+    exp1 = _NOW
+    exp2 = exp1 + 16
+    tok1, tok2 = [_cred("P", exp1)], [_cred("P", exp2)]
+    rows, ev = _scan_pass([], tok1, cfg, exp1 - 10 + 0.1, "p1-")
+    assert _keys(rows) == [(_ckey("P", "EXPIRING"), "HIGH")]
+    rows, ev = _scan_pass(ev, tok1, cfg, exp1 + 0.1, "p2-")
+    assert _keys(rows) == [(_ckey("P", "EXPIRED"), "CRITICAL")]
+    assert _state(ev) == {"p1-0": ("RESOLVED", "SUPERSEDED"), "p2-0": ("OPEN", None)}
+    ev = _act(ev, "p2-0", exp1 + 0.2, "ACK")                          # a human works the auto-declared incident
+    rows, ev = _scan_pass(ev, tok2, cfg, exp1 + 1.1, "p3-")          # rotated at exp1 + 1: nothing inside T
+    assert rows == [] and _state(ev)["p2-0"] == ("ACK", None)          # CONDITION_ENDED never touches an ACK
+    rows, ev = _scan_pass(ev, tok2, cfg, exp1 + 6.5, "p4-")          # cycle 2's window is open ...
+    assert rows == []                                                  # ... but EXPIRED is live: the h-leg holds
+    still_acked = ev
+    ev = _act(ev, "p2-0", exp1 + 7, "RESOLVED", "ACTIONED")           # closed 6 days after the rotation
+    rows, ev = _scan_pass(ev, tok2, cfg, exp1 + 7.1, "p5-")
+    assert _keys(rows) == [(_ckey("P", "EXPIRING"), "HIGH")]
+    assert rows[0]["DETAIL"].startswith(f"Rotate before {_day(exp2)} ")
+    rows, ev = _scan_pass(ev, tok2, cfg, exp2 + 0.2, "p6-")          # cycle 2 expires unrotated
+    assert _keys(rows) == [(_ckey("P", "EXPIRED"), "CRITICAL")]         # pages + auto-declares again
+    assert _state(ev) == {"p1-0": ("RESOLVED", "SUPERSEDED"), "p2-0": ("RESOLVED", "ACTIONED"),
+                          "p5-0": ("RESOLVED", "SUPERSEDED"), "p6-0": ("OPEN", None)}
+    # a live row always blocks: had cycle 1's EXPIRED stayed ACK'd, the queue keeps THAT event and nothing new
+    assert _scan_pass(still_acked, tok2, cfg, exp2 + 0.2, "px-")[0] == []
+
+
+def test_v157_arm10_a_seven_day_pat_rotated_early_re_raises_its_next_expiry():
+    """Round-2 finding, the short-lifetime case: a 7-day PAT (lifetime <= THRESHOLD_NUM 10) is inside the window
+    from birth, so no close-time or raise-time window can tell its cycles apart. Rotated at day 2 and resolved
+    ACTIONED at the rotation, its next expiry (day 9) must raise EXPIRING at once; that new cycle then dedupes like
+    any other (its live row blocks, a same-cycle human close still blocks)."""
+    cfg = [_cfg("SEC_CRED_EXPIRY", THRESHOLD_NUM=10)]
+    t0 = _NOW                                                          # the first token is created
+    exp1, exp2 = t0 + 7, t0 + 9                                        # rotated at t0 + 2 -> the new token
+    rows, ev = _scan_pass([], [_cred("Q", exp1)], cfg, t0 + 0.05, "q1-")
+    assert _keys(rows) == [(_ckey("Q", "EXPIRING"), "HIGH")]
+    ev = _act(ev, "q1-0", t0 + 2, "RESOLVED", "ACTIONED")
+    tok2 = [_cred("Q", exp2)]
+    for at in (t0 + 2.1, exp2 - 1):                                   # right after the rotation, a day before exp2
+        again = _run_arm(_ARM10, {"ALERT_CONFIG": cfg, "CREDENTIALS": tok2, "ALERT_EVENTS": ev}, at)
+        assert _keys(again) == [(_ckey("Q", "EXPIRING"), "HIGH")], at
+        assert again[0]["DETAIL"].startswith(f"Rotate before {_day(exp2)} ")
+    rows, ev = _scan_pass(ev, tok2, cfg, t0 + 2.1, "q2-")
+    assert len(rows) == 1
+    assert _scan_pass(ev, tok2, cfg, exp2 - 1, "q3-")[0] == []         # the live cycle-2 row blocks
+    ev = _act(ev, "q2-0", exp2 - 0.9, "RESOLVED", "NOISE")
+    assert _scan_pass(ev, tok2, cfg, exp2 - 0.8, "q4-")[0] == []       # a same-cycle human close still blocks
 
 
 def test_v157_arm10_a_rotated_credential_re_alerts_through_a_whole_second_cycle():
     """End to end through arm [10] + the V067 supersede token: cycle 1 human-resolved, cycle 2 raises
     EXPIRING at T-days and the CRITICAL EXPIRED at expiry (the finding's stuck-EXPIRING path)."""
     exp1 = _NOW - 90
-    ev = [_ev(_ckey("K", "EXPIRING"), "RESOLVED", "SUPERSEDED", raised=exp1 - 14, resolved=exp1 + 0.1),
-          _ev(_ckey("K", "EXPIRED"), "RESOLVED", "ACTIONED", raised=exp1 + 0.1, resolved=exp1 + 2)]
+    ev = [_ev(_ckey("K", "EXPIRING"), "RESOLVED", "SUPERSEDED", raised=exp1 - 14, resolved=exp1 + 0.1,
+              detail=_detail(exp1)),
+          _ev(_ckey("K", "EXPIRED"), "RESOLVED", "ACTIONED", raised=exp1 + 0.1, resolved=exp1 + 2,
+              detail=_detail(exp1))]
     cfg = [_cfg("SEC_CRED_EXPIRY")]
     exp2 = _NOW + 3                                            # rotated: the next 90-day token expires in 3 days
     first = _run_arm(_ARM10, {"ALERT_CONFIG": cfg, "CREDENTIALS": [_cred("K", exp2)], "ALERT_EVENTS": ev}, _NOW)
@@ -688,6 +829,74 @@ def test_v157_arm10_a_rotated_credential_re_alerts_through_a_whole_second_cycle(
     # the supersede sweep's hi/lo pairing still matches: same key, band token swapped
     assert "REPLACE(lo.DEDUPE_KEY, '|EXPIRING', '|EXPIRED')" in _H
     assert second[0]["DEDUPE_KEY"] == ev[-1]["DEDUPE_KEY"].replace("|EXPIRING", "|EXPIRED")
+
+
+def _select_items(body: str) -> list[str]:
+    """Top-level comma split of a SELECT list (comments stripped; quotes and parentheses respected)."""
+    body = re.sub(r"--[^\n]*", "", body)
+    items: list[str] = []
+    cur: list[str] = []
+    depth, quoted = 0, False
+    for ch in body:
+        if ch == "'":
+            quoted = not quoted                    # a doubled '' toggles twice: still correct
+        elif not quoted and ch in "()":
+            depth += 1 if ch == "(" else -1
+        if ch == "," and depth == 0 and not quoted:
+            items.append(" ".join("".join(cur).split()))
+            cur = []
+        else:
+            cur.append(ch)
+    return [*items, " ".join("".join(cur).split())]
+
+
+_DETAIL_TAIL = " || ' to avoid auth failures for jobs and integrations using this credential.'"
+
+
+def test_v157_arm10_cycle_id_is_written_by_every_definer_since_v009():
+    """The premise of the cycle id, over the rows history holds: EVERY definer of arm [10] since the rule was
+    introduced (V009) writes DETAIL = 'Rotate before ' || <the expiry as YYYY-MM-DD> || one fixed tail, from ONE
+    projection for both bands, in the INSERT's DETAIL position -- and nothing else ever rewrites the head of an
+    ALERT_EVENTS DETAIL (the other writers only append a suffix) or inserts a SEC_CRED_EXPIRY row."""
+    title = "cr.USER_NAME || ' ' || LOWER(cr.TYPE) || ' ''' || cr.NAME || ''' ' ||"
+    definers: dict[int, str] = {}
+    for f in sorted(_MIGDIR.glob("V*.sql")):
+        text = f.read_text(encoding="utf-8")
+        heads = [m.start() + 1 for m in re.finditer(r"\n[ ]+'Rotate before ' \|\|", text)]
+        assert text.count(title) == len(heads) <= 1, f.name       # one arm [10] per definer, one DETAIL head
+        for pos in heads:
+            ins = text.rindex("INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS", 0, pos)
+            cols = _select_items(re.match(r"INSERT INTO DBA_MAINT_DB\.OVERWATCH\.ALERT_EVENTS\s*\(([^)]*)\)",
+                                          text[ins:]).group(1))
+            assert cols[:5] == ["RULE_ID", "COMPANY", "SEVERITY", "TITLE", "DETAIL"], f.name
+            items = _select_items(text[text.rindex("SELECT c.RULE_ID,", 0, pos) + 7:text.index("FROM cfg c", pos)])
+            assert title.rstrip(" |") in items[3] and "IFF(" not in items[4], f.name   # one projection, both bands
+            if "candidates AS (" in text[ins:pos]:               # V009-V016: a UNION ALL branch named by branch 1
+                first = text.index("SELECT ", text.index("candidates AS (", ins))
+                assert _select_items(text[first + 7:text.index("FROM cfg c", first)])[4].endswith(" AS DETAIL")
+                assert ("SELECT c.RULE_ID, c.COMPANY, c.SEVERITY, c.TITLE, c.DETAIL, c.METRIC_VALUE, c.DEDUPE_KEY\n"
+                        "    FROM candidates c") in text[pos:], f.name
+            definers[int(f.name[1:4])] = items[4]
+    assert min(definers) == 9 and 157 in definers and len(definers) == 30, sorted(definers)
+    for v, detail in definers.items():
+        dates = ({"TO_VARCHAR(cr.EXPIRES_AT, 'YYYY-MM-DD')", "TO_VARCHAR(cr.EXPIRATION_DATE, 'YYYY-MM-DD')"}
+                 if v < 157 else
+                 {"TO_VARCHAR(CONVERT_TIMEZONE('America/Chicago', cr.EXPIRATION_DATE)::TIMESTAMP_NTZ, 'YYYY-MM-DD')"})
+        assert any(detail == "'Rotate before ' || " + d + _DETAIL_TAIL for d in dates), (v, detail)
+    # every other DETAIL writer appends (Cortex pre-explain in the anomaly sweeps; the app's AI hypothesis)
+    for f in sorted(_MIGDIR.glob("V*.sql")):
+        text = f.read_text(encoding="utf-8")
+        for m in re.finditer(r"(?<![\w.])DETAIL\s*=\s*", text):
+            assert text[m.end():].startswith("LEFT(COALESCE(DETAIL, '') || "), (f.name, text[m.end():m.end() + 40])
+    alerts = _read("app/ui/pages/alerts.py")
+    assert alerts.count("SET DETAIL = ") == 1
+    assert "f\"LEFT(COALESCE(DETAIL, '') || ' | AI hypothesis: ' || \"" in alerts
+    # and no SEC_CRED_EXPIRY row comes from outside a migration: the one other ALERT_EVENTS INSERT is the drill
+    sources = [*(_ROOT / "app").rglob("*.py"), *(_ROOT / "snowflake").glob("*.sql")]
+    assert {p.relative_to(_ROOT).as_posix() for p in sources
+            if re.search(r"INSERT INTO[^\n]*ALERT_EVENTS", p.read_text(encoding="utf-8"))} == {
+                "snowflake/alert_drill.sql"}
+    assert "SEC_CRED_EXPIRY" not in _read("snowflake/alert_drill.sql")
 
 
 # -- #12c condition-ended sweep -----------------------------------------------------------------------------
@@ -1244,6 +1453,8 @@ def test_v157_runbook_catalogue():
     assert "| OPS_PIPELINE_DEGRADED | PLATFORM |" in rb and "| COST_IDLE_OPPORTUNITY | COST |" in rb
     assert "~~SEC_BREAK_GLASS_USE~~" in rb                                   # history row stays
     assert "| SEC_BREAK_GLASS_USE | SECURITY | > threshold statements/day" not in rb   # live-looking row gone
+    (cred_row,) = [ln for ln in rb.splitlines() if ln.startswith("| SEC_CRED_EXPIRY | SECURITY |")]
+    assert "once per band per expiry date" in cred_row and "weekly until rotated" not in cred_row
 
 
 def test_v157_plain_sql_parses():
@@ -1256,7 +1467,7 @@ def test_v157_plain_sql_parses():
 def test_v157_inserted_select_statements_parse():
     """The new arms' INSERT ... WITH statements parse as Snowflake SQL once the :binds are literals."""
     sqlglot = pytest.importorskip("sqlglot")
-    for block in (_ARM22_H, _ARM24):
+    for block in (_ARM22_H, _ARM24, _ARM10):
         stmt = block[block.index("INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS"):block.index("    EXCEPTION")]
         sqlglot.parse(stmt.replace(":credit_price", "3.68"), dialect="snowflake")
     for gate in re.findall(r"UPDATE DBA_MAINT_DB\.OVERWATCH\.ALERT_EVENTS ev.*?;\n", _CE, re.S):
@@ -1270,7 +1481,7 @@ _PART_B_FRAGMENTS = {
     "SP_ALERT_SCAN()": ("OPS_PIPELINE_DEGRADED", "SP_SCAN_ETL_CYCLE", "CONDITION_ENDED",
                         "V157: only rules whose still-firing set this sweep recomputes",
                         "ALERT_SCAN_HOURLY heartbeat stamp", "alert scan v12 (V157:",
-                        "-b.WIN_DAYS, CONVERT_TIMEZONE("),
+                        "OR e.DETAIL LIKE ("),
     "SP_ALERT_SCAN_DAILY()": ("COST_IDLE_OPPORTUNITY", "OPS_PIPELINE_DEGRADED", "ALERT_SCAN_DAILY heartbeat stamp",
                               "alert scan daily v3 (V157:", "JOIN newest n ON s.SNAPSHOT_AT >="),
 }
