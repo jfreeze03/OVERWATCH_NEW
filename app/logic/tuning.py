@@ -23,7 +23,9 @@ KEEP_ACTIONED_SHARE = 0.90  # a suggestion must keep >= 90% of actioned alerts
 # operator pastes these into a real ALTER, so the direction has to be right.
 #   SEC_CRED_EXPIRY      fires when days-until-expiry <= N
 #   COST_CONTRACT_BREACH fires when projected days-left <= N
-LOWER_IS_WORSE = frozenset({"SEC_CRED_EXPIRY", "COST_CONTRACT_BREACH"})
+#   PIPE_ETL_CYCLE_LATE  fires when minutes-left-to-the-SLA-target <= N (V156 lead window; METRIC_VALUE is
+#                        written only for a lead-window WARN, so projection / CRIT / EXH never skew it)
+LOWER_IS_WORSE = frozenset({"SEC_CRED_EXPIRY", "COST_CONTRACT_BREACH", "PIPE_ETL_CYCLE_LATE"})
 
 
 def suggest_threshold(metric_values: pd.DataFrame, current_threshold: float,
