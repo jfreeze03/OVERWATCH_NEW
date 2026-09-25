@@ -183,7 +183,12 @@ DROP PROCEDURE IF EXISTS DBA_MAINT_DB.OVERWATCH.SP_CANARY_SENTINEL();
 DROP PROCEDURE IF EXISTS DBA_MAINT_DB.OVERWATCH.SP_REFRESH_ML_FORECAST();  -- opt-in script
 DROP DYNAMIC TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.MART_SPEND_ROLLUP_DT;
 DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.FORECAST_ML_DAILY;  -- opt-in script
--- Weekly *_BAK_LAST clones (SP_BACKUP_OPERATOR_TABLES) are safe to drop anytime.
+-- Operator-data backups (SP_BACKUP_OPERATOR_TABLES, V158): the daily
+-- DBA_MAINT_DB.OVERWATCH_BAK.<T>_OWBAK_D<yyyymmdd> / Sunday <T>_OWBAK_W<yyyymmdd> TRANSIENT
+-- generations (their own schema, OVERWATCH_BAK), the weekly *_BAK_LAST pointers and the
+-- OPERATOR_BACKUP_LOG ledger are operator-data INSURANCE: this file never drops any of them,
+-- the OVERWATCH_BAK schema included. The proc prunes expired generations itself; remove the
+-- rest by hand only after a verified restore or a factory reset.
 
 -- A4. Functions
 DROP FUNCTION IF EXISTS DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(VARCHAR);
@@ -244,6 +249,7 @@ DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.SAVINGS_VERIFICATION_RUNS;
 -- DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY;  -- frozen baselines are NOT rebuildable
 -- DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY;  -- frozen baselines are NOT rebuildable
 -- DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CONFIG_SNAPSHOT;  -- change-detection history
+-- DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG;  -- V158 backup-generation ledger (operator history)
 -- DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES;
 -- DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.REMEDIATION_LOG;
 -- DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.USER_PREFS;
@@ -289,8 +295,14 @@ DROP NOTIFICATION INTEGRATION IF EXISTS OVERWATCH_WEBHOOK_FINOPS;
 DROP NOTIFICATION INTEGRATION IF EXISTS OVERWATCH_WEBHOOK_TEAMS;     -- recipe
 DROP SECRET IF EXISTS DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL;    -- recipe (webhook_delivery.sql)
 
--- To restore operator data after re-running migrations, INSERT ... SELECT from
--- the *_BAK_* clones (column lists match), then drop the clones.
+-- To restore operator data after re-running migrations, run as the table-owner role (the audit
+-- tables revoke DELETE from both admin roles), one table at a time:
+--   INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.<T>
+--   SELECT * FROM DBA_MAINT_DB.OVERWATCH_BAK.<T>_OWBAK_D<yyyymmdd>;
+-- picking the generation from OPERATOR_BACKUP_LOG (V158), or from a manual *_BAK_<date> clone
+-- (column lists match unless a later migration altered <T>). Never CLONE-restore: the backups
+-- are TRANSIENT, so a clone into a permanent <T> is refused, and a re-materialized table would
+-- re-apply the schema FUTURE grants (reopening the audit seal). Drop manual clones afterwards.
 
 -- ===========================================================================
 -- C. SHARED INFRASTRUCTURE — uncomment only if you really mean it.
@@ -326,7 +338,7 @@ WHERE TABLE_SCHEMA = 'OVERWATCH'
       'PIPELINE_SLA_CONFIG', 'PIPELINE_SLA_STATUS',
       'DAILY_DIGEST', 'SAVINGS_VERIFICATION_RUNS', 'DEPARTMENT_MAP',
       'ACTION_ACTIVITY', 'EVIDENCE_LINKS', 'ENTITY_CATALOG', 'USER_WATCHLIST',
-      'OPTIMIZATION_EXPERIMENTS', 'SLO_OBJECTIVES',
+      'OPTIMIZATION_EXPERIMENTS', 'SLO_OBJECTIVES', 'OPERATOR_BACKUP_LOG',
       'FACT_SECURITY_LOGIN_DAILY', 'FACT_SECURITY_CHANGE',
       'SECURITY_TRUST_SNAPSHOT'
   )

@@ -41,12 +41,13 @@ ORDER BY SCHEDULED_TIME DESC;
 SELECT LOGGED_AT, PAGE, ERROR_TYPE, LEFT(ERROR_MESSAGE, 160) AS ERROR_MESSAGE, CONTEXT
 FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
 WHERE LOGGED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
-  AND PAGE IN ('MartLoader', 'ExtractLoader', 'ChangeImpactScan')
+  AND PAGE IN ('MartLoader', 'ExtractLoader', 'ChangeImpactScan', 'BackupOperatorTables')
 ORDER BY LOGGED_AT DESC
 LIMIT 100;
 
 -- 4) Freshness — the loader-owned rows. HOURS_BEHIND beyond ~2 for an
---    hourly source (or ~26 for a daily one) means its loader is not landing.
+--    hourly source (or ~30 for a daily one, the shared *_DAILY cadence rule) means its loader
+--    is not landing. OPERATOR_BACKUP_DAILY is the daily operator-data backup (V158).
 SELECT SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS,
        ROUND(DATEDIFF('minute', LAST_LOAD_TS, CURRENT_TIMESTAMP()) / 60.0, 1) AS HOURS_BEHIND
 FROM DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE

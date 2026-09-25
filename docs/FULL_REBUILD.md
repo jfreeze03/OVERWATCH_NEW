@@ -36,6 +36,18 @@ date suffix; verify counts:
     UNION ALL SELECT 'ALERT_CONFIG', COUNT(*) FROM ALERT_CONFIG_BAK_<date>;
     -- ...one row per clone, equal to the source counts.
 
+Since V158 the daily backup task also keeps dated generations of the 25
+operator tables in their own TRANSIENT schema, `DBA_MAINT_DB.OVERWATCH_BAK`
+(`<T>_OWBAK_D<yyyymmdd>`, 14 daily + 8 Sunday-weekly, row counts in
+OPERATOR_BACKUP_LOG). Teardown never touches that schema, so the generations
+are a second copy that survives this whole procedure. Keep the manual
+`_BAK_<date>` token for the clones above: the daily prune matches only
+`_OWBAK_` names, so it can never drop them. Restore from either with
+`INSERT OVERWRITE INTO <T> SELECT * FROM ...` as the table-owner role (a
+TRANSIENT generation cannot CLONE back into a permanent table). V158's tail is
+`EXECUTE TASK`, so replaying it during a rebuild runs the backup as SYSTEM,
+inside the Security CHANGE RISK carve-out for its own prune.
+
 ## 2. Teardown
 
 Run snowflake/teardown.sql top to bottom (Section A executes; B and C stay
