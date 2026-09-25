@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.590.0"
+APP_VERSION = "4.591.0"
 
 # The build's load-bearing schema floor. main() reads the live max(SCHEMA_VERSION)
 # once per session and, if it is BELOW this, renders ONE actionable blocked state
@@ -29,6 +29,13 @@ CORE_SCHEMA = "OVERWATCH"
 MART_SCHEMA = "OVERWATCH"
 APP_WAREHOUSE = "WH_ALFA_ADMIN"
 APP_QUERY_TAG_PREFIX = "OVERWATCH"
+# Next-Fifty #7 (owner diagnostic 2026-09-24, DIAG_7B_TAGS): Streamlit-in-Snowflake stamps EVERY statement
+# the app runs with its own JSON QUERY_TAG -
+#   {"StreamlitEngine":"ExecuteStreamlit","StreamlitName":"DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP","ChildQuery":true}
+# - reads, writes, the connector's result_scan fetches, all history - and OVERRIDES any per-statement tag
+# the app sends. This fragment names THIS app (snowflake.yml identifier) and is the self-traffic signal.
+APP_STREAMLIT_NAME = "OVERWATCH_APP"
+APP_SIS_QUERY_TAG_FRAGMENT = f'"StreamlitName":"{OVERWATCH_DB}.{CORE_SCHEMA}.{APP_STREAMLIT_NAME}"'
 
 
 def core_object(name: str) -> str:

@@ -21,10 +21,11 @@ _SIS_ATTR = "_ow_is_sis"
 _TAG_MAX = 200
 _PARAMS_ATTR = "_ow_stmt_params_ok"  # False once this Snowpark rejects statement_params
 # Next-Fifty #7 Slice B: tiers whose per-tier STATEMENT_TIMEOUT_IN_SECONDS also rides statement_params
-# on SiS. The owner probe (2026-09-24) proved an owner's-rights statement honors it, but the READ
-# tiers' 30/120/180s ceilings have never been enforced in production (the real wall is the 300s
-# warehouse default), so they stay off until the now-tagged per-tier durations are measured. Cortex's
-# 90s ceiling is the documented intent for an explicit, spinner-backed button (core.ai).
+# on SiS. The owner probe (2026-09-24) proved an owner's-rights proc honors it, but the READ tiers'
+# 30/120/180s ceilings have never been enforced in production (the real wall is the 300s warehouse
+# default), so they stay off until per-tier durations are measured (APP_QUERY_TELEMETRY records the tier
+# and QUERY_ID of every slow read). Cortex's 90s ceiling is the documented intent for an explicit,
+# spinner-backed button (core.ai). Whether SiS honors it is unverified: SiS overrides the QUERY_TAG.
 STATEMENT_PARAMS_TIMEOUT_TIERS: frozenset[str] = frozenset({"cortex"})
 
 
@@ -45,7 +46,10 @@ def build_query_tag(page: str = "", tier: str = "") -> str:
 def statement_params(session, *, page: str, tier: str, timeout_s: int | None = None) -> dict[str, str] | None:
     """Per-statement QUERY_TAG for owner's-rights SiS, where ALTER SESSION is rejected (Next-Fifty #7
     Slice B). Rides the statement's own request - no extra statement, unlike the per-query ALTER SESSION
-    that was declined. The owner probe (2026-09-24) proved an owner's-rights statement records it.
+    that was declined. The owner probe (2026-09-24) proved an owner's-rights proc records it, BUT the
+    post-deploy diagnostic showed Streamlit-in-Snowflake overrides it with its own app tag on every
+    statement - so self-traffic keys on SiS's tag (common.app_self_sql), and this tag only lands off-SiS
+    or wherever Snowflake stops overriding it. Kept: harmless, and it carries Cortex's timeout.
     Off-SiS returns None: the ALTER SESSION path already tags there, and test fakes stay untouched.
     STATEMENT_TIMEOUT_IN_SECONDS is added only for STATEMENT_PARAMS_TIMEOUT_TIERS."""
     if session is None or not getattr(session, _SIS_ATTR, False) or getattr(session, _PARAMS_ATTR, None) is False:

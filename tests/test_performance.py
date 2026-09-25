@@ -88,7 +88,7 @@ def test_app_cost_uses_one_warehouse_and_tag_based_workload_split():
     assert "WAREHOUSE_NAME = 'WH_ALFA_ADMIN'" in self_cost
     # Next-Fifty #7: one shared tag-OR-marker predicate; untagged SiS app reads land with the tasks
     from app.data.common import app_self_sql
-    assert f"CASE WHEN {app_self_sql()} THEN 'INTERACTIVE APP' " in self_cost
+    assert f"WHEN {app_self_sql()} THEN 'INTERACTIVE APP' " in self_cost
     assert "ELSE 'TASKS / ALERTS / OTHER' END AS WORKLOAD" in self_cost
     assert "WH_OVERWATCH_APP" not in self_cost
 

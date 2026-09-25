@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.591.0 - Next Fifty #7 correction: key self-traffic on the tag Streamlit-in-Snowflake stamps itself (2026-09-24)
+
+- The owner's post-deploy diagnostic (DIAG_7B_TAGS, app confirmed on v4.590.0) showed the per-statement
+  `OVERWATCH|page=…|tier=…` tag from 4.590.0 never lands. Streamlit-in-Snowflake stamps every statement the
+  app runs with its own QUERY_TAG, `{"StreamlitEngine":"ExecuteStreamlit","StreamlitName":
+  "DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP","ChildQuery":true}`, and overrides any tag the app sends. That
+  stamp is on the app's reads, its telemetry writes, the role probe and the connector's result_scan fetches,
+  and it has been there all along.
+- `common.app_self_sql` / `not_app_self_sql` now recognise that stamp (`config.APP_SIS_QUERY_TAG_FRAGMENT`,
+  tied to snowflake.yml's identifier by a test), alongside the old prefix and comment marker. Every
+  self-noise view (query triage and fingerprints, proc SLA and regression, chatter, repeat queries, release
+  days) now actually drops the app's own statements, and the Spend panel's driver classifier calls them
+  system-generated.
+- Admin > App self-cost: `INTERACTIVE APP` is every statement the app ran; `APP RUNTIME (SiS)` is the
+  Streamlit session statement (tested first, since it carries the same stamp); the `APP RESULT FETCH`
+  bucket is gone (the fetches carry the stamp). The split now holds for the whole 14-day window, not just
+  since the release. The app Cortex card splits by function and model (the stamp has no page).
+- Honest docs: the note, the Performance panel and the RUNBOOK say SiS overrides per-statement tags, and that
+  the Cortex 90s per-statement timeout is unverified under SiS. `POSTDEPLOY_7B_CHECK.sql` is superseded:
+  it looked for our tag.
+
+4-pin version bump 4.590.0 → 4.591.0 + CHANGELOG.
+
 ## 4.590.0 - Next Fifty — #7 Slice B: per-statement query tags (2026-09-24)
 
 - Every statement the app submits on Streamlit-in-Snowflake now carries its own QUERY_TAG

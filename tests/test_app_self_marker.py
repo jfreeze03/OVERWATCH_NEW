@@ -25,12 +25,29 @@ def test_marker_constants():
 
 
 def test_exact_renders():
-    # the marker is spelled as a SPLIT constant so these builders' own statements never self-match
-    assert common.app_self_sql() == ("(QUERY_TAG LIKE 'OVERWATCH%' OR CONTAINS(QUERY_TEXT, "
-                                     "'/* OVERWATCH' || '_APP|'))")
+    # the marker is spelled as a SPLIT constant so these builders' own statements never self-match;
+    # SiS's own app tag (owner diagnostic 2026-09-24) is the primary signal
+    sis = '\'"StreamlitName":"DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP"\''
+    assert sis == common.APP_SIS_TAG_SQL
+    assert common.app_self_sql() == ("(QUERY_TAG LIKE 'OVERWATCH%' OR CONTAINS(QUERY_TAG, " + sis + ") "
+                                     "OR CONTAINS(QUERY_TEXT, '/* OVERWATCH' || '_APP|'))")
+    assert common.app_self_sql("Q", text=False) == ("(Q.QUERY_TAG LIKE 'OVERWATCH%' "
+                                                   "OR CONTAINS(Q.QUERY_TAG, " + sis + "))")
     assert common.not_app_self_sql("q") == ("(COALESCE(q.QUERY_TAG, '') NOT LIKE 'OVERWATCH%' AND NOT "
+                                            "CONTAINS(COALESCE(q.QUERY_TAG, ''), " + sis + ") AND NOT "
                                             "CONTAINS(COALESCE(q.QUERY_TEXT, ''), '/* OVERWATCH' || '_APP|'))")
-    assert common.not_app_self_sql(text=False) == "COALESCE(QUERY_TAG, '') NOT LIKE 'OVERWATCH%'"
+    assert common.not_app_self_sql(text=False) == ("(COALESCE(QUERY_TAG, '') NOT LIKE 'OVERWATCH%' AND NOT "
+                                                   "CONTAINS(COALESCE(QUERY_TAG, ''), " + sis + "))")
+
+
+def test_sis_tag_fragment_names_the_deployed_app():
+    # the fragment must track snowflake.yml's Streamlit identifier, or the app stops recognising itself
+    yml = (_ROOT / "snowflake.yml").read_text(encoding="utf-8")
+    ident = yml.split("identifier:", 1)[1]
+    assert f"name: {config.APP_STREAMLIT_NAME}" in ident and f"database: {config.OVERWATCH_DB}" in ident
+    assert f"schema: {config.CORE_SCHEMA}" in ident
+    assert config.APP_SIS_QUERY_TAG_FRAGMENT == '"StreamlitName":"DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP"'
+    assert "'" not in config.APP_SIS_QUERY_TAG_FRAGMENT                  # safe as a SQL literal
 
 
 def test_every_self_noise_builder_carries_the_marker_leg():
@@ -40,11 +57,14 @@ def test_every_self_noise_builder_carries_the_marker_leg():
                 insights_sql.repeat_query_fingerprints(30), mart_sql.app_self_cost(14),
                 mart_sql.app_statement_stats(7), mart_sql.app_warehouse_queue_by_hour(14)):
         assert "'/* OVERWATCH' || '_APP|'" in sql
+        assert common.APP_SIS_TAG_SQL in sql                          # SiS's app tag excludes/claims it
         # review fix: the contiguous marker never appears in a builder's own text, or QUERY_HISTORY would
         # count the diagnostic builder itself as 'INTERACTIVE APP' traffic
         assert common.APP_SQL_MARKER_OPEN not in sql
-    # detect_release_days stays tag-only by design (no new 180-day QUERY_TEXT read)
+    # detect_release_days stays tag-only by design (no new 180-day QUERY_TEXT read) - but tag-only now
+    # includes SiS's app tag
     assert "_APP|" not in insights_sql.detect_release_days(30)
+    assert common.APP_SIS_TAG_SQL in insights_sql.detect_release_days(30)
 
 
 def test_one_source_of_truth():
@@ -62,7 +82,8 @@ def test_admin_note_is_honest():
     src = (_ROOT / "app/ui/pages/admin.py").read_text(encoding="utf-8")
     assert "carries an OVERWATCH query tag" not in src
     body = src.split("def _self_cost_tab(", 1)[1].split("\ndef ", 1)[0]
-    # Slice B (v4.590.0): the note now says the app tags per statement, and names the other side honestly
-    assert "rejects ALTER SESSION" in body and "statement_params" in body
+    # owner diagnostic 2026-09-24: SiS overrides the per-statement tag and stamps its own - the note says so
+    assert "rejects ALTER SESSION" in body and "statement_params" in body and "StreamlitName" in body
     assert "mart_sql.APP_OTHER_WORKLOAD" in body and "UNTAGGED APP" not in src
-    assert "mart_sql.APP_RUNTIME_WORKLOAD" in body and "mart_sql.APP_FETCH_WORKLOAD" in body
+    assert "mart_sql.APP_RUNTIME_WORKLOAD" in body and "APP_FETCH_WORKLOAD" not in src
+    assert "_TAGGED_SINCE" not in src                                 # nothing claims our tag lands
