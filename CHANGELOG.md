@@ -8,14 +8,16 @@ From the owner's Decision Studio screenshots (2026-09-24). App-only.
   savings (all time)" (equal to the "/mo" line beneath it, which is what an auditor reading SAVINGS_LEDGER
   would flag). The KPIs now read "Verified savings run-rate $X/mo" (active: verified in the last 12
   months) and "Added this quarter $X/mo", with a measured-method chip; the narrative says "/mo of savings
-  run-rate".
+  run-rate" and uses the same active (last-12-months) figure as the KPI, naming older items no longer
+  counted. The Scorecard hero and the Brief help say "/mo added this quarter".
 - **Realization.** It read "— nothing verified yet" beside $1,864.51 verified, because auto-measured
   (autobook) items carry no up-front estimate. It now reads "n/a — auto-measured, no up-front estimate
   (N items)"; "nothing verified yet" only when nothing is. Same on the Scorecard tile.
-- **"None" in tables (root fix).** On the styled-table path a caller's `NumberColumn(format=...)`
-  overrode the house em-dash, so a NULL printed as "None" (the lever table's Realization %). The shared
-  renderer now moves a caller printf onto the Styler with `na_rep="—"` for any column that holds NULLs,
-  keeping the caller's label and help. Fixes every table, not just this one.
+- **"None" in tables (root fix, every table).** Streamlit's grid draws a missing cell with its own
+  placeholder (default "None") before it looks at any styled text, so the table machinery's `na_rep="—"`
+  never reached a NULL cell — the lever table's Realization % showed "None", and so did NULLs app-wide. The
+  shared renderer now passes `placeholder="—"` to the grid on every path (retrying without it on an older
+  runtime).
 - **Monthly chart.** It was a line over complete months only, so one verified month was a lone dot
   ("Peak $683 on Aug 01") while most of the quarter had verified in September. It is now 12 zero-filled
   monthly bars ending with the current month, dimmed and labelled "(MTD)", with "Aug 2026"-style labels.
