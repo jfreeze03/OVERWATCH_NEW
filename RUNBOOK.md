@@ -169,7 +169,11 @@ daily source, it is the one the sidebar health strip most often names as
 rhythm, not an outage. Failures land in APP_ERROR_LOG (PAGE
 `BackupOperatorTables`: `clone_failed`, `backup_log_failed`,
 `backup_prune_failed`, `backup_incomplete`), which `loader_chain_check.sql`
-step 3 lists; `OPERATOR_BACKUP_LOG` records every clone, skip and prune.
+step 3 lists. `OPERATOR_BACKUP_LOG` gets a CLONED row for every
+`OVERWATCH_BAK` generation (the daily `_D`, and on Sundays the weekly `_W` as
+its own row, so a restore older than the daily window still finds a table
+that exists), plus every skip and prune. The Sunday `*_BAK_LAST` refresh is
+not logged.
 
 `SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;` — every state should be
 `started` except TASK_ALERT_NOTIFY before its integration exists.
@@ -612,7 +616,8 @@ deployed app — redeploy the app.
 1. **One bad table:** restore from a backup generation with INSERT OVERWRITE:
    `INSERT OVERWRITE INTO <T> SELECT * FROM DBA_MAINT_DB.OVERWATCH_BAK.<T>_OWBAK_D<yyyymmdd>;`
    Pick the generation from `OPERATOR_BACKUP_LOG` (ROW_COUNT vs SOURCE_ROW_COUNT
-   per day; 14 daily + 8 Sunday-weekly `_W` are kept). Run it as the table-owner
+   per day; 14 daily + 8 Sunday-weekly `_W` are kept, and each generation has its
+   own CLONED row, so past the daily window use `<T>_OWBAK_W<yyyymmdd>`). Run it as the table-owner
    role: INSERT OVERWRITE deletes, and roles.sql revokes DELETE on ALERT_AUDIT /
    REMEDIATION_LOG from both admin roles. It keeps the table's DDL, grants and
    audit seal. Never CLONE-restore: the backups are TRANSIENT (a clone into a
@@ -620,14 +625,38 @@ deployed app — redeploy the app.
    schema FUTURE grants. Time Travel (last hour, same rule):
    `INSERT OVERWRITE INTO <T> SELECT * FROM <T> AT(OFFSET => -3600);`
 2. **Dropped object:** `UNDROP TABLE/SCHEMA ...` within retention.
-3. **Schema gone:** UNDROP first. Otherwise: all migrations in order (V001..V158) →
-   roles.sql → validate.sql (all OK) → facts refill from loaders (history
-   bounded by ACCOUNT_USAGE retention: 365d) → operator tables from
-   the `OVERWATCH_BAK` generations (a separate schema, so they survive a lost
-   OVERWATCH; INSERT OVERWRITE as in step 1), else `*_BAK_LAST` if it
-   survived, else re-seed (SETTINGS rates, budgets,
-   contract; DEPARTMENT_MAP names; ALERT_CONFIG thresholds re-seed with
-   defaults automatically).
+3. **Schema gone:** UNDROP first (`UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH;`).
+   Otherwise rebuild in this order. The operator tables are restored BEFORE V158
+   is replayed:
+   1) Apply the migrations in order, **V001..V157 only**.
+   2) Restore the 25 operator tables, **SETTINGS first** (rates, budgets and the
+      BACKUP_KEEP_* retention live there), with INSERT OVERWRITE as the
+      table-owner role, as in step 1. The source is the `OVERWATCH_BAK`
+      generations, a separate schema that survives a lost OVERWATCH.
+      `OPERATOR_BACKUP_LOG` lived in OVERWATCH and is gone, so choose by name
+      and row count:
+      `SELECT TABLE_NAME, ROW_COUNT, CREATED FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'OVERWATCH_BAK' ORDER BY 1;`
+      Use the newest generation dated BEFORE the loss, the same date for every
+      table. The name carries the Central day. The loss day's own `_D` counts
+      only if its CREATED time is before the loss. Past the daily window, use a
+      Sunday `_W`. A table with no generation is re-seeded (SETTINGS rates,
+      budgets, contract; DEPARTMENT_MAP names; ALERT_CONFIG thresholds re-seed
+      with defaults automatically). `*_BAK_LAST` lived in OVERWATCH and went
+      with it.
+   3) Apply V158, then any later migrations. The V158 tail backs up the
+      restored tables and prunes with the restored BACKUP_KEEP_DAILY /
+      BACKUP_KEEP_WEEKLY.
+   4) roles.sql → validate.sql (all OK) → facts refill from the loaders
+      (history bounded by ACCOUNT_USAGE retention: 365d).
+
+   **If V158 was already replayed before the restore:** its tail, and every
+   05:10 run since, cloned the re-seeded tables into a generation dated that
+   day. Those runs pruned with the re-seeded 14 / 8 and started a new
+   OPERATOR_BACKUP_LOG that names only post-loss generations. Run
+   `ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR SUSPEND;` at once.
+   Restore SETTINGS first so your BACKUP_KEEP_* values are back, and never
+   restore from the generation dated the replay day or any later one. Verify
+   the restore, then run `ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR RESUME;`.
 4. **Bad deploy:** `snow streamlit deploy --replace` from the previous git
    tag. Migrations are additive; no schema rollback exists or is needed.
 5. **Verify after any recovery:** validate.sql all OK → Admin canary all

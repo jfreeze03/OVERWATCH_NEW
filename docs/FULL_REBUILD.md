@@ -70,10 +70,21 @@ stands for every file). Notes:
 - If you kept operator data, SCHEMA_VERSION already holds 1..124: the
   guards pass, IF NOT EXISTS objects recreate only what teardown dropped,
   and the version MERGEs no-op. That is the designed restore path.
-- If you factory-reset, V001 reseeds SETTINGS/ALERT_CONFIG/COMPANY_SCOPE
-  defaults; restore your real values from the clones afterward:
-      INSERT INTO SETTINGS SELECT * FROM SETTINGS_BAK_<date>; -- etc.
+- If you factory-reset, **stop after V157** and restore before V158 runs.
+  V001 re-seeds the SETTINGS/ALERT_CONFIG/COMPANY_SCOPE defaults. V158's tail
+  then backs up whatever the operator tables hold, and it prunes with whatever
+  SETTINGS holds (the re-seeded BACKUP_KEEP_* 14 / 8). So restore your real
+  values first, SETTINGS first, as the table-owner role:
+      INSERT OVERWRITE INTO SETTINGS SELECT * FROM SETTINGS_BAK_<date>; -- etc.
       (or UPDATE the handful you care about: rates, budgets, routes.)
+  You can also use the newest `OVERWATCH_BAK` generation dated before the reset.
+  If you dropped OPERATOR_BACKUP_LOG too, choose it by name and ROW_COUNT:
+      SELECT TABLE_NAME, ROW_COUNT, CREATED FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES
+      WHERE TABLE_SCHEMA = 'OVERWATCH_BAK' ORDER BY 1;
+  Then apply V158 and the rest. If V158 already ran on the re-seeded tables,
+  run `ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR SUSPEND;` first.
+  Restore SETTINGS first, and never restore from the generation dated the
+  replay day (or later). Verify, then RESUME the task (RUNBOOK §16 step 3).
 
 ## 4. Grants
 

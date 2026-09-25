@@ -516,11 +516,25 @@ Restore = migrations in order -> roles.sql -> validate.sql (all rows OK).
 - **Fine-grained undo:** Time Travel —
   `INSERT OVERWRITE INTO <t> SELECT * FROM <t> AT(OFFSET => -3600);`
   or `UNDROP TABLE <t>` within the retention window.
-- **Schema dropped:** `UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH;` first. If gone,
-  re-run all migrations in order (V001..V158) + roles.sql + validate.sql; facts refill from
-  the loader tasks (history limited to ACCOUNT_USAGE retention); operator
-  tables restore from the `OVERWATCH_BAK` generations (a separate schema, so they
-  survive a lost OVERWATCH) or `*_BAK_LAST` clones if they survived, else re-seed.
+- **Schema dropped:** `UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH;` first. If it is gone,
+  restore the operator data BEFORE V158 is replayed:
+  1. Re-run the migrations in order, **V001..V157 only**.
+  2. Restore the 25 operator tables, **SETTINGS first**, with INSERT OVERWRITE as
+     the table-owner role. The source is the `OVERWATCH_BAK` generations, a separate
+     schema that survives a lost OVERWATCH. Use the newest generation dated before
+     the loss. `OPERATOR_BACKUP_LOG` was in OVERWATCH and is gone, so choose by name
+     and ROW_COUNT:
+     `SELECT TABLE_NAME, ROW_COUNT, CREATED FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'OVERWATCH_BAK' ORDER BY 1;`
+     A table with no generation is re-seeded. `*_BAK_LAST` was in OVERWATCH too.
+  3. Apply V158 and any later migrations. Its tail backs up the restored data and
+     prunes with the restored BACKUP_KEEP_* values.
+  4. Run roles.sql + validate.sql. Facts refill from the loader tasks (history
+     limited to ACCOUNT_USAGE retention).
+
+  If V158 already ran on the re-seeded tables, run
+  `ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR SUSPEND;` first. Restore
+  SETTINGS first, never restore from the generation dated the replay day (or later),
+  and resume the task once the restore is verified (RUNBOOK §16 step 3).
 - **App broken after deploy:** `snow streamlit deploy --replace` with the
   previous git tag; migrations are additive so no schema rollback is needed.
 - **"Failed to retrieve packages... Have you enabled External Access
