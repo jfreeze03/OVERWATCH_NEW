@@ -119,7 +119,7 @@ def test_v146_proc_matches_v142_except_the_ai_functions_arm():
 
 def test_validate_and_docs_track_v146():
     val = _read("snowflake/validate.sql")
-    assert "V001..V155 applied" in val and "VERSION BETWEEN 1 AND 155) = 155" in val
+    assert "V001..V158 applied" in val and "VERSION BETWEEN 1 AND 158) = 158" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V146__ai_usage_loader_repoint_ai_functions.sql" in _read(rel)
 

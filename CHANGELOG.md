@@ -1,5 +1,58 @@
 # Changelog
 
+## 4.594.0 - Next Fifty wave 2b (V156–V158): overnight ETL alerts, alert-scan self-watch + idle push, daily backups (2026-09-25)
+
+Three owner-applied migrations. Unlike wave 2a these change what pages and what gets dropped, so they apply only
+after the 2a build (the CONDITION_ENDED exclusion) and this build are both DEPLOYED.
+
+- **V156 (#2): the overnight Informatica cycle pushes instead of waiting to be pulled.** New ETL_CYCLE_TASKS cache +
+  SP_SCAN_ETL_CYCLE() read the configured CONTROL_STATUS (allowlisted FQN, 23 nights, retries collapsed to each
+  task's final attempt, night key DATE(start - 12h), Central clock) and raise three new PIPELINE rules:
+  PIPE_ETL_TASK_FAILED (MEDIUM, HIGH for the terminal workflow, threshold floored at 1, auto-clears when a retry
+  succeeds), PIPE_ETL_CYCLE_NOT_STARTED (HIGH; the Tonight "Cycle start: Overdue" test) and PIPE_ETL_CYCLE_LATE
+  (WARN/CRIT/EXH bands). A terminal re-run in the afternoon no longer hides the night's completion
+  (TERMINAL_START), an undispatched terminal is judged only when it ran the same night last week, and the
+  projection uses the newest 14 clean nights (a new SQL heuristic sharing the SLA forecast settings, not the app's
+  Theil-Sen trend). New objects only; nothing calls the proc until V157. **Disclosures:** a night that finished
+  late stays HIGH (email, no incident); an unfinished miss is CRITICAL and auto-declares an incident; a weekday
+  holiday on a night the starter ran last week fires NOT_STARTED once (resolve as EXPECTED); month-end nights are
+  under-projected (the lead-window and CRIT/EXH legs still catch them).
+- **V157 (#10a/b/d, #13, #2, #12c): one re-derivation of both alert scans from V141.** Byte-identical otherwise,
+  locked by normalize-and-compare. New OPS_PIPELINE_DEGRADED (PLATFORM/HIGH) in both scans: a freshness row past
+  its cadence (DAILY/METERING 30h, else 3h, including the scans' own new ALERT_SCAN_HOURLY / ALERT_SCAN_DAILY
+  heartbeats, so each scan watches the other), a swallowed loader failure, or an idle alert notifier. New weekly
+  COST_IDLE_OPPORTUNITY (COST/MEDIUM, 100 USD/month, HIGH at 5x) at the Optimize ACTIONABLE idle figure. The
+  hourly scan also runs the V156 ETL-cycle add-on (not counted toward OPS_SCAN_DEGRADED), resolves OPEN
+  SEC_CRED_EXPIRY / SEC_NEW_EXPOSURE events as CONDITION_ENDED once the credential is rotated or removed or the
+  PUBLIC grant revoked (both rules opted in, after both procs are replaced), scopes the V091 auto-clear sweep to
+  its 3 PERF rules, lets a rotated credential's next expiry cycle re-alert, and drops the dead break-glass arm
+  (its only QUERY_HISTORY read). Tallies 13 hourly, 11 daily. **Disclosures:** first-run burst (every freshness
+  row already past cadence raises one HIGH event; the first daily run raises this week's idle events;
+  `PREFLIGHT_WAVE2B.sql` previews them); the freshness boards gain the two heartbeat rows; a non-PERF rule that
+  already had AUTO_CLEAR_ENABLED is no longer blanket-cleared 1h after raise; CONDITION_ENDED closes OPEN events
+  only (an ACK'd one stays for a human).
+- **V158 (#32): operator data is backed up daily, not weekly.** New owner-only TRANSIENT schema
+  DBA_MAINT_DB.OVERWATCH_BAK (no FUTURE grants, so no grant churn in OVERWATCH; survives a lost OVERWATCH).
+  SP_BACKUP_OPERATOR_TABLES (from V089) clones the 25 operator tables at 05:10 Central to immutable
+  `<T>_OWBAK_D<yyyymmdd>` generations (Sundays also `_OWBAK_W` and the unchanged weekly `*_BAK_LAST`), keeps
+  BACKUP_KEEP_DAILY 14 / BACKUP_KEEP_WEEKLY 8 (editable in Admin, floors 7/4), logs row counts to the new
+  OPERATOR_BACKUP_LOG and stamps OPERATOR_BACKUP_DAILY freshness only on a clean run, so a failing backup goes
+  stale and V157 alerts on it. TASK_BACKUP_OPERATOR moves from Sunday 05:40 to daily 05:10.
+  V_SECURITY_EXCEPTION_QUEUE (from V151) keeps the task's own generation-prune DROPs out of CHANGE RISK (a human
+  DROP of a backup still surfaces). Tag coverage ignores OVERWATCH_BAK. **Disclosures:** the old DR restore
+  (`CLONE <T>_BAK_LAST`) has been broken since V089 for permanent tables; restore is now `INSERT OVERWRITE` as the
+  table-owner role (RUNBOOK §16). The daily CLONEs and, from day 15, the prune DROPs still show in the Security
+  change log and incident timeline (accepted noise). Nothing is pruned for 15 days.
+
+Owner-side: return `snowflake/run/PROBES_WAVE2.sql` first (E1/E3/E5 gate V156, C4 the V157 playbook wording,
+F1/F5/F6 V158; the defaults assumed are listed in the PR). Apply V151 → V155 and deploy 4.593.0 first. Then
+deploy THIS build (`snow streamlit deploy --replace`: playbooks, navigation, the backup-retention editors;
+until it lands Admin reads the new SETTINGS keys as "safe to delete"), run the read-only `PREFLIGHT_WAVE2B.sql`,
+and apply V156 → V157 → V158 from the runbox RUN_NEXT. No apply-time scan CALL (a hand CALL of a scan emails);
+V158's tail runs the backup task once.
+
+4-pin version bump 4.593.0 → 4.594.0 + CHANGELOG.
+
 ## 4.593.0 - Next Fifty wave 2a (V151–V155): security drops, freshness, autobook settle, incident loop, collector parity (2026-09-24)
 
 Five owner-applied migrations (none writes ALERT_EVENTS, emails, or DROPs an object) plus app pieces.

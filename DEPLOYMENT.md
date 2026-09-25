@@ -171,6 +171,9 @@ snowflake/migrations/V152__pipeline_freshness_coverage.sql
 snowflake/migrations/V153__ledger_autobook_full_window_settle.sql
 snowflake/migrations/V154__incident_attach_automitigate.sql
 snowflake/migrations/V155__operator_stats_sis_app_tag.sql
+snowflake/migrations/V156__etl_cycle_push_alerts.sql
+snowflake/migrations/V157__alert_scan_self_watch_idle_push.sql
+snowflake/migrations/V158__operator_backup_generations.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
