@@ -38,6 +38,21 @@ PLAYBOOKS: dict[str, str] = {
         "usage, before the account-level ~10% rebate); recurring on the same warehouse = raise the "
         "threshold on the rule."
     ),
+    "COST_IDLE_OPPORTUNITY": (
+        "**Means:** over the last 14 complete days this warehouse burned a large share of its credits "
+        "in hours with zero queries; a tighter AUTO_SUSPEND recovers at least the rule threshold (USD "
+        "per month, after the ~60s resume tail per active hour); and its current timer — read from the "
+        "daily SHOW WAREHOUSES snapshot — is disabled or above 60s. Weekly per warehouse; a mid-week "
+        "jump past 5x the threshold re-raises it as HIGH.\n\n"
+        "1. Cost Intelligence > Optimization & Savings → *Idle & sizing* with a 14-day window: the same "
+        "warehouse shows about the same actionable USD/month (the alert counts 14 complete days only).\n"
+        "2. Apply the ALTER in the alert detail, the *Respond — closed loop* panel in this drawer, or "
+        "*Remediation & ledger* (both re-read the live setting and never raise an already-tight timer). "
+        "A latency-sensitive workload pays a cold resume on its first query — check that first.\n"
+        "3. A timer decrease is picked up by the next daily change scan and auto-booked; "
+        "SP_LEDGER_AUTOBOOK settles the measured saving once the 14-day tracking window closes. Enabling "
+        "a timer on a never-suspend warehouse is not auto-booked — book it in *Remediation & ledger*."
+    ),
     "COST_ANOMALY_SWEEP": (
         "**Means:** yesterday's credits for this series sit far outside its 28-day pattern.\n\n"
         "1. Investigate → lands on Cost Intelligence > Spend & Attribution scoped to the entity; check the day's attribution.\n"
@@ -61,7 +76,12 @@ PLAYBOOKS: dict[str, str] = {
         "**Means:** a credential expires within the threshold (or already has).\n\n"
         "1. Security > Access → *Expiring credentials* for owner and days left.\n"
         "2. Rotate: create the new secret/key first, roll consumers, then retire the old one.\n"
-        "3. Expired + job failures already happening = treat as an incident, not a chore."
+        "3. Expired + job failures already happening = treat as an incident, not a chore.\n\n"
+        "Auto-clear (V157, when the rule's auto-clear is on): once no credential with this user and "
+        "name is still expiring inside the rule window — rotated to a later expiry, or removed — the "
+        "hourly scan resolves the OPEN event as CONDITION_ENDED (after at least 1h; ACK'd and snoozed "
+        "events stay yours to close). If an EXPIRED event was auto-declared into an incident, that "
+        "incident moves to MITIGATED once all its member alerts resolve — close it with the root cause."
     ),
     "SEC_BREAK_GLASS_USE": (
         "**Means:** heavy statement volume under a break-glass admin role.\n\n"
@@ -91,8 +111,27 @@ PLAYBOOKS: dict[str, str] = {
         "3. After the fix, `CALL DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN();` (or `SP_ALERT_SCAN_DAILY()`), "
         "confirm no new `rule_block_failed` row, then resolve."
     ),
+    "OPS_PIPELINE_DEGRADED": (
+        "**Means:** part of OVERWATCH's own pipeline stopped while its tasks still read SUCCEEDED: a "
+        "telemetry source is past its load cadence (hourly sources 3h, `DAILY`/`METERING` sources "
+        "30h), a loader logged a failure and carried on, or the alert notifier has not acquired its "
+        "sender lease in 3h while a delivery route is enabled. `ALERT_SCAN_HOURLY` / "
+        "`ALERT_SCAN_DAILY` are the alert scans' own heartbeats: that scan stopped, or its heartbeat "
+        "stamp keeps failing (`scan_heartbeat_failed`).\n\n"
+        "1. Admin > Migrations & freshness → *Diagnose stale sources* (maps each stale source to its "
+        "latest loader error). Snowsight: `SELECT LOGGED_AT, PAGE, ERROR_TYPE, CONTEXT, ERROR_MESSAGE "
+        "FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG WHERE ERROR_TYPE LIKE '%_failed' ORDER BY LOGGED_AT "
+        "DESC LIMIT 50;`\n"
+        "2. Task state: run `snowflake/loader_chain_check.sql`; a root auto-suspends after 10 "
+        "consecutive failures (V071) — fix the cause, then `ALTER TASK ... RESUME`.\n"
+        "3. After the fix, wait one cycle, confirm the row is fresh, then resolve. A stale source raises "
+        "at most once per last-load day, and a loader failure once per source per day (the optional "
+        "tag-coverage / task-node / AI-usage arms only through their stale row) — for an intentionally "
+        "unloaded source, resolve it once with a note."
+    ),
     "OPS_CANARY_FAIL": (
-        "**Means:** the hourly source canary (SP_CANARY_SENTINEL) could not read one or more "
+        "**Means:** the weekly (Mondays 05:30 Central) source canary (SP_CANARY_SENTINEL) could "
+        "not read one or more "
         "objects OVERWATCH depends on — an ACCOUNT_USAGE view or an OVERWATCH table. Pages and "
         "loaders that read it are failing or empty.\n\n"
         "1. Snowsight: `SELECT RUN_AT, CHECK_NAME, ERROR FROM DBA_MAINT_DB.OVERWATCH.CANARY_RESULTS "
@@ -197,7 +236,11 @@ PLAYBOOKS: dict[str, str] = {
         "3. Not intended → `REVOKE <PRIVILEGE> ON <GRANTED_ON> <DB.SCHEMA.NAME> FROM ROLE PUBLIC;` "
         "(a batch grant: `REVOKE <PRIVILEGE> ON ALL <OBJECT_TYPE>S IN SCHEMA <DB.SCHEMA> FROM ROLE "
         "PUBLIC;` and check `SHOW FUTURE GRANTS IN SCHEMA <DB.SCHEMA>;`). Grant a named role "
-        "instead, then resolve."
+        "instead, then resolve.\n\n"
+        "Auto-clear (V157, when the rule's auto-clear is on): once every grant of this batch shows a "
+        "revoke (DELETED_ON) in GRANTS_TO_ROLES, the hourly scan resolves the OPEN event as "
+        "CONDITION_ENDED (after at least 1h; ACCOUNT_USAGE can lag about 2h; ACK'd and snoozed events "
+        "stay yours to close)."
     ),
     "PIPE_TASK_FAILURES": (
         "**Means:** a task failed at least the threshold number of times on one day (retries "

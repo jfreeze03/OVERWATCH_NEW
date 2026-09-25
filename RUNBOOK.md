@@ -452,7 +452,12 @@ DEDUPE_KEY (no duplicate while the key exists) → OPEN → ACK → RESOLVED,
 each transition writing ALERT_AUDIT. Severity escalations are computed at
 insert. Webhook delivery batches unnotified OPEN CRITICAL/HIGH (or per
 ALERT_ROUTES family/severity → named integration; one failing route never
-blocks others).
+blocks others). **Machine closes** (excluded from precision/MTTR): SUPERSEDED
+(V067 escalation), AUTO_CLEARED (V091 hysteresis — the 3 PERF rules only since
+V157), SNOOZE_SUPPRESSED (V117) and CONDITION_ENDED (V157: an OPEN
+SEC_CRED_EXPIRY / SEC_NEW_EXPOSURE event once ACCOUNT_USAGE shows the credential
+rotated/removed or the PUBLIC grant batch fully revoked; ≥1h dwell, ACK'd and
+snoozed events are left for a human).
 
 | Rule | Family | Fires when (threshold = THRESHOLD_NUM, editable) | Recurrence |
 |---|---|---|---|
@@ -465,6 +470,7 @@ blocks others).
 | COST_SERVERLESS_CREEP | COST | non-WH/non-AI service credits up > % WoW (≥5 cr) | weekly while creeping |
 | COST_ANOMALY_SWEEP | COST | robust z ≥ threshold vs 28d (warehouse & service series) | per series per day |
 | COST_CONTRACT_BREACH | COST | projected exhaustion ≤ threshold days (CRITICAL ≤14) | weekly |
+| COST_IDLE_OPPORTUNITY | COST | a settings-verified AUTO_SUSPEND tightening recovers ≥ threshold USD/month (net of the 60s resume tail, 14 complete days, ≥7 covered; HIGH at ≥5x) — daily scan, V157 | weekly per WH |
 | PERF_QUERY_FAIL_PCT | PERF | window fail % over threshold | daily |
 | PERF_QUEUED_MINUTES | PERF | queued minutes over threshold | daily |
 | PERF_SPILL_GB | PERF | remote spill GB over threshold | daily |
@@ -476,12 +482,12 @@ blocks others).
 | SEC_FAILED_LOGINS | SECURITY | failed logins over threshold | daily |
 | SEC_CRED_EXPIRY | SECURITY | credential expires ≤ threshold days — 10 by default since V028 (CRITICAL if expired) | weekly until rotated |
 | ~~SEC_BREAK_GLASS_USE~~ | SECURITY | retired at V034 (muted since V025) — admin-role activity stays as evidence on Security -> Changes | — |
-| SEC_BREAK_GLASS_USE | SECURITY | > threshold statements/day under admin roles | daily per user |
 | COST_DEPT_BUDGET_PACE | COST | department MTD > budget pace by threshold % (DEPT_BUDGETS) | daily per dept |
 | COST_ORG_ACCOUNT_CREEP | COST | org account currency spend up threshold % WoW | weekly per account |
 | PIPE_VOLUME_DROP | PIPELINE | table rows-added down threshold % vs prior-7d avg (≥1k rows/day) | daily per table |
 | OPS_CANARY_FAIL | PLATFORM | weekly source sentinel found failing dependency views | daily key |
 | OPS_SCAN_DEGRADED | PLATFORM | one or more rule blocks failed in the last scan (v7 isolation) | daily key |
+| OPS_PIPELINE_DEGRADED | PLATFORM | pipeline self-watch in BOTH scans (V157): a SOURCE_FRESHNESS_STATE row past its cadence (DAILY/METERING 30h, else 3h; incl. the ALERT_SCAN_HOURLY / ALERT_SCAN_DAILY heartbeats), a loader failure logged and swallowed, or the notifier idle 3h while a route is enabled | per source per last-load day; per failure type/source/day |
 | OPS_SLOW_RENDER | PLATFORM | page p95 first paint > threshold s (7d, from APP_USAGE.RENDER_MS) | weekly per page |
 
 Playbooks for each rule render in the alert drawer (`logic/playbooks.py`).

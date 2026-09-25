@@ -50,7 +50,7 @@ def test_v117_read_path_excludes_snooze_suppressed_as_machine_close() -> None:
     # SNOOZE_SUPPRESSED is a MACHINE close (not a human resolution), so it must join
     # SUPERSEDED/AUTO_CLEARED in every read-path exclusion (RESOLVED counts, MTTR, precision) —
     # otherwise the daily snooze-suppressed re-raises would inflate the human-resolution metrics.
-    # wave 2a: the list is now 4 kinds (+ CONDITION_ENDED, the V156 condition-ended sweep).
+    # wave 2a: the list is now 4 kinds (+ CONDITION_ENDED, the V157 condition-ended sweep).
     src = _read("app/data/mart_sql.py")
     assert "NOT IN ('SUPERSEDED', 'AUTO_CLEARED')" not in src   # the 2-element form is fully upgraded
     assert "NOT IN ('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED')" not in src   # and the 3-element form

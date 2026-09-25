@@ -693,10 +693,10 @@ SELECT
     SUM(IFF(ACK_AT IS NOT NULL, 1, 0)) AS ACKED,
     -- codex#40 companion: a MACHINE close (V067 escalation SUPERSEDED, the V091
     -- auto-clear sweep marking a cleared condition AUTO_CLEARED, the V117 snooze
-    -- sweep's SNOOZE_SUPPRESSED, or the V156 condition-ended sweep's CONDITION_ENDED
+    -- sweep's SNOOZE_SUPPRESSED, or the V157 condition-ended sweep's CONDITION_ENDED
     -- when a SEC_CRED_EXPIRY / SEC_NEW_EXPOSURE condition goes away) is NOT a human
     -- resolution — exclude all four from the RESOLVED count and MTTR so machine
-    -- closes don't pollute the operator panel. Ships before V156 so its first
+    -- closes don't pollute the operator panel. Ships before V157 so its first
     -- CONDITION_ENDED close is never counted as a human resolve.
     SUM(IFF(RESOLVED_AT IS NOT NULL AND COALESCE(RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED', 'CONDITION_ENDED'), 1, 0)) AS RESOLVED,
     ROUND(AVG(DATEDIFF('minute', RAISED_AT, ACK_AT)), 1) AS MTTA_MIN,

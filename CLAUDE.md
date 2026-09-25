@@ -126,8 +126,12 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
 - **Cortex user attribution stays live-first, byte-exact v4.34.2 shape**
   (exact emails + timestamps; owner rejected the mart swap that lost them).
 - **No monthly-budget KPI** on Overview; MTD-vs-prior-month pace instead.
-- Deterministic prescriptive alert rules, dedupe-key pattern (21 scan arms:
-  [01]-[19] + [20] SEC_NEW_EXPOSURE + [21] SEC_POSTURE_METRIC).
+- Deterministic prescriptive alert rules, dedupe-key pattern. Since V157 the hourly
+  SP_ALERT_SCAN has 13 counting arms ([01]-[05], [10], [11], [14], [17], [18], [20],
+  [21] SEC_POSTURE_METRIC, [22] OPS_PIPELINE_DEGRADED; the dead [15] break-glass arm is gone)
+  + the [23] PIPE_ETL_CYCLE add-on; SP_ALERT_SCAN_DAILY has 11 ([06]-[09], [12], [13], [13b],
+  [16], [19], [22], [24] COST_IDLE_OPPORTUNITY) + the [17]/[18] add-ons. Add-ons, sweeps and the
+  [hb] heartbeats never increment `fails` (test_scan_denominators_match_counting_arms).
 - Validate/loader worksheets are pasted by Joe; the app monitors the loader
   through APP_ERROR_LOG + SOURCE_FRESHNESS_STATE (loader-owned freshness).
 

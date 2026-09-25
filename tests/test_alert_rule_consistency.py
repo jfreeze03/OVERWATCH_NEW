@@ -225,10 +225,10 @@ _ARM_REF_RE = re.compile(rf"\bRULE_ID\s*=\s*'({_RULE})'")
 
 # rule id -> why its dead arm is tolerated for now. Removing an arm needs a proc re-derivation (a
 # numbered migration); when that lands, test_D_dead_arm_allowlist_is_not_stale forces the entry out.
-DEAD_ARM_ALLOWLIST = {
-    "SEC_BREAK_GLASS_USE": "config DELETEd V034:181; arm [15] in SP_ALERT_SCAN joins no row. "
-                           "Arm removal rides the next SP_ALERT_SCAN re-derivation (wave 2).",
-}
+# Empty since V157 (Next-Fifty #10d): the last dead arm, [15] SEC_BREAK_GLASS_USE (config DELETEd at
+# V034), left SP_ALERT_SCAN in the wave-2 re-derivation. RETIRED_ALLOWLIST still names the rule (the app
+# mentions it for history) and its playbook stays for old events.
+DEAD_ARM_ALLOWLIST: dict[str, str] = {}
 
 
 def _arm_rule_refs() -> dict[str, set[str]]:
