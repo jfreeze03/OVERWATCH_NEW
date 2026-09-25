@@ -2698,20 +2698,58 @@ LIMIT 40
 # V032 incident object — readers (tiny operator-curated tables, live tier).
 # ---------------------------------------------------------------------------
 
-def open_incidents(limit: int = 50, company: str = "ALL") -> str:
+def _incident_ready_cte() -> str:
+    """Next-Fifty #12: the per-incident ALERT-member roll-up shared by open_incidents(lifecycle=True)
+    and incident_metrics. LIVE_MEMBERS counts members that are not RESOLVED (a member whose event row
+    is gone counts as live); LIVE_SUCCESSORS counts SUPERSEDED / SNOOZE_SUPPRESSED members whose
+    same-rule same-company successor is still OPEN/ACK/SNOOZED (a machine hand-off, not an end).
+    Both zero = READY TO CLOSE. This mirrors V154's SP_INCIDENT_AUTODECLARE [auto-mitigate] HAVING
+    minus its 1h dwell (tests/migrations/test_v154 locks the shared tokens). Uncorrelated aggregates
+    over small operator tables only -- no nested scalar subquery (the 002031 shape)."""
+    return f"""inc_ready AS (
+    SELECT m.INCIDENT_ID,
+           COUNT_IF(e.EVENT_ID IS NULL OR e.STATUS <> 'RESOLVED') AS LIVE_MEMBERS,
+           COUNT_IF(COALESCE(e.RESOLUTION_KIND, '') IN ('SUPERSEDED', 'SNOOZE_SUPPRESSED')
+                    AND l.LAST_LIVE_AT >= e.RAISED_AT) AS LIVE_SUCCESSORS
+    FROM {core_object("INCIDENT_MEMBERS")} m
+    JOIN {core_object("INCIDENTS")} ri
+      ON ri.INCIDENT_ID = m.INCIDENT_ID AND ri.STATUS IN ('OPEN', 'MITIGATED')
+    LEFT JOIN {core_object("ALERT_EVENTS")} e ON e.EVENT_ID = m.REF_ID
+    LEFT JOIN (
+        SELECT RULE_ID, COMPANY, MAX(RAISED_AT) AS LAST_LIVE_AT
+        FROM {core_object("ALERT_EVENTS")}
+        WHERE STATUS IN ('OPEN', 'ACK', 'SNOOZED')
+        GROUP BY RULE_ID, COMPANY
+    ) l ON l.RULE_ID = e.RULE_ID AND l.COMPANY = e.COMPANY
+    WHERE m.MEMBER_KIND = 'ALERT'
+    GROUP BY m.INCIDENT_ID
+)"""
+
+
+def open_incidents(limit: int = 50, company: str = "ALL", lifecycle: bool = False) -> str:
     """Company keeps that company's rows PLUS account-level (COMPANY='ALL')
     incidents — the open_alert_events convention (live round 8: the panel
-    ignored the triage filter and showed both companies under ALFA)."""
+    ignored the triage filter and showed both companies under ALFA).
+
+    Next-Fifty #12a: ``lifecycle=True`` (Control Room only — its drawer drives Acknowledge /
+    Mark mitigated) adds ACK_AT, OWNER, MITIGATED_AT and READY_TO_CLOSE (every ALERT member
+    resolved, no live successor — the shared _incident_ready_cte). Brief and the canary only
+    count the rows, so they keep the cheap read (the default renders the pre-#12 SQL unchanged)."""
     limit = max(1, min(int(limit or 50), 200))
     comp = ("" if str(company or "ALL").upper() == "ALL"
             else f" AND (i.COMPANY = {sql_literal(company)} OR UPPER(i.COMPANY) = 'ALL')")
+    head = f"WITH {_incident_ready_cte()}\n" if lifecycle else ""
+    lifecycle_cols = ("       i.ACK_AT, i.OWNER, i.MITIGATED_AT,\n"
+                      "       COALESCE(r.LIVE_MEMBERS = 0 AND r.LIVE_SUCCESSORS = 0, FALSE) AS READY_TO_CLOSE,\n"
+                      if lifecycle else "")
+    ready_join = "LEFT JOIN inc_ready r ON r.INCIDENT_ID = i.INCIDENT_ID\n" if lifecycle else ""
     return f"""
-SELECT i.INCIDENT_ID, i.SEVERITY, i.STATUS, i.COMPANY, i.TITLE,
+{head}SELECT i.INCIDENT_ID, i.SEVERITY, i.STATUS, i.COMPANY, i.TITLE,
        i.DETECTED_AT, i.STARTED_AT, i.DECLARED_BY,
-       (SELECT COUNT(*) FROM {core_object("INCIDENT_MEMBERS")} m
+{lifecycle_cols}       (SELECT COUNT(*) FROM {core_object("INCIDENT_MEMBERS")} m
          WHERE m.INCIDENT_ID = i.INCIDENT_ID) AS MEMBERS
 FROM {core_object("INCIDENTS")} i
-WHERE i.STATUS IN ('OPEN', 'MITIGATED'){comp}
+{ready_join}WHERE i.STATUS IN ('OPEN', 'MITIGATED'){comp}
 ORDER BY CASE UPPER(i.SEVERITY) WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 ELSE 2 END,
          i.DETECTED_AT DESC
 LIMIT {limit}
@@ -2752,8 +2790,11 @@ LIMIT {limit}
 def incident_gantt(days: int = 14, company: str = "ALL") -> str:
     """CR5: per-incident lifecycle spans for a Gantt view — DETECTED_AT to
     RESOLVED_AT (or to now for an open incident). Includes RESOLVED incidents so
-    completed spans render, not just the open queue. ACK/MITIGATE timestamps are
-    not consistently written, so the bar is the detected->resolved span.
+    completed spans render, not just the open queue. The bar stays the
+    detected->resolved span: ACK_AT / MITIGATED_AT are written only since
+    Next-Fifty #12 (Control Room Acknowledge / Mark mitigated, the Close back-fill,
+    and V154's auto-mitigate sweep), so older incidents carry neither and a
+    mid-bar marker would be missing on most of the 14d window.
 
     The SQL is intentionally 'now'-free — it uses CURRENT_TIMESTAMP() (a stable
     SQL token, not a baked datetime literal), so run()'s (sql,scope) memo is shared
@@ -2762,11 +2803,15 @@ def incident_gantt(days: int = 14, company: str = "ALL") -> str:
     + INCIDENTS re-scan whenever a render crossed a minute boundary, and two viewers
     never shared the memo unless within the same minute).
 
-    DETECTED_AT is written in account time while the SiS CURRENT_TIMESTAMP() is
-    server/UTC (ALTER SESSION TIMEZONE is a no-op), so an OPEN incident's server-UTC
-    end would overshoot account time by the offset (~5-6h). IS_OPEN (RESOLVED_AT IS
-    NULL) is returned so the reader (charts.incident_gantt) re-anchors exactly those
-    bars' end/duration to account time — precise, not inferred from the STATUS text.
+    Clock: the 2026-09-21 diagnostic showed the account TIMEZONE is America/Chicago
+    (common.py TIMEZONE STANDARD), so the SiS session's CURRENT_TIMESTAMP() — which
+    also stamps DETECTED_AT, ACK_AT, MITIGATED_AT and RESOLVED_AT — is already Central
+    and today's open-bar end matches account time. The re-anchor below is kept as
+    defense in depth (ALTER SESSION TIMEZONE is a no-op under owner's-rights SiS, so a
+    changed account/warehouse zone would otherwise overshoot an open bar by the
+    offset): IS_OPEN (RESOLVED_AT IS NULL) is returned so the reader
+    (charts.incident_gantt) re-anchors exactly those bars' end/duration to the
+    caller's account now — precise, not inferred from the STATUS text.
     ENDED stays non-null (COALESCE to now) so open bars are never dropped by the
     reader's dropna."""
     days = bounded_days(days, 90)
@@ -2790,15 +2835,25 @@ LIMIT 60
 
 
 def incident_metrics(days: int = 90, company: str = "ALL") -> str:
-    """One row of lifecycle truth: TTD/MTTR medians and storm compression
-    (alerts absorbed per incident).
+    """One row of lifecycle truth: TTD/MTTA/MTTM/MTTR medians, storm compression
+    (alerts absorbed per incident) and the ready-to-close count.
 
-    Two structurally-dead metrics removed (round-4 hunt), each following the
-    change-correlated % precedent from v4.351 — all three counted a column no
-    writer ever persists, so each was a permanent misleading value:
-      * MTTA_MIN (ALC-2): DATEDIFF to INCIDENTS.ACK_AT, but ACK_AT is an
-        ALERT_EVENTS lifecycle field — no incident writer ever sets it, so the
-        median was always NULL. The real detected->ack median is alert-grain.
+    Next-Fifty #12 restored the incident lifecycle columns now that writers exist:
+      * MTTA_MIN / ACKED_N: detected -> the FIRST human response (Control Room
+        Acknowledge, Mark mitigated, or a single-incident Close, each of which
+        back-fills INCIDENTS.ACK_AT only when empty). AUTO-declared incidents
+        only (owner decision O-6): a manual declare is itself the response, so
+        including it would pull the median toward seconds. Before #12 no writer set
+        INCIDENTS.ACK_AT, which is why ALC-2 had dropped it.
+      * MTTM_MIN: detected -> MITIGATED_AT (an operator's Mark mitigated, or V154's
+        SP_INCIDENT_AUTODECLARE sweep, which stamps the last member resolve time).
+      * READY_TO_CLOSE_N: open incidents in scope whose every ALERT member is
+        resolved with no live successor (the shared _incident_ready_cte), from the
+        uncapped table, never len() of the LIMIT-50 open list.
+
+    Two structurally-dead metrics stay removed (round-4 hunt), each following the
+    change-correlated % precedent from v4.351 — each counted a column no writer
+    ever persists, so each was a permanent misleading value:
       * REOPEN_PCT (ALC-1): counted INCIDENTS.REOPENED_FROM parents, but no
         writer ever populates REOPENED_FROM (declare/autodeclare insert neither
         it nor a reopen child), so it was a permanent 0.0%.
@@ -2808,6 +2863,10 @@ def incident_metrics(days: int = 90, company: str = "ALL") -> str:
     days = bounded_days(days, 365)
     comp = ("" if str(company or "ALL").upper() == "ALL"
             else f" AND (COMPANY = {sql_literal(company)} OR UPPER(COMPANY) = 'ALL')")
+    # The ready count joins INCIDENTS aliased i, so its company arm is the i.-qualified twin
+    # (the bare company-scope arm above stays at exactly 2 uses: the w CTE + OPEN_NOW).
+    comp_i = ("" if str(company or "ALL").upper() == "ALL"
+              else f" AND (i.COMPANY = {sql_literal(company)} OR UPPER(i.COMPANY) = 'ALL')")
     # COMPRESSION previously nested (SELECT COUNT(*) FROM w) inside NULLIF inside a scalar
     # subquery — Snowflake 002031 "Unsupported subquery type cannot be evaluated" (owner
     # error log 2026-08-17). Hoist the incident count and the numerator into single-row
@@ -2825,6 +2884,14 @@ compression AS (
     FROM {core_object("INCIDENT_MEMBERS")} m
     JOIN w ON w.INCIDENT_ID = m.INCIDENT_ID
     WHERE m.MEMBER_KIND = 'ALERT'
+),
+{_incident_ready_cte()},
+ready AS (
+    SELECT COUNT(*) AS READY_N
+    FROM {core_object("INCIDENTS")} i
+    JOIN inc_ready r ON r.INCIDENT_ID = i.INCIDENT_ID
+    WHERE i.STATUS IN ('OPEN', 'MITIGATED'){comp_i}
+      AND r.LIVE_MEMBERS = 0 AND r.LIVE_SUCCESSORS = 0
 )
 SELECT
     (SELECT COUNT(*) FROM {core_object("INCIDENTS")}
@@ -2832,10 +2899,19 @@ SELECT
     wn.N AS DECLARED_N,
     (SELECT ROUND(MEDIAN(DATEDIFF('minute', STARTED_AT, DETECTED_AT)), 1) FROM w
       WHERE STARTED_AT IS NOT NULL AND STARTED_AT < DETECTED_AT) AS TTD_MIN,
+    (SELECT ROUND(MEDIAN(DATEDIFF('minute', DETECTED_AT, ACK_AT)), 1) FROM w
+      WHERE ACK_AT IS NOT NULL AND ACK_AT >= DETECTED_AT
+        AND DECLARED_BY = 'SP_INCIDENT_AUTODECLARE') AS MTTA_MIN,
+    (SELECT COUNT(*) FROM w
+      WHERE ACK_AT IS NOT NULL AND ACK_AT >= DETECTED_AT
+        AND DECLARED_BY = 'SP_INCIDENT_AUTODECLARE') AS ACKED_N,
+    (SELECT ROUND(MEDIAN(DATEDIFF('minute', DETECTED_AT, MITIGATED_AT)), 1) FROM w
+      WHERE MITIGATED_AT IS NOT NULL AND MITIGATED_AT >= DETECTED_AT) AS MTTM_MIN,
     (SELECT ROUND(MEDIAN(DATEDIFF('minute', DETECTED_AT, RESOLVED_AT)), 1) FROM w
       WHERE RESOLVED_AT IS NOT NULL) AS MTTR_MIN,
-    ROUND(compression.ALERT_MEMBERS / NULLIF(wn.N, 0), 1) AS COMPRESSION
-FROM wn CROSS JOIN compression
+    ROUND(compression.ALERT_MEMBERS / NULLIF(wn.N, 0), 1) AS COMPRESSION,
+    ready.READY_N AS READY_TO_CLOSE_N
+FROM wn CROSS JOIN compression CROSS JOIN ready
 """
 
 

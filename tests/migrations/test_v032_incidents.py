@@ -91,13 +91,18 @@ def test_incident_readers_shapes():
     met = mart_sql.incident_metrics(90)
     for col in ("OPEN_NOW", "TTD_MIN", "MTTR_MIN", "COMPRESSION"):
         assert col in met, col
-    # Three structurally-dead metrics removed, each counting a column no writer ever
+    # Two structurally-dead metrics stay removed, each counting a column no writer ever
     # persists (so each was a permanent misleading value):
     #   CHANGE_PCT (v4.351): INCIDENT_MEMBERS kind WH_CHANGE/DEPLOY, never persisted.
-    #   MTTA_MIN (ALC-2): INCIDENTS.ACK_AT is never set (ACK_AT is alert-grain only).
     #   REOPEN_PCT (ALC-1): INCIDENTS.REOPENED_FROM is never populated.
     assert "CHANGE_PCT" not in met and "('WH_CHANGE', 'DEPLOY')" not in met
-    assert "MTTA_MIN" not in met and "REOPEN_PCT" not in met and "REOPENED_FROM" not in met
+    assert "REOPEN_PCT" not in met and "REOPENED_FROM" not in met
+    # MTTA_MIN (dropped as ALC-2 while nothing wrote INCIDENTS.ACK_AT) is RESTORED by
+    # Next-Fifty #12a: Control Room Acknowledge / Mark mitigated / Close now write ACK_AT.
+    # It counts AUTO-declared incidents only (owner decision O-6).
+    for col in ("MTTA_MIN", "ACKED_N", "MTTM_MIN", "READY_TO_CLOSE_N"):
+        assert f"AS {col}" in met, col
+    assert "DECLARED_BY = 'SP_INCIDENT_AUTODECLARE') AS MTTA_MIN" in met
     gantt = mart_sql.incident_gantt(14, "ALFA")               # CR5 lifecycle-span reader
     for col in ("STARTED", "ENDED", "DURATION_MIN", "SEVERITY", "TITLE", "IS_OPEN"):
         assert col in gantt, col
@@ -127,7 +132,7 @@ def test_control_room_incidents_section():
     # resolves the VIEWER identity against an allowlist. The section is still op-gated.
     assert "is_operator()" in _CR
     assert "mart_sql.incident_metrics(90, company)" in _CR      # triage filter honored
-    assert "mart_sql.open_incidents(50, company)" in _CR
+    assert "mart_sql.open_incidents(50, company, lifecycle=True)" in _CR   # #12a: Control Room reads the lifecycle cols
     # CR5 lifecycle Gantt wired; the SQL is now-free (cache-stable) and the OPEN bar's
     # end is re-anchored to account time in charts.incident_gantt (keyed off IS_OPEN),
     # not baked into the SQL — so no minute-rounded now literal on the call anymore.
