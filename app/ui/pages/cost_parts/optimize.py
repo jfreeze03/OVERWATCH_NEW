@@ -1843,6 +1843,16 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             st.markdown("**Remediation history**")
             styled_table(remlog.df, height=200)
 
+def _yes_no_dash(value: object) -> str:
+    """A nullable Snowflake BOOLEAN cell for display: True -> Yes, False -> No, NULL/NaN/NA -> the em-dash."""
+    try:
+        if value is None or bool(pd.isna(value)):
+            return "—"
+    except (TypeError, ValueError):
+        pass
+    return "Yes" if str(value).strip().upper() in ("TRUE", "1", "YES") else "No"
+
+
 def _savings_tab() -> None:
     res = run(mart_sql.savings_ledger(), page=_PAGE, key="savings_ledger",
               tier="live", source="SAVINGS_LEDGER")
@@ -1865,12 +1875,28 @@ def _savings_tab() -> None:
                     "Nothing booked yet — the autobook task fills this as warehouse "
                     "cost-lever changes are detected (needs migration V038).")
     else:
-        styled_table(res.df[[c for c in ("CREATED_AT", "SOURCE", "DESCRIPTION", "STATE",
-                                          "ESTIMATED_USD", "VERIFIED_USD", "VERIFIED_BY",
-                                          "SUPERSEDED_BY_CHANGE_ID")
-                             if c in res.df.columns]],
+        # Next-Fifty #11 (V153): the full-window re-measure beside the stored dollars. REMEASURED_14D_MONTHLY_USD
+        # keeps its _USD auto-format (no column_config format -> format_usd, NULL -> the em-dash);
+        # VOLUME_CONFOUNDED is a nullable boolean, shown Yes / No / — on the display copy.
+        _ledger_view = res.df.copy()
+        if "VOLUME_CONFOUNDED" in _ledger_view.columns:
+            _ledger_view["VOLUME_CONFOUNDED"] = _ledger_view["VOLUME_CONFOUNDED"].map(_yes_no_dash)
+        styled_table(_ledger_view[[c for c in ("CREATED_AT", "SOURCE", "DESCRIPTION", "STATE",
+                                               "ESTIMATED_USD", "VERIFIED_USD", "MEASURED_AFTER_DAYS",
+                                               "REMEASURED_14D_MONTHLY_USD", "VOLUME_CONFOUNDED",
+                                               "VERIFIED_BY", "SUPERSEDED_BY_CHANGE_ID")
+                                   if c in _ledger_view.columns]],
                      column_config={"SUPERSEDED_BY_CHANGE_ID":
-                                    st.column_config.TextColumn("Superseded by change")})
+                                    st.column_config.TextColumn("Superseded by change"),
+                                    "VOLUME_CONFOUNDED": st.column_config.TextColumn("Volume-confounded")})
+        st.caption(md_dollars(
+            "Change-scan (auto) rows settle 15–16 days after the change — the morning after their 14-day "
+            "measured window closes (once V153 is applied). Remeasured 14d monthly USD recomputes that "
+            "settle on the closed window (same $5/mo floor and LBA-1 co-attribution, the unrounded "
+            "credit rate); a row settled before V153 kept its ~3-day figure, priced at a credit rate "
+            "rounded 3.68 → 4 (+8.7%), and is never rewritten, so compare it with Verified USD. "
+            "Volume-confounded: query volume after the change sat outside 0.7–1.3x of baseline — dollars "
+            "are not adjusted."))
 
     # #3: operator gating from the VIEWER identity + allowlist, not CURRENT_ROLE().
     is_operator = _is_operator()
@@ -1928,6 +1954,10 @@ def _savings_tab() -> None:
     if not res.empty:
         with st.expander("Verify an estimated item (proof required)"):
             _live = split_superseded(res.df)[0]      # a superseded twin can't be verified again
+            # Next-Fifty #11: change-scan rows settle themselves on their 14-day measured window; a hand
+            # verify would pre-empt that measurement for good (the settle only touches ESTIMATED rows).
+            if "SOURCE" in _live.columns:
+                _live = _live[_live["SOURCE"].astype(str) != "auto"]
             estimated = _live[_live["STATE"].astype(str).str.upper() == LEDGER_ESTIMATED]
             if estimated.empty:
                 st.caption("No ESTIMATED items to verify.")
