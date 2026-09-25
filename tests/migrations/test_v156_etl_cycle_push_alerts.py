@@ -145,8 +145,8 @@ def _render_ins_sql(fqn: str = "DB.S.CONTROL_STATUS") -> str:
 
 
 # The rendered dynamic INSERT, as a test-side golden: the INSERT column order <-> select-list order, the NOT NULL
-# filter, the whole-night cut, the bound starter name and FIRST_OK_END bounded by the night's first kickoff
-# (CYC_START, MIN starter start) and its last (CYC_LAST_START, MAX starter start) are all in it.
+# filter, the whole-night cut, the bound starter name and FIRST_OK_END bounded by the START of an attempt vs
+# the night's last kickoff (CYC_LAST_START, MAX starter start) are all in it.
 _INS_SQL = (
     "INSERT INTO DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS "
     "(CYCLE_DATE, WORKFLOW_NAME, TASK_NAME, TERMINAL_STATUS, FIRST_START, TERMINAL_START, TERMINAL_END, FIRST_OK_END) "
@@ -158,7 +158,7 @@ _INS_SQL = (
     "AND TASK_START_DTTM >= DATEADD('day', -24, CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ) "
     "AND DATE(DATEADD('hour', -12, TASK_START_DTTM::TIMESTAMP_NTZ)) > DATEADD('day', -23, "
     "DATE(DATEADD('hour', -12, CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ)))), "
-    "cs AS (SELECT CD AS CS_NIGHT, MIN(TASK_START_DTTM) AS CYC_START, "
+    "cs AS (SELECT CD AS CS_NIGHT, "
     "MAX(TASK_START_DTTM) AS CYC_LAST_START FROM src WHERE WF = ? GROUP BY CD) "
     "SELECT CD, WF, TN, "
     "LEFT(TO_VARCHAR(MAX_BY(TASK_STATUS, COALESCE(TASK_END_DTTM, TASK_START_DTTM))), 100), "
@@ -167,7 +167,7 @@ _INS_SQL = (
     "MAX_BY(TASK_END_DTTM, COALESCE(TASK_END_DTTM, TASK_START_DTTM))::TIMESTAMP_NTZ, "
     "MIN(IFF(TASK_END_DTTM IS NOT NULL "
     f"AND COALESCE(UPPER(TASK_STATUS), '') NOT IN ({_FAILED_SQL}) "
-    "AND TASK_START_DTTM >= CYC_START AND TASK_END_DTTM >= CYC_LAST_START, TASK_END_DTTM, NULL))::TIMESTAMP_NTZ "
+    "AND TASK_START_DTTM >= CYC_LAST_START, TASK_END_DTTM, NULL))::TIMESTAMP_NTZ "
     "FROM src LEFT JOIN cs ON cs.CS_NIGHT = src.CD "
     "GROUP BY CD, WF, TN"
 )
@@ -271,7 +271,7 @@ def test_v156_dynamic_insert_renders_parses_and_reads_only_app_columns():
         "TERMINAL_START": "MAX_BY(TASK_START_DTTM, COALESCE(TASK_END_DTTM, TASK_START_DTTM))::TIMESTAMP_NTZ",
         "TERMINAL_END": "MAX_BY(TASK_END_DTTM, COALESCE(TASK_END_DTTM, TASK_START_DTTM))::TIMESTAMP_NTZ",
         "FIRST_OK_END": (f"MIN(IFF(TASK_END_DTTM IS NOT NULL AND COALESCE(UPPER(TASK_STATUS), '') NOT IN "
-                         f"({_FAILED_SQL}) AND TASK_START_DTTM >= CYC_START AND TASK_END_DTTM >= CYC_LAST_START, "
+                         f"({_FAILED_SQL}) AND TASK_START_DTTM >= CYC_LAST_START, "
                          "TASK_END_DTTM, NULL))::TIMESTAMP_NTZ"),
     }
     for col, src in want.items():
@@ -281,11 +281,10 @@ def test_v156_dynamic_insert_renders_parses_and_reads_only_app_columns():
     src_proj = {p.alias: p.this for p in ctes["src"].expressions if p.alias}
     assert src_proj["CD"] == sqlglot.parse_one("DATE(DATEADD('hour', -12, TASK_START_DTTM::TIMESTAMP_NTZ))",
                                                read="snowflake")
-    # cs: the night's FIRST kickoff (MIN) and LAST kickoff (MAX) over the bound starter's attempts, and nothing
-    # else (no second bind: the starter-IS-terminal case is deliberately not special-cased, see the header)
+    # cs: the night's LAST kickoff (MAX) over the bound starter's attempts, and nothing else (no second bind:
+    # the starter-IS-terminal case is deliberately not special-cased, see the header)
     cs_proj = {p.alias: p.this for p in ctes["cs"].expressions}
     assert cs_proj == {"CS_NIGHT": sqlglot.parse_one("CD", read="snowflake"),
-                       "CYC_START": sqlglot.parse_one("MIN(TASK_START_DTTM)", read="snowflake"),
                        "CYC_LAST_START": sqlglot.parse_one("MAX(TASK_START_DTTM)", read="snowflake")}
     assert ctes["cs"].args["where"].this == sqlglot.parse_one("WF = ?", read="snowflake")
     schema = {**_SCHEMA, "DB": {"S": {"CONTROL_STATUS": dict.fromkeys(_CTL_COLUMNS, "VARCHAR")}}}
@@ -459,27 +458,32 @@ def test_v156_terminal_counts_only_from_its_terminal_attempt():
     _once(f"COUNT_IF(t.FIRST_OK_END IS NULL AND UPPER(t.TERMINAL_STATUS) IN ({_FAILED_SQL})) AS N_FAILED")
     _once("COUNT_IF(t.FIRST_OK_END IS NULL AND t.TERMINAL_END IS NULL AND (t.TERMINAL_STATUS IS NULL "
           f"OR UPPER(t.TERMINAL_STATUS) NOT IN ({_FAILED_SQL}))) AS N_RUNNING")
-    # FIRST_OK_END is bounded by the SAME cycle start [C] uses (MIN starter start per night) AND by the night's
-    # LAST kickoff (MAX starter start), not a naive MIN: a clean finish from before the real kickoff never counts
+    # FIRST_OK_END counts only an attempt that STARTED at/after the night's LAST kickoff (MAX starter start),
+    # not a naive MIN and not an end bound: an attempt started before the real kickoff never counts, even one
+    # still running across it (review round 2: a 21:30-22:10 afternoon terminal vs a 22:00 kickoff)
     rendered = _render_ins_sql()
-    assert rendered.count("cs AS (SELECT CD AS CS_NIGHT, MIN(TASK_START_DTTM) AS CYC_START, "
+    assert rendered.count("cs AS (SELECT CD AS CS_NIGHT, "
                           "MAX(TASK_START_DTTM) AS CYC_LAST_START FROM src WHERE WF = ? GROUP BY CD)") == 1
-    assert rendered.count("AND TASK_START_DTTM >= CYC_START AND TASK_END_DTTM >= CYC_LAST_START, "
-                          "TASK_END_DTTM, NULL))::TIMESTAMP_NTZ") == 1
+    assert rendered.count("AND TASK_START_DTTM >= CYC_LAST_START, TASK_END_DTTM, NULL))::TIMESTAMP_NTZ") == 1
+    assert "TASK_END_DTTM >= CYC_LAST_START" not in rendered and "CYC_START" not in rendered.replace(
+        "CYC_LAST_START", "")
     # CYCLE_START keeps the app's MIN(starter start) (parity; the afternoon double re-run edge is documented)
     assert "SELECT CYCLE_DATE, MIN(FIRST_START) AS CYCLE_START\n" in _BODY
     assert "MIN(TASK_START_DTTM) AS CYCLE_START" in etl.cycle_finish_history_scan(
         "DB.S.T", start_workflow="A", end_workflow="B")
     hdr = _header_text()
     assert "CYCLE_START = MIN(starter start) is the afternoon run" in hdr
-    assert "clean finish after the night's last kickoff (FIRST_OK_END), so a re-run of it after the night" in hdr
+    assert ("clean finish after the night's last kickoff (FIRST_OK_END: the attempt must START at/after it), so a "
+            "re-run of it after the night finished") in hdr
     # the known edges say what the round-2 bound leaves: loud, never silent, including starter = terminal
-    for edge in ("FIRST_OK_END must end at/after the night's LAST starter start",
+    for edge in ("FIRST_OK_END must START at/after the night's LAST starter start",
                  "a next-morning re-run of the STARTER", "a starter re-run alone stays quiet",
                  "When ETL_CYCLE_START_WORKFLOW = ETL_CYCLE_END_WORKFLOW every task is a starter task",
                  "Both fail LOUD, by choice",
-                 "the afternoon finish never counts as FIRST_OK_END once the real kickoff runs"):
+                 "an afternoon attempt that started before the real kickoff never counts as FIRST_OK_END",
+                 "SILENT residual: an afternoon-chain terminal attempt that STARTS after the real kickoff"):
         assert edge in hdr, edge
+    assert "never hides the real" not in _MIG, "no doc may promise the real run is never hidden (the residual)"
     assert "LATE reads the night complete all night" not in hdr               # the round-1 edge is gone
 
 
@@ -711,7 +715,7 @@ def test_v156_part_b_ddl_fragments_are_in_the_migration():
                  "OR g.IS_COMPLETE, g.SEVERITY", "NOT COALESCE(g.PROJECTED_FINISH > g.DL_H, FALSE)",
                  "MAX(COALESCE(t.FIRST_OK_END, t.TERMINAL_END))", "COUNT_IF(t.TERMINAL_END IS NULL) = 0",
                  "USING (start_wf)", "MAX(TASK_START_DTTM) AS CYC_LAST_START",
-                 "TASK_END_DTTM >= CYC_LAST_START"):
+                 "TASK_START_DTTM >= CYC_LAST_START"):
         assert "'" not in frag and _BODY.count(frag) == 1, frag
 
 
@@ -1112,14 +1116,14 @@ def _as_of(rows, now):
     return out
 
 
-def _collapse(rows, *, bound: str = "last", start_wf: str = _S):
+def _collapse(rows, *, bound: str = "kickoff", start_wf: str = _S):
     """ins_sql: attempts -> one row per (night, workflow, task). FIRST_OK_END = the earliest clean (ended, not a
-    failed status; NULL status reads clean) finish among the attempts that started at/after the night's FIRST
-    kickoff (cs.CYC_START = MIN starter start) and ended at/after its LAST kickoff (cs.CYC_LAST_START = MAX
-    starter start); no starter run that night -> NULL (a NULL bound never compares true). bound="first" models
-    the round-1 SQL (the first-kickoff bound alone), bound="none" the naive unbounded MIN the round-1 review
-    rejected. start_wf is the bound starter name (the '?' of cs)."""
-    assert bound in ("last", "first", "none")
+    failed status; NULL status reads clean) finish among the attempts that STARTED at/after the night's LAST
+    kickoff (cs.CYC_LAST_START = MAX starter start); no starter run that night -> NULL (a NULL bound never
+    compares true). Superseded bounds, kept to prove each review round's case: bound="end" = round 2 (started
+    at/after the FIRST kickoff and ENDED at/after the last), bound="first" = round 1 (the first-kickoff bound
+    alone), bound="none" = the naive unbounded MIN. start_wf is the bound starter name (the '?' of cs)."""
+    assert bound in ("kickoff", "end", "first", "none")
     groups: dict = {}
     for wf, task, status, start, end in rows:
         groups.setdefault(((start - timedelta(hours=12)).date(), wf, task), []).append((status, start, end))
@@ -1134,8 +1138,16 @@ def _collapse(rows, *, bound: str = "last", start_wf: str = _S):
     for (night, wf, task), att in groups.items():
         term = max(att, key=lambda a: a[2] or a[1])          # MAX_BY(.., COALESCE(end, start))
         cs, cl = cyc_first.get(night), cyc_last.get(night)
-        ok = [a[2] for a in att if a[2] is not None and str(a[0] or "").upper() not in _FAILED
-              and (bound == "none" or (cs is not None and a[1] >= cs and (bound == "first" or a[2] >= cl)))]
+        if bound == "kickoff":
+            fits = [cl is not None and a[1] >= cl for a in att]
+        elif bound == "end":
+            fits = [cs is not None and a[1] >= cs and a[2] is not None and a[2] >= cl for a in att]
+        elif bound == "first":
+            fits = [cs is not None and a[1] >= cs for a in att]
+        else:
+            fits = [True for _a in att]
+        ok = [a[2] for a, fit in zip(att, fits, strict=True)
+              if fit and a[2] is not None and str(a[0] or "").upper() not in _FAILED]
         out.append({"CYCLE_DATE": night, "WORKFLOW_NAME": wf, "TASK_NAME": task, "TERMINAL_STATUS": term[0],
                     "FIRST_START": min(a[1] for a in att), "TERMINAL_START": term[1], "TERMINAL_END": term[2],
                     "FIRST_OK_END": min(ok, default=None)})
@@ -1360,7 +1372,7 @@ def test_v156_model_first_ok_end_is_bounded_by_the_cycle_start():
     rerun = [(_T, task, "SUCCEEDED", datetime.combine(_TONIGHT, time(13, 0)),
               datetime.combine(_TONIGHT, time(13, 20))) for task in ("s_recon_1", "s_recon_2")]
     rows = _history() + rerun + _night(_TONIGHT, term_start=time(4, 0), term_end=None)   # real run hung
-    for bound in ("last", "first"):                    # the round-1 first-kickoff bound already held this case
+    for bound in ("kickoff", "end", "first"):          # the round-1 first-kickoff bound already held this case
         miss = _late(_collapse(rows, bound=bound), _at(7, 10))
         assert miss and (miss["band"], miss["severity"]) == ("CRIT", "CRITICAL"), bound
     assert _late(_collapse(rows, bound="none"), _at(7, 10)) is None, "the naive MIN silences the real miss"
@@ -1370,11 +1382,12 @@ def test_v156_model_first_ok_end_is_bounded_by_the_cycle_start():
     assert got and (got["band"], got["severity"]) == ("EXH", "CRITICAL")
 
 
-def _afternoon_chain(d: date = _TONIGHT):
+def _afternoon_chain(d: date = _TONIGHT, *, kick: time = time(13, 0), term: tuple = (time(15, 0), time(15, 30))):
     """The WHOLE chain re-run after noon on d, keyed to night d like the real 22:00 kickoff (the ops response to
-    a failed previous night): the starter 13:00-13:05, then both terminal tasks 15:00-15:30 clean."""
-    return [(_S, "s_kickoff", "SUCCEEDED", datetime.combine(d, time(13, 0)), datetime.combine(d, time(13, 5)))] + [
-        (_T, task, "SUCCEEDED", datetime.combine(d, time(15, 0)), datetime.combine(d, time(15, 30)))
+    a failed previous night): the starter at `kick` (5 min), then both terminal tasks over `term`, clean."""
+    k0 = datetime.combine(d, kick)
+    return [(_S, "s_kickoff", "SUCCEEDED", k0, k0 + timedelta(minutes=5))] + [
+        (_T, task, "SUCCEEDED", datetime.combine(d, term[0]), datetime.combine(d, term[1]))
         for task in ("s_recon_1", "s_recon_2")]
 
 
@@ -1419,6 +1432,42 @@ def test_v156_model_double_rerun_never_silences_the_real_run(real):
         datetime.combine(_TONIGHT, time(15, 30))] * 2        # before the real kickoff it is the night's finish
 
 
+
+@pytest.mark.parametrize("real", sorted(_REAL_RUNS))
+def test_v156_model_afternoon_chain_straddling_the_kickoff_never_silences_the_real_run(real):
+    """Review round 2 re-review: the afternoon chain's terminal ran 21:30-22:10 across the real 22:00 kickoff.
+    Bounded by the END (round 2) its 22:10 clean finish was FIRST_OK_END and a hung, failed or late REAL
+    terminal raised nothing; bounded by the attempt's START (it began 21:30, before the kickoff) it never counts."""
+    (status, end), want = _REAL_RUNS[real]
+    rows = (_history() + _afternoon_chain(kick=time(15, 0), term=(time(21, 30), time(22, 10)))
+            + _night(_TONIGHT, term_start=time(4, 0), term_end=end, status=status))
+    scans = {"20:00": datetime.combine(_TONIGHT, time(20, 0)), "23:30": datetime.combine(_TONIGHT, time(23, 30)),
+             "06:10": _at(6, 10), "07:10": _at(7, 10), "08:10": _at(8, 10), "08:40": _at(8, 40)}
+    got, old = {}, {}
+    for label, now in scans.items():
+        snap = _as_of(rows, now)
+        new, end_bound = _late(_collapse(snap), now), _late(_collapse(snap, bound="end"), now)
+        got[label] = new and (new["band"], new["severity"])
+        old[label] = end_bound and (end_bound["band"], end_bound["severity"])
+    assert got == {label: want.get(label) for label in scans}
+    assert set(old.values()) == {None}, "the round-2 end bound silences the real run"
+    tonight = [t for t in _collapse(_as_of(rows, _at(8, 40))) if t["CYCLE_DATE"] == _TONIGHT and t["WORKFLOW_NAME"] == _T]
+    ok_end = {"HUNG": None, "FAILED": None, "LATE": _at(8, 30), "ON_TIME": _at(5, 0)}[real]
+    assert [t["FIRST_OK_END"] for t in tonight] == [ok_end, ok_end]
+
+
+def test_v156_model_late_afternoon_chain_is_the_documented_silent_residual():
+    """The residual the header names SILENT: an afternoon chain whose terminal STARTS after the real kickoff
+    (16:00 chain, terminal 22:30-23:10 vs the 22:00 kickoff) looks exactly like a real early run, so its clean
+    finish is FIRST_OK_END and a hung real terminal raises no LATE. Locked so a change here is deliberate."""
+    rows = (_history() + _afternoon_chain(kick=time(16, 0), term=(time(22, 30), time(23, 10)))
+            + _night(_TONIGHT, term_start=time(4, 0), term_end=None))
+    for now in (_at(6, 10), _at(7, 10), _at(8, 40)):
+        assert _late(_collapse(_as_of(rows, now)), now) is None, now
+    hung = _late(_collapse(_as_of(rows, _at(7, 10))), _at(7, 10), first_ok=False)
+    assert hung and (hung["band"], hung["severity"]) == ("CRIT", "CRITICAL"), "latest-attempt grading would page"
+
+
 def test_v156_model_next_morning_starter_rerun_is_the_documented_loud_residual():
     """The known edge the last-kickoff bound leaves (header): a STARTER re-run the next morning (09:00, keyed to
     the night) is the night's last kickoff, so the 05:30 on-time finish no longer counts as FIRST_OK_END. Alone
@@ -1454,7 +1503,7 @@ def test_v156_model_starter_is_terminal_fails_loud_not_silent():
     The alternative -- the first-kickoff bound alone when start = end -- keeps that night quiet but lets an
     afternoon re-run of the workflow complete the night and silence a hung real run. The SQL takes the loud
     side: no special case (cs binds only the starter; locked in the render test)."""
-    def late(rows, now, bound="last"):
+    def late(rows, now, bound="kickoff"):
         return _late(_collapse(_as_of(rows, now), bound=bound, start_wf=_ONE), now, start_wf=_ONE, end_wf=_ONE)
     hist = _one_workflow(_history())
     normal = hist + _one_workflow(_night(_TONIGHT))

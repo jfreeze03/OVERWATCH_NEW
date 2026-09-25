@@ -11,12 +11,19 @@ after the 2a build (the CONDITION_ENDED exclusion) and this build are both DEPLO
   PIPE_ETL_TASK_FAILED (MEDIUM, HIGH for the terminal workflow, threshold floored at 1, auto-clears when a retry
   succeeds), PIPE_ETL_CYCLE_NOT_STARTED (HIGH; the Tonight "Cycle start: Overdue" test) and PIPE_ETL_CYCLE_LATE
   (WARN/CRIT/EXH bands). A terminal re-run in the afternoon no longer hides the night's completion
-  (TERMINAL_START), an undispatched terminal is judged only when it ran the same night last week, and the
+  (TERMINAL_START); a terminal task is done at its first clean finish from an attempt that STARTED at/after the
+  night's last kickoff (FIRST_OK_END), so a next-morning re-run never re-grades a night that finished on time
+  and an afternoon chain started before the real kickoff never hides the real run; the cache holds the 23
+  newest WHOLE nights; an undispatched terminal is judged only when it ran the same night last week, and the
   projection uses the newest 14 clean nights (a new SQL heuristic sharing the SLA forecast settings, not the app's
   Theil-Sen trend). New objects only; nothing calls the proc until V157. **Disclosures:** a night that finished
   late stays HIGH (email, no incident); an unfinished miss is CRITICAL and auto-declares an incident; a weekday
   holiday on a night the starter ran last week fires NOT_STARTED once (resolve as EXPECTED); month-end nights are
-  under-projected (the lead-window and CRIT/EXH legs still catch them).
+  under-projected (the lead-window and CRIT/EXH legs still catch them); TASK_FAILED stays OPEN while a retry is
+  still running and clears only once every final attempt finished clean; a next-morning re-run of the STARTER
+  (or of any task when ETL_CYCLE_START_WORKFLOW = ETL_CYCLE_END_WORKFLOW) re-grades that night (loud, never
+  silent); the one SILENT residual is an afternoon chain whose terminal STARTS after the real kickoff (it reads
+  as a real early run and hides a hung real terminal from LATE; TASK_FAILED still reports a failed one).
 - **V157 (#10a/b/d, #13, #2, #12c): one re-derivation of both alert scans from V141.** Byte-identical otherwise,
   locked by normalize-and-compare. New OPS_PIPELINE_DEGRADED (PLATFORM/HIGH) in both scans: a freshness row past
   its cadence (DAILY/METERING 30h, else 3h, including the scans' own new ALERT_SCAN_HOURLY / ALERT_SCAN_DAILY
@@ -25,12 +32,19 @@ after the 2a build (the CONDITION_ENDED exclusion) and this build are both DEPLO
   hourly scan also runs the V156 ETL-cycle add-on (not counted toward OPS_SCAN_DEGRADED), resolves OPEN
   SEC_CRED_EXPIRY / SEC_NEW_EXPOSURE events as CONDITION_ENDED once the credential is rotated or removed or the
   PUBLIC grant revoked (both rules opted in, after both procs are replaced), scopes the V091 auto-clear sweep to
-  its 3 PERF rules, lets a rotated credential's next expiry cycle re-alert, and drops the dead break-glass arm
+  its 3 PERF rules, lets a rotated credential's next expiry cycle re-alert (a closed event now blocks only its own
+  expiry date, read from the 'Rotate before YYYY-MM-DD' head every arm [10] since V009 writes into DETAIL, so a
+  human resolve never suppresses the next cycle however late it lands; a live event still blocks), and drops the
+  dead break-glass arm
   (its only QUERY_HISTORY read). Tallies 13 hourly, 11 daily. **Disclosures:** first-run burst (every freshness
   row already past cadence raises one HIGH event; the first daily run raises this week's idle events;
-  `PREFLIGHT_WAVE2B.sql` previews them); the freshness boards gain the two heartbeat rows; a non-PERF rule that
+  `PREFLIGHT_WAVE2B.sql` previews them); a credential already inside its expiry window whose earlier-cycle
+  SEC_CRED_EXPIRY event was human-resolved raises its previously suppressed event once (CRITICAL, with an
+  auto-declared incident, if already expired); the freshness boards gain the two heartbeat rows; a non-PERF rule that
   already had AUTO_CLEAR_ENABLED is no longer blanket-cleared 1h after raise; CONDITION_ENDED closes OPEN events
-  only (an ACK'd one stays for a human).
+  only (an ACK'd one stays for a human). The idle timer is read from the newest SHOW WAREHOUSES snapshot batch,
+  so a dropped or renamed warehouse never raises. Rollback order: switch AUTO_CLEAR_ENABLED off for
+  SEC_CRED_EXPIRY / SEC_NEW_EXPOSURE FIRST, then re-run V141 (RUNBOOK §12).
 - **V158 (#32): operator data is backed up daily, not weekly.** New owner-only TRANSIENT schema
   DBA_MAINT_DB.OVERWATCH_BAK (no FUTURE grants, so no grant churn in OVERWATCH; survives a lost OVERWATCH).
   SP_BACKUP_OPERATOR_TABLES (from V089) clones the 25 operator tables at 05:10 Central to immutable
@@ -42,7 +56,18 @@ after the 2a build (the CONDITION_ENDED exclusion) and this build are both DEPLO
   DROP of a backup still surfaces). Tag coverage ignores OVERWATCH_BAK. **Disclosures:** the old DR restore
   (`CLONE <T>_BAK_LAST`) has been broken since V089 for permanent tables; restore is now `INSERT OVERWRITE` as the
   table-owner role (RUNBOOK §16). The daily CLONEs and, from day 15, the prune DROPs still show in the Security
-  change log and incident timeline (accepted noise). Nothing is pruned for 15 days.
+  change log and incident timeline (accepted noise). Nothing is pruned for 15 days. The log gets one CLONED row
+  per generation (the Sunday `_OWBAK_W` included). A schema-gone or factory-reset rebuild applies V001..V157,
+  restores the operator tables (SETTINGS first), THEN V158, whose tail backs up whatever the tables hold
+  (RUNBOOK §16 step 3).
+- **Review fixes (adversarial review: 29 confirmed on the first pass, then 2 re-review rounds on the fixes).**
+  V156: a next-morning terminal re-run no longer raises a false CRITICAL + incident on a night that finished on
+  time, TASK_FAILED no longer clears (and re-pages) when a retry has merely started, and the cache cut is by
+  whole night. V157: arm [10] cycle identity (above), Investigate on OPS_PIPELINE_DEGRADED no longer sets a
+  bogus sticky Database filter, the idle arm reads the newest snapshot batch, and the closed-loop ledger note no
+  longer claims the scan adopts a never-suspend enable. V158: the weekly generations are logged and the DR order
+  restores before re-arming the backup. Every load-bearing SQL clause is now locked by a test proven to fail on
+  its mutation (normalized whole-statement goldens, executed sqlite harnesses, model tests).
 
 Owner-side: return `snowflake/run/PROBES_WAVE2.sql` first (E1/E3/E5 gate V156, C4 the V157 playbook wording,
 F1/F5/F6 V158; the defaults assumed are listed in the PR). Apply V151 → V155 and deploy 4.593.0 first. Then
