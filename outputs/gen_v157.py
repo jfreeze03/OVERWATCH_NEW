@@ -7,10 +7,11 @@ anchored deltas, each asserted count == 1, in this order:
 
   SP_ALERT_SCAN (hourly)
     H1  (10d) delete the dead arm [15] (its rule was deleted at V034; the scan's only QUERY_HISTORY read)
-    H2  (12c) arm [10] recurrence fix (H2a/H2b/H2c): a row closed before THIS expiry's warning window
-              opened (any kind, incl. a human ACTIONED/NOISE/EXPECTED) or machine-closed (CONDITION_ENDED /
-              SUPERSEDED) no longer blocks a rotated credential's next expiry cycle -- the key is unchanged;
-              never mint EXPIRING while the EXPIRED event is live
+    H2  (12c) arm [10] recurrence fix (H2a/H2b/H2d/H2c): a row closed for an EARLIER expiry (the date at the
+              head of its DETAIL -- any kind, incl. a human ACTIONED/NOISE/EXPECTED, however late) or
+              machine-closed (CONDITION_ENDED / SUPERSEDED) no longer blocks a rotated credential's next expiry
+              cycle -- the key is unchanged, the DETAIL date is pinned to Central; never mint EXPIRING while the
+              EXPIRED event is live
     H3  (10a + 2) insert [22] OPS_PIPELINE_DEGRADED + the [23] PIPE_ETL_CYCLE add-on before the self-alert
     H4  (12c C1) scope the V091 auto-clear sweep to its 3 PERF rules (applied BEFORE H5)
     H5  (12c) insert the condition-ended sweep after the V091 sweep
@@ -469,29 +470,46 @@ ARM15 = new_hourly[new_hourly.index(_A15):new_hourly.index(_A17)]
 assert ARM15.count("fails := fails + 1") == 1 and "ACCOUNT_USAGE.QUERY_HISTORY" in ARM15
 new_hourly = _swap(new_hourly, ARM15, "", "H1 arm [15]")
 
-# H2 (12c): arm [10]'s recurrence fix, three count==1 swaps. The DEDUPE_KEY is NOT changed (the V067/V096
-# supersede token, the h-leg below and the condition-ended sweep rebuild it verbatim); instead the arm
-# carries the credential's EXPIRATION_DATE and the rule window out of b, and a closed row blocks only when
-# it was closed inside THIS expiry's warning window (EXP - THRESHOLD_NUM days). A live row (RESOLVED_AT
-# NULL) always blocks. H2a: the two carried columns after the key expression.
+# H2 (12c): arm [10]'s recurrence fix, four count==1 swaps. The DEDUPE_KEY is NOT changed (the V067/V096
+# supersede token, the h-leg below and the condition-ended sweep rebuild it verbatim). Instead the arm
+# carries the credential's EXPIRATION_DATE out of b, and a CLOSED row blocks only when it was raised for THIS
+# expiry: its cycle id is the expiry date every arm [10] since V009 writes at the head of DETAIL ('Rotate
+# before ' || TO_VARCHAR(<expiry>, 'YYYY-MM-DD') || ..., one projection for both bands -- verified for all 30
+# definers V009..V157 by tests/migrations/test_v157_*). It never depends on WHEN a row was raised or closed,
+# so a prior cycle resolved late (an ACK'd EXPIRED closed days after the rotation) or a credential whose
+# lifetime is at most THRESHOLD_NUM days (a 7-day PAT) still re-alerts. A live row (RESOLVED_AT NULL)
+# always blocks. H2a: the carried column after the key expression.
 H2A_OLD = ("               c.RULE_ID || '|' || cr.USER_NAME || '|' || cr.NAME || '|' || "
            "IFF(cr.EXPIRATION_DATE < CURRENT_TIMESTAMP(), 'EXPIRED', 'EXPIRING')\n"
            "        FROM cfg c\n"
            "        JOIN SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS cr\n")
 H2A_NEW = ("               c.RULE_ID || '|' || cr.USER_NAME || '|' || cr.NAME || '|' || "
            "IFF(cr.EXPIRATION_DATE < CURRENT_TIMESTAMP(), 'EXPIRED', 'EXPIRING'),\n"
-           "               cr.EXPIRATION_DATE,   -- V157: EXP_TS (this cycle's expiry; dedupe only, not inserted)\n"
-           "               c.THRESHOLD_NUM       -- V157: WIN_DAYS (the raise window)\n"
+           "               cr.EXPIRATION_DATE    -- V157: EXP_TS (this cycle's expiry: the dedupe's cycle id, not "
+           "inserted)\n"
            "        FROM cfg c\n"
            "        JOIN SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS cr\n")
-new_hourly = _swap(new_hourly, H2A_OLD, H2A_NEW, "H2a arm [10] carried columns")
+new_hourly = _swap(new_hourly, H2A_OLD, H2A_NEW, "H2a arm [10] carried column")
 
 # H2b: the derived table's alias list (unique through the raise-window line above it).
 H2B_OLD = ("         AND cr.EXPIRATION_DATE <= DATEADD('day', c.THRESHOLD_NUM, CURRENT_TIMESTAMP())\n\n"
            "        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)\n")
 H2B_NEW = ("         AND cr.EXPIRATION_DATE <= DATEADD('day', c.THRESHOLD_NUM, CURRENT_TIMESTAMP())\n\n"
-           "        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY, EXP_TS, WIN_DAYS)\n")
+           "        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY, EXP_TS)\n")
 new_hourly = _swap(new_hourly, H2B_OLD, H2B_NEW, "H2b arm [10] alias list")
+
+# H2d: the DETAIL writer's date -- the cycle id -- pinned to Central. Every scheduled scan already rendered it
+# in the account TIMEZONE (America/Chicago); pinning it means a hand-run scan from a session in another
+# timezone writes the SAME date, so H2c's match (pinned the same way) is exact for every row written from V157.
+H2D_OLD = ("               'Rotate before ' || TO_VARCHAR(cr.EXPIRATION_DATE, 'YYYY-MM-DD') ||\n"
+           "                   ' to avoid auth failures for jobs and integrations using this credential.',\n")
+H2D_NEW = ("               -- V157: this date is the cycle id the dedupe below matches; pinned to Central so a hand-run "
+           "scan in another\n"
+           "               -- session timezone writes the same date the scheduled scans always have\n"
+           "               'Rotate before ' || TO_VARCHAR(CONVERT_TIMEZONE('America/Chicago', cr.EXPIRATION_DATE)"
+           "::TIMESTAMP_NTZ, 'YYYY-MM-DD') ||\n"
+           "                   ' to avoid auth failures for jobs and integrations using this credential.',\n")
+new_hourly = _swap(new_hourly, H2D_OLD, H2D_NEW, "H2d arm [10] DETAIL date pinned to Central")
 
 # H2c: arm [10]'s dedupe tail (unique through its own error CONTEXT).
 H2_TAIL = (
@@ -509,14 +527,16 @@ H2_NEW = (
     "            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY\n"
     "              AND COALESCE(e.RESOLUTION_KIND, '') NOT IN ('CONDITION_ENDED', 'SUPERSEDED')   "
     "-- V157: a machine close never blocks\n"
-    "              -- V157: the key has no date, so a row closed (by anyone: ACTIONED, NOISE, EXPECTED, a bulk clear) "
-    "before THIS\n"
-    "              -- expiry's warning window opened is an earlier cycle and never blocks -- a rotated credential's "
-    "next expiry\n"
-    "              -- re-alerts. A live row (RESOLVED_AT NULL) or a close inside this window still blocks. "
-    "Central wall-clock.\n"
-    "              AND COALESCE(e.RESOLVED_AT, CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ)\n"
-    "                  >= DATEADD('day', -b.WIN_DAYS, CONVERT_TIMEZONE('America/Chicago', b.EXP_TS)::TIMESTAMP_NTZ)\n"
+    "              -- V157: the key has no date, so the cycle id is the expiry date every arm [10] since V009 writes "
+    "at the head\n"
+    "              -- of DETAIL (Rotate before YYYY-MM-DD, both bands). A CLOSED row (by anyone: ACTIONED, NOISE, "
+    "EXPECTED, a bulk\n"
+    "              -- clear, however late) blocks only when it was raised for THIS expiry, never by when it was "
+    "raised or closed,\n"
+    "              -- so a rotated credential's next expiry re-alerts. A live row (RESOLVED_AT NULL) always blocks.\n"
+    "              AND (e.RESOLVED_AT IS NULL\n"
+    "                   OR e.DETAIL LIKE ('Rotate before ' || TO_VARCHAR(CONVERT_TIMEZONE('America/Chicago', b.EXP_TS)"
+    "::TIMESTAMP_NTZ, 'YYYY-MM-DD') || '%'))\n"
     "        )\n"
     "          -- V157: never mint EXPIRING while this credential's EXPIRED event is live (the supersede sweep "
     "would resolve it in the same run: hourly churn)\n"
@@ -529,6 +549,12 @@ H2_NEW = (
     "        );\n" + H2_TAIL
 )
 new_hourly = _swap(new_hourly, H2_OLD, H2_NEW, "H2c arm [10] recurrence")
+# the cycle id the dedupe matches is exactly the date the writer puts in DETAIL (same expression, same pin)
+_CYCLE_ID = "TO_VARCHAR(CONVERT_TIMEZONE('America/Chicago', cr.EXPIRATION_DATE)::TIMESTAMP_NTZ, 'YYYY-MM-DD')"
+assert ("'Rotate before ' || " + _CYCLE_ID + " ||\n") in H2D_NEW
+assert ("e.DETAIL LIKE ('Rotate before ' || " + _CYCLE_ID.replace("cr.EXPIRATION_DATE", "b.EXP_TS")
+        + " || '%'))\n") in H2_NEW
+assert "WIN_DAYS" not in new_hourly and "AND (e.RESOLVED_AT IS NULL\n" in H2_NEW
 
 # H3 (10a + 2): [22] + [23] directly above the OPS_SCAN_DEGRADED self-alert.
 _SELF = "    IF (fails > 0) THEN\n"
@@ -598,11 +624,13 @@ HEADER = """\
 --       fully revoked (OPEN only, 1h dwell, positive evidence only);
 --     ~ the V091 auto-clear sweep is scoped to its 3 PERF rules (the only rules whose still-firing set it
 --       recomputes), so opting another rule into AUTO_CLEAR_ENABLED never blanket-clears it after 1h;
---     ~ arm [10]: a prior event closed before the current expiry's warning window opened (by anyone -- a
---       human ACTIONED/NOISE/EXPECTED resolve included) or machine-closed (CONDITION_ENDED / SUPERSEDED)
---       no longer blocks the credential's key, so a rotated credential's next expiry cycle re-alerts (the
---       key itself is unchanged; a live event or a close inside the current window still blocks), and
---       EXPIRING is never minted while that credential's EXPIRED event is live;
+--     ~ arm [10]: a prior event closed for an EARLIER expiry (by anyone -- a human ACTIONED/NOISE/EXPECTED
+--       resolve included, however late) or machine-closed (CONDITION_ENDED / SUPERSEDED) no longer blocks
+--       the credential's key, so a rotated credential's next expiry cycle re-alerts. The key itself is
+--       unchanged: the cycle id is the expiry date every arm [10] since V009 writes at the head of DETAIL
+--       ('Rotate before YYYY-MM-DD', both bands), now pinned to Central on both the write and the match.
+--       A live (OPEN/ACK/SNOOZED) event, or a close for this same expiry, still blocks; EXPIRING is never
+--       minted while that credential's EXPIRED event is live;
 --     + [hb] heartbeat: stamps SOURCE_FRESHNESS_STATE 'ALERT_SCAN_HOURLY' last in every run.
 --     Counting arms stay 13 (13 - [15] + [22]); the self-alert literal is unchanged.
 --   SP_ALERT_SCAN_DAILY:
@@ -624,11 +652,14 @@ HEADER = """\
 -- FIRST RUN: every SOURCE_FRESHNESS_STATE row already past its cadence raises one HIGH OPS_PIPELINE_DEGRADED
 -- event, and the first daily run raises this ISO week's COST_IDLE_OPPORTUNITY events (preview with the
 -- separate read-only PREFLIGHT_WAVE2B.sql). A credential already inside its expiry window whose only prior
--- SEC_CRED_EXPIRY event for that key was closed before this expiry's window opened (an earlier cycle, e.g.
--- human-resolved) raises its previously suppressed event once (CRITICAL if already expired). A close inside
--- the current window still suppresses it. Deploy the app build that excludes CONDITION_ENDED from the
--- human-resolution metrics BEFORE applying (it shipped in wave 2a). No procedure runs at apply time: the scans
--- pick this up on their next scheduled run.
+-- SEC_CRED_EXPIRY event for that key was closed for an EARLIER expiry date (an earlier cycle, e.g.
+-- human-resolved, however late) raises its previously suppressed event once (CRITICAL, and an auto-declared
+-- incident, if already expired). A close for the SAME expiry date, or a still-live event, still suppresses
+-- it. Known edge: a row written before V157 by a hand-run scan from a session in another timezone carries
+-- that zone's date; if the expiry fell on a different calendar date there, the row reads as an earlier cycle
+-- and the event re-raises once (a duplicate, not a missed alert). Deploy the app build that excludes
+-- CONDITION_ENDED from the human-resolution metrics BEFORE applying (it shipped in wave 2a). No procedure runs
+-- at apply time: the scans pick this up on their next scheduled run.
 -- ROLLBACK (order matters): FIRST, by hand (never inside a migration), switch AUTO_CLEAR_ENABLED off for
 -- SEC_CRED_EXPIRY and SEC_NEW_EXPOSURE; only THEN re-run V141's two procs (RUNBOOK section 12, "Rolling back
 -- V157"). Reversed, an hourly scan landing between the two steps runs V141's unscoped V091 sweep, which
@@ -691,8 +722,10 @@ DESCRIPTION = (
     "+ #12c condition-ended sweep (an OPEN SEC_CRED_EXPIRY or SEC_NEW_EXPOSURE event resolves CONDITION_ENDED "
     "once CREDENTIALS or GRANTS_TO_ROLES show the condition ended; 1h dwell, positive evidence only, opt-in via "
     "AUTO_CLEAR_ENABLED); the V091 auto-clear sweep scoped to its 3 PERF rules; arm [10] (key unchanged) "
-    "ignores CONDITION_ENDED and SUPERSEDED rows and any row closed before the current expiry''s warning window "
-    "opened, human resolves included, so a rotated credential''s next expiry re-alerts, and never mints "
+    "ignores CONDITION_ENDED and SUPERSEDED rows and any row closed for an earlier expiry, human resolves "
+    "included however late (the cycle id is the expiry date every arm [10] since V009 writes at the head of "
+    "DETAIL, now pinned to Central on write and match; a live row always blocks), so a rotated credential''s "
+    "next expiry re-alerts, and never mints "
     "EXPIRING while the EXPIRED event is live; + [hb] ALERT_SCAN_HOURLY heartbeat. Tally 13 -> 13. Daily: + "
     "[22] (byte-identical, shared keys) + [24] COST_IDLE_OPPORTUNITY (weekly per warehouse, net recoverable "
     "USD/month after the 60s resume tail, settings-verified timer (newest SHOW WAREHOUSES snapshot batch) "
