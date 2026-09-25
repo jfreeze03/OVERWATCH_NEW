@@ -2040,6 +2040,32 @@ def _clean_numeric_cell(v) -> str:
     return f"{f:,.4f}".rstrip("0").rstrip(".")
 
 
+def _nullable_printf_columns(frame, column_config: dict | None) -> dict:
+    """Caller NumberColumn printf formats on columns that actually hold NULLs: {column: format}.
+
+    On the Styler path Streamlit's column_config printf overrides the styled cell, so the house
+    em-dash (na_rep) never reached those NULLs - they rendered as the literal 'None' (the Decision
+    Studio lever table's Realization %, owner screenshot 2026-09-24). _render_table moves each such
+    format onto the Styler WITH na_rep and keeps only the caller's label/help/width. Only plain printf
+    strings Python can apply ('$%.2f', '%.0f%%', '%d') qualify; named formats are left alone."""
+    out: dict = {}
+    for col, cfg in (column_config or {}).items():
+        if col not in getattr(frame, "columns", ()) or not isinstance(cfg, dict):
+            continue
+        tc = cfg.get("type_config")
+        fmt = tc.get("format") if isinstance(tc, dict) else None
+        if not isinstance(tc, dict) or tc.get("type") != "number" or not isinstance(fmt, str) or "%" not in fmt:
+            continue
+        try:
+            if not bool(frame[col].isna().any()):
+                continue
+            fmt % 1.0                                   # Python-applicable printf only
+        except Exception:  # noqa: BLE001 - an exotic format keeps Streamlit's own rendering
+            continue
+        out[col] = fmt
+    return out
+
+
 def _render_table(df, *, height: int | None, column_config: dict | None,
                   key: str | None = None, selectable: bool = False,
                   slug: str | None = None, days: int | None = None,
@@ -2132,6 +2158,7 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
         except Exception:  # noqa: BLE001 - the bar is cosmetic, the table must render
             pass
     _cell_count = len(df) * max(1, len(df.columns))
+    _na_printf = _nullable_printf_columns(display_df, column_config)   # NULL '—' vs a caller printf
     if len(df) <= STYLER_MAX_ROWS and _cell_count <= STYLER_MAX_CELLS:
         try:
             styler = display_df.style
@@ -2169,6 +2196,16 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                     styler = styler.format(_clean_numeric_cell, na_rep="—", subset=_rest_num)
                 if _rest_txt:
                     styler = styler.format(na_rep="—", subset=_rest_txt)
+            # A caller's printf on a NULL-bearing column: format on the Styler (last, so it wins) WITH
+            # na_rep, and strip the printf from the column_config so it cannot override the em-dash.
+            if _na_printf:
+                _cfg_na = dict(column_config or {})
+                for _nc, _pf in _na_printf.items():
+                    styler = styler.format(lambda v, _p=_pf: _p % v, na_rep="—", subset=[_nc])
+                    _entry = dict(_cfg_na[_nc])
+                    _entry["type_config"] = {**dict(_entry.get("type_config") or {}), "format": None}
+                    _cfg_na[_nc] = _entry
+                column_config = _cfg_na
             data = styler
         except Exception:  # noqa: BLE001 - styling is cosmetic, table must render
             data = display_df

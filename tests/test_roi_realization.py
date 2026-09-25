@@ -77,6 +77,7 @@ def test_roi_is_a_first_class_decision_studio_section():
     ds = _src("app/ui/decision_studio.py")
     assert "def _roi(company: str)" in ds
     assert "Return on OVERWATCH" in ds
-    assert "savings_by_month(" in ds and "savings_by_lever(" in ds
+    # ROI fixes (2026-09-24): the bars read a zero-filled calendar incl. the month-to-date
+    assert "savings_month_calendar(" in ds and "savings_by_lever(" in ds
     # the old buried realization block in _scenarios now points at the ROI section.
     assert ds.count("Realization — the savings track record") == 0

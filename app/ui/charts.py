@@ -1874,6 +1874,35 @@ def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
     st.altair_chart((bars + labels).properties(height=280), width="stretch")
 
 
+def monthly_bars_usd(df: pd.DataFrame, label_col: str, usd_col: str, *, partial_col: str = "PARTIAL",
+                     y_title: str = "USD") -> None:
+    """One bar per calendar month in the frame's order (chronological), a $ label on each non-zero bar,
+    and the in-flight month dimmed like every other partial period (C38) - so a single verified month
+    reads as a bar among zero months, never as a lone dot on an empty line (Decision Studio ROI,
+    owner screenshot 2026-09-24)."""
+    if df is None or df.empty or float(pd.to_numeric(df[usd_col], errors="coerce").fillna(0).sum()) <= 0:
+        _empty_note("Nothing verified in these months yet.")
+        return
+    d = df.copy()
+    d[usd_col] = pd.to_numeric(d[usd_col], errors="coerce").fillna(0.0)
+    order = list(d[label_col].astype(str))
+    _max = float(d[usd_col].max())
+    _yscale = alt.Scale(domainMax=_max * 1.15) if _max > 0 else alt.Undefined
+    x = alt.X(f"{label_col}:O", title=None, sort=order, axis=alt.Axis(labelAngle=0))
+    bars = _base(d, 260).mark_bar().encode(
+        x=x,
+        y=alt.Y(f"{usd_col}:Q", title=y_title, scale=_yscale),
+        opacity=_provisional_opacity(partial_col),
+        tooltip=[alt.Tooltip(f"{label_col}:O", title="Month"), alt.Tooltip(f"{usd_col}:Q", format="$,.2f")],
+    )
+    labels = (
+        alt.Chart(d[d[usd_col] > 0]).mark_text(dy=-6, baseline="bottom", fontSize=11, color=_TITLE)
+        .encode(x=x, y=alt.Y(f"{usd_col}:Q"), text=alt.Text(f"{usd_col}:Q", format=_usd_fmt(_max)),
+                opacity=_provisional_opacity(partial_col))
+    )
+    st.altair_chart((bars + labels).properties(height=260), width="stretch")
+
+
 def paired_bars(df: pd.DataFrame, label_col: str, a_col: str, b_col: str,
                 a_label: str = "A", b_label: str = "B", title: str = "",
                 top_n: int = 10, unit: str = "$") -> None:

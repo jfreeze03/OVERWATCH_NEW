@@ -14,7 +14,7 @@ from app.core.session import is_operator
 from app.core.state import request_navigation
 from app.data import mart_sql, workbench_sql
 from app.logic import insights
-from app.logic.actions import ledger_totals, savings_by_lever, savings_by_month
+from app.logic.actions import ledger_totals, savings_by_lever, savings_month_calendar
 from app.logic.date_windows import is_prior_month_window
 from app.logic.decision import prioritize_workloads, scenario_projection, slo_summary
 from app.logic.formulas import (
@@ -704,11 +704,10 @@ def decision_verdict(rate: float) -> dict:
     if sig is None:
         return {}
     proof = proof_verdict(sig["roi"], sig["realization"], sig["acc"]["ACCEPTANCE_PCT"], sig["prec"])
-    return page_verdict(
-        decision_studio_signals(proof),
-        healthy="OVERWATCH is earning its keep — savings realize, alerts stay precise, "
-                "and the team acts on the advice.",
-    )
+    # The healthy sentence is proof_verdict's own headline, which names only MEASURED facts (and lists what
+    # is not measured yet) - the old hard-coded sentence claimed realization, precision and follow-through
+    # even while they were unmeasured (owner screenshot 2026-09-24).
+    return page_verdict(decision_studio_signals(proof), healthy=proof["headline"])
 
 
 def _scorecard(company: str, rate: float) -> None:
@@ -767,9 +766,12 @@ def _scorecard(company: str, rate: float) -> None:
                 f"item counts until it is {SAVINGS_ACTIVE_MONTHS} months old."})
     kpi_row([
         {"label": "Realization",
-         "value": (f"{realization:,.0f}%" if realization is not None else "—"),
+         "value": (f"{realization:,.0f}%" if realization is not None
+                   else ("n/a" if sig["totals"]["verified_count"] else "—")),
          "help": "Of what verified items were estimated to save, how much actually measured out. "
-                 "Near 100% means the estimates held up (verified items that carried an estimate)."},
+                 "Near 100% means the estimates held up (verified items that carried an estimate). "
+                 "n/a = every verified item was auto-measured from a detected change, which books no "
+                 "up-front estimate to compare against."},
         {"label": "Acted on",
          "value": (f"{acc['ACCEPTANCE_PCT']:,.0f}%" if acc["ACCEPTANCE_PCT"] is not None else "—"),
          "delta": f"{acc['DONE_N']} done · {acc['DROPPED_N']} dismissed · {acc['OPEN_N']} open",
@@ -832,26 +834,35 @@ def _roi(company: str) -> None:
     _real = totals["realization_pct"]
     _avgd = totals["avg_days_to_verify"]
     kpi_row([
-        {"label": "Verified savings (all time)", "value": format_usd(totals["verified_usd"]),
-         "severity": "ok" if totals["verified_usd"] else "",
-         "delta": (f"{format_usd(totals['verified_active_usd'])}/mo active run-rate "
-                   f"(last {SAVINGS_ACTIVE_MONTHS} months)"),
-         "delta_color": "off",
-         "help": "Measured, proof-backed savings booked to the ledger — never mixes in estimates."},
-        {"label": "Verified this quarter", "value": format_usd(totals["verified_qtd_usd"])},
+        # D4 (owner screenshot 2026-09-24): every VERIFIED_USD is a MONTHLY saving, so these sums are a
+        # run-rate in $/mo - the old "Verified savings (all time)" label read like cumulative dollars
+        # (and equalled the "/mo" line beneath it), exactly what an auditor reading the ledger would flag.
+        {"label": "Verified savings run-rate", "value": f"{format_usd(totals['verified_active_usd'])}/mo",
+         "severity": "ok" if totals["verified_active_usd"] else "",
+         "delta": (f"active: verified in the last {SAVINGS_ACTIVE_MONTHS} months · "
+                   f"{format_usd(totals['verified_usd'])}/mo across all {totals['verified_count']:,} verified item(s)"),
+         "delta_color": "off", "method": "measured",
+         "help": "Each verified item is a recurring MONTHLY saving measured after the change (never an "
+                 "estimate); this is their sum as a $/month run-rate, not cumulative dollars saved."},
+        {"label": "Added this quarter", "value": f"{format_usd(totals['verified_qtd_usd'])}/mo",
+         "method": "measured",
+         "help": "Monthly run-rate of the items verified since the quarter began."},
         {"label": "Realization rate",
-         "value": (f"{_real:,.0f}%" if _real is not None else "—"),
+         "value": (f"{_real:,.0f}%" if _real is not None
+                   else ("n/a" if totals["verified_count"] else "—")),
          "delta": (f"{format_usd(totals['realized_verified_usd'])} of "
                    f"{format_usd(totals['realized_estimated_usd'])} estimated"
-                   if _real is not None else "nothing verified yet"),
+                   if _real is not None else
+                   (f"auto-measured — no up-front estimate ({totals['verified_count']:,} item(s))"
+                    if totals["verified_count"] else "nothing verified yet")),
          "delta_color": "off",
          "help": "Verified $ as a share of what those items were estimated to save — the honest "
                  "estimate-vs-actual (verified items that carried an estimate). Near 100% means the "
                  "estimates held up; above 100% means realized savings beat the estimate."},
         {"label": "Open pipeline", "value": format_usd(totals["estimated_usd"]),
          "delta": f"{totals['estimated_count']:,} item(s) awaiting proof", "delta_color": "off",
-         "help": "Estimated savings still unverified — the opportunity ahead. Verify them on "
-                 "Experiments (below) or Cost ▸ Optimize."},
+         "help": "Estimated savings still unverified — the opportunity ahead. Changes the daily change "
+                 "scan detects settle automatically; the rest verify on Cost ▸ Optimize."},
     ])
     if totals["superseded_count"]:
         # Next-Fifty #5: one warehouse change booked twice (the app's manual row + the change scan's
@@ -863,7 +874,7 @@ def _roi(company: str) -> None:
             "never counted twice. Clean them up on Cost ▸ Optimize ▸ Savings ledger."))
     if totals["verified_usd"] > 0:
         st.markdown(md_dollars(
-            f"OVERWATCH has verified **{format_usd(totals['verified_usd'])}** in savings across "
+            f"OVERWATCH has verified **{format_usd(totals['verified_usd'])}/mo** of savings run-rate across "
             f"**{totals['verified_count']:,}** item(s)"
             + (f", realizing **{_real:,.0f}%** of what they were estimated to save"
                if _real is not None else "")
@@ -872,16 +883,16 @@ def _roi(company: str) -> None:
     else:
         empty_state("no_data_yet",
                     f"No savings verified yet — {format_usd(totals['estimated_usd'])} is estimated across "
-                    f"{totals['estimated_count']:,} item(s). Verify optimizations on Experiments (below) "
-                    "or Cost ▸ Optimize to start the track record.")
+                    f"{totals['estimated_count']:,} item(s). Changes the daily change scan detects settle "
+                    "automatically; verify the rest on Cost ▸ Optimize to start the track record.")
 
-    month_df = savings_by_month(ledger.df, 12)
+    month_df = savings_month_calendar(ledger.df, 12)
     lever_df = savings_by_lever(ledger.df)
     if not month_df.empty:
         # Newly-verified per month (the run-rate ADDED that month) — not the active run-rate above,
         # which is the trailing-12-month sum of these (adversarial review of #3).
-        st.markdown("**Newly verified savings — by month** (monthly run-rate added each month)")
-        charts.daily_metric_line(month_df, "MONTH", "VERIFIED_USD", "run-rate added / month", unit="usd")
+        st.markdown("**Newly verified savings — by month** (monthly run-rate added each month; this month so far)")
+        charts.monthly_bars_usd(month_df, "MONTH_LABEL", "VERIFIED_USD", y_title="$/mo added")
     if not lever_df.empty:
         st.markdown("**Where the realized savings come from — by lever**")
         charts.bar_usd(lever_df, "LEVER", "VERIFIED_USD", "verified $ by lever", top_n=10)

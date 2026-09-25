@@ -41,9 +41,10 @@ def test_no_evidence_is_not_rendered_as_a_healthy_zero() -> None:
     # (latency/P95 only), never a misleading healthy 0.00x.
     assert '(f"{summary[\'worst_burn\']:,.2f}x" if summary["has_burn"] else "n/a")' in studio
     # DS flagship ROI section (v4.251): a failed ledger read shows a no-data state (not a
-    # healthy $0 verified total), and realization reads "—" until something is verified.
+    # healthy $0 verified total), and realization reads "—" until something is verified (ROI fixes
+    # 2026-09-24: 'n/a' once items are verified but auto-measured, i.e. carry no estimate).
     assert 'if not ledger.ok:\n        empty_state("needs_setup"' in studio
-    assert '(f"{_real:,.0f}%" if _real is not None else "—")' in studio
+    assert '("n/a" if totals["verified_count"] else "—")' in studio
     # v4.365 (ds-hunt): the no-candidate state still reads "No evidence" (not a healthy $0), and an
     # eligible-but-unpriced queue now reads "Unpriced" rather than a misleading $0.00.
     assert 'return "No evidence"' in studio
