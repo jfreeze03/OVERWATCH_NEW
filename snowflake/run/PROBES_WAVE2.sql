@@ -7,7 +7,8 @@
 --    B (#11 V153) the autobook credit-rate defect and past whole-baseline 'verified' rows
 --    C (#12)      auto-clear flags, the incident auto-declare toggle, CREDENTIALS shape, stale incidents
 --    D (#10/#13)  which sources are stale today (each becomes one alert once V157 lands)
---    E (#2 V156)  CONTROL_STATUS timestamps / status words / terminal regularity / volume / owner role
+--    E (#2 V156)  CONTROL_STATUS timestamps / status words / terminal regularity / volume / owner role /
+--                 (E6) do starter tasks overlap the terminal (added 2026-09-25 by the wave-2b review)
 --    F (#32 V158) operator-table transience, future grants, existing backup names, who runs the backup
 -- =====================================================================================
 USE ROLE SNOW_ACCOUNTADMINS;
@@ -91,6 +92,24 @@ GROUP BY 1 ORDER BY 1 DESC;   -- any night with STARTER_ROWS > 0 and TERM_TASKS 
 SELECT COUNT(*) AS ROWS_23D FROM ALFA_EDW_PRD.PUBLIC.CONTROL_STATUS WHERE TASK_START_DTTM >= DATEADD('day', -23, CURRENT_TIMESTAMP());
 SELECT PROCEDURE_OWNER FROM DBA_MAINT_DB.INFORMATION_SCHEMA.PROCEDURES
 WHERE PROCEDURE_SCHEMA = 'OVERWATCH' AND PROCEDURE_NAME = 'SP_ALERT_SCAN';   -- the role that must SELECT CONTROL_STATUS
+
+-- E6 (#2 V156) per night: does a STARTER task ever start after the terminal has started? V156 counts a terminal
+-- task's clean finish only from an attempt that STARTED at/after the night's LAST starter start, so a night with
+-- STARTER_AFTER_TERMINAL = TRUE falls back to latest-attempt grading (loud, never silent). Expect FALSE on normal
+-- nights; TRUE on most nights means the starter workflow runs a late task and the bound needs a rethink.
+-- STARTER_START_HOURS > 1 flags an afternoon re-run of the chain keyed to that night.
+WITH n AS (
+  SELECT DATE(DATEADD('hour', -12, TASK_START_DTTM)) AS NIGHT,
+         MIN(IFF(WORKFLOW_NAME = 'WF_BASE_GW_CLOSEOUT_CTL_DLY', TASK_START_DTTM, NULL)) AS FIRST_STARTER_START,
+         MAX(IFF(WORKFLOW_NAME = 'WF_BASE_GW_CLOSEOUT_CTL_DLY', TASK_START_DTTM, NULL)) AS LAST_STARTER_START,
+         COUNT(DISTINCT IFF(WORKFLOW_NAME = 'WF_BASE_GW_CLOSEOUT_CTL_DLY', DATE_TRUNC('hour', TASK_START_DTTM), NULL)) AS STARTER_START_HOURS,
+         MIN(IFF(WORKFLOW_NAME = 'WF_BASE_RECON_MTRC_CMPSIT_DAILY', TASK_START_DTTM, NULL)) AS FIRST_TERMINAL_START
+  FROM ALFA_EDW_PRD.PUBLIC.CONTROL_STATUS
+  WHERE TASK_START_DTTM >= DATEADD('day', -23, CURRENT_TIMESTAMP())
+  GROUP BY 1)
+SELECT NIGHT, FIRST_STARTER_START, LAST_STARTER_START, STARTER_START_HOURS, FIRST_TERMINAL_START,
+       LAST_STARTER_START > FIRST_TERMINAL_START AS STARTER_AFTER_TERMINAL
+FROM n WHERE FIRST_STARTER_START IS NOT NULL ORDER BY NIGHT DESC;
 
 -- F1-F6 (#32)
 SELECT TABLE_NAME, IS_TRANSIENT, RETENTION_TIME, ROW_COUNT, BYTES FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES
