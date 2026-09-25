@@ -79,11 +79,13 @@ def test_supersede_excluded_from_operator_mttr():
     # timings pollute human MTTR.
     from app.data import mart_sql
     mttr = mart_sql.alert_mttr(90)
-    # V117: SNOOZE_SUPPRESSED joins the machine-close exclusion (RESOLVED + MTTR)
-    assert mttr.count("COALESCE(RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED')") == 2
+    # V117: SNOOZE_SUPPRESSED joins the machine-close exclusion (RESOLVED + MTTR); wave 2a adds
+    # CONDITION_ENDED (the V156 condition-ended sweep) ahead of V156 so it never counts as human
+    assert mttr.count("COALESCE(RESOLUTION_KIND, '') NOT IN "
+                      "('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED', 'CONDITION_ENDED')") == 2
     ms = (_ROOT / "app" / "data" / "mart_sql.py").read_text(encoding="utf-8")
     assert ("COUNT_IF(COALESCE(RESOLUTION_KIND, '') NOT IN "
-            "('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED')) AS RESOLVED_EVENTS") in ms
+            "('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED', 'CONDITION_ENDED')) AS RESOLVED_EVENTS") in ms
 
 
 # #17 — residual compute resolves its company from the executing warehouse
