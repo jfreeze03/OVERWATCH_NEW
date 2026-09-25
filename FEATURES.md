@@ -79,7 +79,7 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 | Capability | Where |
 |---|---|
 | Mart-first facts + hourly/daily loaders; 365d backfill script; retention purge with floors | V002 + `backfill_365.sql` + `SP_PURGE_FACTS` |
-| Weekly zero-copy backups of operator tables + DR runbook | `TASK_BACKUP_OPERATOR`; RUNBOOK §16 |
+| Daily (14) + Sunday-weekly (8) zero-copy backup generations of the 25 operator tables in their own `OVERWATCH_BAK` schema (row-count log, dead-man freshness, INSERT OVERWRITE restore) + DR runbook | `TASK_BACKUP_OPERATOR` (V158); RUNBOOK §16 |
 | Saved views, default landing, display timezone (per user) | 💾 Views popover |
 | Usage analytics (page adoption + render ms) | Admin → Performance |
 | Parallel batch fetch, lazy sections, SQL-keyed cache, fragments | core runtime |

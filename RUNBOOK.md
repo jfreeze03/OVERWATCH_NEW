@@ -146,7 +146,7 @@ native alerts), `ml_forecast_option.sql` (SNOWFLAKE.ML.FORECAST engine), `backfi
 | TASK_DAILY_DIGEST | 07:20 daily | SP_DAILY_DIGEST | DAILY_DIGEST (Cortex) |
 | TASK_VERIFY_SAVINGS | 07:40 1st of month | SP_VERIFY_IDLE_SAVINGS | SAVINGS_LEDGER verifications |
 | TASK_PURGE_FACTS | 05:20 1st of month | SP_PURGE_FACTS | deletes beyond retention |
-| TASK_BACKUP_OPERATOR | 05:40 Sundays | SP_BACKUP_OPERATOR_TABLES | `*_BAK_LAST` clones |
+| TASK_BACKUP_OPERATOR | 05:10 daily | SP_BACKUP_OPERATOR_TABLES | `OVERWATCH_BAK.*_OWBAK_D<yyyymmdd>` (+Sun `_W`) generations, Sunday `*_BAK_LAST`, OPERATOR_BACKUP_LOG, OPERATOR_BACKUP_DAILY freshness |
 | TASK_CANARY_SENTINEL | 05:30 Mondays | SP_CANARY_SENTINEL | CANARY_RESULTS + OPS_CANARY_FAIL |
 
 **Notes on the automation:** the Monday 05:30 sentinel deliberately leads
@@ -159,6 +159,17 @@ scan procs — the hourly `SP_ALERT_SCAN` and the daily `SP_ALERT_SCAN_DAILY`
 (split out in V062); runtime failures are the sentinel's and
 OPS_SCAN_DEGRADED's job — a broken block logs `rule_block_failed` and
 self-alerts, which IS the failure-injection test running in production, safely.
+
+**Operator backups (V158):** TASK_BACKUP_OPERATOR runs daily at 05:10 on the
+hourly chain's warm warehouse and stamps `OPERATOR_BACKUP_DAILY` in
+SOURCE_FRESHNESS_STATE only when every clone succeeded, so a failing or
+suspended backup goes stale (30h) like any daily loader. Being the earliest
+daily source, it is the one the sidebar health strip most often names as
+"stalest" (WARN from ~03:40 until the 05:10 run) — that is its normal
+rhythm, not an outage. Failures land in APP_ERROR_LOG (PAGE
+`BackupOperatorTables`: `clone_failed`, `backup_log_failed`,
+`backup_prune_failed`, `backup_incomplete`), which `loader_chain_check.sql`
+step 3 lists; `OPERATOR_BACKUP_LOG` records every clone, skip and prune.
 
 `SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;` — every state should be
 `started` except TASK_ALERT_NOTIFY before its integration exists.
@@ -411,7 +422,9 @@ CONTRACT_CREDITS / CONTRACT_START_DATE / CONTRACT_END_DATE (ISO dates) ·
 CORTEX_MODEL llama3.1-8b · FORECAST_ENGINE linear|seasonal|ml_forecast ·
 SCORE_PTS_* (nine platform-score weights, §6) · FACT_RETENTION_DAYS_HOURLY
 400 (floor 90) · FACT_RETENTION_DAYS_DAILY 800 (floor 180) ·
-ERROR_LOG_RETENTION_DAYS 180 (floor 30). Values are strings; bad numbers
+ERROR_LOG_RETENTION_DAYS 180 (floor 30) · BACKUP_KEEP_DAILY 14 (7-60) ·
+BACKUP_KEEP_WEEKLY 8 (4-52) (operator-backup generations kept per table,
+V158). Values are strings; bad numbers
 fall back to defaults. Changes take effect within one cache cycle (≤5 min)
 or after Refresh.
 
@@ -497,11 +510,17 @@ Playbooks for each rule render in the alert drawer (`logic/playbooks.py`).
 
 ## 13. Object inventory (DBA_MAINT_DB.OVERWATCH)
 
-**Operator/config tables** (backed up weekly to `*_BAK_LAST`): SETTINGS,
+**Operator/config tables** (backed up daily since V158 to dated TRANSIENT
+generations in the separate schema `DBA_MAINT_DB.OVERWATCH_BAK` —
+`<T>_OWBAK_D<yyyymmdd>`, 14 daily + 8 Sunday-weekly `_W`, row counts in
+OPERATOR_BACKUP_LOG — plus the Sunday `*_BAK_LAST` pointer in OVERWATCH): SETTINGS,
 COMPANY_SCOPE, ALERT_CONFIG, ALERT_EVENTS, ALERT_AUDIT (append-only),
 ACTION_QUEUE, SAVINGS_LEDGER, DEPARTMENT_MAP, ALERT_ROUTES,
 REMEDIATION_LOG (append-only), USER_PREFS, OBJECT_CHANGE_REGISTRY,
-PIPELINE_SLA_CONFIG, DAILY_DIGEST.
+WAREHOUSE_CHANGE_REGISTRY, WAREHOUSE_CONFIG_SNAPSHOT, PIPELINE_SLA_CONFIG,
+DAILY_DIGEST, DEPT_BUDGETS, INCIDENTS, INCIDENT_MEMBERS, ACTION_ACTIVITY,
+EVIDENCE_LINKS, ENTITY_CATALOG, USER_WATCHLIST, OPTIMIZATION_EXPERIMENTS,
+SLO_OBJECTIVES (all 25).
 **Facts (transient, rebuildable, purged by retention):** FACT_METERING_DAILY,
 FACT_WAREHOUSE_DAILY, FACT_QUERY_HOURLY, FACT_TASK_DAILY, FACT_LOGIN_DAILY,
 FACT_STORAGE_DAILY. **Marts/views:** MART_EXEC_BOARD, MART_SOURCE_FRESHNESS,
@@ -590,14 +609,23 @@ deployed app — redeploy the app.
 
 ## 16. Disaster recovery
 
-1. **One bad table:** `CREATE OR REPLACE TABLE <T> CLONE <T>_BAK_LAST;`
-   (weekly Sunday clone) or Time Travel:
-   `CREATE OR REPLACE TABLE <T> CLONE <T> AT(OFFSET => -3600);`
+1. **One bad table:** restore from a backup generation with INSERT OVERWRITE:
+   `INSERT OVERWRITE INTO <T> SELECT * FROM DBA_MAINT_DB.OVERWATCH_BAK.<T>_OWBAK_D<yyyymmdd>;`
+   Pick the generation from `OPERATOR_BACKUP_LOG` (ROW_COUNT vs SOURCE_ROW_COUNT
+   per day; 14 daily + 8 Sunday-weekly `_W` are kept). Run it as the table-owner
+   role: INSERT OVERWRITE deletes, and roles.sql revokes DELETE on ALERT_AUDIT /
+   REMEDIATION_LOG from both admin roles. It keeps the table's DDL, grants and
+   audit seal. Never CLONE-restore: the backups are TRANSIENT (a clone into a
+   permanent table is refused), and a re-materialized table re-applies the
+   schema FUTURE grants. Time Travel (last hour, same rule):
+   `INSERT OVERWRITE INTO <T> SELECT * FROM <T> AT(OFFSET => -3600);`
 2. **Dropped object:** `UNDROP TABLE/SCHEMA ...` within retention.
-3. **Schema gone:** UNDROP first. Otherwise: all migrations in order (V001..V124) →
+3. **Schema gone:** UNDROP first. Otherwise: all migrations in order (V001..V158) →
    roles.sql → validate.sql (all OK) → facts refill from loaders (history
    bounded by ACCOUNT_USAGE retention: 365d) → operator tables from
-   `*_BAK_LAST` if they survived, else re-seed (SETTINGS rates, budgets,
+   the `OVERWATCH_BAK` generations (a separate schema, so they survive a lost
+   OVERWATCH; INSERT OVERWRITE as in step 1), else `*_BAK_LAST` if it
+   survived, else re-seed (SETTINGS rates, budgets,
    contract; DEPARTMENT_MAP names; ALERT_CONFIG thresholds re-seed with
    defaults automatically).
 4. **Bad deploy:** `snow streamlit deploy --replace` from the previous git

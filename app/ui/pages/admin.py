@@ -748,6 +748,9 @@ _SETTING_EDITORS: dict[str, tuple[str, object]] = {
     "FACT_RETENTION_DAYS_DAILY": (_NUM, {"min_value": 1.0, "step": 1.0}),
     "ERROR_LOG_RETENTION_DAYS": (_NUM, {"min_value": 1.0, "step": 1.0}),
     "APP_USAGE_RETENTION_DAYS": (_NUM, {"min_value": 1.0, "step": 1.0}),
+    # Operator-backup generations kept per table (V158; the proc clamps to the same bounds).
+    "BACKUP_KEEP_DAILY": (_NUM, {"min_value": 7.0, "max_value": 60.0, "step": 1.0}),
+    "BACKUP_KEEP_WEEKLY": (_NUM, {"min_value": 4.0, "max_value": 52.0, "step": 1.0}),
 }
 
 

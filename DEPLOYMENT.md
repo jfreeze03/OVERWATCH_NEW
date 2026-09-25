@@ -483,11 +483,13 @@ surgical by design — the schema is shared with the old app, so it never drops
 `DBA_MAINT_DB.OVERWATCH` itself, only named objects:
 
 - **Section A (live):** tasks, alerts, procs, functions, views, transient
-  facts/marts. Safe anytime — re-run the migrations in order (V001..V133) and the loaders repopulate.
+  facts/marts. Safe anytime — re-run the migrations in order (V001..V158) and the loaders repopulate.
 - **Section B (commented):** operator data — settings, company scope, alert
   config/events/audit, action queue, savings ledger, error log,
   schema_version. Uncomment only for a factory reset, and run the provided
   `CLONE` backups first. `UNDROP TABLE ...` also works within Time Travel.
+  The daily backup generations (`DBA_MAINT_DB.OVERWATCH_BAK`, V158) and
+  `OPERATOR_BACKUP_LOG` are never dropped by the teardown.
 - **Section C (commented):** warehouse, Streamlit app
   object, roles — shared infrastructure, dropped only deliberately.
 
@@ -499,15 +501,23 @@ Restore = migrations in order -> roles.sql -> validate.sql (all rows OK).
 
 ## 6. Disaster recovery (summary — full detail in RUNBOOK.md)
 
-- **Weekly backups:** `TASK_BACKUP_OPERATOR` (Sun 05:40) clones every
-  operator-editable table to `<NAME>_BAK_LAST` (zero-copy). Restore one table:
-  `CREATE OR REPLACE TABLE <NAME> CLONE <NAME>_BAK_LAST;`
-- **Fine-grained undo:** Time Travel — `SELECT * FROM <t> AT(OFFSET => -3600)`
+- **Daily backups (V158):** `TASK_BACKUP_OPERATOR` (daily 05:10) clones the 25
+  operator tables to dated TRANSIENT generations in the separate schema
+  `DBA_MAINT_DB.OVERWATCH_BAK` (`<NAME>_OWBAK_D<yyyymmdd>`; 14 daily + 8
+  Sunday-weekly kept, row counts in `OPERATOR_BACKUP_LOG`) and refreshes the
+  Sunday `<NAME>_BAK_LAST` pointer. Restore one table as the table-owner role
+  (INSERT OVERWRITE deletes; the audit tables revoke DELETE from both admin roles):
+  `INSERT OVERWRITE INTO <NAME> SELECT * FROM DBA_MAINT_DB.OVERWATCH_BAK.<NAME>_OWBAK_D<yyyymmdd>;`
+  Never CLONE-restore: the backups are TRANSIENT (a clone into a permanent table
+  is refused) and a re-materialized table re-applies the schema FUTURE grants.
+- **Fine-grained undo:** Time Travel —
+  `INSERT OVERWRITE INTO <t> SELECT * FROM <t> AT(OFFSET => -3600);`
   or `UNDROP TABLE <t>` within the retention window.
 - **Schema dropped:** `UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH;` first. If gone,
-  re-run all migrations in order (V001..V133) + roles.sql + validate.sql; facts refill from
+  re-run all migrations in order (V001..V158) + roles.sql + validate.sql; facts refill from
   the loader tasks (history limited to ACCOUNT_USAGE retention); operator
-  tables restore from `*_BAK_LAST` clones if they survived, else re-seed.
+  tables restore from the `OVERWATCH_BAK` generations (a separate schema, so they
+  survive a lost OVERWATCH) or `*_BAK_LAST` clones if they survived, else re-seed.
 - **App broken after deploy:** `snow streamlit deploy --replace` with the
   previous git tag; migrations are additive so no schema rollback is needed.
 - **"Failed to retrieve packages... Have you enabled External Access

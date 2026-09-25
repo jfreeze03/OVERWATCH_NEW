@@ -674,6 +674,12 @@ FROM (SELECT COUNT_IF(EXPIRATION_DATE < CURRENT_TIMESTAMP()) AS EXPIRED_CREDENTI
 """
 
 
+#: V158 (Next-Fifty #32): the operator-backup generations live in their own TRANSIENT schema and are
+#: zero-copy clones of OVERWATCH tables -- never governance-taggable assets, so they stay out of the
+#: tag-coverage denominator and the untagged worklist (up to ~550 rows at steady state).
+_NOT_BACKUP_SCHEMA = "NOT (t.TABLE_CATALOG = 'DBA_MAINT_DB' AND t.TABLE_SCHEMA = 'OVERWATCH_BAK')"
+
+
 #: #20: the governance tag keys whose object-level coverage is scored. Whitelisted
 #: (never raw UI text) and injected through sql_literal.
 _GOV_TAG_KEYS: tuple[str, ...] = ("COST_OWNER", "SENSITIVITY", "SERVICE_TIER", "APP_OWNER")
@@ -710,6 +716,7 @@ def object_tag_coverage(company: str = "ALL",
     where = and_where(
         "t.DELETED IS NULL",
         "t.TABLE_TYPE = 'BASE TABLE'",
+        _NOT_BACKUP_SCHEMA,
         companies.database_company_scope(company, "t.TABLE_CATALOG"),
     )
     return f"""
@@ -756,6 +763,7 @@ def untagged_objects(company: str = "ALL", tag_name: str = "COST_OWNER",
     where = and_where(
         "t.DELETED IS NULL",
         "t.TABLE_TYPE = 'BASE TABLE'",
+        _NOT_BACKUP_SCHEMA,
         companies.database_company_scope(company, "t.TABLE_CATALOG"),
     )
     return f"""
