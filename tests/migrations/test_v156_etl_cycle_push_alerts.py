@@ -2,17 +2,18 @@
 
 SP_SCAN_ETL_CYCLE() reads the configured Informatica CONTROL_STATUS table once per run into the transient
 ETL_CYCLE_TASKS cache (the 23 newest WHOLE nights, retries collapsed to each task's terminal attempt, night key
-DATE(start - 12h), FIRST_OK_END = the first clean in-cycle finish) and raises PIPE_ETL_TASK_FAILED /
-PIPE_ETL_CYCLE_NOT_STARTED / PIPE_ETL_CYCLE_LATE itself, each rule in its own EXCEPTION guard. New objects
-only (no re-derivation, so no generator): the hourly SP_ALERT_SCAN gains the add-on CALL arm in V157. These
-locks pin the app parity (status words, night key, retry collapse, settings defaults, the Overdue test, the
-forecaster constants), the plan corrections (TERMINAL_START filter, GREATEST threshold floor, the term_lw
-regular-terminal guard, the newest-14 clean history, CRITICAL only for an unfinished miss, lead-window-only
-METRIC_VALUE), the review fixes (FIRST_OK_END bounded by the cycle start, auto-clear only on a FINISHED clean
-final attempt, whole-night cache) and Python models of the collapse, the [A] raise / auto-clear, the [B]
-Overdue test and the [C] grading. Every SQL clause a model encodes is pinned as whitespace-normalized EXACT
-text occurring once (not a loose substring), and the one dynamic statement is pinned as a rendered golden, so
-a model and the SQL cannot drift apart silently.
+DATE(start - 12h), FIRST_OK_END = the first clean finish after the night's last kickoff) and raises
+PIPE_ETL_TASK_FAILED / PIPE_ETL_CYCLE_NOT_STARTED / PIPE_ETL_CYCLE_LATE itself, each rule in its own EXCEPTION
+guard. New objects only (no re-derivation, so no generator): the hourly SP_ALERT_SCAN gains the add-on CALL arm
+in V157. These locks pin the app parity (status words, night key, retry collapse, settings defaults, the Overdue
+test, the forecaster constants), the plan corrections (TERMINAL_START filter, GREATEST threshold floor, the
+term_lw regular-terminal guard, the newest-14 clean history, CRITICAL only for an unfinished miss,
+lead-window-only METRIC_VALUE), the review fixes (FIRST_OK_END bounded by the night's first AND last kickoff,
+auto-clear only on a FINISHED clean final attempt, whole-night cache) and Python models of the collapse, the [A]
+raise / auto-clear, the [B] Overdue test and the [C] grading. The one dynamic statement (rendered) and the three
+rule INSERTs are each pinned WHOLE against a test-side golden -- every CTE compared to its own closing paren,
+then the outer select -- so no clause a model encodes can be edited, dropped or appended to without a failing
+test, and a model and the SQL cannot drift apart silently.
 
 The validate / docs / admin pins below are asserted at the WAVE TIP (V158) and fail until the wave-2b
 integration commit bumps those shared files.
@@ -72,6 +73,11 @@ def _norm(sql: str) -> str:
 
 
 _NBODY = _norm(_BODY)
+
+
+def _header_text() -> str:
+    """The migration header as one line of prose (the '-- ' prefixes and line wraps collapsed)."""
+    return " ".join(ln[2:].strip() for ln in _HEADER.splitlines() if ln.startswith("--"))
 
 
 def _once(frag: str) -> None:
@@ -139,7 +145,8 @@ def _render_ins_sql(fqn: str = "DB.S.CONTROL_STATUS") -> str:
 
 
 # The rendered dynamic INSERT, as a test-side golden: the INSERT column order <-> select-list order, the NOT NULL
-# filter, the whole-night cut, the bound starter name and the cycle-start-bounded FIRST_OK_END are all in it.
+# filter, the whole-night cut, the bound starter name and FIRST_OK_END bounded by the night's first kickoff
+# (CYC_START, MIN starter start) and its last (CYC_LAST_START, MAX starter start) are all in it.
 _INS_SQL = (
     "INSERT INTO DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS "
     "(CYCLE_DATE, WORKFLOW_NAME, TASK_NAME, TERMINAL_STATUS, FIRST_START, TERMINAL_START, TERMINAL_END, FIRST_OK_END) "
@@ -151,7 +158,8 @@ _INS_SQL = (
     "AND TASK_START_DTTM >= DATEADD('day', -24, CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ) "
     "AND DATE(DATEADD('hour', -12, TASK_START_DTTM::TIMESTAMP_NTZ)) > DATEADD('day', -23, "
     "DATE(DATEADD('hour', -12, CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ)))), "
-    "cs AS (SELECT CD AS CS_NIGHT, MIN(TASK_START_DTTM) AS CYC_START FROM src WHERE WF = ? GROUP BY CD) "
+    "cs AS (SELECT CD AS CS_NIGHT, MIN(TASK_START_DTTM) AS CYC_START, "
+    "MAX(TASK_START_DTTM) AS CYC_LAST_START FROM src WHERE WF = ? GROUP BY CD) "
     "SELECT CD, WF, TN, "
     "LEFT(TO_VARCHAR(MAX_BY(TASK_STATUS, COALESCE(TASK_END_DTTM, TASK_START_DTTM))), 100), "
     "MIN(TASK_START_DTTM)::TIMESTAMP_NTZ, "
@@ -159,7 +167,7 @@ _INS_SQL = (
     "MAX_BY(TASK_END_DTTM, COALESCE(TASK_END_DTTM, TASK_START_DTTM))::TIMESTAMP_NTZ, "
     "MIN(IFF(TASK_END_DTTM IS NOT NULL "
     f"AND COALESCE(UPPER(TASK_STATUS), '') NOT IN ({_FAILED_SQL}) "
-    "AND TASK_START_DTTM >= CYC_START, TASK_END_DTTM, NULL))::TIMESTAMP_NTZ "
+    "AND TASK_START_DTTM >= CYC_START AND TASK_END_DTTM >= CYC_LAST_START, TASK_END_DTTM, NULL))::TIMESTAMP_NTZ "
     "FROM src LEFT JOIN cs ON cs.CS_NIGHT = src.CD "
     "GROUP BY CD, WF, TN"
 )
@@ -263,7 +271,8 @@ def test_v156_dynamic_insert_renders_parses_and_reads_only_app_columns():
         "TERMINAL_START": "MAX_BY(TASK_START_DTTM, COALESCE(TASK_END_DTTM, TASK_START_DTTM))::TIMESTAMP_NTZ",
         "TERMINAL_END": "MAX_BY(TASK_END_DTTM, COALESCE(TASK_END_DTTM, TASK_START_DTTM))::TIMESTAMP_NTZ",
         "FIRST_OK_END": (f"MIN(IFF(TASK_END_DTTM IS NOT NULL AND COALESCE(UPPER(TASK_STATUS), '') NOT IN "
-                         f"({_FAILED_SQL}) AND TASK_START_DTTM >= CYC_START, TASK_END_DTTM, NULL))::TIMESTAMP_NTZ"),
+                         f"({_FAILED_SQL}) AND TASK_START_DTTM >= CYC_START AND TASK_END_DTTM >= CYC_LAST_START, "
+                         "TASK_END_DTTM, NULL))::TIMESTAMP_NTZ"),
     }
     for col, src in want.items():
         assert got[col] == sqlglot.parse_one(src, read="snowflake"), col
@@ -272,6 +281,13 @@ def test_v156_dynamic_insert_renders_parses_and_reads_only_app_columns():
     src_proj = {p.alias: p.this for p in ctes["src"].expressions if p.alias}
     assert src_proj["CD"] == sqlglot.parse_one("DATE(DATEADD('hour', -12, TASK_START_DTTM::TIMESTAMP_NTZ))",
                                                read="snowflake")
+    # cs: the night's FIRST kickoff (MIN) and LAST kickoff (MAX) over the bound starter's attempts, and nothing
+    # else (no second bind: the starter-IS-terminal case is deliberately not special-cased, see the header)
+    cs_proj = {p.alias: p.this for p in ctes["cs"].expressions}
+    assert cs_proj == {"CS_NIGHT": sqlglot.parse_one("CD", read="snowflake"),
+                       "CYC_START": sqlglot.parse_one("MIN(TASK_START_DTTM)", read="snowflake"),
+                       "CYC_LAST_START": sqlglot.parse_one("MAX(TASK_START_DTTM)", read="snowflake")}
+    assert ctes["cs"].args["where"].this == sqlglot.parse_one("WF = ?", read="snowflake")
     schema = {**_SCHEMA, "DB": {"S": {"CONTROL_STATUS": dict.fromkeys(_CTL_COLUMNS, "VARCHAR")}}}
     qualify(sqlglot.parse_one(sql.replace("?", "'X'"), read="snowflake"), schema=schema, dialect="snowflake",
             validate_qualify_columns=True)
@@ -443,16 +459,28 @@ def test_v156_terminal_counts_only_from_its_terminal_attempt():
     _once(f"COUNT_IF(t.FIRST_OK_END IS NULL AND UPPER(t.TERMINAL_STATUS) IN ({_FAILED_SQL})) AS N_FAILED")
     _once("COUNT_IF(t.FIRST_OK_END IS NULL AND t.TERMINAL_END IS NULL AND (t.TERMINAL_STATUS IS NULL "
           f"OR UPPER(t.TERMINAL_STATUS) NOT IN ({_FAILED_SQL}))) AS N_RUNNING")
-    # FIRST_OK_END is bounded by the SAME cycle start [C] uses (MIN starter start per night), not a naive MIN
-    assert "cs AS (SELECT CD AS CS_NIGHT, MIN(TASK_START_DTTM) AS CYC_START FROM src WHERE WF = ? GROUP BY CD)" \
-        in _render_ins_sql()
+    # FIRST_OK_END is bounded by the SAME cycle start [C] uses (MIN starter start per night) AND by the night's
+    # LAST kickoff (MAX starter start), not a naive MIN: a clean finish from before the real kickoff never counts
+    rendered = _render_ins_sql()
+    assert rendered.count("cs AS (SELECT CD AS CS_NIGHT, MIN(TASK_START_DTTM) AS CYC_START, "
+                          "MAX(TASK_START_DTTM) AS CYC_LAST_START FROM src WHERE WF = ? GROUP BY CD)") == 1
+    assert rendered.count("AND TASK_START_DTTM >= CYC_START AND TASK_END_DTTM >= CYC_LAST_START, "
+                          "TASK_END_DTTM, NULL))::TIMESTAMP_NTZ") == 1
     # CYCLE_START keeps the app's MIN(starter start) (parity; the afternoon double re-run edge is documented)
     assert "SELECT CYCLE_DATE, MIN(FIRST_START) AS CYCLE_START\n" in _BODY
     assert "MIN(TASK_START_DTTM) AS CYCLE_START" in etl.cycle_finish_history_scan(
         "DB.S.T", start_workflow="A", end_workflow="B")
-    assert "CYCLE_START = MIN(starter start)" in _HEADER
-    assert "LATE reads\n-- the night complete all night" in _HEADER          # the edge FIRST_OK_END widens
-    assert "(FIRST_OK_END), so a re-run of it after the night" in _HEADER
+    hdr = _header_text()
+    assert "CYCLE_START = MIN(starter start) is the afternoon run" in hdr
+    assert "clean finish after the night's last kickoff (FIRST_OK_END), so a re-run of it after the night" in hdr
+    # the known edges say what the round-2 bound leaves: loud, never silent, including starter = terminal
+    for edge in ("FIRST_OK_END must end at/after the night's LAST starter start",
+                 "a next-morning re-run of the STARTER", "a starter re-run alone stays quiet",
+                 "When ETL_CYCLE_START_WORKFLOW = ETL_CYCLE_END_WORKFLOW every task is a starter task",
+                 "Both fail LOUD, by choice",
+                 "the afternoon finish never counts as FIRST_OK_END once the real kickoff runs"):
+        assert edge in hdr, edge
+    assert "LATE reads the night complete all night" not in hdr               # the round-1 edge is gone
 
 
 def test_v156_regular_terminal_guard():
@@ -682,7 +710,8 @@ def test_v156_part_b_ddl_fragments_are_in_the_migration():
     for frag in ("t.TERMINAL_START >= s.CYCLE_START", "GREATEST(c.MIN_FAILED, 1)", "CROSS JOIN term_lw tl",
                  "OR g.IS_COMPLETE, g.SEVERITY", "NOT COALESCE(g.PROJECTED_FINISH > g.DL_H, FALSE)",
                  "MAX(COALESCE(t.FIRST_OK_END, t.TERMINAL_END))", "COUNT_IF(t.TERMINAL_END IS NULL) = 0",
-                 "USING (start_wf)"):
+                 "USING (start_wf)", "MAX(TASK_START_DTTM) AS CYC_LAST_START",
+                 "TASK_END_DTTM >= CYC_LAST_START"):
         assert "'" not in frag and _BODY.count(frag) == 1, frag
 
 
@@ -705,6 +734,297 @@ def test_v156_rule_sql_parses_and_every_column_resolves():
     for stmt in stmts:
         tree = sqlglot.parse_one(_bind(stmt), read="snowflake")
         qualify(tree, schema=_SCHEMA, dialect="snowflake", validate_qualify_columns=True)
+
+
+# ---------------------------------------------------------------------------------------------------
+# 22. the three rule INSERTs pinned WHOLE (review round 2). A fragment lock stops at the last clause it names,
+#     so a filter APPENDED after it survived (e.g. 'WHERE e.CYCLE_DATE IS NOT NULL' after the nights LEFT JOIN
+#     turns it back into the inner join that drops a hung night). Each statement is split into its CTEs, each
+#     compared to its OWN closing paren, then the INSERT head and the outer select: the whole statement.
+def _with_parts(stmt: str) -> tuple[str, list[tuple[str, str]], str]:
+    """Normalized 'INSERT ... WITH a AS (...), b AS (...) SELECT ...' -> (head, [(cte, 'cte AS (...)')], tail),
+    each CTE cut at ITS matching ')' (quote-aware: a '(' or ')' inside a literal never counts)."""
+    s = _norm(stmt)
+    head, rest = s.split(" WITH ", 1)
+    ctes: list[tuple[str, str]] = []
+    while True:
+        m = re.match(r"(\w+) AS \(", rest)
+        assert m, rest[:80]
+        depth, quoted, i = 0, False, m.end() - 1
+        while True:
+            c = rest[i]
+            if c == "'":
+                quoted = not quoted
+            elif not quoted and c == "(":
+                depth += 1
+            elif not quoted and c == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        ctes.append((m.group(1), rest[:i + 1]))
+        rest = rest[i + 1:]
+        if not rest.startswith(", "):
+            return head, ctes, rest.strip()
+        rest = rest[2:]
+
+
+# [A] PIPE_ETL_TASK_FAILED raise: the reviewed statement, comments stripped (compared whitespace-normalized)
+_A_RAISE = f"""
+INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+    (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+WITH cfg AS (
+    SELECT RULE_ID, SEVERITY, COALESCE(THRESHOLD_NUM, 1) AS MIN_FAILED
+    FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
+    WHERE RULE_ID = 'PIPE_ETL_TASK_FAILED' AND ENABLED
+),
+anchor AS (
+    SELECT COALESCE(MAX(IFF(WORKFLOW_NAME = :start_wf, CYCLE_DATE, NULL)), MAX(CYCLE_DATE)) AS CYCLE_DATE
+    FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS
+),
+wf AS (
+    SELECT t.CYCLE_DATE, t.WORKFLOW_NAME,
+           COUNT(*) AS TASK_COUNT,
+           COUNT_IF(UPPER(t.TERMINAL_STATUS) IN ({_FAILED_SQL})) AS FAILED_TASK_COUNT,
+           LISTAGG(IFF(UPPER(t.TERMINAL_STATUS) IN ({_FAILED_SQL}),
+                       t.TASK_NAME || ' (' || t.TERMINAL_STATUS || ')', NULL), ', ')
+               WITHIN GROUP (ORDER BY t.TASK_NAME) AS FAILED_TASKS
+    FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS t
+    JOIN anchor a ON t.CYCLE_DATE >= a.CYCLE_DATE
+    GROUP BY t.CYCLE_DATE, t.WORKFLOW_NAME
+)
+SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+FROM (
+SELECT c.RULE_ID, 'ALL',
+       IFF(w.WORKFLOW_NAME = :end_wf AND c.SEVERITY IN ('LOW', 'MEDIUM'), 'HIGH', c.SEVERITY),
+       LEFT(w.WORKFLOW_NAME || ': ' || w.FAILED_TASK_COUNT || ' of ' || w.TASK_COUNT
+            || ' task(s) failed in the ' || TO_VARCHAR(w.CYCLE_DATE) || ' nightly cycle', 300),
+       LEFT('Final attempt failed (Informatica retries collapse to the last attempt): '
+            || LEFT(w.FAILED_TASKS, 1500) || '. '
+            || IFF(w.WORKFLOW_NAME = :end_wf,
+                   'This is the cycle TERMINAL workflow - the cycle cannot finish until it is re-run. ', '')
+            || 'Informatica may also have notified. Triage: Operations > Pipeline SLA > Tonight at a glance. '
+            || 'Auto-clears if a retry succeeds.', 2000),
+       w.FAILED_TASK_COUNT,
+       'PIPE_ETL_TASK_FAILED|' || LEFT(w.WORKFLOW_NAME, 200) || '|' || TO_VARCHAR(w.CYCLE_DATE)
+FROM cfg c
+JOIN wf w ON w.FAILED_TASK_COUNT >= GREATEST(c.MIN_FAILED, 1)
+) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+WHERE NOT EXISTS (
+    SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+    WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+      AND COALESCE(e.RESOLUTION_KIND, '') <> 'AUTO_CLEARED'
+)"""
+
+# [B] PIPE_ETL_CYCLE_NOT_STARTED raise: the reviewed statement, comments stripped (compared whitespace-normalized)
+_B_RAISE = """
+INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+    (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+WITH cfg AS (
+    SELECT RULE_ID, SEVERITY, GREATEST(ROUND(COALESCE(THRESHOLD_NUM, 120)), 0) AS GRACE_MIN
+    FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
+    WHERE RULE_ID = 'PIPE_ETL_CYCLE_NOT_STARTED' AND ENABLED
+),
+cyc AS (
+    SELECT CYCLE_DATE, MIN(FIRST_START) AS CYCLE_START_AT
+    FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS
+    WHERE WORKFLOW_NAME = :start_wf
+    GROUP BY CYCLE_DATE
+),
+anchor AS (
+    SELECT CYCLE_DATE, CYCLE_START_AT
+    FROM cyc
+    QUALIFY ROW_NUMBER() OVER (ORDER BY CYCLE_DATE DESC) = 1
+),
+missed AS (
+    SELECT c.RULE_ID, c.SEVERITY, c.GRACE_MIN, a.CYCLE_START_AT AS LAST_START,
+           MAX(IFF(DATEADD('minute', 7 * 1440 + c.GRACE_MIN, p.CYCLE_START_AT) < :now_ct,
+                   p.CYCLE_DATE, NULL)) AS REF_NIGHT,
+           MAX(IFF(DATEADD('minute', 7 * 1440 + c.GRACE_MIN, p.CYCLE_START_AT) < :now_ct,
+                   p.CYCLE_START_AT, NULL)) AS REF_START
+    FROM cfg c
+    CROSS JOIN anchor a
+    JOIN cyc p
+      ON p.CYCLE_DATE BETWEEN DATEADD('day', -6, a.CYCLE_DATE)
+                          AND DATEADD('day', -7, DATE(DATEADD('hour', -12, :now_ct)))
+    GROUP BY c.RULE_ID, c.SEVERITY, c.GRACE_MIN, a.CYCLE_START_AT
+)
+SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+FROM (
+SELECT m.RULE_ID, 'ALL', m.SEVERITY,
+       LEFT('Nightly ETL cycle did not start: ' || :start_wf || ' has no run for the '
+            || TO_VARCHAR(DATEADD('day', 7, m.REF_NIGHT)) || ' night', 300),
+       LEFT('It kicked off at ' || TO_VARCHAR(m.REF_START, 'HH24:MI') || ' on the same night last week; '
+            || 'now ' || FLOOR(DATEDIFF('minute', DATEADD('day', 7, m.REF_START), :now_ct) / 60) || 'h '
+            || MOD(DATEDIFF('minute', DATEADD('day', 7, m.REF_START), :now_ct), 60) || 'm past that (grace '
+            || m.GRACE_MIN || ' min). Last cycle start ' || TO_VARCHAR(m.LAST_START, 'YYYY-MM-DD HH24:MI')
+            || ' (Central). Nothing downstream loads until the starter runs - check the Informatica '
+            || 'scheduler / integration service. A planned no-run night (holiday, freeze) = resolve as '
+            || 'EXPECTED. Operations > Pipeline SLA > Tonight at a glance shows the same Cycle start: Overdue.', 2000),
+       DATEDIFF('minute', DATEADD('day', 7, m.REF_START), :now_ct),
+       'PIPE_ETL_CYCLE_NOT_STARTED|' || TO_VARCHAR(DATEADD('day', 7, m.REF_NIGHT))
+FROM missed m
+WHERE m.REF_NIGHT IS NOT NULL
+  AND DATEDIFF('second', m.LAST_START, :now_ct) > 86400 + m.GRACE_MIN * 60
+) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+WHERE NOT EXISTS (
+    SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+    WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+)"""
+
+# [C] PIPE_ETL_CYCLE_LATE raise (every clause the _late model encodes): the reviewed statement, comments stripped (compared whitespace-normalized)
+_C_RAISE = f"""
+INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+    (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+WITH cfg AS (
+    SELECT RULE_ID, SEVERITY, GREATEST(ROUND(COALESCE(THRESHOLD_NUM, 60)), 0) AS LEAD_MIN
+    FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
+    WHERE RULE_ID = 'PIPE_ETL_CYCLE_LATE' AND ENABLED
+),
+starts AS (
+    SELECT CYCLE_DATE, MIN(FIRST_START) AS CYCLE_START
+    FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS
+    WHERE WORKFLOW_NAME = :start_wf
+    GROUP BY CYCLE_DATE
+),
+ends AS (
+    SELECT t.CYCLE_DATE,
+           COUNT(*) AS TERM_TASKS,
+           MAX(COALESCE(t.FIRST_OK_END, t.TERMINAL_END)) AS CYCLE_FINISH,
+           COUNT_IF(t.FIRST_OK_END IS NULL
+                    AND UPPER(t.TERMINAL_STATUS) IN ({_FAILED_SQL})) AS N_FAILED,
+           COUNT_IF(t.FIRST_OK_END IS NULL
+                    AND t.TERMINAL_END IS NULL
+                    AND (t.TERMINAL_STATUS IS NULL
+                         OR UPPER(t.TERMINAL_STATUS) NOT IN ({_FAILED_SQL}))) AS N_RUNNING
+    FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS t
+    JOIN starts s ON s.CYCLE_DATE = t.CYCLE_DATE
+                 AND (t.FIRST_OK_END IS NOT NULL OR t.TERMINAL_START >= s.CYCLE_START)
+    WHERE t.WORKFLOW_NAME = :end_wf
+    GROUP BY t.CYCLE_DATE
+),
+nights AS (
+    SELECT s.CYCLE_DATE, s.CYCLE_START, e.CYCLE_FINISH,
+           COALESCE(e.TERM_TASKS, 0) AS TERM_TASKS,
+           COALESCE(e.N_FAILED, 0) AS N_FAILED,
+           COALESCE(e.N_RUNNING, 0) AS N_RUNNING,
+           IFF(DATEADD('minute', :target_off, DATE_TRUNC('day', s.CYCLE_START)) > s.CYCLE_START,
+               DATEADD('minute', :target_off, DATE_TRUNC('day', s.CYCLE_START)),
+               DATEADD('minute', :target_off + 1440, DATE_TRUNC('day', s.CYCLE_START))) AS DL_T
+    FROM starts s
+    LEFT JOIN ends e ON e.CYCLE_DATE = s.CYCLE_DATE
+),
+latest AS (
+    SELECT MAX(CYCLE_DATE) AS CYCLE_DATE FROM nights
+),
+term_lw AS (
+    SELECT COUNT(*) AS N
+    FROM nights n
+    JOIN latest l ON n.CYCLE_DATE = DATEADD('day', -7, l.CYCLE_DATE)
+    WHERE n.TERM_TASKS > 0
+),
+hist AS (
+    SELECT MEDIAN(DATEDIFF('second', n.CYCLE_START, n.CYCLE_FINISH)) AS MED_CYCLE_SEC,
+           MIN(n.TERM_TASKS) AS MIN_TERM_TASKS,
+           COUNT(*) AS N_HIST
+    FROM (
+        SELECT n.*
+        FROM nights n
+        JOIN latest l ON n.CYCLE_DATE < l.CYCLE_DATE
+        WHERE n.CYCLE_FINISH IS NOT NULL AND n.N_FAILED = 0 AND n.N_RUNNING = 0
+        QUALIFY ROW_NUMBER() OVER (ORDER BY n.CYCLE_DATE DESC) <= 14
+    ) n
+),
+tonight AS (
+    SELECT n.CYCLE_DATE, n.CYCLE_START, n.CYCLE_FINISH, n.TERM_TASKS, n.N_FAILED, n.N_RUNNING,
+           n.DL_T,
+           DATEADD('minute', :breach_off - :target_off, n.DL_T) AS DL_H,
+           h.MED_CYCLE_SEC, h.N_HIST,
+           (n.CYCLE_FINISH IS NOT NULL AND n.N_FAILED = 0 AND n.N_RUNNING = 0
+            AND n.TERM_TASKS >= COALESCE(h.MIN_TERM_TASKS, 1)) AS IS_COMPLETE,
+           IFF(h.N_HIST >= 4,
+               GREATEST(:now_ct, DATEADD('second', ROUND(h.MED_CYCLE_SEC), n.CYCLE_START)),
+               NULL) AS PROJECTED_FINISH
+    FROM nights n
+    JOIN latest l ON n.CYCLE_DATE = l.CYCLE_DATE
+    CROSS JOIN hist h
+),
+graded AS (
+    SELECT t.CYCLE_DATE, t.CYCLE_START, t.CYCLE_FINISH, t.TERM_TASKS, t.N_FAILED, t.N_RUNNING,
+           t.DL_T, t.DL_H, t.MED_CYCLE_SEC, t.N_HIST, t.IS_COMPLETE, t.PROJECTED_FINISH,
+           c.RULE_ID, c.SEVERITY,
+           CASE
+               WHEN IFF(t.IS_COMPLETE, t.CYCLE_FINISH, :now_ct) > t.DL_H THEN 'EXH'
+               WHEN IFF(t.IS_COMPLETE, t.CYCLE_FINISH, :now_ct) > t.DL_T THEN 'CRIT'
+               WHEN NOT t.IS_COMPLETE
+                    AND (:now_ct >= DATEADD('minute', -c.LEAD_MIN, t.DL_T)
+                         OR t.PROJECTED_FINISH > t.DL_H) THEN 'WARN'
+           END AS BAND
+    FROM tonight t
+    CROSS JOIN cfg c
+    CROSS JOIN term_lw tl
+    WHERE :now_ct < DATEADD('hour', 12, t.DL_H)
+      AND NOT (t.TERM_TASKS = 0 AND COALESCE(tl.N, 0) = 0)
+)
+SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+FROM (
+SELECT g.RULE_ID, 'ALL',
+       IFF(g.BAND = 'WARN' OR g.IS_COMPLETE, g.SEVERITY, 'CRITICAL'),
+       LEFT(CASE g.BAND
+                WHEN 'EXH' THEN IFF(g.IS_COMPLETE,
+                    'Nightly ETL cycle finished ' || TO_VARCHAR(g.CYCLE_FINISH, 'HH24:MI')
+                        || ', past the ' || TO_VARCHAR(g.DL_H, 'HH24:MI') || ' hard deadline',
+                    'Nightly ETL cycle past the ' || TO_VARCHAR(g.DL_H, 'HH24:MI')
+                        || ' hard deadline and still not finished')
+                WHEN 'CRIT' THEN IFF(g.IS_COMPLETE,
+                    'Nightly ETL cycle finished ' || TO_VARCHAR(g.CYCLE_FINISH, 'HH24:MI')
+                        || ', after the ' || TO_VARCHAR(g.DL_T, 'HH24:MI') || ' target',
+                    'Nightly ETL cycle missed the ' || TO_VARCHAR(g.DL_T, 'HH24:MI')
+                        || ' target and is still not finished')
+                ELSE IFF(g.PROJECTED_FINISH > g.DL_H,
+                    'Nightly ETL cycle projected to finish ~' || TO_VARCHAR(g.PROJECTED_FINISH, 'HH24:MI')
+                        || ', past the ' || TO_VARCHAR(g.DL_H, 'HH24:MI') || ' hard deadline',
+                    'Nightly ETL cycle not finished ' || DATEDIFF('minute', :now_ct, g.DL_T)
+                        || ' min before the ' || TO_VARCHAR(g.DL_T, 'HH24:MI') || ' target')
+            END || ' (' || TO_VARCHAR(g.CYCLE_DATE) || ' night)', 300),
+       LEFT('Cycle started ' || TO_VARCHAR(g.CYCLE_START, 'YYYY-MM-DD HH24:MI') || ' (' || :start_wf
+            || '). Terminal ' || :end_wf || ': '
+            || CASE WHEN g.TERM_TASKS = 0 THEN 'not dispatched yet'
+                    WHEN g.N_FAILED > 0 THEN g.N_FAILED || ' task(s) FAILED - re-run it'
+                    WHEN g.N_RUNNING > 0 THEN g.N_RUNNING || ' task(s) still running'
+                    WHEN g.IS_COMPLETE THEN 'finished ' || TO_VARCHAR(g.CYCLE_FINISH, 'YYYY-MM-DD HH24:MI')
+                    ELSE 'only ' || g.TERM_TASKS || ' task(s) dispatched so far' END
+            || '. Typical cycle '
+            || COALESCE(FLOOR(g.MED_CYCLE_SEC / 3600) || 'h ' || MOD(FLOOR(g.MED_CYCLE_SEC / 60), 60)
+                        || 'm over ' || g.N_HIST || ' clean night(s)', 'unknown (short history)')
+            || '. Target ' || TO_VARCHAR(g.DL_T, 'HH24:MI') || ', hard deadline '
+            || TO_VARCHAR(g.DL_H, 'HH24:MI') || ' (Central). Operations > Pipeline SLA > Tonight: '
+            || 'SLA finish forecast + Tonight at a glance.', 2000),
+       IFF(g.BAND = 'WARN' AND NOT COALESCE(g.PROJECTED_FINISH > g.DL_H, FALSE), DATEDIFF('minute', :now_ct, g.DL_T), NULL),
+       'PIPE_ETL_CYCLE_LATE|' || g.BAND || '|' || TO_VARCHAR(g.CYCLE_DATE)
+FROM graded g
+WHERE g.BAND IS NOT NULL
+) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+WHERE NOT EXISTS (
+    SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+    WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+)"""
+
+_RAISE_GOLDENS = dict(zip(_RULES, (_A_RAISE, _B_RAISE, _C_RAISE), strict=True))     # body order [A], [B], [C]
+
+
+@pytest.mark.parametrize("rule", _RULES)
+def test_v156_rule_inserts_are_pinned_whole(rule):
+    stmt = _raise_statements()[_RULES.index(rule)]
+    assert f"'{rule}|' ||" in stmt, "the statement for this rule (its dedupe key)"
+    head, ctes, tail = _with_parts(stmt)
+    want_head, want_ctes, want_tail = _with_parts(_RAISE_GOLDENS[rule])
+    assert [n for n, _ in ctes] == [n for n, _ in want_ctes], rule
+    for (name, got), (_, want) in zip(ctes, want_ctes, strict=True):
+        assert got == want, f"{rule}: CTE {name} changed (compared whole, to its closing paren)"
+    assert head == want_head, rule
+    assert tail == want_tail, f"{rule}: the outer select changed"
+    assert _norm(stmt) == _norm(_RAISE_GOLDENS[rule])
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -792,25 +1112,30 @@ def _as_of(rows, now):
     return out
 
 
-def _collapse(rows, *, bounded: bool = True):
+def _collapse(rows, *, bound: str = "last", start_wf: str = _S):
     """ins_sql: attempts -> one row per (night, workflow, task). FIRST_OK_END = the earliest clean (ended, not a
-    failed status; NULL status reads clean) finish among the attempts that started at/after the night's cycle
-    start (cs: MIN starter start of that night; no starter run that night -> NULL). bounded=False models the
-    naive, unbounded MIN the review rejected."""
+    failed status; NULL status reads clean) finish among the attempts that started at/after the night's FIRST
+    kickoff (cs.CYC_START = MIN starter start) and ended at/after its LAST kickoff (cs.CYC_LAST_START = MAX
+    starter start); no starter run that night -> NULL (a NULL bound never compares true). bound="first" models
+    the round-1 SQL (the first-kickoff bound alone), bound="none" the naive unbounded MIN the round-1 review
+    rejected. start_wf is the bound starter name (the '?' of cs)."""
+    assert bound in ("last", "first", "none")
     groups: dict = {}
     for wf, task, status, start, end in rows:
         groups.setdefault(((start - timedelta(hours=12)).date(), wf, task), []).append((status, start, end))
-    cyc: dict = {}
+    cyc_first: dict = {}
+    cyc_last: dict = {}
     for (night, wf, _task), att in groups.items():
-        if wf == _S:
-            first = min(a[1] for a in att)
-            cyc[night] = min(cyc.get(night, first), first)
+        if wf == start_wf:
+            lo, hi = min(a[1] for a in att), max(a[1] for a in att)
+            cyc_first[night] = min(cyc_first.get(night, lo), lo)
+            cyc_last[night] = max(cyc_last.get(night, hi), hi)
     out = []
     for (night, wf, task), att in groups.items():
         term = max(att, key=lambda a: a[2] or a[1])          # MAX_BY(.., COALESCE(end, start))
-        cs = cyc.get(night)
+        cs, cl = cyc_first.get(night), cyc_last.get(night)
         ok = [a[2] for a in att if a[2] is not None and str(a[0] or "").upper() not in _FAILED
-              and (not bounded or (cs is not None and a[1] >= cs))]
+              and (bound == "none" or (cs is not None and a[1] >= cs and (bound == "first" or a[2] >= cl)))]
         out.append({"CYCLE_DATE": night, "WORKFLOW_NAME": wf, "TASK_NAME": task, "TERMINAL_STATUS": term[0],
                     "FIRST_START": min(a[1] for a in att), "TERMINAL_START": term[1], "TERMINAL_END": term[2],
                     "FIRST_OK_END": min(ok, default=None)})
@@ -818,19 +1143,19 @@ def _collapse(rows, *, bounded: bool = True):
 
 
 def _late(tasks, now, *, filter_col="TERMINAL_START", first_ok=True, lead=60, target_off=420, breach_off=480,
-          sev="HIGH"):
+          sev="HIGH", start_wf=_S, end_wf=_T):
     """[C] PIPE_ETL_CYCLE_LATE over the cache rows -> {band, severity, metric, ...} or None. first_ok=False (with
-    filter_col) models the SQL before the FIRST_OK_END fix."""
+    filter_col) models the SQL before the FIRST_OK_END fix; start_wf / end_wf are :start_wf / :end_wf."""
     starts: dict = {}
     for t in tasks:
-        if t["WORKFLOW_NAME"] == _S:
+        if t["WORKFLOW_NAME"] == start_wf:
             d = t["CYCLE_DATE"]
             starts[d] = min(starts.get(d, t["FIRST_START"]), t["FIRST_START"])
     nights = {}
     for d, cs in starts.items():
         def done(t):
             return first_ok and t["FIRST_OK_END"] is not None
-        term = [t for t in tasks if t["WORKFLOW_NAME"] == _T and t["CYCLE_DATE"] == d
+        term = [t for t in tasks if t["WORKFLOW_NAME"] == end_wf and t["CYCLE_DATE"] == d
                 and (done(t) or t[filter_col] >= cs)]
         live = [t for t in term if not done(t)]
         failed = sum(1 for t in live if _status(t) in _FAILED)
@@ -962,6 +1287,18 @@ def test_v156_model_mirrors_the_sql_fragments():
     # the ends CTE filters the TERMINAL workflow (the model's `_T`), never the starter
     ends = _NBODY.split("ends AS (", 1)[1].split("nights AS (", 1)[0]
     assert ends.count("WHERE t.WORKFLOW_NAME = :end_wf") == 1 and ":start_wf" not in ends
+    # every [C] CTE the _late model encodes is pinned WHOLE, to its own closing paren, so a filter appended
+    # after its last fragment (review round 2: nights / tonight / hist) cannot survive
+    got, want = dict(_with_parts(_raise_statements()[2])[1]), dict(_with_parts(_C_RAISE)[1])
+    for name in ("starts", "ends", "nights", "latest", "term_lw", "hist", "tonight", "graded"):
+        assert got[name] == want[name], name
+    assert got["nights"].endswith(" AS DL_T FROM starts s LEFT JOIN ends e ON e.CYCLE_DATE = s.CYCLE_DATE)")
+    assert got["hist"].endswith(" QUALIFY ROW_NUMBER() OVER (ORDER BY n.CYCLE_DATE DESC) <= 14) n)")
+    assert got["tonight"].endswith(" AS PROJECTED_FINISH FROM nights n JOIN latest l ON n.CYCLE_DATE = l.CYCLE_DATE "
+                                   "CROSS JOIN hist h)")
+    assert got["latest"] == "latest AS (SELECT MAX(CYCLE_DATE) AS CYCLE_DATE FROM nights)"
+    assert got["graded"].endswith(" WHERE :now_ct < DATEADD('hour', 12, t.DL_H) "
+                                  "AND NOT (t.TERM_TASKS = 0 AND COALESCE(tl.N, 0) = 0))")
     # the collapse the model's _collapse mirrors
     assert _render_ins_sql() == _INS_SQL
 
@@ -1023,13 +1360,117 @@ def test_v156_model_first_ok_end_is_bounded_by_the_cycle_start():
     rerun = [(_T, task, "SUCCEEDED", datetime.combine(_TONIGHT, time(13, 0)),
               datetime.combine(_TONIGHT, time(13, 20))) for task in ("s_recon_1", "s_recon_2")]
     rows = _history() + rerun + _night(_TONIGHT, term_start=time(4, 0), term_end=None)   # real run hung
-    miss = _late(_collapse(rows), _at(7, 10))
-    assert miss and (miss["band"], miss["severity"]) == ("CRIT", "CRITICAL")
-    assert _late(_collapse(rows, bounded=False), _at(7, 10)) is None, "the naive MIN silences the real miss"
+    for bound in ("last", "first"):                    # the round-1 first-kickoff bound already held this case
+        miss = _late(_collapse(rows, bound=bound), _at(7, 10))
+        assert miss and (miss["band"], miss["severity"]) == ("CRIT", "CRITICAL"), bound
+    assert _late(_collapse(rows, bound="none"), _at(7, 10)) is None, "the naive MIN silences the real miss"
     failed = (_history() + _night(_TONIGHT, term_start=time(4, 0), term_end=time(4, 30), status="FAILED")
               + [(_T, "s_recon_1", "RUNNING", _at(9, 30), None)])
     got = _late(_collapse(_as_of(failed, _at(10, 10))), _at(10, 10))
     assert got and (got["band"], got["severity"]) == ("EXH", "CRITICAL")
+
+
+def _afternoon_chain(d: date = _TONIGHT):
+    """The WHOLE chain re-run after noon on d, keyed to night d like the real 22:00 kickoff (the ops response to
+    a failed previous night): the starter 13:00-13:05, then both terminal tasks 15:00-15:30 clean."""
+    return [(_S, "s_kickoff", "SUCCEEDED", datetime.combine(d, time(13, 0)), datetime.combine(d, time(13, 5)))] + [
+        (_T, task, "SUCCEEDED", datetime.combine(d, time(15, 0)), datetime.combine(d, time(15, 30)))
+        for task in ("s_recon_1", "s_recon_2")]
+
+
+# the real terminal run (both tasks, 04:00 start) of the night after an afternoon full-chain re-run:
+# (status, end), and what [C] raises at each hourly scan as (band, severity), None = nothing
+_REAL_RUNS = {
+    "HUNG": (("RUNNING", None), {"06:10": ("WARN", "HIGH"), "07:10": ("CRIT", "CRITICAL"),
+                                 "08:10": ("EXH", "CRITICAL"), "08:40": ("EXH", "CRITICAL")}),
+    "FAILED": (("FAILED", time(4, 30)), {"06:10": ("WARN", "HIGH"), "07:10": ("CRIT", "CRITICAL"),
+                                         "08:10": ("EXH", "CRITICAL"), "08:40": ("EXH", "CRITICAL")}),
+    "LATE": (("SUCCEEDED", time(8, 30)), {"06:10": ("WARN", "HIGH"), "07:10": ("CRIT", "CRITICAL"),
+                                          "08:10": ("EXH", "CRITICAL"), "08:40": ("EXH", "HIGH")}),
+    "ON_TIME": (("SUCCEEDED", time(5, 0)), {}),
+}
+
+
+@pytest.mark.parametrize("real", sorted(_REAL_RUNS))
+def test_v156_model_double_rerun_never_silences_the_real_run(real):
+    """Review round 2, finding 1: bounded only by the night's FIRST kickoff (MIN starter start = the 13:00
+    afternoon re-run), the 15:30 afternoon finish was each terminal task's FIRST_OK_END, so LATE read the night
+    complete all night and a hung, failed or late REAL terminal run raised nothing (no CRITICAL, no incident).
+    Bounded by the LAST kickoff too (15:30 < the real 22:00 kickoff) the afternoon finish never counts: quiet
+    before the real run, then the real run is judged."""
+    (status, end), want = _REAL_RUNS[real]
+    rows = _history() + _afternoon_chain() + _night(_TONIGHT, term_start=time(4, 0), term_end=end, status=status)
+    scans = {"20:00": datetime.combine(_TONIGHT, time(20, 0)), "23:30": datetime.combine(_TONIGHT, time(23, 30)),
+             "06:10": _at(6, 10), "07:10": _at(7, 10), "08:10": _at(8, 10), "08:40": _at(8, 40)}
+    got, old = {}, {}
+    for label, now in scans.items():
+        snap = _as_of(rows, now)
+        new, first_only = _late(_collapse(snap), now), _late(_collapse(snap, bound="first"), now)
+        got[label] = new and (new["band"], new["severity"])
+        old[label] = first_only and (first_only["band"], first_only["severity"])
+    assert got == {label: want.get(label) for label in scans}
+    assert set(old.values()) == {None}, "the round-1 first-kickoff bound alone silences the real run"
+    # the cache row itself: the afternoon finish is never FIRST_OK_END once the real kickoff ran
+    tonight = [t for t in _collapse(_as_of(rows, _at(8, 40))) if t["CYCLE_DATE"] == _TONIGHT and t["WORKFLOW_NAME"] == _T]
+    ok_end = {"HUNG": None, "FAILED": None, "LATE": _at(8, 30), "ON_TIME": _at(5, 0)}[real]
+    assert [t["FIRST_OK_END"] for t in tonight] == [ok_end, ok_end]
+    before = _collapse(_as_of(rows, datetime.combine(_TONIGHT, time(20, 0))))
+    assert [t["FIRST_OK_END"] for t in before if t["CYCLE_DATE"] == _TONIGHT and t["WORKFLOW_NAME"] == _T] == [
+        datetime.combine(_TONIGHT, time(15, 30))] * 2        # before the real kickoff it is the night's finish
+
+
+def test_v156_model_next_morning_starter_rerun_is_the_documented_loud_residual():
+    """The known edge the last-kickoff bound leaves (header): a STARTER re-run the next morning (09:00, keyed to
+    the night) is the night's last kickoff, so the 05:30 on-time finish no longer counts as FIRST_OK_END. Alone
+    it changes nothing (each terminal task's latest attempt is still its clean 04:00-05:30 run); with a terminal
+    re-run alongside, the night re-grades on that re-run -- LOUD (EXH: CRITICAL while it runs, HIGH once it
+    ends clean), never silent."""
+    on_time = _history() + _night(_TONIGHT, term_end=time(5, 30))
+    starter = [(_S, "s_kickoff", "SUCCEEDED", _at(9, 0), _at(9, 5))]
+    for now in (_at(9, 40), _at(10, 10), _at(11, 10)):
+        tasks = _collapse(_as_of(on_time + starter, now))
+        assert _late(tasks, now) is None, now
+        assert [t["FIRST_OK_END"] for t in tasks
+                if t["CYCLE_DATE"] == _TONIGHT and t["WORKFLOW_NAME"] == _T] == [None, None], now
+    rerun = [*on_time, *starter, (_T, "s_recon_1", "SUCCEEDED", _at(9, 30), _at(9, 50))]
+    running = _late(_collapse(_as_of(rerun, _at(9, 40))), _at(9, 40))
+    assert running and (running["band"], running["severity"]) == ("EXH", "CRITICAL")
+    done = _late(_collapse(_as_of(rerun, _at(10, 10))), _at(10, 10))
+    assert done and (done["band"], done["severity"]) == ("EXH", "HIGH")
+
+
+_ONE = "WF_ONE"
+
+
+def _one_workflow(rows):
+    """The same attempts under ETL_CYCLE_START_WORKFLOW = ETL_CYCLE_END_WORKFLOW (one workflow is the cycle)."""
+    return [(_ONE, task, status, start, end) for _wf, task, status, start, end in rows]
+
+
+def test_v156_model_starter_is_terminal_fails_loud_not_silent():
+    """The start = end decision (header known edges), locked. With one workflow as both starter and terminal,
+    every task start is a kickoff, so the last-kickoff bound voids a finished night on ANY next-morning re-run
+    of one of its tasks (round 1's page comes back for this configuration: EXH CRITICAL while the re-run runs).
+    The alternative -- the first-kickoff bound alone when start = end -- keeps that night quiet but lets an
+    afternoon re-run of the workflow complete the night and silence a hung real run. The SQL takes the loud
+    side: no special case (cs binds only the starter; locked in the render test)."""
+    def late(rows, now, bound="last"):
+        return _late(_collapse(_as_of(rows, now), bound=bound, start_wf=_ONE), now, start_wf=_ONE, end_wf=_ONE)
+    hist = _one_workflow(_history())
+    normal = hist + _one_workflow(_night(_TONIGHT))
+    for now in (_at(6, 10), _at(7, 10), _at(10, 10)):
+        assert late(normal, now) is None, now
+    # an afternoon re-run of the whole workflow, then the real run hangs: CRITICAL at 07:10, never silent ...
+    hung = hist + _one_workflow(_afternoon_chain() + _night(_TONIGHT, term_end=None))
+    got = late(hung, _at(7, 10))
+    assert got and (got["band"], got["severity"]) == ("CRIT", "CRITICAL")
+    assert late(hung, _at(7, 10), bound="first") is None, "the rejected special case silences the hung run"
+    # ... at the documented price: a next-morning re-run of a task of a night that finished on time pages
+    rerun = hist + _one_workflow([*_night(_TONIGHT, term_end=time(5, 30)),
+                                  (_T, "s_recon_1", "RUNNING", _at(9, 30), None)])
+    loud = late(rerun, _at(10, 10))
+    assert loud and (loud["band"], loud["severity"]) == ("EXH", "CRITICAL")
+    assert late(rerun, _at(10, 10), bound="first") is None
 
 
 def test_v156_model_weekday_only_terminal_is_not_judged():
