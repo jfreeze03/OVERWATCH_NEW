@@ -6,9 +6,9 @@
 --    A (#8 V151)  how many Terraform identity/policy drops the security queue will start showing
 --    B (#11 V153) the autobook credit-rate defect and past whole-baseline 'verified' rows
 --    C (#12)      auto-clear flags, the incident auto-declare toggle, CREDENTIALS shape, stale incidents
---    D (#10/#13)  which sources are stale today (each becomes one alert once V156 lands)
---    E (#2 V155)  CONTROL_STATUS timestamps / status words / terminal regularity / volume / owner role
---    F (#32 V157) operator-table transience, future grants, existing backup names, who runs the backup
+--    D (#10/#13)  which sources are stale today (each becomes one alert once V157 lands)
+--    E (#2 V156)  CONTROL_STATUS timestamps / status words / terminal regularity / volume / owner role
+--    F (#32 V158) operator-table transience, future grants, existing backup names, who runs the backup
 -- =====================================================================================
 USE ROLE SNOW_ACCOUNTADMINS;
 ALTER SESSION SET TIMEZONE = 'America/Chicago';   -- NTZ stamps are Central; a UTC worksheet skews every age by 5-6h
