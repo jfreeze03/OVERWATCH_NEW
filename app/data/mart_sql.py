@@ -688,13 +688,16 @@ SELECT
     DATE_TRUNC('week', RAISED_AT)::DATE AS WEEK,
     COUNT(*) AS EVENTS,
     SUM(IFF(ACK_AT IS NOT NULL, 1, 0)) AS ACKED,
-    -- codex#40 companion: a MACHINE close (V067 escalation SUPERSEDED, or the V091
-    -- auto-clear sweep marking a cleared condition AUTO_CLEARED) is NOT a human
-    -- resolution — exclude both from the RESOLVED count and MTTR so machine closes
-    -- don't pollute the operator panel.
-    SUM(IFF(RESOLVED_AT IS NOT NULL AND COALESCE(RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED'), 1, 0)) AS RESOLVED,
+    -- codex#40 companion: a MACHINE close (V067 escalation SUPERSEDED, the V091
+    -- auto-clear sweep marking a cleared condition AUTO_CLEARED, the V117 snooze
+    -- sweep's SNOOZE_SUPPRESSED, or the V156 condition-ended sweep's CONDITION_ENDED
+    -- when a SEC_CRED_EXPIRY / SEC_NEW_EXPOSURE condition goes away) is NOT a human
+    -- resolution — exclude all four from the RESOLVED count and MTTR so machine
+    -- closes don't pollute the operator panel. Ships before V156 so its first
+    -- CONDITION_ENDED close is never counted as a human resolve.
+    SUM(IFF(RESOLVED_AT IS NOT NULL AND COALESCE(RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED', 'CONDITION_ENDED'), 1, 0)) AS RESOLVED,
     ROUND(AVG(DATEDIFF('minute', RAISED_AT, ACK_AT)), 1) AS MTTA_MIN,
-    ROUND(AVG(IFF(COALESCE(RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED'),
+    ROUND(AVG(IFF(COALESCE(RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED', 'CONDITION_ENDED'),
                   DATEDIFF('minute', RAISED_AT, RESOLVED_AT), NULL)), 1) AS MTTR_MIN
 FROM {core_object("ALERT_EVENTS")}
 WHERE RAISED_AT >= DATEADD('day', -{days}, CURRENT_DATE())
@@ -1072,9 +1075,11 @@ GROUP BY NAME
 def email_notification_history(days: int = 7) -> str:
     """OVERWATCH_EMAIL send outcomes (one aggregate row; zero sends = readable + quiet).
     NOTIFICATION_HISTORY takes START_TIME => (owner probe 2026-09-24: it rejects the
-    START_TIME_RANGE_START argument ALERT_HISTORY / TASK_HISTORY use)."""
+    START_TIME_RANGE_START argument ALERT_HISTORY / TASK_HISTORY use) and rejects
+    END_TIME-START_TIME > 336h (owner probe R2), so the clamp is 13 days: a 14-day START_TIME
+    against the default END_TIME (now, evaluated later) lands just past 336h."""
     from app.logic.formulas import ACCOUNT_TIMEZONE
-    days = bounded_days(days, 14)
+    days = bounded_days(days, 13)
     _fail = "UPPER(STATUS) LIKE 'FAIL%'"
     return f"""
 SELECT COUNT_IF(UPPER(STATUS) = 'SUCCESS') AS SENT_N,
@@ -1591,7 +1596,8 @@ def resolutions_for_rule(rule_id: str, days: int = 180, limit: int = 5) -> str:
     """rec26 / CoCo Alerts #26: how the SAME rule was resolved before — the last few
     RESOLVED events for this rule with their resolution kind + note, newest first, so
     the drawer offers a playbook from the account's own history instead of generic
-    guidance. SUPERSEDED closes are excluded (they carry no human decision). Rule id
+    guidance. Machine closes (SUPERSEDED / AUTO_CLEARED / SNOOZE_SUPPRESSED / CONDITION_ENDED)
+    are excluded (they carry no human decision). Rule id
     validated (identifier allowlist)."""
     import re as _re
 
@@ -1617,7 +1623,7 @@ LEFT JOIN (
 ) a ON a.EVENT_ID = e.EVENT_ID
 WHERE e.RULE_ID = {sql_literal(rid)}
   AND e.STATUS = 'RESOLVED'
-  AND COALESCE(e.RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED')
+  AND COALESCE(e.RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED', 'CONDITION_ENDED')
   AND e.RESOLVED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
 ORDER BY e.RESOLVED_AT DESC
 LIMIT {cap}
@@ -1636,9 +1642,10 @@ def rule_precision(days: int = 90) -> str:
     return f"""
 SELECT
     RULE_ID,
-    -- codex#40 companion: exclude machine SUPERSEDED closes so RESOLVED_EVENTS ties to the
-    -- ACTIONED+NOISE+EXPECTED+UNTAGGED buckets (PRECISION_PCT was already unaffected).
-    COUNT_IF(COALESCE(RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED')) AS RESOLVED_EVENTS,
+    -- codex#40 companion: exclude machine closes (SUPERSEDED / AUTO_CLEARED / SNOOZE_SUPPRESSED /
+    -- CONDITION_ENDED) so RESOLVED_EVENTS ties to the ACTIONED+NOISE+EXPECTED+UNTAGGED buckets
+    -- (PRECISION_PCT was already unaffected).
+    COUNT_IF(COALESCE(RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED', 'CONDITION_ENDED')) AS RESOLVED_EVENTS,
     COUNT_IF(RESOLUTION_KIND = 'ACTIONED')            AS ACTIONED,
     COUNT_IF(RESOLUTION_KIND = 'NOISE')               AS NOISE,
     COUNT_IF(RESOLUTION_KIND = 'EXPECTED')            AS EXPECTED,

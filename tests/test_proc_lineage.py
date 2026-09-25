@@ -1,5 +1,10 @@
 """Proc lineage guard: a re-derived proc must be derived from its IMMEDIATELY PREVIOUS definer.
 
+"Proc" here means any re-definable DBA_MAINT_DB.OVERWATCH object: PROCEDURE, VIEW or FUNCTION
+(SECURE optional). Views and UDFs joined in wave 2a: V_SECURITY_EXCEPTION_QUEUE and
+MART_SOURCE_FRESHNESS are re-derived exactly like procs, so a wrong-base view silently drops an
+intervening version's predicate the same way (V088 re-derived the view "from V075" past V080).
+
 Round 13's defect (fixed by V148): V123 re-derived SP_REFRESH_EXEC_BOARD "from V073" while the
 live definer was V079, silently dropping V079's CoCo/CoWork AI-rate predicate and mispricing
 Cortex Code on the exec board. Each migration's own byte-lock compares against the base the
@@ -33,9 +38,14 @@ _HISTORICAL_WAIVERS: dict[tuple[int, str], str] = {
     (123, "SP_REFRESH_EXEC_BOARD"): (
         "declared V073, true previous definer V079 -- the round-13 defect: dropped V079's CoCo/CoWork "
         "AI predicate; repaired forward by V148 (re-derived from V123 with the predicate restored)."),
+    (88, "V_SECURITY_EXCEPTION_QUEUE"): (
+        "declared V075, true previous definer V080 -- deliberate: V088 generalized V080's fixed 18-role "
+        "list to TF_* (a supersede, nothing dropped)."),
 }
 
-_PROC_RE = re.compile(r"CREATE\s+OR\s+REPLACE\s+PROCEDURE\s+DBA_MAINT_DB\.OVERWATCH\.(\w+)\s*\(")
+# wave 2a: VIEW / FUNCTION (SECURE optional) are guarded like procs. A view opens "AS", a proc/UDF "(".
+_PROC_RE = re.compile(
+    r"CREATE\s+OR\s+REPLACE\s+(?:SECURE\s+)?(?:PROCEDURE|VIEW|FUNCTION)\s+DBA_MAINT_DB\.OVERWATCH\.(\w+)\s*(?:\(|AS\b)")
 _MARK_RE = re.compile(r"^-- >>> derived:(\w+)(.*)$", re.M)
 _MARK_BASE_RE = re.compile(r"\bfrom\s+V(\d{3})\b|^\s*\(\s*V(\d{3})\b")
 _CHAIN = r"V(\d{3})((?:\s*->\s*V\d{3})*)"
@@ -151,6 +161,13 @@ def test_lineage_parser_is_not_vacuous():
     assert by[(149, "SP_LOAD_QH_EXTRACT")]["prev"] == 94
     assert by[(133, "SP_ANOMALY_SWEEP")]["claims"] == [132]      # chain "V122->V132": last hop
     assert by[(91, "SP_ALERT_SCAN")]["claims"] == [87]           # marker beats the carried V087 header prose
+    # wave 2a: views and UDFs are tracked (V080's view marker is right; V088's is the waived supersede)
+    assert by[(80, "V_SECURITY_EXCEPTION_QUEUE")]["claims"] == [75]
+    assert by[(80, "V_SECURITY_EXCEPTION_QUEUE")]["prev"] == 75
+    assert by[(88, "V_SECURITY_EXCEPTION_QUEUE")]["claims"] == [75]
+    assert by[(88, "V_SECURITY_EXCEPTION_QUEUE")]["prev"] == 80
+    assert by[(45, "MART_SOURCE_FRESHNESS")]["prev"] == 43
+    assert by[(44, "COMPANY_FOR_USER")]["prev"] == 19
 
 
 _BASE = ("CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_X()\nRETURNS VARCHAR\n"
@@ -171,6 +188,27 @@ def test_synthetic_marker_beats_prose_and_waiver_escapes():
     waived = {10: _BASE, 20: _BASE,
               30: "-- LINEAGE-WAIVER: SP_X V020 was reverted by hand\n-- >>> derived:SP_X  (from V010)\n" + _BASE}
     assert not _violations(waived, {})
+
+
+def test_synthetic_views_and_functions_are_guarded():
+    """wave 2a: VIEW, SECURE VIEW and FUNCTION re-derivations get the same base check and the same
+    post-horizon fail-closed marker rule as procs."""
+    shapes = {
+        "V_X": "CREATE OR REPLACE VIEW DBA_MAINT_DB.OVERWATCH.V_X AS\nSELECT 1 AS A;\n",
+        "V_S": "CREATE OR REPLACE SECURE VIEW DBA_MAINT_DB.OVERWATCH.V_S\nAS SELECT 1 AS A;\n",
+        "F_X": "CREATE OR REPLACE FUNCTION DBA_MAINT_DB.OVERWATCH.F_X(A VARCHAR)\nRETURNS VARCHAR\nAS 'A';\n",
+    }
+    hi = _FAIL_CLOSED_ABOVE + 1
+    for name, body in shapes.items():
+        assert _PROC_RE.findall(body) == [name]
+        wrong = {10: body, 20: body, 30: f"-- >>> derived:{name}  (from V010; fix)\n" + body}
+        v = _violations(wrong, {})
+        assert v and f"V030 {name}" in v[0] and "V020" in v[0]
+        assert not _violations({10: body, 20: body, 30: f"-- >>> derived:{name}  (from V020; fix)\n" + body}, {})
+        assert _violations({10: body, hi: "-- touched\n" + body}, {}), f"{name}: post-horizon needs a marker"
+    # the full (greedy) name is captured when AS follows it; a TABLE is never a tracked definer
+    assert _PROC_RE.findall("CREATE OR REPLACE VIEW DBA_MAINT_DB.OVERWATCH.ASSET_V AS SELECT 1") == ["ASSET_V"]
+    assert not _PROC_RE.findall("CREATE OR REPLACE TABLE DBA_MAINT_DB.OVERWATCH.T_X AS SELECT 1")
 
 
 def test_synthetic_fail_closed_above_horizon():
