@@ -12,7 +12,8 @@
 --   OVERWATCH_BAK.<T>_OWBAK_D<yyyymmdd> (Central day). Sundays also clone <T>_OWBAK_W<yyyymmdd> from
 --   that D generation and run the V089 <T>_BAK_LAST statement unchanged (still weekly). A table
 --   missing on this install is a logged skip, not a failure.
--- * Backup-vs-source row counts go to the new OPERATOR_BACKUP_LOG (the proc trims it at 400 days).
+-- * Backup-vs-source row counts go to the new OPERATOR_BACKUP_LOG, one CLONED row per generation (the
+--   daily D; Sundays also the weekly W). The proc trims the log at 400 days.
 -- * Prune: newest SETTINGS BACKUP_KEEP_DAILY (14) / BACKUP_KEEP_WEEKLY (8) generations per table and
 --   kind (floors 7 / 4, ceilings 60 / 52). Only TRANSIENT base tables in OVERWATCH_BAK whose whole
 --   name is one of the 25 + _OWBAK_[DW] + 8 digits, dated before today, re-checked before each DROP.
@@ -30,6 +31,9 @@
 -- CLONE back into a permanent table, and a CLONE restore would re-apply the schema FUTURE grants.
 -- The tail starts the first generation through the TASK (asynchronous; it runs as SYSTEM, inside the
 -- carve-out, keyed on the Central day whatever the worksheet zone). Nothing is pruned on day 1.
+-- DR replay (schema gone, or a factory reset): apply V001..V157, restore the operator tables
+-- (SETTINGS first), THEN this file. Its tail backs up whatever the tables hold and prunes with the
+-- retention SETTINGS holds (RUNBOOK section 16 step 3).
 -- Owner applies in Snowsight after V157. This file never runs from the app.
 -- Rollback: V089:27-71 proc, ALTER TASK ... SET SCHEDULE = 'USING CRON 40 5 * * 0 America/Chicago',
 -- and the V151 view.
@@ -195,9 +199,10 @@ BEGIN
         END IF;
     END FOR;
 
-    -- Row counts: INFORMATION_SCHEMA metadata only, no table scan. One CLONED row per generation
-    -- taken today, backup vs source, so a restore can pick a generation on evidence. Isolated: a
-    -- failure here never blocks the prune, the freshness stamp or the RETURN.
+    -- Row counts: INFORMATION_SCHEMA metadata only, no table scan. One CLONED row per OVERWATCH_BAK
+    -- generation taken today (the daily D; on Sundays also the weekly W), backup vs source, so a
+    -- restore can pick any kept generation on evidence (the Sunday *_BAK_LAST pointer is not logged).
+    -- Isolated: a failure here never blocks the prune, the freshness stamp or the RETURN.
     BEGIN
         INSERT INTO DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG
             (RUN_ID, GENERATION, SOURCE_TABLE, BACKUP_TABLE, ACTION, ROW_COUNT, SOURCE_ROW_COUNT, BYTES)
@@ -208,9 +213,23 @@ BEGIN
          AND b.TABLE_NAME = s.TABLE_NAME || '_OWBAK_' || :gen_d
         WHERE b.TABLE_SCHEMA = 'OVERWATCH_BAK'
           AND REGEXP_LIKE(b.TABLE_NAME, :prune_re);
+        IF (is_sunday) THEN
+            -- The weekly generation outlives its D twin (kept in weeks, not days), so it gets its own
+            -- CLONED row: once the D generation is pruned, the log still names a table that exists.
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG
+                (RUN_ID, GENERATION, SOURCE_TABLE, BACKUP_TABLE, ACTION, ROW_COUNT, SOURCE_ROW_COUNT, BYTES)
+            SELECT :run_id, :gen_w, s.TABLE_NAME, b.TABLE_NAME, 'CLONED', b.ROW_COUNT, s.ROW_COUNT, b.BYTES
+            FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES b
+            JOIN DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES s
+              ON s.TABLE_SCHEMA = 'OVERWATCH' AND s.TABLE_TYPE = 'BASE TABLE'
+             AND b.TABLE_NAME = s.TABLE_NAME || '_OWBAK_' || :gen_w
+            WHERE b.TABLE_SCHEMA = 'OVERWATCH_BAK'
+              AND REGEXP_LIKE(b.TABLE_NAME, :prune_re);
+        END IF;
+        -- The freshness ROW_COUNT is the daily generation's rows only (never doubled on a Sunday).
         SELECT COALESCE(SUM(ROW_COUNT), 0) INTO :total_rows
           FROM DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG
-         WHERE RUN_ID = :run_id AND ACTION = 'CLONED';
+         WHERE RUN_ID = :run_id AND ACTION = 'CLONED' AND GENERATION = :gen_d;
     EXCEPTION
         WHEN OTHER THEN
             emsg := SQLERRM;

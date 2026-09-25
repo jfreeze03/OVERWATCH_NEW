@@ -3,10 +3,14 @@
 SP_BACKUP_OPERATOR_TABLES (re-derived from V089, its current definer) clones the 25 operator tables every
 day to immutable TRANSIENT ``DBA_MAINT_DB.OVERWATCH_BAK.<T>_OWBAK_D<yyyymmdd>`` generations (Sundays also
 ``_OWBAK_W``, cloned from the D generation, plus V089's own weekly ``<T>_BAK_LAST`` statement), logs row
-counts to OPERATOR_BACKUP_LOG, prunes to SETTINGS BACKUP_KEEP_DAILY / BACKUP_KEEP_WEEKLY (floors 7 / 4) and
-stamps SOURCE_FRESHNESS_STATE 'OPERATOR_BACKUP_DAILY' only on a clean run. The same file re-derives
-V_SECURITY_EXCEPTION_QUEUE from V151 with one carve-out for the task's own prune DROPs. Byte-locked to
-outputs/gen_v158.py.
+counts to OPERATOR_BACKUP_LOG (one CLONED row per generation, the Sunday W included), prunes to SETTINGS
+BACKUP_KEEP_DAILY / BACKUP_KEEP_WEEKLY (floors 7 / 4) and stamps SOURCE_FRESHNESS_STATE
+'OPERATOR_BACKUP_DAILY' only on a clean run. The same file re-derives V_SECURITY_EXCEPTION_QUEUE from V151
+with one carve-out for the task's own prune DROPs. Byte-locked to outputs/gen_v158.py.
+
+The proc's load-bearing shapes (the prune candidate query, the Sunday-only W generation, the fail-open
+metadata probe, the W row-count arm) are asserted by ``_lock_*`` helpers, and
+``test_v158_locks_kill_their_mutations`` proves each helper rejects the mutation it exists to catch.
 
 The wave-tip pins at the bottom (validate 'V001..V158 applied', the DEPLOYMENT/README list lines and the
 admin _EXPECTED_MIGRATIONS[158] entry) are written by the wave integrator; they fail until then.
@@ -90,6 +94,122 @@ def _live(text: str) -> str:
 def _block(text: str, opener: str, closer: str) -> str:
     i = text.index(opener)
     return text[i:text.index(closer, i) + len(closer)]
+
+
+# The daily D and the Sunday-only W generation statements, exactly as the proc carries them.
+_GEN_D_STMT = ("EXECUTE IMMEDIATE 'CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH_BAK.' || :tname ||\n"
+               "                                  '_OWBAK_' || :gen_d || ' CLONE DBA_MAINT_DB.OVERWATCH.' || :tname;")
+_GEN_W_STMT = ("EXECUTE IMMEDIATE 'CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH_BAK.' || :tname ||\n"
+               "                                      '_OWBAK_' || :gen_w || ' CLONE DBA_MAINT_DB.OVERWATCH_BAK.' || "
+               ":tname ||\n                                      '_OWBAK_' || :gen_d;")
+_SUNDAY_OPEN = "                IF (is_sunday) THEN\n"      # the per-table loop's Sunday branch
+_SUNDAY_CLOSE = "                END IF;\n"
+
+# The metadata probe fails OPEN: a probe error means "attempt the clone" (V089 behavior), so an unreadable
+# INFORMATION_SCHEMA surfaces as clone_failed, never as 25 silent SKIPPED_MISSING rows.
+_PROBE = (
+    "        present := 1;\n"
+    "        BEGIN\n"
+    "            SELECT COUNT(*) INTO :present\n"
+    "              FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES\n"
+    "             WHERE TABLE_SCHEMA = 'OVERWATCH' AND TABLE_NAME = :tname\n"
+    "               AND TABLE_TYPE = 'BASE TABLE';\n"
+    "        EXCEPTION\n"
+    "            WHEN OTHER THEN\n"
+    "                present := 1;\n"
+    "        END;\n"
+    "        IF (present = 0) THEN\n"
+)
+
+# The prune candidate query, whitespace-normalized. Every token is load-bearing: AND -> OR in the QUALIFY
+# drops every generation older than today; < -> <= drops today's; ASC / >= / a lost GEN_KIND partition /
+# swapped keeps shift which generations survive.
+_QUALIFY = ("QUALIFY g.GEN_DAY < :day_ct AND ROW_NUMBER() OVER (PARTITION BY g.BASE_NAME, g.GEN_KIND "
+            "ORDER BY g.GEN_DAY DESC) > IFF(g.GEN_KIND = 'D', :keep_d, :keep_w)")
+_PRUNE_CANDIDATE = _norm("""
+res := (
+    SELECT g.TABLE_NAME
+    FROM (
+        SELECT TABLE_NAME,
+               LEFT(TABLE_NAME, LENGTH(TABLE_NAME) - 16) AS BASE_NAME,
+               SUBSTR(TABLE_NAME, LENGTH(TABLE_NAME) - 8, 1) AS GEN_KIND,
+               TRY_TO_DATE(RIGHT(TABLE_NAME, 8), 'YYYYMMDD') AS GEN_DAY
+        FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_CATALOG = 'DBA_MAINT_DB'
+          AND TABLE_SCHEMA = 'OVERWATCH_BAK'
+          AND TABLE_TYPE = 'BASE TABLE'
+          AND IS_TRANSIENT = 'YES'
+          AND REGEXP_LIKE(TABLE_NAME, :prune_re)
+    ) g
+    WHERE g.GEN_DAY IS NOT NULL
+    QUALIFY g.GEN_DAY < :day_ct
+        AND ROW_NUMBER() OVER (PARTITION BY g.BASE_NAME, g.GEN_KIND ORDER BY g.GEN_DAY DESC)
+            > IFF(g.GEN_KIND = 'D', :keep_d, :keep_w)
+    ORDER BY g.TABLE_NAME
+);""")
+assert _QUALIFY in _PRUNE_CANDIDATE
+
+# The row-count block (comments dropped, whitespace-normalized): the D row every run, the W row inside
+# IF (is_sunday) keyed on gen_w, and the freshness ROW_COUNT summed over the D generation only.
+_LOG_BLOCK = _norm("""
+BEGIN
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG
+        (RUN_ID, GENERATION, SOURCE_TABLE, BACKUP_TABLE, ACTION, ROW_COUNT, SOURCE_ROW_COUNT, BYTES)
+    SELECT :run_id, :gen_d, s.TABLE_NAME, b.TABLE_NAME, 'CLONED', b.ROW_COUNT, s.ROW_COUNT, b.BYTES
+    FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES b
+    JOIN DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES s
+      ON s.TABLE_SCHEMA = 'OVERWATCH' AND s.TABLE_TYPE = 'BASE TABLE'
+     AND b.TABLE_NAME = s.TABLE_NAME || '_OWBAK_' || :gen_d
+    WHERE b.TABLE_SCHEMA = 'OVERWATCH_BAK'
+      AND REGEXP_LIKE(b.TABLE_NAME, :prune_re);
+    IF (is_sunday) THEN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG
+            (RUN_ID, GENERATION, SOURCE_TABLE, BACKUP_TABLE, ACTION, ROW_COUNT, SOURCE_ROW_COUNT, BYTES)
+        SELECT :run_id, :gen_w, s.TABLE_NAME, b.TABLE_NAME, 'CLONED', b.ROW_COUNT, s.ROW_COUNT, b.BYTES
+        FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES b
+        JOIN DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES s
+          ON s.TABLE_SCHEMA = 'OVERWATCH' AND s.TABLE_TYPE = 'BASE TABLE'
+         AND b.TABLE_NAME = s.TABLE_NAME || '_OWBAK_' || :gen_w
+        WHERE b.TABLE_SCHEMA = 'OVERWATCH_BAK'
+          AND REGEXP_LIKE(b.TABLE_NAME, :prune_re);
+    END IF;
+    SELECT COALESCE(SUM(ROW_COUNT), 0) INTO :total_rows
+      FROM DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG
+     WHERE RUN_ID = :run_id AND ACTION = 'CLONED' AND GENERATION = :gen_d;
+EXCEPTION
+    WHEN OTHER THEN
+        emsg := SQLERRM;
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+            (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'BackupOperatorTables', 'backup_log_failed', LEFT(:emsg, 2000),
+               'row-count log ' || :gen_d || ' (OPERATOR_BACKUP_DAILY): generations taken, counts not logged', CURRENT_ROLE();
+END;""")
+
+
+def _lock_prune_candidate(new: str) -> None:
+    cand = _block(new, "res := (", "\n        );")
+    assert _QUALIFY in _norm(cand), "the prune QUALIFY connective / window / keep drifted"
+    assert _norm(cand) == _PRUNE_CANDIDATE, "the prune candidate query drifted from its golden"
+
+
+def _lock_sunday_cadence(new: str) -> None:
+    sunday = _block(new, _SUNDAY_OPEN, _SUNDAY_CLOSE)
+    assert new.count(_GEN_W_STMT) == 1 and _GEN_W_STMT in sunday, "the W generation is cloned on Sundays only"
+    assert new.count(_GEN_D_STMT) == 1 and _GEN_D_STMT not in sunday, "the D generation is cloned every day"
+    assert new.index(_GEN_D_STMT) < new.index(_SUNDAY_OPEN), "W clones from today's D, so D comes first"
+
+
+def _lock_probe_fails_open(new: str) -> None:
+    # two assignments: the pre-probe default AND the EXCEPTION handler (the one that makes it fail open)
+    assert new.count("present := 1;") == 2 and "present := 0;" not in new
+    assert new.count(_PROBE) == 1, "the metadata probe must fail OPEN (handler sets present := 1)"
+
+
+def _lock_weekly_generation_logged(new: str) -> None:
+    log = _block(new, "    -- Row counts:", "    -- Prune:")
+    assert _norm(_live(log)) == _LOG_BLOCK, "the row-count block drifted from its golden"
+    assert log.index(":gen_d, s.TABLE_NAME") < log.index("        IF (is_sunday) THEN\n") \
+        < log.index(":gen_w, s.TABLE_NAME")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -177,12 +297,7 @@ def test_v158_every_dynamic_create_is_transient_and_generations_live_in_overwatc
     targets = [t for _, t in creates]
     assert targets.count("DBA_MAINT_DB.OVERWATCH_BAK.") == 2          # the D and W generations
     assert targets.count("DBA_MAINT_DB.OVERWATCH.") == 1              # V089's _BAK_LAST, nothing else
-    gen_d = ("EXECUTE IMMEDIATE 'CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH_BAK.' || :tname ||\n"
-             "                                  '_OWBAK_' || :gen_d || ' CLONE DBA_MAINT_DB.OVERWATCH.' || :tname;")
-    gen_w = ("EXECUTE IMMEDIATE 'CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH_BAK.' || :tname ||\n"
-             "                                      '_OWBAK_' || :gen_w || ' CLONE DBA_MAINT_DB.OVERWATCH_BAK.' || "
-             ":tname ||\n                                      '_OWBAK_' || :gen_d;")
-    assert new.count(gen_d) == 1 and new.count(gen_w) == 1   # W is cloned from D inside OVERWATCH_BAK
+    assert new.count(_GEN_D_STMT) == 1 and new.count(_GEN_W_STMT) == 1   # W is cloned from D in OVERWATCH_BAK
     assert "_BAK_' ||" not in new and "_BAK_2" not in new     # never the manual DR token
 
 
@@ -190,7 +305,10 @@ def test_v158_bak_last_is_v089s_statement_inside_the_sunday_branch():
     base, new = _proc(_V089), _proc(_V158)
     b = base.index("EXECUTE IMMEDIATE 'CREATE OR REPLACE TRANSIENT TABLE")
     assert _norm(base[b:base.index(";", b) + 1]) == _norm(_V089_BAK_LAST)
-    sunday = _block(new, "                IF (is_sunday) THEN\n", "                END IF;\n")
+    sunday = _block(new, _SUNDAY_OPEN, _SUNDAY_CLOSE)
+    # the weekly tier: W is cloned INSIDE IF (is_sunday) and nowhere else (a daily W + the rank prune
+    # would collapse 8 weeks of weekly retention to 8 days); D is cloned every day, before the branch
+    _lock_sunday_cadence(new)
     n = sunday.index("EXECUTE IMMEDIATE 'CREATE OR REPLACE TRANSIENT TABLE")
     assert _norm(sunday[n:sunday.index(";", n) + 1]) == _norm(_V089_BAK_LAST)
     assert new.count("_BAK_LAST CLONE") == 1, "_BAK_LAST refreshes only on Sundays (same cadence as V089)"
@@ -210,8 +328,10 @@ def test_v158_generation_naming_cadence_and_timezone():
                  "prune_re := '(' || ARRAY_TO_STRING(:tables, '|') || ')_OWBAK_[DW][0-9]{8}';"):
         assert new.count(frag) == 1, frag
     assert "CURRENT_DATE()" not in new, "the generation day is the Central day, never the session date"
-    # a missing source is a logged skip; the metadata probe fails open (V089 behavior)
-    assert "'SKIPPED_MISSING'" in new and "present := 1;" in new
+    # a missing source is a logged skip; the metadata probe fails open (V089 behavior): the EXCEPTION
+    # handler itself sets present := 1, not just the pre-probe default
+    assert "'SKIPPED_MISSING'" in new
+    _lock_probe_fails_open(new)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -230,6 +350,9 @@ def test_v158_prune_is_scoped_to_overwatch_bak_and_double_checked():
                  "ROW_NUMBER() OVER (PARTITION BY g.BASE_NAME, g.GEN_KIND ORDER BY g.GEN_DAY DESC)",
                  "> IFF(g.GEN_KIND = 'D', :keep_d, :keep_w)"):
         assert frag in cand, frag
+    # the fragments above cannot see the connective between them: lock the whole query (AND -> OR in the
+    # QUALIFY would drop every generation dated before today and void the 7 / 4 floors)
+    _lock_prune_candidate(new)
     assert "TABLE_SCHEMA = 'OVERWATCH'\n" not in cand and "'OVERWATCH' " not in cand
     assert "keep_d := LEAST(GREATEST(ROUND(keep_d), 7), 60);" in new
     assert "keep_w := LEAST(GREATEST(ROUND(keep_w), 4), 52);" in new
@@ -325,6 +448,8 @@ def test_v158_prune_rank_rule_emulated():
                  "TRY_TO_DATE(RIGHT(TABLE_NAME, 8), 'YYYYMMDD') AS GEN_DAY",
                  "RIGHT(:pname, 9), LEFT(:pname, LENGTH(:pname) - 16)"):
         assert frag in new, frag
+    # _prune below keeps `day < today and rank > keep`: tie the mirror to the SQL's connective and window
+    assert _QUALIFY in _norm(new)
     assert _sql_suffixes("OPTIMIZATION_EXPERIMENTS_OWBAK_D20260924") == (
         "OPTIMIZATION_EXPERIMENTS", "D", "20260924", "D20260924")
     assert _sql_suffixes("INCIDENTS_OWBAK_W20260920") == ("INCIDENTS", "W", "20260920", "W20260920")
@@ -352,6 +477,81 @@ def test_v158_prune_rank_rule_emulated():
     # a paused task: all generations older than today, still only rank > keep is dropped
     stale = [f"SETTINGS_OWBAK_D{(today - dt.timedelta(days=k)):%Y%m%d}" for k in range(30, 50)]
     assert len(_prune(stale, today, 14, 8)) == 6
+
+
+# ---------------------------------------------------------------------------------------------
+# mutation-kill proofs: each _lock_* helper passes on the real proc and fails on the mutation it guards
+# ---------------------------------------------------------------------------------------------
+_W_LINE = "                    " + _GEN_W_STMT + "\n"
+_D_LINE = "                " + _GEN_D_STMT + "\n"
+
+
+def _swap(old: str, new: str):
+    def mutate(text: str) -> str:
+        assert text.count(old) == 1, f"mutation anchor drifted (the proof went vacuous): {old!r}"
+        return text.replace(old, new, 1)
+    return mutate
+
+
+def _move(line: str, before: str):
+    def mutate(text: str) -> str:
+        assert text.count(line) == 1 and text.count(before) == 1, "mutation anchor drifted"
+        return text.replace(line, "", 1).replace(before, line + before, 1)
+    return mutate
+
+
+def _move_into_sunday(line: str):
+    def mutate(text: str) -> str:
+        assert text.count(line) == 1 and text.count(_SUNDAY_OPEN) == 1, "mutation anchor drifted"
+        return text.replace(line, "", 1).replace(_SUNDAY_OPEN, _SUNDAY_OPEN + line, 1)
+    return mutate
+
+
+_MUTANTS = {
+    # #26 the prune QUALIFY (C1: AND -> OR drops every generation dated before today)
+    "prune-and-to-or": (_lock_prune_candidate, _swap(
+        "QUALIFY g.GEN_DAY < :day_ct\n                AND ROW_NUMBER()",
+        "QUALIFY g.GEN_DAY < :day_ct\n                OR ROW_NUMBER()")),
+    "prune-lt-to-le": (_lock_prune_candidate, _swap("QUALIFY g.GEN_DAY < :day_ct", "QUALIFY g.GEN_DAY <= :day_ct")),
+    "prune-rank-gt-to-ge": (_lock_prune_candidate, _swap("> IFF(g.GEN_KIND = 'D'", ">= IFF(g.GEN_KIND = 'D'")),
+    "prune-order-asc": (_lock_prune_candidate, _swap("ORDER BY g.GEN_DAY DESC", "ORDER BY g.GEN_DAY ASC")),
+    "prune-partition-loses-kind": (_lock_prune_candidate, _swap(
+        "PARTITION BY g.BASE_NAME, g.GEN_KIND", "PARTITION BY g.BASE_NAME")),
+    "prune-keeps-swapped": (_lock_prune_candidate, _swap(
+        "IFF(g.GEN_KIND = 'D', :keep_d, :keep_w)", "IFF(g.GEN_KIND = 'D', :keep_w, :keep_d)")),
+    # #27 the weekly tier (C2: a W generation cloned every day collapses 8 weeks to 8 days)
+    "w-generation-every-day": (_lock_sunday_cadence, _move(_W_LINE, _SUNDAY_OPEN)),
+    "d-generation-sunday-only": (_lock_sunday_cadence, _move_into_sunday(_D_LINE)),
+    # #28 the fail-open probe (C3: a handler that fails closed skips all 25 tables silently)
+    "probe-handler-fails-closed": (_lock_probe_fails_open, _swap(
+        "            WHEN OTHER THEN\n                present := 1;", "            WHEN OTHER THEN\n                present := 0;")),
+    "probe-loses-its-default": (_lock_probe_fails_open, _swap(
+        "        present := 1;\n        BEGIN\n", "        BEGIN\n")),
+    # #11 the W CLONED row (Sunday-only, keyed on gen_w) and the D-only freshness ROW_COUNT
+    "w-log-row-every-day": (_lock_weekly_generation_logged, lambda t: _swap(
+        "        END IF;\n        -- The freshness ROW_COUNT", "        -- The freshness ROW_COUNT")(_swap(
+            ":prune_re);\n        IF (is_sunday) THEN\n", ":prune_re);\n")(t))),
+    "w-log-row-keyed-on-d": (_lock_weekly_generation_logged, _swap(
+        "SELECT :run_id, :gen_w, s.TABLE_NAME", "SELECT :run_id, :gen_d, s.TABLE_NAME")),
+    "w-log-row-joins-d": (_lock_weekly_generation_logged, _swap(
+        "|| '_OWBAK_' || :gen_w\n", "|| '_OWBAK_' || :gen_d\n")),
+    "w-log-row-dropped": (_lock_weekly_generation_logged, _swap(
+        "SELECT :run_id, :gen_w, s.TABLE_NAME, b.TABLE_NAME, 'CLONED'",
+        "SELECT :run_id, :gen_w, s.TABLE_NAME, b.TABLE_NAME, 'SKIPPED'")),
+    "freshness-rows-doubled-on-sunday": (_lock_weekly_generation_logged, _swap(
+        " AND ACTION = 'CLONED' AND GENERATION = :gen_d;", " AND ACTION = 'CLONED';")),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_MUTANTS))
+def test_v158_locks_kill_their_mutations(name):
+    lock, mutate = _MUTANTS[name]
+    real = _proc(_V158)
+    lock(real)                                        # the real proc passes the lock ...
+    mutant = mutate(real)
+    assert mutant != real
+    with pytest.raises((AssertionError, ValueError)):
+        lock(mutant)                                  # ... and the mutation it exists to catch fails it
 
 
 # ---------------------------------------------------------------------------------------------
@@ -402,6 +602,20 @@ def test_v158_log_table_counts_and_self_retention():
         assert action in new, action
     assert "DELETE FROM DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG\n     WHERE LOGGED_AT < DATEADD('day', -400," in new
     assert new.count("DELETE FROM") == 1
+
+
+def test_v158_weekly_generation_gets_its_own_cloned_row():
+    # a Sunday W generation outlives its D twin (the D is pruned on day 15), so it must be named by its own
+    # CLONED row -- else, past the daily window, the log points a restore only at dropped tables
+    new = _proc(_V158)
+    _lock_weekly_generation_logged(new)
+    log = _block(new, "    -- Row counts:", "    -- Prune:")
+    assert log.count("'CLONED', b.ROW_COUNT, s.ROW_COUNT, b.BYTES") == 2
+    # the freshness ROW_COUNT stays the daily generation's rows (never doubled on a Sunday)
+    assert "WHERE RUN_ID = :run_id AND ACTION = 'CLONED' AND GENERATION = :gen_d;" in log
+    rb = _norm(_read("RUNBOOK.md"))
+    assert "records every clone, skip and prune" not in rb
+    assert "on Sundays the weekly `_W` as its own row" in rb and "The Sunday `*_BAK_LAST` refresh is not logged" in rb
 
 
 def test_v158_schedule_moves_in_place_and_task_audit_pins_it():
@@ -486,6 +700,44 @@ def test_restore_docs_moved_to_insert_overwrite():
     assert "BACKUP_KEEP_DAILY 14 (7-60)" in rb and "BACKUP_KEEP_WEEKLY 8 (4-52)" in rb
     assert "INSERT OVERWRITE INTO <T> SELECT * FROM <T> AT(OFFSET => -3600);" in rb
     assert "OVERWATCH_BAK" in _read("docs/FULL_REBUILD.md") and "OVERWATCH_BAK" in _read("FEATURES.md")
+
+
+_DR_CHOOSER = ("SELECT TABLE_NAME, ROW_COUNT, CREATED FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES "
+               "WHERE TABLE_SCHEMA = 'OVERWATCH_BAK' ORDER BY 1;")
+_DR_SUSPEND = "ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR SUSPEND;"
+
+
+def _lock_dr_order(section: str, *, replay: str, restore: str, v158: str) -> None:
+    """A rebuild restores the operator tables BEFORE V158 is replayed: V158's tail clones whatever the
+    tables hold into an immutable generation dated that day and prunes with whatever SETTINGS holds."""
+    s = _norm(section)
+    assert "V001..V158" not in s, "a full V001..V158 replay before the restore backs up the re-seeded tables"
+    assert s.index(replay) < s.index(restore) < s.index(v158), "order: V001..V157 -> restore -> V158"
+    assert "SETTINGS first" in s, "SETTINGS first: it carries BACKUP_KEEP_* (the V158 tail prunes with it)"
+    assert _DR_CHOOSER in s, "the chooser must survive the loss (INFORMATION_SCHEMA, not the lost log)"
+    assert _DR_SUSPEND in s and "never restore from the generation dated the replay day" in s
+
+
+def test_dr_docs_restore_operator_tables_before_the_v158_replay():
+    rb, dep = _read("RUNBOOK.md"), _read("DEPLOYMENT.md")
+    step3 = rb[rb.index("3. **Schema gone:**"):rb.index("4. **Bad deploy:**")]
+    _lock_dr_order(step3, replay="**V001..V157 only**", restore="Restore the 25 operator tables",
+                   v158="Apply V158")
+    assert "OPERATOR_BACKUP_LOG` lived in OVERWATCH and is gone" in _norm(step3)
+    assert "dated BEFORE the loss" in _norm(step3)
+    dropped = dep[dep.index("- **Schema dropped:**"):dep.index("- **App broken after deploy:**")]
+    _lock_dr_order(dropped, replay="**V001..V157 only**", restore="Restore the 25 operator tables",
+                   v158="Apply V158")
+    assert "OPERATOR_BACKUP_LOG` was in OVERWATCH and is gone" in _norm(dropped)
+    fr = _read("docs/FULL_REBUILD.md")
+    reset = fr[fr.index("- If you factory-reset"):fr.index("## 4. Grants")]
+    _lock_dr_order(reset, replay="**stop after V157**", restore="INSERT OVERWRITE INTO SETTINGS",
+                   v158="Then apply V158")
+    td = _read("snowflake/teardown.sql")
+    note = _norm(td[td.index("-- To restore operator data after a factory reset"):td.index("-- C. SHARED")])
+    assert note.index("V001..V157 only") < note.index("SETTINGS first") < note.index("THEN apply V158")
+    # the migration's own header carries the same order for whoever replays the file
+    assert "apply V001..V157, restore the operator tables\n-- (SETTINGS first), THEN this file." in _V158
 
 
 def test_loader_chain_check_reads_backup_errors_and_the_30h_rule():
