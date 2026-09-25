@@ -180,6 +180,16 @@ def split_superseded(df: pd.DataFrame | None) -> tuple[pd.DataFrame, pd.DataFram
     return df[~mask], df[mask]
 
 
+def _is_true(value: object) -> bool:
+    """A Snowflake BOOLEAN cell as read back (True / 'TRUE' / 1) -> True; NULL / NaN / anything else -> False."""
+    if isinstance(value, str):
+        return value.strip().upper() in ("TRUE", "1", "YES")
+    try:
+        return False if value is None or bool(pd.isna(value)) else bool(value)
+    except (TypeError, ValueError):
+        return False
+
+
 def ledger_totals(df: pd.DataFrame, active_months: int = SAVINGS_ACTIVE_MONTHS) -> dict:
     """Estimated vs verified totals (never mixed), plus the realization story — the
     verified dollars as a share of what those verified items were originally estimated
@@ -192,11 +202,19 @@ def ledger_totals(df: pd.DataFrame, active_months: int = SAVINGS_ACTIVE_MONTHS) 
     ``active_months`` months — the ROI numerator, which does not reset when a quarter starts.
 
     Next-Fifty #5: superseded manual twins (split_superseded) are excluded from every figure and
-    disclosed separately as superseded_count / superseded_estimated_usd (not-yet-REJECTED twins)."""
+    disclosed separately as superseded_count / superseded_estimated_usd (not-yet-REJECTED twins).
+
+    Next-Fifty #11 (V153), disclosure only -- never subtracted from any figure:
+      auto_settle_pending_count -- ESTIMATED change-scan rows (SOURCE 'auto'); they settle themselves the
+        morning after their 14-day measured window closes, so they are not "awaiting proof" by hand.
+      volume_confounded_count / _usd -- VERIFIED items whose full measured window shows query volume
+        outside 0.7-1.3x of baseline (mart_sql.savings_ledger VOLUME_CONFOUNDED), and their verified $.
+    Callers pass the uncapped savings_ledger(limit=None) frame, so these are whole-ledger counts."""
     empty = {"estimated_usd": 0.0, "verified_usd": 0.0, "estimated_count": 0,
              "verified_count": 0, "verified_estimated_usd": 0.0, "realization_pct": None,
              "verified_qtd_usd": 0.0, "verified_active_usd": 0.0, "avg_days_to_verify": None,
-             "superseded_count": 0, "superseded_estimated_usd": 0.0}
+             "superseded_count": 0, "superseded_estimated_usd": 0.0,
+             "auto_settle_pending_count": 0, "volume_confounded_count": 0, "volume_confounded_usd": 0.0}
     if df is None or df.empty or "STATE" not in df.columns:
         return empty
     live, sup = split_superseded(df)
@@ -241,6 +259,10 @@ def ledger_totals(df: pd.DataFrame, active_months: int = SAVINGS_ACTIVE_MONTHS) 
     days = (verified_at - created_at).dt.total_seconds() / 86400.0
     days = days[days.notna() & (days >= 0)]
     avg_days = round(float(days.mean()), 1) if not days.empty else None
+    auto_pending = (int((est["SOURCE"].astype(str).str.strip().str.lower() == "auto").sum())
+                    if "SOURCE" in est.columns else 0)
+    _vc = (ver["VOLUME_CONFOUNDED"].map(_is_true) if "VOLUME_CONFOUNDED" in ver.columns
+           else pd.Series(False, index=ver.index)).astype(bool)
     return {
         "estimated_usd": round(float(est_usd), 2),
         "verified_usd": round(float(ver_usd), 2),
@@ -257,6 +279,9 @@ def ledger_totals(df: pd.DataFrame, active_months: int = SAVINGS_ACTIVE_MONTHS) 
         "verified_qtd_usd": round(qtd, 2),
         "verified_active_usd": round(active, 2),
         "avg_days_to_verify": avg_days,
+        "auto_settle_pending_count": auto_pending,
+        "volume_confounded_count": int(_vc.sum()),
+        "volume_confounded_usd": round(float(ver_usd_col[_vc].sum()), 2),
         **sup_fields,
     }
 

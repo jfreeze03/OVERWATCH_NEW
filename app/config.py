@@ -174,8 +174,12 @@ MAX_MART_WINDOW_DAYS = 365         # mart-backed facts (400-800d retention) hono
 # Next-Fifty #3: the ROI numerator counts a VERIFIED monthly saving until it ages past this many
 # months (a verified saving keeps saving after its quarter; revert detection is not built yet).
 SAVINGS_ACTIVE_MONTHS = 12
-# Next-Fifty #5: the app FINDING_TYPEs SP_LEDGER_AUTOBOOK (V145) ALSO books from the daily change scan
+# Next-Fifty #5: the app FINDING_TYPEs SP_LEDGER_AUTOBOOK (V145/V153) ALSO books from the daily change scan
 # (the registry's SIZE == the app's RESIZE); SCHEDULE is invisible to the scan, so the app still books it.
+# V153 (Next-Fifty #11) also ADOPTS a matching manual row for these levers instead of booking a twin.
+# MIN_CLUSTERS is scan-only: the change scan tracks it in the registry but neither the autobook nor the
+# app books it (Next-Fifty #38 is wave 3), so it is deliberately absent here and remediation.py does not
+# mirror it.
 LEDGER_AUTOBOOKED_LEVERS = ("AUTO_SUSPEND", "MAX_CLUSTERS", "RESIZE")
 # a manual row and a registry change are the same change when the scan saw it within this many days
 # (the scan runs daily 06:40 America/Chicago: <= 24h lag + one missed run)

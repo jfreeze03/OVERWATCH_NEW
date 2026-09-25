@@ -755,7 +755,11 @@ def _ledger_twin_select() -> str:
     (Next-Fifty #5, double-booking). While the auto row is still ESTIMATED it carries $0, so nothing
     double-counts yet. CHANGE_SEEN_AT is LTZ, CREATED_AT NTZ (V005) — the cast uses the session TZ,
     the account's America/Chicago, the same clock as the NTZ defaults; -1h slack covers a scan that
-    lands between the ALTER and the ledger INSERT."""
+    lands between the ALTER and the ledger INSERT.
+
+    V153 (Next-Fifty #11): SP_LEDGER_AUTOBOOK now ADOPTS a matching manual ESTIMATED row (stamps its
+    SOURCE_CHANGE_ID) when it sees the change first — its ADOPT UPDATE uses these same ON/WHERE lines —
+    so new twins arise only from history (pre-V153 rows) or from pairings the 1:1 adopt leaves unpaired."""
     levers = ", ".join(sql_literal(x) for x in sorted(LEDGER_AUTOBOOKED_LEVERS))
     return f"""SELECT m.ITEM_ID AS TWIN_ITEM_ID, r.CHANGE_ID AS TWIN_CHANGE_ID, a.ITEM_ID AS TWIN_AUTO_ITEM_ID
     FROM {core_object("SAVINGS_LEDGER")} m
@@ -785,8 +789,28 @@ def savings_ledger(limit: int | None = 500) -> str:
     Brief/Scorecard cite for the same quarter (cost-hunt5 2026-08-30).
 
     SUPERSEDED_BY_CHANGE_ID (Next-Fifty #5): set on a manual row whose change the autobook ALSO booked
-    and settled (_ledger_twin_select) — actions.split_superseded drops it from every rollup."""
+    and settled (_ledger_twin_select) — actions.split_superseded drops it from every rollup.
+
+    Full-window re-measure (Next-Fifty #11 / V153) — read-only disclosure from the linked registry row,
+    never written back:
+      MEASURED_AFTER_DAYS — the after-window the change scan measured (~14 once it closed).
+      REMEASURED_14D_MONTHLY_USD — the V153 settle recomputed on the CLOSED window: the same gate as the
+        proc (the 5 closed verdicts, window closed, credits metered after), the same $5 floor, the same
+        LBA-1 RN (a co-attributed row reads $0) and the FLOAT credit rate from SETTINGS. NULL until the
+        window closes, below the floor, or on a manual row. A row settled before V153 on ~3 days of
+        after-data (and priced at 4 instead of 3.68) keeps its stored VERIFIED_USD; this column shows the
+        full-window figure beside it.
+      VOLUME_RATIO / VOLUME_CONFOUNDED — per-day query volume after vs the 14-day baseline, and whether it
+        sits outside 0.7-1.3x (the proc's VOLUME_CONFOUNDED note; dollars are never adjusted for it).
+    The window function evaluates before ORDER BY / LIMIT, so the RN ranks the whole ledger, not the
+    capped page."""
     limit_clause = f"\nLIMIT {int(limit)}" if limit is not None else ""
+    # mirrors the V153 SP_LEDGER_AUTOBOOK settle gate on the app clock (account_today_sql, the TZ standard)
+    _closed = ("r.VERDICT IN ('IMPROVED', 'NEUTRAL', 'REGRESSED', 'NO_BASELINE', 'INSUFFICIENT_AFTER')\n"
+               f"           AND {account_today_sql()} > r.TRACKING_UNTIL\n"
+               "           AND r.AFTER_CREDITS_PER_DAY IS NOT NULL")
+    _usd = "(COALESCE(r.BASELINE_CREDITS_PER_DAY, 0) - COALESCE(r.AFTER_CREDITS_PER_DAY, 0)) * px.RATE * 30"
+    _vol = "(r.AFTER_QUERIES / NULLIF(r.AFTER_DAYS, 0)) / NULLIF(r.BASELINE_QUERIES / 14.0, 0)"
     return f"""
 WITH {_ledger_twin_cte()}
 SELECT l.ITEM_ID, l.ACTION_ID, l.CREATED_AT, l.DESCRIPTION, l.STATE, l.ESTIMATED_USD, l.VERIFIED_USD,
@@ -799,10 +823,26 @@ SELECT l.ITEM_ID, l.ACTION_ID, l.CREATED_AT, l.DESCRIPTION, l.STATE, l.ESTIMATED
                 CASE WHEN r.SETTING = 'SIZE' THEN 'RESIZE' ELSE r.SETTING END,
                 'unclassified') AS FINDING_TYPE,
        IFF(l.SOURCE_CHANGE_ID IS NULL, 'manual', 'auto') AS SOURCE,
-       t.TWIN_CHANGE_ID AS SUPERSEDED_BY_CHANGE_ID
+       t.TWIN_CHANGE_ID AS SUPERSEDED_BY_CHANGE_ID,
+       r.AFTER_DAYS AS MEASURED_AFTER_DAYS,
+       IFF({_closed},
+           IFF({_usd} >= 5,
+               IFF(ROW_NUMBER() OVER (
+                       PARTITION BY r.WAREHOUSE_NAME, r.BASELINE_CREDITS_PER_DAY,
+                                    r.AFTER_CREDITS_PER_DAY, r.AFTER_DAYS
+                       ORDER BY r.CHANGE_SEEN_AT, r.CHANGE_ID) = 1,
+                   ROUND({_usd}, 2), 0),
+               NULL),
+           NULL) AS REMEASURED_14D_MONTHLY_USD,
+       IFF({_closed},
+           ROUND({_vol}, 2), NULL) AS VOLUME_RATIO,
+       IFF({_closed},
+           {_vol} NOT BETWEEN 0.7 AND 1.3, NULL) AS VOLUME_CONFOUNDED
 FROM {core_object("SAVINGS_LEDGER")} l
 LEFT JOIN {core_object("WAREHOUSE_CHANGE_REGISTRY")} r ON l.SOURCE_CHANGE_ID = r.CHANGE_ID
 LEFT JOIN twin t ON t.TWIN_ITEM_ID = l.ITEM_ID
+CROSS JOIN (SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CREDIT_PRICE_USD', VALUE, NULL))), 3.68) AS RATE
+            FROM {core_object("SETTINGS")}) px
 ORDER BY l.CREATED_AT DESC{limit_clause}
 """
 
