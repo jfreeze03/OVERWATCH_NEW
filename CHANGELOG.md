@@ -12,9 +12,9 @@ after the 2a build (the CONDITION_ENDED exclusion) and this build are both DEPLO
   succeeds), PIPE_ETL_CYCLE_NOT_STARTED (HIGH; the Tonight "Cycle start: Overdue" test) and PIPE_ETL_CYCLE_LATE
   (WARN/CRIT/EXH bands). A terminal re-run in the afternoon no longer hides the night's completion
   (TERMINAL_START); a terminal task is done at its first clean finish from an attempt that STARTED at/after the
-  night's last kickoff (FIRST_OK_END), so a next-morning re-run never re-grades a night that finished on time
-  and an afternoon chain started before the real kickoff never hides the real run; the cache holds the 23
-  newest WHOLE nights; an undispatched terminal is judged only when it ran the same night last week, and the
+  night's last kickoff (FIRST_OK_END), so a next-morning terminal re-run never re-grades a night that finished
+  on time and an afternoon terminal attempt started before the real kickoff is never FIRST_OK_END (it still
+  reads the night complete until the real terminal dispatches); the cache holds the 23 newest WHOLE nights; an undispatched terminal is judged only when it ran the same night last week, and the
   projection uses the newest 14 clean nights (a new SQL heuristic sharing the SLA forecast settings, not the app's
   Theil-Sen trend). New objects only; nothing calls the proc until V157. **Disclosures:** a night that finished
   late stays HIGH (email, no incident); an unfinished miss is CRITICAL and auto-declares an incident; a weekday
@@ -22,8 +22,9 @@ after the 2a build (the CONDITION_ENDED exclusion) and this build are both DEPLO
   under-projected (the lead-window and CRIT/EXH legs still catch them); TASK_FAILED stays OPEN while a retry is
   still running and clears only once every final attempt finished clean; a next-morning re-run of the STARTER
   (or of any task when ETL_CYCLE_START_WORKFLOW = ETL_CYCLE_END_WORKFLOW) re-grades that night (loud, never
-  silent); the one SILENT residual is an afternoon chain whose terminal STARTS after the real kickoff (it reads
-  as a real early run and hides a hung real terminal from LATE; TASK_FAILED still reports a failed one).
+  silent); two SILENT residuals follow an afternoon re-run of the whole chain: a real cycle that hangs BEFORE
+  its terminal dispatches, and a chain whose terminal STARTS after the real kickoff (it reads as a real early
+  run and hides a hung real terminal from LATE); TASK_FAILED still reports a failed real run in both.
 - **V157 (#10a/b/d, #13, #2, #12c): one re-derivation of both alert scans from V141.** Byte-identical otherwise,
   locked by normalize-and-compare. New OPS_PIPELINE_DEGRADED (PLATFORM/HIGH) in both scans: a freshness row past
   its cadence (DAILY/METERING 30h, else 3h, including the scans' own new ALERT_SCAN_HOURLY / ALERT_SCAN_DAILY

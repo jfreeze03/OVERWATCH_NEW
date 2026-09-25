@@ -76118,9 +76118,9 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --                                  clean finish after the night's last kickoff (FIRST_OK_END: the attempt must
 --                                  START at/after it), so a re-run of it after the night finished (e.g. a
 --                                  next-morning recon re-run keyed to the same night) never re-grades an
---                                  on-time night, and an attempt that started before the real kickoff (an
---                                  afternoon re-run of the whole chain, even one running across the kickoff)
---                                  is never its FIRST_OK_END;
+--                                  on-time night, and once the real kickoff runs an attempt that started
+--                                  before it (an afternoon re-run of the whole chain, even one running across
+--                                  the kickoff) is never its FIRST_OK_END;
 --                                  a task without one counts only when its terminal attempt started at/after
 --                                  that night's cycle start (an afternoon terminal re-run keyed to the same
 --                                  night neither completes nor hides the night); a night whose terminal has
@@ -76142,10 +76142,10 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 -- is a starter task, so a next-morning re-run of ANY task keyed to the night does the same. Both fail LOUD, by
 -- choice: a special case for one workflow would let an afternoon re-run of it complete the night and silence a
 -- hung real run. When BOTH the starter and the terminal are re-run in the afternoon, CYCLE_START = MIN(starter
--- start) is the afternoon run (the app's MIN semantics); an afternoon attempt that started before the real
--- kickoff never counts as FIRST_OK_END, but it still reads the night complete until the real terminal run
--- starts, so a real cycle that hangs before its terminal dispatches stays quiet that night (TASK_FAILED still
--- reports a failed real run). SILENT residual: an afternoon-chain terminal attempt that STARTS after the real
+-- start) is the afternoon run (the app's MIN semantics); once the real kickoff runs, an afternoon attempt that
+-- started before it never counts as FIRST_OK_END, but it still reads the night complete until the real terminal
+-- run starts. SILENT residual 1: a real cycle that hangs before its terminal dispatches stays quiet that night
+-- (TASK_FAILED still reports a failed real run). SILENT residual 2: an afternoon-chain terminal attempt that STARTS after the real
 -- kickoff (a chain started late in the afternoon, e.g. 16:00 with its terminal at 22:30) cannot be told from a
 -- real early run, so its clean finish is FIRST_OK_END and a hung, failed or late real terminal that night
 -- raises no LATE (TASK_FAILED still reports a failed one). A terminal task removed for good reads the first night after as
@@ -76485,8 +76485,8 @@ BEGIN
     --     cyc_start / term / cyc_end). Deadline = the first target clock time STRICTLY after the cycle start
     --     (insights._deadline_after, cross-midnight); hard = target + (breach - target). Complete = the terminal
     --     has run at least its usual task count, none still running, none failed (retries collapsed; a task
-    --     with a clean finish after the night's last kickoff is done at FIRST_OK_END, whatever a later re-run
-    --     of it is doing).
+    --     with a clean finish from an attempt that STARTED at/after the night's last kickoff is done at
+    --     FIRST_OK_END, whatever a later re-run of it is doing).
     --     Severity: WARN and a night that FINISHED late take the rule severity (HIGH: email, no incident); an
     --     unfinished CRIT / EXH is CRITICAL (SP_INCIDENT_AUTODECLARE opens an incident). METRIC_VALUE is the
     --     minutes left to the target for a lead-window WARN only (NULL for a projection WARN, CRIT and EXH).
@@ -76506,8 +76506,9 @@ BEGIN
                 GROUP BY CYCLE_DATE
             ),
             ends AS (
-                -- terminal tasks of the SAME night. A task with a clean finish after the night's last kickoff
-                -- (FIRST_OK_END) is DONE at that first clean finish: a later re-run of it (the next morning,
+                -- terminal tasks of the SAME night. A task with a clean finish from an attempt that STARTED
+                -- at/after the night's last kickoff (FIRST_OK_END) is DONE at that first clean finish: a later
+                -- re-run of it (the next morning,
                 -- after the night already finished) neither re-opens nor re-grades the night. A task without
                 -- one counts only when its TERMINAL attempt started at/after that night's cycle start: an
                 -- afternoon re-run keyed to the night (before the ~22:00 kickoff) is not the night's
@@ -76654,7 +76655,7 @@ $$;
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 156 AS VERSION,
-       'Nightly ETL cycle PUSH alerts (Next-Fifty rank 2): ETL_CYCLE_TASKS transient cache + SP_SCAN_ETL_CYCLE() (isolated config-driven read of ETL_CONTROL_STATUS_FQN, FQN-allowlisted, the 23 newest WHOLE nights cut by night key, retries collapsed to the terminal attempt via MAX_BY with that attempt''s start kept as TERMINAL_START, plus FIRST_OK_END = the first clean finish among attempts STARTED at/after the night''s last kickoff (MAX starter start; starter name bound via USING), night key DATE(TASK_START_DTTM - 12h), clock pinned America/Chicago) raising PIPE_ETL_TASK_FAILED (MEDIUM, HIGH for the terminal workflow, threshold never below 1, auto-clears on retry success: every final attempt finished and none failed, so a retry still running keeps it OPEN), PIPE_ETL_CYCLE_NOT_STARTED (HIGH, the app NEXT_CYCLE_OVERDUE test, grace = THRESHOLD_NUM min) and PIPE_ETL_CYCLE_LATE (WARN/CRIT/EXH bands superseded by the V067 sweep; lead = THRESHOLD_NUM min before ETL_SLA_TARGET_HHMM, or the start-shifted median of the newest 14 prior clean nights projects past ETL_SLA_BREACH_HHMM; a night that finished late is HIGH, an unfinished miss CRITICAL, which auto-declares an incident; a terminal task is done at its first clean finish after the night''s last kickoff (FIRST_OK_END), so a next-morning terminal re-run never re-grades a finished night and an afternoon chain attempt that started before the real kickoff never counts (a next-morning starter re-run, or any re-run when the starter IS the terminal workflow, voids it: the night re-grades loud; an afternoon chain whose terminal starts after the real kickoff is the documented silent residual), else counts only when its terminal attempt started at/after the night''s cycle start; an undispatched terminal is judged only when it ran the same night last week; METRIC_VALUE only on a lead-window WARN), each in its own EXCEPTION guard. Three PIPELINE ALERT_CONFIG rules, WHEN NOT MATCHED, AUTO_CLEAR left at its default. Called hourly once V157 adds the SP_ALERT_SCAN add-on CALL arm (not counted toward OPS_SCAN_DEGRADED). Needs SELECT on CONTROL_STATUS (already granted for the app panels).' AS DESCRIPTION
+       'Nightly ETL cycle PUSH alerts (Next-Fifty rank 2): ETL_CYCLE_TASKS transient cache + SP_SCAN_ETL_CYCLE() (isolated config-driven read of ETL_CONTROL_STATUS_FQN, FQN-allowlisted, the 23 newest WHOLE nights cut by night key, retries collapsed to the terminal attempt via MAX_BY with that attempt''s start kept as TERMINAL_START, plus FIRST_OK_END = the first clean finish among attempts STARTED at/after the night''s last kickoff (MAX starter start; starter name bound via USING), night key DATE(TASK_START_DTTM - 12h), clock pinned America/Chicago) raising PIPE_ETL_TASK_FAILED (MEDIUM, HIGH for the terminal workflow, threshold never below 1, auto-clears on retry success: every final attempt finished and none failed, so a retry still running keeps it OPEN), PIPE_ETL_CYCLE_NOT_STARTED (HIGH, the app NEXT_CYCLE_OVERDUE test, grace = THRESHOLD_NUM min) and PIPE_ETL_CYCLE_LATE (WARN/CRIT/EXH bands superseded by the V067 sweep; lead = THRESHOLD_NUM min before ETL_SLA_TARGET_HHMM, or the start-shifted median of the newest 14 prior clean nights projects past ETL_SLA_BREACH_HHMM; a night that finished late is HIGH, an unfinished miss CRITICAL, which auto-declares an incident; a terminal task is done at its first clean finish from an attempt STARTED at/after the night''s last kickoff (FIRST_OK_END), so a next-morning terminal re-run never re-grades a finished night and an afternoon chain attempt that started before the real kickoff is never FIRST_OK_END (a next-morning starter re-run, or any re-run when the starter IS the terminal workflow, voids it: the night re-grades loud); two documented SILENT residuals after an afternoon chain re-run: a real cycle that hangs before its terminal dispatches, and a chain whose terminal starts after the real kickoff; a task with no FIRST_OK_END counts only when its terminal attempt started at/after the night''s cycle start; an undispatched terminal is judged only when it ran the same night last week; METRIC_VALUE only on a lead-window WARN), each in its own EXCEPTION guard. Three PIPELINE ALERT_CONFIG rules, WHEN NOT MATCHED, AUTO_CLEAR left at its default. Called hourly once V157 adds the SP_ALERT_SCAN add-on CALL arm (not counted toward OPS_SCAN_DEGRADED). Needs SELECT on CONTROL_STATUS (already granted for the app panels).' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 156);
 
 -- ===========================================================================

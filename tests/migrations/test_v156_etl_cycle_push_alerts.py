@@ -480,10 +480,16 @@ def test_v156_terminal_counts_only_from_its_terminal_attempt():
                  "a next-morning re-run of the STARTER", "a starter re-run alone stays quiet",
                  "When ETL_CYCLE_START_WORKFLOW = ETL_CYCLE_END_WORKFLOW every task is a starter task",
                  "Both fail LOUD, by choice",
-                 "an afternoon attempt that started before the real kickoff never counts as FIRST_OK_END",
-                 "SILENT residual: an afternoon-chain terminal attempt that STARTS after the real kickoff"):
+                 "once the real kickoff runs, an afternoon attempt that started before it never counts as "
+                 "FIRST_OK_END",
+                 "SILENT residual 1: a real cycle that hangs before its terminal dispatches stays quiet",
+                 "SILENT residual 2: an afternoon-chain terminal attempt that STARTS after the real kickoff"):
         assert edge in hdr, edge
-    assert "never hides the real" not in _MIG, "no doc may promise the real run is never hidden (the residual)"
+    for path in (f"snowflake/migrations/{_NAME}", "CHANGELOG.md", "README.md", "RUNBOOK.md"):
+        text = _read(path)
+        for claim in ("never hides the real", "never hides a real", "the one SILENT residual"):
+            assert claim not in text, (path, claim)     # two silent residuals exist: no doc may promise otherwise
+    assert "SILENT residual 1:" in hdr and "SILENT residual 2:" in hdr
     assert "LATE reads the night complete all night" not in hdr               # the round-1 edge is gone
 
 
@@ -1466,6 +1472,19 @@ def test_v156_model_late_afternoon_chain_is_the_documented_silent_residual():
         assert _late(_collapse(_as_of(rows, now)), now) is None, now
     hung = _late(_collapse(_as_of(rows, _at(7, 10))), _at(7, 10), first_ok=False)
     assert hung and (hung["band"], hung["severity"]) == ("CRIT", "CRITICAL"), "latest-attempt grading would page"
+
+
+
+def test_v156_model_hang_before_dispatch_after_afternoon_chain_is_the_documented_silent_residual():
+    """SILENT residual 1 (header): after a 13:00 afternoon re-run of the whole chain (terminal 15:00-15:30), the
+    real 22:00 cycle hangs BEFORE its terminal dispatches. The afternoon attempt is never FIRST_OK_END, but
+    CYCLE_START is the afternoon MIN, so its latest attempt still reads the night complete: no LATE. Without the
+    afternoon chain the same night pages CRIT CRITICAL at 07:10. Locked so a change here is deliberate."""
+    hung = _night(_TONIGHT, terminal=False)
+    for now in (_at(6, 10), _at(7, 10), _at(8, 40)):
+        assert _late(_collapse(_as_of(_history() + _afternoon_chain() + hung, now)), now) is None, now
+    alone = _late(_collapse(_history() + hung), _at(7, 10))
+    assert alone and (alone["band"], alone["severity"]) == ("CRIT", "CRITICAL")
 
 
 def test_v156_model_next_morning_starter_rerun_is_the_documented_loud_residual():
