@@ -222,9 +222,10 @@ def _native_apps_rollup(pool_res, rate: float) -> None:
 # v4.595: why the billed ranking exists beside the compile-ranked views (copy-locked in tests).
 _CS_BILLED_WHY = (
     "Ranked by the cloud-services credits each statement family used, not by compile time. The compile-heavy "
-    "list below admits only families averaging over 0.5 s of compile, and the Operations chatter view only "
-    "statements that are mostly compile. A SYSTEM$WAIT poll compiles in well under 0.1 s and then sleeps in "
-    "cloud services, so neither list shows it, even when it is the biggest line here. Sleep hours = runs x the "
+    "list (shown for an ELEVATED or clicked warehouse) admits only families averaging over 0.5 s of compile, "
+    "and the Operations chatter view only no-warehouse metadata statements or statements that are mostly "
+    "compile. A SYSTEM$WAIT poll run on a warehouse compiles in well under 0.1 s and then sleeps in cloud "
+    "services, so neither list shows it, even when it is the biggest line here. Sleep hours = runs x the "
     "wait each statement asks for.")
 
 
@@ -270,7 +271,7 @@ def _cs_billed_families_panel(company: str, days: int, rate: float, sel_wh: str,
         sleep_card,
         {"label": "Missed by compile ranking", "value": s["low_compile_pct"], "unit": "percent", "scope": scope,
          "sub": f"{format_credits(s['low_compile_cs'])} CS cr in families averaging ≤0.5 s compile",
-         "help": "Share of these statement credits in families the compile-heavy list below cannot show "
+         "help": "Share of these statement credits in families the compile-heavy list cannot show "
                  "(average compile at or under 0.5 s), whatever they cost."},
         {"label": "Statement CS credits", "value": s["scope_cs"], "unit": "credits", "method": "measured",
          "scope": scope,
@@ -281,7 +282,7 @@ def _cs_billed_families_panel(company: str, days: int, rate: float, sel_wh: str,
                  "two are recorded separately and need not match exactly."},
     ])
     st.caption(md_dollars(_CS_BILLED_WHY))
-    styled_table(view, height=380, slug="cs-billed-families", sort_label="by CS credits desc",
+    styled_table(view, height=380, slug="cs-billed-families", sort_label="CS credits desc",
                  column_config={
                      "CS_CREDITS": st.column_config.NumberColumn("CS credits", format="%.4f"),
                      "BILLED_CS_CREDITS": st.column_config.NumberColumn("Billed CS credits", format="%.4f"),
@@ -849,7 +850,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
         else:
             st.caption("Click a warehouse above to scope the drivers below to it; showing account-wide until then.")
         # v4.595: families ranked by the cloud-services credits they BILL, for every warehouse (not only
-        # ELEVATED) — the only view that shows sleep polling, which barely compiles.
+        # ELEVATED) — the only view that names and prices sleep polling, which barely compiles.
         _cs_billed_families_panel(company, days, rate, _sel_wh, bounds=bounds, prefetched=csfam_res)
         # A warehouse selection drills the drivers via a live per-warehouse QUERY_HISTORY
         # read (the family/CS marts aren't warehouse-grained for this cut); account-wide
@@ -859,7 +860,8 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                           if _sel_wh else "Why is it elevated? Compile-heavy query families")
             st.markdown(f"**{_fam_title}**")
             st.caption(md_dollars("Ranked by compile time, so drivers that barely compile, such as sleep polling "
-                                  "(SYSTEM$WAIT), appear only in the billed ranking above."))
+                                  "(SYSTEM$WAIT), cannot appear here; the billed ranking above names and prices "
+                                  "them."))
             if _sel_wh:
                 comp = run(
                     cost_sql.compile_heavy_families(days, company, warehouse=_sel_wh, min_runs=5, bounds=bounds),

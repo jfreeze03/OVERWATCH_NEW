@@ -7,6 +7,13 @@ A SYSTEM$WAIT statement compiles in well under 0.1 s and then holds the statemen
 requested interval; its cloud-services credits accrue for the whole wait (owner DIAG 2026-09-26:
 ~0.55 CS credits per hour slept on this account). Compile-ranked views therefore never show it.
 
+A sleep is recognised by its STATEMENT SHAPE, not by the text merely containing the call: the
+statement itself must be ``SELECT SYSTEM$WAIT(`` or ``CALL SYSTEM$WAIT(`` (after optional leading
+whitespace and comments). So a query that only mentions the call — in a string literal, a comment,
+an ILIKE '%system$wait(%' search — is not a sleep, and neither is task / procedure DDL or a
+scripting block that wraps the call in a loop (Snowflake records each wrapped call as its own child
+statement, which IS classified, so the sleep is counted once, on the child).
+
 Pure: ``re`` only — no pandas, Streamlit or Snowflake.
 """
 
@@ -15,58 +22,58 @@ from __future__ import annotations
 import math
 import re
 
-# The call itself, at a token boundary: SYSTEM$WAIT( or SYSTEM$WAIT (…). Not SYSTEM$WAIT_FOR_SERVICES
-# (the next char is "_") nor a longer identifier ending in SYSTEM$WAIT (the boundary class).
-_CALL_RE = re.compile(r"(?:^|[^A-Z0-9_$])SYSTEM\$WAIT\s*\(", re.IGNORECASE)
-# The same signature for Snowflake REGEXP_INSTR over UPPER(text): POSIX ERE, no backslash and no
-# quote (it is embedded in a SQL string literal). tests/test_system_wait.py locks the parity.
-SLEEP_SQL_PATTERN = "(^|[^A-Z0-9_$])SYSTEM[$]WAIT[[:space:]]*[(]"
-# The argument list of ONE call: a non-negative number (optionally quoted), then an optional quoted
-# unit. A bind variable (? / :1), an expression or a truncated call does not match -> None.
+# The sleep statement shape for Snowflake REGEXP_INSTR over UPPER(text): POSIX ERE, anchored at the
+# start; leading whitespace, /* block */ and -- line comments allowed; then SELECT or CALL, then the
+# call at a token boundary (SYSTEM$WAIT_FOR_SERVICES has "_" next, so it never matches). No backslash
+# and no quote: it is embedded in a SQL string literal (the line comment ends at a literal newline).
+SLEEP_SQL_PATTERN = (
+    "^[[:space:]]*((/[*]([^*]|[*]+[^*/])*[*]+/|--[^\n]*\n)[[:space:]]*)*"
+    "(SELECT|CALL)[[:space:]]+SYSTEM[$]WAIT[[:space:]]*[(]"
+)
+# The SAME pattern for Python (POSIX [[:space:]] == \s here); tests lock the parity.
+_PY_SHAPE = SLEEP_SQL_PATTERN.replace("[[:space:]]", r"\s")
+_SHAPE_RE = re.compile(_PY_SHAPE, re.IGNORECASE)
+# The shape plus its argument list: a non-negative number (optionally quoted), then an optional quoted
+# unit. A bind variable (? / :1), an expression or a truncated call does not match -> None. Named groups:
+# the shared shape carries its own (unnamed) groups.
 _ARG_RE = re.compile(
-    r"(?:^|[^A-Z0-9_$])SYSTEM\$WAIT\s*\(\s*'?\s*(\d+(?:\.\d*)?|\.\d+)\s*'?\s*"
-    r"(?:,\s*'\s*([A-Za-z]+)\s*'\s*)?\)",
+    _PY_SHAPE + r"\s*'?\s*(?P<amount>\d+(?:\.\d*)?|\.\d+)\s*'?\s*(?:,\s*'\s*(?P<unit>[A-Za-z]+)\s*'\s*)?\)",
     re.IGNORECASE)
 # Snowflake's SYSTEM$WAIT time units (singular after stripping a trailing S); default SECONDS.
 _UNIT_SECONDS = {"DAY": 86400.0, "HOUR": 3600.0, "MINUTE": 60.0, "SECOND": 1.0,
                  "MILLISECOND": 1e-3, "MICROSECOND": 1e-6, "NANOSECOND": 1e-9}
-# Defining a task or procedure whose body sleeps is not itself a sleep.
+# Defensive: a DDL QUERY_TYPE is never a sleep, whatever its text (the shape already excludes DDL text).
 _DDL_PREFIXES = ("CREATE", "ALTER")
-_DDL_TEXT_RE = re.compile(r"^\s*(?:CREATE|ALTER)\b", re.IGNORECASE)
 
 
 def is_sleep_text(text: object) -> bool:
-    """True when ``text`` contains a SYSTEM$WAIT call (SELECT or CALL form, any case/spacing)."""
-    return isinstance(text, str) and _CALL_RE.search(text) is not None
+    """True when ``text`` IS a sleep statement: SELECT / CALL SYSTEM$WAIT(...) (any case/spacing,
+    optional leading comments). A statement that only mentions the call is not."""
+    return isinstance(text, str) and _SHAPE_RE.search(text) is not None
 
 
 def is_sleep_statement(text: object, query_type: object = "") -> bool:
-    """A sleep statement: sleep text that is not DDL. QUERY_TYPE decides when present
-    (CREATE_TASK / ALTER_TASK / CREATE_PROCEDURE …); with no type, the text's first keyword does."""
+    """A sleep statement whose QUERY_TYPE (when known) is not DDL."""
     if not is_sleep_text(text):
         return False
-    qtype = str(query_type or "").strip().upper() if isinstance(query_type, str) else ""
-    if qtype:
-        return not qtype.startswith(_DDL_PREFIXES)
-    return _DDL_TEXT_RE.match(str(text)) is None
+    qtype = query_type.strip().upper() if isinstance(query_type, str) else ""
+    return not qtype.startswith(_DDL_PREFIXES) if qtype else True
 
 
 def wait_seconds(text: object) -> float | None:
-    """The requested wait, in seconds, of the ONE SYSTEM$WAIT call in ``text``.
+    """The requested wait, in seconds, of a sleep statement.
 
-    None when there is no call, more than one call (a loop body), a bind variable (? / :1), an
-    unknown unit, or truncated text. The unit defaults to SECONDS; singular and plural spellings
-    are both accepted, case-insensitively. A negative amount never matches (Snowflake rejects it)."""
-    if not isinstance(text, str) or len(_CALL_RE.findall(text)) != 1:
+    None when ``text`` is not a sleep statement, the argument is a bind variable (? / :1) or an
+    expression, the unit is unknown, or the text is truncated. The unit defaults to SECONDS; singular
+    and plural spellings are both accepted, case-insensitively. A negative amount never matches
+    (Snowflake rejects it)."""
+    if not isinstance(text, str):
         return None
     m = _ARG_RE.search(text)
     if m is None:
         return None
-    try:
-        amount = float(m.group(1))
-    except ValueError:
-        return None
-    unit = (m.group(2) or "SECONDS").upper()
+    amount = float(m.group("amount"))
+    unit = (m.group("unit") or "SECONDS").upper()
     if unit.endswith("S"):
         unit = unit[:-1]
     factor = _UNIT_SECONDS.get(unit)

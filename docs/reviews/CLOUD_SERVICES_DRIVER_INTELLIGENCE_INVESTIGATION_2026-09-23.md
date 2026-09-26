@@ -125,9 +125,12 @@ above:
 BILLED_CS_CREDITS(family) = Σ_day LEAST(family_CS(day), GREATEST(0, account_CS(day) + account_adjustment(day)))
 ```
 
-It equals the family's credits 1:1 on every day above the allowance and is 0 on a day under it. Per-family values
-add across families only while each day stays above the allowance (disclosed on the panel). Days not yet in
-FACT_METERING_DAILY stay unpriced (NaN, never $0). Statement days are Central, metering days UTC. Gross CS is still
+It equals the family's credits 1:1 on days whose billed cloud services are at least the family's credits, is capped
+at the day's billed total below that, and is 0 on a day under the allowance. Per-family values add across families
+only while each day's billed cloud services cover their combined credits, so a group total (the sleep-polling KPI)
+is capped per day as a group: `Σ_day LEAST(Σ_family CS(day), billed(day))`. Only complete metering days are used:
+the newest FACT_METERING_DAILY row is the UTC day still in progress when the daily load ran (06:45 Central), so its
+adjustment is not final. That day and any day not yet in FACT_METERING_DAILY stay unpriced (NaN, never $0). Statement days are Central, metering days UTC. Gross CS is still
 never dollarized. Surfaces: `mart_sql.cloud_svc_billed_families` → `cs_driver.billed_family_view` → Cost > Spend,
 *Which statement families bill the most cloud services*.
 

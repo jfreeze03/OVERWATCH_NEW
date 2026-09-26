@@ -333,11 +333,25 @@ def test_billed_view_duration_columns_humanize():
 def test_billing_basis_note_copy():
     base = {"metered_days": 7, "under_allowance_days": 0, "unmetered_cs": 0.0}
     head, detail = billing_basis_note(base, 3.68)
-    assert "on all 7 metered days" in head and "$3.68" in head and "billed" in head
+    assert "on all 7 complete metered days" in head and "$3.68" in head and "billed cloud services" in head
     head, _ = billing_basis_note({**base, "under_allowance_days": 2}, 3.68)
     assert "under the free allowance" in head and "only credits above it" in head
     head, _ = billing_basis_note({**base, "metered_days": 0}, 3.68)
     assert "not priced" in head
     head, _ = billing_basis_note({**base, "unmetered_cs": 3.2}, 3.68)
-    assert "not yet in daily metering" in head
+    assert "not closed yet" in head and "unpriced" in head
     assert "UTC" in detail and "alone stopped" in detail and "$" not in detail
+
+
+def test_null_group_sleep_total_is_unpriced_even_with_metered_days():
+    _, s = billed_family_view(_billed_frame(SLEEP_BILLED_CS_CREDITS_ALL=None), 3.68)
+    assert s["metered_days"] == 7 and pd.isna(s["sleep_usd"])
+
+
+def test_mentions_and_loop_wrappers_are_not_sleep_polling():
+    for text in ("select query_text from qh where query_text ilike '%system$wait(%'",
+                 "select 1 -- system$wait(10)",
+                 "BEGIN LOOP CALL SYSTEM$WAIT(60); END LOOP; END;"):
+        assert classify_row(_fam(text))[0] != SLEEP_POLLING, text
+        assert sleep_estimate({"SAMPLE_TEXT": text, "RUNS": 10, "AVG_ELAPSED_S": 40.0,
+                               "QUERY_PARAMETERIZED_HASH": "h"}) == (None, None, "")

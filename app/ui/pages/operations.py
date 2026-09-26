@@ -663,7 +663,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                 "UI itself (not a user). Cloud-services credits are gross usage, before the "
                 "account-level ~10% rebate; the application name is self-reported. Click an "
                 "application to classify its chatter families and see whether a resize could help. "
-                "Sleep polling (SYSTEM$WAIT) never appears here: it runs on a warehouse and barely "
+                "Sleep polling (SYSTEM$WAIT) run on a warehouse does not appear here: it barely "
                 "compiles. Cost ▸ Spend ▸ 'Which statement families bill the most cloud services' "
                 "ranks it by what it bills."))
             if _sel_app is not None and 0 <= int(_sel_app) < len(_cdf):

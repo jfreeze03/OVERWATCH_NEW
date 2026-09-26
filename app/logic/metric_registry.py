@@ -66,7 +66,8 @@ COLUMN_HELP = {
                     "governance/stage), sleep polling (a SYSTEM$WAIT loop), compile-heavy SQL, or normal "
                     "work. Text-signature + compile-share based.",
     "RESIZE_VERDICT": "Whether a warehouse resize could plausibly help. 'Resize not indicated' = the cost is "
-                      "compile/metadata in the cloud-services layer, which resizing does not touch.",
+                      "compile/metadata work or sleep time (SYSTEM$WAIT) in the cloud-services layer, which "
+                      "resizing does not touch.",
     "REMEDIATION_OWNER": "Who most likely owns the fix (application / BI-IDE / data-eng / governance / platform) — "
                          "behavioural (cache metadata, cut polling/reconnects), not a resize.",
     "DRIVER_CONFIDENCE": "Classification confidence — HIGH for an unambiguous query-text signature, MEDIUM for a "
@@ -246,8 +247,9 @@ METRICS: tuple[Metric, ...] = (
            "MART_CLOUD_SVC_DAILY (per-statement CREDITS_USED_CLOUD_SERVICES) capped per day at "
            "FACT_METERING_DAILY billed CS (used + adjustment)",
            ACCOUNT_TZ, "hourly mart; metering up to 24h", "v4.595",
-           "Marginal: what the bill drops by if this family alone stopped, at the compute rate; exactly "
-           "1:1 while the account-day is above the 10% allowance.",
+           "Marginal: what the bill drops by if this family alone stopped, at the compute rate; 1:1 on "
+           "days whose billed cloud services cover the family's credits. Complete metering days only; "
+           "a group total (sleep polling) is capped per day as a group.",
            window="rolling-daily", partial_day="included", unit="USD", filters=("company",),
            required_sources=("MART_CLOUD_SVC_DAILY", "FACT_METERING_DAILY"),
            coverage="statement-level CS only; unmetered days unpriced; Central statement days vs UTC "

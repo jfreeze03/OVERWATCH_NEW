@@ -3,6 +3,9 @@
 One definition shared by the CS-driver classifier, the per-query advisor and the billed-family SQL
 builder. The parity test is the load-bearing one: the SQL SLEEP_FLAG (window totals) and the Python
 classification must agree on every statement, or the KPI totals and the table rows diverge.
+A sleep is recognised by its STATEMENT SHAPE (SELECT / CALL SYSTEM$WAIT, after optional leading
+comments), never by the text merely mentioning the call (review r1: literals, comments, ILIKE
+searches and loop-wrapping blocks were being counted and priced as sleeps).
 """
 
 from __future__ import annotations
@@ -20,14 +23,16 @@ SLEEPS = [
     "CALL SYSTEM$WAIT(30)",
     "call system$wait(60)",
     "CALL SYSTEM$WAIT(1200)",
-    "SYSTEM$WAIT (10)",
+    "select SYSTEM$WAIT (10)",
     "select system$wait(\n  10\n)",
     "CALL SYSTEM$WAIT(?)",
     "CALL SYSTEM$WAIT(:1)",
     "select system$wait(5, 'FORTNIGHTS')",
     "select system$wait(12",                                   # truncated sample text
-    "BEGIN CALL SYSTEM$WAIT(1); CALL SYSTEM$WAIT(2); END",     # a loop body: two calls
-    "select 1; select system$wait(3)",
+    "  /* ctm job 42 */ select system$wait(10)",               # leading block comment
+    "-- poll\r\nCALL SYSTEM$WAIT(30)",                         # leading line comment (CRLF)
+    "/** a * b **/\n/*c*/ call system$wait(5)",
+    "SELECT SYSTEM$WAIT(2) AS WAITED",
 ]
 NOT_SLEEPS = [
     "SELECT SYSTEM$WAIT_FOR_SERVICES(60, 'svc')",
@@ -37,6 +42,20 @@ NOT_SLEEPS = [
     "CALL FOO_SYSTEM$WAIT(3)",
     "select 1",
     "",
+    # mentions, not sleeps (review r1)
+    "select query_text, count(*) from snowflake.account_usage.query_history "
+    "where query_text ilike '%system$wait(%' group by 1",
+    "select 1 -- system$wait(10)",
+    "/* was: call system$wait(30) */ select count(*) from t",
+    "select 'system$wait(5)' as note",
+    "SYSTEM$WAIT (10)",                                        # not a statement on its own
+    # containers: Snowflake records each wrapped call as its own child statement, counted there
+    "BEGIN CALL SYSTEM$WAIT(1); CALL SYSTEM$WAIT(2); END",
+    "BEGIN LOOP IF ((SELECT COUNT(*) FROM STG.LANDING) > 0) THEN BREAK; END IF; CALL SYSTEM$WAIT(60); "
+    "END LOOP; CALL DW.LOAD_ORDERS(); END;",
+    "EXECUTE IMMEDIATE 'CALL SYSTEM$WAIT(10)'",
+    "select 1; select system$wait(3)",
+    "CREATE OR REPLACE TASK T AS CALL SYSTEM$WAIT(10)",
 ]
 
 
@@ -73,9 +92,11 @@ def test_non_str_is_never_sleep(value):
     ("select system$wait(0.5)", 0.5),
     ("select system$wait(.5)", 0.5),
     ("select system$wait('10')", 10.0),
-    ("SYSTEM$WAIT (10)", 10.0),
+    ("select SYSTEM$WAIT (10)", 10.0),
     ("select system$wait(\n  10\n)", 10.0),
     ("select system$wait(0)", 0.0),
+    ("/* ctm */ select system$wait(10)", 10.0),
+    ("-- poll\nCALL SYSTEM$WAIT(1, 'HOURS')", 3600.0),
 ])
 def test_wait_seconds_values(text, expected):
     got = wait_seconds(text)
@@ -88,7 +109,8 @@ def test_wait_seconds_values(text, expected):
     "select system$wait(5, 'FORTNIGHTS')",                     # unknown unit
     "select system$wait(-1)",                                  # negative (Snowflake rejects it)
     "select system$wait(12",                                   # truncated
-    "BEGIN CALL SYSTEM$WAIT(1); CALL SYSTEM$WAIT(2); END",     # more than one call
+    "BEGIN LOOP CALL SYSTEM$WAIT(60); END LOOP; END;",         # a loop body: per iteration, not per run
+    "select 1 -- system$wait(10)",                             # a comment is not a request
     "select system$wait(n)",                                   # an expression
     "select 1",
 ])
@@ -98,11 +120,11 @@ def test_wait_seconds_none(text):
 
 def test_ddl_that_contains_the_call_is_not_a_sleep():
     ddl = "CREATE OR REPLACE TASK T WAREHOUSE = W SCHEDULE = '5 MINUTE' AS CALL SYSTEM$WAIT(10)"
-    assert is_sleep_text(ddl)                                  # the text contains it ...
-    assert not is_sleep_statement(ddl, "CREATE_TASK")          # ... but defining a sleep is not sleeping
-    assert not is_sleep_statement(ddl)                         # no type: the first keyword decides
+    assert not is_sleep_text(ddl)                              # the text contains it, but the statement is DDL
+    assert not is_sleep_statement(ddl, "CREATE_TASK")
+    assert not is_sleep_statement(ddl)
     assert not is_sleep_statement("  alter task t modify as call system$wait(1)")
-    assert not is_sleep_statement("ALTER TASK T MODIFY AS CALL SYSTEM$WAIT(1)", "ALTER_TASK")
+    assert not is_sleep_statement("CALL SYSTEM$WAIT(10)", "CREATE_TASK")   # a DDL type is never a sleep
     assert is_sleep_statement("CALL SYSTEM$WAIT(10)", "CALL")
     assert is_sleep_statement("select system$wait(10)", "SELECT")
     assert is_sleep_statement("select system$wait(10)")
@@ -110,11 +132,12 @@ def test_ddl_that_contains_the_call_is_not_a_sleep():
 
 
 ALL_TEXTS = SLEEPS + NOT_SLEEPS + [
-    "CREATE OR REPLACE TASK T AS CALL SYSTEM$WAIT(10)",
     "select system$wait(1,'MINUTES')",
     "WITH x AS (SELECT 1) SELECT SYSTEM$WAIT(2) FROM x",
     "select system$wait\t(4)",
     "select system$wait\r\n(4)",
+    "/* unterminated select system$wait(4)",
+    "--no newline select system$wait(4)",
 ]
 
 
@@ -125,6 +148,7 @@ def test_sql_pattern_agrees_with_python(text):
     assert (sql_re.search(text.upper()) is not None) == is_sleep_text(text)
 
 
-def test_sql_pattern_is_literal_safe():
-    # embedded in a SQL string literal: no backslash (escape) and no quote
+def test_sql_pattern_is_literal_safe_and_anchored():
+    # embedded in a SQL string literal: no backslash (escape) and no quote; anchored at the start
     assert "\\" not in SLEEP_SQL_PATTERN and "'" not in SLEEP_SQL_PATTERN
+    assert SLEEP_SQL_PATTERN.startswith("^")

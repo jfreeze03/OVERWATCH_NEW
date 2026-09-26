@@ -133,3 +133,20 @@ def test_registered_in_canary_and_metric_registry():
     sql = _sql(30, "ALL")
     for src in m.required_sources:
         assert src in sql, src
+
+
+def test_only_complete_metering_days_price_anything():
+    # review r1: the newest FACT_METERING_DAILY row is the UTC day in progress at the 06:45 load
+    sql = _sql(30, "ALL")
+    bill = _cte(sql, "bill")
+    assert "x.DAY < (SELECT MAX(z.DAY) FROM" in bill and "FACT_METERING_DAILY" in bill
+    bounded = _cte(_sql(30, "ALL", bounds=_BOUNDS), "bill")
+    assert "x.DAY < (SELECT MAX(z.DAY) FROM" in bounded      # the whole table's max, not the window's
+
+
+def test_sleep_total_is_a_per_day_group_cap():
+    sql = _sql(30, "ALL")
+    assert "LEAST(sd.SLEEP_CS_DAY, GREATEST(0, b.CS_BILLED_DAY))" in sql
+    assert "ROUND(ss.SLEEP_BILLED_CS_CREDITS_ALL, 4) AS SLEEP_BILLED_CS_CREDITS_ALL" in sql
+    assert "CROSS JOIN sleepsum ss" in sql
+    assert "t.BILLED_CS_CREDITS, 0)) OVER ()" not in sql      # never the sum of per-family marginals

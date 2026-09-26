@@ -24,8 +24,11 @@ computation against a shared pool, so it is never ALLOCATED to a warehouse or a 
 figure is never dollarized. v4.595 prices one thing only — the MARGINAL billed credit of a family
 (``billed_family_view``): per day, the smaller of the family's credits and the account's billed
 cloud services that day (used + adjustment), i.e. what the bill drops by if that family alone stopped,
-compute held fixed. It is unique (no allocation choice), equals the family's credits 1:1 on every day
-the account is above the allowance, and is zero on days it is under it.
+compute held fixed. It is unique (no allocation choice): it equals the family's credits 1:1 on days
+whose billed cloud services are at least that family's credits (every complete day on this account in
+the 2026-09-26 DIAG), is capped at the day's billed total below that, and is zero on a day under the
+allowance. Per-family values add only while each day's billed cloud services cover their combined
+credits, so a GROUP total (the sleep-polling KPI) is capped per day as a group, in the SQL.
 
 Pure pandas — no Streamlit, no Snowflake. Reuses ``query_advisor.COMPILE_FRACTION`` so the
 "compile-dominated" threshold matches the per-query advisor.
@@ -409,7 +412,9 @@ def billed_family_view(df: pd.DataFrame | None, rate: float) -> tuple[pd.DataFra
     metered_days = int(_win("METERED_DAYS"))
     sleep_families = int(_win("SLEEP_FAMILIES_ALL"))
     sleep_cs = _win("SLEEP_CS_CREDITS_ALL")
-    sleep_billed = _win("SLEEP_BILLED_CS_CREDITS_ALL")
+    # NULL when no sleep credit falls on a complete metered day: unpriced (NaN), never $0
+    sleep_billed = (safe_float(df["SLEEP_BILLED_CS_CREDITS_ALL"].iloc[0], _NAN)
+                    if "SLEEP_BILLED_CS_CREDITS_ALL" in df.columns else _NAN)
     low_compile = _win("LOW_COMPILE_CS_CREDITS_ALL")
     if "SLEEP_FLAG" in out.columns:
         sleep_mask = _numcol(out, "SLEEP_FLAG").fillna(0.0) > 0
@@ -430,7 +435,8 @@ def billed_family_view(df: pd.DataFrame | None, rate: float) -> tuple[pd.DataFra
         "sleep_families": sleep_families,
         "sleep_cs": sleep_cs,
         "sleep_billed_cs": sleep_billed,
-        "sleep_usd": credits_to_usd(sleep_billed, rate, round_cents=False) if metered_days else _NAN,
+        "sleep_usd": (credits_to_usd(sleep_billed, rate, round_cents=False)
+                      if metered_days and not pd.isna(sleep_billed) else _NAN),
         "sleep_share_pct": sleep_cs / scope_cs * 100.0 if scope_cs > 0 else 0.0,
         "sleep_sec_shown": float(shown_sleep.fillna(0.0).sum()),
         "sleep_hours_complete": bool(len(shown_sleep) == sleep_families and shown_sleep.notna().all()),
@@ -448,20 +454,22 @@ def billing_basis_note(summary: dict, rate: float) -> tuple[str, str]:
                 "usage and are not priced.")
     elif under == 0:
         head = (f"Billing basis: the account's cloud services were above the free allowance (10% of daily "
-                f"warehouse compute) on all {md} metered days, so every extra credit here is billed. "
-                f"Billed $ = those credits × ${safe_float(rate):,.2f} (the compute rate).")
+                f"warehouse compute) on all {md} complete metered days, so cutting these credits cuts the "
+                f"bill, up to each day's billed cloud services. Billed $ = those credits × "
+                f"${safe_float(rate):,.2f} (the compute rate).")
     else:
-        head = (f"Billing basis: on {under} of {md} metered days the account stayed under the free "
+        head = (f"Billing basis: on {under} of {md} complete metered days the account stayed under the free "
                 f"allowance (10% of daily warehouse compute), where cloud services cost nothing extra; "
                 f"Billed $ counts only credits above it, × ${safe_float(rate):,.2f}.")
     unmetered = safe_float(summary.get("unmetered_cs"))
     if md and unmetered > 0:
-        head += (f" {format_credits(unmetered)} CS credits are from days not yet in daily metering "
-                 "(up to a day behind) and are left unpriced.")
+        head += (f" {format_credits(unmetered)} CS credits are from days daily metering has not closed yet "
+                 "(today, and the day in progress when it last loaded) and are left unpriced.")
     detail = ("Per day, a family's billed credits are the smaller of its credits and the account's billed "
               "cloud services that day (used + adjustment): what the bill drops by if that family alone "
-              "stopped, holding compute fixed. They add across families while each day stays above the "
-              "allowance. Statement days are Central and metering days UTC, so the daily check can shift "
-              "by a few hours at the boundary. Statement credits come from query history, per statement, "
-              "and are recorded separately from metering.")
+              "stopped, holding compute fixed. Per-family values add only while each day's billed cloud "
+              "services cover their combined credits; the sleep-polling total is capped per day as a group. "
+              "Statement days are Central and metering days UTC, so the daily check can shift by a few "
+              "hours at the boundary. Statement credits come from query history, per statement, and are "
+              "recorded separately from metering.")
     return head, detail
