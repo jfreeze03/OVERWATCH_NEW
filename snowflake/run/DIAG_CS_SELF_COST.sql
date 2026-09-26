@@ -68,4 +68,14 @@ WHERE DATABASE_NAME = 'DBA_MAINT_DB' AND SCHEMA_NAME = 'OVERWATCH'
   AND SCHEDULED_TIME >= DATEADD('day', -7, CURRENT_TIMESTAMP())
 GROUP BY 1 ORDER BY RUNS_7D DESC, AVG_SEC DESC;
 
+-- (5) Every alert rule and whether it is enabled (the hourly scan compiles ALL its arms every hour, enabled or not;
+--     SEC_BREAK_GLASS_USE should be ABSENT -- its row was deleted at V034, yet its arm still runs hourly).
+SELECT RULE_ID, FAMILY, ENABLED, SEVERITY, THRESHOLD_NUM, AUTO_CLEAR_ENABLED FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG ORDER BY 1;
+
+-- (6) SLOs by entity type (TASK SLOs read the hourly task-node mart; decides whether that mart can refresh every 4h).
+SELECT ENTITY_TYPE, COUNT(*) AS N FROM DBA_MAINT_DB.OVERWATCH.SLO_OBJECTIVES GROUP BY 1 ORDER BY 1;
+
+-- (7) The native watch alerts (if NATIVE_ALERT_STALE_FACTS is resumed it already covers some of what wave 2b adds hourly).
+SHOW ALERTS IN SCHEMA DBA_MAINT_DB.OVERWATCH;
+
 ALTER SESSION UNSET TIMEZONE;
