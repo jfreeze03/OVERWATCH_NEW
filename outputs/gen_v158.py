@@ -20,6 +20,17 @@ After (plan section 1 "V157 -- rank 32", renumbered V158 because wave 2a inserte
   * SOURCE_FRESHNESS_STATE 'OPERATOR_BACKUP_DAILY' (DAILY in the name = the shared 30h cadence rule)
     advances only on a run with zero clone failures, Central-pinned.
 
+Wave-2b rework D11 (statement budget; the backup still runs DAILY):
+  * ONE set-based INFORMATION_SCHEMA.TABLES probe before the per-table loop (was one probe per table)
+    returns the 25 sources present in OVERWATCH and the sources whose generation for today already
+    exists in OVERWATCH_BAK (a same-day re-run then skips the no-op CLONE). It still fails OPEN: a probe
+    error leaves probe_ok FALSE, so nothing counts as missing or already taken and every clone is attempted
+    exactly as V089 did;
+  * ONE set-based PRUNED log insert after the prune (FLATTEN over the dropped names) replaces the
+    per-DROP inserts; PRUNE_FAILED stays per row next to its APP_ERROR_LOG row (error path only).
+  A steady-state weekday is 59 statements (was 107), a steady-state Sunday 135 (was 208); the model and
+  its mutation proofs live in tests/migrations/test_v158_operator_backup_generations.py.
+
 The prune's daily DROPs would score DESTRUCTIVE 100 / CRITICAL in FACT_SECURITY_CHANGE, so the SAME file
 re-derives V_SECURITY_EXCEPTION_QUEUE from V151 (its current definer) with ONE carve-out clause keyed on
 USER_NAME 'SYSTEM' (probe F5 default) AND the exact generated DROP text. The first prune happens 15 days
@@ -92,7 +103,11 @@ NEW_DECLS = """\
     missing INT DEFAULT 0;         -- source table absent on this install: a skip, never a failure
     pruned INT DEFAULT 0;
     prune_failed INT DEFAULT 0;
-    present INT DEFAULT 0;
+    probe_ok BOOLEAN DEFAULT FALSE;  -- the one metadata probe answered (else every clone is attempted)
+    src_present ARRAY;             -- the probe: the 25 sources that exist in OVERWATCH
+    have_d ARRAY;                  -- the probe: sources whose daily generation for today exists
+    have_w ARRAY;                  -- the probe: sources whose weekly generation for today exists
+    pruned_list VARCHAR DEFAULT '';  -- dropped generation names, logged by ONE insert after the prune
     keep_d FLOAT DEFAULT 14;
     keep_w FLOAT DEFAULT 8;
     day_ct DATE;
@@ -129,21 +144,34 @@ BEGIN
     -- anchors the whole name, so a manual <T>_BAK_<yyyymmdd> DR clone can never match.
     prune_re := '(' || ARRAY_TO_STRING(:tables, '|') || ')_OWBAK_[DW][0-9]{8}';
 
+    -- ONE set-based metadata probe for the whole run (wave-2b rework D11; it was one probe per table):
+    -- which of the 25 sources exist in OVERWATCH, and which of them already have today's daily / weekly
+    -- generation in OVERWATCH_BAK (a same-day re-run then skips the no-op CLONE). Fails OPEN: if the
+    -- probe itself errors, probe_ok stays FALSE, so nothing counts as missing or already taken and every
+    -- clone is attempted exactly as V089 did (a missing source then lands as clone_failed).
+    BEGIN
+        SELECT COALESCE(ARRAY_AGG(IFF(TABLE_SCHEMA = 'OVERWATCH', TABLE_NAME, NULL)), ARRAY_CONSTRUCT()),
+               COALESCE(ARRAY_AGG(IFF(TABLE_SCHEMA = 'OVERWATCH_BAK' AND RIGHT(TABLE_NAME, 9) = :gen_d,
+                                      LEFT(TABLE_NAME, LENGTH(TABLE_NAME) - 16), NULL)), ARRAY_CONSTRUCT()),
+               COALESCE(ARRAY_AGG(IFF(TABLE_SCHEMA = 'OVERWATCH_BAK' AND RIGHT(TABLE_NAME, 9) = :gen_w,
+                                      LEFT(TABLE_NAME, LENGTH(TABLE_NAME) - 16), NULL)), ARRAY_CONSTRUCT())
+          INTO :src_present, :have_d, :have_w
+          FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES
+         WHERE TABLE_SCHEMA IN ('OVERWATCH', 'OVERWATCH_BAK')
+           AND TABLE_TYPE = 'BASE TABLE'
+           AND ((TABLE_SCHEMA = 'OVERWATCH' AND ARRAY_CONTAINS(TABLE_NAME::VARIANT, :tables))
+             OR (TABLE_SCHEMA = 'OVERWATCH_BAK' AND REGEXP_LIKE(TABLE_NAME, :prune_re)
+                 AND RIGHT(TABLE_NAME, 9) IN (:gen_d, :gen_w)));
+        probe_ok := TRUE;
+    EXCEPTION
+        WHEN OTHER THEN
+            probe_ok := FALSE;
+    END;
+
     FOR i IN 0 TO ARRAY_SIZE(:tables) - 1 DO
         tname := GET(:tables, i)::VARCHAR;
-        -- Source present on this install? Fails OPEN: if the metadata probe itself errors, the clone
-        -- is attempted exactly as V089 did (a missing source then lands as clone_failed).
-        present := 1;
-        BEGIN
-            SELECT COUNT(*) INTO :present
-              FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES
-             WHERE TABLE_SCHEMA = 'OVERWATCH' AND TABLE_NAME = :tname
-               AND TABLE_TYPE = 'BASE TABLE';
-        EXCEPTION
-            WHEN OTHER THEN
-                present := 1;
-        END;
-        IF (present = 0) THEN
+        -- Missing only on a definite answer: the probe ran and did not list the source (fails OPEN).
+        IF (COALESCE(probe_ok AND NOT ARRAY_CONTAINS(tname::VARIANT, :src_present), FALSE)) THEN
             missing := missing + 1;
             INSERT INTO DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG
                 (RUN_ID, GENERATION, SOURCE_TABLE, ACTION, DETAIL)
@@ -151,17 +179,22 @@ BEGIN
         ELSE
             BEGIN
                 -- V158: the daily generation, immutable once taken (IF NOT EXISTS), in the dedicated
-                -- TRANSIENT schema OVERWATCH_BAK (no FUTURE grants there, so no grant churn).
-                EXECUTE IMMEDIATE 'CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH_BAK.' || :tname ||
-                                  '_OWBAK_' || :gen_d || ' CLONE DBA_MAINT_DB.OVERWATCH.' || :tname;
+                -- TRANSIENT schema OVERWATCH_BAK (no FUTURE grants there, so no grant churn). One the
+                -- probe already saw today is not re-issued: the CLONE would be a no-op.
+                IF (NOT COALESCE(probe_ok AND ARRAY_CONTAINS(tname::VARIANT, :have_d), FALSE)) THEN
+                    EXECUTE IMMEDIATE 'CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH_BAK.' || :tname ||
+                                      '_OWBAK_' || :gen_d || ' CLONE DBA_MAINT_DB.OVERWATCH.' || :tname;
+                END IF;
                 IF (is_sunday) THEN
                     -- Sundays: the weekly generation, cloned from today's daily one inside OVERWATCH_BAK,
                     -- and the V089 *_BAK_LAST pointer in OVERWATCH, still weekly (statement unchanged).
-                    EXECUTE IMMEDIATE 'CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH_BAK.' || :tname ||
-                                      '_OWBAK_' || :gen_w || ' CLONE DBA_MAINT_DB.OVERWATCH_BAK.' || :tname ||
-                                      '_OWBAK_' || :gen_d;
+                    IF (NOT COALESCE(probe_ok AND ARRAY_CONTAINS(tname::VARIANT, :have_w), FALSE)) THEN
+                        EXECUTE IMMEDIATE 'CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH_BAK.' || :tname ||
+                                          '_OWBAK_' || :gen_w || ' CLONE DBA_MAINT_DB.OVERWATCH_BAK.' || :tname ||
+                                          '_OWBAK_' || :gen_d;
+                    END IF;
 __BAK_LAST__                END IF;
-                done := done + 1;
+                done := done + 1;          -- this source holds today's generation (taken now or earlier today)
             EXCEPTION
                 WHEN OTHER THEN
                     emsg := SQLERRM;
@@ -220,7 +253,8 @@ __BAK_LAST__                END IF;
     -- Prune: keep the newest keep_d daily / keep_w weekly generations per table and kind (rank-based,
     -- so a paused task never empties the history; today's generation is never a candidate). Only
     -- TRANSIENT base tables in DBA_MAINT_DB.OVERWATCH_BAK whose whole name matches prune_re, and the
-    -- regex is re-checked right before each DROP. Isolated like the log above.
+    -- regex is re-checked right before each DROP. Isolated like the log above. Each dropped name is
+    -- collected for the ONE PRUNED insert after this block (it was one INSERT per DROP).
     BEGIN
         res := (
             SELECT g.TABLE_NAME
@@ -249,9 +283,7 @@ __BAK_LAST__                END IF;
                 BEGIN
                     EXECUTE IMMEDIATE 'DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH_BAK.' || :pname;
                     pruned := pruned + 1;
-                    INSERT INTO DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG
-                        (RUN_ID, GENERATION, SOURCE_TABLE, BACKUP_TABLE, ACTION)
-                    SELECT :run_id, RIGHT(:pname, 9), LEFT(:pname, LENGTH(:pname) - 16), :pname, 'PRUNED';
+                    pruned_list := pruned_list || pname || ' ';   -- whole-name regex match: no space inside
                 EXCEPTION
                     WHEN OTHER THEN
                         emsg := SQLERRM;
@@ -274,8 +306,28 @@ __BAK_LAST__                END IF;
             INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
                 (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
             SELECT 'BackupOperatorTables', 'backup_prune_failed', LEFT(:emsg, 2000),
-                   'prune scan ' || :gen_d || ' (OPERATOR_BACKUP_DAILY): every generation kept this run', CURRENT_ROLE();
+                   'prune scan ' || :gen_d || ' (OPERATOR_BACKUP_DAILY): scan stopped, generations not yet dropped are kept', CURRENT_ROLE();
     END;
+
+    -- The PRUNED rows: ONE set-based insert per run (wave-2b rework D11; it was one INSERT per DROP),
+    -- the same row per dropped generation as before. It sits after the prune block, so every DROP that
+    -- ran is logged even when the scan stopped part-way. Isolated: a failure is logged, never blocking.
+    IF (pruned > 0) THEN
+        BEGIN
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG
+                (RUN_ID, GENERATION, SOURCE_TABLE, BACKUP_TABLE, ACTION)
+            SELECT :run_id, RIGHT(p.VALUE::VARCHAR, 9), LEFT(p.VALUE::VARCHAR, LENGTH(p.VALUE::VARCHAR) - 16),
+                   p.VALUE::VARCHAR, 'PRUNED'
+            FROM TABLE(FLATTEN(INPUT => SPLIT(TRIM(:pruned_list), ' '))) p;
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                    (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'BackupOperatorTables', 'backup_log_failed', LEFT(:emsg, 2000),
+                       'prune log ' || :gen_d || ' (OPERATOR_BACKUP_DAILY): ' || :pruned || ' generation(s) dropped, not logged', CURRENT_ROLE();
+        END;
+    END IF;
 
     -- The log trims itself (SP_PURGE_FACTS is untouched).
     DELETE FROM DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG
@@ -325,10 +377,25 @@ assert proc.count("CREATE OR REPLACE TRANSIENT TABLE DBA_MAINT_DB.OVERWATCH.' ||
 assert proc.count("EXECUTE IMMEDIATE 'DROP") == 1
 assert proc.count("'DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH_BAK.' || :pname") == 1
 assert "CALL " not in proc and "$$" not in proc[proc.index("$$") + 2:-4]
-_sunday = proc[proc.index("                IF (is_sunday) THEN\n"):proc.index("                END IF;\n")]
+_s0 = proc.index("                IF (is_sunday) THEN\n")
+_sunday = proc[_s0:proc.index("\n                END IF;\n", _s0) + 1]   # the 16-space close, not a nested one
 assert BAK_LAST_SUNDAY in _sunday, "_BAK_LAST must sit inside IF (is_sunday)"
 assert "'_OWBAK_' || :gen_w || ' CLONE" in _sunday, "the W generation is cloned on Sundays only"
 assert "'_OWBAK_' || :gen_d || ' CLONE" not in _sunday, "the D generation is cloned every day"
+assert _sunday.index("'_OWBAK_' || :gen_w || ' CLONE") < _sunday.index("                    END IF;\n") \
+    < _sunday.index(BAK_LAST_SUNDAY), "_BAK_LAST runs every Sunday run, outside the W skip"
+# D11: ONE INFORMATION_SCHEMA probe before the per-table loop, none inside it
+_loop = proc[proc.index("    FOR i IN 0 TO ARRAY_SIZE(:tables) - 1 DO\n"):proc.index("    END FOR;\n")]
+assert "INFORMATION_SCHEMA" not in _loop, "the per-table loop must not probe metadata"
+assert proc[:proc.index("    FOR i IN 0 TO")].count("FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES") == 1
+assert proc.count("INFORMATION_SCHEMA.TABLES") == 6       # probe 1 + D log 2 + W log 2 + prune candidates 1
+assert proc.count("probe_ok := TRUE;") == 1 and proc.count("probe_ok := FALSE;") == 1
+# D11: ONE set-based PRUNED insert after the prune block; the cursor loop only collects names
+_cur = proc[proc.index("        FOR r IN c_prune DO\n"):proc.index("        END FOR;\n")]
+assert "'PRUNED'" not in _cur and proc.count("'PRUNED'") == 1
+assert "pruned_list := pruned_list || pname || ' ';" in _cur
+assert proc.index("        END FOR;\n") < proc.index("    IF (pruned > 0) THEN\n") \
+    < proc.index("'PRUNED'") < proc.index("    -- The log trims itself")
 _log = proc[proc.index("    -- Row counts:"):proc.index("    -- Prune:")]
 assert _log.count("'CLONED', b.ROW_COUNT, s.ROW_COUNT, b.BYTES") == 2
 _log_sunday = _log[_log.index("        IF (is_sunday) THEN\n"):_log.index("        END IF;\n")]
@@ -391,6 +458,11 @@ HEADER = """\
 --   kind (floors 7 / 4, ceilings 60 / 52). Only TRANSIENT base tables in OVERWATCH_BAK whose whole
 --   name is one of the 25 + _OWBAK_[DW] + 8 digits, dated before today, re-checked before each DROP.
 --   The manual <T>_BAK_<yyyymmdd> DR clones (teardown.sql B0, rebuild/00) use a different token.
+-- * Statement budget (wave-2b rework D11): ONE set-based INFORMATION_SCHEMA probe per run (the 25
+--   sources present + which already hold today's generation; fails open to V089's clone-everything)
+--   replaces the per-table probes, and ONE set-based PRUNED log insert replaces the per-DROP inserts.
+--   A steady-state weekday is 59 statements and a Sunday 135, 489 a week (the untrimmed per-table
+--   design: 107 / 208 / 850; V089 ran 26 a week). A same-day re-run issues no no-op CLONE.
 -- * SOURCE_FRESHNESS_STATE 'OPERATOR_BACKUP_DAILY' (30h cadence by name) advances only on a run with
 --   zero clone failures, so a failing or suspended backup goes stale and the dead-man paths fire.
 -- * TASK_BACKUP_OPERATOR was created IF NOT EXISTS (V015), so its schedule moves in place
@@ -486,6 +558,8 @@ DESCRIPTION = (
     "OPERATOR_BACKUP_LOG, prunes to SETTINGS BACKUP_KEEP_DAILY 14 / BACKUP_KEEP_WEEKLY 8 (floors 7/4, only "
     "TRANSIENT OVERWATCH_BAK tables whose whole name matches the generation pattern, dated before today) "
     "and stamps SOURCE_FRESHNESS_STATE OPERATOR_BACKUP_DAILY only on a run with zero clone failures. "
+    "One set-based INFORMATION_SCHEMA probe per run (sources present + generations already taken today; "
+    "fails open) and one set-based PRUNED log insert keep a steady-state day at 59 statements (Sunday 135). "
     "TASK_BACKUP_OPERATOR moved from Sunday 05:40 to daily 05:10 via SUSPEND/SET SCHEDULE/RESUME. "
     "V_SECURITY_EXCEPTION_QUEUE re-derived from V151 with one carve-out: the task''s own generation-prune "
     "DROP (USER_NAME SYSTEM, exact generated statement) leaves the CHANGE RISK queue. Restore = INSERT "
