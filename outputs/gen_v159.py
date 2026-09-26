@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Forward-generate V159: the loader compile diet (wave-2b rework, owner decisions D5 + D6).
 
-DIAG_CS_SELF_COST (2026-09-26) measured OVERWATCH's own scheduled compile at ~166 min/week on WH_ALFA_ADMIN.
+DIAG_CS_SELF_COST (2026-09-26) put OVERWATCH's ten heaviest scheduled compile families at ~166 min/week on WH_ALFA_ADMIN (a floor, not the whole scheduled total).
 After the alert scan, the next-largest families are two procs that recompile a heavy ACCOUNT_USAGE statement
 every hour for data that changes far less often:
 
@@ -183,15 +183,16 @@ DESCRIPTION = (
     "the three marts is up to 4h old (5h across the November DST night) on the Optimize idle and sizing panels, "
     "the Unit costs task-graph panel, the Operations node-timing board and SP_SLO_BREACH_SCAN (V096; "
     "SLO_OBJECTIVES is empty today); completed days are unaffected. Estimated saving ~42-44 compile-min/week "
-    "of the ~166 measured. No task, schedule, rule, table or grant change; no tail CALL."
+    "of the ~166 the listed DIAG families total. No task, schedule, rule, table or grant change; no tail CALL."
 )
 assert "'" not in DESCRIPTION.replace("''", "")                  # every apostrophe doubled
 assert len(DESCRIPTION.replace("''", "'")) <= 4000
 
 out = f"""-- V159__loader_compile_diet.sql
 --
--- Loader compile diet (wave-2b rework, owner decisions D5 + D6). DIAG_CS_SELF_COST (2026-09-26) measured
--- OVERWATCH's own scheduled compile at ~166 min/week on WH_ALFA_ADMIN. After the alert scan, the next-largest
+-- Loader compile diet (wave-2b rework, owner decisions D5 + D6). DIAG_CS_SELF_COST (2026-09-26) put the ten
+-- heaviest OVERWATCH scheduled compile families at ~166 min/week on WH_ALFA_ADMIN (a floor, not the whole
+-- scheduled total). After the alert scan, the next-largest
 -- families are this migration's two procs, which recompile a heavy ACCOUNT_USAGE statement every hour for
 -- data that changes far less often (runs/week x average compile, measured):
 --   * SP_LOAD_MARTS_V27 HOURLY arm [1] MERGE MART_WAREHOUSE_EFFICIENCY_DAILY: 175 x 9.2 s = 27.0 min
@@ -245,7 +246,7 @@ out = f"""-- V159__loader_compile_diet.sql
 -- Estimated saving (ESTIMATES, DIAG family numbers): [1] and [6] drop from 175 to 49 runs/week (6 Central
 -- cycles x 7 + the reconcile's 7): 27.0 -> 7.5 and 14.8 -> 4.2, about 30 compile-min/week, plus [6b]
 -- (unmeasured). SP_CHANGE_ATTRIBUTION: 14.4 -> ~0.3-2.6 (168 small-table probes plus ~3 full UPDATEs on a
--- day with a warehouse change), about 12-14. Total ~42-44 of the ~166 measured. Added: one scalar SELECT per
+-- day with a warehouse change), about 12-14. Total ~42-44 of the ~166 the listed families total. Added: one scalar SELECT per
 -- loader run (175/week, no table).
 --
 -- No task, schedule, rule, table or grant change and no tail CALL: the next hourly TASK_LOAD_HOURLY graph

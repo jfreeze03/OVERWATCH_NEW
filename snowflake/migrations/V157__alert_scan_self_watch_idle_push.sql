@@ -11,7 +11,8 @@
 --       10/20% ratio; [11] was the hourly scan's only WAREHOUSE_METERING_HISTORY read. The file retires the
 --       rule the V034 way (below the procs): its row goes, its OPEN/ACK/SNOOZED events close as EXPECTED;
 --     ~ cadence gates (compile diet): the Central hour is read ONCE per run into ct_hour. Arms [10]
---       SEC_CRED_EXPIRY and [20] SEC_NEW_EXPOSURE -- the scan's two heaviest ACCOUNT_USAGE compiles -- run
+--       SEC_CRED_EXPIRY (3.9 s) and [20] SEC_NEW_EXPOSURE (19.4 s, the scan's heaviest compile; [14]
+--       PIPE_COPY_FAILURES at 5.8 s stays hourly) -- run
 --       only when MOD(ct_hour, 4) = 1 (01,05,09,13,17,21 Central); [22] only when MOD(ct_hour, 3) = 2
 --       (02,05,08,11,14,17,20,23). Each gate wraps an UNCHANGED arm; a gated-off arm counts as ok. A failed
 --       hour read keeps the DEFAULT 5 (inside both slots): every gated block runs, like before V157;

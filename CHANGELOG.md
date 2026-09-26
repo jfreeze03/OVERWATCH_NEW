@@ -5,11 +5,14 @@
 Four owner-applied migrations. They change what pages and what gets dropped, so they apply only after the 2a build
 (the CONDITION_ENDED exclusion) and this build are both DEPLOYED.
 
-**Reworked for cloud-services cost (owner, 2026-09-26).** OVERWATCH's own scheduled statements measured ~166
-compile-minutes a week (about 0.5–0.6 cloud-services credits a day, ~2% of the account's CS). As first written this
+**Reworked for cloud-services cost (owner, 2026-09-26).** OVERWATCH's statements bill about 0.5–0.6 cloud-services
+credits a day (~2% of the account's CS); its heaviest scheduled compile families alone total ~166 compile-minutes a
+week (a floor, not the whole scheduled total; ~0.2 CS credits a day at the measured ~0.0093 credit per
+compile-minute). As first written this
 wave would have added an estimated 20–140 compile-min a week. Reworked, it removes more than it adds: an estimated
-**~85 compile-min a week less than today** (V157 about −66, V159 about −42 to −48, V156 about +15, V158 about +3 to
-+11; estimates from the 7-day DIAG families). Owner decisions: SEC_NEW_EXPOSURE every 4 hours, daily backups
+**~85 compile-min a week less than today**, about 0.8 CS credits a week (V157 about −66, V159 about −42 to −48,
+V156 about +15, V158 about +3 to +11; estimates from the 7-day DIAG families). The number of statements per hourly
+cycle rises slightly; what falls is the heavy ACCOUNT_USAGE compiles. Owner decisions: SEC_NEW_EXPOSURE every 4 hours, daily backups
 (trimmed).
 
 - **V156 (#2): the overnight Informatica cycle pushes instead of waiting to be pulled.** New ETL_CYCLE_TASKS cache +

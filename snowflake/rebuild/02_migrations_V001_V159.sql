@@ -76709,7 +76709,8 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --       10/20% ratio; [11] was the hourly scan's only WAREHOUSE_METERING_HISTORY read. The file retires the
 --       rule the V034 way (below the procs): its row goes, its OPEN/ACK/SNOOZED events close as EXPECTED;
 --     ~ cadence gates (compile diet): the Central hour is read ONCE per run into ct_hour. Arms [10]
---       SEC_CRED_EXPIRY and [20] SEC_NEW_EXPOSURE -- the scan's two heaviest ACCOUNT_USAGE compiles -- run
+--       SEC_CRED_EXPIRY (3.9 s) and [20] SEC_NEW_EXPOSURE (19.4 s, the scan's heaviest compile; [14]
+--       PIPE_COPY_FAILURES at 5.8 s stays hourly) -- run
 --       only when MOD(ct_hour, 4) = 1 (01,05,09,13,17,21 Central); [22] only when MOD(ct_hour, 3) = 2
 --       (02,05,08,11,14,17,20,23). Each gate wraps an UNCHANGED arm; a gated-off arm counts as ok. A failed
 --       hour read keeps the DEFAULT 5 (inside both slots): every gated block runs, like before V157;
@@ -79207,8 +79208,9 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 -- ===========================================================================
 -- V159__loader_compile_diet.sql
 --
--- Loader compile diet (wave-2b rework, owner decisions D5 + D6). DIAG_CS_SELF_COST (2026-09-26) measured
--- OVERWATCH's own scheduled compile at ~166 min/week on WH_ALFA_ADMIN. After the alert scan, the next-largest
+-- Loader compile diet (wave-2b rework, owner decisions D5 + D6). DIAG_CS_SELF_COST (2026-09-26) put the ten
+-- heaviest OVERWATCH scheduled compile families at ~166 min/week on WH_ALFA_ADMIN (a floor, not the whole
+-- scheduled total). After the alert scan, the next-largest
 -- families are this migration's two procs, which recompile a heavy ACCOUNT_USAGE statement every hour for
 -- data that changes far less often (runs/week x average compile, measured):
 --   * SP_LOAD_MARTS_V27 HOURLY arm [1] MERGE MART_WAREHOUSE_EFFICIENCY_DAILY: 175 x 9.2 s = 27.0 min
@@ -79262,7 +79264,7 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 -- Estimated saving (ESTIMATES, DIAG family numbers): [1] and [6] drop from 175 to 49 runs/week (6 Central
 -- cycles x 7 + the reconcile's 7): 27.0 -> 7.5 and 14.8 -> 4.2, about 30 compile-min/week, plus [6b]
 -- (unmeasured). SP_CHANGE_ATTRIBUTION: 14.4 -> ~0.3-2.6 (168 small-table probes plus ~3 full UPDATEs on a
--- day with a warehouse change), about 12-14. Total ~42-44 of the ~166 measured. Added: one scalar SELECT per
+-- day with a warehouse change), about 12-14. Total ~42-44 of the ~166 the listed families total. Added: one scalar SELECT per
 -- loader run (175/week, no table).
 --
 -- No task, schedule, rule, table or grant change and no tail CALL: the next hourly TASK_LOAD_HOURLY graph
@@ -80249,5 +80251,5 @@ $$;
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 159 AS VERSION,
-       'Loader compile diet (wave-2b rework, owner decisions D5 + D6): two procs stop recompiling a heavy ACCOUNT_USAGE statement every hour. SP_LOAD_MARTS_V27 (re-derived from V152) reads the Central hour once at the top of its HOURLY branch and runs the three DAY-grain arms [1] MART_WAREHOUSE_EFFICIENCY_DAILY, [6] MART_TASK_GRAPH_DAILY and [6b] MART_TASK_NODE_DAILY only in the 00/04/08/12/16/20 Central cycles, and always when d > 2 (the nightly reconcile re-loads D-3..today with (''HOURLY'', 3); backfills pass 90/365). A gated-off arm is not a failure and appends no freshness token; the three names contain DAILY, so the 30h cadence rule never reads them stale. Every other arm, the DAILY scope, the freshness stamp and the RETURN are byte-identical. SP_CHANGE_ATTRIBUTION (re-derived from V033) runs its unchanged UPDATE only while a WAREHOUSE_CHANGE_REGISTRY row seen in the last 3 hours is unattributed (~3 attempts per change, the first at ~07:07 as before), else returns ''attribution pass skipped''. Latency trade: today''s partial row in the three marts is up to 4h old (5h across the November DST night) on the Optimize idle and sizing panels, the Unit costs task-graph panel, the Operations node-timing board and SP_SLO_BREACH_SCAN (V096; SLO_OBJECTIVES is empty today); completed days are unaffected. Estimated saving ~42-44 compile-min/week of the ~166 measured. No task, schedule, rule, table or grant change; no tail CALL.' AS DESCRIPTION
+       'Loader compile diet (wave-2b rework, owner decisions D5 + D6): two procs stop recompiling a heavy ACCOUNT_USAGE statement every hour. SP_LOAD_MARTS_V27 (re-derived from V152) reads the Central hour once at the top of its HOURLY branch and runs the three DAY-grain arms [1] MART_WAREHOUSE_EFFICIENCY_DAILY, [6] MART_TASK_GRAPH_DAILY and [6b] MART_TASK_NODE_DAILY only in the 00/04/08/12/16/20 Central cycles, and always when d > 2 (the nightly reconcile re-loads D-3..today with (''HOURLY'', 3); backfills pass 90/365). A gated-off arm is not a failure and appends no freshness token; the three names contain DAILY, so the 30h cadence rule never reads them stale. Every other arm, the DAILY scope, the freshness stamp and the RETURN are byte-identical. SP_CHANGE_ATTRIBUTION (re-derived from V033) runs its unchanged UPDATE only while a WAREHOUSE_CHANGE_REGISTRY row seen in the last 3 hours is unattributed (~3 attempts per change, the first at ~07:07 as before), else returns ''attribution pass skipped''. Latency trade: today''s partial row in the three marts is up to 4h old (5h across the November DST night) on the Optimize idle and sizing panels, the Unit costs task-graph panel, the Operations node-timing board and SP_SLO_BREACH_SCAN (V096; SLO_OBJECTIVES is empty today); completed days are unaffected. Estimated saving ~42-44 compile-min/week of the ~166 the listed DIAG families total. No task, schedule, rule, table or grant change; no tail CALL.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 159);

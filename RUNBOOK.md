@@ -487,7 +487,7 @@ exception handler — a broken rule logs `rule_block_failed` to APP_ERROR_LOG
 and raises OPS_SCAN_DEGRADED while every other rule keeps firing.
 
 **Cadence gates (V157, compile diet):** the hourly SP_ALERT_SCAN reads the
-Central hour once per run and skips its heaviest blocks outside their slots —
+Central hour once per run and skips these blocks outside their slots —
 SEC_CRED_EXPIRY [10], SEC_NEW_EXPOSURE [20] and their condition-ended clears
 run at 01, 05, 09, 13, 17 and 21 Central; the OPS_PIPELINE_DEGRADED [22]
 self-watch at 02, 05, 08, 11, 14, 17, 20 and 23 (the daily scan's copy still
