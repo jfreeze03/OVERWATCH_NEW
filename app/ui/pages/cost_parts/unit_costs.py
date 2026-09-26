@@ -607,7 +607,7 @@ def _graphs_tab(company: str, days: int, rate: float, database: str = "",
         # no truncation banner. max_rows=0 fetches the full window (the builders keep a
         # 50000-row safety ceiling).
         max_rows=0,
-        mart_source="MART_TASK_GRAPH_DAILY (mart, loaded hourly)",
+        mart_source="MART_TASK_GRAPH_DAILY (mart, refreshed every 4h; today up to 4h behind)",
         live_source="TASK_HISTORY + QUERY_ATTRIBUTION_HISTORY (live fallback)")
     if not guard(res, "No task-graph runs in this scope/window."):
         return

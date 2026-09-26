@@ -111,11 +111,22 @@ def test_v127_is_the_latest_full_loader_definition() -> None:
     defs = sorted(p for p in _MIG_DIR.glob("V[0-9]*.sql")
                   if "CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27"
                   in p.read_text(encoding="utf-8"))
-    # V152 (Next-Fifty #10c) added the MART_TASK_NODE_DAILY row to the HOURLY freshness srcmap, so it
-    # is now the latest full-loader definition; it was re-derived from V146 (the ai_functions repoint
-    # onto the canonical CORTEX_AI_FUNCTIONS_USAGE_HISTORY), which was re-derived from V142 (A4
-    # single-scan), and V127 the baseline before that.
-    assert defs[-1].name == "V152__pipeline_freshness_coverage.sql"
+    # V159 (wave-2b rework, D5 loader compile diet) gates the HOURLY day-grain arms [1] / [6] / [6b] to
+    # every 4th Central hour (always when d > 2), so it is now the latest full-loader definition; it was
+    # re-derived from V152 (Next-Fifty #10c: the MART_TASK_NODE_DAILY freshness srcmap row), which was
+    # re-derived from V146 (the ai_functions repoint onto the canonical CORTEX_AI_FUNCTIONS_USAGE_HISTORY),
+    # from V142 (A4 single-scan), and V127 the baseline before that. The wh_eff arm V127 introduced is
+    # carried byte-identical (only wrapped by the gate).
+    assert defs[-1].name == "V159__loader_compile_diet.sql"
+    latest = _proc_block(defs[-1].read_text(encoding="utf-8"))
+    arm = latest[latest.index("-- [1] warehouse efficiency"):latest.index("loaded := loaded || 'wh_eff ';")]
+    v127_arm = _proc_block(_V127)
+    v127_arm = v127_arm[v127_arm.index("-- [1] warehouse efficiency"):v127_arm.index("loaded := loaded || 'wh_eff ';")]
+    gate = ("        IF (d > 2 OR MOD(ct_hour, 4) = 0) THEN   -- V159 (D5) gate [1]: every 4th Central hour; "
+            "always when d > 2\n")
+    assert arm.count(gate) == 1
+    assert "m_idle AS (" in arm and "SUM(IFF(a.HOUR_TS IS NULL, COALESCE(mh.CREDITS_USED, 0), 0)) AS IDLE_CREDITS" in arm
+    assert arm.replace(gate, "").count("IDLE_CREDITS") == v127_arm.count("IDLE_CREDITS")
 
 
 def test_v127_floor_tracks_the_tip() -> None:
