@@ -2728,12 +2728,12 @@ def _task_runs_view(company: str, days: int, database: str = "",
         page=_PAGE,
         key=f"t_node_{company}_{days}{_lm}",
         tier="hourly",
-        source="MART_TASK_NODE_DAILY",
+        source="MART_TASK_NODE_DAILY (mart, refreshed every 4h; today up to 4h behind)",
     )
     if guard(
         nres,
         "No per-node timing yet — MART_TASK_NODE_DAILY is empty for this scope "
-        "(it loads hourly once V058 is applied).",
+        "(it refreshes every 4 hours once V058 is applied).",
     ):
         ndf = nres.df.copy()
         if {"FAILED", "RUNS"}.issubset(ndf.columns):

@@ -381,7 +381,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         mart27_sql.eff_idle_analysis(days, company, bounds=bounds),
         insights_sql.idle_warehouse_analysis(days, company, bounds=bounds),
         page=_PAGE, key=f"idle_{company}_{days}{_lm}", days=days,
-        mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, loaded hourly)",
+        mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, refreshed every 4h; today up to 4h behind)",
         live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")
     if _idle_head.ok and not _idle_head.empty:
         _iw_days = served_days(_idle_head, days)
@@ -428,7 +428,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             mart27_sql.eff_idle_analysis(days, company, bounds=bounds),
             insights_sql.idle_warehouse_analysis(days, company, bounds=bounds),
             page=_PAGE, key=f"idle_{company}_{days}{_lm}", days=days,
-            mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, loaded hourly)",
+            mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, refreshed every 4h; today up to 4h behind)",
             live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")
         if guard(idle_res, "No warehouse metering in this window."):
             # Current settings are part of recommendation eligibility, not decoration:
@@ -1717,7 +1717,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             mart27_sql.eff_idle_analysis(days, company, bounds=bounds),
             insights_sql.idle_warehouse_analysis(days, company, bounds=bounds),
             page=_PAGE, key=f"remed_idle_{company}_{days}{_lm}", days=days,
-            mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, loaded hourly)",
+            mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, refreshed every 4h; today up to 4h behind)",
             live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")
         if guard(idle_res, "No warehouse activity in the window to remediate."):
             _remed_whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="jump_wh",

@@ -182,6 +182,24 @@ anyway (the V089 behaviour); nothing is skipped on a guess.
 `SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;` — every state should be
 `started` except TASK_ALERT_NOTIFY before its integration exists.
 
+**Loader compile diet (V159):** two hourly procs skip work instead of
+recompiling a heavy ACCOUNT_USAGE statement every hour. The hourly
+`SP_LOAD_MARTS_V27('HOURLY', 2)` runs its three day-grain arms —
+`MART_WAREHOUSE_EFFICIENCY_DAILY` [1], `MART_TASK_GRAPH_DAILY` [6] and
+`MART_TASK_NODE_DAILY` [6b] — only in the 00/04/08/12/16/20 Central cycles,
+and always when DAYS_BACK > 2 (the nightly reconcile's `('HOURLY', 3)`, which
+re-loads D-3..today, and backfills). Every other mart still loads hourly.
+Today's row in those three marts can be up to 4h old (5h across the
+November DST night): the Optimize idle / sizing panels, the Unit costs
+task-graph panel, the Operations node-timing board and `SP_SLO_BREACH_SCAN`
+see it that much later; completed days are unaffected. Their freshness rows
+advance only in those cycles, well inside the 30h DAILY cadence, so they
+never read stale. To force them by hand, `CALL SP_LOAD_MARTS_V27('HOURLY', 3)`.
+`SP_CHANGE_ATTRIBUTION` runs its QUERY_HISTORY UPDATE only while a
+WAREHOUSE_CHANGE_REGISTRY row seen in the last 3 hours is still
+unattributed (about three hourly attempts per change, the first ~07:07 after
+the 06:40 scan) and otherwise returns `attribution pass skipped`.
+
 ## 5. Pages, sections, and every metric
 
 **Money convention:** billed credits = `CREDITS_BILLED` where the source
@@ -834,4 +852,8 @@ INCIDENT_REOPEN_DAYS), alerts-per-incident compression, change-correlated %
 CHANGE_SOURCE. MANAGED = a DEPLOY_ACTORS service user (Settings; empty
 until Flyway/Terraform land), MANUAL = a human, UNKNOWN = no matching ALTER
 found near the snapshot. Populate DEPLOY_ACTORS the day a deploy tool gets
-a service user.
+a service user. Since V159 the hourly attribution pass tries each change for
+about 3 hours after the scan sees it (its fixed evidence window around
+CHANGE_SEEN_AT gains no new QUERY_HISTORY rows after that unless
+ACCOUNT_USAGE runs more than ~3h late); a later unattributed change
+re-tries every unattributed row of the last 7 days.
