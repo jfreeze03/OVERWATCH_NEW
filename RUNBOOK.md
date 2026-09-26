@@ -173,7 +173,11 @@ step 3 lists. `OPERATOR_BACKUP_LOG` gets a CLONED row for every
 `OVERWATCH_BAK` generation (the daily `_D`, and on Sundays the weekly `_W` as
 its own row, so a restore older than the daily window still finds a table
 that exists), plus every skip and prune. The Sunday `*_BAK_LAST` refresh is
-not logged.
+not logged. Statement budget: each run reads INFORMATION_SCHEMA once for all
+25 sources (not once per table) and writes its PRUNED rows in one insert, so a
+steady-state day is 59 statements (135 on Sundays); a same-day re-run skips the
+clones it already took. If that one probe errors, the run clones all 25
+anyway (the V089 behaviour); nothing is skipped on a guess.
 
 `SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;` — every state should be
 `started` except TASK_ALERT_NOTIFY before its integration exists.

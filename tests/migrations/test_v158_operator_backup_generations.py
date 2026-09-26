@@ -12,6 +12,13 @@ The proc's load-bearing shapes (the prune candidate query, the Sunday-only W gen
 metadata probe, the W row-count arm) are asserted by ``_lock_*`` helpers, and
 ``test_v158_locks_kill_their_mutations`` proves each helper rejects the mutation it exists to catch.
 
+Wave-2b rework D11 (the backup stays DAILY, trimmed): ONE set-based INFORMATION_SCHEMA probe before the
+per-table loop (sources present + generations already taken today; still fail-open), ONE set-based PRUNED
+log insert after the prune, and a static statement-budget model (``_budget`` / ``_runs``) that pins a
+steady-state weekday at 59 statements (135 on Sundays) and reproduces the untrimmed 107 / 208 on the pre-D11
+shape. Python mirrors (``_probe_emulated``, ``_loop_emulated``, ``_pruned_rows_batched``) prove the skip
+decisions and the batched rows; the mirrors are tied to the SQL by the exact-text locks.
+
 The wave-tip pins at the bottom (validate 'V001..V158 applied', the DEPLOYMENT/README list lines and the
 admin _EXPECTED_MIGRATIONS[158] entry) are written by the wave integrator; they fail until then.
 """
@@ -96,30 +103,77 @@ def _block(text: str, opener: str, closer: str) -> str:
     return text[i:text.index(closer, i) + len(closer)]
 
 
-# The daily D and the Sunday-only W generation statements, exactly as the proc carries them.
+# The daily D and the Sunday-only W generation statements, exactly as the proc carries them (each inside
+# its same-day skip IF since the wave-2b rework D11, hence one level deeper than before).
 _GEN_D_STMT = ("EXECUTE IMMEDIATE 'CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH_BAK.' || :tname ||\n"
-               "                                  '_OWBAK_' || :gen_d || ' CLONE DBA_MAINT_DB.OVERWATCH.' || :tname;")
+               "                                      '_OWBAK_' || :gen_d || ' CLONE DBA_MAINT_DB.OVERWATCH.' || :tname;")
 _GEN_W_STMT = ("EXECUTE IMMEDIATE 'CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH_BAK.' || :tname ||\n"
-               "                                      '_OWBAK_' || :gen_w || ' CLONE DBA_MAINT_DB.OVERWATCH_BAK.' || "
-               ":tname ||\n                                      '_OWBAK_' || :gen_d;")
+               "                                          '_OWBAK_' || :gen_w || ' CLONE DBA_MAINT_DB.OVERWATCH_BAK.' || "
+               ":tname ||\n                                          '_OWBAK_' || :gen_d;")
 _SUNDAY_OPEN = "                IF (is_sunday) THEN\n"      # the per-table loop's Sunday branch
-_SUNDAY_CLOSE = "                END IF;\n"
+# The branch's own 16-space close. The leading newline matters: the nested W-skip IF closes with a 20-space
+# "END IF;" that contains the bare 16-space text as a substring.
+_SUNDAY_CLOSE = "\n                END IF;\n"
 
-# The metadata probe fails OPEN: a probe error means "attempt the clone" (V089 behavior), so an unreadable
-# INFORMATION_SCHEMA surfaces as clone_failed, never as 25 silent SKIPPED_MISSING rows.
-_PROBE = (
-    "        present := 1;\n"
-    "        BEGIN\n"
-    "            SELECT COUNT(*) INTO :present\n"
-    "              FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES\n"
-    "             WHERE TABLE_SCHEMA = 'OVERWATCH' AND TABLE_NAME = :tname\n"
-    "               AND TABLE_TYPE = 'BASE TABLE';\n"
-    "        EXCEPTION\n"
-    "            WHEN OTHER THEN\n"
-    "                present := 1;\n"
-    "        END;\n"
-    "        IF (present = 0) THEN\n"
-)
+# D11: ONE set-based metadata probe before the per-table loop (it was one probe per table). It fails OPEN:
+# probe_ok turns TRUE only after the SELECT returned, the handler leaves it FALSE, and every skip below is
+# COALESCE(probe_ok AND ..., FALSE) -- so an unreadable INFORMATION_SCHEMA means "clone everything" (V089
+# behavior; a missing source then lands as clone_failed), never 25 silent SKIPPED_MISSING rows or 25
+# skipped clones.
+_PROBE_BLOCK = _norm("""
+BEGIN
+    SELECT COALESCE(ARRAY_AGG(IFF(TABLE_SCHEMA = 'OVERWATCH', TABLE_NAME, NULL)), ARRAY_CONSTRUCT()),
+           COALESCE(ARRAY_AGG(IFF(TABLE_SCHEMA = 'OVERWATCH_BAK' AND RIGHT(TABLE_NAME, 9) = :gen_d,
+                                  LEFT(TABLE_NAME, LENGTH(TABLE_NAME) - 16), NULL)), ARRAY_CONSTRUCT()),
+           COALESCE(ARRAY_AGG(IFF(TABLE_SCHEMA = 'OVERWATCH_BAK' AND RIGHT(TABLE_NAME, 9) = :gen_w,
+                                  LEFT(TABLE_NAME, LENGTH(TABLE_NAME) - 16), NULL)), ARRAY_CONSTRUCT())
+      INTO :src_present, :have_d, :have_w
+      FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES
+     WHERE TABLE_SCHEMA IN ('OVERWATCH', 'OVERWATCH_BAK')
+       AND TABLE_TYPE = 'BASE TABLE'
+       AND ((TABLE_SCHEMA = 'OVERWATCH' AND ARRAY_CONTAINS(TABLE_NAME::VARIANT, :tables))
+         OR (TABLE_SCHEMA = 'OVERWATCH_BAK' AND REGEXP_LIKE(TABLE_NAME, :prune_re)
+             AND RIGHT(TABLE_NAME, 9) IN (:gen_d, :gen_w)));
+    probe_ok := TRUE;
+EXCEPTION
+    WHEN OTHER THEN
+        probe_ok := FALSE;
+END;""")
+_PROBE_OPEN = "    -- ONE set-based metadata probe"
+# The three decisions the probe feeds, each a definite TRUE only from an answered probe.
+_MISSING_IF = "        IF (COALESCE(probe_ok AND NOT ARRAY_CONTAINS(tname::VARIANT, :src_present), FALSE)) THEN\n"
+_SKIP_D_IF = "IF (NOT COALESCE(probe_ok AND ARRAY_CONTAINS(tname::VARIANT, :have_d), FALSE)) THEN"
+_SKIP_W_IF = "IF (NOT COALESCE(probe_ok AND ARRAY_CONTAINS(tname::VARIANT, :have_w), FALSE)) THEN"
+_D_BLOCK = ("                " + _SKIP_D_IF + "\n                    " + _GEN_D_STMT + "\n"
+            "                END IF;\n")
+_W_BLOCK = ("                    " + _SKIP_W_IF + "\n                        " + _GEN_W_STMT + "\n"
+            "                    END IF;\n")
+_LOOP_OPEN, _LOOP_CLOSE = "    FOR i IN 0 TO ARRAY_SIZE(:tables) - 1 DO\n", "\n    END FOR;\n"
+_CUR_OPEN, _CUR_CLOSE = "        FOR r IN c_prune DO\n", "\n        END FOR;\n"
+
+# D11: the PRUNED rows are ONE set-based insert after the prune block (it was one INSERT per DROP). Inside
+# the cursor loop the DROP only collects its name, after the DROP succeeded and inside the regex guard.
+_COLLECT = ("                    pruned := pruned + 1;\n"
+            "                    pruned_list := pruned_list || pname || ' ';")
+_PRUNE_LOG_BLOCK = _norm("""
+IF (pruned > 0) THEN
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG
+            (RUN_ID, GENERATION, SOURCE_TABLE, BACKUP_TABLE, ACTION)
+        SELECT :run_id, RIGHT(p.VALUE::VARCHAR, 9), LEFT(p.VALUE::VARCHAR, LENGTH(p.VALUE::VARCHAR) - 16),
+               p.VALUE::VARCHAR, 'PRUNED'
+        FROM TABLE(FLATTEN(INPUT => SPLIT(TRIM(:pruned_list), ' '))) p;
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'BackupOperatorTables', 'backup_log_failed', LEFT(:emsg, 2000),
+                   'prune log ' || :gen_d || ' (OPERATOR_BACKUP_DAILY): ' || :pruned || ' generation(s) dropped, not logged', CURRENT_ROLE();
+    END;
+END IF;""")
+_PRUNE_LOG_OPEN = "    IF (pruned > 0) THEN\n"
+_PRUNE_SCAN_END = "scan stopped, generations not yet dropped are kept', CURRENT_ROLE();\n    END;\n"
 
 # The prune candidate query, whitespace-normalized. Every token is load-bearing: AND -> OR in the QUALIFY
 # drops every generation older than today; < -> <= drops today's; ASC / >= / a lost GEN_KIND partition /
@@ -200,9 +254,128 @@ def _lock_sunday_cadence(new: str) -> None:
 
 
 def _lock_probe_fails_open(new: str) -> None:
-    # two assignments: the pre-probe default AND the EXCEPTION handler (the one that makes it fail open)
-    assert new.count("present := 1;") == 2 and "present := 0;" not in new
-    assert new.count(_PROBE) == 1, "the metadata probe must fail OPEN (handler sets present := 1)"
+    probe = _block(new, _PROBE_OPEN, "\n    END;\n")
+    assert _norm(_live(probe)) == _PROBE_BLOCK, "the one metadata probe drifted from its golden"
+    # probe_ok: FALSE by default, TRUE only after the SELECT returned, left FALSE by the handler
+    assert "    probe_ok BOOLEAN DEFAULT FALSE;" in new
+    assert new.count("probe_ok := TRUE;") == 1 and new.count("probe_ok := FALSE;") == 1
+    assert probe.index("INTO :src_present, :have_d, :have_w") < probe.index("probe_ok := TRUE;") \
+        < probe.index("EXCEPTION"), "the success flag must follow the SELECT, inside the guarded block"
+    # every decision the probe feeds is a definite TRUE only from an answered probe (fails open)
+    assert new.count(_MISSING_IF) == 1, "a source counts as missing only when the probe answered"
+    assert new.count(_SKIP_D_IF) == 1 and new.count(_SKIP_W_IF) == 1
+    assert new.count("probe_ok AND") == 3, "no other decision may read the probe"
+
+
+def _lock_single_probe(new: str) -> None:
+    """D11: the metadata probe runs ONCE per run, before the per-table loop -- never per table."""
+    loop = _block(new, _LOOP_OPEN, _LOOP_CLOSE)
+    assert "INFORMATION_SCHEMA" not in loop and "SHOW " not in _live(loop), "the loop must not read metadata"
+    # its success path issues the clones and nothing else (the handlers and the rare missing branch aside)
+    work = _HANDLER.sub("", loop)
+    work = work.replace(_block(work, _MISSING_IF, "        ELSE\n"), "")
+    stmts = _stmt_starts(work)
+    assert len(stmts) == 3 and all(s.startswith("EXECUTE IMMEDIATE 'CREATE ") for s in stmts), stmts
+    assert new[:new.index(_LOOP_OPEN)].count("DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES") == 1
+    assert new.index(_PROBE_OPEN) < new.index(_LOOP_OPEN)
+    # probe 1 + the D row-count join 2 + the W row-count join 2 + the prune candidates 1
+    assert new.count("DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES") == 6
+
+
+def _lock_generation_skip(new: str) -> None:
+    """A same-day re-run skips the no-op CLONE of a generation the probe already saw -- and nothing else."""
+    loop = _block(new, _LOOP_OPEN, _LOOP_CLOSE)
+    sunday = _block(loop, _SUNDAY_OPEN, _SUNDAY_CLOSE)
+    assert loop.count(_D_BLOCK) == 1 and _D_BLOCK not in sunday, "D skip wraps exactly the D clone, every day"
+    assert sunday.count(_W_BLOCK) == 1, "W skip wraps exactly the W clone, Sundays only"
+    assert loop.index(_D_BLOCK) < loop.index(_SUNDAY_OPEN)
+    # the weekly _BAK_LAST pointer refreshes on every Sunday run: after the W skip closes, never inside it
+    assert sunday.index(_W_BLOCK) + len(_W_BLOCK) <= sunday.index("EXECUTE IMMEDIATE 'CREATE OR REPLACE TRANSIENT")
+    # and a skipped clone still counts as done (the table holds today's generation)
+    assert loop.index(_SUNDAY_CLOSE) < loop.index("                done := done + 1;")
+
+
+def _lock_prune_log_set_based(new: str) -> None:
+    """D11: ONE PRUNED insert per run, after the prune block; the cursor loop only collects names."""
+    cur = _block(new, _CUR_OPEN, _CUR_CLOSE)
+    assert "'PRUNED'" not in cur and new.count("'PRUNED'") == 1, "no per-DROP PRUNED insert"
+    guard = _block(cur, "IF (REGEXP_LIKE(pname, prune_re)) THEN", "\n            END IF;\n")
+    drop = "EXECUTE IMMEDIATE 'DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH_BAK.' || :pname;\n"
+    assert cur.count(_COLLECT) == 1 and guard.index(drop) < guard.index(_COLLECT), \
+        "a name is collected only after its DROP ran, inside the whole-name regex guard"
+    assert guard.index(_COLLECT) < guard.index("EXCEPTION"), "a failed DROP is never collected as PRUNED"
+    log = _block(new, _PRUNE_LOG_OPEN, "\n    END IF;\n")
+    assert _norm(_live(log)) == _PRUNE_LOG_BLOCK, "the set-based PRUNED insert drifted from its golden"
+    # after the prune block (so a scan that stops part-way still logs its DROPs), before the log trim
+    assert new.index(_PRUNE_SCAN_END) < new.index(_PRUNE_LOG_OPEN) < new.index("    -- The log trims itself")
+    # PRUNE_FAILED stays per row next to its APP_ERROR_LOG row (error path only)
+    assert cur.count("'PRUNE_FAILED'") == 1
+
+
+# ---------------------------------------------------------------------------------------------
+# D11 statement budget: a static count of the SQL statements one run issues, per path
+# ---------------------------------------------------------------------------------------------
+_STMT_START = re.compile(r"(?:(?:SELECT|INSERT INTO|DELETE FROM|MERGE INTO|UPDATE|EXECUTE IMMEDIATE|SHOW|CALL)\b"
+                         r"|res := \()")
+_HANDLER = re.compile(r"(?ms)^( *)EXCEPTION\n.*?^\1END;\n")
+
+
+def _stmt_starts(text: str) -> list[str]:
+    """SQL statements in a scripting fragment: a DML/DDL keyword at the start of a line, where a SELECT
+    only counts when it starts a statement (not the SELECT of an INSERT ... SELECT, a MERGE USING or a
+    subquery). Scripting assignments and IF tests are not SQL statements."""
+    out: list[str] = []
+    prev = ";"
+    for raw in text.splitlines():
+        ln = raw.strip()
+        if not ln or ln.startswith("--"):
+            continue
+        if _STMT_START.match(ln) and (not ln.startswith("SELECT") or prev.endswith((";", " THEN", " DO"))
+                                       or prev in ("BEGIN", "ELSE")):
+            out.append(ln)
+        prev = ln.split("--")[0].rstrip()
+    return out
+
+
+def _budget(proc: str, missing_open: str = _MISSING_IF) -> dict[str, int]:
+    """Per-path SQL statement counts of one SP_BACKUP_OPERATOR_TABLES run (success paths; the EXCEPTION
+    handlers, the SKIPPED_MISSING branch and the backup_incomplete branch are failure/rare paths)."""
+    body = _HANDLER.sub("", proc[proc.index("\nBEGIN\n"):])
+    loop, cur = _block(body, _LOOP_OPEN, _LOOP_CLOSE), _block(body, _CUR_OPEN, _CUR_CLOSE)
+    top = body.replace(loop, "").replace(cur, "")
+    top = top.replace(_block(top, "    IF (failed > 0) THEN\n", "\n    END IF;\n"), "")
+    prune_log = _block(top, _PRUNE_LOG_OPEN, "\n    END IF;\n") if _PRUNE_LOG_OPEN in top else ""
+    top = top.replace(prune_log, "") if prune_log else top
+    w_log = _block(top, "        IF (is_sunday) THEN\n", "\n        END IF;\n")
+    top = top.replace(w_log, "")
+    loop = loop.replace(_block(loop, missing_open, "        ELSE\n"), "")
+    sunday = _block(loop, _SUNDAY_OPEN, _SUNDAY_CLOSE)
+    return {
+        "fixed": 1 + len(_stmt_starts(top)),              # + the task's CALL
+        "per_table": len(_stmt_starts(loop.replace(sunday, ""))),
+        "per_table_sunday": len(_stmt_starts(sunday)),
+        "sunday_log": len(_stmt_starts(w_log)),
+        "per_drop": len(_stmt_starts(cur)),
+        "prune_log": len(_stmt_starts(prune_log)),
+    }
+
+
+def _runs(b: dict[str, int], n: int = len(TABLES)) -> dict[str, int]:
+    """Statements per run: days 1-14 (nothing to prune) and steady state (one D ages out per table per
+    day; on Sundays one W per table too)."""
+    weekday_first = b["fixed"] + n * b["per_table"]
+    weekday = weekday_first + n * b["per_drop"] + b["prune_log"]
+    sunday = (b["fixed"] + b["sunday_log"] + n * (b["per_table"] + b["per_table_sunday"])
+              + 2 * n * b["per_drop"] + b["prune_log"])
+    return {"weekday_first_14_days": weekday_first, "weekday": weekday, "sunday": sunday,
+            "week": 6 * weekday + sunday}
+
+
+def _lock_statement_budget(new: str) -> None:
+    b = _budget(new)
+    assert b == {"fixed": 8, "per_table": 1, "per_table_sunday": 2, "sunday_log": 1, "per_drop": 1,
+                 "prune_log": 1}, b
+    assert _runs(b) == {"weekday_first_14_days": 33, "weekday": 59, "sunday": 135, "week": 489}, _runs(b)
 
 
 def _lock_weekly_generation_logged(new: str) -> None:
@@ -480,12 +653,156 @@ def test_v158_prune_rank_rule_emulated():
 
 
 # ---------------------------------------------------------------------------------------------
+# D11: one metadata probe, the same-day skip, one PRUNED insert, the statement budget
+# ---------------------------------------------------------------------------------------------
+def _probe_emulated(rows: list[tuple[str, str]], gen_d: str, gen_w: str) -> tuple[set[str], set[str], set[str]]:
+    """Python mirror of the probe's WHERE + the three ARRAY_AGG(IFF(...)) over (TABLE_SCHEMA, TABLE_NAME)
+    BASE TABLE rows: (src_present, have_d, have_w)."""
+    src: set[str] = set()
+    have_d: set[str] = set()
+    have_w: set[str] = set()
+    for schema, name in rows:
+        if schema == "OVERWATCH" and name in TABLES:
+            src.add(name)
+        elif schema == "OVERWATCH_BAK" and _PRUNE_RX.fullmatch(name) and name[-9:] in (gen_d, gen_w):
+            (have_d if name[-9:] == gen_d else have_w).add(name[:len(name) - 16])
+    return src, have_d, have_w
+
+
+def _loop_emulated(probe_ok: bool, src: set[str] | None, have_d: set[str] | None, have_w: set[str] | None,
+                   is_sunday: bool) -> tuple[int, int, list[tuple[str, str]]]:
+    """Python mirror of the per-table loop's three IF decisions (text-locked by _lock_probe_fails_open and
+    _lock_generation_skip). SQL three-valued logic: ARRAY_CONTAINS on a NULL array is NULL, and
+    COALESCE(probe_ok AND <NULL>, FALSE) is FALSE -- so an unknown never skips anything."""
+    def known(arr: set[str] | None, t: str) -> bool:          # COALESCE(probe_ok AND ARRAY_CONTAINS, FALSE)
+        return probe_ok and arr is not None and t in arr
+
+    done = missing = 0
+    stmts: list[tuple[str, str]] = []
+    for t in TABLES:
+        if probe_ok and src is not None and t not in src:     # COALESCE(probe_ok AND NOT ..., FALSE)
+            missing += 1
+            stmts.append(("SKIPPED_MISSING", t))
+            continue
+        if not known(have_d, t):
+            stmts.append(("CLONE_D", t))
+        if is_sunday:
+            if not known(have_w, t):
+                stmts.append(("CLONE_W", t))
+            stmts.append(("BAK_LAST", t))
+        done += 1
+    return done, missing, stmts
+
+
+def _kinds(stmts: list[tuple[str, str]]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for kind, _t in stmts:
+        out[kind] = out.get(kind, 0) + 1
+    return out
+
+
+def test_v158_one_metadata_probe_before_the_loop_fails_open():
+    new = _proc(_V158)
+    _lock_single_probe(new)
+    _lock_probe_fails_open(new)
+    gd, gw = "D20260927", "W20260927"                               # a Sunday
+    rows = [("OVERWATCH", t) for t in TABLES] + [
+        ("OVERWATCH", "APP_ERROR_LOG"), ("OVERWATCH", "SETTINGS_BAK_LAST"),
+        ("OVERWATCH_BAK", "SETTINGS_OWBAK_D20260927"), ("OVERWATCH_BAK", "SETTINGS_OWBAK_D20260926"),
+        ("OVERWATCH_BAK", "INCIDENTS_OWBAK_W20260927"), ("OVERWATCH_BAK", "SETTINGS_BAK_20260927"),
+        ("OVERWATCH_BAK", "FOO_OWBAK_D20260927"), ("OVERWATCH", "USER_PREFS_OWBAK_D20260927")]
+    src, have_d, have_w = _probe_emulated(rows, gd, gw)
+    assert src == set(TABLES)                                     # only the 25, never a non-operator table
+    assert have_d == {"SETTINGS"} and have_w == {"INCIDENTS"}     # today's, in OVERWATCH_BAK, whole-name only
+    # a failed probe: nothing counts as missing or already taken -- all 25 cloned, exactly V089's attempt
+    done, missing, stmts = _loop_emulated(False, None, None, None, is_sunday=False)
+    assert (done, missing, _kinds(stmts)) == (25, 0, {"CLONE_D": 25})
+    done, missing, stmts = _loop_emulated(False, None, None, None, is_sunday=True)
+    assert (done, missing, _kinds(stmts)) == (25, 0, {"CLONE_D": 25, "CLONE_W": 25, "BAK_LAST": 25})
+    # an answered probe on an install missing the 11 V075 tables: the same skips the per-table probe gave
+    v074 = set(TABLES) - set(_V075_ADDITIONS)
+    done, missing, stmts = _loop_emulated(True, v074, set(), set(), is_sunday=False)
+    assert (done, missing, _kinds(stmts)) == (14, 11, {"CLONE_D": 14, "SKIPPED_MISSING": 11})
+
+
+def test_v158_same_day_rerun_skips_only_the_no_op_clones():
+    new = _proc(_V158)
+    _lock_generation_skip(new)
+    every = set(TABLES)
+    # the normal daily run: every generation is new
+    assert _kinds(_loop_emulated(True, every, set(), set(), False)[2]) == {"CLONE_D": 25}
+    assert _kinds(_loop_emulated(True, every, set(), set(), True)[2]) == {
+        "CLONE_D": 25, "CLONE_W": 25, "BAK_LAST": 25}
+    # a same-day re-run (the apply-day tail before 05:10, a manual EXECUTE TASK): no no-op CLONE is issued
+    done, _m, stmts = _loop_emulated(True, every, every, set(), False)
+    assert done == 25 and stmts == []
+    # ... on a Sunday the weekly *_BAK_LAST pointer still refreshes (V089 cadence, every Sunday run)
+    done, _m, stmts = _loop_emulated(True, every, every, every, True)
+    assert done == 25 and _kinds(stmts) == {"BAK_LAST": 25}
+    # ... and a W that failed on the first Sunday run is retried from the D that exists
+    done, _m, stmts = _loop_emulated(True, every, every, every - {"INCIDENTS"}, True)
+    assert done == 25 and _kinds(stmts) == {"CLONE_W": 1, "BAK_LAST": 25} and ("CLONE_W", "INCIDENTS") in stmts
+
+
+def _pruned_rows_per_row(names: list[str]) -> list[tuple[str, str, str, str]]:
+    """The pre-D11 per-DROP insert: RIGHT(:pname, 9), LEFT(:pname, LENGTH(:pname) - 16), :pname, 'PRUNED'."""
+    return [(n[-9:], n[:len(n) - 16], n, "PRUNED") for n in names]
+
+
+def _pruned_rows_batched(names: list[str]) -> list[tuple[str, str, str, str]]:
+    """The D11 insert: pruned_list := pruned_list || pname || ' ' per DROP, then FLATTEN over
+    SPLIT(TRIM(:pruned_list), ' ') with the same RIGHT / LEFT slices on each VALUE."""
+    pruned_list = ""
+    for n in names:
+        pruned_list = pruned_list + n + " "
+    return [(v[-9:], v[:len(v) - 16], v, "PRUNED") for v in pruned_list.strip(" ").split(" ")]
+
+
+def test_v158_pruned_rows_are_one_set_based_insert_with_the_same_rows():
+    new = _proc(_V158)
+    _lock_prune_log_set_based(new)
+    # the same row per dropped generation as the per-DROP insert wrote (cursor order: ORDER BY TABLE_NAME)
+    today = dt.date(2026, 9, 27)                                  # a Sunday: one D and one W age out per table
+    names: list[str] = []
+    for base in TABLES:
+        names += [f"{base}_OWBAK_D{(today - dt.timedelta(days=k)):%Y%m%d}" for k in range(15)]   # today + 14
+        names += [f"{base}_OWBAK_W{(today - dt.timedelta(weeks=k)):%Y%m%d}" for k in range(9)]   # today + 8
+    dropped = sorted(_prune(names, today, 14, 8))
+    assert len(dropped) == 25 * 2                                  # the steady-state Sunday: 25 D + 25 W
+    assert _pruned_rows_batched(dropped) == _pruned_rows_per_row(dropped)
+    # SPLIT on ' ' is lossless: every collected name passed the whole-name regex, which has no whitespace
+    assert all(_PRUNE_RX.fullmatch(n) and " " not in n for n in dropped)
+    assert not re.search(r"\s", _PRUNE_RX.pattern)
+    assert _pruned_rows_batched(["SETTINGS_OWBAK_D20260901"]) == [
+        ("D20260901", "SETTINGS", "SETTINGS_OWBAK_D20260901", "PRUNED")]
+
+
+def test_v158_statement_budget():
+    new = _proc(_V158)
+    _lock_statement_budget(new)
+    # the same model on the pre-D11 shape (the PR #34 text, all four D11 edits reverted) gives the
+    # independently counted 107 / 208 / 850 of the cost analysis: the model counts what it claims to
+    before = _runs(_budget(_pre_d11(new)))
+    assert before == {"weekday_first_14_days": 57, "weekday": 107, "sunday": 208, "week": 850}, before
+    # the numbers the header, the SCHEMA_VERSION DESCRIPTION and RUNBOOK section 4 quote are the model's
+    assert "A steady-state weekday is 59 statements and a Sunday 135, 489 a week" in _V158
+    assert "design: 107 / 208 / 850; V089 ran 26 a week" in _V158
+    assert "keep a steady-state day at 59 statements (Sunday 135)" in _V158
+    assert "steady-state day is 59 statements (135 on Sundays)" in _norm(_read("RUNBOOK.md"))
+
+
+def _pre_d11(proc: str) -> str:
+    """The PR #34 proc shape rebuilt from the current one: no pre-loop probe and no set-based PRUNED
+    insert, the per-table probe back in the loop and the per-DROP PRUNED insert back in the cursor loop."""
+    probe = _block(proc, _PROBE_OPEN, "\n    END;\n") + "\n"
+    log = _block(proc, _PRUNE_LOG_OPEN, "\n    END IF;\n") + "\n"
+    assert proc.count(probe) == 1 and proc.count(log) == 1
+    return _PER_ROW_PRUNE_LOG(_PER_TABLE_PROBE(proc.replace(probe, "", 1).replace(log, "", 1)))
+
+
+# ---------------------------------------------------------------------------------------------
 # mutation-kill proofs: each _lock_* helper passes on the real proc and fails on the mutation it guards
 # ---------------------------------------------------------------------------------------------
-_W_LINE = "                    " + _GEN_W_STMT + "\n"
-_D_LINE = "                " + _GEN_D_STMT + "\n"
-
-
 def _swap(old: str, new: str):
     def mutate(text: str) -> str:
         assert text.count(old) == 1, f"mutation anchor drifted (the proof went vacuous): {old!r}"
@@ -507,6 +824,49 @@ def _move_into_sunday(line: str):
     return mutate
 
 
+# The two D11 reverts, as mutations: the pre-D11 per-table probe back inside the loop, and the pre-D11
+# per-DROP PRUNED insert back inside the cursor loop.
+_OLD_PROBE = (
+    "        BEGIN\n"
+    "            SELECT COUNT(*) INTO :present\n"
+    "              FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES\n"
+    "             WHERE TABLE_SCHEMA = 'OVERWATCH' AND TABLE_NAME = :tname\n"
+    "               AND TABLE_TYPE = 'BASE TABLE';\n"
+    "        EXCEPTION\n"
+    "            WHEN OTHER THEN\n"
+    "                present := 1;\n"
+    "        END;\n")
+_OLD_PRUNE_ROW = (
+    "                    INSERT INTO DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG\n"
+    "                        (RUN_ID, GENERATION, SOURCE_TABLE, BACKUP_TABLE, ACTION)\n"
+    "                    SELECT :run_id, RIGHT(:pname, 9), LEFT(:pname, LENGTH(:pname) - 16), :pname, 'PRUNED';\n")
+_COLLECT_LINE = _COLLECT + "   -- whole-name regex match: no space inside\n"
+_PER_TABLE_PROBE = _swap(_MISSING_IF, _OLD_PROBE + _MISSING_IF)
+_PER_ROW_PRUNE_LOG = _swap(_COLLECT_LINE, _COLLECT_LINE + _OLD_PRUNE_ROW)
+
+
+def _move_prune_log_into_the_scan(text: str) -> str:
+    """The set-based insert moved inside the prune block (a scan that dies part-way would lose it)."""
+    block = _block(text, _PRUNE_LOG_OPEN, "\n    END IF;\n")
+    assert text.count(block) == 1 and text.count(_CUR_CLOSE) == 1, "mutation anchor drifted"
+    text = text.replace(block, "", 1)
+    return text.replace(_CUR_CLOSE, _CUR_CLOSE + block, 1)
+
+
+def _bak_last_inside_the_w_skip(text: str) -> str:
+    """The W skip's END IF moved below _BAK_LAST: a same-day Sunday re-run would stop refreshing it."""
+    text = _swap("'_OWBAK_' || :gen_d;\n                    END IF;\n", "'_OWBAK_' || :gen_d;\n")(text)
+    return _swap("_BAK_LAST CLONE DBA_MAINT_DB.OVERWATCH.' || :tname;\n",
+                 "_BAK_LAST CLONE DBA_MAINT_DB.OVERWATCH.' || :tname;\n                    END IF;\n")(text)
+
+
+def _flag_before_the_select(text: str) -> str:
+    """probe_ok set TRUE before the SELECT: a failing probe would leave it TRUE (fails closed)."""
+    text = _swap(":gen_w)));\n        probe_ok := TRUE;\n", ":gen_w)));\n")(text)
+    return _swap("    BEGIN\n        SELECT COALESCE(ARRAY_AGG(",
+                 "    BEGIN\n        probe_ok := TRUE;\n        SELECT COALESCE(ARRAY_AGG(")(text)
+
+
 _MUTANTS = {
     # #26 the prune QUALIFY (C1: AND -> OR drops every generation dated before today)
     "prune-and-to-or": (_lock_prune_candidate, _swap(
@@ -519,14 +879,58 @@ _MUTANTS = {
         "PARTITION BY g.BASE_NAME, g.GEN_KIND", "PARTITION BY g.BASE_NAME")),
     "prune-keeps-swapped": (_lock_prune_candidate, _swap(
         "IFF(g.GEN_KIND = 'D', :keep_d, :keep_w)", "IFF(g.GEN_KIND = 'D', :keep_w, :keep_d)")),
-    # #27 the weekly tier (C2: a W generation cloned every day collapses 8 weeks to 8 days)
-    "w-generation-every-day": (_lock_sunday_cadence, _move(_W_LINE, _SUNDAY_OPEN)),
-    "d-generation-sunday-only": (_lock_sunday_cadence, _move_into_sunday(_D_LINE)),
-    # #28 the fail-open probe (C3: a handler that fails closed skips all 25 tables silently)
+    # #27 the weekly tier (C2: a W generation cloned every day collapses 8 weeks to 8 days); since D11 each
+    # clone sits in its same-day skip IF, so the mutants move the whole wrapped statement
+    "w-generation-every-day": (_lock_sunday_cadence, _move(_W_BLOCK, _SUNDAY_OPEN)),
+    "d-generation-sunday-only": (_lock_sunday_cadence, _move_into_sunday(_D_BLOCK)),
+    # #28 + D11 the fail-open probe (a probe that fails closed skips all 25 tables silently)
     "probe-handler-fails-closed": (_lock_probe_fails_open, _swap(
-        "            WHEN OTHER THEN\n                present := 1;", "            WHEN OTHER THEN\n                present := 0;")),
-    "probe-loses-its-default": (_lock_probe_fails_open, _swap(
-        "        present := 1;\n        BEGIN\n", "        BEGIN\n")),
+        "        WHEN OTHER THEN\n            probe_ok := FALSE;", "        WHEN OTHER THEN\n            probe_ok := TRUE;")),
+    "probe-flag-set-before-the-select": (_lock_probe_fails_open, _flag_before_the_select),
+    "probe-default-true": (_lock_probe_fails_open, _swap(
+        "    probe_ok BOOLEAN DEFAULT FALSE;", "    probe_ok BOOLEAN DEFAULT TRUE; ")),
+    "missing-on-an-unknown": (_lock_probe_fails_open, _swap(
+        "NOT ARRAY_CONTAINS(tname::VARIANT, :src_present), FALSE)) THEN",
+        "NOT ARRAY_CONTAINS(tname::VARIANT, :src_present), TRUE)) THEN")),
+    "probe-reads-views-too": (_lock_probe_fails_open, _swap(
+        "         WHERE TABLE_SCHEMA IN ('OVERWATCH', 'OVERWATCH_BAK')\n           AND TABLE_TYPE = 'BASE TABLE'\n",
+        "         WHERE TABLE_SCHEMA IN ('OVERWATCH', 'OVERWATCH_BAK')\n")),
+    "probe-have-d-any-day": (_lock_probe_fails_open, _swap(
+        "'OVERWATCH_BAK' AND RIGHT(TABLE_NAME, 9) = :gen_d,",
+        "'OVERWATCH_BAK' AND LEFT(RIGHT(TABLE_NAME, 9), 1) = 'D',")),
+    # D11 the single probe (the per-table probe must not come back)
+    "per-table-probe-returns": (_lock_single_probe, _PER_TABLE_PROBE),
+    # D11 the same-day skip (it must never suppress a clone that is still needed)
+    "d-skip-keyed-on-the-source": (_lock_generation_skip, _swap(
+        "ARRAY_CONTAINS(tname::VARIANT, :have_d), FALSE)) THEN",
+        "ARRAY_CONTAINS(tname::VARIANT, :src_present), FALSE)) THEN")),
+    "w-skip-keyed-on-the-d": (_lock_generation_skip, _swap(
+        "ARRAY_CONTAINS(tname::VARIANT, :have_w), FALSE)) THEN",
+        "ARRAY_CONTAINS(tname::VARIANT, :have_d), FALSE)) THEN")),
+    "skip-on-an-unknown": (_lock_generation_skip, _swap(
+        "ARRAY_CONTAINS(tname::VARIANT, :have_d), FALSE)) THEN",
+        "ARRAY_CONTAINS(tname::VARIANT, :have_d), TRUE)) THEN")),
+    "bak-last-inside-the-w-skip": (_lock_generation_skip, _bak_last_inside_the_w_skip),
+    # D11 the set-based PRUNED insert
+    "prune-log-per-row-again": (_lock_prune_log_set_based, _PER_ROW_PRUNE_LOG),
+    "prune-name-not-collected": (_lock_prune_log_set_based, _swap(
+        "\n                    pruned_list := pruned_list || pname || ' ';   -- whole-name regex match: no space inside",
+        "")),
+    "prune-name-collected-before-the-drop": (_lock_prune_log_set_based, _swap(
+        "                    EXECUTE IMMEDIATE 'DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH_BAK.' || :pname;\n" + _COLLECT,
+        _COLLECT + "\n                    EXECUTE IMMEDIATE 'DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH_BAK.' || :pname;")),
+    "prune-log-inside-the-scan": (_lock_prune_log_set_based, _move_prune_log_into_the_scan),
+    "prune-log-gate-off-by-one": (_lock_prune_log_set_based, _swap(
+        "    IF (pruned > 0) THEN\n", "    IF (pruned > 1) THEN\n")),
+    "prune-log-generation-slice": (_lock_prune_log_set_based, _swap(
+        "RIGHT(p.VALUE::VARCHAR, 9)", "RIGHT(p.VALUE::VARCHAR, 8)")),
+    # D11 the statement budget (either revert, or any new top-level statement, re-inflates the count)
+    "budget-per-table-probe": (_lock_statement_budget, _PER_TABLE_PROBE),
+    "budget-per-row-prune-log": (_lock_statement_budget, _PER_ROW_PRUNE_LOG),
+    "budget-extra-top-level-statement": (_lock_statement_budget, _swap(
+        "    -- The log trims itself (SP_PURGE_FACTS is untouched).\n",
+        "    -- The log trims itself (SP_PURGE_FACTS is untouched).\n"
+        "    SELECT COUNT(*) INTO :total_rows FROM DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG;\n")),
     # #11 the W CLONED row (Sunday-only, keyed on gen_w) and the D-only freshness ROW_COUNT
     "w-log-row-every-day": (_lock_weekly_generation_logged, lambda t: _swap(
         "        END IF;\n        -- The freshness ROW_COUNT", "        -- The freshness ROW_COUNT")(_swap(
