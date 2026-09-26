@@ -589,7 +589,8 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
             ])
             styled_table(with_user_names(cdf, _PAGE), height=280)
             # #1: pure alert-provenance (what the scan raises + cadence) → audit-mode only.
-            methodology_note("The hourly scan raises SEC_CRED_EXPIRY for these — re-raised weekly until rotated.")
+            methodology_note("The hourly scan raises SEC_CRED_EXPIRY for these — checked every 4 hours (01, 05, "
+                             "09, 13, 17, 21 Central), once per band per expiry date (EXPIRING, then EXPIRED).")
             result_caption(creds)
 
         section_header("Dormant users still holding access (90d+)", "", "security",

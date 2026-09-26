@@ -1,10 +1,13 @@
 """Locks for V157 — the single wave-2 re-derivation of both alert scans (Next-Fifty wave 2b).
 
 Ranks 10a/b/d + 13 + 2 (the ETL-cycle add-on slot) + 12c, merged onto the CURRENT definer of both procs,
-V141. Hourly SP_ALERT_SCAN: the dead arm [15] out; [22] OPS_PIPELINE_DEGRADED + [23] PIPE_ETL_CYCLE add-on
-in; the V091 auto-clear sweep scoped to its 3 PERF rules; a #12c condition-ended sweep for SEC_CRED_EXPIRY /
-SEC_NEW_EXPOSURE; the arm [10] recurrence fix; an [hb] heartbeat. Daily SP_ALERT_SCAN_DAILY: [22] (byte-
-identical), [24] COST_IDLE_OPPORTUNITY, [hb]. Tallies 13 -> 13 and 9 -> 11.
+V141, plus the wave-2b compile-diet rework (owner decisions D1-D4, D8-D10). Hourly SP_ALERT_SCAN: the dead
+arm [15] and the retired COST_CLOUD_SVC_RATIO arm [11] out; ONE Central-hour read gates arms [10]/[20] and
+their condition-ended clears to every 4th hour and [22] OPS_PIPELINE_DEGRADED to every 3rd; the [23]
+PIPE_ETL_CYCLE add-on in; the V091 auto-clear sweep scoped to its 3 PERF rules; a #12c condition-ended sweep
+for SEC_CRED_EXPIRY / SEC_NEW_EXPOSURE; the arm [10] recurrence fix; an [hb] heartbeat as a point UPDATE.
+Daily SP_ALERT_SCAN_DAILY (ungated): [22] (byte-identical), [24] COST_IDLE_OPPORTUNITY, [hb]. Tallies
+13 -> 12 and 9 -> 11. File level: COST_CLOUD_SVC_RATIO retired the V034 way.
 
 Byte-locked to outputs/gen_v157.py; the normalize-and-compare locks prove nothing else in either V141 body
 moved (the round-13 class: a re-derivation silently dropping an intervening version's change).
@@ -51,18 +54,29 @@ _D = _proc(_MIG, "SP_ALERT_SCAN_DAILY()")
 _H141 = _proc(_V141, "SP_ALERT_SCAN()")
 _D141 = _proc(_V141, "SP_ALERT_SCAN_DAILY()")
 
-_ARM22_H = _between(_H, "    -- [22] OPS_PIPELINE_DEGRADED", "    -- [23] PIPE_ETL_CYCLE")
+# Wave-2b rework cadence gates -- test-side copies, independent of the generator. Every gate wraps ONE
+# unchanged block: "    IF (<expr>) THEN   -- V157 cadence gate: <label>\n" ... "    END IF;   -- /V157 cadence gate: <label>\n".
+_HOUR_READ = "        SELECT HOUR(CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())) INTO :ct_hour;\n"
+_HOUR_DECL_RE = re.compile(r"    ct_hour INT DEFAULT (\d+);[^\n]*\n")
+_SEC_EXPR, _OPS_EXPR = "MOD(ct_hour, 4) = 1", "MOD(ct_hour, 3) = 2"
+_GATE_OPEN_RE = re.compile(r"^    IF \((MOD\(ct_hour, \d\) = \d)\) THEN   -- V157 cadence gate: ([^\n]*)\n", re.M)
+_GATE_CLOSE_RE = re.compile(r"^    END IF;   -- /V157 cadence gate: ([^\n]*)\n", re.M)
+_GATE_CLOSE = "    END IF;   -- /V157 cadence gate: "
+
+_ARM22_H = _between(_H, "    -- [22] OPS_PIPELINE_DEGRADED", _GATE_CLOSE + "[22]")
 _ARM22_D = _between(_D, "    -- [22] OPS_PIPELINE_DEGRADED", "    -- [24] COST_IDLE_OPPORTUNITY")
 _ARM23 = _between(_H, "    -- [23] PIPE_ETL_CYCLE", "    IF (fails > 0) THEN\n")
 _ARM24 = _between(_D, "    -- [24] COST_IDLE_OPPORTUNITY", "    -- [17] PIPE_REF_GAP")
-_ARM10 = _between(_H, "    -- [10] SEC_CRED_EXPIRY", "    -- [11] COST_CLOUD_SVC_RATIO")
-_ARM20 = _between(_H, "    -- [20] SEC_NEW_EXPOSURE", "    -- [21] SEC_POSTURE_METRIC")
+_ARM10 = _between(_H, "    -- [10] SEC_CRED_EXPIRY", _GATE_CLOSE + "[10]")
+_ARM20 = _between(_H, "    -- [20] SEC_NEW_EXPOSURE", _GATE_CLOSE + "[20]")
 _V091 = _between(_H, "    -- [auto-clear sweep] V091:", "    -- [condition-ended sweep]")
 _CE = _between(_H, "    -- [condition-ended sweep]", "\n    -- [snooze carry-forward sweep] V117:")
 _HB_H = _between(_H, "    -- [hb] scan heartbeat", "    RETURN ")
 _HB_D = _between(_D, "    -- [hb] scan heartbeat", "    RETURN ")
+_HOUR_BLOCK = _between(_H, "    -- [cadence] V157 compile diet", "    -- [wake] V086:")
 
 _ARM15_V141 = _between(_H141, "    -- [15] SEC_BREAK_GLASS_USE\n", "    -- [17] COST_DEPT_BUDGET_PACE\n")
+_ARM11_V141 = _between(_H141, "    -- [11] COST_CLOUD_SVC_RATIO\n", "    -- [14] PIPE_COPY_FAILURES\n")
 _RET_H141 = "    RETURN 'alert scan v11 (V091: + auto-clear sweep): ' || (13 - :fails) || '/13 rule blocks ok';\n"
 _RET_D141 = ("    RETURN 'alert scan daily v2 (V141: storage-surge/serverless-creep/egress-spike moved off the hourly "
              "scan): ' || (9 - :fails) || '/9 rule blocks ok (daily)';\n")
@@ -176,11 +190,15 @@ def test_v157_file_order():
     mark_d = _MIG.index("-- >>> derived:SP_ALERT_SCAN_DAILY  (from V141;")
     create_d = _MIG.index("CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN_DAILY()")
     opt_in = _MIG.index("UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG\n   SET AUTO_CLEAR_ENABLED = TRUE")
+    retire_row = _MIG.index("DELETE FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG\n WHERE RULE_ID = 'COST_CLOUD_SVC_RATIO';")
+    retire_events = _MIG.index("UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS\n   SET STATUS = 'RESOLVED', "
+                               "RESOLUTION_KIND = 'EXPECTED'")
     version = _MIG.index("INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION")
-    assert guard < seed < mark_h < create_h < mark_d < create_d < opt_in < version
+    # the retirement runs after both procs are replaced (no scan can raise [11] any more), row before events
+    assert guard < seed < mark_h < create_h < mark_d < create_d < opt_in < retire_row < retire_events < version
 
 
-def test_v157_is_two_procs_one_seed_one_opt_in_no_task_no_top_level_call():
+def test_v157_is_two_procs_one_seed_one_opt_in_one_retirement_no_task_no_top_level_call():
     from tests.test_migrations_parse import _plain_statements
     assert _MIG.count("CREATE OR REPLACE PROCEDURE") == 2
     top = "".join(p for i, p in enumerate(_MIG.split("$$")) if i % 2 == 0)
@@ -189,6 +207,7 @@ def test_v157_is_two_procs_one_seed_one_opt_in_no_task_no_top_level_call():
         assert banned not in top, banned
     kinds = [re.sub(r"^(?:--[^\n]*\n)+", "", s.strip()).split(None, 2)[:2] for s in _plain_statements(_MIG)]
     assert kinds == [["MERGE", "INTO"], ["UPDATE", "DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG"],
+                     ["DELETE", "FROM"], ["UPDATE", "DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS"],
                      ["INSERT", "INTO"]], kinds
     # the only CALL anywhere is the [23] add-on inside the hourly body (no raiser runs at apply time)
     assert _MIG.count("CALL DBA_MAINT_DB.OVERWATCH.SP_SCAN_ETL_CYCLE()") == 1
@@ -238,10 +257,26 @@ def test_v157_markers_name_the_current_definer():
 
 def test_v157_hourly_normalizes_back_to_v141_byte_for_byte():
     h = _H
-    i, j = h.index("    -- [22] OPS_PIPELINE_DEGRADED"), h.index("    IF (fails > 0) THEN\n")
-    h = h[:i] + h[j:]                                                            # [22] + [23]
+    # rework: the Central-hour declaration + its one read (the [cadence] block before [wake])
+    (decl,) = _HOUR_DECL_RE.findall(h)
+    h = _HOUR_DECL_RE.sub("", h, count=1)
+    i, j = h.index("    -- [cadence] V157 compile diet"), h.index("    -- [wake] V086:")
+    assert h[i:j].count(_HOUR_READ) == 1
+    h = h[:i] + h[j:]                                                            # [cadence] hour read
+    i, j = h.index(_GATE_OPEN_RE.search(h[h.index("    -- [21] SEC_POSTURE_METRIC"):]).group(0)),\
+        h.index("    IF (fails > 0) THEN\n")
+    assert "    -- [22] OPS_PIPELINE_DEGRADED" in h[i:j] and "    -- [23] PIPE_ETL_CYCLE" in h[i:j]
+    h = h[:i] + h[j:]                                                            # gated [22] + [23]
     i, j = h.index("\n    -- [condition-ended sweep]"), h.index("\n    -- [snooze carry-forward sweep] V117:")
-    h = h[:i] + h[j:]                                                            # condition-ended sweep
+    h = h[:i] + h[j:]                                                            # condition-ended sweep (+ gates)
+    # the two security-arm gates: exactly one IF line and one END IF line around each UNCHANGED arm
+    opens, closes = _GATE_OPEN_RE.findall(h), _GATE_CLOSE_RE.findall(h)
+    assert [e for e, _ in opens] == [_SEC_EXPR, _SEC_EXPR] and [lb for _, lb in opens] == closes
+    h = _GATE_CLOSE_RE.sub("", _GATE_OPEN_RE.sub("", h))                         # [10] / [20] gates
+    assert "ct_hour" not in h, "every ct_hour use is a declared delta"
+    assert h.count("' of 12 alert rule block(s) failed this run'") == 1
+    h = h.replace("' of 12 alert rule block(s) failed this run'",
+                  "' of 13 alert rule block(s) failed this run'")               # self-alert tally
     assert h.count(_C1_LINE) == 1
     h = h.replace(_C1_LINE, "", 1)                                               # V091 scope line
     assert h.count(_H2_NEW) == 1 and h.count(_H2A_NEW) == 1 and h.count(_H2B_NEW) == 1
@@ -253,7 +288,9 @@ def test_v157_hourly_normalizes_back_to_v141_byte_for_byte():
     j = h.index("\n", h.index("    RETURN ", i)) + 1
     h = h[:i] + _RET_H141 + h[j:]                                                # [hb] + RETURN
     h = h.replace("    -- [17] COST_DEPT_BUDGET_PACE\n", _ARM15_V141 + "    -- [17] COST_DEPT_BUDGET_PACE\n", 1)
+    h = h.replace("    -- [14] PIPE_COPY_FAILURES\n", _ARM11_V141 + "    -- [14] PIPE_COPY_FAILURES\n", 1)
     assert h == _H141
+    assert decl == "5"
 
 
 def test_v157_daily_normalizes_back_to_v141_byte_for_byte():
@@ -292,15 +329,34 @@ def test_v157_dead_arm_and_its_query_history_read_are_gone():
     assert _ARM15_V141.count(_FAILS_INC) == 1 and "ACCOUNT_USAGE.QUERY_HISTORY" in _ARM15_V141
 
 
+def test_v157_retired_ratio_arm_and_its_metering_read_are_gone():
+    """Rework D3: arm [11] COST_CLOUD_SVC_RATIO leaves both scans with the hourly scan's only
+    WAREHOUSE_METERING_HISTORY read; nothing else in either scan names the rule."""
+    for body in (_H, _D):
+        assert "COST_CLOUD_SVC_RATIO" not in body and "    -- [11]" not in body
+    assert "SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY" not in _H
+    assert _ARM11_V141.count(_FAILS_INC) == 1 and "ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY" in _ARM11_V141
+    assert _H141.count("ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY") == 1          # it WAS the only one
+
+
 def test_v157_tallies_equal_the_counting_arms():
-    assert _H.count(_FAILS_INC) == 13 and _D.count(_FAILS_INC) == 11
-    assert "' of 13 alert rule block(s) failed this run'" in _H
-    assert "(13 - :fails) || '/13 rule blocks ok'" in _H
+    # V141's 13 hourly counting arms - [15] - [11] + [22] = 12; a gated-off arm is skipped whole, EXCEPTION
+    # handler included, so it can never increment fails (it counts as ok)
+    assert _H.count(_FAILS_INC) == 12 and _D.count(_FAILS_INC) == 11
+    assert _H141.count(_FAILS_INC) == 13 and _ARM15_V141.count(_FAILS_INC) == _ARM11_V141.count(_FAILS_INC) == 1
+    assert "' of 12 alert rule block(s) failed this run'" in _H and " of 13 " not in _H
+    assert "(12 - :fails) || '/12 rule blocks ok'" in _H and "/13 " not in _H
     assert "' of 11 daily alert rule block(s) failed this run'" in _D
     assert "(11 - :fails) || '/11 rule blocks ok (daily)'" in _D
     assert _ARM22_H.count(_FAILS_INC) == 1 and _ARM24.count(_FAILS_INC) == 1
-    for block in (_ARM23, _CE, _HB_H, _HB_D):
+    for block in (_ARM23, _CE, _HB_H, _HB_D, _HOUR_BLOCK):
         assert _FAILS_INC not in block and "fails :=" not in block
+    from tests.test_alert_rule_consistency import _FAILS_INC_RE, _SCAN_DENOMINATORS
+    for proc, body, n in (("SP_ALERT_SCAN", _H, 12), ("SP_ALERT_SCAN_DAILY", _D, 11)):
+        assert len(_FAILS_INC_RE.findall(body)) == n
+        self_alert_re, return_re = _SCAN_DENOMINATORS[proc]
+        assert {int(x) for x in re.findall(self_alert_re, body)} == {n}
+        assert {(int(a), int(b)) for a, b in re.findall(return_re, body)} == {(n, n)}   # RETURN + [hb] STATUS
 
 
 def test_v157_hourly_ordering():
@@ -315,6 +371,9 @@ def test_v157_hourly_ordering():
     assert _H.index("    -- [22] OPS_PIPELINE_DEGRADED") < _H.index("    -- [23] PIPE_ETL_CYCLE")
     # [hb] is the LAST block, after the self-alert and every sweep
     assert _H.index("    END IF;\n") < _H.index("    -- [hb] scan heartbeat")
+    # the hour is read once, right after the SETTINGS read and before [wake] and every arm
+    assert (_H.index("    FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;\n") < _H.index(_HOUR_READ)
+            < _H.index("    -- [wake] V086:") < _H.index("    -- [01] COST_DAILY_CREDITS"))
 
 
 def test_v157_daily_ordering():
@@ -363,6 +422,115 @@ def test_v157_arm10_recurrence_fix_lives_only_in_arm10():
     tail = _ARM10[_ARM10.index(") b (RULE_ID, COMPANY"):]
     assert tail.index("WHERE NOT EXISTS (") < tail.index("AND NOT EXISTS (")
     assert " OR NOT EXISTS" not in tail and " OR EXISTS" not in tail
+
+
+# -- rework: cadence gates (owner decisions D1/D2/D8/D9/D12) ----------------------------------------------------
+
+_SEC_HOURS = {1, 5, 9, 13, 17, 21}                  # D1/D2/D9: [10], [20] and their condition-ended clears
+_OPS_HOURS = {2, 5, 8, 11, 14, 17, 20, 23}          # D8: [22] in the hourly scan
+
+
+def _gates(body: str) -> list[tuple[str, str, str]]:
+    """[(expr, label, the ONE block it wraps)] in body order; every open has its own labelled close."""
+    out = []
+    for m in _GATE_OPEN_RE.finditer(body):
+        close = _GATE_CLOSE + m.group(2) + "\n"
+        out.append((m.group(1), m.group(2), body[m.end():body.index(close, m.end())]))
+    assert len(_GATE_CLOSE_RE.findall(body)) == len(out) == body.count("cadence gate: ") // 2
+    return out
+
+
+def _gate_hours(expr: str) -> set[int]:
+    """EXECUTE a gate condition for every Central hour 0-23 (ct_hour bound; Snowflake MOD of non-negative
+    integers is Python's %)."""
+    con = sqlite3.connect(":memory:")
+    con.create_function("MOD", 2, lambda a, b: a % b, deterministic=True)
+    return {h for h in range(24) if con.execute("SELECT " + expr.replace("ct_hour", "?"), (h,)).fetchone()[0]}
+
+
+def test_v157_cadence_gates_select_exactly_the_intended_central_hours():
+    assert _gate_hours(_SEC_EXPR) == _SEC_HOURS and _gate_hours(_OPS_EXPR) == _OPS_HOURS
+    gates = _gates(_H)
+    heads = [(expr, blk.split("\n", 1)[0]) for expr, _lbl, blk in gates]
+    assert heads == [(_SEC_EXPR, "    -- [10] SEC_CRED_EXPIRY"),
+                     (_SEC_EXPR, "    -- [20] SEC_NEW_EXPOSURE (V084 - CoCo Sec36: a new grant to PUBLIC widens "
+                                 "the blast radius)"),
+                     (_OPS_EXPR, "    -- [22] OPS_PIPELINE_DEGRADED (V157, Next-Fifty #10: OVERWATCH watches its "
+                                 "own pipeline from inside BOTH"),
+                     (_SEC_EXPR, "    BEGIN"), (_SEC_EXPR, "    BEGIN")], heads
+    for _expr, label, blk in gates:
+        # each gate wraps ONE isolated block, EXCEPTION handler included: a skipped arm never runs its
+        # `fails := fails + 1`, so a gated-off arm counts as ok
+        assert blk.endswith("    END;\n") and blk.count("\n    BEGIN\n") + blk.startswith("    BEGIN\n") == 1, label
+        assert blk.count(_FAILS_INC) == (0 if "condition-ended" in blk or "clear rides" in label else 1), label
+        assert "ct_hour" not in blk, label                               # the gate sits AROUND the block
+    # D9: each rule's clear rides exactly its raise arm's gate
+    ce = {lbl.split(" ", 1)[0]: expr for expr, lbl, _b in gates if "clear rides" in lbl}
+    assert ce == {"SEC_CRED_EXPIRY": gates[0][0], "SEC_NEW_EXPOSURE": gates[1][0]}
+    for _expr, lbl, blk in gates[3:]:
+        assert f"e.RULE_ID = '{lbl.split(' ', 1)[0]}' AND e.STATUS = 'OPEN'" in blk    # still behind EXISTS-OPEN
+    # the labels state the hours their expression selects
+    for expr, lbl, _b in gates:
+        want = _SEC_HOURS if expr == _SEC_EXPR else _OPS_HOURS
+        assert lbl.endswith("(" + ",".join(f"{h:02d}" for h in sorted(want)) + " Central)"), lbl
+
+
+def test_v157_the_central_hour_is_read_once_and_fails_open():
+    code = re.sub(r"--[^\n]*", "", _H)                                   # comments out
+    # declared once with DEFAULT 5, read by ONE SELECT ... INTO, never reassigned, read only by the 5 gates
+    (default,) = _HOUR_DECL_RE.findall(_H)
+    assert int(default) in _SEC_HOURS and int(default) in _OPS_HOURS    # a failed read runs EVERY gated block
+    assert _H.count(_HOUR_READ) == 1 and "ct_hour :=" not in _H and code.count("INTO :ct_hour") == 1
+    assert code.count("ct_hour") == 1 + 1 + 5
+    assert "HOUR(CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP()))" in _HOUR_READ    # the D12 convention
+    # the read is isolated: a failure logs cadence_gate_failed and never touches :fails
+    assert _HOUR_BLOCK.count("    BEGIN\n") == 1 and "'cadence_gate_failed'" in _HOUR_BLOCK
+    assert _FAILS_INC not in _HOUR_BLOCK and "RETURN" not in _HOUR_BLOCK
+    # the daily scan runs once a day: no hour, no gate; its [22] copy is ungated
+    assert "ct_hour" not in _D and "cadence gate" not in _D
+    assert _D[:_D.index(_ARM22_D)].endswith("    END;\n")                   # [19]'s end, not a gate line
+
+
+def test_v157_ungated_hourly_arms_run_every_hour():
+    gated = [(m.start(), _H.index(_GATE_CLOSE + m.group(2), m.end())) for m in _GATE_OPEN_RE.finditer(_H)]
+    for arm in ("[01] COST_DAILY_CREDITS", "[02] COST_WH_DAILY_CREDITS", "[03] PERF_QUERY_FAIL_PCT",
+                "[04] PERF_QUEUED_MINUTES", "[05] PERF_SPILL_GB", "[14] PIPE_COPY_FAILURES",
+                "[17] COST_DEPT_BUDGET_PACE", "[18] SEC_NEW_ADMIN_NETWORK", "[21] SEC_POSTURE_METRIC",
+                "[23] PIPE_ETL_CYCLE", "[wake] V086", "[auto-clear sweep] V091", "[snooze carry-forward sweep]",
+                "[hb] scan heartbeat"):
+        pos = _H.index("    -- " + arm)
+        assert not any(a < pos < b for a, b in gated), arm
+    assert not any(a < _H.index("    IF (fails > 0) THEN") < b for a, b in gated)          # the self-alert
+    assert not any(a < _H.index("    -- V067 #40: supersede") < b for a, b in gated)       # the supersede sweep
+
+
+def _day_runs(day: date) -> list[int]:
+    """Central hour of each TASK_LOAD_HOURLY run on ``day`` (CRON '7 * * * *' America/Chicago), walked in UTC:
+    Snowflake runs a wall-clock CRON time twice when the autumn change repeats it and skips it when spring
+    removes it."""
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("America/Chicago")
+    t = datetime(day.year, day.month, day.day, 0, 7, tzinfo=ZoneInfo("UTC")) - timedelta(hours=12)
+    hours = []
+    for _ in range(48):
+        local = t.astimezone(tz)
+        if local.date() == day:
+            hours.append(local.hour)       # HOUR(CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP()))
+        t += timedelta(hours=1)
+    return hours
+
+
+@pytest.mark.parametrize(("day", "sec", "ops"), [
+    (date(2026, 9, 30), 6, 8),             # an ordinary day: 24 runs
+    (date(2026, 11, 1), 7, 8),             # autumn change: 01:07 runs twice -> one extra security slot
+    (date(2027, 3, 14), 6, 7),             # spring change: 02:07 does not exist -> one [22] slot skipped
+])
+def test_v157_cadence_model_runs_per_central_day(day, sec, ops):
+    """The per-day run counts the report's compile arithmetic uses (and the DST edges the header discloses)."""
+    runs = _day_runs(day)
+    assert len(runs) == 24 + (sec - 6) - (8 - ops)
+    assert sum(_gate_hours(_SEC_EXPR).__contains__(h) for h in runs) == sec
+    assert sum(_gate_hours(_OPS_EXPR).__contains__(h) for h in runs) == ops
 
 
 # -- [22] OPS_PIPELINE_DEGRADED -------------------------------------------------------------------------
@@ -430,19 +598,37 @@ def test_v157_arm23_is_a_non_counting_add_on():
     assert "'etl_cycle_scan_failed', LEFT(:emsg, 2000)" in a
     assert "NOT counted toward the" in a and _FAILS_INC not in a
     assert a.count("BEGIN") == 1 and a.count("END;") == 1
+    # ungated here (one CALL statement; SP_SCAN_ETL_CYCLE applies its own ETL-window gate, V156): the line
+    # before it closes [22]'s gate and nothing about it reads the hour
+    assert "ct_hour" not in a and _H[:_H.index(a)].endswith(_GATE_CLOSE + "[22] every 3h (02,05,08,11,14,17,20,23 "
+                                                              "Central)\n")
 
 
 # -- [hb] heartbeats -----------------------------------------------------------------------------------
 
 @pytest.mark.parametrize(("hb", "source", "total", "status"), [
-    (_HB_H, "ALERT_SCAN_HOURLY", 13, "'alert scan ' || (13 - :fails) || '/13 rule blocks ok' AS STATUS"),
-    (_HB_D, "ALERT_SCAN_DAILY", 11, "'alert scan daily ' || (11 - :fails) || '/11 rule blocks ok (daily)' AS STATUS"),
+    (_HB_H, "ALERT_SCAN_HOURLY", 12, "'alert scan ' || (12 - :fails) || '/12 rule blocks ok'"),
+    (_HB_D, "ALERT_SCAN_DAILY", 11, "'alert scan daily ' || (11 - :fails) || '/11 rule blocks ok (daily)'"),
 ])
 def test_v157_heartbeats(hb, source, total, status):
-    assert f"SELECT '{source}' AS SOURCE_NAME," in hb
-    assert "CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ AS LAST_LOAD_TS" in hb
-    assert f"({total} - :fails) AS ROW_COUNT" in hb and status in hb
-    assert "GENERATION = COALESCE(t.GENERATION, 0) + 1" in hb
+    # rework D10: the cheapest shape -- ONE point UPDATE of the scan's own row; the INSERT runs only when the
+    # UPDATE matched no row (first run / deleted row), with the same values and GENERATION 1
+    assert "MERGE" not in hb
+    upd = ("        UPDATE DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE\n"
+           "           SET LAST_LOAD_TS = CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ,\n"
+           f"               ROW_COUNT = ({total} - :fails),\n"
+           "               SNAPSHOT_TS = CURRENT_TIMESTAMP(),\n"
+           "               GENERATION = COALESCE(GENERATION, 0) + 1,\n"
+           f"               STATUS = {status}\n"
+           f"         WHERE SOURCE_NAME = '{source}';\n"
+           "        IF (SQLROWCOUNT = 0) THEN\n"
+           "            INSERT INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE\n"
+           "                (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)\n"
+           f"            SELECT '{source}', CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ,\n"
+           f"                   ({total} - :fails), 1, {status};\n"
+           "        END IF;\n")
+    assert hb.count(upd) == 1
+    assert hb.count("DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE") == 2      # the UPDATE + its fallback only
     assert f"'{source} heartbeat stamp - alerts unaffected'" in hb      # CONTEXT starts with the source name
     assert "'scan_heartbeat_failed'" in hb and hb.endswith("    END;\n\n")
     # the shared name rule the OTHER graph's [22] applies: hourly 3h, daily 30h
@@ -470,6 +656,7 @@ _SCHEMAS = {
                                         "CREDITS_TOTAL", "IDLE_CREDITS", "IDLE_PCT"),
     "WAREHOUSE_CONFIG_SNAPSHOT": ("WAREHOUSE_NAME", "AUTO_SUSPEND", "SNAPSHOT_AT"),
     "SETTINGS": ("KEY", "VALUE"),
+    "SOURCE_FRESHNESS_STATE": ("SOURCE_NAME", "LAST_LOAD_TS", "ROW_COUNT", "SNAPSHOT_TS", "GENERATION", "STATUS"),
 }
 _EVENT_COLS = ("RULE_ID", "COMPANY", "SEVERITY", "TITLE", "DETAIL", "METRIC_VALUE", "DEDUPE_KEY")
 
@@ -904,7 +1091,15 @@ def test_v157_arm10_cycle_id_is_written_by_every_definer_since_v009():
 def test_v157_condition_ended_block_shape():
     ce = _CE
     assert ce.startswith("    -- [condition-ended sweep] V157 (Next-Fifty #12c): ")
-    assert ce.endswith("    END;\n") and _H.count("    -- [condition-ended sweep]") == 1
+    assert _H.count("    -- [condition-ended sweep]") == 1
+    # rework D9: each rule's isolated block sits WHOLE inside its raise arm's security-slot gate
+    for rule, arm in (("SEC_CRED_EXPIRY", "[10]"), ("SEC_NEW_EXPOSURE", "[20]")):
+        label = f"{rule} clear rides arm {arm} every 4h (01,05,09,13,17,21 Central)"
+        opn = f"    IF ({_SEC_EXPR}) THEN   -- V157 cadence gate: {label}\n"
+        blk = _between(ce, opn, _GATE_CLOSE + label)[len(opn):]
+        assert ce.count(opn) == 1 and blk.startswith("    BEGIN\n") and blk.endswith("    END;\n"), rule
+        assert blk.count("    BEGIN\n") == 1 and f"'V157 condition-ended sweep {rule} - other" in blk, rule
+    assert ce.endswith(_GATE_CLOSE + "SEC_NEW_EXPOSURE clear rides arm [20] every 4h (01,05,09,13,17,21 Central)\n")
     for rule in ("SEC_CRED_EXPIRY", "SEC_NEW_EXPOSURE"):          # one EXISTS-with-join gate per rule
         gate = ("        IF (EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e\n"
                 "                    JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c ON c.RULE_ID = e.RULE_ID\n"
@@ -1074,6 +1269,50 @@ def test_v157_condition_ended_sweep_executed_clears_only_fully_revoked_exposure(
     for b in ("USAGE|SCHEMA", "SELECT|VIEW"):
         assert after[batch[b]]["STATUS"] == "OPEN", b
     assert after["SEC_NEW_EXPOSURE|OWNERSHIP|TABLE|1999-01-01 00:00:00"]["STATUS"] == "OPEN"
+
+
+# -- [hb] heartbeat, EXECUTED (rework D10: one point UPDATE; the INSERT only when it matched no row) ----------
+
+def _hb_pass(hb: str, con: sqlite3.Connection, fails: int) -> str:
+    """Run one [hb] pass the way Snowflake Scripting does: the UPDATE, then IF (SQLROWCOUNT = 0) the INSERT.
+    -> 'UPDATE' or 'INSERT' (which statement landed the stamp)."""
+    upd = re.search(r"        UPDATE DBA_MAINT_DB\.OVERWATCH\.SOURCE_FRESHNESS_STATE\n.*?;\n", hb, re.S).group(0)
+    ins = re.search(r"            INSERT INTO DBA_MAINT_DB\.OVERWATCH\.SOURCE_FRESHNESS_STATE\n.*?;\n", hb,
+                    re.S).group(0)
+    if con.execute(_to_sqlite(upd.replace(":fails", str(fails)))).rowcount:
+        return "UPDATE"
+    con.execute(_to_sqlite(ins.replace(":fails", str(fails))))
+    return "INSERT"
+
+
+@pytest.mark.parametrize(("hb", "source", "status_ok", "status_2"), [
+    (_HB_H, "ALERT_SCAN_HOURLY", "alert scan 12/12 rule blocks ok", "alert scan 10/12 rule blocks ok"),
+    (_HB_D, "ALERT_SCAN_DAILY", "alert scan daily 11/11 rule blocks ok (daily)",
+     "alert scan daily 9/11 rule blocks ok (daily)"),
+])
+def test_v157_heartbeat_executed_stamps_self_heals_and_touches_only_its_row(hb, source, status_ok, status_2):
+    other = {"SOURCE_NAME": "FACT_QUERY_HOURLY", "LAST_LOAD_TS": _NOW - 1, "ROW_COUNT": 7, "GENERATION": 41,
+             "STATUS": "OK"}
+    con = _connect({"SOURCE_FRESHNESS_STATE": [other]}, _NOW)
+
+    def rows() -> dict:
+        cur = con.execute("SELECT * FROM SOURCE_FRESHNESS_STATE ORDER BY rowid")
+        cols = [c[0] for c in cur.description]
+        return {r[0]: dict(zip(cols, r, strict=True)) for r in cur.fetchall()}
+
+    assert _hb_pass(hb, con, 0) == "INSERT"                          # first run: the row does not exist yet
+    got = rows()[source]
+    assert (got["LAST_LOAD_TS"], got["ROW_COUNT"], got["GENERATION"], got["STATUS"]) == (_NOW, 12 if "HOURLY" in
+                                                                                        source else 11, 1, status_ok)
+    con = _connect({"SOURCE_FRESHNESS_STATE": list(rows().values())}, _NOW + 1 / 24)
+    assert _hb_pass(hb, con, 2) == "UPDATE"                          # every later run: one point UPDATE
+    after = rows()
+    assert len(after) == 2 and after["FACT_QUERY_HOURLY"] == dict(other, SNAPSHOT_TS=None)   # untouched
+    got = after[source]
+    assert (got["LAST_LOAD_TS"], got["GENERATION"], got["STATUS"]) == (_NOW + 1 / 24, 2, status_2)
+    assert got["SNAPSHOT_TS"] == _NOW + 1 / 24
+    con.execute("DELETE FROM SOURCE_FRESHNESS_STATE WHERE SOURCE_NAME = ?", (source,))
+    assert _hb_pass(hb, con, 0) == "INSERT" and rows()[source]["GENERATION"] == 1   # a deleted row self-heals
 
 
 # -- [24] COST_IDLE_OPPORTUNITY ----------------------------------------------------------------------------
@@ -1339,6 +1578,96 @@ def test_v157_preflight_executed_matches_the_arm(tmp_path):
     _assert_preflight_matches_the_arm(pre.read_text(encoding="utf-8"))
 
 
+# -- rework: COST_CLOUD_SVC_RATIO retirement (owner decision D3; the V034 house pattern) ------------------------
+
+_RETIRE_ROW = "DELETE FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG\n WHERE RULE_ID = 'COST_CLOUD_SVC_RATIO';\n"
+_RETIRE_EVENTS = ("UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS\n"
+                  "   SET STATUS = 'RESOLVED', RESOLUTION_KIND = 'EXPECTED',\n"
+                  "       RESOLVED_AT = CURRENT_TIMESTAMP()\n"
+                  " WHERE RULE_ID = 'COST_CLOUD_SVC_RATIO' AND STATUS IN ('OPEN', 'ACK', 'SNOOZED');\n")
+
+
+def test_v157_retires_cost_cloud_svc_ratio_the_v034_way():
+    assert _MIG.count(_RETIRE_ROW) == 1 and _MIG.count(_RETIRE_EVENTS) == 1
+    assert _MIG.index(_RETIRE_ROW) < _MIG.index(_RETIRE_EVENTS)          # row first: nothing re-raises after
+    v034 = (_MIGDIR / "V034__route_company_filter.sql").read_text(encoding="utf-8")
+    # the same two statements V034 used for SEC_BREAK_GLASS_USE -- the kind EXPECTED, never a new one ...
+    assert "SET STATUS = 'RESOLVED', RESOLUTION_KIND = 'EXPECTED',\n       RESOLVED_AT = CURRENT_TIMESTAMP()" in v034
+    assert "DELETE FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG\n WHERE RULE_ID = 'SEC_BREAK_GLASS_USE';" in v034
+    # ... + SNOOZED (V086 came later: the hourly wake would reopen a snoozed event no scan can ever close)
+    assert " WHERE RULE_ID = 'SEC_BREAK_GLASS_USE' AND STATUS IN ('OPEN', 'ACK');" in v034
+    v116 = (_MIGDIR / "V116__alert_clear_scope_proc.sql").read_text(encoding="utf-8")
+    assert "IF (v_kind NOT IN ('ACTIONED', 'NOISE', 'EXPECTED')) THEN" in v116     # a kind humans already use
+    from tests.test_alert_rule_consistency import (
+        RETIRED_ALLOWLIST,
+        _app_claims,
+        _config_deleted,
+        _config_enabled,
+        _raised_rule_ids,
+    )
+    raised, enabled = _raised_rule_ids(), _config_enabled()
+    assert "COST_CLOUD_SVC_RATIO" in _config_deleted() and "COST_CLOUD_SVC_RATIO" not in enabled
+    assert "COST_CLOUD_SVC_RATIO" not in raised and "COST_CLOUD_SVC_RATIO" in RETIRED_ALLOWLIST
+    assert _app_claims().get("COST_CLOUD_SVC_RATIO") == {"RETIRED"}       # the app says so (its playbook)
+    assert "COST_CLOUD_SVC_ANOMALY" in raised and "COST_CLOUD_SVC_ANOMALY" in enabled   # the successor is live
+
+
+def test_v157_retirement_executed_closes_only_the_retired_rules_live_events():
+    key = "COST_CLOUD_SVC_RATIO|WH_{}|2026-09-2{}"
+    events = [_ev(key.format("A", 9), "OPEN", raised=_NOW - 1), _ev(key.format("B", 9), "ACK", raised=_NOW - 1),
+              _ev(key.format("C", 8), "SNOOZED", raised=_NOW - 2),
+              _ev(key.format("D", 7), "RESOLVED", "ACTIONED", raised=_NOW - 3, resolved=_NOW - 2.5),
+              _ev("COST_CLOUD_SVC_ANOMALY|WH_A|2026-09-29", "OPEN", raised=_NOW - 1),
+              _ev("SEC_NEW_EXPOSURE|SELECT|TABLE|2026-09-29 01:00:00", "OPEN", raised=_NOW - 1)]
+    cfg = [_cfg("COST_CLOUD_SVC_RATIO"), _cfg("COST_CLOUD_SVC_ANOMALY")]
+    con = _connect({"ALERT_EVENTS": events, "ALERT_CONFIG": cfg}, _NOW)
+    # EXECUTE the file's own retirement statements, in file order (never the test-side copies above)
+    block = _between(_MIG, "-- Owner decision (wave-2b rework): retire COST_CLOUD_SVC_RATIO.",
+                     "INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION")
+    stmts = [s.strip() for s in re.sub(r"--[^\n]*\n", "", block).split(";") if s.strip()]
+    assert [s.split()[0] for s in stmts] == ["DELETE", "UPDATE"]
+    for stmt in stmts:
+        con.execute(_to_sqlite(stmt))
+    assert [r[0] for r in con.execute("SELECT RULE_ID FROM ALERT_CONFIG")] == ["COST_CLOUD_SVC_ANOMALY"]
+    cur = con.execute("SELECT EVENT_ID, STATUS, RESOLUTION_KIND, RESOLVED_AT FROM ALERT_EVENTS")
+    got = {r[0]: r[1:] for r in cur.fetchall()}
+    for wh, day in (("A", 9), ("B", 9), ("C", 8)):
+        assert got[key.format(wh, day)] == ("RESOLVED", "EXPECTED", _NOW), wh
+    assert got[key.format("D", 7)] == ("RESOLVED", "ACTIONED", _NOW - 2.5)           # history untouched
+    assert got["COST_CLOUD_SVC_ANOMALY|WH_A|2026-09-29"] == ("OPEN", None, None)       # other rules untouched
+    assert got["SEC_NEW_EXPOSURE|SELECT|TABLE|2026-09-29 01:00:00"] == ("OPEN", None, None)
+
+
+def test_v157_cadence_and_retirement_are_documented_for_the_operator():
+    from app.logic.playbooks import PLAYBOOKS
+    ratio = PLAYBOOKS["COST_CLOUD_SVC_RATIO"]
+    assert ratio.startswith("**Retired (V157).**") and "closed as EXPECTED" in ratio
+    assert "COST_CLOUD_SVC_ANOMALY" not in ratio          # naming a live rule next to 'retired' would trip Guard B
+    for rule in ("SEC_CRED_EXPIRY", "SEC_NEW_EXPOSURE"):
+        pb = PLAYBOOKS[rule]
+        assert "every 4 hours (01, 05, 09, 13, 17 and 21 Central)" in pb, rule
+        assert "up to ~4h after" in pb and "next 4-hourly check resolves the OPEN event as CONDITION_ENDED" in pb
+    assert "the CRITICAL EXPIRED one that auto-declares an incident" in PLAYBOOKS["SEC_CRED_EXPIRY"]
+    assert ("Checked every 3 hours by the hourly scan (02, 05, 08, 11, 14, 17, 20 and 23 Central) and once each "
+            "morning by the daily scan") in PLAYBOOKS["OPS_PIPELINE_DEGRADED"]
+    rb = _read("RUNBOOK.md")
+    assert "**Cadence gates (V157, compile diet):**" in rb
+    assert "| ~~COST_CLOUD_SVC_RATIO~~ | COST | retired at V157" in rb
+    assert "| COST_CLOUD_SVC_RATIO | COST |" not in rb                          # the live-looking row is gone
+    (exp_row,) = [ln for ln in rb.splitlines() if ln.startswith("| SEC_NEW_EXPOSURE | SECURITY |")]
+    assert "checked every 4h since V157" in exp_row
+    (cred_row,) = [ln for ln in rb.splitlines() if ln.startswith("| SEC_CRED_EXPIRY | SECURITY |")]
+    assert "checked every 4h since V157" in cred_row and "EXPIRED included" in cred_row
+    (ops_row,) = [ln for ln in rb.splitlines() if ln.startswith("| OPS_PIPELINE_DEGRADED | PLATFORM |")]
+    assert "the hourly scan checks every 3h" in ops_row
+    spend = _read("app/ui/pages/cost_parts/spend.py")
+    assert "where the COST_CLOUD_SVC_RATIO alert fires" not in spend and "fixed-ratio alert was retired" in spend
+    nav = _read("app/logic/navigate.py")
+    assert "stay only so the drawer still routes its historical events" in nav
+    sec = _read("app/ui/pages/security.py")
+    assert "checked every 4 hours (01, 05, \"\n" in sec and "re-raised weekly until rotated" not in sec
+
+
 # -- app lockstep owned by this slice -----------------------------------------------------------------------
 
 def test_v157_playbooks_navigation_and_evidence():
@@ -1476,14 +1805,22 @@ def test_v157_inserted_select_statements_parse():
 
 # The RUN_NEXT PART B grid (V157.1) checks these with CONTAINS(GET_DDL('PROCEDURE', ...), '<frag>'): each must
 # literally be in the proc it is checked against (GET_DDL returns the stored body, comments included) and stay
-# quote-free so it pastes into a SQL literal unchanged. SEC_BREAK_GLASS_USE is the expected-FALSE probe.
+# quote-free so it pastes into a SQL literal unchanged (GET_DDL re-quotes the body, so a fragment holding a
+# quote never matches). _PART_B_ABSENT are the expected-FALSE probes.
 _PART_B_FRAGMENTS = {
     "SP_ALERT_SCAN()": ("OPS_PIPELINE_DEGRADED", "SP_SCAN_ETL_CYCLE", "CONDITION_ENDED",
                         "V157: only rules whose still-firing set this sweep recomputes",
                         "ALERT_SCAN_HOURLY heartbeat stamp", "alert scan v12 (V157:",
-                        "OR e.DETAIL LIKE ("),
+                        "OR e.DETAIL LIKE (", "INTO :ct_hour", "IF (MOD(ct_hour, 4) = 1) THEN",
+                        "IF (MOD(ct_hour, 3) = 2) THEN", "IF (SQLROWCOUNT = 0) THEN", "/12 rule blocks ok"),
     "SP_ALERT_SCAN_DAILY()": ("COST_IDLE_OPPORTUNITY", "OPS_PIPELINE_DEGRADED", "ALERT_SCAN_DAILY heartbeat stamp",
-                              "alert scan daily v3 (V157:", "JOIN newest n ON s.SNAPSHOT_AT >="),
+                              "alert scan daily v3 (V157:", "JOIN newest n ON s.SNAPSHOT_AT >=",
+                              "IF (SQLROWCOUNT = 0) THEN"),
+}
+_PART_B_ABSENT = {
+    "SP_ALERT_SCAN()": ("SEC_BREAK_GLASS_USE", "COST_CLOUD_SVC_RATIO", "WAREHOUSE_METERING_HISTORY",
+                        "MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE"),
+    "SP_ALERT_SCAN_DAILY()": ("ct_hour", "MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE"),
 }
 
 
@@ -1492,7 +1829,10 @@ def test_v157_part_b_get_ddl_fragments_are_in_the_procs():
         body = _proc(_MIG, proc)
         for frag in frags:
             assert frag in body and "'" not in frag, (proc, frag)
-    assert "SEC_BREAK_GLASS_USE" not in _H                  # H_DEAD_ARM_LEFT must read FALSE
+        for frag in _PART_B_ABSENT[proc]:
+            assert frag not in body and "'" not in frag, (proc, frag)
+    # the security gate appears exactly 4 times ([10], [20] and their clears), the [22] gate once
+    assert _H.count("IF (MOD(ct_hour, 4) = 1) THEN") == 4 and _H.count("IF (MOD(ct_hour, 3) = 2) THEN") == 1
 
 
 # -- integration lockstep (validate floor / docs / Admin). Pinned to the WAVE TIP V158; these are completed

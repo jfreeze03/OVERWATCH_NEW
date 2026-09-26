@@ -8,12 +8,17 @@ from __future__ import annotations
 
 PLAYBOOKS: dict[str, str] = {
     "COST_CLOUD_SVC_RATIO": (
-        "**Means:** this warehouse burns an outsized share on cloud services — many tiny "
+        "**Retired (V157).** This fixed-ratio rule no longer raises; every event still open, "
+        "acknowledged or snoozed when it was retired was closed as EXPECTED. The note stays so its "
+        "older events keep their first response.\n\n"
+        "**Meant:** this warehouse burned an outsized share on cloud services — many tiny "
         "queries, metadata-heavy patterns, or compile-heavy SQL.\n\n"
         "1. Cost > Spend → *Cloud-services health*: confirm the warehouse and open the "
         "compile-heavy families table under it.\n"
         "2. Look for chatty automation (single-row queries in loops, aggressive polling).\n"
-        "3. Fix = batch the small queries, cache lookups, or move the workload; re-check in a week."
+        "3. Fix = batch the small queries, cache lookups, or move the workload. The per-warehouse "
+        "cloud-services baseline rule (V150, daily) now covers this signal — it raises only on a real "
+        "step-change against the warehouse's own 28 days, so a chronically chatty warehouse stays quiet."
     ),
     "COST_STORAGE_SURGE": (
         "**Means:** a database grew more than the threshold in one day.\n\n"
@@ -80,11 +85,16 @@ PLAYBOOKS: dict[str, str] = {
         "1. Security > Access → *Expiring credentials* for owner and days left.\n"
         "2. Rotate: create the new secret/key first, roll consumers, then retire the old one.\n"
         "3. Expired + job failures already happening = treat as an incident, not a chore.\n\n"
+        "Cadence (V157): the hourly scan checks credentials every 4 hours (01, 05, 09, 13, 17 and 21 "
+        "Central), so an event — including the CRITICAL EXPIRED one that auto-declares an incident — can "
+        "arrive up to ~4h after the credential enters the window or expires. Rotate ahead of the date "
+        "the event gives, not when it arrives.\n\n"
         "Auto-clear (V157, when the rule's auto-clear is on): once no credential with this user and "
         "name is still expiring inside the rule window — rotated to a later expiry, or removed — the "
-        "hourly scan resolves the OPEN event as CONDITION_ENDED (after at least 1h; ACK'd and snoozed "
-        "events stay yours to close). If an EXPIRED event was auto-declared into an incident, that "
-        "incident moves to MITIGATED once all its member alerts resolve — close it with the root cause."
+        "next 4-hourly check resolves the OPEN event as CONDITION_ENDED (after at least 1h, so up to "
+        "~4h after the rotation shows; ACK'd and snoozed events stay yours to close). If an EXPIRED "
+        "event was auto-declared into an incident, that incident moves to MITIGATED once all its member "
+        "alerts resolve — close it with the root cause."
     ),
     "SEC_BREAK_GLASS_USE": (
         "**Means:** heavy statement volume under a break-glass admin role.\n\n"
@@ -120,7 +130,9 @@ PLAYBOOKS: dict[str, str] = {
         "30h), a loader logged a failure and carried on, or the alert notifier has not acquired its "
         "sender lease in 3h while a delivery route is enabled. `ALERT_SCAN_HOURLY` / "
         "`ALERT_SCAN_DAILY` are the alert scans' own heartbeats: that scan stopped, or its heartbeat "
-        "stamp keeps failing (`scan_heartbeat_failed`).\n\n"
+        "stamp keeps failing (`scan_heartbeat_failed`). Checked every 3 hours by the hourly scan (02, 05, "
+        "08, 11, 14, 17, 20 and 23 Central) and once each morning by the daily scan, so a finding can "
+        "arrive up to ~3h after it crosses its limit.\n\n"
         "1. Admin > Migrations & freshness → *Diagnose stale sources* (maps each stale source to its "
         "latest loader error). Snowsight: `SELECT LOGGED_AT, PAGE, ERROR_TYPE, CONTEXT, ERROR_MESSAGE "
         "FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG WHERE ERROR_TYPE LIKE '%_failed' ORDER BY LOGGED_AT "
@@ -240,10 +252,13 @@ PLAYBOOKS: dict[str, str] = {
         "(a batch grant: `REVOKE <PRIVILEGE> ON ALL <OBJECT_TYPE>S IN SCHEMA <DB.SCHEMA> FROM ROLE "
         "PUBLIC;` and check `SHOW FUTURE GRANTS IN SCHEMA <DB.SCHEMA>;`). Grant a named role "
         "instead, then resolve.\n\n"
+        "Cadence (V157): the hourly scan checks PUBLIC grants every 4 hours (01, 05, 09, 13, 17 and 21 "
+        "Central) over the last 24h, so a new grant can surface up to ~4h after ACCOUNT_USAGE shows it "
+        "(which itself can lag about 2h).\n\n"
         "Auto-clear (V157, when the rule's auto-clear is on): once every grant of this batch shows a "
-        "revoke (DELETED_ON) in GRANTS_TO_ROLES, the hourly scan resolves the OPEN event as "
-        "CONDITION_ENDED (after at least 1h; ACCOUNT_USAGE can lag about 2h; ACK'd and snoozed events "
-        "stay yours to close)."
+        "revoke (DELETED_ON) in GRANTS_TO_ROLES, the next 4-hourly check resolves the OPEN event as "
+        "CONDITION_ENDED (after at least 1h, so up to ~4h after the revoke shows; ACCOUNT_USAGE can lag "
+        "about 2h; ACK'd and snoozed events stay yours to close)."
     ),
     "PIPE_TASK_FAILURES": (
         "**Means:** a task failed at least the threshold number of times on one day (retries "

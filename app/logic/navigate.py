@@ -41,6 +41,10 @@ PAGE_SECTION_LABELS = {
 
 _RULE_TARGETS = {
     "PERF_CHANGE_REGRESSION": ("Operations", "Change impact"),
+    # COST_CLOUD_SVC_RATIO is no longer raised (V157: its config row and scan arm are gone; the per-warehouse
+    # cloud-services baseline rule of V150 covers the signal). Its entries here, in FIX_TARGETS and in
+    # INLINE_FIX_RULES stay only so the drawer still routes its historical events -- the house pattern the
+    # break-glass rule's entry below follows.
     "COST_CLOUD_SVC_RATIO": ("Cost Intelligence", "Spend & Attribution"),
     "COST_STORAGE_SURGE": ("Cost Intelligence", "Optimization & Savings"),
     "COST_SERVERLESS_CREEP": ("Cost Intelligence", "Spend & Attribution"),
