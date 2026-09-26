@@ -257,19 +257,24 @@ PLAYBOOKS: dict[str, str] = {
         "3. Fix the root error, `EXECUTE TASK <DB.SCHEMA.TASK>;` once to prove it, confirm "
         "SUCCEEDED, resolve. A failed root also skipped its children — check Tasks > Graph."
     ),
-    # V156 (Next-Fifty rank 2): the nightly Informatica cycle, pushed by SP_SCAN_ETL_CYCLE (hourly via the
-    # V157 alert-scan add-on arm). Same night key / retry collapse as Operations > Pipeline SLA > Tonight.
+    # V156 (Next-Fifty rank 2): the nightly Informatica cycle, pushed by SP_SCAN_ETL_CYCLE (the V157 alert-scan
+    # add-on arm calls it hourly; it works only in its run window: the Central hours of ETL_SLA_TARGET_HHMM - 10h
+    # through + 3h, plus a 15:00 pass). Same night key / retry collapse as Operations > Pipeline SLA > Tonight.
     "PIPE_ETL_TASK_FAILED": (
         "**Means:** at least the threshold number (never fewer than one) of one workflow's tasks in "
         "tonight's Informatica cycle ended FAILED on their final attempt (retries collapse to the last "
         "attempt, so a failure a retry fixed auto-clears). A failure in the cycle TERMINAL workflow is "
         "raised HIGH — the cycle cannot finish until it is re-run. Snoozing one night's event also "
-        "snoozes that workflow's later nights until it wakes.\n\n"
+        "snoozes that workflow's later nights until it wakes. The scan works only in the overnight run "
+        "window (the Central hours of ETL_SLA_TARGET_HHMM − 10h through + 3h) plus one 15:00 pass, so a "
+        "failure in a daytime re-run — and the auto-clear once its retry succeeds — lands at the 15:00 pass "
+        "or when the window opens, up to about 6h after it happens (one a retry fixes first never alerts).\n\n"
         "1. Operations > Pipeline SLA → *Tonight* → *Tonight at a glance* (failed workflows), then "
         "*Recurring failures* → *Failure recurrence* for whether this task is chronic.\n"
         "2. Snowsight: `SELECT CYCLE_DATE, TASK_NAME, TERMINAL_STATUS, FIRST_START, TERMINAL_START, "
         "TERMINAL_END FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS WHERE WORKFLOW_NAME = '<workflow>' "
-        "ORDER BY CYCLE_DATE DESC, FIRST_START;` then the Informatica session log for the error.\n"
+        "ORDER BY CYCLE_DATE DESC, FIRST_START;` (the cache is as of the scan's last in-window run) then "
+        "the Informatica session log for the error.\n"
         "3. Fix and re-run the failed session(s) before the SLA target; resolve ACTIONED (NOISE if "
         "Informatica already handled it)."
     ),

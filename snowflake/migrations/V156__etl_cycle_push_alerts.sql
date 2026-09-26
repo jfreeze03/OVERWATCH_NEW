@@ -14,14 +14,16 @@
 --                           12h) like the app, plus FIRST_OK_END = the earliest clean finish among the attempts
 --                           that STARTED at/after that night's LAST starter start (the night's last kickoff;
 --                           the starter name is a bound value).
---   * SP_SCAN_ETL_CYCLE() - allowlist-validates the FQN, rebuilds ETL_CYCLE_TASKS with one EXECUTE IMMEDIATE,
---                           then raises three rules itself, each inside its own EXCEPTION guard:
+--   * SP_SCAN_ETL_CYCLE() - inside its RUN WINDOW (below) allowlist-validates the FQN, rebuilds ETL_CYCLE_TASKS
+--                           with one EXECUTE IMMEDIATE, then raises three rules itself, each inside its own
+--                           EXCEPTION guard:
 --       PIPE_ETL_TASK_FAILED       MEDIUM (HIGH for the terminal workflow). One event per (workflow, night)
 --                                  whose final-attempt failed-task count >= THRESHOLD_NUM (1; a threshold
 --                                  below 1 still needs one failure). Auto-clears (AUTO_CLEARED, OPEN-only)
 --                                  when a retry later succeeds: every final attempt of that workflow-night has
 --                                  FINISHED and none failed (a retry still running keeps the event OPEN, so a
---                                  retry that fails again never re-raises it).
+--                                  retry that fails again never re-raises it). The clear UPDATE runs only when
+--                                  an OPEN PIPE_ETL_TASK_FAILED event exists (one EXISTS probe otherwise).
 --       PIPE_ETL_CYCLE_NOT_STARTED HIGH. The app NEXT_CYCLE_OVERDUE test: the starter has been silent longer
 --                                  than 24h + grace AND a night it ran on last week has come round again, past
 --                                  last week kickoff + grace, with no run. THRESHOLD_NUM = grace minutes (120 =
@@ -59,6 +61,19 @@
 --   * three ALERT_CONFIG rules (PIPELINE), WHEN NOT MATCHED only. AUTO_CLEAR_ENABLED is left at its default
 --     (FALSE): the V091 sweep recomputes only PERF scopes, and TASK_FAILED carries its own retry auto-clear.
 -- The clock is pinned to America/Chicago (CONTROL_STATUS timestamps are naive Central, like the app assumes).
+-- RUN WINDOW (wave-2b rework, compile diet; no task or schedule change). The hourly alert scan (about :08-:15
+-- past each hour, after the :07 root) calls this every hour, but it works only in the Central hours from
+-- HOUR(target - 10h) through HOUR(target + 3h) inclusive, wrapping midnight (target = ETL_SLA_TARGET_HHMM as
+-- parsed below, blank or malformed -> 07:00), plus one daytime pass in the 15:xx scan: at 07:00 the 21:xx ..
+-- 10:xx scans + 15:xx = 15 of 24 calls. Out of window a call reads only the rule count and SETTINGS and returns
+-- BEFORE the cache DELETE, so ETL_CYCLE_TASKS keeps the last in-window scan's nights (the playbook triage
+-- queries read it). The window holds the ~22:00 kickoff + the NOT_STARTED grace, the lead-window WARN, the
+-- target (CRIT) and the default hard deadline (EXH). LATENCY TRADE (by choice): a TASK_FAILED from a daytime
+-- re-run, and the retry auto-clear of an OPEN one, surface at the next in-window scan (the 15:xx pass or the
+-- window start), up to ~6h later than hourly, and a daytime failure a retry fixes before then is never raised;
+-- an EXH crossing after the window's last scan (a hard deadline more than ~3h after the target) waits for the
+-- 15:xx pass (the unfinished CRIT has paged CRITICAL by then); a starter whose usual kickoff + grace falls
+-- before the window opens is judged NOT_STARTED at the window start.
 -- Known edges (documented, not fixed). FIRST_OK_END must START at/after the night's LAST starter start, so a
 -- starter attempt keyed to the night that starts after a terminal attempt started voids it (a next-morning
 -- re-run of the STARTER, or a starter task that starts while or after the terminal runs): that night then grades each terminal
@@ -81,9 +96,10 @@
 -- quiet.
 -- Wiring: V157 re-derives the hourly alert scan with an add-on CALL arm [23] for this proc, outside the core
 -- tally (a CONTROL_STATUS grant gap logs etl_cycle_scan_failed and never trips OPS_SCAN_DEGRADED); until V157
--- is applied nothing calls it. HIGH/CRITICAL reach the OVERWATCH_EMAIL path (NATIVE_ALERT_NEW_EVENTS) and any
--- matching Teams route. Needs the SELECT on CONTROL_STATUS the app panels already use (owner role). No task
--- change, no tail CALL. Owner applies in Snowsight after V155. This file never runs from the app.
+-- is applied nothing calls it. A hand CALL outside the RUN WINDOW only returns the skip string. HIGH/CRITICAL
+-- reach the OVERWATCH_EMAIL path (NATIVE_ALERT_NEW_EVENTS) and any matching Teams route. Needs the SELECT on
+-- CONTROL_STATUS the app panels already use (owner role). No task change, no tail CALL. Owner applies in
+-- Snowsight after V155. This file never runs from the app.
 
 EXECUTE IMMEDIATE
 $$
@@ -136,6 +152,8 @@ $$
 -- against: etl_control_sql.FAILED_TASK_STATUSES / cycle_night_health_scan (anchor, missed, RAN_LAST_WEEK) /
 -- cycle_finish_history_scan (cyc_start, term, cyc_end) and insights._parse_hhmm / _deadline_after. The LATE
 -- projection is a new SQL heuristic sharing SLA_FORECAST_MIN_RUNS / SLA_FORECAST_FIT_NIGHTS (not parity).
+-- Called every hour, it works only inside the RUN WINDOW (target - 10h .. target + 3h Central, plus a 15:00
+-- pass); an out-of-window call returns after the rule count and the SETTINGS read, cache untouched.
 DECLARE
     ctl_fqn STRING;
     start_wf STRING;
@@ -161,12 +179,6 @@ BEGIN
     FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
     WHERE RULE_ID IN ('PIPE_ETL_CYCLE_LATE', 'PIPE_ETL_CYCLE_NOT_STARTED', 'PIPE_ETL_TASK_FAILED') AND ENABLED;
 
-    -- always clear last run's cache first, so a stale night never lingers after a disable or a fix.
-    DELETE FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS;
-    IF (:n_enabled = 0) THEN
-        RETURN 'etl cycle scan skipped (rules disabled)';
-    END IF;
-
     -- a missing row falls back to DEFAULT_SETTINGS (app/config.py ETL_CYCLE_* / ETL_SLA_*); a blank row
     -- stays blank and disables the rule that needs it, exactly like the app's merged settings.
     SELECT MAX(IFF(KEY = 'ETL_CONTROL_STATUS_FQN', VALUE, NULL)),
@@ -176,11 +188,6 @@ BEGIN
            TRIM(COALESCE(MAX(IFF(KEY = 'ETL_SLA_BREACH_HHMM', VALUE, NULL)), '08:00'))
       INTO :ctl_fqn, :start_wf, :end_wf, :target_raw, :breach_raw
     FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;
-
-    IF (:ctl_fqn IS NULL OR TRIM(:ctl_fqn) = ''
-        OR NOT RLIKE(TRIM(:ctl_fqn), '^[A-Za-z0-9_$]+([.][A-Za-z0-9_$]+){0,3}$')) THEN
-        RETURN 'etl cycle scan skipped (unconfigured or invalid ETL_CONTROL_STATUS_FQN)';
-    END IF;
 
     -- 'HH:MM' (24h) -> minutes past midnight; malformed -> 07:00 / 08:00 (insights._parse_hhmm), and a hard
     -- deadline at or before the target becomes target + 60 min (insights.etl_cycle_sla_forecast).
@@ -200,6 +207,29 @@ BEGIN
 
     -- TIMEZONE STANDARD: the scan clock is Central wall-clock NTZ, the same basis as CONTROL_STATUS.
     now_ct := CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ;
+
+    -- RUN WINDOW (wave-2b rework, compile diet): work only in the Central hours from HOUR(target - 10h)
+    -- through HOUR(target + 3h), both ends inclusive and wrapping midnight (07:00 -> the 21:xx .. 10:xx
+    -- scans; a blank or malformed ETL_SLA_TARGET_HHMM already fell back to 07:00 above), plus one daytime
+    -- pass in the 15:xx scan (daytime TASK_FAILED re-runs). MOD(... + 24, 24) = hours since the window
+    -- opened (the + 1440 / + 24 keep MOD's dividend non-negative). Out of window this RETURNs BEFORE the
+    -- DELETE below, so ETL_CYCLE_TASKS keeps the last in-window scan's nights for the playbook triage queries.
+    IF (MOD(HOUR(:now_ct) - FLOOR(MOD(:target_off - 600 + 1440, 1440) / 60) + 24, 24) > 13
+        AND HOUR(:now_ct) <> 15) THEN
+        RETURN 'etl cycle scan skipped (outside the run window: Central hour ' || HOUR(:now_ct)
+               || ' is not in HOUR(ETL_SLA_TARGET_HHMM - 10h) .. HOUR(target + 3h) or 15; cache kept)';
+    END IF;
+
+    -- every in-window run clears last run's cache first, so a stale night never lingers after a disable or a fix.
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS;
+    IF (:n_enabled = 0) THEN
+        RETURN 'etl cycle scan skipped (rules disabled)';
+    END IF;
+
+    IF (:ctl_fqn IS NULL OR TRIM(:ctl_fqn) = ''
+        OR NOT RLIKE(TRIM(:ctl_fqn), '^[A-Za-z0-9_$]+([.][A-Za-z0-9_$]+){0,3}$')) THEN
+        RETURN 'etl cycle scan skipped (unconfigured or invalid ETL_CONTROL_STATUS_FQN)';
+    END IF;
 
     -- The ONLY dynamic statement. The FQN is validated above (a bare, well-formed identifier), so it is safe
     -- to concatenate; lookback_days is an INT; the starter name is BOUND as data (USING), never concatenated.
@@ -319,18 +349,23 @@ BEGIN
         -- final-attempt failures AND every final attempt finished: a retry that has only STARTED (no end yet)
         -- keeps the event OPEN, so a retry that then fails again never mints a second event and email.
         -- OPEN-only (an ACK or SNOOZE is a human decision, left alone). The cache holds whole nights only, so
-        -- its oldest night is never a partial one whose failed tasks were cut away.
-        UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
-           SET STATUS = 'RESOLVED', RESOLVED_AT = CURRENT_TIMESTAMP(), RESOLUTION_KIND = 'AUTO_CLEARED'
-         WHERE RULE_ID = 'PIPE_ETL_TASK_FAILED'
-           AND STATUS = 'OPEN'
-           AND DEDUPE_KEY IN (
-               SELECT 'PIPE_ETL_TASK_FAILED|' || LEFT(t.WORKFLOW_NAME, 200) || '|' || TO_VARCHAR(t.CYCLE_DATE)
-               FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS t
-               GROUP BY t.WORKFLOW_NAME, t.CYCLE_DATE
-               HAVING COUNT_IF(UPPER(t.TERMINAL_STATUS) IN ('ABORTED', 'ERROR', 'ERRORED', 'FAILED', 'KILLED', 'STOPPED', 'TERMINATED')) = 0
-                  AND COUNT_IF(t.TERMINAL_END IS NULL) = 0
-           );
+        -- its oldest night is never a partial one whose failed tasks were cut away. Skipped (one EXISTS probe,
+        -- no GROUP BY over the cache) when no PIPE_ETL_TASK_FAILED event is OPEN: the probe is the UPDATE's own
+        -- first two predicates, so a skipped run is exactly a run that would have resolved nothing.
+        IF (EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+                    WHERE RULE_ID = 'PIPE_ETL_TASK_FAILED' AND STATUS = 'OPEN')) THEN
+            UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+               SET STATUS = 'RESOLVED', RESOLVED_AT = CURRENT_TIMESTAMP(), RESOLUTION_KIND = 'AUTO_CLEARED'
+             WHERE RULE_ID = 'PIPE_ETL_TASK_FAILED'
+               AND STATUS = 'OPEN'
+               AND DEDUPE_KEY IN (
+                   SELECT 'PIPE_ETL_TASK_FAILED|' || LEFT(t.WORKFLOW_NAME, 200) || '|' || TO_VARCHAR(t.CYCLE_DATE)
+                   FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS t
+                   GROUP BY t.WORKFLOW_NAME, t.CYCLE_DATE
+                   HAVING COUNT_IF(UPPER(t.TERMINAL_STATUS) IN ('ABORTED', 'ERROR', 'ERRORED', 'FAILED', 'KILLED', 'STOPPED', 'TERMINATED')) = 0
+                      AND COUNT_IF(t.TERMINAL_END IS NULL) = 0
+               );
+        END IF;
     EXCEPTION
         WHEN OTHER THEN
             emsg := SQLERRM;
@@ -581,5 +616,5 @@ $$;
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 156 AS VERSION,
-       'Nightly ETL cycle PUSH alerts (Next-Fifty rank 2): ETL_CYCLE_TASKS transient cache + SP_SCAN_ETL_CYCLE() (isolated config-driven read of ETL_CONTROL_STATUS_FQN, FQN-allowlisted, the 23 newest WHOLE nights cut by night key, retries collapsed to the terminal attempt via MAX_BY with that attempt''s start kept as TERMINAL_START, plus FIRST_OK_END = the first clean finish among attempts STARTED at/after the night''s last kickoff (MAX starter start; starter name bound via USING), night key DATE(TASK_START_DTTM - 12h), clock pinned America/Chicago) raising PIPE_ETL_TASK_FAILED (MEDIUM, HIGH for the terminal workflow, threshold never below 1, auto-clears on retry success: every final attempt finished and none failed, so a retry still running keeps it OPEN), PIPE_ETL_CYCLE_NOT_STARTED (HIGH, the app NEXT_CYCLE_OVERDUE test, grace = THRESHOLD_NUM min) and PIPE_ETL_CYCLE_LATE (WARN/CRIT/EXH bands superseded by the V067 sweep; lead = THRESHOLD_NUM min before ETL_SLA_TARGET_HHMM, or the start-shifted median of the newest 14 prior clean nights projects past ETL_SLA_BREACH_HHMM; a night that finished late is HIGH, an unfinished miss CRITICAL, which auto-declares an incident; a terminal task is done at its first clean finish from an attempt STARTED at/after the night''s last kickoff (FIRST_OK_END), so a next-morning terminal re-run never re-grades a finished night and an afternoon chain attempt that started before the real kickoff is never FIRST_OK_END (a next-morning starter re-run, or any re-run when the starter IS the terminal workflow, voids it: the night re-grades loud); two documented SILENT residuals after an afternoon chain re-run: a real cycle that hangs before its terminal dispatches, and a chain whose terminal starts after the real kickoff; a task with no FIRST_OK_END counts only when its terminal attempt started at/after the night''s cycle start; an undispatched terminal is judged only when it ran the same night last week; METRIC_VALUE only on a lead-window WARN), each in its own EXCEPTION guard. Three PIPELINE ALERT_CONFIG rules, WHEN NOT MATCHED, AUTO_CLEAR left at its default. Called hourly once V157 adds the SP_ALERT_SCAN add-on CALL arm (not counted toward OPS_SCAN_DEGRADED). Needs SELECT on CONTROL_STATUS (already granted for the app panels).' AS DESCRIPTION
+       'Nightly ETL cycle PUSH alerts (Next-Fifty rank 2): ETL_CYCLE_TASKS transient cache + SP_SCAN_ETL_CYCLE() (isolated config-driven read of ETL_CONTROL_STATUS_FQN, FQN-allowlisted, the 23 newest WHOLE nights cut by night key, retries collapsed to the terminal attempt via MAX_BY with that attempt''s start kept as TERMINAL_START, plus FIRST_OK_END = the first clean finish among attempts STARTED at/after the night''s last kickoff (MAX starter start; starter name bound via USING), night key DATE(TASK_START_DTTM - 12h), clock pinned America/Chicago) raising PIPE_ETL_TASK_FAILED (MEDIUM, HIGH for the terminal workflow, threshold never below 1, auto-clears on retry success: every final attempt finished and none failed, so a retry still running keeps it OPEN), PIPE_ETL_CYCLE_NOT_STARTED (HIGH, the app NEXT_CYCLE_OVERDUE test, grace = THRESHOLD_NUM min) and PIPE_ETL_CYCLE_LATE (WARN/CRIT/EXH bands superseded by the V067 sweep; lead = THRESHOLD_NUM min before ETL_SLA_TARGET_HHMM, or the start-shifted median of the newest 14 prior clean nights projects past ETL_SLA_BREACH_HHMM; a night that finished late is HIGH, an unfinished miss CRITICAL, which auto-declares an incident; a terminal task is done at its first clean finish from an attempt STARTED at/after the night''s last kickoff (FIRST_OK_END), so a next-morning terminal re-run never re-grades a finished night and an afternoon chain attempt that started before the real kickoff is never FIRST_OK_END (a next-morning starter re-run, or any re-run when the starter IS the terminal workflow, voids it: the night re-grades loud); two documented SILENT residuals after an afternoon chain re-run: a real cycle that hangs before its terminal dispatches, and a chain whose terminal starts after the real kickoff; a task with no FIRST_OK_END counts only when its terminal attempt started at/after the night''s cycle start; an undispatched terminal is judged only when it ran the same night last week; METRIC_VALUE only on a lead-window WARN), each in its own EXCEPTION guard. Three PIPELINE ALERT_CONFIG rules, WHEN NOT MATCHED, AUTO_CLEAR left at its default. Called every hour by the SP_ALERT_SCAN add-on CALL arm V157 adds (not counted toward OPS_SCAN_DEGRADED), it works only in the Central hours HOUR(ETL_SLA_TARGET_HHMM - 10h) through HOUR(target + 3h), wrapping midnight, plus a 15:00 pass (15 of 24 calls at the 07:00 default; a blank or malformed target falls back to 07:00): an out-of-window call returns after the rule count and the SETTINGS read and leaves ETL_CYCLE_TASKS untouched, so a daytime TASK_FAILED raise or retry clear lands up to ~6h later; the retry auto-clear UPDATE runs only when an OPEN PIPE_ETL_TASK_FAILED event exists. Needs SELECT on CONTROL_STATUS (already granted for the app panels).' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 156);
