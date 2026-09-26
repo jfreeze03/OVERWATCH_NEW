@@ -6,23 +6,35 @@ Ranks 10a/b/d + 13 + 2 (CALL arm) + 12c, merged onto the CURRENT definer of both
 anchored deltas, each asserted count == 1, in this order:
 
   SP_ALERT_SCAN (hourly)
+    H0  (rework D12) the Central hour read ONCE into ct_hour (DECLARE DEFAULT 5 = inside both slots, so a
+              failed read fails OPEN to hourly) -- the only input of every cadence gate below
     H1  (10d) delete the dead arm [15] (its rule was deleted at V034; the scan's only QUERY_HISTORY read)
+    H1b (rework D3) delete arm [11] COST_CLOUD_SVC_RATIO -- the rule is RETIRED at file level (V150's
+              COST_CLOUD_SVC_ANOMALY supersedes it); the scan's only WAREHOUSE_METERING_HISTORY read
     H2  (12c) arm [10] recurrence fix (H2a/H2b/H2d/H2c): a row closed for an EARLIER expiry (the date at the
               head of its DETAIL -- any kind, incl. a human ACTIONED/NOISE/EXPECTED, however late) or
               machine-closed (CONDITION_ENDED / SUPERSEDED) no longer blocks a rotated credential's next expiry
               cycle -- the key is unchanged, the DETAIL date is pinned to Central; never mint EXPIRING while the
               EXPIRED event is live
-    H3  (10a + 2) insert [22] OPS_PIPELINE_DEGRADED + the [23] PIPE_ETL_CYCLE add-on before the self-alert
+    H7  (rework D1/D2) arms [10] SEC_CRED_EXPIRY and [20] SEC_NEW_EXPOSURE run only in the 4-hourly security
+              slot, IF (MOD(ct_hour, 4) = 1) around each UNCHANGED arm (01,05,09,13,17,21 Central)
+    H3  (10a + 2 + rework D8) insert [22] OPS_PIPELINE_DEGRADED inside IF (MOD(ct_hour, 3) = 2)
+              (02,05,...,23 Central; the arm text is byte-identical to the daily copy) + the ungated [23]
+              PIPE_ETL_CYCLE add-on (SP_SCAN_ETL_CYCLE gates itself, V156) before the self-alert
+    H8  (rework tally) self-alert denominator 13 -> 12 (V141's 13 - [15] - [11] + [22])
     H4  (12c C1) scope the V091 auto-clear sweep to its 3 PERF rules (applied BEFORE H5)
-    H5  (12c) insert the condition-ended sweep after the V091 sweep
-    H6  (10b) [hb] heartbeat + the new RETURN
-  SP_ALERT_SCAN_DAILY
+    H5  (12c + rework D9) insert the condition-ended sweep after the V091 sweep; each rule's clear sits in
+              its raise arm's security-slot gate, still behind its EXISTS-OPEN gate
+    H6  (10b + rework D10) [hb] heartbeat as ONE point UPDATE (an INSERT only when no row matched) + the
+              new RETURN (12)
+  SP_ALERT_SCAN_DAILY (no cadence gate: it runs once a day)
     D1  insert [22] (byte-identical to the hourly copy) + [24] COST_IDLE_OPPORTUNITY before [17]
     D2  self-alert denominator 9 -> 11
-    D3  [hb] heartbeat + the new RETURN
+    D3  [hb] heartbeat (the same point-UPDATE shape) + the new RETURN
 
 File order: guard (-20157, v < 156) -> ALERT_CONFIG seed (WHEN NOT MATCHED only) -> hourly marker + proc
--> daily marker + proc -> AUTO_CLEAR opt-in UPDATE (AFTER both procs) -> SCHEMA_VERSION 157.
+-> daily marker + proc -> AUTO_CLEAR opt-in UPDATE (AFTER both procs) -> COST_CLOUD_SVC_RATIO retirement (the
+V034 house pattern: close its lingering events as EXPECTED, delete its rule row) -> SCHEMA_VERSION 157.
 No CALL of any raiser. Everything else in both V141 bodies stays byte-identical
 (tests/migrations/test_v157_alert_scan_self_watch_idle_push.py normalizes each back to V141).
 
@@ -58,6 +70,54 @@ def _swap(text: str, old: str, new: str, label: str) -> str:
 hourly = extract_proc(V141, "SP_ALERT_SCAN()")
 daily = extract_proc(V141, "SP_ALERT_SCAN_DAILY()")
 assert hourly.count("fails := fails + 1") == 13 and daily.count("fails := fails + 1") == 9
+
+# ---------------------------------------------------------------------------------------------------
+# Cadence gates (wave-2b rework, owner decisions D1/D2/D8/D9/D12). ONE Central-hour read per run of the
+# hourly scan, then a cheap MOD test around each gated block: a skipped block compiles nothing.
+# ---------------------------------------------------------------------------------------------------
+HOUR_EXPR = "HOUR(CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP()))"
+SEC_GATE = "MOD(ct_hour, 4) = 1"        # [10], [20] and their condition-ended clears: 01,05,09,13,17,21
+OPS_GATE = "MOD(ct_hour, 3) = 2"        # [22] in the hourly scan: 02,05,08,11,14,17,20,23
+HOUR_DEFAULT = 5                        # inside BOTH slots: a failed hour read fails OPEN (every arm runs)
+assert HOUR_DEFAULT % 4 == 1 and HOUR_DEFAULT % 3 == 2
+
+
+def _gate(expr: str, label: str, block: str) -> str:
+    """Wrap an UNCHANGED block (never re-indented, so it stays byte-identical to its source) in a gate."""
+    assert block.endswith("    END;\n") and block.startswith("    "), label
+    return (f"    IF ({expr}) THEN   -- V157 cadence gate: {label}\n" + block
+            + f"    END IF;   -- /V157 cadence gate: {label}\n")
+
+
+_SEC_SLOTS = "every 4h (01,05,09,13,17,21 Central)"
+_OPS_SLOTS = "every 3h (02,05,08,11,14,17,20,23 Central)"
+
+HOUR_BLOCK = f"""\
+    -- [cadence] V157 compile diet (Next-Fifty wave 2b rework): the Central hour this run started in, read
+    -- ONCE. A gated block skips its whole statement -- nothing compiles, no ACCOUNT_USAGE read -- and a
+    -- gated-off arm counts as ok (it never touches :fails):
+    --   {SEC_GATE}  (01,05,09,13,17,21 Central): arms [10] SEC_CRED_EXPIRY and [20] SEC_NEW_EXPOSURE,
+    --                        and each rule's condition-ended clear (a clear rides its raise arm's slot);
+    --   {OPS_GATE}  (02,05,08,11,14,17,20,23 Central): [22] OPS_PIPELINE_DEGRADED (the daily scan's
+    --                        copy stays daily).
+    -- TASK_LOAD_HOURLY fires at :07 Central (CRON, DST-aware), so each slot is one run a day (a DST night can
+    -- repeat or skip one slot; the dedupe keys absorb a repeat). If this read ever fails, ct_hour keeps its
+    -- DEFAULT {HOUR_DEFAULT} -- inside BOTH slots -- so every gated block runs (fail-open to hourly) and the
+    -- failure is logged (cadence_gate_failed). Does NOT touch :fails.
+    BEGIN
+        SELECT {HOUR_EXPR} INTO :ct_hour;
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'cadence_gate_failed', :emsg,
+                   'V157 Central-hour read - every gated block runs this pass', CURRENT_ROLE();
+    END;
+
+"""
+HOUR_DECL = (f"    ct_hour INT DEFAULT {HOUR_DEFAULT};   -- V157: the Central hour of this run ([cadence] below); "
+             f"{HOUR_DEFAULT} sits in both slots\n")
 
 # ---------------------------------------------------------------------------------------------------
 # Inserted blocks
@@ -201,8 +261,9 @@ ARM_23 = """\
     END;
 """
 
-# #12c condition-ended sweep (after the V091 sweep, before the V117 carry-forward). NOT counted.
-CE_BLOCK = """\
+# #12c condition-ended sweep (after the V091 sweep, before the V117 carry-forward). NOT counted. Rework D9:
+# each rule's clear (its probe + UPDATE, unchanged) sits inside its raise arm's security-slot gate.
+CE_HEAD = """\
     -- [condition-ended sweep] V157 (Next-Fifty #12c): resolve a still-OPEN SECURITY event whose
     -- underlying STATE has ended, re-verified against the SAME ACCOUNT_USAGE source its raise arm
     -- reads -- a state check, not the V091 metric hysteresis above (which V157 scopes to its 3 PERF
@@ -224,7 +285,13 @@ CE_BLOCK = """\
     -- and skips its ACCOUNT_USAGE read entirely unless it has an OPEN event and is opted in (one EXISTS
     -- with a join -- no nested scalar subquery). The machine close CONDITION_ENDED is excluded from
     -- precision/MTTR in the app read-path like SUPERSEDED/AUTO_CLEARED/SNOOZE_SUPPRESSED.
+    -- Cadence (compile diet): each rule's clear runs only in the slot its raise arm runs (MOD(ct_hour, 4) = 1),
+    -- still behind its EXISTS-OPEN gate. Off-slot hours skip the probe and the ACCOUNT_USAGE read alike, so a
+    -- clear lands in the first security slot after the evidence shows (up to ~4h later). An event raised in a
+    -- slot is re-checked no sooner than the next one, so the 1h dwell always holds.
     -- Does NOT touch :fails.
+"""
+CE_CRED = """\
     BEGIN
         IF (EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
                     JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c ON c.RULE_ID = e.RULE_ID
@@ -261,6 +328,8 @@ CE_BLOCK = """\
             INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
             SELECT 'AlertScan', 'condition_ended_sweep_failed', :emsg, 'V157 condition-ended sweep SEC_CRED_EXPIRY - other rules unaffected', CURRENT_ROLE();
     END;
+"""
+CE_EXPO = """\
     BEGIN
         IF (EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
                     JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c ON c.RULE_ID = e.RULE_ID
@@ -290,30 +359,35 @@ CE_BLOCK = """\
             SELECT 'AlertScan', 'condition_ended_sweep_failed', :emsg, 'V157 condition-ended sweep SEC_NEW_EXPOSURE - other rules unaffected', CURRENT_ROLE();
     END;
 """
+CE_BLOCK = (CE_HEAD
+            + _gate(SEC_GATE, "SEC_CRED_EXPIRY clear rides arm [10] " + _SEC_SLOTS, CE_CRED)
+            + _gate(SEC_GATE, "SEC_NEW_EXPOSURE clear rides arm [20] " + _SEC_SLOTS, CE_EXPO))
 
 
 def _heartbeat(source: str, total: int, status_head: str, status_tail: str, graph: str) -> str:
+    status = f"'{status_head}' || ({total} - :fails) || '/{total} rule blocks ok{status_tail}'"
     return f"""\
     -- [hb] scan heartbeat (V157, Next-Fifty #10b): stamp this scan's own SOURCE_FRESHNESS_STATE row LAST --
     -- after every arm and sweep -- so a row older than its cadence means the scan stopped (or this stamp
     -- keeps failing: APP_ERROR_LOG scan_heartbeat_failed). The {graph} graph's [22] arm, the app freshness
     -- boards and NATIVE_ALERT_STALE_FACTS read it with the shared name rule (ALERT_SCAN_HOURLY -> 3h,
-    -- ALERT_SCAN_DAILY -> 30h). LAST_LOAD_TS is Central wall-clock like every loader stamp. Isolated;
-    -- does NOT touch :fails.
+    -- ALERT_SCAN_DAILY -> 30h). LAST_LOAD_TS is Central wall-clock like every loader stamp. Cheapest shape:
+    -- ONE point UPDATE of this scan's own row; the INSERT runs only when it matched no row (the first run,
+    -- or after the row was deleted), so the stamp self-heals. Isolated; does NOT touch :fails.
     BEGIN
-        MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE t
-        USING (
-            SELECT '{source}' AS SOURCE_NAME,
-                   CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ AS LAST_LOAD_TS,
-                   ({total} - :fails) AS ROW_COUNT,
-                   '{status_head}' || ({total} - :fails) || '/{total} rule blocks ok{status_tail}' AS STATUS
-        ) s
-        ON t.SOURCE_NAME = s.SOURCE_NAME
-        WHEN MATCHED THEN UPDATE SET LAST_LOAD_TS = s.LAST_LOAD_TS, ROW_COUNT = s.ROW_COUNT,
-            SNAPSHOT_TS = CURRENT_TIMESTAMP(), GENERATION = COALESCE(t.GENERATION, 0) + 1,
-            STATUS = s.STATUS
-        WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
-        VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, s.STATUS);
+        UPDATE DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE
+           SET LAST_LOAD_TS = CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ,
+               ROW_COUNT = ({total} - :fails),
+               SNAPSHOT_TS = CURRENT_TIMESTAMP(),
+               GENERATION = COALESCE(GENERATION, 0) + 1,
+               STATUS = {status}
+         WHERE SOURCE_NAME = '{source}';
+        IF (SQLROWCOUNT = 0) THEN
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE
+                (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
+            SELECT '{source}', CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ,
+                   ({total} - :fails), 1, {status};
+        END IF;
     EXCEPTION
         WHEN OTHER THEN
             emsg := SQLERRM;
@@ -326,7 +400,7 @@ def _heartbeat(source: str, total: int, status_head: str, status_tail: str, grap
 """
 
 
-HB_HOURLY = _heartbeat("ALERT_SCAN_HOURLY", 13, "alert scan ", "", "daily")
+HB_HOURLY = _heartbeat("ALERT_SCAN_HOURLY", 12, "alert scan ", "", "daily")
 HB_DAILY = _heartbeat("ALERT_SCAN_DAILY", 11, "alert scan daily ", " (daily)", "hourly")
 
 # [24] -- the rank-13 weekly idle-waste push (daily scan only).
@@ -449,19 +523,32 @@ ARM_24 = """\
     END;
 """
 
-for _blk in (ARM_22, ARM_23, CE_BLOCK, HB_HOURLY, HB_DAILY, ARM_24):
+for _blk in (HOUR_BLOCK, ARM_22, ARM_23, CE_BLOCK, HB_HOURLY, HB_DAILY, ARM_24):
     assert "$$" not in _blk, "a $$ inside a scripting body ends it"
     assert _blk.count("(") == _blk.count(")"), "unbalanced parentheses in an inserted block"
 assert ARM_22.count("fails := fails + 1") == 1 and ARM_24.count("fails := fails + 1") == 1
-for _blk in (ARM_23, CE_BLOCK, HB_HOURLY, HB_DAILY):
+for _blk in (HOUR_BLOCK, ARM_23, CE_BLOCK, HB_HOURLY, HB_DAILY):
     assert "fails := fails + 1" not in _blk, "add-ons, sweeps and heartbeats never count"
 assert "SEC_BREAK_GLASS_USE" not in ARM_22 + ARM_23 + CE_BLOCK + HB_HOURLY
 assert HB_HOURLY.endswith("    END;\n\n") and HB_DAILY.endswith("    END;\n\n")
+assert CE_BLOCK.count(f"    IF ({SEC_GATE}) THEN   -- V157 cadence gate: ") == 2
+assert CE_BLOCK.count("    END IF;   -- /V157 cadence gate: ") == 2
+for _blk in (HB_HOURLY, HB_DAILY):
+    assert "MERGE" not in _blk and _blk.count("IF (SQLROWCOUNT = 0) THEN") == 1   # D10: point UPDATE
+assert "ct_hour" not in ARM_22 + ARM_23 + ARM_24 + HB_HOURLY + HB_DAILY           # gates sit AROUND arms
 
 # ---------------------------------------------------------------------------------------------------
 # SP_ALERT_SCAN (hourly) deltas
 # ---------------------------------------------------------------------------------------------------
 new_hourly = hourly
+
+# H0 (rework D12): the Central hour, declared with its fail-open default and read ONCE, first thing after
+# the SETTINGS read (both anchors unique in the hourly body).
+_DECL_END = "    fails INT DEFAULT 0;\nBEGIN\n"
+new_hourly = _swap(new_hourly, _DECL_END, _DECL_END.replace("BEGIN\n", HOUR_DECL + "BEGIN\n"), "H0 declare")
+_WAKE = "    FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;\n\n    -- [wake] V086:"
+new_hourly = _swap(new_hourly, _WAKE, _WAKE.replace("\n\n    -- [wake]", "\n\n" + HOUR_BLOCK + "    -- [wake]"),
+                   "H0 hour read")
 
 # H1 (10d): the dead arm [15], exactly V141's slice.
 _A15, _A17 = "    -- [15] SEC_BREAK_GLASS_USE\n", "    -- [17] COST_DEPT_BUDGET_PACE\n"
@@ -469,6 +556,14 @@ assert new_hourly.count(_A15) == 1 and new_hourly.count(_A17) == 1
 ARM15 = new_hourly[new_hourly.index(_A15):new_hourly.index(_A17)]
 assert ARM15.count("fails := fails + 1") == 1 and "ACCOUNT_USAGE.QUERY_HISTORY" in ARM15
 new_hourly = _swap(new_hourly, ARM15, "", "H1 arm [15]")
+
+# H1b (rework D3): arm [11] COST_CLOUD_SVC_RATIO, exactly V141's slice -- the rule is retired at file level
+# (RETIRE below); V150's per-warehouse COST_CLOUD_SVC_ANOMALY supersedes the fixed ratio.
+_A11, _A14 = "    -- [11] COST_CLOUD_SVC_RATIO\n", "    -- [14] PIPE_COPY_FAILURES\n"
+assert new_hourly.count(_A11) == 1 and new_hourly.count(_A14) == 1
+ARM11 = new_hourly[new_hourly.index(_A11):new_hourly.index(_A14)]
+assert ARM11.count("fails := fails + 1") == 1 and "ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY" in ARM11
+new_hourly = _swap(new_hourly, ARM11, "", "H1b arm [11]")
 
 # H2 (12c): arm [10]'s recurrence fix, four count==1 swaps. The DEDUPE_KEY is NOT changed (the V067/V096
 # supersede token, the h-leg below and the condition-ended sweep rebuild it verbatim). Instead the arm
@@ -556,9 +651,26 @@ assert ("e.DETAIL LIKE ('Rotate before ' || " + _CYCLE_ID.replace("cr.EXPIRATION
         + " || '%'))\n") in H2_NEW
 assert "WIN_DAYS" not in new_hourly and "AND (e.RESOLVED_AT IS NULL\n" in H2_NEW
 
+# H7 (rework D1/D2): arms [10] and [20] -- the scan's heaviest ACCOUNT_USAGE compiles (CREDENTIALS; the
+# 19 s GRANTS_TO_ROLES family) -- run in the 4-hourly security slot only. Each arm is wrapped WHOLE, never
+# re-indented, so its text (incl. arm [10]'s H2 fix) is untouched inside the gate.
+for _arm, _nxt, _lbl in (("    -- [10] SEC_CRED_EXPIRY\n", "    -- [14] PIPE_COPY_FAILURES\n", "[10] "),
+                         ("    -- [20] SEC_NEW_EXPOSURE", "    -- [21] SEC_POSTURE_METRIC", "[20] ")):
+    _blk = new_hourly[new_hourly.index(_arm):new_hourly.index(_nxt)]
+    assert _blk.count("fails := fails + 1") == 1 and _blk.endswith("    END;\n"), _lbl
+    new_hourly = _swap(new_hourly, _blk, _gate(SEC_GATE, _lbl + _SEC_SLOTS, _blk), "H7 gate " + _lbl)
+
 # H3 (10a + 2): [22] + [23] directly above the OPS_SCAN_DEGRADED self-alert.
 _SELF = "    IF (fails > 0) THEN\n"
-new_hourly = _swap(new_hourly, _SELF, ARM_22 + ARM_23 + _SELF, "H3 self-alert anchor")
+# Rework D8: the hourly copy of [22] runs every 3rd Central hour -- the gate sits AROUND the unchanged arm, so
+# [22] stays byte-identical to the daily copy (which runs every morning, ungated). [23] stays ungated: the
+# CALL is one statement and SP_SCAN_ETL_CYCLE applies its own ETL-window gate (V156).
+ARM_22_GATED = _gate(OPS_GATE, "[22] " + _OPS_SLOTS, ARM_22)
+new_hourly = _swap(new_hourly, _SELF, ARM_22_GATED + ARM_23 + _SELF, "H3 self-alert anchor")
+
+# H8 (rework tally): V141's 13 counting arms - [15] - [11] + [22] = 12.
+_T13 = "               :fails || ' of 13 alert rule block(s) failed this run',\n"
+new_hourly = _swap(new_hourly, _T13, _T13.replace(" of 13 ", " of 12 "), "H8 self-alert denominator")
 
 # H4 (12c C1): scope the V091 sweep to the 3 PERF rules whose still-firing set it recomputes.
 H4_OLD = ("           AND ev.RULE_ID IN (SELECT RULE_ID FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG\n"
@@ -578,12 +690,23 @@ assert new_hourly.index(CE_BLOCK) < new_hourly.index("    -- [snooze carry-forwa
 H6_OLD = "    RETURN 'alert scan v11 (V091: + auto-clear sweep): ' || (13 - :fails) || '/13 rule blocks ok';\n"
 H6_NEW = (HB_HOURLY
           + "    RETURN 'alert scan v12 (V157: + OPS_PIPELINE_DEGRADED self-watch + ETL-cycle add-on + "
-            "condition-ended sweep + heartbeat, - dead break-glass arm): ' || (13 - :fails) || '/13 rule blocks ok';\n")
+            "condition-ended sweep + heartbeat, - dead break-glass arm, - retired cloud-services ratio arm, "
+            "security arms every 4h, self-watch every 3h): ' || (12 - :fails) || '/12 rule blocks ok';\n")
 new_hourly = _swap(new_hourly, H6_OLD, H6_NEW, "H6 hourly RETURN")
 
-assert new_hourly.count("fails := fails + 1") == 13          # 13 - [15] + [22]
-assert "' of 13 alert rule block(s) failed this run'" in new_hourly
+assert new_hourly.count("fails := fails + 1") == 12          # 13 - [15] - [11] + [22]
+assert "' of 12 alert rule block(s) failed this run'" in new_hourly and " of 13 " not in new_hourly
 assert "SEC_BREAK_GLASS_USE" not in new_hourly and "ACCOUNT_USAGE.QUERY_HISTORY" not in new_hourly
+assert "COST_CLOUD_SVC_RATIO" not in new_hourly and "WAREHOUSE_METERING_HISTORY" not in new_hourly
+# the gates: one hour read, 2 arm + 2 clear security gates, 1 [22] gate, all balanced, ct_hour never reassigned
+assert new_hourly.count("INTO :ct_hour") == 1 and "ct_hour :=" not in new_hourly
+assert new_hourly.count(f"IF ({SEC_GATE}) THEN") == 4 and new_hourly.count(f"IF ({OPS_GATE}) THEN") == 1
+assert new_hourly.count("END IF;   -- /V157 cadence gate: ") == 5
+# ct_hour is read ONLY by the 5 gate conditions (plus its declaration, the read and comments)
+assert new_hourly.count("ct_hour") == (HOUR_DECL.count("ct_hour") + HOUR_BLOCK.count("ct_hour") + 5
+                                       + CE_HEAD.count("ct_hour"))
+assert new_hourly.index("INTO :ct_hour") < new_hourly.index("    -- [01] COST_DAILY_CREDITS")
+assert ARM_22_GATED in new_hourly
 assert new_hourly.count("CALL DBA_MAINT_DB.OVERWATCH.SP_SCAN_ETL_CYCLE();") == 1
 
 # ---------------------------------------------------------------------------------------------------
@@ -602,6 +725,8 @@ D3_NEW = (HB_DAILY
 new_daily = _swap(new_daily, D3_OLD, D3_NEW, "D3 daily RETURN")
 assert new_daily.count("fails := fails + 1") == 11           # 9 + [22] + [24]
 assert "AS DAILY_BURN" in new_daily                          # V064 burn carried (history lock test_rec10)
+assert "ct_hour" not in new_daily and "cadence gate" not in new_daily   # the daily scan runs once a day: no gate
+assert new_daily.count(ARM_22) == 1 and new_hourly.count(ARM_22) == 1  # [22] byte-identical in both scans
 
 # ---------------------------------------------------------------------------------------------------
 # File assembly
@@ -615,13 +740,25 @@ HEADER = """\
 --   SP_ALERT_SCAN (hourly):
 --     - arm [15] removed: it keyed on a rule whose ALERT_CONFIG row was deleted at V034, so it joined no
 --       row, yet it was the hourly scan's only ACCOUNT_USAGE.QUERY_HISTORY read;
+--     - arm [11] removed and COST_CLOUD_SVC_RATIO RETIRED (owner decision, wave-2b rework): V150's
+--       per-warehouse robust-z COST_CLOUD_SVC_ANOMALY (daily, SP_ANOMALY_SWEEP) supersedes the fixed
+--       10/20% ratio; [11] was the hourly scan's only WAREHOUSE_METERING_HISTORY read. The file retires the
+--       rule the V034 way (below the procs): its row goes, its OPEN/ACK/SNOOZED events close as EXPECTED;
+--     ~ cadence gates (compile diet): the Central hour is read ONCE per run into ct_hour. Arms [10]
+--       SEC_CRED_EXPIRY and [20] SEC_NEW_EXPOSURE -- the scan's two heaviest ACCOUNT_USAGE compiles -- run
+--       only when MOD(ct_hour, 4) = 1 (01,05,09,13,17,21 Central); [22] only when MOD(ct_hour, 3) = 2
+--       (02,05,08,11,14,17,20,23). Each gate wraps an UNCHANGED arm; a gated-off arm counts as ok. A failed
+--       hour read keeps the DEFAULT 5 (inside both slots): every gated block runs, like before V157;
 --     + [22] OPS_PIPELINE_DEGRADED (counting): pipeline self-watch -- a stale SOURCE_FRESHNESS_STATE row, a
---       loader failure that was logged and swallowed, or an idle alert notifier;
---     + [23] PIPE_ETL_CYCLE add-on (NOT counting): runs SP_SCAN_ETL_CYCLE (V156); a CONTROL_STATUS grant
---       gap logs etl_cycle_scan_failed and never trips OPS_SCAN_DEGRADED;
+--       loader failure that was logged and swallowed, or an idle alert notifier -- every 3rd hour here and
+--       every morning in the daily scan;
+--     + [23] PIPE_ETL_CYCLE add-on (NOT counting, ungated): runs SP_SCAN_ETL_CYCLE (V156), which applies its
+--       own ETL-window gate; a CONTROL_STATUS grant gap logs etl_cycle_scan_failed and never trips
+--       OPS_SCAN_DEGRADED;
 --     + condition-ended sweep (#12c): an OPEN SEC_CRED_EXPIRY / SEC_NEW_EXPOSURE event resolves as
 --       CONDITION_ENDED once ACCOUNT_USAGE shows the credential rotated/removed or the PUBLIC grant batch
---       fully revoked (OPEN only, 1h dwell, positive evidence only);
+--       fully revoked (OPEN only, 1h dwell, positive evidence only). Each rule's clear runs only in its raise
+--       arm's 4-hourly slot;
 --     ~ the V091 auto-clear sweep is scoped to its 3 PERF rules (the only rules whose still-firing set it
 --       recomputes), so opting another rule into AUTO_CLEAR_ENABLED never blanket-clears it after 1h;
 --     ~ arm [10]: a prior event closed for an EARLIER expiry (by anyone -- a human ACTIONED/NOISE/EXPECTED
@@ -631,26 +768,37 @@ HEADER = """\
 --       ('Rotate before YYYY-MM-DD', both bands), now pinned to Central on both the write and the match.
 --       A live (OPEN/ACK/SNOOZED) event, or a close for this same expiry, still blocks; EXPIRING is never
 --       minted while that credential's EXPIRED event is live;
---     + [hb] heartbeat: stamps SOURCE_FRESHNESS_STATE 'ALERT_SCAN_HOURLY' last in every run.
---     Counting arms stay 13 (13 - [15] + [22]); the self-alert literal is unchanged.
+--     + [hb] heartbeat: stamps SOURCE_FRESHNESS_STATE 'ALERT_SCAN_HOURLY' last in every run, as ONE point
+--       UPDATE (an INSERT only when the row is missing: the first run, or after a delete).
+--     Counting arms 13 -> 12 (13 - [15] - [11] + [22]); the self-alert and the RETURN say 12.
 --   SP_ALERT_SCAN_DAILY:
 --     + [22] OPS_PIPELINE_DEGRADED (byte-identical to the hourly copy; shared dedupe keys, so whichever
 --       graph is alive raises each finding once);
 --     + [24] COST_IDLE_OPPORTUNITY (counting): weekly idle-waste push, the DB-side twin of the Optimize
 --       ACTIONABLE figure (net of the 60s resume tail, settings-verified timer from the newest SHOW
 --       WAREHOUSES snapshot batch -- a dropped/renamed warehouse never raises -- 14 complete Central days);
---     + [hb] heartbeat 'ALERT_SCAN_DAILY'. Counting arms 9 -> 11.
+--     + [hb] heartbeat 'ALERT_SCAN_DAILY' (the same point-UPDATE shape). Counting arms 9 -> 11. No cadence
+--       gate: the daily scan runs once a day.
 --   ALERT_CONFIG: OPS_PIPELINE_DEGRADED (PLATFORM, HIGH) and COST_IDLE_OPPORTUNITY (COST, MEDIUM, 100 USD/month,
 --   HIGH band at 5x) are seeded WHEN NOT MATCHED only. SEC_CRED_EXPIRY and SEC_NEW_EXPOSURE are opted into
 --   auto-clear AFTER both procs are replaced (never before: V141's unscoped sweep would blanket-clear them).
 --
 -- Everything else in both V141 bodies is byte-identical (tests/migrations/test_v157_* normalizes each back
--- to V141): DECLARE, [wake], the 12 surviving hourly arms, both self-alerts (hourly literal 13), the V067/V115
--- supersede sweep, the V091 body except its one scope line, the V117 carry-forward, the daily arms
--- [06]-[19], the [17]/[18] add-ons and the V064 trailing-30-complete-day burn.
+-- to V141): DECLARE (+ ct_hour), the SETTINGS read, [wake], the 11 surviving hourly arms ([10] carries its
+-- recurrence fix; [10] and [20] sit unchanged inside their gates), both self-alerts (hourly literal now 12),
+-- the V067/V115 supersede sweep, the V091 body except its one scope line, the V117 carry-forward, the daily
+-- arms [06]-[19], the [17]/[18] add-ons and the V064 trailing-30-complete-day burn.
 --
--- FIRST RUN: every SOURCE_FRESHNESS_STATE row already past its cadence raises one HIGH OPS_PIPELINE_DEGRADED
--- event, and the first daily run raises this ISO week's COST_IDLE_OPPORTUNITY events (preview with the
+-- LATENCY TRADE (owner decisions D1/D2/D8/D9; the compile saving is the point): a new PUBLIC grant
+-- (SEC_NEW_EXPOSURE) and a credential entering its window or expiring (SEC_CRED_EXPIRY -- the EXPIRED band is
+-- CRITICAL and auto-declares an incident) surface up to ~4h later than an hourly check would raise them, on
+-- top of ACCOUNT_USAGE's own lag; a CONDITION_ENDED clear lands up to ~4h after the evidence; the hourly [22]
+-- self-watch reports a stale source or an idle notifier up to ~3h later (the daily scan's copy still runs
+-- every morning). Every other hourly arm and sweep still runs every hour.
+--
+-- FIRST RUN: at the first [22] slot (hourly scan) or daily run, every SOURCE_FRESHNESS_STATE row already past
+-- its cadence raises one HIGH OPS_PIPELINE_DEGRADED event, and the first daily run raises this ISO week's
+-- COST_IDLE_OPPORTUNITY events (preview with the
 -- separate read-only PREFLIGHT_WAVE2B.sql). A credential already inside its expiry window whose only prior
 -- SEC_CRED_EXPIRY event for that key was closed for an EARLIER expiry date (an earlier cycle, e.g.
 -- human-resolved, however late) raises its previously suppressed event once (CRITICAL, and an auto-declared
@@ -659,11 +807,15 @@ HEADER = """\
 -- that zone's date; if the expiry fell on a different calendar date there, the row reads as an earlier cycle
 -- and the event re-raises once (a duplicate, not a missed alert). Deploy the app build that excludes
 -- CONDITION_ENDED from the human-resolution metrics BEFORE applying (it shipped in wave 2a). No procedure runs
--- at apply time: the scans pick this up on their next scheduled run.
+-- at apply time: the scans pick this up on their next scheduled run. Applying also closes every OPEN, ACK'd
+-- or SNOOZED COST_CLOUD_SVC_RATIO event as EXPECTED and deletes that rule's ALERT_CONFIG row (history in
+-- ALERT_EVENTS is kept).
 -- ROLLBACK (order matters): FIRST, by hand (never inside a migration), switch AUTO_CLEAR_ENABLED off for
 -- SEC_CRED_EXPIRY and SEC_NEW_EXPOSURE; only THEN re-run V141's two procs (RUNBOOK section 12, "Rolling back
 -- V157"). Reversed, an hourly scan landing between the two steps runs V141's unscoped V091 sweep, which
 -- AUTO_CLEARs their OPEN events 1h after raise -- and V141's arms [10]/[20] never re-raise an auto-cleared key.
+-- The retired COST_CLOUD_SVC_RATIO row stays deleted after a rollback (V141's arm [11] then joins no row, like
+-- the old [15]); re-seed it by hand only if the fixed ratio is wanted back.
 -- Apply AFTER V156 (SP_SCAN_ETL_CYCLE must exist for [23]; before it, the arm only logs
 -- etl_cycle_scan_failed). Idempotent; safe to re-run.
 
@@ -695,9 +847,10 @@ WHEN NOT MATCHED THEN INSERT (RULE_ID, FAMILY, NAME, ENABLED, SEVERITY, THRESHOL
 
 """
 
-MARK_H = ("-- >>> derived:SP_ALERT_SCAN  (from V141; - dead break-glass arm [15], + [22] OPS_PIPELINE_DEGRADED, "
-          "+ [23] PIPE_ETL_CYCLE add-on, + condition-ended sweep, V091 sweep scoped to PERF, arm [10] recurrence "
-          "fix, + [hb], V157)\n")
+MARK_H = ("-- >>> derived:SP_ALERT_SCAN  (from V141; - dead break-glass arm [15], - retired COST_CLOUD_SVC_RATIO "
+          "arm [11], [10]/[20] + their condition-ended clears every 4h, + [22] OPS_PIPELINE_DEGRADED every 3h, + [23] "
+          "PIPE_ETL_CYCLE add-on, + condition-ended sweep, V091 sweep scoped to PERF, arm [10] recurrence fix, "
+          "+ [hb], V157)\n")
 MARK_D = ("-- >>> derived:SP_ALERT_SCAN_DAILY  (from V141; + [22] OPS_PIPELINE_DEGRADED, + [24] "
           "COST_IDLE_OPPORTUNITY, + [hb], V157)\n")
 
@@ -710,15 +863,39 @@ UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
  WHERE RULE_ID IN ('SEC_CRED_EXPIRY', 'SEC_NEW_EXPOSURE');
 """
 
+RETIRE = """\
+-- Owner decision (wave-2b rework): retire COST_CLOUD_SVC_RATIO. V150's per-warehouse robust-z
+-- COST_CLOUD_SVC_ANOMALY (daily, SP_ANOMALY_SWEEP) supersedes the fixed 10/20% ratio, and arm [11] -- an hourly
+-- WAREHOUSE_METERING_HISTORY read -- is gone from SP_ALERT_SCAN above. The house retire pattern (V034,
+-- SEC_BREAK_GLASS_USE): the rule row goes and lingering events close as EXPECTED -- SNOOZED ones too, since the
+-- hourly wake step would otherwise reopen an event no scan can ever close again. ALERT_EVENTS history is kept.
+-- Row FIRST, then the events: once the row is gone no arm [11] joins a config row -- not even a scan that
+-- started before this file and still runs V141's body -- so nothing can re-raise the rule after the close.
+DELETE FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
+ WHERE RULE_ID = 'COST_CLOUD_SVC_RATIO';
+
+UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+   SET STATUS = 'RESOLVED', RESOLUTION_KIND = 'EXPECTED',
+       RESOLVED_AT = CURRENT_TIMESTAMP()
+ WHERE RULE_ID = 'COST_CLOUD_SVC_RATIO' AND STATUS IN ('OPEN', 'ACK', 'SNOOZED');
+"""
+
 DESCRIPTION = (
-    "Next-Fifty wave 2b (ranks 10a/b/d, 13, 2, 12c): the single wave-2 re-derivation of SP_ALERT_SCAN and "
-    "SP_ALERT_SCAN_DAILY from V141, byte-identical otherwise. Hourly: dead break-glass arm [15] removed (its "
-    "rule was deleted at V034; it was the scan''s only ACCOUNT_USAGE.QUERY_HISTORY read); + [22] "
+    "Next-Fifty wave 2b (ranks 10a/b/d, 13, 2, 12c) plus the wave-2b compile-diet rework: the single wave-2 "
+    "re-derivation of SP_ALERT_SCAN and SP_ALERT_SCAN_DAILY from V141, byte-identical otherwise. Hourly: dead "
+    "break-glass arm [15] removed (its rule was deleted at V034; it was the scan''s only "
+    "ACCOUNT_USAGE.QUERY_HISTORY read); arm [11] removed and COST_CLOUD_SVC_RATIO retired (V150 "
+    "COST_CLOUD_SVC_ANOMALY supersedes the fixed ratio; its OPEN, ACK and SNOOZED events close as EXPECTED and "
+    "its ALERT_CONFIG row is deleted, the V034 pattern); cadence gates from one Central-hour read per run "
+    "(fail-open default 5): arms [10] SEC_CRED_EXPIRY and [20] SEC_NEW_EXPOSURE and their condition-ended "
+    "clears run when MOD(hour, 4) = 1 (01,05,09,13,17,21 Central), [22] when MOD(hour, 3) = 2, so those "
+    "alerts and clears can land up to about 4h (3h for [22]) later; + [22] "
     "OPS_PIPELINE_DEGRADED self-watch (a SOURCE_FRESHNESS_STATE row past the shared DAILY/METERING 30h else 3h "
     "name rule, at most one event per source per last-load day; a swallowed loader failure of the five "
     "NATIVE_ALERT_STALE_FACTS error types, one per type, source and Central day, the three optional mart arms "
     "left to the stale leg; an idle alert notifier via OW_SENDER_LEASE while a route is enabled); + [23] add-on "
-    "arm running SP_SCAN_ETL_CYCLE (V156; not counted toward OPS_SCAN_DEGRADED, logs etl_cycle_scan_failed); "
+    "arm running SP_SCAN_ETL_CYCLE (V156, ungated here; not counted toward OPS_SCAN_DEGRADED, logs "
+    "etl_cycle_scan_failed); "
     "+ #12c condition-ended sweep (an OPEN SEC_CRED_EXPIRY or SEC_NEW_EXPOSURE event resolves CONDITION_ENDED "
     "once CREDENTIALS or GRANTS_TO_ROLES show the condition ended; 1h dwell, positive evidence only, opt-in via "
     "AUTO_CLEAR_ENABLED); the V091 auto-clear sweep scoped to its 3 PERF rules; arm [10] (key unchanged) "
@@ -726,11 +903,12 @@ DESCRIPTION = (
     "included however late (the cycle id is the expiry date every arm [10] since V009 writes at the head of "
     "DETAIL, now pinned to Central on write and match; a live row always blocks), so a rotated credential''s "
     "next expiry re-alerts, and never mints "
-    "EXPIRING while the EXPIRED event is live; + [hb] ALERT_SCAN_HOURLY heartbeat. Tally 13 -> 13. Daily: + "
-    "[22] (byte-identical, shared keys) + [24] COST_IDLE_OPPORTUNITY (weekly per warehouse, net recoverable "
-    "USD/month after the 60s resume tail, settings-verified timer (newest SHOW WAREHOUSES snapshot batch) "
-    "disabled or above 60s, 14 complete Central days with at least 7 covered; MEDIUM at 100 USD/month, HIGH "
-    "band at 5x) + [hb] ALERT_SCAN_DAILY "
+    "EXPIRING while the EXPIRED event is live; + [hb] ALERT_SCAN_HOURLY heartbeat (one point UPDATE, an INSERT "
+    "only when the row is missing). Tally 13 -> 12. Daily: + "
+    "[22] (byte-identical, shared keys, ungated) + [24] COST_IDLE_OPPORTUNITY (weekly per warehouse, net "
+    "recoverable USD/month after the 60s resume tail, settings-verified timer (newest SHOW WAREHOUSES snapshot "
+    "batch) disabled or above 60s, 14 complete Central days with at least 7 covered; MEDIUM at 100 USD/month, "
+    "HIGH band at 5x) + [hb] ALERT_SCAN_DAILY "
     "heartbeat. Tally 9 -> 11. Seeds OPS_PIPELINE_DEGRADED (PLATFORM, HIGH) and COST_IDLE_OPPORTUNITY (COST, "
     "MEDIUM, 100, 336h) WHEN NOT MATCHED only; opts SEC_CRED_EXPIRY and SEC_NEW_EXPOSURE into auto-clear after "
     "both procs are replaced. No task change, no procedure run at apply time."
@@ -745,7 +923,8 @@ TAIL = (
     "WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 157);\n"
 )
 
-out = (HEADER + MARK_H + new_hourly + "\n\n" + MARK_D + new_daily + "\n\n" + OPT_IN + "\n" + TAIL)
+out = (HEADER + MARK_H + new_hourly + "\n\n" + MARK_D + new_daily + "\n\n" + OPT_IN + "\n" + RETIRE + "\n"
+       + TAIL)
 
 assert out.count("CREATE OR REPLACE PROCEDURE") == 2
 _top_level = "".join(part for i, part in enumerate(out.split("$$")) if i % 2 == 0)
@@ -756,6 +935,10 @@ for banned in ("AUTO_CLEAR_ENABLED = FALSE", "SET ENABLED"):
 assert out.index("SET AUTO_CLEAR_ENABLED = TRUE") > out.index(
     "CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN_DAILY()")
 assert out.count("CALL DBA_MAINT_DB.OVERWATCH.SP_SCAN_ETL_CYCLE()") == 1   # only the [23] add-on, in the hourly body
+# the retirement: the V034 shape, after both procs and the opt-in, and the only DELETE in the file
+assert out.index(RETIRE) > out.index(OPT_IN) > out.index("CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN_DAILY()")
+assert out.count("DELETE FROM ") == 1 and _top_level.count("COST_CLOUD_SVC_RATIO'") == 2
+assert "DROP " not in _top_level
 
 target = Path(os.environ.get("V157_OUT") or (MIG / "V157__alert_scan_self_watch_idle_push.sql"))
 target.write_text(out, encoding="utf-8", newline="\n")

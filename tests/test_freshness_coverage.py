@@ -7,7 +7,9 @@ Before V152, MART_CLOUD_SVC_DAILY (the V150 COST_CLOUD_SVC_ANOMALY baseline) and
 were exactly that. These locks keep the class closed:
 
   (a) every FACT_/MART_ MERGE/INSERT target in the latest proc bodies is a quoted SOURCE_NAME in some
-      latest-body ``MERGE INTO ...SOURCE_FRESHNESS_STATE ... ;`` block (allowlist UNSTAMPED_OK, empty);
+      latest-body ``MERGE INTO ...SOURCE_FRESHNESS_STATE ... ;`` block -- or, for the alert scans' own
+      heartbeats (V157), a point ``UPDATE ...SOURCE_FRESHNESS_STATE ... WHERE SOURCE_NAME = '<name>';`` --
+      (allowlist UNSTAMPED_OK, empty);
   (b) SP_LOAD_MARTS_V27's token chain: per scope block, the ``loaded := loaded || '<tok> '`` tokens
       equal that block's srcmap tokens, each on its arm's success path, and every srcmap SOURCE_NAME is
       a ``SELECT '<name>'`` row of the latest MART_SOURCE_FRESHNESS view -- a token alone stamps
@@ -42,7 +44,9 @@ HOURLY_NAMED = frozenset({
 _NAME_RE = re.compile(r"^(FACT|MART|OW|SECURITY|ALERT)_[A-Z0-9_]+$")   # drops 'OK'/'ERROR' STATUS literals
 _TARGET_RE = re.compile(
     r"(?:MERGE\s+INTO|INSERT\s+(?:OVERWRITE\s+)?INTO)\s+DBA_MAINT_DB\.OVERWATCH\.((?:FACT|MART)_\w+)")
-_STAMP_RE = re.compile(r"MERGE\s+INTO\s+DBA_MAINT_DB\.OVERWATCH\.SOURCE_FRESHNESS_STATE\b.*?;", re.S)
+# a stamp is a MERGE of the row(s), or (the V157 scan heartbeats' cheapest shape) a point UPDATE of one row
+_STAMP_RE = re.compile(
+    r"(?:MERGE\s+INTO|UPDATE)\s+DBA_MAINT_DB\.OVERWATCH\.SOURCE_FRESHNESS_STATE\b.*?;", re.S)
 _TOKEN_RE = re.compile(r"loaded := loaded \|\| '(\w+) ';")
 _SRCMAP_RE = re.compile(r"FROM VALUES\s*\n(.*?)AS srcmap\(SOURCE_NAME, TOKEN\)", re.S)
 _PAIR_RE = re.compile(r"\('(\w+)', '(\w+)'\)")
@@ -299,3 +303,12 @@ def test_v157_scan_heartbeats_are_stamped_by_their_own_scans():
     assert stamped.get("ALERT_SCAN_HOURLY") == {"SP_ALERT_SCAN"}
     assert stamped.get("ALERT_SCAN_DAILY") == {"SP_ALERT_SCAN_DAILY"}
     assert "ALERT_SCAN_HOURLY" in HOURLY_NAMED and "ALERT_SCAN_DAILY" not in HOURLY_NAMED
+    # wave-2b rework (D10): each heartbeat is a point UPDATE of the scan's own row -- the ONLY UPDATE-shaped
+    # stamp anywhere -- and it stamps exactly that one name
+    bodies = _latest_proc_bodies()
+    upd = {p for p, b in bodies.items()
+           if re.search(r"\bUPDATE\s+DBA_MAINT_DB\.OVERWATCH\.SOURCE_FRESHNESS_STATE\b", b)}
+    assert upd == {"SP_ALERT_SCAN", "SP_ALERT_SCAN_DAILY"}
+    for proc, name in (("SP_ALERT_SCAN", "ALERT_SCAN_HOURLY"), ("SP_ALERT_SCAN_DAILY", "ALERT_SCAN_DAILY")):
+        (block,) = [b for b in _STAMP_RE.findall(bodies[proc]) if b.startswith("UPDATE")]
+        assert block.endswith(f"WHERE SOURCE_NAME = '{name}';"), proc

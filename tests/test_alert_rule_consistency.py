@@ -36,6 +36,9 @@ _MIG = _ROOT / "snowflake" / "migrations"
 # greppable act that records "the app references this for history only". Verified 2026-08-01.
 RETIRED_ALLOWLIST = frozenset({
     "SEC_BREAK_GLASS_USE",   # config DELETEd V034:181; Security>Changes says "no alert fires"
+    # config DELETEd + arm [11] removed at V157 (wave-2b rework; V150's COST_CLOUD_SVC_ANOMALY supersedes the
+    # fixed ratio); its playbook says "Retired (V157)" and navigate keeps its targets for historical events.
+    "COST_CLOUD_SVC_RATIO",
     # NOT PIPE_TASK_FAILURES: V043 disabled it, but V045 ("task monitoring restored")
     # re-enabled it and SP_ALERT_SCAN_DAILY (V066:753) raises it — it is LIVE, not retired.
     # (Wrongly allowlisted on first cut by checking only SP_ALERT_SCAN, not the DAILY scan.)
@@ -255,6 +258,15 @@ def test_D_dead_arm_allowlist_is_not_stale():
     refs, deleted = _arm_rule_refs(), _config_deleted()
     stale = sorted(rid for rid in DEAD_ARM_ALLOWLIST if rid not in refs or rid not in deleted)
     assert not stale, f"DEAD_ARM_ALLOWLIST entries whose arm is gone or whose rule is seeded again: {stale}"
+
+
+def test_retired_allowlist_is_not_stale():
+    """A RETIRED_ALLOWLIST rule must really be retired: its config row DELETEd (or disabled) and no latest raiser
+    arm still keyed on it -- otherwise the allowlist would excuse a live rule from Guards A and C."""
+    raised, enabled, deleted = _raised_rule_ids(), _config_enabled(), _config_deleted()
+    stale = sorted(rid for rid in RETIRED_ALLOWLIST if rid in raised or rid in enabled)
+    assert not stale, f"RETIRED_ALLOWLIST entries that are still raised or enabled: {stale}"
+    assert {"SEC_BREAK_GLASS_USE", "COST_CLOUD_SVC_RATIO"} <= deleted       # V034 / V157 (wave-2b rework)
 
 
 def test_config_replay_sees_the_v034_delete():

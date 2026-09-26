@@ -741,8 +741,9 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
     st.markdown("**Cloud-services health by warehouse**")
     st.caption(
         "Above ~10% (WATCH) of a warehouse's credits usually means many tiny queries, "
-        "metadata-heavy patterns, or compile-heavy SQL. ELEVATED starts past 20%, "
-        "where the COST_CLOUD_SVC_RATIO alert fires (editable on Alerts)."
+        "metadata-heavy patterns, or compile-heavy SQL; ELEVATED starts past 20%. These bands are "
+        "for reading only: the fixed-ratio alert was retired in V157, and the COST_CLOUD_SVC_ANOMALY "
+        "alert (daily) now fires when a warehouse steps outside its own 28-day cloud-services baseline."
     )
     _lm = "_lm" if bounds is not None else ""
     csr = csr_res if csr_res is not None else run(
