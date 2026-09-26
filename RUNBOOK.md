@@ -146,7 +146,7 @@ native alerts), `ml_forecast_option.sql` (SNOWFLAKE.ML.FORECAST engine), `backfi
 | TASK_DAILY_DIGEST | 07:20 daily | SP_DAILY_DIGEST | DAILY_DIGEST (Cortex) |
 | TASK_VERIFY_SAVINGS | 07:40 1st of month | SP_VERIFY_IDLE_SAVINGS | SAVINGS_LEDGER verifications |
 | TASK_PURGE_FACTS | 05:20 1st of month | SP_PURGE_FACTS | deletes beyond retention |
-| TASK_BACKUP_OPERATOR | 05:40 Sundays | SP_BACKUP_OPERATOR_TABLES | `*_BAK_LAST` clones |
+| TASK_BACKUP_OPERATOR | 05:10 daily | SP_BACKUP_OPERATOR_TABLES | `OVERWATCH_BAK.*_OWBAK_D<yyyymmdd>` (+Sun `_W`) generations, Sunday `*_BAK_LAST`, OPERATOR_BACKUP_LOG, OPERATOR_BACKUP_DAILY freshness |
 | TASK_CANARY_SENTINEL | 05:30 Mondays | SP_CANARY_SENTINEL | CANARY_RESULTS + OPS_CANARY_FAIL |
 
 **Notes on the automation:** the Monday 05:30 sentinel deliberately leads
@@ -160,8 +160,45 @@ scan procs — the hourly `SP_ALERT_SCAN` and the daily `SP_ALERT_SCAN_DAILY`
 OPS_SCAN_DEGRADED's job — a broken block logs `rule_block_failed` and
 self-alerts, which IS the failure-injection test running in production, safely.
 
+**Operator backups (V158):** TASK_BACKUP_OPERATOR runs daily at 05:10 on the
+hourly chain's warm warehouse and stamps `OPERATOR_BACKUP_DAILY` in
+SOURCE_FRESHNESS_STATE only when every clone succeeded, so a failing or
+suspended backup goes stale (30h) like any daily loader. Being the earliest
+daily source, it is the one the sidebar health strip most often names as
+"stalest" (WARN from ~03:40 until the 05:10 run) — that is its normal
+rhythm, not an outage. Failures land in APP_ERROR_LOG (PAGE
+`BackupOperatorTables`: `clone_failed`, `backup_log_failed`,
+`backup_prune_failed`, `backup_incomplete`), which `loader_chain_check.sql`
+step 3 lists. `OPERATOR_BACKUP_LOG` gets a CLONED row for every
+`OVERWATCH_BAK` generation (the daily `_D`, and on Sundays the weekly `_W` as
+its own row, so a restore older than the daily window still finds a table
+that exists), plus every skip and prune. The Sunday `*_BAK_LAST` refresh is
+not logged. Statement budget: each run reads INFORMATION_SCHEMA once for all
+25 sources (not once per table) and writes its PRUNED rows in one insert, so a
+steady-state day is 59 statements (135 on Sundays); a same-day re-run skips the
+clones it already took. If that one probe errors, the run clones all 25
+anyway (the V089 behaviour); nothing is skipped on a guess.
+
 `SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;` — every state should be
 `started` except TASK_ALERT_NOTIFY before its integration exists.
+
+**Loader compile diet (V159):** two hourly procs skip work instead of
+recompiling a heavy ACCOUNT_USAGE statement every hour. The hourly
+`SP_LOAD_MARTS_V27('HOURLY', 2)` runs its three day-grain arms —
+`MART_WAREHOUSE_EFFICIENCY_DAILY` [1], `MART_TASK_GRAPH_DAILY` [6] and
+`MART_TASK_NODE_DAILY` [6b] — only in the 00/04/08/12/16/20 Central cycles,
+and always when DAYS_BACK > 2 (the nightly reconcile's `('HOURLY', 3)`, which
+re-loads D-3..today, and backfills). Every other mart still loads hourly.
+Today's row in those three marts can be up to 4h old (5h across the
+November DST night): the Optimize idle / sizing panels, the Unit costs
+task-graph panel, the Operations node-timing board and `SP_SLO_BREACH_SCAN`
+see it that much later; completed days are unaffected. Their freshness rows
+advance only in those cycles, well inside the 30h DAILY cadence, so they
+never read stale. To force them by hand, `CALL SP_LOAD_MARTS_V27('HOURLY', 3)`.
+`SP_CHANGE_ATTRIBUTION` runs its QUERY_HISTORY UPDATE only while a
+WAREHOUSE_CHANGE_REGISTRY row seen in the last 3 hours is still
+unattributed (about three hourly attempts per change, the first ~07:07 after
+the 06:40 scan) and otherwise returns `attribution pass skipped`.
 
 ## 5. Pages, sections, and every metric
 
@@ -411,7 +448,9 @@ CONTRACT_CREDITS / CONTRACT_START_DATE / CONTRACT_END_DATE (ISO dates) ·
 CORTEX_MODEL llama3.1-8b · FORECAST_ENGINE linear|seasonal|ml_forecast ·
 SCORE_PTS_* (nine platform-score weights, §6) · FACT_RETENTION_DAYS_HOURLY
 400 (floor 90) · FACT_RETENTION_DAYS_DAILY 800 (floor 180) ·
-ERROR_LOG_RETENTION_DAYS 180 (floor 30). Values are strings; bad numbers
+ERROR_LOG_RETENTION_DAYS 180 (floor 30) · BACKUP_KEEP_DAILY 14 (7-60) ·
+BACKUP_KEEP_WEEKLY 8 (4-52) (operator-backup generations kept per table,
+V158). Values are strings; bad numbers
 fall back to defaults. Changes take effect within one cache cycle (≤5 min)
 or after Refresh.
 
@@ -447,12 +486,45 @@ Decision Studio ▸ ROI. The open ESTIMATED pipeline is a separate figure by des
 exception handler — a broken rule logs `rule_block_failed` to APP_ERROR_LOG
 and raises OPS_SCAN_DEGRADED while every other rule keeps firing.
 
+**Cadence gates (V157, compile diet):** the hourly SP_ALERT_SCAN reads the
+Central hour once per run and skips these blocks outside their slots —
+SEC_CRED_EXPIRY [10], SEC_NEW_EXPOSURE [20] and their condition-ended clears
+run at 01, 05, 09, 13, 17 and 21 Central; the OPS_PIPELINE_DEGRADED [22]
+self-watch at 02, 05, 08, 11, 14, 17, 20 and 23 (the daily scan's copy still
+runs every morning). A skipped arm compiles nothing and counts as ok in the
+12-block tally; a failed hour read runs every gated block (fail-open,
+`cadence_gate_failed`). The trade: those alerts and clears can arrive up to
+~4h (~3h for [22]) later than an every-hour check. A condition that begins and
+ends between two checks is never raised: a PUBLIC grant revoked within ~4h, or
+a stale-source / idle-notifier episode that clears between [22] slots (logged
+loader failures are still caught by the 24h ERR leg). A hand
+`CALL SP_ALERT_SCAN()` obeys the same gates: outside a slot it skips those arms
+and still reports 12/12 ok, so verify a fix to one of them in the 05 or 17
+Central hour (both slots) or after its next scheduled slot. Every other arm and sweep
+still runs every hour.
+
 **Lifecycle:** rule (ALERT_CONFIG row) → scan inserts an event with a
 DEDUPE_KEY (no duplicate while the key exists) → OPEN → ACK → RESOLVED,
 each transition writing ALERT_AUDIT. Severity escalations are computed at
 insert. Webhook delivery batches unnotified OPEN CRITICAL/HIGH (or per
 ALERT_ROUTES family/severity → named integration; one failing route never
-blocks others).
+blocks others). **Machine closes** (excluded from precision/MTTR): SUPERSEDED
+(V067 escalation), AUTO_CLEARED (V091 hysteresis — the 3 PERF rules only since
+V157), SNOOZE_SUPPRESSED (V117) and CONDITION_ENDED (V157: an OPEN
+SEC_CRED_EXPIRY / SEC_NEW_EXPOSURE event once ACCOUNT_USAGE shows the credential
+rotated/removed or the PUBLIC grant batch fully revoked; ≥1h dwell, checked in the
+4-hourly security slot so a clear lands up to ~4h after the evidence; ACK'd and
+snoozed events are left for a human).
+
+**Rolling back V157 (order matters).** FIRST switch the two security rules' auto-clear
+flag off, by hand in a worksheet (never inside a migration):
+`UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG SET AUTO_CLEAR_ENABLED = FALSE WHERE RULE_ID IN ('SEC_CRED_EXPIRY','SEC_NEW_EXPOSURE');`
+Only THEN re-run V141's `CREATE OR REPLACE PROCEDURE ... SP_ALERT_SCAN()` and
+`... SP_ALERT_SCAN_DAILY()`. Reversed, an hourly TASK_ALERT_SCAN that lands between
+the two steps runs V141's unscoped V091 sweep, which resolves every OPEN
+SEC_CRED_EXPIRY / SEC_NEW_EXPOSURE event as AUTO_CLEARED 1h after raise, and V141's
+arms [10]/[20] never re-raise an auto-cleared key: expiring credentials and new
+PUBLIC grants silently leave the queue.
 
 | Rule | Family | Fires when (threshold = THRESHOLD_NUM, editable) | Recurrence |
 |---|---|---|---|
@@ -460,11 +532,12 @@ blocks others).
 | COST_WH_DAILY_CREDITS | COST | one warehouse's credits/day over threshold | daily per WH |
 | COST_BUDGET_PACE | COST | MTD spend ahead of budget pace | daily |
 | COST_FORECAST_BREACH | COST | projected month-end over budget | daily |
-| COST_CLOUD_SVC_RATIO | COST | warehouse cloud-services ratio > % (24h, ≥0.5 cr) | daily per WH |
+| ~~COST_CLOUD_SVC_RATIO~~ | COST | retired at V157 (wave-2b compile diet) — COST_CLOUD_SVC_ANOMALY (V150, daily: a warehouse's cloud-services credits step outside its own 28-day robust baseline) supersedes the fixed ratio; open, acknowledged and snoozed events were closed as EXPECTED; the WATCH/ELEVATED bands stay on Cost > Spend for reading | — |
 | COST_STORAGE_SURGE | COST | database grew > GB day-over-day | per DB per day |
 | COST_SERVERLESS_CREEP | COST | non-WH/non-AI service credits up > % WoW (≥5 cr) | weekly while creeping |
 | COST_ANOMALY_SWEEP | COST | robust z ≥ threshold vs 28d (warehouse & service series) | per series per day |
 | COST_CONTRACT_BREACH | COST | projected exhaustion ≤ threshold days (CRITICAL ≤14) | weekly |
+| COST_IDLE_OPPORTUNITY | COST | a settings-verified AUTO_SUSPEND tightening recovers ≥ threshold USD/month (net of the 60s resume tail, 14 complete days, ≥7 covered; HIGH at ≥5x) — daily scan, V157 | weekly per WH |
 | PERF_QUERY_FAIL_PCT | PERF | window fail % over threshold | daily |
 | PERF_QUEUED_MINUTES | PERF | queued minutes over threshold | daily |
 | PERF_SPILL_GB | PERF | remote spill GB over threshold | daily |
@@ -473,26 +546,36 @@ blocks others).
 | PIPE_TASK_FAILURES | PIPELINE | task failures in window over threshold | daily per task |
 | PIPE_COPY_FAILURES | PIPELINE | failed/partial file loads 24h (CRITICAL ≥10 files) | daily per table |
 | PIPE_DT_FAILURES | PIPELINE | dynamic-table refresh failures 24h (CRITICAL ≥5) | daily per DT |
+| PIPE_ETL_TASK_FAILED | PIPELINE | a workflow's tasks failed on their final attempt tonight (≥ threshold, never below 1; HIGH for the terminal workflow; auto-clears once every retried task has finished clean — a retry still running keeps it open) — V156, via the V157 scan arm in the cycle run window (Central hours of ETL_SLA_TARGET_HHMM − 10h through target + 3h, plus a 15:00 pass): a daytime re-run failure, or the auto-clear of its retry, lands at the 15:00 pass or the window start, up to ~6h later | per workflow per night |
+| PIPE_ETL_CYCLE_NOT_STARTED | PIPELINE | cycle starter silent past last week's same-night kickoff + threshold min (the Tonight *Cycle start: Overdue* test) — V156, via the V157 scan arm in the cycle run window (ETL_SLA_TARGET_HHMM − 10h through + 3h Central, plus 15:00) | per missed night |
+| PIPE_ETL_CYCLE_LATE | PIPELINE | terminal unfinished within threshold min of ETL_SLA_TARGET_HHMM, or projected past the hard deadline (WARN); past the target (CRIT) / hard deadline (EXH): HIGH when the cycle already finished, CRITICAL (auto-declares an incident) when still unfinished; a terminal task is done at its first clean finish from an attempt that STARTED at/after the night's last kickoff, so a next-morning terminal re-run never re-grades the night and an afternoon attempt started before the real kickoff is never that finish (a next-morning starter re-run, or any re-run when starter = terminal workflow, re-grades it: loud); after an afternoon re-run of the whole chain, a real cycle that hangs before its terminal dispatches, or a chain whose terminal starts after the kickoff, can hide the real run (documented) — V156, via the V157 scan arm in the cycle run window (ETL_SLA_TARGET_HHMM − 10h through + 3h Central, plus 15:00; a hard deadline more than ~3h after the target is judged at the 15:00 pass) | per night per band |
 | SEC_FAILED_LOGINS | SECURITY | failed logins over threshold | daily |
-| SEC_CRED_EXPIRY | SECURITY | credential expires ≤ threshold days — 10 by default since V028 (CRITICAL if expired) | weekly until rotated |
+| SEC_CRED_EXPIRY | SECURITY | credential expires ≤ threshold days — 10 by default since V028 (CRITICAL if expired); checked every 4h since V157 (01, 05, 09, 13, 17, 21 Central), so an event — EXPIRED included — can arrive up to ~4h late | once per band per expiry date (EXPIRING, then EXPIRED); a rotated credential's next expiry re-alerts even after a human resolve, however late (V157: a closed event blocks only its own expiry date, read from its DETAIL; a live one always blocks) |
+| SEC_NEW_EXPOSURE | SECURITY | a new grant to PUBLIC (24h lookback) of ≥ threshold objects in one batch; checked every 4h since V157 (01, 05, 09, 13, 17, 21 Central); a grant revoked before the next check is never raised | once per grant batch (PRIVILEGE, GRANTED_ON, CREATED_ON); auto-clears as CONDITION_ENDED once the whole batch is revoked (V157) |
 | ~~SEC_BREAK_GLASS_USE~~ | SECURITY | retired at V034 (muted since V025) — admin-role activity stays as evidence on Security -> Changes | — |
-| SEC_BREAK_GLASS_USE | SECURITY | > threshold statements/day under admin roles | daily per user |
 | COST_DEPT_BUDGET_PACE | COST | department MTD > budget pace by threshold % (DEPT_BUDGETS) | daily per dept |
 | COST_ORG_ACCOUNT_CREEP | COST | org account currency spend up threshold % WoW | weekly per account |
 | PIPE_VOLUME_DROP | PIPELINE | table rows-added down threshold % vs prior-7d avg (≥1k rows/day) | daily per table |
 | OPS_CANARY_FAIL | PLATFORM | weekly source sentinel found failing dependency views | daily key |
 | OPS_SCAN_DEGRADED | PLATFORM | one or more rule blocks failed in the last scan (v7 isolation) | daily key |
+| OPS_PIPELINE_DEGRADED | PLATFORM | pipeline self-watch in BOTH scans (V157): a SOURCE_FRESHNESS_STATE row past its cadence (DAILY/METERING 30h, else 3h; incl. the ALERT_SCAN_HOURLY / ALERT_SCAN_DAILY heartbeats), a loader failure logged and swallowed, or the notifier idle 3h while a route is enabled; the hourly scan checks every 3h (02, 05, …, 23 Central), the daily scan every morning; a stale or idle episode that ends between checks is not raised | per source per last-load day; per failure type/source/day |
 | OPS_SLOW_RENDER | PLATFORM | page p95 first paint > threshold s (7d, from APP_USAGE.RENDER_MS) | weekly per page |
 
 Playbooks for each rule render in the alert drawer (`logic/playbooks.py`).
 
 ## 13. Object inventory (DBA_MAINT_DB.OVERWATCH)
 
-**Operator/config tables** (backed up weekly to `*_BAK_LAST`): SETTINGS,
+**Operator/config tables** (backed up daily since V158 to dated TRANSIENT
+generations in the separate schema `DBA_MAINT_DB.OVERWATCH_BAK` —
+`<T>_OWBAK_D<yyyymmdd>`, 14 daily + 8 Sunday-weekly `_W`, row counts in
+OPERATOR_BACKUP_LOG — plus the Sunday `*_BAK_LAST` pointer in OVERWATCH): SETTINGS,
 COMPANY_SCOPE, ALERT_CONFIG, ALERT_EVENTS, ALERT_AUDIT (append-only),
 ACTION_QUEUE, SAVINGS_LEDGER, DEPARTMENT_MAP, ALERT_ROUTES,
 REMEDIATION_LOG (append-only), USER_PREFS, OBJECT_CHANGE_REGISTRY,
-PIPELINE_SLA_CONFIG, DAILY_DIGEST.
+WAREHOUSE_CHANGE_REGISTRY, WAREHOUSE_CONFIG_SNAPSHOT, PIPELINE_SLA_CONFIG,
+DAILY_DIGEST, DEPT_BUDGETS, INCIDENTS, INCIDENT_MEMBERS, ACTION_ACTIVITY,
+EVIDENCE_LINKS, ENTITY_CATALOG, USER_WATCHLIST, OPTIMIZATION_EXPERIMENTS,
+SLO_OBJECTIVES (all 25).
 **Facts (transient, rebuildable, purged by retention):** FACT_METERING_DAILY,
 FACT_WAREHOUSE_DAILY, FACT_QUERY_HOURLY, FACT_TASK_DAILY, FACT_LOGIN_DAILY,
 FACT_STORAGE_DAILY. **Marts/views:** MART_EXEC_BOARD, MART_SOURCE_FRESHNESS,
@@ -581,16 +664,50 @@ deployed app — redeploy the app.
 
 ## 16. Disaster recovery
 
-1. **One bad table:** `CREATE OR REPLACE TABLE <T> CLONE <T>_BAK_LAST;`
-   (weekly Sunday clone) or Time Travel:
-   `CREATE OR REPLACE TABLE <T> CLONE <T> AT(OFFSET => -3600);`
+1. **One bad table:** restore from a backup generation with INSERT OVERWRITE:
+   `INSERT OVERWRITE INTO <T> SELECT * FROM DBA_MAINT_DB.OVERWATCH_BAK.<T>_OWBAK_D<yyyymmdd>;`
+   Pick the generation from `OPERATOR_BACKUP_LOG` (ROW_COUNT vs SOURCE_ROW_COUNT
+   per day; 14 daily + 8 Sunday-weekly `_W` are kept, and each generation has its
+   own CLONED row, so past the daily window use `<T>_OWBAK_W<yyyymmdd>`). Run it as the table-owner
+   role: INSERT OVERWRITE deletes, and roles.sql revokes DELETE on ALERT_AUDIT /
+   REMEDIATION_LOG from both admin roles. It keeps the table's DDL, grants and
+   audit seal. Never CLONE-restore: the backups are TRANSIENT (a clone into a
+   permanent table is refused), and a re-materialized table re-applies the
+   schema FUTURE grants. Time Travel (last hour, same rule):
+   `INSERT OVERWRITE INTO <T> SELECT * FROM <T> AT(OFFSET => -3600);`
 2. **Dropped object:** `UNDROP TABLE/SCHEMA ...` within retention.
-3. **Schema gone:** UNDROP first. Otherwise: all migrations in order (V001..V124) →
-   roles.sql → validate.sql (all OK) → facts refill from loaders (history
-   bounded by ACCOUNT_USAGE retention: 365d) → operator tables from
-   `*_BAK_LAST` if they survived, else re-seed (SETTINGS rates, budgets,
-   contract; DEPARTMENT_MAP names; ALERT_CONFIG thresholds re-seed with
-   defaults automatically).
+3. **Schema gone:** UNDROP first (`UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH;`).
+   Otherwise rebuild in this order. The operator tables are restored BEFORE V158
+   is replayed:
+   1) Apply the migrations in order, **V001..V157 only**.
+   2) Restore the 25 operator tables, **SETTINGS first** (rates, budgets and the
+      BACKUP_KEEP_* retention live there), with INSERT OVERWRITE as the
+      table-owner role, as in step 1. The source is the `OVERWATCH_BAK`
+      generations, a separate schema that survives a lost OVERWATCH.
+      `OPERATOR_BACKUP_LOG` lived in OVERWATCH and is gone, so choose by name
+      and row count:
+      `SELECT TABLE_NAME, ROW_COUNT, CREATED FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'OVERWATCH_BAK' ORDER BY 1;`
+      Use the newest generation dated BEFORE the loss, the same date for every
+      table. The name carries the Central day. The loss day's own `_D` counts
+      only if its CREATED time is before the loss. Past the daily window, use a
+      Sunday `_W`. A table with no generation is re-seeded (SETTINGS rates,
+      budgets, contract; DEPARTMENT_MAP names; ALERT_CONFIG thresholds re-seed
+      with defaults automatically). `*_BAK_LAST` lived in OVERWATCH and went
+      with it.
+   3) Apply V158, then any later migrations. The V158 tail backs up the
+      restored tables and prunes with the restored BACKUP_KEEP_DAILY /
+      BACKUP_KEEP_WEEKLY.
+   4) roles.sql → validate.sql (all OK) → facts refill from the loaders
+      (history bounded by ACCOUNT_USAGE retention: 365d).
+
+   **If V158 was already replayed before the restore:** its tail, and every
+   05:10 run since, cloned the re-seeded tables into a generation dated that
+   day. Those runs pruned with the re-seeded 14 / 8 and started a new
+   OPERATOR_BACKUP_LOG that names only post-loss generations. Run
+   `ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR SUSPEND;` at once.
+   Restore SETTINGS first so your BACKUP_KEEP_* values are back, and never
+   restore from the generation dated the replay day or any later one. Verify
+   the restore, then run `ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR RESUME;`.
 4. **Bad deploy:** `snow streamlit deploy --replace` from the previous git
    tag. Migrations are additive; no schema rollback exists or is needed.
 5. **Verify after any recovery:** validate.sql all OK → Admin canary all
@@ -741,4 +858,8 @@ INCIDENT_REOPEN_DAYS), alerts-per-incident compression, change-correlated %
 CHANGE_SOURCE. MANAGED = a DEPLOY_ACTORS service user (Settings; empty
 until Flyway/Terraform land), MANUAL = a human, UNKNOWN = no matching ALTER
 found near the snapshot. Populate DEPLOY_ACTORS the day a deploy tool gets
-a service user.
+a service user. Since V159 the hourly attribution pass tries each change for
+about 3 hours after the scan sees it (its fixed evidence window around
+CHANGE_SEEN_AT gains no new QUERY_HISTORY rows after that unless
+ACCOUNT_USAGE runs more than ~3h late); a later unattributed change
+re-tries every unattributed row of the last 7 days.

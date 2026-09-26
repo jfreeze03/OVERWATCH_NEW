@@ -41,12 +41,13 @@ ORDER BY SCHEDULED_TIME DESC;
 SELECT LOGGED_AT, PAGE, ERROR_TYPE, LEFT(ERROR_MESSAGE, 160) AS ERROR_MESSAGE, CONTEXT
 FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
 WHERE LOGGED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
-  AND PAGE IN ('MartLoader', 'ExtractLoader', 'ChangeImpactScan')
+  AND PAGE IN ('MartLoader', 'ExtractLoader', 'ChangeImpactScan', 'BackupOperatorTables')
 ORDER BY LOGGED_AT DESC
 LIMIT 100;
 
 -- 4) Freshness — the loader-owned rows. HOURS_BEHIND beyond ~2 for an
---    hourly source (or ~26 for a daily one) means its loader is not landing.
+--    hourly source (or ~30 for a daily one, the shared *_DAILY cadence rule) means its loader
+--    is not landing. OPERATOR_BACKUP_DAILY is the daily operator-data backup (V158).
 SELECT SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS,
        ROUND(DATEDIFF('minute', LAST_LOAD_TS, CURRENT_TIMESTAMP()) / 60.0, 1) AS HOURS_BEHIND
 FROM DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE
@@ -55,7 +56,7 @@ ORDER BY HOURS_BEHIND DESC;
 -- 5) The two facts the pages lean on hardest — do they have TODAY?
 SELECT 'FACT_QUERY_HOURLY' AS FACT, MAX(HOUR_TS) AS NEWEST FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
 UNION ALL
-SELECT 'MART_TASK_GRAPH_DAILY', MAX(DAY)::TIMESTAMP_NTZ FROM DBA_MAINT_DB.OVERWATCH.MART_TASK_GRAPH_DAILY
+SELECT 'MART_TASK_GRAPH_DAILY', MAX(DAY)::TIMESTAMP_NTZ FROM DBA_MAINT_DB.OVERWATCH.MART_TASK_GRAPH_DAILY   -- V159: refreshed every 4h, so today's row can first appear with the 04:07 Central cycle
 UNION ALL
 SELECT 'ALERT_EVENTS (raised)', MAX(RAISED_AT) FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
 UNION ALL
@@ -63,5 +64,7 @@ SELECT 'OW_QH_EXTRACT', MAX(START_TIME)::TIMESTAMP_NTZ FROM DBA_MAINT_DB.OVERWAT
 -- Fix for a stale extract/facts after step 0: force one cycle by hand —
 --     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(0);
 --     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_HOURLY_FACTS();
---     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 2);
+--     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 3);   -- 3, not 2: since V159 the day-grain arms
+--                                                                  -- [1]/[6]/[6b] run only in the 00/04/08/12/16/20
+--                                                                  -- Central cycles unless DAYS_BACK > 2
 --     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_OPS_DIAG(2);

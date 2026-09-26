@@ -93,7 +93,7 @@ expected AS (
       ('TASK_INCIDENT_AUTODECLARE',      'started', 'WH_ALFA_ADMIN', NULL, NULL),
       ('TASK_LEDGER_AUTOBOOK',           'started', 'WH_ALFA_ADMIN', NULL, NULL),
       ('TASK_VERIFY_SAVINGS',            'started', 'WH_ALFA_ADMIN', NULL, NULL),
-      ('TASK_BACKUP_OPERATOR',           'started', 'WH_ALFA_ADMIN', NULL, NULL),
+      ('TASK_BACKUP_OPERATOR',           'started', 'WH_ALFA_ADMIN', 'USING CRON 10 5 * * * America/Chicago', NULL),  -- V158 daily
       ('TASK_PURGE_FACTS',               'started', 'WH_ALFA_ADMIN', NULL, NULL),
       ('TASK_PURGE_QUERY_TELEMETRY',     'started', 'WH_ALFA_ADMIN', NULL, NULL)
     AS t(NAME, STATE_EXPECTED, WAREHOUSE_EXPECTED, SCHEDULE_EXPECTED, PREDECESSOR_EXPECTED)

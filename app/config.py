@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.593.0"
+APP_VERSION = "4.594.0"
 
 # The build's load-bearing schema floor. main() reads the live max(SCHEMA_VERSION)
 # once per session and, if it is BELOW this, renders ONE actionable blocked state
@@ -89,6 +89,11 @@ DEFAULT_SETTINGS = {
     "FACT_RETENTION_DAYS_DAILY": "800",
     "ERROR_LOG_RETENTION_DAYS": "180",
     "APP_USAGE_RETENTION_DAYS": "365",
+    # Operator-data backup generations (SP_BACKUP_OPERATOR_TABLES, V158): per table, keep the newest
+    # N daily and N Sunday-weekly zero-copy clones in DBA_MAINT_DB.OVERWATCH_BAK. The proc clamps to
+    # 7-60 / 4-52 (the Admin editor bounds), so a bad value can never prune the history away.
+    "BACKUP_KEEP_DAILY": "14",
+    "BACKUP_KEEP_WEEKLY": "8",
     # Forecast engine: linear | seasonal | ml_forecast (needs the opt-in
     # snowflake/ml_forecast_option.sql; falls back to seasonal when absent).
     "FORECAST_ENGINE": "linear",

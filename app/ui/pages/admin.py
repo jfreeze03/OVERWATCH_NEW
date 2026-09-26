@@ -658,6 +658,45 @@ _EXPECTED_MIGRATIONS = {
          "re-derived from V147 (byte-identical except one cursor predicate) also skips statements "
          "carrying the QUERY_TAG Streamlit-in-Snowflake stamps on every app statement, so the Operator "
          "boards agree with Operations query triage again. No schema change, no backfill",
+    156: "Nightly ETL cycle push alerts: SP_SCAN_ETL_CYCLE reads the configured CONTROL_STATUS (23 nights, "
+         "retries collapsed to each task's final attempt, Central clock) into the ETL_CYCLE_TASKS cache and "
+         "raises PIPE_ETL_TASK_FAILED (MEDIUM, HIGH for the terminal workflow; auto-clears when a retry "
+         "succeeds), PIPE_ETL_CYCLE_NOT_STARTED (HIGH; the Tonight 'Cycle start: Overdue' test) and "
+         "PIPE_ETL_CYCLE_LATE (lead-window / projection WARN; a night that finished late stays HIGH, an "
+         "unfinished miss is CRITICAL and auto-declares an incident). Works only in the overnight run window "
+         "(the Central hours of ETL_SLA_TARGET_HHMM - 10h through + 3h, plus a 15:00 pass; 15 of 24 hourly "
+         "calls at 07:00), so a daytime TASK_FAILED can alert up to ~6h later; the retry auto-clear runs only "
+         "while an event is open. Nothing calls it until V157 adds the hourly alert-scan arm, so until then "
+         "the Tonight panel stays pull-only. New objects only; needs SELECT on CONTROL_STATUS",
+    157: "Alert-scan self-watch + weekly idle push + compile diet (SP_ALERT_SCAN and SP_ALERT_SCAN_DAILY re-derived "
+         "once from V141, byte-identical otherwise): new OPS_PIPELINE_DEGRADED (PLATFORM/HIGH) raises from BOTH scans "
+         "(every 3rd Central hour in the hourly scan, every morning in the daily) when a freshness row passes its "
+         "cadence (DAILY/METERING 30h, else 3h -- including the scans' own ALERT_SCAN_HOURLY / ALERT_SCAN_DAILY "
+         "heartbeats), a loader failure is logged and swallowed, or the alert notifier stops taking its lease; new "
+         "COST_IDLE_OPPORTUNITY (COST/MEDIUM, 100 USD/month, HIGH at 5x) pushes a weekly per-warehouse alert at the "
+         "Optimize actionable idle USD/month when a settings-verified timer is off or above 60s. The hourly scan reads "
+         "the Central hour once and runs SEC_CRED_EXPIRY / SEC_NEW_EXPOSURE and their CONDITION_ENDED clears every 4th "
+         "hour (01,05,...,21); it also runs the SP_SCAN_ETL_CYCLE add-on (not counted), scopes the V091 auto-clear "
+         "sweep to its 3 PERF rules and drops the dead break-glass arm. COST_CLOUD_SVC_RATIO is retired (arm removed, "
+         "rule row deleted, open/acked/snoozed events closed as EXPECTED; V150's COST_CLOUD_SVC_ANOMALY supersedes "
+         "it). Tallies 12 and 11; heartbeats are point UPDATEs; no task change, no apply-time run",
+    158: "Operator-data backups rotate daily: SP_BACKUP_OPERATOR_TABLES (re-derived from V089) clones "
+         "the 25 operator tables every day at 05:10 Central to immutable TRANSIENT <T>_OWBAK_D<yyyymmdd> "
+         "generations in the new owner-only schema DBA_MAINT_DB.OVERWATCH_BAK (Sundays also _OWBAK_W and "
+         "the weekly *_BAK_LAST), keeps 14 daily + 8 weekly (SETTINGS BACKUP_KEEP_DAILY / "
+         "BACKUP_KEEP_WEEKLY, floors 7/4), logs row counts to OPERATOR_BACKUP_LOG and stamps "
+         "OPERATOR_BACKUP_DAILY freshness only on a clean run, so a failing backup goes stale. One "
+         "set-based metadata probe and one set-based PRUNED insert per run keep a steady day at 59 "
+         "statements. TASK_BACKUP_OPERATOR moves from Sunday 05:40 to daily 05:10; V_SECURITY_EXCEPTION_QUEUE "
+         "(re-derived from V151) keeps the task's own generation-prune DROPs out of CHANGE RISK. "
+         "Restore = INSERT OVERWRITE as the table-owner role",
+    159: "Loader compile diet: SP_LOAD_MARTS_V27 (re-derived from V152) runs its three day-grain HOURLY "
+         "arms -- MART_WAREHOUSE_EFFICIENCY_DAILY [1], MART_TASK_GRAPH_DAILY [6], MART_TASK_NODE_DAILY [6b] -- "
+         "only in the 00/04/08/12/16/20 Central cycles and always when DAYS_BACK > 2 (the nightly reconcile "
+         "and backfills); every other arm stays hourly and a skipped arm stamps no freshness (30h DAILY "
+         "cadence, never stale). SP_CHANGE_ATTRIBUTION (re-derived from V033) runs its QUERY_HISTORY UPDATE "
+         "only while a registry row seen in the last 3h is unattributed. Today's row in those marts can be up "
+         "to 4h old; ~42-44 compile-min/week saved (estimate). No task or schedule change, no apply-time run",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -748,6 +787,9 @@ _SETTING_EDITORS: dict[str, tuple[str, object]] = {
     "FACT_RETENTION_DAYS_DAILY": (_NUM, {"min_value": 1.0, "step": 1.0}),
     "ERROR_LOG_RETENTION_DAYS": (_NUM, {"min_value": 1.0, "step": 1.0}),
     "APP_USAGE_RETENTION_DAYS": (_NUM, {"min_value": 1.0, "step": 1.0}),
+    # Operator-backup generations kept per table (V158; the proc clamps to the same bounds).
+    "BACKUP_KEEP_DAILY": (_NUM, {"min_value": 7.0, "max_value": 60.0, "step": 1.0}),
+    "BACKUP_KEEP_WEEKLY": (_NUM, {"min_value": 4.0, "max_value": 52.0, "step": 1.0}),
 }
 
 

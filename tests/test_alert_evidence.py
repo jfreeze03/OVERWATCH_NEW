@@ -101,6 +101,16 @@ def test_unknown_family_falls_back_to_generic_but_only_for_cost_perf() -> None:
     assert plan_for_alert("SEC_NEW_EXPOSURE", "new admin grant", "", "2026-08-17") is None
 
 
+def test_idle_opportunity_withholds_the_off_topic_latency_pack() -> None:
+    """V157: COST_IDLE_OPPORTUNITY is about hours with ZERO queries, so the generic COST_*
+    query-families-by-elapsed pack would explain it with unrelated latency rows -- withheld."""
+    title = "WH_ALFA_BI_PRD idle waste ~$412/mo: AUTO_SUSPEND 600s -> 60s"
+    detail = "Trailing 14 complete day(s): 180.2 of 390.5 credits burned in hours with zero queries"
+    assert plan_for_alert("COST_IDLE_OPPORTUNITY", title, detail, "2026-09-28 06:52:10") is None
+    # the generic fallback still serves every other COST_* rule without a bespoke pack
+    assert plan_for_alert("COST_WH_DAILY_CREDITS", title, "", "2026-09-28") is not None
+
+
 def test_prompt_framing_matches_the_family_and_forbids_invention() -> None:
     cloud_df = pd.DataFrame({
         "SAMPLE_TEXT": ["SHOW TABLES"], "QUERY_TYPE": ["SHOW"], "RUNS": [4000],

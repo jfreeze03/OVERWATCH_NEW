@@ -13,8 +13,8 @@
 -- that ran and stopped), which is the real dead-man signal on re-runs / DR.
 
 WITH checks AS (
-    SELECT 'V001..V155 applied' AS CHECK_NAME,
-           IFF((SELECT COUNT(DISTINCT VERSION) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION BETWEEN 1 AND 155) = 155,
+    SELECT 'V001..V159 applied' AS CHECK_NAME,
+           IFF((SELECT COUNT(DISTINCT VERSION) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION BETWEEN 1 AND 159) = 159,
                'OK', 'FAIL: run missing migrations') AS RESULT
     UNION ALL
     SELECT 'Settings seeded',
@@ -132,6 +132,17 @@ WITH checks AS (
     SELECT 'ALERT_CONFIG rule count >= 29 (full seed)',
            IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG) >= 29,
                'OK', 'FAIL: expected >= 29 rules — seed incomplete')
+    UNION ALL
+    -- V158: operator backups are a dead-man source too. No row = pre-V158 install (OK); a row whose
+    -- stamp is NULL (never a clean run) or older than the 30h daily cadence FAILs. Central-pinned:
+    -- the stamp is Central wall-clock, so a UTC worksheet must not skew its age by 5-6h.
+    SELECT 'Operator backups fresh (OPERATOR_BACKUP_DAILY <= 30h; absent ok pre-V158)',
+           (SELECT CASE WHEN COUNT(*) = 0 THEN 'OK (no backup stamp yet)'
+                        WHEN DATEDIFF('minute', MAX(LAST_LOAD_TS), CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ) / 60.0 <= 30
+                        THEN 'OK'
+                        ELSE 'FAIL: newest clean operator backup older than 30h (or never) — check TASK_BACKUP_OPERATOR + OPERATOR_BACKUP_LOG' END
+              FROM DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE
+             WHERE SOURCE_NAME = 'OPERATOR_BACKUP_DAILY')
     UNION ALL
     SELECT 'Key procs present (platform + security loaders)',
            IFF((SELECT COUNT(DISTINCT PROCEDURE_NAME)

@@ -171,6 +171,10 @@ snowflake/migrations/V152__pipeline_freshness_coverage.sql
 snowflake/migrations/V153__ledger_autobook_full_window_settle.sql
 snowflake/migrations/V154__incident_attach_automitigate.sql
 snowflake/migrations/V155__operator_stats_sis_app_tag.sql
+snowflake/migrations/V156__etl_cycle_push_alerts.sql
+snowflake/migrations/V157__alert_scan_self_watch_idle_push.sql
+snowflake/migrations/V158__operator_backup_generations.sql
+snowflake/migrations/V159__loader_compile_diet.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -242,7 +246,8 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > `COMPANY_FOR_DATABASE` in two rules (#22), a 999 serverless-creep onset sentinel (#20), a
 > post-scan escalation-supersede sweep (`RESOLUTION_KIND='SUPERSEDED'`, excluded from the
 > precision score; #40), and a non-OK object-cost return on rollback (#10). Optional clone
-> check: `CALL SP_ALERT_SCAN();` runs clean; after a HIGH→CRITICAL crossing, the earlier
+> check: `CALL SP_ALERT_SCAN();` runs clean (since V157 a hand CALL skips the cadence-gated rules outside
+> their Central-hour slots and still reports 12/12 ok); after a HIGH→CRITICAL crossing, the earlier
 > lower-band `ALERT_EVENTS` row flips to `RESOLVED`/`SUPERSEDED` while the CRITICAL stays OPEN.
 
 > **V068 verify (standalone-mart freshness stamps — no smoke test):** re-derives
@@ -483,11 +488,13 @@ surgical by design — the schema is shared with the old app, so it never drops
 `DBA_MAINT_DB.OVERWATCH` itself, only named objects:
 
 - **Section A (live):** tasks, alerts, procs, functions, views, transient
-  facts/marts. Safe anytime — re-run the migrations in order (V001..V133) and the loaders repopulate.
+  facts/marts. Safe anytime — re-run the migrations in order (V001..V159) and the loaders repopulate.
 - **Section B (commented):** operator data — settings, company scope, alert
   config/events/audit, action queue, savings ledger, error log,
   schema_version. Uncomment only for a factory reset, and run the provided
   `CLONE` backups first. `UNDROP TABLE ...` also works within Time Travel.
+  The daily backup generations (`DBA_MAINT_DB.OVERWATCH_BAK`, V158) and
+  `OPERATOR_BACKUP_LOG` are never dropped by the teardown.
 - **Section C (commented):** warehouse, Streamlit app
   object, roles — shared infrastructure, dropped only deliberately.
 
@@ -499,15 +506,37 @@ Restore = migrations in order -> roles.sql -> validate.sql (all rows OK).
 
 ## 6. Disaster recovery (summary — full detail in RUNBOOK.md)
 
-- **Weekly backups:** `TASK_BACKUP_OPERATOR` (Sun 05:40) clones every
-  operator-editable table to `<NAME>_BAK_LAST` (zero-copy). Restore one table:
-  `CREATE OR REPLACE TABLE <NAME> CLONE <NAME>_BAK_LAST;`
-- **Fine-grained undo:** Time Travel — `SELECT * FROM <t> AT(OFFSET => -3600)`
+- **Daily backups (V158):** `TASK_BACKUP_OPERATOR` (daily 05:10) clones the 25
+  operator tables to dated TRANSIENT generations in the separate schema
+  `DBA_MAINT_DB.OVERWATCH_BAK` (`<NAME>_OWBAK_D<yyyymmdd>`; 14 daily + 8
+  Sunday-weekly kept, row counts in `OPERATOR_BACKUP_LOG`) and refreshes the
+  Sunday `<NAME>_BAK_LAST` pointer. Restore one table as the table-owner role
+  (INSERT OVERWRITE deletes; the audit tables revoke DELETE from both admin roles):
+  `INSERT OVERWRITE INTO <NAME> SELECT * FROM DBA_MAINT_DB.OVERWATCH_BAK.<NAME>_OWBAK_D<yyyymmdd>;`
+  Never CLONE-restore: the backups are TRANSIENT (a clone into a permanent table
+  is refused) and a re-materialized table re-applies the schema FUTURE grants.
+- **Fine-grained undo:** Time Travel —
+  `INSERT OVERWRITE INTO <t> SELECT * FROM <t> AT(OFFSET => -3600);`
   or `UNDROP TABLE <t>` within the retention window.
-- **Schema dropped:** `UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH;` first. If gone,
-  re-run all migrations in order (V001..V133) + roles.sql + validate.sql; facts refill from
-  the loader tasks (history limited to ACCOUNT_USAGE retention); operator
-  tables restore from `*_BAK_LAST` clones if they survived, else re-seed.
+- **Schema dropped:** `UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH;` first. If it is gone,
+  restore the operator data BEFORE V158 is replayed:
+  1. Re-run the migrations in order, **V001..V157 only**.
+  2. Restore the 25 operator tables, **SETTINGS first**, with INSERT OVERWRITE as
+     the table-owner role. The source is the `OVERWATCH_BAK` generations, a separate
+     schema that survives a lost OVERWATCH. Use the newest generation dated before
+     the loss. `OPERATOR_BACKUP_LOG` was in OVERWATCH and is gone, so choose by name
+     and ROW_COUNT:
+     `SELECT TABLE_NAME, ROW_COUNT, CREATED FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'OVERWATCH_BAK' ORDER BY 1;`
+     A table with no generation is re-seeded. `*_BAK_LAST` was in OVERWATCH too.
+  3. Apply V158 and any later migrations. Its tail backs up the restored data and
+     prunes with the restored BACKUP_KEEP_* values.
+  4. Run roles.sql + validate.sql. Facts refill from the loader tasks (history
+     limited to ACCOUNT_USAGE retention).
+
+  If V158 already ran on the re-seeded tables, run
+  `ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR SUSPEND;` first. Restore
+  SETTINGS first, never restore from the generation dated the replay day (or later),
+  and resume the task once the restore is verified (RUNBOOK §16 step 3).
 - **App broken after deploy:** `snow streamlit deploy --replace` with the
   previous git tag; migrations are additive so no schema rollback is needed.
 - **"Failed to retrieve packages... Have you enabled External Access

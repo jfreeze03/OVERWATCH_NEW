@@ -7,6 +7,7 @@ savings-ledger insert (always ESTIMATED until the verifier proves it).
 
 from __future__ import annotations
 
+import math
 import re
 
 from .formulas import safe_float
@@ -253,3 +254,35 @@ def autobook_books_change(lever: str, old_value: object) -> bool:
     if lv == "RESIZE":
         return str(old_value or "").strip().upper().replace("-", "") in _AUTOBOOK_SIZE_RANK
     return False
+
+
+# The alert drawer's closed loop books a $0 ESTIMATED SAVINGS_LEDGER row; its NOTES must not promise an
+# autobook ADOPT (V153) that SP_LEDGER_AUTOBOOK never makes. The page prefixes 'From alert event <id8>'
+# (mart_sql.ledger_for_event matches NOTES on that substring).
+_NOTE_ADOPTED = "; the daily change scan adopts and settles it on its 14-day measured window."
+_NOTE_PROOF_RUN = "; verify with a proof run on the Savings ledger."
+_NOTE_NEVER_SUSPEND = ("; enabling a timer on a never-suspend warehouse is not auto-booked — verify it on "
+                       "the Savings ledger.")
+_NOTE_UNVERIFIED = ("; the daily change scan adopts it only when it sees a saving-direction change — "
+                    "otherwise verify it on the Savings ledger.")
+
+
+def closed_loop_note_suffix(lever: str, current_value: object = None) -> str:
+    """The lever-aware tail of the closed-loop ledger row's NOTES.
+
+    STATEMENT_TIMEOUT is invisible to the change scan (a proof run verifies it). AUTO_SUSPEND is adopted
+    only for a decrease from a POSITIVE timer (``autobook_books_change``): a COST_IDLE_OPPORTUNITY event on
+    a never-suspend (<=0) warehouse tightens to 60s, and 60 < 0 is never booked, so that row says so; an
+    unread timer promises nothing. The cluster cap stays adoptable (a cap to 1 from a larger max)."""
+    lv = str(lever or "").strip().upper()
+    if lv == "STATEMENT_TIMEOUT":
+        return _NOTE_PROOF_RUN
+    if lv == "AUTO_SUSPEND":
+        try:
+            cur = float(current_value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return _NOTE_UNVERIFIED
+        if math.isnan(cur):  # an unread SHOW WAREHOUSES value
+            return _NOTE_UNVERIFIED
+        return _NOTE_ADOPTED if autobook_books_change(lv, cur) else _NOTE_NEVER_SUSPEND
+    return _NOTE_ADOPTED

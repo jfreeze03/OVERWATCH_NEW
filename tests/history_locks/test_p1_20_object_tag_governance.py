@@ -47,6 +47,17 @@ def test_untagged_objects_builder_contract():
     assert "LIMIT 1000" in security_sql.untagged_objects("ALL", "COST_OWNER", limit=99999)
 
 
+def test_tag_builders_exclude_the_operator_backup_schema():
+    # V158 (Next-Fifty #32): the daily operator-backup generations (~550 zero-copy clones at steady
+    # state) live in DBA_MAINT_DB.OVERWATCH_BAK and must not dilute the coverage denominator or flood
+    # the untagged worklist. Only that one schema is carved out (OVERWATCH itself stays counted).
+    pred = "NOT (t.TABLE_CATALOG = 'DBA_MAINT_DB' AND t.TABLE_SCHEMA = 'OVERWATCH_BAK')"
+    for sql in (security_sql.object_tag_coverage("ALL"), security_sql.object_tag_coverage("ALFA"),
+                security_sql.untagged_objects("ALL"), security_sql.untagged_objects("Trexis", "SENSITIVITY")):
+        assert sql.count(pred) == 1
+        assert "t.TABLE_TYPE = 'BASE TABLE' AND " + pred in sql
+
+
 def test_object_tag_coverage_dedups_case_variant_keys():
     # A duplicate / case-variant tag key must NOT fan out the keys CTE (which would
     # double every TOTAL/TAGGED). Dedup collapses them to one literal each.
