@@ -110,6 +110,27 @@ CREDITS_ADJUSTMENT_CLOUD_SERVICES = −MIN(daily_CS_usage, 0.10 × daily_compute
 - **Estimated/Attributed CS Usage** (per driver/app — attributed, self-reported)
 - **Account-Level Billing Impact** (account+day — the only authoritative billable figure, shown as a reconciling control)
 
+### Addendum (v4.595.0, 2026-09-26): marginal billed inference per family
+
+The owner's DIAG (2026-09-26, 7 days) showed the account above the free allowance on every day, and SYSTEM$WAIT
+sleep polling at 57.3 of 218.55 CS credits (26%): Control-M `select system$wait(10)` plus SYSTEM tasks
+`CALL SYSTEM$WAIT(30/60/1200)`. A sleep compiles in ~0.07 s, so every compile-ranked surface missed it.
+
+v4.595 prices one per-family figure without allocating the rebate. Per account-day, with
+`billed = MAX(0, CS − 0.10 × compute)`, stopping one family (CS falls by `f`, compute held fixed) lowers the bill
+by exactly `MIN(f, billed)`. That counterfactual has ONE answer, so it is not the non-unique rebate split rejected
+above:
+
+```
+BILLED_CS_CREDITS(family) = Σ_day LEAST(family_CS(day), GREATEST(0, account_CS(day) + account_adjustment(day)))
+```
+
+It equals the family's credits 1:1 on every day above the allowance and is 0 on a day under it. Per-family values
+add across families only while each day stays above the allowance (disclosed on the panel). Days not yet in
+FACT_METERING_DAILY stay unpriced (NaN, never $0). Statement days are Central, metering days UTC. Gross CS is still
+never dollarized. Surfaces: `mart_sql.cloud_svc_billed_families` → `cs_driver.billed_family_view` → Cost > Spend,
+*Which statement families bill the most cloud services*.
+
 ---
 
 ## 7. Metadata Chatter Detection Design

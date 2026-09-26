@@ -38,10 +38,14 @@ PLAYBOOKS: dict[str, str] = {
         "baseline — a per-warehouse signal, so a warehouse that is chronically compile-heavy stays "
         "quiet and only a real change surfaces.\n\n"
         "1. Operations > Queries → *Cloud-services chatter by application*: which client/driver moved.\n"
-        "2. Cost > Spend → *Cloud-services health*: the compile-heavy families under that warehouse.\n"
-        "3. Fix = quiet the chatty tool / cache metadata / cut reconnects (credits shown are gross "
-        "usage, before the account-level ~10% rebate); recurring on the same warehouse = raise the "
-        "threshold on the rule."
+        "2. Cost > Spend → *Which statement families bill the most cloud services*: families ranked by "
+        "the credits they bill, including sleep polling (a `SYSTEM$WAIT` loop), which the compile-ranked "
+        "views never show.\n"
+        "3. Cost > Spend → *Cloud-services health*: the compile-heavy families under that warehouse.\n"
+        "4. Fix = quiet the chatty tool / cache metadata / cut reconnects / poll from the scheduler "
+        "(credits shown are gross usage, before the account-level ~10% rebate); recurring on the same "
+        "warehouse = raise the threshold on the rule. A chronic poller never trips this rule (it is its "
+        "own baseline); the billed ranking shows it."
     ),
     "COST_IDLE_OPPORTUNITY": (
         "**Means:** over the last 14 complete days this warehouse burned a large share of its credits "

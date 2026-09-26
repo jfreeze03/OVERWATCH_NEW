@@ -41,6 +41,7 @@ _PATHOLOGY = {
     "queued": "Concurrency starvation",
     "cold_start": "Cold-start wait",
     "zero_result": "Expensive empty result",
+    "sleep_polling": "Sleep polling",
 }
 # Capacity findings (the warehouse, not the SQL): excluded from SQL badness and never named as the
 # SQL driver. cold_start = the resume/provisioning share of the wait dominates (Next-Fifty #17).

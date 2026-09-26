@@ -213,13 +213,18 @@ def render() -> None:
             "key": "napp", "tier": "historical",
             "sql": cost_sql.compute_pool_usage(f["days"], bounds=f["bounds"]),
             "source": "SNOWPARK_CONTAINER_SERVICES_HISTORY (native apps rollup)"})
+        # v4.595: the billed cloud-services family ranking (one mart read) rides the same round trip.
+        _spend_specs.append({
+            "key": "csfam", "tier": "hourly",
+            "sql": mart_sql.cloud_svc_billed_families(f["days"], f["company"], bounds=f["bounds"]),
+            "source": "MART_CLOUD_SVC_DAILY + FACT_METERING_DAILY (billed CS by statement family)"})
         _pf = run_batch_mixed(_spend_specs, page=_PAGE) or {}
         section_header("Spend", "", "spend", anchor="cost-spend")
         _spend_tab(f["company"], f["days"], rate, ai_rate, f["database"],
                    bounds=f["bounds"],
                    metering_res=_pf.get("metering"), csr_res=_pf.get("csr"),
                    coco_res=_pf.get("coco"), allin_res=_pf.get("allin"),
-                   napp_res=_pf.get("napp"))
+                   napp_res=_pf.get("napp"), csfam_res=_pf.get("csfam"))
         st.divider()
         if st.toggle("Load company attribution (cost by company & user)",
                      key="cost_attribution_load",

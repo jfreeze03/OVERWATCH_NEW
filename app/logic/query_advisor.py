@@ -6,6 +6,10 @@ fixes plus a composite 0-100 "optimize me first" badness score — deterministic
 no Cortex. An OPTIONAL per-query Cortex rewrite is wired separately in the UI and
 never runs unless the operator clicks it.
 
+v4.595: ONE finding is text-keyed rather than shape-keyed — ``sleep_polling`` reads SAMPLE_TEXT
+(fingerprint grain) or QUERY_TEXT (per-query drill) for a SYSTEM$WAIT call, because a sleep looks
+like healthy warehouse work by every numeric column (tiny compile, execution = the wait).
+
 Thresholds mirror ops_sql.query_optimization_triage / poor_pruning_queries EXACTLY
 (remote spill > 0; PARTITIONS_TOTAL >= 100 AND scan-ratio > 0.8; > 50 GB scanned)
 so the drill's findings never contradict the triage table that links here. The
@@ -18,7 +22,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from .formulas import safe_div, safe_float
+from .formulas import humanize_duration, safe_div, safe_float
+from .system_wait import is_sleep_statement, wait_seconds
 
 # --- thresholds (kept identical to ops_sql.query_optimization_triage) -------
 REMOTE_SPILL_MIN_GB = 0.0        # any remote spill is memory exhaustion
@@ -49,7 +54,7 @@ FINGERPRINT_SPLIT_DOMINANT_SHARE = 0.6
 # base points + a size-scaled bonus, each capped so one axis can't dominate.
 _CAP = {"remote_spill": 55, "poor_pruning": 30, "cold_scan": 25,
         "compile_bound": 20, "metadata_chatter": 18, "queued": 15, "cold_start": 15,
-        "local_spill": 12, "zero_result": 12}
+        "local_spill": 12, "zero_result": 12, "sleep_polling": 18}
 
 
 @dataclass(frozen=True)
@@ -196,6 +201,24 @@ def advise(row: Mapping[str, object], *,
             "huge IN-list or a very wide/heavily-joined statement. Parameterize the "
             "IN-list (bind or a temp table) or simplify the statement.",
             pts))
+
+    # 5b) sleep polling (v4.595) — a SYSTEM$WAIT call. Keyed on the TEXT only: by shape a sleep is
+    #     healthy (tiny compile, execution = the wait), so no numeric rule can see it, and a
+    #     shape-identical ordinary statement never fires this. Same weight as metadata chatter: a
+    #     cadence problem, not SQL. The per-QUERY drill carries QUERY_TEXT; the fingerprint SAMPLE_TEXT.
+    _txt = next((v for v in (row.get("SAMPLE_TEXT"), row.get("QUERY_TEXT")) if isinstance(v, str) and v), "")
+    if is_sleep_statement(_txt, row.get("QUERY_TYPE") or ""):
+        _w = wait_seconds(_txt)
+        _per = (f"for {humanize_duration(_w, 's')} per run" if _w is not None
+                else "for the requested wait on every run")
+        findings.append(Finding(
+            "sleep_polling", "warn", "Sleep polling",
+            f"This statement is a sleep: SYSTEM$WAIT holds it open {_per}, and cloud-services credits "
+            "accrue while it waits, so a polling loop pays for every wait. Poll from the scheduler instead "
+            "(let Control-M or the orchestrator own the interval), chain dependent tasks with AFTER or "
+            "trigger them when a stream has data, or run one short readiness check from outside Snowflake. "
+            "A resize won't help. Cost > Spend > 'Which statement families bill the most cloud services' "
+            "shows what it bills.", _CAP["sleep_polling"]))
 
     # 6) queued — on the fingerprint grain, only when queueing is TYPICAL (not one storm run
     #    inflating AVG(queued) past the ratio gate). queued_run_pct < 0 = per-query grain.
