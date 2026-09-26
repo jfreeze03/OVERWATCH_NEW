@@ -2214,9 +2214,11 @@ def _tonight_glance_panel() -> None:
         f"{etl_control_sql.NIGHT_REGULAR_MIN_NIGHTS} of the last {etl_control_sql.NIGHT_LOOKBACK_NIGHTS} "
         "nights and on this night last week, but has no run tonight past its usual start + 1h. PENDING: "
         "not due yet. The Brief and Control Room verdicts read this same roll-up. Once V156 and V157 are "
-        "applied, the hourly alert scan also pushes these signals as PIPE_ETL_TASK_FAILED / "
+        "applied, the alert scan also pushes these signals as PIPE_ETL_TASK_FAILED / "
         "PIPE_ETL_CYCLE_NOT_STARTED / PIPE_ETL_CYCLE_LATE events (HIGH and CRITICAL reach email when "
-        "native delivery is on).")
+        "native delivery is on) in the overnight run window: hourly from ETL_SLA_TARGET_HHMM − 10h through "
+        "+ 3h (Central), plus one 15:00 pass, so a daytime re-run failure can take up to about 6h to alert. "
+        "This panel stays live at any hour.")
     if not guard(res, "No nightly cycle found in CONTROL_STATUS — the cycle starter workflow has no runs. "
                  "Check ETL_CYCLE_START_WORKFLOW on Admin ▸ SETTINGS.",
                  setup_hint="The app role needs SELECT on the CONTROL_STATUS table "

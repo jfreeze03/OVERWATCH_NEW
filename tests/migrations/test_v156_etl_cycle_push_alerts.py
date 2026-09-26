@@ -15,6 +15,12 @@ rule INSERTs are each pinned WHOLE against a test-side golden -- every CTE compa
 then the outer select -- so no clause a model encodes can be edited, dropped or appended to without a failing
 test, and a model and the SQL cannot drift apart silently.
 
+Wave-2b rework D7 (compile diet, section 23): the proc works only inside a RUN WINDOW -- the Central hours from
+HOUR(ETL_SLA_TARGET_HHMM - 10h) through HOUR(target + 3h), wrapping midnight, plus a 15:00 pass -- and an
+out-of-window call returns after the rule count and the SETTINGS read, BEFORE the cache DELETE; the TASK_FAILED
+retry auto-clear UPDATE runs only when an OPEN event exists. The gate's SQL expression is translated from its
+sqlglot tree and checked against a datetime model of the owner rule for every target minute and hour.
+
 The validate / docs / admin pins below are asserted at the WAVE TIP (V158) and fail until the wave-2b
 integration commit bumps those shared files.
 """
@@ -721,8 +727,14 @@ def test_v156_part_b_ddl_fragments_are_in_the_migration():
                  "OR g.IS_COMPLETE, g.SEVERITY", "NOT COALESCE(g.PROJECTED_FINISH > g.DL_H, FALSE)",
                  "MAX(COALESCE(t.FIRST_OK_END, t.TERMINAL_END))", "COUNT_IF(t.TERMINAL_END IS NULL) = 0",
                  "USING (start_wf)", "MAX(TASK_START_DTTM) AS CYC_LAST_START",
-                 "TASK_START_DTTM >= CYC_LAST_START"):
+                 "TASK_START_DTTM >= CYC_LAST_START",
+                 # wave-2b rework D7: the run-window gate, the cache DELETE it precedes, the auto-clear probe
+                 "FLOOR(MOD(:target_off - 600 + 1440, 1440) / 60) + 24, 24) > 13", "HOUR(:now_ct) <> 15",
+                 "DELETE FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS",
+                 "IF (EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS"):
         assert "'" not in frag and _BODY.count(frag) == 1, frag
+    # PART B's GATE_BEFORE_DELETE compares these two positions in GET_DDL
+    assert _BODY.index("HOUR(:now_ct) <> 15") < _BODY.index("DELETE FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS")
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -1646,3 +1658,311 @@ def test_v156_model_not_started_is_the_overdue_test():
     normal = _collapse(_history() + _night(_TONIGHT, terminal=False))
     assert _not_started(normal, _at(0, 10)) is None
     assert _not_started(normal, _at(9, 10)) is None
+
+
+# ---------------------------------------------------------------------------------------------------
+# 23. wave-2b rework D7 (compile diet): the RUN WINDOW gate and the auto-clear EXISTS skip. The gate is the SQL
+#     expression itself, turned by a small fail-closed translator of its sqlglot tree into a Python function
+#     (Snowflake MOD keeps the dividend's sign, '/' is exact) and compared hour by hour with an independent
+#     datetime model of the owner decision: the Central hours from HOUR(target - 10h) through HOUR(target + 3h),
+#     wrapping midnight, plus the 15:00 pass.
+_GATE = ("IF (MOD(HOUR(:now_ct) - FLOOR(MOD(:target_off - 600 + 1440, 1440) / 60) + 24, 24) > 13 "
+         "AND HOUR(:now_ct) <> 15) THEN "
+         "RETURN 'etl cycle scan skipped (outside the run window: Central hour ' || HOUR(:now_ct) "
+         "|| ' is not in HOUR(ETL_SLA_TARGET_HHMM - 10h) .. HOUR(target + 3h) or 15; cache kept)'; END IF;")
+_GATE_COND_RE = re.compile(
+    r"\n    IF \((MOD\(HOUR\(:now_ct\).*?)\) THEN\n\s+RETURN 'etl cycle scan skipped \(outside the run window", re.S)
+_DELETE = "DELETE FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS;"
+_AUTO_CLEAR_GATE = ("IF (EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS "
+                    "WHERE RULE_ID = 'PIPE_ETL_TASK_FAILED' AND STATUS = 'OPEN')) THEN")
+_SQL_HEADS = ("SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "TRUNCATE", "EXECUTE", "CALL", "CREATE", "ALTER", "DROP")
+
+
+def _sf_fn(node):
+    """Translate the gate's SQL tree into a Python function of env ({'now_ct': datetime, 'target_off': int}) with
+    Snowflake semantics: exact '/', FLOOR, MOD taking the dividend's sign. Any node it does not model fails."""
+    import math
+    from fractions import Fraction
+
+    from sqlglot import exp
+    if isinstance(node, exp.Paren):
+        return _sf_fn(node.this)
+    if isinstance(node, exp.Literal):
+        assert not node.is_string, node.sql()
+        const = int(node.this)
+        return lambda env: const
+    if isinstance(node, exp.Placeholder):
+        name = node.name
+        return lambda env: env[name]
+    if isinstance(node, exp.Hour):
+        inner = _sf_fn(node.this)
+        return lambda env: inner(env).hour
+    if isinstance(node, exp.Floor):
+        assert node.args.get("decimals") is None, node.sql()
+        inner = _sf_fn(node.this)
+        return lambda env: math.floor(inner(env))
+    if isinstance(node, exp.Not):
+        inner = _sf_fn(node.this)
+        return lambda env: not inner(env)
+    ops = {exp.Add: lambda a, b: a + b, exp.Sub: lambda a, b: a - b, exp.Div: lambda a, b: Fraction(a) / b,
+           exp.Mod: lambda a, b: a - b * math.trunc(Fraction(a) / b),
+           exp.GT: lambda a, b: a > b, exp.GTE: lambda a, b: a >= b, exp.LT: lambda a, b: a < b,
+           exp.LTE: lambda a, b: a <= b, exp.EQ: lambda a, b: a == b, exp.NEQ: lambda a, b: a != b,
+           exp.And: lambda a, b: bool(a) and bool(b), exp.Or: lambda a, b: bool(a) or bool(b)}
+    op = ops.get(type(node))
+    if op is None:
+        raise AssertionError(f"unmodelled node in the gate: {type(node).__name__}: {node.sql()}")
+    left, right = _sf_fn(node.this), _sf_fn(node.expression)
+    return lambda env: op(left(env), right(env))
+
+
+_GATE_FN: list = []
+
+
+def _gate_skips(now: datetime, target_off: int) -> bool:
+    """TRUE = the proc RETURNs the out-of-window skip at this Central clock: the gate's SQL condition, parsed from
+    the proc body and translated once."""
+    if not _GATE_FN:
+        sqlglot = pytest.importorskip("sqlglot")
+        (cond,) = _GATE_COND_RE.findall(_BODY)
+        _GATE_FN.append(_sf_fn(sqlglot.parse_one("SELECT " + cond, read="snowflake").expressions[0]))
+    return bool(_GATE_FN[0]({"now_ct": now, "target_off": target_off}))
+
+
+def _run_hours(target_off: int, minute: int = 8) -> set:
+    """The Central hours whose scan (the hourly graph's :07 root, so about :08) runs the proc body."""
+    day = date(2026, 9, 23)
+    return {h for h in range(24) if not _gate_skips(datetime.combine(day, time(h, minute)), target_off)}
+
+
+def _window_core(target_off: int) -> set:
+    """D7 as the owner wrote it, built independently with datetimes: every Central hour from HOUR(target - 10h)
+    through HOUR(target + 3h), both inclusive, across midnight (the 15:00 pass is added by _window_spec)."""
+    mid = datetime(2026, 9, 23)
+    t, last = (mid + timedelta(minutes=target_off - 600)).replace(minute=0), mid + timedelta(minutes=target_off + 180)
+    hours = set()
+    while t <= last:
+        hours.add(t.hour)
+        t += timedelta(hours=1)
+    return hours
+
+
+def _window_spec(target_off: int) -> set:
+    return _window_core(target_off) | {15}
+
+
+def test_v156_run_window_gate_is_pinned_between_the_settings_read_and_the_delete():
+    """D7 placement: after the rule count, the SETTINGS read, the target parse (so a blank / malformed target
+    already fell back to 07:00) and the Central clock; BEFORE the cache DELETE."""
+    _once(_GATE)
+    gate = _BODY.index("    IF (MOD(HOUR(:now_ct)")
+    for before in ("SELECT COUNT(*) INTO :n_enabled", "FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;", "target_off := IFF(",
+                   "now_ct := CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ;"):
+        assert _BODY.count(before) == 1 and _BODY.index(before) < gate, before
+    assert _BODY.count(_DELETE) == 1 and gate < _BODY.index(_DELETE)
+    # one assignment each: the gate reads the parsed target and the proc's one Central clock
+    assert _BODY.count("target_off :=") == 1 and _BODY.count("now_ct :=") == 1
+    # the rules-disabled and FQN skips come AFTER the DELETE (every in-window run still clears the cache first)
+    assert (_BODY.index(_DELETE) < _BODY.index("RETURN 'etl cycle scan skipped (rules disabled)';")
+            < _BODY.index("RETURN 'etl cycle scan skipped (unconfigured or invalid ETL_CONTROL_STATUS_FQN)';"))
+    assert "HOUR(CURRENT_TIMESTAMP())" not in _BODY and _NBODY.count("HOUR(:now_ct)") == 3
+
+
+def test_v156_out_of_window_run_reads_two_statements_and_leaves_the_cache_untouched():
+    """Everything an out-of-window call executes is the text from BEGIN to the gate's END IF (no branch in it
+    can reach the cache): exactly two SQL reads (the rule count and SETTINGS), no DML, no dynamic SQL, and no
+    reference to ETL_CYCLE_TASKS -- so the playbook triage queries keep reading the last in-window nights."""
+    from tests.test_migrations_parse import _split_statements
+    begin = _BODY.index("\nBEGIN\n") + len("\nBEGIN\n")
+    gate_end = _BODY.index("END IF;", _BODY.index("    IF (MOD(HOUR(:now_ct)")) + len("END IF;")
+    path = _strip_comments(_BODY[begin:gate_end])
+    stmts = [re.sub(r"\s+", " ", s).strip() for s in _split_statements(path) if s.strip()]
+    sql = [s for s in stmts if s.split(" ", 1)[0].upper() in _SQL_HEADS]
+    assert [s.split(" FROM ", 1)[1].split(" ", 1)[0] for s in sql] == [
+        "DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG", "DBA_MAINT_DB.OVERWATCH.SETTINGS"]
+    assert all(s.startswith("SELECT ") and " INTO :" in s for s in sql)
+    assert "ETL_CYCLE_TASKS" not in path and "EXECUTE IMMEDIATE" not in path
+    for dml in ("INSERT ", "UPDATE ", "DELETE ", "MERGE ", "TRUNCATE ", "CALL "):
+        assert dml not in path.upper(), dml
+    # the skip RETURN is the gate's own branch, and the gate closes the path
+    assert stmts[-2].startswith("IF (MOD(HOUR(:now_ct)")
+    assert "RETURN 'etl cycle scan skipped (outside the run window" in stmts[-2] and stmts[-1] == "END IF"
+    # the in-window path starts by clearing the cache
+    assert re.match(r"\s*(?:--[^\n]*\n\s*)*" + re.escape(_DELETE), _BODY[gate_end:])
+
+
+@pytest.mark.parametrize(("target", "want"), [
+    ("07:00", {21, 22, 23, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15}),        # the default: cross-midnight 21..10
+    ("06:30", {20, 21, 22, 23, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 15}),        # a minute-bearing target floors both ends
+    ("23:00", {13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1, 2}),     # cross-midnight at the END; 15 inside
+    ("00:00", {14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1, 2, 3}),
+    ("14:00", {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}),         # a daytime cycle: no wrap, 15 inside
+    ("", {21, 22, 23, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15}),             # blank row -> the 07:00 fallback
+    ("7am", {21, 22, 23, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15}),          # malformed -> 07:00
+    ("24:00", {21, 22, 23, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15}),        # out of range -> 07:00
+])
+def test_v156_run_window_every_central_hour(target, want):
+    """Every Central hour of a day, through the proc's own target parse (_sql_hhmm, pinned to the SQL text above)
+    and the gate's SQL expression: exactly the intended hours run."""
+    off = _sql_hhmm(target, 420)
+    got = _run_hours(off)
+    assert got == want == _window_spec(off), (target, sorted(got))
+    assert len(got) == 14 + (15 not in _window_core(off))
+
+
+def test_v156_run_window_sql_matches_the_owner_rule_for_every_target_minute():
+    """Every target minute of the day x 24 hours: the SQL gate == the datetime model of D7; the scan minute never
+    matters (HOUR only); the core window is always 14 hours (13h span, both ends inclusive)."""
+    for off in range(1440):
+        spec = _window_spec(off)
+        assert len(_window_core(off)) == 14, off
+        assert _run_hours(off) == spec, off
+        if off % 5 == 0:
+            for minute in (0, 59):
+                assert _run_hours(off, minute) == spec, (off, minute)
+
+
+def test_v156_run_window_default_night_bands_keep_their_hourly_timing():
+    """At the 07:00 / 08:00 defaults every overnight crossing is judged in the scan right after it, exactly as the
+    hourly design did: NOT_STARTED (22:00 kickoff + 120 min grace -> the 00:08 scan), the lead-window WARN (06:08),
+    CRIT (07:08) and EXH (08:08), with two spare in-window scans after the hard deadline."""
+    runs = _run_hours(_sql_hhmm("07:00", 420))
+    for hour in (22, 0, 6, 7, 8, 9, 10):
+        assert hour in runs, hour
+    assert {11, 12, 13, 14, 16, 17, 18, 19, 20} & runs == set()
+
+
+def test_v156_model_window_replay_daytime_task_failed_latency_and_cache_kept():
+    """Hourly :08 scans through a day with the gate applied (the SQL expression). The cache is rebuilt only in
+    window, so between the 10:08 and 15:08 scans it keeps the 10:08 nights. A daytime re-run failure at 11:30
+    (keyed to the night) is raised at the 15:08 pass instead of 12:08; one at 15:30 (keyed to the NEXT night,
+    past noon) waits for the 21:08 window start (the ~6h trade); a daytime failure a same-night retry fixes
+    before the next in-window scan is never raised (hourly raised it at 11:08 and auto-cleared it at 12:08)."""
+    target_off = _sql_hhmm("07:00", 420)
+    base = _history() + _night(_TONIGHT)                      # the night finished 05:00, on time
+    fail_1130 = [("WF_X", "x_load", "FAILED", _at(11, 30), _at(11, 40))]
+    fail_1530 = [("WF_X", "x_load", "FAILED", _at(15, 30), _at(15, 40))]
+    fail_1020 = [("WF_X", "x_load", "FAILED", _at(10, 20), _at(10, 25))]
+    retry_ok = [("WF_X", "x_load", "SUCCEEDED", _at(11, 30), _at(11, 40))]      # before noon: the same night
+    scans = [_at(h, 8) for h in range(9, 24)] + [datetime.combine(_TONIGHT + timedelta(days=2), time(h, 8))
+                                                  for h in range(3)]
+
+    def replay(rows, *, windowed: bool):
+        events: list = []
+        raised: dict = {}
+        for now in scans:
+            if windowed and _gate_skips(now, target_off):
+                continue                                       # RETURN before the DELETE: cache kept as is
+            for key in _task_failed_scan(_collapse(_as_of(rows, now)), events):
+                raised[key] = now
+        return raised, events
+    for rows, at_hourly, at_window in ((base + fail_1130, _at(12, 8), _at(15, 8)),
+                                       (base + fail_1530, _at(16, 8), _at(21, 8))):
+        hourly, _ = replay(rows, windowed=False)
+        windowed, _ = replay(rows, windowed=True)
+        (key,) = hourly
+        assert hourly == {key: at_hourly} and windowed == {key: at_window}, (hourly, windowed)
+        assert windowed[key] - hourly[key] <= timedelta(hours=6)
+    # fixed by a same-night retry before the 15:08 pass: hourly raised (and auto-cleared) it; the window never does
+    hourly, events = replay(base + fail_1020 + retry_ok, windowed=False)
+    assert list(hourly.values()) == [_at(11, 8)] and events[0]["kind"] == "AUTO_CLEARED"
+    assert replay(base + fail_1020 + retry_ok, windowed=True) == ({}, [])
+    # between in-window scans the cache is the 10:08 snapshot: the 11:30 failure is absent from it until 15:08
+    snaps = {now: _collapse(_as_of(base + fail_1130, now))
+             for now in (_at(10, 8), _at(11, 8), _at(14, 8), _at(15, 8)) if not _gate_skips(now, target_off)}
+    assert sorted(snaps) == [_at(10, 8), _at(15, 8)]
+    assert not any(t["WORKFLOW_NAME"] == "WF_X" for t in snaps[_at(10, 8)])
+    assert any(t["WORKFLOW_NAME"] == "WF_X" for t in snaps[_at(15, 8)])
+
+
+def test_v156_task_failed_auto_clear_runs_only_with_an_open_event():
+    """D7: the retry auto-clear UPDATE sits inside IF (EXISTS (<an OPEN PIPE_ETL_TASK_FAILED event>)). The probe's
+    predicates are EXACTLY the UPDATE's first two conjuncts (parsed), so a skipped run is a run whose UPDATE would
+    have matched no row: the gate changes cost, never outcome."""
+    sqlglot = pytest.importorskip("sqlglot")
+    from sqlglot import exp
+    _once(_AUTO_CLEAR_GATE + " " + _A_AUTO_CLEAR.strip() + " END IF;")
+    assert _BODY.count("IF (EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS") == 1
+    probe = sqlglot.parse_one(_NBODY.split("IF (EXISTS (", 1)[1].split(")) THEN", 1)[0], read="snowflake")
+    upd = sqlglot.parse_one(_auto_clear_statement(), read="snowflake")
+    assert probe.find(exp.From).this.sql() == upd.this.sql() == "DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS"
+
+    def conjuncts(where):
+        return [c.sql() for c in where.this.flatten()] if isinstance(where.this, exp.And) else [where.this.sql()]
+    probe_terms, upd_terms = conjuncts(probe.args["where"]), conjuncts(upd.args["where"])
+    assert probe_terms == ["RULE_ID = 'PIPE_ETL_TASK_FAILED'", "STATUS = 'OPEN'"]
+    assert upd_terms[:2] == probe_terms and len(upd_terms) == 3 and upd_terms[2].startswith("DEDUPE_KEY IN (")
+    # the probe runs inside [A]'s EXCEPTION block, after the raise (a raise this run makes it TRUE)
+    a_block = _BODY.split("-- [A] PIPE_ETL_TASK_FAILED", 1)[1].split("-- [B] PIPE_ETL_CYCLE_NOT_STARTED", 1)[0]
+    assert a_block.index("n_failed := SQLROWCOUNT;") < a_block.index("IF (EXISTS (") < a_block.index("EXCEPTION")
+
+
+def _task_failed_raise(tasks, events: list) -> list:
+    """The [A] raise half of _task_failed_scan (no auto-clear); returns the minted keys."""
+    starter = [t["CYCLE_DATE"] for t in tasks if t["WORKFLOW_NAME"] == _S]
+    anchor = max(starter) if starter else max(t["CYCLE_DATE"] for t in tasks)
+    minted = []
+    for wf, d in sorted({(t["WORKFLOW_NAME"], t["CYCLE_DATE"]) for t in tasks
+                         if t["CYCLE_DATE"] >= anchor and _status(t) in _FAILED}):
+        key = _key_a(wf, d)
+        if not any(e["key"] == key and e["kind"] != "AUTO_CLEARED" for e in events):
+            events.append({"key": key, "status": "OPEN", "kind": None})
+            minted.append(key)
+    return minted
+
+
+def test_v156_model_auto_clear_gate_changes_cost_not_outcome():
+    """Replay of a failed-then-retried terminal task: with the EXISTS gate the events end identical to the
+    ungated UPDATE at every scan, and the UPDATE is skipped on every scan where no event is OPEN."""
+    rows = [*_night(_TONIGHT, terminal=False),
+            (_T, "s_recon_1", "FAILED", _at(2, 0), _at(2, 5)),
+            (_T, "s_recon_1", "SUCCEEDED", _at(4, 20), _at(5, 0))]
+    plain: list = []
+    gated: list = []
+    ran = []
+    for now in (_at(1, 8), _at(2, 8), _at(3, 8), _at(4, 8), _at(5, 8), _at(6, 8)):
+        tasks = _collapse(_as_of(rows, now))
+        _task_failed_scan(tasks, plain)                         # raise, then the UPDATE every run
+        _task_failed_raise(tasks, gated)                        # raise, then ...
+        if any(e["status"] == "OPEN" for e in gated):           # ... IF (EXISTS (an OPEN event)) THEN UPDATE
+            ran.append(now)
+            cleared = _auto_cleared(tasks)
+            for e in gated:
+                if e["status"] == "OPEN" and e["key"] in cleared:
+                    e["status"], e["kind"] = "RESOLVED", "AUTO_CLEARED"
+        assert gated == plain, now
+    assert len(plain) == 1 and plain[0]["kind"] == "AUTO_CLEARED"
+    assert ran == [_at(2, 8), _at(3, 8), _at(4, 8), _at(5, 8)]        # 01:08 and 06:08 skip the UPDATE
+
+
+def test_v156_run_window_is_documented_everywhere():
+    """The latency trade is disclosed in the header, the DESCRIPTION, the RUNBOOK rows, the TASK_FAILED playbook
+    and the Tonight panel help; the DESCRIPTION stays within SCHEMA_VERSION's 4000 chars."""
+    hdr = _header_text()
+    for claim in ("RUN WINDOW (wave-2b rework, compile diet; no task or schedule change)",
+                  "HOUR(target - 10h) through HOUR(target + 3h) inclusive, wrapping midnight",
+                  "plus one daytime pass in the 15:xx scan", "15 of 24 calls",
+                  "returns BEFORE the cache DELETE, so ETL_CYCLE_TASKS keeps the last in-window scan's nights",
+                  "LATENCY TRADE (by choice)", "up to ~6h later than hourly",
+                  "a daytime failure a retry fixes before then is never raised",
+                  "The clear UPDATE runs only when an OPEN PIPE_ETL_TASK_FAILED event exists",
+                  "A hand CALL outside the RUN WINDOW only returns the skip string"):
+        assert claim in hdr, claim
+    m = re.search(r"SELECT 156 AS VERSION,\n       '((?:[^']|'')*)' AS DESCRIPTION", _MIG)
+    assert m
+    desc = m.group(1)
+    assert len(desc.replace("''", "'")) <= 4000 and "'" not in desc.replace("''", "")
+    for claim in ("HOUR(ETL_SLA_TARGET_HHMM - 10h) through HOUR(target + 3h)", "plus a 15:00 pass",
+                  "leaves ETL_CYCLE_TASKS untouched", "up to ~6h later",
+                  "the retry auto-clear UPDATE runs only when an OPEN PIPE_ETL_TASK_FAILED event exists"):
+        assert claim in desc, claim
+    assert "Called hourly once V157" not in desc
+    rows = [ln for ln in _read("RUNBOOK.md").splitlines() if ln.startswith("| PIPE_ETL_")]
+    assert len(rows) == 3 and all("run window" in ln and "hourly via" not in ln for ln in rows)
+    assert "up to ~6h later" in next(ln for ln in rows if ln.startswith("| PIPE_ETL_TASK_FAILED |"))
+    from app.logic.playbooks import PLAYBOOKS
+    tf = PLAYBOOKS["PIPE_ETL_TASK_FAILED"]
+    assert "plus one 15:00 pass" in tf and "up to about 6h after it happens" in tf
+    assert "the cache is as of the scan's last in-window run" in tf
+    assert "plus one 15:00 pass, so a daytime re-run failure can take up to about 6h to alert" in _read(
+        "app/ui/pages/operations.py")
