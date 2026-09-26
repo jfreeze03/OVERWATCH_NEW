@@ -19,7 +19,7 @@ steady-state weekday at 59 statements (135 on Sundays) and reproduces the untrim
 shape. Python mirrors (``_probe_emulated``, ``_loop_emulated``, ``_pruned_rows_batched``) prove the skip
 decisions and the batched rows; the mirrors are tied to the SQL by the exact-text locks.
 
-The wave-tip pins at the bottom (validate 'V001..V158 applied', the DEPLOYMENT/README list lines and the
+The wave-tip pins at the bottom (validate 'V001..V159 applied', the DEPLOYMENT/README list lines and the
 admin _EXPECTED_MIGRATIONS[158] entry) are written by the wave integrator; they fail until then.
 """
 
@@ -501,8 +501,9 @@ def test_v158_generation_naming_cadence_and_timezone():
                  "prune_re := '(' || ARRAY_TO_STRING(:tables, '|') || ')_OWBAK_[DW][0-9]{8}';"):
         assert new.count(frag) == 1, frag
     assert "CURRENT_DATE()" not in new, "the generation day is the Central day, never the session date"
-    # a missing source is a logged skip; the metadata probe fails open (V089 behavior): the EXCEPTION
-    # handler itself sets present := 1, not just the pre-probe default
+    # a missing source is a logged skip; the single pre-loop metadata probe fails open (V089 behavior):
+    # probe_ok is FALSE by default, set TRUE only after the SELECT returned, and left FALSE by the
+    # EXCEPTION handler, so every COALESCE(probe_ok AND ..., FALSE) decision means 'clone' on a probe error
     assert "'SKIPPED_MISSING'" in new
     _lock_probe_fails_open(new)
 
@@ -1174,7 +1175,7 @@ def test_v158_plain_sql_parses():
 # ---------------------------------------------------------------------------------------------
 def test_validate_and_docs_track_v158():
     val = _read("snowflake/validate.sql")
-    assert "V001..V158 applied" in val and "VERSION BETWEEN 1 AND 158) = 158" in val
+    assert "V001..V159 applied" in val and "VERSION BETWEEN 1 AND 159) = 159" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert f"snowflake/migrations/{_NAME}" in _read(rel), rel
 

@@ -1,4 +1,4 @@
--- 02_migrations_V001_V158.sql — GENERATED: the 158 migration files,
+-- 02_migrations_V001_V159.sql — GENERATED: the 159 migration files,
 -- byte-concatenated in order (locked by tests/test_rebuild_bundle.py).
 -- Snowsight 'Run All' executes top to bottom and HALTS at the first
 -- error — exactly the rule from docs/FULL_REBUILD.md. If it halts,
@@ -76088,14 +76088,16 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --                           12h) like the app, plus FIRST_OK_END = the earliest clean finish among the attempts
 --                           that STARTED at/after that night's LAST starter start (the night's last kickoff;
 --                           the starter name is a bound value).
---   * SP_SCAN_ETL_CYCLE() - allowlist-validates the FQN, rebuilds ETL_CYCLE_TASKS with one EXECUTE IMMEDIATE,
---                           then raises three rules itself, each inside its own EXCEPTION guard:
+--   * SP_SCAN_ETL_CYCLE() - inside its RUN WINDOW (below) allowlist-validates the FQN, rebuilds ETL_CYCLE_TASKS
+--                           with one EXECUTE IMMEDIATE, then raises three rules itself, each inside its own
+--                           EXCEPTION guard:
 --       PIPE_ETL_TASK_FAILED       MEDIUM (HIGH for the terminal workflow). One event per (workflow, night)
 --                                  whose final-attempt failed-task count >= THRESHOLD_NUM (1; a threshold
 --                                  below 1 still needs one failure). Auto-clears (AUTO_CLEARED, OPEN-only)
 --                                  when a retry later succeeds: every final attempt of that workflow-night has
 --                                  FINISHED and none failed (a retry still running keeps the event OPEN, so a
---                                  retry that fails again never re-raises it).
+--                                  retry that fails again never re-raises it). The clear UPDATE runs only when
+--                                  an OPEN PIPE_ETL_TASK_FAILED event exists (one EXISTS probe otherwise).
 --       PIPE_ETL_CYCLE_NOT_STARTED HIGH. The app NEXT_CYCLE_OVERDUE test: the starter has been silent longer
 --                                  than 24h + grace AND a night it ran on last week has come round again, past
 --                                  last week kickoff + grace, with no run. THRESHOLD_NUM = grace minutes (120 =
@@ -76133,6 +76135,19 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --   * three ALERT_CONFIG rules (PIPELINE), WHEN NOT MATCHED only. AUTO_CLEAR_ENABLED is left at its default
 --     (FALSE): the V091 sweep recomputes only PERF scopes, and TASK_FAILED carries its own retry auto-clear.
 -- The clock is pinned to America/Chicago (CONTROL_STATUS timestamps are naive Central, like the app assumes).
+-- RUN WINDOW (wave-2b rework, compile diet; no task or schedule change). The hourly alert scan (about :08-:15
+-- past each hour, after the :07 root) calls this every hour, but it works only in the Central hours from
+-- HOUR(target - 10h) through HOUR(target + 3h) inclusive, wrapping midnight (target = ETL_SLA_TARGET_HHMM as
+-- parsed below, blank or malformed -> 07:00), plus one daytime pass in the 15:xx scan: at 07:00 the 21:xx ..
+-- 10:xx scans + 15:xx = 15 of 24 calls. Out of window a call reads only the rule count and SETTINGS and returns
+-- BEFORE the cache DELETE, so ETL_CYCLE_TASKS keeps the last in-window scan's nights (the playbook triage
+-- queries read it). The window holds the ~22:00 kickoff + the NOT_STARTED grace, the lead-window WARN, the
+-- target (CRIT) and the default hard deadline (EXH). LATENCY TRADE (by choice): a TASK_FAILED from a daytime
+-- re-run, and the retry auto-clear of an OPEN one, surface at the next in-window scan (the 15:xx pass or the
+-- window start), up to ~6h later than hourly, and a daytime failure a retry fixes before then is never raised;
+-- an EXH crossing after the window's last scan (a hard deadline more than ~3h after the target) waits for the
+-- 15:xx pass (the unfinished CRIT has paged CRITICAL by then); a starter whose usual kickoff + grace falls
+-- before the window opens is judged NOT_STARTED at the window start.
 -- Known edges (documented, not fixed). FIRST_OK_END must START at/after the night's LAST starter start, so a
 -- starter attempt keyed to the night that starts after a terminal attempt started voids it (a next-morning
 -- re-run of the STARTER, or a starter task that starts while or after the terminal runs): that night then grades each terminal
@@ -76155,9 +76170,10 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 -- quiet.
 -- Wiring: V157 re-derives the hourly alert scan with an add-on CALL arm [23] for this proc, outside the core
 -- tally (a CONTROL_STATUS grant gap logs etl_cycle_scan_failed and never trips OPS_SCAN_DEGRADED); until V157
--- is applied nothing calls it. HIGH/CRITICAL reach the OVERWATCH_EMAIL path (NATIVE_ALERT_NEW_EVENTS) and any
--- matching Teams route. Needs the SELECT on CONTROL_STATUS the app panels already use (owner role). No task
--- change, no tail CALL. Owner applies in Snowsight after V155. This file never runs from the app.
+-- is applied nothing calls it. A hand CALL outside the RUN WINDOW only returns the skip string. HIGH/CRITICAL
+-- reach the OVERWATCH_EMAIL path (NATIVE_ALERT_NEW_EVENTS) and any matching Teams route. Needs the SELECT on
+-- CONTROL_STATUS the app panels already use (owner role). No task change, no tail CALL. Owner applies in
+-- Snowsight after V155. This file never runs from the app.
 
 EXECUTE IMMEDIATE
 $$
@@ -76210,6 +76226,8 @@ $$
 -- against: etl_control_sql.FAILED_TASK_STATUSES / cycle_night_health_scan (anchor, missed, RAN_LAST_WEEK) /
 -- cycle_finish_history_scan (cyc_start, term, cyc_end) and insights._parse_hhmm / _deadline_after. The LATE
 -- projection is a new SQL heuristic sharing SLA_FORECAST_MIN_RUNS / SLA_FORECAST_FIT_NIGHTS (not parity).
+-- Called every hour, it works only inside the RUN WINDOW (target - 10h .. target + 3h Central, plus a 15:00
+-- pass); an out-of-window call returns after the rule count and the SETTINGS read, cache untouched.
 DECLARE
     ctl_fqn STRING;
     start_wf STRING;
@@ -76235,12 +76253,6 @@ BEGIN
     FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
     WHERE RULE_ID IN ('PIPE_ETL_CYCLE_LATE', 'PIPE_ETL_CYCLE_NOT_STARTED', 'PIPE_ETL_TASK_FAILED') AND ENABLED;
 
-    -- always clear last run's cache first, so a stale night never lingers after a disable or a fix.
-    DELETE FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS;
-    IF (:n_enabled = 0) THEN
-        RETURN 'etl cycle scan skipped (rules disabled)';
-    END IF;
-
     -- a missing row falls back to DEFAULT_SETTINGS (app/config.py ETL_CYCLE_* / ETL_SLA_*); a blank row
     -- stays blank and disables the rule that needs it, exactly like the app's merged settings.
     SELECT MAX(IFF(KEY = 'ETL_CONTROL_STATUS_FQN', VALUE, NULL)),
@@ -76250,11 +76262,6 @@ BEGIN
            TRIM(COALESCE(MAX(IFF(KEY = 'ETL_SLA_BREACH_HHMM', VALUE, NULL)), '08:00'))
       INTO :ctl_fqn, :start_wf, :end_wf, :target_raw, :breach_raw
     FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;
-
-    IF (:ctl_fqn IS NULL OR TRIM(:ctl_fqn) = ''
-        OR NOT RLIKE(TRIM(:ctl_fqn), '^[A-Za-z0-9_$]+([.][A-Za-z0-9_$]+){0,3}$')) THEN
-        RETURN 'etl cycle scan skipped (unconfigured or invalid ETL_CONTROL_STATUS_FQN)';
-    END IF;
 
     -- 'HH:MM' (24h) -> minutes past midnight; malformed -> 07:00 / 08:00 (insights._parse_hhmm), and a hard
     -- deadline at or before the target becomes target + 60 min (insights.etl_cycle_sla_forecast).
@@ -76274,6 +76281,29 @@ BEGIN
 
     -- TIMEZONE STANDARD: the scan clock is Central wall-clock NTZ, the same basis as CONTROL_STATUS.
     now_ct := CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ;
+
+    -- RUN WINDOW (wave-2b rework, compile diet): work only in the Central hours from HOUR(target - 10h)
+    -- through HOUR(target + 3h), both ends inclusive and wrapping midnight (07:00 -> the 21:xx .. 10:xx
+    -- scans; a blank or malformed ETL_SLA_TARGET_HHMM already fell back to 07:00 above), plus one daytime
+    -- pass in the 15:xx scan (daytime TASK_FAILED re-runs). MOD(... + 24, 24) = hours since the window
+    -- opened (the + 1440 / + 24 keep MOD's dividend non-negative). Out of window this RETURNs BEFORE the
+    -- DELETE below, so ETL_CYCLE_TASKS keeps the last in-window scan's nights for the playbook triage queries.
+    IF (MOD(HOUR(:now_ct) - FLOOR(MOD(:target_off - 600 + 1440, 1440) / 60) + 24, 24) > 13
+        AND HOUR(:now_ct) <> 15) THEN
+        RETURN 'etl cycle scan skipped (outside the run window: Central hour ' || HOUR(:now_ct)
+               || ' is not in HOUR(ETL_SLA_TARGET_HHMM - 10h) .. HOUR(target + 3h) or 15; cache kept)';
+    END IF;
+
+    -- every in-window run clears last run's cache first, so a stale night never lingers after a disable or a fix.
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS;
+    IF (:n_enabled = 0) THEN
+        RETURN 'etl cycle scan skipped (rules disabled)';
+    END IF;
+
+    IF (:ctl_fqn IS NULL OR TRIM(:ctl_fqn) = ''
+        OR NOT RLIKE(TRIM(:ctl_fqn), '^[A-Za-z0-9_$]+([.][A-Za-z0-9_$]+){0,3}$')) THEN
+        RETURN 'etl cycle scan skipped (unconfigured or invalid ETL_CONTROL_STATUS_FQN)';
+    END IF;
 
     -- The ONLY dynamic statement. The FQN is validated above (a bare, well-formed identifier), so it is safe
     -- to concatenate; lookback_days is an INT; the starter name is BOUND as data (USING), never concatenated.
@@ -76393,18 +76423,23 @@ BEGIN
         -- final-attempt failures AND every final attempt finished: a retry that has only STARTED (no end yet)
         -- keeps the event OPEN, so a retry that then fails again never mints a second event and email.
         -- OPEN-only (an ACK or SNOOZE is a human decision, left alone). The cache holds whole nights only, so
-        -- its oldest night is never a partial one whose failed tasks were cut away.
-        UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
-           SET STATUS = 'RESOLVED', RESOLVED_AT = CURRENT_TIMESTAMP(), RESOLUTION_KIND = 'AUTO_CLEARED'
-         WHERE RULE_ID = 'PIPE_ETL_TASK_FAILED'
-           AND STATUS = 'OPEN'
-           AND DEDUPE_KEY IN (
-               SELECT 'PIPE_ETL_TASK_FAILED|' || LEFT(t.WORKFLOW_NAME, 200) || '|' || TO_VARCHAR(t.CYCLE_DATE)
-               FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS t
-               GROUP BY t.WORKFLOW_NAME, t.CYCLE_DATE
-               HAVING COUNT_IF(UPPER(t.TERMINAL_STATUS) IN ('ABORTED', 'ERROR', 'ERRORED', 'FAILED', 'KILLED', 'STOPPED', 'TERMINATED')) = 0
-                  AND COUNT_IF(t.TERMINAL_END IS NULL) = 0
-           );
+        -- its oldest night is never a partial one whose failed tasks were cut away. Skipped (one EXISTS probe,
+        -- no GROUP BY over the cache) when no PIPE_ETL_TASK_FAILED event is OPEN: the probe is the UPDATE's own
+        -- first two predicates, so a skipped run is exactly a run that would have resolved nothing.
+        IF (EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+                    WHERE RULE_ID = 'PIPE_ETL_TASK_FAILED' AND STATUS = 'OPEN')) THEN
+            UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+               SET STATUS = 'RESOLVED', RESOLVED_AT = CURRENT_TIMESTAMP(), RESOLUTION_KIND = 'AUTO_CLEARED'
+             WHERE RULE_ID = 'PIPE_ETL_TASK_FAILED'
+               AND STATUS = 'OPEN'
+               AND DEDUPE_KEY IN (
+                   SELECT 'PIPE_ETL_TASK_FAILED|' || LEFT(t.WORKFLOW_NAME, 200) || '|' || TO_VARCHAR(t.CYCLE_DATE)
+                   FROM DBA_MAINT_DB.OVERWATCH.ETL_CYCLE_TASKS t
+                   GROUP BY t.WORKFLOW_NAME, t.CYCLE_DATE
+                   HAVING COUNT_IF(UPPER(t.TERMINAL_STATUS) IN ('ABORTED', 'ERROR', 'ERRORED', 'FAILED', 'KILLED', 'STOPPED', 'TERMINATED')) = 0
+                      AND COUNT_IF(t.TERMINAL_END IS NULL) = 0
+               );
+        END IF;
     EXCEPTION
         WHEN OTHER THEN
             emsg := SQLERRM;
@@ -76655,7 +76690,7 @@ $$;
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 156 AS VERSION,
-       'Nightly ETL cycle PUSH alerts (Next-Fifty rank 2): ETL_CYCLE_TASKS transient cache + SP_SCAN_ETL_CYCLE() (isolated config-driven read of ETL_CONTROL_STATUS_FQN, FQN-allowlisted, the 23 newest WHOLE nights cut by night key, retries collapsed to the terminal attempt via MAX_BY with that attempt''s start kept as TERMINAL_START, plus FIRST_OK_END = the first clean finish among attempts STARTED at/after the night''s last kickoff (MAX starter start; starter name bound via USING), night key DATE(TASK_START_DTTM - 12h), clock pinned America/Chicago) raising PIPE_ETL_TASK_FAILED (MEDIUM, HIGH for the terminal workflow, threshold never below 1, auto-clears on retry success: every final attempt finished and none failed, so a retry still running keeps it OPEN), PIPE_ETL_CYCLE_NOT_STARTED (HIGH, the app NEXT_CYCLE_OVERDUE test, grace = THRESHOLD_NUM min) and PIPE_ETL_CYCLE_LATE (WARN/CRIT/EXH bands superseded by the V067 sweep; lead = THRESHOLD_NUM min before ETL_SLA_TARGET_HHMM, or the start-shifted median of the newest 14 prior clean nights projects past ETL_SLA_BREACH_HHMM; a night that finished late is HIGH, an unfinished miss CRITICAL, which auto-declares an incident; a terminal task is done at its first clean finish from an attempt STARTED at/after the night''s last kickoff (FIRST_OK_END), so a next-morning terminal re-run never re-grades a finished night and an afternoon chain attempt that started before the real kickoff is never FIRST_OK_END (a next-morning starter re-run, or any re-run when the starter IS the terminal workflow, voids it: the night re-grades loud); two documented SILENT residuals after an afternoon chain re-run: a real cycle that hangs before its terminal dispatches, and a chain whose terminal starts after the real kickoff; a task with no FIRST_OK_END counts only when its terminal attempt started at/after the night''s cycle start; an undispatched terminal is judged only when it ran the same night last week; METRIC_VALUE only on a lead-window WARN), each in its own EXCEPTION guard. Three PIPELINE ALERT_CONFIG rules, WHEN NOT MATCHED, AUTO_CLEAR left at its default. Called hourly once V157 adds the SP_ALERT_SCAN add-on CALL arm (not counted toward OPS_SCAN_DEGRADED). Needs SELECT on CONTROL_STATUS (already granted for the app panels).' AS DESCRIPTION
+       'Nightly ETL cycle PUSH alerts (Next-Fifty rank 2): ETL_CYCLE_TASKS transient cache + SP_SCAN_ETL_CYCLE() (isolated config-driven read of ETL_CONTROL_STATUS_FQN, FQN-allowlisted, the 23 newest WHOLE nights cut by night key, retries collapsed to the terminal attempt via MAX_BY with that attempt''s start kept as TERMINAL_START, plus FIRST_OK_END = the first clean finish among attempts STARTED at/after the night''s last kickoff (MAX starter start; starter name bound via USING), night key DATE(TASK_START_DTTM - 12h), clock pinned America/Chicago) raising PIPE_ETL_TASK_FAILED (MEDIUM, HIGH for the terminal workflow, threshold never below 1, auto-clears on retry success: every final attempt finished and none failed, so a retry still running keeps it OPEN), PIPE_ETL_CYCLE_NOT_STARTED (HIGH, the app NEXT_CYCLE_OVERDUE test, grace = THRESHOLD_NUM min) and PIPE_ETL_CYCLE_LATE (WARN/CRIT/EXH bands superseded by the V067 sweep; lead = THRESHOLD_NUM min before ETL_SLA_TARGET_HHMM, or the start-shifted median of the newest 14 prior clean nights projects past ETL_SLA_BREACH_HHMM; a night that finished late is HIGH, an unfinished miss CRITICAL, which auto-declares an incident; a terminal task is done at its first clean finish from an attempt STARTED at/after the night''s last kickoff (FIRST_OK_END), so a next-morning terminal re-run never re-grades a finished night and an afternoon chain attempt that started before the real kickoff is never FIRST_OK_END (a next-morning starter re-run, or any re-run when the starter IS the terminal workflow, voids it: the night re-grades loud); two documented SILENT residuals after an afternoon chain re-run: a real cycle that hangs before its terminal dispatches, and a chain whose terminal starts after the real kickoff; a task with no FIRST_OK_END counts only when its terminal attempt started at/after the night''s cycle start; an undispatched terminal is judged only when it ran the same night last week; METRIC_VALUE only on a lead-window WARN), each in its own EXCEPTION guard. Three PIPELINE ALERT_CONFIG rules, WHEN NOT MATCHED, AUTO_CLEAR left at its default. Called every hour by the SP_ALERT_SCAN add-on CALL arm V157 adds (not counted toward OPS_SCAN_DEGRADED), it works only in the Central hours HOUR(ETL_SLA_TARGET_HHMM - 10h) through HOUR(target + 3h), wrapping midnight, plus a 15:00 pass (15 of 24 calls at the 07:00 default; a blank or malformed target falls back to 07:00): an out-of-window call returns after the rule count and the SETTINGS read and leaves ETL_CYCLE_TASKS untouched, so a daytime TASK_FAILED raise or retry clear lands up to ~6h later; the retry auto-clear UPDATE runs only when an OPEN PIPE_ETL_TASK_FAILED event exists. Needs SELECT on CONTROL_STATUS (already granted for the app panels).' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 156);
 
 -- ===========================================================================
@@ -76669,13 +76704,25 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --   SP_ALERT_SCAN (hourly):
 --     - arm [15] removed: it keyed on a rule whose ALERT_CONFIG row was deleted at V034, so it joined no
 --       row, yet it was the hourly scan's only ACCOUNT_USAGE.QUERY_HISTORY read;
+--     - arm [11] removed and COST_CLOUD_SVC_RATIO RETIRED (owner decision, wave-2b rework): V150's
+--       per-warehouse robust-z COST_CLOUD_SVC_ANOMALY (daily, SP_ANOMALY_SWEEP) supersedes the fixed
+--       10/20% ratio; [11] was the hourly scan's only WAREHOUSE_METERING_HISTORY read. The file retires the
+--       rule the V034 way (below the procs): its row goes, its OPEN/ACK/SNOOZED events close as EXPECTED;
+--     ~ cadence gates (compile diet): the Central hour is read ONCE per run into ct_hour. Arms [10]
+--       SEC_CRED_EXPIRY and [20] SEC_NEW_EXPOSURE -- the scan's two heaviest ACCOUNT_USAGE compiles -- run
+--       only when MOD(ct_hour, 4) = 1 (01,05,09,13,17,21 Central); [22] only when MOD(ct_hour, 3) = 2
+--       (02,05,08,11,14,17,20,23). Each gate wraps an UNCHANGED arm; a gated-off arm counts as ok. A failed
+--       hour read keeps the DEFAULT 5 (inside both slots): every gated block runs, like before V157;
 --     + [22] OPS_PIPELINE_DEGRADED (counting): pipeline self-watch -- a stale SOURCE_FRESHNESS_STATE row, a
---       loader failure that was logged and swallowed, or an idle alert notifier;
---     + [23] PIPE_ETL_CYCLE add-on (NOT counting): runs SP_SCAN_ETL_CYCLE (V156); a CONTROL_STATUS grant
---       gap logs etl_cycle_scan_failed and never trips OPS_SCAN_DEGRADED;
+--       loader failure that was logged and swallowed, or an idle alert notifier -- every 3rd hour here and
+--       every morning in the daily scan;
+--     + [23] PIPE_ETL_CYCLE add-on (NOT counting, ungated): runs SP_SCAN_ETL_CYCLE (V156), which applies its
+--       own ETL-window gate; a CONTROL_STATUS grant gap logs etl_cycle_scan_failed and never trips
+--       OPS_SCAN_DEGRADED;
 --     + condition-ended sweep (#12c): an OPEN SEC_CRED_EXPIRY / SEC_NEW_EXPOSURE event resolves as
 --       CONDITION_ENDED once ACCOUNT_USAGE shows the credential rotated/removed or the PUBLIC grant batch
---       fully revoked (OPEN only, 1h dwell, positive evidence only);
+--       fully revoked (OPEN only, 1h dwell, positive evidence only). Each rule's clear runs only in its raise
+--       arm's 4-hourly slot;
 --     ~ the V091 auto-clear sweep is scoped to its 3 PERF rules (the only rules whose still-firing set it
 --       recomputes), so opting another rule into AUTO_CLEAR_ENABLED never blanket-clears it after 1h;
 --     ~ arm [10]: a prior event closed for an EARLIER expiry (by anyone -- a human ACTIONED/NOISE/EXPECTED
@@ -76685,26 +76732,42 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --       ('Rotate before YYYY-MM-DD', both bands), now pinned to Central on both the write and the match.
 --       A live (OPEN/ACK/SNOOZED) event, or a close for this same expiry, still blocks; EXPIRING is never
 --       minted while that credential's EXPIRED event is live;
---     + [hb] heartbeat: stamps SOURCE_FRESHNESS_STATE 'ALERT_SCAN_HOURLY' last in every run.
---     Counting arms stay 13 (13 - [15] + [22]); the self-alert literal is unchanged.
+--     + [hb] heartbeat: stamps SOURCE_FRESHNESS_STATE 'ALERT_SCAN_HOURLY' last in every run, as ONE point
+--       UPDATE (an INSERT only when the row is missing: the first run, or after a delete).
+--     Counting arms 13 -> 12 (13 - [15] - [11] + [22]); the self-alert and the RETURN say 12.
 --   SP_ALERT_SCAN_DAILY:
 --     + [22] OPS_PIPELINE_DEGRADED (byte-identical to the hourly copy; shared dedupe keys, so whichever
 --       graph is alive raises each finding once);
 --     + [24] COST_IDLE_OPPORTUNITY (counting): weekly idle-waste push, the DB-side twin of the Optimize
 --       ACTIONABLE figure (net of the 60s resume tail, settings-verified timer from the newest SHOW
 --       WAREHOUSES snapshot batch -- a dropped/renamed warehouse never raises -- 14 complete Central days);
---     + [hb] heartbeat 'ALERT_SCAN_DAILY'. Counting arms 9 -> 11.
+--     + [hb] heartbeat 'ALERT_SCAN_DAILY' (the same point-UPDATE shape). Counting arms 9 -> 11. No cadence
+--       gate: the daily scan runs once a day.
 --   ALERT_CONFIG: OPS_PIPELINE_DEGRADED (PLATFORM, HIGH) and COST_IDLE_OPPORTUNITY (COST, MEDIUM, 100 USD/month,
 --   HIGH band at 5x) are seeded WHEN NOT MATCHED only. SEC_CRED_EXPIRY and SEC_NEW_EXPOSURE are opted into
 --   auto-clear AFTER both procs are replaced (never before: V141's unscoped sweep would blanket-clear them).
 --
 -- Everything else in both V141 bodies is byte-identical (tests/migrations/test_v157_* normalizes each back
--- to V141): DECLARE, [wake], the 12 surviving hourly arms, both self-alerts (hourly literal 13), the V067/V115
--- supersede sweep, the V091 body except its one scope line, the V117 carry-forward, the daily arms
--- [06]-[19], the [17]/[18] add-ons and the V064 trailing-30-complete-day burn.
+-- to V141): DECLARE (+ ct_hour), the SETTINGS read, [wake], the 11 surviving hourly arms ([10] carries its
+-- recurrence fix; [10] and [20] sit unchanged inside their gates), both self-alerts (hourly literal now 12),
+-- the V067/V115 supersede sweep, the V091 body except its one scope line, the V117 carry-forward, the daily
+-- arms [06]-[19], the [17]/[18] add-ons and the V064 trailing-30-complete-day burn.
 --
--- FIRST RUN: every SOURCE_FRESHNESS_STATE row already past its cadence raises one HIGH OPS_PIPELINE_DEGRADED
--- event, and the first daily run raises this ISO week's COST_IDLE_OPPORTUNITY events (preview with the
+-- LATENCY TRADE (owner decisions D1/D2/D8/D9; the compile saving is the point): a new PUBLIC grant
+-- (SEC_NEW_EXPOSURE) and a credential entering its window or expiring (SEC_CRED_EXPIRY -- the EXPIRED band is
+-- CRITICAL and auto-declares an incident) surface up to ~4h later than an hourly check would raise them, on
+-- top of ACCOUNT_USAGE's own lag; a CONDITION_ENDED clear lands up to ~4h after the evidence; the hourly [22]
+-- self-watch reports a stale source or an idle notifier up to ~3h later (the daily scan's copy still runs
+-- every morning). Every other hourly arm and sweep still runs every hour.
+-- A condition that starts and ends between two checks is never raised at all: a PUBLIC grant revoked before
+-- the next 4-hourly check (an exposure shorter than ~4h, after ACCOUNT_USAGE lag; V141 already missed ones
+-- under ~1h) and a stale-source or idle-notifier episode that clears between two [22] slots (the ERR leg's
+-- 24h lookback still catches every logged loader failure). GRANTS_TO_ROLES history and Security > Changes
+-- still show such a grant.
+--
+-- FIRST RUN: at the first [22] slot (hourly scan) or daily run, every SOURCE_FRESHNESS_STATE row already past
+-- its cadence raises one HIGH OPS_PIPELINE_DEGRADED event, and the first daily run raises this ISO week's
+-- COST_IDLE_OPPORTUNITY events (preview with the
 -- separate read-only PREFLIGHT_WAVE2B.sql). A credential already inside its expiry window whose only prior
 -- SEC_CRED_EXPIRY event for that key was closed for an EARLIER expiry date (an earlier cycle, e.g.
 -- human-resolved, however late) raises its previously suppressed event once (CRITICAL, and an auto-declared
@@ -76713,11 +76776,15 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 -- that zone's date; if the expiry fell on a different calendar date there, the row reads as an earlier cycle
 -- and the event re-raises once (a duplicate, not a missed alert). Deploy the app build that excludes
 -- CONDITION_ENDED from the human-resolution metrics BEFORE applying (it shipped in wave 2a). No procedure runs
--- at apply time: the scans pick this up on their next scheduled run.
+-- at apply time: the scans pick this up on their next scheduled run. Applying also closes every OPEN, ACK'd
+-- or SNOOZED COST_CLOUD_SVC_RATIO event as EXPECTED and deletes that rule's ALERT_CONFIG row (history in
+-- ALERT_EVENTS is kept).
 -- ROLLBACK (order matters): FIRST, by hand (never inside a migration), switch AUTO_CLEAR_ENABLED off for
 -- SEC_CRED_EXPIRY and SEC_NEW_EXPOSURE; only THEN re-run V141's two procs (RUNBOOK section 12, "Rolling back
 -- V157"). Reversed, an hourly scan landing between the two steps runs V141's unscoped V091 sweep, which
 -- AUTO_CLEARs their OPEN events 1h after raise -- and V141's arms [10]/[20] never re-raise an auto-cleared key.
+-- The retired COST_CLOUD_SVC_RATIO row stays deleted after a rollback (V141's arm [11] then joins no row, like
+-- the old [15]); re-seed it by hand only if the fixed ratio is wanted back.
 -- Apply AFTER V156 (SP_SCAN_ETL_CYCLE must exist for [23]; before it, the arm only logs
 -- etl_cycle_scan_failed). Idempotent; safe to re-run.
 
@@ -76747,7 +76814,7 @@ ON t.RULE_ID = s.RULE_ID
 WHEN NOT MATCHED THEN INSERT (RULE_ID, FAMILY, NAME, ENABLED, SEVERITY, THRESHOLD_NUM, WINDOW_HOURS)
      VALUES (s.RULE_ID, s.FAMILY, s.NAME, s.ENABLED, s.SEVERITY, s.THRESHOLD_NUM, s.WINDOW_HOURS);
 
--- >>> derived:SP_ALERT_SCAN  (from V141; - dead break-glass arm [15], + [22] OPS_PIPELINE_DEGRADED, + [23] PIPE_ETL_CYCLE add-on, + condition-ended sweep, V091 sweep scoped to PERF, arm [10] recurrence fix, + [hb], V157)
+-- >>> derived:SP_ALERT_SCAN  (from V141; - dead break-glass arm [15], - retired COST_CLOUD_SVC_RATIO arm [11], [10]/[20] + their condition-ended clears every 4h, + [22] OPS_PIPELINE_DEGRADED every 3h, + [23] PIPE_ETL_CYCLE add-on, + condition-ended sweep, V091 sweep scoped to PERF, arm [10] recurrence fix, + [hb], V157)
 CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN()
 RETURNS VARCHAR
 LANGUAGE SQL
@@ -76764,12 +76831,35 @@ DECLARE
     ai_credit_price FLOAT;
     emsg VARCHAR;
     fails INT DEFAULT 0;
+    ct_hour INT DEFAULT 5;   -- V157: the Central hour of this run ([cadence] below); 5 sits in both slots
 BEGIN
     SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'MONTHLY_BUDGET_USD', VALUE, NULL))), 0),
            COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CREDIT_PRICE_USD', VALUE, NULL))), 3.68),
            COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'AI_CREDIT_PRICE_USD', VALUE, NULL))), 2.20)
       INTO :budget_usd, :credit_price, :ai_credit_price
     FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;
+
+    -- [cadence] V157 compile diet (Next-Fifty wave 2b rework): the Central hour this run started in, read
+    -- ONCE. A gated block skips its whole statement -- nothing compiles, no ACCOUNT_USAGE read -- and a
+    -- gated-off arm counts as ok (it never touches :fails):
+    --   MOD(ct_hour, 4) = 1  (01,05,09,13,17,21 Central): arms [10] SEC_CRED_EXPIRY and [20] SEC_NEW_EXPOSURE,
+    --                        and each rule's condition-ended clear (a clear rides its raise arm's slot);
+    --   MOD(ct_hour, 3) = 2  (02,05,08,11,14,17,20,23 Central): [22] OPS_PIPELINE_DEGRADED (the daily scan's
+    --                        copy stays daily).
+    -- TASK_LOAD_HOURLY fires at :07 Central (CRON, DST-aware), so each slot is one run a day (a DST night can
+    -- repeat or skip one slot; the dedupe keys absorb a repeat). If this read ever fails, ct_hour keeps its
+    -- DEFAULT 5 -- inside BOTH slots -- so every gated block runs (fail-open to hourly) and the
+    -- failure is logged (cadence_gate_failed). Does NOT touch :fails.
+    BEGIN
+        SELECT HOUR(CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())) INTO :ct_hour;
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'cadence_gate_failed', :emsg,
+                   'V157 Central-hour read - every gated block runs this pass', CURRENT_ROLE();
+    END;
 
     -- [wake] V086: return expired per-event snoozes to the triage feed. A snoozed
     -- event sits at STATUS='SNOOZED' (off the OPEN/ACK feed); once its wake time has
@@ -76979,6 +77069,7 @@ BEGIN
             SELECT 'AlertScan', 'rule_block_failed', :emsg,
                    'rule PERF_SPILL_GB - other rules unaffected', CURRENT_ROLE();
     END;
+    IF (MOD(ct_hour, 4) = 1) THEN   -- V157 cadence gate: [10] every 4h (01,05,09,13,17,21 Central)
     -- [10] SEC_CRED_EXPIRY
     BEGIN
         INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
@@ -77041,55 +77132,7 @@ BEGIN
             SELECT 'AlertScan', 'rule_block_failed', :emsg,
                    'rule SEC_CRED_EXPIRY - other rules unaffected', CURRENT_ROLE();
     END;
-    -- [11] COST_CLOUD_SVC_RATIO
-    BEGIN
-        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
-            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
-        WITH cfg AS (
-            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
-        )
-        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
-        FROM (
-        -- COST_CLOUD_SVC_RATIO: cloud-services share of a warehouse's credits
-        -- (CoCo finding: WH_TRXS_TRANSFORM at ~30%; normal is <10%). Fires
-        -- daily per warehouse while the ratio stays above threshold.
-        SELECT c.RULE_ID,
-               DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(w.WAREHOUSE_NAME),
-               c.SEVERITY,
-               w.WAREHOUSE_NAME || ' cloud-services ratio ' || ROUND(w.RATIO_PCT, 1) || '% (24h)',
-               'Cloud services ' || ROUND(w.CS, 2) || ' of ' || ROUND(w.TOT, 2) ||
-                   ' credits. Normal is <10% - look for many tiny queries, heavy metadata ' ||
-                   'operations, or compile-heavy SQL. Diagnostics: Cost > Spend.',
-               w.RATIO_PCT,
-               c.RULE_ID || '|' || w.WAREHOUSE_NAME || '|' || TO_VARCHAR(CURRENT_DATE())
-        FROM cfg c
-        JOIN (
-            SELECT WAREHOUSE_NAME,
-                   SUM(CREDITS_USED_CLOUD_SERVICES) AS CS,
-                   SUM(CREDITS_USED) AS TOT,
-                   SUM(CREDITS_USED_CLOUD_SERVICES) / NULLIF(SUM(CREDITS_USED), 0) * 100 AS RATIO_PCT
-            FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
-            WHERE START_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
-              AND WAREHOUSE_ID > 0
-            GROUP BY 1
-            HAVING SUM(CREDITS_USED) >= 1
-        ) w ON c.RULE_ID = 'COST_CLOUD_SVC_RATIO'
-           AND w.RATIO_PCT > c.THRESHOLD_NUM AND w.CS >= 0.5
-
-        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
-        WHERE NOT EXISTS (
-            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
-            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
-        );
-    EXCEPTION
-        WHEN OTHER THEN
-            emsg := SQLERRM;
-            fails := fails + 1;
-            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
-                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
-            SELECT 'AlertScan', 'rule_block_failed', :emsg,
-                   'rule COST_CLOUD_SVC_RATIO - other rules unaffected', CURRENT_ROLE();
-    END;
+    END IF;   -- /V157 cadence gate: [10] every 4h (01,05,09,13,17,21 Central)
     -- [14] PIPE_COPY_FAILURES
     BEGIN
         INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
@@ -77243,6 +77286,7 @@ BEGIN
             SELECT 'AlertScan', 'rule_block_failed', :emsg,
                    'rule SEC_NEW_ADMIN_NETWORK - other rules unaffected', CURRENT_ROLE();
     END;
+    IF (MOD(ct_hour, 4) = 1) THEN   -- V157 cadence gate: [20] every 4h (01,05,09,13,17,21 Central)
     -- [20] SEC_NEW_EXPOSURE (V084 - CoCo Sec36: a new grant to PUBLIC widens the blast radius)
     BEGIN
         INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
@@ -77294,6 +77338,7 @@ BEGIN
             SELECT 'AlertScan', 'rule_block_failed', :emsg,
                    'rule SEC_NEW_EXPOSURE - other rules unaffected', CURRENT_ROLE();
     END;
+    END IF;   -- /V157 cadence gate: [20] every 4h (01,05,09,13,17,21 Central)
     -- [21] SEC_POSTURE_METRIC (V087 - CoCo Sec35: generic, data-driven posture monitor
     --      keyed by ALERT_CONFIG.METRIC_NAME; every operator-created posture-metric rule
     --      raises here, so posture self-monitors after a finding is turned into a rule.
@@ -77344,6 +77389,7 @@ BEGIN
             SELECT 'AlertScan', 'rule_block_failed', :emsg,
                    'rule posture-metric (generic) - other rules unaffected', CURRENT_ROLE();
     END;
+    IF (MOD(ct_hour, 3) = 2) THEN   -- V157 cadence gate: [22] every 3h (02,05,08,11,14,17,20,23 Central)
     -- [22] OPS_PIPELINE_DEGRADED (V157, Next-Fifty #10: OVERWATCH watches its own pipeline from inside BOTH
     --      task graphs. Byte-identical in SP_ALERT_SCAN and SP_ALERT_SCAN_DAILY with shared dedupe keys, so
     --      whichever graph is still alive raises each finding once. (a) STALE: a SOURCE_FRESHNESS_STATE row
@@ -77456,6 +77502,7 @@ BEGIN
             SELECT 'AlertScan', 'rule_block_failed', :emsg,
                    'rule OPS_PIPELINE_DEGRADED - other rules unaffected', CURRENT_ROLE();
     END;
+    END IF;   -- /V157 cadence gate: [22] every 3h (02,05,08,11,14,17,20,23 Central)
     -- [23] PIPE_ETL_CYCLE  (V157, Next-Fifty #2; optional external-dependency add-on: NOT counted toward the
     -- core scan-health tally, because SP_SCAN_ETL_CYCLE (V156) reads the customer Informatica CONTROL_STATUS
     -- table SELECT-granted out-of-band -- a grant gap must not trip the OPS_SCAN_DEGRADED self-alert. The scan
@@ -77478,7 +77525,7 @@ BEGIN
         INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
             (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
         SELECT c.RULE_ID, 'ALL', c.SEVERITY,
-               :fails || ' of 13 alert rule block(s) failed this run',
+               :fails || ' of 12 alert rule block(s) failed this run',
                'APP_ERROR_LOG has the SQL errors (rule_block_failed). The other rules ' ||
                    'kept firing - that is the point of the v7 decomposition.',
                :fails,
@@ -77613,7 +77660,12 @@ BEGIN
     -- and skips its ACCOUNT_USAGE read entirely unless it has an OPEN event and is opted in (one EXISTS
     -- with a join -- no nested scalar subquery). The machine close CONDITION_ENDED is excluded from
     -- precision/MTTR in the app read-path like SUPERSEDED/AUTO_CLEARED/SNOOZE_SUPPRESSED.
+    -- Cadence (compile diet): each rule's clear runs only in the slot its raise arm runs (MOD(ct_hour, 4) = 1),
+    -- still behind its EXISTS-OPEN gate. Off-slot hours skip the probe and the ACCOUNT_USAGE read alike, so a
+    -- clear lands in the first security slot after the evidence shows (up to ~4h later). An event raised in a
+    -- slot is re-checked no sooner than the next one, so the 1h dwell always holds.
     -- Does NOT touch :fails.
+    IF (MOD(ct_hour, 4) = 1) THEN   -- V157 cadence gate: SEC_CRED_EXPIRY clear rides arm [10] every 4h (01,05,09,13,17,21 Central)
     BEGIN
         IF (EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
                     JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c ON c.RULE_ID = e.RULE_ID
@@ -77650,6 +77702,8 @@ BEGIN
             INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
             SELECT 'AlertScan', 'condition_ended_sweep_failed', :emsg, 'V157 condition-ended sweep SEC_CRED_EXPIRY - other rules unaffected', CURRENT_ROLE();
     END;
+    END IF;   -- /V157 cadence gate: SEC_CRED_EXPIRY clear rides arm [10] every 4h (01,05,09,13,17,21 Central)
+    IF (MOD(ct_hour, 4) = 1) THEN   -- V157 cadence gate: SEC_NEW_EXPOSURE clear rides arm [20] every 4h (01,05,09,13,17,21 Central)
     BEGIN
         IF (EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
                     JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c ON c.RULE_ID = e.RULE_ID
@@ -77678,6 +77732,7 @@ BEGIN
             INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
             SELECT 'AlertScan', 'condition_ended_sweep_failed', :emsg, 'V157 condition-ended sweep SEC_NEW_EXPOSURE - other rules unaffected', CURRENT_ROLE();
     END;
+    END IF;   -- /V157 cadence gate: SEC_NEW_EXPOSURE clear rides arm [20] every 4h (01,05,09,13,17,21 Central)
 
     -- [snooze carry-forward sweep] V117: a per-event snooze keeps the event's date-banded
     -- DEDUPE_KEY, so when the day/week band rolls the raise arms above mint a NEW OPEN event for
@@ -77739,22 +77794,23 @@ BEGIN
     -- after every arm and sweep -- so a row older than its cadence means the scan stopped (or this stamp
     -- keeps failing: APP_ERROR_LOG scan_heartbeat_failed). The daily graph's [22] arm, the app freshness
     -- boards and NATIVE_ALERT_STALE_FACTS read it with the shared name rule (ALERT_SCAN_HOURLY -> 3h,
-    -- ALERT_SCAN_DAILY -> 30h). LAST_LOAD_TS is Central wall-clock like every loader stamp. Isolated;
-    -- does NOT touch :fails.
+    -- ALERT_SCAN_DAILY -> 30h). LAST_LOAD_TS is Central wall-clock like every loader stamp. Cheapest shape:
+    -- ONE point UPDATE of this scan's own row; the INSERT runs only when it matched no row (the first run,
+    -- or after the row was deleted), so the stamp self-heals. Isolated; does NOT touch :fails.
     BEGIN
-        MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE t
-        USING (
-            SELECT 'ALERT_SCAN_HOURLY' AS SOURCE_NAME,
-                   CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ AS LAST_LOAD_TS,
-                   (13 - :fails) AS ROW_COUNT,
-                   'alert scan ' || (13 - :fails) || '/13 rule blocks ok' AS STATUS
-        ) s
-        ON t.SOURCE_NAME = s.SOURCE_NAME
-        WHEN MATCHED THEN UPDATE SET LAST_LOAD_TS = s.LAST_LOAD_TS, ROW_COUNT = s.ROW_COUNT,
-            SNAPSHOT_TS = CURRENT_TIMESTAMP(), GENERATION = COALESCE(t.GENERATION, 0) + 1,
-            STATUS = s.STATUS
-        WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
-        VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, s.STATUS);
+        UPDATE DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE
+           SET LAST_LOAD_TS = CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ,
+               ROW_COUNT = (12 - :fails),
+               SNAPSHOT_TS = CURRENT_TIMESTAMP(),
+               GENERATION = COALESCE(GENERATION, 0) + 1,
+               STATUS = 'alert scan ' || (12 - :fails) || '/12 rule blocks ok'
+         WHERE SOURCE_NAME = 'ALERT_SCAN_HOURLY';
+        IF (SQLROWCOUNT = 0) THEN
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE
+                (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
+            SELECT 'ALERT_SCAN_HOURLY', CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ,
+                   (12 - :fails), 1, 'alert scan ' || (12 - :fails) || '/12 rule blocks ok';
+        END IF;
     EXCEPTION
         WHEN OTHER THEN
             emsg := SQLERRM;
@@ -77764,7 +77820,7 @@ BEGIN
                    'ALERT_SCAN_HOURLY heartbeat stamp - alerts unaffected', CURRENT_ROLE();
     END;
 
-    RETURN 'alert scan v12 (V157: + OPS_PIPELINE_DEGRADED self-watch + ETL-cycle add-on + condition-ended sweep + heartbeat, - dead break-glass arm): ' || (13 - :fails) || '/13 rule blocks ok';
+    RETURN 'alert scan v12 (V157: + OPS_PIPELINE_DEGRADED self-watch + ETL-cycle add-on + condition-ended sweep + heartbeat, - dead break-glass arm, - retired cloud-services ratio arm, security arms every 4h, self-watch every 3h): ' || (12 - :fails) || '/12 rule blocks ok';
 END;
 $$;
 
@@ -78587,22 +78643,23 @@ BEGIN
     -- after every arm and sweep -- so a row older than its cadence means the scan stopped (or this stamp
     -- keeps failing: APP_ERROR_LOG scan_heartbeat_failed). The hourly graph's [22] arm, the app freshness
     -- boards and NATIVE_ALERT_STALE_FACTS read it with the shared name rule (ALERT_SCAN_HOURLY -> 3h,
-    -- ALERT_SCAN_DAILY -> 30h). LAST_LOAD_TS is Central wall-clock like every loader stamp. Isolated;
-    -- does NOT touch :fails.
+    -- ALERT_SCAN_DAILY -> 30h). LAST_LOAD_TS is Central wall-clock like every loader stamp. Cheapest shape:
+    -- ONE point UPDATE of this scan's own row; the INSERT runs only when it matched no row (the first run,
+    -- or after the row was deleted), so the stamp self-heals. Isolated; does NOT touch :fails.
     BEGIN
-        MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE t
-        USING (
-            SELECT 'ALERT_SCAN_DAILY' AS SOURCE_NAME,
-                   CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ AS LAST_LOAD_TS,
-                   (11 - :fails) AS ROW_COUNT,
-                   'alert scan daily ' || (11 - :fails) || '/11 rule blocks ok (daily)' AS STATUS
-        ) s
-        ON t.SOURCE_NAME = s.SOURCE_NAME
-        WHEN MATCHED THEN UPDATE SET LAST_LOAD_TS = s.LAST_LOAD_TS, ROW_COUNT = s.ROW_COUNT,
-            SNAPSHOT_TS = CURRENT_TIMESTAMP(), GENERATION = COALESCE(t.GENERATION, 0) + 1,
-            STATUS = s.STATUS
-        WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
-        VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, s.STATUS);
+        UPDATE DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE
+           SET LAST_LOAD_TS = CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ,
+               ROW_COUNT = (11 - :fails),
+               SNAPSHOT_TS = CURRENT_TIMESTAMP(),
+               GENERATION = COALESCE(GENERATION, 0) + 1,
+               STATUS = 'alert scan daily ' || (11 - :fails) || '/11 rule blocks ok (daily)'
+         WHERE SOURCE_NAME = 'ALERT_SCAN_DAILY';
+        IF (SQLROWCOUNT = 0) THEN
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE
+                (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
+            SELECT 'ALERT_SCAN_DAILY', CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ,
+                   (11 - :fails), 1, 'alert scan daily ' || (11 - :fails) || '/11 rule blocks ok (daily)';
+        END IF;
     EXCEPTION
         WHEN OTHER THEN
             emsg := SQLERRM;
@@ -78623,9 +78680,24 @@ UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
    SET AUTO_CLEAR_ENABLED = TRUE
  WHERE RULE_ID IN ('SEC_CRED_EXPIRY', 'SEC_NEW_EXPOSURE');
 
+-- Owner decision (wave-2b rework): retire COST_CLOUD_SVC_RATIO. V150's per-warehouse robust-z
+-- COST_CLOUD_SVC_ANOMALY (daily, SP_ANOMALY_SWEEP) supersedes the fixed 10/20% ratio, and arm [11] -- an hourly
+-- WAREHOUSE_METERING_HISTORY read -- is gone from SP_ALERT_SCAN above. The house retire pattern (V034,
+-- SEC_BREAK_GLASS_USE): the rule row goes and lingering events close as EXPECTED -- SNOOZED ones too, since the
+-- hourly wake step would otherwise reopen an event no scan can ever close again. ALERT_EVENTS history is kept.
+-- Row FIRST, then the events: once the row is gone no arm [11] joins a config row -- not even a scan that
+-- started before this file and still runs V141's body -- so nothing can re-raise the rule after the close.
+DELETE FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
+ WHERE RULE_ID = 'COST_CLOUD_SVC_RATIO';
+
+UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+   SET STATUS = 'RESOLVED', RESOLUTION_KIND = 'EXPECTED',
+       RESOLVED_AT = CURRENT_TIMESTAMP()
+ WHERE RULE_ID = 'COST_CLOUD_SVC_RATIO' AND STATUS IN ('OPEN', 'ACK', 'SNOOZED');
+
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 157 AS VERSION,
-       'Next-Fifty wave 2b (ranks 10a/b/d, 13, 2, 12c): the single wave-2 re-derivation of SP_ALERT_SCAN and SP_ALERT_SCAN_DAILY from V141, byte-identical otherwise. Hourly: dead break-glass arm [15] removed (its rule was deleted at V034; it was the scan''s only ACCOUNT_USAGE.QUERY_HISTORY read); + [22] OPS_PIPELINE_DEGRADED self-watch (a SOURCE_FRESHNESS_STATE row past the shared DAILY/METERING 30h else 3h name rule, at most one event per source per last-load day; a swallowed loader failure of the five NATIVE_ALERT_STALE_FACTS error types, one per type, source and Central day, the three optional mart arms left to the stale leg; an idle alert notifier via OW_SENDER_LEASE while a route is enabled); + [23] add-on arm running SP_SCAN_ETL_CYCLE (V156; not counted toward OPS_SCAN_DEGRADED, logs etl_cycle_scan_failed); + #12c condition-ended sweep (an OPEN SEC_CRED_EXPIRY or SEC_NEW_EXPOSURE event resolves CONDITION_ENDED once CREDENTIALS or GRANTS_TO_ROLES show the condition ended; 1h dwell, positive evidence only, opt-in via AUTO_CLEAR_ENABLED); the V091 auto-clear sweep scoped to its 3 PERF rules; arm [10] (key unchanged) ignores CONDITION_ENDED and SUPERSEDED rows and any row closed for an earlier expiry, human resolves included however late (the cycle id is the expiry date every arm [10] since V009 writes at the head of DETAIL, now pinned to Central on write and match; a live row always blocks), so a rotated credential''s next expiry re-alerts, and never mints EXPIRING while the EXPIRED event is live; + [hb] ALERT_SCAN_HOURLY heartbeat. Tally 13 -> 13. Daily: + [22] (byte-identical, shared keys) + [24] COST_IDLE_OPPORTUNITY (weekly per warehouse, net recoverable USD/month after the 60s resume tail, settings-verified timer (newest SHOW WAREHOUSES snapshot batch) disabled or above 60s, 14 complete Central days with at least 7 covered; MEDIUM at 100 USD/month, HIGH band at 5x) + [hb] ALERT_SCAN_DAILY heartbeat. Tally 9 -> 11. Seeds OPS_PIPELINE_DEGRADED (PLATFORM, HIGH) and COST_IDLE_OPPORTUNITY (COST, MEDIUM, 100, 336h) WHEN NOT MATCHED only; opts SEC_CRED_EXPIRY and SEC_NEW_EXPOSURE into auto-clear after both procs are replaced. No task change, no procedure run at apply time.' AS DESCRIPTION
+       'Next-Fifty wave 2b (ranks 10a/b/d, 13, 2, 12c) plus the wave-2b compile-diet rework: the single wave-2 re-derivation of SP_ALERT_SCAN and SP_ALERT_SCAN_DAILY from V141, byte-identical otherwise. Hourly: dead break-glass arm [15] removed (its rule was deleted at V034; it was the scan''s only ACCOUNT_USAGE.QUERY_HISTORY read); arm [11] removed and COST_CLOUD_SVC_RATIO retired (V150 COST_CLOUD_SVC_ANOMALY supersedes the fixed ratio; its OPEN, ACK and SNOOZED events close as EXPECTED and its ALERT_CONFIG row is deleted, the V034 pattern); cadence gates from one Central-hour read per run (fail-open default 5): arms [10] SEC_CRED_EXPIRY and [20] SEC_NEW_EXPOSURE and their condition-ended clears run when MOD(hour, 4) = 1 (01,05,09,13,17,21 Central), [22] when MOD(hour, 3) = 2, so those alerts and clears can land up to about 4h (3h for [22]) later; + [22] OPS_PIPELINE_DEGRADED self-watch (a SOURCE_FRESHNESS_STATE row past the shared DAILY/METERING 30h else 3h name rule, at most one event per source per last-load day; a swallowed loader failure of the five NATIVE_ALERT_STALE_FACTS error types, one per type, source and Central day, the three optional mart arms left to the stale leg; an idle alert notifier via OW_SENDER_LEASE while a route is enabled); + [23] add-on arm running SP_SCAN_ETL_CYCLE (V156, ungated here; not counted toward OPS_SCAN_DEGRADED, logs etl_cycle_scan_failed); + #12c condition-ended sweep (an OPEN SEC_CRED_EXPIRY or SEC_NEW_EXPOSURE event resolves CONDITION_ENDED once CREDENTIALS or GRANTS_TO_ROLES show the condition ended; 1h dwell, positive evidence only, opt-in via AUTO_CLEAR_ENABLED); the V091 auto-clear sweep scoped to its 3 PERF rules; arm [10] (key unchanged) ignores CONDITION_ENDED and SUPERSEDED rows and any row closed for an earlier expiry, human resolves included however late (the cycle id is the expiry date every arm [10] since V009 writes at the head of DETAIL, now pinned to Central on write and match; a live row always blocks), so a rotated credential''s next expiry re-alerts, and never mints EXPIRING while the EXPIRED event is live; + [hb] ALERT_SCAN_HOURLY heartbeat (one point UPDATE, an INSERT only when the row is missing). Tally 13 -> 12. Daily: + [22] (byte-identical, shared keys, ungated) + [24] COST_IDLE_OPPORTUNITY (weekly per warehouse, net recoverable USD/month after the 60s resume tail, settings-verified timer (newest SHOW WAREHOUSES snapshot batch) disabled or above 60s, 14 complete Central days with at least 7 covered; MEDIUM at 100 USD/month, HIGH band at 5x) + [hb] ALERT_SCAN_DAILY heartbeat. Tally 9 -> 11. Seeds OPS_PIPELINE_DEGRADED (PLATFORM, HIGH) and COST_IDLE_OPPORTUNITY (COST, MEDIUM, 100, 336h) WHEN NOT MATCHED only; opts SEC_CRED_EXPIRY and SEC_NEW_EXPOSURE into auto-clear after both procs are replaced. No task change, no procedure run at apply time.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 157);
 
 -- ===========================================================================
@@ -78651,6 +78723,11 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --   kind (floors 7 / 4, ceilings 60 / 52). Only TRANSIENT base tables in OVERWATCH_BAK whose whole
 --   name is one of the 25 + _OWBAK_[DW] + 8 digits, dated before today, re-checked before each DROP.
 --   The manual <T>_BAK_<yyyymmdd> DR clones (teardown.sql B0, rebuild/00) use a different token.
+-- * Statement budget (wave-2b rework D11): ONE set-based INFORMATION_SCHEMA probe per run (the 25
+--   sources present + which already hold today's generation; fails open to V089's clone-everything)
+--   replaces the per-table probes, and ONE set-based PRUNED log insert replaces the per-DROP inserts.
+--   A steady-state weekday is 59 statements and a Sunday 135, 489 a week (the untrimmed per-table
+--   design: 107 / 208 / 850; V089 ran 26 a week). A same-day re-run issues no no-op CLONE.
 -- * SOURCE_FRESHNESS_STATE 'OPERATOR_BACKUP_DAILY' (30h cadence by name) advances only on a run with
 --   zero clone failures, so a failing or suspended backup goes stale and the dead-man paths fire.
 -- * TASK_BACKUP_OPERATOR was created IF NOT EXISTS (V015), so its schedule moves in place
@@ -78743,7 +78820,11 @@ DECLARE
     missing INT DEFAULT 0;         -- source table absent on this install: a skip, never a failure
     pruned INT DEFAULT 0;
     prune_failed INT DEFAULT 0;
-    present INT DEFAULT 0;
+    probe_ok BOOLEAN DEFAULT FALSE;  -- the one metadata probe answered (else every clone is attempted)
+    src_present ARRAY;             -- the probe: the 25 sources that exist in OVERWATCH
+    have_d ARRAY;                  -- the probe: sources whose daily generation for today exists
+    have_w ARRAY;                  -- the probe: sources whose weekly generation for today exists
+    pruned_list VARCHAR DEFAULT '';  -- dropped generation names, logged by ONE insert after the prune
     keep_d FLOAT DEFAULT 14;
     keep_w FLOAT DEFAULT 8;
     day_ct DATE;
@@ -78777,21 +78858,34 @@ BEGIN
     -- anchors the whole name, so a manual <T>_BAK_<yyyymmdd> DR clone can never match.
     prune_re := '(' || ARRAY_TO_STRING(:tables, '|') || ')_OWBAK_[DW][0-9]{8}';
 
+    -- ONE set-based metadata probe for the whole run (wave-2b rework D11; it was one probe per table):
+    -- which of the 25 sources exist in OVERWATCH, and which of them already have today's daily / weekly
+    -- generation in OVERWATCH_BAK (a same-day re-run then skips the no-op CLONE). Fails OPEN: if the
+    -- probe itself errors, probe_ok stays FALSE, so nothing counts as missing or already taken and every
+    -- clone is attempted exactly as V089 did (a missing source then lands as clone_failed).
+    BEGIN
+        SELECT COALESCE(ARRAY_AGG(IFF(TABLE_SCHEMA = 'OVERWATCH', TABLE_NAME, NULL)), ARRAY_CONSTRUCT()),
+               COALESCE(ARRAY_AGG(IFF(TABLE_SCHEMA = 'OVERWATCH_BAK' AND RIGHT(TABLE_NAME, 9) = :gen_d,
+                                      LEFT(TABLE_NAME, LENGTH(TABLE_NAME) - 16), NULL)), ARRAY_CONSTRUCT()),
+               COALESCE(ARRAY_AGG(IFF(TABLE_SCHEMA = 'OVERWATCH_BAK' AND RIGHT(TABLE_NAME, 9) = :gen_w,
+                                      LEFT(TABLE_NAME, LENGTH(TABLE_NAME) - 16), NULL)), ARRAY_CONSTRUCT())
+          INTO :src_present, :have_d, :have_w
+          FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES
+         WHERE TABLE_SCHEMA IN ('OVERWATCH', 'OVERWATCH_BAK')
+           AND TABLE_TYPE = 'BASE TABLE'
+           AND ((TABLE_SCHEMA = 'OVERWATCH' AND ARRAY_CONTAINS(TABLE_NAME::VARIANT, :tables))
+             OR (TABLE_SCHEMA = 'OVERWATCH_BAK' AND REGEXP_LIKE(TABLE_NAME, :prune_re)
+                 AND RIGHT(TABLE_NAME, 9) IN (:gen_d, :gen_w)));
+        probe_ok := TRUE;
+    EXCEPTION
+        WHEN OTHER THEN
+            probe_ok := FALSE;
+    END;
+
     FOR i IN 0 TO ARRAY_SIZE(:tables) - 1 DO
         tname := GET(:tables, i)::VARCHAR;
-        -- Source present on this install? Fails OPEN: if the metadata probe itself errors, the clone
-        -- is attempted exactly as V089 did (a missing source then lands as clone_failed).
-        present := 1;
-        BEGIN
-            SELECT COUNT(*) INTO :present
-              FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES
-             WHERE TABLE_SCHEMA = 'OVERWATCH' AND TABLE_NAME = :tname
-               AND TABLE_TYPE = 'BASE TABLE';
-        EXCEPTION
-            WHEN OTHER THEN
-                present := 1;
-        END;
-        IF (present = 0) THEN
+        -- Missing only on a definite answer: the probe ran and did not list the source (fails OPEN).
+        IF (COALESCE(probe_ok AND NOT ARRAY_CONTAINS(tname::VARIANT, :src_present), FALSE)) THEN
             missing := missing + 1;
             INSERT INTO DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG
                 (RUN_ID, GENERATION, SOURCE_TABLE, ACTION, DETAIL)
@@ -78799,15 +78893,20 @@ BEGIN
         ELSE
             BEGIN
                 -- V158: the daily generation, immutable once taken (IF NOT EXISTS), in the dedicated
-                -- TRANSIENT schema OVERWATCH_BAK (no FUTURE grants there, so no grant churn).
-                EXECUTE IMMEDIATE 'CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH_BAK.' || :tname ||
-                                  '_OWBAK_' || :gen_d || ' CLONE DBA_MAINT_DB.OVERWATCH.' || :tname;
+                -- TRANSIENT schema OVERWATCH_BAK (no FUTURE grants there, so no grant churn). One the
+                -- probe already saw today is not re-issued: the CLONE would be a no-op.
+                IF (NOT COALESCE(probe_ok AND ARRAY_CONTAINS(tname::VARIANT, :have_d), FALSE)) THEN
+                    EXECUTE IMMEDIATE 'CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH_BAK.' || :tname ||
+                                      '_OWBAK_' || :gen_d || ' CLONE DBA_MAINT_DB.OVERWATCH.' || :tname;
+                END IF;
                 IF (is_sunday) THEN
                     -- Sundays: the weekly generation, cloned from today's daily one inside OVERWATCH_BAK,
                     -- and the V089 *_BAK_LAST pointer in OVERWATCH, still weekly (statement unchanged).
-                    EXECUTE IMMEDIATE 'CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH_BAK.' || :tname ||
-                                      '_OWBAK_' || :gen_w || ' CLONE DBA_MAINT_DB.OVERWATCH_BAK.' || :tname ||
-                                      '_OWBAK_' || :gen_d;
+                    IF (NOT COALESCE(probe_ok AND ARRAY_CONTAINS(tname::VARIANT, :have_w), FALSE)) THEN
+                        EXECUTE IMMEDIATE 'CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH_BAK.' || :tname ||
+                                          '_OWBAK_' || :gen_w || ' CLONE DBA_MAINT_DB.OVERWATCH_BAK.' || :tname ||
+                                          '_OWBAK_' || :gen_d;
+                    END IF;
                     -- V089: TRANSIENT target -- a transient source (ALERT_EVENTS,
                     -- ACTION_QUEUE, ...) cannot clone into a PERMANENT table
                     -- ("Transient object cannot be cloned to a permanent object"),
@@ -78816,7 +78915,7 @@ BEGIN
                     EXECUTE IMMEDIATE 'CREATE OR REPLACE TRANSIENT TABLE DBA_MAINT_DB.OVERWATCH.' || :tname ||
                                       '_BAK_LAST CLONE DBA_MAINT_DB.OVERWATCH.' || :tname;
                 END IF;
-                done := done + 1;
+                done := done + 1;          -- this source holds today's generation (taken now or earlier today)
             EXCEPTION
                 WHEN OTHER THEN
                     emsg := SQLERRM;
@@ -78875,7 +78974,8 @@ BEGIN
     -- Prune: keep the newest keep_d daily / keep_w weekly generations per table and kind (rank-based,
     -- so a paused task never empties the history; today's generation is never a candidate). Only
     -- TRANSIENT base tables in DBA_MAINT_DB.OVERWATCH_BAK whose whole name matches prune_re, and the
-    -- regex is re-checked right before each DROP. Isolated like the log above.
+    -- regex is re-checked right before each DROP. Isolated like the log above. Each dropped name is
+    -- collected for the ONE PRUNED insert after this block (it was one INSERT per DROP).
     BEGIN
         res := (
             SELECT g.TABLE_NAME
@@ -78904,9 +79004,7 @@ BEGIN
                 BEGIN
                     EXECUTE IMMEDIATE 'DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH_BAK.' || :pname;
                     pruned := pruned + 1;
-                    INSERT INTO DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG
-                        (RUN_ID, GENERATION, SOURCE_TABLE, BACKUP_TABLE, ACTION)
-                    SELECT :run_id, RIGHT(:pname, 9), LEFT(:pname, LENGTH(:pname) - 16), :pname, 'PRUNED';
+                    pruned_list := pruned_list || pname || ' ';   -- whole-name regex match: no space inside
                 EXCEPTION
                     WHEN OTHER THEN
                         emsg := SQLERRM;
@@ -78929,8 +79027,28 @@ BEGIN
             INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
                 (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
             SELECT 'BackupOperatorTables', 'backup_prune_failed', LEFT(:emsg, 2000),
-                   'prune scan ' || :gen_d || ' (OPERATOR_BACKUP_DAILY): every generation kept this run', CURRENT_ROLE();
+                   'prune scan ' || :gen_d || ' (OPERATOR_BACKUP_DAILY): scan stopped, generations not yet dropped are kept', CURRENT_ROLE();
     END;
+
+    -- The PRUNED rows: ONE set-based insert per run (wave-2b rework D11; it was one INSERT per DROP),
+    -- the same row per dropped generation as before. It sits after the prune block, so every DROP that
+    -- ran is logged even when the scan stopped part-way. Isolated: a failure is logged, never blocking.
+    IF (pruned > 0) THEN
+        BEGIN
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG
+                (RUN_ID, GENERATION, SOURCE_TABLE, BACKUP_TABLE, ACTION)
+            SELECT :run_id, RIGHT(p.VALUE::VARCHAR, 9), LEFT(p.VALUE::VARCHAR, LENGTH(p.VALUE::VARCHAR) - 16),
+                   p.VALUE::VARCHAR, 'PRUNED'
+            FROM TABLE(FLATTEN(INPUT => SPLIT(TRIM(:pruned_list), ' '))) p;
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                    (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'BackupOperatorTables', 'backup_log_failed', LEFT(:emsg, 2000),
+                       'prune log ' || :gen_d || ' (OPERATOR_BACKUP_DAILY): ' || :pruned || ' generation(s) dropped, not logged', CURRENT_ROLE();
+        END;
+    END IF;
 
     -- The log trims itself (SP_PURGE_FACTS is untouched).
     DELETE FROM DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG
@@ -79081,5 +79199,1055 @@ EXECUTE TASK DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR;
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 158 AS VERSION,
-       'Operator-data backups rotate daily (Next-Fifty #32): new TRANSIENT schema DBA_MAINT_DB.OVERWATCH_BAK (owner-only, no FUTURE grants, so no grant churn in OVERWATCH). SP_BACKUP_OPERATOR_TABLES re-derived from V089 clones the 25 operator tables every day at 05:10 Central to immutable TRANSIENT OVERWATCH_BAK.<T>_OWBAK_D<yyyymmdd> generations (Sundays also _OWBAK_W, cloned from the D generation, and V089''s <T>_BAK_LAST statement, still weekly), logs backup vs source row counts to the new OPERATOR_BACKUP_LOG, prunes to SETTINGS BACKUP_KEEP_DAILY 14 / BACKUP_KEEP_WEEKLY 8 (floors 7/4, only TRANSIENT OVERWATCH_BAK tables whose whole name matches the generation pattern, dated before today) and stamps SOURCE_FRESHNESS_STATE OPERATOR_BACKUP_DAILY only on a run with zero clone failures. TASK_BACKUP_OPERATOR moved from Sunday 05:40 to daily 05:10 via SUSPEND/SET SCHEDULE/RESUME. V_SECURITY_EXCEPTION_QUEUE re-derived from V151 with one carve-out: the task''s own generation-prune DROP (USER_NAME SYSTEM, exact generated statement) leaves the CHANGE RISK queue. Restore = INSERT OVERWRITE as the table-owner role. Tail: EXECUTE TASK (first generation).' AS DESCRIPTION
+       'Operator-data backups rotate daily (Next-Fifty #32): new TRANSIENT schema DBA_MAINT_DB.OVERWATCH_BAK (owner-only, no FUTURE grants, so no grant churn in OVERWATCH). SP_BACKUP_OPERATOR_TABLES re-derived from V089 clones the 25 operator tables every day at 05:10 Central to immutable TRANSIENT OVERWATCH_BAK.<T>_OWBAK_D<yyyymmdd> generations (Sundays also _OWBAK_W, cloned from the D generation, and V089''s <T>_BAK_LAST statement, still weekly), logs backup vs source row counts to the new OPERATOR_BACKUP_LOG, prunes to SETTINGS BACKUP_KEEP_DAILY 14 / BACKUP_KEEP_WEEKLY 8 (floors 7/4, only TRANSIENT OVERWATCH_BAK tables whose whole name matches the generation pattern, dated before today) and stamps SOURCE_FRESHNESS_STATE OPERATOR_BACKUP_DAILY only on a run with zero clone failures. One set-based INFORMATION_SCHEMA probe per run (sources present + generations already taken today; fails open) and one set-based PRUNED log insert keep a steady-state day at 59 statements (Sunday 135). TASK_BACKUP_OPERATOR moved from Sunday 05:40 to daily 05:10 via SUSPEND/SET SCHEDULE/RESUME. V_SECURITY_EXCEPTION_QUEUE re-derived from V151 with one carve-out: the task''s own generation-prune DROP (USER_NAME SYSTEM, exact generated statement) leaves the CHANGE RISK queue. Restore = INSERT OVERWRITE as the table-owner role. Tail: EXECUTE TASK (first generation).' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 158);
+
+-- ===========================================================================
+-- >>> V159__loader_compile_diet.sql
+-- ===========================================================================
+-- V159__loader_compile_diet.sql
+--
+-- Loader compile diet (wave-2b rework, owner decisions D5 + D6). DIAG_CS_SELF_COST (2026-09-26) measured
+-- OVERWATCH's own scheduled compile at ~166 min/week on WH_ALFA_ADMIN. After the alert scan, the next-largest
+-- families are this migration's two procs, which recompile a heavy ACCOUNT_USAGE statement every hour for
+-- data that changes far less often (runs/week x average compile, measured):
+--   * SP_LOAD_MARTS_V27 HOURLY arm [1] MERGE MART_WAREHOUSE_EFFICIENCY_DAILY: 175 x 9.2 s = 27.0 min
+--     (QUERY_HISTORY x2 + WAREHOUSE_METERING_HISTORY x2); arm [6] MERGE MART_TASK_GRAPH_DAILY: 175 x 5.1 s
+--     = 14.8 min (TASK_HISTORY x2 + QUERY_ATTRIBUTION_HISTORY); arm [6b] MERGE MART_TASK_NODE_DAILY
+--     (TASK_HISTORY) sits below the panel's cut, unmeasured. 175 = 24 hourly runs x 7 + the nightly
+--     reconcile's 7 re-calls.
+--   * SP_CHANGE_ATTRIBUTION's UPDATE WAREHOUSE_CHANGE_REGISTRY: 168 x 5.1 s = 14.4 min (an 8-day
+--     QUERY_HISTORY join every hour, although registry rows only arrive when the change scan runs).
+--
+-- D5  SP_LOAD_MARTS_V27(VARCHAR, FLOAT), re-derived from V152 (its current definer). The HOURLY branch
+--     reads the Central hour ONCE (SELECT HOUR(CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP()))
+--     INTO :ct_hour) and wraps arms [1], [6] and [6b] each in IF (d > 2 OR MOD(ct_hour, 4) = 0). They run in
+--     the 00/04/08/12/16/20 Central cycles (6 of 24) and ALWAYS when d > 2: SP_NIGHTLY_RECONCILE (V064)
+--     DELETEs D-3..today of MART_WAREHOUSE_EFFICIENCY_DAILY and MART_TASK_GRAPH_DAILY and re-loads them with
+--     ('HOURLY', 3), so an hour-only gate would leave those days empty until the next gated hour; backfills
+--     pass 90/365. TASK_LOAD_MARTS_V27_HOURLY passes ('HOURLY', 2), so d = 2 there. A gated-off arm counts
+--     as OK (req_fail / opt_fail untouched) and appends no :loaded token, so the token-gated freshness MERGE
+--     leaves its SOURCE_FRESHNESS_STATE row at its last stamp -- all three names contain DAILY, so the shared
+--     30h cadence rule (health strip, freshness boards, NATIVE_ALERT_STALE_FACTS, OPS_PIPELINE_DEGRADED)
+--     never reads them stale. The arms' own text is not touched (not even re-indented); every other HOURLY
+--     arm, the DAILY scope, the freshness stamp and the RETURN are byte-identical to V152.
+-- D6  SP_CHANGE_ATTRIBUTION(), re-derived from V033 (its only definer). An early-return guard runs the
+--     unchanged UPDATE only IF EXISTS a WAREHOUSE_CHANGE_REGISTRY row with CHANGED_BY IS NULL and
+--     CHANGE_SEEN_AT >= DATEADD('hour', -3, CURRENT_TIMESTAMP()). CHANGE_SEEN_AT is the scan's TIMESTAMP_LTZ
+--     CURRENT_TIMESTAMP() stamp (V024/V109), so the probe uses the same clock as the proc's own 7-day filter
+--     (an instant against an instant: no zone conversion). That gives ~3 hourly attempts per change, the
+--     first at ~07:07 (27 min after the 06:40 scan) exactly as today; a skipped run returns
+--     'attribution pass skipped (...)'.
+--
+-- Latency trade (disclosed):
+--   * Today's partial row in the three marts is up to 4h old (5h across the November DST fall-back night,
+--     when 01:00-02:00 Central repeats). Readers that see it later: the Optimize idle / sizing / remediation
+--     panels and the idle headline, the Unit costs task-graph panel, the Operations node-timing board and
+--     graph-roots failure counts, and SP_SLO_BREACH_SCAN (V096 reads MART_WAREHOUSE_EFFICIENCY_DAILY and
+--     MART_TASK_NODE_DAILY), so a warehouse or task SLO breach can surface up to ~4h later -- SLO_OBJECTIVES
+--     is empty today, so no SLO is affected yet. WAREHOUSE_METERING_HISTORY (~3h) and
+--     QUERY_ATTRIBUTION_HISTORY (up to ~8h) already lag, which offsets part of it.
+--   * Completed days are unaffected: the reconcile always re-loads D-3..today, and the 00 and 04 Central
+--     cycles re-cover yesterday. SP_ALERT_SCAN_DAILY's COST_IDLE_OPPORTUNITY arm reads completed days only.
+--   * A reconcile that fails mid-way now refills today at the next 4-hour slot, not the next hour.
+--   * A manual CALL SP_LOAD_MARTS_V27('HOURLY', 2) outside those hours skips the three arms; pass 3 to force
+--     them (snowflake/loader_chain_check.sql says so).
+--   * Attribution: a row seen more than 3h ago is not retried unless a newer unattributed change arrives
+--     inside its 7-day window (the unchanged UPDATE then retries all of them). Only an ACCOUNT_USAGE delay
+--     beyond ~3h could lose an attribution that way.
+--   * Pre-existing and NOT changed here: the -65/+5 min evidence window assumes an hourly snapshot, but the
+--     snapshot is daily (06:40) or on demand (Operations Run scan), so only ALTERs made within ~65 min
+--     before a scan are ever attributed. Fixing that changes behaviour and needs its own decision.
+--
+-- Estimated saving (ESTIMATES, DIAG family numbers): [1] and [6] drop from 175 to 49 runs/week (6 Central
+-- cycles x 7 + the reconcile's 7): 27.0 -> 7.5 and 14.8 -> 4.2, about 30 compile-min/week, plus [6b]
+-- (unmeasured). SP_CHANGE_ATTRIBUTION: 14.4 -> ~0.3-2.6 (168 small-table probes plus ~3 full UPDATEs on a
+-- day with a warehouse change), about 12-14. Total ~42-44 of the ~166 measured. Added: one scalar SELECT per
+-- loader run (175/week, no table).
+--
+-- No task, schedule, rule, table or grant change and no tail CALL: the next hourly TASK_LOAD_HOURLY graph
+-- runs both procs. Idempotent; safe to re-run. Owner applies in Snowsight after V158. This file never runs
+-- from the app.
+
+EXECUTE IMMEDIATE
+$$
+DECLARE
+    v NUMBER;
+    not_ready EXCEPTION (-20159, 'V159 requires V158 first - apply migrations in order.');
+BEGIN
+    SELECT MAX(VERSION) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 158) THEN
+        RAISE not_ready;
+    END IF;
+END;
+$$;
+
+-- >>> derived:SP_LOAD_MARTS_V27  (from V152; + the D5 Central 4-hour gate around HOURLY arms [1], [6] and [6b], always open when d > 2, V159)
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27(SCOPE VARCHAR, DAYS_BACK FLOAT)
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    emsg VARCHAR;
+    loaded VARCHAR DEFAULT '';
+    d INT;
+    ct_hour INT;              -- V159 (D5): Central hour of this run, read once (the 4-hour gate)
+    ext_lo DATE;
+    ext_lo_hour TIMESTAMP_LTZ;
+    req_fail INT DEFAULT 0;   -- V066 #10: REQUIRED-arm (core fact/mart) failures this run
+    opt_fail INT DEFAULT 0;   -- V066 #10: OPTIONAL-arm (tag-cov, task-node, AI/Cortex) failures
+    bad_scope EXCEPTION (-20661,
+        'SP_LOAD_MARTS_V27: SCOPE must be HOURLY or DAILY - refusing to run as a silent no-op load.');   -- V066 #37 VALIDATE SCOPE
+BEGIN
+    d := GREATEST(1, LEAST(COALESCE(DAYS_BACK, 2), 400))::INT;
+
+    -- V066 #37 VALIDATE SCOPE: an unrecognized SCOPE matched no arm and the terminal RETURN
+    -- still claimed the marts loaded, so a typo'd scope silently loaded nothing. Fail loudly
+    -- at the top instead (the outer BEGIN has no handler, so this RAISE aborts the proc).
+    IF (UPPER(:SCOPE) NOT IN ('HOURLY', 'DAILY')) THEN
+        RAISE bad_scope;
+    END IF;
+
+    IF (UPPER(:SCOPE) = 'HOURLY') THEN
+
+        -- V159 compile diet (D5): the three DAY-grain arms whose ACCOUNT_USAGE MERGEs dominate this
+        -- loader's compile -- [1] MART_WAREHOUSE_EFFICIENCY_DAILY, [6] MART_TASK_GRAPH_DAILY and [6b]
+        -- MART_TASK_NODE_DAILY -- run every 4th Central hour (00, 04, 08, 12, 16, 20) instead of every
+        -- hour, and ALWAYS when d > 2: SP_NIGHTLY_RECONCILE DELETEs D-3..today of the first two and
+        -- re-loads them with ('HOURLY', 3), and backfills pass 90/365. The hourly task passes 2. A gated-off
+        -- arm is not a failure (req_fail / opt_fail untouched) and appends no :loaded token, so its
+        -- SOURCE_FRESHNESS_STATE row keeps its last stamp -- every name here contains DAILY, so the shared
+        -- 30h cadence rule never reads it stale. Every other arm below still runs every hour.
+        SELECT HOUR(CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())) INTO :ct_hour;
+
+        -- V062 B5/B10: clamp backfill lower bounds to the extract's first
+        -- WHOLE day/hour so a wide :d actually loads :d days (not a silent 2),
+        -- while normal ops (small :d) stay at the extract-bounded window.
+        ext_lo := (SELECT COALESCE(
+                       DATEADD('day', IFF(MIN(START_TIME) = DATE_TRUNC('day', MIN(START_TIME)), 0, 1), DATE(MIN(START_TIME))),
+                       DATEADD('day', -:d, CURRENT_DATE()))
+                   FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT);
+        ext_lo_hour := (SELECT COALESCE(
+                       DATEADD('hour', IFF(MIN(START_TIME) = DATE_TRUNC('hour', MIN(START_TIME)), 0, 1), DATE_TRUNC('hour', MIN(START_TIME))),
+                       DATEADD('day', -:d, CURRENT_DATE()))
+                   FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT);
+
+        -- [1] warehouse efficiency ------------------------------------------
+        IF (d > 2 OR MOD(ct_hour, 4) = 0) THEN   -- V159 (D5) gate [1]: every 4th Central hour; always when d > 2
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_WAREHOUSE_EFFICIENCY_DAILY t
+            USING (
+                WITH m AS (
+                    SELECT DATE(START_TIME) AS DAY, WAREHOUSE_NAME,
+                           SUM(CREDITS_USED) AS CREDITS_TOTAL,
+                           SUM(CREDITS_USED_COMPUTE) AS CREDITS_COMPUTE,
+                           COUNT_IF(CREDITS_USED > 0) AS BILLED_HOURS
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                      AND WAREHOUSE_ID > 0
+                    GROUP BY 1, 2
+                ),
+                q AS (
+                    SELECT DATE(START_TIME) AS DAY, WAREHOUSE_NAME,
+                           COUNT(*) AS QUERIES,
+                           COUNT_IF(EXECUTION_STATUS <> 'SUCCESS') AS FAILS,
+                           SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0)) / 60000 AS QUEUED_MIN,
+                           SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_GB,
+                           APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000 AS P95_S,
+                           SUM(COALESCE(EXECUTION_TIME, 0)) / 3600000 AS EXEC_HOURS
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                      AND WAREHOUSE_NAME IS NOT NULL
+                    GROUP BY 1, 2
+                ),
+                -- V103: ACTIVE_HOURS must count every clock hour a query was RUNNING, not just
+                -- its START hour. The old COUNT(DISTINCT DATE_TRUNC('hour', START_TIME)) marked
+                -- hours 11 and 12 of a 10:59->13:00 query IDLE, so IDLE_PCT (and every $ derived
+                -- from it: the SUSPEND/DOWN sizing verdict, IDLE_MONTHLY_USD, the idle-$ KPI)
+                -- overstated idle for any multi-hour query. Expand each query across the hours it
+                -- SPANS (bounded to 25, matching insights_sql._active_hours_cte), attribute each
+                -- spanned hour to its own DAY, and count distinct warehouse-day-hours.
+                qh AS (
+                    SELECT s.WAREHOUSE_NAME,
+                           DATE(DATEADD('hour', g.SEQ, s.H0)) AS DAY,
+                           DATEADD('hour', g.SEQ, s.H0) AS HOUR_TS
+                    FROM (
+                        SELECT WAREHOUSE_NAME,
+                               DATE_TRUNC('hour', START_TIME) AS H0,
+                               DATE_TRUNC('hour', COALESCE(END_TIME, START_TIME)) AS H1
+                        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                        WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                          AND WAREHOUSE_NAME IS NOT NULL
+                    ) s
+                    JOIN (SELECT SEQ4() AS SEQ FROM TABLE(GENERATOR(ROWCOUNT => 25))) g
+                      ON DATEADD('hour', g.SEQ, s.H0) <= s.H1
+                ),
+                q_active AS (
+                    SELECT WAREHOUSE_NAME, DAY, COUNT(DISTINCT HOUR_TS) AS ACTIVE_HOURS
+                    FROM qh
+                    GROUP BY 1, 2
+                ),
+                m_idle AS (
+                    -- V127: ACTUAL credits burned in warehouse-hours with NO active (span-
+                    -- expanded) query -- mirrors the live twin insights_sql.idle_warehouse_analysis
+                    -- (SUM(IFF(no active query hour, CREDITS_USED, 0))). Stored so the reader
+                    -- eff_idle_analysis reads accurate idle spend instead of pro-rating the day's
+                    -- total credits by the hour-count IDLE_PCT (which over-states idle for scale-out
+                    -- warehouses, whose idle hours cost less than their active multi-cluster hours).
+                    -- Join to DISTINCT active hours (like the live query_hours CTE) so a metering
+                    -- slice is never fanned out by multiple queries sharing an hour.
+                    SELECT DATE(mh.START_TIME) AS DAY, mh.WAREHOUSE_NAME,
+                           SUM(IFF(a.HOUR_TS IS NULL, COALESCE(mh.CREDITS_USED, 0), 0)) AS IDLE_CREDITS
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY mh
+                    LEFT JOIN (SELECT DISTINCT WAREHOUSE_NAME, HOUR_TS FROM qh) a
+                           ON a.WAREHOUSE_NAME = mh.WAREHOUSE_NAME
+                          AND a.HOUR_TS = DATE_TRUNC('hour', mh.START_TIME)
+                    WHERE mh.START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                      AND mh.WAREHOUSE_ID > 0
+                    GROUP BY 1, 2
+                )
+                SELECT COALESCE(m.DAY, q.DAY) AS DAY,
+                       COALESCE(m.WAREHOUSE_NAME, q.WAREHOUSE_NAME) AS WAREHOUSE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(COALESCE(m.WAREHOUSE_NAME, q.WAREHOUSE_NAME)) AS COMPANY,
+                       ROUND(COALESCE(m.CREDITS_TOTAL, 0), 4) AS CREDITS_TOTAL,
+                       ROUND(COALESCE(m.CREDITS_COMPUTE, 0), 4) AS CREDITS_COMPUTE,
+                       COALESCE(q.QUERIES, 0) AS QUERIES,
+                       COALESCE(q.FAILS, 0) AS FAILS,
+                       ROUND(COALESCE(q.QUEUED_MIN, 0), 2) AS QUEUED_MIN,
+                       ROUND(COALESCE(q.SPILL_GB, 0), 3) AS SPILL_GB,
+                       ROUND(COALESCE(q.P95_S, 0), 1) AS P95_S,
+                       ROUND(COALESCE(q.EXEC_HOURS, 0), 3) AS EXEC_HOURS,
+                       COALESCE(m.BILLED_HOURS, 0) AS BILLED_HOURS,
+                       COALESCE(qa.ACTIVE_HOURS, 0) AS ACTIVE_HOURS,
+                       ROUND(100 * GREATEST(COALESCE(m.BILLED_HOURS, 0) - COALESCE(qa.ACTIVE_HOURS, 0), 0)
+                             / NULLIF(m.BILLED_HOURS, 0), 2) AS IDLE_PCT,
+                       ROUND(COALESCE(m.CREDITS_TOTAL, 0) / NULLIF(q.QUERIES, 0), 6) AS CREDITS_PER_QUERY,
+                       ROUND(COALESCE(mi.IDLE_CREDITS, 0), 4) AS IDLE_CREDITS
+                FROM m FULL OUTER JOIN q ON q.DAY = m.DAY AND q.WAREHOUSE_NAME = m.WAREHOUSE_NAME
+                LEFT JOIN q_active qa ON qa.WAREHOUSE_NAME = COALESCE(m.WAREHOUSE_NAME, q.WAREHOUSE_NAME)
+                                     AND qa.DAY = COALESCE(m.DAY, q.DAY)
+                LEFT JOIN m_idle mi ON mi.WAREHOUSE_NAME = COALESCE(m.WAREHOUSE_NAME, q.WAREHOUSE_NAME)
+                                   AND mi.DAY = COALESCE(m.DAY, q.DAY)
+            ) s
+            ON t.DAY = s.DAY AND t.WAREHOUSE_NAME = s.WAREHOUSE_NAME
+            WHEN MATCHED THEN UPDATE SET
+                COMPANY = s.COMPANY, CREDITS_TOTAL = s.CREDITS_TOTAL,
+                CREDITS_COMPUTE = s.CREDITS_COMPUTE, QUERIES = s.QUERIES, FAILS = s.FAILS,
+                QUEUED_MIN = s.QUEUED_MIN, SPILL_GB = s.SPILL_GB, P95_S = s.P95_S,
+                EXEC_HOURS = s.EXEC_HOURS, BILLED_HOURS = s.BILLED_HOURS,
+                ACTIVE_HOURS = s.ACTIVE_HOURS, IDLE_PCT = s.IDLE_PCT,
+                CREDITS_PER_QUERY = s.CREDITS_PER_QUERY, IDLE_CREDITS = s.IDLE_CREDITS,
+                LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, WAREHOUSE_NAME, COMPANY, CREDITS_TOTAL, CREDITS_COMPUTE, QUERIES, FAILS,
+                 QUEUED_MIN, SPILL_GB, P95_S, EXEC_HOURS, BILLED_HOURS, ACTIVE_HOURS, IDLE_PCT, CREDITS_PER_QUERY, IDLE_CREDITS)
+            VALUES (s.DAY, s.WAREHOUSE_NAME, s.COMPANY, s.CREDITS_TOTAL, s.CREDITS_COMPUTE, s.QUERIES, s.FAILS,
+                    s.QUEUED_MIN, s.SPILL_GB, s.P95_S, s.EXEC_HOURS, s.BILLED_HOURS, s.ACTIVE_HOURS, s.IDLE_PCT, s.CREDITS_PER_QUERY, s.IDLE_CREDITS);
+            loaded := loaded || 'wh_eff ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_WAREHOUSE_EFFICIENCY_DAILY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
+        END;
+        END IF;   -- V159 (D5) gate [1]
+
+        -- [2] query families (top 2000/day by exec time) --------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_QUERY_FAMILY_DAILY t
+            USING (
+                SELECT DAY,
+                       QUERY_HASH,
+                       COMPANY,
+                       ANY_VALUE(LEFT(QUERY_TEXT, 200)) AS SAMPLE_TEXT,
+                       COUNT(*) AS RUNS,
+                       COUNT_IF(EXECUTION_STATUS <> 'SUCCESS') AS FAILS,
+                       COUNT(DISTINCT USER_NAME) AS USERS,
+                       COUNT(DISTINCT WAREHOUSE_NAME) AS WAREHOUSES,
+                       ANY_VALUE(DATABASE_NAME) AS DATABASE_NAME,
+                       ANY_VALUE(SCHEMA_NAME) AS SCHEMA_NAME,
+                       ROUND(SUM(COALESCE(EXECUTION_TIME, 0)) / 1000, 1) AS TOTAL_EXEC_SEC,
+                       ROUND(SUM(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 1000, 1) AS TOTAL_ELAPSED_SEC,
+                       ROUND(MEDIAN(TOTAL_ELAPSED_TIME) / 1000, 2) AS MEDIAN_S,
+                       ROUND(APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000, 2) AS P95_S,
+                       ROUND(AVG(COALESCE(COMPILATION_TIME, 0)), 1) AS COMPILE_MS_AVG,
+                       ROUND(AVG(COALESCE(BYTES_SCANNED, 0)) / POWER(1024, 3), 3) AS GB_SCANNED_AVG,
+                       ROUND(AVG(COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0)), 2) AS CACHE_PCT_AVG,
+                       COUNT_IF(COALESCE(QUERY_TAG, '') != '') AS TAGGED_RUNS
+                FROM (
+                    -- V082: derive COMPANY per row FIRST (UDF outside the aggregation, the
+                    -- V029 shape law), so the outer GROUP BY keys on a plain column and never
+                    -- on the correlated-subquery UDF directly -- grouping BY that UDF is the
+                    -- exact shape that logged mart_load_failed every hour after V027 (V029).
+                    SELECT DATE(START_TIME) AS DAY,
+                           QUERY_PARAMETERIZED_HASH AS QUERY_HASH,
+                           DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME) AS COMPANY,
+                           QUERY_TEXT, EXECUTION_STATUS, USER_NAME, WAREHOUSE_NAME,
+                           DATABASE_NAME, SCHEMA_NAME, EXECUTION_TIME, TOTAL_ELAPSED_TIME,
+                           COMPILATION_TIME, BYTES_SCANNED, PERCENTAGE_SCANNED_FROM_CACHE, QUERY_TAG
+                    FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+                    WHERE START_TIME >= GREATEST(DATEADD('day', -:d, CURRENT_DATE()), :ext_lo)
+                      AND QUERY_PARAMETERIZED_HASH IS NOT NULL
+                )
+                GROUP BY DAY, QUERY_HASH, COMPANY
+                QUALIFY ROW_NUMBER() OVER (PARTITION BY DAY, COMPANY ORDER BY TOTAL_EXEC_SEC DESC) <= 2000
+            ) s
+            ON t.DAY = s.DAY AND t.QUERY_HASH = s.QUERY_HASH AND t.COMPANY = s.COMPANY
+            WHEN MATCHED THEN UPDATE SET
+                SAMPLE_TEXT = s.SAMPLE_TEXT, RUNS = s.RUNS, FAILS = s.FAILS, USERS = s.USERS,
+                WAREHOUSES = s.WAREHOUSES, DATABASE_NAME = s.DATABASE_NAME, SCHEMA_NAME = s.SCHEMA_NAME,
+                TOTAL_EXEC_SEC = s.TOTAL_EXEC_SEC, TOTAL_ELAPSED_SEC = s.TOTAL_ELAPSED_SEC, MEDIAN_S = s.MEDIAN_S, P95_S = s.P95_S,
+                COMPILE_MS_AVG = s.COMPILE_MS_AVG, GB_SCANNED_AVG = s.GB_SCANNED_AVG,
+                CACHE_PCT_AVG = s.CACHE_PCT_AVG, TAGGED_RUNS = s.TAGGED_RUNS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, QUERY_HASH, COMPANY, SAMPLE_TEXT, RUNS, FAILS, USERS, WAREHOUSES, DATABASE_NAME, SCHEMA_NAME,
+                 TOTAL_EXEC_SEC, TOTAL_ELAPSED_SEC, MEDIAN_S, P95_S, COMPILE_MS_AVG, GB_SCANNED_AVG, CACHE_PCT_AVG, TAGGED_RUNS)
+            VALUES (s.DAY, s.QUERY_HASH, s.COMPANY, s.SAMPLE_TEXT, s.RUNS, s.FAILS, s.USERS, s.WAREHOUSES, s.DATABASE_NAME,
+                    s.SCHEMA_NAME, s.TOTAL_EXEC_SEC, s.TOTAL_ELAPSED_SEC, s.MEDIAN_S, s.P95_S, s.COMPILE_MS_AVG, s.GB_SCANNED_AVG,
+                    s.CACHE_PCT_AVG, s.TAGGED_RUNS);
+            loaded := loaded || 'qfam ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_QUERY_FAMILY_DAILY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
+        END;
+
+        -- [3] role-hour fact -------------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_QUERY_ROLE_HOURLY t
+            USING (
+                SELECT g.HOUR_TS, g.ROLE_NAME, g.WAREHOUSE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(g.WAREHOUSE_NAME) AS COMPANY,
+                       g.QUERIES, g.FAILS, g.EXEC_SEC
+                FROM (
+                    SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS,
+                           COALESCE(ROLE_NAME, 'UNKNOWN') AS ROLE_NAME,
+                           COALESCE(WAREHOUSE_NAME, 'NONE') AS WAREHOUSE_NAME,
+                           COUNT(*) AS QUERIES,
+                           COUNT_IF(EXECUTION_STATUS <> 'SUCCESS') AS FAILS,
+                           ROUND(SUM(COALESCE(EXECUTION_TIME, 0)) / 1000, 1) AS EXEC_SEC
+                    FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+                    WHERE START_TIME >= GREATEST(DATEADD('day', -:d, CURRENT_DATE()), :ext_lo_hour)
+                    GROUP BY 1, 2, 3
+                ) g
+            ) s
+            ON t.HOUR_TS = s.HOUR_TS AND t.ROLE_NAME = s.ROLE_NAME AND t.WAREHOUSE_NAME = s.WAREHOUSE_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, QUERIES = s.QUERIES, FAILS = s.FAILS,
+                EXEC_SEC = s.EXEC_SEC, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (HOUR_TS, ROLE_NAME, WAREHOUSE_NAME, COMPANY, QUERIES, FAILS, EXEC_SEC)
+            VALUES (s.HOUR_TS, s.ROLE_NAME, s.WAREHOUSE_NAME, s.COMPANY, s.QUERIES, s.FAILS, s.EXEC_SEC);
+            loaded := loaded || 'role_hr ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_QUERY_ROLE_HOURLY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
+        END;
+
+        -- [4] schema-hour fact -----------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_QUERY_SCHEMA_HOURLY t
+            USING (
+                SELECT g.HOUR_TS, g.DATABASE_NAME, g.SCHEMA_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(g.DATABASE_NAME) AS COMPANY,
+                       g.QUERIES, g.FAILS, g.QUEUED_SEC, g.SPILL_GB, g.P95_S
+                FROM (
+                    SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS,
+                           COALESCE(DATABASE_NAME, 'NONE') AS DATABASE_NAME,
+                           COALESCE(SCHEMA_NAME, 'NONE') AS SCHEMA_NAME,
+                           COUNT(*) AS QUERIES,
+                           COUNT_IF(EXECUTION_STATUS <> 'SUCCESS') AS FAILS,
+                           ROUND(SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000, 1) AS QUEUED_SEC,
+                           ROUND(SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3), 3) AS SPILL_GB,
+                           ROUND(APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000, 1) AS P95_S
+                    FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+                    WHERE START_TIME >= GREATEST(DATEADD('day', -:d, CURRENT_DATE()), :ext_lo_hour)
+                    GROUP BY 1, 2, 3
+                ) g
+            ) s
+            ON t.HOUR_TS = s.HOUR_TS AND t.DATABASE_NAME = s.DATABASE_NAME AND t.SCHEMA_NAME = s.SCHEMA_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, QUERIES = s.QUERIES, FAILS = s.FAILS,
+                QUEUED_SEC = s.QUEUED_SEC, SPILL_GB = s.SPILL_GB, P95_S = s.P95_S, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (HOUR_TS, DATABASE_NAME, SCHEMA_NAME, COMPANY, QUERIES, FAILS, QUEUED_SEC, SPILL_GB, P95_S)
+            VALUES (s.HOUR_TS, s.DATABASE_NAME, s.SCHEMA_NAME, s.COMPANY, s.QUERIES, s.FAILS, s.QUEUED_SEC, s.SPILL_GB, s.P95_S);
+            loaded := loaded || 'schema_hr ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_QUERY_SCHEMA_HOURLY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
+        END;
+
+        -- [4b] tag coverage by user, day grain (v4.14 tuning trio) --------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_TAG_COVERAGE_DAILY t
+            USING (
+                SELECT g.DAY, g.USER_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(g.USER_NAME) AS COMPANY,
+                       g.QUERIES, g.EXEC_SEC, g.UNTAGGED_EXEC_SEC
+                FROM (
+                    SELECT DATE(START_TIME) AS DAY,
+                           COALESCE(USER_NAME, 'UNKNOWN') AS USER_NAME,
+                           COUNT(*) AS QUERIES,
+                           ROUND(SUM(COALESCE(EXECUTION_TIME, 0)) / 1000, 1) AS EXEC_SEC,
+                           ROUND(SUM(IFF(NULLIF(QUERY_TAG, '') IS NULL,
+                                         COALESCE(EXECUTION_TIME, 0), 0)) / 1000, 1) AS UNTAGGED_EXEC_SEC
+                    FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+                    WHERE START_TIME >= GREATEST(DATEADD('day', -:d, CURRENT_DATE()), :ext_lo)
+                    GROUP BY 1, 2
+                ) g
+            ) s
+            ON t.DAY = s.DAY AND t.USER_NAME = s.USER_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, QUERIES = s.QUERIES,
+                EXEC_SEC = s.EXEC_SEC, UNTAGGED_EXEC_SEC = s.UNTAGGED_EXEC_SEC,
+                LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, USER_NAME, COMPANY, QUERIES, EXEC_SEC, UNTAGGED_EXEC_SEC)
+            VALUES (s.DAY, s.USER_NAME, s.COMPANY, s.QUERIES, s.EXEC_SEC, s.UNTAGGED_EXEC_SEC);
+            loaded := loaded || 'tagcov ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_TAG_COVERAGE_DAILY - other marts unaffected', CURRENT_ROLE();
+                opt_fail := opt_fail + 1;   -- V066 #10: this OPTIONAL arm failed (verdict-only; per-arm swallow unchanged)
+        END;
+
+        -- [5] cost allocation (exec-time share of each warehouse-hour) -------
+        BEGIN
+            CREATE OR REPLACE TEMPORARY TABLE _OW_ALLOC_BASE AS
+            WITH wh AS (
+                SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS, WAREHOUSE_NAME,
+                       SUM(CREDITS_USED) AS HOUR_CREDITS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+                WHERE START_TIME >= GREATEST(DATEADD('day', -:d, CURRENT_DATE()), :ext_lo)
+                  AND WAREHOUSE_ID > 0
+                GROUP BY 1, 2
+            ),
+            q AS (
+                SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS, WAREHOUSE_NAME,
+                       USER_NAME, COALESCE(ROLE_NAME, 'UNKNOWN') AS ROLE_NAME,
+                       COALESCE(DATABASE_NAME, 'NONE') AS DATABASE_NAME,
+                       COALESCE(SCHEMA_NAME, 'NONE') AS SCHEMA_NAME,
+                       SUM(COALESCE(EXECUTION_TIME, 0)) AS EXEC_MS
+                FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+                WHERE START_TIME >= GREATEST(DATEADD('day', -:d, CURRENT_DATE()), :ext_lo)
+                  AND WAREHOUSE_NAME IS NOT NULL AND COALESCE(EXECUTION_TIME, 0) > 0
+                GROUP BY 1, 2, 3, 4, 5, 6
+            ),
+            tot AS (
+                SELECT HOUR_TS, WAREHOUSE_NAME, SUM(EXEC_MS) AS TOTAL_MS FROM q GROUP BY 1, 2
+            )
+            SELECT DATE(q.HOUR_TS) AS DAY, q.WAREHOUSE_NAME, q.USER_NAME, q.ROLE_NAME,
+                   q.DATABASE_NAME, q.SCHEMA_NAME, q.EXEC_MS,
+                   wh.HOUR_CREDITS * q.EXEC_MS / NULLIF(tot.TOTAL_MS, 0) AS ALLOC_CREDITS
+            FROM q
+            JOIN tot ON tot.HOUR_TS = q.HOUR_TS AND tot.WAREHOUSE_NAME = q.WAREHOUSE_NAME
+            JOIN wh ON wh.HOUR_TS = q.HOUR_TS AND wh.WAREHOUSE_NAME = q.WAREHOUSE_NAME;
+
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_COST_ALLOCATION_DAILY t
+            USING (
+                SELECT DAY, 'USER' AS DIMENSION, USER_NAME AS KEY_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(USER_NAME) AS COMPANY,
+                       ROUND(SUM(ALLOC_CREDITS), 6) AS ALLOC_CREDITS,
+                       ROUND(SUM(EXEC_MS) / 1000, 1) AS EXEC_SEC
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3
+                UNION ALL
+                SELECT DAY, 'DATABASE', DATABASE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME),
+                       ROUND(SUM(ALLOC_CREDITS), 6), ROUND(SUM(EXEC_MS) / 1000, 1)
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3
+                UNION ALL
+                SELECT DAY, 'SCHEMA', DATABASE_NAME || '.' || SCHEMA_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME),
+                       ROUND(SUM(ALLOC_CREDITS), 6), ROUND(SUM(EXEC_MS) / 1000, 1)
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3, DATABASE_NAME
+                UNION ALL
+                SELECT DAY, 'ROLE', ROLE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_ROLE(ROLE_NAME),
+                       ROUND(SUM(ALLOC_CREDITS), 6), ROUND(SUM(EXEC_MS) / 1000, 1)
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3
+            ) s
+            ON t.DAY = s.DAY AND t.DIMENSION = s.DIMENSION AND t.KEY_NAME = s.KEY_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, ALLOC_CREDITS = s.ALLOC_CREDITS,
+                EXEC_SEC = s.EXEC_SEC, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, DIMENSION, KEY_NAME, COMPANY, ALLOC_CREDITS, EXEC_SEC)
+            VALUES (s.DAY, s.DIMENSION, s.KEY_NAME, s.COMPANY, s.ALLOC_CREDITS, s.EXEC_SEC);
+            loaded := loaded || 'alloc ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_COST_ALLOCATION_DAILY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
+        END;
+
+        -- [5b] cross-dim allocation fact (V041 R2): persist _OW_ALLOC_BASE at
+        -- DAY x WAREHOUSE x DATABASE x USER before it collapses to single-dim.
+        -- NO schema grain (cardinality; schema stays live-filtered). Same
+        -- expressions as [5], so the day-sums reconcile by construction.
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_COST_ALLOC_XDIM_DAILY t
+            USING (
+                SELECT DAY, WAREHOUSE_NAME, DATABASE_NAME, USER_NAME,
+                       ROUND(SUM(EXEC_MS) / 1000, 1) AS EXEC_SEC,
+                       ROUND(SUM(ALLOC_CREDITS), 6) AS ALLOC_CREDITS
+                FROM _OW_ALLOC_BASE
+                GROUP BY 1, 2, 3, 4
+            ) s
+            ON t.DAY = s.DAY AND t.WAREHOUSE_NAME = s.WAREHOUSE_NAME
+               AND t.DATABASE_NAME = s.DATABASE_NAME AND t.USER_NAME = s.USER_NAME
+            WHEN MATCHED THEN UPDATE SET EXEC_SEC = s.EXEC_SEC,
+                ALLOC_CREDITS = s.ALLOC_CREDITS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, WAREHOUSE_NAME, DATABASE_NAME, USER_NAME, EXEC_SEC, ALLOC_CREDITS)
+            VALUES (s.DAY, s.WAREHOUSE_NAME, s.DATABASE_NAME, s.USER_NAME, s.EXEC_SEC, s.ALLOC_CREDITS);
+            loaded := loaded || 'alloc_xdim ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_COST_ALLOC_XDIM_DAILY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
+        END;
+
+        -- [6] task graphs -----------------------------------------------------
+        IF (d > 2 OR MOD(ct_hour, 4) = 0) THEN   -- V159 (D5) gate [6]: every 4th Central hour; always when d > 2
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_TASK_GRAPH_DAILY t
+            USING (
+                WITH attempts AS (
+                    -- V126: keep EVERY attempt (do NOT collapse to the terminal attempt before
+                    -- the credit join) and tag the terminal one. TASK_RUNS / FAILED_TASKS still
+                    -- count scheduled tasks via TERMINAL_RN = 1 (a task auto-retried to success
+                    -- is not a graph-run failure), but WH_CREDITS now SUMs the compute of EVERY
+                    -- attempt -- each retry really billed compute. This mirrors the live twin
+                    -- graph_sql.graph_daily_costs exactly, so the same task-graph panel's cost no
+                    -- longer flips with mart warmth. V102's terminal-only credit join dropped a
+                    -- failed-retry attempt's compute (documented as accepted, but it disagreed
+                    -- with the live path and the "every task run" panel caption).
+                    SELECT COALESCE(h.GRAPH_RUN_GROUP_ID::VARCHAR, h.QUERY_ID) AS RUN_KEY,
+                           h.NAME, h.DATABASE_NAME, h.SCHEMA_NAME,
+                           h.QUERY_START_TIME, h.COMPLETED_TIME, h.STATE,
+                           COALESCE(a.CREDITS, 0) AS CREDITS,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY COALESCE(h.GRAPH_RUN_GROUP_ID::VARCHAR, h.QUERY_ID), h.NAME, h.SCHEDULED_TIME
+                               ORDER BY h.COMPLETED_TIME DESC NULLS LAST) AS TERMINAL_RN
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY h
+                    LEFT JOIN (
+                        SELECT COALESCE(ROOT_QUERY_ID, QUERY_ID) AS ROOT_ID, SUM(CREDITS_ATTRIBUTED_COMPUTE + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS
+                        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+                        WHERE START_TIME >= DATEADD('day', -:d - 1, CURRENT_DATE())
+                          AND COALESCE(ROOT_QUERY_ID, QUERY_ID) IN (
+                              SELECT QUERY_ID FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+                              WHERE QUERY_START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                                AND STATE IN ('SUCCEEDED', 'FAILED')
+                          )
+                        GROUP BY COALESCE(ROOT_QUERY_ID, QUERY_ID)
+                    ) a ON a.ROOT_ID = h.QUERY_ID
+                    WHERE h.QUERY_START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                      AND h.STATE IN ('SUCCEEDED', 'FAILED')
+                ),
+                runs AS (
+                    SELECT RUN_KEY,
+                           MIN_BY(NAME, QUERY_START_TIME) AS PIPELINE,
+                           MIN_BY(DATABASE_NAME, QUERY_START_TIME) AS DATABASE_NAME,
+                           MIN_BY(SCHEMA_NAME, QUERY_START_TIME) AS SCHEMA_NAME,
+                           DATE(MIN(QUERY_START_TIME)) AS DAY,
+                           COUNT_IF(TERMINAL_RN = 1) AS TASK_RUNS,
+                           COUNT_IF(TERMINAL_RN = 1 AND STATE = 'FAILED') AS FAILED_TASKS,
+                           DATEDIFF('second', MIN(QUERY_START_TIME), MAX(COMPLETED_TIME)) AS WALL_SEC,
+                           SUM(CREDITS) AS CREDITS
+                    FROM attempts
+                    GROUP BY RUN_KEY
+                )
+                SELECT DAY, PIPELINE, DATABASE_NAME, SCHEMA_NAME,
+                       COUNT(*) AS GRAPH_RUNS,
+                       COUNT_IF(FAILED_TASKS > 0) AS RUNS_WITH_FAILURES,
+                       SUM(TASK_RUNS) AS TASK_RUNS,
+                       ROUND(AVG(WALL_SEC), 1) AS AVG_WALL_SEC,
+                       ROUND(APPROX_PERCENTILE(WALL_SEC, 0.95), 1) AS P95_WALL_SEC,
+                       ROUND(SUM(CREDITS), 4) AS WH_CREDITS
+                FROM runs GROUP BY 1, 2, 3, 4
+            ) s
+            ON t.DAY = s.DAY AND t.PIPELINE = s.PIPELINE
+               AND COALESCE(t.DATABASE_NAME, '') = COALESCE(s.DATABASE_NAME, '')
+               AND COALESCE(t.SCHEMA_NAME, '') = COALESCE(s.SCHEMA_NAME, '')
+            WHEN MATCHED THEN UPDATE SET GRAPH_RUNS = s.GRAPH_RUNS,
+                RUNS_WITH_FAILURES = s.RUNS_WITH_FAILURES, TASK_RUNS = s.TASK_RUNS,
+                AVG_WALL_SEC = s.AVG_WALL_SEC, P95_WALL_SEC = s.P95_WALL_SEC,
+                WH_CREDITS = s.WH_CREDITS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, PIPELINE, DATABASE_NAME, SCHEMA_NAME, GRAPH_RUNS, RUNS_WITH_FAILURES,
+                 TASK_RUNS, AVG_WALL_SEC, P95_WALL_SEC, WH_CREDITS)
+            VALUES (s.DAY, s.PIPELINE, s.DATABASE_NAME, s.SCHEMA_NAME, s.GRAPH_RUNS,
+                    s.RUNS_WITH_FAILURES, s.TASK_RUNS, s.AVG_WALL_SEC, s.P95_WALL_SEC, s.WH_CREDITS);
+            loaded := loaded || 'graphs ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_TASK_GRAPH_DAILY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
+        END;
+        END IF;   -- V159 (D5) gate [6]
+
+        -- [6b] per-node task timing (queue + exec delay) -> MART_TASK_NODE_DAILY
+        -- Observability for the deferred reconcile-scheduling work: the
+        -- SCHEDULED_TIME->QUERY_START_TIME dispatch delay (which the pipeline-grain
+        -- arm [6] discards) quantifies the 06:40/06:45 XSMALL contention. Own
+        -- guarded arm; touches no existing statement; one TASK_HISTORY scan at the
+        -- same -:d window; MERGE on (DAY, DATABASE_NAME, SCHEMA_NAME, TASK_NAME).
+        IF (d > 2 OR MOD(ct_hour, 4) = 0) THEN   -- V159 (D5) gate [6b]: every 4th Central hour; always when d > 2
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_TASK_NODE_DAILY t
+            USING (
+                SELECT DATE(QUERY_START_TIME) AS DAY,
+                       COALESCE(DATABASE_NAME, 'NONE') AS DATABASE_NAME,
+                       COALESCE(SCHEMA_NAME, 'NONE') AS SCHEMA_NAME,
+                       NAME AS TASK_NAME,
+                       COUNT(*) AS RUNS,
+                       COUNT_IF(STATE = 'FAILED') AS FAILED,
+                       ROUND(AVG(GREATEST(DATEDIFF('millisecond', SCHEDULED_TIME, QUERY_START_TIME), 0)) / 1000, 2) AS AVG_QUEUE_SEC,
+                       ROUND(APPROX_PERCENTILE(GREATEST(DATEDIFF('millisecond', SCHEDULED_TIME, QUERY_START_TIME), 0), 0.95) / 1000, 2) AS P95_QUEUE_SEC,
+                       ROUND(MAX(GREATEST(DATEDIFF('millisecond', SCHEDULED_TIME, QUERY_START_TIME), 0)) / 1000, 2) AS MAX_QUEUE_SEC,
+                       ROUND(AVG(DATEDIFF('millisecond', QUERY_START_TIME, COMPLETED_TIME)) / 1000, 2) AS AVG_EXEC_SEC,
+                       ROUND(APPROX_PERCENTILE(DATEDIFF('millisecond', QUERY_START_TIME, COMPLETED_TIME), 0.95) / 1000, 2) AS P95_EXEC_SEC,
+                       ROUND(MAX(DATEDIFF('millisecond', QUERY_START_TIME, COMPLETED_TIME)) / 1000, 2) AS MAX_EXEC_SEC,
+                       MIN(QUERY_START_TIME) AS FIRST_START,
+                       MAX(COMPLETED_TIME) AS LAST_COMPLETED
+                FROM (
+                    -- V102: collapse task auto-retries to the terminal attempt so RUNS /
+                    -- FAILED and the queue/exec percentiles count scheduled runs, not
+                    -- attempts, mirroring the live ops_sql.task_runs / task_recent_states.
+                    SELECT DATABASE_NAME, SCHEMA_NAME, NAME, SCHEDULED_TIME,
+                           QUERY_START_TIME, COMPLETED_TIME, STATE
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+                    WHERE QUERY_START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                      AND STATE IN ('SUCCEEDED', 'FAILED')
+                    QUALIFY ROW_NUMBER() OVER (PARTITION BY DATABASE_NAME, SCHEMA_NAME, NAME, SCHEDULED_TIME
+                                               ORDER BY COMPLETED_TIME DESC NULLS LAST) = 1
+                ) th
+                GROUP BY 1, 2, 3, 4
+            ) s
+            ON t.DAY = s.DAY AND t.TASK_NAME = s.TASK_NAME
+               AND COALESCE(t.DATABASE_NAME, '') = COALESCE(s.DATABASE_NAME, '')
+               AND COALESCE(t.SCHEMA_NAME, '') = COALESCE(s.SCHEMA_NAME, '')
+            WHEN MATCHED THEN UPDATE SET
+                RUNS = s.RUNS, FAILED = s.FAILED,
+                AVG_QUEUE_SEC = s.AVG_QUEUE_SEC, P95_QUEUE_SEC = s.P95_QUEUE_SEC, MAX_QUEUE_SEC = s.MAX_QUEUE_SEC,
+                AVG_EXEC_SEC = s.AVG_EXEC_SEC, P95_EXEC_SEC = s.P95_EXEC_SEC, MAX_EXEC_SEC = s.MAX_EXEC_SEC,
+                FIRST_START = s.FIRST_START, LAST_COMPLETED = s.LAST_COMPLETED, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, DATABASE_NAME, SCHEMA_NAME, TASK_NAME, RUNS, FAILED,
+                 AVG_QUEUE_SEC, P95_QUEUE_SEC, MAX_QUEUE_SEC,
+                 AVG_EXEC_SEC, P95_EXEC_SEC, MAX_EXEC_SEC, FIRST_START, LAST_COMPLETED)
+            VALUES (s.DAY, s.DATABASE_NAME, s.SCHEMA_NAME, s.TASK_NAME, s.RUNS, s.FAILED,
+                    s.AVG_QUEUE_SEC, s.P95_QUEUE_SEC, s.MAX_QUEUE_SEC,
+                    s.AVG_EXEC_SEC, s.P95_EXEC_SEC, s.MAX_EXEC_SEC, s.FIRST_START, s.LAST_COMPLETED);
+            loaded := loaded || 'task_node ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_TASK_NODE_DAILY - other marts unaffected', CURRENT_ROLE();
+                opt_fail := opt_fail + 1;   -- V066 #10: this OPTIONAL arm failed (verdict-only; per-arm swallow unchanged)
+        END;
+        END IF;   -- V159 (D5) gate [6b]
+
+        -- [8] incident timeline (rolling 48h window rebuild) -----------------
+        BEGIN
+            -- V066 #3: wrap the DELETE+INSERT in ONE transaction. Under AUTOCOMMIT the DELETE
+            -- committed immediately, so a later failure in the 4-way UNION INSERT (a transient
+            -- ACCOUNT_USAGE read / COMPANY_FOR_DATABASE UDF error) left the trailing 48h BLANK
+            -- until the next hourly rebuild -- an incident timeline empty mid-incident. ROLLBACK
+            -- on error restores the prior rows (the B34 FACT_TASK_DAILY wrap pattern).
+            BEGIN TRANSACTION;
+            DELETE FROM DBA_MAINT_DB.OVERWATCH.MART_INCIDENT_TIMELINE
+            WHERE EVENT_TS >= DATEADD('hour', -48, CURRENT_TIMESTAMP());
+
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.MART_INCIDENT_TIMELINE
+                (EVENT_TS, KIND, COMPANY, SEVERITY, TITLE, REF_ID)
+            SELECT RAISED_AT, 'ALERT', COMPANY, SEVERITY, LEFT(TITLE, 300), EVENT_ID
+            FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            WHERE RAISED_AT >= DATEADD('hour', -48, CURRENT_TIMESTAMP())
+            UNION ALL
+            SELECT COMPLETED_TIME, 'TASK_FAIL',
+                   DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(COALESCE(DATABASE_NAME, '')),
+                   'HIGH', LEFT(DATABASE_NAME || '.' || NAME || ' failed', 300), NAME
+            FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+            WHERE COMPLETED_TIME >= DATEADD('hour', -48, CURRENT_TIMESTAMP()) AND STATE = 'FAILED'
+            UNION ALL
+            SELECT START_TIME, 'DDL',
+                   DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(COALESCE(DATABASE_NAME, '')),
+                   'INFO', LEFT(QUERY_TYPE || ' by ' || USER_NAME || ' (' || COALESCE(ROLE_NAME, '?') || ')', 300), QUERY_ID
+            FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+            WHERE START_TIME >= DATEADD('hour', -48, CURRENT_TIMESTAMP())
+              AND EXECUTION_STATUS = 'SUCCESS'
+              AND QUERY_TYPE IN ('CREATE', 'CREATE_TABLE', 'CREATE_TABLE_AS_SELECT', 'ALTER',
+                                 'DROP', 'RENAME', 'CREATE_VIEW', 'GRANT', 'REVOKE', 'TRUNCATE_TABLE')
+            UNION ALL
+            SELECT CHANGE_SEEN_AT, 'WH_CHANGE', COMPANY, 'INFO',
+                   LEFT(WAREHOUSE_NAME || ' ' || SETTING || ' ' || COALESCE(OLD_VALUE, '?') || '->' || COALESCE(NEW_VALUE, '?'), 300),
+                   CHANGE_ID
+            FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY
+            WHERE CHANGE_SEEN_AT >= DATEADD('hour', -48, CURRENT_TIMESTAMP());
+            COMMIT;
+            loaded := loaded || 'timeline ';
+        EXCEPTION
+            WHEN OTHER THEN
+                ROLLBACK;   -- V066 #3: undo the 48h DELETE if the rebuild INSERT failed
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_INCIDENT_TIMELINE - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
+        END;
+
+
+        -- V041 R6: loader-owned freshness — this scope's sources, one commit.
+        -- V066 #11 FRESHNESS ADVANCES ON FAILURE: stamp ONLY the sources whose arm actually
+        -- loaded this run. This MERGE used to advance GENERATION and write the successful-arm
+        -- list as STATUS across the whole STATIC group, so a source whose arm just failed
+        -- still looked freshly loaded. Each arm appends its token to :loaded only on its
+        -- success path, so gate the source set on token membership (ARRAY_CONTAINS over
+        -- SPLIT(:loaded)); a failed source is left untouched -- its prior generation/snapshot
+        -- stand, correctly reading as not-loaded-this-run -- and STATUS now carries that
+        -- source's own outcome.
+        MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE t
+        USING (
+            SELECT f.SOURCE_NAME, ANY_VALUE(f.LAST_LOAD_TS) AS LAST_LOAD_TS,
+                   ANY_VALUE(f.ROW_COUNT) AS ROW_COUNT, LISTAGG(m.TOKEN, ' ') AS STATUS
+            FROM DBA_MAINT_DB.OVERWATCH.MART_SOURCE_FRESHNESS f
+            JOIN (
+                SELECT SOURCE_NAME, TOKEN FROM VALUES
+                    ('MART_WAREHOUSE_EFFICIENCY_DAILY', 'wh_eff'),
+                    ('MART_QUERY_FAMILY_DAILY', 'qfam'),
+                    ('FACT_QUERY_ROLE_HOURLY', 'role_hr'),
+                    ('FACT_QUERY_SCHEMA_HOURLY', 'schema_hr'),
+                    ('MART_TAG_COVERAGE_DAILY', 'tagcov'),
+                    ('MART_COST_ALLOCATION_DAILY', 'alloc'),
+                    ('FACT_COST_ALLOC_XDIM_DAILY', 'alloc_xdim'),
+                    ('MART_TASK_GRAPH_DAILY', 'graphs'),
+                    ('MART_TASK_NODE_DAILY', 'task_node'),
+                    ('MART_INCIDENT_TIMELINE', 'timeline')
+                    AS srcmap(SOURCE_NAME, TOKEN)
+            ) m ON m.SOURCE_NAME = f.SOURCE_NAME
+            WHERE ARRAY_CONTAINS(m.TOKEN::VARIANT, SPLIT(:loaded, ' '))
+            GROUP BY f.SOURCE_NAME
+        ) s
+        ON t.SOURCE_NAME = s.SOURCE_NAME
+        WHEN MATCHED THEN UPDATE SET LAST_LOAD_TS = s.LAST_LOAD_TS, ROW_COUNT = s.ROW_COUNT,
+            SNAPSHOT_TS = CURRENT_TIMESTAMP(), GENERATION = COALESCE(t.GENERATION, 0) + 1,
+            STATUS = s.STATUS
+        WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
+        VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, s.STATUS);
+
+    END IF;
+
+    IF (UPPER(:SCOPE) = 'DAILY') THEN
+
+        -- [7] security posture ------------------------------------------------
+        BEGIN
+            -- V041 R11 (guarded, v4.36.1): SHOW -> RESULT_SCAN once daily
+            -- (V024 precedent), so Security stops paying a SHOW + parse per
+            -- render. The nested handler means a SHOW failure can never take
+            -- the CORE posture metrics down with it — the monitor arms below
+            -- emit no rows that day instead (HAVING; never a lying zero).
+            BEGIN
+                SHOW WAREHOUSES LIMIT 500;
+                CREATE OR REPLACE TEMPORARY TABLE _OW_WH_MONITOR AS
+                SELECT "name"::VARCHAR AS WAREHOUSE_NAME,
+                       COALESCE("resource_monitor"::VARCHAR, 'null') AS RESOURCE_MONITOR,
+                       TRY_TO_NUMBER("auto_suspend"::VARCHAR) AS AUTO_SUSPEND
+                FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+            EXCEPTION
+                WHEN OTHER THEN
+                    emsg := SQLERRM;
+                    CREATE OR REPLACE TEMPORARY TABLE _OW_WH_MONITOR (
+                        WAREHOUSE_NAME VARCHAR, RESOURCE_MONITOR VARCHAR, AUTO_SUSPEND NUMBER);
+                    INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                    SELECT 'MartLoader', 'monitor_counts_skipped', :emsg, 'SHOW WAREHOUSES unavailable - core posture unaffected', CURRENT_ROLE();
+            END;
+
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_SECURITY_POSTURE_DAILY t
+            USING (
+                -- A4: CREDENTIALS scanned ONCE; both metrics via COUNT_IF + UNPIVOT (was two scans).
+                SELECT CURRENT_DATE() AS DAY, cu.METRIC AS METRIC, 'ALL' AS COMPANY, cu.VALUE::NUMBER(18,2) AS VALUE
+                FROM (
+                    SELECT COUNT_IF(EXPIRATION_DATE IS NOT NULL
+                                    AND EXPIRATION_DATE BETWEEN CURRENT_TIMESTAMP() AND DATEADD('day', 10, CURRENT_TIMESTAMP())) AS "EXPIRING_CRED_10D",
+                           COUNT_IF(EXPIRATION_DATE IS NOT NULL AND EXPIRATION_DATE < CURRENT_TIMESTAMP()) AS "EXPIRED_CRED"
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
+                ) c
+                UNPIVOT (VALUE FOR METRIC IN ("EXPIRING_CRED_10D", "EXPIRED_CRED")) cu
+                UNION ALL
+                SELECT CURRENT_DATE(), 'ADMIN_STMTS_24H', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                  AND ROLE_NAME IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')
+                UNION ALL
+                -- A4: GRANTS_TO_USERS scanned ONCE; both grant metrics via COUNT_IF + UNPIVOT (was two
+                -- scans). The outer WHERE is a superset of the rows either metric needs (created >= -30d
+                -- covers the -24h change window; deleted >= -24h keeps revoked-in-24h rows), and each
+                -- COUNT_IF re-applies its exact original predicate, so both counts are unchanged.
+                SELECT CURRENT_DATE() AS DAY, gu.METRIC AS METRIC, 'ALL' AS COMPANY, gu.VALUE::NUMBER(18,2) AS VALUE
+                FROM (
+                    SELECT COUNT_IF(CREATED_ON >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                                    OR DELETED_ON >= DATEADD('hour', -24, CURRENT_TIMESTAMP())) AS "GRANT_CHANGES_24H",
+                           COUNT_IF(DELETED_ON IS NULL
+                                    AND ROLE IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')
+                                    AND CREATED_ON >= DATEADD('day', -30, CURRENT_TIMESTAMP())) AS "BREAKGLASS_GRANTS_30D"
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
+                    WHERE CREATED_ON >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+                       OR DELETED_ON >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                ) g
+                UNPIVOT (VALUE FOR METRIC IN ("GRANT_CHANGES_24H", "BREAKGLASS_GRANTS_30D")) gu
+                UNION ALL
+                -- V041 R9: unused-role posture from the role-hour fact, not a
+                -- 90d QUERY_HISTORY anti-join. Coverage-gated: HAVING emits NO
+                -- row (never a lying zero) until the fact spans the window.
+                SELECT CURRENT_DATE(), 'UNUSED_ROLES_90D', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.ROLES r
+                WHERE r.DELETED_ON IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_ROLE_HOURLY q
+                      WHERE q.HOUR_TS >= DATEADD('day', -90, CURRENT_TIMESTAMP())
+                        AND q.ROLE_NAME = r.NAME
+                  )
+                HAVING (SELECT MIN(HOUR_TS) FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_ROLE_HOURLY)
+                       <= DATEADD('day', -89, CURRENT_TIMESTAMP())
+                UNION ALL
+                SELECT CURRENT_DATE(), 'MFA_GAP_USERS', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.USERS U
+                WHERE U.DELETED_ON IS NULL AND COALESCE(U.DISABLED, FALSE) = FALSE
+                  AND U.HAS_PASSWORD = TRUE AND COALESCE(U.HAS_MFA, FALSE) = FALSE
+                  AND EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY L
+                              WHERE L.USER_NAME = U.NAME
+                                AND L.DAY >= DATEADD('day', -30, CURRENT_DATE())
+                                AND L.PASSWORD_LOGINS > 0)
+                UNION ALL
+                SELECT CURRENT_DATE(), 'WH_NO_MONITOR', 'ALL',
+                       COUNT_IF(LOWER(TRIM(RESOURCE_MONITOR)) IN ('null', '', 'none'))
+                FROM _OW_WH_MONITOR
+                HAVING COUNT(*) > 0
+                UNION ALL
+                SELECT CURRENT_DATE(), 'WH_NO_AUTOSUSPEND', 'ALL',
+                       COUNT_IF(COALESCE(AUTO_SUSPEND, 0) <= 0)
+                FROM _OW_WH_MONITOR
+                HAVING COUNT(*) > 0
+            ) s
+            ON t.DAY = s.DAY AND t.METRIC = s.METRIC AND t.COMPANY = s.COMPANY
+            WHEN MATCHED THEN UPDATE SET VALUE = s.VALUE, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, METRIC, COMPANY, VALUE)
+            VALUES (s.DAY, s.METRIC, s.COMPANY, s.VALUE);
+            loaded := loaded || 'posture ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_SECURITY_POSTURE_DAILY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
+        END;
+
+        -- [9] AI usage (Cortex Code views bill this account; Functions guarded)
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY t
+            USING (
+                SELECT c.USAGE_TIME::DATE AS DAY,
+                       COALESCE(u.NAME, 'UNKNOWN') AS USER_NAME,
+                       c.SOURCE AS SOURCE,
+                       'n/a' AS MODEL_NAME,
+                       ANY_VALUE(u.EMAIL) AS EMAIL,
+                       -- V078: CORTEX_CODE_* USAGE_TIME is TIMESTAMP_TZ; the fact
+                       -- columns are TIMESTAMP_NTZ and MERGE will not coerce TZ->NTZ
+                       -- (live 2026-08-13: "expecting TIMESTAMP_NTZ(9) but got
+                       -- TIMESTAMP_TZ(9) for column FIRST_TS" killed this arm on
+                       -- every run, starving the AI coverage gate).
+                       MIN(c.USAGE_TIME)::TIMESTAMP_NTZ AS FIRST_TS,
+                       MAX(c.USAGE_TIME)::TIMESTAMP_NTZ AS LAST_TS,
+                       COUNT(*) AS REQUESTS,
+                       SUM(COALESCE(c.TOKENS, 0)) AS TOKENS,
+                       ROUND(SUM(COALESCE(c.TOKEN_CREDITS, 0)), 6) AS CREDITS
+                FROM (
+                    SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'Snowsight' AS SOURCE
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY
+                    WHERE USAGE_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                    UNION ALL
+                    SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'CLI'
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_CLI_USAGE_HISTORY
+                    WHERE USAGE_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                ) c
+                LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.USERS u ON u.USER_ID = c.USER_ID
+                GROUP BY 1, 2, 3
+            ) s
+            ON t.DAY = s.DAY AND t.USER_NAME = s.USER_NAME AND t.SOURCE = s.SOURCE AND t.MODEL_NAME = s.MODEL_NAME
+            WHEN MATCHED THEN UPDATE SET REQUESTS = s.REQUESTS, TOKENS = s.TOKENS,
+                CREDITS = s.CREDITS, EMAIL = s.EMAIL, FIRST_TS = s.FIRST_TS,
+                LAST_TS = s.LAST_TS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, USER_NAME, SOURCE, MODEL_NAME, EMAIL, FIRST_TS, LAST_TS, REQUESTS, TOKENS, CREDITS)
+            VALUES (s.DAY, s.USER_NAME, s.SOURCE, s.MODEL_NAME, s.EMAIL, s.FIRST_TS, s.LAST_TS,
+                    s.REQUESTS, s.TOKENS, s.CREDITS);
+            loaded := loaded || 'ai_code ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_AI_USAGE_DAILY (code views) - other marts unaffected', CURRENT_ROLE();
+                opt_fail := opt_fail + 1;   -- V066 #10: this OPTIONAL arm failed (verdict-only; per-arm swallow unchanged)
+        END;
+
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY t
+            USING (
+                -- V146: repointed off the FROZEN CORTEX_FUNCTIONS_USAGE_HISTORY onto the canonical
+                -- CORTEX_AI_FUNCTIONS_USAGE_HISTORY. Not a drop-in: TOKEN_CREDITS -> CREDITS; START_TIME
+                -- is TIMESTAMP_LTZ (was NTZ) so FIRST_TS/LAST_TS cast ::TIMESTAMP_NTZ (same TZ->NTZ MERGE
+                -- guard as the ai_code arm, V078); and there is NO scalar TOKENS column -- token counts
+                -- live in the METRICS ARRAY as {"key":{"metric":"input"|"output","unit":"tokens"},"value":N},
+                -- so LATERAL FLATTEN sums value where unit='tokens'. CREDITS + REQUESTS are deduped to
+                -- once per source row via COALESCE(m.INDEX,0)=0 (OUTER=>TRUE emits a NULL-index row for
+                -- empty METRICS, still counted once) so the FLATTEN fan-out cannot multiply them.
+                SELECT f.START_TIME::DATE AS DAY,
+                       'ACCOUNT' AS USER_NAME,
+                       'Functions' AS SOURCE,
+                       COALESCE(NULLIF(f.MODEL_NAME, ''), 'n/a') AS MODEL_NAME,
+                       NULL AS EMAIL,
+                       MIN(f.START_TIME)::TIMESTAMP_NTZ AS FIRST_TS,
+                       MAX(f.START_TIME)::TIMESTAMP_NTZ AS LAST_TS,
+                       COUNT(CASE WHEN COALESCE(m.INDEX, 0) = 0 THEN 1 END) AS REQUESTS,
+                       SUM(CASE WHEN m.VALUE:key:unit::STRING = 'tokens'
+                                THEN m.VALUE:value::NUMBER ELSE 0 END) AS TOKENS,
+                       ROUND(SUM(CASE WHEN COALESCE(m.INDEX, 0) = 0
+                                      THEN COALESCE(f.CREDITS, 0) ELSE 0 END), 6) AS CREDITS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY f,
+                     LATERAL FLATTEN(input => f.METRICS, OUTER => TRUE) m
+                WHERE f.START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                GROUP BY 1, 2, 3, 4
+            ) s
+            ON t.DAY = s.DAY AND t.USER_NAME = s.USER_NAME AND t.SOURCE = s.SOURCE AND t.MODEL_NAME = s.MODEL_NAME
+            WHEN MATCHED THEN UPDATE SET REQUESTS = s.REQUESTS, TOKENS = s.TOKENS,
+                CREDITS = s.CREDITS, EMAIL = s.EMAIL, FIRST_TS = s.FIRST_TS,
+                LAST_TS = s.LAST_TS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, USER_NAME, SOURCE, MODEL_NAME, EMAIL, FIRST_TS, LAST_TS, REQUESTS, TOKENS, CREDITS)
+            VALUES (s.DAY, s.USER_NAME, s.SOURCE, s.MODEL_NAME, s.EMAIL, s.FIRST_TS, s.LAST_TS,
+                    s.REQUESTS, s.TOKENS, s.CREDITS);
+            loaded := loaded || 'ai_functions ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_AI_USAGE_DAILY (functions view optional) - other marts unaffected', CURRENT_ROLE();
+                opt_fail := opt_fail + 1;   -- V066 #10: this OPTIONAL arm failed (verdict-only; per-arm swallow unchanged)
+        END;
+
+
+        -- V041 R6: loader-owned freshness — this scope's sources, one commit.
+        -- V066 #11 FRESHNESS ADVANCES ON FAILURE (DAILY scope): same token-gated stamp.
+        -- Only posture / AI sources whose arm loaded advance; FACT_AI_USAGE_DAILY collapses
+        -- its two arms (ai_code, ai_functions) to one row via GROUP BY so the MERGE matches
+        -- its target exactly once.
+        MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE t
+        USING (
+            SELECT f.SOURCE_NAME, ANY_VALUE(f.LAST_LOAD_TS) AS LAST_LOAD_TS,
+                   ANY_VALUE(f.ROW_COUNT) AS ROW_COUNT, LISTAGG(m.TOKEN, ' ') AS STATUS
+            FROM DBA_MAINT_DB.OVERWATCH.MART_SOURCE_FRESHNESS f
+            JOIN (
+                SELECT SOURCE_NAME, TOKEN FROM VALUES
+                    ('MART_SECURITY_POSTURE_DAILY', 'posture'),
+                    ('FACT_AI_USAGE_DAILY', 'ai_code'),
+                    ('FACT_AI_USAGE_DAILY', 'ai_functions')
+                    AS srcmap(SOURCE_NAME, TOKEN)
+            ) m ON m.SOURCE_NAME = f.SOURCE_NAME
+            -- V066 #23 AI FRESHNESS PARTIAL: FACT_AI_USAGE_DAILY has TWO independent arms
+            -- (ai_code + ai_functions) mapped to the ONE physical source. The #11 per-token
+            -- WHERE ARRAY_CONTAINS stamped the whole source fresh as soon as a SINGLE arm's
+            -- token reached :loaded, so a half-loaded AI source read green. Gate the whole
+            -- group: stamp a source only when EVERY one of its tokens loaded (both AI arms,
+            -- or the lone posture arm). A partial AI load leaves the prior stamp standing, so
+            -- the source reads as not-loaded-this-run (same treatment #11 gives a failed arm).
+            GROUP BY f.SOURCE_NAME
+            HAVING COUNT(*) = COUNT_IF(ARRAY_CONTAINS(m.TOKEN::VARIANT, SPLIT(:loaded, ' ')))
+        ) s
+        ON t.SOURCE_NAME = s.SOURCE_NAME
+        WHEN MATCHED THEN UPDATE SET LAST_LOAD_TS = s.LAST_LOAD_TS, ROW_COUNT = s.ROW_COUNT,
+            SNAPSHOT_TS = CURRENT_TIMESTAMP(), GENERATION = COALESCE(t.GENERATION, 0) + 1,
+            STATUS = s.STATUS
+        WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
+        VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, s.STATUS);
+
+    END IF;
+
+    -- V066 #10 FALSE SUCCESS: the terminal RETURN used to always claim the marts loaded,
+    -- even when an arm's EXCEPTION handler swallowed a failure and continued. Return a
+    -- machine-readable verdict from the REQUIRED / OPTIONAL failure counters instead.
+    IF (req_fail = 0) THEN
+        RETURN 'MARTS OK (' || :SCOPE || ', ' || :d || 'd): ' || :loaded
+               || IFF(:opt_fail > 0, '[' || :opt_fail || ' optional failed]', '');
+    END IF;
+    RETURN 'MARTS WITH ERRORS: ' || :req_fail || ' required, ' || :opt_fail || ' optional ('
+           || :SCOPE || ', ' || :d || 'd): ' || :loaded;
+END;
+$$;
+
+-- >>> derived:SP_CHANGE_ATTRIBUTION  (from V033; + the D6 recent-unattributed EXISTS gate, V159)
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_CHANGE_ATTRIBUTION()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+BEGIN
+    -- V159 compile diet (D6): the UPDATE below compiles an 8-day ACCOUNT_USAGE.QUERY_HISTORY join, and it
+    -- ran every hour. Registry rows only arrive when SP_WAREHOUSE_CHANGE_SCAN runs (the 06:40 daily scan,
+    -- or an on-demand Run scan), and each row's evidence window is fixed around its CHANGE_SEEN_AT
+    -- (-65/+5 min), so once QUERY_HISTORY has caught up (it lags ~45 min) a later retry finds nothing
+    -- new. Run the pass only while a row seen in the last 3 hours is still unattributed: ~3 hourly
+    -- attempts per change, the first at ~07:07 after the 06:40 scan as before; every other hour costs
+    -- one small-table probe.
+    -- CHANGE_SEEN_AT is the scan's TIMESTAMP_LTZ CURRENT_TIMESTAMP() stamp (V024/V109), compared on the
+    -- same clock as the 7-day filter below. When the pass runs, the UPDATE is unchanged: it still retries
+    -- every unattributed row of the last 7 days.
+    IF (NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY
+                    WHERE CHANGED_BY IS NULL
+                      AND CHANGE_SEEN_AT >= DATEADD('hour', -3, CURRENT_TIMESTAMP()))) THEN
+        RETURN 'attribution pass skipped (no unattributed change seen in the last 3h)';
+    END IF;
+
+    -- Attribute unattributed registry rows from the last 7 days: the ALTER
+    -- that ran within the 65 minutes before the hourly snapshot saw the
+    -- change (5-minute forward grace for clock skew). Best effort.
+    UPDATE DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY t
+       SET CHANGED_BY = s.USER_NAME
+      FROM (
+          SELECT r.CHANGE_ID, MAX_BY(q.USER_NAME, q.START_TIME) AS USER_NAME
+          FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY r
+          JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+            ON q.START_TIME >= DATEADD('day', -8, CURRENT_TIMESTAMP())
+           AND q.START_TIME BETWEEN DATEADD('minute', -65, r.CHANGE_SEEN_AT)
+                                AND DATEADD('minute', 5, r.CHANGE_SEEN_AT)
+           AND q.EXECUTION_STATUS = 'SUCCESS'
+           AND q.QUERY_TYPE ILIKE 'ALTER%'
+           AND q.QUERY_TEXT ILIKE '%' || r.WAREHOUSE_NAME || '%'
+          WHERE r.CHANGED_BY IS NULL
+            AND r.CHANGE_SEEN_AT >= DATEADD('day', -7, CURRENT_TIMESTAMP())
+          GROUP BY r.CHANGE_ID
+      ) s
+     WHERE t.CHANGE_ID = s.CHANGE_ID;
+
+    RETURN 'attribution pass complete';
+END;
+$$;
+
+INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
+SELECT 159 AS VERSION,
+       'Loader compile diet (wave-2b rework, owner decisions D5 + D6): two procs stop recompiling a heavy ACCOUNT_USAGE statement every hour. SP_LOAD_MARTS_V27 (re-derived from V152) reads the Central hour once at the top of its HOURLY branch and runs the three DAY-grain arms [1] MART_WAREHOUSE_EFFICIENCY_DAILY, [6] MART_TASK_GRAPH_DAILY and [6b] MART_TASK_NODE_DAILY only in the 00/04/08/12/16/20 Central cycles, and always when d > 2 (the nightly reconcile re-loads D-3..today with (''HOURLY'', 3); backfills pass 90/365). A gated-off arm is not a failure and appends no freshness token; the three names contain DAILY, so the 30h cadence rule never reads them stale. Every other arm, the DAILY scope, the freshness stamp and the RETURN are byte-identical. SP_CHANGE_ATTRIBUTION (re-derived from V033) runs its unchanged UPDATE only while a WAREHOUSE_CHANGE_REGISTRY row seen in the last 3 hours is unattributed (~3 attempts per change, the first at ~07:07 as before), else returns ''attribution pass skipped''. Latency trade: today''s partial row in the three marts is up to 4h old (5h across the November DST night) on the Optimize idle and sizing panels, the Unit costs task-graph panel, the Operations node-timing board and SP_SLO_BREACH_SCAN (V096; SLO_OBJECTIVES is empty today); completed days are unaffected. Estimated saving ~42-44 compile-min/week of the ~166 measured. No task, schedule, rule, table or grant change; no tail CALL.' AS DESCRIPTION
+WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 159);

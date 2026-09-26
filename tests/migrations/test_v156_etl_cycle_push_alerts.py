@@ -21,7 +21,7 @@ out-of-window call returns after the rule count and the SETTINGS read, BEFORE th
 retry auto-clear UPDATE runs only when an OPEN event exists. The gate's SQL expression is translated from its
 sqlglot tree and checked against a datetime model of the owner rule for every target minute and hour.
 
-The validate / docs / admin pins below are asserted at the WAVE TIP (V158) and fail until the wave-2b
+The validate / docs / admin pins below are asserted at the WAVE TIP (V159) and fail until the wave-2b
 integration commit bumps those shared files.
 """
 
@@ -46,7 +46,7 @@ _GUARD = _PARTS[1]
 _BODY = _PARTS[3]                      # the SP_SCAN_ETL_CYCLE body
 _HEADER = _MIG.split("\nEXECUTE IMMEDIATE\n$$\n", 1)[0]
 _RULES = ("PIPE_ETL_TASK_FAILED", "PIPE_ETL_CYCLE_NOT_STARTED", "PIPE_ETL_CYCLE_LATE")
-_TIP = 158                             # the wave-2b tip (V156 ETL cycle, V157 scans, V158 backups)
+_TIP = 159                             # the wave-2b tip (V156 ETL cycle, V157 scans, V158 backups, V159 diet)
 _FAILED_SQL = ", ".join(f"'{s}'" for s in sorted(etl.FAILED_TASK_STATUSES))
 _INS_SPLIT = ";\n    EXECUTE IMMEDIATE :ins_sql USING (start_wf);"
 
@@ -1963,6 +1963,9 @@ def test_v156_run_window_is_documented_everywhere():
     from app.logic.playbooks import PLAYBOOKS
     tf = PLAYBOOKS["PIPE_ETL_TASK_FAILED"]
     assert "plus one 15:00 pass" in tf and "up to about 6h after it happens" in tf
+    late = PLAYBOOKS["PIPE_ETL_CYCLE_LATE"]
+    assert "The cache is as of the scan's last in-window run" in late and "*Tonight at a glance* (live)" in late
+    assert "judged at the 15:00 pass" in next(ln for ln in rows if ln.startswith("| PIPE_ETL_CYCLE_LATE |"))
     assert "the cache is as of the scan's last in-window run" in tf
     assert "plus one 15:00 pass, so a daytime re-run failure can take up to about 6h to alert" in _read(
         "app/ui/pages/operations.py")

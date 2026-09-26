@@ -795,6 +795,11 @@ HEADER = """\
 -- top of ACCOUNT_USAGE's own lag; a CONDITION_ENDED clear lands up to ~4h after the evidence; the hourly [22]
 -- self-watch reports a stale source or an idle notifier up to ~3h later (the daily scan's copy still runs
 -- every morning). Every other hourly arm and sweep still runs every hour.
+-- A condition that starts and ends between two checks is never raised at all: a PUBLIC grant revoked before
+-- the next 4-hourly check (an exposure shorter than ~4h, after ACCOUNT_USAGE lag; V141 already missed ones
+-- under ~1h) and a stale-source or idle-notifier episode that clears between two [22] slots (the ERR leg's
+-- 24h lookback still catches every logged loader failure). GRANTS_TO_ROLES history and Security > Changes
+-- still show such a grant.
 --
 -- FIRST RUN: at the first [22] slot (hourly scan) or daily run, every SOURCE_FRESHNESS_STATE row already past
 -- its cadence raises one HIGH OPS_PIPELINE_DEGRADED event, and the first daily run raises this ISO week's

@@ -203,7 +203,7 @@ def test_v152_description_is_escaped_and_fits():
 # w2a-v152 slice branch until the integrator lands the shared validate/docs/admin edits for the wave.
 def test_validate_and_docs_track_v152():
     val = _read("snowflake/validate.sql")
-    assert "V001..V158 applied" in val and "VERSION BETWEEN 1 AND 158) = 158" in val
+    assert "V001..V159 applied" in val and "VERSION BETWEEN 1 AND 159) = 159" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert _NAME in _read(rel), rel
 

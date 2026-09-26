@@ -494,7 +494,13 @@ self-watch at 02, 05, 08, 11, 14, 17, 20 and 23 (the daily scan's copy still
 runs every morning). A skipped arm compiles nothing and counts as ok in the
 12-block tally; a failed hour read runs every gated block (fail-open,
 `cadence_gate_failed`). The trade: those alerts and clears can arrive up to
-~4h (~3h for [22]) later than an every-hour check. Every other arm and sweep
+~4h (~3h for [22]) later than an every-hour check. A condition that begins and
+ends between two checks is never raised: a PUBLIC grant revoked within ~4h, or
+a stale-source / idle-notifier episode that clears between [22] slots (logged
+loader failures are still caught by the 24h ERR leg). A hand
+`CALL SP_ALERT_SCAN()` obeys the same gates: outside a slot it skips those arms
+and still reports 12/12 ok, so verify a fix to one of them in the 05 or 17
+Central hour (both slots) or after its next scheduled slot. Every other arm and sweep
 still runs every hour.
 
 **Lifecycle:** rule (ALERT_CONFIG row) → scan inserts an event with a
@@ -542,17 +548,17 @@ PUBLIC grants silently leave the queue.
 | PIPE_DT_FAILURES | PIPELINE | dynamic-table refresh failures 24h (CRITICAL ≥5) | daily per DT |
 | PIPE_ETL_TASK_FAILED | PIPELINE | a workflow's tasks failed on their final attempt tonight (≥ threshold, never below 1; HIGH for the terminal workflow; auto-clears once every retried task has finished clean — a retry still running keeps it open) — V156, via the V157 scan arm in the cycle run window (Central hours of ETL_SLA_TARGET_HHMM − 10h through target + 3h, plus a 15:00 pass): a daytime re-run failure, or the auto-clear of its retry, lands at the 15:00 pass or the window start, up to ~6h later | per workflow per night |
 | PIPE_ETL_CYCLE_NOT_STARTED | PIPELINE | cycle starter silent past last week's same-night kickoff + threshold min (the Tonight *Cycle start: Overdue* test) — V156, via the V157 scan arm in the cycle run window (ETL_SLA_TARGET_HHMM − 10h through + 3h Central, plus 15:00) | per missed night |
-| PIPE_ETL_CYCLE_LATE | PIPELINE | terminal unfinished within threshold min of ETL_SLA_TARGET_HHMM, or projected past the hard deadline (WARN); past the target (CRIT) / hard deadline (EXH): HIGH when the cycle already finished, CRITICAL (auto-declares an incident) when still unfinished; a terminal task is done at its first clean finish from an attempt that STARTED at/after the night's last kickoff, so a next-morning terminal re-run never re-grades the night and an afternoon attempt started before the real kickoff is never that finish (a next-morning starter re-run, or any re-run when starter = terminal workflow, re-grades it: loud); after an afternoon re-run of the whole chain, a real cycle that hangs before its terminal dispatches, or a chain whose terminal starts after the kickoff, can hide the real run (documented) — V156, via the V157 scan arm in the cycle run window (ETL_SLA_TARGET_HHMM − 10h through + 3h Central, plus 15:00) | per night per band |
+| PIPE_ETL_CYCLE_LATE | PIPELINE | terminal unfinished within threshold min of ETL_SLA_TARGET_HHMM, or projected past the hard deadline (WARN); past the target (CRIT) / hard deadline (EXH): HIGH when the cycle already finished, CRITICAL (auto-declares an incident) when still unfinished; a terminal task is done at its first clean finish from an attempt that STARTED at/after the night's last kickoff, so a next-morning terminal re-run never re-grades the night and an afternoon attempt started before the real kickoff is never that finish (a next-morning starter re-run, or any re-run when starter = terminal workflow, re-grades it: loud); after an afternoon re-run of the whole chain, a real cycle that hangs before its terminal dispatches, or a chain whose terminal starts after the kickoff, can hide the real run (documented) — V156, via the V157 scan arm in the cycle run window (ETL_SLA_TARGET_HHMM − 10h through + 3h Central, plus 15:00; a hard deadline more than ~3h after the target is judged at the 15:00 pass) | per night per band |
 | SEC_FAILED_LOGINS | SECURITY | failed logins over threshold | daily |
 | SEC_CRED_EXPIRY | SECURITY | credential expires ≤ threshold days — 10 by default since V028 (CRITICAL if expired); checked every 4h since V157 (01, 05, 09, 13, 17, 21 Central), so an event — EXPIRED included — can arrive up to ~4h late | once per band per expiry date (EXPIRING, then EXPIRED); a rotated credential's next expiry re-alerts even after a human resolve, however late (V157: a closed event blocks only its own expiry date, read from its DETAIL; a live one always blocks) |
-| SEC_NEW_EXPOSURE | SECURITY | a new grant to PUBLIC (24h lookback) of ≥ threshold objects in one batch; checked every 4h since V157 (01, 05, 09, 13, 17, 21 Central) | once per grant batch (PRIVILEGE, GRANTED_ON, CREATED_ON); auto-clears as CONDITION_ENDED once the whole batch is revoked (V157) |
+| SEC_NEW_EXPOSURE | SECURITY | a new grant to PUBLIC (24h lookback) of ≥ threshold objects in one batch; checked every 4h since V157 (01, 05, 09, 13, 17, 21 Central); a grant revoked before the next check is never raised | once per grant batch (PRIVILEGE, GRANTED_ON, CREATED_ON); auto-clears as CONDITION_ENDED once the whole batch is revoked (V157) |
 | ~~SEC_BREAK_GLASS_USE~~ | SECURITY | retired at V034 (muted since V025) — admin-role activity stays as evidence on Security -> Changes | — |
 | COST_DEPT_BUDGET_PACE | COST | department MTD > budget pace by threshold % (DEPT_BUDGETS) | daily per dept |
 | COST_ORG_ACCOUNT_CREEP | COST | org account currency spend up threshold % WoW | weekly per account |
 | PIPE_VOLUME_DROP | PIPELINE | table rows-added down threshold % vs prior-7d avg (≥1k rows/day) | daily per table |
 | OPS_CANARY_FAIL | PLATFORM | weekly source sentinel found failing dependency views | daily key |
 | OPS_SCAN_DEGRADED | PLATFORM | one or more rule blocks failed in the last scan (v7 isolation) | daily key |
-| OPS_PIPELINE_DEGRADED | PLATFORM | pipeline self-watch in BOTH scans (V157): a SOURCE_FRESHNESS_STATE row past its cadence (DAILY/METERING 30h, else 3h; incl. the ALERT_SCAN_HOURLY / ALERT_SCAN_DAILY heartbeats), a loader failure logged and swallowed, or the notifier idle 3h while a route is enabled; the hourly scan checks every 3h (02, 05, …, 23 Central), the daily scan every morning | per source per last-load day; per failure type/source/day |
+| OPS_PIPELINE_DEGRADED | PLATFORM | pipeline self-watch in BOTH scans (V157): a SOURCE_FRESHNESS_STATE row past its cadence (DAILY/METERING 30h, else 3h; incl. the ALERT_SCAN_HOURLY / ALERT_SCAN_DAILY heartbeats), a loader failure logged and swallowed, or the notifier idle 3h while a route is enabled; the hourly scan checks every 3h (02, 05, …, 23 Central), the daily scan every morning; a stale or idle episode that ends between checks is not raised | per source per last-load day; per failure type/source/day |
 | OPS_SLOW_RENDER | PLATFORM | page p95 first paint > threshold s (7d, from APP_USAGE.RENDER_MS) | weekly per page |
 
 Playbooks for each rule render in the alert drawer (`logic/playbooks.py`).

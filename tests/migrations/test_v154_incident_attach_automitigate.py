@@ -213,7 +213,7 @@ def test_v154_plain_sql_parses():
 
 def test_validate_and_docs_track_v154():
     val = _read("snowflake/validate.sql")
-    assert "V001..V158 applied" in val and "VERSION BETWEEN 1 AND 158) = 158" in val
+    assert "V001..V159 applied" in val and "VERSION BETWEEN 1 AND 159) = 159" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V154__incident_attach_automitigate.sql" in _read(rel), rel
 

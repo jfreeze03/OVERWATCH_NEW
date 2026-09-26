@@ -1660,6 +1660,16 @@ def test_v157_cadence_and_retirement_are_documented_for_the_operator():
     assert "checked every 4h since V157" in cred_row and "EXPIRED included" in cred_row
     (ops_row,) = [ln for ln in rb.splitlines() if ln.startswith("| OPS_PIPELINE_DEGRADED | PLATFORM |")]
     assert "the hourly scan checks every 3h" in ops_row
+    # review fix: a condition shorter than the check interval is never raised (not only delayed)
+    assert "is never raised" in PLAYBOOKS["SEC_NEW_EXPOSURE"]
+    assert "ends between two checks is not raised" in PLAYBOOKS["OPS_PIPELINE_DEGRADED"]
+    assert "never raised" in exp_row and "is not raised" in ops_row
+    assert "ends between two checks is never raised" in " ".join(rb.split())
+    assert "is never raised at all" in _MIG
+    # review fix: a hand CALL outside a slot reports 12/12 ok without running the gated rule
+    osd = PLAYBOOKS["OPS_SCAN_DEGRADED"]
+    assert "still reports 12/12 ok" in osd and "05 or 17 Central hour" in osd
+    assert "A hand `CALL SP_ALERT_SCAN()` obeys the same gates" in " ".join(rb.split())
     spend = _read("app/ui/pages/cost_parts/spend.py")
     assert "where the COST_CLOUD_SVC_RATIO alert fires" not in spend and "fixed-ratio alert was retired" in spend
     nav = _read("app/logic/navigate.py")
@@ -1841,7 +1851,7 @@ def test_v157_part_b_get_ddl_fragments_are_in_the_procs():
 
 def test_validate_and_docs_track_v157():
     val = _read("snowflake/validate.sql")
-    assert "V001..V158 applied" in val and "VERSION BETWEEN 1 AND 158) = 158" in val
+    assert "V001..V159 applied" in val and "VERSION BETWEEN 1 AND 159) = 159" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert _NAME in _read(rel), rel
 

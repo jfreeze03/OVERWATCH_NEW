@@ -174,6 +174,7 @@ snowflake/migrations/V155__operator_stats_sis_app_tag.sql
 snowflake/migrations/V156__etl_cycle_push_alerts.sql
 snowflake/migrations/V157__alert_scan_self_watch_idle_push.sql
 snowflake/migrations/V158__operator_backup_generations.sql
+snowflake/migrations/V159__loader_compile_diet.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -245,7 +246,8 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > `COMPANY_FOR_DATABASE` in two rules (#22), a 999 serverless-creep onset sentinel (#20), a
 > post-scan escalation-supersede sweep (`RESOLUTION_KIND='SUPERSEDED'`, excluded from the
 > precision score; #40), and a non-OK object-cost return on rollback (#10). Optional clone
-> check: `CALL SP_ALERT_SCAN();` runs clean; after a HIGH→CRITICAL crossing, the earlier
+> check: `CALL SP_ALERT_SCAN();` runs clean (since V157 a hand CALL skips the cadence-gated rules outside
+> their Central-hour slots and still reports 12/12 ok); after a HIGH→CRITICAL crossing, the earlier
 > lower-band `ALERT_EVENTS` row flips to `RESOLVED`/`SUPERSEDED` while the CRITICAL stays OPEN.
 
 > **V068 verify (standalone-mart freshness stamps — no smoke test):** re-derives
@@ -486,7 +488,7 @@ surgical by design — the schema is shared with the old app, so it never drops
 `DBA_MAINT_DB.OVERWATCH` itself, only named objects:
 
 - **Section A (live):** tasks, alerts, procs, functions, views, transient
-  facts/marts. Safe anytime — re-run the migrations in order (V001..V158) and the loaders repopulate.
+  facts/marts. Safe anytime — re-run the migrations in order (V001..V159) and the loaders repopulate.
 - **Section B (commented):** operator data — settings, company scope, alert
   config/events/audit, action queue, savings ledger, error log,
   schema_version. Uncomment only for a factory reset, and run the provided
