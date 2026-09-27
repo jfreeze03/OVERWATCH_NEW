@@ -68,6 +68,7 @@ from app.logic.insights import (
     cluster_failures_by_family,
     compare_release_periods,
     cycle_night_summary,
+    cycle_target_attainment,
     duration_sla_forecast,
     etl_cycle_sla_forecast,
     etl_runtime_creep,
@@ -75,6 +76,7 @@ from app.logic.insights import (
     pipeline_sla_forecast,
     rank_release_candidates,
     recon_recurrence,
+    task_cadence_attainment,
     task_duration_anomalies,
     task_failure_recurrence,
     task_release_deltas,
@@ -125,6 +127,7 @@ from app.ui.components import (
     with_user_names,
     write_gate_open,
 )
+from app.ui.pages.ops_parts.optimize_queue import render_optimize
 
 _PAGE = "Operations"
 
@@ -1701,7 +1704,7 @@ def _runtime_creep_panel(days: int = 0, *, pf: dict | None = None) -> None:
         result_caption(res)
 
 
-def _sla_finish_forecast_panel(*, pf: dict | None = None) -> None:
+def _sla_finish_forecast_panel(*, pf: dict | None = None) -> dict:
     """Will the whole nightly cycle finish before the 7am target (8am hard)?
 
     The cycle is bracketed by two anchor workflows: the STARTER (~10pm kickoff) and the TERMINAL
@@ -1709,7 +1712,10 @@ def _sla_finish_forecast_panel(*, pf: dict | None = None) -> None:
     anchored to that night's start (cross-midnight), the finish-vs-deadline margin is trended across
     nights, and a breach is projected before it happens. Start-drift (the cycle beginning later) is
     called out as a second cause, since a late start alone can blow the deadline. Config-gated on
-    ETL_CONTROL_STATUS_FQN; the deadline + anchor workflows are Admin-editable (7am/8am defaults)."""
+    ETL_CONTROL_STATUS_FQN; the deadline + anchor workflows are Admin-editable (7am/8am defaults).
+
+    Returns the forecast dict (``{}`` when unconfigured, unread or empty) so the Tonight chapter's
+    built-in objectives reuse it with no second read."""
     section_header("SLA finish forecast (vs 7am target)",
                    "warn", "pipeline", anchor="ops-sla-finish")
     settings = load_settings(_PAGE)
@@ -1717,7 +1723,7 @@ def _sla_finish_forecast_panel(*, pf: dict | None = None) -> None:
     if not fqn:
         empty_state("needs_setup", "Not configured — set ETL_CONTROL_STATUS_FQN on Admin ▸ "
                     "SETTINGS (shared with the runtimes panel above).")
-        return
+        return {}
     start_wf = str(settings.get("ETL_CYCLE_START_WORKFLOW") or "").strip()
     end_wf = str(settings.get("ETL_CYCLE_END_WORKFLOW") or "").strip()
     target = str(settings.get("ETL_SLA_TARGET_HHMM") or "07:00").strip()
@@ -1734,7 +1740,7 @@ def _sla_finish_forecast_panel(*, pf: dict | None = None) -> None:
         empty_state("needs_setup", "Set ETL_CYCLE_START_WORKFLOW and ETL_CYCLE_END_WORKFLOW (the "
                     "cycle's first and last workflow) on Admin ▸ SETTINGS, and a valid "
                     "ETL_CONTROL_STATUS_FQN, to forecast cycle completion.")
-        return
+        return {}
     res = (pf or {}).get("cycle_finish") or run(scan_sql, page=_PAGE, key="etl_cycle_finish", tier="recent",
               source="CONTROL_STATUS (cycle finish vs deadline)", max_rows=etl_control_sql.MAX_SLA_NIGHTS)
     if guard(res, "No completed nightly cycles in the window — the starter and terminal workflows "
@@ -1745,7 +1751,7 @@ def _sla_finish_forecast_panel(*, pf: dict | None = None) -> None:
                                     spike_calendar=str(settings.get("EXPECTED_SPIKE_CALENDAR") or ""))
         if not fc:
             empty_state("clean", "No completed nightly cycles in the window yet.")
-            return
+            return {}
 
         def _signed(sec: object, early: str = "early", late: str = "late") -> str:
             if sec is None:
@@ -1832,6 +1838,8 @@ def _sla_finish_forecast_panel(*, pf: dict | None = None) -> None:
                    "but are still judged for an actual miss. Deadline + anchor workflows are editable "
                    "on Admin ▸ SETTINGS.")
         result_caption(res)
+        return fc
+    return {}
 
 
 def _run_inventory_panel(*, pf: dict | None = None) -> None:
@@ -2184,7 +2192,7 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
         key="ops_pipeline_view",
     )
     if view == "Tonight":
-        _pipeline_tonight(days, database)
+        _pipeline_tonight(days, database, company, schema_contains)
     elif view == "Recurring failures":
         _pipeline_recurring(days, company, database, schema_contains)
     elif view == "Performance":
@@ -2263,14 +2271,89 @@ def _tonight_glance_panel() -> None:
     result_caption(res)
 
 
-def _pipeline_tonight(days: int = 0, database: str = "") -> None:
+def _builtin_objectives_panel(fc: dict, company: str = "ALL", days: int = 0, database: str = "",
+                              schema_contains: str = "") -> None:
+    """v4.597 (Option C): two READ-ONLY objectives that need no setup, replacing the retired
+    Decision Studio SLO editor on the surface where the pipeline is actually watched.
+
+    - Nightly cycle done by the target: the SLA finish forecast's judged nights (``fc``, already
+      computed by the panel below — zero extra reads), met vs late / failed / hung.
+    - Tasks on cadence: every task's freshness against its own schedule. ONE TASK_HISTORY member,
+      byte-identical (SQL + tier) to the Tasks > SLA view's "fresh" member, so the two share the
+      batch-member cache; it honors Company / Database / Schema like that view."""
+    from app.logic.insights import task_freshness_status
+
+    _fb = run_batch([
+        {"key": "fresh",
+         "sql": ops_sql.task_freshness_sla(max(days, 14), company, database, schema_contains),
+         "source": "TASK_HISTORY (cadence + silence)"},
+    ], page=_PAGE, tier="recent")
+    _fres = _fb.get("fresh") if _fb is not None else None
+    fresh = task_freshness_status(_fres.df) if (_fres is not None and _fres.usable()) else None
+    cyc = cycle_target_attainment(fc)
+    cad = task_cadence_attainment(fresh)
+    _misses = ((cyc["judged"] - cyc["met"]) if cyc else 0) + ((cad["late"] + cad["stale"]) if cad else 0)
+    section_header("Built-in objectives", alarm_health(_misses) if (cyc or cad) else "", "pipeline",
+                   anchor="ops-builtin-objectives")
+    _settings = load_settings(_PAGE)
+    _etl_set = bool(str(_settings.get("ETL_CONTROL_STATUS_FQN") or "").strip())
+    _target = (cyc.get("target_hhmm") if cyc else
+               str(_settings.get("ETL_SLA_TARGET_HHMM") or "07:00").strip())
+    if cyc and cyc["judged"]:
+        cyc_tile = {"label": f"Nightly cycle done by {_target}",
+                    "value": f"{cyc['met']}/{cyc['judged']} nights",
+                    "severity": "ok" if cyc["met"] == cyc["judged"] else "warn",
+                    "delta": (f"{cyc['late']} late · {cyc['failed']} failed · {cyc['hung']} hung"
+                              + (" · tonight still running" if cyc.get("in_flight") else "")),
+                    "delta_color": "off",
+                    "help": "Of the recent nights the SLA forecast below judges (newest 14), how many "
+                            f"finished COMPLETE at or before {_target}. Failed nights and runs that never "
+                            "finished count as misses; tonight's run is left out while it still has time."}
+    else:
+        cyc_tile = {"label": f"Nightly cycle done by {_target}", "value": "—",
+                    "delta": ("tonight still running" if cyc.get("in_flight") else
+                              ("no judged nights yet" if _etl_set else "needs setup")),
+                    "delta_color": "off",
+                    "help": ("Set ETL_CONTROL_STATUS_FQN and ETL_CYCLE_START_WORKFLOW / "
+                             "ETL_CYCLE_END_WORKFLOW on Admin ▸ SETTINGS to judge the nightly cycle."
+                             if not _etl_set else
+                             "No completed, failed or overdue night in the forecast window yet.")}
+    if cad and cad["total"]:
+        cad_tile = {"label": "Tasks on cadence", "value": f"{cad['on_time']}/{cad['total']}",
+                    "severity": "ok" if cad["on_time"] == cad["total"] else "warn",
+                    "delta": f"{cad['late']} late · {cad['stale']} stale", "delta_color": "off",
+                    "help": "Scheduled tasks on time against their OWN cadence (median gap, judged "
+                            "against their longest normal gap). Late ~ one cadence overdue, stale ~ two "
+                            "(silently stopped). Honors Company / Database / Schema."}
+    else:
+        cad_tile = {"label": "Tasks on cadence", "value": "—",
+                    "delta": ("unavailable" if (_fres is not None and not _fres.ok)
+                              else "no derivable cadence yet"),
+                    "delta_color": "off",
+                    "help": "Needs at least three scheduled runs per task in the window to derive a "
+                            "cadence; unavailable means the task-history read failed."}
+    kpi_row([cyc_tile, cad_tile])
+    st.caption(
+        "Read-only objectives derived from the ETL clock and each task's own cadence — no setup. "
+        "The custom SLO editor was retired (v4.597); any ACTIVE SLO_OBJECTIVES rows still alert and "
+        "badge the Entity 360 watchlist."
+        + (" Tasks on cadence is judged over the tasks read (of the 200 most-silent tasks), so the "
+           "on-time share is a conservative read." if cad.get("capped") else ""))
+
+
+def _pipeline_tonight(days: int = 0, database: str = "", company: str = "ALL",
+                      schema_contains: str = "") -> None:
     """rec9 'Tonight': did/will the nightly cycle finish clean before the 07:00 deadline.
 
     Leads with the whole-night roll-up (every workflow: failed / did not run / running), then the
-    XLAT reference gap (a missing source code HARD-FAILS the load), the whole-cycle finish forecast,
-    this run's per-task runtimes, and the run/params inventory."""
+    two built-in objectives (v4.597), the XLAT reference gap (a missing source code HARD-FAILS the
+    load), the whole-cycle finish forecast, this run's per-task runtimes, and the run/params
+    inventory."""
     # Next-Fifty #1: the whole night first — the same shared read the Brief + Control Room verdicts use.
     _tonight_glance_panel()
+    # v4.597 (Option C): the built-in objectives paint HERE, at the top, but are filled after the
+    # SLA forecast below has run — the cycle objective reuses its forecast (no duplicate work).
+    _obj_slot = st.container()
     # Second: a source code missing from XLAT hard-fails the nightly load (config-gated; dormant
     # until set up). Honors the scope-bar Database filter (pinned checks always show).
     _reference_gap_panel(database)
@@ -2279,7 +2362,9 @@ def _pipeline_tonight(days: int = 0, database: str = "") -> None:
     _pf = _pipeline_prefetch(days, want={"cycle_finish", "wf_list", "run_inventory"})
     # The whole-cycle SLA: will the nightly cycle (starter → terminal) finish before 7am?
     # Window-independent by design (fixed 14-night baseline, matches Brief) — see the panel.
-    _sla_finish_forecast_panel(pf=_pf)
+    fc = _sla_finish_forecast_panel(pf=_pf)
+    with _obj_slot:
+        _builtin_objectives_panel(fc, company, days, database, schema_contains)
     # A chosen workflow's latest run's per-task runtimes (Informatica CONTROL_STATUS),
     # scoped to the Window; config-gated + fail-silent-with-grant-hint.
     _workflow_runtimes_panel(days, pf=_pf)
@@ -4059,7 +4144,7 @@ def render() -> None:
     # Contention folded under Warehouses (CoCo): warehouse health and the
     # contention it causes read together.
     section = lazy_sections(
-        ["Queries", "Tasks", "Warehouses", "Change impact",
+        ["Queries", "Tasks", "Warehouses", "Optimize", "Change impact",
          "Pipeline SLA", "Release compare", "Emergency"], key="ops_section",
         counts=stashed_counts(_PAGE) or None)
     _contracts = {
@@ -4078,6 +4163,12 @@ def render() -> None:
             "partial": ("days",),
             "note": "Contention uses Window; warehouse anomaly history is a fixed 30-day view.",
         },
+        "Optimize": {
+            "applies": ("company", "days"),
+            "partial": ("warehouse_contains", "user_contains", "database", "schema_contains"),
+            "note": "The fix queue is Company + Window from the daily marts; the live-profile "
+                    "toggle also honors Warehouse/User/Database/Schema.",
+        },
         "Change impact": {
             # v4.157.0: the warehouse-settings registry honors warehouse contains —
             # declare it so the banner stops warning "ignored" where it filters.
@@ -4089,8 +4180,8 @@ def render() -> None:
             "partial": ("company", "database", "schema_contains"),
             "note": "SLA horizons are account-wide policy; File-load failures narrows to Company; "
                     "Reference-data-gap narrows to Database (pinned checks always show); Volume "
-                    "drops and Dynamic-table refresh health honor Company/Database/Schema. (The DQ "
-                    "row-volume panel is still account-wide.)",
+                    "drops and Dynamic-table refresh health honor Company/Database/Schema, as does "
+                    "the Tasks-on-cadence objective. (The DQ row-volume panel is still account-wide.)",
         },
         "Release compare": {
             "applies": ("company",),
@@ -4117,6 +4208,10 @@ def render() -> None:
             anchor="ops-wh-contention",
         )
         _contention_tab(f["company"], f["days"], bounds=f["bounds"])
+    elif section == "Optimize":
+        render_optimize(f["company"], f["days"], rate, bounds=f["bounds"], is_operator=is_operator,
+                        wh_filter=f["warehouse_contains"], user_filter=f["user_contains"],
+                        database=f["database"], schema_contains=f["schema_contains"])
     elif section == "Change impact":
         _change_impact_tab(f["company"], f["database"], f["schema_contains"], is_operator)
     elif section == "Pipeline SLA":

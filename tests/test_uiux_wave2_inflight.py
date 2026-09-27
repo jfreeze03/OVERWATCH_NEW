@@ -34,6 +34,7 @@ LATCHED_FILES = {
     "app/ui/decision_studio.py": 2,
     "app/ui/pages/cost.py": 1,
     "app/ui/pages/admin.py": 1,
+    "app/ui/pages/ops_parts/optimize_queue.py": 2,   # v4.597: Track (per fingerprint) + Track all ACT NOW
 }
 
 

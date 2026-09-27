@@ -1305,6 +1305,55 @@ def etl_cycle_sla_forecast(
     }
 
 
+def cycle_target_attainment(fc: dict | None) -> dict:
+    """Built-in objective "Nightly cycle done by <target>": how many of the forecast's judged
+    nights (``fc["nights"]``, the newest SLA_FORECAST_FIT_NIGHTS) finished COMPLETE at or before
+    the target. Reuses ``etl_cycle_sla_forecast`` output, so it costs no read of its own.
+
+    MET = RUN_STATE COMPLETE and MARGIN_SEC >= 0. Misses: a COMPLETE night past target (late), a
+    FAILED night (failed), and an INCOMPLETE night that is not tonight's still-in-flight run
+    (hung). The newest night is left out of the judged count only while it is INCOMPLETE with
+    runway left before the target (``live_runway_sec`` > 0). Spike-calendar nights are judged like
+    any other (the objective is the clock, not the trend). Returns {met, judged, late, failed,
+    hung, target_hhmm}, or {} when there is no forecast / no nights. Pure; never raises."""
+    if not fc or not isinstance(fc.get("nights"), list) or not fc["nights"]:
+        return {}
+    nights = list(fc["nights"])                      # newest first (etl_cycle_sla_forecast order)
+    runway = fc.get("live_runway_sec")
+    in_flight = (str(nights[0].get("RUN_STATE") or "").upper() == "INCOMPLETE"
+                 and runway is not None and safe_float(runway) > 0)
+    judged_nights = nights[1:] if in_flight else nights
+    met = late = failed = hung = 0
+    for night in judged_nights:
+        state = str(night.get("RUN_STATE") or "").upper()
+        margin = night.get("MARGIN_SEC")
+        if state == "COMPLETE":
+            if margin is not None and safe_float(margin, default=float("nan")) >= 0:
+                met += 1
+            else:
+                late += 1
+        elif state == "FAILED":
+            failed += 1
+        else:
+            hung += 1
+    return {"met": met, "judged": len(judged_nights), "late": late, "failed": failed,
+            "hung": hung, "target_hhmm": str(fc.get("target_hhmm") or "07:00"),
+            "in_flight": bool(in_flight)}
+
+
+def task_cadence_attainment(fresh: pd.DataFrame | None, *, row_cap: int = 200) -> dict:
+    """Built-in objective "Tasks on cadence": of the tasks with a derivable cadence
+    (``task_freshness_status`` output), how many are On-time vs Late vs Stale against their own
+    schedule. ``capped`` is True when the frame hit the builder's LIMIT (``row_cap``, the 200
+    most-silent tasks first), so the ratio covers those and not every task. {} on no data."""
+    if fresh is None or fresh.empty or "STATUS" not in fresh.columns:
+        return {}
+    status = fresh["STATUS"].astype(str)
+    return {"on_time": int(status.eq("On-time").sum()), "total": len(fresh),
+            "late": int(status.eq("Late").sum()), "stale": int(status.eq("Stale").sum()),
+            "capped": len(fresh) >= int(row_cap)}
+
+
 def cycle_night_summary(df: pd.DataFrame | None) -> dict:
     """Fold cycle_night_health_scan rows into the whole-night roll-up the Brief / Control Room /
     Operations glance share. Counts come from the UNCAPPED TOTAL_* window columns on row 0 (never a

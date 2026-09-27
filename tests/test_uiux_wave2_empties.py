@@ -71,6 +71,7 @@ def test_the_sweep_left_no_raw_absence_regression_hotspots():
         "app/ui/pages/cost_parts/compare.py": 0,
         "app/ui/pages/cost_parts/unit_costs.py": 0,
         "app/ui/pages/cost_parts/ai_chargeback.py": 1,   # queue receipt
+        "app/ui/pages/ops_parts/optimize_queue.py": 0,   # v4.597 fix queue: every absence via the vocabulary
     }
     for rel, cap in ceilings.items():
         raw = len(re.findall(r"st\.(?:info|success)\(", _src(rel)))

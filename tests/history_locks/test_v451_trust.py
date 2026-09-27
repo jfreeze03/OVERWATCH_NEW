@@ -126,6 +126,10 @@ _REACHABLE = {
         "GRANTS_TO_USERS", "LOGIN_HISTORY", "POLICY_REFERENCES", "QUERY_HISTORY", "ROLES", "SESSIONS",
         "TABLES", "TABLE_STORAGE_METRICS", "TAG_REFERENCES", "USERS"),
     "app/ui/pages/alerts.py": (),
+    # v4.597 (Option C): Operations > Optimize. The queue/tracked/watchlist reads are mart and
+    # app tables; QUERY_HISTORY is the opt-in live-profile toggle (query_opportunity_fingerprints,
+    # byte-identical to the Queries board call, so the two share one cache entry) — off first paint.
+    "app/ui/pages/ops_parts/optimize_queue.py": ("QUERY_HISTORY",),
     # v4.52: + the object-ledger recon builder (Codex #7) — QAH and the five
     # maintenance-arm source histories, click-gated on the Canary tab.
     # v4.589 (Next-Fifty #25): mart-vs-live recon gains the warehouse + AI arms (toggle-gated Canary tab).

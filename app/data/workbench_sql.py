@@ -319,15 +319,60 @@ LIMIT 50
 """
 
 
-def workload_portfolio(days: int = 30, company: str = "ALL",
-                       limit: int = 200, *, bounds: tuple | None = None) -> str:
-    """Measured recurring-query portfolio with cost and behavior evidence."""
+# Operations > Optimize (v4.597): the fix queue reads the SAME portfolio SQL plus the advisor
+# columns query_advisor.advise needs from the family mart, so the queue can name a specific
+# diagnosis per family without a live scan. Each advisor fragment below is spliced into the
+# otherwise-unchanged portfolio text; workload_portfolio() passes advisor=False and stays
+# BYTE-IDENTICAL (tests/test_optimize_queue.py strips these exact fragments back out and compares).
+# Every column is f./p.-qualified (the alias-shadow rule). Never name the work-item table here: a
+# write to it bumps that domain's cache salt, which would re-cold this heavy mart read.
+_ADVISOR_COSTS_COLS = """,
+           MAX_BY(p.COMPANY, p.CREDITS_ATTRIBUTED) AS TOP_COMPANY,
+           MAX_BY(p.DATABASE_NAME, p.CREDITS_ATTRIBUTED) AS TOP_DATABASE"""
+_ADVISOR_FAMILY_COLS = """,
+           SUM(f.RUNS) AS FAMILY_RUNS,
+           SUM(f.TOTAL_EXEC_SEC) AS TOTAL_EXEC_SEC,
+           ROUND(SUM(COALESCE(f.COMPILE_MS_AVG, 0) * f.RUNS) / 1000, 1) AS TOTAL_COMPILE_SEC,
+           ROUND(SUM(COALESCE(f.GB_SCANNED_AVG, 0) * f.RUNS) / NULLIF(SUM(f.RUNS), 0), 3) AS GB_SCANNED,
+           MAX(f.WAREHOUSES) AS WAREHOUSES,
+           -- Typical-run proxies (0..1 run shares, day grain): the share of runs on days whose
+           -- compile was heavy (>= 1s avg and > half the elapsed) / compile-dominated with ~no
+           -- execution. advise() fires compile_bound / metadata_chatter only when the pathology is
+           -- TYPICAL, so one compile-storm day cannot label the whole family.
+           SUM(IFF(f.COMPILE_MS_AVG >= 1000
+                   AND f.COMPILE_MS_AVG * f.RUNS / 1000
+                       > 0.5 * COALESCE(f.TOTAL_ELAPSED_SEC, f.TOTAL_EXEC_SEC),
+                   f.RUNS, 0)) / NULLIF(SUM(f.RUNS), 0) AS COMPILE_RUN_PCT,
+           SUM(IFF(f.COMPILE_MS_AVG * f.RUNS / 1000
+                       >= 0.7 * COALESCE(f.TOTAL_ELAPSED_SEC, f.TOTAL_EXEC_SEC)
+                   AND f.TOTAL_EXEC_SEC / NULLIF(f.RUNS, 0) <= 0.5,
+                   f.RUNS, 0)) / NULLIF(SUM(f.RUNS), 0) AS COMPILE_DOMINANT_RUN_PCT"""
+_ADVISOR_SELECT_COLS = """,
+       f.TOTAL_ELAPSED_SEC, f.FAMILY_RUNS, f.TOTAL_EXEC_SEC, f.TOTAL_COMPILE_SEC,
+       f.GB_SCANNED, f.WAREHOUSES,
+       ROUND(f.COMPILE_RUN_PCT, 3) AS COMPILE_RUN_PCT,
+       ROUND(f.COMPILE_DOMINANT_RUN_PCT, 3) AS COMPILE_DOMINANT_RUN_PCT,
+       c.TOP_COMPANY, c.TOP_DATABASE,
+       -- Uncapped scope totals (window functions run before the LIMIT): the queue's headline
+       -- family count and observed cost cover EVERY family in scope, not just the listed top-N.
+       COUNT(*) OVER () AS SCOPE_FAMILIES_TOTAL,
+       ROUND(SUM(c.CREDITS) OVER (), 4) AS SCOPE_CREDITS_TOTAL,
+       -- OVERWATCH's own loader/mart statements: tagged (never bulk-tracked), not dropped.
+       COALESCE(CONTAINS(UPPER(f.QUERY_PREVIEW), 'DBA_MAINT_DB.OVERWATCH.'), FALSE) AS OW_SELF"""
+
+
+def _portfolio_sql(days: int, company: str, limit: int, bounds: tuple | None, *,
+                   advisor: bool) -> str:
+    """The measured recurring-query portfolio; ``advisor`` adds the fix-queue columns."""
     horizon = bounded_days(days, 400)
     cap = max(10, min(int(limit or 200), 500))
     company_clause = (
         "" if str(company or "ALL").upper() == "ALL"
         else f"AND p.COMPANY = {sql_literal(str(company), 40)}"
     )
+    costs_cols = _ADVISOR_COSTS_COLS if advisor else ""
+    family_cols = _ADVISOR_FAMILY_COLS if advisor else ""
+    select_cols = _ADVISOR_SELECT_COLS if advisor else ""
     return f"""
 WITH costs AS (
     SELECT p.QUERY_HASH,
@@ -336,7 +381,7 @@ WITH costs AS (
            COUNT(DISTINCT p.DAY) AS ACTIVE_DAYS,
            COUNT(DISTINCT p.DATABASE_NAME) AS DATABASES,
            HLL_ESTIMATE(HLL_COMBINE(p.USERS_HLL)) AS USERS,
-           MAX(p.DAY) AS LAST_SEEN
+           MAX(p.DAY) AS LAST_SEEN{costs_cols}
     FROM {core_object('MART_PATTERN_COST_DAILY')} p
     WHERE {scope_window_where('p.DAY', horizon, bounds=bounds)}
       {company_clause}
@@ -356,7 +401,7 @@ WITH costs AS (
            ROUND(SUM(COALESCE(f.CACHE_PCT_AVG, 0) * f.RUNS)
                  / NULLIF(SUM(f.RUNS), 0) * 100, 1) AS AVG_CACHE_PCT,
            MAX(f.P95_S) AS P95_SEC,
-           ANY_VALUE(f.SAMPLE_TEXT) AS QUERY_PREVIEW
+           ANY_VALUE(f.SAMPLE_TEXT) AS QUERY_PREVIEW{family_cols}
     FROM {core_object('MART_QUERY_FAMILY_DAILY')} f
     JOIN scoped_families s
       ON s.QUERY_HASH = f.QUERY_HASH AND s.COMPANY = f.COMPANY
@@ -370,7 +415,7 @@ WITH costs AS (
 SELECT c.QUERY_HASH AS FINGERPRINT, c.RUNS, f.FAILS AS FAILS,
        ROUND(c.CREDITS, 4) AS CREDITS, c.ACTIVE_DAYS, c.DATABASES, c.USERS,
        ROUND(COALESCE(f.TOTAL_ELAPSED_SEC, 0) / 3600, 2) AS TOTAL_ELAPSED_HOURS,
-       f.AVG_CACHE_PCT, f.P95_SEC, c.LAST_SEEN, f.QUERY_PREVIEW
+       f.AVG_CACHE_PCT, f.P95_SEC, c.LAST_SEEN, f.QUERY_PREVIEW{select_cols}
 FROM costs c
 LEFT JOIN families f ON f.QUERY_HASH = c.QUERY_HASH
 WHERE c.RUNS > 0 AND c.CREDITS > 0
@@ -383,6 +428,45 @@ WHERE c.RUNS > 0 AND c.CREDITS > 0
   AND UPPER(COALESCE(f.QUERY_PREVIEW, '')) NOT LIKE '%OVERWATCH_APP%'
 ORDER BY c.CREDITS DESC
 LIMIT {cap}
+"""
+
+
+def workload_portfolio(days: int = 30, company: str = "ALL",
+                       limit: int = 200, *, bounds: tuple | None = None) -> str:
+    """Measured recurring-query portfolio with cost and behavior evidence."""
+    return _portfolio_sql(days, company, limit, bounds, advisor=False)
+
+
+def optimize_queue(days: int = 30, company: str = "ALL", limit: int = 200, *,
+                   bounds: tuple | None = None) -> str:
+    """Operations > Optimize fix queue: the portfolio plus the per-run advisor inputs
+    (exec / compile / scan totals, the typical-run compile proxies), the dominant company
+    and database by credits, and an OVERWATCH own-traffic flag (OW_SELF)."""
+    return _portfolio_sql(days, company, limit, bounds, advisor=True)
+
+
+def tracked_actions(entity_type: str = "QUERY_FINGERPRINT", lookback_days: int = 90) -> str:
+    """Which entities of ``entity_type`` already have Action Center work: every entity with an
+    OPEN/IN_PROGRESS item, or one decided (DONE/DROPPED) within ``lookback_days``. One row per
+    upper-cased entity key: the latest item's id/status/owner, plus OPEN_N so an open item is never
+    hidden behind a newer closed one, and DROPPED_N (dismissals inside the lookback, the same test
+    the bulk Track insert's cooldown applies). Account-wide by design (no company): tracking is per entity."""
+    kind = _entity_type(entity_type) or "QUERY_FINGERPRINT"
+    lookback = max(1, min(int(lookback_days or 90), 365))
+    return f"""
+SELECT UPPER(q.SOURCE_ENTITY_KEY) AS ENTITY_KEY_U,
+       MAX_BY(q.ACTION_ID, q.CREATED_AT) AS LATEST_ACTION_ID,
+       MAX_BY(q.STATUS, q.CREATED_AT) AS ACTION_STATUS,
+       MAX_BY(q.OWNER, q.CREATED_AT) AS ACTION_OWNER,
+       COUNT_IF(UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS')) AS OPEN_N,
+       COUNT_IF(UPPER(q.STATUS) = 'DROPPED') AS DROPPED_N,
+       MAX(COALESCE(q.COMPLETED_AT, q.UPDATED_AT)) AS LAST_DECIDED
+FROM {core_object('ACTION_QUEUE')} q
+WHERE UPPER(q.SOURCE_ENTITY_TYPE) = {sql_literal(kind, 40)}
+  AND q.SOURCE_ENTITY_KEY IS NOT NULL
+  AND (UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS')
+       OR COALESCE(q.COMPLETED_AT, q.UPDATED_AT) >= DATEADD('day', -{lookback}, CURRENT_TIMESTAMP()))
+GROUP BY UPPER(q.SOURCE_ENTITY_KEY)
 """
 
 
