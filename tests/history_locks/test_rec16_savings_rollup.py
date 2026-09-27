@@ -72,5 +72,11 @@ def test_rollup_panel_collects_idle_and_resize_on_optimize():
            / "optimize.py").read_text(encoding="utf-8")
     assert "rollup_savings(" in src
     assert "Total addressable savings" in src
-    assert 'SavingsOpportunity("IDLE"' in src
-    assert 'SavingsOpportunity("RESIZE"' in src
+    # v4.597: the IDLE / RESIZE generators moved into savings_rollup (shared with Proof ▸ Pipeline);
+    # Optimize still collects BOTH legs, through the helpers, and the helpers still build them.
+    assert "_savings_opps.extend(idle_opportunities(advisor))" in src
+    assert "_savings_opps.extend(resize_opportunities(sized))" in src
+    helper = (Path(__file__).resolve().parents[2] / "app" / "logic" / "savings_rollup.py").read_text(
+        encoding="utf-8")
+    assert 'SavingsOpportunity("IDLE"' in helper
+    assert 'SavingsOpportunity("RESIZE"' in helper

@@ -243,6 +243,7 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("workbench.data_product_economics", lambda: workbench_sql.data_product_economics()),
     ("workbench.cost_truth", lambda: workbench_sql.cost_truth()),
     ("mart.savings_ledger", mart_sql.savings_ledger),
+    ("mart.ledger_attribution", mart_sql.ledger_attribution),
     ("mart.settings", mart_sql.settings),
     ("mart.schema_version", mart_sql.schema_version),
     ("mart.unmapped_entities", lambda: mart_sql.unmapped_entities(7)),

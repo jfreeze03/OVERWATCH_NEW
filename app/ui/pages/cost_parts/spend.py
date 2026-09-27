@@ -16,7 +16,7 @@ import streamlit as st
 
 from app.config import MAX_LIVE_WINDOW_DAYS
 from app.core.query import run
-from app.data import app_cost_sql, cost_sql, insights_sql, mart27_sql, mart_sql
+from app.data import app_cost_sql, cost_sql, insights_sql, mart27_sql, mart_sql, workbench_sql
 from app.data.common import resolve_effective_window
 from app.logic import cs_driver
 from app.logic.anomaly import (
@@ -33,6 +33,7 @@ from app.logic.cost_coverage import (
     attribution_gap,
     attribution_gap_trend,
     drill_ready_spend_share,
+    metered_grain_coverage,
     service_category,
     service_coverage_inventory,
 )
@@ -111,6 +112,11 @@ def _spend_attr_recent_jobs(company: str, days: int, bounds: tuple | None = None
         # round-trip.
         {"key": "coco", "sql": mart27_sql.ai_code_daily(days, "ALL", bounds=bounds),
          "source": "FACT_AI_USAGE_DAILY (Cortex Code Snowsight+CLI, daily loader)"},
+        # v4.597 (Option C): the metered-grain coverage ratio that moved here from Decision
+        # Studio ▸ Cost Truth. Attribution-toggle only (cost.py filters it into the on-demand
+        # batch beside wh/daily), so the default Spend first paint is unchanged. Fact/mart only.
+        {"key": "grain", "sql": workbench_sql.cost_truth(days, company, bounds=bounds),
+         "source": "FACT_WAREHOUSE_DAILY + FACT_OBJECT_COST_DAILY + MART_COST_ALLOCATION_DAILY (grain coverage)"},
     ]
 
 
@@ -976,8 +982,9 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 result_caption(users)
 
 def _attribution_tab(company: str, days: int, rate: float, database: str = "", schema_contains: str = "",
-                     *, bounds: tuple | None = None, wh_res=None, daily_res=None) -> None:
-    # wh_res / daily_res are the prefetched batch results (perf #15); None ->
+                     *, bounds: tuple | None = None, wh_res=None, daily_res=None,
+                     grain_res=None) -> None:
+    # wh_res / daily_res / grain_res are the prefetched batch results (perf #15); None ->
     # read serially here. The live/historical fallbacks below are unchanged.
     # For 'Last month' (bounds) the pool AND the allocation shares both read the bounded
     # calendar range, so per-entity dollars still reconcile to the exact-usage pool.
@@ -1100,6 +1107,28 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                                 "warehouse's idle time and its unadjusted cloud-services credits "
                                 "— the account-level rebate lives on the Spend panel. "
                                 "Company-wide: the database/schema filters don't narrow this table.")
+        # v4.597 (Option C): the metered-grain coverage ratio (moved from Decision Studio ▸ Cost
+        # Truth). All three numbers come from ONE cost_truth frame — one window (today included)
+        # and one company scope — never from the today-excluded vs-prior pool above, whose window
+        # differs. Prefetched in the attribution batch; a serial mart read otherwise. Rendered only
+        # when metered, measured and allocated are all present (NULL basis = no evidence, not 0).
+        grain = grain_res if grain_res is not None else run(
+            workbench_sql.cost_truth(days, company, bounds=bounds), page=_PAGE,
+            key=f"spend_grain_cov_{company}_{days}{_lm}", tier="hourly",
+            source="FACT_WAREHOUSE_DAILY + FACT_OBJECT_COST_DAILY + MART_COST_ALLOCATION_DAILY (grain coverage)")
+        _grain_cov = metered_grain_coverage(grain.df if grain.usable() else None)
+        if _grain_cov is not None:
+            st.caption(
+                f"Grain coverage ({window_phrase(bounds, int(days))}): measured object-query compute is "
+                f"{_grain_cov['measured_pct']:,.0f}% and user-allocated {_grain_cov['allocated_pct']:,.0f}% "
+                "of metered warehouse credits — separate lenses, not addends.",
+                help="Measured = FACT_OBJECT_COST_DAILY query-compute arms (object-attributed, excludes "
+                     "idle and the unattributed residual). Allocated here is the owner-scoped "
+                     "MART_COST_ALLOCATION_DAILY user dimension — not the warehouse-share bars below — "
+                     "so per company it can exceed 100% when one company's users run on another's "
+                     "warehouses; the ratio is cleanest under Company = ALL. Metered = "
+                     "FACT_WAREHOUSE_DAILY usage over the same window (a trailing window includes "
+                     "today, unlike the vs-prior table above).")
 
         # Pre-fetch both allocation dims so the intro caption states the SAME pool the bars
         # use. r5-bug: both dims read the same mart over the same window, so their serving is
@@ -1201,12 +1230,13 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                     "- **Allocated to user / database:** the elapsed-time (or credit-weighted) "
                     "share above — a **directional estimate**. The 'Named rows cover N%' caption on "
                     "each chart is its coverage; 'Other / not shown' is the residual.\n"
-                    "- **Measured-query / object grain:** the **Object cost ledger** (Operations → "
-                    "Optimize) splits query credits into read / write / **residual** (queries that "
-                    "touched no base object) and proves *arms + residual = attribution credits* "
-                    "(the additive-contract recon on Admin).\n"
-                    "- **Billed-vs-model residual:** the **rate-card reconciliation** (Cost & "
-                    "Contract → Contract) frames the gap to the invoice as storage / transfer / "
+                    "- **Measured-query / object grain:** the **Object cost ledger** (Cost ▸ "
+                    "Optimization & Savings) splits query credits into read / write / **residual** "
+                    "(queries that touched no base object) and proves *arms + residual = attribution "
+                    "credits* (the additive-contract recon on Admin); the grain-coverage line under "
+                    "the warehouse table gives its share of metered credits when every lens has data.\n"
+                    "- **Billed-vs-model residual:** the **rate-card reconciliation** (Cost ▸ "
+                    "Contract & Forecast) frames the gap to the invoice as storage / transfer / "
                     "serverless / discounts.\n\n"
                     "Non-additive tracks (idle, serverless, AI, storage, the cloud-services rebate) "
                     "are on the Spend service breakdown, **not** folded into this query-grain ladder."

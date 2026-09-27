@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 
 import pandas as pd
 
 from app.logic.formulas import safe_float
+from app.logic.savings_rollup import SavingsOpportunity
 
 # Lane gates for the Decision-Studio portfolio. Named so the scatter's confidence
 # guide lines (F46) stay in lockstep with the lane assignment in prioritize_workloads.
@@ -150,6 +152,107 @@ def scenario_projection(actions: pd.DataFrame | None, *, adoption_pct: float,
         "low_capture": round(gross * adoption * max(realization - 0.2, 0.0), 2),
         "high_capture": round(min(gross, gross * adoption * min(realization + 0.2, 1.0)), 2),
     }
+
+
+# ACTION_QUEUE.PERIOD (V083; logic.workbench.ACTION_ESTIMATE_PERIODS) -> monthly run-rate divisor.
+# ONE_TIME is kept OUT of the run-rate (reported beside it); NULL / '' / anything else is "unspecified",
+# excluded from the run-rate but counted, so the projection never silently mixes time bases.
+_PERIOD_MONTHLY_DIVISOR = {"MONTHLY": 1.0, "ANNUAL": 12.0}
+
+
+def monthly_equivalent(frame: pd.DataFrame | None) -> tuple[pd.DataFrame, dict]:
+    """Normalise authored ACTION_QUEUE estimates to a monthly run-rate (v4.597, Proof ▸ Pipeline).
+
+    Returns ``(frame + MONTHLY_USD, summary)``. MONTHLY_USD = ESTIMATED_USD for MONTHLY, /12 for ANNUAL,
+    NaN (not 0 — "—" in the grid) for ONE_TIME, unspecified PERIOD, or an unpriced row (NULL / <= 0
+    estimate). ``summary`` counts every bucket so the UI can say "N open · M unpriced · K one-time":
+      items, monthly_usd (the run-rate), priced_count (rows in the run-rate), annual_count,
+      unpriced_count, one_time_count / one_time_usd, unspecified_count / unspecified_usd.
+    Totals are over the frame PASSED IN — a LIMIT-capped action read must disclose its cap beside them."""
+    summary: dict = {"items": 0, "monthly_usd": 0.0, "priced_count": 0, "annual_count": 0,
+                     "unpriced_count": 0, "one_time_count": 0, "one_time_usd": 0.0,
+                     "unspecified_count": 0, "unspecified_usd": 0.0}
+    if frame is None or frame.empty:
+        out = pd.DataFrame() if frame is None else frame.copy()
+        out["MONTHLY_USD"] = pd.Series(dtype="float64")
+        return out, summary
+    out = frame.copy()
+    usd = pd.to_numeric(out.get("ESTIMATED_USD", pd.Series(float("nan"), index=out.index)),
+                        errors="coerce")
+    period = (out.get("PERIOD", pd.Series("", index=out.index))
+              .fillna("").astype(str).str.strip().str.upper())
+    priced = usd.notna() & (usd > 0)
+    divisor = period.map(_PERIOD_MONTHLY_DIVISOR)
+    run_rate = priced & divisor.notna()
+    out["MONTHLY_USD"] = (usd / divisor).where(run_rate).round(2)
+    one_time = priced & period.eq("ONE_TIME")
+    unspecified = priced & divisor.isna() & ~period.eq("ONE_TIME")
+    summary.update({
+        "items": len(out),
+        "monthly_usd": round(float(out["MONTHLY_USD"].sum(skipna=True)), 2),
+        "priced_count": int(run_rate.sum()),
+        "annual_count": int((run_rate & period.eq("ANNUAL")).sum()),
+        "unpriced_count": int((~priced).sum()),
+        "one_time_count": int(one_time.sum()),
+        "one_time_usd": round(float(usd[one_time].sum()), 2),
+        "unspecified_count": int(unspecified.sum()),
+        "unspecified_usd": round(float(usd[unspecified].sum()), 2),
+    })
+    return out, summary
+
+
+_ADDRESSABLE_TITLE = {"IDLE": "Tighten auto-suspend on {target}", "RESIZE": "Right-size {target}"}
+
+
+def pipeline_frame(rollup_items: Iterable[SavingsOpportunity] | None,
+                   queued_df: pd.DataFrame | None) -> pd.DataFrame:
+    """One scenario_projection-ready frame for Proof ▸ Pipeline (v4.597): the de-duplicated Cost ▸
+    Optimize addressable rollup (savings_rollup.rollup_savings(...).items) UNION the queued ACTION_QUEUE
+    rows, both on a monthly basis.
+
+    Addressable rows are synthetic: KIND "Addressable", SOURCE_ENTITY_TYPE 'WAREHOUSE' + KEY = the
+    target, STATUS OPEN, CONFIDENCE = the opportunity's 0..1 weight, ESTIMATED_USD = MONTHLY_USD = its
+    $/mo, PERIOD MONTHLY. Queued rows (KIND "Queued") carry MONTHLY_USD (monthly_equivalent) AS
+    ESTIMATED_USD — one-time / unspecified / unpriced rows project $0 — with the authored figure kept in
+    AUTHORED_USD. scenario_projection then de-duplicates by entity (largest estimate wins), so a queued
+    action on the same warehouse as an addressable opportunity is counted once. Verified savings never
+    enter this frame."""
+    rows = []
+    for opp in rollup_items or ():
+        source = str(opp.source).upper()
+        target = str(opp.target)
+        usd = round(safe_float(opp.monthly_usd), 2)
+        rows.append({
+            "ACTION_ID": f"addressable:{source}:{target}",
+            "KIND": "Addressable",
+            "SEVERITY": None,
+            "TITLE": _ADDRESSABLE_TITLE.get(source, source.title() + " on {target}").format(target=target),
+            "SOURCE": f"Cost ▸ Optimization & Savings ({source})",
+            "SOURCE_ENTITY_TYPE": "WAREHOUSE",
+            "SOURCE_ENTITY_KEY": target,
+            "STATUS": "OPEN",
+            "CONFIDENCE": max(0.0, min(safe_float(opp.confidence), 1.0)),
+            "ESTIMATED_USD": usd,
+            "MONTHLY_USD": usd,
+            "AUTHORED_USD": None,
+            "PERIOD": "MONTHLY",
+            "OWNER": None,
+        })
+    addressable = pd.DataFrame(rows)
+    if queued_df is None or queued_df.empty:
+        return addressable.reset_index(drop=True)
+    queued = queued_df if "MONTHLY_USD" in queued_df.columns else monthly_equivalent(queued_df)[0]
+    queued = queued.copy()
+    queued["KIND"] = "Queued"
+    queued["AUTHORED_USD"] = queued["ESTIMATED_USD"] if "ESTIMATED_USD" in queued.columns else None
+    queued["ESTIMATED_USD"] = queued["MONTHLY_USD"]
+    if addressable.empty:
+        return queued.reset_index(drop=True)
+    # all-NA columns (e.g. SEVERITY / OWNER on the synthetic rows) are dropped before the concat and
+    # restored after, so pandas never infers dtypes from all-NA blocks (deprecated behaviour).
+    columns = list(dict.fromkeys([*addressable.columns, *queued.columns]))
+    parts = [part.dropna(axis=1, how="all") for part in (addressable, queued)]
+    return pd.concat(parts, ignore_index=True, sort=False).reindex(columns=columns)
 
 
 def slo_summary(frame: pd.DataFrame | None) -> dict[str, float]:
