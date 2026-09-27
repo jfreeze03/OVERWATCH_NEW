@@ -273,6 +273,7 @@ def _billed_frame(**window):
 def test_billed_view_reproduces_the_owner_diag():
     view, s = billed_family_view(_billed_frame(), 3.68)
     assert list(view.columns) == list(BILLED_VIEW_COLS)
+    assert list(view["#"]) == [1, 2, 3, 4]                                    # the SQL CS_RANK, not positional
     assert set(view["DRIVER_CLASS"]) == {SLEEP_POLLING}
     assert abs(view["CS_CREDITS"].sum() - 57.3) < 1e-9
     assert abs(view["SLEEP_SEC"].sum() - 372_700) < 1e-6                     # 103.5 hours slept
@@ -339,6 +340,10 @@ def test_billing_basis_note_copy():
     assert "under the free allowance" in head and "only credits above it" in head
     head, _ = billing_basis_note({**base, "metered_days": 0}, 3.68)
     assert "not priced" in head
+    head, _ = billing_basis_note({**base, "metered_days": 1}, 3.68)             # review r3: no "all 1 ... days"
+    assert "on the 1 complete metered day," in head and "all 1" not in head
+    head, _ = billing_basis_note({**base, "metered_days": 1, "under_allowance_days": 1}, 3.68)
+    assert "on 1 of 1 complete metered day the account" in head
     head, _ = billing_basis_note({**base, "unmetered_cs": 3.2}, 3.68)
     assert "not closed yet" in head and "unpriced" in head
     # review r2: the additivity condition, not "above the allowance"

@@ -176,3 +176,26 @@ def test_counted_vs_labelled():
 
 def test_two_calls_have_no_single_requested_wait():
     assert wait_seconds("select system$wait(10); select system$wait(20)") is None
+
+
+def test_round3_comment_and_escape_handling():
+    # review r3: a comment mentioning the call is not a second call; Snowflake's // comments and
+    # backslash-escaped quotes are understood by both the counted shape and the label mask
+    from app.logic.system_wait import polls_with_system_wait
+    assert wait_seconds("/* poll: call system$wait(60) until ready */ CALL SYSTEM$WAIT(60)") == 60.0
+    assert wait_seconds("CALL SYSTEM$WAIT(60) -- was system$wait(30)") == 60.0
+    assert wait_seconds("CALL SYSTEM$WAIT(60) /* system$wait(60) */") == 60.0
+    assert wait_seconds("select system$wait(10); select system$wait(20)") is None       # still two calls
+    led = "// poll landing\nCALL SYSTEM$WAIT(60)"
+    assert is_sleep_statement(led) and wait_seconds(led) == 60.0                        # counted, not only labelled
+    assert not polls_with_system_wait("select count(*) from stg.landing // replaced call system$wait(60)")
+    assert not polls_with_system_wait(r"insert into ops.notes values ('don\'t', 'use call system$wait(60) sparingly')")
+    assert polls_with_system_wait(r"BEGIN LET msg := 'can\'t start'; CALL SYSTEM$WAIT(60); END;")
+    assert polls_with_system_wait("BEGIN LET msg := 'it''s late'; CALL SYSTEM$WAIT(60); END;")
+
+
+@pytest.mark.parametrize("text", ["// poll\nCALL SYSTEM$WAIT(60)", "select 1 // system$wait(10)",
+                                  "//a\n//b\nselect system$wait(1)"])
+def test_sql_pattern_parity_with_slash_comments(text):
+    sql_re = re.compile(SLEEP_SQL_PATTERN.replace("[[:space:]]", r"\s"))
+    assert (sql_re.search(text.upper()) is not None) == is_sleep_text(text)

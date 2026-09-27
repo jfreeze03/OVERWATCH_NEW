@@ -177,6 +177,8 @@ def test_copy_does_not_overclaim_after_review():
     body = _helper_body()
     assert "capped at that day's billed cloud services" in body   # the sleep $ help (review r2)
     assert "(s['scope_cs'] - s['unmetered_cs']) / s['metered_cs']" in body   # same days on both sides
+    assert "format_credits(s['scope_cs'] - s['unmetered_cs'])} on complete days" in body   # r3: show its base
+    assert '_scope_txt = "account-wide" if str(company).upper() == "ALL" else f"{company} only"' in _SPEND
     assert "sleep time (SYSTEM$WAIT)" in mr.COLUMN_HELP["RESIZE_VERDICT"]
     note = mr.get("cloud_services_family_billed")
     assert note is not None and "above the 10% allowance" not in note.notes

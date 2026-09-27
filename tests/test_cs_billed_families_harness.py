@@ -194,3 +194,7 @@ def test_mentions_are_not_flagged_and_sleeps_ride_past_the_top_n(db):
     view, s = cs_driver.billed_family_view(df, RATE)
     assert s["sleep_families"] == 1 and s["sleep_hours_complete"] is True
     assert list(view["DRIVER_CLASS"]).count(cs_driver.SLEEP_POLLING) == 1
+    # review r3: the pulled-in sleep row shows its TRUE rank, not its position (51)
+    total = mart_sql.CS_BILLED_TOP_N + 5 + 5                                   # 55 ordinary + 5 small families
+    w30 = view.loc[view["SAMPLE_TEXT"] == "CALL SYSTEM$WAIT(30)"].iloc[0]
+    assert len(view) == mart_sql.CS_BILLED_TOP_N + 1 and w30["#"] == total - 1   # 2nd-smallest of the 60

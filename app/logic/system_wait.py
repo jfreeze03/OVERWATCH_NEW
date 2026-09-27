@@ -28,11 +28,11 @@ import math
 import re
 
 # The sleep statement shape for Snowflake REGEXP_INSTR over UPPER(text): POSIX ERE, anchored at the
-# start; leading whitespace, /* block */ and -- line comments allowed; then SELECT or CALL, then the
+# start; leading whitespace, /* block */, -- and // line comments allowed; then SELECT or CALL, then the
 # call at a token boundary (SYSTEM$WAIT_FOR_SERVICES has "_" next, so it never matches). No backslash
 # and no quote: it is embedded in a SQL string literal (the line comment ends at a literal newline).
 SLEEP_SQL_PATTERN = (
-    "^[[:space:]]*((/[*]([^*]|[*]+[^*/])*[*]+/|--[^\n]*\n)[[:space:]]*)*"
+    "^[[:space:]]*((/[*]([^*]|[*]+[^*/])*[*]+/|--[^\n]*\n|//[^\n]*\n)[[:space:]]*)*"
     "(SELECT|CALL)[[:space:]]+SYSTEM[$]WAIT[[:space:]]*[(]"
 )
 # QUERY_TYPEs never counted as a sleep, whatever their text: DDL that defines one, and the parent row
@@ -50,8 +50,9 @@ _ARG_RE = re.compile(
     re.IGNORECASE)
 # The call anywhere, at a token boundary (for the one-call check and the wrapper label).
 _CALL_RE = re.compile(r"(?:^|[^A-Z0-9_$])SYSTEM\$WAIT\s*\(", re.IGNORECASE)
-# String literals and comments, blanked before looking for a call a block really executes.
-_LITERAL_OR_COMMENT_RE = re.compile(r"'(?:[^']|'')*'?|--[^\n]*|/\*.*?(?:\*/|$)", re.DOTALL)
+# String literals (doubled '' and backslash escapes) and Snowflake comments (--, //, /* */), blanked
+# before counting calls or looking for a call a block really executes.
+_LITERAL_OR_COMMENT_RE = re.compile(r"'(?:[^'\\]|\\.|'')*'?|--[^\n]*|//[^\n]*|/\*.*?(?:\*/|$)", re.DOTALL)
 _DDL_PREFIXES = ("CREATE", "ALTER")
 _DDL_TEXT_RE = re.compile(r"^\s*(?:CREATE|ALTER)\b", re.IGNORECASE)
 # Snowflake's SYSTEM$WAIT time units (singular after stripping a trailing S); default SECONDS.
@@ -94,7 +95,8 @@ def wait_seconds(text: object) -> float | None:
     variable (? / :1) or an expression, the unit is unknown, or the text is truncated. The unit defaults
     to SECONDS; singular and plural spellings are both accepted, case-insensitively. A negative amount
     never matches (Snowflake rejects it)."""
-    if not isinstance(text, str) or len(_CALL_RE.findall(text)) > 1:
+    # one call outside literals / comments (a comment that mentions the call is not a second call)
+    if not isinstance(text, str) or len(_CALL_RE.findall(_LITERAL_OR_COMMENT_RE.sub(" ", text))) > 1:
         return None
     m = _ARG_RE.search(text)
     if m is None:

@@ -334,8 +334,10 @@ def driver_summary(df: pd.DataFrame) -> dict:
 
 # Display order == the CSV. Every duration ends in _S / _SEC so the table humanizes it to Hr/Min/Sec;
 # CS_CREDITS_PER_SLEEP_HOUR is a rate, not a duration (its last token is HOUR, not HOURS / H).
+# "#" is the family's true rank by CS credits (the SQL CS_RANK): a sleep family pulled in below the top 50
+# keeps its real rank instead of the table's positional 1..N.
 BILLED_VIEW_COLS = (
-    "DRIVER_CLASS", "SAMPLE_TEXT", "WAREHOUSE_NAME", "USER_NAME", "USER_TOP_APP", "ROLE_NAME",
+    "#", "DRIVER_CLASS", "SAMPLE_TEXT", "WAREHOUSE_NAME", "USER_NAME", "USER_TOP_APP", "ROLE_NAME",
     "QUERY_TYPE", "RUNS", "ACTIVE_DAYS", "AVG_COMPILE_S", "AVG_EXEC_S", "AVG_ELAPSED_S", "COMPILE_PCT",
     "CS_CREDITS", "CS_SHARE_PCT", "BILLED_CS_CREDITS", "BILLED_CS_USD", "WAIT_PER_RUN_SEC", "SLEEP_SEC",
     "SLEEP_BASIS", "CS_CREDITS_PER_SLEEP_HOUR", "OWNER_HINT", "REMEDIATION_OWNER", "NEXT_STEP",
@@ -409,6 +411,8 @@ def billed_family_view(df: pd.DataFrame | None, rate: float) -> tuple[pd.DataFra
     cs = _numcol(out, "CS_CREDITS")
     sleep_h = out["SLEEP_SEC"] / 3600.0
     out["CS_CREDITS_PER_SLEEP_HOUR"] = (cs / sleep_h.where(sleep_h > 0)).astype("float64")
+    out["#"] = (_numcol(out, "CS_RANK") if "CS_RANK" in out.columns
+                else pd.Series(range(1, len(out) + 1), index=out.index, dtype="float64"))
     view = out.reindex(columns=list(BILLED_VIEW_COLS))
 
     def _win(col: str) -> float:
@@ -459,12 +463,14 @@ def billing_basis_note(summary: dict, rate: float) -> tuple[str, str]:
         head = ("Billing basis: daily metering for this window isn't loaded yet, so these credits are "
                 "usage and are not priced.")
     elif under == 0:
+        days_txt = "the 1 complete metered day" if md == 1 else f"all {md} complete metered days"
         head = (f"Billing basis: the account's cloud services were above the free allowance (10% of daily "
-                f"warehouse compute) on all {md} complete metered days, so cutting these credits cuts the "
+                f"warehouse compute) on {days_txt}, so cutting these credits cuts the "
                 f"bill, up to each day's billed cloud services. Billed $ = those credits × "
                 f"${safe_float(rate):,.2f} (the compute rate).")
     else:
-        head = (f"Billing basis: on {under} of {md} complete metered days the account stayed under the free "
+        head = (f"Billing basis: on {under} of {md} complete metered day{'' if md == 1 else 's'} the account "
+                f"stayed under the free "
                 f"allowance (10% of daily warehouse compute), where cloud services cost nothing extra; "
                 f"Billed $ counts only credits above it, × ${safe_float(rate):,.2f}.")
     unmetered = safe_float(summary.get("unmetered_cs"))

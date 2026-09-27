@@ -279,8 +279,9 @@ def _cs_billed_families_panel(company: str, days: int, rate: float, sel_wh: str,
          "scope": scope,
          # same days on both sides: statement credits on complete metered days vs those days' metering
          # (review r2: today + the in-progress day were in the numerator only, reading over 100%)
-         "sub": (f"{(s['scope_cs'] - s['unmetered_cs']) / s['metered_cs'] * 100:.0f}% of "
-                 f"{format_credits(s['metered_cs'])} metered (complete days)"
+         "sub": (f"{format_credits(s['scope_cs'] - s['unmetered_cs'])} on complete days = "
+                 f"{(s['scope_cs'] - s['unmetered_cs']) / s['metered_cs'] * 100:.0f}% of "
+                 f"{format_credits(s['metered_cs'])} metered"
                  if scope == "account-wide" and s["metered_cs"] > 0 else ""),
          "help": "Cloud-services credits recorded on individual statements (query history, loaded hourly) for "
                  "this scope and window. Metered = the account's cloud-services credits in daily metering; the "
@@ -853,7 +854,8 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
         if _sel_wh:
             st.caption(f"Cloud-services drivers scoped to **{_sel_wh}** — click another warehouse to switch.")
         else:
-            st.caption("Click a warehouse above to scope the drivers below to it; showing account-wide until then.")
+            _scope_txt = "account-wide" if str(company).upper() == "ALL" else f"{company} only"
+            st.caption(f"Click a warehouse above to scope the drivers below to it; showing {_scope_txt} until then.")
         # v4.595: families ranked by the cloud-services credits they BILL, for every warehouse (not only
         # ELEVATED) — the only view that names and prices sleep polling, which barely compiles.
         _cs_billed_families_panel(company, days, rate, _sel_wh, bounds=bounds, prefetched=csfam_res)
