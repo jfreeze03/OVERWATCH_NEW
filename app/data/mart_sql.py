@@ -462,12 +462,16 @@ def _cloud_svc_where(days: int, company: str, warehouse: str, *, bounds: tuple |
     return and_where(*where)
 
 
-def cloud_svc_top_shapes(days: int, company: str = "ALL", warehouse: str = "", *, bounds: tuple | None = None) -> str:
+def cloud_svc_top_shapes(days: int, company: str = "ALL", warehouse: str = "", *, bounds: tuple | None = None,
+                         sleep_only: bool = False) -> str:
     """Top query shapes by cloud-services credits (V055, MART_CLOUD_SVC_DAILY).
 
     The shape-grain lens the compile-heavy view misses: a metadata storm of tiny
     SHOW/DESCRIBE queries has near-zero compile time but can dominate CS credits.
     RUNS / CS-per-1k-runs / avg exec / cache% expose which pattern to throttle.
+    ``sleep_only`` (V160, the COST_SLEEP_POLLING AI evidence pack) keeps only SYSTEM$WAIT sleep statements
+    (the shared system_wait statement shape, as cloud_svc_billed_families flags them), so a warehouse's own
+    heavy statements never outrank the sleeps the alert is about.
     """
     return f"""
 SELECT
@@ -480,11 +484,19 @@ SELECT
     ROUND(SUM(EXEC_SEC_SUM) / NULLIF(SUM(RUNS), 0), 3) AS AVG_EXEC_S,
     ROUND(SUM(CACHE_PCT_SUM) / NULLIF(SUM(RUNS), 0) * 100, 0) AS AVG_CACHE_PCT
 FROM {mart_object("MART_CLOUD_SVC_DAILY")}
-WHERE {_cloud_svc_where(days, company, warehouse, bounds=bounds)}
+WHERE {and_where(_cloud_svc_where(days, company, warehouse, bounds=bounds), *(_sleep_row_predicates() if sleep_only else ()))}
 GROUP BY QUERY_PARAMETERIZED_HASH
 ORDER BY CS_CREDITS DESC
 LIMIT 30
 """
+
+
+def _sleep_row_predicates() -> tuple[str, ...]:
+    """A MART_CLOUD_SVC_DAILY row that IS a SYSTEM$WAIT sleep statement (system_wait statement shape; the same
+    three tests cloud_svc_billed_families applies to a family's sample, here per row)."""
+    return ("QUERY_PARAMETERIZED_HASH <> 'n/a'",
+            *(f"QUERY_TYPE NOT LIKE {sql_literal(p + '%')}" for p in SLEEP_EXCLUDED_TYPE_PREFIXES),
+            f"REGEXP_INSTR(UPPER(SAMPLE_TEXT), {sql_literal(SLEEP_SQL_PATTERN)}) > 0")
 
 
 def cloud_svc_by_user(days: int, company: str = "ALL", warehouse: str = "", *, bounds: tuple | None = None) -> str:

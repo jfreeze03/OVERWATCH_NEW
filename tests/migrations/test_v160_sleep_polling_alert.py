@@ -645,7 +645,7 @@ def test_v160_raise_hold_and_severity_text():
     # severity never downgrades an operator-set base; COMPANY per warehouse
     assert "IFF(o.BAND_RANK = 2 AND o.BASE_SEVERITY IN ('LOW', 'MEDIUM'), 'HIGH', o.BASE_SEVERITY)" in n
     assert "COALESCE(DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(o.WAREHOUSE_NAME), 'ALL')" in n
-    assert "IFF(o.WAREHOUSE_NAME = 'NONE', 'ALL'," in n                                  # no warehouse = account
+    assert "IFF(o.WAREHOUSE_NAME = 'NONE', 'ALL'" not in n    # review r2: the house mapping, like the mart and V150
     assert "WHERE RULE_ID = 'COST_SLEEP_POLLING' AND ENABLED" in n                      # a disabled rule raises nothing
 
 

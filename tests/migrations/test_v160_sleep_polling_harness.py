@@ -759,6 +759,8 @@ def test_owner_fixture_events_key_title_detail(owner):
         assert len(e["DETAIL"]) <= 2000 and navigate._DB_RE.search(e["DETAIL"].upper()) is None
         assert f"Next step: {fam['NEXT_STEP']} Verify: " in e["DETAIL"]       # the panel row's own next step
         assert f"Owner: {fam['OWNER_HINT']}." in e["DETAIL"]
+        # review r2: the whole next step survives the AI prompt's DETAIL[:500]
+        assert f"Next step: {fam['NEXT_STEP']}" in e["DETAIL"][:500] and "A resize won't help." in e["DETAIL"][:500]
         assert f"~${round(usd)}/week, ~${round(usd * 52 / 12)}/month at $3.68/credit" in e["DETAIL"]
         assert "Sleep polling on 7 of the 7 complete days 2026-09-21 to 2026-09-27 (last on 2026-09-27)" in e["DETAIL"]
         assert navigate.investigation_target(_RULE, f"{e['TITLE']} {e['DETAIL']}")["filters"] == {
@@ -964,9 +966,10 @@ def test_company_follows_the_warehouse():
     for wh in ("WH_ALFA_Q", "WH_TRXS_TRANSFORM", "WH_OTHER", "NONE"):
         _flat(db, f"H_{wh}", "CALL SYSTEM$WAIT(5)", 5.0, wh=wh, user="U", qtype="CALL")
     raised = {e["DEDUPE_KEY"].split("|")[1]: e for e in db.run().raised}
-    # an unmapped warehouse keeps the house UNKNOWN classification (V044); only the no-warehouse bucket is ALL
+    # the house per-warehouse mapping (V044), exactly as the mart stamps its rows: an unmapped warehouse and the
+    # no-warehouse bucket are UNKNOWN (review r2: 'ALL' made the Verify panel read "None found" under ALFA)
     assert {k: e["COMPANY"] for k, e in raised.items()} == {"WH_ALFA_Q": "ALFA", "WH_TRXS_TRANSFORM": "Trexis",
-                                                            "WH_OTHER": "UNKNOWN", "NONE": "ALL"}
+                                                            "WH_OTHER": "UNKNOWN", "NONE": "UNKNOWN"}
     assert raised["NONE"]["TITLE"].startswith("No warehouse sleep polling ~$")      # the mart's NULL warehouse
     assert navigate.investigation_target(_RULE, raised["NONE"]["TITLE"])["filters"] == {}
 

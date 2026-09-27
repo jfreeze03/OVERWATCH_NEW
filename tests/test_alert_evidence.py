@@ -118,12 +118,17 @@ def test_sleep_polling_gets_the_cloud_services_pack_for_its_warehouse() -> None:
     plan = plan_for_alert("COST_SLEEP_POLLING", title, "Sleep polling on 7 of the 7 complete days", "2026-09-28")
     assert plan is not None and plan.kind == "cloud_svc_sleep" and plan.days == 7
     assert plan.warehouse == "WH_ALFA_TRANSFORM_PRD"
-    # same SQL as the cloud_svc pack; a sleep-specific framing (review r1: the shared framing called a
-    # sleep's high CS per run "metadata/compile overhead")
+    # the cloud_svc pack restricted to sleep shapes (review r2), with a sleep-specific framing (review r1: the
+    # shared framing called a sleep's high CS per run "metadata/compile overhead")
     from app.data import alert_evidence_sql
     from app.logic.ai_prompts import _EVIDENCE_COLUMNS, _EVIDENCE_FRAMING
-    assert alert_evidence_sql.build(plan) == alert_evidence_sql.build(
-        type(plan)("cloud_svc", plan.window_label, days=7, warehouse=plan.warehouse))
+    from app.logic.system_wait import SLEEP_SQL_PATTERN
+    sleep_sql = alert_evidence_sql.build(plan)
+    plain_sql = alert_evidence_sql.build(type(plan)("cloud_svc", plan.window_label, days=7, warehouse=plan.warehouse))
+    assert f"REGEXP_INSTR(UPPER(SAMPLE_TEXT), '{SLEEP_SQL_PATTERN}') > 0" in sleep_sql
+    assert "QUERY_TYPE NOT LIKE 'MULTI_STATEMENT%'" in sleep_sql and "REGEXP_INSTR" not in plain_sql
+    assert "WAREHOUSE_NAME = 'WH_ALFA_TRANSFORM_PRD'" in sleep_sql
+    assert "long sleeps" in _EVIDENCE_FRAMING["cloud_svc_sleep"] and "frequent" not in _EVIDENCE_FRAMING["cloud_svc_sleep"]
     assert _EVIDENCE_COLUMNS["cloud_svc_sleep"] == _EVIDENCE_COLUMNS["cloud_svc"]
     assert "not metadata/compile" in _EVIDENCE_FRAMING["cloud_svc_sleep"]
     assert "sleep polling" in plan.label

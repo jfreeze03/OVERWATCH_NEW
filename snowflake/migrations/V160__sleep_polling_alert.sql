@@ -312,23 +312,23 @@ BEGIN
     SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
     FROM (
     SELECT o.RULE_ID,
-           IFF(o.WAREHOUSE_NAME = 'NONE', 'ALL',          -- no warehouse = account-level; else the house mapping
-               COALESCE(DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(o.WAREHOUSE_NAME), 'ALL')),
+           COALESCE(DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(o.WAREHOUSE_NAME), 'ALL'),
            IFF(o.BAND_RANK = 2 AND o.BASE_SEVERITY IN ('LOW', 'MEDIUM'), 'HIGH', o.BASE_SEVERITY),
            LEFT(IFF(o.WAREHOUSE_NAME = 'NONE', 'No warehouse', o.WAREHOUSE_NAME) || ' sleep polling ~$'
                 || ROUND(o.USD_WEEK)::INT || '/week: ' || o.OWNER_HINT, 300),
            LEFT('Sleep polling on ' || o.ACTIVE_DAYS || ' of the 7 complete days ' || TO_VARCHAR(o.WIN_START) || ' to '
-                || TO_VARCHAR(o.WIN_END) || ' (last on ' || TO_VARCHAR(o.LAST_ACTIVE_DAY) || '): ' || o.RUNS
-                || ' sleep run(s) in ' || o.FAMILIES || ' statement family(ies): ' || COALESCE(o.CALLS, 'a wait call')
-                || '. Cloud services ' || ROUND(o.CS_CREDITS, 2) || ' credits used, ' || ROUND(o.BILLED_CS_CREDITS, 2)
-                || ' billed (the account was above its free 10% allowance on ' || o.ABOVE_ALLOWANCE_DAYS
-                || ' of 7 days) = ~$' || ROUND(o.USD_WEEK)::INT || '/week, ~$' || ROUND(o.USD_WEEK * 52 / 12)::INT
-                || '/month at $' || ROUND(o.CREDIT_PRICE_USD, 2) || '/credit. Owner: ' || o.OWNER_HINT || '. Next step: '
+                || TO_VARCHAR(o.WIN_END) || ' (last on ' || TO_VARCHAR(o.LAST_ACTIVE_DAY) || '), ~'
+                || ROUND(o.USD_WEEK)::INT || ' USD/week billed. Owner: ' || o.OWNER_HINT || '. Next step: '
                 || IFF(UPPER(o.USER_NAME) = 'SYSTEM',
                        'Stop sleeping inside the task: run the dependent step AFTER its predecessor in a task graph, or trigger it when a stream has data, instead of a CALL SYSTEM$WAIT loop. A resize won''t help.',
                        'Move the wait out of Snowflake: let the scheduler own the interval (Control-M cyclic interval or file watcher, orchestrator sensor), or run one short readiness check per cycle instead of SYSTEM$WAIT; cloud-services credits accrue for the whole sleep. A resize won''t help.')
                 || ' Verify: Cost Intelligence > Spend & Attribution > Cloud-services health, 7-day window, Which '
-                || 'statement families bill the most cloud services. A sleep compiles in well under 0.1 s, so '
+                || 'statement families bill the most cloud services. Evidence: ' || o.RUNS || ' sleep run(s) in '
+                || o.FAMILIES || ' statement family(ies): ' || COALESCE(o.CALLS, 'a wait call')
+                || '. Cloud services ' || ROUND(o.CS_CREDITS, 2) || ' credits used, ' || ROUND(o.BILLED_CS_CREDITS, 2)
+                || ' billed (the account was above its free 10% allowance on ' || o.ABOVE_ALLOWANCE_DAYS
+                || ' of 7 days) = ~$' || ROUND(o.USD_WEEK)::INT || '/week, ~$' || ROUND(o.USD_WEEK * 52 / 12)::INT
+                || '/month at $' || ROUND(o.CREDIT_PRICE_USD, 2) || '/credit. A sleep compiles in well under 0.1 s, so '
                 || 'compile-ranked views never show it, and the per-warehouse cloud-services baseline rule never trips '
                 || 'on a steady poller (it is its own baseline). Checked weekly; while OPEN, this event resolves itself '
                 || 'once the poller bills under the clear level (half the threshold by default) or is idle on the last '

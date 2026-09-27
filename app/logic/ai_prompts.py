@@ -185,7 +185,8 @@ _EVIDENCE_FRAMING: dict[str, str] = {
                   "(higher CS_CREDITS_PER_1K = more metadata/compile overhead per run)"),
     "cloud_svc_sleep": ("Top query shapes by cloud-services credits on the warehouse. A SYSTEM$WAIT shape bills "
                         "cloud services for the whole sleep (AVG_EXEC_S is the wait), so its high "
-                        "CS_CREDITS_PER_1K means long or frequent sleeps, not metadata/compile overhead"),
+                        "CS_CREDITS_PER_1K means long sleeps (how often it polls shows in RUNS and CS_CREDITS), "
+                        "not metadata/compile overhead"),
     "cortex": "Daily AI/Cortex billed credits by service type",
     "metering_service": "Daily billed credits for this service type",
     "query_family": "This query family's daily run count and p50/p95 latency in seconds",
