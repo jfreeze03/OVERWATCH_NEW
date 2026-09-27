@@ -82,6 +82,7 @@ TARGETS = [
     ("cb.window.company", lambda p: chargeback_sql.department_window_credits(7, p)),
     ("mart.factsum.wh", lambda p: mart_sql.fact_query_window_summary(7, "ALFA", p, "", "")),
     ("mart.factsum.user", lambda p: mart_sql.fact_query_window_summary(7, "ALFA", "", p, "")),
+    ("mart.cs_billed.wh", lambda p: mart_sql.cloud_svc_billed_families(7, "ALL", p)),
 ]
 
 # Builders whose ONLY correct response to hostile input is refusal.

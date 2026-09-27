@@ -2377,7 +2377,9 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
     # rec31: declare size only on tables that SCROLL (>10 rows -> height-capped, so
     # the total is not visible on screen). Fully-visible small tables need no
     # count caption, and a caller that prints its own count passes size_note=False.
-    _prov = f"by {sort_label}" if sort_label else ""   # rec30: order provenance
+    # rec30: order provenance. Callers pass the order bare ("CS credits desc") or with the
+    # preposition ("by runs desc"); both print one "by" (eight tables used to read "by by ...").
+    _prov = f"by {sort_label.removeprefix('by ')}" if sort_label else ""
     if isinstance(days, int) and days > 0:
         _prov += (" · " if _prov else "") + f"last {days}d"
     if size_note and len(df) > 10:

@@ -32,6 +32,7 @@ from app.data.common import (
     resolve_effective_window,
     scope_window_where,
 )
+from app.logic.system_wait import SLEEP_EXCLUDED_TYPE_PREFIXES, SLEEP_SQL_PATTERN
 
 
 def _company_filter(company: str) -> str:
@@ -502,6 +503,158 @@ WHERE {_cloud_svc_where(days, company, warehouse, bounds=bounds)}
 GROUP BY USER_NAME
 ORDER BY CS_CREDITS DESC
 LIMIT 25
+"""
+
+
+# v4.595 billed-family ranking: the top N by CS credits (plus every sleep-polling family), a hard row cap
+# well under DEFAULT_MAX_ROWS (so run() never truncates it), and the compile-heavy lists' admission bar
+# (AVG(COMPILATION_TIME) > 500 ms in cost_sql.compile_heavy_families / mart27_sql.family_compile_heavy).
+CS_BILLED_TOP_N = 50
+CS_BILLED_ROW_CAP = 250
+COMPILE_HEAVY_AVG_S = 0.5
+
+
+def cloud_svc_billed_families(days: int, company: str = "ALL", warehouse: str = "", *,
+                              bounds: tuple | None = None) -> str:
+    """Statement families ranked by the cloud-services credits they BILL, not by compile time (v4.595).
+
+    Mart-only: MART_CLOUD_SVC_DAILY (per-statement CREDITS_USED_CLOUD_SERVICES, loaded hourly) x
+    FACT_METERING_DAILY (the account-day's billed cloud services) x MART_QUERY_FAMILY_DAILY (average
+    elapsed) x FACT_APP_COST_DAILY (the user's main application). Row grain = hash x type x warehouse x
+    user. BILLED_CS_CREDITS = SUM over days of LEAST(family CS that day, GREATEST(0, account CS +
+    adjustment that day)): what the bill drops by if this family alone stopped (a marginal
+    counterfactual, not a rebate allocation); NULL on days metering has not loaded yet. ``bill`` keeps
+    COMPLETE metering days only: the newest FACT_METERING_DAILY row is the UTC day still in progress
+    when the daily load ran (SP_LOAD_DAILY_FACTS, 06:45 Central), so its adjustment is not final;
+    that day's statement credits stay unpriced like any unmetered day. The sleep-polling total
+    (SLEEP_BILLED_CS_CREDITS_ALL) is capped per day as a GROUP (``sleepday`` / ``sleepsum``): what the
+    bill drops by if every sleep family stopped, never more than that day's billed cloud services
+    (summing the per-family marginals would over-count once a day's billed CS is below their sum).
+    Billing and the app hint are account facts, so those CTEs ignore the company / warehouse scope.
+    Window totals are SUM() OVER () in ``ranked``, BEFORE the top-N filter (never derived from the
+    capped frame). Returns the top CS_BILLED_TOP_N by CS plus every sleep-polling family (SLEEP_FLAG,
+    the shared system_wait.SLEEP_SQL_PATTERN statement shape). Every aggregate argument is
+    alias-qualified: a bare RUNS once resolved to a SUM(RUNS) AS RUNS alias ("aggregate functions
+    cannot be nested"). No rate math here."""
+    fam_where = _cloud_svc_where(days, company, warehouse, bounds=bounds)
+    fam_mart_where = _cloud_svc_where(days, company, "", bounds=bounds)   # the family mart has no warehouse
+    acct_where = _cloud_svc_where(days, "ALL", "", bounds=bounds)          # billing is account-wide
+    # never a sleep: DDL defining one, a multi-statement parent (system_wait.is_sleep_statement parity)
+    not_excluded = " AND ".join(f"f.QUERY_TYPE NOT LIKE {sql_literal(p + '%')}"
+                                for p in SLEEP_EXCLUDED_TYPE_PREFIXES)
+    return f"""
+WITH bill AS (
+    SELECT x.DAY,
+           SUM(COALESCE(x.CREDITS_CLOUD_SVCS, 0)) AS CS_USED_DAY,
+           SUM(COALESCE(x.CREDITS_CLOUD_SVCS, 0) + COALESCE(x.CREDITS_ADJUSTMENT, 0)) AS CS_BILLED_DAY
+    FROM {mart_object("FACT_METERING_DAILY")} x
+    WHERE {acct_where}
+      AND x.DAY < (SELECT MAX(z.DAY) FROM {mart_object("FACT_METERING_DAILY")} z)
+    GROUP BY x.DAY
+),
+billsum AS (
+    SELECT SUM(b.CS_USED_DAY) AS METERED_CS_CREDITS, COUNT(*) AS METERED_DAYS,
+           COUNT_IF(b.CS_BILLED_DAY <= 0) AS UNDER_ALLOWANCE_DAYS, MAX(b.DAY) AS LAST_METERED_DAY
+    FROM bill b
+),
+fd AS (
+    SELECT m.DAY, m.QUERY_PARAMETERIZED_HASH, m.QUERY_TYPE, m.WAREHOUSE_NAME, m.USER_NAME,
+           MAX_BY(m.ROLE_NAME, m.CS_CREDITS) AS ROLE_NAME,
+           MIN(m.SAMPLE_TEXT) AS SAMPLE_MIN, MAX(m.SAMPLE_TEXT) AS SAMPLE_MAX,
+           SUM(m.RUNS) AS RUNS, SUM(m.CS_CREDITS) AS CS_CREDITS,
+           SUM(m.EXEC_SEC_SUM) AS EXEC_SEC, SUM(m.COMPILE_SEC_SUM) AS COMPILE_SEC
+    FROM {mart_object("MART_CLOUD_SVC_DAILY")} m
+    WHERE {fam_where}
+    GROUP BY m.DAY, m.QUERY_PARAMETERIZED_HASH, m.QUERY_TYPE, m.WAREHOUSE_NAME, m.USER_NAME
+),
+fam AS (
+    SELECT fd.QUERY_PARAMETERIZED_HASH, fd.QUERY_TYPE, fd.WAREHOUSE_NAME, fd.USER_NAME,
+           MAX_BY(fd.ROLE_NAME, fd.CS_CREDITS) AS ROLE_NAME,
+           MIN(fd.SAMPLE_MIN) AS SAMPLE_TEXT, MAX(fd.SAMPLE_MAX) AS SAMPLE_TEXT_ALT,
+           SUM(fd.RUNS) AS RUNS, SUM(fd.CS_CREDITS) AS CS_CREDITS,
+           SUM(fd.EXEC_SEC) AS EXEC_SEC, SUM(fd.COMPILE_SEC) AS COMPILE_SEC,
+           COUNT(*) AS ACTIVE_DAYS,
+           SUM(IFF(b.DAY IS NULL, NULL, LEAST(fd.CS_CREDITS, GREATEST(0, b.CS_BILLED_DAY)))) AS BILLED_CS_CREDITS,
+           SUM(IFF(b.DAY IS NULL, fd.CS_CREDITS, 0)) AS UNMETERED_CS_CREDITS
+    FROM fd
+    LEFT JOIN bill b ON b.DAY = fd.DAY
+    GROUP BY fd.QUERY_PARAMETERIZED_HASH, fd.QUERY_TYPE, fd.WAREHOUSE_NAME, fd.USER_NAME
+),
+el AS (
+    SELECT q.QUERY_HASH,
+           SUM(COALESCE(q.TOTAL_ELAPSED_SEC, q.TOTAL_EXEC_SEC)) / NULLIF(SUM(q.RUNS), 0) AS AVG_ELAPSED_S
+    FROM {mart_object("MART_QUERY_FAMILY_DAILY")} q
+    WHERE {fam_mart_where}
+    GROUP BY q.QUERY_HASH
+),
+app AS (
+    SELECT u.USER_NAME, MAX_BY(u.APPLICATION, u.APP_QUERIES) AS USER_TOP_APP
+    FROM (
+        SELECT c.USER_NAME, c.APPLICATION, SUM(c.QUERIES) AS APP_QUERIES
+        FROM {core_object("FACT_APP_COST_DAILY")} c
+        WHERE {acct_where} AND c.APPLICATION <> '(unknown)'
+        GROUP BY c.USER_NAME, c.APPLICATION
+    ) u
+    GROUP BY u.USER_NAME
+),
+tagged AS (
+    SELECT f.*, el.AVG_ELAPSED_S, a.USER_TOP_APP,
+           IFF(f.QUERY_PARAMETERIZED_HASH <> 'n/a'
+               AND {not_excluded}
+               AND REGEXP_INSTR(UPPER(f.SAMPLE_TEXT), {sql_literal(SLEEP_SQL_PATTERN)}) > 0, 1, 0) AS SLEEP_FLAG
+    FROM fam f
+    LEFT JOIN el ON el.QUERY_HASH = f.QUERY_PARAMETERIZED_HASH
+    LEFT JOIN app a ON a.USER_NAME = f.USER_NAME
+),
+ranked AS (
+    SELECT t.*,
+           ROW_NUMBER() OVER (ORDER BY t.CS_CREDITS DESC, t.QUERY_PARAMETERIZED_HASH,
+                                       t.WAREHOUSE_NAME, t.USER_NAME, t.QUERY_TYPE) AS CS_RANK,
+           SUM(t.CS_CREDITS) OVER () AS SCOPE_CS_CREDITS,
+           SUM(t.UNMETERED_CS_CREDITS) OVER () AS SCOPE_UNMETERED_CS_CREDITS,
+           SUM(IFF(COALESCE(t.COMPILE_SEC, 0) <= {COMPILE_HEAVY_AVG_S} * t.RUNS, t.CS_CREDITS, 0)) OVER ()
+               AS LOW_COMPILE_CS_CREDITS_ALL,
+           SUM(t.SLEEP_FLAG) OVER () AS SLEEP_FAMILIES_ALL,
+           SUM(IFF(t.SLEEP_FLAG = 1, t.CS_CREDITS, 0)) OVER () AS SLEEP_CS_CREDITS_ALL
+    FROM tagged t
+),
+sleepday AS (
+    SELECT fd.DAY, SUM(fd.CS_CREDITS) AS SLEEP_CS_DAY
+    FROM fd
+    JOIN tagged t ON t.QUERY_PARAMETERIZED_HASH = fd.QUERY_PARAMETERIZED_HASH AND t.QUERY_TYPE = fd.QUERY_TYPE
+                 AND t.WAREHOUSE_NAME = fd.WAREHOUSE_NAME AND t.USER_NAME = fd.USER_NAME
+    WHERE t.SLEEP_FLAG = 1
+    GROUP BY fd.DAY
+),
+sleepsum AS (
+    SELECT SUM(LEAST(sd.SLEEP_CS_DAY, GREATEST(0, b.CS_BILLED_DAY))) AS SLEEP_BILLED_CS_CREDITS_ALL
+    FROM sleepday sd
+    JOIN bill b ON b.DAY = sd.DAY
+)
+SELECT
+    r.CS_RANK, r.QUERY_PARAMETERIZED_HASH, r.QUERY_TYPE, r.WAREHOUSE_NAME, r.USER_NAME, r.ROLE_NAME,
+    r.USER_TOP_APP, r.SAMPLE_TEXT, r.SAMPLE_TEXT_ALT, r.RUNS, r.ACTIVE_DAYS,
+    ROUND(r.COMPILE_SEC / NULLIF(r.RUNS, 0), 3) AS AVG_COMPILE_S,
+    ROUND(r.EXEC_SEC / NULLIF(r.RUNS, 0), 3) AS AVG_EXEC_S,
+    ROUND(r.AVG_ELAPSED_S, 3) AS AVG_ELAPSED_S,
+    ROUND(r.CS_CREDITS, 4) AS CS_CREDITS,
+    ROUND(r.BILLED_CS_CREDITS, 4) AS BILLED_CS_CREDITS,
+    ROUND(r.CS_CREDITS / NULLIF(r.SCOPE_CS_CREDITS, 0) * 100, 2) AS CS_SHARE_PCT,
+    r.SLEEP_FLAG,
+    ROUND(r.SCOPE_CS_CREDITS, 4) AS SCOPE_CS_CREDITS,
+    ROUND(r.SCOPE_UNMETERED_CS_CREDITS, 4) AS SCOPE_UNMETERED_CS_CREDITS,
+    ROUND(r.LOW_COMPILE_CS_CREDITS_ALL, 4) AS LOW_COMPILE_CS_CREDITS_ALL,
+    r.SLEEP_FAMILIES_ALL,
+    ROUND(r.SLEEP_CS_CREDITS_ALL, 4) AS SLEEP_CS_CREDITS_ALL,
+    ROUND(ss.SLEEP_BILLED_CS_CREDITS_ALL, 4) AS SLEEP_BILLED_CS_CREDITS_ALL,
+    ROUND(s.METERED_CS_CREDITS, 4) AS METERED_CS_CREDITS,
+    s.METERED_DAYS, s.UNDER_ALLOWANCE_DAYS, s.LAST_METERED_DAY
+FROM ranked r
+CROSS JOIN billsum s
+CROSS JOIN sleepsum ss
+WHERE r.CS_RANK <= {CS_BILLED_TOP_N} OR r.SLEEP_FLAG = 1
+ORDER BY r.CS_RANK
+LIMIT {CS_BILLED_ROW_CAP}
 """
 
 

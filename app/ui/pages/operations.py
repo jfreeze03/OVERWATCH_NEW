@@ -56,6 +56,7 @@ from app.logic.formulas import (
     format_usd,
     humanize_duration,
     humanize_gb,
+    md_dollars,
     safe_float,
 )
 from app.logic.incident import route_incidents, summarize_incidents
@@ -657,10 +658,14 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                     "CS_CREDITS": st.column_config.NumberColumn("CS credits", format="%.4f"),
                 })
             result_caption(_chat)
-            st.caption("Who is generating the chatter. Client-gen % = the share issued by the driver / "
-                       "UI itself (not a user). Cloud-services credits are gross usage, before the "
-                       "account-level ~10% rebate; the application name is self-reported. Click an "
-                       "application to classify its chatter families and see whether a resize could help.")
+            st.caption(md_dollars(
+                "Who is generating the chatter. Client-gen % = the share issued by the driver / "
+                "UI itself (not a user). Cloud-services credits are gross usage, before the "
+                "account-level ~10% rebate; the application name is self-reported. Click an "
+                "application to classify its chatter families and see whether a resize could help. "
+                "Sleep polling (SYSTEM$WAIT) run on a warehouse does not appear here: it barely "
+                "compiles. Cost ▸ Spend ▸ 'Which statement families bill the most cloud services' "
+                "ranks it by what it bills."))
             if _sel_app is not None and 0 <= int(_sel_app) < len(_cdf):
                 _app = str(_cdf.iloc[int(_sel_app)]["APPLICATION"])
                 _fam = run(
@@ -872,7 +877,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                     status_chips([(f.title, "bad" if f.severity == "bad" else "")
                                   for f in _adv_findings])
                     for _f in _adv_findings:
-                        st.markdown(f"- {_f.detail}")
+                        st.markdown(md_dollars(f"- {_f.detail}"))
                     # OPT-IN Cortex rewrite: button-gated, credit-warned, grounded in
                     # exactly this query's stats + the findings above. Never auto-runs.
                     from app.logic.ai_prompts import query_optimization_prompt

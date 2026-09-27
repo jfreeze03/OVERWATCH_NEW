@@ -45,6 +45,7 @@ from app.logic.formulas import (
     format_credits,
     format_usd,
     humanize_bytes,
+    humanize_duration,
     md_dollars,
     pct_delta,
     safe_float,
@@ -218,10 +219,93 @@ def _native_apps_rollup(pool_res, rate: float) -> None:
             column_config={"Spend": st.column_config.NumberColumn("Spend", format="$%.0f")})
 
 
+# v4.595: why the billed ranking exists beside the compile-ranked views (copy-locked in tests).
+_CS_BILLED_WHY = (
+    "Ranked by the cloud-services credits each statement family used, not by compile time. The compile-heavy "
+    "list (shown for an ELEVATED or clicked warehouse) admits only families averaging over 0.5 s of compile, "
+    "and the Operations chatter view only no-warehouse metadata statements or statements that are mostly "
+    "compile. A SYSTEM$WAIT poll run on a warehouse compiles in well under 0.1 s and then sleeps in cloud "
+    "services, so neither list shows it, even when it is the biggest line here. Sleep hours = runs x the "
+    "wait each statement asks for.")
+
+
+def _cs_billed_families_panel(company: str, days: int, rate: float, sel_wh: str, *,
+                              bounds: tuple | None = None, prefetched=None) -> None:
+    """v4.595: statement families ranked by the cloud-services credits they BILL, with sleep polling
+    (SYSTEM$WAIT) named, priced and routed. Mart-only (no live fallback, no live scan), hourly-cached;
+    the account-wide read rides the Spend first-paint batch (cost.py "csfam"), a warehouse click is one
+    more hourly mart read. Classification, hours slept and USD are pure logic in cs_driver."""
+    _lm = "_lm" if bounds is not None else ""
+    st.markdown("**Which statement families bill the most cloud services**")
+    if sel_wh:
+        res = run(mart_sql.cloud_svc_billed_families(days, "ALL", sel_wh, bounds=bounds), page=_PAGE,
+                  key=f"cs_billed_fam_{company}_{days}_{sel_wh}{_lm}", tier="hourly",
+                  source="MART_CLOUD_SVC_DAILY + FACT_METERING_DAILY (billed CS by statement family, per warehouse)")
+    else:
+        res = prefetched if prefetched is not None else run(
+            mart_sql.cloud_svc_billed_families(days, company, bounds=bounds), page=_PAGE,
+            key=f"cs_billed_fam_{company}_{days}{_lm}", tier="hourly",
+            source="MART_CLOUD_SVC_DAILY + FACT_METERING_DAILY (billed CS by statement family)")
+    if not guard(res, "No cloud-services credits recorded on statements in this window yet "
+                      "(the statement mart loads hourly)."):
+        return
+    view, s = cs_driver.billed_family_view(res.df, rate)
+    scope = "warehouse" if sel_wh else ("account-wide" if str(company).upper() == "ALL" else "company")
+    chip = "billed (marginal)" if s["metered_days"] else "usage (unpriced)"
+    n_sleep = int(s["sleep_families"])
+    if n_sleep:
+        _slept = (f" · {'' if s['sleep_hours_complete'] else '≥ '}"
+                  f"{humanize_duration(s['sleep_sec_shown'], 's')} slept" if s["sleep_sec_shown"] > 0 else "")
+        sleep_card = {
+            "label": "Sleep polling", "value": s["sleep_usd"], "unit": "usd", "method": chip, "scope": scope,
+            "sub": (f"{format_credits(s['sleep_cs'])} CS cr · {n_sleep} "
+                    f"famil{'y' if n_sleep == 1 else 'ies'}{_slept}"),
+            "severity": "warn" if s["sleep_share_pct"] >= 10 else "",
+            "help": "What the bill drops by if every SYSTEM$WAIT sleep stopped: per complete metered day, their "
+                    "cloud-services credits capped at that day's billed cloud services, at the compute rate. "
+                    "Today and the day metering has not closed are unpriced; the CS credits shown include them. "
+                    "Hours slept = runs x the wait each statement asks for (runs x measured average runtime "
+                    "when the wait varies)."}
+    else:
+        sleep_card = {"label": "Sleep polling", "value": "None found",
+                      "sub": "no SYSTEM$WAIT families in this window", "severity": "ok", "scope": scope}
+    kpi_row([
+        sleep_card,
+        {"label": "Missed by compile ranking", "value": s["low_compile_pct"], "unit": "percent", "scope": scope,
+         "sub": f"{format_credits(s['low_compile_cs'])} CS cr in families averaging ≤0.5 s compile",
+         "help": "Share of these statement credits in families the compile-heavy list cannot show "
+                 "(average compile at or under 0.5 s), whatever they cost."},
+        {"label": "Statement CS credits", "value": s["scope_cs"], "unit": "credits", "method": "measured",
+         "scope": scope,
+         # same days on both sides: statement credits on complete metered days vs those days' metering
+         # (review r2: today + the in-progress day were in the numerator only, reading over 100%)
+         "sub": (f"{format_credits(s['scope_cs'] - s['unmetered_cs'])} on complete days = "
+                 f"{(s['scope_cs'] - s['unmetered_cs']) / s['metered_cs'] * 100:.0f}% of "
+                 f"{format_credits(s['metered_cs'])} metered"
+                 if scope == "account-wide" and s["metered_cs"] > 0 else ""),
+         "help": "Cloud-services credits recorded on individual statements (query history, loaded hourly) for "
+                 "this scope and window. Metered = the account's cloud-services credits in daily metering; the "
+                 "two are recorded separately and need not match exactly."},
+    ])
+    st.caption(md_dollars(_CS_BILLED_WHY))
+    styled_table(view, height=380, slug="cs-billed-families", sort_label="CS credits desc",
+                 column_config={
+                     "CS_CREDITS": st.column_config.NumberColumn("CS credits", format="%.4f"),
+                     "BILLED_CS_CREDITS": st.column_config.NumberColumn("Billed CS credits", format="%.4f"),
+                     "CS_SHARE_PCT": st.column_config.NumberColumn("Share of CS", format="%.1f%%"),
+                     "COMPILE_PCT": st.column_config.NumberColumn("Compile %", format="%.1f%%"),
+                     "CS_CREDITS_PER_SLEEP_HOUR": st.column_config.NumberColumn(
+                         "CS credits / sleep hour", format="%.3f")})
+    result_caption(res)
+    head, detail = cs_driver.billing_basis_note(s, rate)
+    st.caption(md_dollars(head))
+    methodology_note(md_dollars(detail))     # audit mode only; methodology_note does not escape $ itself
+
+
 def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: str = "",
                *, bounds: tuple | None = None,
                metering_res=None, csr_res=None, coco_res=None, allin_res=None,
-               napp_res=None) -> None:
+               napp_res=None, csfam_res=None) -> None:
     # Hot path: the daily metering fact carries the same columns; fall back
     # to live ACCOUNT_USAGE only when the fact has no rows yet. metering_res is
     # the prefetched batch result (perf #15); None -> read it serially here.
@@ -769,8 +853,12 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
         elevated = csr.df[csr.df["STATUS"].astype(str) == "ELEVATED"]
         if _sel_wh:
             st.caption(f"Cloud-services drivers scoped to **{_sel_wh}** — click another warehouse to switch.")
-        elif not elevated.empty:
-            st.caption("Click a warehouse above to scope its drivers; showing account-wide until then.")
+        else:
+            _scope_txt = "account-wide" if str(company).upper() == "ALL" else f"{company} only"
+            st.caption(f"Click a warehouse above to scope the drivers below to it; showing {_scope_txt} until then.")
+        # v4.595: families ranked by the cloud-services credits they BILL, for every warehouse (not only
+        # ELEVATED) — the only view that names and prices sleep polling, which barely compiles.
+        _cs_billed_families_panel(company, days, rate, _sel_wh, bounds=bounds, prefetched=csfam_res)
         # A warehouse selection drills the drivers via a live per-warehouse QUERY_HISTORY
         # read (the family/CS marts aren't warehouse-grained for this cut); account-wide
         # (mart-first) when nothing is selected.
@@ -778,6 +866,9 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
             _fam_title = (f"Cloud-services drivers on {_sel_wh} — compile-heavy query families"
                           if _sel_wh else "Why is it elevated? Compile-heavy query families")
             st.markdown(f"**{_fam_title}**")
+            st.caption(md_dollars("Ranked by compile time, so drivers that barely compile, such as sleep polling "
+                                  "(SYSTEM$WAIT), cannot appear here; the billed ranking above names and prices "
+                                  "them."))
             if _sel_wh:
                 comp = run(
                     cost_sql.compile_heavy_families(days, company, warehouse=_sel_wh, min_runs=5, bounds=bounds),
@@ -795,7 +886,8 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
             # elevated?" while the ratio anomaly is still open; an empty is a
             # failed diagnosis redirecting the reader, not a good outcome.
             if guard(comp, f"No query family with {_fam_floor}+ runs averages >0.5s compile time — the "
-                           "ratio driver is likely many tiny/metadata queries (see statement types below)."):
+                           "ratio driver is likely many tiny/metadata queries or sleep polling (see the billed "
+                           "ranking above and statement types below)."):
                 # Phase 0 CS-driver intelligence: classify each family (metadata chatter /
                 # discovery / compile-heavy) and say whether a resize could even help, so the
                 # reader gets WHY it is elevated and WHO owns the fix, not just a compile list.

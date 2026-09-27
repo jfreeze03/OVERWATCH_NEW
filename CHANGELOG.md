@@ -1,5 +1,59 @@
 # Changelog
 
+## 4.595.0 - Cloud-services cost drivers: statement families ranked by billed credits, sleep polling named (2026-09-26)
+
+Owner DIAG (2026-09-26, 7 days): every cloud-services credit on this account is billed (the account is above the
+free 10%-of-compute allowance every day), and the largest avoidable line is SYSTEM$WAIT sleep polling. Control-M's
+`select system$wait(10)` runs 18,667 times a week on WH_ALFA_TRANSFORM_PRD (28.8 CS credits), and SYSTEM tasks'
+`CALL SYSTEM$WAIT(30/60/1200)` on WH_TRXS_TRANSFORM add 28.5. Together that is 57.3 CS credits a week, 26% of the
+account's 218.55, at about 0.55 CS credits per hour slept (about $211 a week at $3.68). OVERWATCH never named or
+priced it: every driver panel was filtered or ranked by compile time (a sleep compiles in about 0.07 s), and the
+CS-ranked "Drill in" shape table listed it unclassified, while the generic SYSTEM$ rule called it benign platform
+noise. App-only, no migration.
+
+- **New panel, Cost ▸ Spend ▸ Cloud-services health: "Which statement families bill the most cloud services".**
+  Families (hash x warehouse x user) are ranked by CREDITS_USED_CLOUD_SERVICES from MART_CLOUD_SVC_DAILY. Columns:
+  runs, active days, average compile / execution / elapsed, compile %, CS credits, share of CS, billed CS credits
+  and $, the wait per run, hours slept, CS credits per sleep hour, owner hint, next step and resize verdict. The
+  owner hint is the task owner role, or the user plus their main application from FACT_APP_COST_DAILY. The panel
+  renders for every warehouse (not only ELEVATED) and scopes to a clicked warehouse. KPIs: sleep polling $ (with
+  CS credits, families and hours slept), the share of CS the compile ranking cannot show, and statement CS credits
+  vs metered.
+- **Sleep polling is a driver class** (`cs_driver.SLEEP_POLLING`). It sits ahead of the generic SYSTEM$ arm, which
+  used to label it benign platform noise. A new shared parser, `app/logic/system_wait.py`, reads the SYSTEM$WAIT
+  argument (unit-aware) with one pattern for Python and SQL, parity-tested. A sleep is COUNTED by its statement
+  shape (SELECT or CALL SYSTEM$WAIT, after optional leading comments). A statement that only mentions the call (a
+  string literal, a comment, an ILIKE search), task and procedure DDL, SYSTEM$WAIT_FOR_SERVICES and longer
+  identifiers are not sleeps, and the generic SYSTEM$ rule no longer claims them. A scripting block or
+  multi-statement request that runs the call is LABELLED Sleep polling (so its owner gets the fix) but never
+  counted, because Snowflake records each wrapped call as its own child row, which is. Hours slept = runs x the
+  requested wait, or runs x the measured average elapsed when a family's wait varies. The verdict is "Resize not
+  indicated"; the fix is to poll from the scheduler, chain tasks with AFTER or streams, or check readiness
+  outside Snowflake.
+- **Billing basis.** Billed = per day, the smaller of the family's credits and the account's billed cloud services
+  (used + adjustment) from FACT_METERING_DAILY. That is what the bill drops by if that family alone stopped, not
+  an allocation of the rebate (investigation doc §6 addendum), and it is priced at the compute rate in
+  formulas.py. It is 1:1 on days whose billed cloud services cover the family's credits (every complete day in
+  the DIAG). Only complete metering days price anything: the newest FACT_METERING_DAILY row is the UTC day still in
+  progress at the 06:45 load, so it and today stay unpriced (blank, never $0). The sleep-polling KPI is capped per
+  day as a group (summing per-family marginals would over-count on a day whose billed cloud services are below
+  their sum). The gate is account-wide under any company or warehouse scope. Statement days are Central and
+  metering days UTC (disclosed; audit mode shows the method).
+- **Advisor / OOS.** A text-keyed `sleep_polling` Finding (18 points, pathology "Sleep polling"). The Operations
+  optimization board and the per-query drill stop calling a SYSTEM$WAIT loop "No actionable finding", and
+  shape-identical statements stay clean. The drill's finding sink now escapes "$".
+- **Copy.** The compile-heavy panel and the Operations chatter panel say why they cannot see sleep polling and
+  point to the new ranking. The COST_CLOUD_SVC_ANOMALY playbook gains the ranking as step 2 and notes that a
+  chronic poller never trips its own baseline. New column help, a metric-registry entry
+  (`cloud_services_family_billed`, ESTIMATED) and a glossary row.
+- **Its own cost.** One mart read rides the existing Spend first-paint batch (hourly, shared cache); a warehouse
+  click adds one more hourly mart read. There is no live scan, the ACCOUNT_USAGE budgets are unchanged (spend 12,
+  operations 42), and the reachable-table pins are unchanged.
+- **Tests.** Parser variants plus SQL/Python parity; classifier arm order and the byte-stable default columns;
+  billed-view arithmetic on the owner's four families; builder locks (window totals before the top-N cut, the
+  per-day billing cap, account-wide billing, alias-qualified aggregates, bounds, row cap); wiring, perf, copy and
+  AST $-sink locks; advisor and OOS. 4-pin version bump 4.594.0 → 4.595.0.
+
 ## 4.594.0 - Next Fifty wave 2b (V156–V159): overnight ETL alerts, alert-scan self-watch + idle push, daily backups, compile diet (2026-09-26)
 
 Four owner-applied migrations. They change what pages and what gets dropped, so they apply only after the 2a build

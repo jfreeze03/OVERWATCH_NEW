@@ -63,13 +63,37 @@ COLUMN_HELP = {
     "CACHE_PCT": "% of scan bytes served from cache; low = cold scans hitting storage.",
     # cloud-services driver intelligence (Phase 0)
     "DRIVER_CLASS": "What this family IS — metadata chatter, discovery (JDBC/INFORMATION_SCHEMA/"
-                    "governance/stage), compile-heavy SQL, or normal work. Text-signature + compile-share based.",
+                    "governance/stage), sleep polling (a SYSTEM$WAIT loop), compile-heavy SQL, or normal "
+                    "work. Text-signature + compile-share based.",
     "RESIZE_VERDICT": "Whether a warehouse resize could plausibly help. 'Resize not indicated' = the cost is "
-                      "compile/metadata in the cloud-services layer, which resizing does not touch.",
+                      "compile/metadata work or sleep time (SYSTEM$WAIT) in the cloud-services layer, which "
+                      "resizing does not touch.",
     "REMEDIATION_OWNER": "Who most likely owns the fix (application / BI-IDE / data-eng / governance / platform) — "
                          "behavioural (cache metadata, cut polling/reconnects), not a resize.",
     "DRIVER_CONFIDENCE": "Classification confidence — HIGH for an unambiguous query-text signature, MEDIUM for a "
                          "shape-only call, LOW for a thin sample.",
+    # v4.595: statement families ranked by the cloud-services credits they bill (Cost > Spend).
+    # At most one "$" per entry: header help renders markdown, where two pair into LaTeX.
+    "BILLED_CS_CREDITS": "Cloud-services credits this family added on days the account was above the free "
+                         "10%-of-compute allowance (per day, the smaller of its credits and that day's billed "
+                         "cloud services): what the bill drops by if this family alone stopped.",
+    "BILLED_CS_USD": "Billed CS credits x the compute rate (CREDIT_PRICE_USD). Marginal, not an allocation of "
+                     "the rebate; blank = only days daily metering has not closed yet (today and the day in "
+                     "progress at the last load).",
+    "CS_SHARE_PCT": "Share of this scope's statement-level cloud-services credits in the window (all families, "
+                    "not only the rows shown).",
+    "SLEEP_SEC": "Time these runs spent sleeping: runs x the SYSTEM$WAIT argument, or runs x measured average "
+                 "elapsed when the argument varies within the family.",
+    "WAIT_PER_RUN_SEC": "The wait each statement asks for, parsed from its SYSTEM$WAIT call (unit-aware); "
+                        "blank when it varies or is a bind variable.",
+    "SLEEP_BASIS": "requested = runs x the parsed wait; measured = runs x average elapsed from the "
+                   "query-family mart.",
+    "CS_CREDITS_PER_SLEEP_HOUR": "Cloud-services credits per hour slept: what each hour of polling costs here.",
+    "USER_TOP_APP": "The client application behind most of this user's metered queries in the window "
+                    "(FACT_APP_COST_DAILY): a user-level hint, not proof this statement came from it.",
+    "OWNER_HINT": "Who to talk to: the task owner role for SYSTEM (task) statements, else the user and their "
+                  "main application.",
+    "NEXT_STEP": "The concrete fix for this driver class.",
 }
 
 
@@ -219,6 +243,19 @@ METRICS: tuple[Metric, ...] = (
            window="vs-prior-half-window", partial_day="excluded", unit="ratio", filters=("company",),
            required_sources=("ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY",),
            coverage="per-warehouse heuristic; real rebate is account-level", owner="platform"),
+    Metric("cloud_services_family_billed", "Cloud-services billed by statement family", ESTIMATED,
+           "statement family (hash x warehouse x user) / window",
+           "MART_CLOUD_SVC_DAILY (per-statement CREDITS_USED_CLOUD_SERVICES) capped per day at "
+           "FACT_METERING_DAILY billed CS (used + adjustment)",
+           ACCOUNT_TZ, "hourly mart; priced on complete metering days (up to ~36h behind)", "v4.595",
+           "Marginal: what the bill drops by if this family alone stopped, at the compute rate; 1:1 on "
+           "days whose billed cloud services cover the family's credits. Complete metering days only; "
+           "a group total (sleep polling) is capped per day as a group.",
+           window="trailing-complete-days", partial_day="excluded", unit="USD", filters=("company",),
+           required_sources=("MART_CLOUD_SVC_DAILY", "FACT_METERING_DAILY"),
+           coverage="statement-level CS only; today and the in-progress metering day unpriced; Central "
+                    "statement days vs UTC metering days",
+           owner="platform"),
     Metric("capacity_pressure_forecast", "Warehouse capacity pressure forecast", ESTIMATED,
            "warehouse / days-to-pressure",
            "FACT_QUERY_HOURLY + FACT_WAREHOUSE_DAILY + WAREHOUSE_CHANGE_REGISTRY",
