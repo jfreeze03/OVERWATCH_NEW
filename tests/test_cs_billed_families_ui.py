@@ -153,12 +153,16 @@ def test_oos_board_names_the_pathology():
     assert row["FIRST_ACTION"] == breakdowns["ctm"][0][2]
 
 
-def test_advisor_ignores_mentions_and_loop_wrappers():
+def test_advisor_ignores_mentions_and_names_wrappers_without_a_per_run_wait():
     for text in ("select query_text from qh where query_text ilike '%system$wait(%'",
-                 "/* was: call system$wait(30) */ select count(*) from t",
-                 "BEGIN LOOP IF ((SELECT COUNT(*) FROM L) > 0) THEN BREAK; END IF; CALL SYSTEM$WAIT(60); END LOOP; END;"):
+                 "/* was: call system$wait(30) */ select count(*) from t"):
         findings, _ = query_advisor.advise({"QUERY_TEXT": text, "QUERY_TYPE": "SELECT", "ELAPSED_SEC": 1800.0})
         assert "sleep_polling" not in [f.code for f in findings], text
+    loop = "BEGIN LOOP IF ((SELECT COUNT(*) FROM L) > 0) THEN BREAK; END IF; CALL SYSTEM$WAIT(60); END LOOP; END;"
+    findings, _ = query_advisor.advise({"QUERY_TEXT": loop, "ELAPSED_SEC": 1800.0})
+    assert [f.code for f in findings] == ["sleep_polling"]
+    assert findings[0].detail.startswith("This block sleeps") and "per run" not in findings[0].detail
+    assert findings[0].detail.count("$") == 1
 
 
 def test_copy_does_not_overclaim_after_review():
@@ -169,5 +173,14 @@ def test_copy_does_not_overclaim_after_review():
     assert "appear only in the billed ranking" not in _SPEND and "cannot appear here" in _SPEND
     assert "never appears here" not in _OPS and "run on a warehouse does not appear here" in _OPS
     assert 'sort_label="CS credits desc"' in _SPEND
+    assert "list below" not in _helper_body()                      # KPI help too, not only the why-caption
+    body = _helper_body()
+    assert "capped at that day's billed cloud services" in body   # the sleep $ help (review r2)
+    assert "(s['scope_cs'] - s['unmetered_cs']) / s['metered_cs']" in body   # same days on both sides
+    assert "sleep time (SYSTEM$WAIT)" in mr.COLUMN_HELP["RESIZE_VERDICT"]
+    note = mr.get("cloud_services_family_billed")
+    assert note is not None and "above the 10% allowance" not in note.notes
+    assert note.partial_day == "excluded" and "only days daily metering has not closed" in mr.COLUMN_HELP[
+        "BILLED_CS_USD"]
     comps = (_ROOT / "app/ui/components.py").read_text(encoding="utf-8")
     assert "sort_label.removeprefix('by ')" in comps           # "by by ..." on eight tables

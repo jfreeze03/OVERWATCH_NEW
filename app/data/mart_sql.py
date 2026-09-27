@@ -32,7 +32,7 @@ from app.data.common import (
     resolve_effective_window,
     scope_window_where,
 )
-from app.logic.system_wait import SLEEP_SQL_PATTERN
+from app.logic.system_wait import SLEEP_EXCLUDED_TYPE_PREFIXES, SLEEP_SQL_PATTERN
 
 
 def _company_filter(company: str) -> str:
@@ -539,6 +539,9 @@ def cloud_svc_billed_families(days: int, company: str = "ALL", warehouse: str = 
     fam_where = _cloud_svc_where(days, company, warehouse, bounds=bounds)
     fam_mart_where = _cloud_svc_where(days, company, "", bounds=bounds)   # the family mart has no warehouse
     acct_where = _cloud_svc_where(days, "ALL", "", bounds=bounds)          # billing is account-wide
+    # never a sleep: DDL defining one, a multi-statement parent (system_wait.is_sleep_statement parity)
+    not_excluded = " AND ".join(f"f.QUERY_TYPE NOT LIKE {sql_literal(p + '%')}"
+                                for p in SLEEP_EXCLUDED_TYPE_PREFIXES)
     return f"""
 WITH bill AS (
     SELECT x.DAY,
@@ -597,7 +600,7 @@ app AS (
 tagged AS (
     SELECT f.*, el.AVG_ELAPSED_S, a.USER_TOP_APP,
            IFF(f.QUERY_PARAMETERIZED_HASH <> 'n/a'
-               AND f.QUERY_TYPE NOT LIKE 'CREATE%' AND f.QUERY_TYPE NOT LIKE 'ALTER%'
+               AND {not_excluded}
                AND REGEXP_INSTR(UPPER(f.SAMPLE_TEXT), {sql_literal(SLEEP_SQL_PATTERN)}) > 0, 1, 0) AS SLEEP_FLAG
     FROM fam f
     LEFT JOIN el ON el.QUERY_HASH = f.QUERY_PARAMETERIZED_HASH

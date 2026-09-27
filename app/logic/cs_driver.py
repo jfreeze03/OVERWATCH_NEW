@@ -36,6 +36,7 @@ Pure pandas — no Streamlit, no Snowflake. Reuses ``query_advisor.COMPILE_FRACT
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 
 import pandas as pd
@@ -43,7 +44,7 @@ import pandas as pd
 from app.config import APP_SIS_QUERY_TAG_FRAGMENT
 from app.logic.formulas import credits_to_usd, format_credits, safe_float
 from app.logic.query_advisor import COMPILE_FRACTION
-from app.logic.system_wait import is_sleep_statement, wait_seconds
+from app.logic.system_wait import is_sleep_statement, polls_with_system_wait, wait_seconds
 
 # --- driver classes (a Phase-0 subset of the 12-class taxonomy) --------------
 SYSTEM_GENERATED = "System generated"
@@ -109,6 +110,9 @@ DRIVER_COLS = ("DRIVER_CLASS", "DRIVER_CONFIDENCE", "RESIZE_VERDICT", "REMEDIATI
 ACTION_COLS = ("OWNER_HINT", "NEXT_STEP")
 # MART_CLOUD_SVC_DAILY's COALESCE(QUERY_PARAMETERIZED_HASH, 'n/a'): mixed statements, no family.
 _NO_HASH = "N/A"
+# A system function with no specific rule — but never SYSTEM$WAIT( itself: a statement that only
+# mentions the call (an ILIKE search, a comment) is not platform-issued (review r2).
+_GENERIC_SYSTEM_FN_RE = re.compile(r"SYSTEM\$(?!WAIT\s*\()")
 
 
 def _text(row: pd.Series | dict, col: str) -> str:
@@ -161,10 +165,12 @@ def classify_row(row: pd.Series | dict) -> tuple[str, str]:
     # v4.595 SLEEP POLLING: a SYSTEM$WAIT call (SELECT or CALL). Its cloud-services cost is the sleep
     # itself (~0.07 s compile on a 10-1200 s statement), so it must precede the generic "SYSTEM$"
     # platform arm below, which would call a Control-M / task poll benign platform noise. Exact call
-    # signature (system_wait.is_sleep_statement): SYSTEM$WAIT_FOR_SERVICES and other SYSTEM$ calls
-    # still fall through, and a CREATE/ALTER that merely CONTAINS the call (task/proc DDL) is no sleep.
-    if is_sleep_statement(text, qtype):
-        return SLEEP_POLLING, conf("HIGH")
+    # signature (system_wait): SYSTEM$WAIT_FOR_SERVICES and other SYSTEM$ calls still fall through, and
+    # a CREATE/ALTER that merely CONTAINS the call (task/proc DDL) is no sleep. A scripting block that
+    # polls with the call is LABELLED here too (MEDIUM) so its owner gets the fix, but sleep_estimate
+    # and the SQL SLEEP_FLAG count only the sleep statement itself (its child row), never the wrapper.
+    if polls_with_system_wait(text, qtype):
+        return SLEEP_POLLING, conf("HIGH" if is_sleep_statement(text, qtype) else "MEDIUM")
     if ("SYSTEM$GET_CLASSIFICATION" in text or "SYSTEM$CLASSIFY" in text
             or "SYSTEM$CORTEX_MODEL_ACCESSIBLE" in text or "SHOW CORTEX" in text):
         return GOVERNANCE_DISCOVERY, conf("HIGH")
@@ -178,7 +184,7 @@ def classify_row(row: pd.Series | dict) -> tuple[str, str]:
             or qtype in ("GET_FILES", "LIST_FILES", "PUT_FILES")):
         return STAGE_FILE, conf("HIGH")
     # a system function we do not have a specific rule for: still platform-issued
-    if "SYSTEM$" in text:
+    if _GENERIC_SYSTEM_FN_RE.search(text):
         return SYSTEM_GENERATED, conf("MEDIUM")
 
     # --- shape-based classes (no decisive text signature) --------------------

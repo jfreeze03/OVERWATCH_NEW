@@ -23,7 +23,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .formulas import humanize_duration, safe_div, safe_float
-from .system_wait import is_sleep_statement, wait_seconds
+from .system_wait import is_sleep_statement, polls_with_system_wait, wait_seconds
 
 # --- thresholds (kept identical to ops_sql.query_optimization_triage) -------
 REMOTE_SPILL_MIN_GB = 0.0        # any remote spill is memory exhaustion
@@ -206,14 +206,21 @@ def advise(row: Mapping[str, object], *,
     #     healthy (tiny compile, execution = the wait), so no numeric rule can see it, and a
     #     shape-identical ordinary statement never fires this. Same weight as metadata chatter: a
     #     cadence problem, not SQL. The per-QUERY drill carries QUERY_TEXT; the fingerprint SAMPLE_TEXT.
+    #     A scripting block that polls with the call gets the same finding (no per-run duration: its
+    #     wait is per call, not per run).
     _txt = next((v for v in (row.get("SAMPLE_TEXT"), row.get("QUERY_TEXT")) if isinstance(v, str) and v), "")
-    if is_sleep_statement(_txt, row.get("QUERY_TYPE") or ""):
-        _w = wait_seconds(_txt)
-        _per = (f"for {humanize_duration(_w, 's')} per run" if _w is not None
-                else "for the requested wait on every run")
+    _qt = row.get("QUERY_TYPE") or ""
+    if polls_with_system_wait(_txt, _qt):
+        if is_sleep_statement(_txt, _qt):
+            _w = wait_seconds(_txt)
+            _lead = ("This statement is a sleep: SYSTEM$WAIT holds it open "
+                     + (f"for {humanize_duration(_w, 's')} per run" if _w is not None
+                        else "for the requested wait on every run"))
+        else:
+            _lead = "This block sleeps: each SYSTEM$WAIT call in it holds it open for the requested wait"
         findings.append(Finding(
             "sleep_polling", "warn", "Sleep polling",
-            f"This statement is a sleep: SYSTEM$WAIT holds it open {_per}, and cloud-services credits "
+            f"{_lead}, and cloud-services credits "
             "accrue while it waits, so a polling loop pays for every wait. Poll from the scheduler instead "
             "(let Control-M or the orchestrator own the interval), chain dependent tasks with AFTER or "
             "trigger them when a stream has data, or run one short readiness check from outside Snowflake. "

@@ -97,6 +97,11 @@ def test_sleep_flag_uses_the_shared_pattern():
     sql = _sql(30, "ALL")
     assert f"'{SLEEP_SQL_PATTERN}'" in sql
     assert "<> 'n/a'" in sql and "NOT LIKE 'CREATE%'" in sql and "NOT LIKE 'ALTER%'" in sql
+    # parity with system_wait.is_sleep_statement's excluded QUERY_TYPEs (review r2: multi-statement parents)
+    from app.logic.system_wait import SLEEP_EXCLUDED_TYPE_PREFIXES
+    for prefix in SLEEP_EXCLUDED_TYPE_PREFIXES:
+        assert f"f.QUERY_TYPE NOT LIKE '{prefix}%'" in sql, prefix
+    assert "MULTI_STATEMENT" in SLEEP_EXCLUDED_TYPE_PREFIXES
 
 
 def test_warehouse_scope_and_quote_safety():

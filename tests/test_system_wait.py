@@ -152,3 +152,27 @@ def test_sql_pattern_is_literal_safe_and_anchored():
     # embedded in a SQL string literal: no backslash (escape) and no quote; anchored at the start
     assert "\\" not in SLEEP_SQL_PATTERN and "'" not in SLEEP_SQL_PATTERN
     assert SLEEP_SQL_PATTERN.startswith("^")
+
+
+def test_counted_vs_labelled():
+    # review r2: COUNTED (hours, SQL flag, totals) = the sleep statement itself; LABELLED (driver class,
+    # advisor) also covers a block / multi-statement request that runs the call, never DDL or a mention
+    from app.logic.system_wait import polls_with_system_wait
+    loop = "BEGIN LOOP CALL SYSTEM$WAIT(60); END LOOP; END;"
+    assert polls_with_system_wait(loop) and not is_sleep_statement(loop)
+    assert polls_with_system_wait("EXECUTE IMMEDIATE $$ BEGIN CALL SYSTEM$WAIT(30); END; $$")
+    ms = "select system$wait(3); select 1"
+    assert is_sleep_text(ms) and not is_sleep_statement(ms, "MULTI_STATEMENT")
+    assert polls_with_system_wait(ms, "MULTI_STATEMENT")
+    for mention in ("select q from qh where q ilike '%system$wait(%'", "select 1 -- system$wait(10)",
+                    "/* call system$wait(30) */ select 1", "select 'it''s system$wait(5)' as note"):
+        assert not polls_with_system_wait(mention), mention
+    for ddl, qtype in (("CREATE OR REPLACE TASK T AS CALL SYSTEM$WAIT(10)", ""),
+                       ("CREATE OR REPLACE TASK T AS CALL SYSTEM$WAIT(10)", "CREATE_TASK"),
+                       ("CALL SYSTEM$WAIT(10)", "ALTER_TASK")):
+        assert not polls_with_system_wait(ddl, qtype), (ddl, qtype)
+    assert polls_with_system_wait("CALL SYSTEM$WAIT(10)", "CALL")
+
+
+def test_two_calls_have_no_single_requested_wait():
+    assert wait_seconds("select system$wait(10); select system$wait(20)") is None

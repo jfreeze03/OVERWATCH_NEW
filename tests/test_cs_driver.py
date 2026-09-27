@@ -195,6 +195,7 @@ def test_other_system_functions_still_fall_through():
     # defining a task that sleeps is not sleeping
     ddl = _fam("CREATE OR REPLACE TASK T AS CALL SYSTEM$WAIT(10)", QUERY_TYPE="CREATE_TASK")
     assert classify_row(ddl)[0] != SLEEP_POLLING
+    assert classify_row(_fam("CREATE OR REPLACE TASK T AS CALL SYSTEM$WAIT(10)"))[0] != SLEEP_POLLING
 
 
 def test_unhashed_bucket_is_never_confident():
@@ -340,6 +341,8 @@ def test_billing_basis_note_copy():
     assert "not priced" in head
     head, _ = billing_basis_note({**base, "unmetered_cs": 3.2}, 3.68)
     assert "not closed yet" in head and "unpriced" in head
+    # review r2: the additivity condition, not "above the allowance"
+    assert "cover their combined credits" in detail and "stays above the allowance" not in detail
     assert "UTC" in detail and "alone stopped" in detail and "$" not in detail
 
 
@@ -348,10 +351,28 @@ def test_null_group_sleep_total_is_unpriced_even_with_metered_days():
     assert s["metered_days"] == 7 and pd.isna(s["sleep_usd"])
 
 
-def test_mentions_and_loop_wrappers_are_not_sleep_polling():
+def test_mentions_are_neither_sleep_polling_nor_platform_noise():
+    # review r1/r2: a statement that only MENTIONS the call is not a sleep, and the generic SYSTEM$ arm no
+    # longer claims it as benign platform noise either -- it falls to the shape classes
     for text in ("select query_text from qh where query_text ilike '%system$wait(%'",
                  "select 1 -- system$wait(10)",
-                 "BEGIN LOOP CALL SYSTEM$WAIT(60); END LOOP; END;"):
-        assert classify_row(_fam(text))[0] != SLEEP_POLLING, text
+                 "/* was: call system$wait(30) */ select count(*) from t"):
+        assert classify_row(_fam(text))[0] not in (SLEEP_POLLING, SYSTEM_GENERATED), text
         assert sleep_estimate({"SAMPLE_TEXT": text, "RUNS": 10, "AVG_ELAPSED_S": 40.0,
                                "QUERY_PARAMETERIZED_HASH": "h"}) == (None, None, "")
+
+
+def test_wrappers_are_labelled_for_their_owner_but_never_counted():
+    # review r2: a block polling in a loop (or a multi-statement parent) is LABELLED sleep polling so its
+    # owner gets the fix, but adds no hours -- its child CALL SYSTEM$WAIT rows carry them, once
+    loop = ("BEGIN LOOP IF ((SELECT COUNT(*) FROM STG.LANDING) > 0) THEN BREAK; END IF; CALL SYSTEM$WAIT(60); "
+            "END LOOP; CALL DW.LOAD_ORDERS(); END;")
+    for text, qtype in ((loop, ""), ("select system$wait(3); select 1", "MULTI_STATEMENT")):
+        row = _fam(text, QUERY_TYPE=qtype, USER_NAME="SYSTEM", ROLE_NAME="TRXS_TASK_OWNER",
+                   QUERY_PARAMETERIZED_HASH="h", AVG_ELAPSED_S=1800.0)
+        assert classify_row(row) == (SLEEP_POLLING, "MEDIUM"), text
+        assert sleep_estimate(row) == (None, None, ""), text
+        view, s = billed_family_view(pd.DataFrame([{**row, "SLEEP_FLAG": 0, "SLEEP_FAMILIES_ALL": 0}]), 3.68)
+        assert view.iloc[0]["REMEDIATION_OWNER"] == "Job scheduler / task owner"
+        assert "AFTER" in view.iloc[0]["NEXT_STEP"] and pd.isna(view.iloc[0]["SLEEP_SEC"])
+        assert s["sleep_families"] == 0 and s["sleep_sec_shown"] == 0.0

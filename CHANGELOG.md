@@ -21,11 +21,12 @@ noise. App-only, no migration.
   vs metered.
 - **Sleep polling is a driver class** (`cs_driver.SLEEP_POLLING`). It sits ahead of the generic SYSTEM$ arm, which
   used to label it benign platform noise. A new shared parser, `app/logic/system_wait.py`, reads the SYSTEM$WAIT
-  argument (unit-aware) with one pattern for Python and SQL, parity-tested. A sleep is recognised by its
-  statement shape (SELECT or CALL SYSTEM$WAIT, after optional leading comments), so a statement that only mentions
-  the call (a string literal, a comment, an ILIKE search), task and procedure DDL, a scripting block that wraps the
-  call in a loop (its child calls are counted instead), SYSTEM$WAIT_FOR_SERVICES and longer identifiers are not
-  sleeps. Hours slept = runs x the
+  argument (unit-aware) with one pattern for Python and SQL, parity-tested. A sleep is COUNTED by its statement
+  shape (SELECT or CALL SYSTEM$WAIT, after optional leading comments). A statement that only mentions the call (a
+  string literal, a comment, an ILIKE search), task and procedure DDL, SYSTEM$WAIT_FOR_SERVICES and longer
+  identifiers are not sleeps, and the generic SYSTEM$ rule no longer claims them. A scripting block or
+  multi-statement request that runs the call is LABELLED Sleep polling (so its owner gets the fix) but never
+  counted, because Snowflake records each wrapped call as its own child row, which is. Hours slept = runs x the
   requested wait, or runs x the measured average elapsed when a family's wait varies. The verdict is "Resize not
   indicated"; the fix is to poll from the scheduler, chain tasks with AFTER or streams, or check readiness
   outside Snowflake.

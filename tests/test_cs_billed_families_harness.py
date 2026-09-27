@@ -179,16 +179,18 @@ def test_mentions_are_not_flagged_and_sleeps_ride_past_the_top_n(db):
     _fam(db, d, "H_CMT", "select 1 -- system$wait(10)", 0.4, 30, wh="WH_Q", user="ANALYST", qtype="SELECT")
     _fam(db, d, "H_LOOP", "BEGIN LOOP CALL SYSTEM$WAIT(60); END LOOP; END;", 0.3, 4)
     _fam(db, d, "H_W30", "CALL SYSTEM$WAIT(30)", 0.2, 500)   # a real sleep, ranked below the top 50
+    # a multi-statement parent whose first statement is the sleep: its child (H_W30-like) carries it
+    _fam(db, d, "H_MS", "select system$wait(30); call dw.load_orders()", 0.1, 5, qtype="MULTI_STATEMENT")
     df = _run(db)
     flagged = set(df.loc[df["SLEEP_FLAG"] == 1, "QUERY_PARAMETERIZED_HASH"])
     assert flagged == {"H_W30"}
     assert "H_W30" in set(df["QUERY_PARAMETERIZED_HASH"])          # pulled in past the top-N cut
-    assert not {"H_DIAG", "H_CMT", "H_LOOP"} & set(df["QUERY_PARAMETERIZED_HASH"])   # below the cut, unflagged
+    assert not {"H_DIAG", "H_CMT", "H_LOOP", "H_MS"} & set(df["QUERY_PARAMETERIZED_HASH"])  # below the cut
     assert df["SLEEP_FAMILIES_ALL"].iloc[0] == 1
     assert df["SCOPE_CS_CREDITS"].iloc[0] == pytest.approx(
-        sum(2.0 + i / 100 for i in range(mart_sql.CS_BILLED_TOP_N + 5)) + 0.5 + 0.4 + 0.3 + 0.2)
+        sum(2.0 + i / 100 for i in range(mart_sql.CS_BILLED_TOP_N + 5)) + 0.5 + 0.4 + 0.3 + 0.2 + 0.1)
     # the compile-ranking blind spot: only the families averaging <= 0.5 s compile
-    assert df["LOW_COMPILE_CS_CREDITS_ALL"].iloc[0] == pytest.approx(0.5 + 0.4 + 0.3 + 0.2)
+    assert df["LOW_COMPILE_CS_CREDITS_ALL"].iloc[0] == pytest.approx(0.5 + 0.4 + 0.3 + 0.2 + 0.1)
     view, s = cs_driver.billed_family_view(df, RATE)
     assert s["sleep_families"] == 1 and s["sleep_hours_complete"] is True
     assert list(view["DRIVER_CLASS"]).count(cs_driver.SLEEP_POLLING) == 1

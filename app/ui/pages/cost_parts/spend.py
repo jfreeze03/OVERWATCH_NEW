@@ -261,9 +261,11 @@ def _cs_billed_families_panel(company: str, days: int, rate: float, sel_wh: str,
             "sub": (f"{format_credits(s['sleep_cs'])} CS cr · {n_sleep} "
                     f"famil{'y' if n_sleep == 1 else 'ies'}{_slept}"),
             "severity": "warn" if s["sleep_share_pct"] >= 10 else "",
-            "help": "Statements calling SYSTEM$WAIT: their cloud-services credits on days the account was over "
-                    "the free 10% allowance, at the compute rate. Hours slept = runs x the wait each statement "
-                    "asks for (runs x measured average runtime when the wait varies)."}
+            "help": "What the bill drops by if every SYSTEM$WAIT sleep stopped: per complete metered day, their "
+                    "cloud-services credits capped at that day's billed cloud services, at the compute rate. "
+                    "Today and the day metering has not closed are unpriced; the CS credits shown include them. "
+                    "Hours slept = runs x the wait each statement asks for (runs x measured average runtime "
+                    "when the wait varies)."}
     else:
         sleep_card = {"label": "Sleep polling", "value": "None found",
                       "sub": "no SYSTEM$WAIT families in this window", "severity": "ok", "scope": scope}
@@ -275,7 +277,10 @@ def _cs_billed_families_panel(company: str, days: int, rate: float, sel_wh: str,
                  "(average compile at or under 0.5 s), whatever they cost."},
         {"label": "Statement CS credits", "value": s["scope_cs"], "unit": "credits", "method": "measured",
          "scope": scope,
-         "sub": (f"{s['scope_cs'] / s['metered_cs'] * 100:.0f}% of {format_credits(s['metered_cs'])} metered"
+         # same days on both sides: statement credits on complete metered days vs those days' metering
+         # (review r2: today + the in-progress day were in the numerator only, reading over 100%)
+         "sub": (f"{(s['scope_cs'] - s['unmetered_cs']) / s['metered_cs'] * 100:.0f}% of "
+                 f"{format_credits(s['metered_cs'])} metered (complete days)"
                  if scope == "account-wide" and s["metered_cs"] > 0 else ""),
          "help": "Cloud-services credits recorded on individual statements (query history, loaded hourly) for "
                  "this scope and window. Metered = the account's cloud-services credits in daily metering; the "

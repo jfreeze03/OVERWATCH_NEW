@@ -78,7 +78,8 @@ COLUMN_HELP = {
                          "10%-of-compute allowance (per day, the smaller of its credits and that day's billed "
                          "cloud services): what the bill drops by if this family alone stopped.",
     "BILLED_CS_USD": "Billed CS credits x the compute rate (CREDIT_PRICE_USD). Marginal, not an allocation of "
-                     "the rebate; blank = day not in daily metering yet.",
+                     "the rebate; blank = only days daily metering has not closed yet (today and the day in "
+                     "progress at the last load).",
     "CS_SHARE_PCT": "Share of this scope's statement-level cloud-services credits in the window (all families, "
                     "not only the rows shown).",
     "SLEEP_SEC": "Time these runs spent sleeping: runs x the SYSTEM$WAIT argument, or runs x measured average "
@@ -246,14 +247,14 @@ METRICS: tuple[Metric, ...] = (
            "statement family (hash x warehouse x user) / window",
            "MART_CLOUD_SVC_DAILY (per-statement CREDITS_USED_CLOUD_SERVICES) capped per day at "
            "FACT_METERING_DAILY billed CS (used + adjustment)",
-           ACCOUNT_TZ, "hourly mart; metering up to 24h", "v4.595",
+           ACCOUNT_TZ, "hourly mart; priced on complete metering days (up to ~36h behind)", "v4.595",
            "Marginal: what the bill drops by if this family alone stopped, at the compute rate; 1:1 on "
            "days whose billed cloud services cover the family's credits. Complete metering days only; "
            "a group total (sleep polling) is capped per day as a group.",
-           window="rolling-daily", partial_day="included", unit="USD", filters=("company",),
+           window="trailing-complete-days", partial_day="excluded", unit="USD", filters=("company",),
            required_sources=("MART_CLOUD_SVC_DAILY", "FACT_METERING_DAILY"),
-           coverage="statement-level CS only; unmetered days unpriced; Central statement days vs UTC "
-                    "metering days",
+           coverage="statement-level CS only; today and the in-progress metering day unpriced; Central "
+                    "statement days vs UTC metering days",
            owner="platform"),
     Metric("capacity_pressure_forecast", "Warehouse capacity pressure forecast", ESTIMATED,
            "warehouse / days-to-pressure",
