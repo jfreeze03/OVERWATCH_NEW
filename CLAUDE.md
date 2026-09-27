@@ -129,8 +129,9 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
 - Deterministic prescriptive alert rules, dedupe-key pattern. Since V157 the hourly
   SP_ALERT_SCAN has 12 counting arms ([01]-[05], [10], [14], [17], [18], [20],
   [21] SEC_POSTURE_METRIC, [22] OPS_PIPELINE_DEGRADED; the dead [15] break-glass arm is gone and
-  [11] COST_CLOUD_SVC_RATIO is retired) + the [23] PIPE_ETL_CYCLE add-on; SP_ALERT_SCAN_DAILY has 11
-  ([06]-[09], [12], [13], [13b], [16], [19], [22], [24] COST_IDLE_OPPORTUNITY) + the [17]/[18]
+  [11] COST_CLOUD_SVC_RATIO is retired) + the [23] PIPE_ETL_CYCLE add-on; SP_ALERT_SCAN_DAILY has 12
+  ([06]-[09], [12], [13], [13b], [16], [19], [22], [24] COST_IDLE_OPPORTUNITY, [25] COST_SLEEP_POLLING -- a
+  counting CALL arm; SP_SCAN_SLEEP_POLLING gates itself weekly, V160) + the [17]/[18]
   add-ons. Add-ons, sweeps and the [hb] heartbeats never increment `fails`
   (test_scan_denominators_match_counting_arms). Cadence gates (V157 compile diet): the hourly scan
   reads the Central hour ONCE (`ct_hour`); [10]/[20] + their condition-ended clears run only when

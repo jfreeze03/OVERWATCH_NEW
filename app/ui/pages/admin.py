@@ -697,6 +697,12 @@ _EXPECTED_MIGRATIONS = {
          "cadence, never stale). SP_CHANGE_ATTRIBUTION (re-derived from V033) runs its QUERY_HISTORY UPDATE "
          "only while a registry row seen in the last 3h is unattributed. Today's row in those marts can be up "
          "to 4h old; ~42-44 compile-min/week saved (estimate). No task or schedule change, no apply-time run",
+    160: "COST_SLEEP_POLLING, the chronic sleep-polling alert: a new weekly scan (SP_SCAN_SLEEP_POLLING, CALLed "
+         "by the daily alert scan as counting arm [25], tally 11 -> 12) raises one event per poller (warehouse x "
+         "user, or task owner role) that slept on 5+ of the 7 newest complete days and billed at least the "
+         "threshold USD per week of cloud services, priced like the Cost > Spend billed-family panel; MEDIUM "
+         "at 25, HIGH at 5x; self-clears once the polling stops. New transient table SLEEP_POLLING_WEEKLY. "
+         "No task change, no apply-time run",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

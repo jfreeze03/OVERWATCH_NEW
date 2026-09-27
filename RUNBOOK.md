@@ -514,7 +514,9 @@ V157), SNOOZE_SUPPRESSED (V117) and CONDITION_ENDED (V157: an OPEN
 SEC_CRED_EXPIRY / SEC_NEW_EXPOSURE event once ACCOUNT_USAGE shows the credential
 rotated/removed or the PUBLIC grant batch fully revoked; ≥1h dwell, checked in the
 4-hourly security slot so a clear lands up to ~4h after the evidence; ACK'd and
-snoozed events are left for a human).
+snoozed events are left for a human; and, since V160, an OPEN COST_SLEEP_POLLING event at
+the weekly check once its poller stops, bills under the clear level or is idle on the
+window's last 4 complete days — ACK'd events stay with a human there too).
 
 **Rolling back V157 (order matters).** FIRST switch the two security rules' auto-clear
 flag off, by hand in a worksheet (never inside a migration):
@@ -525,6 +527,8 @@ the two steps runs V141's unscoped V091 sweep, which resolves every OPEN
 SEC_CRED_EXPIRY / SEC_NEW_EXPOSURE event as AUTO_CLEARED 1h after raise, and V141's
 arms [10]/[20] never re-raise an auto-cleared key: expiring credentials and new
 PUBLIC grants silently leave the queue.
+
+**Rolling back V160.** Re-run V157's `CREATE OR REPLACE PROCEDURE ... SP_ALERT_SCAN_DAILY()` (the tally goes back to 11 and nothing calls SP_SCAN_SLEEP_POLLING any more). Optionally disable the rule (`UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG SET ENABLED = FALSE WHERE RULE_ID = 'COST_SLEEP_POLLING';`), close its lingering OPEN, ACK'd or SNOOZED events as EXPECTED, and drop the proc (and, if wanted, the transient SLEEP_POLLING_WEEKLY table) with the teardown.sql lines. The weekly scan never runs at apply time; to re-check a week by hand, `CALL DBA_MAINT_DB.OVERWATCH.SP_SCAN_SLEEP_POLLING(TRUE);` (it can raise events and email).
 
 | Rule | Family | Fires when (threshold = THRESHOLD_NUM, editable) | Recurrence |
 |---|---|---|---|
@@ -538,6 +542,7 @@ PUBLIC grants silently leave the queue.
 | COST_ANOMALY_SWEEP | COST | robust z ≥ threshold vs 28d (warehouse & service series) | per series per day |
 | COST_CONTRACT_BREACH | COST | projected exhaustion ≤ threshold days (CRITICAL ≤14) | weekly |
 | COST_IDLE_OPPORTUNITY | COST | a settings-verified AUTO_SUSPEND tightening recovers ≥ threshold USD/month (net of the 60s resume tail, 14 complete days, ≥7 covered; HIGH at ≥5x) — daily scan, V157 | weekly per WH |
+| COST_SLEEP_POLLING | COST | a poller (warehouse x user, or task owner role) slept via SYSTEM$WAIT on ≥5 of the 7 newest complete days and billed ≥ threshold USD/week (Spend-panel billed basis; HIGH at ≥5x) — daily scan [25] → SP_SCAN_SLEEP_POLLING, once per ISO week, V160 | one event per poller per episode; CONDITION_ENDED when it stops |
 | PERF_QUERY_FAIL_PCT | PERF | window fail % over threshold | daily |
 | PERF_QUEUED_MINUTES | PERF | queued minutes over threshold | daily |
 | PERF_SPILL_GB | PERF | remote spill GB over threshold | daily |

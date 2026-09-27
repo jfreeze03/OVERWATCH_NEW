@@ -58,6 +58,8 @@ _RULE_TARGETS = {
     # is clamped to Overview by request_navigation like every other unreachable target).
     "OPS_PIPELINE_DEGRADED": ("Control Room", "Freshness & replay"),
     "COST_IDLE_OPPORTUNITY": ("Cost Intelligence", "Optimization & Savings"),
+    # V160: the billed-family panel (Cloud-services health) lives on Spend & Attribution.
+    "COST_SLEEP_POLLING": ("Cost Intelligence", "Spend & Attribution"),
 }
 
 _FAMILY_DEFAULTS = (
