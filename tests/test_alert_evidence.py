@@ -111,6 +111,16 @@ def test_idle_opportunity_withholds_the_off_topic_latency_pack() -> None:
     assert plan_for_alert("COST_WH_DAILY_CREDITS", title, "", "2026-09-28") is not None
 
 
+def test_sleep_polling_gets_the_cloud_services_pack_for_its_warehouse() -> None:
+    """V160: COST_SLEEP_POLLING bills cloud services on one warehouse -- the per-shape cloud-services pack
+    (which lists its SYSTEM$WAIT families) scoped to that warehouse; no warehouse -> no pack."""
+    title = "WH_ALFA_TRANSFORM_PRD sleep polling ~$106/week: Control-M · CTM_SVC"
+    plan = plan_for_alert("COST_SLEEP_POLLING", title, "Sleep polling on 7 of the 7 complete days", "2026-09-28")
+    assert plan is not None and plan.kind == "cloud_svc" and plan.days == 7
+    assert plan.warehouse == "WH_ALFA_TRANSFORM_PRD"
+    assert plan_for_alert("COST_SLEEP_POLLING", "No warehouse sleep polling ~$30/week: User X", "", "2026-09-28") is None
+
+
 def test_prompt_framing_matches_the_family_and_forbids_invention() -> None:
     cloud_df = pd.DataFrame({
         "SAMPLE_TEXT": ["SHOW TABLES"], "QUERY_TYPE": ["SHOW"], "RUNS": [4000],

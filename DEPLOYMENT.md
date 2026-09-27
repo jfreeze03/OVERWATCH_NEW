@@ -175,6 +175,7 @@ snowflake/migrations/V156__etl_cycle_push_alerts.sql
 snowflake/migrations/V157__alert_scan_self_watch_idle_push.sql
 snowflake/migrations/V158__operator_backup_generations.sql
 snowflake/migrations/V159__loader_compile_diet.sql
+snowflake/migrations/V160__sleep_polling_alert.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -488,7 +489,7 @@ surgical by design — the schema is shared with the old app, so it never drops
 `DBA_MAINT_DB.OVERWATCH` itself, only named objects:
 
 - **Section A (live):** tasks, alerts, procs, functions, views, transient
-  facts/marts. Safe anytime — re-run the migrations in order (V001..V159) and the loaders repopulate.
+  facts/marts. Safe anytime — re-run the migrations in order (V001..V160) and the loaders repopulate.
 - **Section B (commented):** operator data — settings, company scope, alert
   config/events/audit, action queue, savings ledger, error log,
   schema_version. Uncomment only for a factory reset, and run the provided

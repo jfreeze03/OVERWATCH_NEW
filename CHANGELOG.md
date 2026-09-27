@@ -1,5 +1,62 @@
 # Changelog
 
+## 4.596.0 - Chronic sleep-polling alert: COST_SLEEP_POLLING (V160) (2026-09-27)
+
+One owner-applied migration (V160). v4.595's Cost > Spend panel names and prices SYSTEM$WAIT sleep polling, but
+nothing pushed it. The account's cloud services are above the free allowance every day, and sleep polling was
+57.3 of 218.55 CS credits a week in the owner DIAG (about $211 a week at $3.68):
+- Control-M `select system$wait(10)` on WH_ALFA_TRANSFORM_PRD: 28.8.
+- SYSTEM tasks' `CALL SYSTEM$WAIT(30/60/1200)` on WH_TRXS_TRANSFORM: 28.5.
+
+V150's COST_CLOUD_SVC_ANOMALY can never fire on a chronic poller, because the poller is its own 28-day baseline.
+
+- **The rule (owner defaults, 2026-09-27).**
+  - One event per POLLER: a warehouse plus the user, or the task owner role when a task runs the statements as SYSTEM.
+  - It raises when the poller slept on 5 or more of the 7 newest complete days and billed at least THRESHOLD_NUM
+    USD a week. That is MEDIUM at 25; HIGH at 5x.
+  - The billed basis is the panel's own: per complete metering day, the smaller of the poller's credits and the
+    account's billed cloud services, capped as one group, at the compute rate. The newest (in-progress) metering
+    day is left out.
+  - A sleep is the app's statement shape (`system_wait.SLEEP_SQL_PATTERN`). The SQL copy is locked to the app by a
+    permanent parity test.
+  - COMPANY comes from COMPANY_FOR_WAREHOUSE. DETAIL carries the waits, runs, credits used and billed, USD per
+    week and per month, the owner hint and the concrete next step: a task gets AFTER/stream chaining; a scheduler
+    or client gets "let the scheduler own the interval".
+- **Lifecycle.**
+  - A live (OPEN, ACK or SNOOZED) event holds its band, so there is no weekly re-raise.
+  - A NOISE or EXPECTED resolve mutes that band for 28 days; a 5x HIGH still breaks through.
+  - An ACTIONED resolve re-raises only if polling continues after that day.
+  - A live HIGH supersedes the poller's MED from any week, SNOOZED included.
+  - Self-clear (CONDITION_ENDED, OPEN only, 1h dwell, AUTO_CLEAR_ENABLED seeded TRUE) happens once the poller is
+    absent, bills under the clear level (half the threshold unless CLEAR_THRESHOLD_NUM is set), or was idle on
+    the window's last 4 days.
+- **Cadence and cost.**
+  - New SP_SCAN_SLEEP_POLLING(FORCE_RUN BOOLEAN), CALLed by SP_ALERT_SCAN_DAILY as counting arm [25]. The daily
+    scan is re-derived from V157 and byte-identical except for [25] and the tally (11 -> 12).
+  - The proc works once per ISO week (Central) behind a receipt row in the new TRANSIENT SLEEP_POLLING_WEEKLY. It
+    defers (logged) until the 7 days are complete, and a failure is redone by the next daily scan and trips
+    OPS_SCAN_DEGRADED.
+  - About 2 small statements on 6 days a week and about 10 on the due day: a few compile-seconds a week, no
+    ACCOUNT_USAGE view, no new task or warehouse resume.
+  - Weekly latency: a stopped poller clears up to about 10 days later.
+- **App.**
+  - The playbook (Means / verify on the panel / fix at the source / self-clear), Investigate → Cost Intelligence
+    > Spend & Attribution, and the AI evidence pack (cloud-services shapes on the poller's warehouse).
+  - The COST_CLOUD_SVC_ANOMALY and OPS_SCAN_DEGRADED playbooks name the new rule.
+  - Admin migration contract, validate floor V160, teardown, README / DEPLOYMENT / RUNBOOK (rule row + "Rolling
+    back V160"), rebuild bundle.
+- **Tests.**
+  - Byte-identical regeneration.
+  - Normalize-and-compare of the daily scan back to V157 (the round-13 lock).
+  - An executed sqlite harness of the new proc: panel parity on the owner's four families and on a binding day,
+    the raise / hold / supersede / clear matrix, and the weekly gate.
+  - The permanent pattern-parity test, PART B fragment locks and app lockstep.
+- **Apply order.** Deploy this build (`snow streamlit deploy --replace`), run the read-only
+  `PREFLIGHT_SLEEP_POLLING.sql`, then apply V160 from the runbox RUN_NEXT. Nothing runs at apply time. The first
+  daily scan after apply evaluates the current ISO week.
+
+4-pin version bump 4.595.0 → 4.596.0 + CHANGELOG.
+
 ## 4.595.0 - Cloud-services cost drivers: statement families ranked by billed credits, sleep polling named (2026-09-26)
 
 Owner DIAG (2026-09-26, 7 days): every cloud-services credit on this account is billed (the account is above the

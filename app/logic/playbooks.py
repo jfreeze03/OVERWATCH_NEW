@@ -45,7 +45,7 @@ PLAYBOOKS: dict[str, str] = {
         "4. Fix = quiet the chatty tool / cache metadata / cut reconnects / poll from the scheduler "
         "(credits shown are gross usage, before the account-level ~10% rebate); recurring on the same "
         "warehouse = raise the threshold on the rule. A chronic poller never trips this rule (it is its "
-        "own baseline); the billed ranking shows it."
+        "own baseline); the billed ranking shows it, and COST_SLEEP_POLLING raises it weekly."
     ),
     "COST_IDLE_OPPORTUNITY": (
         "**Means:** over the last 14 complete days this warehouse burned a large share of its credits "
@@ -64,6 +64,30 @@ PLAYBOOKS: dict[str, str] = {
         "a timer on a never-suspend warehouse is not auto-booked — book it once (a closed-loop run already "
         "booked its zero-dollar row; otherwise use *Remediation & ledger*) and verify it on the Savings "
         "ledger."
+    ),
+    "COST_SLEEP_POLLING": (
+        "**Means:** one poller -- a warehouse plus the user, or the task owner role for statements a task "
+        "runs as SYSTEM -- slept with `SYSTEM$WAIT` on 5 or more of the 7 newest complete days, and its "
+        "cloud-services credits billed at least the rule threshold (USD per week; HIGH at 5x). A sleep "
+        "compiles in well under 0.1 s and then holds the statement open for the whole wait, so the "
+        "compile-ranked views never show it, and the per-warehouse cloud-services baseline "
+        "(COST_CLOUD_SVC_ANOMALY) never trips on a steady poller. Checked once a week by the daily scan; "
+        "one event per poller while the polling lasts.\n\n"
+        "1. Cost > Spend → *Which statement families bill the most cloud services* with a 7-day window: "
+        "the poller's sleep families, runs, hours slept and billed USD (the alert prices the 7 newest "
+        "complete metering days). Week-by-week history: "
+        "`SELECT * FROM DBA_MAINT_DB.OVERWATCH.SLEEP_POLLING_WEEKLY WHERE ROW_KIND = 'POLLER' "
+        "ORDER BY WEEK_START DESC, USD_WEEK DESC;`\n"
+        "2. Fix it at the source; a resize won't help. A task (the owner role is in the title): run the "
+        "dependent step AFTER its predecessor in a task graph, or trigger it when a stream has data, "
+        "instead of a `CALL SYSTEM$WAIT` loop. A scheduler or client (Control-M, an orchestrator): let "
+        "the scheduler own the interval (a cyclic interval, a file watcher, a sensor) or run one short "
+        "readiness check per cycle.\n"
+        "3. The event resolves itself (CONDITION_ENDED) at a weekly check once the poller stops or bills "
+        "under the clear level (half the threshold unless CLEAR_THRESHOLD_NUM is set). Resolved as "
+        "actioned, it comes back only if the polling continues after that day; NOISE or EXPECTED keeps "
+        "it quiet for 28 days unless it grows past 5x. THRESHOLD_NUM is USD per week. To re-check now: "
+        "`CALL DBA_MAINT_DB.OVERWATCH.SP_SCAN_SLEEP_POLLING(TRUE);` (it can raise events and email)."
     ),
     "COST_ANOMALY_SWEEP": (
         "**Means:** yesterday's credits for this series sit far outside its 28-day pattern.\n\n"
@@ -131,7 +155,8 @@ PLAYBOOKS: dict[str, str] = {
         "21 Central hours and OPS_PIPELINE_DEGRADED only in the 02, 05, 08, 11, 14, 17, 20 and 23 hours. "
         "Outside those hours the CALL skips that rule and still reports 12/12 ok, so verify a fix to one "
         "of them by calling in the 05 or 17 Central hour (both slots), or wait for its next slot and "
-        "re-check APP_ERROR_LOG."
+        "re-check APP_ERROR_LOG. The daily scan's COST_SLEEP_POLLING arm works once per ISO week; after "
+        "a failure the next daily scan redoes the week."
     ),
     "OPS_PIPELINE_DEGRADED": (
         "**Means:** part of OVERWATCH's own pipeline stopped while its tasks still read SUCCEEDED: a "

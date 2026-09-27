@@ -19,7 +19,7 @@ steady-state weekday at 59 statements (135 on Sundays) and reproduces the untrim
 shape. Python mirrors (``_probe_emulated``, ``_loop_emulated``, ``_pruned_rows_batched``) prove the skip
 decisions and the batched rows; the mirrors are tied to the SQL by the exact-text locks.
 
-The wave-tip pins at the bottom (validate 'V001..V159 applied', the DEPLOYMENT/README list lines and the
+The wave-tip pins at the bottom (validate 'V001..V160 applied', the DEPLOYMENT/README list lines and the
 admin _EXPECTED_MIGRATIONS[158] entry) are written by the wave integrator; they fail until then.
 """
 
@@ -1175,7 +1175,7 @@ def test_v158_plain_sql_parses():
 # ---------------------------------------------------------------------------------------------
 def test_validate_and_docs_track_v158():
     val = _read("snowflake/validate.sql")
-    assert "V001..V159 applied" in val and "VERSION BETWEEN 1 AND 159) = 159" in val
+    assert "V001..V160 applied" in val and "VERSION BETWEEN 1 AND 160) = 160" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert f"snowflake/migrations/{_NAME}" in _read(rel), rel
 

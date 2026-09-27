@@ -132,6 +132,13 @@ def plan_for_alert(rule_id: str, title: str, detail: str = "",
             return None
         return EvidencePlan("queueing", "last 7 days", days=7, warehouse=warehouse, day=day)
 
+    if rid == "COST_SLEEP_POLLING":
+        # V160: a sleep poller bills cloud services on its warehouse -- the per-shape cloud-services pack
+        # names its SYSTEM$WAIT families. Without a warehouse there is nothing honest to scope to.
+        if not warehouse:
+            return None
+        return EvidencePlan("cloud_svc", "last 7 days", days=7, warehouse=warehouse)
+
     if rid == "COST_IDLE_OPPORTUNITY":
         # V157: idle waste is hours with ZERO queries — the generic query-families-by-elapsed pack
         # would ground the explanation on off-topic latency rows. No bespoke idle pack yet, so the
