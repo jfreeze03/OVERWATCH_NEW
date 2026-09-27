@@ -50,6 +50,7 @@ def test_patched_module_set_covers_the_pages():
         "app.ui.pages.cost_parts.ai_chargeback", "app.ui.pages.cost_parts.compare",
         "app.ui.pages.cost_parts.contract", "app.ui.pages.cost_parts.optimize",
         "app.ui.pages.cost_parts.spend", "app.ui.pages.cost_parts.unit_costs",
+        "app.ui.pages.ops_parts.optimize_queue",
     }
     assert expected <= names, f"unpatched modules: {expected - names}"
 

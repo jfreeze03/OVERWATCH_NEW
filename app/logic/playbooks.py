@@ -142,6 +142,22 @@ PLAYBOOKS: dict[str, str] = {
         "profile for the regressed step.\n"
         "3. Fix forward or roll back; the tracker verdicts IMPROVED once p95/credits recover."
     ),
+    # v4.597 (Option C): the in-app SLO editor is gone, so this names where objectives live now.
+    "PERF_SLO_BREACH": (
+        "**Means:** an ACTIVE custom objective in SLO_OBJECTIVES measured outside its target over "
+        "its window (CRITICAL when a success-rate objective burns 2x or more of its error budget). "
+        "The event detail names the metric, the measured value vs the target, and the entity.\n\n"
+        "1. Control Room > Entity 360 → *Watchlist*: a watched entity whose objective is in breach "
+        "is flagged there, beside its metric history and open work.\n"
+        "2. Fix the entity (Operations > Queries for a warehouse or query family, Operations > Tasks "
+        "for a task), or accept the new normal. The in-app SLO editor was removed in v4.597 (older "
+        "event text still says Decision Studio -> SLOs), so change or retire the objective in "
+        "Snowsight: `UPDATE DBA_MAINT_DB.OVERWATCH.SLO_OBJECTIVES SET ACTIVE = FALSE WHERE SLO_ID = "
+        "'<id>';` (the id is the second `|`-separated part of the event's dedupe key).\n"
+        "3. The objectives that need no setup (nightly cycle done by the target, tasks on cadence) "
+        "live on Operations > Pipeline SLA → *Tonight* → *Built-in objectives*; they are read-only "
+        "and do not page."
+    ),
     "OPS_SCAN_DEGRADED": (
         "**Means:** one or more rule blocks inside the alert scan errored this run (hourly "
         "SP_ALERT_SCAN, or SP_ALERT_SCAN_DAILY when the event key carries `|DAILY|`). The other "

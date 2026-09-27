@@ -30,7 +30,7 @@ PAGE_SECTION_LABELS = {
                      "Freshness & replay", "Entity 360"],
     "Cost Intelligence": ["Spend & Attribution", "Contract & Forecast", "Chargeback & AI",
                          "Unit costs", "Compare", "Optimization & Savings"],
-    "Operations": ["Queries", "Tasks", "Warehouses", "Change impact",
+    "Operations": ["Queries", "Tasks", "Warehouses", "Optimize", "Change impact",
                    "Pipeline SLA", "Release compare", "Emergency"],
     "Decision Studio": ["Scorecard", "ROI", "Portfolio", "SLOs", "Products", "Cost Truth", "Scenarios", "Experiments"],
     "Alerts": ["Open events", "Rules", "History", "Native delivery"],

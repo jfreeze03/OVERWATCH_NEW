@@ -132,6 +132,7 @@ def _stub_shaped(monkeypatch):
         security,
     )
     from app.ui.pages.cost_parts import ai_chargeback, compare, contract, optimize, spend, unit_costs
+    from app.ui.pages.ops_parts import optimize_queue
 
     monkeypatch.setattr(main_mod, "connection_available", lambda: True)
     monkeypatch.setattr(main_mod, "current_role", lambda: "SNOW_SYSADMINS")
@@ -146,7 +147,7 @@ def _stub_shaped(monkeypatch):
     for module in (main_mod, components, ai_panel, ds_render, security_center, workbench, attention,
                    overview, control_room, cost, operations, alerts, security, admin, brief,
                    ask, decision_studio, ai_chargeback, compare, contract, optimize, spend,
-                   unit_costs):
+                   unit_costs, optimize_queue):
         for fname, fstub in _READ_STUBS.items():
             if hasattr(module, fname):
                 monkeypatch.setattr(module, fname, fstub)
@@ -247,6 +248,31 @@ def test_operations_warehouses_sizing_lens_renders_shaped():
 
 
 @pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
+def test_operations_optimize_renders_shaped():
+    """v4.597 (Option C): Operations > Optimize is not the default section, so the page sweep never
+    paints it. Drive it with the live-profile toggle ON, an operator role and a selected family, so
+    the fix-queue body, the live-diagnosis merge, the Track-all bar and the detail pane's Track
+    block all execute under shaped data (a column the builders do not return raises here)."""
+    at = AppTest.from_function(_entry, default_timeout=30)
+    at.run()
+    assert not at.exception
+    _nav_to(at, "Operations")
+    at.session_state["ops_section"] = "Optimize"
+    at.session_state["ops_opt_live"] = True
+    at.session_state["_ow_current_role"] = "SNOW_SYSADMINS"     # DBA profile -> operator (off-SiS)
+    at.session_state["_ow_md_sel_ops_optimize"] = "1.0"         # shaped FINGERPRINT of row 0
+    at.run()
+    assert not at.exception, f"operations optimize (shaped): {at.exception}"
+    assert not any("could not finish rendering" in str(getattr(e, "value", "")) for e in at.error),         "the Optimize section raised mid-render"
+    blob = " ".join(m.value for m in at.markdown)
+    assert "Fix queue" in blob, "the fix-queue header did not paint"
+    assert "First fix:" in blob, "the detail pane did not render the selected family"
+    labels = [str(b.label) for b in at.button]
+    assert any(lbl.startswith("Track all ACT NOW (") for lbl in labels), labels
+    assert "Track" in labels, "the operator Track button did not render in the detail pane"
+
+
+@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_etl_configured_morning_surfaces_render(monkeypatch):
     """Next-Fifty #1: with the default (empty) ETL_CONTROL_STATUS_FQN the whole-night glance, the
     Brief tile's populated branches and the shared attention verdict stay dormant. Configure it and
@@ -273,3 +299,5 @@ def test_etl_configured_morning_surfaces_render(monkeypatch):
         assert not any("could not finish rendering" in str(getattr(e, "value", "")) for e in at.error), page
     blob = " ".join(m.value for m in at.markdown)
     assert "Tonight at a glance" in blob, "the whole-night glance did not paint on Operations"
+    # v4.597 (Option C): the two read-only built-in objectives paint at the top of Tonight.
+    assert "Built-in objectives" in blob, "the built-in objectives panel did not paint on Tonight"
