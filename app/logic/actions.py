@@ -259,9 +259,14 @@ def ledger_totals(df: pd.DataFrame, active_months: int = SAVINGS_ACTIVE_MONTHS) 
     active = float(ver_usd_col[verified_at >= a_start].sum())
     active_count = int((verified_at >= a_start).sum())
     # verified items the realization ratio cannot include (no positive up-front estimate), and how many of
-    # them the daily change scan auto-measured (SOURCE_CHANGE_ID) vs verified by hand (experiments, manual)
+    # them the daily change scan auto-measured (SOURCE_CHANGE_ID) vs verified by hand (experiments, manual).
+    # v4.597 live-defect fix: savings_ledger() never projected SOURCE_CHANGE_ID (only the derived SOURCE
+    # 'manual'/'auto'), so this count was always 0 in production. It now counts a row as auto when its
+    # SOURCE_CHANGE_ID is set OR — where that column is absent or blank on the row — SOURCE == 'auto'.
     _auto = (ver["SOURCE_CHANGE_ID"].notna() & (ver["SOURCE_CHANGE_ID"].astype(str).str.strip() != "")
              if "SOURCE_CHANGE_ID" in ver.columns else pd.Series(False, index=ver.index))
+    if "SOURCE" in ver.columns:
+        _auto = _auto | (ver["SOURCE"].astype(str).str.strip().str.lower() == "auto")
     no_est = ~_est_pos
     days = (verified_at - created_at).dt.total_seconds() / 86400.0
     days = days[days.notna() & (days >= 0)]

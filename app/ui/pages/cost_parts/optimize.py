@@ -54,8 +54,9 @@ from app.logic.monitors import (
 )
 from app.logic.savings_rollup import (
     SavingsOpportunity,
-    confidence_weight,
     effort_tier,
+    idle_opportunities,
+    resize_opportunities,
     rollup_savings,
 )
 from app.logic.serverless_roi import classify_qas_roi
@@ -455,12 +456,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     f"nothing): {len(flagged)} warehouse(s) met the idle gate but none can be confirmed "
                     "as a timer target, so 'Actionable via timer' below reads $0 — that is unverified, "
                     "not zero opportunity.")
-            _savings_opps.extend(     # rec#16: idle-timer opportunities (net actionable)
-                SavingsOpportunity("IDLE", str(r["WAREHOUSE_NAME"]),
-                                   safe_float(r["ACTIONABLE_MONTHLY_USD"]),
-                                   confidence_weight(r.get("SAVINGS_CONFIDENCE")))
-                for _, r in advisor.iterrows()
-                if safe_float(r["ACTIONABLE_MONTHLY_USD"]) > 0)
+            # rec#16: idle-timer opportunities (net actionable) — the shared helper Proof ▸ Pipeline reuses
+            _savings_opps.extend(idle_opportunities(advisor))
             # rec#20: idle-tail $ per warehouse (for the consolidation saving estimate)
             _idle_by_wh = {str(r["WAREHOUSE_NAME"]).strip().upper():
                            safe_float(r["PROJECTED_MONTHLY_IDLE_USD"])
@@ -579,12 +576,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             )
             sized = size_recommendations(_sizing_df, rate, sizing_days)
             _sizing_profiles_tx = sized
-            _savings_opps.extend(     # rec#16: right-sizing opportunities (overlaps idle per warehouse)
-                SavingsOpportunity("RESIZE", str(r["WAREHOUSE_NAME"]),
-                                   safe_float(r.get("POTENTIAL_MONTHLY_SAVING_USD")),
-                                   confidence_weight(r.get("CONFIDENCE")))
-                for _, r in sized.iterrows()
-                if safe_float(r.get("POTENTIAL_MONTHLY_SAVING_USD")) > 0)
+            # rec#16: right-sizing opportunities (overlaps idle per warehouse) — shared with Proof ▸ Pipeline
+            _savings_opps.extend(resize_opportunities(sized))
             summary = sizing_summary(sized)
             _sz_cols = ["WAREHOUSE_NAME", "COMPANY", "RECOMMENDATION", "RATIONALE",
                         "CONFIDENCE", "AUTO_SUSPEND", "ACTIVE_QUERY_DAYS", "ACTIVE_DAYS_PER_30D",

@@ -13,6 +13,8 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 
+import pandas as pd
+
 from app.logic.formulas import safe_float
 
 # Sources that address the SAME money on the same target — keep only the largest.
@@ -57,6 +59,34 @@ class SavingsRollup:
     total_monthly_usd: float
     items: tuple[SavingsOpportunity, ...]     # kept, ranked by confidence x dollars desc
     dropped: tuple[SavingsOpportunity, ...]   # overlap double-counts removed
+
+
+def idle_opportunities(advisor: pd.DataFrame | None) -> list[SavingsOpportunity]:
+    """rec#16 IDLE leg, extracted from Cost ▸ Optimize (v4.597) so Optimize and Proof ▸ Pipeline build
+    the identical list: one SavingsOpportunity per insights.idle_advisor row with a positive NET
+    actionable timer saving (ACTIONABLE_MONTHLY_USD), weighted by its SAVINGS_CONFIDENCE label.
+    Behaviour is byte-equal to the inline generator it replaced; None / empty -> []."""
+    if advisor is None or advisor.empty:
+        return []
+    return [SavingsOpportunity("IDLE", str(r["WAREHOUSE_NAME"]),
+                               safe_float(r["ACTIONABLE_MONTHLY_USD"]),
+                               confidence_weight(r.get("SAVINGS_CONFIDENCE")))
+            for _, r in advisor.iterrows()
+            if safe_float(r["ACTIONABLE_MONTHLY_USD"]) > 0]
+
+
+def resize_opportunities(sized: pd.DataFrame | None) -> list[SavingsOpportunity]:
+    """rec#16 RESIZE leg (right-sizing; overlaps IDLE per warehouse — rollup_savings keeps the larger),
+    extracted from Cost ▸ Optimize (v4.597): one SavingsOpportunity per sizing.size_recommendations row
+    with a positive POTENTIAL_MONTHLY_SAVING_USD, weighted by its CONFIDENCE label. Byte-equal to the
+    inline generator it replaced; None / empty -> []."""
+    if sized is None or sized.empty:
+        return []
+    return [SavingsOpportunity("RESIZE", str(r["WAREHOUSE_NAME"]),
+                               safe_float(r.get("POTENTIAL_MONTHLY_SAVING_USD")),
+                               confidence_weight(r.get("CONFIDENCE")))
+            for _, r in sized.iterrows()
+            if safe_float(r.get("POTENTIAL_MONTHLY_SAVING_USD")) > 0]
 
 
 def _overlap_group(source: str) -> frozenset[str] | None:
