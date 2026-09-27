@@ -465,6 +465,9 @@ def test_v160_daily_normalizes_back_to_v157_byte_for_byte():
 def test_v160_arm25_is_one_counting_block_between_24_and_17():
     arm = _between(_D, _ANCHOR_25, _ANCHOR_17)
     assert arm.startswith(_ARM25_HEAD) and arm.endswith(_ARM25_CODE)
+    # review r1: nothing but comment lines between the head and the code (an injected statement fails here)
+    between = arm[len(_ARM25_HEAD):len(arm) - len(_ARM25_CODE)]
+    assert all(ln.startswith("    --") for ln in between.splitlines()), between
     assert _D.count(_ARM25_CODE) == 1 and _D.count(_ANCHOR_25) == 1
     assert arm.count(_FAILS_INC) == 1 and arm.count("    BEGIN\n") == 1 and arm.count("    EXCEPTION\n") == 1
     # after [24]'s handler, before [17]
@@ -642,6 +645,7 @@ def test_v160_raise_hold_and_severity_text():
     # severity never downgrades an operator-set base; COMPANY per warehouse
     assert "IFF(o.BAND_RANK = 2 AND o.BASE_SEVERITY IN ('LOW', 'MEDIUM'), 'HIGH', o.BASE_SEVERITY)" in n
     assert "COALESCE(DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(o.WAREHOUSE_NAME), 'ALL')" in n
+    assert "IFF(o.WAREHOUSE_NAME = 'NONE', 'ALL'," in n                                  # no warehouse = account
     assert "WHERE RULE_ID = 'COST_SLEEP_POLLING' AND ENABLED" in n                      # a disabled rule raises nothing
 
 
@@ -853,7 +857,14 @@ def test_v160_detail_shape():
     assert detail.count("won''t help.") == 2
     assert _norm("IFF(UPPER(o.USER_NAME) = 'SYSTEM', 'Stop sleeping inside the task") in _norm(detail)
     assert "Cost Intelligence > Spend & Attribution > Cloud-services health" in "".join(lits)
-    assert "idle on the last 4 complete days." in lits[-1]
+    tail = "".join(lits[-3:])
+    assert "idle on the last " in tail and "4 complete days;" in tail
+    # review r1: the self-clear is OPEN-only; an acknowledged event is the human's to close
+    assert "while OPEN, this event resolves itself" in "".join(lits)
+    assert "".join(lits).endswith("an acknowledged event stays yours to close (resolve it as actioned once fixed).")
+    # owner + next step come before the explanation (the AI prompt keeps DETAIL[:500])
+    joined = "".join(lits)
+    assert joined.index("Owner: ") < joined.index("A sleep compiles in well under 0.1 s")
     # fixed text (the longer next step), the 400-char CALLS cap, two 150-char owner hints and ~100 characters
     # of numbers and dates still fit 2000, so the verify / self-clear tail survives the LEFT on real data
     fixed = sum(len(x) for x in lits) - min(len(task), len(client))

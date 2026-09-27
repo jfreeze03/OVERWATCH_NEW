@@ -16,8 +16,9 @@ from app.logic.alert_evidence import EvidencePlan
 
 def build(plan: EvidencePlan) -> str:
     """Return the evidence SQL for one resolved plan."""
-    if plan.kind == "cloud_svc":
-        # Top query shapes by cloud-services credits on the alert's warehouse.
+    if plan.kind in ("cloud_svc", "cloud_svc_sleep"):
+        # Top query shapes by cloud-services credits on the alert's warehouse (V160 sleep polling
+        # reuses the same pack; only its framing differs).
         return mart_sql.cloud_svc_top_shapes(plan.days, "ALL", plan.warehouse)
     if plan.kind == "cortex":
         # Daily AI/Cortex billed credits by service type (week-over-week).

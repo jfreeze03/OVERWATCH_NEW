@@ -375,9 +375,15 @@ def _try_to_double(v):
         return None
 
 
+# V044 COMPANY_FOR_WAREHOUSE (review r1): the COMPANY_SCOPE row (V001 seeds the four TRXS warehouses), else
+# 'ALFA' for WH_ALFA_*, else 'UNKNOWN' -- it never returns NULL.
+_WH_SCOPE = {"WH_TRXS_LOAD": "Trexis", "WH_TRXS_QUERY": "Trexis", "WH_TRXS_TRANSFORM": "Trexis",
+             "WH_TRXS_UNLOAD": "Trexis"}
+
+
 def _company_for_warehouse(wh):
     w = str(wh or "").upper()
-    return "Trexis" if w.startswith("WH_TRXS_") else "ALFA" if w.startswith("WH_ALFA_") else None
+    return _WH_SCOPE.get(w) or ("ALFA" if w.startswith("WH_ALFA_") else "UNKNOWN")
 
 
 class _CountIf:
@@ -535,7 +541,7 @@ class _Db:
     def stmt(self, day: str, h: str, text: str, cs: float, runs: int = 100, *, wh: str, user: str,
              role: str = "R", qtype: str = "SELECT", compile_s: float = 0.02) -> None:
         self.con.execute("INSERT INTO MART_CLOUD_SVC_DAILY VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                         (day, _company_for_warehouse(wh) or "ALFA", wh, user, role, qtype, h, text, runs, cs,
+                         (day, _company_for_warehouse(wh), wh, user, role, qtype, h, text, runs, cs,
                           0.0, compile_s * runs))
 
     def app(self, user: str, application: str, queries: int, days: tuple[str, ...] = _WIN) -> None:
@@ -955,11 +961,12 @@ def test_credit_price_is_read_from_settings_with_a_safe_fallback(price, rate):
 def test_company_follows_the_warehouse():
     db = _Db()
     _metered(db)
-    for wh in ("WH_ALFA_Q", "WH_TRXS_Q", "WH_OTHER", "NONE"):
+    for wh in ("WH_ALFA_Q", "WH_TRXS_TRANSFORM", "WH_OTHER", "NONE"):
         _flat(db, f"H_{wh}", "CALL SYSTEM$WAIT(5)", 5.0, wh=wh, user="U", qtype="CALL")
     raised = {e["DEDUPE_KEY"].split("|")[1]: e for e in db.run().raised}
-    assert {k: e["COMPANY"] for k, e in raised.items()} == {"WH_ALFA_Q": "ALFA", "WH_TRXS_Q": "Trexis",
-                                                            "WH_OTHER": "ALL", "NONE": "ALL"}
+    # an unmapped warehouse keeps the house UNKNOWN classification (V044); only the no-warehouse bucket is ALL
+    assert {k: e["COMPANY"] for k, e in raised.items()} == {"WH_ALFA_Q": "ALFA", "WH_TRXS_TRANSFORM": "Trexis",
+                                                            "WH_OTHER": "UNKNOWN", "NONE": "ALL"}
     assert raised["NONE"]["TITLE"].startswith("No warehouse sleep polling ~$")      # the mart's NULL warehouse
     assert navigate.investigation_target(_RULE, raised["NONE"]["TITLE"])["filters"] == {}
 

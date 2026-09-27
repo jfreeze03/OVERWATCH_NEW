@@ -116,8 +116,17 @@ def test_sleep_polling_gets_the_cloud_services_pack_for_its_warehouse() -> None:
     (which lists its SYSTEM$WAIT families) scoped to that warehouse; no warehouse -> no pack."""
     title = "WH_ALFA_TRANSFORM_PRD sleep polling ~$106/week: Control-M · CTM_SVC"
     plan = plan_for_alert("COST_SLEEP_POLLING", title, "Sleep polling on 7 of the 7 complete days", "2026-09-28")
-    assert plan is not None and plan.kind == "cloud_svc" and plan.days == 7
+    assert plan is not None and plan.kind == "cloud_svc_sleep" and plan.days == 7
     assert plan.warehouse == "WH_ALFA_TRANSFORM_PRD"
+    # same SQL as the cloud_svc pack; a sleep-specific framing (review r1: the shared framing called a
+    # sleep's high CS per run "metadata/compile overhead")
+    from app.data import alert_evidence_sql
+    from app.logic.ai_prompts import _EVIDENCE_COLUMNS, _EVIDENCE_FRAMING
+    assert alert_evidence_sql.build(plan) == alert_evidence_sql.build(
+        type(plan)("cloud_svc", plan.window_label, days=7, warehouse=plan.warehouse))
+    assert _EVIDENCE_COLUMNS["cloud_svc_sleep"] == _EVIDENCE_COLUMNS["cloud_svc"]
+    assert "not metadata/compile" in _EVIDENCE_FRAMING["cloud_svc_sleep"]
+    assert "sleep polling" in plan.label
     assert plan_for_alert("COST_SLEEP_POLLING", "No warehouse sleep polling ~$30/week: User X", "", "2026-09-28") is None
 
 

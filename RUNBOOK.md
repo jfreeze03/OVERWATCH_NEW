@@ -514,7 +514,9 @@ V157), SNOOZE_SUPPRESSED (V117) and CONDITION_ENDED (V157: an OPEN
 SEC_CRED_EXPIRY / SEC_NEW_EXPOSURE event once ACCOUNT_USAGE shows the credential
 rotated/removed or the PUBLIC grant batch fully revoked; ≥1h dwell, checked in the
 4-hourly security slot so a clear lands up to ~4h after the evidence; ACK'd and
-snoozed events are left for a human).
+snoozed events are left for a human; and, since V160, an OPEN COST_SLEEP_POLLING event at
+the weekly check once its poller stops, bills under the clear level or is idle on the
+window's last 4 complete days — ACK'd events stay with a human there too).
 
 **Rolling back V157 (order matters).** FIRST switch the two security rules' auto-clear
 flag off, by hand in a worksheet (never inside a migration):

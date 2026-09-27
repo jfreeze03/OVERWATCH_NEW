@@ -28,6 +28,7 @@ _LEADING_TOKEN_RE = re.compile(r"^\s*([A-Z][A-Z0-9_]{2,})\b")
 # the DBA which evidence the AI will be grounded in BEFORE they spend credits.
 _KIND_LABEL = {
     "cloud_svc": "cloud-services credits by query shape",
+    "cloud_svc_sleep": "cloud-services credits by query shape (sleep polling)",
     "cortex": "AI/Cortex spend by day",
     "metering_service": "this service's daily credits",
     "query_family": "this query family's latency history",
@@ -40,7 +41,7 @@ _KIND_LABEL = {
 class EvidencePlan:
     """Which evidence shape explains one alert, and how to scope it."""
 
-    kind: str            # cloud_svc | cortex | metering_service | query_family | queueing | generic
+    kind: str            # cloud_svc | cloud_svc_sleep | cortex | metering_service | query_family | queueing | generic
     window_label: str    # human window for the caption, e.g. "last 7 days"
     days: int = 7
     warehouse: str = ""
@@ -134,10 +135,11 @@ def plan_for_alert(rule_id: str, title: str, detail: str = "",
 
     if rid == "COST_SLEEP_POLLING":
         # V160: a sleep poller bills cloud services on its warehouse -- the per-shape cloud-services pack
-        # names its SYSTEM$WAIT families. Without a warehouse there is nothing honest to scope to.
+        # names its SYSTEM$WAIT families, framed for sleeps (a long wait, not compile/metadata overhead).
+        # Without a warehouse there is nothing honest to scope to.
         if not warehouse:
             return None
-        return EvidencePlan("cloud_svc", "last 7 days", days=7, warehouse=warehouse)
+        return EvidencePlan("cloud_svc_sleep", "last 7 days", days=7, warehouse=warehouse)
 
     if rid == "COST_IDLE_OPPORTUNITY":
         # V157: idle waste is hours with ZERO queries — the generic query-families-by-elapsed pack
