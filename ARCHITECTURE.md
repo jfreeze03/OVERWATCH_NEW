@@ -90,7 +90,7 @@ Snowflake connection, and it is enforced by code review + the CI test matrix
   returned with this — it had been retired with the density toggle in v4.157.
 - **Master-detail layout (C42/C47):** `components.master_detail(df, *, key,
   id_col, list_render_fn, detail_render_fn, ...)` is the shared ranked-work-LEFT
-  / selected-detail-RIGHT primitive (Action Center, Decision Studio experiments).
+  / selected-detail-RIGHT primitive (Action Center, Operations ▸ Optimize fix queue).
   It owns only the column split and the fragile positional-selection → stable-id
   → sticky-persistence dance (selection binds by identity via a rec29 seen-guard,
   so a re-sort can't rebind the detail to the wrong row; a deep-link preselect is
@@ -137,8 +137,8 @@ Snowflake connection, and it is enforced by code review + the CI test matrix
   star is display-only and applied after each board's watched-first sort, so pinning
   and the watched counts stay on the underlying bool; a NaN reads as not-watched.
 - **One confidence encoding (F60, `components.confidence_progress_column`):** a 0-1
-  confidence renders as ONE bar in every decision-workbench TABLE (portfolio, Action
-  Center, Decision Studio scenarios, Entity 360 work list), never a raw float;
+  confidence renders as ONE bar in every decision-workbench TABLE (Operations ▸
+  Optimize fix queue, Action Center, Proof ▸ Pipeline, Entity 360 work list), never a raw float;
   single-value surfaces (the Entity 360 header) keep `confidence_badge`. Authored
   confidence carries one shared help string (`AUTHORED_CONFIDENCE_HELP`) so its
   provenance wording (operator *or* recommendation engine) never drifts per surface.

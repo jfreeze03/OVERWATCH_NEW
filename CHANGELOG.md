@@ -1,5 +1,197 @@
 # Changelog
 
+## 4.597.0 - Decision Studio → Proof (Option C restructure) (2026-09-27)
+
+App-only, no migration. Decision Studio mixed two jobs on one page. One was the director-facing proof (Scorecard and
+ROI), and those two tabs read the same ledger but took the ROI numerator from two sources: SQL on the hero, a
+5000-row-capped pandas frame on the ROI tile. The other was operator tooling that lived away from the work it
+served: a Portfolio that ranked query families but named no diagnosis and could not queue anything, an SLO editor
+over an SLO_OBJECTIVES table reported empty, an Experiments board with zero rows, a Cost Truth tab that was really
+one ratio, and a Products board behind a live ACCESS_HISTORY scan. Option C (owner decision 2026-09-24) makes the
+page one read-only **Proof** page ("does OVERWATCH pay for itself, what does each saving rest on, and what is
+ahead") and moves each tool to the surface where that work happens.
+
+- **Operations ▸ Optimize: the fix queue (was Decision Studio ▸ Portfolio).** A new section after Warehouses
+  (`app/ui/pages/ops_parts/optimize_queue.py`, pure logic in `app/logic/fix_queue.py`).
+  - Every measured recurring query family, with its observed mart dollars, ONE diagnosis and a first fix. The
+    lanes and priority are `prioritize_workloads`' own and are never re-ranked.
+  - **Diagnosis precedence:**
+    1. **Live:** the Operations ▸ Queries optimization profile named a pathology for the same fingerprint. A live
+       row that ran clean ("None") falls through.
+    2. **Mart:** `query_advisor.advise` over the family mart's per-run averages, labelled with the live board's
+       own words (new `query_opt.pathology_label`).
+    3. **Heuristic:** the portfolio's specific next move (Cache or materialize, Stabilize failures, Reduce
+       recurrence), with a canned first fix.
+    4. **None:** "Validate evidence" or "Profile it". The first fix names what the marts cannot see (spill,
+       pruning, queueing, rows returned) and points at the live toggle.
+
+    Every row carries DIAG_SOURCE and a 0–1 diagnosis confidence (the live profile's / 100, else the
+    evidence heuristic).
+  - **Data.** `workbench_sql.optimize_queue` is the portfolio SQL plus advisor columns:
+    - per-family run, exec, compile and elapsed totals, GB scanned per run, warehouses;
+    - two typical-run compile proxies, so one compile-storm day cannot label a whole family;
+    - the dominant company and database by credits;
+    - an own-traffic flag (OW_SELF);
+    - uncapped `SCOPE_FAMILIES_TOTAL` / `SCOPE_CREDITS_TOTAL` window totals for the headline tiles.
+
+    `workload_portfolio()` is byte-identical (a verbatim snapshot plus a fragment-strip lock). The builder never
+    names ACTION_QUEUE, so a Track does not re-cold it.
+  - **Track** (operators, in the detail pane; a row click only selects) is ONE idempotent
+    `INSERT … SELECT … FROM (VALUES …) AS v (…) WHERE NOT EXISTS` into ACTION_QUEUE.
+    - It is keyed on SOURCE_ENTITY_TYPE `QUERY_FINGERPRINT` plus the upper-cased fingerprint with an
+      OPEN/IN_PROGRESS item, never on the title or company, so a re-click or another company scope never
+      duplicates it.
+    - Items land UNASSIGNED from source "Operations > Optimize". Severity is MEDIUM for ACT NOW, else LOW: never
+      HIGH or CRITICAL, which feed the Overview score.
+    - CONFIDENCE is OVERWATCH's evidence score, and DETAIL says so.
+    - Only a "Stabilize failures" diagnosis is priced: ESTIMATED_USD = observed cost × the failed-run share
+      (FAIL_PCT clamped at 100), PERIOD MONTHLY. Every other diagnosis tracks unpriced. Observed cost is never
+      written as a savings figure.
+  - **Track all ACT NOW** takes ACT NOW ∧ a specific diagnosis ∧ not own traffic ∧ no open item ∧ not dismissed
+    (DROPPED) in the last 90 days, highest priority first, at most 25 per click. Its statement is shown before
+    the button, and it carries the same 90-day cooldown in SQL. A single Track leaves the cooldown out, so a human
+    can re-track on purpose.
+    - Both writes: operator gate, per-target C48 latch, stamp before rerun. The `"queue"` cache salt refreshes
+      the tracked read, Action Center, Proof ▸ Pipeline and the acted-on read.
+    - Accepted race: two operators clicking in the same second can double-insert, as AI chargeback can today.
+  - Own-traffic families (OVERWATCH's own loader and mart statements) are tagged in the Why line and never
+    bulk-tracked.
+  - **Live query profile** toggle, off on first paint. It is the Queries board's scan with the same SQL, key and
+    tier, so the two share one cache entry, and its source label carries no ACCOUNT_USAGE literal.
+  - **W12 window fix:** the 30-day normalization divides by the window's real day span. Current month and Current
+    year used to divide by a day offset.
+  - Carried over from the Portfolio:
+    - watched families pinned within their lane;
+    - the Act now / Failure risk / Needs validation chips (Needs validation counts the VALIDATE lane);
+    - the 200-family cap disclosure;
+    - the Portfolio map, and the trust caption with its lane rule.
+
+    "Open in Action Center" and "Open Entity 360" show only for profiles that can open Control Room. An
+    `Operations ▸ Optimize` deep link can preselect a family (the `fingerprint` navigation context).
+- **Operations ▸ Pipeline SLA ▸ Tonight: two built-in, read-only objectives (replace the SLO editor).**
+  - **"Nightly cycle done by 07:00"** (the configured ETL_SLA_TARGET_HHMM) = met/judged over the SLA finish
+    forecast's newest 14 nights.
+    - Misses are split into late, failed and hung.
+    - Tonight's run is left out while it is still in flight with runway.
+    - Spike-calendar nights are judged.
+    - It reuses the forecast (`_sla_finish_forecast_panel` now returns it), so it costs no read.
+  - **"Tasks on cadence"** = on-time/total (late · stale) from `task_freshness_status`.
+    - Its one TASK_HISTORY batch member has byte-identical SQL and tier to Tasks ▸ SLA's, so the two share the
+      batch cache.
+    - It honors Company/Database/Schema.
+    - When the builder's 200-most-silent cap binds, the caption says so.
+  - Unconfigured reads "—" with a needs-setup hint, never 0/0. The objectives do not page.
+  - PERF_SLO_BREACH gets its own playbook: where objectives live now, and how to retire an ACTIVE row in Snowsight.
+- **Cost ▸ Spend & Attribution: the grain-coverage ratio (was Decision Studio ▸ Cost Truth).** One caption under
+  the warehouse table inside "Load company attribution". It shows measured object-query compute and user-allocated
+  credits as % of metered warehouse credits: separate lenses, not addends.
+  - All three come from one `workbench_sql.cost_truth` frame (one window, one scope).
+  - It renders only when all three bases have data (`cost_coverage.metered_grain_coverage`).
+  - The help discloses that allocated is the owner-scoped MART_COST_ALLOCATION_DAILY and can exceed 100% per
+    company.
+  - Cost: +1 mart read in the attribution toggle's existing round trip (wh, daily, grain). Spend first paint is
+    unchanged, and spend.py stays at 12 ACCOUNT_USAGE literals.
+  - The coverage ladder's stale pointers now read Cost ▸ Optimization & Savings (Object cost ledger) and Cost ▸
+    Contract & Forecast (rate-card reconciliation).
+- **The Proof page (was Decision Studio): tabs Proof · Pipeline.** It is read-only (no write path left in either
+  page file).
+  - **Proof** merges Scorecard and ROI. It is account-wide (the ledger has no company grain).
+    - Hero "Pays for itself": the verified active run-rate ÷ OVERWATCH's trailing-30-day run cost.
+    - KPIs: Verified savings run-rate, Added this quarter, Realization rate, Settling (change-scan rows that
+      settle when their 14-day window closes), Acted on, Alert precision, On solid evidence.
+    - **Every headline total comes from SQL aggregates** (`savings_summary_quarter`), never from the capped
+      ledger frame. This fixes the two-sources-for-one-number defect.
+  - **Per-item evidence ("What each saving rests on"),** one row per live ledger item (superseded manual twins
+    excluded):
+    - state, verified $/mo, lever, target, change (old → new), change verdict, days measured after;
+    - window: full 14-day, settles ~date, awaiting settle, short window (pre-V153) or not measurable;
+    - attribution;
+    - flags: volume-confounded, cheaper but slower, performance unjudged, co-attributed $0.
+  - **Attribution classes** come from the new `mart_sql.ledger_attribution`; first match wins:
+    1. Experiment (verified by hand).
+    2. Booked in OVERWATCH.
+    3. Executed by OVERWATCH: an adopted row, an alert closed loop, a matching REMEDIATION_LOG ALTER, or an auto
+       row that superseded a twin.
+    4. Recommended by OVERWATCH, executed elsewhere: an idle alert in the 30 days before.
+    5. Detected elsewhere.
+
+    The $ split of the active run-rate is read from uncapped SQL window totals (`proof.evidence_split`), never
+    summed in pandas. The ROI multiple is unchanged (it still counts detected-elsewhere savings); the split is
+    disclosed beside it. The read joins the alerts cache domain on purpose, and stays separate from
+    `savings_ledger`, so the verdict gate does not re-cold on acks.
+  - **Carried realization:** realized vs OVERWATCH's own up-front estimate, carried onto the auto-measured row.
+    The estimate is the first positive of the row's own, the superseded twin's, the remediation's, or the idle
+    alert's $/mo. A REJECTED row with an estimate counts as 0 realized; LBA-1 co-attributed $0 rows are excluded.
+    It is labelled separately and never overwrites the Realization rate.
+  - `savings_ledger()` gains additive columns: SOURCE_CHANGE_ID, TARGET_OBJECT, the linked change's warehouse,
+    setting, old/new value, seen-at, verdict, tracking-until, after-queries and changed-by, and WINDOW_CLOSED.
+    Every existing alias keeps its name and position.
+  - **Pipeline** (was Scenarios):
+    - **Addressable $/mo** from the Cost ▸ Optimization & Savings idle-timer rollup: the same helpers
+      (`savings_rollup.idle_opportunities` / `resize_opportunities`) and the same mart read, so the cache is
+      shared. Right-sizing is opt-in.
+    - **Queued work $/mo:** open actions normalised to monthly by `decision.monthly_equivalent`. ANNUAL ÷ 12;
+      one-time and unspecified estimates are counted and reported but kept out of the run-rate.
+    - Addressable ∪ queued is de-duplicated by entity (`decision.pipeline_frame`).
+    - Projection sliders default to MEASURED values: adoption = the acted-on rate; realization = the realization
+      rate, else the carried realization; the 0.6 confidence floor is policy. Each slider names its source, and
+      "Reset to measured" restores them.
+    - The projection runs in a fragment, so a slider move costs 0 reads. It used to rerun a live-tier queue read.
+    - Verified savings never enter the projection.
+- **Navigation.** The page label is Proof; the module files and the `decision_section` key are unchanged.
+  - `navigate.LEGACY_TARGETS` remaps every old page and section name:
+    - Decision Studio ▸ Scorecard / ROI / Experiments / Products → Proof ▸ Proof;
+    - Scenarios → Proof ▸ Pipeline;
+    - Portfolio → Operations ▸ Optimize;
+    - SLOs → Operations ▸ Pipeline SLA;
+    - Cost Truth → Cost Intelligence ▸ Spend & Attribution;
+    - Control Room ▸ Decision Studio → Operations ▸ Optimize.
+  - The remap covers saved default views, `?page=decision-studio[&section=…]` deep links (falling back to Proof
+    when the target page is off-profile) and in-app `request_navigation` calls (remapped before the profile
+    clamp).
+  - EXECUTIVE gains Proof (Brief, Overview, Cost Intelligence, Proof, Alerts). Proof sits in Analyze, where
+    Decision Studio was.
+  - Every cross-page link on Proof is gated on the viewer's profile (new `state.can_open`). This fixes the READER
+    dead link to Alerts ▸ Rules.
+  - The breadcrumb skips a section equal to the page title (no "Proof ▸ Proof").
+  - The Brief gains "Open Proof →".
+- **Retired or hidden.**
+  - **SLO editor and cockpit: retired.** SLO_OBJECTIVES and SP_SLO_BREACH_SCAN are untouched. Any ACTIVE row
+    still alerts and badges the Entity 360 watchlist, and older event text still names Decision Studio → SLOs.
+  - **Experiments UI and the Action Center "Start optimization experiment" expander: retired.**
+    OPTIMIZATION_EXPERIMENTS and SP_VERIFY_EXPERIMENT stay; an EXPERIMENT ledger row still shows on Proof.
+  - **Products: hidden.** Its body is kept but unreached, which removes the page's live ACCESS_HISTORY scan from
+    the UI.
+  - **The Cost Truth tab: gone** (its ratio moved).
+- **Fixed: the auto-measured count.** `savings_ledger()` never projected SOURCE_CHANGE_ID, so the Realization
+  rate's "(N auto-measured, M verified by hand)" always read 0 auto-measured in production. The column is now
+  projected, and `ledger_totals` also counts SOURCE = 'auto'.
+- **Telemetry and APP_USAGE page label.** The page label changes from "Decision Studio" to "Proof". APP_USAGE,
+  APP_QUERY_TELEMETRY and the stashed section counts split at this release, so Admin usage and performance panels
+  show both rows through the transition. No SQL filters on the old label.
+- **First-paint cost (statements when cold):**
+  - Operations (Queries default): unchanged.
+  - Optimize: 5 (shell 2 cached + queue + tracked + watchlist), vs the Portfolio's 8.
+  - Pipeline SLA ▸ Tonight: +1 lazy TASK_HISTORY member, shared with Tasks ▸ SLA.
+  - Spend default: unchanged. Attribution toggle: 2 → 3.
+  - Proof ▸ Proof: 8 → 9 (+ `ledger_attribution`, app tables only).
+  - Proof ▸ Pipeline: 8 → 10 (+ the idle mart and SHOW WAREHOUSES, both shared); slider moves cost 0.
+
+  ACCOUNT_USAGE literal budgets are unchanged (operations 42, spend 12, optimize 5), and the new module's budget
+  is 0.
+- **Tests.** New `test_optimize_queue.py`, `test_builtin_objectives.py`, `test_spend_grain_coverage.py` and
+  `test_proof_evidence.py`, plus locks for:
+  - the legacy remap;
+  - EXECUTIVE access;
+  - Proof being read-only;
+  - the Pipeline fragment never calling `_proof_signals`.
+
+  Every Decision Studio lock is retargeted to the surface that inherited it or replaced by a gone/remapped lock,
+  never dropped.
+- **Owner-side.** App-only: `snow streamlit deploy --replace`. No migration, no runbox step.
+
+4-pin version bump 4.596.0 → 4.597.0 + CHANGELOG.
+
 ## 4.596.0 - Chronic sleep-polling alert: COST_SLEEP_POLLING (V160) (2026-09-27)
 
 One owner-applied migration (V160). v4.595's Cost > Spend panel names and prices SYSTEM$WAIT sleep polling, but
