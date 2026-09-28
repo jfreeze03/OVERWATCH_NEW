@@ -11,10 +11,12 @@ from app.config import (
     CURRENT_MONTH_WINDOW,
     CURRENT_YEAR_WINDOW,
     LEDGER_AUTOBOOKED_LEVERS,
+    LEDGER_REVERTIBLE_SETTINGS,
     LEDGER_TWIN_MATCH_DAYS,
     MAX_MART_WINDOW_DAYS,
     OVERWATCH_DB,
     SAVINGS_ACTIVE_MONTHS,
+    SAVINGS_MONTH_DAYS,
     THRESHOLDS,
     core_object,
     mart_object,
@@ -32,6 +34,7 @@ from app.data.common import (
     resolve_effective_window,
     scope_window_where,
 )
+from app.logic.sizing import SIZE_ORDER
 from app.logic.system_wait import SLEEP_EXCLUDED_TYPE_PREFIXES, SLEEP_SQL_PATTERN
 
 
@@ -951,6 +954,62 @@ def _ledger_twin_cte() -> str:
     return f"twin AS (\n    {_ledger_twin_select()}\n)"
 
 
+def _setting_cost_rank_sql(setting: str, value: str) -> str:
+    """Next-Fifty #31: the COST rank of a WAREHOUSE_CHANGE_REGISTRY value for its SETTING — higher is
+    costlier; NULL = unknown (never a revert: fail open). SIZE follows sizing.SIZE_ORDER (XSMALL..6XLARGE);
+    AUTO_SUSPEND NULL/<=0 = never suspends = costliest; MAX_CLUSTERS numeric; SCALING_POLICY ECONOMY<STANDARD.
+    TRY_TO_DOUBLE, never TRY_TO_NUMBER (tests/test_ledger_twins.py forbids it in savings_ledger)."""
+    sizes = " ".join(f"WHEN '{s}' THEN {i}" for i, s in enumerate(SIZE_ORDER, 1))
+    xx = SIZE_ORDER.index("2XLARGE") + 1
+    return (f"CASE {setting}"
+            f" WHEN 'SIZE' THEN CASE UPPER(REPLACE(TRIM(COALESCE({value}, '')), '-', '')) {sizes}"
+            f" WHEN 'XXLARGE' THEN {xx} END"
+            f" WHEN 'AUTO_SUSPEND' THEN IFF(COALESCE(TRY_TO_DOUBLE({value}), 0) <= 0, 1000000000000,"
+            f" TRY_TO_DOUBLE({value}))"
+            f" WHEN 'MAX_CLUSTERS' THEN TRY_TO_DOUBLE({value})"
+            f" WHEN 'SCALING_POLICY' THEN CASE UPPER(TRIM({value})) WHEN 'ECONOMY' THEN 1"
+            " WHEN 'STANDARD' THEN 2 END"
+            " END")
+
+
+def _ledger_revert_select() -> str:
+    """Next-Fifty #31: one row per BOOKED registry change (b) that a LATER change on the same warehouse
+    + setting (n) made costlier than b's NEW value — the first such n. REVERTED_AT = n.CHANGE_SEEN_AT
+    (TIMESTAMP_LTZ, the scan's clock); REVERT_KIND 'full' when n is at/above b's OLD value, else
+    'partial' (an unknown OLD reads 'partial'). Pure registry read: joined on l.SOURCE_CHANGE_ID =
+    rv.BOOKED_CHANGE_ID (<=1 row per change by the QUALIFY), so a manual row (SOURCE_CHANGE_ID NULL) is
+    never revert-checked. Compared against b's NEW value, not its OLD one: VERIFIED_USD was measured AT
+    b's new setting, so once the setting is costlier that measured figure no longer describes the
+    warehouse. A tightening (n cheaper) is not a revert; the autobook books it as its own change."""
+    reg = core_object("WAREHOUSE_CHANGE_REGISTRY")
+    settings = ", ".join(sql_literal(s) for s in LEDGER_REVERTIBLE_SETTINGS)
+    n_new = _setting_cost_rank_sql("n.SETTING", "n.NEW_VALUE")
+    return f"""SELECT b.CHANGE_ID AS BOOKED_CHANGE_ID, n.CHANGE_ID AS REVERT_CHANGE_ID,
+           n.CHANGE_SEEN_AT AS REVERTED_AT, n.OLD_VALUE AS REVERT_OLD_VALUE,
+           n.NEW_VALUE AS REVERT_NEW_VALUE,
+           IFF({n_new} >= {_setting_cost_rank_sql("b.SETTING", "b.OLD_VALUE")}, 'full', 'partial') AS REVERT_KIND
+    FROM {reg} b
+    JOIN {reg} n
+      ON n.WAREHOUSE_NAME = b.WAREHOUSE_NAME
+     AND n.SETTING = b.SETTING
+     AND n.CHANGE_SEEN_AT > b.CHANGE_SEEN_AT
+     AND {n_new} > {_setting_cost_rank_sql("b.SETTING", "b.NEW_VALUE")}
+    WHERE b.SETTING IN ({settings})
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY b.CHANGE_ID ORDER BY n.CHANGE_SEEN_AT, n.CHANGE_ID) = 1"""
+
+
+def _ledger_revert_cte() -> str:
+    return f"rv AS (\n    {_ledger_revert_select()}\n)"
+
+
+def _ledger_counts_predicate(since: str) -> str:
+    """THE one 'counts toward the verified run-rate' predicate (savings_summary_quarter QTD + active, and
+    ledger_attribution's active split): VERIFIED, not a superseded twin, verified on/after ``since``, not
+    reverted. The revert clause stays LAST so the pre-#31 prefix is a substring (test_proof_evidence)."""
+    return (f"l.STATE = 'VERIFIED' AND t.TWIN_ITEM_ID IS NULL AND l.VERIFIED_AT >= {since} "
+            "AND rv.REVERTED_AT IS NULL")
+
+
 def savings_ledger(limit: int | None = 500) -> str:
     """The savings ledger, newest first. `limit` caps rows for a browsable DETAIL table;
     pass limit=None for the ECONOMICS reads (all-time verified $, realization, QTD, run-rate,
@@ -985,7 +1044,16 @@ def savings_ledger(limit: int | None = 500) -> str:
         descriptor, verdict and settle clock (a pending row settles the morning after TRACKING_UNTIL).
         CHANGE_SEEN_AT is TIMESTAMP_LTZ; CHANGE_BY is best-effort (nearly always NULL — never classify on it).
       WINDOW_CLOSED — the 14-day after-window has closed on the app clock (NULL on a manual row).
-    Same LEFT JOIN, so zero extra statements."""
+    Same LEFT JOIN, so zero extra statements.
+
+    Revert projections (Next-Fifty #31; ADDITIVE only, appended after WINDOW_CLOSED) from the registry-only
+    rv CTE (_ledger_revert_select), LEFT JOINed 1:1 on SOURCE_CHANGE_ID — still one statement:
+      REVERTED_AT — TIMESTAMP_LTZ, when the daily scan saw a later change on the same warehouse + setting
+        make it costlier than the booked NEW value (up to ~24h after the ALTER); NULL = not reverted.
+      REVERT_CHANGE_ID / REVERT_OLD_VALUE / REVERT_NEW_VALUE — the undoing registry change.
+      REVERT_KIND — 'full' (back to, or past, the booked OLD value) or 'partial'.
+    A manual / app-booked row (SOURCE_CHANGE_ID NULL) is never revert-checked, so these are NULL on it.
+    actions.split_reverted drops a reverted row from the run-rate rollups; realization keeps it."""
     limit_clause = f"\nLIMIT {int(limit)}" if limit is not None else ""
     # mirrors the V153 SP_LEDGER_AUTOBOOK settle gate on the app clock (account_today_sql, the TZ standard)
     _closed = ("r.VERDICT IN ('IMPROVED', 'NEUTRAL', 'REGRESSED', 'NO_BASELINE', 'INSUFFICIENT_AFTER')\n"
@@ -994,7 +1062,8 @@ def savings_ledger(limit: int | None = 500) -> str:
     _usd = "(COALESCE(r.BASELINE_CREDITS_PER_DAY, 0) - COALESCE(r.AFTER_CREDITS_PER_DAY, 0)) * px.RATE * 30"
     _vol = "(r.AFTER_QUERIES / NULLIF(r.AFTER_DAYS, 0)) / NULLIF(r.BASELINE_QUERIES / 14.0, 0)"
     return f"""
-WITH {_ledger_twin_cte()}
+WITH {_ledger_twin_cte()},
+{_ledger_revert_cte()}
 SELECT l.ITEM_ID, l.ACTION_ID, l.CREATED_AT, l.DESCRIPTION, l.STATE, l.ESTIMATED_USD, l.VERIFIED_USD,
        l.VERIFIED_AT, l.VERIFIED_BY, l.PROOF_SQL, l.NOTES,
        -- The dominant autobook path leaves FINDING_TYPE NULL and encodes the lever only in the
@@ -1025,10 +1094,12 @@ SELECT l.ITEM_ID, l.ACTION_ID, l.CREATED_AT, l.DESCRIPTION, l.STATE, l.ESTIMATED
        r.OLD_VALUE AS CHANGE_OLD_VALUE, r.NEW_VALUE AS CHANGE_NEW_VALUE,
        r.CHANGE_SEEN_AT, r.VERDICT AS CHANGE_VERDICT, r.TRACKING_UNTIL, r.AFTER_QUERIES,
        r.CHANGED_BY AS CHANGE_BY,
-       IFF(r.CHANGE_ID IS NULL, NULL, {account_today_sql()} > r.TRACKING_UNTIL) AS WINDOW_CLOSED
+       IFF(r.CHANGE_ID IS NULL, NULL, {account_today_sql()} > r.TRACKING_UNTIL) AS WINDOW_CLOSED,
+       rv.REVERTED_AT, rv.REVERT_CHANGE_ID, rv.REVERT_OLD_VALUE, rv.REVERT_NEW_VALUE, rv.REVERT_KIND
 FROM {core_object("SAVINGS_LEDGER")} l
 LEFT JOIN {core_object("WAREHOUSE_CHANGE_REGISTRY")} r ON l.SOURCE_CHANGE_ID = r.CHANGE_ID
 LEFT JOIN twin t ON t.TWIN_ITEM_ID = l.ITEM_ID
+LEFT JOIN rv ON rv.BOOKED_CHANGE_ID = l.SOURCE_CHANGE_ID
 CROSS JOIN (SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CREDIT_PRICE_USD', VALUE, NULL))), 3.68) AS RATE
             FROM {core_object("SETTINGS")}) px
 ORDER BY l.CREATED_AT DESC{limit_clause}
@@ -1067,8 +1138,10 @@ def ledger_attribution() -> str:
     REC_EST_USD (the idle alert's recommended $/mo).
 
     Window totals — anchored on active-verified rows exactly as savings_summary_quarter's ROI numerator
-    (VERIFIED, twin-excluded, VERIFIED_AT within SAVINGS_ACTIVE_MONTHS of account-today), computed by
-    window functions BEFORE any row cap, so they are whole-ledger even when run() truncates the frame:
+    (VERIFIED, twin-excluded, VERIFIED_AT within SAVINGS_ACTIVE_MONTHS of account-today, and not reverted
+    (Next-Fifty #31) — the one shared _ledger_counts_predicate, so ACTIVE_USD equals
+    VERIFIED_ACTIVE_MONTHLY_USD by construction), computed by window functions BEFORE any row cap, so
+    they are whole-ledger even when run() truncates the frame:
       ATTR_ACTIVE_USD / VERDICT_ACTIVE_USD — the row's attribution / linked-change verdict partition.
       ACTIVE_USD, ACTIVE_ITEMS and the per-class <CLASS>_ACTIVE_USD / REGRESSED_ / NEUTRAL_ACTIVE_USD —
         the same split pivoted onto EVERY row, so any one row carries the complete split even if a whole
@@ -1085,7 +1158,7 @@ def ledger_attribution() -> str:
     # the ALTER keyword each registry SETTING is written with (remediation._ident uppercases all ALTER text)
     _token = ("CASE r.SETTING WHEN 'SIZE' THEN 'WAREHOUSE_SIZE' WHEN 'MAX_CLUSTERS' THEN 'MAX_CLUSTER_COUNT' "
               "WHEN 'MIN_CLUSTERS' THEN 'MIN_CLUSTER_COUNT' ELSE UPPER(r.SETTING) END")
-    _active = f"l.STATE = 'VERIFIED' AND t.TWIN_ITEM_ID IS NULL AND l.VERIFIED_AT >= {_a0}"
+    _active = _ledger_counts_predicate(_a0)
 
     def _class_total(cls: str) -> str:
         return f"ROUND(SUM(IFF(a.ATTRIBUTION = {sql_literal(cls)}, a.ACTIVE_ROW_USD, 0)) OVER (), 2)"
@@ -1097,6 +1170,7 @@ def ledger_attribution() -> str:
                            ("EXPERIMENT", "EXPERIMENT")))
     return f"""
 WITH {_ledger_twin_cte()},
+{_ledger_revert_cte()},
 twin_est AS (
     SELECT t.TWIN_AUTO_ITEM_ID AS ITEM_ID, MAX(m.ESTIMATED_USD) AS TWIN_ESTIMATED_USD
     FROM twin t
@@ -1150,6 +1224,7 @@ a AS (
     FROM {core_object("SAVINGS_LEDGER")} l
     LEFT JOIN {core_object("WAREHOUSE_CHANGE_REGISTRY")} r ON l.SOURCE_CHANGE_ID = r.CHANGE_ID
     LEFT JOIN twin t ON t.TWIN_ITEM_ID = l.ITEM_ID
+    LEFT JOIN rv ON rv.BOOKED_CHANGE_ID = l.SOURCE_CHANGE_ID
     LEFT JOIN twin_est te ON te.ITEM_ID = l.ITEM_ID
     LEFT JOIN rem ON rem.CHANGE_ID = l.SOURCE_CHANGE_ID
     LEFT JOIN rec ON rec.CHANGE_ID = l.SOURCE_CHANGE_ID
@@ -1180,13 +1255,16 @@ def verified_wins(company: str = "ALL") -> str:
     WAREHOUSE_CHANGE_REGISTRY on SOURCE_CHANGE_ID (SETTING -> fix type,
     WAREHOUSE_NAME -> target). VERIFIED-only, realized dollars only (never ESTIMATED).
     Scoped to the page's company by COMPANY_FOR_WAREHOUSE on the recovered target, so
-    evidence never leaks across a company boundary; company='ALL' is account-wide."""
+    evidence never leaks across a company boundary; company='ALL' is account-wide.
+    Next-Fifty #31: a reverted fix is not a proven fix — a booked change the daily scan later saw
+    undone (_ledger_revert_select) is not offered for transfer."""
     from app import companies
     _target = "COALESCE(NULLIF(TRIM(l.TARGET_OBJECT), ''), r.WAREHOUSE_NAME)"
     _scope = ("" if str(company or "ALL").upper() == "ALL"
               else f"\n  AND {companies.company_case_sql(_target)} = {sql_literal(str(company))}")
     return f"""
-WITH {_ledger_twin_cte()}
+WITH {_ledger_twin_cte()},
+{_ledger_revert_cte()}
 SELECT
     l.ITEM_ID,
     l.CREATED_AT,
@@ -1199,9 +1277,11 @@ SELECT
 FROM {core_object("SAVINGS_LEDGER")} l
 LEFT JOIN {core_object("WAREHOUSE_CHANGE_REGISTRY")} r ON l.SOURCE_CHANGE_ID = r.CHANGE_ID
 LEFT JOIN twin t ON t.TWIN_ITEM_ID = l.ITEM_ID
+LEFT JOIN rv ON rv.BOOKED_CHANGE_ID = l.SOURCE_CHANGE_ID
 WHERE l.STATE = 'VERIFIED'
   AND COALESCE(l.VERIFIED_USD, 0) > 0
-  AND t.TWIN_ITEM_ID IS NULL{_scope}
+  AND t.TWIN_ITEM_ID IS NULL
+  AND rv.REVERTED_AT IS NULL{_scope}
 ORDER BY l.VERIFIED_USD DESC
 LIMIT 200
 """
@@ -1917,37 +1997,78 @@ def savings_summary_quarter() -> str:
     last SAVINGS_ACTIVE_MONTHS months. Each VERIFIED_USD is a monthly run-rate that keeps saving
     after the quarter it was verified in, so the old quarter-scoped numerator fell to 0x on the
     first day of every quarter while the trailing-30d run cost did not. VERIFIED_QTD_USD stays as
-    the separate "verified this quarter" KPI. Reverts are not detected yet, so the 12-month cap is
-    the conservative stand-in. (The name is kept: the canary, Brief, Proof and tests reference it.)
+    the separate "verified this quarter" KPI. (The name is kept: the canary, Brief, Proof and tests
+    reference it.)
+
+    Next-Fifty #31: a booked warehouse-setting change the daily scan later saw undone (the rv CTE,
+    _ledger_revert_select: a later change on the same warehouse + setting made it costlier than the
+    booked value) leaves VERIFIED_QTD_USD / VERIFIED_ITEMS / VERIFIED_ACTIVE_* (the one shared
+    _ledger_counts_predicate, also ledger_attribution's active split) and ESTIMATED_OPEN_USD the day the
+    scan sees it. REVERTED_ACTIVE_ITEMS / REVERTED_ACTIVE_USD disclose what left the active window's
+    run-rate. Rows booked in the app carry no SOURCE_CHANGE_ID, are never revert-checked, and still stop
+    counting after SAVINGS_ACTIVE_MONTHS.
+
+    Saved to date (Next-Fifty #31, Proof only — never the ROI numerator, the verdict or the Brief;
+    Brief and Optimize read this same statement and ignore these columns). Over live (VERIFIED,
+    non-twin) rows, reverted ones included up to their revert:
+      SAVED_TO_DATE_USD — sum of VERIFIED_USD / SAVINGS_MONTH_DAYS x whole days in effect: from the day
+        the scan saw the linked change (its measured window is the proof; app-booked rows from
+        VERIFIED_AT), to the earliest of account-today, VERIFIED_AT + SAVINGS_ACTIVE_MONTHS months (when
+        the row leaves the run-rate) and the day the scan saw it undone. LEAST returns NULL if ANY
+        argument is NULL, so the revert day is COALESCEd to today, and the day count to 0.
+      SAVED_MEASURED_USD — the part inside the measured after-window: LEAST(AFTER_DAYS, days from the
+        change to VERIFIED_AT) — ~14 for a V153 settle, ~3 for a pre-V153 one, 0 for an app-booked row.
+        The rest (total - measured, computed by the reader) is carried forward at the verified rate.
+      SAVED_BEFORE_REVERT_USD — the part accrued by rows later undone (real dollars saved before it).
+      SAVED_SINCE_DATE — the earliest start among rows with a positive VERIFIED_USD.
+    Priced at the rate each row settled on (VERIFIED_USD is stored dollars), never re-priced.
 
     Both windows anchor on the ACCOUNT clock (account_today_sql), matching Proof's (formerly
     Decision Studio's) account-time quarter — session-tz DATE_TRUNC('quarter', CURRENT_DATE()) drifted a day at a
-    quarter change and disagreed with that surface (round-2 bug hunt).
+    quarter change and disagreed with that surface (round-2 bug hunt). The LTZ -> NTZ casts use the
+    session TZ, the account's America/Chicago (the twin rule's reliance).
 
     Next-Fifty #5: every aggregate excludes a manual row the autobook's settled row supersedes (the
     same change booked twice); SUPERSEDED_ITEMS is the UNCAPPED count of such twins still awaiting the
-    operator's cleanup (Cost ▸ Optimize ▸ Savings ledger)."""
+    operator's cleanup (Cost ▸ Optimize ▸ Savings ledger). Both new joins are 1:1 (rv by its QUALIFY, the
+    registry by its CHANGE_ID key), so nothing fans out; still ONE statement, no extra read."""
     _today = account_today_sql()
     _q0 = f"DATE_TRUNC('quarter', {_today})"
     _a0 = f"DATEADD('month', -{int(SAVINGS_ACTIVE_MONTHS)}, {_today})"
+    # accrual eligibility: a reverted row still accrues up to its revert day
+    _live = "l.STATE = 'VERIFIED' AND t.TWIN_ITEM_ID IS NULL"
+    _rev_active = f"{_live} AND l.VERIFIED_AT >= {_a0} AND rv.REVERTED_AT IS NOT NULL"
+    # never ' AS ' inside an aggregate expression (tests/test_ledger_twins.py splits on it): '::' casts only
+    _from = "COALESCE(r.CHANGE_SEEN_AT::TIMESTAMP_NTZ, l.VERIFIED_AT)::DATE"
+    _to = (f"LEAST({_today}, DATEADD('month', {int(SAVINGS_ACTIVE_MONTHS)}, l.VERIFIED_AT::DATE), "
+           f"COALESCE(rv.REVERTED_AT::TIMESTAMP_NTZ::DATE, {_today}))")       # COALESCE: LEAST(NULL) is NULL
+    _days = f"COALESCE(GREATEST(0, DATEDIFF('day', {_from}, {_to})), 0)"
+    _per_day = f"COALESCE(l.VERIFIED_USD, 0) / {float(SAVINGS_MONTH_DAYS)}"
+    _mdays = ("COALESCE(IFF(r.CHANGE_ID IS NULL, 0, GREATEST(0, LEAST(COALESCE(r.AFTER_DAYS, 0), "
+              f"DATEDIFF('day', {_from}, l.VERIFIED_AT::DATE)))), 0)")
     return f"""
-WITH {_ledger_twin_cte()}
+WITH {_ledger_twin_cte()},
+{_ledger_revert_cte()}
 SELECT
-    ROUND(SUM(IFF(l.STATE = 'VERIFIED' AND t.TWIN_ITEM_ID IS NULL
-                  AND l.VERIFIED_AT >= {_q0},
+    ROUND(SUM(IFF({_ledger_counts_predicate(_q0)},
                   COALESCE(l.VERIFIED_USD, 0), 0)), 2) AS VERIFIED_QTD_USD,
-    COUNT_IF(l.STATE = 'VERIFIED' AND t.TWIN_ITEM_ID IS NULL
-             AND l.VERIFIED_AT >= {_q0}) AS VERIFIED_ITEMS,
-    ROUND(SUM(IFF(l.STATE = 'VERIFIED' AND t.TWIN_ITEM_ID IS NULL
-                  AND l.VERIFIED_AT >= {_a0},
+    COUNT_IF({_ledger_counts_predicate(_q0)}) AS VERIFIED_ITEMS,
+    ROUND(SUM(IFF({_ledger_counts_predicate(_a0)},
                   COALESCE(l.VERIFIED_USD, 0), 0)), 2) AS VERIFIED_ACTIVE_MONTHLY_USD,
-    COUNT_IF(l.STATE = 'VERIFIED' AND t.TWIN_ITEM_ID IS NULL
-             AND l.VERIFIED_AT >= {_a0}) AS VERIFIED_ACTIVE_ITEMS,
-    ROUND(SUM(IFF(l.STATE = 'ESTIMATED' AND t.TWIN_ITEM_ID IS NULL,
+    COUNT_IF({_ledger_counts_predicate(_a0)}) AS VERIFIED_ACTIVE_ITEMS,
+    ROUND(SUM(IFF(l.STATE = 'ESTIMATED' AND t.TWIN_ITEM_ID IS NULL AND rv.REVERTED_AT IS NULL,
                   COALESCE(l.ESTIMATED_USD, 0), 0)), 2) AS ESTIMATED_OPEN_USD,
-    COUNT_IF(t.TWIN_ITEM_ID IS NOT NULL AND l.STATE <> 'REJECTED') AS SUPERSEDED_ITEMS
+    COUNT_IF(t.TWIN_ITEM_ID IS NOT NULL AND l.STATE <> 'REJECTED') AS SUPERSEDED_ITEMS,
+    COUNT_IF({_rev_active}) AS REVERTED_ACTIVE_ITEMS,
+    ROUND(SUM(IFF({_rev_active}, COALESCE(l.VERIFIED_USD, 0), 0)), 2) AS REVERTED_ACTIVE_USD,
+    ROUND(SUM(IFF({_live}, {_per_day} * {_days}, 0)), 2) AS SAVED_TO_DATE_USD,
+    ROUND(SUM(IFF({_live}, {_per_day} * LEAST({_days}, {_mdays}), 0)), 2) AS SAVED_MEASURED_USD,
+    ROUND(SUM(IFF({_live} AND rv.REVERTED_AT IS NOT NULL, {_per_day} * {_days}, 0)), 2) AS SAVED_BEFORE_REVERT_USD,
+    MIN(IFF({_live} AND COALESCE(l.VERIFIED_USD, 0) > 0, {_from}, NULL)) AS SAVED_SINCE_DATE
 FROM {core_object("SAVINGS_LEDGER")} l
 LEFT JOIN twin t ON t.TWIN_ITEM_ID = l.ITEM_ID
+LEFT JOIN rv ON rv.BOOKED_CHANGE_ID = l.SOURCE_CHANGE_ID
+LEFT JOIN {core_object("WAREHOUSE_CHANGE_REGISTRY")} r ON r.CHANGE_ID = l.SOURCE_CHANGE_ID
 """
 
 
@@ -2928,7 +3049,8 @@ LIMIT 100
 def acceptance_funnel(days: int = 90) -> str:
     """Generated -> executed -> verified, from audit rows (honest subset of
     Codex r5 #4 / r6 #12 — no impression tracking, Streamlit cannot measure
-    'viewed' truthfully)."""
+    'viewed' truthfully). It counts events; a later revert does not rewrite history (Next-Fifty #31),
+    so a verified item the change scan later saw undone still counts here."""
     days = bounded_days(days, 365)
     return f"""
 SELECT

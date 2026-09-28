@@ -16,7 +16,7 @@ so an empty ledger doesn't read as "0% precise".
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 
@@ -24,9 +24,10 @@ from app.logic.actions import (
     LEDGER_ESTIMATED,
     LEDGER_REJECTED,
     LEDGER_VERIFIED,
+    split_reverted,
     split_superseded,
 )
-from app.logic.formulas import ACCOUNT_TIMEZONE, account_today, safe_float
+from app.logic.formulas import ACCOUNT_TIMEZONE, account_today, format_usd, safe_float
 
 
 def account_precision(rule_precision_df: pd.DataFrame | None) -> dict:
@@ -288,8 +289,23 @@ def _window_state(row: pd.Series, auto: bool, today: date) -> str | None:
     return "short window (pre-V153)"
 
 
+def _undone_value(value: object, setting: object) -> str:
+    """A registry value as shown in a revert: NULL AUTO_SUSPEND is SHOW's 'never' (V109 stores
+    TRY_TO_NUMBER(auto_suspend)); any other blank is '?'. Text only — the shaped harness feeds floats."""
+    text = _text(value)
+    if not text and _text(setting).upper() == "AUTO_SUSPEND":
+        return "never"
+    return text or "?"
+
+
 def _flags(row: pd.Series) -> str | None:
     out: list[str] = []
+    # Next-Fifty #31: the revert reads FIRST — the saving no longer counts toward the run-rate
+    _rv_at = row.get("_REVERTED_AT")
+    if _rv_at is not None and not pd.isna(_rv_at):
+        _to = _undone_value(row.get("REVERT_NEW_VALUE"), row.get("CHANGE_SETTING"))
+        _kind = "partly reverted" if _text(row.get("REVERT_KIND")).lower() == "partial" else "reverted"
+        out.append(f"{_kind} {_short_date(pd.Timestamp(_rv_at).date())} → {_to}")
     if _truthy(row.get("VOLUME_CONFOUNDED")):
         out.append("volume-confounded")
     verdict = _text(row.get("CHANGE_VERDICT")).upper()
@@ -314,8 +330,11 @@ def evidence_rows(ledger_df: pd.DataFrame | None, attribution_df: pd.DataFrame |
         (still measuring), "short window (pre-V153)" (settled on ~3 days, never rewritten) or
         "not measurable" (closed with no metered credits after the change); NULL on app-booked rows,
       ATTRIBUTION — the ledger_attribution class as a sentence-case label (NULL when that read failed),
-      FLAGS — "volume-confounded", "cheaper but slower" (REGRESSED yet saved), "performance unjudged"
-        (NO_BASELINE / INSUFFICIENT_AFTER), "co-attributed $0" (LBA-1), joined " · "; NULL when none,
+      FLAGS — first "reverted <Mon d> → <value>" / "partly reverted <Mon d> → <value>" (Next-Fifty #31:
+        the daily scan saw the booked change undone on that day, so the saving left the run-rate; the
+        row is KEPT here, flagged), then "volume-confounded", "cheaper but slower" (REGRESSED yet saved),
+        "performance unjudged" (NO_BASELINE / INSUFFICIENT_AFTER), "co-attributed $0" (LBA-1), joined
+        " · "; NULL when none,
       VERIFIED_AT — tz-naive account time.
     Row-level display only: headline totals come from the SQL window columns (evidence_split)."""
     if ledger_df is None or ledger_df.empty or "STATE" not in ledger_df.columns:
@@ -326,6 +345,7 @@ def evidence_rows(ledger_df: pd.DataFrame | None, attribution_df: pd.DataFrame |
         return pd.DataFrame(columns=list(EVIDENCE_COLUMNS))
     view = live.reset_index(drop=True).copy()
     view["_TRACKING_UNTIL"] = _naive_ts(_col(view, "TRACKING_UNTIL")).to_numpy()
+    view["_REVERTED_AT"] = _naive_ts(_col(view, "REVERTED_AT")).to_numpy()
     auto = _is_auto(view)
     target = _col(view, "TARGET_OBJECT").map(_text)
     target = target.where(target.ne(""), _col(view, "CHANGE_WAREHOUSE").map(_text))
@@ -351,6 +371,53 @@ def evidence_rows(ledger_df: pd.DataFrame | None, attribution_df: pd.DataFrame |
     })
     return out.sort_values("VERIFIED_USD", ascending=False, na_position="last",
                            kind="stable").reset_index(drop=True)
+
+
+REVERTED_COLUMNS: tuple[str, ...] = ("TARGET", "LEVER", "CHANGE", "REVERTED_AT", "REVERTED_TO", "REVERT",
+                                     "STATE", "VERIFIED_USD")
+
+
+def _change_text(old: pd.Series, new: pd.Series, setting: pd.Series) -> list[str | None]:
+    """'old → new' per row (NULL AUTO_SUSPEND reads 'never', other blanks '?'); None when both are blank."""
+    out: list[str | None] = []
+    for o, n, s in zip(old, new, setting, strict=True):
+        if not _text(o) and not _text(n):
+            out.append(None)
+        else:
+            out.append(f"{_undone_value(o, s)} → {_undone_value(n, s)}")
+    return out
+
+
+def reverted_rows(ledger_df: pd.DataFrame | None) -> pd.DataFrame:
+    """Next-Fifty #31: the live (non-superseded) ledger rows whose booked change the daily scan later saw
+    undone — the Proof 'Reverted savings' list. CHANGE = booked 'old → new'; REVERTED_TO = the undoing
+    change 'old → new'; REVERT = 'Full' / 'Partial'; VERIFIED_USD = the $/mo that left the run-rate (NULL
+    -> '—'); REVERTED_AT tz-naive account time. Newest revert first. Display only — never a total."""
+    if ledger_df is None or ledger_df.empty or "STATE" not in ledger_df.columns:
+        return pd.DataFrame(columns=list(REVERTED_COLUMNS))
+    live, _ = split_superseded(ledger_df)
+    _, reverted = split_reverted(live)
+    if reverted.empty:
+        return pd.DataFrame(columns=list(REVERTED_COLUMNS))
+    view = reverted.reset_index(drop=True)
+    setting = _col(view, "CHANGE_SETTING")
+    target = _col(view, "TARGET_OBJECT").map(_text)
+    target = target.where(target.ne(""), _col(view, "CHANGE_WAREHOUSE").map(_text))
+    lever = _col(view, "FINDING_TYPE").map(_text)
+    kind = _col(view, "REVERT_KIND").map(_text).str.lower()
+    out = pd.DataFrame({
+        "TARGET": target.where(target.ne(""), None),
+        "LEVER": lever.where(lever.ne(""), None),
+        "CHANGE": _change_text(_col(view, "CHANGE_OLD_VALUE"), _col(view, "CHANGE_NEW_VALUE"), setting),
+        "REVERTED_AT": _naive_ts(_col(view, "REVERTED_AT")).to_numpy(),
+        "REVERTED_TO": _change_text(_col(view, "REVERT_OLD_VALUE"), _col(view, "REVERT_NEW_VALUE"), setting),
+        "REVERT": kind.map({"full": "Full", "partial": "Partial"}),
+        "STATE": _col(view, "STATE").map(_text).str.upper(),
+        "VERIFIED_USD": pd.to_numeric(_col(view, "VERIFIED_USD"), errors="coerce"),
+    })
+    out["REVERT"] = out["REVERT"].where(out["REVERT"].notna(), None)
+    return out.sort_values("REVERTED_AT", ascending=False, na_position="last",
+                           kind="stable").reset_index(drop=True)[list(REVERTED_COLUMNS)]
 
 
 # evidence_split key -> mart_sql.ledger_attribution window column (pivoted onto every row).
@@ -386,6 +453,76 @@ def evidence_split(attribution_df: pd.DataFrame | None) -> dict:
     return out
 
 
+SAVED_TO_DATE_COLUMNS: tuple[str, ...] = ("SAVED_TO_DATE_USD", "SAVED_MEASURED_USD",
+                                          "SAVED_BEFORE_REVERT_USD", "SAVED_SINCE_DATE")
+
+
+def _as_day(value: object) -> date | None:
+    """A SQL DATE cell as a date: a date, datetime, Timestamp or ISO string. NULL / NaT, a float (the
+    shaped harness) and anything unparseable -> None. NaT is a datetime subclass, so NULL is checked first."""
+    if value is None or isinstance(value, bool | int | float):
+        return None
+    try:
+        if bool(pd.isna(value)):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, datetime):              # pandas Timestamp is a datetime subclass
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return pd.Timestamp(value.strip()).date()
+    except (TypeError, ValueError):
+        return None
+
+
+def saved_to_date(summary_df: pd.DataFrame | None) -> dict | None:
+    """Proof 'Saved to date' from mart_sql.savings_summary_quarter's row 0 — SQL aggregates over the WHOLE
+    ledger, never a sum of the row-capped ledger frame. None when the frame is missing/empty/older-shaped
+    (any SAVED_TO_DATE_COLUMNS absent). Else {total_usd, measured_usd (<= total), carried_usd = total -
+    measured (>= 0), before_revert_usd, since: date | None}. Accrued dollars (each verified item's monthly
+    saving / 30 x the whole days it has been in place), not a run-rate; it never feeds roi_multiple or
+    proof_verdict."""
+    if summary_df is None or summary_df.empty:
+        return None
+    if not set(SAVED_TO_DATE_COLUMNS).issubset(summary_df.columns):
+        return None
+    row = summary_df.iloc[0]
+    total = round(safe_float(row.get("SAVED_TO_DATE_USD")), 2)
+    # ROUND(SUM(..), 2) per column can leave measured a cent above the total: clamp, never a negative carry
+    measured = round(min(safe_float(row.get("SAVED_MEASURED_USD")), total), 2)
+    return {
+        "total_usd": total,
+        "measured_usd": measured,
+        "carried_usd": round(max(0.0, total - measured), 2),
+        "before_revert_usd": round(safe_float(row.get("SAVED_BEFORE_REVERT_USD")), 2),
+        "since": _as_day(row.get("SAVED_SINCE_DATE")),
+    }
+
+
+def saved_to_date_card(saved: dict | None) -> tuple[str, str]:
+    """(value, delta) for the Proof 'Saved to date' card from saved_to_date(). DOLLARS, never '/mo' (the D4
+    lesson: a cumulative figure must not read as a run-rate), and it always discloses the measured vs
+    carried-forward split. None (the whole-ledger summary read failed) -> '—' and says so: there is no
+    fallback to the row-capped ledger frame."""
+    if saved is None:
+        return "—", "whole-ledger summary unavailable"
+    total = safe_float(saved.get("total_usd"))
+    if total <= 0:
+        return format_usd(total), "nothing verified yet"
+    since = saved.get("since")
+    parts = [f"since {_short_date(since)}, {since.year}"] if isinstance(since, date) else []
+    parts += [f"{format_usd(safe_float(saved.get('measured_usd')))} measured",
+              f"{format_usd(safe_float(saved.get('carried_usd')))} carried forward at the verified rate"]
+    before = safe_float(saved.get("before_revert_usd"))
+    if before > 0:
+        parts.append(f"incl. {format_usd(before)} saved before a change was undone")
+    return format_usd(total), " · ".join(parts)
+
+
 def carried_realization(rows: pd.DataFrame | None) -> dict | None:
     """Realization vs OVERWATCH's OWN up-front estimate, carried onto the auto-measured row (v4.597,
     open question 18). A SEPARATE, separately labelled figure — it never overwrites
@@ -401,7 +538,8 @@ def carried_realization(rows: pd.DataFrame | None) -> dict | None:
     row with an estimate counts as 0 realized — a real miss, which realization_pct silently drops.
     Returns None when nothing is eligible, else carried_pct, realized_usd, estimated_usd, items,
     rejected_items, carried_items (estimate came from a twin / remediation / alert, not the row) and
-    by_source counts."""
+    by_source counts. Keeps reverted rows — accuracy, not persistence (Next-Fifty #31): the measurement
+    was real, and dropping undone items would bias the ratio toward the changes that survived."""
     if rows is None or rows.empty or "STATE" not in rows.columns:
         return None
     live, _ = split_superseded(rows)
@@ -440,7 +578,8 @@ def carried_realization(rows: pd.DataFrame | None) -> dict | None:
 
 def settle_schedule(ledger_df: pd.DataFrame | None, today: date | None = None) -> dict:
     """When the change-scan rows still measuring will settle (v4.597, Proof ▸ Settling). Over LIVE
-    ESTIMATED auto rows (superseded twins dropped; auto = SOURCE_CHANGE_ID set or SOURCE 'auto'):
+    ESTIMATED auto rows (superseded twins and, Next-Fifty #31, reverted rows dropped; auto =
+    SOURCE_CHANGE_ID set or SOURCE 'auto'):
       pending — how many are still ESTIMATED,
       next    — the earliest settle day still ahead (TRACKING_UNTIL + 1; the first daily scan after the
                 14-day window settles the row), or None,
@@ -452,6 +591,9 @@ def settle_schedule(ledger_df: pd.DataFrame | None, today: date | None = None) -
         return out
     today = today or account_today()
     live, _ = split_superseded(ledger_df)
+    # Next-Fifty #31: a pending change the scan already saw undone is not "settling" toward the run-rate
+    # (the same rule as actions.ledger_totals' auto_settle_pending_count, so the Settling card agrees)
+    live, _ = split_reverted(live)
     if live.empty:
         return out
     view = live.reset_index(drop=True)

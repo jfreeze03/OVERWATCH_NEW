@@ -41,11 +41,17 @@ def test_twin_rule_shape():
     sqlglot.parse_one(sql, read="snowflake")
 
 
+# every savings_summary_quarter aggregate that carries the twin exclusion (Next-Fifty #31 added the six
+# revert / Saved-to-date aggregates, each over the same live rows)
+_TWIN_EXCLUDED = ("VERIFIED_QTD_USD", "VERIFIED_ITEMS", "VERIFIED_ACTIVE_MONTHLY_USD", "VERIFIED_ACTIVE_ITEMS",
+                  "ESTIMATED_OPEN_USD", "REVERTED_ACTIVE_ITEMS", "REVERTED_ACTIVE_USD", "SAVED_TO_DATE_USD",
+                  "SAVED_MEASURED_USD", "SAVED_BEFORE_REVERT_USD", "SAVED_SINCE_DATE")
+
+
 def test_summary_excludes_twins_from_every_aggregate():
     sql = mart_sql.savings_summary_quarter()
-    assert sql.count("t.TWIN_ITEM_ID IS NULL") == 5
-    for alias in ("VERIFIED_QTD_USD", "VERIFIED_ITEMS", "VERIFIED_ACTIVE_MONTHLY_USD",
-                  "VERIFIED_ACTIVE_ITEMS", "ESTIMATED_OPEN_USD"):
+    assert sql.count("t.TWIN_ITEM_ID IS NULL") == len(_TWIN_EXCLUDED) == 11
+    for alias in _TWIN_EXCLUDED:
         head = sql.split(f"AS {alias}", 1)[0]
         assert "t.TWIN_ITEM_ID IS NULL" in head.rsplit(" AS ", 1)[-1], alias
     assert "AS SUPERSEDED_ITEMS" in sql

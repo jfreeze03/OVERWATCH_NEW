@@ -49,7 +49,11 @@ def test_no_evidence_is_not_rendered_as_a_healthy_zero() -> None:
     assert "if not ledger.ok:\n        _PROOF_MEMO.update(rate=_k, sig=None)\n        return None" in signals
     proof_tab = studio.split("def _proof_tab(", 1)[1].split("\ndef ", 1)[0]
     assert 'if sig is None:\n        empty_state("needs_setup"' in proof_tab
-    assert '("n/a" if totals["verified_count"] else "—")' in proof_tab
+    # Next-Fifty #31: realization keeps reverted rows while verified_count drops them, so "anything
+    # verified" counts both (the "—" stays for an empty record; "nothing verified yet" never sits beside a
+    # real ratio)
+    assert '("n/a" if _ver_any else "—")' in proof_tab
+    assert '_ver_any = int(totals["verified_count"]) + int(totals.get("reverted_count") or 0)' in proof_tab
     # v4.365 (ds-hunt): the no-candidate state still reads "No evidence" (not a healthy $0), and an
     # eligible-but-unpriced queue reads "Unpriced" rather than a misleading $0.00 — now in the
     # Proof ▸ Pipeline projection.
