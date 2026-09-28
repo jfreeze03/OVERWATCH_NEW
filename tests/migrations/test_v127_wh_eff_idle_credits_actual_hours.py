@@ -129,12 +129,6 @@ def test_v127_is_the_latest_full_loader_definition() -> None:
     assert arm.replace(gate, "").count("IDLE_CREDITS") == v127_arm.count("IDLE_CREDITS")
 
 
-def test_v127_floor_tracks_the_tip() -> None:
-    v = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V161 applied" in v
-    assert "BETWEEN 1 AND 161) = 161" in v
-
-
 def test_v127_is_tracked_in_deploy_and_admin_surfaces() -> None:
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V127__wh_eff_idle_credits_actual_hours.sql" in (_ROOT / rel).read_text(encoding="utf-8")

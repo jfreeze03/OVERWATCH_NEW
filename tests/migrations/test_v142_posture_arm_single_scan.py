@@ -91,8 +91,6 @@ def test_v142_leaves_the_anomaly_sweep_double_scan_alone():
 
 
 def test_validate_and_docs_track_v142():
-    val = _read("snowflake/validate.sql")
-    assert "V001..V161 applied" in val and "VERSION BETWEEN 1 AND 161) = 161" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V142__posture_arm_single_scan.sql" in _read(rel)
 

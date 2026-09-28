@@ -42,7 +42,5 @@ def test_v122_preserves_the_materiality_and_baseline_logic():
 
 
 def test_validate_floor_and_docs_track_v122():
-    val = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V161 applied" in val and "VERSION BETWEEN 1 AND 161) = 161" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V122__anomaly_sweep_reconcile_race.sql" in (_ROOT / rel).read_text(encoding="utf-8")

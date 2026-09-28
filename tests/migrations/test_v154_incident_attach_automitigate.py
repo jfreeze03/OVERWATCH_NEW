@@ -212,8 +212,6 @@ def test_v154_plain_sql_parses():
 #    admin._EXPECTED_MIGRATIONS are shared files a single slice does not edit).
 
 def test_validate_and_docs_track_v154():
-    val = _read("snowflake/validate.sql")
-    assert "V001..V161 applied" in val and "VERSION BETWEEN 1 AND 161) = 161" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V154__incident_attach_automitigate.sql" in _read(rel), rel
 

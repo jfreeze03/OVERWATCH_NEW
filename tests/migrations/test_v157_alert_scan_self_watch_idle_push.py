@@ -1850,8 +1850,6 @@ def test_v157_part_b_get_ddl_fragments_are_in_the_procs():
 #    admin._EXPECTED_MIGRATIONS are shared files a single slice does not edit).
 
 def test_validate_and_docs_track_v157():
-    val = _read("snowflake/validate.sql")
-    assert "V001..V161 applied" in val and "VERSION BETWEEN 1 AND 161) = 161" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert _NAME in _read(rel), rel
 

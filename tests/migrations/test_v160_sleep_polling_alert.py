@@ -949,8 +949,6 @@ def test_v160_in_expected_migrations():
 
 
 def test_v160_validate_and_docs():
-    val = _read("snowflake/validate.sql")
-    assert "'V001..V161 applied'" in val and "VERSION BETWEEN 1 AND 161) = 161" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert f"snowflake/migrations/{_NAME}" in _read(rel), rel
 

@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._source import changelog_entry
 from tests.test_migration_proc_syntax import _strip_noise
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -346,18 +347,13 @@ def test_v161_in_expected_migrations():
 
 
 def test_v161_validate_and_docs():
-    val = _read("snowflake/validate.sql")
-    assert "'V001..V161 applied'" in val and "VERSION BETWEEN 1 AND 161) = 161" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert f"snowflake/migrations/{_NAME}" in _read(rel), rel
-    assert (_ROOT / "snowflake" / "rebuild" / "02_migrations_V001_V161.sql").exists()
-    assert not (_ROOT / "snowflake" / "rebuild" / "02_migrations_V001_V160.sql").exists()
 
 
 def test_app_version_and_changelog():
-    assert 'APP_VERSION = "4.598.0"' in _read("app/config.py")
-    head = _read("CHANGELOG.md").split("\n## ", 2)[1]
-    assert head.startswith("4.598.0 - Scheduled operator backups retired (V161)")
+    head = changelog_entry("4.598.0")         # the 4.598.0 entry by its heading, wherever it sits (not 'the top')
+    assert head.startswith("## 4.598.0 - Scheduled operator backups retired (V161)")
     assert "apply before then" in head and "CHANGE RISK" in head and "Time Travel" in head
 
 

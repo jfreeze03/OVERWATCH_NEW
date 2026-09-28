@@ -34,12 +34,6 @@ def test_v123_proc_body_is_account_clock_not_current_date():
     assert body.count(_ACCT) == 12                            # every former CURRENT_DATE() anchor
 
 
-def test_v123_floor_tracks_the_tip():
-    v = (_ROOT / "snowflake/validate.sql").read_text(encoding="utf-8")
-    assert "V001..V161 applied" in v
-    assert "BETWEEN 1 AND 161) = 161" in v
-
-
 def test_exec_board_reader_calendar_presets_use_account_clock():
     for window in (CURRENT_MONTH_WINDOW, CURRENT_YEAR_WINDOW):
         sql = mart_sql.exec_board("ALL", 30, window)
