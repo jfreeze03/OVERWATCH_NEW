@@ -26,8 +26,10 @@ from app.core.query import bump_refresh_salt, execute_statement, query_telemetry
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
-from app.data import cost_sql, mart_sql
+from app.data import cost_sql, mart_sql, ops_sql
+from app.logic import app_telemetry, deploy_health
 from app.logic.formulas import format_usd, format_usd_precise, humanize_duration, md_dollars, safe_float
+from app.logic.navigate import PAGE_SECTION_LABELS
 from app.ui.components import (
     audit_mode,
     confirm_gate,
@@ -752,6 +754,48 @@ def _context_section() -> None:
         st.caption(_ident + f" · app v{APP_VERSION}")
     elif not ctx.ok:
         empty_state("unavailable", "No Snowflake session.", detail=ctx.error)
+    st.caption(deploy_health.runtime_caption(deploy_health.runtime_versions()))   # local, zero queries
+    _schema_ahead_banner()
+
+
+_FRESH_SV_KEY = "_adm_fresh_sv"
+
+
+def _read_fresh_applied() -> set[int] | None:
+    """The header's 5-minute (recent-tier) SCHEMA_VERSION read -> applied versions, or None when unreadable.
+    Stashed per rerun (review r2), so the tabs never re-issue it -- a FAILED read is not cached by
+    st.cache_data and would otherwise run (and log an error) once more per tab."""
+    state = getattr(st, "session_state", None)          # absent under unit-test stubs
+    seq = state.get("_ow_run_seq") if state is not None else None
+    stash = state.get(_FRESH_SV_KEY) if state is not None else None
+    if seq is not None and isinstance(stash, tuple) and len(stash) == 2 and stash[0] == seq:
+        return stash[1]
+    sv = run(mart_sql.schema_version(), page=_PAGE, key="schema_ahead_check", tier="recent",
+             source="SCHEMA_VERSION", probe=True)
+    applied = (deploy_health.applied_versions(sv.df["VERSION"])
+               if sv.usable() and "VERSION" in sv.df.columns else None)
+    if state is not None and seq is not None:
+        state[_FRESH_SV_KEY] = (seq, applied)
+    return applied
+
+
+def _fresh_applied_versions() -> set[int]:
+    """#26 review r1: the tabs union the header's fresh read into their 4h metadata-tier set so, right after a
+    migration is applied, the Migrations tab and Setup progress agree with the banner instead of saying
+    'none newer' / 'Done'. Reuses the banner's per-rerun result (no new statement); empty when unreadable."""
+    return _read_fresh_applied() or set()
+
+
+def _schema_ahead_banner() -> None:
+    """#26: on EVERY Admin section (the default section is Settings, so a tab-only warning hides).
+    Tier ``recent`` on purpose: the shell floor gate keeps the metadata-tier SCHEMA_VERSION cache warm
+    for hours, which would hide a freshly applied migration — exactly the case this warning is for."""
+    applied = _read_fresh_applied()
+    if not applied:
+        return                      # the Migrations tab owns the unreadable/empty story
+    drift = deploy_health.schema_drift(applied, _EXPECTED_MIGRATIONS)
+    if drift.ahead:
+        st.warning(md_dollars(deploy_health.ahead_warning(drift, APP_VERSION)))
 
 
 # rec45: typed editors for the "Change a setting" changer. Driven by an EXPLICIT
@@ -927,18 +971,23 @@ def _migrations_tab() -> None:
         "Compares the applied SCHEMA_VERSION rows against the migrations this app build expects. "
         "A 'Missing migrations' warning means the deployment is behind — run them in order "
         "(DEPLOYMENT.md); the Source freshness panel below reads stale when a loader task has "
-        "stopped, with a per-source cause and the backfill to run."
+        "stopped, with a per-source cause and the backfill to run. A 'newer than this build' warning "
+        "means the deployed app trails the schema — redeploy. Task health below shows whether the "
+        "tasks are started and succeeding."
     )
     res = run(mart_sql.schema_version(), page=_PAGE, key="schema_version", tier="metadata",  # r24 #8: changes only at migrations
               source="SCHEMA_VERSION")
     if not res.ok:
         empty_state("unavailable", "Cannot read SCHEMA_VERSION.", detail=res.error)
         empty_state("needs_setup", "Run snowflake/migrations/V001__core.sql first.")
+        _task_health_panel()      # review r1: the task reads do not depend on SCHEMA_VERSION
         return
     applied = set()
     if not res.empty:
         applied = {int(v) for v in pd.to_numeric(res.df["VERSION"], errors="coerce").dropna()}
         styled_table(res.df)
+    applied |= _fresh_applied_versions()
+    drift = deploy_health.schema_drift(applied, _EXPECTED_MIGRATIONS)
     missing = [(n, name) for n, name in _EXPECTED_MIGRATIONS.items() if n not in applied]
     if missing:
         # Impact-annotated punch list (was one opaque comma-blob): each pending
@@ -952,8 +1001,13 @@ def _migrations_tab() -> None:
             # md_dollars each row INDIVIDUALLY: descriptions carry '$' (V036 "measured $",
             # V065 "MTD$/...") that would pair into a LaTeX math span if joined into one string.
             st.markdown(md_dollars(f"- **V{n:03d}** — {name}"))
-    else:
-        empty_state("clean", f"All {len(_EXPECTED_MIGRATIONS)} migrations applied. App {APP_VERSION} expects exactly these.")
+    elif not drift.ahead:
+        empty_state("clean", deploy_health.migrations_clean_message(drift))
+    if drift.ahead:
+        # #26: the redeploy warning itself is the header banner (every Admin section); the table above
+        # is the 4h metadata read, so the newest rows can be missing from it for a while.
+        st.caption(f"Applied but newer than this build: {deploy_health.version_span(drift.ahead)} — "
+                   "see the redeploy warning above (the table can lag a freshly applied migration).")
 
     fh = run(mart_sql.flyway_history(), page=_PAGE, key="flyway_history", tier="recent",  # r24 #8: external ledger probe
              source="flyway_schema_history (Flyway ledger)", probe=True)
@@ -976,7 +1030,8 @@ def _migrations_tab() -> None:
         live_source="MART_SOURCE_FRESHNESS (aggregate view, pre-V040 fallback)",
         mart_tier="recent", live_tier="recent")   # state moves every 10 min (r14 #13)
     if guard(fresh, "Freshness view empty — have the loader tasks run yet?",
-             setup_hint="Tasks resume at the end of V004. Check SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH."):
+             setup_hint="Tasks resume at the end of V004 — switch on Task health below to see which "
+                        "are suspended or failing."):
         styled_table(fresh.df)
         if st.toggle("Diagnose stale sources", key="adm_stale_diagnose"):
             # The deploy-gap week (2026-07): stale marts meant a failing
@@ -1035,12 +1090,59 @@ def _migrations_tab() -> None:
                 # brief.py:379 / alerts DETAIL guarding pattern for the same data class).
                 st.markdown(md_dollars(
                     f"- **{name}** — {_age}. "
-                    + (hint or "no matching error logged — check SHOW TASKS "
+                    + (hint or "no matching error logged — switch on Task health below "
                                "(tasks suspend if a migration half-applied).")))
+    _task_health_panel()
+
+
+def _task_health_panel() -> None:
+    """#26: are the OVERWATCH tasks started and succeeding? SHOW TASKS + 24h of
+    INFORMATION_SCHEMA.TASK_HISTORY (metadata reads — no ACCOUNT_USAGE lag or scan surface), graded by
+    ``deploy_health.task_health`` against the task set the migrations leave live. Toggle-gated: it
+    reads nothing until switched on, then caches 5 minutes (Refresh all cached data re-reads)."""
+    section_header("Task health", "", "admin")
+    if not st.toggle("Check OVERWATCH task health", key="adm_task_health",
+                     help="SHOW TASKS + the last 24h of INFORMATION_SCHEMA.TASK_HISTORY — metadata reads, "
+                          "no ACCOUNT_USAGE lag."):
+        return
+    tasks = run(ops_sql.overwatch_task_states(), page=_PAGE, key="adm_task_states", tier="recent",
+                source="SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH", max_rows=0, probe=True)
+    runs = run(ops_sql.overwatch_task_run_summary(24), page=_PAGE, key="adm_task_runs", tier="recent",
+               source="INFORMATION_SCHEMA.TASK_HISTORY (24h)", probe=True)
+    h = deploy_health.task_health(
+        tasks.df if tasks.ok else None, runs.df if runs.ok else None,
+        expected=ops_sql.OVERWATCH_TASKS, opt_in=ops_sql.OPT_IN_OVERWATCH_TASKS,
+        retired=ops_sql._RETIRED_OVERWATCH_TASKS, suspended_ok=ops_sql.SUSPENDED_OK_OVERWATCH_TASKS,
+        result_limit=ops_sql.TASK_HISTORY_RESULT_LIMIT)
+    if h.state == "UNVERIFIABLE":
+        empty_state("unavailable", h.headline, detail=tasks.error)
+        return
+    if h.state == "NOT_VISIBLE":
+        empty_state("needs_setup", h.headline, hint="Run snowflake/task_audit.sql in Snowsight as SNOW_SYSADMINS.")
+        return
+    if h.severity == "ok":
+        empty_state("clean", h.headline)
+    elif h.severity == "bad":
+        st.error(md_dollars(h.headline))
+    elif h.severity == "warn":
+        st.warning(md_dollars(h.headline))
+    else:
+        st.caption(md_dollars(h.headline))
+    styled_table(h.rows, height=TABLE_H_LG)
+    for note in h.notes:
+        st.caption(md_dollars(note))            # house rule: every markdown sink of built text is $-safe
+    st.caption("Resume a standalone task with `ALTER TASK … RESUME`, a graph with "
+               "`SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('<root>')`; the full warehouse/schedule/predecessor "
+               "drift check is snowflake/task_audit.sql.")
 
 
 # Next-Fifty #7 Slice B: the release from which the app sends per-statement parameters (Cortex's timeout).
 _STMT_PARAMS_SINCE = "v4.590.0"
+# #33: what actually sets the read ceiling. V002 sets STATEMENT_TIMEOUT_IN_SECONDS = 300 on the app
+# warehouse (V002__facts.sql CREATE + ALTER WAREHOUSE); Snowflake's own default, when neither the
+# warehouse nor the account sets it, is 172800 s (2 days) — 300 s was never "the default".
+_V002_APP_WH_TIMEOUT_S = 300
+_SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S = 172_800
 _SCAN_NOTE = ("First load scans ACCOUNT_USAGE directly (a few seconds on a cold "
               "cache); results cache for an hour, so repeat views are instant.")
 
@@ -1272,11 +1374,21 @@ def _observability_tab() -> None:
         try:
             _e["FAMILY"] = (_e["ERROR_TYPE"].astype(str) + " · "
                             + _e["ERROR_MESSAGE"].astype(str).str.slice(0, 60))
+            # #50: who hit it and on which build — parsed back out of CONTEXT (the sink's
+            # ROLE_NAME is the owner role under owner's-rights SiS, so the viewer rides there).
+            _meta = _e["CONTEXT"].map(app_telemetry.parse_error_context)
+            _e["VIEWER"] = _meta.map(lambda m: m["viewer"] or None)
+            _e["BUILD"] = _meta.map(lambda m: m["build"] or None)
             grouped = (_e.groupby(["PAGE", "FAMILY"], as_index=False)
                        .agg(COUNT=("FAMILY", "size"), FIRST_SEEN=("LOGGED_AT", "min"),
-                            LAST_SEEN=("LOGGED_AT", "max")))
+                            LAST_SEEN=("LOGGED_AT", "max"),
+                            VIEWERS=("VIEWER", "nunique"), LAST_BUILD=("BUILD", "first")))
+            # unknown (pre-4.599 rows) -> NULL -> '—', never a misleading 0 viewers
+            grouped["VIEWERS"] = grouped["VIEWERS"].where(grouped["VIEWERS"] > 0)
             gsorted = grouped.sort_values("LAST_SEEN", ascending=False).reset_index(drop=True)
             _fam_sel = selectable_table(gsorted, key="err_family_sel", height=240)
+            st.caption("Families, counts and viewers cover the newest 100 logged errors; rows logged "
+                       "before app 4.599.0 carry no viewer or build.")
             # Click a family -> the raw rows behind it (this PAGE + FAMILY) inline. Resolve
             # (PAGE, FAMILY) only on a GENUINELY-NEW click (change-detection sentinel): the
             # selection is sticky and re-emits every rerun, and gsorted re-sorts by LAST_SEEN as
@@ -1327,7 +1439,11 @@ def _performance_tab() -> None:
         "The app's per-tier read timeouts (30/120/180s) do NOT apply on owner's-rights "
         "Streamlit-in-Snowflake — ALTER SESSION is rejected there, and they are deliberately not sent "
         "per statement until the read durations are measured. Reads are governed by "
-        f"STATEMENT_TIMEOUT_IN_SECONDS on {APP_WAREHOUSE} (or the account; 300s default). Since "
+        f"STATEMENT_TIMEOUT_IN_SECONDS on {APP_WAREHOUSE}; V002 sets {humanize_duration(_V002_APP_WH_TIMEOUT_S, 's')} "
+        "there. Snowflake enforces the lower non-zero of the warehouse value and the session's (inherited "
+        "from the user or account), so a lower account or user value also caps reads; with neither set "
+        f"anywhere, Snowflake's own default of {humanize_duration(_SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S, 's')} "
+        f"({_SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S} s) applies. Since "
         f"{_STMT_PARAMS_SINCE}, each Cortex evaluation also sends its own {CORTEX_TIMEOUT_SECONDS}s "
         "per-statement ceiling (the lower of the two wins). That is unverified under Streamlit-in-Snowflake, "
         "which is confirmed to override per-statement query tags. To enforce a tighter read ceiling, SET it "
@@ -1341,7 +1457,8 @@ def _performance_tab() -> None:
         _tdf.columns = [str(c).lower() for c in _tdf.columns]
         if "value" in _tdf.columns:
             _val = str(_tdf.iloc[0].get("value", "") or "")
-            _lvl = str(_tdf.iloc[0].get("level", "") or "").upper() or "ACCOUNT (default)"
+            # #33: an empty SHOW PARAMETERS level means NEITHER the warehouse nor the account set it.
+            _lvl = str(_tdf.iloc[0].get("level", "") or "").upper() or "Snowflake default"
             kpi_row([{"label": "Real statement-timeout ceiling",
                       # r8: humanize on the KPI card (300s -> "5m", 28800s -> "8h") per the
                       # duration standard; the raw SHOW PARAMETERS row stays verbatim in the table.
@@ -1354,7 +1471,10 @@ def _performance_tab() -> None:
         styled_table(_tdf)
     else:
         empty_state("no_data_yet", "Could not read the warehouse timeout parameter (needs "
-                    "MONITOR/USAGE on the warehouse). The 300s account default likely applies.")
+                    "MONITOR/USAGE on the warehouse). If V002 applied, "
+                    f"{humanize_duration(_V002_APP_WH_TIMEOUT_S, 's')} is set on {APP_WAREHOUSE}; "
+                    "otherwise the account value, or Snowflake's "
+                    f"{humanize_duration(_SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S, 's')} default, applies.")
 
     section_header("Performance SLO scorecard (7d)", "", "operations")
     slo = run(
@@ -1485,6 +1605,7 @@ def _performance_tab() -> None:
     elif guard(usage, "", setup_hint="APP_USAGE comes with migration V016; re-run roles.sql for the grant."):
         styled_table(usage.df)
         st.caption("Merging or retiring sections should follow this table, not opinions.")
+    _usage_detail_panels()
 
     # Kept SEPARATE from the session-telemetry table above: that one is THIS viewer's
     # in-session buffer (query_telemetry -> session_state); this is the fleet aggregate
@@ -1512,6 +1633,43 @@ def _performance_tab() -> None:
             "query for each row. Per-session telemetry lives on Errors & telemetry."
         )
     _perf_rider_panels(fq.df if fq.ok and not fq.empty else None)
+
+
+def _usage_detail_panels() -> None:
+    """#50 section visits + #47 Ask demand — two small APP_USAGE reads, ungated (data first).
+
+    Reads only APP_USAGE through mart_sql and never imports the Ask package, so the
+    documented Ask revert (delete the package + page) leaves Admin intact."""
+    section_header("Section visits (90d)", "", "operations")
+    sv = run(mart_sql.section_visit_summary(90), page=_PAGE, key="adm_section_visits", tier="recent",
+             source="APP_USAGE (section_visit / subsection_visit)")
+    if sv.ok and sv.empty:
+        empty_state("no_data_yet", "No section visits logged yet — logging starts with app 4.599.0.")
+    elif guard(sv, "", setup_hint="APP_USAGE comes with migration V016; re-run roles.sql for the grant."):
+        _first = pd.NaT
+        if "FIRST_LOGGED_AT" in sv.df.columns:
+            _first = pd.to_datetime(sv.df["FIRST_LOGGED_AT"], errors="coerce").min()
+        styled_table(app_telemetry.with_unvisited_sections(sv.df, PAGE_SECTION_LABELS)
+                     .drop(columns=["FIRST_LOGGED_AT"], errors="ignore"))
+        _since = _first.strftime("%Y-%m-%d") if pd.notna(_first) else "—"
+        st.caption(f"Logged since {_since}. A page's first section counts on every page entry (it is "
+                   "where the page lands); a 0-visit section is a retirement candidate only after 90 "
+                   "full days of logging.")
+
+    section_header("Ask demand (90d)", "", "operations")
+    ad = run(mart_sql.ask_demand_summary(90), page=_PAGE, key="adm_ask_demand", tier="recent",
+             source="APP_USAGE (ask_refused / ask_answered / ask_failed)")
+    if ad.ok and ad.empty:
+        empty_state("no_data_yet", "No Ask questions logged yet — logging starts with app 4.599.0.")
+    elif guard(ad, "", setup_hint="APP_USAGE comes with migration V016; re-run roles.sql for the grant."):
+        _r0 = ad.df.iloc[0]
+        refused = int(safe_float(_r0.get("REFUSED_TOTAL")))
+        total = int(safe_float(_r0.get("ALL_ASKS")))
+        kpi_row([{"label": "Refused questions (90d)", "value": f"{refused:,} of {total:,}"}])
+        styled_table(ad.df.drop(columns=["REFUSED_TOTAL", "ALL_ASKS"], errors="ignore"))
+        st.caption("Refused rows show an 8-word lower-cased stem of the question with digits masked; "
+                   "answered and failed rows show the answer type. The gallery's built-in refusal "
+                   "example is not counted.")
 
 
 def _perf_rider_panels(fq_df=None) -> None:
@@ -1592,8 +1750,8 @@ def _perf_rider_panels(fq_df=None) -> None:
              source="APP_USAGE.EVENT_KIND (V027 rider)")
     if ue.usable():
         styled_table(ue.df, height=190)
-        st.caption("page_visit dominates by design; the interaction kinds (acks, resolves, "
-                   "exports, remediations) are the operator-effectiveness signal.")
+        st.caption("page_visit and section_visit dominate by design; the interaction kinds (acks, "
+                   "resolves, exports, remediations, asks) are the operator-effectiveness signal.")
     acc = run(mart_sql.acceptance_funnel(90), page=_PAGE, key="acceptance_funnel", tier="recent",
               source="REMEDIATION_LOG + SAVINGS_LEDGER")
     if acc.usable():
@@ -1834,16 +1992,25 @@ def _setup_progress_tab() -> None:
     applied: set[int] = set()
     if sv.ok and not sv.empty:
         applied = {int(v) for v in pd.to_numeric(sv.df["VERSION"], errors="coerce").dropna()}
-    missing = [n for n in _EXPECTED_MIGRATIONS if n not in applied]
+    if sv.ok:
+        applied |= _fresh_applied_versions()      # review r1: agree with the header banner
+    drift = deploy_health.schema_drift(applied, _EXPECTED_MIGRATIONS)
     # Single migration rollup — the per-version applied/missing breakdown lives on
     # the Migrations & freshness tab (SCHEMA_VERSION + 'Missing migrations'); this
     # checklist only needs the "N of M applied" headline, not a row per VNNN.
-    _add("Database migrations", done=bool(applied) and not missing,
-         detail=(f"{len(applied)} of {len(_EXPECTED_MIGRATIONS)} applied"
-                 + (f"; {len(missing)} missing" if missing else "")) if sv.ok
-                else "SCHEMA_VERSION unreadable — nothing applied yet",
-         fix="Run the missing migrations in order (DEPLOYMENT.md); "
-             "see the Migrations & freshness tab for per-version detail.")
+    # #26: count only the migrations this build KNOWS (len(applied) printed "162 of 161" once the
+    # database ran ahead of the app), and a database ahead of the build is Partial, never Done.
+    _n_exp = len(_EXPECTED_MIGRATIONS)
+    _add("Database migrations", done=bool(applied) and not drift.missing and not drift.ahead,
+         partial=bool(drift.ahead) and not drift.missing,
+         detail=(f"{_n_exp - len(drift.missing)} of {_n_exp} applied"
+                 + (f"; {len(drift.missing)} missing" if drift.missing else "")
+                 + (f"; {len(drift.ahead)} newer than this build — redeploy the app" if drift.ahead else ""))
+                if sv.ok else "SCHEMA_VERSION unreadable — nothing applied yet",
+         fix=("Run the missing migrations in order (DEPLOYMENT.md); " if drift.missing else "")
+             + ("redeploy the app from the revision the newer migrations came from "
+                "(snow streamlit deploy --replace); " if drift.ahead else "")
+             + "see the Migrations & freshness tab for per-version detail.")
 
     fr = run(mart_sql.source_freshness_state(), page=_PAGE, key="setup_freshness",
              tier="recent", source="SOURCE_FRESHNESS_STATE", probe=True)

@@ -57,10 +57,3 @@ def test_one_time_correction_is_idempotent_and_conservative():
     assert "NOT LIKE '%LBA-1 co-attributed%'" in corr       # sentinel -> re-run is a no-op
     # only correct when the group's primary is itself a real (VERIFIED) saving
     assert "p.SOURCE_CHANGE_ID = g.PRIMARY_CHANGE_ID" in corr and "p.STATE = 'VERIFIED'" in corr
-
-
-def test_validate_floor_tracks_the_tip():
-    # floor moved to V119 when the auto-clear-hysteresis migration landed (round 6).
-    val = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V161 applied" in val
-    assert "VERSION BETWEEN 1 AND 161) = 161" in val

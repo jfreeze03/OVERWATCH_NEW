@@ -72,6 +72,16 @@ def extract_days(text: str, default: int) -> int:
     return max(1, min(_MAX_DAYS, default))
 
 
+def question_stem(question: str, *, max_words: int = 8) -> str:
+    """Refusal telemetry: lower-cased word stem, digits masked, <= 80 chars (APP_USAGE.SECTION).
+
+    #47: a refused question is demand no answerer covers yet, but it is also user text —
+    keep only the first ``max_words`` word tokens (punctuation dropped) and mask every
+    digit run to '#' so ids, amounts and dates never land in the usage table."""
+    toks = [re.sub(r"\d+", "#", t) for t in _WORD_RE.findall((question or "").lower())]
+    return " ".join(toks[:max(1, int(max_words))])[:80]
+
+
 def _term_matches(term: str, low: str, tokens: frozenset[str]) -> bool:
     if term in _STEMS:
         return any(w.startswith(term) for w in tokens)

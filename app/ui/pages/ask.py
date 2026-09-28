@@ -20,11 +20,11 @@ from app.core.query import run, run_batch_mixed
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
 from app.logic.ai_grounding import numbers_preserved as _numbers_preserved  # moved (Next-Fifty #24)
-from app.logic.ask import REGISTRY, route
+from app.logic.ask import REGISTRY, question_stem, route
 from app.logic.ask.pricing import add_usd_estimates, is_ai_credit_column
 from app.logic.ask.types import AnswerResult, AskParams
 from app.logic.formulas import md_dollars, safe_float
-from app.ui.components import load_settings, page_header, styled_table
+from app.ui.components import load_settings, log_ui_event, page_header, styled_table
 
 _PAGE = "Ask"
 
@@ -44,6 +44,26 @@ def _capabilities(heading: str) -> None:
 # One-click test gallery — every registered phrasing plus a deliberately
 # unmapped probe, so the feature can be exercised end to end without typing.
 _REFUSAL_PROBE = "how many failed logins were there today"
+
+
+_ASK_LOG_KEY = "_ow_ask_logged"
+
+
+def _log_ask(kind: str, question: str, section: str) -> None:
+    """#47: one APP_USAGE row per distinct question outcome — reruns (window/AI toggle/company) never re-log.
+
+    Keeps only the LAST signature, so the dedupe state stays one string. The signature is the
+    whole normalised question (session-only, never stored), so re-asking with a different number
+    ('last 7 days' -> 'last 30 days') logs again. Answered/failed rows carry the answer type;
+    refused rows carry question_stem (8 words, digits masked)."""
+    try:
+        sig = f"{kind}|{' '.join((question or '').lower().split())}"
+        if st.session_state.get(_ASK_LOG_KEY) == sig:
+            return
+        st.session_state[_ASK_LOG_KEY] = sig
+        log_ui_event(kind, page=_PAGE, section=section)
+    except Exception:  # noqa: BLE001 - telemetry must never break the answer
+        pass
 
 
 def _test_cases() -> list[str]:
@@ -210,6 +230,8 @@ def render() -> None:
 
     rr = route(question, default_days=default_days, company=company)
     if rr.answerer is None:
+        if question.strip().lower() != _REFUSAL_PROBE:   # the gallery's built-in refusal is not demand
+            _log_ask("ask_refused", question, question_stem(question))
         st.warning("I don't have a grounded path for that yet — so I won't guess.")
         _capabilities("**What I *can* answer (each backed by real query output):**")
         return
@@ -236,6 +258,7 @@ def render() -> None:
     for spec in specs:
         res = results.get(f"ask_{ans.intent}_{spec.key}")
         if res is None or not res.ok:
+            _log_ask("ask_failed", question, ans.intent)
             st.warning(
                 f"I couldn't run the grounded query for this ({(res.error_kind if res else '') or 'error'}), "
                 "so I won't guess. It's logged for follow-up."
@@ -246,4 +269,5 @@ def render() -> None:
         frames[spec.key] = res.df
 
     result = ans.analyze(params, frames)
+    _log_ask("ask_answered", question, ans.intent)
     _render_result(result, company, params, use_ai, model, settings)

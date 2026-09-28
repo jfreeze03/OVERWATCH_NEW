@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app import companies
-from app.config import core_object
+from app.config import CORE_SCHEMA, OVERWATCH_DB, core_object
 from app.core.sqlsafe import contains_filter, sql_literal
 from app.data.common import and_where, bounded_days, not_app_self_sql, scope_window_where
 
@@ -299,6 +299,85 @@ ORDER BY DATABASE_NAME, SCHEMA_NAME, TASK_NAME, SCHEDULED_TIME DESC
 #: OVERWATCH tasks a migration DROPPED (V161: TASK_BACKUP_OPERATOR). TASK_HISTORY keeps a dropped task's rows,
 #: so without this it would read Late, then Stale ("silently stopped") for up to the 90-day cadence window.
 _RETIRED_OVERWATCH_TASKS = ("TASK_BACKUP_OPERATOR",)
+
+#: #26: the OVERWATCH tasks the migrations leave live (every task CREATE minus DROP over V001..tip;
+#: V041 dropped TASK_SNAPSHOT_FRESHNESS, V161 TASK_BACKUP_OPERATOR). Admin ▸ Task health grades
+#: against this set. tests/test_task_set_contract.py replays the migrations and fails when this
+#: set or snowflake/task_audit.sql's expected VALUES disagree with them — a task-creating
+#: migration edits both.
+OVERWATCH_TASKS: frozenset[str] = frozenset({
+    "TASK_ALERT_NOTIFY", "TASK_ALERT_SCAN", "TASK_ALERT_SCAN_DAILY", "TASK_ANOMALY_SWEEP",
+    "TASK_CANARY_SENTINEL", "TASK_CHANGE_ATTRIBUTION", "TASK_CHANGE_IMPACT_SCAN", "TASK_DAILY_DIGEST",
+    "TASK_INCIDENT_AUTODECLARE", "TASK_LEDGER_AUTOBOOK", "TASK_LOAD_APP_COST", "TASK_LOAD_DAILY",
+    "TASK_LOAD_HOURLY", "TASK_LOAD_MARTS_V27_DAILY", "TASK_LOAD_MARTS_V27_HOURLY", "TASK_LOAD_OBJECT_COST",
+    "TASK_LOAD_QUERY_OPERATOR_STATS", "TASK_LOAD_SECURITY_FACTS", "TASK_LOAD_STORAGE_TRUTH",
+    "TASK_LOAD_TABLE_STORAGE", "TASK_LOCK_WAIT_DAILY", "TASK_NIGHTLY_RECONCILE", "TASK_OPS_DIAG_HOURLY",
+    "TASK_PATTERN_COST_DAILY", "TASK_PLATFORM_SCORE_DAILY", "TASK_PURGE_FACTS", "TASK_PURGE_QUERY_TELEMETRY",
+    "TASK_QH_EXTRACT", "TASK_REFRESH_EXEC_BOARD", "TASK_SLO_BREACH_SCAN", "TASK_VERIFY_SAVINGS",
+    "TASK_WAREHOUSE_CHANGE_SCAN",
+})
+#: Tasks only an opt-in script creates (never a migration): graded "Opt-in" when present, never "Missing".
+OPT_IN_OVERWATCH_TASKS: dict[str, str] = {
+    "TASK_ALERT_DRILL": "snowflake/alert_drill.sql",
+    "TASK_REFRESH_ML_FORECAST": "snowflake/ml_forecast_option.sql",
+}
+#: Expected tasks that are legitimately suspended until the owner opts in (RUNBOOK: "every task
+#: started except TASK_ALERT_NOTIFY before its integration exists") — a warning, not a failure.
+SUSPENDED_OK_OVERWATCH_TASKS: dict[str, str] = {
+    "TASK_ALERT_NOTIFY": "suspended until a delivery integration exists (Alerts ▸ Native delivery)",
+}
+#: INFORMATION_SCHEMA.TASK_HISTORY's RESULT_LIMIT (its maximum). The limit spans EVERY task the role
+#: can see, account-wide, so a busy account can fill it before OVERWATCH's rows — the run summary
+#: carries HISTORY_ROWS so Task health can say "may be incomplete" instead of reading healthy.
+TASK_HISTORY_RESULT_LIMIT = 10_000
+
+
+def overwatch_task_states() -> str:
+    """#26: live state of every task in the OVERWATCH schema (SHOW — metadata, no warehouse, no lag).
+
+    Callers pass ``max_rows=0``: ``run()``'s row cap appends LIMIT, which SHOW does not accept.
+    Lists only the tasks the app's owner role holds a privilege on; an empty answer means
+    not-deployed-or-not-visible, never "down"."""
+    return f"SHOW TASKS IN SCHEMA {OVERWATCH_DB}.{CORE_SCHEMA}"
+
+
+def overwatch_task_run_summary(hours: int = 24) -> str:
+    """#26: per-task run outcomes over the last ``hours`` from INFORMATION_SCHEMA.TASK_HISTORY
+    (no ACCOUNT_USAGE lag, no ACCOUNT_USAGE scan surface).
+
+    The table function's RESULT_LIMIT counts rows across every task the role can see, so the
+    ``LEFT JOIN`` from the one-row ``n`` CTE guarantees a (TASK_NAME NULL) row that carries
+    HISTORY_ROWS even when the limit left no OVERWATCH rows; ``logic.deploy_health.task_health``
+    ignores NULL-name rows for statuses and reads HISTORY_ROWS >= TASK_HISTORY_RESULT_LIMIT as
+    "may be incomplete". FAILED_N counts FAILED and FAILED_AND_AUTO_SUSPENDED runs; CANCELLED runs (an
+    operator cancel, a cancelled graph run) are CANCELLED_N, never a failure (task_recent_states agrees).
+    Timestamps pinned to the account's Central clock (TIMEZONE STANDARD)."""
+    from app.logic.formulas import ACCOUNT_TIMEZONE
+    hours = max(1, min(int(hours or 24), 168))
+    fail = "h.STATE IN ('FAILED', 'FAILED_AND_AUTO_SUSPENDED')"
+    fail_at = f"IFF({fail}, COALESCE(h.COMPLETED_TIME, h.SCHEDULED_TIME), NULL)"
+    return f"""
+WITH h AS (
+    SELECT NAME, DATABASE_NAME, SCHEMA_NAME, STATE, ERROR_MESSAGE, SCHEDULED_TIME, COMPLETED_TIME
+    FROM TABLE({OVERWATCH_DB}.INFORMATION_SCHEMA.TASK_HISTORY(
+         SCHEDULED_TIME_RANGE_START => DATEADD('hour', -{hours}, CURRENT_TIMESTAMP()),
+         RESULT_LIMIT => {TASK_HISTORY_RESULT_LIMIT}))
+),
+n AS (SELECT COUNT(*) AS FN_ROWS FROM h)
+SELECT h.NAME AS TASK_NAME,
+       COUNT_IF(h.STATE = 'SUCCEEDED') AS SUCCEEDED_N,
+       COUNT_IF({fail}) AS FAILED_N,
+       COUNT_IF(h.STATE = 'SKIPPED') AS SKIPPED_N,
+       COUNT_IF(h.STATE = 'CANCELLED') AS CANCELLED_N,
+       CONVERT_TIMEZONE('{ACCOUNT_TIMEZONE}', MAX(IFF(h.STATE = 'SUCCEEDED', h.COMPLETED_TIME, NULL)))::TIMESTAMP_NTZ AS LAST_SUCCESS_AT,
+       CONVERT_TIMEZONE('{ACCOUNT_TIMEZONE}', MAX({fail_at}))::TIMESTAMP_NTZ AS LAST_FAILURE_AT,
+       MAX_BY(LEFT(h.ERROR_MESSAGE, 300), {fail_at}) AS LAST_ERROR_MESSAGE,
+       MAX(n.FN_ROWS) AS HISTORY_ROWS
+FROM n
+LEFT JOIN h ON h.DATABASE_NAME = '{OVERWATCH_DB}' AND h.SCHEMA_NAME = '{CORE_SCHEMA}'
+GROUP BY h.NAME
+ORDER BY FAILED_N DESC, SKIPPED_N DESC, TASK_NAME
+"""
 
 
 def task_freshness_sla(days: int = 14, company: str = "ALL", database: str = "",

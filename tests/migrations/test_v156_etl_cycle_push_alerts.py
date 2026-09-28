@@ -46,7 +46,6 @@ _GUARD = _PARTS[1]
 _BODY = _PARTS[3]                      # the SP_SCAN_ETL_CYCLE body
 _HEADER = _MIG.split("\nEXECUTE IMMEDIATE\n$$\n", 1)[0]
 _RULES = ("PIPE_ETL_TASK_FAILED", "PIPE_ETL_CYCLE_NOT_STARTED", "PIPE_ETL_CYCLE_LATE")
-_TIP = 161                             # the tip (V156 ETL cycle, V157 scans, V158 backups, V159 diet, V160 sleep alert, V161 backups retired)
 _FAILED_SQL = ", ".join(f"'{s}'" for s in sorted(etl.FAILED_TASK_STATUSES))
 _INS_SPLIT = ";\n    EXECUTE IMMEDIATE :ins_sql USING (start_wf);"
 
@@ -666,12 +665,7 @@ def test_v156_task_failed_threshold_floor_and_retry_auto_clear():
 
 
 # ---------------------------------------------------------------------------------------------------
-# 16-19. lockstep (validate / docs / admin pins at the wave tip fail until the integration commit)
-def test_v156_validate_pin_at_the_wave_tip():
-    val = _read("snowflake/validate.sql")
-    assert f"V001..V{_TIP} applied" in val and f"VERSION BETWEEN 1 AND {_TIP}) = {_TIP}" in val
-
-
+# 17-19. lockstep (docs / admin / teardown); the validate tip is derived in tests/test_release_lockstep.py
 def test_v156_docs_list_the_migration():
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert _NAME in _read(rel), rel

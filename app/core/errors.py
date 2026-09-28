@@ -10,6 +10,7 @@ enforces that elsewhere).
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import traceback
 from datetime import datetime
@@ -17,10 +18,48 @@ from functools import wraps
 
 import streamlit as st
 
-from app.config import core_object
+from app.config import APP_VERSION, core_object
 
 _BUFFER_KEY = "_ow_error_buffer"
 _BUFFER_MAX = 100
+_CONTEXT_MAX = 2000          # APP_ERROR_LOG.CONTEXT VARCHAR(2000), V001__core.sql:137
+_TB_MAX = 400
+
+
+def _viewer_for_log() -> str:
+    """#50: the viewing user for APP_ERROR_LOG.CONTEXT; never raises, '—' when unknown.
+
+    ROLE_NAME stores CURRENT_ROLE() (the owner role under owner's-rights SiS), so the
+    viewer travels in CONTEXT. The import stays lazy: query.py imports this module."""
+    try:
+        from app.core.identity import viewer_name
+        who = re.sub(r"[\s·]+", "_", str(viewer_name() or "").strip())[:64]
+        return who or "—"
+    except Exception:
+        return "—"
+
+
+def _tb_tail(error: BaseException, frames: int = 3, max_len: int = _TB_MAX) -> str:
+    """'admin.py:1276 _observability_tab < ...' innermost first; app/ frames preferred; '' if never raised.
+
+    Reads error.__traceback__ (not format_exc): record_error is also called outside an
+    except block (query._entitlement_refusal), where format_exc says 'NoneType: None'."""
+    try:
+        tb = traceback.extract_tb(getattr(error, "__traceback__", None))
+        app_f = [f for f in tb if re.search(r"[\\/]app[\\/]", f.filename or "")]
+        pick = (app_f or list(tb))[-frames:]
+        return " < ".join(f"{os.path.basename(f.filename)}:{f.lineno} {f.name}" for f in reversed(pick))[:max_len]
+    except Exception:
+        return ""
+
+
+def _context_line(ref: str, context: str, viewer: str, tb: str) -> str:
+    """ref=… · viewer=… · v<build> · <context> · tb=… within the 2000-char column."""
+    head = f"ref={ref} · viewer={viewer} · v{APP_VERSION}"
+    tail = f" · tb={tb}" if tb else ""
+    room = _CONTEXT_MAX - len(head) - len(tail)
+    mid = f" · {context}"[:room] if context and room > 3 else ""
+    return (head + mid + tail)[:_CONTEXT_MAX]     # the caller context is cut first; ref and tb always survive
 
 
 def format_snowflake_error(error: object, max_len: int = 300) -> str:
@@ -58,6 +97,12 @@ def record_error(page: str, error: BaseException, context: str = "") -> str:
     into the persisted CONTEXT) so the UI can show a copyable id the operator can
     quote when reporting the failure (Wave 2 #46). The ref is a timestamp + a short
     hash of the error, so the same operator-visible ref matches the APP_ERROR_LOG row.
+
+    #50: the CONTEXT shape is `ref=… · viewer=… · v<build> · <context> · tb=…` —
+    the viewing user (ROLE_NAME stays CURRENT_ROLE(), the owner), the app build, the
+    caller's context, and a short innermost-first app-frame traceback. When it must
+    be cut to the column, the caller context goes first; ref and tb always survive.
+    app.logic.app_telemetry.parse_error_context reads it back for Admin.
     """
     at = datetime.now()
     # The error boundary must be bulletproof: a hostile/buggy __str__ (e.g. a driver
@@ -71,13 +116,17 @@ def record_error(page: str, error: BaseException, context: str = "") -> str:
         f"{type(error).__name__}|{_msg}|{traceback.format_exc(limit=3)}".encode("utf-8", "replace")
     ).hexdigest()[:6].upper()
     ref = f"OW-{at.strftime('%Y%m%d-%H%M%S')}-{_digest}"
+    try:
+        _ctx = _context_line(ref, context, _viewer_for_log(), _tb_tail(error))
+    except Exception:
+        _ctx = (f"ref={ref} · {context}" if context else f"ref={ref}")[:2000]
     entry = {
         "at": at.isoformat(timespec="seconds"),
         "ref": ref,
         "page": str(page)[:80],
         "type": type(error).__name__[:200],
         "message": _msg[:2000],
-        "context": (f"ref={ref} · {context}" if context else f"ref={ref}")[:2000],
+        "context": _ctx,
         "trace": traceback.format_exc(limit=6)[:4000],
     }
     try:

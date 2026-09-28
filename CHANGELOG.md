@@ -1,5 +1,58 @@
 # Changelog
 
+## 4.599.0 - Deploy health, actionable errors, section visits and Ask demand; derived release locks (2026-09-28)
+
+App-only, no migration. Next Fifty wave 3, Slice A: ranks 49, 50, 47 (logging only), 26 Phase 1 and 33 (wording only).
+
+- **Admin says when the database is ahead of the app (#26).** Every Admin section warns when SCHEMA_VERSION holds
+  migrations this build does not know (for example V162 applied before `snow streamlit deploy --replace`), names them,
+  and says to redeploy. Migrations & freshness no longer claims the build "expects exactly these" without checking for
+  newer rows, and Setup progress counts only known migrations (it could print "162 of 161"). Both tabs also
+  read the header's 5-minute SCHEMA_VERSION check, so for the hours after a migration is applied they agree with
+  the banner instead of saying "none newer".
+- **Task health (#26).** Migrations & freshness ▸ Check OVERWATCH task health reads SHOW TASKS plus the last 24h of
+  INFORMATION_SCHEMA.TASK_HISTORY and grades the 32 tasks the migrations leave live:
+  - running, suspended, failing, recovered, skipped runs, cancelled runs, not visible, not in this build,
+    retired, opt-in (an installed opt-in task is graded by its runs, so a failing or failure-suspended one is
+    never green);
+  - a cancelled run (an operator cancel, a cancelled graph run) is a warning, never a failure;
+  - a failed or empty read says so and is never shown as healthy;
+  - a history read that hits its 10,000-row limit says it may be incomplete and is never shown green.
+- **task_audit.sql corrected (#26).** It drops TASK_SNAPSHOT_FRESHNESS (dropped by V041) and adds TASK_LOAD_APP_COST,
+  TASK_LOAD_SECURITY_FACTS, TASK_LOAD_TABLE_STORAGE, TASK_LOAD_QUERY_OPERATOR_STATS and TASK_SLO_BREACH_SCAN. A new
+  test replays CREATE / DROP / ALTER TASK over the migrations and checks both the audit file and the app's task list.
+- **Runtime versions (#26).** Admin shows the Python, Streamlit, pandas, Altair and Snowpark versions actually running
+  ("—" when unreadable). Package version ceilings in environment.yml wait until these are observed on the deployed app,
+  because a spec the Snowflake package resolver rejects would stop the app from starting.
+- **Errors say who, which build and where (#50).** APP_ERROR_LOG.CONTEXT now carries the viewer, the app build and a
+  short code-location traceback after the copyable ref (ROLE_NAME stays the owner role under owner's rights). Admin ▸
+  Errors & telemetry shows viewers and the last build per error family (newest 100 errors).
+- **Section visits (#50).** Each page section and sub-view shown or chosen is logged once per page entry and once per
+  change (APP_USAGE.SECTION, written for the first time). Admin ▸ Performance ▸ Section visits (90d) lists visits per
+  section, with never-visited sections shown as 0 so retiring a section follows data.
+- **Ask demand (#47, logging only).** Answered, failed and refused Ask questions are logged once per question.
+  Refusals are stored as an 8-word lower-cased stem with digits masked, and the built-in refusal example is excluded.
+  Admin ▸ Performance ▸ Ask demand (90d) shows what people ask and what was refused. No new answerers yet.
+- **Statement-timeout wording (#33).** Admin no longer calls 300s the default: V002 sets 5m on WH_ALFA_ADMIN, and
+  Snowflake's own default is 48h (172800 s). An unset level reads "Snowflake default".
+- **Release locks are derived (#49).** The migration tip and APP_VERSION are no longer hardcoded in about 50 tests.
+  tests/test_release_lockstep.py derives both validate.sql literals (and the rebuild copy), the run-doc list, the bundle
+  name and APP_VERSION = the top CHANGELOG heading, and fails if a test pins them again. A new migration or release no
+  longer edits about 52 test files; this version bump itself needed none. Per-page first-paint read counts are pinned
+  in tests/test_usage_sim.py, and tests/_source.py is the shared source reader.
+- **First-paint cost.** Admin goes from 3 to 4 statements (the header's SCHEMA_VERSION check, 5-minute cache); every
+  other page is unchanged. Performance gains two APP_USAGE reads; Task health reads nothing until switched on. Section
+  and Ask rows ride the existing buffered usage INSERT (one per rerun). ACCOUNT_USAGE budgets and reachable sets are
+  unchanged.
+- **Privacy.** RUNBOOK §13 now discloses section visits, Ask stems and the viewer/build stored with app errors.
+  A failed usage write now logs only the INSERT's target, columns and row count, never the row values (it used to
+  copy up to 200 characters, which could include a viewer name or a refused-question stem, into APP_ERROR_LOG).
+- **Tests never touch Snowflake.** A new tests/conftest.py refuses every Snowflake session under pytest and points
+  the connector at an empty config folder. Before this, a plain `pytest` run on a machine with a default Snowflake
+  connection could run real reads and write APP_ERROR_LOG / APP_USAGE rows through the page harnesses.
+- **Owner-side.** App-only: `snow streamlit deploy --replace`. No migration and no runbox step. After deploying, Admin ▸
+  Migrations & freshness ▸ Check OVERWATCH task health is the post-deploy check.
+
 ## 4.598.0 - Scheduled operator backups retired (V161) (2026-09-28)
 
 Owner decision (2026-09-28): no scheduled operator-data backups, and no `DBA_MAINT_DB.OVERWATCH_BAK` schema.

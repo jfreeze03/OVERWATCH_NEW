@@ -73,6 +73,9 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("ops.top_queries_by_elapsed", lambda: ops_sql.top_queries_by_elapsed(1, "ALFA", 1)),
     ("ops.failures_by_error", lambda: ops_sql.failures_by_error(1, "ALFA")),
     ("ops.task_runs", lambda: ops_sql.task_runs(1, "ALFA")),
+    # #26 Task health run summary (INFORMATION_SCHEMA). Its SHOW TASKS twin is not a canary: the tab
+    # EXPLAINs every entry, and SHOW cannot be EXPLAINed.
+    ("ops.overwatch_task_run_summary", lambda: ops_sql.overwatch_task_run_summary(24)),
     ("ops.warehouse_pressure", lambda: ops_sql.warehouse_pressure(1, "ALFA")),
     ("ops.lock_contention", lambda: ops_sql.lock_contention(1)),
     ("security.users_without_mfa", lambda: security_sql.users_without_mfa("ALFA")),
@@ -137,6 +140,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("ops.volume_deltas", lambda: ops_sql.volume_deltas()),
     ("mart.dept_budgets", lambda: mart_sql.dept_budgets()),
     ("mart.app_usage_summary", lambda: mart_sql.app_usage_summary(1)),
+    ("mart.section_visit_summary", lambda: mart_sql.section_visit_summary(1)),
+    ("mart.ask_demand_summary", lambda: mart_sql.ask_demand_summary(1)),
     ("mart.app_performance_slo", lambda: mart_sql.app_performance_slo(1)),
     ("mart.contract_exhaustion", lambda: mart_sql.contract_exhaustion()),
     ("mart.savings_summary_quarter", lambda: mart_sql.savings_summary_quarter()),

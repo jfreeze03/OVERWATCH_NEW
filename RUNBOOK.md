@@ -108,8 +108,8 @@ Run in order as a DBA role (SNOW_SYSADMINS unless noted):
 | V025 break-glass policy | `SEC_BREAK_GLASS_USE` disabled (ACCOUNTADMIN/SNOW_ACCOUNTADMINS are routine here) |
 | V026 teams-safe delivery | sender v3: JSON-escaped payloads (quotes/newlines/tabs); Teams Workflows compatible |
 
-> **This table lists landmark migrations only.** The full chain is **V001..V124**
-> (124 files in `snowflake/migrations/`, enumerated in `admin.py` `_EXPECTED_MIGRATIONS`
+> **This table lists landmark migrations only.** The full chain is **V001 through the repo tip**
+> (every file in `snowflake/migrations/`, enumerated in `admin.py` `_EXPECTED_MIGRATIONS`
 > and DEPLOYMENT.md §1). Run every migration in order — the V017 predecessor guard
 > refuses to skip any. V027..V124 add the mart family (V027), the incident system,
 > loader rewrites, the alert-scan split (V062), and the per-table storage mart (V124).
@@ -355,8 +355,8 @@ SOC. **Governance drift score** at top (§6). Sections:
 
 ### Admin
 Settings (edit any SETTINGS key with typed confirm) ·
-Migrations & freshness (SCHEMA_VERSION vs the expected V001..V124 set — admin.py
-`_EXPECTED_MIGRATIONS` — with a drift warning) ·
+Migrations & freshness (SCHEMA_VERSION vs the expected V001-to-tip set — admin.py
+`_EXPECTED_MIGRATIONS` — with a drift warning, and the on-demand Task health check) ·
 App self-cost (the app's own queries/failures on WH_ALFA_ADMIN) · Org
 spend (ORGANIZATION_USAGE currency by account) · Performance (slowest app
 statement families by parameterized hash + session cache-hit estimate) ·
@@ -648,11 +648,19 @@ SP_CHANGE_IMPACT_SCAN, SP_ANOMALY_SWEEP, SP_PURGE_FACTS
 **Functions:** COMPANY_FOR_USER. **Tasks:** §4. **Misc:** SCHEMA_VERSION,
 APP_ERROR_LOG, FORECAST_ML_DAILY (opt-in).
 
-**Usage analytics disclosure:** `APP_USAGE` records user name, page, first
-render time (ms), and timestamp — one row per page change per session, used
-only for the Admin adoption/performance panels. Retention is
-`APP_USAGE_RETENTION_DAYS` (default 365, floor 90) via the monthly purge.
-Tell your users it exists; auditors will ask.
+**Usage analytics disclosure:** `APP_USAGE` records the viewer's user name
+and a timestamp for: one row per page entry (with first-render ms), a ~10%
+sample of same-page reruns, each section or sub-view shown on a page entry or
+chosen (`section_visit`/`subsection_visit` + the section label), operator
+actions (acks, resolves, exports, remediations), and Ask questions
+(`ask_answered`/`ask_failed` with the answer type, or `ask_refused` with an
+8-word lower-cased stem of the question, digits masked). `APP_ERROR_LOG.CONTEXT`
+records the viewer name, app build and a short code-location traceback per app
+error (`ERROR_LOG_RETENTION_DAYS`, default 180, floor 30). A failed usage write
+logs only the INSERT's target, column list and row count, never the row values.
+Read by Admin (DBA profile), and by each viewer's own "since your last visit"
+opener (their last-activity time only). Retention `APP_USAGE_RETENTION_DAYS`
+(default 365, floor 90). Tell your users it exists; auditors will ask.
 
 **Canary** (Admin → Canary): runs every registered SQL builder with 1-row
 caps against the live account and reports PASS/FAIL — the drift detector
@@ -680,9 +688,10 @@ Snowflake release note that mentions ACCOUNT_USAGE, and after migrations.
 ## 15. Troubleshooting
 
 **A page shows "not installed yet."** Admin → Migrations: compare
-SCHEMA_VERSION to the expected set (V001..V124, admin.py `_EXPECTED_MIGRATIONS`); run what's missing, then roles.sql.
+SCHEMA_VERSION to the expected set (V001 through the repo tip, admin.py `_EXPECTED_MIGRATIONS`); run what's missing, then roles.sql.
 
-**Everything is stale.** `SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;` —
+**Everything is stale.** `SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;` (or Admin ▸ Migrations &
+freshness ▸ Task health) —
 suspended tasks are the usual cause (a failed run suspends after retries).
 `SELECT * FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY()) ORDER BY
 SCHEDULED_TIME DESC` for the error; fix; `ALTER TASK ... RESUME;`.
@@ -718,9 +727,11 @@ which builder; check cache-hit %; confirm sections are lazy (only the
 active pill runs) and the batch path isn't falling back (telemetry key
 `batch_fallback`).
 
-**Migration drift warning in Admin.** The app expects exactly V001..V124
-(admin.py `_EXPECTED_MIGRATIONS`); missing = run them in order; extra = you're on a newer schema than the
-deployed app — redeploy the app.
+**Migration drift warning in Admin.** The app expects V001 through its own tip
+(admin.py `_EXPECTED_MIGRATIONS`). Missing = run them in order. Newer than this build = the database is
+ahead of the deployed app: every Admin section shows a redeploy warning naming the versions — redeploy with
+`snow streamlit deploy --replace` from the revision those migrations came from. Then check Admin ▸
+Migrations & freshness ▸ Task health for suspended or failing tasks.
 
 ## 16. Disaster recovery
 

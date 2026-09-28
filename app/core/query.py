@@ -1248,6 +1248,17 @@ def run(
         )
 
 
+def _async_sql_head(sql: str) -> str:
+    """The telemetry INSERT's target and column list plus its row count -- never the row values, which
+    carry viewer names, section labels and refused-question stems (PR A review r1: a failed usage flush
+    used to copy the first 200 characters, values included, into APP_ERROR_LOG.CONTEXT)."""
+    text = str(sql or "")
+    cut = min((i for i in (text.upper().find(" SELECT "), text.upper().find(" VALUES")) if i >= 0),
+              default=min(len(text), 120))
+    rows = text.upper().count(" UNION ALL ") + 1 if cut < len(text) else 0
+    return f"{text[:cut].strip()[:200]} ... ({rows} row(s); values not logged)"
+
+
 def execute_statement_async(sql: str, *, page: str) -> bool:
     """Fire-and-forget write for telemetry rows (usage analytics).
 
@@ -1258,7 +1269,7 @@ def execute_statement_async(sql: str, *, page: str) -> bool:
     """
     ok, why = _statement_allowed(sql)
     if not ok:
-        record_error(page, RuntimeError(why), context=f"execute_statement_async blocked: {sql[:200]}")
+        record_error(page, RuntimeError(why), context=f"execute_statement_async blocked: {_async_sql_head(sql)}")
         return False
     if _entitlement_refusal(sql, page=page, seam="execute_statement_async"):
         return False
@@ -1273,7 +1284,7 @@ def execute_statement_async(sql: str, *, page: str) -> bool:
             submit_collect(session, statement, params)
         return True
     except Exception as exc:
-        record_error(page, exc, context=f"execute_statement_async: {sql[:200]}")
+        record_error(page, exc, context=f"execute_statement_async: {_async_sql_head(sql)}")
         return False
 
 
