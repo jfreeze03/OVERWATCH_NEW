@@ -99,21 +99,51 @@ def _string_constants(tree: ast.AST):
             yield node
 
 
+def _changelog_arg(node: ast.AST) -> str | None:
+    """X when ``node`` is the call ``changelog_entry("X")``."""
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "changelog_entry"
+            and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
+        return node.args[0].value
+    return None
+
+
+def _changelog_idiom_args(tree: ast.AST) -> set[int]:
+    """ids of the "## X ..." constants in the bump-proof idiom ``changelog_entry("X").startswith("## X ...")``
+    (review r2) -- the entry is found by its heading, so the literal never breaks on a bump. Scoped to the
+    idiom itself (review r3): the constant must be the first argument of .startswith on that very call, or on
+    a name assigned from it; a '## X' literal anywhere else in the file is still a pin."""
+    assigned: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            entry = _changelog_arg(node.value)
+            if entry is not None:
+                assigned[node.targets[0].id] = entry
+    ids: set[int] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "startswith" and node.args):
+            continue
+        recv = node.func.value
+        entry = assigned.get(recv.id) if isinstance(recv, ast.Name) else _changelog_arg(recv)
+        arg = node.args[0]
+        if (entry is not None and isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                and arg.value.startswith(f"## {entry} ")):
+            ids.add(id(arg))
+    return ids
+
+
 def _pins_in(text: str, needles: tuple[str, ...]) -> list[int]:
     """Line numbers of release pins in one test file's source: (a) any string constant, in any statement
     shape (assert, loop tuple, call argument, reversed compare, startswith), containing a CURRENT value;
     (b) the legacy literal shapes (any number) in an assert or assignment."""
     tree = ast.parse(text)
     lines = text.splitlines()
-    # review r2: the house idiom `changelog_entry("X").startswith("## X - ...")` finds its entry by heading, so
-    # it is bump-proof; a line marked `# release-pin-ok` names a FIXED release on purpose (history text).
-    entries = {a.value for node in ast.walk(tree)
-               if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "changelog_entry"
-               for a in node.args if isinstance(a, ast.Constant) and isinstance(a.value, str)}
+    # a line marked `# release-pin-ok` names a FIXED release on purpose (history text)
+    idiom = _changelog_idiom_args(tree)
 
     def _exempt(node: ast.Constant) -> bool:
         line = lines[node.lineno - 1] if 0 < node.lineno <= len(lines) else ""
-        return "# release-pin-ok" in line or any(node.value.startswith(f"## {e} ") for e in entries)
+        return "# release-pin-ok" in line or id(node) in idiom
 
     found = {node.lineno for node in _string_constants(tree)
              if any(n in node.value for n in needles) and not _exempt(node)}
@@ -157,6 +187,10 @@ def test_the_pin_guard_catches_every_pin_shape():
         'assert (ROOT / "snowflake/rebuild/02_migrations_V001_V161.sql").exists()',
         'x = check("VERSION BETWEEN 1 AND 161")',
         '_TIP = 160',
+        # review r3: the idiom elsewhere in the file does not excuse a hand-written top-of-CHANGELOG pin
+        'head = changelog_entry("4.599.0")\nassert head.startswith("## 4.599.0 - Slice A")\n'
+        'top = [l for l in read("CHANGELOG.md").splitlines() if l.startswith("## ")][0]\n'
+        'assert top.startswith("## 4.599.0 - ")',
     ]
     for src in shapes:
         assert _pins_in(src, needles), src
@@ -165,6 +199,7 @@ def test_the_pin_guard_catches_every_pin_shape():
           '# assert "V001..V161 applied" in val\nx = 1',
           # review r2: the bump-proof CHANGELOG idiom, and an explicit fixed-history marker
           'head = changelog_entry("4.599.0")\nassert head.startswith("## 4.599.0 - Slice A")',
+          'assert changelog_entry("4.599.0").startswith("## 4.599.0 - Slice A")',
           'assert "logging starts with app 4.599.0." in text   # release-pin-ok: fixed history']
     for src in ok:
         assert not _pins_in(src, needles), src

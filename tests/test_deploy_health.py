@@ -553,3 +553,20 @@ def test_an_opt_in_task_suspended_after_failures_is_a_warning():
                        runs, **_KW)
     assert _status(h, "TASK_ALERT_DRILL") == "Suspended after failures"
     assert h.severity == "warn" and h.headline.endswith(" · 1 opt-in failing")
+
+
+def test_a_suspended_opt_in_trial_that_recovered_or_has_no_state_is_not_failing():
+    """Review r3: EXECUTE TASK on a suspended opt-in task that failed, then succeeded, was not 'suspended after
+    failures'; nor is a task whose SHOW TASKS state is blank (its suspension is not a known fact)."""
+    runs = pd.concat([_runs(), pd.DataFrame([{
+        "TASK_NAME": "TASK_ALERT_DRILL", "SUCCEEDED_N": 1.0, "FAILED_N": 1.0, "SKIPPED_N": 0.0,
+        "LAST_SUCCESS_AT": _T0 + 2 * _HOUR, "LAST_FAILURE_AT": _T0,
+        "LAST_ERROR_MESSAGE": "drill failed", "HISTORY_ROWS": 400.0}])], ignore_index=True)
+    h = dh.task_health(_show({"TASK_ALERT_DRILL": {"state": "suspended"}}, extra=("TASK_ALERT_DRILL",)),
+                       runs, **_KW)
+    assert _status(h, "TASK_ALERT_DRILL") == "Opt-in" and "opt-in failing" not in h.headline
+    assert "succeeded since" in h.rows.set_index("TASK_NAME").loc["TASK_ALERT_DRILL", "NOTE"]
+    failed = runs.assign(SUCCEEDED_N=runs["SUCCEEDED_N"].where(runs["TASK_NAME"] != "TASK_ALERT_DRILL", 0.0),
+                         LAST_SUCCESS_AT=runs["LAST_SUCCESS_AT"].where(runs["TASK_NAME"] != "TASK_ALERT_DRILL"))
+    blank = dh.task_health(_show({"TASK_ALERT_DRILL": {"state": ""}}, extra=("TASK_ALERT_DRILL",)), failed, **_KW)
+    assert _status(blank, "TASK_ALERT_DRILL") == "Opt-in" and "opt-in failing" not in blank.headline

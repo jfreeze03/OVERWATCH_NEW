@@ -292,14 +292,19 @@ def _count(value: object) -> float:
     return number if math.isfinite(number) else 0.0
 
 
+def _recovered(run: Mapping[str, Any]) -> bool:
+    """The newest failure in the window is followed by a success."""
+    last_ok, last_fail = run.get("last_ok", pd.NaT), run.get("last_fail", pd.NaT)
+    return bool(pd.notna(last_ok) and pd.notna(last_fail) and last_ok > last_fail)
+
+
 def _grade_runs(run: Mapping[str, Any]) -> tuple[str, str, str]:
     """(status, severity, note) for a STARTED task from its 24h run counts: Failing (bad) when the newest
     failure is not followed by a success, Recovered / Skipped runs / Cancelled runs (warn), else Running."""
     n_failed, n_skipped = _count(run.get("failed")), _count(run.get("skipped"))
     n_cancelled = _count(run.get("cancelled"))
-    last_ok, last_fail = run.get("last_ok", pd.NaT), run.get("last_fail", pd.NaT)
     if n_failed > 0:
-        if pd.notna(last_ok) and pd.notna(last_fail) and last_ok > last_fail:
+        if _recovered(run):
             return "Recovered", "warn", "failed in the window, succeeded since"
         return "Failing", "bad", ""
     if n_skipped > 0:
@@ -365,11 +370,15 @@ def task_health(tasks: pd.DataFrame | None, runs: pd.DataFrame | None, *, expect
                     status, sev = graded, g_sev
                     note = f"{note}; {g_note}" if g_note else note
                     opt_in_failing += int(graded == "Failing")
-            elif _count(run.get("failed")) > 0:
-                # review r2: FAILED_AND_AUTO_SUSPENDED leaves it suspended -- the terminal form of failing
-                status, sev = "Suspended after failures", "warn"
-                note = f"{note}; failed in the window and is now suspended"
-                opt_in_failing += 1
+            elif task["state"] == "suspended" and _count(run.get("failed")) > 0:
+                if _recovered(run):
+                    # review r3: an opt-in trial (EXECUTE TASK on a suspended task) that failed, then succeeded
+                    note = f"{note}; failed in the window, succeeded since"
+                else:
+                    # review r2: FAILED_AND_AUTO_SUSPENDED leaves it suspended -- the terminal form of failing
+                    status, sev = "Suspended after failures", "warn"
+                    note = f"{note}; its newest run in the window failed and it is suspended"
+                    opt_in_failing += 1
         elif name not in expected_set:
             status, sev = "Not in this build", "warn"
             note = ("live, but no migration in this build creates it — a newer migration's task "
