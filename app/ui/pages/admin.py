@@ -27,7 +27,9 @@ from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
 from app.data import cost_sql, mart_sql
+from app.logic import app_telemetry
 from app.logic.formulas import format_usd, format_usd_precise, humanize_duration, md_dollars, safe_float
+from app.logic.navigate import PAGE_SECTION_LABELS
 from app.ui.components import (
     audit_mode,
     confirm_gate,
@@ -1272,11 +1274,21 @@ def _observability_tab() -> None:
         try:
             _e["FAMILY"] = (_e["ERROR_TYPE"].astype(str) + " · "
                             + _e["ERROR_MESSAGE"].astype(str).str.slice(0, 60))
+            # #50: who hit it and on which build — parsed back out of CONTEXT (the sink's
+            # ROLE_NAME is the owner role under owner's-rights SiS, so the viewer rides there).
+            _meta = _e["CONTEXT"].map(app_telemetry.parse_error_context)
+            _e["VIEWER"] = _meta.map(lambda m: m["viewer"] or None)
+            _e["BUILD"] = _meta.map(lambda m: m["build"] or None)
             grouped = (_e.groupby(["PAGE", "FAMILY"], as_index=False)
                        .agg(COUNT=("FAMILY", "size"), FIRST_SEEN=("LOGGED_AT", "min"),
-                            LAST_SEEN=("LOGGED_AT", "max")))
+                            LAST_SEEN=("LOGGED_AT", "max"),
+                            VIEWERS=("VIEWER", "nunique"), LAST_BUILD=("BUILD", "first")))
+            # unknown (pre-4.599 rows) -> NULL -> '—', never a misleading 0 viewers
+            grouped["VIEWERS"] = grouped["VIEWERS"].where(grouped["VIEWERS"] > 0)
             gsorted = grouped.sort_values("LAST_SEEN", ascending=False).reset_index(drop=True)
             _fam_sel = selectable_table(gsorted, key="err_family_sel", height=240)
+            st.caption("Families, counts and viewers cover the newest 100 logged errors; rows logged "
+                       "before app 4.599.0 carry no viewer or build.")
             # Click a family -> the raw rows behind it (this PAGE + FAMILY) inline. Resolve
             # (PAGE, FAMILY) only on a GENUINELY-NEW click (change-detection sentinel): the
             # selection is sticky and re-emits every rerun, and gsorted re-sorts by LAST_SEEN as
@@ -1485,6 +1497,7 @@ def _performance_tab() -> None:
     elif guard(usage, "", setup_hint="APP_USAGE comes with migration V016; re-run roles.sql for the grant."):
         styled_table(usage.df)
         st.caption("Merging or retiring sections should follow this table, not opinions.")
+    _usage_detail_panels()
 
     # Kept SEPARATE from the session-telemetry table above: that one is THIS viewer's
     # in-session buffer (query_telemetry -> session_state); this is the fleet aggregate
@@ -1512,6 +1525,43 @@ def _performance_tab() -> None:
             "query for each row. Per-session telemetry lives on Errors & telemetry."
         )
     _perf_rider_panels(fq.df if fq.ok and not fq.empty else None)
+
+
+def _usage_detail_panels() -> None:
+    """#50 section visits + #47 Ask demand — two small APP_USAGE reads, ungated (data first).
+
+    Reads only APP_USAGE through mart_sql and never imports the Ask package, so the
+    documented Ask revert (delete the package + page) leaves Admin intact."""
+    section_header("Section visits (90d)", "", "operations")
+    sv = run(mart_sql.section_visit_summary(90), page=_PAGE, key="adm_section_visits", tier="recent",
+             source="APP_USAGE (section_visit / subsection_visit)")
+    if sv.ok and sv.empty:
+        empty_state("no_data_yet", "No section visits logged yet — logging starts with app 4.599.0.")
+    elif guard(sv, "", setup_hint="APP_USAGE comes with migration V016; re-run roles.sql for the grant."):
+        _first = pd.NaT
+        if "FIRST_LOGGED_AT" in sv.df.columns:
+            _first = pd.to_datetime(sv.df["FIRST_LOGGED_AT"], errors="coerce").min()
+        styled_table(app_telemetry.with_unvisited_sections(sv.df, PAGE_SECTION_LABELS)
+                     .drop(columns=["FIRST_LOGGED_AT"], errors="ignore"))
+        _since = _first.strftime("%Y-%m-%d") if pd.notna(_first) else "—"
+        st.caption(f"Logged since {_since}. A page's first section counts on every page entry (it is "
+                   "where the page lands); a 0-visit section is a retirement candidate only after 90 "
+                   "full days of logging.")
+
+    section_header("Ask demand (90d)", "", "operations")
+    ad = run(mart_sql.ask_demand_summary(90), page=_PAGE, key="adm_ask_demand", tier="recent",
+             source="APP_USAGE (ask_refused / ask_answered / ask_failed)")
+    if ad.ok and ad.empty:
+        empty_state("no_data_yet", "No Ask questions logged yet — logging starts with app 4.599.0.")
+    elif guard(ad, "", setup_hint="APP_USAGE comes with migration V016; re-run roles.sql for the grant."):
+        _r0 = ad.df.iloc[0]
+        refused = int(safe_float(_r0.get("REFUSED_TOTAL")))
+        total = int(safe_float(_r0.get("ALL_ASKS")))
+        kpi_row([{"label": "Refused questions (90d)", "value": f"{refused:,} of {total:,}"}])
+        styled_table(ad.df.drop(columns=["REFUSED_TOTAL", "ALL_ASKS"], errors="ignore"))
+        st.caption("Refused rows show an 8-word lower-cased stem of the question with digits masked; "
+                   "answered and failed rows show the answer type. The gallery's built-in refusal "
+                   "example is not counted.")
 
 
 def _perf_rider_panels(fq_df=None) -> None:
@@ -1592,8 +1642,8 @@ def _perf_rider_panels(fq_df=None) -> None:
              source="APP_USAGE.EVENT_KIND (V027 rider)")
     if ue.usable():
         styled_table(ue.df, height=190)
-        st.caption("page_visit dominates by design; the interaction kinds (acks, resolves, "
-                   "exports, remediations) are the operator-effectiveness signal.")
+        st.caption("page_visit and section_visit dominate by design; the interaction kinds (acks, "
+                   "resolves, exports, remediations, asks) are the operator-effectiveness signal.")
     acc = run(mart_sql.acceptance_funnel(90), page=_PAGE, key="acceptance_funnel", tier="recent",
               source="REMEDIATION_LOG + SAVINGS_LEDGER")
     if acc.usable():

@@ -582,3 +582,59 @@ def test_ask_page_is_wired_and_isolated():
     # to analyze() as a false "no data" — preserved through the run_batch_mixed batching.
     assert "not res.ok" in ask_py
     assert "run_batch_mixed" in ask_py            # multi-spec answerers submit one parallel batch
+
+
+# ======================================================= #47: Ask demand telemetry =====
+# These tests belong to the revertible feature (deleted with it). The Admin "Ask demand"
+# panel and mart_sql.ask_demand_summary read only APP_USAGE and are locked in
+# tests/test_app_telemetry.py, which never imports the Ask package.
+
+def test_question_stem():
+    from app.logic.ask import question_stem
+    assert question_stem("Top 10 users last 30 days?") == "top # users last # days"
+    long_q = "Which of our many warehouses spent the most credits on the fifth of May 2026 overall"
+    assert question_stem(long_q) == "which of our many warehouses spent the most"          # 8-word cap
+    assert question_stem(long_q, max_words=3) == "which of our"
+    assert question_stem("x " * 200, max_words=64) == "x " * 40                          # cut at 80 chars
+    assert len(question_stem("abcdefghij " * 20, max_words=64)) <= 80
+    assert question_stem("") == "" and question_stem("   ?!") == ""
+    assert question_stem("user 4111111111111111 order 42") == "user # order #"             # digits masked
+    assert question_stem("anything", max_words=0) == "anything"                            # at least 1 word
+
+
+def test_ask_logs_each_outcome_once_per_question(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.ui.pages import ask
+    calls: list = []
+    monkeypatch.setattr(ask, "st", SimpleNamespace(session_state={}))
+    monkeypatch.setattr(ask, "log_ui_event",
+                        lambda kind, page="", section="": calls.append((kind, page, section)))
+    ask._log_ask("ask_answered", "which user is causing spend spikes", "spend_spike_by_user")
+    # a rerun of the SAME question (window select, AI toggle, company change) never re-logs
+    ask._log_ask("ask_answered", "which user is causing spend spikes", "spend_spike_by_user")
+    assert calls == [("ask_answered", "Ask", "spend_spike_by_user")]
+    ask._log_ask("ask_refused", "what is the weather", "what is the weather")      # a new question
+    assert len(calls) == 2 and calls[-1][0] == "ask_refused"
+    ask._log_ask("ask_answered", "which user is causing spend spikes", "spend_spike_by_user")
+    assert len(calls) == 3                        # only the LAST signature is kept (bounded state)
+
+    def _boom(*a, **k):
+        raise RuntimeError("buffer gone")
+    monkeypatch.setattr(ask, "log_ui_event", _boom)
+    ask._log_ask("ask_failed", "another question", "intent")                       # swallowed, never raises
+
+
+def test_ask_page_telemetry_wiring():
+    src = (_ROOT / "app" / "ui" / "pages" / "ask.py").read_text(encoding="utf-8")
+    body = src.split("\ndef render(", 1)[1]
+    refusal = body.split("if rr.answerer is None:", 1)[1].split("\n    ans = rr.answerer", 1)[0]
+    assert "_log_ask(\"ask_refused\", question, question_stem(question))" in refusal
+    assert refusal.index("!= _REFUSAL_PROBE") < refusal.index("ask_refused")      # the gallery probe is excluded
+    assert refusal.index("ask_refused") < refusal.index("st.warning(")
+    failed = body.split("if res is None or not res.ok:", 1)[1].split("frames[spec.key] = res.df", 1)[0]
+    assert "_log_ask(\"ask_failed\", question, ans.intent)" in failed
+    assert failed.index("ask_failed") < failed.index("return")                    # logged before the early return
+    after = body.split("ans.analyze(", 1)[1]
+    assert "_log_ask(\"ask_answered\", question, ans.intent)" in after
+    assert "ask_answered" not in body.split("ans.analyze(", 1)[0]

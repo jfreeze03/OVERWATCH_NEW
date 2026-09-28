@@ -29,12 +29,15 @@ This package imports app.data builders and app.logic.anomaly READ-ONLY and mutat
 nothing, so those deletions leave the original app byte-for-byte unchanged. (The
 whole feature lives on branch feature/ask-overwatch, so `git checkout main` also
 reverts it cleanly.)
+The Admin 'Ask demand' panel and mart_sql.ask_demand_summary read only APP_USAGE and
+survive a revert. The Ask telemetry tests live in tests/test_ask_registry.py and are
+deleted with it.
 """
 
 from __future__ import annotations
 
 from app.logic.ask.registry import REGISTRY
-from app.logic.ask.router import RouteResult, route
+from app.logic.ask.router import RouteResult, question_stem, route
 from app.logic.ask.types import Answerer, AnswerResult, AskParams, QuerySpec
 
 __all__ = [
@@ -44,5 +47,6 @@ __all__ = [
     "AskParams",
     "QuerySpec",
     "RouteResult",
+    "question_stem",
     "route",
 ]

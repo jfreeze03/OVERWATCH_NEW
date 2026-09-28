@@ -648,10 +648,16 @@ SP_CHANGE_IMPACT_SCAN, SP_ANOMALY_SWEEP, SP_PURGE_FACTS
 **Functions:** COMPANY_FOR_USER. **Tasks:** §4. **Misc:** SCHEMA_VERSION,
 APP_ERROR_LOG, FORECAST_ML_DAILY (opt-in).
 
-**Usage analytics disclosure:** `APP_USAGE` records user name, page, first
-render time (ms), and timestamp — one row per page change per session, used
-only for the Admin adoption/performance panels. Retention is
-`APP_USAGE_RETENTION_DAYS` (default 365, floor 90) via the monthly purge.
+**Usage analytics disclosure:** `APP_USAGE` records the viewer's user name
+and a timestamp for: one row per page entry (with first-render ms), a ~10%
+sample of same-page reruns, each section or sub-view shown on a page entry or
+chosen (`section_visit`/`subsection_visit` + the section label), operator
+actions (acks, resolves, exports, remediations), and Ask questions
+(`ask_answered`/`ask_failed` with the answer type, or `ask_refused` with an
+8-word lower-cased stem of the question, digits masked). `APP_ERROR_LOG.CONTEXT`
+records the viewer name, app build and a short code-location traceback per app
+error (`ERROR_LOG_RETENTION_DAYS`, default 180, floor 30). Used only by Admin
+(DBA profile). Retention `APP_USAGE_RETENTION_DAYS` (default 365, floor 90).
 Tell your users it exists; auditors will ask.
 
 **Canary** (Admin → Canary): runs every registered SQL builder with 1-row
