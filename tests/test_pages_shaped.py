@@ -435,10 +435,7 @@ def test_admin_migrations_task_health_renders_shaped(monkeypatch):
 
 
 @pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
-# v4.599 (#50/#47): the 'Section visits' and 'Ask demand' panels are built by the parallel 'obs'
-# implementer (admin._usage_detail_panels); this worktree only carries the render contract, so it is
-# xfail until the slices integrate. Once they do it must pass: drop the xfail at integration.
-@pytest.mark.xfail(strict=False, reason="lands with the obs slice")
+# v4.599 (#50/#47): the 'Section visits' and 'Ask demand' panels (admin._usage_detail_panels).
 def test_admin_performance_usage_panels_render_shaped():
     """v4.599: Admin > Performance under shaped data paints the new usage panels (Section visits,
     Ask demand) beside Page adoption, with the #33 timeout wording, and does not raise mid-render."""

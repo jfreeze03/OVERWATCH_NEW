@@ -119,7 +119,7 @@ _FIRST_PAINT_BUDGET = {
     "Proof": (0, 9),
     "Alerts": (0, 4),
     "Security": (3, 11),           # AU: gov_counts (USERS/CREDENTIALS/GRANTS_TO_USERS) + tag_probe + tag_cov
-    "Admin": (0, 3),
+    "Admin": (0, 4),               # +1 v4.599 (#26): header ahead-of-build SCHEMA_VERSION check (recent tier)
     "Ask": (0, 1),
 }
 

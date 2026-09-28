@@ -25,6 +25,7 @@ from app.core import errors, session
 from app.data import mart_sql
 from app.logic import app_telemetry
 from app.logic.navigate import PAGE_SECTION_LABELS
+from tests._source import read
 
 _ROOT = Path(__file__).resolve().parents[1]
 _REF_RE = r"OW-\d{8}-\d{6}-[0-9A-F]{6}"
@@ -32,8 +33,6 @@ _USAGE_PREFIX = ("INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE "
                  "(PAGE, SECTION, RENDER_MS, EVENT_KIND, IS_RERUN, USER_NAME) ")
 
 
-def _read(rel: str) -> str:
-    return (_ROOT / rel).read_text(encoding="utf-8")
 
 
 def _body(src: str, name: str) -> str:
@@ -210,8 +209,8 @@ def test_usage_prefix_is_identical_in_main_and_components(monkeypatch):
     from app.core.query import _statement_allowed
     from app.ui import components
     pat = r'"(INSERT INTO DBA_MAINT_DB\.OVERWATCH\.APP_USAGE \([^)]*\) )"'
-    comp = set(re.findall(pat, _read("app/ui/components.py")))
-    main = set(re.findall(pat, _read("app/main.py")))
+    comp = set(re.findall(pat, read("app/ui/components.py")))
+    main = set(re.findall(pat, read("app/main.py")))
     assert comp == {_USAGE_PREFIX}
     assert main == {_USAGE_PREFIX, "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, RENDER_MS) "}
     # runtime: page visit + section visit + UI event land in ONE buffer group (byte-identical prefix)
@@ -311,13 +310,13 @@ def test_section_visit_without_page_or_with_raising_state_is_silent(monkeypatch)
 
 
 def test_lazy_sections_and_main_wire_the_logger():
-    comp = _read("app/ui/components.py")
+    comp = read("app/ui/components.py")
     body = _body(comp, "lazy_sections")
     call = body.index("_log_section_visit(key, str(choice), nested=not deep_link)")
     assert body.index("choice = st.segmented_control(") < call
     assert call < body.index("\n    if deep_link:\n")
     assert 'sentinel = f"_ow_secvis_{key}"' in _body(comp, "_log_section_visit")   # not the purged _ow_nav_ prefix
-    main = _body(_read("app/main.py"), "main")
+    main = _body(read("app/main.py"), "main")
     mark = main.index("_mark_page_entry(page)")
     assert main.index('_schema_floor_breach() if page != "Admin" else None') < mark
     assert mark < main.index("_RENDERERS[page]()")
@@ -325,7 +324,7 @@ def test_lazy_sections_and_main_wire_the_logger():
 
 def test_new_usage_rows_cannot_pollute_first_paint_p95():
     assert "RENDER_MS IS NOT NULL" in mart_sql.app_performance_slo(7)
-    v017 = _read("snowflake/migrations/V017__hardening_v7.sql")
+    v017 = read("snowflake/migrations/V017__hardening_v7.sql")
     arm = v017.split("APPROX_PERCENTILE(RENDER_MS, 0.95)", 1)[1].split("GROUP BY", 1)[0]
     assert "AND RENDER_MS IS NOT NULL" in arm
     assert "COALESCE(EVENT_KIND, 'page_visit') = 'page_visit'" in mart_sql.app_usage_summary(30)
@@ -334,7 +333,7 @@ def test_new_usage_rows_cannot_pollute_first_paint_p95():
                if "OVERWATCH.APP_USAGE (" in p.read_text(encoding="utf-8")]
     assert sorted(p.relative_to(_ROOT).as_posix() for p in writers) == ["app/main.py", "app/ui/components.py"]
     assert "{sql_literal(str(section)[:80]) if section else 'NULL'}, NULL, " in _body(
-        _read("app/ui/components.py"), "log_ui_event")
+        read("app/ui/components.py"), "log_ui_event")
 
 
 # --------------------------------------------------------------------- Admin builders ----
@@ -420,7 +419,7 @@ def test_with_unvisited_sections_fills_zero_rows_and_flags_retired():
 # ------------------------------------------------------------------------- Admin wiring ----
 
 def test_admin_usage_panels_wired_after_page_adoption_and_never_import_ask():
-    admin = _read("app/ui/pages/admin.py")
+    admin = read("app/ui/pages/admin.py")
     perf = _body(admin, "_performance_tab")
     assert perf.index('section_header("Page adoption (30d)"') < perf.index("_usage_detail_panels()")
     assert perf.index("_usage_detail_panels()") < perf.index("Fleet slow/failed fetches")
@@ -433,11 +432,11 @@ def test_admin_usage_panels_wired_after_page_adoption_and_never_import_ask():
         assert banned not in panels, banned
     # the documented Ask revert (delete app/logic/ask + the page) must leave Admin and the mart intact
     for rel in ("app/ui/pages/admin.py", "app/data/mart_sql.py", "app/logic/app_telemetry.py"):
-        assert "app.logic.ask" not in _read(rel), rel
+        assert "app.logic.ask" not in read(rel), rel
 
 
 def test_admin_error_families_show_viewers_and_build():
-    obs = _body(_read("app/ui/pages/admin.py"), "_observability_tab")
+    obs = _body(read("app/ui/pages/admin.py"), "_observability_tab")
     assert "app_telemetry.parse_error_context" in obs
     assert 'VIEWERS=("VIEWER", "nunique")' in obs and 'LAST_BUILD=("BUILD", "first")' in obs
     assert 'FIRST_SEEN=("LOGGED_AT", "min")' in obs
@@ -446,7 +445,7 @@ def test_admin_error_families_show_viewers_and_build():
 
 
 def test_runbook_discloses_section_ask_and_error_viewer_telemetry():
-    rb = _read("RUNBOOK.md")
+    rb = read("RUNBOOK.md")
     block = rb.split("**Usage analytics disclosure:**", 1)[1].split("\n\n", 1)[0]
     for needle in ("section_visit", "subsection_visit", "ask_answered", "ask_failed", "ask_refused",
                    "8-word", "digits masked", "APP_ERROR_LOG.CONTEXT", "viewer name", "app build",
