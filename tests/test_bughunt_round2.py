@@ -101,5 +101,8 @@ def test_operator_writes_use_stable_idempotency_key():
     wb = _src("app/ui/workbench.py")
     assert 'content_request_key(\n                "ui_action"' in wb
     assert "request_key=f\"ui:{action_id}:{uuid4()}\"" not in wb    # fresh-uuid form gone
+    # v4.597 (Option C): the Decision Studio experiment settle (the other stable-key caller) was
+    # retired with the Experiments editor; Proof is READ-ONLY, so it has no write to key at all.
     ds = _src("app/ui/decision_studio.py")
-    assert 'content_request_key(\n                "ui_experiment"' in ds
+    assert "execute_statement(" not in ds and "content_request_key(" not in ds
+    assert "write_gate_open(" not in ds

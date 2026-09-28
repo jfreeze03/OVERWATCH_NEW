@@ -107,8 +107,10 @@ def test_create_sites_rerun_on_success():
     wb = _src("app/ui/workbench.py")
     after_action = wb.split('key="action_new_exec"', 1)[1][:800]
     assert "notify(ok, msg)" in after_action and "st.rerun()" in after_action
-    after_exp = wb.split('key=f"exp_create_{action_id}"', 1)[1][:800]
-    assert "notify(ok, msg)" in after_exp and "st.rerun()" in after_exp
+    # v4.597 (Option C): the experiment create site (the Action Center "Start optimization
+    # experiment" expander) was retired with the Experiments editor — no create site, so no
+    # double-insert to guard. Lock that it stays gone.
+    assert 'exp_create_' not in wb and '"Start optimization experiment"' not in wb
     sec = _src("app/ui/security_center.py")
     after_sec = sec.split('key="sec_exception_create"', 1)[1][:800]
     assert "notify(ok, message)" in after_sec and "st.rerun()" in after_sec
@@ -129,24 +131,29 @@ def test_confidence_columns_labelled_by_epistemics():
     # bare chip) that every decision board routes confidence through.
     assert 'config[confidence_label] = confidence_progress_column(confidence_label' in comp
     assert 'st.column_config.ProgressColumn(' in comp   # inside the shared helper
-    assert 'confidence_label="Confidence (evidence)"' in _src("app/ui/decision_studio.py")
+    # v4.597 (Option C): the evidence-confidence board is the Operations ▸ Optimize fix queue.
+    assert 'confidence_label="Confidence (evidence)"' in _src("app/ui/pages/ops_parts/optimize_queue.py")
     assert 'confidence_label="Confidence (authored)"' in _src("app/ui/workbench.py")
 
 
 # --- rec17/18: no silent row-0 in experiments; scenarios empty-state ---------------
 def test_experiments_require_selection_and_scenarios_guard_empty():
     ds = _src("app/ui/decision_studio.py")
-    exp = ds.split("def _experiments", 1)[1].split("\ndef ", 1)[0]
-    # C47 (v4.315): rec17 "no silent row-0" now lives in the master_detail split —
-    # nothing selected renders the empty-detail hint (never row 0's editor). The
-    # detail body is _render_experiment_detail(row); the primitive shows
-    # empty_detail_msg when no row is bound.
-    assert "master_detail(" in exp and "empty_detail_msg=" in exp
-    assert "index = int(selected) if selected is not None else 0" not in exp  # old row-0
+    # v4.597 (Option C): the Experiments editor was retired (no experiment write path remains).
+    # rec17 "no silent row-0" is still locked on the master_detail primitive every selectable
+    # editor uses — nothing selected renders the empty-detail hint, never row 0's detail — and on
+    # the board that now carries a per-row write (Operations ▸ Optimize's Track).
+    assert "def _experiments" not in ds and "def _render_experiment_detail" not in ds
+    opt = _src("app/ui/pages/ops_parts/optimize_queue.py")
+    assert "master_detail(" in opt and "empty_detail_msg=" in opt
+    assert "index = int(selected) if selected is not None else 0" not in opt  # old row-0
     comp = _src("app/ui/components.py").split("def master_detail(", 1)[1].split("\ndef ", 1)[0]
     assert "if row is not None:" in comp and "empty_detail_msg" in comp
-    scen = ds.split("def _scenarios", 1)[1].split("\ndef ", 1)[0]
-    assert "if actions.empty:" in scen and 'empty_state("no_data_yet"' in scen
+    # rec18: the Scenarios projection is now Proof ▸ Pipeline — an empty pipeline (no addressable
+    # savings AND no open actions) says so and skips the projection controls.
+    pipe = ds.split("def _pipeline_tab(", 1)[1].split("\ndef ", 1)[0]
+    assert "if pipeline.empty:" in pipe and 'empty_state("no_data_yet"' in pipe
+    assert pipe.index("if pipeline.empty:") < pipe.index("_pipeline_projection(pipeline")
 
 
 # --- rec32: products dollar columns declare non-additivity in their help -----------

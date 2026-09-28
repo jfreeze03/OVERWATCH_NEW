@@ -1,9 +1,11 @@
-"""Perf (simulator finding): the Decision Studio page-open verdict and the Scorecard
-section both call _proof_signals in the same render. The run() cache already deduped the 5
-Snowflake reads, but each duplicate call still re-did the Python compute AND emitted a
-cache-hit telemetry row — double-counting those 5 keys in APP_QUERY_TELEMETRY (the perf
-effort's own slow-query oracle). A per-render memo (reset_proof_memo at the page top; safe
-because Decision Studio has no fragments) makes the two callers share ONE computation.
+"""Perf (simulator finding): the Proof page-open verdict and the Proof / Pipeline section
+(formerly the Decision Studio Scorecard) both call _proof_signals in the same render. The run()
+cache already deduped the 5 Snowflake reads, but each duplicate call still re-did the Python
+compute AND emitted a cache-hit telemetry row — double-counting those 5 keys in
+APP_QUERY_TELEMETRY (the perf effort's own slow-query oracle). A per-render memo
+(reset_proof_memo at the page top) makes the callers share ONE computation. v4.597: the page
+now has ONE fragment (the Pipeline projection), and it is safe because that fragment never calls
+_proof_signals — its measured defaults are passed in (locked below and in test_proof_page.py).
 See app/ui/decision_studio.py::_proof_signals / reset_proof_memo. (perf audit 2026-09-02)
 """
 
@@ -73,6 +75,14 @@ def test_reset_re_enables_reads_next_render(monkeypatch):
     ds._proof_signals(3.68)
     assert counter["decision_roi_ledger_full"] == 2
     assert ds._PROOF_MEMO.get("rate") == 3.68
+
+
+def test_the_only_fragment_never_reads_the_memo():
+    import inspect
+    src = inspect.getsource(ds)
+    assert src.count("@st.fragment") == 1
+    frag = src.split("def _pipeline_projection(", 1)[1].split("\ndef _pipeline_tab(", 1)[0]
+    assert "_proof_signals(" not in frag and "reset_proof_memo(" not in frag
 
 
 def test_reset_clears_the_memo(monkeypatch):

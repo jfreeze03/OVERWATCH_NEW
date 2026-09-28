@@ -158,7 +158,7 @@ def _render_change_risk_diagnostic() -> None:
 def security_posture_verdict(company: str) -> dict | None:
     """The Security page's 'should I worry?' verdict, from the domain posture the decision queue
     computes. r-ux: security.render() calls this ABOVE the section bar so the verdict shows on
-    EVERY section (like Overview/Cost/Operations/Decision Studio), not only the default Decision
+    EVERY section (like Overview/Cost/Operations/Proof), not only the default Decision
     queue. The reads are marts (V_SECURITY_EXCEPTION_QUEUE + coverage contract), cached under the
     same keys the decision queue uses — so it costs nothing on that section and only 2 cached mart
     reads on the others (no ACCOUNT_USAGE, no live section scan). None when the queue is unresolved."""

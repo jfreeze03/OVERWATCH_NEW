@@ -60,7 +60,14 @@ def test_slo_summary_empty_carries_the_new_keys():
 # --- UI wiring (#9 caption, #10 n/a, #11 stale surfaced) -------------------
 
 def test_slo_board_surfaces_the_trio():
-    assert 'summary["stale"]' in _SRC              # #11 stale KPI + exception
-    assert 'summary["has_burn"]' in _SRC           # #10 n/a gate
-    assert '"n/a"' in _SRC
-    assert "worst daily P95" in _SRC               # #9 P95-basis disclosure caption
+    # v4.597 (Option C): the custom SLO board was retired (slo_summary / slo_cockpit above stay for
+    # the Entity 360 watchlist badge). Its trust trio carries over to the read-only built-in
+    # objectives on Operations ▸ Pipeline SLA ▸ Tonight, which replaced it:
+    assert "def _slos" not in _SRC
+    ops = (Path(__file__).resolve().parents[2] / "app" / "ui" / "pages" / "operations.py").read_text(
+        encoding="utf-8")
+    panel = ops.split("def _builtin_objectives_panel", 1)[1].split("\ndef ", 1)[0]
+    assert 'cad["stale"]' in panel                 # #11 stale (silently stopped) tasks surfaced
+    assert '"value": "—"' in panel and "0/0" not in panel   # #10 no evidence reads "—", never 0/0
+    assert "tonight still running" in panel        # an in-flight night is not judged as a miss
+    assert "Read-only objectives derived from the ETL clock" in panel   # #9 basis disclosure

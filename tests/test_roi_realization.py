@@ -70,14 +70,15 @@ def test_ledger_builder_carries_finding_type():
 
 def test_roi_is_a_first_class_decision_studio_section():
     page = _src("app/ui/pages/decision_studio.py")
-    # ROI is a top section and dispatched. (The prove-it Scorecard now leads the list as
-    # the flagship landing; ROI is the verified-savings track-record detail behind it.)
-    assert '["Scorecard", "ROI", "Portfolio"' in page
-    assert 'section == "ROI":' in page and "_roi(company)" in page
+    # v4.597 (Option C): the Scorecard + ROI merged into ONE first-class section, Proof ▸ Proof, which
+    # leads the page and is dispatched with the run-rate, realization and the track-record charts.
+    assert '["Proof", "Pipeline"]' in page
+    assert 'section == "Proof":' in page and "_proof_tab(rate)" in page
     ds = _src("app/ui/decision_studio.py")
-    assert "def _roi(company: str)" in ds
-    assert "Return on OVERWATCH" in ds
+    body = ds.split("def _proof_tab(rate: float)", 1)[1].split("\ndef ", 1)[0]
+    assert "Verified savings run-rate" in body and "Realization rate" in body
+    assert "Does OVERWATCH earn its keep?" in body
     # ROI fixes (2026-09-24): the bars read a zero-filled calendar incl. the month-to-date
-    assert "savings_month_calendar(" in ds and "savings_by_lever(" in ds
+    assert "savings_month_calendar(" in body and "savings_by_lever(" in body
     # the old buried realization block in _scenarios now points at the ROI section.
     assert ds.count("Realization — the savings track record") == 0

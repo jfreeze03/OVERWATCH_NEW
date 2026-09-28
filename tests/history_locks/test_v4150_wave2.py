@@ -61,16 +61,19 @@ def test_billed_split_emits_ai_and_other_partitions():
 
 
 def test_cost_truth_kpis_are_dollars_with_ai_aware_billed():
+    # v4.597 (Option C): the Decision Studio Cost Truth KPI board (whose BILLED tile dollarized via
+    # blended_billed_usd, never a flat rate) was retired; its only unique output moved to Cost ▸
+    # Spend & Attribution as a SHARES-only line. The rule still holds where the lenses live now: the
+    # moved ratio prices nothing (no flat-rate $ on any basis), and every billed-$ surface stays
+    # AI-aware.
     ds = _src("app/ui/decision_studio.py")
-    ct = ds.split("def _cost_truth", 1)[1].split("\ndef ", 1)[0]
-    # BILLED uses the blended (AI-aware) dollarization, not a flat rate; the three
-    # compute-clean bases use credits_to_usd.
-    assert "blended_billed_usd(" in ct
-    assert "mart_sql.billed_split(" in ct
-    assert 'format_usd(credits_to_usd(metered, rate))' in ct
-    # dollars are primary (value), credits are the secondary delta.
-    assert '"value": format_usd(billed_usd)' in ct
-    assert '"delta": f"{billed:,.0f} cr"' in ct
+    assert "def _cost_truth" not in ds and "billed_split(" not in ds
+    spend = _src("app/ui/pages/cost_parts/spend.py")
+    cap = spend.split("if _grain_cov is not None:", 1)[1].split("help=", 1)[0]
+    assert "measured_pct" in cap and "allocated_pct" in cap
+    assert "format_usd(" not in cap and "credits_to_usd(" not in cap and "$" not in cap
+    for page in ("app/ui/pages/brief.py", "app/ui/pages/overview.py"):
+        assert "blended_billed_usd(" in _src(page), page
 
 
 # --- rec19: duplicate work-item guard at both create sites ------------------------

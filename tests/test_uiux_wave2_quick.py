@@ -57,15 +57,18 @@ def test_badge_dims_match_what_each_count_varies_with():
     assert "_streaks_known and _fresh_known" in ops    # half the evidence must not badge
     sec = _src("app/ui/security_center.py")
     assert 'dims=("company",)' in sec                  # window-independent queue
-    ds = _src("app/ui/decision_studio.py")
-    assert "dims=()" in ds                             # account-wide experiments
+    # v4.597 (Option C): the account-wide Experiments badge (dims=()) retired with the editor; the
+    # Optimize badge counts the untracked ACT NOW families of ONE company + window, so it declares both.
+    opt = _src("app/ui/pages/ops_parts/optimize_queue.py")
+    assert 'stash_section_count(_PAGE, "Optimize", len(act_now), dims=("company", "days"))' in opt
+    assert "stash_section_count(" not in _src("app/ui/decision_studio.py")
 
 
 def test_three_pages_badge_from_stashed_counts():
     for rel, label in (
         ("app/ui/pages/operations.py", '"Tasks"'),
         ("app/ui/security_center.py", '"Decision queue"'),
-        ("app/ui/decision_studio.py", '"Experiments"'),
+        ("app/ui/pages/ops_parts/optimize_queue.py", '"Optimize"'),   # v4.597: was DS "Experiments"
     ):
         assert f"stash_section_count(_PAGE, {label}" in _src(rel), rel
     for rel in ("app/ui/pages/operations.py", "app/ui/pages/security.py",

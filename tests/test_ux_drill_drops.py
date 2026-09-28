@@ -56,7 +56,11 @@ def test_security_dormant_drill_and_scope_filter():
 
 def test_decision_studio_scenarios_drill():
     ds = _src("app/ui/decision_studio.py")
-    assert 'key="ds_scenarios"' in ds and '_open_entity(' in ds                   # #5
+    # v4.597 (Option C): the Scenarios drill is the Proof ▸ Pipeline table's; a row opens its source
+    # entity in Entity 360 — offered only to a profile that can open Control Room (not EXECUTIVE).
+    pipe = ds.split("def _pipeline_tab(", 1)[1].split("\ndef ", 1)[0]
+    assert 'key="proof_pipeline_table"' in pipe and '_open_entity(' in pipe          # #5
+    assert pipe.index('if can_open("Control Room"):') < pipe.index('key="proof_pipeline_table"')
 
 
 def test_brief_and_control_room_alert_drills():

@@ -106,4 +106,5 @@ def test_proof_is_wired_into_decision_studio():
     ds = (_ROOT / "app" / "ui" / "decision_studio.py").read_text(encoding="utf-8")
     page = (_ROOT / "app" / "ui" / "pages" / "decision_studio.py").read_text(encoding="utf-8")
     assert "account_precision(" in ds and "acceptance_summary(" in ds and "proof_verdict(" in ds
-    assert "Scorecard" in page
+    # v4.597 (Option C): the Scorecard became the page's leading Proof section
+    assert '["Proof", "Pipeline"]' in page and 'section == "Proof"' in page

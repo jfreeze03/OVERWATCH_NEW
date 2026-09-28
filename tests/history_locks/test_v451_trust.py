@@ -130,6 +130,12 @@ _REACHABLE = {
     # app tables; QUERY_HISTORY is the opt-in live-profile toggle (query_opportunity_fingerprints,
     # byte-identical to the Queries board call, so the two share one cache entry) — off first paint.
     "app/ui/pages/ops_parts/optimize_queue.py": ("QUERY_HISTORY",),
+    # v4.597 (Option C): the Proof page. The shell reaches nothing; the body's ONLY reach is
+    # ACCESS_HISTORY from the HIDDEN _products section (product_consumer_reads), which nothing
+    # dispatches any more — the live Proof / Pipeline sections are app tables + marts
+    # (test_proof_page pins that the body minus _products reaches no ACCOUNT_USAGE table).
+    "app/ui/pages/decision_studio.py": (),
+    "app/ui/decision_studio.py": ("ACCESS_HISTORY",),
     # v4.52: + the object-ledger recon builder (Codex #7) — QAH and the five
     # maintenance-arm source histories, click-gated on the Canary tab.
     # v4.589 (Next-Fifty #25): mart-vs-live recon gains the warehouse + AI arms (toggle-gated Canary tab).

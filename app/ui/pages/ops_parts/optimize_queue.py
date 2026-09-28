@@ -1,11 +1,11 @@
 """Operations > Optimize: the recurring-query fix queue (v4.597, Option C).
 
-The old Decision Studio Portfolio rebuilt as a work queue: every measured query family with its
-observed mart dollars, ONE specific diagnosis and a first fix, and a one-click Track into Action
-Center (an idempotent ACTION_QUEUE insert keyed on the fingerprint). No live read on first paint:
-the queue, the tracked set and the watchlist come from app/mart tables in one mixed-tier round
-trip. The optional live query profile reuses the Operations > Queries scan byte-for-byte, so the
-two sections share one cache entry.
+The old Portfolio (formerly on the Decision Studio page) rebuilt as a work queue: every measured
+query family with its observed mart dollars, ONE specific diagnosis and a first fix, and a
+one-click Track into Action Center (an idempotent ACTION_QUEUE insert keyed on the fingerprint).
+No live read on first paint: the queue, the tracked set and the watchlist come from app/mart
+tables in one mixed-tier round trip. The optional live query profile reuses the Operations >
+Queries scan byte-for-byte, so the two sections share one cache entry.
 
 Write safety: a row click only selects (master_detail binds by identity); Track lives in the
 detail pane behind an operator gate + the C48 latch, and Track all ACT NOW is one capped,
@@ -19,7 +19,7 @@ import streamlit as st
 
 from app.core.identity import identity_sql, viewer_name
 from app.core.query import execute_statement, run, run_batch_mixed
-from app.core.state import navigation_context, request_navigation
+from app.core.state import can_open, navigation_context, request_navigation
 from app.data import ops_sql, workbench_sql
 from app.logic import query_opt
 from app.logic.decision import prioritize_workloads
@@ -64,18 +64,6 @@ _SOURCE_LABEL = {
     "none": "nothing specific yet",
 }
 _OPEN_STATUS = "Tracked (open)"
-
-
-def _can_open(page: str) -> bool:
-    """Does this viewer's profile offer ``page``? Fail-open on an unreadable profile, like the
-    since-last-visit opener (the navigation clamp still holds)."""
-    try:
-        from app.config import PAGES_BY_PROFILE
-        from app.core.session import active_profile, current_role
-        allowed = PAGES_BY_PROFILE.get(active_profile(current_role()), ())
-    except Exception:  # noqa: BLE001 - a cross-link gate is chrome, never break the page
-        return True
-    return not allowed or page in allowed
 
 
 def _open_entity(fingerprint: str) -> None:
@@ -358,7 +346,7 @@ def _render_detail(row, *, company: str, is_operator: bool, live_on: bool) -> No
     st.caption(f"Action Center: {status}.")
     # Cross-page doorways only for a viewer whose profile offers Control Room (the pane already
     # sits in master_detail's column, so the two links stack rather than nest another column row).
-    _cr_ok = _can_open("Control Room")
+    _cr_ok = can_open("Control Room")
     if action_id and _cr_ok and st.button("Open in Action Center →", key=f"opt_open_ac:{fp[:16]}",
                                           type="tertiary"):
         request_navigation("Control Room", "Action Center", context={"action_id": action_id})

@@ -59,12 +59,16 @@ def test_effect_line_offers_clear_owner_and_defer_via_v092_flags():
 
 
 def test_experiment_effect_is_honest_about_status_and_audit():
+    # v4.597 (Option C): the experiment editor (and its ledger-booking save) was retired — Proof has
+    # no write path at all. The write that replaced it on a decision board (Operations ▸ Optimize's
+    # Track / Track all) keeps the F58 honesty: the exact statement is shown BEFORE the button, and
+    # the receipt says what really happened (idempotent: an already-open item is skipped).
     ds = _src("app/ui/decision_studio.py")
-    block = ds.split("def _render_experiment_detail", 1)[1].split("\ndef ", 1)[0]
-    assert "savings ledger" in block                       # F58 example: book $X to the ledger
-    assert "reverse its prior ledger booking" in block     # the reversal branch
-    # review fix: status clause only on a real move; "audited" only on the settle path
-    assert "if update_status != current:" in block
-    assert '_settle = update_status in ("VERIFIED", "REJECTED", "ROLLED_BACK")' in block
-    assert '" — audited." if _settle else "."' in block
-    assert block.index("_parts") < block.index('st.expander("SQL preview")')
+    assert "def _render_experiment_detail" not in ds and "execute_statement(" not in ds
+    opt = _src("app/ui/pages/ops_parts/optimize_queue.py")
+    bulk = opt.split("# Track all ACT NOW:", 1)[1].split("_ctx_fp =", 1)[0]
+    assert bulk.index("st.code(_bulk_sql") < bulk.index('st.button(f"Track all ACT NOW')
+    assert "already open in Action Center were skipped" in bulk
+    single = opt.split('_sql = track_fingerprints_sql(track_items([row.to_dict()]', 1)[1]
+    assert single.index("st.code(_sql") < single.index('st.button("Track"')
+    assert "idempotent: an item already open for this family is" in single

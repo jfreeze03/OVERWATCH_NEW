@@ -69,9 +69,12 @@ def test_savings_ledger_limit_is_optional() -> None:
 
 def test_roi_and_scorecard_read_the_full_ledger() -> None:
     src = _src("app/ui/decision_studio.py")
-    # both economics surfaces read the uncapped ledger under a distinct cache key
-    assert src.count("mart_sql.savings_ledger(limit=None)") == 2
-    assert src.count('key="decision_roi_ledger_full"') == 2
+    # v4.597 (Option C): the Scorecard and ROI merged into Proof, so the uncapped ledger is read at
+    # EXACTLY one site — the shared _proof_signals (memoized per render) — under its distinct key.
+    assert src.count("mart_sql.savings_ledger(limit=None)") == 1
+    assert src.count('key="decision_roi_ledger_full"') == 1
+    signals = src.split("def _proof_signals(", 1)[1].split("\ndef ", 1)[0]
+    assert "mart_sql.savings_ledger(limit=None)" in signals
     # the old capped read is gone from the economics surfaces
     assert "mart_sql.savings_ledger(), page=_PAGE, key=\"decision_roi_ledger\"" not in src
 

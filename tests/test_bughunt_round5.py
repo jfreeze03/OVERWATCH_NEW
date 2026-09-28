@@ -74,9 +74,12 @@ def test_content_request_key_is_stable_across_minutes(monkeypatch):
     k2 = content_request_key("ui_action", "a|IN_PROGRESS|x")
     assert k1 == k2 and len(k1) == 32                       # deterministic, no minute bucket
     assert content_request_key("ui_action", "a|DONE|x") != k1   # different content -> different key
-    # the two content-signature callers use the time-independent helper, not idempotency_key
+    # the content-signature caller uses the time-independent helper, not idempotency_key. (v4.597:
+    # the second caller, the Decision Studio experiment settle, was retired — Proof never writes.)
     assert "content_request_key(" in _src("app/ui/workbench.py")
-    assert "content_request_key(" in _src("app/ui/decision_studio.py")
+    ds = _src("app/ui/decision_studio.py")
+    assert "content_request_key(" not in ds and "idempotency_key(" not in ds
+    assert "execute_statement(" not in ds
 
 
 def test_idempotency_key_still_minute_bucketed_for_double_click_dedup(monkeypatch):

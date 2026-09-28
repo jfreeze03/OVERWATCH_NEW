@@ -50,9 +50,12 @@ def test_f59_decision_rows_renders_watched_as_a_star(monkeypatch):
 
 def test_f59_scenarios_table_stars_its_watched_column():
     studio = _src("app/ui/decision_studio.py")
-    # the scenarios board maps WATCHED through the shared star + passes the config
-    assert 'display["WATCHED"] = display["WATCHED"].map(watch_star)' in studio
-    assert '_scen_cfg["WATCHED"] = watch_star_column()' in studio
+    # v4.597 (Option C): the Scenarios board is the Proof ▸ Pipeline table — it maps WATCHED
+    # through the shared star + passes the config
+    pipe = studio.split("def _pipeline_tab(", 1)[1].split("\ndef ", 1)[0]
+    assert 'display["WATCHED"] = display["WATCHED"].map(watch_star)' in pipe
+    assert '_pipe_cfg["WATCHED"] = watch_star_column()' in pipe
+    assert pipe.count("column_config=_pipe_cfg") == 2        # both the drill and the plain table
 
 
 def test_f59_entity_360_button_and_brief_badge_use_the_star():

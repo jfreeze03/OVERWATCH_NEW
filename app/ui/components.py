@@ -185,7 +185,7 @@ def _section_slug(label: str) -> str:
 
 # F6: the ACCOUNT_USAGE lag note is only true where the page actually reads
 # ACCOUNT_USAGE / metering data (directly or via a same-day live fallback).
-# Printing it on app-table pages (Admin, Ask, Decision Studio, ...) trained the
+# Printing it on app-table pages (Admin, Ask, Proof, ...) trained the
 # eye to skip it exactly where it matters — gate it to the metering surfaces.
 # Review fix: Control Room (Pulse/Triage live-fallback to QUERY_HISTORY /
 # TASK_HISTORY) and Brief (its headline MTD credit spend is FACT_METERING_DAILY,
@@ -199,7 +199,7 @@ _LAGGING_SURFACES = {"Cost Intelligence", "Operations", "Security", "Overview",
 # also writes lags a rerun and is shared across pages, so it is not used here.
 _PAGE_SECTION_KEY = {
     "Control Room": "cr_section", "Cost Intelligence": "cost_section",
-    "Operations": "ops_section", "Decision Studio": "decision_section",
+    "Operations": "ops_section", "Proof": "decision_section",
     "Alerts": "alerts_section", "Security": "sec_section", "Admin": "adm_section",
 }
 
@@ -219,7 +219,11 @@ def _page_breadcrumb(title: str) -> str:
         _key = _PAGE_SECTION_KEY.get(title)
         if _key and _labels:
             _sec = str(st.session_state.get(_key) or "")
-            parts.append(_sec if _sec in _labels else _labels[0])
+            _sec = _sec if _sec in _labels else _labels[0]
+            # v4.597: a section named like its page (Proof ▸ Proof) would read as a stutter —
+            # the page crumb already says where you are.
+            if _sec != title:
+                parts.append(_sec)
     except Exception:  # noqa: BLE001 - the breadcrumb is chrome, never break a page
         pass
     return " ▸ ".join(html.escape(p) for p in parts)

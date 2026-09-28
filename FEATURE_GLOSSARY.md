@@ -587,7 +587,7 @@ Live incident-response console: reference lever catalogue, a validated-SQL gener
 
 *Columns:* **Running queries table** — QUERY_ID, USER_NAME (+resolved), WAREHOUSE_NAME, EXECUTION_STATUS, START_TIME, ELAPSED_S, QUERY_PREVIEW, PROFILE deep-link; **Emergency lever catalogue** — Reference markdown of levers, exact statement templates, and when to use each (kill-switch guidance)
 
-## Decision Studio
+## Proof
 *7 sections · 48 metrics.*
 
 ### ROI — Return on OVERWATCH (verified savings)

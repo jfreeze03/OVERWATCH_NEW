@@ -151,7 +151,7 @@ PLAYBOOKS: dict[str, str] = {
         "is flagged there, beside its metric history and open work.\n"
         "2. Fix the entity (Operations > Queries for a warehouse or query family, Operations > Tasks "
         "for a task), or accept the new normal. The in-app SLO editor was removed in v4.597 (older "
-        "event text still says Decision Studio -> SLOs), so change or retire the objective in "
+        "event text still points at that retired editor), so change or retire the objective in "
         "Snowsight: `UPDATE DBA_MAINT_DB.OVERWATCH.SLO_OBJECTIVES SET ACTIVE = FALSE WHERE SLO_ID = "
         "'<id>';` (the id is the second `|`-separated part of the event's dedupe key).\n"
         "3. The objectives that need no setup (nightly cycle done by the target, tasks on cadence) "

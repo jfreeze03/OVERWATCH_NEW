@@ -1878,8 +1878,8 @@ def monthly_bars_usd(df: pd.DataFrame, label_col: str, usd_col: str, *, partial_
                      y_title: str = "USD") -> None:
     """One bar per calendar month in the frame's order (chronological), a $ label on each non-zero bar,
     and the in-flight month dimmed like every other partial period (C38) - so a single verified month
-    reads as a bar among zero months, never as a lone dot on an empty line (Decision Studio ROI,
-    owner screenshot 2026-09-24)."""
+    reads as a bar among zero months, never as a lone dot on an empty line (Proof, formerly Decision
+    Studio ROI; owner screenshot 2026-09-24)."""
     if df is None or df.empty or float(pd.to_numeric(df[usd_col], errors="coerce").fillna(0).sum()) <= 0:
         _empty_note("Nothing verified in these months yet.")
         return

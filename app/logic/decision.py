@@ -1,4 +1,5 @@
-"""Pure prioritization and scenario math for the Decision Studio."""
+"""Pure prioritization and scenario math: the Operations ▸ Optimize fix queue's ranking and the Proof ▸
+Pipeline projection (both formerly on the Decision Studio page)."""
 
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ import pandas as pd
 from app.logic.formulas import safe_float
 from app.logic.savings_rollup import SavingsOpportunity
 
-# Lane gates for the Decision-Studio portfolio. Named so the scatter's confidence
+# Lane gates for the query-family portfolio (Operations ▸ Optimize). Named so the scatter's confidence
 # guide lines (F46) stay in lockstep with the lane assignment in prioritize_workloads.
 # NOTE: ACT NOW keys off a PRIORITY_SCORE percentile (a composite of impact,
 # confidence, reliability and effort) — NOT an impact threshold — so only the

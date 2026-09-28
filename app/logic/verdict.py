@@ -149,10 +149,10 @@ def operations_signals(inputs: pd.DataFrame | None, stale_sources: int = 0) -> l
 
 
 def decision_studio_signals(proof: dict | None) -> list[Signal]:
-    """Wave 2 #8: page-verdict Signals for Decision Studio, DERIVED from the prove-it
-    verdict (app.logic.proof.proof_verdict) the Scorecard section already computes — so
-    the page-open 'should I worry?' line can never disagree with the scorecard banner
-    below it (same thresholds, same 'unproven' honesty), and no parallel model drifts.
+    """Wave 2 #8: page-verdict Signals for the Proof page (formerly Decision Studio; the
+    function name is kept), DERIVED from the prove-it verdict (app.logic.proof.proof_verdict)
+    the Proof section computes — so the page-open 'should I worry?' line can never disagree
+    with the section's figures below it (same thresholds, same 'unproven' honesty), and no parallel model drifts.
 
     Maps proof_verdict's level to the page vocabulary: 'good' -> no concern (Healthy);
     'watch' -> one warn Signal per worst-first reason; 'unproven' (not enough labeled

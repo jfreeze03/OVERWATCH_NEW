@@ -12,7 +12,7 @@ from app.config import SAVINGS_ACTIVE_MONTHS
 from app.core.errors import safe_page
 from app.core.identity import viewer_name
 from app.core.query import run, run_batch
-from app.core.state import filters, request_navigation
+from app.core.state import can_open, filters, request_navigation
 from app.data import mart_sql
 from app.logic import case_file, contract_planner
 from app.logic.actions import deferred_summary, rank_actions
@@ -318,7 +318,7 @@ def render() -> None:
             "help": f"Monthly run-rate of VERIFIED ledger items verified in the last {SAVINGS_ACTIVE_MONTHS} "
                     "months — proven by before/after actuals, never mixed with estimates, and it does not "
                     f"reset when a quarter starts ({format_usd(verified_qtd)}/mo added this quarter; detail "
-                    "on Decision Studio ▸ ROI). App cost = the shared app/loader warehouse's trailing 30-day "
+                    "on Proof). App cost = the shared app/loader warehouse's trailing 30-day "
                     "(monthly) run cost — same horizon. Green: the verified run-rate covers the app's run cost.",
         })
         if pipeline > 0:
@@ -405,6 +405,11 @@ def render() -> None:
     kpi_row(headline)
     if secondary:
         kpi_row(secondary)
+    # v4.597 (Option C): the verified-savings tile's detail — per-item evidence, realization, the priced
+    # pipeline — lives on Proof, which every profile (EXECUTIVE included) can open. One quiet doorway.
+    if roi.usable() and can_open("Proof") and st.button("Open Proof →", key="brief_open_proof",
+                                                        type="tertiary"):
+        request_navigation("Proof", "Proof")
     # N7: same disclosure as Overview — the headline dollars are credit-billed
     # services; storage and data-transfer bill separately (Cost Intelligence).
     # #1: pure billing-basis disclosure → audit-mode only (the note Overview also hides).

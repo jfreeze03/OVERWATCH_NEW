@@ -87,9 +87,17 @@ def test_remaining_pages_thread_bounds_into_their_scope_reads():
     assert "admin_role_activity(days, company, bounds=bounds)" in sec
     # Control Room's only scope read (spend movers vs prior) carries bounds
     assert "fact_warehouse_window_vs_prior(" in cr and 'f["bounds"]' in cr
-    # Decision Studio threads bounds into Portfolio/Products/Cost-Truth
-    assert "workload_portfolio(" in ds and "bounds=bounds" in ds
-    assert "cost_truth(" in ds
+    # v4.597 (Option C): the old Decision Studio scope reads moved; each still threads bounds —
+    # the Portfolio into Operations ▸ Optimize, Cost Truth into Spend's grain ratio, and Proof ▸
+    # Pipeline's addressable mart reads (the hidden Products body keeps its bounds too).
+    opt = _src("app/ui/pages/ops_parts/optimize_queue.py")
+    assert "workbench_sql.optimize_queue(days, company, _QUEUE_CAP, bounds=bounds)" in opt
+    spend = _src("app/ui/pages/cost_parts/spend.py")
+    assert "workbench_sql.cost_truth(days, company, bounds=bounds)" in spend
+    pipe = ds.split("def _pipeline_tab(", 1)[1].split("\ndef ", 1)[0]
+    assert "mart27_sql.eff_idle_analysis(days, company, bounds=bounds)" in pipe
+    assert "mart27_sql.eff_sizing_profile(days, company, bounds=bounds)" in pipe
+    assert "data_product_economics(days, company, bounds=bounds)" in ds
 
 
 def test_ops_and_security_builders_honor_last_month_bounds():

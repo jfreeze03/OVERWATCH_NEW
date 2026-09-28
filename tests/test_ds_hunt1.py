@@ -96,13 +96,17 @@ def test_unpriced_candidates_are_counted_but_gross_is_zero() -> None:
 
 
 def test_scenarios_ui_distinguishes_unpriced_and_discloses_the_cap() -> None:
+    # v4.597 (Option C): the Scenarios projection is Proof ▸ Pipeline (the sliders live in the
+    # _pipeline_projection fragment, the reads + cap disclosure in _pipeline_tab).
     src = _src("app/ui/decision_studio.py")
+    projection = src.split("def _pipeline_projection(", 1)[1].split("\ndef _pipeline_tab(", 1)[0]
+    pipe = src.split("def _pipeline_tab(", 1)[1].split("\ndef ", 1)[0]
     # unpriced vs measured-zero
-    assert '_priced = has_candidates and projection["gross_estimate"] > 0' in src
-    assert 'return format_usd(value) if _priced else "Unpriced"' in src
+    assert '_priced = has_candidates and projection["gross_estimate"] > 0' in projection
+    assert 'return format_usd(value) if _priced else "Unpriced"' in projection
     # 500-cap disclosure
-    assert "if len(actions.df) >= 500:" in src
-    assert "Projecting the top 500 open actions" in src
+    assert "if actions.ok and len(actions.df) >= 500:" in pipe
+    assert "Projecting the top 500 open actions" in pipe
 
 
 # --------------------------------------------------------------------------- #

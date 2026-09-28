@@ -1858,11 +1858,12 @@ def _savings_tab() -> None:
         "(auto-suspend, size, clusters, scaling policy) wherever they were "
         "made — Snowsight included — and settles each against 14 days of "
         "measured actuals. Manual items remain for one-offs.")
-    # The verified / estimated / realization ROI headline is owned by Decision Studio ▸ ROI
-    # (same ledger_totals() source). This tab keeps the operational VERIFY workflow only.
-    st.caption("Verified / estimated / realization totals live on **Decision Studio ▸ ROI**.")
-    if st.button("Open the ROI story → Decision Studio", key="savings_roi_link"):
-        request_navigation("Decision Studio", "ROI")
+    # The verified / estimated / realization ROI headline is owned by Proof ▸ Proof (the former
+    # Decision Studio ROI; same ledger_totals() source + the uncapped SQL run-rate). This tab keeps the
+    # operational VERIFY workflow only.
+    st.caption("Verified / estimated / realization totals, and what each saving rests on, live on **Proof**.")
+    if st.button("Open the proof → Proof", key="savings_roi_link"):
+        request_navigation("Proof", "Proof")
     if res.empty:
         empty_state("no_data_yet",
                     "Nothing booked yet — the autobook task fills this as warehouse "

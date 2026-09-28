@@ -37,18 +37,25 @@ def test_no_evidence_is_not_rendered_as_a_healthy_zero() -> None:
     # not Incomplete — the gate no longer requires queries>0 (audit fix).
     assert 'if _thr.usable() and queries > 0:' not in overview
     assert 'if _thr.usable():' in overview
-    # Wave-2 #10: worst-burn KPI reads n/a when no objective has an applicable burn
-    # (latency/P95 only), never a misleading healthy 0.00x.
-    assert '(f"{summary[\'worst_burn\']:,.2f}x" if summary["has_burn"] else "n/a")' in studio
-    # DS flagship ROI section (v4.251): a failed ledger read shows a no-data state (not a
-    # healthy $0 verified total), and realization reads "—" until something is verified (ROI fixes
-    # 2026-09-24: 'n/a' once items are verified but auto-measured, i.e. carry no estimate).
-    assert 'if not ledger.ok:\n        empty_state("needs_setup"' in studio
-    assert '("n/a" if totals["verified_count"] else "—")' in studio
+    # Wave-2 #10: an objective with no applicable evidence reads "—"/n/a, never a misleading
+    # healthy zero. v4.597 (Option C): the custom SLO board (worst-burn "n/a") was retired; its
+    # read-only successors, the built-in objectives, read "—" (never "0/0") without evidence.
+    objectives = operations.split("def _builtin_objectives_panel", 1)[1].split("\ndef ", 1)[0]
+    assert '"value": "—"' in objectives and "0/0" not in objectives
+    # DS flagship ROI section (v4.251), now Proof ▸ Proof: a failed ledger read shows a no-data state
+    # (not a healthy $0 verified total), and realization reads "—" until something is verified (ROI
+    # fixes 2026-09-24: 'n/a' once items are verified but auto-measured, i.e. carry no estimate).
+    signals = studio.split("def _proof_signals(", 1)[1].split("\ndef ", 1)[0]
+    assert "if not ledger.ok:\n        _PROOF_MEMO.update(rate=_k, sig=None)\n        return None" in signals
+    proof_tab = studio.split("def _proof_tab(", 1)[1].split("\ndef ", 1)[0]
+    assert 'if sig is None:\n        empty_state("needs_setup"' in proof_tab
+    assert '("n/a" if totals["verified_count"] else "—")' in proof_tab
     # v4.365 (ds-hunt): the no-candidate state still reads "No evidence" (not a healthy $0), and an
-    # eligible-but-unpriced queue now reads "Unpriced" rather than a misleading $0.00.
-    assert 'return "No evidence"' in studio
-    assert 'return format_usd(value) if _priced else "Unpriced"' in studio
+    # eligible-but-unpriced queue reads "Unpriced" rather than a misleading $0.00 — now in the
+    # Proof ▸ Pipeline projection.
+    projection = studio.split("def _pipeline_projection(", 1)[1].split("\ndef _pipeline_tab(", 1)[0]
+    assert 'return "No evidence"' in projection
+    assert 'return format_usd(value) if _priced else "Unpriced"' in projection
     assert _optional_number(None, "%") == "n/a"
     assert _optional_number(float("nan"), "%") == "n/a"
 

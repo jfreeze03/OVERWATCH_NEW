@@ -1861,11 +1861,11 @@ def savings_summary_quarter() -> str:
     after the quarter it was verified in, so the old quarter-scoped numerator fell to 0x on the
     first day of every quarter while the trailing-30d run cost did not. VERIFIED_QTD_USD stays as
     the separate "verified this quarter" KPI. Reverts are not detected yet, so the 12-month cap is
-    the conservative stand-in. (The name is kept: the canary, Brief, DS and tests reference it.)
+    the conservative stand-in. (The name is kept: the canary, Brief, Proof and tests reference it.)
 
-    Both windows anchor on the ACCOUNT clock (account_today_sql), matching Decision Studio's
-    account-time quarter — session-tz DATE_TRUNC('quarter', CURRENT_DATE()) drifted a day at a
-    quarter change and disagreed with the DS surface (round-2 bug hunt).
+    Both windows anchor on the ACCOUNT clock (account_today_sql), matching Proof's (formerly
+    Decision Studio's) account-time quarter — session-tz DATE_TRUNC('quarter', CURRENT_DATE()) drifted a day at a
+    quarter change and disagreed with that surface (round-2 bug hunt).
 
     Next-Fifty #5: every aggregate excludes a manual row the autobook's settled row supersedes (the
     same change booked twice); SUPERSEDED_ITEMS is the UNCAPPED count of such twins still awaiting the

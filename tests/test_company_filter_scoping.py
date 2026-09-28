@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from app.data import mart_sql
+from app.data import mart_sql, workbench_sql
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -27,12 +27,20 @@ def test_action_queue_scopes_to_company_plus_account_level():
 
 
 def test_every_owner_queue_reader_passes_company():
-    for rel in ("app/ui/pages/overview.py", "app/ui/workbench.py",
-                "app/ui/decision_studio.py", "app/ui/pages/brief.py"):
+    for rel in ("app/ui/pages/overview.py", "app/ui/workbench.py", "app/ui/pages/brief.py"):
         src = (_ROOT / rel).read_text(encoding="utf-8")
         assert "action_queue(" in src
         # no bare, unscoped action_queue(<n>) read remains on these pages.
         assert not re.search(r"action_queue\(\d+\)\s*[,)]", src), f"{rel}: unscoped action_queue read"
+    # v4.597 (Option C): Proof dropped the dead "Apply V074" legacy fallback (REQUIRED_SCHEMA_FLOOR is
+    # past V074), so it no longer reads mart_sql.action_queue at all; its one queue read — the
+    # Pipeline's queued work — is the company-scoped V074 action_center builder.
+    ds = (_ROOT / "app/ui/decision_studio.py").read_text(encoding="utf-8")
+    assert not re.search(r"action_queue\(\d+\)\s*[,)]", ds)
+    assert "mart_sql.action_queue(" not in ds
+    pipe = ds.split("def _pipeline_tab(", 1)[1].split("\ndef ", 1)[0]
+    assert "workbench_sql.action_center(company, False, 500)" in pipe
+    assert "UPPER(COMPANY) IN ('TREXIS', 'ALL')" in workbench_sql.action_center("Trexis", False, 500)
 
 
 def test_pipeline_load_failures_scopes_to_company():
