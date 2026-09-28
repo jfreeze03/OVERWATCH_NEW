@@ -446,9 +446,10 @@ SELECT COUNT(*) AS OVERWATCH_BAK_STREAMS FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())
 SHOW ALERTS IN DATABASE DBA_MAINT_DB;
 SELECT COUNT(*) AS OVERWATCH_BAK_ALERTS FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) WHERE "schema_name" = 'OVERWATCH_BAK';
 
--- P3. The 26 names V161 moves out of OVERWATCH (expect 26 rows once V158 has run on a Sunday; IS_TRANSIENT YES
---     for the 25 weekly copies), and the manual <T>_BAK_<yyyymmdd> clones V161 must leave alone (a baseline for
---     PART B item 5).
+-- P3. The 26 names V161 moves out of OVERWATCH: expect one RETIRED_BY_V161 row reading TABLES 26,
+--     TRANSIENT_TABLES 25 once V158 has run on a Sunday (the ledger is the one permanent table), plus a
+--     MANUAL_CLONE_KEPT row if any manual <T>_BAK_<yyyymmdd> clones exist: V161 leaves those alone, and that
+--     row's TABLES count is the baseline for PART B item 5.
 SELECT IFF(TABLE_NAME IN ({_in_list(MOVE, "                          ")}),
            'RETIRED_BY_V161', 'MANUAL_CLONE_KEPT') AS KIND,
        COUNT(*) AS TABLES, COUNT_IF(IS_TRANSIENT = 'YES') AS TRANSIENT_TABLES,

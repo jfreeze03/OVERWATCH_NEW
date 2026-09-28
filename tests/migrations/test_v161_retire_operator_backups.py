@@ -111,6 +111,9 @@ def test_v161_preflight_lists_what_v161_would_stop_on_and_what_it_keeps(tmp_path
         assert (f"SHOW {kind} IN DATABASE DBA_MAINT_DB;\nSELECT COUNT(*) AS OVERWATCH_BAK_{kind} FROM "
                 "TABLE(RESULT_SCAN(LAST_QUERY_ID())) WHERE \"schema_name\" = 'OVERWATCH_BAK';") in pre, kind
     assert "'MANUAL_CLONE_KEPT'" in pre and "REGEXP_LIKE(TABLE_NAME, '.+_BAK_[0-9]{8}')" in pre
+    # review r3: P3 groups by KIND, so its comment promises the grid it returns (not "26 rows")
+    p3 = pre[pre.index("-- P3."):pre.index("-- P4.")]
+    assert "expect 26 rows" not in p3 and "TABLES 26" in p3 and "TRANSIENT_TABLES 25" in p3 and "GROUP BY 1" in p3
     assert "TASK_HISTORY(" in pre
     # review r1: the ledger read (the one statement a partial V161 breaks) runs LAST, alone
     last = pre.rstrip().rsplit("\n\n", 1)[1]
