@@ -1750,6 +1750,61 @@ ORDER BY VISITS DESC
 """
 
 
+def section_visit_summary(days: int = 90) -> str:
+    """#50: visits per page section / sub-view (APP_USAGE section_visit + subsection_visit).
+
+    One row per (page, level, section) that was logged; the app zero-fills never-visited
+    page-level sections from PAGE_SECTION_LABELS (app_telemetry.with_unvisited_sections).
+    FIRST_LOGGED_AT (the window's first logged visit) says how long logging has run, so a
+    0-visit row is only read as a retirement candidate after enough history. No LIMIT: the
+    section registry bounds the result to ~100 rows."""
+    days = bounded_days(days, MAX_MART_WINDOW_DAYS)
+    recent = min(30, days)
+    return f"""
+SELECT PAGE,
+       IFF(EVENT_KIND = 'subsection_visit', 'Sub-view', 'Section') AS LEVEL,
+       SECTION,
+       COUNT_IF(AT >= DATEADD('day', -{recent}, CURRENT_TIMESTAMP())) AS VISITS_{recent}D,
+       COUNT(*) AS VISITS,
+       COUNT(DISTINCT USER_NAME) AS USERS,
+       MAX(AT) AS LAST_VISIT_AT,
+       MIN(MIN(AT)) OVER () AS FIRST_LOGGED_AT
+FROM {core_object("APP_USAGE")}
+WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+  AND EVENT_KIND IN ('section_visit', 'subsection_visit')
+  AND SECTION IS NOT NULL
+GROUP BY PAGE, EVENT_KIND, SECTION
+ORDER BY PAGE, VISITS DESC
+"""
+
+
+def ask_demand_summary(days: int = 90, limit: int = 100) -> str:
+    """#47: what people ask on the Ask page — answered / failed (SECTION = the answer type)
+    and refused (SECTION = an 8-word lower-cased, digit-masked question stem).
+
+    REFUSED_TOTAL and ALL_ASKS are windowed over the grouped rows BEFORE the LIMIT, so the
+    headline counts stay whole when the table is capped (uncapped-aggregate rule). Refused
+    rows sort first: they are the demand no answerer covers yet."""
+    days = bounded_days(days, MAX_MART_WINDOW_DAYS)
+    limit = max(1, min(int(limit), 500))
+    return f"""
+SELECT IFF(EVENT_KIND = 'ask_refused', 'Refused',
+           IFF(EVENT_KIND = 'ask_failed', 'Failed', 'Answered')) AS OUTCOME,
+       SECTION AS ASK_TEXT,
+       COUNT(*) AS ASKS,
+       COUNT(DISTINCT USER_NAME) AS USERS,
+       MAX(AT) AS LAST_ASKED_AT,
+       SUM(IFF(EVENT_KIND = 'ask_refused', COUNT(*), 0)) OVER () AS REFUSED_TOTAL,
+       SUM(COUNT(*)) OVER () AS ALL_ASKS
+FROM {core_object("APP_USAGE")}
+WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+  AND EVENT_KIND IN ('ask_refused', 'ask_answered', 'ask_failed')
+GROUP BY EVENT_KIND, SECTION
+ORDER BY IFF(EVENT_KIND = 'ask_refused', 0, 1), ASKS DESC, LAST_ASKED_AT DESC
+LIMIT {limit}
+"""
+
+
 def app_performance_slo(days: int = 7) -> str:
     """Per-page render/fetch guardrails from already-persisted app evidence."""
     days = bounded_days(days, 30)

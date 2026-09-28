@@ -325,10 +325,12 @@ def _log_usage(page: str, render_ms: int | None = None) -> None:
     # N12: enqueue into the shared write buffer (flushed once per rerun) instead
     # of a single-row INSERT round trip here. A V027-shape flush failure downgrades
     # to the old shape next call; an old-shape failure turns usage off.
+    # #50: the prefix is byte-identical to components.log_ui_event's, so this row and
+    # the rerun's section-visit / UI-event rows share ONE buffer group (one INSERT).
     if not st.session_state.get("_ow_usage_oldshape"):
         _buffer_write(
-            "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, RENDER_MS, EVENT_KIND, IS_RERUN, USER_NAME) ",
-            f"SELECT {sql_literal(str(page)[:80])}, {ms}, {sql_literal(kind)}, "
+            "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, SECTION, RENDER_MS, EVENT_KIND, IS_RERUN, USER_NAME) ",
+            f"SELECT {sql_literal(str(page)[:80])}, NULL, {ms}, {sql_literal(kind)}, "
             f"{'TRUE' if is_rerun else 'FALSE'}, {identity_sql()}",
             off_flag="_ow_usage_off", downgrade_flag="_ow_usage_oldshape")
         return
@@ -337,6 +339,17 @@ def _log_usage(page: str, render_ms: int | None = None) -> None:
     _buffer_write(
         "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, RENDER_MS) ",
         f"SELECT {sql_literal(str(page)[:80])}, {ms}", off_flag="_ow_usage_off")
+
+
+def _mark_page_entry(page: str) -> None:
+    """#50: page-entry token for section-visit dedupe; a mid-render st.rerun() on the same page keeps it.
+
+    components._log_section_visit logs a section once per (entry, label): the token moves
+    only when the page changes, so P→Q→P re-logs P's landing section and a same-page rerun
+    (widget change, self-rerun) does not."""
+    if st.session_state.get("_ow_entry_page") != page:
+        st.session_state["_ow_entry_page"] = page
+        st.session_state["_ow_page_entry"] = int(st.session_state.get("_ow_run_seq", 0) or 0)
 
 
 def _global_jump(pages: tuple) -> None:
@@ -856,6 +869,7 @@ def main() -> None:
             "pages read objects that have not been created yet. **Admin ▸ Migrations** lists "
             "exactly which are missing.")
         return
+    _mark_page_entry(page)
     if page == "Overview":
         _persistent_status_bar(pages)
     _RENDERERS[page]()

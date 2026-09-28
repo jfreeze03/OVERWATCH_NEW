@@ -158,6 +158,7 @@ def lazy_sections(labels: list[str], key: str, deep_link: bool = True,
     else:
         choice = st.radio("Section", labels, key=key, horizontal=True, format_func=_fmt,
                           label_visibility="collapsed")
+    _log_section_visit(key, str(choice), nested=not deep_link)   # #50: never raises
     if deep_link:
         try:
             _slug = _section_slug(choice)
@@ -202,6 +203,33 @@ _PAGE_SECTION_KEY = {
     "Operations": "ops_section", "Proof": "decision_section",
     "Alerts": "alerts_section", "Security": "sec_section", "Admin": "adm_section",
 }
+
+
+def _log_section_visit(key: str, label: str, *, nested: bool) -> None:
+    """#50: APP_USAGE section_visit / subsection_visit — once per page entry, once per change.
+
+    The dedupe token rides main._mark_page_entry's page-entry sequence, so a mid-render
+    st.rerun() on the same page never re-logs, while leaving and coming back (P→Q→P) does.
+    A nested bar (deep_link=False) logs 'Parent ▸ Child' and re-logs under a new parent."""
+    try:
+        page = str(st.session_state.get("_ow_entry_page") or "")
+        if not page:
+            return                      # not rendered through main() (tests / harness)
+        entry = st.session_state.get("_ow_page_entry")
+        if nested:
+            parent = str(st.session_state.get(_PAGE_SECTION_KEY.get(page, ""), "") or "")
+            token: tuple = (entry, parent, label)
+            kind = "subsection_visit"
+            section = f"{parent} ▸ {label}" if parent else label
+        else:
+            token, kind, section = (entry, label), "section_visit", label
+        sentinel = f"_ow_secvis_{key}"          # not '_ow_nav_' (state.py purges that prefix)
+        if st.session_state.get(sentinel) == token:
+            return
+        st.session_state[sentinel] = token
+        log_ui_event(kind, page=page, section=section[:80])
+    except Exception:  # noqa: BLE001 - usage telemetry never breaks navigation
+        pass
 
 
 def _page_breadcrumb(title: str) -> str:
@@ -3030,9 +3058,12 @@ def download_text_button(label: str, text: str, filename: str) -> None:
                        on_click="ignore")
 
 
-def log_ui_event(kind: str, page: str = "") -> None:
+def log_ui_event(kind: str, page: str = "", section: str = "") -> None:
     """Product-usage event (V027 rider): saved_view_apply, csv_export,
-    remediation_exec, ... — APP_USAGE rows with RENDER_MS NULL. Best-effort;
+    remediation_exec, section_visit, ask_refused, ... — APP_USAGE rows with
+    RENDER_MS always NULL (that NULL is what keeps them out of the first-paint
+    p95: every p95 reader filters RENDER_MS IS NOT NULL, never EVENT_KIND).
+    ``section`` (#50/#47) fills APP_USAGE.SECTION (NULL when blank). Best-effort;
     silently no-ops pre-V027 (missing columns) or when usage is disabled."""
     import streamlit as st
 
@@ -3045,7 +3076,11 @@ def log_ui_event(kind: str, page: str = "") -> None:
     # N12: enqueue into the shared write buffer (flushed once per rerun) instead of
     # one INSERT round trip per UI action. A flush failure downgrades usage to its
     # old shape, matching this function's oldshape guard above (it then no-ops).
+    # #50: the prefix is byte-identical to main._log_usage's, so page visits, section
+    # visits and UI events share ONE buffer group — one INSERT per rerun.
     _buffer_write(
-        "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, EVENT_KIND, IS_RERUN, USER_NAME) ",
-        f"SELECT {sql_literal(str(page or kind)[:80])}, {sql_literal(str(kind)[:40])}, FALSE, {identity_sql()}",
+        "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, SECTION, RENDER_MS, EVENT_KIND, IS_RERUN, USER_NAME) ",
+        f"SELECT {sql_literal(str(page or kind)[:80])}, "
+        f"{sql_literal(str(section)[:80]) if section else 'NULL'}, NULL, "
+        f"{sql_literal(str(kind)[:40])}, FALSE, {identity_sql()}",
         off_flag="_ow_usage_off", downgrade_flag="_ow_usage_oldshape")

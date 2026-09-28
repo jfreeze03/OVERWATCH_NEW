@@ -137,6 +137,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("ops.volume_deltas", lambda: ops_sql.volume_deltas()),
     ("mart.dept_budgets", lambda: mart_sql.dept_budgets()),
     ("mart.app_usage_summary", lambda: mart_sql.app_usage_summary(1)),
+    ("mart.section_visit_summary", lambda: mart_sql.section_visit_summary(1)),
+    ("mart.ask_demand_summary", lambda: mart_sql.ask_demand_summary(1)),
     ("mart.app_performance_slo", lambda: mart_sql.app_performance_slo(1)),
     ("mart.contract_exhaustion", lambda: mart_sql.contract_exhaustion()),
     ("mart.savings_summary_quarter", lambda: mart_sql.savings_summary_quarter()),
