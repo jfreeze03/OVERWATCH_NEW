@@ -15,7 +15,8 @@ import pandas as pd
 import streamlit as st
 
 from app.config import MAX_LIVE_WINDOW_DAYS
-from app.core.query import run
+from app.core.query import run, run_batch
+from app.core.state import can_open, request_navigation
 from app.data import app_cost_sql, cost_sql, insights_sql, mart27_sql, mart_sql, workbench_sql
 from app.data.common import resolve_effective_window
 from app.logic import cs_driver
@@ -27,7 +28,13 @@ from app.logic.anomaly import (
     flag_anomalies,
     suppress_expected_spikes,
 )
-from app.logic.anomaly_explain import explain_by_warehouse
+from app.logic.anomaly_explain import (
+    UNALLOCATED_LABEL,
+    changes_near_day,
+    explain_below_warehouse,
+    explain_by_warehouse,
+    is_bucket_row,
+)
 from app.logic.cost_coverage import (
     SERVICE_CATEGORY,
     attribution_gap,
@@ -68,6 +75,7 @@ from app.ui.components import (
     section_header,
     selectable_table,
     served_days,
+    status_chips,
     storage_snapshot_fresh,
     styled_table,
     user_display_map,
@@ -1344,10 +1352,15 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                             "That day $": st.column_config.NumberColumn(format="$%.2f"),
                             "Delta $": st.column_config.NumberColumn(format="$%.2f"),
                             "Share %": st.column_config.NumberColumn(format="%.1f%%")})
+                        # Next-Fifty #27: one level down — who and which database moved, and
+                        # what changed. Reads only behind its own toggle (an expander body runs
+                        # every rerun, even collapsed).
+                        _below_warehouse_drill(company, exp, str(_top["label"]), rate)
             st.caption(
-                "How to investigate a flag: the waterfall above names the warehouses that moved; "
-                "then **Operations → Queries** (filter to the warehouse, widen to the flagged day) "
-                "and the **Wasted spend** board show the queries that drove it."
+                "How to investigate a flag: open the waterfall above, break the warehouse down by "
+                "user, database and setting changes, then jump to **Operations ▸ Queries** for that "
+                "warehouse; the **Wasted spend** board on Operations shows what failed, killed or "
+                "aborted queries cost."
             )
         else:
             empty_state("clean", "No daily spend anomalies in the last 30 days (median/MAD z < 3.5).")
@@ -1387,6 +1400,112 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                            "catch multi-factor/seasonal shifts the z-score misses; z-score-only "
                            "flags are tuning candidates.")
             result_caption(na)
+
+
+# Next-Fifty #27: the registry look-back for the below-warehouse drill. The anomaly frame spans
+# the last 30 complete days, so D - 1 is at most 31 days back; one constant = one cache entry per
+# warehouse whatever day is flagged.
+_ANOM_CHANGE_LOOKBACK_DAYS = 32
+# ...and the loaded days each user/database is averaged over (the reader clamps to [7, 28]).
+_ANOM_BASELINE_DAYS = 14
+
+
+def _below_warehouse_drill(company: str, exp, flagged_wh: str, rate: float) -> None:
+    """Next-Fifty #27: explain a flagged day BELOW the warehouse — by user and by database (each
+    against its own zero-filled average, adding up exactly to the warehouse's metered move) plus
+    the warehouse setting changes the daily scan saw within a day of it, and a jump to Operations ▸
+    Queries. Rendered inside the waterfall expander, whose body runs every rerun: the warehouse
+    pick and the jump read nothing, and the two mart reads (one batch) run only while the toggle
+    is on. Allocated estimate on the usage basis — never billed dollars."""
+    fday = exp.flagged_day
+    flagged = str(flagged_wh or "").strip()
+    if fday is None or not flagged:
+        return
+    st.markdown("**Below the warehouse**")
+    opts = list(dict.fromkeys([flagged] + [str(d.name) for d in exp.drivers if d.delta_usd > 0]))
+    wh = (st.selectbox("Warehouse to break down", opts, key=f"spend_anom_drill_wh_{fday}")
+          if len(opts) > 1 else opts[0])
+    wh = str(wh or flagged)
+    if can_open("Operations") and st.button(f"Queries on {wh} → Operations ▸ Queries",
+                                            key="spend_anom_open_queries"):
+        request_navigation("Operations", "Queries", {"warehouse_contains": wh})
+    if can_open("Operations"):
+        st.caption(md_dollars(
+            f"The jump filters Operations ▸ Queries to {wh}; the flagged day is not carried over — "
+            f"set the Window to include {fday} ({(account_today() - fday).days} days ago)."))
+    if not st.toggle("Break down by user, database and setting changes", key="spend_anom_below_wh_load",
+                     help="Splits this warehouse's day by user and by database (each warehouse-hour's "
+                          "metered credits shared by execution time — an estimate) and lists the setting "
+                          "changes the daily scan saw within a day of it. Two mart reads, run only while "
+                          "this is on."):
+        return
+    from app.data import change_impact_sql  # lazy, as control_room's auto-investigation does
+
+    _b = run_batch([
+        {"key": "xdim", "sql": mart27_sql.alloc_xdim_day_drivers(
+            wh, fday.isoformat(), company, baseline_days=_ANOM_BASELINE_DAYS),
+         "source": "FACT_COST_ALLOC_XDIM_DAILY + FACT_WAREHOUSE_DAILY (day drill)"},
+        {"key": "whchg",
+         "sql": change_impact_sql.warehouse_change_registry(_ANOM_CHANGE_LOOKBACK_DAYS, company, wh),
+         "source": "WAREHOUSE_CHANGE_REGISTRY (daily 06:40 CT scan)"},
+    ], page=_PAGE, tier="hourly") or {}
+    xd, chg = _b.get("xdim"), _b.get("whchg")
+
+    if xd is None:
+        empty_state("no_data_yet", "Allocation detail could not be read for this warehouse.")
+    elif guard(xd, f"Allocation detail isn't loaded for {wh} in this window yet "
+                   "(FACT_COST_ALLOC_XDIM_DAILY loads once a day)."):
+        if xd.truncated:
+            # Bounded by construction (top-N x days, see alloc_xdim_day_drivers), so this should
+            # never fire — but a capped frame would under-state every average, so never explain it.
+            st.caption("The allocation detail hit the row cap, so it is not explained here.")
+        else:
+            _f = xd.df.copy()
+            _f["USD"] = _f["CREDITS"].map(lambda c: credits_to_usd(safe_float(c), rate, round_cents=False))
+            below = explain_below_warehouse(_f, fday, wh, baseline_days=_ANOM_BASELINE_DAYS)
+            if not below.ok:
+                empty_state("no_data_yet", below.reason)
+            else:
+                st.markdown(md_dollars(below.narrative))
+                status_chips([("Allocated estimate", ""), ("Usage basis — not billed", "")])
+                _nm = user_display_map(_PAGE)
+                _money = {
+                    "Usual $ (avg)": st.column_config.NumberColumn(format="$%.2f"),
+                    "That day $": st.column_config.NumberColumn(format="$%.2f"),
+                    "Delta $": st.column_config.NumberColumn(format="$%.2f"),
+                    "Share %": st.column_config.NumberColumn(format="%.1f%%")}
+                for _label, _rows in (("User", below.by_user), ("Database", below.by_database)):
+                    styled_table(pd.DataFrame([
+                        {_label: (d.name if _label != "User" or is_bucket_row(d.name)
+                                  else resolve_display(d.name, _nm)),
+                         "Usual $ (avg)": d.baseline_usd, "That day $": d.actual_usd,
+                         "Delta $": d.delta_usd, "Share %": d.share_pct}
+                        for d in _rows]), column_config=_money, size_note=False)
+                _short = (f" — {below.baseline_days} of the {_ANOM_BASELINE_DAYS} asked for are loaded"
+                          if below.baseline_days < _ANOM_BASELINE_DAYS else "")
+                st.caption(
+                    f"Averages over the {below.baseline_days} loaded days before {fday}{_short}; a day "
+                    "with no activity counts as zero, so each table adds up exactly to the warehouse's "
+                    "metered move. The waterfall above uses a robust median of each warehouse's recent "
+                    f"days, so its figure for {wh} can differ. '{UNALLOCATED_LABEL}' = warehouse-hours in "
+                    "which no query started: idle time, or a long query carrying over from an earlier hour.")
+        result_caption(xd)
+
+    st.markdown("**Setting changes near that day**")
+    if chg is None or not chg.ok:
+        st.caption("Warehouse change tracking isn't readable here right now.")
+    else:
+        cands = changes_near_day(chg.df if chg.usable() else None, wh, fday)
+        for c in cands:
+            _when = c.get("when")
+            _seen = f"seen {_when:%Y-%m-%d %H:%M}" if _when is not None else "seen (time unknown)"
+            st.markdown(md_dollars(f"- {c['title']} — {_seen} by {c.get('changed_by') or 'unknown'}"))
+        if not cands:
+            st.caption(md_dollars(
+                f"No setting changes on {wh} were seen from {fday - timedelta(days=1)} to "
+                f"{fday + timedelta(days=1)}."))
+    st.caption("The configuration scan runs daily at 06:40 CT, so a change made on the flagged day "
+               "usually shows as seen the next morning.")
 
 
 def _account_storage_tiers(company: str, days: int, settings: dict, *, bounds: tuple | None = None) -> None:
