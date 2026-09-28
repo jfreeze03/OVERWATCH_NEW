@@ -139,6 +139,11 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
   and a gated-off arm counts as ok.
 - Validate/loader worksheets are pasted by Joe; the app monitors the loader
   through APP_ERROR_LOG + SOURCE_FRESHNESS_STATE (loader-owned freshness).
+- **Option C (2026-09-24, shipped v4.597):** Decision Studio → Proof (Proof ·
+  Pipeline, EXECUTIVE-visible, read-only); Portfolio → Operations ▸ Optimize
+  fix queue (Track = idempotent ACTION_QUEUE insert keyed on
+  QUERY_FINGERPRINT); SLO editor, Experiments UI retired; Products hidden;
+  Cost Truth → Spend ratio. Old links remap via navigate.LEGACY_TARGETS.
 
 ## History in one paragraph each
 

@@ -1,4 +1,21 @@
-"""Decision Studio: prioritization, objectives, economics and experiment follow-through."""
+"""Proof (v4.597, Option C — formerly Decision Studio): does OVERWATCH pay for itself, what each
+verified saving rests on, and the priced pipeline ahead.
+
+Two READ-ONLY section bodies, dispatched by the page shell (app/ui/pages/decision_studio.py; both
+module paths and the ``decision_section`` key are kept this release):
+  * Proof    — the merged Scorecard + ROI: the ROI multiple, run-rate, realization (plus the carried
+               realization vs OVERWATCH's own estimate), settling items, acceptance, alert precision,
+               evidence coverage, and a per-item evidence table (what each saving rests on, who gets
+               credit). Every headline total is a SQL aggregate; pandas only shapes per-item rows.
+  * Pipeline — addressable $/mo (the Cost ▸ Optimization & Savings idle rollup, mart-only) plus the queued
+               ACTION_QUEUE work normalised to a monthly run-rate, and a projection whose sliders
+               default to MEASURED acceptance / realization (a fragment: slider moves cost 0 reads).
+
+No write path lives here (the SLO editor and the Experiments editor were retired; the Portfolio moved
+to Operations ▸ Optimize, the Cost Truth ratio to Cost ▸ Spend & Attribution), so the page is safe for
+the EXECUTIVE profile; every cross-page doorway is gated on state.can_open. ``_products`` is kept
+HIDDEN (unreachable) for a later revival.
+"""
 
 from __future__ import annotations
 
@@ -8,68 +25,69 @@ import pandas as pd
 import streamlit as st
 
 from app.config import SAVINGS_ACTIVE_MONTHS
-from app.core.identity import content_request_key, viewer_name
-from app.core.query import execute_statement, run, run_batch
-from app.core.session import is_operator
-from app.core.state import request_navigation
-from app.data import mart_sql, workbench_sql
+from app.core.identity import viewer_name
+from app.core.query import run, run_batch
+from app.core.state import can_open, request_navigation
+from app.data import mart27_sql, mart_sql, security_sql, workbench_sql
 from app.logic import insights
 from app.logic.actions import ledger_totals, savings_by_lever, savings_month_calendar
-from app.logic.date_windows import is_prior_month_window
-from app.logic.decision import prioritize_workloads, scenario_projection, slo_summary
+from app.logic.date_windows import is_prior_month_window, window_phrase
+from app.logic.decision import (
+    monthly_equivalent,
+    pipeline_frame,
+    prioritize_workloads,
+    scenario_projection,
+)
 from app.logic.formulas import (
     account_now,
-    blended_billed_usd,
     credits_to_usd,
     format_usd,
     md_dollars,
     safe_float,
 )
+from app.logic.insights import (
+    idle_advisor,
+    with_auto_suspend_settings,
+    with_warehouse_settings,
+)
 from app.logic.proof import (
     acceptance_summary,
     account_precision,
+    carried_realization,
+    evidence_rows,
+    evidence_split,
+    ledger_with_attribution,
     proof_verdict,
     roi_multiple,
+    settle_schedule,
 )
+from app.logic.savings_rollup import idle_opportunities, resize_opportunities, rollup_savings
+from app.logic.sizing import size_recommendations
 from app.logic.verdict import decision_studio_signals, page_verdict
-from app.logic.workbench import (
-    EXPERIMENT_STATUSES,
-    SLO_METRIC_KEYS,
-    create_slo_objective_sql,
-    experiment_age_days,
-    mark_watched,
-    mark_watched_pairs,
-    overdue_verification,
-    stale_planning,
-    update_experiment_sql,
-)
+from app.logic.workbench import mark_watched_pairs, stale_planning
 from app.ui import charts
 from app.ui.components import (
     AUTHORED_CONFIDENCE_HELP,
     confidence_progress_column,
-    decision_rows,
     empty_state,
-    exception_summary,
-    guard,
     hero_metric,
     kpi_row,
-    load_settings,
-    master_detail,
-    notify,
-    read_model_caption,
     result_caption,
     section_header,
     selectable_nav_table,
-    selectable_table,
-    stamp_write,
-    stash_section_count,
+    served_days,
     styled_table,
     watch_star,
     watch_star_column,
-    write_gate_open,
 )
 
-_PAGE = "Decision Studio"
+_PAGE = "Proof"
+
+# Projection policy defaults. A measured value replaces the first two when one exists; the confidence
+# floor is policy (the evidence weight an item needs before it is counted), never measured.
+_ASSUMED_ADOPTION_PCT = 60
+_ASSUMED_REALIZATION_PCT = 70
+_CONFIDENCE_FLOOR = 0.6
 
 
 def _open_entity(kind: str, key: str) -> None:
@@ -79,281 +97,17 @@ def _open_entity(kind: str, key: str) -> None:
     )
 
 
-def _open_action_center() -> None:
-    """F56: experiments are created from a work item's 'Start optimization
-    experiment' expander on Action Center — the jump target for the
-    Experiments empty state (same request_navigation idiom the scorecard uses)."""
-    request_navigation("Control Room", "Action Center")
+def _open_savings_ledger() -> None:
+    """F56 doorway for an empty track record: estimated items are verified on the Cost ▸ Optimization
+    & Savings ledger (a page every profile, EXECUTIVE included, can open)."""
+    # land on the pill that holds the ledger + verify workflow, not the section default (Idle & sizing).
+    # The nested lazy_sections widget is not instantiated on this run, so seeding its key is legal.
+    st.session_state["opt_section"] = "Remediation & ledger"
+    request_navigation("Cost Intelligence", "Optimization & Savings")
 
 
-_PORTFOLIO_CAP = 200
-
-
-def _portfolio(company: str, days: int, rate: float, *, bounds: tuple | None = None) -> None:
-    _lm = "_lm" if bounds is not None else ""
-    result = run(
-        workbench_sql.workload_portfolio(days, company, _PORTFOLIO_CAP, bounds=bounds), page=_PAGE,
-        key=f"decision_portfolio_{company}_{days}{_lm}", tier="historical",
-        source="MART_PATTERN_COST_DAILY + MART_QUERY_FAMILY_DAILY",
-    )
-    if not guard(result, "No measured recurring-query cost exists in this scope."):
-        return
-    portfolio = prioritize_workloads(result.df, rate, days)
-    # DS #1: make Watch more than a bookmark — a watched query family gets a WATCHED flag
-    # here and is pinned to the top WITHIN its lane (so an ACT NOW item is never buried
-    # under a watched PLAN item). Degrades to no-pin if the watchlist read is unavailable.
-    _viewer = viewer_name()
-    _wl_res = run(workbench_sql.watchlist(_viewer), page=_PAGE, key="decision_watchlist",
-                  tier="live", source="USER_WATCHLIST") if _viewer else None
-    _wl = _wl_res.df if (_wl_res is not None and _wl_res.usable()) else None
-    portfolio["WATCHED"] = mark_watched(portfolio, _wl, "QUERY_FINGERPRINT", "FINGERPRINT")
-    if bool(portfolio["WATCHED"].any()):
-        _lane_rank = portfolio["LANE"].map({"ACT NOW": 0, "PLAN": 1, "VALIDATE": 2}).fillna(3)
-        portfolio = (portfolio.assign(_LR=_lane_rank)
-                     .sort_values(["_LR", "WATCHED", "PRIORITY_SCORE"],
-                                  ascending=[True, False, False])
-                     .drop(columns="_LR").reset_index(drop=True))
-    read_model_caption("workload_portfolio")
-    # #15: the board caps at the top _PORTFOLIO_CAP families by measured credits; the
-    # app's row-truncation banner only fires at the 5000 fetch cap, so this smaller cap
-    # would truncate silently. Disclose when the cap is hit so "N families" isn't misread
-    # as the whole population.
-    if len(portfolio) >= _PORTFOLIO_CAP:
-        st.caption(
-            f"Showing the top {_PORTFOLIO_CAP} query families by measured credits — more "
-            "exist in this scope; narrow the Window or Company to surface the rest."
-        )
-    act_now = portfolio[portfolio["LANE"].eq("ACT NOW")]
-    failure_risk = portfolio[portfolio["FAIL_PCT"].ge(2)]
-    # Count the VALIDATE LANE itself, not a re-derived confidence<0.5 threshold: prioritize_workloads
-    # also forces LANE=VALIDATE for no-behavioral-evidence families (~has_behavior) whose run/day/cost
-    # CONFIDENCE is routinely >= 0.5, so a confidence filter silently omits exactly the blind-but-costly
-    # families the KPI is meant to size -- and undercounts vs the table + per-lane cost subtotal
-    # (ds-hunt 2026-08-30).
-    validate = portfolio[portfolio["LANE"].eq("VALIDATE")]
-    exceptions = []
-    if not act_now.empty:
-        exceptions.append({
-            "label": "Act now",
-            "value": f"{len(act_now):,}",
-            "detail": f"{format_usd(act_now['IMPACT_USD_30D'].sum())} measured 30-day impact.",
-            "severity": "warn",
-        })
-    if not failure_risk.empty:
-        exceptions.append({
-            "label": "Failure risk",
-            "value": f"{len(failure_risk):,}",
-            "detail": "Families at or above a 2% observed failure rate.",
-            "severity": "bad",
-        })
-    if not validate.empty:
-        exceptions.append({
-            "label": "Needs validation",
-            "value": f"{len(validate):,}",
-            "detail": "Evidence confidence is below the action threshold.",
-            "severity": "warn",
-        })
-    exception_summary(
-        exceptions,
-        "No immediate-action, elevated-failure, or low-confidence workload families.",
-    )
-    kpi_row([
-        {"label": "Measured families", "value": f"{len(portfolio):,}"},
-        {"label": "30d normalized impact",
-         "value": format_usd(portfolio["IMPACT_USD_30D"].sum()),
-         "help": "Measured pattern credits normalized to 30 days; observed cost, not promised savings."},
-        {"label": "High-confidence", "value": f"{portfolio['CONFIDENCE'].ge(0.8).sum():,}"},
-        # DS #2: how much of the board's recommendations rest on COMPLETE evidence. Low
-        # coverage = more calls made on partial signals; per-row EVIDENCE_COVERAGE shows which.
-        {"label": "Evidence coverage",
-         "value": (f"{portfolio['EVIDENCE_COVERAGE'].mean() * 100:,.0f}%" if len(portfolio) else "—"),
-         "severity": (("ok" if portfolio["EVIDENCE_COVERAGE"].mean() >= 0.8 else "warn")
-                      if len(portfolio) else ""),
-         "help": "Average share of the three evidence signals (cache, latency, fail-rate) "
-                 "present per family. Low coverage means more of the board's recommendations "
-                 "rest on partial evidence — the per-row EVIDENCE_COVERAGE column shows which."},
-        {"label": "Watching", "value": f"{int(portfolio['WATCHED'].sum()):,}",
-         "help": "Query families on your personal watchlist — pinned to the top of their lane. "
-                 "Watch or unwatch a family from its Entity 360 (open one below)."},
-    ])
-    charts.workload_portfolio(portfolio)
-    # DS #1: where does the measured 30-day cost concentrate? A per-lane subtotal so the
-    # ACT NOW / PLAN / VALIDATE cost split reads at a glance (measured COST, not savings).
-    _lane_cost = portfolio.groupby("LANE")["IMPACT_USD_30D"].sum()
-    _lane_bits = " · ".join(
-        f"{_lane}: {format_usd(float(_lane_cost.get(_lane, 0.0)))}"
-        for _lane in ("ACT NOW", "PLAN", "VALIDATE") if _lane in _lane_cost.index
-    )
-    if _lane_bits:
-        st.caption(md_dollars(f"30-day measured cost by lane — {_lane_bits} "
-                   "(observed cost concentration, not promised savings)."))
-
-    def open_profile(index: int) -> None:
-        _open_entity("QUERY_FINGERPRINT", str(portfolio.iloc[int(index)]["FINGERPRINT"]))
-
-    decision_rows(
-        portfolio,
-        key="decision_portfolio_table",
-        decision_col="NEXT_MOVE",
-        why_col="QUERY_PREVIEW",
-        impact_col="IMPACT_USD_30D",
-        confidence_col="CONFIDENCE",
-        status_col="LANE",
-        context_cols=("WATCHED", "EFFORT_PROXY", "RUNS", "FAIL_PCT", "AVG_CACHE_PCT", "P95_SEC",
-                      "EVIDENCE_COVERAGE"),
-        on_select=open_profile,
-        height=370,
-        sort_label="decision lane, then evidence-weighted priority",
-        impact_help="Measured pattern credits x the compute rate, normalized to 30 days — "
-                    "observed cost, not promised savings.",
-        confidence_label="Confidence (evidence)",
-        confidence_help="Evidence heuristic (0-1): a blend of run recency, active-day coverage, "
-                        "and whether the family has measured cost. NOT statistical confidence.",
-    )
-    # Trust: name which numbers are measured and which are heuristics, and give the
-    # exact lane rule so a reader never mistakes an ordering heuristic for a verdict.
-    st.caption(
-        "Impact $, runs, fail % and cache are **measured**; confidence, priority and lane are "
-        "**evidence-weighted heuristics** for ordering, not guarantees. Lane rule: ACT NOW = "
-        "top-20% priority AND confidence ≥ 0.65; VALIDATE = confidence < 0.5; otherwise PLAN. "
-        "A family with no measured cache/latency/failure evidence (coverage 0) is held at "
-        "VALIDATE and never told to cache — a blank cell is missing data, not a measured zero. "
-        "WATCHED families (starred from an Entity 360) are pinned to the top of their lane."
-    )
-    result_caption(result, note="credits are measured; effort is a users + databases proxy")
-
-
-def _slo_editor() -> None:
-    if not is_operator():
-        return
-    with st.expander("Create objective"):
-        metric = st.selectbox("Metric", SLO_METRIC_KEYS, key="slo_new_metric")
-        entity_type = (
-            "WAREHOUSE" if metric.startswith("WAREHOUSE_")
-            else "TASK" if metric.startswith("TASK_")
-            else "QUERY_FINGERPRINT"
-        )
-        name = st.text_input("Objective", key="slo_new_name", max_chars=300)
-        entity_key = st.text_input(
-            f"{entity_type.replace('_', ' ').title()} key", key="slo_new_entity",
-            max_chars=500,
-        )
-        success_metric = metric.endswith("SUCCESS_PCT")
-        comparator = ">=" if success_metric else "<="
-        target = st.number_input(
-            # A SUCCESS_PCT target is a percentage: cap it at 100 (mirroring the error-budget input),
-            # or a fat-fingered target > 100 makes CURRENT_VALUE (<=100) fail the >= test forever -- a
-            # permanent, un-clearable false BREACH on a healthy warehouse (ds-hunt 2026-08-30). A
-            # latency (<=) target has no such ceiling.
-            "Target", min_value=0.0, max_value=100.0 if success_metric else None,
-            value=99.0 if success_metric else 60.0,
-            step=0.1, key="slo_new_target",
-        )
-        error_budget = st.number_input(
-            "Error budget %", min_value=0.01, max_value=100.0, value=1.0,
-            step=0.1, key="slo_new_budget",
-        )
-        window = st.select_slider(
-            "Window", options=[7, 14, 30, 60, 90], value=30,
-            format_func=lambda value: f"{value} days", key="slo_new_window",
-        )
-        owner = st.text_input("Owner", value="DBA", key="slo_new_owner", max_chars=200)
-        notes = st.text_area("Notes", key="slo_new_notes", max_chars=4000)
-        if name and entity_key:
-            statement = create_slo_objective_sql(
-                name=name, entity_type=entity_type, entity_key=entity_key,
-                metric_key=metric, comparator=comparator, target_value=target,
-                error_budget_pct=error_budget, window_days=window, owner=owner,
-                notes=notes, actor=viewer_name(),
-            )
-            st.code(statement, language="sql")
-            if (st.button("Create objective", key="slo_new_execute", type="primary")
-                    and write_gate_open("slo_new_execute")):
-                ok, message = execute_statement(statement, page=_PAGE)
-                stamp_write("slo_new_execute", ok)  # C48
-                notify(ok, message)
-                if ok:
-                    st.rerun()
-
-
-def _slos() -> None:
-    result = run(
-        workbench_sql.slo_cockpit(), page=_PAGE, key="decision_slos",
-        tier="recent", source="SLO_OBJECTIVES + existing metric marts",
-    )
-    if not result.ok:
-        empty_state("needs_setup", "Apply V074 to configure objectives and error budgets.")
-        return
-    summary = slo_summary(result.df)
-    measured_objectives = int(summary["met"] + summary["breach"])
-    read_model_caption("slo_cockpit")
-    st.caption(
-        "P95 objectives evaluate the **worst daily P95** over the window — a day-granular "
-        "check (the objective holds only if *every* day stayed under target), not a single "
-        "window percentile. STALE = the newest mart day is >2 days old, so the verdict is "
-        "withheld rather than read off stale evidence. Error-budget burn applies to "
-        "success-rate objectives only; latency/P95 objectives show n/a."
-    )
-    if not result.empty:
-        exceptions = []
-        if summary["breach"]:
-            exceptions.append({
-                "label": "Breached objectives",
-                "value": f"{summary['breach']:,.0f}",
-                "detail": "Measured value is outside the configured objective.",
-                "severity": "bad",
-            })
-        if summary["no_data"]:
-            exceptions.append({
-                "label": "Missing evidence",
-                "value": f"{summary['no_data']:,.0f}",
-                "detail": "The objective cannot be evaluated from its current mart window.",
-                "severity": "warn",
-            })
-        if summary["stale"]:
-            exceptions.append({
-                "label": "Stale evidence",
-                "value": f"{summary['stale']:,.0f}",
-                "detail": "Newest mart day is >2 days old — the loader may have stalled; verdict withheld.",
-                "severity": "warn",
-            })
-        if summary["worst_burn"] > 1:
-            exceptions.append({
-                "label": "Worst error-budget burn",
-                "value": f"{summary['worst_burn']:,.2f}x",
-                "detail": "Reliability consumption exceeds the configured budget.",
-                "severity": "bad",
-            })
-        exception_summary(exceptions, "Every measured objective is within its configured target.")
-    # deferred-item: the actionable exception_summary above already surfaces breach /
-    # missing-evidence / stale (and worst-burn when it exceeds budget) as they occur, so
-    # the KPI row keeps only the non-duplicated TOTALS — the two grammars stop repeating
-    # the same counts.
-    kpi_row([
-        {"label": "Objectives", "value": f"{summary['total']:,.0f}"},
-        {"label": "Meeting target", "value": f"{summary['met']:,.0f}",
-         "severity": "ok" if measured_objectives else ""},
-        {"label": "Worst burn",
-         "value": (f"{summary['worst_burn']:,.2f}x" if summary["has_burn"] else "n/a"),
-         "severity": ("bad" if summary["worst_burn"] > 1 else "ok") if summary["has_burn"] else "",
-         "help": "Error-budget consumption; success-rate objectives only (latency/P95 show n/a)."},
-    ])
-    if result.empty:
-        empty_state("no_data_yet", "No active objectives are configured.")
-    else:
-        frame = result.df.reset_index(drop=True)
-
-        def open_slo_entity(index: int) -> None:
-            row = frame.iloc[int(index)]
-            _open_entity(str(row["ENTITY_TYPE"]), str(row["ENTITY_KEY"]))
-
-        selectable_nav_table(
-            frame, key="decision_slo_table", on_select=open_slo_entity, height=370,
-            sort_label="breach, missing evidence, then error-budget burn",
-        )
-    _slo_editor()
-
-
+# HIDDEN in v4.597 (Option C); revive via memo §4 #6 derived products. Nothing dispatches here (the
+# section left the page's section bar), so it issues no read; its locks stay green on the kept body.
 def _products(company: str, days: int, rate: float, *, bounds: tuple | None = None) -> None:
     _lm = "_lm" if bounds is not None else ""
     result = run(
@@ -525,124 +279,34 @@ def _products(company: str, days: int, rate: float, *, bounds: tuple | None = No
     )
 
 
-def _cost_truth(company: str, days: int, *, bounds: tuple | None = None) -> None:
-    _lm = "_lm" if bounds is not None else ""
-    result = run(
-        workbench_sql.cost_truth(days, company, bounds=bounds), page=_PAGE,
-        key=f"decision_cost_truth_{company}_{days}{_lm}", tier="historical",
-        source="existing billed, metered, measured and allocated facts",
-    )
-    if not guard(result, "No cost facts exist in this window."):
-        return
-    frame = result.df.copy()
-    # DS #4: cost_truth ALWAYS returns four rows (un-grouped scalar aggregates), so an
-    # empty basis arrives as NULL CREDITS, not a missing row — and safe_float would turn
-    # that into a measured-looking $0.00. Track presence and render "No evidence" per basis
-    # instead, most importantly on per-company views where the three company-scoped bases
-    # can be legitimately empty while account-wide BILLED shows real dollars.
-    present = {
-        str(row.get("BASIS")): bool(pd.notna(row.get("CREDITS")))
-        for _, row in frame.iterrows()
-    }
-    values = {
-        str(row.get("BASIS")): safe_float(row.get("CREDITS"))
-        for _, row in frame.iterrows()
-    }
-    metered = values.get("METERED", 0.0)
-    allocated = values.get("ALLOCATED", 0.0)
-    measured = values.get("MEASURED", 0.0)
-    billed = values.get("BILLED", 0.0)
-    # rec29: dollars primary (execs read dollars, not credits), credits secondary.
-    # The three compute-clean bases convert at the compute rate; BILLED blends
-    # services, so its AI/Cortex share must price at the AI rate (house rule d) via
-    # the billed AI/OTHER split — a flat rate would overprice AI credits.
-    settings = load_settings(_PAGE)
-    rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
-    ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
-    split = run(mart_sql.billed_split(days, bounds=bounds), page=_PAGE,
-                key=f"decision_billed_split_{days}{_lm}", tier="historical",
-                source="FACT_METERING_DAILY (billed AI/OTHER split)")
-    # r28 (bug-hunt): billed_split is a BARE AGGREGATE (SUM, no GROUP BY), so an empty
-    # window returns one all-NULL row and split.usable() is True with NO billed data —
-    # which would render a fabricated "$0.00" beside the sibling lenses' honest "No
-    # evidence". Gate on the key column being non-NULL (the same guard spend.py uses for
-    # TOTAL_USD / DAYS_AVERAGED) so an empty window reads "No evidence", not $0.00.
-    _split_has = split.usable() and pd.notna(split.df.iloc[0].get("CREDITS_BILLED"))
-    if _split_has:
-        _s = split.df.iloc[0]
-        billed_usd = blended_billed_usd(safe_float(_s.get("CREDITS_BILLED_OTHER")),
-                                        safe_float(_s.get("CREDITS_BILLED_AI")), rate, ai_rate)
-        _billed_help = ("Account-wide billing basis; Company does not apply. AI/Cortex "
-                        "credits priced at the AI rate, compute at the compute rate.")
-    else:
-        # Degrade when the split read fails OR is empty: a flat compute rate on the
-        # cost_truth billed total slightly overstates AI — say so rather than claiming
-        # AI-aware. (When the window is empty, _billed_present below is False, so this
-        # value is never shown — the tile reads "No evidence".)
-        billed_usd = credits_to_usd(billed, rate)
-        _billed_help = ("Account-wide billing basis; Company does not apply. AI/OTHER split "
-                        "unavailable — priced at the flat compute rate (AI slightly overstated).")
-    # DS #4: billed is account-wide (the cost_truth row OR the account-wide split); the
-    # other three are company-scoped and can be legitimately absent. "No evidence" != $0.
-    _billed_present = present.get("BILLED", False) or _split_has
-    _no_ev = "No evidence"
-    kpi_row([
-        {"label": "Billed credits (modeled $)",
-         "value": format_usd(billed_usd) if _billed_present else _no_ev,
-         "delta": f"{billed:,.0f} cr" if _billed_present else "—",
-         "delta_color": "off", "help": _billed_help},
-        {"label": "Metered warehouse",
-         "value": format_usd(credits_to_usd(metered, rate)) if present.get("METERED") else _no_ev,
-         "delta": f"{metered:,.0f} cr" if present.get("METERED") else "—", "delta_color": "off"},
-        {"label": "Measured object-query",
-         "value": format_usd(credits_to_usd(measured, rate)) if present.get("MEASURED") else _no_ev,
-         "delta": f"{measured:,.0f} cr" if present.get("MEASURED") else "—", "delta_color": "off"},
-        {"label": "Allocated to users",
-         "value": format_usd(credits_to_usd(allocated, rate)) if present.get("ALLOCATED") else _no_ev,
-         "delta": f"{allocated:,.0f} cr" if present.get("ALLOCATED") else "—", "delta_color": "off"},
-    ])
-    # F26/C34 review: NO sort_label here — the four rows are LENSES over cost
-    # ("do not add", DS #4's No-evidence discipline), so a rank ordinal and a
-    # credits race bar would invite exactly the cross-basis comparison this
-    # table forbids. The label was invisible on a 4-row table anyway.
-    styled_table(frame, height=300)
-    st.caption(
-        "Dollars primary, credits secondary. Rows are lenses over cost, not addends: "
-        "billed credits include the cloud-services adjustment but modeled $ uses configured "
-        "rates; organization currency is billing truth. Metered includes warehouse idle; "
-        "measured excludes idle; "
-        "allocated redistributes warehouse usage."
-        + (f" Measured is {measured / metered * 100:,.0f}% and allocated "
-           f"{allocated / metered * 100:,.0f}% of metered."
-           if (present.get("METERED") and metered and present.get("MEASURED")
-               and present.get("ALLOCATED")) else "")
-    )
-
-
 _PROOF_MEMO: dict = {}
 
 
 def reset_proof_memo() -> None:
-    """Clear the per-render _proof_signals memo. Called once at the top of the Decision
-    Studio page render so the shared prove-it computation runs ONCE per render (the
-    page-open verdict AND the Scorecard section both call _proof_signals) — never across
-    renders, where the run() cache's TTL stays the freshness authority. Safe because
-    Decision Studio has NO fragments: the page always re-runs top-to-bottom through this
-    reset before any _proof_signals caller."""
+    """Clear the per-render _proof_signals memo. Called once at the top of the Proof page render so
+    the shared prove-it computation runs ONCE per render (the page-open verdict AND the Proof /
+    Pipeline section both call _proof_signals) — never across renders, where the run() cache's TTL
+    stays the freshness authority. Safe with the Pipeline projection fragment because that fragment
+    NEVER calls _proof_signals: its measured slider defaults are computed in the full run and passed
+    in, so a fragment-only rerun (which skips this reset) never reads a stale memo."""
     _PROOF_MEMO.clear()
 
 
 def _proof_signals(rate: float) -> dict | None:
-    """Wave 2 #8: the shared prove-it reads + compute behind BOTH the page-open verdict
-    and the Scorecard section, so the hoisted verdict and the scorecard banner are one
-    identical computation. Returns None when the savings ledger isn't set up yet. Keeps
-    the `savings_ledger(limit=None)` / `decision_roi_ledger_full` read to ONE site here
-    (the other lives in _roi), which the cost-hunt lock counts at exactly two.
+    """Wave 2 #8: the shared prove-it reads + compute behind BOTH the page-open verdict and the Proof
+    section, so the hoisted verdict and the section's banner figures are one identical computation.
+    Returns None when the savings ledger isn't set up yet. Keeps the `savings_ledger(limit=None)` /
+    `decision_roi_ledger_full` read to ONE site (v4.597: the Scorecard and ROI merged into Proof, so
+    the old second ROI read is gone).
 
-    Memoized PER RENDER (reset_proof_memo at the page top): the two callers now share ONE
-    computation instead of two cache-deduped read sets — same Snowflake I/O (the run() cache
-    already deduped it), but no duplicate cache-hit telemetry double-counting these keys in
-    APP_QUERY_TELEMETRY, and the verdict/scorecard agree by construction, not just by cache."""
+    Memoized PER RENDER (reset_proof_memo at the page top): the callers share ONE computation instead
+    of cache-deduped read sets — same Snowflake I/O (the run() cache already deduped it), but no
+    duplicate cache-hit telemetry double-counting these keys in APP_QUERY_TELEMETRY, and the verdict
+    and the section agree by construction, not just by cache.
+
+    ``verified_active`` / ``verified_active_items`` / ``verified_qtd`` are the UNCAPPED SQL aggregates
+    (savings_summary_quarter) — the headline run-rate and quarter figures; ``totals`` (pandas over the
+    row-capped ledger frame) only feeds ratios, counts and per-item disclosure."""
     _k = round(float(rate), 6)
     if _PROOF_MEMO.get("rate") == _k:
         return _PROOF_MEMO.get("sig")
@@ -661,7 +325,8 @@ def _proof_signals(rate: float) -> dict | None:
         {"key": "sc_appcost", "sql": mart_sql.app_cost_last_30d(),
          "source": "FACT_WAREHOUSE_DAILY (app warehouse, trailing 30d)"},
         {"key": "sc_accept", "sql": mart_sql.action_acceptance(90), "source": "ACTION_QUEUE (decided in 90d)"},
-    ], page=_PAGE, tier="recent") or {}
+    ], page=_PAGE, tier="recent")
+    _sc_pf = _sc_pf if _sc_pf is not None else {}   # house law 8: a None batch is "no prefetch", not {}
     _q = _sc_pf.get("sc_quarter") or run(mart_sql.savings_summary_quarter(), page=_PAGE,
                                          key="sc_quarter", tier="recent",
                                          source="SAVINGS_LEDGER (active run-rate + QTD)")
@@ -673,17 +338,26 @@ def _proof_signals(rate: float) -> dict | None:
     _prec = run(mart_sql.rule_precision(90), page=_PAGE, key="sc_precision",
                 tier="recent", source="ALERT_EVENTS resolution kinds", probe=True)
     totals = ledger_totals(ledger.df)
-    verified_qtd = safe_float(_q.df.iloc[0].get("VERIFIED_QTD_USD")) if _q.usable() else 0.0
+    # review r1: if the whole-ledger summary read fails, fall back to the ledger frame (disclosed on the
+    # page as summary_ok False) instead of a false $0.00/mo run-rate
+    _q_ok = _q.usable()
+    verified_qtd = (safe_float(_q.df.iloc[0].get("VERIFIED_QTD_USD")) if _q_ok
+                    else safe_float(totals.get("verified_qtd_usd")))
     # Next-Fifty #3: the ROI numerator is the ACTIVE verified monthly run-rate (verified in the
     # last SAVINGS_ACTIVE_MONTHS months), not this quarter's sum — a quarter-scoped numerator fell
     # to 0x on the first day of every quarter while the trailing-30d run cost did not.
     verified_active = (safe_float(_q.df.iloc[0].get("VERIFIED_ACTIVE_MONTHLY_USD"))
-                       if _q.usable() else 0.0)
+                       if _q_ok else safe_float(totals.get("verified_active_usd")))
+    verified_active_items = (int(safe_float(_q.df.iloc[0].get("VERIFIED_ACTIVE_ITEMS")))
+                             if _q_ok else int(totals["verified_active_count"]))
     run_cost = safe_float(_ac.df.iloc[0].get("APP_CREDITS_30D")) * rate if _ac.usable() else 0.0
     sig = {
         "ledger": ledger, "totals": totals, "realization": totals["realization_pct"],
         "roi": roi_multiple(verified_active, run_cost),
+        "verified_active": verified_active,
+        "verified_active_items": verified_active_items,
         "verified_qtd": verified_qtd,
+        "summary_ok": _q_ok,
         "acc": acceptance_summary(_acc.df if _acc.usable() else None),
         "prec": account_precision(_prec.df if _prec.usable() else None),
     }
@@ -692,12 +366,11 @@ def _proof_signals(rate: float) -> dict | None:
 
 
 def decision_verdict(rate: float) -> dict:
-    """Wave 2 #8: the page-open 'should I worry?' line for Decision Studio. Reuses the
-    Scorecard reads (via _proof_signals, cache-shared) and the same proof_verdict the
-    scorecard banner shows, so the hoisted line agrees with it exactly. Returns {} (the
-    shell renders nothing) until the ledger is set up. hasattr-guarded st.status so a
-    cold first paint reads as progress, matching the Operations verdict (#7)."""
-    _load = (st.status("Reading Decision Studio proof…", expanded=False)
+    """Wave 2 #8: the page-open 'should I worry?' line for Proof. Reuses the Proof section's reads (via
+    _proof_signals, cache-shared) and the same proof_verdict, so the hoisted line agrees with the
+    section exactly. Returns {} (the shell renders nothing) until the ledger is set up. hasattr-guarded
+    st.status so a cold first paint reads as progress, matching the Operations verdict (#7)."""
+    _load = (st.status("Reading the proof record…", expanded=False)
              if hasattr(st, "status") else contextlib.nullcontext())
     with _load:
         sig = _proof_signals(rate)
@@ -710,20 +383,19 @@ def decision_verdict(rate: float) -> dict:
     return page_verdict(decision_studio_signals(proof), healthy=proof["headline"])
 
 
-def _scorecard(company: str, rate: float) -> None:
-    """Prove-it flagship: does OVERWATCH work, and does it pay for itself? Composes the
-    five trust/value signals — ROI multiple, realization, acceptance, alert precision,
-    evidence coverage — into one director-facing scorecard + a one-line verdict. The gate
-    the owner set before going autonomous. Account-wide; reuses the ledger/queue/alert
-    marts and adds no new scan (only the small account roll-ups in app/logic/proof.py)."""
+def _proof_tab(rate: float) -> None:
+    """Proof ▸ Proof (v4.597: the Scorecard + ROI, merged): does OVERWATCH work, does it pay for itself,
+    and what does each verified saving rest on? Account-wide (SAVINGS_LEDGER has no company grain).
+    Every HEADLINE total is a SQL aggregate — the run-rate and quarter figures from
+    savings_summary_quarter, the attribution split from ledger_attribution's window columns — so a
+    row-capped ledger frame can never shrink them; pandas only shapes ratios, counts and per-item rows.
+    Read-only: no write control, and every cross-page doorway is gated on can_open."""
     section_header("Does OVERWATCH earn its keep?", "", "target")
-    st.caption("Account-wide proof: what the tool recommended, how much the team acted on, what "
-               "verified out in dollars vs OVERWATCH's own run cost, and how much of the advice "
-               "rests on labeled evidence. Resolve alerts with a kind and verify savings to grow it.")
-
-    # Wave 1 #48 + Wave 2 #8: name the heaviest cold-load, and read the prove-it signals
-    # through the SAME shared helper the page-open verdict uses so the scorecard banner
-    # and the hoisted verdict are one identical computation (hasattr-guarded st.status).
+    st.caption("Account-wide — SAVINGS_LEDGER has no company grain, so this record does not narrow to "
+               "the Company filter. What the tool recommended, how much the team acted on, what verified "
+               "out in dollars vs OVERWATCH's own run cost, and what each saving rests on.")
+    # Wave 1 #48 + Wave 2 #8: name the heaviest cold-load, and read the prove-it signals through the
+    # SAME shared helper the page-open verdict uses (a memo hit here: zero extra reads).
     _sc_load = (st.status("Reading the proof ledger…", expanded=False)
                 if hasattr(st, "status") else contextlib.nullcontext())
     with _sc_load:
@@ -732,10 +404,20 @@ def _scorecard(company: str, rate: float) -> None:
         empty_state("needs_setup", "Apply the action + savings layer (V051+) to start the proof record.")
         return
     ledger = sig["ledger"]
-    realization = sig["realization"]
+    totals = sig["totals"]
     roi = sig["roi"]
     acc = sig["acc"]
     prec = sig["prec"]
+    verified_active = sig["verified_active"]
+    # Per-item attribution + the uncapped attribution split (its own read: it joins ALERT_EVENTS, so it
+    # re-colds on alert acks — kept apart from the ledger read, which gates the verdict).
+    attr = run(mart_sql.ledger_attribution(), page=_PAGE, key="proof_attribution", tier="recent",
+               source="SAVINGS_LEDGER + change registry + REMEDIATION_LOG + ALERT_EVENTS (attribution)",
+               probe=True)
+    attr_df = attr.df if attr.usable() else None
+    split = evidence_split(attr_df)
+    carried = carried_realization(ledger_with_attribution(ledger.df, attr_df))
+    settle = settle_schedule(ledger.df)
 
     evcov = None
     _port = run(workbench_sql.workload_portfolio(30, "ALL", 200), page=_PAGE, key="sc_portfolio",
@@ -745,10 +427,8 @@ def _scorecard(company: str, rate: float) -> None:
         if not _pf.empty and "EVIDENCE_COVERAGE" in _pf.columns:
             evcov = round(float(_pf["EVIDENCE_COVERAGE"].mean()) * 100, 0)
 
-    # v4.461 P2: the prove-it verdict is hoisted ONCE above the section bar
-    # (pages/decision_studio.py → decision_verdict → page_verdict_line); the
-    # in-section st.success/warning banner that repeated the same verdict here is
-    # dropped, and the ROI multiple becomes the section's focal number.
+    # v4.461 P2: the prove-it verdict is hoisted ONCE above the section bar (pages/decision_studio.py
+    # → decision_verdict → page_verdict_line); the ROI multiple is this section's focal number.
     hero_metric({
         "label": "Pays for itself",
         "value": (f"{roi['RATIO']:.1f}×" if roi["RATIO"] is not None else "—"),
@@ -764,14 +444,68 @@ def _scorecard(company: str, rate: float) -> None:
                 "trailing-30-day warehouse run cost (APP_WAREHOUSE credits × rate) — same monthly horizon "
                 "on both sides. ≥1× means it pays for itself. Reverted changes are not detected yet, so an "
                 f"item counts until it is {SAVINGS_ACTIVE_MONTHS} months old."})
+
+    _real = totals["realization_pct"]
+    _no_est = int(totals.get("verified_no_estimate_count") or 0)
+    _no_est_auto = int(totals.get("verified_no_estimate_auto_count") or 0)
+    # Next-Fifty #11 (V153): change-scan rows stay ESTIMATED until their 14-day measured window closes and
+    # then settle themselves -- split them out so the delta never asks an operator to hand-verify them.
+    _auto_pending = int(totals.get("auto_settle_pending_count") or 0)
+    _by_hand = max(0, int(totals["estimated_count"]) - _auto_pending)
+    _carried_txt = (f" · carried: {carried['carried_pct']:,.0f}% vs OVERWATCH's own estimate "
+                    f"({carried['items']:,} item(s))"
+                    if carried and carried.get("carried_pct") is not None else "")
+    _next = settle.get("next")
+    _settle_bits = []
+    if _next is not None:
+        _settle_bits.append(f"next ~{_next:%b} {_next.day}")
+    if settle.get("overdue"):
+        _settle_bits.append(f"{int(settle['overdue']):,} awaiting the daily scan")
+    if _by_hand:
+        _settle_bits.append(f"{_by_hand:,} more await proof by hand")
     kpi_row([
-        {"label": "Realization",
-         "value": (f"{realization:,.0f}%" if realization is not None
-                   else ("n/a" if sig["totals"]["verified_count"] else "—")),
-         "help": "Of what verified items were estimated to save, how much actually measured out. "
-                 "Near 100% means the estimates held up (verified items that carried an estimate). "
-                 "n/a = no verified item carried an up-front estimate to compare against (changes the "
-                 "daily scan auto-measured, and experiments verified by hand, book none)."},
+        # D4 (owner screenshot 2026-09-24): every VERIFIED_USD is a MONTHLY saving, so the run-rate reads
+        # $/mo, never cumulative dollars. The VALUE is the uncapped SQL aggregate (the ROI numerator).
+        {"label": "Verified savings run-rate", "value": f"{format_usd(verified_active)}/mo",
+         "severity": "ok" if verified_active else "",
+         "delta": (f"active: verified in the last {SAVINGS_ACTIVE_MONTHS} months · "
+                   f"{format_usd(totals['verified_usd'])}/mo across all {totals['verified_count']:,} verified item(s)"),
+         "delta_color": "off", "method": "measured",
+         "help": "Each verified item is a recurring MONTHLY saving measured after the change (never an "
+                 "estimate); this is their sum as a $/month run-rate, not cumulative dollars saved — the "
+                 "same figure the ROI multiple divides."},
+        {"label": "Added this quarter", "value": f"{format_usd(sig.get('verified_qtd', 0.0))}/mo",
+         "method": "measured",
+         "help": "Monthly run-rate of the items verified since the quarter began (account clock)."},
+        {"label": "Realization rate",
+         "value": (f"{_real:,.0f}%" if _real is not None
+                   else ("n/a" if totals["verified_count"] else "—")),
+         "delta": ((f"{format_usd(totals['realized_verified_usd'])} of "
+                    f"{format_usd(totals['realized_estimated_usd'])} estimated"
+                    + (f" · {_no_est:,} item(s) without an estimate not in the ratio" if _no_est else ""))
+                   if _real is not None else
+                   (f"no up-front estimate on the {_no_est:,} verified item(s) ({_no_est_auto:,} auto-measured, "
+                    f"{_no_est - _no_est_auto:,} verified by hand)"
+                    if totals["verified_count"] else "nothing verified yet")) + _carried_txt,
+         "delta_color": "off",
+         "help": "Verified $ as a share of what those items were estimated to save — the honest "
+                 "estimate-vs-actual (verified items that carried an estimate). Near 100% means the "
+                 "estimates held up; above 100% means realized savings beat the estimate. 'Carried' is a "
+                 "SEPARATE figure: the auto-measured row judged against the estimate OVERWATCH recorded "
+                 "BEFORE the change (its manual twin, the executed remediation, or the idle alert's $/mo); "
+                 "a rejected item that carried an estimate counts as 0 realized. It never replaces the rate."},
+        {"label": "Settling", "value": f"{_auto_pending:,}",
+         "delta": (f"{_auto_pending:,} change(s) settle automatically when their 14-day window closes"
+                   + (" · " + " · ".join(_settle_bits) if _settle_bits else "")
+                   if _auto_pending else
+                   (f"{totals['estimated_count']:,} item(s) awaiting proof" if totals["estimated_count"]
+                    else "nothing measuring")),
+         "delta_color": "off",
+         "help": "Rows the daily change scan booked settle themselves on 14 days of measured actuals, "
+                 "15–16 days after the change (V153); their dollars join the run-rate only then. Items "
+                 "booked by hand are verified on Cost ▸ Optimization & Savings ▸ Remediation & ledger."},
+    ])
+    kpi_row([
         {"label": "Acted on",
          "value": (f"{acc['ACCEPTANCE_PCT']:,.0f}%" if acc["ACCEPTANCE_PCT"] is not None else "—"),
          "delta": f"{acc['DONE_N']} done · {acc['DROPPED_N']} dismissed · {acc['OPEN_N']} open",
@@ -793,89 +527,16 @@ def _scorecard(company: str, rate: float) -> None:
          "help": "Share of the recommendation board's three signals (cache, latency, fail-rate) "
                  "actually present per family — how much of the advice rests on complete evidence."},
     ])
-
-    _fn = run(mart_sql.acceptance_funnel(90), page=_PAGE, key="sc_funnel",
-              tier="recent", source="REMEDIATION_LOG + SAVINGS_LEDGER", probe=True)
-    if _fn.usable():
-        fr = _fn.df.iloc[0]
-        st.caption(md_dollars(
-            "Last 90 days — "
-            f"**{int(safe_float(fr.get('SAVINGS_ESTIMATED')))}** savings items estimated → "
-            f"**{int(safe_float(fr.get('FIXES_EXECUTED')))}** fixes executed → "
-            f"**{int(safe_float(fr.get('SAVINGS_VERIFIED')))}** verified "
-            f"(**{format_usd(safe_float(fr.get('VERIFIED_USD')))}**)"
-            + (f" · {int(safe_float(fr.get('SAVINGS_REJECTED')))} rejected"
-               if safe_float(fr.get("SAVINGS_REJECTED")) else "") + "."))
-
-    _c1, _c2 = st.columns(2)
-    with _c1:
-        if st.button("Savings track record → ROI", key="sc_link_roi", type="secondary"):
-            request_navigation("Decision Studio", "ROI")
-    with _c2:
-        if st.button("Per-rule alert precision → Alerts ▸ Rules", key="sc_link_alerts", type="secondary"):
-            request_navigation("Alerts", "Rules")
-    result_caption(ledger)
-
-
-def _roi(company: str) -> None:
-    """DS flagship (#40/#31/#19): the ROI / realization story, front and center — what
-    OVERWATCH has verifiably saved, how well the estimates held up, the monthly run-rate,
-    and which levers produced it. The director-facing proof that the loop closes. All from
-    the SAVINGS_LEDGER the app already books (no new source)."""
-    section_header("Return on OVERWATCH — verified savings", "", "target")
-    st.caption("Account-wide — SAVINGS_LEDGER has no company grain, so this track record does "
-               "not narrow to the Company filter.")
-    ledger = run(mart_sql.savings_ledger(limit=None), page=_PAGE, key="decision_roi_ledger_full",
-                 tier="recent", source="SAVINGS_LEDGER (full — all-time/QTD/realization economics)")
-    if not ledger.ok:
-        empty_state("needs_setup", "Apply the action layer (V051+) to book and verify savings.")
-        return
-    totals = ledger_totals(ledger.df)
-    _real = totals["realization_pct"]
-    _no_est = int(totals.get("verified_no_estimate_count") or 0)
-    _no_est_auto = int(totals.get("verified_no_estimate_auto_count") or 0)
-    _avgd = totals["avg_days_to_verify"]
-    # Next-Fifty #11 (V153): change-scan rows stay ESTIMATED until their 14-day measured window closes and
-    # then settle themselves -- split them out so the delta never asks an operator to hand-verify them.
-    _auto_pending = int(totals.get("auto_settle_pending_count") or 0)
-    _by_hand = max(0, int(totals["estimated_count"]) - _auto_pending)
-    kpi_row([
-        # D4 (owner screenshot 2026-09-24): every VERIFIED_USD is a MONTHLY saving, so these sums are a
-        # run-rate in $/mo - the old "Verified savings (all time)" label read like cumulative dollars
-        # (and equalled the "/mo" line beneath it), exactly what an auditor reading the ledger would flag.
-        {"label": "Verified savings run-rate", "value": f"{format_usd(totals['verified_active_usd'])}/mo",
-         "severity": "ok" if totals["verified_active_usd"] else "",
-         "delta": (f"active: verified in the last {SAVINGS_ACTIVE_MONTHS} months · "
-                   f"{format_usd(totals['verified_usd'])}/mo across all {totals['verified_count']:,} verified item(s)"),
-         "delta_color": "off", "method": "measured",
-         "help": "Each verified item is a recurring MONTHLY saving measured after the change (never an "
-                 "estimate); this is their sum as a $/month run-rate, not cumulative dollars saved."},
-        {"label": "Added this quarter", "value": f"{format_usd(totals['verified_qtd_usd'])}/mo",
-         "method": "measured",
-         "help": "Monthly run-rate of the items verified since the quarter began."},
-        {"label": "Realization rate",
-         "value": (f"{_real:,.0f}%" if _real is not None
-                   else ("n/a" if totals["verified_count"] else "—")),
-         "delta": ((f"{format_usd(totals['realized_verified_usd'])} of "
-                    f"{format_usd(totals['realized_estimated_usd'])} estimated"
-                    + (f" · {_no_est:,} item(s) without an estimate not in the ratio" if _no_est else ""))
-                   if _real is not None else
-                   (f"no up-front estimate on the {_no_est:,} verified item(s) ({_no_est_auto:,} auto-measured, "
-                    f"{_no_est - _no_est_auto:,} verified by hand)"
-                    if totals["verified_count"] else "nothing verified yet")),
-         "delta_color": "off",
-         "help": "Verified $ as a share of what those items were estimated to save — the honest "
-                 "estimate-vs-actual (verified items that carried an estimate). Near 100% means the "
-                 "estimates held up; above 100% means realized savings beat the estimate."},
-        {"label": "Open pipeline", "value": format_usd(totals["estimated_usd"]),
-         "delta": (f"{_by_hand:,} awaiting proof, {_auto_pending:,} settle automatically when their "
-                   "14-day window closes" if _auto_pending
-                   else f"{totals['estimated_count']:,} item(s) awaiting proof"),
-         "delta_color": "off",
-         "help": "Estimated savings still unverified — the opportunity ahead. Rows the daily change scan "
-                 "booked settle themselves on 14 days of measured actuals, 15–16 days after the change "
-                 "(V153); verify the rest on Cost ▸ Optimize."},
-    ])
+    if not sig.get("summary_ok", True):
+        # review r2: the fallback (see _proof_signals) is disclosed, and the truncation note below
+        # never claims whole-ledger SQL when that read failed
+        st.caption("The whole-ledger savings summary could not be read, so the run-rate, Added this "
+                   "quarter and ROI figures come from the newest ledger rows read here"
+                   + (" (the ledger holds more)." if ledger.truncated else "."))
+    elif ledger.truncated:
+        st.caption("The ledger holds more items than the newest read here: the run-rate, quarter and "
+                   "attribution totals are whole-ledger SQL aggregates, while the realization, settling "
+                   "counts and the per-item evidence below cover the newest items only.")
     if totals["superseded_count"]:
         # Next-Fifty #5: one warehouse change booked twice (the app's manual row + the change scan's
         # measured row) — the manual twin is excluded above; say so, and where to clean it up.
@@ -883,7 +544,7 @@ def _roi(company: str) -> None:
             f"{totals['superseded_count']:,} manual booking(s) "
             f"({format_usd(totals['superseded_estimated_usd'])} estimated) were superseded by the "
             "auto-measured change row for the same warehouse change — excluded here so one change is "
-            "never counted twice. Clean them up on Cost ▸ Optimize ▸ Savings ledger."))
+            "never counted twice. Clean them up on Cost ▸ Optimization & Savings ▸ Remediation & ledger."))
     if totals.get("volume_confounded_count"):
         # Next-Fifty #11: disclosure only -- the measured dollars are never adjusted for volume.
         st.caption(md_dollars(
@@ -891,22 +552,89 @@ def _roi(company: str) -> None:
             f"({format_usd(totals['volume_confounded_usd'])}/mo) whose 14-day measured window shows query "
             "volume outside 0.7–1.3x of baseline — part of that measured delta may be workload, not the "
             "lever. Counted as measured, not adjusted."))
-    if totals["verified_active_usd"] > 0:
-        # the SAME active figure as the run-rate KPI above (review fix: the all-time sum read as a run-rate)
-        _older = totals["verified_count"] - totals["verified_active_count"]
+    if verified_active > 0:
+        # the SAME uncapped SQL figure as the run-rate KPI and the ROI numerator (review fix: the all-time
+        # sum read as a run-rate; v4.597: no longer a pandas sum over the row-capped ledger frame)
+        _active_n = int(sig.get("verified_active_items") or 0)
+        _older = max(0, int(totals["verified_count"]) - _active_n)
+        _avgd = totals["avg_days_to_verify"]
         st.markdown(md_dollars(
-            f"OVERWATCH has verified **{format_usd(totals['verified_active_usd'])}/mo** of active savings run-rate "
-            f"across **{totals['verified_active_count']:,}** item(s) verified in the last {SAVINGS_ACTIVE_MONTHS} months"
+            f"OVERWATCH has verified **{format_usd(verified_active)}/mo** of active savings run-rate "
+            f"across **{_active_n:,}** item(s) verified in the last {SAVINGS_ACTIVE_MONTHS} months"
             + (f" ({_older:,} older item(s) no longer counted)" if _older > 0 else "")
             + (f", realizing **{_real:,.0f}%** of what they were estimated to save"
                if _real is not None else "")
             + (f", closing the loop in **{_avgd:g} days** on average." if _avgd is not None else ".")
             + f" **{format_usd(totals['estimated_usd'])}** more is estimated, awaiting proof."))
+    elif int(sig.get("verified_active_items") or 0) > 0:
+        # review r2: active items that total $0 (a hand-verified "saved nothing") are not "none verified"
+        st.caption(md_dollars(
+            f"{int(sig['verified_active_items']):,} item(s) verified in the last {SAVINGS_ACTIVE_MONTHS} "
+            f"months, totalling {format_usd(verified_active)}/mo. "
+            f"{format_usd(totals['estimated_usd'])} more is estimated, awaiting proof."))
+    elif int(totals["verified_count"]) > 0:
+        # verified items exist, none inside the active window (or the summary read failed): never the
+        # "nothing verified yet" empty state beside a populated evidence table (review r1)
+        st.caption(md_dollars(
+            f"{int(totals['verified_count']):,} verified item(s), none verified in the last "
+            f"{SAVINGS_ACTIVE_MONTHS} months (older items no longer count toward the run-rate). "
+            f"{format_usd(totals['estimated_usd'])} more is estimated, awaiting proof."))
     else:
+        _cost_ok = can_open("Cost Intelligence")
         empty_state("no_data_yet",
                     f"No savings verified yet — {format_usd(totals['estimated_usd'])} is estimated across "
                     f"{totals['estimated_count']:,} item(s). Changes the daily change scan detects settle "
-                    "automatically; verify the rest on Cost ▸ Optimize to start the track record.")
+                    "automatically; verify the rest on Cost ▸ Optimization & Savings to start the track record.",
+                    action_label="Open Optimization & Savings" if _cost_ok else "",
+                    on_action=_open_savings_ledger if _cost_ok else None,
+                    action_key="es_proof_verify")
+
+    # ---- What each saving rests on (per-item evidence) -----------------------------------------
+    section_header("What each saving rests on", "", "target")
+    if split and split.get("active_usd", 0) > 0:
+        _parts = [f"{format_usd(split['executed_usd'])}/mo executed by OVERWATCH",
+                  f"{format_usd(split['recommended_usd'])}/mo recommended by OVERWATCH and executed elsewhere",
+                  f"{format_usd(split['booked_usd'])}/mo booked in OVERWATCH",
+                  f"{format_usd(split['elsewhere_usd'])}/mo detected elsewhere"]
+        if split.get("experiment_usd"):
+            _parts.append(f"{format_usd(split['experiment_usd'])}/mo from hand-verified experiments")
+        _caveats = []
+        if split.get("regressed_usd"):
+            _caveats.append(f"{format_usd(split['regressed_usd'])}/mo came with a performance regression")
+        if split.get("neutral_usd"):
+            _caveats.append(f"{format_usd(split['neutral_usd'])}/mo with no measurable performance change")
+        if split.get("short_window_usd"):
+            _caveats.append(f"{format_usd(split['short_window_usd'])}/mo settled on a short pre-V153 window")
+        st.markdown(md_dollars(
+            f"Of the **{format_usd(split['active_usd'])}/mo** active run-rate: " + " · ".join(_parts) + "."
+            + (" Of it, " + "; ".join(_caveats) + "." if _caveats else "")))
+        st.caption("Every saving counts in the ROI whoever made the change — the split says who gets the "
+                   "credit. Whole-ledger SQL totals, not a sum of the rows below.")
+    elif split:
+        st.caption("No active verified run-rate to attribute yet — the rows below show what each booked "
+                   "item rests on.")
+    elif not attr.ok:
+        st.caption("Attribution is unavailable right now — the rows below show the ledger evidence "
+                   "without who gets the credit.")
+    evid = evidence_rows(ledger.df, attr_df)
+    if evid.empty:
+        empty_state("no_data_yet", "No ledger items to show evidence for yet.")
+    else:
+        styled_table(evid, height=320, slug="proof_evidence", sort_label="verified $/mo, largest first",
+                     # VERIFIED_USD keeps the _USD auto-format (format_usd, "—" for NULL) — no override.
+                     column_config={
+                         "WINDOW": st.column_config.TextColumn(
+                             "Window", help="Change-scan rows only: the 14-day measured window's state."),
+                         "ATTRIBUTION": st.column_config.TextColumn(
+                             "Credit", help="Who made the change: executed or recommended by OVERWATCH, "
+                                            "booked in the app, or detected elsewhere."),
+                         "FLAGS": st.column_config.TextColumn(
+                             "Flags", help="Volume-confounded, performance regressed / unjudged, or an "
+                                           "LBA-1 co-attributed $0 row."),
+                     })
+    if can_open("Operations") and st.button("Change detail → Operations ▸ Change impact",
+                                            key="proof_link_change_impact", type="tertiary"):
+        request_navigation("Operations", "Change impact")
 
     month_df = savings_month_calendar(ledger.df, 12)
     lever_df = savings_by_lever(ledger.df)
@@ -926,50 +654,120 @@ def _roi(company: str) -> None:
                 "REALIZATION_PCT": st.column_config.NumberColumn("Realization %", format="%.0f%%"),
                 "ITEMS": st.column_config.NumberColumn("Items", format="%d"),
             })
+
+    _fn = run(mart_sql.acceptance_funnel(90), page=_PAGE, key="sc_funnel",
+              tier="recent", source="REMEDIATION_LOG + SAVINGS_LEDGER", probe=True)
+    if _fn.usable():
+        fr = _fn.df.iloc[0]
+        st.caption(md_dollars(
+            "Last 90 days — "
+            f"**{int(safe_float(fr.get('SAVINGS_ESTIMATED')))}** savings items estimated → "
+            f"**{int(safe_float(fr.get('FIXES_EXECUTED')))}** fixes executed → "
+            f"**{int(safe_float(fr.get('SAVINGS_VERIFIED')))}** verified "
+            f"(**{format_usd(safe_float(fr.get('VERIFIED_USD')))}**)"
+            + (f" · {int(safe_float(fr.get('SAVINGS_REJECTED')))} rejected"
+               if safe_float(fr.get("SAVINGS_REJECTED")) else "") + "."))
+
+    _c1, _c2 = st.columns(2)
+    with _c1:
+        if st.button("Priced pipeline → Pipeline", key="sc_link_pipeline", type="secondary"):
+            request_navigation("Proof", "Pipeline")
+    with _c2:
+        # READER has no Alerts page: the doorway renders only for a profile that can open it.
+        if can_open("Alerts") and st.button("Per-rule alert precision → Alerts ▸ Rules",
+                                            key="sc_link_alerts", type="secondary"):
+            request_navigation("Alerts", "Rules")
     result_caption(ledger)
+    if attr.ok:
+        result_caption(attr, note="attribution: who made each change; totals are whole-ledger window sums")
 
 
-def _scenarios(company: str) -> None:
-    actions = run(
-        workbench_sql.action_center(company, False, 500), page=_PAGE,
-        key=f"decision_scenario_actions_{company}", tier="live",
-        source="ACTION_QUEUE with confidence and entity keys",
-    )
-    if not actions.ok:
-        empty_state("needs_setup", "Apply V074 to model confidence-aware action scenarios.")
-        legacy = run(
-            mart_sql.action_queue(500, company), page=_PAGE,
-            key=f"decision_scenario_legacy_{company}",
-            tier="live", source="ACTION_QUEUE (legacy read-only shape)",
-        )
-        if legacy.ok and not legacy.empty:
-            styled_table(legacy.df, height=260)
-        return
-    # rec18: with an empty action queue the sliders would model nothing and the KPIs
-    # would silently project $0 — say so and skip the controls until there is a queue.
-    if actions.empty:
-        empty_state("no_data_yet",
-                    "No open actions to model yet — scenarios size a plan from the open "
-                    "action queue. Create actions on Action Center to project savings.")
-        return
+def _clamp_pct(value: object) -> int:
+    return round(max(0.0, min(safe_float(value), 100.0)))
+
+
+def _projection_defaults(sig: dict | None, carried: dict | None) -> dict:
+    """The projection's slider defaults and where each came from. Adoption = the MEASURED acceptance
+    rate (Proof ▸ Acted on), realization = the measured realization rate, else the carried realization
+    vs OVERWATCH's own estimate; each falls back to a labelled assumption. The confidence floor is
+    policy, never measured."""
+    acc = (sig or {}).get("acc") or {}
+    acc_pct = acc.get("ACCEPTANCE_PCT")
+    if acc_pct is not None:
+        adoption = _clamp_pct(acc_pct)
+        adoption_help = (f"Measured: the team acted on {safe_float(acc_pct):,.0f}% of the recommendations "
+                         f"it decided in the last 90 days ({acc.get('DONE_N', 0)} done · "
+                         f"{acc.get('DROPPED_N', 0)} dismissed) — Proof ▸ Acted on.")
+    else:
+        adoption = _ASSUMED_ADOPTION_PCT
+        adoption_help = (f"Assumed — nothing decided yet (no action DONE or DROPPED in 90 days), so "
+                         f"{_ASSUMED_ADOPTION_PCT}% is a placeholder, not a measurement.")
+    real = (sig or {}).get("realization")
+    carried_pct = (carried or {}).get("carried_pct")
+    if real is not None:
+        realization = _clamp_pct(real)
+        realization_help = (f"Measured: verified items realized {safe_float(real):,.0f}% of their up-front "
+                            "estimates — Proof ▸ Realization rate.")
+    elif carried_pct is not None:
+        realization = _clamp_pct(carried_pct)
+        realization_help = (f"Measured (carried): auto-measured changes realized {safe_float(carried_pct):,.0f}% "
+                            "of the estimate OVERWATCH recorded before the change "
+                            f"({int((carried or {}).get('items') or 0):,} item(s)).")
+    else:
+        realization = _ASSUMED_REALIZATION_PCT
+        realization_help = (f"Assumed — no verified item carries an estimate yet, so "
+                            f"{_ASSUMED_REALIZATION_PCT}% is a placeholder, not a measurement.")
+    return {
+        "adoption": adoption, "adoption_help": adoption_help,
+        "realization": realization, "realization_help": realization_help,
+        "conf_floor": _CONFIDENCE_FLOOR,
+        "conf_help": ("Policy, not a measurement: an item counts only at or above this 0–1 confidence — "
+                      "authored on queued actions; the advisor's evidence weight on addressable savings "
+                      "(MEDIUM 0.6, LOW 0.3)."),
+    }
+
+
+@st.fragment
+def _pipeline_projection(frame: pd.DataFrame, defaults: dict) -> None:
+    """Fragment: the Proof ▸ Pipeline projection. A slider move reruns ONLY this block and issues
+    zero reads — the de-duplicated pipeline frame and the measured defaults are computed in the full
+    run and passed in. It never calls _proof_signals (the per-render memo is reset only at the page
+    top, which a fragment rerun skips).
+
+    Floor-compat (streamlit 1.52.2): each slider key is SEEDED into session state only when absent and
+    the widget takes no value=, so a later measured default never collides with a pre-seeded key;
+    "Reset to measured" rewrites the keys in an on_click callback, i.e. before the widgets render."""
+    seed = {"proof_adoption": defaults["adoption"], "proof_realization": defaults["realization"],
+            "proof_conf_floor": defaults["conf_floor"]}
+    for _key, _value in seed.items():
+        if _key not in st.session_state:
+            st.session_state[_key] = _value
+
+    def _reset_to_measured() -> None:
+        for _k, _v in seed.items():
+            st.session_state[_k] = _v
+
     c1, c2, c3 = st.columns(3)
     with c1:
-        adoption = st.slider("Adoption %", 0, 100, 60, 5, key="scenario_adoption")
+        adoption = st.slider("Adoption %", 0, 100, step=1, key="proof_adoption",
+                             help=defaults["adoption_help"])
     with c2:
-        realization = st.slider("Realization %", 0, 100, 70, 5, key="scenario_realization")
+        realization = st.slider("Realization %", 0, 100, step=1, key="proof_realization",
+                                help=defaults["realization_help"])
     with c3:
-        confidence = st.slider("Confidence floor", 0.0, 1.0, 0.6, 0.05,
-                               key="scenario_confidence")
+        confidence = st.slider("Confidence floor", 0.0, 1.0, step=0.05, key="proof_conf_floor",
+                               help=defaults["conf_help"])
+    st.button("Reset to measured", key="proof_reset_measured", type="tertiary",
+              on_click=_reset_to_measured,
+              help="Put the sliders back on the measured values (or the labelled assumptions).")
     projection = scenario_projection(
-        actions.df, adoption_pct=adoption, realization_pct=realization,
-        confidence_floor=confidence,
+        frame, adoption_pct=adoption, realization_pct=realization, confidence_floor=confidence,
     )
     has_candidates = projection["candidates"] > 0
     # Distinguish "no eligible entities" from "eligible but UNPRICED": scenario_projection counts an
-    # action as a candidate on status + confidence alone, so a queue of eligible-but-unpriced actions
-    # (e.g. security decisions carry no dollar estimate) yields candidates > 0 with gross == 0.
-    # Rendering that as "$0.00" reads as "worth nothing" when the dollars are unquantified, not zero
-    # (ds-hunt 2026-08-30).
+    # item as a candidate on status + confidence alone, so eligible-but-unpriced work (a security
+    # decision, a tracked query family) yields candidates > 0 with gross == 0. Rendering that as
+    # "$0.00" reads as "worth nothing" when the dollars are unquantified, not zero (ds-hunt 2026-08-30).
     _priced = has_candidates and projection["gross_estimate"] > 0
 
     def _capture(value: float) -> str:
@@ -978,269 +776,239 @@ def _scenarios(company: str) -> None:
         return format_usd(value) if _priced else "Unpriced"
 
     kpi_row([
-        {"label": "Eligible entities", "value": f"{projection['candidates']:,.0f}"},
-        {"label": "Gross authored estimate", "value": _capture(projection["gross_estimate"])},
-        {"label": "Expected capture",
+        {"label": "Eligible entities", "value": f"{projection['candidates']:,.0f}",
+         "help": "Addressable and queued items at or above the confidence floor, one per entity."},
+        {"label": "In play $/mo", "value": _capture(projection["gross_estimate"]),
+         "help": "The eligible items' monthly estimates, de-duplicated by entity, before the haircuts."},
+        {"label": "Expected capture $/mo",
          "value": _capture(projection["expected_capture"]),
          "delta": (f"{format_usd(projection['low_capture'])} to "
                    f"{format_usd(projection['high_capture'])}") if _priced else None,
-         "delta_color": "off"},
+         "delta_color": "off",
+         "help": "In play × adoption × realization; the range moves realization ±20 points. A model of "
+                 "what is ahead, never a verified saving."},
     ])
-    # Disclose the fetch cap so a >500-action queue's projection is not read as complete (the sibling
-    # _portfolio board discloses its own cap the same way). The lowest-severity/lowest-$ actions are
-    # the ones dropped by the ORDER BY (ds-hunt 2026-08-30).
-    if len(actions.df) >= 500:
+
+
+def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None = None) -> None:
+    """Proof ▸ Pipeline (v4.597; replaces Scenarios): the priced work AHEAD. Addressable $/mo scopes to
+    Company and Window; queued work is every open item for the Company (not windowed). Addressable $/mo
+    is the Cost ▸ Optimization & Savings idle-timer rollup built from the SAME mart read
+    (SQL + tier, so the cache is shared) — mart-only, never the live fallback; right-sizing joins it only
+    behind a toggle, like Optimize. Queued work is the open ACTION_QUEUE normalised to $/mo by PERIOD.
+    The two are unioned and de-duplicated by entity, then a fragment projects them with measured
+    defaults. Read-only; the only doorway (a row's Entity 360) is gated on can_open."""
+    _lm = "_lm" if bounds is not None else ""
+    section_header("What's ahead — the priced pipeline", "", "target")
+    # A memo hit: the page-open verdict already computed the proof signals this render (zero reads).
+    sig = _proof_signals(rate)
+
+    # ---- Addressable $/mo: the Cost ▸ Optimization & Savings idle rollup (mart only) ----------
+    idle = run(mart27_sql.eff_idle_analysis(days, company, bounds=bounds), page=_PAGE,
+               key=f"proof_idle_{company}_{days}{_lm}", tier="hourly",
+               source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, refreshed every 4h; today up to 4h behind)")
+    _whs_cache: list[pd.DataFrame] = []
+
+    def _warehouse_settings() -> pd.DataFrame:
+        # SHOW WAREHOUSES carries the current AUTO_SUSPEND / size — eligibility, not decoration. Shared
+        # (key + tier) with Cost ▸ Optimization & Savings, Operations and the sidebar jump box; read
+        # at most once here.
+        if not _whs_cache:
+            _whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="jump_wh",
+                       tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
+            _whs_cache.append(_whs.df if (_whs.ok and not _whs.empty) else pd.DataFrame())
+        return _whs_cache[0]
+
+    opps = []
+    # W12 (review r2): Current month / Current year pass a day OFFSET (Sep 2 MTD = 1); divide by the
+    # bounds' day SPAN, as Operations ▸ Optimize and Cost ▸ Optimization & Savings do.
+    _span = (bounds[1] - bounds[0]).days if bounds is not None else days
+    _idle_days = _span
+    if idle.usable():
+        _idle_days = served_days(idle, _span)
+        opps.extend(idle_opportunities(
+            idle_advisor(with_auto_suspend_settings(idle.df, _warehouse_settings()), rate, _idle_days)))
+    _sizing = st.toggle("Include right-sizing (mart profile)", key="proof_pipe_sizing",
+                        help="Adds the Cost ▸ Optimization & Savings right-sizing opportunities from the efficiency "
+                             "mart (one extra mart read). Off, the addressable figure is idle-timer only — "
+                             "the same default Cost ▸ Optimization & Savings shows.")
+    _sized_ok = False
+    if _sizing:
+        prof = run(mart27_sql.eff_sizing_profile(days, company, bounds=bounds), page=_PAGE,
+                   key=f"proof_sizing_{company}_{days}{_lm}", tier="hourly",
+                   source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart — p95 is peak daily)")
+        if prof.usable():
+            _sized_ok = True
+            sized = size_recommendations(with_warehouse_settings(prof.df, _warehouse_settings()), rate,
+                                         served_days(prof, _span))
+            opps.extend(resize_opportunities(sized))
+    roll = rollup_savings(opps)
+
+    # ---- Queued work: the open ACTION_QUEUE, normalised to $/mo -------------------------------
+    actions = run(workbench_sql.action_center(company, False, 500, with_totals=True), page=_PAGE,
+                  key=f"proof_queue_{company}", tier="recent",
+                  source="ACTION_QUEUE with confidence and entity keys")
+    queued, qsum = monthly_equivalent(actions.df if actions.usable() else None)
+    # the headline reads the SQL window totals (every open item, uncapped); qsum (over the <=500 rows)
+    # feeds only the projection (review r1: never a headline sum over the capped frame)
+    _qt = dict(qsum)
+    if actions.usable() and "OPEN_TOTAL" in actions.df.columns:
+        _r0 = actions.df.iloc[0]
+        _qt.update(items=int(safe_float(_r0.get("OPEN_TOTAL"))),
+                   monthly_usd=safe_float(_r0.get("QUEUED_MONTHLY_TOTAL")),
+                   unpriced_count=int(safe_float(_r0.get("UNPRICED_TOTAL"))),
+                   one_time_count=int(safe_float(_r0.get("ONE_TIME_TOTAL"))),
+                   unspecified_count=int(safe_float(_r0.get("NO_PERIOD_TOTAL"))))
+    pipeline = pipeline_frame(roll.items, queued if actions.usable() else None)
+
+    # ---- Settling (the ledger evidence already in hand: zero reads) ---------------------------
+    # The count is ledger_totals' auto_settle_pending_count — the SAME figure as Proof ▸ Settling;
+    # settle_schedule adds only the next settle day.
+    settle = settle_schedule(sig["ledger"].df) if sig is not None else {}
+    _pending = int(sig["totals"].get("auto_settle_pending_count") or 0) if sig is not None else 0
+    _next = settle.get("next")
+
+    _basis = "idle timer + right-sizing" if _sized_ok else "idle-timer only"
+    if not idle.ok:
+        _addr = {"label": "Addressable $/mo", "value": "—", "delta": "efficiency mart unavailable",
+                 "delta_color": "off"}
+    elif idle.empty:
+        _addr = {"label": "Addressable $/mo", "value": "—",
+                 "delta": "no warehouse metering in this window", "delta_color": "off"}
+    else:
+        _addr = {"label": "Addressable $/mo", "value": format_usd(roll.total_monthly_usd),
+                 "delta": (f"{len(roll.items):,} opportunit{'y' if len(roll.items) == 1 else 'ies'} · {_basis}"
+                           + ("" if not _warehouse_settings().empty else " · AUTO_SUSPEND unverified")),
+                 "delta_color": "off",
+                 "help": "The Cost ▸ Optimization & Savings addressable net: per-warehouse idle-timer "
+                         "savings (net of the resume tail; overlapping right-sizing de-duplicated per "
+                         f"warehouse), measured over {window_phrase(bounds, _idle_days)} of the efficiency mart. "
+                         "Observed-idle based — an estimate, not a verified saving."}
+    kpi_row([
+        _addr,
+        ({"label": "Queued work $/mo", "value": format_usd(_qt["monthly_usd"]),
+          "delta": (f"{_qt['items']:,} open · {_qt['unpriced_count']:,} unpriced · "
+                    f"{_qt['one_time_count']:,} one-time"
+                    + (f" · {_qt['unspecified_count']:,} no period" if _qt["unspecified_count"] else "")
+                    + (f" · top {qsum['items']:,} projected" if _qt["items"] > qsum["items"] else "")),
+          "delta_color": "off",
+          "help": "Open Action Center estimates as a monthly run-rate: MONTHLY as-is, ANNUAL ÷ 12. One-time "
+                  "and period-less estimates are counted but kept out of the run-rate."}
+         if actions.ok else
+         {"label": "Queued work $/mo", "value": "—", "delta": "action queue unavailable",
+          "delta_color": "off"}),
+        {"label": "Settling",
+         "value": (f"{_pending:,}" if sig is not None else "—"),
+         "delta": ((f"measuring · next ~{_next:%b} {_next.day}" if _pending and _next is not None
+                    else ("measuring" if _pending else "nothing measuring"))
+                   if sig is not None else "ledger not set up"),
+         "delta_color": "off",
+         "help": "Changes the daily scan booked that are still inside their 14-day measured window. "
+                 "Their measured $ joins Proof's verified run-rate when the window closes — it never "
+                 "enters this projection."},
+    ])
+    if not idle.ok:
+        empty_state("unavailable", "The warehouse-efficiency mart could not be read — addressable "
+                                   "savings are not sized (no live fallback on this page).",
+                    detail=idle.error)
+    if not actions.ok:
+        empty_state("unavailable", "The action queue could not be read — queued work is not projected.",
+                    detail=actions.error)
+    if actions.ok and len(actions.df) >= 500:
+        # Disclose the fetch cap so a >500-action queue's projection is not read as complete. The
+        # lowest-severity / lowest-$ actions are the ones the ORDER BY drops (ds-hunt 2026-08-30).
         st.caption(
             "Projecting the top 500 open actions by severity, then overdue, then estimate — more "
             "exist in this scope; narrow the Company to bring the rest into the projection."
         )
     st.caption(
-        "Open action estimates are de-duplicated by entity, then adoption and realization "
-        "haircuts are applied. Estimates are summed at face value across time bases "
-        "(monthly, one-time, annual, or unlabeled — see each action's PERIOD), so read the "
-        "projection as an order-of-magnitude opportunity, not a strict run-rate. "
-        "Verified savings never enter the projection."
+        "Queued estimates are normalised to a monthly run-rate from each action's PERIOD (monthly as-is, "
+        "annual ÷ 12); one-time and period-less estimates are listed but kept out of the run-rate, and "
+        "an unpriced action projects nothing. Addressable and queued work on the same warehouse is "
+        "de-duplicated by entity (the larger $/mo counts once) before the adoption and realization "
+        "haircuts. Verified savings never enter the projection."
     )
-    # The realized track record (verified $, realization rate, run-rate, levers) is now
-    # its own first-class **ROI** section — Scenarios stays focused on the forward projection.
-    st.caption("→ Realized savings and the estimate-vs-actual track record are in the **ROI** "
-               "section (top of Decision Studio).")
-    if not actions.empty:
-        # DS #1: pin actions on watched entities to the top WITHIN their severity band, so a
-        # watched entity's action surfaces first without burying a CRITICAL under a watched LOW.
-        _viewer = viewer_name()
-        _wl_res = run(workbench_sql.watchlist(_viewer), page=_PAGE,
-                      key="decision_scenario_watchlist", tier="live", source="USER_WATCHLIST"
-                      ) if _viewer else None
-        _wl = _wl_res.df if (_wl_res is not None and _wl_res.usable()) else None
-        adf = actions.df.copy()
-        adf["WATCHED"] = mark_watched_pairs(adf, _wl, "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY")
-        # DS #34: flag open actions untouched for 30+ days — the plan was made and forgotten,
-        # so its estimate is decaying. A prompt to re-estimate, act, or close.
-        adf["STALE"] = stale_planning(adf, account_now())
-        _n_stale = int(adf["STALE"].sum())
-        if _n_stale:
-            st.caption(f"⚠ {_n_stale} open action(s) not touched in 30+ days — re-estimate, "
-                       "act, or close them; a stale plan's estimate is decaying.")
-        if bool(adf["WATCHED"].any()):
-            _sev_rank = adf["SEVERITY"].astype(str).str.upper().map(
-                {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}).fillna(4)
-            adf = (adf.assign(_SR=_sev_rank)
-                   .sort_values(["_SR", "WATCHED"], ascending=[True, False], kind="stable")
-                   .drop(columns="_SR").reset_index(drop=True))
-            st.caption(f"★ {int(adf['WATCHED'].sum())} action(s) on your watched entities, "
-                       "pinned to the top of their severity band.")
-        # Every other board on this page drills into Entity 360 on row click; the open-action
-        # plan should too. A row click opens that action's SOURCE entity (no-op when it has none).
-        display = adf[[column for column in (
-            "WATCHED", "STALE", "SEVERITY", "TITLE", "SOURCE_ENTITY_TYPE",
-            "SOURCE_ENTITY_KEY", "CONFIDENCE", "ESTIMATED_USD", "PERIOD", "OWNER", "DUE_DATE",
-        ) if column in adf.columns]].copy()
-        _scen_cfg = {}
-        if "WATCHED" in display.columns:          # F59: one star, not raw True/False
-            display["WATCHED"] = display["WATCHED"].map(watch_star)
-            _scen_cfg["WATCHED"] = watch_star_column()
-        if "CONFIDENCE" in display.columns:       # F60: one confidence encoding — a bar
-            _scen_cfg["CONFIDENCE"] = confidence_progress_column(
-                "Confidence (authored)", AUTHORED_CONFIDENCE_HELP)
+    if pipeline.empty:
+        empty_state("no_data_yet",
+                    "Nothing to project yet — no addressable idle-timer savings in this scope and no open "
+                    "actions. Create actions on Action Center, or widen the Window, to size a plan.")
+        if idle.ok:
+            result_caption(idle)
+        return
 
-        def open_scenario_entity(index: int) -> None:
+    carried = None
+    if sig is not None and sig.get("realization") is None:
+        # No realization rate yet (auto-booked rows carry no up-front estimate): default the slider to
+        # the carried realization instead. The same read + key Proof ▸ Proof uses (cache-shared).
+        _attr = run(mart_sql.ledger_attribution(), page=_PAGE, key="proof_attribution", tier="recent",
+                    source="SAVINGS_LEDGER + change registry + REMEDIATION_LOG + ALERT_EVENTS (attribution)",
+                    probe=True)
+        carried = carried_realization(
+            ledger_with_attribution(sig["ledger"].df, _attr.df if _attr.usable() else None))
+    _pipeline_projection(pipeline, _projection_defaults(sig, carried))
+
+    # DS #1: pin items on watched entities to the top WITHIN their severity band, so a watched
+    # entity's item surfaces first without burying a CRITICAL under a watched LOW. The watchlist and
+    # queue carry write-invalidation salts, so the "recent" tier stays correct after a Watch click.
+    _viewer = viewer_name()
+    _wl_res = run(workbench_sql.watchlist(_viewer), page=_PAGE,
+                  key="proof_pipeline_watchlist", tier="recent", source="USER_WATCHLIST"
+                  ) if _viewer else None
+    _wl = _wl_res.df if (_wl_res is not None and _wl_res.usable()) else None
+    adf = pipeline.copy()
+    adf["WATCHED"] = mark_watched_pairs(adf, _wl, "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY")
+    # DS #34: flag open actions untouched for 30+ days — the plan was made and forgotten, so its
+    # estimate is decaying. (Addressable rows are measured fresh each window: never stale.)
+    adf["STALE"] = stale_planning(adf, account_now())
+    _n_stale = int(adf["STALE"].sum())
+    if _n_stale:
+        st.caption(f"⚠ {_n_stale} open action(s) not touched in 30+ days — re-estimate, "
+                   "act, or close them; a stale plan's estimate is decaying.")
+    _sev_rank = adf["SEVERITY"].astype(str).str.upper().map(
+        {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}).fillna(4)
+    adf = (adf.assign(_SR=_sev_rank)
+           .sort_values(["_SR", "WATCHED"], ascending=[True, False], kind="stable")
+           .drop(columns="_SR").reset_index(drop=True))
+    if bool(adf["WATCHED"].any()):
+        st.caption(f"★ {int(adf['WATCHED'].sum())} item(s) on your watched entities, "
+                   "pinned to the top of their severity band.")
+    display = adf[[column for column in (
+        "WATCHED", "STALE", "KIND", "SEVERITY", "TITLE", "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY",
+        "CONFIDENCE", "MONTHLY_USD", "AUTHORED_USD", "PERIOD", "OWNER", "DUE_DATE",
+    ) if column in adf.columns]].copy()
+    _pipe_cfg = {}
+    if "WATCHED" in display.columns:          # F59: one star, not raw True/False
+        display["WATCHED"] = display["WATCHED"].map(watch_star)
+        _pipe_cfg["WATCHED"] = watch_star_column()
+    if "CONFIDENCE" in display.columns:       # F60: one confidence encoding — a bar
+        _pipe_cfg["CONFIDENCE"] = confidence_progress_column(
+            "Confidence",
+            AUTHORED_CONFIDENCE_HELP + " Addressable rows carry the Cost ▸ Optimization & Savings advisor's "
+            "evidence "
+            "weight instead (MEDIUM 0.6, LOW 0.3) — an evidence score, not an authored belief.")
+    _sort = "severity band (watched first), then queue order; addressable savings after the queued work"
+    if can_open("Control Room"):
+        def open_pipeline_entity(index: int) -> None:
             row = adf.iloc[int(index)]
             kind = row.get("SOURCE_ENTITY_TYPE")
             key = row.get("SOURCE_ENTITY_KEY")
             if pd.notna(kind) and pd.notna(key) and str(kind).strip() and str(key).strip():
                 _open_entity(str(kind).strip(), str(key).strip())
 
+        # A row click opens the item's SOURCE entity in Control Room ▸ Entity 360 (no-op without one).
         selectable_nav_table(
-            display, key="ds_scenarios", on_select=open_scenario_entity,
-            height=320, sort_label="action priority order", column_config=_scen_cfg,
+            display, key="proof_pipeline_table", on_select=open_pipeline_entity,
+            height=320, sort_label=_sort, column_config=_pipe_cfg,
         )
-
-
-def _render_experiment_detail(row) -> None:
-    """C47: the selected experiment's editor — rendered in the master-detail
-    right column (was stacked below the table). Selection identity + the
-    empty-state hint now live in master_detail; the C48 save latch keys off
-    EXPERIMENT_ID exactly as before."""
-    experiment_id = str(row["EXPERIMENT_ID"])
-    if st.button("Open experiment entity", key=f"experiment_entity_{experiment_id}",
-                 type="tertiary"):
-        _open_entity(str(row["ENTITY_TYPE"]), str(row["ENTITY_KEY"]))
-    st.markdown(f"**{row['TITLE']}**")
-    st.write(str(row.get("HYPOTHESIS") or ""))
-    if is_operator():
-        current = str(row.get("STATUS") or "PLANNED").upper()
-        update_status = st.selectbox(
-            "Status", EXPERIMENT_STATUSES,
-            index=EXPERIMENT_STATUSES.index(current) if current in EXPERIMENT_STATUSES else 0,
-            key=f"experiment_status_{experiment_id}",
-        )
-        result_note = st.text_area(
-            "Result evidence", value=str(row.get("RESULT_NOTE") or ""),
-            key=f"experiment_result_{experiment_id}", max_chars=4000,
-        )
-        verified_value = st.number_input(
-            "Verified USD per month (recurring)", min_value=0.0, value=safe_float(row.get("VERIFIED_USD")),
-            step=25.0, key=f"experiment_value_{experiment_id}",
-            help="The MONTHLY recurring saving the experiment proved. The ROI multiple sums verified "
-                 "items as a monthly run-rate over the last 12 months — convert an annual figure (divide "
-                 "by 12); a one-time saving is not a run-rate.",
-        )
-        # Codex #22: a VERIFIED experiment books SAVINGS_LEDGER and feeds the director-
-        # facing "Verified savings / Realization" headline, so it must be evidence-backed.
-        # Gate the Save button on real proof (the SQL preview still renders so the operator
-        # sees what would run). Proc-level enforcement in SP_VERIFY_EXPERIMENT is a follow-up.
-        _proof_gaps: list[str] = []
-        if update_status == "VERIFIED":
-            if not str(result_note or "").strip():
-                _proof_gaps.append("result evidence")
-            if not (safe_float(verified_value) > 0):
-                _proof_gaps.append("a verified $ amount above 0")
-            _obs_end = pd.to_datetime(row.get("OBSERVATION_END"), errors="coerce")
-            if pd.notna(_obs_end) and _obs_end.date() > account_now().date():
-                _proof_gaps.append(
-                    f"the observation window to close (ends {str(row.get('OBSERVATION_END'))[:10]})")
-        statement = update_experiment_sql(
-            experiment_id, status=update_status, result=result_note,
-            verified_usd=verified_value if update_status == "VERIFIED" else None,
-            actor=viewer_name(),
-            # STABLE content-signature request_key (not a fresh uuid) so the settle proc
-            # dedups an at-least-once retry into an idempotent no-op instead of double-booking
-            # the savings ledger / writing a duplicate activity row (round-2 bug hunt).
-            # content_request_key is time-independent, so a retry crossing a minute boundary
-            # still maps to the same key (round-5 bug hunt).
-            request_key=content_request_key(
-                "ui_experiment",
-                f"{experiment_id}|{update_status}|{result_note}|"
-                f"{verified_value if update_status == 'VERIFIED' else ''}"),
-        )
-        # F58: a plain-English effect line above the SQL — name the status move
-        # and the ledger consequence a VERIFIED save carries ("book $X to the
-        # savings ledger"). Review fix: only claim a status move when it's real
-        # (current != update_status), and reserve "— audited" for the SETTLE
-        # path (VERIFIED/REJECTED/ROLLED_BACK write an ACTION_ACTIVITY row) — an
-        # in-flight PLANNED/RUNNING/OBSERVING save is a plain UPDATE with no
-        # activity trail, so it must not claim to be audited.
-        _settle = update_status in ("VERIFIED", "REJECTED", "ROLLED_BACK")
-        _parts = []
-        if update_status != current:
-            _parts.append(f"set status {current} → {update_status}")
-        if update_status == "VERIFIED":
-            _parts.append(f"book {format_usd(safe_float(verified_value))} to the savings ledger")
-        elif update_status in ("REJECTED", "ROLLED_BACK") and safe_float(row.get("VERIFIED_USD")) > 0:
-            _parts.append("reverse its prior ledger booking")
-        elif not _parts:
-            _parts.append("record the edited result / evidence")
-        st.caption("This will " + ", ".join(_parts) + (" — audited." if _settle else "."))
-        with st.expander("SQL preview"):
-            st.code(statement, language="sql")
-        if _proof_gaps:
-            st.warning("Can't verify without proof — still needs: " + ", ".join(_proof_gaps)
-                       + ". A verified experiment books the savings ledger and feeds the "
-                       "'Verified savings' headline, so it must be evidence-backed.")
-        if (st.button("Save experiment", key=f"experiment_save_{experiment_id}",
-                      type="primary", disabled=bool(_proof_gaps))
-                and write_gate_open(f"experiment_save_{experiment_id}")):
-            ok, message = execute_statement(statement, page=_PAGE)
-            stamp_write(f"experiment_save_{experiment_id}", ok)  # C48
-            notify(ok, message)
-            if ok:
-                st.rerun()
-
-
-
-def _experiments() -> None:
-    result = run(
-        workbench_sql.experiments(limit=300), page=_PAGE, key="decision_experiments",
-        tier="recent", source="OPTIMIZATION_EXPERIMENTS",
-    )
-    if not result.ok:
-        empty_state("needs_setup", "Apply V074 to track optimization experiments.")
-        return
-    if result.empty:
-        # F56: point the empty state at where an experiment is actually created —
-        # a selected work item's "Start optimization experiment" expander.
-        # review fix: that expander is OPERATOR-gated, so the doorway renders
-        # only for operators; viewers get accurate read-only wording.
-        if is_operator():
-            empty_state(
-                "no_data_yet", "No optimization experiments have been started.",
-                hint="Start one from a work item on Action Center — select an item and "
-                     "use its 'Start optimization experiment' expander.",
-                action_label="Open Action Center",
-                on_action=_open_action_center,
-                action_key="es_experiments_create",
-            )
-        else:
-            empty_state(
-                "no_data_yet", "No optimization experiments have been started.",
-                hint="An operator starts one from a work item on Action Center; "
-                     "results appear here for every viewer.",
-            )
-        return
-    frame = result.df.reset_index(drop=True)
-    status = frame["STATUS"].astype(str).str.upper()
-    # C16: park the running/observing count for the section bar's "Experiments (n)" badge.
-    # review fix: experiments are account-wide — no filter changes this count,
-    # so the badge declares no scope dims and survives every filter flip.
-    stash_section_count(_PAGE, "Experiments", status.isin(("RUNNING", "OBSERVING")).sum(),
-                        dims=())
-    # DS #24: show how long each experiment has existed — a long-running active one is a
-    # stale-experiment signal ("RUNNING 38d") worth a look, not silent progress.
-    frame["AGE_DAYS"] = experiment_age_days(frame, account_now())
-    _active = status.isin(("PLANNED", "RUNNING", "OBSERVING"))
-    _oldest_active = int(frame.loc[_active, "AGE_DAYS"].max()) if bool(_active.any()) else 0
-    # R40: verification-side sibling of an overdue action — an experiment whose observation
-    # window has elapsed but is still RUNNING/OBSERVING is ready to verify and hasn't been.
-    _overdue_verify = int(overdue_verification(frame, account_now()).sum())
-    # Verified count + value are all-time totals, so read them from the UNCAPPED aggregate rather than
-    # the LIMIT-300 display frame — else the oldest settled VERIFIED experiments (which sort past the
-    # active-first cap) silently drop from these director-facing headlines (ds-hunt 2026-08-30).
-    _vtot = run(workbench_sql.experiment_verified_totals(), page=_PAGE,
-                key="decision_experiment_totals", tier="recent",
-                source="OPTIMIZATION_EXPERIMENTS (uncapped verified totals)", probe=True)
-    if _vtot.usable():
-        _vrow = _vtot.df.iloc[0]
-        _verified_ct = int(safe_float(_vrow.get("VERIFIED_COUNT")))
-        _verified_usd = safe_float(_vrow.get("VERIFIED_USD"))
-        # Total is uncapped too — the display frame is LIMIT-300 active-first, so len(frame)
-        # understates the "Experiments" headline once the account holds > 300 (same cap that
-        # dropped old VERIFIED rows from the tiles above).
-        _total_ct = int(safe_float(_vrow.get("TOTAL_COUNT"))) or len(frame)
-    else:   # fall back to the capped frame if the aggregate read is unavailable
-        _verified_ct = int(status.eq("VERIFIED").sum())
-        _verified_usd = float(frame.loc[status.eq("VERIFIED"), "VERIFIED_USD"].map(safe_float).sum())
-        _total_ct = len(frame)
-    kpi_row([
-        {"label": "Experiments", "value": f"{_total_ct:,}",
-         "help": ("Total experiments (all statuses). The table below lists the 300 most active; "
-                  "older settled ones beyond that cap are still counted here."
-                  if _total_ct > len(frame) else None)},
-        {"label": "Running / observing", "value": f"{status.isin(('RUNNING', 'OBSERVING')).sum():,}"},
-        {"label": "Oldest active", "value": (f"{_oldest_active:,} d" if _oldest_active else "—"),
-         "severity": "warn" if _oldest_active >= 30 else "",
-         "help": "Longest-running planned/running/observing experiment (days since it was "
-                 "created). A long-lived active experiment may be stuck — verify or close it."},
-        {"label": "Overdue verification", "value": f"{_overdue_verify:,}",
-         "severity": "warn" if _overdue_verify else "",
-         "help": "Experiments whose observation window has elapsed but are still active and "
-                 "unverified — ready to verify or reject. The verification-side sibling of an "
-                 "overdue action."},
-        {"label": "Verified", "value": f"{_verified_ct:,}", "severity": "ok"},
-        {"label": "Verified value", "value": format_usd(_verified_usd)},
-    ])
-    # C47: ranked experiments LEFT, the selected editor RIGHT (was stacked).
-    # master_detail keys selection on EXPERIMENT_ID (an upgrade over the old
-    # positional stickiness) and preserves rec17 "no silent row-0" via the
-    # empty-detail hint.
-    master_detail(
-        frame, key="ds_experiments", id_col="EXPERIMENT_ID",
-        list_render_fn=lambda d, k: selectable_table(
-            d, key=k, height=340,
-            sort_label="active status, observation end, then update"),
-        detail_render_fn=_render_experiment_detail,
-        empty_detail_msg="Select an experiment to view its hypothesis, open its "
-                         "entity, or record results.")
-
-# rec8: the page shell (header + primary section bar + dispatch) now lives in
-# app/ui/pages/decision_studio.py; this module keeps only the section bodies.
+    else:
+        # EXECUTIVE has no Control Room: the table stays, the dead drill doesn't.
+        styled_table(display, height=320, sort_label=_sort, column_config=_pipe_cfg)
+    # a neutral label (review r2): the page is read-only, and a READER lands where Track is not offered
+    if can_open("Operations") and st.button("Open the query fix queue → Operations ▸ Optimize",
+                                            key="proof_link_optimize", type="tertiary"):
+        request_navigation("Operations", "Optimize")
+    if idle.ok:
+        result_caption(idle, note="addressable: idle-timer advisor over the mart (Cost ▸ Optimization & "
+                                  "Savings' own)")
+    if actions.ok:
+        result_caption(actions)

@@ -25,8 +25,12 @@ def test_investigation_falls_back_by_family_prefix():
 
 def test_section_keys_cover_all_lazy_pages():
     assert set(navigate.PAGE_SECTION_KEYS) == {
-        "Control Room", "Cost Intelligence", "Operations", "Decision Studio",
+        "Control Room", "Cost Intelligence", "Operations", "Proof",
         "Security", "Alerts", "Admin"}
+    # v4.597 (Option C): the retired page label is gone from the section maps (it survives only
+    # as a key of navigate.LEGACY_TARGETS, remapped on arrival).
+    assert "Decision Studio" not in navigate.PAGE_SECTION_KEYS
+    assert "Decision Studio" not in navigate.PAGE_SECTION_LABELS
 
 
 def test_light_palette_covers_every_dark_pair():

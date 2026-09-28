@@ -33,7 +33,7 @@ def test_reader_profile_excludes_admin_alerts_ask():
     for hidden in ("Admin", "Alerts", "Ask"):
         assert hidden not in reader, hidden
     for shown in ("Brief", "Overview", "Control Room", "Cost Intelligence",
-                  "Operations", "Decision Studio", "Security"):
+                  "Operations", "Proof", "Security"):
         assert shown in reader, shown
     # ETL explicitly wanted Operations visible; it is (writes there are is_operator-gated)
     assert "Operations" in reader

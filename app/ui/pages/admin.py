@@ -580,7 +580,7 @@ _EXPECTED_MIGRATIONS = {
          "age out in 30d, never displayed raw — the reader shows scale-invariant TIME_SHARE_PCT)",
     145: "SP_LEDGER_AUTOBOOK stamps FINDING_TYPE (the savings lever) from the source "
          "WAREHOUSE_CHANGE_REGISTRY.SETTING (SIZE -> RESIZE), so autobooked savings stop pooling into "
-         "'unclassified' in the Decision Studio ROI by-lever chart. Proc-only re-derive (byte-identical "
+         "'unclassified' in the ROI (now Proof) by-lever chart. Proc-only re-derive (byte-identical "
          "to V118 except the INSERT FINDING_TYPE column+value) + a one-time idempotent backfill of "
          "existing autobook rows (FINDING_TYPE-is-empty guard; NULL-source manual rows stay "
          "unclassified). The savings_ledger() reader also recovers the lever via the registry join",
@@ -1606,7 +1606,7 @@ def _perf_rider_panels(fq_df=None) -> None:
              "value": f"{_n('SAVINGS_ESTIMATED')} -> {_n('SAVINGS_VERIFIED')} / {_n('SAVINGS_REJECTED')}"},
             {"label": "Verified savings (90d)",
              # CD-3 (live-defect fix): the same VERIFIED_USD figure renders via format_usd
-             # on Brief + Decision Studio; a raw "${:,.0f}" here made it read differently
+             # on Brief + Proof; a raw "${:,.0f}" here made it read differently
              # ("$1,200,000" vs "$1.20M"). Route through format_usd for one presentation.
              "value": format_usd(float(a.get('VERIFIED_USD') or 0))},
         ])

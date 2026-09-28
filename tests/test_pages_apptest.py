@@ -148,7 +148,7 @@ def test_each_page_renders(page):
 
 
 @pytest.mark.parametrize("page", ["Overview", "Cost Intelligence", "Operations",
-                                  "Security", "Control Room", "Decision Studio"])
+                                  "Security", "Control Room", "Proof"])
 def test_scope_pages_render_with_last_month_selected(page):
     # Exercises the bounded 'Last month' path THROUGH the UI (filters() -> f["bounds"]
     # -> every threaded tab/builder call), which the default-window smoke above does not.

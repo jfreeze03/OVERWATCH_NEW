@@ -57,6 +57,13 @@ _OUTPUT_COLS = ["FINGERPRINT", "SAMPLE_TEXT", "QUERY_TYPE", "WAREHOUSE_NAME", "R
                 "FIRST_ACTION", "LAST_SEEN", "_FINDINGS"]
 
 
+def pathology_label(code: str) -> str:
+    """The human pathology label for one advisor finding ``code`` (the same map the fingerprint
+    board names its PATHOLOGY from), or "Other" for an unmapped code. Public so the Operations >
+    Optimize fix queue labels its mart-grain diagnoses with exactly the live board's words."""
+    return _PATHOLOGY.get(str(code or ""), "Other")
+
+
 def _confidence(n_findings: int, runs: float) -> int:
     """More corroborating findings + a bigger sample => higher confidence. Separate from
     severity: a single-signal or tiny-sample diagnosis is honestly less certain."""

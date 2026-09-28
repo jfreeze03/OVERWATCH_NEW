@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.596.0"
+APP_VERSION = "4.597.0"
 
 # The build's load-bearing schema floor. main() reads the live max(SCHEMA_VERSION)
 # once per session and, if it is BELOW this, renders ONE actionable blocked state
@@ -217,20 +217,22 @@ ROLE_PROFILE_OVERRIDES = {
 }
 
 PAGES_BY_PROFILE = {
-    "EXECUTIVE": ("Brief", "Overview", "Cost Intelligence", "Alerts"),
-    "ANALYST": ("Brief", "Overview", "Cost Intelligence", "Operations", "Control Room", "Decision Studio", "Alerts", "Security"),
-    "MANAGER": ("Brief", "Overview", "Cost Intelligence", "Operations", "Control Room", "Decision Studio", "Alerts", "Security"),
+    # v4.597 (Option C): Proof is READ-ONLY (no write path), so the executive tier gets it — its
+    # cross-links to pages this profile lacks (Control Room, Operations) are hidden via state.can_open.
+    "EXECUTIVE": ("Brief", "Overview", "Cost Intelligence", "Proof", "Alerts"),
+    "ANALYST": ("Brief", "Overview", "Cost Intelligence", "Operations", "Control Room", "Proof", "Alerts", "Security"),
+    "MANAGER": ("Brief", "Overview", "Cost Intelligence", "Operations", "Control Room", "Proof", "Alerts", "Security"),
     # "Ask" (grounded Q&A, app/logic/ask + app/ui/pages/ask.py) is DBA-only for now
     # and sits in its own "Ask OVERWATCH" nav group, ordered below Govern (see NAV_GROUPS).
     # Brief is FIRST so the default landing (pages[0], when no saved view / deep link)
     # opens on Brief, not Ask — matching the nav display order (Ask trails last).
-    "DBA": ("Brief", "Overview", "Cost Intelligence", "Operations", "Control Room", "Decision Studio", "Alerts", "Security", "Admin", "Ask"),
+    "DBA": ("Brief", "Overview", "Cost Intelligence", "Operations", "Control Room", "Proof", "Alerts", "Security", "Admin", "Ask"),
     # Read-only tier (owner ask 2026-08-31): the ETL team + any SiS viewer not
     # explicitly mapped. Everything EXCEPT Admin, Alerts, and Ask. Operations is
     # deliberately IN — ETL want its warehouse/task/pipeline health — but every
     # write control there (emergency levers, scans) is is_operator-gated, so a
     # READER sees it fully and can change nothing.
-    "READER": ("Brief", "Overview", "Cost Intelligence", "Operations", "Control Room", "Decision Studio", "Security"),
+    "READER": ("Brief", "Overview", "Cost Intelligence", "Operations", "Control Room", "Proof", "Security"),
 }
 DEFAULT_PROFILE = "ANALYST"
 
@@ -241,7 +243,7 @@ DEFAULT_PROFILE = "ANALYST"
 # never hidden by omission).
 NAV_GROUPS = {
     "Watch": ("Brief", "Overview", "Alerts"),
-    "Analyze": ("Cost Intelligence", "Operations", "Control Room", "Decision Studio"),
+    "Analyze": ("Cost Intelligence", "Operations", "Control Room", "Proof"),
     "Govern": ("Security", "Admin"),
     # Ask sits below Govern for now (its own single-item group).
     "Ask OVERWATCH": ("Ask",),

@@ -228,13 +228,17 @@ def render() -> None:
         st.divider()
         if st.toggle("Load company attribution (cost by company & user)",
                      key="cost_attribution_load",
-                     help="Per-company / per-user cost attribution — two mart reads, loaded "
-                          "on demand and kept off the default first paint."):
-            _pf = run_batch([j for j in _all_jobs if j["key"] in ("wh", "daily")],
+                     help="Per-company / per-user cost attribution — three mart reads (warehouse "
+                          "pool, daily trend, grain coverage), loaded on demand and kept off the "
+                          "default first paint."):
+            # v4.597: + "grain" (the metered-grain coverage ratio, moved from Decision Studio ▸
+            # Cost Truth) rides the same on-demand round trip; first paint is unchanged.
+            _pf = run_batch([j for j in _all_jobs if j["key"] in ("wh", "daily", "grain")],
                             page=_PAGE, tier="hourly") or {}
             section_header("Attribution", "", "chargeback", anchor="cost-attribution")
             _attribution_tab(f["company"], f["days"], rate, f["database"], f["schema_contains"],
-                             bounds=f["bounds"], wh_res=_pf.get("wh"), daily_res=_pf.get("daily"))
+                             bounds=f["bounds"], wh_res=_pf.get("wh"), daily_res=_pf.get("daily"),
+                             grain_res=_pf.get("grain"))
             st.divider()
         # perf #15: Storage (3 reads) + Unmapped (1 read) are below-fold detail;
         # gate both behind ONE toggle so the default first paint pays only the

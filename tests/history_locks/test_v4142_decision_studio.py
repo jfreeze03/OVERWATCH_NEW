@@ -72,16 +72,27 @@ def test_portfolio_gates_missing_behavioral_evidence() -> None:
 
 
 def test_cost_truth_renders_no_evidence_not_a_fabricated_zero() -> None:
-    # DS #4: cost_truth always returns 4 rows; an empty basis is NULL CREDITS. The render
-    # must show "No evidence" per absent basis, not safe_float(...)-> $0.00.
-    ct = _source("app/ui/decision_studio.py").split("def _cost_truth", 1)[1].split("\ndef ", 1)[0]
-    assert 'pd.notna(row.get("CREDITS"))' in ct          # presence from the raw column
-    assert "No evidence" in ct
-    assert 'if present.get("METERED")' in ct             # KPI value gated on presence
-    assert 'if present.get("MEASURED")' in ct
-    assert 'if present.get("ALLOCATED")' in ct
-    # the metered-ratio caption is skipped unless the bases are actually present
-    assert 'present.get("MEASURED")\n' in ct or "present.get(\"MEASURED\")" in ct
+    # DS #4: cost_truth always returns 4 rows; an empty basis is NULL CREDITS, and that must never
+    # render as a measured $0 / 0%. v4.597 (Option C): the Decision Studio Cost Truth board is gone
+    # (its only unique output, the metered-grain ratio, moved to Cost ▸ Spend & Attribution), so the
+    # same rule is locked where the figure now renders: presence from the RAW column per basis, and
+    # the ratio caption withheld unless METERED, MEASURED and ALLOCATED are all present.
+    from app.logic.cost_coverage import metered_grain_coverage
+    four = pd.DataFrame({"BASIS": ["BILLED", "METERED", "MEASURED", "ALLOCATED"],
+                         "CREDITS": [120.0, 100.0, 60.0, 80.0]})
+    cov = metered_grain_coverage(four)
+    assert cov is not None and round(cov["measured_pct"]) == 60 and round(cov["allocated_pct"]) == 80
+    for absent in ("METERED", "MEASURED", "ALLOCATED"):   # one NULL basis -> no figure, not a 0%
+        empty_basis = four.assign(CREDITS=[None if b == absent else c
+                                           for b, c in zip(four["BASIS"], four["CREDITS"], strict=True)])
+        assert metered_grain_coverage(empty_basis) is None, absent
+    assert metered_grain_coverage(four.assign(CREDITS=[1.0, 0.0, 1.0, 1.0])) is None   # 0 metered
+    src = _source("app/logic/cost_coverage.py").split("def metered_grain_coverage", 1)[1].split("\ndef ", 1)[0]
+    assert "pd.notna(credits)" in src                     # presence from the raw column
+    spend = _source("app/ui/pages/cost_parts/spend.py")
+    assert "_grain_cov = metered_grain_coverage(grain.df if grain.usable() else None)" in spend
+    assert "if _grain_cov is not None:" in spend          # caption gated on presence
+    assert "def _cost_truth" not in _source("app/ui/decision_studio.py")
 
 
 def test_product_economics_scopes_the_catalog_by_company() -> None:
@@ -162,11 +173,15 @@ def test_mark_watched_flags_watchlist_by_type_case_insensitively() -> None:
 def test_portfolio_surfaces_and_pins_watched_families() -> None:
     # DS #1: Watch now does something on the primary decision table — a WATCHED flag,
     # a "Watching" count, and a within-lane pin (lane primary, watched secondary).
-    ds = _source("app/ui/decision_studio.py")
-    assert 'mark_watched(portfolio, _wl, "QUERY_FINGERPRINT", "FINGERPRINT")' in ds
-    assert '"label": "Watching"' in ds
-    assert '["_LR", "WATCHED", "PRIORITY_SCORE"]' in ds     # pinned within lane, not above it
-    assert '"WATCHED", "EFFORT_PROXY"' in ds                # WATCHED leads the context columns
+    # v4.597 (Option C): the Portfolio became the Operations ▸ Optimize fix queue.
+    opt = _source("app/ui/pages/ops_parts/optimize_queue.py")
+    assert 'mark_watched(portfolio, _wl, "QUERY_FINGERPRINT", "FINGERPRINT")' in opt
+    assert '"label": "Watching"' in opt
+    assert '["_LR", "WATCHED", "PRIORITY_SCORE"]' in opt     # pinned within lane, not above it
+    # WATCHED leads the context columns right after the lane (the queue's status column is the track
+    # state, so the lane moved into the context and WATCHED follows it instead of the effort proxy).
+    assert 'context_cols=("LANE", "WATCHED", ' in opt
+    assert "def _portfolio" not in _source("app/ui/decision_studio.py")
 
 
 def test_mark_watched_pairs_matches_type_and_key_pair() -> None:
@@ -186,9 +201,11 @@ def test_mark_watched_pairs_matches_type_and_key_pair() -> None:
 
 
 def test_action_center_pins_watched_actions_within_severity() -> None:
+    # v4.597 (Option C): the Scenarios table became the Proof ▸ Pipeline table.
     ds = _source("app/ui/decision_studio.py")
-    assert 'mark_watched_pairs(adf, _wl, "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY")' in ds
-    assert '["_SR", "WATCHED"]' in ds        # pinned within severity band, not above CRITICAL
+    pipe = ds.split("def _pipeline_tab(", 1)[1].split("\ndef ", 1)[0]
+    assert 'mark_watched_pairs(adf, _wl, "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY")' in pipe
+    assert '["_SR", "WATCHED"]' in pipe      # pinned within severity band, not above CRITICAL
 
 
 def test_scenario_deduplicates_entities_and_separates_closed_work() -> None:
@@ -311,16 +328,22 @@ def test_data_product_is_a_first_class_investigation_entity() -> None:
 
 
 def test_decision_studio_wires_all_six_views_on_its_page() -> None:
-    # rec8: Decision Studio is now its own page; the shell dispatches into the six
-    # section bodies that still live in app/ui/decision_studio.py.
+    # rec8: Decision Studio became its own page; v4.597 (Option C) renamed it Proof with TWO
+    # read-only sections (Proof, Pipeline) whose bodies still live in app/ui/decision_studio.py.
+    # The other views moved (Portfolio -> Operations ▸ Optimize, SLOs -> Pipeline SLA, Cost Truth ->
+    # Spend & Attribution) or were retired / hidden (Experiments, Products): none is dispatched here.
     studio = _source("app/ui/decision_studio.py")
     page = _source("app/ui/pages/decision_studio.py")
-    for view in ("Portfolio", "SLOs", "Products", "Cost Truth", "Scenarios", "Experiments"):
-        assert f'"{view}"' in page
-    assert 'lazy_sections(' in page and 'key="decision_section"' in page
+    assert '["Proof", "Pipeline"]' in page and 'key="decision_section"' in page
+    assert 'lazy_sections(' in page
+    assert 'if section == "Proof":\n        _proof_tab(rate)' in page
+    assert "_pipeline_tab(company, days, rate, bounds=bounds)" in page
+    for gone in ("Portfolio", "SLOs", "Products", "Cost Truth", "Scenarios", "Experiments"):
+        assert f'"{gone}"' not in page, gone
     # Control Room no longer carries Decision Studio (Entity 360 stays).
     assert '"Decision Studio"' not in _source("app/ui/pages/control_room.py")
-    assert "Verified savings never enter the projection" in studio
+    pipe = studio.split("def _pipeline_tab(", 1)[1].split("\ndef ", 1)[0]
+    assert "Verified savings never enter the projection" in pipe
 
 
 def test_workload_portfolio_chart_compiles(monkeypatch: pytest.MonkeyPatch) -> None:

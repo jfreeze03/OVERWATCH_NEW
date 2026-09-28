@@ -27,15 +27,21 @@ def test_storage_labels_name_time_travel():
 
 
 def test_experiment_verify_is_gated_on_proof():
-    # Codex #22: a VERIFIED experiment books SAVINGS_LEDGER + feeds the "Verified
-    # savings" headline, so the Save button is blocked without proof.
-    ds = _src("app/ui/decision_studio.py")
-    assert "_proof_gaps" in ds
-    assert "disabled=bool(_proof_gaps)" in ds
-    # the three required proofs.
-    assert "result evidence" in ds
-    assert "verified $ amount above 0" in ds
-    assert "observation window to close" in ds
+    # Codex #22: a VERIFIED experiment books SAVINGS_LEDGER + feeds the "Verified savings"
+    # headline, so it must never be settled without proof. v4.597 (Option C) retired the Decision
+    # Studio Experiments editor whose Save button carried that gate — the protection now holds by
+    # CONSTRUCTION: no UI module can build the settle (or create) statement at all, and the
+    # proc-level proof guard in SP_VERIFY_EXPERIMENT (V130) stays locked by its migration test.
+    for py in (_ROOT / "app" / "ui").rglob("*.py"):
+        src = py.read_text(encoding="utf-8")
+        assert "update_experiment_sql(" not in src, py
+        assert "create_experiment_sql(" not in src, py
+    # the builders stay (the proc-domain CALL grep needs the SP_VERIFY_EXPERIMENT literal) ...
+    wb = _src("app/logic/workbench.py")
+    assert "def update_experiment_sql" in wb and "def create_experiment_sql" in wb
+    # ... and the proc guard is still pinned where the proof rule now lives.
+    guard = _src("tests/migrations/test_v130_experiment_verify_proof_guard.py")
+    assert "def test_v130_verified_settlement_requires_proof" in guard
 
 
 def test_product_mapping_coverage_is_exposed():

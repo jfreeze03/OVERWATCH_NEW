@@ -182,10 +182,12 @@ def _patched_modules():
         security,
     )
     from app.ui.pages.cost_parts import ai_chargeback, compare, contract, optimize, spend, unit_costs
+    from app.ui.pages.ops_parts import optimize_queue
     return main_mod, [
         main_mod, components, ai_panel, ds_render, security_center, workbench, attention,
         overview, control_room, cost, operations, alerts, security, admin, brief,
         ask, decision_studio, ai_chargeback, compare, contract, optimize, spend, unit_costs,
+        optimize_queue,
     ]
 
 

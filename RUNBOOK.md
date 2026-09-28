@@ -252,6 +252,14 @@ Admin → Settings, never in code.
   exact billing truth; per-user/database attribution allocates each
   warehouse-hour's credits by elapsed-time share and is labeled
   "allocated". Waterfall = top contributors + Other, cumulative.
+  **Grain coverage** (v4.597, moved from Decision Studio ▸ Cost Truth): one
+  caption under the warehouse table shows measured object-query compute
+  and user-allocated credits as a % of metered warehouse credits. These are
+  separate lenses, not addends. All three come from one cost_truth read (one
+  window, one scope), and the caption shows only when all three have data.
+  Allocated is the owner-scoped MART_COST_ALLOCATION_DAILY, so per company it
+  can exceed 100%; read it under Company = ALL. It is one extra mart read,
+  inside the "Load company attribution" toggle only.
 - **Contract** — pacing: consumed share vs elapsed-time share of
   `CONTRACT_CREDITS` between `CONTRACT_START_DATE`/`END`; pace ratio >1 =
   burning faster than the clock. **Renewal planner**: growth scenarios on
@@ -287,12 +295,39 @@ Admin → Settings, never in code.
 - **Warehouses** — daily credits per warehouse, events, concurrency peaks
   (WAREHOUSE_LOAD_HISTORY; sustained PEAK_QUEUED ≳1 = add cluster).
 - **Contention** — lock waits (LOCK_WAIT_HISTORY).
+- **Optimize** (v4.597, was Decision Studio ▸ Portfolio) — the
+  recurring-query fix queue. Each measured query family gets its observed
+  mart $, ONE diagnosis and a first fix: live profile > daily-mart advisor > portfolio
+  heuristic > "Validate evidence" / "Profile it". **Track** (operators, in the
+  detail pane) is one idempotent ACTION_QUEUE insert keyed on
+  QUERY_FINGERPRINT + an open item, so re-clicks never duplicate.
+  - Items land UNASSIGNED at MEDIUM (ACT NOW) or LOW, never HIGH.
+  - They are unpriced unless the diagnosis is "Stabilize failures" (the
+    failed-run share of observed cost, MONTHLY).
+  - **Track all ACT NOW** takes up to 25 per click and skips OVERWATCH's own
+    traffic, families already open and families dismissed or marked done in
+    the last 90 days. If the Action Center status read fails, statuses show
+    Unknown and Track all stays off until it reads.
+
+  No live read on first paint. The optional live-profile toggle reuses the
+  Queries scan (shared cache).
 - **Release compare** — before/after metric deltas around a chosen date.
 - **Change impact** — §9 regression tracker verdicts with run-history
   drill and change-date rule line.
 - **Pipeline SLA** — freshness SLAs from PIPELINE_SLA_CONFIG (target
   minutes per table), COPY/Snowpipe failures (7d, with sample errors),
   dynamic-table refresh health, on-demand stream staleness (SHOW STREAMS).
+  **Built-in objectives** (Tonight, v4.597; they replace the retired
+  Decision Studio SLO editor) are read-only and never page:
+  - "Nightly cycle done by 07:00" = met/judged over the SLA finish forecast's
+    newest 14 nights (late/failed/hung are misses; tonight's still-running
+    cycle is excluded). It reuses the forecast, so it costs zero reads.
+  - "Tasks on cadence" = on-time/total against each task's own cadence
+    (late · stale). It is one TASK_HISTORY read shared with Tasks ▸ SLA and
+    honors Company/Database/Schema.
+
+  Existing ACTIVE SLO_OBJECTIVES rows still raise PERF_SLO_BREACH; change them
+  in Snowsight (see that playbook).
 
 ### Security & Governance
 Honest framing: hygiene and governance posture, **not** a threat-detection
@@ -336,13 +371,39 @@ spend (ORGANIZATION_USAGE currency by account) · Performance (slowest app
 statement families by parameterized hash + session cache-hit estimate) ·
 Canary (§13) · Errors & telemetry (session + persisted APP_ERROR_LOG).
 
-### Decision Studio
-- **Experiments** — propose an optimization, capture the execute-proof and
-  before/after snapshots, and verify realized savings (estimated vs verified
-  never mix; a $0 measured cost reads "not measured yet", not "free").
-- **SLO cockpit** — service-level targets vs actuals for the tracked workloads.
-- **Workload portfolio** — the ranked cost/health view of workloads with owner
-  and next-move, exception-first (the drift/breaches surface before the KPIs).
+### Proof
+Renamed from Decision Studio in v4.597. It is read-only, and every profile
+can open it, including EXECUTIVE. Old Decision Studio links, saved views and
+`?page=decision-studio` deep links remap through `navigate.LEGACY_TARGETS`.
+- **Proof** — "does OVERWATCH pay for itself", account-wide:
+  - Pays for itself = verified active run-rate ÷ the app's trailing-30-day
+    run cost. Verified savings run-rate, Added this quarter, Realization rate
+    (+ carried realization vs OVERWATCH's own estimate), Settling, Acted on,
+    Alert precision and On solid evidence sit beside it. The run-rate, Added
+    this quarter, the ROI multiple and the attribution split are whole-ledger
+    SQL aggregates; realization and the counts come from the newest ≤5,000
+    ledger rows (disclosed when that cap binds).
+  - **What each saving rests on** has one row per ledger item: lever,
+    target, old → new change, verdict, measured window and flags. Each row
+    carries an attribution class: executed by OVERWATCH / recommended by
+    OVERWATCH, executed elsewhere / booked in OVERWATCH / detected elsewhere /
+    experiment.
+  - The $ split comes from uncapped SQL totals. The ROI multiple is
+    unchanged; the split is disclosed beside it.
+- **Pipeline** — what is ahead:
+  - Addressable $/mo (the Cost ▸ Optimization & Savings idle-timer rollup,
+    optional right-sizing) plus queued Action Center work normalized to
+    monthly, de-duplicated by entity.
+  - A projection whose sliders default to MEASURED adoption and realization
+    ("Reset to measured"). It runs in a fragment, so slider moves cost no
+    reads. Verified savings never enter it.
+- **Moved or retired** (v4.597):
+  - Portfolio → Operations ▸ Optimize.
+  - SLOs → Operations ▸ Pipeline SLA built-in objectives; the editor is
+    retired.
+  - Cost Truth → the Spend & Attribution grain ratio.
+  - Experiments UI and the Action Center experiment expander: retired.
+  - Products: hidden.
 
 ### Ask
 - **Grounded Q&A (DBA only)** — ask in plain English; the answerer routes the
@@ -414,6 +475,11 @@ required "inconclusive" escape, word limits.
 - **Savings verifier** (monthly) compares actual before/after spend and
   flips items to VERIFIED or REJECTED. Estimated and verified totals are
   never combined.
+- **Query-family fixes** (Operations → Optimize, v4.597): a diagnosis and
+  first fix per recurring family → **Track** queues it in Action Center
+  (idempotent, keyed on the fingerprint) → assign and work it there.
+- **Proof** (v4.597): the verified run-rate vs the app's own run cost, with
+  what each saving rests on and who gets credit for it.
 - **Change-impact tracker** (V010): any procedure/task change freezes a
   14-day pre-change baseline (runs, fails, median/p95, measured
   credits/call via QUERY_ATTRIBUTION_HISTORY roll-up by ROOT_QUERY_ID) and
@@ -480,7 +546,7 @@ integration with per-route failure isolation; MIN_SEVERITY is a rank filter
 ledger items verified in the last 12 months (never estimates), shown against the
 app's own trailing-30-day warehouse cost (green = pays for itself). It does not
 reset when a quarter starts; "verified this quarter" lives in the help text and on
-Decision Studio ▸ ROI. The open ESTIMATED pipeline is a separate figure by design.
+Proof ▸ Proof. The open ESTIMATED pipeline is a separate figure by design.
 
 **Isolation (v7):** every rule block runs in its own INSERT with its own
 exception handler — a broken rule logs `rule_block_failed` to APP_ERROR_LOG

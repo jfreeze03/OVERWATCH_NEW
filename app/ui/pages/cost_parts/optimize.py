@@ -54,8 +54,9 @@ from app.logic.monitors import (
 )
 from app.logic.savings_rollup import (
     SavingsOpportunity,
-    confidence_weight,
     effort_tier,
+    idle_opportunities,
+    resize_opportunities,
     rollup_savings,
 )
 from app.logic.serverless_roi import classify_qas_roi
@@ -374,6 +375,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     # read a Last-month discriminator so a bounded read never collides with a
     # trailing read of the same day-count.
     _lm = "_lm" if bounds is not None else ""
+    # W12 (review r2): Current month / Current year pass a day OFFSET (Sep 2 MTD = 1); every idle /
+    # sizing run-rate divides by the bounds' day SPAN, as Operations ▸ Optimize and Proof ▸ Pipeline do.
+    _span = (bounds[1] - bounds[0]).days if bounds is not None else days
     # Wave 3: the idle-credit-waste HEADLINE — the single account/company "$ burned in
     # zero-query warehouse-hours" number, above the sub-tabs (per-WH detail is in Idle &
     # sizing below; the identical SQL shares one cached scan). GROSS idle, never "savings".
@@ -384,7 +388,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, refreshed every 4h; today up to 4h behind)",
         live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")
     if _idle_head.ok and not _idle_head.empty:
-        _iw_days = served_days(_idle_head, days)
+        _iw_days = served_days(_idle_head, _span)
         _iw = idle_waste_summary(_idle_head.df, rate, _iw_days)
         # WLA-1: the idle read is bounded to the prior calendar month under "Last month" scope,
         # so label "last month" then; served-days honesty applies on the trailing branch.
@@ -440,7 +444,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             )
             # C1: the mart serves up to 365d but the live fallback clamps to 90d —
             # divide by what was served, or the x30 projection reads ~4x low.
-            idle_days = served_days(idle_res, days)
+            idle_days = served_days(idle_res, _span)
             advisor = idle_advisor(_idle_df, rate, idle_days)
             _idle_profiles_tx = advisor
             flagged = advisor[advisor["FLAGGED"]]
@@ -455,12 +459,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     f"nothing): {len(flagged)} warehouse(s) met the idle gate but none can be confirmed "
                     "as a timer target, so 'Actionable via timer' below reads $0 — that is unverified, "
                     "not zero opportunity.")
-            _savings_opps.extend(     # rec#16: idle-timer opportunities (net actionable)
-                SavingsOpportunity("IDLE", str(r["WAREHOUSE_NAME"]),
-                                   safe_float(r["ACTIONABLE_MONTHLY_USD"]),
-                                   confidence_weight(r.get("SAVINGS_CONFIDENCE")))
-                for _, r in advisor.iterrows()
-                if safe_float(r["ACTIONABLE_MONTHLY_USD"]) > 0)
+            # rec#16: idle-timer opportunities (net actionable) — the shared helper Proof ▸ Pipeline reuses
+            _savings_opps.extend(idle_opportunities(advisor))
             # rec#20: idle-tail $ per warehouse (for the consolidation saving estimate)
             _idle_by_wh = {str(r["WAREHOUSE_NAME"]).strip().upper():
                            safe_float(r["PROJECTED_MONTHLY_IDLE_USD"])
@@ -566,7 +566,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                    "No warehouse activity to profile in this window."):
             # C1: same divisor rule — every per-day rate and the x30 monthly figure
             # inside size_recommendations divides by the window actually served.
-            sizing_days = served_days(prof_res, days)
+            sizing_days = served_days(prof_res, _span)
             _sizing_whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="jump_wh",
                               tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
             # Round-3 hunt + r34 + Next-Fifty #16: ONE shared SHOW-WAREHOUSES mapping (auto-suspend +
@@ -579,12 +579,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             )
             sized = size_recommendations(_sizing_df, rate, sizing_days)
             _sizing_profiles_tx = sized
-            _savings_opps.extend(     # rec#16: right-sizing opportunities (overlaps idle per warehouse)
-                SavingsOpportunity("RESIZE", str(r["WAREHOUSE_NAME"]),
-                                   safe_float(r.get("POTENTIAL_MONTHLY_SAVING_USD")),
-                                   confidence_weight(r.get("CONFIDENCE")))
-                for _, r in sized.iterrows()
-                if safe_float(r.get("POTENTIAL_MONTHLY_SAVING_USD")) > 0)
+            # rec#16: right-sizing opportunities (overlaps idle per warehouse) — shared with Proof ▸ Pipeline
+            _savings_opps.extend(resize_opportunities(sized))
             summary = sizing_summary(sized)
             _sz_cols = ["WAREHOUSE_NAME", "COMPANY", "RECOMMENDATION", "RATIONALE",
                         "CONFIDENCE", "AUTO_SUSPEND", "ACTIVE_QUERY_DAYS", "ACTIVE_DAYS_PER_30D",
@@ -1733,7 +1729,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             row = idf[idf["WAREHOUSE_NAME"].astype(str) == wh_pick]
             idle_credits = float(pd.to_numeric(row["IDLE_CREDITS"], errors="coerce").fillna(0).iloc[0]) if not row.empty else 0.0
             # C1: divide by the window actually served, not the requested one.
-            remed_days = served_days(idle_res, days)
+            remed_days = served_days(idle_res, _span)
             # Book the advisor's settings-verified action value, never gross idle.
             # A missing SHOW WAREHOUSES row intentionally produces no executable fix.
             _rec_all = idle_advisor(idf, rate, remed_days)
@@ -1865,11 +1861,12 @@ def _savings_tab() -> None:
         "(auto-suspend, size, clusters, scaling policy) wherever they were "
         "made — Snowsight included — and settles each against 14 days of "
         "measured actuals. Manual items remain for one-offs.")
-    # The verified / estimated / realization ROI headline is owned by Decision Studio ▸ ROI
-    # (same ledger_totals() source). This tab keeps the operational VERIFY workflow only.
-    st.caption("Verified / estimated / realization totals live on **Decision Studio ▸ ROI**.")
-    if st.button("Open the ROI story → Decision Studio", key="savings_roi_link"):
-        request_navigation("Decision Studio", "ROI")
+    # The verified / estimated / realization ROI headline is owned by Proof ▸ Proof (the former
+    # Decision Studio ROI; same ledger_totals() source + the uncapped SQL run-rate). This tab keeps the
+    # operational VERIFY workflow only.
+    st.caption("Verified / estimated / realization totals, and what each saving rests on, live on **Proof**.")
+    if st.button("Open the proof → Proof", key="savings_roi_link"):
+        request_navigation("Proof", "Proof")
     if res.empty:
         empty_state("no_data_yet",
                     "Nothing booked yet — the autobook task fills this as warehouse "

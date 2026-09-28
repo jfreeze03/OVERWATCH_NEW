@@ -64,6 +64,7 @@ def test_the_sweep_left_no_raw_absence_regression_hotspots():
         "app/ui/pages/admin.py": 0,
         "app/ui/workbench.py": 1,            # blast-radius safety caveat (deliberate info)
         "app/ui/decision_studio.py": 0,
+        "app/ui/pages/decision_studio.py": 0,   # v4.597 Proof shell
         "app/ui/pages/ask.py": 2,            # answer headlines (direct answers, not absences)
         "app/ui/pages/cost.py": 0,           # opener moved to the shared component (C18)
         "app/ui/pages/cost_parts/spend.py": 3,      # SPCS structural notes
@@ -71,6 +72,7 @@ def test_the_sweep_left_no_raw_absence_regression_hotspots():
         "app/ui/pages/cost_parts/compare.py": 0,
         "app/ui/pages/cost_parts/unit_costs.py": 0,
         "app/ui/pages/cost_parts/ai_chargeback.py": 1,   # queue receipt
+        "app/ui/pages/ops_parts/optimize_queue.py": 0,   # v4.597 fix queue: every absence via the vocabulary
     }
     for rel, cap in ceilings.items():
         raw = len(re.findall(r"st\.(?:info|success)\(", _src(rel)))
@@ -81,9 +83,15 @@ def test_f56_workflow_empties_are_doorways():
     wb = _src("app/ui/workbench.py")
     assert 'action_label="Browse the catalog"' in wb
     assert 'action_key="es_watchlist_browse"' in wb
+    # v4.597 (Option C): the Experiments empty state's doorway ("Open Action Center" -> the
+    # "Start optimization experiment" expander) went with the retired Experiments editor — its
+    # target no longer exists. Proof's empty track record is the doorway now: it opens the ledger
+    # where estimated items are verified.
     ds = _src("app/ui/decision_studio.py")
-    assert 'action_label="Open Action Center"' in ds
-    assert 'action_key="es_experiments_create"' in ds
+    assert 'action_key="es_experiments_create"' not in ds
+    assert 'action_label="Open Optimization & Savings" if _cost_ok else ""' in ds
+    assert 'action_key="es_proof_verify"' in ds
+    assert 'request_navigation("Cost Intelligence", "Optimization & Savings")' in ds
 
 
 def test_verified_clean_guards_say_so():

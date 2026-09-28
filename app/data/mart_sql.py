@@ -974,7 +974,18 @@ def savings_ledger(limit: int | None = 500) -> str:
       VOLUME_RATIO / VOLUME_CONFOUNDED — per-day query volume after vs the 14-day baseline, and whether it
         sits outside 0.7-1.3x (the proc's VOLUME_CONFOUNDED note; dollars are never adjusted for it).
     The window function evaluates before ORDER BY / LIMIT, so the RN ranks the whole ledger, not the
-    capped page."""
+    capped page.
+
+    Evidence projections (v4.597, Proof ▸ per-item evidence; ADDITIVE only — no existing alias changes,
+    and Optimize ▸ Savings ledger displays an explicit column subset so nothing new leaks there):
+      SOURCE_CHANGE_ID, TARGET_OBJECT — the raw link + target. SOURCE_CHANGE_ID also fixes
+        actions.ledger_totals' auto-measured count, which read a column this builder never projected.
+      CHANGE_WAREHOUSE / CHANGE_SETTING / CHANGE_OLD_VALUE / CHANGE_NEW_VALUE / CHANGE_SEEN_AT /
+        CHANGE_VERDICT / TRACKING_UNTIL / AFTER_QUERIES / CHANGE_BY — the linked registry row's change
+        descriptor, verdict and settle clock (a pending row settles the morning after TRACKING_UNTIL).
+        CHANGE_SEEN_AT is TIMESTAMP_LTZ; CHANGE_BY is best-effort (nearly always NULL — never classify on it).
+      WINDOW_CLOSED — the 14-day after-window has closed on the app clock (NULL on a manual row).
+    Same LEFT JOIN, so zero extra statements."""
     limit_clause = f"\nLIMIT {int(limit)}" if limit is not None else ""
     # mirrors the V153 SP_LEDGER_AUTOBOOK settle gate on the app clock (account_today_sql, the TZ standard)
     _closed = ("r.VERDICT IN ('IMPROVED', 'NEUTRAL', 'REGRESSED', 'NO_BASELINE', 'INSUFFICIENT_AFTER')\n"
@@ -1008,13 +1019,156 @@ SELECT l.ITEM_ID, l.ACTION_ID, l.CREATED_AT, l.DESCRIPTION, l.STATE, l.ESTIMATED
        IFF({_closed},
            ROUND({_vol}, 2), NULL) AS VOLUME_RATIO,
        IFF({_closed},
-           {_vol} NOT BETWEEN 0.7 AND 1.3, NULL) AS VOLUME_CONFOUNDED
+           {_vol} NOT BETWEEN 0.7 AND 1.3, NULL) AS VOLUME_CONFOUNDED,
+       l.SOURCE_CHANGE_ID, l.TARGET_OBJECT,
+       r.WAREHOUSE_NAME AS CHANGE_WAREHOUSE, r.SETTING AS CHANGE_SETTING,
+       r.OLD_VALUE AS CHANGE_OLD_VALUE, r.NEW_VALUE AS CHANGE_NEW_VALUE,
+       r.CHANGE_SEEN_AT, r.VERDICT AS CHANGE_VERDICT, r.TRACKING_UNTIL, r.AFTER_QUERIES,
+       r.CHANGED_BY AS CHANGE_BY,
+       IFF(r.CHANGE_ID IS NULL, NULL, {account_today_sql()} > r.TRACKING_UNTIL) AS WINDOW_CLOSED
 FROM {core_object("SAVINGS_LEDGER")} l
 LEFT JOIN {core_object("WAREHOUSE_CHANGE_REGISTRY")} r ON l.SOURCE_CHANGE_ID = r.CHANGE_ID
 LEFT JOIN twin t ON t.TWIN_ITEM_ID = l.ITEM_ID
 CROSS JOIN (SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CREDIT_PRICE_USD', VALUE, NULL))), 3.68) AS RATE
             FROM {core_object("SETTINGS")}) px
 ORDER BY l.CREATED_AT DESC{limit_clause}
+"""
+
+
+# ATTRIBUTION classes of ledger_attribution(), in CASE order (first match wins).
+LEDGER_ATTRIBUTION_ORDER: tuple[str, ...] = (
+    "EXPERIMENT", "OVERWATCH_BOOKED", "OVERWATCH_EXECUTED", "OVERWATCH_RECOMMENDED", "DETECTED_ELSEWHERE",
+)
+
+
+def ledger_attribution() -> str:
+    """Who gets credit for each ledger item, plus UNCAPPED window totals of the verified run-rate by
+    attribution (v4.597, Proof ▸ per-item evidence). Account-wide (the ledger has no COMPANY), one row
+    per SAVINGS_LEDGER item keyed on ITEM_ID, newest first like savings_ledger() so a row-capped read
+    of both covers the same items; merge the two in pandas on ITEM_ID.
+
+    ATTRIBUTION, first match wins (LEDGER_ATTRIBUTION_ORDER):
+      EXPERIMENT            — FINDING_TYPE 'EXPERIMENT' (hand-verified via SP_VERIFY_EXPERIMENT).
+      OVERWATCH_BOOKED      — no SOURCE_CHANGE_ID: booked in the app (schedule / retention / 5X-6X resize /
+                              free text), never matched to a detected change.
+      OVERWATCH_EXECUTED    — a detected change the app itself made: an adopted row (V153 ADOPT note), an
+                              alert closed-loop row, an EXECUTED REMEDIATION_LOG ALTER on the same warehouse +
+                              setting from LEDGER_TWIN_MATCH_DAYS before to 1h after the scan saw it, or an
+                              auto row that superseded a manual twin.
+      OVERWATCH_RECOMMENDED — a COST_IDLE_OPPORTUNITY alert on the warehouse in the 30 days before an
+                              AUTO_SUSPEND change someone made elsewhere (alerts since V157 only).
+      DETECTED_ELSEWHERE    — any other change the daily scan detected (Snowsight, Terraform, ...).
+    The REMEDIATION_LOG match uses STARTSWITH/CONTAINS, not LIKE — warehouse names contain '_', a LIKE
+    wildcard. CHANGE_SEEN_AT is LTZ; REMEDIATION_LOG / ALERT_EVENTS times are NTZ Central (the twin-rule
+    cast). CHANGED_BY is never used to classify (it is nearly always NULL).
+
+    Estimates recorded BEFORE the change, for the carried realization (proof.carried_realization):
+    TWIN_ESTIMATED_USD (the superseded manual twin's estimate, on the auto row), REMEDIATION_EST_USD,
+    REC_EST_USD (the idle alert's recommended $/mo).
+
+    Window totals — anchored on active-verified rows exactly as savings_summary_quarter's ROI numerator
+    (VERIFIED, twin-excluded, VERIFIED_AT within SAVINGS_ACTIVE_MONTHS of account-today), computed by
+    window functions BEFORE any row cap, so they are whole-ledger even when run() truncates the frame:
+      ATTR_ACTIVE_USD / VERDICT_ACTIVE_USD — the row's attribution / linked-change verdict partition.
+      ACTIVE_USD, ACTIVE_ITEMS and the per-class <CLASS>_ACTIVE_USD / REGRESSED_ / NEUTRAL_ACTIVE_USD —
+        the same split pivoted onto EVERY row, so any one row carries the complete split even if a whole
+        class fell outside a capped frame.
+      SHORT_WINDOW_ACTIVE_USD — auto rows settled before V153 (NOTES carry neither the 'full window' settle
+        note nor the owner re-settle sentinel 're-settled on the full 14-day window').
+      TOTAL_ITEMS — every ledger row.
+
+    Reads ALERT_EVENTS, so this read joins the alerts cache domain and re-colds on acks — deliberately a
+    SEPARATE builder from savings_ledger(), so the ledger (the verdict gate) does not."""
+    _today = account_today_sql()
+    _a0 = f"DATEADD('month', -{int(SAVINGS_ACTIVE_MONTHS)}, {_today})"
+    _seen = "r.CHANGE_SEEN_AT::TIMESTAMP_NTZ"
+    # the ALTER keyword each registry SETTING is written with (remediation._ident uppercases all ALTER text)
+    _token = ("CASE r.SETTING WHEN 'SIZE' THEN 'WAREHOUSE_SIZE' WHEN 'MAX_CLUSTERS' THEN 'MAX_CLUSTER_COUNT' "
+              "WHEN 'MIN_CLUSTERS' THEN 'MIN_CLUSTER_COUNT' ELSE UPPER(r.SETTING) END")
+    _active = f"l.STATE = 'VERIFIED' AND t.TWIN_ITEM_ID IS NULL AND l.VERIFIED_AT >= {_a0}"
+
+    def _class_total(cls: str) -> str:
+        return f"ROUND(SUM(IFF(a.ATTRIBUTION = {sql_literal(cls)}, a.ACTIVE_ROW_USD, 0)) OVER (), 2)"
+
+    _pivot = ",\n       ".join(
+        f"{_class_total(cls)} AS {alias}_ACTIVE_USD"
+        for cls, alias in (("OVERWATCH_EXECUTED", "EXECUTED"), ("OVERWATCH_RECOMMENDED", "RECOMMENDED"),
+                           ("OVERWATCH_BOOKED", "BOOKED"), ("DETECTED_ELSEWHERE", "ELSEWHERE"),
+                           ("EXPERIMENT", "EXPERIMENT")))
+    return f"""
+WITH {_ledger_twin_cte()},
+twin_est AS (
+    SELECT t.TWIN_AUTO_ITEM_ID AS ITEM_ID, MAX(m.ESTIMATED_USD) AS TWIN_ESTIMATED_USD
+    FROM twin t
+    JOIN {core_object("SAVINGS_LEDGER")} m ON m.ITEM_ID = t.TWIN_ITEM_ID
+    GROUP BY t.TWIN_AUTO_ITEM_ID
+),
+rem AS (
+    SELECT r.CHANGE_ID, rl.REMEDIATION_ID, rl.FINDING_TYPE AS REMEDIATION_KIND,
+           rl.EST_MONTHLY_SAVINGS_USD AS REMEDIATION_EST_USD,
+           rl.EXECUTED_AT AS REMEDIATION_EXECUTED_AT, rl.EXECUTED_BY AS REMEDIATION_EXECUTED_BY
+    FROM {core_object("WAREHOUSE_CHANGE_REGISTRY")} r
+    JOIN {core_object("REMEDIATION_LOG")} rl
+      ON UPPER(rl.STATUS) = 'EXECUTED'
+     AND STARTSWITH(UPPER(TRIM(rl.STATEMENT_SQL)), 'ALTER WAREHOUSE ' || UPPER(r.WAREHOUSE_NAME) || ' ')
+     AND CONTAINS(UPPER(rl.STATEMENT_SQL),
+                  {_token})
+     AND rl.EXECUTED_AT > DATEADD('day', -{int(LEDGER_TWIN_MATCH_DAYS)}, {_seen})
+     AND rl.EXECUTED_AT <= DATEADD('hour', 1, {_seen})
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY r.CHANGE_ID ORDER BY rl.EXECUTED_AT DESC) = 1
+),
+rec AS (
+    SELECT r.CHANGE_ID, e.EVENT_ID AS REC_EVENT_ID, e.METRIC_VALUE AS REC_EST_USD,
+           e.RAISED_AT AS REC_RAISED_AT
+    FROM {core_object("WAREHOUSE_CHANGE_REGISTRY")} r
+    JOIN {core_object("ALERT_EVENTS")} e
+      ON e.RULE_ID = 'COST_IDLE_OPPORTUNITY'
+     AND r.SETTING = 'AUTO_SUSPEND'
+     AND SPLIT_PART(e.DEDUPE_KEY, '|', 2) = UPPER(r.WAREHOUSE_NAME)
+     AND e.RAISED_AT <= {_seen}
+     AND e.RAISED_AT >= DATEADD('day', -30, {_seen})
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY r.CHANGE_ID ORDER BY e.RAISED_AT DESC) = 1
+),
+a AS (
+    SELECT l.ITEM_ID, l.CREATED_AT, r.VERDICT AS CHANGE_VERDICT, te.TWIN_ESTIMATED_USD,
+           rem.REMEDIATION_ID, rem.REMEDIATION_KIND, rem.REMEDIATION_EST_USD,
+           rem.REMEDIATION_EXECUTED_AT, rem.REMEDIATION_EXECUTED_BY,
+           rec.REC_EVENT_ID, rec.REC_EST_USD, rec.REC_RAISED_AT,
+           CASE WHEN UPPER(TRIM(l.FINDING_TYPE)) = 'EXPERIMENT' THEN 'EXPERIMENT'
+                WHEN l.SOURCE_CHANGE_ID IS NULL THEN 'OVERWATCH_BOOKED'
+                WHEN CONTAINS(COALESCE(l.NOTES, ''), 'adopted by the daily change scan')
+                  OR STARTSWITH(COALESCE(l.NOTES, ''), 'From alert event ')
+                  OR rem.REMEDIATION_ID IS NOT NULL
+                  OR te.ITEM_ID IS NOT NULL THEN 'OVERWATCH_EXECUTED'
+                WHEN rec.REC_EVENT_ID IS NOT NULL THEN 'OVERWATCH_RECOMMENDED'
+                ELSE 'DETECTED_ELSEWHERE' END AS ATTRIBUTION,
+           IFF({_active}, 1, 0) AS ACTIVE_ROW_N,
+           IFF({_active}, COALESCE(l.VERIFIED_USD, 0), 0) AS ACTIVE_ROW_USD,
+           IFF(l.SOURCE_CHANGE_ID IS NOT NULL
+               AND NOT CONTAINS(COALESCE(l.NOTES, ''), 'full window')
+               AND NOT CONTAINS(COALESCE(l.NOTES, ''), 're-settled on the full 14-day window'), 1, 0) AS SHORT_WINDOW_N
+    FROM {core_object("SAVINGS_LEDGER")} l
+    LEFT JOIN {core_object("WAREHOUSE_CHANGE_REGISTRY")} r ON l.SOURCE_CHANGE_ID = r.CHANGE_ID
+    LEFT JOIN twin t ON t.TWIN_ITEM_ID = l.ITEM_ID
+    LEFT JOIN twin_est te ON te.ITEM_ID = l.ITEM_ID
+    LEFT JOIN rem ON rem.CHANGE_ID = l.SOURCE_CHANGE_ID
+    LEFT JOIN rec ON rec.CHANGE_ID = l.SOURCE_CHANGE_ID
+)
+SELECT a.ITEM_ID, a.ATTRIBUTION, a.CHANGE_VERDICT, a.TWIN_ESTIMATED_USD,
+       a.REMEDIATION_ID, a.REMEDIATION_KIND, a.REMEDIATION_EST_USD,
+       a.REMEDIATION_EXECUTED_AT, a.REMEDIATION_EXECUTED_BY,
+       a.REC_EVENT_ID, a.REC_EST_USD, a.REC_RAISED_AT,
+       ROUND(SUM(a.ACTIVE_ROW_USD) OVER (PARTITION BY a.ATTRIBUTION), 2) AS ATTR_ACTIVE_USD,
+       ROUND(SUM(a.ACTIVE_ROW_USD) OVER (PARTITION BY a.CHANGE_VERDICT), 2) AS VERDICT_ACTIVE_USD,
+       ROUND(SUM(a.ACTIVE_ROW_USD) OVER (), 2) AS ACTIVE_USD,
+       SUM(a.ACTIVE_ROW_N) OVER () AS ACTIVE_ITEMS,
+       {_pivot},
+       ROUND(SUM(IFF(a.CHANGE_VERDICT = 'REGRESSED', a.ACTIVE_ROW_USD, 0)) OVER (), 2) AS REGRESSED_ACTIVE_USD,
+       ROUND(SUM(IFF(a.CHANGE_VERDICT = 'NEUTRAL', a.ACTIVE_ROW_USD, 0)) OVER (), 2) AS NEUTRAL_ACTIVE_USD,
+       ROUND(SUM(IFF(a.SHORT_WINDOW_N = 1, a.ACTIVE_ROW_USD, 0)) OVER (), 2) AS SHORT_WINDOW_ACTIVE_USD,
+       COUNT(*) OVER () AS TOTAL_ITEMS
+FROM a
+ORDER BY a.CREATED_AT DESC
 """
 
 
@@ -1709,11 +1863,11 @@ def savings_summary_quarter() -> str:
     after the quarter it was verified in, so the old quarter-scoped numerator fell to 0x on the
     first day of every quarter while the trailing-30d run cost did not. VERIFIED_QTD_USD stays as
     the separate "verified this quarter" KPI. Reverts are not detected yet, so the 12-month cap is
-    the conservative stand-in. (The name is kept: the canary, Brief, DS and tests reference it.)
+    the conservative stand-in. (The name is kept: the canary, Brief, Proof and tests reference it.)
 
-    Both windows anchor on the ACCOUNT clock (account_today_sql), matching Decision Studio's
-    account-time quarter — session-tz DATE_TRUNC('quarter', CURRENT_DATE()) drifted a day at a
-    quarter change and disagreed with the DS surface (round-2 bug hunt).
+    Both windows anchor on the ACCOUNT clock (account_today_sql), matching Proof's (formerly
+    Decision Studio's) account-time quarter — session-tz DATE_TRUNC('quarter', CURRENT_DATE()) drifted a day at a
+    quarter change and disagreed with that surface (round-2 bug hunt).
 
     Next-Fifty #5: every aggregate excludes a manual row the autobook's settled row supersedes (the
     same change booked twice); SUPERSEDED_ITEMS is the UNCAPPED count of such twins still awaiting the

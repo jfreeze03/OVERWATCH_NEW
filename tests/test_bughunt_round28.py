@@ -64,13 +64,14 @@ def test_operations_signals_spill_is_per_day_not_window_total():
 # --- #2: billed presence gates on the key column, not a bare-aggregate .usable() ---
 
 def test_cost_truth_billed_gates_on_key_column_not_bare_aggregate_usable():
-    src = _read("app/ui/decision_studio.py")
-    body = src.split("def _cost_truth", 1)[1].split("\ndef ", 1)[0]
-    # the presence flag no longer ORs in split.usable() (always True for the 1-row
-    # bare aggregate); it uses a key-column non-NULL gate instead
-    assert 'or split.usable()' not in body
-    assert '_split_has = split.usable() and pd.notna(split.df.iloc[0].get("CREDITS_BILLED"))' in body
-    assert '_billed_present = present.get("BILLED", False) or _split_has' in body
+    # v4.597 (Option C): the Decision Studio Cost Truth board — the only UI reader of the
+    # billed_split bare aggregate, and the site of this gate — was retired. Lock that no UI surface
+    # reads it now: a future reader must re-earn a key-column presence gate (a 1-row all-NULL bare
+    # aggregate is .usable(), so .usable() alone would render a fabricated $0.00).
+    readers = [py for py in (_ROOT / "app" / "ui").rglob("*.py")
+               if "billed_split(" in py.read_text(encoding="utf-8")]
+    assert readers == []
+    assert "def _cost_truth" not in _read("app/ui/decision_studio.py")
     # billed_split really is a bare aggregate (SUM, no GROUP BY) — the reason .usable()
     # can't be trusted as a presence signal
     bs = _read("app/data/mart_sql.py").split("def billed_split", 1)[1].split("\ndef ", 1)[0]

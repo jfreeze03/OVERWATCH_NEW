@@ -775,7 +775,7 @@ def render() -> None:
 
     # rec11: badge the Incidents pill with open criticals — already in the health strip
     # the shell fetched (zero extra queries), same precedent as Alerts "Open events (N)".
-    # rec8: Decision Studio moved out to its own Analyze page — Control Room is now the
+    # rec8: Decision Studio (now Proof) moved out to its own Analyze page — Control Room is now the
     # pure triage console (Entity 360 stays; it is the drill target for cross-jumps).
     # CoCo do-first #1 / Next-Fifty #1: the SAME attention composition as the Brief — criticals,
     # undelivered, stale, open incidents, whole-night ETL, cycle SLA, XLAT gaps — from the SAME shared

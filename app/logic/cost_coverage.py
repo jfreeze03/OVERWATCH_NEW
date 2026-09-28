@@ -337,3 +337,38 @@ def attribution_gap_trend(
         axis=1,
     )
     return out.sort_values("DAY").reset_index(drop=True)
+
+
+def metered_grain_coverage(frame: pd.DataFrame | None) -> dict | None:
+    """MEASURED and ALLOCATED credits as a share of METERED warehouse credits (v4.597, the
+    ratio line that moved from Decision Studio ▸ Cost Truth to Spend & Attribution).
+
+    ``frame`` is workbench_sql.cost_truth output (BASIS, CREDITS). All three shares come
+    from that ONE frame so the window and company scope agree (never mix it with the
+    today-excluded vs-prior warehouse pool). The builder always returns four rows — an empty
+    basis arrives as NULL CREDITS, never a measured 0 — so presence is ``pd.notna(CREDITS)``
+    per basis. Returns None unless METERED, MEASURED and ALLOCATED are all present and
+    METERED > 0; the shares are lenses, not addends (their sum means nothing). ALLOCATED is
+    the owner-scoped MART_COST_ALLOCATION_DAILY USER dimension, so per company it can exceed
+    100% of metered. Never raises."""
+    if frame is None or getattr(frame, "empty", True) or not {"BASIS", "CREDITS"}.issubset(frame.columns):
+        return None
+    present: dict[str, float] = {}
+    for basis, credits in zip(frame["BASIS"], frame["CREDITS"], strict=False):
+        key = str(basis).strip().upper()
+        if key in ("METERED", "MEASURED", "ALLOCATED") and pd.notna(credits):
+            value = pd.to_numeric(credits, errors="coerce")
+            if pd.notna(value):
+                present[key] = float(value)
+    if not {"METERED", "MEASURED", "ALLOCATED"}.issubset(present):
+        return None
+    metered = present["METERED"]
+    if metered <= 0:
+        return None
+    return {
+        "measured_pct": present["MEASURED"] / metered * 100.0,
+        "allocated_pct": present["ALLOCATED"] / metered * 100.0,
+        "metered_credits": metered,
+        "measured_credits": present["MEASURED"],
+        "allocated_credits": present["ALLOCATED"],
+    }

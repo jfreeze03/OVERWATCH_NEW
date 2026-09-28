@@ -79,7 +79,7 @@ _RENDERERS = {
     "Control Room": control_room.render,
     "Cost Intelligence": cost.render,
     "Operations": operations.render,
-    "Decision Studio": decision_studio.render,
+    "Proof": decision_studio.render,   # v4.597: the former Decision Studio (module path kept)
     "Alerts": alerts.render,
     "Security": security.render,
     "Admin": admin.render,

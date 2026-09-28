@@ -63,16 +63,18 @@ def test_action_center_is_master_detail():
 
 
 def test_decision_studio_experiments_is_master_detail():
+    # v4.597 (Option C): the Experiments editor was retired (Proof is read-only). The per-row write
+    # that replaced it on a decision board — Operations ▸ Optimize's Track — carries the same
+    # master_detail contract: identity-bound selection, the detail body takes the BOUND row, and the
+    # C48 latch keys off that row's identity (never a positional re-derive after a re-sort).
     ds = _src("app/ui/decision_studio.py")
-    exp = ds.split("def _experiments", 1)[1].split("\ndef ", 1)[0]
-    assert 'master_detail(' in exp and 'id_col="EXPERIMENT_ID"' in exp
-    assert "detail_render_fn=_render_experiment_detail" in exp
-    # the detail body was extracted to a function taking the bound row; the C48
-    # save latch still keys off EXPERIMENT_ID
-    detail = ds.split("def _render_experiment_detail(", 1)[1].split("\ndef ", 1)[0]
-    assert 'experiment_id = str(row["EXPERIMENT_ID"])' in detail
-    assert 'write_gate_open(f"experiment_save_{experiment_id}")' in detail
-    assert "frame.iloc[int(selected)]" not in detail        # no positional re-derive
+    assert "def _experiments" not in ds and "def _render_experiment_detail" not in ds
+    opt = _src("app/ui/pages/ops_parts/optimize_queue.py")
+    assert 'master_detail(' in opt and 'id_col="FINGERPRINT"' in opt
+    assert "detail_render_fn=" in opt and "empty_detail_msg=" in opt
+    assert 'write_gate_open(f"opt_track:{fp[:16]}")' in opt
+    assert 'stamp_write(f"opt_track:{fp[:16]}", ok)' in opt
+    assert "iloc[int(selected)]" not in opt                  # no positional re-derive
 
 
 def test_narrow_viewport_restacks_only_the_top_level_panes():

@@ -56,7 +56,7 @@ def content_request_key(kind: str, payload: str) -> str:
     this hashes only (kind, payload, viewer), so the SAME content always maps to
     the SAME key. Use it where a caller passes request_key as a STABLE content
     signature for at-least-once retry idempotency (workbench action lifecycle,
-    decision-studio experiment settle): a lost-response retry — even one that
+    the retired experiment settle): a lost-response retry — even one that
     crosses a minute boundary — then dedups into a no-op instead of writing a
     duplicate audit/comment row. A genuinely different action changes the payload
     and gets a new key. (bug-hunt round 5: the minute bucket silently defeated the
