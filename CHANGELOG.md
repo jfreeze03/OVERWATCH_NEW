@@ -14,9 +14,10 @@ Travel plus the manual clones taken before a risky change.
   - A read-only preflight stops before any change if `OVERWATCH_BAK` holds anything V158 did not create
     (DROP SCHEMA cascades): a table or view, or any stage, sequence, file format, function, procedure, pipe,
     task, stream or alert.
-  - `TASK_BACKUP_OPERATOR` is suspended. V161 then waits, up to about 10 minutes, while a run is in flight,
-    because that run's freshness MERGE could re-create the dead-man row. A replay's V158 tail starts one run,
-    which normally ends within the wait; a run still going after that stops V161 (re-run it later).
+  - `TASK_BACKUP_OPERATOR` is suspended. V161 then waits, up to about 4 minutes (inside the 300 s statement
+    timeout V002 sets on WH_ALFA_ADMIN), while a run is in flight, because that run's freshness MERGE could
+    re-create the dead-man row. A replay's V158 tail starts one run, which normally ends within the wait; a run
+    still going after that stops V161 (re-run it later).
   - The task and `SP_BACKUP_OPERATOR_TABLES` are dropped. `OPERATOR_BACKUP_LOG` and the 25 weekly `<T>_BAK_LAST`
     copies move into `OVERWATCH_BAK` (a DROP if the move fails). The schema is then dropped once, with every
     daily generation in it.
@@ -34,7 +35,9 @@ Travel plus the manual clones taken before a risky change.
     to a DROP adds one CRITICAL row; expect that for `OPERATOR_BACKUP_LOG`, the one permanent table, if
     Snowflake refuses to move it into the transient schema.
   - **Rolling back** (RUNBOOK): `UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH_BAK` first, within its retention (at most 1
-    day), then V015's task block and V158, and redeploy app 4.597.0.
+    day); move the ledger and weekly copies it brings back out of that schema into OVERWATCH (or `UNDROP TABLE`
+    the ledger if its move fell back to a DROP); then V015's task block and V158, and redeploy app 4.597.0
+    (main `0c8afb7`).
   - `PREFLIGHT_V161.sql` (read-only) and a PART B grid come from `outputs/gen_v161.py`.
 - **App (4.598.0):**
   - The `BACKUP_KEEP_*` settings and their Admin editors are gone.
@@ -55,7 +58,8 @@ Travel plus the manual clones taken before a risky change.
     changed to today first; rebuild/00 drops `IF NOT EXISTS`, so an unedited suffix that already exists fails
     loudly instead of keeping an old clone. Teardown B0 now covers every operator table the factory reset drops
     (it lacked WAREHOUSE_CHANGE_REGISTRY, WAREHOUSE_CONFIG_SNAPSHOT, ALERT_ROUTES, REMEDIATION_LOG, USER_PREFS,
-    DEPT_BUDGETS, APP_USAGE, CANARY_RESULTS and DQ_SCHEMA_SNAPSHOT).
+    DEPT_BUDGETS, APP_USAGE, CANARY_RESULTS and DQ_SCHEMA_SNAPSHOT), and rebuild/00 gains CANARY_RESULTS and
+    DQ_SCHEMA_SNAPSHOT, so both clone sets cover it.
   - Retention: no migration sets `DATA_RETENTION_TIME_IN_DAYS`. The TRANSIENT operator tables (ALERT_EVENTS,
     ACTION_QUEUE, ...) keep at most 1 day of Time Travel and no Fail-safe.
 - **Order:** apply V161 (after `PREFLIGHT_V161.sql`), then `snow streamlit deploy --replace`. Either order

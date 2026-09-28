@@ -521,7 +521,7 @@ Restore = migrations in order -> roles.sql -> validate.sql (all rows OK).
   re-materialized table re-applies the schema FUTURE grants.
 - **Schema dropped:** `UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH;` first; it restores the
   manual clones too. Past retention, re-run every migration in order (if V161 stops
-  on an in-flight backup run started by V158's tail, wait and re-run it), re-enter
+  on the backup run V158's tail started, after waiting ~4 minutes for it, re-run it), re-enter
   SETTINGS / DEPARTMENT_MAP / routes, then roles.sql + validate.sql. Facts refill
   from the loader tasks (history limited to ACCOUNT_USAGE retention). See RUNBOOK §16.
 - **App broken after deploy:** `snow streamlit deploy --replace` with the

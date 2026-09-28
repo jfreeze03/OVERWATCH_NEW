@@ -104,8 +104,12 @@ def test_v161_preflight_lists_what_v161_would_stop_on_and_what_it_keeps(tmp_path
                       ("FILE_FORMATS", "FILE_FORMAT_SCHEMA"), ("FUNCTIONS", "FUNCTION_SCHEMA"),
                       ("PROCEDURES", "PROCEDURE_SCHEMA"), ("PIPES", "PIPE_SCHEMA")):
         assert f"FROM DBA_MAINT_DB.INFORMATION_SCHEMA.{view} WHERE {col} = 'OVERWATCH_BAK'" in pre, view
+    # review r2: database-wide SHOW + a schema filter reads 0 (never errors) once the schema is gone or unreadable,
+    # so Run All reaches every grid below; only the V161 migration's own SHOW ... IN SCHEMA is gated
+    assert not re.search(r"^SHOW \w+ IN SCHEMA DBA_MAINT_DB\.OVERWATCH_BAK", pre, re.M)
     for kind in ("TASKS", "STREAMS", "ALERTS"):
-        assert f"SHOW {kind} IN SCHEMA DBA_MAINT_DB.OVERWATCH_BAK;" in pre, kind
+        assert (f"SHOW {kind} IN DATABASE DBA_MAINT_DB;\nSELECT COUNT(*) AS OVERWATCH_BAK_{kind} FROM "
+                "TABLE(RESULT_SCAN(LAST_QUERY_ID())) WHERE \"schema_name\" = 'OVERWATCH_BAK';") in pre, kind
     assert "'MANUAL_CLONE_KEPT'" in pre and "REGEXP_LIKE(TABLE_NAME, '.+_BAK_[0-9]{8}')" in pre
     assert "TASK_HISTORY(" in pre
     # review r1: the ledger read (the one statement a partial V161 breaks) runs LAST, alone
@@ -261,9 +265,14 @@ def test_v161_in_flight_guard_follows_the_suspend_and_ignores_stale_rows():
     assert "STATE = 'EXECUTING'" in guard
     assert ("OR (STATE = 'SCHEDULED'\n                    AND SCHEDULED_TIME <= CURRENT_TIMESTAMP()\n"
             "                    AND SCHEDULED_TIME >= DATEADD('minute', -30, CURRENT_TIMESTAMP()))") in guard
-    # review r1: a replay's own V158-tail run normally ends within a bounded wait (40 x 15 s), so V161
-    # completes instead of halting; it raises only if the run is still going after the loop
-    loop = guard[guard.index("FOR attempt IN 1 TO 40 DO"):guard.index("END FOR;")]
+    # review r1: a replay's own V158-tail run normally ends within a bounded wait, so V161 completes instead of
+    # halting; it raises only if the run is still going after the loop. Review r2: 16 x 15 s (~4 min) stays inside
+    # the 300 s STATEMENT_TIMEOUT_IN_SECONDS V002 sets on WH_ALFA_ADMIN, so -20612 (not a timeout) is what fires
+    v002 = (_MIGDIR / "V002__facts.sql").read_text(encoding="utf-8")
+    assert "ALTER WAREHOUSE WH_ALFA_ADMIN SET STATEMENT_TIMEOUT_IN_SECONDS = 300;" in v002
+    attempts = int(re.search(r"FOR attempt IN 1 TO (\d+) DO", guard).group(1))
+    assert attempts * 15 + attempts * 2 < 300, attempts
+    loop = guard[guard.index(f"FOR attempt IN 1 TO {attempts} DO"):guard.index("END FOR;")]
     assert loop.index("SELECT COUNT(*) INTO :running") < loop.index("IF (running = 0) THEN\n            BREAK;")
     assert loop.index("BREAK;") < loop.index("SELECT SYSTEM$WAIT(15);")
     assert guard.index("END FOR;") < guard.index("IF (running > 0) THEN\n        RAISE backup_in_flight;")
@@ -407,8 +416,17 @@ def test_teardown_and_clone_scripts_after_retirement():
     bak = _read("snowflake/rebuild/00_backup_operator_data.sql")
     # review r1: no IF NOT EXISTS -- an unedited suffix that already exists fails loudly, never keeps an old clone
     assert not re.search(r"^CREATE [^\n]*IF NOT EXISTS", bak, re.M) and not re.search(r"^CREATE TABLE ", bak, re.M)
-    assert bak.count("CREATE TRANSIENT TABLE DBA_MAINT_DB.OVERWATCH.") == 27
-    assert "FIRST change every _20260712 suffix" in bak
+    assert bak.count("CREATE TRANSIENT TABLE DBA_MAINT_DB.OVERWATCH.") == 29
+    assert "FIRST change every _20260712 suffix" in bak and "re-run from the failing CREATE" in bak
+    # review r2: rebuild/00 covers at least everything teardown B0 clones (DEPLOYMENT offers either one)
+    b0 = td[td.index("-- B0. Backups"):td.index("-- B1. Drops")]
+    b0_names = set(re.findall(r"^-- CREATE TRANSIENT TABLE DBA_MAINT_DB\.OVERWATCH\.(\w+?)_BAK_\d{8}", b0, re.M))
+    r00_names = set(re.findall(r"^CREATE TRANSIENT TABLE DBA_MAINT_DB\.OVERWATCH\.(\w+?)_BAK_\d{8}", bak, re.M))
+    assert len(b0_names) == 27 and not b0_names - r00_names, sorted(b0_names - r00_names)
+    for name in r00_names:            # every clone has its verify row
+        assert f"SELECT '{name}' AS TABLE_NAME," in bak, name
+    fr = _read("docs/FULL_REBUILD.md")
+    assert "`IF NOT EXISTS` keeps" not in fr and "it has no `IF NOT EXISTS`" in fr
 
 
 _B1_REBUILT = {"ETL_REF_GAP_RESULTS", "ETL_RECON_RESULTS", "ETL_CYCLE_TASKS", "SLEEP_POLLING_WEEKLY",
@@ -449,10 +467,21 @@ def test_dr_docs_are_time_travel_and_manual_clones():
     assert "**Rolling back V161.**" in rb and "BACKUP_KEEP_DAILY 14" not in rb
     # review r1: the rollback recovers the dropped schema FIRST (UNDROP within retention), and redeploys 4.597.0
     rollback = _norm(rb[rb.index("**Rolling back V161.**"):].split("\n\n", 1)[0])
-    assert rollback.index("UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH_BAK;") < rollback.index("V158 in full")
-    assert "Redeploy app 4.597.0" in rollback and "gone for good" in rollback
+    # review r2: UNDROP SCHEMA brings the ledger + weekly copies back INSIDE OVERWATCH_BAK; they move back to
+    # OVERWATCH (or the ledger is UNDROPped) before V158 creates empty ones
+    move_back = "`ALTER TABLE DBA_MAINT_DB.OVERWATCH_BAK.<name> RENAME TO DBA_MAINT_DB.OVERWATCH.<name>;`"
+    assert (rollback.index("UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH_BAK;") < rollback.index(move_back)
+            < rollback.index("UNDROP TABLE DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG;") < rollback.index("V158 in full"))
+    assert "Redeploy app 4.597.0" in rollback and "0c8afb7" in rollback and "gone for good" in rollback
+    assert "v4.597.0 tag" not in rb                              # no such tag exists
     hdr = _MIG[:_MIG.index("USE SCHEMA")]
     assert "UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH_BAK" in hdr and "redeploy app 4.597.0" in hdr
+    assert "RENAME TO DBA_MAINT_DB.OVERWATCH.<name>" in hdr and "UNDROP TABLE DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG" in hdr
+    # review r2: no doc quotes the pre-r1 -20612 text or promises the old 10-minute wait
+    for rel in ("RUNBOOK.md", "DEPLOYMENT.md", "docs/FULL_REBUILD.md", "snowflake/teardown.sql", "CHANGELOG.md"):
+        text = _read(rel)
+        assert "run is in flight\"" not in text and "about 10 minutes" not in text, rel
+    assert "still in flight after about 4 minutes" in _MIG
     dep = _read("DEPLOYMENT.md")
     six = dep[dep.index("## 6. Disaster recovery"):dep.index("- **App broken after deploy:**")]
     assert "No scheduled backups (V161" in six and "OVERWATCH_BAK" not in six and "V001..V157" not in six

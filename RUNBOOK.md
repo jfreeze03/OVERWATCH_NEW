@@ -585,7 +585,7 @@ PUBLIC grants silently leave the queue.
 
 **Rolling back V160.** Re-run V157's `CREATE OR REPLACE PROCEDURE ... SP_ALERT_SCAN_DAILY()` (the tally goes back to 11 and nothing calls SP_SCAN_SLEEP_POLLING any more). Optionally disable the rule (`UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG SET ENABLED = FALSE WHERE RULE_ID = 'COST_SLEEP_POLLING';`), close its lingering OPEN, ACK'd or SNOOZED events as EXPECTED, and drop the proc (and, if wanted, the transient SLEEP_POLLING_WEEKLY table) with the teardown.sql lines. The weekly scan never runs at apply time; to re-check a week by hand, `CALL DBA_MAINT_DB.OVERWATCH.SP_SCAN_SLEEP_POLLING(TRUE);` (it can raise events and email).
 
-**Rolling back V161.** First, within the dropped schema's retention (at most 1 day for a transient schema; `SHOW PARAMETERS LIKE 'DATA_RETENTION_TIME_IN_DAYS' IN DATABASE DBA_MAINT_DB`), run `UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH_BAK;`: it brings back the generations, the ledger and the weekly copies, and it must come before V158, whose `CREATE ... IF NOT EXISTS` would otherwise take the name (if it already did, `ALTER SCHEMA DBA_MAINT_DB.OVERWATCH_BAK RENAME TO OVERWATCH_BAK_NEW;` first). Then re-run V015's TASK_BACKUP_OPERATOR block (lines 61-67 only: the whole file would re-create the retired MART_SPEND_ROLLUP_DT) and V158 in full, which brings back the task, the proc, the BACKUP_KEEP_* settings and the view carve-out. Redeploy app 4.597.0 as well (`snow streamlit deploy --replace` from the v4.597.0 tag): 4.598 hides the task from Tasks ▸ SLA, has no BACKUP_KEEP_* editors (it lists them as unread settings), and its validate.sql FAILs the restored objects. Past the retention window the dropped generations are gone for good.
+**Rolling back V161.** First, within the dropped schema's retention (at most 1 day for a transient schema; `SHOW PARAMETERS LIKE 'DATA_RETENTION_TIME_IN_DAYS' IN DATABASE DBA_MAINT_DB`), run `UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH_BAK;`. It must come before V158, whose `CREATE ... IF NOT EXISTS` would otherwise take the name (if it already did, `ALTER SCHEMA DBA_MAINT_DB.OVERWATCH_BAK RENAME TO OVERWATCH_BAK_NEW;` first). It brings back the generations, and also the ledger and the weekly copies, which V161 had moved INTO that schema: move them back before V158 creates empty ones, `ALTER TABLE DBA_MAINT_DB.OVERWATCH_BAK.<name> RENAME TO DBA_MAINT_DB.OVERWATCH.<name>;` for OPERATOR_BACKUP_LOG and each `<T>_BAK_LAST`. If the ledger's move had fallen back to a DROP (PART B V161.13 showed a fourth CRITICAL row), run `UNDROP TABLE DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG;` instead. Then re-run V015's TASK_BACKUP_OPERATOR block (lines 61-67 only: the whole file would re-create the retired MART_SPEND_ROLLUP_DT) and V158 in full, which brings back the task, the proc, the BACKUP_KEEP_* settings and the view carve-out. Redeploy app 4.597.0 as well (`snow streamlit deploy --replace` from main commit `0c8afb7`): 4.598 hides the task from Tasks ▸ SLA, has no BACKUP_KEEP_* editors (it lists them as unread settings), and its validate.sql FAILs the restored objects. Past the retention window the dropped generations are gone for good.
 
 | Rule | Family | Fires when (threshold = THRESHOLD_NUM, editable) | Recurrence |
 |---|---|---|---|
@@ -755,8 +755,10 @@ the same day.
    brings back every table in it, manual clones included. Past retention the
    operator data is gone with the schema (the manual clones lived in it too):
    1) Apply every migration in order, V001 onward. V158's tail starts a backup
-      run seconds before V161; if V161 stops with "a TASK_BACKUP_OPERATOR run is
-      in flight", wait a few minutes and re-run it.
+      run seconds before V161, which waits up to about 4 minutes for it. If V161
+      still stops ("V161 stopped: a TASK_BACKUP_OPERATOR run was still in
+      flight", or a statement timeout), re-run it once that run shows a final
+      state in TASK_HISTORY.
    2) Re-enter what matters: SETTINGS rates, budgets and contract;
       DEPARTMENT_MAP names; routes. ALERT_CONFIG thresholds re-seed with
       defaults automatically.

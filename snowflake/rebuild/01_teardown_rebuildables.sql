@@ -317,8 +317,8 @@ DROP NOTIFICATION INTEGRATION IF EXISTS OVERWATCH_WEBHOOK_TEAMS;     -- recipe
 DROP SECRET IF EXISTS DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL;    -- recipe (webhook_delivery.sql)
 
 -- To restore operator data after a factory reset, re-run every migration in order (V001 through
--- V161 or later; if V161 stops on an in-flight backup run started by V158's tail, wait a few
--- minutes and re-run it), then restore each table from the B0 clone, SETTINGS first, as the
+-- V161 or later; V161 waits ~4 minutes for the backup run V158's tail starts, and if it still
+-- stops, re-run it once that run ends), then restore each table from the B0 clone, SETTINGS first, as the
 -- table-owner role (the audit tables revoke DELETE from both admin roles), one table at a time:
 --   INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.<T>
 --   SELECT * FROM DBA_MAINT_DB.OVERWATCH.<T>_BAK_<yyyymmdd>;

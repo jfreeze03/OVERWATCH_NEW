@@ -15,7 +15,7 @@ V161, in order:
   2. read-only preflight: DROP SCHEMA cascades, so stop if OVERWATCH_BAK holds a table/view V158 (or a partial
      V161) did not put there, or any stage, sequence, file format, function, procedure, pipe, task, stream or
      alert;
-  3. suspend TASK_BACKUP_OPERATOR, then wait (up to ~10 minutes) while a run is in flight -- V158's own tail
+  3. suspend TASK_BACKUP_OPERATOR, then wait (up to ~4 minutes) while a run is in flight -- V158's own tail
      EXECUTE TASK starts one on a replay -- and stop only if it is still running: an in-flight run's freshness
      MERGE could re-create the dead-man row after the DELETE below;
   4. drop the task and the proc; move OPERATOR_BACKUP_LOG and the 25 ``<T>_BAK_LAST`` copies into OVERWATCH_BAK
@@ -130,10 +130,11 @@ HEADER = """\
 --   there that the preflight can see: a table or view that is not a V158 generation, a moved <T>_BAK_LAST or
 --   OPERATOR_BACKUP_LOG, or any stage, sequence, file format, function, procedure, pipe, task, stream or alert.
 --   PREFLIGHT_V161.sql lists the same; read it before applying.
--- * TASK_BACKUP_OPERATOR is suspended, then V161 waits (up to ~10 minutes, SYSTEM$WAIT 15 s between checks)
---   while a run is in flight -- a replay's V158 tail starts one seconds earlier -- because its freshness MERGE
---   could re-create the dead-man row after the DELETE below. Still running after that, V161 stops (-20612):
---   re-run it once the run ends. Avoid applying between about 05:05 and 05:20 Central. (The one-off wait is
+-- * TASK_BACKUP_OPERATOR is suspended, then V161 waits (up to ~4 minutes, SYSTEM$WAIT 15 s between checks,
+--   inside the 300 s STATEMENT_TIMEOUT V002 sets on WH_ALFA_ADMIN) while a run is in flight -- a replay's V158
+--   tail starts one seconds earlier -- because its freshness MERGE could re-create the dead-man row after the
+--   DELETE below. Still running after that, V161 stops (-20612): re-run it once the run ends (a statement
+--   timeout here means the same). Avoid applying between about 05:05 and 05:20 Central. (The one-off wait is
 --   far below COST_SLEEP_POLLING's 5-of-7-days bar.)
 -- * The task and SP_BACKUP_OPERATOR_TABLES are dropped. OPERATOR_BACKUP_LOG and the 25 <T>_BAK_LAST copies
 --   are moved into OVERWATCH_BAK (a DROP if the move fails) and the schema is dropped once, with every
@@ -154,11 +155,13 @@ HEADER = """\
 --
 -- Rolling back V161: within the dropped schema's retention (at most 1 day for a transient schema; SHOW
 -- PARAMETERS LIKE 'DATA_RETENTION_TIME_IN_DAYS' IN DATABASE DBA_MAINT_DB), UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH_BAK
--- FIRST: it brings back the generations, the ledger and the weekly copies, and V158's CREATE ... IF NOT EXISTS
--- would otherwise take the name. Then re-run V015's TASK_BACKUP_OPERATOR block (lines 61-67; not the whole
--- file, which would re-create the retired MART_SPEND_ROLLUP_DT) and V158 in full, and redeploy app 4.597.0
--- (4.598 hides the task from Tasks > SLA and has no BACKUP_KEEP_* editors). Past that window the dropped
--- generations are gone for good.
+-- FIRST (V158's CREATE ... IF NOT EXISTS would otherwise take the name): it brings back the generations, and the
+-- ledger and weekly copies V161 moved INTO it. Move those back before V158 creates empty ones: ALTER TABLE
+-- DBA_MAINT_DB.OVERWATCH_BAK.<name> RENAME TO DBA_MAINT_DB.OVERWATCH.<name> for OPERATOR_BACKUP_LOG and each
+-- <T>_BAK_LAST; if the ledger's move had fallen back to a DROP, UNDROP TABLE DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG
+-- instead. Then re-run V015's TASK_BACKUP_OPERATOR block (lines 61-67; not the whole file, which would re-create
+-- the retired MART_SPEND_ROLLUP_DT) and V158 in full, and redeploy app 4.597.0 (main 0c8afb7; 4.598 hides the
+-- task from Tasks > SLA and has no BACKUP_KEEP_* editors). Past that window the dropped generations are gone.
 -- Owner applies in Snowsight after V160, as the role that applied V158 (it owns OVERWATCH_BAK and the task).
 -- This file never runs from the app.
 
@@ -232,15 +235,16 @@ ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR SUSPEND;
 IN_FLIGHT_BLOCK = """
 -- 3. In-flight guard, AFTER the suspend (a started task always shows its next run as SCHEDULED in the future):
 --    wait while a run executes or is due now, so its freshness MERGE cannot re-create the row deleted below.
---    A replay's V158 tail starts a run seconds before this; it normally ends within the wait. A SCHEDULED row
---    more than 30 minutes overdue is stale, not in flight, and never blocks.
+--    A replay's V158 tail starts a run seconds before this; it normally ends within the wait (16 checks x 15 s,
+--    ~4 minutes: under the 300 s warehouse STATEMENT_TIMEOUT V002 sets). A SCHEDULED row more than 30 minutes
+--    overdue is stale, not in flight, and never blocks.
 EXECUTE IMMEDIATE
 $$
 DECLARE
     running NUMBER DEFAULT 0;
-    backup_in_flight EXCEPTION (-20612, 'V161 stopped: a TASK_BACKUP_OPERATOR run was still in flight after about 10 minutes. The task is suspended; re-run V161 once the run ends.');
+    backup_in_flight EXCEPTION (-20612, 'V161 stopped: a TASK_BACKUP_OPERATOR run was still in flight after about 4 minutes. The task is suspended; re-run V161 once the run ends.');
 BEGIN
-    FOR attempt IN 1 TO 40 DO
+    FOR attempt IN 1 TO 16 DO
         SELECT COUNT(*) INTO :running
           FROM TABLE(DBA_MAINT_DB.INFORMATION_SCHEMA.TASK_HISTORY(
                    SCHEDULED_TIME_RANGE_START => DATEADD('hour', -6, CURRENT_TIMESTAMP()),
@@ -352,7 +356,7 @@ VIEW_HEAD = """
 DESCRIPTION = (
     "Scheduled operator-data backups retired (owner decision 2026-09-28): recovery is Snowflake Time Travel plus "
     "the manual <T>_BAK_<yyyymmdd> clones taken before a risky change (teardown.sql B0, rebuild/00), which stay. "
-    "Suspends then drops TASK_BACKUP_OPERATOR (waiting up to ~10 minutes for an in-flight run, else stopping), "
+    "Suspends then drops TASK_BACKUP_OPERATOR (waiting up to ~4 minutes for an in-flight run, else stopping), "
     "drops SP_BACKUP_OPERATOR_TABLES, moves OPERATOR_BACKUP_LOG and the 25 weekly <T>_BAK_LAST copies into "
     "DBA_MAINT_DB.OVERWATCH_BAK and drops that schema once with every V158 generation (a preflight stops first if "
     "the schema holds a table, view, stage, sequence, file format, function, procedure, pipe, task, stream or "
@@ -418,9 +422,10 @@ SELECT CASE WHEN TABLE_TYPE = 'BASE TABLE' AND REGEXP_LIKE(TABLE_NAME, '{GEN_RE}
  GROUP BY 1
  ORDER BY 1;
 
--- P2. Non-table objects in OVERWATCH_BAK: expect every count 0 and the three SHOWs empty (V161 stops (-20611)
---     otherwise; SHOW OBJECTS would list only tables and views). The schema's owner is the role that must
---     apply V161.
+-- P2. Non-table objects in OVERWATCH_BAK: expect every count 0 (V161 stops (-20611) otherwise; SHOW OBJECTS
+--     would list only tables and views). Tasks, streams and alerts are counted from a database-wide SHOW, so a
+--     missing or unreadable schema reads 0 instead of stopping the grids below. The schema's owner is the role
+--     that must apply V161.
 SHOW SCHEMAS LIKE 'OVERWATCH_BAK' IN DATABASE DBA_MAINT_DB;
 SELECT 'STAGES' AS KIND, COUNT(*) AS OBJECTS FROM DBA_MAINT_DB.INFORMATION_SCHEMA.STAGES WHERE STAGE_SCHEMA = 'OVERWATCH_BAK'
 UNION ALL
@@ -434,9 +439,12 @@ SELECT 'PROCEDURES', COUNT(*) FROM DBA_MAINT_DB.INFORMATION_SCHEMA.PROCEDURES WH
 UNION ALL
 SELECT 'PIPES', COUNT(*) FROM DBA_MAINT_DB.INFORMATION_SCHEMA.PIPES WHERE PIPE_SCHEMA = 'OVERWATCH_BAK'
 ORDER BY 1;
-SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH_BAK;
-SHOW STREAMS IN SCHEMA DBA_MAINT_DB.OVERWATCH_BAK;
-SHOW ALERTS IN SCHEMA DBA_MAINT_DB.OVERWATCH_BAK;
+SHOW TASKS IN DATABASE DBA_MAINT_DB;
+SELECT COUNT(*) AS OVERWATCH_BAK_TASKS FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) WHERE "schema_name" = 'OVERWATCH_BAK';
+SHOW STREAMS IN DATABASE DBA_MAINT_DB;
+SELECT COUNT(*) AS OVERWATCH_BAK_STREAMS FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) WHERE "schema_name" = 'OVERWATCH_BAK';
+SHOW ALERTS IN DATABASE DBA_MAINT_DB;
+SELECT COUNT(*) AS OVERWATCH_BAK_ALERTS FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) WHERE "schema_name" = 'OVERWATCH_BAK';
 
 -- P3. The 26 names V161 moves out of OVERWATCH (expect 26 rows once V158 has run on a Sunday; IS_TRANSIENT YES
 --     for the 25 weekly copies), and the manual <T>_BAK_<yyyymmdd> clones V161 must leave alone (a baseline for
@@ -477,8 +485,8 @@ SELECT NAME, STATE, SCHEDULED_TIME, COMPLETED_TIME, LEFT(ERROR_MESSAGE, 120) AS 
  ORDER BY SCHEDULED_TIME DESC;
 
 -- P6. LAST, on its own: the backup ledger. PRUNED / PRUNE_FAILED expected 0 (no prune has run, so the view
---     carve-out V161 removes never matched a row). After a partial V161 the ledger has moved into OVERWATCH_BAK
---     (P1 shows it), so this one statement errors; the grids above are unaffected.
+--     carve-out V161 removes never matched a row). Once V161 has moved or dropped the ledger (a partial or
+--     finished V161; P1 shows a moved one), this one statement errors; the grids above are unaffected.
 SELECT ACTION, COUNT(*) AS ROWS_, MAX(LOGGED_AT) AS NEWEST
   FROM DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG
  GROUP BY ACTION

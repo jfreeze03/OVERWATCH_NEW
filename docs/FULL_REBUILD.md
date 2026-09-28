@@ -41,12 +41,14 @@ generations and the weekly `*_BAK_LAST` copies were retired), so these manual
 clones are the only copy outside Time Travel. Clone as `CREATE TRANSIENT TABLE`
 (a permanent clone of a transient table such as ALERT_EVENTS fails), and change
 the fixed date suffix in `snowflake/rebuild/00_backup_operator_data.sql` to today
-first: its `IF NOT EXISTS` keeps an older clone of the same name. Restore with
+first: it has no `IF NOT EXISTS`, so a suffix that already exists fails with
+"already exists" (use a new suffix, or drop the older clones once they are no
+longer needed; after a partial run, re-run from the failing CREATE). Restore with
 `INSERT OVERWRITE INTO <T> SELECT * FROM <T>_BAK_<date>` as the table-owner role
 (a TRANSIENT clone cannot CLONE back into a permanent table). Replaying V158
 during a rebuild still starts one backup run through its tail `EXECUTE TASK`;
-V161, a few files later, drops everything that run makes (if V161 stops on the
-run in flight, wait a few minutes and re-run it).
+V161, a few files later, waits up to about 4 minutes for that run and then drops
+everything it made (if V161 still stops on it, re-run V161 once the run ends).
 
 ## 2. Teardown
 
