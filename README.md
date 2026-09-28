@@ -51,9 +51,9 @@ security boundary is Snowflake roles under Streamlit-in-Snowflake.
 | Overview | Exec glance: spend vs budget, month-end forecast, alerts, platform score, real top actions. |
 | Control Room | DBA morning triage: ranked issue queue, source freshness, 24h failures, spend movers. |
 | Alerts | Alert rules, open events, ack/resolve workflow, generated native ALERT SQL. |
-| Cost Intelligence | Service/warehouse/user attribution, contract pacing, Cortex + storage, savings ledger (estimated vs verified). |
-| Operations | Queries, tasks, warehouses, contention, change impact — p95, failures, queue, spill, anomalies, post-change regression verdicts. |
-| Decision Studio | Optimization experiments, savings verification, the SLO cockpit, and the workload portfolio. |
+| Cost Intelligence | Service/warehouse/user attribution (with the grain-coverage ratio: measured and user-allocated credits as a share of metered), contract pacing, Cortex + storage, savings ledger (estimated vs verified). |
+| Operations | Queries, tasks, warehouses, contention, the Optimize fix queue (a diagnosis and first fix per recurring query family, with one-click Track into Action Center), change impact, and Pipeline SLA with two built-in objectives (nightly cycle done by 07:00, tasks on cadence) — p95, failures, queue, spill, anomalies, post-change regression verdicts. |
+| Proof | Does OVERWATCH pay for itself: verified savings with per-item evidence, and the priced pipeline ahead. |
 | Security | MFA gaps (login-evidence based), failed logins, grants, recent DDL changes. |
 | Admin | Settings, migration status, source freshness, app self-cost, error log, telemetry. |
 | Ask | DBA-only grounded Q&A over the app's own data (evidence-cited, no free-text SQL). |
