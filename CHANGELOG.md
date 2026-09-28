@@ -13,7 +13,8 @@ App-only, no migration. Next Fifty wave 3, Slice A: ranks 49, 50, 47 (logging on
 - **Task health (#26).** Migrations & freshness ▸ Check OVERWATCH task health reads SHOW TASKS plus the last 24h of
   INFORMATION_SCHEMA.TASK_HISTORY and grades the 32 tasks the migrations leave live:
   - running, suspended, failing, recovered, skipped runs, cancelled runs, not visible, not in this build,
-    retired, opt-in (a started opt-in task is graded by its runs, so a failing one is never green);
+    retired, opt-in (an installed opt-in task is graded by its runs, so a failing or failure-suspended one is
+    never green);
   - a cancelled run (an operator cancel, a cancelled graph run) is a warning, never a failure;
   - a failed or empty read says so and is never shown as healthy;
   - a history read that hits its 10,000-row limit says it may be incomplete and is never shown green.

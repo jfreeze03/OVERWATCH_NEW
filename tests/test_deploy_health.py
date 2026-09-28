@@ -366,7 +366,9 @@ def test_admin_header_warns_on_every_section():
     # outside `if ctx.usable()`: the banner and caption show even with no session-context row
     assert ctx.index("elif not ctx.ok:") < ctx.index("_schema_ahead_banner()")
     banner = _body(adm, "_schema_ahead_banner")
-    assert 'key="schema_ahead_check", tier="recent"' in banner and "probe=True" in banner
+    assert "_read_fresh_applied()" in banner
+    read = _body(adm, "_read_fresh_applied")
+    assert 'key="schema_ahead_check", tier="recent"' in read and "probe=True" in read
     assert "st.warning(md_dollars(deploy_health.ahead_warning(drift, APP_VERSION)))" in banner
     render = _body(adm, "render")
     assert render.index("_context_section()") < render.index("lazy_sections(")
@@ -479,10 +481,13 @@ def test_a_started_opt_in_task_is_graded_by_its_runs():
 
 def test_migrations_tabs_agree_with_the_header_banner():
     adm = _src("app/ui/pages/admin.py")
-    fresh = _body(adm, "_fresh_applied_versions")
-    assert 'key="schema_ahead_check", tier="recent"' in fresh          # the banner's own read (cache hit)
-    banner = _body(adm, "_schema_ahead_banner")
-    assert 'key="schema_ahead_check", tier="recent"' in banner
+    # review r2: ONE fresh read per rerun -- the banner's -- stashed and reused by the tabs, so a failed
+    # read is never re-issued (st.cache_data does not cache failures)
+    assert adm.count('key="schema_ahead_check"') == 1
+    assert "return _read_fresh_applied() or set()" in _body(adm, "_fresh_applied_versions")
+    assert "_read_fresh_applied()" in _body(adm, "_schema_ahead_banner")
+    read = _body(adm, "_read_fresh_applied")
+    assert "stash[0] == seq" in read and "state[_FRESH_SV_KEY] = (seq, applied)" in read
     tab = _body(adm, "_migrations_tab")
     assert tab.index("applied |= _fresh_applied_versions()") < tab.index(
         "drift = deploy_health.schema_drift(applied, _EXPECTED_MIGRATIONS)")
@@ -515,3 +520,36 @@ def test_setup_progress_sees_a_migration_the_metadata_read_has_not(monkeypatch):
     admin._setup_progress_tab()
     row = tables[0].set_index("STEP").loc["Database migrations"]
     assert row["STATUS"] == "Partial" and "1 newer than this build" in row["DETAIL"]
+
+
+def test_the_fresh_schema_read_runs_once_per_rerun_even_when_it_fails(monkeypatch):
+    """Review r2: st.cache_data does not cache a failure, so the tabs reuse the banner's per-rerun result
+    instead of re-issuing a failing SCHEMA_VERSION read (and logging it) once per tab."""
+    from app.ui.pages import admin
+    calls: list[str] = []
+
+    def _run(sql, *, key, **_k):
+        calls.append(key)
+        return QueryResult(ok=False, error="warehouse suspended")
+
+    state = {"_ow_run_seq": 7}
+    monkeypatch.setattr(admin, "run", _run)
+    monkeypatch.setattr(admin, "st", SimpleNamespace(session_state=state, warning=lambda *_a: None))
+    admin._schema_ahead_banner()
+    assert admin._fresh_applied_versions() == set()
+    assert admin._fresh_applied_versions() == set()
+    assert calls == ["schema_ahead_check"]                     # one statement for the whole rerun
+    state["_ow_run_seq"] = 8                                    # the next rerun reads again
+    admin._fresh_applied_versions()
+    assert calls == ["schema_ahead_check", "schema_ahead_check"]
+
+
+def test_an_opt_in_task_suspended_after_failures_is_a_warning():
+    runs = pd.concat([_runs(), pd.DataFrame([{
+        "TASK_NAME": "TASK_ALERT_DRILL", "SUCCEEDED_N": 0.0, "FAILED_N": 3.0, "SKIPPED_N": 0.0,
+        "LAST_SUCCESS_AT": pd.NaT, "LAST_FAILURE_AT": _T0, "LAST_ERROR_MESSAGE": "drill failed",
+        "HISTORY_ROWS": 400.0}])], ignore_index=True)
+    h = dh.task_health(_show({"TASK_ALERT_DRILL": {"state": "suspended"}}, extra=("TASK_ALERT_DRILL",)),
+                       runs, **_KW)
+    assert _status(h, "TASK_ALERT_DRILL") == "Suspended after failures"
+    assert h.severity == "warn" and h.headline.endswith(" · 1 opt-in failing")

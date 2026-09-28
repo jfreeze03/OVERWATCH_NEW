@@ -104,9 +104,20 @@ def _pins_in(text: str, needles: tuple[str, ...]) -> list[int]:
     shape (assert, loop tuple, call argument, reversed compare, startswith), containing a CURRENT value;
     (b) the legacy literal shapes (any number) in an assert or assignment."""
     tree = ast.parse(text)
-    found = {node.lineno for node in _string_constants(tree) if any(n in node.value for n in needles)}
+    lines = text.splitlines()
+    # review r2: the house idiom `changelog_entry("X").startswith("## X - ...")` finds its entry by heading, so
+    # it is bump-proof; a line marked `# release-pin-ok` names a FIXED release on purpose (history text).
+    entries = {a.value for node in ast.walk(tree)
+               if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "changelog_entry"
+               for a in node.args if isinstance(a, ast.Constant) and isinstance(a.value, str)}
+
+    def _exempt(node: ast.Constant) -> bool:
+        line = lines[node.lineno - 1] if 0 < node.lineno <= len(lines) else ""
+        return "# release-pin-ok" in line or any(node.value.startswith(f"## {e} ") for e in entries)
+
+    found = {node.lineno for node in _string_constants(tree)
+             if any(n in node.value for n in needles) and not _exempt(node)}
     if _LITERAL_TIP.search(text) or _LITERAL_VERSION.search(text):
-        lines = text.splitlines()
         for node in ast.walk(tree):
             if isinstance(node, (ast.Assert, ast.Assign, ast.AnnAssign)):
                 seg = "\n".join(lines[node.lineno - 1:node.end_lineno])
@@ -151,7 +162,10 @@ def test_the_pin_guard_catches_every_pin_shape():
         assert _pins_in(src, needles), src
     ok = ['"""Mentions 4.599.0 and V001..V161 in a docstring."""\nx = 1',
           'def f():\n    """V001..V161 applied, as history."""\n    return changelog_entry("4.599.0")',
-          '# assert "V001..V161 applied" in val\nx = 1']
+          '# assert "V001..V161 applied" in val\nx = 1',
+          # review r2: the bump-proof CHANGELOG idiom, and an explicit fixed-history marker
+          'head = changelog_entry("4.599.0")\nassert head.startswith("## 4.599.0 - Slice A")',
+          'assert "logging starts with app 4.599.0." in text   # release-pin-ok: fixed history']
     for src in ok:
         assert not _pins_in(src, needles), src
 

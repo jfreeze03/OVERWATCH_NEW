@@ -1,7 +1,7 @@
 """Shared source readers for the shape-pinning tests (Next-Fifty #49).
 
-Import as ``from tests._source import ...`` (pytest.ini puts the repo root on sys.path; tests/ has no
-conftest or ``__init__``, so a bare ``from _source import`` would depend on collection order).
+Import as ``from tests._source import ...`` -- the one supported spelling (pytest.ini puts the repo root
+on sys.path; tests/ has a conftest, the Snowflake-session guard, but no ``__init__``).
 
 ``read(rel)`` is the one-liner ~180 test files each re-define as ``_src``/``_read``/``_source``.
 ``page_source(name)`` reads a page the way a reader of the page sees it: ``app/ui/pages/<name>.py``

@@ -126,6 +126,10 @@ _FIRST_PAINT_BUDGET = {
 
 @pytest.fixture(scope="module")
 def _all_pages_report():
+    # review r2: the session-scoped tests/conftest.py guard must already refuse real sessions here -- a
+    # function-scoped guard was installed AFTER this module fixture had rendered every page for real.
+    from app.core import session
+    assert session._connect.__name__ == "_refuse_snowflake_session", "conftest guard not active"
     return usage_sim.simulate(pages=usage_sim.DEFAULT_PAGES, scopes={"default": {}}, measure_rerun=False)
 
 

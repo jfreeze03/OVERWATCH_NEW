@@ -365,6 +365,11 @@ def task_health(tasks: pd.DataFrame | None, runs: pd.DataFrame | None, *, expect
                     status, sev = graded, g_sev
                     note = f"{note}; {g_note}" if g_note else note
                     opt_in_failing += int(graded == "Failing")
+            elif _count(run.get("failed")) > 0:
+                # review r2: FAILED_AND_AUTO_SUSPENDED leaves it suspended -- the terminal form of failing
+                status, sev = "Suspended after failures", "warn"
+                note = f"{note}; failed in the window and is now suspended"
+                opt_in_failing += 1
         elif name not in expected_set:
             status, sev = "Not in this build", "warn"
             note = ("live, but no migration in this build creates it — a newer migration's task "

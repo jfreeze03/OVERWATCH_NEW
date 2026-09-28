@@ -758,27 +758,42 @@ def _context_section() -> None:
     _schema_ahead_banner()
 
 
-def _fresh_applied_versions() -> set[int]:
-    """#26 review r1: the header banner's 5-minute (recent-tier) SCHEMA_VERSION read. The tabs union it into
-    their metadata-tier set so, right after a migration is applied, the Migrations tab and Setup progress
-    agree with the banner instead of saying 'none newer' / 'Done' for up to 4h. Same SQL, cap and scope as
-    the banner's read, so on the same rerun it is a cache hit, not a new statement."""
+_FRESH_SV_KEY = "_adm_fresh_sv"
+
+
+def _read_fresh_applied() -> set[int] | None:
+    """The header's 5-minute (recent-tier) SCHEMA_VERSION read -> applied versions, or None when unreadable.
+    Stashed per rerun (review r2), so the tabs never re-issue it -- a FAILED read is not cached by
+    st.cache_data and would otherwise run (and log an error) once more per tab."""
+    state = getattr(st, "session_state", None)          # absent under unit-test stubs
+    seq = state.get("_ow_run_seq") if state is not None else None
+    stash = state.get(_FRESH_SV_KEY) if state is not None else None
+    if seq is not None and isinstance(stash, tuple) and len(stash) == 2 and stash[0] == seq:
+        return stash[1]
     sv = run(mart_sql.schema_version(), page=_PAGE, key="schema_ahead_check", tier="recent",
              source="SCHEMA_VERSION", probe=True)
-    if not sv.usable() or "VERSION" not in sv.df.columns:
-        return set()
-    return deploy_health.applied_versions(sv.df["VERSION"])
+    applied = (deploy_health.applied_versions(sv.df["VERSION"])
+               if sv.usable() and "VERSION" in sv.df.columns else None)
+    if state is not None and seq is not None:
+        state[_FRESH_SV_KEY] = (seq, applied)
+    return applied
+
+
+def _fresh_applied_versions() -> set[int]:
+    """#26 review r1: the tabs union the header's fresh read into their 4h metadata-tier set so, right after a
+    migration is applied, the Migrations tab and Setup progress agree with the banner instead of saying
+    'none newer' / 'Done'. Reuses the banner's per-rerun result (no new statement); empty when unreadable."""
+    return _read_fresh_applied() or set()
 
 
 def _schema_ahead_banner() -> None:
     """#26: on EVERY Admin section (the default section is Settings, so a tab-only warning hides).
     Tier ``recent`` on purpose: the shell floor gate keeps the metadata-tier SCHEMA_VERSION cache warm
     for hours, which would hide a freshly applied migration — exactly the case this warning is for."""
-    sv = run(mart_sql.schema_version(), page=_PAGE, key="schema_ahead_check", tier="recent",
-             source="SCHEMA_VERSION", probe=True)
-    if not sv.usable() or "VERSION" not in sv.df.columns:
+    applied = _read_fresh_applied()
+    if not applied:
         return                      # the Migrations tab owns the unreadable/empty story
-    drift = deploy_health.schema_drift(deploy_health.applied_versions(sv.df["VERSION"]), _EXPECTED_MIGRATIONS)
+    drift = deploy_health.schema_drift(applied, _EXPECTED_MIGRATIONS)
     if drift.ahead:
         st.warning(md_dollars(deploy_health.ahead_warning(drift, APP_VERSION)))
 
