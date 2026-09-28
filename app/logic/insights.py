@@ -140,7 +140,9 @@ def idle_advisor(df: pd.DataFrame, credit_rate_usd: float, window_days: int) -> 
     if {"METERED_HOURS", "IDLE_HOURS"}.issubset(out.columns):
         metered = out["METERED_HOURS"].clip(lower=0)
         active_hours = (metered - out["IDLE_HOURS"]).clip(lower=0)
-        credits_per_hour = (out["TOTAL_CREDITS"] / metered.replace(0, pd.NA)).fillna(0.0)
+        # divide by NaN (float) where nothing was metered: replace(0, pd.NA) made an object column and a
+        # FutureWarning on the fillna downcast; the values are identical
+        credits_per_hour = (out["TOTAL_CREDITS"] / metered.where(metered != 0)).fillna(0.0)
         tail_credits = active_hours * (IDLE_RESUME_TAIL_SEC / 3600.0) * credits_per_hour
         recoverable = (out["IDLE_CREDITS"] - tail_credits).clip(lower=0.0)
     else:
