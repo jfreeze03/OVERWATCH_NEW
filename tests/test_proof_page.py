@@ -91,7 +91,9 @@ def test_proof_cross_links_are_profile_gated():
     # Alerts (READER lacks it) and Operations (EXECUTIVE lacks it) doorways render only when openable
     assert 'can_open("Alerts") and st.button("Per-rule alert precision → Alerts ▸ Rules"' in proof
     assert 'can_open("Operations") and st.button("Change detail → Operations ▸ Change impact"' in proof
-    assert 'can_open("Operations") and st.button("Track more query work → Operations ▸ Optimize"' in pipe
+    # a neutral label: a READER lands on a queue where Track is not offered (review r2)
+    assert 'can_open("Operations") and st.button("Open the query fix queue → Operations ▸ Optimize"' in pipe
+    assert "Track more query work" not in body
     # the Entity 360 row drill only for a profile with Control Room; others get a plain table
     assert 'if can_open("Control Room"):' in pipe and "styled_table(display," in pipe
     # every request_navigation target in the body is either gated, the page itself, or a page every
@@ -384,3 +386,36 @@ def test_empty_state_doorway_lands_on_the_ledger_pill():
     assert body.index('st.session_state["opt_section"] = "Remediation & ledger"') < body.index("request_navigation(")
     optimize = _src("app/ui/pages/cost_parts/optimize.py")
     assert '"Remediation & ledger"' in optimize and 'key="opt_section"' in optimize
+
+
+# --- review r2 ------------------------------------------------------------------------------------
+
+def test_the_summary_fallback_is_disclosed_and_the_cap_note_never_claims_sql_then():
+    proof = _fn(_src(_BODY_REL), "_proof_tab")
+    assert 'if not sig.get("summary_ok", True):' in proof
+    assert "The whole-ledger savings summary could not be read" in proof
+    # the cap note (which claims whole-ledger SQL totals) is the ELSE branch of the fallback
+    assert proof.index('if not sig.get("summary_ok", True):') < proof.index("elif ledger.truncated:")
+
+
+def test_active_items_totalling_zero_are_not_called_none_verified():
+    proof = _fn(_src(_BODY_REL), "_proof_tab")
+    zero = proof.index('elif int(sig.get("verified_active_items") or 0) > 0:')
+    none = proof.index('elif int(totals["verified_count"]) > 0:')
+    assert zero < none and "totalling {format_usd(verified_active)}/mo" in proof
+
+
+def test_addressable_divides_by_the_real_span_on_both_pages():
+    # W12: Current month / Current year pass a day OFFSET, so every idle / sizing run-rate divides by
+    # the bounds' day span -- Proof ▸ Pipeline and Cost ▸ Optimization & Savings show the same figure
+    span = "_span = (bounds[1] - bounds[0]).days if bounds is not None else days"
+    pipe = _fn(_src(_BODY_REL), "_pipeline_tab")
+    assert span in pipe and "served_days(idle, _span)" in pipe and "served_days(prof, _span)" in pipe
+    assert "served_days(idle, days)" not in pipe and "served_days(prof, days)" not in pipe
+    opt = _src("app/ui/pages/cost_parts/optimize.py")
+    assert span in opt
+    for call in ("served_days(_idle_head, _span)", "served_days(idle_res, _span)",
+                 "served_days(prof_res, _span)"):
+        assert call in opt
+    assert not re.search(r"served_days\((?:_idle_head|idle_res|prof_res), days\)", opt)
+    assert "Cost ▸ Optimize " not in _src(_BODY_REL) and "Cost ▸ Optimize'" not in _src(_BODY_REL)

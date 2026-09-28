@@ -186,7 +186,12 @@ def test_objectives_panel_is_honest_about_absence_and_scope():
     assert "judged over the 200 most-silent tasks only" in joined and "conservative" not in joined
     contract = ops.split('"Pipeline SLA": {', 1)[1].split("},", 1)[0]
     assert "Dynamic-table refresh health honor Company/Database/Schema, as does " in contract
-    assert "the Tasks-on-cadence objective, which reads its cadence over max(Window, 14) days." in contract
+    # review r2: the builder clamps to 90 days, so the note and the tile help say so
+    assert ("the Tasks-on-cadence objective, which reads its cadence over max(Window, 14) days, "
+            "capped at 90.") in re.sub(r'"\s*\n\s*"', "", contract)
+    assert 'f"over the last {min(max(days, 14), 90)} days."' in ops
+    # the cap caption never promises a full list elsewhere: Tasks ▸ SLA reads the same LIMIT-200 query
+    assert "for the full list" not in ops and "(Tasks ▸ SLA reads the same 200)" in joined
     # review r1: the Window moves the objective, so the contract lists it as partial (not "ignored")
     assert '"partial": ("company", "database", "schema_contains", "days")' in contract
 

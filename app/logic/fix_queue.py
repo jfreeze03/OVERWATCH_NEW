@@ -31,7 +31,7 @@ from app.logic import query_advisor, query_opt
 from app.logic.formulas import format_usd, humanize_duration, humanize_gb, safe_float
 
 TRACK_ALL_CAP = 25            # rows one "Track all ACT NOW" click may insert
-TRACK_COOLDOWN_DAYS = 90      # a family dismissed (DROPPED) this recently is never bulk re-tracked
+TRACK_COOLDOWN_DAYS = 90      # a family dismissed (DROPPED) or marked DONE this recently is never bulk re-tracked
 TRACK_SOURCE = "Operations > Optimize"
 TRACK_ENTITY_TYPE = "QUERY_FINGERPRINT"
 SPECIFIC_SOURCES = frozenset({"live", "mart", "heuristic"})
@@ -240,14 +240,15 @@ def diagnose_workloads(portfolio: pd.DataFrame | None, *, live_scored: pd.DataFr
     return out
 
 
-def _tracked_sets(tracked: pd.DataFrame | None) -> tuple[dict[str, str], set[str], set[str]]:
+def _tracked_sets(tracked: pd.DataFrame | None) -> tuple[dict[str, str], set[str], set[str], set[str]]:
     """From ``workbench_sql.tracked_actions`` rows: (latest status by key, open keys, keys
-    dismissed within the read's cooldown window). Keys are upper-cased."""
+    dismissed within the read's cooldown window, keys marked DONE within it). Keys are upper-cased."""
     latest: dict[str, str] = {}
     open_keys: set[str] = set()
     dropped: set[str] = set()
+    done: set[str] = set()
     if tracked is None or tracked.empty or "ENTITY_KEY_U" not in tracked.columns:
-        return latest, open_keys, dropped
+        return latest, open_keys, dropped, done
     for rec in tracked.to_dict("records"):
         key = _text(rec.get("ENTITY_KEY_U")).upper()
         if not key:
@@ -258,23 +259,29 @@ def _tracked_sets(tracked: pd.DataFrame | None) -> tuple[dict[str, str], set[str
             open_keys.add(key)
         if safe_float(rec.get("DROPPED_N")) > 0 or status == "DROPPED":
             dropped.add(key)
-    return latest, open_keys, dropped
+        if safe_float(rec.get("DONE_N")) > 0 or status == "DONE":
+            done.add(key)
+    return latest, open_keys, dropped, done
 
 
 def with_track_status(df: pd.DataFrame, tracked: pd.DataFrame | None) -> pd.DataFrame:
-    """Add TRACK_STATUS (Tracked (open) / Dismissed / Done / Untracked) and TRACKED_ACTION_ID:
-    the newest OPEN item for a tracked-open family (the one Action Center lists by default), else
-    the latest closed item ('' when untracked)."""
+    """Add TRACK_STATUS (Tracked (open) / Dismissed / Done / Untracked), TRACKED_ACTION_ID (the
+    newest OPEN item for a tracked-open family, the one Action Center lists by default, else the
+    latest closed item; '' when untracked) and TRACKED_COMPANY (that open item's COMPANY, '' when
+    none): Action Center filters by company, so the doorway needs it (review r2)."""
     out = df.copy()
-    latest, open_keys, dropped = _tracked_sets(tracked)
+    latest, open_keys, dropped, done = _tracked_sets(tracked)
     ids: dict[str, str] = {}
+    open_cos: dict[str, str] = {}
     if tracked is not None and not tracked.empty and "ENTITY_KEY_U" in tracked.columns:
         for rec in tracked.to_dict("records"):
             key_u = _text(rec.get("ENTITY_KEY_U")).upper()
             open_id = _text(rec.get("OPEN_ACTION_ID"))
             ids[key_u] = open_id if key_u in open_keys and open_id else _text(rec.get("LATEST_ACTION_ID"))
+            open_cos[key_u] = _text(rec.get("OPEN_ACTION_COMPANY"))
     statuses: list[str] = []
     action_ids: list[str] = []
+    companies: list[str] = []
     keys = out["FINGERPRINT"] if "FINGERPRINT" in out.columns else pd.Series([""] * len(out))
     for fp in keys:
         key = _text(fp).upper()
@@ -282,23 +289,27 @@ def with_track_status(df: pd.DataFrame, tracked: pd.DataFrame | None) -> pd.Data
             statuses.append("Tracked (open)")
         elif key in dropped:
             statuses.append("Dismissed")
-        elif latest.get(key) == "DONE":
+        elif key in done:
             statuses.append("Done")
         else:
             statuses.append("Untracked")
         action_ids.append(ids.get(key, "") if key in latest else "")
+        companies.append(open_cos.get(key, "") if key in open_keys else "")
     out["TRACK_STATUS"] = statuses
     out["TRACKED_ACTION_ID"] = action_ids
+    out["TRACKED_COMPANY"] = companies
     return out
 
 
 def track_all_eligible(df: pd.DataFrame | None, tracked: pd.DataFrame | None) -> pd.DataFrame:
     """The rows one "Track all ACT NOW" click takes: ACT NOW lane AND a specific diagnosis AND
-    not OVERWATCH's own traffic AND not open-tracked AND not dismissed within the cooldown,
-    in PRIORITY_SCORE order, capped at TRACK_ALL_CAP."""
+    not OVERWATCH's own traffic AND not open-tracked AND not dismissed or marked DONE within the
+    cooldown, in PRIORITY_SCORE order, capped at TRACK_ALL_CAP. Done is cooled down too (review r2):
+    the trailing-window mart still carries the pre-fix runs, so a just-fixed family stays ACT NOW
+    and would otherwise be re-queued with the fix the team already applied."""
     if df is None or df.empty or not {"FINGERPRINT", "LANE", "SPECIFIC"}.issubset(df.columns):
         return pd.DataFrame(columns=list(df.columns) if df is not None else [])
-    _latest, open_keys, dropped = _tracked_sets(tracked)
+    _latest, open_keys, dropped, done = _tracked_sets(tracked)
     keys = df["FINGERPRINT"].map(lambda v: _text(v).upper())
     own = own_traffic(df)
     mask = (df["LANE"].astype(str).eq("ACT NOW")
@@ -306,7 +317,8 @@ def track_all_eligible(df: pd.DataFrame | None, tracked: pd.DataFrame | None) ->
             & ~own
             & keys.ne("")
             & ~keys.isin(open_keys)
-            & ~keys.isin(dropped))
+            & ~keys.isin(dropped)
+            & ~keys.isin(done))
     picked = df[mask]
     if "PRIORITY_SCORE" in picked.columns:
         picked = picked.assign(_P=pd.to_numeric(picked["PRIORITY_SCORE"], errors="coerce").fillna(0.0))
@@ -363,7 +375,7 @@ def track_fingerprints_sql(items: list[dict], *, actor_sql: str, bulk: bool,
 
     Keyed on the ENTITY (SOURCE_ENTITY_TYPE + upper-cased SOURCE_ENTITY_KEY) plus open status,
     never the title or company, so a family is tracked once whichever scope clicked it. ``bulk``
-    adds the dismissed-cooldown arm (a family DROPPED within ``cooldown_days`` is skipped); a
+    adds the cooldown arm (a family DROPPED or DONE within ``cooldown_days`` is skipped); a
     single, deliberate Track leaves it out so a human may re-track on purpose. Every value goes
     through sql_literal / sql_number, and the statement holds no ';' outside literals (one
     statement, so it passes the executor allow-list)."""
@@ -389,7 +401,7 @@ def track_fingerprints_sql(items: list[dict], *, actor_sql: str, bulk: bool,
     if not values:
         return ""
     days = max(1, min(int(cooldown_days or TRACK_COOLDOWN_DAYS), 365))
-    cooldown = (f"\n           OR (UPPER(q.STATUS) = 'DROPPED'\n"
+    cooldown = (f"\n           OR (UPPER(q.STATUS) IN ('DROPPED', 'DONE')\n"
                 f"               AND COALESCE(q.COMPLETED_AT, q.UPDATED_AT) >= "
                 f"DATEADD('day', -{days}, CURRENT_TIMESTAMP()))") if bulk else ""
     rows_sql = ",\n    ".join(values)

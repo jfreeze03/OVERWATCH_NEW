@@ -48,9 +48,11 @@ ahead") and moves each tool to the surface where that work happens.
       (FAIL_PCT clamped at 100), PERIOD MONTHLY. Every other diagnosis tracks unpriced. Observed cost is never
       written as a savings figure.
   - **Track all ACT NOW** takes ACT NOW ∧ a specific diagnosis ∧ not own traffic ∧ no open item ∧ not dismissed
-    (DROPPED) in the last 90 days, highest priority first, at most 25 per click. Its statement is shown before
-    the button, and it carries the same 90-day cooldown in SQL. A single Track leaves the cooldown out, so a human
-    can re-track on purpose.
+    (DROPPED) or marked DONE in the last 90 days, highest priority first, at most 25 per click. Done is cooled
+    down because the trailing mart still carries a fixed family's pre-fix runs, so it stays ACT NOW for a while.
+    Its statement is shown before the button, and it carries the same 90-day cooldown in SQL. A single Track
+    leaves the cooldown out, so a human can re-track on purpose. If the Action Center status read fails, every
+    status shows Unknown, the page says so and Track all is off until the read succeeds.
     - Both writes: operator gate, per-target C48 latch, stamp before rerun. The `"queue"` cache salt refreshes
       the tracked read, Action Center, Proof ▸ Pipeline and the acted-on read.
     - Accepted race: two operators clicking in the same second can double-insert, as AI chargeback can today.
@@ -68,8 +70,10 @@ ahead") and moves each tool to the surface where that work happens.
     - the Portfolio map, and the trust caption with its lane rule.
 
     "Open in Action Center" and "Open Entity 360" show only for profiles that can open Control Room;
-    "Open in Action Center" links to the family's newest OPEN item (a closed one is named, not linked). The
-    pane accepts a `fingerprint` navigation context for a future caller; nothing sends it yet.
+    "Open in Action Center" links to the family's newest OPEN item (a closed one is named, not linked, and an
+    open one tracked under another company is named with the Company to switch to, because Action Center
+    lists only the scope's own and 'ALL' items). The pane accepts a `fingerprint` navigation context for a
+    future caller; nothing sends it yet.
 - **Operations ▸ Pipeline SLA ▸ Tonight: two built-in, read-only objectives (replace the SLO editor).**
   - **"Nightly cycle done by 07:00"** (the configured ETL_SLA_TARGET_HHMM) = met/judged over the SLA finish
     forecast's newest 14 nights.
@@ -105,7 +109,8 @@ ahead") and moves each tool to the surface where that work happens.
       whole-ledger SQL aggregates** (`savings_summary_quarter`, `ledger_attribution`). This fixes the
       two-sources-for-one-number defect. Realization, Settling and the other counts, the "estimated, awaiting
       proof" figure and the per-item rows come from the newest ≤5,000 ledger rows, and the page says so when
-      that cap binds. If the summary read fails, the run-rate falls back to the ledger frame (disclosed).
+      that cap binds. If the summary read fails, the run-rate, Added this quarter and ROI fall back to the
+      ledger frame, and the page says so (the cap note then never claims whole-ledger SQL).
   - **Per-item evidence ("What each saving rests on"),** one row per live ledger item (superseded manual twins
     excluded):
     - state, verified $/mo, lever, target, change (old → new), change verdict, days measured after;
@@ -135,8 +140,15 @@ ahead") and moves each tool to the surface where that work happens.
     - **Addressable $/mo** from the Cost ▸ Optimization & Savings idle-timer rollup: the same helpers
       (`savings_rollup.idle_opportunities` / `resize_opportunities`) and the same mart read, so the cache is
       shared. Right-sizing is opt-in.
-    - **Queued work $/mo:** open actions normalised to monthly by `decision.monthly_equivalent`. ANNUAL ÷ 12;
-      one-time and unspecified estimates are counted and reported but kept out of the run-rate.
+    - **Queued work $/mo:** every open action for the Company (not windowed), normalised to monthly. The
+      headline and its counts are uncapped SQL window totals over the open queue
+      (`action_center(..., with_totals=True)`: OPEN_TOTAL, QUEUED_MONTHLY_TOTAL, UNPRICED_TOTAL,
+      ONE_TIME_TOTAL, NO_PERIOD_TOTAL). MONTHLY as-is, ANNUAL ÷ 12; one-time and unspecified estimates are
+      counted and reported but kept out of the run-rate. `decision.monthly_equivalent` shapes only the
+      ≤500 rows the projection and table use ("· top N projected" when the queue is longer).
+    - Addressable $/mo divides by the window's real day span under Current month / Current year (the W12
+      rule), as Operations ▸ Optimize does; Cost ▸ Optimization & Savings' idle, sizing and remediation
+      run-rates get the same fix, so the two pages show the same figure.
     - Addressable ∪ queued is de-duplicated by entity (`decision.pipeline_frame`).
     - Projection sliders default to MEASURED values: adoption = the acted-on rate; realization = the realization
       rate, else the carried realization; the 0.6 confidence floor is policy. Each slider names its source, and

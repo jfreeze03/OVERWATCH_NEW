@@ -375,6 +375,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     # read a Last-month discriminator so a bounded read never collides with a
     # trailing read of the same day-count.
     _lm = "_lm" if bounds is not None else ""
+    # W12 (review r2): Current month / Current year pass a day OFFSET (Sep 2 MTD = 1); every idle /
+    # sizing run-rate divides by the bounds' day SPAN, as Operations ▸ Optimize and Proof ▸ Pipeline do.
+    _span = (bounds[1] - bounds[0]).days if bounds is not None else days
     # Wave 3: the idle-credit-waste HEADLINE — the single account/company "$ burned in
     # zero-query warehouse-hours" number, above the sub-tabs (per-WH detail is in Idle &
     # sizing below; the identical SQL shares one cached scan). GROSS idle, never "savings".
@@ -385,7 +388,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, refreshed every 4h; today up to 4h behind)",
         live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")
     if _idle_head.ok and not _idle_head.empty:
-        _iw_days = served_days(_idle_head, days)
+        _iw_days = served_days(_idle_head, _span)
         _iw = idle_waste_summary(_idle_head.df, rate, _iw_days)
         # WLA-1: the idle read is bounded to the prior calendar month under "Last month" scope,
         # so label "last month" then; served-days honesty applies on the trailing branch.
@@ -441,7 +444,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             )
             # C1: the mart serves up to 365d but the live fallback clamps to 90d —
             # divide by what was served, or the x30 projection reads ~4x low.
-            idle_days = served_days(idle_res, days)
+            idle_days = served_days(idle_res, _span)
             advisor = idle_advisor(_idle_df, rate, idle_days)
             _idle_profiles_tx = advisor
             flagged = advisor[advisor["FLAGGED"]]
@@ -563,7 +566,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                    "No warehouse activity to profile in this window."):
             # C1: same divisor rule — every per-day rate and the x30 monthly figure
             # inside size_recommendations divides by the window actually served.
-            sizing_days = served_days(prof_res, days)
+            sizing_days = served_days(prof_res, _span)
             _sizing_whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="jump_wh",
                               tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
             # Round-3 hunt + r34 + Next-Fifty #16: ONE shared SHOW-WAREHOUSES mapping (auto-suspend +
@@ -1726,7 +1729,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             row = idf[idf["WAREHOUSE_NAME"].astype(str) == wh_pick]
             idle_credits = float(pd.to_numeric(row["IDLE_CREDITS"], errors="coerce").fillna(0).iloc[0]) if not row.empty else 0.0
             # C1: divide by the window actually served, not the requested one.
-            remed_days = served_days(idle_res, days)
+            remed_days = served_days(idle_res, _span)
             # Book the advisor's settings-verified action value, never gross idle.
             # A missing SHOW WAREHOUSES row intentionally produces no executable fix.
             _rec_all = idle_advisor(idf, rate, remed_days)

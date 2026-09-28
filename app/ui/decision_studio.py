@@ -7,7 +7,7 @@ module paths and the ``decision_section`` key are kept this release):
                realization vs OVERWATCH's own estimate), settling items, acceptance, alert precision,
                evidence coverage, and a per-item evidence table (what each saving rests on, who gets
                credit). Every headline total is a SQL aggregate; pandas only shapes per-item rows.
-  * Pipeline — addressable $/mo (the Cost ▸ Optimize idle rollup, mart-only) plus the queued
+  * Pipeline — addressable $/mo (the Cost ▸ Optimization & Savings idle rollup, mart-only) plus the queued
                ACTION_QUEUE work normalised to a monthly run-rate, and a projection whose sliders
                default to MEASURED acceptance / realization (a fragment: slider moves cost 0 reads).
 
@@ -527,7 +527,13 @@ def _proof_tab(rate: float) -> None:
          "help": "Share of the recommendation board's three signals (cache, latency, fail-rate) "
                  "actually present per family — how much of the advice rests on complete evidence."},
     ])
-    if ledger.truncated:
+    if not sig.get("summary_ok", True):
+        # review r2: the fallback (see _proof_signals) is disclosed, and the truncation note below
+        # never claims whole-ledger SQL when that read failed
+        st.caption("The whole-ledger savings summary could not be read, so the run-rate, Added this "
+                   "quarter and ROI figures come from the newest ledger rows read here"
+                   + (" (the ledger holds more)." if ledger.truncated else "."))
+    elif ledger.truncated:
         st.caption("The ledger holds more items than the newest read here: the run-rate, quarter and "
                    "attribution totals are whole-ledger SQL aggregates, while the realization, settling "
                    "counts and the per-item evidence below cover the newest items only.")
@@ -560,6 +566,12 @@ def _proof_tab(rate: float) -> None:
                if _real is not None else "")
             + (f", closing the loop in **{_avgd:g} days** on average." if _avgd is not None else ".")
             + f" **{format_usd(totals['estimated_usd'])}** more is estimated, awaiting proof."))
+    elif int(sig.get("verified_active_items") or 0) > 0:
+        # review r2: active items that total $0 (a hand-verified "saved nothing") are not "none verified"
+        st.caption(md_dollars(
+            f"{int(sig['verified_active_items']):,} item(s) verified in the last {SAVINGS_ACTIVE_MONTHS} "
+            f"months, totalling {format_usd(verified_active)}/mo. "
+            f"{format_usd(totals['estimated_usd'])} more is estimated, awaiting proof."))
     elif int(totals["verified_count"]) > 0:
         # verified items exist, none inside the active window (or the summary read failed): never the
         # "nothing verified yet" empty state beside a populated evidence table (review r1)
@@ -781,7 +793,7 @@ def _pipeline_projection(frame: pd.DataFrame, defaults: dict) -> None:
 def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None = None) -> None:
     """Proof ▸ Pipeline (v4.597; replaces Scenarios): the priced work AHEAD. Addressable $/mo scopes to
     Company and Window; queued work is every open item for the Company (not windowed). Addressable $/mo
-    is the Cost ▸ Optimize idle-timer rollup built from the SAME mart read
+    is the Cost ▸ Optimization & Savings idle-timer rollup built from the SAME mart read
     (SQL + tier, so the cache is shared) — mart-only, never the live fallback; right-sizing joins it only
     behind a toggle, like Optimize. Queued work is the open ACTION_QUEUE normalised to $/mo by PERIOD.
     The two are unioned and de-duplicated by entity, then a fragment projects them with measured
@@ -791,7 +803,7 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
     # A memo hit: the page-open verdict already computed the proof signals this render (zero reads).
     sig = _proof_signals(rate)
 
-    # ---- Addressable $/mo: the Cost ▸ Optimize idle rollup (mart only) ------------------------
+    # ---- Addressable $/mo: the Cost ▸ Optimization & Savings idle rollup (mart only) ----------
     idle = run(mart27_sql.eff_idle_analysis(days, company, bounds=bounds), page=_PAGE,
                key=f"proof_idle_{company}_{days}{_lm}", tier="hourly",
                source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, refreshed every 4h; today up to 4h behind)")
@@ -799,7 +811,8 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
 
     def _warehouse_settings() -> pd.DataFrame:
         # SHOW WAREHOUSES carries the current AUTO_SUSPEND / size — eligibility, not decoration. Shared
-        # (key + tier) with Cost ▸ Optimize, Operations and the sidebar jump box; read at most once here.
+        # (key + tier) with Cost ▸ Optimization & Savings, Operations and the sidebar jump box; read
+        # at most once here.
         if not _whs_cache:
             _whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="jump_wh",
                        tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
@@ -807,13 +820,16 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
         return _whs_cache[0]
 
     opps = []
-    _idle_days = days
+    # W12 (review r2): Current month / Current year pass a day OFFSET (Sep 2 MTD = 1); divide by the
+    # bounds' day SPAN, as Operations ▸ Optimize and Cost ▸ Optimization & Savings do.
+    _span = (bounds[1] - bounds[0]).days if bounds is not None else days
+    _idle_days = _span
     if idle.usable():
-        _idle_days = served_days(idle, days)
+        _idle_days = served_days(idle, _span)
         opps.extend(idle_opportunities(
             idle_advisor(with_auto_suspend_settings(idle.df, _warehouse_settings()), rate, _idle_days)))
     _sizing = st.toggle("Include right-sizing (mart profile)", key="proof_pipe_sizing",
-                        help="Adds the Cost ▸ Optimize right-sizing opportunities from the efficiency "
+                        help="Adds the Cost ▸ Optimization & Savings right-sizing opportunities from the efficiency "
                              "mart (one extra mart read). Off, the addressable figure is idle-timer only — "
                              "the same default Cost ▸ Optimization & Savings shows.")
     _sized_ok = False
@@ -824,7 +840,7 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
         if prof.usable():
             _sized_ok = True
             sized = size_recommendations(with_warehouse_settings(prof.df, _warehouse_settings()), rate,
-                                         served_days(prof, days))
+                                         served_days(prof, _span))
             opps.extend(resize_opportunities(sized))
     roll = rollup_savings(opps)
 
@@ -967,7 +983,8 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
     if "CONFIDENCE" in display.columns:       # F60: one confidence encoding — a bar
         _pipe_cfg["CONFIDENCE"] = confidence_progress_column(
             "Confidence",
-            AUTHORED_CONFIDENCE_HELP + " Addressable rows carry the Cost ▸ Optimize advisor's evidence "
+            AUTHORED_CONFIDENCE_HELP + " Addressable rows carry the Cost ▸ Optimization & Savings advisor's "
+            "evidence "
             "weight instead (MEDIUM 0.6, LOW 0.3) — an evidence score, not an authored belief.")
     _sort = "severity band (watched first), then queue order; addressable savings after the queued work"
     if can_open("Control Room"):
@@ -986,10 +1003,12 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
     else:
         # EXECUTIVE has no Control Room: the table stays, the dead drill doesn't.
         styled_table(display, height=320, sort_label=_sort, column_config=_pipe_cfg)
-    if can_open("Operations") and st.button("Track more query work → Operations ▸ Optimize",
+    # a neutral label (review r2): the page is read-only, and a READER lands where Track is not offered
+    if can_open("Operations") and st.button("Open the query fix queue → Operations ▸ Optimize",
                                             key="proof_link_optimize", type="tertiary"):
         request_navigation("Operations", "Optimize")
     if idle.ok:
-        result_caption(idle, note="addressable: idle-timer advisor over the mart (Cost ▸ Optimize's own)")
+        result_caption(idle, note="addressable: idle-timer advisor over the mart (Cost ▸ Optimization & "
+                                  "Savings' own)")
     if actions.ok:
         result_caption(actions)

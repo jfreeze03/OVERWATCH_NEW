@@ -467,20 +467,25 @@ def tracked_actions(entity_type: str = "QUERY_FINGERPRINT", lookback_days: int =
     """Which entities of ``entity_type`` already have Action Center work: every entity with an
     OPEN/IN_PROGRESS item, or one decided (DONE/DROPPED) within ``lookback_days``. One row per
     upper-cased entity key: the latest item's id/status/owner, plus OPEN_N so an open item is never
-    hidden behind a newer closed one, and DROPPED_N (dismissals inside the lookback, the same test
-    the bulk Track insert's cooldown applies). Account-wide by design (no company): tracking is per entity."""
+    hidden behind a newer closed one, and DROPPED_N / DONE_N (dismissals / completions inside the
+    lookback, the same test the bulk Track insert's cooldown applies). Account-wide by design (no
+    company): tracking is per entity, so OPEN_ACTION_COMPANY names the open item's company for a
+    doorway into the company-filtered Action Center."""
     kind = _entity_type(entity_type) or "QUERY_FINGERPRINT"
     lookback = max(1, min(int(lookback_days or 90), 365))
     return f"""
 SELECT UPPER(q.SOURCE_ENTITY_KEY) AS ENTITY_KEY_U,
        MAX_BY(q.ACTION_ID, q.CREATED_AT) AS LATEST_ACTION_ID,
        -- the newest OPEN / IN_PROGRESS item (MAX_BY skips NULL ordering values): the one Action Center
-       -- shows by default, so a link to it always lands selected (review r1)
+       -- shows by default (review r1), and its COMPANY -- Action Center filters by company, so a link
+       -- lands selected only when the scope matches it (review r2)
        MAX_BY(q.ACTION_ID, IFF(UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS'), q.CREATED_AT, NULL)) AS OPEN_ACTION_ID,
+       MAX_BY(q.COMPANY, IFF(UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS'), q.CREATED_AT, NULL)) AS OPEN_ACTION_COMPANY,
        MAX_BY(q.STATUS, q.CREATED_AT) AS ACTION_STATUS,
        MAX_BY(q.OWNER, q.CREATED_AT) AS ACTION_OWNER,
        COUNT_IF(UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS')) AS OPEN_N,
        COUNT_IF(UPPER(q.STATUS) = 'DROPPED') AS DROPPED_N,
+       COUNT_IF(UPPER(q.STATUS) = 'DONE') AS DONE_N,
        MAX(COALESCE(q.COMPLETED_AT, q.UPDATED_AT)) AS LAST_DECIDED
 FROM {core_object('ACTION_QUEUE')} q
 WHERE UPPER(q.SOURCE_ENTITY_TYPE) = {sql_literal(kind, 40)}

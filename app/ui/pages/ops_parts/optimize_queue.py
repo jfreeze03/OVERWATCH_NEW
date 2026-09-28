@@ -64,6 +64,7 @@ _SOURCE_LABEL = {
     "none": "nothing specific yet",
 }
 _OPEN_STATUS = "Tracked (open)"
+_UNKNOWN_STATUS = "Unknown"      # the tracked-actions read failed (review r2)
 
 
 def _open_entity(fingerprint: str) -> None:
@@ -133,6 +134,13 @@ def render_optimize(company: str, days: int, rate: float, *, bounds: tuple | Non
     portfolio = diagnose_workloads(portfolio, live_scored=_live_scored, live_breakdowns=_live_bd)
     _tracked_df = _tr.df if _tr.usable() else None
     portfolio = with_track_status(portfolio, _tracked_df)
+    # review r2: a FAILED tracked read (ok but empty = nothing tracked yet) must not claim every family
+    # is Untracked -- mark the status unknown and hold Track all until the read succeeds
+    _track_ok = bool(_tr.ok)
+    if not _track_ok:
+        portfolio["TRACK_STATUS"] = _UNKNOWN_STATUS
+        portfolio["TRACKED_ACTION_ID"] = ""
+        portfolio["TRACKED_COMPANY"] = ""
     # DS #1 carried over: a watched family is flagged and pinned to the top WITHIN its lane (an
     # ACT NOW item is never buried under a watched PLAN item). No pin when the read is unavailable.
     _wl = _wl_res.df if (_wl_res is not None and _wl_res.usable()) else None
@@ -145,7 +153,8 @@ def render_optimize(company: str, days: int, rate: float, *, bounds: tuple | Non
                      .drop(columns="_LR").reset_index(drop=True))
 
     specific = portfolio["SPECIFIC"].astype(bool)
-    untracked = ~portfolio["TRACK_STATUS"].isin([_OPEN_STATUS, "Dismissed"])
+    # Done counts as handled too (review r2): the trailing mart still carries the pre-fix runs
+    untracked = ~portfolio["TRACK_STATUS"].isin([_OPEN_STATUS, "Dismissed", "Done"])
     act_now = portfolio[portfolio["LANE"].eq("ACT NOW") & specific & untracked]
     failure_risk = portfolio[portfolio["FAIL_PCT"].ge(2)]
     # Count the VALIDATE LANE itself (prioritize_workloads also forces blind, no-behaviour families
@@ -170,6 +179,9 @@ def render_optimize(company: str, days: int, rate: float, *, bounds: tuple | Non
                        f"recurring queries scored; {_n_live:,} of the families below are diagnosed "
                        "from it.")
             result_caption(_live_res, note="live profile: diagnoses only, the dollars stay the marts'")
+    if not _track_ok:
+        empty_state("unavailable", "Action Center status could not be read — tracked, dismissed and done "
+                    "state is unknown, so Track all is off until it reads.", detail=_tr.error)
     read_model_caption("workload_portfolio")
     _scope_total = (int(safe_float(result.df["SCOPE_FAMILIES_TOTAL"].iloc[0]))
                     if "SCOPE_FAMILIES_TOTAL" in result.df.columns else len(portfolio))
@@ -185,8 +197,10 @@ def render_optimize(company: str, days: int, rate: float, *, bounds: tuple | Non
         exceptions.append({
             "label": "Act now",
             "value": f"{len(act_now):,}",
-            "detail": f"{format_usd(act_now['IMPACT_USD_30D'].sum())} observed 30-day cost with a "
-                      "specific diagnosis, not yet tracked in Action Center or dismissed.",
+            "detail": (f"{format_usd(act_now['IMPACT_USD_30D'].sum())} observed 30-day cost with a "
+                       "specific diagnosis"
+                       + (", with no open Action Center item and not recently dismissed or done."
+                          if _track_ok else "; Action Center status unknown (the read failed).")),
             "severity": "warn",
         })
     if not failure_risk.empty:
@@ -224,7 +238,7 @@ def render_optimize(company: str, days: int, rate: float, *, bounds: tuple | Non
         {"label": "Specific diagnosis", "value": f"{_n_specific:,} of {len(portfolio):,}",
          "help": "Listed families with a named diagnosis and first fix (live profile, daily-mart "
                  "advisor, or a specific portfolio heuristic). The rest need the live profile."},
-        {"label": "Tracked (open)", "value": f"{_n_open:,}",
+        {"label": "Tracked (open)", "value": f"{_n_open:,}" if _track_ok else "—",
          "help": "Listed families with an OPEN or IN_PROGRESS Action Center item."},
         {"label": "Evidence coverage",
          "value": (f"{portfolio['EVIDENCE_COVERAGE'].mean() * 100:,.0f}%" if len(portfolio) else "—"),
@@ -239,7 +253,7 @@ def render_optimize(company: str, days: int, rate: float, *, bounds: tuple | Non
     ])
 
     # Track all ACT NOW: one capped, idempotent statement, its SQL shown before the button.
-    eligible = track_all_eligible(portfolio, _tracked_df)
+    eligible = track_all_eligible(portfolio, _tracked_df) if _track_ok else portfolio.iloc[0:0]
     _n_elig = len(eligible)
     _bulk_sql = (track_fingerprints_sql(track_items(eligible, company), actor_sql=identity_sql(),
                                         bulk=True) if _n_elig else "")
@@ -258,16 +272,17 @@ def render_optimize(company: str, days: int, rate: float, *, bounds: tuple | Non
                         "re-queued.") if ok else msg)
             if ok:
                 st.rerun()
+        # operator-only mechanics (review r2: a read-only viewer got copy for actions it cannot take)
+        st.caption(
+            f"Track all takes ACT NOW families with a specific diagnosis that have no open Action Center "
+            f"item and were not dismissed or marked done in the last {TRACK_COOLDOWN_DAYS} days, highest "
+            f"priority first, at most {TRACK_ALL_CAP} per click"
+            + (f"; {_own_act} OVERWATCH own-traffic famil{'y' if _own_act == 1 else 'ies'} skipped"
+               if _own_act else "")
+            + ". Items land UNASSIGNED at MEDIUM severity (never HIGH), unpriced unless the diagnosis is "
+              "Stabilize failures.")
     else:
         st.caption("Read-only — an operator can track these into Action Center.")
-    st.caption(
-        f"Track all takes ACT NOW families with a specific diagnosis that have no open Action Center "
-        f"item and were not dismissed in the last {TRACK_COOLDOWN_DAYS} days, highest priority first, "
-        f"at most {TRACK_ALL_CAP} per click"
-        + (f"; {_own_act} OVERWATCH own-traffic famil{'y' if _own_act == 1 else 'ies'} skipped"
-           if _own_act else "")
-        + ". Items land UNASSIGNED at MEDIUM severity (never HIGH), unpriced unless the diagnosis is "
-          "Stabilize failures.")
 
     _ctx_fp = str(navigation_context().get("fingerprint") or "").strip()
     _preselect = _ctx_fp if _ctx_fp in set(portfolio["FINGERPRINT"].astype(str)) else ""
@@ -344,15 +359,23 @@ def _render_detail(row, *, company: str, is_operator: bool, live_on: bool) -> No
     st.code(preview if isinstance(preview, str) and preview else "—", language="sql")
     status = str(row.get("TRACK_STATUS") or "Untracked")
     action_id = str(row.get("TRACKED_ACTION_ID") or "")
-    st.caption(f"Action Center: {status}.")
+    st.caption("Action Center: status unknown (the read failed)." if status == _UNKNOWN_STATUS
+               else f"Action Center: {status}.")
     # Cross-page doorways only for a viewer whose profile offers Control Room (the pane already
     # sits in master_detail's column, so the two links stack rather than nest another column row).
     _cr_ok = can_open("Control Room")
+    # Action Center lists a company's own items plus 'ALL' ones: an open item tracked under another
+    # company is not in this scope's list, so name it instead of linking to nothing (review r2)
+    _item_co = str(row.get("TRACKED_COMPANY") or "").strip()
+    _scope = str(company or "ALL").strip().upper()
+    _elsewhere = bool(_item_co) and _item_co.upper() != "ALL" and _scope not in ("ALL", _item_co.upper())
     # only an OPEN item is listed by Action Center's default view, so only it gets the doorway
     # (review r1: a closed id landed with nothing selected)
-    if (action_id and status == _OPEN_STATUS and _cr_ok
+    if (action_id and status == _OPEN_STATUS and _cr_ok and not _elsewhere
             and st.button("Open in Action Center →", key=f"opt_open_ac:{fp[:16]}", type="tertiary")):
         request_navigation("Control Room", "Action Center", context={"action_id": action_id})
+    elif action_id and status == _OPEN_STATUS and _elsewhere and _cr_ok:
+        st.caption(f"Tracked under {_item_co} — set Company to {_item_co} or All to open it in Action Center.")
     elif action_id and status != _OPEN_STATUS:
         st.caption("The item is closed — Action Center lists it with *Include completed work* on.")
     if fp and _cr_ok and st.button("Open Entity 360 →", key=f"opt_open_360:{fp[:16]}",

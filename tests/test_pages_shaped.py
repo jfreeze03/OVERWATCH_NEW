@@ -273,6 +273,36 @@ def test_operations_optimize_renders_shaped():
 
 
 @pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
+def test_operations_optimize_failed_tracked_read_is_unknown(monkeypatch):
+    """Review r2: when the Action Center status read FAILS, the queue says so, shows every family as
+    Unknown (not Untracked) and holds Track all at 0 -- it never states tracking facts it could not read."""
+    from app.ui.pages.ops_parts import optimize_queue
+
+    def _batch_tracked_fails(specs, **kwargs):
+        out = _shaped_batch(specs, **kwargs)
+        out["ops_opt_tracked"] = QueryResult(df=pd.DataFrame(), ok=False, error="stub timeout",
+                                             source="stub")
+        return out
+
+    monkeypatch.setattr(optimize_queue, "run_batch_mixed", _batch_tracked_fails)
+    at = AppTest.from_function(_entry, default_timeout=30)
+    at.run()
+    _nav_to(at, "Operations")
+    at.session_state["ops_section"] = "Optimize"
+    at.session_state["_ow_current_role"] = "SNOW_SYSADMINS"
+    at.session_state["_ow_md_sel_ops_optimize"] = "1.0"
+    at.run()
+    assert not at.exception, f"operations optimize (tracked read failed): {at.exception}"
+    blob = " ".join(str(m.value) for m in list(at.markdown) + list(at.caption) + list(at.warning)
+                    + list(at.info) + list(at.error))
+    assert "Action Center status could not be read" in blob
+    assert "Action Center: status unknown (the read failed)." in blob
+    assert "Action Center: Untracked." not in blob
+    labels = [str(b.label) for b in at.button]
+    assert "Track all ACT NOW (0)" in labels, labels
+
+
+@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_etl_configured_morning_surfaces_render(monkeypatch):
     """Next-Fifty #1: with the default (empty) ETL_CONTROL_STATUS_FQN the whole-night glance, the
     Brief tile's populated branches and the shared attention verdict stay dormant. Configure it and

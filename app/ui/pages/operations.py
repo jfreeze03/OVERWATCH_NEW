@@ -2339,7 +2339,7 @@ def _builtin_objectives_panel(fc: dict, company: str = "ALL", days: int = 0, dat
                     "help": "Scheduled tasks on time against their OWN cadence (median gap, judged "
                             "against their longest normal gap). Late ~ one cadence overdue, stale ~ two "
                             "(silently stopped). Honors Company / Database / Schema; the cadence is read "
-                            f"over the last {max(days, 14)} days."}
+                            f"over the last {min(max(days, 14), 90)} days."}
     else:
         cad_tile = {"label": "Tasks on cadence", "value": "—",
                     "delta": ("unavailable" if (_fres is not None and not _fres.ok)
@@ -2353,7 +2353,7 @@ def _builtin_objectives_panel(fc: dict, company: str = "ALL", days: int = 0, dat
         "The custom SLO editor was retired (v4.597); any ACTIVE SLO_OBJECTIVES rows still alert and "
         "badge the Entity 360 watchlist."
         + (" Tasks on cadence is judged over the 200 most-silent tasks only; a recently stopped "
-           "fast-cadence task can fall outside them — see Tasks ▸ SLA for the full list."
+           "fast-cadence task can fall outside them (Tasks ▸ SLA reads the same 200)."
            if cad.get("capped") else ""))
 
 
@@ -4197,7 +4197,8 @@ def render() -> None:
             "note": "SLA horizons are account-wide policy; File-load failures narrows to Company; "
                     "Reference-data-gap narrows to Database (pinned checks always show); Volume "
                     "drops and Dynamic-table refresh health honor Company/Database/Schema, as does "
-                    "the Tasks-on-cadence objective, which reads its cadence over max(Window, 14) days. "
+                    "the Tasks-on-cadence objective, which reads its cadence over max(Window, 14) days, "
+                    "capped at 90. "
                     "The SLA finish forecast is a fixed 14-night baseline. (The DQ row-volume panel is "
                     "still account-wide.)",
         },

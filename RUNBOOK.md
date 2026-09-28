@@ -305,7 +305,9 @@ Admin → Settings, never in code.
   - They are unpriced unless the diagnosis is "Stabilize failures" (the
     failed-run share of observed cost, MONTHLY).
   - **Track all ACT NOW** takes up to 25 per click and skips OVERWATCH's own
-    traffic, families already open and families dismissed in the last 90 days.
+    traffic, families already open and families dismissed or marked done in
+    the last 90 days. If the Action Center status read fails, statuses show
+    Unknown and Track all stays off until it reads.
 
   No live read on first paint. The optional live-profile toggle reuses the
   Queries scan (shared cache).

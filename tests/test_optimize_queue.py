@@ -194,11 +194,16 @@ def test_optimize_queue_keeps_the_portfolio_pins_and_never_names_the_queue():
 def test_tracked_actions_is_one_grouped_account_wide_read():
     sql = workbench_sql.tracked_actions()
     parsed = sqlglot.parse_one(sql, read="snowflake")
-    assert parsed.named_selects == ["ENTITY_KEY_U", "LATEST_ACTION_ID", "OPEN_ACTION_ID", "ACTION_STATUS",
-                                    "ACTION_OWNER", "OPEN_N", "DROPPED_N", "LAST_DECIDED"]
+    assert parsed.named_selects == ["ENTITY_KEY_U", "LATEST_ACTION_ID", "OPEN_ACTION_ID", "OPEN_ACTION_COMPANY",
+                                    "ACTION_STATUS", "ACTION_OWNER", "OPEN_N", "DROPPED_N", "DONE_N",
+                                    "LAST_DECIDED"]
     # the newest OPEN item: MAX_BY over an open-only ordering value (NULLs skipped), never the newest overall
     assert ("MAX_BY(q.ACTION_ID, IFF(UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS'), q.CREATED_AT, NULL)) "
             "AS OPEN_ACTION_ID") in sql
+    # ... and that SAME item's company (review r2: Action Center filters by company)
+    assert ("MAX_BY(q.COMPANY, IFF(UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS'), q.CREATED_AT, NULL)) "
+            "AS OPEN_ACTION_COMPANY") in sql
+    assert "COUNT_IF(UPPER(q.STATUS) = 'DONE') AS DONE_N" in sql
     assert "DBA_MAINT_DB.OVERWATCH.ACTION_QUEUE q" in sql
     assert "UPPER(q.SOURCE_ENTITY_TYPE) = 'QUERY_FINGERPRINT'" in sql
     assert "GROUP BY UPPER(q.SOURCE_ENTITY_KEY)" in sql
@@ -432,11 +437,12 @@ def test_track_sql_is_one_allowed_parseable_entity_keyed_statement():
     assert track_fingerprints_sql([], actor_sql="CURRENT_USER()", bulk=True) == ""
 
 
-def test_only_bulk_track_carries_the_dismissed_cooldown():
+def test_only_bulk_track_carries_the_dismissed_and_done_cooldown():
     bulk, single = _track_sql(True), _track_sql(False)
-    assert "UPPER(q.STATUS) = 'DROPPED'" in bulk
+    # review r2: a family marked DONE is cooled down too -- the trailing mart still carries its pre-fix runs
+    assert "UPPER(q.STATUS) IN ('DROPPED', 'DONE')" in bulk
     assert "DATEADD('day', -90, CURRENT_TIMESTAMP())" in bulk
-    assert "DROPPED" not in single                                       # a human may re-track
+    assert "DROPPED" not in single and "'DONE'" not in single            # a human may re-track
 
 
 def test_track_sql_never_writes_high_severity_or_observed_cost():
@@ -503,7 +509,9 @@ def _queue(n: int = 40) -> pd.DataFrame:
 def _tracked(rows: list[tuple]) -> pd.DataFrame:
     return pd.DataFrame([{"ENTITY_KEY_U": k, "LATEST_ACTION_ID": f"id-{k}", "ACTION_STATUS": s,
                           "OPEN_ACTION_ID": f"open-{k}" if o else None,
+                          "OPEN_ACTION_COMPANY": "ALFA" if o else None,
                           "ACTION_OWNER": "UNASSIGNED", "OPEN_N": o, "DROPPED_N": d,
+                          "DONE_N": 1 if s == "DONE" else 0,
                           "LAST_DECIDED": None} for k, s, o, d in rows])
 
 
@@ -514,16 +522,20 @@ def test_track_all_takes_specific_untracked_act_now_by_priority_capped_at_25():
     q.loc[q["FINGERPRINT"] == "FP37", "LANE"] = "PLAN"
     tracked = _tracked([("FP36", "OPEN", 1, 0),                      # already open
                         ("fp35", "DROPPED", 0, 1),                   # dismissed in 90d (case-insens.)
-                        ("FP34", "DONE", 0, 0),                      # done: re-trackable
+                        ("FP34", "DONE", 0, 0),                      # done in 90d: cooled down (r2)
                         ("FP33", "DONE", 1, 0),                      # newer DONE hides an open one
                         ("FP32", "DONE", 0, 1)])                     # newer DONE, dismissed earlier
     picked = track_all_eligible(q, tracked)
     keys = picked["FINGERPRINT"].tolist()
     assert len(keys) == TRACK_ALL_CAP == 25
-    assert keys[0] == "FP34" and keys == sorted(keys, reverse=True)   # priority order
-    assert keys[-1] == "FP08"                                         # the cap cuts the lowest
-    for excluded in ("FP39", "FP38", "FP37", "FP36", "FP35", "FP33", "FP32"):
+    assert keys[0] == "FP31" and keys == sorted(keys, reverse=True)   # priority order
+    assert keys[-1] == "FP07"                                         # the cap cuts the lowest
+    for excluded in ("FP39", "FP38", "FP37", "FP36", "FP35", "FP34", "FP33", "FP32"):
         assert excluded not in keys
+    # DONE_N alone (the latest item is not the DONE one) also cools the family down
+    later = _tracked([("FP31", "IN_PROGRESS", 0, 0)])
+    later["DONE_N"] = 1
+    assert "FP31" not in track_all_eligible(q, later)["FINGERPRINT"].tolist()
     small = track_all_eligible(_queue(3), None)
     assert small["FINGERPRINT"].tolist() == ["FP02", "FP01", "FP00"]
     assert track_all_eligible(q.iloc[0:0], tracked).empty
@@ -539,7 +551,10 @@ def test_track_status_reads_open_dismissed_done_and_untracked():
     # an open family links to its newest OPEN item (FP03: a newer DONE must not hide it); a closed family
     # keeps its latest (closed) id for the caption (review r1)
     assert out["TRACKED_ACTION_ID"].tolist() == ["open-FP00", "id-FP01", "id-FP02", "open-FP03", ""]
+    # the open item's company rides along for the doorway; closed / untracked families carry '' (review r2)
+    assert out["TRACKED_COMPANY"].tolist() == ["ALFA", "", "", "ALFA", ""]
     assert with_track_status(q, None)["TRACK_STATUS"].eq("Untracked").all()
+    assert with_track_status(q, None)["TRACKED_COMPANY"].eq("").all()
 
 
 # --------------------------------------------------------------------------------------------
@@ -651,5 +666,33 @@ def test_none_first_fix_only_claims_the_live_profile_for_families_it_saw():
 
 def test_open_in_action_center_is_offered_only_for_an_open_item():
     src = (_ROOT / "app" / "ui" / "pages" / "ops_parts" / "optimize_queue.py").read_text(encoding="utf-8")
-    assert "if (action_id and status == _OPEN_STATUS and _cr_ok" in src
+    assert "if (action_id and status == _OPEN_STATUS and _cr_ok and not _elsewhere" in src
     assert "Include completed work" in src
+    # review r2: an open item tracked under ANOTHER company is not in this scope's Action Center list
+    # (it filters COMPANY IN (scope, 'ALL')), so it is named, not linked
+    assert ('_elsewhere = bool(_item_co) and _item_co.upper() != "ALL" and '
+            '_scope not in ("ALL", _item_co.upper())') in src
+    assert 'st.caption(f"Tracked under {_item_co} — set Company to {_item_co} or All' in src
+
+
+def test_a_failed_tracked_read_is_unknown_not_untracked():
+    src = _src(_OPT)
+    # review r2: ok-but-empty is "nothing tracked yet"; only a FAILED read goes Unknown
+    assert "_track_ok = bool(_tr.ok)" in src
+    assert 'portfolio["TRACK_STATUS"] = _UNKNOWN_STATUS' in src and '_UNKNOWN_STATUS = "Unknown"' in src
+    assert 'empty_state("unavailable", "Action Center status could not be read' in src
+    assert "detail=_tr.error)" in src
+    # Track all holds (0 eligible -> the button is disabled) and the Tracked KPI shows no number
+    assert "track_all_eligible(portfolio, _tracked_df) if _track_ok else portfolio.iloc[0:0]" in src
+    assert '"value": f"{_n_open:,}" if _track_ok else "—"' in src
+    # Done is handled work: never counted in the Act-now chip
+    assert 'isin([_OPEN_STATUS, "Dismissed", "Done"])' in src
+    assert "not yet tracked" not in src
+
+
+def test_track_all_mechanics_are_shown_to_operators_only():
+    src = _src(_OPT)
+    block = src.split("    if is_operator:\n        if _bulk_sql:", 1)[1].split(
+        'st.caption("Read-only — an operator can track these into Action Center.")', 1)[0]
+    assert "Track all takes ACT NOW families" in block and "dismissed or marked done in the last" in block
+    assert src.count("Track all takes ACT NOW families") == 1
