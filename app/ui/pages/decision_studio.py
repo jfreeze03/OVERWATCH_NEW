@@ -1,9 +1,14 @@
-"""Decision Studio page (rec8): the planning workbench, promoted from a Control
-Room section to its own Analyze page so the daily-triage console and the weekly
-planning studio no longer share a roof. The section BODIES live in
-app/ui/decision_studio.py; this module is the page shell (header, primary section
-bar, scope contract) and dispatches into them. Cross-jumps into Entity 360 stay
-pointed at Control Room, where Entity 360 remains."""
+"""Proof page (v4.597, Option C — the former Decision Studio): does OVERWATCH pay for itself, what
+each verified saving rests on, and the priced pipeline ahead.
+
+Two READ-ONLY sections — Proof (the merged Scorecard + ROI with per-item evidence) and Pipeline
+(addressable $ + queued work + a measured-default projection). The section BODIES live in
+app/ui/decision_studio.py; this module is the page shell (header, page-open verdict, primary section
+bar, scope contract) and dispatches into them. Both module paths and the ``decision_section`` key are
+kept this release. The rest of Decision Studio moved to its natural homes (Portfolio → Operations ▸
+Optimize, SLOs → Operations ▸ Pipeline SLA, Cost Truth → Cost ▸ Spend & Attribution); old links remap
+through navigate.LEGACY_TARGETS. No write path, so EXECUTIVE can open it; cross-links are
+profile-gated (state.can_open)."""
 
 from __future__ import annotations
 
@@ -20,19 +25,13 @@ from app.ui.components import (
     stashed_counts,
 )
 from app.ui.decision_studio import (
-    _cost_truth,
-    _experiments,
-    _portfolio,
-    _products,
-    _roi,
-    _scenarios,
-    _scorecard,
-    _slos,
+    _pipeline_tab,
+    _proof_tab,
     decision_verdict,
     reset_proof_memo,
 )
 
-_PAGE = "Decision Studio"
+_PAGE = "Proof"
 
 
 @safe_page(_PAGE)
@@ -41,68 +40,42 @@ def render() -> None:
     company, days = f["company"], f["days"]
     bounds = f["bounds"]
     page_header(
-        "Decision Studio",
-        "Portfolio, objectives, product economics, scenarios, and experiments.",
+        "Proof",
+        "Does OVERWATCH pay for itself, what each saving rests on, and what's ahead.",
         icon_name="target",
         scope_note=f"{f['company']} · {f['window_label']}",
     )
     rate = safe_float(load_settings(_PAGE).get("CREDIT_PRICE_USD"), 3.68)
-    # Per-render: the page-open verdict and the Scorecard section both call _proof_signals;
-    # reset here so they share ONE computation this render (no fragments on this page, so this
-    # reset always runs top-to-bottom before either caller). The run() cache stays the freshness
-    # authority across renders.
+    # Per-render: the page-open verdict and the section both call _proof_signals; reset here so they
+    # share ONE computation this render. The Pipeline projection is a fragment, but it never calls
+    # _proof_signals (its measured defaults are passed in), so a fragment-only rerun — which skips this
+    # reset — never reads the memo. The run() cache stays the freshness authority across renders.
     reset_proof_memo()
-    # Wave 2 #8: the page-open "should I worry?" line — the prove-it verdict hoisted
-    # above the section bar so it reads before any section is opened. Reuses the
-    # Scorecard reads (cache-shared) and renders nothing until the ledger is set up.
+    # Wave 2 #8: the page-open "should I worry?" line — the prove-it verdict hoisted above the
+    # section bar so it reads before any section is opened. Reuses the Proof reads (cache-shared)
+    # and renders nothing until the ledger is set up.
     _verdict = decision_verdict(rate)
     if _verdict:
         page_verdict_line(_verdict)
     # C18: "since your last visit" opener — renders nothing mid-session or anonymous.
     since_last_visit_opener(_PAGE, f["company"])
     section = lazy_sections(
-        ["Scorecard", "ROI", "Portfolio", "SLOs", "Products", "Cost Truth", "Scenarios", "Experiments"],
+        ["Proof", "Pipeline"],
         key="decision_section",
         counts=stashed_counts(_PAGE) or None,
     )
-    # #13: each section declares which of the page filters it actually honors, instead
-    # of one blanket "Company + Window" contract that overclaimed for the sections that
-    # ignore them (SLO objectives carry their own windows; experiments are account-wide;
-    # Scenarios scopes by Company only, with the horizon chosen in-panel).
+    # #13: each section declares which of the page filters it actually honors, instead of one
+    # blanket contract that overclaims.
     _contracts = {
-        "Scorecard": {"applies": (),
-                      "note": "The prove-it scorecard (ROI, realization, acceptance, alert precision, "
-                              "evidence) is account-wide; the page Company/Window do not apply."},
-        "ROI": {"applies": (),
-                "note": "The savings ledger (verified $, realization, run-rate) is account-wide; "
-                        "the page Company/Window do not apply."},
-        "Portfolio": {"applies": ("company", "days"),
-                      "note": "Recurring-query portfolio scoped to Company and Window."},
-        "SLOs": {"applies": (),
-                 "note": "Objectives evaluate against their own configured windows; the page Company/Window do not apply."},
-        "Products": {"applies": ("company", "days"),
-                     "note": "Data-product economics scoped to Company and Window."},
-        "Cost Truth": {"applies": ("company", "days"),
-                       "note": "Billed/metered/measured/allocated inventory scoped to Company and Window."},
-        "Scenarios": {"applies": ("company",),
-                      "note": "Scenario projections scope to Company; the horizon is chosen inside the panel."},
-        "Experiments": {"applies": (),
-                        "note": "Experiment records are account-wide; the page Company/Window do not apply."},
+        "Proof": {"applies": (),
+                  "note": "Account-wide proof (ledger, run cost, acceptance, alert precision, per-item "
+                          "evidence); the page Company/Window do not apply."},
+        "Pipeline": {"applies": ("company", "days"),
+                     "note": "Addressable $ and queued work scope to Company and Window; the measured "
+                             "slider defaults (acceptance, realization) are account-wide."},
     }
     section_filter_contract(f, **_contracts[section])
-    if section == "Scorecard":
-        _scorecard(company, rate)
-    elif section == "ROI":
-        _roi(company)
-    elif section == "Portfolio":
-        _portfolio(company, days, rate, bounds=bounds)
-    elif section == "SLOs":
-        _slos()
-    elif section == "Products":
-        _products(company, days, rate, bounds=bounds)
-    elif section == "Cost Truth":
-        _cost_truth(company, days, bounds=bounds)
-    elif section == "Scenarios":
-        _scenarios(company)
+    if section == "Proof":
+        _proof_tab(rate)
     else:
-        _experiments()
+        _pipeline_tab(company, days, rate, bounds=bounds)

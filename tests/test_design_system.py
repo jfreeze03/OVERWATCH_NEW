@@ -31,8 +31,11 @@ def test_icons_are_svg_currentcolor_no_emoji():
         svg = icons.icon(name)
         assert svg.startswith("<svg") and "currentColor" in svg
     # every page maps to a real icon, and none of them is an emoji glyph
-    for page in ("Brief", "Cost Intelligence", "Decision Studio", "Alerts", "Admin"):
+    for page in ("Brief", "Cost Intelligence", "Proof", "Alerts", "Admin"):
         assert icons.page_icon(page).startswith("<svg")
+    # v4.597: Proof keeps Decision Studio's "target" glyph (not the unknown-page dot fallback)
+    assert icons.page_icon("Proof") == icons.icon("target")
+    assert icons.page_icon("Proof") != icons.icon("dot")
     assert icons.icon("nonexistent-name").startswith("<svg")   # safe fallback
 
 

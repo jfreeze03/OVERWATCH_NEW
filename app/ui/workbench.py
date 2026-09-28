@@ -34,7 +34,6 @@ from app.logic.workbench import (
     action_summary,
     action_transition_sql,
     create_action_sql,
-    create_experiment_sql,
     entity_catalog_merge_sql,
     evidence_link_sql,
     owned_by,
@@ -288,34 +287,11 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
                     if ok:
                         st.rerun()
 
-        with st.expander("Start optimization experiment"):
-            exp_title = st.text_input("Experiment", key=f"exp_title_{action_id}", max_chars=500)
-            hypothesis = st.text_area("Hypothesis", key=f"exp_hyp_{action_id}", max_chars=4000)
-            baseline = st.text_area("Baseline", key=f"exp_base_{action_id}", max_chars=4000)
-            target = st.text_area("Target", key=f"exp_target_{action_id}", max_chars=4000)
-            rollback = st.text_area("Rollback condition", key=f"exp_rollback_{action_id}", max_chars=4000)
-            observe_to = st.date_input(
-                "Observe through", value=account_today() + timedelta(days=14),
-                key=f"exp_end_{action_id}",
-            )
-            if exp_title and hypothesis and entity_type and entity_key:
-                exp_sql = create_experiment_sql(
-                    action_id=action_id, entity_type=entity_type, entity_key=entity_key,
-                    title=exp_title, hypothesis=hypothesis, baseline=baseline,
-                    target=target, rollback=rollback, observation_end=observe_to,
-                    actor=viewer_name(),
-                )
-                st.code(exp_sql, language="sql")
-                if (st.button("Create experiment", key=f"exp_create_{action_id}")
-                        and write_gate_open(f"exp_create_{action_id}")):
-                    ok, msg = execute_statement(exp_sql, page=_PAGE)
-                    stamp_write(f"exp_create_{action_id}", ok)  # C48
-                    notify(ok, msg)
-                    # rec48: this INSERT is non-idempotent and the surface does not
-                    # otherwise rerun — rerun so the table re-renders as the receipt and
-                    # the form/button reset, or a second click double-inserts.
-                    if ok:
-                        st.rerun()
+        # v4.597 (Option C): the Action Center experiment-start expander was retired with the Decision
+        # Studio Experiments editor — a started experiment could no longer be advanced in the app, so
+        # the create path would have been an orphan write. A warehouse change's saving now books and
+        # settles itself (the change scan) and shows as a Proof evidence row. The builders
+        # (logic.workbench.create_experiment_sql / update_experiment_sql) are kept.
 
 
 def render_action_center(company: str) -> None:
@@ -434,8 +410,8 @@ def render_action_center(company: str) -> None:
                 next_col="DUE_DATE",
                 context_cols=("SEVERITY", "PERIOD", "DEFER_UNTIL", "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY"),
                 height=340, sort_label="severity, overdue, estimated value, then age",
-                impact_help="Authored ESTIMATE (modeled, not billed). Scenarios de-duplicate "
-                            "these by entity and never mix them with verified savings.",
+                impact_help="Authored ESTIMATE (modeled, not billed). The Proof ▸ Pipeline projection "
+                            "de-duplicates these by entity and never mixes them with verified savings.",
                 confidence_label="Confidence (authored)",
                 confidence_help=AUTHORED_CONFIDENCE_HELP)
 
@@ -604,8 +580,7 @@ def _render_data_product_detail(product: str) -> None:
         (f"Owner: {owner_label}", "warn" if len(owners) > 1 else ""),
     ])
     if len(owners) > 1:
-        st.caption("This product spans multiple owners — resolve ownership in the catalog "
-                   "(Decision Studio > Products flags the conflict).")
+        st.caption("This product spans multiple owners — resolve ownership in the catalog below.")
     st.markdown("**Constituent entities**")
     styled_table(df, height=360, slug="product-detail",
                  sort_label="most-severe criticality, then type")
@@ -1014,8 +989,8 @@ def render_watchlist() -> None:
         return
     frame = result.df.reset_index(drop=True)
     # CR16 (surfacing half): reuse the already-evaluated SLO objectives so a watched
-    # entity that has crossed its configured threshold reads as such here, not only
-    # in Decision Studio. Probe-gated — degrades to the plain list before V074 or
+    # entity that has crossed its configured threshold reads as such here (the Decision Studio SLO
+    # board that also showed it was retired in v4.597). Probe-gated — degrades to the plain list before V074 or
     # when no objective covers a watched entity. slo_cockpit reads core marts, not
     # ACCOUNT_USAGE, and this is a nested non-first-paint sub-tab.
     slo = run(

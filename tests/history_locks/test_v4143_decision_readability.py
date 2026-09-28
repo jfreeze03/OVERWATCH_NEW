@@ -182,12 +182,18 @@ def test_exception_first_and_decision_rows_are_wired_at_real_render_shapes() -> 
     assert 'id_col="ACTION_ID"' in action
     assert "confidence_badge(confidence)" in workbench
 
-    studio = _source("app/ui/decision_studio.py")
-    portfolio = studio.split("def _portfolio", 1)[1].split("def _slo_editor", 1)[0]
-    slos = studio.split("def _slos", 1)[1].split("def _products", 1)[0]
+    # v4.597 (Option C): the Portfolio is the Operations ▸ Optimize fix queue — still exception-first,
+    # still decision rows, now keyed on the specific DIAGNOSIS instead of the generic next move.
+    portfolio = _source("app/ui/pages/ops_parts/optimize_queue.py").split(
+        "def render_optimize", 1)[1]
     assert portfolio.index("exception_summary(") < portfolio.index("kpi_row([")
-    assert "decision_rows(" in portfolio and 'decision_col="NEXT_MOVE"' in portfolio
-    assert slos.index("exception_summary(") < slos.index("kpi_row([")
+    assert "decision_rows(" in portfolio and 'decision_col="DIAGNOSIS"' in portfolio
+    # The custom-SLO board and its editor were retired (read-only built-in objectives now live on
+    # Operations ▸ Pipeline SLA ▸ Tonight): no SLO board, and no in-app path can create one.
+    studio = _source("app/ui/decision_studio.py")
+    assert "def _slos" not in studio and "def _slo_editor" not in studio
+    for py in (_ROOT / "app" / "ui").rglob("*.py"):
+        assert "create_slo_objective_sql(" not in py.read_text(encoding="utf-8"), py
 
     control = _source("app/ui/pages/control_room.py")
     # rec8: Decision Studio moved out, so Pulse is now bounded by the next section.
@@ -199,7 +205,7 @@ def test_exception_first_and_decision_rows_are_wired_at_real_render_shapes() -> 
 
 
 def test_v4143_release_metadata_is_current() -> None:
-    assert 'APP_VERSION = "4.596.0"' in _source("app/config.py")
+    assert 'APP_VERSION = "4.597.0"' in _source("app/config.py")
     changelog = _source("CHANGELOG.md")
     assert "## 4.143.1 - Snowflake button compatibility hotfix (2026-08-03)" in changelog
     assert "## 4.143.0 - Decision-readable operating surfaces (2026-08-03)" in changelog

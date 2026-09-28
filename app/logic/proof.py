@@ -2,11 +2,12 @@
 
 The owner's gate before autonomy: hard numbers that the advising features are correct
 and valuable. Nearly every input already exists as a pure function or mart builder
-scattered across four pages (savings realization in Decision Studio ▸ ROI, remediation
-acceptance in Admin, per-rule alert precision in Alerts, evidence coverage in DS
-Portfolio). This module adds only the three aggregates none of them provided — an
-account-wide alert precision roll-up, an action-acceptance rate, and the ROI multiple —
-and a one-line verdict that composes the five proof signals. Pure pandas; no Streamlit,
+scattered across four pages (savings realization on Proof, formerly Decision Studio ▸ ROI;
+remediation acceptance in Admin; per-rule alert precision in Alerts; evidence coverage from the
+query-family portfolio, now Operations ▸ Optimize). This module adds only the three
+aggregates none of them provided — an account-wide alert precision roll-up, an
+action-acceptance rate, and the ROI multiple — and a one-line verdict that composes the
+five proof signals. Pure pandas; no Streamlit,
 no Snowflake. Tested in tests/test_proof.py.
 
 A "None" ratio means NO DATA (nothing decided/resolved yet), never 0% — an honest blank
@@ -432,3 +433,35 @@ def carried_realization(rows: pd.DataFrame | None) -> dict | None:
         "carried_items": int((eligible & src.ne("own")).sum()),
         "by_source": by_source,
     }
+
+
+def settle_schedule(ledger_df: pd.DataFrame | None, today: date | None = None) -> dict:
+    """When the change-scan rows still measuring will settle (v4.597, Proof ▸ Settling). Over LIVE
+    ESTIMATED auto rows (superseded twins dropped; auto = SOURCE_CHANGE_ID set or SOURCE 'auto'):
+      pending — how many are still ESTIMATED,
+      next    — the earliest settle day still ahead (TRACKING_UNTIL + 1; the first daily scan after the
+                14-day window settles the row), or None,
+      overdue — rows whose window closed before today but have not settled yet (awaiting the scan),
+      undated — rows with no linked TRACKING_UNTIL (an unreadable registry link).
+    Display-only counts over the frame passed in; never a $ total."""
+    out: dict = {"pending": 0, "next": None, "overdue": 0, "undated": 0}
+    if ledger_df is None or ledger_df.empty or "STATE" not in ledger_df.columns:
+        return out
+    today = today or account_today()
+    live, _ = split_superseded(ledger_df)
+    if live.empty:
+        return out
+    view = live.reset_index(drop=True)
+    pending = _col(view, "STATE").map(_text).str.upper().eq(LEDGER_ESTIMATED) & _is_auto(view)
+    if not bool(pending.any()):
+        return out
+    until = _naive_ts(_col(view, "TRACKING_UNTIL"))[pending]
+    settle = [(ts.date() + timedelta(days=1)) for ts in until.dropna()]
+    ahead = [d for d in settle if d >= today]
+    out.update({
+        "pending": int(pending.sum()),
+        "next": min(ahead) if ahead else None,
+        "overdue": sum(1 for d in settle if d < today),
+        "undated": int(until.isna().sum()),
+    })
+    return out

@@ -1754,7 +1754,7 @@ def render() -> None:
     # C18: "since your last visit" opener — renders nothing mid-session or anonymous.
     since_last_visit_opener(_PAGE, f["company"])
     # r-ux: the "should I worry?" posture verdict renders ABOVE the section bar on EVERY section,
-    # matching Overview/Cost/Operations/Decision Studio (it used to live only inside the Decision-
+    # matching Overview/Cost/Operations/Proof (it used to live only inside the Decision-
     # queue section). Reuses the cached domain-posture marts — no metered scan, no live section read.
     _sec_verdict = security_posture_verdict(f["company"])
     if _sec_verdict:

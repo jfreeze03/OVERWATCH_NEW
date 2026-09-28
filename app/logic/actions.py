@@ -335,7 +335,7 @@ def savings_by_month(df: pd.DataFrame, months: int = 12) -> pd.DataFrame:
 
 
 def savings_month_calendar(df: pd.DataFrame, months: int = 12) -> pd.DataFrame:
-    """Newly verified run-rate per calendar month for the Decision Studio ROI bars: the LAST ``months``
+    """Newly verified run-rate per calendar month for the Proof ▸ Proof bars (formerly the ROI section): the LAST ``months``
     calendar months ending with the CURRENT month, zero-filled (a month with nothing verified is a real
     $0 bar, not a missing point), the current month flagged PARTIAL and labelled month-to-date. Unlike
     savings_by_month (a complete-months series for trend lines), bars show the partial month honestly

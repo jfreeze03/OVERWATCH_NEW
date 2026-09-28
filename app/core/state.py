@@ -104,6 +104,10 @@ def request_navigation(page: str, section: str = "", filters: dict | None = None
     left), stamped with the destination, so the destination's header can offer a
     one-hop "Back to <origin>". The return jump itself passes
     ``capture_origin=False`` so returning never creates a boomerang origin."""
+    # v4.597 (Option C): a retired target (e.g. the old Decision Studio sections) is remapped to its
+    # new home FIRST — defensively, before the clamp below would send it to Overview.
+    from app.logic.navigate import remap_legacy_target
+    page, section = remap_legacy_target(page, section)
     # Clamp off-profile targets HERE (B8 also clamps on consume), then NO-OP a jump
     # that resolves to the current page with no section change. A sticky st.dataframe
     # selection re-fires request_navigation every rerun; without this, an EXECUTIVE
@@ -139,12 +143,13 @@ def consume_pending_navigation() -> None:
     pending = st.session_state.pop("_ow_nav_pending", None)
     if not pending:
         return
-    # rec8 legacy remap: Decision Studio moved from a Control Room section to its own
-    # top-level page. Rewrite a stale saved-view / default-landing so it lands on the
-    # real page instead of silently falling back to Control Room's first section.
-    if (str(pending.get("page")) == "Control Room"
-            and str(pending.get("section")) == "Decision Studio"):
-        pending = {**pending, "page": "Decision Studio", "section": "Portfolio"}
+    # Legacy remap (rec8, then v4.597 Option C): a stale saved-view / default-landing naming a
+    # retired target — the old {Control Room, Decision Studio} section, or any Decision Studio
+    # page/section — is rewritten to its new home (navigate.LEGACY_TARGETS) BEFORE the profile
+    # clamp, so it lands on the real page instead of Overview or a first section.
+    from app.logic.navigate import remap_legacy_target
+    _lp, _ls = remap_legacy_target(str(pending.get("page") or ""), str(pending.get("section") or ""))
+    pending = {**pending, "page": _lp, "section": _ls}
     # B6: reset the jump box ONLY when we actually consumed a jump. The old
     # unconditional clear ran every rerun and erased the user's pick on the very
     # rerun that delivered it (before _global_jump could read _ow_jump and fire
@@ -214,7 +219,12 @@ def navigation_context(*, consume: bool = False) -> dict:
 
 
 def requested_page(valid_pages: tuple[str, ...]) -> str | None:
-    """Page requested via ?page= deep link, when the runtime supports it."""
+    """Page requested via ?page= deep link, when the runtime supports it.
+
+    v4.597 (Option C): a slug that matches no page is tried as a RETIRED deep link
+    (``?page=decision-studio[&section=<old slug>]``, navigate.legacy_deep_link). On a hit the
+    target section is seeded into the target page's section key (pre-widget) and the new page is
+    returned. It fires once: the sidebar's remember_page rewrites ?page= in the same run."""
     try:
         value = st.query_params.get(_PAGE_PARAM)
         if isinstance(value, list):
@@ -223,9 +233,38 @@ def requested_page(valid_pages: tuple[str, ...]) -> str | None:
             for page in valid_pages:
                 if page.lower().replace(" ", "-") == str(value).lower():
                     return page
+            from app.logic.navigate import PAGE_SECTION_KEYS, legacy_deep_link
+            sec = st.query_params.get("section")
+            if isinstance(sec, list):
+                sec = sec[0] if sec else None
+            hit = legacy_deep_link(str(value), str(sec or ""), valid_pages)
+            if hit is not None:
+                page, section = hit
+                section_key = PAGE_SECTION_KEYS.get(page)
+                if section and section_key:
+                    st.session_state[section_key] = section
+                return page
     except Exception:
         pass  # SiS runtimes without query-param support
     return None
+
+
+def viewer_pages() -> tuple[str, ...]:
+    """The pages this viewer's profile offers — () when the profile cannot be resolved."""
+    try:
+        from app.config import PAGES_BY_PROFILE
+        from app.core.session import active_profile, current_role
+        return tuple(PAGES_BY_PROFILE.get(active_profile(current_role()), ()))
+    except Exception:  # a cross-link gate is chrome, never break the page
+        return ()
+
+
+def can_open(page: str) -> bool:
+    """Does this viewer's profile offer ``page``? Gate every cross-page affordance on it (AGENTS.md:
+    a click toward an off-profile page would silently clamp to Overview). Fail-OPEN on an unreadable
+    profile, like the since-last-visit opener — the navigation clamp still holds either way."""
+    pages = viewer_pages()
+    return not pages or page in pages
 
 
 def remember_page(page: str) -> None:

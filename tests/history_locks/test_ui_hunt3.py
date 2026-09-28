@@ -39,7 +39,9 @@ def test_ledger_totals_exposes_the_realization_population():
     assert t["realized_verified_usd"] == 1000.0 and t["realized_estimated_usd"] == 1000.0
     assert t["verified_usd"] == 1200.0            # all-verified totals still exposed, unused by the delta
     ds = _src("app/ui/decision_studio.py")
-    assert "totals['realized_verified_usd']" in ds and "totals['realized_estimated_usd']" in ds
+    # v4.597 (Option C): the ROI tile lives in Proof ▸ Proof
+    proof = ds.split("def _proof_tab(", 1)[1].split("\ndef ", 1)[0]
+    assert "totals['realized_verified_usd']" in proof and "totals['realized_estimated_usd']" in proof
 
 
 # 8) Change-risk destructive count reflects ALL groups, not the top 200 ------

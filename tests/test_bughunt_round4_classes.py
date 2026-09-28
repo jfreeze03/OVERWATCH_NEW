@@ -44,9 +44,16 @@ def test_ask_credit_share_is_a_percentage_matching_the_headline():
 
 def test_experiments_total_kpi_is_uncapped():
     assert "TOTAL_COUNT" in workbench_sql.experiment_verified_totals()
+    # v4.597 (Option C): the Experiments KPI board was retired (its verified $ now shows as Proof
+    # evidence rows). The uncapped-headline rule carries over to Proof, whose headline figures are
+    # SQL aggregates — never sums over the row-capped ledger frame.
     ds = _read("app/ui/decision_studio.py")
-    assert '_total_ct = int(safe_float(_vrow.get("TOTAL_COUNT"))) or len(frame)' in ds
-    assert '{"label": "Experiments", "value": f"{_total_ct:,}"' in ds
+    assert "def _experiments" not in ds
+    proof = ds.split("def _proof_tab(", 1)[1].split("\ndef ", 1)[0]
+    assert '"value": f"{format_usd(verified_active)}/mo"' in proof      # the run-rate (SQL)
+    assert "split = evidence_split(attr_df)" in proof                    # the attribution split (SQL)
+    signals = ds.split("def _proof_signals(", 1)[1].split("\ndef ", 1)[0]
+    assert 'get("VERIFIED_ACTIVE_MONTHLY_USD")' in signals and 'get("VERIFIED_ACTIVE_ITEMS")' in signals
 
 
 def test_admin_error_family_selection_is_change_guarded():

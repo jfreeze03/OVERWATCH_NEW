@@ -27,11 +27,12 @@ LATCHED_FILES = {
     "app/ui/pages/cost_parts/optimize.py": 6,   # +1 Next-Fifty #5 twin cleanup (ledger_twin_reject)
     "app/ui/pages/operations.py": 5,
     "app/ui/pages/alerts.py": 6,
-    "app/ui/workbench.py": 6,
+    "app/ui/workbench.py": 5,   # v4.597: -1 the retired Action Center experiment-start expander
     "app/ui/pages/cost_parts/ai_chargeback.py": 3,
     "app/ui/security_center.py": 2,
     "app/ui/pages/control_room.py": 5,   # +1 v4.375: bulk 'resolve open incidents' reset panel; +2 Next-Fifty #12a: incident Acknowledge + Mark mitigated
-    "app/ui/decision_studio.py": 2,
+    "app/ui/decision_studio.py": 0,   # v4.597 Proof is READ-ONLY (SLO + experiment editors retired)
+    "app/ui/pages/decision_studio.py": 0,
     "app/ui/pages/cost.py": 1,
     "app/ui/pages/admin.py": 1,
     "app/ui/pages/ops_parts/optimize_queue.py": 2,   # v4.597: Track (per fingerprint) + Track all ACT NOW

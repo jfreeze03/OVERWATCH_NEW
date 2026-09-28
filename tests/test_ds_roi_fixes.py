@@ -73,10 +73,16 @@ def test_month_calendar_zero_fills_and_keeps_the_month_to_date(monkeypatch):
 
 def test_roi_labels_are_a_monthly_run_rate():
     ds = _src("app/ui/decision_studio.py")
-    body = ds.split("def _roi(", 1)[1].split("\ndef ", 1)[0]
+    # v4.597 (Option C): the ROI section merged into Proof ▸ Proof.
+    assert "def _roi(" not in ds
+    body = ds.split("def _proof_tab(", 1)[1].split("\ndef ", 1)[0]
     assert '"label": "Verified savings (all time)"' not in body and "Verified savings run-rate" in body
     assert "Added this quarter" in body and '"method": "measured"' in body
-    assert "}/mo** of active savings run-rate" in body and "totals['verified_active_usd']" in body
+    # the narrative states the ACTIVE run-rate (review fix: the all-time sum read as a run-rate) —
+    # now the uncapped SQL figure (the ROI numerator), not a pandas sum over the capped ledger frame
+    assert "}/mo** of active savings run-rate" in body
+    assert "{format_usd(verified_active)}/mo** of active savings run-rate" in body
+    assert "totals['verified_active_usd']" not in body
     assert "older item(s) no longer counted" in body
     assert "no up-front estimate on the" in body
     assert 'charts.monthly_bars_usd(month_df, "MONTH_LABEL", "VERIFIED_USD"' in body
@@ -119,4 +125,5 @@ def test_realization_counts_split_auto_from_hand_verified():
 
 def test_operations_points_catalog_edits_at_entity_360():
     ops = _src("app/ui/pages/operations.py")
-    assert "in Decision Studio" not in ops and "Control Room ▸ Entity 360" in ops
+    # v4.597: tightened — no Decision Studio mention at all (the page is Proof; its catalog copy is gone)
+    assert "Decision Studio" not in ops and "Control Room ▸ Entity 360" in ops

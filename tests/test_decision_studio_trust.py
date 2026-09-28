@@ -27,7 +27,8 @@ def test_decision_rows_threads_per_surface_column_help():
 
 
 def test_portfolio_names_measured_vs_heuristic():
-    port = _src("app/ui/decision_studio.py").split("def _portfolio", 1)[1].split("\ndef ", 1)[0]
+    # v4.597 (Option C): the Portfolio is the Operations ▸ Optimize fix queue.
+    port = _src("app/ui/pages/ops_parts/optimize_queue.py").split("def render_optimize", 1)[1]
     assert "NOT statistical confidence" in port          # confidence is not what it looks like
     assert "not promised savings" in port                 # impact is observed cost
     assert "evidence-weighted heuristics" in port         # the honest framing

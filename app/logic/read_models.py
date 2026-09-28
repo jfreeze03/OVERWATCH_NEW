@@ -48,9 +48,9 @@ READ_MODELS = (
     ),
     ReadModelContract(
         "workload_portfolio",
-        "measured family impact and evidence score",
+        "measured family cost, diagnosis and evidence score",
         "persistent fingerprint Entity 360 profile",
-        "selected portfolio row",
+        "Open Entity 360 on a selected fix-queue row",
         "daily marts",
         1,
         4,

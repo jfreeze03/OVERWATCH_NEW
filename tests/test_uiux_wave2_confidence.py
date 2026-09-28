@@ -51,7 +51,13 @@ def test_f60_decision_rows_uses_the_shared_helper_not_an_inline_progresscolumn()
 
 def test_f60_scenarios_table_gets_the_confidence_bar_too():
     studio = _src("app/ui/decision_studio.py")
-    assert '"CONFIDENCE"] = confidence_progress_column(' in studio
+    # v4.597 (Option C): the Scenarios table is the Proof ▸ Pipeline table, which mixes AUTHORED
+    # confidence (queued actions) with the advisor's EVIDENCE weight (addressable savings) — one bar,
+    # and a help that names both provenances.
+    pipe = studio.split("def _pipeline_tab(", 1)[1].split("\ndef ", 1)[0]
+    assert '_pipe_cfg["CONFIDENCE"] = confidence_progress_column(' in pipe
+    cfg = pipe.split('_pipe_cfg["CONFIDENCE"] = confidence_progress_column(', 1)[1].split(")\n", 1)[0]
+    assert "AUTHORED_CONFIDENCE_HELP" in cfg and "evidence" in cfg and "not an authored belief" in cfg
 
 
 def test_f60_entity_360_work_table_gets_the_bar_too():

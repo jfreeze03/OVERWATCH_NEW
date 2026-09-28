@@ -33,9 +33,11 @@ def _src(rel: str) -> str:
 # Finding #1 -- "Needs validation" counts the VALIDATE lane, not confidence<0.5
 # --------------------------------------------------------------------------- #
 def test_needs_validation_counts_the_validate_lane() -> None:
-    src = _src("app/ui/decision_studio.py")
+    # v4.597 (Option C): the portfolio board is the Operations ▸ Optimize fix queue.
+    src = _src("app/ui/pages/ops_parts/optimize_queue.py")
     assert 'validate = portfolio[portfolio["LANE"].eq("VALIDATE")]' in src
     assert 'validate = portfolio[portfolio["CONFIDENCE"].lt(0.5)]' not in src
+    assert '"label": "Needs validation"' in src and 'f"{len(validate):,}"' in src
 
 
 # --------------------------------------------------------------------------- #
@@ -49,10 +51,17 @@ def test_experiment_verified_totals_is_uncapped() -> None:
 
 
 def test_experiments_panel_uses_the_uncapped_totals() -> None:
+    # v4.597 (Option C): the Experiments panel was retired — a hand-verified experiment's saving is
+    # an EXPERIMENT evidence row on Proof, and its $ reaches the headline only through the UNCAPPED
+    # SQL split (ledger_attribution's EXPERIMENT_ACTIVE_USD window column), never a capped-frame sum.
     src = _src("app/ui/decision_studio.py")
-    assert "workbench_sql.experiment_verified_totals()" in src
-    assert '{"label": "Verified", "value": f"{_verified_ct:,}"' in src
-    assert '"value": format_usd(_verified_usd)' in src
+    assert "def _experiments" not in src and "_verified_ct" not in src
+    from app.data import mart_sql as _m
+    from app.logic.proof import _SPLIT_COLUMNS
+    assert _SPLIT_COLUMNS["experiment_usd"] == "EXPERIMENT_ACTIVE_USD"
+    assert "AS EXPERIMENT_ACTIVE_USD" in _m.ledger_attribution()
+    proof = src.split("def _proof_tab(", 1)[1].split("\ndef ", 1)[0]
+    assert "split['experiment_usd']" in proof
 
 
 # --------------------------------------------------------------------------- #
@@ -89,8 +98,13 @@ def test_latency_target_keeps_its_open_range() -> None:
 
 
 def test_slo_editor_ui_caps_the_success_target() -> None:
+    # v4.597 (Option C): the in-app SLO editor was retired, so no UI can author an objective at
+    # all; the builder-level clamp (test_success_pct_target_is_capped_at_100 above) stays the guard
+    # for any other caller.
     src = _src("app/ui/decision_studio.py")
-    assert "max_value=100.0 if success_metric else None" in src
+    assert "def _slo_editor" not in src and "create_slo_objective_sql" not in src
+    for py in (_ROOT / "app" / "ui").rglob("*.py"):
+        assert "create_slo_objective_sql(" not in py.read_text(encoding="utf-8"), py
 
 
 # --------------------------------------------------------------------------- #

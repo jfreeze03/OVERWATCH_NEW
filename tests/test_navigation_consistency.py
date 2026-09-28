@@ -29,7 +29,7 @@ _PAGES_DIR = _ROOT / "app" / "ui" / "pages"
 _PAGE_FILES = {
     "Overview": "overview.py", "Control Room": "control_room.py",
     "Cost Intelligence": "cost.py", "Operations": "operations.py",
-    "Decision Studio": "decision_studio.py",
+    "Proof": "decision_studio.py",   # v4.597 (Option C): the former Decision Studio (file kept)
     "Alerts": "alerts.py", "Security": "security.py",
     "Admin": "admin.py", "Brief": "brief.py",
 }
@@ -155,6 +155,85 @@ def test_entity_nav_table_degrades_without_key_col(monkeypatch):
     components.entity_nav_table(pd.DataFrame({"X": [1]}), key="t3",
                                key_col="MISSING", entity_type="WAREHOUSE")
     assert calls["styled"] == 1 and calls["nav"] == 0
+
+
+# ---------------------------------------------------------------------------
+# v4.597 (Option C): Decision Studio -> Proof. Every old link lands on a real
+# section of the retired page's new home, through ONE remap table.
+# ---------------------------------------------------------------------------
+
+def test_legacy_targets_resolve_to_real_sections():
+    from app.logic.navigate import (
+        LEGACY_PAGE,
+        LEGACY_SECTIONS,
+        LEGACY_TARGETS,
+        remap_legacy_target,
+    )
+    # every retired Decision Studio section is mapped — none falls to a bare page by omission
+    assert {s for p, s in LEGACY_TARGETS if p == LEGACY_PAGE} == set(LEGACY_SECTIONS)
+    for (old_page, old_section), (page, section) in LEGACY_TARGETS.items():
+        labels, _ = _lazy_sections_of(_PAGE_FILES[page])
+        assert section in labels, f"{old_page} ▸ {old_section} -> {page!r} lacks {section!r}"
+        assert remap_legacy_target(old_page, old_section) == (page, section)
+        assert page in PAGES_BY_PROFILE["DBA"]
+    # a bare / unknown-section retired page lands on Proof; live targets pass through untouched
+    assert remap_legacy_target(LEGACY_PAGE) == ("Proof", "")
+    assert remap_legacy_target(LEGACY_PAGE, "Nope") == ("Proof", "")
+    assert remap_legacy_target(LEGACY_PAGE, "Pipeline") == ("Proof", "Pipeline")
+    assert remap_legacy_target("Operations", "Queries") == ("Operations", "Queries")
+    assert remap_legacy_target("Proof", "Proof") == ("Proof", "Proof")
+    assert remap_legacy_target("", "") == ("", "")
+    # the retired label is no live page any more
+    assert LEGACY_PAGE not in _PAGE_FILES and LEGACY_PAGE not in PAGE_SECTION_KEYS
+    for pages in PAGES_BY_PROFILE.values():
+        assert LEGACY_PAGE not in pages
+
+
+def test_legacy_deep_links_respect_the_profile():
+    from app.logic.navigate import legacy_deep_link
+    dba, reader, exe = (PAGES_BY_PROFILE[p] for p in ("DBA", "READER", "EXECUTIVE"))
+    assert legacy_deep_link("decision-studio", "", dba) == ("Proof", "")
+    assert legacy_deep_link("Decision-Studio", "roi", dba) == ("Proof", "Proof")
+    assert legacy_deep_link("decision-studio", "scorecard", dba) == ("Proof", "Proof")
+    assert legacy_deep_link("decision-studio", "scenarios", dba) == ("Proof", "Pipeline")
+    assert legacy_deep_link("decision-studio", "portfolio", dba) == ("Operations", "Optimize")
+    assert legacy_deep_link("decision-studio", "slos", dba) == ("Operations", "Pipeline SLA")
+    assert legacy_deep_link("decision-studio", "cost-truth", dba) == (
+        "Cost Intelligence", "Spend & Attribution")
+    # READER keeps Operations (read-only), so the Portfolio still lands on Optimize
+    assert legacy_deep_link("decision-studio", "experiments", reader) == ("Proof", "Proof")
+    assert legacy_deep_link("decision-studio", "portfolio", reader) == ("Operations", "Optimize")
+    # EXECUTIVE has no Operations: an off-profile target falls back to Proof, never Overview
+    assert legacy_deep_link("decision-studio", "portfolio", exe) == ("Proof", "")
+    assert legacy_deep_link("decision-studio", "slos", exe) == ("Proof", "")
+    assert legacy_deep_link("decision-studio", "cost-truth", exe) == (
+        "Cost Intelligence", "Spend & Attribution")
+    assert legacy_deep_link("decision-studio", "bogus", exe) == ("Proof", "")
+    # not the retired slug -> None (the caller keeps its normal landing); nothing reachable -> None
+    assert legacy_deep_link("proof", "", dba) is None
+    assert legacy_deep_link("made-up", "roi", dba) is None
+    assert legacy_deep_link("decision-studio", "roi", ("Brief", "Overview")) is None
+
+
+def test_state_applies_the_legacy_remap_in_all_three_entry_points():
+    state = (_ROOT / "app" / "core" / "state.py").read_text(encoding="utf-8")
+
+    def body(name: str) -> str:
+        return state.split(f"def {name}(", 1)[1].split("\ndef ", 1)[0]
+
+    req = body("request_navigation")          # hard-coded in-app jumps
+    assert "page, section = remap_legacy_target(page, section)" in req
+    assert req.index("remap_legacy_target(") < req.index("PAGES_BY_PROFILE")   # before the clamp
+    consume = body("consume_pending_navigation")   # saved DEFAULT_VIEW / pending jumps
+    assert "remap_legacy_target(" in consume
+    assert consume.index("remap_legacy_target(") < consume.index("PAGES_BY_PROFILE")
+    rp = body("requested_page")               # ?page=decision-studio[&section=...] deep links
+    assert "legacy_deep_link(" in rp and "PAGE_SECTION_KEYS.get(page)" in rp
+    # the live slug match runs first, so a live ?page= never enters the legacy branch; the legacy
+    # hit fires once (the sidebar's remember_page rewrites ?page= in the same run)
+    assert rp.index("for page in valid_pages") < rp.index("legacy_deep_link(")
+    main = (_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    assert "_req = requested_page(pages)" in main and "remember_page(page)" in main
 
 
 def test_dba_pages_cover_all_routed_pages():

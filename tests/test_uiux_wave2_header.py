@@ -58,5 +58,5 @@ def test_f6_lag_caption_is_gated_to_metering_surfaces():
     assert "if title in _LAGGING_SURFACES:" in body
     assert body.index("if title in _LAGGING_SURFACES:") < body.index("st.caption(ACCOUNT_USAGE_LAG_NOTE)")
     # pure app-table pages stay excluded (the note would be noise there)
-    for p in ("Admin", "Ask", "Decision Studio"):
+    for p in ("Admin", "Ask", "Proof"):          # v4.597: Proof (was Decision Studio) is app-table only
         assert p not in components._LAGGING_SURFACES

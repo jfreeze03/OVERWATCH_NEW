@@ -97,3 +97,23 @@ def test_dba_gets_admin(_stub):
     at.run()
     assert not at.exception
     assert "Admin" in _nav_options(at)
+
+
+def test_executive_sees_and_renders_read_only_proof(_stub):
+    # v4.597 (Option C): Proof is READ-ONLY, so the executive tier gets it — grouped under Analyze
+    # beside Cost Intelligence, never alongside Operations / Control Room — and it renders.
+    _stub("SNOW_PRI_GFR_PRD_ALFA_PDMWMGMT")  # -> EXECUTIVE
+    at = AppTest.from_function(_entry, default_timeout=20)
+    at.run()
+    assert not at.exception
+    assert "Proof" in _nav_options(at)
+    analyze = [r for r in at.radio if str(getattr(r, "key", "") or "").startswith("_ow_nav_Analyze")]
+    assert analyze and list(analyze[0].options) == ["Cost Intelligence", "Proof"]
+    analyze[0].set_value("Proof")
+    at.run()
+    assert not at.exception, at.exception
+    assert at.markdown or at.title                   # the page painted something
+    # no write control anywhere on the page an executive can open
+    labels = " ".join(str(getattr(b, "label", "")) for b in at.button)
+    for write_label in ("Track", "Create objective", "Save experiment", "Create experiment"):
+        assert write_label not in labels, write_label

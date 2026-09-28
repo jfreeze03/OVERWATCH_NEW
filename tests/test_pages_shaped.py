@@ -301,3 +301,40 @@ def test_etl_configured_morning_surfaces_render(monkeypatch):
     assert "Tonight at a glance" in blob, "the whole-night glance did not paint on Operations"
     # v4.597 (Option C): the two read-only built-in objectives paint at the top of Tonight.
     assert "Built-in objectives" in blob, "the built-in objectives panel did not paint on Tonight"
+
+
+@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
+def test_proof_sections_render_shaped():
+    """v4.597 (Option C): drive BOTH Proof sections under shaped data — the merged Proof tab (hero,
+    run-rate, per-item evidence + the SQL attribution split) and the Pipeline tab with right-sizing
+    on (addressable rollup + queued work + the projection fragment), then press "Reset to measured"
+    so the fragment's on_click callback path executes too. A column a builder does not return
+    raises here."""
+    at = AppTest.from_function(_entry, default_timeout=30)
+    at.run()
+    assert not at.exception
+    _nav_to(at, "Proof")
+    at.run()
+    assert not at.exception, f"proof (shaped): {at.exception}"
+    assert not any("could not finish rendering" in str(getattr(e, "value", "")) for e in at.error)
+    blob = " ".join(m.value for m in at.markdown)
+    assert "What each saving rests on" in blob and "active run-rate" in blob, blob[:400]
+    at.session_state["decision_section"] = "Pipeline"
+    at.session_state["proof_pipe_sizing"] = True
+    at.run()
+    assert not at.exception, f"proof pipeline (shaped): {at.exception}"
+    assert not any("could not finish rendering" in str(getattr(e, "value", "")) for e in at.error)
+    blob = " ".join(m.value for m in at.markdown)
+    assert "the priced pipeline" in blob
+    keys = {str(s.key) for s in at.slider}
+    assert {"proof_adoption", "proof_realization", "proof_conf_floor"} <= keys, keys
+    reset = [b for b in at.button if str(b.label) == "Reset to measured"]
+    assert reset, [str(b.label) for b in at.button]
+    at.slider(key="proof_adoption").set_value(5)
+    at.run()
+    assert not at.exception
+    reset = [b for b in at.button if str(b.label) == "Reset to measured"]
+    reset[0].click()
+    at.run()
+    assert not at.exception, f"proof reset-to-measured (shaped): {at.exception}"
+    assert at.slider(key="proof_adoption").value != 5      # the callback restored the default

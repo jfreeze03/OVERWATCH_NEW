@@ -14,7 +14,8 @@ PAGE_SECTION_KEYS = {
     "Control Room": "cr_section",
     "Cost Intelligence": "cost_section",
     "Operations": "ops_section",
-    "Decision Studio": "decision_section",
+    # v4.597 (Option C): the former Decision Studio page, renamed; the widget key is kept.
+    "Proof": "decision_section",
     "Security": "sec_section",
     "Alerts": "alerts_section",
     "Admin": "adm_section",
@@ -32,12 +33,70 @@ PAGE_SECTION_LABELS = {
                          "Unit costs", "Compare", "Optimization & Savings"],
     "Operations": ["Queries", "Tasks", "Warehouses", "Optimize", "Change impact",
                    "Pipeline SLA", "Release compare", "Emergency"],
-    "Decision Studio": ["Scorecard", "ROI", "Portfolio", "SLOs", "Products", "Cost Truth", "Scenarios", "Experiments"],
+    "Proof": ["Proof", "Pipeline"],
     "Alerts": ["Open events", "Rules", "History", "Native delivery"],
     "Security": ["Decision queue", "Access", "AI guardrails", "Changes", "Clients", "Egress", "Exposure", "Least privilege", "Trust Center"],
     "Admin": ["Settings", "Migrations & freshness", "Setup progress", "Metrics",
               "App self-cost", "Performance", "Canary", "Errors & telemetry"],
 }
+
+# v4.597 (Option C): Decision Studio became "Proof" (Proof · Pipeline) and its other sections moved to
+# their natural homes. Old links — a saved DEFAULT_VIEW, a hard-coded request_navigation, a
+# ``?page=decision-studio[&section=<slug>]`` deep link — are remapped through this ONE pure table
+# (app/core/state.py applies it in request_navigation, consume_pending_navigation and requested_page),
+# so a stale target lands on the new home instead of silently clamping to a first section.
+LEGACY_PAGE = "Decision Studio"
+LEGACY_SECTIONS = ("Scorecard", "ROI", "Portfolio", "SLOs", "Products", "Cost Truth", "Scenarios",
+                   "Experiments")
+LEGACY_TARGETS: dict[tuple[str, str], tuple[str, str]] = {
+    (LEGACY_PAGE, "Scorecard"): ("Proof", "Proof"),
+    (LEGACY_PAGE, "ROI"): ("Proof", "Proof"),
+    (LEGACY_PAGE, "Experiments"): ("Proof", "Proof"),     # retired UI; its savings are Proof evidence rows
+    (LEGACY_PAGE, "Products"): ("Proof", "Proof"),        # hidden this release
+    (LEGACY_PAGE, "Scenarios"): ("Proof", "Pipeline"),
+    (LEGACY_PAGE, "Portfolio"): ("Operations", "Optimize"),
+    (LEGACY_PAGE, "SLOs"): ("Operations", "Pipeline SLA"),
+    (LEGACY_PAGE, "Cost Truth"): ("Cost Intelligence", "Spend & Attribution"),
+    # rec8's older remap: Decision Studio was once a Control Room section (its Portfolio led).
+    ("Control Room", LEGACY_PAGE): ("Operations", "Optimize"),
+}
+LEGACY_FALLBACK = ("Proof", "")
+
+
+def remap_legacy_target(page: str, section: str = "") -> tuple[str, str]:
+    """A retired (page, section) -> its v4.597 home. A bare or unknown-section Decision Studio lands
+    on Proof (keeping a section only when it is a real Proof section); anything else passes through
+    unchanged."""
+    page, section = str(page or ""), str(section or "")
+    hit = LEGACY_TARGETS.get((page, section))
+    if hit is not None:
+        return hit
+    if page == LEGACY_PAGE:
+        return ("Proof", section if section in PAGE_SECTION_LABELS["Proof"] else "")
+    return (page, section)
+
+
+def _slug(label: str) -> str:
+    """The ?page= / ?section= slug (mirrors components._section_slug and state.remember_page)."""
+    return str(label).lower().replace("&", "and").replace(" ", "-")
+
+
+def legacy_deep_link(page_slug: str, section_slug: str,
+                     valid_pages: tuple[str, ...] | list[str]) -> tuple[str, str] | None:
+    """Resolve a retired ``?page=decision-studio[&section=<old slug>]`` deep link to (page, section),
+    or None when the slug is not the retired page. The target must be one this viewer's profile
+    offers: an off-profile target (EXECUTIVE sent to Operations) falls back to Proof, and when even
+    Proof is off-profile the link resolves to nothing (the caller keeps its normal landing)."""
+    if str(page_slug or "").strip().lower() != _slug(LEGACY_PAGE):
+        return None
+    want = str(section_slug or "").strip().lower()
+    old = next((label for label in LEGACY_SECTIONS if _slug(label) == want), "")
+    target = remap_legacy_target(LEGACY_PAGE, old)
+    allowed = tuple(valid_pages)
+    if target[0] in allowed:
+        return target
+    return LEGACY_FALLBACK if LEGACY_FALLBACK[0] in allowed else None
+
 
 _RULE_TARGETS = {
     "PERF_CHANGE_REGRESSION": ("Operations", "Change impact"),

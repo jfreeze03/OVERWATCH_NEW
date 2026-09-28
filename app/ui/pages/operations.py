@@ -1313,7 +1313,7 @@ def _dq_row_volume_panel(preloaded=None) -> None:
     rv = preloaded or run(dq_sql.product_row_volume(28), page=_PAGE, key="dq_row_volume", tier="recent",
              source="ACCOUNT_USAGE.TABLE_DML_HISTORY x ENTITY_CATALOG")
     if rv.ok and rv.empty:
-        empty_state("needs_setup", "No registered-product tables added rows in the window. Register data products in the catalog (Decision Studio) to monitor their volume here.")
+        empty_state("needs_setup", "No registered-product tables added rows in the window. Register data products in the catalog (Control Room ▸ Entity 360) to monitor their volume here.")
         return
     if not guard(rv, "", setup_hint="Needs TABLE_DML_HISTORY and a populated ENTITY_CATALOG with DATA_PRODUCT."):
         return
@@ -2274,7 +2274,8 @@ def _tonight_glance_panel() -> None:
 def _builtin_objectives_panel(fc: dict, company: str = "ALL", days: int = 0, database: str = "",
                               schema_contains: str = "") -> None:
     """v4.597 (Option C): two READ-ONLY objectives that need no setup, replacing the retired
-    Decision Studio SLO editor on the surface where the pipeline is actually watched.
+    SLO editor (it lived on the page now called Proof) on the surface where the pipeline is
+    actually watched.
 
     - Nightly cycle done by the target: the SLA finish forecast's judged nights (``fc``, already
       computed by the panel below — zero extra reads), met vs late / failed / hung.
