@@ -51,8 +51,12 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
    commented; operator data survives; never DROP SCHEMA/DATABASE.
 5. **Migration guard + floor lockstep:** each V0XX opens with the not_ready
    guard and ends with the idempotent SCHEMA_VERSION insert; bump
-   `snowflake/validate.sql` ("V001..V0XX applied") and admin's
-   `_EXPECTED_MIGRATIONS` together (test enforces).
+   `snowflake/validate.sql` (both the `V001..V0XX applied` label and the
+   `BETWEEN 1 AND N) = N` count) and admin's `_EXPECTED_MIGRATIONS` together;
+   `tests/test_release_lockstep.py` and `tests/test_perf_budgets.py` derive
+   both from the migrations directory. Per-migration tests lock their own
+   content and run-doc line and **must not pin the tip or APP_VERSION** (the
+   guard test fails if they do).
 6. **Rebuild bundle is GENERATED** (`snowflake/rebuild/`): 02 = byte-concat of
    all migrations with `-- >>> name` banner sandwiches; 01/03/04/05 =
    banner + byte-copy of teardown/roles/backfill/validate. Regenerate after

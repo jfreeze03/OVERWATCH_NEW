@@ -100,3 +100,45 @@ def test_report_formats_without_error():
     text = usage_sim.format_report(report)
     assert "queries per interaction" in text
     assert "Brief" in text
+
+
+# Next-Fifty #49: the EXECUTED first-paint reads per page -- (ACCOUNT_USAGE reads, total reads) on a cold
+# DBA first paint, default scope. Steady state: the recording stubs answer every mart, so run_mart_first's
+# live leg never fires and a mart MISS is not counted. test_perf_budgets counts the ACCOUNT_USAGE literal in
+# page files (a lint proxy) and test_v451_trust pins the reachable table set; this pins what a cold render
+# actually ISSUES, and the total catches a non-ACCOUNT_USAGE read creeping onto first paint. Measured at
+# fcf12c2; default / last_month / company_all read the same (company_all Overview is one fewer), so the
+# default scope is enough.
+# Raising either number needs a justification comment (house law 3's spirit); lowering is welcome.
+_FIRST_PAINT_BUDGET = {
+    "Brief": (0, 12),
+    "Overview": (0, 14),
+    "Cost Intelligence": (1, 9),   # AU: the 'napp' batch member, SNOWPARK_CONTAINER_SERVICES_HISTORY (historical tier)
+    "Operations": (0, 7),
+    "Control Room": (0, 5),
+    "Proof": (0, 9),
+    "Alerts": (0, 4),
+    "Security": (3, 11),           # AU: gov_counts (USERS/CREDENTIALS/GRANTS_TO_USERS) + tag_probe + tag_cov
+    "Admin": (0, 3),
+    "Ask": (0, 1),
+}
+
+
+@pytest.fixture(scope="module")
+def _all_pages_report():
+    return usage_sim.simulate(pages=usage_sim.DEFAULT_PAGES, scopes={"default": {}}, measure_rerun=False)
+
+
+def test_first_paint_budget_covers_every_dba_page():
+    # a new DBA page must get a budget row (never skipped: this runs on the floor-compat leg too)
+    assert set(_FIRST_PAINT_BUDGET) == set(usage_sim.DEFAULT_PAGES)
+
+
+@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
+def test_first_paint_reads_stay_within_budget(_all_pages_report):
+    flows = _all_pages_report["flows"]
+    assert {f["page"] for f in flows} == set(_FIRST_PAINT_BUDGET)
+    over = {f["page"]: (f["account_usage"], f["total"], f["error"]) for f in flows
+            if f["error"] or f["account_usage"] > _FIRST_PAINT_BUDGET[f["page"]][0]
+            or f["total"] > _FIRST_PAINT_BUDGET[f["page"]][1]}
+    assert not over, f"first-paint reads (account_usage, total, error) over budget {_FIRST_PAINT_BUDGET}: {over}"

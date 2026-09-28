@@ -94,8 +94,5 @@ def test_action_queue_readers_select_period():
 # --- lockstep --------------------------------------------------------------
 
 def test_v083_validate_floor_and_deploy_docs_track_the_migration():
-    validate = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V161 applied" in validate
-    assert "BETWEEN 1 AND 161) = 161" in validate
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V083__action_estimate_period.sql" in (_ROOT / rel).read_text(encoding="utf-8")

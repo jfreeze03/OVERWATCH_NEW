@@ -73,8 +73,6 @@ def test_v148_proc_is_byte_identical_to_v123_apart_from_the_broadening():
 
 
 def test_validate_and_docs_track_v148():
-    val = _read("snowflake/validate.sql")
-    assert "V001..V161 applied" in val and "VERSION BETWEEN 1 AND 161) = 161" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V148__exec_board_ai_predicate_restore_coco.sql" in _read(rel)
 

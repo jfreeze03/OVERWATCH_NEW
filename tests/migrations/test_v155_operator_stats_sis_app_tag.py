@@ -79,8 +79,6 @@ def test_collector_matches_triage_self_noise_filters():
 
 
 def test_validate_and_docs_track_v155():
-    assert "V001..V161 applied" in _read("snowflake/validate.sql")
-    assert "VERSION BETWEEN 1 AND 161) = 161" in _read("snowflake/validate.sql")
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert _NAME in _read(rel), rel
 

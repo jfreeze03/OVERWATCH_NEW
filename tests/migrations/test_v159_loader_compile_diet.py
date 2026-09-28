@@ -510,8 +510,6 @@ def test_v159_plain_sql_parses():
 # branch until the integrator lands validate.sql / DEPLOYMENT.md / README.md / admin _EXPECTED_MIGRATIONS.
 # ---------------------------------------------------------------------------------------------------
 def test_validate_and_docs_track_v159():
-    val = _read("snowflake/validate.sql")
-    assert "V001..V161 applied" in val and "VERSION BETWEEN 1 AND 161) = 161" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert _NAME in _read(rel), rel
 

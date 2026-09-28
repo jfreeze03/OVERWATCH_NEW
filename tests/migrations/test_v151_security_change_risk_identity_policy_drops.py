@@ -391,14 +391,8 @@ def test_v151_plain_sql_parses():
 
 
 # ---------------------------------------------------------------------------------------------
-# shared lockstep, pinned to the wave-2a tip (V154). The integrator lands validate.sql, the docs
-# and admin _EXPECTED_MIGRATIONS once for V151-V154, so these fail on the slice branch alone.
+# shared lockstep (docs / admin); the validate tip is derived in tests/test_release_lockstep.py.
 # ---------------------------------------------------------------------------------------------
-def test_validate_floor_pins_the_wave_tip():
-    val = _read("snowflake/validate.sql")
-    assert "V001..V161 applied" in val and "VERSION BETWEEN 1 AND 161) = 161" in val
-
-
 def test_docs_and_admin_track_v151():
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert _V151_NAME in _read(rel), rel

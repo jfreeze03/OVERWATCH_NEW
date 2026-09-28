@@ -28,6 +28,15 @@ or module added tomorrow is covered without anyone remembering to add it:
 - test_p4_org_reconciliation — billed (ORGANIZATION_USAGE.USAGE_IN_CURRENCY)
   vs computed (credits x rate); pins the cloud-services rebate that
   formulas.billed_credits exists to make unforgettable
+- test_release_lockstep — derives the migration tip (both validate.sql
+  literals + the rebuild copy, the DEPLOYMENT/README run lists, the bundle
+  name, V001..VNNN contiguity) and APP_VERSION (= the dated top CHANGELOG
+  heading) from the repo, and FAILS if any test pins the tip or APP_VERSION
+  again — a new migration or release edits no per-migration test
+- tests/_source.py — the shared source reader (not collected): `read`,
+  `page_source` (a page shell + the parts package it owns), `migration_tip`,
+  `changelog_entry` (one CHANGELOG section by heading). Import it as
+  `from tests._source import ...`; new tests use it instead of a local `_src`
 
 history_locks/ — frozen locks from earlier feature waves (V012—V018 era,
 P1/P2 polish rounds). They still run in CI; they just don't need to crowd

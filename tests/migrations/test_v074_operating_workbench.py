@@ -261,7 +261,6 @@ def test_action_center_and_exact_navigation_are_wired() -> None:
 
 def test_v074_coverage_surfaces_move_in_lockstep() -> None:
     teardown = (_ROOT / "snowflake" / "teardown.sql").read_text(encoding="utf-8")
-    validate = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
     deploy = (_ROOT / "DEPLOYMENT.md").read_text(encoding="utf-8")
     for name in (
         "ACTION_ACTIVITY",
@@ -272,5 +271,4 @@ def test_v074_coverage_surfaces_move_in_lockstep() -> None:
         "SLO_OBJECTIVES",
     ):
         assert name in teardown
-    assert "V001..V161 applied" in validate
     assert "V074__operating_workbench_foundation.sql" in deploy
