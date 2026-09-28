@@ -31,7 +31,8 @@ whole feature lives on branch feature/ask-overwatch, so `git checkout main` also
 reverts it cleanly.)
 The Admin 'Ask demand' panel and mart_sql.ask_demand_summary read only APP_USAGE and
 survive a revert. The Ask telemetry tests live in tests/test_ask_registry.py and are
-deleted with it.
+deleted with it; also drop the "Ask" row from tests/test_usage_sim.py _FIRST_PAINT_BUDGET
+(its coverage test requires a budget row for exactly the DBA pages).
 """
 
 from __future__ import annotations

@@ -52,10 +52,12 @@ _ASK_LOG_KEY = "_ow_ask_logged"
 def _log_ask(kind: str, question: str, section: str) -> None:
     """#47: one APP_USAGE row per distinct question outcome — reruns (window/AI toggle/company) never re-log.
 
-    Keeps only the LAST signature, so the dedupe state stays one string. Answered/failed rows
-    carry the answer type; refused rows carry question_stem (8 words, digits masked)."""
+    Keeps only the LAST signature, so the dedupe state stays one string. The signature is the
+    whole normalised question (session-only, never stored), so re-asking with a different number
+    ('last 7 days' -> 'last 30 days') logs again. Answered/failed rows carry the answer type;
+    refused rows carry question_stem (8 words, digits masked)."""
     try:
-        sig = f"{kind}|{question_stem(question, max_words=64)}"
+        sig = f"{kind}|{' '.join((question or '').lower().split())}"
         if st.session_state.get(_ASK_LOG_KEY) == sig:
             return
         st.session_state[_ASK_LOG_KEY] = sig

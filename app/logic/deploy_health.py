@@ -23,6 +23,7 @@ import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from importlib import metadata
+from typing import Any
 
 import pandas as pd
 
@@ -138,7 +139,7 @@ def runtime_caption(versions: Mapping[str, str]) -> str:
 # --------------------------------------------------------------------------- #
 
 TASK_HEALTH_COLUMNS = (
-    "TASK_NAME", "STATUS", "STATE", "RUNS_ON", "SUCCEEDED_N", "FAILED_N", "SKIPPED_N",
+    "TASK_NAME", "STATUS", "STATE", "RUNS_ON", "SUCCEEDED_N", "FAILED_N", "SKIPPED_N", "CANCELLED_N",
     "LAST_SUCCESS_AT", "LAST_FAILURE_AT", "LAST_ERROR_MESSAGE", "NOTE",
 )
 _SEVERITY_ORDER = {"bad": 0, "warn": 1, "info": 2, "ok": 3}
@@ -263,6 +264,7 @@ def _run_summary(runs: pd.DataFrame) -> tuple[dict[str, dict], float | None, boo
     succeeded = _numbers(_series(runs, cols, "succeeded_n"))
     failed = _numbers(_series(runs, cols, "failed_n"))
     skipped = _numbers(_series(runs, cols, "skipped_n"))
+    cancelled = _numbers(_series(runs, cols, "cancelled_n"))
     last_ok = _times(_series(runs, cols, "last_success_at"))
     last_fail = _times(_series(runs, cols, "last_failure_at"))
     errors = _series(runs, cols, "last_error_message")
@@ -275,6 +277,7 @@ def _run_summary(runs: pd.DataFrame) -> tuple[dict[str, dict], float | None, boo
             continue                                  # the NULL-name row only carries HISTORY_ROWS
         out[name] = {
             "succeeded": succeeded.iloc[i], "failed": failed.iloc[i], "skipped": skipped.iloc[i],
+            "cancelled": cancelled.iloc[i],
             "last_ok": last_ok.iloc[i], "last_fail": last_fail.iloc[i],
             "error": _text(errors.iloc[i]) or None,
         }
@@ -287,6 +290,23 @@ def _count(value: object) -> float:
     except (TypeError, ValueError):
         return 0.0
     return number if math.isfinite(number) else 0.0
+
+
+def _grade_runs(run: Mapping[str, Any]) -> tuple[str, str, str]:
+    """(status, severity, note) for a STARTED task from its 24h run counts: Failing (bad) when the newest
+    failure is not followed by a success, Recovered / Skipped runs / Cancelled runs (warn), else Running."""
+    n_failed, n_skipped = _count(run.get("failed")), _count(run.get("skipped"))
+    n_cancelled = _count(run.get("cancelled"))
+    last_ok, last_fail = run.get("last_ok", pd.NaT), run.get("last_fail", pd.NaT)
+    if n_failed > 0:
+        if pd.notna(last_ok) and pd.notna(last_fail) and last_ok > last_fail:
+            return "Recovered", "warn", "failed in the window, succeeded since"
+        return "Failing", "bad", ""
+    if n_skipped > 0:
+        return "Skipped runs", "warn", "a run was skipped (the previous run was still going, or a condition was false)"
+    if n_cancelled > 0:
+        return "Cancelled runs", "warn", "a run was cancelled (by an operator, or its graph run was cancelled)"
+    return "Running", "ok", ""
 
 
 def task_health(tasks: pd.DataFrame | None, runs: pd.DataFrame | None, *, expected: Iterable[str],
@@ -323,7 +343,7 @@ def task_health(tasks: pd.DataFrame | None, runs: pd.DataFrame | None, *, expect
         notes.append(NOTE_HISTORY_TRUNCATED.format(limit=int(result_limit)))
 
     rows: list[dict] = []
-    started = suspended = failing = 0
+    started = suspended = failing = opt_in_failing = 0
     for name in sorted(expected_set | set(live)):
         task = live.get(name)
         run = run_map.get(name, {})
@@ -335,28 +355,24 @@ def task_health(tasks: pd.DataFrame | None, runs: pd.DataFrame | None, *, expect
         elif name in retired_set:
             status, sev, note = "Retired", "warn", "dropped by a migration not yet applied"
         elif name in opt_in_map:
-            status, sev, note = "Opt-in", "ok", f"optional — installed by {opt_in_map[name]}"
+            # review r1: an installed, STARTED opt-in task is a real job -- grade its runs (a failing one is
+            # never green); suspended/stateless stays 'Opt-in'. Kept out of the expected-set counters.
+            note = f"optional — installed by {opt_in_map[name]}"
+            status, sev = "Opt-in", "ok"
+            if task["state"] == "started":
+                graded, g_sev, g_note = _grade_runs(run)
+                if graded != "Running":
+                    status, sev = graded, g_sev
+                    note = f"{note}; {g_note}" if g_note else note
+                    opt_in_failing += int(graded == "Failing")
         elif name not in expected_set:
             status, sev = "Not in this build", "warn"
             note = ("live, but no migration in this build creates it — a newer migration's task "
                     "(redeploy the app) or one made by hand")
         elif task["state"] == "started":
             started += 1
-            n_failed, n_skipped = _count(run.get("failed")), _count(run.get("skipped"))
-            last_ok, last_fail = run.get("last_ok", pd.NaT), run.get("last_fail", pd.NaT)
-            if n_failed > 0:
-                recovered = pd.notna(last_ok) and pd.notna(last_fail) and last_ok > last_fail
-                if recovered:
-                    status, sev = "Recovered", "warn"
-                    note = "failed in the window, succeeded since"
-                else:
-                    status, sev = "Failing", "bad"
-                    failing += 1
-            elif n_skipped > 0:
-                status, sev = "Skipped runs", "warn"
-                note = "a run was skipped (the previous run was still going, or a condition was false)"
-            else:
-                status, sev = "Running", "ok"
+            status, sev, note = _grade_runs(run)
+            failing += int(status == "Failing")
         elif task["state"]:
             suspended += 1
             if name in suspended_ok_map:
@@ -378,6 +394,7 @@ def task_health(tasks: pd.DataFrame | None, runs: pd.DataFrame | None, *, expect
             "SUCCEEDED_N": run.get("succeeded", math.nan),
             "FAILED_N": run.get("failed", math.nan),
             "SKIPPED_N": run.get("skipped", math.nan),
+            "CANCELLED_N": run.get("cancelled", math.nan),
             "LAST_SUCCESS_AT": run.get("last_ok", pd.NaT),
             "LAST_FAILURE_AT": run.get("last_fail", pd.NaT),
             "LAST_ERROR_MESSAGE": run.get("error"),
@@ -387,7 +404,7 @@ def task_health(tasks: pd.DataFrame | None, runs: pd.DataFrame | None, *, expect
     frame = pd.DataFrame(rows).sort_values(["_SEV", "TASK_NAME"], kind="stable")
     sevs = set(frame["_SEV"])
     frame = frame.drop(columns=["_SEV"]).reset_index(drop=True)
-    for col in ("SUCCEEDED_N", "FAILED_N", "SKIPPED_N"):
+    for col in ("SUCCEEDED_N", "FAILED_N", "SKIPPED_N", "CANCELLED_N"):
         frame[col] = _numbers(frame[col])
     for col in ("LAST_SUCCESS_AT", "LAST_FAILURE_AT"):
         frame[col] = _times(frame[col])
@@ -402,5 +419,6 @@ def task_health(tasks: pd.DataFrame | None, runs: pd.DataFrame | None, *, expect
         # A failed, invisible or truncated run history cannot prove health: never green.
         severity = "info"
     headline = (f"{started} of {len(expected_set)} OVERWATCH tasks started · {suspended} suspended · "
-                f"{failing} failing (last 24h)")
+                f"{failing} failing (last 24h)"
+                + (f" · {opt_in_failing} opt-in failing" if opt_in_failing else ""))
     return TaskHealth(state, severity, headline, frame[list(TASK_HEALTH_COLUMNS)], tuple(notes))

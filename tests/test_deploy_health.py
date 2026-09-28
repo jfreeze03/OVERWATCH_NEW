@@ -334,6 +334,9 @@ def test_task_run_summary_builder():
             in sql)
     assert "CONVERT_TIMEZONE('America/Chicago'" in sql and "HISTORY_ROWS" in sql
     assert "'FAILED_AND_AUTO_SUSPENDED'" in sql and "COUNT_IF(h.STATE = 'SKIPPED')" in sql
+    # review r1: a CANCELLED run (operator cancel / cancelled graph run) is counted apart, never a failure
+    assert "COUNT_IF(h.STATE = 'CANCELLED') AS CANCELLED_N" in sql
+    assert "h.STATE IN ('FAILED', 'FAILED_AND_AUTO_SUSPENDED')" in sql and sql.count("'CANCELLED'") == 1
     assert "ACCOUNT_USAGE" not in sql
     assert "DATEADD('hour', -168," in ops_sql.overwatch_task_run_summary(999999)
     assert "DATEADD('hour', -24," in ops_sql.overwatch_task_run_summary(0)
@@ -343,8 +346,8 @@ def test_task_run_summary_builder():
 def test_task_run_summary_parses_and_is_a_canary():
     sqlglot = pytest.importorskip("sqlglot")
     expr = sqlglot.parse_one(ops_sql.overwatch_task_run_summary(24), read="snowflake")
-    assert expr.named_selects == ["TASK_NAME", "SUCCEEDED_N", "FAILED_N", "SKIPPED_N", "LAST_SUCCESS_AT",
-                                  "LAST_FAILURE_AT", "LAST_ERROR_MESSAGE", "HISTORY_ROWS"]
+    assert expr.named_selects == ["TASK_NAME", "SUCCEEDED_N", "FAILED_N", "SKIPPED_N", "CANCELLED_N",
+                                  "LAST_SUCCESS_AT", "LAST_FAILURE_AT", "LAST_ERROR_MESSAGE", "HISTORY_ROWS"]
     from app.data.canary import CANARIES
     names = {n for n, _ in CANARIES}
     assert "ops.overwatch_task_run_summary" in names
@@ -445,3 +448,70 @@ def test_setup_progress_counts_only_known_migrations(monkeypatch):
     n = len(admin._EXPECTED_MIGRATIONS)
     assert row["DETAIL"] == f"{n} of {n} applied; 1 newer than this build — redeploy the app"
     assert row["STATUS"] == "Partial" and "snow streamlit deploy --replace" in row["FIX"]
+
+
+# --------------------------------------------------------------------------- #
+# review r1
+# --------------------------------------------------------------------------- #
+def test_cancel_only_runs_are_a_warning_never_failing():
+    runs = _runs({"TASK_LOAD_DAILY": {"CANCELLED_N": 1.0, "LAST_ERROR_MESSAGE": None}})
+    h = dh.task_health(_show(), runs, **_KW)
+    assert _status(h, "TASK_LOAD_DAILY") == "Cancelled runs"
+    assert h.severity == "warn" and "0 failing" in h.headline
+    assert h.rows.set_index("TASK_NAME").loc["TASK_LOAD_DAILY", "CANCELLED_N"] == 1
+
+
+def test_a_started_opt_in_task_is_graded_by_its_runs():
+    runs = _runs()
+    extra = pd.DataFrame([{"TASK_NAME": "TASK_REFRESH_ML_FORECAST", "SUCCEEDED_N": 0.0, "FAILED_N": 1.0,
+                           "SKIPPED_N": 0.0, "LAST_SUCCESS_AT": pd.NaT, "LAST_FAILURE_AT": _T0,
+                           "LAST_ERROR_MESSAGE": "Forecast model not found", "HISTORY_ROWS": 400.0}])
+    h = dh.task_health(_show(extra=("TASK_REFRESH_ML_FORECAST",)), pd.concat([runs, extra], ignore_index=True), **_KW)
+    assert _status(h, "TASK_REFRESH_ML_FORECAST") == "Failing"
+    assert h.severity == "bad" and h.headline.endswith(" · 1 opt-in failing")
+    assert "0 failing (last 24h)" in h.headline                 # the expected-set counter is unchanged
+    assert "optional" in h.rows.set_index("TASK_NAME").loc["TASK_REFRESH_ML_FORECAST", "NOTE"]
+    # suspended or clean opt-in tasks stay 'Opt-in' (ok)
+    quiet = dh.task_health(_show({"TASK_ALERT_DRILL": {"state": "suspended"}}, extra=("TASK_ALERT_DRILL",)),
+                           _runs(), **_KW)
+    assert _status(quiet, "TASK_ALERT_DRILL") == "Opt-in" and "opt-in failing" not in quiet.headline
+
+
+def test_migrations_tabs_agree_with_the_header_banner():
+    adm = _src("app/ui/pages/admin.py")
+    fresh = _body(adm, "_fresh_applied_versions")
+    assert 'key="schema_ahead_check", tier="recent"' in fresh          # the banner's own read (cache hit)
+    banner = _body(adm, "_schema_ahead_banner")
+    assert 'key="schema_ahead_check", tier="recent"' in banner
+    tab = _body(adm, "_migrations_tab")
+    assert tab.index("applied |= _fresh_applied_versions()") < tab.index(
+        "drift = deploy_health.schema_drift(applied, _EXPECTED_MIGRATIONS)")
+    # the task reads do not depend on SCHEMA_VERSION: the unreadable branch still offers Task health
+    unreadable = tab[tab.index("if not res.ok:"):tab.index("applied = set()")]
+    assert "_task_health_panel()" in unreadable and unreadable.rstrip().endswith("return")
+    setup = _body(adm, "_setup_progress_tab")
+    assert setup.index("applied |= _fresh_applied_versions()") < setup.index("drift = deploy_health")
+
+
+def test_setup_progress_sees_a_migration_the_metadata_read_has_not(monkeypatch):
+    """The 4h metadata read still says V001..tip, the header's 5-minute read already sees tip+1."""
+    from app.ui.pages import admin
+    tip = max(admin._EXPECTED_MIGRATIONS)
+    tables: list[pd.DataFrame] = []
+
+    def _run(sql, *, key, **_k):
+        if key == "setup_schema_version":
+            return QueryResult(df=pd.DataFrame({"VERSION": list(range(1, tip + 1))}), ok=True)
+        if key == "schema_ahead_check":
+            return QueryResult(df=pd.DataFrame({"VERSION": list(range(1, tip + 2))}), ok=True)
+        return QueryResult(ok=True)
+
+    monkeypatch.setattr(admin, "run", _run)
+    monkeypatch.setattr(admin, "panel_help", lambda *_a, **_k: None)
+    monkeypatch.setattr(admin, "empty_state", lambda *_a, **_k: None)
+    monkeypatch.setattr(admin, "load_settings", lambda _p: {})
+    monkeypatch.setattr(admin, "styled_table", lambda df, **_k: tables.append(df))
+    monkeypatch.setattr(admin, "st", SimpleNamespace(warning=lambda *_a: None, caption=lambda *_a: None))
+    admin._setup_progress_tab()
+    row = tables[0].set_index("STEP").loc["Database migrations"]
+    assert row["STATUS"] == "Partial" and "1 newer than this build" in row["DETAIL"]

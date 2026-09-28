@@ -560,7 +560,8 @@ Restore = migrations in order -> roles.sql -> validate.sql (all rows OK).
 6. Open Admin → Migration status (no drift), Source freshness (all fresh),
    Self-cost (task + app spend sane); no 'newer than this build' warning on
    Admin; Migrations & freshness ▸ Task health shows no Suspended, Failing or
-   Not visible rows.
+   Not visible rows (TASK_ALERT_NOTIFY reads "Suspended (expected)" until a
+   delivery integration exists — that one is fine).
 7. Tag the release; update `CHANGELOG.md`.
 
 

@@ -7,10 +7,14 @@ App-only, no migration. Next Fifty wave 3, Slice A: ranks 49, 50, 47 (logging on
 - **Admin says when the database is ahead of the app (#26).** Every Admin section warns when SCHEMA_VERSION holds
   migrations this build does not know (for example V162 applied before `snow streamlit deploy --replace`), names them,
   and says to redeploy. Migrations & freshness no longer claims the build "expects exactly these" without checking for
-  newer rows, and Setup progress counts only known migrations (it could print "162 of 161").
+  newer rows, and Setup progress counts only known migrations (it could print "162 of 161"). Both tabs also
+  read the header's 5-minute SCHEMA_VERSION check, so for the hours after a migration is applied they agree with
+  the banner instead of saying "none newer".
 - **Task health (#26).** Migrations & freshness ▸ Check OVERWATCH task health reads SHOW TASKS plus the last 24h of
   INFORMATION_SCHEMA.TASK_HISTORY and grades the 32 tasks the migrations leave live:
-  - running, suspended, failing, recovered, skipped runs, not visible, not in this build, retired, opt-in;
+  - running, suspended, failing, recovered, skipped runs, cancelled runs, not visible, not in this build,
+    retired, opt-in (a started opt-in task is graded by its runs, so a failing one is never green);
+  - a cancelled run (an operator cancel, a cancelled graph run) is a warning, never a failure;
   - a failed or empty read says so and is never shown as healthy;
   - a history read that hits its 10,000-row limit says it may be incomplete and is never shown green.
 - **task_audit.sql corrected (#26).** It drops TASK_SNAPSHOT_FRESHNESS (dropped by V041) and adds TASK_LOAD_APP_COST,
@@ -40,6 +44,11 @@ App-only, no migration. Next Fifty wave 3, Slice A: ranks 49, 50, 47 (logging on
   and Ask rows ride the existing buffered usage INSERT (one per rerun). ACCOUNT_USAGE budgets and reachable sets are
   unchanged.
 - **Privacy.** RUNBOOK §13 now discloses section visits, Ask stems and the viewer/build stored with app errors.
+  A failed usage write now logs only the INSERT's target, columns and row count, never the row values (it used to
+  copy up to 200 characters, which could include a viewer name or a refused-question stem, into APP_ERROR_LOG).
+- **Tests never touch Snowflake.** A new tests/conftest.py refuses every Snowflake session under pytest and points
+  the connector at an empty config folder. Before this, a plain `pytest` run on a machine with a default Snowflake
+  connection could run real reads and write APP_ERROR_LOG / APP_USAGE rows through the page harnesses.
 - **Owner-side.** App-only: `snow streamlit deploy --replace`. No migration and no runbox step. After deploying, Admin ▸
   Migrations & freshness ▸ Check OVERWATCH task health is the post-deploy check.
 

@@ -618,6 +618,11 @@ def test_ask_logs_each_outcome_once_per_question(monkeypatch):
     assert len(calls) == 2 and calls[-1][0] == "ask_refused"
     ask._log_ask("ask_answered", "which user is causing spend spikes", "spend_spike_by_user")
     assert len(calls) == 3                        # only the LAST signature is kept (bounded state)
+    # review r1: re-asking with a different number is a new question (the signature is the whole text)
+    ask._log_ask("ask_answered", "which account is driving credits in the last 7 days", "spend_spike_by_user")
+    ask._log_ask("ask_answered", "which account is driving credits in the last 30 days", "spend_spike_by_user")
+    ask._log_ask("ask_answered", "Which account is driving credits in the last 30  days", "spend_spike_by_user")
+    assert len(calls) == 5                        # case / spacing are the same question
 
     def _boom(*a, **k):
         raise RuntimeError("buffer gone")

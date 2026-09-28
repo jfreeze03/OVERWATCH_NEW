@@ -451,3 +451,36 @@ def test_runbook_discloses_section_ask_and_error_viewer_telemetry():
                    "8-word", "digits masked", "APP_ERROR_LOG.CONTEXT", "viewer name", "app build",
                    "traceback", "ERROR_LOG_RETENTION_DAYS", "APP_USAGE_RETENTION_DAYS", "auditors will ask"):
         assert needle in block, needle
+
+
+def test_sub_view_relogs_when_its_parent_section_is_visited_again(monkeypatch):
+    """Review r1: Tasks -> Warehouses -> Tasks re-logs 'Tasks ▸ Health' exactly as it re-logs 'Tasks'
+    (the nested token carries the page's section-visit sequence)."""
+    from app.ui.components import _log_section_visit
+    state: dict = {"_ow_entry_page": "Operations", "_ow_page_entry": 5, "ops_section": "Tasks"}
+    calls = _section_harness(monkeypatch, state)
+    _log_section_visit("ops_section", "Tasks", nested=False)
+    _log_section_visit("ops_task_view", "Health", nested=True)
+    _log_section_visit("ops_task_view", "Health", nested=True)          # a rerun: no re-log
+    state["ops_section"] = "Warehouses"
+    _log_section_visit("ops_section", "Warehouses", nested=False)
+    state["ops_section"] = "Tasks"
+    _log_section_visit("ops_section", "Tasks", nested=False)
+    _log_section_visit("ops_task_view", "Health", nested=True)          # the parent was visited again
+    assert [c[2] for c in calls] == ["Tasks", "Tasks ▸ Health", "Warehouses", "Tasks", "Tasks ▸ Health"]
+
+
+def test_failed_usage_flush_logs_the_insert_head_not_the_row_values(monkeypatch):
+    """Review r1: a failed telemetry flush used to copy 200 chars of the INSERT (viewer name, section
+    labels, refused-question stems) into APP_ERROR_LOG.CONTEXT; now only the target, columns and row count."""
+    from app.core import query
+    sql = (_USAGE_PREFIX + "SELECT 'Ask', 'who is jane doe', NULL, 'ask_refused', FALSE, 'JDOE'"
+           " UNION ALL SELECT 'Ask', NULL, 120, 'page_visit', FALSE, 'JDOE'")
+    head = query._async_sql_head(sql)
+    assert head.startswith("INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, SECTION, RENDER_MS")
+    assert "jane" not in head and "JDOE" not in head and "(2 row(s); values not logged)" in head
+    seen: list = []
+    monkeypatch.setattr(query, "record_error", lambda page, exc, context="": seen.append(context))
+    monkeypatch.setattr(query, "get_session", lambda: (_ for _ in ()).throw(RuntimeError("no session")))
+    assert query.execute_statement_async(sql, page="Ask") is False
+    assert seen and "jane" not in seen[-1] and seen[-1].startswith("execute_statement_async: INSERT INTO")

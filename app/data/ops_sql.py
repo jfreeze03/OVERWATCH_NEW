@@ -349,11 +349,12 @@ def overwatch_task_run_summary(hours: int = 24) -> str:
     ``LEFT JOIN`` from the one-row ``n`` CTE guarantees a (TASK_NAME NULL) row that carries
     HISTORY_ROWS even when the limit left no OVERWATCH rows; ``logic.deploy_health.task_health``
     ignores NULL-name rows for statuses and reads HISTORY_ROWS >= TASK_HISTORY_RESULT_LIMIT as
-    "may be incomplete". FAILED_N counts FAILED, FAILED_AND_AUTO_SUSPENDED and CANCELLED runs.
+    "may be incomplete". FAILED_N counts FAILED and FAILED_AND_AUTO_SUSPENDED runs; CANCELLED runs (an
+    operator cancel, a cancelled graph run) are CANCELLED_N, never a failure (task_recent_states agrees).
     Timestamps pinned to the account's Central clock (TIMEZONE STANDARD)."""
     from app.logic.formulas import ACCOUNT_TIMEZONE
     hours = max(1, min(int(hours or 24), 168))
-    fail = "h.STATE IN ('FAILED', 'FAILED_AND_AUTO_SUSPENDED', 'CANCELLED')"
+    fail = "h.STATE IN ('FAILED', 'FAILED_AND_AUTO_SUSPENDED')"
     fail_at = f"IFF({fail}, COALESCE(h.COMPLETED_TIME, h.SCHEDULED_TIME), NULL)"
     return f"""
 WITH h AS (
@@ -367,6 +368,7 @@ SELECT h.NAME AS TASK_NAME,
        COUNT_IF(h.STATE = 'SUCCEEDED') AS SUCCEEDED_N,
        COUNT_IF({fail}) AS FAILED_N,
        COUNT_IF(h.STATE = 'SKIPPED') AS SKIPPED_N,
+       COUNT_IF(h.STATE = 'CANCELLED') AS CANCELLED_N,
        CONVERT_TIMEZONE('{ACCOUNT_TIMEZONE}', MAX(IFF(h.STATE = 'SUCCEEDED', h.COMPLETED_TIME, NULL)))::TIMESTAMP_NTZ AS LAST_SUCCESS_AT,
        CONVERT_TIMEZONE('{ACCOUNT_TIMEZONE}', MAX({fail_at}))::TIMESTAMP_NTZ AS LAST_FAILURE_AT,
        MAX_BY(LEFT(h.ERROR_MESSAGE, 300), {fail_at}) AS LAST_ERROR_MESSAGE,

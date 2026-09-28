@@ -758,6 +758,18 @@ def _context_section() -> None:
     _schema_ahead_banner()
 
 
+def _fresh_applied_versions() -> set[int]:
+    """#26 review r1: the header banner's 5-minute (recent-tier) SCHEMA_VERSION read. The tabs union it into
+    their metadata-tier set so, right after a migration is applied, the Migrations tab and Setup progress
+    agree with the banner instead of saying 'none newer' / 'Done' for up to 4h. Same SQL, cap and scope as
+    the banner's read, so on the same rerun it is a cache hit, not a new statement."""
+    sv = run(mart_sql.schema_version(), page=_PAGE, key="schema_ahead_check", tier="recent",
+             source="SCHEMA_VERSION", probe=True)
+    if not sv.usable() or "VERSION" not in sv.df.columns:
+        return set()
+    return deploy_health.applied_versions(sv.df["VERSION"])
+
+
 def _schema_ahead_banner() -> None:
     """#26: on EVERY Admin section (the default section is Settings, so a tab-only warning hides).
     Tier ``recent`` on purpose: the shell floor gate keeps the metadata-tier SCHEMA_VERSION cache warm
@@ -953,11 +965,13 @@ def _migrations_tab() -> None:
     if not res.ok:
         empty_state("unavailable", "Cannot read SCHEMA_VERSION.", detail=res.error)
         empty_state("needs_setup", "Run snowflake/migrations/V001__core.sql first.")
+        _task_health_panel()      # review r1: the task reads do not depend on SCHEMA_VERSION
         return
     applied = set()
     if not res.empty:
         applied = {int(v) for v in pd.to_numeric(res.df["VERSION"], errors="coerce").dropna()}
         styled_table(res.df)
+    applied |= _fresh_applied_versions()
     drift = deploy_health.schema_drift(applied, _EXPECTED_MIGRATIONS)
     missing = [(n, name) for n, name in _EXPECTED_MIGRATIONS.items() if n not in applied]
     if missing:
@@ -975,10 +989,10 @@ def _migrations_tab() -> None:
     elif not drift.ahead:
         empty_state("clean", deploy_health.migrations_clean_message(drift))
     if drift.ahead:
-        # #26: the redeploy warning itself is the header banner (every Admin section); this tab's
-        # read is metadata-tier, so it can trail the header's 5-minute read — the caption points up.
+        # #26: the redeploy warning itself is the header banner (every Admin section); the table above
+        # is the 4h metadata read, so the newest rows can be missing from it for a while.
         st.caption(f"Applied but newer than this build: {deploy_health.version_span(drift.ahead)} — "
-                   "see the redeploy warning above.")
+                   "see the redeploy warning above (the table can lag a freshly applied migration).")
 
     fh = run(mart_sql.flyway_history(), page=_PAGE, key="flyway_history", tier="recent",  # r24 #8: external ledger probe
              source="flyway_schema_history (Flyway ledger)", probe=True)
@@ -1411,9 +1425,10 @@ def _performance_tab() -> None:
         "Streamlit-in-Snowflake — ALTER SESSION is rejected there, and they are deliberately not sent "
         "per statement until the read durations are measured. Reads are governed by "
         f"STATEMENT_TIMEOUT_IN_SECONDS on {APP_WAREHOUSE}; V002 sets {humanize_duration(_V002_APP_WH_TIMEOUT_S, 's')} "
-        "there. If the warehouse value is unset the account's applies, and if neither is set, Snowflake's own "
-        f"default of {humanize_duration(_SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S, 's')} "
-        f"({_SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S} s). Since "
+        "there. Snowflake enforces the lower non-zero of the warehouse value and the session's (inherited "
+        "from the user or account), so a lower account or user value also caps reads; with neither set "
+        f"anywhere, Snowflake's own default of {humanize_duration(_SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S, 's')} "
+        f"({_SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S} s) applies. Since "
         f"{_STMT_PARAMS_SINCE}, each Cortex evaluation also sends its own {CORTEX_TIMEOUT_SECONDS}s "
         "per-statement ceiling (the lower of the two wins). That is unverified under Streamlit-in-Snowflake, "
         "which is confirmed to override per-statement query tags. To enforce a tighter read ceiling, SET it "
@@ -1962,6 +1977,8 @@ def _setup_progress_tab() -> None:
     applied: set[int] = set()
     if sv.ok and not sv.empty:
         applied = {int(v) for v in pd.to_numeric(sv.df["VERSION"], errors="coerce").dropna()}
+    if sv.ok:
+        applied |= _fresh_applied_versions()      # review r1: agree with the header banner
     drift = deploy_health.schema_drift(applied, _EXPECTED_MIGRATIONS)
     # Single migration rollup — the per-version applied/missing breakdown lives on
     # the Migrations & freshness tab (SCHEMA_VERSION + 'Missing migrations'); this

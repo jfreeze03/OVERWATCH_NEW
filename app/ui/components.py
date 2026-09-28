@@ -210,15 +210,18 @@ def _log_section_visit(key: str, label: str, *, nested: bool) -> None:
 
     The dedupe token rides main._mark_page_entry's page-entry sequence, so a mid-render
     st.rerun() on the same page never re-logs, while leaving and coming back (P→Q→P) does.
-    A nested bar (deep_link=False) logs 'Parent ▸ Child' and re-logs under a new parent."""
+    A nested bar (deep_link=False) logs 'Parent ▸ Child' once per visit of its parent section: the
+    token carries the page's section-visit sequence, bumped on every logged page-level visit, so
+    Tasks → Warehouses → Tasks re-logs 'Tasks ▸ Health' as it re-logs 'Tasks' (review r1)."""
     try:
         page = str(st.session_state.get("_ow_entry_page") or "")
         if not page:
             return                      # not rendered through main() (tests / harness)
         entry = st.session_state.get("_ow_page_entry")
+        seq_key = f"_ow_secvis_seq_{page}"
         if nested:
             parent = str(st.session_state.get(_PAGE_SECTION_KEY.get(page, ""), "") or "")
-            token: tuple = (entry, parent, label)
+            token: tuple = (entry, parent, st.session_state.get(seq_key, 0), label)
             kind = "subsection_visit"
             section = f"{parent} ▸ {label}" if parent else label
         else:
@@ -227,6 +230,8 @@ def _log_section_visit(key: str, label: str, *, nested: bool) -> None:
         if st.session_state.get(sentinel) == token:
             return
         st.session_state[sentinel] = token
+        if not nested:
+            st.session_state[seq_key] = int(st.session_state.get(seq_key, 0) or 0) + 1
         log_ui_event(kind, page=page, section=section[:80])
     except Exception:  # noqa: BLE001 - usage telemetry never breaks navigation
         pass
