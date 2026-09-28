@@ -73,6 +73,9 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("ops.top_queries_by_elapsed", lambda: ops_sql.top_queries_by_elapsed(1, "ALFA", 1)),
     ("ops.failures_by_error", lambda: ops_sql.failures_by_error(1, "ALFA")),
     ("ops.task_runs", lambda: ops_sql.task_runs(1, "ALFA")),
+    # #26 Task health run summary (INFORMATION_SCHEMA). Its SHOW TASKS twin is not a canary: the tab
+    # EXPLAINs every entry, and SHOW cannot be EXPLAINed.
+    ("ops.overwatch_task_run_summary", lambda: ops_sql.overwatch_task_run_summary(24)),
     ("ops.warehouse_pressure", lambda: ops_sql.warehouse_pressure(1, "ALFA")),
     ("ops.lock_contention", lambda: ops_sql.lock_contention(1)),
     ("security.users_without_mfa", lambda: security_sql.users_without_mfa("ALFA")),

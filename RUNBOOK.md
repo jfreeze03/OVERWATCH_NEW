@@ -686,9 +686,10 @@ Snowflake release note that mentions ACCOUNT_USAGE, and after migrations.
 ## 15. Troubleshooting
 
 **A page shows "not installed yet."** Admin → Migrations: compare
-SCHEMA_VERSION to the expected set (V001..V124, admin.py `_EXPECTED_MIGRATIONS`); run what's missing, then roles.sql.
+SCHEMA_VERSION to the expected set (V001 through the repo tip, admin.py `_EXPECTED_MIGRATIONS`); run what's missing, then roles.sql.
 
-**Everything is stale.** `SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;` —
+**Everything is stale.** `SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;` (or Admin ▸ Migrations &
+freshness ▸ Task health) —
 suspended tasks are the usual cause (a failed run suspends after retries).
 `SELECT * FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY()) ORDER BY
 SCHEDULED_TIME DESC` for the error; fix; `ALTER TASK ... RESUME;`.

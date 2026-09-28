@@ -157,6 +157,10 @@ def _stub_shaped(monkeypatch):
             monkeypatch.setattr(module, "load_settings", lambda _page: dict(settings))
     monkeypatch.setattr(components, "load_settings", lambda _page: dict(settings))
     monkeypatch.setattr(ai_panel, "cortex_complete", lambda *a, **k: (True, "stub"))
+    # v4.599: the buffered telemetry flush reaches get_session() -> st.connection('snowflake'); with a
+    # default connection configured, a shaped render would INSERT real telemetry. Swallow async writes.
+    import app.core.query as query_mod
+    monkeypatch.setattr(query_mod, "execute_statement_async", lambda *a, **k: True)
 
 
 def _entry():
@@ -368,3 +372,77 @@ def test_proof_sections_render_shaped():
     at.run()
     assert not at.exception, f"proof reset-to-measured (shaped): {at.exception}"
     assert at.slider(key="proof_adoption").value != 5      # the callback restored the default
+
+
+def _admin_section(section: str, **state) -> AppTest:
+    at = AppTest.from_function(_entry, default_timeout=30)
+    at.run()
+    assert not at.exception
+    _nav_to(at, "Admin")
+    at.session_state["adm_section"] = section
+    for k, v in state.items():
+        at.session_state[k] = v
+    at.run()
+    assert not at.exception, f"admin {section} (shaped): {at.exception}"
+    assert not any("could not finish rendering" in str(getattr(e, "value", "")) for e in at.error), \
+        f"admin {section} raised mid-render"
+    return at
+
+
+def _texts(at) -> str:
+    return " ".join(str(e.value) for e in list(at.markdown) + list(at.caption) + list(at.warning)
+                    + list(at.info) + list(at.error))
+
+
+@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
+def test_admin_migrations_task_health_renders_shaped(monkeypatch):
+    """v4.599 (#26): Migrations & freshness with Task health switched ON. Under the shaped stub the SHOW
+    TASKS read parses as a Command (no columns -> empty frame), which exercises the NOT_VISIBLE branch;
+    then a realistic SHOW frame drives the graded table (NaN counts / NaT times through styled_table,
+    a suspended task, a failing one with a '$' in its error) so the populated branch renders too."""
+    at = _admin_section("Migrations & freshness", adm_task_health=True)
+    blob = _texts(at)
+    assert "Task health" in blob
+    assert "SHOW TASKS lists no OVERWATCH tasks" in blob, "empty SHOW did not read as not-visible"
+    assert "Runtime: Python " in blob, "the runtime caption did not paint in the Admin header"
+
+    from app.data import ops_sql
+    from app.ui.pages import admin
+    names = sorted(ops_sql.OVERWATCH_TASKS)
+    show = pd.DataFrame({"name": names, "state": ["started"] * len(names),
+                         "schedule": [None] * len(names), "predecessors": ["[]"] * len(names)})
+    show.loc[show["name"] == "TASK_QH_EXTRACT", "state"] = "suspended"
+    runs = pd.DataFrame({"TASK_NAME": ["TASK_LOAD_DAILY", None], "SUCCEEDED_N": [0, 0], "FAILED_N": [2, 0],
+                         "SKIPPED_N": [0, 0], "LAST_SUCCESS_AT": [pd.NaT, pd.NaT],
+                         "LAST_FAILURE_AT": [pd.Timestamp("2026-09-28 06:50"), pd.NaT],
+                         "LAST_ERROR_MESSAGE": ["Numeric value '$1' is not recognized", None],
+                         "HISTORY_ROWS": [40, 40]})
+    shaped_run = admin.run
+
+    def _task_run(*args, **kwargs):
+        if kwargs.get("key") == "adm_task_states":
+            return QueryResult(df=show.copy(), ok=True, source="stub")
+        if kwargs.get("key") == "adm_task_runs":
+            return QueryResult(df=runs.copy(), ok=True, source="stub")
+        return shaped_run(*args, **kwargs)
+
+    monkeypatch.setattr(admin, "run", _task_run)
+    at = _admin_section("Migrations & freshness", adm_task_health=True)
+    blob = _texts(at)
+    assert "OVERWATCH tasks started" in blob and "1 failing (last 24h)" in blob, blob[-600:]
+    assert any("TASK_LOAD_DAILY" in str(df.value.to_string()) for df in at.dataframe), \
+        "the graded task table did not render"
+
+
+@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
+# v4.599 (#50/#47): the 'Section visits' and 'Ask demand' panels are built by the parallel 'obs'
+# implementer (admin._usage_detail_panels); this worktree only carries the render contract, so it is
+# xfail until the slices integrate. Once they do it must pass: drop the xfail at integration.
+@pytest.mark.xfail(strict=False, reason="lands with the obs slice")
+def test_admin_performance_usage_panels_render_shaped():
+    """v4.599: Admin > Performance under shaped data paints the new usage panels (Section visits,
+    Ask demand) beside Page adoption, with the #33 timeout wording, and does not raise mid-render."""
+    at = _admin_section("Performance")
+    blob = _texts(at)
+    assert "Section visits" in blob, "the Section visits panel header did not paint"
+    assert "Ask demand" in blob, "the Ask demand panel header did not paint"
