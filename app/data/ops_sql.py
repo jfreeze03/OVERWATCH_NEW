@@ -296,6 +296,11 @@ ORDER BY DATABASE_NAME, SCHEMA_NAME, TASK_NAME, SCHEDULED_TIME DESC
 """
 
 
+#: OVERWATCH tasks a migration DROPPED (V161: TASK_BACKUP_OPERATOR). TASK_HISTORY keeps a dropped task's rows,
+#: so without this it would read Late, then Stale ("silently stopped") for up to the 90-day cadence window.
+_RETIRED_OVERWATCH_TASKS = ("TASK_BACKUP_OPERATOR",)
+
+
 def task_freshness_sla(days: int = 14, company: str = "ALL", database: str = "",
                        schema_contains: str = "") -> str:
     """Per-task refresh cadence + silence, so a task that quietly STOPS being
@@ -308,10 +313,13 @@ def task_freshness_sla(days: int = 14, company: str = "ALL", database: str = "",
     ``logic.insights.task_freshness_status`` then classifies On-time / Late / Stale.
     SCHEDULED_TIME/CURRENT_TIMESTAMP are TIMESTAMP_LTZ (absolute instants), so the
     DATEDIFF is correct regardless of session time zone. Only tasks with >= 3
-    observed intervals (a trustworthy cadence) are returned."""
+    observed intervals (a trustworthy cadence) are returned. Tasks OVERWATCH itself retired
+    (``_RETIRED_OVERWATCH_TASKS``) are left out: gone on purpose, not silently stopped."""
     days = max(3, min(int(days or 14), 90))
+    retired = ", ".join(f"'{name}'" for name in _RETIRED_OVERWATCH_TASKS)
     where = and_where(
         f"SCHEDULED_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        f"NOT (DATABASE_NAME = 'DBA_MAINT_DB' AND SCHEMA_NAME = 'OVERWATCH' AND NAME IN ({retired}))",
         companies.database_company_scope(company, "DATABASE_NAME"),
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),

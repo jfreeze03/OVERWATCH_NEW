@@ -100,7 +100,7 @@ Run in order as a DBA role (SNOW_SYSADMINS unless noted):
 | V012 routing+sweep | `ALERT_ROUTES`, route-aware webhook sender, `SP_ANOMALY_SWEEP` + daily task, `REMEDIATION_LOG`, `PIPE_DT_FAILURES` |
 | V013 user prefs | `USER_PREFS` (saved views / default landing / display TZ) |
 | V014 lifecycle | `COST_CONTRACT_BREACH` (scan v5), `PERF_FINGERPRINT_DRIFT` (sweep v2, Mondays), `SP_PURGE_FACTS` + monthly task |
-| V015 pilot+backups | `MART_SPEND_ROLLUP_DT` (Dynamic Table pilot), `SP_BACKUP_OPERATOR_TABLES` + Sunday task |
+| V015 pilot+backups | `MART_SPEND_ROLLUP_DT` (Dynamic Table pilot), `SP_BACKUP_OPERATOR_TABLES` + Sunday task (retired: V090, V161) |
 | V021 precision+telemetry | `RESOLUTION_KIND` precision, `APP_QUERY_TELEMETRY` fleet sink, app self-cost |
 | V022 per-route delivery | `ALERT_DELIVERIES` ledger, sender v2 (additive fan-out, honest retries) |
 | V023 prod-scoped volume | sweep v4 (PIPE_VOLUME_DROP = PROD DBs only), scan v9 (CREDENTIALS columns) |
@@ -146,7 +146,7 @@ native alerts), `ml_forecast_option.sql` (SNOWFLAKE.ML.FORECAST engine), `backfi
 | TASK_DAILY_DIGEST | 07:20 daily | SP_DAILY_DIGEST | DAILY_DIGEST (Cortex) |
 | TASK_VERIFY_SAVINGS | 07:40 1st of month | SP_VERIFY_IDLE_SAVINGS | SAVINGS_LEDGER verifications |
 | TASK_PURGE_FACTS | 05:20 1st of month | SP_PURGE_FACTS | deletes beyond retention |
-| TASK_BACKUP_OPERATOR | 05:10 daily | SP_BACKUP_OPERATOR_TABLES | `OVERWATCH_BAK.*_OWBAK_D<yyyymmdd>` (+Sun `_W`) generations, Sunday `*_BAK_LAST`, OPERATOR_BACKUP_LOG, OPERATOR_BACKUP_DAILY freshness |
+| ~~TASK_BACKUP_OPERATOR~~ | retired V161 | ~~SP_BACKUP_OPERATOR_TABLES~~ | none: scheduled operator backups were removed (Time Travel + manual clones, §16) |
 | TASK_CANARY_SENTINEL | 05:30 Mondays | SP_CANARY_SENTINEL | CANARY_RESULTS + OPS_CANARY_FAIL |
 
 **Notes on the automation:** the Monday 05:30 sentinel deliberately leads
@@ -160,24 +160,15 @@ scan procs — the hourly `SP_ALERT_SCAN` and the daily `SP_ALERT_SCAN_DAILY`
 OPS_SCAN_DEGRADED's job — a broken block logs `rule_block_failed` and
 self-alerts, which IS the failure-injection test running in production, safely.
 
-**Operator backups (V158):** TASK_BACKUP_OPERATOR runs daily at 05:10 on the
-hourly chain's warm warehouse and stamps `OPERATOR_BACKUP_DAILY` in
-SOURCE_FRESHNESS_STATE only when every clone succeeded, so a failing or
-suspended backup goes stale (30h) like any daily loader. Being the earliest
-daily source, it is the one the sidebar health strip most often names as
-"stalest" (WARN from ~03:40 until the 05:10 run) — that is its normal
-rhythm, not an outage. Failures land in APP_ERROR_LOG (PAGE
-`BackupOperatorTables`: `clone_failed`, `backup_log_failed`,
-`backup_prune_failed`, `backup_incomplete`), which `loader_chain_check.sql`
-step 3 lists. `OPERATOR_BACKUP_LOG` gets a CLONED row for every
-`OVERWATCH_BAK` generation (the daily `_D`, and on Sundays the weekly `_W` as
-its own row, so a restore older than the daily window still finds a table
-that exists), plus every skip and prune. The Sunday `*_BAK_LAST` refresh is
-not logged. Statement budget: each run reads INFORMATION_SCHEMA once for all
-25 sources (not once per table) and writes its PRUNED rows in one insert, so a
-steady-state day is 59 statements (135 on Sundays); a same-day re-run skips the
-clones it already took. If that one probe errors, the run clones all 25
-anyway (the V089 behaviour); nothing is skipped on a guess.
+**Operator backups (retired V161, owner decision 2026-09-28):** there is no
+scheduled operator-data backup any more. V161 dropped TASK_BACKUP_OPERATOR,
+SP_BACKUP_OPERATOR_TABLES, the `DBA_MAINT_DB.OVERWATCH_BAK` schema with every
+daily V158 generation, the weekly `*_BAK_LAST` copies, `OPERATOR_BACKUP_LOG`,
+the BACKUP_KEEP_* settings and the `OPERATOR_BACKUP_DAILY` freshness row.
+Recovery is Time Travel plus the manual clones you take before a risky change
+(§16). Older `BackupOperatorTables` rows in APP_ERROR_LOG are history. The
+Tasks-on-cadence objective and Tasks ▸ SLA leave the retired task out (its
+TASK_HISTORY rows would otherwise read "silently stopped" for up to 90 days).
 
 `SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;` — every state should be
 `started` except TASK_ALERT_NOTIFY before its integration exists.
@@ -514,9 +505,7 @@ CONTRACT_CREDITS / CONTRACT_START_DATE / CONTRACT_END_DATE (ISO dates) ·
 CORTEX_MODEL llama3.1-8b · FORECAST_ENGINE linear|seasonal|ml_forecast ·
 SCORE_PTS_* (nine platform-score weights, §6) · FACT_RETENTION_DAYS_HOURLY
 400 (floor 90) · FACT_RETENTION_DAYS_DAILY 800 (floor 180) ·
-ERROR_LOG_RETENTION_DAYS 180 (floor 30) · BACKUP_KEEP_DAILY 14 (7-60) ·
-BACKUP_KEEP_WEEKLY 8 (4-52) (operator-backup generations kept per table,
-V158). Values are strings; bad numbers
+ERROR_LOG_RETENTION_DAYS 180 (floor 30). Values are strings; bad numbers
 fall back to defaults. Changes take effect within one cache cycle (≤5 min)
 or after Refresh.
 
@@ -596,6 +585,8 @@ PUBLIC grants silently leave the queue.
 
 **Rolling back V160.** Re-run V157's `CREATE OR REPLACE PROCEDURE ... SP_ALERT_SCAN_DAILY()` (the tally goes back to 11 and nothing calls SP_SCAN_SLEEP_POLLING any more). Optionally disable the rule (`UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG SET ENABLED = FALSE WHERE RULE_ID = 'COST_SLEEP_POLLING';`), close its lingering OPEN, ACK'd or SNOOZED events as EXPECTED, and drop the proc (and, if wanted, the transient SLEEP_POLLING_WEEKLY table) with the teardown.sql lines. The weekly scan never runs at apply time; to re-check a week by hand, `CALL DBA_MAINT_DB.OVERWATCH.SP_SCAN_SLEEP_POLLING(TRUE);` (it can raise events and email).
 
+**Rolling back V161.** Re-run V015's TASK_BACKUP_OPERATOR block (lines 61-67 only: the whole file would re-create the retired MART_SPEND_ROLLUP_DT), then V158 in full. That brings back the task, the proc, the OVERWATCH_BAK schema, the ledger, the BACKUP_KEEP_* settings, the view carve-out and a first generation; the generations V161 dropped do not come back.
+
 | Rule | Family | Fires when (threshold = THRESHOLD_NUM, editable) | Recurrence |
 |---|---|---|---|
 | COST_DAILY_CREDITS | COST | account credits/day over threshold | daily key |
@@ -636,10 +627,8 @@ Playbooks for each rule render in the alert drawer (`logic/playbooks.py`).
 
 ## 13. Object inventory (DBA_MAINT_DB.OVERWATCH)
 
-**Operator/config tables** (backed up daily since V158 to dated TRANSIENT
-generations in the separate schema `DBA_MAINT_DB.OVERWATCH_BAK` —
-`<T>_OWBAK_D<yyyymmdd>`, 14 daily + 8 Sunday-weekly `_W`, row counts in
-OPERATOR_BACKUP_LOG — plus the Sunday `*_BAK_LAST` pointer in OVERWATCH): SETTINGS,
+**Operator/config tables** (no scheduled backup since V161: Time Travel plus
+manual clones before a risky change, §16): SETTINGS,
 COMPANY_SCOPE, ALERT_CONFIG, ALERT_EVENTS, ALERT_AUDIT (append-only),
 ACTION_QUEUE, SAVINGS_LEDGER, DEPARTMENT_MAP, ALERT_ROUTES,
 REMEDIATION_LOG (append-only), USER_PREFS, OBJECT_CHANGE_REGISTRY,
@@ -654,8 +643,8 @@ control-room snapshot, and the V027+ scheduled-task mart family (the
 MART_SPEND_ROLLUP_DT Dynamic-Table pilot was retired in V090).
 **Procs:** SP_LOAD_HOURLY_FACTS, SP_LOAD_DAILY_FACTS, SP_REFRESH_EXEC_BOARD,
 SP_ALERT_SCAN, SP_NOTIFY_WEBHOOK, SP_DAILY_DIGEST, SP_VERIFY_IDLE_SAVINGS,
-SP_CHANGE_IMPACT_SCAN, SP_ANOMALY_SWEEP, SP_PURGE_FACTS,
-SP_BACKUP_OPERATOR_TABLES (+ opt-in SP_REFRESH_ML_FORECAST).
+SP_CHANGE_IMPACT_SCAN, SP_ANOMALY_SWEEP, SP_PURGE_FACTS
+(+ opt-in SP_REFRESH_ML_FORECAST).
 **Functions:** COMPANY_FOR_USER. **Tasks:** §4. **Misc:** SCHEMA_VERSION,
 APP_ERROR_LOG, FORECAST_ML_DAILY (opt-in).
 
@@ -735,53 +724,47 @@ deployed app — redeploy the app.
 
 ## 16. Disaster recovery
 
-1. **One bad table:** restore from a backup generation with INSERT OVERWRITE:
-   `INSERT OVERWRITE INTO <T> SELECT * FROM DBA_MAINT_DB.OVERWATCH_BAK.<T>_OWBAK_D<yyyymmdd>;`
-   Pick the generation from `OPERATOR_BACKUP_LOG` (ROW_COUNT vs SOURCE_ROW_COUNT
-   per day; 14 daily + 8 Sunday-weekly `_W` are kept, and each generation has its
-   own CLONED row, so past the daily window use `<T>_OWBAK_W<yyyymmdd>`). Run it as the table-owner
-   role: INSERT OVERWRITE deletes, and roles.sql revokes DELETE on ALERT_AUDIT /
-   REMEDIATION_LOG from both admin roles. It keeps the table's DDL, grants and
-   audit seal. Never CLONE-restore: the backups are TRANSIENT (a clone into a
-   permanent table is refused), and a re-materialized table re-applies the
-   schema FUTURE grants. Time Travel (last hour, same rule):
-   `INSERT OVERWRITE INTO <T> SELECT * FROM <T> AT(OFFSET => -3600);`
-2. **Dropped object:** `UNDROP TABLE/SCHEMA ...` within retention.
-3. **Schema gone:** UNDROP first (`UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH;`).
-   Otherwise rebuild in this order. The operator tables are restored BEFORE V158
-   is replayed:
-   1) Apply the migrations in order, **V001..V157 only**.
-   2) Restore the 25 operator tables, **SETTINGS first** (rates, budgets and the
-      BACKUP_KEEP_* retention live there), with INSERT OVERWRITE as the
-      table-owner role, as in step 1. The source is the `OVERWATCH_BAK`
-      generations, a separate schema that survives a lost OVERWATCH.
-      `OPERATOR_BACKUP_LOG` lived in OVERWATCH and is gone, so choose by name
-      and row count:
-      `SELECT TABLE_NAME, ROW_COUNT, CREATED FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'OVERWATCH_BAK' ORDER BY 1;`
-      Use the newest generation dated BEFORE the loss, the same date for every
-      table. The name carries the Central day. The loss day's own `_D` counts
-      only if its CREATED time is before the loss. Past the daily window, use a
-      Sunday `_W`. A table with no generation is re-seeded (SETTINGS rates,
-      budgets, contract; DEPARTMENT_MAP names; ALERT_CONFIG thresholds re-seed
-      with defaults automatically). `*_BAK_LAST` lived in OVERWATCH and went
-      with it.
-   3) Apply V158, then any later migrations. The V158 tail backs up the
-      restored tables and prunes with the restored BACKUP_KEEP_DAILY /
-      BACKUP_KEEP_WEEKLY.
-   4) roles.sql → validate.sql (all OK) → facts refill from the loaders
-      (history bounded by ACCOUNT_USAGE retention: 365d).
+There are **no scheduled operator-data backups** since V161 (owner decision
+2026-09-28). Recovery is Time Travel, UNDROP, and the manual clones you take
+before a risky change. Know the window before you need it:
+`SHOW PARAMETERS LIKE 'DATA_RETENTION_TIME_IN_DAYS' IN TABLE DBA_MAINT_DB.OVERWATCH.<T>;`
+No migration sets it, so the account default applies. The TRANSIENT operator
+tables (ALERT_EVENTS, ACTION_QUEUE and others; `SHOW TABLES` shows the kind)
+keep at most 1 day and have no Fail-safe, so a bad edit to them must be undone
+the same day.
 
-   **If V158 was already replayed before the restore:** its tail, and every
-   05:10 run since, cloned the re-seeded tables into a generation dated that
-   day. Those runs pruned with the re-seeded 14 / 8 and started a new
-   OPERATOR_BACKUP_LOG that names only post-loss generations. Run
-   `ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR SUSPEND;` at once.
-   Restore SETTINGS first so your BACKUP_KEEP_* values are back, and never
-   restore from the generation dated the replay day or any later one. Verify
-   the restore, then run `ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR RESUME;`.
-4. **Bad deploy:** `snow streamlit deploy --replace` from the previous git
+1. **One bad table:** undo it with Time Travel and INSERT OVERWRITE, to an hour
+   ago or to just before a known bad statement:
+   `INSERT OVERWRITE INTO <T> SELECT * FROM <T> AT(OFFSET => -3600);`
+   `INSERT OVERWRITE INTO <T> SELECT * FROM <T> BEFORE(STATEMENT => '<query_id>');`
+   Run it as the table-owner role: INSERT OVERWRITE deletes, and roles.sql
+   revokes DELETE on ALERT_AUDIT / REMEDIATION_LOG from both admin roles. It
+   keeps the table's DDL, grants and audit seal. Past the retention window the
+   only other source is a manual clone:
+   `INSERT OVERWRITE INTO <T> SELECT * FROM <T>_BAK_<yyyymmdd>;`
+   Never CLONE-restore: a TRANSIENT clone cannot clone back into a permanent
+   table, and a re-materialized table re-applies the schema FUTURE grants.
+2. **Before a risky change** (a bulk edit, a rebuild, a factory reset): take
+   the manual clones first, with today's date suffix, and check their row
+   counts: `snowflake/rebuild/00_backup_operator_data.sql` (edit its suffix) or
+   teardown.sql B0. Clone as `CREATE TRANSIENT TABLE ... CLONE`: a permanent
+   clone of a transient table fails. They are the only copy outside Time
+   Travel; drop them once the change proves out.
+3. **Dropped object:** `UNDROP TABLE/SCHEMA ...` within retention.
+4. **Schema gone:** UNDROP first (`UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH;`); it
+   brings back every table in it, manual clones included. Past retention the
+   operator data is gone with the schema (the manual clones lived in it too):
+   1) Apply every migration in order, V001 onward. V158's tail starts a backup
+      run seconds before V161; if V161 stops with "a TASK_BACKUP_OPERATOR run is
+      in flight", wait a few minutes and re-run it.
+   2) Re-enter what matters: SETTINGS rates, budgets and contract;
+      DEPARTMENT_MAP names; routes. ALERT_CONFIG thresholds re-seed with
+      defaults automatically.
+   3) roles.sql → validate.sql (all OK) → facts refill from the loaders
+      (history bounded by ACCOUNT_USAGE retention: 365d).
+5. **Bad deploy:** `snow streamlit deploy --replace` from the previous git
    tag. Migrations are additive; no schema rollback exists or is needed.
-5. **Verify after any recovery:** validate.sql all OK → Admin canary all
+6. **Verify after any recovery:** validate.sql all OK → Admin canary all
    PASS → freshness board green after the next hourly run.
 
 ## 17. Glossary

@@ -176,6 +176,7 @@ snowflake/migrations/V157__alert_scan_self_watch_idle_push.sql
 snowflake/migrations/V158__operator_backup_generations.sql
 snowflake/migrations/V159__loader_compile_diet.sql
 snowflake/migrations/V160__sleep_polling_alert.sql
+snowflake/migrations/V161__retire_operator_backups.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -489,13 +490,12 @@ surgical by design — the schema is shared with the old app, so it never drops
 `DBA_MAINT_DB.OVERWATCH` itself, only named objects:
 
 - **Section A (live):** tasks, alerts, procs, functions, views, transient
-  facts/marts. Safe anytime — re-run the migrations in order (V001..V160) and the loaders repopulate.
+  facts/marts. Safe anytime — re-run the migrations in order (V001..V161) and the loaders repopulate.
 - **Section B (commented):** operator data — settings, company scope, alert
   config/events/audit, action queue, savings ledger, error log,
   schema_version. Uncomment only for a factory reset, and run the provided
-  `CLONE` backups first. `UNDROP TABLE ...` also works within Time Travel.
-  The daily backup generations (`DBA_MAINT_DB.OVERWATCH_BAK`, V158) and
-  `OPERATOR_BACKUP_LOG` are never dropped by the teardown.
+  `CLONE` backups first: since V161 retired the scheduled backups they are the
+  only copy outside Time Travel. `UNDROP TABLE ...` also works within Time Travel.
 - **Section C (commented):** warehouse, Streamlit app
   object, roles — shared infrastructure, dropped only deliberately.
 
@@ -507,37 +507,23 @@ Restore = migrations in order -> roles.sql -> validate.sql (all rows OK).
 
 ## 6. Disaster recovery (summary — full detail in RUNBOOK.md)
 
-- **Daily backups (V158):** `TASK_BACKUP_OPERATOR` (daily 05:10) clones the 25
-  operator tables to dated TRANSIENT generations in the separate schema
-  `DBA_MAINT_DB.OVERWATCH_BAK` (`<NAME>_OWBAK_D<yyyymmdd>`; 14 daily + 8
-  Sunday-weekly kept, row counts in `OPERATOR_BACKUP_LOG`) and refreshes the
-  Sunday `<NAME>_BAK_LAST` pointer. Restore one table as the table-owner role
-  (INSERT OVERWRITE deletes; the audit tables revoke DELETE from both admin roles):
-  `INSERT OVERWRITE INTO <NAME> SELECT * FROM DBA_MAINT_DB.OVERWATCH_BAK.<NAME>_OWBAK_D<yyyymmdd>;`
-  Never CLONE-restore: the backups are TRANSIENT (a clone into a permanent table
-  is refused) and a re-materialized table re-applies the schema FUTURE grants.
-- **Fine-grained undo:** Time Travel —
+- **No scheduled backups (V161, owner decision 2026-09-28):** recovery is Time
+  Travel plus the manual clones taken before a risky change
+  (`snowflake/rebuild/00_backup_operator_data.sql` or teardown.sql B0, as TRANSIENT
+  clones with today's date suffix). The TRANSIENT operator tables keep at most 1 day
+  of Time Travel and no Fail-safe.
+- **Undo one table:** Time Travel, as the table-owner role (INSERT OVERWRITE deletes;
+  the audit tables revoke DELETE from both admin roles):
   `INSERT OVERWRITE INTO <t> SELECT * FROM <t> AT(OFFSET => -3600);`
-  or `UNDROP TABLE <t>` within the retention window.
-- **Schema dropped:** `UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH;` first. If it is gone,
-  restore the operator data BEFORE V158 is replayed:
-  1. Re-run the migrations in order, **V001..V157 only**.
-  2. Restore the 25 operator tables, **SETTINGS first**, with INSERT OVERWRITE as
-     the table-owner role. The source is the `OVERWATCH_BAK` generations, a separate
-     schema that survives a lost OVERWATCH. Use the newest generation dated before
-     the loss. `OPERATOR_BACKUP_LOG` was in OVERWATCH and is gone, so choose by name
-     and ROW_COUNT:
-     `SELECT TABLE_NAME, ROW_COUNT, CREATED FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'OVERWATCH_BAK' ORDER BY 1;`
-     A table with no generation is re-seeded. `*_BAK_LAST` was in OVERWATCH too.
-  3. Apply V158 and any later migrations. Its tail backs up the restored data and
-     prunes with the restored BACKUP_KEEP_* values.
-  4. Run roles.sql + validate.sql. Facts refill from the loader tasks (history
-     limited to ACCOUNT_USAGE retention).
-
-  If V158 already ran on the re-seeded tables, run
-  `ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR SUSPEND;` first. Restore
-  SETTINGS first, never restore from the generation dated the replay day (or later),
-  and resume the task once the restore is verified (RUNBOOK §16 step 3).
+  or `BEFORE(STATEMENT => '<query_id>')`, or from a manual clone:
+  `INSERT OVERWRITE INTO <t> SELECT * FROM <t>_BAK_<yyyymmdd>;`
+  `UNDROP TABLE <t>` within the retention window. Never CLONE-restore: a
+  re-materialized table re-applies the schema FUTURE grants.
+- **Schema dropped:** `UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH;` first; it restores the
+  manual clones too. Past retention, re-run every migration in order (if V161 stops
+  on an in-flight backup run started by V158's tail, wait and re-run it), re-enter
+  SETTINGS / DEPARTMENT_MAP / routes, then roles.sql + validate.sql. Facts refill
+  from the loader tasks (history limited to ACCOUNT_USAGE retention). See RUNBOOK §16.
 - **App broken after deploy:** `snow streamlit deploy --replace` with the
   previous git tag; migrations are additive so no schema rollback is needed.
 - **"Failed to retrieve packages... Have you enabled External Access
