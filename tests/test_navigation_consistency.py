@@ -241,3 +241,15 @@ def test_dba_pages_cover_all_routed_pages():
     routable |= {p for _, (p, _s) in _FAMILY_DEFAULTS}
     missing = routable - set(PAGES_BY_PROFILE["DBA"])
     assert not missing, f"routed pages not in DBA nav: {missing}"
+
+
+def test_operations_section_links_target_real_sections():
+    """#28: in-page hops (request_navigation("Operations", "<section>", ...)) anywhere in the Operations
+    shell or its ops_parts package name a real lazy_sections label — the jump-box check, generalized."""
+    from tests._source import page_source
+
+    labels, _ = _lazy_sections_of("operations.py")
+    hops = re.findall(r'request_navigation\(\s*"Operations",\s*"([^"]+)"', page_source("operations"))
+    assert "Optimize" in hops, hops        # the Queries -> Optimize link (#28) is one of them
+    for section in hops:
+        assert section in labels, f"Operations has no section {section!r} (has {labels})"
