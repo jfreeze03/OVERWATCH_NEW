@@ -1073,7 +1073,8 @@ def ledger_attribution() -> str:
       ACTIVE_USD, ACTIVE_ITEMS and the per-class <CLASS>_ACTIVE_USD / REGRESSED_ / NEUTRAL_ACTIVE_USD —
         the same split pivoted onto EVERY row, so any one row carries the complete split even if a whole
         class fell outside a capped frame.
-      SHORT_WINDOW_ACTIVE_USD — auto rows settled before V153 (NOTES lack the 'full window' settle note).
+      SHORT_WINDOW_ACTIVE_USD — auto rows settled before V153 (NOTES carry neither the 'full window' settle
+        note nor the owner re-settle sentinel 're-settled on the full 14-day window').
       TOTAL_ITEMS — every ledger row.
 
     Reads ALERT_EVENTS, so this read joins the alerts cache domain and re-colds on acks — deliberately a
@@ -1144,7 +1145,8 @@ a AS (
            IFF({_active}, 1, 0) AS ACTIVE_ROW_N,
            IFF({_active}, COALESCE(l.VERIFIED_USD, 0), 0) AS ACTIVE_ROW_USD,
            IFF(l.SOURCE_CHANGE_ID IS NOT NULL
-               AND NOT CONTAINS(COALESCE(l.NOTES, ''), 'full window'), 1, 0) AS SHORT_WINDOW_N
+               AND NOT CONTAINS(COALESCE(l.NOTES, ''), 'full window')
+               AND NOT CONTAINS(COALESCE(l.NOTES, ''), 're-settled on the full 14-day window'), 1, 0) AS SHORT_WINDOW_N
     FROM {core_object("SAVINGS_LEDGER")} l
     LEFT JOIN {core_object("WAREHOUSE_CHANGE_REGISTRY")} r ON l.SOURCE_CHANGE_ID = r.CHANGE_ID
     LEFT JOIN twin t ON t.TWIN_ITEM_ID = l.ITEM_ID

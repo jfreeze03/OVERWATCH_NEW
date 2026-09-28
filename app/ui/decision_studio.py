@@ -100,6 +100,9 @@ def _open_entity(kind: str, key: str) -> None:
 def _open_savings_ledger() -> None:
     """F56 doorway for an empty track record: estimated items are verified on the Cost ▸ Optimization
     & Savings ledger (a page every profile, EXECUTIVE included, can open)."""
+    # land on the pill that holds the ledger + verify workflow, not the section default (Idle & sizing).
+    # The nested lazy_sections widget is not instantiated on this run, so seeding its key is legal.
+    st.session_state["opt_section"] = "Remediation & ledger"
     request_navigation("Cost Intelligence", "Optimization & Savings")
 
 
@@ -335,14 +338,18 @@ def _proof_signals(rate: float) -> dict | None:
     _prec = run(mart_sql.rule_precision(90), page=_PAGE, key="sc_precision",
                 tier="recent", source="ALERT_EVENTS resolution kinds", probe=True)
     totals = ledger_totals(ledger.df)
-    verified_qtd = safe_float(_q.df.iloc[0].get("VERIFIED_QTD_USD")) if _q.usable() else 0.0
+    # review r1: if the whole-ledger summary read fails, fall back to the ledger frame (disclosed on the
+    # page as summary_ok False) instead of a false $0.00/mo run-rate
+    _q_ok = _q.usable()
+    verified_qtd = (safe_float(_q.df.iloc[0].get("VERIFIED_QTD_USD")) if _q_ok
+                    else safe_float(totals.get("verified_qtd_usd")))
     # Next-Fifty #3: the ROI numerator is the ACTIVE verified monthly run-rate (verified in the
     # last SAVINGS_ACTIVE_MONTHS months), not this quarter's sum — a quarter-scoped numerator fell
     # to 0x on the first day of every quarter while the trailing-30d run cost did not.
     verified_active = (safe_float(_q.df.iloc[0].get("VERIFIED_ACTIVE_MONTHLY_USD"))
-                       if _q.usable() else 0.0)
+                       if _q_ok else safe_float(totals.get("verified_active_usd")))
     verified_active_items = (int(safe_float(_q.df.iloc[0].get("VERIFIED_ACTIVE_ITEMS")))
-                             if _q.usable() else int(totals["verified_active_count"]))
+                             if _q_ok else int(totals["verified_active_count"]))
     run_cost = safe_float(_ac.df.iloc[0].get("APP_CREDITS_30D")) * rate if _ac.usable() else 0.0
     sig = {
         "ledger": ledger, "totals": totals, "realization": totals["realization_pct"],
@@ -350,6 +357,7 @@ def _proof_signals(rate: float) -> dict | None:
         "verified_active": verified_active,
         "verified_active_items": verified_active_items,
         "verified_qtd": verified_qtd,
+        "summary_ok": _q_ok,
         "acc": acceptance_summary(_acc.df if _acc.usable() else None),
         "prec": account_precision(_prec.df if _prec.usable() else None),
     }
@@ -552,6 +560,13 @@ def _proof_tab(rate: float) -> None:
                if _real is not None else "")
             + (f", closing the loop in **{_avgd:g} days** on average." if _avgd is not None else ".")
             + f" **{format_usd(totals['estimated_usd'])}** more is estimated, awaiting proof."))
+    elif int(totals["verified_count"]) > 0:
+        # verified items exist, none inside the active window (or the summary read failed): never the
+        # "nothing verified yet" empty state beside a populated evidence table (review r1)
+        st.caption(md_dollars(
+            f"{int(totals['verified_count']):,} verified item(s), none verified in the last "
+            f"{SAVINGS_ACTIVE_MONTHS} months (older items no longer count toward the run-rate). "
+            f"{format_usd(totals['estimated_usd'])} more is estimated, awaiting proof."))
     else:
         _cost_ok = can_open("Cost Intelligence")
         empty_state("no_data_yet",
@@ -764,8 +779,9 @@ def _pipeline_projection(frame: pd.DataFrame, defaults: dict) -> None:
 
 
 def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None = None) -> None:
-    """Proof ▸ Pipeline (v4.597; replaces Scenarios): the priced work AHEAD, scoped to Company and
-    Window. Addressable $/mo is the Cost ▸ Optimize idle-timer rollup built from the SAME mart read
+    """Proof ▸ Pipeline (v4.597; replaces Scenarios): the priced work AHEAD. Addressable $/mo scopes to
+    Company and Window; queued work is every open item for the Company (not windowed). Addressable $/mo
+    is the Cost ▸ Optimize idle-timer rollup built from the SAME mart read
     (SQL + tier, so the cache is shared) — mart-only, never the live fallback; right-sizing joins it only
     behind a toggle, like Optimize. Queued work is the open ACTION_QUEUE normalised to $/mo by PERIOD.
     The two are unioned and de-duplicated by entity, then a fragment projects them with measured
@@ -813,10 +829,20 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
     roll = rollup_savings(opps)
 
     # ---- Queued work: the open ACTION_QUEUE, normalised to $/mo -------------------------------
-    actions = run(workbench_sql.action_center(company, False, 500), page=_PAGE,
+    actions = run(workbench_sql.action_center(company, False, 500, with_totals=True), page=_PAGE,
                   key=f"proof_queue_{company}", tier="recent",
                   source="ACTION_QUEUE with confidence and entity keys")
     queued, qsum = monthly_equivalent(actions.df if actions.usable() else None)
+    # the headline reads the SQL window totals (every open item, uncapped); qsum (over the <=500 rows)
+    # feeds only the projection (review r1: never a headline sum over the capped frame)
+    _qt = dict(qsum)
+    if actions.usable() and "OPEN_TOTAL" in actions.df.columns:
+        _r0 = actions.df.iloc[0]
+        _qt.update(items=int(safe_float(_r0.get("OPEN_TOTAL"))),
+                   monthly_usd=safe_float(_r0.get("QUEUED_MONTHLY_TOTAL")),
+                   unpriced_count=int(safe_float(_r0.get("UNPRICED_TOTAL"))),
+                   one_time_count=int(safe_float(_r0.get("ONE_TIME_TOTAL"))),
+                   unspecified_count=int(safe_float(_r0.get("NO_PERIOD_TOTAL"))))
     pipeline = pipeline_frame(roll.items, queued if actions.usable() else None)
 
     # ---- Settling (the ledger evidence already in hand: zero reads) ---------------------------
@@ -844,10 +870,11 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
                          "Observed-idle based — an estimate, not a verified saving."}
     kpi_row([
         _addr,
-        ({"label": "Queued work $/mo", "value": format_usd(qsum["monthly_usd"]),
-          "delta": (f"{qsum['items']:,} open · {qsum['unpriced_count']:,} unpriced · "
-                    f"{qsum['one_time_count']:,} one-time"
-                    + (f" · {qsum['unspecified_count']:,} no period" if qsum["unspecified_count"] else "")),
+        ({"label": "Queued work $/mo", "value": format_usd(_qt["monthly_usd"]),
+          "delta": (f"{_qt['items']:,} open · {_qt['unpriced_count']:,} unpriced · "
+                    f"{_qt['one_time_count']:,} one-time"
+                    + (f" · {_qt['unspecified_count']:,} no period" if _qt["unspecified_count"] else "")
+                    + (f" · top {qsum['items']:,} projected" if _qt["items"] > qsum["items"] else "")),
           "delta_color": "off",
           "help": "Open Action Center estimates as a monthly run-rate: MONTHLY as-is, ANNUAL ÷ 12. One-time "
                   "and period-less estimates are counted but kept out of the run-rate."}

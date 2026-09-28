@@ -1723,7 +1723,7 @@ def _sla_finish_forecast_panel(*, pf: dict | None = None) -> dict:
     if not fqn:
         empty_state("needs_setup", "Not configured — set ETL_CONTROL_STATUS_FQN on Admin ▸ "
                     "SETTINGS (shared with the runtimes panel above).")
-        return {}
+        return {"_reason": "needs_setup"}
     start_wf = str(settings.get("ETL_CYCLE_START_WORKFLOW") or "").strip()
     end_wf = str(settings.get("ETL_CYCLE_END_WORKFLOW") or "").strip()
     target = str(settings.get("ETL_SLA_TARGET_HHMM") or "07:00").strip()
@@ -1740,7 +1740,7 @@ def _sla_finish_forecast_panel(*, pf: dict | None = None) -> dict:
         empty_state("needs_setup", "Set ETL_CYCLE_START_WORKFLOW and ETL_CYCLE_END_WORKFLOW (the "
                     "cycle's first and last workflow) on Admin ▸ SETTINGS, and a valid "
                     "ETL_CONTROL_STATUS_FQN, to forecast cycle completion.")
-        return {}
+        return {"_reason": "needs_setup"}
     res = (pf or {}).get("cycle_finish") or run(scan_sql, page=_PAGE, key="etl_cycle_finish", tier="recent",
               source="CONTROL_STATUS (cycle finish vs deadline)", max_rows=etl_control_sql.MAX_SLA_NIGHTS)
     if guard(res, "No completed nightly cycles in the window — the starter and terminal workflows "
@@ -1751,7 +1751,7 @@ def _sla_finish_forecast_panel(*, pf: dict | None = None) -> dict:
                                     spike_calendar=str(settings.get("EXPECTED_SPIKE_CALENDAR") or ""))
         if not fc:
             empty_state("clean", "No completed nightly cycles in the window yet.")
-            return {}
+            return {"_reason": "empty"}
 
         def _signed(sec: object, early: str = "early", late: str = "late") -> str:
             if sec is None:
@@ -1839,7 +1839,8 @@ def _sla_finish_forecast_panel(*, pf: dict | None = None) -> dict:
                    "on Admin ▸ SETTINGS.")
         result_caption(res)
         return fc
-    return {}
+    # a failed read is not "no nights" (review r1): the objective above says unavailable, not empty
+    return {"_reason": "unavailable" if not res.ok else "empty"}
 
 
 def _run_inventory_panel(*, pf: dict | None = None) -> None:
@@ -2294,12 +2295,17 @@ def _builtin_objectives_panel(fc: dict, company: str = "ALL", days: int = 0, dat
     cyc = cycle_target_attainment(fc)
     cad = task_cadence_attainment(fresh)
     _misses = ((cyc["judged"] - cyc["met"]) if cyc else 0) + ((cad["late"] + cad["stale"]) if cad else 0)
-    section_header("Built-in objectives", alarm_health(_misses) if (cyc or cad) else "", "pipeline",
-                   anchor="ops-builtin-objectives")
+    # review r1: the cadence read is LIMIT 200 (most-silent first), so a capped "all on time" is not
+    # proven -- never green then (a stopped fast-cadence task can sit outside the 200)
+    _health = alarm_health(_misses) if (cyc or cad) else ""
+    if _health == "ok" and cad.get("capped"):
+        _health = ""
+    section_header("Built-in objectives", _health, "pipeline", anchor="ops-builtin-objectives")
     _settings = load_settings(_PAGE)
     _etl_set = bool(str(_settings.get("ETL_CONTROL_STATUS_FQN") or "").strip())
     _target = (cyc.get("target_hhmm") if cyc else
                str(_settings.get("ETL_SLA_TARGET_HHMM") or "07:00").strip())
+    _fc_reason = str((fc or {}).get("_reason") or "")
     if cyc and cyc["judged"]:
         cyc_tile = {"label": f"Nightly cycle done by {_target}",
                     "value": f"{cyc['met']}/{cyc['judged']} nights",
@@ -2313,19 +2319,27 @@ def _builtin_objectives_panel(fc: dict, company: str = "ALL", days: int = 0, dat
     else:
         cyc_tile = {"label": f"Nightly cycle done by {_target}", "value": "—",
                     "delta": ("tonight still running" if cyc.get("in_flight") else
-                              ("no judged nights yet" if _etl_set else "needs setup")),
+                              "unavailable" if _fc_reason == "unavailable" else
+                              "needs setup" if (not _etl_set or _fc_reason == "needs_setup") else
+                              "no judged nights yet"),
                     "delta_color": "off",
-                    "help": ("Set ETL_CONTROL_STATUS_FQN and ETL_CYCLE_START_WORKFLOW / "
+                    "help": ("The cycle-finish read failed (see the SLA finish forecast below for the "
+                             "error); nothing is judged until it reads."
+                             if _fc_reason == "unavailable" else
+                             "Set ETL_CONTROL_STATUS_FQN and ETL_CYCLE_START_WORKFLOW / "
                              "ETL_CYCLE_END_WORKFLOW on Admin ▸ SETTINGS to judge the nightly cycle."
-                             if not _etl_set else
+                             if (not _etl_set or _fc_reason == "needs_setup") else
                              "No completed, failed or overdue night in the forecast window yet.")}
     if cad and cad["total"]:
         cad_tile = {"label": "Tasks on cadence", "value": f"{cad['on_time']}/{cad['total']}",
-                    "severity": "ok" if cad["on_time"] == cad["total"] else "warn",
-                    "delta": f"{cad['late']} late · {cad['stale']} stale", "delta_color": "off",
+                    "severity": ("warn" if cad["on_time"] != cad["total"] else
+                                 "" if cad.get("capped") else "ok"),
+                    "delta": (f"{cad['late']} late · {cad['stale']} stale"
+                              + (" · top 200 read" if cad.get("capped") else "")), "delta_color": "off",
                     "help": "Scheduled tasks on time against their OWN cadence (median gap, judged "
                             "against their longest normal gap). Late ~ one cadence overdue, stale ~ two "
-                            "(silently stopped). Honors Company / Database / Schema."}
+                            "(silently stopped). Honors Company / Database / Schema; the cadence is read "
+                            f"over the last {max(days, 14)} days."}
     else:
         cad_tile = {"label": "Tasks on cadence", "value": "—",
                     "delta": ("unavailable" if (_fres is not None and not _fres.ok)
@@ -2338,8 +2352,9 @@ def _builtin_objectives_panel(fc: dict, company: str = "ALL", days: int = 0, dat
         "Read-only objectives derived from the ETL clock and each task's own cadence — no setup. "
         "The custom SLO editor was retired (v4.597); any ACTIVE SLO_OBJECTIVES rows still alert and "
         "badge the Entity 360 watchlist."
-        + (" Tasks on cadence is judged over the tasks read (of the 200 most-silent tasks), so the "
-           "on-time share is a conservative read." if cad.get("capped") else ""))
+        + (" Tasks on cadence is judged over the 200 most-silent tasks only; a recently stopped "
+           "fast-cadence task can fall outside them — see Tasks ▸ SLA for the full list."
+           if cad.get("capped") else ""))
 
 
 def _pipeline_tonight(days: int = 0, database: str = "", company: str = "ALL",
@@ -4178,11 +4193,13 @@ def render() -> None:
         },
         "Pipeline SLA": {
             "applies": (),
-            "partial": ("company", "database", "schema_contains"),
+            "partial": ("company", "database", "schema_contains", "days"),
             "note": "SLA horizons are account-wide policy; File-load failures narrows to Company; "
                     "Reference-data-gap narrows to Database (pinned checks always show); Volume "
                     "drops and Dynamic-table refresh health honor Company/Database/Schema, as does "
-                    "the Tasks-on-cadence objective. (The DQ row-volume panel is still account-wide.)",
+                    "the Tasks-on-cadence objective, which reads its cadence over max(Window, 14) days. "
+                    "The SLA finish forecast is a fixed 14-night baseline. (The DQ row-volume panel is "
+                    "still account-wide.)",
         },
         "Release compare": {
             "applies": ("company",),

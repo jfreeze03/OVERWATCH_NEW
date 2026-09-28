@@ -54,8 +54,9 @@ ahead") and moves each tool to the surface where that work happens.
     - Both writes: operator gate, per-target C48 latch, stamp before rerun. The `"queue"` cache salt refreshes
       the tracked read, Action Center, Proof ▸ Pipeline and the acted-on read.
     - Accepted race: two operators clicking in the same second can double-insert, as AI chargeback can today.
-  - Own-traffic families (OVERWATCH's own loader and mart statements) are tagged in the Why line and never
-    bulk-tracked.
+  - Own-traffic families are tagged in the Why line and never bulk-tracked: statements whose SQL names
+    DBA_MAINT_DB.OVERWATCH (the loaders, marts and procedures) and families whose credit-dominant database is
+    DBA_MAINT_DB (the app's own reads run in that database context).
   - **Live query profile** toggle, off on first paint. It is the Queries board's scan with the same SQL, key and
     tier, so the two share one cache entry, and its source label carries no ACCOUNT_USAGE literal.
   - **W12 window fix:** the 30-day normalization divides by the window's real day span. Current month and Current
@@ -66,8 +67,9 @@ ahead") and moves each tool to the surface where that work happens.
     - the 200-family cap disclosure;
     - the Portfolio map, and the trust caption with its lane rule.
 
-    "Open in Action Center" and "Open Entity 360" show only for profiles that can open Control Room. An
-    `Operations ▸ Optimize` deep link can preselect a family (the `fingerprint` navigation context).
+    "Open in Action Center" and "Open Entity 360" show only for profiles that can open Control Room;
+    "Open in Action Center" links to the family's newest OPEN item (a closed one is named, not linked). The
+    pane accepts a `fingerprint` navigation context for a future caller; nothing sends it yet.
 - **Operations ▸ Pipeline SLA ▸ Tonight: two built-in, read-only objectives (replace the SLO editor).**
   - **"Nightly cycle done by 07:00"** (the configured ETL_SLA_TARGET_HHMM) = met/judged over the SLA finish
     forecast's newest 14 nights.
@@ -99,8 +101,11 @@ ahead") and moves each tool to the surface where that work happens.
     - Hero "Pays for itself": the verified active run-rate ÷ OVERWATCH's trailing-30-day run cost.
     - KPIs: Verified savings run-rate, Added this quarter, Realization rate, Settling (change-scan rows that
       settle when their 14-day window closes), Acted on, Alert precision, On solid evidence.
-    - **Every headline total comes from SQL aggregates** (`savings_summary_quarter`), never from the capped
-      ledger frame. This fixes the two-sources-for-one-number defect.
+    - **The verified run-rate, Added this quarter, the ROI multiple and the attribution split are
+      whole-ledger SQL aggregates** (`savings_summary_quarter`, `ledger_attribution`). This fixes the
+      two-sources-for-one-number defect. Realization, Settling and the other counts, the "estimated, awaiting
+      proof" figure and the per-item rows come from the newest ≤5,000 ledger rows, and the page says so when
+      that cap binds. If the summary read fails, the run-rate falls back to the ledger frame (disclosed).
   - **Per-item evidence ("What each saving rests on"),** one row per live ledger item (superseded manual twins
     excluded):
     - state, verified $/mo, lever, target, change (old → new), change verdict, days measured after;
@@ -175,7 +180,9 @@ ahead") and moves each tool to the surface where that work happens.
   - Pipeline SLA ▸ Tonight: +1 lazy TASK_HISTORY member, shared with Tasks ▸ SLA.
   - Spend default: unchanged. Attribution toggle: 2 → 3.
   - Proof ▸ Proof: 8 → 9 (+ `ledger_attribution`, app tables only).
-  - Proof ▸ Pipeline: 8 → 10 (+ the idle mart and SHOW WAREHOUSES, both shared); slider moves cost 0.
+  - Proof ▸ Pipeline: 8 → 10, or 11 when no realization rate is measured yet (+ the idle mart and SHOW
+    WAREHOUSES, both shared; + `ledger_attribution`, cache-shared with Proof ▸ Proof, to default the
+    realization slider to carried realization); slider moves cost 0.
 
   ACCOUNT_USAGE literal budgets are unchanged (operations 42, spend 12, optimize 5), and the new module's budget
   is 0.

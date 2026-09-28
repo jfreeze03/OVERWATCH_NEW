@@ -176,7 +176,11 @@ def diagnose_workloads(portfolio: pd.DataFrame | None, *, live_scored: pd.DataFr
             out[col] = pd.Series(dtype=object)
         return out
     live = _live_index(live_scored, live_breakdowns)
-    live_ran = live_scored is not None
+    # the families the live profile actually examined (incl. its clean 'None' rows): only those may be
+    # told "the live profile found nothing" (review r1: an out-of-filter family was never seen)
+    live_seen: set[str] = set()
+    if live_scored is not None and "FINGERPRINT" in live_scored.columns:
+        live_seen = {_text(fp).upper() for fp in live_scored["FINGERPRINT"]}
     rows: dict[str, list] = {col: [] for col in cols}
     for rec in out.to_dict("records"):
         fp = _text(rec.get("FINGERPRINT"))
@@ -206,10 +210,14 @@ def diagnose_workloads(portfolio: pd.DataFrame | None, *, live_scored: pd.DataFr
                 else:
                     diagnosis = "Profile it"
                     first_fix = "Nothing specific shows in the daily marts. "
-                if live_ran:
+                if fp and fp.upper() in live_seen:
                     first_fix += ("The live profile found no actionable inefficiency in a typical "
                                   "successful run either; open its Entity 360 and read a slow run's "
                                   "query profile.")
+                elif live_scored is not None:
+                    first_fix += ("The live profile did not cover this family (outside its filters, or "
+                                  "beyond its successful-run, window or top-500 scope); open its Entity "
+                                  "360 and read a slow run's query profile.")
                 else:
                     first_fix += (f"The marts cannot see {_MART_BLIND}: turn on the live query "
                                   "profile above to diagnose it.")
@@ -254,14 +262,17 @@ def _tracked_sets(tracked: pd.DataFrame | None) -> tuple[dict[str, str], set[str
 
 
 def with_track_status(df: pd.DataFrame, tracked: pd.DataFrame | None) -> pd.DataFrame:
-    """Add TRACK_STATUS (Tracked (open) / Dismissed / Done / Untracked) and TRACKED_ACTION_ID
-    (the latest Action Center item for the family, '' when untracked)."""
+    """Add TRACK_STATUS (Tracked (open) / Dismissed / Done / Untracked) and TRACKED_ACTION_ID:
+    the newest OPEN item for a tracked-open family (the one Action Center lists by default), else
+    the latest closed item ('' when untracked)."""
     out = df.copy()
     latest, open_keys, dropped = _tracked_sets(tracked)
     ids: dict[str, str] = {}
     if tracked is not None and not tracked.empty and "ENTITY_KEY_U" in tracked.columns:
         for rec in tracked.to_dict("records"):
-            ids[_text(rec.get("ENTITY_KEY_U")).upper()] = _text(rec.get("LATEST_ACTION_ID"))
+            key_u = _text(rec.get("ENTITY_KEY_U")).upper()
+            open_id = _text(rec.get("OPEN_ACTION_ID"))
+            ids[key_u] = open_id if key_u in open_keys and open_id else _text(rec.get("LATEST_ACTION_ID"))
     statuses: list[str] = []
     action_ids: list[str] = []
     keys = out["FINGERPRINT"] if "FINGERPRINT" in out.columns else pd.Series([""] * len(out))

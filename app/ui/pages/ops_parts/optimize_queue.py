@@ -311,8 +311,9 @@ def render_optimize(company: str, days: int, rate: float, *, bounds: tuple | Non
         "VALIDATE = confidence < 0.5; otherwise PLAN. A family with no measured cache/latency/failure "
         "evidence is held at VALIDATE — a blank cell is missing data, not a measured zero. Diagnoses "
         "from the daily marts use day-grain averages and are coarser than the live profile. "
-        "Own-traffic families are tagged and never bulk-tracked. WATCHED families are pinned to the "
-        "top of their lane.")
+        "Own-traffic families (SQL naming DBA_MAINT_DB.OVERWATCH, or run mainly in the DBA_MAINT_DB "
+        "database, where the app's own reads run) are tagged and never bulk-tracked. WATCHED families are "
+        "pinned to the top of their lane.")
     result_caption(result, note="credits are measured; diagnoses are advisory")
     stash_section_count(_PAGE, "Optimize", len(act_now), dims=("company", "days"))
 
@@ -347,9 +348,13 @@ def _render_detail(row, *, company: str, is_operator: bool, live_on: bool) -> No
     # Cross-page doorways only for a viewer whose profile offers Control Room (the pane already
     # sits in master_detail's column, so the two links stack rather than nest another column row).
     _cr_ok = can_open("Control Room")
-    if action_id and _cr_ok and st.button("Open in Action Center →", key=f"opt_open_ac:{fp[:16]}",
-                                          type="tertiary"):
+    # only an OPEN item is listed by Action Center's default view, so only it gets the doorway
+    # (review r1: a closed id landed with nothing selected)
+    if (action_id and status == _OPEN_STATUS and _cr_ok
+            and st.button("Open in Action Center →", key=f"opt_open_ac:{fp[:16]}", type="tertiary")):
         request_navigation("Control Room", "Action Center", context={"action_id": action_id})
+    elif action_id and status != _OPEN_STATUS:
+        st.caption("The item is closed — Action Center lists it with *Include completed work* on.")
     if fp and _cr_ok and st.button("Open Entity 360 →", key=f"opt_open_360:{fp[:16]}",
                                    type="tertiary"):
         _open_entity(fp)

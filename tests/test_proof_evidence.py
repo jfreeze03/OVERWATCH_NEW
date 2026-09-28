@@ -194,7 +194,11 @@ def test_ledger_attribution_window_totals_are_uncapped_and_quarter_anchored():
     for alias in ("EXECUTED", "RECOMMENDED", "BOOKED", "ELSEWHERE", "EXPERIMENT", "REGRESSED", "NEUTRAL"):
         assert f") OVER (), 2) AS {alias}_ACTIVE_USD" in sql, alias
     # short window = an auto row whose note lacks the V153 'full window' settle wording
-    assert "IFF(l.SOURCE_CHANGE_ID IS NOT NULL\n               AND NOT CONTAINS(COALESCE(l.NOTES, ''), 'full window'), 1, 0)" in sql
+    assert ("IFF(l.SOURCE_CHANGE_ID IS NOT NULL\n               AND NOT CONTAINS(COALESCE(l.NOTES, ''), 'full window')\n"
+            "               AND NOT CONTAINS(COALESCE(l.NOTES, ''), 're-settled on the full 14-day window'), 1, 0)") in sql
+    # the sentinel is the one resettle_autobook_14d.sql grid 2 appends (review r1)
+    resettle = (_ROOT / "snowflake" / "resettle_autobook_14d.sql").read_text(encoding="utf-8")
+    assert "re-settled on the full 14-day window" in resettle
     assert "LIMIT" not in sql and "ORDER BY a.CREATED_AT DESC" in sql    # same newest-first order as the ledger
     assert "ACTION_QUEUE" not in sql and "CURRENT_DATE()" not in sql
 

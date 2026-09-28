@@ -142,7 +142,10 @@ def test_objectives_paint_first_but_reuse_the_forecast():
     # the forecast panel returns its fc ({} on every early exit) — the r8 locks still hold
     panel = _body(ops, "_sla_finish_forecast_panel")
     assert "def _sla_finish_forecast_panel(*, pf: dict | None = None) -> dict:" in ops
-    assert panel.count("return {}") == 4 and "return fc" in panel
+    # every early exit says WHY (review r1): setup (x2) / empty / unavailable-or-empty; never a bare {}
+    assert panel.count('return {"_reason": "needs_setup"}') == 2 and 'return {"_reason": "empty"}' in panel
+    assert 'return {"_reason": "unavailable" if not res.ok else "empty"}' in panel
+    assert "return {}" not in panel and "return fc" in panel
     assert not re.search(r"\n\s+return\n", panel)                  # no bare return left
     # the tab threads company/schema into Tonight; the render() call string is unchanged
     assert "_pipeline_tonight(days, database, company, schema_contains)" in _body(ops, "_pipeline_sla_tab")
@@ -167,7 +170,11 @@ def test_tasks_objective_shares_the_task_sla_batch_member():
 def test_objectives_panel_is_honest_about_absence_and_scope():
     ops = _src("app/ui/pages/operations.py")
     panel = _body(ops, "_builtin_objectives_panel")
-    assert 'section_header("Built-in objectives", alarm_health(_misses) if (cyc or cad) else ""' in panel
+    assert '_health = alarm_health(_misses) if (cyc or cad) else ""' in panel
+    # review r1: a capped cadence read (LIMIT 200) is never shown green -- header or tile
+    assert 'if _health == "ok" and cad.get("capped"):' in panel
+    assert 'section_header("Built-in objectives", _health, "pipeline"' in panel
+    assert '"" if cad.get("capped") else "ok"' in panel
     assert '"value": "—"' in panel and '"needs setup"' in panel and "0/0" not in panel
     assert "execute_statement(" not in panel and "st.button(" not in panel   # read-only
     # join the source's adjacent string literals ("..." <newline> "..." and "..." + ("...")
@@ -175,10 +182,13 @@ def test_objectives_panel_is_honest_about_absence_and_scope():
     assert ("Read-only objectives derived from the ETL clock and each task's own cadence — no setup. "
             "The custom SLO editor was retired (v4.597); any ACTIVE SLO_OBJECTIVES rows still alert and "
             "badge the Entity 360 watchlist.") in joined
-    assert "(of the 200 most-silent tasks)" in joined
+    # review r1: the cap is disclosed plainly (no "conservative read" claim -- a stopped task can sit outside)
+    assert "judged over the 200 most-silent tasks only" in joined and "conservative" not in joined
     contract = ops.split('"Pipeline SLA": {', 1)[1].split("},", 1)[0]
     assert "Dynamic-table refresh health honor Company/Database/Schema, as does " in contract
-    assert "the Tasks-on-cadence objective." in contract
+    assert "the Tasks-on-cadence objective, which reads its cadence over max(Window, 14) days." in contract
+    # review r1: the Window moves the objective, so the contract lists it as partial (not "ignored")
+    assert '"partial": ("company", "database", "schema_contains", "days")' in contract
 
 
 def test_slo_breach_has_a_specific_playbook_naming_where_objectives_live():

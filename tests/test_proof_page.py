@@ -352,3 +352,35 @@ def test_settle_schedule_counts_pending_auto_rows_and_the_next_settle_day():
     empty = {"pending": 0, "next": None, "overdue": 0, "undated": 0}
     assert settle_schedule(None) == empty and settle_schedule(pd.DataFrame()) == empty
     assert settle_schedule(ledger[ledger["STATE"] == "VERIFIED"], date(2026, 9, 27)) == empty
+
+
+# ---------------------------------------------------------------------------------------------------
+# review r1 behaviour locks
+# ---------------------------------------------------------------------------------------------------
+
+def test_owner_resettled_rows_read_as_a_full_window():
+    """The O-8 re-settle (snowflake/resettle_autobook_14d.sql grid 2) restates a pre-V153 row on its closed
+    14-day window: WINDOW must say full, not 'short window (pre-V153)'."""
+    from app.logic.proof import _window_state
+    today = date(2026, 9, 27)
+    note = "Auto-booked | 3 days | re-settled on the full 14-day window (owner opt-in 2026-09-30)"
+    assert _window_state(pd.Series({"STATE": "VERIFIED", "NOTES": note}), True, today) == "full 14-day window"
+    assert _window_state(pd.Series({"STATE": "VERIFIED", "NOTES": "Auto-booked | 3 days"}), True,
+                         today) == "short window (pre-V153)"
+
+
+def test_failed_summary_read_falls_back_to_the_ledger_frame_not_zero():
+    body = _fn(_src("app/ui/decision_studio.py"), "_proof_signals")
+    assert 'else safe_float(totals.get("verified_active_usd"))' in body
+    assert 'else safe_float(totals.get("verified_qtd_usd"))' in body
+    assert '"summary_ok": _q_ok' in body
+    tab = _fn(_src("app/ui/decision_studio.py"), "_proof_tab")
+    # verified items exist but none active -> a caption, never the "No savings verified yet" empty state
+    assert tab.index('elif int(totals["verified_count"]) > 0:') < tab.index("No savings verified yet")
+
+
+def test_empty_state_doorway_lands_on_the_ledger_pill():
+    body = _fn(_src("app/ui/decision_studio.py"), "_open_savings_ledger")
+    assert body.index('st.session_state["opt_section"] = "Remediation & ledger"') < body.index("request_navigation(")
+    optimize = _src("app/ui/pages/cost_parts/optimize.py")
+    assert '"Remediation & ledger"' in optimize and 'key="opt_section"' in optimize

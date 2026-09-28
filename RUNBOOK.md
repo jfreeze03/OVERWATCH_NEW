@@ -377,8 +377,10 @@ can open it, including EXECUTIVE. Old Decision Studio links, saved views and
   - Pays for itself = verified active run-rate ÷ the app's trailing-30-day
     run cost. Verified savings run-rate, Added this quarter, Realization rate
     (+ carried realization vs OVERWATCH's own estimate), Settling, Acted on,
-    Alert precision and On solid evidence sit beside it. Every headline total
-    is a SQL aggregate, never a capped frame.
+    Alert precision and On solid evidence sit beside it. The run-rate, Added
+    this quarter, the ROI multiple and the attribution split are whole-ledger
+    SQL aggregates; realization and the counts come from the newest ≤5,000
+    ledger rows (disclosed when that cap binds).
   - **What each saving rests on** has one row per ledger item: lever,
     target, old → new change, verdict, measured window and flags. Each row
     carries an attribution class: executed by OVERWATCH / recommended by

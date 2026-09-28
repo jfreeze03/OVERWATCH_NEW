@@ -183,6 +183,9 @@ EVIDENCE_COLUMNS: tuple[str, ...] = (
 
 _UNJUDGED_VERDICTS = ("NO_BASELINE", "INSUFFICIENT_AFTER")
 _FULL_WINDOW_NOTE = "full window"          # V153 settle note: "measured on the full window: ..."
+# the owner's O-8 re-settle (snowflake/resettle_autobook_14d.sql grid 2) restates a pre-V153 row on its closed
+# 14-day window and appends this sentinel -- a full window too (review r1)
+_RESETTLED_NOTE = "re-settled on the full 14-day window"
 _NOT_MEASURABLE_NOTE = "not measurable"    # V153 close-out note (no metered credits after the change)
 _CO_ATTRIBUTED_NOTE = "LBA-1 co-attributed"
 
@@ -278,7 +281,7 @@ def _window_state(row: pd.Series, auto: bool, today: date) -> str | None:
         if settle >= today:
             return f"settles ~{_short_date(settle)}"
         return f"awaiting settle (window closed {_short_date(until_day)})"
-    if _FULL_WINDOW_NOTE in notes:
+    if _FULL_WINDOW_NOTE in notes or _RESETTLED_NOTE in notes:
         return "full 14-day window"
     if _NOT_MEASURABLE_NOTE in notes:
         return "not measurable"

@@ -39,7 +39,12 @@ def test_every_owner_queue_reader_passes_company():
     assert not re.search(r"action_queue\(\d+\)\s*[,)]", ds)
     assert "mart_sql.action_queue(" not in ds
     pipe = ds.split("def _pipeline_tab(", 1)[1].split("\ndef ", 1)[0]
-    assert "workbench_sql.action_center(company, False, 500)" in pipe
+    assert "workbench_sql.action_center(company, False, 500, with_totals=True)" in pipe
+    # review r1: the queued headline reads the uncapped window totals, computed before the LIMIT
+    sql = workbench_sql.action_center("ALL", False, 500, with_totals=True)
+    assert "COUNT(*) OVER () AS OPEN_TOTAL" in sql and "AS QUEUED_MONTHLY_TOTAL" in sql
+    assert sql.index("OVER ()") < sql.index("LIMIT 500")
+    assert "OVER ()" not in workbench_sql.action_center("ALL", False, 500)    # Action Center unchanged
     assert "UPPER(COMPANY) IN ('TREXIS', 'ALL')" in workbench_sql.action_center("Trexis", False, 500)
 
 

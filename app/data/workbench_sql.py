@@ -11,9 +11,24 @@ def _entity_type(value: str) -> str:
     return str(value or "").strip().upper()[:40]
 
 
+_PERIOD_U = "UPPER(TRIM(COALESCE(PERIOD, '')))"
+_ACTION_TOTALS = f""",
+       COUNT(*) OVER () AS OPEN_TOTAL,
+       ROUND(SUM(IFF(ESTIMATED_USD > 0 AND {_PERIOD_U} = 'MONTHLY', ESTIMATED_USD,
+                     IFF(ESTIMATED_USD > 0 AND {_PERIOD_U} = 'ANNUAL', ESTIMATED_USD / 12, 0))) OVER (), 2)
+           AS QUEUED_MONTHLY_TOTAL,
+       SUM(IFF(COALESCE(ESTIMATED_USD, 0) > 0, 0, 1)) OVER () AS UNPRICED_TOTAL,
+       SUM(IFF(ESTIMATED_USD > 0 AND {_PERIOD_U} = 'ONE_TIME', 1, 0)) OVER () AS ONE_TIME_TOTAL,
+       SUM(IFF(ESTIMATED_USD > 0 AND {_PERIOD_U} NOT IN ('MONTHLY', 'ANNUAL', 'ONE_TIME'), 1, 0)) OVER ()
+           AS NO_PERIOD_TOTAL"""
+
+
 def action_center(company: str = "ALL", include_closed: bool = False,
-                  limit: int = 500) -> str:
-    """Extended ACTION_QUEUE shape installed by V074."""
+                  limit: int = 500, *, with_totals: bool = False) -> str:
+    """Extended ACTION_QUEUE shape installed by V074. ``with_totals`` (v4.597, Proof ▸ Pipeline) adds
+    UNCAPPED window totals computed before the LIMIT -- the open count and the monthly run-rate of every
+    matching item (MONTHLY as-is, ANNUAL / 12; the same buckets as decision.monthly_equivalent) -- so a
+    headline never sums the capped frame."""
     cap = max(1, min(int(limit), 1000))
     clauses: list[str] = []
     if not include_closed:
@@ -26,7 +41,7 @@ def action_center(company: str = "ALL", include_closed: bool = False,
 SELECT ACTION_ID, CREATED_AT, COMPANY, SEVERITY, TITLE, DETAIL, OWNER, STATUS,
        DUE_DATE, DEFER_UNTIL, COMPLETED_AT, RESOLUTION_NOTE, SOURCE,
        SOURCE_ENTITY_TYPE, SOURCE_ENTITY_KEY, CONFIDENCE, PROOF_SQL,
-       ESTIMATED_USD, PERIOD, UPDATED_AT, UPDATED_BY
+       ESTIMATED_USD, PERIOD, UPDATED_AT, UPDATED_BY{_ACTION_TOTALS if with_totals else ""}
 FROM {core_object("ACTION_QUEUE")}
 WHERE {and_where(*clauses)}
 ORDER BY CASE UPPER(SEVERITY) WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
@@ -357,8 +372,11 @@ _ADVISOR_SELECT_COLS = """,
        -- family count and observed cost cover EVERY family in scope, not just the listed top-N.
        COUNT(*) OVER () AS SCOPE_FAMILIES_TOTAL,
        ROUND(SUM(c.CREDITS) OVER (), 4) AS SCOPE_CREDITS_TOTAL,
-       -- OVERWATCH's own loader/mart statements: tagged (never bulk-tracked), not dropped.
-       COALESCE(CONTAINS(UPPER(f.QUERY_PREVIEW), 'DBA_MAINT_DB.OVERWATCH.'), FALSE) AS OW_SELF"""
+       -- OVERWATCH own traffic: tagged (never bulk-tracked), not dropped. Its loaders, marts and procs name
+       -- DBA_MAINT_DB.OVERWATCH in their SQL; the app reads (telemetry scans, mart reads) run in the app
+       -- database context, so their credit-dominant database is DBA_MAINT_DB (review r1).
+       (COALESCE(CONTAINS(UPPER(f.QUERY_PREVIEW), 'DBA_MAINT_DB.OVERWATCH.'), FALSE)
+        OR UPPER(COALESCE(c.TOP_DATABASE, '')) = 'DBA_MAINT_DB') AS OW_SELF"""
 
 
 def _portfolio_sql(days: int, company: str, limit: int, bounds: tuple | None, *,
@@ -456,6 +474,9 @@ def tracked_actions(entity_type: str = "QUERY_FINGERPRINT", lookback_days: int =
     return f"""
 SELECT UPPER(q.SOURCE_ENTITY_KEY) AS ENTITY_KEY_U,
        MAX_BY(q.ACTION_ID, q.CREATED_AT) AS LATEST_ACTION_ID,
+       -- the newest OPEN / IN_PROGRESS item (MAX_BY skips NULL ordering values): the one Action Center
+       -- shows by default, so a link to it always lands selected (review r1)
+       MAX_BY(q.ACTION_ID, IFF(UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS'), q.CREATED_AT, NULL)) AS OPEN_ACTION_ID,
        MAX_BY(q.STATUS, q.CREATED_AT) AS ACTION_STATUS,
        MAX_BY(q.OWNER, q.CREATED_AT) AS ACTION_OWNER,
        COUNT_IF(UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS')) AS OPEN_N,

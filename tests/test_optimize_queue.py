@@ -181,7 +181,10 @@ def test_optimize_queue_keeps_the_portfolio_pins_and_never_names_the_queue():
     # both Streamlit-runtime exclusions kept, and the own-traffic flag uses a DIFFERENT expression
     assert sql.count("UPPER(COALESCE(f.QUERY_PREVIEW, ''))") == 2
     assert "NOT LIKE 'EXECUTE STREAMLIT%'" in sql and "NOT LIKE '%OVERWATCH_APP%'" in sql
-    assert "COALESCE(CONTAINS(UPPER(f.QUERY_PREVIEW), 'DBA_MAINT_DB.OVERWATCH.'), FALSE) AS OW_SELF" in sql
+    # own traffic = SQL naming DBA_MAINT_DB.OVERWATCH OR a credit-dominant DBA_MAINT_DB context (review r1:
+    # the app's own reads never name the schema in their text)
+    assert "(COALESCE(CONTAINS(UPPER(f.QUERY_PREVIEW), 'DBA_MAINT_DB.OVERWATCH.'), FALSE)" in sql
+    assert "OR UPPER(COALESCE(c.TOP_DATABASE, '')) = 'DBA_MAINT_DB') AS OW_SELF" in sql
     # a queue write bumps the ACTION_QUEUE domain salt: naming it would re-cold this mart read
     assert "ACTION_QUEUE" not in sql.upper()
     assert "ACCOUNT_USAGE" not in sql.upper()
@@ -191,8 +194,11 @@ def test_optimize_queue_keeps_the_portfolio_pins_and_never_names_the_queue():
 def test_tracked_actions_is_one_grouped_account_wide_read():
     sql = workbench_sql.tracked_actions()
     parsed = sqlglot.parse_one(sql, read="snowflake")
-    assert parsed.named_selects == ["ENTITY_KEY_U", "LATEST_ACTION_ID", "ACTION_STATUS",
+    assert parsed.named_selects == ["ENTITY_KEY_U", "LATEST_ACTION_ID", "OPEN_ACTION_ID", "ACTION_STATUS",
                                     "ACTION_OWNER", "OPEN_N", "DROPPED_N", "LAST_DECIDED"]
+    # the newest OPEN item: MAX_BY over an open-only ordering value (NULLs skipped), never the newest overall
+    assert ("MAX_BY(q.ACTION_ID, IFF(UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS'), q.CREATED_AT, NULL)) "
+            "AS OPEN_ACTION_ID") in sql
     assert "DBA_MAINT_DB.OVERWATCH.ACTION_QUEUE q" in sql
     assert "UPPER(q.SOURCE_ENTITY_TYPE) = 'QUERY_FINGERPRINT'" in sql
     assert "GROUP BY UPPER(q.SOURCE_ENTITY_KEY)" in sql
@@ -496,6 +502,7 @@ def _queue(n: int = 40) -> pd.DataFrame:
 
 def _tracked(rows: list[tuple]) -> pd.DataFrame:
     return pd.DataFrame([{"ENTITY_KEY_U": k, "LATEST_ACTION_ID": f"id-{k}", "ACTION_STATUS": s,
+                          "OPEN_ACTION_ID": f"open-{k}" if o else None,
                           "ACTION_OWNER": "UNASSIGNED", "OPEN_N": o, "DROPPED_N": d,
                           "LAST_DECIDED": None} for k, s, o, d in rows])
 
@@ -529,7 +536,9 @@ def test_track_status_reads_open_dismissed_done_and_untracked():
                                          ("FP02", "DONE", 0, 0), ("FP03", "DONE", 1, 0)]))
     assert out["TRACK_STATUS"].tolist() == ["Tracked (open)", "Dismissed", "Done",
                                             "Tracked (open)", "Untracked"]
-    assert out["TRACKED_ACTION_ID"].tolist() == ["id-FP00", "id-FP01", "id-FP02", "id-FP03", ""]
+    # an open family links to its newest OPEN item (FP03: a newer DONE must not hide it); a closed family
+    # keeps its latest (closed) id for the caption (review r1)
+    assert out["TRACKED_ACTION_ID"].tolist() == ["open-FP00", "id-FP01", "id-FP02", "open-FP03", ""]
     assert with_track_status(q, None)["TRACK_STATUS"].eq("Untracked").all()
 
 
@@ -588,7 +597,7 @@ def test_the_queue_reads_batch_once_and_divide_by_the_real_span():
 def test_the_queue_keeps_the_portfolio_honesty_copy():
     opt = _src(_OPT)
     for phrase in ("evidence-weighted heuristics", "not promised savings", "ACT NOW",
-                   "confidence < 0.5", "Own-traffic families are tagged and never bulk-tracked",
+                   "confidence < 0.5", "are tagged and never bulk-tracked", "run mainly in the DBA_MAINT_DB",
                    "NOT statistical confidence", "query families by measured credits",
                    "len(portfolio) >= _QUEUE_CAP", 'read_model_caption("workload_portfolio")',
                    'mark_watched(portfolio, _wl, "QUERY_FINGERPRINT", "FINGERPRINT")',
@@ -622,3 +631,25 @@ def test_fix_queue_constants_match_the_owner_decisions():
     assert fix_queue.TRACK_COOLDOWN_DAYS == 90
     assert fix_queue.TRACK_SOURCE == "Operations > Optimize"
     assert fix_queue.TRACK_ENTITY_TYPE == "QUERY_FINGERPRINT"
+
+
+def test_none_first_fix_only_claims_the_live_profile_for_families_it_saw():
+    """review r1: a family outside the live profile's filters/scope must not read 'the live profile found no
+    actionable inefficiency' -- only a family the live read returned (incl. a clean 'None' row) may."""
+    from app.logic.fix_queue import diagnose_workloads
+    base = {"LANE": "PLAN", "NEXT_MOVE": "Profile it", "CONFIDENCE": 0.2, "IMPACT_USD_30D": 10.0,
+            "FAIL_PCT": 0.0, "PRIORITY_SCORE": 1.0}
+    port = pd.DataFrame([{**base, "FINGERPRINT": "SEEN"}, {**base, "FINGERPRINT": "UNSEEN"}])
+    live = pd.DataFrame([{"FINGERPRINT": "seen", "PATHOLOGY": "None", "CONFIDENCE": 50, "FIRST_ACTION": ""}])
+    out = diagnose_workloads(port, live_scored=live, live_breakdowns={}).set_index("FINGERPRINT")
+    assert "found no actionable inefficiency" in out.loc["SEEN", "FIRST_FIX"]
+    assert "did not cover this family" in out.loc["UNSEEN", "FIRST_FIX"]
+    assert "found no actionable" not in out.loc["UNSEEN", "FIRST_FIX"]
+    off = diagnose_workloads(port).set_index("FINGERPRINT")          # live toggle off
+    assert "turn on the live query profile" in off.loc["UNSEEN", "FIRST_FIX"]
+
+
+def test_open_in_action_center_is_offered_only_for_an_open_item():
+    src = (_ROOT / "app" / "ui" / "pages" / "ops_parts" / "optimize_queue.py").read_text(encoding="utf-8")
+    assert "if (action_id and status == _OPEN_STATUS and _cr_ok" in src
+    assert "Include completed work" in src
