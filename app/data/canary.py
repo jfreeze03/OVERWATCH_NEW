@@ -296,6 +296,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     # V041 loader pass
     ("mart27.alloc_xdim_attribution", lambda: mart27_sql.alloc_xdim_attribution(1, "USER", "ALFA", "")),
     ("mart27.alloc_xdim_attribution.db", lambda: mart27_sql.alloc_xdim_attribution(1, "DATABASE", "ALFA", "DBA_MAINT_DB")),
+    ("mart27.alloc_xdim_day_drivers", lambda: mart27_sql.alloc_xdim_day_drivers(
+        "WH_ALFA_ADMIN", (account_today() - timedelta(days=1)).isoformat(), "ALFA")),
     ("mart27.ops_diag_top_queries", lambda: mart27_sql.ops_diag_top_queries(1, "ALFA", 1)),
     ("mart27.ops_diag_failures", lambda: mart27_sql.ops_diag_failures(1, "ALFA")),
     ("mart27.platform_score_inputs", lambda: mart27_sql.platform_score_inputs(7)),
