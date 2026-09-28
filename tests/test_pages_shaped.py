@@ -443,3 +443,154 @@ def test_admin_performance_usage_panels_render_shaped():
     blob = _texts(at)
     assert "Section visits" in blob, "the Section visits panel header did not paint"
     assert "Ask demand" in blob, "the Ask demand panel header did not paint"
+
+
+def _nav_context(at) -> dict:
+    """The page-local nav context left after a render ({} when none) -- AppTest state has no .get()."""
+    try:
+        return dict(at.session_state["_ow_nav_context"] or {})
+    except KeyError:
+        return {}
+
+
+_EVIDENCE_MARK = "ON k.SESSION_ID = c.SESSION_ID"     # only etl_control_sql.run_task_evidence_scan emits it
+
+
+@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
+def test_task_evidence_drill_renders_shaped_and_is_off_by_default(monkeypatch):
+    """Next-Fifty #14 Ph1: Operations ▸ Pipeline SLA ▸ Tonight with the ETL tables configured. Off by
+    default, neither 'Explain a task' drill reads (or renders its picker); switched on at both sites
+    (Workflow runtimes + Run inventory), both read, the page finishes, and the shaped failed CALL leads
+    with its error."""
+    from app.config import DEFAULT_SETTINGS
+    from app.ui import components
+    from app.ui.pages import operations
+
+    etl_settings = dict(DEFAULT_SETTINGS)
+    etl_settings.update({"_source": "stub", "ETL_CONTROL_STATUS_FQN": "DB.SCH.CONTROL_STATUS",
+                         "ETL_CONTROL_RUN_ID_FQN": "DB.SCH.CONTROL_RUN_ID"})
+    for mod in (operations, components):
+        monkeypatch.setattr(mod, "load_settings", lambda _page: dict(etl_settings))
+    seen: list[str] = []
+
+    def _recording_run(*args, **kwargs):
+        seen.append(str(args[0] if args else kwargs.get("sql", "")))
+        return _shaped_run(*args, **kwargs)
+
+    monkeypatch.setattr(operations, "run", _recording_run)
+    at = AppTest.from_function(_entry, default_timeout=30)
+    at.run()
+    _nav_to(at, "Operations")
+    at.session_state["ops_section"] = "Pipeline SLA"
+    at.run()
+    assert not at.exception, f"pipeline SLA tonight (shaped): {at.exception}"
+    assert not any(_EVIDENCE_MARK in s for s in seen), "an evidence read ran with the drill switched off"
+    assert {"etl_ev_rt_toggle", "etl_ev_inv_toggle"} <= {str(t.key) for t in at.toggle}
+    assert not {"etl_ev_rt_pick", "etl_ev_inv_pick"} & {str(s.key) for s in at.selectbox}
+    seen.clear()
+    at.session_state["etl_ev_rt_toggle"] = True
+    at.session_state["etl_ev_inv_toggle"] = True
+    at.run()
+    assert not at.exception, f"task evidence drill (shaped): {at.exception}"
+    assert not any("could not finish rendering" in str(getattr(e, "value", "")) for e in at.error)
+    assert len([s for s in seen if _EVIDENCE_MARK in s]) >= 2, "both drills should have read"
+    assert {"etl_ev_rt_pick", "etl_ev_inv_pick"} <= {str(s.key) for s in at.selectbox}
+    assert any("Failed:" in str(e.value) for e in at.error), [str(e.value) for e in at.error]
+
+
+@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
+def test_queries_opportunity_row_opens_in_optimize(monkeypatch):
+    """#28: select a row on Operations ▸ Queries' opportunity board, click "Open in Optimize →": the SAME
+    family lands selected on Operations ▸ Optimize with the live profile on (its diagnosis matches the QOP
+    breakdown just read), and the one-shot context is fully consumed."""
+    from app.ui.pages import operations
+
+    real_select = operations.selectable_table
+    captured: dict[str, str] = {}
+
+    def _select_first(df, key, **kwargs):
+        if key == "ops_qopp_sel":
+            captured["fp"] = str(df.iloc[0]["FINGERPRINT"])     # never hard-code: the harness types it
+            return 0
+        return real_select(df, key, **kwargs)
+
+    monkeypatch.setattr(operations, "selectable_table", _select_first)
+    at = AppTest.from_function(_entry, default_timeout=30)
+    at.run()
+    _nav_to(at, "Operations")
+    at.session_state["ops_qopp_toggle"] = True
+    at.run()
+    assert not at.exception, f"queries opportunity board (shaped): {at.exception}"
+    buttons = [b for b in at.button if str(b.label) == "Open in Optimize →"]
+    assert len(buttons) == 1, [str(b.label) for b in at.button]
+    buttons[0].click()
+    at.run()
+    assert not at.exception, f"open in optimize (shaped): {at.exception}"
+    assert at.session_state["ops_section"] == "Optimize"
+    assert at.session_state["_ow_md_sel_ops_optimize"] == captured["fp"]
+    assert at.session_state["ops_opt_live"] is True
+    ctx = _nav_context(at)
+    assert "fingerprint" not in ctx and "live_profile" not in ctx, ctx
+    blob = " ".join(str(m.value) for m in at.markdown)
+    assert "First fix:" in blob, "the landed family's detail pane did not render"
+    assert "from the live query profile" in blob, "the landing diagnosis is not the live one"
+
+
+@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
+def test_optimize_names_a_family_it_does_not_queue():
+    """#28: a deep link to a family the fix queue does not list lands with an explanation in the empty
+    detail pane (not a previously selected, unrelated family), is consumed on arrival, and the notice is
+    delivered once (gone on the next rerun). Before #28 the link lingered silently."""
+    at = AppTest.from_function(_entry, default_timeout=30)
+    at.run()
+    _nav_to(at, "Operations")
+    at.run()
+    at.session_state["_ow_md_sel_ops_optimize"] = "1.0"          # an earlier pick of a queued family
+    at.session_state["_ow_nav_pending"] = {"page": "Operations", "section": "Optimize", "filters": {},
+                                           "context": {"fingerprint": "NOT_IN_QUEUE"}, "origin": None}
+    at.run()
+    assert not at.exception, f"optimize unqueued link (shaped): {at.exception}"
+    assert at.session_state["ops_section"] == "Optimize"
+    blob = _texts(at)
+    assert "Query family NOT_IN_QUEUE is not in this fix queue" in blob, blob[-600:]
+    assert "First fix:" not in blob, "an unrelated family's detail pane is still showing"
+    ctx = _nav_context(at)
+    assert "fingerprint" not in ctx, ctx
+    at.run()
+    assert not at.exception
+    assert "is not in this fix queue" not in _texts(at), "the notice lingered past its arrival"
+
+
+@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
+def test_optimize_keeps_a_deep_link_through_a_failed_queue_read(monkeypatch):
+    """#28: when the fix-queue read fails, Optimize returns at its guard BEFORE consuming the link, so the
+    deep-linked family (and its one-shot live_profile) still land on the next successful rerun."""
+    from app.ui.pages.ops_parts import optimize_queue
+
+    state = {"fail": True}
+
+    def _batch(specs, **kwargs):
+        out = _shaped_batch(specs, **kwargs)
+        if state["fail"]:
+            for k in [k for k in out if str(k).startswith("ops_opt_queue_")]:
+                out[k] = QueryResult(df=pd.DataFrame(), ok=False, error="stub timeout", source="stub")
+        return out
+
+    monkeypatch.setattr(optimize_queue, "run_batch_mixed", _batch)
+    at = AppTest.from_function(_entry, default_timeout=30)
+    at.run()
+    _nav_to(at, "Operations")
+    at.run()
+    at.session_state["_ow_nav_pending"] = {"page": "Operations", "section": "Optimize", "filters": {},
+                                           "context": {"fingerprint": "1.0", "live_profile": True},
+                                           "origin": None}
+    at.run()
+    assert not at.exception, f"optimize failed queue read (shaped): {at.exception}"
+    assert _nav_context(at) == {"fingerprint": "1.0", "live_profile": True}, "the link was consumed early"
+    state["fail"] = False
+    at.run()
+    assert not at.exception
+    assert _nav_context(at) == {}
+    assert at.session_state["_ow_md_sel_ops_optimize"] == "1.0"
+    assert at.session_state["ops_opt_live"] is True
+    assert "First fix:" in " ".join(str(m.value) for m in at.markdown)
