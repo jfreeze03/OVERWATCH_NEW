@@ -368,12 +368,23 @@ can open it, including EXECUTIVE. Old Decision Studio links, saved views and
 `?page=decision-studio` deep links remap through `navigate.LEGACY_TARGETS`.
 - **Proof** — "does OVERWATCH pay for itself", account-wide:
   - Pays for itself = verified active run-rate ÷ the app's trailing-30-day
-    run cost. Verified savings run-rate, Added this quarter, Realization rate
-    (+ carried realization vs OVERWATCH's own estimate), Settling, Acted on,
-    Alert precision and On solid evidence sit beside it. The run-rate, Added
-    this quarter, the ROI multiple and the attribution split are whole-ledger
+    run cost. Verified savings run-rate, Saved to date, Added this quarter,
+    Realization rate (+ carried realization vs OVERWATCH's own estimate),
+    Settling, Acted on, Alert precision and On solid evidence sit beside it.
+    The run-rate, Saved to date, Added this quarter, the ROI multiple and the
+    attribution split are whole-ledger
     SQL aggregates; realization and the counts come from the newest ≤5,000
     ledger rows (disclosed when that cap binds).
+  - Reverts (v4.600): a booked warehouse change (size, auto-suspend, max
+    clusters, scaling policy) that a later change made costlier leaves the
+    run-rate, Added this quarter, the ROI multiple, the attribution split and
+    the Brief tile on the first render after the daily scan sees it. It is
+    flagged in the evidence table and listed under Reverted savings. Items
+    booked by hand are not revert-checked; the 12-month cap still bounds them.
+  - Saved to date (v4.600) is dollars, not a run-rate: each verified item's
+    monthly saving ÷ 30 × days in place, until it was undone or 12 months
+    after verification. The card separates the measured part from the part
+    carried forward at the verified rate, and never feeds the ROI multiple.
   - **What each saving rests on** has one row per ledger item: lever,
     target, old → new change, verdict, measured window and flags. Each row
     carries an attribution class: executed by OVERWATCH / recommended by
@@ -532,7 +543,7 @@ integration with per-route failure isolation; MIN_SEVERITY is a rank filter
 (CRITICAL ⊂ HIGH ⊂ MEDIUM ⊂ LOW).
 
 **ROI (Brief):** "Verified savings run-rate" = the monthly run-rate of VERIFIED
-ledger items verified in the last 12 months (never estimates), shown against the
+ledger items verified in the last 12 months and not reverted (never estimates), shown against the
 app's own trailing-30-day warehouse cost (green = pays for itself). It does not
 reset when a quarter starts; "verified this quarter" lives in the help text and on
 Proof ▸ Proof. The open ESTIMATED pipeline is a separate figure by design.
