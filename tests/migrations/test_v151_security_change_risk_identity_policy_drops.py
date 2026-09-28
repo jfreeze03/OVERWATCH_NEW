@@ -396,7 +396,7 @@ def test_v151_plain_sql_parses():
 # ---------------------------------------------------------------------------------------------
 def test_validate_floor_pins_the_wave_tip():
     val = _read("snowflake/validate.sql")
-    assert "V001..V160 applied" in val and "VERSION BETWEEN 1 AND 160) = 160" in val
+    assert "V001..V161 applied" in val and "VERSION BETWEEN 1 AND 161) = 161" in val
 
 
 def test_docs_and_admin_track_v151():

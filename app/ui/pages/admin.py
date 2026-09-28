@@ -703,6 +703,13 @@ _EXPECTED_MIGRATIONS = {
          "threshold USD per week of cloud services, priced like the Cost > Spend billed-family panel; MEDIUM "
          "at 25, HIGH at 5x; self-clears once the polling stops. New transient table SLEEP_POLLING_WEEKLY. "
          "No task change, no apply-time run",
+    161: "Scheduled operator-data backups retired (owner decision): TASK_BACKUP_OPERATOR and "
+         "SP_BACKUP_OPERATOR_TABLES are dropped, the DBA_MAINT_DB.OVERWATCH_BAK schema goes with every daily "
+         "generation, and OPERATOR_BACKUP_LOG plus the 25 weekly *_BAK_LAST copies go too. Also deletes the "
+         "BACKUP_KEEP_* settings and the OPERATOR_BACKUP_DAILY freshness row (closing its open stale event), and "
+         "drops the backup-prune carve-out from V_SECURITY_EXCEPTION_QUEUE. Until it is applied the backup task "
+         "still runs daily and, from its first prune (day 15), its generation DROPs are hidden from CHANGE RISK "
+         "only by that carve-out. Recovery is Time Travel plus manual *_BAK_<date> clones (RUNBOOK section 16)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -793,9 +800,6 @@ _SETTING_EDITORS: dict[str, tuple[str, object]] = {
     "FACT_RETENTION_DAYS_DAILY": (_NUM, {"min_value": 1.0, "step": 1.0}),
     "ERROR_LOG_RETENTION_DAYS": (_NUM, {"min_value": 1.0, "step": 1.0}),
     "APP_USAGE_RETENTION_DAYS": (_NUM, {"min_value": 1.0, "step": 1.0}),
-    # Operator-backup generations kept per table (V158; the proc clamps to the same bounds).
-    "BACKUP_KEEP_DAILY": (_NUM, {"min_value": 7.0, "max_value": 60.0, "step": 1.0}),
-    "BACKUP_KEEP_WEEKLY": (_NUM, {"min_value": 4.0, "max_value": 52.0, "step": 1.0}),
 }
 
 

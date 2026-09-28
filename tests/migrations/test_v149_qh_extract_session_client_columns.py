@@ -90,7 +90,7 @@ def test_v149_reloads_the_extract_immediately():
 
 def test_validate_and_docs_track_v149():
     val = _read("snowflake/validate.sql")
-    assert "V001..V160 applied" in val and "VERSION BETWEEN 1 AND 160) = 160" in val
+    assert "V001..V161 applied" in val and "VERSION BETWEEN 1 AND 161) = 161" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V149__qh_extract_session_client_columns.sql" in _read(rel)
 

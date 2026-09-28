@@ -19,7 +19,7 @@ steady-state weekday at 59 statements (135 on Sundays) and reproduces the untrim
 shape. Python mirrors (``_probe_emulated``, ``_loop_emulated``, ``_pruned_rows_batched``) prove the skip
 decisions and the batched rows; the mirrors are tied to the SQL by the exact-text locks.
 
-The wave-tip pins at the bottom (validate 'V001..V160 applied', the DEPLOYMENT/README list lines and the
+The wave-tip pins at the bottom (validate 'V001..V161 applied', the DEPLOYMENT/README list lines and the
 admin _EXPECTED_MIGRATIONS[158] entry) are written by the wave integrator; they fail until then.
 """
 
@@ -33,8 +33,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
-from app.config import DEFAULT_SETTINGS
 
 _ROOT = Path(__file__).resolve().parents[2]
 _MIG = _ROOT / "snowflake" / "migrations"
@@ -789,7 +787,6 @@ def test_v158_statement_budget():
     assert "A steady-state weekday is 59 statements and a Sunday 135, 489 a week" in _V158
     assert "design: 107 / 208 / 850; V089 ran 26 a week" in _V158
     assert "keep a steady-state day at 59 statements (Sunday 135)" in _V158
-    assert "steady-state day is 59 statements (135 on Sundays)" in _norm(_read("RUNBOOK.md"))
 
 
 def _pre_d11(proc: str) -> str:
@@ -962,17 +959,13 @@ def test_v158_locks_kill_their_mutations(name):
 # ---------------------------------------------------------------------------------------------
 # settings, freshness, log, schedule
 # ---------------------------------------------------------------------------------------------
-def test_v158_settings_seed_matches_defaults_and_editor_bounds():
+def test_v158_settings_seed_is_when_not_matched_14_and_8():
+    # V161 retired these keys (their DEFAULT_SETTINGS and Admin editors are gone: test_v161); V158's own seed
+    # and proc defaults stay what was applied.
     merge = _block(_V158, "MERGE INTO DBA_MAINT_DB.OVERWATCH.SETTINGS t", ";\n")
     assert "WHEN NOT MATCHED THEN INSERT (KEY, VALUE)" in merge and "WHEN MATCHED" not in merge
     for key, default in (("BACKUP_KEEP_DAILY", "14"), ("BACKUP_KEEP_WEEKLY", "8")):
-        assert DEFAULT_SETTINGS[key] == default
-        assert f"('{key}', '{DEFAULT_SETTINGS[key]!s}')" in merge
-    from app.ui.pages import admin
-    assert admin._SETTING_EDITORS["BACKUP_KEEP_DAILY"] == (
-        admin._NUM, {"min_value": 7.0, "max_value": 60.0, "step": 1.0})
-    assert admin._SETTING_EDITORS["BACKUP_KEEP_WEEKLY"] == (
-        admin._NUM, {"min_value": 4.0, "max_value": 52.0, "step": 1.0})
+        assert f"('{key}', '{default}')" in merge
     new = _proc(_V158)
     assert "COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'BACKUP_KEEP_DAILY', VALUE, NULL))), 14)" in new
     assert "COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'BACKUP_KEEP_WEEKLY', VALUE, NULL))), 8)" in new
@@ -1018,20 +1011,15 @@ def test_v158_weekly_generation_gets_its_own_cloned_row():
     assert log.count("'CLONED', b.ROW_COUNT, s.ROW_COUNT, b.BYTES") == 2
     # the freshness ROW_COUNT stays the daily generation's rows (never doubled on a Sunday)
     assert "WHERE RUN_ID = :run_id AND ACTION = 'CLONED' AND GENERATION = :gen_d;" in log
-    rb = _norm(_read("RUNBOOK.md"))
-    assert "records every clone, skip and prune" not in rb
-    assert "on Sundays the weekly `_W` as its own row" in rb and "The Sunday `*_BAK_LAST` refresh is not logged" in rb
 
 
-def test_v158_schedule_moves_in_place_and_task_audit_pins_it():
+def test_v158_schedule_moves_in_place():
+    # (task_audit.sql no longer expects the task: V161 dropped it -- test_v161)
     sched = ("ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR SUSPEND;\n"
              "ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR\n"
              "    SET SCHEDULE = 'USING CRON 10 5 * * * America/Chicago';\n"
              "ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR RESUME;\n")
     assert _V158.count(sched) == 1
-    audit = _read("snowflake/task_audit.sql")
-    assert re.search(r"\('TASK_BACKUP_OPERATOR',\s+'started', 'WH_ALFA_ADMIN', "
-                     r"'USING CRON 10 5 \* \* \* America/Chicago', NULL\)", audit)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1072,16 +1060,9 @@ def test_v158_carve_out_regex_matches_only_the_generated_drop():
 
 
 # ---------------------------------------------------------------------------------------------
-# lockstep: validate row, teardown, docs, loader_chain_check, app predicate
+# lockstep: teardown, loader_chain_check. V161 retired the backups: the validate freshness row, the
+# backup DR / restore docs and the tag-coverage exclusion are locked by test_v161 in their new shape.
 # ---------------------------------------------------------------------------------------------
-def test_validate_has_a_central_pinned_backup_freshness_row_outside_the_teeth():
-    val = _read("snowflake/validate.sql")
-    head, teeth = val.split("EXECUTE IMMEDIATE $$", 1)
-    assert "'Operator backups fresh" in head and "OPERATOR_BACKUP_DAILY" not in teeth
-    assert ("DATEDIFF('minute', MAX(LAST_LOAD_TS), CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())"
-            "::TIMESTAMP_NTZ) / 60.0 <= 30") in head
-
-
 def test_teardown_keeps_every_backup_and_names_the_new_objects():
     td = _read("snowflake/teardown.sql")
     live = _live(td)
@@ -1095,69 +1076,15 @@ def test_teardown_keeps_every_backup_and_names_the_new_objects():
     assert "DROP SCHEMA" not in td.upper()
 
 
-def test_restore_docs_moved_to_insert_overwrite():
-    rb, dep = _read("RUNBOOK.md"), _read("DEPLOYMENT.md")
-    for doc in (rb, dep):
-        assert "INSERT OVERWRITE INTO" in doc and "OVERWATCH_BAK" in doc
-        assert "CLONE <T>_BAK_LAST" not in doc and "CLONE <NAME>_BAK_LAST" not in doc
-        assert "CLONE <T> AT(OFFSET" not in doc
-    assert "TASK_BACKUP_OPERATOR | 05:10 daily" in rb
-    assert "BACKUP_KEEP_DAILY 14 (7-60)" in rb and "BACKUP_KEEP_WEEKLY 8 (4-52)" in rb
-    assert "INSERT OVERWRITE INTO <T> SELECT * FROM <T> AT(OFFSET => -3600);" in rb
-    assert "OVERWATCH_BAK" in _read("docs/FULL_REBUILD.md") and "OVERWATCH_BAK" in _read("FEATURES.md")
-
-
-_DR_CHOOSER = ("SELECT TABLE_NAME, ROW_COUNT, CREATED FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES "
-               "WHERE TABLE_SCHEMA = 'OVERWATCH_BAK' ORDER BY 1;")
-_DR_SUSPEND = "ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR SUSPEND;"
-
-
-def _lock_dr_order(section: str, *, replay: str, restore: str, v158: str) -> None:
-    """A rebuild restores the operator tables BEFORE V158 is replayed: V158's tail clones whatever the
-    tables hold into an immutable generation dated that day and prunes with whatever SETTINGS holds."""
-    s = _norm(section)
-    assert "V001..V158" not in s, "a full V001..V158 replay before the restore backs up the re-seeded tables"
-    assert s.index(replay) < s.index(restore) < s.index(v158), "order: V001..V157 -> restore -> V158"
-    assert "SETTINGS first" in s, "SETTINGS first: it carries BACKUP_KEEP_* (the V158 tail prunes with it)"
-    assert _DR_CHOOSER in s, "the chooser must survive the loss (INFORMATION_SCHEMA, not the lost log)"
-    assert _DR_SUSPEND in s and "never restore from the generation dated the replay day" in s
-
-
-def test_dr_docs_restore_operator_tables_before_the_v158_replay():
-    rb, dep = _read("RUNBOOK.md"), _read("DEPLOYMENT.md")
-    step3 = rb[rb.index("3. **Schema gone:**"):rb.index("4. **Bad deploy:**")]
-    _lock_dr_order(step3, replay="**V001..V157 only**", restore="Restore the 25 operator tables",
-                   v158="Apply V158")
-    assert "OPERATOR_BACKUP_LOG` lived in OVERWATCH and is gone" in _norm(step3)
-    assert "dated BEFORE the loss" in _norm(step3)
-    dropped = dep[dep.index("- **Schema dropped:**"):dep.index("- **App broken after deploy:**")]
-    _lock_dr_order(dropped, replay="**V001..V157 only**", restore="Restore the 25 operator tables",
-                   v158="Apply V158")
-    assert "OPERATOR_BACKUP_LOG` was in OVERWATCH and is gone" in _norm(dropped)
-    fr = _read("docs/FULL_REBUILD.md")
-    reset = fr[fr.index("- If you factory-reset"):fr.index("## 4. Grants")]
-    _lock_dr_order(reset, replay="**stop after V157**", restore="INSERT OVERWRITE INTO SETTINGS",
-                   v158="Then apply V158")
-    td = _read("snowflake/teardown.sql")
-    note = _norm(td[td.index("-- To restore operator data after a factory reset"):td.index("-- C. SHARED")])
-    assert note.index("V001..V157 only") < note.index("SETTINGS first") < note.index("THEN apply V158")
-    # the migration's own header carries the same order for whoever replays the file
+def test_v158_header_carries_its_dr_replay_order():
+    # the applied file's own header (V161 retired the backups; the current DR docs are locked by test_v161)
     assert "apply V001..V157, restore the operator tables\n-- (SETTINGS first), THEN this file." in _V158
 
 
-def test_loader_chain_check_reads_backup_errors_and_the_30h_rule():
+def test_loader_chain_check_keeps_the_30h_daily_rule():
     lcc = _read("snowflake/loader_chain_check.sql")
-    step3 = lcc[lcc.index("-- 3)"):lcc.index("-- 4)")]
-    assert "'BackupOperatorTables'" in step3
     step4 = lcc[lcc.index("-- 4)"):lcc.index("-- 5)")]
     assert "~30" in step4 and "~26" not in step4
-
-
-def test_tag_coverage_builders_skip_the_backup_schema():
-    from app.data import security_sql
-    pred = "NOT (t.TABLE_CATALOG = 'DBA_MAINT_DB' AND t.TABLE_SCHEMA = 'OVERWATCH_BAK')"
-    assert pred in security_sql.object_tag_coverage("ALL")
-    assert pred in security_sql.untagged_objects("ALL")
 
 
 def test_v158_plain_sql_parses():
@@ -1175,7 +1102,7 @@ def test_v158_plain_sql_parses():
 # ---------------------------------------------------------------------------------------------
 def test_validate_and_docs_track_v158():
     val = _read("snowflake/validate.sql")
-    assert "V001..V160 applied" in val and "VERSION BETWEEN 1 AND 160) = 160" in val
+    assert "V001..V161 applied" in val and "VERSION BETWEEN 1 AND 161) = 161" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert f"snowflake/migrations/{_NAME}" in _read(rel), rel
 

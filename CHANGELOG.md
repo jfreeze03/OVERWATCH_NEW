@@ -1,5 +1,71 @@
 # Changelog
 
+## 4.598.0 - Scheduled operator backups retired (V161) (2026-09-28)
+
+Owner decision (2026-09-28): no scheduled operator-data backups, and no `DBA_MAINT_DB.OVERWATCH_BAK` schema.
+V158 (Next-Fifty #32) had moved the weekly `<T>_BAK_LAST` copies to a daily clone of the 25 operator tables into
+dated TRANSIENT generations in that separate schema. It was kept apart so ~25 new tables a day would not add
+FUTURE-grant churn to OVERWATCH, and so the copies would survive a lost OVERWATCH. Recovery is now Snowflake Time
+Travel plus the manual clones taken before a risky change.
+
+- **V161 (owner-applied, after V160):**
+  - The session is pinned with `USE SCHEMA DBA_MAINT_DB.OVERWATCH`: the security loader records each statement's
+    current database and schema, so the footprint below holds only from there.
+  - A read-only preflight stops before any change if `OVERWATCH_BAK` holds anything V158 did not create
+    (DROP SCHEMA cascades): a table or view, or any stage, sequence, file format, function, procedure, pipe,
+    task, stream or alert.
+  - `TASK_BACKUP_OPERATOR` is suspended. V161 then waits, up to about 4 minutes (inside the 300 s statement
+    timeout V002 sets on WH_ALFA_ADMIN), while a run is in flight, because that run's freshness MERGE could
+    re-create the dead-man row. A replay's V158 tail starts one run, which normally ends within the wait; a run
+    still going after that stops V161 (re-run it later).
+  - The task and `SP_BACKUP_OPERATOR_TABLES` are dropped. `OPERATOR_BACKUP_LOG` and the 25 weekly `<T>_BAK_LAST`
+    copies move into `OVERWATCH_BAK` (a DROP if the move fails). The schema is then dropped once, with every
+    daily generation in it.
+  - Every drop is existence-gated, so a re-run adds nothing. Names come only from V158's 25, never a pattern,
+    so the manual `<T>_BAK_<yyyymmdd>` clones are never touched.
+  - SETTINGS `BACKUP_KEEP_DAILY` / `BACKUP_KEEP_WEEKLY` and, last, the `OPERATOR_BACKUP_DAILY` freshness row
+    are deleted. Any open `OPS_PIPELINE_DEGRADED` stale event for that row is closed as EXPECTED.
+  - `V_SECURITY_EXCEPTION_QUEUE` is re-derived from V158 without its backup-prune carve-out, which leaves
+    V151's view text. The first prune would run on 2026-10-10 (2026-10-03 if `BACKUP_KEEP_DAILY` was lowered to
+    7), so **apply before then**. Applied in time, the carve-out never matched a row and the queue does not
+    change.
+  - **Security footprint (disclosed):** applied as SNOW_ACCOUNTADMINS, the three DROPs (task, proc, schema)
+    land in FACT_SECURITY_CHANGE as DESTRUCTIVE / CRITICAL, so the Security page shows CHANGE RISK "Act" for 7
+    days. Nothing emails or pages. The renames score as ALTERs (MEDIUM), below the queue. A move that falls back
+    to a DROP adds one CRITICAL row; expect that for `OPERATOR_BACKUP_LOG`, the one permanent table, if
+    Snowflake refuses to move it into the transient schema.
+  - **Rolling back** (RUNBOOK): `UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH_BAK` first, within its retention (at most 1
+    day); move the ledger and weekly copies it brings back out of that schema into OVERWATCH (or `UNDROP TABLE`
+    the ledger if its move fell back to a DROP); then V015's task block and V158, and redeploy app 4.597.0
+    (main `0c8afb7`).
+  - `PREFLIGHT_V161.sql` (read-only) and a PART B grid come from `outputs/gen_v161.py`.
+- **App (4.598.0):**
+  - The `BACKUP_KEEP_*` settings and their Admin editors are gone.
+  - The tag-coverage builders drop the `OVERWATCH_BAK` exclusion.
+  - Admin lists V161.
+  - `ops_sql.task_freshness_sla` leaves out the tasks OVERWATCH itself retired (`TASK_BACKUP_OPERATOR`), so
+    the Tasks-on-cadence objective and Tasks ▸ SLA do not read the dropped task as "silently stopped" for up to
+    90 days.
+- **Scripts and docs:**
+  - `validate.sql` swaps the backup-freshness row for a "Scheduled operator backups retired" row that FAILs
+    while any retired object exists, read from the objects rather than SCHEMA_VERSION (a replay re-creates
+    them). `task_audit.sql` loses the backup task; `loader_chain_check.sql` no longer lists
+    `BackupOperatorTables`.
+  - teardown, RUNBOOK §4/§13/§16, DEPLOYMENT §5/§6, FULL_REBUILD, FEATURES and README describe Time Travel plus
+    manual clones.
+  - The manual clone script (`rebuild/00_backup_operator_data.sql`) and teardown B0 now clone as TRANSIENT: a
+    permanent clone of a transient operator table fails (the V089 finding). Their fixed date suffix must be
+    changed to today first; rebuild/00 drops `IF NOT EXISTS`, so an unedited suffix that already exists fails
+    loudly instead of keeping an old clone. Teardown B0 now covers every operator table the factory reset drops
+    (it lacked WAREHOUSE_CHANGE_REGISTRY, WAREHOUSE_CONFIG_SNAPSHOT, ALERT_ROUTES, REMEDIATION_LOG, USER_PREFS,
+    DEPT_BUDGETS, APP_USAGE, CANARY_RESULTS and DQ_SCHEMA_SNAPSHOT), and rebuild/00 gains CANARY_RESULTS and
+    DQ_SCHEMA_SNAPSHOT, so both clone sets cover it.
+  - Retention: no migration sets `DATA_RETENTION_TIME_IN_DAYS`. The TRANSIENT operator tables (ALERT_EVENTS,
+    ACTION_QUEUE, ...) keep at most 1 day of Time Travel and no Fail-safe.
+- **Order:** apply V161 (after `PREFLIGHT_V161.sql`), then `snow streamlit deploy --replace`. Either order
+  works. Deployed first, the app shows V161 as not yet applied and briefly counts the `OVERWATCH_BAK` tables in
+  tag coverage. Applied first, the 4.597 Admin page still offers the two retired settings until the deploy.
+
 ## 4.597.0 - Decision Studio → Proof (Option C restructure) (2026-09-27)
 
 App-only, no migration. Decision Studio mixed two jobs on one page. One was the director-facing proof (Scorecard and

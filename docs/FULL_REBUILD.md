@@ -36,17 +36,19 @@ date suffix; verify counts:
     UNION ALL SELECT 'ALERT_CONFIG', COUNT(*) FROM ALERT_CONFIG_BAK_<date>;
     -- ...one row per clone, equal to the source counts.
 
-Since V158 the daily backup task also keeps dated generations of the 25
-operator tables in their own TRANSIENT schema, `DBA_MAINT_DB.OVERWATCH_BAK`
-(`<T>_OWBAK_D<yyyymmdd>`, 14 daily + 8 Sunday-weekly, row counts in
-OPERATOR_BACKUP_LOG). Teardown never touches that schema, so the generations
-are a second copy that survives this whole procedure. Keep the manual
-`_BAK_<date>` token for the clones above: the daily prune matches only
-`_OWBAK_` names, so it can never drop them. Restore from either with
-`INSERT OVERWRITE INTO <T> SELECT * FROM ...` as the table-owner role (a
-TRANSIENT generation cannot CLONE back into a permanent table). V158's tail is
-`EXECUTE TASK`, so replaying it during a rebuild runs the backup as SYSTEM,
-inside the Security CHANGE RISK carve-out for its own prune.
+There are no scheduled backups since V161 (V158's `DBA_MAINT_DB.OVERWATCH_BAK`
+generations and the weekly `*_BAK_LAST` copies were retired), so these manual
+clones are the only copy outside Time Travel. Clone as `CREATE TRANSIENT TABLE`
+(a permanent clone of a transient table such as ALERT_EVENTS fails), and change
+the fixed date suffix in `snowflake/rebuild/00_backup_operator_data.sql` to today
+first: it has no `IF NOT EXISTS`, so a suffix that already exists fails with
+"already exists" (use a new suffix, or drop the older clones once they are no
+longer needed; after a partial run, re-run from the failing CREATE). Restore with
+`INSERT OVERWRITE INTO <T> SELECT * FROM <T>_BAK_<date>` as the table-owner role
+(a TRANSIENT clone cannot CLONE back into a permanent table). Replaying V158
+during a rebuild still starts one backup run through its tail `EXECUTE TASK`;
+V161, a few files later, waits up to about 4 minutes for that run and then drops
+everything it made (if V161 still stops on it, re-run V161 once the run ends).
 
 ## 2. Teardown
 
@@ -70,21 +72,13 @@ stands for every file). Notes:
 - If you kept operator data, SCHEMA_VERSION already holds 1..124: the
   guards pass, IF NOT EXISTS objects recreate only what teardown dropped,
   and the version MERGEs no-op. That is the designed restore path.
-- If you factory-reset, **stop after V157** and restore before V158 runs.
-  V001 re-seeds the SETTINGS/ALERT_CONFIG/COMPANY_SCOPE defaults. V158's tail
-  then backs up whatever the operator tables hold, and it prunes with whatever
-  SETTINGS holds (the re-seeded BACKUP_KEEP_* 14 / 8). So restore your real
-  values first, SETTINGS first, as the table-owner role:
+- If you factory-reset, apply every migration, then restore your real values
+  from the step-1 clones, SETTINGS first, as the table-owner role (V001 re-seeds
+  the SETTINGS/ALERT_CONFIG/COMPANY_SCOPE defaults):
       INSERT OVERWRITE INTO SETTINGS SELECT * FROM SETTINGS_BAK_<date>; -- etc.
       (or UPDATE the handful you care about: rates, budgets, routes.)
-  You can also use the newest `OVERWATCH_BAK` generation dated before the reset.
-  If you dropped OPERATOR_BACKUP_LOG too, choose it by name and ROW_COUNT:
-      SELECT TABLE_NAME, ROW_COUNT, CREATED FROM DBA_MAINT_DB.INFORMATION_SCHEMA.TABLES
-      WHERE TABLE_SCHEMA = 'OVERWATCH_BAK' ORDER BY 1;
-  Then apply V158 and the rest. If V158 already ran on the re-seeded tables,
-  run `ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR SUSPEND;` first.
-  Restore SETTINGS first, and never restore from the generation dated the
-  replay day (or later). Verify, then RESUME the task (RUNBOOK §16 step 3).
+  There is no scheduled backup to fall back on since V161: the step-1 clones are
+  the only copy.
 
 ## 4. Grants
 
