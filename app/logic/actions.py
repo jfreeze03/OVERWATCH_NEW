@@ -180,6 +180,17 @@ def split_superseded(df: pd.DataFrame | None) -> tuple[pd.DataFrame, pd.DataFram
     return df[~mask], df[mask]
 
 
+def split_reverted(df: pd.DataFrame | None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(kept, reverted) by REVERTED_AT (mart_sql.savings_ledger, Next-Fifty #31): a booked warehouse change
+    the daily scan later saw undone. A frame without the column (older reads, tests) is all kept."""
+    if df is None:
+        return pd.DataFrame(), pd.DataFrame()
+    if df.empty or "REVERTED_AT" not in df.columns:
+        return df, df.iloc[0:0]
+    mask = df["REVERTED_AT"].notna()
+    return df[~mask], df[mask]
+
+
 def _is_true(value: object) -> bool:
     """A Snowflake BOOLEAN cell as read back (True / 'TRUE' / 1) -> True; NULL / NaN / anything else -> False."""
     if isinstance(value, str):
@@ -209,13 +220,25 @@ def ledger_totals(df: pd.DataFrame, active_months: int = SAVINGS_ACTIVE_MONTHS) 
         morning after their 14-day measured window closes, so they are not "awaiting proof" by hand.
       volume_confounded_count / _usd -- VERIFIED items whose full measured window shows query volume
         outside 0.7-1.3x of baseline (mart_sql.savings_ledger VOLUME_CONFOUNDED), and their verified $.
+
+    Next-Fifty #31 -- the SAME revert rule as the SQL (mart_sql._ledger_counts_predicate): a row whose
+    booked warehouse change the daily scan later saw undone (REVERTED_AT set, split_reverted) is dropped
+    from the run-rate figures -- verified_usd / _count, verified_qtd_usd, verified_active_usd / _count,
+    volume_confounded_*, and (an undone ESTIMATED row) estimated_usd / _count and
+    auto_settle_pending_count -- but KEPT in the estimate-accuracy figures, because its measurement was
+    real: verified_estimated_usd, realized_*, realization_pct, verified_no_estimate_* and
+    avg_days_to_verify. Disclosed as reverted_count / reverted_usd (VERIFIED and reverted),
+    reverted_active_count / reverted_active_usd (the same, verified inside the active window) and
+    reverted_pending_count (ESTIMATED and reverted).
     Callers pass the uncapped savings_ledger(limit=None) frame, so these are whole-ledger counts."""
     empty = {"estimated_usd": 0.0, "verified_usd": 0.0, "estimated_count": 0,
              "verified_count": 0, "verified_estimated_usd": 0.0, "realization_pct": None,
              "verified_qtd_usd": 0.0, "verified_active_usd": 0.0, "avg_days_to_verify": None,
              "verified_active_count": 0, "verified_no_estimate_count": 0, "verified_no_estimate_auto_count": 0,
              "superseded_count": 0, "superseded_estimated_usd": 0.0,
-             "auto_settle_pending_count": 0, "volume_confounded_count": 0, "volume_confounded_usd": 0.0}
+             "auto_settle_pending_count": 0, "volume_confounded_count": 0, "volume_confounded_usd": 0.0,
+             "reverted_count": 0, "reverted_usd": 0.0, "reverted_active_count": 0, "reverted_active_usd": 0.0,
+             "reverted_pending_count": 0}
     if df is None or df.empty or "STATE" not in df.columns:
         return empty
     live, sup = split_superseded(df)
@@ -229,11 +252,19 @@ def ledger_totals(df: pd.DataFrame, active_months: int = SAVINGS_ACTIVE_MONTHS) 
         return {**empty, **sup_fields}
     view = live.copy()
     view["STATE"] = view["STATE"].astype(str).str.upper()
-    est = view[view["STATE"] == LEDGER_ESTIMATED]
-    ver = view[view["STATE"] == LEDGER_VERIFIED]
+    # Next-Fifty #31: reverted rows (REVERTED_AT set) leave the run-rate figures, never the accuracy ones.
+    _rv = (view["REVERTED_AT"].notna() if "REVERTED_AT" in view.columns
+           else pd.Series(False, index=view.index))
+    is_est = view["STATE"] == LEDGER_ESTIMATED
+    is_ver = view["STATE"] == LEDGER_VERIFIED
+    est = view[is_est & ~_rv]
+    # ver = EVERY verified row (the estimate-accuracy population: realization, latency, no-estimate counts);
+    # _kept masks it down to the run-rate population (not reverted) -- the SQL's _ledger_counts_predicate.
+    ver = view[is_ver]
+    _kept = ~_rv[is_ver]
     est_usd = pd.to_numeric(est.get("ESTIMATED_USD"), errors="coerce").fillna(0).sum()
     ver_usd_col = pd.to_numeric(ver.get("VERIFIED_USD"), errors="coerce").fillna(0)
-    ver_usd = ver_usd_col.sum()
+    ver_usd = ver_usd_col[_kept].sum()
     # Track record: of what VERIFIED items were originally estimated to save, how much
     # actually measured out — a fair estimate-vs-actual on verified items only. Restrict
     # the ratio to items that carried a positive estimate: a verified item with a zero or
@@ -253,11 +284,13 @@ def ledger_totals(df: pd.DataFrame, active_months: int = SAVINGS_ACTIVE_MONTHS) 
     created_at = pd.to_datetime(ver.get("CREATED_AT", _nat), errors="coerce")
     now = pd.Timestamp(account_now())
     q_start = pd.Timestamp(year=now.year, month=((now.month - 1) // 3) * 3 + 1, day=1)
-    qtd = float(ver_usd_col[verified_at >= q_start].sum())
+    qtd = float(ver_usd_col[_kept & (verified_at >= q_start)].sum())
     # Same anchor as the SQL builder: account-today at midnight minus N months.
     a_start = now.normalize() - pd.DateOffset(months=int(active_months))
-    active = float(ver_usd_col[verified_at >= a_start].sum())
-    active_count = int((verified_at >= a_start).sum())
+    _in_active = verified_at >= a_start
+    active = float(ver_usd_col[_kept & _in_active].sum())
+    active_count = int((_kept & _in_active).sum())
+    _rev_ver = ~_kept
     # verified items the realization ratio cannot include (no positive up-front estimate), and how many of
     # them the daily change scan auto-measured (SOURCE_CHANGE_ID) vs verified by hand (experiments, manual).
     # v4.597 live-defect fix: savings_ledger() never projected SOURCE_CHANGE_ID (only the derived SOURCE
@@ -274,12 +307,12 @@ def ledger_totals(df: pd.DataFrame, active_months: int = SAVINGS_ACTIVE_MONTHS) 
     auto_pending = (int((est["SOURCE"].astype(str).str.strip().str.lower() == "auto").sum())
                     if "SOURCE" in est.columns else 0)
     _vc = (ver["VOLUME_CONFOUNDED"].map(_is_true) if "VOLUME_CONFOUNDED" in ver.columns
-           else pd.Series(False, index=ver.index)).astype(bool)
+           else pd.Series(False, index=ver.index)).astype(bool) & _kept
     return {
         "estimated_usd": round(float(est_usd), 2),
         "verified_usd": round(float(ver_usd), 2),
         "estimated_count": len(est),
-        "verified_count": len(ver),
+        "verified_count": int(_kept.sum()),
         "verified_estimated_usd": round(float(ver_est_usd), 2),
         # The numerator/denominator the realization_pct is ACTUALLY computed from —
         # restricted to verified items that carried a positive estimate (_est_pos). The
@@ -297,6 +330,11 @@ def ledger_totals(df: pd.DataFrame, active_months: int = SAVINGS_ACTIVE_MONTHS) 
         "auto_settle_pending_count": auto_pending,
         "volume_confounded_count": int(_vc.sum()),
         "volume_confounded_usd": round(float(ver_usd_col[_vc].sum()), 2),
+        "reverted_count": int(_rev_ver.sum()),
+        "reverted_usd": round(float(ver_usd_col[_rev_ver].sum()), 2),
+        "reverted_active_count": int((_rev_ver & _in_active).sum()),
+        "reverted_active_usd": round(float(ver_usd_col[_rev_ver & _in_active].sum()), 2),
+        "reverted_pending_count": int((is_est & _rv).sum()),
         **sup_fields,
     }
 
@@ -311,6 +349,7 @@ def savings_by_month(df: pd.DataFrame, months: int = 12) -> pd.DataFrame:
     if df is None or df.empty or "STATE" not in df.columns:
         return pd.DataFrame(columns=cols)
     df, _ = split_superseded(df)
+    df, _ = split_reverted(df)      # Next-Fifty #31: a change the scan saw undone left the run-rate
     if df.empty:
         return pd.DataFrame(columns=cols)
     ver = df[df["STATE"].astype(str).str.upper() == LEDGER_VERIFIED].copy()
@@ -346,6 +385,7 @@ def savings_month_calendar(df: pd.DataFrame, months: int = 12) -> pd.DataFrame:
     if df is None or df.empty or "STATE" not in df.columns:
         return pd.DataFrame(columns=cols)
     df, _ = split_superseded(df)
+    df, _ = split_reverted(df)      # Next-Fifty #31: a change the scan saw undone left the run-rate
     ver = df[df["STATE"].astype(str).str.upper() == LEDGER_VERIFIED].copy() if not df.empty else df
     if ver.empty:
         return pd.DataFrame(columns=cols)
@@ -375,6 +415,7 @@ def savings_by_lever(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty or "STATE" not in df.columns:
         return pd.DataFrame(columns=cols)
     df, _ = split_superseded(df)
+    df, _ = split_reverted(df)      # Next-Fifty #31: a change the scan saw undone left the run-rate
     if df.empty:
         return pd.DataFrame(columns=cols)
     ver = df[df["STATE"].astype(str).str.upper() == LEDGER_VERIFIED].copy()
