@@ -133,6 +133,18 @@ WITH checks AS (
            IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG) >= 29,
                'OK', 'FAIL: expected >= 29 rules — seed incomplete')
     UNION ALL
+    -- V161: the scheduled operator backups stay retired. Read from the objects themselves, never SCHEMA_VERSION:
+    -- a replay re-creates them (V015 the task, V158 the schema, proc, settings and freshness row) and one that
+    -- stopped at V161 still reads 'V001..V161 applied'. A BACKUP_KEEP_* row can also come back from an Admin
+    -- save on app 4.597 or older. The proc stands in for the task (tasks have no INFORMATION_SCHEMA view).
+    SELECT 'Scheduled operator backups retired (V161: no OVERWATCH_BAK, backup proc, BACKUP_KEEP_* or OPERATOR_BACKUP_DAILY)',
+           IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = 'OVERWATCH_BAK')
+             + (SELECT COUNT(*) FROM DBA_MAINT_DB.INFORMATION_SCHEMA.PROCEDURES
+                 WHERE PROCEDURE_SCHEMA = 'OVERWATCH' AND PROCEDURE_NAME = 'SP_BACKUP_OPERATOR_TABLES')
+             + (SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.SETTINGS WHERE KEY IN ('BACKUP_KEEP_DAILY', 'BACKUP_KEEP_WEEKLY'))
+             + (SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE WHERE SOURCE_NAME = 'OPERATOR_BACKUP_DAILY') = 0,
+               'OK', 'FAIL: a retired backup object is back (a replay stopped at V161, or an Admin save from app 4.597) — re-run V161')
+    UNION ALL
     SELECT 'Key procs present (platform + security loaders)',
            IFF((SELECT COUNT(DISTINCT PROCEDURE_NAME)
                   FROM DBA_MAINT_DB.INFORMATION_SCHEMA.PROCEDURES

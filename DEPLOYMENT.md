@@ -510,7 +510,7 @@ Restore = migrations in order -> roles.sql -> validate.sql (all rows OK).
 - **No scheduled backups (V161, owner decision 2026-09-28):** recovery is Time
   Travel plus the manual clones taken before a risky change
   (`snowflake/rebuild/00_backup_operator_data.sql` or teardown.sql B0, as TRANSIENT
-  clones with today's date suffix). The TRANSIENT operator tables keep at most 1 day
+  clones with today's date suffix; both cover every operator table a factory reset drops). The TRANSIENT operator tables keep at most 1 day
   of Time Travel and no Fail-safe.
 - **Undo one table:** Time Travel, as the table-owner role (INSERT OVERWRITE deletes;
   the audit tables revoke DELETE from both admin roles):

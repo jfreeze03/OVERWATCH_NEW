@@ -97,9 +97,21 @@ def test_v161_preflight_and_part_b_are_read_only(tmp_path, which):
 def test_v161_preflight_lists_what_v161_would_stop_on_and_what_it_keeps(tmp_path):
     pre, _ = _extras(tmp_path)
     assert pre.startswith("-- PREFLIGHT_V161.sql -- READ-ONLY")
-    assert "'FOREIGN' END AS KIND" in pre and "SHOW OBJECTS IN SCHEMA DBA_MAINT_DB.OVERWATCH_BAK;" in pre
+    assert "'FOREIGN' END AS KIND" in pre
+    # review r1: SHOW OBJECTS lists only tables and views -- every non-table kind V161 checks is listed per kind
+    assert not re.search(r"^SHOW OBJECTS", pre, re.M)
+    for view, col in (("STAGES", "STAGE_SCHEMA"), ("SEQUENCES", "SEQUENCE_SCHEMA"),
+                      ("FILE_FORMATS", "FILE_FORMAT_SCHEMA"), ("FUNCTIONS", "FUNCTION_SCHEMA"),
+                      ("PROCEDURES", "PROCEDURE_SCHEMA"), ("PIPES", "PIPE_SCHEMA")):
+        assert f"FROM DBA_MAINT_DB.INFORMATION_SCHEMA.{view} WHERE {col} = 'OVERWATCH_BAK'" in pre, view
+    for kind in ("TASKS", "STREAMS", "ALERTS"):
+        assert f"SHOW {kind} IN SCHEMA DBA_MAINT_DB.OVERWATCH_BAK;" in pre, kind
     assert "'MANUAL_CLONE_KEPT'" in pre and "REGEXP_LIKE(TABLE_NAME, '.+_BAK_[0-9]{8}')" in pre
-    assert "'LOG ' || ACTION" in pre and "TASK_HISTORY(" in pre
+    assert "TASK_HISTORY(" in pre
+    # review r1: the ledger read (the one statement a partial V161 breaks) runs LAST, alone
+    last = pre.rstrip().rsplit("\n\n", 1)[1]
+    assert "FROM DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG" in last and "UNION" not in last
+    assert pre.count("OVERWATCH.OPERATOR_BACKUP_LOG") == 1
 
 
 def test_v161_part_b_checks_every_retired_object(tmp_path):
@@ -117,6 +129,12 @@ def test_v161_part_b_checks_every_retired_object(tmp_path):
     # the 26 names PART B checks are the 26 V161 moves out
     in_list = re.search(r"TABLE_NAME IN \((.*?)\)\) = 0", part_b, re.S).group(1)
     assert tuple(re.findall(r"'(\w+)'", in_list)) == _MOVE
+    # review r1: the footprint grid sees a fallback DROP of ANY moved table (the permanent ledger included)
+    grid = part_b[part_b.index("-- V161.13"):]
+    tokens = re.findall(r"CONTAINS\(UPPER\(QUERY_PREVIEW\), '(\w+)'\)", grid)
+    for name in _MOVE:
+        assert any(tok in name for tok in tokens), name
+    assert "OPERATOR_BACKUP_LOG" in tokens
 
 
 # -- guard, order, shape -------------------------------------------------------------------------------------
@@ -134,7 +152,9 @@ def test_v161_first_line_guard_and_version():
 
 
 def test_v161_file_order():
-    marks = ["EXCEPTION (-20161", "EXCEPTION (-20611",
+    # review r1: the session is pinned first, so the security loader records DBA_MAINT_DB.OVERWATCH
+    assert "\nUSE SCHEMA DBA_MAINT_DB.OVERWATCH;\n" in _MIG and "USE DATABASE" not in _MIG
+    marks = ["\nUSE SCHEMA DBA_MAINT_DB.OVERWATCH;\n", "EXCEPTION (-20161", "EXCEPTION (-20611",
              "ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR SUSPEND;",
              "EXCEPTION (-20612", "DROP TASK DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR;",
              "DROP PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_BACKUP_OPERATOR_TABLES();",
@@ -170,7 +190,8 @@ def test_v161_names_are_exactly_v158s_25_never_a_pattern():
     assert tuple(re.findall(r"'(\w+)'", pre.split("OR TABLE_NAME IN (", 1)[1].split(")))", 1)[0])) == _MOVE
     # nothing is ever matched by LIKE (the view below keeps V151's own LIKE predicates): the only LIKE before the
     # view is the SHOW TASKS name probe, whose result is then filtered on the exact name
-    head = _MIG[:_MIG.index("CREATE OR REPLACE VIEW")]
+    head = "\n".join(line for line in _MIG[:_MIG.index("CREATE OR REPLACE VIEW")].splitlines()
+                     if not line.lstrip().startswith("--"))      # executable lines only (the header cites SHOW ... LIKE)
     assert re.findall(r"\bLIKE\b\s*'[^']*'", head) == ["LIKE 'TASK_BACKUP_OPERATOR'"]
     assert "_BAK_2" not in _MIG          # the manual clones' date token never appears
 
@@ -217,6 +238,19 @@ def test_v161_preflight_stops_before_any_change():
     for banned in ("DROP", "ALTER", "DELETE", "UPDATE", "INSERT", "RENAME"):
         assert not re.search(rf"\b{banned}\b", code), banned
     assert _MIG.index("RAISE foreign_objects;") < _MIG.index("SUSPEND;")
+    # review r1: every kind DROP SCHEMA ... CASCADE would take, not just tables and views, counts as foreign
+    for view, col in (("STAGES", "STAGE_SCHEMA"), ("SEQUENCES", "SEQUENCE_SCHEMA"),
+                      ("FILE_FORMATS", "FILE_FORMAT_SCHEMA"), ("FUNCTIONS", "FUNCTION_SCHEMA"),
+                      ("PROCEDURES", "PROCEDURE_SCHEMA"), ("PIPES", "PIPE_SCHEMA")):
+        assert f"+ (SELECT COUNT(*) FROM DBA_MAINT_DB.INFORMATION_SCHEMA.{view} WHERE {col} = 'OVERWATCH_BAK')" in pre
+    for kind in ("TASKS", "STREAMS", "ALERTS"):
+        show = f"        SHOW {kind} IN SCHEMA DBA_MAINT_DB.OVERWATCH_BAK;\n"
+        assert (show + "        SELECT COUNT(*) INTO :n FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));\n"
+                "        foreign_n := foreign_n + n;\n") in pre, kind
+    # SHOW ... IN SCHEMA errors on a missing schema: every probe sits inside the existence gate (re-run safe)
+    gate = pre.index("    IF (bak_schema) THEN\n")
+    assert gate < pre.index("INFORMATION_SCHEMA.TABLES") and gate < pre.index("SHOW TASKS")
+    assert pre.index("SHOW ALERTS") < pre.index("    END IF;\n    IF (foreign_n > 0) THEN")
 
 
 def test_v161_in_flight_guard_follows_the_suspend_and_ignores_stale_rows():
@@ -225,9 +259,15 @@ def test_v161_in_flight_guard_follows_the_suspend_and_ignores_stale_rows():
     assert "TASK_NAME => 'TASK_BACKUP_OPERATOR'" in guard
     assert "WHERE DATABASE_NAME = 'DBA_MAINT_DB' AND SCHEMA_NAME = 'OVERWATCH'" in guard
     assert "STATE = 'EXECUTING'" in guard
-    assert ("OR (STATE = 'SCHEDULED'\n                AND SCHEDULED_TIME <= CURRENT_TIMESTAMP()\n"
-            "                AND SCHEDULED_TIME >= DATEADD('minute', -30, CURRENT_TIMESTAMP()))") in guard
-    assert "RAISE backup_in_flight;" in guard
+    assert ("OR (STATE = 'SCHEDULED'\n                    AND SCHEDULED_TIME <= CURRENT_TIMESTAMP()\n"
+            "                    AND SCHEDULED_TIME >= DATEADD('minute', -30, CURRENT_TIMESTAMP()))") in guard
+    # review r1: a replay's own V158-tail run normally ends within a bounded wait (40 x 15 s), so V161
+    # completes instead of halting; it raises only if the run is still going after the loop
+    loop = guard[guard.index("FOR attempt IN 1 TO 40 DO"):guard.index("END FOR;")]
+    assert loop.index("SELECT COUNT(*) INTO :running") < loop.index("IF (running = 0) THEN\n            BREAK;")
+    assert loop.index("BREAK;") < loop.index("SELECT SYSTEM$WAIT(15);")
+    assert guard.index("END FOR;") < guard.index("IF (running > 0) THEN\n        RAISE backup_in_flight;")
+    assert _MIG.count("SYSTEM$WAIT") == 2          # the header's disclosure + the one wait
 
 
 def test_v161_data_steps_close_the_dead_man_last():
@@ -319,7 +359,20 @@ def test_no_setting_or_editor_for_the_retired_backups():
 
 
 def test_scripts_no_longer_expect_the_backup():
-    assert "OPERATOR_BACKUP_DAILY" not in _read("snowflake/validate.sql")
+    val = _read("snowflake/validate.sql")
+    assert "'Operator backups fresh" not in val
+    # review r1: validate FAILs while a retired object exists, read from the objects (a replay that stopped at
+    # V161 still reads 'V001..V161 applied'), outside the EXECUTE IMMEDIATE teeth
+    head = val.split("EXECUTE IMMEDIATE $$", 1)[0]
+    row = head[head.index("SELECT 'Scheduled operator backups retired (V161"):]
+    row = row[:row.index("UNION ALL")]
+    for leg in ("INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = 'OVERWATCH_BAK'",
+                "PROCEDURE_SCHEMA = 'OVERWATCH' AND PROCEDURE_NAME = 'SP_BACKUP_OPERATOR_TABLES'",
+                "KEY IN ('BACKUP_KEEP_DAILY', 'BACKUP_KEEP_WEEKLY')",
+                "SOURCE_FRESHNESS_STATE WHERE SOURCE_NAME = 'OPERATOR_BACKUP_DAILY'"):
+        assert leg in row, leg
+    assert ") = 0,\n               'OK', 'FAIL: a retired backup object is back" in row and "SCHEMA_VERSION" not in row
+    assert "OPERATOR_BACKUP_DAILY" not in val.split("EXECUTE IMMEDIATE $$", 1)[1]
     assert "TASK_BACKUP_OPERATOR" not in _read("snowflake/task_audit.sql")
     lcc = _read("snowflake/loader_chain_check.sql")
     assert "BackupOperatorTables" not in lcc and "OPERATOR_BACKUP_DAILY" not in lcc
@@ -352,8 +405,31 @@ def test_teardown_and_clone_scripts_after_retirement():
     assert "-- CREATE TABLE DBA_MAINT_DB.OVERWATCH." not in td and "-- CREATE TRANSIENT TABLE DBA_MAINT_DB.OVERWATCH." in td
     assert "V001..V157 only" not in td and "OVERWATCH_BAK.<T>_OWBAK_D<yyyymmdd>;" not in td
     bak = _read("snowflake/rebuild/00_backup_operator_data.sql")
-    assert "CREATE TABLE IF NOT EXISTS" not in bak and bak.count("CREATE TRANSIENT TABLE IF NOT EXISTS") == 27
-    assert "Change the _20260712 suffix to today's date" in bak
+    # review r1: no IF NOT EXISTS -- an unedited suffix that already exists fails loudly, never keeps an old clone
+    assert not re.search(r"^CREATE [^\n]*IF NOT EXISTS", bak, re.M) and not re.search(r"^CREATE TABLE ", bak, re.M)
+    assert bak.count("CREATE TRANSIENT TABLE DBA_MAINT_DB.OVERWATCH.") == 27
+    assert "FIRST change every _20260712 suffix" in bak
+
+
+_B1_REBUILT = {"ETL_REF_GAP_RESULTS", "ETL_RECON_RESULTS", "ETL_CYCLE_TASKS", "SLEEP_POLLING_WEEKLY",
+               "OPERATOR_BACKUP_LOG"}   # scan caches rebuilt by their scans; the ledger V161 drops
+
+
+def test_teardown_b0_clones_every_operator_table_b1_drops():
+    # review r1: with no scheduled backup, B0 is the only copy outside Time Travel for a factory reset
+    td = _read("snowflake/teardown.sql")
+    b0 = td[td.index("-- B0. Backups"):td.index("-- B1. Drops")]
+    b1 = td[td.index("-- B1. Drops"):td.index("-- To restore operator data after a factory reset")]
+    dropped = set(re.findall(r"^-- DROP TABLE IF EXISTS DBA_MAINT_DB\.OVERWATCH\.(\w+);", b1, re.M))
+    cloned = set(re.findall(r"^-- CREATE TRANSIENT TABLE DBA_MAINT_DB\.OVERWATCH\.(\w+)_BAK_\d{8}\s+CLONE "
+                            r"DBA_MAINT_DB\.OVERWATCH\.(\w+);", b0, re.M))
+    assert all(a == b for a, b in cloned)
+    cloned_names = {a for a, _ in cloned}
+    assert len(dropped) >= 25 and {"SETTINGS", "ALERT_ROUTES", "REMEDIATION_LOG"} <= dropped
+    assert not (dropped - _B1_REBUILT) - cloned_names, sorted((dropped - _B1_REBUILT) - cloned_names)
+    # and every one of V158's 25 is covered by B0 or dropped in Section A as rebuildable (DAILY_DIGEST)
+    assert not set(_TABLES) - cloned_names - {"DAILY_DIGEST", "INCIDENTS", "INCIDENT_MEMBERS"}
+    assert "DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.DAILY_DIGEST;" in td
 
 
 def test_dr_docs_are_time_travel_and_manual_clones():
@@ -371,6 +447,12 @@ def test_dr_docs_are_time_travel_and_manual_clones():
         assert gone not in dr, gone
     assert "| ~~TASK_BACKUP_OPERATOR~~ | retired V161 |" in rb
     assert "**Rolling back V161.**" in rb and "BACKUP_KEEP_DAILY 14" not in rb
+    # review r1: the rollback recovers the dropped schema FIRST (UNDROP within retention), and redeploys 4.597.0
+    rollback = _norm(rb[rb.index("**Rolling back V161.**"):].split("\n\n", 1)[0])
+    assert rollback.index("UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH_BAK;") < rollback.index("V158 in full")
+    assert "Redeploy app 4.597.0" in rollback and "gone for good" in rollback
+    hdr = _MIG[:_MIG.index("USE SCHEMA")]
+    assert "UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH_BAK" in hdr and "redeploy app 4.597.0" in hdr
     dep = _read("DEPLOYMENT.md")
     six = dep[dep.index("## 6. Disaster recovery"):dep.index("- **App broken after deploy:**")]
     assert "No scheduled backups (V161" in six and "OVERWATCH_BAK" not in six and "V001..V157" not in six
