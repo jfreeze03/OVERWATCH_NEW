@@ -195,6 +195,7 @@ def _patched_modules():
 def recording_stubs():
     """Install the recording read-stubs + the base render bypasses across every UI module."""
     from app.config import DEFAULT_SETTINGS
+    from app.core import query as query_mod
     from app.ui import ai_panel, components
     main_mod, modules = _patched_modules()
     settings = dict(DEFAULT_SETTINGS)
@@ -216,6 +217,10 @@ def recording_stubs():
                 patch(module, "load_settings", lambda _page: dict(settings))
         patch(components, "load_settings", lambda _page: dict(settings))
         patch(ai_panel, "cortex_complete", lambda *a, **k: (True, "stub"))
+        # v4.599: the buffered telemetry flush (query._flush_group) reaches get_session(), which falls
+        # back to st.connection('snowflake') — on a machine with a default connection configured a
+        # simulated render would INSERT real APP_USAGE / telemetry rows. Swallow every async write.
+        patch(query_mod, "execute_statement_async", lambda *a, **k: True)
         yield
 
 

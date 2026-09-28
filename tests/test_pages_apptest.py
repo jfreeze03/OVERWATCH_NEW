@@ -67,6 +67,10 @@ def _stub_runtime(monkeypatch):
         if hasattr(module, "load_settings"):
             monkeypatch.setattr(module, "load_settings", lambda _page: dict(settings))
     monkeypatch.setattr(ai_panel, "cortex_complete", lambda *a, **k: (True, "stub"))
+    # v4.599: the buffered telemetry flush reaches get_session() -> st.connection('snowflake'); with a
+    # default connection configured, a smoke render would INSERT real telemetry. Swallow async writes.
+    import app.core.query as query_mod
+    monkeypatch.setattr(query_mod, "execute_statement_async", lambda *a, **k: True)
 
 
 def _entry():

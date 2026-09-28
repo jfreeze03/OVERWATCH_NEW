@@ -37,6 +37,14 @@
 --   serverless task shows WAREHOUSE = NULL and should carry WAREHOUSE_EXPECTED
 --   = NULL, and a task you intentionally keep suspended should carry
 --   STATE_EXPECTED = 'suspended'.
+--
+--   The NAME list is DERIVED, not guessed: tests/test_task_set_contract.py replays every task
+--   CREATE / ALTER / DROP in the migrations and fails CI unless this list (and the app's
+--   ops_sql.OVERWATCH_TASKS, which Admin ▸ Migrations & freshness ▸ Task health grades) equals the
+--   set the migrations leave live, and every non-NULL warehouse / schedule / predecessor pin below
+--   matches the current definition. A migration that creates or drops a task edits both lists.
+--   Opt-in scripts (alert_drill.sql, ml_forecast_option.sql) are deliberately not expected; if
+--   installed they read DRIFT: live task not in expected set.
 
 SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;
 
@@ -72,6 +80,8 @@ expected AS (
       ('TASK_ALERT_NOTIFY',              'started', 'WH_ALFA_ADMIN', NULL, 'TASK_ALERT_SCAN'),
       ('TASK_LOAD_MARTS_V27_HOURLY',     'started', 'WH_ALFA_ADMIN', NULL, NULL),
       ('TASK_OPS_DIAG_HOURLY',           'started', 'WH_ALFA_ADMIN', NULL, NULL),
+      ('TASK_LOAD_SECURITY_FACTS',       'started', 'WH_ALFA_ADMIN', NULL, 'TASK_LOAD_MARTS_V27_HOURLY'),
+      ('TASK_SLO_BREACH_SCAN',           'started', 'WH_ALFA_ADMIN', NULL, 'TASK_LOAD_MARTS_V27_HOURLY'),
       -- --- DAILY graph (root TASK_LOAD_DAILY -> TASK_NIGHTLY_RECONCILE -> readers) ---
       ('TASK_LOAD_DAILY',                'started', 'WH_ALFA_ADMIN', 'USING CRON 45 6 * * * America/Chicago', NULL),
       ('TASK_NIGHTLY_RECONCILE',         'started', 'WH_ALFA_ADMIN', NULL, 'TASK_LOAD_DAILY'),
@@ -83,7 +93,6 @@ expected AS (
       ('TASK_LOAD_STORAGE_TRUTH',        'started', 'WH_ALFA_ADMIN', NULL, NULL),
       ('TASK_LOCK_WAIT_DAILY',           'started', 'WH_ALFA_ADMIN', NULL, NULL),
       ('TASK_PATTERN_COST_DAILY',        'started', 'WH_ALFA_ADMIN', NULL, NULL),
-      ('TASK_SNAPSHOT_FRESHNESS',        'started', 'WH_ALFA_ADMIN', NULL, NULL),
       ('TASK_DAILY_DIGEST',              'started', 'WH_ALFA_ADMIN', NULL, NULL),
       ('TASK_ANOMALY_SWEEP',             'started', 'WH_ALFA_ADMIN', NULL, NULL),
       ('TASK_CANARY_SENTINEL',           'started', 'WH_ALFA_ADMIN', NULL, NULL),
@@ -94,6 +103,9 @@ expected AS (
       ('TASK_LEDGER_AUTOBOOK',           'started', 'WH_ALFA_ADMIN', NULL, NULL),
       ('TASK_VERIFY_SAVINGS',            'started', 'WH_ALFA_ADMIN', NULL, NULL),
       ('TASK_PURGE_FACTS',               'started', 'WH_ALFA_ADMIN', NULL, NULL),
+      ('TASK_LOAD_APP_COST',             'started', 'WH_ALFA_ADMIN', NULL, NULL),
+      ('TASK_LOAD_TABLE_STORAGE',        'started', 'WH_ALFA_ADMIN', NULL, NULL),
+      ('TASK_LOAD_QUERY_OPERATOR_STATS', 'started', 'WH_ALFA_ADMIN', NULL, NULL),
       ('TASK_PURGE_QUERY_TELEMETRY',     'started', 'WH_ALFA_ADMIN', NULL, NULL)
     AS t(NAME, STATE_EXPECTED, WAREHOUSE_EXPECTED, SCHEDULE_EXPECTED, PREDECESSOR_EXPECTED)
 )
