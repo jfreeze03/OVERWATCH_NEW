@@ -1,4 +1,4 @@
-"""PR C review r2: a Verify click never executes a statement nobody saw.
+"""PR C review r2/r3: a Verify click never writes onto an item whose statement was not painted.
 
 ``_savings_tab`` is rendered directly (no nav), so these AppTests also run on the streamlit 1.52.2 floor, where a
 changed option list resets the item selectbox (its identity includes the options). Two stale-click paths:

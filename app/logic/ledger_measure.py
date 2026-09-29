@@ -307,7 +307,8 @@ def verify_prefill(*, item_id: str, target: float | None, last: Mapping[str, obj
     Streamlit dropped it after the operator left the section). ``clicked``: this is the Verify click's rerun.
 
     Rules:
-      * the Verify click's rerun never moves the amount: the UPDATE must write what st.code showed;
+      * the Verify click's rerun never moves the amount (the UPDATE writes the widget's value: the one st.code
+        showed, or one the operator typed in the same rerun);
       * another item takes its own prefill, or 0.0 when it has none, so one item's amount never carries over;
       * a dropped widget re-arms the prefill (the operator's value went with the widget state anyway);
       * an untouched widget (still holding what OVERWATCH left there) follows the measurement, back to 0.0

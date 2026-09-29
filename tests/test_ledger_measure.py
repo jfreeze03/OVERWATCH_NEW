@@ -244,7 +244,8 @@ def test_verify_prefill_never_overwrites_an_edit():
 
 
 def test_verify_prefill_never_moves_in_the_verify_click_rerun():
-    """C17: the click's rerun must write what st.code showed, so the amount is frozen there."""
+    """C17: the Verify click's rerun never moves the amount (the UPDATE writes the widget's value: the one st.code
+    showed, or one the operator typed in the same rerun)."""
     last = {"item": _A, "val": 6072.0}
     for widget in (6072.0, 1234.0, None):
         frozen = verify_prefill(item_id=_A, target=5974.59, last=last, widget_value=widget, clicked=True)
@@ -359,8 +360,9 @@ def test_verify_measures_after_the_pick_and_prefills_behind_a_sentinel():
     assert "widget_value=st.session_state.get(_amount_key)," in v
     assert 'else st.session_state.get("_ow_ledger_prefill")),' in v and "clicked=_clicked and not _stale_click)" in v
     assert '_clicked = bool(st.session_state.get("ledger_verify_exec"))' in v
-    # review r2: a click on another item than the one whose UPDATE was painted is stale -- the prefill takes the
-    # item-change rule, and the write runs only when the rebuilt statement is exactly the one painted
+    # review r2/r3: a click whose rerun lands on another item than the one whose UPDATE was painted is stale -- the
+    # prefill takes the item-change rule and nothing is written; a same-item click writes that item's own widget
+    # value (the measurement, proof query id and overlap check are the painted ones)
     assert '_stale_click = _clicked and not _same' in v
     assert 'last=({"item": "", "val": None} if _stale_click' in v
     gate = v.split('st.button("Verify savings item", key="ledger_verify_exec"):', 1)[1]
