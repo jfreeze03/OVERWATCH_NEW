@@ -1002,11 +1002,13 @@ Escalation symptoms → fixes (Alerts > Native delivery shows the policy and the
   retries every hour inside its 7-day window.
 - `route_send_failed` whose CONTEXT says `escalation re-post` → the route's
   integration refused the re-post (same fixes as above for a Teams route). While
-  a route keeps refusing, the CRITICALs only it delivered stay first in the
+  a route keeps refusing AND the escalation email is off or failing too, the
+  CRITICALs only that route delivered are never stamped, stay first in the
   escalation batch (oldest first) and can hold back another route's escalations
   until they are acknowledged or leave the 7-day window: fix or disable the
-  failing route, or acknowledge those events. (It needs two or more enabled
-  routes; today's single Teams route cannot hit it.)
+  failing route, or acknowledge those events. (A working email leg stamps every
+  escalated event, and a single route has no other route to hold back, so
+  today's one Teams route plus email cannot hit it.)
 - `escalation_failed` → the pass itself errored; the normal deliveries of that run
   still went. The next hourly run retries what was not stamped; anything already
   re-posted or emailed that run is stamped, so it is not re-sent (its ESCALATE audit

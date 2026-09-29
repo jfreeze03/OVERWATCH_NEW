@@ -195,8 +195,9 @@ the monthly OPS_ALERT_DRILL CRITICAL escalates too; the escalation email is not 
     a snooze V117 carried onto a re-raise counts as a snooze; route-delivered events fill the batch before
     email-only ones, so an email-only backlog cannot starve a Teams re-post; each channel stamps ESCALATED_AT right
     after its send, so a later error never re-posts; the email LISTAGG delimiter is a literal newline. Known limit
-    (RUNBOOK section 19): with two or more enabled routes, CRITICALs only a persistently failing route delivered can
-    hold back another route's escalations until they are acknowledged; fix or disable that route.
+    (RUNBOOK section 19): with two or more enabled routes and the escalation email off or failing, CRITICALs only a
+    persistently failing route delivered can hold back another route's escalations until they are acknowledged;
+    fix or disable that route.
   - V165: the grounding comparison is `ABS(f - v) <= TOL * 1.000000001` in the proc and the Python mirror, so an
     exact half-step rounding (FAILED_QUERY_PCT 1.25 written as 1.3% or 1.2%) is grounded instead of forcing the
     templated digest; the relative slack widens nothing a rounded figure could exploit.
