@@ -93,6 +93,32 @@ def test_unqueued_link_is_consumed_and_explained() -> None:
     assert 'master_detail(\n        portfolio, key="ops_optimize", id_col="FINGERPRINT",' in opt
 
 
+def test_an_empty_queue_consumes_and_explains_the_link() -> None:
+    """Review F23: an EMPTY queue (the read succeeded, no family has attributed credits in this Company and
+    Window) returned at the guard before the link was used, so the fingerprint AND the one-shot live_profile
+    lingered — and switched on an unasked-for live scan after a later Company/Window change. Split empty
+    from failed before the guard: empty consumes both keys and says why; a FAILED read still keeps them."""
+    opt = read(_OPT)
+    guard_at = opt.index('if not guard(result, "No measured recurring-query cost exists in this scope."):')
+    split = opt.index("if result.ok and result.empty:")
+    assert split < guard_at
+    block = opt[split:guard_at]
+    assert "if result.ok and result.empty:" in block and "not result.ok" not in block    # ok-empty only
+    assert '{k: v for k, v in _arr.items()\n' in block
+    assert 'if k not in ("fingerprint", "live_profile")}' in block                     # both keys, one pop
+    assert '"ops_opt_live"' not in block                                               # never switched on
+    guarded = opt[guard_at:].split("\n    # W12:", 1)[0]
+    assert "if _empty_link_fp:" in guarded and guarded.rstrip().endswith("return")
+    assert 'empty_state("no_data_yet", f"Query family {_short_fp(_empty_link_fp)} is not in this fix queue: no "' \
+        in guarded
+    assert '"query family has attributed warehouse credits in the daily marts for this Company "' in guarded
+    assert "Operations ▸ Queries" in guarded
+    # the in-queue notice and the empty-queue notice shorten the fingerprint the same way
+    from app.ui.pages.ops_parts.optimize_queue import _short_fp
+    assert _short_fp("ABCDEF0123456789") == "ABCDEF012345…" and _short_fp("SHORT") == "SHORT"
+    assert opt.count("_short_fp(") == 3                                                # def + the two notices
+
+
 def test_the_link_does_not_prefetch_or_read_on_first_paint() -> None:
     block = _board()
     toggle = block.index('key="ops_qopp_toggle"')

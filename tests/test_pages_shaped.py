@@ -494,6 +494,10 @@ def test_task_evidence_drill_renders_shaped_and_is_off_by_default(monkeypatch):
     assert not at.exception, f"task evidence drill (shaped): {at.exception}"
     assert not any("could not finish rendering" in str(getattr(e, "value", "")) for e in at.error)
     assert len([s for s in seen if _EVIDENCE_MARK in s]) >= 2, "both drills should have read"
+    # review F22: both sites bind the run their table shows; neither re-derives 'the latest run'
+    evidence = [s for s in seen if _EVIDENCE_MARK in s]
+    assert all("    AND RUN_ID = '" in s for s in evidence), "a drill read without binding its table's run"
+    assert not any("ORDER BY TASK_START_DTTM DESC) = 1)" in s for s in evidence)
     assert {"etl_ev_rt_pick", "etl_ev_inv_pick"} <= {str(s.key) for s in at.selectbox}
     assert any("Failed:" in str(e.value) for e in at.error), [str(e.value) for e in at.error]
 
@@ -594,3 +598,47 @@ def test_optimize_keeps_a_deep_link_through_a_failed_queue_read(monkeypatch):
     assert at.session_state["_ow_md_sel_ops_optimize"] == "1.0"
     assert at.session_state["ops_opt_live"] is True
     assert "First fix:" in " ".join(str(m.value) for m in at.markdown)
+
+
+@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
+def test_optimize_consumes_and_explains_a_deep_link_into_an_empty_queue(monkeypatch):
+    """#28 (review F23): the queue read SUCCEEDS but lists no family in this Company and Window. The link is
+    used up on arrival (fingerprint AND the one-shot live_profile, so no live scan switches on later), and
+    the page says why the family is not here; the notice does not linger past its arrival."""
+    from app.ui.pages.ops_parts import optimize_queue
+
+    state = {"empty": True}
+
+    def _batch(specs, **kwargs):
+        out = _shaped_batch(specs, **kwargs)
+        if state["empty"]:
+            for k in [k for k in out if str(k).startswith("ops_opt_queue_")]:
+                out[k] = QueryResult(df=pd.DataFrame(), ok=True, source="stub")
+        return out
+
+    monkeypatch.setattr(optimize_queue, "run_batch_mixed", _batch)
+    at = AppTest.from_function(_entry, default_timeout=30)
+    at.run()
+    _nav_to(at, "Operations")
+    at.run()
+    at.session_state["_ow_nav_pending"] = {"page": "Operations", "section": "Optimize", "filters": {},
+                                           "context": {"fingerprint": "ABCDEF0123456789", "live_profile": True},
+                                           "origin": None}
+    at.run()
+    assert not at.exception, f"optimize empty queue link (shaped): {at.exception}"
+    assert at.session_state["ops_section"] == "Optimize"
+    assert _nav_context(at) == {}, "the link lingered on an empty queue"
+    blob = _texts(at)
+    assert "No measured recurring-query cost exists in this scope." in blob
+    assert "Query family ABCDEF012345… is not in this fix queue: no query family has attributed" in blob, \
+        blob[-600:]
+    assert "ops_opt_live" not in at.session_state or at.session_state["ops_opt_live"] is False
+    at.run()
+    assert not at.exception
+    assert "is not in this fix queue" not in _texts(at), "the notice lingered past its arrival"
+    # the queue fills later (a Company or Window change): nothing from the old link switches the live scan on
+    state["empty"] = False
+    at.run()
+    assert not at.exception
+    assert "ops_opt_live" not in at.session_state or at.session_state["ops_opt_live"] is False
+    assert "is not in this fix queue" not in _texts(at)

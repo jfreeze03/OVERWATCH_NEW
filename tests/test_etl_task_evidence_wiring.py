@@ -53,12 +53,89 @@ def test_evidence_drill_links_the_call_profile_and_reads_recent() -> None:
 def test_both_tonight_sites_render_the_drill() -> None:
     src = read(_OPS)
     runtimes = _body(src, "_workflow_runtimes_panel")
-    assert '_task_evidence_drill(fqn, df, workflow=_wf_pick, days=days, key="etl_ev_rt")' in runtimes
+    # review F22: the runtimes site binds the run its table shows (it used to pass no run_id, so the drill
+    # re-derived 'the latest run' at its own read time — a newer run than a cached table's at cycle start)
+    flat = " ".join(runtimes.split())
+    assert ('_task_evidence_drill(fqn, df, workflow=_wf_pick, run_id=evidence_run_id(df), days=days, '
+            'key="etl_ev_rt")') in flat
     assert runtimes.index("result_caption(res)") < runtimes.index("_task_evidence_drill(")
+    # RUN_ID is the binding, not a column shown in the table (the panel renders df otherwise as-is)
+    assert 'styled_table(df.drop(columns=["RUN_ID"], errors="ignore"), height=320)' in runtimes
+    assert "styled_table(df, height=320)" not in runtimes
     inventory = _body(src, "_run_inventory_panel")
     assert '_task_evidence_drill(status_fqn, tres.df, run_id=picked, key="etl_ev_inv")' in inventory
     assert inventory.index("result_caption(tres)") < inventory.index("_task_evidence_drill(")
     assert src.count("_task_evidence_drill(") == 3          # the def + the two sites
+
+
+def test_evidence_picker_remembers_the_pick_outside_the_widget() -> None:
+    """Review F12/F20: on SiS's streamlit 1.52 a selectbox's identity includes its option labels, so a
+    re-labelled option (a new attempt or failure after a 5-minute refresh) re-creates the widget at
+    `index`. The pick is remembered in its own key and seeds `index` (not part of the keyed identity)."""
+    body = _body(read(_OPS), "_task_evidence_drill")
+    prev = body.index('_prev = st.session_state.get(f"{key}_last")')
+    idx = body.index("_idx = opts.index(_prev) if _prev in opts else 0")
+    pick = body.index('task = st.selectbox("Task to explain", opts, index=_idx, key=f"{key}_pick",')
+    save = body.index('st.session_state[f"{key}_last"] = task')
+    assert prev < idx < pick < save < body.index("run(")
+    assert "index=0" not in body[pick:save]
+    # the labels carry no live runtime (a running task's RUNTIME_SEC changes every refresh)
+    labels = read("app/logic/etl_evidence.py").split("def evidence_task_labels(", 1)[1].split("\ndef ", 1)[0]
+    assert "humanize_duration" not in labels and "rec[2]" not in labels
+
+
+def _picker_render(monkeypatch):
+    """Render ONLY the drill (toggle on) through AppTest. No ButtonGroup widget on this path, so it also runs
+    on the streamlit 1.52 floor leg — the version where a re-labelled selectbox resets."""
+    import pandas as pd
+    import pytest
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+
+    from app.core.result import QueryResult
+    from app.ui.pages import operations
+
+    seen: list[str] = []
+
+    def _run(*args, **kwargs):
+        seen.append(str(args[0] if args else kwargs.get("sql", "")))
+        return QueryResult(df=pd.DataFrame(), ok=True, source="stub")
+
+    monkeypatch.setattr(operations, "run", _run)
+
+    def _app():
+        import pandas as _pd
+        import streamlit as _st
+
+        from app.ui.pages import operations as _ops
+        extra = int(_st.session_state.get("_evt_extra_attempts", 0))
+        rows = [{"TASK_NAME": "SP_A", "TASK_STATUS": "SUCCEEDED", "RUNTIME_SEC": 900.0},
+                {"TASK_NAME": "SP_B", "TASK_STATUS": "SUCCEEDED", "RUNTIME_SEC": 300.0}]
+        rows += [{"TASK_NAME": "SP_A", "TASK_STATUS": "SUCCEEDED", "RUNTIME_SEC": 60.0}] * extra
+        _ops._task_evidence_drill("DB.SCH.CONTROL_STATUS", _pd.DataFrame(rows), run_id="R1", key="evt")
+
+    at = AppTest.from_function(_app, default_timeout=30)
+    at.session_state["evt_toggle"] = True
+    at.run()
+    assert not at.exception, at.exception
+    return at, seen
+
+
+def test_evidence_picker_survives_a_relabel(monkeypatch) -> None:
+    at, seen = _picker_render(monkeypatch)
+    assert at.selectbox(key="evt_pick").value == "SP_A"                   # slowest first
+    at.selectbox(key="evt_pick").set_value("SP_B").run()
+    assert at.selectbox(key="evt_pick").value == "SP_B"
+    # the next refresh shows a retry of SP_A: its label becomes 'SP_A · 2 attempts'
+    seen.clear()
+    at.session_state["_evt_extra_attempts"] = 1
+    at.run()
+    assert not at.exception, at.exception
+    assert at.selectbox(key="evt_pick").value == "SP_B", "the pick snapped back when a label changed"
+    assert seen and "TASK_NAME = 'SP_B'" in seen[-1]                    # the drill still reads the picked task
+    # picking again still works after the re-label
+    at.selectbox(key="evt_pick").set_value("SP_A").run()
+    assert at.selectbox(key="evt_pick").value == "SP_A"
 
 
 def test_evidence_is_never_prefetched() -> None:

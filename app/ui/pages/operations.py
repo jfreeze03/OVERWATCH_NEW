@@ -53,6 +53,7 @@ from app.logic.dq import row_volume_anomalies, summarize_row_volume
 from app.logic.etl_evidence import (
     evidence_display_frame,
     evidence_floor_days,
+    evidence_run_id,
     evidence_task_labels,
     evidence_task_options,
     task_evidence_lines,
@@ -1531,7 +1532,8 @@ def _workflow_runtimes_panel(days: int = 0, *, pf: dict | None = None) -> None:
                  "delta_color": "off"},
                 {"label": _recon_lbl, "value": _recon_val, "delta_color": "off", "help": _recon_help},
             ])
-        styled_table(df, height=320)
+        # RUN_ID is the drill's binding, not a column to read (one value on every row)
+        styled_table(df.drop(columns=["RUN_ID"], errors="ignore"), height=320)
         _bits = [f"{n_tasks} task(s)"]
         if n_fail:
             _bits.append(f"{n_fail} failed")
@@ -1544,7 +1546,11 @@ def _workflow_runtimes_panel(days: int = 0, *, pf: dict | None = None) -> None:
                    "is the only record of these Informatica proc runtimes — Snowflake's task history "
                    "never sees them.")
         result_caption(res)
-        _task_evidence_drill(fqn, df, workflow=_wf_pick, days=days, key="etl_ev_rt")
+        # review F22: bind the run THIS table shows. Re-deriving 'the latest run' at the evidence read's own
+        # time can pick a newer run than this (cached) table when a cycle starts in between; the workflow +
+        # Window predicates are only the fallback when RUN_ID is absent.
+        _task_evidence_drill(fqn, df, workflow=_wf_pick, run_id=evidence_run_id(df), days=days,
+                             key="etl_ev_rt")
 
 
 def _task_evidence_drill(fqn: str, tasks, *, workflow: str = "", run_id: str = "", days: int = 0,
@@ -1554,7 +1560,8 @@ def _task_evidence_drill(fqn: str, tasks, *, workflow: str = "", run_id: str = "
     Off by default behind its own toggle — the off state renders nothing else and reads nothing, and it
     is never prefetched. On: pick a task (failed first, then slowest), and read its Snowflake CALL (status,
     error text) and the statements that CALL ran (queued / compile / execution / spill) for THIS run
-    (``run_id``) or the latest run of ``workflow`` in the Window — the same run the table above shows.
+    (``run_id``, which both sites pass: the run the table above shows) or, only without one, the latest run
+    of ``workflow`` in the Window.
     The verdict lives in app/logic/etl_evidence.py; the SQL in etl_control_sql.run_task_evidence_scan."""
     if tasks is None or getattr(tasks, "empty", True) or "TASK_NAME" not in tasks.columns:
         return
@@ -1568,9 +1575,16 @@ def _task_evidence_drill(fqn: str, tasks, *, workflow: str = "", run_id: str = "
         empty_state("no_data_yet", "No named task in this run to explain.")
         return
     _labels = evidence_task_labels(tasks, etl_control_sql.FAILED_TASK_STATUSES)
-    task = st.selectbox("Task to explain", opts, index=0, key=f"{key}_pick",
+    # review F12/F20: on SiS's streamlit 1.52 a selectbox's identity includes its option LABELS, so a
+    # changed label (a new attempt, a new failure) re-creates the widget at `index`. Remember the pick
+    # outside the widget and seed `index` from it (index is not part of the keyed identity), so a cache
+    # refresh mid-cycle never swaps the task being explained. The labels carry no live runtime either.
+    _prev = st.session_state.get(f"{key}_last")
+    _idx = opts.index(_prev) if _prev in opts else 0
+    task = st.selectbox("Task to explain", opts, index=_idx, key=f"{key}_pick",
                         format_func=lambda t: _labels.get(t, t),
                         help="Tasks with a failed attempt first, then the slowest.")
+    st.session_state[f"{key}_last"] = task
     floor = evidence_floor_days(task_first_start(tasks, task), today=account_today())
     sql = etl_control_sql.run_task_evidence_scan(fqn, task=task, workflow=workflow, run_id=run_id,
                                                  days=days, floor_days=floor)
@@ -1600,8 +1614,10 @@ def _task_evidence_drill(fqn: str, tasks, *, workflow: str = "", run_id: str = "
         disp, cfg = snowsight_profile_column(disp, _PAGE, id_col="CALL_QUERY_ID")
         styled_table(disp, height=220, column_config=cfg or None)
     st.caption("From QUERY_HISTORY (lags up to ~45 min). The task's CALL is matched by procedure name "
-               "inside its CONTROL_STATUS window (±5 min); its statements are the CALL session's statements "
-               "between the CALL's start and end. Queued = overload + provisioning (resume). This shows where "
+               "inside its CONTROL_STATUS window (±5 min), keeping only CALLs in CONTROL_STATUS's own database "
+               "when any ran there (every environment deploys the same names; CALL_DATABASE shows which); its "
+               "statements are the CALL session's statements between the CALL's start and end. Queued = "
+               "overload + provisioning (resume). This shows where "
                "Snowflake time went in this run — Performance ▸ Runtime drift shows 'slower than usual'. "
                "Exact matching by QUERY_TAG is deferred (docs/design/INFORMATICA_QUERY_TAG_ASK.md).")
     result_caption(res)
