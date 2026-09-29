@@ -410,28 +410,41 @@ def savings_month_calendar(df: pd.DataFrame, months: int = 12) -> pd.DataFrame:
 def savings_by_lever(df: pd.DataFrame) -> pd.DataFrame:
     """Verified savings by lever (FINDING_TYPE) — where the realized money comes
     from, most-valuable first. Columns LEVER, VERIFIED_USD, ITEMS, REALIZATION_PCT
-    (verified vs what those items were estimated to save). Empty in, empty out."""
+    (verified vs what those items were estimated to save). Empty in, empty out.
+
+    Next-Fifty #31 (review r1 F10) — the SAME split as ledger_totals: VERIFIED_USD / ITEMS are the run-rate
+    view and drop a row whose change the daily scan saw undone (split_reverted); REALIZATION_PCT is estimate
+    accuracy and KEEPS it (dropping it would bias the ratio toward survivors), so a lever's realization
+    matches the headline Realization rate's population. A lever whose every verified item was undone has no
+    run-rate and is not listed (never a $0 lever row)."""
     cols = ["LEVER", "VERIFIED_USD", "ITEMS", "REALIZATION_PCT"]
     if df is None or df.empty or "STATE" not in df.columns:
         return pd.DataFrame(columns=cols)
     df, _ = split_superseded(df)
-    df, _ = split_reverted(df)      # Next-Fifty #31: a change the scan saw undone left the run-rate
     if df.empty:
         return pd.DataFrame(columns=cols)
     ver = df[df["STATE"].astype(str).str.upper() == LEDGER_VERIFIED].copy()
     if ver.empty:
         return pd.DataFrame(columns=cols)
+    # the split_reverted rule as a row mask (index-safe): kept = REVERTED_AT not set, or no such column
+    ver["_K"] = ver["REVERTED_AT"].isna() if "REVERTED_AT" in ver.columns else True
     ver["LEVER"] = ver.get("FINDING_TYPE", "unclassified").astype(str)
     ver["_V"] = pd.to_numeric(ver.get("VERIFIED_USD"), errors="coerce").fillna(0.0)
     ver["_E"] = pd.to_numeric(ver.get("ESTIMATED_USD"), errors="coerce").fillna(0.0)
+    ver["_VK"] = ver["_V"].where(ver["_K"], 0.0)
     # Realization % compares like-for-like: only verified items that carried a positive
     # estimate count toward the numerator too, else a zero/absent-estimate verified item
     # adds its $ to the numerator with nothing in the denominator and inflates the ratio
     # past 100% — the exact guard ledger_totals uses (_est_pos). VERIFIED_USD/ITEMS stay
     # the full-lever totals for the $ column (bug-hunt 2026-08-30).
     ver["_VPOS"] = ver["_V"].where(ver["_E"] > 0, 0.0)
-    grp = ver.groupby("LEVER").agg(VERIFIED_USD=("_V", "sum"), ITEMS=("_V", "size"),
-                                   _VPOS=("_VPOS", "sum"), _EST=("_E", "sum")).reset_index()
+    ver["_EPOS"] = ver["_E"].where(ver["_E"] > 0, 0.0)
+    grp = ver.groupby("LEVER").agg(VERIFIED_USD=("_VK", "sum"), ITEMS=("_K", "sum"),
+                                   _VPOS=("_VPOS", "sum"), _EST=("_EPOS", "sum")).reset_index()
+    grp = grp[grp["ITEMS"] > 0]
+    if grp.empty:
+        return pd.DataFrame(columns=cols)
+    grp["ITEMS"] = grp["ITEMS"].astype(int)
     grp["REALIZATION_PCT"] = (grp["_VPOS"] / grp["_EST"].where(grp["_EST"] > 0)
                               * 100).round(0)
     grp["VERIFIED_USD"] = grp["VERIFIED_USD"].round(2)

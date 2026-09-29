@@ -7,10 +7,11 @@ Translation: table FQNs stripped, account_today_sql() pinned to TODAY, `::TIMEST
 stores naive account time) and `x::DATE` rewritten to sqlite date(x); DATEADD / DATEDIFF / DATE_TRUNC /
 IFF / COUNT_IF / TRY_TO_DOUBLE / STARTSWITH / CONTAINS / SPLIT_PART shimmed, and LEAST / GREATEST with
 Snowflake's NULL semantics (ANY NULL argument -> NULL: the trap the Saved-to-date COALESCE guards against).
-QUALIFY is rewritten to a filtered subquery, kept inside its own CTE.
+QUALIFY is rewritten to a filtered subquery, kept inside its own CTE and its own (nested) SELECT: the
+revert CTE's per-change derived table carries its own QUALIFY inside the co-attributed group's.
 
 Locks the arithmetic the string locks in tests/test_ledger_reverts.py cannot: which booked changes a later
-change reverts (full / partial / not at all), that the ROI numerator and the attribution split drop the SAME
+change reverts (full / partial / not at all, carried across a co-attributed group), that the ROI numerator and the attribution split drop the SAME
 rows (one predicate), that the pandas fallback (actions.ledger_totals over the executed ledger read) agrees
 with the SQL, and the Saved-to-date accrual (start, 12-month stop, revert stop, measured vs carried).
 """
@@ -18,7 +19,6 @@ with the SQL, and the Saved-to-date accrual (start, 12-month stop, revert stop, 
 from __future__ import annotations
 
 import calendar
-import re
 import sqlite3
 from datetime import date, datetime, timedelta
 
@@ -59,12 +59,53 @@ def _wrap_casts(sql: str, cast: str) -> str:
     return out
 
 
-# SELECT <cols>\n FROM ... \n QUALIFY <win> = 1 -> SELECT * FROM (SELECT <cols>, <win> AS _RN ...) WHERE _RN = 1.
-# (?:(?!\n\)).) keeps every group inside ONE CTE body (each closes on "\n)"), so a match can never start in
-# an earlier CTE and run into a later one's QUALIFY.
-_QUALIFY_RE = re.compile(
-    r"SELECT (?P<cols>(?:(?!\n\)).)*?)\n(?P<rest>\s*FROM (?:(?!\n\)).)*?)\n\s*QUALIFY "
-    r"(?P<win>ROW_NUMBER\(\) OVER \((?:(?!\n\)).)*?\)) = 1", re.S)
+def _depths(sql: str) -> list[int]:
+    """Parenthesis depth at every character, outside single-quoted literals (a quote char keeps its depth)."""
+    out, depth, quoted = [], 0, False
+    for ch in sql:
+        if ch == "'":
+            quoted = not quoted
+        elif not quoted and ch == "(":
+            out.append(depth)
+            depth += 1
+            continue
+        elif not quoted and ch == ")":
+            depth -= 1
+        out.append(depth)
+    return out
+
+
+def _word_at(sql: str, i: int, word: str) -> bool:
+    return (sql.startswith(word, i) and (i == 0 or not (sql[i - 1].isalnum() or sql[i - 1] == "_"))
+            and not (sql[i + len(word)].isalnum() or sql[i + len(word)] == "_"))
+
+
+def _rewrite_first_qualify(sql: str) -> str:
+    """The FIRST `QUALIFY ROW_NUMBER() OVER (...) = 1` -> `SELECT * FROM (SELECT <cols>, <win> AS _RN FROM ...)
+    WHERE _RN = 1`. Its owning SELECT is the nearest one at the same parenthesis depth without leaving the
+    scope (so a QUALIFY never reaches into an earlier CTE, and an outer select skips a nested derived table).
+    The first QUALIFY in the text is always the innermost: an outer select's QUALIFY follows its FROM."""
+    q = sql.index("QUALIFY ")
+    depth = _depths(sql)
+    dq = depth[q]
+    owner = None
+    for i in range(q - 1, -1, -1):
+        if depth[i] < dq:
+            break
+        if depth[i] == dq and _word_at(sql, i, "SELECT"):
+            owner = i
+            break
+    assert owner is not None, sql[max(0, q - 200):q]
+    frm = next(i for i in range(owner, q) if depth[i] == dq and _word_at(sql, i, "FROM"))
+    win_start = q + len("QUALIFY ")
+    assert sql.startswith("ROW_NUMBER() OVER (", win_start), sql[q:q + 80]
+    open_paren = win_start + len("ROW_NUMBER() OVER ")
+    close = next(i for i in range(open_paren + 1, len(sql)) if sql[i] == ")" and depth[i] == dq)
+    assert sql.startswith(" = 1", close + 1), sql[q:close + 10]
+    cols = sql[owner + len("SELECT "):frm].rstrip()
+    rest = sql[frm:q].rstrip()
+    win = sql[win_start:close + 1]
+    return f"{sql[:owner]}SELECT * FROM (SELECT {cols}, {win} AS _RN\n{rest}\n) WHERE _RN = 1{sql[close + 5:]}"
 
 
 def _to_sqlite(sql: str) -> str:
@@ -72,8 +113,8 @@ def _to_sqlite(sql: str) -> str:
     sql = sql.replace(f"{OVERWATCH_DB}.{CORE_SCHEMA}.", "")
     sql = sql.replace("::TIMESTAMP_NTZ", "")
     sql = _wrap_casts(sql, "::DATE")
-    sql = _QUALIFY_RE.sub(lambda m: (f"SELECT * FROM (SELECT {m.group('cols')}, {m.group('win')} AS _RN\n"
-                                     f"{m.group('rest')}\n) WHERE _RN = 1"), sql)
+    while "QUALIFY " in sql:
+        sql = _rewrite_first_qualify(sql)
     assert "QUALIFY" not in sql and "::" not in sql and "CURRENT_" not in sql and "DBA_MAINT_DB" not in sql
     return sql
 
@@ -285,8 +326,9 @@ def _seed_matrix(c) -> None:
     _led(c, "lK", "VERIFIED", 180.0, "2026-07-16 06:45:00", source="K", finding="RESIZE")
     _led(c, "lKm", "VERIFIED", 150.0, "2026-07-20 09:00:00", finding="RESIZE", target="WH_K",
          estimated=200.0, created="2026-06-30 10:00:00", notes="booked from Optimize")
-    # L: LBA-1 -- SIZE + MAX_CLUSTERS in one measured window; the RN=1 SIZE row carries the saving, the
-    # clusters partner settled $0. Sizing back up reverts the RN=1 row (conservative) while the $0 partner holds.
+    # L: LBA-1 -- SIZE + MAX_CLUSTERS in one measured window (one scan: the same CHANGE_SEEN_AT); the RN=1
+    # SIZE row carries the saving, the clusters partner settled $0. Sizing back up reverts the RN=1 row
+    # ('full', its own setting) and, carried across the group, the $0 partner ('partial': inherited).
     _reg(c, "L1", "WH_L", "SIZE", "Large", "Medium", "2026-06-01 06:40:00")
     _reg(c, "L2", "WH_L", "MAX_CLUSTERS", "3", "2", "2026-06-01 06:40:00")
     _reg(c, "L3", "WH_L", "SIZE", "Medium", "Large", "2026-07-10 06:40:00")
@@ -322,7 +364,7 @@ _EXPECTED_REVERTS = {
     "lE": ("full", "2026-06-20 06:40:00"), "lF": (None, None), "lG": (None, None), "lGA": (None, None),
     "lGB": ("full", "2026-06-01 06:40:00"), "lH": (None, None), "lM": (None, None),
     "lJ": ("full", "2026-08-15 06:40:00"), "lK": ("full", "2026-08-10 06:40:00"), "lKm": (None, None),
-    "lL1": ("full", "2026-07-10 06:40:00"), "lL2": (None, None), "lX": ("partial", "2026-07-01 06:40:00"),
+    "lL1": ("full", "2026-07-10 06:40:00"), "lL2": ("partial", "2026-07-10 06:40:00"), "lX": ("partial", "2026-07-01 06:40:00"),
     "lXX": ("full", "2026-07-01 06:40:00"), "lU": (None, None), "lW": ("partial", "2026-07-01 06:40:00"),
     "lO": ("full", "2025-12-01 06:40:00"),
 }
@@ -341,6 +383,12 @@ def test_revert_matrix_on_the_ledger_rows(db):
     assert (led.loc["lA", "REVERT_CHANGE_ID"], led.loc["lA", "REVERT_OLD_VALUE"],
             led.loc["lA", "REVERT_NEW_VALUE"]) == ("A2", "Small", "Medium")
     assert led.loc["lBN", "REVERT_CHANGE_ID"] == "BN2" and pd.isna(led.loc["lBN", "REVERT_NEW_VALUE"])
+    # REVERT_SETTING: the row's own setting, except where the revert was inherited from a co-attributed
+    # partner (lL2, MAX_CLUSTERS, undone through its group's SIZE change)
+    assert led.loc["lA", "REVERT_SETTING"] == "SIZE" and led.loc["lB", "REVERT_SETTING"] == "AUTO_SUSPEND"
+    assert (led.loc["lL2", "REVERT_SETTING"], led.loc["lL2", "REVERT_CHANGE_ID"],
+            led.loc["lL2", "REVERT_NEW_VALUE"]) == ("SIZE", "L3", "Large")
+    assert pd.isna(led.loc["lC", "REVERT_SETTING"])
     # the superseded manual twin is still superseded (no resurrection when its auto row is reverted)
     assert led.loc["lKm", "SUPERSEDED_BY_CHANGE_ID"] == "K"
     # one row per ledger item: the revert join never fans out
@@ -349,12 +397,12 @@ def test_revert_matrix_on_the_ledger_rows(db):
 
 def _active_kept_items() -> dict[str, float]:
     # VERIFIED, not a twin, verified in the last 12 months (>= 2025-09-28), not reverted
-    return {"lC": 600.0, "lF": 30.0, "lG": 45.0, "lGA": 50.0, "lH": 120.0, "lM": 40.0, "lL2": 0.0, "lU": 10.0}
+    return {"lC": 600.0, "lF": 30.0, "lG": 45.0, "lGA": 50.0, "lH": 120.0, "lM": 40.0, "lU": 10.0}
 
 
 def _active_reverted_items() -> dict[str, float]:
     return {"lA": 300.0, "lB": 90.0, "lBN": 45.0, "lD": 60.0, "lGB": 20.0, "lJ": 70.0, "lK": 180.0,
-            "lL1": 200.0, "lX": 500.0, "lXX": 100.0, "lW": 15.0}
+            "lL1": 200.0, "lL2": 0.0, "lX": 500.0, "lXX": 100.0, "lW": 15.0}
 
 
 def test_summary_and_attribution_drop_the_same_rows(db):
@@ -412,6 +460,116 @@ def test_verified_wins_drops_reverted_fixes(db):
         assert wh not in targets, wh
     # WH_A: the reverted auto row is gone; the manual SCHEDULE row targeting WH_A is never revert-checked
     assert list(wins.loc[wins["TARGET_WAREHOUSE"] == "WH_A", "FIX_TYPE"]) == ["SCHEDULE"]
+
+
+# --------------------------------------------------------------------------- co-attributed groups (review r1 F1)
+def _seed_partner_undone(c) -> None:
+    # P: AUTO_SUSPEND 600 -> 60 and SIZE Large -> Medium, seen by ONE scan (the same CHANGE_SEEN_AT: one
+    # measured window, the V153 LBA-1 partition). The AUTO_SUSPEND row is RN=1 and carries the $200; the
+    # SIZE partner settled $0. Only the $0 partner is undone (SIZE back to Large on Jul 10).
+    _reg(c, "P1", "WH_P", "AUTO_SUSPEND", "600", "60", "2026-06-01 06:40:00")
+    _reg(c, "P2", "WH_P", "SIZE", "Large", "Medium", "2026-06-01 06:40:00")
+    _reg(c, "P3", "WH_P", "SIZE", "Medium", "Large", "2026-07-10 06:40:00")
+    _led(c, "lP1", "VERIFIED", 200.0, "2026-06-16 06:45:00", source="P1", finding="AUTO_SUSPEND")
+    _led(c, "lP2", "VERIFIED", 0.0, "2026-06-16 06:45:00", source="P2", finding="RESIZE",
+         notes="Auto | measured on the full window | LBA-1 co-attributed: once on P1.")
+
+
+def test_undoing_the_zero_dollar_partner_takes_the_pair_out(db):
+    _seed_partner_undone(db)
+    led = _ledger(db).set_index("ITEM_ID")
+    # the RN=1 primary inherits its partner's revert: 'partial' (its own lever still stands), with the
+    # undoing change and the setting it touched carried for the flag
+    p1 = led.loc["lP1"]
+    assert (p1["REVERT_KIND"], p1["REVERTED_AT"], p1["REVERT_CHANGE_ID"], p1["REVERT_SETTING"],
+            p1["REVERT_NEW_VALUE"]) == ("partial", "2026-07-10 06:40:00", "P3", "SIZE", "Large")
+    assert (led.loc["lP2", "REVERT_KIND"], led.loc["lP2", "REVERT_SETTING"]) == ("full", "SIZE")
+    assert len(led) == 2                                              # <= 1 revert row per booked change
+    s = _summary(db)
+    # the whole pair leaves the run-rate (the ROI numerator), and the attribution split agrees
+    assert s["VERIFIED_ACTIVE_MONTHLY_USD"] == 0.0
+    assert s["REVERTED_ACTIVE_ITEMS"] == 2 and s["REVERTED_ACTIVE_USD"] == pytest.approx(200.0)
+    assert _run(db, mart_sql.ledger_attribution()).iloc[0]["ACTIVE_USD"] == 0.0
+    # Saved to date stops at the revert: Jun 1 -> Jul 10 = 39 days x $200/30 (not 119 days to Sep 28)
+    assert s["SAVED_TO_DATE_USD"] == pytest.approx(260.0)
+    assert s["SAVED_BEFORE_REVERT_USD"] == pytest.approx(260.0)
+    # a proven fix is a fix that stayed: WH_P is not transferable
+    assert "WH_P" not in set(_run(db, mart_sql.verified_wins("ALL"))["TARGET_WAREHOUSE"])
+
+
+def test_group_is_one_scan_on_one_warehouse(db, monkeypatch):
+    # Q: SIZE seen Jun 1 and MAX_CLUSTERS seen Jun 5 -- two scans, two measured windows: undoing the
+    #    clusters change leaves the SIZE saving alone
+    _reg(db, "Q1", "WH_Q", "SIZE", "Large", "Medium", "2026-06-01 06:40:00")
+    _reg(db, "Q2", "WH_Q", "MAX_CLUSTERS", "3", "2", "2026-06-05 06:40:00")
+    _reg(db, "Q3", "WH_Q", "MAX_CLUSTERS", "2", "3", "2026-07-01 06:40:00")
+    _led(db, "lQ1", "VERIFIED", 100.0, "2026-06-16 06:45:00", source="Q1", finding="RESIZE")
+    _led(db, "lQ2", "VERIFIED", 50.0, "2026-06-20 06:45:00", source="Q2", finding="MAX_CLUSTERS")
+    # R: another warehouse seen by the SAME scan is a different group
+    _reg(db, "R1", "WH_R", "SIZE", "Large", "Medium", "2026-06-05 06:40:00")
+    _led(db, "lR1", "VERIFIED", 70.0, "2026-06-20 06:45:00", source="R1", finding="RESIZE")
+    # Z: a MIN_CLUSTERS change the same scan saw is never booked and never carries a revert
+    _reg(db, "Z1", "WH_Z", "SIZE", "Large", "Medium", "2026-06-01 06:40:00")
+    _reg(db, "Z2", "WH_Z", "MIN_CLUSTERS", "1", "2", "2026-06-01 06:40:00")
+    _reg(db, "Z3", "WH_Z", "MIN_CLUSTERS", "2", "1", "2026-07-01 06:40:00")
+    _led(db, "lZ1", "VERIFIED", 40.0, "2026-06-16 06:45:00", source="Z1", finding="RESIZE")
+    led = _ledger(db).set_index("ITEM_ID")
+    assert pd.isna(led.loc["lQ1", "REVERTED_AT"]) and led.loc["lQ2", "REVERT_KIND"] == "full"
+    assert pd.isna(led.loc["lR1", "REVERTED_AT"]) and pd.isna(led.loc["lZ1", "REVERTED_AT"])
+    s = _summary(db)
+    assert s["VERIFIED_ACTIVE_MONTHLY_USD"] == pytest.approx(210.0) and s["REVERTED_ACTIVE_ITEMS"] == 1
+    # the pandas fallback reads the same executed columns, so it agrees
+    monkeypatch.setattr(actions_mod, "account_now", lambda: datetime(2026, 9, 28, 9, 0))
+    assert ledger_totals(_ledger(db))["verified_active_usd"] == pytest.approx(210.0)
+
+
+def test_same_scan_reverts_keep_their_own_kind(db):
+    # T: SIZE (RN=1) + AUTO_SUSPEND ($0) seen together, then BOTH undone by one later scan (one ALTER). Each
+    # row reads its OWN full revert -- never a partner's, whichever REVERT_CHANGE_ID sorts first ("T1R" <
+    # "T2R" would hand lT2 the SIZE revert on a plain id tiebreak).
+    _reg(db, "T1", "WH_T", "SIZE", "Large", "Medium", "2026-06-01 06:40:00")
+    _reg(db, "T2", "WH_T", "AUTO_SUSPEND", "600", "60", "2026-06-01 06:40:00")
+    _reg(db, "T1R", "WH_T", "SIZE", "Medium", "Large", "2026-07-01 06:40:00")
+    _reg(db, "T2R", "WH_T", "AUTO_SUSPEND", "60", "600", "2026-07-01 06:40:00")
+    _led(db, "lT1", "VERIFIED", 150.0, "2026-06-16 06:45:00", source="T1", finding="RESIZE")
+    _led(db, "lT2", "VERIFIED", 0.0, "2026-06-16 06:45:00", source="T2", finding="AUTO_SUSPEND")
+    # V: the $0 partner is undone first (Jul 1), the primary's own setting fully later (Aug 1): it left the
+    # run-rate Jul 1 (the first revert), and it reads 'full' because its own lever is fully undone now
+    _reg(db, "V1", "WH_V", "SIZE", "Large", "Medium", "2026-06-01 06:40:00")
+    _reg(db, "V2", "WH_V", "MAX_CLUSTERS", "3", "2", "2026-06-01 06:40:00")
+    _reg(db, "V2R", "WH_V", "MAX_CLUSTERS", "2", "3", "2026-07-01 06:40:00")
+    _reg(db, "V1R", "WH_V", "SIZE", "Medium", "Large", "2026-08-01 06:40:00")
+    _led(db, "lV1", "VERIFIED", 120.0, "2026-06-16 06:45:00", source="V1", finding="RESIZE")
+    _led(db, "lV2", "VERIFIED", 0.0, "2026-06-16 06:45:00", source="V2", finding="MAX_CLUSTERS")
+    led = _ledger(db).set_index("ITEM_ID")
+    got = {i: (led.loc[i, "REVERT_KIND"], led.loc[i, "REVERT_CHANGE_ID"], led.loc[i, "REVERT_SETTING"])
+           for i in ("lT1", "lT2", "lV1", "lV2")}
+    assert got == {"lT1": ("full", "T1R", "SIZE"), "lT2": ("full", "T2R", "AUTO_SUSPEND"),
+                   "lV1": ("full", "V2R", "MAX_CLUSTERS"), "lV2": ("full", "V2R", "MAX_CLUSTERS")}
+    assert led.loc["lV1", "REVERTED_AT"] == "2026-07-01 06:40:00"
+
+
+def test_partial_then_full_reads_full(db):
+    # Y: 600 -> 60 booked; 60 -> 300 (partial) on Jul 1, then 300 -> NULL (never suspends) on Aug 1: the
+    #    warehouse is now costlier than before the booked change -> 'full'; the dates / values stay the
+    #    FIRST revert's (the day the saving left the run-rate)
+    _reg(db, "Y", "WH_Y", "AUTO_SUSPEND", "600", "60", "2026-06-01 06:40:00")
+    _reg(db, "Y2", "WH_Y", "AUTO_SUSPEND", "60", "300", "2026-07-01 06:40:00")
+    _reg(db, "Y3", "WH_Y", "AUTO_SUSPEND", "300", None, "2026-08-01 06:40:00")
+    _led(db, "lY", "VERIFIED", 90.0, "2026-06-16 06:45:00", source="Y", finding="AUTO_SUSPEND")
+    # YP: 600 -> 60; 60 -> 120, then 120 -> 300: every later value stays below the booked OLD -> 'partial'
+    _reg(db, "YP", "WH_YP", "AUTO_SUSPEND", "600", "60", "2026-06-01 06:40:00")
+    _reg(db, "YP2", "WH_YP", "AUTO_SUSPEND", "60", "120", "2026-07-01 06:40:00")
+    _reg(db, "YP3", "WH_YP", "AUTO_SUSPEND", "120", "300", "2026-08-01 06:40:00")
+    _led(db, "lYP", "VERIFIED", 30.0, "2026-06-16 06:45:00", source="YP", finding="AUTO_SUSPEND")
+    led = _ledger(db).set_index("ITEM_ID")
+    y = led.loc["lY"]
+    assert (y["REVERT_KIND"], y["REVERTED_AT"], y["REVERT_CHANGE_ID"], y["REVERT_NEW_VALUE"]) == (
+        "full", "2026-07-01 06:40:00", "Y2", "300")
+    yp = led.loc["lYP"]
+    assert (yp["REVERT_KIND"], yp["REVERTED_AT"], yp["REVERT_CHANGE_ID"]) == ("partial", "2026-07-01 06:40:00",
+                                                                             "YP2")
+    assert len(led) == 2
 
 
 # --------------------------------------------------------------------------- Saved to date

@@ -36,27 +36,50 @@ def _v153_insert_block() -> str:
 def test_revert_select_shape():
     sqlglot = pytest.importorskip("sqlglot")
     sel = mart_sql._ledger_revert_select()
-    sqlglot.parse_one(f"WITH {mart_sql._ledger_revert_cte()}\nSELECT * FROM rv", read="snowflake")
-    assert "b.CHANGE_ID AS BOOKED_CHANGE_ID" in sel and "n.CHANGE_ID AS REVERT_CHANGE_ID" in sel
-    assert "n.CHANGE_SEEN_AT AS REVERTED_AT" in sel
+    tree = sqlglot.parse_one(f"WITH {mart_sql._ledger_revert_cte()}\nSELECT * FROM rv", read="snowflake")
+    rv_cols = tree.find(sqlglot.exp.CTE).this.named_selects
+    assert rv_cols == ["BOOKED_CHANGE_ID", "REVERT_CHANGE_ID", "REVERTED_AT", "REVERT_OLD_VALUE",
+                       "REVERT_NEW_VALUE", "REVERT_KIND", "REVERT_SETTING"]
+    outer, inner = sel.split("JOIN (\n", 1)
+    inner, tail = inner.split("\n    ) x ON x.BOOKED_CHANGE_ID = p.CHANGE_ID\n", 1)
+    # --- inner x: one row per booked change b -- the FIRST later costlier change n on its warehouse + setting
+    assert "b.CHANGE_ID AS BOOKED_CHANGE_ID" in inner and "n.CHANGE_ID AS REVERT_CHANGE_ID" in inner
+    assert "n.CHANGE_SEEN_AT AS REVERTED_AT" in inner and "n.SETTING AS REVERT_SETTING" in inner
     for on in ("ON n.WAREHOUSE_NAME = b.WAREHOUSE_NAME", "AND n.SETTING = b.SETTING",
                "AND n.CHANGE_SEEN_AT > b.CHANGE_SEEN_AT"):
-        assert on in sel, on
+        assert on in inner, on
     n_new = mart_sql._setting_cost_rank_sql("n.SETTING", "n.NEW_VALUE")
     # the TRIGGER compares the later change with the booked NEW value (what VERIFIED_USD was measured at) ...
-    assert f"AND {n_new} > {mart_sql._setting_cost_rank_sql('b.SETTING', 'b.NEW_VALUE')}" in sel
-    # ... the KIND with the booked OLD value (full = back to, or past, where it started)
-    assert (f"IFF({n_new} >= {mart_sql._setting_cost_rank_sql('b.SETTING', 'b.OLD_VALUE')}, 'full', 'partial')"
-            " AS REVERT_KIND") in sel
-    assert sel.rstrip().endswith(
+    assert f"AND {n_new} > {mart_sql._setting_cost_rank_sql('b.SETTING', 'b.NEW_VALUE')}" in inner
+    # ... the KIND with the booked OLD value, over EVERY later costlier change (review r1 F4: a partial revert
+    # a later change makes full reads 'full'); the window evaluates before the QUALIFY keeps the first n
+    assert (f"IFF(MAX({n_new}) OVER (PARTITION BY b.CHANGE_ID) >= "
+            f"{mart_sql._setting_cost_rank_sql('b.SETTING', 'b.OLD_VALUE')}, 'full', 'partial') AS REVERT_KIND"
+            ) in inner
+    assert inner.rstrip().endswith(
         "QUALIFY ROW_NUMBER() OVER (PARTITION BY b.CHANGE_ID ORDER BY n.CHANGE_SEEN_AT, n.CHANGE_ID) = 1")
-    assert "WHERE b.SETTING IN ('AUTO_SUSPEND', 'MAX_CLUSTERS', 'SCALING_POLICY', 'SIZE')" in sel
-    # a pure registry read: no ledger inside (keyed on the booked CHANGE_ID, 1:1), no forbidden tokens
-    assert "SAVINGS_LEDGER" not in sel and sel.count("WAREHOUSE_CHANGE_REGISTRY") == 2
+    assert "WHERE b.SETTING IN ('AUTO_SUSPEND', 'MAX_CLUSTERS', 'SCALING_POLICY', 'SIZE')" in inner
+    # --- outer: every member g of a co-attributed group (one scan on one warehouse = one measured window,
+    # the V153 LBA-1 partition) maps to the EARLIEST revert of any member p (review r1 F1), own first on a tie
+    for on in ("ON p.WAREHOUSE_NAME = g.WAREHOUSE_NAME", "AND p.CHANGE_SEEN_AT = g.CHANGE_SEEN_AT",
+               "AND p.SETTING IN ('AUTO_SUSPEND', 'MAX_CLUSTERS', 'SCALING_POLICY', 'SIZE')"):
+        assert on in outer, on
+    assert outer.startswith("SELECT g.CHANGE_ID AS BOOKED_CHANGE_ID, x.REVERT_CHANGE_ID, x.REVERTED_AT,")
+    # 'full' only when g's OWN setting was fully undone; a revert inherited from a partner reads 'partial'
+    assert ("IFF(MAX(IFF(x.BOOKED_CHANGE_ID = g.CHANGE_ID AND x.REVERT_KIND = 'full', 1, 0)) OVER "
+            "(PARTITION BY g.CHANGE_ID) = 1,\n               'full', 'partial') AS REVERT_KIND") in outer
+    assert "WHERE g.SETTING IN ('AUTO_SUSPEND', 'MAX_CLUSTERS', 'SCALING_POLICY', 'SIZE')" in tail
+    assert sel.rstrip().endswith(
+        "QUALIFY ROW_NUMBER() OVER (PARTITION BY g.CHANGE_ID ORDER BY x.REVERTED_AT, "
+        "IFF(x.BOOKED_CHANGE_ID = g.CHANGE_ID, 0, 1), x.REVERT_CHANGE_ID) = 1")
+    assert sel.count("QUALIFY ") == 2
+    # a pure registry read: no ledger inside (keyed on the booked CHANGE_ID, <= 1 row per change), no
+    # forbidden tokens; g / p / b / n are the four registry reads
+    assert "SAVINGS_LEDGER" not in sel and sel.count("WAREHOUSE_CHANGE_REGISTRY") == 4
     for bad in ("TRY_TO_NUMBER", "CURRENT_DATE()", " LIKE ", "LIMIT", "COMPANY_FOR_WAREHOUSE"):
         assert bad not in sel, bad
-    # the b/n aliases never match the LBA-1 settle window lock (tests/test_ledger_twins.py _RN_RE)
-    assert "PARTITION BY r." not in sel
+    # the g/p/b/n/x aliases never match the LBA-1 settle window lock (tests/test_ledger_twins.py _RN_RE)
+    assert "PARTITION BY r." not in sel and " r." not in sel
 
 
 def test_revertible_settings_are_exactly_the_autobooked_arms():
@@ -130,8 +153,8 @@ def test_savings_ledger_appends_exactly_the_revert_columns():
     sqlglot = pytest.importorskip("sqlglot")
     for limit in (None, 500):
         cols = sqlglot.parse_one(mart_sql.savings_ledger(limit=limit), read="snowflake").named_selects
-        assert cols[-6:] == ["WINDOW_CLOSED", "REVERTED_AT", "REVERT_CHANGE_ID", "REVERT_OLD_VALUE",
-                             "REVERT_NEW_VALUE", "REVERT_KIND"]
+        assert cols[-7:] == ["WINDOW_CLOSED", "REVERTED_AT", "REVERT_CHANGE_ID", "REVERT_OLD_VALUE",
+                             "REVERT_NEW_VALUE", "REVERT_KIND", "REVERT_SETTING"]
 
 
 def test_cache_domains_unchanged():

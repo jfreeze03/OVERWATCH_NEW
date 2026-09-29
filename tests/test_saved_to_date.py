@@ -144,22 +144,54 @@ def test_reader_since_parses_or_returns_none(since, expected):
 
 
 def test_card_text_is_dollars_with_the_split():
-    value, delta = proof.saved_to_date_card(proof.saved_to_date(_summary()))
+    value, delta = proof.saved_to_date_card(proof.saved_to_date(_summary()), verified_any=True)
     assert value == "$965.00"
     assert delta == ("since Jul 20, 2026 · $219.01 measured · $745.99 carried forward at the verified rate"
                      " · incl. $155.00 saved before a change was undone")
-    value, delta = proof.saved_to_date_card(proof.saved_to_date(_summary(SAVED_BEFORE_REVERT_USD=0.0)))
+    value, delta = proof.saved_to_date_card(proof.saved_to_date(_summary(SAVED_BEFORE_REVERT_USD=0.0)),
+                                            verified_any=True)
     assert "undone" not in delta and delta.endswith("carried forward at the verified rate")
-    assert proof.saved_to_date_card(None) == ("—", "whole-ledger summary unavailable")
-    assert proof.saved_to_date_card(proof.saved_to_date(_summary(SAVED_TO_DATE_USD=0.0))) == (
+    for verified_any in (True, False):
+        assert proof.saved_to_date_card(None, verified_any=verified_any) == (
+            "—", "whole-ledger summary unavailable")
+    assert proof.saved_to_date_card(proof.saved_to_date(_summary(SAVED_TO_DATE_USD=0.0)), verified_any=False) == (
         "$0.00", "nothing verified yet")
-    no_since = proof.saved_to_date_card(proof.saved_to_date(_summary(SAVED_SINCE_DATE=None)))[1]
+    no_since = proof.saved_to_date_card(proof.saved_to_date(_summary(SAVED_SINCE_DATE=None)),
+                                        verified_any=True)[1]
     assert no_since.startswith("$219.01 measured")
     for saved in (None, proof.saved_to_date(_summary()), proof.saved_to_date(_summary(SAVED_TO_DATE_USD=0.0))):
-        v, d = proof.saved_to_date_card(saved)
-        # never a run-rate, never "(all time)" / "(YTD)" (the D4 lesson)
-        for bad in ("/mo", "all time", "YTD"):
-            assert bad not in v and bad not in d, bad
+        for verified_any in (True, False):
+            v, d = proof.saved_to_date_card(saved, verified_any=verified_any)
+            # never a run-rate, never "(all time)" / "(YTD)" (the D4 lesson)
+            for bad in ("/mo", "all time", "YTD"):
+                assert bad not in v and bad not in d, bad
+
+
+@pytest.mark.parametrize("zero", [
+    # (a) the only verified item was verified by hand TODAY: 0 whole days in effect, so $0 accrued
+    {"SAVED_TO_DATE_USD": 0.0, "SAVED_MEASURED_USD": 0.0, "SAVED_BEFORE_REVERT_USD": 0.0,
+     "SAVED_SINCE_DATE": "2026-09-28"},
+    # (b) every live verified item carries $0 (an LBA-1 partner, a hand-verified "saved nothing")
+    {"SAVED_TO_DATE_USD": 0.0, "SAVED_MEASURED_USD": 0.0, "SAVED_BEFORE_REVERT_USD": 0.0,
+     "SAVED_SINCE_DATE": None},
+])
+def test_a_zero_total_beside_verified_items_never_reads_nothing_verified(zero):
+    # review r1 F2/F6/F21: the run-rate card beside this one already counts these items, so a $0 accrual is a
+    # neutral zero state -- "nothing verified yet" is only for a record with no verified item at all
+    value, delta = proof.saved_to_date_card(proof.saved_to_date(_summary(**zero)), verified_any=True)
+    assert value == "$0.00"
+    assert delta == proof.SAVED_NOTHING_ACCRUED
+    assert "nothing verified" not in delta and delta.startswith("nothing accrued yet")
+    assert "day after it is verified or its change is seen" in delta
+    # the same $0 with no verified item at all is the genuinely empty record
+    assert proof.saved_to_date_card(proof.saved_to_date(_summary(**zero)), verified_any=False) == (
+        "$0.00", "nothing verified yet")
+
+
+def test_saved_to_date_card_requires_the_verified_flag():
+    # keyword-only and required: a caller can never fall back to "nothing verified yet" by omission
+    with pytest.raises(TypeError):
+        proof.saved_to_date_card(proof.saved_to_date(_summary()))            # type: ignore[call-arg]
 
 
 # --------------------------------------------------------------------------- the wiring
@@ -209,7 +241,11 @@ def test_proof_page_source_locks():
     src = read("app/ui/decision_studio.py")
     tab = _fn(src, "_proof_tab")
     assert '{"label": "Saved to date", "value": _saved_value,' in tab and '"method": "accrued"' in tab
-    assert '_saved_value, _saved_delta = saved_to_date_card(sig.get("saved"))' in tab
+    # the zero state keys on whether ANY item is verified (reverted ones included), never on the $ alone
+    assert ('_saved_value, _saved_delta = saved_to_date_card(\n'
+            '        sig.get("saved"), verified_any=_ver_any > 0 or int(sig.get("verified_active_items") or 0) > 0)'
+            ) in tab
+    assert tab.index("_ver_any = ") < tab.index("saved_to_date_card(")
     assert "_SAVED_TO_DATE_HELP" in tab and "does not feed the ROI multiple" in ds._SAVED_TO_DATE_HELP
     assert "not a run-rate" in ds._SAVED_TO_DATE_HELP
     # row 1: run-rate · Saved to date · Added this quarter · Realization; row 2 starts with Settling
@@ -232,6 +268,25 @@ def test_proof_page_source_locks():
     # the Reverted savings list lives in the evidence region, which never sums the capped frame
     evidence = tab.split("# ---- What each saving rests on", 1)[1].split("month_df =", 1)[0]
     assert "_rev = reverted_rows(ledger.df)" in evidence and ".sum(" not in evidence
-    assert 'with st.expander(f"Reverted savings — {len(_rev):,} change(s) undone"):' in evidence
+    # review r1 F7: the list reads the row-capped frame -- its title says so when truncated -- and the SQL
+    # caption only points at it when it is there (computed before the caption)
+    assert ('_rev_title = (f"Reverted savings — {len(_rev):,} change(s) undone"\n'
+            '                      + (" (newest ledger rows)" if ledger.truncated else ""))') in evidence
+    assert "with st.expander(_rev_title):" in evidence
+    assert '(" — see Reverted savings below." if not _rev.empty else ".")' in evidence
+    assert evidence.index("_rev = reverted_rows(ledger.df)") < evidence.index("if _rev_n:")
+    # the run-rate delta's reverted count is the UNCAPPED SQL figure (sig), never the capped frame's
+    assert '_rev_n = int(sig.get("reverted_active_items") or 0)' in tab
+    assert tab.index('_rev_n = int(sig.get("reverted_active_items") or 0)') < tab.index("kpi_row([")
+    assert 'f" · {_rev_n:,} reverted, not counted" if _rev_n else ""' in tab
+    assert "totals.get('reverted_count') or 0):,} reverted, not counted" not in tab
+    # review r1 F3/F5: the "older items" branch names the in-window items that were undone, never the
+    # age-only reason while _rev_n > 0 (the branch ORDER above is unchanged)
+    older = tab.split('elif int(totals["verified_count"]) > 0:', 1)[1].split(
+        'elif int(totals.get("reverted_count") or 0) > 0:', 1)[0]
+    age_only = "verified item(s), none verified in the last "
+    assert older.count(age_only) == 1
+    assert older.index("if _rev_n > 0:") < older.index("was later undone") < older.index("else:") < older.index(
+        age_only)
     # "nothing verified yet" keys on verified OR reverted items (realization keeps reverted rows)
     assert tab.count("if _ver_any else") == 2 and 'if totals["verified_count"] else "nothing' not in tab
