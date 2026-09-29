@@ -591,16 +591,17 @@ SEC_CRED_EXPIRY [10], SEC_NEW_EXPOSURE [20] and their condition-ended clears
 run at 01, 05, 09, 13, 17 and 21 Central; the OPS_PIPELINE_DEGRADED [22]
 self-watch at 02, 05, 08, 11, 14, 17, 20 and 23 (the daily scan's copy still
 runs every morning). A skipped arm compiles nothing and counts as ok in the
-12-block tally; a failed hour read runs every gated block (fail-open,
+14-block tally (12 before V162); a failed hour read runs every gated block (fail-open,
 `cadence_gate_failed`). The trade: those alerts and clears can arrive up to
 ~4h (~3h for [22]) later than an every-hour check. A condition that begins and
 ends between two checks is never raised: a PUBLIC grant revoked within ~4h, or
 a stale-source / idle-notifier episode that clears between [22] slots (logged
 loader failures are still caught by the 24h ERR leg). A hand
 `CALL SP_ALERT_SCAN()` obeys the same gates: outside a slot it skips those arms
-and still reports 12/12 ok, so verify a fix to one of them in the 05 or 17
+and still reports 14/14 ok, so verify a fix to one of them in the 05 or 17
 Central hour (both slots) or after its next scheduled slot. Every other arm and sweep
-still runs every hour.
+still runs every hour, including the two identity arms V162 added: [26]
+SEC_LOGIN_TAKEOVER and [27] SEC_ADMIN_GRANT are ungated.
 
 **Lifecycle:** rule (ALERT_CONFIG row) → scan inserts an event with a
 DEDUPE_KEY (no duplicate while the key exists) → OPEN → ACK → RESOLVED,
@@ -658,6 +659,8 @@ PUBLIC grants silently leave the queue.
 | SEC_FAILED_LOGINS | SECURITY | failed logins over threshold | daily |
 | SEC_CRED_EXPIRY | SECURITY | credential expires ≤ threshold days — 10 by default since V028 (CRITICAL if expired); checked every 4h since V157 (01, 05, 09, 13, 17, 21 Central), so an event — EXPIRED included — can arrive up to ~4h late | once per band per expiry date (EXPIRING, then EXPIRED); a rotated credential's next expiry re-alerts even after a human resolve, however late (V157: a closed event blocks only its own expiry date, read from its DETAIL; a live one always blocks) |
 | SEC_NEW_EXPOSURE | SECURITY | a new grant to PUBLIC (24h lookback) of ≥ threshold objects in one batch; checked every 4h since V157 (01, 05, 09, 13, 17, 21 Central); a grant revoked before the next check is never raised | once per grant batch (PRIVILEGE, GRANTED_ON, CREATED_ON); auto-clears as CONDITION_ENDED once the whole batch is revoked (V157) |
+| SEC_LOGIN_TAKEOVER | SECURITY | ≥ threshold (5) failed logins by one user within 15 min, then a successful login within 60 min of that burst (every failed login counts); CRITICAL when the login is off-hours (20:00-06:00 Central, or a weekend) or the user directly held ACCOUNTADMIN / SECURITYADMIN / SYSADMIN / USERADMIN / ORGADMIN / SNOW_ACCOUNTADMINS / SNOW_SYSADMINS at that moment, else HIGH; company ALL — hourly [26], V162; never auto-declares an incident (SP_INCIDENT_AUTODECLARE skips it: declare by hand) | one event per episode (key ends in the anchor login's UTC millisecond time); a later WARN→CRIT crossing supersedes the WARN, a CRIT is never re-minted as WARN; a snooze never carries to the next episode |
+| SEC_ADMIN_GRANT | SECURITY | a direct grant of one of those seven admin-tier roles to a user (GRANTS_TO_USERS, 26h lookback), raised even when already revoked; flat HIGH; the title flags off-hours and first-time grants; company ALL — hourly [27], V162; never auto-declares an incident | one event per grant (grantee, role, CREATED_ON) |
 | ~~SEC_BREAK_GLASS_USE~~ | SECURITY | retired at V034 (muted since V025) — admin-role activity stays as evidence on Security -> Changes | — |
 | COST_DEPT_BUDGET_PACE | COST | department MTD > budget pace by threshold % (DEPT_BUDGETS) | daily per dept |
 | COST_ORG_ACCOUNT_CREEP | COST | org account currency spend up threshold % WoW | weekly per account |
@@ -951,7 +954,11 @@ forward-only — reopen is a NEW incident carrying REOPENED_FROM.
    family's open alerts link as members automatically, never double-linked.
 2. Auto-declare — CRITICALs open an incident when their dedupe family has
    no open one: hourly, one per family per 24h. Toggle:
-   Settings -> INCIDENT_AUTO_DECLARE_CRITICAL.
+   Settings -> INCIDENT_AUTO_DECLARE_CRITICAL. Never for the two identity
+   rules (V162): SP_INCIDENT_AUTODECLARE skips SEC_LOGIN_TAKEOVER and
+   SEC_ADMIN_GRANT whatever their severity, so contact the user first and then
+   declare by hand (path 1 or 3). A later CRITICAL of either rule still
+   attaches to an open incident a person declared for that rule.
 3. Manual SQL — the panels show every statement they would run; copy and
    adapt for unusual cases (members: ALERT | TASK_FAIL | WH_CHANGE | DDL |
    DEPLOY | REMEDIATION).

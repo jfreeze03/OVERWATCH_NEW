@@ -1321,9 +1321,12 @@ def render() -> None:
         _loop_txt = (" With auto-declare on, later CRITICALs of an already-open family attach to it, and "
                      "an OPEN incident whose member alerts have all been resolved for an hour moves to "
                      "MITIGATED — closing stays human." if _v154_applied() else "")
+        # V162 (Next-Fifty #39): SP_INCIDENT_AUTODECLARE skips the two identity rules -- claimed only once applied.
+        _id_txt = (" Account-takeover and admin-grant alerts never auto-declare; declare them by hand."
+                   if has_migration(162, _PAGE) else "")
         st.caption("DBA-gated, audited, forward-only (reopen = new incident with REOPENED_FROM). "
                    "CRITICALs auto-declare hourly — one incident per dedupe family per 24h — "
-                   "unless INCIDENT_AUTO_DECLARE_CRITICAL is off in Settings." + _loop_txt)
+                   "unless INCIDENT_AUTO_DECLARE_CRITICAL is off in Settings." + _loop_txt + _id_txt)
 
         # ---- Triage queue ----------------------------------------------------------
         section_header("Triage queue")

@@ -92,6 +92,10 @@ DEFAULT_SETTINGS = {
     # Forecast engine: linear | seasonal | ml_forecast (needs the opt-in
     # snowflake/ml_forecast_option.sql; falls back to seasonal when absent).
     "FORECAST_ENGINE": "linear",
+    # Incident auto-declare switch (seeded by V032; read by SP_INCIDENT_AUTODECLARE every hour, absent = TRUE).
+    # Listed here so Admin shows it as an editable setting, not an orphan "no longer read" row (wave 4: V162's
+    # identity rules never auto-declare, whatever this says).
+    "INCIDENT_AUTO_DECLARE_CRITICAL": "TRUE",
     # Known-spike calendar (repo review 2026-08-17): predictable spend spikes the
     # anomaly panels label "expected" instead of flagging. Semicolon rules:
     # MONTH_END:<n> | QUARTER_END:<n> | YYYY-MM-DD..YYYY-MM-DD:<label>.
