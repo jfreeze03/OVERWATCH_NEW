@@ -296,6 +296,16 @@ def test_an_inherited_revert_names_the_partner_setting():
         "600 → 60", "SIZE: Medium → Large", "Partial")
     assert rv.loc["WH_P2", "REVERTED_TO"] == "Medium → Large"
     assert rv.loc["WH_Q", "REVERTED_TO"] == "AUTO_SUSPEND: 60 → never"
+    # review r2: 'Full' through a partner's earlier revert names both facts -- never 'reverted … (co-attributed
+    # MAX_CLUSTERS → 3)' as if that change fully undid a SIZE downsize
+    full = _inherited_ledger()
+    full.loc[full["CHANGE_WAREHOUSE"] == "WH_P", "REVERT_KIND"] = "full"
+    ev_full = proof.evidence_rows(full, None, date(2026, 9, 28)).set_index("TARGET")
+    assert ev_full.loc["WH_P", "FLAGS"] == ("left the run-rate Jul 10 (co-attributed SIZE → Large); "
+                                            "AUTO_SUSPEND since fully undone")
+    rv_full = proof.reverted_rows(full).set_index("TARGET")
+    assert (rv_full.loc["WH_P", "REVERTED_TO"], rv_full.loc["WH_P", "REVERT"]) == (
+        "SIZE: Medium → Large (AUTO_SUSPEND since fully undone)", "Full")
     # an older read without REVERT_SETTING reads the row's own setting (the pre-fix text)
     legacy = _inherited_ledger().drop(columns=["REVERT_SETTING"])
     assert proof.reverted_rows(legacy).set_index("TARGET").loc["WH_P", "REVERTED_TO"] == "Medium → Large"

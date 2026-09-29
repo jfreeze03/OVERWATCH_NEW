@@ -474,8 +474,14 @@ def test_task_evidence_drill_renders_shaped_and_is_off_by_default(monkeypatch):
     seen: list[str] = []
 
     def _recording_run(*args, **kwargs):
-        seen.append(str(args[0] if args else kwargs.get("sql", "")))
-        return _shaped_run(*args, **kwargs)
+        sql = str(args[0] if args else kwargs.get("sql", ""))
+        seen.append(sql)
+        res = _shaped_run(*args, **kwargs)
+        if _EVIDENCE_MARK in sql and {"CALL_DATABASE", "CONTROL_DATABASE"} <= set(res.df.columns):
+            # the shaped placeholders differ per column; make the CALL this environment's (review r2: another
+            # database's CALL is never reported as the task's error)
+            res.df["CALL_DATABASE"] = res.df["CONTROL_DATABASE"]
+        return res
 
     monkeypatch.setattr(operations, "run", _recording_run)
     at = AppTest.from_function(_entry, default_timeout=30)

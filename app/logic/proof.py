@@ -316,9 +316,16 @@ def _flags(row: pd.Series) -> str | None:
     if _rv_at is not None and not pd.isna(_rv_at):
         _by, _inherited = _revert_setting(row)
         _to = _undone_value(row.get("REVERT_NEW_VALUE"), _by)
-        _kind = "partly reverted" if _text(row.get("REVERT_KIND")).lower() == "partial" else "reverted"
+        _full = _text(row.get("REVERT_KIND")).lower() != "partial"
         _when = _short_date(pd.Timestamp(_rv_at).date())
-        out.append(f"{_kind} {_when} (co-attributed {_by} → {_to})" if _inherited else f"{_kind} {_when} → {_to}")
+        if not _inherited:
+            out.append(f"{'reverted' if _full else 'partly reverted'} {_when} → {_to}")
+        elif _full:
+            # review r2: the carried (earliest) revert is a partner's; the own setting was undone in full later
+            _own = _text(row.get("CHANGE_SETTING")).upper() or "its own setting"
+            out.append(f"left the run-rate {_when} (co-attributed {_by} → {_to}); {_own} since fully undone")
+        else:
+            out.append(f"partly reverted {_when} (co-attributed {_by} → {_to})")
     if _truthy(row.get("VOLUME_CONFOUNDED")):
         out.append("volume-confounded")
     verdict = _text(row.get("CHANGE_VERDICT")).upper()
@@ -406,7 +413,8 @@ def reverted_rows(ledger_df: pd.DataFrame | None) -> pd.DataFrame:
     """Next-Fifty #31: the live (non-superseded) ledger rows whose booked change the daily scan later saw
     undone — the Proof 'Reverted savings' list. CHANGE = booked 'old → new'; REVERTED_TO = the undoing
     change 'old → new', prefixed '<SETTING>: ' when it was a co-attributed partner's change (review r1 F1:
-    one measured window, so undoing the partner stales this row's saving too); REVERT = 'Full' / 'Partial';
+    one measured window, so undoing the partner stales this row's saving too) and suffixed '(<own SETTING>
+    since fully undone)' when the row reads Full through its own later revert; REVERT = 'Full' / 'Partial';
     VERIFIED_USD = the $/mo that left the run-rate (NULL -> '—'); REVERTED_AT tz-naive account time.
     Newest revert first. Display only — never a total."""
     if ledger_df is None or ledger_df.empty or "STATE" not in ledger_df.columns:
@@ -421,10 +429,14 @@ def reverted_rows(ledger_df: pd.DataFrame | None) -> pd.DataFrame:
     undone = _change_text(_col(view, "REVERT_OLD_VALUE"), _col(view, "REVERT_NEW_VALUE"),
                           pd.Series([b for b, _ in by], index=view.index, dtype="object"))
     undone = [f"{b}: {t}" if inherited and t else t for t, (b, inherited) in zip(undone, by, strict=True)]
+    kind = _col(view, "REVERT_KIND").map(_text).str.lower()
+    # review r2: 'Full' beside a partner's change -- say the row's own setting was since undone in full
+    undone = [f"{t} ({_text(s).upper() or 'its own setting'} since fully undone)"
+              if inherited and t and k == "full" else t
+              for t, (_, inherited), k, s in zip(undone, by, kind, setting, strict=True)]
     target = _col(view, "TARGET_OBJECT").map(_text)
     target = target.where(target.ne(""), _col(view, "CHANGE_WAREHOUSE").map(_text))
     lever = _col(view, "FINDING_TYPE").map(_text)
-    kind = _col(view, "REVERT_KIND").map(_text).str.lower()
     out = pd.DataFrame({
         "TARGET": target.where(target.ne(""), None),
         "LEVER": lever.where(lever.ne(""), None),

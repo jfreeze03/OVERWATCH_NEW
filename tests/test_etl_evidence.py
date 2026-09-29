@@ -329,10 +329,26 @@ def test_verdict_warns_when_the_call_ran_in_another_database() -> None:
                             "the CALL(s) shown match by procedure name in ALFA_EDW_SIT — check that is this "
                             "environment's run before acting on them.")
     assert "clean" not in _levels(lines)            # another environment's CALL is never 'healthy' for this one
-    # the failed line names the other database too
+    # review r2: after the lag the database warning LEADS and another database's failure is never an error
     failed = _lines(_row(CALL_DATABASE="ALFA_EDW_SIT", IS_CALL_FAILED=1, FAILED_CALLS=1, ERROR_MESSAGE="boom"))
-    assert failed[0].level == "error" and "CALL of SP_X in ALFA_EDW_SIT on WH_ETL" in failed[0].text
-    assert failed[1].level == "warn" and "in ALFA_EDW_SIT" in failed[1].text
+    assert failed[0].level == "warn" and failed[0].text.startswith("No CALL of SP_X ran in ALFA_EDW_PRD")
+    assert failed[1].level == "warn" and "CALL of SP_X in ALFA_EDW_SIT on WH_ETL" in failed[1].text
+    assert "error" not in _levels(failed)
+
+
+def test_verdict_waits_out_the_lag_before_citing_another_databases_call() -> None:
+    """Review r2: a running task (or one that ended < QH_LAG_MIN ago) whose own CALL has not landed must not be
+    judged by a same-named CALL from another database -- one hedge, no 'Failed:' headline."""
+    for age in (0, 10, 44):
+        lines = _lines(_row(CALL_DATABASE="ALFA_EDW_SIT", IS_CALL_FAILED=1, FAILED_CALLS=1,
+                            ERROR_MESSAGE="boom", END_AGE_MIN=age))
+        assert _levels(lines) == ["no_data_yet"], age
+        assert lines[0].text.startswith("No CALL of SP_X in ALFA_EDW_PRD (CONTROL_STATUS's database) in "
+                                        "QUERY_HISTORY yet")
+        assert "ALFA_EDW_SIT, likely another environment" in lines[0].text
+    # the task's OWN database CALL inside the lag is still reported as it is
+    own = _lines(_row(IS_CALL_FAILED=1, FAILED_CALLS=1, ERROR_MESSAGE="boom", END_AGE_MIN=10))
+    assert own[0].level == "error" and own[0].text.startswith("Failed: boom")
 
 
 def test_verdict_database_match_is_case_insensitive_and_needs_a_known_control_db() -> None:
@@ -437,6 +453,9 @@ def test_builder_and_verdict_share_a_column_contract() -> None:
     sql = etl.run_task_evidence_scan("ALFA_EDW_PRD.PUBLIC.CONTROL_STATUS", task="SP_X", workflow="WF")
     shaped = _shaped_from_sql(sql).df
     assert not shaped.empty, "the builder SQL no longer parses into a shaped frame"
+    # the shaped harness fills text columns with placeholders; make the CALL this environment's (review r2:
+    # another database's CALL is never an error), so the contract below still reads the failed-CALL branch
+    shaped = shaped.assign(CALL_DATABASE=shaped["CONTROL_DATABASE"])
     lines = task_evidence_lines(shaped, task="SP_X")
     assert lines[0].level == "error"                      # the shaped row 0 is a failed CALL
     disp = evidence_display_frame(shaped)

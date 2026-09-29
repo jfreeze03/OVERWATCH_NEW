@@ -193,10 +193,12 @@ def task_evidence_lines(df: pd.DataFrame | None, *, task: str) -> list[EvidenceL
     the Informatica side — hedged inside QH_LAG_MIN and when none of its statements were visible);
     (4) a successful CALL whose statements failed; (5) CONTROL_STATUS says failed but no Snowflake CALL
     or statement did — the exact Informatica-side sentence only when every CALL is listed and every
-    CALL's statements were seen, else a hedge; then a warning when no matched CALL ran in
-    CONTROL_STATUS's own database (a same-named procedure in another environment); (6) where the newest
-    CALL's time went (queued, spill, compile, and — outside QH_LAG_MIN only — time outside Snowflake
-    from the SQL window totals); (7) clean when nothing above warned and the task did not fail."""
+    CALL's statements were seen, else a hedge. When no matched CALL ran in CONTROL_STATUS's own database
+    (a same-named procedure, possibly another environment), the drill waits out the lag with one hedge,
+    and after it leads with that warning and never reports the other database's failure as an error;
+    (6) where the newest CALL's time went (queued, spill, compile, and — outside QH_LAG_MIN only — time
+    outside Snowflake from the SQL window totals); (7) clean when nothing above warned and the task did
+    not fail."""
     name = str(task or "").strip() or "this task"
     if df is None or df.empty:
         return [EvidenceLine("no_data_yet",
@@ -221,6 +223,25 @@ def task_evidence_lines(df: pd.DataFrame | None, *, task: str) -> list[EvidenceL
                   f"Informatica QUERY_TAG ({_TAG_ASK_DOC})."))]
 
     out: list[EvidenceLine] = []
+    # review F11 + r2: the SQL keeps only CONTROL_STATUS's own database when any CALL ran there; when none did,
+    # every name match was kept -- possibly another environment's run of the same procedure. Inside the lag
+    # the task's own CALL may simply not have landed, so wait; after it, say so FIRST and never headline
+    # another database's failure as this task's error.
+    ctl_db = _txt(first.get("CONTROL_DATABASE"), "").upper()
+    dbs = (sorted({_txt(v, "").upper() for v in calls["CALL_DATABASE"].tolist()} - {""})
+           if "CALL_DATABASE" in calls.columns else [])
+    other_db = bool(ctl_db) and "CALL_DATABASE" in calls.columns and ctl_db not in dbs
+    _where = ", ".join(dbs) or "an unknown database"
+    if other_db and recent:
+        return [EvidenceLine(
+            "no_data_yet", f"No CALL of {name} in {ctl_db} (CONTROL_STATUS's database) in QUERY_HISTORY yet — "
+                           f"it lags up to ~{QH_LAG_MIN} min and {_ago}. The same-named CALL(s) below ran in "
+                           f"{_where}, likely another environment. Re-check shortly.")]
+    if other_db:
+        out.append(EvidenceLine(
+            "warn", f"No CALL of {name} ran in {ctl_db} (CONTROL_STATUS's database) in this window; the CALL(s) "
+                    f"shown match by procedure name in {_where} — check that is this environment's run before "
+                    "acting on them."))
     latest = calls.iloc[0]
     wh = _txt(latest.get("WAREHOUSE_NAME"))
     task_failed = safe_float(first.get("IS_TASK_FAILED")) > 0
@@ -240,9 +261,10 @@ def task_evidence_lines(df: pd.DataFrame | None, *, task: str) -> list[EvidenceL
         if safe_float(latest.get("IS_CALL_FAILED")) > 0:
             _db = _txt(f.get("CALL_DATABASE"), "")
             out.append(EvidenceLine(
-                "error", f"Failed: {err[:300]} (error {_code(f.get('ERROR_CODE'))}) — the Snowflake CALL of "
-                         f"{name}{f' in {_db}' if _db else ''} on {_txt(f.get('WAREHOUSE_NAME'))} at "
-                         f"{_when(f.get('CALL_START_TIME'))}. Open its query profile below."))
+                "warn" if other_db else "error",
+                f"Failed: {err[:300]} (error {_code(f.get('ERROR_CODE'))}) — the Snowflake CALL of "
+                f"{name}{f' in {_db}' if _db else ''} on {_txt(f.get('WAREHOUSE_NAME'))} at "
+                f"{_when(f.get('CALL_START_TIME'))}. Open its query profile below."))
         else:
             out.append(EvidenceLine(
                 "warn", f"Failed then retried: {max(n_failed, len(failed_calls)):,} of {max(n_calls, 1):,} "
@@ -303,16 +325,6 @@ def task_evidence_lines(df: pd.DataFrame | None, *, task: str) -> list[EvidenceL
         else:
             out.append(EvidenceLine("warn", INFORMATICA_SIDE_SENTENCE))
 
-    # review F11: the SQL keeps only CONTROL_STATUS's own database when any CALL ran there; when none did,
-    # every name match was kept, so say the evidence is from another database (it may be another environment)
-    ctl_db = _txt(first.get("CONTROL_DATABASE"), "").upper()
-    if ctl_db and "CALL_DATABASE" in calls.columns:
-        dbs = sorted({_txt(v, "").upper() for v in calls["CALL_DATABASE"].tolist()} - {""})
-        if ctl_db not in dbs:
-            out.append(EvidenceLine(
-                "warn", f"No CALL of {name} ran in {ctl_db} (CONTROL_STATUS's database) in this window; the "
-                        f"CALL(s) shown match by procedure name in {', '.join(dbs) or 'an unknown database'} — "
-                        "check that is this environment's run before acting on them."))
 
     # (6) where the newest CALL's Snowflake time went — always evaluated
     qpct = safe_float(latest.get("QUEUED_PCT"))

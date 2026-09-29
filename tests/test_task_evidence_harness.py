@@ -207,11 +207,13 @@ def test_only_a_non_prod_call_is_kept_and_flagged() -> None:
     df = _scan(_db([_sit_call()], _KIDS))
     assert list(df["CALL_QUERY_ID"]) == ["q-sit"] and df.iloc[0]["CALL_DATABASE"] == "ALFA_EDW_SIT"
     lines = task_evidence_lines(df, task="SP_D_PLCY")
-    assert lines[0].level == "error"
-    assert "the Snowflake CALL of SP_D_PLCY in ALFA_EDW_SIT on WH_ETL" in lines[0].text
-    assert lines[1].level == "warn" and lines[1].text.startswith(
+    # review r2: the database warning leads, and another environment's failure is a warning, never the error
+    assert lines[0].level == "warn" and lines[0].text.startswith(
         "No CALL of SP_D_PLCY ran in ALFA_EDW_PRD (CONTROL_STATUS's database) in this window; the CALL(s) shown "
         "match by procedure name in ALFA_EDW_SIT")
+    assert lines[1].level == "warn"
+    assert "the Snowflake CALL of SP_D_PLCY in ALFA_EDW_SIT on WH_ETL" in lines[1].text
+    assert "error" not in [line.level for line in lines]
 
 
 def test_a_two_part_control_fqn_states_no_database() -> None:

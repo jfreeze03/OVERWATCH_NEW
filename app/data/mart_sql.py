@@ -988,11 +988,14 @@ def _ledger_revert_select() -> str:
 
     Outer select — the co-attributed group (review r1 F1): changes one scan saw together on the same
     warehouse share CHANGE_SEEN_AT (the V109 scan stamps one CURRENT_TIMESTAMP per INSERT), so they share
-    one measured window: exactly the V153 LBA-1 partition, where RN=1 carries the whole saving and the
-    rest settle $0. Undoing ANY member stales that one measurement, so every member g maps to the EARLIEST
-    revert among its group members p (itself included, so a singleton is unchanged); on a same-scan tie
-    its OWN revert wins. REVERT_KIND is 'full' only when g's OWN setting was fully undone; a revert
-    inherited from a partner reads 'partial' (g's own lever may still save — re-measure it).
+    one measured window. The V153 LBA-1 partition ranks only the BOOKED (saving-direction) changes of that
+    window: RN=1 carries the whole saving and the rest settle $0. Undoing ANY such member stales that one
+    measurement, so every member g maps to the EARLIEST revert among its group members p — g itself (so a
+    singleton is unchanged) and the partners whose own change CUT cost (review r2: a same-scan INCREASE,
+    e.g. a cluster bump alongside a downsize, is never booked, so a further increase on it later is
+    capacity growth, not an undo; an unknown rank does not carry). On a same-scan tie g's OWN revert wins.
+    REVERT_KIND is 'full' only when g's OWN setting was fully undone; a revert inherited from a partner
+    reads 'partial' (g's own lever may still save — re-measure it).
     REVERT_SETTING names the setting the carried revert changed (a partner's, when inherited).
     REVERTED_AT = the revert's CHANGE_SEEN_AT (TIMESTAMP_LTZ, the scan's clock)."""
     reg = core_object("WAREHOUSE_CHANGE_REGISTRY")
@@ -1000,6 +1003,8 @@ def _ledger_revert_select() -> str:
     n_new = _setting_cost_rank_sql("n.SETTING", "n.NEW_VALUE")
     b_old = _setting_cost_rank_sql("b.SETTING", "b.OLD_VALUE")
     b_new = _setting_cost_rank_sql("b.SETTING", "b.NEW_VALUE")
+    p_old = _setting_cost_rank_sql("p.SETTING", "p.OLD_VALUE")
+    p_new = _setting_cost_rank_sql("p.SETTING", "p.NEW_VALUE")
     _own = "x.BOOKED_CHANGE_ID = g.CHANGE_ID"
     return f"""SELECT g.CHANGE_ID AS BOOKED_CHANGE_ID, x.REVERT_CHANGE_ID, x.REVERTED_AT, x.REVERT_OLD_VALUE,
            x.REVERT_NEW_VALUE,
@@ -1011,6 +1016,7 @@ def _ledger_revert_select() -> str:
       ON p.WAREHOUSE_NAME = g.WAREHOUSE_NAME
      AND p.CHANGE_SEEN_AT = g.CHANGE_SEEN_AT
      AND p.SETTING IN ({settings})
+     AND (p.CHANGE_ID = g.CHANGE_ID OR {p_new} < {p_old})
     JOIN (
         SELECT b.CHANGE_ID AS BOOKED_CHANGE_ID, n.CHANGE_ID AS REVERT_CHANGE_ID,
                n.CHANGE_SEEN_AT AS REVERTED_AT, n.OLD_VALUE AS REVERT_OLD_VALUE,

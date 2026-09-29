@@ -176,3 +176,14 @@ def test_the_stand_in_wording_is_gone():
     brief = read("app/ui/pages/brief.py")
     assert "(excluding warehouse changes the daily scan later saw undone)" in brief
     assert "/mo added this quarter" in brief
+
+
+def test_group_carry_only_from_saving_direction_partners() -> None:
+    """Review r2: the same-scan group carries a revert only from partners whose own change CUT cost (the V153
+    LBA-1 population), plus g itself -- never from an unbooked same-scan increase."""
+    from app.data import mart_sql
+
+    sql = mart_sql._ledger_revert_select()
+    rank_new = mart_sql._setting_cost_rank_sql("p.SETTING", "p.NEW_VALUE")
+    rank_old = mart_sql._setting_cost_rank_sql("p.SETTING", "p.OLD_VALUE")
+    assert f"AND (p.CHANGE_ID = g.CHANGE_ID OR {rank_new} < {rank_old})" in sql

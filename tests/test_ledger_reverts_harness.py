@@ -523,6 +523,29 @@ def test_group_is_one_scan_on_one_warehouse(db, monkeypatch):
     assert ledger_totals(_ledger(db))["verified_active_usd"] == pytest.approx(210.0)
 
 
+def test_an_unbooked_same_scan_increase_never_carries_a_revert(db):
+    """Review r2: 'scale out, not up' -- one scan sees a booked downsize AND a cluster increase (never booked,
+    not in the V153 LBA-1 partition). Raising clusters again later is capacity growth, not an undo: the
+    downsize saving stays in the run-rate. A saving-direction partner still carries (the F1 case)."""
+    # S: SIZE Large->Medium booked; MAX_CLUSTERS 2->3 (an increase) in the same scan; clusters 3->4 later
+    _reg(db, "S1", "WH_S", "SIZE", "Large", "Medium", "2026-06-01 06:40:00")
+    _reg(db, "S2", "WH_S", "MAX_CLUSTERS", "2", "3", "2026-06-01 06:40:00")
+    _reg(db, "S3", "WH_S", "MAX_CLUSTERS", "3", "4", "2026-08-01 06:40:00")
+    _led(db, "lS1", "VERIFIED", 150.0, "2026-06-16 06:45:00", source="S1", finding="RESIZE")
+    # U: AUTO_SUSPEND 600->60 booked; SIZE Medium->Large (an increase) in the same scan; Large->X-Large later
+    _reg(db, "U1", "WH_U", "AUTO_SUSPEND", "600", "60", "2026-06-01 06:40:00")
+    _reg(db, "U2", "WH_U", "SIZE", "Medium", "Large", "2026-06-01 06:40:00")
+    _reg(db, "U3", "WH_U", "SIZE", "Large", "X-Large", "2026-08-01 06:40:00")
+    _led(db, "lU1", "VERIFIED", 200.0, "2026-06-16 06:45:00", source="U1", finding="AUTO_SUSPEND")
+    led = _ledger(db).set_index("ITEM_ID")
+    assert pd.isna(led.loc["lS1", "REVERTED_AT"]) and pd.isna(led.loc["lU1", "REVERTED_AT"])
+    s = _summary(db)
+    assert s["VERIFIED_ACTIVE_MONTHLY_USD"] == pytest.approx(350.0) and s["REVERTED_ACTIVE_ITEMS"] == 0
+    # Saved to date runs to today for both (Jun 1 -> Sep 28 = 119 days)
+    assert s["SAVED_TO_DATE_USD"] == pytest.approx(round(350.0 / 30 * 119, 2))
+    assert {"WH_S", "WH_U"} <= set(_run(db, mart_sql.verified_wins("ALL"))["TARGET_WAREHOUSE"])
+
+
 def test_same_scan_reverts_keep_their_own_kind(db):
     # T: SIZE (RN=1) + AUTO_SUSPEND ($0) seen together, then BOTH undone by one later scan (one ALTER). Each
     # row reads its OWN full revert -- never a partner's, whichever REVERT_CHANGE_ID sorts first ("T1R" <

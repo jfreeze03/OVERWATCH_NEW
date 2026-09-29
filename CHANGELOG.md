@@ -9,9 +9,11 @@ App-only, no migration. Next Fifty wave 3, Slice B: ranks 31, 14 (Phase 1), 27 a
   daily change scan saw on the same warehouse and setting. When a later change makes that setting costlier than the
   booked value, the saving is reverted: "full" when any later change took it back to (or past) the original value,
   "partial" otherwise. Changes the scan saw together on one warehouse share one measured window (one row carries the
-  saving, the rest settle at $0), so undoing any of them takes the whole group out; a row undone only through such
-  a partner reads "partial" and its flag names the partner's setting ("partly reverted Jul 10 (co-attributed SIZE →
-  Large)").
+  saving, the rest settle at $0), so undoing any saving member of that group takes the whole group out (a capacity
+  increase the same scan saw is never booked, so raising it further later is growth, not an undo); a row undone
+  only through such a partner reads "partial" and its flag names the partner's setting ("partly reverted Jul 10
+  (co-attributed SIZE → Large)"), or, once its own setting is fully undone too, "left the run-rate Jul 10
+  (co-attributed SIZE → Large); AUTO_SUSPEND since fully undone".
   - A reverted saving leaves the ROI numerator, the Verified savings run-rate, Added this quarter, the attribution
     split, the Brief tile and its estimated pipeline, the month and lever charts, Settling and proven-fix transfer,
     on the first render after the scan sees it.
@@ -47,7 +49,8 @@ App-only, no migration. Next Fifty wave 3, Slice B: ranks 31, 14 (Phase 1), 27 a
     the procedure caught can't be ruled out. A retried task that CONTROL_STATUS still failed also gets its latest
     CALL's reading.
   - Within about 45 minutes of the task ending (or while it runs) it says QUERY_HISTORY may not have caught up yet
-    and does not attribute time to Informatica.
+    and does not attribute time to Informatica; a same-named CALL from another database is never reported as this
+    task's failure (it waits out the lag, then leads with the database warning at warning level).
   - The task picker keeps your pick across refreshes.
   - Exact matching by the Informatica QUERY_TAG is deferred; the ask for the ETL team is
     docs/design/INFORMATICA_QUERY_TAG_ASK.md. The Failure recurrence and Runtime drift captions point to the drill.
@@ -56,10 +59,11 @@ App-only, no migration. Next Fifty wave 3, Slice B: ranks 31, 14 (Phase 1), 27 a
   warehouse the waterfall shows moving up) by user and by database, each against its 14-day average over the days
   the allocation fact loaded (a quiet day counts as zero). Each table adds up exactly to the warehouse's metered
   move, including the part not tied to any query (idle or long-query carry-over hours).
-  - Under a company scope, logins with no company role (task, service and other unclassified users) are grouped as
+  - Under ALFA or Trexis, logins with no company role (task, service and other unclassified users) are grouped as
     *(unclassified users)*, and users and databases outside the company as *(users outside <company>)* /
-    *(databases outside <company>)*. They are grouped, not dropped, and when one of these groups carries the
-    largest change the summary leads with it.
+    *(databases outside <company>)*; under UNKNOWN, users classified to a company are grouped as *(users outside
+    UNKNOWN)* and no database is grouped. They are grouped, not dropped, and when one of these groups carries
+    the largest change the summary leads with it.
   - It lists the warehouse setting changes the 06:40 CT scan saw within a day, and offers a jump to Operations ▸
     Queries that sets the *Warehouse contains* filter to that warehouse (a name match that also catches longer names
     containing it; it stays on until cleared, and the flagged day is not carried over).

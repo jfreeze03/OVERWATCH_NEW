@@ -315,7 +315,7 @@ def page_header(title: str, subtitle: str, scope_note: str = "", icon_name: str 
         # Point at the always-present sidebar scope controls, not the Reset button
         # (which only renders when a filter is active — a cross-company database filter
         # can be validated away, leaving no button to name).
-        st.info(f"{_nav_ctx['filter_note']} — adjust or clear scope in the sidebar.")
+        st.info(f"{_nav_ctx['filter_note']} — adjust or clear it in the scope bar at the top.")
         st.session_state["_ow_nav_context"] = {
             k: v for k, v in _nav_ctx.items() if k != "filter_note"
         }
