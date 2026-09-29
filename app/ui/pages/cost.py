@@ -438,4 +438,4 @@ def render() -> None:
         if st.session_state.get("opt_section") == "Remediation & ledger":
             st.divider()
             section_header("Savings ledger", "ok", "cost")
-            _savings_tab()
+            _savings_tab(rate, settings)

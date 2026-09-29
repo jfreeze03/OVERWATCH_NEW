@@ -89,6 +89,21 @@ def with_warehouse_settings(profile: pd.DataFrame, warehouses: pd.DataFrame) -> 
     return out
 
 
+def multi_cluster_evident(warehouses: pd.DataFrame | None) -> bool:
+    """True when SHOW WAREHOUSES shows ANY warehouse with MAX_CLUSTER_COUNT > 1 (Next-Fifty #38).
+
+    Multi-cluster warehouses need Enterprise edition or higher, so one existing multi-cluster
+    warehouse proves the account can scale out. False = not proven (Standard edition, or simply no
+    multi-cluster warehouse yet) — the caller words the edition caveat, never asserts the edition.
+    Case-insensitive on SHOW's column names; absent/empty frame or column -> False. Pure."""
+    if warehouses is None or warehouses.empty:
+        return False
+    cols = {str(c).lower(): c for c in warehouses.columns}
+    if "max_cluster_count" not in cols:
+        return False
+    return bool((pd.to_numeric(warehouses[cols["max_cluster_count"]], errors="coerce") > 1).any())
+
+
 def idle_waste_summary(df: pd.DataFrame, credit_rate_usd: float, window_days: int) -> dict:
     """Account/company roll-up of idle warehouse waste (repo review wave 3) — the
     single headline "$ burned in warehouse-hours with zero queries" number, priced.

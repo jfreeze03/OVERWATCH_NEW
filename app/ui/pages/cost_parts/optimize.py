@@ -33,13 +33,14 @@ from app.logic.ai_prompts import idle_warehouse_prompt
 from app.logic.capacity import capacity_forecasts
 from app.logic.consolidation import WarehouseProfile, consolidation_candidates
 from app.logic.date_windows import window_label, window_phrase
-from app.logic.formulas import format_usd, humanize_duration, md_dollars, safe_float
+from app.logic.formulas import account_today, format_usd, humanize_duration, md_dollars, safe_float
 from app.logic.insights import (
     IDLE_TARGET_SUSPEND_SEC,
     flag_clustering_churn,
     flag_repeat_candidates,
     idle_advisor,
     idle_waste_summary,
+    multi_cluster_evident,
     poor_pruning_summary,
     repeat_min_runs,
     storage_movers,
@@ -47,6 +48,7 @@ from app.logic.insights import (
     with_auto_suspend_settings,
     with_warehouse_settings,
 )
+from app.logic.ledger_measure import MEASURED, TOO_EARLY, ledger_basis, ledger_measurement, proof_result_json
 from app.logic.monitors import (
     account_monitor,
     resource_monitor_inventory,
@@ -61,9 +63,11 @@ from app.logic.savings_rollup import (
 )
 from app.logic.serverless_roi import classify_qas_roi
 from app.logic.sizing import (
+    RECOMMEND_SCALE_OUT,
     SIZE_ORDER,
     normalize_size,
     price_per_run_bounds,
+    scale_out_plan,
     simulate_scenario,
     size_recommendations,
     sizing_summary,
@@ -583,7 +587,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             _savings_opps.extend(resize_opportunities(sized))
             summary = sizing_summary(sized)
             _sz_cols = ["WAREHOUSE_NAME", "COMPANY", "RECOMMENDATION", "RATIONALE",
-                        "CONFIDENCE", "AUTO_SUSPEND", "ACTIVE_QUERY_DAYS", "ACTIVE_DAYS_PER_30D",
+                        "CONFIDENCE", "CURRENT_SIZE", "MIN_CLUSTER_COUNT", "MAX_CLUSTER_COUNT",
+                        "SCALING_POLICY", "AUTO_SUSPEND", "ACTIVE_QUERY_DAYS", "ACTIVE_DAYS_PER_30D",
                         "MONTHLY_USD_NOW", "IDLE_MONTHLY_USD", "SCENARIO_DOWN_USD", "SCENARIO_UP_USD",
                         "QUEUED_MIN_PER_DAY", "SPILL_GB_PER_DAY", "P95_ELAPSED_SEC", "IDLE_PCT"]
             if "PROVISION_MIN_PER_DAY" in sized.columns:
@@ -605,11 +610,15 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 {"label": "Size-down candidates", "value": f"{summary['down']}"},
             ])
             st.caption(
-                f"Also: {summary['up']} size-up / add-cluster · {summary['suspend']} tune-auto-suspend-first · "
+                f"Also: {summary['scale_out']} add-a-cluster · {summary['size_up']} size-up · "
+                f"{summary['suspend']} tune-auto-suspend-first · "
                 f"{summary['observe'] + summary['review']} held for evidence/cadence review. "
-                "Size-up = sustained per-day overload queueing or remote spill (resume time excluded — a "
-                "suspend-timer signal, not concurrency). Evidence/cadence = advice withheld for episodic "
-                "evidence, unknown timers, or high idle remaining after an already-short timer."
+                "Add a cluster = sustained per-day overload queueing without remote spill (concurrency: "
+                "more clusters, not a bigger size; multi-cluster needs Enterprise edition). Size up = "
+                "remote spill per day (per-query memory; with queueing too, size up first). Resume time "
+                "is excluded — a suspend-timer signal, not concurrency. Evidence/cadence = advice "
+                "withheld for episodic evidence, unknown timers, or high idle remaining after an "
+                "already-short timer."
             )
             _sz_primary = [
                 "WAREHOUSE_NAME", "RECOMMENDATION", "RATIONALE", "CONFIDENCE",
@@ -650,7 +659,23 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 )
             if sel_sz is not None and is_operator:
                 srow = sized.iloc[int(sel_sz)]
-                if not bool(srow.get("ACTIONABLE", False)):
+                if str(srow.get("RECOMMENDATION", "")) == RECOMMEND_SCALE_OUT:
+                    # Next-Fifty #38: a concurrency verdict's fix is the cluster range (or the scaling
+                    # policy), not a resize. Review-only: it adds credits at peaks, so nothing is booked.
+                    _so = scale_out_plan(srow, multi_cluster_evident(
+                        _sizing_whs.df if _sizing_whs.ok and not _sizing_whs.empty else None))
+                    st.markdown("**Scale-out fix (review-only)**")
+                    if _so["policy_to_standard"]:
+                        st.code(remediation.scaling_policy_fix(str(srow["WAREHOUSE_NAME"]), "STANDARD"),
+                                language="sql")
+                    elif _so["known"] and not _so["at_cap"]:
+                        st.code(remediation.cluster_range_fix(str(srow["WAREHOUSE_NAME"]),
+                                                              _so["min"], _so["max"]), language="sql")
+                    st.caption(_so["note"] + " A wider cluster range adds credits while queries queue, "
+                               "so no saving is booked; run it from Operations ▸ Emergency ▸ Cluster "
+                               "range (audited). The resize below is the size-up alternative — use it "
+                               "only if single queries are also slow or spilling.")
+                elif not bool(srow.get("ACTIONABLE", False)):
                     st.warning(
                         "This row is not an evidence-backed resize recommendation. The SQL remains "
                         "available for an intentional operator override, but no saving is booked."
@@ -1849,7 +1874,8 @@ def _yes_no_dash(value: object) -> str:
     return "Yes" if str(value).strip().upper() in ("TRUE", "1", "YES") else "No"
 
 
-def _savings_tab() -> None:
+def _savings_tab(rate: float = 3.68, settings: dict | None = None) -> None:
+    settings = settings or {}
     res = run(mart_sql.savings_ledger(), page=_PAGE, key="savings_ledger",
               tier="live", source="SAVINGS_LEDGER")
     if not res.ok:
@@ -1962,6 +1988,83 @@ def _savings_tab() -> None:
                 options = {f"{r['DESCRIPTION'][:60]} ({r['ITEM_ID'][:8]})": r for _, r in estimated.iterrows()}
                 chosen = st.selectbox("Item", list(options), key="ledger_verify_pick")
                 row = options[chosen]
+                # Next-Fifty #46(d): a measured before/after for the finding types the marts can measure
+                # (warehouse credits, table time-travel bytes, object maintenance credits): 14 days before vs
+                # up to 30 complete days after the booking. It PREFILLS the monthly figure (a sentinel keeps
+                # an operator's edit) and a measured verify stamps PROOF_RESULT / PROOF_RUN_AT /
+                # PROOF_QUERY_ID. One mart read, in the non-default Remediation & ledger sub-section.
+                _item = str(row["ITEM_ID"])
+                _basis = ledger_basis(row.get("FINDING_TYPE"))
+                _tgt = row.get("TARGET_OBJECT")
+                _tgt = "" if _tgt is None or pd.isna(_tgt) else str(_tgt).strip()
+                _booked = pd.to_datetime(row.get("CREATED_AT"), errors="coerce")
+                _m: dict | None = None
+                _msql = ""
+                if _basis and _tgt and pd.notna(_booked):
+                    _msql = mart_sql.ledger_before_after(_basis, _tgt, _booked.date())
+                    _mres = run(_msql, page=_PAGE, key=f"ledger_measure_{_item[:8]}", tier="recent",
+                                source=("FACT_WAREHOUSE_DAILY / MART_TABLE_STORAGE_DAILY / "
+                                        "FACT_OBJECT_COST_DAILY (before/after)"), probe=True)
+                    if _mres.usable():
+                        _m = ledger_measurement(
+                            _mres.df.iloc[0], basis=_basis, rate=rate,
+                            storage_usd_per_tb=safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0),
+                            today=account_today())
+                        if _mres.query_id:
+                            # survives the cache-hit rerun that follows the Verify click
+                            st.session_state[f"_ow_proof_qid_{_item}"] = _mres.query_id
+                    else:
+                        empty_state("unavailable", "The before/after measurement could not be read — "
+                                    "enter the verified amount by hand.", detail=_mres.error)
+                elif not _basis:
+                    st.caption("No measured basis for this item — enter the verified amount by hand.")
+                else:
+                    st.caption("This item has no target or booking date to measure around — enter the "
+                               "verified amount by hand.")
+                _measured = _m is not None and _m["state"] == MEASURED
+                if _m is not None:
+                    _saving = (format_usd(_m["monthly_usd"]) if _measured
+                               else "Too early" if _m["state"] == TOO_EARLY else "No data")
+                    if _basis == "TABLE":
+                        from app.logic.formulas import humanize_bytes
+                        _mk = [{"label": "Time travel before",
+                                "value": "—" if _m["before_bytes"] is None else humanize_bytes(_m["before_bytes"])},
+                               {"label": f"Time travel after ({_m['after_days']} days)",
+                                "value": "—" if _m["after_bytes"] is None else humanize_bytes(_m["after_bytes"])}]
+                    else:
+                        _mk = [{"label": "Before / day",
+                                "value": ("—" if _m["before_per_day"] is None
+                                          else format_usd(_m["before_per_day"] * rate)),
+                                "help": "Credits per day (warehouse, or the object's maintenance) over the 14 "
+                                        "days before the booking, priced at the credit rate."},
+                               {"label": f"After / day ({_m['after_days']} days)",
+                                "value": ("—" if _m["after_per_day"] is None
+                                          else format_usd(_m["after_per_day"] * rate))}]
+                    _mk.append({"label": "Measured saving / mo", "value": _saving,
+                                "severity": "ok" if _measured and _m["monthly_usd"] > 0 else "",
+                                "help": "(before per day - after per day) x 30 days, priced. A negative "
+                                        "figure means the level rose; the prefill is then 0."})
+                    if _basis == "WAREHOUSE":
+                        _mk.append({"label": "Volume ×",
+                                    "value": ("—" if _m["volume_ratio"] is None
+                                              else f"{_m['volume_ratio']:.2f}x"),
+                                    "severity": "warn" if _m["confounded"] else "",
+                                    "help": "Queries per day after vs before. Outside 0.7-1.3x the saving "
+                                            "is volume-confounded (disclosed, not adjusted)."})
+                    kpi_row(_mk)
+                    st.caption(md_dollars(_m["note"] + (" It prefills the amount below and never "
+                                                        "overwrites an edit you make." if _measured
+                                                        else " Enter the verified amount by hand.")))
+                _sig_now = str(st.session_state.get("_ow_ledger_prefill_sig") or "")
+                if _measured and _m is not None:
+                    _sig = f"{_item}|{_m['prefill_usd']:.2f}"
+                    if _sig_now != _sig:
+                        st.session_state["_ow_ledger_prefill_sig"] = _sig
+                        st.session_state["ledger_verified_usd"] = float(_m["prefill_usd"])
+                elif _sig_now and not _sig_now.startswith(f"{_item}|"):
+                    # another item's measured prefill must not carry over to this unmeasured one
+                    st.session_state["_ow_ledger_prefill_sig"] = ""
+                    st.session_state["ledger_verified_usd"] = 0.0
                 verified_usd = st.number_input(
                     "Verified USD per month (measured, post-period)",
                     min_value=0.0, step=50.0, key="ledger_verified_usd",
@@ -1970,10 +2073,20 @@ def _savings_tab() -> None:
                          "total over the measured window to a monthly figure.")
                 check = {"STATE": row["STATE"], "PROOF_SQL": row["PROOF_SQL"], "VERIFIED_USD": verified_usd}
                 allowed, why = can_verify(check)
+                _proof_set = ""
+                if _measured and _m is not None:
+                    import hashlib
+                    _qid = str(st.session_state.get(f"_ow_proof_qid_{_item}") or "")
+                    _proof_json = proof_result_json(
+                        _m, target=_tgt, basis=str(_basis), entered_usd=safe_float(verified_usd),
+                        sql_hash=hashlib.sha1(_msql.encode()).hexdigest()[:16])
+                    _proof_set = (f",\n    PROOF_QUERY_ID = {sql_literal(_qid, 80) if _qid else 'NULL'}, "
+                                  f"PROOF_RESULT = {sql_literal(_proof_json, 16000)}, "
+                                  "PROOF_RUN_AT = CURRENT_TIMESTAMP()")
                 update_sql = (
                     f"UPDATE {core_object('SAVINGS_LEDGER')}\n"
                     f"SET STATE = 'VERIFIED', VERIFIED_USD = {sql_number(verified_usd)}, "
-                    f"VERIFIED_AT = CURRENT_TIMESTAMP(), VERIFIED_BY = {identity_sql()}\n"
+                    f"VERIFIED_AT = CURRENT_TIMESTAMP(), VERIFIED_BY = {identity_sql()}{_proof_set}\n"
                     # codex#26: guard on STATE so a stale/concurrent page (the row was already
                     # VERIFIED or REJECTED after this page rendered) no-ops instead of
                     # overwriting a settled amount. Verification is now conditional/idempotent.

@@ -1225,14 +1225,15 @@ def run(
             df = df.head(cap)
         elapsed = (time.perf_counter() - started) * 1000
         import hashlib as _hashlib
+        _qid = "" if cache_hit else _LAST_QUERY_ID.get()
         _telemetry(page, tier, key, elapsed, len(df), ok=True,
                    cache_hit=cache_hit,
                    sql_hash=_hashlib.sha1(sql.encode()).hexdigest()[:16],
                    truncated=truncated,
-                   query_id=("" if cache_hit else _LAST_QUERY_ID.get()))
+                   query_id=_qid)
         return QueryResult(
             df=df, ok=True, truncated=truncated, source=source, tier=tier,
-            fetched_at=datetime.now(), cache_hit=cache_hit, elapsed_ms=elapsed,
+            fetched_at=datetime.now(), cache_hit=cache_hit, elapsed_ms=elapsed, query_id=_qid,
         )
     except Exception as exc:
         elapsed = (time.perf_counter() - started) * 1000
