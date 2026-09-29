@@ -141,8 +141,9 @@ the monthly OPS_ALERT_DRILL CRITICAL escalates too; the escalation email is not 
     whole credit, over a fixed 90-day history rather than the page Window, with a walk-forward back-test of the days
     and USD they would have held back (no day sets its own limit). Runaway-rule days replay COST_AI_USER_RUNAWAY's
     test, locked to arm [28] by `tests/test_ai_runaway_parity.py`. It reuses the Cortex Code frame the tab already
-    loads (no new read) and is company-scoped. OVERWATCH creates no quota; quotas are set in Snowsight. The old "No
-    per-user AI credit quota is enforcing here" claim is replaced by the exposure numbers.
+    loads (no new read) and is company-scoped. OVERWATCH creates no quota; quotas are set in Snowsight. The no-blocks
+    "AI exposure" caption (4.601.1) adds the back-test figure and points at the table, and the table renders whatever
+    the block read returned, a failed read included.
   - Alerts > Native delivery states the escalation policy with its live values and the last 7 days of escalations,
     with a warning on pass or email failures (one read, in that lazy section, once V164 is applied); it says an
     incident stops the escalation only when acknowledged, mitigated or closed after the alert joined it. The routing
@@ -212,6 +213,31 @@ the monthly OPS_ALERT_DRILL CRITICAL escalates too; the escalation email is not 
   `test_digest_grounding` and `test_digest_render_shaped`. Deliberate lock moves: test_v157's definer count and
   tally (now derived), test_v160's latest-body lock (V163's body keeps V160's [25] block byte-identically) and the
   history lock `test_design_wave` rec2 (re-anchored on the digest expander, still below Asks and collapsed).
+
+## 4.601.1 - Per-user AI-quota blocks read the real view columns (2026-09-29)
+
+App-only fix, no migration.
+
+- **Per-user AI-quota blocks were never shown (fixed).** Cost ▸ AI chargeback ▸ Per-user AI quotas & blocks read
+  `SNOWFLAKE.ACCOUNT_USAGE.QUOTA_ACCESS_BLOCK_HISTORY` windowed and ordered on `CREATED_ON`, a column the view does
+  not have, so every read failed with "invalid identifier 'CREATED_ON'". The read is a probe (the view is absent on
+  accounts without per-user quotas), so the failure was never logged, and the panel fell through to "No per-user
+  AI-quota blocks" and "No per-user AI credit quota is enforcing here" -- on an account where a user had been
+  blocked. Since v4.543.0.
+  - The read now windows and orders on `ACTION_AT`. The view's columns, taken from the account's own data
+    preview: ACTION_AT, QUOTA_ID, QUOTA_NAME, USER_ID, USER_NAME, CYCLE, ACTION, PER_USER_LIMIT, CREDITS and
+    BLOCKED_UNTIL.
+  - The block table shows the user, quota, cycle, action, credits against the per-user limit, when the block was
+    recorded and when it ends. "AI-quota blocks" counts ACTION = BLOCKED rows.
+  - "Currently blocked" is a user whose latest action on a quota is a block that runs past now (BLOCKED_UNTIL, the
+    start of the quota's next cycle, on the account clock). The old rule ("no release timestamp") could never
+    apply to this view. It is judged over the last 32 days whatever the Window, so a user blocked today still
+    shows under "Last month" (the window's blocks drive the counts and the table; with none in the window, the
+    table lists the blocks still in force).
+  - A failed read now says the block history could not be read, never "no blocks"; a view the app cannot see is
+    a setup note, not an error. The 1,000-row read cap is disclosed when it binds.
+  - The no-blocks caption no longer claims that no quota is enforcing; it states the window's AI exposure.
+- **Owner-side.** `snow streamlit deploy --replace`. No migration.
 
 ## 4.601.0 - Timeout posture, scale-out vs size-up, tonight's projected finish, measured outcomes, unread maintenance, triage Track (2026-09-29)
 
