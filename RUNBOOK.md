@@ -376,7 +376,8 @@ can open it, including EXECUTIVE. Old Decision Studio links, saved views and
     SQL aggregates; realization and the counts come from the newest ≤5,000
     ledger rows (disclosed when that cap binds).
   - Reverts (v4.600): a booked warehouse change (size, auto-suspend, max
-    clusters, scaling policy) that a later change made costlier leaves the
+    clusters, scaling policy) that a later change made costlier (or whose
+    co-attributed partner, seen by the same scan, was undone) leaves the
     run-rate, Added this quarter, the ROI multiple, the attribution split and
     the Brief tile on the first render after the daily scan sees it. It is
     flagged in the evidence table and listed under Reverted savings. Items

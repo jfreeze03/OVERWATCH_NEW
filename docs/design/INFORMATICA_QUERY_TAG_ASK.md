@@ -12,7 +12,8 @@ window**, because every `QUERY_TAG` on the nightly cycle is blank. That link:
 
 - misses mapping (`M_*`) tasks, which send their SQL directly instead of calling a procedure;
 - misses a task whose `CONTROL_STATUS.TASK_NAME` differs from the procedure it calls;
-- can confuse two runs of the same procedure that overlap in time;
+- can confuse two runs of the same procedure that overlap in time (or the same procedure in another environment's
+  database — OVERWATCH prefers CONTROL_STATUS's own database, but only the tag is exact);
 - caps the cost attribution on Pipeline SLA ▸ Performance, which keeps an "(unattributed)" remainder.
 
 One session tag makes all of these exact.
