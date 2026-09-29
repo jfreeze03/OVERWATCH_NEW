@@ -844,6 +844,9 @@ _SETTING_EDITORS: dict[str, tuple[str, object]] = {
     "FACT_RETENTION_DAYS_DAILY": (_NUM, {"min_value": 1.0, "step": 1.0}),
     "ERROR_LOG_RETENTION_DAYS": (_NUM, {"min_value": 1.0, "step": 1.0}),
     "APP_USAGE_RETENTION_DAYS": (_NUM, {"min_value": 1.0, "step": 1.0}),
+    # V164 escalation: whole minutes, 0 = off. ESCALATE_EMAIL_INTEGRATION keeps the generic text input (an
+    # integration NAME; blank = no email leg).
+    "ESCALATE_AFTER_MIN": (_NUM, {"min_value": 0.0, "step": 15.0}),
 }
 
 

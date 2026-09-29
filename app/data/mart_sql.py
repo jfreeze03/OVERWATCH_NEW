@@ -3157,6 +3157,47 @@ LIMIT 50
 """
 
 
+# V164 (Next-Fifty #40): the escalation knobs exactly as SP_NOTIFY_WEBHOOK reads them -- an absent row falls back
+# to the same default, and minutes parse like the proc's COALESCE(TRY_TO_NUMBER(TRIM(v)), 0), so the policy line
+# on Alerts > Native delivery states what the notifier will actually do (tests/test_escalation_delivery.py pins
+# these to the LATEST SP_NOTIFY_WEBHOOK body, so a later re-derivation cannot drift from them silently).
+ESCALATE_AFTER_MIN_SQL = ("COALESCE(TRY_TO_NUMBER(TRIM(COALESCE(MAX(IFF(KEY = 'ESCALATE_AFTER_MIN', VALUE, NULL)), "
+                          "'120'))), 0)")
+ESCALATE_EMAIL_SQL = "COALESCE(MAX(IFF(KEY = 'ESCALATE_EMAIL_INTEGRATION', VALUE, NULL)), 'OVERWATCH_EMAIL')"
+
+
+def escalation_summary(days: int = 7) -> str:
+    """V164 (Next-Fifty #40): ONE row for the Native delivery escalation line -- the effective policy (the two
+    SETTINGS knobs, parsed like the proc) and the last ``days`` of escalations.
+
+    Escalations are counted from ALERT_AUDIT ACTION = 'ESCALATE' (one row per escalated event, written by
+    SP_NOTIFY_WEBHOOK just before it stamps ALERT_EVENTS.ESCALATED_AT), never from the ESCALATED_AT column: every
+    table read here exists before V164 is applied, so the Admin canary stays green on either side of the apply.
+    Failures come from APP_ERROR_LOG: escalation_failed (the pass itself) and escalation_email_failed (the email
+    leg; a Teams re-post failure is a route_send_failed row the delivery card already attributes to its route).
+    Reads only OVERWATCH-owned tables; no ACCOUNT_USAGE."""
+    days = bounded_days(days, 90)
+    return f"""
+SELECT
+    (SELECT COUNT(*) FROM {core_object("ALERT_AUDIT")}
+      WHERE ACTION = 'ESCALATE'
+        AND ACTED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())) AS ESCALATED_COUNT,
+    (SELECT MAX(ACTED_AT) FROM {core_object("ALERT_AUDIT")}
+      WHERE ACTION = 'ESCALATE') AS LAST_ESCALATED_AT,
+    (SELECT COUNT_IF(ERROR_TYPE = 'escalation_failed') FROM {core_object("APP_ERROR_LOG")}
+      WHERE PAGE = 'NotifyWebhook'
+        AND LOGGED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())) AS PASS_FAILURES,
+    (SELECT COUNT_IF(ERROR_TYPE = 'escalation_email_failed') FROM {core_object("APP_ERROR_LOG")}
+      WHERE PAGE = 'NotifyWebhook'
+        AND LOGGED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())) AS EMAIL_FAILURES,
+    (SELECT {ESCALATE_AFTER_MIN_SQL} FROM {core_object("SETTINGS")}
+      WHERE KEY IN ('ESCALATE_AFTER_MIN', 'ESCALATE_EMAIL_INTEGRATION')) AS AFTER_MIN,
+    (SELECT TRIM({ESCALATE_EMAIL_SQL}) FROM {core_object("SETTINGS")}
+      WHERE KEY IN ('ESCALATE_AFTER_MIN', 'ESCALATE_EMAIL_INTEGRATION')) AS EMAIL_INTEGRATION_NAME,
+    {days} AS WINDOW_DAYS
+"""
+
+
 def deliveries_for_event(event_id: str) -> str:
     """rec38: the per-route delivery rows for ONE event — 'did THIS page reach
     anyone, on which integration, when'. LEFT JOIN routes so an unmatched route

@@ -7,6 +7,10 @@
 --   V012: SP_NOTIFY_WEBHOOK (route-aware sender) + ALERT_ROUTES
 --   V018: TASK_ALERT_NOTIFY chained AFTER the scan + guarded auto-resume
 --         + morning-digest delivery through the same route
+--   V164: actionable lines ('[SEV] title | company | detail | event <id>') + a one-time
+--         CRITICAL escalation (SETTINGS ESCALATE_AFTER_MIN / ESCALATE_EMAIL_INTEGRATION):
+--         re-posted to the route(s) that delivered it, emailed via OVERWATCH_EMAIL's
+--         DEFAULT_RECIPIENTS (recipe at the end of this file)
 --
 -- Run as ACCOUNTADMIN, paste your Slack/Teams webhook URL, then re-run
 -- V018 (or just: ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_ALERT_NOTIFY RESUME;)
@@ -70,5 +74,19 @@
 -- Routes are additive: an event can match several and each send is isolated
 -- — one bad channel never blocks the others. Disable a route by flipping
 -- ENABLED, no deploy needed.
+
+-- ---------------------------------------------------------------------------
+-- V164 CRITICAL escalation email (optional; Teams re-post works without it).
+-- SP_NOTIFY_WEBHOOK emails an unacknowledged CRITICAL through the integration
+-- named in SETTINGS ESCALATE_EMAIL_INTEGRATION (default OVERWATCH_EMAIL, the
+-- email integration of docs/EMAIL_RECIPIENT_RUNBOOK.md). It sends to that
+-- integration's DEFAULT_RECIPIENTS -- no address lives in OVERWATCH. Set it
+-- ONCE in Snowsight (normally the same list as ALLOWED_RECIPIENTS), replacing
+-- the placeholder there, never here -- an address in this file lands in git:
+-- ALTER NOTIFICATION INTEGRATION OVERWATCH_EMAIL SET
+--     DEFAULT_RECIPIENTS = ('<recipient>')
+--     DEFAULT_SUBJECT = 'OVERWATCH escalation';
+-- No email leg: Admin > Settings, ESCALATE_EMAIL_INTEGRATION blank.
+-- No escalation at all: Admin > Settings, ESCALATE_AFTER_MIN 0.
 
 ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_ALERT_NOTIFY RESUME;
