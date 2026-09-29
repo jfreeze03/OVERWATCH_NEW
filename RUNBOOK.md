@@ -465,8 +465,17 @@ evidence rows only, hard row/char caps, "answer only from the evidence",
 required "inconclusive" escape, word limits.
 
 - **Morning digest** — SP_DAILY_DIGEST (07:20) summarizes exec-board facts
-  + alert counts into DAILY_DIGEST; shown in an Overview expander. If
-  Cortex is unavailable the digest row says so instead of failing.
+  + alert counts into DAILY_DIGEST; shown in the Brief and Overview
+  expanders. Since V165 every figure in the Cortex draft is checked against
+  the FACTS it was given (stored on the row with GROUNDING_OK,
+  FIGURES_CHECKED and UNGROUNDED); when any figure does not match, or Cortex
+  fails, a templated digest built only from the facts is written and sent
+  instead, labelled "not AI-written" (BODY_SOURCE = TEMPLATE; the draft stays
+  in AI_BODY, never sent). A Cortex failure also logs `digest_ai_failed` to
+  APP_ERROR_LOG. The sent text is JSON-escaped like the alert sender. The
+  proc's RETURN names the version: `digest written (AI|TEMPLATE[; ...]); sent
+  N/M routes`. A frequent TEMPLATE means the model states derived numbers:
+  read UNGROUNDED, then consider CORTEX_MODEL.
 - **Evaluation panels** — button-gated "AI evaluation" on release compare,
   task failures, etc.; never auto-run.
 - **Pre-explained anomalies** — sweep v3 appends a grounded hypothesis to
@@ -728,7 +737,7 @@ Snowflake release note that mentions ACCOUNT_USAGE, and after migrations.
 | CREDENTIALS view absent | Credentials panel shows setup hint; scan block yields no rows |
 | ORGANIZATION_USAGE not granted | Org spend tab shows the grant hint, nothing else breaks |
 | TRUST_CENTER not granted | Trust Center section shows the grant hint |
-| Cortex/model unavailable | Digest row says so; AI panels surface the error; nothing else breaks |
+| Cortex/model unavailable | The morning digest sends the templated facts digest and logs `digest_ai_failed` (V165); AI panels surface the error; nothing else breaks |
 | FORECAST_ML_DAILY absent | Forecast engine silently uses seasonal, basis string says so |
 | Webhook integration missing | SP_NOTIFY_WEBHOOK returns a friendly failure; per-route errors log to APP_ERROR_LOG; events stay queued (NOTIFIED_AT null) |
 | ALTER SESSION unsupported (SiS) | SiS stamps its own app QUERY_TAG on every statement (self-traffic keys on it); the warehouse-level timeout is the backstop for reads; Cortex also sends a 90s per-statement timeout |

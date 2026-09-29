@@ -31,8 +31,15 @@ def test_rec14_export_filename_is_page_scoped():
 def test_rec2_brief_narrative_below_asks_and_collapsed():
     b = _src("app/ui/pages/brief.py")
     # rec22: "Asks" is a section_header now, not bold-markdown.
-    assert b.index('section_header("Asks"') < b.index("AI morning narrative")   # narrative moved down
-    assert 'expanded=False' in b.split("AI morning narrative", 1)[1][:80]
+    # Wave 4 (V165, Next-Fifty #24) DELIBERATELY re-anchors this lock: the digest title is now the MEASURED
+    # provenance (app/logic/digest_grounding.digest_provenance: "AI morning narrative" or "Morning digest
+    # (templated, not AI-written)"), so the lock follows the digest expander call itself -- still below Asks,
+    # still collapsed.
+    from app.logic.digest_grounding import AI_TITLE
+    assert AI_TITLE == "AI morning narrative"
+    exp = b.index('with st.expander(f"{prov.title}')
+    assert b.index('section_header("Asks"') < exp            # narrative moved down
+    assert 'expanded=False' in b[exp:exp + 100]
 
 
 # rec18 — micro-label floor raised off ~10.6-11.5px
