@@ -221,6 +221,19 @@ def test_workflow_runtimes_scan_collapses_retries_and_drops_null_start() -> None
     assert "MAX(COALESCE(s.TASK_END_DTTM, CURRENT_TIMESTAMP())))" in sql
 
 
+def test_workflow_runtimes_scan_projects_its_run() -> None:
+    """Review F22: the table's own RUN_ID (one run by construction), as text, so the task-evidence drill binds
+    THIS run instead of re-deriving 'the latest run' at a later time than the cached table."""
+    sql = etl.workflow_runtimes_scan(_CTRL, workflow="WF_X", days=7)
+    assert "       MAX(s.RUN_ID)::VARCHAR AS RUN_ID\n" in sql
+    assert "JOIN latest l ON s.RUN_ID = l.RUN_ID" in sql              # still exactly the latest run
+    assert "GROUP BY s.WORKFLOW_NAME, s.TASK_NAME\n" in sql           # one row per task, unchanged grain
+    sqlglot = pytest.importorskip("sqlglot")
+    cols = sqlglot.parse_one(sql, read="snowflake").named_selects
+    assert cols == ["WORKFLOW_NAME", "TASK_NAME", "TASK_STATUS", "TASK_START_DTTM", "TASK_END_DTTM",
+                    "RUNTIME_SEC", "RUN_ID"]
+
+
 def test_workflow_runtimes_scan_honors_window() -> None:
     # days > 0 bounds the run to the scope-bar Window; days <= 0 adds no window filter
     assert "TASK_START_DTTM >= DATEADD('day', -7, CURRENT_TIMESTAMP())" in \
@@ -760,6 +773,34 @@ def test_task_evidence_scan_matches_the_exact_procedure_name() -> None:
     assert "TASK_NAME = 'DB.SCH.\"sp_x\"'" in quoted          # CONTROL_STATUS still matched verbatim
 
 
+def test_task_evidence_scan_prefers_the_control_status_database() -> None:
+    """Review F11: every EDW environment deploys the same proc names, so the CALL's database is resolved
+    (3-part target, else the session's database) and CONTROL_STATUS's own database wins when any CALL ran
+    there — a window MAX inside `calls`, so the window totals cover only the kept CALLs."""
+    sql = etl.run_task_evidence_scan(_CTRL, task="SP_D_PLCY")
+    assert ("REPLACE(REGEXP_SUBSTR(UPPER(qh.QUERY_TEXT),\n          'CALL[[:space:]]+([A-Z0-9_.$\"]+)', 1, 1, "
+            "'e', 1), '\"', '') AS CALL_TARGET") in sql
+    assert "UPPER(qh.DATABASE_NAME) AS SESSION_DATABASE" in sql
+    assert ("NULLIF(IFF(ARRAY_SIZE(SPLIT(h.CALL_TARGET, '.')) = 3, SPLIT_PART(h.CALL_TARGET, '.', 1),\n"
+            "                    h.SESSION_DATABASE), '') AS CALL_DATABASE") in sql
+    calls = sql.split("\ncalls AS (\n", 1)[1].split("\n),\n", 1)[0]
+    assert "FROM call_db d" in calls
+    assert ("QUALIFY d.CALL_DATABASE = 'ALFA_EDW_PRD'\n"
+            "       OR MAX(IFF(d.CALL_DATABASE = 'ALFA_EDW_PRD', 1, 0)) OVER () = 0") in calls
+    # the window totals read the filtered CTE (never call_hits / call_db)
+    final = sql.rsplit("\nSELECT b.T_START", 1)[1]
+    assert "LEFT JOIN calls c ON 1 = 1" in final and "call_db" not in final and "call_hits" not in final
+    assert "COUNT(c.QUERY_ID) OVER () AS MATCHED_CALLS" in final
+    assert "c.WAREHOUSE_NAME, c.CALL_DATABASE, 'ALFA_EDW_PRD' AS CONTROL_DATABASE," in final
+    # the child link keys on the kept CALLs only
+    assert "  FROM calls c\n  JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY k\n" in sql
+    # a non-3-part FQN states no database: '' (which no NULLIF'd CALL_DATABASE can equal) -> every CALL kept
+    two = etl.run_task_evidence_scan("PUBLIC.CONTROL_STATUS", task="SP_D_PLCY")
+    assert "QUALIFY d.CALL_DATABASE = ''\n" in two and "'' AS CONTROL_DATABASE" in two
+    # the FQN's database is upper-cased like Snowflake folds an unquoted identifier
+    assert "= 'ALFA_EDW_SIT'\n" in etl.run_task_evidence_scan("alfa_edw_sit.public.control_status", task="SP_X")
+
+
 def test_task_evidence_scan_children_share_the_call_session() -> None:
     sql = etl.run_task_evidence_scan(_CTRL, task="SP_D_PLCY")
     assert "ON k.SESSION_ID = c.SESSION_ID" in sql
@@ -824,7 +865,8 @@ def test_task_evidence_scan_columns_humanize() -> None:
         "CALL_QUEUED_MS": "ms", "QUEUED_OVERLOAD_MS": "ms", "QUEUED_PROVISIONING_MS": "ms", "COMPILE_MS": "ms",
         "EXEC_MS": "ms", "CHILD_ELAPSED_MS": "ms"}
     assert _byte_unit_for_column("SPILL_LOCAL_GB") and _byte_unit_for_column("SPILL_REMOTE_GB")
-    assert {"SPILL_LOCAL_GB", "SPILL_REMOTE_GB", "QUEUED_PCT", "CALL_QUERY_ID"} <= set(cols)
+    assert {"SPILL_LOCAL_GB", "SPILL_REMOTE_GB", "QUEUED_PCT", "CALL_QUERY_ID", "CALL_DATABASE",
+            "CONTROL_DATABASE"} <= set(cols)
 
 
 def test_task_evidence_scan_parses() -> None:

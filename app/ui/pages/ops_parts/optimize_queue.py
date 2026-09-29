@@ -68,6 +68,11 @@ _OPEN_STATUS = "Tracked (open)"
 _UNKNOWN_STATUS = "Unknown"      # the tracked-actions read failed (review r2)
 
 
+def _short_fp(fingerprint: str) -> str:
+    """A deep-linked fingerprint as shown in a notice: its first 12 characters, '…' only when cut."""
+    return fingerprint[:12] + ("…" if len(fingerprint) > 12 else "")
+
+
 def _open_entity(fingerprint: str) -> None:
     request_navigation("Control Room", "Entity 360",
                        context={"entity_type": "QUERY_FINGERPRINT", "entity_key": fingerprint})
@@ -118,7 +123,22 @@ def render_optimize(company: str, days: int, rate: float, *, bounds: tuple | Non
                                                      key="ops_opt_watchlist", tier="recent",
                                                      source="USER_WATCHLIST"))
                if _viewer else None)
+    # #28 (review F23): split an EMPTY queue from a FAILED read before the guard. A failed read keeps a
+    # deep link for the next rerun (the guard returns before the consume below); an empty queue can list
+    # no family, so consume the link here and say why the family is not here. Both keys go: a leftover
+    # live_profile would switch the live scan on after a later Company/Window change, unasked.
+    _empty_link_fp = ""
+    if result.ok and result.empty:
+        _arr = st.session_state.get("_ow_nav_context")
+        if isinstance(_arr, dict) and ("fingerprint" in _arr or "live_profile" in _arr):
+            _empty_link_fp = str(_arr.get("fingerprint") or "").strip()
+            st.session_state["_ow_nav_context"] = {k: v for k, v in _arr.items()
+                                                   if k not in ("fingerprint", "live_profile")}
     if not guard(result, "No measured recurring-query cost exists in this scope."):
+        if _empty_link_fp:
+            empty_state("no_data_yet", f"Query family {_short_fp(_empty_link_fp)} is not in this fix queue: no "
+                        "query family has attributed warehouse credits in the daily marts for this Company "
+                        "and Window. Its live QOP breakdown stays on Operations ▸ Queries.")
         return
     # W12: divide by the window's real day SPAN. Current month / Current year resolve `days` to a
     # day OFFSET (Aug 3 MTD = 2), so dividing by it overstated the 30-day normalization.
@@ -296,15 +316,15 @@ def render_optimize(company: str, days: int, rate: float, *, bounds: tuple | Non
     _ctx_fp = str(navigation_context().get("fingerprint") or "").strip()
     _preselect = resolve_deep_link(_ctx_fp, portfolio["FINGERPRINT"])
     if _ctx_fp:   # deliver a deep-link fingerprint ONCE per arrival — found OR not, so an unqueued family
-        #           never lingers to re-preselect after a later Window change. (A failed queue read returned
-        #           at the guard above, before this, so the link survives for the next rerun.)
+        #           never lingers to re-preselect after a later Window change. (A FAILED queue read returned
+        #           at the guard above, before this, so the link survives for the next rerun; an EMPTY queue
+        #           consumed it there, with its own explanation.)
         _nav = st.session_state.get("_ow_nav_context")
         if isinstance(_nav, dict) and _nav.get("fingerprint"):
             st.session_state["_ow_nav_context"] = {k: v for k, v in _nav.items() if k != "fingerprint"}
     _missing = ""
     if _ctx_fp and not _preselect:
-        _short = _ctx_fp[:12] + ("…" if len(_ctx_fp) > 12 else "")
-        _missing = (f"Query family {_short} is not in this fix queue, which lists "
+        _missing = (f"Query family {_short_fp(_ctx_fp)} is not in this fix queue, which lists "
                     + (f"the top {_QUEUE_CAP} " if len(portfolio) >= _QUEUE_CAP else "")
                     + "families with attributed warehouse credits in the daily marts for this Company and "
                       "Window. Metadata chatter and very short statements carry no attributed credits, and a "

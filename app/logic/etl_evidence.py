@@ -29,7 +29,7 @@ INFORMATICA_SIDE_SENTENCE = (
 _TAG_ASK_DOC = "docs/design/INFORMATICA_QUERY_TAG_ASK.md"
 _GIB = 1024 ** 3
 _DISPLAY_COLUMNS = (
-    "CALL_START_TIME", "EXECUTION_STATUS", "ERROR_CODE", "ERROR_MESSAGE", "WAREHOUSE_NAME",
+    "CALL_START_TIME", "EXECUTION_STATUS", "ERROR_CODE", "ERROR_MESSAGE", "CALL_DATABASE", "WAREHOUSE_NAME",
     "CALL_ELAPSED_MS", "CALL_QUEUED_MS", "CHILD_STATEMENTS", "FAILED_CHILD_STATEMENTS", "QUEUED_PCT",
     "QUEUE_WAREHOUSE", "QUEUED_OVERLOAD_MS", "QUEUED_PROVISIONING_MS", "COMPILE_MS", "EXEC_MS",
     "SPILL_LOCAL_GB", "SPILL_REMOTE_GB", "CHILD_ERROR_MESSAGE", "FAILED_CHILD_QUERY_ID", "CALL_QUERY_ID",
@@ -102,6 +102,15 @@ def task_first_start(df: pd.DataFrame | None, task: str) -> date | None:
     return min(starts) if starts else None
 
 
+def evidence_run_id(df: pd.DataFrame | None) -> str:
+    """The RUN_ID a task table shows (workflow_runtimes_scan projects one run on every row), as text for
+    run_task_evidence_scan's ``run_id``; "" when the frame has none, so the drill falls back to the
+    latest-run predicates."""
+    if df is None or df.empty or "RUN_ID" not in df.columns:
+        return ""
+    return _txt(df["RUN_ID"].iloc[0], "")
+
+
 def _task_frame(df: pd.DataFrame | None, failed_statuses: Collection[str]) -> pd.DataFrame:
     """One row per task: _N name, _F any attempt failed (0/1), _R slowest attempt (sec), _A attempts."""
     if df is None or df.empty or "TASK_NAME" not in df.columns:
@@ -128,15 +137,17 @@ def evidence_task_options(df: pd.DataFrame | None, failed_statuses: Collection[s
 
 
 def evidence_task_labels(df: pd.DataFrame | None, failed_statuses: Collection[str]) -> dict[str, str]:
-    """Picker labels keyed by task name: 'NAME · failed · 12m 3s · 2 attempts' (parts only when true)."""
+    """Picker labels keyed by task name: 'NAME · failed · 2 attempts' (parts only when true).
+
+    No runtime (review F12/F20): a running task's RUNTIME_SEC is measured to now, so it changes on every
+    5-minute cache refresh, and on SiS's streamlit 1.52 a changed option label re-creates the selectbox,
+    which snaps the pick back to the first task. The runtime stays in the table above."""
     out: dict[str, str] = {}
     for rec in _task_frame(df, failed_statuses).itertuples(index=False):
-        name, failed, runtime, attempts = str(rec[0]), int(rec[1]), float(rec[2]), int(rec[3])
+        name, failed, attempts = str(rec[0]), int(rec[1]), int(rec[3])
         bits = [name]
         if failed:
             bits.append("failed")
-        if runtime > 0:
-            bits.append(humanize_duration(runtime, "s"))
         if attempts > 1:
             bits.append(f"{attempts} attempts")
         out[name] = " · ".join(bits)
@@ -176,12 +187,16 @@ def task_evidence_lines(df: pd.DataFrame | None, *, task: str) -> list[EvidenceL
     """The drill's findings for ``task``, most important first.
 
     Branches, in order: (1) no CONTROL_STATUS rows; (2) no matching CALL (lag-hedged inside
-    QH_LAG_MIN, else the M_* / QUERY_TAG hint); (3) a failed CALL — an error when the newest attempt
-    failed, a warning when a later attempt succeeded; (4) a successful CALL whose statements failed;
-    (5) CONTROL_STATUS says failed but no Snowflake CALL or statement did — the exact Informatica-side
-    sentence, hedged inside QH_LAG_MIN; (6) where the newest CALL's time went (queued, spill,
-    compile, time outside Snowflake from the SQL window totals); (7) clean when nothing above warned
-    and the task did not fail."""
+    QH_LAG_MIN, else the M_* / QUERY_TAG hint); (3) a failed CALL — an error (naming the CALL's
+    database) when the newest attempt failed, a warning when a later attempt succeeded, followed by the
+    newest CALL's own reading (its caught statement failures, or, for a task CONTROL_STATUS still failed,
+    the Informatica side — hedged inside QH_LAG_MIN and when none of its statements were visible);
+    (4) a successful CALL whose statements failed; (5) CONTROL_STATUS says failed but no Snowflake CALL
+    or statement did — the exact Informatica-side sentence only when every CALL is listed and every
+    CALL's statements were seen, else a hedge; then a warning when no matched CALL ran in
+    CONTROL_STATUS's own database (a same-named procedure in another environment); (6) where the newest
+    CALL's time went (queued, spill, compile, and — outside QH_LAG_MIN only — time outside Snowflake
+    from the SQL window totals); (7) clean when nothing above warned and the task did not fail."""
     name = str(task or "").strip() or "this task"
     if df is None or df.empty:
         return [EvidenceLine("no_data_yet",
@@ -213,19 +228,50 @@ def task_evidence_lines(df: pd.DataFrame | None, *, task: str) -> list[EvidenceL
     n_calls = int(safe_float(first.get("MATCHED_CALLS"), default=float(len(calls))))
     n_failed = int(safe_float(first.get("FAILED_CALLS"), default=float(len(failed_calls))))
     kid_failed = calls[_is_set(calls, "FAILED_CHILD_STATEMENTS")]
+    # a hedge below already says the CALL's statements were not visible (the separate
+    # 'No statements were found' line would only repeat it)
+    blind_hedged = False
+    too_many = (f"{n_calls:,} CALLs of {name} matched, more than this drill lists — too many to rule out a "
+                "failed statement; open them in Operations ▸ Queries.")
     if n_failed > 0 or not failed_calls.empty:
         f = failed_calls.iloc[0] if not failed_calls.empty else latest
         err = _txt(f.get("ERROR_MESSAGE"), "") or _txt(f.get("CHILD_ERROR_MESSAGE"), "") \
             or "no error text recorded"
         if safe_float(latest.get("IS_CALL_FAILED")) > 0:
+            _db = _txt(f.get("CALL_DATABASE"), "")
             out.append(EvidenceLine(
                 "error", f"Failed: {err[:300]} (error {_code(f.get('ERROR_CODE'))}) — the Snowflake CALL of "
-                         f"{name} on {_txt(f.get('WAREHOUSE_NAME'))} at {_when(f.get('CALL_START_TIME'))}. "
-                         "Open its query profile below."))
+                         f"{name}{f' in {_db}' if _db else ''} on {_txt(f.get('WAREHOUSE_NAME'))} at "
+                         f"{_when(f.get('CALL_START_TIME'))}. Open its query profile below."))
         else:
             out.append(EvidenceLine(
                 "warn", f"Failed then retried: {max(n_failed, len(failed_calls)):,} of {max(n_calls, 1):,} "
                         f"CALL attempt(s) of {name} failed ({err[:200]}); the latest attempt succeeded."))
+            # review F15: the retry succeeding is not the end of it — judge the newest CALL on its own
+            n_kid_latest = int(safe_float(latest.get("FAILED_CHILD_STATEMENTS")))
+            if n_kid_latest > 0:
+                out.append(EvidenceLine(
+                    "warn", f"The latest CALL returned success but {n_kid_latest:,} statement(s) inside it "
+                            f"failed ({_txt(latest.get('CHILD_ERROR_MESSAGE'))[:200]}) — the procedure likely "
+                            "caught the error; Informatica may have failed the task on its return value."))
+            elif task_failed and recent:
+                out.append(EvidenceLine(
+                    "no_data_yet", f"CONTROL_STATUS failed the task, but QUERY_HISTORY lags up to "
+                                   f"~{QH_LAG_MIN} min and {_ago}; re-check before concluding where the final "
+                                   "failure was."))
+            elif task_failed and n_calls > len(calls):
+                out.append(EvidenceLine("no_data_yet", too_many))
+            elif task_failed and safe_float(latest.get("CHILD_STATEMENTS")) <= 0:
+                blind_hedged = True
+                out.append(EvidenceLine(
+                    "no_data_yet", "The latest CALL succeeded, but none of its statements were visible in "
+                                   "QUERY_HISTORY, so a failure the procedure caught can't be ruled out; "
+                                   "CONTROL_STATUS still failed the task, so the final failure may be on the "
+                                   "Informatica side."))
+            elif task_failed:
+                out.append(EvidenceLine(
+                    "warn", "The latest CALL succeeded, yet CONTROL_STATUS failed the task — the final "
+                            "failure was likely on the Informatica side."))
     elif not kid_failed.empty:
         k = kid_failed.iloc[0]
         n_kid = int(safe_float(k.get("FAILED_CHILD_STATEMENTS")))
@@ -234,6 +280,7 @@ def task_evidence_lines(df: pd.DataFrame | None, *, task: str) -> list[EvidenceL
                     f"({_txt(k.get('CHILD_ERROR_MESSAGE'))[:200]}) — the procedure likely caught the error; "
                     "Informatica may have failed the task on its return value."))
     elif task_failed:
+        blind = calls[~_is_set(calls, "CHILD_STATEMENTS")]
         if recent:
             out.append(EvidenceLine(
                 "no_data_yet", f"No failed Snowflake CALL yet — QUERY_HISTORY lags up to ~{QH_LAG_MIN} min "
@@ -241,11 +288,31 @@ def task_evidence_lines(df: pd.DataFrame | None, *, task: str) -> list[EvidenceL
                                "side."))
         elif n_calls > len(calls):
             # every CALL must be seen before 'they all succeeded' can be claimed (the rows are capped)
+            out.append(EvidenceLine("no_data_yet", too_many))
+        elif not blind.empty:
+            # review F14/F19: 'the statements it ran succeeded' needs statements SEEN — with none linked, a
+            # failed MERGE the procedure caught (branch 4's case) is indistinguishable from none at all
+            blind_hedged = True
+            lead = (f"The CALL of {name} succeeded, but none of its statements were visible in QUERY_HISTORY"
+                    if len(calls) == 1 else
+                    f"Every CALL of {name} succeeded, but {len(blind):,} of the {len(calls):,} showed no "
+                    "statements in QUERY_HISTORY")
             out.append(EvidenceLine(
-                "no_data_yet", f"{n_calls:,} CALLs of {name} matched, more than this drill lists — too many "
-                               "to rule out a failed statement; open them in Operations ▸ Queries."))
+                "no_data_yet", lead + ", so a failure the procedure caught can't be ruled out; the task's "
+                                      "failure may be on the Informatica side."))
         else:
             out.append(EvidenceLine("warn", INFORMATICA_SIDE_SENTENCE))
+
+    # review F11: the SQL keeps only CONTROL_STATUS's own database when any CALL ran there; when none did,
+    # every name match was kept, so say the evidence is from another database (it may be another environment)
+    ctl_db = _txt(first.get("CONTROL_DATABASE"), "").upper()
+    if ctl_db and "CALL_DATABASE" in calls.columns:
+        dbs = sorted({_txt(v, "").upper() for v in calls["CALL_DATABASE"].tolist()} - {""})
+        if ctl_db not in dbs:
+            out.append(EvidenceLine(
+                "warn", f"No CALL of {name} ran in {ctl_db} (CONTROL_STATUS's database) in this window; the "
+                        f"CALL(s) shown match by procedure name in {', '.join(dbs) or 'an unknown database'} — "
+                        "check that is this environment's run before acting on them."))
 
     # (6) where the newest CALL's Snowflake time went — always evaluated
     qpct = safe_float(latest.get("QUEUED_PCT"))
@@ -273,14 +340,16 @@ def task_evidence_lines(df: pd.DataFrame | None, *, task: str) -> list[EvidenceL
                                         f"statements' Snowflake time ({humanize_duration(compile_ms, 'ms')})."))
     window_sec = safe_float(first.get("TASK_WINDOW_SEC"))
     calls_sec = safe_float(first.get("ALL_CALLS_ELAPSED_MS")) / 1000.0
-    if window_sec >= 60 and 100.0 * calls_sec / window_sec < EVIDENCE_OUTSIDE_PCT:
+    # review F13: an Informatica-side attribution, so lag-gated like the verdict: inside QH_LAG_MIN (a
+    # running task has END_AGE_MIN 0 and a window growing to now) a retry's CALL may not have landed yet
+    if not recent and window_sec >= 60 and 100.0 * calls_sec / window_sec < EVIDENCE_OUTSIDE_PCT:
         out.append(EvidenceLine(
             "warn", f"Most of the task's time was outside Snowflake: its CALL(s) ran "
                     f"{humanize_duration(calls_sec, 's')} of the task's {humanize_duration(window_sec, 's')} "
                     f"window ({100.0 * calls_sec / window_sec:.0f}%) — the rest was Informatica-side (waits, "
                     "data transfer, scheduling)."))
     no_children = safe_float(latest.get("CHILD_STATEMENTS")) <= 0
-    if no_children:
+    if no_children and not blind_hedged:
         out.append(EvidenceLine("no_data_yet", "No statements were found inside the CALL's session — the "
                                                "breakdown covers the CALL alone."))
     # (7) clean only when nothing warned AND CONTROL_STATUS did not fail the task (a failed task inside the
@@ -295,8 +364,9 @@ def task_evidence_lines(df: pd.DataFrame | None, *, task: str) -> list[EvidenceL
 
 def evidence_display_frame(df: pd.DataFrame | None) -> pd.DataFrame:
     """The per-CALL table: rows with a CALL only, in a fixed reading order (the columns present). The
-    task-level helpers (TASK_*, ATTEMPTS, END_AGE_MIN, the window totals, IS_* flags) stay out — they
-    feed the lines above, and a total must never be re-derived from these capped rows."""
+    task-level helpers (TASK_*, ATTEMPTS, END_AGE_MIN, the window totals, IS_* flags, CONTROL_DATABASE)
+    stay out — they feed the lines above, and a total must never be re-derived from these capped rows.
+    CALL_DATABASE stays in: which environment's procedure each CALL was (review F11)."""
     if df is None or df.empty or "CALL_QUERY_ID" not in df.columns:
         return pd.DataFrame(columns=[c for c in _DISPLAY_COLUMNS if df is not None and c in df.columns])
     rows = df[df["CALL_QUERY_ID"].map(lambda v: _txt(v, "") != "")]
