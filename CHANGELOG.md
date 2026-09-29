@@ -133,9 +133,9 @@ the monthly OPS_ALERT_DRILL CRITICAL escalates too; the escalation email is not 
     match the exec-board facts", "Templated, not AI-written: ..." with the unmatched figures and a "Show the
     withheld AI draft" popover, or "Figures not checked" for a digest written before V165 (or before V165 is
     applied). The expander title reads "Morning digest (templated, not AI-written)" for a template, and Overview
-    drops the model name then. The Overview caption and the Brief/Overview source labels claim the figure check
-    only once V165 is applied and the row carries a grounding record; before that the caption keeps its pre-4.602
-    wording.
+    drops the model name then. The Overview caption claims the figure check only once V165 is applied and the row
+    carries a grounding record (before that it keeps its pre-4.602 wording); the Brief/Overview source labels switch
+    once V165 is applied.
   - Cost Intelligence > Chargeback & AI shows "Suggested per-user AI quotas (review only)": a daily limit at each
     user's own p95 active day and a monthly limit at the p95 of their rolling 30-day totals, both rounded up to a
     whole credit, over a fixed 90-day history rather than the page Window, with a walk-forward back-test of the days
@@ -194,12 +194,14 @@ the monthly OPS_ALERT_DRILL CRITICAL escalates too; the escalation email is not 
   - V164: an incident acknowledges an alert only for a human ACK, mitigation or close after the alert joined it;
     a snooze V117 carried onto a re-raise counts as a snooze; route-delivered events fill the batch before
     email-only ones, so an email-only backlog cannot starve a Teams re-post; each channel stamps ESCALATED_AT right
-    after its send, so a later error never re-posts; the email LISTAGG delimiter is a literal newline.
+    after its send, so a later error never re-posts; the email LISTAGG delimiter is a literal newline. Known limit
+    (RUNBOOK section 19): with two or more enabled routes, CRITICALs only a persistently failing route delivered can
+    hold back another route's escalations until they are acknowledged; fix or disable that route.
   - V165: the grounding comparison is `ABS(f - v) <= TOL * 1.000000001` in the proc and the Python mirror, so an
     exact half-step rounding (FAILED_QUERY_PCT 1.25 written as 1.3% or 1.2%) is grounded instead of forcing the
     templated digest; the relative slack widens nothing a rounded figure could exploit.
-  - App: the digest claims (Overview caption, Brief/Overview source labels) are gated on V165 and on a grounding
-    record; the withheld-draft "Unmatched figures" caption escapes `$`; the takeover lens caption and the
+  - App: the Overview digest caption is gated on V165 and on a grounding record, the Brief/Overview source labels
+    on V165; the withheld-draft "Unmatched figures" caption escapes `$`; the takeover lens caption and the
     SEC_LOGIN_TAKEOVER / SEC_FAILED_LOGINS / SEC_TRUST_REGRESSION / OPS_SCAN_DEGRADED playbooks say what the lens and
     the rules actually cover; test_v165's definer lock is bounded at 165.
 - **Tests.** Per-migration shape and round-13 normalize-back locks for every re-derived proc

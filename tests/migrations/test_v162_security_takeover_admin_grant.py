@@ -695,7 +695,8 @@ def test_v162_runbook_rollback_clears_the_identity_events_before_v154_returns():
     assert flat.index("Roll V163 back first") < flat.index("1. Re-run V157's")
     step2 = flat[flat.index("2. Only if V154's"):]
     data = ("UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS SET STATUS = 'RESOLVED', RESOLUTION_KIND = 'EXPECTED', "
-            "RESOLVED_AT = CURRENT_TIMESTAMP() WHERE RULE_ID IN ('SEC_LOGIN_TAKEOVER', 'SEC_ADMIN_GRANT') AND "
+            "RESOLVED_AT = CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ "
+            "WHERE RULE_ID IN ('SEC_LOGIN_TAKEOVER', 'SEC_ADMIN_GRANT') AND "
             "STATUS IN ('OPEN', 'ACK', 'SNOOZED');")
     assert step2.index("wait at least 24 hours after step 1") < step2.index(data) < step2.index(
         "Then re-run V154's procedure")

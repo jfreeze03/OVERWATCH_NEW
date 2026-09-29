@@ -3180,7 +3180,9 @@ def escalation_summary(days: int = 7) -> str:
     SETTINGS knobs, parsed like the proc) and the last ``days`` of escalations.
 
     Escalations are counted from ALERT_AUDIT ACTION = 'ESCALATE' (one row per escalated event, written by
-    SP_NOTIFY_WEBHOOK just before it stamps ALERT_EVENTS.ESCALATED_AT), never from the ESCALATED_AT column: every
+    SP_NOTIFY_WEBHOOK at the end of the pass, after each channel has stamped ALERT_EVENTS.ESCALATED_AT right after
+    its send -- so an error after a send leaves the event stamped without its audit row, and this count can read
+    LOW, never high), never from the ESCALATED_AT column: every
     table read here exists before V164 is applied, so the Admin canary stays green on either side of the apply.
     Failures come from APP_ERROR_LOG: escalation_failed (the pass itself) and escalation_email_failed (the email
     leg; a Teams re-post failure is a route_send_failed row the delivery card already attributes to its route).

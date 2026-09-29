@@ -677,9 +677,12 @@ PUBLIC grants silently leave the queue.
    ```sql
    UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
       SET STATUS = 'RESOLVED', RESOLUTION_KIND = 'EXPECTED',
-          RESOLVED_AT = CURRENT_TIMESTAMP()
+          RESOLVED_AT = CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ
     WHERE RULE_ID IN ('SEC_LOGIN_TAKEOVER', 'SEC_ADMIN_GRANT') AND STATUS IN ('OPEN', 'ACK', 'SNOOZED');
    ```
+
+   RESOLVED_AT is a Central NTZ clock like every other ALERT_EVENTS stamp; `CONVERT_TIMEZONE` keeps it Central even
+   in a UTC worksheet (a bare `CURRENT_TIMESTAMP()` would store the session's wall clock, 5-6 hours ahead there).
 
    Then re-run V154's procedure. Running the scan first only keeps out the events raised between the two steps; it does not stop the auto-declare on its own.
 
@@ -998,7 +1001,12 @@ Escalation symptoms → fixes (Alerts > Native delivery shows the policy and the
   the event is stamped, so that email is not retried; an event no route delivered
   retries every hour inside its 7-day window.
 - `route_send_failed` whose CONTEXT says `escalation re-post` → the route's
-  integration refused the re-post (same fixes as above for a Teams route).
+  integration refused the re-post (same fixes as above for a Teams route). While
+  a route keeps refusing, the CRITICALs only it delivered stay first in the
+  escalation batch (oldest first) and can hold back another route's escalations
+  until they are acknowledged or leave the 7-day window: fix or disable the
+  failing route, or acknowledge those events. (It needs two or more enabled
+  routes; today's single Teams route cannot hit it.)
 - `escalation_failed` → the pass itself errored; the normal deliveries of that run
   still went. The next hourly run retries what was not stamped; anything already
   re-posted or emailed that run is stamped, so it is not re-sent (its ESCALATE audit
