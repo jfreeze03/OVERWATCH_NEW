@@ -108,3 +108,52 @@ def test_failures_outrank_missing() -> None:
 def test_not_started_is_bad() -> None:
     k = _nightly_cycle_kpi(_FC_OK, 0, 0, not_started=True)
     assert k["value"] == "Not started" and k["severity"] == "bad"
+
+
+# --- Next-Fifty #36: tonight's projected finish on the In-flight tile ------------------------------
+_FC_FLIGHT = {"severity": "OK", "latest_state": "INCOMPLETE", "live_runway_sec": 7200, "target_hhmm": "07:00"}
+_ETA = {"ok": True, "risk": "ok", "phase": "on_schedule", "risk_from_pace": False, "projected_hhmm": "05:12",
+        "band_lo_hhmm": "04:50", "band_hi_hhmm": "05:35", "worst_hhmm": "05:12"}
+
+
+def test_in_flight_shows_projected_finish() -> None:
+    k = _nightly_cycle_kpi(_FC_FLIGHT, 0, eta=_ETA)
+    assert (k["value"], k["severity"]) == ("In flight", "info")
+    assert k["delta"] == "projected ~05:12 (04:50–05:35)"
+    assert "projected finish" in k["help"] and "PIPE_ETL_CYCLE_LATE" in k["help"]
+
+
+def test_at_risk_when_projection_misses_target() -> None:
+    k = _nightly_cycle_kpi(_FC_FLIGHT, 0, eta={**_ETA, "risk": "miss", "worst_hhmm": "07:25"})
+    assert (k["value"], k["severity"]) == ("At risk", "warn")
+    assert k["delta"] == "projected ~07:25, past 07:00"
+    k = _nightly_cycle_kpi(_FC_FLIGHT, 0, eta={**_ETA, "risk": "breach", "worst_hhmm": "08:10",
+                                               "risk_from_pace": True})
+    assert k["value"] == "At risk" and k["delta"] == "projected ~08:10 at tonight's pace, past 07:00"
+
+
+def test_running_long_warns() -> None:
+    k = _nightly_cycle_kpi(_FC_FLIGHT, 0, eta={**_ETA, "risk": "running_long", "phase": "running_long"})
+    assert (k["value"], k["severity"]) == ("Running long", "warn")
+    assert k["delta"] == "usually done by 05:35; still running"
+
+
+def test_due_now_is_info() -> None:
+    k = _nightly_cycle_kpi(_FC_FLIGHT, 0, eta={**_ETA, "phase": "due"})
+    assert (k["value"], k["severity"], k["delta"]) == ("In flight", "info", "due now (usual 04:50–05:35)")
+
+
+def test_overdue_and_failures_outrank_the_eta() -> None:
+    at_risk = {**_ETA, "risk": "miss", "worst_hhmm": "07:25"}
+    k = _nightly_cycle_kpi({**_FC_FLIGHT, "live_runway_sec": -600}, 0, eta=at_risk)
+    assert k["value"] == "Overdue" and k["severity"] == "bad"
+    assert _nightly_cycle_kpi(_FC_FLIGHT, 2, eta=at_risk)["value"] == "Failures"
+    assert _nightly_cycle_kpi(_FC_FLIGHT, 0, 1, eta=at_risk)["value"] == "Missing runs"
+
+
+def test_eta_not_ok_keeps_cycle_still_running() -> None:
+    for eta in (None, {}, {"ok": False, "reason": "short_history"}, {"ok": False, "reason": "terminal_not_due"}):
+        k = _nightly_cycle_kpi(_FC_FLIGHT, 0, eta=eta)
+        assert (k["value"], k["severity"], k["delta"]) == ("In flight", "info", "cycle still running"), eta
+    # a completed night ignores any eta (the ETA only speaks while the cycle is in flight)
+    assert _nightly_cycle_kpi(_FC_OK, 0, eta={**_ETA, "risk": "miss"})["value"] == "On track"

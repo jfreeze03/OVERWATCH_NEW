@@ -216,6 +216,42 @@ def account_statement_timeout(seconds: int) -> str:
     return f"ALTER ACCOUNT SET STATEMENT_TIMEOUT_IN_SECONDS = {seconds};"
 
 
+# --- Next-Fifty #30: review-only object-maintenance statements (unread objects) --------------------
+# Never executable in-app: ALTER TABLE / ALTER MATERIALIZED VIEW are outside the executor's allow-list
+# (query._WRITE_PREFIXES), so these are shown for a worksheet, never run. Each returns (statement, reverse).
+_UPPER_OBJ_RE = re.compile(r"^[A-Z_][A-Z0-9_$]{0,254}$")
+
+
+def _plain_object_fqn(fqn: str) -> str:
+    """A plain UPPER-CASE three-part name, verbatim, or ValueError. Deliberately NOT _ident: that
+    upper-cases silently, and 'DB.S.MyTable' upper-cased names a DIFFERENT object than the quoted one the
+    ledger saw. Quoted, mixed-case, dotted, 2-part or 4-part names fail closed (no SQL)."""
+    parts = str(fqn or "").strip().split(".")
+    if len(parts) != 3 or not all(_UPPER_OBJ_RE.match(p) for p in parts):
+        raise ValueError(f"Not a plain upper-case three-part object name: {fqn!r}")
+    return ".".join(parts)
+
+
+def suspend_recluster_object(fqn: str, *, materialized_view: bool = False) -> tuple[str, str]:
+    """Stop automatic clustering on a table (or a materialized view); reversed by RESUME RECLUSTER."""
+    name = _plain_object_fqn(fqn)
+    kind = "MATERIALIZED VIEW" if materialized_view else "TABLE"
+    return f"ALTER {kind} {name} SUSPEND RECLUSTER;", f"ALTER {kind} {name} RESUME RECLUSTER;"
+
+
+def drop_search_optimization(fqn: str) -> tuple[str, str]:
+    """Drop the search-optimization service; re-adding it rebuilds the access path from scratch."""
+    name = _plain_object_fqn(fqn)
+    return (f"ALTER TABLE {name} DROP SEARCH OPTIMIZATION;",
+            f"ALTER TABLE {name} ADD SEARCH OPTIMIZATION;  -- full rebuild")
+
+
+def suspend_mv_refresh(fqn: str) -> tuple[str, str]:
+    """Suspend a materialized view's background refresh (it cannot be queried until resumed)."""
+    name = _plain_object_fqn(fqn)
+    return f"ALTER MATERIALIZED VIEW {name} SUSPEND;", f"ALTER MATERIALIZED VIEW {name} RESUME;"
+
+
 def reverse_hint(finding_type: str, target: str) -> str:
     """One line of how-to-undo, shown wherever a fix executes (Codex r6 #18).
     Prior values are never guessed here: warehouse changes land old->new in

@@ -289,6 +289,18 @@ METRICS: tuple[Metric, ...] = (
            window="rolling-daily", partial_day="included", unit="USD",
            filters=("company", "database"), required_sources=("FACT_OBJECT_COST_DAILY",),
            coverage="direct per-object serverless credits", owner="platform"),
+    Metric("unread_maintenance_estimate", "Maintenance on unread objects", ESTIMATED,
+           "object / 30-day run-rate",
+           "FACT_OBJECT_COST_DAILY maintenance arms (CLUSTERING / SEARCH_OPT / MV_REFRESH) with no read arm, "
+           "confirmed by ACCESS_HISTORY (90d, write-wins, share-guarded)",
+           UTC, "daily load + ACCESS_HISTORY lag", "v4.601",
+           "Last 30 complete days of maintenance credits x rate on confirmed-unread objects (Next-Fifty #30); "
+           "booked ledger rows stay ESTIMATED (no scan settles object-level serverless savings).",
+           window="trailing-complete-days", partial_day="excluded", unit="USD",
+           filters=("company", "database"),
+           required_sources=("FACT_OBJECT_COST_DAILY", "ACCOUNT_USAGE.ACCESS_HISTORY"),
+           coverage="confirmed only with Enterprise ACCESS_HISTORY; share consumers and reads rarer than 90 days "
+                    "are invisible", owner="platform"),
     Metric("etl_unit_cost", "ETL unit cost (per pipeline)", MEASURED,
            "pipeline / run",
            "QUERY_HISTORY (JSON QUERY_TAG) + QUERY_ATTRIBUTION_HISTORY credits",

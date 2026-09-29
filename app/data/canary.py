@@ -67,6 +67,11 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("cost.object_cost_by_arm", lambda: cost_sql.object_cost_by_arm(2, "ALFA")),
     ("cost.object_cost_recon", lambda: cost_sql.object_cost_recon(2)),
     ("cost.object_cost_top", lambda: cost_sql.object_cost_top(2, "ALFA")),
+    # Next-Fifty #30: the unread-maintenance shortlist (mart) and its booked proof query. The ACCESS_HISTORY
+    # confirm (insights_sql.object_reads_confirm) is deliberately not here: Enterprise-only, like storage_reclaim.
+    ("cost.maintenance_on_unread", lambda: cost_sql.maintenance_on_unread(7, "ALFA")),
+    ("cost.unread_maintenance_proof",
+     lambda: cost_sql.unread_maintenance_proof("DB.S.T", account_today() - timedelta(days=15), 1.0)),
     ("etl.etl_cost_by_pipeline", lambda: etl_sql.etl_cost_by_pipeline(2, "ALFA")),
     ("etl.etl_tag_coverage", lambda: etl_sql.etl_tag_coverage(2, "ALFA")),
     ("ops.query_window_summary", lambda: ops_sql.query_window_summary(1, "ALFA")),

@@ -1245,13 +1245,17 @@ NIGHT_REGULAR_MIN_NIGHTS = 10     # ran >= this many of them AND on this night-o
 NIGHT_PENDING_GRACE_SEC = 3600    # absent + not yet past its typical start offset + grace -> PENDING
 NIGHT_NOT_STARTED_SEC = 26 * 3600 # starter silent > a nightly cadence + 2h -> the next cycle is overdue
 MAX_NIGHT_WORKFLOWS = MAX_WORKFLOWS
+# Next-Fifty #36: a workflow's usual END offset counts once it has this many clean prior finishes
+# (mirrors insights.SLA_FORECAST_MIN_RUNS; the data layer never imports logic constants the other way,
+# so a test pins the two equal).
+NIGHT_END_MIN_NIGHTS = 4
 
 
 def cycle_night_health_scan(
-    control_fqn: object, *, start_workflow: object = "",
+    control_fqn: object, *, start_workflow: object = "", end_workflow: object = "",
     lookback_nights: int = NIGHT_LOOKBACK_NIGHTS, min_nights: int = NIGHT_REGULAR_MIN_NIGHTS,
     grace_sec: int = NIGHT_PENDING_GRACE_SEC, not_started_sec: int = NIGHT_NOT_STARTED_SEC,
-    max_rows: int = MAX_NIGHT_WORKFLOWS,
+    max_rows: int = MAX_NIGHT_WORKFLOWS, eta_columns: bool = True,
 ) -> str:
     """One row per workflow for TONIGHT: NIGHT_STATUS = FAILED | MISSING | RUNNING | PENDING | OK.
 
@@ -1264,7 +1268,19 @@ def cycle_night_health_scan(
     per-workflow MISSING can't see). TOTAL_* are UNCAPPED window roll-ups over every row (never derive
     counts from the LIMITed frame). The starter name is an escaped literal (data). Account-wide (no
     company grain in CONTROL_STATUS). Fixed baseline — no scope-bar Window (like the SLA forecast).
-    Fail-closed on a bad FQN. Pure, bounded."""
+    Fail-closed on a bad FQN. Pure, bounded.
+
+    Next-Fifty #36 (``eta_columns``, default on): each workflow also carries tonight's START_OFFSET_SEC /
+    END_OFFSET_SEC from the cycle start (the end only for a clean finish), its usual end
+    (TYPICAL_END_OFFSET_SEC = the median over prior nights it finished CLEAN; a failed night's end is
+    crash-short) and END_NIGHTS_COUNT (those clean nights). A one-row ``pace`` CTE picks the PACE MARKER:
+    the workflow that finished clean tonight whose usual end is the latest, with at least
+    NIGHT_END_MIN_NIGHTS clean finishes; when ``end_workflow`` (the terminal) is set, only workflows that
+    usually end before the terminal's usual end qualify, so the terminal never marks its own pace. PACE_*
+    rides on every row (LEFT JOIN ON 1 = 1 to at most one row: no row multiplication, so TOTAL_* are
+    unchanged, and the marker is uncapped by the LIMIT). The terminal name is an escaped literal (data),
+    emitted only when set. ``eta_columns=False`` renders the pre-#36 roll-up byte-for-byte: the shared
+    read's fallback, so a failure in the additive columns never blanks the whole-night signals."""
     from app.core.sqlsafe import safe_identifier, sql_literal
 
     fqn = str(control_fqn or "").strip()
@@ -1275,6 +1291,7 @@ def cycle_night_health_scan(
     except ValueError:
         return ""
     _sw = str(start_workflow or "").strip()
+    _ew = str(end_workflow or "").strip() if eta_columns else ""
     anchor_starter = f"    AND WORKFLOW_NAME = {sql_literal(_sw)}\n" if _sw else ""
     cyc_starter = f"  WHERE WORKFLOW_NAME = {sql_literal(_sw)}\n" if _sw else ""
     look = max(2, int(lookback_nights))
@@ -1282,6 +1299,54 @@ def cycle_night_health_scan(
     grace = max(0, int(grace_sec))
     late = max(3600, int(not_started_sec))
     _failed = ", ".join(f"'{s}'" for s in sorted(FAILED_TASK_STATUSES))
+    # --- Next-Fifty #36 additive pieces (all '' when eta_columns is off) ---------------------------
+    hist_eta = graded_eta = eta_ctes = select_eta = ""
+    from_eta = "  FROM graded\n"
+    if eta_columns:
+        hist_eta = (
+            ",\n"
+            "         MEDIAN(IFF(w.FAILED_TASK_COUNT = 0 AND w.RUNNING_TASK_COUNT = 0,\n"
+            "                    DATEDIFF('second', c.CYCLE_START_AT, w.LAST_END_AT), NULL)) AS TYPICAL_END_OFFSET_SEC,\n"
+            "         COUNT(IFF(w.FAILED_TASK_COUNT = 0 AND w.RUNNING_TASK_COUNT = 0\n"
+            "                   AND c.CYCLE_START_AT IS NOT NULL AND w.LAST_END_AT IS NOT NULL, 1, NULL))\n"
+            "           AS END_NIGHTS_COUNT"
+        )
+        graded_eta = (
+            ",\n"
+            "         DATEDIFF('second', n.CYCLE_START_AT, t.FIRST_START_AT) AS START_OFFSET_SEC,\n"
+            "         IFF(t.FAILED_TASK_COUNT = 0 AND t.RUNNING_TASK_COUNT = 0,\n"
+            "             DATEDIFF('second', n.CYCLE_START_AT, t.LAST_END_AT), NULL) AS END_OFFSET_SEC,\n"
+            "         h.TYPICAL_END_OFFSET_SEC, COALESCE(h.END_NIGHTS_COUNT, 0) AS END_NIGHTS_COUNT"
+        )
+        term = term_join = term_filter = ""
+        if _ew:
+            term = ("term AS (\n"
+                    "  SELECT MAX(TYPICAL_END_OFFSET_SEC) AS TERM_TYPICAL_END_SEC\n"
+                    "  FROM hist\n"
+                    f"  WHERE WORKFLOW_NAME = {sql_literal(_ew)}\n"
+                    "),\n")
+            term_join = "  CROSS JOIN term tt\n"
+            term_filter = ("    AND (tt.TERM_TYPICAL_END_SEC IS NULL\n"
+                           "         OR g.TYPICAL_END_OFFSET_SEC < tt.TERM_TYPICAL_END_SEC)\n")
+        eta_ctes = (
+            ",\n"
+            f"{term}"
+            "pace AS (\n"
+            "  SELECT g.WORKFLOW_NAME AS PACE_WORKFLOW_NAME,\n"
+            "         g.END_OFFSET_SEC - g.TYPICAL_END_OFFSET_SEC AS PACE_LATE_SEC,\n"
+            "         g.LAST_END_AT AS PACE_END_AT\n"
+            "  FROM graded g\n"
+            f"{term_join}"
+            "  WHERE g.NIGHT_STATUS = 'OK' AND g.END_OFFSET_SEC IS NOT NULL\n"
+            f"    AND g.TYPICAL_END_OFFSET_SEC IS NOT NULL AND g.END_NIGHTS_COUNT >= {NIGHT_END_MIN_NIGHTS}\n"
+            f"{term_filter}"
+            "  QUALIFY ROW_NUMBER() OVER (ORDER BY g.TYPICAL_END_OFFSET_SEC DESC, g.WORKFLOW_NAME) = 1\n"
+            ")"
+        )
+        select_eta = (",\n"
+                      "       START_OFFSET_SEC, END_OFFSET_SEC, TYPICAL_END_OFFSET_SEC, END_NIGHTS_COUNT,\n"
+                      "       p.PACE_WORKFLOW_NAME, p.PACE_LATE_SEC, p.PACE_END_AT")
+        from_eta = "  FROM graded\n  LEFT JOIN pace p ON 1 = 1\n"
     return (
         "WITH anchor AS (\n"
         "  SELECT MAX(DATE(DATEADD('hour', -12, TASK_START_DTTM))) AS CYCLE_DATE\n"
@@ -1323,7 +1388,8 @@ def cycle_night_health_scan(
         "  SELECT w.WORKFLOW_NAME,\n"
         "         COUNT(DISTINCT w.CYCLE_DATE) AS NIGHTS_RAN_COUNT,\n"
         "         MAX(CASE WHEN w.CYCLE_DATE = DATEADD('day', -7, a.CYCLE_DATE) THEN 1 ELSE 0 END) AS RAN_LAST_WEEK,\n"
-        "         MEDIAN(DATEDIFF('second', c.CYCLE_START_AT, w.FIRST_START_AT)) AS TYPICAL_OFFSET_SEC\n"
+        "         MEDIAN(DATEDIFF('second', c.CYCLE_START_AT, w.FIRST_START_AT)) AS TYPICAL_OFFSET_SEC"
+        f"{hist_eta}\n"
         "  FROM per_wf w\n"
         "  CROSS JOIN anchor a\n"
         "  LEFT JOIN cyc c ON c.CYCLE_DATE = w.CYCLE_DATE\n"
@@ -1371,13 +1437,14 @@ def cycle_night_health_scan(
         "         COALESCE(t.RUNNING_TASK_COUNT, 0) AS RUNNING_TASK_COUNT,\n"
         "         t.FIRST_START_AT, t.LAST_END_AT,\n"
         "         COALESCE(h.NIGHTS_RAN_COUNT, 0) AS NIGHTS_RAN_COUNT,\n"
-        "         h.TYPICAL_OFFSET_SEC, n.CYCLE_AGE_SEC, n.NEXT_CYCLE_OVERDUE\n"
+        "         h.TYPICAL_OFFSET_SEC, n.CYCLE_AGE_SEC, n.NEXT_CYCLE_OVERDUE"
+        f"{graded_eta}\n"
         "  FROM universe u\n"
         "  CROSS JOIN anchor a\n"
         "  CROSS JOIN cyc_now n\n"
         "  LEFT JOIN tonight t ON t.WORKFLOW_NAME = u.WORKFLOW_NAME\n"
         "  LEFT JOIN hist h ON h.WORKFLOW_NAME = u.WORKFLOW_NAME\n"
-        ")\n"
+        f"){eta_ctes}\n"
         "SELECT WORKFLOW_NAME, NIGHT_STATUS, CYCLE_DATE, CYCLE_START_AT, FIRST_START_AT, LAST_END_AT,\n"
         "       TASK_COUNT, FAILED_TASK_COUNT, RUNNING_TASK_COUNT, NIGHTS_RAN_COUNT, TYPICAL_OFFSET_SEC,\n"
         "       CYCLE_AGE_SEC, NEXT_CYCLE_OVERDUE,\n"
@@ -1387,8 +1454,9 @@ def cycle_night_health_scan(
         "       SUM(CASE WHEN NIGHT_STATUS = 'MISSING' THEN 1 ELSE 0 END) OVER () AS TOTAL_MISSING_WF,\n"
         "       SUM(CASE WHEN NIGHT_STATUS = 'RUNNING' THEN 1 ELSE 0 END) OVER () AS TOTAL_RUNNING_WF,\n"
         "       SUM(CASE WHEN NIGHT_STATUS = 'PENDING' THEN 1 ELSE 0 END) OVER () AS TOTAL_PENDING_WF,\n"
-        "       CURRENT_TIMESTAMP() AS SNAPSHOT_TS\n"
-        "  FROM graded\n"
+        "       CURRENT_TIMESTAMP() AS SNAPSHOT_TS"
+        f"{select_eta}\n"
+        f"{from_eta}"
         "  ORDER BY CASE NIGHT_STATUS WHEN 'FAILED' THEN 1 WHEN 'MISSING' THEN 2 WHEN 'RUNNING' THEN 3\n"
         "                             WHEN 'PENDING' THEN 4 ELSE 5 END,\n"
         "           WORKFLOW_NAME\n"

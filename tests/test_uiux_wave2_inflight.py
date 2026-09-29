@@ -24,7 +24,7 @@ def _src(rel: str) -> str:
 
 # every file with operator-write click blocks -> expected latched-block count
 LATCHED_FILES = {
-    "app/ui/pages/cost_parts/optimize.py": 6,   # +1 Next-Fifty #5 twin cleanup (ledger_twin_reject)
+    "app/ui/pages/cost_parts/optimize.py": 7,   # +1 Next-Fifty #5 twin cleanup (ledger_twin_reject); +1 Next-Fifty #30 unread-maintenance ESTIMATED booking
     "app/ui/pages/operations.py": 5,
     "app/ui/pages/alerts.py": 6,
     "app/ui/workbench.py": 5,   # v4.597: -1 the retired Action Center experiment-start expander
