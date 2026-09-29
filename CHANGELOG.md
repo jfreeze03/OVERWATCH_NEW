@@ -1,5 +1,77 @@
 # Changelog
 
+## 4.601.0 - Timeout posture, scale-out vs size-up, tonight's projected finish, measured outcomes, unread maintenance, triage Track (2026-09-29)
+
+App-only, no migration. Next Fifty wave 3 remainder (PR C): ranks 33, 38, 36, 46, 30 and 15.
+
+- **Statement-timeout posture per warehouse (#33).** Operations ▸ Warehouses ▸ Sizing & efficiency gains a
+  toggle-gated panel. It reads each warehouse's STATEMENT_TIMEOUT_IN_SECONDS (one SHOW per warehouse, cached 4h, at
+  most 100) and the account value, and shows the effective cap: the lower non-zero of the two, where 0 means the
+  7-day maximum. It flags warehouses left uncapped (48h or more) and writes a review-only script. Each ALTER sets the
+  smallest ladder step at or above p99 × 3 of completed statements over max(Window, 30) days (capped at 90; at least
+  100 runs), with its exact undo as a comment. The table also shows how many completed statements that cap would
+  have cancelled. Nothing runs from the app, nothing is logged, and nothing is booked.
+  - The alert drawer's "Statement timeout 1h" lever is now tighten-only: it reads the warehouse's current value
+    first and never loosens a tighter cap (WH_ALFA_ADMIN's 5 minutes, for example). Its reverse hint no longer points
+    at the change registry, which never records this parameter.
+- **Add a cluster vs Size up (#38).** The merged "Size up / add cluster" verdict is split. Sustained overload
+  queueing without remote spill reads "Add a cluster (scale out)". Remote spill reads "Size up". When both fire,
+  size up first; the rationale names the follow-up. Scale-out rows read the warehouse's cluster range and scaling
+  policy. The Optimize operator pane prefills a review-only MAX_CLUSTER_COUNT + 1 (or SCALING_POLICY = STANDARD on an
+  Economy warehouse) and points execution at Operations ▸ Emergency ▸ Cluster range. No saving is booked.
+  Multi-cluster needs Enterprise edition; the app says so unless the account already runs a multi-cluster
+  warehouse. The scale-in panel waits on the multi-cluster probe.
+- **Tonight's projected finish and cycle timeline (#36).** While tonight's cycle runs, Operations ▸ Pipeline SLA ▸
+  Tonight shows a projected finish: tonight's start plus the median start-to-finish of the clean nights in the SLA
+  finish forecast. It also shows the usual range (25th to 75th percentile), the projection against the target, and
+  a separate "Pace so far" tile read from the furthest workflow that finished cleanly tonight. A toggle shows every
+  workflow's start and end against its usual offsets. The Brief's Nightly cycle tile shows the same projection
+  ("In flight · projected ~05:12 (04:50–05:35)", or "At risk" past the target). No new read: the shared whole-night
+  roll-up gains per-workflow end offsets and a pace marker. **Differs from the PIPE_ETL_CYCLE_LATE alert on
+  purpose**, and the panel says how: the alert uses the 14 prior clean nights, month-ends included, and warns only
+  past the hard deadline. If the shared night read's new columns ever fail, the Brief, Control Room and Tonight
+  fall back to the previous whole-night roll-up (logged once), so failed and did-not-run signals never blank; the
+  projected finish then shows without its pace and the timeline hides.
+- **Measured outcomes (#46).** Completed work is now measured against its own mart signal:
+  - Warehouse credits, a task's failures or P95, a query family's failures or credits. The result is a **Held?**
+    column: "Held 27 days", "Re-broke Sep 21", "Not fixed", "Too early". It stops at each mart's latest loaded day,
+    so a stalled loader never reads as a fix.
+  - It appears in Action Center (with *Include completed work*), Entity 360 ▸ Work and outcomes, and Operations ▸
+    Optimize.
+  - A family marked done whose fix re-broke or never held re-enters Track all despite the 90-day cooldown.
+    Dismissed families never do.
+  - A watched task flags failed runs since yesterday and a P95 spike; a watched query family flags a cost spike or
+    drop (a $10/day floor, not $50) and a P95 spike, on the Brief badge and the Watchlist.
+  - Verifying a savings item by hand now shows a measured before/after (warehouse credits with the volume-confounded
+    flag, table time-travel bytes, or object maintenance credits; 14 days before vs up to 30 complete days after the
+    booking), prefills the monthly figure without overwriting an edit, and stamps PROOF_RESULT / PROOF_RUN_AT /
+    PROOF_QUERY_ID. Retention items are measurable only while the ~14-day storage snapshot history still holds a
+    pre-change snapshot.
+  - The experiment half of #46 is superseded.
+- **Maintenance on objects nobody reads (#30).** Cost ▸ Optimization & Savings ▸ Storage & waste gains a
+  toggle-gated scan. The object ledger shortlists clustering, search-optimization and MV-refresh spend on objects
+  with no read credits in the last 90 days, then access history confirms it:
+  - Reads and writes both count; a query that writes the object counts as a write. Databases shared out read
+    "Check share consumers".
+  - Confirmed rows get a verdict (Suspend clustering / Drop search optimization / Suspend MV refresh), review-only
+    SQL with its reverse, an ESTIMATED $/mo (last 30 complete days), and an operator one-click "Book estimated
+    saving" that inserts an idempotent ESTIMATED ledger row with a runnable proof query.
+  - The app never runs the ALTERs, and no scan settles these rows: verify them on the Savings ledger.
+  - The lever is registered for the de-duplicated addressable total (#35) but not yet shown in it.
+- **Track as work item from Control Room triage (#15).** Task-failure and warehouse spend rows can be tracked into
+  Action Center with one click. It uses the same idempotent statement as Optimize's Track (one write path, keyed on
+  the entity) and writes UNASSIGNED at MEDIUM/LOW, unpriced. The triage table gains TRACKED, Ack by and ACK_AT, and
+  ranks unowned rows first within each severity (an unacknowledged alert; a task or warehouse with no open item).
+  Alerts are not tracked: they are owned through Acknowledge and the incident flow.
+- **Fix:** Action Center details with two dollar figures no longer render as math.
+- **First-paint cost.** Unchanged on every page (ACCOUNT_USAGE literal budgets unchanged). Every new read sits
+  behind a toggle, a selection or a non-default option; a watched task or query family adds one Brief read only for
+  viewers whose watchlist holds one.
+- **Owner-side.** App-only: `snow streamlit deploy --replace`. No migration.
+
+Not in this release (need a migration): a timeout posture rule and daily parameter snapshot (#33 Phase 2), an
+auto-settle arm for object-maintenance savings (#30), and a MIN_CLUSTERS autobook arm (#38).
+
 ## 4.600.0 - Reverted savings, Saved to date, ETL task evidence, below-warehouse anomaly drill (2026-09-28)
 
 App-only, no migration. Next Fifty wave 3, Slice B: ranks 31, 14 (Phase 1), 27 and 28 (close-out).

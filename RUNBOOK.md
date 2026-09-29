@@ -299,6 +299,14 @@ Admin → Settings, never in code.
     traffic, families already open and families dismissed or marked done in
     the last 90 days. If the Action Center status read fails, statuses show
     Unknown and Track all stays off until it reads.
+  - The 90-day cooldown has one exception (v4.601): a family marked done
+    whose measured outcome (Held?) reads Re-broke or Not fixed is re-admitted.
+    Too early, Unavailable and Not checked never lift it, and a dismissal
+    (DROPPED) never does.
+  - Control Room triage Track (v4.601) writes UNASSIGNED MEDIUM/LOW unpriced
+    items (SOURCE 'Control Room > Triage') for task-failure and warehouse
+    spend rows through the same idempotent statement; alerts are never
+    tracked (Acknowledge and the incident flow own them).
 
   No live read on first paint. The optional live-profile toggle reuses the
   Queries scan (shared cache).
@@ -508,6 +516,20 @@ spend kill-switch; 'All' restores; or pin cheap models),
 (lockdown — not generated; coordinate first so you don't lock yourself
 out). (Resource-monitor levers removed in v4.45 — the owner runs none;
 the Cortex allowlist and statement timeouts are the spend brakes.)
+
+Statement-timeout posture (v4.601, Operations → Warehouses → Sizing &
+efficiency): the panel's script is review-only. Delete the lines for ETL
+warehouses that legitimately run long; each ALTER's undo is a comment. The
+alert drawer's closed-loop "Statement timeout 1h" only ever tightens: when
+the warehouse is already capped at 1h or tighter it shows a note, not SQL.
+
+Maintenance on objects nobody reads (v4.601, Cost → Optimization & Savings →
+Storage & waste): book the estimated saving only after the reviewed ALTER has
+run in a worksheet (OVERWATCH never runs it). The row stays ESTIMATED because
+no scan settles object-level serverless savings; verify it by hand on the
+Savings ledger with its PROOF_SQL (maintenance credits since booking vs the
+booked monthly baseline). A later RESUME RECLUSTER / ADD SEARCH OPTIMIZATION /
+MV RESUME shows up only by re-running that proof.
 
 ## 11. Settings reference (Admin → Settings)
 
