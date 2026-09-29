@@ -13,8 +13,19 @@ mean; P95: the median over run days). The after window runs from the day after t
 is partial) to min(today - 1, the mart's LOADED_THROUGH), so a stalled loader never reads as a fix. The
 trailing ROLL_DAYS level must fall at least MIN_DROP below the baseline to count as fixed; climbing back
 to REGAIN x the baseline after that is "Re-broke", dated the day the trailing week crossed back (so it
-lags the real break by up to ROLL_DAYS - 1 days). Never dropping is "Not fixed". The failure rule: any
-failed run after the done day is "Re-broke" on that day.
+lags the real break by up to ROLL_DAYS - 1 days). Never dropping is "Not fixed". The failure rule is
+the same rule on the failure RATE (failed / runs): the trailing ROLL_DAYS rate must fall MIN_DROP below
+the baseline rate, and climbing back to REGAIN x that rate (with a failed run in the week) is
+"Re-broke" -- so one stray failure on a fixed high-volume family is not a re-break, while a daily task
+that fails again is (review C5).
+
+Control Room triage items (SOURCE = fix_queue.TRIAGE_TRACK_SOURCE) are judged on the signal they were
+tracked for, never on a level they were not tracked to lower (review C4): a task-failure item always
+takes the failure rule, whatever its baseline rate; a warehouse-spend item re-breaks only when the
+triage scan's own spend test (robust |z| >= anomaly.DEFAULT_THRESHOLD over the warehouse's trailing
+TRIAGE_WINDOW_DAYS, with its $ and active-day floors and the known-spike calendar) fires again in the
+direction it was tracked for (a spike, or a collapse), read back from the TITLE triage_track_item wrote.
+A quiet signal reads "Held"; neither ever reads "Not fixed".
 
 "Re-broke" and "Not fixed" lift Operations > Optimize's 90-day Track-all cooldown (OVERRIDES_COOLDOWN);
 "Too early", "Unavailable" and "Not checked" never do, and a dismissal is never lifted. The thresholds
@@ -24,13 +35,22 @@ the capped, idempotent Track all and changes a display label.
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections.abc import Iterable, Mapping
 from datetime import date, timedelta
 
+import numpy as np
 import pandas as pd
 
 from app.logic import fix_queue
-from app.logic.formulas import format_usd, humanize_duration, safe_float
+from app.logic.anomaly import (
+    ANOMALY_MIN_ACTIVE_DAYS,
+    ANOMALY_MIN_USD,
+    DEFAULT_SPIKE_CALENDAR,
+    DEFAULT_THRESHOLD,
+    expected_spike_labels,
+)
+from app.logic.formulas import DEFAULT_CREDIT_PRICE_USD, format_usd, humanize_duration, safe_float
 
 HELD_TYPES = ("WAREHOUSE", "TASK", "QUERY_FINGERPRINT")
 BASELINE_DAYS = 28
@@ -57,6 +77,17 @@ NOT_MEASURABLE_LABEL = "Not measurable"
 SIGNAL_CREDITS = "credits"
 SIGNAL_P95 = "P95 runtime"
 SIGNAL_FAILURES = "failures"
+SIGNAL_SPEND_ANOMALY = "spend anomaly"
+
+# The Control Room triage spend scan (control_room.py): robust z per warehouse over the trailing 30 complete
+# days (mart_sql.fact_warehouse_daily(30) minus today), surfaced for the latest complete day.
+TRIAGE_WINDOW_DAYS = 30
+# fix_queue.triage_track_item writes TITLE = f"{KIND}: {key}", KIND from actions.triage_queue
+SPEND_SPIKE_PREFIX = "Spend anomaly:"
+SPEND_COLLAPSE_PREFIX = "Spend collapse:"
+# anomaly.robust_zscores' Iglewicz-Hoaglin constants (a parity test pins _robust_last_z to that function)
+_MAD_K = 0.6745
+_MEANAD_K = 0.7979
 
 
 def _text(value: object) -> str:
@@ -85,10 +116,126 @@ def done_day(row: Mapping[str, object]) -> date | None:
 
 def _res(state: str, label: str, signal: str = "", *, since: date | None = None, after_days: int = 0,
          before: float | None = None, after: float | None = None, fails_before: float | None = None,
-         runs_before: float | None = None, fails_after: float | None = None) -> dict:
+         runs_before: float | None = None, fails_after: float | None = None, runs_after: float | None = None,
+         z: float | None = None, direction: int = 0) -> dict:
     return {"state": state, "label": label, "signal": signal, "since": since, "after_days": int(after_days),
             "before": before, "after": after, "fails_before": fails_before, "runs_before": runs_before,
-            "fails_after": fails_after}
+            "fails_after": fails_after, "runs_after": runs_after, "z": z, "direction": int(direction)}
+
+
+def is_triage_source(source: object) -> bool:
+    """True for an item Control Room triage Track wrote (SOURCE = fix_queue.TRIAGE_TRACK_SOURCE)."""
+    return _text(source).upper() == fix_queue.TRIAGE_TRACK_SOURCE.upper()
+
+
+def spend_direction(title: object) -> int:
+    """The triage spend row a warehouse item was tracked from, read back from its TITLE: +1 a spike
+    ('Spend anomaly: WH'), -1 a collapse ('Spend collapse: WH'), 0 unknown."""
+    text = _text(title)
+    if text.startswith(SPEND_SPIKE_PREFIX):
+        return 1
+    if text.startswith(SPEND_COLLAPSE_PREFIX):
+        return -1
+    return 0
+
+
+def _robust_last_z(values: np.ndarray) -> float:
+    """anomaly.robust_zscores(values).iloc[-1] for a NaN-free array, without building a Series per day
+    (Held? scores up to LOOKBACK_DAYS windows per item on every rerun)."""
+    if len(values) < 5:
+        return 0.0
+    med = float(np.median(values))
+    dev = np.abs(values - med)
+    mad = float(np.median(dev))
+    if mad > 0:
+        return float(_MAD_K * (values[-1] - med) / mad)
+    mean_ad = float(dev.mean())
+    return float(_MEANAD_K * (values[-1] - med) / mean_ad) if mean_ad > 0 else 0.0
+
+
+def _spend_recurrence(per_day: pd.DataFrame, after_idx: list[date], *, title: object, rate: float,
+                      spike_calendar: str | None) -> dict:
+    """A triage warehouse-spend item: did the triage scan's spend test fire again, in the direction the
+    item was tracked for? Each after-day that has a spend row is scored as the triage scan would score it
+    the next morning -- robust z over the TRIAGE_WINDOW_DAYS ending that day (days with a row only),
+    flagged at |z| >= DEFAULT_THRESHOLD with the same floors (a spike day >= ANOMALY_MIN_USD, a collapse
+    on a window median >= ANOMALY_MIN_USD, >= ANOMALY_MIN_ACTIVE_DAYS active days) and the known-spike
+    calendar clearing an upward hit. The first such day is "Re-broke"; none is "Held" (or "Too early")."""
+    direction = spend_direction(title)
+    n = len(after_idx)
+    if direction == 0:
+        # not a title triage Track wrote: which way the spend broke is unknown, so no honest test exists
+        return _res(NOT_MEASURABLE, NOT_MEASURABLE_LABEL, SIGNAL_SPEND_ANOMALY)
+    price = safe_float(rate, DEFAULT_CREDIT_PRICE_USD)
+    price = price if price > 0 else DEFAULT_CREDIT_PRICE_USD
+    usd = (per_day["CREDITS"].dropna() * price).sort_index()
+    days = list(usd.index)
+    vals = usd.to_numpy(dtype=float)
+    present = [d for d in after_idx if d in usd.index]
+    if direction < 0 and n >= MIN_AFTER_DAYS and not present:
+        # no spend row at all since done: a stalled pipeline and a retired warehouse look the same
+        return _res(NOT_MEASURABLE, NOT_MEASURABLE_LABEL, SIGNAL_SPEND_ANOMALY, after_days=n, direction=direction)
+    cal = DEFAULT_SPIKE_CALENDAR if spike_calendar is None else str(spike_calendar)
+    labels = (expected_spike_labels(pd.Series(present, dtype=object), cal).tolist() if present else [])
+    for day, label in zip(present, labels, strict=True):
+        pos = bisect_left(days, day)
+        start = bisect_left(days, day - timedelta(days=TRIAGE_WINDOW_DAYS - 1))
+        window = vals[start:pos + 1]
+        if int((window > 0).sum()) < ANOMALY_MIN_ACTIVE_DAYS:
+            continue
+        z = _robust_last_z(window)
+        if direction > 0:
+            hit = z >= DEFAULT_THRESHOLD and window[-1] >= ANOMALY_MIN_USD and not label
+        else:
+            hit = z <= -DEFAULT_THRESHOLD and float(np.median(window)) >= ANOMALY_MIN_USD
+        if hit:
+            return _res(REBROKE, _rebroke_label(day), SIGNAL_SPEND_ANOMALY, since=day, after_days=n,
+                        after=float(window[-1]), z=z, direction=direction)
+    state, text = (TOO_EARLY, _too_early(n)) if n < MIN_AFTER_DAYS else (HELD, f"Held {n} days")
+    return _res(state, text, SIGNAL_SPEND_ANOMALY, after_days=n, direction=direction)
+
+
+def _failure_arm(per_day: pd.DataFrame, before_idx: list[date], after_idx: list[date], *,
+                 forced: bool) -> dict | None:
+    """The failure rule on the failure RATE, or None when it does not apply (not ``forced`` and fewer
+    than FAIL_ARM_PCT of the baseline runs failed). The level rule's shape on failed / runs: the trailing
+    ROLL_DAYS rate (calendar days, zero-filled) must fall MIN_DROP below the baseline rate to count as
+    fixed; after that, a week back at REGAIN x the baseline rate WITH a failed run in it is "Re-broke",
+    dated the day that week crossed back; never falling is "Not fixed"; < MIN_AFTER_DAYS is "Too early".
+    A zero baseline rate (a forced triage task with no failed run in the baseline) makes any failed run
+    in a week after the first clean one a re-break."""
+    runs_b = float(per_day["RUNS"].reindex(before_idx).fillna(0.0).sum())
+    fails_b = float(per_day["FAILS"].reindex(before_idx).fillna(0.0).sum())
+    rate_b = 100.0 * fails_b / runs_b if runs_b > 0 else 0.0
+    if not forced and not (runs_b > 0 and rate_b >= FAIL_ARM_PCT):
+        return None
+    fails_a = per_day["FAILS"].reindex(after_idx).fillna(0.0)
+    runs_a = per_day["RUNS"].reindex(after_idx).fillna(0.0)
+    n = len(after_idx)
+    fails_sum, runs_sum = float(fails_a.sum()), float(runs_a.sum())
+
+    def res(state: str, label: str, *, since: date | None = None, after: float | None = None) -> dict:
+        return _res(state, label, SIGNAL_FAILURES, since=since, after_days=n, before=rate_b, after=after,
+                    fails_before=fails_b, runs_before=runs_b, fails_after=fails_sum, runs_after=runs_sum)
+
+    roll_f = fails_a.rolling(ROLL_DAYS, min_periods=ROLL_DAYS).sum().dropna()
+    roll_r = runs_a.rolling(ROLL_DAYS, min_periods=ROLL_DAYS).sum().reindex(roll_f.index)
+    rate = pd.Series([(100.0 * f / r) if r > 0 else (100.0 if f > 0 else 0.0)
+                      for f, r in zip(roll_f.tolist(), roll_r.tolist(), strict=True)],
+                     index=roll_f.index, dtype=float)
+    if n < MIN_AFTER_DAYS or rate.empty:
+        return res(TOO_EARLY, _too_early(n))
+    last = float(rate.iloc[-1])
+    fixed = rate <= rate_b * (1 - MIN_DROP)
+    if not bool(fixed.any()):
+        return res(NOT_FIXED, "Not fixed", after=last)
+    first_fixed = fixed.idxmax()
+    later = [d for d in rate.index if d > first_fixed]
+    regained = [d for d in later if rate[d] >= rate_b * REGAIN and roll_f[d] > 0]
+    if regained:
+        since = regained[0]
+        return res(REBROKE, _rebroke_label(since), since=since, after=last)
+    return res(HELD, f"Held {n} days", after=last)
 
 
 def _rebroke_label(since: date) -> str:
@@ -99,10 +246,32 @@ def _too_early(n: int) -> str:
     return f"Too early ({n} of {MIN_AFTER_DAYS} days)"
 
 
+def _pct(part: float, whole: float) -> str:
+    """A failure rate for the basis line: '2.7%', '0.037%', '0%', '—' with no runs."""
+    if not whole > 0:
+        return "—"
+    pct = 100.0 * part / whole
+    if pct <= 0:
+        return "0%"
+    if pct >= 10:
+        return f"{pct:.0f}%"
+    if pct >= 1:
+        return f"{pct:.1f}%"
+    if pct < 0.001:
+        return "<0.001%"
+    return f"{pct:.2g}%"
+
+
 def action_held(entity_type: object, entity_key: object, done: date | None,
-                daily: pd.DataFrame | None, today: date) -> dict:
+                daily: pd.DataFrame | None, today: date, *, source: object = "", title: object = "",
+                rate: float = DEFAULT_CREDIT_PRICE_USD, spike_calendar: str | None = None) -> dict:
     """The measured outcome of one completed item. Keys: state, label, signal, since, after_days, before,
-    after, fails_before, runs_before, fails_after. Never raises."""
+    after, fails_before, runs_before, fails_after, runs_after, z, direction. Never raises.
+
+    ``source`` / ``title`` are the item's SOURCE and TITLE: a Control Room triage item is judged on the
+    signal it was tracked for (a task on its failure rate, a warehouse on the triage spend test in the
+    direction of its TITLE), never on a level rule. ``rate`` prices that spend test's $ floor and
+    ``spike_calendar`` is EXPECTED_SPIKE_CALENDAR (None = the shipped default, '' = none)."""
     kind = _text(entity_type).upper()
     key = _text(entity_key).upper()
     if kind not in HELD_TYPES or not key or done is None:
@@ -132,20 +301,13 @@ def action_held(entity_type: object, entity_key: object, done: date | None,
     calendar = [start + timedelta(days=i) for i in range(max(0, (end - start).days + 1))]
     before_idx = [d for d in calendar if d < done]
     after_idx = [d for d in calendar if d > done]
-    runs_b = float(per_day["RUNS"].reindex(before_idx).fillna(0.0).sum())
-    fails_b = float(per_day["FAILS"].reindex(before_idx).fillna(0.0).sum())
-    if kind != "WAREHOUSE" and runs_b > 0 and 100.0 * fails_b / runs_b >= FAIL_ARM_PCT:
-        fails_a = per_day["FAILS"].reindex(after_idx).fillna(0.0)
-        bad = fails_a[fails_a > 0]
-        n = len(after_idx)
-        fails_after = float(fails_a.sum())
-        if len(bad):
-            since = bad.index[0]
-            return _res(REBROKE, _rebroke_label(since), SIGNAL_FAILURES, since=since, after_days=n,
-                        fails_before=fails_b, runs_before=runs_b, fails_after=fails_after)
-        state, label = (TOO_EARLY, _too_early(n)) if n < MIN_AFTER_DAYS else (HELD, f"Held {n} days")
-        return _res(state, label, SIGNAL_FAILURES, after_days=n, fails_before=fails_b, runs_before=runs_b,
-                    fails_after=fails_after)
+    triage = is_triage_source(source)
+    if triage and kind == "WAREHOUSE":
+        return _spend_recurrence(per_day, after_idx, title=title, rate=rate, spike_calendar=spike_calendar)
+    if kind != "WAREHOUSE":
+        failures = _failure_arm(per_day, before_idx, after_idx, forced=triage and kind == "TASK")
+        if failures is not None:
+            return failures
     if kind == "TASK":
         signal = SIGNAL_P95
         series = per_day["P95_SEC"]
@@ -186,9 +348,21 @@ def held_basis(result: Mapping[str, object], rate: float) -> str:
     n = int(safe_float(result.get("after_days")))
     before, after = result.get("before"), result.get("after")
     if signal == SIGNAL_FAILURES:
-        return (f"{int(safe_float(result.get('fails_before'))):,} failed of "
-                f"{int(safe_float(result.get('runs_before'))):,} runs in the {BASELINE_DAYS} days before; "
-                f"{int(safe_float(result.get('fails_after'))):,} since")
+        fb, rb = safe_float(result.get("fails_before")), safe_float(result.get("runs_before"))
+        fa, ra = safe_float(result.get("fails_after")), safe_float(result.get("runs_after"))
+        return (f"{int(fb):,} failed of {int(rb):,} runs in the {BASELINE_DAYS} days before "
+                f"({_pct(fb, rb)}); {int(fa):,} of {int(ra):,} since ({_pct(fa, ra)})")
+    if signal == SIGNAL_SPEND_ANOMALY:
+        word = {1: "spike", -1: "collapse"}.get(int(safe_float(result.get("direction"))), "")
+        if not word:
+            return ""
+        since = result.get("since")
+        if _text(result.get("state")) == REBROKE and isinstance(since, date):
+            return (f"a spend {word} again on {since:%b} {since.day}: "
+                    f"{format_usd(safe_float(after))}/day, z {safe_float(result.get('z')):+.1f} against its "
+                    f"own {TRIAGE_WINDOW_DAYS} days (the triage scan's test)")
+        return (f"no spend {word} the triage scan would raise (|z| >= {DEFAULT_THRESHOLD:g} against its own "
+                f"{TRIAGE_WINDOW_DAYS} days) in the {n} day{'' if n == 1 else 's'} since")
     if before is None:
         return ""
     if signal == SIGNAL_CREDITS:
@@ -232,11 +406,13 @@ def done_entities(actions: pd.DataFrame | None, today: date, *, type_col: str = 
 
 def held_columns(actions: pd.DataFrame | None, daily: pd.DataFrame | None, today: date, *, read_ok: bool,
                  evaluated: Iterable[tuple[str, str]], rate: float, type_col: str = "SOURCE_ENTITY_TYPE",
-                 key_col: str = "SOURCE_ENTITY_KEY",
+                 key_col: str = "SOURCE_ENTITY_KEY", source_col: str = "SOURCE", title_col: str = "TITLE",
+                 spike_calendar: str | None = None,
                  lookback_days: int = LOOKBACK_DAYS) -> tuple[pd.Series, pd.Series]:
     """(Held? label, HELD_BASIS) per row: None for a row that is not DONE; 'Not measurable' for a type
     with no signal; 'Unavailable' when the signals read failed; 'Not checked' outside the evaluated set
-    (the newest MAX_ENTITIES completions within the lookback); else the measured label."""
+    (the newest MAX_ENTITIES completions within the lookback); else the measured label -- a Control Room
+    triage row (``source_col``) on the signal it was tracked for (see action_held)."""
     if actions is None:
         return pd.Series(dtype=object), pd.Series(dtype=object)
     seen = {(_text(t).upper(), _text(k).upper()) for t, k in evaluated}
@@ -258,7 +434,8 @@ def held_columns(actions: pd.DataFrame | None, daily: pd.DataFrame | None, today
         elif (kind, key) not in seen or done < floor:
             label = NOT_CHECKED_LABEL
         else:
-            res = action_held(kind, key, done, daily, today)
+            res = action_held(kind, key, done, daily, today, source=rec.get(source_col),
+                              title=rec.get(title_col), rate=rate, spike_calendar=spike_calendar)
             label = str(res["label"])
             basis = held_basis(res, rate) or None
         labels.append(label)

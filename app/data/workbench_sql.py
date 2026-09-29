@@ -121,7 +121,7 @@ def related_actions(entity_type: str, entity_key: str, limit: int = 200) -> str:
     cap = max(1, min(int(limit), 500))
     return f"""
 SELECT ACTION_ID, CREATED_AT, SEVERITY, TITLE, OWNER, STATUS, DUE_DATE,
-       DEFER_UNTIL, ESTIMATED_USD, CONFIDENCE, UPDATED_AT, COMPLETED_AT
+       DEFER_UNTIL, ESTIMATED_USD, CONFIDENCE, UPDATED_AT, COMPLETED_AT, SOURCE
 FROM {core_object("ACTION_QUEUE")}
 WHERE UPPER(SOURCE_ENTITY_TYPE) = {sql_literal(_entity_type(entity_type))}
   AND UPPER(SOURCE_ENTITY_KEY) = {sql_literal(str(entity_key or '').strip().upper(), 500)}
