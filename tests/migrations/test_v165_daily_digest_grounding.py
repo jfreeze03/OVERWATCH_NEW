@@ -649,3 +649,10 @@ def test_v165_declares_every_bind_it_uses():
     assert used <= declared, used - declared
     assert used <= set(_BINDS), used - set(_BINDS)
     assert {"facts", "grounding_ok", "n_checked", "ungrounded", "body_source", "ai_body", "msg"} <= used
+
+def test_v165_in_expected_migrations():
+    """Integrator lockstep: Admin lists V165 with house-rule text (no $, no hand CALL, no trailing '.')."""
+    from app.ui.pages.admin import _EXPECTED_MIGRATIONS
+    text = str(_EXPECTED_MIGRATIONS[165])
+    assert "CALL DBA_MAINT_DB.OVERWATCH.SP_" not in text and "$" not in text and not text.endswith(".")
+    assert "GROUNDING_OK" in text and "not AI-written" in text

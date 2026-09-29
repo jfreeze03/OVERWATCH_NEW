@@ -627,8 +627,10 @@ UNION ALL
 SELECT 'V164.1d SCHEMA_VERSION has 164',
        IFF((SELECT COUNT(*) FROM {_O}SCHEMA_VERSION WHERE VERSION = 164) = 1, 'OK', 'FAIL: V164 did not finish');
 
--- V164.3 (after the next hourly chain) the notifier ran the pass. expect: STATE SUCCEEDED and RETURN_VALUE ending
---        '... CRITICAL(s) escalated' (plus '; escalation off (ESCALATE_AFTER_MIN)' when set to 0).
+-- V164.3 (after the next hourly chain) the notifier ran the pass. expect: STATE SUCCEEDED and no ERROR_TEXT.
+--        RETURN_VALUE stays NULL: a task whose body CALLs a proc does not publish the proc's return string (the
+--        V160.6 finding), so the '... CRITICAL(s) escalated' tally shows only on a hand CALL -- never run one, it
+--        can page and email. The two grids below are the evidence.
 SELECT NAME, STATE, SCHEDULED_TIME, COMPLETED_TIME, RETURN_VALUE, LEFT(ERROR_MESSAGE, 200) AS ERROR_TEXT
 FROM TABLE(DBA_MAINT_DB.INFORMATION_SCHEMA.TASK_HISTORY(
        SCHEDULED_TIME_RANGE_START => DATEADD('hour', -3, CURRENT_TIMESTAMP()),

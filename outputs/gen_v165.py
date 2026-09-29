@@ -627,7 +627,8 @@ SELECT DIGEST_DATE, MODEL, LENGTH(BODY) AS BODY_LEN, STARTSWITH(BODY, 'Digest un
  ORDER BY DIGEST_DATE DESC
  LIMIT 14;
 
--- P165.1b the digest task, 14 days (ACCOUNT_USAGE, up to ~45 min behind). expect SUCCEEDED, RETURN_VALUE 'digest written; sent N/M routes'.
+-- P165.1b the digest task, 14 days (ACCOUNT_USAGE, up to ~45 min behind). expect SUCCEEDED; RETURN_VALUE is NULL (a
+--         task that CALLs a proc does not publish the proc's return string -- the V160.6 finding).
 SELECT SCHEDULED_TIME, STATE, RETURN_VALUE, ERROR_MESSAGE
   FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
  WHERE DATABASE_NAME = 'DBA_MAINT_DB' AND SCHEMA_NAME = 'OVERWATCH' AND NAME = 'TASK_DAILY_DIGEST'
@@ -754,7 +755,8 @@ SELECT DIGEST_DATE, MODEL, BODY_SOURCE, GROUNDING_OK, FIGURES_CHECKED, UNGROUNDE
  ORDER BY DIGEST_DATE DESC
  LIMIT 1;
 
--- V165.3b expect STATE SUCCEEDED and RETURN_VALUE starting 'digest written (' (ACCOUNT_USAGE, up to ~45 min behind).
+-- V165.3b expect STATE SUCCEEDED (ACCOUNT_USAGE, up to ~45 min behind). RETURN_VALUE stays NULL (a task that CALLs a
+--         proc does not publish the proc's 'digest written (...)' string); V165.3 above is the evidence.
 SELECT SCHEDULED_TIME, STATE, RETURN_VALUE, ERROR_MESSAGE
   FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
  WHERE DATABASE_NAME = 'DBA_MAINT_DB' AND SCHEMA_NAME = 'OVERWATCH' AND NAME = 'TASK_DAILY_DIGEST'

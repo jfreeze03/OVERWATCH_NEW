@@ -658,3 +658,10 @@ def test_v164_docs():
     for needle in ("Line format (V164)", "| event <EVENT_ID>", "CRITICAL escalation (V164)", "escalation_email_failed",
                    "escalation_failed", "ESCALATE_AFTER_MIN", "DEFAULT_RECIPIENTS"):
         assert needle in s19, needle
+
+def test_v164_in_expected_migrations():
+    """Integrator lockstep: Admin lists V164 with house-rule text (no $, no hand CALL, no trailing '.')."""
+    from app.ui.pages.admin import _EXPECTED_MIGRATIONS
+    text = str(_EXPECTED_MIGRATIONS[164])
+    assert "CALL DBA_MAINT_DB.OVERWATCH.SP_" not in text and "$" not in text and not text.endswith(".")
+    assert "ESCALATE_AFTER_MIN" in text and "ESCALATED_AT" in text and "@" not in text

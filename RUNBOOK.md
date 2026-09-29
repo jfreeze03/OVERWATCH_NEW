@@ -123,6 +123,16 @@ Then `roles.sql` (idempotent; re-run after every upgrade) and
 `validate.sql` (every row should read OK). Deploy the app with
 `snow streamlit deploy --replace`.
 
+**Deploy order and the schema gate (since 4.602).** Every app read of a
+column a migration adds, and every caption that describes a migration's new
+behaviour, checks that migration is in SCHEMA_VERSION first
+(`app/ui/schema_gate.py`; it answers from the startup gate's own
+SCHEMA_VERSION read, so it costs no query, and an unreadable version table
+keeps the pre-apply behaviour). So the app can be deployed before or after
+an apply; the house order is deploy first, then apply. After applying
+V162-V165 the gated text and columns appear within 4 h (the metadata cache)
+or at once on Refresh; Admin ▸ Migrations reads fresher.
+
 **Opt-in scripts** (run deliberately, not part of the chain):
 `webhook_delivery.sql` (notification integration + sender task — Microsoft
 Teams needs the Workflows Adaptive-Card recipe in that file, see §19),
@@ -558,9 +568,16 @@ CONTRACT_CREDITS / CONTRACT_START_DATE / CONTRACT_END_DATE (ISO dates) ·
 CORTEX_MODEL llama3.1-8b · FORECAST_ENGINE linear|seasonal|ml_forecast ·
 SCORE_PTS_* (nine platform-score weights, §6) · FACT_RETENTION_DAYS_HOURLY
 400 (floor 90) · FACT_RETENTION_DAYS_DAILY 800 (floor 180) ·
-ERROR_LOG_RETENTION_DAYS 180 (floor 30). Values are strings; bad numbers
-fall back to defaults. Changes take effect within one cache cycle (≤5 min)
-or after Refresh.
+ERROR_LOG_RETENTION_DAYS 180 (floor 30) · INCIDENT_AUTO_DECLARE_CRITICAL
+TRUE (hourly auto-declare switch; the two V162 identity rules never
+auto-declare either way) · AI_RUNAWAY_ROBUST_Z 3.5 and
+AI_RUNAWAY_INCLUDE_FUNCTIONS FALSE (COST_AI_USER_RUNAWAY, V163; the cap
+multiple is the rule's THRESHOLD_NUM, the cap is COCO_DAILY_CAP_CREDITS) ·
+ESCALATE_AFTER_MIN 120 (0 = off) and ESCALATE_EMAIL_INTEGRATION
+OVERWATCH_EMAIL (blank = no email leg; recipients = that integration's
+DEFAULT_RECIPIENTS, set in Snowsight, never stored here) (V164, §19). Values
+are strings; bad numbers fall back to defaults. Changes take effect within
+one cache cycle (≤5 min) or after Refresh.
 
 ## 12. Alert engine reference
 
@@ -640,6 +657,16 @@ PUBLIC grants silently leave the queue.
 **Rolling back V160.** Re-run V157's `CREATE OR REPLACE PROCEDURE ... SP_ALERT_SCAN_DAILY()` (the tally goes back to 11 and nothing calls SP_SCAN_SLEEP_POLLING any more). Optionally disable the rule (`UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG SET ENABLED = FALSE WHERE RULE_ID = 'COST_SLEEP_POLLING';`), close its lingering OPEN, ACK'd or SNOOZED events as EXPECTED, and drop the proc (and, if wanted, the transient SLEEP_POLLING_WEEKLY table) with the teardown.sql lines. The weekly scan never runs at apply time; to re-check a week by hand, `CALL DBA_MAINT_DB.OVERWATCH.SP_SCAN_SLEEP_POLLING(TRUE);` (it can raise events and email).
 
 **Rolling back V161.** First, within the dropped schema's retention (at most 1 day for a transient schema; `SHOW PARAMETERS LIKE 'DATA_RETENTION_TIME_IN_DAYS' IN DATABASE DBA_MAINT_DB`), run `UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH_BAK;`. It must come before V158, whose `CREATE ... IF NOT EXISTS` would otherwise take the name (if it already did, `ALTER SCHEMA DBA_MAINT_DB.OVERWATCH_BAK RENAME TO OVERWATCH_BAK_NEW;` first). It brings back the generations, and also the ledger and the weekly copies, which V161 had moved INTO that schema: move them back before V158 creates empty ones, `ALTER TABLE DBA_MAINT_DB.OVERWATCH_BAK.<name> RENAME TO DBA_MAINT_DB.OVERWATCH.<name>;` for OPERATOR_BACKUP_LOG and each `<T>_BAK_LAST`. If the ledger's move had fallen back to a DROP (PART B V161.13 showed a fourth CRITICAL row), run `UNDROP TABLE DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG;` instead. Then re-run V015's TASK_BACKUP_OPERATOR block (lines 61-67 only: the whole file would re-create the retired MART_SPEND_ROLLUP_DT) and V158 in full, which brings back the task, the proc, the BACKUP_KEEP_* settings and the view carve-out. Redeploy app 4.597.0 as well (`snow streamlit deploy --replace` from main commit `0c8afb7`): 4.598 hides the task from Tasks ▸ SLA, has no BACKUP_KEEP_* editors (it lists them as unread settings), and its validate.sql FAILs the restored objects. Past the retention window the dropped generations are gone for good.
+
+**Rolling back wave 4 (V162-V165).** Each migration re-derives its procs once, so each rolls back on its own by re-running its base proc; to undo the whole wave, go in reverse apply order (V165, V164, V163, V162), because V163's [07] text points at the hourly SEC_LOGIN_TAKEOVER that V162 adds. None of these rollbacks needs a data change, and none may run inside a migration. App 4.602.0 keeps working after any of them: every wave-4 read and caption is gated on its migration being in SCHEMA_VERSION, and the version rows stay, so a rolled-back proc can leave a caption that overclaims until the app is redeployed from an earlier tag.
+
+**Rolling back V165.** Re-run V112's `CREATE OR REPLACE PROCEDURE ... SP_DAILY_DIGEST()` (V112__daily_digest_skips_paging_routes.sql, lines 26-143). The six DAILY_DIGEST columns can stay; new rows then carry NULLs, which the app shows as "Figures not checked". That also brings back the unescaped Teams send and the "Digest unavailable" body on a Cortex failure. Nothing runs at apply time; a hand `CALL DBA_MAINT_DB.OVERWATCH.SP_DAILY_DIGEST();` spends a Cortex call and posts to Teams.
+
+**Rolling back V164.** Soft: Admin > Settings `ESCALATE_AFTER_MIN` = 0; the next hourly run skips the escalation pass (Alerts > Native delivery reads "Escalation is off"). Hard: re-run ONLY V064's SP_NOTIFY_WEBHOOK block (V064__webhook_drain_watermarks_alert_burn_telemetry.sql lines 74-351), never the whole file, which would also roll back SP_LOAD_DAILY_FACTS, SP_NIGHTLY_RECONCILE and SP_ALERT_SCAN_DAILY. That restores the old `[SEV] title` lines. `ALERT_EVENTS.ESCALATED_AT` and the two settings can stay; app 4.602 still works because its escalation line reads ALERT_AUDIT, not the column.
+
+**Rolling back V163.** Re-run V160's `CREATE OR REPLACE PROCEDURE ... SP_ALERT_SCAN_DAILY()` (the second procedure in V160__sleep_polling_alert.sql, lines 401-1263): the tally goes back to 12, the two arms stop raising and the old [07] text returns. Optionally disable the two rules in Alerts > Rules (or `UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG SET ENABLED = FALSE WHERE RULE_ID IN ('COST_AI_USER_RUNAWAY','SEC_TRUST_REGRESSION');`) and close their lingering events as EXPECTED. The two SETTINGS rows can stay.
+
+**Rolling back V162 (order matters).** FIRST re-run V157's `CREATE OR REPLACE PROCEDURE ... SP_ALERT_SCAN()` (V157__alert_scan_self_watch_idle_push.sql lines 121-1128, never the whole file, which would also put SP_ALERT_SCAN_DAILY back to V157's text and drop V160's and V163's daily arms): the tally goes back to 12 and SEC_LOGIN_TAKEOVER / SEC_ADMIN_GRANT stop raising. Only THEN, optionally, re-run V154's `CREATE OR REPLACE PROCEDURE ... SP_INCIDENT_AUTODECLARE()` (lines 54-235). Reversed, an hourly TASK_INCIDENT_AUTODECLARE landing between the two steps can auto-declare an incident for a CRITICAL takeover. The two ALERT_CONFIG rows can stay; disable them in Alerts > Rules if wanted, and close their lingering events as EXPECTED.
 
 | Rule | Family | Fires when (threshold = THRESHOLD_NUM, editable) | Recurrence |
 |---|---|---|---|
@@ -813,6 +840,11 @@ the same day.
    `INSERT OVERWRITE INTO <T> SELECT * FROM <T>_BAK_<yyyymmdd>;`
    Never CLONE-restore: a TRANSIENT clone cannot clone back into a permanent
    table, and a re-materialized table re-applies the schema FUTURE grants.
+   A clone taken before a migration that added columns has fewer columns, so
+   `SELECT *` from it fails: ALERT_EVENTS gained ESCALATED_AT at V164, and
+   DAILY_DIGEST six columns at V165. Restore those with an explicit column
+   list, or add the column(s) to the clone first (for example
+   `ALTER TABLE ALERT_EVENTS_BAK_<yyyymmdd> ADD COLUMN ESCALATED_AT TIMESTAMP_NTZ;`).
 2. **Before a risky change** (a bulk edit, a rebuild, a factory reset): take
    the manual clones first, with today's date suffix, and check their row
    counts: `snowflake/rebuild/00_backup_operator_data.sql` (edit its suffix) or
@@ -949,9 +981,12 @@ Escalation symptoms → fixes (Alerts > Native delivery shows the policy and the
   integration refused the re-post (same fixes as above for a Teams route).
 - `escalation_failed` → the pass itself errored; the normal deliveries of that run
   still went. The next hourly run retries (nothing was stamped).
-- Nothing escalates → `ESCALATE_AFTER_MIN` is 0 or not a number (the task's
-  RETURN_VALUE ends `escalation off (ESCALATE_AFTER_MIN)`), or TASK_ALERT_NOTIFY is
-  suspended.
+- Nothing escalates → `ESCALATE_AFTER_MIN` is 0 or not a number (Alerts > Native
+  delivery reads "Escalation is off"), or TASK_ALERT_NOTIFY is suspended. The task's
+  TASK_HISTORY RETURN_VALUE stays NULL (a task that CALLs a proc does not publish the
+  proc's return string), so the proc's `... CRITICAL(s) escalated` tally is not
+  visible there; read ALERT_AUDIT ACTION `ESCALATE` and `ESCALATED_AT` instead. Never
+  hand-CALL the notifier to see it: it can page and email.
 - Too noisy → acknowledge or snooze from Alerts > Open events, raise
   `ESCALATE_AFTER_MIN`, or set it to 0. Soft rollback = 0; hard rollback = re-run
   ONLY V064's SP_NOTIFY_WEBHOOK CREATE (V064 lines 74-351, never the whole file,

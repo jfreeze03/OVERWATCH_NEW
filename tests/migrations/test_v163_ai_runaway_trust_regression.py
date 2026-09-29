@@ -648,3 +648,10 @@ def test_v163_runbook_rows():
         assert "V163" in rows[0] and f"daily {arm}" in rows[0], rows[0]
     (failed,) = [ln for ln in rb.splitlines() if ln.startswith("| SEC_FAILED_LOGINS | SECURITY |")]
     assert "V163" in failed and "SEC_LOGIN_TAKEOVER" in failed
+
+def test_v163_in_expected_migrations():
+    """Integrator lockstep: Admin lists V163 with house-rule text (no $, no hand CALL, no trailing '.')."""
+    from app.ui.pages.admin import _EXPECTED_MIGRATIONS
+    text = str(_EXPECTED_MIGRATIONS[163])
+    assert "CALL DBA_MAINT_DB.OVERWATCH.SP_" not in text and "$" not in text and not text.endswith(".")
+    assert "COST_AI_USER_RUNAWAY" in text and "SEC_TRUST_REGRESSION" in text and "14" in text
