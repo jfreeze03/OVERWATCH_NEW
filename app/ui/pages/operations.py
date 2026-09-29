@@ -2500,8 +2500,10 @@ def _cycle_eta_panel(fc: dict, night_res: QueryResult | None) -> None:
         "nights take is added. Past the median the tile reads Due now; past the range, Running long. Pace so "
         "far compares the furthest workflow that has finished cleanly tonight (the one that usually ends "
         "latest before the terminal workflow) with its own usual end, both measured from the cycle start; "
-        "at this pace = the projection moved by that difference. Nothing new is read: it reuses the Tonight "
-        "at a glance and SLA finish forecast reads.")
+        "at this pace = the projection moved by that difference. On a month- or quarter-end night the "
+        "projection already includes the typical extra, so the part of it the pace workflow is expected to "
+        "carry (the extra x its usual end / the median cycle) is allowed first and never counted twice. "
+        "Nothing new is read: it reuses the Tonight at a glance and SLA finish forecast reads.")
 
     def _sev(ts: object) -> str:
         if ts is None:
@@ -2526,10 +2528,17 @@ def _cycle_eta_panel(fc: dict, night_res: QueryResult | None) -> None:
         _pace_delta = ("no upstream workflow has finished yet" if eta.get("pace_available")
                        else "pace unavailable from tonight's roll-up")
     else:
-        _lf = safe_float(_late)
+        # PR C review C1: on a month- or quarter-end night the tile reads the lateness left after the marker's
+        # expected share of the typical extra (the same figure that moves 'at this pace')
+        _adj = eta.get("pace_late_adj_sec")
+        _lf = safe_float(_late if _adj is None else _adj)
+        _share = eta.get("pace_spike_share_sec")
         _pace_value = ("On pace" if abs(_lf) < 60
                        else f"{humanize_duration(abs(_lf), 's')} {'behind' if _lf > 0 else 'ahead'}")
         _pace_delta = f"{eta.get('pace_workflow') or 'pace marker'} · at this pace ~{eta['pace_hhmm']}"
+        if _share:
+            _pace_delta += (f" · vs its usual {eta.get('spike_label') or 'labelled'} night "
+                            f"(+{humanize_duration(safe_float(_share), 's')} allowed)")
         _pace_sev = _sev(eta.get("pace_projected"))
     kpi_row([
         {"label": "Projected finish", "value": _pf_value, "delta": _pf_delta, "delta_color": "off",
@@ -2541,7 +2550,8 @@ def _cycle_eta_panel(fc: dict, night_res: QueryResult | None) -> None:
          "delta": f"hard deadline {hard}", "delta_color": "off", "severity": _sev(eta.get("projected"))},
         {"label": "Pace so far", "value": _pace_value, "delta": _pace_delta, "delta_color": "off",
          "severity": _pace_sev,
-         "help": "The furthest workflow that finished clean tonight against its own usual end. A "
+         "help": "The furthest workflow that finished clean tonight against its own usual end (on a "
+                 "month- or quarter-end night, less its expected share of the typical extra). A "
                  "separate read: it never moves the projected finish."},
     ])
     st.caption(

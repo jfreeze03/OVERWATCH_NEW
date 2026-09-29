@@ -85,6 +85,15 @@ def test_eta_and_timeline_panels_make_no_reads():
     assert "etl_control_sql.MAX_NIGHT_WORKFLOWS" in tl                  # the cap caption
 
 
+def test_pace_tile_reads_the_labelled_night_adjusted_lateness():
+    """PR C review C1: the Pace tile shows the lateness that moves 'at this pace' (pace_late_adj_sec: less the
+    marker's expected share of a labelled night's typical extra) and names the allowance."""
+    eta = _body(_OPS, "_cycle_eta_panel")
+    assert '_adj = eta.get("pace_late_adj_sec")' in eta
+    assert "_lf = safe_float(_late if _adj is None else _adj)" in eta
+    assert 'eta.get("pace_spike_share_sec")' in eta and "night " in eta and "allowed)" in eta
+
+
 def test_timeline_toggle_is_static_and_floor_safe():
     tl = _body(_OPS, "_cycle_timeline_panel")
     assert ('st.toggle("Show tonight\'s cycle timeline", key="ops_cycle_timeline_toggle", value=False,'

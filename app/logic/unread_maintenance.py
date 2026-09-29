@@ -6,7 +6,8 @@ against ACCESS_HISTORY (insights_sql.object_reads_confirm), and this module turn
 verdict per object, review-only SQL, and an ESTIMATED savings-ledger booking.
 
 Verdict precedence: Unconfirmed (no measured read evidence: the confirm read failed or missed the object)
-> Keep (any read) > Check share consumers (its database is shared out; a consumer account's reads never
+> Object gone (MATCHED_BY_ID false: no live TABLES row has this name, so it was dropped or renamed; no SQL,
+no estimate in the totals) > Keep (any read) > Check share consumers (its database is shared out; a consumer account's reads never
 reach this account's access history) > No recent spend (nothing in the last 30 complete days) > the action
 for the arm with the most credits. Only an action verdict carries SQL, and only for a plain upper-case
 three-part name (remediation fails closed on anything else). A missing measurement stays NaN (renders '—').
@@ -34,15 +35,20 @@ ARM_VERDICT = {"CLUSTERING": "Suspend clustering", "SEARCH_OPT": "Drop search op
 # SAVINGS_LEDGER.FINDING_TYPE (VARCHAR(40)); none is an autobooked lever, so no scan settles these rows.
 ARM_FINDING_TYPE = {"CLUSTERING": "SUSPEND_RECLUSTER", "SEARCH_OPT": "DROP_SEARCH_OPTIMIZATION",
                     "MV_REFRESH": "SUSPEND_MV_REFRESH"}
+# the booking dedupe spans every arm's type: one object is one saving, whichever arm dominates (review C6)
+_BOOKED_TYPES_SQL = ", ".join(sql_literal(t, 40) for t in ARM_FINDING_TYPE.values())
 VERDICT_KEEP = "Keep"
 VERDICT_SHARED = "Check share consumers"
 VERDICT_NO_RECENT = "No recent spend"
 VERDICT_UNCONFIRMED = "Unconfirmed"
+# PR C review C11: no live object has this name any more (the confirm's TABLES bridge found no undeleted
+# row), so it was dropped or renamed: its maintenance already stopped and an ALTER would fail.
+VERDICT_GONE = "Object gone"
 ACTION_VERDICTS = frozenset(ARM_VERDICT.values())
 UNREAD_WINDOW_DAYS = 90
 # display order: the actions first, then what needs a person, then what is settled
 _VERDICT_RANK = {**dict.fromkeys(ARM_VERDICT.values(), 0), VERDICT_SHARED: 1, VERDICT_NO_RECENT: 2,
-                 VERDICT_UNCONFIRMED: 3, VERDICT_KEEP: 4}
+                 VERDICT_GONE: 3, VERDICT_UNCONFIRMED: 4, VERDICT_KEEP: 5}
 _READ_COLS = ("MATCHED_BY_ID", "SHARED_DATABASE", "READ_QUERIES", "READ_USERS", "LAST_READ", "WRITE_QUERIES")
 VERDICT_COLUMNS = ("OBJECT_FQN", "OBJECT_DOMAIN", "COMPANY", "VERDICT", "ARM", "FINDING_TYPE", "EST_MONTHLY_USD",
                    "MAINT_USD", "CLUSTERING_CREDITS", "SEARCH_OPT_CREDITS", "MV_REFRESH_CREDITS", "MAINT_CREDITS",
@@ -62,6 +68,16 @@ def _truthy(value: object) -> bool:
         return bool(value)
     except (TypeError, ValueError):
         return False
+
+
+def _known_false(value: object) -> bool:
+    """True only for a MEASURED false (False / 0 / 'FALSE'); None, NaN or pd.NA is unknown, never false."""
+    try:
+        if value is None or bool(pd.isna(value)):
+            return False
+    except (TypeError, ValueError):
+        pass
+    return not _truthy(value)
 
 
 def _text(value: object) -> str:
@@ -155,6 +171,8 @@ def unread_maintenance_verdicts(shortlist: pd.DataFrame | None, reads: pd.DataFr
     for i, row in df.iterrows():
         if not hit[i]:
             verdicts.append(VERDICT_UNCONFIRMED)
+        elif _known_false(row["MATCHED_BY_ID"]):
+            verdicts.append(VERDICT_GONE)
         elif safe_float(row["READ_QUERIES"]) > 0:
             verdicts.append(VERDICT_KEEP)
         elif _truthy(row["SHARED_DATABASE"]):
@@ -180,12 +198,35 @@ def unread_maintenance_verdicts(shortlist: pd.DataFrame | None, reads: pd.DataFr
     return df.reset_index(drop=True)[[*VERDICT_COLUMNS, *rest]]
 
 
+def confirm_failure_note(error_kind: object, error: object = "") -> str:
+    """Why the access-history confirm failed, from run()'s classified error kind (PR C review C8 / C18).
+
+    Only an object-not-visible failure ('absent': "does not exist or not authorized") or an error that names
+    the edition / an unsupported feature blames the edition and the SNOWFLAKE grant; a timeout says so and how
+    to narrow the scan; anything else shows the error itself. This account already reads ACCESS_HISTORY
+    daily (the object-cost loader), so a timeout or a transient fault is the likelier cause there."""
+    kind = str(error_kind or "").strip().lower()
+    err = " ".join(str(error or "").split())[:300]
+    low = err.lower()
+    if kind == "absent" or "enterprise" in low or "unsupported feature" in low:
+        return ("ACCESS_HISTORY is not visible to this app (it needs Enterprise edition and IMPORTED "
+                "PRIVILEGES on the SNOWFLAKE database)")
+    if kind == "timeout":
+        return ("the 90-day access-history check timed out; set the Database filter to narrow the shortlist, "
+                "then retry")
+    return "the access-history check failed" + (f": {err}" if err else "")
+
+
 def book_estimated_sql(row: Mapping[str, object], *, proof_sql: str) -> str:
     """ONE idempotent INSERT of an ESTIMATED SAVINGS_LEDGER row for a confirmed-unread action row.
 
     ``proof_sql`` is built by the data layer (cost_sql.unread_maintenance_proof) and stored as PROOF_SQL,
-    which is what the manual Verify flow needs. Keyed on FINDING_TYPE + TARGET_OBJECT + STATE='ESTIMATED'
-    (WHERE NOT EXISTS), so a second click books nothing. Every value is a sql_literal / sql_number at the
+    which is what the manual Verify flow needs. Keyed on the OBJECT (WHERE NOT EXISTS: the same
+    TARGET_OBJECT under ANY unread-maintenance finding type, in any state but REJECTED), because the estimate
+    is the object's credits across every arm while FINDING_TYPE follows the dominant arm, which can flip as
+    the pre-ALTER days roll out of the window (PR C review C6): a second click, a flipped arm or an already
+    VERIFIED booking books nothing; a REJECTED one can be booked again. Every value is a sql_literal /
+    sql_number at the
     V005 / V053 column widths, and the statement holds no ';' outside literals (it passes the executor
     allow-list as one INSERT into OVERWATCH's own table). ValueError unless the row is an action verdict
     with review SQL, a positive estimate, a finding type, an object and a proof query."""
@@ -215,7 +256,8 @@ def book_estimated_sql(row: Mapping[str, object], *, proof_sql: str) -> str:
         f"{sql_literal(fqn, 300)}\n"
         "WHERE NOT EXISTS (\n"
         f"    SELECT 1 FROM {ledger}\n"
-        f"    WHERE FINDING_TYPE = {sql_literal(ftype, 40)} AND TARGET_OBJECT = {sql_literal(fqn, 300)}\n"
-        "      AND STATE = 'ESTIMATED'\n"
+        f"    WHERE TARGET_OBJECT = {sql_literal(fqn, 300)}\n"
+        f"      AND FINDING_TYPE IN ({_BOOKED_TYPES_SQL})\n"
+        "      AND STATE <> 'REJECTED'\n"
         ")"
     )

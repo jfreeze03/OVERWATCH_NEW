@@ -83,7 +83,18 @@ def test_builder_window_is_clamped_and_totals_are_uncapped():
     assert ">= 1.0\n" in sql and ">= 2.5\n" in cost_sql.maintenance_on_unread(min_credits=2.5)
     assert ">= 1.0\n" in cost_sql.maintenance_on_unread(min_credits="garbage")     # garbage -> the default
     assert ">= 0.0\n" in cost_sql.maintenance_on_unread(min_credits=-5)
-    assert "MIN(MIN(DAY)) OVER () AS COVERAGE_START_DAY" in sql and "MAX(MAX(DAY)) OVER () AS LEDGER_LAST_DAY" in sql
+    # PR C review C7: the coverage bounds are LEDGER-WIDE (a one-row CTE with the window predicate only), never
+    # the company / Database-filtered rows (a quiet database is not a failing load); cross-joined, so no row
+    # multiplication before the window totals or the LIMIT
+    bounds = sql.split("b AS (", 1)[1].split("\n),\n", 1)[0]
+    assert "SELECT MIN(DAY) AS COVERAGE_START_DAY, MAX(DAY) AS LEDGER_LAST_DAY" in bounds
+    assert "WHERE DAY >= DATEADD('day', -90, CURRENT_DATE()) AND DAY < CURRENT_DATE()" in bounds
+    for scoped in ("COMPANY", "SPLIT_PART", "COST_ARM", "UNATTRIBUTED"):
+        assert scoped not in bounds, scoped
+    scoped_sql = cost_sql.maintenance_on_unread(90, "ALFA", "QUIET")
+    assert scoped_sql.split("b AS (", 1)[1].split("\n),\n", 1)[0] == bounds       # scope never reaches it
+    assert "b.COVERAGE_START_DAY, b.LEDGER_LAST_DAY" in sql and "FROM c\nCROSS JOIN b\n" in sql
+    assert "OVER () AS COVERAGE_START_DAY" not in sql and "OVER () AS LEDGER_LAST_DAY" not in sql
     # an MV that is also clustered reads MATERIALIZED_VIEW, not the clustering arm's 'TABLE'
     assert "IFF(MAX(IFF(COST_ARM = 'MV_REFRESH', 1, 0)) = 1, 'MATERIALIZED_VIEW'" in sql
 
@@ -114,11 +125,18 @@ def test_proof_builder_is_central_pinned_and_runnable():
     from app.data.common import account_today_sql
     proof = cost_sql.unread_maintenance_proof('Db.S."MyTable"', date(2026, 9, 29), 12.345678)
     assert ";" not in proof and account_today_sql() in proof and "CURRENT_DATE" not in proof
-    assert "UPPER(REPLACE(OBJECT_FQN, '\"', '')) = 'DB.S.MYTABLE'" in proof   # the shortlist's normalized key
-    assert "DAY >= '2026-09-29'::DATE" in proof and "12.3457 AS BASELINE_MONTHLY_CREDITS" in proof
-    assert "COST_ARM IN ('CLUSTERING', 'SEARCH_OPT', 'MV_REFRESH')" in proof
+    assert "UPPER(REPLACE(f.OBJECT_FQN, '\"', '')) = 'DB.S.MYTABLE'" in proof   # the shortlist's normalized key
+    assert "12.3457 AS BASELINE_MONTHLY_CREDITS" in proof
+    assert "f.COST_ARM IN ('CLUSTERING', 'SEARCH_OPT', 'MV_REFRESH')" in proof
+    # PR C review C10: the booking day is left out (it carries pre-ALTER credits) and the after-window ends at
+    # the ledger's newest loaded day, so an unloaded day is neither summed as 0 nor divided by
+    assert "f.DAY > '2026-09-29'::DATE AND f.DAY <= l.LOADED_THROUGH" in proof and "f.DAY >= " not in proof
+    assert (f"WITH l AS (SELECT MAX(DAY) AS LOADED_THROUGH FROM DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY "
+            f"WHERE DAY >= '2026-09-29'::DATE AND DAY < {account_today_sql()})") in proof
+    assert "NULLIF(GREATEST(MAX(DATEDIFF('day', '2026-09-29'::DATE, l.LOADED_THROUGH)), 0), 0)" in proof
     assert sqlglot.parse_one(proof, read="snowflake").named_selects == [
-        "BASELINE_MONTHLY_CREDITS", "CREDITS_SINCE_BOOKED", "DAYS_SINCE_BOOKED", "MONTHLY_CREDITS_NOW"]
+        "BASELINE_MONTHLY_CREDITS", "LOADED_THROUGH", "DAYS_MEASURED", "CREDITS_SINCE_BOOKED",
+        "MONTHLY_CREDITS_NOW"]
     with pytest.raises(ValueError):
         cost_sql.unread_maintenance_proof("  ", date(2026, 9, 29), 1.0)
     hostile = cost_sql.unread_maintenance_proof("ZZINJZZ' OR '1'='1", date(2026, 9, 29), 1.0)
@@ -191,6 +209,8 @@ def test_verdicts_per_arm_and_sql():
     assert by.loc["DB.S.T1", "EST_MONTHLY_USD"] == 30.0 and by.loc["DB.S.T1", "MAINT_USD"] == 102.0
     assert dict(by["FINDING_TYPE"]) == {"DB.S.T1": "SUSPEND_RECLUSTER", "DB.S.T2": "DROP_SEARCH_OPTIMIZATION",
                                         "DB.S.MV1": "SUSPEND_MV_REFRESH"}
+    t1_rev = by.loc["DB.S.T1", "REVERSE_SQL"].splitlines()
+    assert t1_rev[0] == "ALTER TABLE DB.S.T1 RESUME RECLUSTER;" and t1_rev[1].startswith("-- before the DROP")
     for ftype in ARM_FINDING_TYPE.values():
         assert len(ftype) <= 40 and ftype not in LEDGER_AUTOBOOKED_LEVERS
     # the action rows sort by estimate, largest first
@@ -232,13 +252,67 @@ def test_verdict_precedence_and_honesty():
         assert e.empty and list(e.columns) == list(VERDICT_COLUMNS)
 
 
+def test_a_dropped_or_renamed_object_is_gone_not_an_action():
+    """PR C review C11: the confirm's TABLES bridge (live rows only) found no object under this name, so it was
+    dropped or renamed: no action verdict, no SQL, no finding type, and out of the KPIs / savings roll-up, even
+    with maintenance spend still in the ledger's last 30 days (or a read before the drop)."""
+    from app.logic.unread_maintenance import VERDICT_GONE
+    short = _short(DB__S__DROPPED={"CLUSTERING_CREDITS": 8.0, "MAINT_CREDITS_30D": 8.0},
+                   DB__S__RENAMED={"SEARCH_OPT_CREDITS": 5.0, "MAINT_CREDITS_30D": 3.0},
+                   DB__S__LIVE={"CLUSTERING_CREDITS": 4.0, "MAINT_CREDITS_30D": 2.0},
+                   DB__S__NOCOL={"CLUSTERING_CREDITS": 4.0, "MAINT_CREDITS_30D": 2.0})
+    reads = _reads(DB__S__DROPPED={"MATCHED_BY_ID": False}, DB__S__RENAMED={"MATCHED_BY_ID": 0, "READ_QUERIES": 2},
+                   DB__S__LIVE={"MATCHED_BY_ID": "TRUE"}, DB__S__NOCOL={"MATCHED_BY_ID": None})
+    out = unread_maintenance_verdicts(short, reads, rate=3.0).set_index("OBJECT_FQN")
+    assert out.loc["DB.S.DROPPED", "VERDICT"] == VERDICT_GONE == "Object gone"
+    assert out.loc["DB.S.RENAMED", "VERDICT"] == VERDICT_GONE                 # gone outranks a pre-drop read
+    for fqn in ("DB.S.DROPPED", "DB.S.RENAMED"):
+        assert out.loc[fqn, "REVIEW_SQL"] is None and out.loc[fqn, "FINDING_TYPE"] is None, fqn
+    assert out.loc["DB.S.LIVE", "VERDICT"] == "Suspend clustering"
+    assert out.loc["DB.S.NOCOL", "VERDICT"] == "Suspend clustering"          # an unknown match is not 'gone'
+    ordered = unread_maintenance_verdicts(short, reads, rate=3.0)
+    acts = ordered[ordered["VERDICT"].isin(ACTION_VERDICTS)]
+    assert set(acts["OBJECT_FQN"]) == {"DB.S.LIVE", "DB.S.NOCOL"} and acts["EST_MONTHLY_USD"].sum() == 12.0
+    assert list(ordered["VERDICT"])[-2:] == ["Object gone", "Object gone"]    # after the actions
+    assert {o.target for o in savings_rollup.unread_maintenance_opportunities(ordered)} == {"DB.S.LIVE", "DB.S.NOCOL"}
+    with pytest.raises(ValueError):
+        book_estimated_sql(ordered.set_index("OBJECT_FQN").loc["DB.S.DROPPED"].to_dict()
+                           | {"OBJECT_FQN": "DB.S.DROPPED"}, proof_sql="SELECT 1")
+    # a failed confirm still reads Unconfirmed (it outranks gone: nothing was measured)
+    assert set(unread_maintenance_verdicts(short, None, rate=3.0)["VERDICT"]) == {"Unconfirmed"}
+
+
+def test_confirm_failure_is_worded_by_its_kind():
+    """PR C review C8 / C18: only an object-not-visible / edition failure blames the edition."""
+    from app.logic.unread_maintenance import confirm_failure_note
+    absent = confirm_failure_note("absent", "Object 'ACCESS_HISTORY' does not exist or not authorized.")
+    assert "Enterprise edition" in absent and "IMPORTED PRIVILEGES" in absent
+    assert "Enterprise edition" in confirm_failure_note("other", "Unsupported feature 'ACCESS_HISTORY'.")
+    timeout = confirm_failure_note("timeout", "Statement reached its statement or warehouse timeout of 180 s")
+    assert "timed out" in timeout and "Database filter" in timeout and "Enterprise" not in timeout
+    other = confirm_failure_note("other", "SQL compilation error:\n  invalid argument")
+    assert other == "the access-history check failed: SQL compilation error: invalid argument"
+    assert "Enterprise" not in other
+    for kind in ("unknown_function", "missing_column", "", None):
+        assert "Enterprise" not in confirm_failure_note(kind, "boom"), kind
+    assert confirm_failure_note("other") == "the access-history check failed"
+    assert len(confirm_failure_note("other", "x" * 5000)) < 400                 # a runaway message is capped
+
+
 def test_remediation_generators_fail_closed():
     assert remediation.suspend_recluster_object("DB.S.T") == ("ALTER TABLE DB.S.T SUSPEND RECLUSTER;",
                                                                "ALTER TABLE DB.S.T RESUME RECLUSTER;")
     assert remediation.suspend_recluster_object("DB.S.MV", materialized_view=True)[0] == (
         "ALTER MATERIALIZED VIEW DB.S.MV SUSPEND RECLUSTER;")
-    assert remediation.drop_search_optimization("DB.S.T") == (
-        "ALTER TABLE DB.S.T DROP SEARCH OPTIMIZATION;", "ALTER TABLE DB.S.T ADD SEARCH OPTIMIZATION;  -- full rebuild")
+    # PR C review C9: the reverse of a no-ON drop is guidance, never a bare ADD SEARCH OPTIMIZATION (that re-adds
+    # table-wide EQUALITY, not the dropped per-column methods): capture DESCRIBE first, then re-add each method
+    drop, rev = remediation.drop_search_optimization("DB.S.T")
+    assert drop == "ALTER TABLE DB.S.T DROP SEARCH OPTIMIZATION;"
+    assert all(line.startswith("-- ") for line in rev.splitlines()), rev          # comments only: nothing to run
+    assert "DESCRIBE SEARCH OPTIMIZATION ON DB.S.T;" in rev.splitlines()[0]
+    assert "ALTER TABLE DB.S.T ADD SEARCH OPTIMIZATION ON <METHOD>(<target>)" in rev and "full rebuild" in rev
+    assert "table-wide EQUALITY only, not the dropped configuration" in rev
+    assert "ALTER TABLE DB.S.T ADD SEARCH OPTIMIZATION;  -- full rebuild" not in rev
     assert remediation.suspend_mv_refresh("D_1.S$.M") == ("ALTER MATERIALIZED VIEW D_1.S$.M SUSPEND;",
                                                           "ALTER MATERIALIZED VIEW D_1.S$.M RESUME;")
     for bad in ("DB.S.MyTable", 'DB.S."x"', "A.B", "A.B.C.D", "", "DB.S.T;DROP", "DB..T", "1DB.S.T"):
@@ -263,7 +337,13 @@ def test_booking_sql_is_estimated_idempotent_and_executable():
     assert sql.startswith("INSERT INTO DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER (DESCRIPTION, STATE, ESTIMATED_USD, "
                           "PROOF_SQL, NOTES, FINDING_TYPE, TARGET_OBJECT)")
     assert "'ESTIMATED', 30.0," in sql and "'SUSPEND_RECLUSTER'" in sql and "'DB.S.T1'" in sql
-    assert "WHERE NOT EXISTS (" in sql and "AND STATE = 'ESTIMATED'" in sql
+    # PR C review C6: the dedupe keys on the OBJECT across every unread-maintenance type and any live state
+    assert "WHERE NOT EXISTS (" in sql and "STATE = 'ESTIMATED'" not in sql
+    guard = sql.split("WHERE NOT EXISTS (", 1)[1]
+    assert ("    WHERE TARGET_OBJECT = 'DB.S.T1'\n"
+            "      AND FINDING_TYPE IN ('SUSPEND_RECLUSTER', 'DROP_SEARCH_OPTIMIZATION', 'SUSPEND_MV_REFRESH')\n"
+            "      AND STATE <> 'REJECTED'\n)") in guard
+    assert "FINDING_TYPE = " not in guard                                  # never the dominant arm alone
     assert _statement_allowed(sql) == (True, "")                           # ';' only inside literals
     sqlglot.parse_one(sql, read="snowflake")
     ok, why = can_verify({"STATE": "ESTIMATED", "PROOF_SQL": proof, "VERIFIED_USD": 5})
@@ -283,6 +363,45 @@ def test_booking_sql_is_estimated_idempotent_and_executable():
     assert "ZZINJZZ" not in _strip_literals(hostile) and _statement_allowed(hostile)[0]
 
 
+def test_booking_dedupes_on_the_object_executed():
+    """PR C review C6, EXECUTED in sqlite: the dominant arm flips as the pre-ALTER clustering days roll out of the
+    window (SUSPEND_RECLUSTER on day 1, DROP_SEARCH_OPTIMIZATION by day 10), but the object is one saving: the
+    second arm's INSERT books nothing, nor does any click once the row is VERIFIED; a REJECTED booking can be
+    booked again, and another object is unaffected."""
+    import sqlite3
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE SAVINGS_LEDGER (DESCRIPTION TEXT, STATE TEXT, ESTIMATED_USD REAL, PROOF_SQL TEXT, "
+                "NOTES TEXT, FINDING_TYPE TEXT, TARGET_OBJECT TEXT)")
+    proof = cost_sql.unread_maintenance_proof("DB.S.T", date(2026, 9, 1), 20.0)
+
+    def row(clustering, search, c30, fqn="DB.S.T"):
+        short = _short(**{fqn.replace(".", "__"): {"CLUSTERING_CREDITS": clustering, "SEARCH_OPT_CREDITS": search,
+                                                   "MAINT_CREDITS_30D": c30}})
+        return unread_maintenance_verdicts(short, _reads(**{fqn.replace(".", "__"): {}}), rate=3.0).iloc[0].to_dict()
+
+    def book(r):
+        con.execute(book_estimated_sql(r, proof_sql=proof).replace("DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER",
+                                                                   "SAVINGS_LEDGER"))
+
+    def n():
+        return con.execute("SELECT COUNT(*) FROM SAVINGS_LEDGER WHERE TARGET_OBJECT = 'DB.S.T'").fetchone()[0]
+
+    day1, day10 = row(40.0, 35.0, 20.0), row(30.0, 35.0, 12.0)
+    assert (day1["FINDING_TYPE"], day10["FINDING_TYPE"]) == ("SUSPEND_RECLUSTER", "DROP_SEARCH_OPTIMIZATION")
+    book(day1)
+    book(day1)                                                        # the repeat click
+    book(day10)                                                       # the flipped arm
+    assert n() == 1
+    con.execute("UPDATE SAVINGS_LEDGER SET STATE = 'VERIFIED'")
+    book(day10)
+    assert n() == 1                                                   # a verified booking is still the booking
+    con.execute("UPDATE SAVINGS_LEDGER SET STATE = 'REJECTED'")
+    book(day10)
+    assert n() == 2                                                   # rejected: bookable again
+    book(row(9.0, 0.0, 4.0, fqn="DB.S.OTHER"))
+    assert con.execute("SELECT COUNT(*) FROM SAVINGS_LEDGER").fetchone()[0] == 3
+
+
 def test_rollup_registers_the_lever():
     short = _short(D__S__A={"CLUSTERING_CREDITS": 9.0, "MAINT_CREDITS_30D": 4.0},
                    D__S__K={"CLUSTERING_CREDITS": 9.0})
@@ -300,6 +419,11 @@ def test_rollup_registers_the_lever():
 
 # --- the Storage & waste wiring (source) ------------------------------------------------------------------
 
+def _joined(src: str) -> str:
+    """Adjacent string literals joined (a caption split across source lines reads as one sentence)."""
+    return re.sub(r'"\s*\n\s*f?"', "", src)
+
+
 def _storage_branch() -> str:
     opt = read("app/ui/pages/cost_parts/optimize.py")
     return opt.split('elif opt_section == "Storage & waste":', 1)[1].split('st.markdown("**Storage growth movers**")', 1)[0]
@@ -313,7 +437,12 @@ def test_optimize_wiring_source():
     assert toggle < branch.index("insights_sql.object_reads_confirm(")
     assert branch.index("cost_sql.maintenance_on_unread(") < branch.index("insights_sql.object_reads_confirm(")
     assert branch.count("probe=True") >= 4                               # the object-ledger pair + both new reads
-    assert 'tier="historical"' in branch.split("insights_sql.object_reads_confirm(", 1)[1][:400]
+    # (PR C review C8 moved the confirm SQL into _conf_sql ahead of the latch, so the historical-tier lock now
+    # targets the run() call itself instead of a 400-char window after the builder: at least as strict)
+    assert "_conf_sql = insights_sql.object_reads_confirm(" in branch
+    conf_run = branch.split("_conf = run(_conf_sql,", 1)[1][:200]
+    assert 'tier="historical"' in conf_run and "probe=True" in conf_run
+    assert branch.count("run(_conf_sql") == 1
     # sticky selection resolved by FQN, never by a raw index into a re-sortable frame
     assert "_unread_maint_sel_seen" in branch and "unread_maint_sel_last" in branch
     assert '_uv[_uv["OBJECT_FQN"].astype(str) == _um_pick]' in branch
@@ -335,17 +464,34 @@ def test_optimize_wiring_source():
     assert opt.index('key="cost_unread_maint_toggle"') < opt.index('write_gate_open("waste")')
     # degraded honesty: a failed confirm says so and offers no SQL; a stale ledger warns
     assert "ledger-only shortlist, not suspend candidates; no SQL." in branch
+    # PR C review C8 / C18: the reason is worded by the error kind (never a blanket edition claim), and the
+    # failure is latched per SQL + cache scope so the 180 s scan does not re-run on every rerun; retry on request
+    assert "needs Enterprise edition" not in branch
+    assert "confirm_failure_note(_conf.error_kind, _conf.error)" in branch
+    latch = branch.split('_conf_fail = st.session_state.get("_unread_confirm_failed")', 1)[1]
+    assert latch.index('_conf_fail.get("sig") == _conf_sig') < latch.index("_conf = run(_conf_sql,")
+    assert latch.index("_conf = run(_conf_sql,") < latch.index('st.session_state["_unread_confirm_failed"] = {')
+    assert "_cache_scope(_conf_sql)" in branch                             # Refresh re-arms the latch
+    assert 'key="unread_maint_confirm_retry"' in branch and "on_click=_clear_unread_confirm_latch" in branch
+    clear = opt.split("def _clear_unread_confirm_latch(", 1)[1].split("\ndef ", 1)[0]
+    assert 'st.session_state.pop("_unread_confirm_failed", None)' in clear
+    # PR C review C11: a dropped / renamed object says so and stays out of the totals
+    assert "_uv[\"VERDICT\"].eq(VERDICT_GONE).sum()" in branch and "not counted in the totals above" in branch
+    assert "VERDICT_GONE: " in branch
+    # PR C review C9: the bulk caption never implies a bare ADD restores the dropped configuration
+    assert "capture them first with DESCRIBE SEARCH OPTIMIZATION" in _joined(branch)
     assert "st.warning(f\"The object ledger's newest day is" in branch
     assert "A fixed 90-day window: the window picker does not narrow it." in branch
 
 
 def test_status_chips_cover_every_verdict():
     from app.logic.unread_maintenance import (
+        VERDICT_GONE,
         VERDICT_KEEP,
         VERDICT_NO_RECENT,
         VERDICT_SHARED,
         VERDICT_UNCONFIRMED,
     )
     from app.ui.status_colors import _VERDICTS
-    for v in (*ACTION_VERDICTS, VERDICT_KEEP, VERDICT_SHARED, VERDICT_NO_RECENT, VERDICT_UNCONFIRMED):
+    for v in (*ACTION_VERDICTS, VERDICT_KEEP, VERDICT_SHARED, VERDICT_NO_RECENT, VERDICT_UNCONFIRMED, VERDICT_GONE):
         assert v.upper() in _VERDICTS, v

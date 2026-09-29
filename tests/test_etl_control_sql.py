@@ -681,8 +681,9 @@ def test_cycle_night_health_scan_parses():
             "CYCLE_AGE_SEC", "NEXT_CYCLE_OVERDUE", "TOTAL_WORKFLOWS", "TOTAL_FAILED_TASKS", "TOTAL_FAILED_WF",
             "TOTAL_MISSING_WF", "TOTAL_RUNNING_WF", "TOTAL_PENDING_WF", "SNAPSHOT_TS"]
     # Next-Fifty #36: the ETA columns are APPENDED after SNAPSHOT_TS, so every existing position holds
+    # (PR C review C2: TERM_RAN_LAST_WEEK is appended LAST, so every earlier position still holds)
     eta_cols = ["START_OFFSET_SEC", "END_OFFSET_SEC", "TYPICAL_END_OFFSET_SEC", "END_NIGHTS_COUNT",
-                "PACE_WORKFLOW_NAME", "PACE_LATE_SEC", "PACE_END_AT"]
+                "PACE_WORKFLOW_NAME", "PACE_LATE_SEC", "PACE_END_AT", "TERM_RAN_LAST_WEEK"]
     for sw in ("WF_START", ""):
         tree = sqlglot.parse_one(etl.cycle_night_health_scan(_CTRL, start_workflow=sw), read="snowflake")
         assert tree.named_selects == cols + eta_cols   # the column contract the summarizer + shaped harness share
@@ -714,6 +715,16 @@ def test_cycle_night_health_scan_end_offsets_and_pace():
     assert f"g.END_NIGHTS_COUNT >= {etl.NIGHT_END_MIN_NIGHTS}" in pace and etl.NIGHT_END_MIN_NIGHTS == 4
     assert "g.NIGHT_STATUS = 'OK'" in pace
     assert "g.TYPICAL_END_OFFSET_SEC < tt.TERM_TYPICAL_END_SEC" in pace
+    # PR C review C3: a clean end needs at least the fewest tasks a clean prior night dispatched (V156's
+    # MIN_TERM_TASKS), so a half-dispatched workflow is neither the pace marker nor a timeline finish
+    assert ("MIN(IFF(w.FAILED_TASK_COUNT = 0 AND w.RUNNING_TASK_COUNT = 0, w.TASK_COUNT, NULL))\n"
+            "           AS USUAL_TASK_COUNT") in hist
+    assert ("IFF(t.FAILED_TASK_COUNT = 0 AND t.RUNNING_TASK_COUNT = 0\n"
+            "             AND t.TASK_COUNT >= COALESCE(h.USUAL_TASK_COUNT, 1),\n") in graded
+    # PR C review C2: the terminal's last-week flag rides on every row as a scalar read of the one-row term
+    # CTE (no join, so the FROM below and the TOTAL_* windows are untouched)
+    assert "MAX(RAN_LAST_WEEK) AS TERM_RAN_LAST_WEEK" in sql.split("term AS (", 1)[1].split("\n),\n", 1)[0]
+    assert "       (SELECT TERM_RAN_LAST_WEEK FROM term) AS TERM_RAN_LAST_WEEK\n  FROM graded\n" in sql
     # one pace row broadcast to every row (no multiplication); ORDER BY and LIMIT unchanged
     assert "  FROM graded\n  LEFT JOIN pace p ON 1 = 1\n  ORDER BY CASE NIGHT_STATUS" in sql
     assert sql.rstrip().endswith(f"LIMIT {etl.MAX_NIGHT_WORKFLOWS}")
@@ -727,6 +738,7 @@ def test_cycle_night_health_scan_binds_terminal_as_literal():
     assert with_end.count("WORKFLOW_NAME = 'WF_START'") == 2           # the starter binds exactly as before
     no_end = etl.cycle_night_health_scan(_CTRL, start_workflow="WF_START")
     assert "term AS (" not in no_end and "CROSS JOIN term" not in no_end and "pace AS (" in no_end
+    assert "NULL AS TERM_RAN_LAST_WEEK" in no_end and "FROM term" not in no_end    # no terminal: no flag
     inj = etl.cycle_night_health_scan(_CTRL, end_workflow="x' OR '1'='1")
     assert "WHERE WORKFLOW_NAME = 'x'' OR ''1''=''1'" in inj
     assert "WORKFLOW_NAME = '" not in etl.cycle_night_health_scan(_CTRL)   # no args: no literal at all

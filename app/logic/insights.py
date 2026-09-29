@@ -1388,6 +1388,27 @@ def _eta_hhmm(ts: pd.Timestamp | None) -> str:
         return "—"
 
 
+def _pace_spike_share(night_df: pd.DataFrame, pace_wf: str | None, pace_end: pd.Timestamp | None,
+                      start: pd.Timestamp, late: float, extra: float, median_sec: float) -> float:
+    """PR C review C1: the part of a labelled night's typical extra (``extra`` seconds) the pace marker is
+    expected to carry already, so the pace projection never counts it twice. The extra is assumed to build up
+    evenly across the cycle, so the marker carries extra x (its usual end offset / the median cycle length),
+    capped to [0, extra]. The usual end is the marker row's TYPICAL_END_OFFSET_SEC, else PACE_END_AT − start −
+    PACE_LATE_SEC (the same number: tonight's end offset minus the lateness). When neither is known the whole
+    extra is allowed (the marker is the latest-ending workflow before the terminal), so a labelled night never
+    reads 'at risk' from the lateness it is expected to have."""
+    usual = float("nan")
+    if pace_wf and {"WORKFLOW_NAME", "TYPICAL_END_OFFSET_SEC"}.issubset(night_df.columns):
+        hit = night_df[night_df["WORKFLOW_NAME"].astype(str) == pace_wf]
+        if not hit.empty:
+            usual = safe_float(hit.iloc[0].get("TYPICAL_END_OFFSET_SEC"), default=float("nan"))
+    if usual != usual and pace_end is not None:
+        usual = (pace_end - start).total_seconds() - late
+    if usual != usual or not (median_sec > 0):
+        return extra
+    return extra * min(1.0, max(0.0, usual / median_sec))
+
+
 def etl_cycle_eta(fc: dict | None, night_df: pd.DataFrame | None = None, *, end_workflow: str = "",
                   min_nights: int = SLA_FORECAST_MIN_RUNS, night_row_cap: int = ETA_NIGHT_ROW_CAP) -> dict:
     """Tonight's projected cycle finish while the cycle is IN FLIGHT (Operations ▸ Tonight + the Brief tile).
@@ -1402,16 +1423,20 @@ def etl_cycle_eta(fc: dict | None, night_df: pd.DataFrame | None = None, *, end_
       (``spike_extra_sec`` > 0) shifts all three. The projection never falls before the read's snapshot.
     - Pace (a separate figure that never moves the headline): the night frame's PACE_LATE_SEC (the
       furthest workflow that finished clean tonight, vs its own usual end) moves the projection by that
-      lateness. ``worst_projected`` is the later of the two and drives ``risk``.
+      lateness. On a labelled night the marker's expected share of the typical extra is allowed first
+      (``pace_spike_share_sec``; ``pace_late_adj_sec`` is what moves it), because the headline already
+      carries the extra. ``worst_projected`` is the later of the two and drives ``risk``.
     - Deadlines are the forecaster's (the first target time after the start; the hard deadline >= 60 min
       past it).
 
     Returns {} when there is nothing to project: no forecast, the latest night is not in flight (complete
     or failed), or it is stale (the snapshot is ETA_STALE_AFTER_HARD_H past its hard deadline, V156's
     rule). Returns {'ok': False, 'reason': 'terminal_not_due' | 'short_history', ...} when it will not
-    guess: the terminal workflow is absent from an uncapped night frame (not due tonight, V156's
-    term_lw analogue), or fewer than ``min_nights`` clean nights. Otherwise ok=True with the datetimes,
-    seconds and preformatted *_hhmm strings, so every surface formats identically. Pure; never raises."""
+    guess: the terminal workflow is absent from an uncapped night frame AND did not run on this night
+    last week (TERM_RAN_LAST_WEEK 0 / NULL: V156's term_lw rule; a frame without that column, the shared
+    read's fallback, treats absence alone as not due), or fewer than ``min_nights`` clean nights. Otherwise
+    ok=True with the datetimes, seconds and preformatted *_hhmm strings, so every surface formats
+    identically. Pure; never raises."""
     try:
         return _etl_cycle_eta(fc, night_df, end_workflow=end_workflow, min_nights=min_nights,
                               night_row_cap=night_row_cap)
@@ -1447,7 +1472,13 @@ def _etl_cycle_eta(fc: dict | None, night_df: pd.DataFrame | None, *, end_workfl
     end_wf = str(end_workflow or "").strip()
     if (night_ok and end_wf and night_df is not None and len(night_df) < int(night_row_cap)
             and end_wf not in set(night_df["WORKFLOW_NAME"].astype(str))):
-        return {"ok": False, "reason": "terminal_not_due", "start": start, "end_workflow": end_wf}
+        # PR C review C2: the frame keeps a not-yet-started workflow only when it ran >= 10 of 14 nights AND
+        # last week, so one skipped night drops a weekday-only terminal out of it. V156 calls the terminal
+        # due whenever it ran on this night last week; the frame carries that flag on every row.
+        _lw = (safe_float(night_df.iloc[0].get("TERM_RAN_LAST_WEEK"), default=0.0)
+               if "TERM_RAN_LAST_WEEK" in night_df.columns else 0.0)
+        if not (_lw > 0):
+            return {"ok": False, "reason": "terminal_not_due", "start": start, "end_workflow": end_wf}
     durs: list[float] = []
     for night in fc["nights"][1:]:                      # newest first; [0] is tonight's in-flight night
         if not isinstance(night, dict):
@@ -1473,6 +1504,8 @@ def _etl_cycle_eta(fc: dict | None, night_df: pd.DataFrame | None, *, end_workfl
     projected = max(raw, snap) if snap is not None else raw
     pace_wf: str | None = None
     pace_late: float | None = None
+    pace_adj: float | None = None
+    pace_share = 0.0
     pace_end: pd.Timestamp | None = None
     pace_proj: pd.Timestamp | None = None
     # pace is KNOWN only from tonight's frame with the pace columns (not a stale night, not the shared read's
@@ -1486,7 +1519,14 @@ def _etl_cycle_eta(fc: dict | None, night_df: pd.DataFrame | None, *, end_workfl
             _pw = r0.get("PACE_WORKFLOW_NAME")
             pace_wf = (str(_pw).strip() or None) if _pw is not None and not pd.isna(_pw) else None
             pace_end = _naive_ts(r0.get("PACE_END_AT"))
-            _pp = start + timedelta(seconds=typ + late)
+            # PR C review C1: on a labelled night ``typ`` already carries the typical extra, while the marker's
+            # lateness is measured against its usual (mostly ordinary-night) end, so the share of the extra
+            # expected upstream of the marker would count twice. Allow that share before moving the projection.
+            if extra > 0:
+                pace_share = _pace_spike_share(night_df, pace_wf, pace_end, start, late, extra,
+                                               float(q.iloc[1]))
+            pace_adj = round(late - pace_share, 1)
+            _pp = start + timedelta(seconds=typ + late - pace_share)
             pace_proj = max(_pp, snap) if snap is not None else _pp
     worst = max(projected, pace_proj) if pace_proj is not None else projected
     if snap is None or snap <= raw:
@@ -1514,6 +1554,10 @@ def _etl_cycle_eta(fc: dict | None, night_df: pd.DataFrame | None, *, end_workfl
         "vs_breach_sec": round((dl_h - projected).total_seconds(), 1),
         "pace_available": pace_available,
         "pace_workflow": pace_wf, "pace_late_sec": pace_late, "pace_end": pace_end,   # + = behind
+        # the lateness that moves the pace projection: pace_late_sec minus the typical extra this marker is
+        # expected to carry on a labelled night (pace_spike_share_sec; None on an ordinary night)
+        "pace_late_adj_sec": pace_adj,
+        "pace_spike_share_sec": (round(pace_share, 1) if pace_share > 0 else None),
         "pace_projected": pace_proj, "worst_projected": worst, "risk": risk,
         "risk_from_pace": bool(pace_proj is not None and pace_proj > projected),
         "phase": phase,
@@ -1548,8 +1592,8 @@ def cycle_timeline_frame(night_df: pd.DataFrame | None, *, start_workflow: str =
     blanked (NaN, so it renders '—') until the workflow has SLA_FORECAST_MIN_RUNS clean prior finishes;
     LATE_VS_USUAL_SEC = tonight's end offset − the usual end (+ = late); RUNNING_FOR_SEC = the snapshot
     − FIRST_START_AT for RUNNING rows only. TIMELINE_NOTE (later wins): 'Finished last so far' (the OK
-    row with the latest end) < 'Pace marker' < 'Starts the cycle' < 'Finishes the cycle'. Sorted by
-    tonight's start offset, else the usual one (NaN last), then name. Duration columns carry _SEC so the
+    row with an end offset, i.e. a clean finish, and the latest end) < 'Pace marker' < 'Starts the
+    cycle' < 'Finishes the cycle'. Sorted by tonight's start offset, else the usual one (NaN last), then name. Duration columns carry _SEC so the
     table humanizes them and the CSV equals the displayed frame. Empty TIMELINE_COLUMNS frame on no
     data or missing columns. Pure; never raises."""
     need = {"WORKFLOW_NAME", "NIGHT_STATUS", "START_OFFSET_SEC", "END_OFFSET_SEC", "TYPICAL_END_OFFSET_SEC"}
@@ -1583,7 +1627,8 @@ def cycle_timeline_frame(night_df: pd.DataFrame | None, *, start_workflow: str =
     else:
         out["RUNNING_FOR_SEC"] = float("nan")
     notes = pd.Series("", index=idx, dtype="object")
-    ok_rows = out["NIGHT_STATUS"].eq("OK")
+    # a clean FINISH only: an OK row with no end offset has not dispatched all its usual tasks yet (PR C C3)
+    ok_rows = out["NIGHT_STATUS"].eq("OK") & out["END_OFFSET_SEC"].notna()
     last_end = _naive_series(out["LAST_END_AT"], idx)
     if ok_rows.any() and last_end[ok_rows].notna().any():
         notes[last_end[ok_rows].idxmax()] = "Finished last so far"

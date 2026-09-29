@@ -166,6 +166,62 @@ def test_terminal_not_due_guard():
     assert etl_cycle_eta(_fc(), stale_night, end_workflow="WF_END")["ok"] is True
 
 
+def test_terminal_that_ran_last_week_is_due_even_outside_the_regular_set():
+    """PR C review C2: the frame drops a not-yet-started workflow unless it ran >= 10 of 14 nights AND last
+    week, so one skipped night hides a weekday-only terminal. V156 calls it due whenever it ran on this night
+    last week (term_lw); the frame's TERM_RAN_LAST_WEEK carries that, and only 0 / NULL means not due."""
+    without_end = _night([{"WORKFLOW_NAME": "WF_START"}, {"WORKFLOW_NAME": "WF_MID"}])
+    due = etl_cycle_eta(_fc(), without_end.assign(TERM_RAN_LAST_WEEK=1), end_workflow="WF_END")
+    assert due["ok"] is True and due["projected_hhmm"] == "05:40"
+    for flag in (0, None, float("nan")):
+        out = etl_cycle_eta(_fc(), without_end.assign(TERM_RAN_LAST_WEEK=flag), end_workflow="WF_END")
+        assert out["ok"] is False and out["reason"] == "terminal_not_due", flag
+
+
+def _labelled(**over) -> dict:
+    """A quarter-end night: the 7h10m median + a 1h typical extra -> 06:40 (06:30-06:50), snapshot 05:20."""
+    return _fc(snapshot="2026-09-10 05:20", upcoming_spike_label="QUARTER_END", spike_extra_sec=3600.0, **over)
+
+
+def _marker(pace_late: float, *, usual_end: float | None = 21600.0, with_end_at: bool = True) -> pd.DataFrame:
+    """The pace marker WF_MID (usual end ``usual_end`` s after the 22:30 start) finished ``pace_late`` s late."""
+    row = {"WORKFLOW_NAME": "WF_MID"}
+    if usual_end is not None:
+        row["TYPICAL_END_OFFSET_SEC"] = usual_end
+    df = _night([{"WORKFLOW_NAME": "WF_START"}, row, {"WORKFLOW_NAME": "WF_END"}], pace_late=pace_late)
+    end_at = _START + timedelta(seconds=(usual_end or 21600.0) + pace_late)
+    return df.assign(PACE_END_AT=end_at if with_end_at else pd.NaT)
+
+
+def test_labelled_night_pace_does_not_count_the_extra_twice():
+    """PR C review C1: on a labelled night the headline already carries the typical extra, while the marker's
+    lateness is against its usual (mostly ordinary) night, so the marker's expected share of the extra (the
+    extra x its usual end / the median cycle) is allowed before moving the pace projection."""
+    eta = etl_cycle_eta(_labelled(), _marker(2700.0), end_workflow="WF_END")
+    assert eta["projected_hhmm"] == "06:40" and (eta["band_lo_hhmm"], eta["band_hi_hhmm"]) == ("06:30", "06:50")
+    share = 3600.0 * 21600.0 / (430 * 60.0)                                  # 6h of the 7h10m median
+    assert eta["pace_spike_share_sec"] == round(share, 1) and eta["pace_late_sec"] == 2700.0
+    assert eta["pace_late_adj_sec"] == round(2700.0 - share, 1)
+    assert eta["pace_hhmm"] == "06:35"                                      # was 07:25 (the extra twice)
+    assert eta["risk"] == "ok" and eta["risk_from_pace"] is False and eta["worst_hhmm"] == "06:40"
+    # the same usual end derived from PACE_END_AT when the marker row is not in the (capped) frame
+    derived = etl_cycle_eta(_labelled(), _marker(2700.0, usual_end=None), end_workflow="WF_END")
+    assert derived["pace_spike_share_sec"] == round(share, 1) and derived["risk_from_pace"] is False
+    # neither known: the whole extra is allowed (the marker is the latest-ending workflow before the terminal)
+    blind = etl_cycle_eta(_labelled(), _marker(2700.0, usual_end=None, with_end_at=False), end_workflow="WF_END")
+    assert blind["pace_spike_share_sec"] == 3600.0 and blind["risk"] == "ok"
+
+
+def test_labelled_night_real_upstream_lateness_still_escalates():
+    late = etl_cycle_eta(_labelled(), _marker(9000.0), end_workflow="WF_END")     # 2h30m behind its usual end
+    assert late["risk_from_pace"] is True and late["risk"] == "breach"
+    assert late["pace_late_adj_sec"] == round(9000.0 - 3600.0 * 21600.0 / (430 * 60.0), 1)
+    assert late["projected_hhmm"] == "06:40"                                # the headline never moves
+    # an ordinary night allows nothing: the adjusted lateness IS the lateness
+    plain = etl_cycle_eta(_fc(), _night(pace_late=1380.0), end_workflow="WF_END")
+    assert plain["pace_spike_share_sec"] is None and plain["pace_late_adj_sec"] == plain["pace_late_sec"] == 1380.0
+
+
 def test_tz_aware_inputs_do_not_raise():
     fc = _fc(snapshot=None)
     fc["snapshot_ts"] = pd.Timestamp("2026-09-10 02:00", tz="America/Chicago")
@@ -273,6 +329,17 @@ def test_timeline_is_chronological_with_notes():
     only_mid = only_mid[only_mid["WORKFLOW_NAME"].isin(["WF_MID", "WF_LOAD"])]
     tl2 = cycle_timeline_frame(only_mid, end_workflow="WF_MID")
     assert tl2.set_index("WORKFLOW_NAME").loc["WF_MID", "TIMELINE_NOTE"] == "Finishes the cycle"
+
+
+def test_timeline_finished_last_needs_a_clean_finish():
+    """PR C review C3: an OK row with no end offset has not dispatched all its usual tasks yet (the night scan
+    blanks its END_OFFSET_SEC), so it is never 'Finished last so far', even with the latest task end."""
+    night = _tl_night()
+    part = night["WORKFLOW_NAME"] == "WF_START"                   # OK, but half-dispatched: the latest task end
+    night.loc[part, "LAST_END_AT"] = pd.Timestamp("2026-09-10 01:58")
+    night.loc[part, "END_OFFSET_SEC"] = None
+    tl = cycle_timeline_frame(night).set_index("WORKFLOW_NAME")
+    assert tl.loc["WF_START", "TIMELINE_NOTE"] == "" and tl.loc["WF_NEW", "TIMELINE_NOTE"] == "Finished last so far"
 
 
 def test_timeline_running_elapsed_and_usual_end_needs_4_nights():

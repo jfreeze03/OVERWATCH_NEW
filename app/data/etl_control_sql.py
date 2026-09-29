@@ -1271,14 +1271,19 @@ def cycle_night_health_scan(
     Fail-closed on a bad FQN. Pure, bounded.
 
     Next-Fifty #36 (``eta_columns``, default on): each workflow also carries tonight's START_OFFSET_SEC /
-    END_OFFSET_SEC from the cycle start (the end only for a clean finish), its usual end
+    END_OFFSET_SEC from the cycle start (the end only for a clean finish that dispatched at least as many
+    tasks as its fewest on a clean prior night, V156's MIN_TERM_TASKS rule, so a half-dispatched workflow
+    never reads as finished), its usual end
     (TYPICAL_END_OFFSET_SEC = the median over prior nights it finished CLEAN; a failed night's end is
     crash-short) and END_NIGHTS_COUNT (those clean nights). A one-row ``pace`` CTE picks the PACE MARKER:
     the workflow that finished clean tonight whose usual end is the latest, with at least
     NIGHT_END_MIN_NIGHTS clean finishes; when ``end_workflow`` (the terminal) is set, only workflows that
     usually end before the terminal's usual end qualify, so the terminal never marks its own pace. PACE_*
     rides on every row (LEFT JOIN ON 1 = 1 to at most one row: no row multiplication, so TOTAL_* are
-    unchanged, and the marker is uncapped by the LIMIT). The terminal name is an escaped literal (data),
+    unchanged, and the marker is uncapped by the LIMIT). TERM_RAN_LAST_WEEK (last column) = whether the
+    terminal ran on this night last week (V156's term_lw), on every row, NULL with no terminal set: a
+    terminal that has not started and is not in the regular set is 'not due' only when it is 0 / NULL.
+    The terminal name is an escaped literal (data),
     emitted only when set. ``eta_columns=False`` renders the pre-#36 roll-up byte-for-byte: the shared
     read's fallback, so a failure in the additive columns never blanks the whole-night signals."""
     from app.core.sqlsafe import safe_identifier, sql_literal
@@ -1309,25 +1314,36 @@ def cycle_night_health_scan(
             "                    DATEDIFF('second', c.CYCLE_START_AT, w.LAST_END_AT), NULL)) AS TYPICAL_END_OFFSET_SEC,\n"
             "         COUNT(IFF(w.FAILED_TASK_COUNT = 0 AND w.RUNNING_TASK_COUNT = 0\n"
             "                   AND c.CYCLE_START_AT IS NOT NULL AND w.LAST_END_AT IS NOT NULL, 1, NULL))\n"
-            "           AS END_NIGHTS_COUNT"
+            "           AS END_NIGHTS_COUNT,\n"
+            # PR C review C3: the fewest tasks a clean prior night ran (V156's MIN_TERM_TASKS rule), so a
+            # workflow with only its first task(s) dispatched tonight is not read as a clean finish
+            "         MIN(IFF(w.FAILED_TASK_COUNT = 0 AND w.RUNNING_TASK_COUNT = 0, w.TASK_COUNT, NULL))\n"
+            "           AS USUAL_TASK_COUNT"
         )
         graded_eta = (
             ",\n"
             "         DATEDIFF('second', n.CYCLE_START_AT, t.FIRST_START_AT) AS START_OFFSET_SEC,\n"
-            "         IFF(t.FAILED_TASK_COUNT = 0 AND t.RUNNING_TASK_COUNT = 0,\n"
+            "         IFF(t.FAILED_TASK_COUNT = 0 AND t.RUNNING_TASK_COUNT = 0\n"
+            "             AND t.TASK_COUNT >= COALESCE(h.USUAL_TASK_COUNT, 1),\n"
             "             DATEDIFF('second', n.CYCLE_START_AT, t.LAST_END_AT), NULL) AS END_OFFSET_SEC,\n"
             "         h.TYPICAL_END_OFFSET_SEC, COALESCE(h.END_NIGHTS_COUNT, 0) AS END_NIGHTS_COUNT"
         )
         term = term_join = term_filter = ""
+        # PR C review C2: did the terminal run on this night last week (V156's term_lw)? Carried on every row
+        # (a scalar read of the one-row ``term`` CTE, so no join and no row multiplication); NULL when no
+        # terminal is configured.
+        term_lw = "NULL AS TERM_RAN_LAST_WEEK"
         if _ew:
             term = ("term AS (\n"
-                    "  SELECT MAX(TYPICAL_END_OFFSET_SEC) AS TERM_TYPICAL_END_SEC\n"
+                    "  SELECT MAX(TYPICAL_END_OFFSET_SEC) AS TERM_TYPICAL_END_SEC,\n"
+                    "         MAX(RAN_LAST_WEEK) AS TERM_RAN_LAST_WEEK\n"
                     "  FROM hist\n"
                     f"  WHERE WORKFLOW_NAME = {sql_literal(_ew)}\n"
                     "),\n")
             term_join = "  CROSS JOIN term tt\n"
             term_filter = ("    AND (tt.TERM_TYPICAL_END_SEC IS NULL\n"
                            "         OR g.TYPICAL_END_OFFSET_SEC < tt.TERM_TYPICAL_END_SEC)\n")
+            term_lw = "(SELECT TERM_RAN_LAST_WEEK FROM term) AS TERM_RAN_LAST_WEEK"
         eta_ctes = (
             ",\n"
             f"{term}"
@@ -1345,7 +1361,8 @@ def cycle_night_health_scan(
         )
         select_eta = (",\n"
                       "       START_OFFSET_SEC, END_OFFSET_SEC, TYPICAL_END_OFFSET_SEC, END_NIGHTS_COUNT,\n"
-                      "       p.PACE_WORKFLOW_NAME, p.PACE_LATE_SEC, p.PACE_END_AT")
+                      "       p.PACE_WORKFLOW_NAME, p.PACE_LATE_SEC, p.PACE_END_AT,\n"
+                      f"       {term_lw}")
         from_eta = "  FROM graded\n  LEFT JOIN pace p ON 1 = 1\n"
     return (
         "WITH anchor AS (\n"
