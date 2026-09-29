@@ -79,7 +79,9 @@ from app.logic.insights import (
     compare_release_periods,
     cycle_night_summary,
     cycle_target_attainment,
+    cycle_timeline_frame,
     duration_sla_forecast,
+    etl_cycle_eta,
     etl_cycle_sla_forecast,
     etl_runtime_creep,
     latest_proc_changes,
@@ -2308,18 +2310,20 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
         _pipeline_data_checks(is_operator, company, database, days, schema_contains)
 
 
-def _tonight_glance_panel() -> None:
+def _tonight_glance_panel() -> QueryResult | None:
     """rec1: the WHOLE night in one read — every workflow's tonight status from the shared
     attention.cycle_night_read (the SAME run() entry the Brief + Control Room verdicts read). Fixed
     14-night baseline, Window-independent like the SLA forecast below. NOT prefetched on purpose:
-    run_batch members cache in a separate store and would forfeit the cross-page hit."""
+    run_batch members cache in a separate store and would forfeit the cross-page hit.
+    Next-Fifty #36: returns that read (None when unconfigured) so the projected-finish and cycle-timeline
+    panels reuse it — no second read."""
     settings = load_settings(_PAGE)
     res = attention.cycle_night_read(settings, page=_PAGE)
     if res is None:
         section_header("Tonight at a glance", "", "pipeline", anchor="ops-tonight-glance")
         empty_state("needs_setup", "Not configured — set ETL_CONTROL_STATUS_FQN (a valid table name) on "
                     "Admin ▸ SETTINGS to roll up every workflow's run tonight.")
-        return
+        return None
     night = cycle_night_summary(res.df) if (res.ok and not res.empty) else {}
     if night:
         _bad = night["failed_wf"] or night["missing_wf"] or night["next_cycle_overdue"]
@@ -2343,7 +2347,7 @@ def _tonight_glance_panel() -> None:
                  "Check ETL_CYCLE_START_WORKFLOW on Admin ▸ SETTINGS.",
                  setup_hint="The app role needs SELECT on the CONTROL_STATUS table "
                             "(GRANT SELECT ON <table> TO ROLE <app role>)."):
-        return
+        return res
     tiles = [
         {"label": "Failed", "value": f"{night.get('failed_wf', 0):,}",
          "severity": "bad" if night.get("failed_wf") else "ok",
@@ -2376,6 +2380,7 @@ def _tonight_glance_panel() -> None:
         st.caption(f"⚠ Listing the first {etl_control_sql.MAX_NIGHT_WORKFLOWS} workflows — the counts "
                    "above cover every workflow.")
     result_caption(res)
+    return res
 
 
 def _builtin_objectives_panel(fc: dict, company: str = "ALL", days: int = 0, database: str = "",
@@ -2463,16 +2468,139 @@ def _builtin_objectives_panel(fc: dict, company: str = "ALL", days: int = 0, dat
            if cad.get("capped") else ""))
 
 
+def _cycle_eta_panel(fc: dict, night_res: QueryResult | None) -> None:
+    """Next-Fifty #36: tonight's projected cycle finish, painted under 'Tonight at a glance' while the
+    cycle is in flight. Zero reads of its own: it folds the SLA finish forecast (``fc``) and the glance's
+    whole-night read (``night_res``) through insights.etl_cycle_eta, exactly as the Brief tile does. Renders
+    nothing when the cycle is not in flight; the SLA panel below owns setup, failed and complete states."""
+    end_wf = str(load_settings(_PAGE).get("ETL_CYCLE_END_WORKFLOW") or "").strip()
+    eta = etl_cycle_eta(fc, night_res.df if (night_res is not None and night_res.usable()) else None,
+                        end_workflow=end_wf)
+    if not eta:
+        return
+    if not eta.get("ok"):
+        section_header("Tonight's projected finish", "", "pipeline", anchor="ops-cycle-eta")
+        if eta.get("reason") == "terminal_not_due":
+            empty_state("clean", f"{end_wf} is not due tonight (it is not a regular nightly workflow on this "
+                        "night), so there is no cycle finish to project.")
+        else:
+            empty_state("no_data_yet", "Tonight's cycle is running. A projected finish needs "
+                        f"{eta.get('min_nights', 0)} clean nights in the SLA forecast window; it has "
+                        f"{eta.get('nights_used', 0)}.")
+        return
+    health = {"breach": "bad", "miss": "warn", "running_long": "warn"}.get(str(eta.get("risk")), "ok")
+    section_header("Tonight's projected finish", health, "pipeline", anchor="ops-cycle-eta")
+    tgt, hard = eta["target_hhmm"], eta["breach_hhmm"]
+    panel_help(
+        "While tonight's cycle is running: Projected finish = tonight's cycle start "
+        f"({eta['start_hhmm']}) plus the median start-to-finish time of the {eta['nights_used']} clean nights "
+        "in the SLA finish forecast table below (its newest 14 nights, leaving out failed, unfinished and "
+        "month- or quarter-end nights; at least 4 are needed). The usual range is the middle half of those "
+        "nights (25th to 75th percentile). On a month- or quarter-end night the typical extra time those "
+        "nights take is added. Past the median the tile reads Due now; past the range, Running long. Pace so "
+        "far compares the furthest workflow that has finished cleanly tonight (the one that usually ends "
+        "latest before the terminal workflow) with its own usual end, both measured from the cycle start; "
+        "at this pace = the projection moved by that difference. Nothing new is read: it reuses the Tonight "
+        "at a glance and SLA finish forecast reads.")
+
+    def _sev(ts: object) -> str:
+        if ts is None:
+            return ""
+        return "bad" if ts > eta["hard_deadline"] else ("warn" if ts > eta["deadline"] else "ok")
+
+    phase = eta.get("phase")
+    _range = f"usual range {eta['band_lo_hhmm']}–{eta['band_hi_hhmm']}"
+    if phase == "running_long":
+        _pf_value, _pf_delta = "Running long", f"usually done by {eta['band_hi_hhmm']}"
+    elif phase == "due":
+        _pf_value, _pf_delta = "Due now", _range
+    else:
+        _pf_value, _pf_delta = f"~{eta['projected_hhmm']}", _range
+    _pf_sev = _sev(eta.get("projected"))
+    if phase == "running_long" and _pf_sev == "ok":
+        _pf_sev = "warn"
+    _vs = safe_float(eta.get("vs_target_sec"))
+    _late = eta.get("pace_late_sec")
+    if _late is None:
+        _pace_value, _pace_sev = "—", ""
+        _pace_delta = ("no upstream workflow has finished yet" if eta.get("pace_available")
+                       else "pace unavailable from tonight's roll-up")
+    else:
+        _lf = safe_float(_late)
+        _pace_value = ("On pace" if abs(_lf) < 60
+                       else f"{humanize_duration(abs(_lf), 's')} {'behind' if _lf > 0 else 'ahead'}")
+        _pace_delta = f"{eta.get('pace_workflow') or 'pace marker'} · at this pace ~{eta['pace_hhmm']}"
+        _pace_sev = _sev(eta.get("pace_projected"))
+    kpi_row([
+        {"label": "Projected finish", "value": _pf_value, "delta": _pf_delta, "delta_color": "off",
+         "severity": _pf_sev,
+         "help": "Tonight's start plus the median start-to-finish of the recent clean nights (never "
+                 "earlier than now)."},
+        {"label": f"Projected vs {tgt}",
+         "value": f"{humanize_duration(abs(_vs), 's')} {'early' if _vs >= 0 else 'late'}",
+         "delta": f"hard deadline {hard}", "delta_color": "off", "severity": _sev(eta.get("projected"))},
+        {"label": "Pace so far", "value": _pace_value, "delta": _pace_delta, "delta_color": "off",
+         "severity": _pace_sev,
+         "help": "The furthest workflow that finished clean tonight against its own usual end. A "
+                 "separate read: it never moves the projected finish."},
+    ])
+    st.caption(
+        "How this differs from the PIPE_ETL_CYCLE_LATE alert: the alert (V156) makes its own projection: "
+        "tonight's start plus the median start-to-finish of the 14 prior clean nights, month-end nights "
+        "included, with no range and no pace. It counts a terminal task done at its first clean finish after "
+        f"the kickoff, and it warns only when that projection passes the {hard} hard deadline (or the cycle "
+        f"is still unfinished inside its lead window before {tgt}). This panel uses the clean nights in the "
+        "SLA finish forecast below, leaves out month- and quarter-end nights (adding their typical extra on "
+        f"such a night) and colors against {tgt}. So the two times can differ, most on a month-end night or "
+        "after a next-morning terminal re-run, which this page reads as running again and the alert does not.")
+
+
+def _cycle_timeline_panel(night_res: QueryResult | None) -> None:
+    """Next-Fifty #36: every workflow tonight against its usual start and end, behind a toggle. Re-renders
+    the glance's whole-night read (no query); hidden when that read lacks the offset columns (unconfigured,
+    failed, or the shared read's pre-#36 fallback)."""
+    if night_res is None or not night_res.usable() or "END_OFFSET_SEC" not in night_res.df.columns:
+        return
+    section_header("Cycle timeline", "", "pipeline", anchor="ops-cycle-timeline")
+    if not st.toggle("Show tonight's cycle timeline", key="ops_cycle_timeline_toggle", value=False,
+                     help="Every workflow tonight against its usual start and end (median of the last 14 "
+                          "nights). Re-uses the Tonight at a glance read; no extra query."):
+        st.caption("Toggle on to list every workflow tonight against its usual start and end. It re-uses "
+                   "the Tonight at a glance read, so it adds no query.")
+        return
+    settings = load_settings(_PAGE)
+    tl = cycle_timeline_frame(night_res.df,
+                              start_workflow=str(settings.get("ETL_CYCLE_START_WORKFLOW") or "").strip(),
+                              end_workflow=str(settings.get("ETL_CYCLE_END_WORKFLOW") or "").strip())
+    if tl.empty:
+        empty_state("no_data_yet", "No workflow in tonight's cycle to lay out yet.")
+        return
+    styled_table(tl, height=360, slug="etl_cycle_timeline")
+    st.caption("Offsets are measured from tonight's cycle start; usual = the workflow's median over the last "
+               "14 nights (the usual end counts only clean finishes and shows once it has 4). Late vs usual = "
+               "tonight's end offset minus its usual (negative = early). Running rows show how long they have "
+               "been running. The terminal row's usual end is its own median, so it can differ a little from "
+               "the projected finish above. Per-task detail: Workflow runtimes ▸ Explain a task.")
+    if len(night_res.df) >= etl_control_sql.MAX_NIGHT_WORKFLOWS:
+        st.caption(f"⚠ Listing the first {etl_control_sql.MAX_NIGHT_WORKFLOWS} workflows (failed and "
+                   "unfinished first), so some finished workflows are not shown; the pace marker above "
+                   "covers every workflow.")
+
+
 def _pipeline_tonight(days: int = 0, database: str = "", company: str = "ALL",
                       schema_contains: str = "") -> None:
     """rec9 'Tonight': did/will the nightly cycle finish clean before the 07:00 deadline.
 
-    Leads with the whole-night roll-up (every workflow: failed / did not run / running), then the
-    two built-in objectives (v4.597), the XLAT reference gap (a missing source code HARD-FAILS the
-    load), the whole-cycle finish forecast, this run's per-task runtimes, and the run/params
+    Leads with the whole-night roll-up (every workflow: failed / did not run / running), then tonight's
+    projected finish while the cycle runs (Next-Fifty #36), the two built-in objectives (v4.597), the
+    XLAT reference gap (a missing source code HARD-FAILS the load), the whole-cycle finish forecast, the
+    per-workflow cycle timeline (#36, toggle), this run's per-task runtimes, and the run/params
     inventory."""
     # Next-Fifty #1: the whole night first — the same shared read the Brief + Control Room verdicts use.
-    _tonight_glance_panel()
+    _night_res = _tonight_glance_panel()
+    # Next-Fifty #36: tonight's projected finish paints right under the glance, filled once the SLA
+    # forecast below has run (it folds that forecast and the glance's read — no read of its own).
+    _eta_slot = st.container()
     # v4.597 (Option C): the built-in objectives paint HERE, at the top, but are filled after the
     # SLA forecast below has run — the cycle objective reuses its forecast (no duplicate work).
     _obj_slot = st.container()
@@ -2485,8 +2613,12 @@ def _pipeline_tonight(days: int = 0, database: str = "", company: str = "ALL",
     # The whole-cycle SLA: will the nightly cycle (starter → terminal) finish before 7am?
     # Window-independent by design (fixed 14-night baseline, matches Brief) — see the panel.
     fc = _sla_finish_forecast_panel(pf=_pf)
+    with _eta_slot:
+        _cycle_eta_panel(fc, _night_res)
     with _obj_slot:
         _builtin_objectives_panel(fc, company, days, database, schema_contains)
+    # Next-Fifty #36: every workflow tonight vs its usual start / end (toggle; re-renders the glance read).
+    _cycle_timeline_panel(_night_res)
     # A chosen workflow's latest run's per-task runtimes (Informatica CONTROL_STATUS),
     # scoped to the Window; config-gated + fail-silent-with-grant-hint.
     _workflow_runtimes_panel(days, pf=_pf)
@@ -4421,7 +4553,8 @@ def render() -> None:
                     "drops and Dynamic-table refresh health honor Company/Database/Schema, as does "
                     "the Tasks-on-cadence objective, which reads its cadence over max(Window, 14) days, "
                     "capped at 90. "
-                    "The SLA finish forecast is a fixed 14-night baseline. (The DQ row-volume panel is "
+                    "The SLA finish forecast, projected finish and cycle timeline use fixed 14-night "
+                    "baselines. (The DQ row-volume panel is "
                     "still account-wide.)",
         },
         "Release compare": {

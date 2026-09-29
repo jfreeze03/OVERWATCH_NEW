@@ -73,3 +73,8 @@ def test_rec16_billed_spend_source_matches_registry():
     m = mr.get("account_billed_spend")
     assert "FACT_METERING_DAILY" in m.required_sources
     assert "FACT_METERING_DAILY" in mart_sql.fact_daily_spend(30)
+
+
+def test_unread_maintenance_estimate_is_an_estimated_contract():
+    # Next-Fifty #30: the unread-maintenance $/mo is modeled (credits x rate), never MEASURED or VERIFIED
+    assert mr.get("unread_maintenance_estimate").method == mr.ESTIMATED and mr.validate() == []

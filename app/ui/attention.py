@@ -9,10 +9,16 @@ run() never consults, so the cross-page hit would be lost."""
 
 from __future__ import annotations
 
-from app.core.query import run
+from app.core.query import record_error, run
 from app.core.result import QueryResult
 from app.data import etl_control_sql
-from app.logic.insights import cycle_night_summary, etl_cycle_sla_forecast
+from app.logic.insights import cycle_night_summary, etl_cycle_eta, etl_cycle_sla_forecast
+
+# Next-Fifty #36: failure kinds of the ETA-enriched night read that the pre-#36 roll-up can still
+# answer (a compile / identifier / function fault in the additive columns). 'absent' (no table or no
+# grant) and 'timeout' fail the base read the same way, so they never pay a second round trip.
+_NIGHT_FALLBACK_KINDS = frozenset({"missing_column", "unknown_function", "other"})
+_night_fallback_logged: set[str] = set()
 
 
 def reference_gap_summary(settings: dict, *, page: str) -> tuple[int, str]:
@@ -46,17 +52,40 @@ def reference_gap_summary(settings: dict, *, page: str) -> tuple[int, str]:
 
 def cycle_night_read(settings: dict, *, page: str) -> QueryResult | None:
     """The whole-night roll-up read (None when unconfigured / invalid FQN). Operations renders the
-    frame; the verdicts fold it via cycle_night_summary."""
+    frame; the verdicts fold it via cycle_night_summary.
+
+    Next-Fifty #36: the terminal workflow rides along (the pace marker's upper bound), so the SQL is
+    identical for the Brief, the Control Room and Operations and the run() cache stays shared. Safety
+    net: this is the hottest shared read and a probe (a missing-column fault is silent), so when the
+    ETA-enriched SQL fails for a reason the pre-#36 roll-up can answer, the roll-up is re-read without
+    the ETA columns: the failed / did-not-run signals never blank, and the projected finish and the
+    cycle timeline simply stay hidden. The fault is logged once per process so it is not silent."""
     fqn = str(settings.get("ETL_CONTROL_STATUS_FQN") or "").strip()
     if not fqn:
         return None
+    start_wf = str(settings.get("ETL_CYCLE_START_WORKFLOW") or "").strip()
     scan_sql = etl_control_sql.cycle_night_health_scan(
-        fqn, start_workflow=str(settings.get("ETL_CYCLE_START_WORKFLOW") or "").strip())
+        fqn, start_workflow=start_wf,
+        end_workflow=str(settings.get("ETL_CYCLE_END_WORKFLOW") or "").strip())
     if not scan_sql:
         return None
-    return run(scan_sql, page=page, key="attn_cycle_night", tier="recent",
-               source="CONTROL_STATUS (tonight, every workflow)",
+    res = run(scan_sql, page=page, key="attn_cycle_night", tier="recent",
+              source="CONTROL_STATUS (tonight, every workflow)",
+              max_rows=etl_control_sql.MAX_NIGHT_WORKFLOWS, probe=True)
+    if res.ok or res.error_kind not in _NIGHT_FALLBACK_KINDS:
+        return res
+    base_sql = etl_control_sql.cycle_night_health_scan(fqn, start_workflow=start_wf, eta_columns=False)
+    base = run(base_sql, page=page, key="attn_cycle_night_base", tier="recent",
+               source="CONTROL_STATUS (tonight, every workflow; projected finish unavailable)",
                max_rows=etl_control_sql.MAX_NIGHT_WORKFLOWS, probe=True)
+    if not base.ok:
+        return res
+    _sig = f"{res.error_kind}:{str(res.error)[:120]}"
+    if _sig not in _night_fallback_logged:
+        _night_fallback_logged.add(_sig)
+        record_error(page, RuntimeError(f"cycle_night ETA columns failed; served the base roll-up: {res.error}"),
+                     context="attention.cycle_night_read fallback")
+    return base
 
 
 def nightly_cycle_forecast(settings: dict, *, page: str) -> dict:
@@ -90,9 +119,15 @@ def nightly_cycle_forecast(settings: dict, *, page: str) -> dict:
 
 
 def etl_attention(settings: dict, *, page: str) -> dict:
-    """{ref_gap_n, ref_gap_label, night, cycle} — the ETL half of the shared attention bundle."""
+    """{ref_gap_n, ref_gap_label, night, cycle, eta} — the ETL half of the shared attention bundle.
+
+    ``eta`` (Next-Fifty #36) is tonight's projected finish folded from the two reads above — no read
+    of its own ({} when the cycle is not in flight)."""
     ref_n, ref_label = reference_gap_summary(settings, page=page)
     res = cycle_night_read(settings, page=page)
-    night = cycle_night_summary(res.df) if (res is not None and res.ok and not res.empty) else {}
-    return {"ref_gap_n": ref_n, "ref_gap_label": ref_label, "night": night,
-            "cycle": nightly_cycle_forecast(settings, page=page)}
+    night_df = res.df if (res is not None and res.ok and not res.empty) else None
+    night = cycle_night_summary(night_df) if night_df is not None else {}
+    cycle = nightly_cycle_forecast(settings, page=page)
+    return {"ref_gap_n": ref_n, "ref_gap_label": ref_label, "night": night, "cycle": cycle,
+            "eta": etl_cycle_eta(cycle, night_df,
+                                 end_workflow=str(settings.get("ETL_CYCLE_END_WORKFLOW") or "").strip())}

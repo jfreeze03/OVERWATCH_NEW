@@ -75,18 +75,26 @@ def _stalest_label(vals: dict) -> str:
     return f"{src}{humanize_duration(_h, 'h')}"
 
 
-def _nightly_cycle_kpi(fc: dict, wf_fail_n: int, missing_n: int = 0, *, not_started: bool = False) -> dict:
+def _nightly_cycle_kpi(fc: dict, wf_fail_n: int, missing_n: int = 0, *, not_started: bool = False,
+                       eta: dict | None = None) -> dict:
     """The Brief 'Nightly cycle' KPI (replaces Open incidents): the SLA finish forecast + any failures.
 
     Worst-first — Failures → Overdue/In flight → Late → Regressing → On track — and it paints the
     green 'On track' ONLY when the LATEST night actually COMPLETED on time. A hung/in-flight or FAILED
     latest night, or a forecast with no completed baseline, must never read green off an older night's
     margin (that would be a false all-clear on the executive Brief). Pure: no I/O; takes the already-read
-    forecast dict + the latest-run failure count."""
+    forecast dict + the latest-run failure count.
+
+    Next-Fifty #36: while the cycle is in flight, ``eta`` (insights.etl_cycle_eta, folded by the shared
+    attention read — no read of its own) turns 'cycle still running' into tonight's projected finish,
+    or 'At risk' / 'Running long'. 'Overdue' still comes first."""
     tgt = (fc.get("target_hhmm") if fc else None) or "07:00"
     help_txt = ("Whole nightly ETL cycle: every workflow tonight (failed or did-not-run, retries "
                 "collapsed) plus the SLA finish forecast (the cycle's finish vs the "
-                f"{tgt} target, trended across nights). Operations ▸ Pipeline ▸ Tonight owns the detail.")
+                f"{tgt} target, trended across nights). Operations ▸ Pipeline ▸ Tonight owns the detail."
+                " While the cycle runs, the tile shows tonight's projected finish (start + the median of "
+                "recent clean nights); Operations ▸ Pipeline ▸ Tonight shows the range, the pace, and how it "
+                "differs from the PIPE_ETL_CYCLE_LATE alert.")
 
     def _tile(value: str, severity: str, delta: str) -> dict:
         return {"label": "Nightly cycle", "value": value, "severity": severity,
@@ -117,6 +125,17 @@ def _nightly_cycle_kpi(fc: dict, wf_fail_n: int, missing_n: int = 0, *, not_star
         if runway is not None and safe_float(runway) < 0:
             return _tile("Overdue", "bad",
                          f"{humanize_duration(abs(safe_float(runway)), 's')} past {tgt}, still running")
+        if eta and eta.get("ok"):
+            _range = f"{eta.get('band_lo_hhmm', '—')}–{eta.get('band_hi_hhmm', '—')}"
+            if eta.get("risk") in ("miss", "breach"):
+                _pace = " at tonight's pace" if eta.get("risk_from_pace") else ""
+                return _tile("At risk", "warn", f"projected ~{eta.get('worst_hhmm', '—')}{_pace}, past {tgt}")
+            if eta.get("phase") == "running_long":
+                return _tile("Running long", "warn",
+                             f"usually done by {eta.get('band_hi_hhmm', '—')}; still running")
+            if eta.get("phase") == "due":
+                return _tile("In flight", "info", f"due now (usual {_range})")
+            return _tile("In flight", "info", f"projected ~{eta.get('projected_hhmm', '—')} ({_range})")
         return _tile("In flight", "info", "cycle still running")
     # 4. last completed night finished after the deadline
     if sev == "High":
@@ -364,7 +383,8 @@ def render() -> None:
     # the band keeps the same three positions instead of dropping to two.
     if str(settings.get("ETL_CONTROL_STATUS_FQN") or "").strip():
         _nightly_card = _nightly_cycle_kpi(_cyc, _wf_fail_n, _wf_miss_n,
-                                           not_started=bool(_night.get("next_cycle_overdue")))
+                                           not_started=bool(_night.get("next_cycle_overdue")),
+                                           eta=_etl.get("eta"))
     else:
         _nightly_card = {
             "label": "Nightly cycle", "value": "—", "severity": "info",

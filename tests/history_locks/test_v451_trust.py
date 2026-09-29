@@ -92,8 +92,10 @@ _REACHABLE = {
         # (cost_sql.qas_roi) pairs QAS spend with the eligible-workload benefit signal.
         # v4.546: + TABLE_PRUNING_HISTORY — per-table at-rest pruning candidates
         # (clustering targets), in the toggle-gated query-efficiency scan.
+        # Next-Fifty #30: + GRANTS_TO_ROLES — the unread-maintenance share guard (database grants to
+        # shares; a metadata view, read only behind the Storage & waste toggle).
         "ACCESS_HISTORY", "AUTOMATIC_CLUSTERING_HISTORY", "DATABASE_STORAGE_USAGE_HISTORY",
-        "QUERY_ACCELERATION_ELIGIBLE", "QUERY_ACCELERATION_HISTORY", "QUERY_ATTRIBUTION_HISTORY",
+        "GRANTS_TO_ROLES", "QUERY_ACCELERATION_ELIGIBLE", "QUERY_ACCELERATION_HISTORY", "QUERY_ATTRIBUTION_HISTORY",
         "QUERY_HISTORY", "TABLES", "TABLE_DML_HISTORY", "TABLE_PRUNING_HISTORY",
         "TABLE_STORAGE_METRICS", "WAREHOUSE_METERING_HISTORY"),
     "app/ui/pages/operations.py": (

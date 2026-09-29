@@ -1322,6 +1322,96 @@ GROUP BY KIND
 """
 
 
+OBJECT_READS_MAX_FQNS = 200
+
+
+def object_reads_confirm(fqns: tuple[str, ...] | list[str] = (), days: int = 90) -> str:
+    """Next-Fifty #30 step 2 — CONFIRM the unread-maintenance shortlist against ACCESS_HISTORY.
+
+    One row per shortlisted FQN (at most OBJECT_READS_MAX_FQNS), so an empty frame means the read
+    failed, never 'clean'. Each FQN matches access-history touches two ways, UNION ALL'd (two
+    equi-joins, never an OR join): by objectId, bridged through TABLES on the loader's own
+    ``catalog || '.' || schema || '.' || name`` concatenation (live objects only), and by the quote-
+    stripped upper-case objectName. Extra matches can only make an object look READ (the safe direction).
+    Both BASE_OBJECTS_ACCESSED and OBJECTS_MODIFIED are flattened with no objectDomain filter, and a
+    query that read AND modified the object counts as its WRITER (``MAX(IS_WRITE)``, the V050 write-wins
+    read definition the object ledger uses): a MERGE reading its own target is not a reader.
+    SHARED_DATABASE flags an object in a database granted to a SHARE (GRANTS_TO_ROLES): consumer-account
+    reads never reach this account's access history, so those objects are never called unread.
+
+    No company parameter: the shortlist is already company-scoped and a read by anyone counts.
+    Deliberately NOT a canary: ACCESS_HISTORY needs Enterprise edition (the storage_reclaim precedent) —
+    a permanently red row on Standard. The scan is the storage-waste class, about doubled by the
+    OBJECTS_MODIFIED flatten, and runs only behind the Storage & waste toggle."""
+    from app.core.sqlsafe import sql_literal
+
+    days = bounded_days(days, 90)
+    keys = sorted({str(f).strip() for f in (fqns or ()) if str(f or "").strip()})[:OBJECT_READS_MAX_FQNS]
+    if keys:
+        values = ", ".join(f"({sql_literal(k, 600)})" for k in keys)
+        shortlist = f"SELECT column1::VARCHAR AS OBJECT_FQN FROM VALUES {values}"
+    else:
+        shortlist = "SELECT NULL::VARCHAR AS OBJECT_FQN WHERE FALSE"
+    return f"""
+WITH s AS ({shortlist}),
+ids AS (
+    SELECT s.OBJECT_FQN, UPPER(REPLACE(s.OBJECT_FQN, '"', '')) AS OBJECT_KEY, MAX(t.TABLE_ID) AS TABLE_ID
+    FROM s
+    LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.TABLES t
+      ON t.TABLE_CATALOG || '.' || t.TABLE_SCHEMA || '.' || t.TABLE_NAME = s.OBJECT_FQN
+     AND t.DELETED IS NULL
+    GROUP BY s.OBJECT_FQN
+),
+shared_db AS (
+    SELECT DISTINCT UPPER(NAME) AS DB
+    FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES
+    WHERE GRANTED_TO = 'SHARE' AND GRANTED_ON = 'DATABASE' AND DELETED_ON IS NULL
+),
+ah AS (
+    SELECT QUERY_ID, QUERY_START_TIME, USER_NAME, BASE_OBJECTS_ACCESSED, OBJECTS_MODIFIED
+    FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY
+    WHERE QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+),
+touch AS (
+    SELECT ah.QUERY_ID, ah.QUERY_START_TIME, ah.USER_NAME,
+           f.value:"objectId"::NUMBER AS OBJ_ID,
+           UPPER(REPLACE(f.value:"objectName"::STRING, '"', '')) AS OBJ_KEY,
+           0 AS IS_WRITE
+    FROM ah, LATERAL FLATTEN(input => ah.BASE_OBJECTS_ACCESSED) f
+    UNION ALL
+    SELECT ah.QUERY_ID, ah.QUERY_START_TIME, ah.USER_NAME,
+           f.value:"objectId"::NUMBER,
+           UPPER(REPLACE(f.value:"objectName"::STRING, '"', '')),
+           1
+    FROM ah, LATERAL FLATTEN(input => ah.OBJECTS_MODIFIED) f
+),
+matched AS (
+    SELECT i.OBJECT_FQN, t.QUERY_ID, t.QUERY_START_TIME, t.USER_NAME, t.IS_WRITE
+    FROM ids i JOIN touch t ON t.OBJ_ID = i.TABLE_ID
+    UNION ALL
+    SELECT i.OBJECT_FQN, t.QUERY_ID, t.QUERY_START_TIME, t.USER_NAME, t.IS_WRITE
+    FROM ids i JOIN touch t ON t.OBJ_KEY = i.OBJECT_KEY
+),
+per_query AS (
+    SELECT OBJECT_FQN, QUERY_ID, MAX(QUERY_START_TIME) AS TOUCHED_AT, MAX(USER_NAME) AS USER_NAME,
+           MAX(IS_WRITE) AS IS_WRITE
+    FROM matched
+    GROUP BY OBJECT_FQN, QUERY_ID
+)
+SELECT i.OBJECT_FQN,
+       (i.TABLE_ID IS NOT NULL) AS MATCHED_BY_ID,
+       (sd.DB IS NOT NULL) AS SHARED_DATABASE,
+       COUNT_IF(p.IS_WRITE = 0) AS READ_QUERIES,
+       COUNT(DISTINCT IFF(p.IS_WRITE = 0, p.USER_NAME, NULL)) AS READ_USERS,
+       MAX(IFF(p.IS_WRITE = 0, p.TOUCHED_AT, NULL)) AS LAST_READ,
+       COUNT_IF(p.IS_WRITE = 1) AS WRITE_QUERIES
+FROM ids i
+LEFT JOIN shared_db sd ON sd.DB = UPPER(SPLIT_PART(i.OBJECT_FQN, '.', 1))
+LEFT JOIN per_query p ON p.OBJECT_FQN = i.OBJECT_FQN
+GROUP BY i.OBJECT_FQN, i.TABLE_ID, sd.DB
+"""
+
+
 def measured_query_costs(days: int, company: str = "ALL", database: str = "",
                          schema_contains: str = "", warehouse_contains: str = "",
                          user_contains: str = "", limit: int = 50, *,

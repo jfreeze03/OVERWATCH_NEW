@@ -72,6 +72,7 @@ from app.logic.sizing import (
     size_recommendations,
     sizing_summary,
 )
+from app.logic.unread_maintenance import ACTION_VERDICTS, book_estimated_sql, unread_maintenance_verdicts
 from app.logic.workbench import experiment_state_by_key
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
@@ -1291,6 +1292,138 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             empty_state("needs_setup",
                         "Object cost arrives with migration V048 (FACT_OBJECT_COST_DAILY) — an admin "
                         "can apply it on Admin → Migrations & freshness.")
+        # ---- Next-Fifty #30: maintenance on objects nobody reads -----------------------------------
+        # A mart shortlist (object ledger: maintenance credits, no read credits, fixed 90 days) confirmed
+        # against access history (write-wins, share-guarded) BEFORE any SQL or dollar is offered. Both reads
+        # sit behind the toggle; review-only ALTERs; one-click ESTIMATED booking (OVERWATCH's own table).
+        st.divider()
+        st.markdown("**Maintenance on objects nobody reads**")
+        st.caption(toggle_cost_hint("unread_maint_"))
+        if st.toggle("Run unread-maintenance scan", key="cost_unread_maint_toggle",
+                     help="Clustering, search-optimization and MV-refresh credits on objects with no reads in "
+                          "the last 90 days: an object-ledger shortlist, confirmed against access history."):
+            _um = run(cost_sql.maintenance_on_unread(90, company, database=_oc_db), page=_PAGE,
+                      key=f"unread_maint_{company}_{_oc_db}", tier="recent",
+                      source="FACT_OBJECT_COST_DAILY (maintenance arms with no read arm, 90d)", probe=True)
+            if _um.ok and _um.empty:
+                empty_state("clean", "No object paid 1+ credit of clustering, search optimization or MV refresh "
+                                     "without a read in the last 90 days.")
+                result_caption(_um)
+            elif guard(_um, ""):
+                with st.spinner("Confirming against 90 days of access history…"):
+                    _conf = run(insights_sql.object_reads_confirm(tuple(_um.df["OBJECT_FQN"].astype(str)), 90),
+                                page=_PAGE, key=f"unread_maint_confirm_{company}_{_oc_db}", tier="historical",
+                                source="ACCESS_HISTORY reads (90d) + TABLES ids + share grants", probe=True)
+                _uv = unread_maintenance_verdicts(_um.df, _conf.df if _conf.ok else None, rate=rate)
+                _um0 = _um.df.iloc[0]
+                _cands = int(safe_float(_um0.get("CANDIDATES_WIN"), default=float(len(_um.df))))
+                _um_trunc = _cands > len(_um.df)
+                _ua = _uv[_uv["VERDICT"].isin(ACTION_VERDICTS)]
+                _cap = f" (top {len(_um.df)}, ≥)" if _um_trunc else ""
+                kpi_row([
+                    {"label": "Mart shortlist", "value": f"{_cands:,}",
+                     "help": "Objects with 1+ credit of clustering, search optimization or MV refresh and no "
+                             "read credits in the object ledger over 90 days, before the access-history check."},
+                    {"label": "Confirmed unread" + (f" (top {len(_um.df)})" if _um_trunc else ""),
+                     "value": f"{len(_ua):,}" if _conf.ok else "—",
+                     "severity": ("warn" if len(_ua) else "ok") if _conf.ok else "",
+                     "help": "No read in access history for 90 days, a database not shared out, and "
+                             "maintenance spend in the last 30 days."},
+                    {"label": "Est. $/mo if stopped" + _cap,
+                     "value": format_usd(float(_ua["EST_MONTHLY_USD"].sum())) if _conf.ok else "—",
+                     "help": "ESTIMATED: the last 30 complete days of maintenance credits x your credit rate, "
+                             "on the confirmed-unread objects."
+                             + (" Only the top objects are confirmed, so this is a floor." if _um_trunc else "")},
+                ])
+                if not _conf.ok:
+                    st.caption("Read evidence unavailable (ACCESS_HISTORY needs Enterprise edition) — "
+                               "ledger-only shortlist, not suspend candidates; no SQL.")
+                _um_cols = [c for c in ("OBJECT_FQN", "COMPANY", "VERDICT", "EST_MONTHLY_USD", "MAINT_USD",
+                                        "CLUSTERING_CREDITS", "SEARCH_OPT_CREDITS", "MV_REFRESH_CREDITS",
+                                        "READ_QUERIES", "READ_USERS", "LAST_READ", "WRITE_QUERIES",
+                                        "LAST_MAINT_DAY") if c in _uv.columns]
+                _um_sel = selectable_table(_uv[_um_cols], key="unread_maint_sel", height=300,
+                                           sort_label="action verdicts first, then estimated monthly saving")
+                # sticky-selection sentinel (the admin error-family pattern): resolve the row BY FQN only on a
+                # genuinely new click, so a re-sorted frame never silently swaps the selected object
+                if _um_sel is not None and _um_sel != st.session_state.get("_unread_maint_sel_seen"):
+                    st.session_state["_unread_maint_sel_seen"] = _um_sel
+                    if 0 <= int(_um_sel) < len(_uv):
+                        st.session_state["unread_maint_sel_last"] = str(_uv.iloc[int(_um_sel)]["OBJECT_FQN"])
+                _um_lines = [ln for s in _ua["REVIEW_SQL"].tolist() if isinstance(s, str)
+                             for ln in s.splitlines()][:20]
+                if _um_lines:
+                    st.code("\n".join(_um_lines), language="sql")
+                    st.caption("Review only — OVERWATCH never runs these. SUSPEND RECLUSTER and an MV SUSPEND "
+                               "reverse with RESUME; DROP SEARCH OPTIMIZATION rebuilds the access path from "
+                               "scratch if it is added back; a suspended materialized view cannot be queried "
+                               "until it is resumed. Confirm with the object's owner first.")
+                _um_pick = str(st.session_state.get("unread_maint_sel_last") or "")
+                _um_row = _uv[_uv["OBJECT_FQN"].astype(str) == _um_pick] if _um_pick else _uv.iloc[0:0]
+                if not _um_row.empty:
+                    _r = _um_row.iloc[0]
+                    _fqn, _verdict = str(_r["OBJECT_FQN"]), str(_r["VERDICT"])
+                    st.markdown(f"Selected: `{_fqn}` — {_verdict}")
+                    _review = _r.get("REVIEW_SQL")
+                    if _verdict in ACTION_VERDICTS and isinstance(_review, str) and _review:
+                        st.code(_review, language="sql")
+                        st.caption("Reverse:")
+                        st.code(str(_r["REVERSE_SQL"]), language="sql")
+                        _wq = safe_float(_r.get("WRITE_QUERIES"))
+                        if _wq > 0:
+                            st.caption(f"Also written by {_wq:,.0f} queries in 90 days — the load itself may be "
+                                       "waste.")
+                        _proof = cost_sql.unread_maintenance_proof(
+                            _fqn, account_today(), baseline_monthly_credits=safe_float(_r.get("MAINT_CREDITS_30D")))
+                        try:
+                            _bk = book_estimated_sql(_r.to_dict(), proof_sql=_proof)
+                        except ValueError as _bk_err:        # e.g. a zero credit rate -> nothing to book
+                            _bk = ""
+                            st.caption(f"Not bookable: {_bk_err}.")
+                        if _bk:
+                            st.code(_bk, language="sql")
+                            st.caption("Book only after the ALTER above has run in a worksheet — OVERWATCH never "
+                                       "runs it; the row stays ESTIMATED until you verify it on the Savings ledger.")
+                            _bk_key = f"unread_maint_book_{_fqn}"
+                            if (is_operator and st.button("Book estimated saving", key="unread_maint_book_btn")
+                                    and write_gate_open(_bk_key)):
+                                ok, msg = execute_statement(_bk, page=_PAGE)
+                                stamp_write(_bk_key, ok)  # C48
+                                notify(ok, f"Booked an ESTIMATED saving for {_fqn} (a repeat click books nothing)."
+                                       if ok else f"Booking failed: {msg}")
+                            elif not is_operator:
+                                st.caption("Booking needs SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
+                    elif _verdict in ACTION_VERDICTS:
+                        st.caption("The object name is quoted, mixed-case or dotted, so no statement is generated "
+                                   "(a wrong-case name would target a different object) — write it by hand.")
+                    else:
+                        st.caption({
+                            "Keep": "Read in the last 90 days — keep its maintenance.",
+                            "Check share consumers": "Its database is shared out: a consumer account's reads "
+                                                     "never reach this account's access history. Ask the "
+                                                     "consumers before stopping anything.",
+                            "No recent spend": "No maintenance credits in the last 30 complete days — nothing "
+                                               "left to stop.",
+                            "Unconfirmed": "Access history could not confirm it (the read failed or missed the "
+                                           "object), so no SQL is offered.",
+                        }.get(_verdict, ""))
+                _today = account_today()
+                _cov = pd.to_datetime(_um0.get("COVERAGE_START_DAY"), errors="coerce")
+                if pd.notna(_cov) and (_today - _cov.date()).days < 90:
+                    st.caption(f"The object ledger starts {_cov.date():%Y-%m-%d}, so 'no reads' covers "
+                               f"{(_today - _cov.date()).days} days here, not 90.")
+                _last = pd.to_datetime(_um0.get("LEDGER_LAST_DAY"), errors="coerce")
+                if pd.notna(_last) and (_today - _last.date()).days > 2:
+                    st.warning(f"The object ledger's newest day is {_last.date():%Y-%m-%d} — the daily load may "
+                               "be failing, so these estimates are stale; see Admin ▸ Migrations & freshness.")
+                st.caption(md_dollars(
+                    "A fixed 90-day window: the window picker does not narrow it. Reads from share consumers and "
+                    "reads rarer than every 90 days (quarter- or year-end jobs) are invisible here, and a "
+                    "materialized view used only through automatic query rewrite may not show as a read, so "
+                    "confirm with the owner. Est. $/mo = the last 30 complete days of maintenance credits x "
+                    "your rate (ESTIMATED); booked rows stay ESTIMATED until verified on the Savings ledger."))
+                result_caption(_um)
+                result_caption(_conf)
         st.divider()
         st.markdown("**Storage growth movers**")
         days_storage = max(days, 30)

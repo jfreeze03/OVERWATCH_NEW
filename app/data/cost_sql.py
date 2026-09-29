@@ -10,9 +10,11 @@ Dollarization happens in app/logic/formulas.py, not in SQL.
 
 from __future__ import annotations
 
+from datetime import date
+
 from app import companies
 from app.config import MAX_MART_WINDOW_DAYS
-from app.core.sqlsafe import sql_literal
+from app.core.sqlsafe import sql_literal, sql_number
 from app.data.common import (
     account_month_start_sql,
     account_today_sql,
@@ -23,6 +25,7 @@ from app.data.common import (
     resolve_effective_window,
     scope_window_where,
 )
+from app.logic.formulas import safe_float
 
 _BILLED = (
     "COALESCE(CREDITS_BILLED, GREATEST(0, COALESCE(CREDITS_USED, 0) "
@@ -709,6 +712,113 @@ HAVING SUM(COALESCE(CREDITS, 0)) > 0
 ORDER BY CREDITS DESC
 LIMIT {lim}
 """
+
+
+# Next-Fifty #30: the three serverless maintenance arms an unread object can stop paying for.
+_UNREAD_MAINT_ARMS = "'CLUSTERING', 'SEARCH_OPT', 'MV_REFRESH'"
+
+
+def maintenance_on_unread(days: int = 90, company: str = "ALL", database: str = "", *,
+                          min_credits: float = 1.0, limit: int = 50) -> str:
+    """Next-Fifty #30 step 1 — the mart SHORTLIST of maintenance spend on objects nobody reads.
+
+    FACT_OBJECT_COST_DAILY only: per object, clustering / search-optimization / MV-refresh credits with
+    zero read credits over a FIXED trailing ``days`` (today excluded; no window-picker bounds, because an
+    'unread' claim needs the whole window). Objects group on the normalized key
+    ``UPPER(REPLACE(OBJECT_FQN, '"', ''))``: the loader builds maintenance FQNs by concatenation but
+    read-arm FQNs from ACCESS_HISTORY objectName, so a quoted or mixed-case object would otherwise split
+    into a maintenance row with no reads and look falsely unread. The legacy role-less QUERY_COMPUTE arm
+    (pre-V050) counts as a READ, so the error goes toward 'read'.
+
+    A shortlist, never a verdict: the read arm only holds queries with measured attributed credits, so a
+    short, result-cache or metadata-only read is missing from it. insights_sql.object_reads_confirm
+    (ACCESS_HISTORY) must confirm before any SQL is offered. Floor ``min_credits`` over the window; top
+    ``limit`` (5..200) by the last 30 complete days. CANDIDATES_WIN / MAINT_CREDITS_WIN /
+    MAINT_CREDITS_30D_WIN are window totals computed BEFORE the LIMIT (uncapped). COVERAGE_START_DAY and
+    LEDGER_LAST_DAY bound what the window really covers. COMPANY is labelled post-aggregation from the
+    object's own database (the V030 shape law); the company and Database filters apply per row."""
+    days = bounded_days(days, 90)
+    lim = max(5, min(int(limit or 50), 200))
+    floor = max(0.0, safe_float(min_credits, 1.0))
+    comp = "" if str(company).upper() in ("ALL", "") else f"COMPANY = {companies.sql_literal(company)}"
+    _db = str(database or "").strip()
+    db_pred = (f"UPPER(SPLIT_PART(OBJECT_FQN, '.', 1)) = {companies.sql_literal(_db.upper())}"
+               if _db else "")
+    where = and_where(scope_window_where("DAY", days, exclude_today=True), comp, db_pred,
+                      "OBJECT_FQN <> 'UNATTRIBUTED'",
+                      f"COST_ARM IN ({_UNREAD_MAINT_ARMS}, 'QUERY_COMPUTE_READ', 'QUERY_COMPUTE', "
+                      "'QUERY_COMPUTE_WRITE')")
+    maint = _UNREAD_MAINT_ARMS
+    return f"""
+WITH o AS (
+    SELECT UPPER(REPLACE(OBJECT_FQN, '"', '')) AS OBJECT_KEY,
+           MAX(IFF(COST_ARM IN ({maint}), OBJECT_FQN, NULL)) AS OBJECT_FQN,
+           IFF(MAX(IFF(COST_ARM = 'MV_REFRESH', 1, 0)) = 1, 'MATERIALIZED_VIEW',
+               MAX(IFF(COST_ARM IN ({maint}), OBJECT_DOMAIN, NULL))) AS OBJECT_DOMAIN,
+           SUM(IFF(COST_ARM = 'CLUSTERING', CREDITS, 0)) AS CLUSTERING_CREDITS,
+           SUM(IFF(COST_ARM = 'SEARCH_OPT', CREDITS, 0)) AS SEARCH_OPT_CREDITS,
+           SUM(IFF(COST_ARM = 'MV_REFRESH', CREDITS, 0)) AS MV_REFRESH_CREDITS,
+           SUM(IFF(COST_ARM IN ({maint}) AND DAY >= DATEADD('day', -30, CURRENT_DATE()), CREDITS, 0))
+               AS MAINT_CREDITS_30D,
+           SUM(IFF(COST_ARM IN ('QUERY_COMPUTE_READ', 'QUERY_COMPUTE'), CREDITS, 0)) AS READ_CREDITS,
+           SUM(IFF(COST_ARM = 'QUERY_COMPUTE_WRITE', CREDITS, 0)) AS WRITE_CREDITS,
+           MIN(IFF(COST_ARM IN ({maint}), DAY, NULL)) AS FIRST_MAINT_DAY,
+           MAX(IFF(COST_ARM IN ({maint}), DAY, NULL)) AS LAST_MAINT_DAY,
+           COUNT(DISTINCT IFF(COST_ARM IN ({maint}), DAY, NULL)) AS MAINT_DAYS,
+           MIN(MIN(DAY)) OVER () AS COVERAGE_START_DAY,
+           MAX(MAX(DAY)) OVER () AS LEDGER_LAST_DAY
+    FROM DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY
+    WHERE {where}
+    GROUP BY UPPER(REPLACE(OBJECT_FQN, '"', ''))
+),
+c AS (
+    SELECT o.*, o.CLUSTERING_CREDITS + o.SEARCH_OPT_CREDITS + o.MV_REFRESH_CREDITS AS MAINT_CREDITS
+    FROM o
+    WHERE o.OBJECT_FQN IS NOT NULL AND o.READ_CREDITS = 0
+      AND o.CLUSTERING_CREDITS + o.SEARCH_OPT_CREDITS + o.MV_REFRESH_CREDITS >= {sql_number(floor)}
+)
+SELECT c.OBJECT_FQN, c.OBJECT_DOMAIN,
+       {companies.database_case_sql("SPLIT_PART(c.OBJECT_FQN, '.', 1)")} AS COMPANY,
+       ROUND(c.CLUSTERING_CREDITS, 4) AS CLUSTERING_CREDITS,
+       ROUND(c.SEARCH_OPT_CREDITS, 4) AS SEARCH_OPT_CREDITS,
+       ROUND(c.MV_REFRESH_CREDITS, 4) AS MV_REFRESH_CREDITS,
+       ROUND(c.MAINT_CREDITS, 4) AS MAINT_CREDITS,
+       ROUND(c.MAINT_CREDITS_30D, 4) AS MAINT_CREDITS_30D,
+       ROUND(c.WRITE_CREDITS, 4) AS WRITE_CREDITS,
+       c.FIRST_MAINT_DAY, c.LAST_MAINT_DAY, c.MAINT_DAYS, c.COVERAGE_START_DAY, c.LEDGER_LAST_DAY,
+       COUNT(*) OVER () AS CANDIDATES_WIN,
+       ROUND(SUM(c.MAINT_CREDITS) OVER (), 4) AS MAINT_CREDITS_WIN,
+       ROUND(SUM(c.MAINT_CREDITS_30D) OVER (), 4) AS MAINT_CREDITS_30D_WIN
+FROM c
+ORDER BY c.MAINT_CREDITS_30D DESC, c.MAINT_CREDITS DESC, c.OBJECT_FQN
+LIMIT {lim}
+"""
+
+
+def unread_maintenance_proof(fqn: str, booked_on: date, baseline_monthly_credits: float) -> str:
+    """Next-Fifty #30: the runnable PROOF_SQL booked with an unread-maintenance ESTIMATED ledger row.
+
+    The object's maintenance credits (clustering / search optimization / MV refresh) since the booking day,
+    as a 30-day run-rate beside the baseline booked with it: a suspended arm reads ~0 now. Stored in
+    SAVINGS_LEDGER.PROOF_SQL and run later by a human, often in a UTC worksheet, so 'today' is pinned to
+    the account clock (account_today_sql; the TIMEZONE STANDARD) and the statement holds no ';'. The
+    object matches on the same normalized key as maintenance_on_unread."""
+    key = str(fqn or "").replace('"', "").strip().upper()
+    if not key:
+        raise ValueError("unread_maintenance_proof needs an object name")
+    day = sql_literal(booked_on.strftime("%Y-%m-%d"))
+    today = account_today_sql()
+    days_since = f"DATEDIFF('day', {day}::DATE, {today})"
+    return (
+        f"SELECT {sql_number(round(safe_float(baseline_monthly_credits), 4))} AS BASELINE_MONTHLY_CREDITS, "
+        "ROUND(COALESCE(SUM(CREDITS), 0), 4) AS CREDITS_SINCE_BOOKED, "
+        f"{days_since} AS DAYS_SINCE_BOOKED, "
+        f"ROUND(COALESCE(SUM(CREDITS), 0) * 30 / NULLIF({days_since}, 0), 4) AS MONTHLY_CREDITS_NOW "
+        "FROM DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY "
+        f"WHERE UPPER(REPLACE(OBJECT_FQN, '\"', '')) = {sql_literal(key, 300)} "
+        f"AND COST_ARM IN ({_UNREAD_MAINT_ARMS}) "
+        f"AND DAY >= {day}::DATE AND DAY < {today}"
+    )
 
 
 def org_usage_in_currency(days: int) -> str:
