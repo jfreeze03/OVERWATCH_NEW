@@ -683,7 +683,8 @@ def test_a_failed_tracked_read_is_unknown_not_untracked():
     assert 'empty_state("unavailable", "Action Center status could not be read' in src
     assert "detail=_tr.error)" in src
     # Track all holds (0 eligible -> the button is disabled) and the Tracked KPI shows no number
-    assert "track_all_eligible(portfolio, _tracked_df) if _track_ok else portfolio.iloc[0:0]" in src
+    assert ("track_all_eligible(portfolio, _tracked_df, rebroke=_rebroke) if _track_ok "
+            "else portfolio.iloc[0:0]") in src
     assert '"value": f"{_n_open:,}" if _track_ok else "—"' in src
     # Done is handled work: never counted in the Act-now chip
     assert 'isin([_OPEN_STATUS, "Dismissed", "Done"])' in src
@@ -696,3 +697,121 @@ def test_track_all_mechanics_are_shown_to_operators_only():
         'st.caption("Read-only — an operator can track these into Action Center.")', 1)[0]
     assert "Track all takes ACT NOW families" in block and "dismissed or marked done in the last" in block
     assert src.count("Track all takes ACT NOW families") == 1
+
+
+# --------------------------------------------------------------------------------------------
+# Next-Fifty #46 (b): Re-broke / Not fixed lift the Track-all DONE cooldown (never a dismissal), and
+# #15: track_fingerprints_sql became a thin wrapper over the ONE shared track_entities_sql -- BYTE-IDENTICAL
+# to the 9b9aefe builder whenever no rebroke_keys are passed (the round-13 normalize-and-compare lesson).
+# --------------------------------------------------------------------------------------------
+
+_GOLDEN_ITEMS = [
+    {"COMPANY": "ALFA", "SEVERITY": "MEDIUM", "TITLE": "Spill (memory): FP1… (DB1)", "DETAIL": "First fix: size up",
+     "ENTITY_KEY": "FP1", "CONFIDENCE": 0.74, "ESTIMATED_USD": None, "PERIOD": ""},
+    {"COMPANY": "", "SEVERITY": "HIGH", "TITLE": "Stabilize failures: fp2…", "DETAIL": "x'); DROP TABLE t; --\\",
+     "ENTITY_KEY": "fp2", "CONFIDENCE": 62, "ESTIMATED_USD": 12.345, "PERIOD": "MONTHLY"},
+]
+# track_fingerprints_sql(_GOLDEN_ITEMS, actor_sql="'JOE'", bulk=True) at 9b9aefe (v4.600.0), verbatim
+_GOLDEN_BULK_9B9AEFE = (
+    "INSERT INTO DBA_MAINT_DB.OVERWATCH.ACTION_QUEUE\n"
+    "    (COMPANY, SEVERITY, TITLE, DETAIL, OWNER, STATUS, SOURCE, SOURCE_ENTITY_TYPE,\n"
+    "     SOURCE_ENTITY_KEY, CONFIDENCE, ESTIMATED_USD, PERIOD, UPDATED_BY)\n"
+    "SELECT v.COMPANY, v.SEVERITY, v.TITLE, v.DETAIL, 'UNASSIGNED', 'OPEN', 'Operations > Optimize',\n"
+    "       'QUERY_FINGERPRINT', v.ENTITY_KEY, v.CONF::FLOAT, v.USD::NUMBER(18,2),\n"
+    "       NULLIF(v.PER, ''), 'JOE'\n"
+    "FROM (VALUES\n"
+    "    ('ALFA', 'MEDIUM', 'Spill (memory): FP1… (DB1)', 'First fix: size up', 'FP1', 0.74, NULL, ''),\n"
+    "    ('ALL', 'LOW', 'Stabilize failures: fp2…', 'x''); DROP TABLE t; --\\\\', 'fp2', 1.0, 12.35, 'MONTHLY')\n"
+    ") AS v (COMPANY, SEVERITY, TITLE, DETAIL, ENTITY_KEY, CONF, USD, PER)\n"
+    "WHERE NOT EXISTS (\n"
+    "    SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ACTION_QUEUE q\n"
+    "    WHERE UPPER(q.SOURCE_ENTITY_TYPE) = 'QUERY_FINGERPRINT'\n"
+    "      AND UPPER(q.SOURCE_ENTITY_KEY) = UPPER(v.ENTITY_KEY)\n"
+    "      AND (UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS')\n"
+    "           OR (UPPER(q.STATUS) IN ('DROPPED', 'DONE')\n"
+    "               AND COALESCE(q.COMPLETED_AT, q.UPDATED_AT) >= DATEADD('day', -90, CURRENT_TIMESTAMP()))))")
+# sha256 of the 9b9aefe outputs: (bulk, cooldown_days) -> digest
+_TRACK_SHA_9B9AEFE = {
+    (True, 90): "ef0934383e942de34d0b155ce7965883c0ab2a5c984a8fc9b336c910b7e3aaf1",
+    (True, 30): "9721514edab55b0bee21fb82ca50e74266791dd0988b34f6b4954fef8cead2e0",
+    (False, 90): "f054f35d2b4b01f698dab2b2baecdfea7bfba531b753a7fe4b41cf7a112d4c36",
+    (False, 30): "f054f35d2b4b01f698dab2b2baecdfea7bfba531b753a7fe4b41cf7a112d4c36",
+}
+_REBROKE_LINE = "\n               AND NOT (UPPER(q.STATUS) = 'DONE' AND UPPER(v.ENTITY_KEY) IN ("
+
+
+def test_default_track_sql_is_byte_identical_to_9b9aefe():
+    assert track_fingerprints_sql(_GOLDEN_ITEMS, actor_sql="'JOE'", bulk=True) == _GOLDEN_BULK_9B9AEFE
+    for (bulk, days), sha in _TRACK_SHA_9B9AEFE.items():
+        for rebroke in ((), [], set(), ["", "  ", None]):          # "no keys" in every spelling
+            sql = track_fingerprints_sql(_GOLDEN_ITEMS, actor_sql="'JOE'", bulk=bulk, cooldown_days=days,
+                                         rebroke_keys=rebroke)
+            assert hashlib.sha256(sql.encode()).hexdigest() == sha, (bulk, days, rebroke)
+
+
+def test_rebroke_keys_splice_exactly_one_line_inside_the_decided_group():
+    base = track_fingerprints_sql(_GOLDEN_ITEMS, actor_sql="'JOE'", bulk=True)
+    sql = track_fingerprints_sql(_GOLDEN_ITEMS, actor_sql="'JOE'", bulk=True, rebroke_keys=("fp1",))
+    assert "AND NOT (UPPER(q.STATUS) = 'DONE' AND UPPER(v.ENTITY_KEY) IN ('FP1'))" in sql
+    # normalize-and-compare: removing the one spliced line gives the default statement back byte for byte
+    head, rest = sql.split(_REBROKE_LINE, 1)
+    assert rest.startswith("'FP1'))")                      # the IN list and the NOT group close
+    assert head + rest[len("'FP1'))"):] == base
+    # the line sits INSIDE the DROPPED/DONE group (an OPEN item still blocks), before its closing paren
+    assert sql.endswith("CURRENT_TIMESTAMP())" + _REBROKE_LINE + "'FP1')))))")
+    assert _statement_allowed(sql) == (True, "")
+    parsed = sqlglot.parse(sql, read="snowflake")
+    assert len(parsed) == 1 and parsed[0].key == "insert"
+    # keys are upper-cased, de-duplicated and sorted; never clipped at in_list's 300 characters
+    many = track_fingerprints_sql(_GOLDEN_ITEMS, actor_sql="'JOE'", bulk=True,
+                                  rebroke_keys=["b", "A", "a ", "k" * 450])
+    assert f"IN ('A', 'B', '{'K' * 450}')" in many
+    # a single (deliberate) Track carries no cooldown, so it ignores the keys
+    assert (track_fingerprints_sql(_GOLDEN_ITEMS, actor_sql="'JOE'", bulk=False, rebroke_keys=("FP1",))
+            == track_fingerprints_sql(_GOLDEN_ITEMS, actor_sql="'JOE'", bulk=False))
+
+
+def test_a_hostile_rebroke_key_stays_inside_its_literal():
+    evil = "x')) OR 1=1; DROP TABLE ACTION_QUEUE; --\\"
+    sql = track_fingerprints_sql(_GOLDEN_ITEMS, actor_sql="'JOE'", bulk=True, rebroke_keys=[evil])
+    assert _statement_allowed(sql) == (True, "")
+    assert len(sqlglot.parse(sql, read="snowflake")) == 1
+    residue = re.sub(r"'(?:[^'\\]|\\.|'')*'", "''", sql)
+    assert "DROP" not in residue.upper() and "1=1" not in residue
+
+
+def test_track_all_rebroke_readmits_done_never_dismissed():
+    q = _queue(40)
+    tracked = _tracked([("FP36", "OPEN", 1, 0), ("fp35", "DROPPED", 0, 1), ("FP34", "DONE", 0, 0),
+                        ("FP33", "DONE", 1, 0), ("FP32", "DONE", 0, 1)])
+    base = track_all_eligible(q, tracked)["FINGERPRINT"].tolist()
+    picked = track_all_eligible(q, tracked, rebroke={"fp34", "FP35", "FP36", "FP32"})["FINGERPRINT"].tolist()
+    assert "FP34" in picked and "FP34" not in base                  # a measured re-break re-admits DONE
+    for never in ("FP35", "FP36", "FP33", "FP32"):                   # dismissed / open: never
+        assert never not in picked
+    assert len(picked) == TRACK_ALL_CAP and picked == sorted(picked, reverse=True)   # order + cap kept
+    assert track_all_eligible(q, tracked, rebroke=()).equals(track_all_eligible(q, tracked))
+
+
+def test_optimize_measures_done_families_with_one_gated_plain_read():
+    src = _src(_OPT)
+    block = src.split("# Next-Fifty #46: measure each listed Done family", 1)[1].split("# DS #1 carried over:", 1)[0]
+    # gated: the tracked read succeeded AND a Done family is listed AND the request is non-empty
+    assert "if _track_ok and _done_keys else []" in block
+    assert block.index("if _ents:") < block.index("run(workbench_sql.entity_daily_signals(_ents)")
+    # a plain run(), never a batch spec (the '"tier": "recent"' count stays 2), mart-only label
+    assert 'key="ops_opt_outcomes"' in block and 'tier="recent", probe=True' in block
+    assert '"tier": "recent"' not in block and "ACCOUNT_USAGE" not in block
+    # a failed read reads Unavailable and holds the cooldown (no re-broke keys)
+    assert "outcomes.UNAVAILABLE_LABEL if not _sig_ok" in block
+    assert '_rebroke = {k for k, h in _held.items() if h["state"] in outcomes.OVERRIDES_COOLDOWN}' in block
+    # both reopen labels land on TRACK_STATUS, so Act now counts them and Track all takes them
+    assert '_REOPEN_STATUSES = {outcomes.REBROKE: "Re-broke", outcomes.NOT_FIXED: "Not fixed"}' in src
+    assert 'portfolio["TRACK_STATUS"] = [r or s for r, s in zip(_reopen' in block
+    assert src.index("# Next-Fifty #46: measure each listed Done family") < src.index("untracked = ~portfolio")
+    assert "bulk=True, rebroke_keys=_rebroke)" in src
+    ctx = src.split("def _list(", 1)[1].split("def _detail(", 1)[0]
+    assert '"Held?"' in ctx
+    detail = src.split("def _render_detail(", 1)[1]
+    assert "if status in _REOPEN_STATUSES.values():" in detail and "Track all includes it again." in detail
+    assert 'md_dollars(f"Marked done, but the measured outcome says' in detail

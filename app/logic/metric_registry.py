@@ -94,6 +94,14 @@ COLUMN_HELP = {
     "OWNER_HINT": "Who to talk to: the task owner role for SYSTEM (task) statements, else the user and their "
                   "main application.",
     "NEXT_STEP": "The concrete fix for this driver class.",
+    # Next-Fifty #46 / #15 (v4.601): measured outcomes of completed work, and triage tracking.
+    "HELD?": "Measured after the item was marked done, on the entity's own mart signal: failed runs when it "
+             "was failing before (2% or more of runs), else credits (warehouse, query family) or P95 runtime "
+             "(task). Re-broke is dated when the trailing week climbed back (it can lag the break by up to 6 "
+             "days); Re-broke / Not fixed re-open the Optimize Track-all cooldown.",
+    "TRACKED": "Action Center status of this task or warehouse row: Tracked (open), Done or Dismissed within "
+               "90 days, Untracked, or Unknown when the status read failed. Alerts are owned through "
+               "Acknowledge and the incident flow, so they show no status.",
 }
 
 

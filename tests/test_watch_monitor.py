@@ -3,11 +3,13 @@ cost spike/drop + health-grade status, instead of waiting passively in the list.
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
 
-from app.logic.watch_monitor import watch_summary, watched_status
+from app.logic.anomaly import ANOMALY_MIN_USD
+from app.logic.watch_monitor import WATCH_FAMILY_MIN_USD, watch_summary, watched_status
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -143,3 +145,101 @@ def test_watch_monitor_is_wired_into_the_surfaces():
     assert "def watched_attention(" in wb and "def render_watch_badge(" in wb
     brief = _src("app/ui/pages/brief.py")
     assert "render_watch_badge(" in brief
+
+
+# ------------------------------------------ Next-Fifty #46: task + query-family arms ----
+
+_TODAY = date(2026, 9, 29)
+
+
+def _signals(etype: str, key: str, *, p95: float = 60.0, credits: float | None = None, fails_today: float = 0.0,
+             spike_day: int | None = None, spike_p95: float | None = None, spike_credits: float | None = None,
+             days: int = 30) -> pd.DataFrame:
+    """entity_daily_signals-shaped rows: ``days`` complete days (plus today's partial row) of a steady entity,
+    with an optional spike ``spike_day`` days ago."""
+    rows = []
+    for i in range(1, days + 1):
+        d = _TODAY - timedelta(days=i)
+        rows.append({"ENTITY_TYPE": etype, "ENTITY_KEY_U": key, "DAY": d,
+                     "CREDITS": (spike_credits if i == spike_day and spike_credits is not None
+                                 else (credits + (i % 3) * 0.1 if credits is not None else None)),
+                     "P95_SEC": spike_p95 if (i == spike_day and spike_p95 is not None) else p95 + (i % 3),
+                     "RUNS": 24.0, "FAILS": 0.0, "LOADED_THROUGH": _TODAY - timedelta(days=1)})
+    rows.append({"ENTITY_TYPE": etype, "ENTITY_KEY_U": key, "DAY": _TODAY, "CREDITS": credits,
+                 "P95_SEC": p95, "RUNS": 3.0, "FAILS": fails_today, "LOADED_THROUGH": _TODAY})
+    return pd.DataFrame(rows)
+
+
+def _one(etype: str, key: str, daily: pd.DataFrame | None, **kw) -> pd.Series:
+    return watched_status(pd.DataFrame([_watch(etype, key)]), None, None, entity_daily=daily, today=_TODAY,
+                          **kw).iloc[0]
+
+
+def test_watched_task_failures_since_yesterday_warn():
+    row = _one("TASK", "db.s.load_a", _signals("TASK", "DB.S.LOAD_A", fails_today=2.0))
+    assert bool(row["ATTENTION"]) and row["SEVERITY"] == "warn"
+    assert row["STATUS"] == "2 failed runs since yesterday"
+
+
+def test_watched_task_runtime_spike_is_a_soft_watch_and_steady_otherwise():
+    spike = _one("TASK", "DB.S.LOAD_A", _signals("TASK", "DB.S.LOAD_A", spike_day=1, spike_p95=900.0))
+    assert bool(spike["ATTENTION"]) and spike["SEVERITY"] == "watch"
+    assert spike["STATUS"].startswith("runtime spike (P95 15m") and "z +" in spike["STATUS"]
+    steady = _one("TASK", "DB.S.LOAD_A", _signals("TASK", "DB.S.LOAD_A"))
+    assert not bool(steady["ATTENTION"]) and steady["STATUS"] == "steady"
+    # a spike weeks old is history, not current attention (the two-complete-day recency cut)
+    old = _one("TASK", "DB.S.LOAD_A", _signals("TASK", "DB.S.LOAD_A", spike_day=12, spike_p95=900.0))
+    assert not bool(old["ATTENTION"]) and old["STATUS"] == "steady"
+    # below the materiality floor a runtime 'spike' never fires
+    tiny = _one("TASK", "DB.S.LOAD_A", _signals("TASK", "DB.S.LOAD_A", p95=2.0, spike_day=1, spike_p95=50.0))
+    assert not bool(tiny["ATTENTION"])
+
+
+def test_watched_task_with_no_rows_reads_no_runs_and_is_not_attention():
+    row = _one("TASK", "DB.S.GONE", _signals("TASK", "DB.S.LOAD_A"))
+    assert not bool(row["ATTENTION"]) and row["STATUS"] == "no runs in the last 30 days"
+
+
+def test_watched_family_cost_spike_warns_and_p95_spike_watches_case_insensitively():
+    cost = _one("QUERY_FINGERPRINT", "abc123", _signals("QUERY_FINGERPRINT", "ABC123", p95=12.0, credits=5.0,
+                                                         spike_day=1, spike_credits=50.0))
+    assert bool(cost["ATTENTION"]) and cost["SEVERITY"] == "warn" and cost["STATUS"].startswith("spend spike (z +")
+    p95 = _one("QUERY_FINGERPRINT", "ABC123", _signals("QUERY_FINGERPRINT", "abc123", p95=12.0, credits=5.0,
+                                                        spike_day=2, spike_p95=300.0))
+    assert bool(p95["ATTENTION"]) and p95["SEVERITY"] == "watch" and p95["STATUS"].startswith("P95 spike (5m")
+    # the family floor is WATCH_FAMILY_MIN_USD ($10/day), not the shared $50: a ~$184 spike on a ~$18 family
+    # fires here, where the warehouse floor would have let it through only at $50+
+    assert WATCH_FAMILY_MIN_USD == 10.0 and ANOMALY_MIN_USD == 50.0
+    gone = _one("QUERY_FINGERPRINT", "NOPE", _signals("QUERY_FINGERPRINT", "ABC123", credits=5.0))
+    assert gone["STATUS"] == "not in the family marts in the last 30 days" and not bool(gone["ATTENTION"])
+
+
+def test_without_signals_every_non_warehouse_watch_behaves_exactly_as_before():
+    wl = pd.DataFrame([_watch("WAREHOUSE", "WH_SPIKE"), _watch("TASK", "DB.S.T"),
+                       _watch("QUERY_FINGERPRINT", "ABC"), _watch("QUERY", "WH_SPIKE")])
+    daily = _daily("WH_SPIKE", steady=20.0, outlier=200.0)
+    before = watched_status(wl, daily, None, rate=3.68)
+    after = watched_status(wl, daily, None, rate=3.68, entity_daily=None, today=_TODAY)
+    pd.testing.assert_frame_equal(before, after)
+    assert after.set_index("ENTITY_TYPE").loc[["TASK", "QUERY_FINGERPRINT", "QUERY"], "STATUS"].eq("").all()
+    # a bare 'QUERY' type stays blank even WITH signals; a watch the read did not cover stays blank, not 'no runs'
+    sig = _signals("TASK", "DB.S.T")
+    out = watched_status(wl, daily, None, entity_daily=sig, signal_keys=[("TASK", "db.s.t")], today=_TODAY)
+    by_type = out.set_index("ENTITY_TYPE")["STATUS"]
+    assert by_type["TASK"] == "steady" and by_type["QUERY"] == "" and by_type["QUERY_FINGERPRINT"] == ""
+    assert list(out.columns) == ["ENTITY_TYPE", "ENTITY_KEY", "LABEL", "ATTENTION", "STATUS", "SEVERITY"]
+
+
+def test_watched_attention_reads_signals_only_for_task_or_family_watches():
+    wb = _src("app/ui/workbench.py")
+    body = wb.split("def watched_attention(", 1)[1].split("\ndef ", 1)[0]
+    gate = body.index("if _tk[0] in WATCH_SIGNAL_TYPES")
+    read = body.index("workbench_sql.entity_daily_signals(")
+    assert gate < read
+    assert "include_today=True" in body[read:read + 200]
+    assert 'key="watch_auto_signals"' in body and "probe=True" in body[read:read + 400]
+    # no watched task / family -> no SQL -> no read (a warehouse-only watchlist keeps Brief at its budget)
+    assert "if _watched else \"\"" in body and "if _sig_sql:" in body
+    assert "entity_daily=entity_daily, signal_keys=signal_keys" in body
+    from app.logic import watch_monitor
+    assert watch_monitor.WATCH_SIGNAL_TYPES == ("TASK", "QUERY_FINGERPRINT")

@@ -12,7 +12,7 @@ from app.core.query import execute_statement, run
 from app.core.session import is_operator
 from app.core.state import filters, navigation_context, request_navigation
 from app.data import graph_sql, mart27_sql, mart_sql, workbench_sql
-from app.logic import lineage
+from app.logic import lineage, outcomes
 from app.logic.actions import deferred_mask, deferred_summary, rank_actions
 from app.logic.formulas import (
     account_today,
@@ -24,7 +24,7 @@ from app.logic.formulas import (
     safe_float,
 )
 from app.logic.sizing import size_recommendations
-from app.logic.watch_monitor import watch_summary, watched_status
+from app.logic.watch_monitor import WATCH_SIGNAL_TYPES, watch_summary, watched_status
 from app.logic.wh_health import warehouse_health
 from app.logic.workbench import (
     ACTION_STATUSES,
@@ -97,11 +97,21 @@ def _date_value(value: object, fallback_days: int = 7):
     return parsed.date()
 
 
+def _held_severity(label: str) -> str:
+    """Chip tone for a Held? label: a re-broke / not-fixed outcome warns, a held one is ok."""
+    if label.startswith("Re-broke") or label == "Not fixed":
+        return "warn"
+    return "ok" if label.startswith("Held") else ""
+
+
 def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
     action_id = str(row.get("ACTION_ID") or "")
     section_header(str(row.get("TITLE") or "Work item"),
                    "warn" if str(row.get("SEVERITY", "")).upper() in ("CRITICAL", "HIGH") else "",
                    "action")
+    # Next-Fifty #46: a completed item carries its measured outcome (Include completed work only)
+    _held = row.get(outcomes.HELD_COL)
+    _held_lbl = str(_held).strip() if isinstance(_held, str) else ""
     status_chips([
         (str(row.get("SEVERITY") or "UNSET"),
          "bad" if str(row.get("SEVERITY", "")).upper() in ("CRITICAL", "HIGH") else ""),
@@ -110,9 +120,18 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
         (f"Due: {row.get('DUE_DATE') or 'none'}", ""),
         *([(f"Deferred until {row.get('DEFER_UNTIL')}", "warn")]
           if extended and bool(deferred_mask(pd.DataFrame([row]), account_today()).iloc[0]) else []),
+        *([(f"Held? {_held_lbl}", _held_severity(_held_lbl))] if _held_lbl else []),
     ])
+    if _held_lbl:
+        _basis = str(row.get("HELD_BASIS") or "").strip()
+        _reopen = _held_lbl.startswith("Re-broke") or _held_lbl == "Not fixed"
+        if _basis or _reopen:
+            st.caption(md_dollars(
+                f"Measured since it was marked done: {_basis or _held_lbl}."
+                + (" The fix did not hold — reopen it with Status: OPEN." if _reopen else "")))
     if str(row.get("DETAIL") or "").strip():
-        st.write(str(row.get("DETAIL")))
+        # md_dollars: tracked DETAILs carry dollar figures ('$1,234 off baseline'); two would pair into LaTeX
+        st.write(md_dollars(str(row.get("DETAIL"))))
     confidence = row.get("CONFIDENCE") if extended else None
     if confidence is not None and not pd.isna(confidence):
         confidence_badge(confidence)
@@ -294,6 +313,31 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
         # (logic.workbench.create_experiment_sql / update_experiment_sql) are kept.
 
 
+def _with_held(frame: pd.DataFrame, *, key: str, type_col: str = "SOURCE_ENTITY_TYPE",
+               key_col: str = "SOURCE_ENTITY_KEY") -> pd.DataFrame:
+    """Next-Fifty #46: ``frame`` with Held? + HELD_BASIS (outcomes.held_columns). ONE mart read, made only
+    when a DONE warehouse / task / query-family row completed inside the lookback; account-wide by design
+    (an entity's outcome is not a company fact). A failed read labels those rows Unavailable."""
+    today = account_today()
+    ents = outcomes.done_entities(frame, today, type_col=type_col, key_col=key_col)
+    daily, read_ok = None, True
+    if ents:
+        res = run(workbench_sql.entity_daily_signals(ents), page=_PAGE, key=key, tier="recent", probe=True,
+                  source="FACT_WAREHOUSE_DAILY + MART_TASK_NODE_DAILY + family marts (outcome since done)")
+        read_ok = bool(res.ok)
+        daily = res.df if res.usable() else None
+        if res.truncated:
+            st.caption("Held? read hit the row cap — the oldest completions may read Not measurable.")
+    rate = safe_float(load_settings(_PAGE).get("CREDIT_PRICE_USD"), 3.68)
+    held, basis = outcomes.held_columns(frame, daily, today, read_ok=read_ok,
+                                        evaluated={(t, k) for t, k, _ in ents}, rate=rate,
+                                        type_col=type_col, key_col=key_col)
+    out = frame.copy()
+    out[outcomes.HELD_COL] = held
+    out["HELD_BASIS"] = basis
+    return out
+
+
 def render_action_center(company: str) -> None:
     """Persistent owner queue with exact-row navigation and lifecycle controls."""
     # Codex-adj P1: the header stripe was a CONSTANT "warn" (amber on every render, incl. a
@@ -393,6 +437,17 @@ def render_action_center(company: str) -> None:
         if n_def:
             st.caption(f"Deferred ({n_def}): parked until their resume date and left out of the counts "
                        f"above; next resumes {next_resume}.")
+        # Next-Fifty #46: completed work is listed only with Include completed work, so the Held? read is
+        # gated on that toggle (never first paint) and on V074's lifecycle columns.
+        if include_closed and extended:
+            frame = _with_held(frame, key="action_held_signals")
+            st.caption(
+                f"Held? measures a completed warehouse, task or query-family item against its own mart "
+                f"signal since it was marked done — credits, a task's P95 runtime, or failed runs when it "
+                f"was failing before — for up to the {outcomes.MAX_ENTITIES} most recent completions in the "
+                f"last {outcomes.LOOKBACK_DAYS} days. The signals are account-wide, not company-filtered. "
+                f"Re-broke is dated when the trailing week climbed back, so it can lag the real break by "
+                f"up to {outcomes.ROLL_DAYS - 1} days.")
         display = frame.reset_index(drop=True)
         if not include_closed:
             ranked = rank_actions(display, limit=1000, include_deferred=True)
@@ -408,7 +463,8 @@ def render_action_center(company: str) -> None:
                 decision_col="TITLE", why_col="DETAIL", impact_col="ESTIMATED_USD",
                 confidence_col="CONFIDENCE", owner_col="OWNER", status_col="STATUS",
                 next_col="DUE_DATE",
-                context_cols=("SEVERITY", "PERIOD", "DEFER_UNTIL", "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY"),
+                context_cols=("SEVERITY", "PERIOD", "DEFER_UNTIL", "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY",
+                              "Held?"),
                 height=340, sort_label="severity, overdue, estimated value, then age",
                 impact_help="Authored ESTIMATE (modeled, not billed). The Proof ▸ Pipeline projection "
                             "de-duplicates these by entity and never mixes them with verified savings.",
@@ -742,13 +798,30 @@ def render_entity_360(company: str) -> None:
         workbench_sql.related_actions(kind, key), page=_PAGE,
         key=f"entity_actions_{kind}_{key}", tier="live", source="ACTION_QUEUE",
     )
+    # Next-Fifty #46: a DONE item on a measurable entity gets its Held? outcome (one gated mart read).
+    _rel_df = related.df if related.usable() else pd.DataFrame()
+    _rel_held = (kind in outcomes.HELD_TYPES and related.usable() and "STATUS" in related.df.columns
+                 and bool(related.df["STATUS"].astype(str).str.upper().eq("DONE").any()))
+    if _rel_held:
+        _rel_df = (_with_held(related.df.assign(SOURCE_ENTITY_TYPE=kind, SOURCE_ENTITY_KEY=key),
+                              key=f"entity_held_{kind}_{key}")
+                   .drop(columns=["SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY"]))
     st.markdown("**Work and outcomes**")
     if related.ok and not related.empty:
         # F60: the same authored 0-1 confidence reads as a bar here too, not a raw float.
         _rel_cfg = ({"CONFIDENCE": confidence_progress_column("Confidence (authored)",
                                                               AUTHORED_CONFIDENCE_HELP)}
                     if "CONFIDENCE" in related.df.columns else None)
-        styled_table(related.df, height=240, column_config=_rel_cfg)
+        styled_table(_rel_df.drop(columns=["HELD_BASIS"], errors="ignore"), height=240, column_config=_rel_cfg)
+        if _rel_held and outcomes.HELD_COL in _rel_df.columns:
+            _done_rows = _rel_df[_rel_df["STATUS"].astype(str).str.upper().eq("DONE")]
+            if not _done_rows.empty:
+                _newest = _done_rows.iloc[0]
+                _lbl = str(_newest.get(outcomes.HELD_COL) or "—")
+                _basis = str(_newest.get("HELD_BASIS") or "").strip()
+                st.caption(md_dollars(
+                    f"Newest completed item — Held? {_lbl}" + (f": {_basis}" if _basis else "")
+                    + ". Measured on this entity's own mart signal since it was marked done."))
     else:
         empty_state("no_data_yet", "No action is linked to this entity.")
 
@@ -921,7 +994,26 @@ def watched_attention(viewer: str, rate: float) -> pd.DataFrame:
         sized = size_recommendations(prof.df, rate, served_days(prof, _WATCH_WINDOW_DAYS))
         health = warehouse_health(sized)
     _cal = str(load_settings(_PAGE).get("EXPECTED_SPIKE_CALENDAR") or "")
-    return watched_status(wl.df, daily.df if daily.usable() else None, health, rate, calendar=_cal)
+    # Next-Fifty #46: task / query-family arms. The signals read fires ONLY when this viewer watches a
+    # TASK or QUERY_FINGERPRINT (a warehouse-only watchlist pays nothing), newest watches first, capped.
+    entity_daily, signal_keys = None, None
+    if "ENTITY_TYPE" in wl.df.columns and "ENTITY_KEY" in wl.df.columns:
+        _since = account_today() - timedelta(days=_WATCH_WINDOW_DAYS)
+        _watched: list[tuple[str, str]] = []
+        for _t, _k in zip(wl.df["ENTITY_TYPE"], wl.df["ENTITY_KEY"], strict=False):
+            _tk = (str(_t or "").strip().upper(), str(_k or "").strip().upper())
+            if _tk[0] in WATCH_SIGNAL_TYPES and _tk[1] and _tk not in _watched:
+                _watched.append(_tk)
+        _watched = _watched[:workbench_sql.SIGNAL_MAX_ENTITIES]
+        _sig_sql = (workbench_sql.entity_daily_signals([(t, k, _since) for t, k in _watched], include_today=True)
+                    if _watched else "")
+        if _sig_sql:
+            sig = run(_sig_sql, page=_PAGE, key="watch_auto_signals", tier="recent", probe=True,
+                      source="MART_TASK_NODE_DAILY + MART_QUERY_FAMILY_DAILY + MART_PATTERN_COST_DAILY")
+            if sig.ok:
+                entity_daily, signal_keys = sig.df, _watched
+    return watched_status(wl.df, daily.df if daily.usable() else None, health, rate, calendar=_cal,
+                          entity_daily=entity_daily, signal_keys=signal_keys)
 
 
 def render_watch_badge(viewer: str, rate: float) -> None:

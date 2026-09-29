@@ -244,6 +244,11 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("workbench.workload_portfolio", lambda: workbench_sql.workload_portfolio()),
     ("workbench.optimize_queue", lambda: workbench_sql.optimize_queue()),
     ("workbench.tracked_actions", lambda: workbench_sql.tracked_actions()),
+    ("workbench.tracked_entity_actions", lambda: workbench_sql.tracked_entity_actions()),
+    ("workbench.entity_daily_signals", lambda: workbench_sql.entity_daily_signals(
+        [("WAREHOUSE", "WH_CANARY", account_today() - timedelta(days=2)),
+         ("TASK", "DB.SCH.T_CANARY", account_today() - timedelta(days=2)),
+         ("QUERY_FINGERPRINT", "CANARYHASH", account_today() - timedelta(days=2))])),
     ("workbench.slo_cockpit", lambda: workbench_sql.slo_cockpit()),
     ("workbench.data_product_economics", lambda: workbench_sql.data_product_economics()),
     ("workbench.cost_truth", lambda: workbench_sql.cost_truth()),
