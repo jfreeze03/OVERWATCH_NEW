@@ -35,7 +35,11 @@ CAP_LADDER_S = (300, 600, 900, 1800, 3600, 7200, 14400, 28800, 43200, 86400)
 PREFILL_MULTIPLIER = 3
 MIN_RUNS_FOR_P99 = 100
 TAIL_MIN_DAYS, TAIL_MAX_DAYS = 30, 90
-MAX_WAREHOUSES_READ = 100
+# Review C21: each warehouse's SHOW PARAMETERS is its own entry in the process-wide metadata-tier cache
+# (query._fetch_metadata, max_entries=128, LRU), shared with SHOW DATABASES, the user directory, the
+# schema-version gates and the Admin probes. 40 reads + the account SHOW + SHOW WAREHOUSES stay within a
+# third of that store (tests/test_stmt_timeout.py pins the ratio), so one toggle cannot evict the rest.
+MAX_WAREHOUSES_READ = 40
 STATUS_UNCAPPED, STATUS_CAPPED, STATUS_UNREAD, STATUS_NOT_VISIBLE = "Uncapped", "Capped", "Unread", "Not visible"
 POSTURE_COLUMNS = ["WAREHOUSE_NAME", "STATUS", "EFFECTIVE_TIMEOUT_SEC", "CAP_SOURCE", "COMPLETED_RUNS",
                    "P99_ELAPSED_SEC", "MAX_ELAPSED_SEC", "TIMEOUT_CANCELLED_RUNS", "SUGGESTED_TIMEOUT_SEC",
@@ -137,6 +141,47 @@ def effective_timeout_s(warehouse_s: float | None, warehouse_level: str,
     if a is not None and a < w:
         return a, "Account"
     return w, _SOURCE_BY_LEVEL.get(str(warehouse_level or "").strip().upper(), "Snowflake default")
+
+
+def account_value_kpi(account_s: float | None, how: str) -> dict:
+    """The posture panel's 'Account value' tile (review C15/C20): the value the account ENFORCES, so a 0
+    (Snowflake's 7-day maximum) reads 168h next to the uncapped caption and the table, never '0s'.
+    ``how`` (read / derived from warehouse rows / unread) is the delta; the raw 0 is named in delta + help."""
+    help_ = ("The account's STATEMENT_TIMEOUT_IN_SECONDS, which a warehouse (and every session) inherits "
+             "unless it sets its own.")
+    tile = {"label": "Account value", "value": "—", "delta": how, "delta_color": "off", "help": help_}
+    enforced = enforced_s(account_s)
+    if account_s is None or enforced is None:
+        return tile
+    tile["value"] = humanize_duration(enforced)
+    if float(account_s) <= 0:
+        tile["delta"] = f"{how}; 0 = 7-day max"
+        tile["help"] = help_ + " It is set to 0, which Snowflake enforces as the 7-day maximum."
+    return tile
+
+
+def empty_universe_state(company: str, *, tail_ok: bool, show_ok: bool, active: int = 0) -> tuple[str, str, str]:
+    """(empty_state kind, message, which read's error to show: 'tail' | 'show' | '') when
+    ``warehouse_universe`` returned nothing to read (review C16, house rule 8: 'unavailable' = the read failed).
+
+    A company scope lists only the runtime tail's warehouses, so a FAILED tail is 'unavailable', never a
+    verified-empty scope. ALL scope lists SHOW WAREHOUSES (the tail is only its fallback), so a failed SHOW
+    is 'unavailable'. ``active``: tail warehouses SHOW does not list (the company's warehouses all Not
+    visible)."""
+    if str(company or "ALL").strip().upper() != "ALL":
+        if not tail_ok:
+            return ("unavailable", "The completed-runtime tail could not be read, so this company's warehouses "
+                    "are unknown (a company scope lists only the warehouses active in the window).", "tail")
+        if active:
+            return ("no_data_yet", f"The {active:,} warehouse(s) active for this company in the window are not "
+                    "listed by SHOW WAREHOUSES (dropped, renamed, or not visible to the app role), so there is "
+                    "no timeout to read.", "")
+        return "no_data_yet", "No warehouse ran statements for this company in the window.", ""
+    if not show_ok:
+        tail_says = "neither could the runtime tail" if not tail_ok else "the runtime tail listed no warehouse"
+        return ("unavailable", f"SHOW WAREHOUSES could not be read and {tail_says}, so the warehouses to check "
+                "are unknown.", "show")
+    return "no_data_yet", "SHOW WAREHOUSES lists no warehouse the app role can see.", ""
 
 
 def is_uncapped(effective_s: float | None) -> bool:

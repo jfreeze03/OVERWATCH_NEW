@@ -126,10 +126,63 @@ def test_warehouse_universe():
 def test_warehouse_universe_caps_the_reads_longest_first():
     names = [f"WH_{i:03d}" for i in range(stmt_timeout.MAX_WAREHOUSES_READ + 20)]
     show = pd.DataFrame({"name": names})
-    tail = _tail(("WH_119", 500, 10.0, 99999.0, 0, {}))       # the last by name, but the longest run
+    last = names[-1]      # (was the literal "WH_119" while the cap was 100; review C21 lowered it to 40)
+    tail = _tail((last, 500, 10.0, 99999.0, 0, {}))           # the last by name, but the longest run
     read, hidden = warehouse_universe(show, tail, "ALL")
     assert len(read) == stmt_timeout.MAX_WAREHOUSES_READ and read == sorted(read)
-    assert "WH_119" in read and hidden == []
+    assert last in read and hidden == []
+
+
+def test_read_cap_stays_within_a_third_of_the_metadata_cache():
+    """Review C21: every warehouse SHOW is its own entry in the process-wide metadata-tier st.cache_data
+    store; one toggle must not evict the other metadata reads (SHOW DATABASES, the user directory, the
+    schema gates, the Admin probes). The per-warehouse reads + the account SHOW + SHOW WAREHOUSES stay
+    within a third of that store."""
+    src = read("app/core/query.py")
+    m = re.search(r'@st\.cache_data\(ttl=CACHE_TTLS\["metadata"\], show_spinner=False, max_entries=(\d+)\)\n'
+                  r"def _fetch_metadata\(", src)
+    assert m, "the metadata fetcher's cache size moved: re-check the timeout panel's read cap"
+    assert int(m.group(1)) // 3 >= stmt_timeout.MAX_WAREHOUSES_READ + 2
+    body = _body(page_source("operations"), "_stmt_timeout_posture_panel")
+    assert "if len(names) >= stmt_timeout.MAX_WAREHOUSES_READ:" in body        # the cap stays disclosed
+    assert "Reads at most {stmt_timeout.MAX_WAREHOUSES_READ} warehouses per view" in body
+
+
+def test_account_value_kpi_shows_the_enforced_value():
+    """Review C15/C20: an account set to 0 enforces the 7-day maximum; the tile must not read '0s'."""
+    zero = stmt_timeout.account_value_kpi(0.0, "read")
+    assert zero["label"] == "Account value" and zero["value"] == "168h"
+    assert zero["delta"] == "read; 0 = 7-day max" and "set to 0" in zero["help"] and zero["delta_color"] == "off"
+    derived = stmt_timeout.account_value_kpi(0.0, "derived from warehouse rows")
+    assert derived["value"] == "168h" and derived["delta"] == "derived from warehouse rows; 0 = 7-day max"
+    assert stmt_timeout.account_value_kpi(172800.0, "read")["value"] == "48h"
+    plain = stmt_timeout.account_value_kpi(3600.0, "read")
+    assert plain["value"] == "1h" and plain["delta"] == "read" and "set to 0" not in plain["help"]
+    unread = stmt_timeout.account_value_kpi(None, "unread")
+    assert unread["value"] == "—" and unread["delta"] == "unread"
+    body = _body(page_source("operations"), "_stmt_timeout_posture_panel")
+    assert "stmt_timeout.account_value_kpi(account_s, acct_how)" in body
+    assert "humanize_duration(account_s)" not in body                       # the raw value never headlines
+
+
+def test_empty_universe_state_never_calls_a_failed_read_empty():
+    """Review C16 (house rule 8): a company scope lists only the runtime tail's warehouses, so a failed tail
+    is 'unavailable', never the quiet 'no data yet'."""
+    kind, msg, which = stmt_timeout.empty_universe_state("ALFA", tail_ok=False, show_ok=True)
+    assert (kind, which) == ("unavailable", "tail") and "could not be read" in msg
+    assert stmt_timeout.empty_universe_state("ALFA", tail_ok=True, show_ok=True)[:1] == ("no_data_yet",)
+    gone = stmt_timeout.empty_universe_state("Trexis", tail_ok=True, show_ok=True, active=3)
+    assert gone[0] == "no_data_yet" and "3 warehouse(s)" in gone[1]
+    # ALL scope lists SHOW WAREHOUSES (the tail is only its fallback)
+    show_down = stmt_timeout.empty_universe_state("ALL", tail_ok=True, show_ok=False)
+    assert show_down[0] == "unavailable" and show_down[2] == "show"
+    both_down = stmt_timeout.empty_universe_state("ALL", tail_ok=False, show_ok=False)
+    assert both_down[0] == "unavailable" and "neither could the runtime tail" in both_down[1]
+    assert stmt_timeout.empty_universe_state("ALL", tail_ok=False, show_ok=True)[0] == "no_data_yet"
+    body = _body(page_source("operations"), "_stmt_timeout_posture_panel")
+    assert ("stmt_timeout.empty_universe_state(company, tail_ok=tail.ok, show_ok=whs.ok,\n"
+            "                                                                active=len(not_visible))") in body
+    assert 'empty_state("unavailable" if not (tail.ok or whs.ok) else "no_data_yet"' not in body
 
 
 def _posture() -> pd.DataFrame:
@@ -235,7 +288,12 @@ def test_alert_drawer_timeout_lever_reads_before_it_writes():
     assert "remediation.statement_timeout_fix(wh_inline, 3600)" not in al      # the blind SET is gone
     branch = al.split('elif fix_kind.startswith("Statement"):', 1)[1].split("\n                            else:", 1)[0]
     assert "run(ops_sql.warehouse_stmt_timeout_sql(wh_inline)" in branch and "probe=True" in branch
-    assert 'tier="metadata"' in branch and "max_rows=0" in branch
+    # review C13 (this lock was 'tier="metadata"'): the guard gates an EXECUTABLE ALTER + a ledger booking,
+    # so it reads on the 30 s live tier -- the 4 h metadata entry could hold a value a DBA tightened
+    # outside the app since, and the plan would then loosen it
+    assert 'tier="live"' in branch and 'tier="metadata"' not in branch and "max_rows=0" in branch
+    from app.core.query import CACHE_TTLS
+    assert CACHE_TTLS["live"] <= 30
     assert "_cl_plan = stmt_timeout.tighten_timeout_plan(wh_inline, _to_cur, _to_lvl)" in branch
     assert branch.index("warehouse_stmt_timeout_sql") < branch.index("tighten_timeout_plan")
     # one shared warning/info render for both guarded levers, so the raw st.info ceiling holds

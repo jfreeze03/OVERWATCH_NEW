@@ -36,6 +36,7 @@ MONTH_DAYS = 30
 TB = 1024 ** 4
 MEASURED, TOO_EARLY, NO_DATA = "MEASURED", "TOO_EARLY", "NO_DATA"
 PROOF_RESULT_MAX_CHARS = 16_000   # SAVINGS_LEDGER.PROOF_RESULT is VARCHAR(16000) (V053)
+MAX_OVERLAPS_LISTED = 20          # overlapping ledger items named in the warning / PROOF_RESULT
 
 
 def ledger_basis(finding_type: object) -> str | None:
@@ -193,17 +194,152 @@ def _jsonable(value: object) -> object:
 
 
 def proof_result_json(measure: Mapping[str, object], *, target: str, basis: str, entered_usd: float,
-                      sql_hash: str) -> str:
+                      sql_hash: str, overlaps: Mapping[str, object] | None = None) -> str:
     """The PROOF_RESULT snapshot stamped on a measured verify: the measurement, what the operator entered
-    and the read's SQL hash (joins APP_QUERY_TELEMETRY when the query id is blank). JSON, <= 16000 chars."""
+    and the read's SQL hash (joins APP_QUERY_TELEMETRY when the query id is blank). JSON, <= 16000 chars.
+
+    ``overlaps`` (a ``ledger_overlaps`` result) adds ``overlapping_items`` / ``overlap_check`` ONLY when
+    another booked change shares the measured window or the check could not be completed, so a clean
+    verify's JSON is unchanged."""
     payload = {"kind": "ledger_before_after", "basis": str(basis), "target": str(target)[:600],
                "entered_usd": _jsonable(float(entered_usd)), "sql_hash": str(sql_hash)[:64]}
     for key in ("state", "monthly_usd", "prefill_usd", "before_per_day", "after_per_day", "before_bytes",
                 "after_bytes", "after_days", "after_end", "volume_ratio", "confounded"):
         payload[key] = _jsonable(measure.get(key))
     payload["note"] = str(measure.get("note") or "")[:4000]
+    if overlaps is not None:
+        items = overlaps.get("items")
+        labels = [str(i.get("label") or "")[:160] for i in items if isinstance(i, Mapping)] \
+            if isinstance(items, list) else []
+        if labels:
+            payload["overlapping_items"] = labels[:MAX_OVERLAPS_LISTED]
+        if not overlaps.get("complete", True):
+            payload["overlap_check"] = "incomplete"
     text = json.dumps(payload, sort_keys=True)
     if len(text) > PROOF_RESULT_MAX_CHARS:            # defensive: every field above is already bounded
         payload["note"] = ""
         text = json.dumps(payload, sort_keys=True)[:PROOF_RESULT_MAX_CHARS]
     return text
+
+
+def _norm_target(value: object) -> str:
+    """A ledger target as ledger_before_after keys it: upper-case, trimmed, quotes stripped; '' for NULL."""
+    if value is None:
+        return ""
+    try:
+        if value != value:            # NaN / NaT
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip().upper().replace('"', "")
+
+
+def _blank(value: object) -> bool:
+    return _norm_target(value) == ""
+
+
+def ledger_overlaps(ledger: object, *, item_id: object, target: object, booked_day: date,
+                    window_end: date | None = None, row_cap: int | None = None) -> dict:
+    """Other savings-ledger rows booked on the SAME target inside this item's measured window (review C22).
+
+    ``ledger_before_after`` is keyed on the target and the booking day only, so every other change booked on
+    that warehouse / object / table between ``booked_day - BEFORE_DAYS`` and ``window_end`` (the measurement's
+    after_end; ``booked_day + MAX_AFTER_DAYS`` when unknown) moves the same before/after delta. Prefilling it
+    would credit the whole change to this one item, and verifying two such items counts it twice.
+
+    ``ledger`` is the savings_ledger() frame (any object with ``to_dict('records')``). A row matches on its
+    TARGET_OBJECT, else (a change-scan row carries no target) on its registry CHANGE_WAREHOUSE. Excluded: the
+    item itself, REJECTED rows, and superseded manual twins (their settled change-scan row stands for the same
+    change). A row's day is its CREATED_AT day, the frame's own sort key, so the coverage test is exact.
+
+    ``row_cap``: the frame is the ledger PAGE (newest CREATED_AT first, LIMIT row_cap). When it came back full
+    and its oldest row is not older than the window start, rows past the cap could overlap: ``complete`` is
+    then False and the caller must not treat the item as alone.
+
+    Returns {"items": [{"item_id", "label", "description", "day"}] (by day, at most MAX_OVERLAPS_LISTED),
+             "count": every overlap, "complete": bool, "start": date, "end": date}."""
+    start = booked_day - timedelta(days=BEFORE_DAYS)
+    end = window_end if isinstance(window_end, date) else booked_day + timedelta(days=MAX_AFTER_DAYS)
+    end = max(end, booked_day)
+    out: dict = {"items": [], "count": 0, "complete": True, "start": start, "end": end}
+    to_records = getattr(ledger, "to_dict", None)
+    records = to_records("records") if callable(to_records) else []
+    key = _norm_target(target)
+    me = str(item_id or "").strip()
+    found: list[dict] = []
+    oldest: date | None = None
+    for rec in records:
+        day = _day(rec.get("CREATED_AT"))
+        if day is not None and (oldest is None or day < oldest):
+            oldest = day
+        rid = str(rec.get("ITEM_ID") or "").strip()
+        if not key or day is None or rid == me:
+            continue
+        if str(rec.get("STATE") or "").strip().upper() == "REJECTED":
+            continue
+        if not _blank(rec.get("SUPERSEDED_BY_CHANGE_ID")):
+            continue
+        tgt = _norm_target(rec.get("TARGET_OBJECT")) or _norm_target(rec.get("CHANGE_WAREHOUSE"))
+        if tgt != key or not (start <= day <= end):
+            continue
+        finding = str(rec.get("FINDING_TYPE") or "").strip() or "unclassified"
+        source = str(rec.get("SOURCE") or "").strip() or "manual"
+        state = str(rec.get("STATE") or "").strip().upper() or "?"
+        found.append({"item_id": rid, "day": day,
+                      "description": str(rec.get("DESCRIPTION") or "").strip()[:120],
+                      "label": f"{rid[:8]} {finding} ({source}, {state}, booked {_fmt_day(day)})"})
+    found.sort(key=lambda r: (r["day"], r["item_id"]))
+    out["count"] = len(found)
+    out["items"] = found[:MAX_OVERLAPS_LISTED]
+    if row_cap is not None and len(records) >= int(row_cap) and (oldest is None or oldest >= start):
+        out["complete"] = False
+    return out
+
+
+def verify_prefill(*, item_id: str, target: float | None, last: Mapping[str, object] | None,
+                   widget_value: object, clicked: bool) -> dict:
+    """What the verify form's amount widget should hold this run (review C12 / C17). Pure.
+
+    ``target``: the measured prefill; None when there is nothing to prefill (not measured, or another booked
+    change shares the measured window). ``last``: the previous run's state, {"item": the item id, "val": the
+    amount OVERWATCH last left in the widget, 0.0 being the widget's own default; None = unknown}.
+    ``widget_value``: the widget's current value, None when its key is ABSENT (never rendered yet, or
+    Streamlit dropped it after the operator left the section). ``clicked``: this is the Verify click's rerun.
+
+    Rules:
+      * the Verify click's rerun never moves the amount: the UPDATE must write what st.code showed;
+      * another item takes its own prefill, or 0.0 when it has none, so one item's amount never carries over;
+      * a dropped widget re-arms the prefill (the operator's value went with the widget state anyway);
+      * an untouched widget (still holding what OVERWATCH left there) follows the measurement, back to 0.0
+        when the prefill is withdrawn;
+      * an edited widget is never overwritten.
+
+    Returns {"write": the value to put in the widget, None = leave it alone; "state": the new ``last``;
+             "kept_edit": True when the operator's own entry differs from the measured prefill}."""
+    tgt = None if target is None else round(float(target), 2)
+    prev = dict(last) if isinstance(last, Mapping) else {}
+    prev_item = prev.get("item")
+    prev_val = _num(prev.get("val"))
+    present = widget_value is not None
+    cur = _num(widget_value) if present else None
+    keep = {"write": None, "state": {"item": prev_item, "val": prev_val}, "kept_edit": False}
+    if clicked:
+        return keep
+    if prev_item != item_id:
+        if tgt is not None:
+            return {"write": tgt, "state": {"item": item_id, "val": tgt}, "kept_edit": False}
+        if prev_item is not None and present:
+            return {"write": 0.0, "state": {"item": item_id, "val": 0.0}, "kept_edit": False}
+        return {"write": None, "state": {"item": item_id, "val": None if present else 0.0}, "kept_edit": False}
+    if not present:
+        if tgt is not None:
+            return {"write": tgt, "state": {"item": item_id, "val": tgt}, "kept_edit": False}
+        return {"write": None, "state": {"item": item_id, "val": 0.0}, "kept_edit": False}
+    untouched = prev_val is not None and cur is not None and round(cur, 2) == round(prev_val, 2)
+    if untouched:
+        new = tgt if tgt is not None else 0.0
+        if cur is not None and round(new, 2) != round(cur, 2):
+            return {"write": new, "state": {"item": item_id, "val": new}, "kept_edit": False}
+        return {"write": None, "state": {"item": item_id, "val": prev_val}, "kept_edit": False}
+    kept = tgt is not None and cur is not None and round(cur, 2) != tgt
+    return {"write": None, "state": {"item": item_id, "val": prev_val}, "kept_edit": kept}

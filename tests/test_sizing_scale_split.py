@@ -161,3 +161,33 @@ def test_pages_render_the_split():
     assert "summary['scale_out']" in opt and "summary['size_up']" in opt
     assert "scale_out_plan(" in opt and "remediation.cluster_range_fix(" in opt
     assert "remediation.scaling_policy_fix(" in opt
+
+
+def test_scale_out_caption_names_the_lever_that_builds_the_shown_sql():
+    """Review C19: the SCALING_POLICY = 'STANDARD' prefill routes to Emergency ▸ Scaling policy (the
+    Cluster range lever only builds MIN/MAX_CLUSTER_COUNT); no lever is named when no SQL is shown."""
+    from app.ui.pages.cost_parts.optimize import _scale_out_caption
+
+    econ = scale_out_plan(pd.Series({"MIN_CLUSTER_COUNT": 1.0, "MAX_CLUSTER_COUNT": 3.0,
+                                     "SCALING_POLICY": "ECONOMY"}))
+    cap = _scale_out_caption(econ)
+    assert cap.startswith(econ["note"]) and "Operations ▸ Emergency ▸ Scaling policy (audited)" in cap
+    assert "Cluster range" not in cap and "wider cluster range" not in cap
+    single = _scale_out_caption(scale_out_plan(pd.Series({"MIN_CLUSTER_COUNT": 1.0, "MAX_CLUSTER_COUNT": 1.0})))
+    assert "Operations ▸ Emergency ▸ Cluster range (audited)" in single and "Scaling policy" not in single
+    for plan in (scale_out_plan(pd.Series({"MIN_CLUSTER_COUNT": 2.0, "MAX_CLUSTER_COUNT": 10.0})),
+                 scale_out_plan(pd.Series({"WAREHOUSE_NAME": "W"}))):
+        text = _scale_out_caption(plan)
+        assert "run it from" not in text and "No scale-out statement is generated here." in text
+    for text in (cap, single):
+        assert "size-up alternative" in text
+    # the named levers exist on Operations ▸ Emergency and build exactly the statements the pane shows
+    ops = page_source("operations")
+    assert '"Cluster range", "Scaling policy",' in ops
+    assert 'elif action == "Scaling policy" and wh:' in ops and 'st.radio("Policy", ["ECONOMY", "STANDARD"]' in ops
+    assert "stmt = remediation.scaling_policy_fix(wh, pol)" in ops
+    assert "stmt = remediation.cluster_range_fix(wh, int(lo), int(hi))" in ops
+    # the pane routes through the helper; the old unconditional Cluster-range sentence is gone
+    opt = read("app/ui/pages/cost_parts/optimize.py")
+    assert "st.caption(_scale_out_caption(_so))" in opt
+    assert 'st.caption(_so["note"] + " A wider cluster range' not in opt
