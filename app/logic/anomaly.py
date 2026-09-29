@@ -124,6 +124,42 @@ def complete_days_only(df: pd.DataFrame, day_col: str = "DAY") -> pd.DataFrame:
     return df[pd.to_datetime(df[day_col], errors="coerce").dt.date < account_today()]
 
 
+# Next-Fifty #37b: one value scored against a SEPARATE history. The server twin is the per-user AI
+# runaway arm of SP_ALERT_SCAN_DAILY (V163 arm [28]): the scored day is NOT part of its own baseline
+# (unlike robust_zscores, which scores every point of one series against that series), fewer than
+# ROBUST_Z_MIN_HISTORY points is "no baseline yet" (None -- the caller owns the onset rule), and a
+# history with no dispersion scores NO_DISPERSION_Z above its median and 0 otherwise. Same CASE, same
+# constants as the arm, so app/logic/quotas.runaway_days replays the arm exactly.
+ROBUST_Z_MIN_HISTORY = 5
+NO_DISPERSION_Z = 999.0
+
+
+def robust_z_vs_history(value: float, history) -> float | None:
+    """Modified z of ``value`` against ``history`` (an iterable of numbers; NaN/None dropped).
+
+    median/MAD first, then the mean absolute deviation around the median when MAD is 0 (more than
+    half the history identical), then NO_DISPERSION_Z / 0 when every point is identical. None when
+    the history has fewer than ROBUST_Z_MIN_HISTORY usable points or ``value`` is not a number."""
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return None
+    if val != val:  # NaN
+        return None
+    hist = pd.to_numeric(pd.Series(list(history), dtype=object), errors="coerce").dropna().astype(float)
+    if len(hist) < ROBUST_Z_MIN_HISTORY:
+        return None
+    median = float(hist.median())
+    abs_dev = (hist - median).abs()
+    mad = float(abs_dev.median())
+    if mad > 0:
+        return _MAD_K * (val - median) / mad
+    mean_ad = float(abs_dev.mean())
+    if mean_ad > 0:
+        return _MEANAD_K * (val - median) / mean_ad
+    return NO_DISPERSION_Z if val > median else 0.0
+
+
 def robust_zscores(values: pd.Series) -> pd.Series:
     """Return modified z-scores; zeros when there is no dispersion or <5 points.
 
