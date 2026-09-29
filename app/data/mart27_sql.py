@@ -9,6 +9,8 @@ log before it pages a user.
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 from app import companies
 from app.config import mart_object
 from app.core.sqlsafe import contains_filter, sql_literal
@@ -18,6 +20,11 @@ from app.data.common import (
     bounded_days,
     resolve_effective_window,
     scope_window_where,
+)
+from app.logic.anomaly_explain import (
+    SQL_OTHER_LABELS,
+    UNCLASSIFIED_USERS_LABEL,
+    outside_company_label,
 )
 
 
@@ -1242,6 +1249,132 @@ WHERE {display}
 GROUP BY KEY_NAME
 ORDER BY ALLOC_CREDITS DESC
 LIMIT 100
+"""
+
+
+def alloc_xdim_day_drivers(warehouse: str, day: object, company: str = "ALL", *,
+                           baseline_days: int = 14, top_n: int = 40) -> str:
+    """Next-Fifty #27: ONE warehouse's flagged day broken down BELOW the warehouse — the
+    DAY x USER and DAY x DATABASE allocated credits over [D - baseline_days, D] from
+    FACT_COST_ALLOC_XDIM_DAILY, plus the warehouse's METERED credits (FACT_WAREHOUSE_DAILY
+    CREDITS_TOTAL — the same usage basis as ALLOC_CREDITS and the Spend anomaly waterfall)
+    and a SPINE arm. Long shape: DAY, DIMENSION in {USER, DATABASE, METERED, SPINE},
+    KEY_NAME, CREDITS; the pure explainer is anomaly_explain.explain_below_warehouse.
+
+    * SPINE = the days the allocation fact loaded AT ALL in the window (any warehouse). It
+      drives the explainer's zero-fill (a key silent on a loaded day counts as 0, so the
+      average is exactly additive) and its coverage gate (D loaded, >= 7 baseline days). A
+      day the XDIM loader skipped is absent from the spine and METERED alike — excluded from
+      the average, never counted as a zero. No live twin (a QUERY_HISTORY x metering twin
+      would add a heavy ACCOUNT_USAGE scan), so this reader has no FIRST_DAY/cov gate.
+    * Top-N per dimension by |delta| — the flagged day minus the window sum over the LOADED
+      baseline days (the nb CTE: spine days before D, the explainer's own divisor), so the
+      rank equals the explainer's zero-filled |delta| and a loader gap cannot push a steady
+      key above a real mover (F17: dividing by the nominal baseline_days gave a steady key a
+      phantom delta of A*(1 - loaded/n)). The keys that moved survive; the rest collapse into
+      '(all other users|databases)' — the sums stay exact. top_n clamps to [5, 60] and
+      baseline_days to [7, 28], so the rows are bounded by construction to
+      <= 2*(top_n+1)*(baseline_days+1) + 2*(baseline_days+1) (3,596 at the clamps) <
+      DEFAULT_MAX_ROWS — the page still checks ``truncated``.
+    * Company scope (MC-2, as alloc_xdim_attribution): XDIM by COMPANY_FOR_WAREHOUSE (the
+      COMPANY_SCOPE-aware axis), METERED by the load-stamped FACT_WAREHOUSE_DAILY.COMPANY
+      (the flagged frame's own scope). Keys outside the company's view are MASKED — masked,
+      not dropped, so each dimension still sums to the warehouse's allocated credits — into
+      labelled rows (the text lives in anomaly_explain, which detects them by exact string):
+      users COMPANY_FOR_USER classifies 'UNKNOWN' (no company role: task / service / ETL
+      logins; also a NULL verdict) into '(unclassified users)' — except under the UNKNOWN
+      scope, where they ARE the scope; users of another company into '(users outside <co>)';
+      databases outside the view into '(databases outside <co>)'. A NULL outside-company
+      verdict masks (fail closed). ALL masks nothing.
+    * Dollars are allocated ESTIMATES on the usage basis (not billed): each warehouse-hour's
+      metered credits split by execution-time share; hours in which no query started are
+      never allocated, which is the explainer's 'not allocated' residual.
+    * The warehouse is an EXACT sql_literal match; the day is a validated ISO literal and
+      the window is date literals — no CURRENT_DATE, no START_TIME, so the cache key is
+      stable per (warehouse, day, company). Raises ValueError on a blank warehouse or a
+      non-ISO day.
+    """
+    wh = str(warehouse or "").strip()
+    if not wh:
+        raise ValueError("alloc_xdim_day_drivers needs a warehouse")
+    d = date.fromisoformat(str(day)[:10])
+    n = max(7, min(int(baseline_days), 28))
+    k = max(5, min(int(top_n), 60))
+    lo = f"'{(d - timedelta(days=n)).isoformat()}'::DATE"
+    fd = f"'{d.isoformat()}'::DATE"
+    whl = sql_literal(wh)
+    named = str(company or "ALL").upper() != "ALL"
+    wh_arm = (f"\n      AND {companies.company_case_sql('x.WAREHOUSE_NAME')} = {sql_literal(company)}"
+              if named else "")
+    fw_arm = f"\n  AND f.COMPANY = {sql_literal(company)}" if named else ""
+    uv = companies.user_clause(company, "l.KEY_NAME") if named else ""
+    dv = companies.database_visibility_clause(company, "l.KEY_NAME") if named else ""
+    arms = []
+    if uv and str(company) != "UNKNOWN":
+        # F16: a user COMPANY_FOR_USER classifies 'UNKNOWN' (no company role — task / service /
+        # ETL logins) is NOT another company's user: its own row, BEFORE the outside-company arm.
+        # A NULL verdict is unclassified too. Under the UNKNOWN scope these users ARE the scope.
+        unk = companies.user_clause("UNKNOWN", "l.KEY_NAME")
+        arms.append(f"WHEN l.DIMENSION = 'USER' AND COALESCE(({unk}), TRUE) "
+                    f"THEN {sql_literal(UNCLASSIFIED_USERS_LABEL)}")
+    if uv:
+        arms.append(f"WHEN l.DIMENSION = 'USER' AND NOT COALESCE(({uv}), FALSE) "
+                    f"THEN {sql_literal(outside_company_label('USER', company))}")
+    if dv:
+        arms.append(f"WHEN l.DIMENSION = 'DATABASE' AND NOT COALESCE(({dv}), FALSE) "
+                    f"THEN {sql_literal(outside_company_label('DATABASE', company))}")
+    key_expr = ("CASE " + "\n                ".join(arms) + " ELSE l.KEY_NAME END") if arms else "l.KEY_NAME"
+    other_u, other_d = (sql_literal(SQL_OTHER_LABELS["USER"]), sql_literal(SQL_OTHER_LABELS["DATABASE"]))
+    xdim = mart_object("FACT_COST_ALLOC_XDIM_DAILY")
+    return f"""
+WITH spine AS (
+    SELECT DISTINCT x.DAY FROM {xdim} x
+    WHERE x.DAY >= {lo} AND x.DAY <= {fd}
+),
+nb AS (
+    SELECT COUNT(*) AS N_BASE FROM spine WHERE DAY < {fd}
+),
+base AS (
+    SELECT x.DAY, COALESCE(x.USER_NAME, 'NONE') AS USER_NAME,
+           COALESCE(x.DATABASE_NAME, 'NONE') AS DATABASE_NAME, x.ALLOC_CREDITS
+    FROM {xdim} x
+    WHERE x.WAREHOUSE_NAME = {whl}
+      AND x.DAY >= {lo} AND x.DAY <= {fd}{wh_arm}
+),
+long AS (
+    SELECT DAY, 'USER' AS DIMENSION, USER_NAME AS KEY_NAME, ALLOC_CREDITS FROM base
+    UNION ALL
+    SELECT DAY, 'DATABASE', DATABASE_NAME, ALLOC_CREDITS FROM base
+),
+masked AS (
+    SELECT l.DAY, l.DIMENSION, {key_expr} AS KEY_NAME, l.ALLOC_CREDITS
+    FROM long l
+),
+ranked AS (
+    SELECT m.DIMENSION, m.KEY_NAME,
+           ROW_NUMBER() OVER (PARTITION BY m.DIMENSION ORDER BY
+               ABS(SUM(IFF(m.DAY = {fd}, m.ALLOC_CREDITS, 0))
+                   - SUM(IFF(m.DAY < {fd}, m.ALLOC_CREDITS, 0)) / NULLIF(MAX(nb.N_BASE), 0)) DESC,
+               m.KEY_NAME) AS RN
+    FROM masked m CROSS JOIN nb
+    GROUP BY m.DIMENSION, m.KEY_NAME
+)
+SELECT m.DAY, m.DIMENSION,
+       IFF(r.RN <= {k}, m.KEY_NAME,
+           IFF(m.DIMENSION = 'USER', {other_u}, {other_d})) AS KEY_NAME,
+       ROUND(SUM(m.ALLOC_CREDITS), 6) AS CREDITS
+FROM masked m
+JOIN ranked r ON r.DIMENSION = m.DIMENSION AND r.KEY_NAME = m.KEY_NAME
+GROUP BY 1, 2, 3
+UNION ALL
+SELECT f.DAY, 'METERED', f.WAREHOUSE_NAME, ROUND(SUM(f.CREDITS_TOTAL), 6)
+FROM {mart_object("FACT_WAREHOUSE_DAILY")} f
+WHERE f.WAREHOUSE_NAME = {whl}
+  AND f.DAY IN (SELECT DAY FROM spine){fw_arm}
+GROUP BY f.DAY, f.WAREHOUSE_NAME
+UNION ALL
+SELECT DAY, 'SPINE', '', 0 FROM spine
+ORDER BY 2, 1
 """
 
 

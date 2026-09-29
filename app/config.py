@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.599.0"
+APP_VERSION = "4.600.0"
 
 # The build's load-bearing schema floor. main() reads the live max(SCHEMA_VERSION)
 # once per session and, if it is BELOW this, renders ONE actionable blocked state
@@ -171,9 +171,14 @@ TRIAGE_WINDOW_OPTIONS = (
 )
 MAX_LIVE_WINDOW_DAYS = 90          # hard clamp for live ACCOUNT_USAGE scans
 MAX_MART_WINDOW_DAYS = 365         # mart-backed facts (400-800d retention) honor the long window
-# Next-Fifty #3: the ROI numerator counts a VERIFIED monthly saving until it ages past this many
-# months (a verified saving keeps saving after its quarter; revert detection is not built yet).
+# Next-Fifty #3/#31: the ROI numerator counts a VERIFIED monthly saving until it ages past this many
+# months. A warehouse-setting change the daily scan later sees undone leaves the numerator the day it is
+# seen (mart_sql._ledger_revert_select); rows booked in the app are not revert-checked, so the cap still
+# bounds them.
 SAVINGS_ACTIVE_MONTHS = 12
+# VERIFIED_USD is a 30-day-normalized MONTHLY saving (V153: (BASE - AFTER) credits/day x rate x 30), so
+# Proof's "Saved to date" accrues VERIFIED_USD / SAVINGS_MONTH_DAYS per whole day in effect.
+SAVINGS_MONTH_DAYS = 30
 # Next-Fifty #5: the app FINDING_TYPEs SP_LEDGER_AUTOBOOK (V145/V153) ALSO books from the daily change scan
 # (the registry's SIZE == the app's RESIZE); SCHEDULE is invisible to the scan, so the app still books it.
 # V153 (Next-Fifty #11) also ADOPTS a matching manual row for these levers instead of booking a twin.
@@ -181,6 +186,9 @@ SAVINGS_ACTIVE_MONTHS = 12
 # app books it (Next-Fifty #38 is wave 3), so it is deliberately absent here and remediation.py does not
 # mirror it.
 LEDGER_AUTOBOOKED_LEVERS = ("AUTO_SUSPEND", "MAX_CLUSTERS", "RESIZE")
+# Next-Fifty #31: the registry SETTINGs SP_LEDGER_AUTOBOOK books (V153 INSERT arms), registry spelling
+# (SIZE, not RESIZE). A booked change on one of these is revert-checked; MIN_CLUSTERS is never booked.
+LEDGER_REVERTIBLE_SETTINGS: tuple[str, ...] = ("AUTO_SUSPEND", "MAX_CLUSTERS", "SCALING_POLICY", "SIZE")
 # a manual row and a registry change are the same change when the scan saw it within this many days
 # (the scan runs daily 06:40 America/Chicago: <= 24h lag + one missed run)
 LEDGER_TWIN_MATCH_DAYS = 3

@@ -221,6 +221,19 @@ def test_workflow_runtimes_scan_collapses_retries_and_drops_null_start() -> None
     assert "MAX(COALESCE(s.TASK_END_DTTM, CURRENT_TIMESTAMP())))" in sql
 
 
+def test_workflow_runtimes_scan_projects_its_run() -> None:
+    """Review F22: the table's own RUN_ID (one run by construction), as text, so the task-evidence drill binds
+    THIS run instead of re-deriving 'the latest run' at a later time than the cached table."""
+    sql = etl.workflow_runtimes_scan(_CTRL, workflow="WF_X", days=7)
+    assert "       MAX(s.RUN_ID)::VARCHAR AS RUN_ID\n" in sql
+    assert "JOIN latest l ON s.RUN_ID = l.RUN_ID" in sql              # still exactly the latest run
+    assert "GROUP BY s.WORKFLOW_NAME, s.TASK_NAME\n" in sql           # one row per task, unchanged grain
+    sqlglot = pytest.importorskip("sqlglot")
+    cols = sqlglot.parse_one(sql, read="snowflake").named_selects
+    assert cols == ["WORKFLOW_NAME", "TASK_NAME", "TASK_STATUS", "TASK_START_DTTM", "TASK_END_DTTM",
+                    "RUNTIME_SEC", "RUN_ID"]
+
+
 def test_workflow_runtimes_scan_honors_window() -> None:
     # days > 0 bounds the run to the scope-bar Window; days <= 0 adds no window filter
     assert "TASK_START_DTTM >= DATEADD('day', -7, CURRENT_TIMESTAMP())" in \
@@ -670,3 +683,200 @@ def test_cycle_night_health_scan_parses():
     for sw in ("WF_START", ""):
         tree = sqlglot.parse_one(etl.cycle_night_health_scan(_CTRL, start_workflow=sw), read="snowflake")
         assert tree.named_selects == cols    # the column contract the summarizer + shaped harness share
+
+
+# --- run_task_evidence_scan (#14 Phase 1) ------------------------------------------------------------
+
+_QH = "SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY"
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _latest_predicates(sql: str, start: str, end: str) -> str:
+    """The latest-run predicates: from 'SELECT RUN_ID FROM' through the QUALIFY, whitespace-normalized."""
+    body = sql.split(start, 1)[1].split(end, 1)[0]
+    return _norm("SELECT RUN_ID FROM" + body.split("SELECT RUN_ID FROM", 1)[1] + end)
+
+
+def test_task_evidence_scan_latest_for_workflow() -> None:
+    sql = etl.run_task_evidence_scan(_CTRL, task="SP_D_PLCY", workflow="WF_X", days=7)
+    assert "TASK_NAME = 'SP_D_PLCY'" in sql
+    assert "AND WORKFLOW_NAME = 'WF_X'" in sql
+    assert "TASK_START_DTTM >= DATEADD('day', -7, CURRENT_TIMESTAMP())" in sql
+    assert "QUALIFY ROW_NUMBER() OVER (ORDER BY TASK_START_DTTM DESC) = 1" in sql
+    assert "AND RUN_ID = (" in sql
+
+
+@pytest.mark.parametrize(("workflow", "days"), [("WF_X", 7), ("", 0), ("WF_X", 0)])
+def test_task_evidence_scan_latest_run_matches_the_runtimes_panel(workflow, days) -> None:
+    """Round-13 lesson: the drill re-derives 'the latest run' on its own, so its predicates must stay
+    byte-identical (whitespace aside) to workflow_runtimes_scan's `latest` CTE — never a refactor."""
+    end = "QUALIFY ROW_NUMBER() OVER (ORDER BY TASK_START_DTTM DESC) = 1"
+    runtimes = etl.workflow_runtimes_scan(_CTRL, workflow=workflow, days=days)
+    evidence = etl.run_task_evidence_scan(_CTRL, task="SP_D_PLCY", workflow=workflow, days=days)
+    want = _latest_predicates(runtimes, "WITH latest AS (", end)
+    got = _latest_predicates(evidence, "AND RUN_ID = (", end)
+    assert got == want
+    assert ("WORKFLOW_NAME = 'WF_X'" in got) == bool(workflow)
+    assert ("DATEADD('day', -7," in got) == (days == 7)
+
+
+def test_task_evidence_scan_specific_run_binds_a_literal() -> None:
+    sql = etl.run_task_evidence_scan(_CTRL, task="SP_D_PLCY", run_id="abc-123", workflow="WF_X", days=7)
+    assert "AND RUN_ID = 'abc-123'" in sql
+    assert "ORDER BY TASK_START_DTTM DESC" not in sql       # an explicit run is never re-derived
+    assert "WORKFLOW_NAME = 'WF_X'" not in sql              # run_id wins over workflow + Window
+    assert "QUALIFY ROW_NUMBER() OVER (PARTITION BY CALL_ID" in sql   # kid_err keeps its own QUALIFY
+
+
+def test_task_evidence_scan_escapes_hostile_values() -> None:
+    evil = "x' OR '1'='1"
+    sql = etl.run_task_evidence_scan(_CTRL, task=evil, workflow=evil)
+    assert "TASK_NAME = 'x'' OR ''1''=''1'" in sql
+    assert "WORKFLOW_NAME = 'x'' OR ''1''=''1'" in sql
+    assert "= 'X'' OR ''1''=''1'" in sql                    # the proc key is a literal too
+    sql = etl.run_task_evidence_scan(_CTRL, task="SP_X", run_id=evil)
+    assert "RUN_ID = 'x'' OR ''1''=''1'" in sql
+
+
+def test_task_evidence_scan_fail_closed() -> None:
+    for bad in ("", None, "T; DROP TABLE X", "a b c"):
+        assert etl.run_task_evidence_scan(bad, task="SP_X") == ""
+    for task in ("", None, "   ", '""', "nan"):
+        assert etl.run_task_evidence_scan(_CTRL, task=task) == ""
+
+
+def test_task_evidence_scan_reads_query_history_only_and_keeps_failed_calls() -> None:
+    sql = etl.run_task_evidence_scan(_CTRL, task="SP_D_PLCY", workflow="WF_X")
+    assert sql.count(_QH) == 2
+    for absent in ("QUERY_ATTRIBUTION_HISTORY", "CREDITS", "HAVING SUM(", "QUERY_TAG"):
+        assert absent not in sql, absent
+    for col in ("qh.EXECUTION_STATUS", "qh.ERROR_CODE", "qh.ERROR_MESSAGE"):
+        assert col in sql
+    assert "c.ERROR_CODE::VARCHAR AS ERROR_CODE" in sql      # a zero-padded code stays text
+    assert "LEFT(c.ERROR_MESSAGE, 1000) AS ERROR_MESSAGE" in sql
+
+
+def test_task_evidence_scan_matches_the_exact_procedure_name() -> None:
+    from app.logic.insights import proc_key
+    sql = etl.run_task_evidence_scan(_CTRL, task="SP_D_PLCY")
+    assert "qh.QUERY_TYPE = 'CALL'" in sql
+    assert "SPLIT_PART(REPLACE(REGEXP_SUBSTR(UPPER(qh.QUERY_TEXT)," in sql
+    assert "'CALL[[:space:]]+([A-Z0-9_.$\"]+)', 1, 1, 'e', 1), '\"', ''), '.', -1)" in sql
+    assert "= 'SP_D_PLCY'" in sql
+    assert "CONTAINS(" not in sql and "ILIKE" not in sql and " LIKE " not in sql
+    quoted = etl.run_task_evidence_scan(_CTRL, task='DB.SCH."sp_x"')
+    assert proc_key('DB.SCH."sp_x"') == "SP_X"
+    assert "\n        = 'SP_X'\n" in quoted                   # insights.proc_key parity (CHANGED_RECENTLY)
+    assert "TASK_NAME = 'DB.SCH.\"sp_x\"'" in quoted          # CONTROL_STATUS still matched verbatim
+
+
+def test_task_evidence_scan_prefers_the_control_status_database() -> None:
+    """Review F11: every EDW environment deploys the same proc names, so the CALL's database is resolved
+    (3-part target, else the session's database) and CONTROL_STATUS's own database wins when any CALL ran
+    there — a window MAX inside `calls`, so the window totals cover only the kept CALLs."""
+    sql = etl.run_task_evidence_scan(_CTRL, task="SP_D_PLCY")
+    assert ("REPLACE(REGEXP_SUBSTR(UPPER(qh.QUERY_TEXT),\n          'CALL[[:space:]]+([A-Z0-9_.$\"]+)', 1, 1, "
+            "'e', 1), '\"', '') AS CALL_TARGET") in sql
+    assert "UPPER(qh.DATABASE_NAME) AS SESSION_DATABASE" in sql
+    assert ("NULLIF(IFF(ARRAY_SIZE(SPLIT(h.CALL_TARGET, '.')) = 3, SPLIT_PART(h.CALL_TARGET, '.', 1),\n"
+            "                    h.SESSION_DATABASE), '') AS CALL_DATABASE") in sql
+    calls = sql.split("\ncalls AS (\n", 1)[1].split("\n),\n", 1)[0]
+    assert "FROM call_db d" in calls
+    assert ("QUALIFY d.CALL_DATABASE = 'ALFA_EDW_PRD'\n"
+            "       OR MAX(IFF(d.CALL_DATABASE = 'ALFA_EDW_PRD', 1, 0)) OVER () = 0") in calls
+    # the window totals read the filtered CTE (never call_hits / call_db)
+    final = sql.rsplit("\nSELECT b.T_START", 1)[1]
+    assert "LEFT JOIN calls c ON 1 = 1" in final and "call_db" not in final and "call_hits" not in final
+    assert "COUNT(c.QUERY_ID) OVER () AS MATCHED_CALLS" in final
+    assert "c.WAREHOUSE_NAME, c.CALL_DATABASE, 'ALFA_EDW_PRD' AS CONTROL_DATABASE," in final
+    # the child link keys on the kept CALLs only
+    assert "  FROM calls c\n  JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY k\n" in sql
+    # a non-3-part FQN states no database: '' (which no NULLIF'd CALL_DATABASE can equal) -> every CALL kept
+    two = etl.run_task_evidence_scan("PUBLIC.CONTROL_STATUS", task="SP_D_PLCY")
+    assert "QUALIFY d.CALL_DATABASE = ''\n" in two and "'' AS CONTROL_DATABASE" in two
+    # the FQN's database is upper-cased like Snowflake folds an unquoted identifier
+    assert "= 'ALFA_EDW_SIT'\n" in etl.run_task_evidence_scan("alfa_edw_sit.public.control_status", task="SP_X")
+
+
+def test_task_evidence_scan_children_share_the_call_session() -> None:
+    sql = etl.run_task_evidence_scan(_CTRL, task="SP_D_PLCY")
+    assert "ON k.SESSION_ID = c.SESSION_ID" in sql
+    assert "AND k.START_TIME >= c.START_TIME AND k.START_TIME <= COALESCE(c.END_TIME, CURRENT_TIMESTAMP())" in sql
+    assert "AND k.QUERY_ID <> c.QUERY_ID AND k.QUERY_TYPE <> 'CALL'" in sql
+    for agg in ("SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0)) AS Q_OVERLOAD",
+                "SUM(COALESCE(QUEUED_PROVISIONING_TIME, 0)) AS Q_PROV",
+                "SUM(COALESCE(COMPILATION_TIME, 0)) AS COMPILE", "SUM(COALESCE(EXECUTION_TIME, 0)) AS EXEC",
+                "SUM(COALESCE(BYTES_SPILLED_TO_LOCAL_STORAGE, 0)) AS SPILL_L",
+                "SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) AS SPILL_R",
+                "MAX_BY(WAREHOUSE_NAME, Q_OVERLOAD + Q_PROV) AS QUEUE_WAREHOUSE",
+                "QUALIFY ROW_NUMBER() OVER (PARTITION BY CALL_ID ORDER BY START_TIME DESC) = 1"):
+        assert agg in sql, agg
+    # both QUERY_HISTORY reads are bounded by the task window +/- the clock-skew slack
+    slack = etl.EVIDENCE_SLACK_MIN
+    for alias in ("qh", "k"):
+        assert f"{alias}.START_TIME >= DATEADD('minute', -{slack}, (SELECT T_START FROM bounds))" in sql
+        assert f"{alias}.START_TIME <= DATEADD('minute', {slack}, (SELECT T_END FROM bounds))" in sql
+
+
+def test_task_evidence_scan_literal_floor() -> None:
+    sql = etl.run_task_evidence_scan(_CTRL, task="SP_D_PLCY", floor_days=3)
+    assert sql.count("START_TIME >= DATEADD('day', -3, CURRENT_TIMESTAMP())") == 2
+    assert "qh.START_TIME >= DATEADD('day', -3," in sql and "k.START_TIME >= DATEADD('day', -3," in sql
+    for no_floor in (0, -1, "x", None, float("nan"), float("inf"), True):
+        assert "DATEADD('day'," not in etl.run_task_evidence_scan(_CTRL, task="SP_D_PLCY", floor_days=no_floor)
+
+
+def test_task_evidence_scan_one_row_when_the_task_exists() -> None:
+    sql = etl.run_task_evidence_scan(_CTRL, task="SP_D_PLCY")
+    assert "HAVING COUNT(*) > 0" in sql
+    assert "FROM bounds b" in sql and "LEFT JOIN calls c ON 1 = 1" in sql
+    assert "ORDER BY c.START_TIME DESC NULLS LAST" in sql
+    assert f"LIMIT {etl.MAX_EVIDENCE_ROWS}" in sql
+
+
+def test_task_evidence_scan_uncapped_totals() -> None:
+    sql = etl.run_task_evidence_scan(_CTRL, task="SP_D_PLCY")
+    assert "COUNT(c.QUERY_ID) OVER () AS MATCHED_CALLS" in sql
+    assert "SUM(IFF(c.EXECUTION_STATUS <> 'SUCCESS', 1, 0)) OVER () AS FAILED_CALLS" in sql
+    assert "SUM(c.TOTAL_ELAPSED_TIME) OVER () AS ALL_CALLS_ELAPSED_MS" in sql
+
+
+def test_task_evidence_scan_shares_the_failed_status_set() -> None:
+    sql = etl.run_task_evidence_scan(_CTRL, task="SP_D_PLCY")
+    case = sql.split("CASE WHEN UPPER(b.TERMINAL_STATUS) IN (", 1)[1].split(") THEN 1 ELSE 0 END AS IS_TASK_FAILED", 1)[0]
+    assert {s.strip().strip("'") for s in case.split(",")} == set(etl.FAILED_TASK_STATUSES)
+
+
+def _named_selects(sql: str) -> list[str]:
+    sqlglot = pytest.importorskip("sqlglot")
+    return sqlglot.parse_one(sql, read="snowflake").named_selects
+
+
+def test_task_evidence_scan_columns_humanize() -> None:
+    from app.ui.components import _byte_unit_for_column, _duration_unit_for_column
+    cols = _named_selects(etl.run_task_evidence_scan(_CTRL, task="SP_D_PLCY"))
+    assert [c for c in cols if "_TIME" in c] == ["TASK_START_TIME", "TASK_END_TIME", "CALL_START_TIME"]
+    durations = {c: u for c in cols if (u := _duration_unit_for_column(c))}   # every column with a unit
+    assert durations == {
+        "TASK_WINDOW_SEC": "s", "END_AGE_MIN": "min", "ALL_CALLS_ELAPSED_MS": "ms", "CALL_ELAPSED_MS": "ms",
+        "CALL_QUEUED_MS": "ms", "QUEUED_OVERLOAD_MS": "ms", "QUEUED_PROVISIONING_MS": "ms", "COMPILE_MS": "ms",
+        "EXEC_MS": "ms", "CHILD_ELAPSED_MS": "ms"}
+    assert _byte_unit_for_column("SPILL_LOCAL_GB") and _byte_unit_for_column("SPILL_REMOTE_GB")
+    assert {"SPILL_LOCAL_GB", "SPILL_REMOTE_GB", "QUEUED_PCT", "CALL_QUERY_ID", "CALL_DATABASE",
+            "CONTROL_DATABASE"} <= set(cols)
+
+
+def test_task_evidence_scan_parses() -> None:
+    for kw in ({"workflow": "WF_X", "days": 7, "floor_days": 3}, {"run_id": "abc-123"}, {}):
+        cols = _named_selects(etl.run_task_evidence_scan(_CTRL, task="SP_D_PLCY", **kw))
+        assert cols[0] == "TASK_START_TIME" and cols[-1] == "CHILD_ERROR_MESSAGE"
+
+
+def test_task_evidence_scan_is_account_wide() -> None:
+    import inspect
+    params = inspect.signature(etl.run_task_evidence_scan).parameters
+    assert "company" not in params            # stays out of the company filter matrix, like its siblings
+    assert "ACCOUNT_USAGE.QUERY_HISTORY" in etl._QH_FQN

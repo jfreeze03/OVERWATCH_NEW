@@ -245,7 +245,8 @@ def workflow_runtimes_scan(
     ``days`` (> 0) honors the scope-bar Window; ``0`` means all time. Returns one row per task:
     WORKFLOW_NAME, TASK_NAME, TASK_STATUS, the start/end window, and RUNTIME_SEC = end − start (a
     still-running task with a NULL end is measured to CURRENT_TIMESTAMP(), so a hung task
-    surfaces). Slowest-first; the ``_SEC`` name humanizes to Hr/Min/Sec. Fail-closed on a bad
+    surfaces), and RUN_ID (text; the same run on every row) so a drill can bind exactly the run
+    shown. Slowest-first; the ``_SEC`` name humanizes to Hr/Min/Sec. Fail-closed on a bad
     FQN. Pure: bounded output, no Streamlit."""
     from app.core.sqlsafe import safe_identifier, sql_literal
 
@@ -278,7 +279,10 @@ def workflow_runtimes_scan(
         # ENVELOPE runtime (first attempt start -> last attempt end), so start + RUNTIME_SEC == end
         # holds for a retried task and matches the panel's 'runtime is end - start' caption + span math.
         "       DATEDIFF('second', MIN(s.TASK_START_DTTM),\n"
-        "           MAX(COALESCE(s.TASK_END_DTTM, CURRENT_TIMESTAMP()))) AS RUNTIME_SEC\n"
+        "           MAX(COALESCE(s.TASK_END_DTTM, CURRENT_TIMESTAMP()))) AS RUNTIME_SEC,\n"
+        # the run these rows are (one by construction: `latest` is one RUN_ID), as text like the run
+        # inventory's picker, so the task-evidence drill binds THIS run instead of re-deriving 'latest'
+        "       MAX(s.RUN_ID)::VARCHAR AS RUN_ID\n"
         f"  FROM {tbl} s\n"
         "  JOIN latest l ON s.RUN_ID = l.RUN_ID\n"
         "  WHERE s.TASK_START_DTTM IS NOT NULL AND s.TASK_NAME IS NOT NULL\n"
@@ -900,6 +904,238 @@ def run_cost_attribution_scan(
         "  WHERE RN = 1\n"
         "  GROUP BY 1, 2\n"
         "  ORDER BY CREDITS_ATTRIBUTED DESC NULLS LAST\n"
+        f"  LIMIT {int(max_rows)}"
+    )
+
+
+# --- Phase 4b (Next-Fifty #14 Ph1): task evidence (CONTROL_STATUS x QUERY_HISTORY) ---
+# "Why did this ETL task fail or slow down?" — the task's own Snowflake CALL (status, error text) and
+# the statements that CALL ran (queued / compile / execution / spill), for ONE run. QUERY_HISTORY only:
+# QUERY_ATTRIBUTION_HISTORY lags ~6h and drops short or warehouse-less statements, so a morning read of
+# last night's cycle would usually show no children there.
+MAX_EVIDENCE_ROWS = 50   # a task has a handful of CALL attempts; the one bounds-only row counts too
+EVIDENCE_SLACK_MIN = 5   # +/- minutes of Informatica-vs-Snowflake clock skew around the CONTROL_STATUS window
+
+
+def _evidence_floor_days(floor_days: object) -> int:
+    """The literal pruning floor in whole days; 0 (no floor) for a non-positive / NaN / inf / non-number."""
+    if isinstance(floor_days, bool) or not isinstance(floor_days, (int, float)):
+        return 0
+    try:
+        n = int(floor_days)
+    except (OverflowError, ValueError):   # inf / NaN
+        return 0
+    return n if n > 0 else 0
+
+
+def run_task_evidence_scan(control_fqn: object, *, task: object, workflow: object = "", run_id: object = "",
+                           days: object = 0, floor_days: object = 0,
+                           max_rows: int = MAX_EVIDENCE_ROWS) -> str:
+    """One ETL task's Snowflake evidence for one run: its CALL(s) and the statements each CALL ran.
+
+    RUN: ``run_id`` set -> that run (an escaped literal). Both Tonight sites pass the run their table
+    shows (workflow_runtimes_scan projects its RUN_ID), because a 'latest run' re-derived at a different
+    time can be a newer run than the cached table's. Only without a run id: the latest run, chosen with
+    the SAME predicates as workflow_runtimes_scan's ``latest`` CTE (``workflow`` + ``days``) (locked by a
+    normalize-and-compare test, never a refactor).
+
+    MATCH: the query tags are blank (verified live), so the CALL is matched by exact PROCEDURE NAME inside
+    the task's CONTROL_STATUS window (+/- EVIDENCE_SLACK_MIN): the bare upper-case name after ``CALL``
+    (quotes, schema and arg list dropped) must equal insights.proc_key(task) — the key CHANGED_RECENTLY
+    uses. Never CONTAINS, which mis-matches nested prefixes (SP_D_PLCY_TSACTN vs
+    SP_D_PLCY_TSACTN_STS_CANCLTN_RSN). M_* mapping tasks issue no CALL, so they honestly match nothing.
+    Exact QUERY_TAG matching is Phase 2 (docs/design/INFORMATICA_QUERY_TAG_ASK.md).
+
+    DATABASE: every EDW environment (PRD, SIT, DEV, ...) deploys the same procedure names, so a name match
+    alone can pick up another environment's CALL in the same window. Each CALL's database is resolved
+    (CALL_DATABASE: the first part of a 3-part CALL target, else the session's current database) and,
+    when ANY matched CALL ran in CONTROL_STATUS's own database (CONTROL_DATABASE, the first part of a
+    3-part FQN), only those are kept; otherwise every name match is kept and the verdict says the match
+    is in another database. A non-3-part FQN states no database, so no preference applies. The filter
+    runs inside ``calls``, so the window totals cover only the kept CALLs.
+
+    CHILDREN: QUERY_HISTORY has no ROOT_QUERY_ID (only QUERY_ATTRIBUTION_HISTORY does, ~6h late), so a
+    CALL's children are the other statements in the CALL's SESSION_ID that started between the CALL's
+    start and end. A wrong linkage shows an empty breakdown, never wrong numbers; the status and error
+    verdict does not depend on it. Failed CALLs are KEPT (no credits HAVING — a failed CALL bills ~0).
+
+    SHAPE: always ONE row when the task has CONTROL_STATUS rows in the run (bounds LEFT JOIN calls), so the
+    verdict can tell not-found / no-CALL / failed / slow apart; ordered newest CALL first. MATCHED_CALLS,
+    FAILED_CALLS and ALL_CALLS_ELAPSED_MS are uncapped window totals (never a sum of the LIMIT-ed rows).
+    Only the three real timestamps carry _TIME; durations end _MS/_SEC/_MIN and spill _GB, so the table
+    machinery humanizes them. ``floor_days`` (> 0) adds a LITERAL START_TIME floor to both QUERY_HISTORY
+    reads so they prune (the scalar-subquery bounds alone do not); the page derives it from the task's
+    start. Fail-closed ("") on an empty/invalid FQN, an empty task or a task with no procedure key.
+    Account-wide by design (no company parameter, like its siblings). Pure: bounded output, no Streamlit."""
+    from app.core.sqlsafe import safe_identifier, sql_literal
+    from app.logic.insights import proc_key
+
+    fqn = str(control_fqn or "").strip()
+    _task = str(task or "").strip()
+    if not fqn or not _task:
+        return ""
+    try:
+        tbl = safe_identifier(fqn, allow_qualified=True)
+    except ValueError:
+        return ""
+    _key = proc_key(_task)
+    if not _key:
+        return ""
+    t_lit = sql_literal(_task)
+    call_lit = sql_literal(_key)
+    # CONTROL_STATUS's database (safe_identifier admits only unquoted parts, which Snowflake upper-cases);
+    # '' for a 1- or 2-part FQN = no same-database preference (nothing can equal it: CALL_DATABASE is NULLIF'd)
+    _parts = tbl.split(".")
+    ctl_lit = sql_literal(_parts[0].upper() if len(_parts) == 3 else "")
+    _failed = ", ".join(f"'{s}'" for s in sorted(FAILED_TASK_STATUSES))
+    _rid = str(run_id or "").strip()
+    if _rid:
+        run_filter = f"    AND RUN_ID = {sql_literal(_rid)}\n"
+    else:
+        # the latest run: predicates IDENTICAL to workflow_runtimes_scan's `latest` CTE (same order)
+        _wf = str(workflow or "").strip()
+        wf_filter = f"        AND WORKFLOW_NAME = {sql_literal(_wf)}\n" if _wf else ""
+        run_filter = (
+            "    AND RUN_ID = (\n"
+            f"      SELECT RUN_ID FROM {tbl}\n"
+            "      WHERE TASK_START_DTTM IS NOT NULL\n"
+            f"{wf_filter}"
+            f"{_window_clause(days, indent='      ')}"
+            "      QUALIFY ROW_NUMBER() OVER (ORDER BY TASK_START_DTTM DESC) = 1)\n"
+        )
+    n = _evidence_floor_days(floor_days)
+
+    def _floor(alias: str) -> str:
+        return (f"    AND {alias}.START_TIME >= DATEADD('day', -{n}, CURRENT_TIMESTAMP())\n"
+                if n > 0 else "")
+
+    s = int(EVIDENCE_SLACK_MIN)
+
+    def _window(alias: str) -> str:
+        return (f"  WHERE {alias}.START_TIME >= DATEADD('minute', -{s}, (SELECT T_START FROM bounds))\n"
+                f"    AND {alias}.START_TIME <= DATEADD('minute', {s}, (SELECT T_END FROM bounds))\n")
+
+    return (
+        # this task's CONTROL_STATUS attempts in the run (an Informatica retry writes one row per attempt)
+        "WITH tasks AS (\n"
+        "  SELECT TASK_START_DTTM, TASK_END_DTTM, TASK_STATUS,\n"
+        "         COALESCE(TASK_END_DTTM, CURRENT_TIMESTAMP()) AS TASK_END\n"
+        f"  FROM {tbl}\n"
+        f"  WHERE TASK_START_DTTM IS NOT NULL AND TASK_NAME = {t_lit}\n"
+        f"{run_filter}"
+        "),\n"
+        # the task's envelope + TERMINAL status (the MAX_BY retry idiom the runtimes panel uses); HAVING
+        # makes 'no CONTROL_STATUS rows' an empty result instead of one all-NULL row
+        "bounds AS (\n"
+        "  SELECT MIN(TASK_START_DTTM) AS T_START, MAX(TASK_END) AS T_END, COUNT(*) AS ATTEMPTS,\n"
+        "         MAX_BY(TASK_STATUS, COALESCE(TASK_END_DTTM, TASK_START_DTTM)) AS TERMINAL_STATUS\n"
+        "  FROM tasks\n"
+        "  HAVING COUNT(*) > 0\n"
+        "),\n"
+        # the task's own CALL(s): exact procedure name (the POSIX pattern insights_sql uses, plus '"'), plus
+        # the qualified CALL target and the session's database for the database preference below
+        "call_hits AS (\n"
+        "  SELECT qh.QUERY_ID, qh.SESSION_ID, qh.START_TIME, qh.END_TIME, qh.EXECUTION_STATUS,\n"
+        "         qh.ERROR_CODE, qh.ERROR_MESSAGE, qh.WAREHOUSE_NAME, qh.TOTAL_ELAPSED_TIME,\n"
+        "         COALESCE(qh.QUEUED_OVERLOAD_TIME, 0) + COALESCE(qh.QUEUED_PROVISIONING_TIME, 0) AS CALL_QUEUED,\n"
+        "         REPLACE(REGEXP_SUBSTR(UPPER(qh.QUERY_TEXT),\n"
+        "          'CALL[[:space:]]+([A-Z0-9_.$\"]+)', 1, 1, 'e', 1), '\"', '') AS CALL_TARGET,\n"
+        "         UPPER(qh.DATABASE_NAME) AS SESSION_DATABASE\n"
+        f"  FROM {_QH_FQN} qh\n"
+        f"{_window('qh')}"
+        f"{_floor('qh')}"
+        "    AND qh.QUERY_TYPE = 'CALL'\n"
+        "    AND SPLIT_PART(REPLACE(REGEXP_SUBSTR(UPPER(qh.QUERY_TEXT),\n"
+        "          'CALL[[:space:]]+([A-Z0-9_.$\"]+)', 1, 1, 'e', 1), '\"', ''), '.', -1)\n"
+        f"        = {call_lit}\n"
+        "),\n"
+        # the database each CALL ran in: a 3-part target names it, else the session's current database
+        "call_db AS (\n"
+        "  SELECT h.QUERY_ID, h.SESSION_ID, h.START_TIME, h.END_TIME, h.EXECUTION_STATUS, h.ERROR_CODE,\n"
+        "         h.ERROR_MESSAGE, h.WAREHOUSE_NAME, h.TOTAL_ELAPSED_TIME, h.CALL_QUEUED,\n"
+        "         NULLIF(IFF(ARRAY_SIZE(SPLIT(h.CALL_TARGET, '.')) = 3, SPLIT_PART(h.CALL_TARGET, '.', 1),\n"
+        "                    h.SESSION_DATABASE), '') AS CALL_DATABASE\n"
+        "  FROM call_hits h\n"
+        "),\n"
+        # same-named procs exist in every EDW environment: keep only the CALLs in CONTROL_STATUS's own
+        # database when ANY ran there in the window, else every name match (the verdict then says so).
+        # A window MAX, so MATCHED_CALLS / FAILED_CALLS / ALL_CALLS_ELAPSED_MS cover only the kept CALLs.
+        "calls AS (\n"
+        "  SELECT d.QUERY_ID, d.SESSION_ID, d.START_TIME, d.END_TIME, d.EXECUTION_STATUS, d.ERROR_CODE,\n"
+        "         d.ERROR_MESSAGE, d.WAREHOUSE_NAME, d.TOTAL_ELAPSED_TIME, d.CALL_QUEUED, d.CALL_DATABASE\n"
+        "  FROM call_db d\n"
+        f"  QUALIFY d.CALL_DATABASE = {ctl_lit}\n"
+        f"       OR MAX(IFF(d.CALL_DATABASE = {ctl_lit}, 1, 0)) OVER () = 0\n"
+        "),\n"
+        # each CALL's children: its session's other statements between the CALL's start and end
+        "child_rows AS (\n"
+        "  SELECT c.QUERY_ID AS CALL_ID, k.QUERY_ID, k.START_TIME, k.WAREHOUSE_NAME, k.EXECUTION_STATUS,\n"
+        "         k.ERROR_MESSAGE, k.QUEUED_OVERLOAD_TIME, k.QUEUED_PROVISIONING_TIME, k.COMPILATION_TIME,\n"
+        "         k.EXECUTION_TIME, k.TOTAL_ELAPSED_TIME,\n"
+        "         k.BYTES_SPILLED_TO_LOCAL_STORAGE, k.BYTES_SPILLED_TO_REMOTE_STORAGE\n"
+        "  FROM calls c\n"
+        f"  JOIN {_QH_FQN} k\n"
+        "    ON k.SESSION_ID = c.SESSION_ID\n"
+        "   AND k.START_TIME >= c.START_TIME AND k.START_TIME <= COALESCE(c.END_TIME, CURRENT_TIMESTAMP())\n"
+        "   AND k.QUERY_ID <> c.QUERY_ID AND k.QUERY_TYPE <> 'CALL'\n"
+        f"{_window('k')}"
+        f"{_floor('k')}"
+        "),\n"
+        "kid_wh AS (\n"
+        "  SELECT CALL_ID, WAREHOUSE_NAME, COUNT(*) AS N,\n"
+        "         COUNT_IF(EXECUTION_STATUS <> 'SUCCESS') AS N_FAILED,\n"
+        "         SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0)) AS Q_OVERLOAD,\n"
+        "         SUM(COALESCE(QUEUED_PROVISIONING_TIME, 0)) AS Q_PROV,\n"
+        "         SUM(COALESCE(COMPILATION_TIME, 0)) AS COMPILE,\n"
+        "         SUM(COALESCE(EXECUTION_TIME, 0)) AS EXEC,\n"
+        "         SUM(COALESCE(TOTAL_ELAPSED_TIME, 0)) AS ELAPSED,\n"
+        "         SUM(COALESCE(BYTES_SPILLED_TO_LOCAL_STORAGE, 0)) AS SPILL_L,\n"
+        "         SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) AS SPILL_R\n"
+        "  FROM child_rows\n"
+        "  GROUP BY CALL_ID, WAREHOUSE_NAME\n"
+        "),\n"
+        "kid_stats AS (\n"
+        "  SELECT CALL_ID, SUM(N) AS CHILD_STATEMENTS, SUM(N_FAILED) AS FAILED_CHILD_STATEMENTS,\n"
+        "         SUM(Q_OVERLOAD) AS QUEUED_OVERLOAD_MS, SUM(Q_PROV) AS QUEUED_PROVISIONING_MS,\n"
+        "         SUM(COMPILE) AS COMPILE_MS, SUM(EXEC) AS EXEC_MS, SUM(ELAPSED) AS CHILD_ELAPSED_MS,\n"
+        "         MAX_BY(WAREHOUSE_NAME, Q_OVERLOAD + Q_PROV) AS QUEUE_WAREHOUSE,\n"
+        "         ROUND(SUM(SPILL_L) / POWER(1024, 3), 3) AS SPILL_LOCAL_GB,\n"
+        "         ROUND(SUM(SPILL_R) / POWER(1024, 3), 3) AS SPILL_REMOTE_GB\n"
+        "  FROM kid_wh\n"
+        "  GROUP BY CALL_ID\n"
+        "),\n"
+        # the newest failed child per CALL (its error text is the one to read first)
+        "kid_err AS (\n"
+        "  SELECT CALL_ID, QUERY_ID AS FAILED_CHILD_QUERY_ID, LEFT(ERROR_MESSAGE, 1000) AS CHILD_ERROR_MESSAGE\n"
+        "  FROM child_rows\n"
+        "  WHERE EXECUTION_STATUS <> 'SUCCESS'\n"
+        "  QUALIFY ROW_NUMBER() OVER (PARTITION BY CALL_ID ORDER BY START_TIME DESC) = 1\n"
+        ")\n"
+        "SELECT b.T_START AS TASK_START_TIME, b.T_END AS TASK_END_TIME, b.ATTEMPTS,\n"
+        "       b.TERMINAL_STATUS AS TASK_STATUS,\n"
+        f"       CASE WHEN UPPER(b.TERMINAL_STATUS) IN ({_failed}) THEN 1 ELSE 0 END AS IS_TASK_FAILED,\n"
+        "       IFF(c.EXECUTION_STATUS <> 'SUCCESS', 1, 0) AS IS_CALL_FAILED,\n"
+        "       DATEDIFF('second', b.T_START, b.T_END) AS TASK_WINDOW_SEC,\n"
+        "       DATEDIFF('minute', b.T_END, CURRENT_TIMESTAMP()) AS END_AGE_MIN,\n"
+        "       COUNT(c.QUERY_ID) OVER () AS MATCHED_CALLS,\n"
+        "       SUM(IFF(c.EXECUTION_STATUS <> 'SUCCESS', 1, 0)) OVER () AS FAILED_CALLS,\n"
+        "       SUM(c.TOTAL_ELAPSED_TIME) OVER () AS ALL_CALLS_ELAPSED_MS,\n"
+        "       c.QUERY_ID AS CALL_QUERY_ID, c.START_TIME AS CALL_START_TIME, c.EXECUTION_STATUS,\n"
+        # ERROR_CODE as text: a zero-padded code ('002043') must never read as a number
+        "       c.ERROR_CODE::VARCHAR AS ERROR_CODE, LEFT(c.ERROR_MESSAGE, 1000) AS ERROR_MESSAGE,\n"
+        f"       c.WAREHOUSE_NAME, c.CALL_DATABASE, {ctl_lit} AS CONTROL_DATABASE,\n"
+        "       c.TOTAL_ELAPSED_TIME AS CALL_ELAPSED_MS, c.CALL_QUEUED AS CALL_QUEUED_MS,\n"
+        "       k.CHILD_STATEMENTS, k.FAILED_CHILD_STATEMENTS, k.QUEUED_OVERLOAD_MS, k.QUEUED_PROVISIONING_MS,\n"
+        "       k.COMPILE_MS, k.EXEC_MS, k.CHILD_ELAPSED_MS,\n"
+        "       ROUND(100 * (k.QUEUED_OVERLOAD_MS + k.QUEUED_PROVISIONING_MS)\n"
+        "             / NULLIF(k.CHILD_ELAPSED_MS, 0), 1) AS QUEUED_PCT,\n"
+        "       k.QUEUE_WAREHOUSE, k.SPILL_LOCAL_GB, k.SPILL_REMOTE_GB,\n"
+        "       e.FAILED_CHILD_QUERY_ID, e.CHILD_ERROR_MESSAGE\n"
+        "  FROM bounds b\n"
+        "  LEFT JOIN calls c ON 1 = 1\n"
+        "  LEFT JOIN kid_stats k ON k.CALL_ID = c.QUERY_ID\n"
+        "  LEFT JOIN kid_err e ON e.CALL_ID = c.QUERY_ID\n"
+        "  ORDER BY c.START_TIME DESC NULLS LAST\n"
         f"  LIMIT {int(max_rows)}"
     )
 

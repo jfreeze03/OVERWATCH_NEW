@@ -15,6 +15,7 @@ ALTER SESSION SET QUERY_TAG = '{"pipeline":"daily_edw_load","run_id":"2026-07-14
 | `target_object` | The object the run builds (ties into FACT_OBJECT_COST_DAILY).  |
 | `environment`   | PROD / SIT / DEV — filter prod cost from noise.                |
 | `cost_center`   | Chargeback owner.                                             |
+| `task`          | Optional: the Informatica session/task (= `CONTROL_STATUS.TASK_NAME`) for exact ETL task evidence. |
 
 **How it's read.** `app/data/etl_sql.py` parses the tag with
 `GET_PATH(TRY_PARSE_JSON(QUERY_TAG), 'pipeline')` and joins to MEASURED
@@ -28,3 +29,7 @@ coverage %. Method = MEASURED (see the metric registry, Admin → Metrics).
 
 Adopt the tag in your orchestrator (dbt `query_comment`, Airflow, a stored
 proc's `ALTER SESSION`, etc.) and the panel lights up on its own.
+
+See also: [INFORMATICA_QUERY_TAG_ASK.md](INFORMATICA_QUERY_TAG_ASK.md) — the one-page ask to the ETL team
+for the Informatica Pre/Post SQL that sets this tag per session (Next-Fifty #14). The `task` key is not
+read by the unit-cost KPIs; it is reserved for exact task matching (Phase 2).

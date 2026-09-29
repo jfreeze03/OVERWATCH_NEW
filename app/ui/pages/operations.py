@@ -50,6 +50,15 @@ from app.logic.anomaly import (
 )
 from app.logic.date_windows import window_label
 from app.logic.dq import row_volume_anomalies, summarize_row_volume
+from app.logic.etl_evidence import (
+    evidence_display_frame,
+    evidence_floor_days,
+    evidence_run_id,
+    evidence_task_labels,
+    evidence_task_options,
+    task_evidence_lines,
+    task_first_start,
+)
 from app.logic.formulas import (
     account_today,
     credits_to_usd,
@@ -460,7 +469,11 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                        "the fingerprint runs (its compute-footprint percentile, not the raw credit gap) "
                        "— an ordinal impact rank, so a moderately-bad query run thousands of times beats "
                        "a one-off catastrophe. QOP = how bad a typical run is; RUNS and total time show "
-                       "the footprint itself. Click a row for the additive breakdown and the first fix.")
+                       "the footprint itself. Click a row for the additive breakdown, the first fix and a "
+                       "link to Operations ▸ Optimize.")
+            st.caption("OOS ranks; it is not dollars. Operations ▸ Optimize prices each query family "
+                       "(observed 30-day cost from the daily marts, Company and Window only) and can track "
+                       "it into Action Center.")
             if _sel is not None and 0 <= int(_sel) < len(_disp):
                 _drow = _disp.iloc[int(_sel)]
                 _fp = str(_drow["FINGERPRINT"])
@@ -476,6 +489,16 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                                "(the PlatformScore pattern). The top row is the recommended first fix.")
                 else:
                     st.caption("No actionable finding for this fingerprint (it ran cleanly).")
+                # #28 (KEEP + LINK): the same family in Operations ▸ Optimize (observed dollars, one diagnosis,
+                # Track). A button, not a row-click nav: the row click stays the in-place QOP breakdown, and a
+                # button never re-fires from st.dataframe's sticky selection. live_profile: this board just ran
+                # the exact scan Optimize's live toggle reuses (same builder args + tier = one cache entry).
+                if _fp and st.button("Open in Optimize →", key=f"ops_qopp_open_opt:{_fp[:16]}",
+                                     type="tertiary",
+                                     help="Opens this query family in Operations ▸ Optimize: its observed "
+                                          "30-day cost, one diagnosis and Track into Action Center."):
+                    request_navigation("Operations", "Optimize",
+                                       context={"fingerprint": _fp, "live_profile": True})
 
     # Query Optimization Intelligence (Slice 2): the OPERATOR-level profile Slice 1 can't
     # see. Reads the operator-stats collector mart (FACT_QUERY_OPERATOR_STATS_DAILY,
@@ -1509,7 +1532,8 @@ def _workflow_runtimes_panel(days: int = 0, *, pf: dict | None = None) -> None:
                  "delta_color": "off"},
                 {"label": _recon_lbl, "value": _recon_val, "delta_color": "off", "help": _recon_help},
             ])
-        styled_table(df, height=320)
+        # RUN_ID is the drill's binding, not a column to read (one value on every row)
+        styled_table(df.drop(columns=["RUN_ID"], errors="ignore"), height=320)
         _bits = [f"{n_tasks} task(s)"]
         if n_fail:
             _bits.append(f"{n_fail} failed")
@@ -1522,6 +1546,81 @@ def _workflow_runtimes_panel(days: int = 0, *, pf: dict | None = None) -> None:
                    "is the only record of these Informatica proc runtimes — Snowflake's task history "
                    "never sees them.")
         result_caption(res)
+        # review F22: bind the run THIS table shows. Re-deriving 'the latest run' at the evidence read's own
+        # time can pick a newer run than this (cached) table when a cycle starts in between; the workflow +
+        # Window predicates are only the fallback when RUN_ID is absent.
+        _task_evidence_drill(fqn, df, workflow=_wf_pick, run_id=evidence_run_id(df), days=days,
+                             key="etl_ev_rt")
+
+
+def _task_evidence_drill(fqn: str, tasks, *, workflow: str = "", run_id: str = "", days: int = 0,
+                         key: str) -> None:
+    """Next-Fifty #14 Phase 1: "why did this ETL task fail or slow down?" under a Tonight task table.
+
+    Off by default behind its own toggle — the off state renders nothing else and reads nothing, and it
+    is never prefetched. On: pick a task (failed first, then slowest), and read its Snowflake CALL (status,
+    error text) and the statements that CALL ran (queued / compile / execution / spill) for THIS run
+    (``run_id``, which both sites pass: the run the table above shows) or, only without one, the latest run
+    of ``workflow`` in the Window.
+    The verdict lives in app/logic/etl_evidence.py; the SQL in etl_control_sql.run_task_evidence_scan."""
+    if tasks is None or getattr(tasks, "empty", True) or "TASK_NAME" not in tasks.columns:
+        return
+    if not st.toggle("Explain a task: why did it fail or slow down?", key=f"{key}_toggle", value=False,
+                     help="Reads the task's Snowflake CALL (status, error text) and the statements it ran "
+                          "(queued, compile, execution, spill) from QUERY_HISTORY for this run's window. "
+                          "Off by default, so the tab adds no scan until you ask."):
+        return
+    opts = evidence_task_options(tasks, etl_control_sql.FAILED_TASK_STATUSES)
+    if not opts:
+        empty_state("no_data_yet", "No named task in this run to explain.")
+        return
+    _labels = evidence_task_labels(tasks, etl_control_sql.FAILED_TASK_STATUSES)
+    # review F12/F20: on SiS's streamlit 1.52 a selectbox's identity includes its option LABELS, so a
+    # changed label (a new attempt, a new failure) re-creates the widget at `index`. Remember the pick
+    # outside the widget and seed `index` from it (index is not part of the keyed identity), so a cache
+    # refresh mid-cycle never swaps the task being explained. The labels carry no live runtime either.
+    _prev = st.session_state.get(f"{key}_last")
+    _idx = opts.index(_prev) if _prev in opts else 0
+    task = st.selectbox("Task to explain", opts, index=_idx, key=f"{key}_pick",
+                        format_func=lambda t: _labels.get(t, t),
+                        help="Tasks with a failed attempt first, then the slowest.")
+    st.session_state[f"{key}_last"] = task
+    floor = evidence_floor_days(task_first_start(tasks, task), today=account_today())
+    sql = etl_control_sql.run_task_evidence_scan(fqn, task=task, workflow=workflow, run_id=run_id,
+                                                 days=days, floor_days=floor)
+    if not sql:
+        empty_state("no_data_yet", "This task can't be matched to a Snowflake procedure name.")
+        return
+    # tier "recent" (5-min TTL), deliberately not "historical": QUERY_HISTORY lags up to ~45 min, so a
+    # 1-hour cache would pin a "hasn't caught up yet" answer for an hour after the data arrived.
+    res = run(sql, page=_PAGE, key=f"etl_task_evidence_{run_id or workflow or 'latest'}_{task}_{days}",
+              tier="recent", source="CONTROL_STATUS x QUERY_HISTORY (task evidence, on demand)",
+              max_rows=etl_control_sql.MAX_EVIDENCE_ROWS)
+    if not guard(res, md_dollars(f"{task} has no CONTROL_STATUS rows for this run — nothing to explain."),
+                 setup_hint="The app role needs SELECT on the CONTROL_STATUS table; QUERY_HISTORY is "
+                            "already read elsewhere on this page."):
+        return
+    for line in task_evidence_lines(res.df, task=task):
+        if line.level == "error":
+            st.error(md_dollars("🔴 " + line.text))
+        elif line.level == "warn":
+            st.warning(md_dollars("🟠 " + line.text))
+        else:
+            # 'clean' renders as escaped HTML (no markdown math), 'no_data_yet' as a markdown caption
+            empty_state(line.level, line.text if line.level == "clean" else md_dollars(line.text),
+                        hint=md_dollars(line.hint) if line.hint else "")
+    disp = evidence_display_frame(res.df)
+    if not disp.empty:
+        disp, cfg = snowsight_profile_column(disp, _PAGE, id_col="CALL_QUERY_ID")
+        styled_table(disp, height=220, column_config=cfg or None)
+    st.caption("From QUERY_HISTORY (lags up to ~45 min). The task's CALL is matched by procedure name "
+               "inside its CONTROL_STATUS window (±5 min), keeping only CALLs in CONTROL_STATUS's own database "
+               "when any ran there (every environment deploys the same names; CALL_DATABASE shows which); its "
+               "statements are the CALL session's statements between the CALL's start and end. Queued = "
+               "overload + provisioning (resume). This shows where "
+               "Snowflake time went in this run — Performance ▸ Runtime drift shows 'slower than usual'. "
+               "Exact matching by QUERY_TAG is deferred (docs/design/INFORMATICA_QUERY_TAG_ASK.md).")
+    result_caption(res)
 
 
 # Next-Fifty #21: appended to the failure-recurrence / drift / creep captions.
@@ -1593,7 +1692,9 @@ def _failure_recurrence_panel(days: int = 0, *, pf: dict | None = None) -> None:
                    "decay-weighted failure share (newest weighted most) — a 'likely to fail next run' "
                    "PROXY, not a guaranteed forecast. Still-running runs are excluded; LOW_HISTORY marks "
                    "tasks with too few runs to trust the rate (their chronic/intermittent labels are "
-                   "withheld). Ranked worst-first." + _CHANGED_RECENTLY_NOTE)
+                   "withheld). Ranked worst-first." + _CHANGED_RECENTLY_NOTE
+                   + " Why did a run fail? Tonight ▸ Run inventory ▸ pick the run ▸ Explain a task shows its "
+                     "Snowflake CALL's error.")
         result_caption(res)
 
 
@@ -1636,7 +1737,9 @@ def _workflow_drift_panel(*, pf: dict | None = None) -> None:
                    "task that drifted, not the whole workflow. Only material slowdowns show — at "
                    "least 1 minute AND at least 1.5× the baseline — biggest first; a workflow with no "
                    "prior runs is omitted. LATEST_SEC / BASELINE_SEC / SLOWER_BY_SEC humanize to "
-                   "Hr/Min/Sec." + _CHANGED_RECENTLY_NOTE)
+                   "Hr/Min/Sec." + _CHANGED_RECENTLY_NOTE
+                   + " Why slower? Tonight ▸ Workflow runtimes ▸ Explain a task shows queued time, spill and "
+                     "time outside Snowflake.")
         result_caption(res)
 
 
@@ -1903,6 +2006,7 @@ def _run_inventory_panel(*, pf: dict | None = None) -> None:
                     st.caption("Each task in the chosen run (workflow, status, start/end, runtime) "
                                "from CONTROL_STATUS. RUNTIME_SEC humanizes to Hr/Min/Sec.")
                     result_caption(tres)
+                    _task_evidence_drill(status_fqn, tres.df, run_id=picked, key="etl_ev_inv")
         if params_fqn:
             params_sql = etl_control_sql.run_params_scan(params_fqn, run_id=picked)
             if params_sql:
@@ -2121,9 +2225,10 @@ def _pipeline_prefetch(days: int, want: set[str] | None = None) -> dict:
 
     Deliberately EXCLUDED — they aren't independent first-paint reads: the chosen workflow's
     runtimes and a chosen run's tasks/params need a selectbox value that doesn't exist yet, and
-    the cost-attribution scan is behind its own on-demand toggle (batching it would pay that scan
-    on every tab open). The builder calls here mirror each panel's exactly, so the batched SQL is
-    byte-identical to the panel's fallback — the member is genuinely used, not silently re-read.
+    the cost-attribution scan and the task-evidence drill (Next-Fifty #14, its own toggle) are
+    behind on-demand toggles (batching them would pay those scans on every tab open). The builder
+    calls here mirror each panel's exactly, so the batched SQL is byte-identical to the panel's
+    fallback — the member is genuinely used, not silently re-read.
     Plus the account-scope OBJECT_CHANGE_REGISTRY read the ETL panels annotate from (Next-Fifty #21)."""
     s = load_settings(_PAGE)
     ctrl = str(s.get("ETL_CONTROL_STATUS_FQN") or "").strip()

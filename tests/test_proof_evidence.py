@@ -76,9 +76,14 @@ def test_savings_ledger_projections_are_additive_only():
         assert cols[len(_PRE_V4597_LEDGER_COLUMNS):] == [
             "SOURCE_CHANGE_ID", "TARGET_OBJECT", "CHANGE_WAREHOUSE", "CHANGE_SETTING", "CHANGE_OLD_VALUE",
             "CHANGE_NEW_VALUE", "CHANGE_SEEN_AT", "CHANGE_VERDICT", "TRACKING_UNTIL", "AFTER_QUERIES",
-            "CHANGE_BY", "WINDOW_CLOSED"]
-        # no new join and no new table: still one LEFT JOIN to the registry, no alerts domain
-        assert sql.count("LEFT JOIN") == 2 and "ALERT_EVENTS" not in sql and "REMEDIATION_LOG" not in sql
+            "CHANGE_BY", "WINDOW_CLOSED",
+            # Next-Fifty #31 (v4.600): the revert projections, appended after WINDOW_CLOSED
+            "REVERTED_AT", "REVERT_CHANGE_ID", "REVERT_OLD_VALUE", "REVERT_NEW_VALUE", "REVERT_KIND",
+            # review r1 F1: the setting the undoing change touched (a co-attributed partner's when inherited)
+            "REVERT_SETTING"]
+        # registry + twin + the #31 revert link (a registry-only CTE); no alerts domain
+        assert sql.count("LEFT JOIN") == 3 and "ALERT_EVENTS" not in sql and "REMEDIATION_LOG" not in sql
+        assert "LEFT JOIN rv ON rv.BOOKED_CHANGE_ID = l.SOURCE_CHANGE_ID" in sql
         assert "CURRENT_DATE()" not in sql        # the app clock (TZ standard), never session-tz
     assert "LIMIT" not in mart_sql.savings_ledger(limit=None)
 

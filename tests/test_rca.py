@@ -144,3 +144,28 @@ def test_rca_is_wired_into_control_room():
     # the grounded-AI narrative is button-gated inside the ranked-field block
     assert "incident_narrative_prompt(inc_row, hyps, summ)" in cr
     assert "ai_evaluation_panel(" in cr
+
+
+def test_changes_adapter_prefers_setting_over_change_source():
+    """Next-Fifty #27 (latent bug): change_impact_sql.warehouse_change_registry ALWAYS emits
+    CHANGE_SOURCE (MANAGED/MANUAL/UNKNOWN), which used to win over SETTING — every Control Room
+    auto-investigation title read "Warehouse change on WH_ETL: MANUAL". The setting text leads now;
+    CHANGE_SOURCE stays the last resort and rides in the evidence."""
+    reg = pd.DataFrame([{
+        "WAREHOUSE_NAME": "WH_ETL", "COMPANY": "ALFA", "SETTING": "SIZE", "OLD_VALUE": "MEDIUM",
+        "NEW_VALUE": "LARGE", "CHANGE_SEEN_AT": _ONSET - timedelta(hours=2), "CHANGED_BY": "DBA_JANE",
+        "CHANGE_SOURCE": "MANUAL", "VERDICT": "REGRESSED", "VERDICT_DETAIL": ""}])
+    cand = candidates_from_changes(reg)[0]
+    assert cand["title"] == "Warehouse change on WH_ETL: SIZE: MEDIUM → LARGE (Regressed)"
+    assert ": MANUAL" not in cand["title"]
+    assert cand["evidence"]["change"] == "SIZE: MEDIUM → LARGE" and cand["evidence"]["source"] == "MANUAL"
+    assert cand["when"] == (_ONSET - timedelta(hours=2))
+    # an explicit CHANGE / CHANGE_DDL still leads (entity_recent_changes / OBJECT_CHANGE_REGISTRY)
+    ddl = candidates_from_changes(pd.DataFrame([{"OBJECT_NAME": "DB.S.T", "CHANGE_DDL": "ALTER TABLE T",
+                                                  "CHANGE_SOURCE": "MANUAL", "SETTING": "SIZE"}]))[0]
+    assert ddl["title"] == "Object change on DB.S.T: ALTER TABLE T"
+    # a frame with ONLY CHANGE_SOURCE still falls back to it rather than the bare word "change"
+    only = candidates_from_changes(pd.DataFrame([{"WAREHOUSE_NAME": "WH_X", "CHANGE_SOURCE": "MANAGED"}]))[0]
+    assert only["title"] == "Warehouse change on WH_X: MANAGED"
+    bare = candidates_from_changes(pd.DataFrame([{"WAREHOUSE_NAME": "WH_X"}]))[0]
+    assert bare["title"] == "Warehouse change on WH_X: change" and bare["evidence"]["source"] == ""

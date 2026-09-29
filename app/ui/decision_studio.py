@@ -3,10 +3,11 @@ verified saving rests on, and the priced pipeline ahead.
 
 Two READ-ONLY section bodies, dispatched by the page shell (app/ui/pages/decision_studio.py; both
 module paths and the ``decision_section`` key are kept this release):
-  * Proof    — the merged Scorecard + ROI: the ROI multiple, run-rate, realization (plus the carried
-               realization vs OVERWATCH's own estimate), settling items, acceptance, alert precision,
-               evidence coverage, and a per-item evidence table (what each saving rests on, who gets
-               credit). Every headline total is a SQL aggregate; pandas only shapes per-item rows.
+  * Proof    — the merged Scorecard + ROI: the ROI multiple, run-rate, Saved to date (accrued dollars,
+               Next-Fifty #31), realization (plus the carried realization vs OVERWATCH's own estimate),
+               settling items, acceptance, alert precision, evidence coverage, and a per-item evidence
+               table (what each saving rests on, who gets credit, and the changes later undone). Every
+               headline total is a SQL aggregate; pandas only shapes per-item rows.
   * Pipeline — addressable $/mo (the Cost ▸ Optimization & Savings idle rollup, mart-only) plus the queued
                ACTION_QUEUE work normalised to a monthly run-rate, and a projection whose sliders
                default to MEASURED acceptance / realization (a fragment: slider moves cost 0 reads).
@@ -24,7 +25,7 @@ import contextlib
 import pandas as pd
 import streamlit as st
 
-from app.config import SAVINGS_ACTIVE_MONTHS
+from app.config import SAVINGS_ACTIVE_MONTHS, SAVINGS_MONTH_DAYS
 from app.core.identity import viewer_name
 from app.core.query import run, run_batch
 from app.core.state import can_open, request_navigation
@@ -58,7 +59,10 @@ from app.logic.proof import (
     evidence_split,
     ledger_with_attribution,
     proof_verdict,
+    reverted_rows,
     roi_multiple,
+    saved_to_date,
+    saved_to_date_card,
     settle_schedule,
 )
 from app.logic.savings_rollup import idle_opportunities, resize_opportunities, rollup_savings
@@ -88,6 +92,17 @@ _PAGE = "Proof"
 _ASSUMED_ADOPTION_PCT = 60
 _ASSUMED_REALIZATION_PCT = 70
 _CONFIDENCE_FLOOR = 0.6
+
+# Next-Fifty #31: Proof ▸ Proof "Saved to date" — mart_sql.savings_summary_quarter's SAVED_* columns.
+_SAVED_TO_DATE_HELP = (
+    f"Dollars already saved, not a run-rate: each verified item's monthly saving ÷ {SAVINGS_MONTH_DAYS} × "
+    "the whole days it has been in place. A change the daily change scan measured counts from the day the "
+    "scan saw it (its measured window is the proof); an item verified by hand counts from the day it was "
+    f"verified. Accrual stops when the scan sees the change undone, or {SAVINGS_ACTIVE_MONTHS} months after "
+    "verification, when the item leaves the run-rate. Only the measured windows are measured; the days "
+    "after are carried forward at the verified rate — the same assumption the run-rate makes. Priced at "
+    "the credit rate in effect when each item settled, never re-priced; not an invoice line. It does not "
+    "feed the ROI multiple.")
 
 
 def _open_entity(kind: str, key: str) -> None:
@@ -350,6 +365,13 @@ def _proof_signals(rate: float) -> dict | None:
                        if _q_ok else safe_float(totals.get("verified_active_usd")))
     verified_active_items = (int(safe_float(_q.df.iloc[0].get("VERIFIED_ACTIVE_ITEMS")))
                              if _q_ok else int(totals["verified_active_count"]))
+    # Next-Fifty #31: what the revert check took out of the active run-rate (the same SQL statement; the
+    # ledger-frame fallback applies the same rule). .get(): an older-shaped summary lacks the columns.
+    _row = _q.df.iloc[0] if _q_ok else None
+    reverted_active_items = (int(safe_float(_row.get("REVERTED_ACTIVE_ITEMS"))) if _row is not None
+                             else int(totals.get("reverted_active_count") or 0))
+    reverted_active_usd = (safe_float(_row.get("REVERTED_ACTIVE_USD")) if _row is not None
+                           else safe_float(totals.get("reverted_active_usd")))
     run_cost = safe_float(_ac.df.iloc[0].get("APP_CREDITS_30D")) * rate if _ac.usable() else 0.0
     sig = {
         "ledger": ledger, "totals": totals, "realization": totals["realization_pct"],
@@ -357,6 +379,11 @@ def _proof_signals(rate: float) -> dict | None:
         "verified_active": verified_active,
         "verified_active_items": verified_active_items,
         "verified_qtd": verified_qtd,
+        "reverted_active_items": reverted_active_items,
+        "reverted_active_usd": reverted_active_usd,
+        # Proof "Saved to date": whole-ledger SQL aggregates only — None (the card reads "—") when the
+        # summary read failed; never a fallback sum over the capped ledger frame, never an ROI input
+        "saved": saved_to_date(_q.df) if _q_ok else None,
         "summary_ok": _q_ok,
         "acc": acceptance_summary(_acc.df if _acc.usable() else None),
         "prec": account_precision(_prec.df if _prec.usable() else None),
@@ -442,8 +469,10 @@ def _proof_tab(rate: float) -> None:
                 "(each verified amount is a monthly saving that keeps counting after its quarter, so this "
                 "does not reset on the first day of a quarter), as a multiple of OVERWATCH's own "
                 "trailing-30-day warehouse run cost (APP_WAREHOUSE credits × rate) — same monthly horizon "
-                "on both sides. ≥1× means it pays for itself. Reverted changes are not detected yet, so an "
-                f"item counts until it is {SAVINGS_ACTIVE_MONTHS} months old."})
+                "on both sides. ≥1× means it pays for itself. A warehouse-setting change the daily change "
+                "scan later sees undone (sized back up, a longer or no auto-suspend, more clusters, scaling "
+                "back to Standard) leaves the run-rate the day the scan sees it; everything else counts "
+                f"until it is {SAVINGS_ACTIVE_MONTHS} months old."})
 
     _real = totals["realization_pct"]
     _no_est = int(totals.get("verified_no_estimate_count") or 0)
@@ -463,30 +492,47 @@ def _proof_tab(rate: float) -> None:
         _settle_bits.append(f"{int(settle['overdue']):,} awaiting the daily scan")
     if _by_hand:
         _settle_bits.append(f"{_by_hand:,} more await proof by hand")
+    # Next-Fifty #31: realization KEEPS reverted rows (accuracy, not persistence) while verified_count drops
+    # them, so "nothing verified yet" keys on both -- never printed beside a real ratio.
+    _ver_any = int(totals["verified_count"]) + int(totals.get("reverted_count") or 0)
+    # Next-Fifty #31: what the revert check took out of the ACTIVE run-rate -- the uncapped SQL count (sig,
+    # savings_summary_quarter; the ledger-frame fallback only when that read failed), never a count over the
+    # row-capped ledger frame (review r1 F7).
+    _rev_n = int(sig.get("reverted_active_items") or 0)
+    # Saved to date: the SQL aggregates only (sig["saved"]; None when the whole-ledger summary failed).
+    # Dollars, never "/mo"; never an input to roi_multiple / proof_verdict. A $0 total reads "nothing
+    # verified yet" only when nothing is verified (review r1 F2/F6/F21: not beside a verified run-rate).
+    _saved_value, _saved_delta = saved_to_date_card(
+        sig.get("saved"), verified_any=_ver_any > 0 or int(sig.get("verified_active_items") or 0) > 0)
     kpi_row([
         # D4 (owner screenshot 2026-09-24): every VERIFIED_USD is a MONTHLY saving, so the run-rate reads
         # $/mo, never cumulative dollars. The VALUE is the uncapped SQL aggregate (the ROI numerator).
         {"label": "Verified savings run-rate", "value": f"{format_usd(verified_active)}/mo",
          "severity": "ok" if verified_active else "",
          "delta": (f"active: verified in the last {SAVINGS_ACTIVE_MONTHS} months · "
-                   f"{format_usd(totals['verified_usd'])}/mo across all {totals['verified_count']:,} verified item(s)"),
+                   f"{format_usd(totals['verified_usd'])}/mo across all {totals['verified_count']:,} verified item(s)"
+                   + (f" · {_rev_n:,} reverted, not counted" if _rev_n else "")),
          "delta_color": "off", "method": "measured",
          "help": "Each verified item is a recurring MONTHLY saving measured after the change (never an "
-                 "estimate); this is their sum as a $/month run-rate, not cumulative dollars saved — the "
-                 "same figure the ROI multiple divides."},
+                 "estimate); this is their sum as a $/month run-rate, not cumulative dollars saved (that is "
+                 "Saved to date) — the same figure the ROI multiple divides."},
+        # Next-Fifty #31: accrued DOLLARS (whole-ledger SQL), chipped "accrued", not "measured".
+        {"label": "Saved to date", "value": _saved_value,
+         "delta": _saved_delta, "delta_color": "off", "method": "accrued",
+         "help": _SAVED_TO_DATE_HELP},
         {"label": "Added this quarter", "value": f"{format_usd(sig.get('verified_qtd', 0.0))}/mo",
          "method": "measured",
          "help": "Monthly run-rate of the items verified since the quarter began (account clock)."},
         {"label": "Realization rate",
          "value": (f"{_real:,.0f}%" if _real is not None
-                   else ("n/a" if totals["verified_count"] else "—")),
+                   else ("n/a" if _ver_any else "—")),
          "delta": ((f"{format_usd(totals['realized_verified_usd'])} of "
                     f"{format_usd(totals['realized_estimated_usd'])} estimated"
                     + (f" · {_no_est:,} item(s) without an estimate not in the ratio" if _no_est else ""))
                    if _real is not None else
                    (f"no up-front estimate on the {_no_est:,} verified item(s) ({_no_est_auto:,} auto-measured, "
                     f"{_no_est - _no_est_auto:,} verified by hand)"
-                    if totals["verified_count"] else "nothing verified yet")) + _carried_txt,
+                    if _ver_any else "nothing verified yet")) + _carried_txt,
          "delta_color": "off",
          "help": "Verified $ as a share of what those items were estimated to save — the honest "
                  "estimate-vs-actual (verified items that carried an estimate). Near 100% means the "
@@ -494,6 +540,9 @@ def _proof_tab(rate: float) -> None:
                  "SEPARATE figure: the auto-measured row judged against the estimate OVERWATCH recorded "
                  "BEFORE the change (its manual twin, the executed remediation, or the idle alert's $/mo); "
                  "a rejected item that carried an estimate counts as 0 realized. It never replaces the rate."},
+    ])
+    kpi_row([
+        # rows read 4 + 4 (Next-Fifty #31: Saved to date joined the first row, Settling heads this one)
         {"label": "Settling", "value": f"{_auto_pending:,}",
          "delta": (f"{_auto_pending:,} change(s) settle automatically when their 14-day window closes"
                    + (" · " + " · ".join(_settle_bits) if _settle_bits else "")
@@ -504,8 +553,6 @@ def _proof_tab(rate: float) -> None:
          "help": "Rows the daily change scan booked settle themselves on 14 days of measured actuals, "
                  "15–16 days after the change (V153); their dollars join the run-rate only then. Items "
                  "booked by hand are verified on Cost ▸ Optimization & Savings ▸ Remediation & ledger."},
-    ])
-    kpi_row([
         {"label": "Acted on",
          "value": (f"{acc['ACCEPTANCE_PCT']:,.0f}%" if acc["ACCEPTANCE_PCT"] is not None else "—"),
          "delta": f"{acc['DONE_N']} done · {acc['DROPPED_N']} dismissed · {acc['OPEN_N']} open",
@@ -562,6 +609,7 @@ def _proof_tab(rate: float) -> None:
             f"OVERWATCH has verified **{format_usd(verified_active)}/mo** of active savings run-rate "
             f"across **{_active_n:,}** item(s) verified in the last {SAVINGS_ACTIVE_MONTHS} months"
             + (f" ({_older:,} older item(s) no longer counted)" if _older > 0 else "")
+            + (f" ({_rev_n:,} reverted item(s) no longer counted)" if _rev_n else "")
             + (f", realizing **{_real:,.0f}%** of what they were estimated to save"
                if _real is not None else "")
             + (f", closing the loop in **{_avgd:g} days** on average." if _avgd is not None else ".")
@@ -573,12 +621,29 @@ def _proof_tab(rate: float) -> None:
             f"months, totalling {format_usd(verified_active)}/mo. "
             f"{format_usd(totals['estimated_usd'])} more is estimated, awaiting proof."))
     elif int(totals["verified_count"]) > 0:
-        # verified items exist, none inside the active window (or the summary read failed): never the
-        # "nothing verified yet" empty state beside a populated evidence table (review r1)
+        # verified items exist, none still counting inside the active window (or the summary read failed):
+        # never the "nothing verified yet" empty state beside a populated evidence table (review r1)
+        if _rev_n > 0:
+            # Next-Fifty #31 (review r1 F3/F5): items WERE verified in the window and later undone -- say so,
+            # never the age-only "none verified in the last 12 months"
+            st.caption(md_dollars(
+                f"{int(totals['verified_count']):,} older verified item(s) no longer count toward the "
+                f"run-rate (verified more than {SAVINGS_ACTIVE_MONTHS} months ago), and every item verified "
+                f"in the last {SAVINGS_ACTIVE_MONTHS} months ({_rev_n:,}) was later undone"
+                + (" (see Reverted savings below)" if int(totals.get("reverted_count") or 0) > 0 else "")
+                + f". {format_usd(totals['estimated_usd'])} more is estimated, awaiting proof."))
+        else:
+            st.caption(md_dollars(
+                f"{int(totals['verified_count']):,} verified item(s), none verified in the last "
+                f"{SAVINGS_ACTIVE_MONTHS} months (older items no longer count toward the run-rate). "
+                f"{format_usd(totals['estimated_usd'])} more is estimated, awaiting proof."))
+    elif int(totals.get("reverted_count") or 0) > 0:
+        # Next-Fifty #31: every verified item was later undone -- never "No savings verified yet" beside the
+        # Reverted savings list (realization still reads them)
         st.caption(md_dollars(
-            f"{int(totals['verified_count']):,} verified item(s), none verified in the last "
-            f"{SAVINGS_ACTIVE_MONTHS} months (older items no longer count toward the run-rate). "
-            f"{format_usd(totals['estimated_usd'])} more is estimated, awaiting proof."))
+            f"{int(totals['reverted_count']):,} verified item(s), all later undone — the daily change scan "
+            "saw the warehouse change reversed, so none count toward the run-rate (listed under Reverted "
+            f"savings below). {format_usd(totals['estimated_usd'])} more is estimated, awaiting proof."))
     else:
         _cost_ok = can_open("Cost Intelligence")
         empty_state("no_data_yet",
@@ -629,9 +694,34 @@ def _proof_tab(rate: float) -> None:
                              "Credit", help="Who made the change: executed or recommended by OVERWATCH, "
                                             "booked in the app, or detected elsewhere."),
                          "FLAGS": st.column_config.TextColumn(
-                             "Flags", help="Volume-confounded, performance regressed / unjudged, or an "
+                             "Flags", help="Reverted / partly reverted (the change was undone, or a "
+                                           "co-attributed change the same daily scan saw with it — one "
+                                           "measured window; the saving left the run-rate), "
+                                           "volume-confounded, performance regressed / unjudged, or an "
                                            "LBA-1 co-attributed $0 row."),
                      })
+    # Next-Fifty #31: what the revert check took out of the run-rate -- the count + $ are the SQL figures
+    # (sig, savings_summary_quarter; _rev_n above); the list below is display-only rows, never a total. The
+    # list reads the row-capped ledger frame, so its title says so when the frame is truncated, and the
+    # caption only points at it when it is there (review r1 F7).
+    _rev = reverted_rows(ledger.df)
+    if _rev_n:
+        st.caption(md_dollars(
+            f"{_rev_n:,} verified saving(s) ({format_usd(safe_float(sig.get('reverted_active_usd')))}/mo) left "
+            "the run-rate because the daily change scan saw the change undone"
+            + (" — see Reverted savings below." if not _rev.empty else ".")))
+    if not _rev.empty:
+        _rev_title = (f"Reverted savings — {len(_rev):,} change(s) undone"
+                      + (" (newest ledger rows)" if ledger.truncated else ""))
+        with st.expander(_rev_title):
+            styled_table(_rev, height=220, slug="proof_reverted", column_config={
+                "REVERTED_AT": st.column_config.DatetimeColumn("Undone (scan saw it)",
+                                                               format="MMM DD, YYYY HH:mm"),
+                "REVERTED_TO": st.column_config.TextColumn("Undone to"),
+                "REVERT": st.column_config.TextColumn("Revert")})
+            st.caption("A partial revert may still save part of the measured amount — re-measure it and "
+                       "book the residual by hand on Cost ▸ Optimization & Savings ▸ Remediation & ledger. "
+                       "Re-applying the change is booked again automatically by the daily change scan.")
     if can_open("Operations") and st.button("Change detail → Operations ▸ Change impact",
                                             key="proof_link_change_impact", type="tertiary"):
         request_navigation("Operations", "Change impact")
@@ -641,7 +731,8 @@ def _proof_tab(rate: float) -> None:
     if not month_df.empty:
         # Newly-verified per month (the run-rate ADDED that month) — not the active run-rate above,
         # which is the trailing-12-month sum of these (adversarial review of #3).
-        st.markdown("**Newly verified savings — by month** (monthly run-rate added each month; this month so far)")
+        st.markdown("**Newly verified savings — by month** (monthly run-rate added each month; this month so "
+                    "far; changes later undone are removed)")
         charts.monthly_bars_usd(month_df, "MONTH_LABEL", "VERIFIED_USD", y_title="$/mo added")
     if not lever_df.empty:
         st.markdown("**Where the realized savings come from — by lever**")

@@ -88,6 +88,19 @@ def _text(value: object) -> str:
     return str(value).strip()
 
 
+def resolve_deep_link(fingerprint: object, fingerprints: Iterable[object]) -> str:
+    """#28: the queue's own spelling of a deep-linked fingerprint, or "" when it is not queued.
+    Case-insensitive like every join in this module; master_detail binds the detail pane by EXACT id."""
+    want = _text(fingerprint).upper()
+    if not want:
+        return ""
+    for fp in fingerprints:
+        text = _text(fp)
+        if text.upper() == want:
+            return text
+    return ""
+
+
 def advisor_input(row: Mapping[str, object]) -> dict[str, object]:
     """Map one fix-queue row (family-mart totals) onto ``query_advisor.advise``'s per-run inputs.
 

@@ -1,5 +1,89 @@
 # Changelog
 
+## 4.600.0 - Reverted savings, Saved to date, ETL task evidence, below-warehouse anomaly drill (2026-09-28)
+
+App-only, no migration. Next Fifty wave 3, Slice B: ranks 31, 14 (Phase 1), 27 and 28 (close-out).
+
+- **Undone changes leave the savings run-rate (#31).** A warehouse change the ledger booked as a saving (a smaller
+  size, a shorter auto-suspend, fewer max clusters, Economy scaling) is now checked against every later change the
+  daily change scan saw on the same warehouse and setting. When a later change makes that setting costlier than the
+  booked value, the saving is reverted: "full" when any later change took it back to (or past) the original value,
+  "partial" otherwise. Changes the scan saw together on one warehouse share one measured window (one row carries the
+  saving, the rest settle at $0), so undoing any saving member of that group takes the whole group out (a capacity
+  increase the same scan saw is never booked, so raising it further later is growth, not an undo); a row undone
+  only through such a partner reads "partial" and its flag names the partner's setting ("partly reverted Jul 10
+  (co-attributed SIZE → Large)"), or, once its own setting is fully undone too, "reverted Jul 10 via
+  co-attributed SIZE → Large; AUTO_SUSPEND since fully undone".
+  - A reverted saving leaves the ROI numerator, the Verified savings run-rate, Added this quarter, the attribution
+    split, the Brief tile and its estimated pipeline, the month and lever charts, Settling and proven-fix transfer,
+    on the first render after the scan sees it.
+  - Realization, carried realization, the lever table's Realization % and the 90-day funnel keep it: they measure
+    estimate accuracy.
+  - Proof flags it ("reverted Aug 1 → Medium" / "partly reverted …"; an auto-suspend undone to 0 reads "never") and
+    lists it under **Reverted savings**, with how to re-measure a partial residual. The run-rate card's "N reverted,
+    not counted" is the whole-ledger count of undone items verified in the last 12 months; the list's title adds
+    "(newest ledger rows)" when the ledger read is row-capped. When every item verified in the last 12 months was
+    undone, Proof says so (alongside any older items) instead of "No savings verified yet".
+  - Items booked by hand (schedule, retention, 5X/6X resize, experiments) are not revert-checked and still stop
+    counting after 12 months.
+  - **Heads-up:** the check runs over the whole ledger at read time, so the first render after deploying can step
+    the ROI multiple and the run-rate down; the affected items are listed on Proof ▸ Proof.
+- **Saved to date on Proof (#31).** A new card beside the run-rate: dollars already saved, each verified item's
+  monthly saving ÷ 30 × the whole days it has been in place. Accrual starts the day the change scan saw the change
+  (the day it was verified, for items verified by hand) and stops at today, the day the change was undone, or 12
+  months after verification, whichever comes first. The card shows how much was measured in the change-scan windows
+  and how much is carried forward at the verified rate, and its chip reads "accrued", not "measured". At $0 it reads
+  "nothing verified yet" only when nothing is verified; beside verified items it reads "nothing accrued yet". It is
+  not an invoice line and never feeds the ROI multiple or the verdict. Proof only; no new read (four more columns
+  on the summary Proof already reads).
+- **Why did this ETL task fail or slow down? (#14 Phase 1).** Operations ▸ Pipeline SLA ▸ Tonight gains "Explain a
+  task" under Workflow runtimes and under Run inventory ▸ Tasks in this run, each bound to the run its table shows.
+  Off by default and never prefetched. When switched on it reads the task's Snowflake CALL (matched by exact
+  procedure name inside its CONTROL_STATUS window; every EDW environment deploys the same procedure names, so it
+  keeps only the CALLs in CONTROL_STATUS's own database when any ran there, shows each CALL's database, and says so
+  when the match is in another database) and the statements that CALL ran in the same session: the error text,
+  queued time (resume vs overload), compile, execution, spill and how much of the task's window was spent outside
+  Snowflake, with a query-profile link.
+  - When every matched CALL succeeded and every CALL's statements were seen and succeeded, but the task failed, it
+    says the failure was likely on the Informatica side; when a CALL's statements were not visible it says a failure
+    the procedure caught can't be ruled out. A retried task that CONTROL_STATUS still failed also gets its latest
+    CALL's reading.
+  - Within about 45 minutes of the task ending (or while it runs) it says QUERY_HISTORY may not have caught up yet
+    and does not attribute time to Informatica; a same-named CALL from another database is never reported as this
+    task's failure (it waits out the lag, then leads with the database warning at warning level).
+  - The task picker keeps your pick across refreshes.
+  - Exact matching by the Informatica QUERY_TAG is deferred; the ask for the ETL team is
+    docs/design/INFORMATICA_QUERY_TAG_ASK.md. The Failure recurrence and Runtime drift captions point to the drill.
+- **Spend anomalies explained below the warehouse (#27).** Cost ▸ Spend & Attribution ▸ "Why did <day> move?" gains
+  a switch, *Break down by user, database and setting changes*. It splits the flagged warehouse's day (or any
+  warehouse the waterfall shows moving up) by user and by database, each against its 14-day average over the days
+  the allocation fact loaded (a quiet day counts as zero). Each table adds up exactly to the warehouse's metered
+  move, including the part not tied to any query (idle or long-query carry-over hours).
+  - Under ALFA or Trexis, logins with no company role (task, service and other unclassified users) are grouped as
+    *(unclassified users)*, and users and databases outside the company as *(users outside <company>)* /
+    *(databases outside <company>)*; under UNKNOWN, users classified to a company are grouped as *(users outside
+    UNKNOWN)* and no database is grouped. They are grouped, not dropped, and when one of these groups carries
+    the largest change the summary leads with it.
+  - It lists the warehouse setting changes the 06:40 CT scan saw within a day, and offers a jump to Operations ▸
+    Queries that sets the *Warehouse contains* filter to that warehouse (a name match that also catches longer names
+    containing it; it stays on until cleared, and the flagged day is not carried over).
+  - Allocated estimate, usage basis — not billed. It reads nothing until switched on (one hourly batch of two mart
+    reads).
+- **Queries ▸ Optimization opportunities links to Optimize (#28).** A selected row now has *Open in Optimize →*: the
+  same query family opens in Operations ▸ Optimize with its observed dollars, one diagnosis and Track, and with the
+  live query profile switched on (the same scan the board just ran, so no second read). A family Optimize does not
+  list (no attributed credits, beyond the 200-family cap, or newer than the daily load) now says so in the detail
+  pane instead of showing nothing or the previously selected family. The link is used once — also when the fix
+  queue is empty for the Company and Window, which now says the family is not listed there — and only a failed
+  queue read keeps it for the next rerun. The board stays; its caption points to Optimize for dollars.
+- **Fix: change titles in root-cause lists.** Warehouse setting changes in Control Room ▸ auto-investigation (and the
+  new anomaly drill) read "SIZE: MEDIUM → LARGE" instead of "MANUAL" (SETTING now outranks CHANGE_SOURCE in
+  rca.candidates_from_changes).
+- **First-paint cost.** Unchanged on every page. Saved to date and the revert check ride the existing summary and
+  ledger reads; the ETL and anomaly drills read only behind their own switches. ACCOUNT_USAGE literal budgets and
+  reachable-table pins are unchanged; one new canaried mart reader (mart27.alloc_xdim_day_drivers).
+- **Owner-side.** App-only: `snow streamlit deploy --replace`. No migration.
+
 ## 4.599.0 - Deploy health, actionable errors, section visits and Ask demand; derived release locks (2026-09-28)
 
 App-only, no migration. Next Fifty wave 3, Slice A: ranks 49, 50, 47 (logging only), 26 Phase 1 and 33 (wording only).

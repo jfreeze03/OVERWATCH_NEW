@@ -28,6 +28,7 @@ from app.logic.fix_queue import (
     TRACK_COOLDOWN_DAYS,
     diagnose_workloads,
     own_traffic,
+    resolve_deep_link,
     track_all_eligible,
     track_fingerprints_sql,
     track_items,
@@ -65,6 +66,11 @@ _SOURCE_LABEL = {
 }
 _OPEN_STATUS = "Tracked (open)"
 _UNKNOWN_STATUS = "Unknown"      # the tracked-actions read failed (review r2)
+
+
+def _short_fp(fingerprint: str) -> str:
+    """A deep-linked fingerprint as shown in a notice: its first 12 characters, '…' only when cut."""
+    return fingerprint[:12] + ("…" if len(fingerprint) > 12 else "")
 
 
 def _open_entity(fingerprint: str) -> None:
@@ -117,7 +123,22 @@ def render_optimize(company: str, days: int, rate: float, *, bounds: tuple | Non
                                                      key="ops_opt_watchlist", tier="recent",
                                                      source="USER_WATCHLIST"))
                if _viewer else None)
+    # #28 (review F23): split an EMPTY queue from a FAILED read before the guard. A failed read keeps a
+    # deep link for the next rerun (the guard returns before the consume below); an empty queue can list
+    # no family, so consume the link here and say why the family is not here. Both keys go: a leftover
+    # live_profile would switch the live scan on after a later Company/Window change, unasked.
+    _empty_link_fp = ""
+    if result.ok and result.empty:
+        _arr = st.session_state.get("_ow_nav_context")
+        if isinstance(_arr, dict) and ("fingerprint" in _arr or "live_profile" in _arr):
+            _empty_link_fp = str(_arr.get("fingerprint") or "").strip()
+            st.session_state["_ow_nav_context"] = {k: v for k, v in _arr.items()
+                                                   if k not in ("fingerprint", "live_profile")}
     if not guard(result, "No measured recurring-query cost exists in this scope."):
+        if _empty_link_fp:
+            empty_state("no_data_yet", f"Query family {_short_fp(_empty_link_fp)} is not in this fix queue: no "
+                        "query family has attributed warehouse credits in the daily marts for this Company "
+                        "and Window. Its live QOP breakdown stays on Operations ▸ Queries.")
         return
     # W12: divide by the window's real day SPAN. Current month / Current year resolve `days` to a
     # day OFFSET (Aug 3 MTD = 2), so dividing by it overstated the 30-day normalization.
@@ -126,6 +147,14 @@ def render_optimize(company: str, days: int, rate: float, *, bounds: tuple | Non
 
     # The live profile is opt-in (off first paint): its state is read here so the diagnoses below
     # can use it; the toggle itself renders under the section header.
+    # #28: a family opened from Operations ▸ Queries' opportunity board arrives with live_profile. That board
+    # just ran this exact scan (same builder args + tier = one cache entry), so switching the live profile on
+    # costs no second read inside the cache TTL and the landing diagnosis matches the QOP breakdown the
+    # viewer just read. One-shot: popped here, so the viewer can switch it off again.
+    _arrival = st.session_state.get("_ow_nav_context")
+    if isinstance(_arrival, dict) and _arrival.get("live_profile"):
+        st.session_state["ops_opt_live"] = True
+        st.session_state["_ow_nav_context"] = {k: v for k, v in _arrival.items() if k != "live_profile"}
     _live_on = bool(st.session_state.get("ops_opt_live", False))
     _live_res = _live_scored = _live_bd = None
     if _live_on:
@@ -285,11 +314,26 @@ def render_optimize(company: str, days: int, rate: float, *, bounds: tuple | Non
         st.caption("Read-only — an operator can track these into Action Center.")
 
     _ctx_fp = str(navigation_context().get("fingerprint") or "").strip()
-    _preselect = _ctx_fp if _ctx_fp in set(portfolio["FINGERPRINT"].astype(str)) else ""
-    if _preselect:   # deliver a deep-link fingerprint ONCE per arrival (the Action Center idiom)
+    _preselect = resolve_deep_link(_ctx_fp, portfolio["FINGERPRINT"])
+    if _ctx_fp:   # deliver a deep-link fingerprint ONCE per arrival — found OR not, so an unqueued family
+        #           never lingers to re-preselect after a later Window change. (A FAILED queue read returned
+        #           at the guard above, before this, so the link survives for the next rerun; an EMPTY queue
+        #           consumed it there, with its own explanation.)
         _nav = st.session_state.get("_ow_nav_context")
         if isinstance(_nav, dict) and _nav.get("fingerprint"):
             st.session_state["_ow_nav_context"] = {k: v for k, v in _nav.items() if k != "fingerprint"}
+    _missing = ""
+    if _ctx_fp and not _preselect:
+        _missing = (f"Query family {_short_fp(_ctx_fp)} is not in this fix queue, which lists "
+                    + (f"the top {_QUEUE_CAP} " if len(portfolio) >= _QUEUE_CAP else "")
+                    + "families with attributed warehouse credits in the daily marts for this Company and "
+                      "Window. Metadata chatter and very short statements carry no attributed credits, and a "
+                      "family newer than the last daily load is not listed yet. Its live QOP breakdown stays "
+                      "on Operations ▸ Queries.")
+        # the detail pane must say so, not keep showing a previously selected, unrelated family (the same
+        # keys master_detail clears for a found deep link)
+        for _k in ("_ow_md_sel_ops_optimize", "_ow_md_seen_ops_optimize", "ops_optimize_table"):
+            st.session_state.pop(_k, None)
 
     def _list(display_df, list_key):
         return decision_rows(
@@ -312,7 +356,8 @@ def render_optimize(company: str, days: int, rate: float, *, bounds: tuple | Non
     master_detail(
         portfolio, key="ops_optimize", id_col="FINGERPRINT",
         list_render_fn=_list, detail_render_fn=_detail, preselect_id=_preselect,
-        empty_detail_msg="Select a query family on the left to see its diagnosis, first fix and Track.")
+        empty_detail_msg=_missing or "Select a query family on the left to see its diagnosis, first fix and "
+                                     "Track.")
 
     with st.expander("Portfolio map"):
         charts.workload_portfolio(portfolio[[c for c in (

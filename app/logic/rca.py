@@ -101,13 +101,16 @@ def candidates_from_changes(df: pd.DataFrame | None) -> list[dict]:
         detail = _first(r, "DETAIL", "VERDICT_DETAIL")
         mag = 1.0 if verdict == "REGRESSED" else (0.6 if detail else 0.35)
         entity = _first(r, "ENTITY", "WAREHOUSE_NAME", "OBJECT_NAME", "DATABASE_NAME", "TARGET")
-        change = _first(r, "CHANGE", "CHANGE_DDL", "CHANGE_SOURCE")
+        change = _first(r, "CHANGE", "CHANGE_DDL")
         if not change:
             # warehouse_change_registry describes the change as SETTING: OLD -> NEW.
             setting = _first(r, "SETTING")
             if setting:
                 change = f"{setting}: {_first(r, 'OLD_VALUE') or '?'} → {_first(r, 'NEW_VALUE') or '?'}"
-        change = change or "change"
+        # Next-Fifty #27: CHANGE_SOURCE (MANAGED/MANUAL/UNKNOWN — WHO class, always populated by
+        # warehouse_change_registry) is only the last resort. It used to rank before SETTING, so
+        # every registry candidate (Control Room auto-investigation) read "...: MANUAL".
+        change = change or _first(r, "CHANGE_SOURCE") or "change"
         is_wh = bool(_first(r, "WAREHOUSE_NAME")) or "WAREHOUSE" in change.upper()
         by = _first(r, "CHANGED_BY")
         out.append({
@@ -119,7 +122,8 @@ def candidates_from_changes(df: pd.DataFrame | None) -> list[dict]:
             "magnitude_text": (verdict.title() if verdict else "changed")
                               + (f" — {detail[:60]}" if detail else ""),
             "changed_by": by,
-            "evidence": {"change": change[:120], "verdict": verdict, "by": by},
+            "evidence": {"change": change[:120], "verdict": verdict, "by": by,
+                         "source": _first(r, "CHANGE_SOURCE")},
         })
     return out
 

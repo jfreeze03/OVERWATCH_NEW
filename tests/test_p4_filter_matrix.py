@@ -67,6 +67,10 @@ _REQUIRED_ARGS: dict[str, object] = {
     # so the matrix drives them with a value and injection-tests the company/text filters.
     "user_name": "SOME_USER",          # cost_sql.untagged_executions_for_user
     "pipeline": "nightly_load",        # etl_sql.etl_failed_runs_for_pipeline
+    # Next-Fifty #27 mart27_sql.alloc_xdim_day_drivers: an exact-match, sql_literal'd warehouse
+    # (NOT a _TEXT_FILTERS member — its hostile values are covered in
+    # tests/test_alloc_xdim_day_drivers_sql.py, not fuzzed across the optional-warehouse builders).
+    "warehouse": "WH_ALFA_ETL",
 }
 
 # Free-text filter arguments — the other injection surface besides company.
