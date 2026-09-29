@@ -6,8 +6,10 @@ from app.logic.sizing import (
     RECOMMEND_DOWN,
     RECOMMEND_KEEP,
     RECOMMEND_OBSERVE,
+    RECOMMEND_SCALE_OUT,
+    RECOMMEND_SIZE_UP,
     RECOMMEND_SUSPEND,
-    RECOMMEND_UP,
+    UP_VERDICTS,
     size_recommendations,
     sizing_summary,
 )
@@ -23,21 +25,21 @@ def _wh(name, credits=100.0, queued_sec=0.0, spill=0.0, p95=5.0, idle=0.0,
 
 def test_rules():
     df = pd.DataFrame([
-        _wh("QUEUED", queued_sec=7 * 45 * 60),          # 45 min/day queued -> up
-        _wh("SPILLY", spill=9.0),                        # spill -> up
+        _wh("QUEUED", queued_sec=7 * 45 * 60),          # 45 min/day queued, no spill -> scale out (#38)
+        _wh("SPILLY", spill=9.0),                        # spill -> size up (#38)
         _wh("CALM_IDLE", p95=3.0, idle=40.0),            # fast + idle -> down
         _wh("MOSTLY_IDLE", idle=80.0),                   # suspend first
         _wh("BUSY_FIT", p95=30.0, idle=5.0),             # keep
     ])
     out = size_recommendations(df, credit_rate_usd=3.68, window_days=7)
     rec = dict(zip(out["WAREHOUSE_NAME"], out["RECOMMENDATION"], strict=True))
-    assert rec["QUEUED"] == RECOMMEND_UP
-    assert rec["SPILLY"] == RECOMMEND_UP
+    assert rec["QUEUED"] == RECOMMEND_SCALE_OUT
+    assert rec["SPILLY"] == RECOMMEND_SIZE_UP
     assert rec["CALM_IDLE"] == RECOMMEND_DOWN
     assert rec["MOSTLY_IDLE"] == RECOMMEND_SUSPEND
     assert rec["BUSY_FIT"] == RECOMMEND_KEEP
     # pressure first in the ordering
-    assert out.iloc[0]["RECOMMENDATION"] == RECOMMEND_UP
+    assert out.iloc[0]["RECOMMENDATION"] in UP_VERDICTS
     # D2: a reversible timer fix outranks the speculative size-down bet
     order = list(out["RECOMMENDATION"])
     assert order.index(RECOMMEND_SUSPEND) < order.index(RECOMMEND_DOWN)
@@ -49,10 +51,10 @@ def test_spill_signal_is_per_day_not_a_window_total():
     df = pd.DataFrame([_wh("SPILLY", spill=9.0)])     # 9 GB of remote spill
     out7 = size_recommendations(df, 3.68, 7)
     assert out7.iloc[0]["SPILL_GB_PER_DAY"] == 1.29
-    assert out7.iloc[0]["RECOMMENDATION"] == RECOMMEND_UP    # 1.29 GB/day is pressure
+    assert out7.iloc[0]["RECOMMENDATION"] == RECOMMEND_SIZE_UP   # 1.29 GB/day is pressure
     out90 = size_recommendations(df, 3.68, 90)
     assert out90.iloc[0]["SPILL_GB_PER_DAY"] == 0.1
-    assert out90.iloc[0]["RECOMMENDATION"] != RECOMMEND_UP   # same 9 GB over 90d is noise
+    assert out90.iloc[0]["RECOMMENDATION"] not in UP_VERDICTS  # same 9 GB over 90d is noise
 
 
 def test_provisioning_time_is_not_a_size_up_signal():

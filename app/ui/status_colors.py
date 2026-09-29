@@ -67,6 +67,8 @@ STATUS_COLOR_MAP = {
     "NEW": _WARN, "SPIKE": _BAD,
     "PASS": _OK, "INSUFFICIENT": _MUTED,
     "ELEVATED": _BAD, "WATCH": _WARN, "NORMAL": _OK, "STALE": _WARN, "ACTIVE": _OK,
+    # statement-timeout posture (Operations ▸ Warehouses, Next-Fifty #33)
+    "UNCAPPED": _WARN, "CAPPED": _OK,
 }
 
 # Columns that carry status semantics; True-is-good ones invert boolean colors.
@@ -86,6 +88,10 @@ _VERDICTS = {
     "SLOWER": _WARN, "STABLE": _MUTED, "FASTER BUT FAILING": _BAD,
     # identity auth readiness — password sign-in deprecation (Next-Fifty #9)
     "WILL BREAK": _BAD, "MIGRATE": _WARN, "READY": _OK,
+    # maintenance on unread objects (Next-Fifty #30)
+    "SUSPEND CLUSTERING": _WARN, "DROP SEARCH OPTIMIZATION": _WARN, "SUSPEND MV REFRESH": _WARN,
+    "KEEP": _OK, "CHECK SHARE CONSUMERS": _INFO, "UNCONFIRMED": _MUTED, "NO RECENT SPEND": _MUTED,
+    "OBJECT GONE": _MUTED,   # PR C review C11: dropped or renamed; nothing to stop
 }
 
 

@@ -473,6 +473,19 @@ def since_last_visit_summary(new_alerts: object, new_crit: object,
     return {"severity": severity, "quiet": False, "text": "; ".join(parts)}
 
 
+def _opt_text(value: object) -> str | None:
+    """A text cell as stripped text, or None for None / NaN / blank (so the table renders '—')."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):   # a list-like cell: not a scalar NULL
+        pass
+    text = str(value).strip()
+    return text or None
+
+
 def _dedupe_alert_feed(alerts: pd.DataFrame) -> pd.DataFrame:
     """C2: drop the server-sweep events the app recomputes itself (see
     DUPLICATE_ALERT_RULE_IDS). Frames without a RULE_ID column pass through —
@@ -542,6 +555,14 @@ def triage_queue(
                 "EVENT_ID": str(r.get("EVENT_ID", "") or ""),
                 "RULE_ID": str(r.get("RULE_ID", "") or ""),
                 "WAREHOUSE": "",
+                # Next-Fifty #15: the ACK state rides along (Ack by / ACK_AT columns, unowned-first
+                # ranking). The owner default: alerts are owned through Acknowledge and the incident
+                # flow and are never tracked into Action Center, so they carry no entity identity.
+                "STATUS": str(r.get("STATUS") or "OPEN").strip().upper(),
+                "ACK_BY": _opt_text(r.get("ACK_BY")),
+                "ACK_AT": r.get("ACK_AT"),
+                "ENTITY_TYPE": "",
+                "ENTITY_KEY": "",
                 # Alerts carry no comparable dollar figure; 0.0 keeps them in the
                 # severity band but behind any priced row (see the sort below).
                 "_USD": 0.0,
@@ -554,6 +575,9 @@ def triage_queue(
             database = str(r.get("DATABASE_NAME", "") or "")
             schema = str(r.get("SCHEMA_NAME", "") or "")
             qualified = ".".join(p for p in (database, schema) if p)
+            task = str(r.get("TASK_NAME", "") or "")
+            # #15: the Entity 360 / incident TASK_FQN key (DB.SCHEMA.TASK) -- trackable only when whole
+            fqn = f"{database}.{schema}.{task}" if database and schema and task else ""
             rows.append({
                 "SEVERITY": "HIGH" if failed >= 3 else "MEDIUM",
                 "KIND": "Task failure",
@@ -565,12 +589,18 @@ def triage_queue(
                 "EVENT_ID": "",
                 "RULE_ID": "",
                 "WAREHOUSE": "",
+                "STATUS": "",
+                "ACK_BY": None,
+                "ACK_AT": None,
+                "ENTITY_TYPE": "TASK" if fqn else "",
+                "ENTITY_KEY": fqn,
                 # A failed loader has a real cost, but not one this row can price.
                 "_USD": 0.0,
             })
     for a in anomalies or []:
         z = float(a.get("z", 0) or 0.0)
         label = a.get("label", "warehouse")
+        wh_key = str(a.get("label") or "").strip()   # #15: a labelless hit is not trackable
         value = a.get("value", 0)
         # D6: dollars over the series' own robust baseline. Callers that predate
         # the field (or cannot compute a baseline) leave it out and get 0.0, which
@@ -607,6 +637,11 @@ def triage_queue(
             # rec22: carry the offending warehouse so triage can route the spend
             # spike to that warehouse instead of restarting account-wide.
             "WAREHOUSE": str(label),
+            "STATUS": "",
+            "ACK_BY": None,
+            "ACK_AT": None,
+            "ENTITY_TYPE": "WAREHOUSE" if wh_key else "",
+            "ENTITY_KEY": wh_key,
             "_USD": excess,
         })
     if not rows:
@@ -617,6 +652,8 @@ def triage_queue(
     queue["RAISED_AT"] = queue["RAISED_AT"].map(
         lambda v: "" if v is None or pd.isna(v) else str(v)
     )
+    # #15: same Arrow reason for ACK_AT, but NULL stays None so it renders '—' (never 'None'/'NaT')
+    queue["ACK_AT"] = queue["ACK_AT"].map(lambda v: None if v is None or pd.isna(v) else str(v))
     queue["_SEV"] = queue["SEVERITY"].map(SEVERITY_RANK).fillna(9)
     # D6: within a severity band, rank by DOLLARS at risk — the old tiebreak was
     # alphabetical on KIND, so "Alert" always beat "Spend anomaly" and a $9k/day

@@ -1,4 +1,5 @@
-"""Operations > Optimize fix queue: per-family diagnosis and the Track write builder. Pure module.
+"""Operations > Optimize fix queue: per-family diagnosis, and the shared Track write path (Optimize +
+Control Room triage). Pure module.
 
 Runs on top of ``decision.prioritize_workloads`` output (lanes, IMPACT_USD_30D, CONFIDENCE) and
 never re-ranks it. For each measured query family it names ONE diagnosis and a first fix, from
@@ -25,9 +26,11 @@ from collections.abc import Iterable, Mapping
 
 import pandas as pd
 
+from app import companies
 from app.config import core_object
 from app.core.sqlsafe import sql_literal, sql_number
 from app.logic import query_advisor, query_opt
+from app.logic.actions import SEVERITY_RANK
 from app.logic.formulas import format_usd, humanize_duration, humanize_gb, safe_float
 
 TRACK_ALL_CAP = 25            # rows one "Track all ACT NOW" click may insert
@@ -36,6 +39,14 @@ TRACK_SOURCE = "Operations > Optimize"
 TRACK_ENTITY_TYPE = "QUERY_FINGERPRINT"
 SPECIFIC_SOURCES = frozenset({"live", "mart", "heuristic"})
 _OPEN_STATUSES = frozenset({"OPEN", "IN_PROGRESS"})
+# Next-Fifty #15: Control Room triage tracks task-failure and warehouse-spend rows through the SAME write
+# path. Alerts are never tracked: an ACTION_QUEUE item has no lifecycle link to ALERT_EVENTS, so resolving
+# the alert would never close the work item (they are owned through Acknowledge and the incident flow).
+TRACK_OPEN_STATUS = "Tracked (open)"
+TRACK_UNKNOWN_STATUS = "Unknown"
+TRIAGE_TRACK_SOURCE = "Control Room > Triage"
+TRIAGE_TRACK_TYPES = ("TASK", "WAREHOUSE")
+_TRACKABLE_TYPES = frozenset({TRACK_ENTITY_TYPE, *TRIAGE_TRACK_TYPES})
 
 # The portfolio's specific NEXT_MOVE values and the first fix each one implies.
 _HEURISTIC_FIX = {
@@ -277,11 +288,14 @@ def _tracked_sets(tracked: pd.DataFrame | None) -> tuple[dict[str, str], set[str
     return latest, open_keys, dropped, done
 
 
-def with_track_status(df: pd.DataFrame, tracked: pd.DataFrame | None) -> pd.DataFrame:
+def with_track_status(df: pd.DataFrame, tracked: pd.DataFrame | None, *,
+                      key_col: str = "FINGERPRINT") -> pd.DataFrame:
     """Add TRACK_STATUS (Tracked (open) / Dismissed / Done / Untracked), TRACKED_ACTION_ID (the
     newest OPEN item for a tracked-open family, the one Action Center lists by default, else the
     latest closed item; '' when untracked) and TRACKED_COMPANY (that open item's COMPANY, '' when
-    none): Action Center filters by company, so the doorway needs it (review r2)."""
+    none): Action Center filters by company, so the doorway needs it (review r2). ``key_col`` names
+    the column matched against the tracked rows' ENTITY_KEY_U (Control Room triage passes a
+    composite TYPE|KEY column)."""
     out = df.copy()
     latest, open_keys, dropped, done = _tracked_sets(tracked)
     ids: dict[str, str] = {}
@@ -295,11 +309,11 @@ def with_track_status(df: pd.DataFrame, tracked: pd.DataFrame | None) -> pd.Data
     statuses: list[str] = []
     action_ids: list[str] = []
     companies: list[str] = []
-    keys = out["FINGERPRINT"] if "FINGERPRINT" in out.columns else pd.Series([""] * len(out))
+    keys = out[key_col] if key_col in out.columns else pd.Series([""] * len(out))
     for fp in keys:
         key = _text(fp).upper()
         if key in open_keys:
-            statuses.append("Tracked (open)")
+            statuses.append(TRACK_OPEN_STATUS)
         elif key in dropped:
             statuses.append("Dismissed")
         elif key in done:
@@ -314,21 +328,45 @@ def with_track_status(df: pd.DataFrame, tracked: pd.DataFrame | None) -> pd.Data
     return out
 
 
-def track_all_eligible(df: pd.DataFrame | None, tracked: pd.DataFrame | None) -> pd.DataFrame:
+def track_all_static_mask(df: pd.DataFrame) -> pd.Series:
+    """The row-level half of Track all's rule: LANE 'ACT NOW' AND a specific diagnosis AND not OVERWATCH's
+    own traffic AND a non-blank fingerprint. The other half (no open item, no cooldown) needs the Action
+    Center read; track_all_eligible applies both. ``df`` must carry FINGERPRINT, LANE and SPECIFIC."""
+    keys = df["FINGERPRINT"].map(lambda v: _text(v).upper())
+    return (df["LANE"].astype(str).eq("ACT NOW")
+            & df["SPECIFIC"].map(_is_true)
+            & ~own_traffic(df)
+            & keys.ne(""))
+
+
+def track_all_takes(row: Mapping[str, object] | pd.Series) -> bool:
+    """Whether Track all ACT NOW can take this family at all (track_all_static_mask on one row): the
+    Optimize detail pane says 'Track all includes it again' for a re-broke / not-fixed family ONLY then --
+    its lifted DONE cooldown re-admits nothing outside ACT NOW, a vague diagnosis or own traffic (C23)."""
+    rec = dict(row.items()) if isinstance(row, pd.Series) else dict(row)
+    if not {"FINGERPRINT", "LANE", "SPECIFIC"}.issubset(rec):
+        return False
+    return bool(track_all_static_mask(pd.DataFrame([rec])).iloc[0])
+
+
+def track_all_eligible(df: pd.DataFrame | None, tracked: pd.DataFrame | None, *,
+                       rebroke: Iterable[str] = ()) -> pd.DataFrame:
     """The rows one "Track all ACT NOW" click takes: ACT NOW lane AND a specific diagnosis AND
     not OVERWATCH's own traffic AND not open-tracked AND not dismissed or marked DONE within the
     cooldown, in PRIORITY_SCORE order, capped at TRACK_ALL_CAP. Done is cooled down too (review r2):
     the trailing-window mart still carries the pre-fix runs, so a just-fixed family stays ACT NOW
-    and would otherwise be re-queued with the fix the team already applied."""
+    and would otherwise be re-queued with the fix the team already applied.
+
+    Next-Fifty #46: ``rebroke`` names families whose MEASURED outcome since done says the fix
+    re-broke or never held (outcomes.OVERRIDES_COOLDOWN); their DONE cooldown is lifted, because a
+    measured non-improvement is exactly the case where re-tracking is right. A dismissal (DROPPED)
+    is deliberate and is never lifted."""
     if df is None or df.empty or not {"FINGERPRINT", "LANE", "SPECIFIC"}.issubset(df.columns):
         return pd.DataFrame(columns=list(df.columns) if df is not None else [])
     _latest, open_keys, dropped, done = _tracked_sets(tracked)
+    done = done - {_text(k).upper() for k in rebroke}
     keys = df["FINGERPRINT"].map(lambda v: _text(v).upper())
-    own = own_traffic(df)
-    mask = (df["LANE"].astype(str).eq("ACT NOW")
-            & df["SPECIFIC"].map(_is_true)
-            & ~own
-            & keys.ne("")
+    mask = (track_all_static_mask(df)
             & ~keys.isin(open_keys)
             & ~keys.isin(dropped)
             & ~keys.isin(done))
@@ -382,16 +420,27 @@ def track_items(rows: pd.DataFrame | Iterable[Mapping[str, object]], company: st
     return items
 
 
-def track_fingerprints_sql(items: list[dict], *, actor_sql: str, bulk: bool,
-                           cooldown_days: int = TRACK_COOLDOWN_DAYS) -> str:
-    """ONE idempotent INSERT for the given track items ('' when there are none).
+def track_entities_sql(items: list[dict], *, entity_type: str, source: str, actor_sql: str, bulk: bool,
+                       cooldown_days: int = TRACK_COOLDOWN_DAYS, rebroke_keys: Iterable[str] = ()) -> str:
+    """ONE idempotent INSERT for the given track items ('' when there are none) -- the ONE Track write
+    path, shared by Operations > Optimize (query families) and Control Room triage (tasks, warehouses).
 
     Keyed on the ENTITY (SOURCE_ENTITY_TYPE + upper-cased SOURCE_ENTITY_KEY) plus open status,
-    never the title or company, so a family is tracked once whichever scope clicked it. ``bulk``
-    adds the cooldown arm (a family DROPPED or DONE within ``cooldown_days`` is skipped); a
+    never the title or company, so an entity is tracked once whichever scope clicked it. ``bulk``
+    adds the cooldown arm (an entity DROPPED or DONE within ``cooldown_days`` is skipped); a
     single, deliberate Track leaves it out so a human may re-track on purpose. Every value goes
     through sql_literal / sql_number, and the statement holds no ';' outside literals (one
-    statement, so it passes the executor allow-list)."""
+    statement, so it passes the executor allow-list).
+
+    ``entity_type`` must be QUERY_FINGERPRINT, TASK or WAREHOUSE (ValueError otherwise): an ALERT or
+    INCIDENT has no lifecycle link from ACTION_QUEUE, so a tracked alert's work item would drift from
+    the alert's own state. ``rebroke_keys`` (bulk only, Next-Fifty #46) lifts the DONE -- never the
+    DROPPED -- cooldown for keys whose measured outcome re-broke or never held; with none the
+    statement is byte-identical to the pre-#46 builder."""
+    kind = str(entity_type or "").strip().upper()
+    if kind not in _TRACKABLE_TYPES:
+        raise ValueError(f"Track does not cover entity type {kind or '(blank)'}: only "
+                         f"{', '.join(sorted(_TRACKABLE_TYPES))}")
     values: list[str] = []
     for item in items:
         key = _text(item.get("ENTITY_KEY"))
@@ -414,23 +463,168 @@ def track_fingerprints_sql(items: list[dict], *, actor_sql: str, bulk: bool,
     if not values:
         return ""
     days = max(1, min(int(cooldown_days or TRACK_COOLDOWN_DAYS), 365))
-    cooldown = (f"\n           OR (UPPER(q.STATUS) IN ('DROPPED', 'DONE')\n"
-                f"               AND COALESCE(q.COMPLETED_AT, q.UPDATED_AT) >= "
-                f"DATEADD('day', -{days}, CURRENT_TIMESTAMP()))") if bulk else ""
+    # ENTITY_KEY allows 500 characters; in_list clips at 300, so the IN-list is built here.
+    keys_sql = ", ".join(sql_literal(k, 500) for k in sorted(
+        {_text(k).upper() for k in rebroke_keys if _text(k)})) if bulk else ""
+    rebroke = (f"\n               AND NOT (UPPER(q.STATUS) = 'DONE' AND UPPER(v.ENTITY_KEY) IN ({keys_sql}))"
+               if keys_sql else "")
+    cooldown = ((f"\n           OR (UPPER(q.STATUS) IN ('DROPPED', 'DONE')\n"
+                 f"               AND COALESCE(q.COMPLETED_AT, q.UPDATED_AT) >= "
+                 f"DATEADD('day', -{days}, CURRENT_TIMESTAMP())" + rebroke + ")") if bulk else "")
     rows_sql = ",\n    ".join(values)
     return f"""
 INSERT INTO {core_object('ACTION_QUEUE')}
     (COMPANY, SEVERITY, TITLE, DETAIL, OWNER, STATUS, SOURCE, SOURCE_ENTITY_TYPE,
      SOURCE_ENTITY_KEY, CONFIDENCE, ESTIMATED_USD, PERIOD, UPDATED_BY)
-SELECT v.COMPANY, v.SEVERITY, v.TITLE, v.DETAIL, 'UNASSIGNED', 'OPEN', {sql_literal(TRACK_SOURCE, 120)},
-       {sql_literal(TRACK_ENTITY_TYPE, 40)}, v.ENTITY_KEY, v.CONF::FLOAT, v.USD::NUMBER(18,2),
+SELECT v.COMPANY, v.SEVERITY, v.TITLE, v.DETAIL, 'UNASSIGNED', 'OPEN', {sql_literal(source, 120)},
+       {sql_literal(kind, 40)}, v.ENTITY_KEY, v.CONF::FLOAT, v.USD::NUMBER(18,2),
        NULLIF(v.PER, ''), {actor_sql}
 FROM (VALUES
     {rows_sql}
 ) AS v (COMPANY, SEVERITY, TITLE, DETAIL, ENTITY_KEY, CONF, USD, PER)
 WHERE NOT EXISTS (
     SELECT 1 FROM {core_object('ACTION_QUEUE')} q
-    WHERE UPPER(q.SOURCE_ENTITY_TYPE) = {sql_literal(TRACK_ENTITY_TYPE, 40)}
+    WHERE UPPER(q.SOURCE_ENTITY_TYPE) = {sql_literal(kind, 40)}
       AND UPPER(q.SOURCE_ENTITY_KEY) = UPPER(v.ENTITY_KEY)
       AND (UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS'){cooldown}))
 """.strip()
+
+
+def track_fingerprints_sql(items: list[dict], *, actor_sql: str, bulk: bool,
+                           cooldown_days: int = TRACK_COOLDOWN_DAYS,
+                           rebroke_keys: Iterable[str] = ()) -> str:
+    """Operations > Optimize's Track: ``track_entities_sql`` for query families (a thin wrapper, so the
+    statement is byte-identical to the pre-#15 builder whenever no ``rebroke_keys`` are passed)."""
+    return track_entities_sql(items, entity_type=TRACK_ENTITY_TYPE, source=TRACK_SOURCE, actor_sql=actor_sql,
+                              bulk=bulk, cooldown_days=cooldown_days, rebroke_keys=rebroke_keys)
+
+
+# --------------------------------------------------------------------------------------------
+# Next-Fifty #15: Control Room triage glue (task-failure and warehouse-spend rows only)
+# --------------------------------------------------------------------------------------------
+
+def _triage_option(etype: object, ekey: object) -> str:
+    kind, key = _text(etype).upper(), _text(ekey)
+    return f"{kind}|{key}" if kind in TRIAGE_TRACK_TYPES and key else ""
+
+
+def triage_track_options(queue: pd.DataFrame | None) -> list[str]:
+    """'TYPE|KEY' identity strings of the trackable triage rows (TASK / WAREHOUSE with a key), in queue
+    order, de-duplicated. Alert rows carry no entity and are never offered. [] without the columns."""
+    if queue is None or queue.empty or not {"ENTITY_TYPE", "ENTITY_KEY"}.issubset(queue.columns):
+        return []
+    out: list[str] = []
+    for etype, ekey in zip(queue["ENTITY_TYPE"], queue["ENTITY_KEY"], strict=False):
+        opt = _triage_option(etype, ekey)
+        if opt and opt not in out:
+            out.append(opt)
+    return out
+
+
+def triage_track_label(option: str) -> str:
+    """The picker label: a pure function of the option. On Streamlit 1.52.2 a selectbox's identity
+    includes its format_func labels, so a label carrying a count, z-score or dollar figure would reset
+    the pick whenever that number moved."""
+    kind, _, key = str(option or "").partition("|")
+    return f"{'Task' if kind == 'TASK' else 'Warehouse'} · {key}"
+
+
+def triage_track_row(queue: pd.DataFrame | None, option: str) -> pd.Series | None:
+    """The first queue row whose identity is ``option`` (bind by identity, never by position)."""
+    if queue is None or queue.empty or not {"ENTITY_TYPE", "ENTITY_KEY"}.issubset(queue.columns):
+        return None
+    for i, (etype, ekey) in enumerate(zip(queue["ENTITY_TYPE"], queue["ENTITY_KEY"], strict=False)):
+        if _triage_option(etype, ekey) == option:
+            return queue.iloc[i]
+    return None
+
+
+def triage_track_item(row: Mapping[str, object], company: str) -> dict | None:
+    """One ACTION_QUEUE item for a trackable triage row (None for an alert or a keyless row).
+
+    COMPANY = the selected company, or under ALL the entity's own company (a task by its database, a
+    warehouse by its name), UNKNOWN reading 'ALL'. SEVERITY = MEDIUM for a CRITICAL/HIGH row, else
+    LOW: never HIGH, the Optimize rule (HIGH/CRITICAL items feed the Overview score). Unpriced: a
+    triage row carries no savings estimate. DETAIL freezes the triage text at the moment of tracking."""
+    kind = _text(row.get("ENTITY_TYPE")).upper()
+    key = _text(row.get("ENTITY_KEY"))
+    if kind not in TRIAGE_TRACK_TYPES or not key:
+        return None
+    scope = _text(company)
+    if scope and scope.upper() != "ALL":
+        item_company = scope
+    else:
+        found = (companies.classify_database(key.split(".", 1)[0]) if kind == "TASK"
+                 else companies.classify_warehouse(key))
+        item_company = found if found in ("ALFA", "Trexis") else "ALL"
+    sev = _text(row.get("SEVERITY")).upper()
+    title = f"{_text(row.get('KIND')) or kind.title()}: {key}"
+    raised = _text(row.get("RAISED_AT"))
+    tail = (f" Triage severity {sev or 'unset'}" + (f", raised {raised}" if raised else "")
+            + ". Tracked from Control Room triage; unpriced (a triage row carries no savings estimate).")
+    head = ". ".join(p for p in (_text(row.get("TITLE")), _text(row.get("DETAIL"))) if p)
+    head = head + "." if head and not head.endswith(".") else head
+    detail = head[:max(0, 1000 - len(tail))] + tail
+    return {
+        "ENTITY_TYPE": kind,
+        "COMPANY": item_company[:40],
+        "SEVERITY": "MEDIUM" if sev in ("CRITICAL", "HIGH") else "LOW",
+        "TITLE": title[:300],
+        "DETAIL": detail[:1000],
+        "ENTITY_KEY": key[:500],
+        "CONFIDENCE": None,
+        "ESTIMATED_USD": None,
+        "PERIOD": "",
+    }
+
+
+def with_triage_track_status(queue: pd.DataFrame, tracked: pd.DataFrame | None, *,
+                             read_ok: bool) -> pd.DataFrame:
+    """The triage queue with TRACKED (Action Center status of a TASK / WAREHOUSE row; None -> '—' for
+    alerts; 'Unknown' when the tracked read FAILED), TRACKED_ACTION_ID / TRACKED_COMPANY (for the doorway;
+    '' unless trackable and read), re-sorted UNOWNED FIRST within each severity.
+
+    Owned = an acknowledged alert, or a row with an open Action Center item. Dismissed, Done and Unknown
+    rows sort as unowned, so a failed read never demotes a row. The sort is a stable single key
+    (severity rank x 2 + owned), so triage_queue's dollars-at-risk order holds inside each group, and the
+    index is reset: Control Room maps a clicked row back by POSITION, so the frame it displays and the
+    frame it indexes must be this same one."""
+    if queue is None or queue.empty:
+        return pd.DataFrame() if queue is None else queue.copy()
+    out = queue.copy()
+    n = len(out)
+    etype = (out["ENTITY_TYPE"] if "ENTITY_TYPE" in out.columns
+             else pd.Series([""] * n, index=out.index)).map(lambda v: _text(v).upper())
+    ekey = (out["ENTITY_KEY"] if "ENTITY_KEY" in out.columns
+            else pd.Series([""] * n, index=out.index)).map(_text)
+    trackable = (etype.isin(TRIAGE_TRACK_TYPES) & ekey.ne("")).tolist()
+    composite = None
+    if tracked is not None and not tracked.empty and {"ENTITY_TYPE_U", "ENTITY_KEY_U"}.issubset(tracked.columns):
+        composite = tracked.assign(ENTITY_KEY_U=tracked["ENTITY_TYPE_U"].map(lambda v: _text(v).upper())
+                                   + "|" + tracked["ENTITY_KEY_U"].map(lambda v: _text(v).upper()))
+    status = with_track_status(out.assign(_TRACK_KEY=(etype + "|" + ekey.str.upper()).tolist()),
+                               composite, key_col="_TRACK_KEY")
+    read = bool(read_ok)
+    out["TRACKED"] = pd.Series(
+        [(s if read else TRACK_UNKNOWN_STATUS) if t else None
+         for s, t in zip(status["TRACK_STATUS"], trackable, strict=True)], index=out.index, dtype=object)
+    out["TRACKED_ACTION_ID"] = [a if (t and read) else ""
+                                for a, t in zip(status["TRACKED_ACTION_ID"], trackable, strict=True)]
+    out["TRACKED_COMPANY"] = [c if (t and read) else ""
+                              for c, t in zip(status["TRACKED_COMPANY"], trackable, strict=True)]
+    kind_col = (out["KIND"] if "KIND" in out.columns else pd.Series([""] * n, index=out.index)).astype(str)
+    alert_status = (out["STATUS"] if "STATUS" in out.columns
+                    else pd.Series([""] * n, index=out.index)).map(lambda v: _text(v).upper())
+    owned = (kind_col.eq("Alert") & alert_status.eq("ACK")) | out["TRACKED"].eq(TRACK_OPEN_STATUS)
+    sev = (out["SEVERITY"] if "SEVERITY" in out.columns
+           else pd.Series([""] * n, index=out.index)).map(lambda v: SEVERITY_RANK.get(_text(v).upper(), 9))
+    return (out.assign(_K=sev.astype(float) * 2 + owned.astype(int))
+            .sort_values("_K", kind="stable").drop(columns="_K").reset_index(drop=True))
+
+
+def tracked_elsewhere(item_company: object, scope: object) -> bool:
+    """An open item tracked under ANOTHER company is not in this scope's Action Center list (it filters
+    COMPANY IN (scope, 'ALL')), so the doorway names it instead of linking to nothing (Optimize r2)."""
+    co = _text(item_company)
+    sc = _text(scope).upper() or "ALL"
+    return bool(co) and co.upper() != "ALL" and sc not in ("ALL", co.upper())

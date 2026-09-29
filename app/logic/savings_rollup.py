@@ -16,10 +16,14 @@ from dataclasses import dataclass
 import pandas as pd
 
 from app.logic.formulas import safe_float
+from app.logic.unread_maintenance import ACTION_VERDICTS
 
 # Sources that address the SAME money on the same target — keep only the largest.
-# Idle-tune and right-sizing both recover a warehouse's idle credits.
-_OVERLAP_GROUPS: tuple[frozenset[str], ...] = (frozenset({"IDLE", "RESIZE"}),)
+# Idle-tune and right-sizing both recover a warehouse's idle credits; suspending clustering on an
+# unread table (Next-Fifty #30) and fixing its churny clustering both recover its clustering credits
+# (both keyed on the same db.schema.table concatenation).
+_OVERLAP_GROUPS: tuple[frozenset[str], ...] = (frozenset({"IDLE", "RESIZE"}),
+                                                frozenset({"CLUSTERING", "UNREAD_MAINT"}))
 
 _CONFIDENCE_WEIGHT = {"HIGH": 1.0, "VERIFIED": 1.0, "MEDIUM": 0.6,
                       "ESTIMATED": 0.5, "LOW": 0.3}
@@ -33,7 +37,7 @@ def confidence_weight(label: object) -> float:
 # Effort proxy from the advisor source: a single ALTER (IDLE/RESIZE) vs a costly
 # re-cluster (CLUSTERING). Lets the panel flag quick wins a dollar ranking hides.
 _EFFORT_TIER = {
-    "IDLE": "LOW", "RESIZE": "LOW",
+    "IDLE": "LOW", "RESIZE": "LOW", "UNREAD_MAINT": "LOW",
     "WASTE": "MEDIUM", "STORAGE": "MEDIUM", "RETENTION": "MEDIUM", "LEDGER": "MEDIUM",
     "CLUSTERING": "HIGH",
 }
@@ -48,7 +52,7 @@ def effort_tier(source: object) -> str:
 
 @dataclass(frozen=True)
 class SavingsOpportunity:
-    source: str            # IDLE | RESIZE | STORAGE | RETENTION | CLUSTERING | WASTE | LEDGER
+    source: str            # IDLE | RESIZE | STORAGE | RETENTION | CLUSTERING | WASTE | LEDGER | UNREAD_MAINT
     target: str            # the warehouse / table / db the saving is on
     monthly_usd: float
     confidence: float      # 0..1
@@ -87,6 +91,19 @@ def resize_opportunities(sized: pd.DataFrame | None) -> list[SavingsOpportunity]
                                confidence_weight(r.get("CONFIDENCE")))
             for _, r in sized.iterrows()
             if safe_float(r.get("POTENTIAL_MONTHLY_SAVING_USD")) > 0]
+
+
+def unread_maintenance_opportunities(verdicts: pd.DataFrame | None) -> list[SavingsOpportunity]:
+    """Next-Fifty #30 UNREAD_MAINT leg (registered for the #35 de-duplicated total; not yet in the Optimize
+    headline): one SavingsOpportunity per unread_maintenance.unread_maintenance_verdicts row with an ACTION
+    verdict and a positive EST_MONTHLY_USD (ESTIMATED, so MEDIUM confidence), keyed on OBJECT_FQN so it
+    de-duplicates against a CLUSTERING leg on the same table. None / empty -> []."""
+    if verdicts is None or verdicts.empty or "VERDICT" not in verdicts.columns:
+        return []
+    return [SavingsOpportunity("UNREAD_MAINT", str(r["OBJECT_FQN"]), safe_float(r.get("EST_MONTHLY_USD")),
+                               confidence_weight("MEDIUM"))
+            for _, r in verdicts.iterrows()
+            if str(r.get("VERDICT")) in ACTION_VERDICTS and safe_float(r.get("EST_MONTHLY_USD")) > 0]
 
 
 def _overlap_group(source: str) -> frozenset[str] | None:

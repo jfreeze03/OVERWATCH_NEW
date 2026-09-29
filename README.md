@@ -49,7 +49,7 @@ security boundary is Snowflake roles under Streamlit-in-Snowflake.
 |---|---|
 | Brief | Default landing: compact operator status and the Case File — what changed since your last visit, in one screen. |
 | Overview | Exec glance: spend vs budget, month-end forecast, alerts, platform score, real top actions. |
-| Control Room | DBA morning triage: ranked issue queue, source freshness, 24h failures, spend movers. |
+| Control Room | DBA morning triage: ranked issue queue, source freshness, 24h failures, spend movers; track task-failure / warehouse-spend triage rows into Action Center (Track as work item). |
 | Alerts | Alert rules, open events, ack/resolve workflow, generated native ALERT SQL. |
 | Cost Intelligence | Service/warehouse/user attribution (with the grain-coverage ratio: measured and user-allocated credits as a share of metered), contract pacing, Cortex + storage, savings ledger (estimated vs verified). |
 | Operations | Queries, tasks, warehouses, contention, the Optimize fix queue (a diagnosis and first fix per recurring query family, with one-click Track into Action Center), change impact, and Pipeline SLA with two built-in objectives (nightly cycle done by 07:00, tasks on cadence) — p95, failures, queue, spill, anomalies, post-change regression verdicts. |

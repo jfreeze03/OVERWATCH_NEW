@@ -35,6 +35,7 @@ from app.logic import (
     query_advisor,
     query_opt,
     remediation,
+    stmt_timeout,
     verdict,
     wh_change,
 )
@@ -78,7 +79,9 @@ from app.logic.insights import (
     compare_release_periods,
     cycle_night_summary,
     cycle_target_attainment,
+    cycle_timeline_frame,
     duration_sla_forecast,
+    etl_cycle_eta,
     etl_cycle_sla_forecast,
     etl_runtime_creep,
     latest_proc_changes,
@@ -2307,18 +2310,20 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL", database: str = "
         _pipeline_data_checks(is_operator, company, database, days, schema_contains)
 
 
-def _tonight_glance_panel() -> None:
+def _tonight_glance_panel() -> QueryResult | None:
     """rec1: the WHOLE night in one read — every workflow's tonight status from the shared
     attention.cycle_night_read (the SAME run() entry the Brief + Control Room verdicts read). Fixed
     14-night baseline, Window-independent like the SLA forecast below. NOT prefetched on purpose:
-    run_batch members cache in a separate store and would forfeit the cross-page hit."""
+    run_batch members cache in a separate store and would forfeit the cross-page hit.
+    Next-Fifty #36: returns that read (None when unconfigured) so the projected-finish and cycle-timeline
+    panels reuse it — no second read."""
     settings = load_settings(_PAGE)
     res = attention.cycle_night_read(settings, page=_PAGE)
     if res is None:
         section_header("Tonight at a glance", "", "pipeline", anchor="ops-tonight-glance")
         empty_state("needs_setup", "Not configured — set ETL_CONTROL_STATUS_FQN (a valid table name) on "
                     "Admin ▸ SETTINGS to roll up every workflow's run tonight.")
-        return
+        return None
     night = cycle_night_summary(res.df) if (res.ok and not res.empty) else {}
     if night:
         _bad = night["failed_wf"] or night["missing_wf"] or night["next_cycle_overdue"]
@@ -2342,7 +2347,7 @@ def _tonight_glance_panel() -> None:
                  "Check ETL_CYCLE_START_WORKFLOW on Admin ▸ SETTINGS.",
                  setup_hint="The app role needs SELECT on the CONTROL_STATUS table "
                             "(GRANT SELECT ON <table> TO ROLE <app role>)."):
-        return
+        return res
     tiles = [
         {"label": "Failed", "value": f"{night.get('failed_wf', 0):,}",
          "severity": "bad" if night.get("failed_wf") else "ok",
@@ -2375,6 +2380,7 @@ def _tonight_glance_panel() -> None:
         st.caption(f"⚠ Listing the first {etl_control_sql.MAX_NIGHT_WORKFLOWS} workflows — the counts "
                    "above cover every workflow.")
     result_caption(res)
+    return res
 
 
 def _builtin_objectives_panel(fc: dict, company: str = "ALL", days: int = 0, database: str = "",
@@ -2462,16 +2468,149 @@ def _builtin_objectives_panel(fc: dict, company: str = "ALL", days: int = 0, dat
            if cad.get("capped") else ""))
 
 
+def _cycle_eta_panel(fc: dict, night_res: QueryResult | None) -> None:
+    """Next-Fifty #36: tonight's projected cycle finish, painted under 'Tonight at a glance' while the
+    cycle is in flight. Zero reads of its own: it folds the SLA finish forecast (``fc``) and the glance's
+    whole-night read (``night_res``) through insights.etl_cycle_eta, exactly as the Brief tile does. Renders
+    nothing when the cycle is not in flight; the SLA panel below owns setup, failed and complete states."""
+    end_wf = str(load_settings(_PAGE).get("ETL_CYCLE_END_WORKFLOW") or "").strip()
+    eta = etl_cycle_eta(fc, night_res.df if (night_res is not None and night_res.usable()) else None,
+                        end_workflow=end_wf)
+    if not eta:
+        return
+    if not eta.get("ok"):
+        section_header("Tonight's projected finish", "", "pipeline", anchor="ops-cycle-eta")
+        if eta.get("reason") == "terminal_not_due":
+            empty_state("clean", f"{end_wf} is not due tonight (it is not a regular nightly workflow on this "
+                        "night), so there is no cycle finish to project.")
+        else:
+            empty_state("no_data_yet", "Tonight's cycle is running. A projected finish needs "
+                        f"{eta.get('min_nights', 0)} clean nights in the SLA forecast window; it has "
+                        f"{eta.get('nights_used', 0)}.")
+        return
+    health = {"breach": "bad", "miss": "warn", "running_long": "warn"}.get(str(eta.get("risk")), "ok")
+    section_header("Tonight's projected finish", health, "pipeline", anchor="ops-cycle-eta")
+    tgt, hard = eta["target_hhmm"], eta["breach_hhmm"]
+    panel_help(
+        "While tonight's cycle is running: Projected finish = tonight's cycle start "
+        f"({eta['start_hhmm']}) plus the median start-to-finish time of the {eta['nights_used']} clean nights "
+        "in the SLA finish forecast table below (its newest 14 nights, leaving out failed, unfinished and "
+        "month- or quarter-end nights; at least 4 are needed). The usual range is the middle half of those "
+        "nights (25th to 75th percentile). On a month- or quarter-end night the typical extra time those "
+        "nights take is added. Past the median the tile reads Due now; past the range, Running long. Pace so "
+        "far compares the furthest workflow that has finished cleanly tonight (the one that usually ends "
+        "latest before the terminal workflow) with its own usual end, both measured from the cycle start; "
+        "at this pace = the projection moved by that difference. On a month- or quarter-end night the "
+        "projection already includes the typical extra, so the part of it the pace workflow is expected to "
+        "carry (the extra x its usual end / the median cycle) is allowed first and never counted twice. "
+        "Nothing new is read: it reuses the Tonight at a glance and SLA finish forecast reads.")
+
+    def _sev(ts: object) -> str:
+        if ts is None:
+            return ""
+        return "bad" if ts > eta["hard_deadline"] else ("warn" if ts > eta["deadline"] else "ok")
+
+    phase = eta.get("phase")
+    _range = f"usual range {eta['band_lo_hhmm']}–{eta['band_hi_hhmm']}"
+    if phase == "running_long":
+        _pf_value, _pf_delta = "Running long", f"usually done by {eta['band_hi_hhmm']}"
+    elif phase == "due":
+        _pf_value, _pf_delta = "Due now", _range
+    else:
+        _pf_value, _pf_delta = f"~{eta['projected_hhmm']}", _range
+    _pf_sev = _sev(eta.get("projected"))
+    if phase == "running_long" and _pf_sev == "ok":
+        _pf_sev = "warn"
+    _vs = safe_float(eta.get("vs_target_sec"))
+    _late = eta.get("pace_late_sec")
+    if _late is None:
+        _pace_value, _pace_sev = "—", ""
+        _pace_delta = ("no upstream workflow has finished yet" if eta.get("pace_available")
+                       else "pace unavailable from tonight's roll-up")
+    else:
+        # PR C review C1: on a month- or quarter-end night the tile reads the lateness left after the marker's
+        # expected share of the typical extra (the same figure that moves 'at this pace')
+        _adj = eta.get("pace_late_adj_sec")
+        _lf = safe_float(_late if _adj is None else _adj)
+        _share = eta.get("pace_spike_share_sec")
+        _pace_value = ("On pace" if abs(_lf) < 60
+                       else f"{humanize_duration(abs(_lf), 's')} {'behind' if _lf > 0 else 'ahead'}")
+        _pace_delta = f"{eta.get('pace_workflow') or 'pace marker'} · at this pace ~{eta['pace_hhmm']}"
+        if _share:
+            _pace_delta += (f" · vs its usual {eta.get('spike_label') or 'labelled'} night "
+                            f"(+{humanize_duration(safe_float(_share), 's')} allowed)")
+        _pace_sev = _sev(eta.get("pace_projected"))
+    kpi_row([
+        {"label": "Projected finish", "value": _pf_value, "delta": _pf_delta, "delta_color": "off",
+         "severity": _pf_sev,
+         "help": "Tonight's start plus the median start-to-finish of the recent clean nights (never "
+                 "earlier than now)."},
+        {"label": f"Projected vs {tgt}",
+         "value": f"{humanize_duration(abs(_vs), 's')} {'early' if _vs >= 0 else 'late'}",
+         "delta": f"hard deadline {hard}", "delta_color": "off", "severity": _sev(eta.get("projected"))},
+        {"label": "Pace so far", "value": _pace_value, "delta": _pace_delta, "delta_color": "off",
+         "severity": _pace_sev,
+         "help": "The furthest workflow that finished clean tonight against its own usual end (on a "
+                 "month- or quarter-end night, less its expected share of the typical extra). A "
+                 "separate read: it never moves the projected finish."},
+    ])
+    st.caption(
+        "How this differs from the PIPE_ETL_CYCLE_LATE alert: the alert (V156) makes its own projection: "
+        "tonight's start plus the median start-to-finish of the 14 prior clean nights, month-end nights "
+        "included, with no range and no pace. It counts a terminal task done at its first clean finish after "
+        f"the kickoff, and it warns only when that projection passes the {hard} hard deadline (or the cycle "
+        f"is still unfinished inside its lead window before {tgt}). This panel uses the clean nights in the "
+        "SLA finish forecast below, leaves out month- and quarter-end nights (adding their typical extra on "
+        f"such a night) and colors against {tgt}. So the two times can differ, most on a month-end night or "
+        "after a next-morning terminal re-run, which this page reads as running again and the alert does not.")
+
+
+def _cycle_timeline_panel(night_res: QueryResult | None) -> None:
+    """Next-Fifty #36: every workflow tonight against its usual start and end, behind a toggle. Re-renders
+    the glance's whole-night read (no query); hidden when that read lacks the offset columns (unconfigured,
+    failed, or the shared read's pre-#36 fallback)."""
+    if night_res is None or not night_res.usable() or "END_OFFSET_SEC" not in night_res.df.columns:
+        return
+    section_header("Cycle timeline", "", "pipeline", anchor="ops-cycle-timeline")
+    if not st.toggle("Show tonight's cycle timeline", key="ops_cycle_timeline_toggle", value=False,
+                     help="Every workflow tonight against its usual start and end (median of the last 14 "
+                          "nights). Re-uses the Tonight at a glance read; no extra query."):
+        st.caption("Toggle on to list every workflow tonight against its usual start and end. It re-uses "
+                   "the Tonight at a glance read, so it adds no query.")
+        return
+    settings = load_settings(_PAGE)
+    tl = cycle_timeline_frame(night_res.df,
+                              start_workflow=str(settings.get("ETL_CYCLE_START_WORKFLOW") or "").strip(),
+                              end_workflow=str(settings.get("ETL_CYCLE_END_WORKFLOW") or "").strip())
+    if tl.empty:
+        empty_state("no_data_yet", "No workflow in tonight's cycle to lay out yet.")
+        return
+    styled_table(tl, height=360, slug="etl_cycle_timeline")
+    st.caption("Offsets are measured from tonight's cycle start; usual = the workflow's median over the last "
+               "14 nights (the usual end counts only clean finishes and shows once it has 4). Late vs usual = "
+               "tonight's end offset minus its usual (negative = early). Running rows show how long they have "
+               "been running. The terminal row's usual end is its own median, so it can differ a little from "
+               "the projected finish above. Per-task detail: Workflow runtimes ▸ Explain a task.")
+    if len(night_res.df) >= etl_control_sql.MAX_NIGHT_WORKFLOWS:
+        st.caption(f"⚠ Listing the first {etl_control_sql.MAX_NIGHT_WORKFLOWS} workflows (failed and "
+                   "unfinished first), so some finished workflows are not shown; the pace marker above "
+                   "covers every workflow.")
+
+
 def _pipeline_tonight(days: int = 0, database: str = "", company: str = "ALL",
                       schema_contains: str = "") -> None:
     """rec9 'Tonight': did/will the nightly cycle finish clean before the 07:00 deadline.
 
-    Leads with the whole-night roll-up (every workflow: failed / did not run / running), then the
-    two built-in objectives (v4.597), the XLAT reference gap (a missing source code HARD-FAILS the
-    load), the whole-cycle finish forecast, this run's per-task runtimes, and the run/params
+    Leads with the whole-night roll-up (every workflow: failed / did not run / running), then tonight's
+    projected finish while the cycle runs (Next-Fifty #36), the two built-in objectives (v4.597), the
+    XLAT reference gap (a missing source code HARD-FAILS the load), the whole-cycle finish forecast, the
+    per-workflow cycle timeline (#36, toggle), this run's per-task runtimes, and the run/params
     inventory."""
     # Next-Fifty #1: the whole night first — the same shared read the Brief + Control Room verdicts use.
-    _tonight_glance_panel()
+    _night_res = _tonight_glance_panel()
+    # Next-Fifty #36: tonight's projected finish paints right under the glance, filled once the SLA
+    # forecast below has run (it folds that forecast and the glance's read — no read of its own).
+    _eta_slot = st.container()
     # v4.597 (Option C): the built-in objectives paint HERE, at the top, but are filled after the
     # SLA forecast below has run — the cycle objective reuses its forecast (no duplicate work).
     _obj_slot = st.container()
@@ -2484,8 +2623,12 @@ def _pipeline_tonight(days: int = 0, database: str = "", company: str = "ALL",
     # The whole-cycle SLA: will the nightly cycle (starter → terminal) finish before 7am?
     # Window-independent by design (fixed 14-night baseline, matches Brief) — see the panel.
     fc = _sla_finish_forecast_panel(pf=_pf)
+    with _eta_slot:
+        _cycle_eta_panel(fc, _night_res)
     with _obj_slot:
         _builtin_objectives_panel(fc, company, days, database, schema_contains)
+    # Next-Fifty #36: every workflow tonight vs its usual start / end (toggle; re-renders the glance read).
+    _cycle_timeline_panel(_night_res)
     # A chosen workflow's latest run's per-task runtimes (Informatica CONTROL_STATUS),
     # scoped to the Window; config-gated + fail-silent-with-grant-hint.
     _workflow_runtimes_panel(days, pf=_pf)
@@ -3521,8 +3664,15 @@ def _wh_sizing_efficiency(company: str, rate: float, days: int, *,
             _sized = _sized.merge(_health[["WAREHOUSE_NAME", "SCORE", "GRADE", "WHY"]],
                                   on="WAREHOUSE_NAME", how="left")
         kpi_row([
-            {"label": "Size up / add cluster", "value": f"{_sum['up']}",
-             "delta_color": "inverse" if _sum["up"] else "off"},
+            # Next-Fifty #38: the merged "Size up / add cluster" card split by the kind of pressure.
+            {"label": "Add a cluster", "value": f"{_sum['scale_out']}",
+             "delta_color": "inverse" if _sum["scale_out"] else "off",
+             "help": "Sustained overload queueing without remote spill — concurrency: raise "
+                     "MAX_CLUSTER_COUNT (multi-cluster needs Enterprise edition) or split the workload."},
+            {"label": "Size up", "value": f"{_sum['size_up']}",
+             "delta_color": "inverse" if _sum["size_up"] else "off",
+             "help": "Remote spill per day — per-query memory pressure. With queueing too, size up "
+                     "first; add a cluster only if the queue persists."},
             {"label": "Tune auto-suspend first", "value": f"{_sum['suspend']}"},
             {"label": "Size-down candidates", "value": f"{_sum['down']}"},
             {"label": "Idle $ on suspend-first WHs", "value": format_usd(_sum["idle_saving_usd"])},
@@ -3610,7 +3760,114 @@ def _wh_sizing_efficiency(company: str, rate: float, days: int, *,
                        "(sparse or all-day-idle profiles route to auto-suspend instead).")
         result_caption(_hh)
 
+    _stmt_timeout_posture_panel(company, days)
     _adaptive_candidacy_panel(company, days, bounds=bounds)
+
+
+def _stmt_timeout_posture_panel(company: str, days: int) -> None:
+    """Statement-timeout posture (Next-Fifty #33): each warehouse's EFFECTIVE STATEMENT_TIMEOUT_IN_SECONDS
+    (the lower non-zero of its own value and the account value it inherits), flagged when one runaway
+    statement could bill for 48 hours or more, plus a review-only tightening script sized from the
+    warehouse's completed-runtime tail. Toggle-gated: one SHOW per warehouse (metadata tier, cached 4h)
+    and one grouped runtime-tail read (historical tier). Diagnostic only: nothing executes or is booked."""
+    import math
+
+    section_header("Statement-timeout posture", "", "warehouse", anchor="ops-wh-timeout")
+    if not st.toggle("Read statement-timeout posture (one SHOW per warehouse)", key="ops_wh_timeout_load",
+                     help="Each warehouse's effective STATEMENT_TIMEOUT_IN_SECONDS plus a completed-runtime "
+                          "tail, read on demand."):
+        st.caption("Toggle to see which warehouses let one runaway query bill for up to 48 hours.")
+        return
+    tail_days = stmt_timeout.tail_window_days(days)
+    tail = run(ops_sql.warehouse_timeout_tail(tail_days, company), page=_PAGE,
+               key=f"ops_wh_timeout_tail_{company}_{tail_days}", tier="historical",
+               source=f"QUERY_HISTORY (live, {tail_days}d completed statements)")
+    whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="jump_wh",
+              tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
+    tail_df = tail.df if tail.usable() else None
+    names, not_visible = stmt_timeout.warehouse_universe(whs.df if whs.usable() else None, tail_df, company)
+    if not names:
+        # review C16: pick the kind from the read this scope depends on (a company scope lists only the
+        # runtime tail's warehouses), so a failed read never reads as a verified-empty scope
+        _kind, _msg, _which = stmt_timeout.empty_universe_state(company, tail_ok=tail.ok, show_ok=whs.ok,
+                                                                active=len(not_visible))
+        empty_state(_kind, _msg, detail=(tail.error if _which == "tail" else whs.error if _which == "show"
+                                         else ""))
+        return
+    params: dict = {}
+    with st.spinner(f"Reading {len(names)} warehouse timeouts…"):
+        for wh in names:
+            _res = run(ops_sql.warehouse_stmt_timeout_sql(wh), page=_PAGE, key=f"ops_wh_timeout_{wh}",
+                       tier="metadata", source=f"SHOW PARAMETERS IN WAREHOUSE {wh}", max_rows=0,
+                       probe=True)
+            params[wh] = stmt_timeout.parse_timeout_row(_res.df if _res.usable() else None)
+        acct = run(ops_sql.account_stmt_timeout_sql(), page=_PAGE, key="ops_acct_stmt_timeout",
+                   tier="metadata", source="SHOW PARAMETERS IN ACCOUNT", max_rows=0, probe=True)
+    account_s, _acct_lvl = stmt_timeout.parse_timeout_row(acct.df if acct.usable() else None)
+    acct_how = "read"
+    if account_s is None:
+        account_s = stmt_timeout.derive_account_timeout(params.values())
+        acct_how = "derived from warehouse rows" if account_s is not None else "unread"
+    posture = stmt_timeout.timeout_posture(names, params, account_s, tail_df, not_visible)
+    summ = stmt_timeout.posture_summary(posture)
+    _timed_out = None
+    if tail_df is not None and "TIMEOUT_CANCELLED_TOTAL" in tail_df.columns:
+        _tv = safe_float(tail_df["TIMEOUT_CANCELLED_TOTAL"].iloc[0], float("nan"))
+        _timed_out = None if math.isnan(_tv) else int(_tv)
+    kpi_row([
+        {"label": "Warehouses read", "value": f"{summ['read']:,}",
+         "delta": f"{summ['unread']:,} unread" if summ["unread"] else "", "delta_color": "off"},
+        {"label": "Uncapped", "value": f"{summ['uncapped']:,}",
+         "severity": "warn" if summ["uncapped"] else "ok",
+         "help": "Effective cap of 48 hours or more: Snowflake's default (set nowhere), 0 (the 7-day "
+                 "maximum) or an explicit value that high. One runaway statement can bill that long."},
+        {"label": f"Timed out ({tail_days}d)",
+         "value": "—" if _timed_out is None else f"{_timed_out:,}",
+         "help": "Statements Snowflake cancelled for hitting a statement or warehouse timeout in the "
+                 "window, across every warehouse in scope: caps that already fired."},
+        # review C15/C20: the ENFORCED value (0 = the 7-day maximum reads 168h, never "0s")
+        stmt_timeout.account_value_kpi(account_s, acct_how),
+    ])
+    entity_nav_table(
+        posture[stmt_timeout.POSTURE_COLUMNS[:10]], key=f"ops_wh_timeout_tbl_{company}",
+        key_col="WAREHOUSE_NAME", entity_type="WAREHOUSE", column_config={
+            "CAP_SOURCE": st.column_config.TextColumn("Cap source"),
+            "COMPLETED_RUNS": st.column_config.NumberColumn("Completed runs"),
+            "TIMEOUT_CANCELLED_RUNS": st.column_config.NumberColumn("Timed out"),
+            "WOULD_CANCEL_RUNS": st.column_config.NumberColumn("Suggested cap would cancel"),
+        })
+    if not tail.ok:
+        empty_state("unavailable", "The completed-runtime tail could not be read: no cap is suggested "
+                    "and the run counts show as a dash.", detail=tail.error)
+    script = stmt_timeout.fix_script(posture, tail_days, tail_ok=tail.ok)
+    if script:
+        st.caption("Review only — nothing here runs. Check each line, delete the warehouses that "
+                   "legitimately run longer, then paste into a worksheet. Each ALTER is followed by its "
+                   "exact undo as a comment.")
+        st.code(script, language="sql")
+    elif summ["read"] and not summ["uncapped"]:
+        empty_state("clean", "Every warehouse read has an effective cap below 48 hours.")
+    if account_s is not None and stmt_timeout.is_uncapped(stmt_timeout.enforced_s(account_s)):
+        st.caption("The account value is also 48 hours or more. One account cap reaches every warehouse "
+                   "and workload at once, so it is not scripted here; set it deliberately from "
+                   "Operations ▸ Emergency ▸ Account statement timeout.")
+    if summ["not_visible"]:
+        st.caption(f"{summ['not_visible']:,} warehouse(s) ran statements in the window but SHOW WAREHOUSES "
+                   "does not list them (dropped, renamed, or not visible to the app role): shown as Not "
+                   "visible, with no timeout read.")
+    if len(names) >= stmt_timeout.MAX_WAREHOUSES_READ:
+        st.caption(f"Reads at most {stmt_timeout.MAX_WAREHOUSES_READ} warehouses per view: the ones with "
+                   "the longest completed statements first.")
+    st.caption(md_dollars(
+        "Effective cap = the lower non-zero of the warehouse's own value and the account value it "
+        "inherits; 0 means the 7-day maximum. A user or session value can lower it (or raise it up to the "
+        "warehouse value), and task statements are also capped by USER_TASK_TIMEOUT_MS. Suggested cap = "
+        f"the smallest step at or above p99 x 3 of completed statements over the last {tail_days} days "
+        "(the Window, at least 30 and at most 90, trailing), with at least 100 runs; elapsed includes "
+        "compile and queue time, so it errs long. Under a company scope only warehouses active in the "
+        "window are listed (SHOW WAREHOUSES carries no company). Admin ▸ Performance shows the app "
+        "warehouse's own value."))
+    result_caption(tail)
 
 
 def _adaptive_candidacy_panel(company: str, days: int, *, bounds: tuple | None = None) -> None:
@@ -4282,7 +4539,8 @@ def render() -> None:
         "Warehouses": {
             "applies": ("company",),
             "partial": ("days",),
-            "note": "Contention uses Window; warehouse anomaly history is a fixed 30-day view.",
+            "note": ("Contention uses Window; warehouse anomaly history is a fixed 30-day view; the "
+                     "statement-timeout runtime tail reads max(Window, 30) days, capped at 90."),
         },
         "Optimize": {
             "applies": ("company", "days"),
@@ -4304,7 +4562,8 @@ def render() -> None:
                     "drops and Dynamic-table refresh health honor Company/Database/Schema, as does "
                     "the Tasks-on-cadence objective, which reads its cadence over max(Window, 14) days, "
                     "capped at 90. "
-                    "The SLA finish forecast is a fixed 14-night baseline. (The DQ row-volume panel is "
+                    "The SLA finish forecast, projected finish and cycle timeline use fixed 14-night "
+                    "baselines. (The DQ row-volume panel is "
                     "still account-wide.)",
         },
         "Release compare": {

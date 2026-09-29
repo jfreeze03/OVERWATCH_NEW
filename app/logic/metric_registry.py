@@ -94,6 +94,17 @@ COLUMN_HELP = {
     "OWNER_HINT": "Who to talk to: the task owner role for SYSTEM (task) statements, else the user and their "
                   "main application.",
     "NEXT_STEP": "The concrete fix for this driver class.",
+    # Next-Fifty #46 / #15 (v4.601): measured outcomes of completed work, and triage tracking.
+    "HELD?": "Measured after the item was marked done, on the entity's own mart signal: the failure rate when "
+             "it was failing before (2% or more of runs), else credits (warehouse, query family) or P95 runtime "
+             "(task). An item tracked from Control Room triage is judged on the signal it was tracked for (a "
+             "task's failure rate; a warehouse's triage spend test, in the same direction), so a quiet signal "
+             "reads Held. Re-broke is dated when the trailing week climbed back (it can lag the break by up to 6 "
+             "days); Re-broke / Not fixed lift the Optimize Track-all cooldown (Track all still takes only ACT "
+             "NOW families).",
+    "TRACKED": "Action Center status of this task or warehouse row: Tracked (open), Done or Dismissed within "
+               "90 days, Untracked, or Unknown when the status read failed. Alerts are owned through "
+               "Acknowledge and the incident flow, so they show no status.",
 }
 
 
@@ -289,6 +300,18 @@ METRICS: tuple[Metric, ...] = (
            window="rolling-daily", partial_day="included", unit="USD",
            filters=("company", "database"), required_sources=("FACT_OBJECT_COST_DAILY",),
            coverage="direct per-object serverless credits", owner="platform"),
+    Metric("unread_maintenance_estimate", "Maintenance on unread objects", ESTIMATED,
+           "object / 30-day run-rate",
+           "FACT_OBJECT_COST_DAILY maintenance arms (CLUSTERING / SEARCH_OPT / MV_REFRESH) with no read arm, "
+           "confirmed by ACCESS_HISTORY (90d, write-wins, share-guarded)",
+           UTC, "daily load + ACCESS_HISTORY lag", "v4.601",
+           "Last 30 complete days of maintenance credits x rate on confirmed-unread objects (Next-Fifty #30); "
+           "booked ledger rows stay ESTIMATED (no scan settles object-level serverless savings).",
+           window="trailing-complete-days", partial_day="excluded", unit="USD",
+           filters=("company", "database"),
+           required_sources=("FACT_OBJECT_COST_DAILY", "ACCOUNT_USAGE.ACCESS_HISTORY"),
+           coverage="confirmed only with Enterprise ACCESS_HISTORY; share consumers and reads rarer than 90 days "
+                    "are invisible", owner="platform"),
     Metric("etl_unit_cost", "ETL unit cost (per pipeline)", MEASURED,
            "pipeline / run",
            "QUERY_HISTORY (JSON QUERY_TAG) + QUERY_ATTRIBUTION_HISTORY credits",

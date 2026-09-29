@@ -21,7 +21,7 @@ from app.core.identity import identity_sql, viewer_name
 from app.core.query import execute_statement, run, run_batch_mixed
 from app.core.state import can_open, navigation_context, request_navigation
 from app.data import ops_sql, workbench_sql
-from app.logic import query_opt
+from app.logic import outcomes, query_opt
 from app.logic.decision import prioritize_workloads
 from app.logic.fix_queue import (
     TRACK_ALL_CAP,
@@ -30,11 +30,12 @@ from app.logic.fix_queue import (
     own_traffic,
     resolve_deep_link,
     track_all_eligible,
+    track_all_takes,
     track_fingerprints_sql,
     track_items,
     with_track_status,
 )
-from app.logic.formulas import format_usd, md_dollars, safe_float
+from app.logic.formulas import account_today, format_usd, md_dollars, safe_float
 from app.logic.workbench import mark_watched
 from app.ui import charts
 from app.ui.components import (
@@ -66,6 +67,8 @@ _SOURCE_LABEL = {
 }
 _OPEN_STATUS = "Tracked (open)"
 _UNKNOWN_STATUS = "Unknown"      # the tracked-actions read failed (review r2)
+# Next-Fifty #46: a Done family whose measured outcome says the fix re-broke or never held
+_REOPEN_STATUSES = {outcomes.REBROKE: "Re-broke", outcomes.NOT_FIXED: "Not fixed"}
 
 
 def _short_fp(fingerprint: str) -> str:
@@ -170,6 +173,41 @@ def render_optimize(company: str, days: int, rate: float, *, bounds: tuple | Non
         portfolio["TRACK_STATUS"] = _UNKNOWN_STATUS
         portfolio["TRACKED_ACTION_ID"] = ""
         portfolio["TRACKED_COMPANY"] = ""
+    # Next-Fifty #46: measure each listed Done family on its own mart signal since it was marked done. A
+    # family whose fix re-broke or never held re-enters Act now and Track all -- the 90-day cooldown exists
+    # only because the trailing mart still carries the pre-fix runs. ONE plain read, made only when the
+    # tracked read succeeded AND a Done family is listed; a failed read reads Unavailable and holds the
+    # cooldown. Dismissed families are never measured (a dismissal is deliberate). The Held? column exists
+    # only when a Done family is listed (decision_rows skips an absent context column).
+    _rebroke: set[str] = set()
+    _is_done = portfolio["TRACK_STATUS"].eq("Done")
+    _done_keys = portfolio.loc[_is_done, "FINGERPRINT"].tolist()
+    _today = account_today()
+    _ents = outcomes.done_family_entities(_tracked_df, _done_keys, _today) if _track_ok and _done_keys else []
+    if _done_keys:
+        _held: dict[str, dict] = {}
+        _sig_ok = True
+        if _ents:
+            _sig = run(workbench_sql.entity_daily_signals(_ents), page=_PAGE, key="ops_opt_outcomes",
+                       tier="recent", probe=True,
+                       source="MART_PATTERN_COST_DAILY + MART_QUERY_FAMILY_DAILY (outcome since done)")
+            _sig_ok = bool(_sig.ok)
+            if _sig_ok:
+                _held = outcomes.family_outcomes(_tracked_df, _sig.df if _sig.usable() else None, _today,
+                                                 _done_keys)
+        _rebroke = {k for k, h in _held.items() if h["state"] in outcomes.OVERRIDES_COOLDOWN}
+        _fp_u = portfolio["FINGERPRINT"].map(
+            lambda v: "" if v is None or (isinstance(v, float) and v != v) else str(v).strip().upper())
+        _rate = safe_float(rate, 3.68)
+        portfolio[outcomes.HELD_COL] = [
+            (None if not d else outcomes.UNAVAILABLE_LABEL if not _sig_ok
+             else str(_held[k]["label"]) if k in _held else outcomes.NOT_CHECKED_LABEL)
+            for k, d in zip(_fp_u, _is_done, strict=True)]
+        portfolio["HELD_BASIS"] = [(outcomes.held_basis(_held[k], _rate) or None) if (d and k in _held) else None
+                                   for k, d in zip(_fp_u, _is_done, strict=True)]
+        _reopen = [(_REOPEN_STATUSES[_held[k]["state"]] if (d and k in _rebroke) else None)
+                   for k, d in zip(_fp_u, _is_done, strict=True)]
+        portfolio["TRACK_STATUS"] = [r or s for r, s in zip(_reopen, portfolio["TRACK_STATUS"], strict=True)]
     # DS #1 carried over: a watched family is flagged and pinned to the top WITHIN its lane (an
     # ACT NOW item is never buried under a watched PLAN item). No pin when the read is unavailable.
     _wl = _wl_res.df if (_wl_res is not None and _wl_res.usable()) else None
@@ -228,7 +266,8 @@ def render_optimize(company: str, days: int, rate: float, *, bounds: tuple | Non
             "value": f"{len(act_now):,}",
             "detail": (f"{format_usd(act_now['IMPACT_USD_30D'].sum())} observed 30-day cost with a "
                        "specific diagnosis"
-                       + (", with no open Action Center item and not recently dismissed or done."
+                       + (", with no open Action Center item and not recently dismissed or done (a done "
+                          "family whose fix re-broke or never held counts again)."
                           if _track_ok else "; Action Center status unknown (the read failed).")),
             "severity": "warn",
         })
@@ -282,10 +321,10 @@ def render_optimize(company: str, days: int, rate: float, *, bounds: tuple | Non
     ])
 
     # Track all ACT NOW: one capped, idempotent statement, its SQL shown before the button.
-    eligible = track_all_eligible(portfolio, _tracked_df) if _track_ok else portfolio.iloc[0:0]
+    eligible = track_all_eligible(portfolio, _tracked_df, rebroke=_rebroke) if _track_ok else portfolio.iloc[0:0]
     _n_elig = len(eligible)
     _bulk_sql = (track_fingerprints_sql(track_items(eligible, company), actor_sql=identity_sql(),
-                                        bulk=True) if _n_elig else "")
+                                        bulk=True, rebroke_keys=_rebroke) if _n_elig else "")
     _own_act = int((portfolio["LANE"].eq("ACT NOW") & specific & own_traffic(portfolio)).sum())
     if is_operator:
         if _bulk_sql:
@@ -304,8 +343,9 @@ def render_optimize(company: str, days: int, rate: float, *, bounds: tuple | Non
         # operator-only mechanics (review r2: a read-only viewer got copy for actions it cannot take)
         st.caption(
             f"Track all takes ACT NOW families with a specific diagnosis that have no open Action Center "
-            f"item and were not dismissed or marked done in the last {TRACK_COOLDOWN_DAYS} days, highest "
-            f"priority first, at most {TRACK_ALL_CAP} per click"
+            f"item and were not dismissed or marked done in the last {TRACK_COOLDOWN_DAYS} days (a family "
+            f"marked done still qualifies when its measured outcome shows the fix re-broke or never held), "
+            f"highest priority first, at most {TRACK_ALL_CAP} per click"
             + (f"; {_own_act} OVERWATCH own-traffic famil{'y' if _own_act == 1 else 'ies'} skipped"
                if _own_act else "")
             + ". Items land UNASSIGNED at MEDIUM severity (never HIGH), unpriced unless the diagnosis is "
@@ -341,7 +381,7 @@ def render_optimize(company: str, days: int, rate: float, *, bounds: tuple | Non
             decision_col="DIAGNOSIS", why_col="EVIDENCE", impact_col="IMPACT_USD_30D",
             confidence_col="DIAG_CONFIDENCE", status_col="TRACK_STATUS",
             context_cols=("LANE", "WATCHED", "RUNS", "FAIL_PCT", "AVG_CACHE_PCT", "P95_SEC",
-                          "EVIDENCE_COVERAGE"),
+                          "EVIDENCE_COVERAGE", "Held?"),
             height=370, sort_label="decision lane, then evidence-weighted priority",
             impact_help="Measured pattern credits x the compute rate, normalized to 30 days — "
                         "observed cost, not promised savings.",
@@ -374,6 +414,17 @@ def render_optimize(company: str, days: int, rate: float, *, bounds: tuple | Non
         "Own-traffic families (SQL naming DBA_MAINT_DB.OVERWATCH, or run mainly in the DBA_MAINT_DB "
         "database, where the app's own reads run) are tagged and never bulk-tracked. WATCHED families are "
         "pinned to the top of their lane.")
+    if outcomes.HELD_COL in portfolio.columns:
+        st.caption(
+            f"Held? measures a family marked done on its own daily marts since that day: its failure rate when "
+            f"at least {outcomes.FAIL_ARM_PCT:.0f}% of runs failed in the {outcomes.BASELINE_DAYS} days before, "
+            f"else its attributed credits — a {outcomes.ROLL_DAYS}-day rate or level at least "
+            f"{outcomes.MIN_DROP:.0%} below the baseline is fixed, and climbing back to "
+            f"{outcomes.REGAIN:.0%} of it is Re-broke (so one stray failure is not). Re-broke is dated when the "
+            f"week climbed back, so it can lag the real break by up to {outcomes.ROLL_DAYS - 1} days; Re-broke "
+            f"and Not fixed lift the family's done cooldown, so Track all takes it again when it is an ACT NOW "
+            f"family with a specific diagnosis. Up to {outcomes.MAX_ENTITIES} listed done families completed in "
+            f"the last {outcomes.LOOKBACK_DAYS} days are measured; the rest read Not checked.")
     result_caption(result, note="credits are measured; diagnoses are advisory")
     stash_section_count(_PAGE, "Optimize", len(act_now), dims=("company", "days"))
 
@@ -406,6 +457,17 @@ def _render_detail(row, *, company: str, is_operator: bool, live_on: bool) -> No
     action_id = str(row.get("TRACKED_ACTION_ID") or "")
     st.caption("Action Center: status unknown (the read failed)." if status == _UNKNOWN_STATUS
                else f"Action Center: {status}.")
+    if status in _REOPEN_STATUSES.values():
+        _held_lbl = str(row.get(outcomes.HELD_COL) or status)
+        _basis = str(row.get("HELD_BASIS") or "").strip()
+        # review C23: the lifted DONE cooldown re-admits the family to Track all only when Track all takes it
+        # at all (ACT NOW, a specific diagnosis, not own traffic); otherwise only a single Track re-queues it
+        st.caption(md_dollars(f"Marked done, but the measured outcome says {_held_lbl}"
+                              + (f" ({_basis})" if _basis else "")
+                              + (" — Track all includes it again." if track_all_takes(row) else
+                                 ". Its done cooldown is lifted, but Track all takes only ACT NOW families with "
+                                 "a specific diagnosis that are not OVERWATCH's own traffic, so it will not "
+                                 "re-queue this one — Track does.")))
     # Cross-page doorways only for a viewer whose profile offers Control Room (the pane already
     # sits in master_detail's column, so the two links stack rather than nest another column row).
     _cr_ok = can_open("Control Room")

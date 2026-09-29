@@ -680,9 +680,87 @@ def test_cycle_night_health_scan_parses():
             "TASK_COUNT", "FAILED_TASK_COUNT", "RUNNING_TASK_COUNT", "NIGHTS_RAN_COUNT", "TYPICAL_OFFSET_SEC",
             "CYCLE_AGE_SEC", "NEXT_CYCLE_OVERDUE", "TOTAL_WORKFLOWS", "TOTAL_FAILED_TASKS", "TOTAL_FAILED_WF",
             "TOTAL_MISSING_WF", "TOTAL_RUNNING_WF", "TOTAL_PENDING_WF", "SNAPSHOT_TS"]
+    # Next-Fifty #36: the ETA columns are APPENDED after SNAPSHOT_TS, so every existing position holds
+    # (PR C review C2: TERM_RAN_LAST_WEEK is appended LAST, so every earlier position still holds)
+    eta_cols = ["START_OFFSET_SEC", "END_OFFSET_SEC", "TYPICAL_END_OFFSET_SEC", "END_NIGHTS_COUNT",
+                "PACE_WORKFLOW_NAME", "PACE_LATE_SEC", "PACE_END_AT", "TERM_RAN_LAST_WEEK"]
     for sw in ("WF_START", ""):
         tree = sqlglot.parse_one(etl.cycle_night_health_scan(_CTRL, start_workflow=sw), read="snowflake")
-        assert tree.named_selects == cols    # the column contract the summarizer + shaped harness share
+        assert tree.named_selects == cols + eta_cols   # the column contract the summarizer + shaped harness share
+        tree = sqlglot.parse_one(etl.cycle_night_health_scan(_CTRL, start_workflow=sw, end_workflow="WF_END"),
+                                 read="snowflake")
+        assert tree.named_selects == cols + eta_cols
+        # the shared read's fallback (eta_columns=False) keeps the pre-#36 contract exactly
+        tree = sqlglot.parse_one(etl.cycle_night_health_scan(_CTRL, start_workflow=sw, eta_columns=False),
+                                 read="snowflake")
+        assert tree.named_selects == cols
+
+
+# --- Next-Fifty #36: end offsets, the pace marker and the terminal literal ---------------------------
+def test_cycle_night_health_scan_end_offsets_and_pace():
+    sql = etl.cycle_night_health_scan(_CTRL, start_workflow="WF_START", end_workflow="WF_END")
+    hist = sql.split("hist AS (", 1)[1].split("\n),\n", 1)[0]
+    # the usual END offset counts CLEAN prior finishes only (a failed night's end is crash-short)
+    assert ("MEDIAN(IFF(w.FAILED_TASK_COUNT = 0 AND w.RUNNING_TASK_COUNT = 0,\n"
+            "                    DATEDIFF('second', c.CYCLE_START_AT, w.LAST_END_AT), NULL)) AS TYPICAL_END_OFFSET_SEC"
+            ) in hist
+    assert "AS END_NIGHTS_COUNT" in hist
+    assert "MEDIAN(DATEDIFF('second', c.CYCLE_START_AT, w.FIRST_START_AT)) AS TYPICAL_OFFSET_SEC" in hist
+    graded = sql.split("graded AS (", 1)[1].split("\n),\n", 1)[0]
+    assert "DATEDIFF('second', n.CYCLE_START_AT, t.FIRST_START_AT) AS START_OFFSET_SEC" in graded
+    assert "DATEDIFF('second', n.CYCLE_START_AT, t.LAST_END_AT), NULL) AS END_OFFSET_SEC" in graded
+    assert "COALESCE(h.END_NIGHTS_COUNT, 0) AS END_NIGHTS_COUNT" in graded
+    pace = sql.split("pace AS (", 1)[1].split("\n)\n", 1)[0]
+    assert "QUALIFY ROW_NUMBER() OVER (ORDER BY g.TYPICAL_END_OFFSET_SEC DESC, g.WORKFLOW_NAME) = 1" in pace
+    assert f"g.END_NIGHTS_COUNT >= {etl.NIGHT_END_MIN_NIGHTS}" in pace and etl.NIGHT_END_MIN_NIGHTS == 4
+    assert "g.NIGHT_STATUS = 'OK'" in pace
+    assert "g.TYPICAL_END_OFFSET_SEC < tt.TERM_TYPICAL_END_SEC" in pace
+    # PR C review C3: a clean end needs at least the fewest tasks a clean prior night dispatched (V156's
+    # MIN_TERM_TASKS), so a half-dispatched workflow is neither the pace marker nor a timeline finish
+    assert ("MIN(IFF(w.FAILED_TASK_COUNT = 0 AND w.RUNNING_TASK_COUNT = 0, w.TASK_COUNT, NULL))\n"
+            "           AS USUAL_TASK_COUNT") in hist
+    assert ("IFF(t.FAILED_TASK_COUNT = 0 AND t.RUNNING_TASK_COUNT = 0\n"
+            "             AND t.TASK_COUNT >= COALESCE(h.USUAL_TASK_COUNT, 1),\n") in graded
+    # PR C review C2: the terminal's last-week flag rides on every row as a scalar read of the one-row term
+    # CTE (no join, so the FROM below and the TOTAL_* windows are untouched)
+    assert "MAX(RAN_LAST_WEEK) AS TERM_RAN_LAST_WEEK" in sql.split("term AS (", 1)[1].split("\n),\n", 1)[0]
+    assert "       (SELECT TERM_RAN_LAST_WEEK FROM term) AS TERM_RAN_LAST_WEEK\n  FROM graded\n" in sql
+    # one pace row broadcast to every row (no multiplication); ORDER BY and LIMIT unchanged
+    assert "  FROM graded\n  LEFT JOIN pace p ON 1 = 1\n  ORDER BY CASE NIGHT_STATUS" in sql
+    assert sql.rstrip().endswith(f"LIMIT {etl.MAX_NIGHT_WORKFLOWS}")
+    assert "COUNT(*) OVER () AS TOTAL_WORKFLOWS" in sql
+    assert "ACCOUNT_USAGE" not in sql
+
+
+def test_cycle_night_health_scan_binds_terminal_as_literal():
+    with_end = etl.cycle_night_health_scan(_CTRL, start_workflow="WF_START", end_workflow="WF_END")
+    assert "term AS (" in with_end and "WHERE WORKFLOW_NAME = 'WF_END'" in with_end
+    assert with_end.count("WORKFLOW_NAME = 'WF_START'") == 2           # the starter binds exactly as before
+    no_end = etl.cycle_night_health_scan(_CTRL, start_workflow="WF_START")
+    assert "term AS (" not in no_end and "CROSS JOIN term" not in no_end and "pace AS (" in no_end
+    assert "NULL AS TERM_RAN_LAST_WEEK" in no_end and "FROM term" not in no_end    # no terminal: no flag
+    inj = etl.cycle_night_health_scan(_CTRL, end_workflow="x' OR '1'='1")
+    assert "WHERE WORKFLOW_NAME = 'x'' OR ''1''=''1'" in inj
+    assert "WORKFLOW_NAME = '" not in etl.cycle_night_health_scan(_CTRL)   # no args: no literal at all
+    # the fallback never binds the terminal (its SQL is the pre-#36 roll-up)
+    assert "WF_END" not in etl.cycle_night_health_scan(_CTRL, end_workflow="WF_END", eta_columns=False)
+
+
+_CTRL_SCHEMA = {"ALFA_EDW_PRD": {"PUBLIC": {"CONTROL_STATUS": {
+    "RUN_ID": "VARCHAR", "WORKFLOW_NAME": "VARCHAR", "TASK_NAME": "VARCHAR", "TASK_STATUS": "VARCHAR",
+    "TASK_START_DTTM": "TIMESTAMP", "TASK_END_DTTM": "TIMESTAMP"}}}}
+
+
+def test_cycle_night_health_scan_qualifies_unambiguously():
+    sqlglot = pytest.importorskip("sqlglot")
+    from sqlglot.optimizer.qualify import qualify
+    for ew in ("WF_END", ""):
+        for eta in (True, False):
+            sql = etl.cycle_night_health_scan(_CTRL, start_workflow="WF_START", end_workflow=ew,
+                                              eta_columns=eta)
+            # raises on an ambiguous or unknown column (e.g. a pace column shadowing a graded one)
+            qualify(sqlglot.parse_one(sql, read="snowflake"), schema=_CTRL_SCHEMA, dialect="snowflake",
+                    validate_qualify_columns=True)
 
 
 # --- run_task_evidence_scan (#14 Phase 1) ------------------------------------------------------------

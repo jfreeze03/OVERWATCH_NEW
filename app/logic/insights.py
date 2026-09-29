@@ -89,6 +89,21 @@ def with_warehouse_settings(profile: pd.DataFrame, warehouses: pd.DataFrame) -> 
     return out
 
 
+def multi_cluster_evident(warehouses: pd.DataFrame | None) -> bool:
+    """True when SHOW WAREHOUSES shows ANY warehouse with MAX_CLUSTER_COUNT > 1 (Next-Fifty #38).
+
+    Multi-cluster warehouses need Enterprise edition or higher, so one existing multi-cluster
+    warehouse proves the account can scale out. False = not proven (Standard edition, or simply no
+    multi-cluster warehouse yet) — the caller words the edition caveat, never asserts the edition.
+    Case-insensitive on SHOW's column names; absent/empty frame or column -> False. Pure."""
+    if warehouses is None or warehouses.empty:
+        return False
+    cols = {str(c).lower(): c for c in warehouses.columns}
+    if "max_cluster_count" not in cols:
+        return False
+    return bool((pd.to_numeric(warehouses[cols["max_cluster_count"]], errors="coerce") > 1).any())
+
+
 def idle_waste_summary(df: pd.DataFrame, credit_rate_usd: float, window_days: int) -> dict:
     """Account/company roll-up of idle warehouse waste (repo review wave 3) — the
     single headline "$ burned in warehouse-hours with zero queries" number, priced.
@@ -1281,6 +1296,9 @@ def etl_cycle_sla_forecast(
         "latest_finish": latest["finish"], "latest_state": latest["state"],
         "latest_complete_finish": latest_complete_finish,   # the finish the margin/tier is judged on
         "latest_failed": bool(latest["state"] == "FAILED"),
+        # Next-Fifty #36: the read's own clock (tz-stripped above), so tonight's projected finish can
+        # floor at "now" without a server clock in this layer.
+        "snapshot_ts": snapshot if pd.notna(snapshot) else None,
         "latest_margin_sec": latest_margin, "margin_hard_sec": margin_hard,
         "slope_sec_per_night": (round(slope, 1) if slope is not None else None),
         "projected_margin_sec": (round(projected, 1) if projected is not None else None),
@@ -1341,6 +1359,293 @@ def cycle_target_attainment(fc: dict | None) -> dict:
     return {"met": met, "judged": len(judged_nights), "late": late, "failed": failed,
             "hung": hung, "target_hhmm": str(fc.get("target_hhmm") or "07:00"),
             "in_flight": bool(in_flight)}
+
+
+# --- Next-Fifty #36: tonight's projected finish + the per-workflow cycle timeline -------------------
+ETA_BAND_QUANTILES = (0.25, 0.75)   # the "usual range": the middle half of the sampled clean nights
+ETA_NIGHT_ROW_CAP = 200             # mirrors etl_control_sql.MAX_NIGHT_WORKFLOWS (logic never imports data)
+ETA_STALE_AFTER_HARD_H = 12         # V156's business-day rule: a night stops projecting 12h past its hard deadline
+
+
+def _naive_ts(value: object) -> pd.Timestamp | None:
+    """A tz-naive Timestamp, or None for NULL / NaT / anything unparseable. Never raises."""
+    try:
+        ts = pd.to_datetime(value, errors="coerce")
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not isinstance(ts, pd.Timestamp) or pd.isna(ts):
+        return None
+    return ts.tz_localize(None) if ts.tzinfo is not None else ts
+
+
+def _eta_hhmm(ts: pd.Timestamp | None) -> str:
+    """'HH:MM' rounded to the minute, or the em-dash no-value glyph."""
+    if ts is None:
+        return "—"
+    try:
+        return ts.round("min").strftime("%H:%M")
+    except (TypeError, ValueError, OverflowError):
+        return "—"
+
+
+def _pace_spike_share(night_df: pd.DataFrame, pace_wf: str | None, pace_end: pd.Timestamp | None,
+                      start: pd.Timestamp, late: float, extra: float, median_sec: float) -> float:
+    """PR C review C1: the part of a labelled night's typical extra (``extra`` seconds) the pace marker is
+    expected to carry already, so the pace projection never counts it twice. The extra is assumed to build up
+    evenly across the cycle, so the marker carries extra x (its usual end offset / the median cycle length),
+    capped to [0, extra]. The usual end is the marker row's TYPICAL_END_OFFSET_SEC, else PACE_END_AT − start −
+    PACE_LATE_SEC (the same number: tonight's end offset minus the lateness). When neither is known the whole
+    extra is allowed (the marker is the latest-ending workflow before the terminal), so a labelled night never
+    reads 'at risk' from the lateness it is expected to have."""
+    usual = float("nan")
+    if pace_wf and {"WORKFLOW_NAME", "TYPICAL_END_OFFSET_SEC"}.issubset(night_df.columns):
+        hit = night_df[night_df["WORKFLOW_NAME"].astype(str) == pace_wf]
+        if not hit.empty:
+            usual = safe_float(hit.iloc[0].get("TYPICAL_END_OFFSET_SEC"), default=float("nan"))
+    if usual != usual and pace_end is not None:
+        usual = (pace_end - start).total_seconds() - late
+    if usual != usual or not (median_sec > 0):
+        return extra
+    return extra * min(1.0, max(0.0, usual / median_sec))
+
+
+def etl_cycle_eta(fc: dict | None, night_df: pd.DataFrame | None = None, *, end_workflow: str = "",
+                  min_nights: int = SLA_FORECAST_MIN_RUNS, night_row_cap: int = ETA_NIGHT_ROW_CAP) -> dict:
+    """Tonight's projected cycle finish while the cycle is IN FLIGHT (Operations ▸ Tonight + the Brief tile).
+
+    Reuses two reads the morning surfaces already hold: ``fc`` (etl_cycle_sla_forecast output) and the
+    whole-night roll-up frame (cycle_night_health_scan; only its row-0 PACE_* columns are used).
+
+    - Projected finish = tonight's cycle start + the MEDIAN start-to-finish of the clean nights in
+      ``fc['nights'][1:]`` ([0] is tonight): RUN_STATE COMPLETE, not an EXPECTED_SPIKE (month- or
+      quarter-end) night. The usual range is their ETA_BAND_QUANTILES (25th-75th percentile, linear, so
+      the median equals Snowflake MEDIAN). On a labelled night the forecaster's typical extra time
+      (``spike_extra_sec`` > 0) shifts all three. The projection never falls before the read's snapshot.
+    - Pace (a separate figure that never moves the headline): the night frame's PACE_LATE_SEC (the
+      furthest workflow that finished clean tonight, vs its own usual end) moves the projection by that
+      lateness. On a labelled night the marker's expected share of the typical extra is allowed first
+      (``pace_spike_share_sec``; ``pace_late_adj_sec`` is what moves it), because the headline already
+      carries the extra. ``worst_projected`` is the later of the two and drives ``risk``.
+    - Deadlines are the forecaster's (the first target time after the start; the hard deadline >= 60 min
+      past it).
+
+    Returns {} when there is nothing to project: no forecast, the latest night is not in flight (complete
+    or failed), or it is stale (the snapshot is ETA_STALE_AFTER_HARD_H past its hard deadline, V156's
+    rule). Returns {'ok': False, 'reason': 'terminal_not_due' | 'short_history', ...} when it will not
+    guess: the terminal workflow is absent from an uncapped night frame AND did not run on this night
+    last week (TERM_RAN_LAST_WEEK 0 / NULL: V156's term_lw rule; a frame without that column, the shared
+    read's fallback, treats absence alone as not due), or fewer than ``min_nights`` clean nights. Otherwise
+    ok=True with the datetimes, seconds and preformatted *_hhmm strings, so every surface formats
+    identically. Pure; never raises."""
+    try:
+        return _etl_cycle_eta(fc, night_df, end_workflow=end_workflow, min_nights=min_nights,
+                              night_row_cap=night_row_cap)
+    except (TypeError, ValueError, KeyError, AttributeError, OverflowError, IndexError):
+        return {}                       # production-shaped garbage never breaks a morning surface
+
+
+def _etl_cycle_eta(fc: dict | None, night_df: pd.DataFrame | None, *, end_workflow: str,
+                   min_nights: int, night_row_cap: int) -> dict:
+    if not fc or not isinstance(fc.get("nights"), list) or not fc["nights"]:
+        return {}
+    if str(fc.get("latest_state") or "").upper() != "INCOMPLETE" or fc.get("latest_failed"):
+        return {}
+    start = _naive_ts(fc.get("latest_start"))
+    if start is None:
+        return {}
+    snap = _naive_ts(fc.get("snapshot_ts"))
+    t_h, t_m = _parse_hhmm(fc.get("target_hhmm"), (7, 0))
+    b_h, b_m = _parse_hhmm(fc.get("breach_hhmm"), (8, 0))
+    t_off, b_off = t_h * 60 + t_m, b_h * 60 + b_m
+    if b_off <= t_off:                                   # the forecaster's never-invert rule
+        b_off = t_off + 60
+    dl_t = _deadline_after(start, t_off)
+    dl_h = dl_t + timedelta(minutes=b_off - t_off)
+    if snap is not None and snap >= dl_h + timedelta(hours=ETA_STALE_AFTER_HARD_H):
+        return {}                                        # an old night never projects
+    night_ok = False
+    if (isinstance(night_df, pd.DataFrame) and not night_df.empty
+            and {"WORKFLOW_NAME", "CYCLE_DATE"}.issubset(night_df.columns)):
+        _nd = _naive_ts(night_df.iloc[0].get("CYCLE_DATE"))
+        _fd = _naive_ts(fc.get("latest_cycle_date"))
+        night_ok = _nd is not None and _fd is not None and _nd.normalize() == _fd.normalize()
+    end_wf = str(end_workflow or "").strip()
+    if (night_ok and end_wf and night_df is not None and len(night_df) < int(night_row_cap)
+            and end_wf not in set(night_df["WORKFLOW_NAME"].astype(str))):
+        # PR C review C2: the frame keeps a not-yet-started workflow only when it ran >= 10 of 14 nights AND
+        # last week, so one skipped night drops a weekday-only terminal out of it. V156 calls the terminal
+        # due whenever it ran on this night last week; the frame carries that flag on every row.
+        _lw = (safe_float(night_df.iloc[0].get("TERM_RAN_LAST_WEEK"), default=0.0)
+               if "TERM_RAN_LAST_WEEK" in night_df.columns else 0.0)
+        if not (_lw > 0):
+            return {"ok": False, "reason": "terminal_not_due", "start": start, "end_workflow": end_wf}
+    durs: list[float] = []
+    for night in fc["nights"][1:]:                      # newest first; [0] is tonight's in-flight night
+        if not isinstance(night, dict):
+            continue
+        if str(night.get("RUN_STATE") or "").upper() != "COMPLETE" or night.get("EXPECTED_SPIKE"):
+            continue
+        s, f = _naive_ts(night.get("CYCLE_START")), _naive_ts(night.get("CYCLE_FINISH"))
+        if s is None or f is None or f < s:
+            continue
+        durs.append((f - s).total_seconds())
+    need = max(1, int(min_nights))
+    if len(durs) < need:
+        return {"ok": False, "reason": "short_history", "nights_used": len(durs), "min_nights": need,
+                "start": start}
+    lo_q, hi_q = ETA_BAND_QUANTILES
+    q = pd.Series(durs, dtype="float64").quantile([lo_q, 0.5, hi_q])
+    label = str(fc.get("upcoming_spike_label") or "").strip()
+    _x = safe_float(fc.get("spike_extra_sec"), default=float("nan"))
+    extra = max(0.0, _x) if (label and _x == _x) else 0.0
+    lo, typ, hi = float(q.iloc[0]) + extra, float(q.iloc[1]) + extra, float(q.iloc[2]) + extra
+    raw = start + timedelta(seconds=typ)
+    band_lo, band_hi = start + timedelta(seconds=lo), start + timedelta(seconds=hi)
+    projected = max(raw, snap) if snap is not None else raw
+    pace_wf: str | None = None
+    pace_late: float | None = None
+    pace_adj: float | None = None
+    pace_share = 0.0
+    pace_end: pd.Timestamp | None = None
+    pace_proj: pd.Timestamp | None = None
+    # pace is KNOWN only from tonight's frame with the pace columns (not a stale night, not the shared read's
+    # pre-#36 fallback); a known-but-NULL pace means no upstream workflow has finished cleanly yet
+    pace_available = bool(night_ok and night_df is not None and "PACE_LATE_SEC" in night_df.columns)
+    if pace_available and night_df is not None:
+        r0 = night_df.iloc[0]
+        late = safe_float(r0.get("PACE_LATE_SEC"), default=float("nan"))
+        if late == late:
+            pace_late = round(late, 1)
+            _pw = r0.get("PACE_WORKFLOW_NAME")
+            pace_wf = (str(_pw).strip() or None) if _pw is not None and not pd.isna(_pw) else None
+            pace_end = _naive_ts(r0.get("PACE_END_AT"))
+            # PR C review C1: on a labelled night ``typ`` already carries the typical extra, while the marker's
+            # lateness is measured against its usual (mostly ordinary-night) end, so the share of the extra
+            # expected upstream of the marker would count twice. Allow that share before moving the projection.
+            if extra > 0:
+                pace_share = _pace_spike_share(night_df, pace_wf, pace_end, start, late, extra,
+                                               float(q.iloc[1]))
+            pace_adj = round(late - pace_share, 1)
+            _pp = start + timedelta(seconds=typ + late - pace_share)
+            pace_proj = max(_pp, snap) if snap is not None else _pp
+    worst = max(projected, pace_proj) if pace_proj is not None else projected
+    if snap is None or snap <= raw:
+        phase = "on_schedule"
+    elif snap <= band_hi:
+        phase = "due"
+    else:
+        phase = "running_long"
+    if worst > dl_h:
+        risk = "breach"
+    elif worst > dl_t:
+        risk = "miss"
+    elif phase == "running_long":
+        risk = "running_long"
+    else:
+        risk = "ok"
+    return {
+        "ok": True, "start": start, "snapshot": snap, "nights_used": len(durs),
+        "typical_sec": round(typ, 1), "band_lo_sec": round(lo, 1), "band_hi_sec": round(hi, 1),
+        "spike_label": label, "spike_extra_sec": (round(extra, 1) if extra > 0 else None),
+        "projected": projected, "band_lo": band_lo, "band_hi": band_hi,
+        "deadline": dl_t, "hard_deadline": dl_h,
+        "target_hhmm": f"{t_h:02d}:{t_m:02d}", "breach_hhmm": f"{b_off // 60:02d}:{b_off % 60:02d}",
+        "vs_target_sec": round((dl_t - projected).total_seconds(), 1),     # + = before the target
+        "vs_breach_sec": round((dl_h - projected).total_seconds(), 1),
+        "pace_available": pace_available,
+        "pace_workflow": pace_wf, "pace_late_sec": pace_late, "pace_end": pace_end,   # + = behind
+        # the lateness that moves the pace projection: pace_late_sec minus the typical extra this marker is
+        # expected to carry on a labelled night (pace_spike_share_sec; None on an ordinary night)
+        "pace_late_adj_sec": pace_adj,
+        "pace_spike_share_sec": (round(pace_share, 1) if pace_share > 0 else None),
+        "pace_projected": pace_proj, "worst_projected": worst, "risk": risk,
+        "risk_from_pace": bool(pace_proj is not None and pace_proj > projected),
+        "phase": phase,
+        "start_hhmm": _eta_hhmm(start), "projected_hhmm": _eta_hhmm(projected),
+        "band_lo_hhmm": _eta_hhmm(band_lo), "band_hi_hhmm": _eta_hhmm(band_hi),
+        "pace_hhmm": _eta_hhmm(pace_proj), "worst_hhmm": _eta_hhmm(worst),
+    }
+
+
+TIMELINE_COLUMNS = ["WORKFLOW_NAME", "NIGHT_STATUS", "TIMELINE_NOTE", "FIRST_START_AT", "LAST_END_AT",
+                    "START_OFFSET_SEC", "USUAL_START_OFFSET_SEC", "END_OFFSET_SEC", "USUAL_END_OFFSET_SEC",
+                    "LATE_VS_USUAL_SEC", "RUNNING_FOR_SEC"]
+
+
+def _naive_series(values: object, index: pd.Index) -> pd.Series:
+    """Coerce a column to tz-naive datetimes (NaT for garbage). Never raises."""
+    try:
+        out = pd.to_datetime(pd.Series(values, index=index), errors="coerce")
+        if getattr(out.dt, "tz", None) is not None:
+            out = out.dt.tz_localize(None)
+        return out
+    except (TypeError, ValueError, AttributeError, OverflowError):
+        return pd.Series(pd.NaT, index=index, dtype="datetime64[ns]")
+
+
+def cycle_timeline_frame(night_df: pd.DataFrame | None, *, start_workflow: str = "",
+                         end_workflow: str = "") -> pd.DataFrame:
+    """Every workflow tonight against its usual start and end (Operations ▸ Tonight ▸ Cycle timeline).
+
+    From the whole-night roll-up (cycle_night_health_scan): offsets are seconds from tonight's cycle
+    start. USUAL_START_OFFSET_SEC = TYPICAL_OFFSET_SEC; USUAL_END_OFFSET_SEC = TYPICAL_END_OFFSET_SEC,
+    blanked (NaN, so it renders '—') until the workflow has SLA_FORECAST_MIN_RUNS clean prior finishes;
+    LATE_VS_USUAL_SEC = tonight's end offset − the usual end (+ = late); RUNNING_FOR_SEC = the snapshot
+    − FIRST_START_AT for RUNNING rows only. TIMELINE_NOTE (later wins): 'Finished last so far' (the OK
+    row with an end offset, i.e. a clean finish, and the latest end) < 'Pace marker' < 'Starts the
+    cycle' < 'Finishes the cycle'. Sorted by tonight's start offset, else the usual one (NaN last), then name. Duration columns carry _SEC so the
+    table humanizes them and the CSV equals the displayed frame. Empty TIMELINE_COLUMNS frame on no
+    data or missing columns. Pure; never raises."""
+    need = {"WORKFLOW_NAME", "NIGHT_STATUS", "START_OFFSET_SEC", "END_OFFSET_SEC", "TYPICAL_END_OFFSET_SEC"}
+    if not isinstance(night_df, pd.DataFrame) or night_df.empty or not need.issubset(night_df.columns):
+        return pd.DataFrame(columns=TIMELINE_COLUMNS)
+    df = night_df.reset_index(drop=True)
+    idx = df.index
+
+    def _num(col: str) -> pd.Series:
+        if col not in df.columns:
+            return pd.Series(float("nan"), index=idx, dtype="float64")
+        return pd.to_numeric(df[col], errors="coerce").astype("float64")
+
+    out = pd.DataFrame({
+        "WORKFLOW_NAME": df["WORKFLOW_NAME"].astype(str),
+        "NIGHT_STATUS": df["NIGHT_STATUS"].astype(str).str.upper(),
+        "FIRST_START_AT": df["FIRST_START_AT"] if "FIRST_START_AT" in df.columns else pd.NaT,
+        "LAST_END_AT": df["LAST_END_AT"] if "LAST_END_AT" in df.columns else pd.NaT,
+        "START_OFFSET_SEC": _num("START_OFFSET_SEC"),
+        "USUAL_START_OFFSET_SEC": _num("TYPICAL_OFFSET_SEC"),
+        "END_OFFSET_SEC": _num("END_OFFSET_SEC"),
+        "USUAL_END_OFFSET_SEC": _num("TYPICAL_END_OFFSET_SEC").where(
+            _num("END_NIGHTS_COUNT") >= SLA_FORECAST_MIN_RUNS),
+    }, index=idx)
+    out["LATE_VS_USUAL_SEC"] = out["END_OFFSET_SEC"] - out["USUAL_END_OFFSET_SEC"]
+    snap = _naive_ts(df.iloc[0].get("SNAPSHOT_TS")) if "SNAPSHOT_TS" in df.columns else None
+    first = _naive_series(out["FIRST_START_AT"], idx)
+    running = out["NIGHT_STATUS"].eq("RUNNING")
+    if snap is not None:
+        out["RUNNING_FOR_SEC"] = (snap - first).dt.total_seconds().where(running).astype("float64")
+    else:
+        out["RUNNING_FOR_SEC"] = float("nan")
+    notes = pd.Series("", index=idx, dtype="object")
+    # a clean FINISH only: an OK row with no end offset has not dispatched all its usual tasks yet (PR C C3)
+    ok_rows = out["NIGHT_STATUS"].eq("OK") & out["END_OFFSET_SEC"].notna()
+    last_end = _naive_series(out["LAST_END_AT"], idx)
+    if ok_rows.any() and last_end[ok_rows].notna().any():
+        notes[last_end[ok_rows].idxmax()] = "Finished last so far"
+    if "PACE_WORKFLOW_NAME" in df.columns:
+        _pace = df.iloc[0].get("PACE_WORKFLOW_NAME")
+        _pace_s = "" if _pace is None or pd.isna(_pace) else str(_pace).strip()
+        if _pace_s:
+            notes[out["WORKFLOW_NAME"].eq(_pace_s)] = "Pace marker"
+    if str(start_workflow or "").strip():
+        notes[out["WORKFLOW_NAME"].eq(str(start_workflow).strip())] = "Starts the cycle"
+    if str(end_workflow or "").strip():
+        notes[out["WORKFLOW_NAME"].eq(str(end_workflow).strip())] = "Finishes the cycle"
+    out["TIMELINE_NOTE"] = notes
+    key = out["START_OFFSET_SEC"].fillna(out["USUAL_START_OFFSET_SEC"])
+    out = (out.assign(_k=key).sort_values(["_k", "WORKFLOW_NAME"], na_position="last", kind="mergesort")
+           .drop(columns="_k"))
+    return out.reset_index(drop=True)[TIMELINE_COLUMNS]
 
 
 def task_cadence_attainment(fresh: pd.DataFrame | None, *, row_cap: int = 200) -> dict:

@@ -35,6 +35,9 @@ class QueryResult:
     # a fresh "fetched …", so an old result never carries a fresh-looking fetch time.
     cache_hit: bool = False
     elapsed_ms: float = 0.0
+    # Next-Fifty #46(d): the Snowflake query id of the statement that produced ``df`` — run() sets it on a
+    # cache MISS only (a hit replays an earlier statement); '' on a hit, a failure, or a batch result.
+    query_id: str = ""
 
     @property
     def empty(self) -> bool:

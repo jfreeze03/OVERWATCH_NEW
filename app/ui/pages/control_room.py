@@ -17,7 +17,7 @@ from app.config import THRESHOLDS
 from app.core.errors import safe_page
 from app.core.query import run, run_batch, run_batch_mixed
 from app.core.state import filters, navigation_context, request_navigation
-from app.data import cost_sql, mart27_sql, mart_sql, ops_sql, security_sql
+from app.data import cost_sql, mart27_sql, mart_sql, ops_sql, security_sql, workbench_sql
 from app.logic.actions import ANOMALY_HIGH_EXCESS_USD, ANOMALY_HIGH_Z, triage_queue
 from app.logic.anomaly import (
     ANOMALY_MIN_ACTIVE_DAYS,
@@ -29,6 +29,20 @@ from app.logic.anomaly import (
     suppress_expected_spikes,
 )
 from app.logic.date_windows import is_prior_month_window
+from app.logic.fix_queue import (
+    TRACK_COOLDOWN_DAYS,
+    TRACK_OPEN_STATUS,
+    TRACK_UNKNOWN_STATUS,
+    TRIAGE_TRACK_SOURCE,
+    TRIAGE_TRACK_TYPES,
+    track_entities_sql,
+    tracked_elsewhere,
+    triage_track_item,
+    triage_track_label,
+    triage_track_options,
+    triage_track_row,
+    with_triage_track_status,
+)
 from app.logic.formulas import (
     account_now,
     credits_to_usd,
@@ -459,6 +473,70 @@ def _incident_reset_panel(company: str, open_now: int, is_op: bool) -> None:
             if ok:
                 log_ui_event("incident_close", page=_PAGE)
                 st.rerun()
+
+
+def _triage_track_panel(queue: pd.DataFrame, company: str, *, can_write: bool, tracked_ok: bool) -> None:
+    """Next-Fifty #15: track a triage task-failure or warehouse-spend row into Action Center through the ONE
+    shared Track write (fix_queue.track_entities_sql, the Optimize statement keyed on the entity). Alerts are
+    never offered: they are owned through Acknowledge and the incident flow. A row click on the table still
+    only navigates; the write fires from a one-shot button behind the C48 latch, with its SQL shown first.
+    The pick is bound by IDENTITY ('TYPE|KEY') and remembered outside the widget (cr_track_last), so a
+    re-sort after a Track (Streamlit 1.52.2 re-creates the selectbox when its options reorder) keeps it."""
+    from app.core.identity import identity_sql
+    from app.core.query import execute_statement
+    from app.ui.components import log_ui_event, notify
+
+    _opts = triage_track_options(queue)
+    if not _opts:
+        return
+    with st.expander("Track as work item"):
+        _prev = st.session_state.get("cr_track_last")
+        _idx = _opts.index(_prev) if _prev in _opts else 0
+        _pick = st.selectbox("Task or warehouse", _opts, index=_idx, key="cr_track_pick",
+                             format_func=triage_track_label)
+        st.session_state["cr_track_last"] = _pick
+        _row = triage_track_row(queue, str(_pick))
+        if _row is None:
+            return
+        _status = str(_row.get("TRACKED") or TRACK_UNKNOWN_STATUS)
+        st.caption("Action Center: status unknown (the read failed)." if _status == TRACK_UNKNOWN_STATUS
+                   else f"Action Center: {_status}.")
+        if _status == TRACK_OPEN_STATUS:
+            _aid = str(_row.get("TRACKED_ACTION_ID") or "").strip()
+            _co = str(_row.get("TRACKED_COMPANY") or "").strip()
+            if _aid and not tracked_elsewhere(_co, company):
+                if st.button("Open in Action Center →", key=f"cr_open_ac:{_pick}", type="tertiary"):
+                    request_navigation("Control Room", "Action Center", context={"action_id": _aid})
+            elif _aid:
+                st.caption(f"Tracked under {_co} — set Company to {_co} or All to open it in Action Center.")
+            st.caption("Already tracked: an open Action Center item exists for this task or warehouse.")
+            return
+        if _status in ("Dismissed", "Done"):
+            st.caption(f"{_status} in Action Center within the last {TRACK_COOLDOWN_DAYS} days — Track opens a "
+                       "new item on purpose.")
+        if not can_write:
+            st.caption("Read-only — an operator can track this into Action Center.")
+            return
+        _item = triage_track_item(_row.to_dict(), company)
+        if _item is None:
+            return
+        _sql = track_entities_sql([_item], entity_type=str(_item["ENTITY_TYPE"]), source=TRIAGE_TRACK_SOURCE,
+                                  actor_sql=identity_sql(), bulk=False)
+        st.code(_sql, language="sql")
+        if not tracked_ok:
+            st.caption("Action Center status could not be read — Track stays available and is idempotent.")
+        if (can_write and st.button("Track", key=f"cr_track_btn:{_pick}")
+                and write_gate_open(f"cr_track:{_pick}")):
+            ok, msg = execute_statement(_sql.strip(), page=_PAGE)
+            stamp_write(f"cr_track:{_pick}", ok)  # C48
+            notify(ok, "Tracked in Action Center (idempotent: an item already open for this task or "
+                       "warehouse is left as is)." if ok else msg)
+            if ok:
+                log_ui_event("triage_track", page=_PAGE, section="Incidents & triage")
+                st.rerun()
+        st.caption("Items land UNASSIGNED at MEDIUM (a HIGH or CRITICAL row) or LOW severity — never HIGH — and "
+                   "unpriced. Alerts are owned through Acknowledge and the incident flow, so they are not "
+                   "tracked here.")
 
 
 def _auto_investigation(inc_row, company: str, rate: float) -> None:
@@ -1316,6 +1394,18 @@ def render() -> None:
             tasks.df if tasks.usable() else None,
             anomalies,
         )
+        # Next-Fifty #15: each task / warehouse row's Action Center status -- ONE plain read, made only when
+        # the queue holds a trackable row (an alerts-only morning pays nothing). The queue is re-sorted
+        # unowned-first HERE, before the display frame and the positional row-click closure below are built,
+        # so a clicked row maps back to the row it shows.
+        _tracked_df, _tracked_ok = None, True
+        if triage_track_options(queue):
+            _trk = run(workbench_sql.tracked_entity_actions(TRIAGE_TRACK_TYPES), page=_PAGE,
+                       key="cr_triage_tracked", tier="recent",
+                       source="ACTION_QUEUE (tracked tasks and warehouses)")
+            _tracked_ok = bool(_trk.ok)
+            _tracked_df = _trk.df if _trk.usable() else None
+        queue = with_triage_track_status(queue, _tracked_df, read_ok=_tracked_ok)
         if queue.empty:
             # R3-1: wh_daily gates the spend-anomaly scan — if that read failed the
             # queue is empty for the WRONG reason, so a failed FACT_WAREHOUSE_DAILY must
@@ -1331,7 +1421,8 @@ def render() -> None:
         else:
             # N3: the DBA's one morning list is now actionable — select a row to jump
             # to the page that owns it (alerts/ops/cost), instead of a read-only wall.
-            _disp = [c for c in ("SEVERITY", "KIND", "DATABASE", "TITLE", "DETAIL", "SOURCE", "RAISED_AT")
+            _disp = [c for c in ("SEVERITY", "KIND", "TRACKED", "DATABASE", "TITLE", "DETAIL", "SOURCE",
+                                 "RAISED_AT")
                      if c in queue.columns]
             # rec27: an "Age" companion ("3h ago") next to RAISED_AT reads at a glance;
             # the real timestamp stays for sort/tz. assign preserves row order so the
@@ -1341,6 +1432,12 @@ def render() -> None:
                 _now = account_now()
                 _qdisp = queue.assign(AGE=queue["RAISED_AT"].map(lambda t: humanize_age(t, _now)))
                 _disp = [*_disp, "AGE"]
+            # #15: who acknowledged an alert, and when (the directory name, login fallback; NULL -> '—').
+            # attach_display_name keeps row order, so the positional mapping still holds.
+            if "ACK_BY" in _qdisp.columns and bool(_qdisp["KIND"].eq("Alert").any()):
+                _qdisp = with_user_names(_qdisp, _PAGE, user_col="ACK_BY", display_col="Ack by")
+                _qdisp["Ack by"] = _qdisp["Ack by"].where(_qdisp["ACK_BY"].notna(), None)
+                _disp = [*_disp, "Ack by", "ACK_AT"]
             # rec29: navigate only on a CHANGED selection (the sticky-selection guard
             # lives in selectable_nav_table now — was firing request_navigation every
             # rerun on the sticky row).
@@ -1383,12 +1480,14 @@ def render() -> None:
             selectable_nav_table(_qdisp[_disp], key="cr_triage_sel", on_select=_open_triage,
                                  height=260, size_note=False,  # the caption below states the count
                                  hint="")  # caption below carries the affordance — no double (v4.575 default)
-            st.caption(f"{len(queue)} item(s), ranked by severity then by dollars at risk "
-                       "— select one to open its page. Sources: alerts, task facts, spend "
+            st.caption(f"{len(queue)} item(s), ranked by severity, then unowned first (an alert nobody "
+                       "has acknowledged; a task or warehouse with no open Action Center item), then by "
+                       "dollars at risk — select one to open its page. Sources: alerts, task facts, spend "
                        "anomalies. Task rows are one per task (failures summed across the "
                        "last 3 days incl. today), not one per day."
                        + (" Task failures follow the database filter; alerts and "
                           "spend anomalies don't have database grain." if f["database"] else ""))
+            _triage_track_panel(queue, company, can_write=_is_op, tracked_ok=_tracked_ok)
         # C2: the app scores FACT_WAREHOUSE_DAILY itself, so the server twin's
         # COST_ANOMALY_SWEEP events are dropped from THIS feed (they stay on Alerts) —
         # otherwise every spend break arrived twice, once from each scorer, at two

@@ -6,6 +6,8 @@ lifecycle INSERT/UPDATE statements are built in the pages that own them.
 
 from __future__ import annotations
 
+from datetime import date
+
 from app.config import (
     CORE_SCHEMA,
     CURRENT_MONTH_WINDOW,
@@ -34,6 +36,8 @@ from app.data.common import (
     resolve_effective_window,
     scope_window_where,
 )
+from app.logic.ledger_measure import BASES as _LEDGER_BASES
+from app.logic.ledger_measure import BEFORE_DAYS, MAX_AFTER_DAYS, OBJECT_COST_ARMS
 from app.logic.sizing import SIZE_ORDER
 from app.logic.system_wait import SLEEP_EXCLUDED_TYPE_PREFIXES, SLEEP_SQL_PATTERN
 
@@ -2151,6 +2155,109 @@ FROM {core_object("SAVINGS_LEDGER")}
 WHERE NOTES LIKE {sql_literal('%event ' + prefix + '%')}
 ORDER BY CREATED_AT DESC
 LIMIT 5
+"""
+
+
+def ledger_before_after(basis: str, target_object: str, booked_day: date, *,
+                        before_days: int = BEFORE_DAYS, max_after_days: int = MAX_AFTER_DAYS) -> str:
+    """One-row before/after measurement for a manual ledger verify (Next-Fifty #46(d)); the pure half is
+    app.logic.ledger_measure.ledger_measurement. Always exactly one row.
+
+    WAREHOUSE — FACT_WAREHOUSE_DAILY credits of the warehouse over [booked - before_days, booked) and
+    (booked, booked + max_after_days], plus the same windows of MART_WAREHOUSE_EFFICIENCY_DAILY queries
+    (the volume ratio). OBJECT — FACT_OBJECT_COST_DAILY maintenance credits (clustering / search
+    optimization / MV refresh) of the object, keyed on the quote-stripped upper FQN, same windows (no
+    volume). TABLE — the last MART_TABLE_STORAGE_DAILY time-travel snapshot before the booking day and the
+    latest after it. The booking day itself is excluded from both windows (partial), and no day at or
+    after today (account time, account_today_sql — the TIMEZONE STANDARD) is read. LOADED_THROUGH is the
+    mart's last loaded day in range; the credit and volume after-windows both stop there so they cover the
+    same days. ValueError for an unknown basis or a blank target."""
+    kind = str(basis or "").strip().upper()
+    target = str(target_object or "").strip().upper().replace('"', "")[:600]
+    if kind not in _LEDGER_BASES:
+        raise ValueError(f"No measured basis for {kind or 'blank'}")
+    if not target or booked_day is None:
+        raise ValueError("ledger_before_after needs a target object and a booking day")
+    bday = sql_literal(booked_day.isoformat(), 10)
+    b = max(1, min(int(before_days), 60))
+    a = max(1, min(int(max_after_days), 90))
+    key = sql_literal(target, 600)
+    today = account_today_sql()
+    w = f"w AS (\n    SELECT TO_DATE({bday}) AS BOOKED_DAY, {today} AS TODAY_DAY\n)"
+    if kind == "TABLE":
+        tbl = mart_object("MART_TABLE_STORAGE_DAILY")
+        return f"""
+WITH {w}, loaded AS (
+    SELECT MAX(x.DAY) AS LOADED_THROUGH
+    FROM {tbl} x
+    CROSS JOIN w
+    WHERE x.DAY >= DATEADD('day', -{b}, w.BOOKED_DAY) AND x.DAY <= w.TODAY_DAY
+), snap AS (
+    SELECT s.DAY, SUM(s.TIME_TRAVEL_BYTES) AS TT_BYTES, MAX(s.RETENTION_DAYS) AS RETENTION_DAYS
+    FROM {tbl} s
+    CROSS JOIN w
+    WHERE UPPER(s.DATABASE_NAME || '.' || s.SCHEMA_NAME || '.' || s.TABLE_NAME) = {key}
+      AND s.DAY >= DATEADD('day', -{b}, w.BOOKED_DAY)
+      AND s.DAY <= w.TODAY_DAY
+    GROUP BY s.DAY
+)
+SELECT 'TABLE' AS BASIS, MAX(w.BOOKED_DAY) AS BOOKED_DAY,
+       MAX_BY(snap.TT_BYTES, IFF(snap.DAY < w.BOOKED_DAY, snap.DAY, NULL)) AS BEFORE_TT_BYTES,
+       MAX_BY(snap.RETENTION_DAYS, IFF(snap.DAY < w.BOOKED_DAY, snap.DAY, NULL)) AS BEFORE_RETENTION_DAYS,
+       MAX(IFF(snap.DAY < w.BOOKED_DAY, snap.DAY, NULL)) AS BEFORE_SNAPSHOT_DAY,
+       MAX_BY(snap.TT_BYTES, IFF(snap.DAY > w.BOOKED_DAY, snap.DAY, NULL)) AS AFTER_TT_BYTES,
+       MAX_BY(snap.RETENTION_DAYS, IFF(snap.DAY > w.BOOKED_DAY, snap.DAY, NULL)) AS AFTER_RETENTION_DAYS,
+       MAX(IFF(snap.DAY > w.BOOKED_DAY, snap.DAY, NULL)) AS AFTER_SNAPSHOT_DAY,
+       MAX(l.LOADED_THROUGH) AS LOADED_THROUGH
+FROM w
+CROSS JOIN loaded l
+LEFT JOIN snap ON 1 = 1
+"""
+    if kind == "WAREHOUSE":
+        src = mart_object("FACT_WAREHOUSE_DAILY")
+        match, credit_col = f"UPPER(f.WAREHOUSE_NAME) = {key}", "CREDITS_TOTAL"
+        eff = mart_object("MART_WAREHOUSE_EFFICIENCY_DAILY")
+        vol = f"""
+), vol AS (
+    SELECT SUM(IFF(m.DAY < w.BOOKED_DAY, m.QUERIES, 0)) AS BEFORE_QUERIES,
+           SUM(IFF(m.DAY > w.BOOKED_DAY, m.QUERIES, 0)) AS AFTER_QUERIES
+    FROM {eff} m
+    CROSS JOIN w
+    CROSS JOIN loaded l
+    WHERE UPPER(m.WAREHOUSE_NAME) = {key}
+      AND m.DAY >= DATEADD('day', -{b}, w.BOOKED_DAY)
+      AND m.DAY <= DATEADD('day', {a}, w.BOOKED_DAY)
+      AND m.DAY < w.TODAY_DAY
+      AND m.DAY <= l.LOADED_THROUGH"""
+        vol_cols, vol_join = "vol.BEFORE_QUERIES, vol.AFTER_QUERIES", "\nCROSS JOIN vol"
+    else:
+        src = mart_object("FACT_OBJECT_COST_DAILY")
+        arms = ", ".join(sql_literal(x) for x in OBJECT_COST_ARMS)
+        match = f"UPPER(REPLACE(f.OBJECT_FQN, '\"', '')) = {key}\n      AND f.COST_ARM IN ({arms})"
+        credit_col = "CREDITS"
+        vol = ""
+        vol_cols, vol_join = "NULL AS BEFORE_QUERIES, NULL AS AFTER_QUERIES", ""
+    return f"""
+WITH {w}, loaded AS (
+    SELECT MAX(x.DAY) AS LOADED_THROUGH
+    FROM {src} x
+    CROSS JOIN w
+    WHERE x.DAY >= DATEADD('day', -{b}, w.BOOKED_DAY) AND x.DAY < w.TODAY_DAY
+), cr AS (
+    SELECT SUM(IFF(f.DAY < w.BOOKED_DAY, f.{credit_col}, 0)) AS BEFORE_CREDITS,
+           SUM(IFF(f.DAY > w.BOOKED_DAY, f.{credit_col}, 0)) AS AFTER_CREDITS
+    FROM {src} f
+    CROSS JOIN w
+    WHERE {match}
+      AND f.DAY >= DATEADD('day', -{b}, w.BOOKED_DAY)
+      AND f.DAY <= DATEADD('day', {a}, w.BOOKED_DAY)
+      AND f.DAY < w.TODAY_DAY{vol}
+)
+SELECT {sql_literal(kind)} AS BASIS, w.BOOKED_DAY, {b} AS BEFORE_DAYS, {a} AS MAX_AFTER_DAYS,
+       cr.BEFORE_CREDITS, cr.AFTER_CREDITS, {vol_cols}, l.LOADED_THROUGH
+FROM w
+CROSS JOIN cr{vol_join}
+CROSS JOIN loaded l
 """
 
 

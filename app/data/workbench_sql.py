@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from datetime import date, datetime, timedelta
+
 from app.config import core_object
 from app.core.sqlsafe import clean_filter_text, contains_filter, sql_literal
-from app.data.common import and_where, bounded_days, scope_window_where
+from app.data.common import account_today_sql, and_where, bounded_days, scope_window_where
+from app.logic.formulas import account_today
 
 
 def _entity_type(value: str) -> str:
@@ -117,7 +121,7 @@ def related_actions(entity_type: str, entity_key: str, limit: int = 200) -> str:
     cap = max(1, min(int(limit), 500))
     return f"""
 SELECT ACTION_ID, CREATED_AT, SEVERITY, TITLE, OWNER, STATUS, DUE_DATE,
-       DEFER_UNTIL, ESTIMATED_USD, CONFIDENCE, UPDATED_AT
+       DEFER_UNTIL, ESTIMATED_USD, CONFIDENCE, UPDATED_AT, COMPLETED_AT, SOURCE
 FROM {core_object("ACTION_QUEUE")}
 WHERE UPPER(SOURCE_ENTITY_TYPE) = {sql_literal(_entity_type(entity_type))}
   AND UPPER(SOURCE_ENTITY_KEY) = {sql_literal(str(entity_key or '').strip().upper(), 500)}
@@ -493,6 +497,166 @@ WHERE UPPER(q.SOURCE_ENTITY_TYPE) = {sql_literal(kind, 40)}
   AND (UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS')
        OR COALESCE(q.COMPLETED_AT, q.UPDATED_AT) >= DATEADD('day', -{lookback}, CURRENT_TIMESTAMP()))
 GROUP BY UPPER(q.SOURCE_ENTITY_KEY)
+"""
+
+
+def tracked_entity_actions(entity_types: tuple[str, ...] = ("TASK", "WAREHOUSE"), lookback_days: int = 90) -> str:
+    """Next-Fifty #15: ``tracked_actions`` for several entity types in ONE statement (Control Room triage
+    tracks task and warehouse rows). The same aggregates per (upper-cased type, upper-cased key), plus
+    ENTITY_TYPE_U. Account-wide by design, like tracked_actions: tracking is per entity, and
+    OPEN_ACTION_COMPANY feeds the doorway into the company-filtered Action Center."""
+    kinds = sorted({_entity_type(t) for t in (entity_types or ())} - {""})
+    if not kinds:
+        raise ValueError("tracked_entity_actions needs at least one entity type")
+    lookback = max(1, min(int(lookback_days or 90), 365))
+    in_list = ", ".join(sql_literal(k, 40) for k in kinds)
+    return f"""
+SELECT UPPER(q.SOURCE_ENTITY_TYPE) AS ENTITY_TYPE_U,
+       UPPER(q.SOURCE_ENTITY_KEY) AS ENTITY_KEY_U,
+       MAX_BY(q.ACTION_ID, q.CREATED_AT) AS LATEST_ACTION_ID,
+       MAX_BY(q.ACTION_ID, IFF(UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS'), q.CREATED_AT, NULL)) AS OPEN_ACTION_ID,
+       MAX_BY(q.COMPANY, IFF(UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS'), q.CREATED_AT, NULL)) AS OPEN_ACTION_COMPANY,
+       MAX_BY(q.STATUS, q.CREATED_AT) AS ACTION_STATUS,
+       MAX_BY(q.OWNER, q.CREATED_AT) AS ACTION_OWNER,
+       COUNT_IF(UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS')) AS OPEN_N,
+       COUNT_IF(UPPER(q.STATUS) = 'DROPPED') AS DROPPED_N,
+       COUNT_IF(UPPER(q.STATUS) = 'DONE') AS DONE_N,
+       MAX(COALESCE(q.COMPLETED_AT, q.UPDATED_AT)) AS LAST_DECIDED
+FROM {core_object('ACTION_QUEUE')} q
+WHERE UPPER(q.SOURCE_ENTITY_TYPE) IN ({in_list})
+  AND q.SOURCE_ENTITY_KEY IS NOT NULL
+  AND (UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS')
+       OR COALESCE(q.COMPLETED_AT, q.UPDATED_AT) >= DATEADD('day', -{lookback}, CURRENT_TIMESTAMP()))
+GROUP BY UPPER(q.SOURCE_ENTITY_TYPE), UPPER(q.SOURCE_ENTITY_KEY)
+"""
+
+
+# Next-Fifty #46: the daily mart signal a completed work item (or a watched entity) is measured on.
+SIGNAL_ENTITY_TYPES = ("WAREHOUSE", "TASK", "QUERY_FINGERPRINT")
+SIGNAL_MAX_ENTITIES = 40          # x (28 baseline + 90 lookback + 1) days = 4,760 rows <= DEFAULT_MAX_ROWS
+_SIGNAL_START_FLOOR_DAYS = 400
+
+
+def _signal_entities(entities: Iterable[tuple[str, str, date]] | None,
+                     floor: date) -> dict[tuple[str, str], date]:
+    """(TYPE, KEY_UPPER) -> earliest start, supported types and non-blank keys only, capped at
+    SIGNAL_MAX_ENTITIES in input order (a repeat of an already-kept entity only moves its start earlier)."""
+    seen: dict[tuple[str, str], date] = {}
+    for ent in entities or ():
+        try:
+            kind, key, start = ent
+        except (TypeError, ValueError):
+            continue
+        k = str(kind or "").strip().upper()
+        kk = str(key or "").strip().upper()[:500]
+        day = start.date() if isinstance(start, datetime) else start
+        if k not in SIGNAL_ENTITY_TYPES or not kk or not isinstance(day, date) or day != day:   # NaT
+            continue
+        s = max(day, floor)
+        if (k, kk) in seen:
+            seen[(k, kk)] = min(seen[(k, kk)], s)
+        elif len(seen) < SIGNAL_MAX_ENTITIES:
+            seen[(k, kk)] = s
+    return seen
+
+
+def entity_daily_signals(entities: Iterable[tuple[str, str, date]], *, include_today: bool = False) -> str:
+    """Per (entity, day): CREDITS, P95_SEC, RUNS, FAILS and the source mart's LOADED_THROUGH, for an
+    explicit list of (TYPE, KEY, START_DAY) -- Held? on completed work (Action Center, Entity 360,
+    Operations > Optimize) and the task / query-family watch arms. '' when nothing is measurable (the
+    caller skips the read).
+
+    - WAREHOUSE: FACT_WAREHOUSE_DAILY credits.
+    - TASK: MART_TASK_NODE_DAILY on the DB.SCHEMA.TASK key (P95 exec seconds, runs, failed runs).
+    - QUERY_FINGERPRINT: MART_PATTERN_COST_DAILY attributed credits beside MART_QUERY_FAMILY_DAILY
+      P95 / runs / fails, joined through the UNION of their (key, day) sets (portable; no full join).
+
+    LOADED_THROUGH is the source mart's own latest loaded day (the lower of the two family marts), so
+    a stalled loader never reads as a fix. Mart-only; never names the action queue (a queue write
+    would re-cold it). The day bound is the account's Central 'today' (complete days only unless
+    ``include_today``, the watch path)."""
+    today = account_today()
+    seen = _signal_entities(entities, today - timedelta(days=_SIGNAL_START_FLOOR_DAYS))
+    if not seen:
+        return ""
+    kinds = {k for k, _ in seen}
+    lo = sql_literal(min(seen.values()).isoformat(), 10)
+    upper = "<=" if include_today else "<"
+    today_sql = account_today_sql()
+    rows = ",\n        ".join(f"({sql_literal(k, 40)}, {sql_literal(kk, 500)}, {sql_literal(s.isoformat(), 10)})"
+                               for (k, kk), s in seen.items())
+    arms: list[str] = []
+    loaded: list[str] = []
+    ctes = ""
+    if "WAREHOUSE" in kinds:
+        wh = core_object("FACT_WAREHOUSE_DAILY")
+        arms.append(f"""SELECT w.ENTITY_TYPE AS ENTITY_TYPE, w.ENTITY_KEY_U AS ENTITY_KEY_U, f.DAY AS DAY,
+           SUM(f.CREDITS_TOTAL)::FLOAT AS CREDITS, NULL::FLOAT AS P95_SEC,
+           NULL::FLOAT AS RUNS, NULL::FLOAT AS FAILS
+    FROM {wh} f
+    JOIN want w ON w.ENTITY_TYPE = 'WAREHOUSE' AND UPPER(f.WAREHOUSE_NAME) = w.ENTITY_KEY_U
+    WHERE f.DAY >= {lo} AND f.DAY >= w.START_DAY AND f.DAY {upper} {today_sql}
+    GROUP BY w.ENTITY_TYPE, w.ENTITY_KEY_U, f.DAY""")
+        loaded.append(f"""SELECT 'WAREHOUSE' AS ENTITY_TYPE, MAX(x.DAY) AS LOADED_THROUGH
+    FROM {wh} x WHERE x.DAY >= {lo} AND x.DAY {upper} {today_sql}""")
+    if "TASK" in kinds:
+        tk = core_object("MART_TASK_NODE_DAILY")
+        arms.append(f"""SELECT w.ENTITY_TYPE AS ENTITY_TYPE, w.ENTITY_KEY_U AS ENTITY_KEY_U, t.DAY AS DAY,
+           NULL::FLOAT AS CREDITS, MAX(t.P95_EXEC_SEC)::FLOAT AS P95_SEC,
+           SUM(t.RUNS)::FLOAT AS RUNS, SUM(t.FAILED)::FLOAT AS FAILS
+    FROM {tk} t
+    JOIN want w ON w.ENTITY_TYPE = 'TASK'
+     AND UPPER(t.DATABASE_NAME || '.' || t.SCHEMA_NAME || '.' || t.TASK_NAME) = w.ENTITY_KEY_U
+    WHERE t.DAY >= {lo} AND t.DAY >= w.START_DAY AND t.DAY {upper} {today_sql}
+    GROUP BY w.ENTITY_TYPE, w.ENTITY_KEY_U, t.DAY""")
+        loaded.append(f"""SELECT 'TASK' AS ENTITY_TYPE, MAX(x.DAY) AS LOADED_THROUGH
+    FROM {tk} x WHERE x.DAY >= {lo} AND x.DAY {upper} {today_sql}""")
+    if "QUERY_FINGERPRINT" in kinds:
+        pc, qf = core_object("MART_PATTERN_COST_DAILY"), core_object("MART_QUERY_FAMILY_DAILY")
+        ctes = f""", fam_cost AS (
+    SELECT w.ENTITY_KEY_U AS ENTITY_KEY_U, p.DAY AS DAY, SUM(p.CREDITS_ATTRIBUTED)::FLOAT AS CREDITS
+    FROM {pc} p
+    JOIN want w ON w.ENTITY_TYPE = 'QUERY_FINGERPRINT' AND UPPER(TO_VARCHAR(p.QUERY_HASH)) = w.ENTITY_KEY_U
+    WHERE p.DAY >= {lo} AND p.DAY >= w.START_DAY AND p.DAY {upper} {today_sql}
+    GROUP BY w.ENTITY_KEY_U, p.DAY
+), fam_run AS (
+    SELECT w.ENTITY_KEY_U AS ENTITY_KEY_U, m.DAY AS DAY, MAX(m.P95_S)::FLOAT AS P95_SEC,
+           SUM(m.RUNS)::FLOAT AS RUNS, SUM(m.FAILS)::FLOAT AS FAILS
+    FROM {qf} m
+    JOIN want w ON w.ENTITY_TYPE = 'QUERY_FINGERPRINT' AND UPPER(TO_VARCHAR(m.QUERY_HASH)) = w.ENTITY_KEY_U
+    WHERE m.DAY >= {lo} AND m.DAY >= w.START_DAY AND m.DAY {upper} {today_sql}
+    GROUP BY w.ENTITY_KEY_U, m.DAY
+), fam_keys AS (
+    SELECT ENTITY_KEY_U, DAY FROM fam_cost
+    UNION
+    SELECT ENTITY_KEY_U, DAY FROM fam_run
+)"""
+        arms.append("""SELECT 'QUERY_FINGERPRINT' AS ENTITY_TYPE, k.ENTITY_KEY_U AS ENTITY_KEY_U, k.DAY AS DAY,
+           c.CREDITS AS CREDITS, r.P95_SEC AS P95_SEC, r.RUNS AS RUNS, r.FAILS AS FAILS
+    FROM fam_keys k
+    LEFT JOIN fam_cost c ON c.ENTITY_KEY_U = k.ENTITY_KEY_U AND c.DAY = k.DAY
+    LEFT JOIN fam_run r ON r.ENTITY_KEY_U = k.ENTITY_KEY_U AND r.DAY = k.DAY""")
+        loaded.append(f"""SELECT 'QUERY_FINGERPRINT' AS ENTITY_TYPE,
+           LEAST(COALESCE(pc.D, fm.D), COALESCE(fm.D, pc.D)) AS LOADED_THROUGH
+    FROM (SELECT MAX(x.DAY) AS D FROM {pc} x WHERE x.DAY >= {lo} AND x.DAY {upper} {today_sql}) pc
+    CROSS JOIN (SELECT MAX(y.DAY) AS D FROM {qf} y WHERE y.DAY >= {lo} AND y.DAY {upper} {today_sql}) fm""")
+    union = "\n    UNION ALL\n    ".join(arms)
+    loaded_sql = "\n    UNION ALL\n    ".join(loaded)
+    return f"""
+WITH want AS (
+    SELECT v.ENTITY_TYPE, v.ENTITY_KEY_U, TO_DATE(v.START_DAY) AS START_DAY
+    FROM (VALUES
+        {rows}
+    ) AS v (ENTITY_TYPE, ENTITY_KEY_U, START_DAY)
+){ctes}, sig AS (
+    {union}
+), loaded AS (
+    {loaded_sql}
+)
+SELECT s.ENTITY_TYPE, s.ENTITY_KEY_U, s.DAY, s.CREDITS, s.P95_SEC, s.RUNS, s.FAILS, l.LOADED_THROUGH
+FROM sig s
+LEFT JOIN loaded l ON l.ENTITY_TYPE = s.ENTITY_TYPE
+ORDER BY s.ENTITY_TYPE, s.ENTITY_KEY_U, s.DAY
 """
 
 

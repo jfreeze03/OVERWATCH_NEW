@@ -24,13 +24,13 @@ def _src(rel: str) -> str:
 
 # every file with operator-write click blocks -> expected latched-block count
 LATCHED_FILES = {
-    "app/ui/pages/cost_parts/optimize.py": 6,   # +1 Next-Fifty #5 twin cleanup (ledger_twin_reject)
+    "app/ui/pages/cost_parts/optimize.py": 7,   # +1 Next-Fifty #5 twin cleanup (ledger_twin_reject); +1 Next-Fifty #30 unread-maintenance ESTIMATED booking
     "app/ui/pages/operations.py": 5,
     "app/ui/pages/alerts.py": 6,
     "app/ui/workbench.py": 5,   # v4.597: -1 the retired Action Center experiment-start expander
     "app/ui/pages/cost_parts/ai_chargeback.py": 3,
     "app/ui/security_center.py": 2,
-    "app/ui/pages/control_room.py": 5,   # +1 v4.375: bulk 'resolve open incidents' reset panel; +2 Next-Fifty #12a: incident Acknowledge + Mark mitigated
+    "app/ui/pages/control_room.py": 6,   # +1 v4.375: bulk 'resolve open incidents' reset panel; +2 Next-Fifty #12a: incident Acknowledge + Mark mitigated; +1 Next-Fifty #15: triage Track (task / warehouse rows)
     "app/ui/decision_studio.py": 0,   # v4.597 Proof is READ-ONLY (SLO + experiment editors retired)
     "app/ui/pages/decision_studio.py": 0,
     "app/ui/pages/cost.py": 1,

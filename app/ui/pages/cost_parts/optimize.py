@@ -33,19 +33,29 @@ from app.logic.ai_prompts import idle_warehouse_prompt
 from app.logic.capacity import capacity_forecasts
 from app.logic.consolidation import WarehouseProfile, consolidation_candidates
 from app.logic.date_windows import window_label, window_phrase
-from app.logic.formulas import format_usd, humanize_duration, md_dollars, safe_float
+from app.logic.formulas import account_today, format_usd, humanize_duration, md_dollars, safe_float
 from app.logic.insights import (
     IDLE_TARGET_SUSPEND_SEC,
     flag_clustering_churn,
     flag_repeat_candidates,
     idle_advisor,
     idle_waste_summary,
+    multi_cluster_evident,
     poor_pruning_summary,
     repeat_min_runs,
     storage_movers,
     suspend_recluster_sql,
     with_auto_suspend_settings,
     with_warehouse_settings,
+)
+from app.logic.ledger_measure import (
+    MEASURED,
+    TOO_EARLY,
+    ledger_basis,
+    ledger_measurement,
+    ledger_overlaps,
+    proof_result_json,
+    verify_prefill,
 )
 from app.logic.monitors import (
     account_monitor,
@@ -61,12 +71,21 @@ from app.logic.savings_rollup import (
 )
 from app.logic.serverless_roi import classify_qas_roi
 from app.logic.sizing import (
+    RECOMMEND_SCALE_OUT,
     SIZE_ORDER,
     normalize_size,
     price_per_run_bounds,
+    scale_out_plan,
     simulate_scenario,
     size_recommendations,
     sizing_summary,
+)
+from app.logic.unread_maintenance import (
+    ACTION_VERDICTS,
+    VERDICT_GONE,
+    book_estimated_sql,
+    confirm_failure_note,
+    unread_maintenance_verdicts,
 )
 from app.logic.workbench import experiment_state_by_key
 from app.ui import charts
@@ -98,6 +117,28 @@ from app.ui.components import (
 )
 
 _PAGE = "Cost Intelligence"
+# == mart_sql.savings_ledger()'s default LIMIT: the ledger PAGE _savings_tab reads (tests pin the two).
+# The measured verify's overlap check (review C22) needs it to know when that page may be cut off.
+_LEDGER_PAGE_ROWS = 500
+
+
+_SIZE_UP_ALTERNATIVE = (" The resize below is the size-up alternative — use it only if single queries are "
+                        "also slow or spilling.")
+
+
+def _scale_out_caption(plan: dict) -> str:
+    """The review-only Scale-out pane's caption (Next-Fifty #38; review C19): it names the Operations ▸
+    Emergency lever that builds the statement shown — Scaling policy for the SCALING_POLICY = 'STANDARD'
+    prefill, Cluster range for the MAX_CLUSTER_COUNT one — and no lever when no statement is shown (the
+    range is unknown or already at the generator's cap)."""
+    note = str(plan.get("note") or "")
+    if plan.get("policy_to_standard"):
+        return (note + " Starting clusters sooner adds credits while queries queue, so no saving is booked; "
+                "run it from Operations ▸ Emergency ▸ Scaling policy (audited)." + _SIZE_UP_ALTERNATIVE)
+    if plan.get("known") and not plan.get("at_cap"):
+        return (note + " A wider cluster range adds credits while queries queue, so no saving is booked; "
+                "run it from Operations ▸ Emergency ▸ Cluster range (audited)." + _SIZE_UP_ALTERNATIVE)
+    return note + " No scale-out statement is generated here." + _SIZE_UP_ALTERNATIVE
 
 
 # Split out of app/ui/pages/cost.py (V028): section bodies only —
@@ -367,6 +408,12 @@ def _spend_ceilings_panel(idle_head, rate: float, company: str = "ALL") -> None:
             empty_state("clean", "Every active warehouse is attached to a resource monitor.")
 
 
+def _clear_unread_confirm_latch() -> None:
+    """on_click of 'Retry the access-history check' (PR C review C8): drop the latched confirm failure BEFORE
+    the rerun, so the retry rerun runs the confirm again. Not a widget key (no StreamlitAPIException risk)."""
+    st.session_state.pop("_unread_confirm_failed", None)
+
+
 def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_operator: bool, *, bounds: tuple | None = None) -> None:
     """Optimization insights: idle/right-sizing advisors, expensive queries and
     patterns, the object-cost ledger, efficiency/storage/clustering scans, and
@@ -583,7 +630,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             _savings_opps.extend(resize_opportunities(sized))
             summary = sizing_summary(sized)
             _sz_cols = ["WAREHOUSE_NAME", "COMPANY", "RECOMMENDATION", "RATIONALE",
-                        "CONFIDENCE", "AUTO_SUSPEND", "ACTIVE_QUERY_DAYS", "ACTIVE_DAYS_PER_30D",
+                        "CONFIDENCE", "CURRENT_SIZE", "MIN_CLUSTER_COUNT", "MAX_CLUSTER_COUNT",
+                        "SCALING_POLICY", "AUTO_SUSPEND", "ACTIVE_QUERY_DAYS", "ACTIVE_DAYS_PER_30D",
                         "MONTHLY_USD_NOW", "IDLE_MONTHLY_USD", "SCENARIO_DOWN_USD", "SCENARIO_UP_USD",
                         "QUEUED_MIN_PER_DAY", "SPILL_GB_PER_DAY", "P95_ELAPSED_SEC", "IDLE_PCT"]
             if "PROVISION_MIN_PER_DAY" in sized.columns:
@@ -605,11 +653,15 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 {"label": "Size-down candidates", "value": f"{summary['down']}"},
             ])
             st.caption(
-                f"Also: {summary['up']} size-up / add-cluster · {summary['suspend']} tune-auto-suspend-first · "
+                f"Also: {summary['scale_out']} add-a-cluster · {summary['size_up']} size-up · "
+                f"{summary['suspend']} tune-auto-suspend-first · "
                 f"{summary['observe'] + summary['review']} held for evidence/cadence review. "
-                "Size-up = sustained per-day overload queueing or remote spill (resume time excluded — a "
-                "suspend-timer signal, not concurrency). Evidence/cadence = advice withheld for episodic "
-                "evidence, unknown timers, or high idle remaining after an already-short timer."
+                "Add a cluster = sustained per-day overload queueing without remote spill (concurrency: "
+                "more clusters, not a bigger size; multi-cluster needs Enterprise edition). Size up = "
+                "remote spill per day (per-query memory; with queueing too, size up first). Resume time "
+                "is excluded — a suspend-timer signal, not concurrency. Evidence/cadence = advice "
+                "withheld for episodic evidence, unknown timers, or high idle remaining after an "
+                "already-short timer."
             )
             _sz_primary = [
                 "WAREHOUSE_NAME", "RECOMMENDATION", "RATIONALE", "CONFIDENCE",
@@ -650,7 +702,20 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 )
             if sel_sz is not None and is_operator:
                 srow = sized.iloc[int(sel_sz)]
-                if not bool(srow.get("ACTIONABLE", False)):
+                if str(srow.get("RECOMMENDATION", "")) == RECOMMEND_SCALE_OUT:
+                    # Next-Fifty #38: a concurrency verdict's fix is the cluster range (or the scaling
+                    # policy), not a resize. Review-only: it adds credits at peaks, so nothing is booked.
+                    _so = scale_out_plan(srow, multi_cluster_evident(
+                        _sizing_whs.df if _sizing_whs.ok and not _sizing_whs.empty else None))
+                    st.markdown("**Scale-out fix (review-only)**")
+                    if _so["policy_to_standard"]:
+                        st.code(remediation.scaling_policy_fix(str(srow["WAREHOUSE_NAME"]), "STANDARD"),
+                                language="sql")
+                    elif _so["known"] and not _so["at_cap"]:
+                        st.code(remediation.cluster_range_fix(str(srow["WAREHOUSE_NAME"]),
+                                                              _so["min"], _so["max"]), language="sql")
+                    st.caption(_scale_out_caption(_so))
+                elif not bool(srow.get("ACTIONABLE", False)):
                     st.warning(
                         "This row is not an evidence-backed resize recommendation. The SQL remains "
                         "available for an intentional operator override, but no saving is booked."
@@ -1266,6 +1331,175 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             empty_state("needs_setup",
                         "Object cost arrives with migration V048 (FACT_OBJECT_COST_DAILY) — an admin "
                         "can apply it on Admin → Migrations & freshness.")
+        # ---- Next-Fifty #30: maintenance on objects nobody reads -----------------------------------
+        # A mart shortlist (object ledger: maintenance credits, no read credits, fixed 90 days) confirmed
+        # against access history (write-wins, share-guarded) BEFORE any SQL or dollar is offered. Both reads
+        # sit behind the toggle; review-only ALTERs; one-click ESTIMATED booking (OVERWATCH's own table).
+        st.divider()
+        st.markdown("**Maintenance on objects nobody reads**")
+        st.caption(toggle_cost_hint("unread_maint_"))
+        if st.toggle("Run unread-maintenance scan", key="cost_unread_maint_toggle",
+                     help="Clustering, search-optimization and MV-refresh credits on objects with no reads in "
+                          "the last 90 days: an object-ledger shortlist, confirmed against access history."):
+            _um = run(cost_sql.maintenance_on_unread(90, company, database=_oc_db), page=_PAGE,
+                      key=f"unread_maint_{company}_{_oc_db}", tier="recent",
+                      source="FACT_OBJECT_COST_DAILY (maintenance arms with no read arm, 90d)", probe=True)
+            if _um.ok and _um.empty:
+                empty_state("clean", "No object paid 1+ credit of clustering, search optimization or MV refresh "
+                                     "without a read in the last 90 days.")
+                result_caption(_um)
+            elif guard(_um, ""):
+                import hashlib as _hl
+
+                from app.core.query import cache_scope as _cache_scope
+                from app.core.result import QueryResult as _QR
+                _conf_sql = insights_sql.object_reads_confirm(tuple(_um.df["OBJECT_FQN"].astype(str)), 90)
+                _conf_src = "ACCESS_HISTORY reads (90d) + TABLES ids + share grants"
+                # PR C review C8: run() never caches a failure, so a failed (e.g. timed-out, 180 s) confirm would
+                # re-run on every rerun of this page. Latch the failure per SQL + cache scope (Refresh re-arms
+                # it) and serve the degraded state until the operator retries.
+                _conf_sig = _hl.sha1((_conf_sql + "|" + _cache_scope(_conf_sql)).encode()).hexdigest()
+                _conf_fail = st.session_state.get("_unread_confirm_failed")
+                if isinstance(_conf_fail, dict) and _conf_fail.get("sig") == _conf_sig:
+                    _conf = _QR(df=pd.DataFrame(), ok=False, error=str(_conf_fail.get("error") or ""),
+                                error_kind=str(_conf_fail.get("kind") or ""), source=_conf_src,
+                                tier="historical")
+                else:
+                    with st.spinner("Confirming against 90 days of access history…"):
+                        _conf = run(_conf_sql, page=_PAGE, key=f"unread_maint_confirm_{company}_{_oc_db}",
+                                    tier="historical", source=_conf_src, probe=True)
+                    if not _conf.ok:
+                        st.session_state["_unread_confirm_failed"] = {
+                            "sig": _conf_sig, "kind": _conf.error_kind, "error": _conf.error}
+                _uv = unread_maintenance_verdicts(_um.df, _conf.df if _conf.ok else None, rate=rate)
+                _um0 = _um.df.iloc[0]
+                _cands = int(safe_float(_um0.get("CANDIDATES_WIN"), default=float(len(_um.df))))
+                _um_trunc = _cands > len(_um.df)
+                _ua = _uv[_uv["VERDICT"].isin(ACTION_VERDICTS)]
+                _cap = f" (top {len(_um.df)}, ≥)" if _um_trunc else ""
+                kpi_row([
+                    {"label": "Mart shortlist", "value": f"{_cands:,}",
+                     "help": "Objects with 1+ credit of clustering, search optimization or MV refresh and no "
+                             "read credits in the object ledger over 90 days, before the access-history check."},
+                    {"label": "Confirmed unread" + (f" (top {len(_um.df)})" if _um_trunc else ""),
+                     "value": f"{len(_ua):,}" if _conf.ok else "—",
+                     "severity": ("warn" if len(_ua) else "ok") if _conf.ok else "",
+                     "help": "No read in access history for 90 days, a database not shared out, a live object "
+                             "(not dropped or renamed), and maintenance spend in the last 30 days."},
+                    {"label": "Est. $/mo if stopped" + _cap,
+                     "value": format_usd(float(_ua["EST_MONTHLY_USD"].sum())) if _conf.ok else "—",
+                     "help": "ESTIMATED: the last 30 complete days of maintenance credits x your credit rate, "
+                             "on the confirmed-unread objects."
+                             + (" Only the top objects are confirmed, so this is a floor." if _um_trunc else "")},
+                ])
+                if not _conf.ok:
+                    # PR C review C8 / C18: say WHY by the error kind (only an object-not-visible / edition error
+                    # blames the edition), and retry only on request (the failure is latched above)
+                    st.caption(md_dollars(
+                        f"Read evidence unavailable: {confirm_failure_note(_conf.error_kind, _conf.error)} — "
+                        "ledger-only shortlist, not suspend candidates; no SQL."))
+                    st.button("Retry the access-history check", key="unread_maint_confirm_retry",
+                              on_click=_clear_unread_confirm_latch,
+                              help="Runs the 90-day access-history confirm again (up to the historical read's "
+                                   "time limit). Refresh also re-arms it.")
+                _gone_n = int(_uv["VERDICT"].eq(VERDICT_GONE).sum())
+                if _gone_n:
+                    # PR C review C11: dropped / renamed objects keep ledger spend for up to 30 days, but there is
+                    # nothing left to stop, so they carry no SQL and stay out of both KPIs above
+                    st.caption(f"{_gone_n:,} shortlisted object(s) no longer exist under that name (dropped or "
+                               "renamed): Object gone, no SQL, and not counted in the totals above.")
+                _um_cols = [c for c in ("OBJECT_FQN", "COMPANY", "VERDICT", "EST_MONTHLY_USD", "MAINT_USD",
+                                        "CLUSTERING_CREDITS", "SEARCH_OPT_CREDITS", "MV_REFRESH_CREDITS",
+                                        "READ_QUERIES", "READ_USERS", "LAST_READ", "WRITE_QUERIES",
+                                        "LAST_MAINT_DAY") if c in _uv.columns]
+                _um_sel = selectable_table(_uv[_um_cols], key="unread_maint_sel", height=300,
+                                           sort_label="action verdicts first, then estimated monthly saving")
+                # sticky-selection sentinel (the admin error-family pattern): resolve the row BY FQN only on a
+                # genuinely new click, so a re-sorted frame never silently swaps the selected object
+                if _um_sel is not None and _um_sel != st.session_state.get("_unread_maint_sel_seen"):
+                    st.session_state["_unread_maint_sel_seen"] = _um_sel
+                    if 0 <= int(_um_sel) < len(_uv):
+                        st.session_state["unread_maint_sel_last"] = str(_uv.iloc[int(_um_sel)]["OBJECT_FQN"])
+                _um_lines = [ln for s in _ua["REVIEW_SQL"].tolist() if isinstance(s, str)
+                             for ln in s.splitlines()][:20]
+                if _um_lines:
+                    st.code("\n".join(_um_lines), language="sql")
+                    st.caption("Review only — OVERWATCH never runs these. SUSPEND RECLUSTER and an MV SUSPEND "
+                               "reverse with RESUME. DROP SEARCH OPTIMIZATION removes every method on the table: "
+                               "capture them first with DESCRIBE SEARCH OPTIMIZATION ON the table, because a bare "
+                               "ADD SEARCH OPTIMIZATION re-adds table-wide equality only (a full rebuild), not the "
+                               "dropped configuration. A suspended materialized view cannot be queried until it "
+                               "is resumed. Confirm with the object's owner first.")
+                _um_pick = str(st.session_state.get("unread_maint_sel_last") or "")
+                _um_row = _uv[_uv["OBJECT_FQN"].astype(str) == _um_pick] if _um_pick else _uv.iloc[0:0]
+                if not _um_row.empty:
+                    _r = _um_row.iloc[0]
+                    _fqn, _verdict = str(_r["OBJECT_FQN"]), str(_r["VERDICT"])
+                    st.markdown(f"Selected: `{_fqn}` — {_verdict}")
+                    _review = _r.get("REVIEW_SQL")
+                    if _verdict in ACTION_VERDICTS and isinstance(_review, str) and _review:
+                        st.code(_review, language="sql")
+                        st.caption("Reverse:")
+                        st.code(str(_r["REVERSE_SQL"]), language="sql")
+                        _wq = safe_float(_r.get("WRITE_QUERIES"))
+                        if _wq > 0:
+                            st.caption(f"Also written by {_wq:,.0f} queries in 90 days — the load itself may be "
+                                       "waste.")
+                        _proof = cost_sql.unread_maintenance_proof(
+                            _fqn, account_today(), baseline_monthly_credits=safe_float(_r.get("MAINT_CREDITS_30D")))
+                        try:
+                            _bk = book_estimated_sql(_r.to_dict(), proof_sql=_proof)
+                        except ValueError as _bk_err:        # e.g. a zero credit rate -> nothing to book
+                            _bk = ""
+                            st.caption(f"Not bookable: {_bk_err}.")
+                        if _bk:
+                            st.code(_bk, language="sql")
+                            st.caption("Book only after the ALTER above has run in a worksheet — OVERWATCH never "
+                                       "runs it; the row stays ESTIMATED until you verify it on the Savings ledger.")
+                            _bk_key = f"unread_maint_book_{_fqn}"
+                            if (is_operator and st.button("Book estimated saving", key="unread_maint_book_btn")
+                                    and write_gate_open(_bk_key)):
+                                ok, msg = execute_statement(_bk, page=_PAGE)
+                                stamp_write(_bk_key, ok)  # C48
+                                notify(ok, f"Booked an ESTIMATED saving for {_fqn}, unless it was already booked "
+                                           "(any of its maintenance arms, not rejected): then nothing is added."
+                                       if ok else f"Booking failed: {msg}")
+                            elif not is_operator:
+                                st.caption("Booking needs SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
+                    elif _verdict in ACTION_VERDICTS:
+                        st.caption("The object name is quoted, mixed-case or dotted, so no statement is generated "
+                                   "(a wrong-case name would target a different object) — write it by hand.")
+                    else:
+                        st.caption({
+                            "Keep": "Read in the last 90 days — keep its maintenance.",
+                            "Check share consumers": "Its database is shared out: a consumer account's reads "
+                                                     "never reach this account's access history. Ask the "
+                                                     "consumers before stopping anything.",
+                            "No recent spend": "No maintenance credits in the last 30 complete days — nothing "
+                                               "left to stop.",
+                            "Unconfirmed": "Access history could not confirm it (the read failed or missed the "
+                                           "object), so no SQL is offered.",
+                            VERDICT_GONE: "No live object has this name any more (dropped or renamed): its "
+                                          "maintenance has already stopped and an ALTER would fail, so there is "
+                                          "nothing to stop or book.",
+                        }.get(_verdict, ""))
+                _today = account_today()
+                _cov = pd.to_datetime(_um0.get("COVERAGE_START_DAY"), errors="coerce")
+                if pd.notna(_cov) and (_today - _cov.date()).days < 90:
+                    st.caption(f"The object ledger starts {_cov.date():%Y-%m-%d}, so 'no reads' covers "
+                               f"{(_today - _cov.date()).days} days here, not 90.")
+                _last = pd.to_datetime(_um0.get("LEDGER_LAST_DAY"), errors="coerce")
+                if pd.notna(_last) and (_today - _last.date()).days > 2:
+                    st.warning(f"The object ledger's newest day is {_last.date():%Y-%m-%d} — the daily load may "
+                               "be failing, so these estimates are stale; see Admin ▸ Migrations & freshness.")
+                st.caption(md_dollars(
+                    "A fixed 90-day window: the window picker does not narrow it. Reads from share consumers and "
+                    "reads rarer than every 90 days (quarter- or year-end jobs) are invisible here, and a "
+                    "materialized view used only through automatic query rewrite may not show as a read, so "
+                    "confirm with the owner. Est. $/mo = the last 30 complete days of maintenance credits x "
+                    "your rate (ESTIMATED); booked rows stay ESTIMATED until verified on the Savings ledger."))
+                result_caption(_um)
+                result_caption(_conf)
         st.divider()
         st.markdown("**Storage growth movers**")
         days_storage = max(days, 30)
@@ -1849,7 +2083,8 @@ def _yes_no_dash(value: object) -> str:
     return "Yes" if str(value).strip().upper() in ("TRUE", "1", "YES") else "No"
 
 
-def _savings_tab() -> None:
+def _savings_tab(rate: float = 3.68, settings: dict | None = None) -> None:
+    settings = settings or {}
     res = run(mart_sql.savings_ledger(), page=_PAGE, key="savings_ledger",
               tier="live", source="SAVINGS_LEDGER")
     if not res.ok:
@@ -1962,28 +2197,174 @@ def _savings_tab() -> None:
                 options = {f"{r['DESCRIPTION'][:60]} ({r['ITEM_ID'][:8]})": r for _, r in estimated.iterrows()}
                 chosen = st.selectbox("Item", list(options), key="ledger_verify_pick")
                 row = options[chosen]
+                # Next-Fifty #46(d): a measured before/after for the finding types the marts can measure
+                # (warehouse credits, table time-travel bytes, object maintenance credits): 14 days before vs
+                # up to 30 complete days after the booking. It PREFILLS the monthly figure (a sentinel keeps
+                # an operator's edit) and a measured verify stamps PROOF_RESULT / PROOF_RUN_AT /
+                # PROOF_QUERY_ID. One mart read, in the non-default Remediation & ledger sub-section.
+                _item = str(row["ITEM_ID"])
+                _basis = ledger_basis(row.get("FINDING_TYPE"))
+                _tgt = row.get("TARGET_OBJECT")
+                _tgt = "" if _tgt is None or pd.isna(_tgt) else str(_tgt).strip()
+                _booked = pd.to_datetime(row.get("CREATED_AT"), errors="coerce")
+                _m: dict | None = None
+                _msql = ""
+                if _basis and _tgt and pd.notna(_booked):
+                    _msql = mart_sql.ledger_before_after(_basis, _tgt, _booked.date())
+                    _mres = run(_msql, page=_PAGE, key=f"ledger_measure_{_item[:8]}", tier="recent",
+                                source=("FACT_WAREHOUSE_DAILY / MART_TABLE_STORAGE_DAILY / "
+                                        "FACT_OBJECT_COST_DAILY (before/after)"), probe=True)
+                    if _mres.usable():
+                        _m = ledger_measurement(
+                            _mres.df.iloc[0], basis=_basis, rate=rate,
+                            storage_usd_per_tb=safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0),
+                            today=account_today())
+                        if _mres.query_id:
+                            # survives the cache-hit rerun that follows the Verify click
+                            st.session_state[f"_ow_proof_qid_{_item}"] = _mres.query_id
+                    else:
+                        empty_state("unavailable", "The before/after measurement could not be read — "
+                                    "enter the verified amount by hand.", detail=_mres.error)
+                elif not _basis:
+                    st.caption("No measured basis for this item — enter the verified amount by hand.")
+                else:
+                    st.caption("This item has no target or booking date to measure around — enter the "
+                               "verified amount by hand.")
+                _qid = str(st.session_state.get(f"_ow_proof_qid_{_item}") or "")
+                # Review C22: the before/after is keyed on the target + booking day only, so another change
+                # booked on the same target inside the measured window moves the same delta. Checked against
+                # the ledger page already read above (no new read); a full page whose oldest row is inside
+                # the window cannot rule an overlap out.
+                _ov = (ledger_overlaps(res.df, item_id=_item, target=_tgt, booked_day=_booked.date(),
+                                       window_end=_m.get("after_end"), row_cap=_LEDGER_PAGE_ROWS)
+                       if _m is not None else None)
+                # Review C17: the Verify click's rerun builds the UPDATE from what the previous render SHOWED
+                # (measurement, proof query id, overlap check), never from a read that moved in between.
+                _clicked = bool(st.session_state.get("ledger_verify_exec"))
+                _shown = st.session_state.get("_ow_ledger_shown")
+                # Review r2: a click whose rerun lands on another item than the one whose UPDATE was painted
+                # (the option list changed under the click and 1.52.2 reset the pick, or an item switch and a
+                # click coalesced into one rerun) is STALE: it never writes, and this item takes its own
+                # prefill. "_ow_ledger_shown" is written only AFTER st.code painted the statement below.
+                _same = isinstance(_shown, dict) and _shown.get("item") == _item
+                _stale_click = _clicked and not _same
+                if _clicked and _same:
+                    _m, _msql, _qid, _ov = _shown["m"], _shown["sql"], _shown["qid"], _shown["ov"]
+                _measured = _m is not None and _m["state"] == MEASURED
+                _overlap = _ov is not None and (bool(_ov["count"]) or not _ov["complete"])
+                if _m is not None:
+                    _saving = (format_usd(_m["monthly_usd"]) if _measured
+                               else "Too early" if _m["state"] == TOO_EARLY else "No data")
+                    if _basis == "TABLE":
+                        from app.logic.formulas import humanize_bytes
+                        _mk = [{"label": "Time travel before",
+                                "value": "—" if _m["before_bytes"] is None else humanize_bytes(_m["before_bytes"])},
+                               {"label": f"Time travel after ({_m['after_days']} days)",
+                                "value": "—" if _m["after_bytes"] is None else humanize_bytes(_m["after_bytes"])}]
+                    else:
+                        _mk = [{"label": "Before / day",
+                                "value": ("—" if _m["before_per_day"] is None
+                                          else format_usd(_m["before_per_day"] * rate)),
+                                "help": "Credits per day (warehouse, or the object's maintenance) over the 14 "
+                                        "days before the booking, priced at the credit rate."},
+                               {"label": f"After / day ({_m['after_days']} days)",
+                                "value": ("—" if _m["after_per_day"] is None
+                                          else format_usd(_m["after_per_day"] * rate))}]
+                    _mk.append({"label": "Measured saving / mo", "value": _saving,
+                                "severity": ("warn" if _overlap and _measured
+                                             else "ok" if _measured and _m["monthly_usd"] > 0 else ""),
+                                "help": "(before per day - after per day) x 30 days, priced. A negative "
+                                        "figure means the level rose; the prefill is then 0. It covers "
+                                        "every change on the target inside the window, not only this "
+                                        "item's."})
+                    if _basis == "WAREHOUSE":
+                        _mk.append({"label": "Volume ×",
+                                    "value": ("—" if _m["volume_ratio"] is None
+                                              else f"{_m['volume_ratio']:.2f}x"),
+                                    "severity": "warn" if _m["confounded"] else "",
+                                    "help": "Queries per day after vs before. Outside 0.7-1.3x the saving "
+                                            "is volume-confounded (disclosed, not adjusted)."})
+                    kpi_row(_mk)
+                    st.caption(md_dollars(_m["note"] + (" It prefills the amount below and never "
+                                                        "overwrites an edit you make."
+                                                        if _measured and not _overlap
+                                                        else " Enter the verified amount by hand.")))
+                    if _ov is not None and _ov["count"]:
+                        _more = _ov["count"] - len(_ov["items"])
+                        st.warning(md_dollars(
+                            f"Not prefilled: {_ov['count']:,} other booked change(s) on {_tgt} fall inside "
+                            f"this measured window ({_ov['start']:%b} {_ov['start'].day} – {_ov['end']:%b} "
+                            f"{_ov['end'].day}): "
+                            + "; ".join(f"{o['label']} — {o['description']}" for o in _ov["items"])
+                            + (f"; and {_more:,} more" if _more > 0 else "")
+                            + ". The before/after includes their effect too, so split the measured change "
+                              "between the items and enter only this item's share."))
+                    elif _ov is not None and not _ov["complete"]:
+                        st.warning(f"Not prefilled: the ledger above shows the newest {_LEDGER_PAGE_ROWS:,} "
+                                   f"rows and this booking's measured window reaches past them, so another "
+                                   f"change on {_tgt} cannot be ruled out. Enter only this item's share.")
+                # Review C12 / C17: the prefill re-arms when Streamlit dropped the widget (the section was
+                # left), follows the measurement only while the widget still holds what OVERWATCH put there,
+                # never overwrites an edit, and never moves in the Verify click's own rerun.
+                # Review r3: the amount widget is keyed PER ITEM, so an amount typed for one item can never reach
+                # another item's statement (a switch + click, or a pick reset by 1.52.2). Streamlit drops the
+                # state of a widget that is not rendered, so the keys never pile up.
+                _amount_key = f"ledger_verified_usd_{_item}"
+                _pf = verify_prefill(
+                    item_id=_item,
+                    target=float(_m["prefill_usd"]) if _measured and not _overlap and _m is not None else None,
+                    # a stale click forces the item-change rule: the amount on screen belongs to another item
+                    last=({"item": "", "val": None} if _stale_click
+                          else st.session_state.get("_ow_ledger_prefill")),
+                    # None = the key is ABSENT: never rendered, or dropped after the section was left
+                    widget_value=st.session_state.get(_amount_key),
+                    clicked=_clicked and not _stale_click)
+                st.session_state["_ow_ledger_prefill"] = _pf["state"]
+                if _pf["write"] is not None:
+                    st.session_state[_amount_key] = float(_pf["write"])
+                if _pf["kept_edit"] and _m is not None:
+                    st.caption(md_dollars(f"The measured saving now reads {format_usd(_m['prefill_usd'])}/mo; "
+                                          "your entry is kept."))
                 verified_usd = st.number_input(
                     "Verified USD per month (measured, post-period)",
-                    min_value=0.0, step=50.0, key="ledger_verified_usd",
+                    min_value=0.0, step=50.0, key=_amount_key,
                     help="The MONTHLY recurring saving measured after the change. The ROI multiple sums "
                          "verified items as a monthly run-rate over the last 12 months — convert a "
                          "total over the measured window to a monthly figure.")
                 check = {"STATE": row["STATE"], "PROOF_SQL": row["PROOF_SQL"], "VERIFIED_USD": verified_usd}
                 allowed, why = can_verify(check)
+                _proof_set = ""
+                if _measured and _m is not None:
+                    import hashlib
+                    _proof_json = proof_result_json(
+                        _m, target=_tgt, basis=str(_basis), entered_usd=safe_float(verified_usd),
+                        sql_hash=hashlib.sha1(_msql.encode()).hexdigest()[:16], overlaps=_ov)
+                    _proof_set = (f",\n    PROOF_QUERY_ID = {sql_literal(_qid, 80) if _qid else 'NULL'}, "
+                                  f"PROOF_RESULT = {sql_literal(_proof_json, 16000)}, "
+                                  "PROOF_RUN_AT = CURRENT_TIMESTAMP()")
                 update_sql = (
                     f"UPDATE {core_object('SAVINGS_LEDGER')}\n"
                     f"SET STATE = 'VERIFIED', VERIFIED_USD = {sql_number(verified_usd)}, "
-                    f"VERIFIED_AT = CURRENT_TIMESTAMP(), VERIFIED_BY = {identity_sql()}\n"
+                    f"VERIFIED_AT = CURRENT_TIMESTAMP(), VERIFIED_BY = {identity_sql()}{_proof_set}\n"
                     # codex#26: guard on STATE so a stale/concurrent page (the row was already
                     # VERIFIED or REJECTED after this page rendered) no-ops instead of
                     # overwriting a settled amount. Verification is now conditional/idempotent.
                     f"WHERE ITEM_ID = {sql_literal(row['ITEM_ID'])} AND STATE = 'ESTIMATED';"
                 )
                 st.code(update_sql, language="sql")
+                # Recorded only AFTER st.code painted this item's statement (an interrupted rerun never marks an
+                # item as shown). In the click's rerun the measurement, proof query id and overlap check are the
+                # painted ones, and the amount is this item's own widget value, so the only way the click can
+                # write a statement nobody saw is landing on another item: that click is stale (review r2 / r3).
+                st.session_state["_ow_ledger_shown"] = {"item": _item, "m": _m, "sql": _msql, "qid": _qid,
+                                                        "ov": _ov}
                 if not allowed:
                     st.warning(why)
-                elif (is_operator and st.button("Verify savings item", key="ledger_verify_exec")
-                        and write_gate_open("ledger_verify_exec")):
-                    ok, msg = execute_statement(update_sql, page=_PAGE)
-                    stamp_write("ledger_verify_exec", ok)  # C48
-                    notify(ok, msg if not ok else f"Verified savings item {row['ITEM_ID']}.")
+                elif is_operator and st.button("Verify savings item", key="ledger_verify_exec"):
+                    if _stale_click:
+                        st.warning("The item changed as you clicked, so nothing was written. Review this item "
+                                   "and click Verify again.")
+                    elif write_gate_open("ledger_verify_exec"):
+                        ok, msg = execute_statement(update_sql, page=_PAGE)
+                        stamp_write("ledger_verify_exec", ok)  # C48
+                        notify(ok, msg if not ok else f"Verified savings item {row['ITEM_ID']}.")
