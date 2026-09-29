@@ -24,7 +24,7 @@ from app.data.common import resolve_effective_window
 from app.logic import contract_planner, scoring
 from app.logic.actions import deferred_summary, rank_actions
 from app.logic.date_windows import is_prior_month_window, window_label, window_phrase
-from app.logic.digest_grounding import digest_provenance
+from app.logic.digest_grounding import digest_provenance, digest_source
 from app.logic.forecast import MonthEndForecast, backtest_forecasts, month_end_projection
 from app.logic.formulas import (
     ExecutiveSummaryView,
@@ -1223,9 +1223,9 @@ def render() -> None:
     # ---- Daily AI digest ------------------------------------------------------
     # V165 (#24): the measured-grounding columns only once V165 is applied (the shared schema gate answers
     # from the startup gate's read), and the label is the MEASURED result, never a fixed "grounded".
-    digest = run(mart_sql.latest_digest(grounded=has_migration(165, _PAGE)), page=_PAGE,
-                 key="daily_digest", tier="hourly",
-                 source="DAILY_DIGEST (Cortex draft; figures checked against the exec board, templated on mismatch)")
+    _grounded = has_migration(165, _PAGE)
+    digest = run(mart_sql.latest_digest(grounded=_grounded), page=_PAGE,
+                 key="daily_digest", tier="hourly", source=digest_source(_grounded))
     if digest.usable():
         row = digest.df.iloc[0]
         prov = digest_provenance(row)
@@ -1233,7 +1233,7 @@ def render() -> None:
         with st.expander(f"{prov.title} — {row.get('DIGEST_DATE')}{_model}", expanded=False):
             status_chips([(prov.chip, prov.tone)])
             if prov.detail:
-                st.caption(prov.detail)
+                st.caption(md_dollars(prov.detail))       # UNGROUNDED keeps the '$' of the tokens it lists
             st.markdown(md_dollars(str(row.get("BODY") or "")))
             if prov.show_draft:
                 with st.popover("Show the withheld AI draft"):
@@ -1241,9 +1241,14 @@ def render() -> None:
                     st.markdown(md_dollars(str(row.get("AI_BODY") or "")))
             # KEPT: "Account-wide narrative — does not change with the company filter" is a
             # scope caveat (parity with the kept whole-account contract note) — stays visible.
-            st.caption("Written daily by TASK_DAILY_DIGEST from exec-board facts and alert counts "
-                       "only; every figure is checked against those facts, and a templated digest is sent "
-                       "when any does not match. Account-wide narrative — does not change with the company filter.")
+            # V165 (#24, review r1 W4/W15): the check is claimed only when V165 is applied AND this row carries a
+            # grounding record -- before the apply (the deploy-first order) and on the pre-V165 row that stays
+            # up until the next 07:20 run, the chip says "Figures not checked" and this keeps the pre-4.602 text.
+            _checked = _grounded and prov.ai_written is not None
+            st.caption("Written daily by TASK_DAILY_DIGEST from exec-board facts and alert counts only"
+                       + ("; every figure is checked against those facts, and a templated digest is sent "
+                          "when any does not match" if _checked else "")
+                       + ". Account-wide narrative — does not change with the company filter.")
 
     # ---- Executive summary download -----------------------------------------
     # rec 5: export the SAME honest view-model the screen shows. An Incomplete score

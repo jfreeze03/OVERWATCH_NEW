@@ -79,7 +79,9 @@ def test_scale_and_percent_words_match():
 def test_tolerance_is_ai_groundings():
     assert dg.DIGEST_REL_TOL == ai_grounding._REL_TOL == 0.005
     assert "GREATEST(0.5 * POWER(10, -u.DECIMALS) * u.SCALE, 0.005 * u.NUM_VAL * u.SCALE) AS TOL" in _BODY
-    assert "AND ABS(f.FVAL - t.VAL) <= t.TOL" in _BODY
+    # W3 (review r1): the inclusive half step, with a relative slack for DOUBLE noise -- the same factor both sides
+    assert dg.DIGEST_TOL_SLACK == 1.000000001
+    assert f"AND ABS(f.FVAL - t.VAL) <= t.TOL * {dg.DIGEST_TOL_SLACK!r}\n" in _BODY
     assert "(t.UNIT = 'usd' AND ENDSWITH(f.FKEY, '_USD'))" in _BODY
     assert "(t.UNIT = 'pct' AND ENDSWITH(f.FKEY, '_PCT'))" in _BODY
     assert "AND (t.KEYWORD IS NULL OR CONTAINS(f.FKEY, t.KEYWORD))" in _BODY
@@ -199,6 +201,27 @@ def test_the_procs_own_matching_select_agrees_with_check_digest(body):
     checked, bad = _sql_check(body, FACTS)
     res = dg.check_digest(body, FACTS)
     assert (checked, bad) == (res.checked, set(res.ungrounded)), body
+
+
+@pytest.mark.parametrize("facts, body", [
+    ("FAILED_QUERY_PCT=1.25", "1.3% of queries failed"),
+    ("FAILED_QUERY_PCT=1.25", "1.2% of queries failed"),
+    ("FAILED_QUERY_PCT=0.75", "0.8% of queries failed"),
+    ("TASK_FAILURE_PCT=0.15", "0.2% of tasks failed"),
+    ("QUERIES=8250000", "8.3 million queries"),
+    ("QUERIES=8250000000", "8.2 billion queries"),
+])
+def test_an_exact_half_step_rounding_is_grounded_in_the_proc_too(facts, body):
+    """W3 (review r1): the proc's own join (IEEE doubles in sqlite, as in Snowflake FLOAT) and the mirror both
+    accept a correctly rounded half-step figure."""
+    assert _sql_check(body, facts) == (1, set())
+    res = dg.check_digest(body, facts)
+    assert (res.checked, res.ungrounded) == (1, ())
+
+
+def test_the_half_step_slack_does_not_widen_the_procs_rule():
+    assert _sql_check("1.4% of queries failed", "FAILED_QUERY_PCT=1.25") == (1, {"1.4%"})
+    assert _sql_check("1.3% of queries failed", "FAILED_QUERY_PCT=1.2499") == (1, {"1.3%"})
 
 
 def test_sqlite_parity_has_teeth():

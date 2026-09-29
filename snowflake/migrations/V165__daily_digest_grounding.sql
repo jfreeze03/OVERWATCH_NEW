@@ -178,8 +178,9 @@ BEGIN
     -- *_USD fact, a % figure only a *_PCT fact, a figure followed by a known noun (credits, critical, high,
     -- minutes, GB, queries, failed, tasks, alerts, hours, days) only a fact whose key names it, any other
     -- figure any fact. Dates, clock times, identifier-like tokens (WH_X1, p95, V112) and list markers are
-    -- stripped first. app/logic/digest_grounding.py mirrors this rule; tests/test_digest_grounding_parity.py
-    -- locks every literal below to it. Backslash-free patterns on purpose ([0-9], [.], [$]): V022/V026.
+    -- stripped first. The half step is inclusive: TOL * 1.000000001 absorbs DOUBLE noise (fact 1.25 shown as 1.3).
+    -- app/logic/digest_grounding.py mirrors this rule; tests/test_digest_grounding_parity.py locks every
+    -- literal below to it. Backslash-free patterns on purpose ([0-9], [.], [$]): V022/V026.
     IF (:body IS NOT NULL AND TRIM(:body) <> '') THEN
         clean := REGEXP_REPLACE(:body, '[0-9]{4}-[0-9]{2}-[0-9]{2}([ T][0-9]{1,2}:[0-9]{2}(:[0-9]{2})?)?', ' ');
         clean := REGEXP_REPLACE(:clean, '[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?', ' ');
@@ -235,7 +236,7 @@ BEGIN
               ON (t.UNIT = 'num' OR (t.UNIT = 'usd' AND ENDSWITH(f.FKEY, '_USD'))
                                  OR (t.UNIT = 'pct' AND ENDSWITH(f.FKEY, '_PCT')))
              AND (t.KEYWORD IS NULL OR CONTAINS(f.FKEY, t.KEYWORD))
-             AND ABS(f.FVAL - t.VAL) <= t.TOL
+             AND ABS(f.FVAL - t.VAL) <= t.TOL * 1.000000001
             GROUP BY t.TOK
         ) g;
         grounding_ok := (n_bad = 0);

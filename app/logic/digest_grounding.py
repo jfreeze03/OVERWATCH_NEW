@@ -16,7 +16,7 @@ p95 or V112, and list markers are stripped): a figure matches a FACT when
   * noun -- the word right after it (credits, critical, high, minutes, GB, queries, failed, tasks, alerts,
     hours, days) must be named by the fact key;
   * value -- within half a step of the figure's shown precision or 0.5% (ai_grounding's tolerance), after a
-    k / m / b (thousand / million / billion) scale word.
+    k / m / b (thousand / million / billion) scale word; the half step is inclusive (DIGEST_TOL_SLACK).
 A draft with no figures passes. 'n/a' facts license nothing.
 """
 
@@ -52,8 +52,23 @@ DIGEST_SCALE_WORDS: tuple[tuple[tuple[str, ...], int], ...] = (
 )
 DIGEST_PCT_WORDS: tuple[str, ...] = ("percent", "pct")
 DIGEST_REL_TOL = 0.005          # == ai_grounding._REL_TOL (tests/test_digest_grounding_parity.py)
+# The half step is INCLUSIVE, but the comparison runs in doubles (Snowflake FLOAT too): fact 1.25 shown as
+# '1.3%' differs by 0.050000000000000044 against a tolerance of 0.05000000000000000277. The tolerance is at
+# least 0.5% of the figure, so double noise is ~1e-13 of it at any scale; a 1e-9 RELATIVE slack absorbs it
+# (an absolute epsilon does not at billion scale) and admits nothing a rounded figure could exploit.
+DIGEST_TOL_SLACK = 1.000000001
 # The migration that started measuring (a row written before it carries no grounding columns).
 DIGEST_GROUNDING_MIGRATION = 165
+# The run() source label of the digest read (Brief + Overview). It names the check only once V165 is applied:
+# before that the live proc checks nothing (review r1 W4/W15; app/ui/schema_gate.py: a claim of a new behaviour
+# asks has_migration first). Neither label says "grounded" (tests/test_digest_grounding.py).
+DIGEST_SOURCE_CHECKED = "DAILY_DIGEST (Cortex draft; figures checked against the exec board, templated on mismatch)"
+DIGEST_SOURCE_UNCHECKED = "DAILY_DIGEST (Cortex draft)"
+
+
+def digest_source(grounded: bool) -> str:
+    """The digest read's source label: ``grounded`` is the page's ``has_migration(165, page)``."""
+    return DIGEST_SOURCE_CHECKED if grounded else DIGEST_SOURCE_UNCHECKED
 
 
 def _flags(f: str) -> int:
@@ -110,7 +125,7 @@ def check_digest(body: str, facts: str) -> GroundingCheck:
         key = _keyword(word)
         seen[tok] = any(
             (unit == "num" or (unit == "usd" and fk.endswith("_USD")) or (unit == "pct" and fk.endswith("_PCT")))
-            and (key is None or key in fk) and abs(fv - val) <= tol
+            and (key is None or key in fk) and abs(fv - val) <= tol * DIGEST_TOL_SLACK
             for fk, fv in rows)
     return GroundingCheck(checked=len(seen), ungrounded=tuple(t for t, ok in seen.items() if not ok))
 
