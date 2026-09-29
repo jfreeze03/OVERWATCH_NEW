@@ -103,12 +103,12 @@ def _ledger_rows() -> list[tuple]:
     return rows
 
 
-def _shortlist(company: str = "ALL") -> pd.DataFrame:
+def _shortlist(company: str = "ALL", database: str = "") -> pd.DataFrame:
     con = _con()
     con.execute("CREATE TABLE FACT_OBJECT_COST_DAILY (DAY TEXT, OBJECT_FQN TEXT, OBJECT_DOMAIN TEXT, "
                 "COST_ARM TEXT, COMPANY TEXT, CREDITS REAL)")
     con.executemany("INSERT INTO FACT_OBJECT_COST_DAILY VALUES (?, ?, ?, ?, ?, ?)", _ledger_rows())
-    sql = cost_sql.maintenance_on_unread(90, company)
+    sql = cost_sql.maintenance_on_unread(90, company, database)
     sql = _swap(sql, "DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY", "FACT_OBJECT_COST_DAILY")
     sql = _swap(sql, "DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(", "COMPANY_FOR_DATABASE(")
     sql = _swap(sql, "CURRENT_DATE()", f"'{_TODAY.isoformat()}'")
@@ -149,8 +149,9 @@ def test_window_totals_count_past_the_limit(shortlist):
     assert set(shortlist["MAINT_CREDITS_WIN"]) == {round(60 * 1.5 + 10 + 4 + 3 + 7, 4)}
     assert set(shortlist["MAINT_CREDITS_30D_WIN"]) == {4 + 3 + 7}
     assert set(shortlist["COVERAGE_START_DAY"]) == {_d(60)}          # the window's earliest ledger day
-    # the newest in-scope day (the UNATTRIBUTED row two days ago is out of scope; today never counts)
-    assert set(shortlist["LEDGER_LAST_DAY"]) == {_d(3)}
+    # PR C review C7: the newest LOADED day ledger-wide (the UNATTRIBUTED row two days ago counts: it proves the
+    # load ran), not the newest candidate row; today never counts. (This lock read _d(3), the in-scope day.)
+    assert set(shortlist["LEDGER_LAST_DAY"]) == {_d(2)}
 
 
 def test_a_named_company_filters_rows():
@@ -158,6 +159,16 @@ def test_a_named_company_filters_rows():
     assert "TRX.S.OTHER" not in set(alfa["OBJECT_FQN"]) and set(alfa["CANDIDATES_WIN"]) == {63}
     trx = _shortlist("Trexis")
     assert list(trx["OBJECT_FQN"]) == ["TRX.S.OTHER"]
+
+
+def test_a_quiet_scope_keeps_the_ledger_wide_coverage():
+    """PR C review C7: filtered to a quiet database (its only row is 6 days old), the coverage bounds stay the
+    ledger's own (loaded through 2 days ago, back to 60 days ago), so no false 'the daily load may be failing'
+    warning and no false 'covers 6 days here, not 90'."""
+    for frame in (_shortlist(database="TRX"), _shortlist("Trexis"), _shortlist("Trexis", "trx")):
+        assert list(frame["OBJECT_FQN"]) == ["TRX.S.OTHER"]
+        assert set(frame["LEDGER_LAST_DAY"]) == {_d(2)} and set(frame["COVERAGE_START_DAY"]) == {_d(60)}
+        assert set(frame["CANDIDATES_WIN"]) == {1}
 
 
 # --- step 2: the access-history confirm (LATERAL FLATTEN -> json_each) -----------------------------------
@@ -237,13 +248,94 @@ def test_the_share_guard(reads):
     assert reads.loc["DB.S.X", "SHARED_DATABASE"] == 0            # a role grant is not a share
 
 
+# the three shortlisted objects are live (ACCOUNT_USAGE.TABLES lists materialized views too, TABLE_TYPE
+# 'MATERIALIZED VIEW'); PR C review C11 made a live TABLES row load-bearing, so the frames seed them
+_LIVE = [(301, "DB", "S", "WRITEONLY", None), (302, "DB", "S", "OLDREAD", None), (303, "DB", "S", "MV1", None)]
+
+
 def test_executed_frames_through_the_verdicts(shortlist):
     short = shortlist[shortlist["OBJECT_FQN"].isin(["DB.S.WRITEONLY", "DB.S.OLDREAD", "DB.S.MV1"])]
     conf = _confirm(list(short["OBJECT_FQN"]), history=[
-        ("r1", _T, "ANA", [_obj(None, "DB.S.OLDREAD")], [])], tables=[], shares=[])
+        ("r1", _T, "ANA", [_obj(None, "DB.S.OLDREAD")], [])], tables=_LIVE, shares=[])
     out = unread_maintenance_verdicts(short, conf, rate=3.0).set_index("OBJECT_FQN")
     assert out.loc["DB.S.OLDREAD", "VERDICT"] == "Keep"            # the ledger missed a read access history has
     assert out.loc["DB.S.WRITEONLY", "VERDICT"] == "No recent spend"
     assert out.loc["DB.S.MV1", "VERDICT"] == "Suspend MV refresh"
     assert out.loc["DB.S.MV1", "REVIEW_SQL"].startswith("ALTER MATERIALIZED VIEW DB.S.MV1 SUSPEND RECLUSTER;")
     assert out.loc["DB.S.MV1", "EST_MONTHLY_USD"] == 9.0
+
+
+def test_executed_dropped_object_is_gone(shortlist):
+    """PR C review C11: MV1 was dropped (its TABLES row is DELETED) but still has ledger spend in the last 30
+    days: the executed confirm returns MATCHED_BY_ID 0, so it is 'Object gone' with no SQL and no estimate."""
+    short = shortlist[shortlist["OBJECT_FQN"].isin(["DB.S.OLDREAD", "DB.S.MV1"])]
+    dropped = [(302, "DB", "S", "OLDREAD", None), (303, "DB", "S", "MV1", "2026-09-26 00:00:00")]
+    conf = _confirm(list(short["OBJECT_FQN"]), history=[], tables=dropped, shares=[])
+    assert dict(zip(conf["OBJECT_FQN"], conf["MATCHED_BY_ID"], strict=True)) == {"DB.S.OLDREAD": 1, "DB.S.MV1": 0}
+    out = unread_maintenance_verdicts(short, conf, rate=3.0).set_index("OBJECT_FQN")
+    assert out.loc["DB.S.MV1", "VERDICT"] == "Object gone"
+    assert out.loc["DB.S.MV1", "REVIEW_SQL"] is None and out.loc["DB.S.MV1", "FINDING_TYPE"] is None
+    assert out.loc["DB.S.OLDREAD", "VERDICT"] == "Suspend clustering"   # live, unread, spend in the last 30 days
+
+
+# --- the stored PROOF_SQL, executed (PR C review C10) ----------------------------------------------------------
+
+_BOOKED = date(2026, 9, 1)
+
+
+def _proof_frame(ledger: list[tuple], today: date) -> dict:
+    """Run cost_sql.unread_maintenance_proof for DB.S.T (booked on _BOOKED, 60 credits/month baseline) on
+    ``today`` over ``ledger`` rows (DAY, OBJECT_FQN, COST_ARM, CREDITS)."""
+    con = _con()
+    con.create_function("GREATEST", 2, lambda a, b: None if a is None or b is None else max(a, b))
+    con.create_function("DATEDIFF", 3, lambda unit, a, b: None if a is None or b is None else
+                        (date.fromisoformat(str(b)[:10]) - date.fromisoformat(str(a)[:10])).days)
+    con.execute("CREATE TABLE FACT_OBJECT_COST_DAILY (DAY TEXT, OBJECT_FQN TEXT, COST_ARM TEXT, CREDITS REAL)")
+    con.executemany("INSERT INTO FACT_OBJECT_COST_DAILY VALUES (?, ?, ?, ?)", ledger)
+    from app.data.common import account_today_sql
+    sql = cost_sql.unread_maintenance_proof("DB.S.T", _BOOKED, 60.0)
+    sql = _swap(sql, "DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY", "FACT_OBJECT_COST_DAILY")
+    sql = _swap(sql, account_today_sql(), f"'{today.isoformat()}'")
+    sql = _swap(sql, "::DATE", "")
+    assert "::" not in sql and ";" not in sql
+    df = pd.read_sql_query(sql, con)
+    assert len(df) == 1
+    return df.iloc[0].to_dict()
+
+
+def _maint(first: int, last: int, credits: float = 2.0) -> list[tuple]:
+    """DB.S.T clustering at ``credits``/day for days _BOOKED+first .. _BOOKED+last (pre-ALTER spend)."""
+    return [((_BOOKED + timedelta(days=k)).isoformat(), "DB.S.T", "CLUSTERING", credits)
+            for k in range(first, last + 1)]
+
+
+def _loaded_through(last: int) -> list[tuple]:
+    """Another object's rows proving the loader ran every day through _BOOKED+last."""
+    return [((_BOOKED + timedelta(days=k)).isoformat(), "DB.S.OTHER", "QUERY_COMPUTE_READ", 0.1)
+            for k in range(-10, last + 1)]
+
+
+def test_proof_skips_the_booking_day():
+    # the ALTER ran on the booking day, which still carries 2 pre-ALTER credits; nothing since; loaded through
+    # yesterday (day +9), run on day +10: the arm is stopped, so it reads 0 (was 2 x 30 / 10 = 6)
+    got = _proof_frame(_maint(-5, 0) + _loaded_through(9), _BOOKED + timedelta(days=10))
+    assert (got["DAYS_MEASURED"], got["CREDITS_SINCE_BOOKED"], got["MONTHLY_CREDITS_NOW"]) == (9, 0.0, 0.0)
+    assert got["LOADED_THROUGH"] == (_BOOKED + timedelta(days=9)).isoformat()
+    assert got["BASELINE_MONTHLY_CREDITS"] == 60.0
+
+
+def test_a_stalled_loader_never_proves_the_saving():
+    # the ALTER never ran (2 credits/day continue) but the loader stalled at day +3; run on day +20: measured
+    # over the 3 loaded days it still reads 60/month (was (2 x 4) x 30 / 20 = 12, a false 'realized')
+    got = _proof_frame(_maint(-5, 3) + _loaded_through(3), _BOOKED + timedelta(days=20))
+    assert (got["DAYS_MEASURED"], got["CREDITS_SINCE_BOOKED"], got["MONTHLY_CREDITS_NOW"]) == (3, 6.0, 60.0)
+
+
+def test_too_early_until_a_post_booking_day_loads():
+    # run the day after booking: only the booking day itself has loaded, so nothing is measured yet (NULL)
+    got = _proof_frame(_maint(-5, 0) + _loaded_through(0), _BOOKED + timedelta(days=1))
+    assert got["DAYS_MEASURED"] == 0 and got["MONTHLY_CREDITS_NOW"] is None
+    assert got["CREDITS_SINCE_BOOKED"] == 0.0
+    # an empty ledger since booking: no loaded day at all, NULL (never a divide-by-zero or a 0 'saving')
+    empty = _proof_frame(_maint(-5, -1), _BOOKED + timedelta(days=5))
+    assert empty["LOADED_THROUGH"] is None and empty["MONTHLY_CREDITS_NOW"] is None

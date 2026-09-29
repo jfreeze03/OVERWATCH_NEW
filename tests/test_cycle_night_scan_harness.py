@@ -119,12 +119,23 @@ _MID_END = {d: ("00:20" if i % 2 == 0 else "00:40") for i, d in enumerate(_PRIOR
 _MID_END["2026-09-10"] = "03:00"                         # a long clean night (a spike), still a clean finish
 
 
-def _rows() -> list[tuple]:
+def _rows(*, skip_end: frozenset[str] = frozenset(), gap_tonight: tuple[str, ...] = ()) -> list[tuple]:
+    """``skip_end``: prior nights the terminal WF_END never dispatched. ``gap_tonight``: adds WF_GAP, a two-task
+    workflow (T_G1 22:15-22:45, then T_G2 02:30-03:45 after an idle gap) on every prior night, with only the
+    named tasks run tonight (review C3)."""
     rows: list[tuple] = []
 
     def add(wf, task, status, day, start, end, *, start_next=0, end_next=1):
         rows.append((wf, task, status, _t(day, start, start_next), None if end is None else _t(day, end, end_next)))
 
+    if gap_tonight:
+        for d in _PRIOR:
+            add("WF_GAP", "T_G1", "SUCCEEDED", d, "22:15", "22:45", end_next=0)
+            add("WF_GAP", "T_G2", "SUCCEEDED", d, "02:30", "03:45", start_next=1)
+        if "T_G1" in gap_tonight:
+            add("WF_GAP", "T_G1", "SUCCEEDED", _TONIGHT, "22:15", "22:45", end_next=0)
+        if "T_G2" in gap_tonight:                                   # before the 02:00 snapshot, in this variant
+            add("WF_GAP", "T_G2", "SUCCEEDED", _TONIGHT, "01:00", "01:50", start_next=1)
     for d in _PRIOR:
         add("WF_START", "T_START", "SUCCEEDED", d, "22:00", "22:20", end_next=0)
         if d == "2026-09-05":
@@ -137,7 +148,8 @@ def _rows() -> list[tuple]:
         else:
             add("WF_MID", "T_MID", "SUCCEEDED", d, "22:30", _MID_END[d])
         add("WF_LATE", "T_LATE", "SUCCEEDED", d, "01:00", "03:30", start_next=1)
-        add("WF_END", "T_END", "SUCCEEDED", d, "04:00", "05:00", start_next=1)
+        if d not in skip_end:
+            add("WF_END", "T_END", "SUCCEEDED", d, "04:00", "05:00", start_next=1)
         add("WF_ODD", "T_ODD", "SUCCEEDED", d, "22:05", "05:30")                      # usually ends AFTER the terminal
         add("WF_MISS", "T_MISS", "SUCCEEDED", d, "23:00", "23:30", end_next=0)
         add("WF_FAILT", "T_FAILT", "SUCCEEDED", d, "22:40", "23:40", end_next=0)
@@ -155,7 +167,7 @@ def _rows() -> list[tuple]:
     return rows
 
 
-def _db() -> sqlite3.Connection:
+def _db(rows: list[tuple] | None = None) -> sqlite3.Connection:
     con = sqlite3.connect(":memory:")
     con.create_function("IFF", 3, lambda c, a, b: a if c else b)
     con.create_function("DATEADD", 3, _dateadd)
@@ -164,7 +176,7 @@ def _db() -> sqlite3.Connection:
     con.create_aggregate("MEDIAN", 1, _Median)
     con.execute("CREATE TABLE CONTROL_STATUS (WORKFLOW_NAME TEXT, TASK_NAME TEXT, TASK_STATUS TEXT, "
                 "TASK_START_DTTM TEXT, TASK_END_DTTM TEXT)")
-    con.executemany("INSERT INTO CONTROL_STATUS VALUES (?, ?, ?, ?, ?)", _rows())
+    con.executemany("INSERT INTO CONTROL_STATUS VALUES (?, ?, ?, ?, ?)", _rows() if rows is None else rows)
     return con
 
 
@@ -241,6 +253,58 @@ def test_timeline_over_the_executed_frame(frames):
     assert notes["WF_MID"] == "Pace marker" and notes["WF_NEW"] == "Finished last so far"
     assert tl["WORKFLOW_NAME"].iloc[0] == "WF_START" and tl["WORKFLOW_NAME"].iloc[-1] == "WF_END"
     assert pd.isna(tl.set_index("WORKFLOW_NAME").loc["WF_NEW", "USUAL_END_OFFSET_SEC"])   # < 4 clean nights
+
+
+# --- PR C review C2 / C3 over the executed frame ------------------------------------------------------------
+
+def _fc_in_flight() -> dict:
+    """An etl_cycle_sla_forecast-shaped dict for tonight's night (22:00 start, 7h clean nights, 02:00 now)."""
+    tonight = pd.Timestamp(_TONIGHT)
+    nights = [{"CYCLE_DATE": tonight, "CYCLE_START": tonight + timedelta(hours=22), "CYCLE_FINISH": pd.NaT,
+               "RUN_STATE": "INCOMPLETE", "EXPECTED_SPIKE": None}]
+    for i in range(1, 8):
+        s = tonight - timedelta(days=i) + timedelta(hours=22)
+        nights.append({"CYCLE_DATE": s.normalize(), "CYCLE_START": s, "CYCLE_FINISH": s + timedelta(hours=7),
+                       "RUN_STATE": "COMPLETE", "EXPECTED_SPIKE": None})
+    return {"nights": nights, "latest_state": "INCOMPLETE", "latest_failed": False,
+            "latest_start": tonight + timedelta(hours=22), "latest_cycle_date": tonight,
+            "snapshot_ts": pd.Timestamp(_NOW), "target_hhmm": "07:00", "breach_hhmm": "08:00"}
+
+
+def test_terminal_flag_and_the_regular_set_after_skipped_nights():
+    """C2: WF_END skipped 5 of the 14 prior nights (9 < 10, so it leaves the regular set) but ran on this night
+    last week (09-08): V156 calls it due, so the projection stands instead of a false 'not due tonight'."""
+    from app.logic.insights import etl_cycle_eta
+    assert set(_scan(_db(), end_workflow="WF_END")["TERM_RAN_LAST_WEEK"]) == {1}
+    assert set(_scan(_db())["TERM_RAN_LAST_WEEK"].isna()) == {True}             # no terminal configured
+    skipped = _scan(_db(_rows(skip_end=frozenset(_PRIOR[:5]))), end_workflow="WF_END")
+    assert "WF_END" not in set(skipped["WORKFLOW_NAME"]) and set(skipped["TERM_RAN_LAST_WEEK"]) == {1}
+    eta = etl_cycle_eta(_fc_in_flight(), skipped, end_workflow="WF_END")
+    assert eta["ok"] is True and eta["projected_hhmm"] == "05:00"
+    # ... and when it did NOT run on this night last week either, it is genuinely not due
+    off = _scan(_db(_rows(skip_end=frozenset({*_PRIOR[:5], "2026-09-08"}))), end_workflow="WF_END")
+    assert set(off["TERM_RAN_LAST_WEEK"]) == {0}
+    assert etl_cycle_eta(_fc_in_flight(), off, end_workflow="WF_END")["reason"] == "terminal_not_due"
+    # the flag is one scalar per row: no row multiplication, the uncapped totals are unchanged
+    assert skipped["TOTAL_WORKFLOWS"].iloc[0] == len(skipped)
+
+
+def test_a_half_dispatched_workflow_is_not_a_clean_finish():
+    """C3: WF_GAP's first task finished tonight and its second (after an idle gap) has not started, so only one
+    of its usual two tasks has a row. It is not a finish: no end offset, not the pace marker (WF_MID, 23 min
+    late, stays it), not 'Finished last so far'; its night status is the pre-#36 one (OK)."""
+    df = _scan(_db(_rows(gap_tonight=("T_G1",))), end_workflow="WF_END")
+    gap = _row(df, "WF_GAP")
+    assert (gap["NIGHT_STATUS"], gap["TASK_COUNT"]) == ("OK", 1)
+    assert pd.isna(gap["END_OFFSET_SEC"]) and gap["TYPICAL_END_OFFSET_SEC"] == 20700     # usually ends 03:45
+    assert set(df["PACE_WORKFLOW_NAME"]) == {"WF_MID"} and set(df["PACE_LATE_SEC"]) == {10980 - 9600}
+    tl = cycle_timeline_frame(df, start_workflow="WF_START", end_workflow="WF_END").set_index("WORKFLOW_NAME")
+    assert tl.loc["WF_GAP", "TIMELINE_NOTE"] == "" and pd.isna(tl.loc["WF_GAP", "LATE_VS_USUAL_SEC"])
+    # once both tasks have run it is a clean finish, and (usually ending latest before the terminal) the marker
+    full = _scan(_db(_rows(gap_tonight=("T_G1", "T_G2"))), end_workflow="WF_END")
+    fgap = _row(full, "WF_GAP")
+    assert fgap["TASK_COUNT"] == 2 and fgap["END_OFFSET_SEC"] == 13800
+    assert set(full["PACE_WORKFLOW_NAME"]) == {"WF_GAP"} and set(full["PACE_LATE_SEC"]) == {13800 - 20700}
 
 
 # --- the failure path: an error in the additive columns never blanks the roll-up ---------------------

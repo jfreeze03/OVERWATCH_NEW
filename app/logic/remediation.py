@@ -240,10 +240,19 @@ def suspend_recluster_object(fqn: str, *, materialized_view: bool = False) -> tu
 
 
 def drop_search_optimization(fqn: str) -> tuple[str, str]:
-    """Drop the search-optimization service; re-adding it rebuilds the access path from scratch."""
+    """Drop the search-optimization service; re-adding it rebuilds the access path from scratch.
+
+    The reverse is guidance, not a statement (PR C review C9): DROP SEARCH OPTIMIZATION with no ON clause
+    removes EVERY method on the table, while a bare ADD SEARCH OPTIMIZATION re-enables table-wide EQUALITY
+    only, so it does not restore a per-column configuration (SUBSTRING, GEO, EQUALITY on some columns). The
+    only way back is the configuration captured with DESCRIBE SEARCH OPTIMIZATION before the drop."""
     name = _plain_object_fqn(fqn)
     return (f"ALTER TABLE {name} DROP SEARCH OPTIMIZATION;",
-            f"ALTER TABLE {name} ADD SEARCH OPTIMIZATION;  -- full rebuild")
+            f"-- before the DROP, capture its methods: DESCRIBE SEARCH OPTIMIZATION ON {name};\n"
+            f"-- to reverse, re-add each captured METHOD(target) (a full rebuild): "
+            f"ALTER TABLE {name} ADD SEARCH OPTIMIZATION ON <METHOD>(<target>), ...;\n"
+            f"-- a bare ALTER TABLE {name} ADD SEARCH OPTIMIZATION; re-adds table-wide EQUALITY only, "
+            "not the dropped configuration")
 
 
 def suspend_mv_refresh(fqn: str) -> tuple[str, str]:

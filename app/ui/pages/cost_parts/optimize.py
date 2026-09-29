@@ -72,7 +72,13 @@ from app.logic.sizing import (
     size_recommendations,
     sizing_summary,
 )
-from app.logic.unread_maintenance import ACTION_VERDICTS, book_estimated_sql, unread_maintenance_verdicts
+from app.logic.unread_maintenance import (
+    ACTION_VERDICTS,
+    VERDICT_GONE,
+    book_estimated_sql,
+    confirm_failure_note,
+    unread_maintenance_verdicts,
+)
 from app.logic.workbench import experiment_state_by_key
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
@@ -370,6 +376,12 @@ def _spend_ceilings_panel(idle_head, rate: float, company: str = "ALL") -> None:
                        "SUSPEND), or set an account-level monitor to cap the whole account.")
         elif acct is None:
             empty_state("clean", "Every active warehouse is attached to a resource monitor.")
+
+
+def _clear_unread_confirm_latch() -> None:
+    """on_click of 'Retry the access-history check' (PR C review C8): drop the latched confirm failure BEFORE
+    the rerun, so the retry rerun runs the confirm again. Not a widget key (no StreamlitAPIException risk)."""
+    st.session_state.pop("_unread_confirm_failed", None)
 
 
 def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_operator: bool, *, bounds: tuple | None = None) -> None:
@@ -1310,10 +1322,28 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                      "without a read in the last 90 days.")
                 result_caption(_um)
             elif guard(_um, ""):
-                with st.spinner("Confirming against 90 days of access history…"):
-                    _conf = run(insights_sql.object_reads_confirm(tuple(_um.df["OBJECT_FQN"].astype(str)), 90),
-                                page=_PAGE, key=f"unread_maint_confirm_{company}_{_oc_db}", tier="historical",
-                                source="ACCESS_HISTORY reads (90d) + TABLES ids + share grants", probe=True)
+                import hashlib as _hl
+
+                from app.core.query import cache_scope as _cache_scope
+                from app.core.result import QueryResult as _QR
+                _conf_sql = insights_sql.object_reads_confirm(tuple(_um.df["OBJECT_FQN"].astype(str)), 90)
+                _conf_src = "ACCESS_HISTORY reads (90d) + TABLES ids + share grants"
+                # PR C review C8: run() never caches a failure, so a failed (e.g. timed-out, 180 s) confirm would
+                # re-run on every rerun of this page. Latch the failure per SQL + cache scope (Refresh re-arms
+                # it) and serve the degraded state until the operator retries.
+                _conf_sig = _hl.sha1((_conf_sql + "|" + _cache_scope(_conf_sql)).encode()).hexdigest()
+                _conf_fail = st.session_state.get("_unread_confirm_failed")
+                if isinstance(_conf_fail, dict) and _conf_fail.get("sig") == _conf_sig:
+                    _conf = _QR(df=pd.DataFrame(), ok=False, error=str(_conf_fail.get("error") or ""),
+                                error_kind=str(_conf_fail.get("kind") or ""), source=_conf_src,
+                                tier="historical")
+                else:
+                    with st.spinner("Confirming against 90 days of access history…"):
+                        _conf = run(_conf_sql, page=_PAGE, key=f"unread_maint_confirm_{company}_{_oc_db}",
+                                    tier="historical", source=_conf_src, probe=True)
+                    if not _conf.ok:
+                        st.session_state["_unread_confirm_failed"] = {
+                            "sig": _conf_sig, "kind": _conf.error_kind, "error": _conf.error}
                 _uv = unread_maintenance_verdicts(_um.df, _conf.df if _conf.ok else None, rate=rate)
                 _um0 = _um.df.iloc[0]
                 _cands = int(safe_float(_um0.get("CANDIDATES_WIN"), default=float(len(_um.df))))
@@ -1327,8 +1357,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     {"label": "Confirmed unread" + (f" (top {len(_um.df)})" if _um_trunc else ""),
                      "value": f"{len(_ua):,}" if _conf.ok else "—",
                      "severity": ("warn" if len(_ua) else "ok") if _conf.ok else "",
-                     "help": "No read in access history for 90 days, a database not shared out, and "
-                             "maintenance spend in the last 30 days."},
+                     "help": "No read in access history for 90 days, a database not shared out, a live object "
+                             "(not dropped or renamed), and maintenance spend in the last 30 days."},
                     {"label": "Est. $/mo if stopped" + _cap,
                      "value": format_usd(float(_ua["EST_MONTHLY_USD"].sum())) if _conf.ok else "—",
                      "help": "ESTIMATED: the last 30 complete days of maintenance credits x your credit rate, "
@@ -1336,8 +1366,21 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                              + (" Only the top objects are confirmed, so this is a floor." if _um_trunc else "")},
                 ])
                 if not _conf.ok:
-                    st.caption("Read evidence unavailable (ACCESS_HISTORY needs Enterprise edition) — "
-                               "ledger-only shortlist, not suspend candidates; no SQL.")
+                    # PR C review C8 / C18: say WHY by the error kind (only an object-not-visible / edition error
+                    # blames the edition), and retry only on request (the failure is latched above)
+                    st.caption(md_dollars(
+                        f"Read evidence unavailable: {confirm_failure_note(_conf.error_kind, _conf.error)} — "
+                        "ledger-only shortlist, not suspend candidates; no SQL."))
+                    st.button("Retry the access-history check", key="unread_maint_confirm_retry",
+                              on_click=_clear_unread_confirm_latch,
+                              help="Runs the 90-day access-history confirm again (up to the historical read's "
+                                   "time limit). Refresh also re-arms it.")
+                _gone_n = int(_uv["VERDICT"].eq(VERDICT_GONE).sum())
+                if _gone_n:
+                    # PR C review C11: dropped / renamed objects keep ledger spend for up to 30 days, but there is
+                    # nothing left to stop, so they carry no SQL and stay out of both KPIs above
+                    st.caption(f"{_gone_n:,} shortlisted object(s) no longer exist under that name (dropped or "
+                               "renamed): Object gone, no SQL, and not counted in the totals above.")
                 _um_cols = [c for c in ("OBJECT_FQN", "COMPANY", "VERDICT", "EST_MONTHLY_USD", "MAINT_USD",
                                         "CLUSTERING_CREDITS", "SEARCH_OPT_CREDITS", "MV_REFRESH_CREDITS",
                                         "READ_QUERIES", "READ_USERS", "LAST_READ", "WRITE_QUERIES",
@@ -1355,9 +1398,11 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 if _um_lines:
                     st.code("\n".join(_um_lines), language="sql")
                     st.caption("Review only — OVERWATCH never runs these. SUSPEND RECLUSTER and an MV SUSPEND "
-                               "reverse with RESUME; DROP SEARCH OPTIMIZATION rebuilds the access path from "
-                               "scratch if it is added back; a suspended materialized view cannot be queried "
-                               "until it is resumed. Confirm with the object's owner first.")
+                               "reverse with RESUME. DROP SEARCH OPTIMIZATION removes every method on the table: "
+                               "capture them first with DESCRIBE SEARCH OPTIMIZATION ON the table, because a bare "
+                               "ADD SEARCH OPTIMIZATION re-adds table-wide equality only (a full rebuild), not the "
+                               "dropped configuration. A suspended materialized view cannot be queried until it "
+                               "is resumed. Confirm with the object's owner first.")
                 _um_pick = str(st.session_state.get("unread_maint_sel_last") or "")
                 _um_row = _uv[_uv["OBJECT_FQN"].astype(str) == _um_pick] if _um_pick else _uv.iloc[0:0]
                 if not _um_row.empty:
@@ -1389,7 +1434,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                     and write_gate_open(_bk_key)):
                                 ok, msg = execute_statement(_bk, page=_PAGE)
                                 stamp_write(_bk_key, ok)  # C48
-                                notify(ok, f"Booked an ESTIMATED saving for {_fqn} (a repeat click books nothing)."
+                                notify(ok, f"Booked an ESTIMATED saving for {_fqn}, unless it was already booked "
+                                           "(any of its maintenance arms, not rejected): then nothing is added."
                                        if ok else f"Booking failed: {msg}")
                             elif not is_operator:
                                 st.caption("Booking needs SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
@@ -1406,6 +1452,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                                "left to stop.",
                             "Unconfirmed": "Access history could not confirm it (the read failed or missed the "
                                            "object), so no SQL is offered.",
+                            VERDICT_GONE: "No live object has this name any more (dropped or renamed): its "
+                                          "maintenance has already stopped and an ALTER would fail, so there is "
+                                          "nothing to stop or book.",
                         }.get(_verdict, ""))
                 _today = account_today()
                 _cov = pd.to_datetime(_um0.get("COVERAGE_START_DAY"), errors="coerce")

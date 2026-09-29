@@ -91,6 +91,7 @@ _VERDICTS = {
     # maintenance on unread objects (Next-Fifty #30)
     "SUSPEND CLUSTERING": _WARN, "DROP SEARCH OPTIMIZATION": _WARN, "SUSPEND MV REFRESH": _WARN,
     "KEEP": _OK, "CHECK SHARE CONSUMERS": _INFO, "UNCONFIRMED": _MUTED, "NO RECENT SPEND": _MUTED,
+    "OBJECT GONE": _MUTED,   # PR C review C11: dropped or renamed; nothing to stop
 }
 
 

@@ -275,3 +275,36 @@ def test_operator_books_a_confirmed_unread_object(monkeypatch):
     assert not at.exception, f"booking (shaped): {at.exception}"
     assert len(writes) == 1 and "'ESTIMATED'" in writes[0] and "'SUSPEND_RECLUSTER'" in writes[0]
     assert "WHERE NOT EXISTS" in writes[0]
+
+
+@_SKIP
+def test_a_failed_confirm_is_worded_by_kind_and_latched(monkeypatch):
+    """PR C review C8 / C18: a timed-out access-history confirm says it timed out (not 'needs Enterprise
+    edition'), the failure is latched so a rerun does not re-issue the (up to 180 s) scan, and the retry button
+    runs it again."""
+    from app.ui.pages.cost_parts import optimize
+    confirms: list[str] = []
+
+    def _run(sql, **kwargs):
+        if "OBJECTS_MODIFIED" in sql:
+            confirms.append(sql)
+            return QueryResult(df=pd.DataFrame(), ok=False, error_kind="timeout", source="stub",
+                               error="Statement reached its statement or warehouse timeout of 180 second(s).")
+        if "MAINT_CREDITS_30D" in sql:
+            return QueryResult(df=_SHORT, ok=True, source="stub")
+        return _shaped_run(sql, **kwargs)
+
+    monkeypatch.setattr(optimize, "run", _run)
+    at = _storage({"cost_unread_maint_toggle": True})
+    blob = _texts(at)
+    assert "Read evidence unavailable: the 90-day access-history check timed out" in blob
+    assert "ACCESS_HISTORY needs Enterprise edition" not in blob
+    assert len(confirms) == 1
+    at.run()                                                          # any rerun of the page
+    assert not at.exception and len(confirms) == 1, "the failed confirm re-ran on a plain rerun"
+    assert "check timed out" in _texts(at)                            # the degraded state still paints
+    retry = [b for b in at.button if str(b.key) == "unread_maint_confirm_retry"]
+    assert retry, [str(b.key) for b in at.button]
+    retry[0].click()
+    at.run()
+    assert not at.exception and len(confirms) == 2                    # the retry ran it again

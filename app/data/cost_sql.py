@@ -735,8 +735,10 @@ def maintenance_on_unread(days: int = 90, company: str = "ALL", database: str = 
     (ACCESS_HISTORY) must confirm before any SQL is offered. Floor ``min_credits`` over the window; top
     ``limit`` (5..200) by the last 30 complete days. CANDIDATES_WIN / MAINT_CREDITS_WIN /
     MAINT_CREDITS_30D_WIN are window totals computed BEFORE the LIMIT (uncapped). COVERAGE_START_DAY and
-    LEDGER_LAST_DAY bound what the window really covers. COMPANY is labelled post-aggregation from the
-    object's own database (the V030 shape law); the company and Database filters apply per row."""
+    LEDGER_LAST_DAY bound what the window really covers, LEDGER-WIDE (the one-row ``b`` CTE: window
+    predicate only, no company / Database / arm filter), so a quiet database never reads as a failing load
+    or a short ledger (PR C review C7). COMPANY is labelled post-aggregation from the object's own database
+    (the V030 shape law); the company and Database filters apply per row."""
     days = bounded_days(days, 90)
     lim = max(5, min(int(limit or 50), 200))
     floor = max(0.0, safe_float(min_credits, 1.0))
@@ -764,12 +766,15 @@ WITH o AS (
            SUM(IFF(COST_ARM = 'QUERY_COMPUTE_WRITE', CREDITS, 0)) AS WRITE_CREDITS,
            MIN(IFF(COST_ARM IN ({maint}), DAY, NULL)) AS FIRST_MAINT_DAY,
            MAX(IFF(COST_ARM IN ({maint}), DAY, NULL)) AS LAST_MAINT_DAY,
-           COUNT(DISTINCT IFF(COST_ARM IN ({maint}), DAY, NULL)) AS MAINT_DAYS,
-           MIN(MIN(DAY)) OVER () AS COVERAGE_START_DAY,
-           MAX(MAX(DAY)) OVER () AS LEDGER_LAST_DAY
+           COUNT(DISTINCT IFF(COST_ARM IN ({maint}), DAY, NULL)) AS MAINT_DAYS
     FROM DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY
     WHERE {where}
     GROUP BY UPPER(REPLACE(OBJECT_FQN, '"', ''))
+),
+b AS (
+    SELECT MIN(DAY) AS COVERAGE_START_DAY, MAX(DAY) AS LEDGER_LAST_DAY
+    FROM DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY
+    WHERE {scope_window_where("DAY", days, exclude_today=True)}
 ),
 c AS (
     SELECT o.*, o.CLUSTERING_CREDITS + o.SEARCH_OPT_CREDITS + o.MV_REFRESH_CREDITS AS MAINT_CREDITS
@@ -785,11 +790,12 @@ SELECT c.OBJECT_FQN, c.OBJECT_DOMAIN,
        ROUND(c.MAINT_CREDITS, 4) AS MAINT_CREDITS,
        ROUND(c.MAINT_CREDITS_30D, 4) AS MAINT_CREDITS_30D,
        ROUND(c.WRITE_CREDITS, 4) AS WRITE_CREDITS,
-       c.FIRST_MAINT_DAY, c.LAST_MAINT_DAY, c.MAINT_DAYS, c.COVERAGE_START_DAY, c.LEDGER_LAST_DAY,
+       c.FIRST_MAINT_DAY, c.LAST_MAINT_DAY, c.MAINT_DAYS, b.COVERAGE_START_DAY, b.LEDGER_LAST_DAY,
        COUNT(*) OVER () AS CANDIDATES_WIN,
        ROUND(SUM(c.MAINT_CREDITS) OVER (), 4) AS MAINT_CREDITS_WIN,
        ROUND(SUM(c.MAINT_CREDITS_30D) OVER (), 4) AS MAINT_CREDITS_30D_WIN
 FROM c
+CROSS JOIN b
 ORDER BY c.MAINT_CREDITS_30D DESC, c.MAINT_CREDITS DESC, c.OBJECT_FQN
 LIMIT {lim}
 """
@@ -798,9 +804,14 @@ LIMIT {lim}
 def unread_maintenance_proof(fqn: str, booked_on: date, baseline_monthly_credits: float) -> str:
     """Next-Fifty #30: the runnable PROOF_SQL booked with an unread-maintenance ESTIMATED ledger row.
 
-    The object's maintenance credits (clustering / search optimization / MV refresh) since the booking day,
-    as a 30-day run-rate beside the baseline booked with it: a suspended arm reads ~0 now. Stored in
-    SAVINGS_LEDGER.PROOF_SQL and run later by a human, often in a UTC worksheet, so 'today' is pinned to
+    The object's maintenance credits (clustering / search optimization / MV refresh) AFTER the booking day,
+    as a 30-day run-rate beside the baseline booked with it: a suspended arm reads ~0 now. The booking day
+    itself is left out (booked right after the ALTER, it still carries pre-ALTER credits), and the
+    after-window ends at LOADED_THROUGH (the ledger's newest loaded day since booking, before today): a day
+    the loader has not written yet is neither summed as 0 nor divided by, so a stalled load never 'proves'
+    a saving. DAYS_MEASURED = the loaded days after booking; MONTHLY_CREDITS_NOW is NULL (too early) until
+    one has loaded (PR C review C10, the same bounds as the measured verify's ledger_before_after). Stored
+    in SAVINGS_LEDGER.PROOF_SQL and run later by a human, often in a UTC worksheet, so 'today' is pinned to
     the account clock (account_today_sql; the TIMEZONE STANDARD) and the statement holds no ';'. The
     object matches on the same normalized key as maintenance_on_unread."""
     key = str(fqn or "").replace('"', "").strip().upper()
@@ -808,16 +819,19 @@ def unread_maintenance_proof(fqn: str, booked_on: date, baseline_monthly_credits
         raise ValueError("unread_maintenance_proof needs an object name")
     day = sql_literal(booked_on.strftime("%Y-%m-%d"))
     today = account_today_sql()
-    days_since = f"DATEDIFF('day', {day}::DATE, {today})"
+    measured = f"GREATEST(MAX(DATEDIFF('day', {day}::DATE, l.LOADED_THROUGH)), 0)"
     return (
+        "WITH l AS (SELECT MAX(DAY) AS LOADED_THROUGH FROM DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY "
+        f"WHERE DAY >= {day}::DATE AND DAY < {today}) "
         f"SELECT {sql_number(round(safe_float(baseline_monthly_credits), 4))} AS BASELINE_MONTHLY_CREDITS, "
-        "ROUND(COALESCE(SUM(CREDITS), 0), 4) AS CREDITS_SINCE_BOOKED, "
-        f"{days_since} AS DAYS_SINCE_BOOKED, "
-        f"ROUND(COALESCE(SUM(CREDITS), 0) * 30 / NULLIF({days_since}, 0), 4) AS MONTHLY_CREDITS_NOW "
-        "FROM DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY "
-        f"WHERE UPPER(REPLACE(OBJECT_FQN, '\"', '')) = {sql_literal(key, 300)} "
-        f"AND COST_ARM IN ({_UNREAD_MAINT_ARMS}) "
-        f"AND DAY >= {day}::DATE AND DAY < {today}"
+        "MAX(l.LOADED_THROUGH) AS LOADED_THROUGH, "
+        f"{measured} AS DAYS_MEASURED, "
+        "ROUND(COALESCE(SUM(f.CREDITS), 0), 4) AS CREDITS_SINCE_BOOKED, "
+        f"ROUND(COALESCE(SUM(f.CREDITS), 0) * 30 / NULLIF({measured}, 0), 4) AS MONTHLY_CREDITS_NOW "
+        "FROM l LEFT JOIN DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY f "
+        f"ON UPPER(REPLACE(f.OBJECT_FQN, '\"', '')) = {sql_literal(key, 300)} "
+        f"AND f.COST_ARM IN ({_UNREAD_MAINT_ARMS}) "
+        f"AND f.DAY > {day}::DATE AND f.DAY <= l.LOADED_THROUGH"
     )
 
 
