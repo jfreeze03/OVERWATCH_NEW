@@ -2242,10 +2242,14 @@ def _savings_tab(rate: float = 3.68, settings: dict | None = None) -> None:
                 # (measurement, proof query id, overlap check), never from a read that moved in between.
                 _clicked = bool(st.session_state.get("ledger_verify_exec"))
                 _shown = st.session_state.get("_ow_ledger_shown")
-                if _clicked and isinstance(_shown, dict) and _shown.get("item") == _item:
+                # Review r2: a click whose rerun lands on another item than the one whose UPDATE was painted
+                # (the option list changed under the click and 1.52.2 reset the pick, or an item switch and a
+                # click coalesced into one rerun) is STALE: it never writes, and this item takes its own
+                # prefill. "_ow_ledger_shown" is written only AFTER st.code painted the statement below.
+                _same = isinstance(_shown, dict) and _shown.get("item") == _item
+                _stale_click = _clicked and not _same
+                if _clicked and _same:
                     _m, _msql, _qid, _ov = _shown["m"], _shown["sql"], _shown["qid"], _shown["ov"]
-                st.session_state["_ow_ledger_shown"] = {"item": _item, "m": _m, "sql": _msql, "qid": _qid,
-                                                        "ov": _ov}
                 _measured = _m is not None and _m["state"] == MEASURED
                 _overlap = _ov is not None and (bool(_ov["count"]) or not _ov["complete"])
                 if _m is not None:
@@ -2305,10 +2309,12 @@ def _savings_tab(rate: float = 3.68, settings: dict | None = None) -> None:
                 _pf = verify_prefill(
                     item_id=_item,
                     target=float(_m["prefill_usd"]) if _measured and not _overlap and _m is not None else None,
-                    last=st.session_state.get("_ow_ledger_prefill"),
+                    # a stale click forces the item-change rule: the amount on screen belongs to another item
+                    last=({"item": "", "val": None} if _stale_click
+                          else st.session_state.get("_ow_ledger_prefill")),
                     # None = the key is ABSENT: never rendered, or dropped after the section was left
                     widget_value=st.session_state.get("ledger_verified_usd"),
-                    clicked=_clicked)
+                    clicked=_clicked and not _stale_click)
                 st.session_state["_ow_ledger_prefill"] = _pf["state"]
                 if _pf["write"] is not None:
                     st.session_state["ledger_verified_usd"] = float(_pf["write"])
@@ -2342,10 +2348,18 @@ def _savings_tab(rate: float = 3.68, settings: dict | None = None) -> None:
                     f"WHERE ITEM_ID = {sql_literal(row['ITEM_ID'])} AND STATE = 'ESTIMATED';"
                 )
                 st.code(update_sql, language="sql")
+                # the statement the previous render PAINTED for this item; a click executes only that
+                _painted = _shown.get("update_sql") if _same and isinstance(_shown, dict) else None
+                st.session_state["_ow_ledger_shown"] = {"item": _item, "m": _m, "sql": _msql, "qid": _qid,
+                                                        "ov": _ov, "update_sql": update_sql}
                 if not allowed:
                     st.warning(why)
-                elif (is_operator and st.button("Verify savings item", key="ledger_verify_exec")
-                        and write_gate_open("ledger_verify_exec")):
-                    ok, msg = execute_statement(update_sql, page=_PAGE)
-                    stamp_write("ledger_verify_exec", ok)  # C48
-                    notify(ok, msg if not ok else f"Verified savings item {row['ITEM_ID']}.")
+                elif is_operator and st.button("Verify savings item", key="ledger_verify_exec"):
+                    if _stale_click or update_sql != _painted:
+                        # review r2: never execute a statement nobody saw
+                        st.warning("The savings list changed as you clicked, so nothing was written. Review "
+                                   "this item and click Verify again.")
+                    elif write_gate_open("ledger_verify_exec"):
+                        ok, msg = execute_statement(update_sql, page=_PAGE)
+                        stamp_write("ledger_verify_exec", ok)  # C48
+                        notify(ok, msg if not ok else f"Verified savings item {row['ITEM_ID']}.")

@@ -354,8 +354,17 @@ def test_verify_measures_after_the_pick_and_prefills_behind_a_sentinel():
     assert v.count('st.session_state["ledger_verified_usd"] = ') == 1
     # C12: an ABSENT key (Streamlit dropped it when the section was left) reaches the decision as None
     assert 'widget_value=st.session_state.get("ledger_verified_usd"),' in v
-    assert 'last=st.session_state.get("_ow_ledger_prefill")' in v and "clicked=_clicked)" in v
+    assert 'else st.session_state.get("_ow_ledger_prefill")),' in v and "clicked=_clicked and not _stale_click)" in v
     assert '_clicked = bool(st.session_state.get("ledger_verify_exec"))' in v
+    # review r2: a click on another item than the one whose UPDATE was painted is stale -- the prefill takes the
+    # item-change rule, and the write runs only when the rebuilt statement is exactly the one painted
+    assert '_stale_click = _clicked and not _same' in v
+    assert 'last=({"item": "", "val": None} if _stale_click' in v
+    gate = v.split('st.button("Verify savings item", key="ledger_verify_exec"):', 1)[1]
+    assert gate.index("if _stale_click or update_sql != _painted:") < gate.index('elif write_gate_open("ledger_verify_exec"):')
+    assert gate.index('elif write_gate_open("ledger_verify_exec"):') < gate.index("execute_statement(update_sql")
+    # the painted statement is recorded only AFTER st.code painted it
+    assert v.index('st.code(update_sql, language="sql")') < v.index('"ov": _ov, "update_sql": update_sql}')
     assert v.index('st.session_state["_ow_ledger_prefill"] = _pf["state"]') < v.index('key="ledger_verified_usd"')
     # C22: an overlapping change withdraws the prefill target
     assert 'target=float(_m["prefill_usd"]) if _measured and not _overlap and _m is not None else None' in v

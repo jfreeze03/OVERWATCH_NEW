@@ -25,7 +25,9 @@ takes the failure rule, whatever its baseline rate; a warehouse-spend item re-br
 triage scan's own spend test (robust |z| >= anomaly.DEFAULT_THRESHOLD over the warehouse's trailing
 TRIAGE_WINDOW_DAYS, with its $ and active-day floors and the known-spike calendar) fires again in the
 direction it was tracked for (a spike, or a collapse), read back from the TITLE triage_track_item wrote.
-A quiet signal reads "Held"; neither ever reads "Not fixed".
+A quiet signal reads "Held". A triage warehouse item never reads "Not fixed" (only Held / Re-broke / Too
+early / not measurable); a triage task item can, when its failure rate never fell 20% below the pre-done
+rate (review r2).
 
 "Re-broke" and "Not fixed" lift Operations > Optimize's 90-day Track-all cooldown (OVERRIDES_COOLDOWN);
 "Too early", "Unavailable" and "Not checked" never do, and a dismissal is never lifted. The thresholds

@@ -871,5 +871,12 @@ def test_glossary_optimize_columns_keep_each_state_under_its_own_column():
     assert "Unknown for every family when the Action Center read fails" in track
     assert "Unknown for every family" not in held
     assert "absent when the Action Center status read fails" in held and "Unavailable when" in held
-    # review C23: 'counts in Act now' is qualified by Track all's own row rule
-    assert "only when it is an ACT NOW family with a specific diagnosis that is not own traffic" in track
+    # review C23 + r2: Act now counts every re-opened ACT NOW family with a specific diagnosis (own traffic too, as
+    # optimize_queue's act_now mask has no own-traffic filter); only Track all skips own traffic
+    assert "counts in Act now again when it is an ACT NOW family with a specific diagnosis" in track
+    assert "Track all takes it only when it is also not own traffic" in track
+    assert "only when it is an ACT NOW family with a specific diagnosis that is not own traffic" not in track
+    from tests._source import read
+    q = read("app/ui/pages/ops_parts/optimize_queue.py")
+    act = q.split("act_now = portfolio[", 1)[1].split("\n", 1)[0]
+    assert "OW_SELF" not in act
