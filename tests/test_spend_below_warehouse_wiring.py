@@ -56,10 +56,44 @@ def test_nothing_reads_until_the_toggle_is_on():
 def test_jump_is_gated_on_can_open_and_carries_the_warehouse():
     body = _helper()
     btn = body.index('can_open("Operations") and st.button(')
-    nav = body.index('request_navigation("Operations", "Queries", {"warehouse_contains": wh})')
+    nav = body.index('request_navigation("Operations", "Queries", {"warehouse_contains": wh}, context={')
     assert btn < nav
     assert 'key="spend_anom_open_queries"' in body
     assert 'st.selectbox("Warehouse to break down", opts, key=f"spend_anom_drill_wh_{fday}")' in body
+
+
+def test_jump_caption_tells_the_truth_about_the_sticky_substring_filter():
+    """F18: the jump sets the GLOBAL 'Warehouse contains' filter — a substring match (WH_ALFA_TRANSFORM
+    also lists WH_ALFA_TRANSFORM_PRD) that stays on across pages until cleared. The caption says so,
+    never 'filters Operations ▸ Queries to <wh>', and the destination announces the reshaped scope once
+    through the rec24 filter_note that components.page_header renders on arrival."""
+    body = _helper()
+    assert "The jump filters Operations ▸ Queries to" not in body
+    caption = body.split("if can_open(\"Operations\"):\n        st.caption(md_dollars(", 1)[1].split("))", 1)[0]
+    for phrase in ("sets the Warehouse contains filter to {wh}", "also matches longer warehouse ",
+                   "names that contain it", "stays on across pages until you clear it",
+                   "The flagged day ", "is not carried over", "set the Window to include {fday}"):
+        assert phrase in caption, phrase
+    nav = body.split('request_navigation("Operations", "Queries", {"warehouse_contains": wh}, context={', 1)[1]
+    note = nav.split("})", 1)[0]
+    assert '"filter_note": (f"Warehouse contains filter set to {wh} from the {fday} spend anomaly ' in note
+    assert "also matches longer names containing {wh}" in note and "the day is not carried over" in note
+    # the destination really renders it (and drops only the note, once)
+    comp = read("app/ui/components.py")
+    assert '_nav_ctx.get("filter_note")' in comp and 'k != "filter_note"' in comp
+    assert 'page_header("Operations",' in read("app/ui/pages/operations.py")
+
+
+def test_method_caption_names_what_each_mask_row_holds():
+    """F16: under a named company the unclassified row holds task / service logins (COMPANY_FOR_USER
+    'UNKNOWN'), not another company's users; the caption says so with the reader's own labels."""
+    body = _helper()
+    assert "UNCLASSIFIED_USERS_LABEL" in body and "outside_company_label('USER', _co)" in body
+    assert "outside_company_label('DATABASE', _co)" in body
+    assert "(task, service and other unclassified users)" in body
+    assert "another company's users" in body and "grouped, not dropped" in body
+    assert 'if _co == "UNKNOWN":' in body and 'elif _co.upper() != "ALL":' in body   # ALL: no mask line
+    assert "other-company" not in body
 
 
 def test_helper_budgets_and_honesty():
@@ -162,7 +196,13 @@ def test_toggle_off_reads_nothing_but_offers_the_jump(monkeypatch):
     labels = [b.label for b in at.button]
     assert "Queries on WH_A → Operations ▸ Queries" in labels
     at.button(key="spend_anom_open_queries").click().run()
-    assert nav == [(("Operations", "Queries", {"warehouse_contains": "WH_A"}), {})]
+    assert len(nav) == 1
+    args, kwargs = nav[0]
+    assert args == ("Operations", "Queries", {"warehouse_contains": "WH_A"})
+    note = kwargs["context"]["filter_note"]
+    assert note.startswith("Warehouse contains filter set to WH_A from the ") and "longer names" in note
+    caps = " ".join(str(c.value) for c in at.caption)
+    assert "sets the Warehouse contains filter to WH" in caps and "until you clear it" in caps
 
 
 def test_toggle_on_explains_the_day_in_one_hourly_batch(monkeypatch):

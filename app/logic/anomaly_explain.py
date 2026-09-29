@@ -19,6 +19,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 
+from app.companies import COMPANIES
 from app.logic.formulas import ACCOUNT_TIMEZONE, format_usd, safe_float
 from app.logic.rca import candidates_from_changes
 
@@ -27,10 +28,35 @@ _MAX_DRIVERS = 6
 # Next-Fifty #27: the below-warehouse drill refuses an average over fewer loaded days.
 _MIN_BASELINE_DAYS = 7
 UNALLOCATED_LABEL = "Not allocated to a query (idle / carry-over hours)"
-# Synthetic buckets mart27_sql.alloc_xdim_day_drivers emits: the top-N fold and the
-# other-company mask. Never named as a driver in the narrative.
-_SQL_OTHER = {"USER": "(all other users)", "DATABASE": "(all other databases)"}
-_MASKED = {"USER": "(other-company users)", "DATABASE": "(other-company databases)"}
+
+# Synthetic buckets mart27_sql.alloc_xdim_day_drivers EMITS — the ONE source of truth for their
+# text: the reader imports these to write the SQL, and is_bucket_row / _below_table detect them by
+# exact string, so a relabel can never silently leak a bucket into the narrative as a "user".
+#   * the top-N fold ('(all other users|databases)');
+#   * the company masks (named scope only; ALL masks nothing):
+#       - UNCLASSIFIED_USERS_LABEL: users COMPANY_FOR_USER classifies 'UNKNOWN' — no company role,
+#         typically task / service / ETL logins. Under the UNKNOWN scope they ARE the scope, so no
+#         such arm is emitted there;
+#       - outside_company_label(dim, company): users positively classified to another company, and
+#         the databases outside the company's view.
+SQL_OTHER_LABELS = {"USER": "(all other users)", "DATABASE": "(all other databases)"}
+UNCLASSIFIED_USERS_LABEL = "(unclassified users)"
+
+
+def outside_company_label(dimension: str, company: str) -> str:
+    """'(users outside ALFA)' / '(databases outside ALFA)' — the masked row of a named scope."""
+    noun = "users" if str(dimension).upper() == "USER" else "databases"
+    return f"({noun} outside {company})"
+
+
+# Every mask label the reader can emit, per dimension: the scopes whose visibility clause is
+# non-empty are the named entries of COMPANIES (user_clause / database_visibility_clause return ''
+# for anything else), so this enumeration is exact.
+_MASK_LABELS = {
+    "USER": frozenset({UNCLASSIFIED_USERS_LABEL}
+                      | {outside_company_label("USER", c) for c in COMPANIES if c != "ALL"}),
+    "DATABASE": frozenset(outside_company_label("DATABASE", c) for c in COMPANIES if c != "ALL"),
+}
 
 
 @dataclass(frozen=True)
@@ -162,10 +188,13 @@ def _narrative(fday: date | None, actual: float, baseline: float, delta: float,
 
 def is_bucket_row(name: object) -> bool:
     """True for a synthetic row of the below-warehouse tables — the 'All other …' fold, the
-    SQL top-N bucket, an other-company mask, the not-allocated residual. Never a login or a
-    database name: the page skips the directory lookup for it and the narrative never names it."""
+    SQL top-N bucket, a company mask (unclassified users, users/databases outside the company),
+    the not-allocated residual. Never a login or a database name: the page skips the directory
+    lookup for it, and the narrative never presents it as a named user or database (it describes
+    it as a group when it carries the largest change)."""
     text = str(name or "")
-    return (text == UNALLOCATED_LABEL or text in _SQL_OTHER.values() or text in _MASKED.values()
+    return (text == UNALLOCATED_LABEL or text in SQL_OTHER_LABELS.values()
+            or any(text in labels for labels in _MASK_LABELS.values())
             or text.startswith("All other "))
 
 
@@ -192,23 +221,25 @@ def _dim_split(work: pd.DataFrame, dim: str, fday: date, spine: set,
 def _below_table(dim: str, rows: dict[str, tuple[float, float]], m_base: float, m_act: float,
                  max_rows: int) -> tuple[tuple[DriverContribution, ...], float]:
     """One dimension's table + its raw not-allocated delta. Rows: the top ``max_rows`` real keys
-    by |delta| (the other-company mask always its own row, sorted in), then 'All other … (n)'
+    by |delta| (each company mask always its own row, sorted in), then 'All other … (n)'
     (the rest plus the SQL top-N bucket; 'n+' when that bucket hides more keys), then the
     UNALLOCATED_LABEL residual. Each row is rounded to cents and the residual row BALANCES the
     rounded rows to the rounded metered figures, so a table adds up to metered_delta_usd to the
     cent. Share % is suppressed on an offsetting day (|net| < half the gross churn, the
     explain_by_warehouse rule, with the residual counted in the gross)."""
     noun = "users" if dim == "USER" else "databases"
-    sql_other, masked = _SQL_OTHER[dim], _MASKED[dim]
+    sql_other, masks = SQL_OTHER_LABELS[dim], _MASK_LABELS[dim]
     deltas = {k: a - b for k, (b, a) in rows.items()}
     m_delta = m_act - m_base
     unallocated = m_delta - sum(deltas.values())
     gross = sum(abs(d) for d in deltas.values()) + abs(unallocated)
-    real = sorted((k for k in rows if k not in (sql_other, masked)), key=lambda k: (-abs(deltas[k]), k))
+    real = sorted((k for k in rows if k != sql_other and k not in masks),
+                  key=lambda k: (-abs(deltas[k]), k))
     shown = real[:max(1, int(max_rows))]
     rest = real[len(shown):]
-    if masked in rows:
-        shown = sorted([*shown, masked], key=lambda k: (-abs(deltas[k]), k))
+    present = [k for k in rows if k in masks]
+    if present:
+        shown = sorted([*shown, *present], key=lambda k: (-abs(deltas[k]), k))
     lines = [(k, rows[k][0], rows[k][1]) for k in shown]
     folded = rest + ([sql_other] if sql_other in rows else [])
     if folded:
@@ -230,14 +261,35 @@ def _below_table(dim: str, rows: dict[str, tuple[float, float]], m_base: float, 
     return table, unallocated
 
 
+def _bucket_phrase(name: str) -> str:
+    """A bucket row as prose: '(unclassified users)' -> 'unclassified users',
+    'All other users (7)' -> 'all other users (7)'."""
+    if name.startswith("(") and name.endswith(")"):
+        return name[1:-1]
+    return name[:1].lower() + name[1:]
+
+
+def _moved(row: DriverContribution, whose: str) -> str:
+    return (f"{format_usd(abs(row.delta_usd))} {'over' if row.delta_usd >= 0 else 'under'} {whose} "
+            "average" + (f" ({row.share_pct:+.0f}% of the move)" if row.share_pct else ""))
+
+
 def _top_clause(label: str, rows: tuple[DriverContribution, ...], *, second: bool) -> str:
-    real = [r for r in rows if not is_bucket_row(r.name) and abs(r.delta_usd) >= 0.01]
+    """The table's lead: its top real key — or, when a group row (a company mask or 'All other …')
+    moved more than every named key, that group first, then the largest named key. The
+    not-allocated residual never leads here: the idle clause reports it."""
+    moved = [r for r in rows if r.name != UNALLOCATED_LABEL and abs(r.delta_usd) >= 0.01]
+    real = [r for r in moved if not is_bucket_row(r.name)]
+    group = max((r for r in moved if is_bucket_row(r.name)), key=lambda r: abs(r.delta_usd), default=None)
+    noun = "user" if label == "By user" else "database"
+    if group is not None and (not real or abs(group.delta_usd) > abs(real[0].delta_usd)):
+        text = f" {label}: the largest change is in {_bucket_phrase(group.name)} — {_moved(group, 'their')}"
+        if real:
+            text += f"; the largest named {noun} is {real[0].name} {_moved(real[0], 'its')}"
+        return text + "."
     if not real:
         return ""
-    top = real[0]
-    text = (f" {label}: {top.name} {format_usd(abs(top.delta_usd))} "
-            f"{'over' if top.delta_usd >= 0 else 'under'} its average"
-            + (f" ({top.share_pct:+.0f}% of the move)" if top.share_pct else ""))
+    text = f" {label}: {real[0].name} {_moved(real[0], 'its')}"
     if second and len(real) > 1:
         nxt = real[1]
         text += (f", then {nxt.name} ({format_usd(abs(nxt.delta_usd))} "
