@@ -22,8 +22,8 @@ from app.core.query import execute_action, execute_statement, run, run_batch
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters, navigation_context, request_navigation
-from app.data import alert_evidence_sql, mart_sql, recheck_sql, security_sql
-from app.logic import email_path, remediation, tuning
+from app.data import alert_evidence_sql, mart_sql, ops_sql, recheck_sql, security_sql
+from app.logic import email_path, remediation, stmt_timeout, tuning
 from app.logic.ai_prompts import alert_evidence_prompt
 from app.logic.alert_evidence import plan_for_alert
 from app.logic.formulas import account_now, humanize_age, humanize_duration, md_dollars, safe_float
@@ -1160,6 +1160,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                                         "Statement timeout 1h",
                                                         "Cap clusters at 1"],
                                                 horizontal=True, key=f"clf_kind_{event_id[:8]}")
+                            _cl_plan: dict | None = None
                             if fix_kind.startswith("Tighten"):
                                 # r34: read the CURRENT AUTO_SUSPEND before generating a tighten — a
                                 # blind SET=60 RAISES an already-30s timer (the A3 hazard), the
@@ -1182,14 +1183,27 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                                 _cl_known, _cl_cur = True, float(_clv)
                                 _cl_plan = remediation.tighten_suspend_plan(wh_inline, _cl_cur, _cl_known)
                                 stmt_cl = _cl_plan["stmt"]
+                            elif fix_kind.startswith("Statement"):
+                                # Next-Fifty #33 F1: tighten-only, like the auto-suspend guard. A blind
+                                # SET = 3600 LOOSENS a warehouse already capped tighter (the app warehouse
+                                # runs at 300s), so read the warehouse's current value first (the same
+                                # SHOW as the Warehouses timeout posture; metadata-cached) and generate the
+                                # 1h cap only when it tightens.
+                                _to_res = run(ops_sql.warehouse_stmt_timeout_sql(wh_inline), page=_PAGE,
+                                              key=f"clf_stmt_to_{event_id[:8]}", tier="metadata",
+                                              source=f"SHOW PARAMETERS IN WAREHOUSE {wh_inline}",
+                                              max_rows=0, probe=True)
+                                _to_cur, _to_lvl = stmt_timeout.parse_timeout_row(
+                                    _to_res.df if _to_res.usable() else None)
+                                _cl_plan = stmt_timeout.tighten_timeout_plan(wh_inline, _to_cur, _to_lvl)
+                                stmt_cl = _cl_plan["stmt"]
+                            else:
+                                stmt_cl = remediation.cluster_range_fix(wh_inline, 1, 1)
+                            if _cl_plan is not None:
                                 if _cl_plan["level"] == "warning":
                                     st.warning(_cl_plan["message"])
                                 elif _cl_plan["level"] == "info":
                                     st.info(_cl_plan["message"])
-                            elif fix_kind.startswith("Statement"):
-                                stmt_cl = remediation.statement_timeout_fix(wh_inline, 3600)
-                            else:
-                                stmt_cl = remediation.cluster_range_fix(wh_inline, 1, 1)
                             if stmt_cl:
                                 st.code(stmt_cl, language="sql")
                             if stmt_cl and is_operator:
@@ -1202,6 +1216,10 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                              else "STATEMENT_TIMEOUT" if fix_kind.startswith("Statement")
                                              else "CLUSTER_RANGE")
                                 st.caption(remediation.reverse_hint(_rev_kind, wh_inline))
+                                if _cl_plan is not None and _cl_plan.get("undo"):
+                                    # #33 F1: the timeout's exact undo, from the value read above
+                                    st.caption(md_dollars("Exact undo for this warehouse: "
+                                                          + _cl_plan["undo"]))
                                 if (confirm_gate(wh_inline, "Execute + audit + book estimate",
                                                  key=f"clf_exec_{event_id[:8]}",
                                                  prompt="Type the warehouse name to confirm",

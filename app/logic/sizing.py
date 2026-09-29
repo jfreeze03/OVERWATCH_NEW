@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import pandas as pd
 
-from .formulas import safe_div, safe_float
+from .formulas import humanize_duration, safe_div, safe_float
 
-QUEUE_UP_MIN_PER_DAY = 30.0    # sustained queueing -> size up / add cluster
+QUEUE_UP_MIN_PER_DAY = 30.0    # sustained OVERLOAD queueing -> add a cluster (scale out) [#38]
 # D2 (audit 2026-07-31): every load signal is now PER DAY. The spill threshold
 # used to be a WINDOW TOTAL sitting next to a per-day queue threshold, so the
 # same warehouse crossed it at 90d and not at 7d — the advice moved with the
@@ -27,7 +27,21 @@ MIN_ACTIVE_DAYS = 2
 MIN_ACTIVE_DAYS_PER_30D = 3.0
 AUTO_SUSPEND_TARGET_SEC = 60
 
+# Next-Fifty #38: the merged "Size up / add cluster" verdict is SPLIT by the kind of pressure.
+# Overload queueing with no remote spill is CONCURRENCY -> more clusters, not a bigger size.
+# Remote spill is PER-QUERY memory -> a bigger size (more memory per cluster); a cluster does not
+# help one spilling query. Both at once -> size up FIRST (spilling queries hold slots longer).
+RECOMMEND_SCALE_OUT = "Add a cluster (scale out)"
+RECOMMEND_SIZE_UP = "Size up"
+# Legacy merged verdict (<= v4.600.0). NEVER emitted any more; kept so an old import or an
+# externally built frame still resolves and still counts as capacity pressure.
 RECOMMEND_UP = "Size up / add cluster"
+UP_VERDICTS = frozenset({RECOMMEND_SCALE_OUT, RECOMMEND_SIZE_UP, RECOMMEND_UP})
+# A long peak-day p95 is context for a scale-out row, never a routing signal (on the mart path it
+# is the PEAK daily p95, so it would over-route to size-up). Mirrors wh_health.LONG_P95_SEC.
+LONG_P95_SEC = 120.0
+# remediation.cluster_range_fix clamps MAX_CLUSTER_COUNT to 10; the prefill never promises more.
+CLUSTER_RANGE_CAP = 10
 RECOMMEND_DOWN = "Size down candidate"
 RECOMMEND_SUSPEND = "Tune auto-suspend first"
 RECOMMEND_CADENCE = "Review cadence / consolidation"
@@ -112,12 +126,7 @@ def size_recommendations(df: pd.DataFrame, credit_rate_usd: float, window_days: 
         pressure = queued >= QUEUE_UP_MIN_PER_DAY or spill >= SPILL_UP_GB_PER_DAY
         enough = bool(row["EVIDENCE_SUFFICIENT"])
         if pressure and enough:
-            why = []
-            if queued >= QUEUE_UP_MIN_PER_DAY:
-                why.append(f"{queued:.0f} overload-queued min/day")
-            if spill >= SPILL_UP_GB_PER_DAY:
-                why.append(f"{spill:.1f} GB/day remote spill")
-            return RECOMMEND_UP, "Concurrency/memory pressure: " + ", ".join(why) + "."
+            return _pressure_verdict(row, queued, spill, p95)
         if idle >= SUSPEND_FIRST_IDLE_PCT:
             if settings_supplied:
                 if not bool(row.get("AUTO_SUSPEND_KNOWN", False)):
@@ -160,7 +169,7 @@ def size_recommendations(df: pd.DataFrame, credit_rate_usd: float, window_days: 
     out["RECOMMENDATION"] = verdicts[0]
     out["RATIONALE"] = verdicts[1]
     out["ACTIONABLE"] = out["RECOMMENDATION"].isin(
-        {RECOMMEND_UP, RECOMMEND_SUSPEND, RECOMMEND_DOWN}
+        UP_VERDICTS | {RECOMMEND_SUSPEND, RECOMMEND_DOWN}
     )
     # rec #13: the HEADLINE saving is the conservative floor (only idle reliably
     # shrinks) — not the old MONTHLY - 0.5*MONTHLY = 0.5*MONTHLY that assumed every
@@ -173,11 +182,92 @@ def size_recommendations(df: pd.DataFrame, credit_rate_usd: float, window_days: 
     # its saving is measured idle; a size-down is a speculative SLA bet whose
     # "saving" is the mechanical half-rate scenario. The old order sold the bet
     # first.
-    order = {RECOMMEND_UP: 0, RECOMMEND_SUSPEND: 1, RECOMMEND_DOWN: 2,
+    order = {**dict.fromkeys(UP_VERDICTS, 0), RECOMMEND_SUSPEND: 1, RECOMMEND_DOWN: 2,
              RECOMMEND_CADENCE: 3, RECOMMEND_OBSERVE: 4, RECOMMEND_KEEP: 5}
     out["_O"] = out["RECOMMENDATION"].map(order).fillna(9)
     return (out.sort_values(["_O", "MONTHLY_USD_NOW"], ascending=[True, False])
             .drop(columns="_O").reset_index(drop=True))
+
+
+def _num(value: object) -> float:
+    """NaN for absent/unparseable (with_warehouse_settings leaves NaN on an unmatched warehouse)."""
+    return safe_float(value, default=float("nan"))
+
+
+def _policy(value: object) -> str:
+    return value.strip().upper() if isinstance(value, str) else ""
+
+
+def _pressure_verdict(row, queued: float, spill: float, p95: float) -> tuple[str, str]:
+    """Next-Fifty #38: split capacity pressure into scale-out (concurrency) vs size-up (per-query)."""
+    q_txt = f"{humanize_duration(queued, 'min')}/day overload queueing"
+    if spill >= SPILL_UP_GB_PER_DAY:
+        cur = normalize_size(row.get("CURRENT_SIZE"))
+        step = ("" if not cur else
+                " Already at the largest size — split the workload or fix the spilling queries."
+                if cur == SIZE_ORDER[-1] else f" Next size: {shifted_size(cur, 1)}.")
+        if queued >= QUEUE_UP_MIN_PER_DAY:
+            return RECOMMEND_SIZE_UP, (
+                f"Per-query memory pressure with queueing: {spill:.1f} GB/day remote spill and {q_txt}. "
+                "Size up first — spilling queries hold slots longer, so the queue often clears too; "
+                "if queueing persists after the resize, add a cluster." + step)
+        return RECOMMEND_SIZE_UP, (
+            f"Per-query memory pressure: {spill:.1f} GB/day remote spill. Size up one step for more "
+            "memory per cluster — another cluster does not help a single spilling query." + step)
+    mx = _num(row.get("MAX_CLUSTER_COUNT"))
+    if mx != mx:
+        how = ("Multi-cluster needs Enterprise edition and MAX_CLUSTER_COUNT > 1 (the current setting "
+               "is unknown); otherwise move the concurrent workload to its own warehouse.")
+    elif mx <= 1:
+        how = ("Single-cluster today (MAX_CLUSTER_COUNT = 1): raise MAX_CLUSTER_COUNT to 2 or more "
+               "(multi-cluster needs Enterprise edition), or move the concurrent workload to its own "
+               "warehouse.")
+    elif _policy(row.get("SCALING_POLICY")) == "ECONOMY":
+        how = (f"Already multi-cluster (up to {int(mx)}) on ECONOMY, which waits for sustained load "
+               "before starting a cluster — try SCALING_POLICY = STANDARD before raising the maximum.")
+    elif mx >= CLUSTER_RANGE_CAP:
+        how = f"Already at {int(mx)} clusters — split the workload across warehouses."
+    else:
+        how = (f"Already multi-cluster (up to {int(mx)}): raise MAX_CLUSTER_COUNT to {int(mx) + 1}, "
+               "or split the workload.")
+    tail = ""
+    if p95 >= LONG_P95_SEC:
+        tail = (f" Peak-day p95 is {humanize_duration(p95)} — if the queue sits behind a few long "
+                "queries rather than many concurrent ones, size up instead.")
+    return RECOMMEND_SCALE_OUT, (
+        f"Concurrency pressure: {q_txt}, remote spill under {SPILL_UP_GB_PER_DAY:g} GB/day. "
+        "Add a cluster rather than a bigger size. " + how + tail)
+
+
+def scale_out_plan(row, multi_cluster_seen: bool | None = None) -> dict:
+    """Review-only scale-out prefill for ONE RECOMMEND_SCALE_OUT row (Next-Fifty #38). Pure."""
+    mx = _num(row.get("MAX_CLUSTER_COUNT"))
+    mn = _num(row.get("MIN_CLUSTER_COUNT"))
+    edition = ("This account already runs multi-cluster warehouses, so the edition supports it."
+               if multi_cluster_seen else
+               "Multi-cluster needs Enterprise edition or higher — if the ALTER fails, move the "
+               "concurrent workload to its own warehouse instead.")
+    plan = {"known": mx == mx, "min": 1, "max": 1, "policy_to_standard": False, "at_cap": False,
+            "note": edition}
+    if mx != mx:
+        plan["note"] = "Current cluster range unknown (SHOW WAREHOUSES did not return it). " + edition
+        return plan
+    cur_max = max(1, int(mx))
+    cur_min = max(1, int(mn)) if mn == mn else 1
+    plan["min"] = min(cur_min, CLUSTER_RANGE_CAP)
+    if cur_max > 1 and _policy(row.get("SCALING_POLICY")) == "ECONOMY":
+        plan.update(policy_to_standard=True, max=cur_max,
+                    note="ECONOMY waits for sustained load before starting a cluster; STANDARD starts "
+                         "one as soon as queries queue. " + edition)
+        return plan
+    if cur_max >= CLUSTER_RANGE_CAP:
+        plan.update(at_cap=True, max=cur_max,
+                    note=f"Already at {cur_max} clusters (the generator's cap) — split the workload.")
+        return plan
+    plan["max"] = cur_max + 1
+    plan["note"] = (f"Raises MAX_CLUSTER_COUNT {cur_max} → {cur_max + 1}; MIN stays {plan['min']} so the "
+                    "extra cluster runs only while queries queue. " + edition)
+    return plan
 
 
 def sizing_summary(out: pd.DataFrame) -> dict:
@@ -190,7 +280,8 @@ def sizing_summary(out: pd.DataFrame) -> dict:
     measurement, and the size-down floor stays honest about SLA risk.
     """
     if out is None or out.empty:
-        return {"up": 0, "down": 0, "suspend": 0, "review": 0, "observe": 0,
+        return {"up": 0, "scale_out": 0, "size_up": 0, "down": 0, "suspend": 0, "review": 0,
+                "observe": 0,
                 "potential_saving_usd": 0.0, "potential_saving_high_usd": 0.0,
                 "idle_saving_usd": 0.0}
     rec = out["RECOMMENDATION"]
@@ -201,7 +292,9 @@ def sizing_summary(out: pd.DataFrame) -> dict:
     if "SAVING_HIGH_USD" in out.columns:
         high_usd = round(float(out.loc[rec == RECOMMEND_DOWN, "SAVING_HIGH_USD"].sum()), 0)
     return {
-        "up": int((rec == RECOMMEND_UP).sum()),
+        "up": int(rec.isin(UP_VERDICTS).sum()),          # back-compat: every capacity-pressure row
+        "scale_out": int((rec == RECOMMEND_SCALE_OUT).sum()),
+        "size_up": int((rec == RECOMMEND_SIZE_UP).sum()),
         "down": int((rec == RECOMMEND_DOWN).sum()),
         "suspend": int((rec == RECOMMEND_SUSPEND).sum()),
         "review": int((rec == RECOMMEND_CADENCE).sum()),

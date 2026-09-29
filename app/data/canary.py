@@ -77,6 +77,9 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     # EXPLAINs every entry, and SHOW cannot be EXPLAINed.
     ("ops.overwatch_task_run_summary", lambda: ops_sql.overwatch_task_run_summary(24)),
     ("ops.warehouse_pressure", lambda: ops_sql.warehouse_pressure(1, "ALFA")),
+    # Next-Fifty #33: the statement-timeout runtime tail. Its two SHOW PARAMETERS twins are not
+    # canaries (SHOW cannot be EXPLAINed).
+    ("ops.warehouse_timeout_tail", lambda: ops_sql.warehouse_timeout_tail(1, "ALFA")),
     ("ops.lock_contention", lambda: ops_sql.lock_contention(1)),
     ("security.users_without_mfa", lambda: security_sql.users_without_mfa("ALFA")),
     ("security.users_without_mfa_live", lambda: security_sql.users_without_mfa_live("ALFA")),
@@ -257,6 +260,14 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("mart.app_self_cost", lambda: mart_sql.app_self_cost(1)),
     ("mart.latest_digest", mart_sql.latest_digest),
     ("mart.savings_verification_runs", mart_sql.savings_verification_runs),
+    # Next-Fifty #46(d): the measured manual-verify before/after, one per basis (a recent booking day,
+    # so the scan stays in warm partitions).
+    ("mart.ledger_before_after.warehouse",
+     lambda: mart_sql.ledger_before_after("WAREHOUSE", "WH_CANARY", account_today() - timedelta(days=15))),
+    ("mart.ledger_before_after.object",
+     lambda: mart_sql.ledger_before_after("OBJECT", "DB.SCH.T_CANARY", account_today() - timedelta(days=15))),
+    ("mart.ledger_before_after.table",
+     lambda: mart_sql.ledger_before_after("TABLE", "DB.SCH.T_CANARY", account_today() - timedelta(days=15))),
     ("mart.alert_mttr.canary", lambda: mart_sql.alert_mttr(2)),
     ("chargeback.department_window", lambda: chargeback_sql.department_window_credits(1, "ALFA")),
     ("chargeback.role_share", lambda: chargeback_sql.role_share_within_warehouse(1, "ALFA")),

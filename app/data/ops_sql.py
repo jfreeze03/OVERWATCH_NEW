@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import re
+
 from app import companies
 from app.config import CORE_SCHEMA, OVERWATCH_DB, core_object
 from app.core.sqlsafe import contains_filter, sql_literal
 from app.data.common import and_where, bounded_days, not_app_self_sql, scope_window_where
+from app.logic.stmt_timeout import CAP_LADDER_S
 
 
 def _query_scope(days: int, company: str, warehouse_contains: str = "", user_contains: str = "",
@@ -1168,6 +1171,51 @@ LIMIT 100
 """
 
 
+def warehouse_timeout_tail(days: int = 30, company: str = "ALL") -> str:
+    """Per-warehouse completed-statement runtime tail for the statement-timeout posture (Next-Fifty #33).
+
+    One row per warehouse: completed runs, p99 and longest completed elapsed (seconds), statements the
+    timeout already cancelled (the Snowflake timeout message token, failure_advisor's), and one
+    RUNS_OVER_<s> count per cap-ladder step (the completed statements a cap of <s> seconds would have
+    cancelled). TIMEOUT_CANCELLED_TOTAL is the scope total from a window SUM (never a frame sum).
+
+    The p99 is read LIVE because no mart carries one: FACT_QUERY_HOURLY keeps only a per-cell P95,
+    FACT_QUERY_DAILY has no percentile, and MART_OPS_DIAG_HOURLY keeps a top-50-per-hour sample whose
+    percentile is biased. Toggle-gated on the page. The company label and filter run once per warehouse
+    in the OUTER query (the UDF never runs per statement). No LIMIT: one row per warehouse."""
+    days = bounded_days(days, 90)
+    rungs = ",\n        ".join(
+        f"COUNT_IF(EXECUTION_STATUS = 'SUCCESS' AND TOTAL_ELAPSED_TIME > {s * 1000}) AS RUNS_OVER_{s}"
+        for s in CAP_LADDER_S)
+    rung_cols = ", ".join(f"q.RUNS_OVER_{s}" for s in CAP_LADDER_S)
+    where = companies.warehouse_company_scope(company, "q.WAREHOUSE_NAME") or "1 = 1"
+    return f"""
+WITH q AS (
+    SELECT
+        WAREHOUSE_NAME,
+        COUNT_IF(EXECUTION_STATUS = 'SUCCESS') AS COMPLETED_RUNS,
+        APPROX_PERCENTILE(IFF(EXECUTION_STATUS = 'SUCCESS', TOTAL_ELAPSED_TIME, NULL) / 1000, 0.99)
+            AS P99_ELAPSED_SEC,
+        MAX(IFF(EXECUTION_STATUS = 'SUCCESS', TOTAL_ELAPSED_TIME, NULL)) / 1000 AS MAX_ELAPSED_SEC,
+        COUNT_IF(EXECUTION_STATUS <> 'SUCCESS'
+                 AND ERROR_MESSAGE ILIKE '%statement or warehouse timeout%') AS TIMEOUT_CANCELLED_RUNS,
+        {rungs}
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+      AND WAREHOUSE_NAME IS NOT NULL
+    GROUP BY WAREHOUSE_NAME
+)
+SELECT q.WAREHOUSE_NAME,
+       {companies.company_case_sql('q.WAREHOUSE_NAME')} AS COMPANY,
+       q.COMPLETED_RUNS, q.P99_ELAPSED_SEC, q.MAX_ELAPSED_SEC, q.TIMEOUT_CANCELLED_RUNS,
+       SUM(q.TIMEOUT_CANCELLED_RUNS) OVER () AS TIMEOUT_CANCELLED_TOTAL,
+       {rung_cols}
+FROM q
+WHERE {where}
+ORDER BY q.MAX_ELAPSED_SEC DESC NULLS LAST
+"""
+
+
 def copy_load_failures(days: int, company: str = "ALL") -> str:
     """Failed / partial COPY and Snowpipe file loads by target table."""
     days = bounded_days(days)
@@ -1234,6 +1282,30 @@ def show_streams_sql() -> str:
     """SHOW-based (no ACCOUNT_USAGE view exists for stream staleness).
     LIMIT keeps the runtime row-cap rewrite from touching a SHOW command."""
     return "SHOW STREAMS IN ACCOUNT LIMIT 200"
+
+
+_UNQUOTED_IDENT = re.compile(r"^[A-Z_][A-Z0-9_$]*$")
+
+
+def warehouse_stmt_timeout_sql(warehouse: str) -> str:
+    """One warehouse's STATEMENT_TIMEOUT_IN_SECONDS (value + LEVEL) — Next-Fifty #33.
+
+    No view carries object parameters, so this is one SHOW per warehouse. The name is emitted verbatim
+    when it is an unquoted (upper-case) identifier — for the app warehouse that is byte-identical to
+    Admin ▸ Performance's read, so the two share one cache entry — else double-quoted with embedded
+    quotes doubled. ValueError on a blank name. SHOW cannot be EXPLAINed, so not a canary."""
+    raw = str(warehouse or "").strip()
+    if not raw:
+        raise ValueError("warehouse_stmt_timeout_sql needs a warehouse name")
+    ident = raw if _UNQUOTED_IDENT.match(raw) else '"' + raw.replace('"', '""') + '"'
+    return f"SHOW PARAMETERS LIKE 'STATEMENT_TIMEOUT_IN_SECONDS' IN WAREHOUSE {ident}"
+
+
+def account_stmt_timeout_sql() -> str:
+    """The ACCOUNT's STATEMENT_TIMEOUT_IN_SECONDS (Next-Fifty #33; probe-read: unverified under
+    owner's-rights SiS, the page derives it from the warehouse rows when this fails). SHOW cannot be
+    EXPLAINed, so not a canary."""
+    return "SHOW PARAMETERS LIKE 'STATEMENT_TIMEOUT_IN_SECONDS' IN ACCOUNT"
 
 
 def running_queries(warehouse: str) -> str:

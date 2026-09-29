@@ -126,6 +126,13 @@ def test_reverse_hint_names_the_evidence_not_a_guess():
     assert "WH_ALFA_ETL" in hint and "<previous>" in hint      # never invents the prior value
     assert "AUTO_SUSPEND" in reverse_hint("AUTO_SUSPEND", "X")
     assert "re-apply the previous setting" in reverse_hint("SOMETHING_NEW", "X")
+    # Next-Fifty #33 F2: the change registry never records STATEMENT_TIMEOUT_IN_SECONDS (V024 snapshots
+    # size / suspend / clusters / scaling only), so its hint names the parameter read, never the registry.
+    to = reverse_hint("STATEMENT_TIMEOUT", "WH_ALFA_ETL")
+    assert "WAREHOUSE_CHANGE_REGISTRY" not in to
+    assert "SHOW PARAMETERS LIKE 'STATEMENT_TIMEOUT_IN_SECONDS' IN WAREHOUSE WH_ALFA_ETL" in to
+    assert "UNSET STATEMENT_TIMEOUT_IN_SECONDS" in to and "<previous>" in to
+    assert "REMEDIATION_LOG.STATEMENT_SQL" in to
 
 
 def test_exec_sites_show_reverse_and_log_the_event():

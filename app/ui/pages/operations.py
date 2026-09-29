@@ -35,6 +35,7 @@ from app.logic import (
     query_advisor,
     query_opt,
     remediation,
+    stmt_timeout,
     verdict,
     wh_change,
 )
@@ -3521,8 +3522,15 @@ def _wh_sizing_efficiency(company: str, rate: float, days: int, *,
             _sized = _sized.merge(_health[["WAREHOUSE_NAME", "SCORE", "GRADE", "WHY"]],
                                   on="WAREHOUSE_NAME", how="left")
         kpi_row([
-            {"label": "Size up / add cluster", "value": f"{_sum['up']}",
-             "delta_color": "inverse" if _sum["up"] else "off"},
+            # Next-Fifty #38: the merged "Size up / add cluster" card split by the kind of pressure.
+            {"label": "Add a cluster", "value": f"{_sum['scale_out']}",
+             "delta_color": "inverse" if _sum["scale_out"] else "off",
+             "help": "Sustained overload queueing without remote spill — concurrency: raise "
+                     "MAX_CLUSTER_COUNT (multi-cluster needs Enterprise edition) or split the workload."},
+            {"label": "Size up", "value": f"{_sum['size_up']}",
+             "delta_color": "inverse" if _sum["size_up"] else "off",
+             "help": "Remote spill per day — per-query memory pressure. With queueing too, size up "
+                     "first; add a cluster only if the queue persists."},
             {"label": "Tune auto-suspend first", "value": f"{_sum['suspend']}"},
             {"label": "Size-down candidates", "value": f"{_sum['down']}"},
             {"label": "Idle $ on suspend-first WHs", "value": format_usd(_sum["idle_saving_usd"])},
@@ -3610,7 +3618,115 @@ def _wh_sizing_efficiency(company: str, rate: float, days: int, *,
                        "(sparse or all-day-idle profiles route to auto-suspend instead).")
         result_caption(_hh)
 
+    _stmt_timeout_posture_panel(company, days)
     _adaptive_candidacy_panel(company, days, bounds=bounds)
+
+
+def _stmt_timeout_posture_panel(company: str, days: int) -> None:
+    """Statement-timeout posture (Next-Fifty #33): each warehouse's EFFECTIVE STATEMENT_TIMEOUT_IN_SECONDS
+    (the lower non-zero of its own value and the account value it inherits), flagged when one runaway
+    statement could bill for 48 hours or more, plus a review-only tightening script sized from the
+    warehouse's completed-runtime tail. Toggle-gated: one SHOW per warehouse (metadata tier, cached 4h)
+    and one grouped runtime-tail read (historical tier). Diagnostic only: nothing executes or is booked."""
+    import math
+
+    section_header("Statement-timeout posture", "", "warehouse", anchor="ops-wh-timeout")
+    if not st.toggle("Read statement-timeout posture (one SHOW per warehouse)", key="ops_wh_timeout_load",
+                     help="Each warehouse's effective STATEMENT_TIMEOUT_IN_SECONDS plus a completed-runtime "
+                          "tail, read on demand."):
+        st.caption("Toggle to see which warehouses let one runaway query bill for up to 48 hours.")
+        return
+    tail_days = stmt_timeout.tail_window_days(days)
+    tail = run(ops_sql.warehouse_timeout_tail(tail_days, company), page=_PAGE,
+               key=f"ops_wh_timeout_tail_{company}_{tail_days}", tier="historical",
+               source=f"QUERY_HISTORY (live, {tail_days}d completed statements)")
+    whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="jump_wh",
+              tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
+    tail_df = tail.df if tail.usable() else None
+    names, not_visible = stmt_timeout.warehouse_universe(whs.df if whs.usable() else None, tail_df, company)
+    if not names:
+        empty_state("unavailable" if not (tail.ok or whs.ok) else "no_data_yet",
+                    "No warehouse to read a statement timeout for in this scope (SHOW WAREHOUSES and the "
+                    "runtime tail returned none).",
+                    detail=(tail.error or whs.error))
+        return
+    params: dict = {}
+    with st.spinner(f"Reading {len(names)} warehouse timeouts…"):
+        for wh in names:
+            _res = run(ops_sql.warehouse_stmt_timeout_sql(wh), page=_PAGE, key=f"ops_wh_timeout_{wh}",
+                       tier="metadata", source=f"SHOW PARAMETERS IN WAREHOUSE {wh}", max_rows=0,
+                       probe=True)
+            params[wh] = stmt_timeout.parse_timeout_row(_res.df if _res.usable() else None)
+        acct = run(ops_sql.account_stmt_timeout_sql(), page=_PAGE, key="ops_acct_stmt_timeout",
+                   tier="metadata", source="SHOW PARAMETERS IN ACCOUNT", max_rows=0, probe=True)
+    account_s, _acct_lvl = stmt_timeout.parse_timeout_row(acct.df if acct.usable() else None)
+    acct_how = "read"
+    if account_s is None:
+        account_s = stmt_timeout.derive_account_timeout(params.values())
+        acct_how = "derived from warehouse rows" if account_s is not None else "unread"
+    posture = stmt_timeout.timeout_posture(names, params, account_s, tail_df, not_visible)
+    summ = stmt_timeout.posture_summary(posture)
+    _timed_out = None
+    if tail_df is not None and "TIMEOUT_CANCELLED_TOTAL" in tail_df.columns:
+        _tv = safe_float(tail_df["TIMEOUT_CANCELLED_TOTAL"].iloc[0], float("nan"))
+        _timed_out = None if math.isnan(_tv) else int(_tv)
+    kpi_row([
+        {"label": "Warehouses read", "value": f"{summ['read']:,}",
+         "delta": f"{summ['unread']:,} unread" if summ["unread"] else "", "delta_color": "off"},
+        {"label": "Uncapped", "value": f"{summ['uncapped']:,}",
+         "severity": "warn" if summ["uncapped"] else "ok",
+         "help": "Effective cap of 48 hours or more: Snowflake's default (set nowhere), 0 (the 7-day "
+                 "maximum) or an explicit value that high. One runaway statement can bill that long."},
+        {"label": f"Timed out ({tail_days}d)",
+         "value": "—" if _timed_out is None else f"{_timed_out:,}",
+         "help": "Statements Snowflake cancelled for hitting a statement or warehouse timeout in the "
+                 "window, across every warehouse in scope: caps that already fired."},
+        {"label": "Account value",
+         "value": humanize_duration(account_s) if account_s is not None else "—",
+         "delta": acct_how, "delta_color": "off",
+         "help": "The account's STATEMENT_TIMEOUT_IN_SECONDS, which a warehouse (and every session) "
+                 "inherits unless it sets its own."},
+    ])
+    entity_nav_table(
+        posture[stmt_timeout.POSTURE_COLUMNS[:10]], key=f"ops_wh_timeout_tbl_{company}",
+        key_col="WAREHOUSE_NAME", entity_type="WAREHOUSE", column_config={
+            "CAP_SOURCE": st.column_config.TextColumn("Cap source"),
+            "COMPLETED_RUNS": st.column_config.NumberColumn("Completed runs"),
+            "TIMEOUT_CANCELLED_RUNS": st.column_config.NumberColumn("Timed out"),
+            "WOULD_CANCEL_RUNS": st.column_config.NumberColumn("Suggested cap would cancel"),
+        })
+    if not tail.ok:
+        empty_state("unavailable", "The completed-runtime tail could not be read: no cap is suggested "
+                    "and the run counts show as a dash.", detail=tail.error)
+    script = stmt_timeout.fix_script(posture, tail_days, tail_ok=tail.ok)
+    if script:
+        st.caption("Review only — nothing here runs. Check each line, delete the warehouses that "
+                   "legitimately run longer, then paste into a worksheet. Each ALTER is followed by its "
+                   "exact undo as a comment.")
+        st.code(script, language="sql")
+    elif summ["read"] and not summ["uncapped"]:
+        empty_state("clean", "Every warehouse read has an effective cap below 48 hours.")
+    if account_s is not None and stmt_timeout.is_uncapped(stmt_timeout.enforced_s(account_s)):
+        st.caption("The account value is also 48 hours or more. One account cap reaches every warehouse "
+                   "and workload at once, so it is not scripted here; set it deliberately from "
+                   "Operations ▸ Emergency ▸ Account statement timeout.")
+    if summ["not_visible"]:
+        st.caption(f"{summ['not_visible']:,} warehouse(s) ran statements in the window but SHOW WAREHOUSES "
+                   "does not list them (dropped, renamed, or not visible to the app role): shown as Not "
+                   "visible, with no timeout read.")
+    if len(names) >= stmt_timeout.MAX_WAREHOUSES_READ:
+        st.caption(f"Reads at most {stmt_timeout.MAX_WAREHOUSES_READ} warehouses per view: the ones with "
+                   "the longest completed statements first.")
+    st.caption(md_dollars(
+        "Effective cap = the lower non-zero of the warehouse's own value and the account value it "
+        "inherits; 0 means the 7-day maximum. A user or session value can lower it (or raise it up to the "
+        "warehouse value), and task statements are also capped by USER_TASK_TIMEOUT_MS. Suggested cap = "
+        f"the smallest step at or above p99 x 3 of completed statements over the last {tail_days} days "
+        "(the Window, at least 30 and at most 90, trailing), with at least 100 runs; elapsed includes "
+        "compile and queue time, so it errs long. Under a company scope only warehouses active in the "
+        "window are listed (SHOW WAREHOUSES carries no company). Admin ▸ Performance shows the app "
+        "warehouse's own value."))
+    result_caption(tail)
 
 
 def _adaptive_candidacy_panel(company: str, days: int, *, bounds: tuple | None = None) -> None:
@@ -4282,7 +4398,8 @@ def render() -> None:
         "Warehouses": {
             "applies": ("company",),
             "partial": ("days",),
-            "note": "Contention uses Window; warehouse anomaly history is a fixed 30-day view.",
+            "note": ("Contention uses Window; warehouse anomaly history is a fixed 30-day view; the "
+                     "statement-timeout runtime tail reads max(Window, 30) days, capped at 90."),
         },
         "Optimize": {
             "applies": ("company", "days"),

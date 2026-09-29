@@ -67,6 +67,8 @@ STATUS_COLOR_MAP = {
     "NEW": _WARN, "SPIKE": _BAD,
     "PASS": _OK, "INSUFFICIENT": _MUTED,
     "ELEVATED": _BAD, "WATCH": _WARN, "NORMAL": _OK, "STALE": _WARN, "ACTIVE": _OK,
+    # statement-timeout posture (Operations ▸ Warehouses, Next-Fifty #33)
+    "UNCAPPED": _WARN, "CAPPED": _OK,
 }
 
 # Columns that carry status semantics; True-is-good ones invert boolean colors.

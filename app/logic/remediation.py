@@ -218,15 +218,21 @@ def account_statement_timeout(seconds: int) -> str:
 
 def reverse_hint(finding_type: str, target: str) -> str:
     """One line of how-to-undo, shown wherever a fix executes (Codex r6 #18).
-    Prior values are never guessed here: warehouse changes land old->new in
-    WAREHOUSE_CHANGE_REGISTRY within the hour, and the executed statement is
-    always auditable in REMEDIATION_LOG.STATEMENT_SQL."""
+    Prior values are never guessed here: warehouse size / auto-suspend / cluster / scaling changes land
+    old->new in WAREHOUSE_CHANGE_REGISTRY within the hour, and the executed statement is always
+    auditable in REMEDIATION_LOG.STATEMENT_SQL. The registry never records STATEMENT_TIMEOUT_IN_SECONDS
+    (V024 snapshots size, suspend, clusters and scaling only), so that hint points at the parameter
+    itself (Next-Fifty #33 F2)."""
     kind = str(finding_type or "").upper()
     tgt = str(target or "<object>")
+    if kind == "STATEMENT_TIMEOUT":
+        return (f"Reverse: ALTER WAREHOUSE {tgt} SET STATEMENT_TIMEOUT_IN_SECONDS = <previous>, or UNSET "
+                "STATEMENT_TIMEOUT_IN_SECONDS if it was inherited. Previous value: SHOW PARAMETERS LIKE "
+                f"'STATEMENT_TIMEOUT_IN_SECONDS' IN WAREHOUSE {tgt}, read before the change (the daily "
+                "change scan does not track this parameter). What ran: REMEDIATION_LOG.STATEMENT_SQL.")
     lead = {
         "RESIZE": f"Reverse: ALTER WAREHOUSE {tgt} SET WAREHOUSE_SIZE = '<previous>'",
         "AUTO_SUSPEND": f"Reverse: ALTER WAREHOUSE {tgt} SET AUTO_SUSPEND = <previous seconds>",
-        "STATEMENT_TIMEOUT": f"Reverse: ALTER WAREHOUSE {tgt} SET STATEMENT_TIMEOUT_IN_SECONDS = <previous>",
         "CLUSTER_RANGE": f"Reverse: ALTER WAREHOUSE {tgt} SET MIN_CLUSTER_COUNT/MAX_CLUSTER_COUNT = <previous>",
     }.get(kind, f"Reverse: re-apply the previous setting on {tgt}")
     return (lead + ". Previous value: WAREHOUSE_CHANGE_REGISTRY (old->new, within the "
