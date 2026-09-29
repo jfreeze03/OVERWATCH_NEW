@@ -1,8 +1,10 @@
 """Locks for app/logic/quotas.py — per-user AI-quota block-history normalization.
 
-The QUOTA_ACCESS_BLOCK_HISTORY view's columns are undocumented, so block_history
-binds them at runtime: maps common spellings, derives IS_ACTIVE from a release
-timestamp, and falls back to the raw frame when nothing maps (never a blank one).
+The QUOTA_ACCESS_BLOCK_HISTORY view's SQL-reference page 404s; its real columns (ACTION_AT, QUOTA_NAME, USER_NAME,
+CYCLE, ACTION, PER_USER_LIMIT, CREDITS, BLOCKED_UNTIL, ...) come from the owner's Snowsight preview (v4.601.1).
+block_history binds them at runtime, keeps older guessed spellings as fallbacks, derives IS_ACTIVE from
+BLOCKED_UNTIL on the account clock (or, on an older shape, from a release timestamp), and falls back to the raw
+frame when nothing maps (never a blank one).
 """
 
 from __future__ import annotations
@@ -81,12 +83,15 @@ def test_empty_in_empty_out_mapped_true():
     assert mapped2 and out2.empty
 
 
-def test_builder_reads_the_block_view_and_windows_on_created_on():
+def test_builder_reads_the_block_view_and_windows_on_action_at():
+    """v4.601.1: the view has no CREATED_ON (the owner's Snowsight run: 'invalid identifier CREATED_ON'); its
+    event timestamp is ACTION_AT. The v4.543 reader failed on every account, silently (probe)."""
     from app.data import cortex_sql
     sql = cortex_sql.quota_access_block_history(30)
     assert "SNOWFLAKE.ACCOUNT_USAGE.QUOTA_ACCESS_BLOCK_HISTORY" in sql
-    assert "CREATED_ON >= DATEADD('day', -30" in sql
-    assert "ORDER BY CREATED_ON DESC" in sql
+    assert "ACTION_AT >= DATEADD('day', -30" in sql
+    assert "ORDER BY ACTION_AT DESC" in sql
+    assert "CREATED_ON" not in sql
     # days is clamped to >= 1 so a zero/negative window never becomes a future filter
     assert "-1," in cortex_sql.quota_access_block_history(0)
 
@@ -97,6 +102,88 @@ def test_builder_honors_last_month_bounds():
     from app.data import cortex_sql
     b = cortex_sql.quota_access_block_history(30, bounds=(dt.date(2026, 8, 1), dt.date(2026, 9, 1)))
     assert "SNOWFLAKE.ACCOUNT_USAGE.QUOTA_ACCESS_BLOCK_HISTORY" in b
-    assert "CREATED_ON" in b
+    assert "ACTION_AT" in b and "CREATED_ON" not in b
     # the bounded window is not the trailing-days form
     assert "DATEADD('day', -30" not in b
+
+
+def test_builder_parses_as_snowflake_sql():
+    import sqlglot
+
+    from app.data import cortex_sql
+    expr = sqlglot.parse_one(cortex_sql.quota_access_block_history(7), read="snowflake")
+    assert expr.find(sqlglot.exp.Column) is not None
+
+
+# --- v4.601.1: the view's real columns (the owner's Snowsight data preview, 2026-09-29) -------------------------
+
+def _real_row(**over) -> dict:
+    """One row exactly as QUOTA_ACCESS_BLOCK_HISTORY returned it on the account (TIMESTAMP_LTZ in UTC)."""
+    base = {"ACTION_AT": pd.Timestamp("2026-09-21T17:41:11.000", tz="UTC"), "QUOTA_ID": 310,
+            "QUOTA_NAME": "AI_USER_USAGE", "USER_ID": 1555, "USER_NAME": "LE7765", "CYCLE": "DAILY",
+            "ACTION": "BLOCKED", "PER_USER_LIMIT": 15.0, "CREDITS": 15.230623640,
+            "BLOCKED_UNTIL": pd.Timestamp("2026-09-22T00:00:00.000", tz="UTC")}
+    return {**base, **over}
+
+
+def test_real_view_shape_maps_every_column():
+    import datetime as dt
+    out, mapped = block_history(pd.DataFrame([_real_row()]), now=dt.datetime(2026, 9, 21, 13, 0))
+    assert mapped
+    assert list(out.columns) == ["USER", "QUOTA", "CYCLE", "ACTION", "CREDITS", "PER_USER_LIMIT",
+                                 "BLOCKED_ON", "BLOCKED_UNTIL", "IS_ACTIVE"]
+    row = out.iloc[0]
+    assert (row["USER"], row["QUOTA"], row["CYCLE"], row["ACTION"]) == ("LE7765", "AI_USER_USAGE", "DAILY", "BLOCKED")
+    assert row["CREDITS"] > row["PER_USER_LIMIT"] == 15.0
+
+
+def test_a_block_is_active_until_blocked_until_on_the_account_clock():
+    """BLOCKED_UNTIL 2026-09-22 00:00 UTC is 2026-09-21 19:00 Central (CDT). ``now`` is account (Central) time."""
+    import datetime as dt
+    frame = pd.DataFrame([_real_row()])
+    during, _ = block_history(frame, now=dt.datetime(2026, 9, 21, 18, 59))
+    after, _ = block_history(frame, now=dt.datetime(2026, 9, 21, 19, 1))
+    assert bool(during.iloc[0]["IS_ACTIVE"]) and not bool(after.iloc[0]["IS_ACTIVE"])
+    # a tz-NAIVE BLOCKED_UNTIL is taken as account time already
+    naive = pd.DataFrame([_real_row(BLOCKED_UNTIL=pd.Timestamp("2026-09-21 19:00"))])
+    assert bool(block_history(naive, now=dt.datetime(2026, 9, 21, 18, 0))[0].iloc[0]["IS_ACTIVE"])
+    assert not bool(block_history(naive, now=dt.datetime(2026, 9, 21, 19, 30))[0].iloc[0]["IS_ACTIVE"])
+
+
+def test_without_now_a_blocked_until_frame_derives_no_active_flag():
+    out, mapped = block_history(pd.DataFrame([_real_row()]))
+    assert mapped and "IS_ACTIVE" not in out.columns
+
+
+def test_a_later_non_block_action_ends_the_block_and_is_not_counted_as_a_block():
+    import datetime as dt
+
+    from app.logic.quotas import block_events
+    frame = pd.DataFrame([
+        _real_row(),
+        # an admin reset the same user's quota before the cycle ended
+        _real_row(ACTION_AT=pd.Timestamp("2026-09-21T18:30:00", tz="UTC"), ACTION="UNBLOCKED"),
+        # another user, still blocked
+        _real_row(USER_NAME="QZ1234", USER_ID=77, ACTION_AT=pd.Timestamp("2026-09-21T19:00:00", tz="UTC")),
+    ])
+    out, _ = block_history(frame, now=dt.datetime(2026, 9, 21, 15, 0))
+    active = out.set_index(["USER", "ACTION"])["IS_ACTIVE"]
+    assert not bool(active.loc[("LE7765", "BLOCKED")]) and not bool(active.loc[("LE7765", "UNBLOCKED")])
+    assert bool(active.loc[("QZ1234", "BLOCKED")])
+    assert block_events(out) == 2 and block_events(pd.DataFrame()) == 0
+    # an older shape without ACTION counts every row
+    assert block_events(pd.DataFrame({"USER": ["A", "B"]})) == 2
+
+
+def test_quota_panel_never_reports_no_blocks_when_the_read_failed():
+    """v4.601.1: the probe read's failure used to fall through to 'No per-user AI-quota blocks' plus 'No per-user AI
+    credit quota is enforcing here'. A failed read now says unavailable and stops."""
+    from tests._source import read
+    src = read("app/ui/pages/cost_parts/ai_chargeback.py")
+    body = src.split("def _ai_quota_panel(", 1)[1].split("\ndef ", 1)[0]
+    fail = body.index("if not blk.ok:")
+    assert fail < body.index("block_history(blk.df, now=account_now())") < body.index('empty_state("clean"')
+    branch = body[fail:body.index("block_history(blk.df")]
+    assert 'empty_state("unavailable"' in branch and "return" in branch
+    assert 'blk.error_kind == "absent"' in branch
+    assert 'f"{block_events(blocks):,}"' in body

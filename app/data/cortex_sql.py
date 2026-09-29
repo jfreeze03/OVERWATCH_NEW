@@ -345,18 +345,23 @@ def quota_access_block_history(days: int, *, bounds: tuple | None = None) -> str
     This is the ONE account-level, plain-SELECT read Snowflake exposes for native
     quotas; the per-quota config / limits / consumption are admin-scoped CALL methods
     on each quota object (no SQL enumeration, no read-only viewer path), so they are
-    deliberately out of scope for a read-only console. The view's columns are
-    UNDOCUMENTED as of 2026-09 (its SQL-reference page 404s) — SELECT * and bind
-    client-side (logic/quotas.block_history); CREATED_ON is the one confirmed column,
-    used to window and order. The reader passes probe=True: the view is absent on
-    accounts without the feature, an EXPECTED absence, not an error to log. Honors the
-    scope-bar 'Last month' bounds so the block window matches the tab's spend window."""
+    deliberately out of scope for a read-only console. The view's SQL-reference page
+    404s; its columns, read from the owner's Snowsight preview (2026-09-29, v4.601.1),
+    are ACTION_AT, QUOTA_ID, QUOTA_NAME, USER_ID, USER_NAME, CYCLE, ACTION,
+    PER_USER_LIMIT, CREDITS and BLOCKED_UNTIL. ACTION_AT (when the block was recorded)
+    windows and orders the read; there is NO CREATED_ON (the v4.543 reader windowed on
+    it, so every read failed with an invalid identifier). SELECT * and bind client-side
+    (logic/quotas.block_history) so a new column never breaks the read. The reader passes
+    probe=True: the view is absent on accounts without the feature, an EXPECTED absence,
+    not an error to log -- the panel still shows a failed read as unavailable, never as
+    "no blocks". Honors the scope-bar 'Last month' bounds so the block window matches the
+    tab's spend window."""
     d = max(1, int(days))
-    scope = (resolve_effective_window(d, "CREATED_ON", bounds=bounds)[1]
+    scope = (resolve_effective_window(d, "ACTION_AT", bounds=bounds)[1]
              if bounds is not None
-             else f"CREATED_ON >= DATEADD('day', -{d}, CURRENT_TIMESTAMP())")
+             else f"ACTION_AT >= DATEADD('day', -{d}, CURRENT_TIMESTAMP())")
     return (
         "SELECT * FROM SNOWFLAKE.ACCOUNT_USAGE.QUOTA_ACCESS_BLOCK_HISTORY\n"
         f"WHERE {scope}\n"
-        "ORDER BY CREATED_ON DESC"
+        "ORDER BY ACTION_AT DESC"
     )

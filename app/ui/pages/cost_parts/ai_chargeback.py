@@ -34,8 +34,8 @@ from app.logic.cortex import (
     with_aggregate_budget_row,
 )
 from app.logic.date_windows import window_label, window_phrase
-from app.logic.formulas import account_today, credits_to_usd, format_usd, md_dollars, safe_float
-from app.logic.quotas import block_history
+from app.logic.formulas import account_now, account_today, credits_to_usd, format_usd, md_dollars, safe_float
+from app.logic.quotas import block_events, block_history
 from app.ui import charts
 from app.ui.components import (
     empty_state,
@@ -407,13 +407,25 @@ def _ai_quota_panel(enriched: pd.DataFrame, summary: dict, days: int,
     blk = run(cortex_sql.quota_access_block_history(days, bounds=bounds), page=_PAGE,
               key=f"ai_quota_blocks_{days}{'_lm' if bounds is not None else ''}", tier="recent",
               source="ACCOUNT_USAGE.QUOTA_ACCESS_BLOCK_HISTORY", probe=True, max_rows=1000)
-    blocks, mapped = (block_history(blk.df) if (blk.ok and not blk.empty)
+    if not blk.ok:
+        # v4.601.1: a failed read is never "no blocks". The read is a probe, so Snowflake errors are not logged:
+        # say what happened here instead (the v4.543 reader failed on every account and the panel said
+        # "No per-user AI-quota blocks" plus "No per-user AI credit quota is enforcing here").
+        if blk.error_kind == "absent":
+            empty_state("unavailable", "The quota block history view is not available on this account "
+                        "(per-user AI quotas may not be enabled here), so blocks cannot be shown.",
+                        detail=blk.error)
+        else:
+            empty_state("unavailable", "The quota block history could not be read, so blocks cannot be "
+                        "shown.", detail=blk.error)
+        return
+    blocks, mapped = (block_history(blk.df, now=account_now()) if not blk.empty
                       else (pd.DataFrame(), True))
     if not blocks.empty:
         has_active = "IS_ACTIVE" in blocks.columns
         has_user = "USER" in blocks.columns
         _act = blocks["IS_ACTIVE"].astype(bool) if has_active else None
-        kpis = [{"label": f"AI-quota blocks ({_wlab})", "value": f"{len(blocks):,}",
+        kpis = [{"label": f"AI-quota blocks ({_wlab})", "value": f"{block_events(blocks):,}",
                  "help": "Times a user hit a per-user AI quota and was blocked in this window. "
                          "Account-wide — Snowflake exposes no company grain on this view."}]
         # "Currently blocked" counts distinct BLOCKED USERS (a user can hold >1 active block,
@@ -424,14 +436,14 @@ def _ai_quota_panel(enriched: pd.DataFrame, summary: dict, days: int,
                 {"label": "Currently blocked",
                  "value": f"{int(blocks.loc[_act, 'USER'].nunique()):,}",
                  "severity": "warn" if bool(_act.any()) else "",
-                 "help": "Distinct users whose AI access is blocked right now (no release "
-                         "timestamp) — each is a live incident until the quota resets. Account-wide."})
+                 "help": "Distinct users whose AI access is blocked right now: their latest action on "
+                         "a quota is a block that runs past now (BLOCKED_UNTIL, the start of the quota's "
+                         "next cycle). Each is a live incident until the quota resets. Account-wide."})
         elif has_active:
             kpis.append(
                 {"label": "Active block events", "value": f"{int(_act.sum()):,}",
                  "severity": "warn" if bool(_act.any()) else "",
-                 "help": "Block rows with no release timestamp (a user can hold more than one). "
-                         "Account-wide."})
+                 "help": "Block rows still in effect (a user can hold more than one). Account-wide."})
         if has_user:
             kpis.append({"label": "Users affected", "value": f"{blocks['USER'].nunique():,}"})
         kpi_row(kpis)
