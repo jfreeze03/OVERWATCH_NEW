@@ -17,9 +17,12 @@ App-only fix, no migration.
     recorded and when it ends. "AI-quota blocks" counts ACTION = BLOCKED rows.
   - "Currently blocked" is a user whose latest action on a quota is a block that runs past now (BLOCKED_UNTIL, the
     start of the quota's next cycle, on the account clock). The old rule ("no release timestamp") could never
-    apply to this view.
-  - A failed read now says the block history is unavailable (or that the view is not available on the account),
-    never "no blocks".
+    apply to this view. It is judged over the last 32 days whatever the Window, so a user blocked today still
+    shows under "Last month" (the window's blocks drive the counts and the table; with none in the window, the
+    table lists the blocks still in force).
+  - A failed read now says the block history could not be read, never "no blocks"; a view the app cannot see is
+    a setup note, not an error. The 1,000-row read cap is disclosed when it binds.
+  - The no-blocks caption no longer claims that no quota is enforcing; it states the window's AI exposure.
 - **Owner-side.** `snow streamlit deploy --replace`. No migration.
 
 ## 4.601.0 - Timeout posture, scale-out vs size-up, tonight's projected finish, measured outcomes, unread maintenance, triage Track (2026-09-29)

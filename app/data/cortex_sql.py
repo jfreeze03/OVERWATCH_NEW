@@ -355,13 +355,25 @@ def quota_access_block_history(days: int, *, bounds: tuple | None = None) -> str
     probe=True: the view is absent on accounts without the feature, an EXPECTED absence,
     not an error to log -- the panel still shows a failed read as unavailable, never as
     "no blocks". Honors the scope-bar 'Last month' bounds so the block window matches the
-    tab's spend window."""
+    tab's spend window.
+
+    Review (v4.601.1): the read ALSO takes the last BLOCK_STATE_DAYS (32) days, whatever the
+    window, and marks each row IN_WINDOW. The window's rows drive the event counts and the table;
+    "currently blocked" is judged over every row, so a user blocked today still shows under 'Last
+    month', and a MONTHLY block recorded before a short trailing window is still seen (a cycle is at
+    most 31 days, so any later unblock of it is inside the read too)."""
     d = max(1, int(days))
     scope = (resolve_effective_window(d, "ACTION_AT", bounds=bounds)[1]
              if bounds is not None
              else f"ACTION_AT >= DATEADD('day', -{d}, CURRENT_TIMESTAMP())")
     return (
-        "SELECT * FROM SNOWFLAKE.ACCOUNT_USAGE.QUOTA_ACCESS_BLOCK_HISTORY\n"
-        f"WHERE {scope}\n"
+        f"SELECT *, ({scope}) AS IN_WINDOW\n"
+        "FROM SNOWFLAKE.ACCOUNT_USAGE.QUOTA_ACCESS_BLOCK_HISTORY\n"
+        f"WHERE ({scope}) OR ACTION_AT >= DATEADD('day', -{BLOCK_STATE_DAYS}, CURRENT_TIMESTAMP())\n"
         "ORDER BY ACTION_AT DESC"
     )
+
+
+# Days of block history read for the "currently blocked" state, whatever the page window (a quota cycle is at most
+# a month, so a block still in force and any later unblock of it fall inside this span).
+BLOCK_STATE_DAYS = 32

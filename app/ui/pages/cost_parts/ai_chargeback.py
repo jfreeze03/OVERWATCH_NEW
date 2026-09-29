@@ -35,7 +35,7 @@ from app.logic.cortex import (
 )
 from app.logic.date_windows import window_label, window_phrase
 from app.logic.formulas import account_now, account_today, credits_to_usd, format_usd, md_dollars, safe_float
-from app.logic.quotas import block_events, block_history
+from app.logic.quotas import block_events, block_history, in_window_rows
 from app.ui import charts
 from app.ui.components import (
     empty_state,
@@ -409,23 +409,28 @@ def _ai_quota_panel(enriched: pd.DataFrame, summary: dict, days: int,
               source="ACCOUNT_USAGE.QUOTA_ACCESS_BLOCK_HISTORY", probe=True, max_rows=1000)
     if not blk.ok:
         # v4.601.1: a failed read is never "no blocks". The read is a probe, so Snowflake errors are not logged:
-        # say what happened here instead (the v4.543 reader failed on every account and the panel said
-        # "No per-user AI-quota blocks" plus "No per-user AI credit quota is enforcing here").
+        # say what happened here instead (the v4.543 reader failed on every account and the panel reported no
+        # blocks and no enforcing quota). An absent view is a setup state; anything else is a failed read.
         if blk.error_kind == "absent":
-            empty_state("unavailable", "The quota block history view is not available on this account "
-                        "(per-user AI quotas may not be enabled here), so blocks cannot be shown.",
-                        detail=blk.error)
+            empty_state("needs_setup", "The quota block history view is not available to this app (per-user AI "
+                        "quotas may not be enabled on this account, or the app's role cannot read it), so "
+                        "blocks cannot be shown.")
         else:
             empty_state("unavailable", "The quota block history could not be read, so blocks cannot be "
                         "shown.", detail=blk.error)
-        return
-    blocks, mapped = (block_history(blk.df, now=account_now()) if not blk.empty
+    blocks, mapped = (block_history(blk.df, now=account_now()) if (blk.ok and not blk.empty)
                       else (pd.DataFrame(), True))
-    if not blocks.empty:
-        has_active = "IS_ACTIVE" in blocks.columns
-        has_user = "USER" in blocks.columns
-        _act = blocks["IS_ACTIVE"].astype(bool) if has_active else None
-        kpis = [{"label": f"AI-quota blocks ({_wlab})", "value": f"{block_events(blocks):,}",
+    # The read spans the page window AND the last 32 days: the window's rows drive the counts and the table,
+    # while "currently blocked" is judged over every row (a user blocked today shows under 'Last month' too).
+    in_win = in_window_rows(blocks)
+    has_active = "IS_ACTIVE" in blocks.columns
+    has_user = "USER" in blocks.columns
+    _act = blocks["IS_ACTIVE"].astype(bool) if has_active else None
+    _live = (int(blocks.loc[_act, "USER"].nunique()) if (has_active and has_user and _act is not None)
+             else 0)
+    if not in_win.empty or _live:
+        _plus = "+" if blk.truncated else ""
+        kpis = [{"label": f"AI-quota blocks ({_wlab})", "value": f"{block_events(in_win):,}{_plus}",
                  "help": "Times a user hit a per-user AI quota and was blocked in this window. "
                          "Account-wide — Snowflake exposes no company grain on this view."}]
         # "Currently blocked" counts distinct BLOCKED USERS (a user can hold >1 active block,
@@ -434,39 +439,50 @@ def _ai_quota_panel(enriched: pd.DataFrame, summary: dict, days: int,
         if has_active and has_user:
             kpis.append(
                 {"label": "Currently blocked",
-                 "value": f"{int(blocks.loc[_act, 'USER'].nunique()):,}",
-                 "severity": "warn" if bool(_act.any()) else "",
-                 "help": "Distinct users whose AI access is blocked right now: their latest action on "
-                         "a quota is a block that runs past now (BLOCKED_UNTIL, the start of the quota's "
-                         "next cycle). Each is a live incident until the quota resets. Account-wide."})
-        elif has_active:
+                 "value": f"{_live:,}",
+                 "severity": "warn" if _live else "",
+                 "help": "Distinct users whose AI access is blocked right now, whatever the window: their "
+                         "latest action on a quota is a block that runs past now (BLOCKED_UNTIL, the start of "
+                         "the quota's next cycle). Each is a live incident until the quota resets. Account-wide."})
+        elif has_active and _act is not None:
             kpis.append(
                 {"label": "Active block events", "value": f"{int(_act.sum()):,}",
                  "severity": "warn" if bool(_act.any()) else "",
                  "help": "Block rows still in effect (a user can hold more than one). Account-wide."})
         if has_user:
-            kpis.append({"label": "Users affected", "value": f"{blocks['USER'].nunique():,}"})
+            kpis.append({"label": "Users affected", "value": f"{in_win['USER'].nunique():,}{_plus}",
+                         "help": f"Distinct users blocked in {_wphrase}."})
         kpi_row(kpis)
-        _disp = (with_user_names(blocks.rename(columns={"USER": "USER_NAME"}), _PAGE)
-                 if (mapped and has_user) else blocks)
+        # the window's blocks; when none fall in the window, the blocks still in force
+        _shown = in_win if not in_win.empty else (blocks.loc[_act] if _act is not None else blocks)
+        if "IN_WINDOW" in _shown.columns:
+            _shown = _shown.drop(columns=["IN_WINDOW"])
+        _disp = (with_user_names(_shown.rename(columns={"USER": "USER_NAME"}), _PAGE)
+                 if (mapped and has_user) else _shown)
         styled_table(_disp, slug="ai-quota-blocks", size_note=False)
+        if in_win.empty:
+            st.caption(f"No block was recorded in {_wphrase}; the table lists the blocks still in force.")
+        if blk.truncated:
+            st.caption("Only the newest 1,000 block rows were read, so the window's counts are at least the "
+                       "figures shown.")
         st.caption("Per-user AI quotas are account-wide — these blocks are NOT filtered to this "
                    "tab's company scope (the block view carries no company grain).")
-        return
-    # No blocks (or the view is not enabled here). Quantify the unguarded exposure
-    # from the per-user spend already on screen — the case for setting a quota.
-    empty_state("clean", f"No per-user AI-quota blocks in {_wphrase}.")
-    spend = safe_float(summary.get("spend_usd"))
-    n_users = int(summary.get("active_users") or 0)
-    if spend > 0 and n_users > 0 and "SPEND_USD" in enriched.columns and len(enriched):
-        _top = enriched.sort_values("SPEND_USD", ascending=False).iloc[0]
-        _top_name = str(_top.get("DISPLAY_NAME") or _top.get("USER_NAME") or "the top user")
-        st.caption(md_dollars(
-            f"No per-user AI credit quota is enforcing here. OVERWATCH sees {format_usd(spend)} of "
-            f"AI spend across {n_users:,} user(s) this window — top: {_top_name} at "
-            f"{format_usd(safe_float(_top.get('SPEND_USD')))}. A per-user AI quota (Snowsight, "
-            "Cost Management, Budgets) would cap and auto-block runaway usage before it lands on "
-            "the bill."))
+    elif blk.ok or blk.error_kind == "absent":
+        # No block in this window -- which does not prove no quota exists, so state the exposure the per-user
+        # spend on screen shows instead of claiming none is enforcing.
+        if blk.ok:
+            empty_state("clean", f"No per-user AI-quota blocks in {_wphrase}.")
+        spend = safe_float(summary.get("spend_usd"))
+        n_users = int(summary.get("active_users") or 0)
+        if spend > 0 and n_users > 0 and "SPEND_USD" in enriched.columns and len(enriched):
+            _top = enriched.sort_values("SPEND_USD", ascending=False).iloc[0]
+            _top_name = str(_top.get("DISPLAY_NAME") or _top.get("USER_NAME") or "the top user")
+            st.caption(md_dollars(
+                f"AI exposure: OVERWATCH sees {format_usd(spend)} of AI spend across {n_users:,} "
+                f"user(s) in {_wphrase} — top: {_top_name} at "
+                f"{format_usd(safe_float(_top.get('SPEND_USD')))}. A per-user AI quota (Snowsight, "
+                "Cost Management, Budgets) caps and auto-blocks runaway usage before it lands on "
+                "the bill."))
 
 
 def _token_economics_panel(company: str, days: int, cap_credits: float, *, bounds: tuple | None = None) -> None:

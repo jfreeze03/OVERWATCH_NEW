@@ -92,6 +92,11 @@ def test_builder_reads_the_block_view_and_windows_on_action_at():
     assert "ACTION_AT >= DATEADD('day', -30" in sql
     assert "ORDER BY ACTION_AT DESC" in sql
     assert "CREATED_ON" not in sql
+    # review r1: the read also takes the last BLOCK_STATE_DAYS for "currently blocked", marking the window's rows
+    assert cortex_sql.BLOCK_STATE_DAYS == 32
+    assert "SELECT *, (ACTION_AT >= DATEADD('day', -30, CURRENT_TIMESTAMP())) AS IN_WINDOW" in sql
+    assert ("WHERE (ACTION_AT >= DATEADD('day', -30, CURRENT_TIMESTAMP())) "
+            "OR ACTION_AT >= DATEADD('day', -32, CURRENT_TIMESTAMP())") in sql
     # days is clamped to >= 1 so a zero/negative window never becomes a future filter
     assert "-1," in cortex_sql.quota_access_block_history(0)
 
@@ -105,6 +110,8 @@ def test_builder_honors_last_month_bounds():
     assert "ACTION_AT" in b and "CREATED_ON" not in b
     # the bounded window is not the trailing-days form
     assert "DATEADD('day', -30" not in b
+    # the window marks IN_WINDOW; the 32-day state read is added whatever the bounds
+    assert ") AS IN_WINDOW" in b and "OR ACTION_AT >= DATEADD('day', -32, CURRENT_TIMESTAMP())" in b
 
 
 def test_builder_parses_as_snowflake_sql():
@@ -176,14 +183,135 @@ def test_a_later_non_block_action_ends_the_block_and_is_not_counted_as_a_block()
 
 
 def test_quota_panel_never_reports_no_blocks_when_the_read_failed():
-    """v4.601.1: the probe read's failure used to fall through to 'No per-user AI-quota blocks' plus 'No per-user AI
-    credit quota is enforcing here'. A failed read now says unavailable and stops."""
+    """v4.601.1: the probe read's failure used to fall through to the clean 'no blocks' state plus a claim that no
+    quota was enforcing. A failed read now says so, with no early return (review r1: wave 4 renders a table after
+    both branches), and an absent view is a setup state, not a red error."""
     from tests._source import read
     src = read("app/ui/pages/cost_parts/ai_chargeback.py")
     body = src.split("def _ai_quota_panel(", 1)[1].split("\ndef ", 1)[0]
     fail = body.index("if not blk.ok:")
     assert fail < body.index("block_history(blk.df, now=account_now())") < body.index('empty_state("clean"')
     branch = body[fail:body.index("block_history(blk.df")]
-    assert 'empty_state("unavailable"' in branch and "return" in branch
-    assert 'blk.error_kind == "absent"' in branch
-    assert 'f"{block_events(blocks):,}"' in body
+    assert 'empty_state("unavailable"' in branch and 'empty_state("needs_setup"' in branch
+    assert 'blk.error_kind == "absent"' in branch and "return" not in branch
+    assert "No per-user AI credit quota is enforcing here" not in body
+    assert 'f"{block_events(in_win):,}{_plus}"' in body
+
+
+# --- review r1: the panel rendered with fakes (one read; every branch) --------------------------------------------
+
+class _FakeSt:
+    def __init__(self):
+        self.calls: list[tuple[str, str]] = []
+
+    def markdown(self, text, *_a, **_k):
+        self.calls.append(("markdown", str(text)))
+
+    def caption(self, text, *_a, **_k):
+        self.calls.append(("caption", str(text)))
+
+    def text(self, kind: str) -> str:
+        return "\n".join(t for k, t in self.calls if k == kind)
+
+
+def _render(monkeypatch, result, *, bounds=None, now=None):
+    import datetime as dt
+
+    from app.ui.pages.cost_parts import ai_chargeback as cb
+    fake = _FakeSt()
+    seen: dict = {"run": 0, "kpis": [], "tables": [], "empty": []}
+
+    def fake_run(*_a, **_k):
+        seen["run"] += 1
+        return result
+
+    monkeypatch.setattr(cb, "st", fake)
+    monkeypatch.setattr(cb, "run", fake_run)
+    monkeypatch.setattr(cb, "panel_help", lambda *_a, **_k: None)
+    monkeypatch.setattr(cb, "kpi_row", lambda items, *_a, **_k: seen["kpis"].append(items))
+    monkeypatch.setattr(cb, "styled_table", lambda df, **k: seen["tables"].append((k.get("slug"), df)))
+    monkeypatch.setattr(cb, "empty_state", lambda kind, msg, *_a, **_k: seen["empty"].append((kind, msg)))
+    monkeypatch.setattr(cb, "with_user_names", lambda df, *_a, **_k: df)
+    monkeypatch.setattr(cb, "account_now", lambda: now or dt.datetime(2026, 9, 21, 13, 0))
+    enriched = pd.DataFrame({"USER_NAME": ["BOB"], "DISPLAY_NAME": ["Bob B"], "SPEND_USD": [300.0]})
+    cb._ai_quota_panel(enriched, {"spend_usd": 300.0, "active_users": 1}, 7, bounds=bounds)
+    seen["kpi"] = {k["label"]: k for k in (seen["kpis"][0] if seen["kpis"] else [])}
+    return fake, seen
+
+
+def _ok(df, truncated=False):
+    from types import SimpleNamespace
+    return SimpleNamespace(ok=True, empty=df.empty, df=df, truncated=truncated, error="", error_kind="")
+
+
+def _failed(kind):
+    from types import SimpleNamespace
+    return SimpleNamespace(ok=False, empty=True, df=pd.DataFrame(), truncated=False, error="boom", error_kind=kind)
+
+
+def test_panel_absent_view_is_a_setup_state_and_still_states_the_exposure(monkeypatch):
+    fake, seen = _render(monkeypatch, _failed("absent"))
+    kinds = [k for k, _ in seen["empty"]]
+    assert kinds == ["needs_setup"] and "clean" not in kinds
+    assert "AI exposure:" in fake.text("caption") and not seen["tables"]
+
+
+def test_panel_failed_read_is_unavailable_and_never_clean(monkeypatch):
+    for kind in ("missing_column", "timeout", "other"):
+        fake, seen = _render(monkeypatch, _failed(kind))
+        assert [k for k, _ in seen["empty"]] == ["unavailable"], kind
+        assert "AI exposure:" not in fake.text("caption") and not seen["kpis"] and not seen["tables"]
+
+
+def test_panel_window_blocks_count_and_the_live_block(monkeypatch):
+    fake, seen = _render(monkeypatch, _ok(pd.DataFrame([_real_row(IN_WINDOW=True)])))
+    assert seen["run"] == 1
+    assert seen["kpi"]["AI-quota blocks (7d)"]["value"] == "1"
+    assert seen["kpi"]["Currently blocked"]["value"] == "1" and seen["kpi"]["Currently blocked"]["severity"] == "warn"
+    slug, table = seen["tables"][0]
+    assert slug == "ai-quota-blocks" and "IN_WINDOW" not in table.columns and "USER_NAME" in table.columns
+    assert "No per-user AI credit quota is enforcing here" not in fake.text("caption")
+
+
+def test_panel_last_month_still_shows_a_user_blocked_today(monkeypatch):
+    """Review r1: under 'Last month' the window holds only last month's (expired) blocks; a block recorded today is
+    outside the window but in the 32-day state read, so Currently blocked is 1, not 0."""
+    import datetime as dt
+    today = _real_row(IN_WINDOW=False)                                   # blocked Sep 21, until Sep 22 00:00 UTC
+    august = _real_row(USER_NAME="QZ1234", IN_WINDOW=True, ACTION_AT=pd.Timestamp("2026-08-14T10:00", tz="UTC"),
+                       BLOCKED_UNTIL=pd.Timestamp("2026-08-15T00:00", tz="UTC"))
+    _fake, seen = _render(monkeypatch, _ok(pd.DataFrame([today, august])),
+                         bounds=(dt.date(2026, 8, 1), dt.date(2026, 9, 1)))
+    assert seen["kpi"]["Currently blocked"]["value"] == "1"
+    assert seen["kpi"]["Users affected"]["value"] == "1"            # QZ1234, last month
+    assert seen["tables"][0][1]["USER_NAME"].tolist() == ["QZ1234"]
+    # no block in the window, one in force now: the table lists the live block and says why
+    fake2, seen2 = _render(monkeypatch, _ok(pd.DataFrame([today])), bounds=(dt.date(2026, 8, 1), dt.date(2026, 9, 1)))
+    assert seen2["kpi"]["Currently blocked"]["value"] == "1" and seen2["kpi"]["AI-quota blocks (last month)"]["value"] == "0"
+    assert seen2["tables"][0][1]["USER_NAME"].tolist() == ["LE7765"]
+    assert "the table lists the blocks still in force" in fake2.text("caption")
+    assert "clean" not in [k for k, _ in seen2["empty"]]
+
+
+def test_panel_discloses_the_row_cap(monkeypatch):
+    fake, seen = _render(monkeypatch, _ok(pd.DataFrame([_real_row(IN_WINDOW=True)]), truncated=True))
+    assert seen["kpi"]["AI-quota blocks (7d)"]["value"] == "1+"
+    assert "Only the newest 1,000 block rows were read" in fake.text("caption")
+
+
+def test_panel_no_blocks_is_clean_with_a_window_scoped_exposure_caption(monkeypatch):
+    fake, seen = _render(monkeypatch, _ok(pd.DataFrame()))
+    assert seen["empty"] == [("clean", "No per-user AI-quota blocks in the last 7 days.")]
+    caps = fake.text("caption")
+    assert "AI exposure:" in caps and "in the last 7 days" in caps
+    assert "No per-user AI credit quota is enforcing here" not in caps
+
+
+def test_in_window_rows_keeps_the_window_and_drops_the_helper():
+    from app.logic.quotas import in_window_rows
+    out, _ = block_history(pd.DataFrame([_real_row(IN_WINDOW=True), _real_row(USER_NAME="X", IN_WINDOW=False)]))
+    kept = in_window_rows(out)
+    assert kept["USER"].tolist() == ["LE7765"] and "IN_WINDOW" not in kept.columns
+    older, _ = block_history(pd.DataFrame([_real_row()]))
+    assert len(in_window_rows(older)) == 1                           # no IN_WINDOW column: every row
+    assert in_window_rows(None).empty

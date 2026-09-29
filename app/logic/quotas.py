@@ -81,6 +81,22 @@ def block_events(blocks: pd.DataFrame | None) -> int:
     return int(blocks["ACTION"].map(is_block_action).sum())
 
 
+def _truthy(value: object) -> bool:
+    text = _txt(value).upper()
+    return text in ("TRUE", "1", "T", "Y", "YES")
+
+
+def in_window_rows(blocks: pd.DataFrame | None) -> pd.DataFrame:
+    """The normalized rows inside the page window (IN_WINDOW true), without the helper column; every row when the
+    frame has no IN_WINDOW column (an older read)."""
+    if blocks is None or blocks.empty:
+        return pd.DataFrame(columns=_COLS)
+    if "IN_WINDOW" not in blocks.columns:
+        return blocks
+    keep = blocks["IN_WINDOW"].map(_truthy)
+    return blocks.loc[keep].drop(columns=["IN_WINDOW"]).reset_index(drop=True)
+
+
 def _active_until(out: pd.DataFrame, now: datetime) -> pd.Series:
     """IS_ACTIVE from BLOCKED_UNTIL: the row is its user's LATEST action on that quota, that action is a block,
     and the block runs past ``now`` (account time). A later non-block action (e.g. an unblock) ends it."""
@@ -125,6 +141,8 @@ def block_history(blk_df: pd.DataFrame | None, *, now: datetime | None = None) -
         "BLOCKED_UNTIL": _pick(blk_df, "blocked_until"),
         "RELEASED_ON": _pick(blk_df, "released_on", "unblocked_on", "released_at",
                              "release_time", "block_end", "end_time"),
+        # cortex_sql marks the rows inside the page window (the read also takes the last 32 days for the state)
+        "IN_WINDOW": _pick(blk_df, "in_window"),
     }
     found = {norm: col for norm, col in picks.items() if col}
     if not any(k in found for k in ("USER", "QUOTA", "BLOCKED_ON")):
