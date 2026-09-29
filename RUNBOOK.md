@@ -139,7 +139,7 @@ native alerts), `ml_forecast_option.sql` (SNOWFLAKE.ML.FORECAST engine), `backfi
 | TASK_REFRESH_EXEC_BOARD | after hourly load | SP_REFRESH_EXEC_BOARD | MART_EXEC_BOARD |
 | TASK_ALERT_SCAN | after hourly load | SP_ALERT_SCAN (hourly rules) | ALERT_EVENTS |
 | TASK_ALERT_SCAN_DAILY | after daily load + reconcile | SP_ALERT_SCAN_DAILY (daily rules, split out V062) | ALERT_EVENTS |
-| TASK_ALERT_NOTIFY | after scan (opt-in resume) | SP_NOTIFY_WEBHOOK | webhook sends, NOTIFIED_AT |
+| TASK_ALERT_NOTIFY | after scan (opt-in resume) | SP_NOTIFY_WEBHOOK | webhook sends, NOTIFIED_AT; V164: CRITICAL escalations (ALERT_EVENTS.ESCALATED_AT + one ALERT_AUDIT ESCALATE row each; re-post + OVERWATCH_EMAIL email, §19) |
 | TASK_LOAD_DAILY | 06:45 daily | SP_LOAD_DAILY_FACTS | daily facts |
 | TASK_ANOMALY_SWEEP | 07:00 daily | SP_ANOMALY_SWEEP (v2) | anomaly + (Mon) drift events |
 | TASK_CHANGE_IMPACT_SCAN | 06:50 daily | SP_CHANGE_IMPACT_SCAN | OBJECT_CHANGE_REGISTRY + regression events |
@@ -908,6 +908,45 @@ Symptoms → fixes:
   channel" action points at the wrong team/channel; fix in Power Automate.
 - Success returns **202 Accepted** (asynchronous) — a 202 with no card means
   the flow ran and failed internally; check the flow's run history.
+
+**Line format (V164).** Each alert is one line:
+`[SEV] <title, first 140 chars> | <company> | <detail, one line, first 100 chars> | event <EVENT_ID>`
+(ASCII separators; the detail's line breaks and tabs become spaces). The event id is
+ALERT_EVENTS.EVENT_ID, the row Alerts > Open events lists. The line is identical in the sender's
+3000-character fit and in the message, so a card never cuts an event in half; lines
+are about 3x longer than before, so one card holds about 8-13 alerts and a burst
+drains over more hourly runs (max 6 cards per route per run; the rest follow).
+
+**CRITICAL escalation (V164).** A CRITICAL still open and unacknowledged
+`ESCALATE_AFTER_MIN` minutes (Admin > Settings, default 120; 0 = off) after its
+first notification is escalated ONCE by the hourly notifier: a card headed
+`OVERWATCH ESCALATION - CRITICAL unacknowledged 120+ min:` goes to every enabled
+route that already delivered it, and an email goes through
+`ESCALATE_EMAIL_INTEGRATION` (default `OVERWATCH_EMAIL`, to its
+`DEFAULT_RECIPIENTS`; blank = no email). Acknowledging or snoozing the event, or
+acknowledging, mitigating or closing its incident, prevents it; so does a resolve.
+Each escalation stamps `ALERT_EVENTS.ESCALATED_AT` and writes an `ALERT_AUDIT` row
+with ACTION `ESCALATE`. Timing: hourly, so about 120-185 minutes after the first
+notification. The monthly alert drill escalates too when nobody acknowledges it.
+
+Escalation symptoms → fixes (Alerts > Native delivery shows the policy and the last
+7 days):
+- `escalation_email_failed` in APP_ERROR_LOG (page NotifyWebhook) → `OVERWATCH_EMAIL`
+  has no `DEFAULT_RECIPIENTS`, or SNOW_ACCOUNTADMINS lacks `USAGE` on it
+  (docs/EMAIL_RECIPIENT_RUNBOOK.md, requirement 4). The Teams re-post still went and
+  the event is stamped, so that email is not retried; an event no route delivered
+  retries every hour inside its 7-day window.
+- `route_send_failed` whose CONTEXT says `escalation re-post` → the route's
+  integration refused the re-post (same fixes as above for a Teams route).
+- `escalation_failed` → the pass itself errored; the normal deliveries of that run
+  still went. The next hourly run retries (nothing was stamped).
+- Nothing escalates → `ESCALATE_AFTER_MIN` is 0 or not a number (the task's
+  RETURN_VALUE ends `escalation off (ESCALATE_AFTER_MIN)`), or TASK_ALERT_NOTIFY is
+  suspended.
+- Too noisy → acknowledge or snooze from Alerts > Open events, raise
+  `ESCALATE_AFTER_MIN`, or set it to 0. Soft rollback = 0; hard rollback = re-run
+  ONLY V064's SP_NOTIFY_WEBHOOK CREATE (V064 lines 74-351, never the whole file,
+  which would also roll back three other procs); it also restores the old line format.
 
 
 ## §20 App session timeout & idle cost (Streamlit-in-Snowflake)

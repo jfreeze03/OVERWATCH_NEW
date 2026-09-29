@@ -223,6 +223,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("riders.delivery_by_route", lambda: mart_sql.delivery_by_route(7)),
     ("riders.deliveries_for_event", lambda: mart_sql.deliveries_for_event("evt")),
     ("riders.route_backlog", lambda: mart_sql.route_backlog()),
+    # V164 (#40): reads ALERT_AUDIT / APP_ERROR_LOG / SETTINGS only, so it is green before and after the apply
+    ("riders.escalation_summary", lambda: mart_sql.escalation_summary(7)),
     ("riders.alert_fatigue", lambda: mart_sql.alert_fatigue(7)),
     ("riders.acceptance_funnel", lambda: mart_sql.acceptance_funnel(7)),
     ("riders.telemetry_by_page", lambda: mart_sql.telemetry_by_page(1)),

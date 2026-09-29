@@ -26,11 +26,22 @@ they do not depend on the in-app notifier, so they still fire when that is what 
 PARTIAL / not visible) read from `SHOW ALERTS`, `ALERT_HISTORY` and
 `NOTIFICATION_HISTORY`. It turns red only on a real send or evaluation failure.
 
-**There is no app-side email setting.** Nothing in the Streamlit app, `SETTINGS`,
-or a numbered migration holds the recipient. (The `EMAIL` column on
-`FACT_AI_USAGE_DAILY` is unrelated — it is Cortex-usage attribution data.)
+A fifth email comes from the notifier itself, not from an `ALERT` object: since
+**V164**, `SP_NOTIFY_WEBHOOK` escalates a CRITICAL nobody acknowledged within
+`ESCALATE_AFTER_MIN` minutes (default 120) — it re-posts it to the Teams route that
+delivered it and emails it through the integration named in
+`ESCALATE_EMAIL_INTEGRATION` (default `OVERWATCH_EMAIL`), once per event. That email
+goes to the integration's **`DEFAULT_RECIPIENTS`** (requirement 4 below); its
+subject is the integration's `DEFAULT_SUBJECT`. **Alerts > Native delivery** states the
+escalation policy and the last 7 days of escalations and failures.
 
-## The complete footprint — the recipient lives in exactly 3 requirements
+**There is no app-side email address.** Nothing in the Streamlit app, `SETTINGS`,
+or a numbered migration holds a recipient. `SETTINGS` holds only the integration
+*name* the escalation uses (`ESCALATE_EMAIL_INTEGRATION`) and the delay
+(`ESCALATE_AFTER_MIN`). (The `EMAIL` column on `FACT_AI_USAGE_DAILY` is unrelated —
+it is Cortex-usage attribution data.)
+
+## The complete footprint — the recipient lives in exactly 4 requirements
 
 1. **Verification** — the address must be a *verified* email attached to a
    Snowflake **user** in the account. Snowflake will not send to an unverified
@@ -39,8 +50,18 @@ or a numbered migration holds the recipient. (The `EMAIL` column on
    include the address, and the integration must be `ENABLED`.
 3. **Alert bodies** — each `SYSTEM$SEND_EMAIL(...)` call in the four alerts names
    the recipient literally.
+4. **Escalation default recipients (V164)** — `OVERWATCH_EMAIL`'s
+   `DEFAULT_RECIPIENTS` must list the address (normally the same list as
+   `ALLOWED_RECIPIENTS`). The escalation sends with
+   `SYSTEM$SEND_SNOWFLAKE_NOTIFICATION(... INTEGRATION('OVERWATCH_EMAIL'))`, which
+   has no recipient argument: without `DEFAULT_RECIPIENTS` every escalation email
+   fails and logs `escalation_email_failed` (the Teams re-post still goes). The proc
+   owner role (SNOW_ACCOUNTADMINS) also needs `USAGE` on the integration.
 
-Change all three and the alerts must be `RESUME`d (they are created suspended).
+Change all four and the alerts must be `RESUME`d (they are created suspended).
+Requirement 4 needs no resume: the next hourly notifier run picks it up. To turn
+the escalation email off, blank `ESCALATE_EMAIL_INTEGRATION` in **Admin > Settings**;
+`ESCALATE_AFTER_MIN` 0 turns escalation off entirely.
 
 ## Why email can silently stop
 
@@ -49,6 +70,10 @@ Change all three and the alerts must be `RESUME`d (they are created suspended).
 - `OVERWATCH_EMAIL` was disabled, or its `ALLOWED_RECIPIENTS` no longer includes
   the working address.
 - An alert was `SUSPEND`ed, or its warehouse (`WH_ALFA_ADMIN`) was unavailable.
+- Escalation emails only (V164): `OVERWATCH_EMAIL` has no `DEFAULT_RECIPIENTS`, or the
+  proc owner lost `USAGE` on it — `APP_ERROR_LOG` shows `escalation_email_failed`
+  (page `NotifyWebhook`) and Alerts > Native delivery warns. Or escalation was turned
+  off: `ESCALATE_AFTER_MIN` 0, or `ESCALATE_EMAIL_INTEGRATION` blank.
 
 Note: the alerts are `ALERT` objects, **not** tasks and **not** part of the
 numbered migrations — task-graph or migration changes do not affect them.
@@ -56,8 +81,8 @@ numbered migrations — task-graph or migration changes do not affect them.
 ## Diagnose
 
 ```sql
--- Integration enabled? Who is allowed to receive?
-DESC NOTIFICATION INTEGRATION OVERWATCH_EMAIL;          -- check ENABLED + ALLOWED_RECIPIENTS
+-- Integration enabled? Who is allowed to receive? Who gets the V164 escalation?
+DESC NOTIFICATION INTEGRATION OVERWATCH_EMAIL;          -- check ENABLED + ALLOWED_RECIPIENTS + DEFAULT_RECIPIENTS
 
 -- All four alerts present and started (not suspended)?
 SHOW ALERTS IN SCHEMA DBA_MAINT_DB.OVERWATCH;
@@ -122,6 +147,10 @@ ALTER USER <username> SET EMAIL = '<recipient>';   -- or Snowsight: Admin > User
 ALTER NOTIFICATION INTEGRATION OVERWATCH_EMAIL
       SET ALLOWED_RECIPIENTS = ('<recipient>');   -- comma-separate to CC several
 ALTER NOTIFICATION INTEGRATION OVERWATCH_EMAIL SET ENABLED = TRUE;
+-- requirement 4 (V164 escalation): the default list the escalation email goes to
+ALTER NOTIFICATION INTEGRATION OVERWATCH_EMAIL
+      SET DEFAULT_RECIPIENTS = ('<recipient>')
+          DEFAULT_SUBJECT = 'OVERWATCH escalation';
 ```
 
 ### Step 3 — point all four alerts at it
@@ -162,4 +191,4 @@ The repo copy of `native_alert_templates.sql` ships a **placeholder** recipient
 (`dba-team@example.com`) on purpose, so it is not tenant-specific. If you want a
 redeploy to carry your real default, edit those lines locally (never commit them) — but that is
 cosmetic: it changes nothing about live delivery, which is governed entirely by
-the three requirements above.
+the four requirements above.

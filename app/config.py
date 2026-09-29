@@ -156,6 +156,13 @@ DEFAULT_SETTINGS = {
     "CONTRACT_CREDITS": 0.0,         # 0 = not configured
     "CONTRACT_START_DATE": "",
     "CONTRACT_END_DATE": "",
+    # Alert escalation (V164, Next-Fifty #40). SP_NOTIFY_WEBHOOK re-posts a CRITICAL nobody acknowledged
+    # within ESCALATE_AFTER_MIN minutes, once, to the route(s) that delivered it and emails it through the
+    # ESCALATE_EMAIL_INTEGRATION notification integration: its DEFAULT_RECIPIENTS, set in Snowsight (no
+    # address is ever stored here). 0 turns escalation off; a blank integration turns the email leg off.
+    # Seeded by V164; the proc falls back to these same defaults when a row is absent.
+    "ESCALATE_AFTER_MIN": 120,
+    "ESCALATE_EMAIL_INTEGRATION": "OVERWATCH_EMAIL",
 }
 
 # ---------------------------------------------------------------------------
