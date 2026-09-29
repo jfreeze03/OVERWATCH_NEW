@@ -124,11 +124,16 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
     ])
     if _held_lbl:
         _basis = str(row.get("HELD_BASIS") or "").strip()
-        _reopen = _held_lbl.startswith("Re-broke") or _held_lbl == "Not fixed"
-        if _basis or _reopen:
+        # review C4: reopen advice only on a MEASURED regression (Re-broke). Not fixed is a measured
+        # non-improvement -- said as such, never as "the fix did not hold".
+        _reopen = _held_lbl.startswith("Re-broke")
+        _never = _held_lbl == "Not fixed"
+        if _basis or _reopen or _never:
             st.caption(md_dollars(
                 f"Measured since it was marked done: {_basis or _held_lbl}."
-                + (" The fix did not hold — reopen it with Status: OPEN." if _reopen else "")))
+                + (" The fix did not hold — reopen it with Status: OPEN." if _reopen
+                   else f" The level never fell {outcomes.MIN_DROP:.0%} below its baseline — check the fix "
+                        "was applied." if _never else "")))
     if str(row.get("DETAIL") or "").strip():
         # md_dollars: tracked DETAILs carry dollar figures ('$1,234 off baseline'); two would pair into LaTeX
         st.write(md_dollars(str(row.get("DETAIL"))))
@@ -328,10 +333,14 @@ def _with_held(frame: pd.DataFrame, *, key: str, type_col: str = "SOURCE_ENTITY_
         daily = res.df if res.usable() else None
         if res.truncated:
             st.caption("Held? read hit the row cap — the oldest completions may read Not measurable.")
-    rate = safe_float(load_settings(_PAGE).get("CREDIT_PRICE_USD"), 3.68)
+    settings = load_settings(_PAGE)
+    rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
+    # review C4: a Control Room triage item (SOURCE) is judged on the signal it was tracked for -- a
+    # warehouse on the triage spend test, which honours the same known-spike calendar as the triage scan
     held, basis = outcomes.held_columns(frame, daily, today, read_ok=read_ok,
                                         evaluated={(t, k) for t, k, _ in ents}, rate=rate,
-                                        type_col=type_col, key_col=key_col)
+                                        type_col=type_col, key_col=key_col,
+                                        spike_calendar=str(settings.get("EXPECTED_SPIKE_CALENDAR") or ""))
     out = frame.copy()
     out[outcomes.HELD_COL] = held
     out["HELD_BASIS"] = basis
@@ -443,8 +452,10 @@ def render_action_center(company: str) -> None:
             frame = _with_held(frame, key="action_held_signals")
             st.caption(
                 f"Held? measures a completed warehouse, task or query-family item against its own mart "
-                f"signal since it was marked done — credits, a task's P95 runtime, or failed runs when it "
-                f"was failing before — for up to the {outcomes.MAX_ENTITIES} most recent completions in the "
+                f"signal since it was marked done — credits, a task's P95 runtime, or its failure rate when it "
+                f"was failing before; an item tracked from Control Room triage on the signal it was tracked "
+                f"for (a task's failure rate, a warehouse's triage spend test in the same direction), so a "
+                f"quiet signal reads Held — for up to the {outcomes.MAX_ENTITIES} most recent completions in the "
                 f"last {outcomes.LOOKBACK_DAYS} days. The signals are account-wide, not company-filtered. "
                 f"Re-broke is dated when the trailing week climbed back, so it can lag the real break by "
                 f"up to {outcomes.ROLL_DAYS - 1} days.")

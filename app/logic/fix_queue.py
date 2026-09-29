@@ -328,6 +328,27 @@ def with_track_status(df: pd.DataFrame, tracked: pd.DataFrame | None, *,
     return out
 
 
+def track_all_static_mask(df: pd.DataFrame) -> pd.Series:
+    """The row-level half of Track all's rule: LANE 'ACT NOW' AND a specific diagnosis AND not OVERWATCH's
+    own traffic AND a non-blank fingerprint. The other half (no open item, no cooldown) needs the Action
+    Center read; track_all_eligible applies both. ``df`` must carry FINGERPRINT, LANE and SPECIFIC."""
+    keys = df["FINGERPRINT"].map(lambda v: _text(v).upper())
+    return (df["LANE"].astype(str).eq("ACT NOW")
+            & df["SPECIFIC"].map(_is_true)
+            & ~own_traffic(df)
+            & keys.ne(""))
+
+
+def track_all_takes(row: Mapping[str, object] | pd.Series) -> bool:
+    """Whether Track all ACT NOW can take this family at all (track_all_static_mask on one row): the
+    Optimize detail pane says 'Track all includes it again' for a re-broke / not-fixed family ONLY then --
+    its lifted DONE cooldown re-admits nothing outside ACT NOW, a vague diagnosis or own traffic (C23)."""
+    rec = dict(row.items()) if isinstance(row, pd.Series) else dict(row)
+    if not {"FINGERPRINT", "LANE", "SPECIFIC"}.issubset(rec):
+        return False
+    return bool(track_all_static_mask(pd.DataFrame([rec])).iloc[0])
+
+
 def track_all_eligible(df: pd.DataFrame | None, tracked: pd.DataFrame | None, *,
                        rebroke: Iterable[str] = ()) -> pd.DataFrame:
     """The rows one "Track all ACT NOW" click takes: ACT NOW lane AND a specific diagnosis AND
@@ -345,11 +366,7 @@ def track_all_eligible(df: pd.DataFrame | None, tracked: pd.DataFrame | None, *,
     _latest, open_keys, dropped, done = _tracked_sets(tracked)
     done = done - {_text(k).upper() for k in rebroke}
     keys = df["FINGERPRINT"].map(lambda v: _text(v).upper())
-    own = own_traffic(df)
-    mask = (df["LANE"].astype(str).eq("ACT NOW")
-            & df["SPECIFIC"].map(_is_true)
-            & ~own
-            & keys.ne("")
+    mask = (track_all_static_mask(df)
             & ~keys.isin(open_keys)
             & ~keys.isin(dropped)
             & ~keys.isin(done))

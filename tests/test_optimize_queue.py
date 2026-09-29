@@ -815,3 +815,61 @@ def test_optimize_measures_done_families_with_one_gated_plain_read():
     detail = src.split("def _render_detail(", 1)[1]
     assert "if status in _REOPEN_STATUSES.values():" in detail and "Track all includes it again." in detail
     assert 'md_dollars(f"Marked done, but the measured outcome says' in detail
+
+
+# --------------------------------------------------------------------------------------------
+# review C23: the detail pane promises "Track all includes it again" only for a family Track all can take
+# (the lifted DONE cooldown re-admits nothing outside ACT NOW / a specific diagnosis / non-own traffic)
+# --------------------------------------------------------------------------------------------
+
+def test_track_all_takes_is_the_row_half_of_track_all_eligible():
+    q = _queue(6)
+    q.loc[1, "LANE"] = "PLAN"
+    q.loc[2, "LANE"] = "VALIDATE"
+    q.loc[3, "SPECIFIC"] = False
+    q.loc[4, "OW_SELF"] = True
+    q.loc[5, "FINGERPRINT"] = "  "
+    takes = [fix_queue.track_all_takes(r) for _, r in q.iterrows()]
+    assert takes == [True, False, False, False, False, False]
+    assert fix_queue.track_all_static_mask(q).tolist() == takes
+    # a re-broke family re-enters Track all exactly when the row half holds (nothing tracked blocks it here)
+    tracked = _tracked([(fp, "DONE", 0, 0) for fp in q["FINGERPRINT"]])
+    picked = set(track_all_eligible(q, tracked, rebroke=set(q["FINGERPRINT"].str.strip())
+                                    )["FINGERPRINT"])
+    assert picked == {fp for fp, t in zip(q["FINGERPRINT"], takes, strict=True) if t}
+    # mapping rows (the master-detail row is a Series; a dict works too); missing columns never take
+    assert fix_queue.track_all_takes({"FINGERPRINT": "FP9", "LANE": "ACT NOW", "SPECIFIC": "TRUE"})
+    assert not fix_queue.track_all_takes({"FINGERPRINT": "FP9", "LANE": "ACT NOW"})
+    assert not fix_queue.track_all_takes({"FINGERPRINT": "FP9", "LANE": "ACT NOW", "SPECIFIC": True,
+                                          "OW_SELF": 1.0})
+
+
+def test_optimize_detail_words_the_reopen_from_the_rows_own_eligibility():
+    detail = _src(_OPT).split("def _render_detail(", 1)[1]
+    block = detail.split("if status in _REOPEN_STATUSES.values():", 1)[1].split("_cr_ok = can_open(", 1)[0]
+    assert '(" — Track all includes it again." if track_all_takes(row) else' in block
+    assert "Its done cooldown is lifted, but Track all takes only ACT NOW families with " in block
+    assert '"re-queue this one — Track does."' in block
+
+
+def _glossary_entries(line_marker: str) -> dict[str, str]:
+    """One '*Columns:*' glossary line split into its '**NAME**' entries (entries end at the next '; **')."""
+    from tests._source import read
+    line = next(ln for ln in read("FEATURE_GLOSSARY.md").splitlines() if line_marker in ln)
+    out: dict[str, str] = {}
+    for part in line.split("*Columns:* ", 1)[1].split("; **"):
+        name, _, body = part.lstrip("*").partition("**")
+        out[name.strip()] = body
+    return out
+
+
+def test_glossary_optimize_columns_keep_each_state_under_its_own_column():
+    # review C24: inserting the Held? entry had moved TRACK_STATUS's 'Unknown ... when the Action Center read
+    # fails' clause under Held? (Held? is absent then, and its own failed-read label is Unavailable)
+    cols = _glossary_entries("**TRACK_STATUS (Status)**")
+    track, held = cols["TRACK_STATUS (Status)"], cols["Held?"]
+    assert "Unknown for every family when the Action Center read fails" in track
+    assert "Unknown for every family" not in held
+    assert "absent when the Action Center status read fails" in held and "Unavailable when" in held
+    # review C23: 'counts in Act now' is qualified by Track all's own row rule
+    assert "only when it is an ACT NOW family with a specific diagnosis that is not own traffic" in track

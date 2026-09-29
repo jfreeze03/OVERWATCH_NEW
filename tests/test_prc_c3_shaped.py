@@ -5,8 +5,11 @@ leg skips these, and tests/test_triage_track.py + tests/test_optimize_queue.py l
       label, the signals read fires, and the selected DONE item shows its outcome chip + basis caption.
   (b) Control Room ▸ Incidents & triage as an operator: the unowned-first ranking caption and the
       'Track as work item' expander paint over shaped data.
-  (c) Operations ▸ Optimize: a family marked done whose measured outcome never held reads "Not fixed" and
-      its detail pane says Track all includes it again.
+  (c) Operations ▸ Optimize: a family marked done whose measured outcome never held reads "Not fixed"; its
+      detail pane says Track all includes it again ONLY when Track all can take it (review C23: the shaped
+      family is a VALIDATE-lane own-traffic family, so the pane says a single Track re-queues it).
+  (d) review C4: Control Room triage items (Action Center and Entity 360) are judged on the signal they were
+      tracked for, so a resolved spike / failure burst whose signal is quiet reads Held, never Not fixed.
 """
 
 from __future__ import annotations
@@ -65,7 +68,9 @@ def test_action_center_completed_work_carries_held(monkeypatch):
                 "SEVERITY": "MEDIUM", "TITLE": f"Fix {key}", "DETAIL": "Daily spend $1,500 vs $900 baseline.",
                 "OWNER": "UNASSIGNED", "STATUS": status, "DUE_DATE": None, "DEFER_UNTIL": None,
                 "COMPLETED_AT": pd.Timestamp(done) if status == "DONE" else None, "RESOLUTION_NOTE": None,
-                "SOURCE": "Control Room > Triage", "SOURCE_ENTITY_TYPE": etype, "SOURCE_ENTITY_KEY": key,
+                # review C4: a level-rule fixture, so NOT a triage source (a triage item is judged on its own
+                # signal -- test_action_center_triage_items_read_held_on_their_own_signal locks that path)
+                "SOURCE": "Action Center", "SOURCE_ENTITY_TYPE": etype, "SOURCE_ENTITY_KEY": key,
                 "CONFIDENCE": None, "PROOF_SQL": None, "ESTIMATED_USD": None, "PERIOD": None,
                 "UPDATED_AT": pd.Timestamp(done), "UPDATED_BY": "JDOE"}
 
@@ -197,5 +202,110 @@ def test_optimize_done_family_that_never_held_reads_not_fixed(monkeypatch):
     assert len(seen) == 1 and "'QUERY_FINGERPRINT', '1.0'" in seen[0]
     blob = _blob(at)
     assert "Action Center: Not fixed." in blob
-    assert "Marked done, but the measured outcome says Not fixed" in blob and "Track all includes it again." in blob
+    assert "Marked done, but the measured outcome says Not fixed" in blob
+    # review C23: the shaped family is VALIDATE-lane own traffic, which Track all never takes -- the pane must
+    # not promise the bulk button will re-queue it
+    assert "Track all includes it again." not in blob
+    assert ("Its done cooldown is lifted, but Track all takes only ACT NOW families with a specific diagnosis "
+            "that are not OVERWATCH's own traffic, so it will not re-queue this one — Track does.") in blob
     assert "Held? measures a family marked done" in blob
+
+
+def _triage_signals(done) -> pd.DataFrame:
+    """WH_T: steady spend with a one-day 3x spike the day before done, then steady again. DB.S.TT: a
+    288-runs/day task with 3 failures in the 2 days before done and none since; its P95 never moves."""
+    today = account_today()
+    rows = []
+    for i in range(1, 60):
+        day = today - timedelta(days=i)
+        rows.append({"ENTITY_TYPE": "WAREHOUSE", "ENTITY_KEY_U": "WH_T", "DAY": day,
+                     "CREDITS": 81.0 if day == done - timedelta(days=1) else 27.0, "P95_SEC": None, "RUNS": None,
+                     "FAILS": None, "LOADED_THROUGH": today - timedelta(days=1)})
+        fails = 2.0 if day == done - timedelta(days=1) else 1.0 if day == done - timedelta(days=2) else 0.0
+        rows.append({"ENTITY_TYPE": "TASK", "ENTITY_KEY_U": "DB.S.TT", "DAY": day, "CREDITS": None,
+                     "P95_SEC": 30.0, "RUNS": 288.0, "FAILS": fails, "LOADED_THROUGH": today - timedelta(days=1)})
+    return pd.DataFrame(rows)
+
+
+@_SKIP
+def test_action_center_triage_items_read_held_on_their_own_signal(monkeypatch):
+    """review C4: before the fix both rows read 'Not fixed' (the spike on the 20%-drop level rule, the failure
+    burst on its unchanged P95) and the detail told the operator to reopen correctly-fixed work."""
+    from app.ui import workbench
+
+    today = account_today()
+    done = today - timedelta(days=20)
+
+    def _row(aid, etype, key, title):
+        return {"ACTION_ID": aid, "CREATED_AT": pd.Timestamp(done - timedelta(days=2)), "COMPANY": "ALFA",
+                "SEVERITY": "MEDIUM", "TITLE": title, "DETAIL": "Tracked from Control Room triage.",
+                "OWNER": "UNASSIGNED", "STATUS": "DONE", "DUE_DATE": None, "DEFER_UNTIL": None,
+                "COMPLETED_AT": pd.Timestamp(done), "RESOLUTION_NOTE": None, "SOURCE": "Control Room > Triage",
+                "SOURCE_ENTITY_TYPE": etype, "SOURCE_ENTITY_KEY": key, "CONFIDENCE": None, "PROOF_SQL": None,
+                "ESTIMATED_USD": None, "PERIOD": None, "UPDATED_AT": pd.Timestamp(done), "UPDATED_BY": "JDOE"}
+
+    actions = pd.DataFrame([_row("t-wh", "WAREHOUSE", "WH_T", "Spend anomaly: WH_T"),
+                            _row("t-task", "TASK", "DB.S.TT", "Task failure: DB.S.TT")])
+
+    def _run(*args, **kwargs):
+        sql = str(args[0] if args else kwargs.get("sql", ""))
+        if "WITH want AS" in sql:
+            return QueryResult(df=_triage_signals(done), ok=True, source="stub")
+        if "SOURCE_ENTITY_KEY, CONFIDENCE, PROOF_SQL" in sql:
+            return QueryResult(df=actions.copy(), ok=True, source="stub")
+        return _shaped_run(*args, **kwargs)
+
+    monkeypatch.setattr(workbench, "run", _run)
+    at = AppTest.from_function(_entry, default_timeout=30)
+    at.run()
+    _nav_to(at, "Control Room")
+    at.session_state["action_include_closed"] = True
+    at.session_state["_ow_md_sel_action_center"] = "t-task"
+    at.run()
+    assert not at.exception, f"action center (triage held): {at.exception}"
+    tables = [d.value for d in at.dataframe if "Held?" in list(getattr(d.value, "columns", []))]
+    assert tables, "the Held? column did not reach the Action Center list"
+    assert sorted(str(v) for v in tables[0]["Held?"].tolist()) == ["Held 19 days", "Held 19 days"]
+    blob = _blob(at)
+    assert "Held? Held 19 days" in blob and "Not fixed" not in blob
+    assert "reopen it with Status: OPEN" not in blob
+    assert "3 failed of 8,064 runs in the 28 days before" in blob
+
+
+@_SKIP
+def test_entity_360_judges_a_triage_item_on_its_own_signal(monkeypatch):
+    """review C4 on Entity 360: related_actions now carries SOURCE, so a resolved triage spike reads Held (the
+    level rule read this quiet warehouse 'Not fixed': spend never fell 20% because it was never meant to)."""
+    from app.ui import workbench
+
+    today = account_today()
+    done = today - timedelta(days=20)
+    related = pd.DataFrame([
+        {"ACTION_ID": "t-wh", "CREATED_AT": pd.Timestamp(done), "SEVERITY": "MEDIUM", "TITLE": "Spend anomaly: WH_T",
+         "OWNER": "UNASSIGNED", "STATUS": "DONE", "DUE_DATE": None, "DEFER_UNTIL": None, "ESTIMATED_USD": None,
+         "CONFIDENCE": None, "UPDATED_AT": pd.Timestamp(done), "COMPLETED_AT": pd.Timestamp(done),
+         "SOURCE": "Control Room > Triage"}])
+    seen: list[str] = []
+
+    def _run(*args, **kwargs):
+        sql = str(args[0] if args else kwargs.get("sql", ""))
+        if "WITH want AS" in sql:
+            return QueryResult(df=_triage_signals(done), ok=True, source="stub")
+        if "ORDER BY IFF(UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS'), 0, 1), UPDATED_AT DESC" in sql:
+            seen.append(sql)
+            return QueryResult(df=related.copy(), ok=True, source="stub")      # related_actions
+        return _shaped_run(*args, **kwargs)
+
+    monkeypatch.setattr(workbench, "run", _run)
+    at = AppTest.from_function(_entry, default_timeout=30)
+    at.run()
+    _nav_to(at, "Control Room")
+    at.session_state["cr_section"] = "Entity 360"
+    at.session_state["entity_360_type"] = "WAREHOUSE"
+    at.session_state["entity_360_key"] = "wh_t"
+    at.run()
+    assert not at.exception, f"entity 360 (triage held): {at.exception}"
+    assert seen and "COMPLETED_AT, SOURCE" in seen[0]
+    tables = [d.value for d in at.dataframe if "Held?" in list(getattr(d.value, "columns", []))]
+    assert tables and tables[0]["Held?"].tolist() == ["Held 19 days"]
+    assert "Newest completed item — Held? Held 19 days: no spend spike the triage scan would raise" in _blob(at)

@@ -30,6 +30,7 @@ from app.logic.fix_queue import (
     own_traffic,
     resolve_deep_link,
     track_all_eligible,
+    track_all_takes,
     track_fingerprints_sql,
     track_items,
     with_track_status,
@@ -415,13 +416,15 @@ def render_optimize(company: str, days: int, rate: float, *, bounds: tuple | Non
         "pinned to the top of their lane.")
     if outcomes.HELD_COL in portfolio.columns:
         st.caption(
-            f"Held? measures a family marked done on its own daily marts since that day: its failed runs when "
+            f"Held? measures a family marked done on its own daily marts since that day: its failure rate when "
             f"at least {outcomes.FAIL_ARM_PCT:.0f}% of runs failed in the {outcomes.BASELINE_DAYS} days before, "
-            f"else its attributed credits (a {outcomes.ROLL_DAYS}-day level at least "
-            f"{outcomes.MIN_DROP:.0%} below the baseline). Re-broke is dated when the level climbed back, so it "
-            f"can lag the real break by up to {outcomes.ROLL_DAYS - 1} days; Re-broke and Not fixed re-open "
-            f"the family for Track all. Up to {outcomes.MAX_ENTITIES} listed done families completed in the "
-            f"last {outcomes.LOOKBACK_DAYS} days are measured; the rest read Not checked.")
+            f"else its attributed credits — a {outcomes.ROLL_DAYS}-day rate or level at least "
+            f"{outcomes.MIN_DROP:.0%} below the baseline is fixed, and climbing back to "
+            f"{outcomes.REGAIN:.0%} of it is Re-broke (so one stray failure is not). Re-broke is dated when the "
+            f"week climbed back, so it can lag the real break by up to {outcomes.ROLL_DAYS - 1} days; Re-broke "
+            f"and Not fixed lift the family's done cooldown, so Track all takes it again when it is an ACT NOW "
+            f"family with a specific diagnosis. Up to {outcomes.MAX_ENTITIES} listed done families completed in "
+            f"the last {outcomes.LOOKBACK_DAYS} days are measured; the rest read Not checked.")
     result_caption(result, note="credits are measured; diagnoses are advisory")
     stash_section_count(_PAGE, "Optimize", len(act_now), dims=("company", "days"))
 
@@ -457,8 +460,14 @@ def _render_detail(row, *, company: str, is_operator: bool, live_on: bool) -> No
     if status in _REOPEN_STATUSES.values():
         _held_lbl = str(row.get(outcomes.HELD_COL) or status)
         _basis = str(row.get("HELD_BASIS") or "").strip()
+        # review C23: the lifted DONE cooldown re-admits the family to Track all only when Track all takes it
+        # at all (ACT NOW, a specific diagnosis, not own traffic); otherwise only a single Track re-queues it
         st.caption(md_dollars(f"Marked done, but the measured outcome says {_held_lbl}"
-                              + (f" ({_basis})" if _basis else "") + " — Track all includes it again."))
+                              + (f" ({_basis})" if _basis else "")
+                              + (" — Track all includes it again." if track_all_takes(row) else
+                                 ". Its done cooldown is lifted, but Track all takes only ACT NOW families with "
+                                 "a specific diagnosis that are not OVERWATCH's own traffic, so it will not "
+                                 "re-queue this one — Track does.")))
     # Cross-page doorways only for a viewer whose profile offers Control Room (the pane already
     # sits in master_detail's column, so the two links stack rather than nest another column row).
     _cr_ok = can_open("Control Room")
