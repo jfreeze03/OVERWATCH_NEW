@@ -576,6 +576,53 @@ def test_autodeclare_attach_still_links_a_takeover_to_a_human_declared_incident(
     assert _rows(con, _sq(_DECL)) == []
 
 
+def _user_event(eid: str, rule: str, user: str, *, status: str = "OPEN", severity: str = "CRITICAL",
+                raised: datetime | None = None) -> dict:
+    return dict(_crit(eid, rule, status=status, severity=severity, raised=raised),
+                DEDUPE_KEY=f"{rule}|{user}|CRIT|2026-09-30 0{eid[-1]}:00:00.000")
+
+
+def test_autodeclare_attach_links_an_identity_alert_only_to_the_same_users_incident():
+    """Review W1: ALICE's human incident (MITIGATED, company ALL) must not swallow BOB's CRITICAL takeover -- V164
+    would read the incident's MITIGATED status as BOB's acknowledgement (never escalated) and V131 would refuse a
+    separate declare for BOB. A second ALICE CRITICAL still joins her incident; other rules keep the family match."""
+    inc_a = {"INCIDENT_ID": "INC-A", "STATUS": "MITIGATED", "COMPANY": "ALL", "DETECTED_AT": _ms(_at(_WED, 7))}
+    a1 = _user_event("a1", _TAKE, "ALICE", status="RESOLVED", raised=_at(_WED, 6))
+    b1 = _user_event("b1", _TAKE, "BOB", raised=_at(_WED, 9))
+    a2 = _user_event("a2", _TAKE, "alice", raised=_at(_WED, 9))                   # upper-cased compare
+    tables = {"ALERT_EVENTS": [a1, b1, a2], "INCIDENTS": [inc_a],
+              "INCIDENT_MEMBERS": [{"INCIDENT_ID": "INC-A", "MEMBER_KIND": "ALERT", "REF_ID": "a1"}]}
+    con = _connect(tables, _ms(_at(_WED, 10)))
+    got = [(r["INCIDENT_ID"], r["EVENT_ID"]) for r in _rows(con, _sq(_attach_sql()))]
+    assert got == [("INC-A", "a2")]                                                  # BOB stays unlinked
+    # BOB is never auto-declared either (A1): he waits for a human, with his own escalation clock
+    assert _rows(con, _sq(_DECL)) == []
+    # the same for SEC_ADMIN_GRANT (entity = the grantee)
+    g_inc = dict(inc_a, INCIDENT_ID="INC-G", STATUS="OPEN")
+    g1 = _user_event("g1", _GRANT, "ALICE", status="ACK", raised=_at(_WED, 6))
+    g2 = _user_event("g2", _GRANT, "BOB", raised=_at(_WED, 9))
+    con_g = _connect({"ALERT_EVENTS": [g1, g2], "INCIDENTS": [g_inc],
+                      "INCIDENT_MEMBERS": [{"INCIDENT_ID": "INC-G", "MEMBER_KIND": "ALERT", "REF_ID": "g1"}]},
+                     _ms(_at(_WED, 10)))
+    assert _rows(con_g, _sq(_attach_sql())) == []
+    # every other rule keeps V154's family-only attach (a different entity still joins the open incident)
+    o_inc = dict(inc_a, INCIDENT_ID="INC-O", STATUS="OPEN")
+    o1 = _user_event("o1", "SEC_CRED_EXPIRY", "ALICE", raised=_at(_WED, 6))
+    o2 = _user_event("o2", "SEC_CRED_EXPIRY", "BOB", raised=_at(_WED, 9))
+    con_o = _connect({"ALERT_EVENTS": [o1, o2], "INCIDENTS": [o_inc],
+                      "INCIDENT_MEMBERS": [{"INCIDENT_ID": "INC-O", "MEMBER_KIND": "ALERT", "REF_ID": "o1"}]},
+                     _ms(_at(_WED, 10)))
+    assert [(r["INCIDENT_ID"], r["EVENT_ID"]) for r in _rows(con_o, _sq(_attach_sql()))] == [("INC-O", "o2")]
+    # teeth: V154's [attach] (the A2 predicate removed) links BOB to ALICE's incident
+    pred = ("              AND (e.RULE_ID NOT IN ('SEC_LOGIN_TAKEOVER', 'SEC_ADMIN_GRANT')\n"
+            "                   OR UPPER(SPLIT_PART(COALESCE(a.DEDUPE_KEY, a.EVENT_ID), '|', 2))\n"
+            "                      = UPPER(SPLIT_PART(COALESCE(e.DEDUPE_KEY, e.EVENT_ID), '|', 2)))\n")
+    assert _attach_sql().count(pred) == 1
+    base = _attach_sql().replace(pred, "")
+    assert sorted((r["INCIDENT_ID"], r["EVENT_ID"]) for r in _rows(con, _sq(base))) == [
+        ("INC-A", "a2"), ("INC-A", "b1")]
+
+
 def test_autodeclare_toggle_off_returns_before_any_declare():
     toggle = _between(_A, "    SELECT COALESCE(MAX(VALUE), 'TRUE') INTO :enabled", "    CREATE OR REPLACE TEMPORARY TABLE")
     assert "    IF (UPPER(:enabled) <> 'TRUE') THEN\n        RETURN 'auto-declare off';\n    END IF;\n" in toggle
@@ -626,12 +673,24 @@ def _preflight_statements(tmp_path) -> list[str]:
 
 
 def test_preflight_grids_preview_exactly_what_the_first_run_raises(tmp_path):
-    p1, p2, p3 = _preflight_statements(tmp_path)
+    p1, p2, p3, p4 = _preflight_statements(tmp_path)
     logins, grants = _combined_logins(_NOW_MIX)
     con = _connect({"LOGIN_HISTORY": logins, "GRANTS_TO_USERS": grants}, _ms(_NOW_MIX))
-    arm26 = {r["DEDUPE_KEY"] for r in _run(_ARM26, _NOW_MIX, logins=logins, grants=grants)}
+    raised26 = _run(_ARM26, _NOW_MIX, logins=logins, grants=grants)
+    arm26 = {r["DEDUPE_KEY"] for r in raised26}
     rows1 = _rows(con, _sq(p1))
     assert {r["DEDUPE_KEY_PREVIEW"] for r in rows1 if r["IN_FIRST_RUN_WINDOW"]} == arm26
+    # review W17: P162.4 = exactly the CRITICAL events the first scan raises (what V164 later escalates), i.e.
+    # P162.1's CRIT + IN_FIRST_RUN_WINDOW rows. The WARN episodes (A.WARN, F.TWICE's 06:00 one) and the episode
+    # outside the 24h anchor window (G.OLD) are not in it.
+    crit26 = {r["DEDUPE_KEY"] for r in raised26 if r["SEVERITY"] == "CRITICAL"}
+    rows4 = _rows(con, _sq(p4))
+    assert {r["DEDUPE_KEY_PREVIEW"] for r in rows4} == crit26 == {
+        r["DEDUPE_KEY_PREVIEW"] for r in rows1 if r["IN_FIRST_RUN_WINDOW"] and r["BAND"] == "CRIT"}
+    assert crit26 and crit26 != arm26                                               # both bands present: teeth
+    assert sorted(r["USER_NAME"] for r in rows4) == ["B.NIGHT", "C.ADMIN", "F.TWICE"]  # F.TWICE: its 03:00 one
+    assert {r["CRIT_REASON"] for r in rows4} == {"off-hours", "admin role SYSADMIN"}
+    assert all("escalates about 2-3h after the apply unless acknowledged" in r["AFTER_APPLY"] for r in rows4)
     assert {r["USER_NAME"] for r in rows1} == {"A.WARN", "B.NIGHT", "C.ADMIN", "F.TWICE", "G.OLD"}   # 30 days
     by_user = {r["USER_NAME"]: r for r in rows1}
     assert by_user["C.ADMIN"]["CRIT_REASON"] == "admin role SYSADMIN" and by_user["B.NIGHT"]["BAND"] == "CRIT"

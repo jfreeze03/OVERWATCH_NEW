@@ -68,8 +68,17 @@ _MARK_AUTO = ("-- >>> derived:SP_INCIDENT_AUTODECLARE  (from V154; + no auto-dec
 _MARK_SCAN = ("-- >>> derived:SP_ALERT_SCAN  (from V157; + [26] SEC_LOGIN_TAKEOVER + [27] SEC_ADMIN_GRANT hourly "
               "counting arms, tally 12 -> 14, V162)\n")
 _A1 = ("          -- V162 (Next-Fifty #39, owner 2026-09-29): identity alerts never auto-declare -- a human declares after\n"
-       "          -- contacting the user. [attach] below still links them to an incident a human opened for that family.\n"
+       "          -- contacting the user. [attach] below still links them to an incident a human opened for that user.\n"
        "          AND e.RULE_ID NOT IN ('SEC_LOGIN_TAKEOVER', 'SEC_ADMIN_GRANT')\n")
+# review W1: [attach] links an identity alert only to an incident that already holds the SAME user
+_A2_PRED = ("              AND (e.RULE_ID NOT IN ('SEC_LOGIN_TAKEOVER', 'SEC_ADMIN_GRANT')\n"
+            "                   OR UPPER(SPLIT_PART(COALESCE(a.DEDUPE_KEY, a.EVENT_ID), '|', 2))\n"
+            "                      = UPPER(SPLIT_PART(COALESCE(e.DEDUPE_KEY, e.EVENT_ID), '|', 2)))\n")
+_A2 = ("              -- V162 review fix: an identity alert attaches only to an incident that already holds the\n"
+       "              -- SAME user (DEDUPE_KEY field 2, upper-cased like the entity filter of SP_INCIDENT_DECLARE).\n"
+       "              -- A takeover of another user stays unlinked, so it keeps its own escalation (V164) and its\n"
+       "              -- own proposal, and never inherits an incident acknowledged or mitigated for someone else.\n"
+       + _A2_PRED)
 _ANCHOR_26 = "    -- [26] SEC_LOGIN_TAKEOVER"
 _ANCHOR_27 = "    -- [27] SEC_ADMIN_GRANT"
 _GATE_22 = "    IF (MOD(ct_hour, 3) = 2) THEN"
@@ -133,17 +142,57 @@ def test_v162_preflight_is_read_only_and_parses(tmp_path):
                    "REVOKE", "EXECUTE"):
         assert not re.search(rf"\b{banned}\b", code, re.I), banned
     assert not re.search(r"(?<![:\w]):[A-Za-z_]", code), "a scripting :bind survived into the PREFLIGHT"
-    assert code.count(";") == 3 and "$$" not in sql and b"\r" not in sql.encode()
+    assert code.count(";") == 4 and "$$" not in sql and b"\r" not in sql.encode()
+    assert re.findall(r"^-- (P162\.\d) ", sql, re.M) == ["P162.1", "P162.2", "P162.3", "P162.4"]
     sqlglot = pytest.importorskip("sqlglot")
     from sqlglot import exp
     parsed = sqlglot.parse(sql, dialect="snowflake")
-    assert [p.key for p in parsed] == ["select"] * 3
+    assert [p.key for p in parsed] == ["select"] * 4
     writes = (exp.Insert, exp.Update, exp.Delete, exp.Merge, exp.Create, exp.Drop, exp.Command)
     for p in parsed:
         assert not [type(n).__name__ for n in p.walk() if isinstance(n, writes)]
     ctes = [c.alias for c in parsed[0].find(exp.With).expressions]
     assert ctes == ["k", "ev", "fl", "bend", "seq", "brk", "anc", "det", "adm", "x"]
     assert [c.alias for c in parsed[1].find(exp.With).expressions] == ["ag"]
+    assert [c.alias for c in parsed[3].find(exp.With).expressions] == ctes
+
+
+def test_v162_preflight_p162_4_is_the_first_run_crit_chain_with_the_arm_windows(tmp_path):
+    """Review W17: V164's census P164.2 runs before V162's first scan, so it can never list the CRITICAL takeovers
+    that scan raises -- and those escalate ~2-3h after the apply. P162.4 is arm [26]'s chain with its OWN 27h / 24h
+    windows (not widened), filtered to the CRIT band, and says so."""
+    sql, _ = _optional(tmp_path)
+    p4 = sql[sql.index("-- P162.4 "):]
+    chain = _ARM26[_ARM26.index("        ev AS ("):_ARM26.index("\n        SELECT b.RULE_ID")]
+    assert chain in p4                                                      # the arm's own windows, verbatim
+    assert "DATEADD('hour', -723" not in p4 and "DATEADD('hour', -720" not in p4
+    assert "WHERE x.OFF_HOURS OR x.ADMIN_ROLE IS NOT NULL\n" in p4           # = the arm's CRITICAL band
+    band = _between(_ARM26, "               IFF(x.OFF_HOURS OR x.ADMIN_ROLE IS NOT NULL, 'CRITICAL'", ",\n")
+    assert "x.OFF_HOURS OR x.ADMIN_ROLE IS NOT NULL" in band
+    key26 = _between(_ARM26, "c.RULE_ID || '|' || LEFT(x.USER_NAME, 200)", "\n        FROM cfg c")
+    assert key26.replace("c.RULE_ID", "'SEC_LOGIN_TAKEOVER'", 1) in p4
+    flat = " ".join(ln.lstrip("- ") for ln in p4.splitlines() if ln.startswith("--"))
+    for frag in ("V164's escalation census P164.2 cannot list them", "Read these WITH P164.2",
+                 "seed ('ESCALATE_AFTER_MIN', '0') before the apply", "within 2h of the first hourly scan"):
+        assert frag in flat, frag
+
+
+def test_v164_p164_2_census_points_at_p162_4(tmp_path):
+    """Review W17, the other half: V164's census header says what it cannot see and where that list is."""
+    env = {k: v for k, v in os.environ.items() if k not in ("PREFLIGHT_OUT", "PART_B_OUT", "V164_OUT")}
+    env.update(V164_OUT=str(tmp_path / "m164.sql"), PREFLIGHT_OUT=str(tmp_path / "pf164.sql"))
+    result = subprocess.run([sys.executable, str(ROOT / "outputs" / "gen_v164.py")], env=env, cwd=tmp_path,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "m164.sql").read_bytes() == (
+        ROOT / "snowflake" / "migrations" / "V164__notify_actionable_lines_escalation.sql").read_bytes()
+    pf = (tmp_path / "pf164.sql").read_text(encoding="utf-8")
+    head = pf[pf.index("-- P164.2 "):pf.index("WITH k AS (", pf.index("-- P164.2 "))]
+    flat = " ".join(ln.lstrip("- ") for ln in head.splitlines())
+    assert "NOT LISTED HERE: the CRITICAL takeovers V162's first hourly scan raises" in flat
+    assert "PREFLIGHT P162.4 lists them: decide on both grids together." in flat
+    dep = " ".join(line.lstrip("> ") for line in read("DEPLOYMENT.md").splitlines())
+    assert "and P162.4 the CRITICAL takeovers V162's first hourly scan raises (P164.2 cannot see those" in dep
 
 
 def test_v162_preflight_carries_the_arm_chains_verbatim(tmp_path):
@@ -188,7 +237,21 @@ def test_v162_first_line_guard_and_version():
     for word in ("WHY:", "COST", "LATENCY:", "FIRST RUN:", "ROLLBACK (order matters):",
                  "Apply AFTER V161. Idempotent; safe to re-run."):
         assert word in head, word
-    assert head.index("FIRST re-run V157's SP_ALERT_SCAN") < head.index("THEN\n-- optionally V154's")
+    # review W2/W14: the scan goes first, and V154's autodeclare comes back only AFTER the identity events are
+    # closed or 24h old -- the scan-first order alone never stopped a still-open CRITICAL takeover being declared
+    rb = " ".join(ln.lstrip("- ") for ln in head[head.index("-- ROLLBACK (order matters):"):
+                                                  head.index("-- Apply AFTER V161.")].splitlines())
+    step1, step2 = rb.index("1. Re-run V157's SP_ALERT_SCAN"), rb.index("2. Only to restore V154's SP_INCIDENT_AUTODECLARE")
+    assert step1 < step2
+    pre = rb[step2:]
+    assert pre.index("FIRST wait 24h after step 1") < pre.index("V154 has no exclusion")
+    assert "resolve every OPEN / ACK / SNOOZED SEC_LOGIN_TAKEOVER and SEC_ADMIN_GRANT event as EXPECTED" in pre
+    assert "Running the scan first only keeps out the events raised between the two steps" in pre
+    assert "Roll V163 back before V162" in rb
+    assert "THEN\n-- optionally V154's" not in head and "Reversed, an hourly run" not in head
+    # review W17: the first-run CRITICAL takeovers escalate once V164 lands; P162.4 (not P164.2) lists them
+    assert "P162.4 lists them (V164's own census, P164.2, runs before they exist and cannot)" in " ".join(
+        ln.lstrip("- ") for ln in head.splitlines())
 
 
 def test_v162_file_order_autodeclare_before_the_scan():
@@ -274,19 +337,27 @@ def test_v162_hourly_normalizes_back_to_v157_byte_for_byte():
 
 
 def test_v162_autodeclare_normalizes_back_to_v154_byte_for_byte():
-    assert _A.count(_A1) == 1
-    # the block sits inside the crit CTE, directly before its closing paren
+    assert _A.count(_A1) == 1 and _A.count(_A2) == 1
+    # A1 sits inside the crit CTE, directly before its closing paren
     assert _A.count(_A1 + "    )\n    SELECT UUID_STRING() AS INCIDENT_ID, FAMILY, COMPANY,\n") == 1
-    assert _A.replace(_A1, "") == _A154
+    # A2 is [attach]'s last WHERE predicate: after the NOT EXISTS m2 line, before the QUALIFY (filters, not ranks)
+    assert _A.count("                              WHERE m2.MEMBER_KIND = 'ALERT' AND m2.REF_ID = e.EVENT_ID)\n"
+                    + _A2 + "            QUALIFY ROW_NUMBER() OVER (\n") == 1
+    assert _A.replace(_A1, "").replace(_A2, "") == _A154
+    assert _A.replace(_A1, "") != _A154 and _A.replace(_A2, "") != _A154          # both deltas are real
 
 
-def test_v162_exclusion_lives_only_in_the_crit_cte():
+def test_v162_exclusion_lives_in_the_crit_cte_and_the_same_user_rule_in_attach():
     crit = _between(_A, "    WITH crit AS (", "    SELECT UUID_STRING()")
     attach = _between(_A, "    -- [attach] V154", "    -- [auto-mitigate] V154")
     mitigate = _between(_A, "    -- [auto-mitigate] V154", "SELECT COUNT(*) INTO :made")
     needle = "e.RULE_ID NOT IN ("
-    assert _A.count(needle) == 1 and needle in crit and needle not in attach and needle not in mitigate
+    assert _A.count(needle) == 2 and crit.count(needle) == 1 and attach.count(needle) == 1
+    assert needle not in mitigate
     assert "AND e.RULE_ID NOT IN ('SEC_LOGIN_TAKEOVER', 'SEC_ADMIN_GRANT')\n" in crit
+    # review W1: in [attach] the identity rules are gated on the SAME user, never excluded outright
+    assert _A2_PRED in attach and "AND e.RULE_ID NOT IN ('SEC_LOGIN_TAKEOVER', 'SEC_ADMIN_GRANT')\n" not in attach
+    assert attach.index(_A2_PRED) < attach.index("            QUALIFY ROW_NUMBER() OVER (")
     # the member INSERT joins _OW_AUTODECL (the excluded families never reach it) and is unchanged
     assert _between(_A, "    INSERT INTO DBA_MAINT_DB.OVERWATCH.INCIDENT_MEMBERS", "    -- [attach] V154") == \
         _between(_A154, "    INSERT INTO DBA_MAINT_DB.OVERWATCH.INCIDENT_MEMBERS", "    -- [attach] V154")
@@ -463,7 +534,8 @@ _PART_B = {
     "SP_ALERT_SCAN()": (("SEC_LOGIN_TAKEOVER", "SEC_ADMIN_GRANT", "alert scan v13 (V162:", "/14 rule blocks ok",
                          "LAST_BEND", "HH24:MI:SS.FF3", "IF (MOD(ct_hour, 4) = 1) THEN", "SP_SCAN_ETL_CYCLE"),
                         ("/12 rule blocks ok",)),
-    "SP_INCIDENT_AUTODECLARE()": (("e.RULE_ID NOT IN (", "V162 (Next-Fifty #39", "incident_attach_failed",
+    "SP_INCIDENT_AUTODECLARE()": (("e.RULE_ID NOT IN (", "V162 (Next-Fifty #39",
+                                   "OR UPPER(SPLIT_PART(COALESCE(a.DEDUPE_KEY", "incident_attach_failed",
                                    "incident_mitigate_failed"), ()),
 }
 
@@ -508,9 +580,25 @@ def test_v162_playbooks():
     # the order: right after SEC_NEW_ADMIN_NETWORK
     keys = list(PLAYBOOKS)
     assert keys[keys.index("SEC_NEW_ADMIN_NETWORK") + 1:keys.index("SEC_NEW_ADMIN_NETWORK") + 3] == [_TAKE, _GRANT]
-    # OPS_SCAN_DEGRADED names the hourly tally V162 ships
+    # OPS_SCAN_DEGRADED names the hourly tally V162 ships (and, review W18, the tally before V162 is applied)
     osd = PLAYBOOKS["OPS_SCAN_DEGRADED"]
-    assert "still reports 14/14 ok" in osd and "12/12" not in osd and "COST_SLEEP_POLLING" in osd
+    assert "still reports 14/14 ok (12/12 before V162)" in osd and osd.count("12/12") == 1
+    assert "COST_SLEEP_POLLING" in osd
+    # review W13: the lens lists the alert's user only under company ALL (the event is account-wide, the lens is
+    # company-scoped), a covering window and a threshold of 5+ -- never "every alert shows there"
+    assert "every alert of this rule shows there" not in take
+    for frag in ("a wider 6-hour lens at 5+ failures and follows the top-bar company filter",
+                 "this event is account-wide (company ALL)", "the rule threshold is 5 or more",
+                 "A user missing from it proves nothing until the company is set to ALL."):
+        assert frag in take, frag
+    # review W18: SEC_FAILED_LOGINS points at the takeover rule only while it is enabled (and V162 applied); the
+    # lens is the check, a missing event rules nothing out
+    failed = PLAYBOOKS["SEC_FAILED_LOGINS"]
+    assert "check for that event first" not in failed
+    for frag in ("since V163 the title says", "Since V162, and only while SEC_LOGIN_TAKEOVER is enabled in Alerts > "
+                 "Rules", "*Account-takeover candidates* (step 1) shows that whatever else is set up",
+                 "a missing event does not rule a breakthrough out", "set the top-bar company to ALL"):
+        assert frag in failed, frag
 
 
 def test_v162_navigation_sets_no_entity_filter_for_user_text():
@@ -554,6 +642,12 @@ def test_v162_captions_are_schema_gated():
     cap = cap[:cap.index("st.caption(_toggle_cost_hint(\"takeover\"))")]
     assert "raises SEC_LOGIN_TAKEOVER for the stricter case" in cap and "wider 6-hour lens" in cap
     assert sec.count("raises SEC_LOGIN_TAKEOVER") == 1
+    # review W13: no unconditional "lists its user here" -- the lens is company-scoped and fixed at 5 failures
+    flat = re.sub(r'"\s*\n\s*"', "", cap)
+    assert "so a window that includes such a login lists its user here" not in flat
+    for frag in ("That alert is account-wide but this table follows the company filter",
+                 "a rule threshold of 5 or more", "set the company to ALL before reading a missing user as a false alarm"):
+        assert frag in flat, frag
     assert 'Account-takeover candidates (failed burst → success)", ""' in sec              # label kept
     assert sec.index("section_header(\"Account-takeover candidates") < sec.index("if has_migration(162, _PAGE):")
     cr = read("app/ui/pages/control_room.py")
@@ -584,6 +678,33 @@ def test_v162_runbook():
     assert "[26] SEC_LOGIN_TAKEOVER and [27] SEC_ADMIN_GRANT are ungated" in flat
     sop = rb[rb.index("## §21 Incidents"):]
     assert "SP_INCIDENT_AUTODECLARE skips SEC_LOGIN_TAKEOVER and SEC_ADMIN_GRANT" in " ".join(sop.split())
+    # review W1: the SOP names the same-user rule for [attach]
+    assert "only when that incident already holds the SAME user" in " ".join(sop.split())
+
+
+def test_v162_runbook_rollback_clears_the_identity_events_before_v154_returns():
+    """Review W2/W14/W18: scan first; V154's autodeclare only after a 24h wait or the EXPECTED data step (SNOOZED
+    included), stated BEFORE the re-run; V163 rolls back before V162; the wave paragraph no longer promises that no
+    rollback needs a data change, nor that V162 rolls back on its own."""
+    rb = read("RUNBOOK.md")
+    wave = rb[rb.index("**Rolling back wave 4 (V162-V165).**"):].split("\n\n", 1)[0]
+    assert "None of these rollbacks needs a data change" not in wave and "each rolls back on its own" not in wave
+    assert "V162 does not: roll V163 back before it" in wave and "a 24-hour wait or a data step first" in wave
+    sec = rb[rb.index("**Rolling back V162 (order matters).**"):rb.index("| Rule | Family | Fires when")]
+    flat = " ".join(sec.split())
+    assert flat.index("Roll V163 back first") < flat.index("1. Re-run V157's")
+    step2 = flat[flat.index("2. Only if V154's"):]
+    data = ("UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS SET STATUS = 'RESOLVED', RESOLUTION_KIND = 'EXPECTED', "
+            "RESOLVED_AT = CURRENT_TIMESTAMP() WHERE RULE_ID IN ('SEC_LOGIN_TAKEOVER', 'SEC_ADMIN_GRANT') AND "
+            "STATUS IN ('OPEN', 'ACK', 'SNOOZED');")
+    assert step2.index("wait at least 24 hours after step 1") < step2.index(data) < step2.index(
+        "Then re-run V154's procedure")
+    assert "Running the scan first only keeps out the events raised between the two steps" in step2
+    assert "Reversed, an hourly TASK_INCIDENT_AUTODECLARE" not in flat
+    # the data step is valid SQL on the V004 columns (sqlglot, when available)
+    sqlglot = pytest.importorskip("sqlglot")
+    (stmt,) = sqlglot.parse(data, dialect="snowflake")
+    assert stmt.key == "update"
 
 
 # -- integration lockstep (validate / docs / Admin). Completed by the wave-4 integrator: snowflake/validate.sql,

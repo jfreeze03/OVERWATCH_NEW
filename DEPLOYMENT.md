@@ -359,8 +359,11 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > handling and the nested cursor loop are runtime-only):**
 > 1. Before the apply: PREFLIGHT P164.1 must show `DEFAULT_RECIPIENTS_SET` and
 >    `SNOW_ACCOUNTADMINS_CAN_USE` TRUE, or seed `('ESCALATE_EMAIL_INTEGRATION','')` for a Teams-only
->    escalation. P164.2 lists the first-run escalations; acknowledge stale ones or seed
->    `('ESCALATE_AFTER_MIN','0')` (both seeds survive the V164 MERGE, which is WHEN NOT MATCHED).
+>    escalation. P164.2 lists the first-run escalations of CRITICALs that already exist, and P162.4
+>    the CRITICAL takeovers V162's first hourly scan raises (P164.2 cannot see those; they escalate
+>    about 2-3 hours after the apply too). Read both: acknowledge stale ones (the new takeovers within
+>    2 hours of the first hourly scan) or seed `('ESCALATE_AFTER_MIN','0')` (both seeds survive the
+>    V164 MERGE, which is WHEN NOT MATCHED).
 > 2. After the next hourly chain: TASK_ALERT_NOTIFY SUCCEEDED (its RETURN_VALUE stays NULL: a task
 >    that CALLs a proc does not publish the proc's return string), no `escalation_failed` or
 >    `escalation_email_failed` rows in APP_ERROR_LOG, and one ALERT_AUDIT `ESCALATE` row per

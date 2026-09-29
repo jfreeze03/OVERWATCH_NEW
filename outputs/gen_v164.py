@@ -517,6 +517,8 @@ FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
 --        REPOST_TO = the enabled routes that delivered it (the Teams re-post); EMAIL_LEG = the email goes too.
 --        expect: only events you WANT re-posted and emailed. Acknowledge or resolve stale ones first, or seed
 --        ('ESCALATE_AFTER_MIN', '0') before the apply and turn it on later in Admin > Settings.
+--        NOT LISTED HERE: the CRITICAL takeovers V162's first hourly scan raises (they do not exist yet); they
+--        escalate about 2-3h after the apply too. PREFLIGHT P162.4 lists them: decide on both grids together.
 WITH k AS (
     SELECT CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS NOW_TS,
            {AFTER_PARSE.format(v=SETTINGS_AFTER)} AS AFTER_MIN,

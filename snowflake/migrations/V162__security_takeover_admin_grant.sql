@@ -25,11 +25,12 @@
 --   login in UTC; the grant's Central CREATED_ON), never a bare EVENT_ID: V117's snooze carry-forward reads a
 --   10-character tail that parses as a date (a 10-digit integer is epoch seconds) as a date band, and would carry a
 --   snooze to the user's NEXT takeover.
---   ~ SP_INCIDENT_AUTODECLARE re-derived from V154 (its current definer), byte-identical except ONE predicate in
---     the crit CTE: AND e.RULE_ID NOT IN ('SEC_LOGIN_TAKEOVER', 'SEC_ADMIN_GRANT'). Neither rule ever opens an
+--   ~ SP_INCIDENT_AUTODECLARE re-derived from V154 (its current definer), byte-identical except TWO predicates.
+--     In the crit CTE: AND e.RULE_ID NOT IN ('SEC_LOGIN_TAKEOVER', 'SEC_ADMIN_GRANT'). Neither rule ever opens an
 --     incident, even if an operator later edits its severity to CRITICAL: a human declares after contacting the
---     user. The [attach] arm and the [auto-mitigate] sweep are unchanged, so a later takeover CRITICAL still links
---     to an incident a person declared for that family.
+--     user. In [attach]: a CRITICAL of either rule links only to an OPEN/MITIGATED incident that already holds
+--     the SAME user (DEDUPE_KEY field 2); a CRITICAL for another user stays unlinked, keeps its V164 escalation
+--     and can be declared on its own. Every other rule attaches as in V154; the [auto-mitigate] sweep is unchanged.
 --   ~ SP_ALERT_SCAN re-derived from V157 (its current definer), byte-identical except: + counting arms [26] and
 --     [27] after [21], before the [22] gate (so the self-alert, the V067 supersede sweep and the V117 carry-forward
 --     see them in the same pass: a WARN -> CRIT crossing is superseded at once); tally 12 -> 14 (self-alert, [hb],
@@ -46,10 +47,17 @@
 -- LATENCY: hourly; ACCOUNT_USAGE lags up to ~2h, so an event arrives 1-3h after the login or grant.
 -- FIRST RUN: the first hourly scan after apply raises every takeover episode of the last 24h and every admin grant
 -- of the last 26h (CRITICAL ones included -- no incident is opened). PREFLIGHT_WAVE4.sql P162.1 / P162.2 list them.
+-- Once V164 is applied, each first-run CRITICAL takeover nobody acknowledges is re-posted and emailed about 2-3h
+-- after the apply: P162.4 lists them (V164's own census, P164.2, runs before they exist and cannot).
 -- No procedure runs at apply time.
--- ROLLBACK (order matters): FIRST re-run V157's SP_ALERT_SCAN (tally back to 12; the two rules stop raising), THEN
--- optionally V154's SP_INCIDENT_AUTODECLARE. Reversed, an hourly run in between could auto-declare a CRITICAL
--- takeover. Optionally disable the two rules in Alerts > Rules; the seeds can stay.
+-- ROLLBACK (order matters): 1. Re-run V157's SP_ALERT_SCAN (tally back to 12; the two rules stop raising). That
+-- is usually enough: this SP_INCIDENT_AUTODECLARE only narrows what it does for the two rules, so it can stay.
+-- 2. Only to restore V154's SP_INCIDENT_AUTODECLARE too: FIRST wait 24h after step 1 (the crit CTE reads 24h), or
+-- resolve every OPEN / ACK / SNOOZED SEC_LOGIN_TAKEOVER and SEC_ADMIN_GRANT event as EXPECTED (RUNBOOK section 12
+-- has the UPDATE) -- V154 has no exclusion, so a CRITICAL takeover still open is auto-declared at the next hourly
+-- run. Running the scan first only keeps out the events raised between the two steps; closing or aging out the
+-- rest is what prevents the auto-declare. Roll V163 back before V162 (its [07] text points at the hourly
+-- SEC_LOGIN_TAKEOVER), or accept that pointer. Optionally disable the two rules in Alerts > Rules; the seeds can stay.
 -- Apply AFTER V161. Idempotent; safe to re-run.
 
 EXECUTE IMMEDIATE
@@ -109,7 +117,7 @@ BEGIN
           AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.INCIDENT_MEMBERS m
                           WHERE m.MEMBER_KIND = 'ALERT' AND m.REF_ID = e.EVENT_ID)
           -- V162 (Next-Fifty #39, owner 2026-09-29): identity alerts never auto-declare -- a human declares after
-          -- contacting the user. [attach] below still links them to an incident a human opened for that family.
+          -- contacting the user. [attach] below still links them to an incident a human opened for that user.
           AND e.RULE_ID NOT IN ('SEC_LOGIN_TAKEOVER', 'SEC_ADMIN_GRANT')
     )
     SELECT UUID_STRING() AS INCIDENT_ID, FAMILY, COMPANY,
@@ -180,6 +188,13 @@ BEGIN
               AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
               AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.INCIDENT_MEMBERS m2
                               WHERE m2.MEMBER_KIND = 'ALERT' AND m2.REF_ID = e.EVENT_ID)
+              -- V162 review fix: an identity alert attaches only to an incident that already holds the
+              -- SAME user (DEDUPE_KEY field 2, upper-cased like the entity filter of SP_INCIDENT_DECLARE).
+              -- A takeover of another user stays unlinked, so it keeps its own escalation (V164) and its
+              -- own proposal, and never inherits an incident acknowledged or mitigated for someone else.
+              AND (e.RULE_ID NOT IN ('SEC_LOGIN_TAKEOVER', 'SEC_ADMIN_GRANT')
+                   OR UPPER(SPLIT_PART(COALESCE(a.DEDUPE_KEY, a.EVENT_ID), '|', 2))
+                      = UPPER(SPLIT_PART(COALESCE(e.DEDUPE_KEY, e.EVENT_ID), '|', 2)))
             QUALIFY ROW_NUMBER() OVER (
                 PARTITION BY e.EVENT_ID
                 ORDER BY IFF(SPLIT_PART(COALESCE(a.DEDUPE_KEY, a.EVENT_ID), '|', 2)
@@ -1501,5 +1516,5 @@ $$;
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 162 AS VERSION,
-       'Next-Fifty #39 (owner 2026-09-29): two hourly identity alerts that never auto-declare an incident. SEC_LOGIN_TAKEOVER (SP_ALERT_SCAN arm [26], ungated): at least THRESHOLD_NUM (seed 5, floor 2) failed logins by one user within 15 minutes, then a successful login within 60 minutes; one event per episode; CRITICAL when the login is off-hours (20:00-06:00 America/Chicago or a weekend) or the user directly held ACCOUNTADMIN, SECURITYADMIN, SYSADMIN, USERADMIN, ORGADMIN, SNOW_ACCOUNTADMINS or SNOW_SYSADMINS, else the rule severity (HIGH); 27h LOGIN_HISTORY read, 24h anchor window. SEC_ADMIN_GRANT (arm [27], ungated): one event per direct grant of one of those roles to a user in the last 26h, revoked or not; flat HIGH; the title flags off-hours and first-time grants. Both company ALL; keys end in an explicit millisecond timestamp (never a bare EVENT_ID, which the V117 carry-forward would read as a date). SP_INCIDENT_AUTODECLARE re-derived from V154, byte-identical except the crit CTE excludes both rules ([attach] and [auto-mitigate] unchanged). SP_ALERT_SCAN re-derived from V157, byte-identical except the two counting arms and the tally 12 -> 14. Seeds both rules WHEN NOT MATCHED only. No task change, no SETTINGS key, no procedure run at apply time.' AS DESCRIPTION
+       'Next-Fifty #39 (owner 2026-09-29): two hourly identity alerts that never auto-declare an incident. SEC_LOGIN_TAKEOVER (SP_ALERT_SCAN arm [26], ungated): at least THRESHOLD_NUM (seed 5, floor 2) failed logins by one user within 15 minutes, then a successful login within 60 minutes; one event per episode; CRITICAL when the login is off-hours (20:00-06:00 America/Chicago or a weekend) or the user directly held ACCOUNTADMIN, SECURITYADMIN, SYSADMIN, USERADMIN, ORGADMIN, SNOW_ACCOUNTADMINS or SNOW_SYSADMINS, else the rule severity (HIGH); 27h LOGIN_HISTORY read, 24h anchor window. SEC_ADMIN_GRANT (arm [27], ungated): one event per direct grant of one of those roles to a user in the last 26h, revoked or not; flat HIGH; the title flags off-hours and first-time grants. Both company ALL; keys end in an explicit millisecond timestamp (never a bare EVENT_ID, which the V117 carry-forward would read as a date). SP_INCIDENT_AUTODECLARE re-derived from V154, byte-identical except the crit CTE excludes both rules and [attach] links either rule only to an incident that already holds the same user ([auto-mitigate] unchanged). SP_ALERT_SCAN re-derived from V157, byte-identical except the two counting arms and the tally 12 -> 14. Seeds both rules WHEN NOT MATCHED only. No task change, no SETTINGS key, no procedure run at apply time.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 162);
