@@ -7,7 +7,8 @@ loaded spine; ``changes_near_day`` lists that warehouse's setting changes around
   * exact additivity — each table (incl. 'All other' and the not-allocated residual) sums to the
     warehouse's metered delta, and the residual is metered minus allocated;
   * zero-fill semantics (partial / new / silent keys; METERED off the spine ignored);
-  * the refusals, the top-N fold, the other-company mask, share suppression, the narrative;
+  * the refusals, the top-N fold, the company masks (and the narrative leading with one that
+    carries the largest change), share suppression, the narrative;
   * changes_near_day's exact-name match and its account-local ±1-day window.
 """
 
@@ -17,12 +18,16 @@ from datetime import date, datetime, timedelta
 
 import pandas as pd
 
+from app.companies import COMPANIES
 from app.logic.anomaly_explain import (
+    SQL_OTHER_LABELS,
     UNALLOCATED_LABEL,
+    UNCLASSIFIED_USERS_LABEL,
     changes_near_day,
     explain_below_warehouse,
     explain_by_warehouse,
     is_bucket_row,
+    outside_company_label,
 )
 
 _D = date(2026, 9, 20)
@@ -187,7 +192,7 @@ def test_refuses_empty_or_missing_inputs():
 
 
 # ---------------------------------------------------------------------------
-# Top-N fold, the other-company mask, share
+# Top-N fold, the company masks, share
 # ---------------------------------------------------------------------------
 
 def _many_users(extra: list[dict] | None = None) -> pd.DataFrame:
@@ -220,20 +225,94 @@ def test_top_n_folds_the_rest_and_the_sql_bucket_into_all_other():
     assert plain.by_user[3].name == "All other users (7)"
 
 
-def test_other_company_mask_stays_its_own_row_and_is_never_named():
-    extra = [_rows(_D - timedelta(days=o), "USER", "(other-company users)", 1.0) for o in range(1, 15)]
+def test_company_mask_stays_its_own_row_and_leads_as_a_group_never_as_a_user():
+    extra = [_rows(_D - timedelta(days=o), "USER", "(users outside ALFA)", 1.0) for o in range(1, 15)]
     extra += [_rows(_D - timedelta(days=o), "DATABASE", "DB0", 1.0) for o in range(1, 15)]
-    extra += [_rows(_D, "USER", "(other-company users)", 500.0), _rows(_D, "DATABASE", "DB0", 500.0)]
+    extra += [_rows(_D, "USER", "(users outside ALFA)", 500.0), _rows(_D, "DATABASE", "DB0", 500.0)]
     extra += [_rows(_D - timedelta(days=o), "METERED", "WH_A", 1.0) for o in range(1, 15)]
     extra += [_rows(_D, "METERED", "WH_A", 500.0)]
     exp = explain_below_warehouse(_many_users(extra), _D, "WH_A", max_rows=2)
     names = [r.name for r in exp.by_user]
-    assert names[0] == "(other-company users)"                         # the biggest mover, sorted in
+    assert names[0] == "(users outside ALFA)"                          # the biggest mover, sorted in
     assert names[1:3] == ["U9", "U8"]                                  # does not eat a max_rows slot
-    assert "(other-company users)" not in exp.narrative
-    assert "By user: U9" in exp.narrative
-    assert is_bucket_row("(other-company users)") and is_bucket_row("All other users (7)")
+    # F16: it drives the move, so the narrative leads with it — as a GROUP, never as a named user
+    assert "By user: the largest change is in users outside ALFA — $499.00 over their average" in exp.narrative
+    assert "; the largest named user is U9 $45.00 over its average" in exp.narrative
+    assert "By user: (users outside ALFA)" not in exp.narrative and "By user: U9" not in exp.narrative
+    assert is_bucket_row("(users outside ALFA)") and is_bucket_row("All other users (7)")
     assert is_bucket_row(UNALLOCATED_LABEL) and not is_bucket_row("U9")
+
+
+def test_a_dominant_masked_row_leads_the_narrative():
+    """F16, the reviewer's case: an unclassified service login adds $500 on WH_ALFA_ETL while the
+    only named user moves $20. The table sorts the mask first; the narrative used to skip it and lead
+    with ALICE (+4%) — now it says where 96% of the move is, then names the largest real user."""
+    def _frame(named_on_d: float) -> pd.DataFrame:
+        rows = []
+        for o in range(14, -1, -1):
+            d = _D - timedelta(days=o)
+            named, unc = (named_on_d, 500.0) if o == 0 else (100.0, 0.0)
+            rows += [_rows(d, "SPINE", "", 0), _rows(d, "USER", "ALICE", named),
+                     _rows(d, "DATABASE", "DB_MAIN", named + unc), _rows(d, "METERED", "WH_ALFA_ETL", named + unc)]
+            if unc:
+                rows.append(_rows(d, "USER", UNCLASSIFIED_USERS_LABEL, unc))
+        return pd.DataFrame(rows)
+
+    exp = explain_below_warehouse(_frame(120.0), _D, "WH_ALFA_ETL")
+    assert exp.ok and exp.metered_delta_usd == 520.0
+    assert [r.name for r in exp.by_user][:2] == ["(unclassified users)", "ALICE"]
+    assert ("By user: the largest change is in unclassified users — $500.00 over their average (+96% of the "
+            "move); the largest named user is ALICE $20.00 over its average (+4% of the move).") in exp.narrative
+    assert "By database: DB_MAIN $520.00 over its average (+100% of the move)." in exp.narrative
+    # a named key that moved MORE than the mask still leads, exactly as before
+    named_first = explain_below_warehouse(_frame(900.0), _D, "WH_ALFA_ETL")
+    assert "By user: ALICE $800.00 over its average (+62% of the move)." in named_first.narrative
+    assert "largest change is in" not in named_first.narrative
+
+
+def test_an_all_other_fold_that_outweighs_every_named_key_leads_too():
+    exp = explain_below_warehouse(_many_users(), _D, "WH_A", max_rows=1)
+    assert [r.name for r in exp.by_user][:2] == ["U9", "All other users (9)"]
+    assert ("By user: the largest change is in all other users (9) — $180.00 over their average "
+            "(+80% of the move); the largest named user is U9 $45.00 over its average") in exp.narrative
+
+
+def test_the_not_allocated_residual_never_leads_the_by_user_clause():
+    # idle jumps $980 while C moves $235.71: the idle clause reports it; 'By user' still names C
+    exp = explain_below_warehouse(_sporadic(idle_d=1000.0), _D, "WH_A")
+    assert exp.unallocated_delta_usd == 980.0
+    assert "By user: C $235.71 over its average" in exp.narrative
+    assert "$980.00 more than usual was not tied to a query" in exp.narrative
+    assert "largest change is in" not in exp.narrative
+
+
+def test_both_user_masks_are_their_own_rows_and_the_sums_stay_exact():
+    extra = []
+    for label, base, day in ((UNCLASSIFIED_USERS_LABEL, 2.0, 30.0), ("(users outside Trexis)", 3.0, 1.0)):
+        extra += [_rows(_D - timedelta(days=o), "USER", label, base) for o in range(1, 15)]
+        extra += [_rows(_D - timedelta(days=o), "DATABASE", "DB0", base) for o in range(1, 15)]
+        extra += [_rows(_D - timedelta(days=o), "METERED", "WH_A", base) for o in range(1, 15)]
+        extra += [_rows(_D, "USER", label, day), _rows(_D, "DATABASE", "DB0", day), _rows(_D, "METERED", "WH_A", day)]
+    exp = explain_below_warehouse(_many_users(extra), _D, "WH_A", max_rows=1)
+    names = [r.name for r in exp.by_user]
+    assert names[:3] == ["U9", UNCLASSIFIED_USERS_LABEL, "(users outside Trexis)"]   # sorted in, no slot eaten
+    assert names[3] == "All other users (9)"
+    assert abs(sum(r.delta_usd for r in exp.by_user) - exp.metered_delta_usd) < 0.01
+
+
+def test_bucket_detection_covers_every_label_the_reader_can_emit():
+    """One source of truth (F16): the reader writes these exact strings, is_bucket_row detects them
+    by exact string — every company's mask for both dimensions, the unclassified row, the fold."""
+    labels = [UNCLASSIFIED_USERS_LABEL, *SQL_OTHER_LABELS.values(), UNALLOCATED_LABEL]
+    labels += [outside_company_label(dim, c) for dim in ("USER", "DATABASE") for c in COMPANIES if c != "ALL"]
+    assert UNCLASSIFIED_USERS_LABEL == "(unclassified users)"
+    assert outside_company_label("USER", "ALFA") == "(users outside ALFA)"
+    assert outside_company_label("DATABASE", "Trexis") == "(databases outside Trexis)"
+    for label in labels:
+        assert is_bucket_row(label), label
+    # exact, not a pattern: a stray look-alike (or the retired label) is a real key
+    for real in ("(users outside NOPE)", "(other-company users)", "users outside ALFA", "ALICE", "NONE"):
+        assert not is_bucket_row(real), real
 
 
 def test_share_is_suppressed_on_an_offsetting_day():

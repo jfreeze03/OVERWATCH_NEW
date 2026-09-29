@@ -30,10 +30,12 @@ from app.logic.anomaly import (
 )
 from app.logic.anomaly_explain import (
     UNALLOCATED_LABEL,
+    UNCLASSIFIED_USERS_LABEL,
     changes_near_day,
     explain_below_warehouse,
     explain_by_warehouse,
     is_bucket_row,
+    outside_company_label,
 )
 from app.logic.cost_coverage import (
     SERVICE_CATEGORY,
@@ -1426,13 +1428,21 @@ def _below_warehouse_drill(company: str, exp, flagged_wh: str, rate: float) -> N
     wh = (st.selectbox("Warehouse to break down", opts, key=f"spend_anom_drill_wh_{fday}")
           if len(opts) > 1 else opts[0])
     wh = str(wh or flagged)
+    # F18: the jump sets the GLOBAL 'Warehouse contains' filter — a substring match that also hits
+    # longer names (WH_ALFA_TRANSFORM also matches WH_ALFA_TRANSFORM_PRD) and stays on across pages
+    # until cleared. Say so here, and announce the reshaped scope on arrival (page_header renders
+    # context['filter_note'] once, the rec24 idiom).
     if can_open("Operations") and st.button(f"Queries on {wh} → Operations ▸ Queries",
                                             key="spend_anom_open_queries"):
-        request_navigation("Operations", "Queries", {"warehouse_contains": wh})
+        request_navigation("Operations", "Queries", {"warehouse_contains": wh}, context={
+            "filter_note": (f"Warehouse contains filter set to {wh} from the {fday} spend anomaly "
+                            f"(it also matches longer names containing {wh}; the day is not carried over)")})
     if can_open("Operations"):
         st.caption(md_dollars(
-            f"The jump filters Operations ▸ Queries to {wh}; the flagged day is not carried over — "
-            f"set the Window to include {fday} ({(account_today() - fday).days} days ago)."))
+            f"The jump sets the Warehouse contains filter to {wh}: it also matches longer warehouse "
+            "names that contain it, and it stays on across pages until you clear it. The flagged day "
+            f"is not carried over — set the Window to include {fday} "
+            f"({(account_today() - fday).days} days ago)."))
     if not st.toggle("Break down by user, database and setting changes", key="spend_anom_below_wh_load",
                      help="Splits this warehouse's day by user and by database (each warehouse-hour's "
                           "metered credits shared by execution time — an estimate) and lists the setting "
@@ -1483,12 +1493,27 @@ def _below_warehouse_drill(company: str, exp, flagged_wh: str, rate: float) -> N
                         for d in _rows]), column_config=_money, size_note=False)
                 _short = (f" — {below.baseline_days} of the {_ANOM_BASELINE_DAYS} asked for are loaded"
                           if below.baseline_days < _ANOM_BASELINE_DAYS else "")
+                # F16: under a named company the reader groups keys outside its view — say what
+                # each group holds (the unclassified row is task / service logins, not another
+                # company). Labels come from anomaly_explain, the reader's own source of truth.
+                _co = str(company or "ALL")
+                _masks = ""
+                if _co == "UNKNOWN":
+                    _masks = (f" Under UNKNOWN: '{outside_company_label('USER', _co)}' = users "
+                              "classified to a company — grouped, not dropped.")
+                elif _co.upper() != "ALL":
+                    _masks = (f" Under {_co}: '{UNCLASSIFIED_USERS_LABEL}' = logins with no company "
+                              "role (task, service and other unclassified users), "
+                              f"'{outside_company_label('USER', _co)}' = another company's users and "
+                              f"'{outside_company_label('DATABASE', _co)}' = databases outside "
+                              f"{_co}'s view — grouped, not dropped.")
                 st.caption(
                     f"Averages over the {below.baseline_days} loaded days before {fday}{_short}; a day "
                     "with no activity counts as zero, so each table adds up exactly to the warehouse's "
                     "metered move. The waterfall above uses a robust median of each warehouse's recent "
                     f"days, so its figure for {wh} can differ. '{UNALLOCATED_LABEL}' = warehouse-hours in "
-                    "which no query started: idle time, or a long query carrying over from an earlier hour.")
+                    "which no query started: idle time, or a long query carrying over from an earlier hour."
+                    + _masks)
         result_caption(xd)
 
     st.markdown("**Setting changes near that day**")

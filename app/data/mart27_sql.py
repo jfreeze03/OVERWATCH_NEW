@@ -21,6 +21,11 @@ from app.data.common import (
     resolve_effective_window,
     scope_window_where,
 )
+from app.logic.anomaly_explain import (
+    SQL_OTHER_LABELS,
+    UNCLASSIFIED_USERS_LABEL,
+    outside_company_label,
+)
 
 
 def _company_arm(company: str, column: str = "COMPANY") -> str:
@@ -1262,17 +1267,25 @@ def alloc_xdim_day_drivers(warehouse: str, day: object, company: str = "ALL", *,
       day the XDIM loader skipped is absent from the spine and METERED alike — excluded from
       the average, never counted as a zero. No live twin (a QUERY_HISTORY x metering twin
       would add a heavy ACCOUNT_USAGE scan), so this reader has no FIRST_DAY/cov gate.
-    * Top-N per dimension by a DELTA proxy (|D - window-sum / baseline_days|), so the keys
-      that moved survive; the rest collapse into '(all other users|databases)' — the sums
-      stay exact. top_n clamps to [5, 60] and baseline_days to [7, 28], so the rows are
-      bounded by construction to <= 2*(top_n+1)*(baseline_days+1) + 2*(baseline_days+1)
-      (3,596 at the clamps) < DEFAULT_MAX_ROWS — the page still checks ``truncated``.
+    * Top-N per dimension by |delta| — the flagged day minus the window sum over the LOADED
+      baseline days (the nb CTE: spine days before D, the explainer's own divisor), so the
+      rank equals the explainer's zero-filled |delta| and a loader gap cannot push a steady
+      key above a real mover (F17: dividing by the nominal baseline_days gave a steady key a
+      phantom delta of A*(1 - loaded/n)). The keys that moved survive; the rest collapse into
+      '(all other users|databases)' — the sums stay exact. top_n clamps to [5, 60] and
+      baseline_days to [7, 28], so the rows are bounded by construction to
+      <= 2*(top_n+1)*(baseline_days+1) + 2*(baseline_days+1) (3,596 at the clamps) <
+      DEFAULT_MAX_ROWS — the page still checks ``truncated``.
     * Company scope (MC-2, as alloc_xdim_attribution): XDIM by COMPANY_FOR_WAREHOUSE (the
       COMPANY_SCOPE-aware axis), METERED by the load-stamped FACT_WAREHOUSE_DAILY.COMPANY
-      (the flagged frame's own scope). Other-company users/databases are MASKED into
-      '(other-company users|databases)' by the same visibility clauses — masked, not
-      dropped, so each dimension still sums to the warehouse's allocated credits. A NULL
-      visibility verdict masks (fail closed).
+      (the flagged frame's own scope). Keys outside the company's view are MASKED — masked,
+      not dropped, so each dimension still sums to the warehouse's allocated credits — into
+      labelled rows (the text lives in anomaly_explain, which detects them by exact string):
+      users COMPANY_FOR_USER classifies 'UNKNOWN' (no company role: task / service / ETL
+      logins; also a NULL verdict) into '(unclassified users)' — except under the UNKNOWN
+      scope, where they ARE the scope; users of another company into '(users outside <co>)';
+      databases outside the view into '(databases outside <co>)'. A NULL outside-company
+      verdict masks (fail closed). ALL masks nothing.
     * Dollars are allocated ESTIMATES on the usage basis (not billed): each warehouse-hour's
       metered credits split by execution-time share; hours in which no query started are
       never allocated, which is the explainer's 'not allocated' residual.
@@ -1297,18 +1310,29 @@ def alloc_xdim_day_drivers(warehouse: str, day: object, company: str = "ALL", *,
     uv = companies.user_clause(company, "l.KEY_NAME") if named else ""
     dv = companies.database_visibility_clause(company, "l.KEY_NAME") if named else ""
     arms = []
+    if uv and str(company) != "UNKNOWN":
+        # F16: a user COMPANY_FOR_USER classifies 'UNKNOWN' (no company role — task / service /
+        # ETL logins) is NOT another company's user: its own row, BEFORE the outside-company arm.
+        # A NULL verdict is unclassified too. Under the UNKNOWN scope these users ARE the scope.
+        unk = companies.user_clause("UNKNOWN", "l.KEY_NAME")
+        arms.append(f"WHEN l.DIMENSION = 'USER' AND COALESCE(({unk}), TRUE) "
+                    f"THEN {sql_literal(UNCLASSIFIED_USERS_LABEL)}")
     if uv:
         arms.append(f"WHEN l.DIMENSION = 'USER' AND NOT COALESCE(({uv}), FALSE) "
-                    "THEN '(other-company users)'")
+                    f"THEN {sql_literal(outside_company_label('USER', company))}")
     if dv:
         arms.append(f"WHEN l.DIMENSION = 'DATABASE' AND NOT COALESCE(({dv}), FALSE) "
-                    "THEN '(other-company databases)'")
+                    f"THEN {sql_literal(outside_company_label('DATABASE', company))}")
     key_expr = ("CASE " + "\n                ".join(arms) + " ELSE l.KEY_NAME END") if arms else "l.KEY_NAME"
+    other_u, other_d = (sql_literal(SQL_OTHER_LABELS["USER"]), sql_literal(SQL_OTHER_LABELS["DATABASE"]))
     xdim = mart_object("FACT_COST_ALLOC_XDIM_DAILY")
     return f"""
 WITH spine AS (
     SELECT DISTINCT x.DAY FROM {xdim} x
     WHERE x.DAY >= {lo} AND x.DAY <= {fd}
+),
+nb AS (
+    SELECT COUNT(*) AS N_BASE FROM spine WHERE DAY < {fd}
 ),
 base AS (
     SELECT x.DAY, COALESCE(x.USER_NAME, 'NONE') AS USER_NAME,
@@ -1327,16 +1351,17 @@ masked AS (
     FROM long l
 ),
 ranked AS (
-    SELECT DIMENSION, KEY_NAME,
-           ROW_NUMBER() OVER (PARTITION BY DIMENSION ORDER BY
-               ABS(SUM(IFF(DAY = {fd}, ALLOC_CREDITS, 0))
-                   - SUM(IFF(DAY < {fd}, ALLOC_CREDITS, 0)) / {n}) DESC, KEY_NAME) AS RN
-    FROM masked
-    GROUP BY DIMENSION, KEY_NAME
+    SELECT m.DIMENSION, m.KEY_NAME,
+           ROW_NUMBER() OVER (PARTITION BY m.DIMENSION ORDER BY
+               ABS(SUM(IFF(m.DAY = {fd}, m.ALLOC_CREDITS, 0))
+                   - SUM(IFF(m.DAY < {fd}, m.ALLOC_CREDITS, 0)) / NULLIF(MAX(nb.N_BASE), 0)) DESC,
+               m.KEY_NAME) AS RN
+    FROM masked m CROSS JOIN nb
+    GROUP BY m.DIMENSION, m.KEY_NAME
 )
 SELECT m.DAY, m.DIMENSION,
        IFF(r.RN <= {k}, m.KEY_NAME,
-           IFF(m.DIMENSION = 'USER', '(all other users)', '(all other databases)')) AS KEY_NAME,
+           IFF(m.DIMENSION = 'USER', {other_u}, {other_d})) AS KEY_NAME,
        ROUND(SUM(m.ALLOC_CREDITS), 6) AS CREDITS
 FROM masked m
 JOIN ranked r ON r.DIMENSION = m.DIMENSION AND r.KEY_NAME = m.KEY_NAME
