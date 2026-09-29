@@ -109,6 +109,10 @@ _RULE_TARGETS = {
     "COST_SERVERLESS_CREEP": ("Cost Intelligence", "Spend & Attribution"),
     "COST_ANOMALY_SWEEP": ("Cost Intelligence", "Spend & Attribution"),
     "COST_DEPT_BUDGET_PACE": ("Cost Intelligence", "Chargeback & AI"),
+    # V163 (Next-Fifty #37a / #44b): the per-user AI table and the Trust Center tab (the COST family default,
+    # Spend & Attribution, is the wrong page for a per-user runaway).
+    "COST_AI_USER_RUNAWAY": ("Cost Intelligence", "Chargeback & AI"),
+    "SEC_TRUST_REGRESSION": ("Security", "Trust Center"),
     "PIPE_COPY_FAILURES": ("Operations", "Pipeline SLA"),
     "PIPE_DT_FAILURES": ("Operations", "Pipeline SLA"),
     "SEC_CRED_EXPIRY": ("Security", "Access"),
@@ -182,9 +186,12 @@ _DB_RE = re.compile(r"\b([A-Z][A-Z0-9_]{2,})\.([A-Z][A-Z0-9_]{2,})\.")
 # that text would scope every later page to a bogus or OVERWATCH-only entity, so Investigate applies none.
 # V162: the two identity alerts carry user names (often dotted, e.g. first.last.name), client IPs and raw
 # login error text -- never a warehouse or database -- so they get no entity filter either.
+# V163: COST_AI_USER_RUNAWAY titles lead with a user name and SEC_TRUST_REGRESSION with a scanner name, neither
+# a warehouse or database (a dotted user name reads as DB.SCHEMA.), so Investigate applies no filter.
 _NO_ENTITY_FILTER_RULES = frozenset({
     "OPS_PIPELINE_DEGRADED",
     "SEC_LOGIN_TAKEOVER", "SEC_ADMIN_GRANT",
+    "COST_AI_USER_RUNAWAY", "SEC_TRUST_REGRESSION",
 })
 
 
