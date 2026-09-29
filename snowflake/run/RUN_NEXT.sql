@@ -4,11 +4,20 @@
 --  app v4.602.0 reads all four, each behind its own schema gate).
 --
 --  BEFORE THIS FILE:
---    1. If not done yet, return the snowflake/run/PROBES_NEXT_FIFTY_WAVE4.sql grids (S3, S4, S5c, S6, S7, C4).
+--    1. If not done yet, return the snowflake/run/PROBES_NEXT_FIFTY_WAVE4.sql grids S4b, S6 and S7 (the #39 and
+--       #37 volumes); the rest can follow the apply.
 --    2. Run snowflake/run/PREFLIGHT_WAVE4.sql (read-only) and read P162.1, P162.4, P163.1, P164.1 and P164.2:
---       - P164.1 DEFAULT_RECIPIENTS_SET FALSE: set DEFAULT_RECIPIENTS on OVERWATCH_EMAIL in Snowsight
---         (docs/EMAIL_RECIPIENT_RUNBOOK.md, requirement 4), or FIRST run the first seed below for a Teams-only
---         escalation.
+--       - THE ESCALATION EMAIL CHOICE IS REQUIRED. Your 2026-09-29 C4b grid showed OVERWATCH_EMAIL has NO
+--         DEFAULT_RECIPIENTS, so P164.1 reads DEFAULT_RECIPIENTS_SET FALSE (still check its
+--         SNOW_ACCOUNTADMINS_CAN_USE). Pick ONE before the V164 section:
+--         (A) Email on: as the integration's owner, SET DEFAULT_RECIPIENTS on OVERWATCH_EMAIL in Snowsight to the
+--             address already in its ALLOWED_RECIPIENTS (docs/EMAIL_RECIPIENT_RUNBOOK.md, requirement 4; type the
+--             address only in Snowsight, never in a file). Every unacknowledged CRITICAL is then emailed about
+--             2 h after its first notification, INCLUDING the TREXIS / UNKNOWN ones the ALFA-only Teams route
+--             never carries (P164.2's EMAIL_ONLY rows): for those the escalation email is the first message.
+--         (B) Teams-only: FIRST run the first seed below. TREXIS / UNKNOWN CRITICALs then never escalate.
+--         With neither, the email leg fails on every hourly run while an email-only CRITICAL is open (logged as
+--         escalation_email_failed; Alerts > Native delivery counts the failed sends).
 --       - P164.2 or P162.4 list CRITICALs you do not want re-posted and emailed: acknowledge or resolve them
 --         (the P162.4 takeovers within 2 hours of the first hourly scan), or FIRST run the second seed below
 --         (escalation off; turn it on later in Admin > Settings).
@@ -3904,6 +3913,22 @@ ORDER BY N DESC;
 SELECT (SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT WHERE ACTION = 'ESCALATE') AS ESCALATE_AUDIT_ROWS,
        (SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS WHERE ESCALATED_AT IS NOT NULL) AS ESCALATED_EVENTS,
        (SELECT MAX(ESCALATED_AT) FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS) AS LAST_ESCALATED_AT;
+
+-- V164.3c (after the first escalation) did the escalation email go out? The send only ENQUEUES: a delivery
+--        failure after the enqueue still stamps the event and its audit note says 'email sent', so read
+--        Snowflake's own delivery log for the escalation integration (read from SETTINGS, as the proc does)
+--        from 2 minutes before the latest escalation. expect: STATUS SUCCESS. No row after an escalation =
+--        the email leg is off (ESCALATE_EMAIL_INTEGRATION '') or the send failed before the enqueue (V164.3's
+--        escalation_email_failed row). A native e-mail alert sent in the same minutes also shows here.
+SELECT CONVERT_TIMEZONE('America/Chicago', CREATED)::TIMESTAMP_NTZ AS CREATED_CT, INTEGRATION_NAME, STATUS,
+       LEFT(ERROR_MESSAGE, 200) AS ERROR_MESSAGE
+  FROM TABLE(DBA_MAINT_DB.INFORMATION_SCHEMA.NOTIFICATION_HISTORY(
+           START_TIME => DATEADD('day', -1, CURRENT_TIMESTAMP()), RESULT_LIMIT => 10000))
+ WHERE UPPER(INTEGRATION_NAME) = (SELECT UPPER(TRIM(COALESCE(MAX(VALUE), 'OVERWATCH_EMAIL'))) FROM DBA_MAINT_DB.OVERWATCH.SETTINGS
+                                   WHERE KEY = 'ESCALATE_EMAIL_INTEGRATION')
+   AND CONVERT_TIMEZONE('America/Chicago', CREATED)::TIMESTAMP_NTZ
+       >= DATEADD('minute', -2, (SELECT MAX(ESCALATED_AT) FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS))
+ ORDER BY CREATED DESC;
 
 -- V164.4 (manual) the next Teams card shows lines as '[SEV] <title> | <company> | <detail> | event <id>'. A full
 --        end-to-end check: leave the next monthly OPS_ALERT_DRILL CRITICAL unacknowledged for 2 hours (only when
