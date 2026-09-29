@@ -22,8 +22,8 @@ OVERWATCH_EMAIL recipients; the morning digest stores its facts and a measured g
 templated digest, labelled not AI-written, when the AI draft's numbers do not match. Where the owner was silent a
 default applies and stays open for the owner: a user without a baseline raises on the cap alone; every failed login
 counts toward a burst; a Trexis user's runaway keeps the Trexis company (so it stays off the ALFA-only Teams route);
-a snooze or an incident acknowledgement counts as acknowledged; the monthly OPS_ALERT_DRILL CRITICAL escalates too;
-the escalation email is not company-scoped.
+a snooze or an incident acknowledgement (by a person, after the alert joined the incident) counts as acknowledged;
+the monthly OPS_ALERT_DRILL CRITICAL escalates too; the escalation email is not company-scoped.
 
 - **V162 (owner-applied, after V161): account-takeover and admin-grant alerts, hourly.**
   - SEC_LOGIN_TAKEOVER (hourly scan arm [26], ungated) raises when one user has at least 5 failed logins (the rule
@@ -39,7 +39,8 @@ the escalation email is not company-scoped.
     to that user; the detail names the grantor.
   - Neither rule auto-declares an incident: SP_INCIDENT_AUTODECLARE (re-derived from V154) skips both whatever their
     severity, so a human declares after contacting the user. A later CRITICAL of either rule still attaches to an
-    incident a person declared.
+    open or mitigated incident a person declared for the same user; a CRITICAL for another user stays unlinked,
+    keeps its escalation and can be declared on its own.
   - Both events are account-level (company ALL), so they reach the ALFA-plus-ALL Teams route for any user. Their
     dedupe keys end in a millisecond timestamp, so a snooze never carries to the user's next episode.
   - SP_ALERT_SCAN is re-derived from V157 (the V157 cadence gates unchanged) and reports 14 rule blocks.
@@ -60,12 +61,16 @@ the escalation email is not company-scoped.
     it in USD at AI_CREDIT_PRICE_USD.
   - SEC_TRUST_REGRESSION (daily arm [29], HIGH, company ALL) raises when a CRITICAL or HIGH Trust Center scanner's
     at-risk count rises by at least 1 against its previous snapshot day (today's and yesterday's rows are checked,
-    so a rise after the morning scan lands the next morning). A scanner's first snapshot never raises; the rule is
+    so a rise after the morning scan lands the next morning unless that scanner-day already raised: one event per
+    scanner per snapshot day, carrying the counts of the scan that raised it; a further rise the same day is not
+    pushed again). A scanner's first snapshot never raises; the rule is
     quiet without the TRUST_CENTER_VIEWER grant; the loader's 0 row for a scanner that dropped out means its return
     reads as a rise.
-  - SEC_FAILED_LOGINS [07] now says whether the day also had successful logins: none reads as a lockout or a job
-    sending an old secret, and a burst that got in points to SEC_LOGIN_TAKEOVER. Its predicate, severity and key
-    are unchanged, so no past user-day re-fires.
+  - SEC_FAILED_LOGINS [07] now says whether the day also had successful logins ('so far' on today's partial row,
+    which reads only the ~06:45 load and is not updated when the rest of the day loads): none reads as a lockout
+    or a job sending an old secret, and a burst that got in points to SEC_LOGIN_TAKEOVER while that rule is
+    enabled, and to Account-takeover candidates either way. Its predicate, severity and key are unchanged, so no
+    past user-day re-fires.
   - SP_ALERT_SCAN_DAILY is re-derived from V160 and reports 14 rule blocks. Seeds the 2 rules and the 2 settings
     (WHEN NOT MATCHED only).
   - First run: the next daily scan (~07:00 Central) raises runaways from the last 3 complete days and regressions
@@ -75,19 +80,22 @@ the escalation email is not company-scoped.
     (the detail segment is left out when blank). The line is identical in the sender's 3000-character fit and in
     the message, so a card never cuts an event in half. Lines are about 3x longer: a card holds about 8-13 alerts
     instead of about 40, `max_batches` stays 6 per route per run, and a burst drains over more hourly runs.
-  - A CRITICAL that is still OPEN with no ACK_AT, was never snoozed, is not in an incident someone acknowledged,
-    mitigated or closed, still has its rule configured, was raised inside the 7-day CRITICAL send window, and was
-    first notified (NOTIFIED_AT, else RAISED_AT) at least ESCALATE_AFTER_MIN minutes ago (120) escalates ONCE:
-    re-posted to every enabled route that already delivered it, and emailed through ESCALATE_EMAIL_INTEGRATION
-    (OVERWATCH_EMAIL, with the notification-integration send, so to that integration's DEFAULT_RECIPIENTS; no
-    address is stored in OVERWATCH). With the email leg blank, only an event some route delivered escalates.
+  - A CRITICAL that is still OPEN with no ACK_AT, was never snoozed (including a snooze V117 carried onto a
+    re-raise), is not in an incident a person acknowledged, mitigated or closed after the alert joined it (the
+    automatic V154 mitigation does not count), still has its rule configured, was raised inside the 7-day CRITICAL
+    send window, and was first notified (NOTIFIED_AT, else RAISED_AT) at least ESCALATE_AFTER_MIN minutes ago (120)
+    escalates ONCE: re-posted to every enabled route that already delivered it, and emailed through
+    ESCALATE_EMAIL_INTEGRATION (OVERWATCH_EMAIL, with the notification-integration send, so to that integration's
+    DEFAULT_RECIPIENTS; no address is stored in OVERWATCH). With the email leg blank, only an event some route
+    delivered escalates.
   - The pass runs hourly inside the sender lease, after the normal drain, so an escalation goes out about 120-185
-    minutes after the first notification. It sends, then writes an ALERT_AUDIT `ESCALATE` row, then stamps the new
-    ALERT_EVENTS.ESCALATED_AT, only for the events a channel accepted; when every channel fails the event retries
-    next run inside its 7 days, and when Teams accepted but the email failed it is stamped (the email is not
-    retried). Its own handler logs `escalation_failed` and never re-raises, so normal delivery, the expired tail and
-    the lease release still run; a re-post failure logs `route_send_failed` with the route's usual CONTEXT and an
-    email failure `escalation_email_failed`.
+    minutes after the first notification. Events a route delivered fill each 3000-character batch first. Right after
+    each channel's send succeeds, its events are stamped ALERT_EVENTS.ESCALATED_AT, so a later error never re-posts
+    them; then one ALERT_AUDIT `ESCALATE` row per event the run stamped. When every channel fails nothing is stamped
+    and the event retries next run inside its 7 days; when Teams accepted but the email failed it is stamped (the
+    email is not retried). Its own handler logs `escalation_failed` and never re-raises, so normal delivery, the
+    expired tail and the lease release still run; a re-post failure logs `route_send_failed` with the route's usual
+    CONTEXT and an email failure `escalation_email_failed`.
   - Set ESCALATE_AFTER_MIN to 0 (Admin > Settings) to turn escalation off. The proc's return string adds the
     escalated count, but TASK_ALERT_NOTIFY's TASK_HISTORY RETURN_VALUE stays NULL (a task that CALLs a proc does
     not publish it): read ALERT_AUDIT and ESCALATED_AT, or Alerts > Native delivery.
@@ -102,7 +110,8 @@ the escalation email is not company-scoped.
   - DAILY_DIGEST gains FACTS, GROUNDING_OK, FIGURES_CHECKED, UNGROUNDED, BODY_SOURCE and AI_BODY (all nullable).
     SP_DAILY_DIGEST (re-derived from V112) stores the named facts it gave the model and checks every figure in the
     AI draft against them: bound by unit (`$` only from `*_USD`, `%` only from `*_PCT`) and by the noun after it,
-    and equal within half a step of its shown precision or 0.5%.
+    and equal within half a step of its shown precision (inclusive: a correctly rounded x.x5 figure is not failed
+    by floating-point noise) or 0.5%.
   - When any figure does not match, or Cortex fails, it writes and sends a templated digest built only from the
     facts and labelled "Templated digest (not AI-written)"; the draft is kept in AI_BODY and never sent. A Cortex
     failure logs `digest_ai_failed` instead of sending the error text as the digest.
@@ -124,7 +133,9 @@ the escalation email is not company-scoped.
     match the exec-board facts", "Templated, not AI-written: ..." with the unmatched figures and a "Show the
     withheld AI draft" popover, or "Figures not checked" for a digest written before V165 (or before V165 is
     applied). The expander title reads "Morning digest (templated, not AI-written)" for a template, and Overview
-    drops the model name then.
+    drops the model name then. The Overview caption and the Brief/Overview source labels claim the figure check
+    only once V165 is applied and the row carries a grounding record; before that the caption keeps its pre-4.602
+    wording.
   - Cost Intelligence > Chargeback & AI shows "Suggested per-user AI quotas (review only)": a daily limit at each
     user's own p95 active day and a monthly limit at the p95 of their rolling 30-day totals, both rounded up to a
     whole credit, over a fixed 90-day history rather than the page Window, with a walk-forward back-test of the days
@@ -133,10 +144,13 @@ the escalation email is not company-scoped.
     loads (no new read) and is company-scoped. OVERWATCH creates no quota; quotas are set in Snowsight. The old "No
     per-user AI credit quota is enforcing here" claim is replaced by the exposure numbers.
   - Alerts > Native delivery states the escalation policy with its live values and the last 7 days of escalations,
-    with a warning on pass or email failures (one read, in that lazy section, once V164 is applied); the routing
+    with a warning on pass or email failures (one read, in that lazy section, once V164 is applied); it says an
+    incident stops the escalation only when acknowledged, mitigated or closed after the alert joined it. The routing
     help says a re-post goes only to the route(s) that delivered the event.
-  - Security > Access notes that the hourly scan raises SEC_LOGIN_TAKEOVER for the stricter case, and the Control
-    Room incidents caption says the two identity alerts never auto-declare (both once V162 is applied).
+  - Security > Access notes that the hourly scan raises SEC_LOGIN_TAKEOVER for the stricter case, and that the
+    account-wide alert's user shows in the company-filtered takeover table only with the company at ALL (or the
+    user's own), a window covering the login and a threshold of 5 or more; the Control Room incidents caption
+    says the two identity alerts never auto-declare (both once V162 is applied).
   - New playbooks for the four rules; SEC_FAILED_LOGINS splits lockout from takeover and OPS_SCAN_DEGRADED reads
     14/14. Navigation: SEC_ADMIN_GRANT to Security > Changes, COST_AI_USER_RUNAWAY to Chargeback & AI,
     SEC_TRUST_REGRESSION to Security > Trust Center (the takeover keeps Security > Access); none of the four takes an
@@ -146,23 +160,48 @@ the escalation email is not company-scoped.
     setting instead of a "no longer read" row. Admin lists V162-V165.
 - **Heads-up: noise and paging.**
   - Off-hours retries of a stale secret by a service account can read as CRITICAL takeovers, and with V164 an
-    unacknowledged CRITICAL is re-posted and emailed after about 2-3 hours. Read P162.1 before the apply; the levers
-    are the rule's THRESHOLD_NUM and, later, an error-code or service-account filter.
+    unacknowledged CRITICAL is re-posted and emailed after about 2-3 hours. Read P162.1 and P162.4 before the apply;
+    the levers are the rule's THRESHOLD_NUM and, later, an error-code or service-account filter.
   - Teams lines now carry the first 100 characters of DETAIL, so SEC_* user names and client IPs reach the channel.
   - P164.3 counts the hourly runs that would have needed more than 6 cards per route with the longer lines; the
     lever is `max_batches`.
 - **Owner steps.**
-  1. Run `PREFLIGHT_WAVE4.sql` (read-only) and read P162.1, P163.1, P164.1 and P164.2.
+  1. Run `PREFLIGHT_WAVE4.sql` (read-only) and read P162.1, P162.4, P163.1, P164.1 and P164.2.
   2. If P164.1 shows no DEFAULT_RECIPIENTS, set them in Snowsight (or seed `('ESCALATE_EMAIL_INTEGRATION','')`); if
-     P164.2 lists stale CRITICALs, acknowledge them (or seed `('ESCALATE_AFTER_MIN','0')`).
+     P164.2 or P162.4 list CRITICALs you do not want re-posted and emailed, acknowledge them (the P162.4 takeovers
+     within 2 hours of the first hourly scan) or seed `('ESCALATE_AFTER_MIN','0')`.
   3. `snow streamlit deploy --replace` (4.602.0).
   4. Apply `RUN_NEXT.sql` top to bottom as SNOW_ACCOUNTADMINS and stop on the first error. Nothing runs at apply
      time: never hand-CALL a scan, the notifier or the digest (each can page or email).
   5. Read PART B now, after the next hourly chain, and the next morning. The still-pending V161 change-risk check
      moved to `VERIFY_V161_FOLLOWUP.sql`.
-- **Rollback** (RUNBOOK §12): each migration re-runs its base proc; undo the wave in reverse order. V162: FIRST
-  V157's SP_ALERT_SCAN, THEN (optionally) V154's SP_INCIDENT_AUTODECLARE. V164: soft = ESCALATE_AFTER_MIN 0; hard =
-  only V064's SP_NOTIFY_WEBHOOK block. New columns and settings can stay.
+- **Rollback** (RUNBOOK §12): each migration re-runs its base proc; undo the wave in reverse order. V162: roll V163
+  back first; re-run V157's SP_ALERT_SCAN (usually enough). V154's SP_INCIDENT_AUTODECLARE only after a 24-hour
+  wait, or after resolving open, ACK or snoozed SEC_LOGIN_TAKEOVER / SEC_ADMIN_GRANT events as EXPECTED (RUNBOOK
+  §12 has the UPDATE). V164: soft = ESCALATE_AFTER_MIN 0; hard = only V064's SP_NOTIFY_WEBHOOK block. New columns
+  and settings can stay.
+- **Review fixes (adversarial review r1, before release).**
+  - V162: SP_INCIDENT_AUTODECLARE's [attach] links a SEC_LOGIN_TAKEOVER / SEC_ADMIN_GRANT CRITICAL only to an
+    incident that already holds the same user (case-insensitive); before, one user's takeover could join another
+    user's incident and lose its escalation. Other rules keep V154's family match. PART B V162.3 checks it.
+  - V162: new read-only PREFLIGHT P162.4 lists the CRITICAL takeovers the first hourly scan raises (P164.2 cannot
+    see them, they do not exist yet); they escalate about 2-3 hours after the apply.
+  - V162 rollback order corrected: V163 first, then V157's scan (usually enough); V154's autodeclare only after a
+    24-hour wait or after resolving the lingering identity events (V154 would otherwise auto-declare them).
+  - V163 [07]: today's row is labelled a partial day ("so far"), and the takeover pointer is conditional on the
+    rule being enabled, with Account-takeover candidates as the check either way. [29]: the text claims only what
+    its key delivers (one event per scanner per snapshot day).
+  - V164: an incident acknowledges an alert only for a human ACK, mitigation or close after the alert joined it;
+    a snooze V117 carried onto a re-raise counts as a snooze; route-delivered events fill the batch before
+    email-only ones, so an email-only backlog cannot starve a Teams re-post; each channel stamps ESCALATED_AT right
+    after its send, so a later error never re-posts; the email LISTAGG delimiter is a literal newline.
+  - V165: the grounding comparison is `ABS(f - v) <= TOL * 1.000000001` in the proc and the Python mirror, so an
+    exact half-step rounding (FAILED_QUERY_PCT 1.25 written as 1.3% or 1.2%) is grounded instead of forcing the
+    templated digest; the relative slack widens nothing a rounded figure could exploit.
+  - App: the digest claims (Overview caption, Brief/Overview source labels) are gated on V165 and on a grounding
+    record; the withheld-draft "Unmatched figures" caption escapes `$`; the takeover lens caption and the
+    SEC_LOGIN_TAKEOVER / SEC_FAILED_LOGINS / SEC_TRUST_REGRESSION / OPS_SCAN_DEGRADED playbooks say what the lens and
+    the rules actually cover; test_v165's definer lock is bounded at 165.
 - **Tests.** Per-migration shape and round-13 normalize-back locks for every re-derived proc
   (`tests/migrations/test_v162_*` .. `test_v165_*`), sqlite harnesses that run each new arm's and the escalation
   pass's own SQL, permanent parity locks (`test_security_alert_parity`, `test_ai_runaway_parity`,

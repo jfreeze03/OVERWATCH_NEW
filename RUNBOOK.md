@@ -485,7 +485,10 @@ required "inconclusive" escape, word limits.
   APP_ERROR_LOG. The sent text is JSON-escaped like the alert sender. The
   proc's RETURN names the version: `digest written (AI|TEMPLATE[; ...]); sent
   N/M routes`. A frequent TEMPLATE means the model states derived numbers:
-  read UNGROUNDED, then consider CORTEX_MODEL.
+  read UNGROUNDED, then consider CORTEX_MODEL. A figure matches within half a
+  step of its shown precision, inclusive (1.25 shown as 1.3% or 1.2% passes), or
+  0.5%. Until V165 is applied (and on the last pre-V165 row) the digest chip
+  reads "Figures not checked" and the caption makes no checking claim.
 - **Evaluation panels** — button-gated "AI evaluation" on release compare,
   task failures, etc.; never auto-run.
 - **Pre-explained anomalies** — sweep v3 appends a grounded hypothesis to
@@ -707,13 +710,13 @@ The two ALERT_CONFIG rows can stay; disable them in Alerts > Rules if wanted.
 | PIPE_ETL_TASK_FAILED | PIPELINE | a workflow's tasks failed on their final attempt tonight (≥ threshold, never below 1; HIGH for the terminal workflow; auto-clears once every retried task has finished clean — a retry still running keeps it open) — V156, via the V157 scan arm in the cycle run window (Central hours of ETL_SLA_TARGET_HHMM − 10h through target + 3h, plus a 15:00 pass): a daytime re-run failure, or the auto-clear of its retry, lands at the 15:00 pass or the window start, up to ~6h later | per workflow per night |
 | PIPE_ETL_CYCLE_NOT_STARTED | PIPELINE | cycle starter silent past last week's same-night kickoff + threshold min (the Tonight *Cycle start: Overdue* test) — V156, via the V157 scan arm in the cycle run window (ETL_SLA_TARGET_HHMM − 10h through + 3h Central, plus 15:00) | per missed night |
 | PIPE_ETL_CYCLE_LATE | PIPELINE | terminal unfinished within threshold min of ETL_SLA_TARGET_HHMM, or projected past the hard deadline (WARN); past the target (CRIT) / hard deadline (EXH): HIGH when the cycle already finished, CRITICAL (auto-declares an incident) when still unfinished; a terminal task is done at its first clean finish from an attempt that STARTED at/after the night's last kickoff, so a next-morning terminal re-run never re-grades the night and an afternoon attempt started before the real kickoff is never that finish (a next-morning starter re-run, or any re-run when starter = terminal workflow, re-grades it: loud); after an afternoon re-run of the whole chain, a real cycle that hangs before its terminal dispatches, or a chain whose terminal starts after the kickoff, can hide the real run (documented) — V156, via the V157 scan arm in the cycle run window (ETL_SLA_TARGET_HHMM − 10h through + 3h Central, plus 15:00; a hard deadline more than ~3h after the target is judged at the 15:00 pass) | per night per band |
-| SEC_FAILED_LOGINS | SECURITY | failed logins over threshold on one day (nightly, whole day); since V163 the title and detail say whether the day also had a successful login — none reads as a lockout or a stale secret, a burst that ended in a success is SEC_LOGIN_TAKEOVER (hourly, V162) | daily per user |
+| SEC_FAILED_LOGINS | SECURITY | failed logins over threshold on one day (nightly; yesterday and today are read, and today's row is the partial ~06:45 load and says 'so far'); since V163 the title and detail say whether the day also had a successful login — none reads as a lockout or a stale secret, a burst that ended in a success is SEC_LOGIN_TAKEOVER (hourly, V162, while enabled); Account-takeover candidates either way | daily per user |
 | SEC_CRED_EXPIRY | SECURITY | credential expires ≤ threshold days — 10 by default since V028 (CRITICAL if expired); checked every 4h since V157 (01, 05, 09, 13, 17, 21 Central), so an event — EXPIRED included — can arrive up to ~4h late | once per band per expiry date (EXPIRING, then EXPIRED); a rotated credential's next expiry re-alerts even after a human resolve, however late (V157: a closed event blocks only its own expiry date, read from its DETAIL; a live one always blocks) |
 | SEC_NEW_EXPOSURE | SECURITY | a new grant to PUBLIC (24h lookback) of ≥ threshold objects in one batch; checked every 4h since V157 (01, 05, 09, 13, 17, 21 Central); a grant revoked before the next check is never raised | once per grant batch (PRIVILEGE, GRANTED_ON, CREATED_ON); auto-clears as CONDITION_ENDED once the whole batch is revoked (V157) |
 | SEC_LOGIN_TAKEOVER | SECURITY | ≥ threshold (5) failed logins by one user within 15 min, then a successful login within 60 min of that burst (every failed login counts); CRITICAL when the login is off-hours (20:00-06:00 Central, or a weekend) or the user directly held ACCOUNTADMIN / SECURITYADMIN / SYSADMIN / USERADMIN / ORGADMIN / SNOW_ACCOUNTADMINS / SNOW_SYSADMINS at that moment, else HIGH; company ALL — hourly [26], V162; never auto-declares an incident (SP_INCIDENT_AUTODECLARE skips it: declare by hand) | one event per episode (key ends in the anchor login's UTC millisecond time); a later WARN→CRIT crossing supersedes the WARN, a CRIT is never re-minted as WARN; a snooze never carries to the next episode |
 | SEC_ADMIN_GRANT | SECURITY | a direct grant of one of those seven admin-tier roles to a user (GRANTS_TO_USERS, 26h lookback), raised even when already revoked; flat HIGH; the title flags off-hours and first-time grants; company ALL — hourly [27], V162; never auto-declares an incident | one event per grant (grantee, role, CREATED_ON) |
 | ~~SEC_BREAK_GLASS_USE~~ | SECURITY | retired at V034 (muted since V025) — admin-role activity stays as evidence on Security -> Changes | — |
-| SEC_TRUST_REGRESSION | SECURITY | a CRITICAL or HIGH Trust Center scanner's at-risk count rose ≥ threshold (1) against its previous snapshot day (today's and yesterday's rows checked each morning; a scanner's first snapshot never raises; quiet without TRUST_CENTER_VIEWER); HIGH, company ALL — daily [29], V163 | per scanner per snapshot day; no self-clear |
+| SEC_TRUST_REGRESSION | SECURITY | a CRITICAL or HIGH Trust Center scanner's at-risk count rose ≥ threshold (1) against its previous snapshot day (today's and yesterday's rows checked each morning; a scanner's first snapshot never raises; quiet without TRUST_CENTER_VIEWER); HIGH, company ALL — daily [29], V163 | per scanner per snapshot day (the counts of the scan that raised it; a further rise the same day is not pushed again); no self-clear |
 | COST_DEPT_BUDGET_PACE | COST | department MTD > budget pace by threshold % (DEPT_BUDGETS) | daily per dept |
 | COST_ORG_ACCOUNT_CREEP | COST | org account currency spend up threshold % WoW | weekly per account |
 | PIPE_VOLUME_DROP | PIPELINE | table rows-added down threshold % vs prior-7d avg (≥1k rows/day) | daily per table |
@@ -978,10 +981,13 @@ first notification is escalated ONCE by the hourly notifier: a card headed
 `OVERWATCH ESCALATION - CRITICAL unacknowledged 120+ min:` goes to every enabled
 route that already delivered it, and an email goes through
 `ESCALATE_EMAIL_INTEGRATION` (default `OVERWATCH_EMAIL`, to its
-`DEFAULT_RECIPIENTS`; blank = no email). Acknowledging or snoozing the event, or
-acknowledging, mitigating or closing its incident, prevents it; so does a resolve.
-Each escalation stamps `ALERT_EVENTS.ESCALATED_AT` and writes an `ALERT_AUDIT` row
-with ACTION `ESCALATE`. Timing: hourly, so about 120-185 minutes after the first
+`DEFAULT_RECIPIENTS`; blank = no email). Acknowledging or snoozing the event (a
+snooze V117 carried onto a re-raise counts too), or acknowledging, mitigating or
+closing its incident after the alert joined it, prevents it; so does a resolve. The
+automatic V154 mitigation does not count. Events a route delivered fill each
+3000-character batch first. Each channel stamps `ALERT_EVENTS.ESCALATED_AT` right
+after its send succeeds; one `ALERT_AUDIT` row with ACTION `ESCALATE` per event the
+run stamped follows. Timing: hourly, so about 120-185 minutes after the first
 notification. The monthly alert drill escalates too when nobody acknowledges it.
 
 Escalation symptoms → fixes (Alerts > Native delivery shows the policy and the last
@@ -994,7 +1000,9 @@ Escalation symptoms → fixes (Alerts > Native delivery shows the policy and the
 - `route_send_failed` whose CONTEXT says `escalation re-post` → the route's
   integration refused the re-post (same fixes as above for a Teams route).
 - `escalation_failed` → the pass itself errored; the normal deliveries of that run
-  still went. The next hourly run retries (nothing was stamped).
+  still went. The next hourly run retries what was not stamped; anything already
+  re-posted or emailed that run is stamped, so it is not re-sent (its ESCALATE audit
+  row may be missing).
 - Nothing escalates → `ESCALATE_AFTER_MIN` is 0 or not a number (Alerts > Native
   delivery reads "Escalation is off"), or TASK_ALERT_NOTIFY is suspended. The task's
   TASK_HISTORY RETURN_VALUE stays NULL (a task that CALLs a proc does not publish the

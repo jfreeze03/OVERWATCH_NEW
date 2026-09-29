@@ -636,6 +636,11 @@ def test_v163_playbooks():
     assert "AT_RISK_ENTITIES" not in trust                                         # only after probe S3c
     failed = PLAYBOOKS["SEC_FAILED_LOGINS"]
     assert "SEC_LOGIN_TAKEOVER" in failed and "lockout" in failed and "60 minutes" in failed
+    # review W5 (integrator): [07] reads yesterday and today, and today's row is partial ('so far') -- never a
+    # whole-day claim
+    assert "counts the whole" not in failed
+    for frag in ("reads yesterday and today", "partial ~06:45 load", "'so far' on today's row"):
+        assert frag in failed, frag
     # SEC_LOGIN_TAKEOVER is raised by V162's hourly scan (another slice): nothing near its name here may read as a
     # live-claim or a retired-claim to Guards A/B, whichever order the slices land in
     text = read("app/logic/playbooks.py")

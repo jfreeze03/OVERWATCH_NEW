@@ -81897,11 +81897,12 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --   login in UTC; the grant's Central CREATED_ON), never a bare EVENT_ID: V117's snooze carry-forward reads a
 --   10-character tail that parses as a date (a 10-digit integer is epoch seconds) as a date band, and would carry a
 --   snooze to the user's NEXT takeover.
---   ~ SP_INCIDENT_AUTODECLARE re-derived from V154 (its current definer), byte-identical except ONE predicate in
---     the crit CTE: AND e.RULE_ID NOT IN ('SEC_LOGIN_TAKEOVER', 'SEC_ADMIN_GRANT'). Neither rule ever opens an
+--   ~ SP_INCIDENT_AUTODECLARE re-derived from V154 (its current definer), byte-identical except TWO predicates.
+--     In the crit CTE: AND e.RULE_ID NOT IN ('SEC_LOGIN_TAKEOVER', 'SEC_ADMIN_GRANT'). Neither rule ever opens an
 --     incident, even if an operator later edits its severity to CRITICAL: a human declares after contacting the
---     user. The [attach] arm and the [auto-mitigate] sweep are unchanged, so a later takeover CRITICAL still links
---     to an incident a person declared for that family.
+--     user. In [attach]: a CRITICAL of either rule links only to an OPEN/MITIGATED incident that already holds
+--     the SAME user (DEDUPE_KEY field 2); a CRITICAL for another user stays unlinked, keeps its V164 escalation
+--     and can be declared on its own. Every other rule attaches as in V154; the [auto-mitigate] sweep is unchanged.
 --   ~ SP_ALERT_SCAN re-derived from V157 (its current definer), byte-identical except: + counting arms [26] and
 --     [27] after [21], before the [22] gate (so the self-alert, the V067 supersede sweep and the V117 carry-forward
 --     see them in the same pass: a WARN -> CRIT crossing is superseded at once); tally 12 -> 14 (self-alert, [hb],
@@ -81918,10 +81919,17 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 -- LATENCY: hourly; ACCOUNT_USAGE lags up to ~2h, so an event arrives 1-3h after the login or grant.
 -- FIRST RUN: the first hourly scan after apply raises every takeover episode of the last 24h and every admin grant
 -- of the last 26h (CRITICAL ones included -- no incident is opened). PREFLIGHT_WAVE4.sql P162.1 / P162.2 list them.
+-- Once V164 is applied, each first-run CRITICAL takeover nobody acknowledges is re-posted and emailed about 2-3h
+-- after the apply: P162.4 lists them (V164's own census, P164.2, runs before they exist and cannot).
 -- No procedure runs at apply time.
--- ROLLBACK (order matters): FIRST re-run V157's SP_ALERT_SCAN (tally back to 12; the two rules stop raising), THEN
--- optionally V154's SP_INCIDENT_AUTODECLARE. Reversed, an hourly run in between could auto-declare a CRITICAL
--- takeover. Optionally disable the two rules in Alerts > Rules; the seeds can stay.
+-- ROLLBACK (order matters): 1. Re-run V157's SP_ALERT_SCAN (tally back to 12; the two rules stop raising). That
+-- is usually enough: this SP_INCIDENT_AUTODECLARE only narrows what it does for the two rules, so it can stay.
+-- 2. Only to restore V154's SP_INCIDENT_AUTODECLARE too: FIRST wait 24h after step 1 (the crit CTE reads 24h), or
+-- resolve every OPEN / ACK / SNOOZED SEC_LOGIN_TAKEOVER and SEC_ADMIN_GRANT event as EXPECTED (RUNBOOK section 12
+-- has the UPDATE) -- V154 has no exclusion, so a CRITICAL takeover still open is auto-declared at the next hourly
+-- run. Running the scan first only keeps out the events raised between the two steps; closing or aging out the
+-- rest is what prevents the auto-declare. Roll V163 back before V162 (its [07] text points at the hourly
+-- SEC_LOGIN_TAKEOVER), or accept that pointer. Optionally disable the two rules in Alerts > Rules; the seeds can stay.
 -- Apply AFTER V161. Idempotent; safe to re-run.
 
 EXECUTE IMMEDIATE
@@ -81981,7 +81989,7 @@ BEGIN
           AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.INCIDENT_MEMBERS m
                           WHERE m.MEMBER_KIND = 'ALERT' AND m.REF_ID = e.EVENT_ID)
           -- V162 (Next-Fifty #39, owner 2026-09-29): identity alerts never auto-declare -- a human declares after
-          -- contacting the user. [attach] below still links them to an incident a human opened for that family.
+          -- contacting the user. [attach] below still links them to an incident a human opened for that user.
           AND e.RULE_ID NOT IN ('SEC_LOGIN_TAKEOVER', 'SEC_ADMIN_GRANT')
     )
     SELECT UUID_STRING() AS INCIDENT_ID, FAMILY, COMPANY,
@@ -82052,6 +82060,13 @@ BEGIN
               AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
               AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.INCIDENT_MEMBERS m2
                               WHERE m2.MEMBER_KIND = 'ALERT' AND m2.REF_ID = e.EVENT_ID)
+              -- V162 review fix: an identity alert attaches only to an incident that already holds the
+              -- SAME user (DEDUPE_KEY field 2, upper-cased like the entity filter of SP_INCIDENT_DECLARE).
+              -- A takeover of another user stays unlinked, so it keeps its own escalation (V164) and its
+              -- own proposal, and never inherits an incident acknowledged or mitigated for someone else.
+              AND (e.RULE_ID NOT IN ('SEC_LOGIN_TAKEOVER', 'SEC_ADMIN_GRANT')
+                   OR UPPER(SPLIT_PART(COALESCE(a.DEDUPE_KEY, a.EVENT_ID), '|', 2))
+                      = UPPER(SPLIT_PART(COALESCE(e.DEDUPE_KEY, e.EVENT_ID), '|', 2)))
             QUALIFY ROW_NUMBER() OVER (
                 PARTITION BY e.EVENT_ID
                 ORDER BY IFF(SPLIT_PART(COALESCE(a.DEDUPE_KEY, a.EVENT_ID), '|', 2)
@@ -83373,7 +83388,7 @@ $$;
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 162 AS VERSION,
-       'Next-Fifty #39 (owner 2026-09-29): two hourly identity alerts that never auto-declare an incident. SEC_LOGIN_TAKEOVER (SP_ALERT_SCAN arm [26], ungated): at least THRESHOLD_NUM (seed 5, floor 2) failed logins by one user within 15 minutes, then a successful login within 60 minutes; one event per episode; CRITICAL when the login is off-hours (20:00-06:00 America/Chicago or a weekend) or the user directly held ACCOUNTADMIN, SECURITYADMIN, SYSADMIN, USERADMIN, ORGADMIN, SNOW_ACCOUNTADMINS or SNOW_SYSADMINS, else the rule severity (HIGH); 27h LOGIN_HISTORY read, 24h anchor window. SEC_ADMIN_GRANT (arm [27], ungated): one event per direct grant of one of those roles to a user in the last 26h, revoked or not; flat HIGH; the title flags off-hours and first-time grants. Both company ALL; keys end in an explicit millisecond timestamp (never a bare EVENT_ID, which the V117 carry-forward would read as a date). SP_INCIDENT_AUTODECLARE re-derived from V154, byte-identical except the crit CTE excludes both rules ([attach] and [auto-mitigate] unchanged). SP_ALERT_SCAN re-derived from V157, byte-identical except the two counting arms and the tally 12 -> 14. Seeds both rules WHEN NOT MATCHED only. No task change, no SETTINGS key, no procedure run at apply time.' AS DESCRIPTION
+       'Next-Fifty #39 (owner 2026-09-29): two hourly identity alerts that never auto-declare an incident. SEC_LOGIN_TAKEOVER (SP_ALERT_SCAN arm [26], ungated): at least THRESHOLD_NUM (seed 5, floor 2) failed logins by one user within 15 minutes, then a successful login within 60 minutes; one event per episode; CRITICAL when the login is off-hours (20:00-06:00 America/Chicago or a weekend) or the user directly held ACCOUNTADMIN, SECURITYADMIN, SYSADMIN, USERADMIN, ORGADMIN, SNOW_ACCOUNTADMINS or SNOW_SYSADMINS, else the rule severity (HIGH); 27h LOGIN_HISTORY read, 24h anchor window. SEC_ADMIN_GRANT (arm [27], ungated): one event per direct grant of one of those roles to a user in the last 26h, revoked or not; flat HIGH; the title flags off-hours and first-time grants. Both company ALL; keys end in an explicit millisecond timestamp (never a bare EVENT_ID, which the V117 carry-forward would read as a date). SP_INCIDENT_AUTODECLARE re-derived from V154, byte-identical except the crit CTE excludes both rules and [attach] links either rule only to an incident that already holds the same user ([auto-mitigate] unchanged). SP_ALERT_SCAN re-derived from V157, byte-identical except the two counting arms and the tally 12 -> 14. Seeds both rules WHEN NOT MATCHED only. No task change, no SETTINGS key, no procedure run at apply time.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 162);
 
 -- ===========================================================================
@@ -83402,9 +83417,13 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --     + counting arm [29] SEC_TRUST_REGRESSION (SECURITY_TRUST_SNAPSHOT via LAG, not V_SECURITY_TRUST_DELTA): a
 --       CRITICAL or HIGH scanner's at-risk count rose by >= THRESHOLD_NUM (1) against its previous
 --       snapshot day; today's and yesterday's rows are checked, so a rise after the morning scan lands the next
---       morning. A first-ever snapshot never raises. HIGH, company ALL, one event per scanner per snapshot day.
---     ~ [07] SEC_FAILED_LOGINS: TITLE and DETAIL say whether the day also had successful logins and point a
---       burst that got in to the hourly SEC_LOGIN_TAKEOVER. Predicate, severity and key unchanged (no re-fire).
+--       morning -- unless that morning already raised for the scanner-day: one event per scanner per snapshot
+--       day (the counts of the scan that raised it), so a further rise the same day is not pushed again. A
+--       first-ever snapshot never raises. HIGH, company ALL.
+--     ~ [07] SEC_FAILED_LOGINS: TITLE and DETAIL say whether the day also had successful logins ('so far' on
+--       today's partial row, which the ~06:45 load covers only in part and is never re-raised), and point a
+--       burst that got in to the hourly SEC_LOGIN_TAKEOVER while that rule is enabled, and to the
+--       Account-takeover candidates lens either way. Predicate, severity and key unchanged (no re-fire).
 --     ~ tally 12 -> 14 (self-alert, heartbeat, RETURN).
 --   + ALERT_CONFIG COST_AI_USER_RUNAWAY (COST, HIGH, 2, 24h) and SEC_TRUST_REGRESSION (SECURITY, HIGH,
 --     1, 24h), WHEN NOT MATCHED only; AUTO_CLEAR_ENABLED keeps its default.
@@ -83413,7 +83432,7 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 -- COST: two mart-only INSERTs per nightly run (a few compile-seconds a day); COMPANY_FOR_USER runs only on a
 -- raised row. No new table, view, task, proc or UDF.
 -- LATENCY: daily (~07:00 Central). A runaway day the mart had not loaded yet is raised on the next morning's run;
--- a Trust Center rise after the morning scan, the next morning.
+-- a Trust Center rise after the morning scan, the next morning (unless that scanner-day already raised).
 -- FIRST RUN: the next daily scan raises runaways from the last 3 complete mart days and regressions dated today
 -- or yesterday; preview both with the read-only PREFLIGHT (P163.1, P163.3). Nothing runs at apply time.
 -- ROLLBACK: re-run V160's SP_ALERT_SCAN_DAILY (the tally goes back to 12 and the old [07] text returns);
@@ -83533,12 +83552,21 @@ BEGIN
         SELECT c.RULE_ID, lg.COMPANY, c.SEVERITY,
                lg.USER_NAME || ' had ' || lg.FAILED_LOGINS || ' failed logins on ' || lg.DAY
                    || IFF(COALESCE(lg.LOGINS, 0) - lg.FAILED_LOGINS > 0,
-                          ', ' || (lg.LOGINS - lg.FAILED_LOGINS) || ' successful', ' and no successful login'),
-               IFF(COALESCE(lg.LOGINS, 0) - lg.FAILED_LOGINS > 0,
-                   'The same day also had successful logins. A failed burst followed within 60 minutes by a '
-                   || 'success raises SEC_LOGIN_TAKEOVER from the hourly scan (CRITICAL off-hours or for an admin '
-                   || 'role); this nightly count covers the whole day. ',
-                   'No successful login that day: most likely a lockout or a job still sending an old secret '
+                          ', ' || (lg.LOGINS - lg.FAILED_LOGINS) || ' successful'
+                              || IFF(lg.DAY >= CURRENT_DATE(), ' so far', ''),
+                          IFF(lg.DAY >= CURRENT_DATE(), ' and no successful login so far today',
+                              ' and no successful login')),
+               IFF(lg.DAY >= CURRENT_DATE(),
+                   'Partial day: today counts only what the ~06:45 Central daily load saw (LOGIN_HISTORY lags up '
+                   || 'to 2 h), and this event is not updated when the rest of the day loads. ',
+                   '')
+               || IFF(COALESCE(lg.LOGINS, 0) - lg.FAILED_LOGINS > 0,
+                   'The same day also had successful logins. While the hourly SEC_LOGIN_TAKEOVER rule is enabled '
+                   || '(Alerts > Rules), a failed burst followed within 60 minutes by a success raises it (CRITICAL '
+                   || 'off-hours or for an admin role); either way, check Security > Access > Authentication > '
+                   || 'Account-takeover candidates. ',
+                   'No successful login ' || IFF(lg.DAY >= CURRENT_DATE(), 'so far today', 'that day')
+                   || ': most likely a lockout or a job still sending an old secret '
                    || '(a guessing attempt that never got in looks the same). ')
                    || 'Review Security > Access > Authentication: failed-login reasons and client IPs.',
                lg.FAILED_LOGINS,
@@ -84313,7 +84341,10 @@ BEGIN
     --      07:00 (by the next morning both days carry the new count). CRITICAL/HIGH scanners only; a scanner's
     --      first-ever snapshot (no previous day) never raises, so enabling a package does not flood. The loader
     --      books a scanner missing from FINDINGS as 0, so its return reads as a rise (the DETAIL says so). One
-    --      event per scanner per snapshot day, company ALL, HIGH (c.SEVERITY), no self-clear.)
+    --      event per scanner per snapshot day, carrying the counts of the scan that raised it: a rise after
+    --      ~07:00 lands the next morning only when that scanner-day had not raised yet -- a further rise on a
+    --      day that already raised is NOT pushed again (that event stays open, no self-clear; Security > Trust
+    --      Center shows the live count). Company ALL, HIGH (c.SEVERITY).)
     BEGIN
         INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
             (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
@@ -84516,7 +84547,7 @@ $$;
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 163 AS VERSION,
-       'Next Fifty wave 4 (#37a, #44b, #39). SP_ALERT_SCAN_DAILY re-derived from V160, byte-identical except: + counting arm [28] COST_AI_USER_RUNAWAY (FACT_AI_USAGE_DAILY, mart-only): the AI credits of one user on a complete day above THRESHOLD_NUM (2) x COCO_DAILY_CAP_CREDITS AND a robust z at least AI_RUNAWAY_ROBUST_Z (3.5) against the active days of that user in the 90 days before (median/MAD; fewer than 5 prior active days = no baseline, the cap alone decides); Cortex Code only unless AI_RUNAWAY_INCLUDE_FUNCTIONS and a named user; the last 3 complete days re-scored, one event per user-day; HIGH; METRIC_VALUE = the cap multiple; COMPANY = COMPANY_FOR_USER, ALL when UNKNOWN. + counting arm [29] SEC_TRUST_REGRESSION (SECURITY_TRUST_SNAPSHOT via LAG, not V_SECURITY_TRUST_DELTA): the at-risk count of a CRITICAL or HIGH scanner rose by at least THRESHOLD_NUM (1) against its previous snapshot day, today and yesterday checked; a first snapshot never raises; HIGH, company ALL. [07] SEC_FAILED_LOGINS TITLE and DETAIL now say whether the day had successful logins and point a burst that got in to the hourly SEC_LOGIN_TAKEOVER (predicate, severity and key unchanged). Tally 12 -> 14. Seeds the two rules and the settings AI_RUNAWAY_ROBUST_Z (3.5) and AI_RUNAWAY_INCLUDE_FUNCTIONS (FALSE), WHEN NOT MATCHED only. No task change, no new object, no procedure run at apply time.' AS DESCRIPTION
+       'Next Fifty wave 4 (#37a, #44b, #39). SP_ALERT_SCAN_DAILY re-derived from V160, byte-identical except: + counting arm [28] COST_AI_USER_RUNAWAY (FACT_AI_USAGE_DAILY, mart-only): the AI credits of one user on a complete day above THRESHOLD_NUM (2) x COCO_DAILY_CAP_CREDITS AND a robust z at least AI_RUNAWAY_ROBUST_Z (3.5) against the active days of that user in the 90 days before (median/MAD; fewer than 5 prior active days = no baseline, the cap alone decides); Cortex Code only unless AI_RUNAWAY_INCLUDE_FUNCTIONS and a named user; the last 3 complete days re-scored, one event per user-day; HIGH; METRIC_VALUE = the cap multiple; COMPANY = COMPANY_FOR_USER, ALL when UNKNOWN. + counting arm [29] SEC_TRUST_REGRESSION (SECURITY_TRUST_SNAPSHOT via LAG, not V_SECURITY_TRUST_DELTA): the at-risk count of a CRITICAL or HIGH scanner rose by at least THRESHOLD_NUM (1) against its previous snapshot day, today and yesterday checked; one event per scanner per snapshot day (a further rise the same day is not pushed again); a first snapshot never raises; HIGH, company ALL. [07] SEC_FAILED_LOGINS TITLE and DETAIL now say whether the day had successful logins (so far, on the partial current day) and point a burst that got in to the hourly SEC_LOGIN_TAKEOVER while that rule is enabled and to the Account-takeover candidates lens (predicate, severity and key unchanged). Tally 12 -> 14. Seeds the two rules and the settings AI_RUNAWAY_ROBUST_Z (3.5) and AI_RUNAWAY_INCLUDE_FUNCTIONS (FALSE), WHEN NOT MATCHED only. No task change, no new object, no procedure run at apply time.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 163);
 
 -- ===========================================================================
@@ -84535,22 +84566,27 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --     'OVERWATCH_EMAIL' ('' = no email leg), WHEN NOT MATCHED only: a value set before the apply is kept.
 --   ~ SP_NOTIFY_WEBHOOK re-derived from V064 (its current definer; V070, V112, V157 and V160 only mention it),
 --     byte-identical except:
---       N1 12 escalation variables and cursor c2 (the enabled routes) in the DECLARE;
+--       N1 13 escalation variables and cursor c2 (the enabled routes) in the DECLARE;
 --       N2 every line reads '[SEV] <title, 140> | <company> | <detail, one line, 100> | event <EVENT_ID>' (ASCII),
 --          identical in the 3000-char fit and in the LISTAGG, so the fit still equals what is sent (a worst-case
 --          escaped line is under 900 chars, so a batch always holds at least one event);
 --       N3 the escalation pass, inside the sender lease, after the drain and before the expired tail: a CRITICAL
---          still OPEN with no ACK_AT, not in an incident someone acknowledged, mitigated or closed, never snoozed
---          (an ALERT_AUDIT SNOOZE row), raised inside the 7-day CRITICAL send window, whose rule still exists, and
---          first notified (NOTIFIED_AT, else RAISED_AT) ESCALATE_AFTER_MIN+ minutes ago escalates ONCE: re-posted
---          to every enabled route that already delivered it, and emailed through ESCALATE_EMAIL_INTEGRATION with
---          the notification-integration send, i.e. to that integration's DEFAULT_RECIPIENTS (no address is stored
---          in OVERWATCH). With the email leg off, only an event some enabled route delivered is eligible.
---          Capture-once (oldest first, 3000 escaped chars); send, then an ALERT_AUDIT 'ESCALATE' row, then the
---          ESCALATED_AT stamp, only for ids a channel accepted (every channel failing = retried next run inside
---          the 7 days). Its own handler logs escalation_failed and never re-raises, so the expired tail, the lease
---          release and the RETURN still run. A re-post failure logs route_send_failed with the V064 CONTEXT
---          prefix (the Native delivery card attributes it to its route); an email failure logs
+--          still OPEN with no ACK_AT, not in an incident a human acknowledged, mitigated or closed AFTER the alert
+--          joined it (INCIDENT_MEMBERS.LINKED_AT; V154's machine auto-mitigate, MITIGATED_BY =
+--          SP_INCIDENT_AUTODECLARE, does not count), never snoozed (an ALERT_AUDIT SNOOZE row, or a V117
+--          carry-forward of a snooze onto it: a SNOOZE_SUPPRESSED predecessor with the same band-stripped key),
+--          raised inside the 7-day CRITICAL send window, whose rule still exists, and first notified
+--          (NOTIFIED_AT, else RAISED_AT) ESCALATE_AFTER_MIN+ minutes ago escalates ONCE: re-posted to every
+--          enabled route that already delivered it, and emailed through ESCALATE_EMAIL_INTEGRATION with the
+--          notification-integration send, i.e. to that integration's DEFAULT_RECIPIENTS (no address is stored in
+--          OVERWATCH). With the email leg off, only an event some enabled route delivered is eligible.
+--          Capture-once (route-delivered events first, then oldest first, 3000 escaped chars -- an email-only
+--          event never holds the batch while the email fails); right after each channel's send succeeds, the
+--          ESCALATED_AT stamp for the ids it took (so a later error never re-posts them), then one ALERT_AUDIT
+--          'ESCALATE' row per event the run stamped (every channel failing = nothing stamped, retried next run
+--          inside the 7 days). Its own handler logs escalation_failed and never re-raises, so the expired tail,
+--          the lease release and the RETURN still run. A re-post failure logs route_send_failed with the V064
+--          CONTEXT prefix (the Native delivery card attributes it to its route); an email failure logs
 --          escalation_email_failed;
 --       N4 the RETURN adds '<n> CRITICAL(s) escalated' and a note (off / email failed / pass failed).
 --
@@ -84633,6 +84669,7 @@ DECLARE
     r_esc_ids ARRAY;        -- V164 #40: the part of esc_ids THIS route already delivered
     esc_ok ARRAY;           -- V164 #40: ids at least one channel accepted (audited + stamped)
     esc_msg VARCHAR;
+    esc_sent BOOLEAN DEFAULT FALSE;  -- V164 #40: this channel's send succeeded (stamp right after it)
     esc_routes INT DEFAULT 0;
     esc_emailed BOOLEAN DEFAULT FALSE;
     escalated INT DEFAULT 0;
@@ -84810,18 +84847,22 @@ BEGIN
     END FOR;
 
     -- V164 #40: CRITICAL ESCALATION PASS (Next-Fifty #40, owner decision 2026-09-29). A CRITICAL still OPEN
-    -- and never acknowledged (no ACK_AT; not in an incident someone acknowledged, mitigated or closed; never
-    -- snoozed -- an ALERT_AUDIT SNOOZE row) whose first notification (NOTIFIED_AT, or RAISED_AT when no route
-    -- ever took it) is ESCALATE_AFTER_MIN+ minutes old escalates ONCE: re-posted to every enabled route that
-    -- already delivered it (the same Teams route), and emailed through ESCALATE_EMAIL_INTEGRATION, i.e. to
-    -- that integration's DEFAULT_RECIPIENTS -- no address is written here. With the email leg off ('') only an
-    -- event some enabled route delivered is eligible, so an undeliverable one never holds the batch.
-    -- Capture-once: the ids are frozen oldest-first into esc_ids within 3000 escaped chars (the V063 B9
-    -- invariant), and every message, the audit and the stamp derive from that one set. Send, then audit, then
-    -- stamp: ESCALATED_AT is set only for ids a channel accepted, so an all-channel failure retries next run
-    -- inside the 7-day CRITICAL window (at-least-once, like the drain). Inside the sender lease, so two runs
-    -- never double-escalate. Isolated: an error here is logged (escalation_failed) and never re-raised -- the
-    -- deliveries above, the expired tail, the lease release and the RETURN below still run.
+    -- and never acknowledged (no ACK_AT; not in an incident a human acknowledged, mitigated or closed after
+    -- the alert joined it -- the V154 machine auto-mitigate does not count; never snoozed -- an ALERT_AUDIT
+    -- SNOOZE row, or a V117 carry-forward of a snooze onto it) whose first notification (NOTIFIED_AT, or
+    -- RAISED_AT when no route ever took it) is ESCALATE_AFTER_MIN+ minutes old escalates ONCE: re-posted to
+    -- every enabled route that already delivered it (the same Teams route), and emailed through
+    -- ESCALATE_EMAIL_INTEGRATION, i.e. to that integration's DEFAULT_RECIPIENTS -- no address is written here.
+    -- With the email leg off ('') only an event some enabled route delivered is eligible, and route-delivered
+    -- events always fill the batch first, so an email-only one never holds it (even while the email fails).
+    -- Capture-once: the ids are frozen (route-delivered first, then oldest first) into esc_ids within 3000
+    -- escaped chars (the V063 B9 invariant), and every message, stamp and audit row derives from that one set.
+    -- Send, then stamp at once: right after each channel's send succeeds, ESCALATED_AT (= the frozen pass clock)
+    -- is set for the ids it took, so an error later in the pass can never re-post them next hour; an
+    -- all-channel failure stamps nothing and retries next run inside the 7-day CRITICAL window (at-least-once,
+    -- like the drain). Then one ALERT_AUDIT 'ESCALATE' row per event this run stamped. Inside the sender
+    -- lease, so two runs never double-escalate. Isolated: an error here is logged (escalation_failed) and never
+    -- re-raised -- the deliveries above, the expired tail, the lease release and the RETURN below still run.
     BEGIN
         SELECT COALESCE(MAX(IFF(KEY = 'ESCALATE_AFTER_MIN', VALUE, NULL)), '120'),
                COALESCE(MAX(IFF(KEY = 'ESCALATE_EMAIL_INTEGRATION', VALUE, NULL)), 'OVERWATCH_EMAIL')
@@ -84834,10 +84875,10 @@ BEGIN
         ELSE
             esc_now := CURRENT_TIMESTAMP()::TIMESTAMP_NTZ;
             esc_ok := ARRAY_CONSTRUCT();
-            SELECT ARRAY_AGG(f.EVENT_ID) WITHIN GROUP (ORDER BY f.RAISED_AT ASC, f.EVENT_ID)
+            SELECT ARRAY_AGG(f.EVENT_ID) WITHIN GROUP (ORDER BY f.EMAIL_ONLY, f.RAISED_AT ASC, f.EVENT_ID)
               INTO :esc_ids
             FROM (
-                SELECT e.EVENT_ID, e.RAISED_AT,
+                SELECT e.EVENT_ID, e.RAISED_AT, IFF(rd.EVENT_ID IS NULL, 1, 0) AS EMAIL_ONLY,
                        SUM(LEN(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
                            'ESCALATED (unacked ' || DATEDIFF('minute', COALESCE(e.NOTIFIED_AT, e.RAISED_AT), :esc_now) || ' min) ' || '[' || e.SEVERITY || '] ' || LEFT(e.TITLE, 140) || ' | ' || e.COMPANY || IFF(COALESCE(TRIM(TRANSLATE(e.DETAIL, CHR(10) || CHR(13) || CHR(9), '   ')), '') = '', '', ' | ' || LEFT(TRIM(TRANSLATE(e.DETAIL, CHR(10) || CHR(13) || CHR(9), '   ')), 100)) || ' | event ' || e.EVENT_ID,
                            CHR(92), CHR(92) || CHR(92)),
@@ -84845,10 +84886,15 @@ BEGIN
                            CHR(10), CHR(92) || 'n'),
                            CHR(13), ''),
                            CHR(9),  CHR(92) || 't')) + 2)
-                         OVER (ORDER BY e.RAISED_AT ASC, e.EVENT_ID
+                         OVER (ORDER BY IFF(rd.EVENT_ID IS NULL, 1, 0), e.RAISED_AT ASC, e.EVENT_ID
                                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) - 2 AS CUM_LEN
                 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
                 JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c ON c.RULE_ID = e.RULE_ID
+                LEFT JOIN (SELECT DISTINCT d.EVENT_ID
+                           FROM DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES d
+                           JOIN DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES r
+                             ON r.ROUTE_ID = d.ROUTE_ID AND r.ENABLED) rd
+                  ON rd.EVENT_ID = e.EVENT_ID
                 WHERE e.SEVERITY = 'CRITICAL'
                   AND e.STATUS = 'OPEN'
                   AND e.ACK_AT IS NULL
@@ -84859,14 +84905,24 @@ BEGIN
                                   FROM DBA_MAINT_DB.OVERWATCH.INCIDENT_MEMBERS m
                                   JOIN DBA_MAINT_DB.OVERWATCH.INCIDENTS i ON i.INCIDENT_ID = m.INCIDENT_ID
                                   WHERE m.MEMBER_KIND = 'ALERT' AND m.REF_ID = e.EVENT_ID
-                                    AND (i.ACK_AT IS NOT NULL OR i.STATUS <> 'OPEN'))
+                                    AND (i.ACK_AT >= m.LINKED_AT
+                                         OR (i.STATUS = 'MITIGATED' AND i.MITIGATED_AT >= m.LINKED_AT
+                                             AND COALESCE(i.MITIGATED_BY, '') <> 'SP_INCIDENT_AUTODECLARE')
+                                         OR (i.STATUS = 'RESOLVED' AND i.RESOLVED_AT >= m.LINKED_AT)))
                   AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT a
                                   WHERE a.EVENT_ID = e.EVENT_ID AND a.ACTION = 'SNOOZE')
-                  AND (COALESCE(TRIM(:esc_email), '') <> ''
-                       OR EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES d
-                                  JOIN DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES r
-                                    ON r.ROUTE_ID = d.ROUTE_ID AND r.ENABLED
-                                  WHERE d.EVENT_ID = e.EVENT_ID))
+                  AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS s
+                                  WHERE s.RULE_ID = e.RULE_ID
+                                    AND s.RESOLUTION_KIND = 'SNOOZE_SUPPRESSED'
+                                    AND s.RAISED_AT < e.RAISED_AT
+                                    AND s.RESOLVED_AT >= e.RAISED_AT
+                                    AND IFF(SUBSTR(s.DEDUPE_KEY, -11, 1) = '|'
+                                              AND TRY_TO_DATE(RIGHT(s.DEDUPE_KEY, 10)) IS NOT NULL,
+                                            LEFT(s.DEDUPE_KEY, LENGTH(s.DEDUPE_KEY) - 11), s.DEDUPE_KEY)
+                                        = IFF(SUBSTR(e.DEDUPE_KEY, -11, 1) = '|'
+                                              AND TRY_TO_DATE(RIGHT(e.DEDUPE_KEY, 10)) IS NOT NULL,
+                                            LEFT(e.DEDUPE_KEY, LENGTH(e.DEDUPE_KEY) - 11), e.DEDUPE_KEY))
+                  AND (COALESCE(TRIM(:esc_email), '') <> '' OR rd.EVENT_ID IS NOT NULL)
             ) f
             WHERE f.CUM_LEN <= 3000;
 
@@ -84892,14 +84948,14 @@ BEGIN
                         esc_msg := REPLACE(:esc_msg, CHR(10), CHR(92) || 'n');
                         esc_msg := REPLACE(:esc_msg, CHR(13), '');
                         esc_msg := REPLACE(:esc_msg, CHR(9),  CHR(92) || 't');
+                        esc_sent := FALSE;
                         BEGIN
                             CALL SYSTEM$SEND_SNOWFLAKE_NOTIFICATION(
                                 SNOWFLAKE.NOTIFICATION.TEXT_PLAIN(
                                     'OVERWATCH ESCALATION - CRITICAL unacknowledged ' || :esc_after || '+ min:'
                                     || CHR(92) || 'n' || LEFT(:esc_msg, 3000)),
                                 SNOWFLAKE.NOTIFICATION.INTEGRATION(:r_integration));
-                            esc_ok := ARRAY_CAT(:esc_ok, :r_esc_ids);
-                            esc_routes := esc_routes + 1;
+                            esc_sent := TRUE;
                         EXCEPTION
                             WHEN OTHER THEN
                                 emsg := SQLERRM;
@@ -84910,16 +84966,27 @@ BEGIN
                                        ' - escalation re-post; the email leg is unaffected',
                                        CURRENT_ROLE();
                         END;
+                        IF (esc_sent) THEN
+                            -- stamp at once: nothing later in this pass can make the next run re-post these
+                            esc_ok := ARRAY_CAT(:esc_ok, :r_esc_ids);
+                            esc_routes := esc_routes + 1;
+                            UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+                               SET ESCALATED_AT = :esc_now
+                             WHERE e.ESCALATED_AT IS NULL
+                               AND ARRAY_CONTAINS(e.EVENT_ID::VARIANT, :r_esc_ids);
+                            escalated := escalated + SQLROWCOUNT;
+                        END IF;
                     END IF;
                 END FOR;
 
                 -- Email leg: every escalated id, to the integration's DEFAULT_RECIPIENTS (never an address here).
                 IF (COALESCE(TRIM(:esc_email), '') <> '') THEN
-                    SELECT LISTAGG('ESCALATED (unacked ' || DATEDIFF('minute', COALESCE(e.NOTIFIED_AT, e.RAISED_AT), :esc_now) || ' min) ' || '[' || e.SEVERITY || '] ' || LEFT(e.TITLE, 140) || ' | ' || e.COMPANY || IFF(COALESCE(TRIM(TRANSLATE(e.DETAIL, CHR(10) || CHR(13) || CHR(9), '   ')), '') = '', '', ' | ' || LEFT(TRIM(TRANSLATE(e.DETAIL, CHR(10) || CHR(13) || CHR(9), '   ')), 100)) || ' | event ' || e.EVENT_ID, CHR(10))
+                    SELECT LISTAGG('ESCALATED (unacked ' || DATEDIFF('minute', COALESCE(e.NOTIFIED_AT, e.RAISED_AT), :esc_now) || ' min) ' || '[' || e.SEVERITY || '] ' || LEFT(e.TITLE, 140) || ' | ' || e.COMPANY || IFF(COALESCE(TRIM(TRANSLATE(e.DETAIL, CHR(10) || CHR(13) || CHR(9), '   ')), '') = '', '', ' | ' || LEFT(TRIM(TRANSLATE(e.DETAIL, CHR(10) || CHR(13) || CHR(9), '   ')), 100)) || ' | event ' || e.EVENT_ID, '\n')
                            WITHIN GROUP (ORDER BY e.RAISED_AT ASC, e.EVENT_ID)
                       INTO :esc_msg
                     FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
                     WHERE ARRAY_CONTAINS(e.EVENT_ID::VARIANT, :esc_ids);
+                    esc_sent := FALSE;
                     BEGIN
                         CALL SYSTEM$SEND_SNOWFLAKE_NOTIFICATION(
                             SNOWFLAKE.NOTIFICATION.TEXT_PLAIN(
@@ -84927,8 +84994,7 @@ BEGIN
                                 || :esc_after || ' minutes:' || CHR(10) || CHR(10) || :esc_msg || CHR(10) || CHR(10)
                                 || 'Acknowledge in OVERWATCH > Alerts > Open events. Each alert escalates once.'),
                             SNOWFLAKE.NOTIFICATION.INTEGRATION(TRIM(:esc_email)));
-                        esc_ok := ARRAY_CAT(:esc_ok, :esc_ids);
-                        esc_emailed := TRUE;
+                        esc_sent := TRUE;
                     EXCEPTION
                         WHEN OTHER THEN
                             emsg := SQLERRM;
@@ -84940,9 +85006,19 @@ BEGIN
                                    CURRENT_ROLE();
                             esc_note := :esc_note || '; escalation email failed (APP_ERROR_LOG escalation_email_failed)';
                     END;
+                    IF (esc_sent) THEN
+                        esc_ok := ARRAY_CAT(:esc_ok, :esc_ids);
+                        esc_emailed := TRUE;
+                        UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+                           SET ESCALATED_AT = :esc_now
+                         WHERE e.ESCALATED_AT IS NULL
+                           AND ARRAY_CONTAINS(e.EVENT_ID::VARIANT, :esc_ids);
+                        escalated := escalated + SQLROWCOUNT;
+                    END IF;
                 END IF;
 
-                -- Send, then audit, then stamp: only ids a channel accepted, each once.
+                -- Then the audit: one ESCALATE row per event THIS run stamped (ESCALATED_AT = the frozen
+                -- clock), written after every send so the note carries the whole run's outcome.
                 IF (ARRAY_SIZE(:esc_ok) > 0) THEN
                     INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT (EVENT_ID, ACTION, NOTE, ACTED_BY)
                     SELECT e.EVENT_ID, 'ESCALATE',
@@ -84950,13 +85026,8 @@ BEGIN
                            ' route(s), email ' || IFF(:esc_emailed, 'sent', 'not sent'),
                            'SP_NOTIFY_WEBHOOK'
                     FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
-                    WHERE e.ESCALATED_AT IS NULL
+                    WHERE e.ESCALATED_AT = :esc_now
                       AND ARRAY_CONTAINS(e.EVENT_ID::VARIANT, :esc_ok);
-                    UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
-                       SET ESCALATED_AT = CURRENT_TIMESTAMP()
-                     WHERE e.ESCALATED_AT IS NULL
-                       AND ARRAY_CONTAINS(e.EVENT_ID::VARIANT, :esc_ok);
-                    escalated := SQLROWCOUNT;
                 END IF;
             END IF;
         END IF;
@@ -85062,7 +85133,7 @@ $$;
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 164 AS VERSION,
-       'Next-Fifty #40: actionable Teams lines and a one-time CRITICAL escalation. SP_NOTIFY_WEBHOOK re-derived from V064, byte-identical except: every line reads [SEV] title (140) | company | detail (one line, 100) | event id, identical in the 3000-char fit and the LISTAGG (max_batches stays 6); and an escalation pass inside the sender lease, after the drain and before the expired tail. A CRITICAL still OPEN with no ACK_AT, not in an incident someone acknowledged, mitigated or closed, never snoozed, raised in the 7-day CRITICAL window, whose rule exists, and first notified (NOTIFIED_AT, else RAISED_AT) ESCALATE_AFTER_MIN (120) minutes ago escalates once: re-posted to every enabled route that already delivered it, and emailed through ESCALATE_EMAIL_INTEGRATION (OVERWATCH_EMAIL; that integration DEFAULT_RECIPIENTS, no address stored). Capture-once, oldest first; send, then an ALERT_AUDIT ESCALATE row, then the new ALERT_EVENTS.ESCALATED_AT stamp, only for ids a channel accepted; every channel failing retries next run. Isolated: escalation_failed is logged and never re-raised; a re-post failure logs route_send_failed, an email failure escalation_email_failed. The RETURN adds the escalated count. Seeds SETTINGS ESCALATE_AFTER_MIN 120 (0 = off) and ESCALATE_EMAIL_INTEGRATION OVERWATCH_EMAIL (blank = no email) WHEN NOT MATCHED only. No task change, no procedure run at apply time.' AS DESCRIPTION
+       'Next-Fifty #40: actionable Teams lines and a one-time CRITICAL escalation. SP_NOTIFY_WEBHOOK re-derived from V064, byte-identical except: every line reads [SEV] title (140) | company | detail (one line, 100) | event id, identical in the 3000-char fit and the LISTAGG (max_batches stays 6); and an escalation pass inside the sender lease, after the drain and before the expired tail. A CRITICAL still OPEN with no ACK_AT, not in an incident a human acknowledged, mitigated or closed after the alert joined it (the machine auto-mitigate does not count), never snoozed (an audit SNOOZE row or a V117 carry-forward), raised in the 7-day CRITICAL window, whose rule exists, and first notified (NOTIFIED_AT, else RAISED_AT) ESCALATE_AFTER_MIN (120) minutes ago escalates once: re-posted to every enabled route that already delivered it, and emailed through ESCALATE_EMAIL_INTEGRATION (OVERWATCH_EMAIL; that integration DEFAULT_RECIPIENTS, no address stored). Capture-once, route-delivered events first, then oldest first; right after each channel send succeeds, the new ALERT_EVENTS.ESCALATED_AT stamp for the ids it took, then one ALERT_AUDIT ESCALATE row per event stamped; every channel failing retries next run. Isolated: escalation_failed is logged and never re-raised; a re-post failure logs route_send_failed, an email failure escalation_email_failed. The RETURN adds the escalated count. Seeds SETTINGS ESCALATE_AFTER_MIN 120 (0 = off) and ESCALATE_EMAIL_INTEGRATION OVERWATCH_EMAIL (blank = no email) WHEN NOT MATCHED only. No task change, no procedure run at apply time.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 164);
 
 -- ===========================================================================
@@ -85248,8 +85319,9 @@ BEGIN
     -- *_USD fact, a % figure only a *_PCT fact, a figure followed by a known noun (credits, critical, high,
     -- minutes, GB, queries, failed, tasks, alerts, hours, days) only a fact whose key names it, any other
     -- figure any fact. Dates, clock times, identifier-like tokens (WH_X1, p95, V112) and list markers are
-    -- stripped first. app/logic/digest_grounding.py mirrors this rule; tests/test_digest_grounding_parity.py
-    -- locks every literal below to it. Backslash-free patterns on purpose ([0-9], [.], [$]): V022/V026.
+    -- stripped first. The half step is inclusive: TOL * 1.000000001 absorbs DOUBLE noise (fact 1.25 shown as 1.3).
+    -- app/logic/digest_grounding.py mirrors this rule; tests/test_digest_grounding_parity.py locks every
+    -- literal below to it. Backslash-free patterns on purpose ([0-9], [.], [$]): V022/V026.
     IF (:body IS NOT NULL AND TRIM(:body) <> '') THEN
         clean := REGEXP_REPLACE(:body, '[0-9]{4}-[0-9]{2}-[0-9]{2}([ T][0-9]{1,2}:[0-9]{2}(:[0-9]{2})?)?', ' ');
         clean := REGEXP_REPLACE(:clean, '[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?', ' ');
@@ -85305,7 +85377,7 @@ BEGIN
               ON (t.UNIT = 'num' OR (t.UNIT = 'usd' AND ENDSWITH(f.FKEY, '_USD'))
                                  OR (t.UNIT = 'pct' AND ENDSWITH(f.FKEY, '_PCT')))
              AND (t.KEYWORD IS NULL OR CONTAINS(f.FKEY, t.KEYWORD))
-             AND ABS(f.FVAL - t.VAL) <= t.TOL
+             AND ABS(f.FVAL - t.VAL) <= t.TOL * 1.000000001
             GROUP BY t.TOK
         ) g;
         grounding_ok := (n_bad = 0);

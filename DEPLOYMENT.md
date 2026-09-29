@@ -352,8 +352,11 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > first run raises. First runs: V162's next hourly scan raises the last 24 h of takeover episodes and
 > 26 h of admin grants; V163's next daily scan the last 3 complete AI-usage days and Trust Center rises
 > dated today or yesterday; V164's next hourly notifier escalates every OPEN, unacknowledged CRITICAL
-> of the last 7 days first notified 120+ minutes earlier. Nothing runs at apply time; never hand-CALL a
-> scan, the notifier or the digest (each can page or email).
+> of the last 7 days first notified 120+ minutes earlier (PREFLIGHT P164.2), and the CRITICAL takeovers
+> V162's first scan raises escalate about 2-3 h after the apply (P162.4). An incident counts as
+> acknowledging an alert only when a person acknowledged, mitigated or closed it after the alert joined
+> it. Nothing runs at apply time; never hand-CALL a scan, the notifier or the digest (each can page or
+> email).
 
 > **V164 verify (actionable Teams lines + CRITICAL escalation — OWNER SMOKE TEST: the send, the ARRAY
 > handling and the nested cursor loop are runtime-only):**

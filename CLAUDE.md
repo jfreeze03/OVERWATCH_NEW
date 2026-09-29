@@ -151,7 +151,8 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
   SEC_TRUST_REGRESSION, V163) + the [17]/[18] add-ons. Arm numbers are unique across BOTH scans from
   [26] on (the next free is [30]; [17], [18] and [22] already collide). SP_INCIDENT_AUTODECLARE never
   declares for SEC_LOGIN_TAKEOVER / SEC_ADMIN_GRANT (a hard-coded crit-CTE exclusion, V162 owner
-  decision). Add-ons, sweeps and the [hb] heartbeats never increment `fails`
+  decision), and its [attach] links them only to an incident that already holds the same user (V162
+  review fix). Add-ons, sweeps and the [hb] heartbeats never increment `fails`
   (test_scan_denominators_match_counting_arms). Cadence gates (V157 compile diet): the hourly scan
   reads the Central hour ONCE (`ct_hour`); [10]/[20] + their condition-ended clears run only when
   MOD(ct_hour, 4) = 1, the hourly [22] only when MOD(ct_hour, 3) = 2; a gate wraps an UNCHANGED arm

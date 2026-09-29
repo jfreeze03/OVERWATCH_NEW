@@ -297,8 +297,10 @@ PLAYBOOKS: dict[str, str] = {
         "event and resolve."
     ),
     "SEC_FAILED_LOGINS": (
-        "**Means:** a user crossed the failed-login threshold on one day (the nightly scan counts the whole "
-        "day); since V163 the title says whether that day also had a successful login. No success: most "
+        "**Means:** a user crossed the failed-login threshold on one day (the morning daily scan reads "
+        "yesterday and today; today's row is only the partial ~06:45 load and is not updated when the rest of "
+        "the day loads); since V163 the title says whether that day also had a successful login ('so far' on "
+        "today's row). No success: most "
         "likely a lockout or a job still sending an old secret (a guessing attempt that never got in looks the "
         "same). Successes too: find out whether a failed burst ended in one — *Account-takeover candidates* "
         "(step 1) shows that whatever else is set up. Since V162, and only while SEC_LOGIN_TAKEOVER is "
