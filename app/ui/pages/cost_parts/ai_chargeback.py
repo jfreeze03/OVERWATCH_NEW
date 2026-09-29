@@ -418,7 +418,8 @@ def _ai_quota_panel(enriched: pd.DataFrame, summary: dict, days: int,
     unguarded AI exposure from the per-user spend already fetched above. Reuses the
     tab's `enriched` frame + `summary` — no new per-user scan; only the block read.
 
-    #37b: after either branch, a review-only table suggests a per-user daily and monthly
+    #37b: after every block outcome (a failed read included), a review-only table suggests a per-user
+    daily and monthly
     quota from each user's OWN p95 over a fixed 90-day history, with a walk-forward
     back-test — pure pandas over ``user_daily`` (the live user-day frame the tab already
     holds; None on the fact-fallback leg), so still no new read."""
@@ -469,7 +470,7 @@ def _ai_quota_panel(enriched: pd.DataFrame, summary: dict, days: int,
         if has_active and has_user:
             kpis.append(
                 {"label": "Currently blocked",
-                 "value": f"{_live:,}",
+                 "value": f"{_live:,}{_plus}",
                  "severity": "warn" if _live else "",
                  "help": "Distinct users whose AI access is blocked right now, whatever the window: their "
                          "latest action on a quota is a block that runs past now (BLOCKED_UNTIL, the start of "
@@ -491,7 +492,10 @@ def _ai_quota_panel(enriched: pd.DataFrame, summary: dict, days: int,
                  if (mapped and has_user) else _shown)
         styled_table(_disp, slug="ai-quota-blocks", size_note=False)
         if in_win.empty:
-            st.caption(f"No block was recorded in {_wphrase}; the table lists the blocks still in force.")
+            st.caption(f"No block was recorded in {_wphrase}; the table lists the blocks still in force."
+                       if not blk.truncated else
+                       f"The newest 1,000 block rows all fall outside {_wphrase}, so its blocks were not "
+                       "read; the table lists the blocks still in force.")
         if blk.truncated:
             st.caption("Only the newest 1,000 block rows were read, so the window's counts are at least the "
                        "figures shown.")
@@ -501,7 +505,11 @@ def _ai_quota_panel(enriched: pd.DataFrame, summary: dict, days: int,
         # No block in this window (or the view is not enabled here) -- which does NOT prove no quota exists, so
         # state the exposure the per-user spend on screen shows and point at the suggestions. A failed read gets
         # neither: its unavailable state above is the whole story for the blocks half.
-        if blk.ok:
+        if blk.ok and blk.truncated:
+            # the cap kept only newer rows (Last month): an empty window here is unknown, not clean
+            empty_state("unavailable", f"The newest 1,000 block rows all fall outside {_wphrase}, so its "
+                        "blocks were not read.")
+        elif blk.ok:
             empty_state("clean", f"No per-user AI-quota blocks in {_wphrase}.")
         spend = safe_float(summary.get("spend_usd"))
         n_users = int(summary.get("active_users") or 0)
@@ -580,7 +588,8 @@ def _suggested_quota_table(rec: pd.DataFrame | None, enriched: pd.DataFrame,
         f"only days with {QUOTA_MIN_ACTIVE_DAYS}+ prior active days are judged. Runaway-rule days use "
         f"the runaway rule's seed multiple {RUNAWAY_CAP_MULTIPLE:g}x; {_tune}. Review only: "
         "OVERWATCH creates no quota — a per-user AI quota is set in Snowsight (Cost Management). "
-        "Company-scoped like the table above; Cortex Code (Snowsight + CLI) credits."))
+        "Company-scoped like the User attribution detail above (unlike the account-wide blocks table); "
+        "Cortex Code (Snowsight + CLI) credits."))
 
 
 def _token_economics_panel(company: str, days: int, cap_credits: float, *, bounds: tuple | None = None) -> None:

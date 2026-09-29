@@ -196,6 +196,20 @@ def test_a_later_non_block_action_ends_the_block_and_is_not_counted_as_a_block()
     assert block_events(pd.DataFrame({"USER": ["A", "B"]})) == 2
 
 
+def test_an_unblock_on_one_quota_never_ends_a_block_on_another():
+    """IS_ACTIVE is 'the user's latest action ON THAT QUOTA' (merge review): a DAILY reset leaves the MONTHLY block
+    in force. Grouping on USER alone would drop it."""
+    import datetime as dt
+    frame = pd.DataFrame([
+        _real_row(QUOTA_NAME="AI_MONTHLY", QUOTA_ID=311, CYCLE="MONTHLY",
+                  BLOCKED_UNTIL=pd.Timestamp("2026-10-01T00:00", tz="UTC")),
+        _real_row(ACTION_AT=pd.Timestamp("2026-09-21T18:30:00", tz="UTC"), ACTION="UNBLOCKED"),
+    ])
+    out, _ = block_history(frame, now=dt.datetime(2026, 9, 21, 15, 0))
+    active = out.set_index(["QUOTA", "ACTION"])["IS_ACTIVE"]
+    assert bool(active.loc[("AI_MONTHLY", "BLOCKED")]) and not bool(active.loc[("AI_USER_USAGE", "UNBLOCKED")])
+
+
 def test_quota_panel_never_reports_no_blocks_when_the_read_failed():
     """v4.601.1: the probe read's failure used to fall through to the clean 'no blocks' state plus a claim that no
     quota was enforcing. A failed read now says so, with no early return (review r1: wave 4 renders a table after
@@ -207,11 +221,9 @@ def test_quota_panel_never_reports_no_blocks_when_the_read_failed():
     branch = body[fail:body.index("block_history(blk.df")]
     assert 'empty_state("unavailable"' in branch and 'empty_state("needs_setup"' in branch
     assert 'blk.error_kind == "absent"' in branch and "return" not in branch
+    assert "detail=blk.error" in branch
     assert "No per-user AI credit quota is enforcing here" not in body
     assert 'f"{block_events(in_win):,}{_plus}"' in body
-
-
-# --- review r1: the panel rendered with fakes (one read; every branch) --------------------------------------------
 
 
 # =====================================================================================================
@@ -513,7 +525,8 @@ def _render(monkeypatch, result=None, *, user_daily=None, bounds=None, now=None,
     monkeypatch.setattr(cb, "panel_help", lambda *_a, **_k: None)
     monkeypatch.setattr(cb, "kpi_row", lambda items, *_a, **_k: seen["kpis"].append(items))
     monkeypatch.setattr(cb, "styled_table", lambda df, **k: seen["tables"].append((k.get("slug"), df)))
-    monkeypatch.setattr(cb, "empty_state", lambda kind, msg, *_a, **_k: seen["empty"].append((kind, msg)))
+    monkeypatch.setattr(cb, "empty_state", lambda kind, msg, *_a, **k: (
+        seen["empty"].append((kind, msg)), seen.setdefault("detail", []).append(k.get("detail"))))
     monkeypatch.setattr(cb, "with_user_names", lambda df, *_a, **_k: df)
     monkeypatch.setattr(cb, "has_migration", lambda v, _p: applied and v == 163)
     monkeypatch.setattr(cb, "account_today", lambda: _T)
@@ -588,9 +601,21 @@ def test_panel_failed_read_is_unavailable_and_never_clean(monkeypatch):
     for kind in ("missing_column", "timeout", "other"):
         fake, seen = _render(monkeypatch, _failed(kind))
         assert [k for k, _ in _block_states(seen)] == ["unavailable"], kind
+        assert seen["detail"][0] == "boom", kind                       # the error text reaches the owner
         assert "AI exposure:" not in fake.text("caption") and not seen["kpis"] and not seen["tables"]
         # no early return: wave 4's suggestions render after a failed block read too
         assert _SUGGEST_HEADING in fake.text("markdown"), kind
+
+
+def test_panel_computes_the_suggestions_after_a_failed_or_absent_block_read(monkeypatch):
+    """Merge review: the heading alone also renders on the rec=None 'needs the live scan' leg, so pass a real
+    user-day frame and require the table itself -- a regression that computed rec only on blk.ok fails here."""
+    for res in (_failed("absent"), _failed("timeout"), _failed("missing_column")):
+        fake, seen = _render(monkeypatch, res, user_daily=_frame_for_ui())
+        assert [slug for slug, _ in seen["tables"]] == ["ai-quota-suggestions"], res.error_kind
+        assert len(seen["kpis"]) == 1, res.error_kind
+        assert not any(m.startswith(_SUGGEST_NEEDS_LIVE) for _, m in seen["empty"]), res.error_kind
+        assert fake.text("markdown").count(_SUGGEST_HEADING) == 1, res.error_kind
 
 
 def test_panel_window_blocks_count_and_the_live_block(monkeypatch):
@@ -601,6 +626,17 @@ def test_panel_window_blocks_count_and_the_live_block(monkeypatch):
     slug, table = seen["tables"][0]
     assert slug == "ai-quota-blocks" and "IN_WINDOW" not in table.columns and "USER_NAME" in table.columns
     assert "No per-user AI credit quota is enforcing here" not in fake.text("caption")
+    assert "NOT filtered to this tab's company scope" in fake.text("caption")   # the blocks are account-wide
+
+
+def test_panel_currently_blocked_counts_distinct_users_not_rows(monkeypatch):
+    """One user holding a daily AND a monthly block is one live incident, not two (the R1 fix)."""
+    until = pd.Timestamp("2026-10-01T00:00", tz="UTC")
+    rows = [_real_row(IN_WINDOW=True, BLOCKED_UNTIL=until),
+            _real_row(IN_WINDOW=True, QUOTA_NAME="AI_MONTHLY", QUOTA_ID=311, CYCLE="MONTHLY", BLOCKED_UNTIL=until)]
+    _f, seen = _render(monkeypatch, _ok(pd.DataFrame(rows)))
+    assert seen["kpi"]["Currently blocked"]["value"] == "1"
+    assert seen["kpi"]["Users affected"]["value"] == "1"
 
 
 def test_panel_last_month_still_shows_a_user_blocked_today(monkeypatch):
@@ -616,9 +652,14 @@ def test_panel_last_month_still_shows_a_user_blocked_today(monkeypatch):
     assert seen["kpi"]["Users affected"]["value"] == "1"            # QZ1234, last month
     assert seen["tables"][0][1]["USER_NAME"].tolist() == ["QZ1234"]
     # no block in the window, one in force now: the table lists the live block and says why
-    fake2, seen2 = _render(monkeypatch, _ok(pd.DataFrame([today])), bounds=(dt.date(2026, 8, 1), dt.date(2026, 9, 1)))
+    # an expired block earlier this month is in the 32-day state read but not in force: never listed
+    old = _real_row(USER_NAME="OLD1", IN_WINDOW=False, ACTION_AT=pd.Timestamp("2026-09-03T10:00", tz="UTC"),
+                    BLOCKED_UNTIL=pd.Timestamp("2026-09-04T00:00", tz="UTC"))
+    fake2, seen2 = _render(monkeypatch, _ok(pd.DataFrame([today, old])),
+                           bounds=(dt.date(2026, 8, 1), dt.date(2026, 9, 1)))
     assert seen2["kpi"]["Currently blocked"]["value"] == "1" and seen2["kpi"]["AI-quota blocks (last month)"]["value"] == "0"
     assert seen2["tables"][0][1]["USER_NAME"].tolist() == ["LE7765"]
+    assert "IN_WINDOW" not in seen2["tables"][0][1].columns
     assert "the table lists the blocks still in force" in fake2.text("caption")
     assert "clean" not in [k for k, _ in _block_states(seen2)]
 
@@ -626,7 +667,27 @@ def test_panel_last_month_still_shows_a_user_blocked_today(monkeypatch):
 def test_panel_discloses_the_row_cap(monkeypatch):
     fake, seen = _render(monkeypatch, _ok(pd.DataFrame([_real_row(IN_WINDOW=True)]), truncated=True))
     assert seen["kpi"]["AI-quota blocks (7d)"]["value"] == "1+"
+    assert seen["kpi"]["Users affected"]["value"] == "1+"
+    assert seen["kpi"]["Currently blocked"]["value"] == "1+"
     assert "Only the newest 1,000 block rows were read" in fake.text("caption")
+
+
+def test_panel_last_month_capped_read_is_never_clean(monkeypatch):
+    """Merge review: under 'Last month' the newest rows are this month's state rows, so a capped read can cut
+    every last-month row. That is unknown, not 'no blocks'."""
+    import datetime as dt
+    lm = (dt.date(2026, 8, 1), dt.date(2026, 9, 1))
+    expired = _real_row(IN_WINDOW=False, ACTION_AT=pd.Timestamp("2026-09-10T10:00", tz="UTC"),
+                        BLOCKED_UNTIL=pd.Timestamp("2026-09-11T00:00", tz="UTC"))
+    _f, seen = _render(monkeypatch, _ok(pd.DataFrame([expired]), truncated=True), bounds=lm)
+    states = _block_states(seen)
+    assert "clean" not in [k for k, _ in states]
+    assert states and states[0][0] == "unavailable" and "newest 1,000 block rows" in states[0][1]
+    # someone blocked now: the table lists them, the caption says why the window is empty, the count is '1+'
+    fake2, seen2 = _render(monkeypatch, _ok(pd.DataFrame([_real_row(IN_WINDOW=False)]), truncated=True), bounds=lm)
+    assert seen2["kpi"]["Currently blocked"]["value"] == "1+"
+    assert "The newest 1,000 block rows all fall outside last month" in fake2.text("caption")
+    assert "No block was recorded in" not in fake2.text("caption")
 
 
 def test_panel_no_blocks_is_clean_with_a_window_scoped_exposure_caption(monkeypatch):
