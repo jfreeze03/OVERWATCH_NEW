@@ -15,7 +15,7 @@ Reads V064__webhook_drain_watermarks_alert_burn_telemetry.sql ONLY -- the CURREN
 
 SP_NOTIFY_WEBHOOK deltas, each asserted by count (everything else byte-identical to V064; the V164 test
 normalizes it back):
-  N1a 12 escalation DECLAREs after the V063 fits_ids line
+  N1a 13 escalation DECLAREs after the V063 fits_ids line
   N1b cursor c2 (enabled routes) after cursor c1
   N2  the line expression at BOTH V064 sites (the 3000-char fit and the LISTAGG) -> NEW_LINE, identical at both,
       so the fit still equals what is sent
@@ -103,12 +103,38 @@ SETTINGS_EMAIL = ("COALESCE(MAX(IFF(KEY = 'ESCALATE_EMAIL_INTEGRATION', VALUE, N
                   + ESCALATE_EMAIL_INTEGRATION + "')")
 AFTER_PARSE = "COALESCE(TRY_TO_NUMBER(TRIM({v})), 0)"      # minutes are whole numbers: '120.7' -> 121
 
+
+# The V117 snooze carry-forward identity (V162 SP_ALERT_SCAN, verbatim shape): a key ending '|YYYY-MM-DD' minus
+# that date, else the whole key.
+def v117_identity(k: str) -> str:
+    return (f"IFF(SUBSTR({k}, -11, 1) = '|'\n"
+            f"                                              AND TRY_TO_DATE(RIGHT({k}, 10)) IS NOT NULL,\n"
+            f"                                            LEFT({k}, LENGTH({k}) - 11), {k})")
+
+
 # The eligibility, one clause per line (the V164 test pins each exactly once). ESCALATED_AT is its own line so
 # the PREFLIGHT (run before the column exists) can drop exactly that line.
+#  - rd (review W8): the events some ENABLED route delivered -- the Teams re-post can reach them; the rest are
+#    email-only. It also orders the batch (route-reachable first), so with the email leg on but failing,
+#    email-only events never hold the head of the 3000-char batch and starve the Teams re-posts.
+#  - incident (review W7): only a HUMAN response AFTER the alert joined the incident counts -- an ACK_AT, a
+#    human 'Mark mitigated' (V154's machine sweep stamps MITIGATED_BY = SP_INCIDENT_AUTODECLARE and never
+#    ACK_AT), or a close (always human). An incident acknowledged or mitigated BEFORE [attach] linked this alert
+#    to it (LINKED_AT, V032 default CURRENT_TIMESTAMP) did not acknowledge THIS alert.
+#  - snooze (review W10): an ALERT_AUDIT SNOOZE row on this event, OR a V117 carry-forward onto it -- the sweep
+#    copies the snooze onto the fresh re-raise and resolves its predecessor as SNOOZE_SUPPRESSED (same RULE_ID and
+#    band-stripped key, raised before this event, resolved after it was raised) but writes no audit row, and
+#    [wake] clears the snooze columns; so 'ever snoozed' holds whether or not the snooze crossed a date band.
 ESC_ESCALATED_LINE = "                  AND e.ESCALATED_AT IS NULL\n"
+ESC_REACH = "IFF(rd.EVENT_ID IS NULL, 1, 0)"
 ESC_FROM_WHERE = (
     "                FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e\n"
     "                JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c ON c.RULE_ID = e.RULE_ID\n"
+    "                LEFT JOIN (SELECT DISTINCT d.EVENT_ID\n"
+    "                           FROM DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES d\n"
+    "                           JOIN DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES r\n"
+    "                             ON r.ROUTE_ID = d.ROUTE_ID AND r.ENABLED) rd\n"
+    "                  ON rd.EVENT_ID = e.EVENT_ID\n"
     "                WHERE e.SEVERITY = 'CRITICAL'\n"
     "                  AND e.STATUS = 'OPEN'\n"
     "                  AND e.ACK_AT IS NULL\n"
@@ -119,20 +145,26 @@ ESC_FROM_WHERE = (
     "                                  FROM DBA_MAINT_DB.OVERWATCH.INCIDENT_MEMBERS m\n"
     "                                  JOIN DBA_MAINT_DB.OVERWATCH.INCIDENTS i ON i.INCIDENT_ID = m.INCIDENT_ID\n"
     "                                  WHERE m.MEMBER_KIND = 'ALERT' AND m.REF_ID = e.EVENT_ID\n"
-    "                                    AND (i.ACK_AT IS NOT NULL OR i.STATUS <> 'OPEN'))\n"
+    "                                    AND (i.ACK_AT >= m.LINKED_AT\n"
+    "                                         OR (i.STATUS = 'MITIGATED' AND i.MITIGATED_AT >= m.LINKED_AT\n"
+    "                                             AND COALESCE(i.MITIGATED_BY, '') <> 'SP_INCIDENT_AUTODECLARE')\n"
+    "                                         OR (i.STATUS = 'RESOLVED' AND i.RESOLVED_AT >= m.LINKED_AT)))\n"
     "                  AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT a\n"
     "                                  WHERE a.EVENT_ID = e.EVENT_ID AND a.ACTION = 'SNOOZE')\n"
-    "                  AND (COALESCE(TRIM(:esc_email), '') <> ''\n"
-    "                       OR EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES d\n"
-    "                                  JOIN DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES r\n"
-    "                                    ON r.ROUTE_ID = d.ROUTE_ID AND r.ENABLED\n"
-    "                                  WHERE d.EVENT_ID = e.EVENT_ID))\n"
+    "                  AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS s\n"
+    "                                  WHERE s.RULE_ID = e.RULE_ID\n"
+    "                                    AND s.RESOLUTION_KIND = 'SNOOZE_SUPPRESSED'\n"
+    "                                    AND s.RAISED_AT < e.RAISED_AT\n"
+    "                                    AND s.RESOLVED_AT >= e.RAISED_AT\n"
+    "                                    AND " + v117_identity("s.DEDUPE_KEY") + "\n"
+    "                                        = " + v117_identity("e.DEDUPE_KEY") + ")\n"
+    "                  AND (COALESCE(TRIM(:esc_email), '') <> '' OR rd.EVENT_ID IS NOT NULL)\n"
 )
-ESC_CUM = ("                SELECT e.EVENT_ID, e.RAISED_AT,\n"
+ESC_CUM = ("                SELECT e.EVENT_ID, e.RAISED_AT, " + ESC_REACH + " AS EMAIL_ONLY,\n"
            "                       SUM(LEN(" + esc_chain(ESC_LINE, " " * 27) + ") + 2)\n"
-           "                         OVER (ORDER BY e.RAISED_AT ASC, e.EVENT_ID\n"
+           "                         OVER (ORDER BY " + ESC_REACH + ", e.RAISED_AT ASC, e.EVENT_ID\n"
            "                               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) - 2 AS CUM_LEN\n")
-CAPTURE = ("            SELECT ARRAY_AGG(f.EVENT_ID) WITHIN GROUP (ORDER BY f.RAISED_AT ASC, f.EVENT_ID)\n"
+CAPTURE = ("            SELECT ARRAY_AGG(f.EVENT_ID) WITHIN GROUP (ORDER BY f.EMAIL_ONLY, f.RAISED_AT ASC, f.EVENT_ID)\n"
            "              INTO :esc_ids\n"
            "            FROM (\n"
            + ESC_CUM + ESC_FROM_WHERE +
@@ -154,6 +186,7 @@ N1A_ADD = (
     "    r_esc_ids ARRAY;        -- V164 #40: the part of esc_ids THIS route already delivered\n"
     "    esc_ok ARRAY;           -- V164 #40: ids at least one channel accepted (audited + stamped)\n"
     "    esc_msg VARCHAR;\n"
+    "    esc_sent BOOLEAN DEFAULT FALSE;  -- V164 #40: this channel's send succeeded (stamp right after it)\n"
     "    esc_routes INT DEFAULT 0;\n"
     "    esc_emailed BOOLEAN DEFAULT FALSE;\n"
     "    escalated INT DEFAULT 0;\n"
@@ -172,18 +205,22 @@ N3_BLOCK = (
     "    END FOR;\n"
     "\n"
     "    -- V164 #40: CRITICAL ESCALATION PASS (Next-Fifty #40, owner decision 2026-09-29). A CRITICAL still OPEN\n"
-    "    -- and never acknowledged (no ACK_AT; not in an incident someone acknowledged, mitigated or closed; never\n"
-    "    -- snoozed -- an ALERT_AUDIT SNOOZE row) whose first notification (NOTIFIED_AT, or RAISED_AT when no route\n"
-    "    -- ever took it) is ESCALATE_AFTER_MIN+ minutes old escalates ONCE: re-posted to every enabled route that\n"
-    "    -- already delivered it (the same Teams route), and emailed through ESCALATE_EMAIL_INTEGRATION, i.e. to\n"
-    "    -- that integration's DEFAULT_RECIPIENTS -- no address is written here. With the email leg off ('') only an\n"
-    "    -- event some enabled route delivered is eligible, so an undeliverable one never holds the batch.\n"
-    "    -- Capture-once: the ids are frozen oldest-first into esc_ids within 3000 escaped chars (the V063 B9\n"
-    "    -- invariant), and every message, the audit and the stamp derive from that one set. Send, then audit, then\n"
-    "    -- stamp: ESCALATED_AT is set only for ids a channel accepted, so an all-channel failure retries next run\n"
-    "    -- inside the 7-day CRITICAL window (at-least-once, like the drain). Inside the sender lease, so two runs\n"
-    "    -- never double-escalate. Isolated: an error here is logged (escalation_failed) and never re-raised -- the\n"
-    "    -- deliveries above, the expired tail, the lease release and the RETURN below still run.\n"
+    "    -- and never acknowledged (no ACK_AT; not in an incident a human acknowledged, mitigated or closed after\n"
+    "    -- the alert joined it -- the V154 machine auto-mitigate does not count; never snoozed -- an ALERT_AUDIT\n"
+    "    -- SNOOZE row, or a V117 carry-forward of a snooze onto it) whose first notification (NOTIFIED_AT, or\n"
+    "    -- RAISED_AT when no route ever took it) is ESCALATE_AFTER_MIN+ minutes old escalates ONCE: re-posted to\n"
+    "    -- every enabled route that already delivered it (the same Teams route), and emailed through\n"
+    "    -- ESCALATE_EMAIL_INTEGRATION, i.e. to that integration's DEFAULT_RECIPIENTS -- no address is written here.\n"
+    "    -- With the email leg off ('') only an event some enabled route delivered is eligible, and route-delivered\n"
+    "    -- events always fill the batch first, so an email-only one never holds it (even while the email fails).\n"
+    "    -- Capture-once: the ids are frozen (route-delivered first, then oldest first) into esc_ids within 3000\n"
+    "    -- escaped chars (the V063 B9 invariant), and every message, stamp and audit row derives from that one set.\n"
+    "    -- Send, then stamp at once: right after each channel's send succeeds, ESCALATED_AT (= the frozen pass clock)\n"
+    "    -- is set for the ids it took, so an error later in the pass can never re-post them next hour; an\n"
+    "    -- all-channel failure stamps nothing and retries next run inside the 7-day CRITICAL window (at-least-once,\n"
+    "    -- like the drain). Then one ALERT_AUDIT 'ESCALATE' row per event this run stamped. Inside the sender\n"
+    "    -- lease, so two runs never double-escalate. Isolated: an error here is logged (escalation_failed) and never\n"
+    "    -- re-raised -- the deliveries above, the expired tail, the lease release and the RETURN below still run.\n"
     "    BEGIN\n"
     "        SELECT " + SETTINGS_AFTER + ",\n"
     "               " + SETTINGS_EMAIL + "\n"
@@ -220,14 +257,14 @@ N3_BLOCK = (
     "                        esc_msg := REPLACE(:esc_msg, CHR(10), CHR(92) || 'n');\n"
     "                        esc_msg := REPLACE(:esc_msg, CHR(13), '');\n"
     "                        esc_msg := REPLACE(:esc_msg, CHR(9),  CHR(92) || 't');\n"
+    "                        esc_sent := FALSE;\n"
     "                        BEGIN\n"
     "                            CALL SYSTEM$SEND_SNOWFLAKE_NOTIFICATION(\n"
     "                                SNOWFLAKE.NOTIFICATION.TEXT_PLAIN(\n"
     "                                    'OVERWATCH ESCALATION - CRITICAL unacknowledged ' || :esc_after || '+ min:'\n"
     "                                    || CHR(92) || 'n' || LEFT(:esc_msg, 3000)),\n"
     "                                SNOWFLAKE.NOTIFICATION.INTEGRATION(:r_integration));\n"
-    "                            esc_ok := ARRAY_CAT(:esc_ok, :r_esc_ids);\n"
-    "                            esc_routes := esc_routes + 1;\n"
+    "                            esc_sent := TRUE;\n"
     "                        EXCEPTION\n"
     "                            WHEN OTHER THEN\n"
     "                                emsg := SQLERRM;\n"
@@ -238,16 +275,27 @@ N3_BLOCK = (
     "                                       ' - escalation re-post; the email leg is unaffected',\n"
     "                                       CURRENT_ROLE();\n"
     "                        END;\n"
+    "                        IF (esc_sent) THEN\n"
+    "                            -- stamp at once: nothing later in this pass can make the next run re-post these\n"
+    "                            esc_ok := ARRAY_CAT(:esc_ok, :r_esc_ids);\n"
+    "                            esc_routes := esc_routes + 1;\n"
+    "                            UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e\n"
+    "                               SET ESCALATED_AT = :esc_now\n"
+    "                             WHERE e.ESCALATED_AT IS NULL\n"
+    "                               AND ARRAY_CONTAINS(e.EVENT_ID::VARIANT, :r_esc_ids);\n"
+    "                            escalated := escalated + SQLROWCOUNT;\n"
+    "                        END IF;\n"
     "                    END IF;\n"
     "                END FOR;\n"
     "\n"
     "                -- Email leg: every escalated id, to the integration's DEFAULT_RECIPIENTS (never an address here).\n"
     "                IF (COALESCE(TRIM(:esc_email), '') <> '') THEN\n"
-    "                    SELECT LISTAGG(" + ESC_LINE + ", CHR(10))\n"
+    "                    SELECT LISTAGG(" + ESC_LINE + ", '\\n')\n"
     "                           WITHIN GROUP (ORDER BY e.RAISED_AT ASC, e.EVENT_ID)\n"
     "                      INTO :esc_msg\n"
     "                    FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e\n"
     "                    WHERE ARRAY_CONTAINS(e.EVENT_ID::VARIANT, :esc_ids);\n"
+    "                    esc_sent := FALSE;\n"
     "                    BEGIN\n"
     "                        CALL SYSTEM$SEND_SNOWFLAKE_NOTIFICATION(\n"
     "                            SNOWFLAKE.NOTIFICATION.TEXT_PLAIN(\n"
@@ -255,8 +303,7 @@ N3_BLOCK = (
     "                                || :esc_after || ' minutes:' || CHR(10) || CHR(10) || :esc_msg || CHR(10) || CHR(10)\n"
     "                                || 'Acknowledge in OVERWATCH > Alerts > Open events. Each alert escalates once.'),\n"
     "                            SNOWFLAKE.NOTIFICATION.INTEGRATION(TRIM(:esc_email)));\n"
-    "                        esc_ok := ARRAY_CAT(:esc_ok, :esc_ids);\n"
-    "                        esc_emailed := TRUE;\n"
+    "                        esc_sent := TRUE;\n"
     "                    EXCEPTION\n"
     "                        WHEN OTHER THEN\n"
     "                            emsg := SQLERRM;\n"
@@ -270,9 +317,19 @@ N3_BLOCK = (
     "                            esc_note := :esc_note || '; escalation email failed (APP_ERROR_LOG "
     "escalation_email_failed)';\n"
     "                    END;\n"
+    "                    IF (esc_sent) THEN\n"
+    "                        esc_ok := ARRAY_CAT(:esc_ok, :esc_ids);\n"
+    "                        esc_emailed := TRUE;\n"
+    "                        UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e\n"
+    "                           SET ESCALATED_AT = :esc_now\n"
+    "                         WHERE e.ESCALATED_AT IS NULL\n"
+    "                           AND ARRAY_CONTAINS(e.EVENT_ID::VARIANT, :esc_ids);\n"
+    "                        escalated := escalated + SQLROWCOUNT;\n"
+    "                    END IF;\n"
     "                END IF;\n"
     "\n"
-    "                -- Send, then audit, then stamp: only ids a channel accepted, each once.\n"
+    "                -- Then the audit: one ESCALATE row per event THIS run stamped (ESCALATED_AT = the frozen\n"
+    "                -- clock), written after every send so the note carries the whole run's outcome.\n"
     "                IF (ARRAY_SIZE(:esc_ok) > 0) THEN\n"
     "                    INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT (EVENT_ID, ACTION, NOTE, ACTED_BY)\n"
     "                    SELECT e.EVENT_ID, 'ESCALATE',\n"
@@ -280,13 +337,8 @@ N3_BLOCK = (
     "                           ' route(s), email ' || IFF(:esc_emailed, 'sent', 'not sent'),\n"
     "                           'SP_NOTIFY_WEBHOOK'\n"
     "                    FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e\n"
-    "                    WHERE e.ESCALATED_AT IS NULL\n"
+    "                    WHERE e.ESCALATED_AT = :esc_now\n"
     "                      AND ARRAY_CONTAINS(e.EVENT_ID::VARIANT, :esc_ok);\n"
-    "                    UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e\n"
-    "                       SET ESCALATED_AT = CURRENT_TIMESTAMP()\n"
-    "                     WHERE e.ESCALATED_AT IS NULL\n"
-    "                       AND ARRAY_CONTAINS(e.EVENT_ID::VARIANT, :esc_ok);\n"
-    "                    escalated := SQLROWCOUNT;\n"
     "                END IF;\n"
     "            END IF;\n"
     "        END IF;\n"
@@ -327,8 +379,13 @@ assert proc.index("-- V164 #40: CRITICAL ESCALATION PASS") < proc.index("INSERT 
 assert proc.index("-- V164 #40: CRITICAL ESCALATION PASS") < proc.index("       SET HELD = FALSE, HOLDER = NULL")
 _blk = proc[proc.index("-- V164 #40: CRITICAL ESCALATION PASS"):proc.index("    -- Loud, not silent:")]
 assert "RAISE" not in _blk.replace("RAISED_AT", "")
-assert _blk.index("INTEGRATION(TRIM(:esc_email))") < _blk.index("INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT") \
-    < _blk.index("SET ESCALATED_AT = CURRENT_TIMESTAMP()")
+# send -> stamp at once (per channel) -> the audit after every send (review W9)
+_stamp = "SET ESCALATED_AT = :esc_now\n"
+assert _blk.count(_stamp) == 2 and "SET ESCALATED_AT = CURRENT_TIMESTAMP()" not in _blk
+assert _blk.index("INTEGRATION(:r_integration));") < _blk.index(_stamp) < _blk.index("-- Email leg:") \
+    < _blk.index("INTEGRATION(TRIM(:esc_email)));") < _blk.rindex(_stamp) \
+    < _blk.index("INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT")
+assert ", CHR(10))" not in _blk and _blk.count(", '\\n')\n") == 2     # no function-call LISTAGG delimiter
 assert proc.isascii()
 
 # ---------------------------------------------------------------------------------------------------
@@ -347,22 +404,27 @@ HEADER = f"""-- {NAME}
 --     '{ESCALATE_EMAIL_INTEGRATION}' ('' = no email leg), WHEN NOT MATCHED only: a value set before the apply is kept.
 --   ~ SP_NOTIFY_WEBHOOK re-derived from V064 (its current definer; V070, V112, V157 and V160 only mention it),
 --     byte-identical except:
---       N1 12 escalation variables and cursor c2 (the enabled routes) in the DECLARE;
+--       N1 13 escalation variables and cursor c2 (the enabled routes) in the DECLARE;
 --       N2 every line reads '[SEV] <title, 140> | <company> | <detail, one line, 100> | event <EVENT_ID>' (ASCII),
 --          identical in the 3000-char fit and in the LISTAGG, so the fit still equals what is sent (a worst-case
 --          escaped line is under 900 chars, so a batch always holds at least one event);
 --       N3 the escalation pass, inside the sender lease, after the drain and before the expired tail: a CRITICAL
---          still OPEN with no ACK_AT, not in an incident someone acknowledged, mitigated or closed, never snoozed
---          (an ALERT_AUDIT SNOOZE row), raised inside the 7-day CRITICAL send window, whose rule still exists, and
---          first notified (NOTIFIED_AT, else RAISED_AT) ESCALATE_AFTER_MIN+ minutes ago escalates ONCE: re-posted
---          to every enabled route that already delivered it, and emailed through ESCALATE_EMAIL_INTEGRATION with
---          the notification-integration send, i.e. to that integration's DEFAULT_RECIPIENTS (no address is stored
---          in OVERWATCH). With the email leg off, only an event some enabled route delivered is eligible.
---          Capture-once (oldest first, 3000 escaped chars); send, then an ALERT_AUDIT 'ESCALATE' row, then the
---          ESCALATED_AT stamp, only for ids a channel accepted (every channel failing = retried next run inside
---          the 7 days). Its own handler logs escalation_failed and never re-raises, so the expired tail, the lease
---          release and the RETURN still run. A re-post failure logs route_send_failed with the V064 CONTEXT
---          prefix (the Native delivery card attributes it to its route); an email failure logs
+--          still OPEN with no ACK_AT, not in an incident a human acknowledged, mitigated or closed AFTER the alert
+--          joined it (INCIDENT_MEMBERS.LINKED_AT; V154's machine auto-mitigate, MITIGATED_BY =
+--          SP_INCIDENT_AUTODECLARE, does not count), never snoozed (an ALERT_AUDIT SNOOZE row, or a V117
+--          carry-forward of a snooze onto it: a SNOOZE_SUPPRESSED predecessor with the same band-stripped key),
+--          raised inside the 7-day CRITICAL send window, whose rule still exists, and first notified
+--          (NOTIFIED_AT, else RAISED_AT) ESCALATE_AFTER_MIN+ minutes ago escalates ONCE: re-posted to every
+--          enabled route that already delivered it, and emailed through ESCALATE_EMAIL_INTEGRATION with the
+--          notification-integration send, i.e. to that integration's DEFAULT_RECIPIENTS (no address is stored in
+--          OVERWATCH). With the email leg off, only an event some enabled route delivered is eligible.
+--          Capture-once (route-delivered events first, then oldest first, 3000 escaped chars -- an email-only
+--          event never holds the batch while the email fails); right after each channel's send succeeds, the
+--          ESCALATED_AT stamp for the ids it took (so a later error never re-posts them), then one ALERT_AUDIT
+--          'ESCALATE' row per event the run stamped (every channel failing = nothing stamped, retried next run
+--          inside the 7 days). Its own handler logs escalation_failed and never re-raises, so the expired tail,
+--          the lease release and the RETURN still run. A re-post failure logs route_send_failed with the V064
+--          CONTEXT prefix (the Native delivery card attributes it to its route); an email failure logs
 --          escalation_email_failed;
 --       N4 the RETURN adds '<n> CRITICAL(s) escalated' and a note (off / email failed / pass failed).
 --
@@ -423,11 +485,13 @@ DESCRIPTION = (
     "V064, byte-identical except: every line reads [SEV] title (140) | company | detail (one line, 100) | event id, "
     "identical in the 3000-char fit and the LISTAGG (max_batches stays 6); and an escalation pass inside the sender "
     "lease, after the drain and before the expired tail. A CRITICAL still OPEN with no ACK_AT, not in an incident "
-    "someone acknowledged, mitigated or closed, never snoozed, raised in the 7-day CRITICAL window, whose rule "
+    "a human acknowledged, mitigated or closed after the alert joined it (the machine auto-mitigate does not count), "
+    "never snoozed (an audit SNOOZE row or a V117 carry-forward), raised in the 7-day CRITICAL window, whose rule "
     "exists, and first notified (NOTIFIED_AT, else RAISED_AT) ESCALATE_AFTER_MIN (120) minutes ago escalates once: "
     "re-posted to every enabled route that already delivered it, and emailed through ESCALATE_EMAIL_INTEGRATION "
-    "(OVERWATCH_EMAIL; that integration DEFAULT_RECIPIENTS, no address stored). Capture-once, oldest first; send, "
-    "then an ALERT_AUDIT ESCALATE row, then the new ALERT_EVENTS.ESCALATED_AT stamp, only for ids a channel accepted; "
+    "(OVERWATCH_EMAIL; that integration DEFAULT_RECIPIENTS, no address stored). Capture-once, route-delivered events "
+    "first, then oldest first; right after each channel send succeeds, the new ALERT_EVENTS.ESCALATED_AT stamp for "
+    "the ids it took, then one ALERT_AUDIT ESCALATE row per event stamped; "
     "every channel failing retries next run. Isolated: escalation_failed is logged and never re-raised; a re-post "
     "failure logs route_send_failed, an email failure escalation_email_failed. The RETURN adds the escalated count. "
     "Seeds SETTINGS ESCALATE_AFTER_MIN 120 (0 = off) and ESCALATE_EMAIL_INTEGRATION OVERWATCH_EMAIL (blank = no "
@@ -513,8 +577,9 @@ FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
 
 -- P164.2 First-run escalation census: V164's OWN capture text (binds swapped for the k columns; the ESCALATED_AT
 --        line dropped -- the column does not exist before the apply). Every row escalates on the first hourly run
---        after the apply; WOULD_SEND_FIRST_RUN = inside that run's 3000-char batch (the rest follow on later runs).
---        REPOST_TO = the enabled routes that delivered it (the Teams re-post); EMAIL_LEG = the email goes too.
+--        after the apply; WOULD_SEND_FIRST_RUN = inside that run's 3000-char batch (the rest follow on later runs;
+--        route-delivered events fill the batch first, EMAIL_ONLY rows after them). REPOST_TO = the enabled routes
+--        that delivered it (the Teams re-post); EMAIL_LEG = the email goes too.
 --        expect: only events you WANT re-posted and emailed. Acknowledge or resolve stale ones first, or seed
 --        ('ESCALATE_AFTER_MIN', '0') before the apply and turn it on later in Admin > Settings.
 --        NOT LISTED HERE: the CRITICAL takeovers V162's first hourly scan raises (they do not exist yet); they
@@ -535,17 +600,18 @@ rp AS (
 cand AS (
     SELECT e.EVENT_ID, e.RULE_ID, e.COMPANY, e.RAISED_AT, e.NOTIFIED_AT, LEFT(e.TITLE, 120) AS TITLE,
            DATEDIFF('minute', COALESCE(e.NOTIFIED_AT, e.RAISED_AT), k.NOW_TS) AS UNACKED_MIN,
-           COALESCE(TRIM(k.EMAIL_INTEGRATION), '') <> '' AS EMAIL_LEG,
+           COALESCE(TRIM(k.EMAIL_INTEGRATION), '') <> '' AS EMAIL_LEG, {ESC_REACH} AS EMAIL_ONLY,
            SUM(LEN({_esc1(PF_ESC_LINE)}) + 2)
-             OVER (ORDER BY e.RAISED_AT ASC, e.EVENT_ID ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) - 2 AS CUM_LEN
+             OVER (ORDER BY {ESC_REACH}, e.RAISED_AT ASC, e.EVENT_ID
+                   ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) - 2 AS CUM_LEN
 {PF_WHERE}                  AND k.AFTER_MIN > 0
 )
 SELECT x.EVENT_ID, x.RULE_ID, x.COMPANY, x.RAISED_AT, x.NOTIFIED_AT, x.UNACKED_MIN,
-       COALESCE(rp.REPOST_TO, '(no route delivered it: email only)') AS REPOST_TO, x.EMAIL_LEG,
+       COALESCE(rp.REPOST_TO, '(no route delivered it: email only)') AS REPOST_TO, x.EMAIL_LEG, x.EMAIL_ONLY,
        x.CUM_LEN <= 3000 AS WOULD_SEND_FIRST_RUN, x.TITLE
 FROM cand x
 LEFT JOIN rp ON rp.EVENT_ID = x.EVENT_ID
-ORDER BY x.RAISED_AT, x.EVENT_ID;
+ORDER BY x.EMAIL_ONLY, x.RAISED_AT, x.EVENT_ID;
 
 -- P164.3 Line length and throughput over 30 days of real deliveries: today's line vs the V164 line, and how many
 --        runs (route x hour) would have needed more than max_batches = {MAX_BATCHES} batches with the longer line.
@@ -600,7 +666,10 @@ assert not re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", PREFLIGHT) and PREFLIGHT.isasci
 # ===================================================================================================
 PART_B_PRESENT = (" | event ", "ESCALATED_AT", "escalation_failed", "escalation_email_failed",
                   "CRITICAL(s) escalated", "INTEGRATION(TRIM(:esc_email))", "ALERT_AUDIT a",
-                  "max_batches INT DEFAULT 6")
+                  "max_batches INT DEFAULT 6",
+                  # the adversarial-review fixes (W7 machine mitigation, W10 carried snooze, W8 batch order,
+                  # W9 stamp right after each send)
+                  "i.MITIGATED_BY", "SNOOZE_SUPPRESSED", "f.EMAIL_ONLY", "SET ESCALATED_AT = :esc_now")
 PART_B_ABSENT = ("LEFT(e.TITLE, 140),",)
 _DDL = "GET_DDL('PROCEDURE', 'DBA_MAINT_DB.OVERWATCH.SP_NOTIFY_WEBHOOK()')"
 _present = "\n           AND ".join(f"CONTAINS({_DDL}, '{f}')" for f in PART_B_PRESENT)

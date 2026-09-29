@@ -74,6 +74,7 @@ _DECLS = (
     "    r_esc_ids ARRAY;        -- V164 #40: the part of esc_ids THIS route already delivered\n",
     "    esc_ok ARRAY;           -- V164 #40: ids at least one channel accepted (audited + stamped)\n",
     "    esc_msg VARCHAR;\n",
+    "    esc_sent BOOLEAN DEFAULT FALSE;  -- V164 #40: this channel's send succeeded (stamp right after it)\n",
     "    esc_routes INT DEFAULT 0;\n",
     "    esc_emailed BOOLEAN DEFAULT FALSE;\n",
     "    escalated INT DEFAULT 0;\n",
@@ -88,23 +89,46 @@ _RET_64 = "           ' newly expired-undelivered (event,route) pair(s) flagged'
 _RET_164 = ("           ' newly expired-undelivered (event,route) pair(s) flagged; ' || :escalated ||\n"
             "           ' CRITICAL(s) escalated' || :esc_note;\n")
 # The capture's eligibility, one clause per line: each must appear EXACTLY once in the whole proc.
+_REACH = "IFF(rd.EVENT_ID IS NULL, 1, 0)"
+# review W7: only a HUMAN incident response AFTER the alert joined (LINKED_AT) counts; the V154 machine
+# auto-mitigate (MITIGATED_BY = SP_INCIDENT_AUTODECLARE, ACK_AT never set) does not
+_INCIDENT_CLAUSE = (
+    "                                  JOIN DBA_MAINT_DB.OVERWATCH.INCIDENTS i ON i.INCIDENT_ID = m.INCIDENT_ID\n"
+    "                                  WHERE m.MEMBER_KIND = 'ALERT' AND m.REF_ID = e.EVENT_ID\n"
+    "                                    AND (i.ACK_AT >= m.LINKED_AT\n"
+    "                                         OR (i.STATUS = 'MITIGATED' AND i.MITIGATED_AT >= m.LINKED_AT\n"
+    "                                             AND COALESCE(i.MITIGATED_BY, '') <> 'SP_INCIDENT_AUTODECLARE')\n"
+    "                                         OR (i.STATUS = 'RESOLVED' AND i.RESOLVED_AT >= m.LINKED_AT)))\n")
+# review W10: a V117 carry-forward (SNOOZE_SUPPRESSED predecessor, same RULE_ID + band-stripped key) is a snooze too
+_CARRIED_SNOOZE_CLAUSE = (
+    "                  AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS s\n"
+    "                                  WHERE s.RULE_ID = e.RULE_ID\n"
+    "                                    AND s.RESOLUTION_KIND = 'SNOOZE_SUPPRESSED'\n"
+    "                                    AND s.RAISED_AT < e.RAISED_AT\n"
+    "                                    AND s.RESOLVED_AT >= e.RAISED_AT\n"
+    "                                    AND IFF(SUBSTR(s.DEDUPE_KEY, -11, 1) = '|'\n"
+    "                                              AND TRY_TO_DATE(RIGHT(s.DEDUPE_KEY, 10)) IS NOT NULL,\n"
+    "                                            LEFT(s.DEDUPE_KEY, LENGTH(s.DEDUPE_KEY) - 11), s.DEDUPE_KEY)\n"
+    "                                        = IFF(SUBSTR(e.DEDUPE_KEY, -11, 1) = '|'\n"
+    "                                              AND TRY_TO_DATE(RIGHT(e.DEDUPE_KEY, 10)) IS NOT NULL,\n"
+    "                                            LEFT(e.DEDUPE_KEY, LENGTH(e.DEDUPE_KEY) - 11), e.DEDUPE_KEY))\n")
 _CLAUSES = (
     "                JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c ON c.RULE_ID = e.RULE_ID\n"
+    "                LEFT JOIN (SELECT DISTINCT d.EVENT_ID\n"
+    "                           FROM DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES d\n"
+    "                           JOIN DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES r\n"
+    "                             ON r.ROUTE_ID = d.ROUTE_ID AND r.ENABLED) rd\n"
+    "                  ON rd.EVENT_ID = e.EVENT_ID\n"
     "                WHERE e.SEVERITY = 'CRITICAL'\n",
     "                  AND e.STATUS = 'OPEN'\n                  AND e.ACK_AT IS NULL\n",
     "                  AND e.ESCALATED_AT IS NULL\n",
     "                  AND e.RAISED_AT >= DATEADD('day', -7, :esc_now)\n",
     "                  AND COALESCE(e.NOTIFIED_AT, e.RAISED_AT) <= DATEADD('minute', -1 * :esc_after, :esc_now)\n",
-    "                                  JOIN DBA_MAINT_DB.OVERWATCH.INCIDENTS i ON i.INCIDENT_ID = m.INCIDENT_ID\n"
-    "                                  WHERE m.MEMBER_KIND = 'ALERT' AND m.REF_ID = e.EVENT_ID\n"
-    "                                    AND (i.ACK_AT IS NOT NULL OR i.STATUS <> 'OPEN'))\n",
+    _INCIDENT_CLAUSE,
     "                  AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT a\n"
     "                                  WHERE a.EVENT_ID = e.EVENT_ID AND a.ACTION = 'SNOOZE')\n",
-    "                  AND (COALESCE(TRIM(:esc_email), '') <> ''\n"
-    "                       OR EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES d\n"
-    "                                  JOIN DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES r\n"
-    "                                    ON r.ROUTE_ID = d.ROUTE_ID AND r.ENABLED\n"
-    "                                  WHERE d.EVENT_ID = e.EVENT_ID))\n",
+    _CARRIED_SNOOZE_CLAUSE,
+    "                  AND (COALESCE(TRIM(:esc_email), '') <> '' OR rd.EVENT_ID IS NOT NULL)\n",
 )
 _SETTINGS_READ = (
     "        SELECT COALESCE(MAX(IFF(KEY = 'ESCALATE_AFTER_MIN', VALUE, NULL)), '120'),\n"
@@ -231,6 +255,10 @@ def test_v164_preflight_carries_the_proc_capture_and_line_verbatim(tmp_path):
             assert want in pf, clause[:60]
     esc = _ESC_LINE.replace(":esc_now", "k.NOW_TS")
     assert f"SUM(LEN(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE({esc}, CHR(92)," in pf
+    # review W8: the census sizes the first batch in the proc's order (route-delivered events first)
+    p2 = _between(pf, "-- P164.2", "-- P164.3")
+    assert f"OVER (ORDER BY {_REACH}, e.RAISED_AT ASC, e.EVENT_ID\n" in p2 and f"{_REACH} AS EMAIL_ONLY" in p2
+    assert "ORDER BY x.EMAIL_ONLY, x.RAISED_AT, x.EVENT_ID;" in p2
     assert "AND k.AFTER_MIN > 0" in pf
     # the knobs parse exactly like the proc: absent -> '120' / 'OVERWATCH_EMAIL'; minutes via TRY_TO_NUMBER(TRIM())
     assert ("COALESCE(TRY_TO_NUMBER(TRIM(COALESCE(MAX(IFF(KEY = 'ESCALATE_AFTER_MIN', VALUE, NULL)), '120'))), 0)"
@@ -321,7 +349,7 @@ def test_v164_no_address_no_send_email_no_detail_write_and_ascii():
     assert "SET DETAIL" not in _BODY
     # the only ALERT_EVENTS writes: V064's NOTIFIED_AT stamp and V164's ESCALATED_AT stamp
     sets = re.findall(r"UPDATE DBA_MAINT_DB\.OVERWATCH\.ALERT_EVENTS e\s+SET (\w+) =", _BODY)
-    assert sets == ["NOTIFIED_AT", "ESCALATED_AT"], sets
+    assert sets == ["NOTIFIED_AT", "ESCALATED_AT", "ESCALATED_AT"], sets          # V164: one stamp per channel
     assert "INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS" not in _BODY     # raises nothing (Guards A-E)
     # the email leg is the notification-integration send (DEFAULT_RECIPIENTS), never an address argument
     assert _BODY.count("SNOWFLAKE.NOTIFICATION.INTEGRATION(TRIM(:esc_email)));") == 1
@@ -390,8 +418,10 @@ def test_v164_one_line_expression_at_all_five_sites():
     assert drain.count(_NEW_LINE) == 2 and _ESC_PREFIX not in drain
     assert "SELECT LISTAGG(" + _NEW_LINE + ", '\\n')" in drain                       # the message the drain sends
     assert "                           " + _NEW_LINE + ",\n                           CHR(92)," in drain   # its fit
-    assert "SELECT LISTAGG(" + _ESC_LINE + ", '\\n')" in _BLOCK                      # the Teams re-post
-    assert "SELECT LISTAGG(" + _ESC_LINE + ", CHR(10))" in _BLOCK                   # the email (plain text)
+    # the Teams re-post and the email: the literal '\\n' (a real LF in a Snowflake literal) the drain already uses,
+    # never a function-call delimiter -- LISTAGG documents its delimiter as a constant (review W9)
+    assert _BLOCK.count("SELECT LISTAGG(" + _ESC_LINE + ", '\\n')") == 2
+    assert ", CHR(10))" not in _BLOCK
     assert "                           " + _ESC_LINE + ",\n                           CHR(92)," in _BLOCK
     assert _NEW_LINE.isascii() and "COMPANY" in _NEW_LINE and "' | event ' || e.EVENT_ID" in _NEW_LINE
 
@@ -414,44 +444,59 @@ def test_v164_every_eligibility_clause_appears_exactly_once():
     cap = _between(_BLOCK, "            SELECT ARRAY_AGG(f.EVENT_ID)", "            WHERE f.CUM_LEN <= 3000;")
     for clause in _CLAUSES:
         assert clause in cap, clause[:70]
-    assert "INTO :esc_ids" in cap and cap.count("ORDER BY e.RAISED_AT ASC, e.EVENT_ID") == 1
+    assert "INTO :esc_ids" in cap and cap.count(f"ORDER BY {_REACH}, e.RAISED_AT ASC, e.EVENT_ID\n") == 1
+    # review W8: route-delivered events fill the batch first (the fit and the frozen set in one order)
+    assert "ORDER BY e.RAISED_AT ASC, e.EVENT_ID\n                               ROWS" not in cap
+    assert "ARRAY_AGG(f.EVENT_ID) WITHIN GROUP (ORDER BY f.EMAIL_ONLY, f.RAISED_AT ASC, f.EVENT_ID)" in cap
+    assert f"SELECT e.EVENT_ID, e.RAISED_AT, {_REACH} AS EMAIL_ONLY," in cap
+    # review W7 / W10: the old any-non-OPEN incident test is gone; the carried-snooze test is there
+    assert "i.STATUS <> 'OPEN'" not in _P and "i.ACK_AT IS NOT NULL OR" not in _P
+    assert _P.count("s.RESOLUTION_KIND = 'SNOOZE_SUPPRESSED'") == 1
 
 
 def test_v164_settings_parse_and_off_switch():
     assert _SETTINGS_READ in _BLOCK
     assert "esc_now := CURRENT_TIMESTAMP()::TIMESTAMP_NTZ;" in _BLOCK
     assert _BLOCK.index("IF (esc_after <= 0) THEN") < _BLOCK.index("esc_now := CURRENT_TIMESTAMP()")
-    # CURRENT_TIMESTAMP() only at the frozen clock and the stamp: the capture and every LISTAGG use :esc_now,
-    # so the minutes in a line and the fit that sized it are the same number
-    assert _BLOCK.count("CURRENT_TIMESTAMP()") == 2
+    # CURRENT_TIMESTAMP() only at the frozen clock: the capture, every LISTAGG, both stamps and the audit use
+    # :esc_now, so the minutes in a line and the fit that sized it are the same number, and the audit finds
+    # exactly the rows this run stamped
+    assert _BLOCK.count("CURRENT_TIMESTAMP()") == 1
     assert _BLOCK.count("DATEDIFF('minute', COALESCE(e.NOTIFIED_AT, e.RAISED_AT), :esc_now)") == 3
-    assert _BLOCK.count(":esc_now") == 3 + 2       # the three line sites + the 7-day window + the clock bound
+    # the three line sites + the 7-day window + the clock bound + the two stamps + the audit
+    assert _BLOCK.count(":esc_now") == 3 + 2 + 2 + 1
 
 
-def test_v164_capture_once_send_then_audit_then_stamp():
+def test_v164_capture_once_send_then_stamp_then_audit():
     assert _BLOCK.count("INTO :esc_ids") == 1
     assert _BLOCK.count("                    WHERE d.ROUTE_ID = :r_route_id\n"
                         "                      AND ARRAY_CONTAINS(d.EVENT_ID::VARIANT, :esc_ids);") == 1
     teams = _BLOCK.index("SNOWFLAKE.NOTIFICATION.INTEGRATION(:r_integration));")
     email = _BLOCK.index("SNOWFLAKE.NOTIFICATION.INTEGRATION(TRIM(:esc_email)));")
     audit = _BLOCK.index("INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT (EVENT_ID, ACTION, NOTE, ACTED_BY)")
-    stamp = _BLOCK.index("       SET ESCALATED_AT = CURRENT_TIMESTAMP()")
-    assert teams < email < audit < stamp
+    stamp = "SET ESCALATED_AT = :esc_now\n"
+    assert _BLOCK.count(stamp) == 2 and "SET ESCALATED_AT = CURRENT_TIMESTAMP()" not in _BLOCK
+    teams_stamp, email_stamp = _BLOCK.index(stamp), _BLOCK.rindex(stamp)
+    # review W9: each channel's stamp right after its own send, the audit only after every send
+    assert teams < teams_stamp < _BLOCK.index("-- Email leg:") < email < email_stamp < audit
     assert _BLOCK.count("CALL SYSTEM$SEND_SNOWFLAKE_NOTIFICATION(") == 2
-    # a success adds its ids to esc_ok; the audit and the stamp touch only esc_ok ids still un-escalated
-    assert "esc_ok := ARRAY_CAT(:esc_ok, :r_esc_ids);" in _BLOCK and "esc_ok := ARRAY_CAT(:esc_ok, :esc_ids);" in _BLOCK
+    for send, ok, ids in (("INTEGRATION(:r_integration));", "esc_ok := ARRAY_CAT(:esc_ok, :r_esc_ids);", ":r_esc_ids"),
+                          ("INTEGRATION(TRIM(:esc_email)));", "esc_ok := ARRAY_CAT(:esc_ok, :esc_ids);", ":esc_ids")):
+        seg = _BLOCK[_BLOCK.index(send):]
+        # the send's own BEGIN only flips esc_sent; its handler logs; the stamp runs after END, only on success
+        assert seg.index("esc_sent := TRUE;") < seg.index("EXCEPTION") < seg.index("END;") \
+            < seg.index("IF (esc_sent) THEN") < seg.index(ok) < seg.index(stamp)
+        after = seg[seg.index(stamp) + len(stamp):]
+        want = re.match(r"\s+WHERE e\.ESCALATED_AT IS NULL\n\s+AND ARRAY_CONTAINS\(e\.EVENT_ID::VARIANT, (:\w+)\);\n"
+                        r"\s+escalated := escalated \+ SQLROWCOUNT;\n", after)
+        assert want and want.group(1) == ids, after[:240]
+    assert _BLOCK.count("esc_sent := FALSE;") == 2 and _BLOCK.count("esc_sent := TRUE;") == 2
+    # the audit: one ESCALATE row per event THIS run stamped (the frozen clock), after every send
     tail = _BLOCK[audit:]
-    assert tail.count("WHERE e.ESCALATED_AT IS NULL\n") == 2
-    assert tail.count("AND ARRAY_CONTAINS(e.EVENT_ID::VARIANT, :esc_ok);") == 2
+    assert "WHERE e.ESCALATED_AT = :esc_now\n" in tail and "AND ARRAY_CONTAINS(e.EVENT_ID::VARIANT, :esc_ok);" in tail
     assert "SELECT e.EVENT_ID, 'ESCALATE'," in tail and "'SP_NOTIFY_WEBHOOK'" in tail
     assert _BLOCK.index("IF (ARRAY_SIZE(:esc_ok) > 0) THEN") < audit
-    assert "escalated := SQLROWCOUNT;" in tail
-    # each success line sits right after its own send, inside its own BEGIN, before its handler
-    for send, ok in (("INTEGRATION(:r_integration));", "esc_ok := ARRAY_CAT(:esc_ok, :r_esc_ids);"),
-                     ("INTEGRATION(TRIM(:esc_email)));", "esc_ok := ARRAY_CAT(:esc_ok, :esc_ids);")):
-        seg = _BLOCK[_BLOCK.index(send):]
-        assert seg.index(ok) < seg.index("EXCEPTION")
-
+    assert "escalated := SQLROWCOUNT;" not in _BLOCK
 
 def test_v164_escalation_pass_is_isolated_inside_the_lease():
     acquire = _P.index("       SET HELD = TRUE, HOLDER = CURRENT_SESSION()")
@@ -578,10 +623,10 @@ def test_v164_every_escalation_statement_parses():
     sqlglot = pytest.importorskip("sqlglot")
     stmts = _escalation_sql()
     kinds = [s.split(None, 1)[0] for s in stmts]
-    # settings read, capture, per-route set, re-post LISTAGG, re-post failure log, email LISTAGG, email failure
-    # log, audit INSERT, stamp UPDATE, pass failure log
-    assert kinds == ["SELECT", "SELECT", "SELECT", "SELECT", "INSERT", "SELECT", "INSERT", "INSERT", "UPDATE",
-                     "INSERT"], kinds
+    # settings read, capture, per-route set, re-post LISTAGG, re-post failure log, re-post stamp, email LISTAGG,
+    # email failure log, email stamp, audit INSERT, pass failure log
+    assert kinds == ["SELECT", "SELECT", "SELECT", "SELECT", "INSERT", "UPDATE", "SELECT", "INSERT", "UPDATE",
+                     "INSERT", "INSERT"], kinds
     for stmt in stmts:
         assert not _BIND_RE.search(_STR_RE.sub("''", stmt)), stmt[:80]
         sqlglot.parse_one(stmt, dialect="snowflake")
@@ -601,7 +646,8 @@ def test_v164_parse_check_has_teeth():
 # and newline-free so it pastes into a SQL literal unchanged. _PART_B_ABSENT must be FALSE on V164, TRUE on V064.
 _PART_B_PRESENT = (" | event ", "ESCALATED_AT", "escalation_failed", "escalation_email_failed",
                    "CRITICAL(s) escalated", "INTEGRATION(TRIM(:esc_email))", "ALERT_AUDIT a",
-                   "max_batches INT DEFAULT 6")
+                   "max_batches INT DEFAULT 6", "i.MITIGATED_BY", "SNOOZE_SUPPRESSED", "f.EMAIL_ONLY",
+                   "SET ESCALATED_AT = :esc_now")
 _PART_B_ABSENT = ("LEFT(e.TITLE, 140),",)
 
 

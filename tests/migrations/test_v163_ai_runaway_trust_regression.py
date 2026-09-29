@@ -69,13 +69,22 @@ _OLD07_D = "               'Investigate credential stuffing / lockouts.',\n"
 _NEW07_T = (
     "               lg.USER_NAME || ' had ' || lg.FAILED_LOGINS || ' failed logins on ' || lg.DAY\n"
     "                   || IFF(COALESCE(lg.LOGINS, 0) - lg.FAILED_LOGINS > 0,\n"
-    "                          ', ' || (lg.LOGINS - lg.FAILED_LOGINS) || ' successful', ' and no successful login'),\n")
+    "                          ', ' || (lg.LOGINS - lg.FAILED_LOGINS) || ' successful'\n"
+    "                              || IFF(lg.DAY >= CURRENT_DATE(), ' so far', ''),\n"
+    "                          IFF(lg.DAY >= CURRENT_DATE(), ' and no successful login so far today',\n"
+    "                              ' and no successful login')),\n")
 _NEW07_D = (
-    "               IFF(COALESCE(lg.LOGINS, 0) - lg.FAILED_LOGINS > 0,\n"
-    "                   'The same day also had successful logins. A failed burst followed within 60 minutes by a '\n"
-    "                   || 'success raises SEC_LOGIN_TAKEOVER from the hourly scan (CRITICAL off-hours or for an admin '\n"
-    "                   || 'role); this nightly count covers the whole day. ',\n"
-    "                   'No successful login that day: most likely a lockout or a job still sending an old secret '\n"
+    "               IFF(lg.DAY >= CURRENT_DATE(),\n"
+    "                   'Partial day: today counts only what the ~06:45 Central daily load saw (LOGIN_HISTORY lags up '\n"
+    "                   || 'to 2 h), and this event is not updated when the rest of the day loads. ',\n"
+    "                   '')\n"
+    "               || IFF(COALESCE(lg.LOGINS, 0) - lg.FAILED_LOGINS > 0,\n"
+    "                   'The same day also had successful logins. While the hourly SEC_LOGIN_TAKEOVER rule is enabled '\n"
+    "                   || '(Alerts > Rules), a failed burst followed within 60 minutes by a success raises it (CRITICAL '\n"
+    "                   || 'off-hours or for an admin role); either way, check Security > Access > Authentication > '\n"
+    "                   || 'Account-takeover candidates. ',\n"
+    "                   'No successful login ' || IFF(lg.DAY >= CURRENT_DATE(), 'so far today', 'that day')\n"
+    "                   || ': most likely a lockout or a job still sending an old secret '\n"
     "                   || '(a guessing attempt that never got in looks the same). ')\n"
     "                   || 'Review Security > Access > Authentication: failed-login reasons and client IPs.',\n")
 _SELF_12 = "' of 12 daily alert rule block(s) failed this run'"
@@ -416,6 +425,19 @@ def test_v163_arm07_changes_only_the_title_and_detail():
     assert "c.RULE_ID || '|' || lg.USER_NAME || '|' || lg.DAY\n" in s                 # key: no past user-day re-fires
     assert "AND lg.FAILED_LOGINS >= c.THRESHOLD_NUM" in s and "c.RULE_ID, lg.COMPANY, c.SEVERITY," in s
     assert "credential stuffing" not in _D
+    # review W5: today's row is a partial day (the ~06:45 load) that the RULE|USER|DAY key never re-raises, so
+    # its text says 'so far' and never claims 'no successful login that day'; the predicate still reads today
+    shown = "".join(x.replace("''", "'") for x in re.findall(r"'((?:[^']|'')*)'", s))
+    assert s.count("lg.DAY >= CURRENT_DATE()") == 4 and "AND lg.DAY >= DATEADD('day', -1, CURRENT_DATE())" in s
+    for frag in (" so far", " and no successful login so far today", "Partial day: ", "so far today",
+                 "this event is not updated when the rest of the day loads"):
+        assert frag in shown, frag
+    assert "this nightly count covers the whole day" not in shown
+    # review W18: the takeover pointer is conditional (the rule can be disabled, or V162 rolled back alone) and
+    # the Account-takeover candidates lens is the check either way
+    assert "While the hourly SEC_LOGIN_TAKEOVER rule is enabled (Alerts > Rules)" in shown
+    assert "either way, check Security > Access > Authentication > Account-takeover candidates" in shown
+    assert "success raises SEC_LOGIN_TAKEOVER from the hourly scan" not in shown
     # the hourly rule is named only inside a string -- never a quoted rule literal a guard or arm scan would read
     assert "'SEC_LOGIN_TAKEOVER'" not in _MIG and "SEC_LOGIN_TAKEOVER" not in _strip_noise(_D)
     from tests.test_alert_rule_consistency import _ARM_REF_RE, _RULE_RE
@@ -501,6 +523,29 @@ def test_v163_arm29_reads_the_snapshot_not_the_delta_view():
                  "WHERE s.DAY >= DATEADD('day', -1, k.TODAY)",
                  "c.RULE_ID || '|' || s.SCANNER_ID || '|' || TO_VARCHAR(s.DAY)"):
         assert code.count(frag) == 1, frag
+
+
+def test_v163_arm29_claims_only_what_its_key_delivers():
+    """Review W6: the key is RULE|SCANNER|DAY, so a scanner-day raises once, with the counts of the scan that raised
+    it. A rise after ~07:00 lands the next morning only when that morning had not already raised for the
+    scanner-day; a further rise the same day is not pushed again. No text may promise more (header, arm comment,
+    DESCRIPTION, playbook)."""
+    from app.logic.playbooks import PLAYBOOKS
+    head = _ARM29[:_ARM29.index("    BEGIN\n")]
+    header = _MIG[:_MIG.index("EXECUTE IMMEDIATE")]
+    desc = re.search(r"SELECT 163 AS VERSION,\n       '(.*)' AS DESCRIPTION\n", _MIG, re.S).group(1)
+    pb = PLAYBOOKS[_TRUST]
+    for text in (head, header, desc, pb):
+        flat = _norm(text.replace("--", " "))
+        assert "not pushed again" in flat.lower(), text[:120]
+        # the old unconditional promise is gone everywhere
+        assert "so a rise after the morning scan lands the next morning. " not in flat
+        assert "shows up the next morning;" not in flat
+    assert "only when that scanner-day had not raised yet" in _norm(head.replace("--", " "))
+    assert "unless that morning already raised for the scanner-day" in _norm(header.replace("--", " "))
+    assert "(unless that scanner-day already raised)" in header
+    assert "unless that morning already raised for the same scanner and day" in _norm(pb)
+    assert "c.RULE_ID || '|' || s.SCANNER_ID || '|' || TO_VARCHAR(s.DAY)" in _ARM29      # the key is unchanged
 
 
 _BAND_TOKENS = ("|WARN|", "|MED|", "|HIGH|", "|CRIT|", "|EXH|", "|EXPIRING", "|EXPIRED")

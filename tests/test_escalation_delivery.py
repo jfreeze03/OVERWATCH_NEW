@@ -94,6 +94,9 @@ def test_policy_on_with_email():
     assert "re-posted once to the route(s) that delivered it" in policy
     assert "emailed through the OVERWATCH_EMAIL notification integration (its DEFAULT_RECIPIENTS" in policy
     assert "snoozing" in policy and "incident" in policy
+    # review W7: V164 counts only a human incident response after the alert joined; the V154 sweep's automatic
+    # mitigation does not stop an escalation, so the policy line must not say it does
+    assert "incident after the alert joined it, stops the escalation (an automatic mitigation does not)" in policy
     assert tally == "Last 7 days: 0 CRITICAL(s) escalated."
     assert "@" not in policy and "$" not in policy
 

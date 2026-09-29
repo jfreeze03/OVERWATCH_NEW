@@ -21,9 +21,13 @@
 --     + counting arm [29] SEC_TRUST_REGRESSION (SECURITY_TRUST_SNAPSHOT via LAG, not V_SECURITY_TRUST_DELTA): a
 --       CRITICAL or HIGH scanner's at-risk count rose by >= THRESHOLD_NUM (1) against its previous
 --       snapshot day; today's and yesterday's rows are checked, so a rise after the morning scan lands the next
---       morning. A first-ever snapshot never raises. HIGH, company ALL, one event per scanner per snapshot day.
---     ~ [07] SEC_FAILED_LOGINS: TITLE and DETAIL say whether the day also had successful logins and point a
---       burst that got in to the hourly SEC_LOGIN_TAKEOVER. Predicate, severity and key unchanged (no re-fire).
+--       morning -- unless that morning already raised for the scanner-day: one event per scanner per snapshot
+--       day (the counts of the scan that raised it), so a further rise the same day is not pushed again. A
+--       first-ever snapshot never raises. HIGH, company ALL.
+--     ~ [07] SEC_FAILED_LOGINS: TITLE and DETAIL say whether the day also had successful logins ('so far' on
+--       today's partial row, which the ~06:45 load covers only in part and is never re-raised), and point a
+--       burst that got in to the hourly SEC_LOGIN_TAKEOVER while that rule is enabled, and to the
+--       Account-takeover candidates lens either way. Predicate, severity and key unchanged (no re-fire).
 --     ~ tally 12 -> 14 (self-alert, heartbeat, RETURN).
 --   + ALERT_CONFIG COST_AI_USER_RUNAWAY (COST, HIGH, 2, 24h) and SEC_TRUST_REGRESSION (SECURITY, HIGH,
 --     1, 24h), WHEN NOT MATCHED only; AUTO_CLEAR_ENABLED keeps its default.
@@ -32,7 +36,7 @@
 -- COST: two mart-only INSERTs per nightly run (a few compile-seconds a day); COMPANY_FOR_USER runs only on a
 -- raised row. No new table, view, task, proc or UDF.
 -- LATENCY: daily (~07:00 Central). A runaway day the mart had not loaded yet is raised on the next morning's run;
--- a Trust Center rise after the morning scan, the next morning.
+-- a Trust Center rise after the morning scan, the next morning (unless that scanner-day already raised).
 -- FIRST RUN: the next daily scan raises runaways from the last 3 complete mart days and regressions dated today
 -- or yesterday; preview both with the read-only PREFLIGHT (P163.1, P163.3). Nothing runs at apply time.
 -- ROLLBACK: re-run V160's SP_ALERT_SCAN_DAILY (the tally goes back to 12 and the old [07] text returns);
@@ -152,12 +156,21 @@ BEGIN
         SELECT c.RULE_ID, lg.COMPANY, c.SEVERITY,
                lg.USER_NAME || ' had ' || lg.FAILED_LOGINS || ' failed logins on ' || lg.DAY
                    || IFF(COALESCE(lg.LOGINS, 0) - lg.FAILED_LOGINS > 0,
-                          ', ' || (lg.LOGINS - lg.FAILED_LOGINS) || ' successful', ' and no successful login'),
-               IFF(COALESCE(lg.LOGINS, 0) - lg.FAILED_LOGINS > 0,
-                   'The same day also had successful logins. A failed burst followed within 60 minutes by a '
-                   || 'success raises SEC_LOGIN_TAKEOVER from the hourly scan (CRITICAL off-hours or for an admin '
-                   || 'role); this nightly count covers the whole day. ',
-                   'No successful login that day: most likely a lockout or a job still sending an old secret '
+                          ', ' || (lg.LOGINS - lg.FAILED_LOGINS) || ' successful'
+                              || IFF(lg.DAY >= CURRENT_DATE(), ' so far', ''),
+                          IFF(lg.DAY >= CURRENT_DATE(), ' and no successful login so far today',
+                              ' and no successful login')),
+               IFF(lg.DAY >= CURRENT_DATE(),
+                   'Partial day: today counts only what the ~06:45 Central daily load saw (LOGIN_HISTORY lags up '
+                   || 'to 2 h), and this event is not updated when the rest of the day loads. ',
+                   '')
+               || IFF(COALESCE(lg.LOGINS, 0) - lg.FAILED_LOGINS > 0,
+                   'The same day also had successful logins. While the hourly SEC_LOGIN_TAKEOVER rule is enabled '
+                   || '(Alerts > Rules), a failed burst followed within 60 minutes by a success raises it (CRITICAL '
+                   || 'off-hours or for an admin role); either way, check Security > Access > Authentication > '
+                   || 'Account-takeover candidates. ',
+                   'No successful login ' || IFF(lg.DAY >= CURRENT_DATE(), 'so far today', 'that day')
+                   || ': most likely a lockout or a job still sending an old secret '
                    || '(a guessing attempt that never got in looks the same). ')
                    || 'Review Security > Access > Authentication: failed-login reasons and client IPs.',
                lg.FAILED_LOGINS,
@@ -932,7 +945,10 @@ BEGIN
     --      07:00 (by the next morning both days carry the new count). CRITICAL/HIGH scanners only; a scanner's
     --      first-ever snapshot (no previous day) never raises, so enabling a package does not flood. The loader
     --      books a scanner missing from FINDINGS as 0, so its return reads as a rise (the DETAIL says so). One
-    --      event per scanner per snapshot day, company ALL, HIGH (c.SEVERITY), no self-clear.)
+    --      event per scanner per snapshot day, carrying the counts of the scan that raised it: a rise after
+    --      ~07:00 lands the next morning only when that scanner-day had not raised yet -- a further rise on a
+    --      day that already raised is NOT pushed again (that event stays open, no self-clear; Security > Trust
+    --      Center shows the live count). Company ALL, HIGH (c.SEVERITY).)
     BEGIN
         INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
             (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
@@ -1135,5 +1151,5 @@ $$;
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 163 AS VERSION,
-       'Next Fifty wave 4 (#37a, #44b, #39). SP_ALERT_SCAN_DAILY re-derived from V160, byte-identical except: + counting arm [28] COST_AI_USER_RUNAWAY (FACT_AI_USAGE_DAILY, mart-only): the AI credits of one user on a complete day above THRESHOLD_NUM (2) x COCO_DAILY_CAP_CREDITS AND a robust z at least AI_RUNAWAY_ROBUST_Z (3.5) against the active days of that user in the 90 days before (median/MAD; fewer than 5 prior active days = no baseline, the cap alone decides); Cortex Code only unless AI_RUNAWAY_INCLUDE_FUNCTIONS and a named user; the last 3 complete days re-scored, one event per user-day; HIGH; METRIC_VALUE = the cap multiple; COMPANY = COMPANY_FOR_USER, ALL when UNKNOWN. + counting arm [29] SEC_TRUST_REGRESSION (SECURITY_TRUST_SNAPSHOT via LAG, not V_SECURITY_TRUST_DELTA): the at-risk count of a CRITICAL or HIGH scanner rose by at least THRESHOLD_NUM (1) against its previous snapshot day, today and yesterday checked; a first snapshot never raises; HIGH, company ALL. [07] SEC_FAILED_LOGINS TITLE and DETAIL now say whether the day had successful logins and point a burst that got in to the hourly SEC_LOGIN_TAKEOVER (predicate, severity and key unchanged). Tally 12 -> 14. Seeds the two rules and the settings AI_RUNAWAY_ROBUST_Z (3.5) and AI_RUNAWAY_INCLUDE_FUNCTIONS (FALSE), WHEN NOT MATCHED only. No task change, no new object, no procedure run at apply time.' AS DESCRIPTION
+       'Next Fifty wave 4 (#37a, #44b, #39). SP_ALERT_SCAN_DAILY re-derived from V160, byte-identical except: + counting arm [28] COST_AI_USER_RUNAWAY (FACT_AI_USAGE_DAILY, mart-only): the AI credits of one user on a complete day above THRESHOLD_NUM (2) x COCO_DAILY_CAP_CREDITS AND a robust z at least AI_RUNAWAY_ROBUST_Z (3.5) against the active days of that user in the 90 days before (median/MAD; fewer than 5 prior active days = no baseline, the cap alone decides); Cortex Code only unless AI_RUNAWAY_INCLUDE_FUNCTIONS and a named user; the last 3 complete days re-scored, one event per user-day; HIGH; METRIC_VALUE = the cap multiple; COMPANY = COMPANY_FOR_USER, ALL when UNKNOWN. + counting arm [29] SEC_TRUST_REGRESSION (SECURITY_TRUST_SNAPSHOT via LAG, not V_SECURITY_TRUST_DELTA): the at-risk count of a CRITICAL or HIGH scanner rose by at least THRESHOLD_NUM (1) against its previous snapshot day, today and yesterday checked; one event per scanner per snapshot day (a further rise the same day is not pushed again); a first snapshot never raises; HIGH, company ALL. [07] SEC_FAILED_LOGINS TITLE and DETAIL now say whether the day had successful logins (so far, on the partial current day) and point a burst that got in to the hourly SEC_LOGIN_TAKEOVER while that rule is enabled and to the Account-takeover candidates lens (predicate, severity and key unchanged). Tally 12 -> 14. Seeds the two rules and the settings AI_RUNAWAY_ROBUST_Z (3.5) and AI_RUNAWAY_INCLUDE_FUNCTIONS (FALSE), WHEN NOT MATCHED only. No task change, no new object, no procedure run at apply time.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 163);
