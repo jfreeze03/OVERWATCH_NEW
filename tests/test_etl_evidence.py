@@ -358,8 +358,21 @@ def test_verdict_database_match_is_case_insensitive_and_needs_a_known_control_db
     # a frame without the columns (an older shape) is not second-guessed
     bare = {k: v for k, v in _row().items() if k not in ("CALL_DATABASE", "CONTROL_DATABASE")}
     assert _levels(_lines(bare)) == ["clean"]
+    # review r3: an unresolved database is NOT another environment -- a note, and the verdicts still run
     unknown = _lines(_row(CALL_DATABASE=None))
-    assert any("match by procedure name in an unknown database" in line.text for line in unknown)
+    assert any("ran with no resolvable database" in line.text for line in unknown)
+    assert not any("another environment" in line.text or "CONTROL_STATUS's database" in line.text for line in unknown)
+
+
+def test_verdict_an_unresolved_database_never_hides_the_failure() -> None:
+    """Review r3: 'CALL SP_X()' in a session with no current database fails to resolve (CALL_DATABASE NULL). That
+    is not another environment: the failure stays the headline error, inside the lag and after it."""
+    for age in (0, 10, 600):
+        lines = _lines(_row(CALL_DATABASE=None, IS_CALL_FAILED=1, FAILED_CALLS=1, END_AGE_MIN=age,
+                            ERROR_MESSAGE="Cannot perform CALL. This session does not have a current database."))
+        assert lines[0].level == "warn" and "ran with no resolvable database" in lines[0].text, age
+        assert lines[1].level == "error" and lines[1].text.startswith("Failed: Cannot perform CALL"), age
+        assert not any("likely another environment" in line.text for line in lines), age
 
 
 def test_verdict_queue_provisioning_vs_overload_wording() -> None:

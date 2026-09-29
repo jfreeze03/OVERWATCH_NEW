@@ -228,3 +228,16 @@ def test_a_nested_prefix_never_matches() -> None:
     # SP_D_PLCY_TSACTN is a different procedure (the reason CONTAINS is never used)
     df = _scan(_db([_prd_call(QUERY_TEXT="CALL ALFA_EDW_PRD.PUBLIC.SP_D_PLCY_TSACTN()")]))
     assert len(df) == 1 and df.iloc[0]["CALL_QUERY_ID"] is None and int(df.iloc[0]["MATCHED_CALLS"]) == 0
+
+
+def test_an_unresolved_call_database_is_not_another_environment() -> None:
+    """Review r3, through the real SQL: an unqualified CALL in a session with no current database resolves to a
+    NULL CALL_DATABASE; the fallback keeps it and the verdict still leads with its failure (never 'likely
+    another environment')."""
+    df = _scan(_db([_prd_call(QUERY_TEXT="CALL SP_D_PLCY()", DATABASE_NAME=None, EXECUTION_STATUS="FAIL",
+                              ERROR_CODE="090105", ERROR_MESSAGE="Cannot perform CALL. This session does not have "
+                                                                 "a current database.")]))
+    assert pd.isna(df.iloc[0]["CALL_DATABASE"]) and df.iloc[0]["CALL_QUERY_ID"] is not None
+    lines = task_evidence_lines(df, task="SP_D_PLCY")
+    assert any(line.level == "error" and line.text.startswith("Failed: Cannot perform CALL") for line in lines)
+    assert not any("likely another environment" in line.text for line in lines)

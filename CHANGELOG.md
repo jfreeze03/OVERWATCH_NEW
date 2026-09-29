@@ -12,8 +12,8 @@ App-only, no migration. Next Fifty wave 3, Slice B: ranks 31, 14 (Phase 1), 27 a
   saving, the rest settle at $0), so undoing any saving member of that group takes the whole group out (a capacity
   increase the same scan saw is never booked, so raising it further later is growth, not an undo); a row undone
   only through such a partner reads "partial" and its flag names the partner's setting ("partly reverted Jul 10
-  (co-attributed SIZE → Large)"), or, once its own setting is fully undone too, "left the run-rate Jul 10
-  (co-attributed SIZE → Large); AUTO_SUSPEND since fully undone".
+  (co-attributed SIZE → Large)"), or, once its own setting is fully undone too, "reverted Jul 10 via
+  co-attributed SIZE → Large; AUTO_SUSPEND since fully undone".
   - A reverted saving leaves the ROI numerator, the Verified savings run-rate, Added this quarter, the attribution
     split, the Brief tile and its estimated pipeline, the month and lever charts, Settling and proven-fix transfer,
     on the first render after the scan sees it.

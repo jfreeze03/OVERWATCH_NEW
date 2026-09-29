@@ -230,8 +230,11 @@ def task_evidence_lines(df: pd.DataFrame | None, *, task: str) -> list[EvidenceL
     ctl_db = _txt(first.get("CONTROL_DATABASE"), "").upper()
     dbs = (sorted({_txt(v, "").upper() for v in calls["CALL_DATABASE"].tolist()} - {""})
            if "CALL_DATABASE" in calls.columns else [])
-    other_db = bool(ctl_db) and "CALL_DATABASE" in calls.columns and ctl_db not in dbs
-    _where = ", ".join(dbs) or "an unknown database"
+    # review r3: only a KNOWN different database is another environment. A CALL whose database could not be
+    # resolved (no current database in its session, an unqualified name) may be this task's own run.
+    other_db = bool(ctl_db) and bool(dbs) and ctl_db not in dbs
+    unknown_db = bool(ctl_db) and "CALL_DATABASE" in calls.columns and not dbs
+    _where = ", ".join(dbs)
     if other_db and recent:
         return [EvidenceLine(
             "no_data_yet", f"No CALL of {name} in {ctl_db} (CONTROL_STATUS's database) in QUERY_HISTORY yet — "
@@ -242,6 +245,10 @@ def task_evidence_lines(df: pd.DataFrame | None, *, task: str) -> list[EvidenceL
             "warn", f"No CALL of {name} ran in {ctl_db} (CONTROL_STATUS's database) in this window; the CALL(s) "
                     f"shown match by procedure name in {_where} — check that is this environment's run before "
                     "acting on them."))
+    if unknown_db:
+        out.append(EvidenceLine(
+            "warn", f"The CALL(s) of {name} shown ran with no resolvable database (no current database in their "
+                    f"session and an unqualified name) — check they are {ctl_db}'s run before acting on them."))
     latest = calls.iloc[0]
     wh = _txt(latest.get("WAREHOUSE_NAME"))
     task_failed = safe_float(first.get("IS_TASK_FAILED")) > 0

@@ -301,8 +301,14 @@ def test_an_inherited_revert_names_the_partner_setting():
     full = _inherited_ledger()
     full.loc[full["CHANGE_WAREHOUSE"] == "WH_P", "REVERT_KIND"] = "full"
     ev_full = proof.evidence_rows(full, None, date(2026, 9, 28)).set_index("TARGET")
-    assert ev_full.loc["WH_P", "FLAGS"] == ("left the run-rate Jul 10 (co-attributed SIZE → Large); "
+    assert ev_full.loc["WH_P", "FLAGS"] == ("reverted Jul 10 via co-attributed SIZE → Large; "
                                             "AUTO_SUSPEND since fully undone")
+    # review r3: the flag makes no run-rate claim, so a REJECTED (never counted) row reads the same way
+    rejected = full.copy()
+    rejected.loc[rejected["CHANGE_WAREHOUSE"] == "WH_P", "STATE"] = "REJECTED"
+    flags = proof.evidence_rows(rejected, None, date(2026, 9, 28)).set_index("TARGET").loc["WH_P", "FLAGS"]
+    assert flags == "reverted Jul 10 via co-attributed SIZE → Large; AUTO_SUSPEND since fully undone"
+    assert "run-rate" not in flags
     rv_full = proof.reverted_rows(full).set_index("TARGET")
     assert (rv_full.loc["WH_P", "REVERTED_TO"], rv_full.loc["WH_P", "REVERT"]) == (
         "SIZE: Medium → Large (AUTO_SUSPEND since fully undone)", "Full")

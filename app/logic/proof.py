@@ -321,9 +321,10 @@ def _flags(row: pd.Series) -> str | None:
         if not _inherited:
             out.append(f"{'reverted' if _full else 'partly reverted'} {_when} → {_to}")
         elif _full:
-            # review r2: the carried (earliest) revert is a partner's; the own setting was undone in full later
+            # review r2: the carried (earliest) revert is a partner's; the own setting was undone in full later.
+            # review r3: state-neutral -- a REJECTED or still-ESTIMATED row was never in the run-rate
             _own = _text(row.get("CHANGE_SETTING")).upper() or "its own setting"
-            out.append(f"left the run-rate {_when} (co-attributed {_by} → {_to}); {_own} since fully undone")
+            out.append(f"reverted {_when} via co-attributed {_by} → {_to}; {_own} since fully undone")
         else:
             out.append(f"partly reverted {_when} (co-attributed {_by} → {_to})")
     if _truthy(row.get("VOLUME_CONFOUNDED")):
@@ -365,7 +366,9 @@ def evidence_rows(ledger_df: pd.DataFrame | None, attribution_df: pd.DataFrame |
       FLAGS — first "reverted <Mon d> → <value>" / "partly reverted <Mon d> → <value>" (Next-Fifty #31:
         the daily scan saw the booked change undone on that day, so the saving left the run-rate; the
         row is KEPT here, flagged; "partly reverted <Mon d> (co-attributed <SETTING> → <value>)" when a
-        change the same scan saw with it was undone — one measured window), then "volume-confounded",
+        saving change the same scan saw with it was undone — one measured window — or "reverted <Mon d> via
+        co-attributed <SETTING> → <value>; <own SETTING> since fully undone" once its own setting was fully
+        undone later), then "volume-confounded",
         "cheaper but slower" (REGRESSED yet saved), "performance unjudged" (NO_BASELINE /
         INSUFFICIENT_AFTER), "co-attributed $0" (LBA-1), joined " · "; NULL when none,
       VERIFIED_AT — tz-naive account time.
