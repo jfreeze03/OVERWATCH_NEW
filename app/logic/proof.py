@@ -290,12 +290,23 @@ def _window_state(row: pd.Series, auto: bool, today: date) -> str | None:
 
 
 def _undone_value(value: object, setting: object) -> str:
-    """A registry value as shown in a revert: NULL AUTO_SUSPEND is SHOW's 'never' (V109 stores
-    TRY_TO_NUMBER(auto_suspend)); any other blank is '?'. Text only — the shaped harness feeds floats."""
+    """A registry value as shown in a booked change or a revert. AUTO_SUSPEND blank OR <= 0 is 'never' —
+    the SQL cost rank's own rule (mart_sql._setting_cost_rank_sql ranks NULL / <= 0 as never suspends;
+    V109 stores TRY_TO_NUMBER(auto_suspend), so SHOW's 'never' reads NULL and a 0 reads '0'); any other
+    blank is '?'. Text only — the shaped harness feeds floats."""
     text = _text(value)
-    if not text and _text(setting).upper() == "AUTO_SUSPEND":
+    if _text(setting).upper() == "AUTO_SUSPEND" and (not text or safe_float(text, default=1.0) <= 0):
         return "never"
     return text or "?"
+
+
+def _revert_setting(row: pd.Series) -> tuple[str, bool]:
+    """(the setting the undoing change touched, inherited?) — REVERT_SETTING, else the row's own
+    CHANGE_SETTING. Inherited (review r1 F1): a co-attributed partner's change was undone (one measured
+    window), so the carried revert names ANOTHER setting than the booked one."""
+    own = _text(row.get("CHANGE_SETTING")).upper()
+    by = _text(row.get("REVERT_SETTING")).upper()
+    return (by or own), bool(by and own and by != own)
 
 
 def _flags(row: pd.Series) -> str | None:
@@ -303,9 +314,11 @@ def _flags(row: pd.Series) -> str | None:
     # Next-Fifty #31: the revert reads FIRST — the saving no longer counts toward the run-rate
     _rv_at = row.get("_REVERTED_AT")
     if _rv_at is not None and not pd.isna(_rv_at):
-        _to = _undone_value(row.get("REVERT_NEW_VALUE"), row.get("CHANGE_SETTING"))
+        _by, _inherited = _revert_setting(row)
+        _to = _undone_value(row.get("REVERT_NEW_VALUE"), _by)
         _kind = "partly reverted" if _text(row.get("REVERT_KIND")).lower() == "partial" else "reverted"
-        out.append(f"{_kind} {_short_date(pd.Timestamp(_rv_at).date())} → {_to}")
+        _when = _short_date(pd.Timestamp(_rv_at).date())
+        out.append(f"{_kind} {_when} (co-attributed {_by} → {_to})" if _inherited else f"{_kind} {_when} → {_to}")
     if _truthy(row.get("VOLUME_CONFOUNDED")):
         out.append("volume-confounded")
     verdict = _text(row.get("CHANGE_VERDICT")).upper()
@@ -317,6 +330,18 @@ def _flags(row: pd.Series) -> str | None:
     if _CO_ATTRIBUTED_NOTE in _text(row.get("NOTES")):
         out.append("co-attributed $0")
     return " · ".join(out) if out else None
+
+
+def _change_text(old: pd.Series, new: pd.Series, setting: pd.Series) -> list[str | None]:
+    """'old → new' per row (an AUTO_SUSPEND blank or <= 0 reads 'never', other blanks '?'); None when both
+    are blank."""
+    out: list[str | None] = []
+    for o, n, s in zip(old, new, setting, strict=True):
+        if not _text(o) and not _text(n):
+            out.append(None)
+        else:
+            out.append(f"{_undone_value(o, s)} → {_undone_value(n, s)}")
+    return out
 
 
 def evidence_rows(ledger_df: pd.DataFrame | None, attribution_df: pd.DataFrame | None,
@@ -332,9 +357,10 @@ def evidence_rows(ledger_df: pd.DataFrame | None, attribution_df: pd.DataFrame |
       ATTRIBUTION — the ledger_attribution class as a sentence-case label (NULL when that read failed),
       FLAGS — first "reverted <Mon d> → <value>" / "partly reverted <Mon d> → <value>" (Next-Fifty #31:
         the daily scan saw the booked change undone on that day, so the saving left the run-rate; the
-        row is KEPT here, flagged), then "volume-confounded", "cheaper but slower" (REGRESSED yet saved),
-        "performance unjudged" (NO_BASELINE / INSUFFICIENT_AFTER), "co-attributed $0" (LBA-1), joined
-        " · "; NULL when none,
+        row is KEPT here, flagged; "partly reverted <Mon d> (co-attributed <SETTING> → <value>)" when a
+        change the same scan saw with it was undone — one measured window), then "volume-confounded",
+        "cheaper but slower" (REGRESSED yet saved), "performance unjudged" (NO_BASELINE /
+        INSUFFICIENT_AFTER), "co-attributed $0" (LBA-1), joined " · "; NULL when none,
       VERIFIED_AT — tz-naive account time.
     Row-level display only: headline totals come from the SQL window columns (evidence_split)."""
     if ledger_df is None or ledger_df.empty or "STATE" not in ledger_df.columns:
@@ -349,10 +375,9 @@ def evidence_rows(ledger_df: pd.DataFrame | None, attribution_df: pd.DataFrame |
     auto = _is_auto(view)
     target = _col(view, "TARGET_OBJECT").map(_text)
     target = target.where(target.ne(""), _col(view, "CHANGE_WAREHOUSE").map(_text))
-    old = _col(view, "CHANGE_OLD_VALUE").map(_text)
-    new = _col(view, "CHANGE_NEW_VALUE").map(_text)
-    has_change = old.ne("") | new.ne("")
-    change = (old.where(old.ne(""), "?") + " → " + new.where(new.ne(""), "?")).where(has_change, None)
+    # the same 'old → new' text as the Reverted savings list (an AUTO_SUSPEND blank / <= 0 reads 'never')
+    change = _change_text(_col(view, "CHANGE_OLD_VALUE"), _col(view, "CHANGE_NEW_VALUE"),
+                          _col(view, "CHANGE_SETTING"))
     verdict = _col(view, "CHANGE_VERDICT").map(_text).str.upper()
     attribution = _col(view, "ATTRIBUTION").map(_text).str.upper().map(ATTRIBUTION_LABELS)
     lever = _col(view, "FINDING_TYPE").map(_text)
@@ -377,22 +402,13 @@ REVERTED_COLUMNS: tuple[str, ...] = ("TARGET", "LEVER", "CHANGE", "REVERTED_AT",
                                      "STATE", "VERIFIED_USD")
 
 
-def _change_text(old: pd.Series, new: pd.Series, setting: pd.Series) -> list[str | None]:
-    """'old → new' per row (NULL AUTO_SUSPEND reads 'never', other blanks '?'); None when both are blank."""
-    out: list[str | None] = []
-    for o, n, s in zip(old, new, setting, strict=True):
-        if not _text(o) and not _text(n):
-            out.append(None)
-        else:
-            out.append(f"{_undone_value(o, s)} → {_undone_value(n, s)}")
-    return out
-
-
 def reverted_rows(ledger_df: pd.DataFrame | None) -> pd.DataFrame:
     """Next-Fifty #31: the live (non-superseded) ledger rows whose booked change the daily scan later saw
     undone — the Proof 'Reverted savings' list. CHANGE = booked 'old → new'; REVERTED_TO = the undoing
-    change 'old → new'; REVERT = 'Full' / 'Partial'; VERIFIED_USD = the $/mo that left the run-rate (NULL
-    -> '—'); REVERTED_AT tz-naive account time. Newest revert first. Display only — never a total."""
+    change 'old → new', prefixed '<SETTING>: ' when it was a co-attributed partner's change (review r1 F1:
+    one measured window, so undoing the partner stales this row's saving too); REVERT = 'Full' / 'Partial';
+    VERIFIED_USD = the $/mo that left the run-rate (NULL -> '—'); REVERTED_AT tz-naive account time.
+    Newest revert first. Display only — never a total."""
     if ledger_df is None or ledger_df.empty or "STATE" not in ledger_df.columns:
         return pd.DataFrame(columns=list(REVERTED_COLUMNS))
     live, _ = split_superseded(ledger_df)
@@ -401,6 +417,10 @@ def reverted_rows(ledger_df: pd.DataFrame | None) -> pd.DataFrame:
         return pd.DataFrame(columns=list(REVERTED_COLUMNS))
     view = reverted.reset_index(drop=True)
     setting = _col(view, "CHANGE_SETTING")
+    by = [_revert_setting(view.iloc[i]) for i in range(len(view))]
+    undone = _change_text(_col(view, "REVERT_OLD_VALUE"), _col(view, "REVERT_NEW_VALUE"),
+                          pd.Series([b for b, _ in by], index=view.index, dtype="object"))
+    undone = [f"{b}: {t}" if inherited and t else t for t, (b, inherited) in zip(undone, by, strict=True)]
     target = _col(view, "TARGET_OBJECT").map(_text)
     target = target.where(target.ne(""), _col(view, "CHANGE_WAREHOUSE").map(_text))
     lever = _col(view, "FINDING_TYPE").map(_text)
@@ -410,7 +430,7 @@ def reverted_rows(ledger_df: pd.DataFrame | None) -> pd.DataFrame:
         "LEVER": lever.where(lever.ne(""), None),
         "CHANGE": _change_text(_col(view, "CHANGE_OLD_VALUE"), _col(view, "CHANGE_NEW_VALUE"), setting),
         "REVERTED_AT": _naive_ts(_col(view, "REVERTED_AT")).to_numpy(),
-        "REVERTED_TO": _change_text(_col(view, "REVERT_OLD_VALUE"), _col(view, "REVERT_NEW_VALUE"), setting),
+        "REVERTED_TO": undone,
         "REVERT": kind.map({"full": "Full", "partial": "Partial"}),
         "STATE": _col(view, "STATE").map(_text).str.upper(),
         "VERIFIED_USD": pd.to_numeric(_col(view, "VERIFIED_USD"), errors="coerce"),
@@ -503,16 +523,26 @@ def saved_to_date(summary_df: pd.DataFrame | None) -> dict | None:
     }
 
 
-def saved_to_date_card(saved: dict | None) -> tuple[str, str]:
+SAVED_NOTHING_VERIFIED = "nothing verified yet"
+SAVED_NOTHING_ACCRUED = ("nothing accrued yet — an item accrues from the day after it is verified or its "
+                         "change is seen")
+
+
+def saved_to_date_card(saved: dict | None, *, verified_any: bool) -> tuple[str, str]:
     """(value, delta) for the Proof 'Saved to date' card from saved_to_date(). DOLLARS, never '/mo' (the D4
     lesson: a cumulative figure must not read as a run-rate), and it always discloses the measured vs
     carried-forward split. None (the whole-ledger summary read failed) -> '—' and says so: there is no
-    fallback to the row-capped ledger frame."""
+    fallback to the row-capped ledger frame.
+
+    ``verified_any`` — whether ANY verified item exists (the caller's count, reverted ones included). A $0
+    total only reads "nothing verified yet" when none does (review r1 F2/F6/F21): an item hand-verified
+    today has 0 whole days in effect, and an all-$0 record accrues nothing, while the run-rate card beside
+    this one already counts them — so the zero state is neutral then, never "nothing verified"."""
     if saved is None:
         return "—", "whole-ledger summary unavailable"
     total = safe_float(saved.get("total_usd"))
     if total <= 0:
-        return format_usd(total), "nothing verified yet"
+        return format_usd(total), (SAVED_NOTHING_ACCRUED if verified_any else SAVED_NOTHING_VERIFIED)
     since = saved.get("since")
     parts = [f"since {_short_date(since)}, {since.year}"] if isinstance(since, date) else []
     parts += [f"{format_usd(safe_float(saved.get('measured_usd')))} measured",

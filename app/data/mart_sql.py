@@ -973,29 +973,60 @@ def _setting_cost_rank_sql(setting: str, value: str) -> str:
 
 
 def _ledger_revert_select() -> str:
-    """Next-Fifty #31: one row per BOOKED registry change (b) that a LATER change on the same warehouse
-    + setting (n) made costlier than b's NEW value — the first such n. REVERTED_AT = n.CHANGE_SEEN_AT
-    (TIMESTAMP_LTZ, the scan's clock); REVERT_KIND 'full' when n is at/above b's OLD value, else
-    'partial' (an unknown OLD reads 'partial'). Pure registry read: joined on l.SOURCE_CHANGE_ID =
-    rv.BOOKED_CHANGE_ID (<=1 row per change by the QUALIFY), so a manual row (SOURCE_CHANGE_ID NULL) is
-    never revert-checked. Compared against b's NEW value, not its OLD one: VERIFIED_USD was measured AT
-    b's new setting, so once the setting is costlier that measured figure no longer describes the
-    warehouse. A tightening (n cheaper) is not a revert; the autobook books it as its own change."""
+    """Next-Fifty #31: one row per BOOKED registry change that the daily scan later saw undone. Pure
+    registry read: joined on l.SOURCE_CHANGE_ID = rv.BOOKED_CHANGE_ID (<=1 row per change by the outer
+    QUALIFY), so a manual row (SOURCE_CHANGE_ID NULL) is never revert-checked.
+
+    Inner derived table x — one row per booked change b that a LATER change on the same warehouse +
+    setting (n) made costlier than b's NEW value: the first such n. Compared against b's NEW value, not
+    its OLD one: VERIFIED_USD was measured AT b's new setting, so once the setting is costlier that
+    measured figure no longer describes the warehouse. A tightening (n cheaper) is not a revert; the
+    autobook books it as its own change. REVERT_KIND 'full' when ANY later costlier change reached b's
+    OLD value (MAX over every n, evaluated before the QUALIFY: a partial revert later made full reads
+    'full'), else 'partial' (an unknown OLD reads 'partial'); the REVERTED_AT / REVERT_* values stay the
+    FIRST revert's — the day the saving left the run-rate.
+
+    Outer select — the co-attributed group (review r1 F1): changes one scan saw together on the same
+    warehouse share CHANGE_SEEN_AT (the V109 scan stamps one CURRENT_TIMESTAMP per INSERT), so they share
+    one measured window: exactly the V153 LBA-1 partition, where RN=1 carries the whole saving and the
+    rest settle $0. Undoing ANY member stales that one measurement, so every member g maps to the EARLIEST
+    revert among its group members p (itself included, so a singleton is unchanged); on a same-scan tie
+    its OWN revert wins. REVERT_KIND is 'full' only when g's OWN setting was fully undone; a revert
+    inherited from a partner reads 'partial' (g's own lever may still save — re-measure it).
+    REVERT_SETTING names the setting the carried revert changed (a partner's, when inherited).
+    REVERTED_AT = the revert's CHANGE_SEEN_AT (TIMESTAMP_LTZ, the scan's clock)."""
     reg = core_object("WAREHOUSE_CHANGE_REGISTRY")
     settings = ", ".join(sql_literal(s) for s in LEDGER_REVERTIBLE_SETTINGS)
     n_new = _setting_cost_rank_sql("n.SETTING", "n.NEW_VALUE")
-    return f"""SELECT b.CHANGE_ID AS BOOKED_CHANGE_ID, n.CHANGE_ID AS REVERT_CHANGE_ID,
-           n.CHANGE_SEEN_AT AS REVERTED_AT, n.OLD_VALUE AS REVERT_OLD_VALUE,
-           n.NEW_VALUE AS REVERT_NEW_VALUE,
-           IFF({n_new} >= {_setting_cost_rank_sql("b.SETTING", "b.OLD_VALUE")}, 'full', 'partial') AS REVERT_KIND
-    FROM {reg} b
-    JOIN {reg} n
-      ON n.WAREHOUSE_NAME = b.WAREHOUSE_NAME
-     AND n.SETTING = b.SETTING
-     AND n.CHANGE_SEEN_AT > b.CHANGE_SEEN_AT
-     AND {n_new} > {_setting_cost_rank_sql("b.SETTING", "b.NEW_VALUE")}
-    WHERE b.SETTING IN ({settings})
-    QUALIFY ROW_NUMBER() OVER (PARTITION BY b.CHANGE_ID ORDER BY n.CHANGE_SEEN_AT, n.CHANGE_ID) = 1"""
+    b_old = _setting_cost_rank_sql("b.SETTING", "b.OLD_VALUE")
+    b_new = _setting_cost_rank_sql("b.SETTING", "b.NEW_VALUE")
+    _own = "x.BOOKED_CHANGE_ID = g.CHANGE_ID"
+    return f"""SELECT g.CHANGE_ID AS BOOKED_CHANGE_ID, x.REVERT_CHANGE_ID, x.REVERTED_AT, x.REVERT_OLD_VALUE,
+           x.REVERT_NEW_VALUE,
+           IFF(MAX(IFF({_own} AND x.REVERT_KIND = 'full', 1, 0)) OVER (PARTITION BY g.CHANGE_ID) = 1,
+               'full', 'partial') AS REVERT_KIND,
+           x.REVERT_SETTING
+    FROM {reg} g
+    JOIN {reg} p
+      ON p.WAREHOUSE_NAME = g.WAREHOUSE_NAME
+     AND p.CHANGE_SEEN_AT = g.CHANGE_SEEN_AT
+     AND p.SETTING IN ({settings})
+    JOIN (
+        SELECT b.CHANGE_ID AS BOOKED_CHANGE_ID, n.CHANGE_ID AS REVERT_CHANGE_ID,
+               n.CHANGE_SEEN_AT AS REVERTED_AT, n.OLD_VALUE AS REVERT_OLD_VALUE,
+               n.NEW_VALUE AS REVERT_NEW_VALUE, n.SETTING AS REVERT_SETTING,
+               IFF(MAX({n_new}) OVER (PARTITION BY b.CHANGE_ID) >= {b_old}, 'full', 'partial') AS REVERT_KIND
+        FROM {reg} b
+        JOIN {reg} n
+          ON n.WAREHOUSE_NAME = b.WAREHOUSE_NAME
+         AND n.SETTING = b.SETTING
+         AND n.CHANGE_SEEN_AT > b.CHANGE_SEEN_AT
+         AND {n_new} > {b_new}
+        WHERE b.SETTING IN ({settings})
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY b.CHANGE_ID ORDER BY n.CHANGE_SEEN_AT, n.CHANGE_ID) = 1
+    ) x ON x.BOOKED_CHANGE_ID = p.CHANGE_ID
+    WHERE g.SETTING IN ({settings})
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY g.CHANGE_ID ORDER BY x.REVERTED_AT, IFF({_own}, 0, 1), x.REVERT_CHANGE_ID) = 1"""
 
 
 def _ledger_revert_cte() -> str:
@@ -1049,9 +1080,13 @@ def savings_ledger(limit: int | None = 500) -> str:
     Revert projections (Next-Fifty #31; ADDITIVE only, appended after WINDOW_CLOSED) from the registry-only
     rv CTE (_ledger_revert_select), LEFT JOINed 1:1 on SOURCE_CHANGE_ID — still one statement:
       REVERTED_AT — TIMESTAMP_LTZ, when the daily scan saw a later change on the same warehouse + setting
-        make it costlier than the booked NEW value (up to ~24h after the ALTER); NULL = not reverted.
-      REVERT_CHANGE_ID / REVERT_OLD_VALUE / REVERT_NEW_VALUE — the undoing registry change.
-      REVERT_KIND — 'full' (back to, or past, the booked OLD value) or 'partial'.
+        make it costlier than the booked NEW value (up to ~24h after the ALTER); NULL = not reverted. A
+        change the scan saw together with others on the same warehouse (one measured window: the LBA-1
+        group) takes the EARLIEST revert of any member — undoing the $0 partner stales the RN=1 saving too.
+      REVERT_CHANGE_ID / REVERT_OLD_VALUE / REVERT_NEW_VALUE — the undoing registry change (the first one).
+      REVERT_KIND — 'full' (this row's own setting was later taken back to, or past, the booked OLD value
+        by any later change) or 'partial' (partly undone, or undone only through a co-attributed partner).
+      REVERT_SETTING — the setting the undoing change touched (a partner's when the revert is inherited).
     A manual / app-booked row (SOURCE_CHANGE_ID NULL) is never revert-checked, so these are NULL on it.
     actions.split_reverted drops a reverted row from the run-rate rollups; realization keeps it."""
     limit_clause = f"\nLIMIT {int(limit)}" if limit is not None else ""
@@ -1095,7 +1130,8 @@ SELECT l.ITEM_ID, l.ACTION_ID, l.CREATED_AT, l.DESCRIPTION, l.STATE, l.ESTIMATED
        r.CHANGE_SEEN_AT, r.VERDICT AS CHANGE_VERDICT, r.TRACKING_UNTIL, r.AFTER_QUERIES,
        r.CHANGED_BY AS CHANGE_BY,
        IFF(r.CHANGE_ID IS NULL, NULL, {account_today_sql()} > r.TRACKING_UNTIL) AS WINDOW_CLOSED,
-       rv.REVERTED_AT, rv.REVERT_CHANGE_ID, rv.REVERT_OLD_VALUE, rv.REVERT_NEW_VALUE, rv.REVERT_KIND
+       rv.REVERTED_AT, rv.REVERT_CHANGE_ID, rv.REVERT_OLD_VALUE, rv.REVERT_NEW_VALUE, rv.REVERT_KIND,
+       rv.REVERT_SETTING
 FROM {core_object("SAVINGS_LEDGER")} l
 LEFT JOIN {core_object("WAREHOUSE_CHANGE_REGISTRY")} r ON l.SOURCE_CHANGE_ID = r.CHANGE_ID
 LEFT JOIN twin t ON t.TWIN_ITEM_ID = l.ITEM_ID
@@ -2002,7 +2038,7 @@ def savings_summary_quarter() -> str:
 
     Next-Fifty #31: a booked warehouse-setting change the daily scan later saw undone (the rv CTE,
     _ledger_revert_select: a later change on the same warehouse + setting made it costlier than the
-    booked value) leaves VERIFIED_QTD_USD / VERIFIED_ITEMS / VERIFIED_ACTIVE_* (the one shared
+    booked value — or undid a change the same scan saw with it, which shares its measured window) leaves VERIFIED_QTD_USD / VERIFIED_ITEMS / VERIFIED_ACTIVE_* (the one shared
     _ledger_counts_predicate, also ledger_attribution's active split) and ESTIMATED_OPEN_USD the day the
     scan sees it. REVERTED_ACTIVE_ITEMS / REVERTED_ACTIVE_USD disclose what left the active window's
     run-rate. Rows booked in the app carry no SOURCE_CHANGE_ID, are never revert-checked, and still stop

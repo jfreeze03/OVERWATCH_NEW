@@ -206,3 +206,96 @@ def test_carried_realization_still_counts_a_reverted_row():
     assert carried is not None
     # a (100 -> 80) and b (50 -> 60, reverted) both count: accuracy, not persistence
     assert (carried["estimated_usd"], carried["realized_usd"], carried["items"]) == (150.0, 140.0, 2)
+
+
+# --------------------------------------------------------------------------- review r1 fixes (pure)
+def test_lever_realization_keeps_reverted_rows_like_the_headline(_sep28):
+    # review r1 F10: one lever, one kept item (est 100 -> 80) and one the scan saw undone (est 100 -> 60).
+    # The $ / item columns are the run-rate view (the kept item only); the realization is estimate
+    # accuracy and keeps the undone item, exactly as the headline Realization rate does.
+    rv = pd.Timestamp("2026-08-01 06:40", tz=_LTZ)
+    rows = pd.DataFrame([
+        {"ITEM_ID": "k", "STATE": "VERIFIED", "ESTIMATED_USD": 100.0, "VERIFIED_USD": 80.0,
+         "VERIFIED_AT": "2026-07-11", "FINDING_TYPE": "RESIZE", "REVERTED_AT": None},
+        {"ITEM_ID": "r", "STATE": "VERIFIED", "ESTIMATED_USD": 100.0, "VERIFIED_USD": 60.0,
+         "VERIFIED_AT": "2026-07-16", "FINDING_TYPE": "RESIZE", "REVERTED_AT": rv},
+    ])
+    lever = savings_by_lever(rows)
+    assert list(lever["LEVER"]) == ["RESIZE"]
+    row = lever.iloc[0]
+    assert (row["VERIFIED_USD"], row["ITEMS"]) == (80.0, 1)
+    headline = ledger_totals(rows)["realization_pct"]
+    assert headline == 70.0 and row["REALIZATION_PCT"] == headline          # (80 + 60) / (100 + 100)
+    # without the revert column nothing is undone: the pre-#31 figures
+    legacy = savings_by_lever(rows.drop(columns=["REVERTED_AT"])).iloc[0]
+    assert (legacy["VERIFIED_USD"], legacy["ITEMS"], legacy["REALIZATION_PCT"]) == (140.0, 2, 70.0)
+
+
+@pytest.mark.parametrize(("value", "setting", "shown"), [
+    (None, "AUTO_SUSPEND", "never"), ("", "AUTO_SUSPEND", "never"), ("0", "AUTO_SUSPEND", "never"),
+    ("0.0", "AUTO_SUSPEND", "never"), ("-1", "AUTO_SUSPEND", "never"), (0.0, "auto_suspend", "never"),
+    ("60", "AUTO_SUSPEND", "60"), ("abc", "AUTO_SUSPEND", "abc"),
+    ("0", "MAX_CLUSTERS", "0"), (None, "SIZE", "?"), ("Large", "SIZE", "Large"),
+])
+def test_undone_value_matches_the_sql_rank_rule(value, setting, shown):
+    # review r1 F9: the SQL cost rank reads AUTO_SUSPEND NULL OR <= 0 as "never suspends"; so does the label
+    assert proof._undone_value(value, setting) == shown
+
+
+def _zero_suspend_ledger() -> pd.DataFrame:
+    return pd.DataFrame([
+        # booked 0 (never suspends) -> 60, later undone back to 0
+        {"ITEM_ID": "z", "STATE": "VERIFIED", "VERIFIED_USD": 75.0, "FINDING_TYPE": "AUTO_SUSPEND",
+         "SOURCE": "auto", "SOURCE_CHANGE_ID": "Z1", "CHANGE_WAREHOUSE": "WH_Z", "CHANGE_SETTING": "AUTO_SUSPEND",
+         "CHANGE_OLD_VALUE": "0", "CHANGE_NEW_VALUE": "60", "CHANGE_VERDICT": "IMPROVED",
+         "NOTES": "measured on the full window", "VERIFIED_AT": pd.Timestamp("2026-06-16 06:45"),
+         "REVERTED_AT": pd.Timestamp("2026-08-20 06:40", tz=_LTZ), "REVERT_KIND": "full",
+         "REVERT_OLD_VALUE": "60", "REVERT_NEW_VALUE": "0", "REVERT_CHANGE_ID": "Z2",
+         "REVERT_SETTING": "AUTO_SUSPEND"},
+    ])
+
+
+def test_a_zero_second_auto_suspend_reads_never_everywhere():
+    ev = proof.evidence_rows(_zero_suspend_ledger(), None, date(2026, 9, 28)).iloc[0]
+    assert ev["FLAGS"] == "reverted Aug 20 → never"                  # never "→ 0"
+    assert ev["CHANGE"] == "never → 60"
+    rv = proof.reverted_rows(_zero_suspend_ledger()).iloc[0]
+    assert (rv["CHANGE"], rv["REVERTED_TO"]) == ("never → 60", "60 → never")
+
+
+def _inherited_ledger() -> pd.DataFrame:
+    base = {"STATE": "VERIFIED", "SOURCE": "auto", "CHANGE_VERDICT": "IMPROVED",
+            "NOTES": "measured on the full window", "VERIFIED_AT": pd.Timestamp("2026-06-16 06:45"),
+            "REVERTED_AT": pd.Timestamp("2026-07-10 06:40", tz=_LTZ)}
+    return pd.DataFrame([
+        # the RN=1 AUTO_SUSPEND row inherits its $0 SIZE partner's revert (one measured window)
+        {**base, "ITEM_ID": "p1", "VERIFIED_USD": 200.0, "FINDING_TYPE": "AUTO_SUSPEND", "SOURCE_CHANGE_ID": "P1",
+         "CHANGE_WAREHOUSE": "WH_P", "CHANGE_SETTING": "AUTO_SUSPEND", "CHANGE_OLD_VALUE": "600",
+         "CHANGE_NEW_VALUE": "60", "REVERT_KIND": "partial", "REVERT_OLD_VALUE": "Medium",
+         "REVERT_NEW_VALUE": "Large", "REVERT_CHANGE_ID": "P3", "REVERT_SETTING": "SIZE"},
+        # the partner's own revert reads as before
+        {**base, "ITEM_ID": "p2", "VERIFIED_USD": 0.0, "FINDING_TYPE": "RESIZE", "SOURCE_CHANGE_ID": "P2",
+         "CHANGE_WAREHOUSE": "WH_P2", "CHANGE_SETTING": "SIZE", "CHANGE_OLD_VALUE": "Large",
+         "CHANGE_NEW_VALUE": "Medium", "REVERT_KIND": "full", "REVERT_OLD_VALUE": "Medium",
+         "REVERT_NEW_VALUE": "Large", "REVERT_CHANGE_ID": "P3", "REVERT_SETTING": "SIZE"},
+        # a SIZE row whose AUTO_SUSPEND partner went to NULL (never): the partner's setting decides 'never'
+        {**base, "ITEM_ID": "q1", "VERIFIED_USD": 90.0, "FINDING_TYPE": "RESIZE", "SOURCE_CHANGE_ID": "Q1",
+         "CHANGE_WAREHOUSE": "WH_Q", "CHANGE_SETTING": "SIZE", "CHANGE_OLD_VALUE": "Large",
+         "CHANGE_NEW_VALUE": "Medium", "REVERT_KIND": "partial", "REVERT_OLD_VALUE": "60",
+         "REVERT_NEW_VALUE": None, "REVERT_CHANGE_ID": "Q3", "REVERT_SETTING": "AUTO_SUSPEND"},
+    ])
+
+
+def test_an_inherited_revert_names_the_partner_setting():
+    ev = proof.evidence_rows(_inherited_ledger(), None, date(2026, 9, 28)).set_index("TARGET")
+    assert ev.loc["WH_P", "FLAGS"] == "partly reverted Jul 10 (co-attributed SIZE → Large)"
+    assert ev.loc["WH_P2", "FLAGS"] == "reverted Jul 10 → Large"
+    assert ev.loc["WH_Q", "FLAGS"] == "partly reverted Jul 10 (co-attributed AUTO_SUSPEND → never)"
+    rv = proof.reverted_rows(_inherited_ledger()).set_index("TARGET")
+    assert (rv.loc["WH_P", "CHANGE"], rv.loc["WH_P", "REVERTED_TO"], rv.loc["WH_P", "REVERT"]) == (
+        "600 → 60", "SIZE: Medium → Large", "Partial")
+    assert rv.loc["WH_P2", "REVERTED_TO"] == "Medium → Large"
+    assert rv.loc["WH_Q", "REVERTED_TO"] == "AUTO_SUSPEND: 60 → never"
+    # an older read without REVERT_SETTING reads the row's own setting (the pre-fix text)
+    legacy = _inherited_ledger().drop(columns=["REVERT_SETTING"])
+    assert proof.reverted_rows(legacy).set_index("TARGET").loc["WH_P", "REVERTED_TO"] == "Medium → Large"
