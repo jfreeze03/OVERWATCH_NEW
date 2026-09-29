@@ -42,7 +42,7 @@ def test_patched_module_set_covers_the_pages():
     names = {m.__name__ for m in modules}
     expected = {
         "app.main", "app.ui.components", "app.ui.ai_panel", "app.ui.decision_studio",
-        "app.ui.security_center", "app.ui.workbench", "app.ui.attention",
+        "app.ui.security_center", "app.ui.workbench", "app.ui.attention", "app.ui.schema_gate",
         "app.ui.pages.overview", "app.ui.pages.control_room", "app.ui.pages.cost",
         "app.ui.pages.operations", "app.ui.pages.alerts", "app.ui.pages.security",
         "app.ui.pages.admin", "app.ui.pages.brief", "app.ui.pages.ask",

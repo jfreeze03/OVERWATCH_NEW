@@ -55,6 +55,7 @@ from app.logic.date_windows import (  # noqa: E402
     window_scope_label,
 )
 from app.theme import inject_theme  # noqa: E402
+from app.ui import schema_gate  # noqa: E402
 from app.ui.components import mark_refreshed  # noqa: E402
 from app.ui.icons import icon  # noqa: E402
 from app.ui.pages import (  # noqa: E402
@@ -777,6 +778,8 @@ def _schema_floor_breach() -> int | None:
     cached (changes only when a migration is applied), so this is one cheap read."""
     res = run(mart_sql.schema_version(), page="_shell", key="schema_floor_gate",
               tier="metadata", source="SCHEMA_VERSION")
+    # Wave 4: this run's has_migration() answers come from this read (no second statement).
+    schema_gate.remember(res)
     if not res.usable() or res.empty:
         return None
     try:

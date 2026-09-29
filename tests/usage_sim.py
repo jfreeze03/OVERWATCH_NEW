@@ -59,6 +59,7 @@ for _p in (_ROOT, _HERE):
 # Reuse the shaped-frame builder + navigation + app entry from the render-contract harness.
 from test_pages_shaped import (  # noqa: E402
     _entry,
+    _floor_gate_at_repo_tip,
     _nav_to,
     _shaped_from_sql,
 )
@@ -167,7 +168,7 @@ def _patched_modules():
     """The UI modules whose directly-imported read names must be stubbed. Mirrors the
     tests/test_pages_shaped.py::_stub_shaped list; kept honest by test_usage_sim.py."""
     import app.main as main_mod
-    from app.ui import ai_panel, attention, components, security_center, workbench
+    from app.ui import ai_panel, attention, components, schema_gate, security_center, workbench
     from app.ui import decision_studio as ds_render
     from app.ui.pages import (
         admin,
@@ -184,7 +185,7 @@ def _patched_modules():
     from app.ui.pages.cost_parts import ai_chargeback, compare, contract, optimize, spend, unit_costs
     from app.ui.pages.ops_parts import optimize_queue
     return main_mod, [
-        main_mod, components, ai_panel, ds_render, security_center, workbench, attention,
+        main_mod, components, ai_panel, ds_render, security_center, workbench, attention, schema_gate,
         overview, control_room, cost, operations, alerts, security, admin, brief,
         ask, decision_studio, ai_chargeback, compare, contract, optimize, spend, unit_costs,
         optimize_queue,
@@ -206,7 +207,9 @@ def recording_stubs():
 
         patch(main_mod, "connection_available", lambda: True)
         patch(main_mod, "current_role", lambda: "SNOW_SYSADMINS")
-        patch(main_mod, "_schema_floor_breach", lambda: None)  # bypass startup schema gate
+        # bypass the startup floor gate, keeping its hand-off to app.ui.schema_gate: in production
+        # has_migration() answers from the gate's own read, so it must not count as a page read here
+        patch(main_mod, "_schema_floor_breach", _floor_gate_at_repo_tip)
         for module in modules:
             for fname, fstub in _READ_STUBS.items():
                 if hasattr(module, fname):

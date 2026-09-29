@@ -234,12 +234,17 @@ def test_v154_caption_is_schema_gated():
     (QueryResult(df=pd.DataFrame({"OTHER": [154]})), False),
 ])
 def test_v154_applied_reads_the_schema_version_set(monkeypatch, res, expected):
+    # wave 4: re-pointed at the shared schema gate (app/ui/schema_gate.py), which owns the read
+    from types import SimpleNamespace
+
+    from app.ui import schema_gate
     seen = {}
 
     def _fake_run(sql, **kw):
         seen.update(kw, sql=sql)
         return res
 
-    monkeypatch.setattr(cr, "run", _fake_run)
+    monkeypatch.setattr(schema_gate, "run", _fake_run)
+    monkeypatch.setattr(schema_gate, "st", SimpleNamespace(session_state={}))   # no run to stash on
     assert cr._v154_applied() is expected
     assert seen["sql"] == mart_sql.schema_version() and seen["tier"] == "metadata"
