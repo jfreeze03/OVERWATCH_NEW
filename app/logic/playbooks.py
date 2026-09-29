@@ -94,6 +94,29 @@ PLAYBOOKS: dict[str, str] = {
         "current week now (it rewrites that week's census and can raise events and email): "
         "`CALL DBA_MAINT_DB.OVERWATCH.SP_SCAN_SLEEP_POLLING(TRUE);`"
     ),
+    # V163 (Next-Fifty #37a): the nightly per-user AI runaway, daily scan arm [28].
+    "COST_AI_USER_RUNAWAY": (
+        "**Means:** one user's AI credits on one day went above THRESHOLD_NUM x COCO_DAILY_CAP_CREDITS "
+        "(2 x 15 credits by default) AND sat at least AI_RUNAWAY_ROBUST_Z (3.5) robust-z above that user's "
+        "own active days in the 90 days before it, so a habitual heavy user stays quiet. A user with fewer "
+        "than 5 active days in those 90 has no baseline yet and the cap alone decides (the event says "
+        "\"No baseline yet\"). Cortex Code only (Snowsight and CLI): AI Functions spend counts only when "
+        "AI_RUNAWAY_INCLUDE_FUNCTIONS is TRUE, and only once the loader books Functions spend to a user "
+        "(today it is booked to the account, so the switch changes nothing yet). The daily scan re-checks "
+        "the last 3 complete days each morning, one event per user-day; a day the mart had only partly "
+        "loaded can raise with a lower figure than the final one. The title prices it in USD at "
+        "AI_CREDIT_PRICE_USD; the event's company is the user's (ALL when the user is unmapped).\n\n"
+        "1. Cost Intelligence > Chargeback & AI → *AI users* (load the AI user attribution): the user's daily "
+        "credits and sources over the window.\n"
+        "2. Ask the user what ran. Snowsight: `SELECT h.USAGE_TIME, h.TOKEN_CREDITS, h.TOKENS FROM "
+        "SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY h JOIN SNOWFLAKE.ACCOUNT_USAGE.USERS u "
+        "ON u.USER_ID = h.USER_ID WHERE u.NAME = '<USER>' AND h.USAGE_TIME >= DATEADD('day', -3, "
+        "CURRENT_TIMESTAMP()) ORDER BY h.USAGE_TIME DESC;` (the CLI view is CORTEX_CODE_CLI_USAGE_HISTORY).\n"
+        "3. Runaway or compromised: set a per-user AI quota in Snowsight (Cost Management), sized with the "
+        "suggested per-user quota table under *Per-user AI quotas & blocks*. Sanctioned heavy work: resolve "
+        "as EXPECTED; a snooze carries to the same user's later days while it lasts. THRESHOLD_NUM is the "
+        "cap multiple (Alerts > Rules); the robust-z bar and the Functions switch are in Admin > Settings."
+    ),
     "COST_ANOMALY_SWEEP": (
         "**Means:** yesterday's credits for this series sit far outside its 28-day pattern.\n\n"
         "1. Investigate → lands on Cost Intelligence > Spend & Attribution scoped to the entity; check the day's attribution.\n"
@@ -273,15 +296,19 @@ PLAYBOOKS: dict[str, str] = {
         "event and resolve."
     ),
     "SEC_FAILED_LOGINS": (
-        "**Means:** a user crossed the failed-login threshold on one day — a stale secret in a "
-        "job, a locked-out person, or password spraying.\n\n"
+        "**Means:** a user crossed the failed-login threshold on one day (the nightly scan counts the whole "
+        "day), and the title says whether that day also had a successful login. No success: most likely a "
+        "lockout or a job still sending an old secret (a guessing attempt that never got in looks the same). "
+        "Successes too: a failed burst followed within 60 minutes by a success is SEC_LOGIN_TAKEOVER, raised "
+        "by the hourly scan (CRITICAL off-hours or for an admin role) — check for that event first.\n\n"
         "1. Security > Access → *Authentication*: *Failed logins*, *Failed-login reasons* (network "
         "policy vs bad credentials) and *Account-takeover candidates* (a failed burst then a success).\n"
         "2. Snowsight: `SELECT EVENT_TIMESTAMP, CLIENT_IP, REPORTED_CLIENT_TYPE, ERROR_MESSAGE, IS_SUCCESS "
         "FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY WHERE USER_NAME = '<USER>' "
         "AND EVENT_TIMESTAMP >= DATEADD('day', -2, CURRENT_TIMESTAMP()) ORDER BY EVENT_TIMESTAMP DESC;`\n"
-        "3. Service user with a stale secret → rotate it and fix the job. Unknown IPs, or a success "
-        "right after the burst → `ALTER USER <USER> SET DISABLED = TRUE;` and treat as a security incident."
+        "3. Lockout: a service user with a stale secret → rotate it and fix the job; a person → reset with "
+        "them. Unknown IPs, or a success right after the burst → `ALTER USER <USER> SET DISABLED = TRUE;` "
+        "and treat as a security incident."
     ),
     "SEC_NEW_ADMIN_NETWORK": (
         "**Means:** a user holding ACCOUNTADMIN / SNOW_ACCOUNTADMINS / SNOW_SYSADMINS logged in "
@@ -316,6 +343,22 @@ PLAYBOOKS: dict[str, str] = {
         "revoke (DELETED_ON) in GRANTS_TO_ROLES, the next 4-hourly check resolves the OPEN event as "
         "CONDITION_ENDED (after at least 1h, so up to ~4h after the revoke shows; ACCOUNT_USAGE can lag "
         "about 2h; ACK'd and snoozed events stay yours to close)."
+    ),
+    # V163 (Next-Fifty #44b): Trust Center regression, daily scan arm [29].
+    "SEC_TRUST_REGRESSION": (
+        "**Means:** a CRITICAL or HIGH Trust Center scanner's at-risk entity count rose by at least the rule "
+        "threshold (1 by default) against that scanner's previous snapshot day. The daily scan checks today's "
+        "and yesterday's snapshot each morning, so a rise that lands after the morning check shows up the next "
+        "morning; one event per scanner per snapshot day, and a rise that repeats after a fall is raised again. "
+        "A scanner's first snapshot never raises, so enabling a scanner package does not flood. It needs the "
+        "TRUST_CENTER_VIEWER grant: without it the snapshot stays empty and this rule stays quiet. The loader "
+        "books a scanner that drops out of the findings as 0, so its return reads as a rise (the event says "
+        "so).\n\n"
+        "1. Security > Trust Center: the scanner's current count and its change since the prior snapshot.\n"
+        "2. Snowsight > Monitoring > Trust Center > Findings: the at-risk entities and the suggested fix for "
+        "the scanner named in the event.\n"
+        "3. Fix the entities there, re-run the scanner, confirm the count falls, then resolve. An accepted "
+        "risk: resolve as EXPECTED and note why."
     ),
     "PIPE_TASK_FAILURES": (
         "**Means:** a task failed at least the threshold number of times on one day (retries "

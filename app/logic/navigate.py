@@ -109,6 +109,10 @@ _RULE_TARGETS = {
     "COST_SERVERLESS_CREEP": ("Cost Intelligence", "Spend & Attribution"),
     "COST_ANOMALY_SWEEP": ("Cost Intelligence", "Spend & Attribution"),
     "COST_DEPT_BUDGET_PACE": ("Cost Intelligence", "Chargeback & AI"),
+    # V163 (Next-Fifty #37a / #44b): the per-user AI table and the Trust Center tab (the COST family default,
+    # Spend & Attribution, is the wrong page for a per-user runaway).
+    "COST_AI_USER_RUNAWAY": ("Cost Intelligence", "Chargeback & AI"),
+    "SEC_TRUST_REGRESSION": ("Security", "Trust Center"),
     "PIPE_COPY_FAILURES": ("Operations", "Pipeline SLA"),
     "PIPE_DT_FAILURES": ("Operations", "Pipeline SLA"),
     "SEC_CRED_EXPIRY": ("Security", "Access"),
@@ -177,7 +181,9 @@ _DB_RE = re.compile(r"\b([A-Z][A-Z0-9_]{2,})\.([A-Z][A-Z0-9_]{2,})\.")
 # LOADER_CHAIN_CHECK) and its ERR leg embeds a free-text SQLERRM ("Object 'DBA_MAINT_DB.OVERWATCH.X' does
 # not exist" -> database DBA_MAINT_DB; a 'WH_...' name -> warehouse). A sticky top-bar filter taken from
 # that text would scope every later page to a bogus or OVERWATCH-only entity, so Investigate applies none.
-_NO_ENTITY_FILTER_RULES = frozenset({"OPS_PIPELINE_DEGRADED"})
+# V163: COST_AI_USER_RUNAWAY titles lead with a user name and SEC_TRUST_REGRESSION with a scanner name, neither
+# a warehouse or database (a dotted user name reads as DB.SCHEMA.), so Investigate applies no filter.
+_NO_ENTITY_FILTER_RULES = frozenset({"OPS_PIPELINE_DEGRADED", "COST_AI_USER_RUNAWAY", "SEC_TRUST_REGRESSION"})
 
 
 def investigation_target(rule_id: str, text: str = "") -> dict:

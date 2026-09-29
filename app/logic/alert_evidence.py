@@ -147,6 +147,12 @@ def plan_for_alert(rule_id: str, title: str, detail: str = "",
         # AI-explain affordance is withheld (the alert DETAIL already carries the idle arithmetic).
         return None
 
+    if rid == "COST_AI_USER_RUNAWAY":
+        # V163: one user's Cortex Code credits on one day -- query families by elapsed time say nothing about
+        # AI credits, and the per-user AI table has no evidence pack yet, so the AI-explain affordance is
+        # withheld (the DETAIL carries the z, the user's median and the cap arithmetic).
+        return None
+
     if rid.startswith(("COST_", "PERF_")):
         # A query-latency-shaped anomaly we don't have a bespoke pack for: the
         # original query-families-by-elapsed pack is the right generic evidence.

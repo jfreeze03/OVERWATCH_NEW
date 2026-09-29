@@ -822,6 +822,10 @@ _SETTING_EDITORS: dict[str, tuple[str, object]] = {
     "MONTHLY_BUDGET_USD": (_NUM, {"min_value": 0.0, "step": 100.0}),
     "AI_MONTHLY_BUDGET_USD": (_NUM, {"min_value": 0.0, "step": 100.0}),
     "COCO_DAILY_CAP_CREDITS": (_NUM, {"min_value": 0.0, "step": 1.0}),
+    # V163 COST_AI_USER_RUNAWAY: the robust-z bar (the cap multiple is the rule's THRESHOLD_NUM) and the
+    # AI Functions switch.
+    "AI_RUNAWAY_ROBUST_Z": (_NUM, {"min_value": 1.0, "step": 0.5}),
+    "AI_RUNAWAY_INCLUDE_FUNCTIONS": ("enum", ["FALSE", "TRUE"]),
     "CONTRACT_CREDITS": (_NUM, {"min_value": 0.0, "step": 1000.0}),
     # Platform-score weights (per-unit penalties; STRING-typed in DEFAULT_SETTINGS).
     "SCORE_PTS_BUDGET_PER_PCT": (_NUM, {"min_value": 0.0, "step": 0.1}),
