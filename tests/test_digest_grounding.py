@@ -17,6 +17,7 @@ from app.logic.digest_grounding import (
     TEMPLATE_TITLE,
     check_digest,
     digest_provenance,
+    digest_source,
     strip_non_figures,
 )
 from tests._source import read
@@ -103,6 +104,38 @@ def test_scale_words_and_tolerance():
     assert not check_digest("$12.2K", FACTS).ok                     # 12,200 vs 12,345.67: > 0.5% and > half-step
 
 
+@pytest.mark.parametrize("facts, body", [
+    ("FAILED_QUERY_PCT=1.25", "1.3% of queries failed"),       # half up: |1.25-1.3| = 0.050000000000000044
+    ("FAILED_QUERY_PCT=1.25", "1.2% of queries failed"),       # half down
+    ("FAILED_QUERY_PCT=0.75", "0.8% of queries failed"),
+    ("TASK_FAILURE_PCT=0.15", "0.2% of tasks failed"),
+    ("QUERIES=8250000", "8.3 million queries"),                # the same edge after a scale word
+    ("QUERIES=8250000000", "8.2 billion queries"),             # an absolute 1e-9 epsilon still fails this one
+])
+def test_an_exact_half_step_rounding_is_grounded(facts, body):
+    """W3 (review r1): the half-step rule is inclusive; DOUBLE noise must not fail a correctly rounded figure."""
+    res = check_digest(body, facts)
+    assert res.ok and res.checked == 1, res
+
+
+def test_every_half_step_fact_passes_in_both_rounding_directions():
+    from decimal import ROUND_HALF_DOWN, ROUND_HALF_UP, Decimal
+    for scale_word, scale in (("", 1), (" thousand", 1000), (" million", 10 ** 6), (" billion", 10 ** 9)):
+        for i in range(1, 200, 2):                            # 0.05, 0.15, ... 9.95: every x.x5 below 10
+            fact = Decimal(i) / 20
+            for mode in (ROUND_HALF_UP, ROUND_HALF_DOWN):
+                shown = fact.quantize(Decimal("0.1"), rounding=mode)
+                body = f"{shown}{scale_word} queries"
+                res = check_digest(body, f"QUERIES={fact * scale}")
+                assert res.ok, (body, str(fact * scale), res)
+
+
+def test_the_half_step_slack_does_not_widen_the_rule():
+    assert not check_digest("1.4% of queries failed", "FAILED_QUERY_PCT=1.25").ok      # 1.5 half steps away
+    assert not check_digest("1.3% of queries failed", "FAILED_QUERY_PCT=1.2499").ok    # just past the half step
+    assert not check_digest("1.4 million queries", "QUERIES=1250000").ok
+
+
 # -- provenance ----------------------------------------------------------------------------------------------------
 
 def test_provenance_ai_all_matched():
@@ -166,6 +199,15 @@ def test_provenance_odd_types_resolve_sensibly():
     assert u.chip == "AI-written; figures not verified" and u.tone == "warn"
 
 
+def test_the_source_label_names_the_check_only_once_v165_is_applied():
+    """Review r1 W4: before V165 the live proc checks nothing, so the label must not say it does."""
+    assert digest_source(True) == ("DAILY_DIGEST (Cortex draft; figures checked against the exec board, "
+                                   "templated on mismatch)")
+    assert digest_source(False) == "DAILY_DIGEST (Cortex draft)"
+    for label in (digest_source(True), digest_source(False)):
+        assert "grounded" not in label.lower()
+
+
 # -- app wiring ----------------------------------------------------------------------------------------------------
 
 def test_latest_digest_reads_the_v165_columns_only_when_asked():
@@ -198,7 +240,10 @@ def test_pages_gate_the_read_and_show_the_measured_label(page):
     assert "if prov.detail:" in src and 'with st.expander(f"{prov.title} — ' in src
     # no fixed "grounded" claim is left in the source string or the caption
     assert "Cortex, grounded" not in src and "grounded in the exec board" not in src
-    assert "DAILY_DIGEST (Cortex draft; figures checked against the exec board, templated on mismatch)" in src
+    # the source label names the check only once V165 is applied (review r1 W4): one gated helper, no literal
+    assert "figures checked against the exec board" not in src and src.count("digest_source(") == 1
+    # the unmatched-figure line keeps the '$' of its tokens: escaped at the sink (review r1 W12)
+    assert "st.caption(md_dollars(prov.detail))" in src and "st.caption(prov.detail)" not in src
     # the body line stays verbatim (tests/test_ai_grounding.py::test_digest_bodies_escape_dollars)
     var = "drow" if page == "brief" else "row"
     assert f'st.markdown(md_dollars(str({var}.get("BODY") or "")))' in src
@@ -214,11 +259,19 @@ def test_overview_keeps_its_cache_key_and_drops_the_model_for_a_template():
     assert """_model = "" if prov.ai_written is False else f" ({row.get('MODEL')})\"""" in ov
     assert "every figure is checked against those facts, and a templated digest is sent" in ov
     assert "does not change with the company filter" in ov
+    # the check is claimed only when V165 is applied AND the row carries a grounding record (review r1 W4/W15;
+    # rendered both ways in tests/test_digest_render_shaped.py)
+    assert "_grounded = has_migration(165, _PAGE)" in ov and "latest_digest(grounded=_grounded)" in ov
+    assert "_checked = _grounded and prov.ai_written is not None" in ov
+    assert 'source=digest_source(_grounded))' in ov
 
 
 def test_brief_digest_stays_in_its_recent_batch():
     b = read("app/ui/pages/brief.py")
-    assert '{"key": "digest", "sql": _digest_sql, "source": _DIGEST_SOURCE},' in b
-    assert "_digest_sql = mart_sql.latest_digest(grounded=has_migration(165, _PAGE))" in b
+    assert '{"key": "digest", "sql": _digest_sql, "source": _digest_source},' in b
+    assert "_digest_grounded = has_migration(165, _PAGE)" in b
+    assert "_digest_sql = mart_sql.latest_digest(grounded=_digest_grounded)" in b
+    assert "_digest_source = digest_source(_digest_grounded)" in b
     assert 'run(_digest_sql, page=_PAGE, key="daily_digest", tier="recent",' in b
+    assert "source=_digest_source)" in b
     assert b.index("_digest_sql = mart_sql.latest_digest(") < b.index("_b_rec = run_batch([")

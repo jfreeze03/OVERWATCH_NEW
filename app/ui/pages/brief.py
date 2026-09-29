@@ -16,7 +16,7 @@ from app.core.state import can_open, filters, request_navigation
 from app.data import mart_sql
 from app.logic import case_file, contract_planner
 from app.logic.actions import deferred_summary, rank_actions
-from app.logic.digest_grounding import digest_provenance
+from app.logic.digest_grounding import digest_provenance, digest_source
 from app.logic.formulas import (
     ExecutiveSummaryView,
     account_now,
@@ -58,7 +58,6 @@ from app.ui.sizing import TABLE_H_SM
 from app.ui.workbench import render_watch_badge
 
 _PAGE = "Brief"
-_DIGEST_SOURCE = "DAILY_DIGEST (Cortex draft; figures checked against the exec board, templated on mismatch)"
 
 
 def _stalest_label(vals: dict) -> str:
@@ -198,8 +197,11 @@ def render() -> None:
         {"key": f"acts_{company}", "sql": mart_sql.action_queue(100, company), "source": "ACTION_QUEUE"},
     ], page=_PAGE, tier="live")
     # V165 (#24): the digest's measured-grounding columns, read only once V165 is applied (the shared schema
-    # gate answers from the startup gate's read: no statement of its own).
-    _digest_sql = mart_sql.latest_digest(grounded=has_migration(165, _PAGE))
+    # gate answers from the startup gate's read: no statement of its own). The source label names the check only
+    # once V165 is applied (review r1 W4).
+    _digest_grounded = has_migration(165, _PAGE)
+    _digest_sql = mart_sql.latest_digest(grounded=_digest_grounded)
+    _digest_source = digest_source(_digest_grounded)
     _b_rec = run_batch([
         {"key": "exh", "sql": mart_sql.contract_exhaustion(),
          "source": "SETTINGS + FACT_METERING_DAILY"},
@@ -209,7 +211,7 @@ def render() -> None:
         # PERF #46: the 14d spark moved OUT of this 'recent' batch to the shared hourly
         # daily_spend_wide() read below — batch members cache in a separate 'recent' store
         # that can't share with the solo hourly wide entry Overview/Contract also use.
-        {"key": "digest", "sql": _digest_sql, "source": _DIGEST_SOURCE},
+        {"key": "digest", "sql": _digest_sql, "source": _digest_source},
     ], page=_PAGE, tier="recent")
 
     # Perf: 'recent' (300s) — shares the health_strip cache entry with the sidebar/other shells
@@ -592,14 +594,14 @@ def render() -> None:
     # and is collapsed by default so open fires stay above the fold.
     # V165 (#24): the label is the MEASURED result (digest_provenance), never a fixed "grounded".
     digest = _b_rec.get("digest") or run(_digest_sql, page=_PAGE, key="daily_digest", tier="recent",
-                 source=_DIGEST_SOURCE)
+                 source=_digest_source)
     if digest.usable():
         drow = digest.df.iloc[0]
         prov = digest_provenance(drow)
         with st.expander(f"{prov.title} — {drow.get('DIGEST_DATE')}", expanded=False):
             status_chips([(prov.chip, prov.tone)])
             if prov.detail:
-                st.caption(prov.detail)
+                st.caption(md_dollars(prov.detail))       # UNGROUNDED keeps the '$' of the tokens it lists
             st.markdown(md_dollars(str(drow.get("BODY") or "")))
             if prov.show_draft:
                 with st.popover("Show the withheld AI draft"):

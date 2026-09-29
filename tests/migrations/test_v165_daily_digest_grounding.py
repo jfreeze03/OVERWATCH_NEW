@@ -429,15 +429,33 @@ def test_v165_description_fits_and_doubles_apostrophes():
 
 # -- lineage + round 13 ----------------------------------------------------------------------------------------
 
-def test_v165_marker_names_the_current_definer():
-    from tests.test_proc_lineage import _HISTORICAL_WAIVERS, _definers, _lineage, _migrations, _violations
-    texts = _migrations()
+def _assert_v165_lineage(texts: dict[int, str]) -> None:
+    """V165's own historical lineage, bounded at 165 like its siblings (test_v162/v163/v164): a later migration
+    that legitimately re-derives SP_DAILY_DIGEST must not turn this lock red (W16, review r1)."""
+    from tests.test_proc_lineage import _HISTORICAL_WAIVERS, _definers, _lineage, _violations
     rows = {(r["v"], r["proc"]): r for r in _lineage(texts)}
     r = rows[(165, "SP_DAILY_DIGEST")]
     assert r["src"] == "marker" and r["claims"] == [112] and r["prev"] == 112 and not r["waived"], r
-    assert [v for v in _definers(texts)["SP_DAILY_DIGEST"] if v >= 112] == [112, 165]
+    assert [v for v in _definers(texts)["SP_DAILY_DIGEST"] if 112 <= v <= 165] == [112, 165]
     assert not [v for v in _violations(texts, _HISTORICAL_WAIVERS) if v.startswith("V165 ")]
+
+
+def test_v165_marker_names_the_current_definer():
+    from tests.test_proc_lineage import _migrations
+    _assert_v165_lineage(_migrations())
     assert "LINEAGE-WAIVER" not in _MIG and _MIG.count("-- >>> derived:") == 1
+
+
+def test_v165_lineage_lock_survives_a_later_re_derivation():
+    """A synthetic V999 that re-derives SP_DAILY_DIGEST from V165 (the forward check -- the LATEST body is the
+    measured one -- lives in tests/test_digest_grounding_parity.py)."""
+    from tests.test_proc_lineage import _migrations
+    texts = _migrations()
+    assert max(texts) < 999
+    texts[999] = ("-- >>> derived:SP_DAILY_DIGEST  (from V165)\n"
+                  "CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_DAILY_DIGEST()\n"
+                  "RETURNS VARCHAR LANGUAGE SQL AS\n$$\nBEGIN\n    RETURN 'x';\nEND;\n$$;\n")
+    _assert_v165_lineage(texts)
 
 
 def test_v165_proc_normalizes_back_to_v112_byte_for_byte():

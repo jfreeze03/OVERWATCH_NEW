@@ -89,6 +89,11 @@ SCALE_WORDS = ((("k", "thousand"), 1000), (("m", "mm", "mn", "million"), 1000000
                (("b", "bn", "billion"), 1000000000))
 PCT_WORDS = ("percent", "pct")
 REL_TOL = "0.005"
+# The half-step rule is inclusive, but TOL and ABS(FVAL - VAL) are DOUBLEs: fact 1.25 shown as '1.3%' differs
+# by 0.050000000000000044 against a TOL of 0.05000000000000000277 and would fail. TOL is at least 0.5% of the
+# figure, so DOUBLE noise is ~1e-13 of TOL at any scale (an absolute epsilon is not: billion-scale half steps
+# still fail with + 1e-9); a 1e-9 relative slack absorbs it and admits nothing a rounded figure could exploit.
+TOL_SLACK = "1.000000001"
 for _p, _f in STRIP_PATTERNS:
     assert "\\" not in _p and "'" not in _p and "$$" not in _p
 for _p in (FIGURE_PATTERN, NUM_PATTERN, WORD_PATTERN, FACT_PATTERN):
@@ -152,7 +157,7 @@ GROUND_SELECT = f"""\
               ON (t.UNIT = 'num' OR (t.UNIT = 'usd' AND ENDSWITH(f.FKEY, '_USD'))
                                  OR (t.UNIT = 'pct' AND ENDSWITH(f.FKEY, '_PCT')))
              AND (t.KEYWORD IS NULL OR CONTAINS(f.FKEY, t.KEYWORD))
-             AND ABS(f.FVAL - t.VAL) <= t.TOL
+             AND ABS(f.FVAL - t.VAL) <= t.TOL * {TOL_SLACK}
             GROUP BY t.TOK
         ) g;
 """
@@ -296,8 +301,9 @@ D5_BLOCK = f"""\
     -- *_USD fact, a % figure only a *_PCT fact, a figure followed by a known noun (credits, critical, high,
     -- minutes, GB, queries, failed, tasks, alerts, hours, days) only a fact whose key names it, any other
     -- figure any fact. Dates, clock times, identifier-like tokens (WH_X1, p95, V112) and list markers are
-    -- stripped first. app/logic/digest_grounding.py mirrors this rule; tests/test_digest_grounding_parity.py
-    -- locks every literal below to it. Backslash-free patterns on purpose ([0-9], [.], [$]): V022/V026.
+    -- stripped first. The half step is inclusive: TOL * {TOL_SLACK} absorbs DOUBLE noise (fact 1.25 shown as 1.3).
+    -- app/logic/digest_grounding.py mirrors this rule; tests/test_digest_grounding_parity.py locks every
+    -- literal below to it. Backslash-free patterns on purpose ([0-9], [.], [$]): V022/V026.
     IF (:body IS NOT NULL AND TRIM(:body) <> '') THEN
 {STRIP_LINES}{GROUND_SELECT}        grounding_ok := (n_bad = 0);
     END IF;
