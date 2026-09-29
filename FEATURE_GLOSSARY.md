@@ -130,11 +130,11 @@ The proactive half of 'watch': how many of the viewer's watched entities moved (
 *Columns:* **LABEL** — Display name of the watched entity.; **STATUS** — What moved — cost spike/drop or health-grade change text.
 
 ### AI morning narrative (collapsed expander)
-Cortex-generated grounded daily digest, collapsed by default so open fires stay above the fold — context, not headline.
+The daily digest, collapsed by default so open fires stay above the fold — context, not headline. Since V165 SP_DAILY_DIGEST checks every figure in the Cortex draft against the exec-board facts it gave the model; when any figure does not match, or Cortex fails, it sends a templated digest built only from those facts instead. The title and chip show that MEASURED result: "AI morning narrative" with "AI-written; all N figures match the exec-board facts" (or "it states no figures to check"), or "Morning digest (templated, not AI-written)" with the reason; a templated digest lists the unmatched figures and offers the withheld AI draft behind "Show the withheld AI draft" (never sent). Rows written before V165 read "Figures not checked".
 
 | Metric | Means | Formula | Unit | Source |
 |---|---|---|---|---|
-| **AI morning narrative — {DIGEST_DATE}** | The latest grounded daily digest body text with its date. | latest_digest(): most recent row by DIGEST_DATE, renders BODY. | markdown text | mart_sql.latest_digest -> DAILY_DIGEST (core, Cortex-grounded) |
+| **AI morning narrative / Morning digest (templated, not AI-written) — {DIGEST_DATE}** | The latest digest body (the version the digest routes received) with its date and a provenance chip. | latest_digest(grounded=has_migration(165)): most recent row by DIGEST_DATE, renders BODY; digest_grounding.digest_provenance(BODY_SOURCE, GROUNDING_OK, FIGURES_CHECKED, UNGROUNDED, AI_BODY) picks the title and chip. A figure matches a fact by unit ($ only *_USD, % only *_PCT), by the noun after it, and within half a step of its shown precision or 0.5%. | markdown text + chip | mart_sql.latest_digest -> DAILY_DIGEST (core; FACTS, GROUNDING_OK, FIGURES_CHECKED, UNGROUNDED, BODY_SOURCE, AI_BODY since V165) |
 
 ### Executive export (collapsed expander)
 Three download buttons producing a self-contained brief from the same numbers on screen: presentation HTML, slide-bullets .txt, and CSV. Built from ExecutiveSummaryView assembled from the kpis[], action lines, and USD spend series.
@@ -228,11 +228,11 @@ Itemized penalties behind the score, each with an 'Investigate ->' jump to the p
 | **Score trend (retro, 30d, account-wide)** | Live-score weights replayed over each day's facts; account-wide (retro inputs have no company grain), sits a few points high (no per-day stale/open-action penalties). | logic.scoring.score_history per day; MTD budget penalty is per-month cumsum; leading partial month dropped when a budget is configured. | score /100 per day | run_mart_first(mart27_sql.platform_score_inputs -> FACT_PLATFORM_SCORE_DAILY; fallback mart_sql.score_inputs_daily -> facts + ALERT_EVENTS) |
 
 ### Morning AI digest (expander)
-Cortex-written daily narrative grounded in the exec board and alert counts. Account-wide; does not change with the company filter.
+The daily digest from the exec board and alert counts, with the same measured provenance chip as the Brief: an AI-written body whose every figure matched the facts, or a templated digest (not AI-written) sent because a figure did not match or Cortex failed. The expander title drops the model for a templated digest. Account-wide; does not change with the company filter.
 
 | Metric | Means | Formula | Unit | Source |
 |---|---|---|---|---|
-| **Digest body / date / model** | The latest generated digest text, its date, and the model that wrote it. | most recent row by DIGEST_DATE. | text | mart_sql.latest_digest -> DAILY_DIGEST (Cortex), written by TASK_DAILY_DIGEST |
+| **Digest body / date / model** | The latest digest text (the version sent), its date, the model for an AI-written body, and the provenance chip. | most recent row by DIGEST_DATE; digest_grounding.digest_provenance picks the title and chip (V165 columns read only once V165 is applied). | text + chip | mart_sql.latest_digest -> DAILY_DIGEST (Cortex draft, figures checked since V165), written by TASK_DAILY_DIGEST |
 
 ### Executive summary download (HTML / TXT / CSV)
 Export the same honest on-screen view-model: window spend, MTD, projected, alerts, score, drivers, actions, 30d spend sparkline — with scope labels and Incomplete-score handling so exports don't misrepresent.

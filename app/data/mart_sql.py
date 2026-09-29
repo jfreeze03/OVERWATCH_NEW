@@ -1348,9 +1348,18 @@ WHERE l.ITEM_ID = t.TWIN_ITEM_ID
   AND l.STATE <> 'REJECTED';"""
 
 
-def latest_digest() -> str:
+# V165 (Next-Fifty #24): the measured-grounding columns SP_DAILY_DIGEST writes since V165.
+DIGEST_GROUNDING_COLUMNS = ("BODY_SOURCE", "GROUNDING_OK", "FIGURES_CHECKED", "UNGROUNDED", "AI_BODY", "FACTS")
+
+
+def latest_digest(grounded: bool = False) -> str:
+    """The newest DAILY_DIGEST row. ``grounded`` adds the V165 measured-grounding columns; callers pass
+    ``schema_gate.has_migration(165, page)`` so a deploy that lands before V165 is applied never names a
+    missing column. Without it the SQL is byte-identical to the pre-V165 read (same cache entry; the canary
+    calls it bare)."""
+    extra = (",\n       " + ", ".join(DIGEST_GROUNDING_COLUMNS)) if grounded else ""
     return f"""
-SELECT DIGEST_DATE, MODEL, BODY, CREATED_AT
+SELECT DIGEST_DATE, MODEL, BODY, CREATED_AT{extra}
 FROM {core_object("DAILY_DIGEST")}
 ORDER BY DIGEST_DATE DESC
 LIMIT 1
