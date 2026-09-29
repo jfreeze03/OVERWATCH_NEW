@@ -27,6 +27,13 @@ KEEP_ACTIONED_SHARE = 0.90  # a suggestion must keep >= 90% of actioned alerts
 #                        written only for a lead-window WARN, so projection / CRIT / EXH never skew it)
 LOWER_IS_WORSE = frozenset({"SEC_CRED_EXPIRY", "COST_CONTRACT_BREACH", "PIPE_ETL_CYCLE_LATE"})
 
+# Rules raised once per occurrence whose arm ignores THRESHOLD_NUM and writes a CONSTANT METRIC_VALUE, so a
+# threshold suggested from their metric values would be meaningless (and the operator would paste it into an
+# ALTER that changes nothing):
+#   SEC_ADMIN_GRANT  one event per direct admin-role grant to a user (V162 arm [27], METRIC_VALUE 1)
+NO_THRESHOLD_RULES = frozenset({"SEC_ADMIN_GRANT"})
+NO_THRESHOLD_BASIS = "Raised once per grant; this rule has no threshold."
+
 
 def suggest_threshold(metric_values: pd.DataFrame, current_threshold: float,
                       rule_id: str = "") -> dict:
@@ -37,12 +44,21 @@ def suggest_threshold(metric_values: pd.DataFrame, current_threshold: float,
 
     ``rule_id`` selects the comparison direction (see LOWER_IS_WORSE). Omitting it
     keeps the higher-is-worse default, which is right for every other seeded rule.
+    A NO_THRESHOLD_RULES rule always returns ok=False (it has no threshold to tune).
     """
     import math
 
     current = safe_float(current_threshold)
-    inverse = str(rule_id or "").strip().upper() in LOWER_IS_WORSE
+    rid = str(rule_id or "").strip().upper()
+    inverse = rid in LOWER_IS_WORSE
     required = {"METRIC_VALUE", "RESOLUTION_KIND"}
+    if rid in NO_THRESHOLD_RULES:
+        # V162: nothing to tune -- report the resolution counts, never a threshold.
+        n_noise = n_actioned = 0
+        if metric_values is not None and "RESOLUTION_KIND" in getattr(metric_values, "columns", ()):
+            kinds = metric_values["RESOLUTION_KIND"].astype(str).str.upper()
+            n_noise, n_actioned = int((kinds == "NOISE").sum()), int((kinds == "ACTIONED").sum())
+        return {"ok": False, "basis": NO_THRESHOLD_BASIS, "noise_n": n_noise, "actioned_n": n_actioned}
     if metric_values is None or metric_values.empty or not required.issubset(metric_values.columns):
         return {"ok": False, "basis": "No resolved events with metric values yet.",
                 "noise_n": 0, "actioned_n": 0}

@@ -1064,7 +1064,11 @@ def test_v157_arm10_cycle_id_is_written_by_every_definer_since_v009():
                 assert ("SELECT c.RULE_ID, c.COMPANY, c.SEVERITY, c.TITLE, c.DETAIL, c.METRIC_VALUE, c.DEDUPE_KEY\n"
                         "    FROM candidates c") in text[pos:], f.name
             definers[int(f.name[1:4])] = items[4]
-    assert min(definers) == 9 and 157 in definers and len(definers) == 30, sorted(definers)
+    # wave 4: derived, not a literal 30 -- every SP_ALERT_SCAN definer since V009 carries arm [10] (V162 is the 31st);
+    # the v >= 157 branch below then holds each later re-derivation's [10] to V157's Central-pinned text.
+    from tests.test_proc_lineage import _definers, _migrations
+    scan_definers = {v for v in _definers(_migrations())["SP_ALERT_SCAN"] if v >= 9}
+    assert min(definers) == 9 and 157 in definers and set(definers) == scan_definers, sorted(definers)
     for v, detail in definers.items():
         dates = ({"TO_VARCHAR(cr.EXPIRES_AT, 'YYYY-MM-DD')", "TO_VARCHAR(cr.EXPIRATION_DATE, 'YYYY-MM-DD')"}
                  if v < 157 else
@@ -1666,9 +1670,10 @@ def test_v157_cadence_and_retirement_are_documented_for_the_operator():
     assert "never raised" in exp_row and "is not raised" in ops_row
     assert "ends between two checks is never raised" in " ".join(rb.split())
     assert "is never raised at all" in _MIG
-    # review fix: a hand CALL outside a slot reports 12/12 ok without running the gated rule
+    # review fix: a hand CALL outside a slot reports N/N ok without running the gated rule (wave 4: the tally is
+    # the latest scan's -- 14 since V162, pinned in tests/migrations/test_v162_*)
     osd = PLAYBOOKS["OPS_SCAN_DEGRADED"]
-    assert "still reports 12/12 ok" in osd and "05 or 17 Central hour" in osd
+    assert re.search(r"still reports (\d+)/\1 ok", osd) and "05 or 17 Central hour" in osd
     assert "A hand `CALL SP_ALERT_SCAN()` obeys the same gates" in " ".join(rb.split())
     spend = _read("app/ui/pages/cost_parts/spend.py")
     assert "where the COST_CLOUD_SVC_RATIO alert fires" not in spend and "fixed-ratio alert was retired" in spend

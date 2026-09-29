@@ -808,6 +808,7 @@ def _schema_ahead_banner() -> None:
 _NUM = "number"
 _SETTING_EDITORS: dict[str, tuple[str, object]] = {
     "FORECAST_ENGINE": ("enum", ["linear", "seasonal", "ml_forecast"]),
+    "INCIDENT_AUTO_DECLARE_CRITICAL": ("enum", ["TRUE", "FALSE"]),
     "CONTRACT_START_DATE": ("date", None),
     "CONTRACT_END_DATE": ("date", None),
     # Rates / prices ($ per unit).
