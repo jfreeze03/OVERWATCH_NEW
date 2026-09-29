@@ -48,7 +48,15 @@ from app.logic.insights import (
     with_auto_suspend_settings,
     with_warehouse_settings,
 )
-from app.logic.ledger_measure import MEASURED, TOO_EARLY, ledger_basis, ledger_measurement, proof_result_json
+from app.logic.ledger_measure import (
+    MEASURED,
+    TOO_EARLY,
+    ledger_basis,
+    ledger_measurement,
+    ledger_overlaps,
+    proof_result_json,
+    verify_prefill,
+)
 from app.logic.monitors import (
     account_monitor,
     resource_monitor_inventory,
@@ -103,6 +111,28 @@ from app.ui.components import (
 )
 
 _PAGE = "Cost Intelligence"
+# == mart_sql.savings_ledger()'s default LIMIT: the ledger PAGE _savings_tab reads (tests pin the two).
+# The measured verify's overlap check (review C22) needs it to know when that page may be cut off.
+_LEDGER_PAGE_ROWS = 500
+
+
+_SIZE_UP_ALTERNATIVE = (" The resize below is the size-up alternative — use it only if single queries are "
+                        "also slow or spilling.")
+
+
+def _scale_out_caption(plan: dict) -> str:
+    """The review-only Scale-out pane's caption (Next-Fifty #38; review C19): it names the Operations ▸
+    Emergency lever that builds the statement shown — Scaling policy for the SCALING_POLICY = 'STANDARD'
+    prefill, Cluster range for the MAX_CLUSTER_COUNT one — and no lever when no statement is shown (the
+    range is unknown or already at the generator's cap)."""
+    note = str(plan.get("note") or "")
+    if plan.get("policy_to_standard"):
+        return (note + " Starting clusters sooner adds credits while queries queue, so no saving is booked; "
+                "run it from Operations ▸ Emergency ▸ Scaling policy (audited)." + _SIZE_UP_ALTERNATIVE)
+    if plan.get("known") and not plan.get("at_cap"):
+        return (note + " A wider cluster range adds credits while queries queue, so no saving is booked; "
+                "run it from Operations ▸ Emergency ▸ Cluster range (audited)." + _SIZE_UP_ALTERNATIVE)
+    return note + " No scale-out statement is generated here." + _SIZE_UP_ALTERNATIVE
 
 
 # Split out of app/ui/pages/cost.py (V028): section bodies only —
@@ -672,10 +702,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     elif _so["known"] and not _so["at_cap"]:
                         st.code(remediation.cluster_range_fix(str(srow["WAREHOUSE_NAME"]),
                                                               _so["min"], _so["max"]), language="sql")
-                    st.caption(_so["note"] + " A wider cluster range adds credits while queries queue, "
-                               "so no saving is booked; run it from Operations ▸ Emergency ▸ Cluster "
-                               "range (audited). The resize below is the size-up alternative — use it "
-                               "only if single queries are also slow or spilling.")
+                    st.caption(_scale_out_caption(_so))
                 elif not bool(srow.get("ACTIONABLE", False)):
                     st.warning(
                         "This row is not an evidence-backed resize recommendation. The SQL remains "
@@ -2154,7 +2181,24 @@ def _savings_tab(rate: float = 3.68, settings: dict | None = None) -> None:
                 else:
                     st.caption("This item has no target or booking date to measure around — enter the "
                                "verified amount by hand.")
+                _qid = str(st.session_state.get(f"_ow_proof_qid_{_item}") or "")
+                # Review C22: the before/after is keyed on the target + booking day only, so another change
+                # booked on the same target inside the measured window moves the same delta. Checked against
+                # the ledger page already read above (no new read); a full page whose oldest row is inside
+                # the window cannot rule an overlap out.
+                _ov = (ledger_overlaps(res.df, item_id=_item, target=_tgt, booked_day=_booked.date(),
+                                       window_end=_m.get("after_end"), row_cap=_LEDGER_PAGE_ROWS)
+                       if _m is not None else None)
+                # Review C17: the Verify click's rerun builds the UPDATE from what the previous render SHOWED
+                # (measurement, proof query id, overlap check), never from a read that moved in between.
+                _clicked = bool(st.session_state.get("ledger_verify_exec"))
+                _shown = st.session_state.get("_ow_ledger_shown")
+                if _clicked and isinstance(_shown, dict) and _shown.get("item") == _item:
+                    _m, _msql, _qid, _ov = _shown["m"], _shown["sql"], _shown["qid"], _shown["ov"]
+                st.session_state["_ow_ledger_shown"] = {"item": _item, "m": _m, "sql": _msql, "qid": _qid,
+                                                        "ov": _ov}
                 _measured = _m is not None and _m["state"] == MEASURED
+                _overlap = _ov is not None and (bool(_ov["count"]) or not _ov["complete"])
                 if _m is not None:
                     _saving = (format_usd(_m["monthly_usd"]) if _measured
                                else "Too early" if _m["state"] == TOO_EARLY else "No data")
@@ -2174,9 +2218,12 @@ def _savings_tab(rate: float = 3.68, settings: dict | None = None) -> None:
                                 "value": ("—" if _m["after_per_day"] is None
                                           else format_usd(_m["after_per_day"] * rate))}]
                     _mk.append({"label": "Measured saving / mo", "value": _saving,
-                                "severity": "ok" if _measured and _m["monthly_usd"] > 0 else "",
+                                "severity": ("warn" if _overlap and _measured
+                                             else "ok" if _measured and _m["monthly_usd"] > 0 else ""),
                                 "help": "(before per day - after per day) x 30 days, priced. A negative "
-                                        "figure means the level rose; the prefill is then 0."})
+                                        "figure means the level rose; the prefill is then 0. It covers "
+                                        "every change on the target inside the window, not only this "
+                                        "item's."})
                     if _basis == "WAREHOUSE":
                         _mk.append({"label": "Volume ×",
                                     "value": ("—" if _m["volume_ratio"] is None
@@ -2186,18 +2233,39 @@ def _savings_tab(rate: float = 3.68, settings: dict | None = None) -> None:
                                             "is volume-confounded (disclosed, not adjusted)."})
                     kpi_row(_mk)
                     st.caption(md_dollars(_m["note"] + (" It prefills the amount below and never "
-                                                        "overwrites an edit you make." if _measured
+                                                        "overwrites an edit you make."
+                                                        if _measured and not _overlap
                                                         else " Enter the verified amount by hand.")))
-                _sig_now = str(st.session_state.get("_ow_ledger_prefill_sig") or "")
-                if _measured and _m is not None:
-                    _sig = f"{_item}|{_m['prefill_usd']:.2f}"
-                    if _sig_now != _sig:
-                        st.session_state["_ow_ledger_prefill_sig"] = _sig
-                        st.session_state["ledger_verified_usd"] = float(_m["prefill_usd"])
-                elif _sig_now and not _sig_now.startswith(f"{_item}|"):
-                    # another item's measured prefill must not carry over to this unmeasured one
-                    st.session_state["_ow_ledger_prefill_sig"] = ""
-                    st.session_state["ledger_verified_usd"] = 0.0
+                    if _ov is not None and _ov["count"]:
+                        _more = _ov["count"] - len(_ov["items"])
+                        st.warning(md_dollars(
+                            f"Not prefilled: {_ov['count']:,} other booked change(s) on {_tgt} fall inside "
+                            f"this measured window ({_ov['start']:%b} {_ov['start'].day} – {_ov['end']:%b} "
+                            f"{_ov['end'].day}): "
+                            + "; ".join(f"{o['label']} — {o['description']}" for o in _ov["items"])
+                            + (f"; and {_more:,} more" if _more > 0 else "")
+                            + ". The before/after includes their effect too, so split the measured change "
+                              "between the items and enter only this item's share."))
+                    elif _ov is not None and not _ov["complete"]:
+                        st.warning(f"Not prefilled: the ledger above shows the newest {_LEDGER_PAGE_ROWS:,} "
+                                   f"rows and this booking's measured window reaches past them, so another "
+                                   f"change on {_tgt} cannot be ruled out. Enter only this item's share.")
+                # Review C12 / C17: the prefill re-arms when Streamlit dropped the widget (the section was
+                # left), follows the measurement only while the widget still holds what OVERWATCH put there,
+                # never overwrites an edit, and never moves in the Verify click's own rerun.
+                _pf = verify_prefill(
+                    item_id=_item,
+                    target=float(_m["prefill_usd"]) if _measured and not _overlap and _m is not None else None,
+                    last=st.session_state.get("_ow_ledger_prefill"),
+                    # None = the key is ABSENT: never rendered, or dropped after the section was left
+                    widget_value=st.session_state.get("ledger_verified_usd"),
+                    clicked=_clicked)
+                st.session_state["_ow_ledger_prefill"] = _pf["state"]
+                if _pf["write"] is not None:
+                    st.session_state["ledger_verified_usd"] = float(_pf["write"])
+                if _pf["kept_edit"] and _m is not None:
+                    st.caption(md_dollars(f"The measured saving now reads {format_usd(_m['prefill_usd'])}/mo; "
+                                          "your entry is kept."))
                 verified_usd = st.number_input(
                     "Verified USD per month (measured, post-period)",
                     min_value=0.0, step=50.0, key="ledger_verified_usd",
@@ -2209,10 +2277,9 @@ def _savings_tab(rate: float = 3.68, settings: dict | None = None) -> None:
                 _proof_set = ""
                 if _measured and _m is not None:
                     import hashlib
-                    _qid = str(st.session_state.get(f"_ow_proof_qid_{_item}") or "")
                     _proof_json = proof_result_json(
                         _m, target=_tgt, basis=str(_basis), entered_usd=safe_float(verified_usd),
-                        sql_hash=hashlib.sha1(_msql.encode()).hexdigest()[:16])
+                        sql_hash=hashlib.sha1(_msql.encode()).hexdigest()[:16], overlaps=_ov)
                     _proof_set = (f",\n    PROOF_QUERY_ID = {sql_literal(_qid, 80) if _qid else 'NULL'}, "
                                   f"PROOF_RESULT = {sql_literal(_proof_json, 16000)}, "
                                   "PROOF_RUN_AT = CURRENT_TIMESTAMP()")

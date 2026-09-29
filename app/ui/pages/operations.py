@@ -3777,10 +3777,12 @@ def _stmt_timeout_posture_panel(company: str, days: int) -> None:
     tail_df = tail.df if tail.usable() else None
     names, not_visible = stmt_timeout.warehouse_universe(whs.df if whs.usable() else None, tail_df, company)
     if not names:
-        empty_state("unavailable" if not (tail.ok or whs.ok) else "no_data_yet",
-                    "No warehouse to read a statement timeout for in this scope (SHOW WAREHOUSES and the "
-                    "runtime tail returned none).",
-                    detail=(tail.error or whs.error))
+        # review C16: pick the kind from the read this scope depends on (a company scope lists only the
+        # runtime tail's warehouses), so a failed read never reads as a verified-empty scope
+        _kind, _msg, _which = stmt_timeout.empty_universe_state(company, tail_ok=tail.ok, show_ok=whs.ok,
+                                                                active=len(not_visible))
+        empty_state(_kind, _msg, detail=(tail.error if _which == "tail" else whs.error if _which == "show"
+                                         else ""))
         return
     params: dict = {}
     with st.spinner(f"Reading {len(names)} warehouse timeouts…"):
@@ -3813,11 +3815,8 @@ def _stmt_timeout_posture_panel(company: str, days: int) -> None:
          "value": "—" if _timed_out is None else f"{_timed_out:,}",
          "help": "Statements Snowflake cancelled for hitting a statement or warehouse timeout in the "
                  "window, across every warehouse in scope: caps that already fired."},
-        {"label": "Account value",
-         "value": humanize_duration(account_s) if account_s is not None else "—",
-         "delta": acct_how, "delta_color": "off",
-         "help": "The account's STATEMENT_TIMEOUT_IN_SECONDS, which a warehouse (and every session) "
-                 "inherits unless it sets its own."},
+        # review C15/C20: the ENFORCED value (0 = the 7-day maximum reads 168h, never "0s")
+        stmt_timeout.account_value_kpi(account_s, acct_how),
     ])
     entity_nav_table(
         posture[stmt_timeout.POSTURE_COLUMNS[:10]], key=f"ops_wh_timeout_tbl_{company}",

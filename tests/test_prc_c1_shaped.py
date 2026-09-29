@@ -58,7 +58,7 @@ def _tail() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _ops_recorder(monkeypatch) -> list[str]:
+def _ops_recorder(monkeypatch, *, account: tuple[str, str] = ("172800", ""), tail_fails: bool = False) -> list[str]:
     """Record every SQL Operations issues; answer the timeout reads with crafted frames."""
     import app.ui.pages.operations as ops
 
@@ -74,8 +74,11 @@ def _ops_recorder(monkeypatch) -> list[str]:
         if sql.endswith("IN WAREHOUSE WH_B"):
             return _show("300", "WAREHOUSE")
         if sql.endswith("IN ACCOUNT"):
-            return _show("172800", "")
+            return _show(*account)
         if "RUNS_OVER_300" in sql:
+            if tail_fails:
+                return QueryResult(df=pd.DataFrame(), ok=False, error="Statement reached its timeout",
+                                   error_kind="timeout", source="t")
             return _ok(_tail())
         return _shaped_run(*args, **kwargs)
 
@@ -94,10 +97,12 @@ def _ops_recorder(monkeypatch) -> list[str]:
     return seen
 
 
-def _sizing_lens(at, *, timeout_on: bool) -> None:
+def _sizing_lens(at, *, timeout_on: bool, company: str = "") -> None:
     at.run()
     assert not at.exception
     _nav_to(at, "Operations")
+    if company:
+        at.session_state["flt_company"] = company
     at.session_state["ops_section"] = "Warehouses"
     at.session_state["ops_wh_view"] = "Sizing & efficiency"
     if timeout_on:
@@ -125,6 +130,38 @@ def test_statement_timeout_posture_renders_and_scripts_only_the_uncapped_warehou
     assert "WH_B SET STATEMENT_TIMEOUT_IN_SECONDS" not in code          # capped at 300s: never loosened
     assert "Review only" in blob
     assert any(s.endswith("IN WAREHOUSE WH_A") for s in seen) and any(s.endswith("IN ACCOUNT") for s in seen)
+
+
+def _card(blob: str, title: str) -> str:
+    """One KPI card's HTML: from its title to the next card's title (or 3000 chars)."""
+    at_title = blob.index(f'ow-card__title">{title}<')
+    nxt = blob.find('ow-card__title">', at_title + 20)
+    return blob[at_title:nxt if nxt > 0 else at_title + 3000]
+
+
+@_SKIP
+def test_statement_timeout_account_zero_reads_as_the_seven_day_max(monkeypatch):
+    """Review C15/C20: ALTER ACCOUNT SET STATEMENT_TIMEOUT_IN_SECONDS = 0 enforces the 7-day maximum; the
+    'Account value' tile shows 168h (and says why), never '0s' beside the uncapped caption."""
+    _ops_recorder(monkeypatch, account=("0", "ACCOUNT"))
+    at = AppTest.from_function(_entry, default_timeout=30)
+    _sizing_lens(at, timeout_on=True)
+    blob = _blob(at)
+    card = _card(blob, "Account value")
+    assert "168h" in card and "0 = 7-day max" in card and ">0s<" not in card, card
+    assert "The account value is also 48 hours or more" in blob
+
+
+@_SKIP
+def test_statement_timeout_company_scope_with_a_failed_tail_is_unavailable(monkeypatch):
+    """Review C16: under a company scope the warehouse list IS the runtime tail; when that read fails the
+    panel says the read failed (the red 'unavailable' state), not that the scope returned none."""
+    _ops_recorder(monkeypatch, tail_fails=True)
+    at = AppTest.from_function(_entry, default_timeout=30)
+    _sizing_lens(at, timeout_on=True, company="ALFA")
+    errors = " ".join(str(e.value) for e in at.error)
+    assert "completed-runtime tail could not be read, so this company's warehouses are unknown" in errors
+    assert "returned none" not in _blob(at)
 
 
 @_SKIP
@@ -206,11 +243,179 @@ def test_ledger_verify_prefills_the_measured_saving(monkeypatch):
     # booked Aug 1: after window = Aug 2..Aug 31 (booking + 30), 45 credits/day vs 100 before, at 3.68
     expected = round((100.0 - 1350.0 / 30) * 30 * 3.68, 2)
     assert at.number_input(key="ledger_verified_usd").value == pytest.approx(expected)
-    assert at.session_state["_ow_ledger_prefill_sig"] == f"abcdef12-0000-4000-8000-000000000001|{expected:.2f}"
-    # an operator's edit survives the next rerun (the sentinel only fires when the measurement changes)
+    # review C12/C17: the sentinel records the item and the amount OVERWATCH left in the widget
+    assert at.session_state["_ow_ledger_prefill"] == {"item": "abcdef12-0000-4000-8000-000000000001",
+                                                      "val": expected}
+    # an operator's edit survives the next rerun (and a moved measurement: see the C17 tests below)
     at.number_input(key="ledger_verified_usd").set_value(1234.0)
     at.run()
     assert at.number_input(key="ledger_verified_usd").value == 1234.0
     code = "\n".join(str(c.value) for c in at.code)
     assert "PROOF_RESULT = '" in code and "PROOF_RUN_AT = CURRENT_TIMESTAMP()" in code
     assert "AND STATE = 'ESTIMATED';" in code
+
+
+# ---------------------------------------------------------------------------
+# PR C review r1 (C12 / C17 / C22): the measured-verify prefill on the rendered page
+# ---------------------------------------------------------------------------
+
+class _LedgerPage:
+    """Cost ▸ Remediation & ledger with a crafted ledger + a MUTABLE before/after frame (so a test can move
+    the measurement between reruns, as the daily FACT_WAREHOUSE_DAILY load does), an operator viewer and a
+    recording statement runner."""
+
+    def __init__(self, monkeypatch, ledger: pd.DataFrame | None = None) -> None:
+        import app.ui.pages.cost_parts.optimize as opt
+
+        self.ledger = _estimated_schedule_row() if ledger is None else ledger
+        self.measure = _measurement()
+        self.written: list[str] = []
+
+        def _run(*args, **kwargs):
+            key = str(kwargs.get("key") or "")
+            if key == "savings_ledger":
+                return _ok(self.ledger)
+            if key.startswith("ledger_measure_"):
+                return _ok(self.measure.copy())
+            return _shaped_run(*args, **kwargs)
+
+        def _record(sql, **_kwargs):
+            self.written.append(str(sql))
+            return True, "ok"
+
+        monkeypatch.setattr(opt, "run", _run)
+        monkeypatch.setattr(opt, "_is_operator", lambda: True)
+        monkeypatch.setattr(opt, "write_gate_open", lambda *_a, **_k: True)
+        monkeypatch.setattr(opt, "execute_statement", _record)
+        self.at = AppTest.from_function(_entry, default_timeout=30)
+
+    def open(self):
+        at = self.at
+        at.run()
+        assert not at.exception
+        _nav_to(at, "Cost Intelligence")
+        at.session_state["cost_section"] = "Optimization & Savings"
+        at.session_state["opt_section"] = "Remediation & ledger"
+        at.run()
+        self.check()
+        return at
+
+    def check(self) -> None:
+        assert not self.at.exception, f"savings ledger verify (shaped): {self.at.exception}"
+        assert not any("could not finish rendering" in str(getattr(e, "value", "")) for e in self.at.error)
+
+    def amount(self) -> float:
+        return float(self.at.number_input(key="ledger_verified_usd").value)
+
+    def update_sql(self) -> str:
+        shown = [str(c.value) for c in self.at.code if "SET STATE = 'VERIFIED'" in str(c.value)]
+        assert len(shown) == 1, shown
+        return shown[0]
+
+    def verify_updates(self) -> list[str]:
+        return [s for s in self.written if "SET STATE = 'VERIFIED'" in s]
+
+
+def _prefill_for(after_credits: float) -> float:
+    # booked Aug 1: 14 days before at 100 credits/day; after = Aug 2..Aug 31 (booking + 30), at 3.68
+    return round((1400.0 / 14 - after_credits / 30) * 30 * 3.68, 2)
+
+
+@_SKIP
+def test_ledger_prefill_rearms_after_leaving_and_returning(monkeypatch):
+    """C12: leaving Remediation & ledger drops the number_input's widget state; the prefill must re-arm on
+    the way back instead of rendering 0 under a 'Measured saving / mo' KPI that says it was prefilled."""
+    page = _LedgerPage(monkeypatch)
+    at = page.open()
+    expected = _prefill_for(1350.0)
+    assert page.amount() == pytest.approx(expected)
+    at.session_state["opt_section"] = "Idle & sizing"
+    at.run()
+    page.check()
+    at.session_state["opt_section"] = "Remediation & ledger"
+    at.run()
+    page.check()
+    assert page.amount() == pytest.approx(expected)
+    assert f"VERIFIED_USD = {expected}" in page.update_sql()
+
+
+@_SKIP
+def test_ledger_prefill_never_overwrites_an_edit_when_the_measurement_moves(monkeypatch):
+    """C17: an operator's typed amount survives the measurement moving (the daily load landing), both on
+    the next render and in the UPDATE the Verify click executes."""
+    page = _LedgerPage(monkeypatch)
+    at = page.open()
+    at.number_input(key="ledger_verified_usd").set_value(1234.0)
+    at.run()
+    page.check()
+    assert page.amount() == 1234.0
+    page.measure.loc[0, "AFTER_CREDITS"] = 1200.0                 # the load lands: a new after-window
+    at.run()
+    page.check()
+    assert page.amount() == 1234.0
+    shown = page.update_sql()
+    assert "VERIFIED_USD = 1234.0" in shown
+    caps = " ".join(str(c.value) for c in at.caption)
+    assert "your entry is kept" in caps, caps[-800:]
+    at.button(key="ledger_verify_exec").click()
+    at.run()
+    page.check()
+    assert page.verify_updates() == [shown]
+
+
+@_SKIP
+def test_ledger_verify_click_writes_exactly_what_was_shown_when_the_measurement_moves(monkeypatch):
+    """C17: the measurement moves between the render and the Verify click (untouched prefill). The click's
+    rerun must write the UPDATE st.code showed -- the same VERIFIED_USD and the same PROOF_RESULT --
+    never a silently re-prefilled figure."""
+    page = _LedgerPage(monkeypatch)
+    at = page.open()
+    shown = page.update_sql()
+    assert f"VERIFIED_USD = {_prefill_for(1350.0)}" in shown
+    page.measure.loc[0, "AFTER_CREDITS"] = 1200.0                 # moves after the render, before the click
+    at.button(key="ledger_verify_exec").click()
+    at.run()
+    page.check()
+    assert page.verify_updates() == [shown]
+    # the click is spent: the next render re-measures and moves the untouched prefill to the new figure
+    at.run()
+    page.check()
+    assert page.amount() == pytest.approx(_prefill_for(1200.0))
+
+
+def _other_row(item_id: str, *, finding: str, source: str, state: str, created: str,
+               target: str | None = "WH_A", change_wh: str | None = None, superseded: str | None = None,
+               description: str = "Other change") -> pd.DataFrame:
+    df = _estimated_schedule_row()
+    df["ITEM_ID"] = item_id
+    df["DESCRIPTION"] = description
+    df["STATE"] = state
+    df["SOURCE"] = source
+    df["FINDING_TYPE"] = finding
+    df["TARGET_OBJECT"] = target
+    df["CREATED_AT"] = pd.Timestamp(created)
+    df["SUPERSEDED_BY_CHANGE_ID"] = superseded
+    if "CHANGE_WAREHOUSE" in df.columns:
+        df["CHANGE_WAREHOUSE"] = change_wh
+    return df
+
+
+@_SKIP
+def test_ledger_verify_is_not_prefilled_when_another_change_on_the_warehouse_overlaps(monkeypatch):
+    """C22: a settled AUTO_SUSPEND change on WH_A three days after this SCHEDULE booking sits inside its
+    measured window: the warehouse delta is not this item's alone, so the amount is not prefilled and the
+    overlapping item is named."""
+    ledger = pd.concat([
+        _other_row("feedface-0000-4000-8000-00000000000a", finding="AUTO_SUSPEND", source="auto",
+                   state="VERIFIED", created="2026-08-04 07:00", target=None, change_wh="WH_A",
+                   description="Detected AUTO_SUSPEND change on WH_A: 600 -> 60"),
+        _estimated_schedule_row(),
+    ], ignore_index=True)
+    page = _LedgerPage(monkeypatch, ledger)
+    at = page.open()
+    assert page.amount() == 0.0
+    assert "VERIFIED_USD = 0.0" in page.update_sql()
+    warns = " ".join(str(w.value) for w in at.warning)
+    assert "feedface" in warns and "split" in warns, warns[:800]
+    # the overlap is recorded in the proof a hand-entered verify stamps
+    assert "overlapping_items" in page.update_sql()

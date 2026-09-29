@@ -1186,11 +1186,13 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                             elif fix_kind.startswith("Statement"):
                                 # Next-Fifty #33 F1: tighten-only, like the auto-suspend guard. A blind
                                 # SET = 3600 LOOSENS a warehouse already capped tighter (the app warehouse
-                                # runs at 300s), so read the warehouse's current value first (the same
-                                # SHOW as the Warehouses timeout posture; metadata-cached) and generate the
-                                # 1h cap only when it tightens.
+                                # runs at 300s), so read the warehouse's current value first and generate
+                                # the 1h cap only when it tightens. Review C13: this read gates an
+                                # EXECUTABLE statement, so it rides the 30 s live tier, never the 4 h
+                                # metadata entry the review-only Warehouses posture panel caches (a cap a
+                                # DBA tightened in a worksheet since then would read stale and be loosened).
                                 _to_res = run(ops_sql.warehouse_stmt_timeout_sql(wh_inline), page=_PAGE,
-                                              key=f"clf_stmt_to_{event_id[:8]}", tier="metadata",
+                                              key=f"clf_stmt_to_{event_id[:8]}", tier="live",
                                               source=f"SHOW PARAMETERS IN WAREHOUSE {wh_inline}",
                                               max_rows=0, probe=True)
                                 _to_cur, _to_lvl = stmt_timeout.parse_timeout_row(

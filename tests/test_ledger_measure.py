@@ -23,7 +23,9 @@ from app.logic.ledger_measure import (
     TOO_EARLY,
     ledger_basis,
     ledger_measurement,
+    ledger_overlaps,
     proof_result_json,
+    verify_prefill,
 )
 from tests._source import read
 
@@ -193,6 +195,140 @@ def test_canaries_registered_after_the_ledger_pair():
 
 
 # ---------------------------------------------------------------------------
+# PR C review r1: the prefill decision (C12 / C17) and the same-target overlap check (C22). Pure, so the
+# floor leg runs them too; the rendered proofs are in test_prc_c1_shaped.py.
+# ---------------------------------------------------------------------------
+
+_A, _B = "item-a", "item-b"
+
+
+def test_verify_prefill_first_render_and_item_switch():
+    first = verify_prefill(item_id=_A, target=6072.0, last=None, widget_value=None, clicked=False)
+    assert first == {"write": 6072.0, "state": {"item": _A, "val": 6072.0}, "kept_edit": False}
+    # another item takes its own prefill ...
+    other = verify_prefill(item_id=_B, target=100.0, last=first["state"], widget_value=1234.0, clicked=False)
+    assert other["write"] == 100.0 and other["state"] == {"item": _B, "val": 100.0}
+    # ... or 0.0 when it has none: item A's amount never carries over to an unmeasured item
+    bare = verify_prefill(item_id=_B, target=None, last=first["state"], widget_value=6072.0, clicked=False)
+    assert bare["write"] == 0.0 and bare["state"] == {"item": _B, "val": 0.0}
+    # no prefill ever and no widget yet: nothing written, the widget's own 0.0 default is the baseline
+    none = verify_prefill(item_id=_A, target=None, last=None, widget_value=None, clicked=False)
+    assert none == {"write": None, "state": {"item": _A, "val": 0.0}, "kept_edit": False}
+
+
+def test_verify_prefill_rearms_when_the_widget_state_was_dropped():
+    """C12: leaving the section drops the widget key; coming back must re-prefill, not render 0."""
+    last = {"item": _A, "val": 6072.0}
+    back = verify_prefill(item_id=_A, target=6072.0, last=last, widget_value=None, clicked=False)
+    assert back["write"] == 6072.0 and back["state"] == last
+    # a later measurement (read failed first, 0.0 default on screen) still prefills the untouched widget
+    late = verify_prefill(item_id=_A, target=500.0, last={"item": _A, "val": 0.0}, widget_value=0.0,
+                          clicked=False)
+    assert late["write"] == 500.0
+
+
+def test_verify_prefill_never_overwrites_an_edit():
+    """C17: the measurement moves; an edited widget keeps the operator's value, an untouched one follows."""
+    last = {"item": _A, "val": 6072.0}
+    edited = verify_prefill(item_id=_A, target=5974.59, last=last, widget_value=1234.0, clicked=False)
+    assert edited["write"] is None and edited["kept_edit"] is True and edited["state"] == last
+    same = verify_prefill(item_id=_A, target=1234.0, last=last, widget_value=1234.0, clicked=False)
+    assert same["write"] is None and same["kept_edit"] is False
+    untouched = verify_prefill(item_id=_A, target=5974.59, last=last, widget_value=6072.0, clicked=False)
+    assert untouched["write"] == 5974.59 and untouched["state"] == {"item": _A, "val": 5974.59}
+    # an untouched prefill is withdrawn (to the 0.0 default) when the target goes away, e.g. an overlap
+    gone = verify_prefill(item_id=_A, target=None, last=last, widget_value=6072.0, clicked=False)
+    assert gone["write"] == 0.0 and gone["state"] == {"item": _A, "val": 0.0}
+    steady = verify_prefill(item_id=_A, target=6072.0, last=last, widget_value=6072.0, clicked=False)
+    assert steady["write"] is None and steady["state"] == last
+
+
+def test_verify_prefill_never_moves_in_the_verify_click_rerun():
+    """C17: the click's rerun must write what st.code showed, so the amount is frozen there."""
+    last = {"item": _A, "val": 6072.0}
+    for widget in (6072.0, 1234.0, None):
+        frozen = verify_prefill(item_id=_A, target=5974.59, last=last, widget_value=widget, clicked=True)
+        assert frozen["write"] is None and frozen["state"] == last
+
+
+def _ledger(*rows: dict) -> pd.DataFrame:
+    base = {"ITEM_ID": "", "CREATED_AT": pd.Timestamp("2026-09-01 09:00"), "DESCRIPTION": "d",
+            "STATE": "ESTIMATED", "FINDING_TYPE": "SCHEDULE", "SOURCE": "manual", "TARGET_OBJECT": "WH_A",
+            "SUPERSEDED_BY_CHANGE_ID": None, "CHANGE_WAREHOUSE": None}
+    return pd.DataFrame([{**base, **r} for r in rows])
+
+
+def test_ledger_overlaps_names_other_changes_inside_the_window():
+    me = {"ITEM_ID": "me000000-1"}
+    frame = _ledger(
+        me,
+        # a settled change-scan row: no TARGET_OBJECT, matched on its registry warehouse; inside the window
+        {"ITEM_ID": "auto0000-1", "SOURCE": "auto", "STATE": "VERIFIED", "FINDING_TYPE": "AUTO_SUSPEND",
+         "TARGET_OBJECT": None, "CHANGE_WAREHOUSE": "wh_a", "CREATED_AT": pd.Timestamp("2026-09-03 07:00")},
+        # a manual row on the same warehouse 10 days BEFORE the booking: inside the 14-day before-window
+        {"ITEM_ID": "man00000-1", "CREATED_AT": pd.Timestamp("2026-08-22 10:00"), "TARGET_OBJECT": '"WH_A"'},
+        # excluded: another warehouse, rejected, a superseded twin, and outside the window either side
+        {"ITEM_ID": "othr0000-1", "TARGET_OBJECT": "WH_B"},
+        {"ITEM_ID": "rej00000-1", "STATE": "REJECTED"},
+        {"ITEM_ID": "twin0000-1", "SUPERSEDED_BY_CHANGE_ID": "chg-1"},
+        {"ITEM_ID": "old00000-1", "CREATED_AT": pd.Timestamp("2026-08-17 23:00")},
+        {"ITEM_ID": "late0000-1", "CREATED_AT": pd.Timestamp("2026-09-20 08:00")},
+    )
+    ov = ledger_overlaps(frame, item_id="me000000-1", target="WH_A", booked_day=_BOOKED,
+                         window_end=date(2026, 9, 15), row_cap=500)
+    assert [o["item_id"] for o in ov["items"]] == ["man00000-1", "auto0000-1"] and ov["count"] == 2
+    assert ov["complete"] is True and ov["start"] == date(2026, 8, 18) and ov["end"] == date(2026, 9, 15)
+    assert ov["items"][1]["label"] == "auto0000 AUTO_SUSPEND (auto, VERIFIED, booked Sep 3)"
+    # no after_end yet: the window runs to booking + 30 days, which takes the Sep 20 row in
+    wide = ledger_overlaps(frame, item_id="me000000-1", target="WH_A", booked_day=_BOOKED)
+    assert "late0000-1" in [o["item_id"] for o in wide["items"]]
+    alone = ledger_overlaps(_ledger(me), item_id="me000000-1", target="WH_A", booked_day=_BOOKED)
+    assert alone["count"] == 0 and alone["items"] == [] and alone["complete"] is True
+    assert ledger_overlaps(None, item_id="x", target="WH_A", booked_day=_BOOKED)["count"] == 0
+
+
+def test_ledger_overlaps_flags_a_cut_off_page():
+    """The page is savings_ledger()'s newest-first LIMIT: full, with its oldest row inside the window, it
+    cannot rule an overlap out."""
+    rows = [{"ITEM_ID": f"r{i:07d}-1", "TARGET_OBJECT": "WH_Z",
+             "CREATED_AT": pd.Timestamp("2026-08-25 09:00")} for i in range(3)]
+    cut = ledger_overlaps(_ledger({"ITEM_ID": "me000000-1"}, *rows), item_id="me000000-1", target="WH_A",
+                          booked_day=_BOOKED, row_cap=4)
+    assert cut["count"] == 0 and cut["complete"] is False
+    older = [*rows, {"ITEM_ID": "anc00000-1", "TARGET_OBJECT": "WH_Z",
+                     "CREATED_AT": pd.Timestamp("2026-08-01 09:00")}]
+    ok = ledger_overlaps(_ledger({"ITEM_ID": "me000000-1"}, *older), item_id="me000000-1", target="WH_A",
+                         booked_day=_BOOKED, row_cap=5)
+    assert ok["complete"] is True
+    assert ledger_overlaps(_ledger({"ITEM_ID": "me000000-1"}, *rows), item_id="me000000-1", target="WH_A",
+                           booked_day=_BOOKED, row_cap=500)["complete"] is True
+
+
+def test_proof_result_records_overlaps_only_when_present():
+    m = ledger_measurement(_wh_row(), basis="WAREHOUSE", rate=3.68, storage_usd_per_tb=23.0, today=_TODAY)
+    clean = proof_result_json(m, target="WH_A", basis="WAREHOUSE", entered_usd=1.0, sql_hash="h")
+    assert clean == proof_result_json(m, target="WH_A", basis="WAREHOUSE", entered_usd=1.0, sql_hash="h",
+                                      overlaps={"items": [], "count": 0, "complete": True})
+    doc = json.loads(proof_result_json(
+        m, target="WH_A", basis="WAREHOUSE", entered_usd=1.0, sql_hash="h",
+        overlaps={"items": [{"label": "auto0000 AUTO_SUSPEND (auto, VERIFIED, booked Sep 3)"}], "count": 1,
+                  "complete": False}))
+    assert doc["overlapping_items"] == ["auto0000 AUTO_SUSPEND (auto, VERIFIED, booked Sep 3)"]
+    assert doc["overlap_check"] == "incomplete"
+
+
+def test_ledger_page_rows_matches_the_builder_default():
+    import inspect
+
+    from app.ui.pages.cost_parts import optimize
+    assert inspect.signature(mart_sql.savings_ledger).parameters["limit"].default == optimize._LEDGER_PAGE_ROWS
+    tab = read("app/ui/pages/cost_parts/optimize.py").split("def _savings_tab(", 1)[1].split("\ndef ", 1)[0]
+    assert "run(mart_sql.savings_ledger(), page=_PAGE, key=\"savings_ledger\"" in tab
+    assert "ledger_overlaps(res.df, item_id=_item, target=_tgt, booked_day=_booked.date()," in tab
+    assert "row_cap=_LEDGER_PAGE_ROWS)" in tab
+
+
+# ---------------------------------------------------------------------------
 # Optimize ▸ Savings ledger wiring (source locks; the rendered check is in test_prc_c1_shaped.py)
 # ---------------------------------------------------------------------------
 
@@ -208,10 +344,25 @@ def test_verify_measures_after_the_pick_and_prefills_behind_a_sentinel():
     assert pick < v.index("ledger_basis(row.get(\"FINDING_TYPE\"))") < v.index("mart_sql.ledger_before_after(")
     assert v.index("mart_sql.ledger_before_after(") < v.index('key="ledger_verified_usd"')
     assert 'key=f"ledger_measure_{_item[:8]}", tier="recent"' in v and "probe=True" in v
-    sentinel = v.index('if _sig_now != _sig:')
-    assert sentinel < v.index('st.session_state["ledger_verified_usd"] = float(_m["prefill_usd"])')
-    assert v.index('st.session_state["_ow_ledger_prefill_sig"] = _sig') < v.index('key="ledger_verified_usd"')
-    assert 'if _measured and _m is not None:\n                    _sig = f"{_item}|{_m[\'prefill_usd\']:.2f}"' in v
+    # Review C12/C17 (replaces the item|value string sentinel, which re-prefilled over an edit whenever the
+    # measurement moved and never re-armed after Streamlit dropped the widget): ONE pure decision, fed the
+    # widget's presence, the last amount OVERWATCH left there and the Verify-click flag, runs before the
+    # widget, and it is the ONLY writer of the widget's state.
+    decide = v.index("_pf = verify_prefill(")
+    assert decide < v.index('st.session_state["ledger_verified_usd"] = float(_pf["write"])') \
+        < v.index('key="ledger_verified_usd"')
+    assert v.count('st.session_state["ledger_verified_usd"] = ') == 1
+    # C12: an ABSENT key (Streamlit dropped it when the section was left) reaches the decision as None
+    assert 'widget_value=st.session_state.get("ledger_verified_usd"),' in v
+    assert 'last=st.session_state.get("_ow_ledger_prefill")' in v and "clicked=_clicked)" in v
+    assert '_clicked = bool(st.session_state.get("ledger_verify_exec"))' in v
+    assert v.index('st.session_state["_ow_ledger_prefill"] = _pf["state"]') < v.index('key="ledger_verified_usd"')
+    # C22: an overlapping change withdraws the prefill target
+    assert 'target=float(_m["prefill_usd"]) if _measured and not _overlap and _m is not None else None' in v
+    # C17: the click's rerun swaps in what the previous render showed BEFORE the KPIs and the proof use it
+    swap = v.index('_m, _msql, _qid, _ov = _shown["m"], _shown["sql"], _shown["qid"], _shown["ov"]')
+    assert swap < v.index("kpi_row(_mk)") < v.index("proof_result_json(")
+    assert swap < v.index('st.session_state["_ow_ledger_shown"] = {')
     assert '"Verified USD per month (measured, post-period)"' in v and "min_value=0.0, step=50.0" in v
     assert 'st.caption("No measured basis for this item — enter the verified amount by hand.")' in v
 
