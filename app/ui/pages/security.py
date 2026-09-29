@@ -433,7 +433,10 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
         if has_migration(162, _PAGE):
             st.caption("The hourly alert scan raises SEC_LOGIN_TAKEOVER for the stricter case (at least the rule "
                        "threshold of failed logins within 15 min, then a success within 60 min); this table is the "
-                       "wider 6-hour lens, so a window that includes such a login lists its user here.")
+                       "wider 6-hour lens at 5+ failures. That alert is account-wide but this table follows the "
+                       "company filter, so it lists the alert's user only with the company at ALL (or the user's "
+                       "own), a window that includes the login, and a rule threshold of 5 or more: set the company "
+                       "to ALL before reading a missing user as a false alarm.")
         st.caption(_toggle_cost_hint("takeover"))
         _ato_on = st.toggle(
             "Run account-takeover scan (correlates failed then successful logins)",

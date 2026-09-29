@@ -16,12 +16,15 @@ and emits, in order (every partial apply is safe -- the owner stops on the first
   re-derived from V154 -> marker + SP_ALERT_SCAN re-derived from V157 -> SCHEMA_VERSION 162.
 
 The autodeclare lands BEFORE the scan, so a CRITICAL takeover can never meet the old autodeclare. Rollback runs
-the other way round (scan first).
+the other way round (scan first; V154's autodeclare only after the identity events have aged out or been closed).
 
-SP_INCIDENT_AUTODECLARE delta (asserted count == 1; everything else byte-identical to V154):
-  A1  in the crit CTE only: AND e.RULE_ID NOT IN ('SEC_LOGIN_TAKEOVER', 'SEC_ADMIN_GRANT')
-      ([attach] and [auto-mitigate] untouched: a later takeover CRITICAL still links to an incident a human
-      declared for that family)
+SP_INCIDENT_AUTODECLARE deltas (each asserted count == 1; everything else byte-identical to V154):
+  A1  in the crit CTE: AND e.RULE_ID NOT IN ('SEC_LOGIN_TAKEOVER', 'SEC_ADMIN_GRANT')
+  A2  in [attach]'s WHERE (review W1): an identity alert attaches only to an incident that already holds the SAME
+      user (DEDUPE_KEY field 2, upper-cased like SP_INCIDENT_DECLARE's entity filter); other rules keep V154's
+      family match. Without it, a second user's CRITICAL takeover joined the first user's human incident, so
+      V164 read it as acknowledged (never escalated) and V131 refused a separate declare for it.
+  ([auto-mitigate] untouched.)
 
 SP_ALERT_SCAN deltas (each asserted by count; the V162 test normalizes the body back to V157):
   H1  insert the ungated counting arms [26] SEC_LOGIN_TAKEOVER + [27] SEC_ADMIN_GRANT after [21]'s END, before
@@ -40,8 +43,9 @@ mirrored by app/data/security_sql.ALERT_ADMIN_ROLES / OFF_HOURS_* (tests/test_se
 against the LATEST SP_ALERT_SCAN); this generator never imports app/.
 
 Optional outputs (the byte-identity test never sets them):
-  PREFLIGHT_OUT  the read-only PREFLIGHT section P162.1-P162.3 (the arms' own CTE chains, windows widened to 30
-                 days), for snowflake/run/PREFLIGHT_WAVE4.sql
+  PREFLIGHT_OUT  the read-only PREFLIGHT section P162.1-P162.4 (the arms' own CTE chains, windows widened to 30
+                 days; P162.4 = the CRITICAL takeovers the first hourly scan raises, which V164 escalates and
+                 which P164.2 cannot list yet), for snowflake/run/PREFLIGHT_WAVE4.sql
   PARTB_OUT      the RUN_NEXT PART B verify grids V162.1-V162.6
 
 Run: python outputs/gen_v162.py
@@ -363,7 +367,7 @@ ARM27 = ARM27_HEAD + f"""\
 """
 
 # ---------------------------------------------------------------------------------------------------
-# SP_INCIDENT_AUTODECLARE (from V154): A1, the crit CTE only.
+# SP_INCIDENT_AUTODECLARE (from V154): A1 in the crit CTE, A2 in [attach]'s WHERE.
 # ---------------------------------------------------------------------------------------------------
 auto = extract_proc(V154, "SP_INCIDENT_AUTODECLARE()")
 # intervening changes that MUST survive (V098 re-link guard, V099 company scope, V154 attach + mitigate)
@@ -375,11 +379,28 @@ A1_OLD = ("          AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.INCIDE
           "    )\n"
           "    SELECT UUID_STRING() AS INCIDENT_ID, FAMILY, COMPANY,\n")
 A1_BLOCK = ("          -- V162 (Next-Fifty #39, owner 2026-09-29): identity alerts never auto-declare -- a human declares after\n"
-            "          -- contacting the user. [attach] below still links them to an incident a human opened for that family.\n"
+            "          -- contacting the user. [attach] below still links them to an incident a human opened for that user.\n"
             f"          AND e.RULE_ID NOT IN ('{TAKEOVER}', '{GRANT}')\n")
 A1_NEW = A1_OLD.replace("    )\n    SELECT UUID_STRING()", A1_BLOCK + "    )\n    SELECT UUID_STRING()", 1)
 auto = _swap(auto, A1_OLD, A1_NEW, "A1")
 assert auto.count(f"AND e.RULE_ID NOT IN ('{TAKEOVER}', '{GRANT}')") == 1
+# A2 -- [attach]: the V154 WHERE ends with the NOT EXISTS m2 line right before the QUALIFY (the only m2 line that
+# is followed by the QUALIFY; the declare's member INSERT carries the other one). Filtering here, before the
+# QUALIFY, keeps V154's ranking for every other rule.
+A2_OLD = ("                              WHERE m2.MEMBER_KIND = 'ALERT' AND m2.REF_ID = e.EVENT_ID)\n"
+          "            QUALIFY ROW_NUMBER() OVER (\n")
+A2_BLOCK = ("              -- V162 review fix: an identity alert attaches only to an incident that already holds the\n"
+            "              -- SAME user (DEDUPE_KEY field 2, upper-cased like the entity filter of SP_INCIDENT_DECLARE).\n"
+            "              -- A takeover of another user stays unlinked, so it keeps its own escalation (V164) and its\n"
+            "              -- own proposal, and never inherits an incident acknowledged or mitigated for someone else.\n"
+            f"              AND (e.RULE_ID NOT IN ('{TAKEOVER}', '{GRANT}')\n"
+            "                   OR UPPER(SPLIT_PART(COALESCE(a.DEDUPE_KEY, a.EVENT_ID), '|', 2))\n"
+            "                      = UPPER(SPLIT_PART(COALESCE(e.DEDUPE_KEY, e.EVENT_ID), '|', 2)))\n")
+A2_NEW = A2_OLD.replace("            QUALIFY ROW_NUMBER()", A2_BLOCK + "            QUALIFY ROW_NUMBER()", 1)
+auto = _swap(auto, A2_OLD, A2_NEW, "A2")
+assert auto.count(f"e.RULE_ID NOT IN ('{TAKEOVER}', '{GRANT}')") == 2
+assert auto.index(A1_BLOCK) < auto.index("    -- [attach] V154") < auto.index(A2_BLOCK) \
+    < auto.index("    -- [auto-mitigate] V154")
 
 # ---------------------------------------------------------------------------------------------------
 # SP_ALERT_SCAN (from V157): H1-H4.
@@ -439,11 +460,12 @@ HEADER = f"""-- {NAME}
 --   login in UTC; the grant's Central CREATED_ON), never a bare EVENT_ID: V117's snooze carry-forward reads a
 --   10-character tail that parses as a date (a 10-digit integer is epoch seconds) as a date band, and would carry a
 --   snooze to the user's NEXT takeover.
---   ~ SP_INCIDENT_AUTODECLARE re-derived from V154 (its current definer), byte-identical except ONE predicate in
---     the crit CTE: AND e.RULE_ID NOT IN ('{TAKEOVER}', '{GRANT}'). Neither rule ever opens an
+--   ~ SP_INCIDENT_AUTODECLARE re-derived from V154 (its current definer), byte-identical except TWO predicates.
+--     In the crit CTE: AND e.RULE_ID NOT IN ('{TAKEOVER}', '{GRANT}'). Neither rule ever opens an
 --     incident, even if an operator later edits its severity to CRITICAL: a human declares after contacting the
---     user. The [attach] arm and the [auto-mitigate] sweep are unchanged, so a later takeover CRITICAL still links
---     to an incident a person declared for that family.
+--     user. In [attach]: a CRITICAL of either rule links only to an OPEN/MITIGATED incident that already holds
+--     the SAME user (DEDUPE_KEY field 2); a CRITICAL for another user stays unlinked, keeps its V164 escalation
+--     and can be declared on its own. Every other rule attaches as in V154; the [auto-mitigate] sweep is unchanged.
 --   ~ SP_ALERT_SCAN re-derived from V157 (its current definer), byte-identical except: + counting arms [26] and
 --     [27] after [21], before the [22] gate (so the self-alert, the V067 supersede sweep and the V117 carry-forward
 --     see them in the same pass: a WARN -> CRIT crossing is superseded at once); tally 12 -> 14 (self-alert, [hb],
@@ -460,10 +482,17 @@ HEADER = f"""-- {NAME}
 -- LATENCY: hourly; ACCOUNT_USAGE lags up to ~2h, so an event arrives 1-3h after the login or grant.
 -- FIRST RUN: the first hourly scan after apply raises every takeover episode of the last 24h and every admin grant
 -- of the last 26h (CRITICAL ones included -- no incident is opened). PREFLIGHT_WAVE4.sql P162.1 / P162.2 list them.
+-- Once V164 is applied, each first-run CRITICAL takeover nobody acknowledges is re-posted and emailed about 2-3h
+-- after the apply: P162.4 lists them (V164's own census, P164.2, runs before they exist and cannot).
 -- No procedure runs at apply time.
--- ROLLBACK (order matters): FIRST re-run V157's SP_ALERT_SCAN (tally back to 12; the two rules stop raising), THEN
--- optionally V154's SP_INCIDENT_AUTODECLARE. Reversed, an hourly run in between could auto-declare a CRITICAL
--- takeover. Optionally disable the two rules in Alerts > Rules; the seeds can stay.
+-- ROLLBACK (order matters): 1. Re-run V157's SP_ALERT_SCAN (tally back to 12; the two rules stop raising). That
+-- is usually enough: this SP_INCIDENT_AUTODECLARE only narrows what it does for the two rules, so it can stay.
+-- 2. Only to restore V154's SP_INCIDENT_AUTODECLARE too: FIRST wait 24h after step 1 (the crit CTE reads 24h), or
+-- resolve every OPEN / ACK / SNOOZED {TAKEOVER} and {GRANT} event as EXPECTED (RUNBOOK section 12
+-- has the UPDATE) -- V154 has no exclusion, so a CRITICAL takeover still open is auto-declared at the next hourly
+-- run. Running the scan first only keeps out the events raised between the two steps; closing or aging out the
+-- rest is what prevents the auto-declare. Roll V163 back before V162 (its [07] text points at the hourly
+-- {TAKEOVER}), or accept that pointer. Optionally disable the two rules in Alerts > Rules; the seeds can stay.
 -- Apply AFTER V161. Idempotent; safe to re-run.
 
 EXECUTE IMMEDIATE
@@ -509,7 +538,8 @@ DESCRIPTION = (
     "the last 26h, revoked or not; flat HIGH; the title flags off-hours and first-time grants. Both company ALL; keys "
     "end in an explicit millisecond timestamp (never a bare EVENT_ID, which the V117 carry-forward would read as a "
     "date). SP_INCIDENT_AUTODECLARE re-derived from V154, byte-identical except the crit CTE excludes both rules "
-    "([attach] and [auto-mitigate] unchanged). SP_ALERT_SCAN re-derived from V157, byte-identical except the two "
+    "and [attach] links either rule only to an incident that already holds the same user ([auto-mitigate] "
+    "unchanged). SP_ALERT_SCAN re-derived from V157, byte-identical except the two "
     "counting arms and the tally 12 -> 14. Seeds both rules WHEN NOT MATCHED only. No task change, no SETTINGS key, "
     "no procedure run at apply time.")
 assert len(DESCRIPTION) <= 4000 and "'" not in DESCRIPTION
@@ -534,8 +564,9 @@ assert not re.search(r"^\s*(?:CREATE(?: OR REPLACE)? TASK|ALTER TASK|EXECUTE TAS
 assert "COMPANY_FOR_USER" not in ARM26 + ARM27
 assert "V162 requires V161 first" in out and "SELECT 162 AS VERSION" in out
 assert "\r" not in out
-for _new in (HEADER, ARM26, ARM27, A1_BLOCK, MARK_AUTO, MARK_SCAN, RET_162, VERSION_ROW):
+for _new in (HEADER, ARM26, ARM27, A1_BLOCK, A2_BLOCK, MARK_AUTO, MARK_SCAN, RET_162, VERSION_ROW):
     assert _new.isascii(), _new[:60]                             # (the carried V157 body has its own em-dashes)
+assert "'" not in "".join(ln for ln in A2_BLOCK.splitlines() if ln.lstrip().startswith("--"))   # no stray quote
 _scan_body = hourly[hourly.index("$$") + 2:hourly.rindex("$$")]
 assert "$$" not in _scan_body
 assert set(re.findall(r"SNOWFLAKE\.ACCOUNT_USAGE\.(\w+)", _scan_body)) == {
@@ -620,6 +651,26 @@ WHERE UPPER(e.SEVERITY) = 'CRITICAL'
   AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
 GROUP BY e.RULE_ID, e.COMPANY
 ORDER BY OPEN_OR_ACK_CRITICAL_24H DESC, e.RULE_ID;
+
+-- P162.4 The CRITICAL takeovers the FIRST hourly scan after the apply raises: arm [26] with its OWN windows
+-- ({EV_HOURS}h read, {ANCHOR_HOURS}h anchors), so these are P162.1's BAND = CRIT, IN_FIRST_RUN_WINDOW = TRUE rows as of now.
+-- V164's escalation census P164.2 cannot list them -- they do not exist until V162's first scan (the next :07
+-- Central chain). Once V164 is applied, each one nobody acknowledges is re-posted to the Teams route that delivered
+-- it (and emailed when the email leg is on) 120 minutes after its notification, about 2-3h after the apply. Read
+-- these WITH P164.2: seed ('ESCALATE_AFTER_MIN', '0') before the apply and turn escalation on after triage, or
+-- acknowledge / resolve these events within 2h of the first hourly scan.
+WITH
+{pf_k}{CHAIN26}
+SELECT x.USER_NAME,
+       TRIM(IFF(x.OFF_HOURS, 'off-hours ', '') || IFF(x.ADMIN_ROLE IS NOT NULL, 'admin role ' || x.ADMIN_ROLE, ''))
+           AS CRIT_REASON,
+       x.TS_CT AS SUCCESS_CENTRAL, x.N_FAIL, x.CLIENT_IP,
+       'raised by the first hourly scan after V162; escalates about 2-3h after the apply unless acknowledged'
+           AS AFTER_APPLY,
+       {PF_KEY26} AS DEDUPE_KEY_PREVIEW
+FROM x
+WHERE x.OFF_HOURS OR x.ADMIN_ROLE IS NOT NULL
+ORDER BY x.TS_CT DESC;
 """
     assert "\r" not in preflight and preflight.isascii()
     Path(pf).write_text(preflight, encoding="utf-8", newline="\n")
@@ -639,6 +690,7 @@ if pb:
     scan_old = _ddl("SP_ALERT_SCAN()", "/12 rule blocks ok", "OLD_TALLY_12")
     auto_cols = ",\n       ".join(_ddl("SP_INCIDENT_AUTODECLARE()", f, a) for f, a in (
         ("e.RULE_ID NOT IN (", "CRIT_EXCLUSION"), ("V162 (Next-Fifty #39", "V162_COMMENT"),
+        ("OR UPPER(SPLIT_PART(COALESCE(a.DEDUPE_KEY", "ATTACH_SAME_USER"),
         ("incident_attach_failed", "V154_ATTACH_KEPT"), ("incident_mitigate_failed", "V154_MITIGATE_KEPT")))
     partb = f"""-- ---- V162 checks -----------------------------------------------------
 -- (V162.1, now) the two rules are seeded.
@@ -651,7 +703,7 @@ ORDER BY RULE_ID;   -- 2 rows: {GRANT} SECURITY TRUE HIGH 0 24; {TAKEOVER} SECUR
 SELECT {scan_cols},
        {scan_old};   -- all TRUE except OLD_TALLY_12 = FALSE
 
--- (V162.3, now) SP_INCIDENT_AUTODECLARE excludes the two rules.
+-- (V162.3, now) SP_INCIDENT_AUTODECLARE excludes the two rules and attaches them only to the same user's incident.
 SELECT {auto_cols};   -- all TRUE
 
 -- (V162.4, now, OPTIONAL) the same work the hourly TASK_INCIDENT_AUTODECLARE does -- it raises no alert and sends
