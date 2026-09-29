@@ -116,6 +116,13 @@ def _blob(at) -> str:
     return " ".join(str(m.value) for m in at.markdown) + " " + " ".join(str(c.value) for c in at.caption)
 
 
+def _amount_input(at):
+    """The verify form's amount widget -- keyed per item since review r3 (ledger_verified_usd_<ITEM_ID>)."""
+    found = [n for n in at.number_input if str(n.key).startswith("ledger_verified_usd_")]
+    assert len(found) == 1, [str(n.key) for n in at.number_input]
+    return found[0]
+
+
 @_SKIP
 def test_statement_timeout_posture_renders_and_scripts_only_the_uncapped_warehouse(monkeypatch):
     seen = _ops_recorder(monkeypatch)
@@ -242,14 +249,14 @@ def test_ledger_verify_prefills_the_measured_saving(monkeypatch):
     assert 'ow-card__title">Measured saving / mo<' in blob and "Volume ×" in blob
     # booked Aug 1: after window = Aug 2..Aug 31 (booking + 30), 45 credits/day vs 100 before, at 3.68
     expected = round((100.0 - 1350.0 / 30) * 30 * 3.68, 2)
-    assert at.number_input(key="ledger_verified_usd").value == pytest.approx(expected)
+    assert _amount_input(at).value == pytest.approx(expected)
     # review C12/C17: the sentinel records the item and the amount OVERWATCH left in the widget
     assert at.session_state["_ow_ledger_prefill"] == {"item": "abcdef12-0000-4000-8000-000000000001",
                                                       "val": expected}
     # an operator's edit survives the next rerun (and a moved measurement: see the C17 tests below)
-    at.number_input(key="ledger_verified_usd").set_value(1234.0)
+    _amount_input(at).set_value(1234.0)
     at.run()
-    assert at.number_input(key="ledger_verified_usd").value == 1234.0
+    assert _amount_input(at).value == 1234.0
     code = "\n".join(str(c.value) for c in at.code)
     assert "PROOF_RESULT = '" in code and "PROOF_RUN_AT = CURRENT_TIMESTAMP()" in code
     assert "AND STATE = 'ESTIMATED';" in code
@@ -305,7 +312,7 @@ class _LedgerPage:
         assert not any("could not finish rendering" in str(getattr(e, "value", "")) for e in self.at.error)
 
     def amount(self) -> float:
-        return float(self.at.number_input(key="ledger_verified_usd").value)
+        return float(_amount_input(self.at).value)
 
     def update_sql(self) -> str:
         shown = [str(c.value) for c in self.at.code if "SET STATE = 'VERIFIED'" in str(c.value)]
@@ -345,7 +352,7 @@ def test_ledger_prefill_never_overwrites_an_edit_when_the_measurement_moves(monk
     the next render and in the UPDATE the Verify click executes."""
     page = _LedgerPage(monkeypatch)
     at = page.open()
-    at.number_input(key="ledger_verified_usd").set_value(1234.0)
+    _amount_input(at).set_value(1234.0)
     at.run()
     page.check()
     assert page.amount() == 1234.0

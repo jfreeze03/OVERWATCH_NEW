@@ -2306,6 +2306,10 @@ def _savings_tab(rate: float = 3.68, settings: dict | None = None) -> None:
                 # Review C12 / C17: the prefill re-arms when Streamlit dropped the widget (the section was
                 # left), follows the measurement only while the widget still holds what OVERWATCH put there,
                 # never overwrites an edit, and never moves in the Verify click's own rerun.
+                # Review r3: the amount widget is keyed PER ITEM, so an amount typed for one item can never reach
+                # another item's statement (a switch + click, or a pick reset by 1.52.2). Streamlit drops the
+                # state of a widget that is not rendered, so the keys never pile up.
+                _amount_key = f"ledger_verified_usd_{_item}"
                 _pf = verify_prefill(
                     item_id=_item,
                     target=float(_m["prefill_usd"]) if _measured and not _overlap and _m is not None else None,
@@ -2313,17 +2317,17 @@ def _savings_tab(rate: float = 3.68, settings: dict | None = None) -> None:
                     last=({"item": "", "val": None} if _stale_click
                           else st.session_state.get("_ow_ledger_prefill")),
                     # None = the key is ABSENT: never rendered, or dropped after the section was left
-                    widget_value=st.session_state.get("ledger_verified_usd"),
+                    widget_value=st.session_state.get(_amount_key),
                     clicked=_clicked and not _stale_click)
                 st.session_state["_ow_ledger_prefill"] = _pf["state"]
                 if _pf["write"] is not None:
-                    st.session_state["ledger_verified_usd"] = float(_pf["write"])
+                    st.session_state[_amount_key] = float(_pf["write"])
                 if _pf["kept_edit"] and _m is not None:
                     st.caption(md_dollars(f"The measured saving now reads {format_usd(_m['prefill_usd'])}/mo; "
                                           "your entry is kept."))
                 verified_usd = st.number_input(
                     "Verified USD per month (measured, post-period)",
-                    min_value=0.0, step=50.0, key="ledger_verified_usd",
+                    min_value=0.0, step=50.0, key=_amount_key,
                     help="The MONTHLY recurring saving measured after the change. The ROI multiple sums "
                          "verified items as a monthly run-rate over the last 12 months — convert a "
                          "total over the measured window to a monthly figure.")
@@ -2348,17 +2352,18 @@ def _savings_tab(rate: float = 3.68, settings: dict | None = None) -> None:
                     f"WHERE ITEM_ID = {sql_literal(row['ITEM_ID'])} AND STATE = 'ESTIMATED';"
                 )
                 st.code(update_sql, language="sql")
-                # the statement the previous render PAINTED for this item; a click executes only that
-                _painted = _shown.get("update_sql") if _same and isinstance(_shown, dict) else None
+                # Recorded only AFTER st.code painted this item's statement (an interrupted rerun never marks an
+                # item as shown). In the click's rerun the measurement, proof query id and overlap check are the
+                # painted ones, and the amount is this item's own widget value, so the only way the click can
+                # write a statement nobody saw is landing on another item: that click is stale (review r2 / r3).
                 st.session_state["_ow_ledger_shown"] = {"item": _item, "m": _m, "sql": _msql, "qid": _qid,
-                                                        "ov": _ov, "update_sql": update_sql}
+                                                        "ov": _ov}
                 if not allowed:
                     st.warning(why)
                 elif is_operator and st.button("Verify savings item", key="ledger_verify_exec"):
-                    if _stale_click or update_sql != _painted:
-                        # review r2: never execute a statement nobody saw
-                        st.warning("The savings list changed as you clicked, so nothing was written. Review "
-                                   "this item and click Verify again.")
+                    if _stale_click:
+                        st.warning("The item changed as you clicked, so nothing was written. Review this item "
+                                   "and click Verify again.")
                     elif write_gate_open("ledger_verify_exec"):
                         ok, msg = execute_statement(update_sql, page=_PAGE)
                         stamp_write("ledger_verify_exec", ok)  # C48

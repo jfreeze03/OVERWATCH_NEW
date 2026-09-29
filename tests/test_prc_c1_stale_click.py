@@ -15,7 +15,7 @@ from test_pages_shaped import (  # noqa: F401  (harness stubs, as the shaped tes
     _shaped_run,
     _stub_shaped,
 )
-from test_prc_c1_shaped import _estimated_schedule_row, _measurement, _ok
+from test_prc_c1_shaped import _amount_input, _estimated_schedule_row, _measurement, _ok
 
 A = "abcdef12-0000-4000-8000-000000000001"
 B = "bbbbbbbb-0000-4000-8000-000000000002"
@@ -109,7 +109,7 @@ def test_an_item_switch_coalesced_with_the_click_writes_nothing(monkeypatch):
                                  ignore_index=True)}
     written: list[str] = []
     at = _harness(monkeypatch, state, written)
-    at.number_input(key="ledger_verified_usd").set_value(1234.0)
+    _amount_input(at).set_value(1234.0)
     at.run()
     assert not at.exception, at.exception
     # the operator picks B and clicks Verify before the page settles: one rerun carries both
@@ -120,5 +120,24 @@ def test_an_item_switch_coalesced_with_the_click_writes_nothing(monkeypatch):
     assert not at.exception, at.exception
     assert not [w for w in written if _VERIFIED in w], written
     # B takes its own measured prefill, never A's typed 1234
-    assert at.number_input(key="ledger_verified_usd").value != 1234.0
+    assert _amount_input(at).value != 1234.0
     assert any("nothing was written" in str(w.value) for w in at.warning)
+
+
+def test_a_typed_amount_clicked_before_the_page_re_renders_writes_on_the_first_click(monkeypatch):
+    """Review r3: the browser commits a number_input on blur, which the Verify click's mousedown triggers, so the
+    typed amount and the click arrive in ONE rerun. Same item: the click writes the typed amount at once (a
+    full-statement comparison used to refuse it with a false 'the list changed' warning)."""
+    state = {"ledger": pd.concat([_row(A, "Suspend schedule on WH_A", "WH_A", "2026-08-01 09:00"),
+                                  _row(B, "Suspend schedule on WH_B", "WH_B", "2026-06-01 09:00")],
+                                 ignore_index=True)}
+    written: list[str] = []
+    at = _harness(monkeypatch, state, written)
+    _amount_input(at).set_value(555.0)
+    at.button(key="ledger_verify_exec").click()
+    at.run()
+    assert not at.exception, at.exception
+    updates = [w for w in written if _VERIFIED in w]
+    assert len(updates) == 1, written
+    assert "VERIFIED_USD = 555" in updates[0] and f"ITEM_ID = '{A}'" in updates[0]
+    assert not any("nothing was written" in str(w.value) for w in at.warning)

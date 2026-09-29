@@ -342,18 +342,21 @@ def test_verify_measures_after_the_pick_and_prefills_behind_a_sentinel():
     v = _verify()
     pick = v.index("row = options[chosen]")
     assert pick < v.index("ledger_basis(row.get(\"FINDING_TYPE\"))") < v.index("mart_sql.ledger_before_after(")
-    assert v.index("mart_sql.ledger_before_after(") < v.index('key="ledger_verified_usd"')
+    assert v.index("mart_sql.ledger_before_after(") < v.index("key=_amount_key,")
     assert 'key=f"ledger_measure_{_item[:8]}", tier="recent"' in v and "probe=True" in v
     # Review C12/C17 (replaces the item|value string sentinel, which re-prefilled over an edit whenever the
     # measurement moved and never re-armed after Streamlit dropped the widget): ONE pure decision, fed the
     # widget's presence, the last amount OVERWATCH left there and the Verify-click flag, runs before the
     # widget, and it is the ONLY writer of the widget's state.
     decide = v.index("_pf = verify_prefill(")
-    assert decide < v.index('st.session_state["ledger_verified_usd"] = float(_pf["write"])') \
-        < v.index('key="ledger_verified_usd"')
-    assert v.count('st.session_state["ledger_verified_usd"] = ') == 1
+    assert decide < v.index('st.session_state[_amount_key] = float(_pf["write"])') < v.index("key=_amount_key,")
+    assert v.count("st.session_state[_amount_key] = ") == 1
+    # review r3: the amount widget is keyed PER ITEM, so one item's amount can never reach another's statement
+    assert '_amount_key = f"ledger_verified_usd_{_item}"' in v
+    assert v.index('_amount_key = f"ledger_verified_usd_{_item}"') < decide
+    assert 'key="ledger_verified_usd"' not in v and 'st.session_state["ledger_verified_usd"]' not in v
     # C12: an ABSENT key (Streamlit dropped it when the section was left) reaches the decision as None
-    assert 'widget_value=st.session_state.get("ledger_verified_usd"),' in v
+    assert "widget_value=st.session_state.get(_amount_key)," in v
     assert 'else st.session_state.get("_ow_ledger_prefill")),' in v and "clicked=_clicked and not _stale_click)" in v
     assert '_clicked = bool(st.session_state.get("ledger_verify_exec"))' in v
     # review r2: a click on another item than the one whose UPDATE was painted is stale -- the prefill takes the
@@ -361,11 +364,13 @@ def test_verify_measures_after_the_pick_and_prefills_behind_a_sentinel():
     assert '_stale_click = _clicked and not _same' in v
     assert 'last=({"item": "", "val": None} if _stale_click' in v
     gate = v.split('st.button("Verify savings item", key="ledger_verify_exec"):', 1)[1]
-    assert gate.index("if _stale_click or update_sql != _painted:") < gate.index('elif write_gate_open("ledger_verify_exec"):')
+    assert gate.index("if _stale_click:") < gate.index('elif write_gate_open("ledger_verify_exec"):')
     assert gate.index('elif write_gate_open("ledger_verify_exec"):') < gate.index("execute_statement(update_sql")
-    # the painted statement is recorded only AFTER st.code painted it
-    assert v.index('st.code(update_sql, language="sql")') < v.index('"ov": _ov, "update_sql": update_sql}')
-    assert v.index('st.session_state["_ow_ledger_prefill"] = _pf["state"]') < v.index('key="ledger_verified_usd"')
+    # review r3: no full-statement comparison -- it refused a typed amount clicked before the page re-rendered
+    assert "update_sql != _painted" not in v
+    # the shown record is written only AFTER st.code painted the item's statement
+    assert v.index('st.code(update_sql, language="sql")') < v.index('st.session_state["_ow_ledger_shown"] = {')
+    assert v.index('st.session_state["_ow_ledger_prefill"] = _pf["state"]') < v.index("key=_amount_key,")
     # C22: an overlapping change withdraws the prefill target
     assert 'target=float(_m["prefill_usd"]) if _measured and not _overlap and _m is not None else None' in v
     # C17: the click's rerun swaps in what the previous render showed BEFORE the KPIs and the proof use it
