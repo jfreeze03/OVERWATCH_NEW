@@ -168,7 +168,10 @@ the monthly OPS_ALERT_DRILL CRITICAL escalates too; the escalation email is not 
     lever is `max_batches`.
 - **Owner steps.**
   1. Run `PREFLIGHT_WAVE4.sql` (read-only) and read P162.1, P162.4, P163.1, P164.1 and P164.2.
-  2. If P164.1 shows no DEFAULT_RECIPIENTS, set them in Snowsight (or seed `('ESCALATE_EMAIL_INTEGRATION','')`); if
+  2. Choose the escalation email (required: the 2026-09-29 probe showed OVERWATCH_EMAIL has no DEFAULT_RECIPIENTS).
+     Set DEFAULT_RECIPIENTS in Snowsight to the address already in ALLOWED_RECIPIENTS -- every unacknowledged
+     CRITICAL is then emailed, including TREXIS/UNKNOWN ones the ALFA-only Teams route never carries -- or seed
+     `('ESCALATE_EMAIL_INTEGRATION','')` for Teams-only escalation, in which case those never escalate. If
      P164.2 or P162.4 list CRITICALs you do not want re-posted and emailed, acknowledge them (the P162.4 takeovers
      within 2 hours of the first hourly scan) or seed `('ESCALATE_AFTER_MIN','0')`.
   3. `snow streamlit deploy --replace` (4.602.0).
@@ -206,6 +209,14 @@ the monthly OPS_ALERT_DRILL CRITICAL escalates too; the escalation email is not 
     on V165; the withheld-draft "Unmatched figures" caption escapes `$`; the takeover lens caption and the
     SEC_LOGIN_TAKEOVER / SEC_FAILED_LOGINS / SEC_TRUST_REGRESSION / OPS_SCAN_DEGRADED playbooks say what the lens and
     the rules actually cover; test_v165's definer lock is bounded at 165.
+- **Merge with 4.601.1 and the probe answers (before release).** The AI-quota panel keeps 4.601.1's read and
+  failed-read states, and the suggested quotas render after every block outcome, a failed read included. Under
+  'Last month' a capped block read (the newest 1,000 rows are this month's) is never shown as a clean "no
+  blocks", and "Currently blocked" carries the '+' like the other counts from a capped read. The suggestions'
+  scope caption names the User attribution detail. Alerts > Native delivery counts failed escalation pass
+  runs and email sends (a stuck email-only alert retries hourly). RUN_NEXT's header states the email choice
+  as required and what it means for TREXIS/UNKNOWN CRITICALs; PART B adds V164.3c, a NOTIFICATION_HISTORY
+  read, because the email send only enqueues.
 - **Tests.** Per-migration shape and round-13 normalize-back locks for every re-derived proc
   (`tests/migrations/test_v162_*` .. `test_v165_*`), sqlite harnesses that run each new arm's and the escalation
   pass's own SQL, permanent parity locks (`test_security_alert_parity`, `test_ai_runaway_parity`,

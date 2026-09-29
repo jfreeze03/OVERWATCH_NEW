@@ -119,10 +119,10 @@ def test_tally_and_failures():
     assert "within 2h 15m" in lines[0][1]
     assert lines[1] == ("info", "Last 7 days: 3 CRITICAL(s) escalated, the latest 3h ago.")
     sev, warn = lines[2]
-    assert sev == "warn" and "1 escalation pass failure(s)" in warn and "2 escalation email failure(s)" in warn
+    assert sev == "warn" and "1 failed escalation pass run(s)" in warn and "2 failed escalation email send(s)" in warn
     assert "DEFAULT_RECIPIENTS" in warn and "USAGE" in warn
     only_mail = _lines(EMAIL_FAILURES=1)[-1][1]
-    assert "pass failure" not in only_mail and "1 escalation email failure(s)" in only_mail
+    assert "pass run" not in only_mail and "1 failed escalation email send(s)" in only_mail
     assert len(_lines()) == 2                                         # no failures -> no warning
 
 
@@ -185,7 +185,7 @@ def test_native_delivery_states_the_policy_once_v164_is_applied(monkeypatch):
     text = _texts(at)
     assert "Escalation: a CRITICAL nobody acknowledged within" in text
     assert "CRITICAL(s) escalated" in text
-    assert "escalation email failure(s)" in text                        # shaped counts are non-zero -> the warning
+    assert "failed escalation email send(s)" in text                        # shaped counts are non-zero -> the warning
     assert "**Routing (family → channel)**" in text
 
 

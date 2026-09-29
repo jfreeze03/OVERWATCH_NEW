@@ -719,6 +719,22 @@ SELECT (SELECT COUNT(*) FROM {_O}ALERT_AUDIT WHERE ACTION = 'ESCALATE') AS ESCAL
        (SELECT COUNT(*) FROM {_O}ALERT_EVENTS WHERE ESCALATED_AT IS NOT NULL) AS ESCALATED_EVENTS,
        (SELECT MAX(ESCALATED_AT) FROM {_O}ALERT_EVENTS) AS LAST_ESCALATED_AT;
 
+-- V164.3c (after the first escalation) did the escalation email go out? The send only ENQUEUES: a delivery
+--        failure after the enqueue still stamps the event and its audit note says 'email sent', so read
+--        Snowflake's own delivery log for the escalation integration (read from SETTINGS, as the proc does)
+--        from 2 minutes before the latest escalation. expect: STATUS SUCCESS. No row after an escalation =
+--        the email leg is off (ESCALATE_EMAIL_INTEGRATION '') or the send failed before the enqueue (V164.3's
+--        escalation_email_failed row). A native e-mail alert sent in the same minutes also shows here.
+SELECT CONVERT_TIMEZONE('America/Chicago', CREATED)::TIMESTAMP_NTZ AS CREATED_CT, INTEGRATION_NAME, STATUS,
+       LEFT(ERROR_MESSAGE, 200) AS ERROR_MESSAGE
+  FROM TABLE(DBA_MAINT_DB.INFORMATION_SCHEMA.NOTIFICATION_HISTORY(
+           START_TIME => DATEADD('day', -1, CURRENT_TIMESTAMP()), RESULT_LIMIT => 10000))
+ WHERE UPPER(INTEGRATION_NAME) = (SELECT UPPER(TRIM(COALESCE(MAX(VALUE), 'OVERWATCH_EMAIL'))) FROM {_O}SETTINGS
+                                   WHERE KEY = 'ESCALATE_EMAIL_INTEGRATION')
+   AND CONVERT_TIMEZONE('America/Chicago', CREATED)::TIMESTAMP_NTZ
+       >= DATEADD('minute', -2, (SELECT MAX(ESCALATED_AT) FROM {_O}ALERT_EVENTS))
+ ORDER BY CREATED DESC;
+
 -- V164.4 (manual) the next Teams card shows lines as '[SEV] <title> | <company> | <detail> | event <id>'. A full
 --        end-to-end check: leave the next monthly OPS_ALERT_DRILL CRITICAL unacknowledged for 2 hours (only when
 --        P164.2 was empty) -- expect one 'OVERWATCH ESCALATION' Teams post and one email to DEFAULT_RECIPIENTS.
