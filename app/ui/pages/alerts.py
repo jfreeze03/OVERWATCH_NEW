@@ -413,7 +413,8 @@ def _escalation_lines(row: object, now: object = None) -> list[tuple[str, str]]:
         out.append(("info", f"Escalation: a CRITICAL nobody acknowledged within {humanize_duration(after, 'min')} "
                             f"(ESCALATE_AFTER_MIN) is re-posted once to the route(s) that delivered it {email}. "
                             "Acknowledging, snoozing or resolving it, or acknowledging, mitigating or closing its "
-                            "incident, stops the escalation."))
+                            "incident after the alert joined it, stops the escalation (an automatic mitigation "
+                            "does not)."))
     n = _n("ESCALATED_COUNT")
     tally = f"Last {days} days: {n} CRITICAL(s) escalated"
     if n and now is not None:

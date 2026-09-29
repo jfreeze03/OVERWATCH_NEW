@@ -519,6 +519,22 @@ def test_a_rise_before_the_morning_scan_raises_today_and_is_not_repeated_tomorro
     assert db.regression() == []                                                  # yesterday's rise: same key
 
 
+def test_a_further_rise_on_a_scanner_day_that_already_raised_is_not_pushed_again():
+    """Review W6 (pinned, doc-only by design): one event per scanner per snapshot day, with the counts of the scan
+    that raised it. The morning raises 3 -> 5 for D; the hourly loader later rewrites D to 9; the next morning's
+    re-check of D produces the same key, and D+1 (9 vs 9) shows no rise -- so the 5 -> 9 is not pushed again (the
+    first event stays open; the arm comment, header and playbook say so)."""
+    db = _Db(today=_TODAY - timedelta(days=1))
+    db.trust([(_day(-2), "TWICE", "HIGH", 3), (_day(-1), "TWICE", "HIGH", 5)])
+    (ev,) = db.regression()
+    assert ev["DEDUPE_KEY"] == f"{_TRUST}|TWICE|{_day(-1)}" and " 3 -> 5 " in ev["TITLE"]
+    db.con.execute("UPDATE SECURITY_TRUST_SNAPSHOT SET TOTAL_AT_RISK_COUNT = 9 WHERE DAY = ? AND SCANNER_ID = "
+                   "'TWICE'", (_day(-1),))
+    db.today = _TODAY
+    db.trust([(_day(0), "TWICE", "HIGH", 9)])
+    assert db.regression() == []
+
+
 def test_flapping_re_raises_and_a_return_from_zero_is_flagged():
     db = _Db().trust([(_day(-3), "FLAP", "HIGH", 3), (_day(-2), "FLAP", "HIGH", 5)])
     db.today = _TODAY - timedelta(days=1)
@@ -544,20 +560,42 @@ def test_failed_logins_title_and_detail_branch_on_successes():
                         f"SEC_FAILED_LOGINS|NULLS|{_day(-1)}"}                  # key and predicate unchanged
     locked, gotin, nulls = (got[f"SEC_FAILED_LOGINS|{u}|{d}"] for u, d in
                             (("LOCKED", _day(0)), ("GOTIN", _day(0)), ("NULLS", _day(-1))))
-    assert locked["TITLE"] == f"LOCKED had 12 failed logins on {_day(0)} and no successful login"
-    assert gotin["TITLE"] == f"GOTIN had 12 failed logins on {_day(0)}, 2 successful"
-    assert nulls["TITLE"] == f"NULLS had 11 failed logins on {_day(-1)} and no successful login"
-    assert locked["DETAIL"].startswith("No successful login that day: most likely a lockout")
-    assert gotin["DETAIL"].startswith("The same day also had successful logins. A failed burst followed within "
-                                      "60 minutes by a success raises SEC_LOGIN_TAKEOVER from the hourly scan")
+    # review W5: today's row is partial (the ~06:45 load) and never re-raised, so it says 'so far'
+    assert locked["TITLE"] == f"LOCKED had 12 failed logins on {_day(0)} and no successful login so far today"
+    assert gotin["TITLE"] == f"GOTIN had 12 failed logins on {_day(0)}, 2 successful so far"
+    assert nulls["TITLE"] == f"NULLS had 11 failed logins on {_day(-1)} and no successful login"   # a whole day
+    partial = ("Partial day: today counts only what the ~06:45 Central daily load saw (LOGIN_HISTORY lags up to "
+               "2 h), and this event is not updated when the rest of the day loads. ")
+    assert locked["DETAIL"].startswith(partial + "No successful login so far today: most likely a lockout")
+    assert "that day" not in locked["DETAIL"]
+    assert nulls["DETAIL"].startswith("No successful login that day: most likely a lockout")
+    # review W18: the takeover pointer is conditional; the lens is the check either way
+    assert gotin["DETAIL"].startswith(partial + "The same day also had successful logins. While the hourly "
+                                      "SEC_LOGIN_TAKEOVER rule is enabled (Alerts > Rules), a failed burst followed "
+                                      "within 60 minutes by a success raises it")
+    assert "either way, check Security > Access > Authentication > Account-takeover candidates. " in gotin["DETAIL"]
     for ev in got.values():
         assert ev["DETAIL"].endswith("Review Security > Access > Authentication: failed-login reasons and client IPs.")
         assert ev["SEVERITY"] == "HIGH" and ev["METRIC_VALUE"] in (11, 12)
     assert db.run(_ARM07) == []
-    # a 200-character user name still fits TITLE
+    # a 200-character user name still fits TITLE, on either branch of today's partial wording
     long_user = "x" * 200
-    (ev,) = _Db().logins([(_day(0), long_user, 999999999999, 999999999998)]).run(_ARM07)
-    assert len(ev["TITLE"]) <= 300
+    for logins, failed in ((999999999999, 999999999998), (999999999999, 999999999999)):
+        (ev,) = _Db().logins([(_day(0), long_user, logins, failed)]).run(_ARM07)
+        assert len(ev["TITLE"]) <= 300 and len(ev["DETAIL"]) <= 2000
+
+
+def test_failed_logins_yesterday_keeps_the_whole_day_wording():
+    """Review W5: yesterday's row is complete by the ~06:45 load, so it keeps 'that day' and no partial prefix;
+    a user seen today AND yesterday gets both events, each worded for its own day."""
+    db = _Db().logins([(_day(-1), "SVC", 40, 40), (_day(0), "SVC", 15, 15), (_day(-1), "PERSON", 20, 12)])
+    got = {e["DEDUPE_KEY"]: e for e in db.run(_ARM07)}
+    y, t, p = (got[f"SEC_FAILED_LOGINS|{u}|{d}"] for u, d in (("SVC", _day(-1)), ("SVC", _day(0)),
+                                                               ("PERSON", _day(-1))))
+    assert y["TITLE"].endswith(" and no successful login") and not y["DETAIL"].startswith("Partial day")
+    assert t["TITLE"].endswith(" and no successful login so far today") and t["DETAIL"].startswith("Partial day")
+    assert p["TITLE"] == f"PERSON had 12 failed logins on {_day(-1)}, 8 successful"
+    assert p["DETAIL"].startswith("The same day also had successful logins. While the hourly SEC_LOGIN_TAKEOVER")
 
 
 # ============================================================================================================
