@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.601.1 - Per-user AI-quota blocks read the real view columns (2026-09-29)
+
+App-only fix, no migration.
+
+- **Per-user AI-quota blocks were never shown (fixed).** Cost ▸ AI chargeback ▸ Per-user AI quotas & blocks read
+  `SNOWFLAKE.ACCOUNT_USAGE.QUOTA_ACCESS_BLOCK_HISTORY` windowed and ordered on `CREATED_ON`, a column the view does
+  not have, so every read failed with "invalid identifier 'CREATED_ON'". The read is a probe (the view is absent on
+  accounts without per-user quotas), so the failure was never logged, and the panel fell through to "No per-user
+  AI-quota blocks" and "No per-user AI credit quota is enforcing here" -- on an account where a user had been
+  blocked. Since v4.543.0.
+  - The read now windows and orders on `ACTION_AT`. The view's columns, taken from the account's own data
+    preview: ACTION_AT, QUOTA_ID, QUOTA_NAME, USER_ID, USER_NAME, CYCLE, ACTION, PER_USER_LIMIT, CREDITS and
+    BLOCKED_UNTIL.
+  - The block table shows the user, quota, cycle, action, credits against the per-user limit, when the block was
+    recorded and when it ends. "AI-quota blocks" counts ACTION = BLOCKED rows.
+  - "Currently blocked" is a user whose latest action on a quota is a block that runs past now (BLOCKED_UNTIL, the
+    start of the quota's next cycle, on the account clock). The old rule ("no release timestamp") could never
+    apply to this view. It is judged over the last 32 days whatever the Window, so a user blocked today still
+    shows under "Last month" (the window's blocks drive the counts and the table; with none in the window, the
+    table lists the blocks still in force).
+  - A failed read now says the block history could not be read, never "no blocks"; a view the app cannot see is
+    a setup note, not an error. The 1,000-row read cap is disclosed when it binds.
+  - The no-blocks caption no longer claims that no quota is enforcing; it states the window's AI exposure.
+- **Owner-side.** `snow streamlit deploy --replace`. No migration.
+
 ## 4.601.0 - Timeout posture, scale-out vs size-up, tonight's projected finish, measured outcomes, unread maintenance, triage Track (2026-09-29)
 
 App-only, no migration. Next Fifty wave 3 remainder (PR C): ranks 33, 38, 36, 46, 30 and 15.
