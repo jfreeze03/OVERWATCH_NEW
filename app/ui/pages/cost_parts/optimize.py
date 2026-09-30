@@ -22,6 +22,7 @@ import streamlit as st
 from app.config import LEDGER_AUTOBOOKED_LEVERS, core_object
 from app.core.identity import identity_sql
 from app.core.query import cache_scope, execute_statement, run
+from app.core.result import is_setup_absence
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal, sql_number
 from app.core.state import request_navigation
@@ -1541,10 +1542,13 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 "(additive); full-query 'influenced cost' is a separate non-additive lens.")
         elif _oc.ok:
             empty_state("no_data_yet", "No object-cost rows yet (loads after V048 + the first daily run).")
-        else:
+        elif is_setup_absence(_oc.error_kind):
             empty_state("needs_setup",
                         "Object cost arrives with migration V048 (FACT_OBJECT_COST_DAILY) — an admin "
                         "can apply it on Admin → Migrations & freshness.")
+        else:
+            empty_state("unavailable", "The object-cost ledger (FACT_OBJECT_COST_DAILY) could not be read, so "
+                        "spend by cost arm can't be shown.", detail=_oc.error)
         # ---- Next-Fifty #30: maintenance on objects nobody reads -----------------------------------
         # A mart shortlist (object ledger: maintenance credits, no read credits, fixed 90 days) confirmed
         # against access history (write-wins, share-guarded) BEFORE any SQL or dollar is offered. Both reads

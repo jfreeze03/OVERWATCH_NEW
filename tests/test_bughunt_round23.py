@@ -77,7 +77,9 @@ def test_snoozed_backstop_discloses_a_failed_read():
 def test_ai_governance_queue_message_is_honest_about_idempotency():
     src = _src("app/ui/pages/cost_parts/ai_chargeback.py")
     assert 'f"{count}/{len(statements)} action(s) queued."' not in src
-    assert "governance insert(s) ran" in src and "idempotent" in src
+    assert "action(s) queued" not in src
+    # v4.605: the receipt of the shared Track write claims no count -- it says the write is idempotent
+    assert 'notify(True, "Tracked in Action Center (idempotent: a user or scope' in src
 
 
 def test_brief_verdict_guards_a_failed_incident_read():

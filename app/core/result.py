@@ -23,7 +23,7 @@ class QueryResult:
     # Classified from the RAW exception (Codex r10 #4): format_snowflake_error
     # rewrites messages for humans, which silently broke marker-string checks
     # downstream (canary GAP never matched). Kinds: absent | unknown_function
-    # | timeout | other | "" (no error).
+    # | missing_column | timeout | other | "" (no error).
     error_kind: str = ""
     truncated: bool = False
     source: str = ""
@@ -46,3 +46,21 @@ class QueryResult:
     def usable(self) -> bool:
         """True when the page can render data from this result."""
         return self.ok and not self.empty
+
+
+# v4.605: a failed read renders by its KIND. needs_setup ("not installed / not readable by this app") is
+# ONLY for a true absence: the object is missing or unauthorised ('absent') or the function is not
+# available ('unknown_function'). A missing column on an existing view ('missing_column') is schema
+# drift, and a 'timeout' or any 'other' failure is a failed read: each renders
+# empty_state("unavailable", <panel sentence>, detail=<res.error>), never needs_setup and never the
+# clean state.
+# Caveat: query.run(probe=True) still leaves 'missing_column' UNLOGGED (its expected-absence tuple is
+# unchanged), so on a probe read the red 'unavailable' state is the only record of the drift -- an
+# unavailable sentence for a probe read must not point at the Admin error log.
+SETUP_ABSENCE_KINDS: frozenset[str] = frozenset({"absent", "unknown_function"})
+
+
+def is_setup_absence(error_kind: object) -> bool:
+    """True when a failed read's kind is a true absence (needs_setup); False for drift, a timeout, any other
+    failure, and '' / None (no classified absence)."""
+    return str(error_kind or "").strip().lower() in SETUP_ABSENCE_KINDS

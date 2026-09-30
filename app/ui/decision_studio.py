@@ -78,7 +78,7 @@ from app.logic.savings_rollup import (
 )
 from app.logic.sizing import size_recommendations
 from app.logic.verdict import decision_studio_signals, page_verdict
-from app.logic.workbench import mark_watched_pairs, stale_planning
+from app.logic.workbench import ENTITY_TYPES, mark_watched_pairs, stale_planning
 from app.ui import charts
 from app.ui.components import (
     AUTHORED_CONFIDENCE_HELP,
@@ -1134,7 +1134,9 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
             row = adf.iloc[int(index)]
             kind = row.get("SOURCE_ENTITY_TYPE")
             key = row.get("SOURCE_ENTITY_KEY")
-            if pd.notna(kind) and pd.notna(key) and str(kind).strip() and str(key).strip():
+            # v4.605: only a real Entity 360 type opens (an AI_BUDGET scope item has no entity page)
+            if (pd.notna(kind) and pd.notna(key) and str(kind).strip() and str(key).strip()
+                    and str(kind).strip().upper() in ENTITY_TYPES):
                 _open_entity(str(kind).strip(), str(key).strip())
 
         # A row click opens the item's SOURCE entity in Control Room ▸ Entity 360 (no-op without one).

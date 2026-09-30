@@ -75,12 +75,26 @@ def test_create_action_sql_stamps_and_validates_period():
 
 
 def test_ai_chargeback_queue_insert_stamps_monthly():
-    # The AI-chargeback queue insert stores a 30-day projection -> stamp MONTHLY.
+    # The AI-chargeback queue insert stores a 30-day projection -> stamp MONTHLY. Since v4.605 the column
+    # list is the shared Track builder's (fix_queue.track_entities_sql); a priced AI item renders 'MONTHLY'.
+    import pandas as pd
+
+    from app.logic.fix_queue import AI_TRACK_SOURCE, ai_exception_track_items, track_entities_sql
+
+    ex = pd.DataFrame([{"SEVERITY": "High", "SIGNAL": "Cost per request spike", "USER_NAME": "JDOE",
+                        "SOURCE": "CLI", "TOTAL_REQUESTS": 50, "CREDITS_PER_REQUEST": 0.2,
+                        "PROJECTED_30D_USD": 75.5}])
+    (item,) = ai_exception_track_items(ex, "ALFA")["USER"]
+    assert item["ESTIMATED_USD"] == 75.5 and item["PERIOD"] == "MONTHLY"
+    sql = track_entities_sql([item], entity_type="USER", source=AI_TRACK_SOURCE, actor_sql="CURRENT_USER()",
+                             bulk=False, company_from_user=True, source_scoped=True)
+    assert "ESTIMATED_USD, PERIOD, UPDATED_BY)" in sql
+    assert "75.5, 'MONTHLY')" in sql and "NULLIF(v.PER, '')" in sql
+    sqlglot.parse(sql, dialect="snowflake")
     src = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "ai_chargeback.py").read_text(
         encoding="utf-8"
     )
-    assert "OWNER, SOURCE, ESTIMATED_USD, PERIOD)" in src
-    assert "'MONTHLY'" in src
+    assert "track_entities_sql(" in src
 
 
 # --- the app rewire: readers surface PERIOD --------------------------------

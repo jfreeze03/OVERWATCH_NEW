@@ -36,6 +36,15 @@ from app.logic.cortex import (
     with_aggregate_budget_row,
 )
 from app.logic.date_windows import window_label, window_phrase
+from app.logic.fix_queue import (
+    AI_SCOPE_ENTITY_TYPE,
+    AI_TRACK_CAP,
+    AI_TRACK_SEVERITIES,
+    AI_TRACK_SOURCE,
+    AI_USER_ENTITY_TYPE,
+    ai_exception_track_items,
+    track_entities_sql,
+)
 from app.logic.formulas import account_now, account_today, credits_to_usd, format_usd, md_dollars, safe_float
 from app.logic.quotas import (
     DEFAULT_CAP_CREDITS,
@@ -350,73 +359,7 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
             },
         )
         st.caption(md_dollars(_rules))
-        with st.expander("Queue top exceptions to the Action Queue"):
-            statements = []
-            _queued = exceptions.head(10)
-            # cost-hunt2: the '(all users)' aggregate row's PROJECTED_30D_USD IS the scope-wide
-            # total = the SUM of the per-user projections (aggregate_budget_row reads
-            # rollup_summary's projected_30d_usd_guarded). Queuing it at full value alongside the
-            # per-user rows double-counts those dollars in any additive rollup -- e.g.
-            # mart_sql.action_acceptance DONE_USD and ESTIMATED_OPEN_USD both SUM(ESTIMATED_USD)
-            # with no de-overlap, so once both are DONE the breaching users are counted twice.
-            # Stamp the aggregate's ESTIMATED_USD as the INCREMENTAL exposure not already itemized
-            # by the other queued rows (scope total - sum of other queued projections, clamped
-            # >=0) so the queued set sums to the scope total once. DETAIL still shows the true
-            # scope total; only the additive ESTIMATED_USD field is de-overlapped. (A user
-            # appearing as BOTH a budget breach and a CPR spike is a separate, smaller overlap.)
-            _other_proj = sum(safe_float(_r['PROJECTED_30D_USD'])
-                              for _, _r in _queued.iterrows()
-                              if str(_r['USER_NAME']) != "(all users)")
-            for _, r in _queued.iterrows():
-                user = str(r['USER_NAME'])
-                _is_agg = user == "(all users)"
-                title = f"Cortex {r['SIGNAL']}: {user} ({r['SOURCE']})"
-                _proj = safe_float(r['PROJECTED_30D_USD'])
-                _est = max(0.0, _proj - _other_proj) if _is_agg else _proj
-                detail = (f"{int(r['TOTAL_REQUESTS'])} requests, projected 30d "
-                          f"{format_usd(_proj)}, cr/request {r['CREDITS_PER_REQUEST']:.4f}."
-                          + (" Queued $ is the incremental scope exposure beyond the per-user "
-                             "rows above (avoids double-count)." if _is_agg else ""))
-                # Attribute a PER-USER breach to the user's REAL company (COMPANY_FOR_USER), not the
-                # view's filter: in the ALL view `company` is 'ALL', which would both mis-file a
-                # Trexis user's action under 'ALL' AND -- because the dedup keys on COMPANY -- let
-                # the SAME breach queue a SECOND time from the Trexis scope (double-counting its
-                # ESTIMATED_USD on the Workbench KPI). The scope-aggregate '(all users)' row IS the
-                # per-scope total, so it stays under the view's company (distinct per scope).
-                # codex#39: idempotent insert keyed on COMPANY + TITLE (TITLE encodes signal+user+
-                # source) + this month + open status, so a double-click/retry is a no-op.
-                # DS #7: ESTIMATED_USD here is PROJECTED_30D_USD -- a 30-day (monthly-equivalent)
-                # figure -- so stamp PERIOD='MONTHLY' (else it summed beside one-time estimates).
-                company_expr = (sql_literal(company) if _is_agg
-                                else f"{companies.COMPANY_FOR_USER_FN}({sql_literal(user)})")
-                statements.append(
-                    f"INSERT INTO {core_object('ACTION_QUEUE')} (COMPANY, SEVERITY, TITLE, DETAIL, OWNER, SOURCE, ESTIMATED_USD, PERIOD)\n"
-                    f"SELECT {company_expr}, {sql_literal(str(r['SEVERITY']).upper())}, {sql_literal(title)}, "
-                    f"{sql_literal(detail)}, 'DBA / AI Governance', 'Cost Intelligence > Chargeback & AI > AI users', "
-                    f"{sql_number(_est)}, 'MONTHLY'\n"
-                    f"WHERE NOT EXISTS (SELECT 1 FROM {core_object('ACTION_QUEUE')} q "
-                    f"WHERE q.COMPANY = {company_expr} AND q.TITLE = {sql_literal(title)} "
-                    f"AND UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS') "
-                    f"AND q.CREATED_AT >= DATE_TRUNC('month', CURRENT_DATE()));"
-                )
-            script = "\n".join(statements)
-            st.code(script, language="sql")
-            if (is_operator and st.button("Execute inserts", key="cortex_queue_exec")
-                    and write_gate_open("cortex_queue_exec")):
-                ok_all, count = True, 0
-                for stmt in statements:
-                    ok, _msg = execute_statement(stmt.replace("\n", " "), page=_PAGE)
-                    ok_all, count = ok_all and ok, count + int(ok)
-                stamp_write("cortex_queue_exec", ok_all)  # C48
-                # `count` is the number of inserts that RAN (execute_statement can't see the
-                # affected-row count), NOT rows created — the inserts are idempotent WHERE-NOT-
-                # EXISTS, so items already open this month are 0-row no-ops. Say "ran/skipped",
-                # not "queued", so a re-run this month doesn't read as N new actions created.
-                (st.success if ok_all else st.error)(
-                    f"{count}/{len(statements)} governance insert(s) ran — idempotent, so any "
-                    "already open this month are skipped, not re-queued.")
-            elif not is_operator:
-                st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")
+        _track_exceptions_expander(exceptions, company, is_operator)
 
     # The org daily cap as the V163 runaway arm reads it (junk / 0 / negative -> 15), resolved ONCE and
     # shared by the quota suggestions and the CoCo efficiency review below.
@@ -429,6 +372,62 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
                     z_min=effective_z_min(settings.get("AI_RUNAWAY_ROBUST_Z")))
 
     _token_economics_panel(company, days, _coco_cap, bounds=bounds)
+
+
+def _track_exceptions_expander(exceptions: pd.DataFrame, company: str, is_operator: bool) -> None:
+    """Cost > Chargeback & AI > Exceptions: 'Track top exceptions as work items' (v4.605) -- the ONE shared Track
+    write, as Operations > Optimize and Control Room triage use it. Two statements at most (users, then the
+    all-users scope), shown before the one-click button, executed in order behind the C48 latch."""
+    with st.expander("Track top exceptions as work items"):
+        # Replaces this page's own per-row INSERTs (pre-v4.605). One item per USER, keyed on the user with
+        # every signal of that user in its detail, plus the all-users budget breach keyed on the Company
+        # scope (AI_BUDGET). The NOT EXISTS is scoped to this page's SOURCE (a Security work item on the same
+        # user never blocks an AI-spend item) and entity-keyed, and a still-open pre-v4.605 item from this
+        # page (no entity key) blocks by its legacy TITLE, so nothing queued the old way is duplicated. The
+        # scope item's estimate is the exposure the user items do not already count, so the queued set sums
+        # to the scope total once (fix_queue.ai_exception_track_items).
+        _groups = ai_exception_track_items(exceptions, company)
+        _stmts = [(kind, stmt) for kind, stmt in (
+            (AI_USER_ENTITY_TYPE, track_entities_sql(
+                _groups[AI_USER_ENTITY_TYPE], entity_type=AI_USER_ENTITY_TYPE, source=AI_TRACK_SOURCE,
+                actor_sql=identity_sql(), bulk=False, severities=AI_TRACK_SEVERITIES,
+                company_from_user=True, source_scoped=True)),
+            (AI_SCOPE_ENTITY_TYPE, track_entities_sql(
+                _groups[AI_SCOPE_ENTITY_TYPE], entity_type=AI_SCOPE_ENTITY_TYPE, source=AI_TRACK_SOURCE,
+                actor_sql=identity_sql(), bulk=False, severities=AI_TRACK_SEVERITIES,
+                source_scoped=True)),
+        ) if stmt]
+        st.caption(f"Tracks the first {AI_TRACK_CAP} rows above into Action Center: one work item per "
+                   "user, keyed on the user, with every signal of that user in its detail. A user who "
+                   "already has an open item from this page (tracked before, from any Company scope) is "
+                   "left as is. Items land UNASSIGNED at the strongest signal's severity, under the user's "
+                   "own company (ALL when the user maps to none), priced at the user's projected 30-day "
+                   "spend (monthly).")
+        if _groups[AI_SCOPE_ENTITY_TYPE]:
+            st.caption(f"The all-users budget breach becomes one item for the {company} scope, estimated at "
+                       "only the projected exposure the user items do not already count (none when they "
+                       "count all of it).")
+        for _kind, _stmt in _stmts:
+            st.code(_stmt, language="sql")
+        if (is_operator and _stmts and st.button("Track in Action Center", key="cortex_track_exec")
+                and write_gate_open("cortex_track_exec")):
+            ok_all, _err, _users_done = True, "", False
+            for _kind, _stmt in _stmts:
+                ok, _msg = execute_statement(_stmt.strip(), page=_PAGE)
+                if not ok:
+                    ok_all, _err = False, _msg
+                    break                          # in order; stop at the first failure
+                _users_done = _users_done or _kind == AI_USER_ENTITY_TYPE
+            stamp_write("cortex_track_exec", ok_all)  # C48
+            if ok_all:
+                notify(True, "Tracked in Action Center (idempotent: a user or scope that already has an "
+                             "open item, including one queued from this page before, is left as is).")
+            elif _users_done:
+                notify(False, f"The user items were tracked, but the all-users budget item was not: {_err}")
+            else:
+                notify(False, _err)
+        elif not is_operator:
+            st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")
 
 
 def _ai_quota_panel(enriched: pd.DataFrame, summary: dict, days: int,
@@ -621,7 +620,8 @@ def _token_economics_panel(company: str, days: int, cap_credits: float, *, bound
     a heavy-but-targeted user from a high-intensity one, so this merges the token grain with
     per-user daily credits into peer-relative signals + a 🚩 Review flag. Tracks the page's Window
     filter (``days``). Opt-in toggle; a schema/telemetry miss (an absent view or TOKENS_GRANULAR column)
-    degrades to an honest note, and any other failed read (a timeout) renders 'unavailable' with the error."""
+    degrades to an honest note, and any other failed read (another missing column = drift, a timeout)
+    renders 'unavailable' with the error."""
     from app.logic.wave2 import (
         coco_coaching_count,
         coco_efficiency,
@@ -649,9 +649,16 @@ def _token_economics_panel(company: str, days: int, cap_credits: float, *, bound
         # v4.603: the absence caption is only for the kinds run() treats as an EXPECTED absence on a probe read
         # (and so never logs): keep this tuple in lockstep with query.run's. A timeout or any other failure is
         # a failed read (logged by run()), never "the column doesn't exist" -- TOKENS_GRANULAR exists here.
-        if te_res.error_kind in ("absent", "unknown_function", "missing_column"):
+        # v4.605: a missing column is the documented optional TOKENS_GRANULAR only when the error names it
+        # (format_snowflake_error keeps the identifier: "does not expose X here"); any OTHER missing column is
+        # schema drift -> 'unavailable'. Drift stays unlogged on a probe read, so that sentence names no log.
+        _drift = te_res.error_kind == "missing_column" and "TOKENS_GRANULAR" not in str(te_res.error or "").upper()
+        if te_res.error_kind in ("absent", "unknown_function", "missing_column") and not _drift:
             st.caption("TOKENS_GRANULAR isn't available on this account's Cortex Code views yet — "
                        "token-type economics appear here automatically once the column exists.")
+        elif _drift:
+            empty_state("unavailable", "A column the Cortex Code token-type read uses is missing from Snowflake's "
+                        "view (schema drift), so token economics cannot be shown.", detail=te_res.error)
         else:
             empty_state("unavailable", "The Cortex Code token-type read failed this run, so token economics "
                         "cannot be shown. Retry, or see the Admin error log.", detail=te_res.error)

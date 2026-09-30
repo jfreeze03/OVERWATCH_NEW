@@ -23,6 +23,7 @@ from app.core.ai import CORTEX_TIMEOUT_SECONDS
 from app.core.errors import error_buffer, safe_page
 from app.core.identity import identity_sql
 from app.core.query import bump_refresh_salt, execute_statement, query_telemetry, run, run_batch
+from app.core.result import is_setup_absence
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
@@ -1049,10 +1050,14 @@ def _migrations_tab() -> None:
         st.caption("Flyway owns WHAT ran WHEN once adopted; SCHEMA_VERSION above stays "
                    "the app's contract check (and the in-file guards stay as defense "
                    "against Snowsight bypass). Adoption runbook: docs/FLYWAY_ADOPTION.md.")
-    else:
+    elif fh.ok or is_setup_absence(fh.error_kind):
         st.caption("Flyway not detected — SCHEMA_VERSION above is authoritative. When "
                    "procurement lands, docs/FLYWAY_ADOPTION.md is the adoption runbook; "
                    "this panel lights up on its own once flyway_schema_history exists.")
+    else:
+        empty_state("unavailable", "The Flyway ledger (flyway_schema_history) could not be read, so whether "
+                    "Flyway is adopted can't be confirmed here. SCHEMA_VERSION above is authoritative.",
+                    detail=fh.error)
 
     section_header("Source freshness", "", "admin")
     fresh = run_mart_first(
@@ -2005,9 +2010,12 @@ def _canary_tab() -> None:
         elif (rdf["STATE"] == "WARN").any():
             st.warning("Mart drift in the 2-5% band — usually late-arriving metering rows; "
                        "re-check tomorrow before re-running backfills.")
-        if not ai_recon.ok:
+        if not ai_recon.ok and is_setup_absence(ai_recon.error_kind):
             st.caption("AI checks skipped: the Cortex usage views are not readable on this account "
                        "(subscription/region), so FACT_AI_USAGE_DAILY cannot be reconciled here.")
+        elif not ai_recon.ok:
+            empty_state("unavailable", "AI checks skipped: the Cortex reconciliation read failed, so "
+                        "FACT_AI_USAGE_DAILY was not reconciled here.", detail=ai_recon.error)
         result_caption(recon)
 
     st.divider()
@@ -2095,14 +2103,19 @@ def _setup_progress_tab() -> None:
         "Apply migrations in Snowsight (owner); configure settings on the Settings tab."
     )
     rows: list[dict] = []
+    # v4.605: a read that FAILED (timeout, drift, any non-absence kind) is 'Unknown' -- not a pending setup
+    # step -- so the checklist never tells the owner to apply or configure something that may be done.
+    _retry_fix = "Retry. The read failed; this is not a setup gap."
 
-    def _add(step: str, done: bool, detail: str, fix: str, partial: bool = False) -> None:
-        status = "Done" if done else ("Partial" if partial else "Pending")
+    def _add(step: str, done: bool, detail: str, fix: str, partial: bool = False,
+             unknown: bool = False) -> None:
+        status = "Unknown" if unknown else ("Done" if done else ("Partial" if partial else "Pending"))
         rows.append({"STEP": step, "STATUS": status, "DETAIL": detail,
-                     "FIX": "" if done else fix})
+                     "FIX": fix if (unknown or not done) else ""})
 
     sv = run(mart_sql.schema_version(), page=_PAGE, key="setup_schema_version",
              tier="metadata", source="SCHEMA_VERSION", probe=True)
+    _sv_failed = not sv.ok and not is_setup_absence(sv.error_kind)
     applied: set[int] = set()
     if sv.ok and not sv.empty:
         applied = {int(v) for v in pd.to_numeric(sv.df["VERSION"], errors="coerce").dropna()}
@@ -2115,16 +2128,22 @@ def _setup_progress_tab() -> None:
     # #26: count only the migrations this build KNOWS (len(applied) printed "162 of 161" once the
     # database ran ahead of the app), and a database ahead of the build is Partial, never Done.
     _n_exp = len(_EXPECTED_MIGRATIONS)
+    if sv.ok:
+        _sv_detail = (f"{_n_exp - len(drift.missing)} of {_n_exp} applied"
+                      + (f"; {len(drift.missing)} missing" if drift.missing else "")
+                      + (f"; {len(drift.ahead)} newer than this build — redeploy the app" if drift.ahead else ""))
+    elif _sv_failed:
+        _sv_detail = "SCHEMA_VERSION could not be read, so which migrations are applied is unknown."
+    else:
+        _sv_detail = "SCHEMA_VERSION unreadable — nothing applied yet"
     _add("Database migrations", done=bool(applied) and not drift.missing and not drift.ahead,
-         partial=bool(drift.ahead) and not drift.missing,
-         detail=(f"{_n_exp - len(drift.missing)} of {_n_exp} applied"
-                 + (f"; {len(drift.missing)} missing" if drift.missing else "")
-                 + (f"; {len(drift.ahead)} newer than this build — redeploy the app" if drift.ahead else ""))
-                if sv.ok else "SCHEMA_VERSION unreadable — nothing applied yet",
-         fix=("Run the missing migrations in order (DEPLOYMENT.md); " if drift.missing else "")
-             + ("redeploy the app from the revision the newer migrations came from "
-                "(snow streamlit deploy --replace); " if drift.ahead else "")
-             + "see the Migrations & freshness tab for per-version detail.")
+         partial=bool(drift.ahead) and not drift.missing, unknown=_sv_failed,
+         detail=_sv_detail,
+         fix=(_retry_fix if _sv_failed else
+              ("Run the missing migrations in order (DEPLOYMENT.md); " if drift.missing else "")
+              + ("redeploy the app from the revision the newer migrations came from "
+                 "(snow streamlit deploy --replace); " if drift.ahead else "")
+              + "see the Migrations & freshness tab for per-version detail."))
 
     fr = run(mart_sql.source_freshness_state(), page=_PAGE, key="setup_freshness",
              tier="recent", source="SOURCE_FRESHNESS_STATE", probe=True)
@@ -2138,9 +2157,14 @@ def _setup_progress_tab() -> None:
                     + (f"; {_never} not loaded yet" if _never else ""),
              fix="Loader tasks fill these overnight; a never-loaded source needs its "
                  "backfill (Migrations & freshness tab).")
+    elif not fr.ok and not is_setup_absence(fr.error_kind):
+        _add("Marts loading", done=False, unknown=True,
+             detail="SOURCE_FRESHNESS_STATE could not be read, so whether the marts are loading is unknown.",
+             fix=_retry_fix)
     else:
         _add("Marts loading", done=False,
-             detail="Freshness view not readable — have the loader tasks run?",
+             detail=("SOURCE_FRESHNESS_STATE is empty — have the loader tasks run?" if fr.ok
+                     else "Freshness view not readable — have the loader tasks run?"),
              fix="Resume the loader tasks (end of V004) / run the backfill.")
 
     s = load_settings(_PAGE)
@@ -2157,20 +2181,32 @@ def _setup_progress_tab() -> None:
              "(drives Contract & Forecast).")
     rt = run(mart_sql.alert_routes(), page=_PAGE, key="setup_routes", tier="recent",
              source="ALERT_ROUTES", probe=True)
+    _rt_failed = not rt.ok and not is_setup_absence(rt.error_kind)
     _n_routes = 0
     if rt.usable():
         _n_routes = (int(rt.df["ENABLED"].astype(str).str.upper().isin(("TRUE", "1")).sum())
                      if "ENABLED" in rt.df.columns else len(rt.df))
-    _add("Alert routes configured", done=_n_routes > 0,
-         detail=f"{_n_routes} enabled route(s)" if rt.usable() else "routes table not readable",
-         fix="Add an enabled route so alerts reach Teams/email (Alerts → Rules & routes).")
+    # an ok-but-empty read is a readable table with no route ("0 enabled"), never "not readable"
+    if rt.ok:
+        _rt_detail = f"{_n_routes} enabled route(s)"
+    elif _rt_failed:
+        _rt_detail = "ALERT_ROUTES could not be read, so the routes are unknown."
+    else:
+        _rt_detail = "routes table not readable"
+    _add("Alert routes configured", done=_n_routes > 0, unknown=_rt_failed, detail=_rt_detail,
+         fix=(_retry_fix if _rt_failed
+              else "Add an enabled route so alerts reach Teams/email (Alerts → Rules & routes)."))
 
     df = pd.DataFrame(rows)
-    pending = int((df["STATUS"] != "Done").sum())
-    if pending == 0:
+    pending = int(df["STATUS"].isin(("Pending", "Partial")).sum())
+    unknown = int((df["STATUS"] == "Unknown").sum())
+    if pending == 0 and unknown == 0:
         empty_state("clean", "Setup complete — every checklist item is satisfied.")
-    else:
+    if pending:
         st.warning(f"{pending} setup item(s) still pending — see the FIX column.")
+    if unknown:
+        empty_state("unavailable", f"{unknown} setup item(s) could not be checked: a read failed, which is "
+                    "not a setup gap. Retry.")
     styled_table(df, height=360)
     st.caption("Per-version migration detail (which VNNN is applied or missing) is on "
                "the Migrations & freshness tab.")
