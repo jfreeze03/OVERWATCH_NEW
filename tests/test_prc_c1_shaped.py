@@ -183,7 +183,8 @@ def test_statement_timeout_company_scope_with_a_failed_tail_is_unavailable(monke
 def test_statement_timeout_managed_compute_and_fired_below_cap_name_their_cause(monkeypatch):
     """#33 D4/D5 on the rendered panel: a COMPUTE_SERVICE_WH* pool SHOW never lists is Managed compute (its own
     caption, not the 'dropped, renamed, or not visible' one), and a cancel that fired below the effective cap
-    says a user, session or client value fired it; the Timed-out help no longer calls cancels 'caps that
+    names every lower ceiling that can fire (a user, session, client or task value, or an earlier, lower
+    warehouse or account value); the Timed-out help no longer calls cancels 'caps that
     already fired'."""
     _ops_recorder(monkeypatch, v4603=True)
     at = AppTest.from_function(_entry, default_timeout=30)
@@ -193,7 +194,7 @@ def test_statement_timeout_managed_compute_and_fired_below_cap_name_their_cause(
     assert "USER_TASK_TIMEOUT_MS. Shown as Managed compute." in blob
     assert "ran statements in the window but SHOW WAREHOUSES does not list them" not in blob
     assert "Timed out below the effective cap on WH_A:" in blob
-    assert "a user, session or client value fired below it" in blob
+    assert "a user, session, client or task value, or an earlier, lower warehouse or account value" in blob
     assert "caps that already fired" not in blob
     assert "at whichever ceiling was lowest for that statement" in _card(blob, "Timed out (30d)")
 

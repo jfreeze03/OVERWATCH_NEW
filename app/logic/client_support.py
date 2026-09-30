@@ -40,6 +40,7 @@ NEARING_EOS = "NEARING_EOS"
 BELOW_RECOMMENDED = "BELOW_RECOMMENDED"
 OK = "OK"
 NO_VERSION = "NO_VERSION"
+NOT_COMPARED = "NOT_COMPARED"
 NOT_LISTED = "NOT_LISTED"
 UNAVAILABLE = "UNAVAILABLE"
 
@@ -50,12 +51,17 @@ STATUS_LABELS = {
     BELOW_RECOMMENDED: "BELOW RECOMMENDED",
     OK: "OK",
     NO_VERSION: "NO VERSION",
+    NOT_COMPARED: "NO MINIMUM LISTED",
     NOT_LISTED: "NOT LISTED",
     UNAVAILABLE: "unavailable",
 }
 # Worst first; the table sorts on this, then yours-before-Snowflake-run, then sessions.
 STATUS_RANK = {UNSUPPORTED: 0, NEARING_EOS: 1, BELOW_RECOMMENDED: 2, OK: 3, NO_VERSION: 4,
-               NOT_LISTED: 5, UNAVAILABLE: 6}
+               NOT_COMPARED: 5, NOT_LISTED: 6, UNAVAILABLE: 7}
+# The verdicts that compared a version with a minimum supported version, and the codes that could not: a
+# version with one of the latter is 'not checked' in every support KPI, never counted as clean.
+CHECKED_CODES = (UNSUPPORTED, NEARING_EOS, BELOW_RECOMMENDED, OK)
+NOT_CHECKED_CODES = (NOT_COMPARED, NOT_LISTED)
 
 WHO_YOURS = "Yours"
 WHO_SNOWFLAKE = "Snowflake-run"
@@ -148,16 +154,21 @@ def support_status(version: object, min_supported: object, nearing_eos: object,
     """One driver version against Snowflake's floors for that driver.
 
     NOT_LISTED when the function gave no usable floor at all (no entry, or an entry missing every version
-    key); NO_VERSION when the client reported no version (never compared, never newest); UNSUPPORTED below
-    the minimum supported version; NEARING_EOS at or above it but below the version listed as nearing end
-    of support; BELOW_RECOMMENDED supported but older than the recommended version; else OK."""
+    key); NOT_COMPARED ('NO MINIMUM LISTED') when the entry lists no usable minimum supported version: every
+    other verdict is defined against that minimum ('supported', 'at or above the minimum'), so none is given;
+    NO_VERSION when the client reported no version (never compared, never newest); UNSUPPORTED below the
+    minimum supported version; NEARING_EOS at or above it but below the version listed as nearing end of
+    support; BELOW_RECOMMENDED supported but older than the recommended version; else OK. A band whose key
+    the entry leaves blank is skipped (an entry may list no nearing-end-of-support version)."""
     mk, nk, rk = version_key(min_supported), version_key(nearing_eos), version_key(recommended)
     if mk is None and nk is None and rk is None:
         return NOT_LISTED
+    if mk is None:
+        return NOT_COMPARED
     vk = version_key(version)
     if vk is None:
         return NO_VERSION
-    if mk is not None and _lt(vk, mk):
+    if _lt(vk, mk):
         return UNSUPPORTED
     if nk is not None and _lt(vk, nk):
         return NEARING_EOS
@@ -346,8 +357,8 @@ def read_floors(ok: bool, df: pd.DataFrame | None, error: object = "",
 
     The last case is key drift: GET_PATH on a key Snowflake has renamed returns NULL, not an error, so the
     read still succeeds with one row per client and every version would read NOT LISTED (or, with only the
-    minimum key lost, a milder verdict) under a green '0 unsupported'. Keyed on the minimum because the
-    minimum is what the UNSUPPORTED verdict needs."""
+    minimum key lost, NO MINIMUM LISTED) with nothing checked. Keyed on the minimum because every verdict
+    needs it; the nearing-end-of-support and recommended keys are checked band by band (floor_bands)."""
     if not ok:
         return None, unavailable_reason(error, error_kind)
     floors = floors_from_frame(df)
@@ -357,6 +368,23 @@ def read_floors(ok: bool, df: pd.DataFrame | None, error: object = "",
         return None, ("the function's entries list no minimum supported version; its key names may have "
                       "changed")
     return floors, ""
+
+
+@dataclass(frozen=True)
+class FloorBands:
+    """Whether ANY entry lists a usable value for each optional band. False means that key probably drifted
+    (a renamed key reads NULL without an error), so the band's KPI cannot be checked at all: a version in
+    the nearing band would read BELOW RECOMMENDED or OK, and one below the recommended version would read OK.
+    Per entry a blank band is legitimate (support_status skips it); only a band no entry lists is drift."""
+
+    nearing: bool
+    recommended: bool
+
+
+def floor_bands(floors: Iterable[ClientFloor]) -> FloorBands:
+    fl = list(floors)
+    return FloorBands(nearing=any(version_key(f.nearing_eos) is not None for f in fl),
+                      recommended=any(version_key(f.recommended) is not None for f in fl))
 
 
 # ---------------------------------------------------------------------------
@@ -448,35 +476,27 @@ def no_client_id_sessions(df: pd.DataFrame) -> int:
 
 def _driver_versions(df: pd.DataFrame) -> pd.DataFrame:
     """One row per DRIVER x VERSION: its support code (the same on every PROGRAM row), whether any of its
-    rows is yours, its total sessions, and whether its floor lists no usable minimum (NO_MIN)."""
+    rows is yours, and its total sessions."""
     rows = _identified(df)
     if rows.empty:
-        return pd.DataFrame(columns=["DRIVER", "VERSION", "SUPPORT_CODE", "YOURS", "SESSIONS", "NO_MIN"])
+        return pd.DataFrame(columns=["DRIVER", "VERSION", "SUPPORT_CODE", "YOURS", "SESSIONS"])
     sess = pd.to_numeric(rows["SESSIONS"], errors="coerce").fillna(0) if "SESSIONS" in rows.columns else 0
-    tmp = rows.assign(_yours=rows["WHO_UPGRADES"] == WHO_YOURS, _sess=sess,
-                      _nomin=[version_key(m) is None for m in rows["MIN_SUPPORTED"]])
+    tmp = rows.assign(_yours=rows["WHO_UPGRADES"] == WHO_YOURS, _sess=sess)
     return (tmp.groupby(["DRIVER", "VERSION"], sort=False, dropna=False)
-            .agg(SUPPORT_CODE=("SUPPORT_CODE", "first"), YOURS=("_yours", "any"), SESSIONS=("_sess", "sum"),
-                 NO_MIN=("_nomin", "all"))
+            .agg(SUPPORT_CODE=("SUPPORT_CODE", "first"), YOURS=("_yours", "any"), SESSIONS=("_sess", "sum"))
             .reset_index())
-
-
-# Verdicts support_status can reach without a minimum (the entry lists only the other keys). A version
-# with one of these and no minimum was never compared with a minimum: it is 'not checked', not clean.
-_VERDICTS_WITHOUT_MINIMUM = (NEARING_EOS, BELOW_RECOMMENDED, OK)
 
 
 def _versioned(dv: pd.DataFrame) -> pd.Series:
     return pd.Series([version_key(v) is not None for v in dv["VERSION"]], index=dv.index, dtype=bool)
 
 
-def _not_checked(dv: pd.DataFrame) -> pd.Series:
-    """Your driver versions that could not be compared with a minimum: NOT LISTED (no floor for the
-    driver), or a verdict formed from an entry that lists no minimum. A row with no version ('?') is not
-    counted here: nothing could compare it, and the table already says NO VERSION / NOT LISTED."""
-    code = dv["SUPPORT_CODE"]
-    no_min = dv["NO_MIN"].astype(bool) & code.isin(_VERDICTS_WITHOUT_MINIMUM)
-    return ((code == NOT_LISTED) | no_min) & dv["YOURS"].astype(bool) & _versioned(dv)
+def _not_checked(dv: pd.DataFrame, yours: bool = True) -> pd.Series:
+    """Driver versions on one side (yours, or Snowflake-run only) that could not be compared with a minimum:
+    NOT LISTED (no floor for the driver) or NO MINIMUM LISTED (its entry lists no minimum). A row with no
+    version ('?') is not counted here: nothing could compare it, and the table already says so."""
+    side = dv["YOURS"].astype(bool)
+    return dv["SUPPORT_CODE"].isin(NOT_CHECKED_CODES) & (side if yours else ~side) & _versioned(dv)
 
 
 def support_counts(df: pd.DataFrame) -> dict[str, int]:
@@ -485,13 +505,14 @@ def support_counts(df: pd.DataFrame) -> dict[str, int]:
     A version seen under both a customer program and a Snowflake-run program counts as yours (actionable).
     Nearing end of support and below recommended count yours only; Snowflake-run versions are no action.
 
-    checked_yours / not_checked_yours split your versions that have a version number into those compared
-    with a minimum and those that could not be (see _not_checked); not_listed_yours is the NOT LISTED part
-    of the latter (no floor at all, so no verdict of any kind). The page qualifies its KPIs and caption
-    with these instead of letting an unchecked version read as a green 0."""
+    One rule for every support KPI: a version counts only when it was compared with a minimum (a
+    CHECKED_CODES verdict). checked_* / not_checked_* split each side's versions that have a version number
+    into those compared with a minimum and those that could not be (NOT LISTED / NO MINIMUM LISTED). The
+    page qualifies each KPI with its own side's split (all three yours-KPIs share not_checked_yours; the
+    Snowflake-run KPI uses not_checked_snowflake) instead of letting an unchecked version read as a green 0."""
     dv = _driver_versions(df)
     code, yours = dv["SUPPORT_CODE"], dv["YOURS"].astype(bool)
-    checked = (code == UNSUPPORTED) | (code.isin(_VERDICTS_WITHOUT_MINIMUM) & ~dv["NO_MIN"].astype(bool))
+    checked = code.isin(CHECKED_CODES)
     return {
         "unsupported_yours": int(((code == UNSUPPORTED) & yours).sum()),
         "unsupported_snowflake": int(((code == UNSUPPORTED) & ~yours).sum()),
@@ -499,7 +520,8 @@ def support_counts(df: pd.DataFrame) -> dict[str, int]:
         "below_recommended": int(((code == BELOW_RECOMMENDED) & yours).sum()),
         "checked_yours": int((checked & yours).sum()),
         "not_checked_yours": int(_not_checked(dv).sum()),
-        "not_listed_yours": int(((code == NOT_LISTED) & yours & _versioned(dv)).sum()),
+        "checked_snowflake": int((checked & ~yours).sum()),
+        "not_checked_snowflake": int(_not_checked(dv, yours=False).sum()),
     }
 
 
@@ -525,13 +547,14 @@ def _context(rows: pd.DataFrame) -> str:
     return "used by " + ", ".join(shown) + (f" +{more} more" if more else "")
 
 
-def support_caption(df: pd.DataFrame) -> str:
+def support_caption(df: pd.DataFrame, bands: FloorBands | None = None) -> str:
     """The per-version upgrade sentence, built from the MIN_SUPPORTED / RECOMMENDED columns (never from
     fixed numbers). Lists yours-to-upgrade UNSUPPORTED versions, busiest first, then the Snowflake-run tail.
 
     'None ... below the minimum' is said only of versions that were compared with one: when some of yours
-    could not be (NOT LISTED, or an entry with no minimum) the sentence counts the checked ones and names
-    the rest, and when none could be it never reads clean."""
+    could not be (NOT LISTED, or NO MINIMUM LISTED) the sentence counts the checked ones and names the
+    rest, and when none could be it never reads clean. ``bands`` (floor_bands): a band no entry lists gets
+    a closing clause, so an OK or BELOW RECOMMENDED read without that value is not taken as a verdict."""
     counts = support_counts(df)
     rows = _identified(df)
     unsupported = rows[(rows["SUPPORT_CODE"] == UNSUPPORTED)]
@@ -578,11 +601,19 @@ def support_caption(df: pd.DataFrame) -> str:
     else:
         text = "None of your driver versions in this window is below Snowflake's supported minimum."
     if not n and n_sf:
-        text += (f" {n_sf} driver {_plural(n_sf, 'version', 'versions')} below it "
+        # review R2-4: after 'lists no minimum for that driver', 'below it' would point at the driver
+        ref = "below Snowflake's supported minimum" if k and not checked else "below it"
+        text += (f" {n_sf} driver {_plural(n_sf, 'version', 'versions')} {ref} "
                  f"{_plural(n_sf, 'is', 'are')} {sf_what}")
     if k and checked:
         text += (f" {k} of your driver versions could not be checked against a minimum ({listed}): "
                  f"{lists_none}.")
+    if bands is not None and not bands.nearing:
+        text += (" No entry of Snowflake's function lists a nearing-end-of-support version (its key name may "
+                 "have changed), so a version nearing end of support reads BELOW RECOMMENDED or OK here.")
+    if bands is not None and not bands.recommended:
+        text += (" No entry of Snowflake's function lists a recommended version (its key name may have "
+                 "changed), so OK here does not mean up to date.")
     return text
 
 

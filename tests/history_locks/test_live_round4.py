@@ -144,12 +144,15 @@ def test_clients_panel_wired_and_canaried():
     # the support floor's own column colours UNSUPPORTED red and NEARING END OF SUPPORT amber.
     assert '"NO VERSION": _MUTED' in colors and '"SNOWFLAKE-RUN": _MUTED' in colors
     assert '"UNSUPPORTED": _BAD' in colors and '"NEARING END OF SUPPORT": _WARN' in colors
-    # the panel help states what each support word means (exact #34 wording)
+    # the panel help states what each support word means (exact #34 wording; review R2-8 moved the NOT LISTED
+    # phrase deliberately: an entry listing no version reads NOT LISTED too, and an entry with no minimum is
+    # its own NO MINIMUM LISTED, which gives no verdict and is neutral, never green)
     for phrase in ("SYSTEM$CLIENT_VERSION_INFO() for Snowflake's own minimum-supported",
                    "UNSUPPORTED = below Snowflake's minimum supported version.",
                    "Snowflake upgrades those, and there is nothing to install on your side.",
-                   "NOT LISTED = the function has no entry for this client."):
+                   "NOT LISTED = the function has no entry for this client, or its entry lists no version."):
         assert phrase in _SECURITY, phrase
+    assert '"NO MINIMUM LISTED": _MUTED' in colors
 
 
 # ---------------------------------------------------------------------------

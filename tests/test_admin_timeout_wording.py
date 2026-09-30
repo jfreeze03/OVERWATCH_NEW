@@ -76,11 +76,18 @@ def test_performance_tab_names_the_real_levels():
     assert 'empty_state("unavailable"' in perf and "detail=_to.error" in perf
 
 
-def _render_ceiling(monkeypatch, result):
-    """admin._stmt_timeout_ceiling with fakes: ``result`` is the SHOW PARAMETERS read."""
+def _render_ceiling(monkeypatch, result, account=None):
+    """admin._stmt_timeout_ceiling with fakes: ``result`` is the warehouse SHOW PARAMETERS read, ``account``
+    the account one (default: a failed read)."""
     from app.ui.pages import admin
-    seen: dict = {"empty": [], "kpis": [], "tables": [], "help": []}
-    monkeypatch.setattr(admin, "run", lambda *_a, **_k: result)
+    seen: dict = {"empty": [], "kpis": [], "tables": [], "help": [], "runs": []}
+    account = account if account is not None else _result(None, ok=False, error="acct boom", error_kind="other")
+
+    def fake_run(sql, *_a, **kw):
+        seen["runs"].append((sql, kw))
+        return account if sql.rstrip().endswith("IN ACCOUNT") else result
+
+    monkeypatch.setattr(admin, "run", fake_run)
     monkeypatch.setattr(admin, "section_header", lambda *_a, **_k: None)
     monkeypatch.setattr(admin, "panel_help", lambda text, *_a, **_k: seen["help"].append(text))
     monkeypatch.setattr(admin, "kpi_row", lambda items, *_a, **_k: seen["kpis"].append(items))
@@ -113,37 +120,91 @@ def test_a_failed_ceiling_read_is_unavailable_with_its_error(monkeypatch):
     assert "V002 set 5m at install; the value in force is read below." in seen["help"][0]
 
 
-def test_the_ceiling_kpi_shows_the_value_in_force(monkeypatch):
+def _row(value, level):
     import pandas as pd
-    row = pd.DataFrame([{"key": "STATEMENT_TIMEOUT_IN_SECONDS", "value": "1800", "default": "172800",
-                         "level": "WAREHOUSE"}])
-    seen = _render_ceiling(monkeypatch, _result(row))
-    kpi = seen["kpis"][0][0]
+    return pd.DataFrame([{"key": "STATEMENT_TIMEOUT_IN_SECONDS", "value": value, "default": "172800",
+                          "level": level}])
+
+
+_ACCOUNT_6H = ("21600", "ACCOUNT")          # the account value on this account (probe answers W5)
+
+
+def _tile(monkeypatch, wh, account=None):
+    """The ceiling tile for a warehouse row (value, level) and an account row (value, level), or a failed
+    account read when ``account`` is None."""
+    acct = _result(_row(*account)) if account is not None else None
+    seen = _render_ceiling(monkeypatch, _result(_row(*wh)), acct)
+    return seen["kpis"][0][0], seen
+
+
+def test_the_ceiling_kpi_shows_the_value_in_force(monkeypatch):
+    kpi, seen = _tile(monkeypatch, ("1800", "WAREHOUSE"), _ACCOUNT_6H)
     assert (kpi["value"], kpi["delta"]) == ("30m", "set at: WAREHOUSE") and seen["empty"] == []
+    # review R2-5: the account value is read too (the posture panel's metadata-tier probe read, same SQL)
+    from app.data import ops_sql
+    ((_sql, kw),) = [(q, k) for q, k in seen["runs"] if q == ops_sql.account_stmt_timeout_sql()]
+    assert kw["tier"] == "metadata" and kw["probe"] is True and kw["max_rows"] == 0
     # ok but no row: a quiet note, never 'unavailable' and never a guessed value
     empty = _render_ceiling(monkeypatch, _result(None))
     assert [k for k, _m, _d in empty["empty"]] == ["no_data_yet"] and "5m" not in empty["empty"][0][1]
 
 
-def test_a_warehouse_value_of_zero_reads_as_the_seven_day_max(monkeypatch):
-    """Review R1-8: STATEMENT_TIMEOUT_IN_SECONDS = 0 is Snowflake's 7-day maximum, so the 'value in force' tile
-    shows the ENFORCED 168h and says why (stmt_timeout.enforced_s, the posture panel's account_value_kpi rule),
-    never '0s' (which reads as 'every read is killed at once'). The raw 0 stays in the SHOW table."""
-    import pandas as pd
-    row = pd.DataFrame([{"key": "STATEMENT_TIMEOUT_IN_SECONDS", "value": "0", "default": "172800",
-                         "level": "WAREHOUSE"}])
-    seen = _render_ceiling(monkeypatch, _result(row))
-    kpi = seen["kpis"][0][0]
-    assert kpi["value"] == "168h" and kpi["value"] != "0s"
-    assert kpi["delta"] == "set at: WAREHOUSE; 0 = 7-day max"
-    assert "It is set to 0, which Snowflake enforces as the 7-day maximum." in kpi["help"]
-    assert str(seen["tables"][0].iloc[0]["value"]) == "0"                # the raw row is shown verbatim
-    # a non-zero value keeps its plain delta and help; an unparseable value is the dash, never '0s'
-    row7 = row.assign(value="7200")
-    k7 = _render_ceiling(monkeypatch, _result(row7))["kpis"][0][0]
+_SEVEN_DAY = "which Snowflake enforces as the 7-day maximum"
+
+
+def test_an_account_level_zero_reads_as_the_seven_day_max(monkeypatch):
+    """Review R1-8/R2-5: STATEMENT_TIMEOUT_IN_SECONDS = 0 is Snowflake's 7-day maximum, never '0s' (which reads
+    as 'every read is killed at once'). A 0 the warehouse INHERITS from the account is 0 on the session side
+    too, so there (and only when both sides are 0) the effective ceiling really is 168h."""
+    for account in (("0", "ACCOUNT"), None):                   # read, or derived from the warehouse row
+        kpi, seen = _tile(monkeypatch, ("0", "ACCOUNT"), account)
+        assert kpi["value"] == "168h" and kpi["value"] != "0s", account
+        assert kpi["delta"] == "set at: ACCOUNT; 0 = 7-day max", account
+        assert _SEVEN_DAY in kpi["help"], account
+        assert str(seen["tables"][0].iloc[0]["value"]) == "0"          # the raw row is shown verbatim
+    kpi, _ = _tile(monkeypatch, ("0", "WAREHOUSE"), ("0", "ACCOUNT"))
+    assert (kpi["value"], kpi["delta"]) == ("168h", "set at: WAREHOUSE (0 = no warehouse limit); 0 = 7-day max")
+
+
+def test_a_warehouse_level_zero_is_capped_by_the_account_value(monkeypatch):
+    """Review R2-5: a WAREHOUSE-level 0 only lifts the warehouse's own limit; reads are still capped by the
+    session side (the account's 6h here). The tile used to say 168h with '0 = 7-day max' for this case."""
+    kpi, _ = _tile(monkeypatch, ("0", "WAREHOUSE"), _ACCOUNT_6H)
+    assert kpi["value"] == "6h"
+    assert kpi["delta"] == "set at: WAREHOUSE (0 = no warehouse limit); capped by the account value"
+    assert "7-day" not in kpi["delta"] and _SEVEN_DAY not in kpi["help"]
+    assert "The warehouse's own value is 0 (no warehouse limit), so the account value (6h) caps reads." in kpi["help"]
+    # the account sets none: Snowflake's 172800 s default caps reads (48h), named as such
+    kpi, _ = _tile(monkeypatch, ("0", "WAREHOUSE"), ("172800", ""))
+    assert (kpi["value"], kpi["delta"]) == (
+        "48h", "set at: WAREHOUSE (0 = no warehouse limit); capped by Snowflake's default (the account sets none)")
+
+
+def test_a_warehouse_value_above_the_account_value_is_capped_by_it(monkeypatch):
+    """Review R2-5: the same rule for a non-zero warehouse value above the account's (8h vs 6h): 6h caps reads."""
+    kpi, _ = _tile(monkeypatch, ("28800", "WAREHOUSE"), _ACCOUNT_6H)
+    assert (kpi["value"], kpi["delta"]) == ("6h", "set at: WAREHOUSE; capped by the account value")
+    assert "The warehouse's own value is 8h, so the account value (6h) caps reads." in kpi["help"]
+    # a lower warehouse value wins with no cap note; an unparseable value is the dash, never '0s'
+    k7, _ = _tile(monkeypatch, ("7200", "WAREHOUSE"), _ACCOUNT_6H)
     assert (k7["value"], k7["delta"]) == ("2h", "set at: WAREHOUSE") and "7-day" not in k7["help"]
-    kbad = _render_ceiling(monkeypatch, _result(row.assign(value="n/a")))["kpis"][0][0]
-    assert kbad["value"] == "—"
+    kbad, seen = _tile(monkeypatch, ("n/a", "WAREHOUSE"), _ACCOUNT_6H)
+    assert kbad["value"] == "—" and len(seen["runs"]) == 1          # nothing to compare: no account read
+
+
+def test_an_unread_account_value_qualifies_the_warehouse_value(monkeypatch):
+    """Review R2-5: when the account SHOW fails and the warehouse sets its own value, nothing says what the
+    session side is: the tile shows the warehouse's own value, qualified, and never claims the 7-day maximum
+    is the real ceiling."""
+    kpi, _ = _tile(monkeypatch, ("0", "WAREHOUSE"))
+    assert kpi["value"] == "168h"
+    assert kpi["delta"] == ("set at: WAREHOUSE (0 = no warehouse limit); the session/account value, if lower, "
+                            "caps reads")
+    assert "0 = 7-day max" not in kpi["delta"] and _SEVEN_DAY not in kpi["help"]
+    assert "The account value could not be read, so this is the warehouse's own value" in kpi["help"]
+    kpi, _ = _tile(monkeypatch, ("1800", "WAREHOUSE"))
+    assert (kpi["value"], kpi["delta"]) == ("30m", "set at: WAREHOUSE; the session/account value, if lower, "
+                                                   "caps reads")
 
 
 def test_a_failed_ceiling_read_names_a_cause_only_when_the_error_says_so(monkeypatch):

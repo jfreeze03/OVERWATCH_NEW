@@ -101,7 +101,7 @@ _VERDICTS = {
 # Snowflake-run row reads '<label> (Snowflake-run)' and stays neutral whatever its verdict.
 _SUPPORT = {
     "UNSUPPORTED": _BAD, "NEARING END OF SUPPORT": _WARN, "BELOW RECOMMENDED": _INFO, "OK": _OK,
-    "NO VERSION": _MUTED, "NOT LISTED": _MUTED, "UNAVAILABLE": _MUTED,
+    "NO VERSION": _MUTED, "NO MINIMUM LISTED": _MUTED, "NOT LISTED": _MUTED, "UNAVAILABLE": _MUTED,
 }
 _SNOWFLAKE_RUN_SUFFIX = "(SNOWFLAKE-RUN)"
 
