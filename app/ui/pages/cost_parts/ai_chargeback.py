@@ -35,7 +35,20 @@ from app.logic.cortex import (
 )
 from app.logic.date_windows import window_label, window_phrase
 from app.logic.formulas import account_now, account_today, credits_to_usd, format_usd, md_dollars, safe_float
-from app.logic.quotas import block_events, block_history, in_window_rows
+from app.logic.quotas import (
+    DEFAULT_CAP_CREDITS,
+    QUOTA_LOOKBACK_DAYS,
+    QUOTA_MIN_ACTIVE_DAYS,
+    RUNAWAY_CAP_MULTIPLE,
+    RUNAWAY_ROBUST_Z,
+    block_events,
+    block_history,
+    effective_cap,
+    effective_z_min,
+    in_window_rows,
+    quota_summary,
+    recommend_quotas,
+)
 from app.ui import charts
 from app.ui.components import (
     empty_state,
@@ -53,6 +66,7 @@ from app.ui.components import (
     with_user_names,
     write_gate_open,
 )
+from app.ui.schema_gate import has_migration
 
 _PAGE = "Cost Intelligence"
 
@@ -380,20 +394,37 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
             elif not is_operator:
                 st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")
 
-    _ai_quota_panel(enriched, summary, days, bounds=bounds)
+    # The org daily cap as the V163 runaway arm reads it (junk / 0 / negative -> 15), resolved ONCE and
+    # shared by the quota suggestions and the CoCo efficiency review below.
+    _coco_cap = effective_cap(settings.get("COCO_DAILY_CAP_CREDITS"))
+    # #37b: the suggestions reuse the live 365d user-day frame already fetched above (company-scoped by
+    # cortex_code_user_daily's outer clause) -- None on the fact-fallback leg, where the panel says so.
+    _ai_quota_panel(enriched, summary, days, bounds=bounds,
+                    user_daily=(live_res.df if live_res is not None else None),
+                    cap_credits=_coco_cap, ai_rate=ai_rate,
+                    z_min=effective_z_min(settings.get("AI_RUNAWAY_ROBUST_Z")))
 
-    _coco_cap = safe_float(settings.get("COCO_DAILY_CAP_CREDITS"), 15.0)
-    _token_economics_panel(company, days, _coco_cap if _coco_cap > 0 else 15.0, bounds=bounds)
+    _token_economics_panel(company, days, _coco_cap, bounds=bounds)
 
 
 def _ai_quota_panel(enriched: pd.DataFrame, summary: dict, days: int,
-                    *, bounds: tuple | None = None) -> None:
+                    *, bounds: tuple | None = None, user_daily: pd.DataFrame | None = None,
+                    cap_credits: float = DEFAULT_CAP_CREDITS, ai_rate: float = 0.0,
+                    z_min: float = RUNAWAY_ROBUST_Z) -> None:
     """Native per-user AI cost quotas — who Snowflake has BLOCKED for hitting a
     per-user AI credit ceiling (SNOWFLAKE.CORE.QUOTA), from the account-wide
     QUOTA_ACCESS_BLOCK_HISTORY view (the one read a console can do; quota limits
     live in Snowsight, admin-scoped). When nothing is blocking, it quantifies the
     unguarded AI exposure from the per-user spend already fetched above. Reuses the
-    tab's `enriched` frame + `summary` — no new per-user scan; only the block read."""
+    tab's `enriched` frame + `summary` — no new per-user scan; only the block read.
+
+    #37b: after every block outcome (a failed read included), a review-only table suggests a per-user
+    daily and monthly
+    quota from each user's OWN p95 over a fixed 90-day history, with a walk-forward
+    back-test — pure pandas over ``user_daily`` (the live user-day frame the tab already
+    holds; None on the fact-fallback leg), so still no new read."""
+    rec = (recommend_quotas(user_daily, cap_credits, ai_rate, today=account_today(), z_min=z_min)
+           if user_daily is not None else None)
     # WLA-1: match the tab's window label — "last month" under bounded scope, else "{days}d".
     _wlab = window_label(bounds, days)
     _wphrase = window_phrase(bounds, days)
@@ -439,7 +470,7 @@ def _ai_quota_panel(enriched: pd.DataFrame, summary: dict, days: int,
         if has_active and has_user:
             kpis.append(
                 {"label": "Currently blocked",
-                 "value": f"{_live:,}",
+                 "value": f"{_live:,}{_plus}",
                  "severity": "warn" if _live else "",
                  "help": "Distinct users whose AI access is blocked right now, whatever the window: their "
                          "latest action on a quota is a block that runs past now (BLOCKED_UNTIL, the start of "
@@ -461,28 +492,104 @@ def _ai_quota_panel(enriched: pd.DataFrame, summary: dict, days: int,
                  if (mapped and has_user) else _shown)
         styled_table(_disp, slug="ai-quota-blocks", size_note=False)
         if in_win.empty:
-            st.caption(f"No block was recorded in {_wphrase}; the table lists the blocks still in force.")
+            st.caption(f"No block was recorded in {_wphrase}; the table lists the blocks still in force."
+                       if not blk.truncated else
+                       f"The newest 1,000 block rows all fall outside {_wphrase}, so its blocks were not "
+                       "read; the table lists the blocks still in force.")
         if blk.truncated:
             st.caption("Only the newest 1,000 block rows were read, so the window's counts are at least the "
                        "figures shown.")
         st.caption("Per-user AI quotas are account-wide — these blocks are NOT filtered to this "
                    "tab's company scope (the block view carries no company grain).")
     elif blk.ok or blk.error_kind == "absent":
-        # No block in this window -- which does not prove no quota exists, so state the exposure the per-user
-        # spend on screen shows instead of claiming none is enforcing.
-        if blk.ok:
+        # No block in this window (or the view is not enabled here) -- which does NOT prove no quota exists, so
+        # state the exposure the per-user spend on screen shows and point at the suggestions. A failed read gets
+        # neither: its unavailable state above is the whole story for the blocks half.
+        if blk.ok and blk.truncated:
+            # the cap kept only newer rows (Last month): an empty window here is unknown, not clean
+            empty_state("unavailable", f"The newest 1,000 block rows all fall outside {_wphrase}, so its "
+                        "blocks were not read.")
+        elif blk.ok:
             empty_state("clean", f"No per-user AI-quota blocks in {_wphrase}.")
         spend = safe_float(summary.get("spend_usd"))
         n_users = int(summary.get("active_users") or 0)
         if spend > 0 and n_users > 0 and "SPEND_USD" in enriched.columns and len(enriched):
             _top = enriched.sort_values("SPEND_USD", ascending=False).iloc[0]
             _top_name = str(_top.get("DISPLAY_NAME") or _top.get("USER_NAME") or "the top user")
+            _qs = quota_summary(rec, cap_credits)
+            _held = (f" Over the last {QUOTA_LOOKBACK_DAYS} complete days, limits at each user's own "
+                     f"p95 would have held back {format_usd(_qs['backtest_usd_over'])} on "
+                     f"{_qs['backtest_days_over']:,} user-day(s) (walk-forward back-test)."
+                     if _qs["with_history"] else "")
             st.caption(md_dollars(
                 f"AI exposure: OVERWATCH sees {format_usd(spend)} of AI spend across {n_users:,} "
                 f"user(s) in {_wphrase} — top: {_top_name} at "
-                f"{format_usd(safe_float(_top.get('SPEND_USD')))}. A per-user AI quota (Snowsight, "
-                "Cost Management, Budgets) caps and auto-blocks runaway usage before it lands on "
-                "the bill."))
+                f"{format_usd(safe_float(_top.get('SPEND_USD')))}.{_held} "
+                "Suggested per-user limits are in the table below."))
+    _suggested_quota_table(rec, enriched, cap_credits, z_min)
+
+
+def _suggested_quota_table(rec: pd.DataFrame | None, enriched: pd.DataFrame,
+                           cap_credits: float, z_min: float) -> None:
+    """#37b: 'Suggested per-user AI quotas (review only)' — a ``quotas.recommend_quotas`` frame.
+
+    Review only: OVERWATCH never creates or alters a quota (no quota DDL or method call here); the
+    owner sets one in Snowsight. The history is FIXED at the last 90 complete days, whatever the
+    page Window says (the served-window lesson: a standing limit is not a window statistic)."""
+    st.markdown("**Suggested per-user AI quotas (review only)**")
+    if rec is None:
+        empty_state("needs_setup",
+                    "Suggested quotas need the live Cortex Code user-day scan, which did not resolve "
+                    "this run — the attribution above comes from the daily snapshot. They return with "
+                    "the live scan.")
+        return
+    if rec.empty:
+        empty_state("no_data_yet",
+                    f"No Cortex Code usage by a named user in the last {QUOTA_LOOKBACK_DAYS} complete "
+                    "days for this scope.")
+        return
+    qs = quota_summary(rec, cap_credits)
+    kpi_row([
+        {"label": f"Users with {QUOTA_MIN_ACTIVE_DAYS}+ active days",
+         "value": f"{qs['with_history']:,} of {qs['users']:,}",
+         "help": f"A suggestion needs at least {QUOTA_MIN_ACTIVE_DAYS} active days in the last "
+                 f"{QUOTA_LOOKBACK_DAYS} complete days; the others show — until they have the history."},
+        {"label": "p95 day above the daily cap", "value": f"{qs['p95_over_cap']:,}",
+         "severity": "warn" if qs["p95_over_cap"] else "",
+         "help": f"Users whose own p95 day exceeds COCO_DAILY_CAP_CREDITS ({cap_credits:g} credits): "
+                 "a quota at the org cap would block them on an ordinary heavy day."},
+        {"label": f"Runaway-rule days, {QUOTA_LOOKBACK_DAYS}d", "value": f"{qs['runaway_days']:,}",
+         "severity": "warn" if qs["runaway_days"] else "",
+         "help": f"User-days over {RUNAWAY_CAP_MULTIPLE:g}x the daily cap AND at least {z_min:g} "
+                 "robust z above the user's own prior 90 active days (fewer than 5 = no baseline, "
+                 "the cap alone decides) — the per-user AI runaway rule's test at its seed "
+                 f"multiple, replayed day by day. {qs['runaway_users']:,} user(s) had at least one."},
+        {"label": "Back-test: USD above the limits", "value": format_usd(qs["backtest_usd_over"]),
+         "help": "Credits above each day's walk-forward limit x the AI credit price, summed over "
+                 "users and days: what the suggested daily limits would have held back."},
+    ])
+    display = rec.copy()
+    if {"USER_NAME", "DISPLAY_NAME"}.issubset(enriched.columns):
+        # First Last from the rollup already on screen (no directory read); login is the fallback.
+        names = (enriched[["USER_NAME", "DISPLAY_NAME"]].drop_duplicates("USER_NAME")
+                 .set_index("USER_NAME")["DISPLAY_NAME"])
+        display.insert(1, "DISPLAY_NAME", display["USER_NAME"].map(names).fillna(display["USER_NAME"]))
+    styled_table(display, slug="ai-quota-suggestions", size_note=False)
+    # The rule (COST_AI_USER_RUNAWAY) ships with V163; until then the replay is still exact, but there is
+    # no rule row to tune yet. The shared schema gate answers from the startup read (no new statement).
+    _tune = ("the live rule may be tuned in Alerts > Rules" if has_migration(163, _PAGE)
+             else "the rule itself arrives with migration V163")
+    st.caption(md_dollars(
+        f"Method: a fixed {QUOTA_LOOKBACK_DAYS}-day history (the last {QUOTA_LOOKBACK_DAYS} complete "
+        "days, not the page Window). Suggested daily = each user's own p95 active day, rounded up to "
+        "a whole credit; suggested monthly = the p95 of their rolling 30-day totals (idle days count "
+        "as 0). The back-test is walk-forward: each day is judged against the limit the same rule set "
+        f"from the user's {QUOTA_LOOKBACK_DAYS} days BEFORE it (a day never sets its own limit), and "
+        f"only days with {QUOTA_MIN_ACTIVE_DAYS}+ prior active days are judged. Runaway-rule days use "
+        f"the runaway rule's seed multiple {RUNAWAY_CAP_MULTIPLE:g}x; {_tune}. Review only: "
+        "OVERWATCH creates no quota — a per-user AI quota is set in Snowsight (Cost Management). "
+        "Company-scoped like the User attribution detail above (unlike the account-wide blocks table); "
+        "Cortex Code (Snowsight + CLI) credits."))
 
 
 def _token_economics_panel(company: str, days: int, cap_credits: float, *, bounds: tuple | None = None) -> None:

@@ -712,6 +712,30 @@ _EXPECTED_MIGRATIONS = {
          "drops the backup-prune carve-out from V_SECURITY_EXCEPTION_QUEUE. Until it is applied the backup task "
          "still runs daily and, from its first prune (day 15), its generation DROPs are hidden from CHANGE RISK "
          "only by that carve-out. Recovery is Time Travel plus manual *_BAK_<date> clones (RUNBOOK section 16)",
+    162: "Hourly identity alerts SEC_LOGIN_TAKEOVER and SEC_ADMIN_GRANT (SP_ALERT_SCAN re-derived from V157, "
+         "arms [26] and [27], tally 12 -> 14): a burst of failed logins by one user (5 in 15 min by default) "
+         "followed by a success within 60 min, CRITICAL off-hours Central (20:00-06:00, weekends) or for a "
+         "direct admin-tier role holder, else HIGH, one event per episode; and one HIGH event per direct "
+         "admin-tier role grant to a user, revoked or not. Both company ALL. SP_INCIDENT_AUTODECLARE (re-derived "
+         "from V154) never declares for either rule. Seeds the 2 rules. No task change, no apply-time run",
+    163: "Per-user AI runaway and Trust Center regression alerts, nightly (SP_ALERT_SCAN_DAILY re-derived from "
+         "V160): counting arms [28] COST_AI_USER_RUNAWAY (one user's AI credits on a complete day above 2x "
+         "COCO_DAILY_CAP_CREDITS and at least 3.5 robust-z above their own prior 90 active days; fewer than 5 "
+         "such days = the cap alone; HIGH) and [29] SEC_TRUST_REGRESSION (a CRITICAL or HIGH Trust Center "
+         "scanner's at-risk count up against its previous snapshot day; HIGH); SEC_FAILED_LOGINS now says "
+         "whether the day had a successful login; tally 12 -> 14. Seeds the 2 rules and the AI_RUNAWAY_ROBUST_Z "
+         "/ AI_RUNAWAY_INCLUDE_FUNCTIONS settings. No task change, no apply-time run",
+    164: "Actionable Teams lines and a one-time CRITICAL escalation (SP_NOTIFY_WEBHOOK re-derived from V064): "
+         "every line carries severity, title, company, detail and event id; a CRITICAL nobody acknowledged "
+         "within ESCALATE_AFTER_MIN (120) minutes of its first notification is re-posted once to the route(s) "
+         "that delivered it and emailed through the ESCALATE_EMAIL_INTEGRATION integration (OVERWATCH_EMAIL, "
+         "its default recipients). New ALERT_EVENTS.ESCALATED_AT, an ALERT_AUDIT ESCALATE row per escalation, "
+         "two SETTINGS rows. No task change, no apply-time run",
+    165: "Morning digest grounding: DAILY_DIGEST gains FACTS, GROUNDING_OK, FIGURES_CHECKED, UNGROUNDED, "
+         "BODY_SOURCE and AI_BODY; SP_DAILY_DIGEST (re-derived from V112) checks every figure in the Cortex draft "
+         "against the exec-board facts and, on a mismatch or a Cortex failure, sends a templated digest labelled "
+         "not AI-written (the draft is kept in AI_BODY); SPEND_USD and CREDITS are separate facts and the Teams "
+         "text is JSON-escaped. No task change, no apply-time run",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -808,6 +832,7 @@ def _schema_ahead_banner() -> None:
 _NUM = "number"
 _SETTING_EDITORS: dict[str, tuple[str, object]] = {
     "FORECAST_ENGINE": ("enum", ["linear", "seasonal", "ml_forecast"]),
+    "INCIDENT_AUTO_DECLARE_CRITICAL": ("enum", ["TRUE", "FALSE"]),
     "CONTRACT_START_DATE": ("date", None),
     "CONTRACT_END_DATE": ("date", None),
     # Rates / prices ($ per unit).
@@ -822,6 +847,10 @@ _SETTING_EDITORS: dict[str, tuple[str, object]] = {
     "MONTHLY_BUDGET_USD": (_NUM, {"min_value": 0.0, "step": 100.0}),
     "AI_MONTHLY_BUDGET_USD": (_NUM, {"min_value": 0.0, "step": 100.0}),
     "COCO_DAILY_CAP_CREDITS": (_NUM, {"min_value": 0.0, "step": 1.0}),
+    # V163 COST_AI_USER_RUNAWAY: the robust-z bar (the cap multiple is the rule's THRESHOLD_NUM) and the
+    # AI Functions switch.
+    "AI_RUNAWAY_ROBUST_Z": (_NUM, {"min_value": 1.0, "step": 0.5}),
+    "AI_RUNAWAY_INCLUDE_FUNCTIONS": ("enum", ["FALSE", "TRUE"]),
     "CONTRACT_CREDITS": (_NUM, {"min_value": 0.0, "step": 1000.0}),
     # Platform-score weights (per-unit penalties; STRING-typed in DEFAULT_SETTINGS).
     "SCORE_PTS_BUDGET_PER_PCT": (_NUM, {"min_value": 0.0, "step": 0.1}),
@@ -844,6 +873,9 @@ _SETTING_EDITORS: dict[str, tuple[str, object]] = {
     "FACT_RETENTION_DAYS_DAILY": (_NUM, {"min_value": 1.0, "step": 1.0}),
     "ERROR_LOG_RETENTION_DAYS": (_NUM, {"min_value": 1.0, "step": 1.0}),
     "APP_USAGE_RETENTION_DAYS": (_NUM, {"min_value": 1.0, "step": 1.0}),
+    # V164 escalation: whole minutes, 0 = off. ESCALATE_EMAIL_INTEGRATION keeps the generic text input (an
+    # integration NAME; blank = no email leg).
+    "ESCALATE_AFTER_MIN": (_NUM, {"min_value": 0.0, "step": 15.0}),
 }
 
 

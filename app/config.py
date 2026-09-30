@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.601.1"
+APP_VERSION = "4.602.0"
 
 # The build's load-bearing schema floor. main() reads the live max(SCHEMA_VERSION)
 # once per session and, if it is BELOW this, renders ONE actionable blocked state
@@ -72,6 +72,12 @@ DEFAULT_SETTINGS = {
     "CORTEX_MODEL": "llama3.1-8b",   # model for in-app AI evaluations (Admin-editable)
     "COCO_DAILY_CAP_CREDITS": 15.0,  # per-user daily Cortex Code allowance the token-economics
     #                                  efficiency review measures against (30 for exception users)
+    # V163 COST_AI_USER_RUNAWAY (Next-Fifty #37a): a user's AI day raises only when it is above the rule's
+    # THRESHOLD_NUM x COCO_DAILY_CAP_CREDITS AND at least this robust z above their own prior 90 active days
+    # (fewer than 5 such days = no baseline, the cap alone decides). The switch adds AI Functions spend, but
+    # only rows booked to a user count and the loader books Functions to the account today (inert).
+    "AI_RUNAWAY_ROBUST_Z": 3.5,
+    "AI_RUNAWAY_INCLUDE_FUNCTIONS": "FALSE",
     # Platform-score weights (per-unit penalties; caps fixed in scoring.py).
     # Uncalibrated starting points - tune against incident history.
     "SCORE_PTS_BUDGET_PER_PCT": "0.5",
@@ -92,6 +98,10 @@ DEFAULT_SETTINGS = {
     # Forecast engine: linear | seasonal | ml_forecast (needs the opt-in
     # snowflake/ml_forecast_option.sql; falls back to seasonal when absent).
     "FORECAST_ENGINE": "linear",
+    # Incident auto-declare switch (seeded by V032; read by SP_INCIDENT_AUTODECLARE every hour, absent = TRUE).
+    # Listed here so Admin shows it as an editable setting, not an orphan "no longer read" row (wave 4: V162's
+    # identity rules never auto-declare, whatever this says).
+    "INCIDENT_AUTO_DECLARE_CRITICAL": "TRUE",
     # Known-spike calendar (repo review 2026-08-17): predictable spend spikes the
     # anomaly panels label "expected" instead of flagging. Semicolon rules:
     # MONTH_END:<n> | QUARTER_END:<n> | YYYY-MM-DD..YYYY-MM-DD:<label>.
@@ -146,6 +156,13 @@ DEFAULT_SETTINGS = {
     "CONTRACT_CREDITS": 0.0,         # 0 = not configured
     "CONTRACT_START_DATE": "",
     "CONTRACT_END_DATE": "",
+    # Alert escalation (V164, Next-Fifty #40). SP_NOTIFY_WEBHOOK re-posts a CRITICAL nobody acknowledged
+    # within ESCALATE_AFTER_MIN minutes, once, to the route(s) that delivered it and emails it through the
+    # ESCALATE_EMAIL_INTEGRATION notification integration: its DEFAULT_RECIPIENTS, set in Snowsight (no
+    # address is ever stored here). 0 turns escalation off; a blank integration turns the email leg off.
+    # Seeded by V164; the proc falls back to these same defaults when a row is absent.
+    "ESCALATE_AFTER_MIN": 120,
+    "ESCALATE_EMAIL_INTEGRATION": "OVERWATCH_EMAIL",
 }
 
 # ---------------------------------------------------------------------------

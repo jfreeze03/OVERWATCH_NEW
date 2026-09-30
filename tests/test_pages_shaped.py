@@ -29,6 +29,7 @@ from streamlit.testing.v1 import AppTest  # noqa: E402
 
 from app.config import PAGES_BY_PROFILE  # noqa: E402
 from app.core.result import QueryResult  # noqa: E402
+from tests._source import migration_tip  # noqa: E402
 
 _APPTEST_BUTTONGROUP_OK = _parse_version(st.__version__) >= _parse_version("1.55.0")
 
@@ -101,6 +102,20 @@ def _fake_execute(*_args, **_kwargs):
     return True, "stubbed"
 
 
+_REPO_TIP = migration_tip()
+
+
+def _floor_gate_at_repo_tip():
+    """Stands in for app.main._schema_floor_breach. The floor check is bypassed (a shaped VERSION column
+    would read as below the floor and block every page), but like the real gate it hands this run's
+    SCHEMA_VERSION answer to app.ui.schema_gate, so has_migration() costs no read here either. The
+    database is modelled at the repo tip, so the post-apply branches render against shaped data (the
+    empty-stub smoke in test_pages_apptest.py keeps the pre-apply branches). tests/usage_sim.py reuses it."""
+    from app.ui import schema_gate
+    schema_gate.remember(QueryResult(df=pd.DataFrame({"VERSION": list(range(1, _REPO_TIP + 1))}), ok=True))
+    return None
+
+
 # Every read entry point pages call, mapped to its shaped stub. Patched per module
 # because pages import these names directly (a patch of the defining module would not
 # rebind an already-imported name).
@@ -117,7 +132,7 @@ _READ_STUBS = {
 def _stub_shaped(monkeypatch):
     import app.main as main_mod
     from app.config import DEFAULT_SETTINGS
-    from app.ui import ai_panel, attention, components, security_center, workbench
+    from app.ui import ai_panel, attention, components, schema_gate, security_center, workbench
     from app.ui import decision_studio as ds_render
     from app.ui.pages import (
         admin,
@@ -138,13 +153,15 @@ def _stub_shaped(monkeypatch):
     monkeypatch.setattr(main_mod, "current_role", lambda: "SNOW_SYSADMINS")
     # The v4.431 startup schema gate reads SCHEMA_VERSION; a shaped VERSION column would
     # look below the floor and block every page with the migration banner. This harness
-    # tests page BODIES, so bypass the gate (it has its own dedicated tests).
-    monkeypatch.setattr(main_mod, "_schema_floor_breach", lambda: None)
+    # tests page BODIES, so bypass the gate (it has its own dedicated tests) -- but keep its
+    # hand-off to the wave-4 schema_gate, modelled at the repo tip.
+    monkeypatch.setattr(main_mod, "_schema_floor_breach", _floor_gate_at_repo_tip)
 
     settings = dict(DEFAULT_SETTINGS)
     settings["_source"] = "stub"
 
     for module in (main_mod, components, ai_panel, ds_render, security_center, workbench, attention,
+                   schema_gate,
                    overview, control_room, cost, operations, alerts, security, admin, brief,
                    ask, decision_studio, ai_chargeback, compare, contract, optimize, spend,
                    unit_costs, optimize_queue):

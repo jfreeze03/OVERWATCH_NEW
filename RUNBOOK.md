@@ -123,6 +123,16 @@ Then `roles.sql` (idempotent; re-run after every upgrade) and
 `validate.sql` (every row should read OK). Deploy the app with
 `snow streamlit deploy --replace`.
 
+**Deploy order and the schema gate (since 4.602).** Every app read of a
+column a migration adds, and every caption that describes a migration's new
+behaviour, checks that migration is in SCHEMA_VERSION first
+(`app/ui/schema_gate.py`; it answers from the startup gate's own
+SCHEMA_VERSION read, so it costs no query, and an unreadable version table
+keeps the pre-apply behaviour). So the app can be deployed before or after
+an apply; the house order is deploy first, then apply. After applying
+V162-V165 the gated text and columns appear within 4 h (the metadata cache)
+or at once on Refresh; Admin ▸ Migrations reads fresher.
+
 **Opt-in scripts** (run deliberately, not part of the chain):
 `webhook_delivery.sql` (notification integration + sender task — Microsoft
 Teams needs the Workflows Adaptive-Card recipe in that file, see §19),
@@ -139,7 +149,7 @@ native alerts), `ml_forecast_option.sql` (SNOWFLAKE.ML.FORECAST engine), `backfi
 | TASK_REFRESH_EXEC_BOARD | after hourly load | SP_REFRESH_EXEC_BOARD | MART_EXEC_BOARD |
 | TASK_ALERT_SCAN | after hourly load | SP_ALERT_SCAN (hourly rules) | ALERT_EVENTS |
 | TASK_ALERT_SCAN_DAILY | after daily load + reconcile | SP_ALERT_SCAN_DAILY (daily rules, split out V062) | ALERT_EVENTS |
-| TASK_ALERT_NOTIFY | after scan (opt-in resume) | SP_NOTIFY_WEBHOOK | webhook sends, NOTIFIED_AT |
+| TASK_ALERT_NOTIFY | after scan (opt-in resume) | SP_NOTIFY_WEBHOOK | webhook sends, NOTIFIED_AT; V164: CRITICAL escalations (ALERT_EVENTS.ESCALATED_AT + one ALERT_AUDIT ESCALATE row each; re-post + OVERWATCH_EMAIL email, §19) |
 | TASK_LOAD_DAILY | 06:45 daily | SP_LOAD_DAILY_FACTS | daily facts |
 | TASK_ANOMALY_SWEEP | 07:00 daily | SP_ANOMALY_SWEEP (v2) | anomaly + (Mon) drift events |
 | TASK_CHANGE_IMPACT_SCAN | 06:50 daily | SP_CHANGE_IMPACT_SCAN | OBJECT_CHANGE_REGISTRY + regression events |
@@ -465,8 +475,20 @@ evidence rows only, hard row/char caps, "answer only from the evidence",
 required "inconclusive" escape, word limits.
 
 - **Morning digest** — SP_DAILY_DIGEST (07:20) summarizes exec-board facts
-  + alert counts into DAILY_DIGEST; shown in an Overview expander. If
-  Cortex is unavailable the digest row says so instead of failing.
+  + alert counts into DAILY_DIGEST; shown in the Brief and Overview
+  expanders. Since V165 every figure in the Cortex draft is checked against
+  the FACTS it was given (stored on the row with GROUNDING_OK,
+  FIGURES_CHECKED and UNGROUNDED); when any figure does not match, or Cortex
+  fails, a templated digest built only from the facts is written and sent
+  instead, labelled "not AI-written" (BODY_SOURCE = TEMPLATE; the draft stays
+  in AI_BODY, never sent). A Cortex failure also logs `digest_ai_failed` to
+  APP_ERROR_LOG. The sent text is JSON-escaped like the alert sender. The
+  proc's RETURN names the version: `digest written (AI|TEMPLATE[; ...]); sent
+  N/M routes`. A frequent TEMPLATE means the model states derived numbers:
+  read UNGROUNDED, then consider CORTEX_MODEL. A figure matches within half a
+  step of its shown precision, inclusive (1.25 shown as 1.3% or 1.2% passes), or
+  0.5%. Until V165 is applied (and on the last pre-V165 row) the digest chip
+  reads "Figures not checked" and the caption makes no checking claim.
 - **Evaluation panels** — button-gated "AI evaluation" on release compare,
   task failures, etc.; never auto-run.
 - **Pre-explained anomalies** — sweep v3 appends a grounded hypothesis to
@@ -549,9 +571,16 @@ CONTRACT_CREDITS / CONTRACT_START_DATE / CONTRACT_END_DATE (ISO dates) ·
 CORTEX_MODEL llama3.1-8b · FORECAST_ENGINE linear|seasonal|ml_forecast ·
 SCORE_PTS_* (nine platform-score weights, §6) · FACT_RETENTION_DAYS_HOURLY
 400 (floor 90) · FACT_RETENTION_DAYS_DAILY 800 (floor 180) ·
-ERROR_LOG_RETENTION_DAYS 180 (floor 30). Values are strings; bad numbers
-fall back to defaults. Changes take effect within one cache cycle (≤5 min)
-or after Refresh.
+ERROR_LOG_RETENTION_DAYS 180 (floor 30) · INCIDENT_AUTO_DECLARE_CRITICAL
+TRUE (hourly auto-declare switch; the two V162 identity rules never
+auto-declare either way) · AI_RUNAWAY_ROBUST_Z 3.5 and
+AI_RUNAWAY_INCLUDE_FUNCTIONS FALSE (COST_AI_USER_RUNAWAY, V163; the cap
+multiple is the rule's THRESHOLD_NUM, the cap is COCO_DAILY_CAP_CREDITS) ·
+ESCALATE_AFTER_MIN 120 (0 = off) and ESCALATE_EMAIL_INTEGRATION
+OVERWATCH_EMAIL (blank = no email leg; recipients = that integration's
+DEFAULT_RECIPIENTS, set in Snowsight, never stored here) (V164, §19). Values
+are strings; bad numbers fall back to defaults. Changes take effect within
+one cache cycle (≤5 min) or after Refresh.
 
 ## 12. Alert engine reference
 
@@ -591,16 +620,17 @@ SEC_CRED_EXPIRY [10], SEC_NEW_EXPOSURE [20] and their condition-ended clears
 run at 01, 05, 09, 13, 17 and 21 Central; the OPS_PIPELINE_DEGRADED [22]
 self-watch at 02, 05, 08, 11, 14, 17, 20 and 23 (the daily scan's copy still
 runs every morning). A skipped arm compiles nothing and counts as ok in the
-12-block tally; a failed hour read runs every gated block (fail-open,
+14-block tally (12 before V162); a failed hour read runs every gated block (fail-open,
 `cadence_gate_failed`). The trade: those alerts and clears can arrive up to
 ~4h (~3h for [22]) later than an every-hour check. A condition that begins and
 ends between two checks is never raised: a PUBLIC grant revoked within ~4h, or
 a stale-source / idle-notifier episode that clears between [22] slots (logged
 loader failures are still caught by the 24h ERR leg). A hand
 `CALL SP_ALERT_SCAN()` obeys the same gates: outside a slot it skips those arms
-and still reports 12/12 ok, so verify a fix to one of them in the 05 or 17
+and still reports 14/14 ok, so verify a fix to one of them in the 05 or 17
 Central hour (both slots) or after its next scheduled slot. Every other arm and sweep
-still runs every hour.
+still runs every hour, including the two identity arms V162 added: [26]
+SEC_LOGIN_TAKEOVER and [27] SEC_ADMIN_GRANT are ungated.
 
 **Lifecycle:** rule (ALERT_CONFIG row) → scan inserts an event with a
 DEDUPE_KEY (no duplicate while the key exists) → OPEN → ACK → RESOLVED,
@@ -631,6 +661,33 @@ PUBLIC grants silently leave the queue.
 
 **Rolling back V161.** First, within the dropped schema's retention (at most 1 day for a transient schema; `SHOW PARAMETERS LIKE 'DATA_RETENTION_TIME_IN_DAYS' IN DATABASE DBA_MAINT_DB`), run `UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH_BAK;`. It must come before V158, whose `CREATE ... IF NOT EXISTS` would otherwise take the name (if it already did, `ALTER SCHEMA DBA_MAINT_DB.OVERWATCH_BAK RENAME TO OVERWATCH_BAK_NEW;` first). It brings back the generations, and also the ledger and the weekly copies, which V161 had moved INTO that schema: move them back before V158 creates empty ones, `ALTER TABLE DBA_MAINT_DB.OVERWATCH_BAK.<name> RENAME TO DBA_MAINT_DB.OVERWATCH.<name>;` for OPERATOR_BACKUP_LOG and each `<T>_BAK_LAST`. If the ledger's move had fallen back to a DROP (PART B V161.13 showed a fourth CRITICAL row), run `UNDROP TABLE DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG;` instead. Then re-run V015's TASK_BACKUP_OPERATOR block (lines 61-67 only: the whole file would re-create the retired MART_SPEND_ROLLUP_DT) and V158 in full, which brings back the task, the proc, the BACKUP_KEEP_* settings and the view carve-out. Redeploy app 4.597.0 as well (`snow streamlit deploy --replace` from main commit `0c8afb7`): 4.598 hides the task from Tasks ▸ SLA, has no BACKUP_KEEP_* editors (it lists them as unread settings), and its validate.sql FAILs the restored objects. Past the retention window the dropped generations are gone for good.
 
+**Rolling back wave 4 (V162-V165).** Each migration re-derives its procs once and rolls back by re-running its base proc. V165, V164 and V163 each roll back on their own; V162 does not: roll V163 back before it (V163's [07] text points at the hourly SEC_LOGIN_TAKEOVER that V162 adds), and bringing V154's autodeclare back needs a 24-hour wait or a data step first (below). To undo the whole wave, go in reverse apply order (V165, V164, V163, V162). None of these rollbacks may run inside a migration. App 4.602.0 keeps working after any of them: every wave-4 read and caption is gated on its migration being in SCHEMA_VERSION, and the version rows stay, so a rolled-back proc can leave a caption that overclaims until the app is redeployed from an earlier tag.
+
+**Rolling back V165.** Re-run V112's `CREATE OR REPLACE PROCEDURE ... SP_DAILY_DIGEST()` (V112__daily_digest_skips_paging_routes.sql, lines 26-143). The six DAILY_DIGEST columns can stay; new rows then carry NULLs, which the app shows as "Figures not checked". That also brings back the unescaped Teams send and the "Digest unavailable" body on a Cortex failure. Nothing runs at apply time; a hand `CALL DBA_MAINT_DB.OVERWATCH.SP_DAILY_DIGEST();` spends a Cortex call and posts to Teams.
+
+**Rolling back V164.** Soft: Admin > Settings `ESCALATE_AFTER_MIN` = 0; the next hourly run skips the escalation pass (Alerts > Native delivery reads "Escalation is off"). Hard: re-run ONLY V064's SP_NOTIFY_WEBHOOK block (V064__webhook_drain_watermarks_alert_burn_telemetry.sql lines 74-351), never the whole file, which would also roll back SP_LOAD_DAILY_FACTS, SP_NIGHTLY_RECONCILE and SP_ALERT_SCAN_DAILY. That restores the old `[SEV] title` lines. `ALERT_EVENTS.ESCALATED_AT` and the two settings can stay; app 4.602 still works because its escalation line reads ALERT_AUDIT, not the column.
+
+**Rolling back V163.** Re-run V160's `CREATE OR REPLACE PROCEDURE ... SP_ALERT_SCAN_DAILY()` (the second procedure in V160__sleep_polling_alert.sql, lines 401-1263): the tally goes back to 12, the two arms stop raising and the old [07] text returns. Optionally disable the two rules in Alerts > Rules (or `UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG SET ENABLED = FALSE WHERE RULE_ID IN ('COST_AI_USER_RUNAWAY','SEC_TRUST_REGRESSION');`) and close their lingering events as EXPECTED. The two SETTINGS rows can stay.
+
+**Rolling back V162 (order matters).** Roll V163 back first (or accept that its [07] text keeps pointing at SEC_LOGIN_TAKEOVER). Then:
+
+1. Re-run V157's `CREATE OR REPLACE PROCEDURE ... SP_ALERT_SCAN()` (V157__alert_scan_self_watch_idle_push.sql lines 121-1128, never the whole file, which would also put SP_ALERT_SCAN_DAILY back to V157's text and drop V160's and V163's daily arms): the tally goes back to 12 and SEC_LOGIN_TAKEOVER / SEC_ADMIN_GRANT stop raising. This is usually enough: V162's SP_INCIDENT_AUTODECLARE only narrows what it does for those two rules, so it can stay.
+2. Only if V154's `CREATE OR REPLACE PROCEDURE ... SP_INCIDENT_AUTODECLARE()` (lines 54-235) must come back too, clear the way FIRST. V154's crit CTE has no rule exclusion and reads every OPEN or ACK CRITICAL of the last 24 hours, so a CRITICAL takeover raised before step 1 and still open would be auto-declared by the next hourly TASK_INCIDENT_AUTODECLARE. Either wait at least 24 hours after step 1, or resolve the lingering events as EXPECTED (SNOOZED included: a snooze wakes to OPEN):
+
+   ```sql
+   UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+      SET STATUS = 'RESOLVED', RESOLUTION_KIND = 'EXPECTED',
+          RESOLVED_AT = CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ
+    WHERE RULE_ID IN ('SEC_LOGIN_TAKEOVER', 'SEC_ADMIN_GRANT') AND STATUS IN ('OPEN', 'ACK', 'SNOOZED');
+   ```
+
+   RESOLVED_AT is a Central NTZ clock like every other ALERT_EVENTS stamp; `CONVERT_TIMEZONE` keeps it Central even
+   in a UTC worksheet (a bare `CURRENT_TIMESTAMP()` would store the session's wall clock, 5-6 hours ahead there).
+
+   Then re-run V154's procedure. Running the scan first only keeps out the events raised between the two steps; it does not stop the auto-declare on its own.
+
+The two ALERT_CONFIG rows can stay; disable them in Alerts > Rules if wanted.
+
 | Rule | Family | Fires when (threshold = THRESHOLD_NUM, editable) | Recurrence |
 |---|---|---|---|
 | COST_DAILY_CREDITS | COST | account credits/day over threshold | daily key |
@@ -644,6 +701,7 @@ PUBLIC grants silently leave the queue.
 | COST_CONTRACT_BREACH | COST | projected exhaustion ≤ threshold days (CRITICAL ≤14) | weekly |
 | COST_IDLE_OPPORTUNITY | COST | a settings-verified AUTO_SUSPEND tightening recovers ≥ threshold USD/month (net of the 60s resume tail, 14 complete days, ≥7 covered; HIGH at ≥5x) — daily scan, V157 | weekly per WH |
 | COST_SLEEP_POLLING | COST | a poller (warehouse x user, or task owner role) slept via SYSTEM$WAIT on ≥5 of the 7 newest complete days and billed ≥ threshold USD/week (Spend-panel billed basis; HIGH at ≥5x) — daily scan [25] → SP_SCAN_SLEEP_POLLING, once per ISO week, V160 | one event per poller per episode; CONDITION_ENDED when it stops |
+| COST_AI_USER_RUNAWAY | COST | one user's AI credits on one complete day > threshold x COCO_DAILY_CAP_CREDITS (2 x 15 by default) AND a robust z ≥ AI_RUNAWAY_ROBUST_Z (3.5) against their own active days in the prior 90 (fewer than 5 such days = no baseline: the cap alone decides); Cortex Code only unless AI_RUNAWAY_INCLUDE_FUNCTIONS (inert until Functions spend is booked to a user); HIGH; company = the user's, ALL when unmapped — daily [28], V163 | per user per day; the last 3 complete days re-checked each morning |
 | PERF_QUERY_FAIL_PCT | PERF | window fail % over threshold | daily |
 | PERF_QUEUED_MINUTES | PERF | queued minutes over threshold | daily |
 | PERF_SPILL_GB | PERF | remote spill GB over threshold | daily |
@@ -655,10 +713,13 @@ PUBLIC grants silently leave the queue.
 | PIPE_ETL_TASK_FAILED | PIPELINE | a workflow's tasks failed on their final attempt tonight (≥ threshold, never below 1; HIGH for the terminal workflow; auto-clears once every retried task has finished clean — a retry still running keeps it open) — V156, via the V157 scan arm in the cycle run window (Central hours of ETL_SLA_TARGET_HHMM − 10h through target + 3h, plus a 15:00 pass): a daytime re-run failure, or the auto-clear of its retry, lands at the 15:00 pass or the window start, up to ~6h later | per workflow per night |
 | PIPE_ETL_CYCLE_NOT_STARTED | PIPELINE | cycle starter silent past last week's same-night kickoff + threshold min (the Tonight *Cycle start: Overdue* test) — V156, via the V157 scan arm in the cycle run window (ETL_SLA_TARGET_HHMM − 10h through + 3h Central, plus 15:00) | per missed night |
 | PIPE_ETL_CYCLE_LATE | PIPELINE | terminal unfinished within threshold min of ETL_SLA_TARGET_HHMM, or projected past the hard deadline (WARN); past the target (CRIT) / hard deadline (EXH): HIGH when the cycle already finished, CRITICAL (auto-declares an incident) when still unfinished; a terminal task is done at its first clean finish from an attempt that STARTED at/after the night's last kickoff, so a next-morning terminal re-run never re-grades the night and an afternoon attempt started before the real kickoff is never that finish (a next-morning starter re-run, or any re-run when starter = terminal workflow, re-grades it: loud); after an afternoon re-run of the whole chain, a real cycle that hangs before its terminal dispatches, or a chain whose terminal starts after the kickoff, can hide the real run (documented) — V156, via the V157 scan arm in the cycle run window (ETL_SLA_TARGET_HHMM − 10h through + 3h Central, plus 15:00; a hard deadline more than ~3h after the target is judged at the 15:00 pass) | per night per band |
-| SEC_FAILED_LOGINS | SECURITY | failed logins over threshold | daily |
+| SEC_FAILED_LOGINS | SECURITY | failed logins over threshold on one day (nightly; yesterday and today are read, and today's row is the partial ~06:45 load and says 'so far'); since V163 the title and detail say whether the day also had a successful login — none reads as a lockout or a stale secret, a burst that ended in a success is SEC_LOGIN_TAKEOVER (hourly, V162, while enabled); Account-takeover candidates either way | daily per user |
 | SEC_CRED_EXPIRY | SECURITY | credential expires ≤ threshold days — 10 by default since V028 (CRITICAL if expired); checked every 4h since V157 (01, 05, 09, 13, 17, 21 Central), so an event — EXPIRED included — can arrive up to ~4h late | once per band per expiry date (EXPIRING, then EXPIRED); a rotated credential's next expiry re-alerts even after a human resolve, however late (V157: a closed event blocks only its own expiry date, read from its DETAIL; a live one always blocks) |
 | SEC_NEW_EXPOSURE | SECURITY | a new grant to PUBLIC (24h lookback) of ≥ threshold objects in one batch; checked every 4h since V157 (01, 05, 09, 13, 17, 21 Central); a grant revoked before the next check is never raised | once per grant batch (PRIVILEGE, GRANTED_ON, CREATED_ON); auto-clears as CONDITION_ENDED once the whole batch is revoked (V157) |
+| SEC_LOGIN_TAKEOVER | SECURITY | ≥ threshold (5) failed logins by one user within 15 min, then a successful login within 60 min of that burst (every failed login counts); CRITICAL when the login is off-hours (20:00-06:00 Central, or a weekend) or the user directly held ACCOUNTADMIN / SECURITYADMIN / SYSADMIN / USERADMIN / ORGADMIN / SNOW_ACCOUNTADMINS / SNOW_SYSADMINS at that moment, else HIGH; company ALL — hourly [26], V162; never auto-declares an incident (SP_INCIDENT_AUTODECLARE skips it: declare by hand) | one event per episode (key ends in the anchor login's UTC millisecond time); a later WARN→CRIT crossing supersedes the WARN, a CRIT is never re-minted as WARN; a snooze never carries to the next episode |
+| SEC_ADMIN_GRANT | SECURITY | a direct grant of one of those seven admin-tier roles to a user (GRANTS_TO_USERS, 26h lookback), raised even when already revoked; flat HIGH; the title flags off-hours and first-time grants; company ALL — hourly [27], V162; never auto-declares an incident | one event per grant (grantee, role, CREATED_ON) |
 | ~~SEC_BREAK_GLASS_USE~~ | SECURITY | retired at V034 (muted since V025) — admin-role activity stays as evidence on Security -> Changes | — |
+| SEC_TRUST_REGRESSION | SECURITY | a CRITICAL or HIGH Trust Center scanner's at-risk count rose ≥ threshold (1) against its previous snapshot day (today's and yesterday's rows checked each morning; a scanner's first snapshot never raises; quiet without TRUST_CENTER_VIEWER); HIGH, company ALL — daily [29], V163 | per scanner per snapshot day (the counts of the scan that raised it; a further rise the same day is not pushed again); no self-clear |
 | COST_DEPT_BUDGET_PACE | COST | department MTD > budget pace by threshold % (DEPT_BUDGETS) | daily per dept |
 | COST_ORG_ACCOUNT_CREEP | COST | org account currency spend up threshold % WoW | weekly per account |
 | PIPE_VOLUME_DROP | PIPELINE | table rows-added down threshold % vs prior-7d avg (≥1k rows/day) | daily per table |
@@ -723,7 +784,7 @@ Snowflake release note that mentions ACCOUNT_USAGE, and after migrations.
 | CREDENTIALS view absent | Credentials panel shows setup hint; scan block yields no rows |
 | ORGANIZATION_USAGE not granted | Org spend tab shows the grant hint, nothing else breaks |
 | TRUST_CENTER not granted | Trust Center section shows the grant hint |
-| Cortex/model unavailable | Digest row says so; AI panels surface the error; nothing else breaks |
+| Cortex/model unavailable | The morning digest sends the templated facts digest and logs `digest_ai_failed` (V165); AI panels surface the error; nothing else breaks |
 | FORECAST_ML_DAILY absent | Forecast engine silently uses seasonal, basis string says so |
 | Webhook integration missing | SP_NOTIFY_WEBHOOK returns a friendly failure; per-route errors log to APP_ERROR_LOG; events stay queued (NOTIFIED_AT null) |
 | ALTER SESSION unsupported (SiS) | SiS stamps its own app QUERY_TAG on every statement (self-traffic keys on it); the warehouse-level timeout is the backstop for reads; Cortex also sends a 90s per-statement timeout |
@@ -799,6 +860,11 @@ the same day.
    `INSERT OVERWRITE INTO <T> SELECT * FROM <T>_BAK_<yyyymmdd>;`
    Never CLONE-restore: a TRANSIENT clone cannot clone back into a permanent
    table, and a re-materialized table re-applies the schema FUTURE grants.
+   A clone taken before a migration that added columns has fewer columns, so
+   `SELECT *` from it fails: ALERT_EVENTS gained ESCALATED_AT at V164, and
+   DAILY_DIGEST six columns at V165. Restore those with an explicit column
+   list, or add the column(s) to the clone first (for example
+   `ALTER TABLE ALERT_EVENTS_BAK_<yyyymmdd> ADD COLUMN ESCALATED_AT TIMESTAMP_NTZ;`).
 2. **Before a risky change** (a bulk edit, a rebuild, a factory reset): take
    the manual clones first, with today's date suffix, and check their row
    counts: `snowflake/rebuild/00_backup_operator_data.sql` (edit its suffix) or
@@ -904,6 +970,60 @@ Symptoms → fixes:
 - Success returns **202 Accepted** (asynchronous) — a 202 with no card means
   the flow ran and failed internally; check the flow's run history.
 
+**Line format (V164).** Each alert is one line:
+`[SEV] <title, first 140 chars> | <company> | <detail, one line, first 100 chars> | event <EVENT_ID>`
+(ASCII separators; the detail's line breaks and tabs become spaces). The event id is
+ALERT_EVENTS.EVENT_ID, the row Alerts > Open events lists. The line is identical in the sender's
+3000-character fit and in the message, so a card never cuts an event in half; lines
+are about 3x longer than before, so one card holds about 8-13 alerts and a burst
+drains over more hourly runs (max 6 cards per route per run; the rest follow).
+
+**CRITICAL escalation (V164).** A CRITICAL still open and unacknowledged
+`ESCALATE_AFTER_MIN` minutes (Admin > Settings, default 120; 0 = off) after its
+first notification is escalated ONCE by the hourly notifier: a card headed
+`OVERWATCH ESCALATION - CRITICAL unacknowledged 120+ min:` goes to every enabled
+route that already delivered it, and an email goes through
+`ESCALATE_EMAIL_INTEGRATION` (default `OVERWATCH_EMAIL`, to its
+`DEFAULT_RECIPIENTS`; blank = no email). Acknowledging or snoozing the event (a
+snooze V117 carried onto a re-raise counts too), or acknowledging, mitigating or
+closing its incident after the alert joined it, prevents it; so does a resolve. The
+automatic V154 mitigation does not count. Events a route delivered fill each
+3000-character batch first. Each channel stamps `ALERT_EVENTS.ESCALATED_AT` right
+after its send succeeds; one `ALERT_AUDIT` row with ACTION `ESCALATE` per event the
+run stamped follows. Timing: hourly, so about 120-185 minutes after the first
+notification. The monthly alert drill escalates too when nobody acknowledges it.
+
+Escalation symptoms → fixes (Alerts > Native delivery shows the policy and the last
+7 days):
+- `escalation_email_failed` in APP_ERROR_LOG (page NotifyWebhook) → `OVERWATCH_EMAIL`
+  has no `DEFAULT_RECIPIENTS`, or SNOW_ACCOUNTADMINS lacks `USAGE` on it
+  (docs/EMAIL_RECIPIENT_RUNBOOK.md, requirement 4). The Teams re-post still went and
+  the event is stamped, so that email is not retried; an event no route delivered
+  retries every hour inside its 7-day window.
+- `route_send_failed` whose CONTEXT says `escalation re-post` → the route's
+  integration refused the re-post (same fixes as above for a Teams route). While
+  a route keeps refusing AND the escalation email is off or failing too, the
+  CRITICALs only that route delivered are never stamped, stay first in the
+  escalation batch (oldest first) and can hold back another route's escalations
+  until they are acknowledged or leave the 7-day window: fix or disable the
+  failing route, or acknowledge those events. (A working email leg stamps every
+  escalated event, and a single route has no other route to hold back, so
+  today's one Teams route plus email cannot hit it.)
+- `escalation_failed` → the pass itself errored; the normal deliveries of that run
+  still went. The next hourly run retries what was not stamped; anything already
+  re-posted or emailed that run is stamped, so it is not re-sent (its ESCALATE audit
+  row may be missing).
+- Nothing escalates → `ESCALATE_AFTER_MIN` is 0 or not a number (Alerts > Native
+  delivery reads "Escalation is off"), or TASK_ALERT_NOTIFY is suspended. The task's
+  TASK_HISTORY RETURN_VALUE stays NULL (a task that CALLs a proc does not publish the
+  proc's return string), so the proc's `... CRITICAL(s) escalated` tally is not
+  visible there; read ALERT_AUDIT ACTION `ESCALATE` and `ESCALATED_AT` instead. Never
+  hand-CALL the notifier to see it: it can page and email.
+- Too noisy → acknowledge or snooze from Alerts > Open events, raise
+  `ESCALATE_AFTER_MIN`, or set it to 0. Soft rollback = 0; hard rollback = re-run
+  ONLY V064's SP_NOTIFY_WEBHOOK CREATE (V064 lines 74-351, never the whole file,
+  which would also roll back three other procs); it also restores the old line format.
+
 
 ## §20 App session timeout & idle cost (Streamlit-in-Snowflake)
 
@@ -951,7 +1071,14 @@ forward-only — reopen is a NEW incident carrying REOPENED_FROM.
    family's open alerts link as members automatically, never double-linked.
 2. Auto-declare — CRITICALs open an incident when their dedupe family has
    no open one: hourly, one per family per 24h. Toggle:
-   Settings -> INCIDENT_AUTO_DECLARE_CRITICAL.
+   Settings -> INCIDENT_AUTO_DECLARE_CRITICAL. Never for the two identity
+   rules (V162): SP_INCIDENT_AUTODECLARE skips SEC_LOGIN_TAKEOVER and
+   SEC_ADMIN_GRANT whatever their severity, so contact the user first and then
+   declare by hand (path 1 or 3). A later CRITICAL of either rule still
+   attaches to an open or mitigated incident a person declared for that
+   rule, but only when that incident already holds the SAME user; a
+   CRITICAL for another user stays unlinked (and keeps its escalation)
+   until someone declares it.
 3. Manual SQL — the panels show every statement they would run; copy and
    adapt for unusual cases (members: ALERT | TASK_FAIL | WH_CHANGE | DDL |
    DEPLOY | REMEDIATION).

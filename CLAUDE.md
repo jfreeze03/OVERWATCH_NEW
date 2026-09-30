@@ -112,6 +112,17 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
     swallow a genuinely different action (fragments freeze the run seq —
     emergency surfaces use scoped keys + short backstops). The query-layer
     spinners in `execute_*` are the in-flight state; don't add per-site ones.
+12. **Schema gate (wave 4, v4.602):** gate every read of a column a migration
+    adds, and every caption that claims a migration's behaviour, with
+    `app.ui.schema_gate.has_migration(n, page)` — never a private
+    SCHEMA_VERSION read. It answers from the startup gate's own read (no
+    query; first-paint budgets stay put) and is False on an unreadable
+    table, so a deploy before the apply keeps the pre-apply behaviour. A new
+    `app/ui` module that imports `run` (or another read entry point) at
+    module level must be registered in `tests/usage_sim.py`,
+    `tests/test_pages_shaped.py` and `tests/test_pages_apptest.py`;
+    `tests/test_schema_gate.py` enforces the first two in full (and that the
+    apptest harness stubs schema_gate and attention).
 
 ## Owner decisions (do not relitigate)
 
@@ -130,17 +141,30 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
 - **Cortex user attribution stays live-first, byte-exact v4.34.2 shape**
   (exact emails + timestamps; owner rejected the mart swap that lost them).
 - **No monthly-budget KPI** on Overview; MTD-vs-prior-month pace instead.
-- Deterministic prescriptive alert rules, dedupe-key pattern. Since V157 the hourly
-  SP_ALERT_SCAN has 12 counting arms ([01]-[05], [10], [14], [17], [18], [20],
-  [21] SEC_POSTURE_METRIC, [22] OPS_PIPELINE_DEGRADED; the dead [15] break-glass arm is gone and
-  [11] COST_CLOUD_SVC_RATIO is retired) + the [23] PIPE_ETL_CYCLE add-on; SP_ALERT_SCAN_DAILY has 12
-  ([06]-[09], [12], [13], [13b], [16], [19], [22], [24] COST_IDLE_OPPORTUNITY, [25] COST_SLEEP_POLLING -- a
-  counting CALL arm; SP_SCAN_SLEEP_POLLING gates itself weekly, V160) + the [17]/[18]
-  add-ons. Add-ons, sweeps and the [hb] heartbeats never increment `fails`
+- Deterministic prescriptive alert rules, dedupe-key pattern. Since V162 the hourly
+  SP_ALERT_SCAN has 14 counting arms ([01]-[05], [10], [14], [17], [18], [20],
+  [21] SEC_POSTURE_METRIC, [22] OPS_PIPELINE_DEGRADED, [26] SEC_LOGIN_TAKEOVER and [27] SEC_ADMIN_GRANT --
+  both ungated, V162; the dead [15] break-glass arm is gone and [11] COST_CLOUD_SVC_RATIO is retired) + the
+  [23] PIPE_ETL_CYCLE add-on; since V163 SP_ALERT_SCAN_DAILY has 14 ([06]-[09], [12], [13], [13b], [16],
+  [19], [22], [24] COST_IDLE_OPPORTUNITY, [25] COST_SLEEP_POLLING -- a counting CALL arm;
+  SP_SCAN_SLEEP_POLLING gates itself weekly, V160; [28] COST_AI_USER_RUNAWAY and [29]
+  SEC_TRUST_REGRESSION, V163) + the [17]/[18] add-ons. Arm numbers are unique across BOTH scans from
+  [26] on (the next free is [30]; [17], [18] and [22] already collide). SP_INCIDENT_AUTODECLARE never
+  declares for SEC_LOGIN_TAKEOVER / SEC_ADMIN_GRANT (a hard-coded crit-CTE exclusion, V162 owner
+  decision), and its [attach] links them only to an incident that already holds the same user (V162
+  review fix). Add-ons, sweeps and the [hb] heartbeats never increment `fails`
   (test_scan_denominators_match_counting_arms). Cadence gates (V157 compile diet): the hourly scan
   reads the Central hour ONCE (`ct_hour`); [10]/[20] + their condition-ended clears run only when
   MOD(ct_hour, 4) = 1, the hourly [22] only when MOD(ct_hour, 3) = 2; a gate wraps an UNCHANGED arm
-  and a gated-off arm counts as ok.
+  and a gated-off arm counts as ok. `app/logic/quotas.runaway_days` is the app twin of daily arm [28]:
+  re-derive either side only with `tests/test_ai_runaway_parity.py` green (or change both together).
+- Current definers of the wave-4 procs (re-derive forward from THESE): SP_ALERT_SCAN and
+  SP_INCIDENT_AUTODECLARE = V162, SP_ALERT_SCAN_DAILY = V163, SP_NOTIFY_WEBHOOK = V164 (its escalation
+  SETTINGS expressions are pinned to `mart_sql.ESCALATE_*` by `tests/test_escalation_delivery.py`, and
+  `last_delivery_health` still keys on the `route <id> integration <name>` CONTEXT), SP_DAILY_DIGEST =
+  V165 (its grounding literals live in `app/logic/digest_grounding.py`, locked by
+  `tests/test_digest_grounding_parity.py`). A proc-calling task's TASK_HISTORY RETURN_VALUE is NULL:
+  verify a scheduled proc by its heartbeat / ledger rows, never by the return string or a hand CALL.
 - Validate/loader worksheets are pasted by Joe; the app monitors the loader
   through APP_ERROR_LOG + SOURCE_FRESHNESS_STATE (loader-owned freshness).
 - **Option C (2026-09-24, shipped v4.597):** Decision Studio → Proof (Proof ·

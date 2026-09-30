@@ -177,6 +177,10 @@ snowflake/migrations/V158__operator_backup_generations.sql
 snowflake/migrations/V159__loader_compile_diet.sql
 snowflake/migrations/V160__sleep_polling_alert.sql
 snowflake/migrations/V161__retire_operator_backups.sql
+snowflake/migrations/V162__security_takeover_admin_grant.sql
+snowflake/migrations/V163__ai_runaway_trust_regression.sql
+snowflake/migrations/V164__notify_actionable_lines_escalation.sql
+snowflake/migrations/V165__daily_digest_grounding.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -249,7 +253,7 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > post-scan escalation-supersede sweep (`RESOLUTION_KIND='SUPERSEDED'`, excluded from the
 > precision score; #40), and a non-OK object-cost return on rollback (#10). Optional clone
 > check: `CALL SP_ALERT_SCAN();` runs clean (since V157 a hand CALL skips the cadence-gated rules outside
-> their Central-hour slots and still reports 12/12 ok); after a HIGH→CRITICAL crossing, the earlier
+> their Central-hour slots and still reports 14/14 ok, 12/12 before V162); after a HIGH→CRITICAL crossing, the earlier
 > lower-band `ALERT_EVENTS` row flips to `RESOLVED`/`SUPERSEDED` while the CRITICAL stays OPEN.
 
 > **V068 verify (standalone-mart freshness stamps — no smoke test):** re-derives
@@ -339,6 +343,47 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > names in the same alert family. `CONFIDENCE` and `EVIDENCE` should disclose exact matched
 > warehouse/object changes or task failures. Incident creation remains a typed human action in
 > Control Room. No app or automation should apply this migration directly.
+
+> **V162-V165 (Next-Fifty wave 4) — order and first runs:** deploy app 4.602.0 first, then apply
+> V162 → V165 in order (each guards on the one before; stop on the first error). Every app read of a
+> wave-4 column and every new caption is gated on its own migration (`app/ui/schema_gate.py`), so
+> either order is safe; after the apply the gated text appears within 4 h (the metadata cache) or at
+> once on Refresh. Run the read-only `PREFLIGHT_WAVE4.sql` (runbox) first: it lists exactly what each
+> first run raises. First runs: V162's next hourly scan raises the last 24 h of takeover episodes and
+> 26 h of admin grants; V163's next daily scan the last 3 complete AI-usage days and Trust Center rises
+> dated today or yesterday; V164's next hourly notifier escalates every OPEN, unacknowledged CRITICAL
+> of the last 7 days first notified 120+ minutes earlier (PREFLIGHT P164.2), and the CRITICAL takeovers
+> V162's first scan raises escalate about 2-3 h after the apply (P162.4). An incident counts as
+> acknowledging an alert only when a person acknowledged, mitigated or closed it after the alert joined
+> it. Nothing runs at apply time; never hand-CALL a scan, the notifier or the digest (each can page or
+> email).
+
+> **V164 verify (actionable Teams lines + CRITICAL escalation — OWNER SMOKE TEST: the send, the ARRAY
+> handling and the nested cursor loop are runtime-only):**
+> 1. Before the apply: PREFLIGHT P164.1 must show `DEFAULT_RECIPIENTS_SET` and
+>    `SNOW_ACCOUNTADMINS_CAN_USE` TRUE, or seed `('ESCALATE_EMAIL_INTEGRATION','')` for a Teams-only
+>    escalation. P164.2 lists the first-run escalations of CRITICALs that already exist, and P162.4
+>    the CRITICAL takeovers V162's first hourly scan raises (P164.2 cannot see those; they escalate
+>    about 2-3 hours after the apply too). Read both: acknowledge stale ones (the new takeovers within
+>    2 hours of the first hourly scan) or seed `('ESCALATE_AFTER_MIN','0')` (both seeds survive the
+>    V164 MERGE, which is WHEN NOT MATCHED).
+> 2. After the next hourly chain: TASK_ALERT_NOTIFY SUCCEEDED (its RETURN_VALUE stays NULL: a task
+>    that CALLs a proc does not publish the proc's return string), no `escalation_failed` or
+>    `escalation_email_failed` rows in APP_ERROR_LOG, and one ALERT_AUDIT `ESCALATE` row per
+>    `ALERT_EVENTS.ESCALATED_AT` stamp.
+> 3. The next Teams card shows `[SEV] title | company | detail | event <id>` lines.
+> 4. End to end: leave the monthly OPS_ALERT_DRILL CRITICAL unacknowledged for 2 hours. Expect one
+>    "OVERWATCH ESCALATION" card, one email, one ESCALATE audit row and ESCALATED_AT set.
+> 5. Restoring ALERT_EVENTS from a manual clone taken before V164: the clone lacks ESCALATED_AT, so
+>    `INSERT OVERWRITE ... SELECT *` fails. Use an explicit column list, or
+>    `ALTER TABLE <clone> ADD COLUMN ESCALATED_AT TIMESTAMP_NTZ` first (RUNBOOK §16).
+
+> **V165 verify (measured digest grounding — no smoke test to apply):** the next morning after
+> 07:20 CT, the latest DAILY_DIGEST row has BODY_SOURCE `AI` or `TEMPLATE` and FACTS filled;
+> TASK_DAILY_DIGEST SUCCEEDED; and the card arrived in Teams (V165 also JSON-escapes the digest text,
+> which Teams Workflows otherwise rejects on a raw newline or quote). A frequent `TEMPLATE` means the
+> model states numbers the facts do not hold: read UNGROUNDED. Nothing runs at apply time (a hand
+> `CALL` spends a Cortex call and posts to Teams).
 
 > **V061 heal (runs in the migration tail; safe to re-run separately/off-hours):**
 > `CALL SP_LOAD_MARTS_V27('DAILY', 365);` rewrites `FACT_AI_USAGE_DAILY` rows the old
@@ -490,7 +535,7 @@ surgical by design — the schema is shared with the old app, so it never drops
 `DBA_MAINT_DB.OVERWATCH` itself, only named objects:
 
 - **Section A (live):** tasks, alerts, procs, functions, views, transient
-  facts/marts. Safe anytime — re-run the migrations in order (V001..V161) and the loaders repopulate.
+  facts/marts. Safe anytime — re-run the migrations in order (V001..V165) and the loaders repopulate.
 - **Section B (commented):** operator data — settings, company scope, alert
   config/events/audit, action queue, savings ledger, error log,
   schema_version. Uncomment only for a factory reset, and run the provided

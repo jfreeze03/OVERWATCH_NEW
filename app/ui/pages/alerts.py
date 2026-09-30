@@ -55,6 +55,7 @@ from app.ui.components import (
     with_user_names,
     write_gate_open,
 )
+from app.ui.schema_gate import has_migration
 
 _PAGE = "Alerts"
 
@@ -386,6 +387,68 @@ def _last_delivery_card() -> None:
     if last_fail_sample:
         with st.expander("Last send failure"):
             st.code(last_fail_sample[:400])
+
+
+def _escalation_lines(row: object, now: object = None) -> list[tuple[str, str]]:
+    """V164 (Next-Fifty #40): the Native delivery escalation copy from ONE mart_sql.escalation_summary row, as
+    (severity, text) pairs: 'info' for the policy and the 7-day tally, 'warn' when the pass or its email leg
+    failed. AFTER_MIN is already parsed like the proc (whole minutes; 0 or not a number = off) and
+    EMAIL_INTEGRATION_NAME is trimmed (blank = no email leg), so this only words them. Pure; never raises."""
+    get = row.get if hasattr(row, "get") else (lambda _k, _d=None: _d)
+
+    def _n(col: str) -> int:
+        return int(safe_float(get(col), 0.0))
+
+    after = safe_float(get("AFTER_MIN"), 0.0)
+    integ = get("EMAIL_INTEGRATION_NAME")
+    integ = "" if integ is None or (isinstance(integ, float) and math.isnan(integ)) else str(integ).strip()
+    days = _n("WINDOW_DAYS") or 7
+    out: list[tuple[str, str]] = []
+    if after <= 0:
+        out.append(("info", "Escalation is off (ESCALATE_AFTER_MIN is 0 or not a number): an unacknowledged "
+                            "CRITICAL is not re-posted or emailed. Set it in Admin > Settings."))
+    else:
+        email = (f"and emailed through the {integ} notification integration (its DEFAULT_RECIPIENTS, set in "
+                 "Snowsight)" if integ else "but not emailed (ESCALATE_EMAIL_INTEGRATION is blank)")
+        out.append(("info", f"Escalation: a CRITICAL nobody acknowledged within {humanize_duration(after, 'min')} "
+                            f"(ESCALATE_AFTER_MIN) is re-posted once to the route(s) that delivered it {email}. "
+                            "Acknowledging, snoozing or resolving it, or acknowledging, mitigating or closing its "
+                            "incident after the alert joined it, stops the escalation (an automatic mitigation "
+                            "does not)."))
+    n = _n("ESCALATED_COUNT")
+    tally = f"Last {days} days: {n} CRITICAL(s) escalated"
+    if n and now is not None:
+        tally += f", the latest {humanize_age(get('LAST_ESCALATED_AT'), now)}"
+    out.append(("info", tally + "."))
+    pass_f, mail_f = _n("PASS_FAILURES"), _n("EMAIL_FAILURES")
+    if pass_f or mail_f:
+        parts = []
+        if pass_f:
+            parts.append(f"{pass_f} failed escalation pass run(s)")
+        if mail_f:
+            parts.append(f"{mail_f} failed escalation email send(s) — the notifier retries every hourly run "
+                         "until one goes out, so one unsent alert can fail many times; check DEFAULT_RECIPIENTS "
+                         "on the integration and USAGE on it for the app owner role "
+                         "(docs/EMAIL_RECIPIENT_RUNBOOK.md)")
+        out.append(("warn", f"Last {days} days: " + "; ".join(parts) + " (APP_ERROR_LOG, page NotifyWebhook)."))
+    return out
+
+
+def _escalation_status() -> None:
+    """V164 (Next-Fifty #40): the escalation policy and the last 7 days of escalations, under the delivery card.
+    Gated on V164 being applied: before that the notifier has no escalation pass, so stating a policy would be
+    false. The gate answers from the startup SCHEMA_VERSION read (no statement of its own); the one read here
+    happens only on this lazy section, never on first paint."""
+    if not has_migration(164, _PAGE):
+        return
+    res = run(mart_sql.escalation_summary(7), page=_PAGE, key="escalation_summary", tier="recent",
+              source="ALERT_AUDIT (ESCALATE) + APP_ERROR_LOG + SETTINGS")
+    if not res.usable():
+        empty_state("unavailable", "Escalation status unavailable — the ALERT_AUDIT / SETTINGS read failed.",
+                    detail=res.error)
+        return
+    for sev, text in _escalation_lines(res.df.iloc[0], account_now()):
+        (st.warning if sev == "warn" else st.caption)(md_dollars(text))
 
 
 def _delivery_status() -> None:
@@ -1860,12 +1923,18 @@ def render() -> None:
         _delivery_status()
         _email_path_status()
         _last_delivery_card()
+        _escalation_status()
         st.markdown("**Routing (family → channel)**")
         panel_help(
             "Routing sends each family/severity through a named notification "
             "integration — COST to #finops, SECURITY to #security. The seeded ALL/HIGH "
             "route keeps the original single-webhook behavior until you add rows. One "
             "failing integration never blocks the others."
+            # V164 (#40): the re-post follows the delivery ledger, not the route rules; stated only once applied
+            + (" An escalation re-posts a CRITICAL only to the route(s) that already delivered it, so a "
+               "route that never carried an event never gets its escalation; the email leg, when on, "
+               "still reaches it."
+               if has_migration(164, _PAGE) else "")
         )
         routes = run(mart_sql.alert_routes(), page=_PAGE, key="alert_routes", tier="recent",  # r24 #8: config table; post-save freshness rides the action salt
                      source="ALERT_ROUTES")

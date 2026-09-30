@@ -82,6 +82,7 @@ from app.ui.components import (
     with_user_names,
     write_gate_open,
 )
+from app.ui.schema_gate import has_migration
 from app.ui.workbench import render_action_center, render_entity_360, render_watchlist
 
 _PAGE = "Control Room"
@@ -388,17 +389,10 @@ def _incident_lifecycle_controls(inc_row, iid: str, *, can_write: bool) -> None:
 def _v154_applied() -> bool:
     """True once V154 is in the applied SCHEMA_VERSION set — the Incidents caption only claims the
     [attach] arm and the [auto-mitigate] sweep once they exist (a deploy can land before the apply).
-    The same cheap metadata read Admin ▸ Migrations uses (operations._operator_identity_grain_available
-    pattern); an unreadable version table reads as not-applied, so the caption never overclaims."""
-    res = run(mart_sql.schema_version(), page=_PAGE, key="cr_incident_loop_migver",
-              tier="metadata", source="SCHEMA_VERSION", probe=True)
-    if not res.ok or not res.usable() or "VERSION" not in res.df.columns:
-        return False
-    try:
-        applied = {int(v) for v in pd.to_numeric(res.df["VERSION"], errors="coerce").dropna()}
-    except (TypeError, ValueError):
-        return False
-    return 154 in applied
+    Wave 4: the shared schema gate (app/ui/schema_gate.py) answers from the startup gate's read of this
+    run, so it costs no statement of its own; an unreadable version table reads as not-applied, so the
+    caption never overclaims."""
+    return has_migration(154, _PAGE)
 
 
 def _clear_open_incidents_sql(company: str, kind: str, note: str) -> str:
@@ -1327,9 +1321,12 @@ def render() -> None:
         _loop_txt = (" With auto-declare on, later CRITICALs of an already-open family attach to it, and "
                      "an OPEN incident whose member alerts have all been resolved for an hour moves to "
                      "MITIGATED — closing stays human." if _v154_applied() else "")
+        # V162 (Next-Fifty #39): SP_INCIDENT_AUTODECLARE skips the two identity rules -- claimed only once applied.
+        _id_txt = (" Account-takeover and admin-grant alerts never auto-declare; declare them by hand."
+                   if has_migration(162, _PAGE) else "")
         st.caption("DBA-gated, audited, forward-only (reopen = new incident with REOPENED_FROM). "
                    "CRITICALs auto-declare hourly — one incident per dedupe family per 24h — "
-                   "unless INCIDENT_AUTO_DECLARE_CRITICAL is off in Settings." + _loop_txt)
+                   "unless INCIDENT_AUTO_DECLARE_CRITICAL is off in Settings." + _loop_txt + _id_txt)
 
         # ---- Triage queue ----------------------------------------------------------
         section_header("Triage queue")

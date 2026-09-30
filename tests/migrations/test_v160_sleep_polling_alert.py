@@ -439,7 +439,8 @@ def test_v160_marker_names_the_current_definer_and_the_new_proc_has_none():
     assert (160, "SP_SCAN_SLEEP_POLLING") not in rows                  # a first definition: nothing to derive from
     defs = _definers(texts)
     assert defs["SP_SCAN_SLEEP_POLLING"] == [160]
-    assert [v for v in defs["SP_ALERT_SCAN_DAILY"] if v > 157] == [160]  # V158/V159 never touched it
+    # V158/V159 never touched it (V163 re-derives it from V160 on purpose: that migration locks its own delta)
+    assert [v for v in defs["SP_ALERT_SCAN_DAILY"] if 157 < v <= 160] == [160]
     assert not [v for v in _violations(texts, _HISTORICAL_WAIVERS) if v.startswith("V160 ")]
     assert "derived:SP_SCAN_SLEEP_POLLING" not in _MIG and "LINEAGE-WAIVER" not in _MIG
     assert _MIG.count("-- >>> derived:") == 1
@@ -667,7 +668,9 @@ def test_v160_auto_clear_flag_is_inert_outside_its_own_clear():
     auto-resolve a COST_SLEEP_POLLING event."""
     from tests.test_alert_rule_consistency import _latest_proc_bodies
     bodies = _latest_proc_bodies()
-    assert bodies["SP_SCAN_SLEEP_POLLING"] == _NEW and bodies["SP_ALERT_SCAN_DAILY"] == _D
+    assert bodies["SP_SCAN_SLEEP_POLLING"] == _NEW
+    # wave 4: V163 re-derived the daily scan from V160; it still carries arm [25] byte-for-byte
+    assert _between(_D, _ANCHOR_25, _ANCHOR_17) in bodies["SP_ALERT_SCAN_DAILY"]
     readers = 0
     for name, body in bodies.items():
         if name == "SP_SCAN_SLEEP_POLLING":

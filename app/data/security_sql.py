@@ -26,6 +26,18 @@ ELEVATED_ROLES: tuple[str, ...] = (
 REACHES_ADMIN_ROLES: tuple[str, ...] = (
     "SNOW_ACCOUNTADMINS", "ACCOUNTADMIN", "SNOW_SYSADMINS", "SECURITYADMIN",
 )
+# V162 (Next-Fifty #39, owner 2026-09-29): the admin tier the two HOURLY identity alerts watch, in the order
+# SP_ALERT_SCAN writes it -- SEC_LOGIN_TAKEOVER is CRITICAL when the user held one of these directly at the
+# successful login, and SEC_ADMIN_GRANT raises once per direct grant of one to a user -- and their off-hours
+# window: 20:00-06:00 America/Chicago plus Saturday/Sunday (ISO weekdays 6 and 7). The SQL literals live in arms
+# [26] / [27]; tests/test_security_alert_parity.py locks them to these constants. No builder here reads them (the
+# app's own grant-anomaly helpers keep their older 07-19 business day and 5-role ELEVATED_ROLES on purpose).
+ALERT_ADMIN_ROLES: tuple[str, ...] = (
+    "ACCOUNTADMIN", "SECURITYADMIN", "SYSADMIN", "USERADMIN", "ORGADMIN", "SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS",
+)
+OFF_HOURS_START_HOUR = 20          # Central hour >= this is off-hours
+OFF_HOURS_END_HOUR = 6             # Central hour < this is off-hours
+OFF_HOURS_WEEKEND_ISO: tuple[int, ...] = (6, 7)
 
 
 def _admin_roles_in(column: str, roles: tuple[str, ...]) -> str:

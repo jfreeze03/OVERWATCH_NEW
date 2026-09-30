@@ -71,6 +71,7 @@ from app.ui.components import (
     user_display_map,
     with_user_names,
 )
+from app.ui.schema_gate import has_migration
 from app.ui.security_center import (
     render_admin_grant_anomalies,
     render_effective_access,
@@ -427,6 +428,15 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
         # (alarm_health contract: amber ONLY when there are findings). Matches the dormant header below.
         section_header("Account-takeover candidates (failed burst → success)", "", "security",
                        anchor="sec-ato")
+        # V162 (Next-Fifty #39): claimed only once the hourly arm exists (schema-gated; the gate answers from the
+        # startup SCHEMA_VERSION read, so it costs no statement). The lens itself stays the wider 6-hour window.
+        if has_migration(162, _PAGE):
+            st.caption("The hourly alert scan raises SEC_LOGIN_TAKEOVER for the stricter case (at least the rule "
+                       "threshold of failed logins within 15 min, then a success within 60 min); this table is the "
+                       "wider 6-hour lens at 5+ failures. That alert is account-wide but this table follows the "
+                       "company filter, so it lists the alert's user only with the company at ALL (or the user's "
+                       "own), a window that includes the login, and a rule threshold of 5 or more: set the company "
+                       "to ALL before reading a missing user as a false alarm.")
         st.caption(_toggle_cost_hint("takeover"))
         _ato_on = st.toggle(
             "Run account-takeover scan (correlates failed then successful logins)",
