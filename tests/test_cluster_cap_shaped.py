@@ -13,7 +13,9 @@ whose peak was cluster 3.
       warehouse's resize picker opens on MEDIUM, a size-up (R1-4); the selected row's cluster columns name
       the check window (R1-9: the rendered headers and help, review r2 R2-8);
   (f) review r2 R2-2: a 2X-Large or 3X-Large below-cap warehouse (no size up in the picker) opens the picker on
-      nothing, with no statement, saving or Execute until a size is picked.
+      nothing, with no statement, saving or Execute until a size is picked;
+  (g) review r3 R3-1: while the row stays selected, a size change (an Execute, or an outside resize) re-creates
+      the picker on its new default, and a resize clears the typed confirm.
 
 The shared shaped harness stubs SHOW WAREHOUSES as an empty frame, so only an injected frame reaches the gate
 (tests/test_prc_c1_shaped.py renders that default). The floor venv skips these (_APPTEST_BUTTONGROUP_OK).
@@ -72,7 +74,10 @@ def _hist() -> pd.DataFrame:
 
 
 def _page(monkeypatch, *, check: bool, fails: bool = False, max_clusters: int = 4,
-          select: str = "", size: str = "X-Small", show_empty: bool = False) -> tuple[AppTest, list[str]]:
+          select: str = "", size: str = "X-Small", show_empty: bool = False,
+          show_size: dict | None = None) -> tuple[AppTest, list[str]]:
+    """``show_size`` ({"size": ...}) is read by SHOW WAREHOUSES on every run, so a test can change the size between
+    reruns while the row stays selected (review r3 R3-1); otherwise every run reads ``size``."""
     import app.ui.pages.cost_parts.optimize as opt
 
     seen: list[str] = []
@@ -102,7 +107,7 @@ def _page(monkeypatch, *, check: bool, fails: bool = False, max_clusters: int = 
         sql = str(args[0] if args else kwargs.get("sql", ""))
         seen.append(sql)
         if sql.startswith("SHOW WAREHOUSES"):
-            return _ok(pd.DataFrame() if show_empty else _show(max_clusters, size))
+            return _ok(pd.DataFrame() if show_empty else _show(max_clusters, show_size["size"] if show_size else size))
         if "CLUSTER_NUMBER" in sql:
             if fails:
                 return QueryResult(df=pd.DataFrame(), ok=False, source="t", error_kind="timeout",
@@ -144,6 +149,14 @@ def _sized(at) -> pd.DataFrame:
 
 def _captions(at) -> str:
     return " ".join(str(c.value) for c in at.caption)
+
+
+def _pick(at, warehouse: str = "WH_LOW"):
+    """The Resize to picker. Its key is the warehouse, then the current size and the default index (review r3
+    R3-1), so it is found by the warehouse prefix."""
+    picks = [s for s in at.selectbox if str(s.key).startswith(f"sizing_to_{warehouse}_")]
+    assert len(picks) == 1, [s.key for s in at.selectbox]
+    return picks[0]
 
 
 @_SKIP
@@ -223,7 +236,7 @@ def test_the_operator_pane_prefills_only_a_reached_cap(monkeypatch, check, selec
     code, text = _pane(at)
     assert ("ALTER WAREHOUSE WH_SAT SET MIN_CLUSTER_COUNT = 1 MAX_CLUSTER_COUNT = 5;" in code) is raise_to_5
     assert f"ALTER WAREHOUSE {select} SET MIN_CLUSTER_COUNT" in code or not raise_to_5
-    assert any(s.key == f"sizing_to_{select}" for s in at.selectbox)            # the resize is still offered
+    assert _pick(at, select) is not None                                        # the resize is still offered
     if raise_to_5:
         assert "Scale-out fix (review-only)" in text
         assert "run it from Operations ▸ Emergency ▸ Cluster range (audited)." in text
@@ -266,7 +279,7 @@ def test_a_small_below_cap_warehouse_opens_the_resize_on_a_size_up(monkeypatch):
     Small warehouse (it opened on XSMALL: a downsize projecting a saving). Review r1 R1-9: the selected row's
     cluster columns name the check window, and the evidence frame (the CSV) carries it."""
     at, _seen = _page(monkeypatch, check=True, select="WH_LOW", size="Small")
-    pick = next(s for s in at.selectbox if s.key == "sizing_to_WH_LOW")
+    pick = _pick(at)
     assert pick.value == "MEDIUM"
     assert list(pick.options) == ["XSMALL", "SMALL", "MEDIUM", "LARGE", "XLARGE", "XXLARGE"]
     code, text = _pane(at)
@@ -298,7 +311,7 @@ def test_no_size_up_to_offer_opens_the_picker_on_nothing(monkeypatch, size, note
     a 2X-Large one a no-op. It now opens with nothing picked: the note says why, and no statement, saving or
     Execute renders until the operator picks a size."""
     at, _seen = _page(monkeypatch, check=True, select="WH_LOW", size=size)
-    pick = next(s for s in at.selectbox if s.key == "sizing_to_WH_LOW")
+    pick = _pick(at)
     assert pick.value is None
     assert list(pick.options) == ["XSMALL", "SMALL", "MEDIUM", "LARGE", "XLARGE", "XXLARGE"]
     code, text = _pane(at)
@@ -308,3 +321,73 @@ def test_no_size_up_to_offer_opens_the_picker_on_nothing(monkeypatch, size, note
     assert "Projected saving" not in text and "Resizing UP" not in text and "2XLARGE" not in text
     assert not any(t.key == "sizing_confirm" for t in at.text_input)
     assert not any(b.key == "sizing_btn" for b in at.button)
+
+
+def _recording_writes(monkeypatch) -> list[str]:
+    """Every statement the Execute gate runs (the harness's own stub answers (True, 'stubbed') and keeps none)."""
+    import app.ui.pages.cost_parts.optimize as opt
+
+    writes: list[str] = []
+
+    def _execute(sql, **_kwargs):
+        writes.append(str(sql))
+        return True, "Statement executed."
+
+    monkeypatch.setattr(opt, "execute_statement", _execute)
+    return writes
+
+
+def _resize(at, writes: list[str], to: str) -> None:
+    """Type the warehouse name and click Execute: the ALTER to ``to`` runs and is logged."""
+    at.text_input(key="sizing_confirm").input("WH_LOW").run()
+    at.button(key="sizing_btn").click().run()
+    assert not at.exception
+    assert f"ALTER WAREHOUSE WH_LOW SET WAREHOUSE_SIZE = '{to}';" in writes
+    assert any("REMEDIATION_LOG" in w for w in writes)
+
+
+@_SKIP
+def test_the_picker_follows_its_default_when_the_size_changes_under_a_selected_row(monkeypatch):
+    """Review r3 R3-1: the picker was keyed on the warehouse alone and Streamlit leaves `index` out of a keyed
+    selectbox's identity, so while WH_LOW stayed selected an earlier value outlived a new default. After an
+    Execute (X-Large -> 2X-Large) the pane said no size was picked beside an ALTER to XXLARGE and an enabled
+    Execute; after an outside resize (Large -> 3X-Large) it projected a saving for a downsize nobody picked. Each
+    size change now opens the picker on its own default: nothing, or the new size up."""
+    show = {"size": "X-Large"}
+    at, _seen = _page(monkeypatch, check=True, select="WH_LOW", show_size=show)
+    writes = _recording_writes(monkeypatch)
+    assert _pick(at).value == "XXLARGE"
+    _resize(at, writes, "XXLARGE")
+    for size, up in (("2X-Large", None), ("Large", "XLARGE"), ("3X-Large", None)):
+        show["size"] = size
+        at.run()
+        assert not at.exception, size
+        assert _pick(at).value == up, size
+        code, text = _pane(at)
+        assert "Projected saving" not in text, size
+        if up is None:
+            assert "WAREHOUSE_SIZE" not in code, size
+            assert "The picker opens with no size picked: pick one to see the statement." in text, size
+            assert not any(b.key == "sizing_btn" for b in at.button), size
+        else:
+            assert [ln for ln in code.splitlines() if "WAREHOUSE_SIZE" in ln] == [
+                f"ALTER WAREHOUSE WH_LOW SET WAREHOUSE_SIZE = '{up}';"]
+            assert f"Resizing UP LARGE → {up} raises cost — no saving booked." in text
+            assert "The picker opens with no size picked" not in text
+
+
+@_SKIP
+def test_a_resize_clears_the_typed_confirm(monkeypatch):
+    """Review r3 R3-1: after a resize (Large -> XLARGE) the picker opens on the NEW size up, XXLARGE, so the name
+    typed for the first resize is cleared: a second Execute needs a new confirm."""
+    show = {"size": "Large"}
+    at, _seen = _page(monkeypatch, check=True, select="WH_LOW", show_size=show)
+    writes = _recording_writes(monkeypatch)
+    assert _pick(at).value == "XLARGE"
+    _resize(at, writes, "XLARGE")
+    show["size"] = "X-Large"
+    at.run()
+    assert not at.exception
+    assert _pick(at).value == "XXLARGE"
+    assert at.text_input(key="sizing_confirm").value == ""
+    assert at.button(key="sizing_btn").disabled

@@ -54,10 +54,12 @@ CLUSTER_CHECK_MAX_DAYS = 90          # the live QUERY_HISTORY clamp (data.common
 CLUSTER_CHECK_MAX_WAREHOUSES = 100   # == the sizing profile's LIMIT 100, so no profile row is ever left out
 CAP_REACHED, CAP_NOT_REACHED, CAP_NO_QUERIES, CAP_NOT_CHECKED = "reached", "not_reached", "no_queries", "not_checked"
 # Where the cluster-cap check lives (review r1 R1-5 / R1-11): every surface that says "add a cluster" without
-# running the check points here (through CLUSTER_CAP_QUALIFIER), so a higher MAX_CLUSTER_COUNT is never advised on
-# a cap nobody checked. tests/test_cluster_cap_gate.py sweeps app/ for add-a-cluster text without the qualifier
-# (review r2 R2-4); its allowlist names the exceptions (labels, the gated verdicts, and the query advisor's
-# split-unknown fallback, byte-locked on purpose by tests/test_cold_start_split.py).
+# running the check points here (through CLUSTER_CAP_QUALIFIER), so a higher MAX_CLUSTER_COUNT is not advised on a
+# cap nobody checked. tests/test_cluster_cap_gate.py sweeps app/ for add-a-cluster text without the qualifier
+# (review r2 R2-4); its allowlist names the exceptions: labels, the gated verdicts, and one unqualified text, the
+# query advisor's fallback for a row WITHOUT the overload/provisioning split (the older row shape), which Next-Fifty
+# #17 byte-locks in tests/test_cold_start_split.py. The advisor's split-known, no-dominant-cause text carries the
+# qualifier (review r3 R3-2 / R3-7).
 CLUSTER_CAP_CHECK_PATH = "Cost Intelligence ▸ Optimization & Savings ▸ Idle & sizing ▸ Check cluster use"
 # The qualifier those surfaces carry (ETL evidence, Operations), inside their own parentheses: no read,
 # just the rule.
@@ -221,10 +223,15 @@ def _policy(value: object) -> str:
 
 def _queue_follow_up(row) -> str:
     """The Size up (spill + queueing) rationale's follow-up (review r2 R2-4 / R2-11): add a cluster if the queue
-    persists, gated like the scale-out verdict. On a multi-cluster non-ECONOMY warehouse whose cluster-cap check
-    ran: never reached -> split instead (a higher maximum would not help); at the generator's cap of
-    CLUSTER_RANGE_CAP -> split; reached -> add one, and says so. Otherwise (single-cluster, ECONOMY, unknown
-    range, not checked, no clustered query) the rule itself, CLUSTER_CAP_QUALIFIER."""
+    persists, gated like the scale-out verdict. On a multi-cluster non-ECONOMY warehouse, in this order:
+      - the cluster-cap check ran and no query reached the cap -> split instead, with the evidence (a higher maximum
+        would not help);
+      - already at the generator's cap of CLUSTER_RANGE_CAP (10) clusters or more -> split the workload across
+        warehouses, whether or not the cap was checked (reached, not checked or no clustered query), as the
+        scale-out verdict does (review r3 R3-3 / R3-6);
+      - below that cap and the check shows it reached -> add one, with the hours.
+    Everything else (single-cluster, ECONOMY, unknown range, and below the cap not checked or no clustered query)
+    gets the rule itself, CLUSTER_CAP_QUALIFIER."""
     lead = "if queueing persists after the resize, "
     mx = _num(row.get("MAX_CLUSTER_COUNT"))
     if mx == mx and mx > 1 and _policy(row.get("SCALING_POLICY")) != "ECONOMY":

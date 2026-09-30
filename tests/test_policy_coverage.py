@@ -433,11 +433,44 @@ def test_sibling_lines_never_say_no_masked_column():
         "the database or schema) can be listed.")
     assert pc.SIBLINGS_TAG_QUALIFIER not in pc.sibling_lines(sibs)                    # no tags: no qualifier
     assert pc.sibling_lines((), tag_masking=True) == (pc.SIBLINGS_NONE, pc.SIBLINGS_LAG)  # nothing listed to qualify
-    assert "can lag up to 2 hours" in pc.SIBLINGS_LAG and "cached SHOW DATABASES read" in pc.SIBLINGS_LAG
+    assert "can lag up to 2h" in pc.SIBLINGS_LAG and "cached SHOW DATABASES read" in pc.SIBLINGS_LAG
+    assert "cached for up to 1h" in pc.SIBLINGS_LAG and "in the last 3h can be listed" in pc.SIBLINGS_LAG   # R3-5
     texts = (*tagged, *pc.sibling_lines(()), pc.SIBLINGS_UNCHECKED, pc.SIBLINGS_NO_NAMES, pc.PARITY_LEGEND,
              pc.PARITY_NOTHING_TO_GROUP, pc.parity_summary_sentence(3, 1))
     for text in texts:
         assert "no masked column" not in text and not re.search(r"\blive\b", text, re.IGNORECASE), text
+
+
+def test_the_lag_lines_count_the_panels_own_cache(monkeypatch):
+    """Review r3 R3-5: the unmasked-sibling lines compare SHOW DATABASES against the masked databases of the
+    coverage read, which is cached on the 'hourly' tier, and the lag line gave only the view's 2 hours. A database
+    masked (or cloned from a masked one) 2.5h ago can be in the view but not in a read cached 1.9h after the
+    masking, so it is still listed: the bound is the view's lag plus the cache, 3h. NO_MASKING had the same 2-hour
+    window. Both lines carry the combined bound, humanized, from constants pinned to the reads' tier."""
+    from app.core.query import CACHE_TTLS
+
+    pc = _pc()
+    assert pc.POLICY_VIEW_LAG_SEC == 7200
+    assert pc.POLICY_READ_CACHE_SEC == CACHE_TTLS["hourly"] == 3600
+    _fake, seen = _render_panel(monkeypatch, _ok(_probe_shape()))
+    ((key, _sql_text, kw),) = seen["runs"]
+    assert key == "sec_policy_cov" and CACHE_TTLS[kw["tier"]] == pc.POLICY_READ_CACHE_SEC
+    _fake, seen = _render_parity(monkeypatch, _ok(_parity_frame(3, total=3, differing=1)))
+    ((key, _sql_text, kw), _dbs) = seen["runs"]
+    assert key == "sec_policy_parity" and CACHE_TTLS[kw["tier"]] == pc.POLICY_READ_CACHE_SEC
+    # the reviewers' case: masked at t, the read cached at t + 1.9h (before the view caught up), listed at t + 2.5h
+    masked_ago = 9000
+    assert pc.POLICY_VIEW_LAG_SEC < masked_ago <= pc.POLICY_VIEW_LAG_SEC + pc.POLICY_READ_CACHE_SEC
+    assert pc.SIBLINGS_LAG == (
+        "The policy-reference view can lag up to 2h and this panel's reads of it are cached for up to 1h (Refresh "
+        "data clears the cache), so a database masked or cloned in the last 3h can be listed; the database list is a "
+        "cached SHOW DATABASES read, so a database created since that read is not listed.")
+    assert pc.NO_MASKING == (
+        "The policy-reference view lists no masking policy on any column or tag in this account, so there is no "
+        "masking inventory. A policy attached in the last 3h may not be listed yet (the view can lag up to 2h and "
+        "this read of it is cached for up to 1h; Refresh data clears the cache).")
+    for text in (pc.SIBLINGS_LAG, pc.NO_MASKING):
+        assert "2 hours" not in text and "in that time" not in text
 
 
 def test_network_policy_caption_variants():

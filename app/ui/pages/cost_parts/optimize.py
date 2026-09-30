@@ -894,10 +894,17 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 # Review r2 R2-2: where no size up is offered (the largest option, a larger warehouse, or an
                 # unknown size) the picker opens with nothing picked (index None) and the note says why: no
                 # statement, saving or Execute until the operator picks a size.
+                # Review r3 R3-1: Streamlit leaves `index` out of a keyed selectbox's identity, so a key on the
+                # warehouse alone kept an earlier value when the default changed while the row stayed selected
+                # (after an Execute, or an outside resize), and the pane showed a statement, a saving and Execute
+                # under the no-size-picked note. The key carries what the default is computed from (the current
+                # size and the default index), so a new default is a new widget and a stale pick is dropped.
                 _rs_idx, _rs_note = resize_picker_default(srow.get("RECOMMENDATION"), srow.get("CURRENT_SIZE"),
                                                           remediation.RESIZE_SIZES)
+                _rs_cur = normalize_size(srow.get("CURRENT_SIZE")) or "UNKNOWN"
                 target_size = st.selectbox("Resize to", list(remediation.RESIZE_SIZES), index=_rs_idx,
-                                           key=f"sizing_to_{srow['WAREHOUSE_NAME']}", placeholder="Pick a size")
+                                           key=f"sizing_to_{srow['WAREHOUSE_NAME']}_{_rs_cur}_{_rs_idx}",
+                                           placeholder="Pick a size")
                 if _rs_note:
                     st.caption(_rs_note)
                 if target_size is not None:       # R2-2: nothing picked = no statement, saving or Execute
@@ -939,6 +946,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     blast_radius(str(srow["WAREHOUSE_NAME"]), _PAGE)
                     from app.logic import remediation as _remediation
                     st.caption(_remediation.reverse_hint("RESIZE", str(srow["WAREHOUSE_NAME"])))
+                    # R3-1: after a resize the picker can open on a new size up, so the typed name from that
+                    # resize is cleared (before its input renders): a repeat Execute needs a new confirm.
+                    if st.session_state.pop("_sizing_clear_confirm", False):
+                        st.session_state["sizing_confirm"] = ""
                     if (confirm_gate(str(srow["WAREHOUSE_NAME"]), "Execute resize + log", key="sizing",
                                      prompt="Type the warehouse name to confirm resize", object_name=True)
                             and write_gate_open("sizing")):
@@ -952,6 +963,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         if ok:
                             from app.ui.components import log_ui_event
                             log_ui_event("remediation_exec", page=_PAGE)
+                            st.session_state["_sizing_clear_confirm"] = True
                         # Next-Fifty #5: the change scan (V038/V145) books a resize from XSMALL..4XLARGE and
                         # settles it on measured actuals, so no manual row for those (it was a double-booking).
                         # From a size the scan's map can't rank (5X/6X-LARGE) the app still books it.

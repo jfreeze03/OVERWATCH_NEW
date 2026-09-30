@@ -23,7 +23,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from app.logic.formulas import safe_float
+from app.logic.formulas import humanize_duration, safe_float
 
 INVENTORY_COLUMNS: tuple[str, ...] = (
     "DATABASE_NAME", "ENVIRONMENT", "MASKED_OBJECTS", "MASKED_COLUMNS", "MASKING_POLICIES", "REFS_NOT_ACTIVE",
@@ -41,13 +41,24 @@ PARITY_COLUMNS: tuple[str, ...] = (
 )
 PARITY_TOTAL_COLUMNS: tuple[str, ...] = ("TOTAL_NAMES", "DIFFERING_NAMES")
 
+# Review r3 R3-5: how far behind the panel's masking lines can be. Snowflake's policy-reference view lags up to
+# POLICY_VIEW_LAG_SEC, and the panel's reads of it (sec_policy_cov, sec_policy_parity) are on the 'hourly' tier, so a
+# result can be up to POLICY_READ_CACHE_SEC old on top of that: set equal to app.core.query.CACHE_TTLS["hourly"]
+# (test-pinned, with both reads' tier). The sidebar's Refresh data clears the cache.
+POLICY_VIEW_LAG_SEC = 7200
+POLICY_READ_CACHE_SEC = 3600
+_VIEW_LAG = humanize_duration(POLICY_VIEW_LAG_SEC)
+_READ_CACHE = humanize_duration(POLICY_READ_CACHE_SEC)
+_MAX_BEHIND = humanize_duration(POLICY_VIEW_LAG_SEC + POLICY_READ_CACHE_SEC)
+
 POLICY_VIEW_UNREADABLE = (
     "Snowflake's policy-reference view (POLICY_REFERENCES) is not readable by this app: it is missing in this "
     "account, or the app's role cannot see it. Masking and row-access coverage cannot be shown here."
 )
 NO_MASKING = (
     "The policy-reference view lists no masking policy on any column or tag in this account, so there is no "
-    "masking inventory. A policy attached in the last 2 hours may not be listed yet."
+    "masking inventory. A policy attached in the last " + _MAX_BEHIND + " may not be listed yet (the view can lag up "
+    "to " + _VIEW_LAG + " and this read of it is cached for up to " + _READ_CACHE + "; Refresh data clears the cache)."
 )
 TAG_ONLY_MASKING = (
     "The policy-reference view lists no column-level masking reference; masking here is attached through tags "
@@ -78,7 +89,8 @@ PARITY_NOTHING_TO_GROUP = (
 # checked (unavailable / no_data_yet), never that there are none. Review R2-1: that absence is all the panel knows,
 # so no line says a database has "no masked column": tag-based masking is not traced to columns (a database masked
 # only through a tag is listed; SIBLINGS_TAG_QUALIFIER says so whenever the account has masking tags), and the policy
-# view lags while the database list is a cached read (SIBLINGS_LAG, on every rendered list).
+# view lags, the panel's reads of it are cached (review r3 R3-5) and the database list is a cached read (SIBLINGS_LAG,
+# on every rendered list).
 SIBLINGS_UNCHECKED = (
     "Databases with no column-level masking reference were not checked: the database list (SHOW DATABASES) could "
     "not be read, so a family may hold databases that are not shown here."
@@ -100,8 +112,10 @@ SIBLINGS_TAG_QUALIFIER = (
     "the database or schema) can be listed."
 )
 SIBLINGS_LAG = (
-    "The policy-reference view can lag up to 2 hours, so a database masked or cloned in that time can be listed; "
-    "the database list is a cached SHOW DATABASES read, so a database created since that read is not listed."
+    "The policy-reference view can lag up to " + _VIEW_LAG + " and this panel's reads of it are cached for up to "
+    + _READ_CACHE + " (Refresh data clears the cache), so a database masked or cloned in the last " + _MAX_BEHIND
+    + " can be listed; the database list is a cached SHOW DATABASES read, so a database created since that read is "
+    "not listed."
 )
 SIBLINGS_CAPPED = "SHOW DATABASES stopped at its row limit, so databases past it were not checked."
 SIBLING_NAMES_CAP = 20

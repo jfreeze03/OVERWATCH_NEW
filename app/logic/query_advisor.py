@@ -23,7 +23,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .formulas import humanize_duration, safe_div, safe_float
-from .sizing import CLUSTER_CAP_CHECK_PATH
+from .sizing import CLUSTER_CAP_CHECK_PATH, CLUSTER_CAP_QUALIFIER
 from .system_wait import is_sleep_statement, polls_with_system_wait, wait_seconds
 
 # --- thresholds (kept identical to ops_sql.query_optimization_triage) -------
@@ -274,7 +274,14 @@ def advise(row: Mapping[str, object], *,
                 f"the current maximum ({CLUSTER_CAP_CHECK_PATH} checks it) — below the cap, a higher "
                 "maximum does not help.",
                 pts))
-        else:  # split unknown (older row shape) or no dominant cause: the original combined wording
+        elif split_known:  # no dominant cause: the hedge, with the cluster-cap rule (review r3 R3-2 / R3-7)
+            findings.append(Finding(
+                "queued", "warn", "Queued",
+                f"Spent {queued_sec:.0f}s queued (of {elapsed:.1f}s total) — either "
+                "concurrency (add a cluster or size up for parallelism; " + CLUSTER_CAP_QUALIFIER + ") or "
+                "warehouse resume overhead (lengthen AUTO_SUSPEND / keep it warm).",
+                pts))
+        else:  # split unknown (older row shape): the original combined wording, byte-locked by Next-Fifty #17
             findings.append(Finding(
                 "queued", "warn", "Queued",
                 f"Spent {queued_sec:.0f}s queued (of {elapsed:.1f}s total) — either "
