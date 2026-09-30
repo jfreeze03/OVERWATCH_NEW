@@ -484,7 +484,7 @@ def compare_release_periods(df: pd.DataFrame) -> list[dict]:
         # humanize to Hr/Min/Sec, matching the rest of the app).
         if col == "P95_ELAPSED_SEC":
             return humanize_duration(v, "s")
-        if col == "QUEUED_SEC":               # per-query seconds — small, show 2 decimals
+        if col == "QUEUED_SEC":               # per-query seconds, humanized Hr/Min/Sec ('500ms/q', '2.5s/q')
             return f"{humanize_duration(v, 's')}/q"
         if col == "SPILL_REMOTE_GB":          # per-query GB — tiny, render as MB/query
             return f"{v * 1024:,.1f} MB/q"

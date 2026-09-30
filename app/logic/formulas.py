@@ -331,6 +331,24 @@ def humanize_duration(value: object, unit: str = "s") -> str:
     return f"{sign}{seconds}s"
 
 
+def duration_vs_threshold_text(value: object, threshold: object, unit: str = "s") -> str:
+    """The sentence "<value> vs threshold <threshold>", both through humanize_duration, for a duration
+    checked against its threshold. humanize_duration rounds (from an hour up it drops the seconds), so 90.9
+    and 90 minutes both read "1h 30m" and a "Still over" verdict would print two identical numbers. When the
+    two texts collide, the sentence names the exact gap instead ("1h 30m vs threshold 1h 30m, 54s over" /
+    ", 300ms under"), and a value exactly equal to its threshold says so ("1h 30m, at the threshold").
+    NaN reads as the no-value glyph on its side, like humanize_duration."""
+    v_txt, t_txt = humanize_duration(value, unit), humanize_duration(threshold, unit)
+    v, t = safe_float(value, default=float("nan")), safe_float(threshold, default=float("nan"))
+    if v_txt != t_txt or not (math.isfinite(v) and math.isfinite(t)):
+        return f"{v_txt} vs threshold {t_txt}"
+    if v == t:
+        return f"{v_txt}, at the threshold"
+    gap = humanize_duration(abs(v - t), unit)
+    gap = "<1ms" if gap == "0s" else gap                   # a sub-0.5ms gap rounds to nothing
+    return f"{v_txt} vs threshold {t_txt}, {gap} {'over' if v > t else 'under'}"
+
+
 def humanize_bytes(value: object) -> str:
     """Render a raw byte count as a compact binary unit — "3.6 TB", "891.3 MB",
     "512 B" — so sub-TB transfer (hundreds of MB) reads as itself instead of

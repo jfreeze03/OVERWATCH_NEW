@@ -26,7 +26,14 @@ from app.data import alert_evidence_sql, mart_sql, ops_sql, recheck_sql, securit
 from app.logic import email_path, remediation, stmt_timeout, tuning
 from app.logic.ai_prompts import alert_evidence_prompt
 from app.logic.alert_evidence import plan_for_alert
-from app.logic.formulas import account_now, humanize_age, humanize_duration, md_dollars, safe_float
+from app.logic.formulas import (
+    account_now,
+    duration_vs_threshold_text,
+    humanize_age,
+    humanize_duration,
+    md_dollars,
+    safe_float,
+)
 from app.logic.navigate import fix_target, inline_fix_warehouse, investigation_target
 from app.logic.playbooks import playbook_for
 from app.logic.verdict import Signal, page_verdict
@@ -98,6 +105,16 @@ def _recheck_value_text(rule_id: object, value: float) -> str:
     if str(rule_id or "").strip().upper() == "PERF_QUEUED_MINUTES":
         return humanize_duration(value, "min")
     return f"{value:,.2f}"
+
+
+def _recheck_vs_text(rule_id: object, value: float, threshold: float) -> str:
+    """A re-check's "<value> vs threshold <threshold>", in the rule's unit. For PERF_QUEUED_MINUTES both sides
+    can round to the same "1h 30m" (review r1: "Still over: ... 1h 30m vs threshold 1h 30m"), so
+    formulas.duration_vs_threshold_text then names the exact gap, or says the value is at the threshold. The
+    verdict itself is always computed on the raw numbers."""
+    if str(rule_id or "").strip().upper() == "PERF_QUEUED_MINUTES":
+        return duration_vs_threshold_text(value, threshold, "min")
+    return f"{_recheck_value_text(rule_id, value)} vs threshold {_recheck_value_text(rule_id, threshold)}"
 
 
 # V086 per-event snooze: label -> hours. The server computes the wake time from the
@@ -1214,17 +1231,16 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                 st.info("Re-check result unreadable — run it again.")
                             elif _rct is not None and safe_float(_rct) > 0:
                                 if _rcv >= safe_float(_rct):
-                                    st.warning(f"Still over: {_rcl} = {_recheck_value_text(_rid, _rcv)} vs "
-                                               f"threshold {_recheck_value_text(_rid, safe_float(_rct))} "
+                                    st.warning(f"Still over: {_rcl} = "
+                                               f"{_recheck_vs_text(_rid, _rcv, safe_float(_rct))} "
                                                f"(re-checked {_rca}).")
                                 elif not _rc_fresh:
                                     st.info(f"Was clear when re-checked {_rca}: {_rcl} = "
-                                            f"{_recheck_value_text(_rid, _rcv)} vs threshold "
-                                            f"{_recheck_value_text(_rid, safe_float(_rct))} "
+                                            f"{_recheck_vs_text(_rid, _rcv, safe_float(_rct))} "
                                             "— re-check again before resolving.")
                                 else:
-                                    st.success(f"Condition clear: {_rcl} = {_recheck_value_text(_rid, _rcv)} vs "
-                                               f"threshold {_recheck_value_text(_rid, safe_float(_rct))} "
+                                    st.success(f"Condition clear: {_rcl} = "
+                                               f"{_recheck_vs_text(_rid, _rcv, safe_float(_rct))} "
                                                f"(re-checked {_rca}).")
                                     # F50: close the loop the copy promises — one click
                                     # prefills RESOLVE + ACTIONED + the measured evidence
@@ -1236,8 +1252,8 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                             f"alert_action_{event_id[:8]}_{_sel_nonce}": "RESOLVE",
                                             f"alert_kind_{event_id[:8]}_{_sel_nonce}": "ACTIONED",
                                             f"alert_note_{event_id[:8]}_{_sel_nonce}": (
-                                                f"Re-check clear at {_rca}: {_rcl} {_recheck_value_text(_rid, _rcv)} "
-                                                f"vs threshold {_recheck_value_text(_rid, safe_float(_rct))}")[:500],
+                                                f"Re-check clear at {_rca}: {_rcl} "
+                                                f"{_recheck_vs_text(_rid, _rcv, safe_float(_rct))}")[:500],
                                         }
                                         st.rerun()
                             else:
