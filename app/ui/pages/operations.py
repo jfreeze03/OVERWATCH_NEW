@@ -3785,12 +3785,13 @@ def _stmt_timeout_posture_panel(company: str, days: int) -> None:
     whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="jump_wh",
               tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
     tail_df = tail.df if tail.usable() else None
-    names, not_visible = stmt_timeout.warehouse_universe(whs.df if whs.usable() else None, tail_df, company)
+    names, not_visible, managed = stmt_timeout.warehouse_universe(whs.df if whs.usable() else None, tail_df,
+                                                                  company)
     if not names:
         # review C16: pick the kind from the read this scope depends on (a company scope lists only the
         # runtime tail's warehouses), so a failed read never reads as a verified-empty scope
         _kind, _msg, _which = stmt_timeout.empty_universe_state(company, tail_ok=tail.ok, show_ok=whs.ok,
-                                                                active=len(not_visible))
+                                                                active=len(not_visible), managed=len(managed))
         empty_state(_kind, _msg, detail=(tail.error if _which == "tail" else whs.error if _which == "show"
                                          else ""))
         return
@@ -3808,7 +3809,7 @@ def _stmt_timeout_posture_panel(company: str, days: int) -> None:
     if account_s is None:
         account_s = stmt_timeout.derive_account_timeout(params.values())
         acct_how = "derived from warehouse rows" if account_s is not None else "unread"
-    posture = stmt_timeout.timeout_posture(names, params, account_s, tail_df, not_visible)
+    posture = stmt_timeout.timeout_posture(names, params, account_s, tail_df, not_visible, managed)
     summ = stmt_timeout.posture_summary(posture)
     _timed_out = None
     if tail_df is not None and "TIMEOUT_CANCELLED_TOTAL" in tail_df.columns:
@@ -3823,17 +3824,27 @@ def _stmt_timeout_posture_panel(company: str, days: int) -> None:
                  "maximum) or an explicit value that high. One runaway statement can bill that long."},
         {"label": f"Timed out ({tail_days}d)",
          "value": "—" if _timed_out is None else f"{_timed_out:,}",
-         "help": "Statements Snowflake cancelled for hitting a statement or warehouse timeout in the "
-                 "window, across every warehouse in scope: caps that already fired."},
+         # v4.603 (#33 D5): a cancel fires at whichever ceiling is lowest for THAT statement, so the count
+         # is not "the effective cap fired" -- the table's 'Fired at' shows which ceiling did
+         "help": "Statements Snowflake cancelled for hitting a statement timeout in the window, across every "
+                 "warehouse in scope, at whichever ceiling was lowest for that statement: warehouse, account, "
+                 "user, session, client or task. That can be below the effective cap shown per warehouse; "
+                 "'Fired at' in the table shows the ceiling that fired."},
         # review C15/C20: the ENFORCED value (0 = the 7-day maximum reads 168h, never "0s")
         stmt_timeout.account_value_kpi(account_s, acct_how),
     ])
     entity_nav_table(
-        posture[stmt_timeout.POSTURE_COLUMNS[:10]], key=f"ops_wh_timeout_tbl_{company}",
+        posture[stmt_timeout.DISPLAY_COLUMNS], key=f"ops_wh_timeout_tbl_{company}",
         key_col="WAREHOUSE_NAME", entity_type="WAREHOUSE", column_config={
             "CAP_SOURCE": st.column_config.TextColumn("Cap source"),
             "COMPLETED_RUNS": st.column_config.NumberColumn("Completed runs"),
-            "TIMEOUT_CANCELLED_RUNS": st.column_config.NumberColumn("Timed out"),
+            "TIMEOUT_CANCELLED_RUNS": st.column_config.NumberColumn(
+                "Timed out", help="Cancelled at any ceiling (warehouse, account, user, session, client or "
+                                  "task), which can be lower than the effective cap shown."),
+            "TIMEOUT_FIRED": st.column_config.TextColumn(
+                "Fired at", help="The ceiling those cancels fired at (from Snowflake's 'timeout of N "
+                                 "second(s)' message). 'below cap' = a user, session or client value "
+                                 "fired below this warehouse's effective cap."),
             "WOULD_CANCEL_RUNS": st.column_config.NumberColumn("Suggested cap would cancel"),
         })
     if not tail.ok:
@@ -3851,10 +3862,8 @@ def _stmt_timeout_posture_panel(company: str, days: int) -> None:
         st.caption("The account value is also 48 hours or more. One account cap reaches every warehouse "
                    "and workload at once, so it is not scripted here; set it deliberately from "
                    "Operations ▸ Emergency ▸ Account statement timeout.")
-    if summ["not_visible"]:
-        st.caption(f"{summ['not_visible']:,} warehouse(s) ran statements in the window but SHOW WAREHOUSES "
-                   "does not list them (dropped, renamed, or not visible to the app role): shown as Not "
-                   "visible, with no timeout read.")
+    for _note in stmt_timeout.status_notes(summ):     # Not visible / Managed compute / fired below the cap
+        st.caption(_note)
     if len(names) >= stmt_timeout.MAX_WAREHOUSES_READ:
         st.caption(f"Reads at most {stmt_timeout.MAX_WAREHOUSES_READ} warehouses per view: the ones with "
                    "the longest completed statements first.")
@@ -4306,8 +4315,16 @@ def _emergency_tab(is_operator: bool) -> None:
             elif action == "Resume warehouse" and wh:
                 stmt = remediation.resume_warehouse(wh)
             elif action == "Warehouse statement timeout" and wh:
-                secs = st.number_input("Timeout seconds (0 = no cap)", 0, 604800, 3600,
-                                       step=300, key="emg_secs")
+                # v4.603 (#33 D3): 0 is NOT "no cap" -- Snowflake enforces it as the 7-day maximum, and the
+                # lower non-zero of this value and the session value (the account's unless a user or
+                # session sets its own) is what fires (logic.stmt_timeout's rule).
+                secs = st.number_input("Timeout seconds (0 = Snowflake's 7-day maximum; a lower "
+                                       "session/account value still applies)", 0, 604800, 3600,
+                                       step=300, key="emg_secs",
+                                       help="0 = Snowflake's 7-day maximum, not 'no cap'. The session value "
+                                            "(the account value unless a user or session sets its own) "
+                                            "still applies if it is lower: the lower non-zero of the two "
+                                            "is what Snowflake enforces.")
                 stmt = remediation.statement_timeout_fix(wh, int(secs))
             elif action == "Cluster range" and wh:
                 c1, c2 = st.columns(2)

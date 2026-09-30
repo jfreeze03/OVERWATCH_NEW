@@ -271,7 +271,8 @@ def test_v161_in_flight_guard_follows_the_suspend_and_ignores_stale_rows():
             "                    AND SCHEDULED_TIME >= DATEADD('minute', -30, CURRENT_TIMESTAMP()))") in guard
     # review r1: a replay's own V158-tail run normally ends within a bounded wait, so V161 completes instead of
     # halting; it raises only if the run is still going after the loop. Review r2: 16 x 15 s (~4 min) stays inside
-    # the 300 s STATEMENT_TIMEOUT_IN_SECONDS V002 sets on WH_ALFA_ADMIN, so -20612 (not a timeout) is what fires
+    # 300 s, the STATEMENT_TIMEOUT_IN_SECONDS V002 set on WH_ALFA_ADMIN at install (a conservative bound: the value
+    # in force is read live on Admin > Performance and is higher here), so -20612 (not a timeout) is what fires
     v002 = (_MIGDIR / "V002__facts.sql").read_text(encoding="utf-8")
     assert "ALTER WAREHOUSE WH_ALFA_ADMIN SET STATEMENT_TIMEOUT_IN_SECONDS = 300;" in v002
     attempts = int(re.search(r"FOR attempt IN 1 TO (\d+) DO", guard).group(1))

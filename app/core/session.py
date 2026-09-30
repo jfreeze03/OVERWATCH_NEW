@@ -22,8 +22,9 @@ _TAG_MAX = 200
 _PARAMS_ATTR = "_ow_stmt_params_ok"  # False once this Snowpark rejects statement_params
 # Next-Fifty #7 Slice B: tiers whose per-tier STATEMENT_TIMEOUT_IN_SECONDS also rides statement_params
 # on SiS. The owner probe (2026-09-24) proved an owner's-rights proc honors it, but the READ tiers'
-# 30/120/180s ceilings have never been enforced in production (the real wall is the 300 s
-# STATEMENT_TIMEOUT_IN_SECONDS V002 sets on WH_ALFA_ADMIN; Snowflake's own default is 172800 s),
+# 30/120/180s ceilings have never been enforced in production (the real wall is WH_ALFA_ADMIN's
+# STATEMENT_TIMEOUT_IN_SECONDS, read live on Admin > Performance: V002 set 300 s at install, but this
+# account's cancels there fire at 1800 s; Snowflake's own default is 172800 s),
 # so they stay off until per-tier durations are measured (APP_QUERY_TELEMETRY records the tier
 # and QUERY_ID of every slow read). Cortex's 90s ceiling is the documented intent for an explicit,
 # spinner-backed button (core.ai). Whether SiS honors it is unverified: SiS overrides the QUERY_TAG.
@@ -107,9 +108,9 @@ def _connect():
         # front so we never spray failed statements into QUERY_HISTORY.
         # Consequence (#31): the per-tier STATEMENT_TIMEOUT the app tries to set
         # via apply_statement_timeout() cannot take effect here — the warehouse/
-        # account STATEMENT_TIMEOUT_IN_SECONDS (the 300 s STATEMENT_TIMEOUT_IN_SECONDS V002
-        # sets on WH_ALFA_ADMIN; Snowflake's own default is 172800 s) is the ceiling in
-        # production. Next-Fifty #7 Slice B: the QUERY_TAG (and, for the tiers in
+        # account STATEMENT_TIMEOUT_IN_SECONDS (the warehouse value, read live on Admin >
+        # Performance; V002 set 300 s at install; Snowflake's own default is 172800 s) is the
+        # ceiling in production. Next-Fifty #7 Slice B: the QUERY_TAG (and, for the tiers in
         # STATEMENT_PARAMS_TIMEOUT_TIERS, the timeout) now ride each statement via
         # statement_params() instead.
         setattr(session, _SIS_ATTR, True)
@@ -216,13 +217,14 @@ def apply_statement_timeout(session, seconds: int) -> None:
 
     #31: ALTER SESSION is rejected under owner's-rights SiS, so the app's per-tier
     timeouts (30/120/180s) never actually apply there. Every app READ is instead
-    governed by the warehouse/account STATEMENT_TIMEOUT_IN_SECONDS — the 300 s
-    STATEMENT_TIMEOUT_IN_SECONDS V002 sets on WH_ALFA_ADMIN (Snowflake's own default is
-    172800 s) — which is the REAL contract in production, not the values passed here.
+    governed by the warehouse/account STATEMENT_TIMEOUT_IN_SECONDS — the warehouse value
+    (read live on Admin > Performance; V002 set 300 s at install, a DBA may have changed it
+    since; Snowflake's own default is 172800 s) — which is the REAL contract in production,
+    not the values passed here.
     To enforce a tighter ceiling the OWNER must SET STATEMENT_TIMEOUT_IN_SECONDS on
     the app warehouse (or account). Follow-up: a QUERY_HISTORY monitor on long
     app-tagged queries (the APP_QUERY_TAG_PREFIX QUERY_TAG) to catch anything
-    approaching that 300 s wall. This call still does real work OFF-SiS (local dev,
+    approaching that warehouse ceiling. This call still does real work OFF-SiS (local dev,
     tests) where ALTER SESSION is accepted. Next-Fifty #7 Slice B: on SiS the timeout can
     ride the statement itself (statement_params), per tier in STATEMENT_PARAMS_TIMEOUT_TIERS:
     Cortex is on now (its documented 90s intent); a read tier joins once its tagged
