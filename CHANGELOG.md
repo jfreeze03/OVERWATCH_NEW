@@ -23,6 +23,24 @@ V162-V165 follows 4.602.0's rules (every new read is gated on its own migration;
   - Cost > Chargeback & AI > CoCo efficiency review: the "TOKENS_GRANULAR isn't available" note now appears only when the read reports the view absent or not authorized, or an invalid column (the expected-absence set the app does not log). A timeout or other failed read now shows as unavailable, with the error, so a slow scan is no longer reported as a missing column.
   - Admin > Canary has 6 new checks: Guardrails flags, CoCo token types, AI-quota block history and the app's own Cortex cost, plus the Clients support floor (SYSTEM$CLIENT_VERSION_INFO) and the timeout lever's one-warehouse impact read. A missing view or function on accounts without the feature shows as a calm GAP (CoCo token types still FAILs on an account whose Cortex Code views predate the optional TOKENS_GRANULAR column; Admin > Canary says so). A renamed or missing column now FAILs; that is the kind of error that broke the quota panel before 4.601.1 without any alert. After deploying, run the canary once: if cortex.guardrails_daily FAILs, the Guardrails view's column names need fixing (START_TIME and GUARDRAILS_RESPONSE were never checked against the real view).
   - ETL wording: the "Explain a task" no-CALL hint, the CHANGED_RECENTLY caption and the QUERY_TAG ask for the ETL team no longer say M_* tasks never call a procedure. One M_* task on this account does call a procedure with its own name. The ask doc cites that task as the example; app captions don't name it.
+- **Review fixes (adversarial review r1, before release).**
+  - Security > Clients never reads clean on a support floor it could not really check. If Snowflake renames the
+    keys of SYSTEM$CLIENT_VERSION_INFO() (the read still succeeds, the values come back empty) or no entry lists a
+    minimum, support reads 'unavailable' with dashed KPIs. A version of yours that could not be checked counts as
+    'not checked' (the yours-to-upgrade KPI shows 'N not checked', never a green 0), and the caption counts only
+    checked versions. If Snowflake lists a driver twice, the entry with a minimum wins. The inventory no longer stops
+    silently at 500 rows: at the app's row cap the support KPIs and lists are withheld with a caption, and the
+    family/version counts read 'N+'.
+  - Alert drawer 'Statement timeout 1h': the override resets whenever the impact it acknowledges changes (a count
+    that moves, or a failed read that later succeeds), and once ticked the notice says the ALTER below is generated
+    anyway.
+  - Statement-timeout posture: 'below cap' is judged on the lowest ceiling that fired, and its help names an earlier,
+    lower warehouse value as a cause too. Admin > Performance shows a warehouse timeout of 0 as 168h (0 = 7-day
+    maximum), not '0s', and names a privilege cause only when Snowflake's error says so. Admin > Canary says a
+    cortex.code_token_types FAIL is expected on views that predate the optional TOKENS_GRANULAR column.
+  - Tests now model Snowflake's NULL ordering in the executed Clients harness and lock the Snowflake-run partition,
+    the per-version behind count, the yours-only KPIs and a stronger no-hard-coded-version guard (each proven to fail
+    before its fix).
 - **Owner checks after deploy.** Run Admin > Canary once (compile-only): a FAIL on cortex.guardrails_daily means the
   Guardrails view's column names differ -- send its column list. Run `SELECT SYSTEM$CLIENT_VERSION_INFO();` as the
   OVERWATCH_APP owner role (the probe ran as SNOW_ACCOUNTADMINS): if it fails there, the Clients support column
