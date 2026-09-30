@@ -13,7 +13,7 @@ import pandas as pd
 import streamlit as st
 
 from app.core.query import execute_statement, run
-from app.core.result import is_setup_absence
+from app.core.result import is_privilege_error, is_setup_absence
 from app.core.session import is_operator
 from app.core.state import request_navigation
 from app.data import security_sql, workbench_sql
@@ -192,9 +192,11 @@ _COVERAGE_UNREAD_SIGNAL = "domain coverage could not be read, so no domain is sc
 
 
 def _coverage_failed(coverage) -> bool:
-    """The coverage-contract read failed other than by a true absence (a timeout, schema drift, any other
-    failure) -- a failed read, never 'coverage not complete'."""
-    return not coverage.ok and not is_setup_absence(coverage.error_kind)
+    """The coverage-contract read failed other than by a missing object (a timeout, schema drift, an
+    "Insufficient privileges" error on the existing view, any other failure) -- a failed read, never
+    'coverage not complete' and never silence (review r2 R2-1)."""
+    return not coverage.ok and (not is_setup_absence(coverage.error_kind)
+                                or is_privilege_error(coverage.error_kind))
 
 
 def render_security_overview(company: str) -> None:

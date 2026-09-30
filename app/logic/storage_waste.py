@@ -20,7 +20,7 @@ never reach this account's access history) counts, and then in one of two ways:
     TIME_TRAVEL x (R - target) / R, the retention control's own estimate. It is a monthly run-rate only on the
     assumption, not checked here, that the table keeps being written as it was over its retention window (a one-off
     rewrite ages out of Time Travel on its own), and it assumes no account-level MIN_DATA_RETENTION_TIME_IN_DAYS
-    above the target (the parameter is not read; the legend says so).
+    above the target (the parameter is not read; the legend and both Addressable $/mo help texts say so).
 Never counted: fail-safe (a fixed 7-day tail), clone-retained bytes (a clone still holds them), a stale table's Time
 Travel, retention on a table someone reads (a recovery policy, not waste), tables under 90 days old, shared-out
 databases, stale tables sharing storage with a clone, dropped or replaced tables, and every row of the DML-only
@@ -34,7 +34,6 @@ unread-maintenance ones where the meaning is the same (unread_maintenance.VERDIC
 from __future__ import annotations
 
 import math
-import re
 from collections.abc import Mapping
 
 import pandas as pd
@@ -61,7 +60,8 @@ LEVER_NOTHING = "Nothing to reclaim"
 # the savings_rollup source each counted lever becomes (both are in its one-saving-per-table object group)
 LEVER_SOURCE = {LEVER_DROP: "STORAGE", LEVER_RETENTION: "RETENTION"}
 # A table with a live Savings-ledger booking under any of these is left out of the lever: a retention cut already
-# booked (RETENTION), or an unread-maintenance saving on the same table (one saving per table).
+# booked (RETENTION: a legacy or hand-inserted booking, since no in-app write books it from v4.605), or an
+# unread-maintenance saving on the same table (one saving per table).
 STORAGE_BOOKED_TYPES = TABLE_FINDING_TYPES | OBJECT_FINDING_TYPES
 LEVER_COLUMNS = ("LEVER", "EST_MONTHLY_USD")
 _EVIDENCE = ("NEVER_READ", "OLDER_THAN_90D", "SHARED_DATABASE", "RETENTION_KNOWN", "CLONE_GROUP_LIVE")
@@ -84,9 +84,9 @@ LEVER_LEGEND = (
     f"{LEVER_CLONES}: a stale, unread table that shares storage with a clone (another live table in its clone group, "
     "or bytes it retains for a clone); not priced, because dropping it frees nothing a clone still references. "
     f"{VERDICT_GONE}: no live table under that ID (dropped or replaced). "
-    f"{LEVER_NOTHING}: nothing a drop or a {TARGET_RETENTION_DAYS}-day retention would free (a written table already "
-    f"at {TARGET_RETENTION_DAYS} day or less, or with no Time Travel; a stale table with no active bytes, whose Time "
-    "Travel ages out on its own). "
+    f"{LEVER_NOTHING}: not a lever. A written table is not a drop candidate, and it is already at "
+    f"{TARGET_RETENTION_DAYS} day or less of retention or has no Time Travel; a stale table has no active bytes for "
+    "a drop to free, and its Time Travel ages out on its own. "
     "Fail-safe (a fixed 7-day tail) and clone-retained bytes (a clone still holds them) never count. "
     "Confirm with the owner before dropping anything: reads from a replica in another account, and reads rarer "
     f"than every {UNREAD_DAYS} days, are invisible here."
@@ -95,7 +95,8 @@ LEVER_LEGEND = (
 # so they agree with LEVER_LEGEND.
 H_STORAGE_BASIS = (
     f"a stale table's active bytes, or the Time Travel a {TARGET_RETENTION_DAYS}-day retention would release on a "
-    "table still written (a monthly run-rate only while it keeps being written), at your storage rate"
+    "table still written (a monthly run-rate only while it keeps being written, assuming no account-level "
+    f"MIN_DATA_RETENTION_TIME_IN_DAYS above {TARGET_RETENTION_DAYS} day), at your storage rate"
 )
 FLOOR_LEGEND = (
     f"The scan ranks tables by retention bytes, and a table with no DML for {UNREAD_DAYS} days has little or no Time "
@@ -192,42 +193,39 @@ def lever_rows(verdicts: pd.DataFrame | None) -> pd.DataFrame:
 
 
 def table_fqn(row: Mapping[str, object]) -> str:
-    """DATABASE.SCHEMA.TABLE from the row's raw names: the RETENTION booking's TARGET_OBJECT spelling (the retention
-    control joins the same three columns), so unread_maintenance.object_key matches a booking to its row."""
+    """DATABASE.SCHEMA.TABLE from the row's raw names: the spelling unread_maintenance.object_key normalises a
+    Savings-ledger TARGET_OBJECT to (UPPER, quotes stripped), so a RETENTION booking (legacy or hand-inserted: no
+    in-app write books RETENTION since v4.605) or an unread-maintenance booking on the same table matches its row."""
     return f"{_text(row.get('DATABASE_NAME'))}.{_text(row.get('SCHEMA_NAME'))}.{_text(row.get('TABLE_NAME'))}"
 
 
-_ABSENT_OBJECT_RE = re.compile(r"object '([^']+)' does not exist or not authorized", re.IGNORECASE)
 _NOTE_ACCESS_HISTORY = ("ACCESS_HISTORY is not visible to this app (it needs Enterprise edition and IMPORTED "
                         "PRIVILEGES on the SNOWFLAKE database)")
-_NOTE_GRANTS = ("GRANTS_TO_ROLES (the share guard) is not visible to this app (it needs IMPORTED PRIVILEGES on the "
-                "SNOWFLAKE database)")
-_NOTE_EITHER = ("ACCESS_HISTORY or GRANTS_TO_ROLES (the share guard) is not visible to this app (both need IMPORTED "
-                "PRIVILEGES on the SNOWFLAKE database; ACCESS_HISTORY also needs Enterprise edition)")
+_NOTE_NOT_VISIBLE = ("ACCESS_HISTORY or GRANTS_TO_ROLES (the share guard), or another ACCOUNT_USAGE view this scan "
+                     "reads, is not visible to this app (they need IMPORTED PRIVILEGES on the SNOWFLAKE database; "
+                     "ACCESS_HISTORY also needs Enterprise edition)")
 
 
 def reads_unavailable_note(error_kind: object, error: object = "") -> str:
     """Why the storage-waste scan has no read evidence, from run()'s classified error kind (the degraded caption).
 
-    The scan's one statement reads two objects its DML-only fallback does not: ACCESS_HISTORY (the reads) and
-    GRANTS_TO_ROLES (the share guard). An error naming the edition / an unsupported feature blames ACCESS_HISTORY's
-    edition and the SNOWFLAKE grant. An object-not-visible failure ('absent') names the object Snowflake's error
-    names, ACCESS_HISTORY or GRANTS_TO_ROLES, and both when the error names none; for any other object it shows the
-    error itself. A timeout says so; anything else shows the error itself (whitespace collapsed, at most 300
-    characters). This account reads ACCESS_HISTORY daily (the object-cost loader), so a timeout or a transient
-    fault is the likelier cause. The Database filter never narrows this scan, so the note never offers it."""
+    ``error`` is what run() stores: format_snowflake_error's text, which rewrites every "does not exist or not
+    authorized" failure to a fixed setup sentence that names no object. So an object-not-visible failure ('absent')
+    cannot say which object is missing: it names the two objects the scan reads that its DML-only fallback does not,
+    ACCESS_HISTORY (the reads) and GRANTS_TO_ROLES (the share guard), or another ACCOUNT_USAGE view the scan reads,
+    with the SNOWFLAKE grant (review r2 R2-3: a per-object branch keyed on the raw text never ran). An error naming
+    the edition / an unsupported feature (format_snowflake_error keeps that text) blames ACCESS_HISTORY's edition
+    and the SNOWFLAKE grant. A timeout says so; anything else, an "Insufficient privileges" error ('privilege')
+    included, shows the error itself (whitespace collapsed, at most 300 characters). This account reads
+    ACCESS_HISTORY daily (the object-cost loader), so a timeout or a transient fault is the likelier cause. The
+    Database filter never narrows this scan, so the note never offers it."""
     kind = str(error_kind or "").strip().lower()
     err = " ".join(str(error or "").split())[:300]
     low = err.lower()
-    failed = "the access-history read failed" + (f": {err}" if err else "")
     if "enterprise" in low or "unsupported feature" in low:
         return _NOTE_ACCESS_HISTORY
     if kind == "absent":
-        found = _ABSENT_OBJECT_RE.search(err)
-        named = found.group(1).replace('"', "").strip().upper().rsplit(".", 1)[-1] if found else ""
-        if not named:
-            return _NOTE_EITHER
-        return {"ACCESS_HISTORY": _NOTE_ACCESS_HISTORY, "GRANTS_TO_ROLES": _NOTE_GRANTS}.get(named, failed)
+        return _NOTE_NOT_VISIBLE
     if kind == "timeout":
         return f"the {UNREAD_DAYS}-day access-history read timed out"
-    return failed
+    return "the access-history read failed" + (f": {err}" if err else "")

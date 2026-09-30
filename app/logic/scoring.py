@@ -86,10 +86,12 @@ def degraded_sources(results: dict) -> set[str]:
     ``ok is False`` AND ``error_kind != 'absent'``. An 'absent' read means the mart
     is simply not installed (a legitimate zero on a partial deployment), NOT a
     suppressed signal; those stay zero-penalty. A timeout / unknown_function / other
-    failure, by contrast, could be hiding a real task-failure / staleness / owner-queue
-    / over-budget condition, so it must fail the score closed (extends C1's principle
-    beyond the two REQUIRED sources). ``results`` maps source-name -> QueryResult-like
-    (anything with ``.ok`` and ``.error_kind``)."""
+    failure, or a 'privilege' one ("Insufficient privileges": the object exists, the
+    role lacks a privilege on it -- review r2 R2-1), by contrast, could be hiding a
+    real task-failure / staleness / owner-queue / over-budget condition, so it must
+    fail the score closed (extends C1's principle beyond the two REQUIRED sources).
+    ``results`` maps source-name -> QueryResult-like (anything with ``.ok`` and
+    ``.error_kind``)."""
     return {name for name, r in results.items()
             if (not getattr(r, "ok", True)) and getattr(r, "error_kind", "") != "absent"}
 

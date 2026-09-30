@@ -243,12 +243,17 @@ def _classify_error(exc: object) -> str:
         s = str(exc or "").lower()
     except Exception:
         return "other"
-    # 'absent' = the role cannot reach the object: missing / not granted (002003) or held without the needed
-    # privilege (003001 "Insufficient privileges"). format_snowflake_error rewrites both to the same
-    # "run the migrations and roles.sql" text guard() routes to needs_setup, so both classify alike here
-    # (review R1-17: a privilege error was 'other' -> red 'unavailable' carrying that setup advice).
-    if "does not exist or not authorized" in s or "insufficient privileges" in s:
+    # 'absent' = the object is missing or not granted (002003). 'privilege' = 003001 "Insufficient
+    # privileges": the object EXISTS, but the role lacks a privilege the statement needs. format_snowflake_error
+    # rewrites both to the same "run the migrations and roles.sql" text guard() routes to needs_setup, and
+    # result.SETUP_ABSENCE_KINDS holds both, so every panel renders them alike (review R1-17). They stay two
+    # kinds because the object exists: every consumer of the literal 'absent' (a legitimate zero on a partial
+    # deployment -- the health score, the canary GAP, a probe read's unlogged absence) treats a privilege
+    # error as a failed read (review r2 R2-1).
+    if "does not exist or not authorized" in s:
         return "absent"
+    if "insufficient privileges" in s:
+        return "privilege"
     if "unknown function" in s:
         return "unknown_function"
     # wave-2 review #3: an optional COLUMN missing on an EXISTING view (the
@@ -1243,6 +1248,8 @@ def run(
     except Exception as exc:
         elapsed = (time.perf_counter() - started) * 1000
         kind = _classify_error(exc)
+        # 'privilege' is deliberately NOT here: the object exists, so an "Insufficient privileges" error is
+        # logged even on a probe read (review r2 R2-1), though its panel still renders needs_setup.
         _expected_absence = probe and kind in ("absent", "unknown_function", "missing_column")
         if not _expected_absence:
             _telemetry(page, tier, key, elapsed, 0, ok=False)

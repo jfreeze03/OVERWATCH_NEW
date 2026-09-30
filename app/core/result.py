@@ -22,7 +22,7 @@ class QueryResult:
     error: str = ""
     # Classified from the RAW exception (Codex r10 #4): format_snowflake_error
     # rewrites messages for humans, which silently broke marker-string checks
-    # downstream (canary GAP never matched). Kinds: absent | unknown_function
+    # downstream (canary GAP never matched). Kinds: absent | privilege | unknown_function
     # | missing_column | timeout | other | "" (no error).
     error_kind: str = ""
     truncated: bool = False
@@ -49,23 +49,33 @@ class QueryResult:
 
 
 # v4.605: a failed read renders by its KIND. needs_setup ("not installed / not readable by this app") is
-# ONLY for a true absence: the object is missing or unauthorised ('absent' -- "does not exist or not
-# authorized" or "Insufficient privileges", the two errors format_snowflake_error rewrites to the setup
-# advice guard() routes to needs_setup) or the function is not
-# available ('unknown_function'). A missing column on an existing view ('missing_column') is schema
+# ONLY for a true absence: the object is missing or unauthorised ('absent', "does not exist or not
+# authorized"), the role lacks a privilege on it ('privilege', "Insufficient privileges" -- the two errors
+# format_snowflake_error rewrites to the setup advice guard() routes to needs_setup, so a panel and guard()
+# agree), or the function is not available ('unknown_function'). A 'privilege' error proves the object
+# exists, so it is never a legitimate zero: the literal-'absent' consumers (the health score's degraded
+# sources, the canary GAP, run()'s unlogged probe absence), Admin > Setup progress and the Security
+# coverage contract read it as a failed read (is_privilege_error). A missing column on an existing view ('missing_column') is schema
 # drift, and a 'timeout' or any 'other' failure is a failed read: each renders
 # empty_state("unavailable", <panel sentence>, detail=<res.error>), never needs_setup and never the
 # clean state.
 # Caveat: query.run(probe=True) still leaves 'missing_column' UNLOGGED (its expected-absence tuple is
 # unchanged), so on a probe read the red 'unavailable' state is the only record of the drift -- an
 # unavailable sentence for a probe read must not point at the Admin error log.
-SETUP_ABSENCE_KINDS: frozenset[str] = frozenset({"absent", "unknown_function"})
+SETUP_ABSENCE_KINDS: frozenset[str] = frozenset({"absent", "privilege", "unknown_function"})
 
 
 def is_setup_absence(error_kind: object) -> bool:
     """True when a failed read's kind is a true absence (needs_setup); False for drift, a timeout, any other
     failure, and '' / None (no classified absence)."""
     return str(error_kind or "").strip().lower() in SETUP_ABSENCE_KINDS
+
+
+def is_privilege_error(error_kind: object) -> bool:
+    """True for an "Insufficient privileges" failure ('privilege'): a setup absence for rendering (needs_setup, as
+    guard() shows it), but the object exists, so a consumer that treats absence as a legitimate zero or as
+    'nothing applied yet' must read it as a failed read instead."""
+    return str(error_kind or "").strip().lower() == "privilege"
 
 
 def is_schema_drift(error_kind: object) -> bool:

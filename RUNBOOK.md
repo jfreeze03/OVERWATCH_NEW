@@ -310,9 +310,13 @@ Admin → Settings, never in code.
   items already count its exposure). A user or scope with an open item
   from this page is not queued again, including items queued before v4.605
   under any of the page's three SOURCE names (matched by their old title).
-  When a user's strongest signal is now stronger than their open item's
-  severity, the click first raises that item's severity and notes it in
-  its detail; the estimate stays as first tracked. A Security work item on
+  When a user's strongest signal now outranks every open item of that user
+  from this page, the click first raises one of them, the strongest (on a
+  tie the item keyed on the user, else the newest), and notes it in its
+  detail; the estimate stays as first tracked. A user with several items
+  queued before v4.605 keeps them all and only that one is raised, so one
+  breach never counts twice in Critical / high; a user who already has an
+  open item at that severity is left as is. A Security work item on
   the same user does not block it. An item still open from an earlier
   month now blocks a new one; a done or dismissed item does not.
 - **Optimization** — idle advisor (warehouse-hours billed with zero
@@ -943,9 +947,12 @@ and Security then shows a red "unavailable" with the error (v4.605).
 
 **A red "unavailable" on an optional panel** (v4.605). A probe read shows
 needs_setup only when the object is missing or not granted (or the function
-does not exist). "Insufficient privileges" counts as not granted, like "does
-not exist or not authorized": both show needs_setup, and a probe read logs
-neither. A missing column (schema drift), a timeout or any other
+does not exist). "Insufficient privileges" shows needs_setup too, like "does
+not exist or not authorized", but it proves the object exists: a probe read
+logs it to APP_ERROR_LOG, the canary FAILs it (never GAP), the Overview
+health score reads it as a failed read (Incomplete, never a zero penalty),
+and Admin → Setup progress marks the row Unknown with a re-apply-the-grants
+FIX. A missing column (schema drift), a timeout or any other
 failure shows "unavailable" with the error in its detail expander. A probe
 read does not write a missing column to APP_ERROR_LOG, so that expander is
 the only record: copy the error, then run Admin → Canary (a registered
