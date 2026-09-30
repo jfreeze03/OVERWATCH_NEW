@@ -205,12 +205,14 @@ def test_every_probe_cortex_read_has_a_declared_canary():
     assert reg["cortex.code_token_types"]() == cortex_sql.cortex_code_token_types()
 
 
-def _run_canary_tab(monkeypatch, kinds: dict[str, str]) -> dict[str, str]:
+def _render_canary_tab(monkeypatch, kinds: dict[str, str]) -> tuple[dict[str, str], _FakeSt, list[str]]:
     """Admin > Canary with fakes: ``kinds`` maps a canary name to the error kind its read fails with (every
-    other entry passes). Returns name -> STATUS from the runner's own classification."""
+    other entry passes). Returns (name -> STATUS from the runner's own classification, the fake st, the panel
+    help texts)."""
     import app.ui.components as components
     from app.ui.pages import admin
     fake = _FakeSt(button_key="adm_canary_run", toggles_off=("adm_recon_on",))   # stop before the recon
+    helps: list[str] = []
 
     def fake_run(_sql, *_a, source: str = "", **_k):
         kind = kinds.get(source)
@@ -219,13 +221,17 @@ def _run_canary_tab(monkeypatch, kinds: dict[str, str]) -> dict[str, str]:
     monkeypatch.setattr(admin, "st", fake)
     monkeypatch.setattr(admin, "run", fake_run)
     monkeypatch.setattr(admin, "audit_mode", lambda: False)
-    monkeypatch.setattr(admin, "panel_help", lambda *_a, **_k: None)
+    monkeypatch.setattr(admin, "panel_help", lambda text, *_a, **_k: helps.append(str(text)))
     monkeypatch.setattr(admin, "empty_state", lambda *_a, **_k: None)
     monkeypatch.setattr(admin, "section_header", lambda *_a, **_k: None)
     monkeypatch.setattr(components, "styled_table", lambda *_a, **_k: None)
     admin._canary_tab()
     frame = fake.session_state["_adm_canary_results"]
-    return dict(zip(frame["CHECK"], frame["STATUS"], strict=True))
+    return dict(zip(frame["CHECK"], frame["STATUS"], strict=True)), fake, helps
+
+
+def _run_canary_tab(monkeypatch, kinds: dict[str, str]) -> dict[str, str]:
+    return _render_canary_tab(monkeypatch, kinds)[0]
 
 
 def test_canary_absence_is_a_gap_and_a_missing_column_fails(monkeypatch):
@@ -238,3 +244,34 @@ def test_canary_absence_is_a_gap_and_a_missing_column_fails(monkeypatch):
     status = _run_canary_tab(monkeypatch, {"cortex.quota_access_block_history": "missing_column"})
     assert status["cortex.quota_access_block_history"] == "FAIL"
     assert {s for n, s in status.items() if n != "cortex.quota_access_block_history"} == {"PASS"}
+
+
+_TOKEN_TYPES_EXCEPTION = ("cortex.code_token_types also FAILs on accounts whose Cortex Code views predate the "
+                          "optional TOKENS_GRANULAR column")
+
+
+def test_canary_panel_names_the_one_expected_fail(monkeypatch):
+    """Review R1-13: a missing TOKENS_GRANULAR stays a FAIL (the drift alarm: a GAP would hide a renamed or
+    dropped column), but the panel that says 'a FAIL means ... fix the drift' now names this one known exception,
+    and a failed cortex.code_token_types says so next to the failure count."""
+    status, fake, helps = _render_canary_tab(monkeypatch, {"cortex.code_token_types": "missing_column"})
+    assert status["cortex.code_token_types"] == "FAIL"                  # the classification is unchanged
+    assert any(_TOKEN_TYPES_EXCEPTION in h for h in helps), helps
+    assert _TOKEN_TYPES_EXCEPTION in fake.text("caption")
+    assert "When its ERROR names TOKENS_GRANULAR (an invalid identifier), that FAIL is expected" in fake.text("caption")
+    # every other FAIL (or none) carries no such note: the exception is scoped to its own entry
+    _, fake, _ = _render_canary_tab(monkeypatch, {"cortex.quota_access_block_history": "missing_column"})
+    assert _TOKEN_TYPES_EXCEPTION not in fake.text("caption")
+    _, fake, _ = _render_canary_tab(monkeypatch, {})
+    assert _TOKEN_TYPES_EXCEPTION not in fake.text("caption")
+
+
+def test_canary_comment_never_cites_a_read_timeout_sis_does_not_apply():
+    """Review R1-13: on SiS no per-tier read timeout is applied (ALTER SESSION is rejected and only the cortex
+    tier rides statement_params -- core.session), so the executed probe runs to the app warehouse's
+    STATEMENT_TIMEOUT_IN_SECONDS, not 'the live tier's 30s timeout'."""
+    from app.core.session import STATEMENT_PARAMS_TIMEOUT_TIERS
+    flat = re.sub(r"[ \t]*\n[ \t]*#?[ \t]*", " ", read("app/data/canary.py"))   # join wrapped comment lines
+    assert "against the live tier's 30s timeout" not in flat
+    assert "live" not in STATEMENT_PARAMS_TIMEOUT_TIERS
+    assert "no per-tier read timeout applies" in flat and "STATEMENT_TIMEOUT_IN_SECONDS" in flat

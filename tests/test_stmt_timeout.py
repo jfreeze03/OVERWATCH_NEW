@@ -185,9 +185,11 @@ def test_status_notes_name_each_cause():
     assert "dropped" not in notes[1] and "not visible to the app role" not in notes[1]
     assert status_notes({"not_visible": 0, "managed": 0, "fired_below": []}) == []
     below = status_notes({"fired_below": ["WH_ALFA_QUERY", "WH_ALFA_TRANSFORM_PRD"]})
-    assert below == ["Timed out below the effective cap on WH_ALFA_QUERY, WH_ALFA_TRANSFORM_PRD: the ceiling "
-                     "that fired ('Fired at') is lower than the warehouse's cap, so a user, session or client "
-                     "value fired below it (or an earlier, lower warehouse value), not that cap."]
+    # review R1-19: 'below cap' judges the LOWEST ceiling that fired (a straddling range is flagged too), so
+    # the note says the lowest one, not "the ceiling that fired"
+    assert below == ["Timed out below the effective cap on WH_ALFA_QUERY, WH_ALFA_TRANSFORM_PRD: the lowest "
+                     "ceiling that fired ('Fired at') is lower than the warehouse's cap, so a user, session or "
+                     "client value fired below it (or an earlier, lower warehouse value), not that cap."]
     many = status_notes({"fired_below": [f"WH_{i}" for i in range(9)]})[0]
     assert "WH_5 and 3 more:" in many and "WH_6" not in many
 
@@ -328,6 +330,49 @@ def test_fired_at_is_tied_to_the_ceiling_that_fired():
     assert fired_below_cap(None, 21600) is None and fired_below_cap(600, float("nan")) is None
     assert fired_at_text(None, None) is None and fired_at_text(3600, None) == "1h"
     assert fired_at_text(7200, 7200, True) == "2h · below cap"
+
+
+def test_fired_below_cap_judges_the_lowest_ceiling_that_fired():
+    """Review R1-19: FIRED_BELOW_CAP judges the LOWEST ceiling that fired (TIMEOUT_FIRED_MIN_SEC), not the
+    highest. A range that straddles the cap (cancels at 600 s AND at the 6h cap itself) IS flagged: some of its
+    cancels were not that cap firing (a user, session or client value, or an earlier, lower warehouse value), and
+    that is what 'below cap' tells the reader. (spec_s2 proposed MAX < EFFECTIVE, which would flag a warehouse
+    only when EVERY cancel fired below its cap and hide the straddle; MIN is the rule the code documents.)"""
+    tail = _tail(("WH_MIX", 5000, 100.0, 21000.0, 3, {}, (600.0, 21600.0)),
+                 ("WH_AT", 5000, 100.0, 21000.0, 3, {}, (21600.0, 21600.0)),
+                 ("WH_NONE", 5000, 100.0, 21000.0, 0, {}))
+    params = {"WH_MIX": (21600.0, "ACCOUNT"), "WH_AT": (21600.0, "ACCOUNT"), "WH_NONE": (21600.0, "ACCOUNT")}
+    p = timeout_posture(list(params), params, 21600.0, tail).set_index("WAREHOUSE_NAME")
+    assert p.loc["WH_MIX", "TIMEOUT_FIRED"] == "10m–6h · below cap"
+    assert p.loc["WH_MIX", "FIRED_BELOW_CAP"] is True
+    assert p.loc["WH_AT", "TIMEOUT_FIRED"] == "6h" and p.loc["WH_AT", "FIRED_BELOW_CAP"] is False
+    assert p.loc["WH_NONE", "FIRED_BELOW_CAP"] is None                    # no cancel: no judgement
+    summ = posture_summary(p.reset_index())
+    assert summ["fired_below"] == ["WH_MIX"]
+    (note,) = status_notes(summ)
+    assert note.startswith("Timed out below the effective cap on WH_MIX: the lowest ceiling that fired")
+
+
+def test_fired_at_help_names_every_cause_of_below_cap():
+    """Review R1-6/R1-12: the 'Fired at' column help names the same causes as status_notes and fired_below_cap:
+    a user, session or client value, OR an earlier, lower warehouse value (SHOW reads today's cap, the window
+    reaches back 30-90 days), so the hover text never blames a user or client for an old warehouse value."""
+    import ast
+    tree = ast.parse(read("app/ui/pages/operations.py"))
+    helps = [kw.value.value for node in ast.walk(tree) if isinstance(node, ast.Call)
+             and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == "Fired at"
+             for kw in node.keywords if kw.arg == "help" and isinstance(kw.value, ast.Constant)]
+    assert len(helps) == 1, helps
+    (help_,) = helps
+    assert "'below cap' = the lowest of them is under this warehouse's effective cap" in help_
+    assert "a user, session or client value" in help_ and "an earlier, lower warehouse value" in help_
+    assert "today's" in help_ and "30-90 days" in help_
+    runbook = re.sub(r"\s+", " ", read("RUNBOOK.md"))
+    assert '"below cap" means the lowest ceiling that fired is under the warehouse\'s effective cap' in runbook
+    assert "an earlier, lower warehouse value" in runbook.split('"below cap" means', 1)[1][:400]
+    # review R1-7/R1-10: the probe's 27 counted every status; the drawer counts completed statements only
+    assert "ran 27 such statements" not in runbook
+    assert "27 statements of 1h or more in 30 days, any status" in runbook and "at most 26" in runbook
 
 
 def test_fix_script_review_only():
@@ -499,30 +544,68 @@ def test_alert_drawer_timeout_lever_reads_before_it_writes():
 
 
 class _LeverSt:
-    """The slice of streamlit _stmt_timeout_lever touches, recording what it renders."""
+    """The slice of streamlit _stmt_timeout_lever touches, recording what it renders IN SCREEN ORDER: an
+    ``empty()`` placeholder holds its slot, and whatever is written inside ``with slot.container():`` lands
+    there (so a notice filled after the checkbox still reads above it, as it does on the page).
 
-    def __init__(self, tick: bool = False):
+    ``state`` (review R1-4): None = a stateless checkbox that returns ``tick``; a dict = Streamlit's keyed
+    widget state (1.52.2 identifies a keyed checkbox by its key alone, so a tick survives a label change),
+    shared across renders -- ``tick_last()`` ticks the checkbox the last render showed."""
+
+    def __init__(self, tick: bool = False, state: dict | None = None):
         self.calls: list[tuple[str, str]] = []
         self.tick = tick
+        self.state = state
+        self.keys: list[str] = []
+        self._slot: int | None = None
+
+    def _put(self, kind: str, text: str) -> None:
+        if self._slot is not None:
+            self.calls[self._slot] = (kind, text)
+        else:
+            self.calls.append((kind, text))
 
     def warning(self, text, *_a, **_k):
-        self.calls.append(("warning", str(text)))
+        self._put("warning", str(text))
 
     def info(self, text, *_a, **_k):
-        self.calls.append(("info", str(text)))
+        self._put("info", str(text))
 
-    def checkbox(self, label, *_a, **_k):
+    def checkbox(self, label, *_a, key: str = "", **_k):
         self.calls.append(("checkbox", str(label)))
-        return self.tick
+        self.keys.append(key)
+        return self.tick if self.state is None else bool(self.state.get(key, False))
+
+    def empty(self):
+        fake, idx = self, len(self.calls)
+        self.calls.append(("empty", ""))
+
+        class _Slot:
+            def container(self):
+                return self
+
+            def __enter__(self):
+                fake._slot = idx
+                return self
+
+            def __exit__(self, *_exc):
+                fake._slot = None
+                return False
+
+        return _Slot()
+
+    def tick_last(self) -> None:
+        assert self.state is not None and self.keys, "no keyed checkbox was rendered"
+        self.state[self.keys[-1]] = True
 
 
-def _lever(monkeypatch, *, value="7200", level="WAREHOUSE", impact=None, tick=False):
+def _lever(monkeypatch, *, value="7200", level="WAREHOUSE", impact=None, tick=False, state=None):
     """Render the drawer's 'Statement timeout 1h' lever with fakes: ``impact`` = the impact read's result
-    (a frame, or an Exception for a failed read)."""
+    (a frame, or an Exception for a failed read); ``state`` = keyed checkbox state kept across renders."""
     from types import SimpleNamespace
 
     from app.ui.pages import alerts
-    fake = _LeverSt(tick)
+    fake = _LeverSt(tick, state)
     seen: dict = {"sql": [], "empty": []}
 
     def fake_run(sql, **kw):
@@ -553,6 +636,8 @@ def test_drawer_lever_withholds_the_alter_when_it_would_cancel_statements(monkey
     kinds = [k for k, _ in fake.calls]
     assert kinds == ["warning", "checkbox"]                             # the notice, then the explicit override
     assert "would have cancelled 27 completed statements in the last 30 days (longest 2h 34m)" in fake.calls[0][1]
+    assert fake.calls[0][1].endswith("The ALTER is withheld unless you tick the override.")   # true while unticked
+    assert "Override ticked" not in fake.calls[0][1]
     assert fake.calls[1][1].startswith("I accept that a 1h cap would have cancelled 27")
     # exactly two reads: the live SHOW, then ONE warehouse's 30-day impact (probe, historical tier)
     (show_sql, show_kw), (imp_sql, imp_kw) = seen["sql"]
@@ -564,9 +649,38 @@ def test_drawer_lever_withholds_the_alter_when_it_would_cancel_statements(monkey
 
 def test_drawer_lever_generates_only_after_the_override(monkeypatch):
     plan, fake, _ = _lever(monkeypatch, impact=_W5B_IMPACT, tick=True)
-    assert [k for k, _t in fake.calls] == ["warning", "checkbox"]         # the warning stays visible
+    assert [k for k, _t in fake.calls] == ["warning", "checkbox"]         # the warning stays visible, above
     assert plan["stmt"] == "ALTER WAREHOUSE WH_TRXS_TRANSFORM SET STATEMENT_TIMEOUT_IN_SECONDS = 3600;"
     assert plan["undo"] == "ALTER WAREHOUSE WH_TRXS_TRANSFORM SET STATEMENT_TIMEOUT_IN_SECONDS = 7200;"
+    # review R1-5/R1-15: the notice is the FINAL plan's, so once the override is ticked it no longer says the
+    # ALTER is withheld directly above the generated ALTER (the 'Override ticked' text was never rendered)
+    warning = fake.calls[0][1]
+    assert warning.endswith("Override ticked: the ALTER below is generated anyway.") and warning == plan["message"]
+    assert "withheld unless you tick" not in warning
+    assert "would have cancelled 27 completed statements" in warning       # the impact is still stated
+
+
+def test_drawer_lever_override_is_tied_to_the_impact_it_acknowledges(monkeypatch):
+    """Review R1-4: the override is keyed on the impact it acknowledges. A tick given under one impact (a failed
+    read: 'without knowing', or N statements) never carries over as a tick of a DIFFERENT impact's 'I accept
+    ...' label -- on Streamlit 1.52.2 a keyed checkbox keeps its value across a label change, and a failed read
+    is retried on the very rerun the tick causes."""
+    alter = "ALTER WAREHOUSE WH_TRXS_TRANSFORM SET STATEMENT_TIMEOUT_IN_SECONDS = 3600;"
+    three = _W5B_IMPACT.assign(OVER_TARGET_RUNS=3)
+    failed = RuntimeError("SQL execution canceled")
+    for first, then in ((failed, _W5B_IMPACT), (three, _W5B_IMPACT), (_W5B_IMPACT, failed)):
+        state: dict = {}
+        plan, fake, _ = _lever(monkeypatch, impact=first, state=state)
+        assert plan["stmt"] == ""
+        fake.tick_last()                                                 # the operator ticks THIS label
+        plan, fake, _ = _lever(monkeypatch, impact=first, state=state)
+        assert plan["stmt"] == alter                                     # the tick holds while its impact does
+        plan, fake, _ = _lever(monkeypatch, impact=then, state=state)
+        assert plan["stmt"] == "" and plan["undo"] == "", (first, then)  # a new impact starts unticked
+        assert fake.calls[0][1].endswith("The ALTER is withheld unless you tick the override.")
+    assert stmt_timeout.override_ack(None) == stmt_timeout.override_ack(TimeoutImpact(ok=False)) == "unknown"
+    assert stmt_timeout.override_ack(TimeoutImpact(ok=True, over_target=27)) == "27"
+    assert stmt_timeout.override_ack(TimeoutImpact(ok=True, over_target=None)) == "unknown"
 
 
 def test_drawer_lever_failed_impact_read_is_unavailable_not_none(monkeypatch):
@@ -697,7 +811,11 @@ def test_admin_parity_and_untouched():
     admin = read("app/ui/pages/admin.py")
     m = re.search(r"^_SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S = ([\d_]+)$", admin, re.M)
     assert m and int(m.group(1).replace("_", "")) == stmt_timeout.SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S == 172_800
-    assert "stmt_timeout." not in admin and "ops_sql.warehouse_stmt_timeout_sql" not in admin  # Admin untouched
+    # review R1-8 moved this lock ("stmt_timeout." not in admin): Admin's ceiling tile now shows the ENFORCED
+    # value through the shared pure helpers (0 = the 7-day maximum), and only those; its SHOW stays its own
+    # literal (the shared cache entry, locked above)
+    assert set(re.findall(r"stmt_timeout\.(\w+)", admin)) == {"parse_timeout_row", "enforced_s"}
+    assert "ops_sql.warehouse_stmt_timeout_sql" not in admin
 
 
 def test_duration_and_count_naming():

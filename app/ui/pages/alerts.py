@@ -573,7 +573,12 @@ def _stmt_timeout_lever(wh_inline: str, event_id: str) -> dict:
     have cancelled in the last 30 days; historical tier, probe). A non-zero or UNKNOWN impact makes the
     plan a warning and withholds the ALTER until the operator ticks the explicit override; a failed read
     renders 'unavailable' with its error and never reads as no impact. Renders its own notice; returns
-    the plan (``stmt`` '' while withheld)."""
+    the plan (``stmt`` '' while withheld).
+
+    Review R1-4/R1-5: the notice sits above the override but is filled from the FINAL plan (a placeholder
+    reserved before the checkbox), so once ticked it says the ALTER is generated, not withheld; and the
+    override is keyed on the impact it acknowledges (stmt_timeout.override_ack), so a new impact -- a failed
+    read that succeeds on the rerun the tick causes, or a changed count -- starts unticked."""
     _to_res = run(ops_sql.warehouse_stmt_timeout_sql(wh_inline), page=_PAGE,
                   key=f"clf_stmt_to_{event_id[:8]}", tier="live",
                   source=f"SHOW PARAMETERS IN WAREHOUSE {wh_inline}",
@@ -593,11 +598,14 @@ def _stmt_timeout_lever(wh_inline: str, event_id: str) -> dict:
                         "unknown.", detail=_impact.error)
     _plan = stmt_timeout.tighten_timeout_plan(wh_inline, _to_cur, _to_lvl, target=_STMT_LEVER_TARGET_S,
                                               impact=_impact)
-    _plan_notice(_plan)
-    if _plan["override_needed"] and st.checkbox(_plan["override_label"],
-                                                key=f"clf_stmt_override_{event_id[:8]}"):
+    _notice = st.empty()
+    if _plan["override_needed"] and st.checkbox(
+            _plan["override_label"],
+            key=f"clf_stmt_override_{event_id[:8]}_{stmt_timeout.override_ack(_impact)}"):
         _plan = stmt_timeout.tighten_timeout_plan(wh_inline, _to_cur, _to_lvl, target=_STMT_LEVER_TARGET_S,
                                                   impact=_impact, override=True)
+    with _notice.container():
+        _plan_notice(_plan)
     return _plan
 
 

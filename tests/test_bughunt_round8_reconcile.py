@@ -54,7 +54,10 @@ def test_trust_center_empty_delta_is_not_a_green_all_clear():
 
 def test_admin_statement_timeout_ceiling_is_humanized():
     src = _read("app/ui/pages/admin.py")
-    assert 'humanize_duration(safe_float(_val), "s") if _val else "—"' in src
+    # review R1-8 (v4.603) moved this lock: the tile humanizes the ENFORCED value (0 = the 7-day maximum,
+    # never "0s"; behaviour-tested in tests/test_admin_timeout_wording.py)
+    assert '"value": humanize_duration(_enforced, "s") if _enforced is not None else "—"' in src
+    assert "_enforced = stmt_timeout.enforced_s(_secs)" in src
     assert '"value": f"{_val}s" if _val else "—"' not in src
 
 

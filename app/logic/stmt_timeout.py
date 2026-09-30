@@ -323,8 +323,9 @@ def _tail_value(t: Mapping[str, object] | None, col: str) -> float:
 
 def fired_below_cap(fired_min_s: object, effective_s: object) -> bool | None:
     """True when a timeout cancel fired BELOW the warehouse's effective cap: the ceiling that fired was a
-    user, session or client value (or an earlier, lower warehouse value), not that cap. None when either
-    side is unknown (no cancel with a parseable ceiling, or the cap is unread / not a warehouse)."""
+    user, session or client value (or an earlier, lower warehouse value: the cap is today's SHOW value and
+    the window reaches back 30-90 days), not that cap. None when either side is unknown (no cancel with a
+    parseable ceiling, or the cap is unread / not a warehouse). Callers pass the LOWEST ceiling that fired."""
     fired, eff = _num(fired_min_s), _num(effective_s)
     if fired is None or eff is None:
         return None
@@ -346,6 +347,9 @@ def fired_at_text(fired_min_s: object, fired_max_s: object, below: bool | None =
 
 def _fired_cols(t: Mapping[str, object] | None, effective_s: float | None) -> dict[str, object]:
     lo, hi = _tail_value(t, "TIMEOUT_FIRED_MIN_SEC"), _tail_value(t, "TIMEOUT_FIRED_MAX_SEC")
+    # review R1-19: judged on the LOWEST ceiling that fired, deliberately not the highest (spec_s2 proposed
+    # MAX < EFFECTIVE). A range that straddles the cap (cancels at 10m AND at the 6h cap) still had cancels
+    # that were not that cap firing, which is what 'below cap' tells the reader; MAX would hide them.
     below = fired_below_cap(lo, effective_s)
     return {"TIMEOUT_FIRED": fired_at_text(lo, hi, below), "TIMEOUT_FIRED_MIN_SEC": lo,
             "TIMEOUT_FIRED_MAX_SEC": hi, "FIRED_BELOW_CAP": below}
@@ -375,7 +379,8 @@ def timeout_posture(read_names: Iterable[str], params: Mapping[str, tuple[float 
     (rendered as the dash), never 0. SUGGESTED_TIMEOUT_SEC and WOULD_CANCEL_RUNS (the completed statements
     in the window that cap would have cancelled) are set on Uncapped rows only. TIMEOUT_FIRED ('Fired at')
     is the humanized ceiling the window's timeout cancels fired at; FIRED_BELOW_CAP is True when the lowest
-    of them is below the row's effective cap (a user, session or client value fired, not that cap). Sorted
+    of them is below the row's effective cap (a user, session or client value fired, or an earlier, lower
+    warehouse value did: the cap is today's SHOW value), not that cap. Sorted
     Uncapped, Capped, Unread, Not visible, Managed compute, then longest run first."""
     tail = _tail_lookup(tail_df)
     rows = []
@@ -447,8 +452,8 @@ def status_notes(summary: Mapping[str, object]) -> list[str]:
     below = summary.get("fired_below") or []
     if isinstance(below, (list, tuple)) and below:
         shown = ", ".join(str(n) for n in below[:6]) + (f" and {len(below) - 6:,} more" if len(below) > 6 else "")
-        notes.append(f"Timed out below the effective cap on {shown}: the ceiling that fired ('Fired at') is lower "
-                     "than the warehouse's cap, so a user, session or client value fired below it (or an "
+        notes.append(f"Timed out below the effective cap on {shown}: the lowest ceiling that fired ('Fired at') is "
+                     "lower than the warehouse's cap, so a user, session or client value fired below it (or an "
                      "earlier, lower warehouse value), not that cap.")
     return notes
 
@@ -572,6 +577,17 @@ def timeout_would_tighten(current_s: float | None, target: int = 3600) -> bool:
 
 def _plural(n: int, word: str) -> str:
     return f"{n:,} {word}" + ("" if n == 1 else "s")
+
+
+def override_ack(impact: TimeoutImpact | None) -> str:
+    """What the lever's explicit override acknowledges, for its widget key (review R1-4): 'unknown' when the
+    impact was not read or the read failed (the 'without knowing what it would cancel' label), else the
+    statement count the 'I accept that ... would have cancelled N' label names. Keying the checkbox on this
+    makes any change of impact remount it unticked: Streamlit identifies a keyed checkbox by its key alone, so
+    a tick given under one label would otherwise carry over to a different one."""
+    if impact is None or not impact.ok or impact.over_target is None:
+        return "unknown"
+    return str(int(impact.over_target))
 
 
 def tighten_timeout_plan(warehouse: str, current_s: float | None, current_level: str = "", *,

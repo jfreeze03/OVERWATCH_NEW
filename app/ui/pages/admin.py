@@ -27,7 +27,7 @@ from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
 from app.data import cost_sql, mart_sql, ops_sql
-from app.logic import app_telemetry, deploy_health
+from app.logic import app_telemetry, deploy_health, stmt_timeout
 from app.logic.formulas import format_usd, format_usd_precise, humanize_duration, md_dollars, safe_float
 from app.logic.navigate import PAGE_SECTION_LABELS
 from app.ui.components import (
@@ -1493,25 +1493,35 @@ def _stmt_timeout_ceiling() -> None:
         _tdf = _to.df.copy()
         _tdf.columns = [str(c).lower() for c in _tdf.columns]
         if "value" in _tdf.columns:
-            _val = str(_tdf.iloc[0].get("value", "") or "")
             # #33: an empty SHOW PARAMETERS level means NEITHER the warehouse nor the account set it.
             _lvl = str(_tdf.iloc[0].get("level", "") or "").upper() or "Snowflake default"
+            # review R1-8: the value ENFORCED, as the posture panel's account_value_kpi shows it -- 0 is
+            # Snowflake's 7-day maximum (168h), never "0s"; an unparseable value is the dash.
+            _secs, _ = stmt_timeout.parse_timeout_row(_tdf)
+            _enforced = stmt_timeout.enforced_s(_secs)
+            _zero = _secs is not None and _secs <= 0
             kpi_row([{"label": "Real statement-timeout ceiling",
                       # r8: humanize on the KPI card (300s -> "5m", 28800s -> "8h") per the
                       # duration standard; the raw SHOW PARAMETERS row stays verbatim in the table.
-                      "value": humanize_duration(safe_float(_val), "s") if _val else "—",
-                      "delta": f"set at: {_lvl}", "delta_color": "off",
+                      "value": humanize_duration(_enforced, "s") if _enforced is not None else "—",
+                      "delta": f"set at: {_lvl}" + ("; 0 = 7-day max" if _zero else ""),
+                      "delta_color": "off",
                       "help": "The STATEMENT_TIMEOUT_IN_SECONDS actually in force on the app "
                               "warehouse — the true wall every app READ runs against, regardless "
                               "of the app's per-tier values. Cortex evaluations are additionally "
-                              "capped per statement."}])
+                              "capped per statement."
+                              + (" It is set to 0, which Snowflake enforces as the 7-day maximum."
+                                 if _zero else "")}])
         styled_table(_tdf)
     elif not _to.ok:
         # v4.603 (#33 D2, house rule 8): a failed probe read is 'unavailable' with its error, never a quiet
         # caption, and never a guess at the value (V002's 5m is not what is in force on this account).
-        empty_state("unavailable", f"Could not read STATEMENT_TIMEOUT_IN_SECONDS on {APP_WAREHOUSE} (needs "
-                    "MONITOR/USAGE on the warehouse), so the ceiling in force is unknown.",
-                    detail=_to.error)
+        # Review R1-14: APP_WAREHOUSE is the app's own query_warehouse, so its owner role holds USAGE on it; a
+        # cause is named only when Snowflake's error is 'does not exist or not authorized' (kind 'absent').
+        _why = (" (the warehouse is missing, or the app's owner role has no privilege on it)"
+                if _to.error_kind == "absent" else "")
+        empty_state("unavailable", f"Could not read STATEMENT_TIMEOUT_IN_SECONDS on {APP_WAREHOUSE}{_why}, "
+                    "so the ceiling in force is unknown.", detail=_to.error)
     else:
         # ok but no row: SHOW PARAMETERS ... LIKE should always return one, so this is only a quiet note.
         empty_state("no_data_yet", f"SHOW PARAMETERS returned no STATEMENT_TIMEOUT_IN_SECONDS row for "
@@ -1822,6 +1832,15 @@ def _perf_rider_panels(fq_df=None) -> None:
                    "tracking — Streamlit cannot measure 'viewed' truthfully.")
 
 
+# Review R1-13: the one canary FAIL that can be expected. TOKENS_GRANULAR is an OPTIONAL column (newer Cortex
+# Code view versions; cortex_sql.cortex_code_token_types), yet a missing column stays a FAIL there: a GAP would
+# also hide a renamed or dropped column, which is the drift the canary exists to catch.
+_TOKEN_TYPES_FAIL_NOTE = ("cortex.code_token_types also FAILs on accounts whose Cortex Code views predate the "
+                          "optional TOKENS_GRANULAR column. When its ERROR names TOKENS_GRANULAR (an invalid "
+                          "identifier), that FAIL is expected and there is no drift to fix; the CoCo token panel "
+                          "says the column isn't available yet.")
+
+
 def _canary_tab() -> None:
     st.caption(
         "Runs every registered SQL builder against the live account to catch "
@@ -1835,7 +1854,7 @@ def _canary_tab() -> None:
         "column drift or a missing OVERWATCH object before a user does. A FAIL (not a declared "
         "GAP) means a query the app depends on no longer compiles — fix the drift; the mart "
         "reconciliation panel below flags mart totals that diverge past 5% from live and the "
-        "backfill to re-run."
+        f"backfill to re-run. One known exception: {_TOKEN_TYPES_FAIL_NOTE}"
     )
     from app.data.canary import CANARIES, EXPECTED_GAPS
 
@@ -1894,6 +1913,9 @@ def _canary_tab() -> None:
             empty_state("clean", f"All {len(frame) - len(gaps)} applicable canary statements passed.")
         else:
             st.error(f"{len(failed)} of {len(frame)} canary statements failed — see errors below.")
+            if "cortex.code_token_types" in set(failed["CHECK"]):
+                # review R1-13: the one FAIL that can be expected (kept a FAIL: a GAP would hide real drift)
+                st.caption(_TOKEN_TYPES_FAIL_NOTE)
         st.session_state["_adm_canary_results"] = frame
     stored = st.session_state.get("_adm_canary_results")
     if stored is not None:
