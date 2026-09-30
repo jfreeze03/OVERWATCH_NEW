@@ -353,11 +353,18 @@ SOC. **Governance drift score** at top (§6). Sections:
   grants) with a who-changed-most bar beside it, failed-login reasons
   (network-policy vs credential), break-glass activity trend.
 - **Clients** — driver/version inventory from ACCOUNT_USAGE.SESSIONS
-  (lags ~3h): driver + version from CLIENT_APPLICATION_ID, PROGRAM from
-  the client-reported CLIENT_ENVIRONMENT (VS Code/DBeaver report; many
-  ODBC tools like Erwin do not). BEHIND = older than the newest version
-  of the same driver seen in the account — the upgrade shortlist. CSV
-  export on the panel.
+  (lags ~3h): driver + version from CLIENT_APPLICATION_ID ('(no client
+  id)' when empty), PROGRAM from the client-reported CLIENT_ENVIRONMENT
+  (VS Code/DBeaver report; many ODBC tools like Erwin do not). Since
+  v4.603 (#34) each version is checked against Snowflake's own floor from
+  SYSTEM$CLIENT_VERSION_INFO(): UNSUPPORTED (below the minimum supported
+  version), NEARING END OF SUPPORT, BELOW RECOMMENDED, OK, NO VERSION,
+  NOT LISTED. Snowflake-run rows (the Snowflake Web App / Snowsight
+  backend, SnowServices ingress) are Snowflake's to upgrade: neutral, and
+  out of the 'yours to upgrade' KPI and the BEHIND count. If the function
+  cannot be read, support reads 'unavailable', the support KPIs show '—',
+  and STATUS (BEHIND = older than the newest version of the same driver
+  among your rows) is the fallback. CSV export on the panel.
 - **Trust Center** — latest findings per scanner (needs
   TRUST_CENTER_VIEWER).
 

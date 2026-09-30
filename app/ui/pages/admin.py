@@ -1874,8 +1874,8 @@ def _canary_tab() -> None:
         gaps = frame[frame["STATUS"] == "GAP"]
         if not gaps.empty:
             st.caption(f"{len(gaps)} GAP: declared account-feature absences (Cortex "
-                       "subscription/region) — absence, not drift. Anything absent "
-                       "WITHOUT a declaration fails instead.")
+                       "subscription/region, SYSTEM$CLIENT_VERSION_INFO) — absence, not drift. "
+                       "Anything absent WITHOUT a declaration fails instead.")
         if failed.empty:
             empty_state("clean", f"All {len(frame) - len(gaps)} applicable canary statements passed.")
         else:

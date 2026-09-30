@@ -1465,18 +1465,33 @@ def _posture_trend_panel(trend) -> None:
                "Loaded daily after the ~06:45 nightly load.")
 
 
+_CLIENTS_HELP = (
+    "Source: ACCOUNT_USAGE.SESSIONS (lags up to ~3h) for what connected, and "
+    "SYSTEM$CLIENT_VERSION_INFO() for Snowflake's own minimum-supported, nearing-end-of-support and "
+    "recommended version of each driver. UNSUPPORTED = below Snowflake's minimum supported version. "
+    "NEARING END OF SUPPORT = at or above that minimum but below the version Snowflake lists as nearing "
+    "end of support. BELOW RECOMMENDED = supported but older than Snowflake's recommended version. "
+    "Snowflake-run rows come from Snowflake's own services (the Snowflake Web App / Snowsight, "
+    "SnowServices ingress). Snowflake upgrades those, and there is nothing to install on your side. "
+    "NOT LISTED = the function has no entry for this client. NO VERSION = the client did not report one."
+    "\n\nDRIVER and VERSION parse from CLIENT_APPLICATION_ID ('(no client id)' when it is empty). PROGRAM "
+    "is whatever the client self-reports (VS Code, DBeaver and most JDBC/Python tools do; many ODBC tools "
+    "such as Erwin do not — '(not reported)' means exactly that). STATUS compares each of your versions "
+    "with the newest version of the same driver seen in this account; it is not a support verdict."
+)
+
+
 def _clients_tab(company: str, days: int, *, bounds: tuple | None = None) -> None:
-    """Driver/version inventory — the 'when do we need to upgrade' sheet."""
+    """Driver/version inventory — the 'when do we need to upgrade' sheet — with Snowflake's own support
+    floor per driver version (Next-Fifty #34). Two reads joined in app/logic/client_support: SESSIONS
+    (what connected, with the in-account BEHIND/CURRENT STATUS) and SYSTEM$CLIENT_VERSION_INFO() (a
+    probe=True metadata read). When the SYSTEM$ read fails, every support status reads 'unavailable',
+    the support KPIs show a dash, and the in-account STATUS is the fallback."""
+    from app.logic import client_support as cs
+
     _lm = "_lm" if bounds is not None else ""
     section_header("Client drivers & versions", "", "operations")
-    panel_help(
-        "Source: ACCOUNT_USAGE.SESSIONS (lags up to ~3h, 365d retention). DRIVER and "
-        "VERSION parse from CLIENT_APPLICATION_ID; PROGRAM is whatever the client "
-        "self-reports (VS Code, DBeaver and most JDBC/Python tools do; many ODBC "
-        "tools such as Erwin do not — '(not reported)' means exactly that). "
-        "The observed-newest comparison is the upgrade signal; this is a read-only "
-        "inventory, not a support-policy verdict."
-    )
+    panel_help(_CLIENTS_HELP)
     res = run(security_sql.client_drivers(days, company, bounds=bounds), page=_PAGE,
               key=f"clients_{company}_{days}{_lm}", tier="historical",
               source="ACCOUNT_USAGE.SESSIONS")
@@ -1485,17 +1500,58 @@ def _clients_tab(company: str, days: int, *, bounds: tuple | None = None) -> Non
         return
     if not guard(res, "", setup_hint="Needs the ACCOUNT_USAGE.SESSIONS view (IMPORTED PRIVILEGES on the SNOWFLAKE db)."):
         return
-    df = res.df.copy()
-    behind = int((df["STATUS"].astype(str) == "BEHIND").sum())
+    info = run(security_sql.client_version_info(), page=_PAGE, key="client_version_info",
+               tier="metadata", probe=True, source="SYSTEM$CLIENT_VERSION_INFO()")
+    floors, reason = cs.read_floors(info.ok, info.df, info.error, info.error_kind)
+    ann = cs.annotate_support(res.df, floors)
+    counts = cs.support_counts(ann) if floors is not None else None
+
+    def _kpi(label: str, key: str, bad_sev: str, help_text: str) -> dict:
+        if counts is None:
+            return {"label": label, "value": "—", "help": "Snowflake's support floor could not be read."}
+        n = counts[key]
+        return {"label": label, "value": f"{n}", "severity": bad_sev if n else "ok", "help": help_text}
+
     kpi_row([
-        {"label": "Driver families", "value": f"{df['DRIVER'].nunique()}"},
-        {"label": "Driver+version combos", "value": f"{len(df)}"},
+        {"label": "Driver families", "value": f"{cs.driver_family_count(ann)}"},
+        {"label": "Driver+version combos", "value": f"{cs.driver_version_count(ann)}",
+         "help": "Distinct driver x version (one version reported by two programs counts once)."},
+        _kpi("Unsupported, yours to upgrade", "unsupported_yours", "bad",
+             "Driver versions below Snowflake's minimum supported version, run by your clients."),
+        _kpi("Unsupported, Snowflake-run", "unsupported_snowflake", "info",
+             "Below the minimum, but run by Snowflake's own web app or services: Snowflake upgrades these."),
+        _kpi("Nearing end of support", "nearing_eos", "warn",
+             "Yours: at or above the minimum but below the version Snowflake lists as nearing end of support."),
+        _kpi("Below recommended", "below_recommended", "info",
+             "Yours: supported, but older than Snowflake's recommended version."),
     ])
-    styled_table(df, height=380, slug="client-drivers", sort_label="last seen")
+    # Re-sorted only when the support verdict exists; otherwise the builder's own order stands. Either
+    # way the sort_label names the real order (it used to claim 'last seen').
+    if floors is not None:
+        df, sort_label = cs.display_frame(cs.sort_by_support(ann)), cs.SUPPORT_SORT_LABEL
+    else:
+        df, sort_label = cs.display_frame(ann), cs.INVENTORY_SORT_LABEL
+    styled_table(df, height=380, slug="client-drivers", sort_label=sort_label)
+    if floors is not None:
+        st.caption(cs.support_caption(ann))
+    else:
+        st.caption(cs.unavailable_caption(reason))
+        _detail = str(info.error or "").strip()
+        if _detail and _detail.splitlines()[0][:160] != _detail:
+            with st.expander("Support-floor read error"):
+                st.code(_detail)
+    behind = cs.behind_count(ann)
     st.caption(
-        f"{behind} combinations trail the newest observed version."
+        f"{behind} driver {'version trails' if behind == 1 else 'versions trail'} the newest version of the "
+        "same driver seen in this account (STATUS; Snowflake-run rows are not counted)."
     )
+    _no_id = cs.no_client_id_sessions(ann)
+    if _no_id:
+        st.caption(f"{_no_id:,} sessions reported no client id; they show as '{cs.NO_CLIENT_ID}' and count "
+                   "in no KPI.")
     result_caption(res)
+    if info.ok:
+        result_caption(info)
 
 
 def _ai_guardrails_tab(company: str) -> None:

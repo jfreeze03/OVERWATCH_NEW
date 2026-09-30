@@ -11,6 +11,7 @@ from app.data.common import (
     resolve_effective_window,
     scope_window_where,
 )
+from app.logic.client_support import NO_CLIENT_ID, SNOWFLAKE_RUN_DRIVERS, SNOWFLAKE_RUN_PROGRAM_PREFIXES
 from app.logic.identity_auth import SERVICE_TYPES
 
 # --- Admin-role tiers (codified AS-IS per owner decision 2026-09-10; byte-identical to the
@@ -1190,19 +1191,36 @@ LIMIT {limit}
 """
 
 
+def _snowflake_run_predicate() -> str:
+    """SQL twin of client_support.who_upgrades, rendered from the SAME constants (one allow-list): a
+    PROGRAM prefix (ILIKE '<prefix>%') or an exact DRIVER, both case-insensitive."""
+    prog = " OR ".join(f"PROGRAM ILIKE {sql_literal(p + '%')}" for p in SNOWFLAKE_RUN_PROGRAM_PREFIXES)
+    drivers = ", ".join(sql_literal(d.upper()) for d in SNOWFLAKE_RUN_DRIVERS)
+    return f"{prog} OR UPPER(DRIVER) IN ({drivers})"
+
+
 def client_drivers(days: int = 30, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """Driver/version inventory from ACCOUNT_USAGE.SESSIONS: which driver,
     which version, reported by which program, used by whom — the "when do
-    we need to upgrade" sheet.
+    we need to upgrade" sheet. Snowflake's own support floor joins on in
+    app/logic/client_support (Next-Fifty #34, client_version_info below).
 
     PROGRAM is what the client self-reports in CLIENT_ENVIRONMENT: JDBC and
     Python tools usually set it (DBeaver, VS Code); plenty of ODBC tools
-    (Erwin) do not, so '(not reported)' is honest, not a bug. STATUS compares
-    each version against the newest version of the SAME driver seen in this
-    account this window — the only latest-version truth available from
-    inside Snowflake. Version key pads dot-segments so 3.10.2 > 3.9.1.
-    SESSIONS lags up to ~3h; POSIX classes only (no backslashes survive
-    the string layers — V022 lesson).
+    (Erwin) do not, so '(not reported)' is honest, not a bug. A NULL or blank
+    CLIENT_APPLICATION_ID is kept and labelled '(no client id)' (it used to be
+    dropped, or to render as a green CURRENT row with an empty DRIVER).
+
+    UPGRADED_BY splits Snowflake's own services (the Snowflake Web App /
+    Snowsight backend, SnowServices ingress: client_support's allow-list)
+    from the customer's clients. STATUS compares each customer version against
+    the newest version of the SAME driver seen among the CUSTOMER's rows this
+    window — the only in-account latest-version truth. A Snowflake-run row
+    reads 'SNOWFLAKE-RUN' and never sets the newest; a row with no version
+    ('?') has a NULL key, reads 'NO VERSION', and is never the newest ('?'
+    used to sort above every digit and win MAX). Version key pads dot-segments
+    so 3.10.2 > 3.9.1. SESSIONS lags up to ~3h; POSIX classes only (no
+    backslashes survive the string layers — V022 lesson).
     """
     days = bounded_days(days, maximum=90)
     _scope = (resolve_effective_window(days, "CREATED_ON", bounds=bounds)[1]
@@ -1210,7 +1228,6 @@ def client_drivers(days: int = 30, company: str = "ALL", *, bounds: tuple | None
               else f"CREATED_ON >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     where = and_where(
         _scope,
-        "CLIENT_APPLICATION_ID IS NOT NULL",
         companies.user_scope_subquery(company, "USER_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.SESSIONS",
                                       distinct_where=_scope),
     )
@@ -1220,7 +1237,7 @@ WITH s AS (
         USER_NAME,
         CREATED_ON,
         COALESCE(NULLIF(TRIM(REGEXP_REPLACE(CLIENT_APPLICATION_ID, ' [0-9][0-9.]*$', '')), ''),
-                 CLIENT_APPLICATION_ID) AS DRIVER,
+                 NULLIF(TRIM(CLIENT_APPLICATION_ID), ''), {sql_literal(NO_CLIENT_ID)}) AS DRIVER,
         COALESCE(NULLIF(TRIM(REGEXP_SUBSTR(CLIENT_APPLICATION_ID, '[0-9][0-9.]*$')), ''), '?') AS VERSION,
         COALESCE(TRY_PARSE_JSON(CLIENT_ENVIRONMENT):APPLICATION::STRING, '(not reported)') AS PROGRAM
     FROM SNOWFLAKE.ACCOUNT_USAGE.SESSIONS
@@ -1228,28 +1245,54 @@ WITH s AS (
 ),
 keyed AS (
     SELECT s.*,
-           LPAD(COALESCE(NULLIF(SPLIT_PART(VERSION, '.', 1), ''), '0'), 6, '0') ||
-           LPAD(COALESCE(NULLIF(SPLIT_PART(VERSION, '.', 2), ''), '0'), 6, '0') ||
-           LPAD(COALESCE(NULLIF(SPLIT_PART(VERSION, '.', 3), ''), '0'), 6, '0') ||
-           LPAD(COALESCE(NULLIF(SPLIT_PART(VERSION, '.', 4), ''), '0'), 6, '0') AS VKEY
+           IFF(VERSION = '?', NULL,
+               LPAD(COALESCE(NULLIF(SPLIT_PART(VERSION, '.', 1), ''), '0'), 6, '0') ||
+               LPAD(COALESCE(NULLIF(SPLIT_PART(VERSION, '.', 2), ''), '0'), 6, '0') ||
+               LPAD(COALESCE(NULLIF(SPLIT_PART(VERSION, '.', 3), ''), '0'), 6, '0') ||
+               LPAD(COALESCE(NULLIF(SPLIT_PART(VERSION, '.', 4), ''), '0'), 6, '0')) AS VKEY,
+           IFF({_snowflake_run_predicate()}, 'SNOWFLAKE', 'CUSTOMER') AS UPGRADED_BY
     FROM s
 ),
 grouped AS (
-    SELECT DRIVER, VERSION, PROGRAM, MAX(VKEY) AS VKEY,
+    SELECT DRIVER, VERSION, PROGRAM, UPGRADED_BY, MAX(VKEY) AS VKEY,
            COUNT(DISTINCT USER_NAME) AS USERS,
            COUNT(*) AS SESSIONS,
            MIN(DATE(CREATED_ON)) AS FIRST_SEEN,
            MAX(DATE(CREATED_ON)) AS LAST_SEEN,
            LEFT(LISTAGG(DISTINCT USER_NAME, ', ') WITHIN GROUP (ORDER BY USER_NAME), 160) AS SAMPLE_USERS
     FROM keyed
-    GROUP BY DRIVER, VERSION, PROGRAM
+    GROUP BY DRIVER, VERSION, PROGRAM, UPGRADED_BY
 )
-SELECT DRIVER, VERSION, PROGRAM, USERS, SESSIONS, FIRST_SEEN, LAST_SEEN, SAMPLE_USERS,
-       FIRST_VALUE(VERSION) OVER (PARTITION BY DRIVER ORDER BY VKEY DESC) AS NEWEST_IN_ACCOUNT,
-       IFF(VKEY < MAX(VKEY) OVER (PARTITION BY DRIVER), 'BEHIND', 'CURRENT') AS STATUS
+SELECT DRIVER, VERSION, PROGRAM, UPGRADED_BY, USERS, SESSIONS, FIRST_SEEN, LAST_SEEN, SAMPLE_USERS,
+       IFF(UPGRADED_BY = 'SNOWFLAKE', NULL,
+           FIRST_VALUE(IFF(VKEY IS NULL, NULL, VERSION))
+               OVER (PARTITION BY DRIVER, UPGRADED_BY ORDER BY VKEY DESC NULLS LAST)) AS NEWEST_IN_ACCOUNT,
+       CASE WHEN UPGRADED_BY = 'SNOWFLAKE' THEN 'SNOWFLAKE-RUN'
+            WHEN VKEY IS NULL THEN 'NO VERSION'
+            WHEN VKEY < MAX(VKEY) OVER (PARTITION BY DRIVER, UPGRADED_BY) THEN 'BEHIND'
+            ELSE 'CURRENT' END AS STATUS
 FROM grouped
-ORDER BY DRIVER, VKEY DESC, SESSIONS DESC
+ORDER BY DRIVER, VKEY DESC NULLS LAST, SESSIONS DESC
 LIMIT 500
+"""
+
+
+def client_version_info() -> str:
+    """Snowflake's own per-driver support floor (Next-Fifty #34): one row per entry of
+    SYSTEM$CLIENT_VERSION_INFO(), with the minimum supported, nearing-end-of-support and recommended
+    version. Key names and flatten shape are the probe's (PROBES_NEXT_FIFTY_WAVE4.sql W4c, the only form
+    proven live on this account); GET_PATH, not the ':' path form, keeps the builder canary-parse-clean.
+    RAW_ENTRY carries each entry's own JSON so app/logic/client_support can still read a field whose key
+    Snowflake spells differently. A metadata call (no ACCOUNT_USAGE scan): the page runs it
+    tier='metadata', probe=True, and a failure renders the support column 'unavailable', never clean."""
+    return """
+SELECT GET_PATH(f.value, 'clientId')::STRING AS CLIENT_ID,
+       GET_PATH(f.value, 'clientAppId')::STRING AS CLIENT_APP_ID,
+       GET_PATH(f.value, 'minimumSupportedVersion')::STRING AS MIN_SUPPORTED_VERSION,
+       GET_PATH(f.value, 'minimumNearingEndOfSupportVersion')::STRING AS NEARING_EOS_VERSION,
+       GET_PATH(f.value, 'recommendedVersion')::STRING AS RECOMMENDED_VERSION,
+       TO_JSON(f.value) AS RAW_ENTRY
+FROM TABLE(FLATTEN(INPUT => TRY_PARSE_JSON(SYSTEM$CLIENT_VERSION_INFO()))) f
 """
 
 

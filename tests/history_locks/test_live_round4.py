@@ -99,8 +99,21 @@ def test_client_drivers_builder_shape():
     assert "REGEXP_SUBSTR(CLIENT_APPLICATION_ID, '[0-9][0-9.]*$')" in sql
     assert "TRY_PARSE_JSON(CLIENT_ENVIRONMENT):APPLICATION::STRING" in sql
     assert "COMPANY_FOR_USER" in sql                          # user-grain company scoping
-    assert "FIRST_VALUE(VERSION) OVER (PARTITION BY DRIVER ORDER BY VKEY DESC)" in sql
+    # v4.603 (Next-Fifty #34) moved these locks deliberately. A version-less row ('?') used to pad to
+    # '00000?...', which sorts above every digit, so bare 'SQLAPI' became the newest SQLAPI and marked
+    # ControlM's SQLAPI 2.0.0 BEHIND. Its key is now NULL, the newest pick is NULLS LAST, and it reads
+    # 'NO VERSION' (a NULL comparison must not fall through to CURRENT). Snowflake's own web app and
+    # services are split out (UPGRADED_BY) so they never set a customer's newest version.
+    assert "IFF(VERSION = '?', NULL," in sql
+    flat = " ".join(sql.split())
+    assert ("FIRST_VALUE(IFF(VKEY IS NULL, NULL, VERSION)) "
+            "OVER (PARTITION BY DRIVER, UPGRADED_BY ORDER BY VKEY DESC NULLS LAST)") in flat
+    assert "WHEN VKEY IS NULL THEN 'NO VERSION'" in sql
+    assert "WHEN UPGRADED_BY = 'SNOWFLAKE' THEN 'SNOWFLAKE-RUN'" in sql
+    assert sql.index("THEN 'SNOWFLAKE-RUN'") < sql.index("THEN 'NO VERSION'") < sql.index("THEN 'BEHIND'")
     assert "'BEHIND'" in sql and "'CURRENT'" in sql
+    assert "ORDER BY DRIVER, VKEY DESC NULLS LAST, SESSIONS DESC" in sql
+    assert "'(no client id)'" in sql and "CLIENT_APPLICATION_ID IS NOT NULL" not in sql
     assert sql.count("LPAD(") == 4                            # 3.10.2 > 3.9.1, per segment
     assert "-90," in security_sql.client_drivers(9999)        # window clamped
     assert "COMPANY_FOR_USER" not in security_sql.client_drivers(30, "ALL")
@@ -120,9 +133,20 @@ def test_clients_panel_wired_and_canaried():
     assert "(not reported)" in _SECURITY                      # honest PROGRAM caveat
     canary = (_ROOT / "app" / "data" / "canary.py").read_text(encoding="utf-8")
     assert "security_sql.client_drivers" in canary
+    assert "security_sql.client_version_info" in canary       # v4.603 (#34): the support floor read
     assert "security_sql.expiring_credentials(10," in canary  # canary follows the policy
     colors = (_ROOT / "app" / "ui" / "status_colors.py").read_text(encoding="utf-8")
     assert '"BEHIND": _WARN' in colors and '"CURRENT": _OK' in colors
+    # v4.603 (#34), moved deliberately: no-version and Snowflake-run rows are neutral, never green;
+    # the support floor's own column colours UNSUPPORTED red and NEARING END OF SUPPORT amber.
+    assert '"NO VERSION": _MUTED' in colors and '"SNOWFLAKE-RUN": _MUTED' in colors
+    assert '"UNSUPPORTED": _BAD' in colors and '"NEARING END OF SUPPORT": _WARN' in colors
+    # the panel help states what each support word means (exact #34 wording)
+    for phrase in ("SYSTEM$CLIENT_VERSION_INFO() for Snowflake's own minimum-supported",
+                   "UNSUPPORTED = below Snowflake's minimum supported version.",
+                   "Snowflake upgrades those, and there is nothing to install on your side.",
+                   "NOT LISTED = the function has no entry for this client."):
+        assert phrase in _SECURITY, phrase
 
 
 # ---------------------------------------------------------------------------

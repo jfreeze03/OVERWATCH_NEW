@@ -101,6 +101,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("security.recent_ddl_changes", lambda: security_sql.recent_ddl_changes(1, "ALFA")),
     ("security.expiring_credentials", lambda: security_sql.expiring_credentials(10, "ALFA")),
     ("security.client_drivers", lambda: security_sql.client_drivers(30, "ALFA")),
+    # Next-Fifty #34: Snowflake's own driver support floor (a metadata call, no ACCOUNT_USAGE scan).
+    ("security.client_version_info", security_sql.client_version_info),
     ("security.exception_queue", lambda: security_sql.security_exception_queue("ALFA", 1)),
     ("security.domain_coverage", security_sql.security_domain_coverage),
     ("security.trust_center_delta", security_sql.trust_center_delta),
@@ -341,4 +343,8 @@ EXPECTED_GAPS: frozenset[str] = frozenset({
     "cortex.model_costs",
     "cortex.source_costs",
     "cortex.mart_vs_live_ai_recon",   # reads the subscription-gated CORTEX_CODE_* views
+    # Next-Fifty #34: SYSTEM$CLIENT_VERSION_INFO() is an account-feature function (proven live on this
+    # account, 2026-09-29 probe W4c). Only its ABSENCE (unknown function) reads GAP -- the Clients tab then
+    # shows 'unavailable' support; any other failure (grant, timeout) still FAILS.
+    "security.client_version_info",
 })
