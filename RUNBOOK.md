@@ -293,7 +293,11 @@ Admin → Settings, never in code.
   each multi-cluster warehouse's hourly peak cluster over ≥35 days, and a
   higher MAX_CLUSTER_COUNT is suggested only where queries reached the
   current maximum — otherwise "Size up or split (cluster cap not
-  reached)", or "not checked" with the toggle off); toggled scans: repeat-query
+  reached)", or "not checked" with the toggle off. The read starts at
+  midnight N days back, and its hours are the hours queries STARTED in.
+  An empty SHOW WAREHOUSES reads "cluster ranges unknown", not "no
+  multi-cluster warehouse"; the Resize picker opens one size up on a
+  capacity-pressure verdict); toggled scans: repeat-query
   fingerprints (≥10 identical runs = caching/materialization candidates),
   query efficiency (families scanning >80% of ≥100-partition tables;
   zero-scan share trend), storage waste (Time-Travel/failsafe-heavy tables,
@@ -312,7 +316,11 @@ Admin → Settings, never in code.
 - **Tasks** — task runs/failures by day (FACT_TASK_DAILY), failure detail
   with DATABASE column, RCA timeline for a selected failure.
 - **Warehouses** — daily credits per warehouse, events, concurrency peaks
-  (WAREHOUSE_LOAD_HISTORY; sustained PEAK_QUEUED ≳1 = add cluster).
+  (WAREHOUSE_LOAD_HISTORY; sustained PEAK_QUEUED ≳1 = add a cluster —
+  on a multi-cluster warehouse raise MAX_CLUSTER_COUNT only if its
+  queries reach the current maximum, checked on Cost ▸ Idle & sizing ▸
+  Check cluster use; the Sizing & efficiency table says so under the
+  table for its unchecked Add a cluster rows).
 - **Contention** — lock waits (LOCK_WAIT_HISTORY).
 - **Optimize** (v4.597, was Decision Studio ▸ Portfolio) — the
   recurring-query fix queue. Each measured query family gets its observed

@@ -8,11 +8,17 @@ whose peak was cluster 3.
   (b) ON: WH_SAT is told to raise MAX_CLUSTER_COUNT to 5; WH_LOW reads "Size up or split (cluster cap not
       reached)";
   (c) the read FAILS: a red "Query failed" line, the failed caption, and WH_SAT reads "was not checked";
-  (d) no multi-cluster warehouse in SHOW: the no-cap caption and no toggle at all.
+  (d) no multi-cluster warehouse in SHOW: the no-cap caption and no toggle at all;
+  (e) v4.604.0 review r1: an EMPTY SHOW says the cluster ranges are unknown (R1-10); a Small below-cap
+      warehouse's resize picker opens on MEDIUM, a size-up (R1-4); the selected row's cluster columns name
+      the check window (R1-9).
 
 The shared shaped harness stubs SHOW WAREHOUSES as an empty frame, so only an injected frame reaches the gate
-(tests/test_prc_c1_shaped.py covers the no-multi-cluster default). The floor venv skips these
-(_APPTEST_BUTTONGROUP_OK); tests/test_cluster_cap_gate.py locks the same behaviour purely and by source."""
+(tests/test_prc_c1_shaped.py renders that default). The floor venv skips these (_APPTEST_BUTTONGROUP_OK).
+Every leg runs the floor twins: tests/test_cluster_cap_render.py calls the page's _cluster_cap_check with a
+fake st for the gate's own paths -- (a), (c) the failed read, (d) and (e)'s empty SHOW -- and
+tests/test_cluster_cap_gate.py locks the verdicts, the pure helpers behind (e)'s picker default and window
+labels, and the page wiring by source."""
 
 from __future__ import annotations
 
@@ -43,8 +49,8 @@ def _ok(df: pd.DataFrame) -> QueryResult:
     return QueryResult(df=df, ok=True, source="t")
 
 
-def _show(max_clusters: int) -> pd.DataFrame:
-    return pd.DataFrame([{"name": n, "size": "X-Small", "min_cluster_count": 1, "max_cluster_count": max_clusters,
+def _show(max_clusters: int, size: str = "X-Small") -> pd.DataFrame:
+    return pd.DataFrame([{"name": n, "size": size, "min_cluster_count": 1, "max_cluster_count": max_clusters,
                           "scaling_policy": "STANDARD", "auto_suspend": 300} for n in _HIST])
 
 
@@ -62,7 +68,7 @@ def _hist() -> pd.DataFrame:
 
 
 def _page(monkeypatch, *, check: bool, fails: bool = False, max_clusters: int = 4,
-          select: str = "") -> tuple[AppTest, list[str]]:
+          select: str = "", size: str = "X-Small", show_empty: bool = False) -> tuple[AppTest, list[str]]:
     import app.ui.pages.cost_parts.optimize as opt
 
     seen: list[str] = []
@@ -92,7 +98,7 @@ def _page(monkeypatch, *, check: bool, fails: bool = False, max_clusters: int = 
         sql = str(args[0] if args else kwargs.get("sql", ""))
         seen.append(sql)
         if sql.startswith("SHOW WAREHOUSES"):
-            return _ok(_show(max_clusters))
+            return _ok(pd.DataFrame() if show_empty else _show(max_clusters, size))
         if "CLUSTER_NUMBER" in sql:
             if fails:
                 return QueryResult(df=pd.DataFrame(), ok=False, source="t", error_kind="timeout",
@@ -158,7 +164,9 @@ def test_toggle_on_gates_the_advice_on_hours_at_the_cap(monkeypatch):
     at, seen = _page(monkeypatch, check=True)
     reads = [s for s in seen if "CLUSTER_NUMBER" in s]
     assert reads and all("UPPER(q.WAREHOUSE_NAME) IN ('WH_LOW', 'WH_SAT')" in s for s in reads)
-    assert all("DATEADD('day', -35, CURRENT_TIMESTAMP())" in s for s in reads)
+    # review r1 R1-7: from midnight (account time) 35 days back, never now minus 35 days
+    assert all("DATEADD('day', -35, CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE)" in s
+               for s in reads)
     sized = _sized(at)
     assert sized.loc["WH_SAT", "RECOMMENDATION"] == RECOMMEND_SCALE_OUT
     assert ("queries reached cluster 4 of 4 in 57 hours of the last 35 days: raise MAX_CLUSTER_COUNT to 5"
@@ -234,3 +242,35 @@ def test_no_multi_cluster_warehouse_offers_no_check(monkeypatch):
     assert not any(t.key == "sizing_cluster_check" for t in at.toggle)
     assert not any("CLUSTER_NUMBER" in s for s in seen)
     assert "Single-cluster today (MAX_CLUSTER_COUNT = 1)" in _sized(at).loc["WH_SAT", "RATIONALE"]
+
+
+@_SKIP
+def test_an_empty_show_says_the_cluster_ranges_are_unknown(monkeypatch):
+    """Review r1 R1-10: zero SHOW rows are an absent input — never "no warehouse has MAX_CLUSTER_COUNT above 1"."""
+    at, seen = _page(monkeypatch, check=True, show_empty=True)
+    info = " ".join(str(i.value) for i in at.info)
+    assert "cluster ranges are unknown and the cluster-cap check cannot run" in info
+    assert "cluster cap to check" not in _captions(at)
+    assert not any(t.key == "sizing_cluster_check" for t in at.toggle)
+    assert not any("CLUSTER_NUMBER" in s for s in seen)
+    assert "the current setting is unknown" in _sized(at).loc["WH_SAT", "RATIONALE"]
+
+
+@_SKIP
+def test_a_small_below_cap_warehouse_opens_the_resize_on_a_size_up(monkeypatch):
+    """Review r1 R1-4: the below-cap pane calls the resize the size-up route, so the picker opens on MEDIUM for a
+    Small warehouse (it opened on XSMALL: a downsize projecting a saving). Review r1 R1-9: the selected row's
+    cluster columns name the check window, and the evidence frame (the CSV) carries it."""
+    at, _seen = _page(monkeypatch, check=True, select="WH_LOW", size="Small")
+    pick = next(s for s in at.selectbox if s.key == "sizing_to_WH_LOW")
+    assert pick.value == "MEDIUM"
+    assert list(pick.options) == ["XSMALL", "SMALL", "MEDIUM", "LARGE", "XLARGE", "XXLARGE"]
+    code, text = _pane(at)
+    assert "ALTER WAREHOUSE WH_LOW SET WAREHOUSE_SIZE = 'MEDIUM';" in code
+    assert "Resizing UP SMALL → MEDIUM raises cost — no saving booked." in text
+    assert "Projected saving" not in text
+    evidence = [df.value for df in at.dataframe
+                if isinstance(df.value, pd.DataFrame) and "CLUSTER_CHECK_DAYS" in df.value.columns
+                and "RATIONALE" in df.value.columns and len(df.value) == 1]
+    assert evidence and evidence[0].iloc[0]["CLUSTER_CHECK_DAYS"] == 35
+    assert evidence[0].iloc[0]["PEAK_CLUSTERS"] == 3

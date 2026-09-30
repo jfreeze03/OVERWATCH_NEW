@@ -23,6 +23,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .formulas import humanize_duration, safe_div, safe_float
+from .sizing import CLUSTER_CAP_CHECK_PATH
 from .system_wait import is_sleep_statement, polls_with_system_wait, wait_seconds
 
 # --- thresholds (kept identical to ops_sql.query_optimization_triage) -------
@@ -267,9 +268,11 @@ def advise(row: Mapping[str, object], *,
             findings.append(Finding(
                 "queued", "warn", "Queued",
                 f"Spent {queued_sec:.0f}s queued (of {elapsed:.1f}s total), {over_sec:.0f}s of it OVERLOAD — "
-                "the warehouse was saturated. A concurrency problem, not bad SQL: raise MAX_CLUSTER_COUNT "
-                "(multi-cluster) or move this workload to its own warehouse; size up only if single "
-                "queries are also slow or spilling.",
+                "the warehouse was saturated. A concurrency problem, not bad SQL: add a cluster or move "
+                "this workload to its own warehouse; size up only if single queries are also slow or "
+                "spilling. On a multi-cluster warehouse, raise MAX_CLUSTER_COUNT only if its queries reach "
+                f"the current maximum ({CLUSTER_CAP_CHECK_PATH} checks it) — below the cap, a higher "
+                "maximum does not help.",
                 pts))
         else:  # split unknown (older row shape) or no dominant cause: the original combined wording
             findings.append(Finding(
