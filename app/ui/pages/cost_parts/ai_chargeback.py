@@ -1136,8 +1136,13 @@ def _company_showback_panel(company: str, days: int, rate: float, ai_rate: float
                      "complete metered days shown. The credit part is the same basis as the credit-spend tile "
                      "on Spend & Attribution, but complete days only. Excludes data transfer, Marketplace and "
                      "org-currency adjustments."},
-            {"label": "Company-attributed share", "value": f"{pct:.0f}%" if pct is not None else "—",
-             "help": "Company rows, UNKNOWN included, as a share of the all-in total. UNKNOWN is spend whose "
+            {"label": "Company-attributed share, before adjustment",
+             "value": f"{pct:.0f}%" if pct is not None else "—",
+             "help": "Company rows, UNKNOWN included, as a share of the spend before the cloud-services "
+                     "adjustment: the company rows plus the unattributed row, which add up to 100%. Company "
+                     "warehouse dollars are metering before the adjustment, and the adjustment is a credit on "
+                     "the whole bill rather than on any company, so it is left out of the share (the all-in "
+                     "total is after it). UNKNOWN is spend whose "
                      "warehouse, database or user has no company evidence yet; a COMPANY_SCOPE mapping moves "
                      "it (Cortex Code at once, the other lines as the loaders re-stamp recent days; see "
                      "Unmapped entities on Spend & Attribution). A different lens from Spend & "
@@ -1147,8 +1152,8 @@ def _company_showback_panel(company: str, days: int, rate: float, ai_rate: float
                      "reader-account and replication metering, AI services other than Cortex Code in "
                      "Snowsight and the CLI, serverless with no object-cost ledger arm, cloud services "
                      "outside any warehouse, storage with no per-database split, a few hours of day-boundary "
-                     "offset, and anything on days a source has not loaded (named under the table when it "
-                     "happens)."},
+                     "offset, and anything on days a source has not loaded or has only partly loaded (named "
+                     "under the table when it happens)."},
             {"label": "Cloud-services adjustment", "value": format_usd(abs(adj)),
              "help": "The daily cloud-services adjustment from metering: a credit that lowers the bill (a "
                      "positive amount here, negative in the table). It is account-level, so it is its own "
@@ -1178,7 +1183,15 @@ def _company_showback_panel(company: str, days: int, rate: float, ai_rate: float
                          column_config={"CONTENTS": st.column_config.TextColumn("Contents", width="large")})
     else:
         if table.empty:
-            if company == "UNKNOWN":
+            gaps = [str(g) for g in out.get("keyed_gaps") or []]
+            if company == "UNKNOWN" and gaps:
+                # R1-14: an empty UNKNOWN read is verified clear only when every keyed source covers the
+                # whole span in full; a missing, stale or partly loaded one leaves it unverified
+                named = gaps[0] if len(gaps) == 1 else ", ".join(gaps[:-1]) + " and " + gaps[-1]
+                empty_state("no_data_yet", f"Nothing read here is stamped UNKNOWN, but {named} "
+                                           f"{'does' if len(gaps) == 1 else 'do'} not cover all of {span} in "
+                                           "full (see the notes below), so UNKNOWN cannot be confirmed clear.")
+            elif company == "UNKNOWN":
                 empty_state("clean", "Nothing in this span is stamped UNKNOWN: every warehouse, serverless, "
                                      "Cortex Code and storage line read here has a company.")
             else:
@@ -1190,10 +1203,12 @@ def _company_showback_panel(company: str, days: int, rate: float, ai_rate: float
                 {"label": f"{company} all-in, {span}", "value": format_usd(safe_float(s["company_usd"])),
                  "help": "This company's warehouse, serverless, Cortex Code and estimated storage dollars "
                          "over the complete metered days shown: the same row the ALL view shows."},
-                {"label": "Share of the account's all-in total",
+                {"label": "Share of account spend, before adjustment",
                  "value": f"{pct:.0f}%" if pct is not None else "—",
-                 "help": "This company's all-in dollars over the whole account's all-in total for the same "
-                         "days (billed metering plus estimated storage)."},
+                 "help": "This company's all-in dollars over the whole account's spend for the same days "
+                         "before the cloud-services adjustment (billed metering plus estimated storage, with "
+                         "the adjustment added back). The same basis as the ALL view's Company-attributed "
+                         "share, where the company rows and the unattributed row add up to 100%."},
             ])
             styled_table(table, slug="company-showback", size_note=False)
             st.caption(_SHOWBACK_TABLE_NOTE)
@@ -1221,4 +1236,7 @@ def _company_showback_panel(company: str, days: int, rate: float, ai_rate: float
         "company (warehouse, object-cost and storage rows keep the company stamped when they loaded; the "
         "loaders re-stamp only recent days), while Cortex Code uses today's user mapping. Storage prices "
         "each day's bytes at 1/(days in that month) of the monthly $/TiB rate. Nothing is allocated by a "
-        "share; the unattributed row is the all-in total minus everything with a key."))
+        "share; the unattributed row is the all-in total minus everything with a key. Shares divide by the "
+        "spend before the cloud-services adjustment (the company rows plus the unattributed row), the same "
+        "basis as the company warehouse dollars. The object-cost and Cortex Code facts reload after the "
+        "morning metering load; until they do, a note names the newest day they hold only in part."))

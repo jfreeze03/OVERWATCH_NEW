@@ -222,8 +222,8 @@ def test_populated_all_view_renders_rows_and_tie_out(monkeypatch):
     from tests.test_company_showback import _synthetic_frame
     at = _render(monkeypatch, _qr(_synthetic_frame()), audit=True)
     blob = _texts(at)
-    for label in ("All-in total, Aug 31 – Sep 29", "Company-attributed share", "Unattributed (no company key)",
-                  "Cloud-services adjustment"):
+    for label in ("All-in total, Aug 31 – Sep 29", "Company-attributed share, before adjustment",
+                  "Unattributed (no company key)", "Cloud-services adjustment"):
         assert label in blob, label
     tables = [d.value for d in at.dataframe]
     main = next(t for t in tables if "COMPANY" in getattr(t, "columns", []))
@@ -244,7 +244,7 @@ def test_company_scope_view_hides_account_rows(monkeypatch):
     from tests.test_company_showback import _synthetic_frame
     at = _render(monkeypatch, _qr(_synthetic_frame(only="ALFA")), company="ALFA")
     blob = _texts(at)
-    assert "ALFA all-in, Aug 31 – Sep 29" in blob and "Share of the account's all-in total" in blob
+    assert "ALFA all-in, Aug 31 – Sep 29" in blob and "Share of account spend, before adjustment" in blob
     main = next(d.value for d in at.dataframe if "COMPANY" in getattr(d.value, "columns", []))
     assert main["COMPANY"].tolist() == ["ALFA"]
     caps = " ".join(str(c.value) for c in at.caption)
@@ -257,3 +257,61 @@ def test_company_scope_view_hides_account_rows(monkeypatch):
     quiet = _render(monkeypatch, _qr(empty), company="Trexis")
     assert ("No warehouse, serverless, Cortex Code or storage spend is stamped Trexis in Aug 31 – Sep 29."
             in " ".join(str(c.value) for c in quiet.caption))
+
+
+def _green_rows(at) -> int:
+    """The compact verified-clean rows empty_state('clean') paints (exception_summary's ok row)."""
+    return sum(str(m.value).count("ow-exception--ok") for m in at.markdown)
+
+
+def test_unknown_scope_is_never_clean_while_a_keyed_source_has_a_gap(monkeypatch):
+    # R1-14: an empty UNKNOWN table is verified clear only when every keyed source covers the span
+    from tests.test_company_showback import _COVERAGE, _synthetic_frame
+
+    def _empty_unknown(**kw):
+        return _synthetic_frame(only="UNKNOWN", warehouse={}, serverless=[], coco=[], storage_db={}, **kw)
+
+    never = dict(_COVERAGE)
+    never["FACT_WAREHOUSE_DAILY"] = (None, None)                         # (A) never loaded
+    stale = dict(_COVERAGE)
+    stale["FACT_OBJECT_COST_DAILY"] = ("2026-06-30", "2026-07-15")       # (B) frozen loader
+    none_loaded = {t: (None, None) for t in _COVERAGE if t != "FACT_METERING_DAILY"}
+    none_loaded["FACT_METERING_DAILY"] = _COVERAGE["FACT_METERING_DAILY"]   # (C) metering only
+    cases = {
+        "A": (_empty_unknown(coverage=never), "FACT_WAREHOUSE_DAILY does not cover all of Aug 31 – Sep 29"),
+        "B": (_empty_unknown(coverage=stale), "FACT_OBJECT_COST_DAILY does not cover all of Aug 31 – Sep 29"),
+        "C": (_empty_unknown(coverage=none_loaded, storage_span=(None, None, 0)),
+              # no account-storage day: the per-database line rides it, so the account fact is the one named
+              "FACT_WAREHOUSE_DAILY, FACT_OBJECT_COST_DAILY, FACT_AI_USAGE_DAILY and FACT_STORAGE_ACCOUNT_DAILY "
+              "do not cover all of Aug 31 – Sep 29"),
+        # (D) R1-13: the Cortex Code fact still holds only the morning of the span's last day
+        "D": (_empty_unknown(loaded={"FACT_AI_USAGE_DAILY": "2026-09-29 07:40:00"}),
+              "FACT_AI_USAGE_DAILY does not cover all of Aug 31 – Sep 29"),
+    }
+    for name, (frame, named) in cases.items():
+        at = _render(monkeypatch, _qr(frame), company="UNKNOWN")
+        assert _green_rows(at) == 0, name
+        assert "Nothing in this span is stamped UNKNOWN:" not in _texts(at), name
+        caps = " ".join(str(c.value) for c in at.caption)
+        assert f"Nothing read here is stamped UNKNOWN, but {named} in full" in caps, (name, caps[:400])
+        assert "so UNKNOWN cannot be confirmed clear." in caps, name
+        assert not list(at.success) and not list(at.error), name
+    # the fully covered, fully loaded read keeps its verified-clean row
+    covered = _render(monkeypatch, _qr(_empty_unknown(loaded={"FACT_AI_USAGE_DAILY": "2026-09-30 07:40:00"})),
+                      company="UNKNOWN")
+    assert _green_rows(covered) == 1
+    assert "cannot be confirmed clear" not in " ".join(str(c.value) for c in covered.caption)
+    # a named company stays a quiet caption either way
+    quiet = _render(monkeypatch, _qr(cases["A"][0]), company="Trexis")
+    assert _green_rows(quiet) == 0
+    assert ("No warehouse, serverless, Cortex Code or storage spend is stamped Trexis in Aug 31 – Sep 29."
+            in " ".join(str(c.value) for c in quiet.caption))
+
+
+def test_partly_loaded_day_note_renders_under_the_all_view(monkeypatch):
+    # R1-13: the note reaches the page (the notes loop renders every one under the table)
+    from tests.test_company_showback import _synthetic_frame
+    at = _render(monkeypatch, _qr(_synthetic_frame(loaded={"FACT_OBJECT_COST_DAILY": "2026-09-29 07:05:00"})))
+    caps = " ".join(str(c.value) for c in at.caption)
+    assert ("Serverless: FACT_OBJECT_COST_DAILY's rows for Sep 29, 2026 were loaded before that day was "
+            "complete") in caps

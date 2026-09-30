@@ -148,7 +148,11 @@ def company_allin_showback(days: int, company: str = "ALL", *, bounds: tuple | N
     it, so it is excluded, and today never counts. The storage legs share ``sdays``: the
     account-storage days among those metered days, so a day daily metering skipped is left
     out of every row. COVERAGE rows carry each fact's ledger-wide first/last day (the coverage
-    notes name a late or stale source from them). COMPANY_FOR_USER runs on the grouped user in
+    notes name a late or stale source from them). The object-cost and Cortex Code COVERAGE rows
+    also carry LOADED_AT, the fact's last load (MAX(LOAD_TS), TIMESTAMP_NTZ Central wall time):
+    those facts reload in their own daily runs after the 06:45 CT metering load has moved
+    yesterday into the span, so until they run, the span's newest day holds only the part
+    loaded the morning before, and the notes say so (R1-13). COMPANY_FOR_USER runs on the grouped user in
     a derived-table projection with the company test in an outer WHERE (the V030 shape law, as
     in mart27_sql.live_monthly_spend_by_warehouse). The row count is bounded: tens of service
     types, a few companies x five serverless arms, one row per Cortex Code user, six storage
@@ -181,18 +185,21 @@ def company_allin_showback(days: int, company: str = "ALL", *, bounds: tuple | N
         f"SUM(COALESCE(t.{tier}_BYTES, 0) / POWER(1024, 4) / DAY(LAST_DAY(t.DAY))) AS {tier}_TIB_MO"
         for tier in STORAGE_TIERS)
     tier_rows = "\n".join(
-        f"UNION ALL SELECT 'STORAGE_ACCT', NULL, '{tier}', NULL, NULL, a.{tier}_TIB_MO, NULL, NULL, NULL "
+        f"UNION ALL SELECT 'STORAGE_ACCT', NULL, '{tier}', NULL, NULL, a.{tier}_TIB_MO, NULL, NULL, NULL, NULL "
         f"FROM stor_acct a WHERE a.N_DAYS > 0"
         for tier in STORAGE_TIERS)
+    # LOADED_AT only on the two keyed facts that reload after the metering load (R1-13); the
+    # warehouse fact loads in the metering run itself and storage is one snapshot per day
+    last_load = "MAX(x.LOAD_TS)::TIMESTAMP_NTZ"
     coverage_rows = "\n".join(
-        f"UNION ALL SELECT 'COVERAGE', NULL, '{name}', NULL, NULL, NULL, MIN(x.DAY), MAX(x.DAY), NULL "
+        f"UNION ALL SELECT 'COVERAGE', NULL, '{name}', NULL, NULL, NULL, MIN(x.DAY), MAX(x.DAY), NULL, {loaded} "
         f"FROM {table} x{where}"
-        for name, table, where in (
-            ("FACT_WAREHOUSE_DAILY", warehouse_fact, ""),
-            ("FACT_OBJECT_COST_DAILY", object_cost_fact, ""),
-            ("FACT_AI_USAGE_DAILY", ai_fact, f" WHERE x.SOURCE IN ({srcs})"),
-            ("FACT_STORAGE_DAILY", storage_db_fact, ""),
-            ("FACT_STORAGE_ACCOUNT_DAILY", storage_acct_fact, ""),
+        for name, table, where, loaded in (
+            ("FACT_WAREHOUSE_DAILY", warehouse_fact, "", "NULL"),
+            ("FACT_OBJECT_COST_DAILY", object_cost_fact, "", last_load),
+            ("FACT_AI_USAGE_DAILY", ai_fact, f" WHERE x.SOURCE IN ({srcs})", last_load),
+            ("FACT_STORAGE_DAILY", storage_db_fact, "", "NULL"),
+            ("FACT_STORAGE_ACCOUNT_DAILY", storage_acct_fact, "", "NULL"),
         ))
     return f"""
 WITH win AS (
@@ -249,18 +256,20 @@ WITH win AS (
 )
 SELECT 'WINDOW' AS LINE_KIND, NULL::VARCHAR AS COMPANY, NULL::VARCHAR AS SERVICE_TYPE,
        NULL::FLOAT AS CREDITS, NULL::FLOAT AS CREDITS_ADJUSTMENT, NULL::FLOAT AS TIB_MO,
-       w.W_LO AS FIRST_DAY, DATEADD('day', -1, w.W_HI) AS LAST_DAY, NULL::FLOAT AS DAYS_IN_SPAN
+       w.W_LO AS FIRST_DAY, DATEADD('day', -1, w.W_HI) AS LAST_DAY, NULL::FLOAT AS DAYS_IN_SPAN,
+       NULL::TIMESTAMP_NTZ AS LOADED_AT
 FROM win w
-UNION ALL SELECT 'SPAN', NULL, NULL, NULL, NULL, NULL, MIN(d.DAY), MAX(d.DAY), COUNT(*) FROM mdays d
-UNION ALL SELECT 'STORAGE_SPAN', NULL, NULL, NULL, NULL, NULL, MIN(d.DAY), MAX(d.DAY), COUNT(*) FROM sdays d
-UNION ALL SELECT 'METERING', NULL, m.SERVICE_TYPE, m.CREDITS, m.CREDITS_ADJUSTMENT, NULL, NULL, NULL, NULL
+UNION ALL SELECT 'SPAN', NULL, NULL, NULL, NULL, NULL, MIN(d.DAY), MAX(d.DAY), COUNT(*), NULL FROM mdays d
+UNION ALL SELECT 'STORAGE_SPAN', NULL, NULL, NULL, NULL, NULL, MIN(d.DAY), MAX(d.DAY), COUNT(*), NULL FROM sdays d
+UNION ALL SELECT 'METERING', NULL, m.SERVICE_TYPE, m.CREDITS, m.CREDITS_ADJUSTMENT, NULL, NULL, NULL, NULL, NULL
 FROM metering m
-UNION ALL SELECT 'WAREHOUSE', w.COMPANY, NULL, w.CREDITS, NULL, NULL, NULL, NULL, NULL FROM wh w
-UNION ALL SELECT 'SERVERLESS', s.COMPANY, s.COST_ARM, s.CREDITS, NULL, NULL, NULL, NULL, NULL FROM sl s
-UNION ALL SELECT 'COCO', c.COMPANY, NULL, c.CREDITS, NULL, NULL, NULL, NULL, NULL FROM coco c
-UNION ALL SELECT 'STORAGE_DB', sd.COMPANY, NULL, NULL, NULL, sd.TIB_MO, NULL, NULL, NULL FROM stor_db sd
+UNION ALL SELECT 'WAREHOUSE', w.COMPANY, NULL, w.CREDITS, NULL, NULL, NULL, NULL, NULL, NULL FROM wh w
+UNION ALL SELECT 'SERVERLESS', s.COMPANY, s.COST_ARM, s.CREDITS, NULL, NULL, NULL, NULL, NULL, NULL FROM sl s
+UNION ALL SELECT 'COCO', c.COMPANY, NULL, c.CREDITS, NULL, NULL, NULL, NULL, NULL, NULL FROM coco c
+UNION ALL SELECT 'STORAGE_DB', sd.COMPANY, NULL, NULL, NULL, sd.TIB_MO, NULL, NULL, NULL, NULL FROM stor_db sd
 {tier_rows}
-UNION ALL SELECT 'COVERAGE', NULL, 'FACT_METERING_DAILY', NULL, NULL, NULL, c.M_FIRST, c.M_LAST, NULL FROM mcov c
+UNION ALL SELECT 'COVERAGE', NULL, 'FACT_METERING_DAILY', NULL, NULL, NULL, c.M_FIRST, c.M_LAST, NULL, NULL
+FROM mcov c
 {coverage_rows}
 """
 

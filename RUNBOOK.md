@@ -282,7 +282,16 @@ Admin → Settings, never in code.
   An UNKNOWN row shrinks once a COMPANY_SCOPE mapping lands (Unmapped
   entities on Spend & Attribution): Cortex Code at once, the warehouse,
   object-cost and storage lines as the loaders re-stamp recent days (older
-  days keep their stamp until a backfill).
+  days keep their stamp until a backfill). The Company-attributed share
+  (and a named company's share) is of the spend BEFORE the cloud-services
+  adjustment, so the company rows and the unattributed row add up to 100%;
+  the all-in total and the tie-out stay after it. Each morning, between the
+  06:45 CT metering load and the object-cost / Cortex Code reloads, a note
+  says the span's newest day is only partly loaded on those lines (part of
+  it sits on the unattributed row until they run); a note that persists
+  past mid-morning means that loader is behind (Admin → Migrations &
+  freshness). With Company = UNKNOWN, an empty table reads verified-clean
+  only when every keyed source covers the span in full.
 - **Cortex & Storage** — Cortex daily spend (token-based credits × $2.20),
   storage GB by database × storage rate.
 - **AI Users** — per-user Cortex consumption, exceptions (users over the

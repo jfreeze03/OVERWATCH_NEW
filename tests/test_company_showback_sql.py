@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from app.core.sqlsafe import sql_literal
 from app.data import canary, chargeback_sql
 from app.data.common import account_today_sql
 from app.logic import metric_registry
@@ -172,6 +173,9 @@ def test_span_drops_the_in_progress_metering_day_and_today():
     for sql in (trailing, bounded):
         assert "CURRENT_DATE()" not in sql
         assert "GREATEST(w.W_LO, c.M_FIRST) AS LO" in sql
+        # R1-23: the Window is half-open [W_LO, W_HI), so its last day is W_HI - 1; the stall
+        # threshold and the end-gap note both key on it, so a +1 day shift would move both
+        assert "w.W_LO AS FIRST_DAY, DATEADD('day', -1, w.W_HI) AS LAST_DAY" in sql
 
 
 def test_company_scope_filters_keyed_legs_only():
@@ -199,6 +203,55 @@ def test_coco_company_is_resolved_per_grouped_user():
     # no user name leaves the query: the output carries company totals only
     tail = sql.split("FROM win w\n", 1)[1]
     assert "USER_NAME" not in tail
+
+
+def test_coco_leg_reads_snowsight_and_cli_only():
+    # R1-21: the loader also writes SOURCE='Functions' rows under USER_NAME='ACCOUNT'; without this
+    # filter they would pass through COMPANY_FOR_USER into a company's AI_USD. The COVERAGE row spells
+    # the same list, so the filter is pinned inside the leg itself, built from the constant.
+    want = "WHERE a.SOURCE IN (" + ", ".join(sql_literal(x) for x in COCO_SOURCES) + ")"
+    assert want == "WHERE a.SOURCE IN ('Snowsight', 'CLI')"
+    for company in ("ALL", "ALFA", "UNKNOWN"):
+        body = _cte(chargeback_sql.company_allin_showback(30, company), "coco_user")
+        assert want in body, company
+        # one WHERE and no OR, so a widening ('... OR a.SOURCE = ...') or a second predicate is caught
+        assert body.count("WHERE") == 1 and not re.search(r"\bOR\b", body), body
+
+
+def test_reloaded_keyed_facts_carry_their_last_load_time():
+    # R1-13: the object-cost and Cortex Code facts reload after the 06:45 CT metering load, so their
+    # COVERAGE rows carry MAX(LOAD_TS) for the partly-loaded-day note; the others carry NULL
+    sql = chargeback_sql.company_allin_showback(30, "ALL")
+    assert "NULL::TIMESTAMP_NTZ AS LOADED_AT" in sql
+    rows = {line.split("'")[3]: line for line in sql.splitlines()
+            if line.startswith("UNION ALL SELECT 'COVERAGE'")}
+    assert set(rows) == set(_FACTS)
+    for fact in ("FACT_OBJECT_COST_DAILY", "FACT_AI_USAGE_DAILY"):
+        assert "MIN(x.DAY), MAX(x.DAY), NULL, MAX(x.LOAD_TS)::TIMESTAMP_NTZ FROM" in rows[fact], fact
+    for fact in ("FACT_METERING_DAILY", "FACT_WAREHOUSE_DAILY", "FACT_STORAGE_DAILY", "FACT_STORAGE_ACCOUNT_DAILY"):
+        assert "LOAD_TS" not in rows[fact], fact
+        assert rows[fact].split(" FROM ", 1)[0].rstrip().endswith("NULL, NULL"), fact
+    # the Cortex Code load time is of the Snowsight + CLI rows only, never the Functions arm's
+    assert rows["FACT_AI_USAGE_DAILY"].endswith("WHERE x.SOURCE IN ('Snowsight', 'CLI')")
+
+
+def test_load_time_contract_matches_the_loaders():
+    # LOADED_AT means "the loader's last run" only while both loaders rewrite every recent row's
+    # LOAD_TS (TIMESTAMP_NTZ, CURRENT_TIMESTAMP() in the task's Central session) on each run
+    for table in ("FACT_OBJECT_COST_DAILY", "FACT_AI_USAGE_DAILY"):
+        assert "LOAD_TS" in _table_columns(table), table
+    ddl = "\n".join(p.read_text(encoding="utf-8") for p in _MIG.glob("V*.sql"))
+    assert "LOAD_TS       TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()" in ddl       # V048
+    assert "LOAD_TS TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()" in ddl             # V027
+    version, body = _latest_proc_body("SP_LOAD_OBJECT_COST")
+    assert version >= 139
+    assert "DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY WHERE DAY >= :lo;" in body
+    for cols in re.findall(r"INSERT INTO DBA_MAINT_DB\.OVERWATCH\.FACT_OBJECT_COST_DAILY \(([^)]*)\)", body):
+        assert "LOAD_TS" not in cols                                          # the default stamps each run
+    version, body = _latest_proc_body("SP_LOAD_MARTS_V27")
+    assert version >= 159
+    code_arm = body.split("'Snowsight' AS SOURCE", 1)[1].split("loaded := loaded || 'ai_code '", 1)[0]
+    assert "LAST_TS = s.LAST_TS, LOAD_TS = CURRENT_TIMESTAMP()" in code_arm   # matched rows re-stamped
 
 
 def test_output_columns_are_the_logic_contract():
