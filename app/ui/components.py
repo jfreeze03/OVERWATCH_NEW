@@ -3054,16 +3054,16 @@ def last_refreshed_note() -> str:
 
     rec48: this tracks the SESSION load / manual Refresh, NOT data freshness
     (per-tier caches mean the data may be newer). 'Updated' overclaimed that —
-    say 'Session refreshed' so it does not read as a data-freshness stamp."""
+    say 'Session refreshed' so it does not read as a data-freshness stamp.
+    v4.605.0: the age is the shared humanize_age ('just now' under 45 s, then '5m ago' /
+    '3h ago' / '2d ago'), not a hand-rolled '37s ago' ladder."""
     from datetime import datetime
+
+    from app.logic.formulas import humanize_age
     ts = st.session_state.get("_ow_refreshed_at")
     if not ts:
         return "Live · cached per tier"
-    secs = max(0, int((datetime.now() - ts).total_seconds()))
-    if secs < 60:
-        return f"Session refreshed {secs}s ago"
-    mins = secs // 60
-    return f"Session refreshed {mins}m ago" if mins < 60 else f"Session refreshed {mins // 60}h ago"
+    return f"Session refreshed {humanize_age(ts, datetime.now())}"
 
 
 def download_text_button(label: str, text: str, filename: str) -> None:

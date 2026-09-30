@@ -90,6 +90,16 @@ _SETUP_HINT = "Alerting is not installed yet — an admin can verify on Admin �
 
 RESOLUTION_KINDS = ("ACTIONED", "NOISE", "EXPECTED")
 
+
+def _recheck_value_text(rule_id: object, value: float) -> str:
+    """A re-check value in its rule's unit. PERF_QUEUED_MINUTES measures minutes of queueing, so it reads
+    Hr/Min/Sec like every other duration (v4.605.0; the rule's seeded threshold is minutes too, so both sides
+    of "vs threshold" humanize the same way); the other re-checks (credits, GB, %) keep two decimals."""
+    if str(rule_id or "").strip().upper() == "PERF_QUEUED_MINUTES":
+        return humanize_duration(value, "min")
+    return f"{value:,.2f}"
+
+
 # V086 per-event snooze: label -> hours. The server computes the wake time from the
 # duration (DATEADD in SP_ALERT_SNOOZE), so the app never reasons about the clock.
 SNOOZE_PRESETS = {
@@ -1204,16 +1214,17 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                 st.info("Re-check result unreadable — run it again.")
                             elif _rct is not None and safe_float(_rct) > 0:
                                 if _rcv >= safe_float(_rct):
-                                    st.warning(f"Still over: {_rcl} = {_rcv:,.2f} vs "
-                                               f"threshold {safe_float(_rct):,.2f} "
+                                    st.warning(f"Still over: {_rcl} = {_recheck_value_text(_rid, _rcv)} vs "
+                                               f"threshold {_recheck_value_text(_rid, safe_float(_rct))} "
                                                f"(re-checked {_rca}).")
                                 elif not _rc_fresh:
                                     st.info(f"Was clear when re-checked {_rca}: {_rcl} = "
-                                            f"{_rcv:,.2f} vs threshold {safe_float(_rct):,.2f} "
+                                            f"{_recheck_value_text(_rid, _rcv)} vs threshold "
+                                            f"{_recheck_value_text(_rid, safe_float(_rct))} "
                                             "— re-check again before resolving.")
                                 else:
-                                    st.success(f"Condition clear: {_rcl} = {_rcv:,.2f} vs "
-                                               f"threshold {safe_float(_rct):,.2f} "
+                                    st.success(f"Condition clear: {_rcl} = {_recheck_value_text(_rid, _rcv)} vs "
+                                               f"threshold {_recheck_value_text(_rid, safe_float(_rct))} "
                                                f"(re-checked {_rca}).")
                                     # F50: close the loop the copy promises — one click
                                     # prefills RESOLVE + ACTIONED + the measured evidence
@@ -1225,12 +1236,12 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                             f"alert_action_{event_id[:8]}_{_sel_nonce}": "RESOLVE",
                                             f"alert_kind_{event_id[:8]}_{_sel_nonce}": "ACTIONED",
                                             f"alert_note_{event_id[:8]}_{_sel_nonce}": (
-                                                f"Re-check clear at {_rca}: {_rcl} {_rcv:,.2f} "
-                                                f"vs threshold {safe_float(_rct):,.2f}")[:500],
+                                                f"Re-check clear at {_rca}: {_rcl} {_recheck_value_text(_rid, _rcv)} "
+                                                f"vs threshold {_recheck_value_text(_rid, safe_float(_rct))}")[:500],
                                         }
                                         st.rerun()
                             else:
-                                st.info(f"{_rcl}: {_rcv:,.2f} (rule threshold unavailable).")
+                                st.info(f"{_rcl}: {_recheck_value_text(_rid, _rcv)} (rule threshold unavailable).")
                     hist = _dr.get("hist") or run(
                         mart_sql.events_for_rule(str(row["RULE_ID"]), 90), page=_PAGE,
                         key=f"hist_rule_{event_id[:8]}", tier="recent",

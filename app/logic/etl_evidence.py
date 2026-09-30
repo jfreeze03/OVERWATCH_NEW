@@ -16,10 +16,17 @@ from datetime import date, datetime
 
 import pandas as pd
 
-from app.logic.formulas import account_today, humanize_bytes, humanize_duration, safe_float
+from app.logic.formulas import (
+    account_today,
+    humanize_bytes,
+    humanize_duration,
+    humanize_minutes_ago,
+    safe_float,
+)
 from app.logic.sizing import CLUSTER_CAP_QUALIFIER
 
 QH_LAG_MIN = 45                  # ACCOUNT_USAGE.QUERY_HISTORY latency: absence inside it is not evidence
+_QH_LAG_TXT = humanize_duration(QH_LAG_MIN, "min")   # "45m" -- every sentence that names the lag
 EVIDENCE_QUEUE_PCT = 20.0        # queued share of the CALL's statement time that reads as "slow: queued"
 EVIDENCE_COMPILE_PCT = 30.0      # compile share of the statement time that reads as "compilation-heavy"
 EVIDENCE_OUTSIDE_PCT = 50.0      # Snowflake CALL time below this share of the task window = time outside it
@@ -207,7 +214,7 @@ def task_evidence_lines(df: pd.DataFrame | None, *, task: str) -> list[EvidenceL
     first = df.iloc[0]
     age = safe_float(first.get("END_AGE_MIN"), default=float("inf"))
     recent = age < QH_LAG_MIN
-    _ago = (f"the task ended {int(age)} min ago" if age >= 1
+    _ago = (f"the task ended {humanize_minutes_ago(age)}" if age >= 1
             else "the task ended moments ago or is still running")
     has_call = (df["CALL_QUERY_ID"].map(lambda v: _txt(v, "") != "") if "CALL_QUERY_ID" in df.columns
                 else pd.Series(False, index=df.index))
@@ -215,7 +222,7 @@ def task_evidence_lines(df: pd.DataFrame | None, *, task: str) -> list[EvidenceL
     if calls.empty:
         if recent:
             return [EvidenceLine("no_data_yet",
-                                 f"No CALL of {name} in QUERY_HISTORY yet — it lags up to ~{QH_LAG_MIN} min "
+                                 f"No CALL of {name} in QUERY_HISTORY yet — it lags up to ~{_QH_LAG_TXT} "
                                  f"and {_ago}. Re-check shortly.")]
         return [EvidenceLine(
             "no_data_yet", f"No Snowflake CALL of {name} ran in its window.",
@@ -239,7 +246,7 @@ def task_evidence_lines(df: pd.DataFrame | None, *, task: str) -> list[EvidenceL
     if other_db and recent:
         return [EvidenceLine(
             "no_data_yet", f"No CALL of {name} in {ctl_db} (CONTROL_STATUS's database) in QUERY_HISTORY yet — "
-                           f"it lags up to ~{QH_LAG_MIN} min and {_ago}. The same-named CALL(s) below ran in "
+                           f"it lags up to ~{_QH_LAG_TXT} and {_ago}. The same-named CALL(s) below ran in "
                            f"{_where}, likely another environment. Re-check shortly.")]
     if other_db:
         out.append(EvidenceLine(
@@ -287,7 +294,7 @@ def task_evidence_lines(df: pd.DataFrame | None, *, task: str) -> list[EvidenceL
             elif task_failed and recent:
                 out.append(EvidenceLine(
                     "no_data_yet", f"CONTROL_STATUS failed the task, but QUERY_HISTORY lags up to "
-                                   f"~{QH_LAG_MIN} min and {_ago}; re-check before concluding where the final "
+                                   f"~{_QH_LAG_TXT} and {_ago}; re-check before concluding where the final "
                                    "failure was."))
             elif task_failed and n_calls > len(calls):
                 out.append(EvidenceLine("no_data_yet", too_many))
@@ -313,7 +320,7 @@ def task_evidence_lines(df: pd.DataFrame | None, *, task: str) -> list[EvidenceL
         blind = calls[~_is_set(calls, "CHILD_STATEMENTS")]
         if recent:
             out.append(EvidenceLine(
-                "no_data_yet", f"No failed Snowflake CALL yet — QUERY_HISTORY lags up to ~{QH_LAG_MIN} min "
+                "no_data_yet", f"No failed Snowflake CALL yet — QUERY_HISTORY lags up to ~{_QH_LAG_TXT} "
                                f"and {_ago}; re-check before concluding the failure was on the Informatica "
                                "side."))
         elif n_calls > len(calls):

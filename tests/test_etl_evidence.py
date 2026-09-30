@@ -139,7 +139,9 @@ def test_verdict_not_found() -> None:
 def test_verdict_no_call_recent_says_lag() -> None:
     lines = _lines(_row(CALL_QUERY_ID=None, MATCHED_CALLS=0, END_AGE_MIN=10))
     assert _levels(lines) == ["no_data_yet"]
-    assert "~45 min" in lines[0].text and "10 min ago" in lines[0].text
+    # v4.605.0 (owner 2026-09-30): the lag and the age read Hr/Min/Sec (humanize_duration / humanize_minutes_ago);
+    # this lock moved on purpose from "~45 min" / "N min ago".
+    assert "~45m" in lines[0].text and "10m ago" in lines[0].text
     assert INFORMATICA_SIDE_SENTENCE not in lines[0].text
 
 
@@ -216,7 +218,9 @@ def test_verdict_informatica_side_exact_sentence() -> None:
 def test_verdict_informatica_side_hedged_when_recent() -> None:
     lines = _lines(_row(IS_TASK_FAILED=1, END_AGE_MIN=44))
     assert lines[0].level == "no_data_yet"
-    assert "~45 min" in lines[0].text and "44 min ago" in lines[0].text
+    # v4.605.0 (owner 2026-09-30): the lag and the age read Hr/Min/Sec (humanize_duration / humanize_minutes_ago);
+    # this lock moved on purpose from "~45 min" / "N min ago".
+    assert "~45m" in lines[0].text and "44m ago" in lines[0].text
     assert INFORMATICA_SIDE_SENTENCE not in " ".join(line.text for line in lines)
     assert "clean" not in _levels(lines)
 
@@ -301,7 +305,9 @@ def test_verdict_retried_latest_call_caught_a_statement_failure() -> None:
 def test_verdict_retried_inside_the_lag_is_hedged() -> None:
     newest, older = _retried(END_AGE_MIN=20)
     lines = _lines(newest, {**older, "END_AGE_MIN": 20})
-    assert lines[1].level == "no_data_yet" and "~45 min" in lines[1].text and "20 min ago" in lines[1].text
+    # v4.605.0 (owner 2026-09-30): the lag and the age read Hr/Min/Sec (humanize_duration / humanize_minutes_ago);
+    # this lock moved on purpose from "~45 min" / "N min ago".
+    assert lines[1].level == "no_data_yet" and "~45m" in lines[1].text and "20m ago" in lines[1].text
     assert "likely on the Informatica side" not in " ".join(line.text for line in lines)
 
 
@@ -487,3 +493,11 @@ def test_builder_and_verdict_share_a_column_contract() -> None:
     disp = evidence_display_frame(shaped)
     assert list(disp.columns) == [c for c in ev._DISPLAY_COLUMNS if c in shaped.columns]
     assert set(ev._DISPLAY_COLUMNS) <= set(shaped.columns)   # every displayed column is selected
+
+
+def test_a_null_end_age_no_longer_crashes() -> None:
+    """v4.605.0: a NULL END_AGE_MIN (MAX(TASK_END) NULL) defaults to inf = "not recent"; the old
+    f"{int(age)} min ago" raised OverflowError on it before any line rendered. The age now goes through
+    humanize_minutes_ago, so the drill returns its post-lag reading instead of crashing."""
+    lines = _lines(_row(CALL_QUERY_ID=None, MATCHED_CALLS=0, END_AGE_MIN=None))
+    assert _levels(lines) == ["no_data_yet"] and "ran in its window" in lines[0].text

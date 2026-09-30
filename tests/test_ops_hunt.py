@@ -58,7 +58,9 @@ def test_release_verdict_labels_declare_per_query_units():
          "P95_ELAPSED_SEC": 10.0, "QUEUED_SEC": 0.5, "SPILL_REMOTE_GB": 0.01},
     ])
     labels = {r["Metric"] for r in compare_release_periods(df)}
-    assert "Queued (s/query)" in labels and "Remote spill (GB/query)" in labels
+    # v4.605.0 (owner 2026-09-30): the release-compare labels dropped their stale '(s)' units (the values
+    # were already humanized), so these keys moved on purpose: 'p95 runtime', 'Queued per query'.
+    assert "Queued per query" in labels and "Remote spill (GB/query)" in labels
     assert "Queued (s)" not in labels and "Remote spill (GB)" not in labels
 
 
@@ -81,7 +83,7 @@ def test_release_verdict_flat_when_absolute_move_below_floor():
     ])
     v = {r["Metric"]: r["Verdict"] for r in compare_release_periods(df)}
     assert v["Failure %"] == "Flat"
-    assert v["p95 runtime (s)"] == "Flat"
+    assert v["p95 runtime"] == "Flat"                     # key moved v4.605.0 (stale "(s)" dropped)
 
 
 # ---- F9 (LOW): duration detectors disclose sub-baseline windows --------------------

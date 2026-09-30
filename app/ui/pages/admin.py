@@ -1526,7 +1526,7 @@ def _stmt_timeout_ceiling() -> None:
         "from the user or account), so a lower account or user value also caps reads; with neither set "
         f"anywhere, Snowflake's own default of {humanize_duration(_SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S, 's')} "
         f"({_SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S} s) applies. Since "
-        f"{_STMT_PARAMS_SINCE}, each Cortex evaluation also sends its own {CORTEX_TIMEOUT_SECONDS}s "
+        f"{_STMT_PARAMS_SINCE}, each Cortex evaluation also sends its own {humanize_duration(CORTEX_TIMEOUT_SECONDS, 's')} "
         "per-statement ceiling (the lower of the two wins). That is unverified under Streamlit-in-Snowflake, "
         "which is confirmed to override per-statement query tags. To enforce a tighter read ceiling, SET it "
         "on the warehouse or account."

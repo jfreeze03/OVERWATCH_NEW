@@ -126,9 +126,9 @@ def operations_signals(inputs: pd.DataFrame | None, stale_sources: int = 0) -> l
         elif tf_pct >= 1:
             sigs.append(Signal("warn", f"task failures {tf_pct:.1f}%"))
         if queue_min_day >= 30:
-            sigs.append(Signal("bad", f"warehouse queueing {queue_min_day:.0f} min/day"))
+            sigs.append(Signal("bad", f"warehouse queueing {humanize_duration(queue_min_day, 'min')}/day"))
         elif queue_min_day >= 10:
-            sigs.append(Signal("warn", f"warehouse queueing {queue_min_day:.0f} min/day"))
+            sigs.append(Signal("warn", f"warehouse queueing {humanize_duration(queue_min_day, 'min')}/day"))
         # r28 (bug-hunt): remote spill is a PER-DAY rate (5 GB/day onset, matching the
         # platform score in scoring.py; the docstring above says "spill 5 GB"). It was
         # compared as a WINDOW TOTAL while queue above is correctly /ndays — so the
