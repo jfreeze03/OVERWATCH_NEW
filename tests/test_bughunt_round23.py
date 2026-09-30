@@ -78,8 +78,9 @@ def test_ai_governance_queue_message_is_honest_about_idempotency():
     src = _src("app/ui/pages/cost_parts/ai_chargeback.py")
     assert 'f"{count}/{len(statements)} action(s) queued."' not in src
     assert "action(s) queued" not in src
-    # v4.605: the receipt of the shared Track write claims no count -- it says the write is idempotent
-    assert 'notify(True, "Tracked in Action Center (idempotent: a user or scope' in src
+    # v4.605: the receipt of the shared Track write claims no count -- it says an open item is never duplicated
+    # (a stronger signal raises the open item's severity instead)
+    assert 'notify(True, "Tracked in Action Center. An open item is never duplicated; a stronger signal ' in src
 
 
 def test_brief_verdict_guards_a_failed_incident_read():

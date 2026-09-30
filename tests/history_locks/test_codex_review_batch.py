@@ -117,7 +117,8 @@ def test_ledger_verify_has_state_guard():                # #26
 
 def test_ai_exception_queue_is_idempotent():             # #39
     # v4.605: the idempotency moved from the page's COMPANY + TITLE + month check into the shared Track write,
-    # entity-keyed and scoped to the page's SOURCE (plus the legacy-title arm for pre-v4.605 open rows).
+    # entity-keyed and scoped to the page's SOURCE (plus the legacy-title arm for pre-v4.605 open rows, under
+    # any SOURCE name the page ever wrote).
     from app.logic.fix_queue import AI_TRACK_SOURCE, track_entities_sql
     cb = _src("app/ui/pages/cost_parts/ai_chargeback.py")
     assert "track_entities_sql(" in cb and "source_scoped=True" in cb
@@ -125,7 +126,7 @@ def test_ai_exception_queue_is_idempotent():             # #39
                              entity_type="USER", source=AI_TRACK_SOURCE, actor_sql="CURRENT_USER()",
                              bulk=False, source_scoped=True)
     assert "WHERE NOT EXISTS (" in sql
-    assert f"WHERE q.SOURCE = '{AI_TRACK_SOURCE}'" in sql
+    assert f"WHERE ((q.SOURCE = '{AI_TRACK_SOURCE}'" in sql
     assert "AND UPPER(q.SOURCE_ENTITY_KEY) = UPPER(v.ENTITY_KEY))" in sql
     assert "q.TITLE =" not in sql
 
