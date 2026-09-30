@@ -80,6 +80,7 @@ from app.logic.savings_rollup import (
     unread_lever,
 )
 from app.logic.sizing import size_recommendations
+from app.logic.storage_waste import H_STORAGE_BASIS
 from app.logic.verdict import decision_studio_signals, page_verdict
 from app.logic.workbench import ENTITY_TYPES, mark_watched_pairs, stale_planning
 from app.ui import charts
@@ -1035,8 +1036,8 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
                          "when Cost ▸ Optimization & Savings ▸ Storage & waste confirmed it against access history "
                          "this session, for this Company with the Database filter clear (the last 30 complete "
                          "days of maintenance); and storage waste only when that section's storage-waste scan ran "
-                         "this session for this Company (the current bytes of tables nobody read in 90 days, at "
-                         "your storage rate). Both are ESTIMATED, " + H_BOOKED + "; a table counted by both "
+                         "this session for this Company (tables nobody read in 90 days: " + H_STORAGE_BASIS
+                         + "). Both are ESTIMATED, " + H_BOOKED + "; a table counted by both "
                          "counts once (the larger wins). When the efficiency mart cannot be read or has "
                          "no metering, the figure counts only the other levers and the delta says the idle timer "
                          "is missing. The caption below names the levers counted. Estimates, not verified savings."}

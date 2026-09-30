@@ -127,6 +127,7 @@ from app.logic.sizing import (
 )
 from app.logic.storage_waste import (
     FLOOR_LEGEND,
+    H_STORAGE_BASIS,
     LEVER_LEGEND,
     STORAGE_BOOKED_TYPES,
     lever_rows,
@@ -1129,7 +1130,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                          "resize counts once, and so does a table counted by more than one of unread maintenance "
                          "and storage waste (the larger wins). Idle and right-sizing are measured over this "
                          "window. Unread maintenance (the last 30 complete days of maintenance) and storage waste "
-                         "(the table's current bytes at your storage rate) are ESTIMATED, on objects confirmed "
+                         "(" + H_STORAGE_BASIS + ") are ESTIMATED, on objects confirmed "
                          "unread in Storage & waste this session, " + H_BOOKED + "; an "
                          "object you stopped without booking keeps counting until those 30 days roll off. A table "
                          "you dropped or re-set in a worksheet keeps counting until the storage-waste scan is "
@@ -2051,8 +2052,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         "label": "Stale AND never read (90d)", "value": f"{len(never)}",
                         "severity": "warn" if len(never) else "ok",
                         "help": "No DML and no reads in ACCESS_HISTORY for 90 days. LEVER below says which of "
-                                "them count as Archive or drop (a shared-out database or a table under 90 days "
-                                "old does not). Verify with owners before dropping.",
+                                "them count as Archive or drop (a shared-out database, a table under 90 days "
+                                "old, or one that shares storage with a clone does not). Verify with owners "
+                                "before dropping.",
                     })
                 if _sv_ok:
                     kpis_w.append({
@@ -2061,9 +2063,12 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         "severity": "warn" if _sv_n else "ok",
                         "help": "ESTIMATED at your storage rate: the Archive or drop and Cut retention rows in "
                                 "LEVER below (tables nobody read in 90 days, at least 90 days old, not in a "
-                                "shared-out database). Fail-safe, clone-retained bytes and tables under 1 GB never "
-                                "count." + (" Only the top 50 tables by retention bytes are scanned, so this is "
-                                            "a floor." if _wtrunc else ""),
+                                "shared-out database). Fail-safe, clone-retained bytes, stale tables that share "
+                                "storage with a clone (Check clones) and tables under 1 GB never count. Tables "
+                                "already booked on the Savings ledger are in this sum but left out of Addressable "
+                                "$/mo (the line at the end of this panel counts them)."
+                                + (" Only the top 50 tables by retention bytes are scanned, so this is "
+                                   "a floor." if _wtrunc else ""),
                     })
                 if _sv_ok and _sv_n:
                     # Tables already booked on the Savings ledger (a retention cut, or an unread-maintenance saving
@@ -2182,7 +2187,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     if not _ret_known:
                         st.warning(
                             "Current DATA_RETENTION_TIME_IN_DAYS is unavailable. No ALTER or savings "
-                            "entry is generated until the setting can be verified."
+                            "estimate is generated until the setting can be verified."
                         )
                     elif not _can_reduce:
                         st.info(
@@ -2202,40 +2207,27 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         est_w = round(_freed_gb / 1024 * _rate_tb, 2)
                         st.caption(
                             f"{_basis} (~${est_w:,.2f}/mo, ESTIMATED). Current retention is read live from "
-                            "the table's metadata at selection, so this reduction can't silently raise a "
+                            "the table's metadata at selection, so this statement can't silently raise a "
                             "retention that was lowered elsewhere. Time-Travel bytes also age out on their "
                             f"own as the existing window rolls forward. The {_fs_gb:,.0f} GB of failsafe is "
-                            "NOT included: it drains on a fixed 7-day schedule regardless of this setting."
+                            "NOT included: it drains on a fixed 7-day schedule regardless of this setting. The "
+                            "estimate assumes no account-level MIN_DATA_RETENTION_TIME_IN_DAYS above the "
+                            "retention you set (not checked here): a higher floor keeps that Time Travel."
                         )
-                        if (confirm_gate(str(wrow["TABLE_NAME"]), "Execute retention change + log", key="waste",
-                                         prompt="Type the table name to confirm", object_name=True)
-                                and write_gate_open("waste")):
-                            ok, msg = execute_statement(stmt_w, page=_PAGE)
-                            execute_statement(
-                                f"INSERT INTO {core_object('REMEDIATION_LOG')} "
-                                "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, EST_MONTHLY_SAVINGS_USD, STATUS, RESULT_NOTE, EXECUTED_BY) "
-                                f"SELECT 'RETENTION', {sql_literal('.'.join([str(wrow['DATABASE_NAME']), str(wrow['SCHEMA_NAME']), str(wrow['TABLE_NAME'])]))}, "
-                                f"{sql_literal(stmt_w)}, {sql_number(est_w)}, "
-                                f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}, {identity_sql()}", page=_PAGE)
-                            if ok and est_w > 0:
-                                execute_statement(
-                                    f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
-                                    "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES, FINDING_TYPE, TARGET_OBJECT) "
-                                    f"SELECT {sql_literal('Retention ' + str(wrow['TABLE_NAME']) + ' -> ' + str(int(keep_days)) + 'd')}, "
-                                    f"'ESTIMATED', {sql_number(est_w)}, {sql_literal(stmt_w)}, "
-                                    "'Booked from storage-waste scan.', "
-                                    f"'RETENTION', {sql_literal('.'.join([str(wrow['DATABASE_NAME']), str(wrow['SCHEMA_NAME']), str(wrow['TABLE_NAME'])]))}", page=_PAGE)
-                            stamp_write("waste", ok)  # C48
-                            if ok and _st_booked is not None:
-                                _st_booked = _st_booked | {object_key(".".join([str(wrow["DATABASE_NAME"]),
-                                                                                str(wrow["SCHEMA_NAME"]),
-                                                                                str(wrow["TABLE_NAME"])]))}
-                            notify(ok, msg if not ok else
-                                   f"Retention set to {int(keep_days)}d on {wrow['TABLE_NAME']}.")
+                        # v4.605 review r1: review only. The executor's allow-list (query._WRITE_PREFIXES) refuses
+                        # ALTER TABLE on purpose (a prefix would admit every ALTER TABLE, and every SiS viewer runs
+                        # with the owner's rights), so an Execute button here could only log a FAILED row. Like the
+                        # #30 unread-maintenance statements, the ALTER is shown for a worksheet, never run.
+                        st.caption(md_dollars(
+                            "Review only: OVERWATCH never runs this ALTER (ALTER TABLE is outside the in-app "
+                            "executor's allow-list). Confirm with the table's owner, then run it in a worksheet. "
+                            "The table keeps counting in Addressable $/mo until the storage-waste scan is re-run "
+                            "after account usage shows the change."))
                 # Next-Fifty #35 storage leg: the ONLY path from these rows to Addressable $/mo (Idle & sizing, Proof
-                # ▸ Pipeline): a primitives-only snapshot in a non-widget session key, written after any retention
-                # change this run (that table is left out at once). Only the read-evidence frame carries rows; it is
-                # never cleared when the toggle is off (Streamlit resets it on every revisit).
+                # ▸ Pipeline): a primitives-only snapshot in a non-widget session key. The retention control above
+                # is review only (OVERWATCH never runs its ALTER), so a table re-set in a worksheet keeps counting
+                # until the scan is re-run after account usage shows the change. Only the read-evidence frame
+                # carries rows; it is never cleared when the toggle is off (Streamlit resets it on every revisit).
                 st.session_state[STORAGE_HANDOFF_KEY] = storage_handoff(
                     sdf if _sv_ok else None, status=STORAGE_CONFIRMED if _sv_ok else STORAGE_NO_READS, company=company,
                     database="", scope=cache_scope(), as_of=utc_now(), rate=_waste_rate_tb, checked=len(sdf),

@@ -48,7 +48,7 @@ def _row(db: str, schema: str, table: str, **kw) -> dict:
     row = {"DATABASE_NAME": db, "SCHEMA_NAME": schema, "TABLE_NAME": table, "ACTIVE_GB": 0.0,
            "TIME_TRAVEL_GB": 0.0, "FAILSAFE_GB": 5.0, "CLONE_RETAINED_GB": 0.0, "RETENTION_DAYS": 1.0,
            "RETENTION_KNOWN": True, "LAST_DML": pd.NaT, "LAST_READ": pd.NaT, "DML_STATUS": "STALE",
-           "NEVER_READ": True, "SHARED_DATABASE": False, "OLDER_THAN_90D": True}
+           "NEVER_READ": True, "SHARED_DATABASE": False, "OLDER_THAN_90D": True, "CLONE_GROUP_LIVE": 1}
     row.update(kw)
     return row
 
@@ -58,13 +58,15 @@ def _reclaim(*rows: dict) -> pd.DataFrame:
 
 
 # a stale unread table (Archive or drop: 1 TiB active = $23.00/mo at the $23 default), a written unread one (Cut
-# retention: 102.4 GB TT x (5 - 1) / 5 = $1.84/mo), one read in 90 days (Keep) and one in a shared-out database
+# retention: 102.4 GB TT x (5 - 1) / 5 = $1.84/mo), one read in 90 days (Keep), one in a shared-out database, and a
+# stale unread clone source (Check clones, unpriced: another live table shares its clone group)
 _RECLAIM = _reclaim(
     _row("DB", "S", "STALE_T", ACTIVE_GB=1024.0),
     _row("DB", "S", "WRITTEN_T", DML_STATUS="ACTIVE", TIME_TRAVEL_GB=102.4, RETENTION_DAYS=5.0, ACTIVE_GB=50.0,
          LAST_DML=pd.Timestamp("2026-09-20")),
     _row("DB", "S", "READ_T", NEVER_READ=False, ACTIVE_GB=300.0, LAST_READ=pd.Timestamp("2026-09-25")),
     _row("SHR", "S", "T", SHARED_DATABASE=True, ACTIVE_GB=200.0),
+    _row("DB", "S", "CLONED_T", ACTIVE_GB=2048.0, CLONE_GROUP_LIVE=2),
 )
 _FRAMES = {_RECLAIM_MARK: _RECLAIM, _LEDGER_MARK: _LEDGER}
 _ROWS = [["STORAGE", "DB.S.STALE_T", 23.0, 0.6], ["RETENTION", "DB.S.WRITTEN_T", 1.84, 0.6]]
@@ -102,10 +104,11 @@ def test_unread_tables_join_the_addressable_headline(monkeypatch):
     assert handoff["status"] == "confirmed" and handoff["rows"] == _ROWS and handoff["booked_excluded"] == 0
     blob = _texts(at)
     assert "2 unread table(s) join Addressable $/mo in Idle & sizing and on Proof ▸ Pipeline" in blob
-    assert "LEVER says whether a table counts in Addressable $/mo" in blob
-    assert "Archive or drop is a floor" not in blob                         # 4 rows: not the top-50 floor
+    assert "LEVER says whether a table qualifies for Addressable $/mo" in blob
+    assert "Archive or drop is a floor" not in blob                         # 5 rows: not the top-50 floor
     frame = next(f for f in _frames(at) if "LEVER" in f.columns)
-    assert list(frame["LEVER"]) == ["Archive or drop", "Cut retention", "Keep", "Check share consumers"]
+    assert list(frame["LEVER"]) == ["Archive or drop", "Cut retention", "Keep", "Check share consumers",
+                                    "Check clones"]
     assert list(frame.columns[:5]) == ["DATABASE_NAME", "SCHEMA_NAME", "TABLE_NAME", "LEVER", "EST_MONTHLY_USD"]
     value, card = _card(at, "Reclaimable $/mo (unread tables)")
     assert value == "$24.84", card

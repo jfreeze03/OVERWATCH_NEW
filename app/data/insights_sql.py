@@ -1198,6 +1198,16 @@ def storage_reclaim(company: str = "ALL", min_gb: float = 1.0, read_days: int = 
     reach this account's access history. OLDER_THAN_90D is TRUE only for a table
     created at least 90 days ago (a NULL created time is FALSE), so a 'no read in
     90 days' claim spans the whole window. Same single statement, same LIMIT.
+
+    CLONE_GROUP_LIVE (v4.605 review r1) is how many LIVE tables share the row's
+    CLONE_GROUP_ID. A source owns the micro-partitions its clones share, so
+    dropping it frees nothing a clone still references (they turn into
+    retained-for-clone bytes of the dropped table, which this DELETED = FALSE scan
+    no longer shows): logic.storage_waste leaves a stale table in a group of more
+    than one, or one retaining bytes for a clone, unpriced ('Check clones'). The
+    count is taken over every live table in the account, BEFORE the Company scope
+    and the LIMIT, because a clone can sit in another Company's database or
+    outside the top 50.
     """
     read_days = bounded_days(read_days, 90)
     min_bytes = int(max(0.1, float(min_gb)) * 1024 ** 3)
@@ -1219,6 +1229,12 @@ shared_db AS (
     SELECT DISTINCT UPPER(NAME) AS DB
     FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES
     WHERE GRANTED_TO = 'SHARE' AND GRANTED_ON = 'DATABASE' AND DELETED_ON IS NULL
+),
+clone_groups AS (
+    SELECT CLONE_GROUP_ID, COUNT(*) AS CLONE_GROUP_LIVE
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_STORAGE_METRICS
+    WHERE DELETED = FALSE AND CLONE_GROUP_ID IS NOT NULL
+    GROUP BY 1
 )
 SELECT
     m.TABLE_CATALOG AS DATABASE_NAME,
@@ -1235,7 +1251,8 @@ SELECT
     IFF(d.LAST_DML IS NULL, 'STALE', 'ACTIVE') AS DML_STATUS,
     IFF(r.LAST_READ IS NULL, TRUE, FALSE)      AS NEVER_READ,
     (sd.DB IS NOT NULL)                        AS SHARED_DATABASE,
-    IFF(m.TABLE_CREATED <= DATEADD('day', -90, CURRENT_TIMESTAMP()), TRUE, FALSE) AS OLDER_THAN_90D
+    IFF(m.TABLE_CREATED <= DATEADD('day', -90, CURRENT_TIMESTAMP()), TRUE, FALSE) AS OLDER_THAN_90D,
+    cg.CLONE_GROUP_LIVE
 FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_STORAGE_METRICS m
 LEFT JOIN (
     SELECT TABLE_ID, MAX(END_TIME) AS LAST_DML
@@ -1246,6 +1263,7 @@ LEFT JOIN (
 {_RETENTION_JOIN_SQL}
 LEFT JOIN reads r ON r.TABLE_ID = m.ID
 LEFT JOIN shared_db sd ON sd.DB = UPPER(m.TABLE_CATALOG)
+LEFT JOIN clone_groups cg ON cg.CLONE_GROUP_ID = m.CLONE_GROUP_ID
 WHERE {where}
 -- r36: COALESCE the clone term — RETAINED_FOR_CLONE_BYTES is NULL for never-cloned tables (the
 -- common case), and TT + FS + NULL = NULL, which Snowflake sorts NULLS-FIRST under DESC, so
