@@ -269,6 +269,25 @@ def test_operations_warehouses_sizing_lens_renders_shaped():
 
 
 @pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
+def test_cost_chargeback_section_renders_shaped():
+    """#42 Part 1: Cost > Chargeback & AI is not the default section, so the page sweep never paints
+    it. Drive it under shaped data so Department chargeback, the Company all-in showback (its batched
+    member) and Query-tag governance all execute; a column a builder does not return raises here."""
+    at = AppTest.from_function(_entry, default_timeout=30)
+    at.run()
+    assert not at.exception
+    _nav_to(at, "Cost Intelligence")
+    at.session_state["cost_section"] = "Chargeback & AI"
+    at.run()
+    assert not at.exception, f"cost chargeback (shaped): {at.exception}"
+    assert not any("could not finish rendering" in str(getattr(e, "value", "")) for e in at.error), \
+        "the Chargeback & AI section raised mid-render"
+    blob = " ".join(m.value for m in at.markdown)
+    assert "Company all-in showback" in blob, "the showback section header did not paint"
+    assert "Department chargeback" in blob and "Query-tag governance" in blob
+
+
+@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_operations_optimize_renders_shaped():
     """v4.597 (Option C): Operations > Optimize is not the default section, so the page sweep never
     paints it. Drive it with the live-profile toggle ON, an operator role and a selected family, so

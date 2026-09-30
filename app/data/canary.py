@@ -311,6 +311,9 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
      lambda: mart_sql.ledger_before_after("TABLE", "DB.SCH.T_CANARY", account_today() - timedelta(days=15))),
     ("mart.alert_mttr.canary", lambda: mart_sql.alert_mttr(2)),
     ("chargeback.department_window", lambda: chargeback_sql.department_window_credits(1, "ALFA")),
+    # #42 Part 1: every fact it reads is a core OVERWATCH table, so an absence is a real failure
+    # (deliberately NOT in EXPECTED_GAPS).
+    ("chargeback.company_allin_showback", lambda: chargeback_sql.company_allin_showback(2, "ALFA")),
     ("chargeback.role_share", lambda: chargeback_sql.role_share_within_warehouse(1, "ALFA")),
     ("chargeback.department_map", chargeback_sql.department_map),
     ("chargeback.role_department", lambda: chargeback_sql.role_department_map_join(1, "ALFA")),

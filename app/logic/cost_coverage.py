@@ -256,14 +256,19 @@ def drill_ready_spend_share(frame: pd.DataFrame) -> float:
     return covered / total * 100.0
 
 
-# Company/owner-ATTRIBUTABLE spend: only own-account warehouse metering carries a
-# company key — COMPANY_FOR_WAREHOUSE resolves THIS account's warehouse names.
-# Everything else is the "unattributed gap": reader-account metering (compute runs
-# in the consumer account, no company key here — and no reader drill exists, rec
-# #43), serverless, AI/Cortex, replication, storage credits. This is a DIFFERENT
-# axis from drill_ready_spend_share (object-level drillability), but the two AGREE
-# that reader/serverless are not company-attributable — so the two coverage
-# percentages on the Spend screen never contradict each other.
+# Company/owner-ATTRIBUTABLE spend in the METERING lens: only own-account warehouse
+# metering carries a company key in metering — COMPANY_FOR_WAREHOUSE resolves THIS
+# account's warehouse names. Everything else is the metering "unattributed gap":
+# reader-account metering (compute runs in the consumer account, no company key here —
+# and no reader drill exists, rec #43), serverless, AI/Cortex, replication, storage
+# credits. This is a DIFFERENT axis from drill_ready_spend_share (object-level
+# drillability), but the two AGREE that reader/serverless are not company-attributable
+# from metering — so the two coverage percentages on the Spend screen never contradict
+# each other. #42: Chargeback & AI → Company all-in showback (app.logic.showback) reads
+# the OTHER facts' company keys (the object-cost ledger, per-user Cortex Code usage,
+# per-database storage) to attribute serverless, Cortex Code and storage. This constant
+# is deliberately NOT widened for that: attribution_gap splits METERING rows only, and
+# no metering row carries those keys.
 _ATTRIBUTABLE_CATEGORIES = ("Warehouse",)
 
 
