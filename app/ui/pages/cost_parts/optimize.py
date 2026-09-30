@@ -2260,7 +2260,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     else:
                         st.caption(
                             f"Highest-value quiet window {proposal['start']:02d}:00–{proposal['end']:02d}:00 "
-                            f"({proposal['hours']}h, ~{proposal['avg_credits_per_day']} credits/day burned idle). "
+                            f"({humanize_duration(proposal['hours'], 'h')}, ~{proposal['avg_credits_per_day']} credits/day burned idle). "
                             f"Weekday schedule below; review before executing — resume-on-demand still works "
                             f"if a job fires early."
                         )

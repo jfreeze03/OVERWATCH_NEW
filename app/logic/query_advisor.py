@@ -10,6 +10,10 @@ v4.595: ONE finding is text-keyed rather than shape-keyed — ``sleep_polling`` 
 (fingerprint grain) or QUERY_TEXT (per-query drill) for a SYSTEM$WAIT call, because a sleep looks
 like healthy warehouse work by every numeric column (tiny compile, execution = the wait).
 
+v4.605.0 (owner decision 2026-09-30): every duration a finding names reads Hr/Min/Sec through
+formulas.humanize_duration ("Spent 2m 30s queued (of 3m 20s total)"), like the tables and KPI cards;
+the wording, points and ranking are unchanged. Byte quantities ("Spilled 2.3 GB") are not durations.
+
 Thresholds mirror ops_sql.query_optimization_triage / poor_pruning_queries EXACTLY
 (remote spill > 0; PARTITIONS_TOTAL >= 100 AND scan-ratio > 0.8; > 50 GB scanned)
 so the drill's findings never contradict the triage table that links here. The
@@ -182,8 +186,8 @@ def advise(row: Mapping[str, object], *,
         pts = _cap(10 + (compile_frac * 100 - 70) / 3, _CAP["metadata_chatter"])
         findings.append(Finding(
             "metadata_chatter", "warn", "Metadata chatter",
-            f"Compilation was {compile_frac * 100:.0f}% of a {elapsed:.1f}s runtime with only "
-            f"{execution_sec:.1f}s of execution — this is a metadata / discovery call (SHOW, "
+            f"Compilation was {compile_frac * 100:.0f}% of a {humanize_duration(elapsed, 's')} runtime with only "
+            f"{humanize_duration(execution_sec, 's')} of execution — this is a metadata / discovery call (SHOW, "
             "INFORMATION_SCHEMA, a SYSTEM$ probe, or a driver's schema introspection), not "
             "warehouse work. A resize won't help. Reduce the CADENCE: cache the metadata, batch "
             "the calls, pool connections, or quiet the tool issuing it (Operations > Queries > "
@@ -198,7 +202,7 @@ def advise(row: Mapping[str, object], *,
         pts = _cap(10 + (frac - 50) / 5, _CAP["compile_bound"])
         findings.append(Finding(
             "compile_bound", "warn", "Compile-bound",
-            f"Compilation was {frac:.0f}% of the {elapsed:.1f}s runtime — usually a "
+            f"Compilation was {frac:.0f}% of the {humanize_duration(elapsed, 's')} runtime — usually a "
             "huge IN-list or a very wide/heavily-joined statement. Parameterize the "
             "IN-list (bind or a temp table) or simplify the statement.",
             pts))
@@ -254,10 +258,11 @@ def advise(row: Mapping[str, object], *,
     if (queued_sec >= QUEUE_MIN_SEC and elapsed > 0 and safe_div(queued_sec, elapsed) > QUEUE_FRACTION
             and (queued_run_pct < 0 or queued_run_pct >= FINGERPRINT_QUEUE_TYPICAL_SHARE)):
         pts = _cap(8 + queued_sec, _CAP["queued"])
+        queued_txt, elapsed_txt = humanize_duration(queued_sec, "s"), humanize_duration(elapsed, "s")
         if wait_cause == "provisioning":
             findings.append(Finding(
                 "cold_start", "warn", "Cold-start wait",
-                f"Waited {queued_sec:.0f}s (of {elapsed:.1f}s total), {prov_sec:.0f}s of it PROVISIONING — "
+                f"Waited {queued_txt} (of {elapsed_txt} total), {humanize_duration(prov_sec, 's')} of it PROVISIONING — "
                 "the warehouse was resuming from suspend, not overloaded. A bigger warehouse won't help "
                 "(each size step doubles the per-second rate). If the wait matters, keep it warm across "
                 "this query's schedule (co-schedule it with other work on the warehouse, or lengthen "
@@ -267,7 +272,7 @@ def advise(row: Mapping[str, object], *,
         elif wait_cause == "overload":
             findings.append(Finding(
                 "queued", "warn", "Queued",
-                f"Spent {queued_sec:.0f}s queued (of {elapsed:.1f}s total), {over_sec:.0f}s of it OVERLOAD — "
+                f"Spent {queued_txt} queued (of {elapsed_txt} total), {humanize_duration(over_sec, 's')} of it OVERLOAD — "
                 "the warehouse was saturated. A concurrency problem, not bad SQL: add a cluster or move "
                 "this workload to its own warehouse; size up only if single queries are also slow or "
                 "spilling. On a multi-cluster warehouse, raise MAX_CLUSTER_COUNT only if its queries reach "
@@ -277,14 +282,14 @@ def advise(row: Mapping[str, object], *,
         elif split_known:  # no dominant cause: the hedge, with the cluster-cap rule (review r3 R3-2 / R3-7)
             findings.append(Finding(
                 "queued", "warn", "Queued",
-                f"Spent {queued_sec:.0f}s queued (of {elapsed:.1f}s total) — either "
+                f"Spent {queued_txt} queued (of {elapsed_txt} total) — either "
                 "concurrency (add a cluster or size up for parallelism; " + CLUSTER_CAP_QUALIFIER + ") or "
                 "warehouse resume overhead (lengthen AUTO_SUSPEND / keep it warm).",
                 pts))
-        else:  # split unknown (older row shape): the original combined wording, byte-locked by Next-Fifty #17
+        else:  # split unknown (older row shape): the original combined wording (Next-Fifty #17); numbers humanized v4.605.0 (owner 2026-09-30)
             findings.append(Finding(
                 "queued", "warn", "Queued",
-                f"Spent {queued_sec:.0f}s queued (of {elapsed:.1f}s total) — either "
+                f"Spent {queued_txt} queued (of {elapsed_txt} total) — either "
                 "concurrency (add a cluster or size up for parallelism) or warehouse "
                 "resume overhead (lengthen AUTO_SUSPEND / keep it warm).",
                 pts))

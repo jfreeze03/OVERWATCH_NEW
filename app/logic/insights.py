@@ -293,7 +293,7 @@ def flag_repeat_candidates(df: pd.DataFrame, window_days: int = REPEAT_GATE_BASE
     )
     out["WHY"] = out.apply(
         lambda r: (
-            f"{r['RUNS_PER_30D']:.1f} runs/30d, {r['HOURS_PER_30D']:.1f}h compute/30d, "
+            f"{r['RUNS_PER_30D']:.1f} runs/30d, {humanize_duration(r['HOURS_PER_30D'], 'h')} compute/30d, "
             f"{r['AVG_CACHE_PCT']:.0f}% cache — consider a materialized/refreshed table or schedule change."
         ) if r["CANDIDATE"] else "",
         axis=1,
@@ -458,8 +458,8 @@ _RELEASE_METRICS = (
     # regression. Queued/spill are now PER-QUERY (insights_sql normalizes by QUERY_COUNT).
     ("QUERY_COUNT", "Queries", None, 0.0),
     ("FAIL_PCT", "Failure %", True, 0.5),                    # >= 0.5 percentage point
-    ("P95_ELAPSED_SEC", "p95 runtime (s)", True, 2.0),      # >= 2 s
-    ("QUEUED_SEC", "Queued (s/query)", True, 0.1),          # >= 0.1 s per query
+    ("P95_ELAPSED_SEC", "p95 runtime", True, 2.0),      # >= 2 s
+    ("QUEUED_SEC", "Queued per query", True, 0.1),          # >= 0.1 s per query
     ("SPILL_REMOTE_GB", "Remote spill (GB/query)", True, 0.001),  # >= ~1 MB per query
 )
 _FLAT_TOLERANCE_PCT = 10.0
@@ -485,7 +485,7 @@ def compare_release_periods(df: pd.DataFrame) -> list[dict]:
         if col == "P95_ELAPSED_SEC":
             return humanize_duration(v, "s")
         if col == "QUEUED_SEC":               # per-query seconds — small, show 2 decimals
-            return f"{v:,.2f} s/q"
+            return f"{humanize_duration(v, 's')}/q"
         if col == "SPILL_REMOTE_GB":          # per-query GB — tiny, render as MB/query
             return f"{v * 1024:,.1f} MB/q"
         if col == "FAIL_PCT":
@@ -2204,25 +2204,27 @@ def pipeline_sla_forecast(df: pd.DataFrame, *, overdue_k: float = 1.5) -> pd.Dat
         if not is_met:
             forecasts.append("Breached")
             severities.append("High")
-            details.append(f"already {hs:.1f}h old (past its {safe_float(max_age.iloc[i]):.0f}h limit)")
+            details.append(f"already {humanize_duration(hs, 'h')} old (past its "
+                           f"{humanize_duration(safe_float(max_age.iloc[i]), 'h')} limit)")
             continue
         if has_cadence and hs * 60.0 > k * yard_gap:
             forecasts.append("Overdue")
             severities.append("High")
             details.append(
-                f"last refresh {hs:.1f}h ago vs ~{cycle_hours:.1f}h typical — refresh is late"
+                f"last refresh {humanize_duration(hs, 'h')} ago vs ~{humanize_duration(cycle_hours, 'h')} typical — "
+                "refresh is late"
             )
             continue
         proximity = cycle_hours if cycle_hours is not None else safe_float(max_age.iloc[i]) * 0.15
         if bool(pd.notna(rw_raw)) and rw <= proximity:
             forecasts.append("At risk")
             severities.append("Medium")
-            eta = f"breaches in ~{rw:.1f}h" if rw > 0 else "at the limit now"
-            details.append(eta + (f"; ~{cycle_hours:.1f}h typical cadence" if has_cadence else ""))
+            eta = f"breaches in ~{humanize_duration(rw, 'h')}" if rw > 0 else "at the limit now"
+            details.append(eta + (f"; ~{humanize_duration(cycle_hours, 'h')} typical cadence" if has_cadence else ""))
             continue
         forecasts.append("On track")
         severities.append("OK")
-        details.append(f"~{rw:.1f}h runway" if bool(pd.notna(rw_raw)) else "fresh")
+        details.append(f"~{humanize_duration(rw, 'h')} runway" if bool(pd.notna(rw_raw)) else "fresh")
     out["FORECAST"] = forecasts
     out["SEVERITY"] = severities
     out["DETAIL"] = details

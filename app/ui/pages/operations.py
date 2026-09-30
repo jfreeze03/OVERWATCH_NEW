@@ -1879,7 +1879,7 @@ def _sla_finish_forecast_panel(*, pf: dict | None = None) -> dict:
         _n2b_lbl = "—" if _n2b is None else ("already past" if _n2b <= 0 else f"~{_n2b} night(s)")
         _sd = fc.get("start_slope_min_per_night")
         _sd_lbl = ("—" if _sd is None
-                   else f"{abs(safe_float(_sd)):.0f} min/night {'later' if safe_float(_sd) > 0 else 'earlier'}")
+                   else f"{humanize_duration(abs(safe_float(_sd)), 'min')}/night {'later' if safe_float(_sd) > 0 else 'earlier'}")
         # the finish the margin/tier is judged on (last COMPLETE night), so the KPI's value and
         # its timestamp describe the SAME night — not the newest night, which may be failed/in-flight.
         _fin = fc.get("latest_complete_finish")   # never NaT (a complete night has a finish) or None

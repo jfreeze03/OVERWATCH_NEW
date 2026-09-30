@@ -76,7 +76,7 @@ connect). Streamlit-in-Snowflake stamps every statement the app runs with its ow
 QUERY_TAG naming the app (`"StreamlitName":"DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP"`) and
 overrides any per-statement tag, so OVERWATCH's self-traffic filters key on that tag.
 Reads are bounded by the warehouse STATEMENT_TIMEOUT_IN_SECONDS; Cortex evaluations also
-send a 90s per-statement timeout (unverified under SiS). The app
+send a 1m 30s per-statement timeout (unverified under SiS). The app
 and all tasks run on the dedicated XSMALL warehouse **WH_ALFA_ADMIN**
 (no resource monitor since v4.45 — OVERWATCH_RM was suspending it mid-use).
 
@@ -871,7 +871,7 @@ Snowflake release note that mentions ACCOUNT_USAGE, and after migrations.
 | Cortex/model unavailable | The morning digest sends the templated facts digest and logs `digest_ai_failed` (V165); AI panels surface the error; nothing else breaks |
 | FORECAST_ML_DAILY absent | Forecast engine silently uses seasonal, basis string says so |
 | Webhook integration missing | SP_NOTIFY_WEBHOOK returns a friendly failure; per-route errors log to APP_ERROR_LOG; events stay queued (NOTIFIED_AT null) |
-| ALTER SESSION unsupported (SiS) | SiS stamps its own app QUERY_TAG on every statement (self-traffic keys on it); the warehouse-level timeout is the backstop for reads; Cortex also sends a 90s per-statement timeout |
+| ALTER SESSION unsupported (SiS) | SiS stamps its own app QUERY_TAG on every statement (self-traffic keys on it); the warehouse-level timeout is the backstop for reads; Cortex also sends a 1m 30s per-statement timeout |
 | Schema/db filters on mart-only panels | Panels that lack the dimension switch to live sources automatically |
 
 ## 15. Troubleshooting

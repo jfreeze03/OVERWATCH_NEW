@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from .formulas import format_usd, safe_float
+from .formulas import format_usd, humanize_duration, safe_float
 
 
 def replay_headlines(
@@ -48,7 +48,7 @@ def replay_headlines(
         if queued_min >= 30:
             heads.append({
                 "severity": "warn",
-                "text": f"{queued_min:,.0f} queued minutes across the day.",
+                "text": f"{humanize_duration(queued_min, 'min')} of queueing across the day.",
             })
     if critical_alerts:
         heads.append({"severity": "bad",

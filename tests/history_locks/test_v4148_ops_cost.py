@@ -41,14 +41,16 @@ def test_release_compare_humanizes_durations_and_keeps_units():
     ])
     rows = {r["Metric"]: r for r in insights.compare_release_periods(df)}
     # Durations humanize to Hr/Min/Sec like the rest of the app (no 6-decimal floats).
-    assert "h" in rows["p95 runtime (s)"]["Before"]          # 3661s -> hours
-    assert rows["p95 runtime (s)"]["After"].endswith("s")    # 45s
-    assert "." not in rows["p95 runtime (s)"]["Before"]      # humanized, not "3661.00"
+    # v4.605.0 (owner 2026-09-30): the release-compare labels dropped their stale '(s)' units (the values
+    # were already humanized), so these keys moved on purpose: 'p95 runtime', 'Queued per query'.
+    assert "h" in rows["p95 runtime"]["Before"]          # 3661s -> hours
+    assert rows["p95 runtime"]["After"].endswith("s")    # 45s
+    assert "." not in rows["p95 runtime"]["Before"]      # humanized, not "3661.00"
     # Queued/spill are PER-QUERY now (insights_sql divides by QUERY_COUNT); the labels and
     # units say so, and tiny per-query spill renders as MB/query rather than a 0.02 GB float.
     assert rows["Remote spill (GB/query)"]["Before"] == "20.5 MB/q"   # 0.020 GB -> 20.5 MB/q
-    assert rows["Queued (s/query)"]["Before"] == "0.50 s/q"
+    assert rows["Queued per query"]["Before"] == "500ms/q"     # v4.605.0: humanized (was "0.50 s/q")
     assert rows["Queries"]["After"] == "1,200"
     assert rows["Failure %"]["Before"] == "1.0%"
     # The verdict logic (computed from numerics before formatting) is unchanged.
-    assert rows["p95 runtime (s)"]["Verdict"] == "Better"
+    assert rows["p95 runtime"]["Verdict"] == "Better"

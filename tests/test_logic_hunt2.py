@@ -30,7 +30,9 @@ def test_release_compare_judges_from_zero_regressions():
                        "QUEUED_SEC": [0, 300], "SPILL_REMOTE_GB": [0, 10]})
     v = _verdicts(compare_release_periods(df))
     assert v["Failure %"] == "Worse"
-    assert v["Queued (s/query)"] == "Worse" and v["Remote spill (GB/query)"] == "Worse"
+    # v4.605.0 (owner 2026-09-30): the release-compare labels dropped their stale '(s)' units (the values
+    # were already humanized), so these keys moved on purpose: 'p95 runtime', 'Queued per query'.
+    assert v["Queued per query"] == "Worse" and v["Remote spill (GB/query)"] == "Worse"
 
 
 def test_release_compare_from_zero_no_change_is_flat_and_improvement_to_zero_is_better():
@@ -43,7 +45,7 @@ def test_release_compare_from_zero_no_change_is_flat_and_improvement_to_zero_is_
     better = pd.DataFrame({"PERIOD": ["BEFORE", "AFTER"], "QUERY_COUNT": [10, 10],
                           "FAILED_COUNT": [5, 0], "P95_ELAPSED_SEC": [1, 1],
                           "QUEUED_SEC": [300, 0], "SPILL_REMOTE_GB": [10, 0]})
-    assert _verdicts(compare_release_periods(better))["Queued (s/query)"] == "Better"
+    assert _verdicts(compare_release_periods(better))["Queued per query"] == "Better"   # key moved v4.605.0
 
 
 def test_rca_high_timed_cause_outranks_untimed_low_even_at_higher_raw_score():

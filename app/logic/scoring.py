@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from .formulas import safe_float
+from .formulas import humanize_duration, safe_float
 
 
 @dataclass(frozen=True)
@@ -175,7 +175,7 @@ def platform_score(signals: dict, weights: dict | None = None,
         _raw = (queue_minutes - 10) * w["SCORE_PTS_QUEUE_PER_MIN"]
         drivers.append(
             ScoreDriver("Queueing", _cap(_raw, 10),
-                        f"{queue_minutes:.0f} queued minutes per day." + _cap_note(_raw, 10))
+                        f"{humanize_duration(queue_minutes, 'min')} queued per day." + _cap_note(_raw, 10))
         )
 
     spill_gb = safe_float(signals.get("spill_gb"))

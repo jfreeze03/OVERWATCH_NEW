@@ -240,7 +240,11 @@ def test_admin_cortex_card_is_toggle_and_probe_gated():
     # test_admin_timeout_wording), called first by the Performance tab
     assert perf.split('"""', 2)[2].strip().startswith("_stmt_timeout_ceiling()")
     perf += src.split("def _stmt_timeout_ceiling(", 1)[1].split("\ndef ", 1)[0]
-    assert "Every app query is instead" not in perf and "{CORTEX_TIMEOUT_SECONDS}s" in perf
+    # v4.605.0 (owner 2026-09-30) moved this lock: the Cortex ceiling reads Hr/Min/Sec ("1m 30s") like the panel's
+    # other durations, so the raw "{CORTEX_TIMEOUT_SECONDS}s" must be gone (the source breaks the line before
+    # "per-statement ceiling", so the two are not locked together)
+    assert "Every app query is instead" not in perf and "{humanize_duration(CORTEX_TIMEOUT_SECONDS, 's')}" in perf
+    assert "{CORTEX_TIMEOUT_SECONDS}s" not in perf
     assert "unverified under Streamlit-in-Snowflake" in perf
     assert '("FUNCTION_NAME", "MODEL_NAME", "REQUESTS", "AI_CREDITS")' in body
     assert tab.index("_run_cost_panel()") < tab.index("_app_cortex_cost()")
