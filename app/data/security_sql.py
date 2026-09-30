@@ -13,6 +13,7 @@ from app.data.common import (
 )
 from app.logic.client_support import NO_CLIENT_ID, SNOWFLAKE_RUN_DRIVERS, SNOWFLAKE_RUN_PROGRAM_PREFIXES
 from app.logic.identity_auth import SERVICE_TYPES
+from app.logic.policy_coverage import FAMILY_NAME_PATTERN, FAMILY_SUFFIX_PATTERN
 
 # --- Admin-role tiers (codified AS-IS per owner decision 2026-09-10; byte-identical to the
 # former inlined literals — one source of truth, no behaviour change). Two single-use sites
@@ -492,13 +493,15 @@ ORDER BY USER_NETWORK_POLICY NULLS FIRST, A.USER_NAME
 # Next-Fifty #43: a database "family" is its name up to the last underscore (X_PRD, X_DEV -> X); the environment is
 # the part after it. Name-derived on purpose: no environment or tenant name is hard-coded. REGEXP_LIKE anchors the
 # whole name, so a name with no inner underscore is its own family with no environment. One source for both #43
-# builders.
+# builders; the patterns live in app.logic.policy_coverage, whose db_family is the Python mirror used on the
+# SHOW DATABASES names (the unmasked databases of a masked database's family).
 def _db_family(col: str) -> str:
-    return f"IFF(REGEXP_LIKE({col}, '.+_[^_]+'), REGEXP_REPLACE({col}, '_[^_]+$', ''), {col})"
+    return (f"IFF(REGEXP_LIKE({col}, '{FAMILY_NAME_PATTERN}'), REGEXP_REPLACE({col}, '{FAMILY_SUFFIX_PATTERN}', ''), "
+            f"{col})")
 
 
 def _db_env_suffix(col: str) -> str:
-    return f"IFF(REGEXP_LIKE({col}, '.+_[^_]+'), REGEXP_SUBSTR({col}, '[^_]+$'), NULL)"
+    return f"IFF(REGEXP_LIKE({col}, '{FAMILY_NAME_PATTERN}'), REGEXP_SUBSTR({col}, '[^_]+$'), NULL)"
 
 
 # Fully qualified keys for every #43 distinct count (never S1a's unqualified REF_ENTITY_NAME / POLICY_NAME: 325 vs
@@ -511,7 +514,9 @@ DATA_POLICY_KINDS: tuple[str, ...] = ("MASKING_POLICY", "ROW_ACCESS_POLICY", "PR
 
 def data_policy_coverage() -> str:
     """Next-Fifty #43 Phase 1: masking / row-access / projection / aggregation policy coverage from the
-    policy-reference view (up to about 2h behind; the 2026-09-29 S1b probe proved every column this reads).
+    policy-reference view (up to about 2h behind). The 2026-09-29 probes proved every column this reads: S1b read
+    seven (POLICY_KIND, REF_ENTITY_DOMAIN, REF_DATABASE_NAME, REF_SCHEMA_NAME, REF_ENTITY_NAME, REF_COLUMN_NAME,
+    POLICY_STATUS), S1a read POLICY_NAME, and S0b's column list shows POLICY_DB and POLICY_SCHEMA.
 
     One row per database that has a column-level masking reference, with the account totals repeated on every
     row. ``tot`` is LEFT JOINed to ``by_db`` ON 1 = 1, so a zero-masking account still returns exactly one row
@@ -579,10 +584,12 @@ def masking_environment_parity() -> str:
     """Next-Fifty #43 Phase 1: the environment grouping -- information only, not a gap list.
 
     Grain: (DATABASE_FAMILY, SCHEMA_NAME, OBJECT_NAME), for every masked schema.object in a family that has 2+
-    databases with column masking. A family's databases are those with at least one column-level masking
-    reference (see _db_family). COLUMN_SET is the sorted distinct masked-column list in one database. SAME means
-    masked in every family database on one column set; otherwise DIFFERS. TOTAL_NAMES and DIFFERING_NAMES are
-    window totals taken before the LIMIT (the uncapped-aggregate rule)."""
+    databases with column masking. A family's databases HERE are only those with at least one column-level
+    masking reference (see _db_family), hence MASKED_FAMILY_DATABASES: a database with no masked column is in
+    neither #43 table; the page lists those from SHOW DATABASES (policy_coverage.unmasked_family_databases).
+    COLUMN_SET is the sorted distinct masked-column list in one database. SAME means masked in every masked family
+    database on one column set; otherwise DIFFERS. TOTAL_NAMES and DIFFERING_NAMES are window totals taken before
+    the LIMIT (the uncapped-aggregate rule)."""
     fam = _db_family("REF_DATABASE_NAME")
     return f"""
 WITH m AS (
@@ -596,27 +603,27 @@ WITH m AS (
            LISTAGG(DISTINCT COL, ',') WITHIN GROUP (ORDER BY COL) AS COLUMN_SET
     FROM m GROUP BY DATABASE_FAMILY, DB, SCH, OBJ
 ), fam_dbs AS (
-    SELECT DATABASE_FAMILY, DB, COUNT(*) OVER (PARTITION BY DATABASE_FAMILY) AS FAMILY_DATABASES
+    SELECT DATABASE_FAMILY, DB, COUNT(*) OVER (PARTITION BY DATABASE_FAMILY) AS MASKED_FAMILY_DATABASES
     FROM (SELECT DISTINCT DATABASE_FAMILY, DB FROM per_obj)
 ), names AS (
     SELECT DISTINCT P.DATABASE_FAMILY, P.SCH, P.OBJ
     FROM per_obj P JOIN fam_dbs F ON F.DATABASE_FAMILY = P.DATABASE_FAMILY AND F.DB = P.DB
-    WHERE F.FAMILY_DATABASES >= 2
+    WHERE F.MASKED_FAMILY_DATABASES >= 2
 ), grid AS (
-    SELECT N.DATABASE_FAMILY, N.SCH, N.OBJ, F.DB, F.FAMILY_DATABASES, P.MASKED_COLUMNS, P.COLUMN_SET
+    SELECT N.DATABASE_FAMILY, N.SCH, N.OBJ, F.DB, F.MASKED_FAMILY_DATABASES, P.MASKED_COLUMNS, P.COLUMN_SET
     FROM names N
     JOIN fam_dbs F ON F.DATABASE_FAMILY = N.DATABASE_FAMILY
     LEFT JOIN per_obj P ON P.DATABASE_FAMILY = N.DATABASE_FAMILY AND P.DB = F.DB AND P.SCH = N.SCH AND P.OBJ = N.OBJ
 ), named AS (
     SELECT DATABASE_FAMILY, SCH AS SCHEMA_NAME, OBJ AS OBJECT_NAME,
-           COUNT(COLUMN_SET) AS DATABASES_MASKED, MAX(FAMILY_DATABASES) AS FAMILY_DATABASES,
+           COUNT(COLUMN_SET) AS DATABASES_MASKED, MAX(MASKED_FAMILY_DATABASES) AS MASKED_FAMILY_DATABASES,
            COUNT(DISTINCT COLUMN_SET) AS COLUMN_SETS,
-           IFF(COUNT(COLUMN_SET) = MAX(FAMILY_DATABASES) AND COUNT(DISTINCT COLUMN_SET) = 1, 'SAME', 'DIFFERS') AS PARITY,
+           IFF(COUNT(COLUMN_SET) = MAX(MASKED_FAMILY_DATABASES) AND COUNT(DISTINCT COLUMN_SET) = 1, 'SAME', 'DIFFERS') AS PARITY,
            LISTAGG(IFF(COLUMN_SET IS NULL, NULL, DB || ' (' || MASKED_COLUMNS || ')'), ', ') WITHIN GROUP (ORDER BY DB) AS MASKED_IN,
            NULLIF(LISTAGG(IFF(COLUMN_SET IS NULL, DB, NULL), ', ') WITHIN GROUP (ORDER BY DB), '') AS NO_MASKING_REF_IN
     FROM grid GROUP BY DATABASE_FAMILY, SCH, OBJ
 )
-SELECT DATABASE_FAMILY, SCHEMA_NAME, OBJECT_NAME, PARITY, DATABASES_MASKED, FAMILY_DATABASES, COLUMN_SETS,
+SELECT DATABASE_FAMILY, SCHEMA_NAME, OBJECT_NAME, PARITY, DATABASES_MASKED, MASKED_FAMILY_DATABASES, COLUMN_SETS,
        MASKED_IN, NO_MASKING_REF_IN,
        COUNT(*) OVER () AS TOTAL_NAMES,
        SUM(IFF(PARITY = 'DIFFERS', 1, 0)) OVER () AS DIFFERING_NAMES
@@ -954,12 +961,16 @@ def show_resource_monitors_sql() -> str:
     return "SHOW RESOURCE MONITORS"
 
 
+SHOW_DATABASES_LIMIT = 500
+
+
 def show_databases_sql() -> str:
     """SHOW-based database inventory (ACCOUNT_USAGE.DATABASES absent on this
     account, mirroring SHOW WAREHOUSES). Feeds the sidebar picker so new
     databases appear without a code change (item 8c, 2026-07-14); the hardcoded
-    lists in companies.py stay the offline fallback."""
-    return "SHOW DATABASES LIMIT 500"
+    lists in companies.py stay the offline fallback. The #43 environment grouping reuses this exact read (same
+    SQL, metadata tier, max_rows=0: the sidebar's cache entry, no extra scan)."""
+    return f"SHOW DATABASES LIMIT {SHOW_DATABASES_LIMIT}"
 
 
 def show_shares_sql() -> str:

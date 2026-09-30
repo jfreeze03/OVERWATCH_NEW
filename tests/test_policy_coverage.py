@@ -1,10 +1,12 @@
 """Next-Fifty #43 Phase 1: masking / row-access / projection / aggregation policy coverage (Security > Exposure).
 
-Two toggle- and probe-gated reads of POLICY_REFERENCES (only the 10 columns the 2026-09-29 S1b probe proved),
+Two toggle- and probe-gated reads of POLICY_REFERENCES (only the 10 columns the 2026-09-29 S0b/S1a/S1b probes
+proved: S1b read seven, S1a read POLICY_NAME, S0b's column list shows POLICY_DB and POLICY_SCHEMA),
 every distinct count keyed on a fully qualified name, the account totals read from SQL (never summed from the
 per-database rows), a no-extra-scan ACCOUNT_POLICY_REFS on the Access network-policy read, and the owner defaults:
 information only, out of the Decision-queue domain scores, the environment grouping is not a gap worklist.
-Render tests use fakes (the tests/test_probe_read_honesty.py _FakeSt pattern)."""
+Render tests use fakes (the tests/test_probe_read_honesty.py _FakeSt pattern); the builders' semantics run for real
+in tests/test_policy_coverage_harness.py."""
 
 from __future__ import annotations
 
@@ -52,6 +54,36 @@ def test_data_policy_coverage_contract():
     assert f"LISTAGG(DISTINCT IFF(PKIND IN ({kinds}), NULL, PKIND), ', ') AS OTHER_POLICY_KINDS" in sql
 
 
+def test_data_policy_coverage_pins_the_keys_the_tag_split_and_the_status_count():
+    """Review R1-19 / R1-20 / R1-24: the qualified-key projections, every TAG-sensitive expression and the
+    not-ACTIVE count, pinned exactly (a substring anywhere in the SQL let an unqualified COLUMN_FQN, a dropped
+    TAG filter or a constant 0 pass). tests/test_policy_coverage_harness.py runs the same SQL on rows."""
+    s = _sql()
+    sql = s.data_policy_coverage()
+    for part in (
+        f"{s._PR_ENTITY_FQN} AS ENTITY_FQN,",
+        f"IFF(REF_COLUMN_NAME IS NULL, NULL, {s._PR_ENTITY_FQN} || '.' || REF_COLUMN_NAME) AS COLUMN_FQN,",
+        f"{s._PR_POLICY_FQN} AS POLICY_FQN,",
+        "UPPER(POLICY_STATUS) AS PSTATUS",
+        "COUNT(DISTINCT IFF(PKIND = 'MASKING_POLICY' AND REF_DOMAIN <> 'TAG', COLUMN_FQN, NULL)) AS TOTAL_MASKED_COLUMNS",
+        "COUNT(DISTINCT IFF(PKIND = 'MASKING_POLICY' AND REF_DOMAIN <> 'TAG', ENTITY_FQN, NULL)) AS TOTAL_MASKED_OBJECTS",
+        "COUNT(DISTINCT IFF(PKIND = 'MASKING_POLICY' AND REF_DOMAIN <> 'TAG', REF_DATABASE_NAME, NULL)) "
+        "AS TOTAL_MASKED_DATABASES",
+        "COUNT(DISTINCT IFF(PKIND = 'MASKING_POLICY' AND REF_DOMAIN = 'TAG', ENTITY_FQN, NULL)) AS MASKING_TAGS",
+        "COUNT(DISTINCT IFF(PKIND = 'MASKING_POLICY' AND REF_DOMAIN = 'TAG', REF_DATABASE_NAME, NULL)) "
+        "AS MASKING_TAG_DATABASES",
+        "COUNT(DISTINCT IFF(PKIND = 'MASKING_POLICY' AND REF_DOMAIN = 'TAG', POLICY_FQN, NULL)) AS TAG_MASKING_POLICIES",
+        "WHERE PKIND = 'MASKING_POLICY' AND REF_DOMAIN <> 'TAG' AND REF_DATABASE_NAME IS NOT NULL",
+        "COUNT_IF(PKIND = 'MASKING_POLICY' AND PSTATUS <> 'ACTIVE') AS MASKING_REFS_NOT_ACTIVE",
+        "LISTAGG(DISTINCT IFF(PKIND = 'MASKING_POLICY' AND PSTATUS <> 'ACTIVE', PSTATUS, NULL), ', ') "
+        "AS NOT_ACTIVE_STATUSES",
+        "COUNT_IF(PSTATUS <> 'ACTIVE') AS REFS_NOT_ACTIVE",
+    ):
+        assert part in sql, part
+    assert sql.count("REF_DOMAIN <> 'TAG'") == 4        # the three column-level totals and the by_db filter
+    assert sql.count("REF_DOMAIN = 'TAG'") == 3         # the three tag-line totals
+
+
 def test_every_distinct_count_is_fully_qualified():
     s = _sql()
     b = _builders()
@@ -69,9 +101,29 @@ def test_every_distinct_count_is_fully_qualified():
 
 @pytest.mark.parametrize("col", ["REGION", "POLICY_ID", "REF_ARG_COLUMN_NAMES", "TAG_DATABASE", "TAG_SCHEMA",
                                  "TAG_NAME"])
-def test_only_s1b_proven_columns_are_read(col):
+def test_only_probe_proven_columns_are_read(col):
     for name, sql in _builders().items():
         assert re.search(rf"\b{col}\b", sql) is None, (name, col)
+
+
+# POLICY_REFERENCES' 16 columns (S0b: N_COLS 16) and the 2026-09-29 probe that proved each one the #43 builders
+# read (review R1-3: S1b read seven, S1a read POLICY_NAME, S0b's column list is the only proof of POLICY_DB and
+# POLICY_SCHEMA).
+_PROBE_PROVEN = {"POLICY_KIND": "S1b", "REF_ENTITY_DOMAIN": "S1b", "REF_DATABASE_NAME": "S1b",
+                 "REF_SCHEMA_NAME": "S1b", "REF_ENTITY_NAME": "S1b", "REF_COLUMN_NAME": "S1b",
+                 "POLICY_STATUS": "S1b", "POLICY_NAME": "S1a", "POLICY_DB": "S0b", "POLICY_SCHEMA": "S0b"}
+_PR_ALL_COLUMNS = (*_PROBE_PROVEN, "REGION", "POLICY_ID", "REF_ARG_COLUMN_NAMES", "TAG_DATABASE", "TAG_SCHEMA",
+                   "TAG_NAME")
+
+
+def test_the_builders_read_exactly_the_probe_proven_columns():
+    assert len(_PR_ALL_COLUMNS) == 16 and len(_PROBE_PROVEN) == 10
+    b = _builders()
+    read_cols = {c for c in _PR_ALL_COLUMNS if any(re.search(rf"\b{c}\b", sql) for sql in b.values())}
+    assert read_cols == set(_PROBE_PROVEN)
+    doc = _sql().data_policy_coverage.__doc__ or ""
+    assert "S1b probe proved every column" not in doc
+    assert "S1a read POLICY_NAME, and S0b's column list shows POLICY_DB and POLICY_SCHEMA" in " ".join(doc.split())
 
 
 def test_builder_columns_match_the_logic_contract():
@@ -91,7 +143,7 @@ def test_masking_environment_parity_contract():
     assert sql.count(_PR) == 1
     for part in ("COUNT(*) OVER () AS TOTAL_NAMES",                          # uncapped totals, before the LIMIT
                  "SUM(IFF(PARITY = 'DIFFERS', 1, 0)) OVER () AS DIFFERING_NAMES",
-                 "LIMIT 1000", "WHERE F.FAMILY_DATABASES >= 2", "ORDER BY IFF(PARITY = 'DIFFERS', 0, 1)",
+                 "LIMIT 1000", "WHERE F.MASKED_FAMILY_DATABASES >= 2", "ORDER BY IFF(PARITY = 'DIFFERS', 0, 1)",
                  "UPPER(REF_ENTITY_DOMAIN) <> 'TAG'", "REF_COLUMN_NAME IS NOT NULL"):
         assert part in sql, part
     assert "COMPANY_FOR_" not in sql
@@ -123,6 +175,13 @@ def test_db_family_rule():
              "USER$JOE": ("USER$JOE", None), "A_": ("A_", None)}
     for name, want in cases.items():
         assert (family(name), env(name)) == want, name
+        assert _pc().db_family(name) == want[0], name                  # the page's mirror (unmasked siblings)
+    # one source: the SQL helper is built from the logic layer's patterns
+    pc = _pc()
+    assert fam_sql == (f"IFF(REGEXP_LIKE(X, '{pc.FAMILY_NAME_PATTERN}'), "
+                       f"REGEXP_REPLACE(X, '{pc.FAMILY_SUFFIX_PATTERN}', ''), X)")
+    for name in ("ALFA_EDW_PRD", "ALFA_EDW_SAN", "TRXS_EDW_DEV", "DBA_MAINT_DB", "SNOWFLAKE", "_X", "A__B"):
+        assert pc.db_family(name) == family(name), name
     # both builders share the one helper, and no environment or tenant name is hard-coded in either
     for sql in _builders().values():
         assert s._db_family("REF_DATABASE_NAME") in sql
@@ -177,7 +236,8 @@ def _probe_shape() -> pd.DataFrame:
 _NO_ROW_LEVEL = ("No row-access, projection or aggregation policy is in use: the policy-reference view lists none "
                  "attached to any table or view.")
 _TAG_LINE = ("Tag-based masking: 15 tags in 4 databases carry a masking policy (4 distinct policies). This counts "
-             "the tag assignments; the columns each tag reaches are not listed here.")
+             "the tags that carry a masking policy, once each even when a tag carries a policy for more than one "
+             "data type; the columns each tag is set on are not listed here.")
 
 
 def test_summary_reads_totals_never_sums():
@@ -225,8 +285,14 @@ def test_tag_sentence_singular_and_none():
     one = pc.summarize_policy_coverage(_cov_frame([_SENTINEL], MASKING_TAGS=1, MASKING_TAG_DATABASES=1,
                                                   TAG_MASKING_POLICIES=1))
     assert pc.tag_masking_sentence(one) == (
-        "Tag-based masking: 1 tag in 1 database carries a masking policy (1 distinct policy). This counts the tag "
-        "assignments; the columns each tag reaches are not listed here.")
+        "Tag-based masking: 1 tag in 1 database carries a masking policy (1 distinct policy). This counts the tags "
+        "that carry a masking policy, once each even when a tag carries a policy for more than one data type; the "
+        "columns each tag is set on are not listed here.")
+    # review R1-2: MASKING_TAGS is COUNT(DISTINCT tag), not the references nor the objects a tag is set on
+    # (tests/test_policy_coverage_harness.py: one tag carrying two policies counts once)
+    for cov in (one, pc.summarize_policy_coverage(_probe_shape())):
+        sentence = pc.tag_masking_sentence(cov)
+        assert "assignment" not in sentence and "reference" not in sentence
     none = pc.summarize_policy_coverage(_cov_frame([_SENTINEL]))
     assert pc.tag_masking_sentence(none) == (
         "Tag-based masking: none. The policy-reference view lists no masking policy attached to a tag.")
@@ -272,7 +338,7 @@ def test_summary_is_none_without_the_total_columns():
 def _parity_frame(n: int, total: int, differing: int) -> pd.DataFrame:
     pc = _pc()
     rows = [{"DATABASE_FAMILY": "EDW", "SCHEMA_NAME": "S", "OBJECT_NAME": f"T{i}",
-             "PARITY": "DIFFERS" if i < differing else "SAME", "DATABASES_MASKED": 2, "FAMILY_DATABASES": 3,
+             "PARITY": "DIFFERS" if i < differing else "SAME", "DATABASES_MASKED": 2, "MASKED_FAMILY_DATABASES": 3,
              "COLUMN_SETS": 1, "MASKED_IN": "EDW_DEV (2), EDW_PRD (2)", "NO_MASKING_REF_IN": "EDW_SIT",
              "TOTAL_NAMES": total, "DIFFERING_NAMES": differing} for i in range(n)]
     return pd.DataFrame(rows, columns=[*pc.PARITY_COLUMNS, *pc.PARITY_TOTAL_COLUMNS])
@@ -286,10 +352,70 @@ def test_parity_view_and_counts():
     assert pc.parity_counts(frame) == (1500, 1)                       # from TOTAL_NAMES, not len(frame)
     assert pc.parity_summary_sentence(1500, 1) == (
         "1,500 masked table or view names belong to a database family with two or more masked databases; 1 is "
-        "not masked the same way in every one of them.")
+        "not masked the same way in every one of them. Databases with no masked column are not part of this "
+        "grouping.")
     assert pc.parity_summary_sentence(1, 0) == (
         "1 masked table or view name belongs to a database family with two or more masked databases; 0 are not "
-        "masked the same way in every one of them.")
+        "masked the same way in every one of them. Databases with no masked column are not part of this grouping.")
+
+
+def test_parity_wording_says_unmasked_databases_are_left_out():
+    """Review R1-1: the grouping only sees databases with a masked column; its column name, legend, summary and
+    empty state say so (an unmasked environment is listed from SHOW DATABASES instead)."""
+    pc = _pc()
+    assert "MASKED_FAMILY_DATABASES" in pc.PARITY_COLUMNS and "FAMILY_DATABASES" not in pc.PARITY_COLUMNS
+    assert "a database with no masked column appears in neither table" in pc.PARITY_LEGEND
+    assert "A family here is the databases with masked columns" in pc.PARITY_LEGEND
+    assert "MASKED_FAMILY_DATABASES counts the family's databases with masked columns" in pc.PARITY_LEGEND
+    assert pc.PARITY_NOTHING_TO_GROUP == (
+        "No two databases with masked columns share a name up to their last underscore, so there is nothing to "
+        "group. Databases with no masked column are not part of this grouping.")
+
+
+# The 2026-09-29 shape: ALFA_EDW_* has 7 databases (app/companies.py) but only some carry column masking.
+_SHOW_NAMES = ["ALFA_EDW_PRD", "ALFA_EDW_DEV", "ALFA_EDW_SIT", "ALFA_EDW_SAN", "ALFA_EDW_PHX", "ALFA_EDW_SEA",
+               "ALFA_EDW_MGM", "MART_A", "MART_B", "OPS", "OPS_ARCHIVE", "DBA_MAINT_DB", "SNOWFLAKE"]
+
+
+def test_unmasked_family_databases():
+    pc = _pc()
+    got = pc.unmasked_family_databases(["ALFA_EDW_PRD", "ALFA_EDW_DEV", "ALFA_EDW_SIT", "MART_A", "OPS"],
+                                       _SHOW_NAMES)
+    assert got == (pc.FamilySiblings("ALFA_EDW", ("ALFA_EDW_MGM", "ALFA_EDW_PHX", "ALFA_EDW_SAN", "ALFA_EDW_SEA")),
+                   pc.FamilySiblings("MART", ("MART_B",)),
+                   pc.FamilySiblings("OPS", ("OPS_ARCHIVE",)))
+    # only production masked: the grouping has nothing to group, the sibling list still names every environment
+    (only_prd,) = pc.unmasked_family_databases(["ALFA_EDW_PRD"], _SHOW_NAMES)
+    assert only_prd.family == "ALFA_EDW" and len(only_prd.unmasked) == 6 and "ALFA_EDW_PRD" not in only_prd.unmasked
+    # every family member masked, a masked database SHOW does not list, and blank / NaN names: nothing to list
+    assert pc.unmasked_family_databases(["MART_A", "MART_B"], ["MART_A", "MART_B", None, float("nan"), ""]) == ()
+    assert pc.unmasked_family_databases([], _SHOW_NAMES) == ()
+
+
+def test_listed_database_names():
+    pc = _pc()
+    assert pc.listed_database_names(pd.DataFrame({"created_on": [1, 2], "name": ["B", "A"]})) == ["B", "A"]
+    assert pc.listed_database_names(pd.DataFrame({"NAME": [" X ", None, "", float("nan")]})) == ["X"]
+    for frame in (None, pd.DataFrame(), pd.DataFrame({"created_on": [1]})):
+        assert pc.listed_database_names(frame) == []
+
+
+def test_sibling_lines():
+    pc = _pc()
+    sibs = pc.unmasked_family_databases(["ALFA_EDW_PRD", "MART_A"], _SHOW_NAMES)
+    assert pc.sibling_lines(sibs) == (
+        pc.SIBLINGS_LEAD,
+        "ALFA_EDW: no masked column in ALFA_EDW_DEV, ALFA_EDW_MGM, ALFA_EDW_PHX, ALFA_EDW_SAN, ALFA_EDW_SEA and "
+        "ALFA_EDW_SIT.",
+        "MART: no masked column in MART_B.")
+    assert pc.sibling_lines(()) == (pc.SIBLINGS_NONE,)
+    assert pc.sibling_lines((), listed_capped=True) == (pc.SIBLINGS_NONE, pc.SIBLINGS_CAPPED)
+    many = (pc.FamilySiblings("X", tuple(f"X_{i:02d}" for i in range(pc.SIBLING_NAMES_CAP + 3))),)
+    line = pc.sibling_lines(many)[1]
+    assert line.endswith(f"X_{pc.SIBLING_NAMES_CAP - 1:02d} and 3 more.") and f"X_{pc.SIBLING_NAMES_CAP:02d}" not in line
+    # the unchecked states never claim there are none
+    for text in (pc.SIBLINGS_UNCHECKED, pc.SIBLINGS_NO_NAMES):
+        assert "were not checked" in text and "lists no" not in text
 
 
 def test_network_policy_caption_variants():
@@ -482,9 +608,14 @@ def test_policy_panel_surfaces_not_active_and_other_kinds(monkeypatch):
     assert "Other policy kinds in the view, not covered here: JOIN_POLICY." in caps
 
 
-def _render_parity(monkeypatch, result):
-    sec, fake, seen = _patch(monkeypatch, {"sec_policy_parity": result})
-    sec._render_masking_parity()
+def _show_dbs(names=_SHOW_NAMES):
+    return _ok(pd.DataFrame({"created_on": ["x"] * len(names), "name": names}))
+
+
+def _render_parity(monkeypatch, result, dbs=None, masked=("ALFA_EDW_PRD", "ALFA_EDW_DEV", "ALFA_EDW_SIT")):
+    sec, fake, seen = _patch(monkeypatch, {"sec_policy_parity": result,
+                                           "sec_policy_parity_dbs": dbs if dbs is not None else _show_dbs()})
+    sec._render_masking_parity(masked)
     return fake, seen
 
 
@@ -502,14 +633,25 @@ def test_parity_toggle_states(monkeypatch):
                                              "policy-reference view.")]
     assert seen["detail"] == ["boom (timeout)"]
 
-    _, seen = _render_parity(monkeypatch, _ok(pd.DataFrame()))
-    assert seen["empty"] == [("no_data_yet", "No two databases with masked columns share a name up to their last "
-                                             "underscore, so there is nothing to group.")]
+    _, seen = _render_parity(monkeypatch, _failed("timeout"))
+    assert [k for k, *_ in seen["runs"]] == ["sec_policy_parity"]      # no sibling read under a failed grouping
+
+    fake, seen = _render_parity(monkeypatch, _ok(pd.DataFrame()), masked=("ALFA_EDW_PRD",))
+    assert seen["empty"] == [("no_data_yet", pc.PARITY_NOTHING_TO_GROUP)]
+    # only production masked: nothing to group, but the unmasked environments are still named
+    assert pc.SIBLINGS_LEAD in fake.text("caption")
+    assert ("ALFA_EDW: no masked column in ALFA_EDW_DEV, ALFA_EDW_MGM, ALFA_EDW_PHX, ALFA_EDW_SAN, ALFA_EDW_SEA "
+            "and ALFA_EDW_SIT.") in fake.text("caption")
 
     fake, seen = _render_parity(monkeypatch, _ok(_parity_frame(3, total=3, differing=1)))
-    ((key, _sql_text, kw),) = seen["runs"]
+    ((key, _sql_text, kw), (dbs_key, dbs_sql, dbs_kw)) = seen["runs"]
     assert key == "sec_policy_parity" and kw["probe"] is True and kw["tier"] == "hourly"
     assert "ACCOUNT_USAGE" not in kw["source"]
+    # the sidebar's SHOW DATABASES read (same SQL, tier and max_rows: its cache entry)
+    assert dbs_key == "sec_policy_parity_dbs" and dbs_sql == _sql().show_databases_sql()
+    assert dbs_kw["tier"] == "metadata" and dbs_kw["max_rows"] == 0
+    assert "ALFA_EDW: no masked column in ALFA_EDW_MGM, ALFA_EDW_PHX, ALFA_EDW_SAN and ALFA_EDW_SEA." \
+        in fake.text("caption")
     ((table, kwargs),) = seen["tables"]
     assert list(table.columns) == list(pc.PARITY_COLUMNS) and kwargs["slug"] == "masking-environment-grouping"
     caps = fake.text("caption")
@@ -519,6 +661,46 @@ def test_parity_toggle_states(monkeypatch):
 
     fake, _ = _render_parity(monkeypatch, _ok(_parity_frame(3, total=1500, differing=2)))
     assert "Showing the first 3 of 1,500 names, differences first." in fake.text("caption")
+
+
+def test_unmasked_sibling_read_failures_never_say_there_are_none(monkeypatch):
+    """Review R1-1: a failed SHOW DATABASES read is unavailable with the error, an empty or nameless one is
+    no_data_yet; neither renders the sibling lead nor a 'lists no database' line."""
+    pc = _pc()
+    grouping = _ok(_parity_frame(3, total=3, differing=1))
+    fake, seen = _render_parity(monkeypatch, grouping, dbs=_failed("other"))
+    assert seen["empty"] == [("unavailable", pc.SIBLINGS_UNCHECKED)] and seen["detail"] == ["boom (other)"]
+    for dbs in (_ok(pd.DataFrame()), _ok(pd.DataFrame({"created_on": ["x"]})),
+                _ok(pd.DataFrame({"NAME": [None, ""]}))):
+        fake, seen = _render_parity(monkeypatch, grouping, dbs=dbs)
+        assert seen["empty"] == [("no_data_yet", pc.SIBLINGS_NO_NAMES)]
+        caps = fake.text("caption")
+        assert pc.SIBLINGS_LEAD not in caps and pc.SIBLINGS_NONE not in caps
+    # a full family: checked, and says so; a SHOW read at its row limit says the rest were not checked
+    names = ["ALFA_EDW_PRD", "ALFA_EDW_DEV", "ALFA_EDW_SIT"] + [f"Z{i:03d}" for i in range(497)]
+    fake, seen = _render_parity(monkeypatch, grouping, dbs=_show_dbs(names))
+    assert seen["empty"] == [] and pc.SIBLINGS_NONE in fake.text("caption")
+    assert len(names) == _sql().SHOW_DATABASES_LIMIT and pc.SIBLINGS_CAPPED in fake.text("caption")
+
+
+def test_policy_panel_passes_its_masked_databases_to_the_grouping(monkeypatch):
+    sec, _fake, _seen = _patch(monkeypatch, {"sec_policy_cov": _ok(_probe_shape())})
+    got: list = []
+    monkeypatch.setattr(sec, "_render_masking_parity", lambda masked=(): got.append(masked))
+    sec._render_policy_coverage()
+    assert got == [("EDW_PRD", "EDW_DEV", "EDW_SIT", "MART_A", "OPS")]
+
+
+def test_unmasked_sibling_read_is_the_sidebars_cached_read():
+    """No extra scan: the grouping's SHOW DATABASES read is the sidebar's exact call (run() caches by SQL, tier
+    and scope, never by key), so it is a cache hit."""
+    def norm(text: str) -> str:
+        return " ".join(text.split()).replace("( ", "(")
+    side = norm(read("app/main.py"))
+    body = norm(_body(read("app/ui/pages/security.py"), "_render_unmasked_siblings"))
+    for src in (side, body):
+        call = src.split("run(security_sql.show_databases_sql(),", 1)[1].split(")", 1)[0]
+        assert 'tier="metadata"' in call and "max_rows=0" in call and "probe" not in call, call
 
 
 def _render_netpol(monkeypatch, df: pd.DataFrame):
@@ -618,7 +800,15 @@ def test_docs_describe_the_panel_and_its_canaries():
         assert col in exposure, col
     row = next(ln for ln in glossary.splitlines() if ln.startswith("| **N registered statements"))
     assert "v4.603 adds 6 entries" in row and "no drift to fix" not in row
-    for name in ("security.data_policy_coverage", "security.masking_environment_parity",
-                 "security.admin_network_policy_coverage"):
-        assert name in row, name
+    # review R1-26: v4.604 adds five, none a declared gap
+    from app.data.canary import CANARIES, EXPECTED_GAPS
+    v4604 = ("security.data_policy_coverage", "security.masking_environment_parity",
+             "security.admin_network_policy_coverage", "insights.warehouse_cluster_use",
+             "chargeback.company_allin_showback")
+    assert "v4.604 adds 5 entries" in row and "v4.604 adds 3" not in row
+    reg = dict(CANARIES)
+    for name in v4604:
+        assert name in row and name in reg and name not in EXPECTED_GAPS, name
+    # the unmasked-sibling lines are documented with the grouping
+    assert "MASKED_FAMILY_DATABASES" in exposure and "SHOW DATABASES" in exposure
     assert "(#43) | Security -> Exposure |" in read("FEATURES.md")

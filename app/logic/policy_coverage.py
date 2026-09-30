@@ -2,7 +2,9 @@
 
 Shapes ``security_sql.data_policy_coverage`` and ``security_sql.masking_environment_parity`` into the Security >
 Exposure panel's frames and sentences, and ``ACCOUNT_POLICY_REFS`` (from ``admin_network_policy_coverage``) into
-the Access network-policy caption.
+the Access network-policy caption. It also owns the database-family rule (FAMILY_NAME_PATTERN /
+FAMILY_SUFFIX_PATTERN: the SQL's ``security_sql._db_family`` is built from them and ``db_family`` is its Python
+mirror), so the SHOW DATABASES names are grouped the same way to list a family's databases with no masked column.
 
 - Every number comes from SQL, keyed on fully qualified names. Nothing here sums a per-database column into an
   account total: distinct policies are not additive across databases, so the totals are read from the SQL's own
@@ -14,6 +16,8 @@ the Access network-policy caption.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import pandas as pd
@@ -31,7 +35,7 @@ TOTAL_COLUMNS: tuple[str, ...] = (
 )
 TEXT_TOTAL_COLUMNS: tuple[str, ...] = ("NOT_ACTIVE_STATUSES", "OTHER_POLICY_KINDS")
 PARITY_COLUMNS: tuple[str, ...] = (
-    "DATABASE_FAMILY", "SCHEMA_NAME", "OBJECT_NAME", "PARITY", "DATABASES_MASKED", "FAMILY_DATABASES",
+    "DATABASE_FAMILY", "SCHEMA_NAME", "OBJECT_NAME", "PARITY", "DATABASES_MASKED", "MASKED_FAMILY_DATABASES",
     "COLUMN_SETS", "MASKED_IN", "NO_MASKING_REF_IN",
 )
 PARITY_TOTAL_COLUMNS: tuple[str, ...] = ("TOTAL_NAMES", "DIFFERING_NAMES")
@@ -56,12 +60,39 @@ INVENTORY_NOTE = (
 )
 PARITY_LEGEND = (
     "SAME: masked in every database of its family that has masked columns, on the same column names. DIFFERS: "
-    "masked in fewer of them, or on different columns. MASKED_IN gives each database with its masked-column "
-    "count; NO_MASKING_REF_IN lists family databases that have masked columns but none on this name, and the "
-    "table may not exist there. A family is the databases whose names match up to the last underscore (for "
-    "example X_PRD and X_DEV). Information only, not a gap list: it does not assume every environment should be "
-    "masked like production."
+    "masked in fewer of them, or on different columns. MASKED_FAMILY_DATABASES counts the family's databases "
+    "with masked columns; MASKED_IN gives each database with its masked-column count; NO_MASKING_REF_IN lists "
+    "family databases that have masked columns but none on this name, and the table may not exist there. A "
+    "family here is the databases with masked columns whose names match up to the last underscore (for example "
+    "X_PRD and X_DEV); a database with no masked column appears in neither table. Information only, not a gap "
+    "list: it does not assume every environment should be masked like production."
 )
+_NOT_IN_GROUPING = "Databases with no masked column are not part of this grouping."
+PARITY_NOTHING_TO_GROUP = (
+    "No two databases with masked columns share a name up to their last underscore, so there is nothing to "
+    "group. " + _NOT_IN_GROUPING
+)
+# The unmasked-sibling lines under the grouping (review R1-1): the databases of a masked database's family that
+# have no masked column at all, from the SHOW DATABASES names. A failed or nameless SHOW read says they were not
+# checked (unavailable / no_data_yet), never that there are none.
+SIBLINGS_UNCHECKED = (
+    "Databases with no masked column were not checked: the database list (SHOW DATABASES) could not be read, "
+    "so a family may hold databases that are not shown here."
+)
+SIBLINGS_NO_NAMES = (
+    "Databases with no masked column were not checked: the database list (SHOW DATABASES) returned no database "
+    "names, so a family may hold databases that are not shown here."
+)
+SIBLINGS_LEAD = (
+    "Databases with no masked column, in the family of a masked database (from SHOW DATABASES: the databases "
+    "this app's role can see):"
+)
+SIBLINGS_NONE = (
+    "SHOW DATABASES (the databases this app's role can see) lists no database without a masked column in the "
+    "family of a masked database."
+)
+SIBLINGS_CAPPED = "SHOW DATABASES stopped at its row limit, so databases past it were not checked."
+SIBLING_NAMES_CAP = 20
 ACCOUNT_POLICY_HINT = (
     "The same view lists an account-level network policy, which applies to an admin without a user-level policy "
     "unless they sign in through a security integration that has its own."
@@ -91,6 +122,26 @@ _NETWORK_CAPTION_NONE = (
     "SHOW PARAMETERS LIKE 'NETWORK_POLICY' IN ACCOUNT. Without one, an admin with no user-level policy is limited "
     "only by a security integration's own network policy, when signing in through it."
 )
+
+
+# The database-family rule (Next-Fifty #43): a family is the name up to its last underscore (X_PRD, X_DEV -> X); a
+# name with no inner underscore is its own family. One source for security_sql._db_family (SQL: Snowflake's
+# REGEXP_LIKE anchors the whole name) and db_family below (re.fullmatch anchors the same way).
+FAMILY_NAME_PATTERN = ".+_[^_]+"
+FAMILY_SUFFIX_PATTERN = "_[^_]+$"
+
+
+def db_family(name: str) -> str:
+    """The Python mirror of security_sql._db_family, for the SHOW DATABASES names."""
+    return re.sub(FAMILY_SUFFIX_PATTERN, "", name) if re.fullmatch(FAMILY_NAME_PATTERN, name) else name
+
+
+@dataclass(frozen=True)
+class FamilySiblings:
+    """One family of a database with a masked column, and its listed databases that have no masked column."""
+
+    family: str
+    unmasked: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -186,7 +237,8 @@ def tag_masking_sentence(c: PolicyCoverage) -> str:
             f"{_plural(c.masking_tag_databases, 'database', 'databases')} "
             f"{'carries' if tags == 1 else 'carry'} a masking policy "
             f"({_plural(c.tag_masking_policies, 'distinct policy', 'distinct policies')}). "
-            "This counts the tag assignments; the columns each tag reaches are not listed here.")
+            "This counts the tags that carry a masking policy, once each even when a tag carries a policy for "
+            "more than one data type; the columns each tag is set on are not listed here.")
 
 
 def row_policy_sentences(c: PolicyCoverage) -> tuple[str, ...]:
@@ -243,7 +295,59 @@ def parity_counts(frame: pd.DataFrame | None) -> tuple[int, int]:
 def parity_summary_sentence(total: int, differing: int) -> str:
     return (f"{_plural(total, 'masked table or view name belongs', 'masked table or view names belong')} to a "
             f"database family with two or more masked databases; {differing:,} "
-            f"{'is' if differing == 1 else 'are'} not masked the same way in every one of them.")
+            f"{'is' if differing == 1 else 'are'} not masked the same way in every one of them. "
+            + _NOT_IN_GROUPING)
+
+
+def listed_database_names(frame: pd.DataFrame | None) -> list[str]:
+    """The database names from a SHOW DATABASES frame (its ``name`` column, any case), blanks and NULLs dropped;
+    [] when the frame is missing, empty or has no name column (the page's not-checked state)."""
+    if frame is None or frame.empty:
+        return []
+    cols = {str(c).lower(): c for c in frame.columns}
+    if "name" not in cols:
+        return []
+    return [t for t in (_text(v) for v in frame[cols["name"]].tolist()) if t]
+
+
+def unmasked_family_databases(masked: Iterable[object], listed: Iterable[object]) -> tuple[FamilySiblings, ...]:
+    """For each family of a database with a masked column (``masked``: the inventory's DATABASE_NAME values), the
+    ``listed`` databases (the SHOW DATABASES names) of that family that have no masked column. Families with none
+    are left out; families and names are sorted. A family with only one masked database counts too: that is the
+    only-production-is-masked case the grouping itself cannot show."""
+    masked_set = {_text(n) for n in masked} - {""}
+    families = {db_family(n) for n in masked_set}
+    found: dict[str, set[str]] = {}
+    for raw in listed:
+        name = _text(raw)
+        if not name or name in masked_set:
+            continue
+        family = db_family(name)
+        if family in families:
+            found.setdefault(family, set()).add(name)
+    return tuple(FamilySiblings(f, tuple(sorted(found[f]))) for f in sorted(found))
+
+
+def _and_join(words: list[str]) -> str:
+    if len(words) <= 1:
+        return "".join(words)
+    return f"{', '.join(words[:-1])} and {words[-1]}"
+
+
+def sibling_lines(siblings: tuple[FamilySiblings, ...], *, listed_capped: bool = False) -> tuple[str, ...]:
+    """The captions under the grouping, for a SHOW DATABASES read that returned names (a failed or nameless read
+    is the page's SIBLINGS_UNCHECKED / SIBLINGS_NO_NAMES state, never these lines). ``listed_capped`` means the
+    read hit its row limit, so databases past it were not checked."""
+    out = [SIBLINGS_LEAD] if siblings else [SIBLINGS_NONE]
+    for s in siblings:
+        names = list(s.unmasked[:SIBLING_NAMES_CAP])
+        more = len(s.unmasked) - len(names)
+        if more > 0:
+            names.append(f"{more:,} more")
+        out.append(f"{s.family}: no masked column in {_and_join(names)}.")
+    if listed_capped:
+        out.append(SIBLINGS_CAPPED)
+    return tuple(out)
 
 
 def account_network_policy_refs(frame: pd.DataFrame | None) -> int | None:
