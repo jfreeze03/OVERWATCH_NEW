@@ -275,7 +275,11 @@ Admin → Settings, never in code.
   per-user expectation), AI budget pacing when `AI_MONTHLY_BUDGET_USD` set.
 - **Optimization** — idle advisor (warehouse-hours billed with zero
   queries = auto-suspend opportunity); right-sizing simulator (spill +
-  queue profile → size suggestion); toggled scans: repeat-query
+  queue profile → size suggestion; its **Check cluster use** toggle reads
+  each multi-cluster warehouse's hourly peak cluster over ≥35 days, and a
+  higher MAX_CLUSTER_COUNT is suggested only where queries reached the
+  current maximum — otherwise "Size up or split (cluster cap not
+  reached)", or "not checked" with the toggle off); toggled scans: repeat-query
   fingerprints (≥10 identical runs = caching/materialization candidates),
   query efficiency (families scanning >80% of ≥100-partition tables;
   zero-scan share trend), storage waste (Time-Travel/failsafe-heavy tables,

@@ -94,6 +94,7 @@ _REACHABLE = {
         # (clustering targets), in the toggle-gated query-efficiency scan.
         # Next-Fifty #30: + GRANTS_TO_ROLES — the unread-maintenance share guard (database grants to
         # shares; a metadata view, read only behind the Storage & waste toggle).
+        # Next-Fifty #38 (v4.604): + warehouse_cluster_use reads QUERY_HISTORY (already pinned) — no set change.
         "ACCESS_HISTORY", "AUTOMATIC_CLUSTERING_HISTORY", "DATABASE_STORAGE_USAGE_HISTORY",
         "GRANTS_TO_ROLES", "QUERY_ACCELERATION_ELIGIBLE", "QUERY_ACCELERATION_HISTORY", "QUERY_ATTRIBUTION_HISTORY",
         "QUERY_HISTORY", "TABLES", "TABLE_DML_HISTORY", "TABLE_PRUNING_HISTORY",

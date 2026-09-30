@@ -1,7 +1,12 @@
 """Next-Fifty #38: the merged "Size up / add cluster" sizing verdict is split by the kind of
 pressure — overload queueing without remote spill is CONCURRENCY (add a cluster / scale out), remote
-spill is PER-QUERY memory (size up; with queueing too, size up first). App-only: no migration, no new
-read (the cluster config already rides on the profile via insights.with_warehouse_settings)."""
+spill is PER-QUERY memory (size up; with queueing too, size up first). App-only: no migration (the
+cluster config rides on the profile via insights.with_warehouse_settings).
+
+v4.604 (#38 remainder): on a multi-cluster warehouse the "raise MAX_CLUSTER_COUNT to N+1" advice and
+prefill are GATED on the cluster-cap check (sizing.with_cluster_use, fed by the toggled
+insights_sql.warehouse_cluster_use read), so the multi-cluster rows below carry the reached-cap columns;
+their unchecked twins lock the "was not checked" side. tests/test_cluster_cap_gate.py covers the gate."""
 
 from __future__ import annotations
 
@@ -12,6 +17,7 @@ from app.logic.insights import multi_cluster_evident, with_warehouse_settings
 from app.logic.sizing import (
     CLUSTER_RANGE_CAP,
     LONG_P95_SEC,
+    RECOMMEND_BELOW_CAP,
     RECOMMEND_DOWN,
     RECOMMEND_OBSERVE,
     RECOMMEND_SCALE_OUT,
@@ -28,6 +34,9 @@ from tests._source import page_source, read
 
 _Q45 = 7 * 45 * 60          # 45 min/day of overload queueing over a 7-day window
 _SPILL = 9.0                # 1.29 GB/day remote spill over 7 days
+# v4.604 (#38 remainder): a cluster-cap check that saw queries at the current maximum in 5 of 100 hours
+_REACHED = {"CLUSTER_CHECK_DAYS": 35.0, "ACTIVE_HOUR_COUNT": 100.0, "PEAK_CLUSTERS": 3.0,
+            "AT_CAP_HOUR_COUNT": 5.0}
 
 
 def _wh(name, queued_sec=0.0, spill=0.0, p95=5.0, idle=0.0, active_days=7, **extra):
@@ -54,7 +63,7 @@ def test_queue_only_is_scale_out_spill_is_size_up_both_is_size_up_first():
 def test_the_legacy_merged_verdict_is_never_emitted_but_still_counts():
     out = size_recommendations(pd.DataFrame([_wh("Q", queued_sec=_Q45), _wh("S", spill=_SPILL)]), 3.68, 7)
     assert RECOMMEND_UP not in set(out["RECOMMENDATION"])
-    assert {RECOMMEND_SCALE_OUT, RECOMMEND_SIZE_UP, RECOMMEND_UP} == UP_VERDICTS
+    assert {RECOMMEND_SCALE_OUT, RECOMMEND_SIZE_UP, RECOMMEND_UP, RECOMMEND_BELOW_CAP} == UP_VERDICTS
     legacy = pd.DataFrame({"RECOMMENDATION": [RECOMMEND_UP], "POTENTIAL_MONTHLY_SAVING_USD": [0.0]})
     assert sizing_summary(legacy)["up"] == 1          # an externally built frame still counts
 
@@ -88,7 +97,8 @@ def test_scale_out_rationale_reads_the_cluster_config():
     out = _sized(
         _wh("UNKNOWN", queued_sec=_Q45),
         _wh("SINGLE", queued_sec=_Q45, MAX_CLUSTER_COUNT=1.0, SCALING_POLICY="STANDARD"),
-        _wh("MULTI", queued_sec=_Q45, MAX_CLUSTER_COUNT=3.0, SCALING_POLICY="STANDARD"),
+        _wh("MULTI", queued_sec=_Q45, MAX_CLUSTER_COUNT=3.0, SCALING_POLICY="STANDARD", **_REACHED),
+        _wh("MULTI_UNCHECKED", queued_sec=_Q45, MAX_CLUSTER_COUNT=3.0, SCALING_POLICY="STANDARD"),
         _wh("ECON", queued_sec=_Q45, MAX_CLUSTER_COUNT=3.0, SCALING_POLICY="ECONOMY"),
         _wh("CAPPED", queued_sec=_Q45, MAX_CLUSTER_COUNT=float(CLUSTER_RANGE_CAP)),
     )
@@ -96,6 +106,9 @@ def test_scale_out_rationale_reads_the_cluster_config():
     assert "unknown" in out.loc["UNKNOWN", "RATIONALE"]
     assert "MAX_CLUSTER_COUNT = 1" in out.loc["SINGLE", "RATIONALE"]
     assert "raise MAX_CLUSTER_COUNT to 4" in out.loc["MULTI", "RATIONALE"]
+    assert "reached cluster 3 of 3 in 5 hours of the last 35 days" in out.loc["MULTI", "RATIONALE"]
+    assert "was not checked" in out.loc["MULTI_UNCHECKED", "RATIONALE"]
+    assert "raise MAX_CLUSTER_COUNT to" not in out.loc["MULTI_UNCHECKED", "RATIONALE"]
     assert "SCALING_POLICY = STANDARD" in out.loc["ECON", "RATIONALE"]
     assert "split the workload" in out.loc["CAPPED", "RATIONALE"]
     assert (out["RECOMMENDATION"] == RECOMMEND_SCALE_OUT).all()
@@ -130,8 +143,11 @@ def test_scale_out_plan_prefill():
     capped = scale_out_plan(pd.Series({"MIN_CLUSTER_COUNT": 2.0, "MAX_CLUSTER_COUNT": 10.0}))
     assert capped["at_cap"] is True and capped["min"] == 2
     # MIN is never raised: a MIN > 1 bills clusters around the clock
-    kept = scale_out_plan(pd.Series({"MIN_CLUSTER_COUNT": 2.0, "MAX_CLUSTER_COUNT": 4.0}))
-    assert (kept["min"], kept["max"]) == (2, 5)
+    kept = scale_out_plan(pd.Series({"MIN_CLUSTER_COUNT": 2.0, "MAX_CLUSTER_COUNT": 4.0, **_REACHED}))
+    assert (kept["min"], kept["max"], kept["prefill"]) == (2, 5, True)
+    # v4.604: the same warehouse, cap NOT checked -> no prefill, the range stays as it is
+    unchecked = scale_out_plan(pd.Series({"MIN_CLUSTER_COUNT": 2.0, "MAX_CLUSTER_COUNT": 4.0}))
+    assert (unchecked["min"], unchecked["max"], unchecked["prefill"]) == (2, 4, False)
     seen = scale_out_plan(pd.Series({"MAX_CLUSTER_COUNT": 1.0}), multi_cluster_seen=True)
     assert "already runs multi-cluster" in seen["note"]
 
@@ -139,8 +155,8 @@ def test_scale_out_plan_prefill():
 def test_prefill_cap_matches_the_generator_clamp():
     assert CLUSTER_RANGE_CAP == 10
     assert "MAX_CLUSTER_COUNT = 10;" in remediation.cluster_range_fix("W", 1, 99)
-    plan = scale_out_plan(pd.Series({"MIN_CLUSTER_COUNT": 1.0, "MAX_CLUSTER_COUNT": 9.0}))
-    assert plan["max"] == 10 and not plan["at_cap"]
+    plan = scale_out_plan(pd.Series({"MIN_CLUSTER_COUNT": 1.0, "MAX_CLUSTER_COUNT": 9.0, **_REACHED}))
+    assert plan["max"] == 10 and not plan["at_cap"] and plan["prefill"]
 
 
 def test_multi_cluster_evident():

@@ -52,6 +52,7 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 |---|---|
 | One-click remediation: auto-suspend, off-hours schedules, resize, retention — audit row + ESTIMATED savings | Cost → Optimization |
 | Interactive right-size what-if (size step + auto-suspend, bounded $ range) | Cost → Optimization |
+| Cluster-cap check: a higher MAX_CLUSTER_COUNT is suggested only where a multi-cluster warehouse's queries reached its current maximum (hourly peak cluster, ≥35 days); otherwise "Size up or split" | Cost → Optimization (Idle & sizing) |
 | Storage reclaim shortlist: stale AND never-read 90d (ACCESS_HISTORY) | Cost → Optimization |
 | Savings verifier flips ESTIMATED → VERIFIED/REJECTED from actuals monthly | Cost → Savings ledger |
 | Emergency levers: suspend WH, timeouts, cluster caps, monitor quotas, pipe/task pause, disable user, Cortex allowlist | Admin → Emergency |
