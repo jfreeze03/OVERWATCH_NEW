@@ -28,6 +28,7 @@ import re
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from app.ui.components import _auto_formats, _duration_unit_for_column
 
@@ -128,11 +129,30 @@ def test_pages_do_not_bypass_the_table_machinery_with_raw_dataframe():
 # unit must come from the shared humanizers (formulas.humanize_duration / format_unit / humanize_age /
 # humanize_minutes_ago), so the unit is picked by magnitude and reads like the tables and KPI cards.
 # Days ("{n}d") are windows, not durations, and stay out of the unit set.
-_DUR_UNIT = r"(?:ms|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?)"
+_DUR_UNIT = r"(?P<unit>ms|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?)"
+# review r1 (the 2026-09-30 hygiene release): the guard also sees an explicit "(s)" plural ("{n} hour(s)"),
+# a no-break or narrow no-break space between number and unit, an empty "{}" str.format placeholder and one
+# level of nested braces ("{'{:.1f}'.format(x)} s").
+_SP = r"[ \u00a0\u202f]"                                           # a space, a no-break or a narrow no-break
+_PLACEHOLDER = r"(?:\{[^{}]*\}|\{[^{}]*\{[^{}]*\}[^{}]*\})"
 # "{x}s", "{x} min", "{x}-second", and up to two lowercase words between ("{x} queued minutes")
-_RAW_DURATION_RE = re.compile(r"\{[^{}]+\}(?P<gap>[ -]?|[ -](?:[a-z]+ ){1,2})" + _DUR_UNIT + r"(?![A-Za-z0-9_(])")
-_PRINTF_DURATION_RE = re.compile(r"%[-+ 0#]*\d*(?:\.\d+)?[dfg] ?" + _DUR_UNIT + r"(?![A-Za-z0-9_])")
-_SQL_ALIAS_BEFORE_RE = re.compile(r"\b(?:FROM|JOIN)\s*$")      # "FROM {tbl} s" is a table alias, not seconds
+_RAW_DURATION_RE = re.compile(_PLACEHOLDER + rf"(?P<gap>(?:{_SP}|-)?|(?:{_SP}|-)(?:[a-z]+{_SP}){{1,2}})"
+                              + _DUR_UNIT + r"(?:\(s\))?(?![A-Za-z0-9_(])")
+# printf: %d/%f/%g/%i/%s with an optional %(name) key. No space flag: "% is" is English ("Coverage % is ..."),
+# and a space-flagged number conversion before a unit is not a form the app writes.
+_PRINTF_DURATION_RE = re.compile(r"%(?:\([A-Za-z_]\w*\))?[-+0#]*\d*(?:\.\d+)?[dfgis] ?" + _DUR_UNIT
+                                 + r"(?:\(s\))?(?![A-Za-z0-9_])")
+# "FROM {tbl} s" / "MERGE INTO {t} m USING {src} s" / "UPDATE {t} s SET" is a table alias, not seconds. Only
+# the alias shape is exempt (review r1): an upper-case SQL keyword right before the placeholder, ONE plain
+# space, and a one-letter alias. "FROM {x} queued minutes" or "INTO {x} min" is still flagged.
+_SQL_ALIAS_BEFORE_RE = re.compile(r"\b(?:FROM|JOIN|INTO|USING|UPDATE)\s*$")
+_SQL_ALIAS_UNITS = {"s", "m", "h"}
+_RATE_GAP_RE = re.compile(rf"\bper{_SP}$")                         # "{n} credits per hour" is a rate
+
+
+def _is_sql_alias(text: str, m: re.Match) -> bool:
+    return (m.group("gap") == " " and m.group("unit") in _SQL_ALIAS_UNITS
+            and bool(_SQL_ALIAS_BEFORE_RE.search(text[:m.start()])))
 
 # Whole functions that ARE duration formatters: their output is the humanized form (or, for the printf map,
 # the only form a large-frame NumberColumn accepts).
@@ -172,10 +192,10 @@ _RAW_DURATION_ALLOWED = {
         "AUTO_SUSPEND parameter values (seconds, as SET)",
     ("app/logic/sizing.py", "_recommend", "despite AUTO_SUSPEND={current}s;"):
         "AUTO_SUSPEND parameter value (seconds, as SET)",
-    ("app/logic/sizing.py", "_susp_label", "never | {int(_sf(v, 0))}s"):
+    ("app/logic/sizing.py", "_susp_label", "{int(_sf(v, 0))}s"):
         "the what-if assumption 'Auto-suspend 600s -> 60s', the same shape as the [24] alert title "
         "(tests/test_bughunt_round4.py locks 'never -> 60s')",
-    ("app/ui/pages/cost_parts/optimize.py", "_whatif_panel", "never suspends | {live_suspend}s suspend"):
+    ("app/ui/pages/cost_parts/optimize.py", "_whatif_panel", "{live_suspend}s suspend"):
         "AUTO_SUSPEND parameter value on the what-if KPI (the slider beside it offers the SET values 30..900)",
     ("app/ui/pages/cost_parts/optimize.py", "_whatif_panel", "Scenario ({sim['size_new']}, {int(sus_wi)}s)"):
         "AUTO_SUSPEND parameter value on the what-if KPI",
@@ -194,8 +214,13 @@ _RAW_DURATION_ALLOWED = {
         "the legacy-fallback ALERT_AUDIT note; SP_ALERT_SNOOZE (V086) writes its note as :v_hours || 'h', and "
         "hours is always a whole-hour SNOOZE_PRESETS value",
     # --- not durations ----------------------------------------------------------------------------------
+    # (a conditional renders once per branch, so a singular/plural pair is two fragments)
     ("app/logic/sizing.py", "_hour_count_txt", "{n} hour"):
+        "a COUNT of hourly buckets at the cluster cap ('1 hour of the last 35 days'), not an elapsed time",
+    ("app/logic/sizing.py", "_hour_count_txt", "{n} hours"):
         "a COUNT of hourly buckets at the cluster cap ('57 hours of the last 35 days'), not an elapsed time",
+    ("app/logic/stmt_timeout.py", "_plural", "{n} {word}s"):
+        "a noun pluralizer ('3 completed statements'), not a duration: the 's' is the plural of {word}",
     ("app/logic/ask/registry.py", "_analyze_warehouse_waste", "idle {idle_h} of {met_h} metered hours"):
         "a tally of metered hour slices ('idle 57 of 120 metered hours'), not an elapsed time",
     ("app/ui/charts.py", "hour_heatmap", "{_r.iloc[_p]} at hour {int(_h.iloc[_p])}"):
@@ -203,23 +228,34 @@ _RAW_DURATION_ALLOWED = {
 }
 
 
+_MAX_RENDERINGS = 4096      # fail closed: an expression with more branch combinations than this fails the sweep
+
+
 def _string_expressions(tree: ast.AST):
-    """(enclosing function, text) for every string expression: each literal climbed to its whole
-    concatenation (f-string incl. format specs, +, a conditional part); docstrings skipped. A non-literal
-    part renders as {its source} -- the same rendering as test_cluster_cap_gate._str_text."""
+    """(enclosing function, text) for every rendering of every string expression: each literal climbed to its
+    whole concatenation (f-string incl. format specs, +, a conditional part -- rendered once per branch);
+    docstrings skipped. A non-literal part renders as {its source}, as in test_cluster_cap_gate._str_text."""
     parent = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
 
-    def text(node) -> str:
+    def texts(node) -> list[str]:
+        """Every rendering of ``node``. A conditional part renders once per branch and a "+" is the cross
+        product of its sides (review r1: joining the branches as "body | orelse" kept a number in the body
+        away from a unit after the conditional, so (f"{x:.0f}" if ok else "-") + " min" was never seen)."""
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
+            return [node.value]
         if isinstance(node, ast.JoinedStr):
-            return "".join(v.value if isinstance(v, ast.Constant) else "{" + ast.unparse(v.value) + "}"
-                           for v in node.values)
+            return ["".join(v.value if isinstance(v, ast.Constant) else "{" + ast.unparse(v.value) + "}"
+                            for v in node.values)]
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-            return text(node.left) + text(node.right)
-        if isinstance(node, ast.IfExp):
-            return text(node.body) + " | " + text(node.orelse)
-        return "{" + ast.unparse(node) + "}"
+            out = list(dict.fromkeys(a + b for a in texts(node.left) for b in texts(node.right)))
+        elif isinstance(node, ast.IfExp):
+            out = list(dict.fromkeys(texts(node.body) + texts(node.orelse)))
+        else:
+            return ["{" + ast.unparse(node) + "}"]
+        assert len(out) <= _MAX_RENDERINGS, (
+            f"line {node.lineno}: {len(out)} renderings of one string expression -- split it into named parts "
+            "so the raw-duration sweep can read every combination")
+        return out
 
     tops = {}
     for node in ast.walk(tree):
@@ -244,7 +280,8 @@ def _string_expressions(tree: ast.AST):
         while up is not None and not fn:
             fn = up.name if isinstance(up, (ast.FunctionDef, ast.AsyncFunctionDef)) else ""
             up = parent.get(up)
-        yield fn, text(top)
+        for text in texts(top):
+            yield fn, text
 
 
 def _raw_duration_hits(source: str):
@@ -252,8 +289,7 @@ def _raw_duration_hits(source: str):
     out = []
     for fn, text in _string_expressions(ast.parse(source)):
         hits = [(m.start(), m.end(), m.group(0)) for m in _RAW_DURATION_RE.finditer(text)
-                if not _SQL_ALIAS_BEFORE_RE.search(text[:m.start()])
-                and not m.group("gap").endswith("per ")]             # "{n} credits per hour" is a rate
+                if not _is_sql_alias(text, m) and not _RATE_GAP_RE.search(m.group("gap"))]
         hits += [(m.start(), m.end(), m.group(0)) for m in _PRINTF_DURATION_RE.finditer(text)]
         if hits:
             out.append((fn, text, hits))
@@ -318,6 +354,58 @@ def f(x, q, n, tbl, reason):
     assert flagged == {"Spent {q}s queued (of {x}s total)", "{q} min/day queued", "%.1f s",
                        "{n} queued minutes across the day.", "p95 {x}ms", "already {x}h old",
                        "{x}-second wait"}, flagged
+
+
+# Review r1 (the 2026-09-30 hygiene release): raw shapes the first sweep let through, each beside a safe
+# near-miss of the same form. (expression, the rendering the sweep must flag -- None = must pass).
+_REVIEW_R1_FORMS = {
+    # (a) an explicit "(s)" plural -- the codebase already writes day(s) / night(s)
+    "plural-hour": ('f"{n} hour(s) late"', "{n} hour(s) late"),
+    "plural-minute": ('f"{x:.0f} minute(s)"', "{x} minute(s)"),
+    "plural-second": ('f"{x} second(s)"', "{x} second(s)"),
+    "plural-min": ('f"{x} min(s)"', "{x} min(s)"),
+    "plural-day-safe": ('f"{n} day(s) late"', None),                 # days are windows, not durations
+    "plural-noun-safe": ('f"{n} item(s)"', None),
+    # (b) a conditional number with its unit AFTER the conditional (each branch renders on its own)
+    "ifexp-body": ('(f"{x:.0f}" if ok else "-") + " min"', "{x} min"),
+    "ifexp-orelse": ('("-" if x is None else f"{x:.1f}") + "s queued"', "{x}s queued"),
+    "ifexp-unit-in-branch": ('f"{x}" + (" min" if ok else " GB")', "{x} min"),
+    "ifexp-safe": ('(f"{n} runs" if ok else "none") + " per day"', None),
+    # (c) str.format and printf placeholders
+    "format-empty": ('"{}s".format(x)', "{}s"),
+    "format-empty-spaced": ('"{} min".format(x)', "{} min"),
+    "format-nested": ('"{:.1f}".format(x) + " s"', "{'{:.1f}'.format(x)} s"),
+    "format-days-safe": ('"{}d".format(n)', None),
+    "printf-s": ('"%s s" % x', "%s s"),
+    "printf-i": ('"%i min" % x', "%i min"),
+    "printf-named": ('"%(v)d s" % d', "%(v)d s"),
+    "printf-prose-safe": ('"Coverage % is credit-weighted"', None),  # '% is' is English, not a conversion
+    "printf-noun-safe": ('"%s runs" % n', None),
+    # (d) a no-break / narrow no-break space between number and unit
+    "nbsp": ('f"{x}\u00a0min"', "{x}\u00a0min"),
+    "narrow-nbsp": ('f"{x}\u202fs"', "{x}\u202fs"),
+    "nbsp-words": ('f"{x}\u00a0queued\u00a0minutes"', "{x}\u00a0queued\u00a0minutes"),
+    "nbsp-safe": ('f"{x}\u00a0GB"', None),
+    # the SQL-alias exemption (R1-11): FROM / JOIN / INTO / USING / UPDATE + one space + a one-letter alias ...
+    "sql-merge-safe": ('f"MERGE INTO {t} m USING {src} s ON m.ID = s.ID"', None),
+    "sql-update-safe": ('f"UPDATE {t} s SET X = 1"', None),
+    "sql-join-safe": ('f"SELECT 1 FROM {t} s JOIN {src} h ON s.ID = h.ID"', None),
+    # ... and nothing else after those keywords: a spelled unit or a worded gap is still a duration
+    "sql-keyword-spelled-unit": ('f"MERGE INTO {x} min"', "MERGE INTO {x} min"),
+    "sql-keyword-worded-gap": ('f"FROM {x} queued minutes"', "FROM {x} queued minutes"),
+    "sql-keyword-no-space": ('f"FROM {x}s"', "FROM {x}s"),
+    "sql-lowercase-prose": ('f"moved into {x} m"', "moved into {x} m"),
+    # the rate exemption is the word 'per', not any word ending in it
+    "rate-safe": ('f"{n} credits per hour"', None),
+    "rate-lookalike": ('f"{x} super hours"', "{x} super hours"),
+}
+
+
+@pytest.mark.parametrize("form", sorted(_REVIEW_R1_FORMS))
+def test_the_duration_sweep_catches_the_review_r1_forms(form):
+    expr, want = _REVIEW_R1_FORMS[form]
+    flagged = {text for _fn, text, _h in _raw_duration_hits(f"def f(x, n, d, t, src, ok):\n    v = {expr}\n")}
+    assert flagged == ({want} if want else set()), (form, flagged)
 
 
 # --- the sentences the v4.605.0 sweep fixed, rendered (behaviour, not source text) ---------------------
@@ -424,6 +512,33 @@ def test_alert_recheck_humanizes_queued_minutes():
     assert recheck_sql.recheck_label("PERF_QUEUED_MINUTES") == "queued time today"
     alerts = (_ROOT / "app" / "ui" / "pages" / "alerts.py").read_text(encoding="utf-8")
     assert "{_rcv:,.2f}" not in alerts and "{safe_float(_rct):,.2f}" not in alerts
+
+
+def test_alert_recheck_names_the_gap_when_rounding_hides_it():
+    """Review r1: humanize_duration drops the seconds from an hour up, so a queued-minutes re-check of 90.9 against
+    a threshold of 90 read "Still over: queued time today = 1h 30m vs threshold 1h 30m" (and the resolve note
+    carried it). The sentence now names the exact gap when the two texts collide, or says 'at the threshold'."""
+    from app.logic.formulas import duration_vs_threshold_text
+    from app.ui.pages.alerts import _recheck_vs_text
+
+    cases = {(90.9, 90.0): "1h 30m vs threshold 1h 30m, 54s over",
+             (60.99, 60.0): "1h vs threshold 1h, 59s over",
+             (89.995, 90.0): "1h 30m vs threshold 1h 30m, 300ms under",
+             (30.004, 30.0): "30m vs threshold 30m, 240ms over",
+             (30.000001, 30.0): "30m vs threshold 30m, <1ms over",
+             (90.0, 90.0): "1h 30m, at the threshold",
+             (145.0, 30.0): "2h 25m vs threshold 30m",                 # distinct texts: no gap clause
+             (29.0, 30.0): "29m vs threshold 30m"}
+    for (value, thr), want in cases.items():
+        assert _recheck_vs_text("PERF_QUEUED_MINUTES", value, thr) == want, (value, thr)
+        assert duration_vs_threshold_text(value, thr, "min") == want, (value, thr)
+    assert duration_vs_threshold_text(float("nan"), 30.0, "min") == "— vs threshold 30m"
+    # the other rules keep two decimals, unchanged
+    assert _recheck_vs_text("COST_WH_DAILY_CREDITS", 12.345, 12.0) == "12.35 vs threshold 12.00"
+    # every "vs threshold" sentence on the page (Still over, Was clear, Condition clear, the resolve note) uses it
+    alerts = (_ROOT / "app" / "ui" / "pages" / "alerts.py").read_text(encoding="utf-8")
+    assert alerts.count("_recheck_vs_text(_rid, _rcv, safe_float(_rct))") == 4
+    assert "threshold {_recheck_value_text(_rid" not in alerts
 
 
 def test_session_refreshed_note_uses_the_shared_age(monkeypatch):

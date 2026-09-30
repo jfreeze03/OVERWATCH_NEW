@@ -214,7 +214,10 @@ def task_evidence_lines(df: pd.DataFrame | None, *, task: str) -> list[EvidenceL
     first = df.iloc[0]
     age = safe_float(first.get("END_AGE_MIN"), default=float("inf"))
     recent = age < QH_LAG_MIN
-    _ago = (f"the task ended {humanize_minutes_ago(age)}" if age >= 1
+    # Only a recent task names its age, and every use below sits behind `recent`. A NULL age is inf and
+    # humanize_minutes_ago reads inf as "just now", so it is never built for a not-recent task (review r1).
+    _ago = ("" if not recent
+            else f"the task ended {humanize_minutes_ago(age)}" if age >= 1
             else "the task ended moments ago or is still running")
     has_call = (df["CALL_QUERY_ID"].map(lambda v: _txt(v, "") != "") if "CALL_QUERY_ID" in df.columns
                 else pd.Series(False, index=df.index))

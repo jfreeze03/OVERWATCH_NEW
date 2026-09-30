@@ -496,8 +496,16 @@ def test_builder_and_verdict_share_a_column_contract() -> None:
 
 
 def test_a_null_end_age_no_longer_crashes() -> None:
-    """v4.605.0: a NULL END_AGE_MIN (MAX(TASK_END) NULL) defaults to inf = "not recent"; the old
+    """v4.605.0: a NULL END_AGE_MIN (defensive: the builder never emits NULL -- it fills a missing end time
+    with now via COALESCE, so a task with no end time has END_AGE_MIN 0) defaults to inf = "not recent"; the old
     f"{int(age)} min ago" raised OverflowError on it before any line rendered. The age now goes through
     humanize_minutes_ago, so the drill returns its post-lag reading instead of crashing."""
     lines = _lines(_row(CALL_QUERY_ID=None, MATCHED_CALLS=0, END_AGE_MIN=None))
     assert _levels(lines) == ["no_data_yet"] and "ran in its window" in lines[0].text
+    # review r1: humanize_minutes_ago reads inf as "just now"; a NULL age never names an age at all
+    for row in (_row(END_AGE_MIN=None), _row(END_AGE_MIN=None, IS_TASK_FAILED=1, TASK_STATUS="FAILED"),
+                _row(END_AGE_MIN=None, CALL_DATABASE="OTHER_DB")):
+        assert not any("just now" in line.text or "task ended" in line.text for line in _lines(row)), row
+    # what the builder does emit for a task with no end time: END_AGE_MIN 0, read as recent
+    zero = _lines(_row(CALL_QUERY_ID=None, MATCHED_CALLS=0, END_AGE_MIN=0))
+    assert "the task ended moments ago or is still running" in zero[0].text
