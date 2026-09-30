@@ -117,6 +117,12 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("security.admin_role_activity_fact", lambda: security_sql.admin_role_activity_fact(1)),
     ("security.effective_access", lambda: security_sql.effective_access("ALFA")),
     ("security.egress_baseline", lambda: security_sql.egress_baseline(1)),
+    # Next-Fifty #43: the POLICY_REFERENCES reads (probe=True on Security). A standard view, proven readable (S1b
+    # 2026-09-29), so none is a declared gap: an absent view or a renamed column FAILs here while the page shows
+    # needs_setup / unavailable.
+    ("security.data_policy_coverage", security_sql.data_policy_coverage),
+    ("security.masking_environment_parity", security_sql.masking_environment_parity),
+    ("security.admin_network_policy_coverage", lambda: security_sql.admin_network_policy_coverage("ALFA")),
     ("change_impact.change_registry", lambda: change_impact_sql.change_registry(30, "ALFA")),
     ("mart.fact_metering_by_service", lambda: mart_sql.fact_metering_by_service(7)),
     ("mart.fact_query_window_summary", lambda: mart_sql.fact_query_window_summary(1, "ALFA")),
