@@ -798,7 +798,7 @@ def test_storage_and_waste_publishes_the_handoff_source():
     assert 'empty_state("unavailable", md_dollars(S_LEDGER_UNAVAILABLE), detail=_led_err)' in branch
     # never cleared (the toggle resets on every revisit), never built here, and no new ACCOUNT_USAGE read
     assert "pop(UNREAD_HANDOFF_KEY" not in opt and "del st.session_state[UNREAD_HANDOFF_KEY]" not in opt
-    assert opt.count("ACCOUNT_USAGE") == 5
+    assert opt.count("ACCOUNT_USAGE") == 6   # v4.604 #38: + the toggled cluster-use read (test_perf_budgets optimize.py 5 -> 6)
     ds = read("app/ui/decision_studio.py")
     assert "UNREAD_HANDOFF_KEY] =" not in ds and "unread_handoff(" not in ds
 
