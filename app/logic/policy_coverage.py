@@ -1,0 +1,405 @@
+"""Next-Fifty #43 Phase 1: masking / row-access / projection / aggregation policy coverage.
+
+Shapes ``security_sql.data_policy_coverage`` and ``security_sql.masking_environment_parity`` into the Security >
+Exposure panel's frames and sentences, and ``ACCOUNT_POLICY_REFS`` (from ``admin_network_policy_coverage``) into
+the Access network-policy caption. It also owns the database-family rule (FAMILY_NAME_PATTERN /
+FAMILY_SUFFIX_PATTERN: the SQL's ``security_sql._db_family`` is built from them and ``db_family`` is its Python
+mirror), so the SHOW DATABASES names are grouped the same way to list a family's databases with no column-level
+masking reference.
+
+- Every number comes from SQL, keyed on fully qualified names. Nothing here sums a per-database column into an
+  account total: distinct policies are not additive across databases, so the totals are read from the SQL's own
+  account-level columns (repeated on every row).
+- Nothing here feeds ``app.logic.security.domain_posture`` or the Decision-queue domain scores (owner default #43):
+  the panel is information only, and the environment grouping is not a gap worklist.
+- Pure: no Streamlit, no app.data, no clock.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Iterable
+from dataclasses import dataclass
+
+import pandas as pd
+
+from app.logic.formulas import humanize_duration, safe_float
+
+INVENTORY_COLUMNS: tuple[str, ...] = (
+    "DATABASE_NAME", "ENVIRONMENT", "MASKED_OBJECTS", "MASKED_COLUMNS", "MASKING_POLICIES", "REFS_NOT_ACTIVE",
+)
+TOTAL_COLUMNS: tuple[str, ...] = (
+    "TOTAL_MASKED_COLUMNS", "TOTAL_MASKED_OBJECTS", "TOTAL_MASKED_DATABASES", "TOTAL_MASKING_POLICIES",
+    "MASKING_TAGS", "MASKING_TAG_DATABASES", "TAG_MASKING_POLICIES", "MASKING_REFS_NOT_ACTIVE",
+    "ROW_ACCESS_OBJECTS", "ROW_ACCESS_POLICIES", "PROJECTION_OBJECTS", "PROJECTION_POLICIES",
+    "AGGREGATION_OBJECTS", "AGGREGATION_POLICIES",
+)
+TEXT_TOTAL_COLUMNS: tuple[str, ...] = ("NOT_ACTIVE_STATUSES", "OTHER_POLICY_KINDS")
+PARITY_COLUMNS: tuple[str, ...] = (
+    "DATABASE_FAMILY", "SCHEMA_NAME", "OBJECT_NAME", "PARITY", "DATABASES_MASKED", "MASKED_FAMILY_DATABASES",
+    "COLUMN_SETS", "MASKED_IN", "NO_MASKING_REF_IN",
+)
+PARITY_TOTAL_COLUMNS: tuple[str, ...] = ("TOTAL_NAMES", "DIFFERING_NAMES")
+
+# Review r3 R3-5: how far behind the panel's masking lines can be. Snowflake's policy-reference view lags up to
+# POLICY_VIEW_LAG_SEC, and the panel's reads of it (sec_policy_cov, sec_policy_parity) are on the 'hourly' tier, so a
+# result can be up to POLICY_READ_CACHE_SEC old on top of that: set equal to app.core.query.CACHE_TTLS["hourly"]
+# (test-pinned, with both reads' tier). The sidebar's Refresh data clears the cache.
+POLICY_VIEW_LAG_SEC = 7200
+POLICY_READ_CACHE_SEC = 3600
+_VIEW_LAG = humanize_duration(POLICY_VIEW_LAG_SEC)
+_READ_CACHE = humanize_duration(POLICY_READ_CACHE_SEC)
+_MAX_BEHIND = humanize_duration(POLICY_VIEW_LAG_SEC + POLICY_READ_CACHE_SEC)
+
+POLICY_VIEW_UNREADABLE = (
+    "Snowflake's policy-reference view (POLICY_REFERENCES) is not readable by this app: it is missing in this "
+    "account, or the app's role cannot see it. Masking and row-access coverage cannot be shown here."
+)
+NO_MASKING = (
+    "The policy-reference view lists no masking policy on any column or tag in this account, so there is no "
+    "masking inventory. A policy attached in the last " + _MAX_BEHIND + " may not be listed yet (the view can lag up "
+    "to " + _VIEW_LAG + " and this read of it is cached for up to " + _READ_CACHE + "; Refresh data clears the cache)."
+)
+TAG_ONLY_MASKING = (
+    "The policy-reference view lists no column-level masking reference; masking here is attached through tags "
+    "only (see the tag-based line below)."
+)
+INVENTORY_NOTE = (
+    "One row per database with a masked column. Counts are distinct fully qualified names; a policy used in "
+    "several databases counts once in each row, so MASKING_POLICIES does not add up to the account total. "
+    "ENVIRONMENT is the part of the database name after its last underscore, shown when two or more databases "
+    "with masked columns share the rest of the name."
+)
+PARITY_LEGEND = (
+    "SAME: masked in every database of its family that has masked columns, on the same column names. DIFFERS: "
+    "masked in fewer of them, or on different columns. MASKED_FAMILY_DATABASES counts the family's databases "
+    "with masked columns; MASKED_IN gives each database with its masked-column count; NO_MASKING_REF_IN lists "
+    "family databases that have masked columns but none on this name, and the table may not exist there. A "
+    "family here is the databases with masked columns whose names match up to the last underscore (for example "
+    "X_PRD and X_DEV); a database with no column-level masking reference appears in neither table. Information "
+    "only, not a gap list: it does not assume every environment should be masked like production."
+)
+_NOT_IN_GROUPING = "Databases with no column-level masking reference are not part of this grouping."
+PARITY_NOTHING_TO_GROUP = (
+    "No two databases with masked columns share a name up to their last underscore, so there is nothing to "
+    "group. " + _NOT_IN_GROUPING
+)
+# The unmasked-sibling lines under the grouping (review R1-1): the databases of a masked database's family with no
+# COLUMN-LEVEL masking reference, from the SHOW DATABASES names. A failed or nameless SHOW read says they were not
+# checked (unavailable / no_data_yet), never that there are none. Review R2-1: that absence is all the panel knows,
+# so no line says a database has "no masked column": tag-based masking is not traced to columns (a database masked
+# only through a tag is listed; SIBLINGS_TAG_QUALIFIER says so whenever the account has masking tags), and the policy
+# view lags, the panel's reads of it are cached (review r3 R3-5) and the database list is a cached read (SIBLINGS_LAG,
+# on every rendered list).
+SIBLINGS_UNCHECKED = (
+    "Databases with no column-level masking reference were not checked: the database list (SHOW DATABASES) could "
+    "not be read, so a family may hold databases that are not shown here."
+)
+SIBLINGS_NO_NAMES = (
+    "Databases with no column-level masking reference were not checked: the database list (SHOW DATABASES) "
+    "returned no database names, so a family may hold databases that are not shown here."
+)
+SIBLINGS_LEAD = (
+    "Databases with no column-level masking reference, in the family of a masked database (from SHOW DATABASES: "
+    "the databases this app's role can see):"
+)
+SIBLINGS_NONE = (
+    "SHOW DATABASES (the databases this app's role can see) lists no database without a column-level masking "
+    "reference in the family of a masked database."
+)
+SIBLINGS_TAG_QUALIFIER = (
+    "Tag-based masking is not traced to columns here, so a database masked only through a tag (or a tag set on "
+    "the database or schema) can be listed."
+)
+SIBLINGS_LAG = (
+    "The policy-reference view can lag up to " + _VIEW_LAG + " and this panel's reads of it are cached for up to "
+    + _READ_CACHE + " (Refresh data clears the cache), so a database masked or cloned in the last " + _MAX_BEHIND
+    + " can be listed; the database list is a cached SHOW DATABASES read, so a database created since that read is "
+    "not listed."
+)
+SIBLINGS_CAPPED = "SHOW DATABASES stopped at its row limit, so databases past it were not checked."
+SIBLING_NAMES_CAP = 20
+ACCOUNT_POLICY_HINT = (
+    "The same view lists an account-level network policy, which applies to an admin without a user-level policy "
+    "unless they sign in through a security integration that has its own."
+)
+
+# Snowflake's documented network-policy precedence (docs "Network policy precedence", re-read 2026-09-30): the most
+# specific wins -- a security integration's policy overrides a user's and the account's, and a user's overrides the
+# account's. So the user-level policy "pins" an admin except when they sign in through an integration that has its
+# own policy; every caption below that credits the user-level policy carries that qualifier.
+_INTEGRATION_PRECEDENCE = (
+    "A security integration's own network policy takes precedence over both when an admin signs in through that "
+    "integration."
+)
+# The Access caption before #43 (its first sentence verbatim) for the state where the account-level count is not
+# known, plus the integration qualifier.
+_NETWORK_CAPTION_UNKNOWN = (
+    "A user-level policy overrides the account policy and pins an admin to known networks; an admin without one "
+    "still falls under the account-level policy if one is set. " + _INTEGRATION_PRECEDENCE
+)
+_NETWORK_CAPTION_SET = (
+    "An account-level network policy is set (the policy-reference view lists it). A user-level policy takes "
+    "precedence over it and pins an admin to known networks; an admin without one falls under the account-level "
+    "policy. " + _INTEGRATION_PRECEDENCE
+)
+_NETWORK_CAPTION_NONE = (
+    "The policy-reference view lists no account-level network policy (it can lag up to 2 hours); confirm with "
+    "SHOW PARAMETERS LIKE 'NETWORK_POLICY' IN ACCOUNT. Without one, an admin with no user-level policy is limited "
+    "only by a security integration's own network policy, when signing in through it."
+)
+
+
+# The database-family rule (Next-Fifty #43): a family is the name up to its last underscore (X_PRD, X_DEV -> X); a
+# name with no inner underscore is its own family. One source for security_sql._db_family (SQL: Snowflake's
+# REGEXP_LIKE anchors the whole name) and db_family below (re.fullmatch anchors the same way).
+FAMILY_NAME_PATTERN = ".+_[^_]+"
+FAMILY_SUFFIX_PATTERN = "_[^_]+$"
+
+
+def db_family(name: str) -> str:
+    """The Python mirror of security_sql._db_family, for the SHOW DATABASES names."""
+    return re.sub(FAMILY_SUFFIX_PATTERN, "", name) if re.fullmatch(FAMILY_NAME_PATTERN, name) else name
+
+
+@dataclass(frozen=True)
+class FamilySiblings:
+    """One family of a database with a masked column, and its listed databases with no column-level masking
+    reference."""
+
+    family: str
+    unmasked: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PolicyCoverage:
+    """Account totals from data_policy_coverage (one read of row 0: the totals repeat on every row)."""
+
+    masked_columns: int
+    masked_objects: int
+    masked_databases: int
+    masking_policies: int
+    masking_tags: int
+    masking_tag_databases: int
+    tag_masking_policies: int
+    not_active_refs: int
+    row_access_objects: int
+    row_access_policies: int
+    projection_objects: int
+    projection_policies: int
+    aggregation_objects: int
+    aggregation_policies: int
+    not_active_statuses: str
+    other_policy_kinds: str
+
+
+def _count(v: object) -> int:
+    return int(safe_float(v))
+
+
+def _text(v: object) -> str:
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(v).strip()
+
+
+def _plural(n: int, one: str, many: str) -> str:
+    return f"{n:,} {one if n == 1 else many}"
+
+
+def _or_join(words: list[str]) -> str:
+    if len(words) <= 1:
+        return "".join(words)
+    if len(words) == 2:
+        return f"{words[0]} or {words[1]}"
+    return f"{', '.join(words[:-1])} or {words[-1]}"
+
+
+def summarize_policy_coverage(frame: pd.DataFrame | None) -> PolicyCoverage | None:
+    """The account totals, or None when the frame is missing, empty, or lacks a total column (never zeros)."""
+    if frame is None or frame.empty:
+        return None
+    if any(c not in frame.columns for c in (*TOTAL_COLUMNS, *TEXT_TOTAL_COLUMNS)):
+        return None
+    row = frame.iloc[0]
+    return PolicyCoverage(
+        masked_columns=_count(row["TOTAL_MASKED_COLUMNS"]),
+        masked_objects=_count(row["TOTAL_MASKED_OBJECTS"]),
+        masked_databases=_count(row["TOTAL_MASKED_DATABASES"]),
+        masking_policies=_count(row["TOTAL_MASKING_POLICIES"]),
+        masking_tags=_count(row["MASKING_TAGS"]),
+        masking_tag_databases=_count(row["MASKING_TAG_DATABASES"]),
+        tag_masking_policies=_count(row["TAG_MASKING_POLICIES"]),
+        not_active_refs=_count(row["MASKING_REFS_NOT_ACTIVE"]),
+        row_access_objects=_count(row["ROW_ACCESS_OBJECTS"]),
+        row_access_policies=_count(row["ROW_ACCESS_POLICIES"]),
+        projection_objects=_count(row["PROJECTION_OBJECTS"]),
+        projection_policies=_count(row["PROJECTION_POLICIES"]),
+        aggregation_objects=_count(row["AGGREGATION_OBJECTS"]),
+        aggregation_policies=_count(row["AGGREGATION_POLICIES"]),
+        not_active_statuses=_text(row["NOT_ACTIVE_STATUSES"]),
+        other_policy_kinds=_text(row["OTHER_POLICY_KINDS"]),
+    )
+
+
+def database_inventory(frame: pd.DataFrame | None) -> pd.DataFrame:
+    """The per-database rows (the NULL-database totals sentinel dropped), INVENTORY_COLUMNS only, in SQL order."""
+    if frame is None or frame.empty or "DATABASE_NAME" not in frame.columns:
+        return pd.DataFrame(columns=list(INVENTORY_COLUMNS))
+    rows = frame[frame["DATABASE_NAME"].notna()]
+    cols = [c for c in INVENTORY_COLUMNS if c in frame.columns]
+    return rows[cols].reset_index(drop=True)
+
+
+def tag_masking_sentence(c: PolicyCoverage) -> str:
+    tags = c.masking_tags
+    if tags <= 0:
+        return "Tag-based masking: none. The policy-reference view lists no masking policy attached to a tag."
+    return (f"Tag-based masking: {_plural(tags, 'tag', 'tags')} in "
+            f"{_plural(c.masking_tag_databases, 'database', 'databases')} "
+            f"{'carries' if tags == 1 else 'carry'} a masking policy "
+            f"({_plural(c.tag_masking_policies, 'distinct policy', 'distinct policies')}). "
+            "This counts the tags that carry a masking policy, once each even when a tag carries a policy for "
+            "more than one data type; the columns each tag is set on are not listed here.")
+
+
+def row_policy_sentences(c: PolicyCoverage) -> tuple[str, ...]:
+    """One sentence per row-level policy kind in use, then ONE sentence naming every kind not in use (the explicit
+    'no row-access policy' statement; it always renders when any kind is unused)."""
+    out: list[str] = []
+    unused: list[str] = []
+    for label, attr in (("row-access", "row_access"), ("projection", "projection"), ("aggregation", "aggregation")):
+        objs = int(getattr(c, f"{attr}_objects"))
+        pols = int(getattr(c, f"{attr}_policies"))
+        if objs > 0:
+            out.append(f"{label.capitalize()} policies are attached to "
+                       f"{_plural(objs, 'table or view', 'tables or views')} "
+                       f"({_plural(pols, 'distinct policy', 'distinct policies')}).")
+        else:
+            unused.append(label)
+    if unused:
+        out.append(f"No {_or_join(unused)} policy is in use: the policy-reference view lists none attached to any "
+                   "table or view.")
+    return tuple(out)
+
+
+def not_active_sentence(c: PolicyCoverage) -> str:
+    n = c.not_active_refs
+    if n <= 0:
+        return ""
+    return (f"{_plural(n, 'masking reference reports', 'masking references report')} a status other than ACTIVE: "
+            f"{c.not_active_statuses or 'status not reported'}.")
+
+
+def other_kinds_sentence(c: PolicyCoverage) -> str:
+    if not c.other_policy_kinds:
+        return ""
+    return f"Other policy kinds in the view, not covered here: {c.other_policy_kinds}."
+
+
+def parity_view(frame: pd.DataFrame | None) -> pd.DataFrame:
+    """The displayed environment-grouping frame (and so the CSV): PARITY_COLUMNS only, totals dropped."""
+    if frame is None:
+        return pd.DataFrame(columns=list(PARITY_COLUMNS))
+    cols = [c for c in PARITY_COLUMNS if c in frame.columns]
+    return frame[cols].reset_index(drop=True)
+
+
+def parity_counts(frame: pd.DataFrame | None) -> tuple[int, int]:
+    """(TOTAL_NAMES, DIFFERING_NAMES): window totals taken in SQL before the row cap, read from row 0."""
+    if frame is None or frame.empty:
+        return 0, 0
+    row = frame.iloc[0]
+    return (_count(row["TOTAL_NAMES"]) if "TOTAL_NAMES" in frame.columns else 0,
+            _count(row["DIFFERING_NAMES"]) if "DIFFERING_NAMES" in frame.columns else 0)
+
+
+def parity_summary_sentence(total: int, differing: int) -> str:
+    return (f"{_plural(total, 'masked table or view name belongs', 'masked table or view names belong')} to a "
+            f"database family with two or more masked databases; {differing:,} "
+            f"{'is' if differing == 1 else 'are'} not masked the same way in every one of them. "
+            + _NOT_IN_GROUPING)
+
+
+def listed_database_names(frame: pd.DataFrame | None) -> list[str]:
+    """The database names from a SHOW DATABASES frame (its ``name`` column, any case), blanks and NULLs dropped;
+    [] when the frame is missing, empty or has no name column (the page's not-checked state)."""
+    if frame is None or frame.empty:
+        return []
+    cols = {str(c).lower(): c for c in frame.columns}
+    if "name" not in cols:
+        return []
+    return [t for t in (_text(v) for v in frame[cols["name"]].tolist()) if t]
+
+
+def unmasked_family_databases(masked: Iterable[object], listed: Iterable[object]) -> tuple[FamilySiblings, ...]:
+    """For each family of a database with a masked column (``masked``: the inventory's DATABASE_NAME values), the
+    ``listed`` databases (the SHOW DATABASES names) of that family with no column-level masking reference (a
+    database masked only through a tag is one of them: tags are not traced to columns). Families with none
+    are left out; families and names are sorted. A family with only one masked database counts too: that is the
+    only-production-is-masked case the grouping itself cannot show."""
+    masked_set = {_text(n) for n in masked} - {""}
+    families = {db_family(n) for n in masked_set}
+    found: dict[str, set[str]] = {}
+    for raw in listed:
+        name = _text(raw)
+        if not name or name in masked_set:
+            continue
+        family = db_family(name)
+        if family in families:
+            found.setdefault(family, set()).add(name)
+    return tuple(FamilySiblings(f, tuple(sorted(found[f]))) for f in sorted(found))
+
+
+def _and_join(words: list[str]) -> str:
+    if len(words) <= 1:
+        return "".join(words)
+    return f"{', '.join(words[:-1])} and {words[-1]}"
+
+
+def sibling_lines(siblings: tuple[FamilySiblings, ...], *, listed_capped: bool = False,
+                  tag_masking: bool = False) -> tuple[str, ...]:
+    """The captions under the grouping, for a SHOW DATABASES read that returned names (a failed or nameless read
+    is the page's SIBLINGS_UNCHECKED / SIBLINGS_NO_NAMES state, never these lines). Each family line says "no
+    column-level masking reference", never "no masked column" (review R2-1). ``tag_masking`` (the account has
+    masking tags: PolicyCoverage.masking_tags > 0) adds SIBLINGS_TAG_QUALIFIER under a non-empty list, since a
+    database masked only through a tag is listed; SIBLINGS_LAG always follows. ``listed_capped`` means the read
+    hit its row limit, so databases past it were not checked."""
+    out = [SIBLINGS_LEAD] if siblings else [SIBLINGS_NONE]
+    for s in siblings:
+        names = list(s.unmasked[:SIBLING_NAMES_CAP])
+        more = len(s.unmasked) - len(names)
+        if more > 0:
+            names.append(f"{more:,} more")
+        out.append(f"{s.family}: no column-level masking reference in {_and_join(names)}.")
+    if siblings and tag_masking:
+        out.append(SIBLINGS_TAG_QUALIFIER)
+    out.append(SIBLINGS_LAG)
+    if listed_capped:
+        out.append(SIBLINGS_CAPPED)
+    return tuple(out)
+
+
+def account_network_policy_refs(frame: pd.DataFrame | None) -> int | None:
+    """ACCOUNT_POLICY_REFS from admin_network_policy_coverage, or None when it is not known (no frame, no column,
+    or every value NULL)."""
+    if frame is None or frame.empty or "ACCOUNT_POLICY_REFS" not in frame.columns:
+        return None
+    values = pd.to_numeric(frame["ACCOUNT_POLICY_REFS"], errors="coerce")
+    if values.isna().all():
+        return None
+    return int(values.max())
+
+
+def network_policy_caption(refs: int | None) -> str:
+    """The Access caption: a fact line about the account-level network policy, never a coverage verdict."""
+    if refs is None:
+        return _NETWORK_CAPTION_UNKNOWN
+    if refs > 0:
+        return _NETWORK_CAPTION_SET
+    return _NETWORK_CAPTION_NONE

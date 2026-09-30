@@ -94,6 +94,7 @@ _REACHABLE = {
         # (clustering targets), in the toggle-gated query-efficiency scan.
         # Next-Fifty #30: + GRANTS_TO_ROLES — the unread-maintenance share guard (database grants to
         # shares; a metadata view, read only behind the Storage & waste toggle).
+        # Next-Fifty #38 (v4.604): + warehouse_cluster_use reads QUERY_HISTORY (already pinned) — no set change.
         "ACCESS_HISTORY", "AUTOMATIC_CLUSTERING_HISTORY", "DATABASE_STORAGE_USAGE_HISTORY",
         "GRANTS_TO_ROLES", "QUERY_ACCELERATION_ELIGIBLE", "QUERY_ACCELERATION_HISTORY", "QUERY_ATTRIBUTION_HISTORY",
         "QUERY_HISTORY", "TABLES", "TABLE_DML_HISTORY", "TABLE_PRUNING_HISTORY",
@@ -122,6 +123,8 @@ _REACHABLE = {
         # inventory denominator, TAG_REFERENCES the unverified tag-assignment side).
         # v4.589 (Next-Fifty #9): + POLICY_REFERENCES for the admin network-policy coverage panel
         # (toggle- and probe-gated, off first paint).
+        # Next-Fifty #43 (v4.604): + data_policy_coverage / masking_environment_parity on Exposure -- same table,
+        # set unchanged.
         "ACCESS_HISTORY", "CORTEX_AI_GUARDRAILS_USAGE_HISTORY",
         "CORTEX_CODE_CLI_USAGE_HISTORY", "CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY",
         "CREDENTIALS", "DATA_TRANSFER_HISTORY", "GRANTS_TO_ROLES",

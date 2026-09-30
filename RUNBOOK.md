@@ -269,13 +269,48 @@ Admin → Settings, never in code.
   exact per-department billed credits; role-share within a warehouse as a
   secondary allocated lens; Unmapped bucket reconciles to the account
   total. Monthly statement export.
+- **Company all-in showback** (Chargeback & AI, below Department
+  chargeback) — per company: warehouse metering, the object-cost ledger's
+  serverless arms, Cortex Code (Snowsight + CLI) and estimated storage; the
+  cloud-services adjustment and the unattributed remainder are account
+  rows, so the table ties out to billed metering + estimated storage over
+  the complete metered days. On a long Window, a source that starts later
+  than the Window leaves its earlier dollars on the unattributed row (the
+  notes under the table name it). A negative family residual means the company rows read
+  more than that family's metering in the span (different Snowflake views,
+  different day boundaries); the note under the table names the family.
+  An UNKNOWN row shrinks once a COMPANY_SCOPE mapping lands (Unmapped
+  entities on Spend & Attribution): Cortex Code at once, the warehouse,
+  object-cost and storage lines as the loaders re-stamp recent days (older
+  days keep their stamp until a backfill). The Company-attributed share
+  (and a named company's share) is of the spend BEFORE the cloud-services
+  adjustment, so the company rows and the unattributed row add up to 100%;
+  the all-in total and the tie-out stay after it. Each morning, between the
+  06:45 CT metering load and the object-cost / Cortex Code reloads, a note
+  says the span's newest day is only partly loaded on those lines (part of
+  it sits on the unattributed row until they run); a note that persists
+  past mid-morning means that loader is behind (Admin → Migrations &
+  freshness). With Company = UNKNOWN, an empty table reads verified-clean
+  only when every keyed source covers the span in full.
 - **Cortex & Storage** — Cortex daily spend (token-based credits × $2.20),
   storage GB by database × storage rate.
 - **AI Users** — per-user Cortex consumption, exceptions (users over the
   per-user expectation), AI budget pacing when `AI_MONTHLY_BUDGET_USD` set.
 - **Optimization** — idle advisor (warehouse-hours billed with zero
   queries = auto-suspend opportunity); right-sizing simulator (spill +
-  queue profile → size suggestion); toggled scans: repeat-query
+  queue profile → size suggestion; its **Check cluster use** toggle reads
+  each multi-cluster warehouse's hourly peak cluster over ≥35 days, and a
+  higher MAX_CLUSTER_COUNT is suggested only where queries reached the
+  current maximum — otherwise "Size up or split (cluster cap not
+  reached)", or "not checked" with the toggle off. The read starts at
+  midnight N days back, and its hours are the hours queries STARTED in.
+  An empty SHOW WAREHOUSES reads "cluster ranges unknown", not "no
+  multi-cluster warehouse"; the Resize picker opens one size up on a
+  capacity-pressure verdict where the picker offers one, and otherwise
+  (XXLARGE, larger than every option, or an unknown size) with no size
+  picked, a note saying why, and no statement until a size is picked;
+  a partly-listed profile names the warehouses SHOW did not list);
+  toggled scans: repeat-query
   fingerprints (≥10 identical runs = caching/materialization candidates),
   query efficiency (families scanning >80% of ≥100-partition tables;
   zero-scan share trend), storage waste (Time-Travel/failsafe-heavy tables,
@@ -294,7 +329,11 @@ Admin → Settings, never in code.
 - **Tasks** — task runs/failures by day (FACT_TASK_DAILY), failure detail
   with DATABASE column, RCA timeline for a selected failure.
 - **Warehouses** — daily credits per warehouse, events, concurrency peaks
-  (WAREHOUSE_LOAD_HISTORY; sustained PEAK_QUEUED ≳1 = add cluster).
+  (WAREHOUSE_LOAD_HISTORY; sustained PEAK_QUEUED ≳1 = add a cluster —
+  on a multi-cluster warehouse raise MAX_CLUSTER_COUNT only if its
+  queries reach the current maximum, checked on Cost ▸ Idle & sizing ▸
+  Check cluster use; the Sizing & efficiency table says so under the
+  table for its unchecked Add a cluster rows).
 - **Contention** — lock waits (LOCK_WAIT_HISTORY).
 - **Optimize** (v4.597, was Decision Studio ▸ Portfolio) — the
   recurring-query fix queue. Each measured query family gets its observed
@@ -433,8 +472,19 @@ can open it, including EXECUTIVE. Old Decision Studio links, saved views and
     unchanged; the split is disclosed beside it.
 - **Pipeline** — what is ahead:
   - Addressable $/mo (the Cost ▸ Optimization & Savings idle-timer rollup,
-    optional right-sizing) plus queued Action Center work normalized to
-    monthly, de-duplicated by entity.
+    optional right-sizing, and unread maintenance confirmed in Storage & waste
+    this session) plus queued Action Center work normalized to monthly,
+    de-duplicated by entity. A caption names the levers counted and why any
+    is missing. If the efficiency mart cannot be read (or has no metering in
+    the window), the headline still totals the other counted levers and its
+    delta says the idle timer is not counted; it is a dash only when no
+    counted lever has an item (a lever counted at $0, such as a clean
+    unread-maintenance scan or one whose objects are all already booked,
+    still leaves the dash). Unread maintenance drops out on Refresh, a
+    credit-rate change, or 1h after Storage & waste was last shown. An object
+    booked in another session keeps counting until the scan is re-run at
+    least 5m after that booking (the Savings-ledger read that leaves booked
+    objects out is cached for up to 5m): at most 1h 5m after the booking.
   - A projection whose sliders default to MEASURED adoption and realization
     ("Reset to measured"). It runs in a fragment, so slider moves cost no
     reads. Verified savings never enter it.
@@ -856,6 +906,11 @@ names TOKENS_GRANULAR) on accounts whose Cortex Code views predate that
 optional column. That is expected only if the CoCo efficiency review has
 never shown token types on the account; if it has, the column was renamed
 or dropped: fix cortex_sql.cortex_code_token_types.
+The three POLICY_REFERENCES checks (security.data_policy_coverage,
+masking_environment_parity, admin_network_policy_coverage) are not declared
+gaps: if the app's role cannot read that view they FAIL here while Security
+shows a calm needs_setup. IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE
+(snowflake/roles.sql) covers that view.
 
 **Numbers look wrong.** Check the source caption first (mart vs live +
 lag). ACCOUNT_USAGE lags ≤45 min (query history) to ≤24h (metering daily);

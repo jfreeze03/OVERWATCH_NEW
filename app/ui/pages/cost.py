@@ -48,6 +48,7 @@ _PAGE = "Cost Intelligence"
 from app.ui.pages.cost_parts.ai_chargeback import (  # noqa: E402
     _ai_users_tab,
     _chargeback_tab,
+    _company_showback_panel,
     _cortex_spend_tab,
 )
 from app.ui.pages.cost_parts.contract import _contract_tab, org_balance_result  # noqa: E402
@@ -166,7 +167,7 @@ def render() -> None:
         "Chargeback & AI": {
             "applies": ("days",),
             "partial": ("company", "database", "schema_contains"),
-            "note": "Company shapes chargeback/AI users; Cortex service totals remain account-wide.",
+            "note": "Company shapes chargeback, the all-in showback and AI users; Cortex service totals remain account-wide.",
         },
         "Unit costs": {
             # v4.157.0: measured_query_costs honors warehouse/user contains too —
@@ -302,7 +303,12 @@ def render() -> None:
         _contract_tab(settings)
     elif section == "Chargeback & AI":
         section_header("Department chargeback", "", "chargeback", anchor="cost-chargeback")
-        _chargeback_tab(f["company"], f["days"], rate, is_operator, bounds=f["bounds"])
+        _showback_pre = _chargeback_tab(f["company"], f["days"], rate, is_operator, bounds=f["bounds"])
+        st.divider()
+        # #42 Part 1: read-only, same visibility as this tab; its read rode the chargeback batch.
+        section_header("Company all-in showback", "", "chargeback", anchor="cost-showback")
+        _company_showback_panel(f["company"], f["days"], rate, ai_rate, settings, bounds=f["bounds"],
+                                prefetched=_showback_pre)
         st.divider()
         section_header("Query-tag governance", "", "chargeback", anchor="cost-tags")
         # KEPT as a plain caption: "allocated, never attributed" is a misread-prevention

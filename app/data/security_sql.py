@@ -13,6 +13,7 @@ from app.data.common import (
 )
 from app.logic.client_support import NO_CLIENT_ID, SNOWFLAKE_RUN_DRIVERS, SNOWFLAKE_RUN_PROGRAM_PREFIXES
 from app.logic.identity_auth import SERVICE_TYPES
+from app.logic.policy_coverage import FAMILY_NAME_PATTERN, FAMILY_SUFFIX_PATTERN
 
 # --- Admin-role tiers (codified AS-IS per owner decision 2026-09-10; byte-identical to the
 # former inlined literals — one source of truth, no behaviour change). Two single-use sites
@@ -446,10 +447,13 @@ ORDER BY U.NAME
 
 def admin_network_policy_coverage(company: str = "ALL") -> str:
     """rank 9: which directly-granted admin users (ELEVATED_ROLES) carry a USER-level network
-    policy. POLICY_REFERENCES is UNVERIFIED on this account for USER-domain network-policy rows
-    (docs list network policies as supported, up to 2h latency), so the page runs this probe=True
-    and treats USER_POLICY_REFS = 0 as needs_setup, never as 'no admin is covered'. Account-level
-    (CIS 3.1) and service-account (CIS 3.2) coverage are Trust Center CIS scanners — not duplicated."""
+    policy. The 2026-09-29 S1b probe read USER (1), ACCOUNT (1) and INTEGRATION (3) network-policy
+    rows here, but another account may not expose USER rows (docs: up to 2h latency), so the page
+    still runs this probe=True and treats USER_POLICY_REFS = 0 as needs_setup, never as 'no admin is
+    covered'. Next-Fifty #43: np_totals also counts ACCOUNT-domain rows (ACCOUNT_POLICY_REFS, same
+    scan) so the caption can say an account-level policy is set -- a fact line, not a coverage
+    verdict; account-level (CIS 3.1) and service-account (CIS 3.2) coverage stay Trust Center CIS
+    scanners."""
     where = and_where(
         "DELETED_ON IS NULL",
         _admin_roles_in("ROLE", ELEVATED_ROLES),
@@ -468,19 +472,165 @@ WITH admins AS (
     WHERE POLICY_KIND = 'NETWORK_POLICY'
 ), np_totals AS (
     SELECT COUNT(*) AS NETWORK_POLICY_REFS,
-           COUNT_IF(REF_DOMAIN = 'USER') AS USER_POLICY_REFS
+           COUNT_IF(REF_DOMAIN = 'USER') AS USER_POLICY_REFS,
+           COUNT_IF(REF_DOMAIN = 'ACCOUNT') AS ACCOUNT_POLICY_REFS
     FROM np
 )
 SELECT A.USER_NAME,
        A.ADMIN_ROLES,
        MAX(NP.POLICY_NAME) AS USER_NETWORK_POLICY,
        T.NETWORK_POLICY_REFS,
-       T.USER_POLICY_REFS
+       T.USER_POLICY_REFS,
+       T.ACCOUNT_POLICY_REFS
 FROM admins A
 CROSS JOIN np_totals T
 LEFT JOIN np NP ON NP.REF_DOMAIN = 'USER' AND NP.REF_ENTITY_NAME = A.USER_NAME
-GROUP BY A.USER_NAME, A.ADMIN_ROLES, T.NETWORK_POLICY_REFS, T.USER_POLICY_REFS
+GROUP BY A.USER_NAME, A.ADMIN_ROLES, T.NETWORK_POLICY_REFS, T.USER_POLICY_REFS, T.ACCOUNT_POLICY_REFS
 ORDER BY USER_NETWORK_POLICY NULLS FIRST, A.USER_NAME
+"""
+
+
+# Next-Fifty #43: a database "family" is its name up to the last underscore (X_PRD, X_DEV -> X); the environment is
+# the part after it. Name-derived on purpose: no environment or tenant name is hard-coded. REGEXP_LIKE anchors the
+# whole name, so a name with no inner underscore is its own family with no environment. One source for both #43
+# builders; the patterns live in app.logic.policy_coverage, whose db_family is the Python mirror used on the
+# SHOW DATABASES names (the unmasked databases of a masked database's family).
+def _db_family(col: str) -> str:
+    return (f"IFF(REGEXP_LIKE({col}, '{FAMILY_NAME_PATTERN}'), REGEXP_REPLACE({col}, '{FAMILY_SUFFIX_PATTERN}', ''), "
+            f"{col})")
+
+
+def _db_env_suffix(col: str) -> str:
+    return f"IFF(REGEXP_LIKE({col}, '{FAMILY_NAME_PATTERN}'), REGEXP_SUBSTR({col}, '[^_]+$'), NULL)"
+
+
+# Fully qualified keys for every #43 distinct count (never S1a's unqualified REF_ENTITY_NAME / POLICY_NAME: 325 vs
+# 1,255 masked tables on the 2026-09-29 probe).
+_PR_ENTITY_FQN = "COALESCE(REF_DATABASE_NAME, '') || '.' || COALESCE(REF_SCHEMA_NAME, '') || '.' || REF_ENTITY_NAME"
+_PR_POLICY_FQN = "COALESCE(POLICY_DB, '') || '.' || COALESCE(POLICY_SCHEMA, '') || '.' || POLICY_NAME"
+_PR_KIND = "REPLACE(UPPER(TRIM(POLICY_KIND)), ' ', '_')"
+DATA_POLICY_KINDS: tuple[str, ...] = ("MASKING_POLICY", "ROW_ACCESS_POLICY", "PROJECTION_POLICY", "AGGREGATION_POLICY")
+
+
+def data_policy_coverage() -> str:
+    """Next-Fifty #43 Phase 1: masking / row-access / projection / aggregation policy coverage from the
+    policy-reference view (up to about 2h behind). The 2026-09-29 probes proved every column this reads: S1b read
+    seven (POLICY_KIND, REF_ENTITY_DOMAIN, REF_DATABASE_NAME, REF_SCHEMA_NAME, REF_ENTITY_NAME, REF_COLUMN_NAME,
+    POLICY_STATUS), S1a read POLICY_NAME, and S0b's column list shows POLICY_DB and POLICY_SCHEMA.
+
+    One row per database that has a column-level masking reference, with the account totals repeated on every
+    row. ``tot`` is LEFT JOINed to ``by_db`` ON 1 = 1, so a zero-masking account still returns exactly one row
+    (DATABASE_NAME NULL) carrying the totals. Totals come from ``tot`` and are never summed from the per-database
+    rows: distinct policies are not additive across databases. Account-wide (no company scope). REF_ENTITY_DOMAIN
+    'TAG' is tag-based masking; every other masking domain is column-level. Kinds are normalised, and any kind
+    outside the four data-policy kinds and NETWORK_POLICY is listed in OTHER_POLICY_KINDS, so a spelling change
+    can never read as "no row-access policy". PKIND / PSTATUS avoid the alias-shadow rule and sqlglot's KIND
+    keyword. No row cap: one row per masked database (run()'s cap still applies)."""
+    kinds = ", ".join(f"'{k}'" for k in (*DATA_POLICY_KINDS, "NETWORK_POLICY"))
+    fam, env = _db_family("REF_DATABASE_NAME"), _db_env_suffix("REF_DATABASE_NAME")
+    return f"""
+WITH pr AS (
+    SELECT {_PR_KIND} AS PKIND,
+           UPPER(REF_ENTITY_DOMAIN) AS REF_DOMAIN,
+           REF_DATABASE_NAME,
+           {_PR_ENTITY_FQN} AS ENTITY_FQN,
+           IFF(REF_COLUMN_NAME IS NULL, NULL, {_PR_ENTITY_FQN} || '.' || REF_COLUMN_NAME) AS COLUMN_FQN,
+           {_PR_POLICY_FQN} AS POLICY_FQN,
+           UPPER(POLICY_STATUS) AS PSTATUS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.POLICY_REFERENCES
+), tot AS (
+    SELECT
+        COUNT(DISTINCT IFF(PKIND = 'MASKING_POLICY' AND REF_DOMAIN <> 'TAG', COLUMN_FQN, NULL)) AS TOTAL_MASKED_COLUMNS,
+        COUNT(DISTINCT IFF(PKIND = 'MASKING_POLICY' AND REF_DOMAIN <> 'TAG', ENTITY_FQN, NULL)) AS TOTAL_MASKED_OBJECTS,
+        COUNT(DISTINCT IFF(PKIND = 'MASKING_POLICY' AND REF_DOMAIN <> 'TAG', REF_DATABASE_NAME, NULL)) AS TOTAL_MASKED_DATABASES,
+        COUNT(DISTINCT IFF(PKIND = 'MASKING_POLICY', POLICY_FQN, NULL)) AS TOTAL_MASKING_POLICIES,
+        COUNT(DISTINCT IFF(PKIND = 'MASKING_POLICY' AND REF_DOMAIN = 'TAG', ENTITY_FQN, NULL)) AS MASKING_TAGS,
+        COUNT(DISTINCT IFF(PKIND = 'MASKING_POLICY' AND REF_DOMAIN = 'TAG', REF_DATABASE_NAME, NULL)) AS MASKING_TAG_DATABASES,
+        COUNT(DISTINCT IFF(PKIND = 'MASKING_POLICY' AND REF_DOMAIN = 'TAG', POLICY_FQN, NULL)) AS TAG_MASKING_POLICIES,
+        COUNT_IF(PKIND = 'MASKING_POLICY' AND PSTATUS <> 'ACTIVE') AS MASKING_REFS_NOT_ACTIVE,
+        COUNT(DISTINCT IFF(PKIND = 'ROW_ACCESS_POLICY', ENTITY_FQN, NULL)) AS ROW_ACCESS_OBJECTS,
+        COUNT(DISTINCT IFF(PKIND = 'ROW_ACCESS_POLICY', POLICY_FQN, NULL)) AS ROW_ACCESS_POLICIES,
+        COUNT(DISTINCT IFF(PKIND = 'PROJECTION_POLICY', ENTITY_FQN, NULL)) AS PROJECTION_OBJECTS,
+        COUNT(DISTINCT IFF(PKIND = 'PROJECTION_POLICY', POLICY_FQN, NULL)) AS PROJECTION_POLICIES,
+        COUNT(DISTINCT IFF(PKIND = 'AGGREGATION_POLICY', ENTITY_FQN, NULL)) AS AGGREGATION_OBJECTS,
+        COUNT(DISTINCT IFF(PKIND = 'AGGREGATION_POLICY', POLICY_FQN, NULL)) AS AGGREGATION_POLICIES,
+        LISTAGG(DISTINCT IFF(PKIND = 'MASKING_POLICY' AND PSTATUS <> 'ACTIVE', PSTATUS, NULL), ', ') AS NOT_ACTIVE_STATUSES,
+        LISTAGG(DISTINCT IFF(PKIND IN ({kinds}), NULL, PKIND), ', ') AS OTHER_POLICY_KINDS
+    FROM pr
+), by_db AS (
+    SELECT REF_DATABASE_NAME AS DATABASE_NAME, {fam} AS DATABASE_FAMILY, {env} AS NAME_SUFFIX,
+           COUNT(DISTINCT ENTITY_FQN) AS MASKED_OBJECTS,
+           COUNT(DISTINCT COLUMN_FQN) AS MASKED_COLUMNS,
+           COUNT(DISTINCT POLICY_FQN) AS MASKING_POLICIES,
+           COUNT_IF(PSTATUS <> 'ACTIVE') AS REFS_NOT_ACTIVE
+    FROM pr
+    WHERE PKIND = 'MASKING_POLICY' AND REF_DOMAIN <> 'TAG' AND REF_DATABASE_NAME IS NOT NULL
+    GROUP BY 1, 2, 3
+)
+SELECT B.DATABASE_NAME,
+       IFF(COUNT(B.DATABASE_NAME) OVER (PARTITION BY B.DATABASE_FAMILY) >= 2, B.NAME_SUFFIX, NULL) AS ENVIRONMENT,
+       B.MASKED_OBJECTS, B.MASKED_COLUMNS, B.MASKING_POLICIES, B.REFS_NOT_ACTIVE,
+       T.TOTAL_MASKED_COLUMNS, T.TOTAL_MASKED_OBJECTS, T.TOTAL_MASKED_DATABASES, T.TOTAL_MASKING_POLICIES,
+       T.MASKING_TAGS, T.MASKING_TAG_DATABASES, T.TAG_MASKING_POLICIES, T.MASKING_REFS_NOT_ACTIVE,
+       T.ROW_ACCESS_OBJECTS, T.ROW_ACCESS_POLICIES, T.PROJECTION_OBJECTS, T.PROJECTION_POLICIES,
+       T.AGGREGATION_OBJECTS, T.AGGREGATION_POLICIES, T.NOT_ACTIVE_STATUSES, T.OTHER_POLICY_KINDS
+FROM tot T
+LEFT JOIN by_db B ON 1 = 1
+ORDER BY B.MASKED_COLUMNS DESC NULLS LAST, B.DATABASE_NAME
+"""
+
+
+def masking_environment_parity() -> str:
+    """Next-Fifty #43 Phase 1: the environment grouping -- information only, not a gap list.
+
+    Grain: (DATABASE_FAMILY, SCHEMA_NAME, OBJECT_NAME), for every masked schema.object in a family that has 2+
+    databases with column masking. A family's databases HERE are only those with at least one column-level
+    masking reference (see _db_family), hence MASKED_FAMILY_DATABASES: a database with no column-level masking
+    reference (tag-only masking included) is in neither #43 table; the page lists those from SHOW DATABASES
+    (policy_coverage.unmasked_family_databases).
+    COLUMN_SET is the sorted distinct masked-column list in one database. SAME means masked in every masked family
+    database on one column set; otherwise DIFFERS. TOTAL_NAMES and DIFFERING_NAMES are window totals taken before
+    the LIMIT (the uncapped-aggregate rule)."""
+    fam = _db_family("REF_DATABASE_NAME")
+    return f"""
+WITH m AS (
+    SELECT REF_DATABASE_NAME AS DB, {fam} AS DATABASE_FAMILY, REF_SCHEMA_NAME AS SCH, REF_ENTITY_NAME AS OBJ,
+           REF_COLUMN_NAME AS COL
+    FROM SNOWFLAKE.ACCOUNT_USAGE.POLICY_REFERENCES
+    WHERE {_PR_KIND} = 'MASKING_POLICY' AND UPPER(REF_ENTITY_DOMAIN) <> 'TAG'
+      AND REF_DATABASE_NAME IS NOT NULL AND REF_COLUMN_NAME IS NOT NULL
+), per_obj AS (
+    SELECT DATABASE_FAMILY, DB, SCH, OBJ, COUNT(DISTINCT COL) AS MASKED_COLUMNS,
+           LISTAGG(DISTINCT COL, ',') WITHIN GROUP (ORDER BY COL) AS COLUMN_SET
+    FROM m GROUP BY DATABASE_FAMILY, DB, SCH, OBJ
+), fam_dbs AS (
+    SELECT DATABASE_FAMILY, DB, COUNT(*) OVER (PARTITION BY DATABASE_FAMILY) AS MASKED_FAMILY_DATABASES
+    FROM (SELECT DISTINCT DATABASE_FAMILY, DB FROM per_obj)
+), names AS (
+    SELECT DISTINCT P.DATABASE_FAMILY, P.SCH, P.OBJ
+    FROM per_obj P JOIN fam_dbs F ON F.DATABASE_FAMILY = P.DATABASE_FAMILY AND F.DB = P.DB
+    WHERE F.MASKED_FAMILY_DATABASES >= 2
+), grid AS (
+    SELECT N.DATABASE_FAMILY, N.SCH, N.OBJ, F.DB, F.MASKED_FAMILY_DATABASES, P.MASKED_COLUMNS, P.COLUMN_SET
+    FROM names N
+    JOIN fam_dbs F ON F.DATABASE_FAMILY = N.DATABASE_FAMILY
+    LEFT JOIN per_obj P ON P.DATABASE_FAMILY = N.DATABASE_FAMILY AND P.DB = F.DB AND P.SCH = N.SCH AND P.OBJ = N.OBJ
+), named AS (
+    SELECT DATABASE_FAMILY, SCH AS SCHEMA_NAME, OBJ AS OBJECT_NAME,
+           COUNT(COLUMN_SET) AS DATABASES_MASKED, MAX(MASKED_FAMILY_DATABASES) AS MASKED_FAMILY_DATABASES,
+           COUNT(DISTINCT COLUMN_SET) AS COLUMN_SETS,
+           IFF(COUNT(COLUMN_SET) = MAX(MASKED_FAMILY_DATABASES) AND COUNT(DISTINCT COLUMN_SET) = 1, 'SAME', 'DIFFERS') AS PARITY,
+           LISTAGG(IFF(COLUMN_SET IS NULL, NULL, DB || ' (' || MASKED_COLUMNS || ')'), ', ') WITHIN GROUP (ORDER BY DB) AS MASKED_IN,
+           NULLIF(LISTAGG(IFF(COLUMN_SET IS NULL, DB, NULL), ', ') WITHIN GROUP (ORDER BY DB), '') AS NO_MASKING_REF_IN
+    FROM grid GROUP BY DATABASE_FAMILY, SCH, OBJ
+)
+SELECT DATABASE_FAMILY, SCHEMA_NAME, OBJECT_NAME, PARITY, DATABASES_MASKED, MASKED_FAMILY_DATABASES, COLUMN_SETS,
+       MASKED_IN, NO_MASKING_REF_IN,
+       COUNT(*) OVER () AS TOTAL_NAMES,
+       SUM(IFF(PARITY = 'DIFFERS', 1, 0)) OVER () AS DIFFERING_NAMES
+FROM named
+ORDER BY IFF(PARITY = 'DIFFERS', 0, 1), DATABASE_FAMILY, SCHEMA_NAME, OBJECT_NAME
+LIMIT 1000
 """
 
 
@@ -812,12 +962,16 @@ def show_resource_monitors_sql() -> str:
     return "SHOW RESOURCE MONITORS"
 
 
+SHOW_DATABASES_LIMIT = 500
+
+
 def show_databases_sql() -> str:
     """SHOW-based database inventory (ACCOUNT_USAGE.DATABASES absent on this
     account, mirroring SHOW WAREHOUSES). Feeds the sidebar picker so new
     databases appear without a code change (item 8c, 2026-07-14); the hardcoded
-    lists in companies.py stay the offline fallback."""
-    return "SHOW DATABASES LIMIT 500"
+    lists in companies.py stay the offline fallback. The #43 environment grouping reuses this exact read (same
+    SQL, metadata tier, max_rows=0: the sidebar's cache entry, no extra scan)."""
+    return f"SHOW DATABASES LIMIT {SHOW_DATABASES_LIMIT}"
 
 
 def show_shares_sql() -> str:

@@ -60,6 +60,7 @@ from app.logic.formulas import (
     pct_delta,
     safe_float,
 )
+from app.logic.showback import storage_tier_rates
 from app.ui import charts
 from app.ui.components import (
     audit_mode,
@@ -173,20 +174,24 @@ def _spend_attribution_capability(df, rate: float, ai_rate: float,
     kpi_row([
         {"label": "Attributable to a company",
          "value": f"{_cov:.0f}%",
-         "help": "Share of billed metering on your OWN warehouses — the only spend with a "
-                 "company key (COMPANY_FOR_WAREHOUSE). Reader-account, serverless, AI/Cortex, "
-                 "replication and storage credits have none.",
+         "help": "Share of billed metering on your OWN warehouses — the only metering line with a "
+                 "company key (COMPANY_FOR_WAREHOUSE). Serverless, AI/Cortex, replication and storage "
+                 "carry none in metering; Chargeback & AI → Company all-in showback attributes "
+                 "serverless, Cortex Code and storage from other facts. Reader-account metering has "
+                 "no company key anywhere.",
          "severity": ("ok" if _cov >= 85 else "warn")},
         {"label": "Unattributed spend",
          "value": format_usd(_gap_summary["gap_usd"]),
          "delta": f"{100 - _cov:.0f}% of billed",
          "delta_color": "off",
          "help": "Reader-account, serverless, AI/Cortex, replication and storage credits — "
-                 "billed but not chargeable to a company from metering alone."},
+                 "billed but not chargeable to a company from metering alone. Chargeback & AI → "
+                 "Company all-in showback credits serverless, Cortex Code and storage to companies "
+                 "from the object-cost ledger, per-user usage and per-database storage."},
         {"label": "Attributed (warehouse)",
          "value": format_usd(_gap_summary["attributed_usd"]),
-         "help": "Own-account warehouse metering only — the sole spend with a company key. "
-                 "Reader-account metering carries no company key and is part of the "
+         "help": "Own-account warehouse metering only — the only metering line with a company "
+                 "key. Reader-account metering carries no company key and is part of the "
                  "unattributed gap above, not this figure."},
     ])
     if not _gap_breakdown.empty:
@@ -199,9 +204,11 @@ def _spend_attribution_capability(df, rate: float, ai_rate: float,
     st.caption(
         "A DIFFERENT axis from 'Cost drill coverage' above: that measures object-level "
         "drillability (serverless has an object ledger, so it counts as covered there); this "
-        "measures what can be charged back to a company (only warehouse metering carries a "
-        "company key). Account-wide — company-level attribution is on the Attribution tab. "
-        "Byte-metered storage/transfer live in the org rate-card panels, not this credit lens."
+        "measures what metering alone can charge back to a company (only warehouse metering "
+        "carries a company key in metering). Account-wide — company-level attribution is on the "
+        "Attribution tab, and Chargeback & AI → Company all-in showback adds serverless, Cortex "
+        "Code and storage by company. Byte-metered storage/transfer live in the org rate-card "
+        "panels, not this credit lens."
     )
 
 
@@ -1560,11 +1567,10 @@ def _account_storage_tiers(company: str, days: int, settings: dict, *, bounds: t
         st.caption("No account storage rows in this window yet.")
         return
     row = res.df.iloc[0]
-    std = safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0)
-    stage_rate = safe_float(settings.get("STORAGE_STAGE_USD_PER_TB_MONTH"), std)
-    hybrid_rate = safe_float(settings.get("STORAGE_HYBRID_USD_PER_TB_MONTH"), 348.16)
-    cool_rate = safe_float(settings.get("STORAGE_ARCHIVE_COOL_USD_PER_TB_MONTH"), 4.0)
-    cold_rate = safe_float(settings.get("STORAGE_ARCHIVE_COLD_USD_PER_TB_MONTH"), 1.0)
+    # #42: one home for the tier rates and their defaults (the showback prices storage the same way)
+    _r = storage_tier_rates(settings)
+    std, stage_rate, hybrid_rate = _r["TABLE"], _r["STAGE"], _r["HYBRID"]
+    cool_rate, cold_rate = _r["ARCHIVE_COOL"], _r["ARCHIVE_COLD"]
     tiers = [
         ("Table", "TABLE_BYTES", std),
         ("Stage", "STAGE_BYTES", stage_rate),

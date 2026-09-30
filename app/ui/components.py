@@ -1423,17 +1423,26 @@ def with_user_name_parts(df, page: str, *, user_col: str = "USER_NAME"):
 def toggle_cost_hint(key_contains: str) -> str:
     """'What will this cost me?' for heavy on-demand toggles (Codex r7 #15):
     the last observed runtime for a matching query key from THIS session's
-    telemetry, or an honest 'first run this session' when unknown."""
+    telemetry, or an honest 'first run this session' when unknown.
+
+    Review r1 R1-6: the runtime is humanized (Hr/Min/Sec — "2m 25s", never a raw "145.0s"), and a
+    cached rerun (cache_hit True, a few ms) never masks the real scan's time when one was recorded."""
     try:
         from app.core.query import query_telemetry
+        from app.logic.formulas import humanize_duration
         t = query_telemetry()
         if t.empty:
             return "First run this session — expect a live scan."
         hits = t[t["key"].astype(str).str.contains(key_contains, regex=False)]
         if hits.empty:
             return "First run this session — expect a live scan."
+        if "cache_hit" in hits.columns:
+            scans = hits[~hits["cache_hit"].eq(True)]
+            if not scans.empty:
+                hits = scans
         last_ms = float(hits.iloc[-1]["elapsed_ms"])
-        return f"Last run took ~{last_ms / 1000:.1f}s this session (cached repeats are instant)."
+        return (f"Last run took ~{humanize_duration(last_ms, 'ms')} this session "
+                "(cached repeats are instant).")
     except Exception:  # noqa: BLE001 - a hint must never break a page
         return ""
 

@@ -308,3 +308,248 @@ def test_a_failed_confirm_is_worded_by_kind_and_latched(monkeypatch):
     retry[0].click()
     at.run()
     assert not at.exception and len(confirms) == 2                    # the retry ran it again
+
+
+# --- #35: confirmed unread maintenance joins Addressable $/mo (Idle & sizing, Proof ▸ Pipeline) -------------
+
+_LEDGER = pd.DataFrame(columns=["TARGET_OBJECT", "FINDING_TYPE", "STATE"])     # nothing booked yet
+_UNREAD_FRAMES = {"MAINT_CREDITS_30D": _SHORT, "OBJECTS_MODIFIED": _READS, "REMEASURED_14D_MONTHLY_USD": _LEDGER}
+
+
+def _frames(at) -> list[pd.DataFrame]:
+    out = []
+    for d in at.dataframe:
+        v = d.value
+        out.append(v.data if hasattr(v, "data") and not isinstance(v, pd.DataFrame) else v)
+    return [f for f in out if isinstance(f, pd.DataFrame)]
+
+
+def _addressable_rows(at) -> pd.DataFrame:
+    for f in _frames(at):
+        if {"Source", "Warehouse / target"} <= set(f.columns):
+            return f
+    return pd.DataFrame(columns=["Source", "Warehouse / target"])
+
+
+def _idle_and_sizing(at, sqls: list[str]) -> list[str]:
+    """Switch Cost ▸ Optimize to Idle & sizing and rerun; returns the SQL issued on that run."""
+    before = len(sqls)
+    at.session_state["opt_section"] = "Idle & sizing"
+    at.run()
+    assert not at.exception, f"idle & sizing (shaped): {at.exception}"
+    assert not any("could not finish rendering" in str(getattr(e, "value", "")) for e in at.error)
+    return sqls[before:]
+
+
+@_SKIP
+def test_confirmed_unread_joins_the_addressable_headline(monkeypatch):
+    from app.logic.savings_rollup import UNREAD_HANDOFF_KEY
+    sqls, _ = _recording(monkeypatch, frames=_UNREAD_FRAMES)
+    at = _storage({"cost_unread_maint_toggle": True})
+    assert "1 confirmed-unread object(s) join Addressable" in _texts(at)
+    assert at.session_state[UNREAD_HANDOFF_KEY]["rows"] == [["DB.S.T1", 36.8, 0.6]]   # 10 credits x the $3.68 rate
+    issued = _idle_and_sizing(at, sqls)
+    blob = _texts(at)
+    assert "Levers counted: idle timer" in blob and "unread maintenance" in blob
+    assert "Not counted: right-sizing (turn on 'Load right-sizing profile (heavy scan)' above)" in blob
+    rows = _addressable_rows(at)
+    hit = rows[rows["Warehouse / target"] == "DB.S.T1"]
+    assert list(hit["Source"]) == ["UNREAD_MAINT"] and list(hit["Effort"]) == ["LOW"]
+    # the headline read nothing new: no shortlist, no confirm, no ledger read on that run
+    assert not [s for s in issued if "MAINT_CREDITS_30D" in s or "OBJECTS_MODIFIED" in s
+                or "REMEASURED_14D_MONTHLY_USD" in s]
+
+
+@_SKIP
+def test_a_failed_confirm_keeps_unread_out_of_the_headline(monkeypatch):
+    from app.ui.pages.cost_parts import optimize
+    sqls: list[str] = []
+
+    def _run(sql, **kwargs):
+        sqls.append(sql)
+        if "OBJECTS_MODIFIED" in sql:
+            return QueryResult(df=pd.DataFrame(), ok=False, error_kind="timeout", source="stub",
+                               error="Statement reached its statement or warehouse timeout of 180 second(s).")
+        if "MAINT_CREDITS_30D" in sql:
+            return QueryResult(df=_SHORT, ok=True, source="stub")
+        return _shaped_run(sql, **kwargs)
+
+    monkeypatch.setattr(optimize, "run", _run)
+    at = _storage({"cost_unread_maint_toggle": True})
+    assert "no object is confirmed unread" in _texts(at)
+    assert not [s for s in sqls if "REMEASURED_14D_MONTHLY_USD" in s]       # nothing to count: no ledger read
+    _idle_and_sizing(at, sqls)
+    assert "unread maintenance (the access-history check failed, so no object is confirmed unread)" in _texts(at)
+    rows = _addressable_rows(at)
+    assert "DB.S.T1" not in list(rows["Warehouse / target"])
+
+
+@_SKIP
+def test_a_failed_ledger_read_keeps_unread_out_and_says_so(monkeypatch):
+    from app.ui.pages.cost_parts import optimize
+    sqls: list[str] = []
+
+    def _run(sql, **kwargs):
+        sqls.append(sql)
+        if "REMEASURED_14D_MONTHLY_USD" in sql:
+            return QueryResult(df=pd.DataFrame(), ok=False, error="SAVINGS_LEDGER read failed", source="stub")
+        for marker, df in (("MAINT_CREDITS_30D", _SHORT), ("OBJECTS_MODIFIED", _READS)):
+            if marker in sql:
+                return QueryResult(df=df, ok=True, source="stub")
+        return _shaped_run(sql, **kwargs)
+
+    monkeypatch.setattr(optimize, "run", _run)
+    at = _storage({"cost_unread_maint_toggle": True})
+    assert any("Savings ledger could not be read" in str(e.value) for e in at.error)     # unavailable, never clean
+    _idle_and_sizing(at, sqls)
+    blob = _texts(at)
+    assert "unread maintenance (the Savings ledger could not be read" in blob
+    assert "DB.S.T1" not in list(_addressable_rows(at)["Warehouse / target"])
+
+
+@_SKIP
+def test_a_booked_object_leaves_the_addressable_headline(monkeypatch):
+    from app.logic.savings_rollup import UNREAD_HANDOFF_KEY
+    sqls, writes = _recording(monkeypatch, frames=_UNREAD_FRAMES)
+    at = _storage({"cost_unread_maint_toggle": True, "unread_maint_sel_last": "DB.S.T1",
+                   "_ow_current_role": "SNOW_SYSADMINS"})
+    assert at.session_state[UNREAD_HANDOFF_KEY]["rows"]                  # counted before the booking
+    book = [b for b in at.button if str(b.label) == "Book estimated saving"]
+    assert book, [str(b.label) for b in at.button]
+    book[0].click()
+    at.run()
+    assert not at.exception, f"booking (shaped): {at.exception}"
+    assert len(writes) == 1
+    handoff = at.session_state[UNREAD_HANDOFF_KEY]
+    assert handoff["rows"] == [] and handoff["booked_excluded"] == 1   # left out in the same run
+    _idle_and_sizing(at, sqls)
+    assert "DB.S.T1" not in list(_addressable_rows(at)["Warehouse / target"])
+    assert "1 already booked on the Savings ledger left out" in _texts(at)
+
+
+@_SKIP
+def test_proof_pipeline_counts_the_session_confirmed_unread(monkeypatch):
+    _recording(monkeypatch, frames=_UNREAD_FRAMES)
+    at = _storage({"cost_unread_maint_toggle": True})
+    _nav_to(at, "Proof")
+    at.session_state["decision_section"] = "Pipeline"
+    at.run()
+    assert not at.exception, f"proof pipeline (shaped): {at.exception}"
+    assert not any("could not finish rendering" in str(getattr(e, "value", "")) for e in at.error)
+    captions = " ".join(str(c.value) for c in at.caption)
+    assert "Levers counted: idle timer + unread maintenance." in captions
+    assert "proof_link_unread" not in [str(b.key) for b in at.button]     # counted: no doorway
+    pipe = [f for f in _frames(at) if {"SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY"} <= set(f.columns)]
+    assert pipe, "the pipeline table did not render"
+    hit = pipe[0][pipe[0]["SOURCE_ENTITY_KEY"] == "DB.S.T1"]
+    assert list(hit["SOURCE_ENTITY_TYPE"]) == ["OBJECT"]
+    assert list(hit["TITLE"]) == ["Stop maintenance on unread DB.S.T1"]
+
+
+@_SKIP
+def test_proof_pipeline_without_a_scan_offers_the_doorway():
+    at = AppTest.from_function(_entry, default_timeout=30)
+    at.run()
+    assert not at.exception
+    _nav_to(at, "Proof")
+    at.session_state["decision_section"] = "Pipeline"
+    at.run()
+    assert not at.exception, f"proof pipeline (shaped): {at.exception}"
+    captions = " ".join(str(c.value) for c in at.caption)
+    assert ("unread maintenance (not checked this session: run the unread-maintenance scan in Cost ▸ "
+            "Optimization & Savings ▸ Storage & waste)") in captions
+    door = [b for b in at.button if str(b.key) == "proof_link_unread"]
+    assert door and str(door[0].label).startswith("Check unread maintenance")
+    door[0].click()
+    at.run()
+    assert not at.exception, f"doorway (shaped): {at.exception}"
+    assert at.session_state["opt_section"] == "Storage & waste"
+
+
+# --- R1-15 / R1-22: the Proof ▸ Pipeline headline follows the levers counted, not the idle read alone ----------
+
+def _proof_pipeline_with_idle(monkeypatch, idle: QueryResult):
+    """Confirm DB.S.T1 in Storage & waste ($36.80/mo), then open Proof ▸ Pipeline with its efficiency-mart idle read
+    replaced by ``idle`` (failed or empty)."""
+    from app.ui import decision_studio
+    _recording(monkeypatch, frames=_UNREAD_FRAMES)
+    at = _storage({"cost_unread_maint_toggle": True})
+    idle_reads: list[str] = []
+
+    def _run(sql, **kwargs):
+        if "AS IDLE_HOURS" in sql and "MART_WAREHOUSE_EFFICIENCY_DAILY" in sql:
+            idle_reads.append(sql)
+            return idle
+        return _shaped_run(sql, **kwargs)
+
+    monkeypatch.setattr(decision_studio, "run", _run)
+    _nav_to(at, "Proof")
+    at.session_state["decision_section"] = "Pipeline"
+    at.run()
+    assert not at.exception, f"proof pipeline (shaped): {at.exception}"
+    assert not any("could not finish rendering" in str(getattr(e, "value", "")) for e in at.error)
+    assert idle_reads, "the idle read was not replaced"
+    return at
+
+
+def _card(at, label: str) -> tuple[str, str]:
+    """(value, whole card html) of the KPI card titled ``label``."""
+    import re
+    for m in at.markdown:
+        html = str(m.value)
+        if f'class="ow-card__title">{label}<' in html:
+            value = re.search(r'class="ow-card__value">([^<]*)<', html)
+            return (value.group(1) if value else ""), html
+    raise AssertionError(f"no {label!r} card")
+
+
+@_SKIP
+@pytest.mark.parametrize(("idle", "gap", "reason"), [
+    (QueryResult(df=pd.DataFrame(), ok=False, error="MART_WAREHOUSE_EFFICIENCY_DAILY read failed", source="stub"),
+     "efficiency mart unavailable", "the efficiency mart could not be read"),
+    (QueryResult(df=pd.DataFrame(), ok=True, source="stub"),
+     "no warehouse metering in this window", "no warehouse metering in this window"),
+])
+def test_proof_headline_counts_unread_when_the_idle_read_fails(monkeypatch, idle, gap, reason):
+    """R1-15 / R1-22: with the efficiency-mart idle read failed (or empty) and a confirmed unread handoff, the
+    Addressable $/mo headline shows the unread figure the 'Levers counted' caption names and the projection
+    carries, with the missing idle timer named in its delta, never a bare dash beside counted dollars."""
+    at = _proof_pipeline_with_idle(monkeypatch, idle)
+    value, card = _card(at, "Addressable $/mo")
+    assert value == "$36.80", card                                         # 10 credits x the $3.68 rate
+    assert f"1 opportunity · unread maintenance · idle timer not counted ({gap})" in card
+    captions = " ".join(str(c.value) for c in at.caption)
+    assert f"Levers counted: unread maintenance. Not counted: idle timer ({reason})" in captions
+    blob = _texts(at)
+    assert "addressable savings are not sized" not in blob
+    if not idle.ok:                                                          # the failed read still says so
+        assert any("idle-timer savings are not sized" in str(e.value) for e in at.error), [
+            str(e.value) for e in at.error]
+    pipe = [f for f in _frames(at) if {"SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY"} <= set(f.columns)]
+    assert pipe, "the pipeline table did not render"
+    hit = pipe[0][pipe[0]["SOURCE_ENTITY_KEY"] == "DB.S.T1"]
+    assert list(hit["MONTHLY_USD"]) == [36.8]                             # the projection carries the same $
+    addressable = pipe[0][pipe[0]["KIND"] == "Addressable"]
+    assert round(float(addressable["MONTHLY_USD"].sum()), 2) == 36.8
+
+
+@_SKIP
+def test_proof_headline_keeps_the_dash_when_nothing_is_counted(monkeypatch):
+    """R1-15: with the idle read failed and no lever item (no scan this session), the headline stays a dash: a
+    failed read never renders as a clean $0."""
+    from app.ui import decision_studio
+
+    def _run(sql, **kwargs):
+        if "AS IDLE_HOURS" in sql and "MART_WAREHOUSE_EFFICIENCY_DAILY" in sql:
+            return QueryResult(df=pd.DataFrame(), ok=False, error="mart read failed", source="stub")
+        return _shaped_run(sql, **kwargs)
+
+    monkeypatch.setattr(decision_studio, "run", _run)
+    at = AppTest.from_function(_entry, default_timeout=30)
+    at.run()
+    _nav_to(at, "Proof")
+    at.session_state["decision_section"] = "Pipeline"
+    at.run()
+    assert not at.exception, f"proof pipeline (shaped): {at.exception}"
+    value, card = _card(at, "Addressable $/mo")
+    assert value == "—" and "efficiency mart unavailable" in card and "idle timer not counted" not in card

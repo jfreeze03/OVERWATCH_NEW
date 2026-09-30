@@ -80,3 +80,6 @@ def test_rollup_panel_collects_idle_and_resize_on_optimize():
         encoding="utf-8")
     assert 'SavingsOpportunity("IDLE"' in helper
     assert 'SavingsOpportunity("RESIZE"' in helper
+    # Next-Fifty #35: the UNREAD_MAINT leg joins the same headline, from the Storage & waste session handoff
+    assert "_savings_opps.extend(_unread.opportunities)" in src
+    assert 'SavingsOpportunity("UNREAD_MAINT"' in helper

@@ -102,6 +102,16 @@ COLUMN_HELP = {
              "reads Held. Re-broke is dated when the trailing week climbed back (it can lag the break by up to 6 "
              "days); Re-broke / Not fixed lift the Optimize Track-all cooldown (Track all still takes only ACT "
              "NOW families).",
+    # #42 Part 1: the Company all-in showback table (Cost > Chargeback & AI). AI_USD is deliberately
+    # absent: the org rate-card table already uses AI_USD for org AI dollars.
+    "STORAGE_EST_USD": "ESTIMATED — average daily bytes x the configured storage rate (each day at "
+                       "1/days-in-month of the monthly rate); not billed metering.",
+    "OTHER_METERED_USD": "Metering with no company key (reader accounts, replication and others): "
+                         "account-level only.",
+    "SHARE_OF_TOTAL_PCT": "This row's dollars as a share of the spend before the cloud-services adjustment "
+                          "(billed metering plus estimated storage, with the adjustment added back) for the "
+                          "same days: the company rows and the unattributed row add up to 100%; the adjustment "
+                          "row has none.",
     "TRACKED": "Action Center status of this task or warehouse row: Tracked (open), Done or Dismissed within "
                "90 days, Untracked, or Unknown when the status read failed. Alerts are owned through "
                "Acknowledge and the incident flow, so they show no status.",
@@ -195,6 +205,21 @@ METRICS: tuple[Metric, ...] = (
            window="rolling-daily", partial_day="included", unit="USD", filters=("company",),
            required_sources=("FACT_WAREHOUSE_DAILY", "DEPARTMENT_MAP"),
            coverage="exact warehouse usage per department", owner="finops"),
+    Metric("company_allin_showback", "Company all-in showback", BILLED,
+           "company / complete metered days",
+           "FACT_METERING_DAILY (billed) reconciled to FACT_WAREHOUSE_DAILY + FACT_OBJECT_COST_DAILY non-query "
+           "arms + FACT_AI_USAGE_DAILY (Snowsight + CLI) + FACT_STORAGE_DAILY / FACT_STORAGE_ACCOUNT_DAILY "
+           "(estimated storage)",
+           UTC, "daily metering; complete metered days only", "v4.604",
+           "Company rows = warehouse metering before the CS adjustment + ledger serverless + Cortex Code + "
+           "estimated storage; the CS adjustment and the unattributed remainder are account-level rows, so the "
+           "rows sum to billed metering plus estimated storage.",
+           window="trailing-complete-days", partial_day="excluded", unit="USD", filters=("company",),
+           required_sources=("FACT_METERING_DAILY", "FACT_WAREHOUSE_DAILY", "FACT_OBJECT_COST_DAILY",
+                             "FACT_AI_USAGE_DAILY", "FACT_STORAGE_DAILY", "FACT_STORAGE_ACCOUNT_DAILY"),
+           coverage="complete metered days; today and the in-progress metering day excluded; UTC metering vs "
+                    "Central warehouse/object days",
+           owner="finops"),
     Metric("measured_query_cost", "Measured query / CALL cost", MEASURED,
            "query / CALL", "ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY (COMPUTE + QAS)",
            UTC, "~8h", "item4",

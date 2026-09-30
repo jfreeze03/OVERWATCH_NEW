@@ -454,7 +454,8 @@ def test_optimize_calls_the_shared_helpers():
     assert opt.count("_savings_opps.extend(idle_opportunities(advisor))") == 1
     assert opt.count("_savings_opps.extend(resize_opportunities(sized))") == 1
     assert 'SavingsOpportunity("IDLE"' not in opt and 'SavingsOpportunity("RESIZE"' not in opt
-    assert opt.count("ACCOUNT_USAGE") == 5                    # tests/test_perf_budgets.py ceiling
+    # tests/test_perf_budgets.py ceiling; 5 -> 6 at v4.604 (Next-Fifty #38: the toggled cluster-cap read's label)
+    assert opt.count("ACCOUNT_USAGE") == 6
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +498,7 @@ def test_pipeline_frame_unions_addressable_and_queued_without_double_counting():
                            SavingsOpportunity("RESIZE", "WH_A", 50.0, 0.6),     # overlap: dropped by rollup
                            SavingsOpportunity("IDLE", "WH_B", 20.0, 0.3)])
     with warnings.catch_warnings():
-        warnings.simplefilter("error", FutureWarning)                      # no all-NA concat deprecation
+        warnings.simplefilter("error")      # no all-NA concat FutureWarning, no NumPy NaT DeprecationWarning (R1-18)
         pf = pipeline_frame(roll.items, _queue())
     addr = pf[pf["KIND"] == "Addressable"]
     assert list(addr["SOURCE_ENTITY_KEY"]) == ["WH_A", "WH_B"]
@@ -520,6 +521,70 @@ def test_pipeline_frame_unions_addressable_and_queued_without_double_counting():
     assert pipeline_frame([], pd.DataFrame()).empty
     assert scenario_projection(pipeline_frame([], None), adoption_pct=60, realization_pct=70,
                                confidence_floor=0.6)["candidates"] == 0.0
+
+
+
+def test_pipeline_frame_types_unread_rows_as_objects():
+    """Next-Fifty #35: an UNREAD_MAINT opportunity targets an object FQN, so its synthetic row is an OBJECT (the
+    Entity 360 type Storage & waste drills to): it de-duplicates against a queued OBJECT action on the same FQN and
+    never against a warehouse that happens to share the key."""
+    opps = [SavingsOpportunity("UNREAD_MAINT", "DB.S.T", 40.0, 0.6), SavingsOpportunity("IDLE", "WH_A", 10.0, 0.6)]
+    pf = pipeline_frame(opps, None).set_index("SOURCE_ENTITY_KEY")
+    assert pf.loc["DB.S.T", "SOURCE_ENTITY_TYPE"] == "OBJECT"
+    assert pf.loc["DB.S.T", "TITLE"] == "Stop maintenance on unread DB.S.T"
+    assert pf.loc["DB.S.T", "SOURCE"] == "Cost ▸ Optimization & Savings (UNREAD_MAINT)"
+    assert pf.loc["WH_A", "SOURCE_ENTITY_TYPE"] == "WAREHOUSE"               # IDLE / RESIZE rows unchanged
+    assert pf.loc["WH_A", "TITLE"] == "Tighten auto-suspend on WH_A"
+
+    def queued(entity_type: str) -> pd.DataFrame:
+        return pd.DataFrame([{"ACTION_ID": "9", "STATUS": "OPEN", "CONFIDENCE": 0.9, "ESTIMATED_USD": 25.0,
+                              "PERIOD": "MONTHLY", "SOURCE_ENTITY_TYPE": entity_type,
+                              "SOURCE_ENTITY_KEY": "db.s.t", "SEVERITY": "LOW", "TITLE": "q"}])
+
+    same = scenario_projection(pipeline_frame(opps[:1], queued("OBJECT")), adoption_pct=100,
+                               realization_pct=100, confidence_floor=0.6)
+    assert same["candidates"] == 1.0 and same["gross_estimate"] == 40.0     # one object, the larger wins
+    other = scenario_projection(pipeline_frame(opps[:1], queued("WAREHOUSE")), adoption_pct=100,
+                                realization_pct=100, confidence_floor=0.6)
+    assert other["candidates"] == 2.0 and other["gross_estimate"] == 65.0   # never merged with a warehouse
+
+def test_pipeline_frame_keeps_queue_timestamps_without_a_numpy_nat_deprecation():
+    """R1-18: ACTION_QUEUE's CREATED_AT / UPDATED_AT are TIMESTAMP_NTZ NOT NULL, so every queued row brings naive
+    datetime64 columns the synthetic Addressable rows lack. pandas NA-fills those rows with a unit-less
+    dtype.type('NaT'), which NumPy 2.5 deprecates (and will reject: Proof ▸ Pipeline would fail to render
+    whenever it has both kinds of row). The frame must come back with no warning at all, each time column's
+    dtype kept, NaT on the Addressable rows and the queued values untouched."""
+    q = _queue().assign(
+        CREATED_AT=pd.to_datetime(["2026-09-01 08:00"] * 6),
+        UPDATED_AT=pd.to_datetime(["2026-09-02 09:30"] * 6).astype("datetime64[us]"),
+        DUE_DATE=pd.to_datetime(["2026-10-01", None, None, None, None, None]),
+        AGE=pd.to_timedelta([3600] * 6, unit="s"),
+        SEEN_AT=pd.to_datetime(["2026-09-03 10:00"] * 6).tz_localize("UTC"),
+    )
+    times = ["CREATED_AT", "UPDATED_AT", "DUE_DATE", "AGE", "SEEN_AT"]
+    roll = rollup_savings([SavingsOpportunity("IDLE", "WH_A", 80.0, 0.6),
+                           SavingsOpportunity("UNREAD_MAINT", "DB.S.T", 40.0, 0.6)])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")                  # DeprecationWarning and FutureWarning alike
+        pf = pipeline_frame(roll.items, q)
+    assert [str(pf[c].dtype) for c in times] == [str(q[c].dtype) for c in times]
+    assert list(pf.columns[:3]) == ["ACTION_ID", "KIND", "SEVERITY"] and pf.columns[-len(times):].tolist() == times
+    addr = pf[pf["KIND"] == "Addressable"]
+    assert list(addr["SOURCE_ENTITY_KEY"]) == ["WH_A", "DB.S.T"] and addr[times].isna().all().all()
+    queued = pf[pf["KIND"] == "Queued"].reset_index(drop=True)
+    for col in times:
+        pd.testing.assert_series_equal(queued[col], q[col], check_names=False)
+    # the de-duplication and the projection are unchanged by the time columns
+    proj = scenario_projection(pf, adoption_pct=100, realization_pct=100, confidence_floor=0.6)
+    assert proj == scenario_projection(pipeline_frame(roll.items, _queue()), adoption_pct=100,
+                                       realization_pct=100, confidence_floor=0.6)
+    # a queue-only frame and a column whose kind differs between the parts still concat cleanly
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert str(pipeline_frame(None, q)["CREATED_AT"].dtype) == "datetime64[ns]"
+        mixed = pipeline_frame(roll.items, q.assign(SOURCE=pd.to_datetime(["2026-09-01"] * 6)))
+    assert mixed["SOURCE"].iloc[0] == "Cost ▸ Optimization & Savings (IDLE)"          # text on Addressable
+    assert mixed["SOURCE"].iloc[-1] == pd.Timestamp("2026-09-01")                     # the queue's own value
 
 
 def test_pipeline_frame_accepts_an_already_normalised_queue():

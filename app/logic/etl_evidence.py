@@ -17,6 +17,7 @@ from datetime import date, datetime
 import pandas as pd
 
 from app.logic.formulas import account_today, humanize_bytes, humanize_duration, safe_float
+from app.logic.sizing import CLUSTER_CAP_QUALIFIER
 
 QH_LAG_MIN = 45                  # ACCOUNT_USAGE.QUERY_HISTORY latency: absence inside it is not evidence
 EVIDENCE_QUEUE_PCT = 20.0        # queued share of the CALL's statement time that reads as "slow: queued"
@@ -340,8 +341,8 @@ def task_evidence_lines(df: pd.DataFrame | None, *, task: str) -> list[EvidenceL
         prov = safe_float(latest.get("QUEUED_PROVISIONING_MS")) >= safe_float(latest.get("QUEUED_OVERLOAD_MS"))
         why = ("waiting for the warehouse to resume (provisioning) — keep it warm across the schedule; "
                "sizing up buys nothing here" if prov
-               else "waiting behind other work (overload) — add a cluster or move this step off the busy "
-                    "window")
+               else "waiting behind other work (overload) — move this step off the busy window, or add a "
+                    f"cluster ({CLUSTER_CAP_QUALIFIER})")
         out.append(EvidenceLine("warn", f"Slow: {qpct:.0f}% of its statements' time was queued on {qwh} — "
                                         f"mostly {why}."))
     remote = safe_float(latest.get("SPILL_REMOTE_GB"))

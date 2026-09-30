@@ -200,6 +200,68 @@ def test_pipeline_reads_share_the_optimize_cache_and_never_go_live():
     assert "ACCOUNT_USAGE" not in mart27_sql.eff_idle_analysis(30, "ALL")
 
 
+
+def test_pipeline_counts_unread_only_from_the_session_handoff():
+    """Next-Fifty #35: Proof ▸ Pipeline reads the unread-maintenance lever back from the Storage & waste session
+    handoff (zero reads; never the scan, the confirm or the ledger), names every lever it counted and why one is
+    missing, and offers a profile-gated doorway to run the scan."""
+    body = _src(_BODY_REL)
+    pipe = _fn(body, "_pipeline_tab")
+    assert pipe.count("_unread = unread_lever(st.session_state.get(UNREAD_HANDOFF_KEY), company=company, "
+                      "scope=cache_scope(),") == 1
+    assert pipe.index("opps.extend(_unread.opportunities)") < pipe.index("roll = rollup_savings(opps)")
+    for token in ("maintenance_on_unread", "object_reads_confirm", "unread_maintenance_opportunities",
+                  "unread_handoff(", "booked_objects", "cost_sql", "insights_sql"):
+        assert token not in body, token
+    assert "lever_basis(_counted, _absent, {\"UNREAD_MAINT\": _unread.note})" in pipe
+    assert "_basis = lever_short(_counted)" in pipe
+    assert '"idle timer + right-sizing" if _sized_ok' not in pipe                # the old two-lever wording
+    assert ('if not _unread.included and can_open("Cost Intelligence") and st.button(\n'
+            '            "Check unread maintenance → Cost ▸ Optimization & Savings ▸ Storage & waste",') in pipe
+    # the caption sits with the headline, before the failure states below it
+    assert pipe.index("kpi_row([") < pipe.index("st.caption(md_dollars(lever_basis(") < pipe.index(
+        'empty_state("unavailable", "The warehouse-efficiency mart could not be read')
+    door = _fn(body, "_open_storage_waste")
+    assert door.index('st.session_state["opt_section"] = "Storage & waste"') < door.index(
+        'request_navigation("Cost Intelligence", "Optimization & Savings")')
+    assert "on the same warehouse or object is" in pipe
+    assert "no addressable savings from the levers counted in this scope" in pipe
+    shell = _src(_SHELL_REL)
+    assert "(unread maintenance, when counted, " in shell and "is its last 30 complete days)" in shell
+
+
+def test_pipeline_headline_follows_the_levers_counted():
+    """R1-15 / R1-22 (the floor leg skips the shaped twin in tests/test_prc_c2_shaped.py): the Addressable $/mo
+    headline is gated on the rollup's items, not on the idle read alone, so it never shows a dash beside a
+    'Levers counted: unread maintenance' caption and a projection carrying those dollars. A failed or empty idle
+    read is named in the delta; the dash stays only when no counted lever has an item (review r2 R2-5: a lever
+    counted at $0, such as a clean unread-maintenance scan, still leaves the dash); the failure state no longer
+    says the whole addressable figure is unsized."""
+    pipe = _fn(_src(_BODY_REL), "_pipeline_tab")
+    assert ('_idle_gap = ("efficiency mart unavailable" if not idle.ok\n'
+            '                 else "no warehouse metering in this window" if idle.empty else "")') in pipe
+    assert ('    if _idle_gap and not roll.items:\n'
+            '        _addr = {"label": "Addressable $/mo", "value": "—", "delta": _idle_gap, "delta_color": "off"}\n'
+            '    else:\n'
+            '        _addr = {"label": "Addressable $/mo", "value": format_usd(roll.total_monthly_usd),') in pipe
+    assert 'f" · idle timer not counted ({_idle_gap})" if _idle_gap' in pipe
+    assert pipe.count('"value": "—"') == 2              # the headline's dash + the queue-unavailable card only
+    assert pipe.index("roll = rollup_savings(opps)") < pipe.index("if _idle_gap and not roll.items:")
+    joined = re.sub(r'"\s*\n\s*f?"', "", pipe)
+    assert "The warehouse-efficiency mart could not be read — idle-timer savings are not sized" in joined
+    assert "addressable savings are not sized" not in joined
+    assert "Off, the addressable figure is idle-timer only" not in joined
+
+
+def test_the_runbook_states_the_dash_rule_the_code_applies():
+    """Review r2 R2-5 / R2-10: RUNBOOK said the headline 'is a dash only when nothing is counted', but the code
+    (above) keeps the dash whenever no counted lever has an item, so a lever counted at $0 still shows it."""
+    rb = re.sub(r"\s+", " ", _src("RUNBOOK.md"))
+    assert "a dash only when nothing is counted" not in rb
+    assert ("it is a dash only when no counted lever has an item (a lever counted at $0, such as a clean "
+            "unread-maintenance scan or one whose objects are all already booked, still leaves the dash)") in rb
+
+
 def test_live_proof_sections_reach_no_account_usage():
     """The v451 reach pin allows the body ACCESS_HISTORY only because of the HIDDEN _products;
     the dispatched sections themselves reach no ACCOUNT_USAGE table."""

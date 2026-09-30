@@ -52,6 +52,7 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 |---|---|
 | One-click remediation: auto-suspend, off-hours schedules, resize, retention — audit row + ESTIMATED savings | Cost → Optimization |
 | Interactive right-size what-if (size step + auto-suspend, bounded $ range) | Cost → Optimization |
+| Cluster-cap check: a higher MAX_CLUSTER_COUNT is suggested only where a multi-cluster warehouse's queries reached its current maximum (hourly peak cluster, ≥35 days); otherwise "Size up or split" | Cost → Optimization (Idle & sizing) |
 | Storage reclaim shortlist: stale AND never-read 90d (ACCESS_HISTORY) | Cost → Optimization |
 | Savings verifier flips ESTIMATED → VERIFIED/REJECTED from actuals monthly | Cost → Savings ledger |
 | Emergency levers: suspend WH, timeouts, cluster caps, monitor quotas, pipe/task pause, disable user, Cortex allowlist | Admin → Emergency |
@@ -65,6 +66,7 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 | Month-end forecast: linear / seasonal / opt-in `ML.FORECAST` | Overview; `ml_forecast_option.sql` |
 | Renewal planner (growth scenarios, recommended commit) | Cost → Contract |
 | Department budgets + monthly statement exports | Cost → Chargeback |
+| Company all-in showback (warehouse + serverless + Cortex Code + estimated storage by company; cloud-services adjustment and unattributed remainder tie to billed metering + estimated storage) | Cost → Chargeback & AI |
 | Billing truth vs app model (org rate card vs credits x rate, monthly) | Admin → Org spend |
 | Styled HTML executive summary; per-table CSV everywhere | Overview; all tables |
 | Quarterly access-review export pack (grants matrix, unused roles, 90d diff) | Security → Access |
@@ -106,6 +108,7 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 | Per-route company delivery filters (Teams = ALFA-only for now) | alert sender v4 (V034) |
 | Measured proc costs: $/call leaderboard, price-a-CALL/session, trend-one-procedure by name | Cost -> Unit costs |
 | Client driver/version inventory with BEHIND flags + Snowflake's support floor (UNSUPPORTED / nearing end of support, yours vs Snowflake-run; #34) | Security -> Clients |
+| Masking / row-access / projection / aggregation policy coverage per database, tag-based masking, same-name environment grouping with each family's databases that have no column-level masking reference (#43) | Security -> Exposure |
 | Delivery SLOs, alert fatigue, acceptance funnel, per-page cache-hit telemetry | Alerts -> History, Admin -> Performance |
 | Flyway-readiness (ledger panel + adoption runbook) | Admin, docs/FLYWAY_ADOPTION.md |
 | Partial-success batching (one bad member no longer drags siblings serial) | app-wide (v4.20) |

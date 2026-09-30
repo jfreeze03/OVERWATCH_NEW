@@ -21,7 +21,7 @@ import streamlit as st
 
 from app.config import LEDGER_AUTOBOOKED_LEVERS, core_object
 from app.core.identity import identity_sql
-from app.core.query import execute_statement, run
+from app.core.query import cache_scope, execute_statement, run
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal, sql_number
 from app.core.state import request_navigation
@@ -33,7 +33,14 @@ from app.logic.ai_prompts import idle_warehouse_prompt
 from app.logic.capacity import capacity_forecasts
 from app.logic.consolidation import WarehouseProfile, consolidation_candidates
 from app.logic.date_windows import window_label, window_phrase
-from app.logic.formulas import account_today, format_usd, humanize_duration, md_dollars, safe_float
+from app.logic.formulas import (
+    account_today,
+    format_usd,
+    humanize_duration,
+    md_dollars,
+    safe_float,
+    utc_now,
+)
 from app.logic.insights import (
     IDLE_TARGET_SUSPEND_SEC,
     flag_clustering_churn,
@@ -63,28 +70,56 @@ from app.logic.monitors import (
     unmonitored_warehouses,
 )
 from app.logic.savings_rollup import (
+    H_BOOKED,
+    S_LEDGER_UNAVAILABLE,
+    UNREAD_CLEAN,
+    UNREAD_CONFIRM_FAILED,
+    UNREAD_CONFIRMED,
+    UNREAD_HANDOFF_KEY,
+    UNREAD_LEDGER_FAILED,
+    UNREAD_SHORTLIST_FAILED,
     SavingsOpportunity,
     effort_tier,
     idle_opportunities,
+    lever_basis,
     resize_opportunities,
     rollup_savings,
+    unread_handoff,
+    unread_handoff_note,
+    unread_lever,
 )
 from app.logic.serverless_roi import classify_qas_roi
 from app.logic.sizing import (
+    CAP_NO_QUERIES,
+    CAP_NOT_CHECKED,
+    CAP_NOT_REACHED,
+    RECOMMEND_BELOW_CAP,
     RECOMMEND_SCALE_OUT,
     SIZE_ORDER,
+    cluster_check_days,
+    cluster_check_label,
+    cluster_check_targets,
+    cluster_range_coverage,
+    cluster_range_unknown,
+    cluster_use_summary,
     normalize_size,
+    picker_size_label,
     price_per_run_bounds,
+    resize_picker_default,
     scale_out_plan,
     simulate_scenario,
     size_recommendations,
     sizing_summary,
+    unknown_range_sentence,
+    with_cluster_use,
 )
 from app.logic.unread_maintenance import (
     ACTION_VERDICTS,
     VERDICT_GONE,
     book_estimated_sql,
+    booked_objects,
     confirm_failure_note,
+    object_key,
     unread_maintenance_verdicts,
 )
 from app.logic.workbench import experiment_state_by_key
@@ -124,21 +159,128 @@ _LEDGER_PAGE_ROWS = 500
 
 _SIZE_UP_ALTERNATIVE = (" The resize below is the size-up alternative — use it only if single queries are "
                         "also slow or spilling.")
+_SIZE_UP_ROUTE = " The resize below is the size-up route."
+_BELOW_CAP_CAPTION = (
+    "No MAX_CLUSTER_COUNT statement is generated: in the checked window no query reached this warehouse's "
+    "current cluster cap, so a higher maximum would not help. The resize below is the size-up route; a "
+    "bigger size raises the hourly rate, so no saving is booked. Splitting the workload onto its own "
+    "warehouse is a manual change.")
+_CLUSTER_USE_NOTE = (
+    "Peak cluster = the highest CLUSTER_NUMBER any query ran on (the busiest hour); p95 hourly peak = the "
+    "peak that 95% of active hours stay at or under; hours at cap = hours whose peak reached (or passed) "
+    "the current MAX_CLUSTER_COUNT from SHOW WAREHOUSES. Hours are clock hours counted by the hour a query "
+    "STARTED in, so a long query's later hours are not counted and the hour counts are a floor. Only a "
+    "warehouse with hours at cap is offered a higher maximum, and raising it adds credits while queries "
+    "queue, so no saving is booked. A cap that is never reached costs nothing extra where "
+    "MIN_CLUSTER_COUNT is 1 — Snowflake starts clusters above the minimum only on demand — so no cut is "
+    "suggested here either.")
 
 
 def _scale_out_caption(plan: dict) -> str:
     """The review-only Scale-out pane's caption (Next-Fifty #38; review C19): it names the Operations ▸
     Emergency lever that builds the statement shown — Scaling policy for the SCALING_POLICY = 'STANDARD'
     prefill, Cluster range for the MAX_CLUSTER_COUNT one — and no lever when no statement is shown (the
-    range is unknown or already at the generator's cap)."""
+    range is unknown or already at the generator's cap). #38 remainder (the cluster-cap gate): a
+    multi-cluster plan prefills only when the cluster-cap check shows queries reaching the current
+    maximum; not checked / no queries / never reached shows no statement and points at the resize."""
     note = str(plan.get("note") or "")
     if plan.get("policy_to_standard"):
         return (note + " Starting clusters sooner adds credits while queries queue, so no saving is booked; "
                 "run it from Operations ▸ Emergency ▸ Scaling policy (audited)." + _SIZE_UP_ALTERNATIVE)
-    if plan.get("known") and not plan.get("at_cap"):
+    if plan.get("prefill"):
         return (note + " A wider cluster range adds credits while queries queue, so no saving is booked; "
                 "run it from Operations ▸ Emergency ▸ Cluster range (audited)." + _SIZE_UP_ALTERNATIVE)
+    if plan.get("cap") in (CAP_NOT_CHECKED, CAP_NO_QUERIES, CAP_NOT_REACHED):
+        return note + " No scale-out statement is generated here." + _SIZE_UP_ROUTE
     return note + " No scale-out statement is generated here." + _SIZE_UP_ALTERNATIVE
+
+
+def _cluster_cap_check(sizing_df: pd.DataFrame, whs_res, sizing_days: int, company: str,
+                       bounds: tuple | None) -> pd.DataFrame:
+    """Next-Fifty #38 remainder: the cluster-cap gate on the add-a-cluster advice.
+
+    Behind its own toggle (inside the already-toggled right-sizing profile), one cached live read of each
+    multi-cluster warehouse's hourly peak QUERY_HISTORY.CLUSTER_NUMBER over sizing.cluster_check_days
+    (at least 35 days, so a month-end is inside; at most the 90-day live limit). The judged use is
+    carried onto the profile (sizing.with_cluster_use) BEFORE size_recommendations, so a higher
+    MAX_CLUSTER_COUNT is suggested only where queries reached the current maximum. The frame comes back
+    UNCHANGED when the toggle is off, SHOW WAREHOUSES failed, returned no cluster range for any profile
+    warehouse (ranges unknown — never "no multi-cluster warehouse"; review r1 R1-10), no warehouse is
+    multi-cluster, the read failed or its shape is unreadable — and then no multi-cluster add-a-cluster
+    row is offered a higher MAX_CLUSTER_COUNT (the gated STANDARD rows say their cap was not checked)."""
+    targets = cluster_check_targets(sizing_df)
+    if not whs_res.ok:
+        empty_state("unavailable",
+                    "SHOW WAREHOUSES could not be read, so cluster ranges are unknown and the cluster-cap "
+                    "check cannot run.",
+                    detail=str(whs_res.error or "").strip())
+        return sizing_df
+    known, _unknown = cluster_range_coverage(sizing_df)
+    if not known:
+        # An empty SHOW (or one listing none of these warehouses) is an ABSENT input, not a clean answer:
+        # zero rows are never red (house rule 8), and they are never "no multi-cluster warehouse" either.
+        empty_state("needs_setup",
+                    "SHOW WAREHOUSES returned no cluster range for the warehouses in this profile (dropped, "
+                    "renamed, or not visible to the app's role), so the cluster ranges are unknown and the "
+                    "cluster-cap check cannot run.")
+        return sizing_df
+    # review r2 R2-3: a partly-listed profile NAMES the warehouses SHOW did not list (it only counted them)
+    unknown_txt = unknown_range_sentence(cluster_range_unknown(sizing_df))
+    if not targets:
+        st.caption("No warehouse in this profile has MAX_CLUSTER_COUNT above 1 in SHOW WAREHOUSES, so "
+                   "there is no cluster cap to check." + unknown_txt)
+        return sizing_df
+    chk_days = cluster_check_days(sizing_days, bounds[0] if bounds is not None else None, account_today())
+    st.caption(f"Cluster-cap check: {len(targets)} multi-cluster warehouse(s) in this profile, over the "
+               f"last {chk_days} days.{unknown_txt} " + toggle_cost_hint("cluster_use"))
+    # The label and help stay STATIC (the window and count live in the caption above), so the widget
+    # never re-keys — and resets — when the window changes.
+    if not st.toggle("Check cluster use (multi-cluster warehouses)", key="sizing_cluster_check",
+                     help="Reads QUERY_HISTORY for the multi-cluster warehouses in this profile: the highest "
+                          "cluster any query started on in each clock hour, over at least 35 days so a "
+                          "month-end is inside. A higher MAX_CLUSTER_COUNT is suggested only where queries "
+                          "reached the current maximum."):
+        st.caption("Off: the cluster cap is not checked, so add-a-cluster advice on a multi-cluster warehouse "
+                   "suggests no higher MAX_CLUSTER_COUNT and prefills none.")
+        return sizing_df
+    # Not a probe read: a failure is a real failure and gets logged. max_rows=0 is safe — the rows are
+    # warehouses x distinct cluster numbers, never queries.
+    res = run(insights_sql.warehouse_cluster_use(tuple(targets), chk_days), page=_PAGE,
+              key=f"cluster_use_{company}_{chk_days}", tier="historical", max_rows=0,
+              source="ACCOUNT_USAGE.QUERY_HISTORY (hourly peak CLUSTER_NUMBER, live)")
+    if not res.ok:
+        guard(res, "")   # the red 'unavailable' "Query failed: <first line>" + its Error detail expander
+        st.caption("The cluster-cap check failed, so the cap was not checked: add-a-cluster advice below "
+                   "suggests no higher MAX_CLUSTER_COUNT for a multi-cluster warehouse.")
+        return sizing_df
+    util = cluster_use_summary(res.df, sizing_df, targets)
+    if util.empty:
+        empty_state("unavailable",
+                    "The cluster-cap read came back without its expected columns, so the cap was not "
+                    "checked.")
+        return sizing_df
+    reached = int((util["AT_CAP_HOUR_COUNT"] > 0).sum())
+    st.caption(f"Cluster-cap check, last {chk_days} days: {reached} of {len(util)} multi-cluster "
+               "warehouse(s) reached their current MAX_CLUSTER_COUNT in at least one hour.")
+    with st.expander(f"Cluster use per multi-cluster warehouse ({len(util)})"):
+        styled_table(util, size_note=False, sort_label="hours at cap, then peak cluster", column_config={
+            "MIN_CLUSTER_COUNT": st.column_config.NumberColumn("Min clusters", format="%d"),
+            "MAX_CLUSTER_COUNT": st.column_config.NumberColumn("Max clusters", format="%d"),
+            "ACTIVE_HOUR_COUNT": st.column_config.NumberColumn(
+                "Active hours", format="%d",
+                help="Clock hours in which at least one query started on a cluster of this warehouse (a "
+                     "long query counts only in the hour it started)."),
+            "PEAK_CLUSTERS": st.column_config.NumberColumn("Peak cluster", format="%d"),
+            "P95_PEAK_CLUSTERS": st.column_config.NumberColumn("p95 hourly peak", format="%d"),
+            "AT_CAP_HOUR_COUNT": st.column_config.NumberColumn(
+                "Hours at cap", format="%d",
+                help="Clock hours in which a query started on the current MAX_CLUSTER_COUNT cluster (or a "
+                     "higher one, if the cap was since lowered)."),
+            "CLUSTER_CAP": st.column_config.TextColumn("Cap"),
+        })
+        st.caption(_CLUSTER_USE_NOTE)
+        result_caption(res)
+    return with_cluster_use(sizing_df, util, chk_days)
 
 
 # Split out of app/ui/pages/cost.py (V028): section bodies only —
@@ -620,10 +762,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             # CURRENT_SIZE + cluster config) carried onto the profile BEFORE size_recommendations, so
             # (a) a resize saving uses the operator's ACTUAL current size and (b) the recommender
             # refuses a size-DOWN on a warehouse already at XSMALL — identically on Operations ▸ Sizing.
-            _sizing_df = with_warehouse_settings(
-                prof_res.df,
-                _sizing_whs.df if _sizing_whs.ok and not _sizing_whs.empty else pd.DataFrame(),
-            )
+            _whs_df = _sizing_whs.df if _sizing_whs.ok and not _sizing_whs.empty else pd.DataFrame()
+            _sizing_df = with_warehouse_settings(prof_res.df, _whs_df)
+            # Next-Fifty #38: the cluster-cap check rides on the profile BEFORE the verdicts (they read it)
+            _sizing_df = _cluster_cap_check(_sizing_df, _sizing_whs, sizing_days, company, bounds)
             sized = size_recommendations(_sizing_df, rate, sizing_days)
             _sizing_profiles_tx = sized
             # rec#16: right-sizing opportunities (overlaps idle per warehouse) — shared with Proof ▸ Pipeline
@@ -631,7 +773,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             summary = sizing_summary(sized)
             _sz_cols = ["WAREHOUSE_NAME", "COMPANY", "RECOMMENDATION", "RATIONALE",
                         "CONFIDENCE", "CURRENT_SIZE", "MIN_CLUSTER_COUNT", "MAX_CLUSTER_COUNT",
-                        "SCALING_POLICY", "AUTO_SUSPEND", "ACTIVE_QUERY_DAYS", "ACTIVE_DAYS_PER_30D",
+                        "SCALING_POLICY", "PEAK_CLUSTERS", "AT_CAP_HOUR_COUNT", "CLUSTER_CHECK_DAYS",
+                        "AUTO_SUSPEND",
+                        "ACTIVE_QUERY_DAYS", "ACTIVE_DAYS_PER_30D",
                         "MONTHLY_USD_NOW", "IDLE_MONTHLY_USD", "SCENARIO_DOWN_USD", "SCENARIO_UP_USD",
                         "QUEUED_MIN_PER_DAY", "SPILL_GB_PER_DAY", "P95_ELAPSED_SEC", "IDLE_PCT"]
             if "PROVISION_MIN_PER_DAY" in sized.columns:
@@ -653,15 +797,21 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 {"label": "Size-down candidates", "value": f"{summary['down']}"},
             ])
             st.caption(
-                f"Also: {summary['scale_out']} add-a-cluster · {summary['size_up']} size-up · "
-                f"{summary['suspend']} tune-auto-suspend-first · "
+                f"Also: {summary['scale_out']} add-a-cluster · "
+                + (f"{summary['below_cap']} size-up-or-split (cluster cap not reached) · "
+                   if summary["below_cap"] else "")
+                + f"{summary['size_up']} size-up · {summary['suspend']} tune-auto-suspend-first · "
                 f"{summary['observe'] + summary['review']} held for evidence/cadence review. "
                 "Add a cluster = sustained per-day overload queueing without remote spill (concurrency: "
-                "more clusters, not a bigger size; multi-cluster needs Enterprise edition). Size up = "
-                "remote spill per day (per-query memory; with queueing too, size up first). Resume time "
-                "is excluded — a suspend-timer signal, not concurrency. Evidence/cadence = advice "
-                "withheld for episodic evidence, unknown timers, or high idle remaining after an "
-                "already-short timer."
+                "more clusters, not a bigger size; multi-cluster needs Enterprise edition); on a "
+                "multi-cluster warehouse a higher MAX_CLUSTER_COUNT is suggested only when the cluster-cap "
+                "check shows queries reaching the current maximum. Size up = remote spill per day "
+                "(per-query memory; with queueing too, size up first). Resume time is excluded — a "
+                "suspend-timer signal, not concurrency. Evidence/cadence = advice withheld for episodic "
+                "evidence, unknown timers, or high idle remaining after an already-short timer."
+                + (f" {summary['cap_unchecked']} add-a-cluster row(s) on a multi-cluster warehouse were not "
+                   "checked against the cluster cap, so no higher MAX_CLUSTER_COUNT is suggested for them."
+                   if summary["cap_unchecked"] else "")
             )
             _sz_primary = [
                 "WAREHOUSE_NAME", "RECOMMENDATION", "RATIONALE", "CONFIDENCE",
@@ -681,6 +831,11 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             else:
                 srow = sized.iloc[int(sel_sz)]
                 st.markdown("**Selected recommendation evidence**")
+                # review r1 R1-9: the cluster-cap columns come from the CHECK window, not this row's sizing
+                # window — the header says which (the CSV carries CLUSTER_CHECK_DAYS itself).
+                _cd = srow.get("CLUSTER_CHECK_DAYS")
+                _cd_help = ("From the cluster-cap check window (Check cluster use, read to today), not the "
+                            "sizing window of the other columns.")
                 styled_table(
                     sized.iloc[[int(sel_sz)]][[c for c in _sz_cols if c in sized.columns]],
                     size_note=False,
@@ -698,6 +853,13 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             "Spill GB/day", format="%.2f"),
                         "PROVISION_MIN_PER_DAY": st.column_config.Column("Provision per day"),
                         "IDLE_PCT": st.column_config.NumberColumn("Idle %", format="%.0f%%"),
+                        "PEAK_CLUSTERS": st.column_config.NumberColumn(
+                            cluster_check_label("Peak cluster", _cd), format="%d", help=_cd_help),
+                        "AT_CAP_HOUR_COUNT": st.column_config.NumberColumn(
+                            cluster_check_label("Hours at cap", _cd), format="%d", help=_cd_help),
+                        "CLUSTER_CHECK_DAYS": st.column_config.NumberColumn(
+                            "Cap check days", format="%d",
+                            help="Days the cluster-cap check read: whole days back from midnight, plus today."),
                     },
                 )
             if sel_sz is not None and is_operator:
@@ -705,16 +867,20 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 if str(srow.get("RECOMMENDATION", "")) == RECOMMEND_SCALE_OUT:
                     # Next-Fifty #38: a concurrency verdict's fix is the cluster range (or the scaling
                     # policy), not a resize. Review-only: it adds credits at peaks, so nothing is booked.
-                    _so = scale_out_plan(srow, multi_cluster_evident(
-                        _sizing_whs.df if _sizing_whs.ok and not _sizing_whs.empty else None))
+                    _so = scale_out_plan(srow, multi_cluster_evident(_whs_df if not _whs_df.empty else None))
                     st.markdown("**Scale-out fix (review-only)**")
                     if _so["policy_to_standard"]:
                         st.code(remediation.scaling_policy_fix(str(srow["WAREHOUSE_NAME"]), "STANDARD"),
                                 language="sql")
-                    elif _so["known"] and not _so["at_cap"]:
+                    elif _so["prefill"]:
                         st.code(remediation.cluster_range_fix(str(srow["WAREHOUSE_NAME"]),
                                                               _so["min"], _so["max"]), language="sql")
                     st.caption(_scale_out_caption(_so))
+                elif str(srow.get("RECOMMENDATION", "")) == RECOMMEND_BELOW_CAP:
+                    # #38 remainder: checked, and the cap was never reached — no cluster statement; the
+                    # resize below is the size-up route (an upsize captions its cost, books nothing).
+                    st.markdown("**Cluster cap not reached (review-only)**")
+                    st.caption(_BELOW_CAP_CAPTION)
                 elif not bool(srow.get("ACTIONABLE", False)):
                     st.warning(
                         "This row is not an evidence-backed resize recommendation. The SQL remains "
@@ -722,75 +888,100 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     )
                 # Round-3 hunt: scope the widget key to the warehouse — a fixed key let
                 # a size picked for one warehouse persist onto the next selected row.
-                target_size = st.selectbox("Resize to", ["XSMALL", "SMALL", "MEDIUM", "LARGE"],
-                                           key=f"sizing_to_{srow['WAREHOUSE_NAME']}")
-                stmt_sz = remediation.resize_fix(str(srow["WAREHOUSE_NAME"]), target_size)
-                st.code(stmt_sz, language="sql")
-                # Round-3 hunt: the booked saving must follow the ACTUAL chosen target vs
-                # the current size (credits ~halve per size step down), NOT a fixed
-                # 0.5*MONTHLY tied only to the RECOMMENDATION string — which booked a
-                # phantom saving even for a same-size or larger pick. Book a positive
-                # ESTIMATED_USD only on a confirmed downsize.
-                est_sz = 0.0
-                _cur_size = normalize_size(srow.get("CURRENT_SIZE"))
-                _tgt_norm = normalize_size(target_size)
-                if _cur_size and _tgt_norm and _tgt_norm != _cur_size:
-                    _steps = SIZE_ORDER.index(_tgt_norm) - SIZE_ORDER.index(_cur_size)
-                    if _steps < 0:  # a genuine downsize
-                        # Book the CONSERVATIVE idle-scaled saving the rest of the tab uses, NOT the
-                        # whole bill rate-scaled: on a smaller warehouse a compute-bound query runs
-                        # ~2x longer (cost-neutral), so only the IDLE share reliably shrinks when the
-                        # per-hour rate halves (sizing.py rec#13). `_monthly * (1 - 2**steps)` booked
-                        # the optimistic everything-halves ceiling -- ~12x too high for a busy, low-idle
-                        # warehouse. Scale IDLE only, matching POTENTIAL_MONTHLY_SAVING_USD (bug-hunt
-                        # 2026-08-30).
-                        _idle = safe_float(srow.get("IDLE_MONTHLY_USD"))
-                        est_sz = round(max(0.0, _idle * (1.0 - 2.0 ** _steps)), 2)
-                        st.caption(f"Projected saving ~${est_sz:,.0f}/mo resizing {_cur_size} → "
-                                   f"{_tgt_norm} (only idle-hour credits reliably shrink; busy "
-                                   "compute-bound work runs ~2x longer on a smaller size). The daily "
-                                   "change scan books this resize to the Savings ledger and settles it "
-                                   "against 14 days of measured actuals — the app logs the estimate to "
-                                   "REMEDIATION_LOG instead of booking a second ledger row.")
-                    else:  # an upsize is a cost increase — never a booked saving
-                        st.caption(f"Resizing UP {_cur_size} → {_tgt_norm} raises cost — no saving booked.")
-                elif not _cur_size:
-                    st.caption("Current warehouse size unavailable (SHOW WAREHOUSES) — no saving "
-                               "booked automatically; verify any saving on the Savings ledger.")
-                blast_radius(str(srow["WAREHOUSE_NAME"]), _PAGE)
-                from app.logic import remediation as _remediation
-                st.caption(_remediation.reverse_hint("RESIZE", str(srow["WAREHOUSE_NAME"])))
-                if (confirm_gate(str(srow["WAREHOUSE_NAME"]), "Execute resize + log", key="sizing",
-                                 prompt="Type the warehouse name to confirm resize", object_name=True)
-                        and write_gate_open("sizing")):
-                    ok, msg = execute_statement(stmt_sz, page=_PAGE)
-                    execute_statement(
-                        f"INSERT INTO {core_object('REMEDIATION_LOG')} "
-                        "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, EST_MONTHLY_SAVINGS_USD, STATUS, RESULT_NOTE, EXECUTED_BY) "
-                        f"SELECT 'RESIZE', {sql_literal(str(srow['WAREHOUSE_NAME']))}, {sql_literal(stmt_sz)}, "
-                        f"{sql_number(est_sz)}, {sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}, {identity_sql()}",
-                        page=_PAGE)
-                    if ok:
-                        from app.ui.components import log_ui_event
-                        log_ui_event("remediation_exec", page=_PAGE)
-                    # Next-Fifty #5: the change scan (V038/V145) books a resize from XSMALL..4XLARGE and
-                    # settles it on measured actuals, so no manual row for those (it was a double-booking).
-                    # From a size the scan's map can't rank (5X/6X-LARGE) the app still books it.
-                    _sz_autobooked = remediation.autobook_books_change("RESIZE", _cur_size)
-                    if ok and est_sz > 0 and not _sz_autobooked:
+                # Review r1 R1-4: a capacity-pressure verdict opens on one size UP (its captions call this the
+                # size-up route), never on a downsize that projects a saving; the options are every size
+                # resize_fix accepts (they stopped at LARGE, so an XLARGE warehouse had no size-up option).
+                # Review r2 R2-2: where no size up is offered (the largest option, a larger warehouse, or an
+                # unknown size) the picker opens with nothing picked (index None) and the note says why: no
+                # statement, saving or Execute until the operator picks a size.
+                # Review r3 R3-1: Streamlit leaves `index` out of a keyed selectbox's identity, so a key on the
+                # warehouse alone kept an earlier value when the default changed while the row stayed selected
+                # (after an Execute, or an outside resize), and the pane showed a statement, a saving and Execute
+                # under the no-size-picked note. The key carries what the default is computed from (the current
+                # size and the default index), so a new default is a new widget and a stale pick is dropped.
+                _rs_idx, _rs_note = resize_picker_default(srow.get("RECOMMENDATION"), srow.get("CURRENT_SIZE"),
+                                                          remediation.RESIZE_SIZES)
+                _rs_cur = normalize_size(srow.get("CURRENT_SIZE")) or "UNKNOWN"
+                target_size = st.selectbox("Resize to", list(remediation.RESIZE_SIZES), index=_rs_idx,
+                                           key=f"sizing_to_{srow['WAREHOUSE_NAME']}_{_rs_cur}_{_rs_idx}",
+                                           placeholder="Pick a size")
+                if _rs_note:
+                    st.caption(_rs_note)
+                if target_size is not None:       # R2-2: nothing picked = no statement, saving or Execute
+                    stmt_sz = remediation.resize_fix(str(srow["WAREHOUSE_NAME"]), target_size)
+                    st.code(stmt_sz, language="sql")
+                    # Round-3 hunt: the booked saving must follow the ACTUAL chosen target vs
+                    # the current size (credits ~halve per size step down), NOT a fixed
+                    # 0.5*MONTHLY tied only to the RECOMMENDATION string — which booked a
+                    # phantom saving even for a same-size or larger pick. Book a positive
+                    # ESTIMATED_USD only on a confirmed downsize.
+                    est_sz = 0.0
+                    _cur_size = normalize_size(srow.get("CURRENT_SIZE"))
+                    _cur_label = picker_size_label(_cur_size, remediation.RESIZE_SIZES)
+                    _tgt_norm = normalize_size(target_size)
+                    if _cur_size and _tgt_norm and _tgt_norm != _cur_size:
+                        _steps = SIZE_ORDER.index(_tgt_norm) - SIZE_ORDER.index(_cur_size)
+                        if _steps < 0:  # a genuine downsize
+                            # Book the CONSERVATIVE idle-scaled saving the rest of the tab uses, NOT the
+                            # whole bill rate-scaled: on a smaller warehouse a compute-bound query runs
+                            # ~2x longer (cost-neutral), so only the IDLE share reliably shrinks when the
+                            # per-hour rate halves (sizing.py rec#13). `_monthly * (1 - 2**steps)` booked
+                            # the optimistic everything-halves ceiling -- ~12x too high for a busy, low-idle
+                            # warehouse. Scale IDLE only, matching POTENTIAL_MONTHLY_SAVING_USD (bug-hunt
+                            # 2026-08-30).
+                            _idle = safe_float(srow.get("IDLE_MONTHLY_USD"))
+                            est_sz = round(max(0.0, _idle * (1.0 - 2.0 ** _steps)), 2)
+                            st.caption(f"Projected saving ~${est_sz:,.0f}/mo resizing {_cur_label} → "
+                                       f"{target_size} (only idle-hour credits reliably shrink; busy "
+                                       "compute-bound work runs ~2x longer on a smaller size). The daily "
+                                       "change scan books this resize to the Savings ledger and settles it "
+                                       "against 14 days of measured actuals — the app logs the estimate to "
+                                       "REMEDIATION_LOG instead of booking a second ledger row.")
+                        else:  # an upsize is a cost increase — never a booked saving
+                            st.caption(f"Resizing UP {_cur_label} → {target_size} raises cost — no saving "
+                                       "booked.")
+                    elif not _cur_size:
+                        st.caption("Current warehouse size unavailable (SHOW WAREHOUSES) — no saving "
+                                   "booked automatically; verify any saving on the Savings ledger.")
+                    blast_radius(str(srow["WAREHOUSE_NAME"]), _PAGE)
+                    from app.logic import remediation as _remediation
+                    st.caption(_remediation.reverse_hint("RESIZE", str(srow["WAREHOUSE_NAME"])))
+                    # R3-1: after a resize the picker can open on a new size up, so the typed name from that
+                    # resize is cleared (before its input renders): a repeat Execute needs a new confirm.
+                    if st.session_state.pop("_sizing_clear_confirm", False):
+                        st.session_state["sizing_confirm"] = ""
+                    if (confirm_gate(str(srow["WAREHOUSE_NAME"]), "Execute resize + log", key="sizing",
+                                     prompt="Type the warehouse name to confirm resize", object_name=True)
+                            and write_gate_open("sizing")):
+                        ok, msg = execute_statement(stmt_sz, page=_PAGE)
                         execute_statement(
-                            f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
-                            "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES, FINDING_TYPE, TARGET_OBJECT) "
-                            f"SELECT {sql_literal('Resize ' + str(srow['WAREHOUSE_NAME']) + ' to ' + target_size)}, "
-                            f"'ESTIMATED', {sql_number(est_sz)}, {sql_literal(stmt_sz)}, "
-                            "'Booked from sizing simulator; verify with a proof run on the Savings ledger.', "
-                            f"'RESIZE', {sql_literal(str(srow['WAREHOUSE_NAME']))}", page=_PAGE)
-                    stamp_write("sizing", ok)  # C48
-                    # r-ux: name the object + effect (was generic "Statement executed.")
-                    notify(ok, msg if not ok else
-                           f"Resized {srow['WAREHOUSE_NAME']} to {target_size}; "
-                           + ("the daily change scan books and settles the measured saving." if _sz_autobooked
-                              else "booked an estimated saving — verify it on the Savings ledger."))
+                            f"INSERT INTO {core_object('REMEDIATION_LOG')} "
+                            "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, EST_MONTHLY_SAVINGS_USD, STATUS, RESULT_NOTE, EXECUTED_BY) "
+                            f"SELECT 'RESIZE', {sql_literal(str(srow['WAREHOUSE_NAME']))}, {sql_literal(stmt_sz)}, "
+                            f"{sql_number(est_sz)}, {sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}, {identity_sql()}",
+                            page=_PAGE)
+                        if ok:
+                            from app.ui.components import log_ui_event
+                            log_ui_event("remediation_exec", page=_PAGE)
+                            st.session_state["_sizing_clear_confirm"] = True
+                        # Next-Fifty #5: the change scan (V038/V145) books a resize from XSMALL..4XLARGE and
+                        # settles it on measured actuals, so no manual row for those (it was a double-booking).
+                        # From a size the scan's map can't rank (5X/6X-LARGE) the app still books it.
+                        _sz_autobooked = remediation.autobook_books_change("RESIZE", _cur_size)
+                        if ok and est_sz > 0 and not _sz_autobooked:
+                            execute_statement(
+                                f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
+                                "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES, FINDING_TYPE, TARGET_OBJECT) "
+                                f"SELECT {sql_literal('Resize ' + str(srow['WAREHOUSE_NAME']) + ' to ' + target_size)}, "
+                                f"'ESTIMATED', {sql_number(est_sz)}, {sql_literal(stmt_sz)}, "
+                                "'Booked from sizing simulator; verify with a proof run on the Savings ledger.', "
+                                f"'RESIZE', {sql_literal(str(srow['WAREHOUSE_NAME']))}", page=_PAGE)
+                        stamp_write("sizing", ok)  # C48
+                        # r-ux: name the object + effect (was generic "Statement executed.")
+                        notify(ok, msg if not ok else
+                               f"Resized {srow['WAREHOUSE_NAME']} to {target_size}; "
+                               + ("the daily change scan books and settles the measured saving." if _sz_autobooked
+                                  else "booked an estimated saving — verify it on the Savings ledger."))
             _whatif_panel(sized, sizing_days, rate)
             result_caption(prof_res)
 
@@ -884,16 +1075,39 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         _exp = run(workbench_sql.experiments(entity_type="WAREHOUSE"), page=_PAGE,
                    key=f"opt_experiments_{company}", tier="recent", source="OPTIMIZATION_EXPERIMENTS")
         _exp_df = _exp.df if _exp.usable() else pd.DataFrame()
+        # Next-Fifty #35: unread maintenance joins ONLY from the Storage & waste session handoff (a confirmed
+        # scan, this Company, Database filter clear, same cache scope and credit rate, under 1h old by the aware UTC
+        # clock) — zero reads here.
+        _unread = unread_lever(st.session_state.get(UNREAD_HANDOFF_KEY), company=company, scope=cache_scope(),
+                               now=utc_now(), rate=rate, where="Storage & waste")
+        _savings_opps.extend(_unread.opportunities)
         _roll = rollup_savings(_savings_opps)
+        _counted = [lever for lever, on in (("IDLE", _idle_profiles_tx is not None),
+                                            ("RESIZE", _sizing_profiles_tx is not None),
+                                            ("UNREAD_MAINT", _unread.included)) if on]
+        _absent: dict[str, str] = {}
+        if _idle_profiles_tx is None:
+            _absent["IDLE"] = "the idle advisor above returned no rows or could not be read"
+        if _sizing_profiles_tx is None:
+            _absent["RESIZE"] = ("the right-sizing profile above returned no rows or could not be read"
+                                 if st.session_state.get("sizing_load") else
+                                 "turn on 'Load right-sizing profile (heavy scan)' above")
+        if not _unread.included:
+            _absent["UNREAD_MAINT"] = _unread.reason
+        _basis = lever_basis(_counted, _absent, {"UNREAD_MAINT": _unread.note})
         if _roll.items:
             kpi_row([
                 {"label": "Addressable $/mo (net)", "value": format_usd(_roll.total_monthly_usd),
-                 "help": "Idle-timer + right-sizing opportunities, de-duplicated so a warehouse "
-                         "counted for BOTH idle and resize is not double-counted (the larger wins)."},
+                 "help": "The levers named just below, de-duplicated: a warehouse counted for both idle and "
+                         "resize counts once (the larger wins). Idle and right-sizing are measured over this "
+                         "window. Unread maintenance is ESTIMATED from the last 30 complete days of maintenance "
+                         "on objects confirmed unread in Storage & waste this session, " + H_BOOKED + "; an "
+                         "object you stopped without booking keeps counting until those 30 days roll off."},
                 {"label": "Opportunities", "value": str(len(_roll.items))},
                 {"label": "Overlaps removed", "value": str(len(_roll.dropped)),
                  "help": "Idle/resize double-counts on the same warehouse dropped from the total."},
             ])
+            st.caption(md_dollars(_basis))
             _rdf = pd.DataFrame([
                 {"Source": o.source, "Warehouse / target": o.target,
                  "$/mo": round(o.monthly_usd, 2), "Confidence": round(o.confidence, 2),
@@ -912,22 +1126,22 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                       "saving already under test is not a fresh opportunity to re-book."),
                          })
             st.caption(
-                "Ranked by confidence x dollars. **Effort** flags the quick wins — LOW is a "
-                "single ALTER (idle timer / size), so sort by it to bank the easy savings "
-                "first even when they're not the biggest number. The failed-query **Wasted "
-                "spend** board (Operations) and the **Serverless ROI** panel above are "
-                "additional levers not yet folded into this total; storage / clustering plug "
-                "into the same rollup next."
+                "Ranked by confidence x dollars. **Effort** flags the quick wins — LOW is a quick ALTER-level "
+                "change (an idle timer, a size, or stopping maintenance on an unread object), so sort by it to "
+                "bank the easy savings first even when they're not the biggest number. Also not in this total: "
+                "the failed-query **Wasted spend** board (Operations), the **Serverless ROI** panel above, and "
+                "the storage-waste and automatic-clustering panels in Storage & waste."
             )
         else:
-            st.caption("No open idle or right-sizing opportunities to roll up in this window.")
+            st.caption(md_dollars("No open opportunities from the levers counted. " + _basis))
 
         st.divider()
         # rec#20: fleet consolidation — same-size warehouses in this scope whose active
         # hours barely overlap can plausibly share one warehouse, retiring the mostly-
         # idle one. Review-only: it names the pair and a conservative saving, proposes
-        # nothing. (Multi-cluster scale-in — lowering MAX_CLUSTER_COUNT on rarely-
-        # saturated warehouses — is the other half of this rec and stays queued.)
+        # nothing. (Multi-cluster scale-in was closed in #38 as a $0 lever: with
+        # MIN_CLUSTER_COUNT = 1 an unreached cap never starts a cluster, so lowering it saves
+        # nothing; Idle & sizing's cluster-cap check shows cluster use instead.)
         st.markdown("**Fleet consolidation candidates (review-only)**")
         st.caption(
             "Same size class, current company scope, active hours that barely overlap → the two "
@@ -1348,6 +1562,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 empty_state("clean", "No object paid 1+ credit of clustering, search optimization or MV refresh "
                                      "without a read in the last 90 days.")
                 result_caption(_um)
+                # Next-Fifty #35: a clean scan counts the lever at $0 in Addressable $/mo (Idle & sizing, Proof)
+                st.session_state[UNREAD_HANDOFF_KEY] = unread_handoff(
+                    None, status=UNREAD_CLEAN, company=company, database=_oc_db, scope=cache_scope(),
+                    as_of=utc_now(), rate=rate)
             elif guard(_um, ""):
                 import hashlib as _hl
 
@@ -1376,6 +1594,22 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 _cands = int(safe_float(_um0.get("CANDIDATES_WIN"), default=float(len(_um.df))))
                 _um_trunc = _cands > len(_um.df)
                 _ua = _uv[_uv["VERDICT"].isin(ACTION_VERDICTS)]
+                # Next-Fifty #35: objects already booked on the Savings ledger stay out of Addressable $/mo (the
+                # Book button's own dedupe). Read only when there is something to count: a confirmed action row
+                # and no Database filter (a Database-scoped scan never joins the headline). The SQL + tier are
+                # Proof's full-ledger read (one shared cache entry); the key must NOT contain 'unread_maint_', or
+                # toggle_cost_hint above would report this fast read instead of the confirm.
+                _booked: frozenset[str] | None = frozenset()
+                _led_err = ""
+                if _conf.ok and not _ua.empty and not str(_oc_db or "").strip():
+                    _led = run(mart_sql.savings_ledger(limit=None), page=_PAGE, key="booked_unread_ledger",
+                               tier="recent",
+                               source="SAVINGS_LEDGER (bookings, to leave booked objects out of Addressable $/mo)")
+                    # a row-capped read may miss the oldest bookings: unknown, never a partial set (no double count)
+                    _booked = booked_objects(_led.df) if _led.ok and not _led.truncated else None
+                    _led_err = (str(_led.error or "") if not _led.ok else
+                                f"The read stopped at its {len(_led.df):,}-row cap, so older bookings could not "
+                                "be checked." if _led.truncated else "")
                 _cap = f" (top {len(_um.df)}, ≥)" if _um_trunc else ""
                 kpi_row([
                     {"label": "Mart shortlist", "value": f"{_cands:,}",
@@ -1461,6 +1695,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                     and write_gate_open(_bk_key)):
                                 ok, msg = execute_statement(_bk, page=_PAGE)
                                 stamp_write(_bk_key, ok)  # C48
+                                if ok and _booked is not None:
+                                    _booked = _booked | {object_key(_fqn)}
                                 notify(ok, f"Booked an ESTIMATED saving for {_fqn}, unless it was already booked "
                                            "(any of its maintenance arms, not rejected): then nothing is added."
                                        if ok else f"Booking failed: {msg}")
@@ -1498,8 +1734,24 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     "materialized view used only through automatic query rewrite may not show as a read, so "
                     "confirm with the owner. Est. $/mo = the last 30 complete days of maintenance credits x "
                     "your rate (ESTIMATED); booked rows stay ESTIMATED until verified on the Savings ledger."))
+                # Next-Fifty #35: the ONLY path from these verdicts to Addressable $/mo (Idle & sizing, Proof ▸
+                # Pipeline): a primitives-only snapshot in a non-widget session key. Only a CONFIRMED scan carries
+                # rows; it is never cleared when the toggle is off (Streamlit resets it on every revisit).
+                st.session_state[UNREAD_HANDOFF_KEY] = unread_handoff(
+                    _uv, status=UNREAD_CONFIRMED if _conf.ok else UNREAD_CONFIRM_FAILED, company=company,
+                    database=_oc_db, scope=cache_scope(), as_of=utc_now(), rate=rate, checked=len(_um.df),
+                    truncated=_um_trunc, booked=_booked)
+                if st.session_state[UNREAD_HANDOFF_KEY]["status"] == UNREAD_LEDGER_FAILED:
+                    empty_state("unavailable", md_dollars(S_LEDGER_UNAVAILABLE), detail=_led_err)
+                elif (_n := unread_handoff_note(st.session_state[UNREAD_HANDOFF_KEY])):
+                    st.caption(md_dollars(_n))
                 result_caption(_um)
                 result_caption(_conf)
+            else:
+                # guard() above already rendered the shortlist's 'unavailable' state
+                st.session_state[UNREAD_HANDOFF_KEY] = unread_handoff(
+                    None, status=UNREAD_SHORTLIST_FAILED, company=company, database=_oc_db, scope=cache_scope(),
+                    as_of=utc_now(), rate=rate)
         st.divider()
         st.markdown("**Storage growth movers**")
         days_storage = max(days, 30)

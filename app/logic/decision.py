@@ -6,6 +6,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable
 
+import numpy as np
 import pandas as pd
 
 from app.logic.formulas import safe_float
@@ -202,7 +203,11 @@ def monthly_equivalent(frame: pd.DataFrame | None) -> tuple[pd.DataFrame, dict]:
     return out, summary
 
 
-_ADDRESSABLE_TITLE = {"IDLE": "Tighten auto-suspend on {target}", "RESIZE": "Right-size {target}"}
+_ADDRESSABLE_TITLE = {"IDLE": "Tighten auto-suspend on {target}", "RESIZE": "Right-size {target}",
+                      "UNREAD_MAINT": "Stop maintenance on unread {target}"}
+# Next-Fifty #35: an unread-maintenance row targets an object FQN (the Entity 360 OBJECT type Storage & waste
+# drills to), so it de-duplicates against a queued OBJECT:<fqn> action and never against a warehouse.
+_ADDRESSABLE_ENTITY = {"UNREAD_MAINT": "OBJECT"}
 
 
 def pipeline_frame(rollup_items: Iterable[SavingsOpportunity] | None,
@@ -211,13 +216,13 @@ def pipeline_frame(rollup_items: Iterable[SavingsOpportunity] | None,
     Optimize addressable rollup (savings_rollup.rollup_savings(...).items) UNION the queued ACTION_QUEUE
     rows, both on a monthly basis.
 
-    Addressable rows are synthetic: KIND "Addressable", SOURCE_ENTITY_TYPE 'WAREHOUSE' + KEY = the
-    target, STATUS OPEN, CONFIDENCE = the opportunity's 0..1 weight, ESTIMATED_USD = MONTHLY_USD = its
-    $/mo, PERIOD MONTHLY. Queued rows (KIND "Queued") carry MONTHLY_USD (monthly_equivalent) AS
-    ESTIMATED_USD — one-time / unspecified / unpriced rows project $0 — with the authored figure kept in
-    AUTHORED_USD. scenario_projection then de-duplicates by entity (largest estimate wins), so a queued
-    action on the same warehouse as an addressable opportunity is counted once. Verified savings never
-    enter this frame."""
+    Addressable rows are synthetic: KIND "Addressable", SOURCE_ENTITY_TYPE WAREHOUSE (OBJECT for
+    UNREAD_MAINT) + KEY = the target, STATUS OPEN, CONFIDENCE = the opportunity's 0..1 weight,
+    ESTIMATED_USD = MONTHLY_USD = its $/mo, PERIOD MONTHLY. Queued rows (KIND "Queued") carry
+    MONTHLY_USD (monthly_equivalent) AS ESTIMATED_USD — one-time / unspecified / unpriced rows project
+    $0 — with the authored figure kept in AUTHORED_USD. scenario_projection then de-duplicates by entity (largest estimate wins), so a queued
+    action on the same warehouse (or object) as an addressable opportunity is counted once.
+    Verified savings never enter this frame."""
     rows = []
     for opp in rollup_items or ():
         source = str(opp.source).upper()
@@ -229,7 +234,7 @@ def pipeline_frame(rollup_items: Iterable[SavingsOpportunity] | None,
             "SEVERITY": None,
             "TITLE": _ADDRESSABLE_TITLE.get(source, source.title() + " on {target}").format(target=target),
             "SOURCE": f"Cost ▸ Optimization & Savings ({source})",
-            "SOURCE_ENTITY_TYPE": "WAREHOUSE",
+            "SOURCE_ENTITY_TYPE": _ADDRESSABLE_ENTITY.get(source, "WAREHOUSE"),
             "SOURCE_ENTITY_KEY": target,
             "STATUS": "OPEN",
             "CONFIDENCE": max(0.0, min(safe_float(opp.confidence), 1.0)),
@@ -253,7 +258,35 @@ def pipeline_frame(rollup_items: Iterable[SavingsOpportunity] | None,
     # restored after, so pandas never infers dtypes from all-NA blocks (deprecated behaviour).
     columns = list(dict.fromkeys([*addressable.columns, *queued.columns]))
     parts = [part.dropna(axis=1, how="all") for part in (addressable, queued)]
-    return pd.concat(parts, ignore_index=True, sort=False).reindex(columns=columns)
+    return _concat_rows(parts).reindex(columns=columns)
+
+
+def _naive_time(series: pd.Series) -> bool:
+    """A tz-naive datetime64 / timedelta64 column (a tz-aware one never takes the unit-less NaT path)."""
+    return getattr(series.dtype, "kind", "") in ("M", "m") and getattr(series.dtype, "tz", None) is None
+
+
+def _concat_rows(parts: list[pd.DataFrame]) -> pd.DataFrame:
+    """pd.concat(parts, ignore_index=True, sort=False) that never NA-fills a naive datetime64 / timedelta64
+    column (R1-18): pandas fills the rows of a part that lacks one (the synthetic Addressable rows lack the
+    queue's CREATED_AT / UPDATED_AT, TIMESTAMP_NTZ NOT NULL) with dtype.type('NaT'), a unit-less NaT that
+    NumPy 2.5 deprecates and will reject. Those columns are assembled here with a unit-typed NaT instead,
+    keeping their dtype; a column whose kind differs across parts is left to pandas."""
+    times: dict[str, np.dtype] = {}
+    for part in parts:
+        for col in part.columns:
+            if _naive_time(part[col]):
+                times.setdefault(col, part[col].dtype)
+    times = {col: dtype for col, dtype in times.items()
+             if all(col not in part.columns or (_naive_time(part[col]) and part[col].dtype.kind == dtype.kind)
+                    for part in parts)}
+    order = list(dict.fromkeys(col for part in parts for col in part.columns))
+    out = pd.concat([part.drop(columns=[col for col in times if col in part.columns]) for part in parts],
+                    ignore_index=True, sort=False)
+    for col, dtype in times.items():
+        out[col] = np.concatenate([part[col].to_numpy(dtype=dtype) if col in part.columns
+                                   else np.full(len(part), "NaT", dtype=dtype) for part in parts])
+    return out[order]
 
 
 def slo_summary(frame: pd.DataFrame | None) -> dict[str, float]:

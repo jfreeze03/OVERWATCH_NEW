@@ -48,7 +48,8 @@ def test_operations_skips_discarded_activity_read():
 def test_decision_studio_batches_scorecard_reads():
     src = _read("app/ui/decision_studio.py")
     # v4.597 (Option C): Proof is read-only, so execute_statement left the import
-    assert "from app.core.query import run, run_batch" in src
+    # (v4.604 #35 added cache_scope: the unread-maintenance handoff is matched on the cache scope, no read)
+    assert "from app.core.query import cache_scope, run, run_batch" in src
     assert "execute_statement" not in src
     assert '_sc_pf = run_batch([' in src
     assert '_q = _sc_pf.get("sc_quarter") or run(' in src

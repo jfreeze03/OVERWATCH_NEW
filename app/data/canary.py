@@ -117,6 +117,12 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("security.admin_role_activity_fact", lambda: security_sql.admin_role_activity_fact(1)),
     ("security.effective_access", lambda: security_sql.effective_access("ALFA")),
     ("security.egress_baseline", lambda: security_sql.egress_baseline(1)),
+    # Next-Fifty #43: the POLICY_REFERENCES reads (probe=True on Security). A standard view, proven readable (S1b
+    # 2026-09-29), so none is a declared gap: an absent view or a renamed column FAILs here while the page shows
+    # needs_setup / unavailable.
+    ("security.data_policy_coverage", security_sql.data_policy_coverage),
+    ("security.masking_environment_parity", security_sql.masking_environment_parity),
+    ("security.admin_network_policy_coverage", lambda: security_sql.admin_network_policy_coverage("ALFA")),
     ("change_impact.change_registry", lambda: change_impact_sql.change_registry(30, "ALFA")),
     ("mart.fact_metering_by_service", lambda: mart_sql.fact_metering_by_service(7)),
     ("mart.fact_query_window_summary", lambda: mart_sql.fact_query_window_summary(1, "ALFA")),
@@ -170,6 +176,9 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("insights.task_failure_details", lambda: insights_sql.task_failure_details(1, "ALFA")),
     ("insights.dormant_users", lambda: insights_sql.dormant_users(30, "ALFA")),
     ("insights.warehouse_sizing_profile", lambda: insights_sql.warehouse_sizing_profile(1, "ALFA")),
+    # Next-Fifty #38 cluster-cap check. NOT an expected gap: CLUSTER_NUMBER is a standard QUERY_HISTORY
+    # column (proven on this account by probe W1c), so a missing column must FAIL the canary.
+    ("insights.warehouse_cluster_use", lambda: insights_sql.warehouse_cluster_use(("WH_ALFA_ADMIN",), 1)),
     ("insights.measured_query_costs", lambda: insights_sql.measured_query_costs(1, "ALFA")),
     ("insights.procedure_costs_usd", lambda: insights_sql.procedure_costs_usd(1, "ALFA")),
     ("graph.graph_daily_costs", lambda: graph_sql.graph_daily_costs(1, "ALFA")),
@@ -302,6 +311,9 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
      lambda: mart_sql.ledger_before_after("TABLE", "DB.SCH.T_CANARY", account_today() - timedelta(days=15))),
     ("mart.alert_mttr.canary", lambda: mart_sql.alert_mttr(2)),
     ("chargeback.department_window", lambda: chargeback_sql.department_window_credits(1, "ALFA")),
+    # #42 Part 1: every fact it reads is a core OVERWATCH table, so an absence is a real failure
+    # (deliberately NOT in EXPECTED_GAPS).
+    ("chargeback.company_allin_showback", lambda: chargeback_sql.company_allin_showback(2, "ALFA")),
     ("chargeback.role_share", lambda: chargeback_sql.role_share_within_warehouse(1, "ALFA")),
     ("chargeback.department_map", chargeback_sql.department_map),
     ("chargeback.role_department", lambda: chargeback_sql.role_department_map_join(1, "ALFA")),
