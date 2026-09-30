@@ -71,9 +71,10 @@ def render() -> None:
                   "note": "Account-wide proof (ledger, run cost, acceptance, alert precision, per-item "
                           "evidence); the page Company/Window do not apply."},
         "Pipeline": {"applies": ("company", "days"),
-                     "note": "Addressable $ scopes to Company and Window; queued work is every open "
-                             "Action Center item for the Company (not windowed); the measured slider "
-                             "defaults (acceptance, realization) are account-wide."},
+                     "note": "Addressable $ scopes to Company and Window (unread maintenance, when counted, "
+                             "is its last 30 complete days); queued work is every open Action Center item for "
+                             "the Company (not windowed); the measured slider defaults (acceptance, "
+                             "realization) are account-wide."},
     }
     section_filter_contract(f, **_contracts[section])
     if section == "Proof":

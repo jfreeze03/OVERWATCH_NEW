@@ -200,6 +200,35 @@ def test_pipeline_reads_share_the_optimize_cache_and_never_go_live():
     assert "ACCOUNT_USAGE" not in mart27_sql.eff_idle_analysis(30, "ALL")
 
 
+
+def test_pipeline_counts_unread_only_from_the_session_handoff():
+    """Next-Fifty #35: Proof ▸ Pipeline reads the unread-maintenance lever back from the Storage & waste session
+    handoff (zero reads; never the scan, the confirm or the ledger), names every lever it counted and why one is
+    missing, and offers a profile-gated doorway to run the scan."""
+    body = _src(_BODY_REL)
+    pipe = _fn(body, "_pipeline_tab")
+    assert pipe.count("_unread = unread_lever(st.session_state.get(UNREAD_HANDOFF_KEY), company=company, "
+                      "scope=cache_scope(),") == 1
+    assert pipe.index("opps.extend(_unread.opportunities)") < pipe.index("roll = rollup_savings(opps)")
+    for token in ("maintenance_on_unread", "object_reads_confirm", "unread_maintenance_opportunities",
+                  "unread_handoff(", "booked_objects", "cost_sql", "insights_sql"):
+        assert token not in body, token
+    assert "lever_basis(_counted, _absent, {\"UNREAD_MAINT\": _unread.note})" in pipe
+    assert "_basis = lever_short(_counted)" in pipe
+    assert '"idle timer + right-sizing" if _sized_ok' not in pipe                # the old two-lever wording
+    assert ('if not _unread.included and can_open("Cost Intelligence") and st.button(\n'
+            '            "Check unread maintenance → Cost ▸ Optimization & Savings ▸ Storage & waste",') in pipe
+    # the caption sits with the headline, before the failure states below it
+    assert pipe.index("kpi_row([") < pipe.index("st.caption(md_dollars(lever_basis(") < pipe.index(
+        'empty_state("unavailable", "The warehouse-efficiency mart could not be read')
+    door = _fn(body, "_open_storage_waste")
+    assert door.index('st.session_state["opt_section"] = "Storage & waste"') < door.index(
+        'request_navigation("Cost Intelligence", "Optimization & Savings")')
+    assert "on the same warehouse or object is" in pipe
+    assert "no addressable savings from the levers counted in this scope" in pipe
+    shell = _src(_SHELL_REL)
+    assert "(unread maintenance, when counted, " in shell and "is its last 30 complete days)" in shell
+
 def test_live_proof_sections_reach_no_account_usage():
     """The v451 reach pin allows the body ACCESS_HISTORY only because of the HIDDEN _products;
     the dispatched sections themselves reach no ACCOUNT_USAGE table."""

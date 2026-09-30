@@ -217,6 +217,51 @@ def confirm_failure_note(error_kind: object, error: object = "") -> str:
     return "the access-history check failed" + (f": {err}" if err else "")
 
 
+def object_key(fqn: object) -> str:
+    """The shortlist's normalized object key, UPPER(REPLACE(OBJECT_FQN, '"', '')) (cost_sql.maintenance_on_unread
+    groups on it), so a quoted or lower-case ledger TARGET_OBJECT names the same object as its verdict row."""
+    return _text(fqn).replace('"', "").upper()
+
+
+_BOOKED_TYPES = frozenset(ARM_FINDING_TYPE.values())
+
+
+def _cell(value: object) -> str:
+    """A ledger cell as text; None / NaN / pd.NA read as '' (a NULL), never the string '<NA>'."""
+    try:
+        if value is None or bool(pd.isna(value)):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return _text(value)
+
+
+def booked_objects(ledger: pd.DataFrame | None) -> frozenset[str] | None:
+    """Next-Fifty #35: the objects already booked on the Savings ledger under ANY unread-maintenance finding type
+    in any state but REJECTED: the predicate book_estimated_sql's WHERE NOT EXISTS refuses a second booking on
+    (a NULL STATE is not '<> REJECTED' there either), so an object the Book button would refuse is never counted
+    in Addressable $/mo. Keys are object_key(TARGET_OBJECT); FINDING_TYPE / STATE compare UPPER(TRIM()).
+
+    None / not a DataFrame -> None (unknown: the caller leaves the lever out rather than risk a double count);
+    an empty frame -> frozenset() (nothing booked); a non-empty frame without TARGET_OBJECT, FINDING_TYPE or
+    STATE -> None. Pure; never raises."""
+    if not isinstance(ledger, pd.DataFrame):
+        return None
+    if ledger.empty:
+        return frozenset()
+    if not {"TARGET_OBJECT", "FINDING_TYPE", "STATE"}.issubset(ledger.columns):
+        return None
+    out: set[str] = set()
+    for target, ftype, state in zip(ledger["TARGET_OBJECT"], ledger["FINDING_TYPE"], ledger["STATE"],
+                                    strict=True):
+        live = _cell(state).upper()
+        if _cell(ftype).upper() in _BOOKED_TYPES and live and live != "REJECTED":
+            key = object_key(_cell(target))
+            if key:
+                out.add(key)
+    return frozenset(out)
+
+
 def book_estimated_sql(row: Mapping[str, object], *, proof_sql: str) -> str:
     """ONE idempotent INSERT of an ESTIMATED SAVINGS_LEDGER row for a confirmed-unread action row.
 

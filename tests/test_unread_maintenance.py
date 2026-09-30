@@ -7,7 +7,8 @@ wiring claim is also locked by source below)."""
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -24,7 +25,7 @@ from app.logic.unread_maintenance import (
     book_estimated_sql,
     unread_maintenance_verdicts,
 )
-from tests._source import read
+from tests._source import ROOT, read
 
 sqlglot = pytest.importorskip("sqlglot")
 
@@ -414,7 +415,282 @@ def test_rollup_registers_the_lever():
     assert same.total_monthly_usd == 8.0 and len(same.dropped) == 1               # the larger one survives
     other = savings_rollup.rollup_savings([opps[0], savings_rollup.SavingsOpportunity("CLUSTERING", "D.S.B", 5.0, 0.6)])
     assert other.total_monthly_usd == 13.0 and not other.dropped
-    assert "unread_maintenance_opportunities(" not in read("app/ui/pages/cost_parts/optimize.py")  # #35 owns the headline
+    # #35: the headlines never build the lever themselves; its ONLY call site outside tests is the body of
+    # savings_rollup.unread_handoff (so only a CONFIRMED Storage & waste scan can put dollars in Addressable $/mo)
+    for rel in ("app/ui/pages/cost_parts/optimize.py", "app/ui/decision_studio.py"):
+        assert "unread_maintenance_opportunities(" not in read(rel), rel
+    calls = [(str(py.relative_to(ROOT)), src.count("unread_maintenance_opportunities("))
+             for py in sorted((ROOT / "app").rglob("*.py"))
+             if "unread_maintenance_opportunities(" in (src := py.read_text(encoding="utf-8")
+                                                        .replace("def unread_maintenance_opportunities(", ""))]
+    assert calls == [(str(Path("app/logic/savings_rollup.py")), 1)], calls
+    handoff_body = read("app/logic/savings_rollup.py").split("def unread_handoff(", 1)[1].split("\ndef ", 1)[0]
+    assert handoff_body.count("unread_maintenance_opportunities(verdicts)") == 1
+
+
+# --- #35: the UNREAD_MAINT lever's session handoff into Addressable $/mo (pure) ----------------------------
+
+_AS_OF = datetime(2026, 9, 30, 10, 0, 0)
+_WHERE = "Storage & waste"
+
+
+def _mix(rate: float = 2.0) -> pd.DataFrame:
+    """One object per verdict: an action (D.S.A), Keep, Check share consumers, No recent spend, Object gone and
+    Unconfirmed (no confirm row)."""
+    short = _short(D__S__A={"CLUSTERING_CREDITS": 9.0, "MAINT_CREDITS_30D": 4.0},
+                   D__S__K={"CLUSTERING_CREDITS": 9.0}, D__S__SH={"CLUSTERING_CREDITS": 9.0},
+                   D__S__OLD={"CLUSTERING_CREDITS": 9.0, "MAINT_CREDITS_30D": 0.0},
+                   D__S__GONE={"CLUSTERING_CREDITS": 9.0}, D__S__MISS={"CLUSTERING_CREDITS": 9.0})
+    reads = _reads(D__S__A={}, D__S__K={"READ_QUERIES": 1}, D__S__SH={"SHARED_DATABASE": True}, D__S__OLD={},
+                   D__S__GONE={"MATCHED_BY_ID": False})
+    return unread_maintenance_verdicts(short, reads, rate=rate)
+
+
+def _hand(verdicts=None, status="confirmed", **kw) -> dict:
+    kw.setdefault("company", "ALFA")
+    kw.setdefault("database", "")
+    kw.setdefault("scope", "S")
+    kw.setdefault("as_of", _AS_OF)
+    return savings_rollup.unread_handoff(verdicts, status=status, **kw)
+
+
+def _lever(handoff, *, company="ALFA", scope="S", age_sec=60.0, where=_WHERE):
+    return savings_rollup.unread_lever(handoff, company=company, scope=scope,
+                                       now=_AS_OF + timedelta(seconds=age_sec), where=where)
+
+
+def test_handoff_carries_only_confirmed_action_rows():
+    verdicts = _mix()
+    assert set(verdicts["VERDICT"]) == {"Suspend clustering", "Keep", "Check share consumers", "No recent spend",
+                                        "Object gone", "Unconfirmed"}
+    h = _hand(verdicts)
+    assert h["status"] == "confirmed" and h["rows"] == [["D.S.A", 8.0, 0.6]] and h["booked_excluded"] == 0
+    assert _hand(verdicts, status=savings_rollup.UNREAD_CONFIRM_FAILED)["rows"] == []
+    for status in (savings_rollup.UNREAD_CLEAN, savings_rollup.UNREAD_SHORTLIST_FAILED, "bogus"):
+        assert _hand(verdicts, status=status)["rows"] == [], status
+    # a mart-only $ can never pass: without the confirm every row is Unconfirmed, even if labelled confirmed
+    unconfirmed = unread_maintenance_verdicts(_short(D__S__A={"CLUSTERING_CREDITS": 9.0, "MAINT_CREDITS_30D": 4.0}),
+                                              None, rate=2.0)
+    h = _hand(unconfirmed)
+    assert h["rows"] == [] and h["status"] == "confirmed"
+    assert h["company"] == "ALFA" and h["database"] == "" and h["scope"] == "S"
+    assert h["as_of"] == "2026-09-30T10:00:00"
+    assert _hand(None, company="  alfa ", database=" db1 ")["company"] == "ALFA"
+    assert _hand(None, company="", database=" db1 ")["company"] == "ALL"
+    assert _hand(None, database=" db1 ")["database"] == "DB1"
+
+
+def test_handoff_round_trips_to_the_registered_generator():
+    short = _short(D__S__A={"CLUSTERING_CREDITS": 9.0, "MAINT_CREDITS_30D": 4.0},
+                   D__S__B={"SEARCH_OPT_CREDITS": 9.0, "MAINT_CREDITS_30D": 1.25},
+                   D__S__K={"CLUSTERING_CREDITS": 9.0})
+    verdicts = unread_maintenance_verdicts(short, _reads(D__S__A={}, D__S__B={}, D__S__K={"READ_QUERIES": 2}),
+                                           rate=3.0)
+    lever = _lever(_hand(verdicts))
+    assert lever.included and lever.reason == "" and lever.note == ""
+    assert lever.opportunities == tuple(savings_rollup.unread_maintenance_opportunities(verdicts))
+    assert [o.target for o in lever.opportunities] == ["D.S.A", "D.S.B"]
+
+
+def test_handoff_is_session_safe():
+    import json
+    for status in ("confirmed", "clean", "confirm_failed", "shortlist_failed"):
+        h = _hand(_mix(), status=status, checked=50, truncated=True, booked=frozenset({"X"}))
+        assert json.loads(json.dumps(h)) == h, status                   # primitives only
+        assert all(isinstance(v, (str, int, float, bool, list)) for v in h.values())
+    assert _hand(_mix(), booked=None)["status"] == "ledger_failed"
+    assert json.dumps(_hand(_mix(), booked=None))
+
+
+def test_handoff_leaves_out_booked_objects_and_needs_the_ledger():
+    h = _hand(_mix(), booked=frozenset({"D.S.A"}))
+    assert h["rows"] == [] and h["booked_excluded"] == 1 and h["status"] == "confirmed"
+    h = _hand(_mix(), booked=frozenset({"D.S.OTHER"}))
+    assert h["rows"] == [["D.S.A", 8.0, 0.6]] and h["booked_excluded"] == 0
+    # the ledger read failed: with rows to count nothing is counted (never a possible double count)
+    failed = _hand(_mix(), booked=None)
+    assert failed["status"] == "ledger_failed" and failed["rows"] == [] and failed["booked_excluded"] == 0
+    # ... but with nothing to count there is nothing to leave out, so the scan still counts ($0)
+    assert _hand(_mix(), status=savings_rollup.UNREAD_CONFIRM_FAILED, booked=None)["status"] == "confirm_failed"
+    assert _hand(None, booked=None)["status"] == "confirmed"
+
+
+def test_booked_objects_matches_the_booking_dedupe():
+    import sqlite3
+
+    from app.logic.unread_maintenance import booked_objects, object_key
+    ledger = pd.DataFrame([
+        {"TARGET_OBJECT": "DB.S.A", "FINDING_TYPE": "SUSPEND_RECLUSTER", "STATE": "ESTIMATED"},
+        {"TARGET_OBJECT": "DB.S.V", "FINDING_TYPE": "DROP_SEARCH_OPTIMIZATION", "STATE": "VERIFIED"},
+        {"TARGET_OBJECT": "DB.S.R", "FINDING_TYPE": "DROP_SEARCH_OPTIMIZATION", "STATE": "REJECTED"},
+        {"TARGET_OBJECT": "DB.S.N", "FINDING_TYPE": "SUSPEND_MV_REFRESH", "STATE": None},
+        {"TARGET_OBJECT": "DB.S.W", "FINDING_TYPE": "AUTO_SUSPEND", "STATE": "ESTIMATED"},
+        {"TARGET_OBJECT": '"db"."s"."q"', "FINDING_TYPE": " suspend_mv_refresh ", "STATE": " verified "},
+        {"TARGET_OBJECT": None, "FINDING_TYPE": "SUSPEND_RECLUSTER", "STATE": "ESTIMATED"},
+    ])
+    assert booked_objects(ledger) == frozenset({"DB.S.A", "DB.S.V", "DB.S.Q"})
+    assert object_key('"db"."s"."q"') == "DB.S.Q" and object_key(None) == "" and object_key(float("nan")) == ""
+    assert booked_objects(pd.DataFrame()) == frozenset()
+    assert booked_objects(None) is None and booked_objects("x") is None       # type: ignore[arg-type]
+    assert booked_objects(ledger.drop(columns="STATE")) is None
+    assert booked_objects(pd.DataFrame({"TARGET_OBJECT": ["DB.S.A"], "FINDING_TYPE": [pd.NA],
+                                        "STATE": ["ESTIMATED"]})) == frozenset()
+    # the SAME predicate the Book button refuses on, EXECUTED: every plain-name object booked_objects calls booked
+    # gets no second row, every other one does (REJECTED, a NULL state, another finding type)
+    proof = cost_sql.unread_maintenance_proof("DB.S.A", date(2026, 9, 1), 10.0)
+    assert "STATE <> 'REJECTED'" in book_estimated_sql(_action_row(), proof_sql=proof)
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE SAVINGS_LEDGER (DESCRIPTION TEXT, STATE TEXT, ESTIMATED_USD REAL, PROOF_SQL TEXT, "
+                "NOTES TEXT, FINDING_TYPE TEXT, TARGET_OBJECT TEXT)")
+    plain = ledger[ledger["TARGET_OBJECT"].isin(["DB.S.A", "DB.S.V", "DB.S.R", "DB.S.N", "DB.S.W"])]
+    con.executemany("INSERT INTO SAVINGS_LEDGER (STATE, FINDING_TYPE, TARGET_OBJECT) VALUES (?, ?, ?)",
+                    plain[["STATE", "FINDING_TYPE", "TARGET_OBJECT"]].itertuples(index=False, name=None))
+    booked = booked_objects(plain)
+    for fqn in ("DB.S.A", "DB.S.V", "DB.S.R", "DB.S.N", "DB.S.W"):
+        before = con.execute("SELECT COUNT(*) FROM SAVINGS_LEDGER WHERE TARGET_OBJECT = ?", (fqn,)).fetchone()[0]
+        row = {**_action_row(), "OBJECT_FQN": fqn}
+        con.execute(book_estimated_sql(row, proof_sql=proof).replace("DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER",
+                                                                      "SAVINGS_LEDGER"))
+        after = con.execute("SELECT COUNT(*) FROM SAVINGS_LEDGER WHERE TARGET_OBJECT = ?", (fqn,)).fetchone()[0]
+        assert (after == before) == (fqn in booked), fqn
+
+
+_R = {
+    "not_run": "not checked this session: run the unread-maintenance scan in Storage & waste",
+    "company": "last checked for ALFA, not TRXS: re-run the scan in Storage & waste",
+    "database": "last checked for database DB1 only: clear the Database filter and re-run the scan in Storage & waste",
+    "stale": ("the last check was shown over 1h ago, or cached data was refreshed since: re-run the scan in "
+              "Storage & waste"),
+    "shortlist": "the object-cost ledger could not be read in Storage & waste",
+    "confirm": "the access-history check failed, so no object is confirmed unread",
+    "ledger": "the Savings ledger could not be read, so objects already booked there could not be left out",
+}
+
+
+@pytest.mark.parametrize(("handoff", "kwargs", "reason"), [
+    (None, {}, "not_run"),
+    ("not a mapping", {}, "not_run"),
+    ({"status": "bogus"}, {}, "not_run"),
+    ({"status": ["confirmed"]}, {}, "not_run"),
+    ("confirmed", {"company": "trxs"}, "company"),
+    ({"database": "db1"}, {}, "database"),
+    ("confirmed", {"scope": "S2"}, "stale"),
+    ("confirmed", {"age_sec": 3601}, "stale"),
+    ({"as_of": "not a timestamp"}, {}, "stale"),
+    ({"as_of": "2026-09-30T10:00:00+00:00"}, {}, "stale"),                       # tz-mismatched -> never fresh
+    ({"status": "shortlist_failed"}, {}, "shortlist"),
+    ({"status": "confirm_failed"}, {}, "confirm"),
+    ({"status": "ledger_failed"}, {}, "ledger"),
+])
+def test_unread_lever_absent_reasons(handoff, kwargs, reason):
+    base = _hand(_mix())
+    h = {**base, **handoff} if isinstance(handoff, dict) else (base if handoff == "confirmed" else handoff)
+    lever = _lever(h, **kwargs)
+    assert lever.included is False and lever.opportunities == () and lever.note == ""
+    assert lever.reason == _R[reason]
+
+
+def test_unread_lever_included_states_and_notes():
+    clean = _lever(_hand(None, status=savings_rollup.UNREAD_CLEAN))
+    assert clean.included and clean.opportunities == () and clean.reason == "" and clean.note == ""
+    zero = _lever(_hand(_mix(), booked=frozenset({"D.S.A"}), checked=50, truncated=True))
+    assert zero.included and zero.opportunities == ()                          # counted, at $0
+    assert zero.note == ("only the top 50 shortlisted objects were checked, so this is a floor; 1 already booked "
+                         "on the Savings ledger left out")
+    one = _lever(_hand(_mix(), checked=1234, truncated=True))
+    assert one.note == "only the top 1,234 shortlisted objects were checked, so this is a floor"
+    assert [(o.source, o.target, o.monthly_usd, o.confidence) for o in one.opportunities] == [
+        ("UNREAD_MAINT", "D.S.A", 8.0, 0.6)]
+    # malformed rows are skipped, never raised on
+    odd = _lever({**_hand(_mix()), "rows": [["X", 5.0], "bad", ["Y", -1, 0.6], ["Z", "7.5", "0.6"], ["", 3, 0.6],
+                                            [None, 2, 0.6], None]})
+    assert [(o.target, o.monthly_usd, o.confidence) for o in odd.opportunities] == [("Z", 7.5, 0.6)]
+    assert _lever({**_hand(_mix()), "rows": "nope"}).opportunities == ()
+
+
+def test_unread_lever_age_boundary_and_scope():
+    h = _hand(_mix())
+    assert _lever(h, age_sec=3600).included and not _lever(h, age_sec=3601).included
+    assert _lever(h, age_sec=-5).included                                      # a clock wobble is not stale
+    assert _lever(_hand(_mix(), company="alfa"), company="ALFA").included
+    assert _lever(_hand(_mix(), company="ALFA"), company=" alfa ").included
+    assert _lever(_hand(_mix(), company=""), company="ALL").included
+    assert _lever(_hand(_mix(), company="ALL"), company="").included
+    assert not _lever(_hand(_mix(), company="ALL"), company="ALFA").included
+    assert _lever(h, where="Cost ▸ Optimization & Savings ▸ Storage & waste", scope="other").reason.endswith(
+        "re-run the scan in Cost ▸ Optimization & Savings ▸ Storage & waste")
+
+
+def test_handoff_max_age_is_the_historical_cache_ttl():
+    from app.core.query import CACHE_TTLS
+    from app.logic.formulas import humanize_duration
+    assert savings_rollup.UNREAD_HANDOFF_MAX_AGE_SEC == CACHE_TTLS["historical"] == 3600
+    assert humanize_duration(savings_rollup.UNREAD_HANDOFF_MAX_AGE_SEC) == "1h"
+    assert savings_rollup.UNREAD_HANDOFF_KEY == "_ow_unread_maint_handoff"
+    assert not savings_rollup.UNREAD_HANDOFF_KEY.startswith(("flt_", "cost_", "opt_"))   # never a widget key
+
+
+def test_lever_basis_and_short_wording():
+    basis = savings_rollup.lever_basis(
+        ["IDLE", "UNREAD_MAINT"], {"RESIZE": "turn on 'Load right-sizing profile (heavy scan)' above"},
+        {"UNREAD_MAINT": "only the top 50 shortlisted objects were checked, so this is a floor"})
+    assert basis == ("Levers counted: idle timer + unread maintenance (only the top 50 shortlisted objects were "
+                     "checked, so this is a floor). Not counted: right-sizing (turn on 'Load right-sizing profile "
+                     "(heavy scan)' above).")
+    assert savings_rollup.lever_basis([], {}) == "Levers counted: none."
+    assert savings_rollup.lever_basis(["IDLE"], {}, {"UNREAD_MAINT": ""}) == "Levers counted: idle timer."
+    assert savings_rollup.lever_basis([], {"IDLE": "a", "UNREAD_MAINT": "b"}) == (
+        "Levers counted: none. Not counted: idle timer (a); unread maintenance (b).")
+    assert savings_rollup.lever_short(["IDLE"]) == "idle-timer only"
+    assert savings_rollup.lever_short([]) == "no lever counted"
+    assert savings_rollup.lever_short(["IDLE", "RESIZE"]) == "idle timer + right-sizing"
+    assert savings_rollup.lever_short(["IDLE", "RESIZE", "UNREAD_MAINT"]) == (
+        "idle timer + right-sizing + unread maintenance")
+
+
+def test_handoff_note_wording():
+    note = savings_rollup.unread_handoff_note
+    for silent in (None, "x", _hand(None, status="clean"), _hand(_mix(), status="shortlist_failed"),
+                   _hand(_mix(), booked=None), {"status": "bogus"}):
+        assert note(silent) == "", silent
+    assert note(_hand(_mix(), database="db1")) == (
+        "Not added to Addressable $/mo: this scan is narrowed to database DB1. Clear the Database filter and re-run "
+        "it to count confirmed objects in Idle & sizing and on Proof ▸ Pipeline.")
+    assert note(_hand(_mix(), status="confirm_failed", database="db1")).startswith(
+        "Not added to Addressable $/mo: this scan is narrowed to database DB1.")
+    assert note(_hand(_mix(), status="confirm_failed")) == (
+        "Not added to Addressable $/mo: no object is confirmed unread.")
+    assert note(_hand(None)) == "No confirmed-unread object to add to Addressable $/mo."
+    assert note(_hand(_mix(), booked=frozenset({"D.S.A"}))) == (
+        "No confirmed-unread object to add to Addressable $/mo: the 1 confirmed are already booked on the Savings "
+        "ledger.")
+    assert note(_hand(_mix())) == (
+        "1 confirmed-unread object(s) join Addressable $/mo in Idle & sizing and on Proof ▸ Pipeline for this "
+        "Company. They drop out when cached data is refreshed, or 1h after this panel was last shown.")
+    short = _short(D__S__A={"CLUSTERING_CREDITS": 9.0, "MAINT_CREDITS_30D": 4.0},
+                   D__S__B={"CLUSTERING_CREDITS": 9.0, "MAINT_CREDITS_30D": 2.0})
+    two = unread_maintenance_verdicts(short, _reads(D__S__A={}, D__S__B={}), rate=1.0)
+    assert note(_hand(two, checked=50, truncated=True, booked=frozenset({"D.S.B"}))) == (
+        "1 confirmed-unread object(s) join Addressable $/mo in Idle & sizing and on Proof ▸ Pipeline for this "
+        "Company (a floor: only the top 50 shortlisted objects were checked). 1 already booked on the Savings "
+        "ledger are left out. They drop out when cached data is refreshed, or 1h after this panel was last shown.")
+    assert savings_rollup.S_LEDGER_UNAVAILABLE == (
+        "The Savings ledger could not be read, so confirmed objects are not added to Addressable $/mo (objects "
+        "already booked could not be left out).")
+
+
+def test_savings_rollup_stays_pure():
+    import ast
+    for rel in ("app/logic/savings_rollup.py", "app/logic/unread_maintenance.py"):
+        src = read(rel)
+        mods = set()
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.Import):
+                mods |= {a.name for a in node.names}
+            elif isinstance(node, ast.ImportFrom):
+                mods.add(node.module or "")
+        assert not [m for m in mods if m == "streamlit" or m.startswith(("streamlit.", "app.data", "app.ui"))], rel
+        assert "account_now(" not in src and "datetime.now(" not in src and "date.today(" not in src, rel
 
 
 # --- the Storage & waste wiring (source) ------------------------------------------------------------------
@@ -482,6 +758,70 @@ def test_optimize_wiring_source():
     assert "capture them first with DESCRIBE SEARCH OPTIMIZATION" in _joined(branch)
     assert "st.warning(f\"The object ledger's newest day is" in branch
     assert "A fixed 90-day window: the window picker does not narrow it." in branch
+
+
+def test_storage_and_waste_publishes_the_handoff_source():
+    """#35 (the floor leg skips the shaped twin): Storage & waste is the ONLY writer of the handoff, only inside the
+    scan toggle, once per outcome (clean / confirmed-or-confirm-failed / shortlist failed); a booking leaves the
+    object out in the same run; the booked-objects read is gated and never clears the handoff."""
+    opt = read("app/ui/pages/cost_parts/optimize.py")
+    branch = _storage_branch()
+    write = "st.session_state[UNREAD_HANDOFF_KEY] = unread_handoff("
+    assert branch.count(write) == 3 and opt.count(write) == 3
+    assert "status=UNREAD_CONFIRMED if _conf.ok else UNREAD_CONFIRM_FAILED" in branch
+    assert "status=UNREAD_CLEAN" in branch and "status=UNREAD_SHORTLIST_FAILED" in branch
+    toggle = branch.index('key="cost_unread_maint_toggle"')
+    writes = [m.start() for m in re.finditer(re.escape(write), branch)]
+    assert all(toggle < w for w in writes)
+    clean_at = branch.index("status=UNREAD_CLEAN")
+    assert branch.index("if _um.ok and _um.empty:") < clean_at < branch.index('elif guard(_um, ""):')
+    confirmed_at = branch.index("status=UNREAD_CONFIRMED if _conf.ok else UNREAD_CONFIRM_FAILED")
+    assert branch.index("stamp_write(_bk_key, ok)") < confirmed_at            # after any booking this run
+    assert branch.index("A fixed 90-day window") < confirmed_at < branch.index("result_caption(_um)\n"
+                                                                                "                result_caption(_conf)")
+    tail = branch.split("result_caption(_conf)\n", 1)[1]
+    assert tail.lstrip().startswith("else:") and "status=UNREAD_SHORTLIST_FAILED" in tail
+    # a booking leaves the headline in the same run (notify() does not rerun)
+    book = branch.split("stamp_write(_bk_key, ok)  # C48\n", 1)[1]
+    assert book.lstrip().startswith("if ok and _booked is not None:\n")
+    assert "_booked = _booked | {object_key(_fqn)}" in book.split("notify(", 1)[0]
+    # the booked-objects read: only with a confirmed action row and no Database filter, Proof's SQL + tier
+    gate = 'if _conf.ok and not _ua.empty and not str(_oc_db or "").strip():'
+    assert branch.count(gate) == 1
+    led = branch.split(gate, 1)[1].split("_cap = f", 1)[0]
+    assert 'run(mart_sql.savings_ledger(limit=None), page=_PAGE, key="booked_unread_ledger",' in led
+    assert 'tier="recent"' in led and "probe=True" not in led
+    assert "unread_maint_" not in "booked_unread_ledger"                  # toggle_cost_hint keys on that prefix
+    assert "booked_objects(_led.df) if _led.ok and not _led.truncated else None" in led
+    assert branch.index('_booked: frozenset[str] | None = frozenset()') < branch.index(gate)
+    assert "unread_handoff_note(st.session_state[UNREAD_HANDOFF_KEY])" in branch
+    assert 'empty_state("unavailable", md_dollars(S_LEDGER_UNAVAILABLE), detail=_led_err)' in branch
+    # never cleared (the toggle resets on every revisit), never built here, and no new ACCOUNT_USAGE read
+    assert "pop(UNREAD_HANDOFF_KEY" not in opt and "del st.session_state[UNREAD_HANDOFF_KEY]" not in opt
+    assert opt.count("ACCOUNT_USAGE") == 5
+    ds = read("app/ui/decision_studio.py")
+    assert "UNREAD_HANDOFF_KEY] =" not in ds and "unread_handoff(" not in ds
+
+
+def test_idle_and_sizing_headline_reads_only_the_handoff_source():
+    opt = read("app/ui/pages/cost_parts/optimize.py")
+    idle = opt.split('if opt_section == "Idle & sizing":', 1)[1].split('elif opt_section == "Queries & patterns":', 1)[0]
+    call = ("_unread = unread_lever(st.session_state.get(UNREAD_HANDOFF_KEY), company=company, scope=cache_scope(),\n"
+            '                               now=account_now(), where="Storage & waste")')
+    assert idle.count(call) == 1
+    assert idle.index(call) < idle.index("_savings_opps.extend(_unread.opportunities)") < idle.index(
+        "_roll = rollup_savings(_savings_opps)")
+    for read_call in ("maintenance_on_unread(", "object_reads_confirm(", "savings_ledger(", "unread_handoff("):
+        assert read_call not in idle, read_call                                    # zero reads here
+    assert "lever_basis(_counted, _absent, {\"UNREAD_MAINT\": _unread.note})" in idle
+    assert "st.caption(md_dollars(_basis))" in idle
+    assert 'st.caption(md_dollars("No open opportunities from the levers counted. " + _basis))' in idle
+    joined = _joined(opt)
+    assert "plug into the same rollup next" not in joined
+    assert ("Also not in this total: the failed-query **Wasted spend** board (Operations), the **Serverless ROI** "
+            "panel above, and the storage-waste and automatic-clustering panels in Storage & waste.") in joined
+    assert "or stopping maintenance on an unread object" in joined
+    assert ("an object you stopped without booking keeps counting until those 30 days roll off.") in joined
 
 
 def test_status_chips_cover_every_verdict():

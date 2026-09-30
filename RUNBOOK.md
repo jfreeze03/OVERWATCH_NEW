@@ -433,8 +433,10 @@ can open it, including EXECUTIVE. Old Decision Studio links, saved views and
     unchanged; the split is disclosed beside it.
 - **Pipeline** — what is ahead:
   - Addressable $/mo (the Cost ▸ Optimization & Savings idle-timer rollup,
-    optional right-sizing) plus queued Action Center work normalized to
-    monthly, de-duplicated by entity.
+    optional right-sizing, and unread maintenance confirmed in Storage & waste
+    this session) plus queued Action Center work normalized to monthly,
+    de-duplicated by entity. A caption names the levers counted and why any
+    is missing.
   - A projection whose sliders default to MEASURED adoption and realization
     ("Reset to measured"). It runs in a fragment, so slider moves cost no
     reads. Verified savings never enter it.

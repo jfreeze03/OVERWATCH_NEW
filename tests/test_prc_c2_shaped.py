@@ -308,3 +308,159 @@ def test_a_failed_confirm_is_worded_by_kind_and_latched(monkeypatch):
     retry[0].click()
     at.run()
     assert not at.exception and len(confirms) == 2                    # the retry ran it again
+
+
+# --- #35: confirmed unread maintenance joins Addressable $/mo (Idle & sizing, Proof ▸ Pipeline) -------------
+
+_LEDGER = pd.DataFrame(columns=["TARGET_OBJECT", "FINDING_TYPE", "STATE"])     # nothing booked yet
+_UNREAD_FRAMES = {"MAINT_CREDITS_30D": _SHORT, "OBJECTS_MODIFIED": _READS, "REMEASURED_14D_MONTHLY_USD": _LEDGER}
+
+
+def _frames(at) -> list[pd.DataFrame]:
+    out = []
+    for d in at.dataframe:
+        v = d.value
+        out.append(v.data if hasattr(v, "data") and not isinstance(v, pd.DataFrame) else v)
+    return [f for f in out if isinstance(f, pd.DataFrame)]
+
+
+def _addressable_rows(at) -> pd.DataFrame:
+    for f in _frames(at):
+        if {"Source", "Warehouse / target"} <= set(f.columns):
+            return f
+    return pd.DataFrame(columns=["Source", "Warehouse / target"])
+
+
+def _idle_and_sizing(at, sqls: list[str]) -> list[str]:
+    """Switch Cost ▸ Optimize to Idle & sizing and rerun; returns the SQL issued on that run."""
+    before = len(sqls)
+    at.session_state["opt_section"] = "Idle & sizing"
+    at.run()
+    assert not at.exception, f"idle & sizing (shaped): {at.exception}"
+    assert not any("could not finish rendering" in str(getattr(e, "value", "")) for e in at.error)
+    return sqls[before:]
+
+
+@_SKIP
+def test_confirmed_unread_joins_the_addressable_headline(monkeypatch):
+    from app.logic.savings_rollup import UNREAD_HANDOFF_KEY
+    sqls, _ = _recording(monkeypatch, frames=_UNREAD_FRAMES)
+    at = _storage({"cost_unread_maint_toggle": True})
+    assert "1 confirmed-unread object(s) join Addressable" in _texts(at)
+    assert at.session_state[UNREAD_HANDOFF_KEY]["rows"] == [["DB.S.T1", 36.8, 0.6]]   # 10 credits x the $3.68 rate
+    issued = _idle_and_sizing(at, sqls)
+    blob = _texts(at)
+    assert "Levers counted: idle timer" in blob and "unread maintenance" in blob
+    assert "Not counted: right-sizing (turn on 'Load right-sizing profile (heavy scan)' above)" in blob
+    rows = _addressable_rows(at)
+    hit = rows[rows["Warehouse / target"] == "DB.S.T1"]
+    assert list(hit["Source"]) == ["UNREAD_MAINT"] and list(hit["Effort"]) == ["LOW"]
+    # the headline read nothing new: no shortlist, no confirm, no ledger read on that run
+    assert not [s for s in issued if "MAINT_CREDITS_30D" in s or "OBJECTS_MODIFIED" in s
+                or "REMEASURED_14D_MONTHLY_USD" in s]
+
+
+@_SKIP
+def test_a_failed_confirm_keeps_unread_out_of_the_headline(monkeypatch):
+    from app.ui.pages.cost_parts import optimize
+    sqls: list[str] = []
+
+    def _run(sql, **kwargs):
+        sqls.append(sql)
+        if "OBJECTS_MODIFIED" in sql:
+            return QueryResult(df=pd.DataFrame(), ok=False, error_kind="timeout", source="stub",
+                               error="Statement reached its statement or warehouse timeout of 180 second(s).")
+        if "MAINT_CREDITS_30D" in sql:
+            return QueryResult(df=_SHORT, ok=True, source="stub")
+        return _shaped_run(sql, **kwargs)
+
+    monkeypatch.setattr(optimize, "run", _run)
+    at = _storage({"cost_unread_maint_toggle": True})
+    assert "no object is confirmed unread" in _texts(at)
+    assert not [s for s in sqls if "REMEASURED_14D_MONTHLY_USD" in s]       # nothing to count: no ledger read
+    _idle_and_sizing(at, sqls)
+    assert "unread maintenance (the access-history check failed, so no object is confirmed unread)" in _texts(at)
+    rows = _addressable_rows(at)
+    assert "DB.S.T1" not in list(rows["Warehouse / target"])
+
+
+@_SKIP
+def test_a_failed_ledger_read_keeps_unread_out_and_says_so(monkeypatch):
+    from app.ui.pages.cost_parts import optimize
+    sqls: list[str] = []
+
+    def _run(sql, **kwargs):
+        sqls.append(sql)
+        if "REMEASURED_14D_MONTHLY_USD" in sql:
+            return QueryResult(df=pd.DataFrame(), ok=False, error="SAVINGS_LEDGER read failed", source="stub")
+        for marker, df in (("MAINT_CREDITS_30D", _SHORT), ("OBJECTS_MODIFIED", _READS)):
+            if marker in sql:
+                return QueryResult(df=df, ok=True, source="stub")
+        return _shaped_run(sql, **kwargs)
+
+    monkeypatch.setattr(optimize, "run", _run)
+    at = _storage({"cost_unread_maint_toggle": True})
+    assert any("Savings ledger could not be read" in str(e.value) for e in at.error)     # unavailable, never clean
+    _idle_and_sizing(at, sqls)
+    blob = _texts(at)
+    assert "unread maintenance (the Savings ledger could not be read" in blob
+    assert "DB.S.T1" not in list(_addressable_rows(at)["Warehouse / target"])
+
+
+@_SKIP
+def test_a_booked_object_leaves_the_addressable_headline(monkeypatch):
+    from app.logic.savings_rollup import UNREAD_HANDOFF_KEY
+    sqls, writes = _recording(monkeypatch, frames=_UNREAD_FRAMES)
+    at = _storage({"cost_unread_maint_toggle": True, "unread_maint_sel_last": "DB.S.T1",
+                   "_ow_current_role": "SNOW_SYSADMINS"})
+    assert at.session_state[UNREAD_HANDOFF_KEY]["rows"]                  # counted before the booking
+    book = [b for b in at.button if str(b.label) == "Book estimated saving"]
+    assert book, [str(b.label) for b in at.button]
+    book[0].click()
+    at.run()
+    assert not at.exception, f"booking (shaped): {at.exception}"
+    assert len(writes) == 1
+    handoff = at.session_state[UNREAD_HANDOFF_KEY]
+    assert handoff["rows"] == [] and handoff["booked_excluded"] == 1   # left out in the same run
+    _idle_and_sizing(at, sqls)
+    assert "DB.S.T1" not in list(_addressable_rows(at)["Warehouse / target"])
+    assert "1 already booked on the Savings ledger left out" in _texts(at)
+
+
+@_SKIP
+def test_proof_pipeline_counts_the_session_confirmed_unread(monkeypatch):
+    _recording(monkeypatch, frames=_UNREAD_FRAMES)
+    at = _storage({"cost_unread_maint_toggle": True})
+    _nav_to(at, "Proof")
+    at.session_state["decision_section"] = "Pipeline"
+    at.run()
+    assert not at.exception, f"proof pipeline (shaped): {at.exception}"
+    assert not any("could not finish rendering" in str(getattr(e, "value", "")) for e in at.error)
+    captions = " ".join(str(c.value) for c in at.caption)
+    assert "Levers counted: idle timer + unread maintenance." in captions
+    assert "proof_link_unread" not in [str(b.key) for b in at.button]     # counted: no doorway
+    pipe = [f for f in _frames(at) if {"SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY"} <= set(f.columns)]
+    assert pipe, "the pipeline table did not render"
+    hit = pipe[0][pipe[0]["SOURCE_ENTITY_KEY"] == "DB.S.T1"]
+    assert list(hit["SOURCE_ENTITY_TYPE"]) == ["OBJECT"]
+    assert list(hit["TITLE"]) == ["Stop maintenance on unread DB.S.T1"]
+
+
+@_SKIP
+def test_proof_pipeline_without_a_scan_offers_the_doorway():
+    at = AppTest.from_function(_entry, default_timeout=30)
+    at.run()
+    assert not at.exception
+    _nav_to(at, "Proof")
+    at.session_state["decision_section"] = "Pipeline"
+    at.run()
+    assert not at.exception, f"proof pipeline (shaped): {at.exception}"
+    captions = " ".join(str(c.value) for c in at.caption)
+    assert ("unread maintenance (not checked this session: run the unread-maintenance scan in Cost ▸ "
+            "Optimization & Savings ▸ Storage & waste)") in captions
+    door = [b for b in at.button if str(b.key) == "proof_link_unread"]
+    assert door and str(door[0].label).startswith("Check unread maintenance")
+    door[0].click()
+    at.run()
+    assert not at.exception, f"doorway (shaped): {at.exception}"
+    assert at.session_state["opt_section"] == "Storage & waste"

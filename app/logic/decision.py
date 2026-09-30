@@ -202,7 +202,11 @@ def monthly_equivalent(frame: pd.DataFrame | None) -> tuple[pd.DataFrame, dict]:
     return out, summary
 
 
-_ADDRESSABLE_TITLE = {"IDLE": "Tighten auto-suspend on {target}", "RESIZE": "Right-size {target}"}
+_ADDRESSABLE_TITLE = {"IDLE": "Tighten auto-suspend on {target}", "RESIZE": "Right-size {target}",
+                      "UNREAD_MAINT": "Stop maintenance on unread {target}"}
+# Next-Fifty #35: an unread-maintenance row targets an object FQN (the Entity 360 OBJECT type Storage & waste
+# drills to), so it de-duplicates against a queued OBJECT:<fqn> action and never against a warehouse.
+_ADDRESSABLE_ENTITY = {"UNREAD_MAINT": "OBJECT"}
 
 
 def pipeline_frame(rollup_items: Iterable[SavingsOpportunity] | None,
@@ -211,13 +215,13 @@ def pipeline_frame(rollup_items: Iterable[SavingsOpportunity] | None,
     Optimize addressable rollup (savings_rollup.rollup_savings(...).items) UNION the queued ACTION_QUEUE
     rows, both on a monthly basis.
 
-    Addressable rows are synthetic: KIND "Addressable", SOURCE_ENTITY_TYPE 'WAREHOUSE' + KEY = the
-    target, STATUS OPEN, CONFIDENCE = the opportunity's 0..1 weight, ESTIMATED_USD = MONTHLY_USD = its
-    $/mo, PERIOD MONTHLY. Queued rows (KIND "Queued") carry MONTHLY_USD (monthly_equivalent) AS
-    ESTIMATED_USD — one-time / unspecified / unpriced rows project $0 — with the authored figure kept in
-    AUTHORED_USD. scenario_projection then de-duplicates by entity (largest estimate wins), so a queued
-    action on the same warehouse as an addressable opportunity is counted once. Verified savings never
-    enter this frame."""
+    Addressable rows are synthetic: KIND "Addressable", SOURCE_ENTITY_TYPE WAREHOUSE (OBJECT for
+    UNREAD_MAINT) + KEY = the target, STATUS OPEN, CONFIDENCE = the opportunity's 0..1 weight,
+    ESTIMATED_USD = MONTHLY_USD = its $/mo, PERIOD MONTHLY. Queued rows (KIND "Queued") carry
+    MONTHLY_USD (monthly_equivalent) AS ESTIMATED_USD — one-time / unspecified / unpriced rows project
+    $0 — with the authored figure kept in AUTHORED_USD. scenario_projection then de-duplicates by entity (largest estimate wins), so a queued
+    action on the same warehouse (or object) as an addressable opportunity is counted once.
+    Verified savings never enter this frame."""
     rows = []
     for opp in rollup_items or ():
         source = str(opp.source).upper()
@@ -229,7 +233,7 @@ def pipeline_frame(rollup_items: Iterable[SavingsOpportunity] | None,
             "SEVERITY": None,
             "TITLE": _ADDRESSABLE_TITLE.get(source, source.title() + " on {target}").format(target=target),
             "SOURCE": f"Cost ▸ Optimization & Savings ({source})",
-            "SOURCE_ENTITY_TYPE": "WAREHOUSE",
+            "SOURCE_ENTITY_TYPE": _ADDRESSABLE_ENTITY.get(source, "WAREHOUSE"),
             "SOURCE_ENTITY_KEY": target,
             "STATUS": "OPEN",
             "CONFIDENCE": max(0.0, min(safe_float(opp.confidence), 1.0)),
