@@ -548,8 +548,19 @@ warehouses that legitimately run long; each ALTER's undo is a comment. The
 alert drawer's closed-loop "Statement timeout 1h" only ever tightens: it
 re-reads the warehouse value on a 30-second tier before it generates the
 ALTER, and when the warehouse is already capped at 1h or tighter it shows a
-note, not SQL. A manual savings verify is not prefilled when other booked
-changes share the measured window; split the measured change by hand.
+note, not SQL. Since v4.603 it also reads what a 1h cap would have cancelled
+on that one warehouse in the last 30 days: when that is any completed
+statement (or the read failed, so it is unknown) the ALTER is withheld until
+you tick the override. Take that seriously on hour-plus ETL warehouses
+(WH_TRXS_TRANSFORM ran 27 such statements in 30 days, 2026-09-29). The
+posture table's "Fired at" is the ceiling a timeout cancel actually fired at;
+"below cap" means a user, session or client value fired, not the warehouse's
+cap. "Managed compute" rows (COMPUTE_SERVICE_WH*) are Snowflake's
+serverless-task and upgrade pools: nothing to grant or set there. In the
+Emergency lever, a warehouse timeout of 0 is Snowflake's 7-day maximum, not
+"no cap", and a lower session/account value still applies. A manual savings
+verify is not prefilled when other booked changes share the measured window;
+split the measured change by hand.
 
 Maintenance on objects nobody reads (v4.601, Cost → Optimization & Savings →
 Storage & waste): book the estimated saving only after the reviewed ALTER has

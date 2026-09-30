@@ -85,6 +85,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     # Next-Fifty #33: the statement-timeout runtime tail. Its two SHOW PARAMETERS twins are not
     # canaries (SHOW cannot be EXPLAINed).
     ("ops.warehouse_timeout_tail", lambda: ops_sql.warehouse_timeout_tail(1, "ALFA")),
+    # v4.603 (#33 D1): the alert drawer's one-warehouse impact read for the 'Statement timeout 1h' lever.
+    ("ops.warehouse_timeout_impact", lambda: ops_sql.warehouse_timeout_impact("WH_ALFA_ADMIN", 3600, 1)),
     ("ops.lock_contention", lambda: ops_sql.lock_contention(1)),
     ("security.users_without_mfa", lambda: security_sql.users_without_mfa("ALFA")),
     ("security.users_without_mfa_live", lambda: security_sql.users_without_mfa_live("ALFA")),

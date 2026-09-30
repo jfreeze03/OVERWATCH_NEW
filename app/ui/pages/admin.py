@@ -1170,9 +1170,11 @@ def _task_health_panel() -> None:
 
 # Next-Fifty #7 Slice B: the release from which the app sends per-statement parameters (Cortex's timeout).
 _STMT_PARAMS_SINCE = "v4.590.0"
-# #33: what actually sets the read ceiling. V002 sets STATEMENT_TIMEOUT_IN_SECONDS = 300 on the app
-# warehouse (V002__facts.sql CREATE + ALTER WAREHOUSE); Snowflake's own default, when neither the
-# warehouse nor the account sets it, is 172800 s (2 days) — 300 s was never "the default".
+# #33: what sets the read ceiling. V002 SET STATEMENT_TIMEOUT_IN_SECONDS = 300 on the app warehouse at
+# install (V002__facts.sql CREATE + ALTER WAREHOUSE); a DBA may have changed it since (v4.603: on this
+# account WH_ALFA_ADMIN's cancels fire at 1800 s, the value V139's header records), so the panel READS the
+# value in force and never states 300 s as current. Snowflake's own default, when neither the warehouse
+# nor the account sets it, is 172800 s (2 days) — 300 s was never "the default".
 _V002_APP_WH_TIMEOUT_S = 300
 _SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S = 172_800
 _SCAN_NOTE = ("First load scans ACCOUNT_USAGE directly (a few seconds on a cold "
@@ -1459,20 +1461,23 @@ def _observability_tab() -> None:
         st.rerun()
 
 
-def _performance_tab() -> None:
-    """Prove (or disprove) that the app is fast: its own statement stats."""
-    # R43: the app's per-tier ALTER SESSION timeouts (30/120/180s) are a no-op under
-    # owner's-rights SiS (core.session.apply_statement_timeout documents this) — the REAL
-    # ceiling every app READ runs against is the warehouse/account STATEMENT_TIMEOUT_IN_SECONDS.
-    # Next-Fifty #7 Slice B: Cortex evaluations also carry their own per-statement ceiling.
-    # Read + show it so the true wall is visible, not just described in a code comment.
+def _stmt_timeout_ceiling() -> None:
+    """Admin ▸ Performance: the statement-timeout ceiling the app's READS actually run against.
+
+    R43: the app's per-tier ALTER SESSION timeouts (30/120/180s) are a no-op under owner's-rights SiS
+    (core.session.apply_statement_timeout documents this) -- the REAL ceiling every app READ runs against is
+    the warehouse/account STATEMENT_TIMEOUT_IN_SECONDS. Next-Fifty #7 Slice B: Cortex evaluations also carry
+    their own per-statement ceiling. Read + show it so the true wall is visible, not just described in a code
+    comment. v4.603 (#33 D2): the value in force is READ (V002's 300 s is only the install-time value), and a
+    failed probe read renders 'unavailable' with its error, never a guess."""
     section_header("Production statement-timeout ceiling", "", "operations")
     panel_help(
         "The app's per-tier read timeouts (30/120/180s) do NOT apply on owner's-rights "
         "Streamlit-in-Snowflake — ALTER SESSION is rejected there, and they are deliberately not sent "
         "per statement until the read durations are measured. Reads are governed by "
-        f"STATEMENT_TIMEOUT_IN_SECONDS on {APP_WAREHOUSE}; V002 sets {humanize_duration(_V002_APP_WH_TIMEOUT_S, 's')} "
-        "there. Snowflake enforces the lower non-zero of the warehouse value and the session's (inherited "
+        f"STATEMENT_TIMEOUT_IN_SECONDS on {APP_WAREHOUSE}: V002 set "
+        f"{humanize_duration(_V002_APP_WH_TIMEOUT_S, 's')} at install; the value in force is read below. "
+        "Snowflake enforces the lower non-zero of the warehouse value and the session's (inherited "
         "from the user or account), so a lower account or user value also caps reads; with neither set "
         f"anywhere, Snowflake's own default of {humanize_duration(_SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S, 's')} "
         f"({_SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S} s) applies. Since "
@@ -1501,12 +1506,21 @@ def _performance_tab() -> None:
                               "of the app's per-tier values. Cortex evaluations are additionally "
                               "capped per statement."}])
         styled_table(_tdf)
+    elif not _to.ok:
+        # v4.603 (#33 D2, house rule 8): a failed probe read is 'unavailable' with its error, never a quiet
+        # caption, and never a guess at the value (V002's 5m is not what is in force on this account).
+        empty_state("unavailable", f"Could not read STATEMENT_TIMEOUT_IN_SECONDS on {APP_WAREHOUSE} (needs "
+                    "MONITOR/USAGE on the warehouse), so the ceiling in force is unknown.",
+                    detail=_to.error)
     else:
-        empty_state("no_data_yet", "Could not read the warehouse timeout parameter (needs "
-                    "MONITOR/USAGE on the warehouse). If V002 applied, "
-                    f"{humanize_duration(_V002_APP_WH_TIMEOUT_S, 's')} is set on {APP_WAREHOUSE}; "
-                    "otherwise the account value, or Snowflake's "
-                    f"{humanize_duration(_SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S, 's')} default, applies.")
+        # ok but no row: SHOW PARAMETERS ... LIKE should always return one, so this is only a quiet note.
+        empty_state("no_data_yet", f"SHOW PARAMETERS returned no STATEMENT_TIMEOUT_IN_SECONDS row for "
+                    f"{APP_WAREHOUSE}.")
+
+
+def _performance_tab() -> None:
+    """Prove (or disprove) that the app is fast: its own statement stats."""
+    _stmt_timeout_ceiling()
 
     section_header("Performance SLO scorecard (7d)", "", "operations")
     slo = run(

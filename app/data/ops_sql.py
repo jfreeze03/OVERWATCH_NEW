@@ -1171,13 +1171,22 @@ LIMIT 100
 """
 
 
+# A statement Snowflake cancelled for hitting a statement/warehouse timeout (error 000630's message token,
+# failure_advisor's): the count and the fired-ceiling parse in warehouse_timeout_tail share this one predicate.
+_TIMEOUT_CANCEL_PREDICATE = ("EXECUTION_STATUS <> 'SUCCESS' "
+                             "AND ERROR_MESSAGE ILIKE '%statement or warehouse timeout%'")
+
+
 def warehouse_timeout_tail(days: int = 30, company: str = "ALL") -> str:
     """Per-warehouse completed-statement runtime tail for the statement-timeout posture (Next-Fifty #33).
 
     One row per warehouse: completed runs, p99 and longest completed elapsed (seconds), statements the
-    timeout already cancelled (the Snowflake timeout message token, failure_advisor's), and one
-    RUNS_OVER_<s> count per cap-ladder step (the completed statements a cap of <s> seconds would have
-    cancelled). TIMEOUT_CANCELLED_TOTAL is the scope total from a window SUM (never a frame sum).
+    timeout already cancelled (the Snowflake timeout message token, failure_advisor's), the lowest and
+    highest ceiling those cancels fired at (TIMEOUT_FIRED_MIN_SEC / _MAX_SEC: N parsed from the message's
+    "timeout of N second(s)", thousands commas stripped -- the W5b probe's regex; a cancel fires at the
+    lowest ceiling for THAT statement, which can be a user, session or client value below the warehouse's
+    cap), and one RUNS_OVER_<s> count per cap-ladder step (the completed statements a cap of <s> seconds
+    would have cancelled). TIMEOUT_CANCELLED_TOTAL is the scope total from a window SUM (never a frame sum).
 
     The p99 is read LIVE because no mart carries one: FACT_QUERY_HOURLY keeps only a per-cell P95,
     FACT_QUERY_DAILY has no percentile, and MART_OPS_DIAG_HOURLY keeps a top-50-per-hour sample whose
@@ -1189,6 +1198,8 @@ def warehouse_timeout_tail(days: int = 30, company: str = "ALL") -> str:
         for s in CAP_LADDER_S)
     rung_cols = ", ".join(f"q.RUNS_OVER_{s}" for s in CAP_LADDER_S)
     where = companies.warehouse_company_scope(company, "q.WAREHOUSE_NAME") or "1 = 1"
+    fired = (f"IFF({_TIMEOUT_CANCEL_PREDICATE}, TRY_TO_NUMBER(REPLACE(REGEXP_SUBSTR(ERROR_MESSAGE, "
+             "'timeout of ([0-9,]+) second', 1, 1, 'e', 1), ',', '')), NULL)")
     return f"""
 WITH q AS (
     SELECT
@@ -1197,8 +1208,9 @@ WITH q AS (
         APPROX_PERCENTILE(IFF(EXECUTION_STATUS = 'SUCCESS', TOTAL_ELAPSED_TIME, NULL) / 1000, 0.99)
             AS P99_ELAPSED_SEC,
         MAX(IFF(EXECUTION_STATUS = 'SUCCESS', TOTAL_ELAPSED_TIME, NULL)) / 1000 AS MAX_ELAPSED_SEC,
-        COUNT_IF(EXECUTION_STATUS <> 'SUCCESS'
-                 AND ERROR_MESSAGE ILIKE '%statement or warehouse timeout%') AS TIMEOUT_CANCELLED_RUNS,
+        COUNT_IF({_TIMEOUT_CANCEL_PREDICATE}) AS TIMEOUT_CANCELLED_RUNS,
+        MIN({fired}) AS TIMEOUT_FIRED_MIN_SEC,
+        MAX({fired}) AS TIMEOUT_FIRED_MAX_SEC,
         {rungs}
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
     WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
@@ -1208,11 +1220,40 @@ WITH q AS (
 SELECT q.WAREHOUSE_NAME,
        {companies.company_case_sql('q.WAREHOUSE_NAME')} AS COMPANY,
        q.COMPLETED_RUNS, q.P99_ELAPSED_SEC, q.MAX_ELAPSED_SEC, q.TIMEOUT_CANCELLED_RUNS,
+       q.TIMEOUT_FIRED_MIN_SEC, q.TIMEOUT_FIRED_MAX_SEC,
        SUM(q.TIMEOUT_CANCELLED_RUNS) OVER () AS TIMEOUT_CANCELLED_TOTAL,
        {rung_cols}
 FROM q
 WHERE {where}
 ORDER BY q.MAX_ELAPSED_SEC DESC NULLS LAST
+"""
+
+
+def warehouse_timeout_impact(warehouse: str, target_s: int = 3600, days: int = 30) -> str:
+    """What a STATEMENT_TIMEOUT_IN_SECONDS of ``target_s`` would have cancelled on ONE warehouse (v4.603,
+    Next-Fifty #33 D1): the alert drawer's 'Statement timeout 1h' lever reads it before it offers the ALTER.
+
+    One row, completed statements only, over a fixed trailing ``days`` (clamped to 1..90):
+    OVER_TARGET_RUNS (TOTAL_ELAPSED_TIME > target: includes queue and compile time, so an upper bound),
+    EXEC_OVER_TARGET_RUNS (the same count on EXECUTION_TIME alone, so the queue share is visible),
+    MAX_ELAPSED_SEC (the longest completed statement) and COMPLETED_RUNS. Filtered to the one warehouse
+    the way warehouse_blast_radius is (validated identifier, upper-cased literal), so it never scans the
+    fleet; the Operations tail frame is company/window-keyed and toggle-gated, so it is not reused here.
+    An aggregate with no GROUP BY: always exactly one row (0 counts / NULL max when nothing ran)."""
+    from app.core.sqlsafe import safe_identifier
+
+    wh = safe_identifier(str(warehouse or "").strip())
+    days = bounded_days(days, 90)
+    target_ms = max(1, int(target_s)) * 1000
+    return f"""
+SELECT
+    COUNT_IF(EXECUTION_STATUS = 'SUCCESS')                                   AS COMPLETED_RUNS,
+    COUNT_IF(EXECUTION_STATUS = 'SUCCESS' AND TOTAL_ELAPSED_TIME > {target_ms}) AS OVER_TARGET_RUNS,
+    COUNT_IF(EXECUTION_STATUS = 'SUCCESS' AND EXECUTION_TIME > {target_ms})     AS EXEC_OVER_TARGET_RUNS,
+    MAX(IFF(EXECUTION_STATUS = 'SUCCESS', TOTAL_ELAPSED_TIME, NULL)) / 1000  AS MAX_ELAPSED_SEC
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+  AND UPPER(WAREHOUSE_NAME) = {sql_literal(wh.upper())}
 """
 
 

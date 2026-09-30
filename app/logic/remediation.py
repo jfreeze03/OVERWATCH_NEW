@@ -160,7 +160,8 @@ def resume_warehouse(warehouse: str) -> str:
 
 
 def statement_timeout_fix(warehouse: str, seconds: int) -> str:
-    """Cap runaway queries on one warehouse (0 disables the cap)."""
+    """Cap runaway queries on one warehouse. 0 = Snowflake's 7-day maximum, not 'no cap'; the lower non-zero
+    of this value and the session/account value is what gets enforced (logic.stmt_timeout's rule)."""
     seconds = max(0, min(int(seconds), 604800))
     return (f"ALTER WAREHOUSE {_ident(warehouse, 'warehouse')} "
             f"SET STATEMENT_TIMEOUT_IN_SECONDS = {seconds};")
