@@ -1473,7 +1473,9 @@ _CLIENTS_HELP = (
     "end of support. BELOW RECOMMENDED = supported but older than Snowflake's recommended version. "
     "Snowflake-run rows come from Snowflake's own services (the Snowflake Web App / Snowsight, "
     "SnowServices ingress). Snowflake upgrades those, and there is nothing to install on your side. "
-    "NOT LISTED = the function has no entry for this client. NO VERSION = the client did not report one."
+    "NOT LISTED = the function has no entry for this client. A version of yours that could not be "
+    "checked against a minimum (NOT LISTED, or an entry with no minimum) is counted as 'not checked' "
+    "and never shown as a clean green 0. NO VERSION = the client did not report one."
     "\n\nDRIVER and VERSION parse from CLIENT_APPLICATION_ID ('(no client id)' when it is empty). PROGRAM "
     "is whatever the client self-reports (VS Code, DBeaver and most JDBC/Python tools do; many ODBC tools "
     "such as Erwin do not — '(not reported)' means exactly that). STATUS compares each of your versions "
@@ -1485,8 +1487,10 @@ def _clients_tab(company: str, days: int, *, bounds: tuple | None = None) -> Non
     """Driver/version inventory — the 'when do we need to upgrade' sheet — with Snowflake's own support
     floor per driver version (Next-Fifty #34). Two reads joined in app/logic/client_support: SESSIONS
     (what connected, with the in-account BEHIND/CURRENT STATUS) and SYSTEM$CLIENT_VERSION_INFO() (a
-    probe=True metadata read). When the SYSTEM$ read fails, every support status reads 'unavailable',
-    the support KPIs show a dash, and the in-account STATUS is the fallback."""
+    probe=True metadata read). When the SYSTEM$ read fails (or lists no minimum anywhere: key drift),
+    every support status reads 'unavailable', the support KPIs show a dash, and the in-account STATUS is
+    the fallback. When the inventory hits run()'s row cap, every total over it is withheld or marked
+    as a floor instead of counting part of the feed."""
     from app.logic import client_support as cs
 
     _lm = "_lm" if bounds is not None else ""
@@ -1504,26 +1508,51 @@ def _clients_tab(company: str, days: int, *, bounds: tuple | None = None) -> Non
                tier="metadata", probe=True, source="SYSTEM$CLIENT_VERSION_INFO()")
     floors, reason = cs.read_floors(info.ok, info.df, info.error, info.error_kind)
     ann = cs.annotate_support(res.df, floors)
-    counts = cs.support_counts(ann) if floors is not None else None
+    # The inventory is uncapped in SQL, so run()'s row cap is the only cut and res.truncated is honest.
+    # A total over a cut feed would be partial (the oldest versions of the last driver go first), so
+    # every count below is withheld or marked as a floor when it fires.
+    capped = bool(getattr(res, "truncated", False))
+    counts = cs.support_counts(ann) if floors is not None and not capped else None
+    no_counts = ("Snowflake's support floor could not be read." if floors is None
+                 else "The driver inventory hit the row cap, so this count would be partial.")
 
-    def _kpi(label: str, key: str, bad_sev: str, help_text: str) -> dict:
+    def _kpi(label: str, key: str, bad_sev: str, help_text: str, unchecked_key: str = "") -> dict:
         if counts is None:
-            return {"label": label, "value": "—", "help": "Snowflake's support floor could not be read."}
+            return {"label": label, "value": "—", "help": no_counts}
+        unchecked = counts[unchecked_key] if unchecked_key else 0
+        if unchecked and not counts["checked_yours"]:
+            return {"label": label, "value": "—",
+                    "help": "None of your driver versions could be checked against Snowflake's floor; the "
+                            "caption below names them."}
         n = counts[key]
-        return {"label": label, "value": f"{n}", "severity": bad_sev if n else "ok", "help": help_text}
+        item = {"label": label, "value": f"{n}", "help": help_text}
+        if n:
+            item["severity"] = bad_sev
+        elif not unchecked:
+            item["severity"] = "ok"          # green only when every one of your versions was checked
+        if unchecked:
+            item["sub"] = f"{unchecked} not checked"
+            item["help"] = (f"{help_text} Not counted here: {unchecked} of your driver versions that could "
+                            "not be checked against Snowflake's floor (the caption below names them).")
+        return item
 
+    _floor_mark = "+" if capped else ""
+    _capped_help = " At least this many: the driver inventory hit the row cap." if capped else ""
     kpi_row([
-        {"label": "Driver families", "value": f"{cs.driver_family_count(ann)}"},
-        {"label": "Driver+version combos", "value": f"{cs.driver_version_count(ann)}",
-         "help": "Distinct driver x version (one version reported by two programs counts once)."},
+        {"label": "Driver families", "value": f"{cs.driver_family_count(ann)}{_floor_mark}",
+         "help": "Distinct driver families that connected in the window." + _capped_help},
+        {"label": "Driver+version combos", "value": f"{cs.driver_version_count(ann)}{_floor_mark}",
+         "help": "Distinct driver x version (one version reported by two programs counts once)." + _capped_help},
         _kpi("Unsupported, yours to upgrade", "unsupported_yours", "bad",
-             "Driver versions below Snowflake's minimum supported version, run by your clients."),
+             "Driver versions below Snowflake's minimum supported version, run by your clients.",
+             "not_checked_yours"),
         _kpi("Unsupported, Snowflake-run", "unsupported_snowflake", "info",
              "Below the minimum, but run by Snowflake's own web app or services: Snowflake upgrades these."),
         _kpi("Nearing end of support", "nearing_eos", "warn",
-             "Yours: at or above the minimum but below the version Snowflake lists as nearing end of support."),
+             "Yours: at or above the minimum but below the version Snowflake lists as nearing end of support.",
+             "not_listed_yours"),
         _kpi("Below recommended", "below_recommended", "info",
-             "Yours: supported, but older than Snowflake's recommended version."),
+             "Yours: supported, but older than Snowflake's recommended version.", "not_listed_yours"),
     ])
     # Re-sorted only when the support verdict exists; otherwise the builder's own order stands. Either
     # way the sort_label names the real order (it used to claim 'last seen').
@@ -1532,23 +1561,26 @@ def _clients_tab(company: str, days: int, *, bounds: tuple | None = None) -> Non
     else:
         df, sort_label = cs.display_frame(ann), cs.INVENTORY_SORT_LABEL
     styled_table(df, height=380, slug="client-drivers", sort_label=sort_label)
-    if floors is not None:
-        st.caption(cs.support_caption(ann))
-    else:
+    if capped:
+        st.caption(cs.capped_caption(len(res.df)))
+    if floors is None:
         st.caption(cs.unavailable_caption(reason))
         _detail = str(info.error or "").strip()
         if _detail and _detail.splitlines()[0][:160] != _detail:
             with st.expander("Support-floor read error"):
                 st.code(_detail)
-    behind = cs.behind_count(ann)
-    st.caption(
-        f"{behind} driver {'version trails' if behind == 1 else 'versions trail'} the newest version of the "
-        "same driver seen in this account (STATUS; Snowflake-run rows are not counted)."
-    )
+    elif not capped:
+        st.caption(cs.support_caption(ann))
+    if not capped:
+        behind = cs.behind_count(ann)
+        st.caption(
+            f"{behind} driver {'version trails' if behind == 1 else 'versions trail'} the newest version of "
+            "the same driver seen in this account (STATUS; Snowflake-run rows are not counted)."
+        )
     _no_id = cs.no_client_id_sessions(ann)
     if _no_id:
-        st.caption(f"{_no_id:,} sessions reported no client id; they show as '{cs.NO_CLIENT_ID}' and count "
-                   "in no KPI.")
+        st.caption(f"{'At least ' if capped else ''}{_no_id:,} sessions reported no client id; they show as "
+                   f"'{cs.NO_CLIENT_ID}' and count in no KPI.")
     result_caption(res)
     if info.ok:
         result_caption(info)

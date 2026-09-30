@@ -362,9 +362,15 @@ SOC. **Governance drift score** at top (§6). Sections:
   NOT LISTED. Snowflake-run rows (the Snowflake Web App / Snowsight
   backend, SnowServices ingress) are Snowflake's to upgrade: neutral, and
   out of the 'yours to upgrade' KPI and the BEHIND count. If the function
-  cannot be read, support reads 'unavailable', the support KPIs show '—',
-  and STATUS (BEHIND = older than the newest version of the same driver
-  among your rows) is the fallback. CSV export on the panel.
+  cannot be read, or none of its entries lists a minimum supported version
+  (a renamed key reads NULL without an error), support reads 'unavailable',
+  the support KPIs show '—', and STATUS (BEHIND = older than the newest
+  version of the same driver among your rows) is the fallback. A version of
+  yours with no minimum to compare with (NOT LISTED) is 'not checked': the
+  KPIs show the count and are never a green 0, and the caption names it.
+  If the inventory hits the app's row cap, the support KPIs, the upgrade
+  list and the behind count are withheld (they would be partial): narrow
+  the window or company scope. CSV export on the panel.
 - **Trust Center** — latest findings per scanner (needs
   TRUST_CENTER_VIEWER).
 
