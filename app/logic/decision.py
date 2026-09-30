@@ -204,10 +204,13 @@ def monthly_equivalent(frame: pd.DataFrame | None) -> tuple[pd.DataFrame, dict]:
 
 
 _ADDRESSABLE_TITLE = {"IDLE": "Tighten auto-suspend on {target}", "RESIZE": "Right-size {target}",
-                      "UNREAD_MAINT": "Stop maintenance on unread {target}"}
-# Next-Fifty #35: an unread-maintenance row targets an object FQN (the Entity 360 OBJECT type Storage & waste
-# drills to), so it de-duplicates against a queued OBJECT:<fqn> action and never against a warehouse.
-_ADDRESSABLE_ENTITY = {"UNREAD_MAINT": "OBJECT"}
+                      "UNREAD_MAINT": "Stop maintenance on unread {target}",
+                      "STORAGE": "Archive or drop unread {target}",
+                      "RETENTION": "Cut Time Travel retention on unread {target}"}
+# Next-Fifty #35: an unread-maintenance or storage-waste row targets an object / table FQN (the Entity 360 OBJECT
+# type Storage & waste drills to), so it de-duplicates against a queued OBJECT:<fqn> action and never against a
+# warehouse.
+_ADDRESSABLE_ENTITY = {"UNREAD_MAINT": "OBJECT", "STORAGE": "OBJECT", "RETENTION": "OBJECT"}
 
 
 def pipeline_frame(rollup_items: Iterable[SavingsOpportunity] | None,
@@ -217,7 +220,7 @@ def pipeline_frame(rollup_items: Iterable[SavingsOpportunity] | None,
     rows, both on a monthly basis.
 
     Addressable rows are synthetic: KIND "Addressable", SOURCE_ENTITY_TYPE WAREHOUSE (OBJECT for
-    UNREAD_MAINT) + KEY = the target, STATUS OPEN, CONFIDENCE = the opportunity's 0..1 weight,
+    UNREAD_MAINT, STORAGE and RETENTION) + KEY = the target, STATUS OPEN, CONFIDENCE = the opportunity's 0..1 weight,
     ESTIMATED_USD = MONTHLY_USD = its $/mo, PERIOD MONTHLY. Queued rows (KIND "Queued") carry
     MONTHLY_USD (monthly_equivalent) AS ESTIMATED_USD — one-time / unspecified / unpriced rows project
     $0 — with the authored figure kept in AUTHORED_USD. scenario_projection then de-duplicates by entity (largest estimate wins), so a queued

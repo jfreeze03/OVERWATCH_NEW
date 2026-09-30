@@ -14,7 +14,7 @@ from app.core.sqlsafe import safe_identifier, sql_literal
 # rule id -> (needs_warehouse, value label)
 RECHECKABLE: dict[str, tuple[bool, str]] = {
     "COST_WH_DAILY_CREDITS": (True, "credits today"),
-    "PERF_QUEUED_MINUTES": (True, "queued minutes today"),
+    "PERF_QUEUED_MINUTES": (True, "queued time today"),
     "PERF_SPILL_GB": (True, "remote spill GB today"),
     "COST_CLOUD_SVC_RATIO": (True, "cloud-services ratio % today"),
     "PERF_QUERY_FAIL_PCT": (False, "query fail % (24h)"),

@@ -388,9 +388,11 @@ def test_release_verdicts():
          "P95_ELAPSED_SEC": 50.0, "QUEUED_SEC": 105.0, "SPILL_REMOTE_GB": 10.0},
     ])
     rows = {r["Metric"]: r for r in insights.compare_release_periods(df)}
+    # v4.605.0 (owner 2026-09-30): the release-compare labels dropped their stale '(s)' units (the values
+    # were already humanized), so these keys moved on purpose: 'p95 runtime', 'Queued per query'.
     assert rows["Failure %"]["Verdict"] == "Worse"        # 1% -> 3%
-    assert rows["p95 runtime (s)"]["Verdict"] == "Better"  # halved
-    assert rows["Queued (s/query)"]["Verdict"] == "Flat"   # +5% within tolerance
+    assert rows["p95 runtime"]["Verdict"] == "Better"  # halved
+    assert rows["Queued per query"]["Verdict"] == "Flat"   # +5% within tolerance
     assert insights.compare_release_periods(pd.DataFrame()) == []
 
 

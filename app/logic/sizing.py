@@ -163,7 +163,7 @@ def size_recommendations(df: pd.DataFrame, credit_rate_usd: float, window_days: 
                         "warehouse consolidation, or retirement instead of lengthening the timer.")
             prov = ""
             if has_prov and row.get("PROVISION_MIN_PER_DAY", 0) >= 1:
-                prov = (f" ({row['PROVISION_MIN_PER_DAY']:.0f} provisioning min/day — "
+                prov = (f" ({humanize_duration(row['PROVISION_MIN_PER_DAY'], 'min')}/day provisioning — "
                         "resume overhead, not concurrency)")
             return RECOMMEND_SUSPEND, (
                 f"{idle:.0f}% of credits are idle-hours{prov} - shorten AUTO_SUSPEND before resizing.")
@@ -184,7 +184,7 @@ def size_recommendations(df: pd.DataFrame, credit_rate_usd: float, window_days: 
                     f"Already at the smallest size (X-Small), {idle:.0f}% idle - no size-down "
                     "target; reduce idle via AUTO_SUSPEND cadence or consolidation.")
             return RECOMMEND_DOWN, (
-                f"No queueing, no spill, p95 {p95:.1f}s, {idle:.0f}% idle - "
+                f"No queueing, no spill, p95 {humanize_duration(p95, 's')}, {idle:.0f}% idle - "
                 "one size down likely holds SLAs at half the rate.")
         return RECOMMEND_KEEP, "Load and capacity look matched for this window."
 

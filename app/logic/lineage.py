@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from app.core.result import is_schema_drift, is_setup_absence
+
 
 def _norm(value: object) -> str:
     return str(value or "").strip().upper()
@@ -125,3 +127,18 @@ def blast_summary(edges: pd.DataFrame | None, consumers: pd.DataFrame | None,
                                 .fillna(0).sum()) if not measured.empty else 0,
         "deepest_level": int(pd.to_numeric(br["DEPTH"], errors="coerce").fillna(0).max()),
     }
+
+
+def observed_unmeasured_reason(error_kind: object) -> str:
+    """Why the OBSERVED half (ACCESS_HISTORY) could not be measured, by run()'s classified error kind (v4.605
+    review R1-13). Only a true absence (is_setup_absence: the view is missing or not granted to this role)
+    names the edition/role; this account is Enterprise and its object-cost loader reads ACCESS_HISTORY daily,
+    so a timeout, schema drift or any other failure says what actually happened."""
+    kind = str(error_kind or "").strip().lower()
+    if is_setup_absence(kind):
+        return "ACCESS_HISTORY (Enterprise-only) is unavailable on this account/role"
+    if kind == "timeout":
+        return "the ACCESS_HISTORY read timed out"
+    if is_schema_drift(kind):
+        return "the ACCESS_HISTORY read hit schema drift (a column this build reads is missing)"
+    return "the ACCESS_HISTORY read failed"

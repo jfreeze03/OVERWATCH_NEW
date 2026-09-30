@@ -752,8 +752,8 @@ def test_the_query_advisor_gates_its_cluster_advice():
 
 def test_the_no_dominant_cause_queue_finding_carries_the_cap_check():
     """Review r3 R3-2 / R3-7: the advisor's hedged fallback serves two row shapes. With no overload/provisioning
-    split (the older shape) it keeps its v4.588 wording, byte-locked by tests/test_cold_start_split.py. With the
-    split known but no cause dominating most queued runs -- the live case on the fingerprint grain, whose builder
+    split (the older shape) it keeps its v4.588 wording, byte-locked by tests/test_cold_start_split.py (numbers
+    humanized since v4.605.0, owner 2026-09-30). With the split known but no cause dominating most queued runs -- the live case on the fingerprint grain, whose builder
     always emits the split -- it said "add a cluster" with no cap check, on Operations ▸ Queries and as the fix
     queue's First fix. It keeps the hedge and now carries the rule; the points (so QOP) are unchanged."""
     from app.logic.query_advisor import advise
@@ -768,7 +768,9 @@ def test_the_no_dominant_cause_queue_finding_carries_the_cap_check():
            "QUEUED_PROVISIONING_SEC": 13.0, "QUEUED_RUN_PCT": 0.9, "PROVISIONING_QUEUED_RUN_PCT": 0.5,
            "OVERLOAD_QUEUED_RUN_PCT": 0.5, "GB_SCANNED": 5.0, "CACHE_PCT": 10.0, "LOCAL_SPILL_GB": 0.0,
            "REMOTE_SPILL_GB": 0.0, "ROWS_PRODUCED": 100.0, "PARTITIONS_SCANNED": 10.0, "PARTITIONS_TOTAL": 1000.0}
-    hedged = ("Spent 25s queued (of 28.0s total) — either concurrency (add a cluster or size up for parallelism; "
+    # v4.605.0 (owner decision 2026-09-30): the advisor's numbers read Hr/Min/Sec through humanize_duration, so
+    # this lock moved on purpose from "(of 28.0s total)" to "(of 28s total)"; the hedge's wording is unchanged.
+    hedged = ("Spent 25s queued (of 28s total) — either concurrency (add a cluster or size up for parallelism; "
               + CLUSTER_CAP_QUALIFIER + ") or warehouse resume overhead (lengthen AUTO_SUSPEND / keep it warm).")
     findings, _ = advise(row)
     queued = [f for f in findings if f.code in ("queued", "cold_start")]
@@ -845,11 +847,12 @@ _ADD_CLUSTER_LABELS = {
 # (file, enclosing function, fragment): advice that may omit the qualifier, and why.
 _ADD_CLUSTER_ALLOWED = {
     ("app/logic/query_advisor.py", "advise",
-     "Spent {queued_sec}s queued (of {elapsed}s total) — either concurrency (add a cluster or size up for "
+     "Spent {queued_txt} queued (of {elapsed_txt} total) — either concurrency (add a cluster or size up for "
      "parallelism) or warehouse resume overhead (lengthen AUTO_SUSPEND / keep it warm)."):
         "the split-UNKNOWN fallback only (a row without QUEUED_OVERLOAD_SEC / QUEUED_PROVISIONING_SEC, the older row "
         "shape): tests/test_cold_start_split.py locks it byte for byte (Next-Fifty #17 kept the v4.588 wording for "
-        "that shape). The split-known, no-dominant-cause text carries the qualifier (review r3 R3-2 / R3-7; "
+        "that shape; numbers humanized by the 2026-09-30 hygiene release (owner decision), so this key names queued_txt / "
+        "elapsed_txt). The split-known, no-dominant-cause text carries the qualifier (review r3 R3-2 / R3-7; "
         "test_the_no_dominant_cause_queue_finding_carries_the_cap_check)",
     ("app/logic/sizing.py", "_pressure_verdict", "{lead} Add a cluster rather than a bigger size. {how}{tail}"):
         "the scale-out verdict itself, after its cap gate: the not-checked / no-queries / never-reached branches "

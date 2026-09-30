@@ -109,16 +109,23 @@ def test_ascore2_degraded_sources_golden_matrix():
     # ADDED REC #5: outage kinds (timeout/unknown_function/other) fail closed; an
     # 'absent' mart (not installed) and an ok read stay zero-penalty. This is the
     # golden matrix that keeps a freshly-provisioned deployment from oscillating
-    # between Incomplete and a falsely-healthy score.
+    # between Incomplete and a falsely-healthy score. v4.605 review r2 R2-1: an
+    # "Insufficient privileges" read ('privilege') proves the object exists, so it
+    # is degraded (fails closed), never the 'absent' legitimate zero.
     from app.logic.scoring import degraded_sources
     res = degraded_sources({
         "task": _FakeRes(False, "timeout"),
         "freshness": _FakeRes(False, "unknown_function"),
         "owner-queue": _FakeRes(False, "other"),
+        "budget": _FakeRes(False, "privilege"),
         "installed-ok": _FakeRes(True, ""),
         "not-installed": _FakeRes(False, "absent"),
     })
-    assert res == {"task", "freshness", "owner-queue"}
+    assert res == {"task", "freshness", "owner-queue", "budget"}
+    # the kind run() gives a raw 003001 is that degraded kind
+    from app.core.query import _classify_error
+    assert _classify_error(Exception("003001 (42501): SQL access control error: Insufficient privileges to "
+                                     "operate on table 'ACTION_QUEUE'")) == "privilege"
 
 
 def test_ascore2_platform_score_incomplete_on_degraded():

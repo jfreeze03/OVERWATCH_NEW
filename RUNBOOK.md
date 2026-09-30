@@ -76,7 +76,7 @@ connect). Streamlit-in-Snowflake stamps every statement the app runs with its ow
 QUERY_TAG naming the app (`"StreamlitName":"DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP"`) and
 overrides any per-statement tag, so OVERWATCH's self-traffic filters key on that tag.
 Reads are bounded by the warehouse STATEMENT_TIMEOUT_IN_SECONDS; Cortex evaluations also
-send a 90s per-statement timeout (unverified under SiS). The app
+send a 1m 30s per-statement timeout (unverified under SiS). The app
 and all tasks run on the dedicated XSMALL warehouse **WH_ALFA_ADMIN**
 (no resource monitor since v4.45 — OVERWATCH_RM was suspending it mid-use).
 
@@ -296,6 +296,29 @@ Admin → Settings, never in code.
   storage GB by database × storage rate.
 - **AI Users** — per-user Cortex consumption, exceptions (users over the
   per-user expectation), AI budget pacing when `AI_MONTHLY_BUDGET_USD` set.
+  **Track top exceptions as work items** (v4.605, operators) writes the
+  first 10 Exceptions rows through the same Track statement as Optimize and
+  Control Room triage: one Action Center item per user (keyed on the user,
+  every signal in its detail, the strongest signal's severity, under the
+  user's own company; an unmapped user stays UNKNOWN, so their estimate is
+  never summed into a named Company's queue) plus one item for the
+  all-users budget breach, keyed on the Company scope and priced only at
+  the exposure beyond the user items tracked in the same click. All-users
+  items tracked from different Company views are priced separately and
+  overlap, so do not add them together. Items land UNASSIGNED, priced
+  MONTHLY when priced (the scope item carries no estimate when the user
+  items already count its exposure). A user or scope with an open item
+  from this page is not queued again, including items queued before v4.605
+  under any of the page's three SOURCE names (matched by their old title).
+  When a user's strongest signal now outranks every open item of that user
+  from this page, the click first raises one of them, the strongest (on a
+  tie the item keyed on the user, else the newest), and notes it in its
+  detail; the estimate stays as first tracked. A user with several items
+  queued before v4.605 keeps them all and only that one is raised, so one
+  breach never counts twice in Critical / high; a user who already has an
+  open item at that severity is left as is. A Security work item on
+  the same user does not block it. An item still open from an earlier
+  month now blocks a new one; a done or dismissed item does not.
 - **Optimization** — idle advisor (warehouse-hours billed with zero
   queries = auto-suspend opportunity); right-sizing simulator (spill +
   queue profile → size suggestion; its **Check cluster use** toggle reads
@@ -314,7 +337,8 @@ Admin → Settings, never in code.
   fingerprints (≥10 identical runs = caching/materialization candidates),
   query efficiency (families scanning >80% of ≥100-partition tables;
   zero-scan share trend), storage waste (Time-Travel/failsafe-heavy tables,
-  STALE = no DML in 90d); **guarded remediation** (§9); storage growth
+  STALE = no DML in 90d; tables nobody read in 90 days feed Addressable
+  $/mo as storage waste); **guarded remediation** (§9); storage growth
   movers.
 - **Savings ledger** — every claimed saving with STATE: ESTIMATED (booked
   by remediation/advisor) → VERIFIED or REJECTED by the monthly verifier
@@ -359,6 +383,11 @@ Admin → Settings, never in code.
     items (SOURCE 'Control Room > Triage') for task-failure and warehouse
     spend rows through the same idempotent statement; alerts are never
     tracked (Acknowledge and the incident flow own them).
+  - Cost > Chargeback & AI exceptions (v4.605) use the same statement too,
+    keyed on the user (USER) or the Company scope (AI_BUDGET, a scope key
+    with no Entity 360 page), keeping the exception's severity. A separate
+    UPDATE runs first and only raises the severity of an open user item
+    from that page when the user's signal has since grown stronger.
 
   No live read on first paint. The optional live-profile toggle reuses the
   Queries scan (shared cache).
@@ -473,7 +502,8 @@ can open it, including EXECUTIVE. Old Decision Studio links, saved views and
 - **Pipeline** — what is ahead:
   - Addressable $/mo (the Cost ▸ Optimization & Savings idle-timer rollup,
     optional right-sizing, and unread maintenance confirmed in Storage & waste
-    this session) plus queued Action Center work normalized to monthly,
+    this session, and unread-table storage waste from that section's
+    storage-waste scan) plus queued Action Center work normalized to monthly,
     de-duplicated by entity. A caption names the levers counted and why any
     is missing. If the efficiency mart cannot be read (or has no metering in
     the window), the headline still totals the other counted levers and its
@@ -485,6 +515,8 @@ can open it, including EXECUTIVE. Old Decision Studio links, saved views and
     booked in another session keeps counting until the scan is re-run at
     least 5m after that booking (the Savings-ledger read that leaves booked
     objects out is cached for up to 5m): at most 1h 5m after the booking.
+    Storage waste drops out the same way, but on a storage-rate change rather
+    than a credit-rate change. A table counted by both counts once.
   - A projection whose sliders default to MEASURED adoption and realization
     ("Reset to measured"). It runs in a fragment, so slider moves cost no
     reads. Verified savings never enter it.
@@ -871,7 +903,7 @@ Snowflake release note that mentions ACCOUNT_USAGE, and after migrations.
 | Cortex/model unavailable | The morning digest sends the templated facts digest and logs `digest_ai_failed` (V165); AI panels surface the error; nothing else breaks |
 | FORECAST_ML_DAILY absent | Forecast engine silently uses seasonal, basis string says so |
 | Webhook integration missing | SP_NOTIFY_WEBHOOK returns a friendly failure; per-route errors log to APP_ERROR_LOG; events stay queued (NOTIFIED_AT null) |
-| ALTER SESSION unsupported (SiS) | SiS stamps its own app QUERY_TAG on every statement (self-traffic keys on it); the warehouse-level timeout is the backstop for reads; Cortex also sends a 90s per-statement timeout |
+| ALTER SESSION unsupported (SiS) | SiS stamps its own app QUERY_TAG on every statement (self-traffic keys on it); the warehouse-level timeout is the backstop for reads; Cortex also sends a 1m 30s per-statement timeout |
 | Schema/db filters on mart-only panels | Panels that lack the dimension switch to live sources automatically |
 
 ## 15. Troubleshooting
@@ -910,7 +942,29 @@ The three POLICY_REFERENCES checks (security.data_policy_coverage,
 masking_environment_parity, admin_network_policy_coverage) are not declared
 gaps: if the app's role cannot read that view they FAIL here while Security
 shows a calm needs_setup. IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE
-(snowflake/roles.sql) covers that view.
+(snowflake/roles.sql) covers that view. A renamed column FAILs here too,
+and Security then shows a red "unavailable" with the error (v4.605).
+
+**A red "unavailable" on an optional panel** (v4.605). A probe read shows
+needs_setup only when the object is missing or not granted (or the function
+does not exist). "Insufficient privileges" shows needs_setup too, like "does
+not exist or not authorized", but it proves the object exists: a probe read
+logs it to APP_ERROR_LOG, the canary FAILs it (never GAP), the Overview
+health score reads it as a failed read (Incomplete, never a zero penalty),
+and Admin → Setup progress marks the row Unknown with a re-apply-the-grants
+FIX. A missing column (schema drift), a timeout or any other
+failure shows "unavailable" with the error in its detail expander. A probe
+read does not write a missing column to APP_ERROR_LOG, so that expander is
+the only record: copy the error, then run Admin → Canary (a registered
+builder FAILs there on drift).
+A timeout usually clears on a retry; drift does not (apply the missing
+migrations, or redeploy). Admin → Setup progress marks a checklist row
+Unknown (not Pending) when its read fails this way: FIX says Retry for a
+timeout and names the schema drift for a missing column, and the
+"could not be checked" line's Error detail lists each failed read's error.
+An ACCESS_HISTORY read (Entity 360 blast radius, Proof consumer reach) names
+the edition or role only when the view is absent; this account is
+Enterprise, so a timeout there says it timed out.
 
 **Numbers look wrong.** Check the source caption first (mart vs live +
 lag). ACCOUNT_USAGE lags ≤45 min (query history) to ≤24h (metering daily);

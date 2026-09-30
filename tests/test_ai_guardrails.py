@@ -156,7 +156,7 @@ def test_ai_guardrails_section_is_wired_into_security():
     # Guardrails is enabled"), but the view exists on this account (owner probe 2026-09-29). Absence is now
     # "not readable by this app", and any other failure is 'unavailable' (tests/test_probe_read_honesty.py).
     assert "is not readable by this app" in src
-    assert 'gr.error_kind in ("absent", "unknown_function")' in src
+    assert "is_setup_absence(gr.error_kind)" in src          # v4.605 r3: 'privilege' is a setup absence too
     assert "appears only once Guardrails is enabled" not in src and "Guardrails is enabled and" not in src
 
 

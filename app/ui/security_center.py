@@ -13,6 +13,7 @@ import pandas as pd
 import streamlit as st
 
 from app.core.query import execute_statement, run
+from app.core.result import is_privilege_error, is_setup_absence
 from app.core.session import is_operator
 from app.core.state import request_navigation
 from app.data import security_sql, workbench_sql
@@ -92,8 +93,12 @@ def _render_change_risk_diagnostic() -> None:
             "sec_change_risk_breakdown",
             "FACT_SECURITY_CHANGE (DESTRUCTIVE, risk>=70, 7d)",
         )
-        if not res.ok:
+        if not res.ok and is_setup_absence(res.error_kind):
             _setup_state("The change-risk breakdown")
+            return
+        if not res.ok:
+            empty_state("unavailable", "The change-risk breakdown (FACT_SECURITY_CHANGE) could not be read.",
+                        detail=res.error)
             return
         if res.empty:
             empty_state("clean", "No DESTRUCTIVE change-risk events over threshold in the last 7 days.")
@@ -177,7 +182,21 @@ def security_posture_verdict(company: str) -> dict | None:
         Signal("bad", f"{len(_act)} domain(s) need action: "
                       + ", ".join(p.domain.title() for p in _act[:3])) if _act else None,
         Signal("warn", f"{_open_n} open finding(s)") if _open_n else None,
+        # Review R1-16: an unread coverage contract leaves every domain unscored, so no domain can reach
+        # 'need action' -- say so rather than quietly reading a CRITICAL finding as 'Watch'.
+        Signal("warn", _COVERAGE_UNREAD_SIGNAL) if _coverage_failed(coverage) else None,
     ], healthy="no security domain needs action")
+
+
+_COVERAGE_UNREAD_SIGNAL = "domain coverage could not be read, so no domain is scored"
+
+
+def _coverage_failed(coverage) -> bool:
+    """The coverage-contract read failed other than by a missing object (a timeout, schema drift, an
+    "Insufficient privileges" error on the existing view, any other failure) -- a failed read, never
+    'coverage not complete' and never silence (review r2 R2-1)."""
+    return not coverage.ok and (not is_setup_absence(coverage.error_kind)
+                                or is_privilege_error(coverage.error_kind))
 
 
 def render_security_overview(company: str) -> None:
@@ -192,23 +211,28 @@ def render_security_overview(company: str) -> None:
         "sec_domain_coverage",
         "Security domain coverage contract",
     )
-    if not queue.ok and not coverage.ok:
+    # v4.605: the V075 setup state only when BOTH reads are a true absence (object missing / unauthorised);
+    # a timeout, a missing column or any other failure is a failed read, never "apply V075".
+    if (not queue.ok and not coverage.ok and is_setup_absence(queue.error_kind)
+            and is_setup_absence(coverage.error_kind)):
         section_header("Security decision queue", "", "security")
         _setup_state("The security decision queue")
         return
     if not queue.ok:
         # The exception queue IS the per-domain evidence. If it did not resolve, scoring
         # off an empty frame would read every COMPLETE-coverage domain as 100/Healthy —
-        # a false all-clear painted above this notice. Surface the unresolved state and
+        # a false all-clear painted above this notice. Surface the failed read and
         # stop, before any posture/verdict/KPI is rendered.
         section_header("Security decision queue", "", "security")
-        empty_state("no_data_yet", "The domain contract loaded, but the exception queue did not resolve.")
+        empty_state("unavailable", "The security exception queue (V_SECURITY_EXCEPTION_QUEUE) could not be "
+                    "read, so no domain posture is shown.", detail=queue.error)
         return
 
     posture = domain_posture(
         queue.df,
         coverage.df if coverage.ok else pd.DataFrame(),
     )
+    _cov_failed = _coverage_failed(coverage)
     # C17/C23: the "should I worry?" verdict now renders ABOVE the section bar for EVERY section
     # (security.render() -> security_posture_verdict), so it is not repeated here; the section
     # header's severity still derives from the same posture data.
@@ -234,6 +258,12 @@ def render_security_overview(company: str) -> None:
         "its affected-entity count increases that deduction up to 3x. Unknown and "
         "on-demand domains do not silently receive a perfect score."
     )
+    if _cov_failed:
+        # Review R1-16: the queue resolved but the coverage contract did not -- every domain reads Unknown
+        # because the contract was not read, not because coverage is incomplete. (No Admin error-log pointer:
+        # a probe read leaves a missing column unlogged.)
+        empty_state("unavailable", "The security domain coverage contract could not be read, so domain scores "
+                    "are withheld (shown as --).", detail=coverage.error)
 
     # Owner diagnostic (2026-08-17): when CHANGE RISK is flooded by routine DESTRUCTIVE
     # DDL, surface WHO/WHAT actually drives it so any exclusion is precise, not a guess.
@@ -251,7 +281,12 @@ def render_security_overview(company: str) -> None:
             item.domain for item in posture
             if item.coverage not in ("COMPLETE", "ON_DEMAND")
         ]
-        if unresolved:
+        if not coverage.ok:
+            # the contract was never read, so "coverage is not complete for: <every domain>" would state a
+            # coverage fact the app does not have
+            empty_state("no_data_yet", "No exceptions are queued from the evidence that resolved; the domain "
+                        "coverage contract could not be read, so which domains are fully covered is unknown.")
+        elif unresolved:
             empty_state(
                 "no_data_yet",
                 "No exceptions are queued from the evidence that resolved, but coverage is "

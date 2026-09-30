@@ -44,12 +44,14 @@ def _to_sqlite(sql: str) -> str:
     swap("DBA_MAINT_DB.OVERWATCH.", "")
     sql = sql.replace("CURRENT_TIMESTAMP()", f"'{_NOW}'")
     sql = sql.replace("::FLOAT", "").replace("::NUMBER(18,2)", "")
-    m = re.search(r"FROM \(VALUES\n(?P<rows>.*?)\n\) AS v \(COMPANY, SEVERITY, TITLE, DETAIL, ENTITY_KEY, CONF, "
-                  r"USD, PER\)", sql, re.S)
+    # The Track INSERT's VALUES list (COMPANY .. PER) and the AI escalation UPDATE's (SEVERITY, TITLE, ENTITY_KEY).
+    m = re.search(r"FROM \(VALUES\n(?P<rows>.*?)\n\) AS v \((?P<cols>[A-Z_]+(?:, [A-Z_]+)*)\)", sql, re.S)
     if m:
-        cols = ("COMPANY", "SEVERITY", "TITLE", "DETAIL", "ENTITY_KEY", "CONF", "USD", "PER")
+        cols = m.group("cols").split(", ")
         sel = ", ".join(f"column{i + 1} AS {c}" for i, c in enumerate(cols))
         sql = sql.replace(m.group(0), f"FROM (SELECT {sel} FROM (VALUES\n{m.group('rows')}\n)) AS v")
+    # sqlite needs AS on an UPDATE target alias (Snowflake takes the bare alias every OVERWATCH UPDATE uses)
+    sql = re.sub(r"\AUPDATE (\w+) (\w+)\n", r"UPDATE \1 AS \2\n", sql)
     assert "::" not in sql and "CURRENT_TIMESTAMP" not in sql
     return sql
 

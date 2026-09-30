@@ -17,6 +17,7 @@ import streamlit as st
 
 from app.config import MAX_LIVE_WINDOW_DAYS
 from app.core.query import run, run_batch
+from app.core.result import is_setup_absence
 from app.data import cortex_sql, etl_sql, graph_sql, insights_sql, mart27_sql
 from app.logic import graphs
 from app.logic.call_tree import build_call_tree
@@ -331,10 +332,12 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                        f"grain, so the active {', '.join(_pc_dropped)} filter is not applied here.")
     elif _pc.ok:
         empty_state("clean", "No repeated pattern crossed the $0.01 floor in this window.")
-    else:
+    elif is_setup_absence(_pc.error_kind):
         empty_state("needs_setup",
                     "Pattern costs arrive with migration V037 (MART_PATTERN_COST_DAILY v2) — "
                     "an admin can apply the pending schema update on Admin → Migrations & freshness.")
+    else:
+        empty_state("unavailable", "Pattern costs (MART_PATTERN_COST_DAILY) could not be read.", detail=_pc.error)
 
     # $-escape: expander LABELS render markdown+LaTeX too — "total $ and $/call" paired
     with st.expander(md_dollars("Trend one procedure — total $ and $/call over time")):

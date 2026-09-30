@@ -94,7 +94,10 @@ def test_expensive_queries_bounds_inputs():
 def test_storage_reclaim_shape():
     sql = insights_sql.storage_reclaim("ALFA")
     assert "ACCESS_HISTORY" in sql and "NEVER_READ" in sql
-    assert "RETAINED_FOR_CLONE_BYTES" in sql and "objectDomain" in sql
+    # Next-Fifty #35 storage leg: reads count in ANY object domain (the #30 confirm's rule, the safe direction):
+    # a materialized view or dynamic table read under its own domain used to leave its table looking never-read
+    assert "RETAINED_FOR_CLONE_BYTES" in sql
+    assert "objectDomain" not in sql and 'f.value:"objectId" IS NOT NULL' in sql
 
 
 def test_rule_precision_shape():

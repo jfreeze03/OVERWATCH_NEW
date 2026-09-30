@@ -28,6 +28,7 @@ import streamlit as st
 from app.config import SAVINGS_ACTIVE_MONTHS, SAVINGS_MONTH_DAYS
 from app.core.identity import viewer_name
 from app.core.query import cache_scope, run, run_batch
+from app.core.result import is_setup_absence
 from app.core.state import can_open, request_navigation
 from app.data import mart27_sql, mart_sql, security_sql, workbench_sql
 from app.logic import insights
@@ -40,6 +41,7 @@ from app.logic.decision import (
     scenario_projection,
 )
 from app.logic.formulas import (
+    DEFAULT_STORAGE_USD_PER_TB_MONTH,
     account_now,
     credits_to_usd,
     format_usd,
@@ -68,17 +70,20 @@ from app.logic.proof import (
 )
 from app.logic.savings_rollup import (
     H_BOOKED,
+    STORAGE_HANDOFF_KEY,
     UNREAD_HANDOFF_KEY,
     idle_opportunities,
     lever_basis,
     lever_short,
     resize_opportunities,
     rollup_savings,
+    storage_lever,
     unread_lever,
 )
 from app.logic.sizing import size_recommendations
+from app.logic.storage_waste import H_STORAGE_BASIS
 from app.logic.verdict import decision_studio_signals, page_verdict
-from app.logic.workbench import mark_watched_pairs, stale_planning
+from app.logic.workbench import ENTITY_TYPES, mark_watched_pairs, stale_planning
 from app.ui import charts
 from app.ui.components import (
     AUTHORED_CONFIDENCE_HELP,
@@ -86,6 +91,7 @@ from app.ui.components import (
     empty_state,
     hero_metric,
     kpi_row,
+    load_settings,
     result_caption,
     section_header,
     selectable_nav_table,
@@ -132,11 +138,30 @@ def _open_savings_ledger() -> None:
 
 
 def _open_storage_waste() -> None:
-    """Next-Fifty #35 doorway: the unread-maintenance lever is counted only after its scan ran (and confirmed)
-    in Cost ▸ Optimization & Savings ▸ Storage & waste this session. Seeds the pill like _open_savings_ledger
-    (the nested lazy_sections widget is not instantiated on this run, so seeding its key is legal)."""
+    """Next-Fifty #35 doorway: the unread-maintenance and storage-waste levers are counted only after their scans ran
+    in Cost ▸ Optimization & Savings ▸ Storage & waste this session (the unread one confirmed against access
+    history). Both doorways ('Check unread maintenance', 'Check storage waste') land here. Seeds the pill like
+    _open_savings_ledger (the nested lazy_sections widget is not instantiated on this run, so seeding its key is
+    legal)."""
     st.session_state["opt_section"] = "Storage & waste"
     request_navigation("Cost Intelligence", "Optimization & Savings")
+
+
+def _consumer_reads_state(reads) -> None:
+    """The consumer-reach degrade line under the retirement verdicts. v4.605 review R1-13: the edition claim
+    only for a true absence (is_setup_absence -- the view is missing or not granted to this role); this account
+    is Enterprise, so a timeout, schema drift or any other failure is a failed read with its error. A readable
+    but empty read is its own quiet caption; a usable read renders nothing here."""
+    if not reads.ok and is_setup_absence(reads.error_kind):
+        st.caption("Consumer reach needs Enterprise ACCESS_HISTORY, which isn't available here "
+                   "— every verdict shows INSUFFICIENT_DATA (usage can't be measured, not zero).")
+    elif not reads.ok:
+        empty_state("unavailable", "Consumer reads (ACCESS_HISTORY) could not be read, so every verdict shows "
+                    "INSUFFICIENT_DATA (usage can't be measured, not zero).", detail=reads.error)
+    elif reads.empty:
+        st.caption("ACCESS_HISTORY returned no reads for mapped products in this window "
+                   "(recent-read ingestion lag, or none were read) — verdicts show "
+                   "INSUFFICIENT_DATA because usage couldn't be measured, not because it's zero.")
 
 
 # HIDDEN in v4.597 (Option C); revive via memo §4 #6 derived products. Nothing dispatches here (the
@@ -222,13 +247,7 @@ def _products(company: str, days: int, rate: float, *, bounds: tuple | None = No
         # measured. `_measured` gates the consumer surfaces so "couldn't measure" never
         # renders as a measured 0 (unlike a genuine measured-zero product).
         _measured = reads.usable()
-        if not reads.ok:
-            st.caption("Consumer reach needs Enterprise ACCESS_HISTORY, which isn't available here "
-                       "— every verdict shows INSUFFICIENT_DATA (usage can't be measured, not zero).")
-        elif reads.empty:
-            st.caption("ACCESS_HISTORY returned no reads for mapped products in this window "
-                       "(recent-read ingestion lag, or none were read) — verdicts show "
-                       "INSUFFICIENT_DATA because usage couldn't be measured, not because it's zero.")
+        _consumer_reads_state(reads)
         _retire = int((verdicts["RETIREMENT_VERDICT"] == "RETIRE_CANDIDATE").sum())
         # This is the SUM of each product's distinct readers (DISTINCT_CONSUMERS is a per-product
         # COUNT(DISTINCT USER_NAME)), so an account that reads several of these products is counted
@@ -904,8 +923,9 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
     Company and Window; queued work is every open item for the Company (not windowed). Addressable $/mo
     is the Cost ▸ Optimization & Savings idle-timer rollup built from the SAME mart read
     (SQL + tier, so the cache is shared) — mart-only, never the live fallback; right-sizing joins it only
-    behind a toggle, like Optimize; unread maintenance joins only from the Storage & waste session handoff
-    (zero reads here). Queued work is the open ACTION_QUEUE normalised to $/mo by PERIOD.
+    behind a toggle, like Optimize; unread maintenance and storage waste join only from their Storage & waste
+    session handoffs (zero reads here; the storage rate comes from the settings the page shell already loaded).
+    Queued work is the open ACTION_QUEUE normalised to $/mo by PERIOD.
     The two are unioned and de-duplicated by entity, then a fragment projects them with measured
     defaults. Read-only; the only doorway (a row's Entity 360) is gated on can_open."""
     _lm = "_lm" if bounds is not None else ""
@@ -958,6 +978,12 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
     _unread = unread_lever(st.session_state.get(UNREAD_HANDOFF_KEY), company=company, scope=cache_scope(),
                            now=utc_now(), rate=rate, where="Cost ▸ Optimization & Savings ▸ Storage & waste")
     opps.extend(_unread.opportunities)
+    # Next-Fifty #35 storage leg: the same, for storage waste (this Company, same cache scope, priced at the storage
+    # rate in force, under 1h old). load_settings is a cache hit: the page shell read it this render.
+    _st_rate = safe_float(load_settings(_PAGE).get("STORAGE_USD_PER_TB_MONTH"), DEFAULT_STORAGE_USD_PER_TB_MONTH)
+    _storage = storage_lever(st.session_state.get(STORAGE_HANDOFF_KEY), company=company, scope=cache_scope(),
+                             now=utc_now(), rate=_st_rate, where="Cost ▸ Optimization & Savings ▸ Storage & waste")
+    opps.extend(_storage.opportunities)
     roll = rollup_savings(opps)
 
     # ---- Queued work: the open ACTION_QUEUE, normalised to $/mo -------------------------------
@@ -985,7 +1011,8 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
     _next = settle.get("next")
 
     _counted = [lever for lever, on in (("IDLE", idle.usable()), ("RESIZE", _sized_ok),
-                                        ("UNREAD_MAINT", _unread.included)) if on]
+                                        ("UNREAD_MAINT", _unread.included),
+                                        ("STORAGE_WASTE", _storage.included)) if on]
     _absent: dict[str, str] = {}
     if not idle.ok:
         _absent["IDLE"] = "the efficiency mart could not be read"
@@ -997,6 +1024,8 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
         _absent["RESIZE"] = "the sizing mart returned no rows or could not be read"
     if not _unread.included:
         _absent["UNREAD_MAINT"] = _unread.reason
+    if not _storage.included:
+        _absent["STORAGE_WASTE"] = _storage.reason
     _basis = lever_short(_counted)
     # R1-15 / R1-22: the headline follows the levers counted (Cost ▸ Optimization & Savings' rule), not the idle
     # read alone: whenever the rollup has an item it shows the figure the caption counts and the projection
@@ -1015,10 +1044,13 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
                  "help": "The Cost ▸ Optimization & Savings addressable net, de-duplicated: idle-timer savings "
                          "per warehouse (net of the resume tail) measured over "
                          f"{window_phrase(bounds, _idle_days)} of the efficiency mart; right-sizing when it is "
-                         "included (the same warehouse counts once, the larger wins); and unread maintenance only "
+                         "included (the same warehouse counts once, the larger wins); unread maintenance only "
                          "when Cost ▸ Optimization & Savings ▸ Storage & waste confirmed it against access history "
                          "this session, for this Company with the Database filter clear (the last 30 complete "
-                         "days of maintenance, " + H_BOOKED + "). When the efficiency mart cannot be read or has "
+                         "days of maintenance); and storage waste only when that section's storage-waste scan ran "
+                         "this session for this Company (tables nobody read in 90 days: " + H_STORAGE_BASIS
+                         + "). Both are ESTIMATED, " + H_BOOKED + "; a table counted by both "
+                         "counts once (the larger wins). When the efficiency mart cannot be read or has "
                          "no metering, the figure counts only the other levers and the delta says the idle timer "
                          "is missing. The caption below names the levers counted. Estimates, not verified savings."}
     kpi_row([
@@ -1044,10 +1076,16 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
                  "Their measured $ joins Proof's verified run-rate when the window closes — it never "
                  "enters this projection."},
     ])
-    st.caption(md_dollars(lever_basis(_counted, _absent, {"UNREAD_MAINT": _unread.note})))
+    st.caption(md_dollars(lever_basis(_counted, _absent, {"UNREAD_MAINT": _unread.note, "STORAGE_WASTE": _storage.note})))
     if not _unread.included and can_open("Cost Intelligence") and st.button(
             "Check unread maintenance → Cost ▸ Optimization & Savings ▸ Storage & waste",
             key="proof_link_unread", type="tertiary"):
+        _open_storage_waste()
+    # the storage-waste doorway only when unread maintenance is counted: otherwise the unread doorway above already
+    # opens the same section
+    if _unread.included and not _storage.included and can_open("Cost Intelligence") and st.button(
+            "Check storage waste → Cost ▸ Optimization & Savings ▸ Storage & waste",
+            key="proof_link_storage", type="tertiary"):
         _open_storage_waste()
     if not idle.ok:
         empty_state("unavailable", "The warehouse-efficiency mart could not be read — idle-timer "
@@ -1134,7 +1172,9 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
             row = adf.iloc[int(index)]
             kind = row.get("SOURCE_ENTITY_TYPE")
             key = row.get("SOURCE_ENTITY_KEY")
-            if pd.notna(kind) and pd.notna(key) and str(kind).strip() and str(key).strip():
+            # v4.605: only a real Entity 360 type opens (an AI_BUDGET scope item has no entity page)
+            if (pd.notna(kind) and pd.notna(key) and str(kind).strip() and str(key).strip()
+                    and str(kind).strip().upper() in ENTITY_TYPES):
                 _open_entity(str(kind).strip(), str(key).strip())
 
         # A row click opens the item's SOURCE entity in Control Room ▸ Entity 360 (no-op without one).

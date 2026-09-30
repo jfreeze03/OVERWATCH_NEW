@@ -11,6 +11,7 @@ import streamlit as st
 
 from app.core.errors import safe_page
 from app.core.query import cache_scope, run, run_batch
+from app.core.result import is_setup_absence
 from app.core.state import filters, request_navigation
 from app.data import cortex_sql, insights_sql, mart27_sql, security_sql
 from app.logic.date_windows import is_prior_month_window
@@ -107,13 +108,11 @@ from app.ui.security_center import (
 _PAGE = "Security"
 
 
-_PROBE_ABSENT = ("absent", "missing_column", "unknown_function")
-
-
 def _auth_inventory(company: str):
     """rank 9: one USERS read shared by the Authentication and Privileged access chapters
-    (run() caches by SQL, so the second chapter is a cache hit). probe=True: a USERS view
-    without TYPE / HAS_RSA_PUBLIC_KEY degrades to needs_setup, not an error on every render."""
+    (run() caches by SQL, so the second chapter is a cache hit). probe=True: an absent or unauthorised
+    object is needs_setup; a missing column (TYPE / HAS_RSA_PUBLIC_KEY drift), a timeout or any other
+    failure is 'unavailable' with the error (v4.605)."""
     return run(security_sql.user_auth_inventory(company), page=_PAGE,
                key=f"auth_inventory_{company}", tier="hourly", probe=True,
                source="USERS + FACT_LOGIN_DAILY + GRANTS_TO_USERS (auth readiness)")
@@ -134,9 +133,13 @@ def _render_auth_readiness(auth, company: str, *, evidence_ok: bool) -> None:
                    anchor="sec-auth-readiness",
                    badge=(f"{n_break} will break" if n_break else ""))
     st.caption(ROLLOUT_NOTE)
-    if not auth.ok and auth.error_kind in _PROBE_ABSENT:
-        empty_state("needs_setup", "The USERS view doesn't expose TYPE / HAS_RSA_PUBLIC_KEY to this "
-                    "app, so readiness can't be classified here. The MFA-gap list above still applies.")
+    if not auth.ok and is_setup_absence(auth.error_kind):
+        empty_state("needs_setup", "Snowflake's USERS or GRANTS_TO_USERS view, or OVERWATCH's login fact, "
+                    "isn't readable by this app here, so password-deprecation readiness can't be classified.")
+        return
+    if not auth.ok:
+        empty_state("unavailable", "The password-deprecation readiness read failed, so no account can be "
+                    "classified here.", detail=auth.error)
         return
     if auth.ok and auth.empty:
         empty_state("clean", "No enabled user in this scope holds a password, is LEGACY_SERVICE, "
@@ -201,10 +204,17 @@ def _render_admin_network_policy(company: str) -> None:
     npc = run(security_sql.admin_network_policy_coverage(company), page=_PAGE,
               key=f"admin_netpol_{company}", tier="hourly", probe=True,
               source="POLICY_REFERENCES x GRANTS_TO_USERS (admin network policies)")
-    if not npc.ok and npc.error_kind in _PROBE_ABSENT:
-        empty_state("needs_setup", "The policy-reference view isn't readable by this app here, so admin "
-                    "network-policy coverage can't be checked. Verify one admin with "
+    # v4.605: by the failure KIND -- an absent / unauthorised view is setup; a missing column (drift), a
+    # timeout or any other failure is a failed read, never "not readable here".
+    if not npc.ok and is_setup_absence(npc.error_kind):
+        empty_state("needs_setup", "Snowflake's POLICY_REFERENCES or GRANTS_TO_USERS view isn't readable by "
+                    "this app here, so admin network-policy coverage can't be checked. Verify one admin with "
                     "SHOW PARAMETERS LIKE 'NETWORK_POLICY' IN USER <name>.")
+        return
+    if not npc.ok:
+        empty_state("unavailable", "The admin network-policy read failed, so coverage can't be checked here. "
+                    "Verify one admin with SHOW PARAMETERS LIKE 'NETWORK_POLICY' IN USER <name>.",
+                    detail=npc.error)
         return
     if npc.ok and npc.empty:
         empty_state("no_data_yet", "No admin-role grants visible in this scope.")
@@ -929,7 +939,7 @@ def _render_policy_coverage() -> None:
         return
     res = run(security_sql.data_policy_coverage(), page=_PAGE, key="sec_policy_cov", tier="hourly",
               probe=True, source="POLICY_REFERENCES (masking, row-access, projection, aggregation)")
-    if not res.ok and res.error_kind in ("absent", "unknown_function"):
+    if not res.ok and is_setup_absence(res.error_kind):
         empty_state("needs_setup", POLICY_VIEW_UNREADABLE)
         return
     if not res.ok:
@@ -1011,7 +1021,7 @@ def _render_masking_parity(masked_dbs: tuple = (), *, tag_masking: bool = False)
         return
     par = run(security_sql.masking_environment_parity(), page=_PAGE, key="sec_policy_parity", tier="hourly",
               probe=True, source="POLICY_REFERENCES (masked tables grouped across environments)")
-    if not par.ok and par.error_kind in ("absent", "unknown_function"):
+    if not par.ok and is_setup_absence(par.error_kind):
         empty_state("needs_setup", POLICY_VIEW_UNREADABLE)
         return
     if not par.ok:
@@ -1377,10 +1387,15 @@ def _tag_governance_panel(company: str) -> None:
     section_header("Object-tag governance coverage", "", "security")
     probe = run(security_sql.object_tag_probe(), page=_PAGE, key="tag_probe",
                 tier="metadata", source="ACCOUNT_USAGE.TAG_REFERENCES (probe)", probe=True)
-    if not probe.ok:
+    if not probe.ok and is_setup_absence(probe.error_kind):
         st.caption("Object-tag coverage needs ACCOUNT_USAGE.TAG_REFERENCES (tag lineage), "
                    "which isn't available to this role/edition yet — panel hidden until it is. "
                    "This is object tags, distinct from the query-tag coverage on Cost.")
+        st.divider()
+        return
+    if not probe.ok:
+        empty_state("unavailable", "The TAG_REFERENCES check failed, so object-tag coverage can't be shown here.",
+                    detail=probe.error)
         st.divider()
         return
     cov = run(security_sql.object_tag_coverage(company), page=_PAGE,
@@ -1842,7 +1857,7 @@ def _ai_guardrails_tab(company: str) -> None:
     # absent view AND a missing column go unlogged: the panel must say which it was. The view exists on
     # this account (owner probe 2026-09-29), so a failure is never "Guardrails is not enabled": an absent
     # object means the app cannot read the view; anything else (a changed column, a timeout) is a failed read.
-    if not gr.ok and gr.error_kind in ("absent", "unknown_function"):
+    if not gr.ok and is_setup_absence(gr.error_kind):
         empty_state("needs_setup",
                     "The Cortex Guardrails usage view (CORTEX_AI_GUARDRAILS_USAGE_HISTORY) "
                     "is not readable by this app: it is missing in this account or region, or the app's "

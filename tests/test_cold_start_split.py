@@ -2,7 +2,11 @@
 concurrency starvation — sizing up buys nothing, so it must never be labelled "Concurrency starvation"
 or told to size up. The QOIE fingerprint builder, the per-query drill and the live warehouse_pressure
 fallback now split overload from provisioning; advise() names the dominant component while keeping the
-combined wait's points (QOP / SQL_QOP / OOS and the ranking are byte-stable)."""
+combined wait's points (QOP / SQL_QOP / OOS and the ranking are byte-stable).
+
+v4.605.0 (owner decision 2026-09-30): #17's split-unknown WORDING and behaviour are unchanged; only its
+numbers moved to the shared humanize_duration form, so the _LEGACY_QUEUED byte lock is re-pinned to the
+humanized text on purpose ("Spent 7s queued (of 10.0s total)" -> "Spent 7.0s queued (of 10s total)")."""
 
 from __future__ import annotations
 
@@ -16,7 +20,10 @@ from app.logic.query_advisor import Finding, advise
 from app.logic.query_opt import score_opportunities
 
 _ROOT = Path(__file__).resolve().parents[1]
-_LEGACY_QUEUED = ("Spent 7s queued (of 10.0s total) — either concurrency (add a cluster or size up for "
+# v4.605.0 (owner decision 2026-09-30): #17's split-unknown WORDING and behaviour are unchanged; only its
+# numbers moved to the shared humanize_duration form, so this byte lock is re-pinned to the humanized text
+# on purpose (was "Spent 7s queued (of 10.0s total)").
+_LEGACY_QUEUED = ("Spent 7.0s queued (of 10s total) — either concurrency (add a cluster or size up for "
                   "parallelism) or warehouse resume overhead (lengthen AUTO_SUSPEND / keep it warm).")
 
 

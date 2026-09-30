@@ -28,7 +28,7 @@ from datetime import datetime
 
 import pandas as pd
 
-from app.logic.formulas import safe_float
+from app.logic.formulas import humanize_duration, safe_float
 
 # Scoring weights + bands (uncalibrated starting points; the why-breakdown makes them auditable).
 _W_PROX, _W_MAG, _W_MATCH = 0.45, 0.35, 0.20
@@ -245,8 +245,8 @@ def rank_root_causes(candidates: list[dict], onset, *, entity_name: str = "",
             band = "LOW"
         if when_dt is not None and onset_dt is not None:
             lead_h = (onset_dt - when_dt).total_seconds() / 3600.0
-            lead_text = (f"{lead_h:.1f}h before onset" if lead_h >= 0
-                         else f"{-lead_h:.1f}h AFTER onset")
+            lead_text = (f"{humanize_duration(lead_h, 'h')} before onset" if lead_h >= 0
+                         else f"{humanize_duration(-lead_h, 'h')} AFTER onset")
         else:
             lead_text = "timing unknown"
         scored.append({

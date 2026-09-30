@@ -120,6 +120,16 @@ def test_a_failed_ceiling_read_is_unavailable_with_its_error(monkeypatch):
     assert "V002 set 5m at install; the value in force is read below." in seen["help"][0]
 
 
+def test_the_cortex_ceiling_reads_hr_min_sec(monkeypatch):
+    """v4.605.0 (owner 2026-09-30): the Cortex per-statement ceiling reads Hr/Min/Sec like the panel's other
+    durations (V002's "5m", the default's "48h"), not a raw "90s"."""
+    from app.core.ai import CORTEX_TIMEOUT_SECONDS
+    seen = _render_ceiling(monkeypatch, _result(None, ok=False, error="boom", error_kind="other"))
+    assert CORTEX_TIMEOUT_SECONDS == 90
+    assert "each Cortex evaluation also sends its own 1m 30s per-statement ceiling" in seen["help"][0]
+    assert "90s" not in seen["help"][0]
+
+
 def _row(value, level):
     import pandas as pd
     return pd.DataFrame([{"key": "STATEMENT_TIMEOUT_IN_SECONDS", "value": value, "default": "172800",

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from .formulas import safe_float
+from .formulas import humanize_duration, safe_float
 
 
 @dataclass(frozen=True)
@@ -86,10 +86,12 @@ def degraded_sources(results: dict) -> set[str]:
     ``ok is False`` AND ``error_kind != 'absent'``. An 'absent' read means the mart
     is simply not installed (a legitimate zero on a partial deployment), NOT a
     suppressed signal; those stay zero-penalty. A timeout / unknown_function / other
-    failure, by contrast, could be hiding a real task-failure / staleness / owner-queue
-    / over-budget condition, so it must fail the score closed (extends C1's principle
-    beyond the two REQUIRED sources). ``results`` maps source-name -> QueryResult-like
-    (anything with ``.ok`` and ``.error_kind``)."""
+    failure, or a 'privilege' one ("Insufficient privileges": the object exists, the
+    role lacks a privilege on it -- review r2 R2-1), by contrast, could be hiding a
+    real task-failure / staleness / owner-queue / over-budget condition, so it must
+    fail the score closed (extends C1's principle beyond the two REQUIRED sources).
+    ``results`` maps source-name -> QueryResult-like (anything with ``.ok`` and
+    ``.error_kind``)."""
     return {name for name, r in results.items()
             if (not getattr(r, "ok", True)) and getattr(r, "error_kind", "") != "absent"}
 
@@ -175,7 +177,7 @@ def platform_score(signals: dict, weights: dict | None = None,
         _raw = (queue_minutes - 10) * w["SCORE_PTS_QUEUE_PER_MIN"]
         drivers.append(
             ScoreDriver("Queueing", _cap(_raw, 10),
-                        f"{queue_minutes:.0f} queued minutes per day." + _cap_note(_raw, 10))
+                        f"{humanize_duration(queue_minutes, 'min')} queued per day." + _cap_note(_raw, 10))
         )
 
     spill_gb = safe_float(signals.get("spill_gb"))

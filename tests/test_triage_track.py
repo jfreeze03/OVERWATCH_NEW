@@ -168,12 +168,17 @@ def test_alerts_are_never_trackable():
     assert triage_track_item(alert, "ALL") is None
     # queue order (dollars at risk inside HIGH), de-duplicated; the schema-less task is not offered
     assert triage_track_options(q) == ["WAREHOUSE|WH_A", "WAREHOUSE|WH_B", "WAREHOUSE|WH_C", "TASK|DB.S.LOAD_A"]
-    for kind in ("ALERT", "INCIDENT", "", "USER", "QUERY"):
+    for kind in ("ALERT", "INCIDENT", "", "QUERY"):
         with pytest.raises(ValueError):
             track_entities_sql([{"ENTITY_KEY": "E1"}], entity_type=kind, source=TRIAGE_TRACK_SOURCE,
                                actor_sql="CURRENT_USER()", bulk=False)
-    # the trackable set is exactly the Optimize family + the two triage types, all real Entity 360 types
-    assert {TRACK_ENTITY_TYPE, "TASK", "WAREHOUSE"} == fix_queue._TRACKABLE_TYPES
+    # the trackable set is the Optimize family + the two triage types + (v4.605) Chargeback & AI's USER and
+    # its AI_BUDGET scope key. Every one but AI_BUDGET is a real Entity 360 type; AI_BUDGET is the one
+    # documented non-entity scope key (the Action Center / Proof drills never open it).
+    assert {TRACK_ENTITY_TYPE, "TASK", "WAREHOUSE", fix_queue.AI_USER_ENTITY_TYPE,
+            fix_queue.AI_SCOPE_ENTITY_TYPE} == fix_queue._TRACKABLE_TYPES
+    assert fix_queue._TRACKABLE_TYPES - {fix_queue.AI_SCOPE_ENTITY_TYPE} <= set(ENTITY_TYPES)
+    assert fix_queue.AI_SCOPE_ENTITY_TYPE not in ENTITY_TYPES
     assert set(TRIAGE_TRACK_TYPES) | {TRACK_ENTITY_TYPE} <= set(ENTITY_TYPES)
     assert triage_track_options(pd.DataFrame([{"KIND": "Alert"}])) == []
     assert triage_track_options(None) == []

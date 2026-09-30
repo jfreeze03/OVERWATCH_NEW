@@ -72,9 +72,9 @@ def render() -> None:
                           "evidence); the page Company/Window do not apply."},
         "Pipeline": {"applies": ("company", "days"),
                      "note": "Addressable $ scopes to Company and Window (unread maintenance, when counted, "
-                             "is its last 30 complete days); queued work is every open Action Center item for "
-                             "the Company (not windowed); the measured slider defaults (acceptance, "
-                             "realization) are account-wide."},
+                             "is its last 30 complete days), except storage waste, which is the tables' current "
+                             "bytes; queued work is every open Action Center item for the Company (not windowed); "
+                             "the measured slider defaults (acceptance, realization) are account-wide."},
     }
     section_filter_contract(f, **_contracts[section])
     if section == "Proof":

@@ -220,7 +220,7 @@ def test_quota_panel_never_reports_no_blocks_when_the_read_failed():
     assert fail < body.index("block_history(blk.df, now=account_now())") < body.index('empty_state("clean"')
     branch = body[fail:body.index("block_history(blk.df")]
     assert 'empty_state("unavailable"' in branch and 'empty_state("needs_setup"' in branch
-    assert 'blk.error_kind == "absent"' in branch and "return" not in branch
+    assert "is_setup_absence(blk.error_kind)" in branch and "return" not in branch
     assert "detail=blk.error" in branch
     assert "No per-user AI credit quota is enforcing here" not in body
     assert 'f"{block_events(in_win):,}{_plus}"' in body
@@ -595,6 +595,15 @@ def test_panel_absent_view_is_a_setup_state_and_still_states_the_exposure(monkey
     assert kinds == ["needs_setup"] and "clean" not in kinds
     assert "AI exposure:" in fake.text("caption") and not seen["tables"]
     assert _SUGGEST_HEADING in fake.text("markdown")                  # the suggestions still render
+
+
+def test_panel_privilege_error_is_a_setup_state_without_the_exposure(monkeypatch):
+    """v4.605 review r3: an "Insufficient privileges" error is a setup state like an absent view (the view exists,
+    so the blocks are unknown): needs_setup, never clean, and no exposure line (that is for a view not enabled)."""
+    fake, seen = _render(monkeypatch, _failed("privilege"))
+    assert [k for k, _ in _block_states(seen)] == ["needs_setup"]
+    assert "AI exposure:" not in fake.text("caption") and not seen["tables"]
+    assert _SUGGEST_HEADING in fake.text("markdown")
 
 
 def test_panel_failed_read_is_unavailable_and_never_clean(monkeypatch):

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.logic.formulas import safe_float
+from app.logic.formulas import humanize_duration, safe_float
 
 # Penalty rates (per unit) and caps (max points any one driver can take). Uncalibrated
 # starting points, mirroring the platform-score thresholds where they exist.
@@ -70,7 +70,7 @@ def warehouse_health(sized: pd.DataFrame | None) -> pd.DataFrame:
         if q > QUEUE_THRESHOLD_MIN:
             pen = _cap((q - QUEUE_THRESHOLD_MIN) * W_QUEUE_PER_MIN, QUEUE_CAP)
             score -= pen
-            why.append(f"{q:.0f} min/day queued")
+            why.append(f"{humanize_duration(q, 'min')}/day queued")
 
         sp = safe_float(r.get("SPILL_GB_PER_DAY"))
         if sp > SPILL_THRESHOLD_GB:
@@ -82,7 +82,7 @@ def warehouse_health(sized: pd.DataFrame | None) -> pd.DataFrame:
         if p95 > LONG_P95_SEC:
             pen = _cap((p95 - LONG_P95_SEC) / LONG_P95_SEC * W_P95, P95_CAP)
             score -= pen
-            why.append(f"p95 runtime {p95:.0f}s")
+            why.append(f"p95 runtime {humanize_duration(p95, 's')}")
 
         # Low utilization — evidence-gated (a sparse nightly-batch WH must not grade
         # "At risk" just for being idle between runs).

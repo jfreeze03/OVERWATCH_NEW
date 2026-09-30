@@ -118,9 +118,9 @@ def query_optimization_prompt(row: Mapping[str, object], findings: Sequence[Find
     """
     stats = "; ".join([
         f"warehouse_size={row.get('WAREHOUSE_SIZE') or '?'}",
-        f"elapsed={safe_float(row.get('ELAPSED_SEC')):.1f}s",
-        f"compile={safe_float(row.get('COMPILE_SEC')):.1f}s",
-        f"queued={safe_float(row.get('QUEUED_SEC')):.1f}s",
+        f"elapsed_sec={safe_float(row.get('ELAPSED_SEC')):.1f}",
+        f"compile_sec={safe_float(row.get('COMPILE_SEC')):.1f}",
+        f"queued_sec={safe_float(row.get('QUEUED_SEC')):.1f}",
         f"gb_scanned={safe_float(row.get('GB_SCANNED')):.1f}",
         f"cache_pct={safe_float(row.get('CACHE_PCT')):.0f}",
         f"remote_spill_gb={safe_float(row.get('REMOTE_SPILL_GB')):.1f}",

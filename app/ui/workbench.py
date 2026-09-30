@@ -9,6 +9,7 @@ import streamlit as st
 
 from app.core.identity import content_request_key, viewer_name
 from app.core.query import execute_statement, run
+from app.core.result import is_setup_absence
 from app.core.session import is_operator
 from app.core.state import filters, navigation_context, request_navigation
 from app.data import graph_sql, mart27_sql, mart_sql, workbench_sql
@@ -142,7 +143,9 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
         confidence_badge(confidence)
     entity_type = str(row.get("SOURCE_ENTITY_TYPE") or "").strip().upper()
     entity_key = str(row.get("SOURCE_ENTITY_KEY") or "").strip()
-    if entity_type and entity_key and st.button(
+    # v4.605: only a real Entity 360 type drills (AI_BUDGET, the Chargeback & AI scope key, is not one --
+    # opening it would land on whatever entity was last selected).
+    if entity_type in ENTITY_TYPES and entity_key and st.button(
         "Open entity 360", key=f"action_entity_{action_id}", type="tertiary"
     ):
         request_navigation(
@@ -886,9 +889,13 @@ def _object_blast_radius_panel(key: str) -> None:
     edges = run(graph_sql.object_dependency_edges(), page=_PAGE, key="object_dep_edges",
                 tier="historical", source="ACCOUNT_USAGE.OBJECT_DEPENDENCIES",
                 probe=True, max_rows=50000)
-    if not edges.ok:
+    if not edges.ok and is_setup_absence(edges.error_kind):
         st.caption("Declared object lineage needs ACCOUNT_USAGE.OBJECT_DEPENDENCIES, "
                    "which isn't available to this role/account yet — blast radius hidden.")
+        return
+    if not edges.ok:
+        empty_state("unavailable", "Declared object lineage (OBJECT_DEPENDENCIES) could not be read, so the "
+                    "blast radius can't be shown.", detail=edges.error)
         return
     if edges.truncated:
         st.warning("The account-wide dependency graph hit the row cap, so 'Declared "
@@ -915,9 +922,14 @@ def _object_blast_radius_panel(key: str) -> None:
             st.caption(f"Observed directly: {q} queries by {u} user(s) touched this object "
                        f"in {_BLAST_WINDOW_DAYS}d (ACCESS_HISTORY, includes proc/dynamic SQL) "
                        "— a count of recorded facts, not a safe-to-ALTER verdict.")
-        elif not root_cons.ok:
+        elif not root_cons.ok and is_setup_absence(root_cons.error_kind):
             st.caption("Observed-consumer evidence (ACCESS_HISTORY, Enterprise-only) is "
                        "unavailable here, so proc/dynamic-SQL usage can't be measured.")
+        elif not root_cons.ok:
+            # v4.605 review R1-13: this account is Enterprise, so a timeout / drift / other failure is a
+            # failed read with its error, never an edition claim.
+            empty_state("unavailable", "Observed consumers (ACCESS_HISTORY) could not be read, so "
+                        "proc/dynamic-SQL usage can't be measured.", detail=root_cons.error)
         return
     # observed consumers for the object itself + its declared dependents
     fqns = (key, *deps["FQN"].tolist())
@@ -926,6 +938,9 @@ def _object_blast_radius_panel(key: str) -> None:
                page=_PAGE, key=f"object_blast_cons_{key}", tier="recent",
                source="ACCOUNT_USAGE.ACCESS_HISTORY (Enterprise)", probe=True)
     measured_half = cons.ok   # False => could NOT measure (never conflate with "measured zero")
+    # v4.605 review R1-13: why the observed half is unmeasured, by kind -- the edition/role only for a true
+    # absence; a timeout / drift / other failure also renders unavailable with its error (below).
+    _unmeasured_why = "" if measured_half else lineage.observed_unmeasured_reason(cons.error_kind)
     consumers_df = cons.df if cons.usable() else pd.DataFrame()
     # The consumer fetch is LIMIT-capped; at the cap the measured half is a lower bound, so the
     # measured-vs-unmeasured split would over-state "unmeasured". Surface it like Declared dependents
@@ -944,8 +959,8 @@ def _object_blast_radius_panel(key: str) -> None:
          "help": ("Dependents actually touched in ACCESS_HISTORY in the window. The rest "
                   "are recorded but unqueried here."
                   if measured_half else
-                  "Not measured — ACCESS_HISTORY (Enterprise-only) is unavailable on this "
-                  "account/role, so this is 'could not measure', not 'measured zero'.")},
+                  f"Not measured — {_unmeasured_why}, so this is 'could not measure', not "
+                  "'measured zero'.")},
         {"label": "Deepest chain", "value": f"{summary['deepest_level']} hop(s)"},
     ])
     if measured_half and not consumers_df.empty:
@@ -965,10 +980,12 @@ def _object_blast_radius_panel(key: str) -> None:
     else:
         st.caption(
             f"{summary['dependents']} recorded dependents. The OBSERVED half could not be "
-            "measured here — ACCESS_HISTORY (Enterprise-only) is unavailable on this "
-            "account/role — so whether these dependents are actually queried is UNKNOWN, "
-            "not zero. Declared dependents also miss procs/dynamic SQL. A count of what "
-            "depends on this — never a 'safe to ALTER' verdict.")
+            f"measured here — {_unmeasured_why} — so whether these dependents are actually "
+            "queried is UNKNOWN, not zero. Declared dependents also miss procs/dynamic SQL. A "
+            "count of what depends on this — never a 'safe to ALTER' verdict.")
+        if not is_setup_absence(cons.error_kind):
+            empty_state("unavailable", "Observed consumers (ACCESS_HISTORY) could not be read, so the "
+                        "observed half of the blast radius is unknown.", detail=cons.error)
 
 
 # Watch automation (owner ask 2026-08-17): "when I click Watch, does it do
