@@ -49,7 +49,9 @@ class QueryResult:
 
 
 # v4.605: a failed read renders by its KIND. needs_setup ("not installed / not readable by this app") is
-# ONLY for a true absence: the object is missing or unauthorised ('absent') or the function is not
+# ONLY for a true absence: the object is missing or unauthorised ('absent' -- "does not exist or not
+# authorized" or "Insufficient privileges", the two errors format_snowflake_error rewrites to the setup
+# advice guard() routes to needs_setup) or the function is not
 # available ('unknown_function'). A missing column on an existing view ('missing_column') is schema
 # drift, and a 'timeout' or any 'other' failure is a failed read: each renders
 # empty_state("unavailable", <panel sentence>, detail=<res.error>), never needs_setup and never the
@@ -64,3 +66,9 @@ def is_setup_absence(error_kind: object) -> bool:
     """True when a failed read's kind is a true absence (needs_setup); False for drift, a timeout, any other
     failure, and '' / None (no classified absence)."""
     return str(error_kind or "").strip().lower() in SETUP_ABSENCE_KINDS
+
+
+def is_schema_drift(error_kind: object) -> bool:
+    """True for a missing column on an existing object ('missing_column'): schema drift, which a retry never
+    clears (a SELECT with an explicit column list fails until a migration or a redeploy lines the two up)."""
+    return str(error_kind or "").strip().lower() == "missing_column"

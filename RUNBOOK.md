@@ -933,13 +933,21 @@ and Security then shows a red "unavailable" with the error (v4.605).
 
 **A red "unavailable" on an optional panel** (v4.605). A probe read shows
 needs_setup only when the object is missing or not granted (or the function
-does not exist). A missing column (schema drift), a timeout or any other
+does not exist). "Insufficient privileges" counts as not granted, like "does
+not exist or not authorized": both show needs_setup, and a probe read logs
+neither. A missing column (schema drift), a timeout or any other
 failure shows "unavailable" with the error in its detail expander. A probe
 read does not write a missing column to APP_ERROR_LOG, so that expander is
 the only record: copy the error, then run Admin → Canary (a registered
 builder FAILs there on drift).
-A timeout usually clears on a retry. Admin → Setup progress marks a
-checklist row Unknown (not Pending) when its read fails this way.
+A timeout usually clears on a retry; drift does not (apply the missing
+migrations, or redeploy). Admin → Setup progress marks a checklist row
+Unknown (not Pending) when its read fails this way: FIX says Retry for a
+timeout and names the schema drift for a missing column, and the
+"could not be checked" line's Error detail lists each failed read's error.
+An ACCESS_HISTORY read (Entity 360 blast radius, Proof consumer reach) names
+the edition or role only when the view is absent; this account is
+Enterprise, so a timeout there says it timed out.
 
 **Numbers look wrong.** Check the source caption first (mart vs live +
 lag). ACCOUNT_USAGE lags ≤45 min (query history) to ≤24h (metering daily);

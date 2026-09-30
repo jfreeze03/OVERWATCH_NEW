@@ -243,7 +243,11 @@ def _classify_error(exc: object) -> str:
         s = str(exc or "").lower()
     except Exception:
         return "other"
-    if "does not exist or not authorized" in s:
+    # 'absent' = the role cannot reach the object: missing / not granted (002003) or held without the needed
+    # privilege (003001 "Insufficient privileges"). format_snowflake_error rewrites both to the same
+    # "run the migrations and roles.sql" text guard() routes to needs_setup, so both classify alike here
+    # (review R1-17: a privilege error was 'other' -> red 'unavailable' carrying that setup advice).
+    if "does not exist or not authorized" in s or "insufficient privileges" in s:
         return "absent"
     if "unknown function" in s:
         return "unknown_function"
