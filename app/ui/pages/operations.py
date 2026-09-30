@@ -12,7 +12,7 @@ from app.config import MAX_LIVE_WINDOW_DAYS, core_object
 from app.core.errors import safe_page
 from app.core.identity import identity_sql
 from app.core.query import execute_cancel_query, execute_statement, run, run_batch, run_batch_mixed
-from app.core.result import QueryResult
+from app.core.result import QueryResult, is_setup_absence
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters, navigation_context, request_navigation
@@ -1045,10 +1045,14 @@ def _query_insights_panel() -> None:
         return
     qi = run(insights_sql.query_insights_feed(7), page=_PAGE, key="query_insights_7",
              tier="historical", source="ACCOUNT_USAGE.QUERY_INSIGHTS", probe=True)
-    if not qi.ok:
+    if not qi.ok and is_setup_absence(qi.error_kind):
         st.caption("QUERY_INSIGHTS isn't available on this account/edition yet — "
                    "when Snowflake exposes it, its own per-query suggestions appear "
                    "here automatically.")
+        return
+    if not qi.ok:
+        empty_state("unavailable", "Snowflake's QUERY_INSIGHTS view could not be read, so its per-query "
+                    "suggestions can't be shown.", detail=qi.error)
         return
     if qi.empty:
         empty_state("clean", "Snowflake recorded no query-improvement insights in the last 7 days.")

@@ -296,6 +296,17 @@ Admin → Settings, never in code.
   storage GB by database × storage rate.
 - **AI Users** — per-user Cortex consumption, exceptions (users over the
   per-user expectation), AI budget pacing when `AI_MONTHLY_BUDGET_USD` set.
+  **Track top exceptions as work items** (v4.605, operators) writes the
+  first 10 Exceptions rows through the same Track statement as Optimize and
+  Control Room triage: one Action Center item per user (keyed on the user,
+  every signal in its detail, the strongest signal's severity, under the
+  user's own company or ALL) plus one item for the all-users budget breach,
+  keyed on the Company scope and priced only at the exposure the user items
+  do not already count. Items land UNASSIGNED, priced MONTHLY. A user or
+  scope with an open item from this page is skipped, including items queued
+  before v4.605 (matched by their old title). A Security work item on the
+  same user does not block it. An item still open from an earlier month now
+  blocks a new one; a done or dismissed item does not.
 - **Optimization** — idle advisor (warehouse-hours billed with zero
   queries = auto-suspend opportunity); right-sizing simulator (spill +
   queue profile → size suggestion; its **Check cluster use** toggle reads
@@ -360,6 +371,9 @@ Admin → Settings, never in code.
     items (SOURCE 'Control Room > Triage') for task-failure and warehouse
     spend rows through the same idempotent statement; alerts are never
     tracked (Acknowledge and the incident flow own them).
+  - Cost > Chargeback & AI exceptions (v4.605) use the same statement too,
+    keyed on the user (USER) or the Company scope (AI_BUDGET, a scope key
+    with no Entity 360 page), keeping the exception's severity.
 
   No live read on first paint. The optional live-profile toggle reuses the
   Queries scan (shared cache).
@@ -914,7 +928,18 @@ The three POLICY_REFERENCES checks (security.data_policy_coverage,
 masking_environment_parity, admin_network_policy_coverage) are not declared
 gaps: if the app's role cannot read that view they FAIL here while Security
 shows a calm needs_setup. IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE
-(snowflake/roles.sql) covers that view.
+(snowflake/roles.sql) covers that view. A renamed column FAILs here too,
+and Security then shows a red "unavailable" with the error (v4.605).
+
+**A red "unavailable" on an optional panel** (v4.605). A probe read shows
+needs_setup only when the object is missing or not granted (or the function
+does not exist). A missing column (schema drift), a timeout or any other
+failure shows "unavailable" with the error in its detail expander. A probe
+read does not write a missing column to APP_ERROR_LOG, so that expander is
+the only record: copy the error, then run Admin → Canary (a registered
+builder FAILs there on drift).
+A timeout usually clears on a retry. Admin → Setup progress marks a
+checklist row Unknown (not Pending) when its read fails this way.
 
 **Numbers look wrong.** Check the source caption first (mart vs live +
 lag). ACCOUNT_USAGE lags ≤45 min (query history) to ≤24h (metering daily);

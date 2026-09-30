@@ -153,9 +153,26 @@ _TOKENS_NOTE = "TOKENS_GRANULAR isn't available on this account's Cortex Code vi
 
 @pytest.mark.parametrize("kind", _EXPECTED_ABSENCE)
 def test_token_panel_expected_absence_keeps_the_locked_caption(monkeypatch, kind):
-    fake, seen = _render_token_panel(monkeypatch, _failed(kind))
+    res = _failed(kind)
+    if kind == "missing_column":
+        # v4.605: the note is for the documented optional column only -- format_snowflake_error keeps its name
+        res.error = "This Snowflake edition/account does not expose C.TOKENS_GRANULAR here."
+    fake, seen = _render_token_panel(monkeypatch, res)
     assert _TOKENS_NOTE in fake.text("caption"), kind
     assert seen["empty"] == [] and seen["runs"] == 1                   # returns before the credit read
+
+
+def test_token_panel_missing_other_column_is_drift(monkeypatch):
+    """v4.605: a missing column that is NOT TOKENS_GRANULAR is schema drift -- 'unavailable' with the error, never
+    the 'column doesn't exist yet' note. Drift stays unlogged on a probe read, so no Admin error-log pointer."""
+    res = _failed("missing_column")
+    res.error = "This Snowflake edition/account does not expose USER_NAME here."
+    fake, seen = _render_token_panel(monkeypatch, res)
+    ((state, msg),) = seen["empty"]
+    assert state == "unavailable" and "schema drift" in msg
+    assert "Admin error log" not in msg and "error log" not in msg.lower()
+    assert seen["detail"] == [res.error]
+    assert _TOKENS_NOTE not in fake.text("caption") and seen["runs"] == 1
 
 
 @pytest.mark.parametrize("kind", _OTHER_FAILURES)

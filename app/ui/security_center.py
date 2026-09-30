@@ -13,6 +13,7 @@ import pandas as pd
 import streamlit as st
 
 from app.core.query import execute_statement, run
+from app.core.result import is_setup_absence
 from app.core.session import is_operator
 from app.core.state import request_navigation
 from app.data import security_sql, workbench_sql
@@ -92,8 +93,12 @@ def _render_change_risk_diagnostic() -> None:
             "sec_change_risk_breakdown",
             "FACT_SECURITY_CHANGE (DESTRUCTIVE, risk>=70, 7d)",
         )
-        if not res.ok:
+        if not res.ok and is_setup_absence(res.error_kind):
             _setup_state("The change-risk breakdown")
+            return
+        if not res.ok:
+            empty_state("unavailable", "The change-risk breakdown (FACT_SECURITY_CHANGE) could not be read.",
+                        detail=res.error)
             return
         if res.empty:
             empty_state("clean", "No DESTRUCTIVE change-risk events over threshold in the last 7 days.")
@@ -192,17 +197,21 @@ def render_security_overview(company: str) -> None:
         "sec_domain_coverage",
         "Security domain coverage contract",
     )
-    if not queue.ok and not coverage.ok:
+    # v4.605: the V075 setup state only when BOTH reads are a true absence (object missing / unauthorised);
+    # a timeout, a missing column or any other failure is a failed read, never "apply V075".
+    if (not queue.ok and not coverage.ok and is_setup_absence(queue.error_kind)
+            and is_setup_absence(coverage.error_kind)):
         section_header("Security decision queue", "", "security")
         _setup_state("The security decision queue")
         return
     if not queue.ok:
         # The exception queue IS the per-domain evidence. If it did not resolve, scoring
         # off an empty frame would read every COMPLETE-coverage domain as 100/Healthy —
-        # a false all-clear painted above this notice. Surface the unresolved state and
+        # a false all-clear painted above this notice. Surface the failed read and
         # stop, before any posture/verdict/KPI is rendered.
         section_header("Security decision queue", "", "security")
-        empty_state("no_data_yet", "The domain contract loaded, but the exception queue did not resolve.")
+        empty_state("unavailable", "The security exception queue (V_SECURITY_EXCEPTION_QUEUE) could not be "
+                    "read, so no domain posture is shown.", detail=queue.error)
         return
 
     posture = domain_posture(

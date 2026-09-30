@@ -9,6 +9,7 @@ import streamlit as st
 
 from app.core.identity import content_request_key, viewer_name
 from app.core.query import execute_statement, run
+from app.core.result import is_setup_absence
 from app.core.session import is_operator
 from app.core.state import filters, navigation_context, request_navigation
 from app.data import graph_sql, mart27_sql, mart_sql, workbench_sql
@@ -142,7 +143,9 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
         confidence_badge(confidence)
     entity_type = str(row.get("SOURCE_ENTITY_TYPE") or "").strip().upper()
     entity_key = str(row.get("SOURCE_ENTITY_KEY") or "").strip()
-    if entity_type and entity_key and st.button(
+    # v4.605: only a real Entity 360 type drills (AI_BUDGET, the Chargeback & AI scope key, is not one --
+    # opening it would land on whatever entity was last selected).
+    if entity_type in ENTITY_TYPES and entity_key and st.button(
         "Open entity 360", key=f"action_entity_{action_id}", type="tertiary"
     ):
         request_navigation(
@@ -886,9 +889,13 @@ def _object_blast_radius_panel(key: str) -> None:
     edges = run(graph_sql.object_dependency_edges(), page=_PAGE, key="object_dep_edges",
                 tier="historical", source="ACCOUNT_USAGE.OBJECT_DEPENDENCIES",
                 probe=True, max_rows=50000)
-    if not edges.ok:
+    if not edges.ok and is_setup_absence(edges.error_kind):
         st.caption("Declared object lineage needs ACCOUNT_USAGE.OBJECT_DEPENDENCIES, "
                    "which isn't available to this role/account yet — blast radius hidden.")
+        return
+    if not edges.ok:
+        empty_state("unavailable", "Declared object lineage (OBJECT_DEPENDENCIES) could not be read, so the "
+                    "blast radius can't be shown.", detail=edges.error)
         return
     if edges.truncated:
         st.warning("The account-wide dependency graph hit the row cap, so 'Declared "

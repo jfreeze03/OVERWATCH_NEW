@@ -62,11 +62,24 @@ def test_aggregate_budget_row_is_the_sum_of_its_constituents():
 
 # ---- F2 fix: the queued aggregate ESTIMATED_USD is the incremental exposure ---------
 def test_ai_queue_stamps_aggregate_with_incremental_estimate():
+    # v4.605: the formula moved from the page's inline INSERT loop into fix_queue.ai_exception_track_items (the
+    # shared Track path); lock it by behaviour. The scope item carries only the exposure the user items tracked
+    # with it do not already count, so the queued set sums to the scope total exactly once.
+    from app.logic.fix_queue import AI_SCOPE_ENTITY_TYPE, AI_USER_ENTITY_TYPE, ai_exception_track_items
+
+    def _row(user, usd, source="(all sources)", signal="Budget breach", sev="Critical"):
+        return {"SEVERITY": sev, "SIGNAL": signal, "USER_NAME": user, "SOURCE": source,
+                "TOTAL_REQUESTS": 10, "CREDITS_PER_REQUEST": 0.1, "PROJECTED_30D_USD": usd}
+
+    scope = _row("(all users)", 440.0, signal="AI budget breach (all users)")
+    groups = ai_exception_track_items(pd.DataFrame([scope, _row("A", 220.0), _row("B", 110.0)]), "ALFA")
+    users = [i["ESTIMATED_USD"] for i in groups[AI_USER_ENTITY_TYPE]]
+    (agg,) = groups[AI_SCOPE_ENTITY_TYPE]
+    assert users == [220.0, 110.0] and agg["ESTIMATED_USD"] == 110.0
+    assert agg["ESTIMATED_USD"] + sum(users) == 440.0
     body = _src("app/ui/pages/cost_parts/ai_chargeback.py")
-    assert "_est = max(0.0, _proj - _other_proj) if _is_agg else _proj" in body
-    assert "sql_number(_est)" in body
-    # the raw full-value insert (which caused the overlap) is gone
-    assert "sql_number(r['PROJECTED_30D_USD'])" not in body
+    assert "_other_proj" not in body and "sql_number(r['PROJECTED_30D_USD'])" not in body
+    assert "ai_exception_track_items(exceptions, company)" in body
 
 
 def test_ai_queue_incremental_formula_zeroes_the_overlap():

@@ -16,6 +16,7 @@ import streamlit as st
 
 from app.config import MAX_LIVE_WINDOW_DAYS
 from app.core.query import run, run_batch
+from app.core.result import is_setup_absence
 from app.core.state import can_open, request_navigation
 from app.data import app_cost_sql, cost_sql, insights_sql, mart27_sql, mart_sql, workbench_sql
 from app.data.common import resolve_effective_window
@@ -1386,10 +1387,13 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                       "cost-anomaly model) on demand, beside the z-score sweep above."):
         na = run(cost_sql.native_anomaly_insights(), page=_PAGE, key="native_anomalies",
                  tier="historical", source="SNOWFLAKE.LOCAL.ANOMALY_INSIGHTS", probe=True)
-        if not na.ok:
+        if not na.ok and is_setup_absence(na.error_kind):
             st.caption("The native ANOMALY_INSIGHTS feed isn't available on this account yet "
                        "(it appears once Snowflake's cost-anomaly detection is active). The "
                        "z-score sweep above still runs.")
+        elif not na.ok:
+            empty_state("unavailable", "Snowflake's native ANOMALY_INSIGHTS feed could not be read. The z-score "
+                        "sweep above still runs.", detail=na.error)
         elif na.empty:
             empty_state("clean", "Snowflake's native model reports no cost anomalies.")
         else:
@@ -1558,10 +1562,14 @@ def _account_storage_tiers(company: str, days: int, settings: dict, *, bounds: t
         res = run(cost_sql.storage_account_truth_live(days, bounds=bounds), page=_PAGE,
                   key=f"stor_acct_live_{days}{_lm}", tier="historical",
                   source="ACCOUNT_USAGE.STORAGE_USAGE (avg of daily bytes, live)", probe=True)
-    if not res.ok:
+    if not res.ok and is_setup_absence(res.error_kind):
         st.caption("Account storage tiers need migration V046 "
                    "(FACT_STORAGE_ACCOUNT_DAILY) or STORAGE_USAGE access — an admin "
                    "can apply it on Admin → Migrations & freshness.")
+        return
+    if not res.ok:
+        empty_state("unavailable", "Account storage by tier could not be read, so the tier bill can't be shown.",
+                    detail=res.error)
         return
     if res.empty or safe_float(res.df.iloc[0].get("DAYS_AVERAGED"), default=0.0) <= 0:
         st.caption("No account storage rows in this window yet.")

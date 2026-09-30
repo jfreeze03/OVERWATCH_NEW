@@ -1,5 +1,5 @@
-"""Operations > Optimize fix queue: per-family diagnosis, and the shared Track write path (Optimize +
-Control Room triage). Pure module.
+"""Operations > Optimize fix queue: per-family diagnosis, and the ONE shared Track write path (Operations >
+Optimize, Control Room triage and, since v4.605, Cost > Chargeback & AI exceptions). Pure module.
 
 Runs on top of ``decision.prioritize_workloads`` output (lanes, IMPACT_USD_30D, CONFIDENCE) and
 never re-ranks it. For each measured query family it names ONE diagnosis and a first fix, from
@@ -46,7 +46,29 @@ TRACK_OPEN_STATUS = "Tracked (open)"
 TRACK_UNKNOWN_STATUS = "Unknown"
 TRIAGE_TRACK_SOURCE = "Control Room > Triage"
 TRIAGE_TRACK_TYPES = ("TASK", "WAREHOUSE")
-_TRACKABLE_TYPES = frozenset({TRACK_ENTITY_TYPE, *TRIAGE_TRACK_TYPES})
+# Optimize + triage Track items land at MEDIUM or LOW only: HIGH/CRITICAL items feed the Overview score.
+TRACK_SEVERITIES = ("MEDIUM", "LOW")
+# v4.605: Cost > Chargeback & AI exceptions track through the SAME write. One item per user (USER, keyed on the
+# exception's USER_NAME, every signal of that user in its detail) plus the all-users budget breach, keyed on the
+# Company scope (AI_BUDGET -- a scope key, NOT an Entity 360 type: the drill guards in workbench.py and
+# decision_studio.py never open it). The source is the legacy writer's SOURCE, byte-identical, so its still-open
+# rows are recognised (see _LEGACY_TITLE_ARMS). Severity is preserved (the legacy writer's behaviour).
+AI_TRACK_SOURCE = "Cost Intelligence > Chargeback & AI > AI users"
+AI_USER_ENTITY_TYPE = "USER"
+AI_SCOPE_ENTITY_TYPE = "AI_BUDGET"
+AI_TRACK_CAP = 10             # exception ROWS read per click (the legacy writer's head(10))
+AI_TRACK_SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
+_AI_SCOPE_ROW = "(all users)"
+_TRACKABLE_TYPES = frozenset({TRACK_ENTITY_TYPE, *TRIAGE_TRACK_TYPES, AI_USER_ENTITY_TYPE, AI_SCOPE_ENTITY_TYPE})
+# Pre-v4.605 Chargeback & AI rows carry no SOURCE_ENTITY_TYPE/KEY; their TITLE is 'Cortex <signal>: <user>
+# (<source>)', and the scope row's is 'Cortex AI budget breach (all users): (all users) ((all sources))' under
+# COMPANY = the scope. A still-open legacy row blocks the matching entity-keyed item (source_scoped only). CONTAINS
+# is an exact substring (no LIKE wildcards); ': ' and ' (' bracket the name, so JDOE never matches XJDOE.
+_LEGACY_TITLE_ARMS = {
+    "USER": "CONTAINS(UPPER(q.TITLE), ': ' || UPPER(v.ENTITY_KEY) || ' (')",
+    "AI_BUDGET": ("CONTAINS(UPPER(q.TITLE), ': (ALL USERS) (') "
+                  "AND UPPER(COALESCE(q.COMPANY, '')) = UPPER(v.ENTITY_KEY)"),
+}
 
 # The portfolio's specific NEXT_MOVE values and the first fix each one implies.
 _HEURISTIC_FIX = {
@@ -421,9 +443,12 @@ def track_items(rows: pd.DataFrame | Iterable[Mapping[str, object]], company: st
 
 
 def track_entities_sql(items: list[dict], *, entity_type: str, source: str, actor_sql: str, bulk: bool,
-                       cooldown_days: int = TRACK_COOLDOWN_DAYS, rebroke_keys: Iterable[str] = ()) -> str:
+                       cooldown_days: int = TRACK_COOLDOWN_DAYS, rebroke_keys: Iterable[str] = (),
+                       severities: Iterable[str] = TRACK_SEVERITIES, company_from_user: bool = False,
+                       source_scoped: bool = False) -> str:
     """ONE idempotent INSERT for the given track items ('' when there are none) -- the ONE Track write
-    path, shared by Operations > Optimize (query families) and Control Room triage (tasks, warehouses).
+    path, shared by Operations > Optimize (query families), Control Room triage (tasks, warehouses) and
+    Cost > Chargeback & AI (users + the all-users budget scope, v4.605).
 
     Keyed on the ENTITY (SOURCE_ENTITY_TYPE + upper-cased SOURCE_ENTITY_KEY) plus open status,
     never the title or company, so an entity is tracked once whichever scope clicked it. ``bulk``
@@ -432,22 +457,33 @@ def track_entities_sql(items: list[dict], *, entity_type: str, source: str, acto
     through sql_literal / sql_number, and the statement holds no ';' outside literals (one
     statement, so it passes the executor allow-list).
 
-    ``entity_type`` must be QUERY_FINGERPRINT, TASK or WAREHOUSE (ValueError otherwise): an ALERT or
-    INCIDENT has no lifecycle link from ACTION_QUEUE, so a tracked alert's work item would drift from
-    the alert's own state. ``rebroke_keys`` (bulk only, Next-Fifty #46) lifts the DONE -- never the
-    DROPPED -- cooldown for keys whose measured outcome re-broke or never held; with none the
-    statement is byte-identical to the pre-#46 builder."""
+    ``entity_type`` must be QUERY_FINGERPRINT, TASK, WAREHOUSE, USER or AI_BUDGET (ValueError otherwise):
+    an ALERT or INCIDENT has no lifecycle link from ACTION_QUEUE, so a tracked alert's work item would
+    drift from the alert's own state. ``rebroke_keys`` (bulk only, Next-Fifty #46) lifts the DONE -- never
+    the DROPPED -- cooldown for keys whose measured outcome re-broke or never held; with none the
+    statement is byte-identical to the pre-#46 builder.
+
+    v4.605 options (the defaults leave the statement byte-identical to v4.604): ``severities`` is the
+    allowed SEVERITY set (anything else writes LOW); ``company_from_user`` (USER only, ValueError
+    otherwise) resolves COMPANY in SQL as COALESCE(NULLIF(COMPANY_FOR_USER(key), 'UNKNOWN'), 'ALL') --
+    the V163 [28] owner rule, on a plain column (V030 shape law); ``source_scoped`` keys the NOT EXISTS
+    on ``source`` too (a Security work item on the same user never blocks an AI-spend item) and, for a
+    type in _LEGACY_TITLE_ARMS, also lets a still-open pre-v4.605 row of that source (no entity key)
+    block by its TITLE."""
     kind = str(entity_type or "").strip().upper()
     if kind not in _TRACKABLE_TYPES:
         raise ValueError(f"Track does not cover entity type {kind or '(blank)'}: only "
                          f"{', '.join(sorted(_TRACKABLE_TYPES))}")
+    if company_from_user and kind != AI_USER_ENTITY_TYPE:
+        raise ValueError(f"company_from_user resolves a USER's company; not {kind or '(blank)'}")
+    allowed = {_text(s).upper() for s in severities}
     values: list[str] = []
     for item in items:
         key = _text(item.get("ENTITY_KEY"))
         if not key:
             continue
         sev = _text(item.get("SEVERITY")).upper()
-        sev = sev if sev in ("MEDIUM", "LOW") else "LOW"
+        sev = sev if sev in allowed else "LOW"
         conf = item.get("CONFIDENCE")
         conf_f = safe_float(conf, default=float("nan"))
         conf_sql = "NULL" if conf is None or conf_f != conf_f else sql_number(max(0.0, min(conf_f, 1.0)))
@@ -472,11 +508,26 @@ def track_entities_sql(items: list[dict], *, entity_type: str, source: str, acto
                  f"               AND COALESCE(q.COMPLETED_AT, q.UPDATED_AT) >= "
                  f"DATEADD('day', -{days}, CURRENT_TIMESTAMP())" + rebroke + ")") if bulk else "")
     rows_sql = ",\n    ".join(values)
+    company_col = (f"COALESCE(NULLIF({companies.COMPANY_FOR_USER_FN}(v.ENTITY_KEY), 'UNKNOWN'), 'ALL')"
+                   if company_from_user else "v.COMPANY")
+    entity_match = (f"UPPER(q.SOURCE_ENTITY_TYPE) = {sql_literal(kind, 40)}\n"
+                    f"      AND UPPER(q.SOURCE_ENTITY_KEY) = UPPER(v.ENTITY_KEY)")
+    legacy_arm = _LEGACY_TITLE_ARMS.get(kind, "")
+    if source_scoped and legacy_arm:
+        match = (f"q.SOURCE = {sql_literal(source, 120)}\n"
+                 f"      AND ((UPPER(q.SOURCE_ENTITY_TYPE) = {sql_literal(kind, 40)}\n"
+                 f"            AND UPPER(q.SOURCE_ENTITY_KEY) = UPPER(v.ENTITY_KEY))\n"
+                 f"           OR (q.SOURCE_ENTITY_TYPE IS NULL\n"
+                 f"               AND {legacy_arm}))")
+    elif source_scoped:
+        match = f"q.SOURCE = {sql_literal(source, 120)}\n      AND {entity_match}"
+    else:
+        match = entity_match
     return f"""
 INSERT INTO {core_object('ACTION_QUEUE')}
     (COMPANY, SEVERITY, TITLE, DETAIL, OWNER, STATUS, SOURCE, SOURCE_ENTITY_TYPE,
      SOURCE_ENTITY_KEY, CONFIDENCE, ESTIMATED_USD, PERIOD, UPDATED_BY)
-SELECT v.COMPANY, v.SEVERITY, v.TITLE, v.DETAIL, 'UNASSIGNED', 'OPEN', {sql_literal(source, 120)},
+SELECT {company_col}, v.SEVERITY, v.TITLE, v.DETAIL, 'UNASSIGNED', 'OPEN', {sql_literal(source, 120)},
        {sql_literal(kind, 40)}, v.ENTITY_KEY, v.CONF::FLOAT, v.USD::NUMBER(18,2),
        NULLIF(v.PER, ''), {actor_sql}
 FROM (VALUES
@@ -484,8 +535,7 @@ FROM (VALUES
 ) AS v (COMPANY, SEVERITY, TITLE, DETAIL, ENTITY_KEY, CONF, USD, PER)
 WHERE NOT EXISTS (
     SELECT 1 FROM {core_object('ACTION_QUEUE')} q
-    WHERE UPPER(q.SOURCE_ENTITY_TYPE) = {sql_literal(kind, 40)}
-      AND UPPER(q.SOURCE_ENTITY_KEY) = UPPER(v.ENTITY_KEY)
+    WHERE {match}
       AND (UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS'){cooldown}))
 """.strip()
 
@@ -628,3 +678,93 @@ def tracked_elsewhere(item_company: object, scope: object) -> bool:
     co = _text(item_company)
     sc = _text(scope).upper() or "ALL"
     return bool(co) and co.upper() != "ALL" and sc not in ("ALL", co.upper())
+
+
+# --------------------------------------------------------------------------------------------
+# v4.605: Cost > Chargeback & AI exceptions glue (one item per user + the all-users budget scope)
+# --------------------------------------------------------------------------------------------
+
+def _ai_signal_segment(rec: Mapping[str, object]) -> str:
+    return (f"{_text(rec.get('SIGNAL'))} ({_text(rec.get('SOURCE'))}): "
+            f"{int(safe_float(rec.get('TOTAL_REQUESTS'))):,} requests, projected 30d "
+            f"{format_usd(safe_float(rec.get('PROJECTED_30D_USD')))}, "
+            f"cr/request {safe_float(rec.get('CREDITS_PER_REQUEST')):.4f}")
+
+
+def ai_exception_track_items(exceptions: pd.DataFrame | None, company: str, *,
+                             cap: int = AI_TRACK_CAP) -> dict[str, list[dict]]:
+    """The Chargeback & AI Exceptions table as Track items: {"USER": [...], "AI_BUDGET": [...]} (both keys,
+    always). Reads exceptions.head(cap) in table order -- the '(all users)' scope row first, then strongest
+    first -- so the cap counts exception ROWS, as the legacy writer's head(10) did.
+
+    USER: one item per upper-cased USER_NAME (first-seen order; a blank name is skipped). SEVERITY and TITLE
+    come from the user's first (strongest) row; TITLE keeps the legacy 'Cortex <signal>: <user> (<source>)'
+    format, plus ' + N more signal(s)'. DETAIL lists every signal of that user, frozen at tracking time.
+    ESTIMATED_USD = the '(all sources)' budget row's PROJECTED_30D_USD when the user has one (it already sums
+    every source), else the sum over the user's distinct-source rows; PERIOD 'MONTHLY' when priced. COMPANY is
+    a placeholder: track_entities_sql(company_from_user=True) resolves it per user in SQL.
+
+    AI_BUDGET: the '(all users)' row (at most one), keyed on the Company scope ('ALL' when blank). Its
+    ESTIMATED_USD is the scope exposure BEYOND the user items tracked with it (max 0, None at 0), so the queued
+    set sums to the scope total once."""
+    out: dict[str, list[dict]] = {AI_USER_ENTITY_TYPE: [], AI_SCOPE_ENTITY_TYPE: []}
+    if exceptions is None or exceptions.empty:
+        return out
+    scope = _text(company) or "ALL"
+    by_user: dict[str, list[dict]] = {}
+    scope_rec: dict | None = None
+    for rec in exceptions.head(max(0, int(cap))).to_dict("records"):
+        user = _text(rec.get("USER_NAME"))
+        if not user:
+            continue
+        if user == _AI_SCOPE_ROW:
+            scope_rec = scope_rec if scope_rec is not None else rec
+            continue
+        by_user.setdefault(user.upper(), []).append(rec)      # dicts keep first-seen order
+    tail = ". Projected at the time of tracking."
+    for recs in by_user.values():
+        first = recs[0]
+        user = _text(first.get("USER_NAME"))
+        title = f"Cortex {_text(first.get('SIGNAL'))}: {user} ({_text(first.get('SOURCE'))})"
+        if len(recs) > 1:
+            title += f" + {len(recs) - 1} more signal" + ("s" if len(recs) - 1 > 1 else "")
+        head = "; ".join(_ai_signal_segment(r) for r in recs)
+        budget = [r for r in recs if _text(r.get("SOURCE")).lower() == "(all sources)"]
+        if budget:
+            est = safe_float(budget[0].get("PROJECTED_30D_USD"))
+        else:
+            per_source: dict[str, float] = {}
+            for r in recs:
+                per_source.setdefault(_text(r.get("SOURCE")).upper(), safe_float(r.get("PROJECTED_30D_USD")))
+            est = sum(per_source.values())
+        priced = est > 0
+        out[AI_USER_ENTITY_TYPE].append({
+            "COMPANY": scope[:40],
+            "SEVERITY": _text(first.get("SEVERITY")).upper(),
+            "TITLE": title[:300],
+            "DETAIL": head[:max(0, 1000 - len(tail))] + tail,
+            "ENTITY_KEY": user[:500],
+            "CONFIDENCE": None,
+            "ESTIMATED_USD": (round(est, 2) if priced else None),
+            "PERIOD": ("MONTHLY" if priced else ""),
+        })
+    if scope_rec is not None:
+        proj = safe_float(scope_rec.get("PROJECTED_30D_USD"))
+        tracked = sum(safe_float(i["ESTIMATED_USD"]) for i in out[AI_USER_ENTITY_TYPE])
+        est = max(0.0, proj - tracked)
+        priced = round(est, 2) > 0
+        out[AI_SCOPE_ENTITY_TYPE].append({
+            "COMPANY": scope[:40],
+            "SEVERITY": _text(scope_rec.get("SEVERITY")).upper(),
+            "TITLE": (f"Cortex {_text(scope_rec.get('SIGNAL'))}: {_text(scope_rec.get('USER_NAME'))} "
+                      f"({_text(scope_rec.get('SOURCE'))})")[:300],
+            "DETAIL": (f"{int(safe_float(scope_rec.get('TOTAL_REQUESTS'))):,} requests, projected 30d "
+                       f"{format_usd(proj)}, cr/request {safe_float(scope_rec.get('CREDITS_PER_REQUEST')):.4f}. "
+                       "Its estimate is the scope exposure beyond the user items tracked with it (avoids "
+                       "double-counting).")[:1000],
+            "ENTITY_KEY": scope[:500],
+            "CONFIDENCE": None,
+            "ESTIMATED_USD": (round(est, 2) if priced else None),
+            "PERIOD": ("MONTHLY" if priced else ""),
+        })
+    return out

@@ -14,7 +14,7 @@ import pandas as pd
 import streamlit as st
 
 from app.core.query import run
-from app.core.result import QueryResult
+from app.core.result import QueryResult, is_setup_absence
 from app.data import cost_sql, insights_sql, mart27_sql, mart_sql, security_sql
 from app.logic import contract_planner, steering
 from app.logic.forecast import contract_pace
@@ -129,12 +129,18 @@ def _org_truth_panel() -> bool:
     is the truth, and the SETTINGS-based credits pacing below becomes the
     steering layer. Returns True when it rendered."""
     bal = org_balance_result(_PAGE)   # the ONE shared read (Brief / Overview / Cost verdict share it)
-    if bal is None or not bal.usable():
+    # v4.605: "isn't visible" only for a true absence (memoized None, or an absent / unauthorised view); a
+    # failed read is 'unavailable'; an ok-but-empty read reaches the summary's own "no usable rows" line.
+    if bal is None or (not bal.ok and is_setup_absence(bal.error_kind)):
         st.caption(
             "Snowflake's contract balance (ORGANIZATION_USAGE.REMAINING_BALANCE_DAILY) "
             "isn't visible to this role, so pacing uses SETTINGS below. Granting org "
             "visibility unlocks balance, burn, and runway automatically."
         )
+        return False
+    if not bal.ok:
+        empty_state("unavailable", "Snowflake's contract balance (REMAINING_BALANCE_DAILY) could not be read, so "
+                    "pacing uses SETTINGS below.", detail=bal.error)
         return False
     summary = contract_planner.remaining_balance_summary(bal.df)
     if not summary.get("ok"):

@@ -249,8 +249,9 @@ def _classify_error(exc: object) -> str:
         return "unknown_function"
     # wave-2 review #3: an optional COLUMN missing on an EXISTING view (the
     # documented degrade path for TOKENS_GRANULAR / QUERY_INSIGHTS schema drift)
-    # is a compilation "invalid identifier" — a probe read must treat it like
-    # an absent object, not error-log it on every render.
+    # is a compilation "invalid identifier" — a probe read leaves it unlogged; the
+    # panel renders it unavailable (v4.605, result.is_setup_absence) unless it is
+    # the documented optional TOKENS_GRANULAR.
     if "invalid identifier" in s:
         return "missing_column"
     if "statement reached its statement or warehouse timeout" in s or "timeout" in s:

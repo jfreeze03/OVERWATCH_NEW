@@ -109,6 +109,8 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 | Measured proc costs: $/call leaderboard, price-a-CALL/session, trend-one-procedure by name | Cost -> Unit costs |
 | Client driver/version inventory with BEHIND flags + Snowflake's support floor (UNSUPPORTED / nearing end of support, yours vs Snowflake-run; #34) | Security -> Clients |
 | Masking / row-access / projection / aggregation policy coverage per database, tag-based masking, same-name environment grouping with each family's databases that have no column-level masking reference (#43) | Security -> Exposure |
+| Cortex AI exceptions tracked as Action Center work items: one per user plus the all-users budget scope, through the shared idempotent Track write (v4.605) | Cost -> Chargeback & AI |
+| Optional panels fail by kind: needs setup only for a missing or ungranted object; schema drift, timeouts and other failed reads show "unavailable" with the error, and Setup progress marks them Unknown (v4.605) | Security, Cost, Operations, Admin, Control Room |
 | Delivery SLOs, alert fatigue, acceptance funnel, per-page cache-hit telemetry | Alerts -> History, Admin -> Performance |
 | Flyway-readiness (ledger panel + adoption runbook) | Admin, docs/FLYWAY_ADOPTION.md |
 | Partial-success batching (one bad member no longer drags siblings serial) | app-wide (v4.20) |
