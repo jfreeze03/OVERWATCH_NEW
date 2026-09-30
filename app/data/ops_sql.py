@@ -1184,8 +1184,9 @@ def warehouse_timeout_tail(days: int = 30, company: str = "ALL") -> str:
     timeout already cancelled (the Snowflake timeout message token, failure_advisor's), the lowest and
     highest ceiling those cancels fired at (TIMEOUT_FIRED_MIN_SEC / _MAX_SEC: N parsed from the message's
     "timeout of N second(s)", thousands commas stripped -- the W5b probe's regex; a cancel fires at the
-    lowest ceiling for THAT statement, which can be a user, session or client value below the warehouse's
-    cap, or an earlier, lower warehouse value inside the window), and one RUNS_OVER_<s> count per cap-ladder
+    lowest ceiling for THAT statement, which can be a user, session, client or task value below the
+    warehouse's cap, or an earlier, lower warehouse or account value inside the window; the message gives the
+    number only), and one RUNS_OVER_<s> count per cap-ladder
     step (the completed statements a cap of <s> seconds would have cancelled). TIMEOUT_CANCELLED_TOTAL is the scope total from a window SUM (never a frame sum).
 
     The p99 is read LIVE because no mart carries one: FACT_QUERY_HOURLY keeps only a per-cell P95,

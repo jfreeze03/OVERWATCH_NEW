@@ -258,7 +258,16 @@ def test_canary_panel_names_the_one_expected_fail(monkeypatch):
     assert status["cortex.code_token_types"] == "FAIL"                  # the classification is unchanged
     assert any(_TOKEN_TYPES_EXCEPTION in h for h in helps), helps
     assert _TOKEN_TYPES_EXCEPTION in fake.text("caption")
-    assert "When its ERROR names TOKENS_GRANULAR (an invalid identifier), that FAIL is expected" in fake.text("caption")
+    # review R2-6/R2-7: the same error text also means a renamed or dropped column (the drift the FAIL is kept
+    # for), so the note never calls it expected outright: it is conditional on what the operator can observe
+    caps = fake.text("caption")
+    assert ("That FAIL is expected only if the CoCo efficiency review (Cost > Chargeback & AI) has never shown "
+            "token types here.") in caps
+    assert ("If it has shown them before, the column was renamed or dropped: that is drift, so fix "
+            "cortex_sql.cortex_code_token_types.") in caps
+    for text in (caps, *helps):
+        assert "no drift to fix" not in text and "that FAIL is expected and" not in text
+        assert "this account" not in text                         # the note states no account's history
     # every other FAIL (or none) carries no such note: the exception is scoped to its own entry
     _, fake, _ = _render_canary_tab(monkeypatch, {"cortex.quota_access_block_history": "missing_column"})
     assert _TOKEN_TYPES_EXCEPTION not in fake.text("caption")
@@ -275,3 +284,22 @@ def test_canary_comment_never_cites_a_read_timeout_sis_does_not_apply():
     assert "against the live tier's 30s timeout" not in flat
     assert "live" not in STATEMENT_PARAMS_TIMEOUT_TIERS
     assert "no per-tier read timeout applies" in flat and "STATEMENT_TIMEOUT_IN_SECONDS" in flat
+
+
+def test_docs_list_every_new_canary_and_the_conditional_exception():
+    """Review R2-9: the glossary Canary row listed 4 of the 6 v4.603 checks and, like RUNBOOK's 'Canary
+    failures', read every FAIL as drift while Admin > Canary names one conditional exception. Both now carry
+    the exception in the panel's own conditional terms, never 'no drift to fix'."""
+    from app.data.canary import CANARIES
+    registered = {name for name, _ in CANARIES}
+    new = (*_PROBE_CANARIES, "security.client_version_info", "ops.warehouse_timeout_impact")
+    assert set(new) <= registered
+    row = next(ln for ln in read("FEATURE_GLOSSARY.md").splitlines() if ln.startswith("| **N registered statements"))
+    assert "v4.603 adds 6 entries" in row
+    for name in new:
+        assert (name if not name.startswith("cortex.") else name.split(".", 1)[1]) in row, name
+    runbook = re.sub(r"\s+", " ", read("RUNBOOK.md"))
+    canary_failures = runbook.split("**Canary failures.**", 1)[1][:700]
+    for text in (row, canary_failures):
+        assert "never shown token types" in text and "fix cortex_sql.cortex_code_token_types" in text
+        assert "no drift to fix" not in text and "nothing to fix" not in text

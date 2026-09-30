@@ -365,9 +365,13 @@ SOC. **Governance drift score** at top (§6). Sections:
   cannot be read, or none of its entries lists a minimum supported version
   (a renamed key reads NULL without an error), support reads 'unavailable',
   the support KPIs show '—', and STATUS (BEHIND = older than the newest
-  version of the same driver among your rows) is the fallback. A version of
-  yours with no minimum to compare with (NOT LISTED) is 'not checked': the
-  KPIs show the count and are never a green 0, and the caption names it.
+  version of the same driver among your rows) is the fallback. A version
+  with no minimum to compare with (NOT LISTED, or NO MINIMUM LISTED: its
+  entry lists no minimum, so no verdict is given) is 'not checked' in every
+  support KPI, yours and Snowflake-run alike: the KPIs show the count (or '—'
+  when nothing could be checked) and are never a green 0, and the caption
+  names yours. If no entry lists a nearing-end-of-support or recommended
+  version (a renamed key), that KPI shows '—' and the caption says so.
   If the inventory hits the app's row cap, the support KPIs, the upgrade
   list and the behind count are withheld (they would be partial): narrow
   the window or company scope. CSV export on the panel.
@@ -569,9 +573,11 @@ you tick the override. Take that seriously on hour-plus ETL warehouses
 2026-09-29; one was a timeout cancel, so the drawer, which counts completed
 statements only, shows at most 26). The posture table's "Fired at" is the
 ceiling a timeout cancel actually fired at; "below cap" means the lowest
-ceiling that fired is under the warehouse's effective cap: a user, session or
-client value fired, or an earlier, lower warehouse value did (the cap shown is
-today's value; the window reaches back 30-90 days). "Managed compute" rows
+ceiling that fired is under the warehouse's effective cap, so a lower ceiling
+fired: a user, session, client or task value, or an earlier, lower warehouse
+or account value (the message gives the number of seconds, not which of these
+set it; the cap shown is today's value and the window reaches back 30-90
+days). "Managed compute" rows
 (COMPUTE_SERVICE_WH*) are Snowflake's serverless-task and upgrade pools:
 nothing to grant or set there. In the Emergency lever, a warehouse timeout of
 0 is Snowflake's 7-day maximum, not "no cap", and a lower session/account
@@ -845,6 +851,11 @@ Route rows ENABLED with the right MIN_SEVERITY? APP_ERROR_LOG shows
 
 **Canary failures.** Column drift in ACCOUNT_USAGE or a dropped object.
 The failing check names the builder; APP_ERROR_LOG has the SQL error.
+One conditional exception: cortex.code_token_types also FAILs (its error
+names TOKENS_GRANULAR) on accounts whose Cortex Code views predate that
+optional column. That is expected only if the CoCo efficiency review has
+never shown token types on the account; if it has, the column was renamed
+or dropped: fix cortex_sql.cortex_code_token_types.
 
 **Numbers look wrong.** Check the source caption first (mart vs live +
 lag). ACCOUNT_USAGE lags ≤45 min (query history) to ≤24h (metering daily);

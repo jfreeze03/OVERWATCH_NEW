@@ -1473,9 +1473,13 @@ _CLIENTS_HELP = (
     "end of support. BELOW RECOMMENDED = supported but older than Snowflake's recommended version. "
     "Snowflake-run rows come from Snowflake's own services (the Snowflake Web App / Snowsight, "
     "SnowServices ingress). Snowflake upgrades those, and there is nothing to install on your side. "
-    "NOT LISTED = the function has no entry for this client. A version of yours that could not be "
-    "checked against a minimum (NOT LISTED, or an entry with no minimum) is counted as 'not checked' "
-    "and never shown as a clean green 0. NO VERSION = the client did not report one."
+    "NOT LISTED = the function has no entry for this client, or its entry lists no version. NO MINIMUM "
+    "LISTED = the entry lists no minimum supported version, so no verdict is given (every other status is "
+    "defined against that minimum). A version that could not be checked against a minimum (NOT LISTED or "
+    "NO MINIMUM LISTED) counts as 'not checked' in every support KPI, yours and Snowflake-run alike, and is "
+    "never shown as a clean green 0. If no entry lists a nearing-end-of-support or a recommended version "
+    "(a renamed key reads empty), that KPI shows '—' and the caption says so. NO VERSION = the client did "
+    "not report one."
     "\n\nDRIVER and VERSION parse from CLIENT_APPLICATION_ID ('(no client id)' when it is empty). PROGRAM "
     "is whatever the client self-reports (VS Code, DBeaver and most JDBC/Python tools do; many ODBC tools "
     "such as Erwin do not — '(not reported)' means exactly that). STATUS compares each of your versions "
@@ -1513,27 +1517,44 @@ def _clients_tab(company: str, days: int, *, bounds: tuple | None = None) -> Non
     # every count below is withheld or marked as a floor when it fires.
     capped = bool(getattr(res, "truncated", False))
     counts = cs.support_counts(ann) if floors is not None and not capped else None
+    bands = cs.floor_bands(floors) if floors is not None else None
     no_counts = ("Snowflake's support floor could not be read." if floors is None
                  else "The driver inventory hit the row cap, so this count would be partial.")
+    # Review R2-2/R2-3/R2-8, one rule for every support KPI: a version counts only when it was compared with
+    # a minimum; each KPI is qualified by its OWN side's unchecked versions (NOT LISTED / NO MINIMUM LISTED),
+    # '—' when none of that side could be checked, and a band no entry lists at all (a renamed key) is '—'.
+    _sides = {
+        "yours": ("not_checked_yours", "checked_yours", "your driver versions", "the caption below names them"),
+        "snowflake": ("not_checked_snowflake", "checked_snowflake", "the Snowflake-run driver versions",
+                      "the table marks them NOT LISTED or NO MINIMUM LISTED"),
+    }
+    _band_keys = {"nearing": ("nearing-end-of-support", "minimumNearingEndOfSupportVersion"),
+                  "recommended": ("recommended", "recommendedVersion")}
 
-    def _kpi(label: str, key: str, bad_sev: str, help_text: str, unchecked_key: str = "") -> dict:
+    def _kpi(label: str, key: str, bad_sev: str, help_text: str, side: str = "yours", band: str = "") -> dict:
         if counts is None:
             return {"label": label, "value": "—", "help": no_counts}
-        unchecked = counts[unchecked_key] if unchecked_key else 0
-        if unchecked and not counts["checked_yours"]:
+        if band and bands is not None and not getattr(bands, band):
+            what, json_key = _band_keys[band]
             return {"label": label, "value": "—",
-                    "help": "None of your driver versions could be checked against Snowflake's floor; the "
-                            "caption below names them."}
+                    "help": f"{help_text} Not shown: no entry of Snowflake's function lists a {what} version "
+                            f"({json_key}; its key name may have changed), so no version could be checked "
+                            "against one."}
+        unchecked_key, checked_key, whose, where = _sides[side]
+        unchecked, checked = counts[unchecked_key], counts[checked_key]
+        if unchecked and not checked:
+            return {"label": label, "value": "—",
+                    "help": f"None of {whose} could be checked against a minimum; {where}."}
         n = counts[key]
         item = {"label": label, "value": f"{n}", "help": help_text}
         if n:
             item["severity"] = bad_sev
         elif not unchecked:
-            item["severity"] = "ok"          # green only when every one of your versions was checked
+            item["severity"] = "ok"          # green only when every version this KPI covers was checked
         if unchecked:
             item["sub"] = f"{unchecked} not checked"
-            item["help"] = (f"{help_text} Not counted here: {unchecked} of your driver versions that could "
-                            "not be checked against Snowflake's floor (the caption below names them).")
+            item["help"] = (f"{help_text} Not counted here: {unchecked} of {whose} that could not be "
+                            f"checked against a minimum ({where}).")
         return item
 
     _floor_mark = "+" if capped else ""
@@ -1544,15 +1565,15 @@ def _clients_tab(company: str, days: int, *, bounds: tuple | None = None) -> Non
         {"label": "Driver+version combos", "value": f"{cs.driver_version_count(ann)}{_floor_mark}",
          "help": "Distinct driver x version (one version reported by two programs counts once)." + _capped_help},
         _kpi("Unsupported, yours to upgrade", "unsupported_yours", "bad",
-             "Driver versions below Snowflake's minimum supported version, run by your clients.",
-             "not_checked_yours"),
+             "Driver versions below Snowflake's minimum supported version, run by your clients."),
         _kpi("Unsupported, Snowflake-run", "unsupported_snowflake", "info",
-             "Below the minimum, but run by Snowflake's own web app or services: Snowflake upgrades these."),
+             "Below the minimum, but run by Snowflake's own web app or services: Snowflake upgrades these.",
+             side="snowflake"),
         _kpi("Nearing end of support", "nearing_eos", "warn",
              "Yours: at or above the minimum but below the version Snowflake lists as nearing end of support.",
-             "not_listed_yours"),
+             band="nearing"),
         _kpi("Below recommended", "below_recommended", "info",
-             "Yours: supported, but older than Snowflake's recommended version.", "not_listed_yours"),
+             "Yours: supported, but older than Snowflake's recommended version.", band="recommended"),
     ])
     # Re-sorted only when the support verdict exists; otherwise the builder's own order stands. Either
     # way the sort_label names the real order (it used to claim 'last seen').
@@ -1570,7 +1591,7 @@ def _clients_tab(company: str, days: int, *, bounds: tuple | None = None) -> Non
             with st.expander("Support-floor read error"):
                 st.code(_detail)
     elif not capped:
-        st.caption(cs.support_caption(ann))
+        st.caption(cs.support_caption(ann, bands))
     if not capped:
         behind = cs.behind_count(ann)
         st.caption(

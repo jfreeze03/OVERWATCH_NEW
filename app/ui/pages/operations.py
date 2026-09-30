@@ -3841,12 +3841,14 @@ def _stmt_timeout_posture_panel(company: str, days: int) -> None:
             "TIMEOUT_CANCELLED_RUNS": st.column_config.NumberColumn(
                 "Timed out", help="Cancelled at any ceiling (warehouse, account, user, session, client or "
                                   "task), which can be lower than the effective cap shown."),
+            # review R2-10: the 'below cap' cause list is stmt_timeout.FIRED_BELOW_CAUSES verbatim (status_notes')
             "TIMEOUT_FIRED": st.column_config.TextColumn(
                 "Fired at", help="The ceiling those cancels fired at, lowest to highest (from Snowflake's "
                                  "'timeout of N second(s)' message). 'below cap' = the lowest of them is "
-                                 "under this warehouse's effective cap: a user, session or client value "
-                                 "fired, or an earlier, lower warehouse value did (the cap shown is today's "
-                                 "value; the window reaches back 30-90 days)."),
+                                 "under this warehouse's effective cap, so a lower ceiling fired: a user, "
+                                 "session, client or task value, or an earlier, lower warehouse or account "
+                                 "value (the message gives the number of seconds, not which of these set it). "
+                                 "The cap shown is today's value; the window reaches back 30-90 days."),
             "WOULD_CANCEL_RUNS": st.column_config.NumberColumn("Suggested cap would cancel"),
         })
     if not tail.ok:
@@ -3877,7 +3879,7 @@ def _stmt_timeout_posture_panel(company: str, days: int) -> None:
         "(the Window, at least 30 and at most 90, trailing), with at least 100 runs; elapsed includes "
         "compile and queue time, so it errs long. Under a company scope only warehouses active in the "
         "window are listed (SHOW WAREHOUSES carries no company). Admin ▸ Performance shows the app "
-        "warehouse's own value."))
+        "warehouse's effective ceiling by the same rule."))
     result_caption(tail)
 
 

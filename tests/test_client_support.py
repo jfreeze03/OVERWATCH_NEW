@@ -18,6 +18,7 @@ Snowflake's version numbers appear here as FIXTURES only; the app never hard-cod
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 import sqlite3
@@ -87,7 +88,12 @@ def test_version_key_pads_segments_and_rejects_no_version():
     ("?", ("2.0.0", "2.0.0", "2.0.0"), cs.NO_VERSION),                 # bare 'SQLAPI': never compared
     ("?", (None, None, None), cs.NOT_LISTED),                          # Snowsight: no entry
     ("4.0.0", ("", "", ""), cs.NOT_LISTED),                            # an entry missing every key
-    ("1.0.0", (None, None, "2.0.0"), cs.BELOW_RECOMMENDED),            # only the keys it has
+    # review R2-8: an entry with no minimum gives no verdict (every other status is defined against it)
+    ("1.0.0", (None, None, "2.0.0"), cs.NOT_COMPARED),
+    ("3.13.22", (None, "3.20.1", "4.3.4"), cs.NOT_COMPARED),
+    ("?", (None, None, "2.0.0"), cs.NOT_COMPARED),
+    ("1.0.0", ("0.5.0", None, None), cs.OK),                          # a blank band per entry is skipped
+    ("1.0.0", ("0.5.0", None, "2.0.0"), cs.BELOW_RECOMMENDED),
 ])
 def test_support_status_on_the_probe_rows(version, floor, expected):
     assert cs.support_status(version, *floor) == expected
@@ -233,7 +239,8 @@ def test_caption_says_how_many_of_yours_could_not_be_checked():
     ann = cs.annotate_support(_drivers(), floors)
     counts = cs.support_counts(ann)
     assert counts["unsupported_yours"] == 2                            # Python 3.10.1, ODBC 3.2.2
-    assert (counts["checked_yours"], counts["not_checked_yours"], counts["not_listed_yours"]) == (10, 2, 2)
+    assert (counts["checked_yours"], counts["not_checked_yours"]) == (10, 2)
+    assert (counts["checked_snowflake"], counts["not_checked_snowflake"]) == (2, 0)
     text = cs.support_caption(ann)
     assert text.startswith("2 driver versions below Snowflake's supported minimum are yours to upgrade: ")
     assert text.endswith(" 2 of your driver versions could not be checked against a minimum "
@@ -248,9 +255,12 @@ def test_caption_never_reads_clean_when_nothing_of_yours_could_be_checked():
     assert (counts["checked_yours"], counts["not_checked_yours"]) == (0, 1)
     text = cs.support_caption(ann)
     assert "None of your driver versions in this window is below" not in text
+    # review R2-4: after '... for that driver', 'below it' pointed at the driver: the tail names the minimum
     assert text == ("None of your driver versions could be checked against Snowflake's supported minimum "
                     "(Spark 2.16.0): Snowflake's function lists no minimum for that driver. 1 driver version "
-                    "below it is Snowflake-run (Snowflake's own web app or services): no action.")
+                    "below Snowflake's supported minimum is Snowflake-run (Snowflake's own web app or "
+                    "services): no action.")
+    assert "below it" not in text
     # some checked, some not: the clean sentence counts only the checked ones and names the rest
     rows = [("Spark 2.16.0", "spark-submit", ["A"], 3), ("JDBC 4.3.4", "x", ["B"], 2)]
     text = cs.support_caption(cs.annotate_support(_drivers_of(rows), _floors()))
@@ -276,9 +286,11 @@ def test_client_version_info_builder_uses_the_probe_shape():
     assert not re.search(r"\d+\.\d+\.\d+", sql)                   # never a hard-coded Snowflake version
 
 
-# A dotted three-part version standing on its own: '3.19.1' inside 'JDBC 3.19.1 today' is one; 'v4.603.0',
-# '3.19.1.4' and 'x3.19.1' are not (a word or dot touches it).
-_VERSION_IN_TEXT = re.compile(r"(?<![\w.])\d+\.\d+\.\d+(?![\w.])")
+# A dotted three-part version standing on its own, with an optional 'v': '3.19.1' in 'JDBC 3.19.1 today', in
+# 'below 3.19.1.' (a sentence-final period does not shield it: review R2-1) and in 'JDBC v3.19.1'. Not one:
+# '3.19.1.4' and '10.0.0.1' (a fourth segment), 'x3.19.1' (a word touches it). findall returns the captured
+# version, so the app's own vX.YYY.Z release numbers are still exempted by _APP_RELEASE below.
+_VERSION_IN_TEXT = re.compile(r"(?<![\w.])[vV]?(\d+\.\d+\.\d+)(?!\.?\d)(?!\w)")
 # The app's OWN release numbers carry a three-digit minor (4.603.0); Snowflake's client versions never do
 # (JDBC 3.25.0, Go 2.2.0, Python connector 4.7.5, .NET 4.1.0), so one is never mistaken for the other.
 _APP_RELEASE = re.compile(r"\d+\.\d{3,}\.\d+")
@@ -310,6 +322,11 @@ def test_the_version_guard_catches_a_version_inside_a_sentence():
     assert _hard_coded_versions('JDBC_NOTE = "JDBC below 3.19.1 is unsupported"') == ["3.19.1"]
     assert _hard_coded_versions('def f(n):\n    return f"{n} below 3.12.3"') == ["3.12.3"]
     assert _hard_coded_versions('X = "4.3.4"') == ["4.3.4"]
+    # review R2-1: a sentence-final version and a 'v' prefix used to pass
+    assert _hard_coded_versions('H = "Upgrade JDBC below 3.19.1."') == ["3.19.1"]
+    assert _hard_coded_versions('H = "The minimum is 3.19.1. Upgrade now"') == ["3.19.1"]
+    assert _hard_coded_versions('H = "upgrade to JDBC v3.19.1 today"') == ["3.19.1"]
+    assert _hard_coded_versions('def f(n):\n    return f"{n} is below 3.12.3."') == ["3.12.3"]
     # not a Snowflake version: docstring examples, the app's own release numbers, version-like fragments
     assert _hard_coded_versions('"""Doc: 3.10.2 > 3.9.1."""\ndef g():\n    """\'3.13.22\' -> (3, 13, 22, 0)"""') == []
     from app.config import APP_VERSION  # the app's own release number, derived
@@ -359,6 +376,9 @@ def test_status_colours():
     assert muted in css("WHO_UPGRADES", "Snowflake-run") and css("WHO_UPGRADES", "Yours") == ""
     assert css("STATUS", "OK") == ""                                            # 'OK' green only here
     assert "#123e2c" in css("SUPPORT_STATUS", "OK")
+    assert muted in css("SUPPORT_STATUS", "NO MINIMUM LISTED")                   # no verdict: never green
+    for label in cs.STATUS_LABELS.values():
+        assert css("SUPPORT_STATUS", label), label
 
 
 # ---------------------------------------------------------------------------
@@ -631,7 +651,8 @@ def test_counts_and_caption_match_the_probe():
     assert cs.driver_family_count(ann) == 8                    # '(no client id)' is not a family
     assert cs.no_client_id_sessions(ann) == 4
     # every version of yours with a version number was checked against a minimum
-    assert (counts["checked_yours"], counts["not_checked_yours"], counts["not_listed_yours"]) == (12, 0, 0)
+    assert (counts["checked_yours"], counts["not_checked_yours"]) == (12, 0)
+    assert (counts["checked_snowflake"], counts["not_checked_snowflake"]) == (2, 0)   # Go 1.1.5, 1.6.17
 
 
 def test_behind_count_is_one_per_driver_version_not_per_program():
@@ -739,10 +760,18 @@ def _failed(kind, error="boom"):
                            error_kind=kind, source="stub", fetched_at=None, cache_hit=False)
 
 
-def _info_frame() -> pd.DataFrame:
+def _info_frame(floors: list[cs.ClientFloor] | None = None) -> pd.DataFrame:
     return pd.DataFrame([{"CLIENT_ID": f.client_id, "CLIENT_APP_ID": f.client_app_id,
                           "MIN_SUPPORTED_VERSION": f.min_supported, "NEARING_EOS_VERSION": f.nearing_eos,
-                          "RECOMMENDED_VERSION": f.recommended, "RAW_ENTRY": "{}"} for f in _floors()])
+                          "RECOMMENDED_VERSION": f.recommended, "RAW_ENTRY": "{}"}
+                         for f in (_floors() if floors is None else floors)])
+
+
+def _minless(app_id: str, keep_nearing: bool = False) -> list[cs.ClientFloor]:
+    """_floors() with one driver's only entry listing no minimum (and no nearing-EOS version unless kept):
+    the W4c probe's min-less Go entry, as the driver's only one."""
+    return [dataclasses.replace(f, min_supported="", nearing_eos=f.nearing_eos if keep_nearing else "")
+            if f.client_app_id == app_id else f for f in _floors()]
 
 
 def _render(monkeypatch, info, drivers=None):
@@ -862,6 +891,144 @@ def test_render_dashes_kpis_when_none_of_yours_could_be_checked(monkeypatch):
     caps = fake.text("caption")
     assert "None of your driver versions could be checked" in caps
     assert "in this window is below" not in caps
+    assert ("None of your driver versions could be checked against Snowflake's supported minimum (Spark 2.16.0): "
+            "Snowflake's function lists no minimum for that driver. 1 driver version below Snowflake's supported "
+            "minimum is Snowflake-run (Snowflake's own web app or services): no action.") in caps
+
+
+def _helps(seen) -> str:
+    return "\n".join(k["help"] for k in seen["kpis"][0])
+
+
+def _assert_never_green_over_unchecked(seen) -> None:
+    for label in _SUPPORT_KPIS:
+        k = seen["kpi"][label]
+        assert k.get("severity") != "ok", (label, k)
+    assert "against Snowflake's floor" not in _helps(seen)       # review R2-2: 'against a minimum', precisely
+
+
+def test_render_state1_a_drivers_only_entry_lists_no_minimum(monkeypatch):
+    """Review R2-2 state 1 / R2-8: Go's only entry lists no minimum (the W4c shape). Nothing of yours and
+    nothing Snowflake-run could be compared with a minimum, so every support KPI is '—' and the table gives
+    no verdict. It used to show Nearing '0' green, Snowflake-run '0' green (Go 1.1.5 is really below its
+    minimum) and Below recommended '2', beside a dashed yours-KPI saying nothing could be checked."""
+    rows = [("Go 2.0.2", "Go", ["A"], 3), ("Go 1.16.0", "Go", ["B"], 2), ("Go 1.1.5", "Snowflake Web App", ["C"], 1)]
+    fake, seen = _render(monkeypatch, _ok(_info_frame(_minless("Go"))), drivers=_ok(_drivers_of(rows)))
+    kpi = seen["kpi"]
+    for label in _SUPPORT_KPIS:
+        assert kpi[label]["value"] == "—" and "severity" not in kpi[label], (label, kpi[label])
+    assert kpi["Nearing end of support"]["help"] == ("None of your driver versions could be checked against a "
+                                                     "minimum; the caption below names them.")
+    assert kpi["Unsupported, Snowflake-run"]["help"] == (
+        "None of the Snowflake-run driver versions could be checked against a minimum; the table marks them "
+        "NOT LISTED or NO MINIMUM LISTED.")
+    _assert_never_green_over_unchecked(seen)
+    ((table, _kw),) = seen["tables"]
+    assert set(table["SUPPORT_STATUS"]) == {"NO MINIMUM LISTED", "NO MINIMUM LISTED (Snowflake-run)"}
+    assert "BELOW RECOMMENDED" not in " ".join(table["SUPPORT_STATUS"])
+    assert "None of your driver versions could be checked against Snowflake's supported minimum" in (
+        fake.text("caption"))
+
+
+def test_render_state2_every_row_not_listed(monkeypatch):
+    """Review R2-2 state 2: only the .NET entry, so every row is NOT LISTED. 'Unsupported, Snowflake-run' used
+    to read a green 0 over Go 1.1.5 / 1.6.17, which nothing compared with a minimum."""
+    info = _info_frame()
+    _fake, seen = _render(monkeypatch, _ok(info[info["CLIENT_APP_ID"] == ".NET"]))
+    for label in _SUPPORT_KPIS:
+        assert seen["kpi"][label]["value"] == "—" and "severity" not in seen["kpi"][label], label
+    _assert_never_green_over_unchecked(seen)
+    ((table, _kw),) = seen["tables"]
+    assert {s.split(" (")[0] for s in table["SUPPORT_STATUS"]} == {"NOT LISTED"}
+
+
+def test_render_state3_mixed_uses_one_not_checked_count(monkeypatch):
+    """Review R2-2 state 3 / R2-8: Go's only entry lists no minimum and JDBC has none. The same 6 unchecked
+    versions of yours qualify all three yours-KPIs (it read '6 not checked' on one and '2 not checked' on the
+    next two, and counted Go's versions as 'supported'), and the Snowflake-run KPI is '—', not a green 0."""
+    floors = [f for f in _minless("Go") if f.client_app_id != "JDBC"]
+    fake, seen = _render(monkeypatch, _ok(_info_frame(floors)))
+    kpi = seen["kpi"]
+    assert (kpi["Unsupported, yours to upgrade"]["value"], kpi["Unsupported, yours to upgrade"]["severity"]) == ("2", "bad")
+    assert kpi["Nearing end of support"]["value"] == "0" and "severity" not in kpi["Nearing end of support"]
+    # Python 3.16.0, JavaScript 3.0.0, ODBC 3.12.1: the Go versions are no longer called 'supported'
+    assert (kpi["Below recommended"]["value"], kpi["Below recommended"]["severity"]) == ("3", "info")
+    for label in ("Unsupported, yours to upgrade", "Nearing end of support", "Below recommended"):
+        assert kpi[label]["sub"] == "6 not checked", label
+        assert ("Not counted here: 6 of your driver versions that could not be checked against a minimum (the "
+                "caption below names them).") in kpi[label]["help"], label
+    sf = kpi["Unsupported, Snowflake-run"]
+    assert sf["value"] == "—" and "severity" not in sf
+    _assert_never_green_over_unchecked(seen)
+    ((table, _kw),) = seen["tables"]
+    status = dict(zip(zip(table["DRIVER"], table["VERSION"], table["PROGRAM"], strict=True),
+                      table["SUPPORT_STATUS"], strict=True))
+    assert status[("JDBC", "3.13.22", "com.amazonaws.services.glue.P")] == "NOT LISTED"
+    assert status[("Go", "2.1.0", "Go")] == "NO MINIMUM LISTED"
+    assert status[("Go", "1.1.5", "Snowflake Web App")] == "NO MINIMUM LISTED (Snowflake-run)"
+    assert "6 of your driver versions could not be checked against a minimum" in fake.text("caption")
+
+
+@pytest.mark.parametrize("keep_nearing", [False, True])
+def test_a_floor_with_no_minimum_is_never_called_supported(monkeypatch, keep_nearing):
+    """Review R2-8: JDBC's only entry keeps its recommended (and optionally nearing-EOS) version but lists no
+    minimum. JDBC 3.13.22 is really below the minimum; it read BELOW RECOMMENDED (or NEARING END OF SUPPORT),
+    was counted in that KPI with no qualifier ('supported'), while the caption said it could not be checked."""
+    floors = _minless("JDBC", keep_nearing=keep_nearing)
+    counts = cs.support_counts(cs.annotate_support(_drivers(), floors))
+    assert (counts["below_recommended"], counts["nearing_eos"]) == (7, 0)     # JDBC 3.25.0 dropped out of 8
+    assert (counts["checked_yours"], counts["not_checked_yours"]) == (10, 2)
+    _fake, seen = _render(monkeypatch, _ok(_info_frame(floors)))
+    kpi = seen["kpi"]
+    for label in ("Unsupported, yours to upgrade", "Nearing end of support", "Below recommended"):
+        assert kpi[label]["sub"] == "2 not checked", label
+    assert kpi["Nearing end of support"]["value"] == "0" and "severity" not in kpi["Nearing end of support"]
+    _assert_never_green_over_unchecked(seen)
+    ((table, _kw),) = seen["tables"]
+    jdbc = set(table[table["DRIVER"] == "JDBC"]["SUPPORT_STATUS"])
+    assert jdbc == {"NO MINIMUM LISTED"}, jdbc
+
+
+def test_floor_bands_flag_a_band_no_entry_lists():
+    assert cs.floor_bands(_floors()) == cs.FloorBands(nearing=True, recommended=True)
+    no_rec = [dataclasses.replace(f, recommended="") for f in _floors()]
+    assert cs.floor_bands(no_rec) == cs.FloorBands(nearing=True, recommended=False)
+    no_near = [dataclasses.replace(f, nearing_eos="n/a") for f in _floors()]    # unparseable is no value
+    assert cs.floor_bands(no_near) == cs.FloorBands(nearing=False, recommended=True)
+    # one entry listing the band is enough: a blank band on a single entry is legitimate, not drift
+    one = [dataclasses.replace(f, nearing_eos="") for f in _floors() if f.client_app_id != "Go"] + [
+        f for f in _floors() if f.client_app_id == "Go"]
+    assert cs.floor_bands(one).nearing is True
+    ann = cs.annotate_support(_drivers(), no_rec)
+    text = cs.support_caption(ann, cs.floor_bands(no_rec))
+    assert text.endswith(" No entry of Snowflake's function lists a recommended version (its key name may have "
+                         "changed), so OK here does not mean up to date.")
+    assert "recommended 4.3.4" not in text
+    assert cs.support_caption(ann) == cs.support_caption(ann, cs.FloorBands(True, True))
+
+
+@pytest.mark.parametrize(("keep", "dashed", "json_key", "clause", "other"), [
+    (("MIN", "NEARING"), "Below recommended", "recommendedVersion",
+     "No entry of Snowflake's function lists a recommended version (its key name may have changed), so OK here "
+     "does not mean up to date.", ("Nearing end of support", "0")),
+    (("MIN", "RECOMMENDED"), "Nearing end of support", "minimumNearingEndOfSupportVersion",
+     "No entry of Snowflake's function lists a nearing-end-of-support version (its key name may have changed), "
+     "so a version nearing end of support reads BELOW RECOMMENDED or OK here.", ("Below recommended", "8")),
+])
+def test_render_when_one_band_key_drifts(monkeypatch, keep, dashed, json_key, clause, other):
+    """Review R2-3: the minimum is read but a renamed nearing-EOS or recommended key reads empty on every entry.
+    That band's KPI used to read a green '0' (Below recommended went from 8 to 0 with the recommended key gone)
+    and every such version read OK / BELOW RECOMMENDED. Now that KPI is '—' naming the unread key, the caption
+    says why, and the verdicts that need only the minimum still render."""
+    fake, seen = _render(monkeypatch, _ok(_drifted_info_frame(keep)))
+    kpi = seen["kpi"]
+    assert kpi[dashed]["value"] == "—" and "severity" not in kpi[dashed]
+    assert json_key in kpi[dashed]["help"] and "its key name may have changed" in kpi[dashed]["help"]
+    assert kpi["Unsupported, yours to upgrade"]["value"] == "3"
+    assert kpi["Unsupported, Snowflake-run"]["value"] == "2"
+    label, value = other                                           # the band that was read still renders
+    assert kpi[label]["value"] == value, kpi[label]
+    assert clause in fake.text("caption")
 
 
 def test_render_when_the_inventory_hits_the_row_cap(monkeypatch):

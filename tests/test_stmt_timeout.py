@@ -187,9 +187,13 @@ def test_status_notes_name_each_cause():
     below = status_notes({"fired_below": ["WH_ALFA_QUERY", "WH_ALFA_TRANSFORM_PRD"]})
     # review R1-19: 'below cap' judges the LOWEST ceiling that fired (a straddling range is flagged too), so
     # the note says the lowest one, not "the ceiling that fired"
+    # review R2-10: the causes name 'task' (as the adjacent 'Timed out' texts do) and an earlier account value,
+    # and never attribute the ceiling to one level: the parse reads the number only
     assert below == ["Timed out below the effective cap on WH_ALFA_QUERY, WH_ALFA_TRANSFORM_PRD: the lowest "
-                     "ceiling that fired ('Fired at') is lower than the warehouse's cap, so a user, session or "
-                     "client value fired below it (or an earlier, lower warehouse value), not that cap."]
+                     "ceiling that fired ('Fired at') is lower than the warehouse's cap, so at least some of "
+                     "those cancels were not that cap. The lower ceiling is a user, session, client or task "
+                     "value, or an earlier, lower warehouse or account value (the message gives the number of "
+                     "seconds, not which of these set it)."]
     many = status_notes({"fired_below": [f"WH_{i}" for i in range(9)]})[0]
     assert "WH_5 and 3 more:" in many and "WH_6" not in many
 
@@ -335,7 +339,7 @@ def test_fired_at_is_tied_to_the_ceiling_that_fired():
 def test_fired_below_cap_judges_the_lowest_ceiling_that_fired():
     """Review R1-19: FIRED_BELOW_CAP judges the LOWEST ceiling that fired (TIMEOUT_FIRED_MIN_SEC), not the
     highest. A range that straddles the cap (cancels at 600 s AND at the 6h cap itself) IS flagged: some of its
-    cancels were not that cap firing (a user, session or client value, or an earlier, lower warehouse value), and
+    cancels were not that cap firing (stmt_timeout.FIRED_BELOW_CAUSES), and
     that is what 'below cap' tells the reader. (spec_s2 proposed MAX < EFFECTIVE, which would flag a warehouse
     only when EVERY cancel fired below its cap and hide the straddle; MIN is the rule the code documents.)"""
     tail = _tail(("WH_MIX", 5000, 100.0, 21000.0, 3, {}, (600.0, 21600.0)),
@@ -354,9 +358,11 @@ def test_fired_below_cap_judges_the_lowest_ceiling_that_fired():
 
 
 def test_fired_at_help_names_every_cause_of_below_cap():
-    """Review R1-6/R1-12: the 'Fired at' column help names the same causes as status_notes and fired_below_cap:
-    a user, session or client value, OR an earlier, lower warehouse value (SHOW reads today's cap, the window
-    reaches back 30-90 days), so the hover text never blames a user or client for an old warehouse value."""
+    """Review R1-6/R1-12/R2-10: the 'Fired at' column help names the same causes as status_notes and
+    fired_below_cap, verbatim (FIRED_BELOW_CAUSES): a user, session, client or TASK value -- the same levels
+    the 'Timed out' help lists beside it -- OR an earlier, lower warehouse or account value (SHOW reads today's
+    cap, the window reaches back 30-90 days), and says the message gives only the number, so the hover text
+    never blames one level for a ceiling the parse cannot attribute."""
     import ast
     tree = ast.parse(read("app/ui/pages/operations.py"))
     helps = [kw.value.value for node in ast.walk(tree) if isinstance(node, ast.Call)
@@ -365,11 +371,24 @@ def test_fired_at_help_names_every_cause_of_below_cap():
     assert len(helps) == 1, helps
     (help_,) = helps
     assert "'below cap' = the lowest of them is under this warehouse's effective cap" in help_
-    assert "a user, session or client value" in help_ and "an earlier, lower warehouse value" in help_
+    from app.logic.stmt_timeout import FIRED_BELOW_CAUSES
+    assert FIRED_BELOW_CAUSES in help_ and "task" in FIRED_BELOW_CAUSES
+    assert "an earlier, lower warehouse or account value" in FIRED_BELOW_CAUSES
+    assert "not which of these set it" in FIRED_BELOW_CAUSES
     assert "today's" in help_ and "30-90 days" in help_
+    (note,) = status_notes({"fired_below": ["WH_A"]})
+    assert f"The lower ceiling is {FIRED_BELOW_CAUSES}." in note
+    # every level the adjacent 'Timed out' texts list, except today's effective cap itself, is a cause
+    for level in ("user", "session", "client", "task", "warehouse", "account"):
+        assert level in FIRED_BELOW_CAUSES, level
     runbook = re.sub(r"\s+", " ", read("RUNBOOK.md"))
     assert '"below cap" means the lowest ceiling that fired is under the warehouse\'s effective cap' in runbook
-    assert "an earlier, lower warehouse value" in runbook.split('"below cap" means', 1)[1][:400]
+    below = runbook.split('"below cap" means', 1)[1][:400]
+    assert "a user, session, client or task value" in below
+    assert "an earlier, lower warehouse or account value" in below
+    glossary = read("FEATURE_GLOSSARY.md")
+    assert "a user, session, client or task value, or an earlier, lower warehouse or account value" in glossary
+    assert "a user, session or client value" not in glossary
     # review R1-7/R1-10: the probe's 27 counted every status; the drawer counts completed statements only
     assert "ran 27 such statements" not in runbook
     assert "27 statements of 1h or more in 30 days, any status" in runbook and "at most 26" in runbook
@@ -811,11 +830,14 @@ def test_admin_parity_and_untouched():
     admin = read("app/ui/pages/admin.py")
     m = re.search(r"^_SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S = ([\d_]+)$", admin, re.M)
     assert m and int(m.group(1).replace("_", "")) == stmt_timeout.SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S == 172_800
-    # review R1-8 moved this lock ("stmt_timeout." not in admin): Admin's ceiling tile now shows the ENFORCED
-    # value through the shared pure helpers (0 = the 7-day maximum), and only those; its SHOW stays its own
-    # literal (the shared cache entry, locked above)
-    assert set(re.findall(r"stmt_timeout\.(\w+)", admin)) == {"parse_timeout_row", "enforced_s"}
+    # review R1-8 moved this lock ("stmt_timeout." not in admin), and review R2-5 again: Admin's ceiling tile
+    # shows the EFFECTIVE ceiling (the lower non-zero of the warehouse and account values) through the shared
+    # pure helpers, and only those; it reads the account value with the posture panel's builder (one cache
+    # entry), while its warehouse SHOW stays its own literal (the shared cache entry, locked above)
+    assert set(re.findall(r"stmt_timeout\.(\w+)", admin)) == {
+        "parse_timeout_row", "enforced_s", "derive_account_timeout", "effective_timeout_s"}
     assert "ops_sql.warehouse_stmt_timeout_sql" not in admin
+    assert admin.count("ops_sql.account_stmt_timeout_sql()") == 1
 
 
 def test_duration_and_count_naming():

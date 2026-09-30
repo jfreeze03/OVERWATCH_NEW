@@ -21,8 +21,8 @@ when that is anything but a verified zero.
 
 A timeout cancel fires at whichever ceiling is lowest for THAT statement (warehouse, account, user,
 session, client or task), so the per-warehouse 'Timed out' count is paired with the ceiling that fired
-(TIMEOUT_FIRED_MIN_SEC / _MAX_SEC, parsed from the error text): one below the effective cap is a user,
-session or client value (or an earlier warehouse value), not that cap firing.
+(TIMEOUT_FIRED_MIN_SEC / _MAX_SEC, parsed from the error text): one below the effective cap is not that cap
+firing but one of FIRED_BELOW_CAUSES (the error text gives the number only, never which level set it).
 """
 
 from __future__ import annotations
@@ -73,6 +73,13 @@ _NUMERIC_COLS = ("EFFECTIVE_TIMEOUT_SEC", "COMPLETED_RUNS", "P99_ELAPSED_SEC", "
 _TAIL_COLS = ("COMPLETED_RUNS", "P99_ELAPSED_SEC", "MAX_ELAPSED_SEC", "TIMEOUT_CANCELLED_RUNS",
               "TIMEOUT_FIRED_MIN_SEC", "TIMEOUT_FIRED_MAX_SEC")
 FIRED_BELOW_NOTE = "below cap"
+# Review R2-10: what can set a ceiling BELOW a warehouse's effective cap (today's min(warehouse, account)): every
+# other level of the 'Timed out' list (user, session, client, task), or a warehouse / account value that was
+# lower earlier in the 30-90 day window. The fired-ceiling parse reads only N from 'timeout of N second(s)', so
+# the texts name these as the possible sources, never one of them as the cause. The 'Fired at' column help
+# (operations.py) carries this phrase verbatim (tests/test_stmt_timeout.py locks both).
+FIRED_BELOW_CAUSES = ("a user, session, client or task value, or an earlier, lower warehouse or account value "
+                      "(the message gives the number of seconds, not which of these set it)")
 
 
 def tail_window_days(days: object) -> int:
@@ -322,10 +329,10 @@ def _tail_value(t: Mapping[str, object] | None, col: str) -> float:
 
 
 def fired_below_cap(fired_min_s: object, effective_s: object) -> bool | None:
-    """True when a timeout cancel fired BELOW the warehouse's effective cap: the ceiling that fired was a
-    user, session or client value (or an earlier, lower warehouse value: the cap is today's SHOW value and
-    the window reaches back 30-90 days), not that cap. None when either side is unknown (no cancel with a
-    parseable ceiling, or the cap is unread / not a warehouse). Callers pass the LOWEST ceiling that fired."""
+    """True when a timeout cancel fired BELOW the warehouse's effective cap: the ceiling that fired was not
+    that cap but one of FIRED_BELOW_CAUSES (the cap is today's SHOW value and the window reaches back 30-90
+    days). None when either side is unknown (no cancel with a parseable ceiling, or the cap is unread / not a
+    warehouse). Callers pass the LOWEST ceiling that fired."""
     fired, eff = _num(fired_min_s), _num(effective_s)
     if fired is None or eff is None:
         return None
@@ -379,8 +386,8 @@ def timeout_posture(read_names: Iterable[str], params: Mapping[str, tuple[float 
     (rendered as the dash), never 0. SUGGESTED_TIMEOUT_SEC and WOULD_CANCEL_RUNS (the completed statements
     in the window that cap would have cancelled) are set on Uncapped rows only. TIMEOUT_FIRED ('Fired at')
     is the humanized ceiling the window's timeout cancels fired at; FIRED_BELOW_CAP is True when the lowest
-    of them is below the row's effective cap (a user, session or client value fired, or an earlier, lower
-    warehouse value did: the cap is today's SHOW value), not that cap. Sorted
+    of them is below the row's effective cap (one of FIRED_BELOW_CAUSES fired: the cap is today's SHOW
+    value), not that cap. Sorted
     Uncapped, Capped, Unread, Not visible, Managed compute, then longest run first."""
     tail = _tail_lookup(tail_df)
     rows = []
@@ -453,8 +460,8 @@ def status_notes(summary: Mapping[str, object]) -> list[str]:
     if isinstance(below, (list, tuple)) and below:
         shown = ", ".join(str(n) for n in below[:6]) + (f" and {len(below) - 6:,} more" if len(below) > 6 else "")
         notes.append(f"Timed out below the effective cap on {shown}: the lowest ceiling that fired ('Fired at') is "
-                     "lower than the warehouse's cap, so a user, session or client value fired below it (or an "
-                     "earlier, lower warehouse value), not that cap.")
+                     "lower than the warehouse's cap, so at least some of those cancels were not that cap. The "
+                     f"lower ceiling is {FIRED_BELOW_CAUSES}.")
     return notes
 
 
