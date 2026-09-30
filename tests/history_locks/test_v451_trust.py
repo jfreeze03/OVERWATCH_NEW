@@ -127,7 +127,12 @@ _REACHABLE = {
         "CREDENTIALS", "DATA_TRANSFER_HISTORY", "GRANTS_TO_ROLES",
         "GRANTS_TO_USERS", "LOGIN_HISTORY", "POLICY_REFERENCES", "QUERY_HISTORY", "ROLES", "SESSIONS",
         "TABLES", "TABLE_STORAGE_METRICS", "TAG_REFERENCES", "USERS"),
-    "app/ui/pages/alerts.py": (),
+    # v4.603 (Next-Fifty #33 D1): + QUERY_HISTORY -- the drawer's 'Statement timeout 1h' lever reads ONE
+    # warehouse's 30-day completed-statement impact (ops_sql.warehouse_timeout_impact: a single-row aggregate
+    # filtered to that warehouse, probe + historical tier) before it offers the ALTER. Interaction-gated: it
+    # runs only when an operator opens an alert's Respond expander, picks that lever, and the SET would
+    # tighten -- never first paint. The page file still carries no new ACCOUNT_USAGE literal.
+    "app/ui/pages/alerts.py": ("QUERY_HISTORY",),
     # v4.597 (Option C): Operations > Optimize. The queue/tracked/watchlist reads are mart and
     # app tables; QUERY_HISTORY is the opt-in live-profile toggle (query_opportunity_fingerprints,
     # byte-identical to the Queries board call, so the two share one cache entry) — off first paint.

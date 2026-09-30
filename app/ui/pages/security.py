@@ -1465,18 +1465,41 @@ def _posture_trend_panel(trend) -> None:
                "Loaded daily after the ~06:45 nightly load.")
 
 
+_CLIENTS_HELP = (
+    "Source: ACCOUNT_USAGE.SESSIONS (lags up to ~3h) for what connected, and "
+    "SYSTEM$CLIENT_VERSION_INFO() for Snowflake's own minimum-supported, nearing-end-of-support and "
+    "recommended version of each driver. UNSUPPORTED = below Snowflake's minimum supported version. "
+    "NEARING END OF SUPPORT = at or above that minimum but below the version Snowflake lists as nearing "
+    "end of support. BELOW RECOMMENDED = supported but older than Snowflake's recommended version. "
+    "Snowflake-run rows come from Snowflake's own services (the Snowflake Web App / Snowsight, "
+    "SnowServices ingress). Snowflake upgrades those, and there is nothing to install on your side. "
+    "NOT LISTED = the function has no entry for this client, or its entry lists no version. NO MINIMUM "
+    "LISTED = the entry lists no minimum supported version, so no verdict is given (every other status is "
+    "defined against that minimum). A version that could not be checked against a minimum (NOT LISTED or "
+    "NO MINIMUM LISTED) counts as 'not checked' in the support KPIs for its own side (yours, or "
+    "Snowflake-run), which never show a clean green 0 over it. If no entry lists a nearing-end-of-support or a recommended version "
+    "(a renamed key reads empty), that KPI shows '—' and the caption says so. NO VERSION = the client did "
+    "not report one."
+    "\n\nDRIVER and VERSION parse from CLIENT_APPLICATION_ID ('(no client id)' when it is empty). PROGRAM "
+    "is whatever the client self-reports (VS Code, DBeaver and most JDBC/Python tools do; many ODBC tools "
+    "such as Erwin do not — '(not reported)' means exactly that). STATUS compares each of your versions "
+    "with the newest version of the same driver seen in this account; it is not a support verdict."
+)
+
+
 def _clients_tab(company: str, days: int, *, bounds: tuple | None = None) -> None:
-    """Driver/version inventory — the 'when do we need to upgrade' sheet."""
+    """Driver/version inventory — the 'when do we need to upgrade' sheet — with Snowflake's own support
+    floor per driver version (Next-Fifty #34). Two reads joined in app/logic/client_support: SESSIONS
+    (what connected, with the in-account BEHIND/CURRENT STATUS) and SYSTEM$CLIENT_VERSION_INFO() (a
+    probe=True metadata read). When the SYSTEM$ read fails (or lists no minimum anywhere: key drift),
+    every support status reads 'unavailable', the support KPIs show a dash, and the in-account STATUS is
+    the fallback. When the inventory hits run()'s row cap, every total over it is withheld or marked
+    as a floor instead of counting part of the feed."""
+    from app.logic import client_support as cs
+
     _lm = "_lm" if bounds is not None else ""
     section_header("Client drivers & versions", "", "operations")
-    panel_help(
-        "Source: ACCOUNT_USAGE.SESSIONS (lags up to ~3h, 365d retention). DRIVER and "
-        "VERSION parse from CLIENT_APPLICATION_ID; PROGRAM is whatever the client "
-        "self-reports (VS Code, DBeaver and most JDBC/Python tools do; many ODBC "
-        "tools such as Erwin do not — '(not reported)' means exactly that). "
-        "The observed-newest comparison is the upgrade signal; this is a read-only "
-        "inventory, not a support-policy verdict."
-    )
+    panel_help(_CLIENTS_HELP)
     res = run(security_sql.client_drivers(days, company, bounds=bounds), page=_PAGE,
               key=f"clients_{company}_{days}{_lm}", tier="historical",
               source="ACCOUNT_USAGE.SESSIONS")
@@ -1485,17 +1508,103 @@ def _clients_tab(company: str, days: int, *, bounds: tuple | None = None) -> Non
         return
     if not guard(res, "", setup_hint="Needs the ACCOUNT_USAGE.SESSIONS view (IMPORTED PRIVILEGES on the SNOWFLAKE db)."):
         return
-    df = res.df.copy()
-    behind = int((df["STATUS"].astype(str) == "BEHIND").sum())
+    info = run(security_sql.client_version_info(), page=_PAGE, key="client_version_info",
+               tier="metadata", probe=True, source="SYSTEM$CLIENT_VERSION_INFO()")
+    floors, reason = cs.read_floors(info.ok, info.df, info.error, info.error_kind)
+    ann = cs.annotate_support(res.df, floors)
+    # The inventory is uncapped in SQL, so run()'s row cap is the only cut and res.truncated is honest.
+    # A total over a cut feed would be partial (the oldest versions of the last driver go first), so
+    # every count below is withheld or marked as a floor when it fires.
+    capped = bool(getattr(res, "truncated", False))
+    counts = cs.support_counts(ann) if floors is not None and not capped else None
+    bands = cs.floor_bands(floors) if floors is not None else None
+    no_counts = ("Snowflake's support floor could not be read." if floors is None
+                 else "The driver inventory hit the row cap, so this count would be partial.")
+    # Review R2-2/R2-3/R2-8, one rule for every support KPI: a version counts only when it was compared with
+    # a minimum; each KPI is qualified by its OWN side's unchecked versions (NOT LISTED / NO MINIMUM LISTED),
+    # '—' when none of that side could be checked, and a band no entry lists at all (a renamed key) is '—'.
+    _sides = {
+        "yours": ("not_checked_yours", "checked_yours", "your driver versions", "the caption below names them"),
+        "snowflake": ("not_checked_snowflake", "checked_snowflake", "the Snowflake-run driver versions",
+                      "the table marks them NOT LISTED or NO MINIMUM LISTED"),
+    }
+    _band_keys = {"nearing": ("nearing-end-of-support", "minimumNearingEndOfSupportVersion"),
+                  "recommended": ("recommended", "recommendedVersion")}
+
+    def _kpi(label: str, key: str, bad_sev: str, help_text: str, side: str = "yours", band: str = "") -> dict:
+        if counts is None:
+            return {"label": label, "value": "—", "help": no_counts}
+        if band and bands is not None and not getattr(bands, band):
+            what, json_key = _band_keys[band]
+            return {"label": label, "value": "—",
+                    "help": f"{help_text} Not shown: no entry of Snowflake's function lists a {what} version "
+                            f"({json_key}; its key name may have changed), so no version could be checked "
+                            "against one."}
+        unchecked_key, checked_key, whose, where = _sides[side]
+        unchecked, checked = counts[unchecked_key], counts[checked_key]
+        if unchecked and not checked:
+            return {"label": label, "value": "—",
+                    "help": f"None of {whose} could be checked against a minimum; {where}."}
+        n = counts[key]
+        item = {"label": label, "value": f"{n}", "help": help_text}
+        if n:
+            item["severity"] = bad_sev
+        elif not unchecked:
+            item["severity"] = "ok"          # green only when every version this KPI covers was checked
+        if unchecked:
+            item["sub"] = f"{unchecked} not checked"
+            item["help"] = (f"{help_text} Not counted here: {unchecked} of {whose} that could not be "
+                            f"checked against a minimum ({where}).")
+        return item
+
+    _floor_mark = "+" if capped else ""
+    _capped_help = " At least this many: the driver inventory hit the row cap." if capped else ""
     kpi_row([
-        {"label": "Driver families", "value": f"{df['DRIVER'].nunique()}"},
-        {"label": "Driver+version combos", "value": f"{len(df)}"},
+        {"label": "Driver families", "value": f"{cs.driver_family_count(ann)}{_floor_mark}",
+         "help": "Distinct driver families that connected in the window." + _capped_help},
+        {"label": "Driver+version combos", "value": f"{cs.driver_version_count(ann)}{_floor_mark}",
+         "help": "Distinct driver x version (one version reported by two programs counts once)." + _capped_help},
+        _kpi("Unsupported, yours to upgrade", "unsupported_yours", "bad",
+             "Driver versions below Snowflake's minimum supported version, run by your clients."),
+        _kpi("Unsupported, Snowflake-run", "unsupported_snowflake", "info",
+             "Below the minimum, but run by Snowflake's own web app or services: Snowflake upgrades these.",
+             side="snowflake"),
+        _kpi("Nearing end of support", "nearing_eos", "warn",
+             "Yours: at or above the minimum but below the version Snowflake lists as nearing end of support.",
+             band="nearing"),
+        _kpi("Below recommended", "below_recommended", "info",
+             "Yours: supported, but older than Snowflake's recommended version.", band="recommended"),
     ])
-    styled_table(df, height=380, slug="client-drivers", sort_label="last seen")
-    st.caption(
-        f"{behind} combinations trail the newest observed version."
-    )
+    # Re-sorted only when the support verdict exists; otherwise the builder's own order stands. Either
+    # way the sort_label names the real order (it used to claim 'last seen').
+    if floors is not None:
+        df, sort_label = cs.display_frame(cs.sort_by_support(ann)), cs.SUPPORT_SORT_LABEL
+    else:
+        df, sort_label = cs.display_frame(ann), cs.INVENTORY_SORT_LABEL
+    styled_table(df, height=380, slug="client-drivers", sort_label=sort_label)
+    if capped:
+        st.caption(cs.capped_caption(len(res.df)))
+    if floors is None:
+        st.caption(cs.unavailable_caption(reason))
+        _detail = str(info.error or "").strip()
+        if _detail and _detail.splitlines()[0][:160] != _detail:
+            with st.expander("Support-floor read error"):
+                st.code(_detail)
+    elif not capped:
+        st.caption(cs.support_caption(ann, bands))
+    if not capped:
+        behind = cs.behind_count(ann)
+        st.caption(
+            f"{behind} driver {'version trails' if behind == 1 else 'versions trail'} the newest version of "
+            "the same driver seen in this account (STATUS; Snowflake-run rows are not counted)."
+        )
+    _no_id = cs.no_client_id_sessions(ann)
+    if _no_id:
+        st.caption(f"{'At least ' if capped else ''}{_no_id:,} sessions reported no client id; they show as "
+                   f"'{cs.NO_CLIENT_ID}' and count in no KPI.")
     result_caption(res)
+    if info.ok:
+        result_caption(info)
 
 
 def _ai_guardrails_tab(company: str) -> None:
@@ -1507,7 +1616,8 @@ def _ai_guardrails_tab(company: str) -> None:
        (cortex_code_user_daily) as a coverage-gated fallback that shares the
        Cost page's cached scan.
     2. GUARDRAILS — flag telemetry from the optional Cortex Guardrails usage
-       view, probe-gated with an honest not-enabled state."""
+       view, probe-gated: an absent view is a setup state (not readable by this
+       app), any other failure is 'unavailable' with the error (v4.603)."""
     from app.logic.ai_guardrails import (
         TOKEN_Z_FLAG,
         VELOCITY_MIN_REQUESTS,
@@ -1581,13 +1691,24 @@ def _ai_guardrails_tab(company: str) -> None:
                    anchor="sec-ai-guardrails")
     gr = run(cortex_sql.guardrails_daily(30), page=_PAGE, key="ai_guardrails_daily",
              tier="historical", source="CORTEX_AI_GUARDRAILS_USAGE_HISTORY", probe=True)
-    if not gr.ok:
+    # v4.603: branch on the failure kind (the v4.601.1 quota-panel pattern). The read is a probe, so an
+    # absent view AND a missing column go unlogged: the panel must say which it was. The view exists on
+    # this account (owner probe 2026-09-29), so a failure is never "Guardrails is not enabled": an absent
+    # object means the app cannot read the view; anything else (a changed column, a timeout) is a failed read.
+    if not gr.ok and gr.error_kind in ("absent", "unknown_function"):
         empty_state("needs_setup",
-                    "Cortex Guardrails telemetry isn't available on this account (the usage view "
-                    "appears only once Guardrails is enabled on Cortex functions). Behavioral "
-                    "monitoring above still runs; enable Guardrails to add prompt-flag telemetry.")
+                    "The Cortex Guardrails usage view (CORTEX_AI_GUARDRAILS_USAGE_HISTORY) "
+                    "is not readable by this app: it is missing in this account or region, or the app's "
+                    "role cannot see it. Guardrail flags cannot be shown; behavioral monitoring above "
+                    "still runs.")
+    elif not gr.ok:
+        empty_state("unavailable",
+                    "The Cortex Guardrails usage view could not be read, so guardrail flags cannot be shown.",
+                    detail=gr.error)
     elif gr.empty:
-        empty_state("clean", "Guardrails is enabled and recorded no flagged requests in 30 days.")
+        # Zero rows: the view is readable but recorded no guardrails-checked request, which says
+        # nothing about whether Guardrails is enabled -- so not a verified-clean state either.
+        empty_state("no_data_yet", "No guardrails-checked requests were recorded in the last 30 days.")
     else:
         _g = gr.df.copy()
         _req = float(pd.to_numeric(_g["REQUESTS"], errors="coerce").fillna(0).sum())

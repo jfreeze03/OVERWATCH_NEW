@@ -596,7 +596,8 @@ def _token_economics_panel(company: str, days: int, cap_credits: float, *, bound
     """CoCo efficiency review (repo review wave 2: TOKENS_GRANULAR). Cache-hit alone can't separate
     a heavy-but-targeted user from a high-intensity one, so this merges the token grain with
     per-user daily credits into peer-relative signals + a 🚩 Review flag. Tracks the page's Window
-    filter (``days``). Opt-in toggle; a schema/telemetry miss degrades to an honest note."""
+    filter (``days``). Opt-in toggle; a schema/telemetry miss (an absent view or TOKENS_GRANULAR column)
+    degrades to an honest note, and any other failed read (a timeout) renders 'unavailable' with the error."""
     from app.logic.wave2 import (
         coco_coaching_count,
         coco_efficiency,
@@ -621,8 +622,15 @@ def _token_economics_panel(company: str, days: int, cap_credits: float, *, bound
                  source="CORTEX_CODE_*_USAGE_HISTORY (TOKENS_GRANULAR, window derived in-app)",
                  probe=True, max_rows=200_000)
     if not te_res.ok:
-        st.caption("TOKENS_GRANULAR isn't available on this account's Cortex Code views yet — "
-                   "token-type economics appear here automatically once the column exists.")
+        # v4.603: the absence caption is only for the kinds run() treats as an EXPECTED absence on a probe read
+        # (and so never logs): keep this tuple in lockstep with query.run's. A timeout or any other failure is
+        # a failed read (logged by run()), never "the column doesn't exist" -- TOKENS_GRANULAR exists here.
+        if te_res.error_kind in ("absent", "unknown_function", "missing_column"):
+            st.caption("TOKENS_GRANULAR isn't available on this account's Cortex Code views yet — "
+                       "token-type economics appear here automatically once the column exists.")
+        else:
+            empty_state("unavailable", "The Cortex Code token-type read failed this run, so token economics "
+                        "cannot be shown. Retry, or see the Admin error log.", detail=te_res.error)
         return
     econ = token_economics(token_types_window(te_res.df, days, bounds=bounds))
     if econ.empty:

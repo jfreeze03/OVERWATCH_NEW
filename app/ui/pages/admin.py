@@ -27,7 +27,7 @@ from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
 from app.data import cost_sql, mart_sql, ops_sql
-from app.logic import app_telemetry, deploy_health
+from app.logic import app_telemetry, deploy_health, stmt_timeout
 from app.logic.formulas import format_usd, format_usd_precise, humanize_duration, md_dollars, safe_float
 from app.logic.navigate import PAGE_SECTION_LABELS
 from app.ui.components import (
@@ -1170,9 +1170,11 @@ def _task_health_panel() -> None:
 
 # Next-Fifty #7 Slice B: the release from which the app sends per-statement parameters (Cortex's timeout).
 _STMT_PARAMS_SINCE = "v4.590.0"
-# #33: what actually sets the read ceiling. V002 sets STATEMENT_TIMEOUT_IN_SECONDS = 300 on the app
-# warehouse (V002__facts.sql CREATE + ALTER WAREHOUSE); Snowflake's own default, when neither the
-# warehouse nor the account sets it, is 172800 s (2 days) — 300 s was never "the default".
+# #33: what sets the read ceiling. V002 SET STATEMENT_TIMEOUT_IN_SECONDS = 300 on the app warehouse at
+# install (V002__facts.sql CREATE + ALTER WAREHOUSE); a DBA may have changed it since (v4.603: on this
+# account WH_ALFA_ADMIN's cancels fire at 1800 s, the value V139's header records), so the panel READS the
+# value in force and never states 300 s as current. Snowflake's own default, when neither the warehouse
+# nor the account sets it, is 172800 s (2 days) — 300 s was never "the default".
 _V002_APP_WH_TIMEOUT_S = 300
 _SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S = 172_800
 _SCAN_NOTE = ("First load scans ACCOUNT_USAGE directly (a few seconds on a cold "
@@ -1459,20 +1461,68 @@ def _observability_tab() -> None:
         st.rerun()
 
 
-def _performance_tab() -> None:
-    """Prove (or disprove) that the app is fast: its own statement stats."""
-    # R43: the app's per-tier ALTER SESSION timeouts (30/120/180s) are a no-op under
-    # owner's-rights SiS (core.session.apply_statement_timeout documents this) — the REAL
-    # ceiling every app READ runs against is the warehouse/account STATEMENT_TIMEOUT_IN_SECONDS.
-    # Next-Fifty #7 Slice B: Cortex evaluations also carry their own per-statement ceiling.
-    # Read + show it so the true wall is visible, not just described in a code comment.
+def _ceiling_tile(w_secs: float | None, w_level: str, level_label: str, account_s: float | None, *,
+                  account_is_default: bool = False) -> dict:
+    """The 'Real statement-timeout ceiling' tile (review R2-5): the EFFECTIVE ceiling for app reads,
+    stmt_timeout.effective_timeout_s -- the lower non-zero of the app warehouse's value and the account's --
+    with the cap source named. 0 is 'no limit at that level'; '0 = 7-day max' only when both sides are 0, so
+    the effective value really is Snowflake's 7-day maximum. With the account value unknown (its read failed
+    and the warehouse sets its own value) the warehouse's own value is shown, qualified. An unparseable value
+    is the dash, never '0s'. Durations are humanized (the raw SHOW row stays verbatim in the table)."""
+    tile = {"label": "Real statement-timeout ceiling", "value": "—", "delta": f"set at: {level_label}",
+            "delta_color": "off",
+            "help": "The statement timeout every app READ on the app warehouse runs against, regardless of the "
+                    "app's per-tier values: Snowflake enforces the lower non-zero of the warehouse's "
+                    "STATEMENT_TIMEOUT_IN_SECONDS and the session's (the account's, unless a user or session sets "
+                    "its own). This tile reads the warehouse and account values only: a user or session value, "
+                    "which can lower it or raise it up to the warehouse value, is not read. Cortex evaluations "
+                    "are additionally capped per statement."}
+    w_enforced = stmt_timeout.enforced_s(w_secs)
+    if w_secs is None or w_enforced is None:
+        return tile
+    w_zero = w_secs <= 0
+    own_wh = w_level == "WAREHOUSE"
+    if w_zero and own_wh:
+        tile["delta"] += " (0 = no warehouse limit)"
+    if account_s is None:
+        tile["value"] = humanize_duration(w_enforced, "s")
+        tile["delta"] += "; the session/account value, if lower, caps reads"
+        tile["help"] += (" The account value could not be read, so this is the warehouse's own value: the "
+                         "session/account value, if lower, caps reads.")
+        return tile
+    eff, src = stmt_timeout.effective_timeout_s(w_secs, w_level, account_s)
+    tile["value"] = humanize_duration(eff, "s")
+    if src == "Account" and own_wh:
+        cap = ("the account value (Snowflake's default; the account sets none)" if account_is_default
+               else "the account value")
+        own = "0 (no warehouse limit)" if w_zero else humanize_duration(w_enforced, "s")
+        tile["delta"] += f"; capped by {cap}"
+        tile["help"] += f" The warehouse's own value is {own}, so {cap} caps reads at {humanize_duration(eff, 's')}."
+    if w_zero and float(account_s) <= 0:
+        tile["delta"] += "; 0 = 7-day max"
+        tile["help"] += (" The warehouse and the account both resolve to 0, which Snowflake enforces as the "
+                         "7-day maximum.")
+    return tile
+
+
+def _stmt_timeout_ceiling() -> None:
+    """Admin ▸ Performance: the statement-timeout ceiling the app's READS actually run against.
+
+    R43: the app's per-tier ALTER SESSION timeouts (30/120/180s) are a no-op under owner's-rights SiS
+    (core.session.apply_statement_timeout documents this) -- the REAL ceiling every app READ runs against is
+    the warehouse/account STATEMENT_TIMEOUT_IN_SECONDS. Next-Fifty #7 Slice B: Cortex evaluations also carry
+    their own per-statement ceiling. Read + show it so the true wall is visible, not just described in a code
+    comment. v4.603 (#33 D2): the value in force is READ (V002's 300 s is only the install-time value), and a
+    failed probe read renders 'unavailable' with its error, never a guess. The tile shows the effective ceiling
+    (_ceiling_tile): the account value is read as well, because a lower one caps reads."""
     section_header("Production statement-timeout ceiling", "", "operations")
     panel_help(
         "The app's per-tier read timeouts (30/120/180s) do NOT apply on owner's-rights "
         "Streamlit-in-Snowflake — ALTER SESSION is rejected there, and they are deliberately not sent "
         "per statement until the read durations are measured. Reads are governed by "
-        f"STATEMENT_TIMEOUT_IN_SECONDS on {APP_WAREHOUSE}; V002 sets {humanize_duration(_V002_APP_WH_TIMEOUT_S, 's')} "
-        "there. Snowflake enforces the lower non-zero of the warehouse value and the session's (inherited "
+        f"STATEMENT_TIMEOUT_IN_SECONDS on {APP_WAREHOUSE}: V002 set "
+        f"{humanize_duration(_V002_APP_WH_TIMEOUT_S, 's')} at install; the value in force is read below. "
+        "Snowflake enforces the lower non-zero of the warehouse value and the session's (inherited "
         "from the user or account), so a lower account or user value also caps reads; with neither set "
         f"anywhere, Snowflake's own default of {humanize_duration(_SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S, 's')} "
         f"({_SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S} s) applies. Since "
@@ -1488,25 +1538,41 @@ def _performance_tab() -> None:
         _tdf = _to.df.copy()
         _tdf.columns = [str(c).lower() for c in _tdf.columns]
         if "value" in _tdf.columns:
-            _val = str(_tdf.iloc[0].get("value", "") or "")
             # #33: an empty SHOW PARAMETERS level means NEITHER the warehouse nor the account set it.
             _lvl = str(_tdf.iloc[0].get("level", "") or "").upper() or "Snowflake default"
-            kpi_row([{"label": "Real statement-timeout ceiling",
-                      # r8: humanize on the KPI card (300s -> "5m", 28800s -> "8h") per the
-                      # duration standard; the raw SHOW PARAMETERS row stays verbatim in the table.
-                      "value": humanize_duration(safe_float(_val), "s") if _val else "—",
-                      "delta": f"set at: {_lvl}", "delta_color": "off",
-                      "help": "The STATEMENT_TIMEOUT_IN_SECONDS actually in force on the app "
-                              "warehouse — the true wall every app READ runs against, regardless "
-                              "of the app's per-tier values. Cortex evaluations are additionally "
-                              "capped per statement."}])
+            _secs, _wlvl = stmt_timeout.parse_timeout_row(_tdf)
+            _acct_s: float | None = None
+            _acct_default = False
+            if _secs is not None:
+                # review R2-5: reads run against the LOWER non-zero of this value and the session's (inherited
+                # from the account), so the tile needs the account value too -- the posture panel's read (same
+                # SQL, so the same metadata-tier cache entry), else derived from this warehouse row.
+                _acct = run(ops_sql.account_stmt_timeout_sql(), page=_PAGE, key="adm_acct_stmt_timeout",
+                            tier="metadata", source="SHOW PARAMETERS IN ACCOUNT", max_rows=0, probe=True)
+                _acct_s, _acct_lvl = stmt_timeout.parse_timeout_row(_acct.df if _acct.usable() else None)
+                _acct_default = _acct_s is not None and not _acct_lvl
+                if _acct_s is None:
+                    _acct_s = stmt_timeout.derive_account_timeout([(_secs, _wlvl)])
+            kpi_row([_ceiling_tile(_secs, _wlvl, _lvl, _acct_s, account_is_default=_acct_default)])
         styled_table(_tdf)
+    elif not _to.ok:
+        # v4.603 (#33 D2, house rule 8): a failed probe read is 'unavailable' with its error, never a quiet
+        # caption, and never a guess at the value (V002's 5m is not what is in force on this account).
+        # Review R1-14: APP_WAREHOUSE is the app's own query_warehouse, so its owner role holds USAGE on it; a
+        # cause is named only when Snowflake's error is 'does not exist or not authorized' (kind 'absent').
+        _why = (" (the warehouse is missing, or the app's owner role has no privilege on it)"
+                if _to.error_kind == "absent" else "")
+        empty_state("unavailable", f"Could not read STATEMENT_TIMEOUT_IN_SECONDS on {APP_WAREHOUSE}{_why}, "
+                    "so the ceiling in force is unknown.", detail=_to.error)
     else:
-        empty_state("no_data_yet", "Could not read the warehouse timeout parameter (needs "
-                    "MONITOR/USAGE on the warehouse). If V002 applied, "
-                    f"{humanize_duration(_V002_APP_WH_TIMEOUT_S, 's')} is set on {APP_WAREHOUSE}; "
-                    "otherwise the account value, or Snowflake's "
-                    f"{humanize_duration(_SNOWFLAKE_DEFAULT_STMT_TIMEOUT_S, 's')} default, applies.")
+        # ok but no row: SHOW PARAMETERS ... LIKE should always return one, so this is only a quiet note.
+        empty_state("no_data_yet", f"SHOW PARAMETERS returned no STATEMENT_TIMEOUT_IN_SECONDS row for "
+                    f"{APP_WAREHOUSE}.")
+
+
+def _performance_tab() -> None:
+    """Prove (or disprove) that the app is fast: its own statement stats."""
+    _stmt_timeout_ceiling()
 
     section_header("Performance SLO scorecard (7d)", "", "operations")
     slo = run(
@@ -1808,6 +1874,19 @@ def _perf_rider_panels(fq_df=None) -> None:
                    "tracking — Streamlit cannot measure 'viewed' truthfully.")
 
 
+# Review R1-13: the one canary FAIL that can be expected. TOKENS_GRANULAR is an OPTIONAL column (newer Cortex
+# Code view versions; cortex_sql.cortex_code_token_types), yet a missing column stays a FAIL there: a GAP would
+# also hide a renamed or dropped column, which is the drift the canary exists to catch. Review R2-6/R2-7: the
+# error text is the same in both cases, so the note never calls the FAIL expected outright; it gives the one
+# thing the operator can observe that tells them apart (has the CoCo panel ever shown token types here?).
+_TOKEN_TYPES_FAIL_NOTE = ("cortex.code_token_types also FAILs on accounts whose Cortex Code views predate the "
+                          "optional TOKENS_GRANULAR column: its ERROR then names TOKENS_GRANULAR (an invalid "
+                          "identifier). That FAIL is expected only if the CoCo efficiency review (Cost > "
+                          "Chargeback & AI) has never shown token types here. If it has shown them before, the "
+                          "column was renamed or dropped: that is drift, so fix "
+                          "cortex_sql.cortex_code_token_types.")
+
+
 def _canary_tab() -> None:
     st.caption(
         "Runs every registered SQL builder against the live account to catch "
@@ -1821,7 +1900,7 @@ def _canary_tab() -> None:
         "column drift or a missing OVERWATCH object before a user does. A FAIL (not a declared "
         "GAP) means a query the app depends on no longer compiles — fix the drift; the mart "
         "reconciliation panel below flags mart totals that diverge past 5% from live and the "
-        "backfill to re-run."
+        f"backfill to re-run. One known exception: {_TOKEN_TYPES_FAIL_NOTE}"
     )
     from app.data.canary import CANARIES, EXPECTED_GAPS
 
@@ -1874,12 +1953,15 @@ def _canary_tab() -> None:
         gaps = frame[frame["STATUS"] == "GAP"]
         if not gaps.empty:
             st.caption(f"{len(gaps)} GAP: declared account-feature absences (Cortex "
-                       "subscription/region) — absence, not drift. Anything absent "
-                       "WITHOUT a declaration fails instead.")
+                       "subscription/region, SYSTEM$CLIENT_VERSION_INFO) — absence, not drift. "
+                       "Anything absent WITHOUT a declaration fails instead.")
         if failed.empty:
             empty_state("clean", f"All {len(frame) - len(gaps)} applicable canary statements passed.")
         else:
             st.error(f"{len(failed)} of {len(frame)} canary statements failed — see errors below.")
+            if "cortex.code_token_types" in set(failed["CHECK"]):
+                # review R1-13: the one FAIL that can be expected (kept a FAIL: a GAP would hide real drift)
+                st.caption(_TOKEN_TYPES_FAIL_NOTE)
         st.session_state["_adm_canary_results"] = frame
     stored = st.session_state.get("_adm_canary_results")
     if stored is not None:

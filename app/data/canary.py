@@ -85,6 +85,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     # Next-Fifty #33: the statement-timeout runtime tail. Its two SHOW PARAMETERS twins are not
     # canaries (SHOW cannot be EXPLAINed).
     ("ops.warehouse_timeout_tail", lambda: ops_sql.warehouse_timeout_tail(1, "ALFA")),
+    # v4.603 (#33 D1): the alert drawer's one-warehouse impact read for the 'Statement timeout 1h' lever.
+    ("ops.warehouse_timeout_impact", lambda: ops_sql.warehouse_timeout_impact("WH_ALFA_ADMIN", 3600, 1)),
     ("ops.lock_contention", lambda: ops_sql.lock_contention(1)),
     ("security.users_without_mfa", lambda: security_sql.users_without_mfa("ALFA")),
     ("security.users_without_mfa_live", lambda: security_sql.users_without_mfa_live("ALFA")),
@@ -101,6 +103,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("security.recent_ddl_changes", lambda: security_sql.recent_ddl_changes(1, "ALFA")),
     ("security.expiring_credentials", lambda: security_sql.expiring_credentials(10, "ALFA")),
     ("security.client_drivers", lambda: security_sql.client_drivers(30, "ALFA")),
+    # Next-Fifty #34: Snowflake's own driver support floor (a metadata call, no ACCOUNT_USAGE scan).
+    ("security.client_version_info", security_sql.client_version_info),
     ("security.exception_queue", lambda: security_sql.security_exception_queue("ALFA", 1)),
     ("security.domain_coverage", security_sql.security_domain_coverage),
     ("security.trust_center_delta", security_sql.trust_center_delta),
@@ -179,6 +183,22 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("cortex.ai_functions_daily", lambda: cortex_sql.cortex_ai_functions_daily(1)),
     ("cortex.model_costs", lambda: cortex_sql.cortex_model_costs(1)),
     ("cortex.source_costs", lambda: cortex_sql.cortex_source_costs(1)),
+    # v4.603: the probe=True Cortex reads that had no canary. A probe read logs neither an absent object NOR a
+    # missing column (query.run's expected-absence set), so a drifted column failed silently on every render
+    # (the v4.601.1 QUOTA_ACCESS_BLOCK_HISTORY CREATED_ON class). Each is declared in EXPECTED_GAPS below, so
+    # only a true absence reads GAP; an invalid identifier FAILs. Compile-only (the default) is cheap; the
+    # executed probe of code_token_types pays the same window-flat ~22s secure-view scan as code_user_rollup
+    # (the builder has no window knob by design). On SiS no per-tier read timeout applies (ALTER SESSION is
+    # rejected and only the cortex tier rides statement_params: core.session), so that scan runs up to the
+    # app warehouse's STATEMENT_TIMEOUT_IN_SECONDS (read live on Admin > Performance); the live tier's 30s
+    # applies only off SiS (local dev), where a timeout in execute mode is load, not drift. Compile-only is
+    # the drift check. code_token_types also FAILs (not GAPs) on an account whose Cortex Code views predate the
+    # optional TOKENS_GRANULAR column: kept, because a GAP would hide a renamed or dropped column; the Admin
+    # canary panel names that one expected FAIL.
+    ("cortex.guardrails_daily", lambda: cortex_sql.guardrails_daily(1)),
+    ("cortex.code_token_types", cortex_sql.cortex_code_token_types),
+    ("cortex.quota_access_block_history", lambda: cortex_sql.quota_access_block_history(1)),
+    ("cortex.app_self_cost", lambda: mart_sql.app_cortex_self_cost(1)),
     ("mart.exec_board", lambda: mart_sql.exec_board("ALFA", 7)),
     ("mart.source_freshness", mart_sql.source_freshness),
     ("mart.source_freshness_state", mart_sql.source_freshness_state),
@@ -341,4 +361,14 @@ EXPECTED_GAPS: frozenset[str] = frozenset({
     "cortex.model_costs",
     "cortex.source_costs",
     "cortex.mart_vs_live_ai_recon",   # reads the subscription-gated CORTEX_CODE_* views
+    # Next-Fifty #34: SYSTEM$CLIENT_VERSION_INFO() is an account-feature function (proven live on this
+    # account, 2026-09-29 probe W4c). Only its ABSENCE (unknown function) reads GAP -- the Clients tab then
+    # shows 'unavailable' support; any other failure (grant, timeout) still FAILS.
+    "security.client_version_info",
+    # v4.603 probe-read canaries: absence is an account-feature state (Guardrails / per-user quota views,
+    # the Cortex Code subscription, the AI-functions view); a missing column is drift and FAILs.
+    "cortex.guardrails_daily",
+    "cortex.code_token_types",
+    "cortex.quota_access_block_history",
+    "cortex.app_self_cost",
 })

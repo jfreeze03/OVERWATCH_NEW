@@ -54,7 +54,15 @@ def test_trust_center_empty_delta_is_not_a_green_all_clear():
 
 def test_admin_statement_timeout_ceiling_is_humanized():
     src = _read("app/ui/pages/admin.py")
-    assert 'humanize_duration(safe_float(_val), "s") if _val else "—"' in src
+    # review R1-8 (v4.603) moved this lock: the tile humanizes the ENFORCED value (0 = the 7-day maximum,
+    # never "0s"). Review R2-5 moved it again: it humanizes the EFFECTIVE ceiling (the lower non-zero of the
+    # warehouse and account values), or the warehouse's own enforced value, qualified, when the account value
+    # is unknown; an unparseable value keeps the dash (behaviour-tested in tests/test_admin_timeout_wording.py)
+    tile = src.split("def _ceiling_tile(", 1)[1].split("\ndef ", 1)[0]
+    assert "eff, src = stmt_timeout.effective_timeout_s(w_secs, w_level, account_s)" in tile
+    assert 'tile["value"] = humanize_duration(eff, "s")' in tile
+    assert 'tile["value"] = humanize_duration(w_enforced, "s")' in tile
+    assert "w_enforced = stmt_timeout.enforced_s(w_secs)" in tile and '"value": "—"' in tile
     assert '"value": f"{_val}s" if _val else "—"' not in src
 
 

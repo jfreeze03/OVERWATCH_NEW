@@ -7,9 +7,10 @@ Informatica-side sentence has exactly one home. Plus the ETL-team ask doc stays 
 
 from __future__ import annotations
 
+import ast
 import re
 
-from tests._source import read
+from tests._source import ROOT, read
 
 _OPS = "app/ui/pages/operations.py"
 
@@ -167,6 +168,38 @@ def test_query_tag_ask_doc_is_consistent() -> None:
     # the verdict's hint and the builder docstring both point the ETL team at the same doc
     assert "docs/design/INFORMATICA_QUERY_TAG_ASK.md" in read("app/logic/etl_evidence.py")
     assert "docs/design/INFORMATICA_QUERY_TAG_ASK.md" in read("app/data/etl_control_sql.py")
+
+
+def _module_constant(rel: str, name: str) -> str:
+    """A module-level string constant's value, read from source (no page import on the floor leg)."""
+    for node in ast.parse(read(rel)).body:
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == name for t in node.targets):
+            return str(ast.literal_eval(node.value))
+    raise AssertionError(f"{name} not found in {rel}")
+
+
+def test_m_star_wording_is_hedged_everywhere() -> None:
+    """v4.603: owner probe P3 (2026-09-29) showed an M_* CONTROL_STATUS task that CALLs a procedure of its own
+    name (matched in its window, in CONTROL_STATUS's database). No code special-cases M_* (insights.proc_key is
+    name-only), so the blanket 'M_* tasks never CALL' claims were reworded neutrally. The ask doc may cite the
+    task as the example (the ETL team owns it); app captions and code never hard-code a production task name."""
+    doc = " ".join(read("docs/design/INFORMATICA_QUERY_TAG_ASK.md").split())
+    assert ("misses tasks that send their SQL directly instead of calling a procedure (typically mapping, "
+            "`M_*`, tasks; an `M_*` task that calls a procedure of the same name, such as "
+            "`M_BASE_EDW_LOAD_COMPLETION_DAILY`, is matched);") in doc
+    assert "misses mapping (`M_*`) tasks, which send their SQL directly" not in doc
+    note = _module_constant(_OPS, "_CHANGED_RECENTLY_NOTE")
+    assert note.endswith("so check the database; rows with no procedure of that name stay blank.")
+    assert "M_*" not in note and "have no proc" not in note
+    sql_doc = " ".join(read("app/data/etl_control_sql.py").split())
+    assert "M_* mapping tasks issue no CALL" not in sql_doc
+    assert ("A task that issues no CALL (typically an M_* mapping that sends its SQL directly) honestly matches "
+            "nothing; an M_* task that CALLs a same-named procedure matches normally.") in sql_doc
+    ev_src = " ".join(read("app/logic/etl_evidence.py").split())
+    assert "Mapping (M_*) tasks send their SQL directly" not in ev_src
+    offenders = [p.as_posix() for p in (ROOT / "app").rglob("*.py")
+                 if "M_BASE_EDW_LOAD_COMPLETION_DAILY" in p.read_text(encoding="utf-8")]
+    assert offenders == []
 
 
 def test_tag_keys_unchanged_by_the_ask() -> None:

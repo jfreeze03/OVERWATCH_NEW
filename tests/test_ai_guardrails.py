@@ -151,8 +151,13 @@ def test_ai_guardrails_section_is_wired_into_security():
     src = (_ROOT / "app" / "ui" / "pages" / "security.py").read_text(encoding="utf-8")
     assert '"AI guardrails"' in src and "_ai_guardrails_tab(f[\"company\"])" in src
     assert "guardrails_daily(30)" in src and "probe=True" in src
-    # honest degrade when the optional guardrails view is absent.
-    assert "isn't available on this account" in src
+    # honest degrade when the optional guardrails view is absent. v4.603 moved this lock: the old text blamed
+    # every failure on Guardrails not being enabled ("isn't available on this account ... appears only once
+    # Guardrails is enabled"), but the view exists on this account (owner probe 2026-09-29). Absence is now
+    # "not readable by this app", and any other failure is 'unavailable' (tests/test_probe_read_honesty.py).
+    assert "is not readable by this app" in src
+    assert 'gr.error_kind in ("absent", "unknown_function")' in src
+    assert "appears only once Guardrails is enabled" not in src and "Guardrails is enabled and" not in src
 
 
 def test_ai_guardrails_fact_read_is_not_row_capped_below_the_builder_limit():

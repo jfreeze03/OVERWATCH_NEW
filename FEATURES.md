@@ -105,7 +105,7 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 | Change attribution: CHANGED_BY + MANAGED/MANUAL vs DEPLOY_ACTORS | Operations scorecard (V033) |
 | Per-route company delivery filters (Teams = ALFA-only for now) | alert sender v4 (V034) |
 | Measured proc costs: $/call leaderboard, price-a-CALL/session, trend-one-procedure by name | Cost -> Unit costs |
-| Client driver/version inventory with BEHIND flags | Security -> Clients |
+| Client driver/version inventory with BEHIND flags + Snowflake's support floor (UNSUPPORTED / nearing end of support, yours vs Snowflake-run; #34) | Security -> Clients |
 | Delivery SLOs, alert fatigue, acceptance funnel, per-page cache-hit telemetry | Alerts -> History, Admin -> Performance |
 | Flyway-readiness (ledger panel + adoption runbook) | Admin, docs/FLYWAY_ADOPTION.md |
 | Partial-success batching (one bad member no longer drags siblings serial) | app-wide (v4.20) |

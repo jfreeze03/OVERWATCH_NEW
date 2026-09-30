@@ -58,8 +58,10 @@ STATUS_COLOR_MAP = {
     "ALERT": _BAD, "TASK FAILURE": _WARN, "SPEND ANOMALY": _INFO,
     # credential expiry
     "EXPIRED": _BAD, "EXPIRING": _WARN,
-    # client driver versions (Security -> Clients)
-    "BEHIND": _WARN, "CURRENT": _OK,
+    # client driver versions (Security -> Clients). NO VERSION: the client reported none, so it is never
+    # compared and never green. SNOWFLAKE-RUN (STATUS) / Snowflake-run (WHO_UPGRADES): Snowflake's own
+    # web app and services, which Snowflake upgrades -- neutral, never an upgrade task (Next-Fifty #34).
+    "BEHIND": _WARN, "CURRENT": _OK, "NO VERSION": _MUTED, "SNOWFLAKE-RUN": _MUTED,
     # change-registration states (Security -> Changes) and generic verdicts
     "UNKNOWN": _MUTED,
     "REGISTERED": _OK, "UNREGISTERED": _WARN, "NOT_APPLICABLE": _MUTED,
@@ -77,6 +79,7 @@ STATUS_COLUMNS = (
     "ROLE_IN_GRAPH", "KIND", "GOT_WORSE", "CANDIDATE", "FLAGGED",
     "STALE", "IS_ANOMALY", "SLA_MET", "ENABLED", "VERDICT",
     "CHANGE_REGISTRATION", "BEHAVIOR", "DECISION", "SLO_STATE",
+    "SUPPORT_STATUS", "WHO_UPGRADES",
 )
 _TRUE_IS_GOOD = {"SLA_MET", "ENABLED"}
 _VERDICTS = {
@@ -93,6 +96,14 @@ _VERDICTS = {
     "KEEP": _OK, "CHECK SHARE CONSUMERS": _INFO, "UNCONFIRMED": _MUTED, "NO RECENT SPEND": _MUTED,
     "OBJECT GONE": _MUTED,   # PR C review C11: dropped or renamed; nothing to stop
 }
+# Snowflake's support floor per driver version (Security -> Clients, Next-Fifty #34). Column-scoped like
+# _VERDICTS so a generic 'OK' elsewhere never turns green. Labels = client_support.STATUS_LABELS; a
+# Snowflake-run row reads '<label> (Snowflake-run)' and stays neutral whatever its verdict.
+_SUPPORT = {
+    "UNSUPPORTED": _BAD, "NEARING END OF SUPPORT": _WARN, "BELOW RECOMMENDED": _INFO, "OK": _OK,
+    "NO VERSION": _MUTED, "NO MINIMUM LISTED": _MUTED, "NOT LISTED": _MUTED, "UNAVAILABLE": _MUTED,
+}
+_SNOWFLAKE_RUN_SUFFIX = "(SNOWFLAKE-RUN)"
 
 
 def status_css(column: str, value: object) -> str:
@@ -103,6 +114,8 @@ def status_css(column: str, value: object) -> str:
     column = str(column).upper()
     if column == "VERDICT":
         pair = _VERDICTS.get(text)
+    elif column == "SUPPORT_STATUS":
+        pair = _MUTED if text.endswith(_SNOWFLAKE_RUN_SUFFIX) else _SUPPORT.get(text)
     elif column in _TRUE_IS_GOOD and text in ("TRUE", "FALSE"):
         pair = _OK if text == "TRUE" else _BAD
     else:

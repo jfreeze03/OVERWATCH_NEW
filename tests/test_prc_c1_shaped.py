@@ -47,18 +47,26 @@ def _show(value: str, level: str) -> QueryResult:
                               "level": level, "description": "", "type": "NUMBER"}]))
 
 
-def _tail() -> pd.DataFrame:
+def _tail(*, v4603: bool = False) -> pd.DataFrame:
+    """The runtime tail. ``v4603``: WH_A's cancel fired at 600 s (below its 48h effective cap) and a
+    Snowflake-managed serverless-task pool SHOW never lists ran statements too (#33 D4/D5)."""
     rows = []
-    for name, runs, p99, mx, over in (("WH_A", 5000, 250.0, 4000.0, {900: 12}),
-                                      ("WH_B", 800, 40.0, 290.0, {})):
+    specs = [("WH_A", 5000, 250.0, 4000.0, {900: 12}, (600.0, 600.0) if v4603 else (None, None)),
+             ("WH_B", 800, 40.0, 290.0, {}, (None, None))]
+    if v4603:
+        specs.append(("COMPUTE_SERVICE_WH_USER_TASKS_POOL_STANDARD_GEN1_XSMALL", 149986, 25.0, 930.0, {},
+                      (None, None)))
+    for name, runs, p99, mx, over, (lo, hi) in specs:
         r = {"WAREHOUSE_NAME": name, "COMPANY": "ALFA", "COMPLETED_RUNS": runs, "P99_ELAPSED_SEC": p99,
-             "MAX_ELAPSED_SEC": mx, "TIMEOUT_CANCELLED_RUNS": 1, "TIMEOUT_CANCELLED_TOTAL": 2}
+             "MAX_ELAPSED_SEC": mx, "TIMEOUT_CANCELLED_RUNS": 1, "TIMEOUT_FIRED_MIN_SEC": lo,
+             "TIMEOUT_FIRED_MAX_SEC": hi, "TIMEOUT_CANCELLED_TOTAL": 2}
         r.update({f"RUNS_OVER_{s}": over.get(s, 0) for s in CAP_LADDER_S})
         rows.append(r)
     return pd.DataFrame(rows)
 
 
-def _ops_recorder(monkeypatch, *, account: tuple[str, str] = ("172800", ""), tail_fails: bool = False) -> list[str]:
+def _ops_recorder(monkeypatch, *, account: tuple[str, str] = ("172800", ""), tail_fails: bool = False,
+                  v4603: bool = False) -> list[str]:
     """Record every SQL Operations issues; answer the timeout reads with crafted frames."""
     import app.ui.pages.operations as ops
 
@@ -79,7 +87,7 @@ def _ops_recorder(monkeypatch, *, account: tuple[str, str] = ("172800", ""), tai
             if tail_fails:
                 return QueryResult(df=pd.DataFrame(), ok=False, error="Statement reached its timeout",
                                    error_kind="timeout", source="t")
-            return _ok(_tail())
+            return _ok(_tail(v4603=v4603))
         return _shaped_run(*args, **kwargs)
 
     def _batch(specs, **kwargs):
@@ -169,6 +177,26 @@ def test_statement_timeout_company_scope_with_a_failed_tail_is_unavailable(monke
     errors = " ".join(str(e.value) for e in at.error)
     assert "completed-runtime tail could not be read, so this company's warehouses are unknown" in errors
     assert "returned none" not in _blob(at)
+
+
+@_SKIP
+def test_statement_timeout_managed_compute_and_fired_below_cap_name_their_cause(monkeypatch):
+    """#33 D4/D5 on the rendered panel: a COMPUTE_SERVICE_WH* pool SHOW never lists is Managed compute (its own
+    caption, not the 'dropped, renamed, or not visible' one), and a cancel that fired below the effective cap
+    names every lower ceiling that can fire (a user, session, client or task value, or an earlier, lower
+    warehouse or account value); the Timed-out help no longer calls cancels 'caps that
+    already fired'."""
+    _ops_recorder(monkeypatch, v4603=True)
+    at = AppTest.from_function(_entry, default_timeout=30)
+    _sizing_lens(at, timeout_on=True)
+    blob = _blob(at)
+    assert "1 Snowflake-managed compute pool(s) (COMPUTE_SERVICE_WH*: serverless-task and upgrade pools)" in blob
+    assert "USER_TASK_TIMEOUT_MS. Shown as Managed compute." in blob
+    assert "ran statements in the window but SHOW WAREHOUSES does not list them" not in blob
+    assert "Timed out below the effective cap on WH_A:" in blob
+    assert "a user, session, client or task value, or an earlier, lower warehouse or account value" in blob
+    assert "caps that already fired" not in blob
+    assert "at whichever ceiling was lowest for that statement" in _card(blob, "Timed out (30d)")
 
 
 @_SKIP

@@ -236,6 +236,10 @@ def test_admin_cortex_card_is_toggle_and_probe_gated():
     assert 'else "—"' in body                                     # zero/unknown never renders a false $0
     tab = src.split("def _self_cost_tab(", 1)[1].split("\ndef ", 1)[0]
     perf = src.split("def _performance_tab(", 1)[1].split("\ndef ", 1)[0]
+    # v4.603 (#33 D2) moved this lock: the ceiling panel is its own function (render-tested in
+    # test_admin_timeout_wording), called first by the Performance tab
+    assert perf.split('"""', 2)[2].strip().startswith("_stmt_timeout_ceiling()")
+    perf += src.split("def _stmt_timeout_ceiling(", 1)[1].split("\ndef ", 1)[0]
     assert "Every app query is instead" not in perf and "{CORTEX_TIMEOUT_SECONDS}s" in perf
     assert "unverified under Streamlit-in-Snowflake" in perf
     assert '("FUNCTION_NAME", "MODEL_NAME", "REQUESTS", "AI_CREDITS")' in body

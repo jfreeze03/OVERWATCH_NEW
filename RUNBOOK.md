@@ -353,11 +353,28 @@ SOC. **Governance drift score** at top (§6). Sections:
   grants) with a who-changed-most bar beside it, failed-login reasons
   (network-policy vs credential), break-glass activity trend.
 - **Clients** — driver/version inventory from ACCOUNT_USAGE.SESSIONS
-  (lags ~3h): driver + version from CLIENT_APPLICATION_ID, PROGRAM from
-  the client-reported CLIENT_ENVIRONMENT (VS Code/DBeaver report; many
-  ODBC tools like Erwin do not). BEHIND = older than the newest version
-  of the same driver seen in the account — the upgrade shortlist. CSV
-  export on the panel.
+  (lags ~3h): driver + version from CLIENT_APPLICATION_ID ('(no client
+  id)' when empty), PROGRAM from the client-reported CLIENT_ENVIRONMENT
+  (VS Code/DBeaver report; many ODBC tools like Erwin do not). Since
+  v4.603 (#34) each version is checked against Snowflake's own floor from
+  SYSTEM$CLIENT_VERSION_INFO(): UNSUPPORTED (below the minimum supported
+  version), NEARING END OF SUPPORT, BELOW RECOMMENDED, OK, NO VERSION,
+  NOT LISTED. Snowflake-run rows (the Snowflake Web App / Snowsight
+  backend, SnowServices ingress) are Snowflake's to upgrade: neutral, and
+  out of the 'yours to upgrade' KPI and the BEHIND count. If the function
+  cannot be read, or none of its entries lists a minimum supported version
+  (a renamed key reads NULL without an error), support reads 'unavailable',
+  the support KPIs show '—', and STATUS (BEHIND = older than the newest
+  version of the same driver among your rows) is the fallback. A version
+  with no minimum to compare with (NOT LISTED, or NO MINIMUM LISTED: its
+  entry lists no minimum, so no verdict is given) is 'not checked' in the
+  support KPIs for its own side (yours, or Snowflake-run): those show the count (or '—'
+  when nothing could be checked) and are never a green 0, and the caption
+  names yours. If no entry lists a nearing-end-of-support or recommended
+  version (a renamed key), that KPI shows '—' and the caption says so.
+  If the inventory hits the app's row cap, the support KPIs, the upgrade
+  list and the behind count are withheld (they would be partial): narrow
+  the window or company scope. CSV export on the panel.
 - **Trust Center** — latest findings per scanner (needs
   TRUST_CENTER_VIEWER).
 
@@ -548,8 +565,25 @@ warehouses that legitimately run long; each ALTER's undo is a comment. The
 alert drawer's closed-loop "Statement timeout 1h" only ever tightens: it
 re-reads the warehouse value on a 30-second tier before it generates the
 ALTER, and when the warehouse is already capped at 1h or tighter it shows a
-note, not SQL. A manual savings verify is not prefilled when other booked
-changes share the measured window; split the measured change by hand.
+note, not SQL. Since v4.603 it also reads what a 1h cap would have cancelled
+on that one warehouse in the last 30 days: when that is any completed
+statement (or the read failed, so it is unknown) the ALTER is withheld until
+you tick the override. Take that seriously on hour-plus ETL warehouses
+(WH_TRXS_TRANSFORM ran 27 statements of 1h or more in 30 days, any status,
+2026-09-29; one was a timeout cancel, so the drawer, which counts completed
+statements only, shows at most 26). The posture table's "Fired at" is the
+ceiling a timeout cancel actually fired at; "below cap" means the lowest
+ceiling that fired is under the warehouse's effective cap, so a lower ceiling
+fired: a user, session, client or task value, or an earlier, lower warehouse
+or account value (the message gives the number of seconds, not which of these
+set it; the cap shown is today's value and the window reaches back 30-90
+days). "Managed compute" rows
+(COMPUTE_SERVICE_WH*) are Snowflake's serverless-task and upgrade pools:
+nothing to grant or set there. In the Emergency lever, a warehouse timeout of
+0 is Snowflake's 7-day maximum, not "no cap", and a lower session/account
+value still applies. A manual savings
+verify is not prefilled when other booked changes share the measured window;
+split the measured change by hand.
 
 Maintenance on objects nobody reads (v4.601, Cost → Optimization & Savings →
 Storage & waste): book the estimated saving only after the reviewed ALTER has
@@ -817,6 +851,11 @@ Route rows ENABLED with the right MIN_SEVERITY? APP_ERROR_LOG shows
 
 **Canary failures.** Column drift in ACCOUNT_USAGE or a dropped object.
 The failing check names the builder; APP_ERROR_LOG has the SQL error.
+One conditional exception: cortex.code_token_types also FAILs (its error
+names TOKENS_GRANULAR) on accounts whose Cortex Code views predate that
+optional column. That is expected only if the CoCo efficiency review has
+never shown token types on the account; if it has, the column was renamed
+or dropped: fix cortex_sql.cortex_code_token_types.
 
 **Numbers look wrong.** Check the source caption first (mart vs live +
 lag). ACCOUNT_USAGE lags ≤45 min (query history) to ≤24h (metering daily);

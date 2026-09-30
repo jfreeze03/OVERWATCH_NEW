@@ -546,6 +546,69 @@ def _email_path_status() -> None:
         st.caption(md_dollars(v.detail))
 
 
+def _plan_notice(plan: dict | None) -> None:
+    """The guarded levers' ONE warning/info render (tighten-only auto-suspend + statement timeout)."""
+    if plan is None:
+        return
+    if plan["level"] == "warning":
+        st.warning(plan["message"])
+    elif plan["level"] == "info":
+        st.info(plan["message"])
+
+
+# The cap the drawer's 'Statement timeout 1h' lever sets (its impact read covers stmt_timeout.IMPACT_DAYS).
+_STMT_LEVER_TARGET_S = 3600
+
+
+def _stmt_timeout_lever(wh_inline: str, event_id: str) -> dict:
+    """The alert drawer's 'Statement timeout 1h' lever (Next-Fifty #33): read, weigh, then maybe generate.
+
+    F1 (v4.601): tighten-only. A blind SET = 3600 LOOSENS a warehouse already capped tighter (the app
+    warehouse's value in force is read, never assumed from its install-time value), so the warehouse's
+    current value is read first. Review C13: this read gates an EXECUTABLE statement, so it rides the 30 s live tier, never the
+    4 h metadata entry the review-only Warehouses posture panel caches (a cap a DBA tightened in a
+    worksheet since then would read stale and be loosened).
+
+    D1 (v4.603): only when that SET would tighten, ONE warehouse's impact read runs (what the cap would
+    have cancelled in the last 30 days; historical tier, probe). A non-zero or UNKNOWN impact makes the
+    plan a warning and withholds the ALTER until the operator ticks the explicit override; a failed read
+    renders 'unavailable' with its error and never reads as no impact. Renders its own notice; returns
+    the plan (``stmt`` '' while withheld).
+
+    Review R1-4/R1-5: the notice sits above the override but is filled from the FINAL plan (a placeholder
+    reserved before the checkbox), so once ticked it says the ALTER is generated, not withheld; and the
+    override is keyed on the impact it acknowledges (stmt_timeout.override_ack), so a new impact -- a failed
+    read that succeeds on the rerun the tick causes, or a changed count -- starts unticked."""
+    _to_res = run(ops_sql.warehouse_stmt_timeout_sql(wh_inline), page=_PAGE,
+                  key=f"clf_stmt_to_{event_id[:8]}", tier="live",
+                  source=f"SHOW PARAMETERS IN WAREHOUSE {wh_inline}",
+                  max_rows=0, probe=True)
+    _to_cur, _to_lvl = stmt_timeout.parse_timeout_row(_to_res.df if _to_res.usable() else None)
+    _impact = None
+    if stmt_timeout.timeout_would_tighten(_to_cur, _STMT_LEVER_TARGET_S):
+        _days = stmt_timeout.IMPACT_DAYS
+        _imp = run(ops_sql.warehouse_timeout_impact(wh_inline, _STMT_LEVER_TARGET_S, _days), page=_PAGE,
+                   key=f"clf_stmt_impact_{event_id[:8]}", tier="historical",
+                   source=f"QUERY_HISTORY (live, {_days}d completed statements on {wh_inline})", probe=True)
+        _impact = stmt_timeout.parse_timeout_impact(_imp.df if _imp.ok else None, ok=_imp.ok, days=_days,
+                                                    error=_imp.error)
+        if not _impact.ok:
+            empty_state("unavailable", f"Could not read the last {_days} days of completed statements on "
+                        f"{wh_inline}: what a {humanize_duration(_STMT_LEVER_TARGET_S)} cap would cancel is "
+                        "unknown.", detail=_impact.error)
+    _plan = stmt_timeout.tighten_timeout_plan(wh_inline, _to_cur, _to_lvl, target=_STMT_LEVER_TARGET_S,
+                                              impact=_impact)
+    _notice = st.empty()
+    if _plan["override_needed"] and st.checkbox(
+            _plan["override_label"],
+            key=f"clf_stmt_override_{event_id[:8]}_{stmt_timeout.override_ack(_impact)}"):
+        _plan = stmt_timeout.tighten_timeout_plan(wh_inline, _to_cur, _to_lvl, target=_STMT_LEVER_TARGET_S,
+                                                  impact=_impact, override=True)
+    with _notice.container():
+        _plan_notice(_plan)
+    return _plan
+
+
 def _stale_rebind(sel: int, event_id: str, bound: object) -> bool:
     """F51: True when a sticky positional selection now points at a DIFFERENT event
     than the one the drawer was bound to — the feed shrank or reordered underneath it
@@ -1246,29 +1309,15 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                                 _cl_known, _cl_cur = True, float(_clv)
                                 _cl_plan = remediation.tighten_suspend_plan(wh_inline, _cl_cur, _cl_known)
                                 stmt_cl = _cl_plan["stmt"]
+                                _plan_notice(_cl_plan)
                             elif fix_kind.startswith("Statement"):
-                                # Next-Fifty #33 F1: tighten-only, like the auto-suspend guard. A blind
-                                # SET = 3600 LOOSENS a warehouse already capped tighter (the app warehouse
-                                # runs at 300s), so read the warehouse's current value first and generate
-                                # the 1h cap only when it tightens. Review C13: this read gates an
-                                # EXECUTABLE statement, so it rides the 30 s live tier, never the 4 h
-                                # metadata entry the review-only Warehouses posture panel caches (a cap a
-                                # DBA tightened in a worksheet since then would read stale and be loosened).
-                                _to_res = run(ops_sql.warehouse_stmt_timeout_sql(wh_inline), page=_PAGE,
-                                              key=f"clf_stmt_to_{event_id[:8]}", tier="live",
-                                              source=f"SHOW PARAMETERS IN WAREHOUSE {wh_inline}",
-                                              max_rows=0, probe=True)
-                                _to_cur, _to_lvl = stmt_timeout.parse_timeout_row(
-                                    _to_res.df if _to_res.usable() else None)
-                                _cl_plan = stmt_timeout.tighten_timeout_plan(wh_inline, _to_cur, _to_lvl)
+                                # Next-Fifty #33: tighten-only (F1) and impact-weighed (D1) -- the value
+                                # in force is read live first (never assumed from an install-time value),
+                                # then what a 1h cap would have cancelled; see _stmt_timeout_lever.
+                                _cl_plan = _stmt_timeout_lever(wh_inline, event_id)
                                 stmt_cl = _cl_plan["stmt"]
                             else:
                                 stmt_cl = remediation.cluster_range_fix(wh_inline, 1, 1)
-                            if _cl_plan is not None:
-                                if _cl_plan["level"] == "warning":
-                                    st.warning(_cl_plan["message"])
-                                elif _cl_plan["level"] == "info":
-                                    st.info(_cl_plan["message"])
                             if stmt_cl:
                                 st.code(stmt_cl, language="sql")
                             if stmt_cl and is_operator:
