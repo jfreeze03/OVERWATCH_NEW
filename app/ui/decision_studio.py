@@ -28,6 +28,7 @@ import streamlit as st
 from app.config import SAVINGS_ACTIVE_MONTHS, SAVINGS_MONTH_DAYS
 from app.core.identity import viewer_name
 from app.core.query import cache_scope, run, run_batch
+from app.core.result import is_setup_absence
 from app.core.state import can_open, request_navigation
 from app.data import mart27_sql, mart_sql, security_sql, workbench_sql
 from app.logic import insights
@@ -146,6 +147,23 @@ def _open_storage_waste() -> None:
     request_navigation("Cost Intelligence", "Optimization & Savings")
 
 
+def _consumer_reads_state(reads) -> None:
+    """The consumer-reach degrade line under the retirement verdicts. v4.605 review R1-13: the edition claim
+    only for a true absence (is_setup_absence -- the view is missing or not granted to this role); this account
+    is Enterprise, so a timeout, schema drift or any other failure is a failed read with its error. A readable
+    but empty read is its own quiet caption; a usable read renders nothing here."""
+    if not reads.ok and is_setup_absence(reads.error_kind):
+        st.caption("Consumer reach needs Enterprise ACCESS_HISTORY, which isn't available here "
+                   "— every verdict shows INSUFFICIENT_DATA (usage can't be measured, not zero).")
+    elif not reads.ok:
+        empty_state("unavailable", "Consumer reads (ACCESS_HISTORY) could not be read, so every verdict shows "
+                    "INSUFFICIENT_DATA (usage can't be measured, not zero).", detail=reads.error)
+    elif reads.empty:
+        st.caption("ACCESS_HISTORY returned no reads for mapped products in this window "
+                   "(recent-read ingestion lag, or none were read) — verdicts show "
+                   "INSUFFICIENT_DATA because usage couldn't be measured, not because it's zero.")
+
+
 # HIDDEN in v4.597 (Option C); revive via memo §4 #6 derived products. Nothing dispatches here (the
 # section left the page's section bar), so it issues no read; its locks stay green on the kept body.
 def _products(company: str, days: int, rate: float, *, bounds: tuple | None = None) -> None:
@@ -229,13 +247,7 @@ def _products(company: str, days: int, rate: float, *, bounds: tuple | None = No
         # measured. `_measured` gates the consumer surfaces so "couldn't measure" never
         # renders as a measured 0 (unlike a genuine measured-zero product).
         _measured = reads.usable()
-        if not reads.ok:
-            st.caption("Consumer reach needs Enterprise ACCESS_HISTORY, which isn't available here "
-                       "— every verdict shows INSUFFICIENT_DATA (usage can't be measured, not zero).")
-        elif reads.empty:
-            st.caption("ACCESS_HISTORY returned no reads for mapped products in this window "
-                       "(recent-read ingestion lag, or none were read) — verdicts show "
-                       "INSUFFICIENT_DATA because usage couldn't be measured, not because it's zero.")
+        _consumer_reads_state(reads)
         _retire = int((verdicts["RETIREMENT_VERDICT"] == "RETIRE_CANDIDATE").sum())
         # This is the SUM of each product's distinct readers (DISTINCT_CONSUMERS is a per-product
         # COUNT(DISTINCT USER_NAME)), so an account that reads several of these products is counted

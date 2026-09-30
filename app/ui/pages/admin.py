@@ -23,7 +23,7 @@ from app.core.ai import CORTEX_TIMEOUT_SECONDS
 from app.core.errors import error_buffer, safe_page
 from app.core.identity import identity_sql
 from app.core.query import bump_refresh_salt, execute_statement, query_telemetry, run, run_batch
-from app.core.result import is_setup_absence
+from app.core.result import is_schema_drift, is_setup_absence
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
@@ -2106,6 +2106,15 @@ def _setup_progress_tab() -> None:
     # v4.605: a read that FAILED (timeout, drift, any non-absence kind) is 'Unknown' -- not a pending setup
     # step -- so the checklist never tells the owner to apply or configure something that may be done.
     _retry_fix = "Retry. The read failed; this is not a setup gap."
+    # Review R1-15: a retry never clears schema drift (a missing column in an explicit column list), so the
+    # FIX is worded by kind; the failed reads' errors go to the summary's Error detail (a probe read leaves
+    # a missing column unlogged, so that expander is the only record of it).
+    _drift_fix = ("Schema drift: a column this build reads is missing. Apply the missing migrations, or "
+                  "redeploy the app if the database is ahead of it (Migrations & freshness tab); a retry will "
+                  "not clear it. See the Error detail.")
+
+    def _fail_fix(kind: object) -> str:
+        return _drift_fix if is_schema_drift(kind) else _retry_fix
 
     def _add(step: str, done: bool, detail: str, fix: str, partial: bool = False,
              unknown: bool = False) -> None:
@@ -2139,7 +2148,7 @@ def _setup_progress_tab() -> None:
     _add("Database migrations", done=bool(applied) and not drift.missing and not drift.ahead,
          partial=bool(drift.ahead) and not drift.missing, unknown=_sv_failed,
          detail=_sv_detail,
-         fix=(_retry_fix if _sv_failed else
+         fix=(_fail_fix(sv.error_kind) if _sv_failed else
               ("Run the missing migrations in order (DEPLOYMENT.md); " if drift.missing else "")
               + ("redeploy the app from the revision the newer migrations came from "
                  "(snow streamlit deploy --replace); " if drift.ahead else "")
@@ -2160,7 +2169,7 @@ def _setup_progress_tab() -> None:
     elif not fr.ok and not is_setup_absence(fr.error_kind):
         _add("Marts loading", done=False, unknown=True,
              detail="SOURCE_FRESHNESS_STATE could not be read, so whether the marts are loading is unknown.",
-             fix=_retry_fix)
+             fix=_fail_fix(fr.error_kind))
     else:
         _add("Marts loading", done=False,
              detail=("SOURCE_FRESHNESS_STATE is empty — have the loader tasks run?" if fr.ok
@@ -2194,7 +2203,7 @@ def _setup_progress_tab() -> None:
     else:
         _rt_detail = "routes table not readable"
     _add("Alert routes configured", done=_n_routes > 0, unknown=_rt_failed, detail=_rt_detail,
-         fix=(_retry_fix if _rt_failed
+         fix=(_fail_fix(rt.error_kind) if _rt_failed
               else "Add an enabled route so alerts reach Teams/email (Alerts → Rules & routes)."))
 
     df = pd.DataFrame(rows)
@@ -2205,8 +2214,15 @@ def _setup_progress_tab() -> None:
     if pending:
         st.warning(f"{pending} setup item(s) still pending — see the FIX column.")
     if unknown:
+        _failed_reads = [(src, r) for src, r in (("SCHEMA_VERSION", sv), ("SOURCE_FRESHNESS_STATE", fr),
+                                                 ("ALERT_ROUTES", rt))
+                         if not r.ok and not is_setup_absence(r.error_kind)]
+        _any_drift = any(is_schema_drift(r.error_kind) for _, r in _failed_reads)
         empty_state("unavailable", f"{unknown} setup item(s) could not be checked: a read failed, which is "
-                    "not a setup gap. Retry.")
+                    "not a setup gap. "
+                    + ("A missing column is schema drift, which a retry will not clear: see the FIX column."
+                       if _any_drift else "Retry."),
+                    detail="\n".join(f"{src}: {r.error}" for src, r in _failed_reads))
     styled_table(df, height=360)
     st.caption("Per-version migration detail (which VNNN is applied or missing) is on "
                "the Migrations & freshness tab.")
