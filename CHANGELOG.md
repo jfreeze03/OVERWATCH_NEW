@@ -1,5 +1,96 @@
 # Changelog
 
+## 4.605.0 - Hygiene: storage waste in Addressable $/mo, every duration in Hr/Min/Sec, probe failures read by kind, one Track write for AI exceptions (2026-09-30)
+
+App-only, no migration. The small buildable-now items left after the 2026-09-30 re-ground-truth: the #35 storage-waste
+lever, a duration humanization sweep (owner decision: the query advisor's #17-locked numbers are humanized too; its hedged
+wording stays), the probe-failure routing the #43 review flagged, and the Chargeback & AI queue write on the shared #15 path.
+
+- **Cost: unread-table storage joins Addressable $/mo (#35 storage leg).**
+  - Storage & waste LEVER per table. When the storage-waste scan has read evidence, each table gets a LEVER and an ESTIMATED EST_MONTHLY_USD at STORAGE_USD_PER_TB_MONTH. The new pure module is logic/storage_waste.py, and the frame keeps the same rows in the same order.
+    - Archive or drop: a table with no DML and no read in 90 days, priced on its active bytes.
+    - Cut retention: a table still written but not read in 90 days, priced on the Time Travel a 1-day retention would release. This is the retention control's own formula.
+    - A table counts only if it is live, never read in 90 days, at least 90 days old and not in a shared-out database.
+  - A new 'Reclaimable $/mo (unread tables)' KPI sums the two levers. A legend explains each LEVER. When the top-50 frame is full, the KPI reads 'top 50, ≥' and a floor legend is shown, because most stale tables rank outside the top 50.
+  - Read evidence and the degraded caption:
+    - storage_reclaim now counts reads in any access-history object domain, the #30 confirm's rule. This errs on the safe side: a materialized view or dynamic table read no longer leaves its table looking never-read. As a result, 'Stale AND never read (90d)' can only fall. This is intended, not a regression.
+    - The same statement gains a share guard (SHARED_DATABASE, from GRANTS_TO_ROLES) and OLDER_THAN_90D.
+    - The degraded (DML-only) caption now says why read evidence is missing, by error kind, instead of '(ACCESS_HISTORY needs Enterprise edition)'. This account is Enterprise, so a timeout now says it timed out.
+  - Idle & sizing and Proof ▸ Pipeline count storage waste exactly like unread maintenance. They read it from a session handoff and make zero reads. The handoff is limited to the same Company, the same cache scope and 1h, and is dropped on a storage-rate change. The 'Levers counted / Not counted' line names storage waste and says why it is missing:
+    - not checked this session;
+    - no read evidence;
+    - the scan could not be read;
+    - the Savings ledger could not be read;
+    - the storage rate changed;
+    - stale.
+  - Booked tables and overlaps:
+    - Tables already booked on the Savings ledger (a RETENTION booking or an unread-maintenance booking) are left out.
+    - A retention change made in the panel leaves its table out at once.
+    - One saving per table: unread maintenance, clustering, storage and retention on the same table count once, and the larger wins. 'Overlaps removed' counts these too.
+  - Proof ▸ Pipeline adds OBJECT rows titled 'Archive or drop unread <table>' and 'Cut Time Travel retention on unread <table>'. It also adds a 'Check storage waste' doorway when unread maintenance is already counted.
+  - Never counted:
+    - fail-safe (a fixed 7-day tail);
+    - clone-retained bytes;
+    - a stale table's remaining Time Travel;
+    - retention on tables someone reads;
+    - tables under 1 GB;
+    - DML-only fallback rows;
+    - #29 transient conversion.
+- **Every duration a sentence names reads Hr/Min/Sec.**
+  - Owner decision (2026-09-30): the query advisor's findings now show their numbers in the same Hr/Min/Sec form as the tables and KPI cards. "Spent 150s queued (of 200.0s total)" now reads "Spent 2m 30s queued (of 3m 20s total)", and a 0.55 s metadata call reads "…of a 550ms runtime with only 10ms of execution". This covers the metadata chatter, compile-bound, cold-start and queued findings. Next-Fifty #17's split-unknown wording and behaviour, the points, QOP / SQL_QOP / OOS and the ranking are all unchanged. You see these findings in the Operations query drill, in the Operations ▸ Optimize fix queue (First fix / FIRST_ACTION) and in the Cortex grounding prompt's FINDINGS.
+  - The sweep fixed the other raw durations through the shared helpers:
+    - Operations warehouse health ("2h 25m/day queued", "p95 runtime 15m 40s").
+    - The verdict ("warehouse queueing 40m/day").
+    - Release compare: the labels are now "p95 runtime" and "Queued per query" (the stale "(s)" is gone) and the per-query queue reads "500ms/q".
+    - Pipeline SLA forecast ("already 30h 30m old (past its 24h limit)", "~23h 30m runway", "breaches in ~45m").
+    - Explain a task ("lags up to ~45m and the task ended 12m ago").
+    - Tonight start drift ("…/night later") and the quiet window.
+    - The Overview score driver ("2h 25m queued per day.").
+    - Control Room replay ("2h 25m of queueing across the day.") and the RCA lead ("12m before onset").
+    - Cost ▸ Optimize repeat candidates ("4h 30m compute/30d").
+    - The auto-suspend provisioning note ("2h 30m/day provisioning").
+    - Admin ▸ Performance: the Cortex per-statement ceiling reads "1m 30s".
+    - The sidebar refresh note, which now uses the shared humanize_age ("just now" under 45 s, then "5m ago").
+    - The Alerts PERF_QUEUED_MINUTES re-check: its label is now "queued time today", and the value and threshold are humanized ("2h 25m vs threshold 30m"). The other rules keep two decimals.
+  - Kept on purpose: Snowflake parameter values (AUTO_SUSPEND, STATEMENT_TIMEOUT_IN_SECONDS) stay in the parameter's own seconds. They match the prefilled ALTER, SHOW WAREHOUSES and SP_ALERT_SCAN_DAILY [24]'s "AUTO_SUSPEND 600s -> 60s" title. On this account the multi-cluster warehouses run AUTO_SUSPEND 300, and WH_ALFA_ADMIN and the Streamlit notebook warehouse run 60 (2026-09-29 probe).
+  - Fix: Explain a task no longer raises OverflowError when END_AGE_MIN is NULL. It now returns its post-lag reading.
+  - The AI grounding prompt's stat keys carry their unit: elapsed_sec=, compile_sec=, queued_sec=.
+  - New test: tests/test_duration_format_consistency.py now sweeps every string expression in app/ (except the app/data SQL layer) as AST. It fails on any interpolated number followed by a time unit that did not come from the shared helpers. Exemptions are span-based: each one covers only its listed fragment, and a stale exemption fails the test. There is also a negative control and behaviour tests.
+  - Byte locks moved deliberately, each with a comment saying why: test_cold_start_split (_LEGACY_QUEUED), test_cluster_cap_gate (the hedged text and the _ADD_CLUSTER_ALLOWED key), test_etl_evidence, test_v4148_ops_cost, test_insights, test_logic_hunt2, test_ops_hunt and test_statement_params.
+- **A failed probe read shows the kind of failure.**
+  - A failed probe read now shows the kind of failure. A new helper, app.core.result.is_setup_absence, keeps
+    needs_setup for a true absence only: the object is missing or not granted ('absent'), or the function does not
+    exist ('unknown_function'). A missing column (schema drift), a timeout or any other failure renders a red
+    "unavailable" state with the error in its detail expander. query.run(probe=True) still does not log a missing
+    column (its expected-absence tuple is unchanged), so that expander is the only record, and no new message points
+    at the Admin error log. Sites fixed (A1-A16): Security > Access password-deprecation readiness and the admin
+    network-policy panel (the reported #9 bug, where a missing column read as "the policy-reference view isn't
+    readable"; the lumped _PROBE_ABSENT tuple is gone, and "The MFA-gap list above still applies" is dropped);
+    Security object-tag coverage; the Security decision queue, which now shows the V075 setup state only when both
+    reads are absent (a failed exception-queue read is "unavailable", no longer "did not resolve"); the change-risk
+    breakdown; Operations query insights; Spend native ANOMALY_INSIGHTS and account storage tiers; Optimization object
+    cost; Unit costs pattern costs; Admin Flyway ledger and AI reconciliation; Entity 360 blast radius; Contract org
+    balance (a readable but empty view now shows "Org balance view returned no usable rows" instead of "isn't visible
+    to this role"); the CoCo token panel shows its TOKENS_GRANULAR note only when that is the missing column, and any
+    other missing column is "schema drift". Admin > Setup progress: a checklist row whose read fails for a reason
+    other than absence is Unknown, with a Retry fix and a separate "N setup item(s) could not be checked" line.
+    Unknown never counts as pending. An empty routes read now says "0 enabled route(s)" (this account: 1).
+- **Cost > Chargeback & AI: Track top exceptions writes through the shared Track statement.**
+  - Cost > Chargeback & AI "Track top exceptions as work items" now writes through the shared Track statement
+    (fix_queue.track_entities_sql, the one Optimize and Control Room triage use), at most two statements per click
+    instead of up to ten INSERTs. Each user gets one item, keyed on the user (SOURCE_ENTITY_TYPE USER), with every
+    signal in its detail and the severity of that user's strongest signal. COMPANY is
+    COALESCE(NULLIF(COMPANY_FOR_USER(user), 'UNKNOWN'), 'ALL'). The all-users budget breach becomes one AI_BUDGET item
+    keyed on the Company scope, estimated only at the exposure the user items do not already count. OWNER is
+    UNASSIGNED (was 'DBA / AI Governance'); PERIOD is MONTHLY when priced. The duplicate check is scoped to this
+    page's SOURCE, so a Security work item on the same user no longer blocks the AI item. It matches the user or scope
+    entity, and a still-open pre-v4.605 item from this page is matched by its old title, so nothing is queued twice.
+    There is no backfill. The month window is gone: an item still open from an earlier month now blocks a new one
+    (before, a second item was allowed and QUEUED_MONTHLY_TOTAL double-counted). A done or dismissed item does not
+    block. AI_BUDGET never opens Entity 360. Owner check after deploy: open Security > Access and toggle "Check admin
+    network-policy coverage". It should render KPIs on this account (S1b lists one USER-level and one ACCOUNT-level
+    network policy).
+
 ## 4.604.0 - Masking coverage, a cluster-cap check on the add-a-cluster advice, company all-in showback, unread maintenance in Addressable $/mo (2026-09-30)
 
 App-only, no migration. Next-Fifty #43 Phase 1, the #38 remainder, #42 Part 1 and #35 -- the four items the 2026-09-30

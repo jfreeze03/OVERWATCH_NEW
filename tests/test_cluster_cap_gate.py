@@ -851,7 +851,7 @@ _ADD_CLUSTER_ALLOWED = {
      "parallelism) or warehouse resume overhead (lengthen AUTO_SUSPEND / keep it warm)."):
         "the split-UNKNOWN fallback only (a row without QUEUED_OVERLOAD_SEC / QUEUED_PROVISIONING_SEC, the older row "
         "shape): tests/test_cold_start_split.py locks it byte for byte (Next-Fifty #17 kept the v4.588 wording for "
-        "that shape; numbers humanized since v4.605.0, owner 2026-09-30, so this key names queued_txt / "
+        "that shape; numbers humanized by the 2026-09-30 hygiene release (owner decision), so this key names queued_txt / "
         "elapsed_txt). The split-known, no-dominant-cause text carries the qualifier (review r3 R3-2 / R3-7; "
         "test_the_no_dominant_cause_queue_finding_carries_the_cap_check)",
     ("app/logic/sizing.py", "_pressure_verdict", "{lead} Add a cluster rather than a bigger size. {how}{tail}"):
