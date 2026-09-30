@@ -213,7 +213,9 @@ def test_pipeline_counts_unread_only_from_the_session_handoff():
     for token in ("maintenance_on_unread", "object_reads_confirm", "unread_maintenance_opportunities",
                   "unread_handoff(", "booked_objects", "cost_sql", "insights_sql"):
         assert token not in body, token
-    assert "lever_basis(_counted, _absent, {\"UNREAD_MAINT\": _unread.note})" in pipe
+    # #35 storage leg: the storage-waste lever joins the same caption
+    assert ("lever_basis(_counted, _absent, {\"UNREAD_MAINT\": _unread.note, \"STORAGE_WASTE\": _storage.note})"
+            in pipe)
     assert "_basis = lever_short(_counted)" in pipe
     assert '"idle timer + right-sizing" if _sized_ok' not in pipe                # the old two-lever wording
     assert ('if not _unread.included and can_open("Cost Intelligence") and st.button(\n'

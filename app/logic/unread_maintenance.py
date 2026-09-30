@@ -236,11 +236,14 @@ def _cell(value: object) -> str:
     return _text(value)
 
 
-def booked_objects(ledger: pd.DataFrame | None) -> frozenset[str] | None:
+def booked_objects(ledger: pd.DataFrame | None, *,
+                   finding_types: frozenset[str] | None = None) -> frozenset[str] | None:
     """Next-Fifty #35: the objects already booked on the Savings ledger under ANY unread-maintenance finding type
     in any state but REJECTED: the predicate book_estimated_sql's WHERE NOT EXISTS refuses a second booking on
     (a NULL STATE is not '<> REJECTED' there either), so an object the Book button would refuse is never counted
     in Addressable $/mo. Keys are object_key(TARGET_OBJECT); FINDING_TYPE / STATE compare UPPER(TRIM()).
+    ``finding_types`` replaces the unread-maintenance types (None keeps them): the storage-waste lever passes
+    storage_waste.STORAGE_BOOKED_TYPES (RETENTION plus these), so one table is one saving.
 
     None / not a DataFrame -> None (unknown: the caller leaves the lever out rather than risk a double count);
     an empty frame -> frozenset() (nothing booked); a non-empty frame without TARGET_OBJECT, FINDING_TYPE or
@@ -251,11 +254,12 @@ def booked_objects(ledger: pd.DataFrame | None) -> frozenset[str] | None:
         return frozenset()
     if not {"TARGET_OBJECT", "FINDING_TYPE", "STATE"}.issubset(ledger.columns):
         return None
+    types = _BOOKED_TYPES if finding_types is None else frozenset(str(t).strip().upper() for t in finding_types)
     out: set[str] = set()
     for target, ftype, state in zip(ledger["TARGET_OBJECT"], ledger["FINDING_TYPE"], ledger["STATE"],
                                     strict=True):
         live = _cell(state).upper()
-        if _cell(ftype).upper() in _BOOKED_TYPES and live and live != "REJECTED":
+        if _cell(ftype).upper() in types and live and live != "REJECTED":
             key = object_key(_cell(target))
             if key:
                 out.add(key)

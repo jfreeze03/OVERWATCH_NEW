@@ -34,6 +34,7 @@ from app.logic.capacity import capacity_forecasts
 from app.logic.consolidation import WarehouseProfile, consolidation_candidates
 from app.logic.date_windows import window_label, window_phrase
 from app.logic.formulas import (
+    DEFAULT_STORAGE_USD_PER_TB_MONTH,
     account_today,
     format_usd,
     humanize_duration,
@@ -72,6 +73,13 @@ from app.logic.monitors import (
 from app.logic.savings_rollup import (
     H_BOOKED,
     S_LEDGER_UNAVAILABLE,
+    S_STORAGE_LEDGER_UNAVAILABLE,
+    STORAGE_CLEAN,
+    STORAGE_CONFIRMED,
+    STORAGE_HANDOFF_KEY,
+    STORAGE_LEDGER_FAILED,
+    STORAGE_NO_READS,
+    STORAGE_SCAN_FAILED,
     UNREAD_CLEAN,
     UNREAD_CONFIRM_FAILED,
     UNREAD_CONFIRMED,
@@ -84,6 +92,9 @@ from app.logic.savings_rollup import (
     lever_basis,
     resize_opportunities,
     rollup_savings,
+    storage_handoff,
+    storage_handoff_note,
+    storage_lever,
     unread_handoff,
     unread_handoff_note,
     unread_lever,
@@ -112,6 +123,14 @@ from app.logic.sizing import (
     sizing_summary,
     unknown_range_sentence,
     with_cluster_use,
+)
+from app.logic.storage_waste import (
+    FLOOR_LEGEND,
+    LEVER_LEGEND,
+    STORAGE_BOOKED_TYPES,
+    lever_rows,
+    reads_unavailable_note,
+    storage_waste_verdicts,
 )
 from app.logic.unread_maintenance import (
     ACTION_VERDICTS,
@@ -1075,16 +1094,21 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         _exp = run(workbench_sql.experiments(entity_type="WAREHOUSE"), page=_PAGE,
                    key=f"opt_experiments_{company}", tier="recent", source="OPTIMIZATION_EXPERIMENTS")
         _exp_df = _exp.df if _exp.usable() else pd.DataFrame()
-        # Next-Fifty #35: unread maintenance joins ONLY from the Storage & waste session handoff (a confirmed
-        # scan, this Company, Database filter clear, same cache scope and credit rate, under 1h old by the aware UTC
-        # clock) — zero reads here.
+        # Next-Fifty #35: unread maintenance and storage waste join ONLY from their Storage & waste session
+        # handoffs (a scan this session, this Company, Database filter clear, same cache scope, the credit rate /
+        # storage rate their rows were priced at, under 1h old by the aware UTC clock) — zero reads here.
         _unread = unread_lever(st.session_state.get(UNREAD_HANDOFF_KEY), company=company, scope=cache_scope(),
                                now=utc_now(), rate=rate, where="Storage & waste")
         _savings_opps.extend(_unread.opportunities)
+        _st_rate = safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), DEFAULT_STORAGE_USD_PER_TB_MONTH)
+        _storage = storage_lever(st.session_state.get(STORAGE_HANDOFF_KEY), company=company, scope=cache_scope(),
+                                 now=utc_now(), rate=_st_rate, where="Storage & waste")
+        _savings_opps.extend(_storage.opportunities)
         _roll = rollup_savings(_savings_opps)
         _counted = [lever for lever, on in (("IDLE", _idle_profiles_tx is not None),
                                             ("RESIZE", _sizing_profiles_tx is not None),
-                                            ("UNREAD_MAINT", _unread.included)) if on]
+                                            ("UNREAD_MAINT", _unread.included),
+                                            ("STORAGE_WASTE", _storage.included)) if on]
         _absent: dict[str, str] = {}
         if _idle_profiles_tx is None:
             _absent["IDLE"] = "the idle advisor above returned no rows or could not be read"
@@ -1094,18 +1118,26 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                  "turn on 'Load right-sizing profile (heavy scan)' above")
         if not _unread.included:
             _absent["UNREAD_MAINT"] = _unread.reason
-        _basis = lever_basis(_counted, _absent, {"UNREAD_MAINT": _unread.note})
+        if not _storage.included:
+            _absent["STORAGE_WASTE"] = _storage.reason
+        _basis = lever_basis(_counted, _absent, {"UNREAD_MAINT": _unread.note, "STORAGE_WASTE": _storage.note})
         if _roll.items:
             kpi_row([
                 {"label": "Addressable $/mo (net)", "value": format_usd(_roll.total_monthly_usd),
                  "help": "The levers named just below, de-duplicated: a warehouse counted for both idle and "
-                         "resize counts once (the larger wins). Idle and right-sizing are measured over this "
-                         "window. Unread maintenance is ESTIMATED from the last 30 complete days of maintenance "
-                         "on objects confirmed unread in Storage & waste this session, " + H_BOOKED + "; an "
-                         "object you stopped without booking keeps counting until those 30 days roll off."},
+                         "resize counts once, and so does a table counted by more than one of unread maintenance "
+                         "and storage waste (the larger wins). Idle and right-sizing are measured over this "
+                         "window. Unread maintenance (the last 30 complete days of maintenance) and storage waste "
+                         "(the table's current bytes at your storage rate) are ESTIMATED, on objects confirmed "
+                         "unread in Storage & waste this session, " + H_BOOKED + "; an "
+                         "object you stopped without booking keeps counting until those 30 days roll off. A table "
+                         "you dropped or re-set in a worksheet keeps counting until the storage-waste scan is "
+                         "re-run after account usage shows the change."},
                 {"label": "Opportunities", "value": str(len(_roll.items))},
                 {"label": "Overlaps removed", "value": str(len(_roll.dropped)),
-                 "help": "Idle/resize double-counts on the same warehouse dropped from the total."},
+                 "help": "Double-counts dropped from the total: idle and resize on the same warehouse, or more "
+                         "than one of unread maintenance and storage waste on the same table (the larger counts "
+                         "once)."},
             ])
             st.caption(md_dollars(_basis))
             _rdf = pd.DataFrame([
@@ -1129,8 +1161,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 "Ranked by confidence x dollars. **Effort** flags the quick wins — LOW is a quick ALTER-level "
                 "change (an idle timer, a size, or stopping maintenance on an unread object), so sort by it to "
                 "bank the easy savings first even when they're not the biggest number. Also not in this total: "
-                "the failed-query **Wasted spend** board (Operations), the **Serverless ROI** panel above, and "
-                "the storage-waste and automatic-clustering panels in Storage & waste."
+                "the failed-query **Wasted spend** board (Operations), the **Serverless ROI** panel above, the "
+                "automatic-clustering panel in Storage & waste, and the storage-waste bytes no lever claims "
+                "(fail-safe, clone-retained, and tables someone reads)."
             )
         else:
             st.caption(md_dollars("No open opportunities from the levers counted. " + _basis))
@@ -1952,13 +1985,19 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         st.caption(toggle_cost_hint("reclaim_"))
         if st.toggle("Run storage-waste scan", key="cost_waste_toggle",
                      help="Top tables by retention bytes, flagged STALE when no DML touched them in 90 days."):
+            # Next-Fifty #35 storage leg: the storage rate the lever's rows are priced at (the SAME expression the
+            # two headlines read it back with, so the sides never disagree and fake a rate change)
+            _waste_rate_tb = safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), DEFAULT_STORAGE_USD_PER_TB_MONTH)
             with st.spinner("Scanning table storage + 90 days of read/DML history…"):
                 waste = run(insights_sql.storage_reclaim(company), page=_PAGE,
                             key=f"reclaim_{company}", tier="historical",
-                            source="TABLE_STORAGE_METRICS + DML + ACCESS_HISTORY (reads, 90d)")
+                            source="TABLE_STORAGE_METRICS + DML + ACCESS_HISTORY (reads, 90d) + share grants")
                 reads_available = waste.ok
+                # why there is no read evidence, by the error kind (kept before the fallback replaces `waste`)
+                _reads_note = "" if waste.ok else reads_unavailable_note(waste.error_kind, waste.error)
                 if not waste.ok:
-                    # ACCESS_HISTORY needs Enterprise edition — degrade to the DML-only view.
+                    # The read-evidence scan failed (on this Enterprise account a timeout or a fault; the edition
+                    # only on a not-visible error) — degrade to the DML-only view.
                     waste = run_mart_first(
                         mart_sql.table_storage_waste_mart(company),
                         insights_sql.storage_waste(company),
@@ -1969,6 +2008,11 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         mart_accept=storage_snapshot_fresh)   # r36: stale snapshot -> live scan
             if waste.ok and waste.empty:
                 empty_state("clean", "No table above 1 GB of combined active + retention bytes in this scope.")
+                # Next-Fifty #35 storage leg: a clean scan counts the lever at $0 in Addressable $/mo. storage_reclaim
+                # and storage_waste are Company-scoped only, so the Database filter never narrows this scan.
+                st.session_state[STORAGE_HANDOFF_KEY] = storage_handoff(
+                    None, status=STORAGE_CLEAN, company=company, database="", scope=cache_scope(),
+                    as_of=utc_now(), rate=_waste_rate_tb)
             elif guard(waste, ""):
                 sdf = waste.df.copy().drop(columns=["SNAPSHOT_DAY"], errors="ignore")
                 if "DML_STATUS" in sdf.columns:
@@ -1978,6 +2022,14 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 # the shown top tables, not the account-wide stale total. Mark it a floor
                 # when the frame is truncated at the cap.
                 _wtrunc = len(sdf) >= 50
+                # Next-Fifty #35 storage leg: one LEVER per row (same rows, same order, so waste_sel still maps),
+                # only on the read-evidence frame; the DML-only fallback confirms nothing unread.
+                _sv_ok = reads_available and "NEVER_READ" in sdf.columns
+                if _sv_ok:
+                    sdf = storage_waste_verdicts(sdf, rate_tb=_waste_rate_tb)
+                _sv_n = len(lever_rows(sdf)) if _sv_ok else 0
+                _st_booked: frozenset[str] | None = frozenset()
+                _st_led_err = ""
                 kpis_w = [
                     {"label": "Tables shown", "value": f"{len(sdf)}"},
                     {"label": "Stale (no DML 90d)", "value": f"{len(stale)}",
@@ -1994,21 +2046,51 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     kpis_w.append({
                         "label": "Stale AND never read (90d)", "value": f"{len(never)}",
                         "severity": "warn" if len(never) else "ok",
-                        "help": "No DML and no reads in ACCESS_HISTORY for 90 days — the "
-                                "safe-to-archive shortlist. Verify with owners before dropping.",
+                        "help": "No DML and no reads in ACCESS_HISTORY for 90 days. LEVER below says which of "
+                                "them count as Archive or drop (a shared-out database or a table under 90 days "
+                                "old does not). Verify with owners before dropping.",
                     })
+                if _sv_ok:
+                    kpis_w.append({
+                        "label": "Reclaimable $/mo (unread tables" + (", top 50, ≥)" if _wtrunc else ")"),
+                        "value": format_usd(float(lever_rows(sdf)["EST_MONTHLY_USD"].sum())),
+                        "severity": "warn" if _sv_n else "ok",
+                        "help": "ESTIMATED at your storage rate: the Archive or drop and Cut retention rows in "
+                                "LEVER below (tables nobody read in 90 days, at least 90 days old, not in a "
+                                "shared-out database). Fail-safe, clone-retained bytes and tables under 1 GB never "
+                                "count." + (" Only the top 50 tables by retention bytes are scanned, so this is "
+                                            "a floor." if _wtrunc else ""),
+                    })
+                if _sv_ok and _sv_n:
+                    # Tables already booked on the Savings ledger (a retention cut, or an unread-maintenance saving
+                    # on the same table) stay out of Addressable $/mo: one saving per table. Read only when a table
+                    # qualifies. The same SQL and tier as the unread read and Proof, so one shared cache entry; the
+                    # key must NOT contain 'reclaim_', or toggle_cost_hint above would report this fast read.
+                    _st_led = run(mart_sql.savings_ledger(limit=None), page=_PAGE, key="booked_storage_ledger",
+                                  tier="recent",
+                                  source="SAVINGS_LEDGER (bookings, to leave booked tables out of Addressable $/mo)")
+                    # a row-capped read may miss the oldest bookings: unknown, never a partial set (no double count)
+                    _st_booked = (booked_objects(_st_led.df, finding_types=STORAGE_BOOKED_TYPES)
+                                  if _st_led.ok and not _st_led.truncated else None)
+                    _st_led_err = (str(_st_led.error or "") if not _st_led.ok else
+                                   f"The read stopped at its {len(_st_led.df):,}-row cap, so older bookings could "
+                                   "not be checked." if _st_led.truncated else "")
                 kpi_row(kpis_w)
                 sel_w = selectable_table(sdf, key="waste_sel", height=300)
                 # D4: "or dropping" is only defensible when read evidence exists. On
                 # the degraded (DML-only) path a table can be read constantly and
                 # still look stale — recommending a DROP there is dangerous advice.
-                st.caption("Stale + heavy retention = candidates for DATA_RETENTION_TIME_IN_DAYS "
-                           + ("reduction, transient conversion, or dropping."
-                              if reads_available else
-                              "reduction or transient conversion. Read evidence is unavailable "
-                              "(ACCESS_HISTORY needs Enterprise edition), so STALE here means no DML "
-                              "only — a table nobody writes may still be read every day. These are "
-                              "not drop candidates."))
+                # Next-Fifty #35: the degraded reason is worded by the error kind (this account is Enterprise, so a
+                # failure here is a timeout or a fault), never a blanket edition claim.
+                st.caption(md_dollars(
+                    "Stale + heavy retention = candidates for DATA_RETENTION_TIME_IN_DAYS "
+                    + ("reduction, transient conversion, or dropping."
+                       if reads_available else
+                       "reduction or transient conversion. Read evidence is unavailable: " + _reads_note
+                       + ". STALE here means no DML only — a table nobody writes may still be read every "
+                       "day. These are not drop candidates.")))
+                if _sv_ok:
+                    st.caption(md_dollars(LEVER_LEGEND + (" " + FLOOR_LEGEND if _wtrunc else "")))
                 result_caption(waste)
                 if sel_w is not None:
                     _trow = sdf.iloc[int(sel_w)]
@@ -2140,8 +2222,29 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                     "'Booked from storage-waste scan.', "
                                     f"'RETENTION', {sql_literal('.'.join([str(wrow['DATABASE_NAME']), str(wrow['SCHEMA_NAME']), str(wrow['TABLE_NAME'])]))}", page=_PAGE)
                             stamp_write("waste", ok)  # C48
+                            if ok and _st_booked is not None:
+                                _st_booked = _st_booked | {object_key(".".join([str(wrow["DATABASE_NAME"]),
+                                                                                str(wrow["SCHEMA_NAME"]),
+                                                                                str(wrow["TABLE_NAME"])]))}
                             notify(ok, msg if not ok else
                                    f"Retention set to {int(keep_days)}d on {wrow['TABLE_NAME']}.")
+                # Next-Fifty #35 storage leg: the ONLY path from these rows to Addressable $/mo (Idle & sizing, Proof
+                # ▸ Pipeline): a primitives-only snapshot in a non-widget session key, written after any retention
+                # change this run (that table is left out at once). Only the read-evidence frame carries rows; it is
+                # never cleared when the toggle is off (Streamlit resets it on every revisit).
+                st.session_state[STORAGE_HANDOFF_KEY] = storage_handoff(
+                    sdf if _sv_ok else None, status=STORAGE_CONFIRMED if _sv_ok else STORAGE_NO_READS, company=company,
+                    database="", scope=cache_scope(), as_of=utc_now(), rate=_waste_rate_tb, checked=len(sdf),
+                    truncated=_wtrunc, booked=_st_booked)
+                if st.session_state[STORAGE_HANDOFF_KEY]["status"] == STORAGE_LEDGER_FAILED:
+                    empty_state("unavailable", md_dollars(S_STORAGE_LEDGER_UNAVAILABLE), detail=_st_led_err)
+                elif (_sn := storage_handoff_note(st.session_state[STORAGE_HANDOFF_KEY])):
+                    st.caption(md_dollars(_sn))
+            else:
+                # guard() above already rendered the scan's 'unavailable' state
+                st.session_state[STORAGE_HANDOFF_KEY] = storage_handoff(
+                    None, status=STORAGE_SCAN_FAILED, company=company, database="", scope=cache_scope(),
+                    as_of=utc_now(), rate=_waste_rate_tb)
 
         st.markdown("**Automatic clustering spend (per table)**")
         st.caption(toggle_cost_hint("clustering_"))

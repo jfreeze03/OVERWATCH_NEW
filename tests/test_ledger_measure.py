@@ -402,9 +402,10 @@ def test_savings_tab_takes_the_rate_and_settings_from_the_page():
     assert "def _savings_tab(rate: float = 3.68, settings: dict | None = None) -> None:" in opt
     assert "_savings_tab(rate, settings)" in read("app/ui/pages/cost.py")
     # (v4.604 #35 added the unread-maintenance handoff's clock, so the import wraps; R1-17 made it the aware
-    # utc_now in place of the naive account_now)
-    assert ("from app.logic.formulas import (\n    account_today,\n    format_usd,\n"
-            "    humanize_duration,\n    md_dollars,\n    safe_float,\n    utc_now,\n)\n") in opt
+    # utc_now in place of the naive account_now; v4.605 #35 storage leg added the storage-rate fallback the storage
+    # handoff's writer and readers share)
+    assert ("from app.logic.formulas import (\n    DEFAULT_STORAGE_USD_PER_TB_MONTH,\n    account_today,\n"
+            "    format_usd,\n    humanize_duration,\n    md_dollars,\n    safe_float,\n    utc_now,\n)\n") in opt
     # the measured verify adds no write gate, button, raw info/success or ACCOUNT_USAGE literal to the tab
     tab = opt.split("def _savings_tab(", 1)[1].split("\ndef ", 1)[0]
     assert tab.count("write_gate_open(") == 3 and tab.count("st.button(") == 4
