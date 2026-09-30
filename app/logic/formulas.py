@@ -335,8 +335,11 @@ def duration_vs_threshold_text(value: object, threshold: object, unit: str = "s"
     """The sentence "<value> vs threshold <threshold>", both through humanize_duration, for a duration
     checked against its threshold. humanize_duration rounds (from an hour up it drops the seconds), so 90.9
     and 90 minutes both read "1h 30m" and a "Still over" verdict would print two identical numbers. When the
-    two texts collide, the sentence names the exact gap instead ("1h 30m vs threshold 1h 30m, 54s over" /
+    two texts collide, the sentence names the gap instead ("1h 30m vs threshold 1h 30m, 54s over" /
     ", 300ms under"), and a value exactly equal to its threshold says so ("1h 30m, at the threshold").
+    Two texts that collide are at most 59 rounded seconds apart (the same minute from an hour up), so a raw gap
+    of 59.5s or more is capped at "59s": rounded on its own it would read "1m" beside two values that read the
+    same minute (review r2 R2-7). Not a plain floor: float noise (0.9 min = 53.99999s) must still read "54s".
     NaN reads as the no-value glyph on its side, like humanize_duration."""
     v_txt, t_txt = humanize_duration(value, unit), humanize_duration(threshold, unit)
     v, t = safe_float(value, default=float("nan")), safe_float(threshold, default=float("nan"))
@@ -344,7 +347,8 @@ def duration_vs_threshold_text(value: object, threshold: object, unit: str = "s"
         return f"{v_txt} vs threshold {t_txt}"
     if v == t:
         return f"{v_txt}, at the threshold"
-    gap = humanize_duration(abs(v - t), unit)
+    gap_sec = abs(v - t) * _DURATION_FACTOR_SEC.get(unit.lower(), 1.0)
+    gap = humanize_duration(59.0, "s") if gap_sec >= 59.5 else humanize_duration(abs(v - t), unit)
     gap = "<1ms" if gap == "0s" else gap                   # a sub-0.5ms gap rounds to nothing
     return f"{v_txt} vs threshold {t_txt}, {gap} {'over' if v > t else 'under'}"
 

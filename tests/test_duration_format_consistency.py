@@ -517,7 +517,8 @@ def test_alert_recheck_humanizes_queued_minutes():
 def test_alert_recheck_names_the_gap_when_rounding_hides_it():
     """Review r1: humanize_duration drops the seconds from an hour up, so a queued-minutes re-check of 90.9 against
     a threshold of 90 read "Still over: queued time today = 1h 30m vs threshold 1h 30m" (and the resolve note
-    carried it). The sentence now names the exact gap when the two texts collide, or says 'at the threshold'."""
+    carried it). The sentence now names the gap when the two texts collide (capped at 59s, review r2 R2-7), or says
+    'at the threshold'."""
     from app.logic.formulas import duration_vs_threshold_text
     from app.ui.pages.alerts import _recheck_vs_text
 
@@ -528,7 +529,14 @@ def test_alert_recheck_names_the_gap_when_rounding_hides_it():
              (30.000001, 30.0): "30m vs threshold 30m, <1ms over",
              (90.0, 90.0): "1h 30m, at the threshold",
              (145.0, 30.0): "2h 25m vs threshold 30m",                 # distinct texts: no gap clause
-             (29.0, 30.0): "29m vs threshold 30m"}
+             (29.0, 30.0): "29m vs threshold 30m",
+             # review r2 R2-7: a raw gap of 59.5s+ between two texts that read the same minute is capped at 59s,
+             # never a "1m" gap between two identical readings (a fractional threshold is the normal case)
+             (90.99, 89.9934): "1h 30m vs threshold 1h 30m, 59s over",
+             (89.995, 90.99): "1h 30m vs threshold 1h 30m, 59s under",
+             (59.995, 60.99): "1h vs threshold 1h, 59s under",
+             (90.0 + 59.49 / 60, 90.0): "1h 30m vs threshold 1h 30m, 59s over",   # under the cap: rounds to 59s
+             (0.9 + 60.0, 60.0): "1h vs threshold 1h, 54s over"}         # float noise: 53.99999s still reads 54s
     for (value, thr), want in cases.items():
         assert _recheck_vs_text("PERF_QUEUED_MINUTES", value, thr) == want, (value, thr)
         assert duration_vs_threshold_text(value, thr, "min") == want, (value, thr)

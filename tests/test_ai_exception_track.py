@@ -7,10 +7,10 @@ detail) plus one AI_BUDGET item for the all-users breach, keyed on the Company s
 fix_queue.track_entities_sql writes them -- entity-keyed, scoped to the page's SOURCE (a Security work item on the
 same user never blocks), with a legacy-title arm so a still-open pre-v4.605 row is never duplicated, under any of
 the three SOURCE names the page ever wrote (no backfill, no migration). An unmapped user's item stays UNKNOWN
-(COMPANY_FOR_USER's raw value, as before), never ALL. fix_queue.ai_track_escalation_sql runs first and raises an
-open user item's severity when the new signal is stronger (one item per user would otherwise swallow the
-escalation). The builder's defaults stay byte-identical to v4.604 (goldens captured on 4769af4b). The SQL runs for
-real in sqlite (the tests/test_track_cooldown_harness.py harness).
+(COMPANY_FOR_USER's raw value, as before), never ALL. fix_queue.ai_track_escalation_sql runs first and raises at
+most one open item per user, the strongest, when the new signal outranks every open item of that user (one item per
+user would otherwise swallow the escalation). The builder's defaults stay byte-identical to v4.604 (goldens
+captured on 4769af4b). The SQL runs for real in sqlite (the tests/test_track_cooldown_harness.py harness).
 """
 
 from __future__ import annotations
@@ -352,12 +352,12 @@ def test_ai_track_executes_in_sqlite():
 
 def _seed_one(con: sqlite3.Connection, company: str, sev: str, title: str, status: str, source: str,
               etype: str | None = None, ekey: str | None = None, usd: float | None = None,
-              detail: str = "d") -> int:
+              detail: str = "d", created: str = "2026-08-01 00:00:00") -> int:
     cur = con.execute("INSERT INTO ACTION_QUEUE (COMPANY, SEVERITY, TITLE, DETAIL, OWNER, STATUS, SOURCE, "
                       "SOURCE_ENTITY_TYPE, SOURCE_ENTITY_KEY, ESTIMATED_USD, PERIOD, UPDATED_BY, CREATED_AT, "
                       "UPDATED_AT) VALUES (?, ?, ?, ?, 'DBA / AI Governance', ?, ?, ?, ?, ?, 'MONTHLY', 'SEED', "
-                      "'2026-08-01 00:00:00', '2026-08-01 00:00:00')",
-                      (company, sev, title, detail, status, source, etype, ekey, usd))
+                      "?, '2026-08-01 00:00:00')",
+                      (company, sev, title, detail, status, source, etype, ekey, usd, created))
     return int(cur.lastrowid or 0)
 
 
@@ -425,6 +425,68 @@ def test_a_stronger_signal_raises_the_open_item_instead_of_queuing_nothing():
         # one item per user still holds: only DONEESC (its item is closed) is queued anew
         assert con.execute("SELECT SOURCE_ENTITY_TYPE, SOURCE_ENTITY_KEY, SEVERITY FROM ACTION_QUEUE "
                            "WHERE ACTION_ID > ?", (done,)).fetchall() == [("USER", "DONEESC", "CRITICAL")]
+
+
+def test_the_raise_lifts_at_most_one_item_per_user():
+    """Review r2 R2-2 / R2-9: the raise updated EVERY open matching row of a user, and the pre-v4.605 writer left
+    several (one per signal, per source and per month), so one breach turned each of a user's MEDIUM / HIGH rows
+    CRITICAL -- even when the user already held an open CRITICAL item -- and counted more than once in Critical /
+    high and the Overview's open-high penalty. Now at most one item per user is raised, and only when the new signal
+    outranks that user's strongest open item: the strongest item, on a tie the entity-keyed one, then the newest.
+    The user's other items keep their severity, and a second click is a no-op."""
+    con = _ai_db()
+    mid, first = _OLD_SOURCES
+    # DUP: the same 'High usage' title twice (another month, an older SOURCE name): only the newer one is raised
+    dup_old = _seed_one(con, "UNKNOWN", "MEDIUM", "Cortex High usage: DUP ((all sources))", "OPEN", first,
+                        created="2026-06-01 00:00:00")
+    dup_new = _seed_one(con, "UNKNOWN", "MEDIUM", "Cortex High usage: DUP ((all sources))", "OPEN", mid,
+                        created="2026-07-01 00:00:00")
+    # LEG: the user already holds an open CRITICAL item, so nothing is raised
+    leg = [_seed_one(con, "UNKNOWN", sev, f"Cortex {sig}: LEG ({src})", "OPEN", mid)
+           for sev, sig, src in (("MEDIUM", "High usage", "(all sources)"), ("CRITICAL", "Budget breach",
+                                                                            "(all sources)"),
+                                 ("HIGH", "Cost per request spike", "CLI"))]
+    # MIX: a newer MEDIUM and an older HIGH: the strongest (the HIGH) is raised, whatever its age
+    mix_med = _seed_one(con, "UNKNOWN", "MEDIUM", "Cortex High usage: MIX ((all sources))", "OPEN", mid,
+                        created="2026-07-15 00:00:00")
+    mix_high = _seed_one(con, "UNKNOWN", "HIGH", "Cortex Cost per request spike: MIX (CLI)", "IN_PROGRESS", mid,
+                         created="2026-06-15 00:00:00")
+    # TIE: an entity-keyed MEDIUM and a newer legacy MEDIUM: the entity-keyed item wins the tie
+    tie_ent = _seed_one(con, "ALFA", "MEDIUM", "Cortex High usage: TIE ((all sources))", "OPEN", AI_TRACK_SOURCE,
+                        "USER", "tie", created="2026-06-01 00:00:00")
+    tie_leg = _seed_one(con, "UNKNOWN", "MEDIUM", "Cortex High usage: TIE ((all sources))", "OPEN", mid,
+                        created="2026-07-01 00:00:00")
+    last_seed = tie_leg
+    items = ai_exception_track_items(pd.DataFrame([_row(u, 500.0) for u in ("DUP", "LEG", "MIX", "TIE")]),
+                                     "ALFA")[AI_USER_ENTITY_TYPE]
+    assert {i["SEVERITY"] for i in items} == {"CRITICAL"}
+    stmts = [fix_queue.ai_track_escalation_sql(items, actor_sql="'VIEWER'"), _user_sql(items, actor="'VIEWER'")]
+
+    def sev(action_id: int) -> str:
+        return con.execute("SELECT SEVERITY FROM ACTION_QUEUE WHERE ACTION_ID = ?", (action_id,)).fetchone()[0]
+
+    def open_high() -> int:
+        return con.execute("SELECT COUNT(*) FROM ACTION_QUEUE WHERE UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS') "
+                           "AND UPPER(SEVERITY) IN ('CRITICAL', 'HIGH')").fetchone()[0]
+
+    before = open_high()
+    for _ in range(2):                                   # the second click changes nothing
+        for stmt in stmts:
+            con.execute(_to_sqlite(stmt))
+        assert (sev(dup_old), sev(dup_new)) == ("MEDIUM", "CRITICAL")
+        assert [sev(i) for i in leg] == ["MEDIUM", "CRITICAL", "HIGH"]
+        assert (sev(mix_med), sev(mix_high)) == ("MEDIUM", "CRITICAL")
+        assert (sev(tie_ent), sev(tie_leg)) == ("CRITICAL", "MEDIUM")
+        raised = con.execute("SELECT ACTION_ID, DETAIL, UPDATED_BY FROM ACTION_QUEUE WHERE UPDATED_BY = 'VIEWER' "
+                             "ORDER BY ACTION_ID").fetchall()
+        assert [r[0] for r in raised] == [dup_new, mix_high, tie_ent]
+        assert raised[1][1].startswith("Raised from HIGH to CRITICAL by a later Track (Cortex Budget breach: MIX "
+                                       "((all sources))).")
+        assert all(r[1].count("Raised from") == 1 for r in raised)
+        # one breach counts once: DUP and TIE each add one CRITICAL, MIX's HIGH was already counted, LEG adds none
+        assert open_high() == before + 2
+        # each of the four users already has an open item, so nothing new is queued
+        assert con.execute("SELECT COUNT(*) FROM ACTION_QUEUE WHERE ACTION_ID > ?", (last_seed,)).fetchone()[0] == 0
 
 
 # ---------------------------------------------------------------------------------------- the page ----
@@ -516,18 +578,22 @@ def test_track_captions_and_docs_say_what_the_code_does(monkeypatch):
     assert "beyond the user items tracked in the same click" in caps and "overlap, so do not add them" in caps
     assert "UNKNOWN when the user maps to none" in caps and "ALL when the user maps to none" not in caps
     assert "all sources when the user has a budget signal" in caps and "else the sum of the spiking sources" in caps
-    assert "raises its severity when the new signal is stronger" in caps and "left as is" not in caps
+    assert "raises its severity" not in caps and "keeps that one item" not in caps       # R2-2 / R2-9: one of them
+    assert ("When the new signal is stronger than every open item of that user, the first statement raises one of "
+            "them, the strongest") in caps and "only that one is raised" in caps
     assert "including one queued under an earlier page name" in caps
     rb = _flat(read("RUNBOOK.md"))
     assert "Items land UNASSIGNED, priced MONTHLY when priced (the scope item carries no estimate" in rb
     assert "Items land UNASSIGNED, priced MONTHLY. " not in rb
     assert "beyond the user items tracked in the same click" in rb and "an unmapped user stays UNKNOWN" in rb
-    assert "under any of the page's three SOURCE names" in rb and "the click first raises that item's severity" in rb
+    assert "under any of the page's three SOURCE names" in rb and "raises that item's severity" not in rb
+    assert "the click first raises one of them, the strongest" in rb and "one breach never counts twice" in rb
     gl = _flat(read("FEATURE_GLOSSARY.md"))
     assert "COMPANY = COALESCE(COMPANY_FOR_USER(user), 'UNKNOWN')" in gl
     assert "NULLIF(COMPANY_FOR_USER(user), 'UNKNOWN'), 'ALL'), ESTIMATED_USD" not in gl
     assert "'Cost & Contract > Chargeback & AI > AI users', 'Cost & Contract > AI Users'" in gl
-    assert "fix_queue.ai_track_escalation_sql raises the SEVERITY" in gl
+    assert "fix_queue.ai_track_escalation_sql raises the SEVERITY of at most one such open item per user" in gl
+    assert "raises an open user item's severity when the user's signal has grown stronger" not in gl
     intro = gl.split("### Action Center", 1)[1].split("| Metric |", 1)[0]
     assert "Cost ▸ Chargeback & AI ▸ Track top exceptions (v4.605) writes through the same statement" in intro
     assert "can arrive CRITICAL or HIGH" in intro and "no Entity 360 page" in intro
@@ -539,7 +605,7 @@ def test_track_click_runs_the_statements_in_order_and_reports_a_partial_write(mo
     # R1-21: raise the severity of open user items first, then insert users, then the all-users scope
     assert seen["ran"] == ["ESCALATE", "USER", "AI_BUDGET"] and seen["stamps"] == [("cortex_track_exec", True)]
     ((ok, msg),) = seen["notify"]
-    assert ok and "never duplicated" in msg and "raises its severity" in msg and len(msg) <= 120
+    assert ok and "never duplicated" in msg and "raises the user's strongest open item" in msg and len(msg) <= 120
     kinds = [k for k, _ in fake.calls]
     assert kinds.count("code") == 3 and kinds.index("code") < kinds.index("button")
     assert fake.calls[0] == ("expander", "Track top exceptions as work items")
@@ -553,8 +619,8 @@ def test_track_click_runs_the_statements_in_order_and_reports_a_partial_write(mo
     # the user statement fails after the escalation: stop there, and say what did land
     _, seen = _render(monkeypatch, fail="USER")
     assert seen["ran"] == ["ESCALATE", "USER"]
-    assert seen["notify"] == [(False, "Open user items were raised where the signal is stronger, but no new item "
-                                      "was tracked: boom-USER")]
+    assert seen["notify"] == [(False, "Open items were raised where a user's signal is stronger (at most one per "
+                                      "user), but no new item was tracked: boom-USER")]
     # the escalation fails: nothing else runs
     _, seen = _render(monkeypatch, fail="ESCALATE")
     assert seen["ran"] == ["ESCALATE"] and seen["notify"] == [(False, "boom-ESCALATE")]

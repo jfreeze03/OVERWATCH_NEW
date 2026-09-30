@@ -1,7 +1,10 @@
 """v4.605: a failed probe read renders by its failure KIND.
 
 needs_setup ("not installed / not readable by this app") is ONLY for a true absence -- an absent or
-unauthorised object ('absent') or an unavailable function ('unknown_function'), app.core.result.is_setup_absence.
+unauthorised object ('absent'), an "Insufficient privileges" error on an existing one ('privilege') or an
+unavailable function ('unknown_function'), app.core.result.is_setup_absence. A 'privilege' error proves the object
+exists, so run() logs it on a probe read and every consumer of the literal 'absent' (a legitimate zero) reads it as a
+failed read (review r2 R2-1).
 A missing column on an existing view ('missing_column') is schema drift, and a 'timeout' or any 'other'
 failure is a failed read: each renders empty_state("unavailable", <panel sentence>, detail=<error>), never
 needs_setup and never the clean state. The reported bug: Security > Access's admin network-policy panel
@@ -32,7 +35,7 @@ import pytest
 from app.core.result import SETUP_ABSENCE_KINDS, QueryResult, is_setup_absence
 from tests._source import ROOT, read
 
-_SETUP = ("absent", "unknown_function")
+_SETUP = ("absent", "privilege", "unknown_function")
 _FAILED = ("missing_column", "timeout", "other")
 
 
@@ -119,13 +122,16 @@ def _one_unavailable(seen: dict, kind: str) -> str:
 # ----------------------------------------------------------------------------- the shared rule ----
 
 def test_setup_absence_kinds_are_the_true_absences():
-    assert frozenset({"absent", "unknown_function"}) == SETUP_ABSENCE_KINDS
+    assert frozenset({"absent", "privilege", "unknown_function"}) == SETUP_ABSENCE_KINDS
     m = re.search(r"_expected_absence = probe and kind in \(([^)]*)\)", read("app/core/query.py"))
     assert m, "query.run's expected-absence tuple moved"
     run_unlogged = {s.strip().strip("\"'") for s in m.group(1).split(",") if s.strip()}
-    assert run_unlogged > SETUP_ABSENCE_KINDS                    # a strict subset: drift is unlogged, not setup
-    assert "missing_column" in run_unlogged and "missing_column" not in SETUP_ABSENCE_KINDS
+    assert run_unlogged == {"absent", "unknown_function", "missing_column"}
+    # drift is unlogged but not setup; a privilege error is setup (needs_setup) but LOGGED: the object exists
+    assert run_unlogged - SETUP_ABSENCE_KINDS == {"missing_column"}
+    assert SETUP_ABSENCE_KINDS - run_unlogged == {"privilege"}
     assert is_setup_absence("absent") and is_setup_absence("ABSENT") and is_setup_absence(" unknown_function ")
+    assert is_setup_absence(" Privilege ")
     for kind in (None, "", "timeout", "missing_column", "other"):
         assert not is_setup_absence(kind), kind
     assert "missing_column | timeout" in read("app/core/result.py")      # the kinds comment names drift
@@ -133,15 +139,20 @@ def test_setup_absence_kinds_are_the_true_absences():
 
 def test_insufficient_privileges_is_a_setup_absence(monkeypatch):
     """Review R1-17: format_snowflake_error rewrites "Insufficient privileges" and "does not exist or not
-    authorized" to the same setup advice guard() routes to needs_setup, so run() classifies both 'absent' too --
-    one failure, one state, whichever helper renders it."""
+    authorized" to the same setup advice guard() routes to needs_setup, so both are setup absences -- one failure,
+    one state, whichever helper renders it. Review r2 R2-1: but a privilege error proves the object exists, so it
+    is its own kind ('privilege'), never the literal 'absent' a legitimate-zero consumer reads."""
     from app.core.errors import format_snowflake_error
     from app.core.query import _classify_error
+    from app.core.result import is_privilege_error
     from app.ui import components
     raw = Exception("003001 (42501): SQL access control error: Insufficient privileges to operate on table 'X'")
     gone = Exception("002003 (02000): SQL compilation error: Object 'X' does not exist or not authorized.")
-    assert _classify_error(raw) == _classify_error(gone) == "absent"
-    assert is_setup_absence(_classify_error(raw))
+    assert _classify_error(raw) == "privilege" and _classify_error(gone) == "absent"
+    assert is_setup_absence(_classify_error(raw)) and is_setup_absence(_classify_error(gone))
+    assert is_privilege_error(_classify_error(raw)) and not is_privilege_error(_classify_error(gone))
+    for kind in (None, "", "absent", "unknown_function", "missing_column", "timeout", "other"):
+        assert not is_privilege_error(kind), kind
     assert format_snowflake_error(raw) == format_snowflake_error(gone)
     states: list[str] = []
     monkeypatch.setattr(components, "empty_state", lambda kind, *_a, **_k: states.append(kind))
@@ -149,6 +160,35 @@ def test_insufficient_privileges_is_a_setup_absence(monkeypatch):
         res = QueryResult(ok=False, error=format_snowflake_error(exc), error_kind=_classify_error(exc))
         assert components.guard(res, "no rows") is False
     assert states == ["needs_setup", "needs_setup"]
+
+
+def test_a_privilege_error_is_logged_and_never_a_legitimate_zero(monkeypatch):
+    """Review r2 R2-1: while 003001 classified 'absent', a probe read left it unlogged and every consumer of the
+    literal 'absent' failed OPEN for an object that provably exists -- the health score dropped that source's
+    penalty (no Incomplete), a declared canary gap read GAP instead of FAIL. As its own kind it is logged and
+    each of those consumers reads it as a failed read again; a 002003 keeps its old behaviour."""
+    import app.core.query as q
+    from app.logic.scoring import degraded_sources
+    logged: list[str] = []
+    monkeypatch.setattr(q, "_telemetry", lambda *_a, **_k: None)
+    monkeypatch.setattr(q, "record_error", lambda _page, exc, **_k: logged.append(str(exc)))
+    errors = {"priv": "003001 (42501): SQL access control error: Insufficient privileges to operate on table 'X'",
+              "gone": "002003 (02000): SQL compilation error: Object 'X' does not exist or not authorized."}
+    kinds = {}
+    for name, text in errors.items():
+        def _boom(_sql, _scope, _page, _text=text):
+            raise RuntimeError(_text)
+        monkeypatch.setitem(q._FETCHERS, "recent", _boom)
+        res = q.run(f"SELECT 1 /* {name} */", page="T", key=name, tier="recent", probe=True)
+        assert not res.ok
+        kinds[name] = res.error_kind
+    assert kinds == {"priv": "privilege", "gone": "absent"}
+    assert logged == [errors["priv"]]                            # only the privilege error reaches APP_ERROR_LOG
+    assert degraded_sources({"owner-queue": QueryResult(ok=False, error_kind="privilege"),
+                             "freshness": QueryResult(ok=False, error_kind="absent")}) == {"owner-queue"}
+    # the literal-'absent' consumers stay literal, so 'privilege' takes their failed-read path
+    assert '_gap = (res.error_kind in ("absent", "unknown_function")' in read("app/ui/pages/admin.py")
+    assert 'getattr(_bt_hist, "error_kind", "") != "absent"' in read("app/ui/pages/overview.py")
 
 
 def test_schema_drift_is_the_missing_column_kind():
@@ -294,11 +334,12 @@ def test_security_overview_both_absent_is_the_v075_setup_state(monkeypatch):
 _CRITICAL_IDENTITY = pd.DataFrame([{"SEVERITY": "CRITICAL", "DOMAIN": "IDENTITY", "TITLE": "t", "IMPACT_COUNT": 3}])
 
 
-@pytest.mark.parametrize("kind", _FAILED)
+@pytest.mark.parametrize("kind", (*_FAILED, "privilege"))
 @pytest.mark.parametrize("queue_rows", [False, True])
 def test_security_overview_failed_coverage_is_unavailable(monkeypatch, kind, queue_rows):
     """Review R1-16: the queue resolved but the coverage read failed -- an unavailable state with the error, and
-    an empty queue never claims "coverage is not complete" for a contract that was never read."""
+    an empty queue never claims "coverage is not complete" for a contract that was never read. Review r2 R2-1: an
+    "Insufficient privileges" error on the contract is a failed read too (the view exists), never silence."""
     sc = _sc()
     queue = _ok(_CRITICAL_IDENTITY if queue_rows else pd.DataFrame())
     _, seen = _patch(monkeypatch, sc, {"sec_exception_queue_ALL": queue, "sec_domain_coverage": _failed(kind)},
@@ -318,7 +359,7 @@ def test_security_overview_failed_coverage_is_unavailable(monkeypatch, kind, que
 
 @pytest.mark.parametrize("coverage,signal", [
     (_failed("timeout"), True), (_failed("missing_column"), True), (_failed("other"), True),
-    (_failed("absent"), False), (None, False)])
+    (_failed("privilege"), True), (_failed("absent"), False), (None, False)])
 def test_security_verdict_names_an_unread_coverage_contract(monkeypatch, coverage, signal):
     """Review R1-16: with coverage unread no domain can reach 'need action', so a CRITICAL finding read as a plain
     'Watch'; the verdict now says the coverage could not be read."""
@@ -553,6 +594,32 @@ def test_setup_checklist_absent_schema_version_is_still_pending(monkeypatch):
     # review R1-15: the failed reads' errors (never the absent one) are the Error detail
     assert details[[k for k, _ in empties].index("unavailable")] == ("SOURCE_FRESHNESS_STATE: boom (timeout)\n"
                                                                     "ALERT_ROUTES: boom (other)")
+
+
+def test_setup_checklist_privilege_error_is_unknown_not_nothing_applied(monkeypatch):
+    """Review r2 R2-1: "Insufficient privileges" on SCHEMA_VERSION proves the table exists, so the row is Unknown
+    with a failed-read detail and a grants FIX, never Pending 'nothing applied yet'; its error is in the Error
+    detail, and a retry is never offered for it."""
+    details: list = []
+    rows, empties, _ = _setup_rows(monkeypatch, {
+        "setup_schema_version": QueryResult(ok=False, error="boom (privilege)", error_kind="privilege"),
+        "setup_freshness": QueryResult(ok=False, error="boom (privilege)", error_kind="privilege"),
+        "setup_routes": QueryResult(ok=False, error="boom (privilege)", error_kind="privilege")}, details)
+    mig = rows.loc["Database migrations"]
+    assert mig["STATUS"] == "Unknown" and "nothing applied yet" not in mig["DETAIL"]
+    assert mig["DETAIL"] == "SCHEMA_VERSION could not be read, so which migrations are applied is unknown."
+    for step in ("Database migrations", "Marts loading", "Alert routes configured"):
+        row = rows.loc[step]
+        assert row["STATUS"] == "Unknown", step
+        assert row["FIX"].startswith("Insufficient privileges: the object exists"), step
+        assert "roles.sql" in row["FIX"] and "a retry will not clear it" in row["FIX"] and "Retry." not in row["FIX"]
+    assert rows.loc["Marts loading", "DETAIL"] == ("SOURCE_FRESHNESS_STATE could not be read, so whether the marts "
+                                                   "are loading is unknown.")
+    assert empties == [("unavailable", "3 setup item(s) could not be checked: a read failed, which is not a setup "
+                                       "gap. An 'Insufficient privileges' error needs the app's grants re-applied "
+                                       "(roles.sql), which a retry will not clear: see the FIX column.")]
+    assert details == ["SCHEMA_VERSION: boom (privilege)\nSOURCE_FRESHNESS_STATE: boom (privilege)\n"
+                       "ALERT_ROUTES: boom (privilege)"]
 
 
 def test_setup_checklist_drift_is_not_a_retry(monkeypatch):

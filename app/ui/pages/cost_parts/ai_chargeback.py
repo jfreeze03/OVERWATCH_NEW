@@ -82,7 +82,7 @@ from app.ui.components import (
 from app.ui.schema_gate import has_migration
 
 _PAGE = "Cost Intelligence"
-# The Track expander's first statement: raise the severity of users' open items (fix_queue.ai_track_escalation_sql).
+# The Track expander's first statement: raise at most one open item per user (fix_queue.ai_track_escalation_sql).
 _ESCALATE = "ESCALATE"
 
 # #42 Part 1: Company all-in showback (Cost > Chargeback & AI). Marts only; no source label
@@ -379,8 +379,8 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
 
 def _track_exceptions_expander(exceptions: pd.DataFrame, company: str, is_operator: bool) -> None:
     """Cost > Chargeback & AI > Exceptions: 'Track top exceptions as work items' (v4.605) -- the ONE shared Track
-    write, as Operations > Optimize and Control Room triage use it. Three statements at most (raise the severity of
-    users' open items, then insert users, then the all-users scope), shown before the one-click button, executed in
+    write, as Operations > Optimize and Control Room triage use it. Three statements at most (raise at most one open
+    item per user, then insert users, then the all-users scope), shown before the one-click button, executed in
     order behind the C48 latch."""
     with st.expander("Track top exceptions as work items"):
         # Replaces this page's own per-row INSERTs (pre-v4.605). One item per USER, keyed on the user with
@@ -389,10 +389,12 @@ def _track_exceptions_expander(exceptions: pd.DataFrame, company: str, is_operat
         # user never blocks an AI-spend item) and entity-keyed, and a still-open pre-v4.605 item from this
         # page (no entity key, under any SOURCE name the page ever wrote) blocks by its legacy TITLE, so nothing
         # queued the old way is duplicated. One item per user would swallow an escalation, so the first
-        # statement raises an open item's SEVERITY when the user's strongest signal is now stronger (never a
-        # downgrade; its estimate stays as first tracked). The scope item's estimate is the exposure beyond the
-        # user items built in the same click, so one click's items sum to the scope total once; all-users
-        # items from other Company views or clicks are not subtracted (fix_queue.ai_exception_track_items).
+        # statement raises ONE open item's SEVERITY per user when the new signal outranks every open item of that
+        # user (never a downgrade; its estimate stays as first tracked; review r2 R2-2 / R2-9: a pre-v4.605 user
+        # may hold several items, and raising them all counted one breach several times). The scope item's
+        # estimate is the exposure beyond the user items built in the same click, so one click's items sum to
+        # the scope total once; all-users items from other Company views or clicks are not subtracted
+        # (fix_queue.ai_exception_track_items).
         _groups = ai_exception_track_items(exceptions, company)
         _stmts = [(kind, stmt) for kind, stmt in (
             (_ESCALATE, ai_track_escalation_sql(_groups[AI_USER_ENTITY_TYPE], actor_sql=identity_sql())),
@@ -413,9 +415,11 @@ def _track_exceptions_expander(exceptions: pd.DataFrame, company: str, is_operat
                    "user has a budget signal (an '(all sources)' row), else the sum of the spiking "
                    "sources. A user who already has "
                    "an open item from this page (tracked before, from any Company scope, including one "
-                   "queued under an earlier page name) keeps that one item: the first statement raises its "
-                   "severity when the new signal is stronger and says so in its detail, and its estimate "
-                   "stays as first tracked.")
+                   "queued under an earlier page name) gets no new item. When the new signal is stronger than "
+                   "every open item of that user, the first statement raises one of them, the strongest (on a "
+                   "tie the item keyed on the user, else the newest), to the new severity and says so in its detail; its estimate stays as "
+                   "first tracked. A user with several items queued before v4.605 keeps them all, and only "
+                   "that one is raised.")
         if _groups[AI_SCOPE_ENTITY_TYPE]:
             st.caption(f"The all-users budget breach becomes one item for the {company} scope, estimated at "
                        "only the projected exposure beyond the user items tracked in the same click (none "
@@ -436,12 +440,12 @@ def _track_exceptions_expander(exceptions: pd.DataFrame, company: str, is_operat
             stamp_write("cortex_track_exec", ok_all)  # C48
             if ok_all:
                 notify(True, "Tracked in Action Center. An open item is never duplicated; a stronger signal "
-                             "raises its severity.")
+                             "raises the user's strongest open item.")
             elif AI_USER_ENTITY_TYPE in _done:
                 notify(False, f"The user items were tracked, but the all-users budget item was not: {_err}")
             elif _ESCALATE in _done:
-                notify(False, "Open user items were raised where the signal is stronger, but no new item "
-                              f"was tracked: {_err}")
+                notify(False, "Open items were raised where a user's signal is stronger (at most one per "
+                              f"user), but no new item was tracked: {_err}")
             else:
                 notify(False, _err)
         elif not is_operator:

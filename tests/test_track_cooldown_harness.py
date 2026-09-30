@@ -51,7 +51,7 @@ def _to_sqlite(sql: str) -> str:
         sel = ", ".join(f"column{i + 1} AS {c}" for i, c in enumerate(cols))
         sql = sql.replace(m.group(0), f"FROM (SELECT {sel} FROM (VALUES\n{m.group('rows')}\n)) AS v")
     # sqlite needs AS on an UPDATE target alias (Snowflake takes the bare alias every OVERWATCH UPDATE uses)
-    sql = re.sub(r"\AUPDATE (\w+) q\n", r"UPDATE \1 AS q\n", sql)
+    sql = re.sub(r"\AUPDATE (\w+) (\w+)\n", r"UPDATE \1 AS \2\n", sql)
     assert "::" not in sql and "CURRENT_TIMESTAMP" not in sql
     return sql
 

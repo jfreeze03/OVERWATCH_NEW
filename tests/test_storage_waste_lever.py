@@ -199,25 +199,44 @@ def test_without_read_evidence_every_row_is_unconfirmed():
         "LEVER"].tolist() == ["Unconfirmed"]
 
 
+def _as_run_stores(raw: str) -> tuple[str, str]:
+    """(error_kind, error) exactly as run() fills them from a raw Snowflake error: the kind from the RAW text, the
+    error through format_snowflake_error (which drops the object name from a not-visible error)."""
+    from app.core.errors import format_snowflake_error
+    from app.core.query import _classify_error
+    exc = Exception(raw)
+    return _classify_error(exc), format_snowflake_error(exc)
+
+
 def test_reads_unavailable_note_by_kind():
     ah = ("ACCESS_HISTORY is not visible to this app (it needs Enterprise edition and IMPORTED PRIVILEGES on the "
           "SNOWFLAKE database)")
-    grants = ("GRANTS_TO_ROLES (the share guard) is not visible to this app (it needs IMPORTED PRIVILEGES on the "
-              "SNOWFLAKE database)")
-    either = ("ACCESS_HISTORY or GRANTS_TO_ROLES (the share guard) is not visible to this app (both need IMPORTED "
-              "PRIVILEGES on the SNOWFLAKE database; ACCESS_HISTORY also needs Enterprise edition)")
-    # v4.605 review r1: the scan's one statement reads GRANTS_TO_ROLES (the share guard) as well as ACCESS_HISTORY,
-    # so a not-visible failure names the object Snowflake's error names, and both when it names none
-    assert reads_unavailable_note("absent") == either
-    assert reads_unavailable_note("absent", "SQL compilation error:\nObject 'SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY' "
-                                            "does not exist or not authorized.") == ah
-    assert reads_unavailable_note("absent", "SQL compilation error: Object 'SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES' "
-                                            "does not exist or not authorized.") == grants
-    assert reads_unavailable_note("ABSENT", "object '\"SNOWFLAKE\".\"ACCOUNT_USAGE\".\"grants_to_roles\"' does not "
-                                            "exist or not authorized") == grants
-    # another object: the error itself, never a guess
-    other = "SQL compilation error: Object 'SNOWFLAKE.ACCOUNT_USAGE.TABLE_DML_HISTORY' does not exist or not authorized."
-    assert reads_unavailable_note("absent", other) == "the access-history read failed: " + other
+    not_visible = ("ACCESS_HISTORY or GRANTS_TO_ROLES (the share guard), or another ACCOUNT_USAGE view this scan "
+                   "reads, is not visible to this app (they need IMPORTED PRIVILEGES on the SNOWFLAKE database; "
+                   "ACCESS_HISTORY also needs Enterprise edition)")
+    # v4.605 review r2 (R2-3 / R2-4 / R2-10): run() stores format_snowflake_error's text, which names no object, so a
+    # not-visible failure of any object the scan reads gives the one note that names both and the SNOWFLAKE grant.
+    # The inputs go through the same path run() takes (a raw-text input never reaches the note in the app).
+    setup = "The current role cannot access this object. If OVERWATCH setup is new, run the migrations and roles.sql."
+    for obj in ("ACCESS_HISTORY", "GRANTS_TO_ROLES", "TABLE_DML_HISTORY", "TABLES"):
+        kind, err = _as_run_stores(f"002003 (02000): SQL compilation error:\nObject 'SNOWFLAKE.ACCOUNT_USAGE.{obj}' "
+                                   "does not exist or not authorized.")
+        assert (kind, err) == ("absent", setup), obj
+        assert reads_unavailable_note(kind, err) == not_visible, obj
+    # the note never depends on the error text for a not-visible kind (the old per-object branch never ran)
+    assert reads_unavailable_note("absent") == reads_unavailable_note(" ABSENT ", "anything") == not_visible
+    assert reads_unavailable_note("absent", "Object 'SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES' does not exist or not "
+                                            "authorized.") == not_visible
+    # "Insufficient privileges" is its own kind (R2-1): the literal-'absent' branch does not take it -- a failed read
+    # that shows the error itself
+    kind, err = _as_run_stores("003001 (42501): SQL access control error: Insufficient privileges to operate on "
+                               "view 'ACCESS_HISTORY'")
+    assert kind == "privilege" and reads_unavailable_note(kind, err) == "the access-history read failed: " + setup
+    # the edition text survives format_snowflake_error, so the edition branch still fires on the real path
+    kind, err = _as_run_stores("Unsupported feature 'ACCESS_HISTORY'")
+    assert reads_unavailable_note(kind, err) == ah
+    kind, err = _as_run_stores("000604 (57014): Statement reached its statement or warehouse timeout of 180 second(s).")
+    assert kind == "timeout" and reads_unavailable_note(kind, err) == "the 90-day access-history read timed out"
     assert reads_unavailable_note("sql", "Unsupported feature 'ACCESS_HISTORY'") == ah
     assert reads_unavailable_note("", "This view requires ENTERPRISE edition") == ah
     assert reads_unavailable_note("timeout", "Statement reached its statement or warehouse timeout of 180 "
@@ -229,7 +248,8 @@ def test_reads_unavailable_note_by_kind():
     assert reads_unavailable_note(None, None) == "the access-history read failed"
     long = reads_unavailable_note("sql", "e" * 1000)
     assert long == "the access-history read failed: " + "e" * 300
-    for kind, err in (("absent", ""), ("absent", other), ("timeout", ""), ("sql", "boom"), ("", "")):
+    for kind, err in (("absent", ""), ("absent", setup), ("privilege", setup), ("timeout", ""), ("sql", "boom"),
+                      ("", "")):
         assert "Database filter" not in reads_unavailable_note(kind, err)       # it never narrows this scan
 
 
@@ -442,14 +462,22 @@ def test_storage_handoff_note_wording():
         "history. Newer than 90 days: too new for a 90-day no-read claim. Check clones: a stale, unread table that "
         "shares storage with a clone (another live table in its clone group, or bytes it retains for a clone); not "
         "priced, because dropping it frees nothing a clone still references. Object gone: no live table under that "
-        "ID (dropped or replaced). Nothing to reclaim: nothing a drop or a 1-day retention would free (a written "
-        "table already at 1 day or less, or with no Time Travel; a stale table with no active bytes, whose Time "
-        "Travel ages out on its own). Fail-safe (a fixed 7-day tail) and clone-retained bytes (a clone still holds "
-        "them) never count. Confirm with the owner before dropping anything: reads from a replica in another "
+        "ID (dropped or replaced). Nothing to reclaim: not a lever. A written table is not a drop candidate, and it "
+        "is already at 1 day or less of retention or has no Time Travel; a stale table has no active bytes for a "
+        "drop to free, and its Time Travel ages out on its own. Fail-safe (a fixed 7-day tail) and clone-retained "
+        "bytes (a clone still holds them) never count. Confirm with the owner before dropping anything: reads from a replica in another "
         "account, and reads rarer than every 90 days, are invisible here.")
+    # review r2 R2-5 / R2-11: both Addressable $/mo help texts carry H_STORAGE_BASIS, so the floor assumption is here
     assert H_STORAGE_BASIS == (
         "a stale table's active bytes, or the Time Travel a 1-day retention would release on a table still written "
-        "(a monthly run-rate only while it keeps being written), at your storage rate")
+        "(a monthly run-rate only while it keeps being written, assuming no account-level "
+        "MIN_DATA_RETENTION_TIME_IN_DAYS above 1 day), at your storage rate")
+    # review r2 R2-6: a written table showing active bytes lands in Nothing to reclaim, so the legend never says a
+    # drop would free nothing there (it says a written table is not a drop candidate)
+    assert "nothing a drop" not in LEVER_LEGEND
+    written = storage_waste_verdicts(pd.DataFrame([_row("W", STATUS="ACTIVE", ACTIVE_GB=2048.0, TIME_TRAVEL_GB=512.0,
+                                                        RETENTION_DAYS=1)]), rate_tb=_RATE)
+    assert written["LEVER"].tolist() == ["Nothing to reclaim"]
     assert FLOOR_LEGEND == (
         "The scan ranks tables by retention bytes, and a table with no DML for 90 days has little or no Time Travel "
         "or fail-safe left, so most stale tables fall outside the top 50: Archive or drop is a floor.")

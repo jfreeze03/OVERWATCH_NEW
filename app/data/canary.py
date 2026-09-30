@@ -375,7 +375,8 @@ EXPECTED_GAPS: frozenset[str] = frozenset({
     "cortex.mart_vs_live_ai_recon",   # reads the subscription-gated CORTEX_CODE_* views
     # Next-Fifty #34: SYSTEM$CLIENT_VERSION_INFO() is an account-feature function (proven live on this
     # account, 2026-09-29 probe W4c). Only its ABSENCE (unknown function) reads GAP -- the Clients tab then
-    # shows 'unavailable' support; any other failure (grant, timeout) still FAILS.
+    # shows 'unavailable' support; any other failure (an "Insufficient privileges" grant error, a timeout)
+    # still FAILS.
     "security.client_version_info",
     # v4.603 probe-read canaries: absence is an account-feature state (Guardrails / per-user quota views,
     # the Cortex Code subscription, the AI-functions view); a missing column is drift and FAILs.

@@ -53,8 +53,8 @@ TRACK_SEVERITIES = ("MEDIUM", "LOW")
 # Company scope (AI_BUDGET -- a scope key, NOT an Entity 360 type: the drill guards in workbench.py and
 # decision_studio.py never open it). The source is the legacy writer's last SOURCE, byte-identical; its still-open
 # rows, and those it wrote under its two earlier SOURCE names, are recognised (see _LEGACY_TITLE_ARMS and
-# AI_LEGACY_SOURCES). Severity is preserved (the legacy writer's behaviour), and a later, stronger signal raises
-# the open item's severity (ai_track_escalation_sql) instead of queuing a second item.
+# AI_LEGACY_SOURCES). Severity is preserved (the legacy writer's behaviour), and a later signal that outranks every
+# open item of the user raises ONE of them (ai_track_escalation_sql) instead of queuing a second item.
 AI_TRACK_SOURCE = "Cost Intelligence > Chargeback & AI > AI users"
 # Every SOURCE the page's pre-v4.605 writer stamped (git log -S on its INSERT): 'Cost & Contract > AI Users' until
 # v4.49, 'Cost & Contract > Chargeback & AI > AI users' from v4.49 until v4.541 (the page rename), AI_TRACK_SOURCE
@@ -801,18 +801,24 @@ def _severity_rank_sql(expr: str) -> str:
 
 
 def ai_track_escalation_sql(items: list[dict], *, actor_sql: str) -> str:
-    """ONE UPDATE that only ever RAISES the severity of this page's open USER items ('' when there are none).
+    """ONE UPDATE that only ever RAISES the severity of at most ONE open USER item per user ('' when there are none).
 
     track_entities_sql keeps one item per user, so while a user's item is open a later, stronger signal (MEDIUM
     'High usage' tracked, the user now breaches the budget) inserts nothing. This statement runs first, behind the
-    same C48 latch, and matches exactly what blocks that insert (_track_match: SOURCE-scoped entity key, or a
-    pre-v4.605 row by its legacy TITLE under any of AI_LEGACY_SOURCES), OPEN or IN_PROGRESS only. It sets SEVERITY
-    to the new signal's when that ranks strictly higher (never a downgrade, so a re-run is a no-op), prefixes
-    DETAIL with 'Raised from <old> to <new> by a later Track (<new title>)' (clipped at 1000), and stamps
-    UPDATED_AT / UPDATED_BY. TITLE and ESTIMATED_USD stay as first tracked: re-pricing would break the all-users
-    item's de-overlap (and a user may hold several pre-v4.605 per-signal rows). Another source's item (a Security
-    work item on the same user) and a DONE or DROPPED item are never touched. Every value goes through
-    sql_literal; one statement, no ';' outside literals."""
+    same C48 latch, over exactly what blocks that insert (_track_match: SOURCE-scoped entity key, or a pre-v4.605
+    row by its legacy TITLE under any of AI_LEGACY_SOURCES), OPEN or IN_PROGRESS only. A pre-v4.605 user may hold
+    several such rows (the old writer queued one per signal, per source and per month), so the target is chosen in
+    a derived table (a WHERE over window columns, no QUALIFY): per user, only when the new signal outranks the
+    user's STRONGEST open matching item, and then only that one item -- the strongest, on a tie the entity-keyed
+    one, then the newest (CREATED_AT, then ACTION_ID). A user already holding an open item at or above the new
+    severity is left as is, one breach raises at most one item (it never counts twice in Critical / high), the
+    user's other items keep their severity, and a re-run is a no-op (review r2 R2-2 / R2-9). The raise sets
+    SEVERITY to the new signal's (never a downgrade), prefixes DETAIL with 'Raised from <old> to <new> by a later
+    Track (<new title>)' (clipped at 1000), and stamps UPDATED_AT / UPDATED_BY. TITLE and ESTIMATED_USD stay as
+    first tracked: re-pricing would break the all-users item's de-overlap. Another source's item (a Security work
+    item on the same user) and a DONE or DROPPED item are never touched. Every value goes through sql_literal; one
+    statement (UPDATE on an OVERWATCH table, so the executor's allow-list takes it as is), no ';' outside
+    literals."""
     allowed = set(AI_TRACK_SEVERITIES)
     values: list[str] = []
     for item in items:
@@ -827,18 +833,31 @@ def ai_track_escalation_sql(items: list[dict], *, actor_sql: str) -> str:
         return ""
     rows_sql = ",\n    ".join(values)
     match = _track_match(AI_USER_ENTITY_TYPE, AI_TRACK_SOURCE, True)
+    q_rank = _severity_rank_sql("q.SEVERITY")
     return f"""
-UPDATE {core_object('ACTION_QUEUE')} q
-SET SEVERITY = v.SEVERITY,
-    DETAIL = SUBSTR('Raised from ' || COALESCE(UPPER(q.SEVERITY), 'unset') || ' to ' || v.SEVERITY
-                    || ' by a later Track (' || v.TITLE || '). The estimate is the one first tracked. '
-                    || COALESCE(q.DETAIL, ''), 1, 1000),
+UPDATE {core_object('ACTION_QUEUE')} tgt
+SET SEVERITY = s.NEW_SEVERITY,
+    DETAIL = SUBSTR('Raised from ' || COALESCE(UPPER(tgt.SEVERITY), 'unset') || ' to ' || s.NEW_SEVERITY
+                    || ' by a later Track (' || s.NEW_TITLE || '). The estimate is the one first tracked. '
+                    || COALESCE(tgt.DETAIL, ''), 1, 1000),
     UPDATED_AT = CURRENT_TIMESTAMP(),
     UPDATED_BY = {actor_sql}
-FROM (VALUES
+FROM (
+    SELECT c.ACTION_ID, c.NEW_SEVERITY, c.NEW_TITLE
+    FROM (
+        SELECT q.ACTION_ID, v.SEVERITY AS NEW_SEVERITY, v.TITLE AS NEW_TITLE,
+               {_severity_rank_sql('v.SEVERITY')} AS NEW_RANK,
+               MIN({q_rank}) OVER (PARTITION BY UPPER(v.ENTITY_KEY)) AS BEST_RANK,
+               ROW_NUMBER() OVER (PARTITION BY UPPER(v.ENTITY_KEY)
+                                  ORDER BY {q_rank}, (q.SOURCE_ENTITY_TYPE IS NULL),
+                                           q.CREATED_AT DESC, q.ACTION_ID DESC) AS PICK
+        FROM (VALUES
     {rows_sql}
-) AS v (SEVERITY, TITLE, ENTITY_KEY)
-WHERE {match}
-  AND UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS')
-  AND {_severity_rank_sql('v.SEVERITY')} < {_severity_rank_sql('q.SEVERITY')}
+) AS v (SEVERITY, TITLE, ENTITY_KEY), {core_object('ACTION_QUEUE')} q
+        WHERE {match}
+          AND UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS')
+    ) c
+    WHERE c.PICK = 1 AND c.NEW_RANK < c.BEST_RANK
+) s
+WHERE tgt.ACTION_ID = s.ACTION_ID
 """.strip()

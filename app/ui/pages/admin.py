@@ -23,7 +23,7 @@ from app.core.ai import CORTEX_TIMEOUT_SECONDS
 from app.core.errors import error_buffer, safe_page
 from app.core.identity import identity_sql
 from app.core.query import bump_refresh_salt, execute_statement, query_telemetry, run, run_batch
-from app.core.result import is_schema_drift, is_setup_absence
+from app.core.result import is_privilege_error, is_schema_drift, is_setup_absence
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
@@ -2113,8 +2113,21 @@ def _setup_progress_tab() -> None:
                   "redeploy the app if the database is ahead of it (Migrations & freshness tab); a retry will "
                   "not clear it. See the Error detail.")
 
+    # Review r2 R2-1: "Insufficient privileges" proves the object exists, so it is a failed read (Unknown), never
+    # "nothing applied yet"; a retry will not clear a missing grant either.
+    _priv_fix = ("Insufficient privileges: the object exists, but the app's role lacks a privilege this read "
+                 "needs. Re-apply the grants (snowflake/roles.sql, run by the owner in Snowsight); a retry will "
+                 "not clear it. See the Error detail.")
+
     def _fail_fix(kind: object) -> str:
-        return _drift_fix if is_schema_drift(kind) else _retry_fix
+        if is_schema_drift(kind):
+            return _drift_fix
+        return _priv_fix if is_privilege_error(kind) else _retry_fix
+
+    def _read_failed(res) -> bool:
+        """The read failed other than by a missing object: a privilege error counts as failed (the object
+        exists), unlike the 'absent' / 'unknown_function' setup absences."""
+        return not res.ok and (not is_setup_absence(res.error_kind) or is_privilege_error(res.error_kind))
 
     def _add(step: str, done: bool, detail: str, fix: str, partial: bool = False,
              unknown: bool = False) -> None:
@@ -2124,7 +2137,7 @@ def _setup_progress_tab() -> None:
 
     sv = run(mart_sql.schema_version(), page=_PAGE, key="setup_schema_version",
              tier="metadata", source="SCHEMA_VERSION", probe=True)
-    _sv_failed = not sv.ok and not is_setup_absence(sv.error_kind)
+    _sv_failed = _read_failed(sv)
     applied: set[int] = set()
     if sv.ok and not sv.empty:
         applied = {int(v) for v in pd.to_numeric(sv.df["VERSION"], errors="coerce").dropna()}
@@ -2166,7 +2179,7 @@ def _setup_progress_tab() -> None:
                     + (f"; {_never} not loaded yet" if _never else ""),
              fix="Loader tasks fill these overnight; a never-loaded source needs its "
                  "backfill (Migrations & freshness tab).")
-    elif not fr.ok and not is_setup_absence(fr.error_kind):
+    elif _read_failed(fr):
         _add("Marts loading", done=False, unknown=True,
              detail="SOURCE_FRESHNESS_STATE could not be read, so whether the marts are loading is unknown.",
              fix=_fail_fix(fr.error_kind))
@@ -2190,7 +2203,7 @@ def _setup_progress_tab() -> None:
              "(drives Contract & Forecast).")
     rt = run(mart_sql.alert_routes(), page=_PAGE, key="setup_routes", tier="recent",
              source="ALERT_ROUTES", probe=True)
-    _rt_failed = not rt.ok and not is_setup_absence(rt.error_kind)
+    _rt_failed = _read_failed(rt)
     _n_routes = 0
     if rt.usable():
         _n_routes = (int(rt.df["ENABLED"].astype(str).str.upper().isin(("TRUE", "1")).sum())
@@ -2216,12 +2229,16 @@ def _setup_progress_tab() -> None:
     if unknown:
         _failed_reads = [(src, r) for src, r in (("SCHEMA_VERSION", sv), ("SOURCE_FRESHNESS_STATE", fr),
                                                  ("ALERT_ROUTES", rt))
-                         if not r.ok and not is_setup_absence(r.error_kind)]
+                         if _read_failed(r)]
         _any_drift = any(is_schema_drift(r.error_kind) for _, r in _failed_reads)
+        _any_priv = any(is_privilege_error(r.error_kind) for _, r in _failed_reads)
+        _why = " ".join(_t for _t in (
+            "A missing column is schema drift, which a retry will not clear: see the FIX column." if _any_drift
+            else "",
+            "An 'Insufficient privileges' error needs the app's grants re-applied (roles.sql), which a retry "
+            "will not clear: see the FIX column." if _any_priv else "") if _t) or "Retry."
         empty_state("unavailable", f"{unknown} setup item(s) could not be checked: a read failed, which is "
-                    "not a setup gap. "
-                    + ("A missing column is schema drift, which a retry will not clear: see the FIX column."
-                       if _any_drift else "Retry."),
+                    "not a setup gap. " + _why,
                     detail="\n".join(f"{src}: {r.error}" for src, r in _failed_reads))
     styled_table(df, height=360)
     st.caption("Per-version migration detail (which VNNN is applied or missing) is on "
