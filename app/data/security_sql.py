@@ -1221,6 +1221,12 @@ def client_drivers(days: int = 30, company: str = "ALL", *, bounds: tuple | None
     used to sort above every digit and win MAX). Version key pads dot-segments
     so 3.10.2 > 3.9.1. SESSIONS lags up to ~3h; POSIX classes only (no
     backslashes survive the string layers — V022 lesson).
+
+    No LIMIT of its own (it used to end LIMIT 500, below run()'s default
+    cap, so a cut feed could never set res.truncated): the page derives the
+    support KPIs, the upgrade caption and the BEHIND count from these rows,
+    so run()'s cap must be the only cut and must be detectable. A real
+    account has a few dozen DRIVER x VERSION x PROGRAM rows.
     """
     days = bounded_days(days, maximum=90)
     _scope = (resolve_effective_window(days, "CREATED_ON", bounds=bounds)[1]
@@ -1273,7 +1279,6 @@ SELECT DRIVER, VERSION, PROGRAM, UPGRADED_BY, USERS, SESSIONS, FIRST_SEEN, LAST_
             ELSE 'CURRENT' END AS STATUS
 FROM grouped
 ORDER BY DRIVER, VKEY DESC NULLS LAST, SESSIONS DESC
-LIMIT 500
 """
 
 

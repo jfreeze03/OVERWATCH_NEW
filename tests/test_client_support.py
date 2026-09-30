@@ -5,8 +5,11 @@ SYSTEM$CLIENT_VERSION_INFO() parser and the KPI counts/wording. An EXECUTED sqli
 client_drivers SQL over sessions seeded from the owner's 2026-09-29 probe (answers W4/W4c), proving:
 SQLAPI 2.0.0 is not BEHIND and bare 'SQLAPI' is NO VERSION (never newest); Snowflake's own web app and
 services read SNOWFLAKE-RUN and never set a customer's newest version; NULL/blank client ids are
-'(no client id)', never green CURRENT. Render tests drive _clients_tab with fakes: a working floor read
-gives 3 yours-to-upgrade / 2 Snowflake-run UNSUPPORTED, a failed one reads 'unavailable' with dashed KPIs.
+'(no client id)', never green CURRENT. The harness models Snowflake's NULL ordering (DEFAULT_NULL_ORDERING
+= LAST: NULLs first on DESC), which sqlite reverses, so dropping an explicit NULLS LAST fails the executed
+tests too, not only the string lock in history_locks/test_live_round4. Render tests drive _clients_tab
+with fakes: a working floor read gives 3 yours-to-upgrade / 2 Snowflake-run UNSUPPORTED; a failed one, one
+whose entries list no minimum (key drift) and a capped inventory read with dashed KPIs, never clean.
 
 The JSON fixture is modelled on Snowflake's documented SYSTEM$CLIENT_VERSION_INFO() shape with the floor
 values the probe returned (W4c). The owner has not pasted the raw W3 JSON yet; swap it in when they do.
@@ -178,6 +181,84 @@ def test_read_floors_never_turns_a_failed_or_empty_read_into_a_verdict():
     assert ok and why == ""
 
 
+def _drifted_info_frame(keep: tuple[str, ...] = ()) -> pd.DataFrame:
+    """The builder's frame after Snowflake renamed the version keys: GET_PATH returns NULL for a missing
+    key (no error), so every row still names its client but the flattened floors are NULL, and RAW_ENTRY
+    carries the entry under spellings no alias knows. `keep` names flattened floor columns that survive."""
+    return pd.DataFrame([
+        {"CLIENT_ID": f.client_id, "CLIENT_APP_ID": f.client_app_id,
+         "MIN_SUPPORTED_VERSION": f.min_supported if "MIN" in keep else None,
+         "NEARING_EOS_VERSION": f.nearing_eos if "NEARING" in keep else None,
+         "RECOMMENDED_VERSION": f.recommended if "RECOMMENDED" in keep else None,
+         "RAW_ENTRY": json.dumps({"clientAppId": f.client_app_id, "minimumVersion": f.min_supported,
+                                  "latestVersion": f.recommended})}
+        for f in _floors()])
+
+
+@pytest.mark.parametrize("keep", [(), ("RECOMMENDED",), ("NEARING", "RECOMMENDED")])
+def test_read_floors_with_no_minimum_anywhere_is_unavailable_not_clean(keep):
+    """Key drift: the read succeeds with one row per client and no usable minimum. It used to return those
+    floors, so every version read NOT LISTED (or, with only the minimum lost, BELOW RECOMMENDED for
+    JDBC 3.13.22) under a green '0 unsupported'."""
+    floors, why = cs.read_floors(True, _drifted_info_frame(keep))
+    assert floors is None
+    assert why == "the function's entries list no minimum supported version; its key names may have changed"
+    # an unparseable minimum is no minimum either
+    junk = pd.DataFrame([{"CLIENT_APP_ID": "JDBC", "MIN_SUPPORTED_VERSION": "n/a", "RECOMMENDED_VERSION": "4.3.4"}])
+    assert cs.read_floors(True, junk)[0] is None
+    # one entry with a minimum is enough for a verdict
+    assert cs.read_floors(True, _drifted_info_frame(("MIN",)))[0] is not None
+
+
+def test_a_second_minimum_less_entry_never_erases_a_drivers_minimum():
+    go = {"clientId": "GO", "clientAppId": "Go", "minimumSupportedVersion": "1.11.2",
+          "minimumNearingEndOfSupportVersion": "1.12.1", "recommendedVersion": "2.2.0"}
+    bare = {"clientId": "GO", "clientAppId": "Go", "recommendedVersion": "2.2.0"}
+    for entries in ([go, bare], [bare, go]):
+        index = cs.floor_index(cs.parse_client_version_info(entries))
+        assert index["GO"].min_supported == "1.11.2", entries
+    # with it, the web app's Go 1.1.5 stays UNSUPPORTED (Snowflake-run) instead of BELOW RECOMMENDED
+    floors = [f for f in _floors() if f.client_app_id != "Go"] + cs.parse_client_version_info([go, bare])
+    counts = cs.support_counts(cs.annotate_support(_drivers(), floors))
+    assert counts["unsupported_snowflake"] == 2 and counts["unsupported_yours"] == 3
+
+
+def _drivers_of(rows) -> pd.DataFrame:
+    return pd.read_sql_query(_to_sqlite(security_sql.client_drivers(30, "ALL")), _sessions_db(rows))
+
+
+def test_caption_says_how_many_of_yours_could_not_be_checked():
+    # JDBC has no entry at all: its two versions are NOT LISTED, so 'unsupported' covers only the rest
+    floors = [f for f in _floors() if f.client_app_id != "JDBC"]
+    ann = cs.annotate_support(_drivers(), floors)
+    counts = cs.support_counts(ann)
+    assert counts["unsupported_yours"] == 2                            # Python 3.10.1, ODBC 3.2.2
+    assert (counts["checked_yours"], counts["not_checked_yours"], counts["not_listed_yours"]) == (10, 2, 2)
+    text = cs.support_caption(ann)
+    assert text.startswith("2 driver versions below Snowflake's supported minimum are yours to upgrade: ")
+    assert text.endswith(" 2 of your driver versions could not be checked against a minimum "
+                         "(JDBC 3.25.0, JDBC 3.13.22): Snowflake's function lists no minimum for that driver.")
+
+
+def test_caption_never_reads_clean_when_nothing_of_yours_could_be_checked():
+    rows = [("Spark 2.16.0", "spark-submit", ["A"], 3), ("Go 1.1.5", "Snowflake Web App", ["B"], 1),
+            ("SQLAPI", None, ["C"], 1)]
+    ann = cs.annotate_support(_drivers_of(rows), _floors())
+    counts = cs.support_counts(ann)
+    assert (counts["checked_yours"], counts["not_checked_yours"]) == (0, 1)
+    text = cs.support_caption(ann)
+    assert "None of your driver versions in this window is below" not in text
+    assert text == ("None of your driver versions could be checked against Snowflake's supported minimum "
+                    "(Spark 2.16.0): Snowflake's function lists no minimum for that driver. 1 driver version "
+                    "below it is Snowflake-run (Snowflake's own web app or services): no action.")
+    # some checked, some not: the clean sentence counts only the checked ones and names the rest
+    rows = [("Spark 2.16.0", "spark-submit", ["A"], 3), ("JDBC 4.3.4", "x", ["B"], 2)]
+    text = cs.support_caption(cs.annotate_support(_drivers_of(rows), _floors()))
+    assert text == ("None of your checked driver versions (1) is below Snowflake's supported minimum. "
+                    "1 of your driver versions could not be checked against a minimum (Spark 2.16.0): "
+                    "Snowflake's function lists no minimum for that driver.")
+
+
 # ---------------------------------------------------------------------------
 # builders, canary, colours
 # ---------------------------------------------------------------------------
@@ -195,10 +276,54 @@ def test_client_version_info_builder_uses_the_probe_shape():
     assert not re.search(r"\d+\.\d+\.\d+", sql)                   # never a hard-coded Snowflake version
 
 
+# A dotted three-part version standing on its own: '3.19.1' inside 'JDBC 3.19.1 today' is one; 'v4.603.0',
+# '3.19.1.4' and 'x3.19.1' are not (a word or dot touches it).
+_VERSION_IN_TEXT = re.compile(r"(?<![\w.])\d+\.\d+\.\d+(?![\w.])")
+# The app's OWN release numbers carry a three-digit minor (4.603.0); Snowflake's client versions never do
+# (JDBC 3.25.0, Go 2.2.0, Python connector 4.7.5, .NET 4.1.0), so one is never mistaken for the other.
+_APP_RELEASE = re.compile(r"\d+\.\d{3,}\.\d+")
+
+
+def _hard_coded_versions(source: str) -> list[str]:
+    """Every Snowflake-looking version written into a string of this source, anywhere in the text (a
+    caption, a help sentence, a constant, an f-string part), except in docstrings, whose examples
+    ('3.13.22' -> (3, 13, 22, 0)) document the parser rather than state a floor."""
+    import ast
+    tree = ast.parse(source)
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+            first = node.body[0]
+            if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)):
+                docstrings.add(id(first.value))
+    found = []
+    for node in ast.walk(tree):                      # ast.walk visits f-string (JoinedStr) parts too
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
+            found += [m for m in _VERSION_IN_TEXT.findall(node.value) if not _APP_RELEASE.fullmatch(m)]
+    return found
+
+
+def test_the_version_guard_catches_a_version_inside_a_sentence():
+    # the shapes that used to get through: a version in a help sentence, a module constant, an f-string
+    assert _hard_coded_versions('HELP = "Unsupported, yours (JDBC 3.19.1 today)."') == ["3.19.1"]
+    assert _hard_coded_versions('JDBC_NOTE = "JDBC below 3.19.1 is unsupported"') == ["3.19.1"]
+    assert _hard_coded_versions('def f(n):\n    return f"{n} below 3.12.3"') == ["3.12.3"]
+    assert _hard_coded_versions('X = "4.3.4"') == ["4.3.4"]
+    # not a Snowflake version: docstring examples, the app's own release numbers, version-like fragments
+    assert _hard_coded_versions('"""Doc: 3.10.2 > 3.9.1."""\ndef g():\n    """\'3.13.22\' -> (3, 13, 22, 0)"""') == []
+    from app.config import APP_VERSION  # the app's own release number, derived
+    own =f'A = "{APP_VERSION}"\nB = "rows logged before app 4.599.0"\nC = "(v{APP_VERSION})"'
+    assert _hard_coded_versions(own) == []
+    assert _hard_coded_versions('D = "10.0.0.1"\nE = "3.19"\nF = "x3.19.1"') == []
+
+
 def test_no_snowflake_version_is_hard_coded_in_app_code():
     import ast
     for rel in ("app/logic/client_support.py", "app/data/security_sql.py", "app/ui/pages/security.py"):
-        tree = ast.parse((_ROOT / rel).read_text(encoding="utf-8"))
+        source = (_ROOT / rel).read_text(encoding="utf-8")
+        assert _hard_coded_versions(source) == [], rel
+        tree = ast.parse(source)
         literals = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
         assert not [v for v in literals if re.fullmatch(r"\s*\d+\.\d+(\.\d+)+\s*", v)], rel
     src = (_ROOT / "app" / "logic" / "client_support.py").read_text(encoding="utf-8")
@@ -269,6 +394,10 @@ _W4 = [
     ("ODBC 3.2.2", "MashupEngineGateway", ["POWERBI_DEV", "POWERBI_PRD"], 2),
     ("SQLAPI", None, ["H21427", "KEBARR1"], 2),
     ("JDBC 3.13.22", "com.amazonaws.services.glue.P", ["AWS Glue PRD"], 1),   # same combo, more sessions
+    # a BEHIND version under a SECOND customer program (live: JavaScript 3.0.0 under cortex_code_cli and
+    # cortex_code_sa): program grain would count it twice, so the BEHIND count's DRIVER x VERSION grain is
+    # locked by the '6' below (7 at program grain)
+    ("Go 2.0.0", "Go", ["H14"], 1),
 ]
 
 
@@ -312,6 +441,12 @@ def _to_sqlite(sql: str) -> str:
     sql = sql.replace("LISTAGG(DISTINCT USER_NAME, ', ') WITHIN GROUP (ORDER BY USER_NAME)",
                       "GROUP_CONCAT(DISTINCT USER_NAME)")
     sql = sql.replace(" ILIKE ", " LIKE ")                 # sqlite LIKE is ASCII case-insensitive
+    # Snowflake's default NULL ordering (DEFAULT_NULL_ORDERING = LAST) treats NULL as the HIGHEST value:
+    # NULLs come first on DESC and last on ASC. sqlite treats NULL as the lowest, the reverse. Where the SQL
+    # leaves NULL placement implicit, spell out Snowflake's default so the harness sorts as Snowflake does.
+    # (A key with no direction sorts ASC: the builder's only one is DRIVER, which is never NULL.)
+    sql = re.sub(r"\bDESC\b(?!\s+NULLS)", "DESC NULLS FIRST", sql)
+    sql = re.sub(r"\bASC\b(?!\s+NULLS)", "ASC NULLS LAST", sql)
     assert "::" not in sql and "ACCOUNT_USAGE" not in sql
     return sql
 
@@ -438,6 +573,36 @@ ORDER BY DRIVER, VKEY DESC, SESSIONS DESC
     assert cs.NO_CLIENT_ID not in set(df["DRIVER"])                                # NULL ids dropped
 
 
+def test_the_harness_sees_snowflakes_null_ordering():
+    """Snowflake puts NULLs FIRST on DESC by default; sqlite puts them last. Without modelling that, the
+    builder with its NULLS LAST dropped ran identically here and only a string lock noticed. It must fail
+    the executed checks: on Snowflake bare 'SQLAPI' (a NULL key) would sort first and its NULL would
+    become ControlM's NEWEST_IN_ACCOUNT."""
+    sql = security_sql.client_drivers(30, "ALL")
+    assert sql.count(" NULLS LAST") == 2
+    dropped = _drivers(sql.replace(" NULLS LAST", ""))
+    assert _row(dropped, "SQLAPI", "2.0.0")["NEWEST_IN_ACCOUNT"] is None
+    assert dropped[dropped["DRIVER"] == "SQLAPI"]["VERSION"].tolist() == ["?", "2.0.0"]
+    kept = _drivers(sql)
+    assert _row(kept, "SQLAPI", "2.0.0")["NEWEST_IN_ACCOUNT"] == "2.0.0"
+    assert _to_sqlite("ORDER BY A DESC, B ASC, C DESC NULLS LAST") == (
+        "ORDER BY A DESC NULLS FIRST, B ASC NULLS LAST, C DESC NULLS LAST")
+
+
+def test_executed_a_newer_snowflake_run_version_never_makes_a_customer_behind():
+    """STATUS's MAX window is partitioned by UPGRADED_BY too. In the probe's data every Snowflake-run Go is
+    older than the customer's newest (2.1.0), so dropping that partition changed no row; the day the web
+    app moves to a newer Go, it would make every customer Go row BEHIND (the #34 defect)."""
+    base = pd.read_sql_query(_to_sqlite(security_sql.client_drivers(30, "ALL")), _sessions_db())
+    rows = [*_W4, ("Go 2.2.0", "Snowflake Web App (CNG)", ["H13"], 2)]
+    df = pd.read_sql_query(_to_sqlite(security_sql.client_drivers(30, "ALL")), _sessions_db(rows))
+    for program in ("Go", "[ADBC]MashupEngine"):
+        r = _row(df, "Go", "2.1.0", program)
+        assert (r["STATUS"], r["NEWEST_IN_ACCOUNT"]) == ("CURRENT", "2.1.0"), program
+    assert _row(df, "Go", "2.2.0")["STATUS"] == "SNOWFLAKE-RUN"
+    assert cs.behind_count(df) == cs.behind_count(base) == 6
+
+
 # ---------------------------------------------------------------------------
 # the join, KPIs and wording on the probe's data
 # ---------------------------------------------------------------------------
@@ -461,9 +626,36 @@ def test_counts_and_caption_match_the_probe():
     # the in-account STATUS caption: driver x version grain, Snowflake-run excluded
     # JDBC 3.13.22, Go 2.0.2 / 2.0.0 / 1.16.0 (vs Power BI's 2.1.0), Python 3.10.1, ODBC 3.2.2
     assert cs.behind_count(ann) == 6
-    assert cs.driver_version_count(ann) == 17                  # Go 2.0.2 under two programs counts once
+    assert int((ann["STATUS"] == "BEHIND").sum()) == 7         # Go 2.0.0 is BEHIND under two programs
+    assert cs.driver_version_count(ann) == 17                  # Go 2.0.2 / 2.0.0 under two programs count once
     assert cs.driver_family_count(ann) == 8                    # '(no client id)' is not a family
     assert cs.no_client_id_sessions(ann) == 4
+    # every version of yours with a version number was checked against a minimum
+    assert (counts["checked_yours"], counts["not_checked_yours"], counts["not_listed_yours"]) == (12, 0, 0)
+
+
+def test_behind_count_is_one_per_driver_version_not_per_program():
+    df = pd.DataFrame([
+        {"DRIVER": "JavaScript", "VERSION": "3.0.0", "PROGRAM": "cortex_code_cli", "STATUS": "BEHIND"},
+        {"DRIVER": "JavaScript", "VERSION": "3.0.0", "PROGRAM": "cortex_code_sa", "STATUS": "BEHIND"},
+        {"DRIVER": "JavaScript", "VERSION": "3.1.0", "PROGRAM": "VSCODE_1.40.0", "STATUS": "CURRENT"},
+        {"DRIVER": "Go", "VERSION": "1.1.5", "PROGRAM": "Snowflake Web App", "STATUS": "SNOWFLAKE-RUN"},
+    ])
+    assert cs.behind_count(df) == 1
+
+
+def test_nearing_and_below_recommended_count_yours_only():
+    """Both KPIs say 'Yours'. The probe's data has no Snowflake-run-only version in either band (Go 2.0.2 is
+    also run by a customer program), so counting Snowflake's own versions went unnoticed."""
+    rows = [("Go 2.0.5", "Snowflake Web App (X)", ["A"], 2), ("Go 1.12.0", "Snowflake Web App (Y)", ["B"], 1),
+            ("JDBC 3.25.0", "INFA_IICS", ["C"], 1)]
+    df = pd.read_sql_query(_to_sqlite(security_sql.client_drivers(30, "ALL")), _sessions_db(rows))
+    ann = cs.annotate_support(df, _floors())
+    assert _row(ann, "Go", "2.0.5")["SUPPORT_CODE"] == cs.BELOW_RECOMMENDED    # the case exercises both bands
+    assert _row(ann, "Go", "1.12.0")["SUPPORT_CODE"] == cs.NEARING_EOS
+    counts = cs.support_counts(ann)
+    assert counts["below_recommended"] == 1                                     # JDBC 3.25.0 only
+    assert counts["nearing_eos"] == 0
 
 
 def test_annotate_marks_rows_and_keeps_snowflake_run_neutral():
@@ -553,11 +745,12 @@ def _info_frame() -> pd.DataFrame:
                           "RECOMMENDED_VERSION": f.recommended, "RAW_ENTRY": "{}"} for f in _floors()])
 
 
-def _render(monkeypatch, info):
+def _render(monkeypatch, info, drivers=None):
     from app.ui.pages import security as sec
     fake = _FakeSt()
     seen: dict = {"runs": [], "kpis": [], "tables": [], "empty": [], "results": []}
-    drivers = _ok(_drivers())
+    drivers = drivers if drivers is not None else _ok(_drivers())
+    monkeypatch.setattr(sec, "guard", lambda res, *_a, **_k: bool(res.ok) and not res.empty)
 
     def fake_run(sql, **kw):
         seen["runs"].append(kw)
@@ -623,6 +816,81 @@ def test_render_when_the_floor_read_returns_nothing(monkeypatch):
     fake, seen = _render(monkeypatch, _ok(pd.DataFrame()))
     assert seen["kpi"]["Unsupported, yours to upgrade"]["value"] == "—"
     assert "returned no client entries" in fake.text("caption")
+
+
+_SUPPORT_KPIS = ("Unsupported, yours to upgrade", "Unsupported, Snowflake-run", "Nearing end of support",
+                 "Below recommended")
+
+
+@pytest.mark.parametrize("keep", [(), ("RECOMMENDED",)])
+def test_render_when_the_floor_keys_drift(monkeypatch, keep):
+    """An info frame whose rows name every client but carry no readable minimum (Snowflake renamed the
+    keys). It used to render '0' with severity 'ok' on all four KPIs and 'None of your driver versions ...
+    is below Snowflake's supported minimum' while JDBC 3.13.22, Python 3.10.1 and ODBC 3.2.2 are below it."""
+    fake, seen = _render(monkeypatch, _ok(_drifted_info_frame(keep)))
+    for label in _SUPPORT_KPIS:
+        assert seen["kpi"][label]["value"] == "—" and "severity" not in seen["kpi"][label], label
+    ((table, kw),) = seen["tables"]
+    assert set(table["SUPPORT_STATUS"]) == {"unavailable"} and kw["sort_label"] == cs.INVENTORY_SORT_LABEL
+    caps = fake.text("caption")
+    assert ("Snowflake's support floor could not be read (the function's entries list no minimum supported "
+            "version; its key names may have changed).") in caps
+    assert "None of your driver versions" not in caps and "yours to upgrade" not in caps
+
+
+def test_render_qualifies_kpis_when_some_of_yours_are_not_listed(monkeypatch):
+    info = _info_frame()
+    fake, seen = _render(monkeypatch, _ok(info[info["CLIENT_APP_ID"] != "JDBC"]))
+    kpi = seen["kpi"]
+    mine = kpi["Unsupported, yours to upgrade"]
+    assert (mine["value"], mine["severity"], mine["sub"]) == ("2", "bad", "2 not checked")
+    assert "Not counted here: 2 of your driver versions" in mine["help"]
+    for label in ("Nearing end of support", "Below recommended"):
+        assert kpi[label]["sub"] == "2 not checked", label
+    assert kpi["Nearing end of support"]["value"] == "0" and "severity" not in kpi["Nearing end of support"]
+    assert kpi["Unsupported, Snowflake-run"]["value"] == "2" and "sub" not in kpi["Unsupported, Snowflake-run"]
+    assert "could not be checked against a minimum (JDBC 3.25.0, JDBC 3.13.22)" in fake.text("caption")
+
+
+def test_render_dashes_kpis_when_none_of_yours_could_be_checked(monkeypatch):
+    rows = [("Spark 2.16.0", "spark-submit", ["A"], 3), ("Go 1.1.5", "Snowflake Web App", ["B"], 1)]
+    fake, seen = _render(monkeypatch, _ok(_info_frame()), drivers=_ok(_drivers_of(rows)))
+    kpi = seen["kpi"]
+    for label in ("Unsupported, yours to upgrade", "Nearing end of support", "Below recommended"):
+        assert kpi[label]["value"] == "—" and "severity" not in kpi[label], label
+    assert kpi["Unsupported, Snowflake-run"]["value"] == "1"
+    caps = fake.text("caption")
+    assert "None of your driver versions could be checked" in caps
+    assert "in this window is below" not in caps
+
+
+def test_render_when_the_inventory_hits_the_row_cap(monkeypatch):
+    """The inventory feed is cut at run()'s cap: every support KPI, the upgrade caption and the BEHIND count
+    would be totals over part of it (the oldest versions of the last driver go first), so none is given."""
+    capped = SimpleNamespace(**{**vars(_ok(_drivers())), "truncated": True})
+    fake, seen = _render(monkeypatch, _ok(_info_frame()), drivers=capped)
+    kpi = seen["kpi"]
+    for label in _SUPPORT_KPIS:
+        assert kpi[label]["value"] == "—" and "severity" not in kpi[label], label
+        assert "row cap" in kpi[label]["help"], label
+    assert kpi["Driver families"]["value"] == "8+" and kpi["Driver+version combos"]["value"] == "17+"
+    caps = fake.text("caption")
+    assert cs.capped_caption(len(capped.df)) in caps
+    for claim in ("None of your driver versions", "yours to upgrade:", "trail the newest version"):
+        assert claim not in caps, claim
+    assert "At least 4 sessions reported no client id" in caps
+    ((table, _kw),) = seen["tables"]
+    assert len(table) == len(capped.df)                          # the rows it has still render
+
+
+def test_client_drivers_leaves_the_row_cap_to_run():
+    """Its own LIMIT 500 sat below run()'s default cap, which keeps a smaller LIMIT as is, so a cut feed
+    could never set res.truncated. With no LIMIT of its own, run() fetches cap+1 and can tell."""
+    from app.config import DEFAULT_MAX_ROWS
+    from app.core.query import _with_row_cap
+    sql = security_sql.client_drivers(30, "ALL")
+    assert not re.search(r"LIMIT\s+\d+\s*$", sql.strip())
+    assert _with_row_cap(sql, DEFAULT_MAX_ROWS).rstrip().endswith(f"LIMIT {DEFAULT_MAX_ROWS + 1}")
 
 
 def test_logic_module_is_pure():

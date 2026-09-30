@@ -302,17 +302,30 @@ def floors_from_frame(df: pd.DataFrame | None) -> list[ClientFloor]:
     return out
 
 
+def _has_minimum(floor: ClientFloor) -> bool:
+    return version_key(floor.min_supported) is not None
+
+
 def floor_index(floors: Iterable[ClientFloor]) -> dict[str, ClientFloor]:
-    """Upper-cased driver id -> floor. A clientAppId match beats a clientId match (as in the W4c probe)."""
-    floors = list(floors)
-    index: dict[str, ClientFloor] = {}
+    """Upper-cased driver id -> floor. A clientAppId match beats a clientId match (as in the W4c probe).
+
+    Two entries for the same id: the one that lists a minimum supported version wins, else the first. A
+    second, minimum-less entry for a driver (the W4c probe hints the live function has one for Go) must
+    never erase that driver's minimum and turn an UNSUPPORTED version into a milder verdict."""
+    by_id: dict[str, ClientFloor] = {}
+    by_app: dict[str, ClientFloor] = {}
+
+    def _keep(index: dict[str, ClientFloor], key: str, floor: ClientFloor) -> None:
+        current = index.get(key)
+        if current is None or (not _has_minimum(current) and _has_minimum(floor)):
+            index[key] = floor
+
     for f in floors:
         if f.client_id:
-            index.setdefault(f.client_id.upper(), f)
-    for f in floors:
+            _keep(by_id, f.client_id.upper(), f)
         if f.client_app_id:
-            index[f.client_app_id.upper()] = f
-    return index
+            _keep(by_app, f.client_app_id.upper(), f)
+    return {**by_id, **by_app}
 
 
 def unavailable_reason(error: object, error_kind: object) -> str:
@@ -328,13 +341,21 @@ def unavailable_reason(error: object, error_kind: object) -> str:
 def read_floors(ok: bool, df: pd.DataFrame | None, error: object = "",
                 error_kind: object = "") -> tuple[list[ClientFloor] | None, str]:
     """The SYSTEM$ read's outcome -> (floors, reason). floors is None whenever no support verdict can be
-    given: the read failed (any error_kind), or it returned nothing parseable. A failed read is never
-    rendered as clean."""
+    given: the read failed (any error_kind), it returned nothing parseable, or no entry lists a usable
+    minimum supported version. A failed read is never rendered as clean.
+
+    The last case is key drift: GET_PATH on a key Snowflake has renamed returns NULL, not an error, so the
+    read still succeeds with one row per client and every version would read NOT LISTED (or, with only the
+    minimum key lost, a milder verdict) under a green '0 unsupported'. Keyed on the minimum because the
+    minimum is what the UNSUPPORTED verdict needs."""
     if not ok:
         return None, unavailable_reason(error, error_kind)
     floors = floors_from_frame(df)
     if not floors:
         return None, "the function returned no client entries that could be parsed"
+    if not any(_has_minimum(f) for f in floors):
+        return None, ("the function's entries list no minimum supported version; its key names may have "
+                      "changed")
     return floors, ""
 
 
@@ -427,29 +448,58 @@ def no_client_id_sessions(df: pd.DataFrame) -> int:
 
 def _driver_versions(df: pd.DataFrame) -> pd.DataFrame:
     """One row per DRIVER x VERSION: its support code (the same on every PROGRAM row), whether any of its
-    rows is yours, and its total sessions."""
+    rows is yours, its total sessions, and whether its floor lists no usable minimum (NO_MIN)."""
     rows = _identified(df)
     if rows.empty:
-        return pd.DataFrame(columns=["DRIVER", "VERSION", "SUPPORT_CODE", "YOURS", "SESSIONS"])
+        return pd.DataFrame(columns=["DRIVER", "VERSION", "SUPPORT_CODE", "YOURS", "SESSIONS", "NO_MIN"])
     sess = pd.to_numeric(rows["SESSIONS"], errors="coerce").fillna(0) if "SESSIONS" in rows.columns else 0
-    tmp = rows.assign(_yours=rows["WHO_UPGRADES"] == WHO_YOURS, _sess=sess)
+    tmp = rows.assign(_yours=rows["WHO_UPGRADES"] == WHO_YOURS, _sess=sess,
+                      _nomin=[version_key(m) is None for m in rows["MIN_SUPPORTED"]])
     return (tmp.groupby(["DRIVER", "VERSION"], sort=False, dropna=False)
-            .agg(SUPPORT_CODE=("SUPPORT_CODE", "first"), YOURS=("_yours", "any"), SESSIONS=("_sess", "sum"))
+            .agg(SUPPORT_CODE=("SUPPORT_CODE", "first"), YOURS=("_yours", "any"), SESSIONS=("_sess", "sum"),
+                 NO_MIN=("_nomin", "all"))
             .reset_index())
+
+
+# Verdicts support_status can reach without a minimum (the entry lists only the other keys). A version
+# with one of these and no minimum was never compared with a minimum: it is 'not checked', not clean.
+_VERDICTS_WITHOUT_MINIMUM = (NEARING_EOS, BELOW_RECOMMENDED, OK)
+
+
+def _versioned(dv: pd.DataFrame) -> pd.Series:
+    return pd.Series([version_key(v) is not None for v in dv["VERSION"]], index=dv.index, dtype=bool)
+
+
+def _not_checked(dv: pd.DataFrame) -> pd.Series:
+    """Your driver versions that could not be compared with a minimum: NOT LISTED (no floor for the
+    driver), or a verdict formed from an entry that lists no minimum. A row with no version ('?') is not
+    counted here: nothing could compare it, and the table already says NO VERSION / NOT LISTED."""
+    code = dv["SUPPORT_CODE"]
+    no_min = dv["NO_MIN"].astype(bool) & code.isin(_VERDICTS_WITHOUT_MINIMUM)
+    return ((code == NOT_LISTED) | no_min) & dv["YOURS"].astype(bool) & _versioned(dv)
 
 
 def support_counts(df: pd.DataFrame) -> dict[str, int]:
     """KPI counts at DRIVER x VERSION grain from an annotate_support frame (read succeeded).
 
     A version seen under both a customer program and a Snowflake-run program counts as yours (actionable).
-    Nearing end of support and below recommended count yours only; Snowflake-run versions are no action."""
+    Nearing end of support and below recommended count yours only; Snowflake-run versions are no action.
+
+    checked_yours / not_checked_yours split your versions that have a version number into those compared
+    with a minimum and those that could not be (see _not_checked); not_listed_yours is the NOT LISTED part
+    of the latter (no floor at all, so no verdict of any kind). The page qualifies its KPIs and caption
+    with these instead of letting an unchecked version read as a green 0."""
     dv = _driver_versions(df)
     code, yours = dv["SUPPORT_CODE"], dv["YOURS"].astype(bool)
+    checked = (code == UNSUPPORTED) | (code.isin(_VERDICTS_WITHOUT_MINIMUM) & ~dv["NO_MIN"].astype(bool))
     return {
         "unsupported_yours": int(((code == UNSUPPORTED) & yours).sum()),
         "unsupported_snowflake": int(((code == UNSUPPORTED) & ~yours).sum()),
         "nearing_eos": int(((code == NEARING_EOS) & yours).sum()),
         "below_recommended": int(((code == BELOW_RECOMMENDED) & yours).sum()),
+        "checked_yours": int((checked & yours).sum()),
+        "not_checked_yours": int(_not_checked(dv).sum()),
+        "not_listed_yours": int(((code == NOT_LISTED) & yours & _versioned(dv)).sum()),
     }
 
 
@@ -477,7 +527,11 @@ def _context(rows: pd.DataFrame) -> str:
 
 def support_caption(df: pd.DataFrame) -> str:
     """The per-version upgrade sentence, built from the MIN_SUPPORTED / RECOMMENDED columns (never from
-    fixed numbers). Lists yours-to-upgrade UNSUPPORTED versions, busiest first, then the Snowflake-run tail."""
+    fixed numbers). Lists yours-to-upgrade UNSUPPORTED versions, busiest first, then the Snowflake-run tail.
+
+    'None ... below the minimum' is said only of versions that were compared with one: when some of yours
+    could not be (NOT LISTED, or an entry with no minimum) the sentence counts the checked ones and names
+    the rest, and when none could be it never reads clean."""
     counts = support_counts(df)
     rows = _identified(df)
     unsupported = rows[(rows["SUPPORT_CODE"] == UNSUPPORTED)]
@@ -502,18 +556,41 @@ def support_caption(df: pd.DataFrame) -> str:
         detail = f" ({'; '.join(bits)})" if bits else ""
         parts.append(f"{driver_display(r['DRIVER'])} {_text(r['VERSION'])}{detail}")
     n, n_sf = counts["unsupported_yours"], counts["unsupported_snowflake"]
+    k, checked = counts["not_checked_yours"], counts["checked_yours"]
     sf_what = "Snowflake-run (Snowflake's own web app or services): no action."
+    unchecked = dv[_not_checked(dv)].sort_values("SESSIONS", ascending=False, kind="stable")
+    names = [f"{driver_display(d)} {_text(v)}" for d, v in zip(unchecked["DRIVER"], unchecked["VERSION"],
+                                                                strict=True)]
+    listed = ", ".join(names[:4]) + (f" +{len(names) - 4} more" if len(names) > 4 else "")
+    n_drv = int(unchecked["DRIVER"].nunique())
+    lists_none = f"Snowflake's function lists no minimum for {_plural(n_drv, 'that driver', 'those drivers')}"
     if n:
         text = (f"{n} driver {_plural(n, 'version', 'versions')} below Snowflake's supported minimum "
                 f"{_plural(n, 'is', 'are')} yours to upgrade: {', '.join(parts)}.")
         if n_sf:
             text += f" {n_sf} more {_plural(n_sf, 'is', 'are')} {sf_what}"
-        return text
-    text = "None of your driver versions in this window is below Snowflake's supported minimum."
-    if n_sf:
+    elif k and not checked:
+        # nothing of yours could be compared: never the clean sentence
+        text = (f"None of your driver versions could be checked against Snowflake's supported minimum "
+                f"({listed}): {lists_none}.")
+    elif k:
+        text = f"None of your checked driver versions ({checked}) is below Snowflake's supported minimum."
+    else:
+        text = "None of your driver versions in this window is below Snowflake's supported minimum."
+    if not n and n_sf:
         text += (f" {n_sf} driver {_plural(n_sf, 'version', 'versions')} below it "
                  f"{_plural(n_sf, 'is', 'are')} {sf_what}")
+    if k and checked:
+        text += (f" {k} of your driver versions could not be checked against a minimum ({listed}): "
+                 f"{lists_none}.")
     return text
+
+
+def capped_caption(rows: int) -> str:
+    """The inventory feed hit run()'s row cap: every total over it would be partial, so none is given."""
+    return (f"The driver inventory hit the {rows:,}-row cap, so the support KPIs, the upgrade list and the "
+            "behind-version count are not shown: they would count only part of it. Narrow the window or "
+            "the company scope.")
 
 
 def unavailable_caption(reason: str) -> str:

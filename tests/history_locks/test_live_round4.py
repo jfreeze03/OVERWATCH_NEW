@@ -108,6 +108,9 @@ def test_client_drivers_builder_shape():
     flat = " ".join(sql.split())
     assert ("FIRST_VALUE(IFF(VKEY IS NULL, NULL, VERSION)) "
             "OVER (PARTITION BY DRIVER, UPGRADED_BY ORDER BY VKEY DESC NULLS LAST)") in flat
+    # the BEHIND verdict's MAX is split by UPGRADED_BY too: a newer Snowflake-run version must never make a
+    # customer's newest version BEHIND (executed in tests/test_client_support.py)
+    assert "WHEN VKEY < MAX(VKEY) OVER (PARTITION BY DRIVER, UPGRADED_BY) THEN 'BEHIND'" in flat
     assert "WHEN VKEY IS NULL THEN 'NO VERSION'" in sql
     assert "WHEN UPGRADED_BY = 'SNOWFLAKE' THEN 'SNOWFLAKE-RUN'" in sql
     assert sql.index("THEN 'SNOWFLAKE-RUN'") < sql.index("THEN 'NO VERSION'") < sql.index("THEN 'BEHIND'")
