@@ -5,27 +5,31 @@
 App-only, no migration. Next-Fifty #43 Phase 1, the #38 remainder, #42 Part 1 and #35 -- the four items the 2026-09-30
 re-ground-truth found buildable with no owner input. Defaults taken for open owner calls: the masking panel stays out of
 the security scores and its environment grouping is information only; #42 Part 2 (DATABASE as a department-map type), the
-#35 storage-waste / transient legs and a Brief/Overview addressable card are not in this release.
+#35 storage-waste / transient legs and a Brief/Overview addressable card are not in this release. Adversarially reviewed
+before release (26 findings in round 1, all fixed).
 
 - **Security: masking and row-access policy coverage (#43 Phase 1).**
-  - Security > Exposure: masking and row-access policy coverage (Next-Fifty #43 Phase 1). A new toggle ("Check masking and row-access policy coverage") makes one hourly-cached, probe=True read of Snowflake's policy-reference view (POLICY_REFERENCES). It reads only the 10 columns the 2026-09-29 S1b probe proved.
+  - Security > Exposure: masking and row-access policy coverage (Next-Fifty #43 Phase 1). A new toggle ("Check masking and row-access policy coverage") makes one hourly-cached, probe=True read of Snowflake's policy-reference view (POLICY_REFERENCES). It reads only the 10 columns the 2026-09-29 probes proved: S1b read seven, S1a read POLICY_NAME, and S0b's column list shows POLICY_DB and POLICY_SCHEMA.
     - KPIs: masked columns, tables and views, databases, and masking policies. Every distinct count is keyed on a fully qualified name (database.schema.object[.column] and database.schema.policy). Account totals are read from SQL and never summed from the per-database rows.
     - A per-database masking inventory. Its ENVIRONMENT column is the name after the last underscore, shown when two or more masked databases share the rest of the name.
-    - Tag-based masking has its own line.
+    - Tag-based masking has its own line. It counts the tags that carry a masking policy, once each even when a tag carries a policy for more than one data type.
     - An explicit statement appears when no row-access, projection or aggregation policy is in use. Any unexpected policy kind surfaces in an "Other policy kinds" caption instead of reading as "none".
-    - A nested toggle groups same-named masked tables across a database family (SAME / DIFFERS). It is information only, not a gap list, with no Track button, severity or alert.
+    - A nested toggle groups same-named masked tables across a database family (SAME / DIFFERS). It is information only, not a gap list, with no Track button, severity or alert. The grouping counts only a family's databases that have masked columns (MASKED_FAMILY_DATABASES). Below it, one line per family of a masked database names that family's databases with no masked column at all, even when only one database of the family is masked. The names come from the sidebar's cached SHOW DATABASES read, so there is no extra scan, and cover the databases the app's role can see. If that read fails or returns no names, the line says the unmasked databases were not checked.
     - The panel is account-wide and is not counted in the Decision-queue domain scores.
     - On this account's data (2026-09-29 probe): 2,416 masked columns on 1,255 tables in 5 databases; 15 masking tags in 4 databases; no row-access, projection or aggregation policy.
     - Failure states: an absent or unauthorised view shows needs_setup. Any other failure shows unavailable with the error. An account with no masking shows needs_setup, and tag-only masking shows no_data_yet. Nothing renders as clean.
+    - Tests: tests/test_policy_coverage_harness.py runs both #43 builders in sqlite on seeded policy-reference rows and locks the fully qualified keys, the tag/column split and the not-ACTIVE count.
   - Security > Access: the admin network-policy caption now says whether the policy-reference view lists an account-level network policy. This is COUNT_IF(REF_DOMAIN = 'ACCOUNT') in the existing read, with no extra scan. The caption follows Snowflake's documented precedence: a user-level policy overrides the account's, and a security integration's own policy overrides both when an admin signs in through it. When no user-level policy is listed, the needs_setup message carries an account-policy hint.
   - Admin > Canary gains 3 checks: security.data_policy_coverage, security.masking_environment_parity and security.admin_network_policy_coverage. The last one previously had no canary. None is a declared gap, so an absent view or a renamed column FAILs.
   - Owner check after deploy:
     - Turn the Exposure toggle on and confirm 2,416 / 1,255 / 5.
     - Run Admin > Canary once in execute mode as the app owner role; the probes ran as SNOW_ACCOUNTADMINS. This is the first execution of the new SQL constructs.
 - **Cost: the add-a-cluster advice checks the cluster cap (#38 remainder).**
-  - **Cost Intelligence ▸ Optimization & Savings ▸ Idle & sizing: Check cluster use.** After you load the right-sizing profile, a new toggle reads the highest cluster any query ran on in each hour (QUERY_HISTORY.CLUSTER_NUMBER) for each multi-cluster warehouse in the profile. The window is at least 35 days, so a month-end is always inside. It stretches to cover the sizing window, up to the 90-day live limit. The add-a-cluster advice now suggests a higher MAX_CLUSTER_COUNT, and prefills the review-only ALTER, only for a warehouse whose queries reached its current maximum in at least one hour, and it says in how many. A warehouse that never reached its cap reads **Size up or split (cluster cap not reached)**. Its queue is not held by the cluster cap (the usual causes are cluster start-up time or a few long queries), so the advice points at a size-up or a split and no cluster statement is generated. If the toggle is off, or the read fails (a red line shows the error), the advice says the cap was not checked and nothing is prefilled. Raising the maximum adds credits while queries queue, so no saving is booked. Single-cluster, Economy-policy and unknown-range rows are unchanged. In the owner's 2026-09-29 probe (14 days), WH_TRXS_TRANSFORM reached 4 of 4 clusters in 57 hours, WH_ALFA_TRANSFORM_PRD in 43 hours, and WH_TRXS_QUERY (3 of 3) in 1 hour. The other nine active multi-cluster warehouses stayed below their cap.
+  - **Cost Intelligence ▸ Optimization & Savings ▸ Idle & sizing: Check cluster use.** After you load the right-sizing profile, a new toggle reads the highest cluster any query ran on in each hour (QUERY_HISTORY.CLUSTER_NUMBER) for each multi-cluster warehouse in the profile. The window is at least 35 days, so a month-end is always inside. It starts at midnight and reaches back to the sizing window's first day, up to the 90-day live limit. The add-a-cluster advice now suggests a higher MAX_CLUSTER_COUNT, and prefills the review-only ALTER, only for a warehouse whose queries reached its current maximum in at least one hour, and it says in how many. A warehouse that never reached its cap reads **Size up or split (cluster cap not reached)**. Its queue is not held by the cluster cap (the usual causes are cluster start-up time or a few long queries), so the advice points at a size-up or a split and no cluster statement is generated. If the toggle is off, or the read fails (a red line shows the error), the advice says the cap was not checked and nothing is prefilled. Raising the maximum adds credits while queries queue, so no saving is booked. Single-cluster, Economy-policy and unknown-range rows are unchanged. In the owner's 2026-09-29 probe (14 days), WH_TRXS_TRANSFORM reached 4 of 4 clusters in 57 hours, WH_ALFA_TRANSFORM_PRD in 43 hours, and WH_TRXS_QUERY (3 of 3) in 1 hour. The other nine active multi-cluster warehouses stayed below their cap. Hours are counted by the hour a query starts in, so a long query counts once, and the help says so. In the selected row's evidence, Peak cluster and Hours at cap name the check window (last N days), and the row carries Cap check days. If SHOW WAREHOUSES lists none of the profile's warehouses, the page says the cluster ranges are unknown, not that no warehouse is multi-cluster. The Resize to picker now also offers X-Large and XX-Large, and for a capacity-pressure verdict (add a cluster, size up, size up or split) it opens one size up instead of on X-Small.
   - **Lowering an unreached cap is not offered.** Snowflake starts clusters above MIN_CLUSTER_COUNT only on demand, so with a minimum of 1 a lower cap saves nothing. The scale-in half of #38 is closed as $0.
-  - **Operations ▸ Warehouses ▸ Sizing & efficiency:** the Add a cluster KPI help now says the count does not check the cluster cap, and points at the check on Cost.
+  - **Operations ▸ Warehouses ▸ Sizing & efficiency:** the Add a cluster KPI help says the count does not check the cluster cap, and a caption under the table says how many Add a cluster rows on a multi-cluster warehouse were not checked, pointing at the check on Cost.
+  - **The other add-a-cluster advice** (the query advisor's overload finding on Operations ▸ Queries and in the Optimize fix queue, the Tonight task drill's overload line, and the Operations Concurrency-starved help, concurrency-peaks and live-path captions) now says to raise MAX_CLUSTER_COUNT on a multi-cluster warehouse only if its queries reach the current maximum, and points at Check cluster use. No new read.
+  - Heavy-toggle cost hints ("Last run took ...") now read in hours, minutes and seconds (2m 25s, not 145.0s) and ignore cached reruns.
   - Admin ▸ Canary: + insights.warehouse_cluster_use. The Cost ▸ Optimize live-scan budget goes up by 1 (this toggled read). The set of ACCOUNT_USAGE views it can reach is unchanged.
 - **Cost > Chargeback & AI: company all-in showback (#42 Part 1).**
   - Cost > Chargeback & AI: Company all-in showback (#42 Part 1). A new section below Department chargeback shows, per
@@ -38,32 +42,50 @@ the security scores and its environment grouping is information only; #42 Part 2
     (adjustment applied, AI at the AI rate) plus storage estimated at the Admin tier rates. Data transfer, Marketplace
     and org-currency adjustments are excluded, and the org rate card remains the invoice. The span is the Window's
     complete metered days only: today and the newest, possibly unfinished, daily-metering day never count. KPIs: All-
-    in total, Company-attributed share (UNKNOWN counts as a company row), Unattributed, and Cloud-services adjustment.
-    A "What the unattributed row holds" breakdown sums to the unattributed row. Coverage notes name any source that
-    starts late or ends early (its dollars stay unattributed), metering gaps, partial storage days and any negative
-    family residual. Under a named Company, only that company's row and its share of the account's all-in total show.
-    A failed read renders unavailable and missing objects render needs-setup. A capped or malformed frame renders
-    unavailable, never a clean or $0 state. The read is marts only and rides the existing Chargeback batch: no extra
-    round trip and no new ACCOUNT_USAGE read. Visibility matches the tab. The Spend & Attribution attribution help no
-    longer claims warehouse is the only company key anywhere; it now says "only in metering" and points at the
-    showback. _ATTRIBUTABLE_CATEGORIES is unchanged. The storage-tier panel now takes its rates from the shared
-    showback.storage_tier_rates, with identical behaviour. No migration.
+    in total, Company-attributed share, before adjustment (UNKNOWN counts as a company row), Unattributed, and Cloud-
+    services adjustment. Every share (the KPI, a named company's share and the table's SHARE_OF_TOTAL_PCT) is of the
+    spend before the cloud-services adjustment: the company rows plus the unattributed row, which add up to 100%. The
+    adjustment row has no share. Company warehouse dollars are metering before the adjustment, so on the all-in total
+    the share could pass 100% whenever the adjustment was larger than the unattributed remainder. The all-in total and
+    the tie-out stay on the billed basis. A "What the unattributed row holds" breakdown sums to the unattributed row.
+    Coverage notes name any source that starts late or ends early (its dollars stay unattributed), metering gaps,
+    partial storage days and any negative family residual. They also name an object-cost or Cortex Code fact whose
+    newest day in the span was loaded before that day was complete: those facts reload after the 06:45 CT metering
+    load, so part of that day sits on the unattributed row until they run. Under a named Company, only that company's
+    row and its share of the account's spend before the cloud-services adjustment show. With Company = UNKNOWN, an
+    empty table reads verified-clean only when every keyed source covers the whole span in full; otherwise a quiet
+    caption names the sources that do not. A failed read renders unavailable and missing objects render needs-setup. A
+    capped or malformed frame renders unavailable, never a clean or $0 state. The read is marts only and rides the
+    existing Chargeback batch: no extra round trip and no new ACCOUNT_USAGE read. Visibility matches the tab. The
+    Spend & Attribution attribution help no longer claims warehouse is the only company key anywhere; it now says
+    "only in metering" and points at the showback. _ATTRIBUTABLE_CATEGORIES is unchanged. The storage-tier panel now
+    takes its rates from the shared showback.storage_tier_rates, with identical behaviour. No migration. Admin ▸
+    Canary: + chargeback.company_allin_showback (core OVERWATCH marts, not a declared gap, so absence FAILs).
 - **Addressable $/mo counts confirmed unread maintenance (#35).**
   - The unread-maintenance lever from #30 now joins the de-duplicated Addressable $/mo on Cost ▸ Optimization &
     Savings ▸ Idle & sizing and on Proof ▸ Pipeline. It counts only objects that the Storage & waste scan confirmed
     against access history in your session, for the same Company, with the Database filter clear. Objects already
     booked on the Savings ledger are left out: that is the Book button's own dedupe, checked with one toggle-gated
-    ledger read that shares Proof's cache entry. A failed or row-capped ledger read keeps the lever out and shows
-    'unavailable'. The lever drops out when cached data is refreshed, or 1h after the Storage & waste panel was last
-    shown. A 'Levers counted / Not counted' line under each headline names every lever and why one is missing (scan
-    not run, another Company, Database-scoped, stale, or a failed shortlist, access-history or ledger read). Only the
-    top shortlisted objects are checked, so the lever is labelled a floor. Proof words its delta by lever (e.g. 'idle
-    timer + unread maintenance') and, when the lever is not counted, shows a 'Check unread maintenance' button that
-    opens Storage & waste. Pipeline rows for unread maintenance are OBJECT:<fqn> ('Stop maintenance on unread <fqn>'),
-    so they de-duplicate against a queued action on the same object and never against a warehouse. Storage & waste
-    says whether its confirmed objects were added and when they drop out. The stale caption 'storage / clustering plug
-    into the same rollup next' is fixed. App-only: no migration, no new SQL builder, and no ACCOUNT_USAGE or
-    reachable-scan change.
+    ledger read that shares Proof's cache entry. An object booked in another session after the scan keeps counting
+    until the scan is re-run (at most 1h); Storage & waste and both headlines' help say so. A failed or row-capped
+    ledger read keeps the lever out and shows 'unavailable'. The lever drops out when cached data is refreshed, when
+    the credit rate changes (its dollars were priced at the old rate), or 1h after the Storage & waste panel was last
+    shown. The hour is real time on an aware UTC clock, so a daylight-saving change neither stretches nor shortens it,
+    and a stamp more than 60 seconds in the future counts as stale. A 'Levers counted / Not counted' line under each
+    headline names every lever and why one is missing (scan not run, another Company, Database-scoped, stale, credit
+    rate changed, or a failed shortlist, access-history or ledger read). Only the top shortlisted objects are checked,
+    so the lever is labelled a floor. Proof words its delta by lever (e.g. 'idle timer + unread maintenance') and,
+    when the lever is not counted, shows a 'Check unread maintenance' button that opens Storage & waste. Proof's
+    headline follows the levers counted, as Cost ▸ Optimization & Savings' does. If the efficiency mart cannot be read
+    or has no metering in the window, it still shows the other counted levers' total (for example confirmed unread
+    maintenance), and its delta says the idle timer is not counted and why. It shows '—' only when no counted lever
+    has an item. Proof ▸ Pipeline's union of addressable and queued rows now builds the queue's timestamp columns with
+    a unit-typed NaT, keeping their dtype, instead of pandas' NA fill, which raised NumPy 2.5's 'generic unit'
+    DeprecationWarning (a future error that would stop the panel rendering). Pipeline rows for unread maintenance are
+    OBJECT:<fqn> ('Stop maintenance on unread <fqn>'), so they de-duplicate against a queued action on the same object
+    and never against a warehouse. Storage & waste says whether its confirmed objects were added and when they drop
+    out. The stale caption 'storage / clustering plug into the same rollup next' is fixed. App-only: no migration, no
+    new SQL builder, and no ACCOUNT_USAGE or reachable-scan change.
 
 ## 4.603.0 - Driver support floor on Security > Clients, honest timeout levers, probe-read failure texts (2026-09-30)
 
