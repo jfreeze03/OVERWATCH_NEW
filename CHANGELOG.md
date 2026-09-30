@@ -45,7 +45,8 @@ V162-V165 follows 4.602.0's rules (every new read is gated on its own migration;
   Guardrails view's column names differ -- send its column list. Run `SELECT SYSTEM$CLIENT_VERSION_INFO();` as the
   OVERWATCH_APP owner role (the probe ran as SNOW_ACCOUNTADMINS): if it fails there, the Clients support column
   honestly reads 'unavailable'. On Operations > Warehouses > statement-timeout posture, read the cap source for
-  WH_ALFA_ADMIN (1800 s expected at warehouse level) and WH_TRXS_TRANSFORM.
+  WH_ALFA_ADMIN (1800 s expected at warehouse level), WH_TRXS_TRANSFORM, WH_ALFA_QUERY and WH_ALFA_TRANSFORM_PRD
+  (the probes never read the last three's per-warehouse settings).
 - **Rebuild caution.** The full-rebuild bundle still re-applies V002's 300 s STATEMENT_TIMEOUT_IN_SECONDS on
   WH_ALFA_ADMIN; confirm the intended value (live: 1800 s) before any rebuild.
 
