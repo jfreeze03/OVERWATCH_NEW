@@ -91,17 +91,19 @@ def _render_ceiling(monkeypatch, result):
     return seen
 
 
-def _result(df, ok=True, error=""):
+def _result(df, ok=True, error="", error_kind=""):
     from types import SimpleNamespace
 
     import pandas as pd
     frame = pd.DataFrame() if df is None else df
     return SimpleNamespace(ok=ok, empty=frame.empty, df=frame, error=error,
+                           error_kind=error_kind if not ok else "",
                            usable=lambda: ok and not frame.empty)
 
 
 def test_a_failed_ceiling_read_is_unavailable_with_its_error(monkeypatch):
-    seen = _render_ceiling(monkeypatch, _result(None, ok=False, error="Insufficient privileges on WH_ALFA_ADMIN"))
+    seen = _render_ceiling(monkeypatch, _result(None, ok=False, error="Insufficient privileges on WH_ALFA_ADMIN",
+                                                error_kind="other"))
     assert seen["kpis"] == [] and seen["tables"] == []
     assert len(seen["empty"]) == 1
     kind, msg, detail = seen["empty"][0]
@@ -121,3 +123,42 @@ def test_the_ceiling_kpi_shows_the_value_in_force(monkeypatch):
     # ok but no row: a quiet note, never 'unavailable' and never a guessed value
     empty = _render_ceiling(monkeypatch, _result(None))
     assert [k for k, _m, _d in empty["empty"]] == ["no_data_yet"] and "5m" not in empty["empty"][0][1]
+
+
+def test_a_warehouse_value_of_zero_reads_as_the_seven_day_max(monkeypatch):
+    """Review R1-8: STATEMENT_TIMEOUT_IN_SECONDS = 0 is Snowflake's 7-day maximum, so the 'value in force' tile
+    shows the ENFORCED 168h and says why (stmt_timeout.enforced_s, the posture panel's account_value_kpi rule),
+    never '0s' (which reads as 'every read is killed at once'). The raw 0 stays in the SHOW table."""
+    import pandas as pd
+    row = pd.DataFrame([{"key": "STATEMENT_TIMEOUT_IN_SECONDS", "value": "0", "default": "172800",
+                         "level": "WAREHOUSE"}])
+    seen = _render_ceiling(monkeypatch, _result(row))
+    kpi = seen["kpis"][0][0]
+    assert kpi["value"] == "168h" and kpi["value"] != "0s"
+    assert kpi["delta"] == "set at: WAREHOUSE; 0 = 7-day max"
+    assert "It is set to 0, which Snowflake enforces as the 7-day maximum." in kpi["help"]
+    assert str(seen["tables"][0].iloc[0]["value"]) == "0"                # the raw row is shown verbatim
+    # a non-zero value keeps its plain delta and help; an unparseable value is the dash, never '0s'
+    row7 = row.assign(value="7200")
+    k7 = _render_ceiling(monkeypatch, _result(row7))["kpis"][0][0]
+    assert (k7["value"], k7["delta"]) == ("2h", "set at: WAREHOUSE") and "7-day" not in k7["help"]
+    kbad = _render_ceiling(monkeypatch, _result(row.assign(value="n/a")))["kpis"][0][0]
+    assert kbad["value"] == "—"
+
+
+def test_a_failed_ceiling_read_names_a_cause_only_when_the_error_says_so(monkeypatch):
+    """Review R1-14: the app warehouse is the app's own query_warehouse, so its owner role holds USAGE on it; a
+    timeout or other failure is not a privilege gap. Only Snowflake's 'does not exist or not authorized'
+    (error_kind 'absent') names a cause, worded as that error is (missing OR no privilege)."""
+    for kind in ("timeout", "other", "missing_column", "unknown_function"):
+        seen = _render_ceiling(monkeypatch, _result(None, ok=False, error=f"boom ({kind})", error_kind=kind))
+        ((state, msg, detail),) = seen["empty"]
+        assert state == "unavailable" and detail == f"boom ({kind})", kind
+        assert msg == "Could not read STATEMENT_TIMEOUT_IN_SECONDS on WH_ALFA_ADMIN, so the ceiling in force is unknown."
+        assert "MONITOR" not in msg and "USAGE" not in msg and "privilege" not in msg, kind
+    seen = _render_ceiling(monkeypatch, _result(None, ok=False, error="Warehouse 'WH_ALFA_ADMIN' does not exist "
+                                                "or not authorized.", error_kind="absent"))
+    ((state, msg, _detail),) = seen["empty"]
+    assert state == "unavailable" and "the ceiling in force is unknown" in msg
+    assert "(the warehouse is missing, or the app's owner role has no privilege on it)" in msg
+    assert "MONITOR/USAGE" not in msg

@@ -3842,9 +3842,11 @@ def _stmt_timeout_posture_panel(company: str, days: int) -> None:
                 "Timed out", help="Cancelled at any ceiling (warehouse, account, user, session, client or "
                                   "task), which can be lower than the effective cap shown."),
             "TIMEOUT_FIRED": st.column_config.TextColumn(
-                "Fired at", help="The ceiling those cancels fired at (from Snowflake's 'timeout of N "
-                                 "second(s)' message). 'below cap' = a user, session or client value "
-                                 "fired below this warehouse's effective cap."),
+                "Fired at", help="The ceiling those cancels fired at, lowest to highest (from Snowflake's "
+                                 "'timeout of N second(s)' message). 'below cap' = the lowest of them is "
+                                 "under this warehouse's effective cap: a user, session or client value "
+                                 "fired, or an earlier, lower warehouse value did (the cap shown is today's "
+                                 "value; the window reaches back 30-90 days)."),
             "WOULD_CANCEL_RUNS": st.column_config.NumberColumn("Suggested cap would cancel"),
         })
     if not tail.ok:

@@ -559,13 +559,17 @@ note, not SQL. Since v4.603 it also reads what a 1h cap would have cancelled
 on that one warehouse in the last 30 days: when that is any completed
 statement (or the read failed, so it is unknown) the ALTER is withheld until
 you tick the override. Take that seriously on hour-plus ETL warehouses
-(WH_TRXS_TRANSFORM ran 27 such statements in 30 days, 2026-09-29). The
-posture table's "Fired at" is the ceiling a timeout cancel actually fired at;
-"below cap" means a user, session or client value fired, not the warehouse's
-cap. "Managed compute" rows (COMPUTE_SERVICE_WH*) are Snowflake's
-serverless-task and upgrade pools: nothing to grant or set there. In the
-Emergency lever, a warehouse timeout of 0 is Snowflake's 7-day maximum, not
-"no cap", and a lower session/account value still applies. A manual savings
+(WH_TRXS_TRANSFORM ran 27 statements of 1h or more in 30 days, any status,
+2026-09-29; one was a timeout cancel, so the drawer, which counts completed
+statements only, shows at most 26). The posture table's "Fired at" is the
+ceiling a timeout cancel actually fired at; "below cap" means the lowest
+ceiling that fired is under the warehouse's effective cap: a user, session or
+client value fired, or an earlier, lower warehouse value did (the cap shown is
+today's value; the window reaches back 30-90 days). "Managed compute" rows
+(COMPUTE_SERVICE_WH*) are Snowflake's serverless-task and upgrade pools:
+nothing to grant or set there. In the Emergency lever, a warehouse timeout of
+0 is Snowflake's 7-day maximum, not "no cap", and a lower session/account
+value still applies. A manual savings
 verify is not prefilled when other booked changes share the measured window;
 split the measured change by hand.
 

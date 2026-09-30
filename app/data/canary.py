@@ -188,8 +188,13 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     # (the v4.601.1 QUOTA_ACCESS_BLOCK_HISTORY CREATED_ON class). Each is declared in EXPECTED_GAPS below, so
     # only a true absence reads GAP; an invalid identifier FAILs. Compile-only (the default) is cheap; the
     # executed probe of code_token_types pays the same window-flat ~22s secure-view scan as code_user_rollup
-    # (the builder has no window knob by design) against the live tier's 30s timeout, so a timeout there in
-    # execute mode is load, not drift -- compile-only is the drift check.
+    # (the builder has no window knob by design). On SiS no per-tier read timeout applies (ALTER SESSION is
+    # rejected and only the cortex tier rides statement_params: core.session), so that scan runs up to the
+    # app warehouse's STATEMENT_TIMEOUT_IN_SECONDS (read live on Admin > Performance); the live tier's 30s
+    # applies only off SiS (local dev), where a timeout in execute mode is load, not drift. Compile-only is
+    # the drift check. code_token_types also FAILs (not GAPs) on an account whose Cortex Code views predate the
+    # optional TOKENS_GRANULAR column: kept, because a GAP would hide a renamed or dropped column; the Admin
+    # canary panel names that one expected FAIL.
     ("cortex.guardrails_daily", lambda: cortex_sql.guardrails_daily(1)),
     ("cortex.code_token_types", cortex_sql.cortex_code_token_types),
     ("cortex.quota_access_block_history", lambda: cortex_sql.quota_access_block_history(1)),
