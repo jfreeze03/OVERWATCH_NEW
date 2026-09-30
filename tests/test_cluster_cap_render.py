@@ -160,9 +160,10 @@ def test_a_partly_listed_profile_names_its_unknown_warehouses(monkeypatch):
     frame = with_warehouse_settings(_profile("WH_SAT", "WH_GONE"), show)
     _check(frame, show)
     assert not seen["empty"]
+    # review r2 R2-3: the unlisted warehouse is NAMED, not only counted
     assert ("Cluster-cap check: 1 multi-cluster warehouse(s) in this profile, over the last 35 days. 1 "
-            "warehouse(s) in this profile are not in SHOW WAREHOUSES, so their cluster range is unknown and "
-            "they are not checked. HINT.") in fake.captions
+            "warehouse(s) in this profile are not in SHOW WAREHOUSES (WH_GONE), so their cluster range is unknown "
+            "and they are not checked. HINT.") in fake.captions
     assert [t[0] for t in fake.toggles] == ["sizing_cluster_check"]
     # (a) the toggle is off: nothing is read and the page says the cap was not checked
     assert not seen["runs"]
@@ -172,8 +173,8 @@ def test_a_partly_listed_profile_names_its_unknown_warehouses(monkeypatch):
     fake2, _seen2 = _patch(monkeypatch)
     show2 = _show({"WH_ONE": 1})
     _check(with_warehouse_settings(_profile("WH_ONE", "WH_GONE"), show2), show2)
-    assert (_NO_CAP_CAPTION + " 1 warehouse(s) in this profile are not in SHOW WAREHOUSES, so their cluster "
-            "range is unknown and they are not checked.") in fake2.captions
+    assert (_NO_CAP_CAPTION + " 1 warehouse(s) in this profile are not in SHOW WAREHOUSES (WH_GONE), so their "
+            "cluster range is unknown and they are not checked.") in fake2.captions
     assert not fake2.toggles
 
 

@@ -9,7 +9,9 @@ Locks the semantics the string locks in tests/test_policy_coverage.py cannot (re
 - R1-20: tag-domain rows never leak into the column-level totals, the database count or the inventory;
 - R1-24: the not-ACTIVE count is computed in SQL (masking rows only, status upper-cased), not a constant;
 - R1-2: MASKING_TAGS counts distinct tags: one tag carrying two policies counts once;
-- R1-1: the grouping's MASKED_FAMILY_DATABASES counts only a family's databases with column masking.
+- R1-1: the grouping's MASKED_FAMILY_DATABASES counts only a family's databases with column masking;
+- R2-1: on the page, a tag-only database is listed as having no column-level masking reference, with the tag
+  qualifier and the lag line, and nothing says 'no masked column'.
 """
 
 from __future__ import annotations
@@ -192,20 +194,24 @@ def test_no_masking_still_returns_the_totals_row(db):
     assert pc.database_inventory(out).empty
 
 
+# EDW_SAN is masked through a tag only; MART_A is alone in its family.
+_PARITY_ROWS = [
+    _mask("EDW_PRD", "CORE", "CUST", "SSN"), _mask("EDW_PRD", "CORE", "CUST", "DOB"),
+    _mask("EDW_DEV", "CORE", "CUST", "SSN"), _mask("EDW_DEV", "CORE", "CUST", "DOB"),
+    _mask("EDW_SIT", "CORE", "CUST", "SSN"),
+    _mask("EDW_PRD", "CORE", "ACCT", "TIN"), _mask("EDW_DEV", "CORE", "ACCT", "TIN"),
+    _mask("EDW_DEV", "CORE", "ACCT", "ACCTNO"),
+    *(_mask(d, "CORE", "ADDR", "ZIP") for d in ("EDW_PRD", "EDW_DEV", "EDW_SIT")),
+    _mask("EDW_SAN", "TAGS", "PII", None, domain="TAG"),
+    _mask("MART_A", "CORE", "CUST", "SSN"),
+]
+
+
 def test_parity_counts_only_masked_family_databases(db):
     """R1-1: EDW_SAN exists with tag masking only, so it is no family database here: MASKED_FAMILY_DATABASES is 3
     and EDW_SAN is in no NO_MASKING_REF_IN (the page lists it from SHOW DATABASES instead). MART_A is alone in its
     family, so nothing of it is grouped."""
-    _seed(db, [
-        _mask("EDW_PRD", "CORE", "CUST", "SSN"), _mask("EDW_PRD", "CORE", "CUST", "DOB"),
-        _mask("EDW_DEV", "CORE", "CUST", "SSN"), _mask("EDW_DEV", "CORE", "CUST", "DOB"),
-        _mask("EDW_SIT", "CORE", "CUST", "SSN"),
-        _mask("EDW_PRD", "CORE", "ACCT", "TIN"), _mask("EDW_DEV", "CORE", "ACCT", "TIN"),
-        _mask("EDW_DEV", "CORE", "ACCT", "ACCTNO"),
-        *(_mask(d, "CORE", "ADDR", "ZIP") for d in ("EDW_PRD", "EDW_DEV", "EDW_SIT")),
-        _mask("EDW_SAN", "TAGS", "PII", None, domain="TAG"),
-        _mask("MART_A", "CORE", "CUST", "SSN"),
-    ])
+    _seed(db, _PARITY_ROWS)
     out = _query(db, security_sql.masking_environment_parity())
     view = pc.parity_view(out)
     assert list(view.columns) == list(pc.PARITY_COLUMNS)
@@ -223,3 +229,32 @@ def test_parity_counts_only_masked_family_databases(db):
     masked = ["EDW_PRD", "EDW_DEV", "EDW_SIT", "MART_A"]
     assert pc.unmasked_family_databases(masked, [*masked, "EDW_SAN", "MART_B"]) == (
         pc.FamilySiblings("EDW", ("EDW_SAN",)), pc.FamilySiblings("MART", ("MART_B",)))
+
+
+@pytest.mark.parametrize("rows", [_PARITY_ROWS, [_PARITY_ROWS[0], _PARITY_ROWS[-2]]],
+                         ids=["grouped", "nothing-to-group"])
+def test_a_tag_only_database_is_never_called_unmasked_on_the_page(db, monkeypatch, rows):
+    """Review R2-1, on both render paths (the grouping table, and the empty grouping when only EDW_PRD has column
+    masking): the real builder output for a tag-only EDW_SAN, with the account's masking tags counted, reaches
+    the page's _render_policy_coverage with both toggles on. EDW_SAN is listed as having no COLUMN-LEVEL masking
+    reference, the tag qualifier and the lag line render, and nothing on the panel says 'no masked column'."""
+    from tests.test_policy_coverage import _ok, _patch
+
+    _seed(db, rows)
+    cov_df = _query(db, security_sql.data_policy_coverage())
+    cov = pc.summarize_policy_coverage(cov_df)
+    assert cov is not None and cov.masking_tags > 0 and cov.masked_columns > 0
+    par_df = _query(db, security_sql.masking_environment_parity())
+    assert par_df.empty is (len(rows) == 2)
+    show = pd.DataFrame({"name": ["EDW_PRD", "EDW_DEV", "EDW_SIT", "EDW_SAN", "MART_A", "MART_B"]})
+    sec, fake, seen = _patch(monkeypatch, {"sec_policy_cov": _ok(cov_df), "sec_policy_parity": _ok(par_df),
+                                           "sec_policy_parity_dbs": _ok(show)})
+    sec._render_policy_coverage()
+    assert [k for k, *_ in seen["runs"]] == ["sec_policy_cov", "sec_policy_parity", "sec_policy_parity_dbs"]
+    caps = fake.text("caption")
+    edw = [ln for ln in caps.splitlines() if ln.startswith("EDW: ")]
+    assert len(edw) == 1 and "EDW_SAN" in edw[0]
+    assert edw[0].startswith("EDW: no column-level masking reference in ")
+    assert pc.SIBLINGS_LEAD in caps and pc.SIBLINGS_TAG_QUALIFIER in caps and pc.SIBLINGS_LAG in caps
+    shown = "\n".join([caps, fake.text("markdown"), *(msg for _kind, msg in seen["empty"])])
+    assert "no masked column" not in shown

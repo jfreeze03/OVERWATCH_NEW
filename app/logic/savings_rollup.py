@@ -125,6 +125,11 @@ UNREAD_HANDOFF_MAX_AGE_SEC = 3600
 # R1-17: the stamp and the reader's 'now' are aware UTC (formulas.utc_now, passed in by the UI), so the age never
 # jumps at a DST change; a stamp more than this far in the future (a clock step) is stale, never fresh.
 UNREAD_HANDOFF_MAX_SKEW_SEC = 60
+# Review r2 R2-6 / R2-9: the Savings-ledger read that leaves booked objects out (Storage & waste, key
+# booked_unread_ledger) is on the 'recent' tier, so it can be up to this old when the scan runs: set equal to
+# app.core.query.CACHE_TTLS["recent"] (test-pinned, with the read's tier). No cache salt sees another session's
+# booking, so a re-run inside that time still counts the object, and its stamp lives UNREAD_HANDOFF_MAX_AGE_SEC more.
+BOOKED_LEDGER_CACHE_SEC = 300
 UNREAD_CONFIRMED = "confirmed"
 UNREAD_CLEAN = "clean"
 UNREAD_CONFIRM_FAILED = "confirm_failed"
@@ -135,6 +140,8 @@ _UNREAD_STATUSES = frozenset({UNREAD_CONFIRMED, UNREAD_CLEAN, UNREAD_CONFIRM_FAI
 LEVER_LABEL = {"IDLE": "idle timer", "RESIZE": "right-sizing", "UNREAD_MAINT": "unread maintenance"}
 
 _MAX_AGE = humanize_duration(UNREAD_HANDOFF_MAX_AGE_SEC)
+_LEDGER_CACHE = humanize_duration(BOOKED_LEDGER_CACHE_SEC)
+_MAX_ELSEWHERE = humanize_duration(UNREAD_HANDOFF_MAX_AGE_SEC + BOOKED_LEDGER_CACHE_SEC)
 # why the lever is absent ({where} = the call site's path to Storage & waste)
 R_NOT_RUN = "not checked this session: run the unread-maintenance scan in {where}"
 R_COMPANY = "last checked for {handoff_company}, not {company}: re-run the scan in {where}"
@@ -150,10 +157,18 @@ R_RATE = ("the credit rate changed since the last check, which priced its object
 # qualifiers on a counted lever
 N_FLOOR = "only the top {checked:,} shortlisted objects were checked, so this is a floor"
 N_BOOKED = "{n:,} already booked on the Savings ledger left out"
-# R1-16: the booked set is read when the scan runs; a same-session booking updates it in that run, but no cache
-# salt can see another session's INSERT, so that case is disclosed (the Storage & waste line + both headlines' help)
-N_ELSEWHERE = ("An object booked in another session after this scan keeps counting here until the scan is re-run "
-               "(at most " + _MAX_AGE + ").")
+# R1-16: the booked set comes from a 'recent'-tier ledger read when the scan runs, so it can be up to
+# BOOKED_LEDGER_CACHE_SEC old (R2-6 / R2-9); a same-session booking updates it in that run, but no cache salt can see
+# another session's INSERT, so that case is disclosed (the Storage & waste line + both headlines' help): a re-run
+# inside the cache time still counts the object and re-stamps the handoff, so it counts until the scan is re-run at
+# least that long after the booking, and at most the handoff's hour plus the cache time after it.
+N_ELSEWHERE = ("An object booked in another session keeps counting here until the scan is re-run at least "
+               + _LEDGER_CACHE + " after that booking (the Savings-ledger read that leaves booked objects out is "
+               "cached for up to " + _LEDGER_CACHE + "): at most " + _MAX_ELSEWHERE + " after the booking.")
+# The same rule in both Addressable $/mo headlines' help (Cost ▸ Optimization & Savings, Proof ▸ Pipeline).
+H_BOOKED = ("less any already booked on the Savings ledger as of the scan's ledger read, which is cached for up to "
+            + _LEDGER_CACHE + " (an object booked in another session keeps counting until the scan is re-run at "
+            "least " + _LEDGER_CACHE + " after that booking: at most " + _MAX_ELSEWHERE + ")")
 # Storage & waste, when the booked-objects read failed (rendered as 'unavailable')
 S_LEDGER_UNAVAILABLE = ("The Savings ledger could not be read, so confirmed objects are not added to Addressable "
                         "$/mo (objects already booked could not be left out).")

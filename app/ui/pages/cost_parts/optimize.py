@@ -70,6 +70,7 @@ from app.logic.monitors import (
     unmonitored_warehouses,
 )
 from app.logic.savings_rollup import (
+    H_BOOKED,
     S_LEDGER_UNAVAILABLE,
     UNREAD_CLEAN,
     UNREAD_CONFIRM_FAILED,
@@ -99,14 +100,17 @@ from app.logic.sizing import (
     cluster_check_label,
     cluster_check_targets,
     cluster_range_coverage,
+    cluster_range_unknown,
     cluster_use_summary,
     normalize_size,
+    picker_size_label,
     price_per_run_bounds,
     resize_picker_default,
     scale_out_plan,
     simulate_scenario,
     size_recommendations,
     sizing_summary,
+    unknown_range_sentence,
     with_cluster_use,
 )
 from app.logic.unread_maintenance import (
@@ -211,7 +215,7 @@ def _cluster_cap_check(sizing_df: pd.DataFrame, whs_res, sizing_days: int, compa
                     "check cannot run.",
                     detail=str(whs_res.error or "").strip())
         return sizing_df
-    known, unknown = cluster_range_coverage(sizing_df)
+    known, _unknown = cluster_range_coverage(sizing_df)
     if not known:
         # An empty SHOW (or one listing none of these warehouses) is an ABSENT input, not a clean answer:
         # zero rows are never red (house rule 8), and they are never "no multi-cluster warehouse" either.
@@ -220,8 +224,8 @@ def _cluster_cap_check(sizing_df: pd.DataFrame, whs_res, sizing_days: int, compa
                     "renamed, or not visible to the app's role), so the cluster ranges are unknown and the "
                     "cluster-cap check cannot run.")
         return sizing_df
-    unknown_txt = (f" {unknown} warehouse(s) in this profile are not in SHOW WAREHOUSES, so their cluster "
-                   "range is unknown and they are not checked." if unknown else "")
+    # review r2 R2-3: a partly-listed profile NAMES the warehouses SHOW did not list (it only counted them)
+    unknown_txt = unknown_range_sentence(cluster_range_unknown(sizing_df))
     if not targets:
         st.caption("No warehouse in this profile has MAX_CLUSTER_COUNT above 1 in SHOW WAREHOUSES, so "
                    "there is no cluster cap to check." + unknown_txt)
@@ -887,79 +891,85 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 # Review r1 R1-4: a capacity-pressure verdict opens on one size UP (its captions call this the
                 # size-up route), never on a downsize that projects a saving; the options are every size
                 # resize_fix accepts (they stopped at LARGE, so an XLARGE warehouse had no size-up option).
+                # Review r2 R2-2: where no size up is offered (the largest option, a larger warehouse, or an
+                # unknown size) the picker opens with nothing picked (index None) and the note says why: no
+                # statement, saving or Execute until the operator picks a size.
                 _rs_idx, _rs_note = resize_picker_default(srow.get("RECOMMENDATION"), srow.get("CURRENT_SIZE"),
                                                           remediation.RESIZE_SIZES)
                 target_size = st.selectbox("Resize to", list(remediation.RESIZE_SIZES), index=_rs_idx,
-                                           key=f"sizing_to_{srow['WAREHOUSE_NAME']}")
+                                           key=f"sizing_to_{srow['WAREHOUSE_NAME']}", placeholder="Pick a size")
                 if _rs_note:
                     st.caption(_rs_note)
-                stmt_sz = remediation.resize_fix(str(srow["WAREHOUSE_NAME"]), target_size)
-                st.code(stmt_sz, language="sql")
-                # Round-3 hunt: the booked saving must follow the ACTUAL chosen target vs
-                # the current size (credits ~halve per size step down), NOT a fixed
-                # 0.5*MONTHLY tied only to the RECOMMENDATION string — which booked a
-                # phantom saving even for a same-size or larger pick. Book a positive
-                # ESTIMATED_USD only on a confirmed downsize.
-                est_sz = 0.0
-                _cur_size = normalize_size(srow.get("CURRENT_SIZE"))
-                _tgt_norm = normalize_size(target_size)
-                if _cur_size and _tgt_norm and _tgt_norm != _cur_size:
-                    _steps = SIZE_ORDER.index(_tgt_norm) - SIZE_ORDER.index(_cur_size)
-                    if _steps < 0:  # a genuine downsize
-                        # Book the CONSERVATIVE idle-scaled saving the rest of the tab uses, NOT the
-                        # whole bill rate-scaled: on a smaller warehouse a compute-bound query runs
-                        # ~2x longer (cost-neutral), so only the IDLE share reliably shrinks when the
-                        # per-hour rate halves (sizing.py rec#13). `_monthly * (1 - 2**steps)` booked
-                        # the optimistic everything-halves ceiling -- ~12x too high for a busy, low-idle
-                        # warehouse. Scale IDLE only, matching POTENTIAL_MONTHLY_SAVING_USD (bug-hunt
-                        # 2026-08-30).
-                        _idle = safe_float(srow.get("IDLE_MONTHLY_USD"))
-                        est_sz = round(max(0.0, _idle * (1.0 - 2.0 ** _steps)), 2)
-                        st.caption(f"Projected saving ~${est_sz:,.0f}/mo resizing {_cur_size} → "
-                                   f"{_tgt_norm} (only idle-hour credits reliably shrink; busy "
-                                   "compute-bound work runs ~2x longer on a smaller size). The daily "
-                                   "change scan books this resize to the Savings ledger and settles it "
-                                   "against 14 days of measured actuals — the app logs the estimate to "
-                                   "REMEDIATION_LOG instead of booking a second ledger row.")
-                    else:  # an upsize is a cost increase — never a booked saving
-                        st.caption(f"Resizing UP {_cur_size} → {_tgt_norm} raises cost — no saving booked.")
-                elif not _cur_size:
-                    st.caption("Current warehouse size unavailable (SHOW WAREHOUSES) — no saving "
-                               "booked automatically; verify any saving on the Savings ledger.")
-                blast_radius(str(srow["WAREHOUSE_NAME"]), _PAGE)
-                from app.logic import remediation as _remediation
-                st.caption(_remediation.reverse_hint("RESIZE", str(srow["WAREHOUSE_NAME"])))
-                if (confirm_gate(str(srow["WAREHOUSE_NAME"]), "Execute resize + log", key="sizing",
-                                 prompt="Type the warehouse name to confirm resize", object_name=True)
-                        and write_gate_open("sizing")):
-                    ok, msg = execute_statement(stmt_sz, page=_PAGE)
-                    execute_statement(
-                        f"INSERT INTO {core_object('REMEDIATION_LOG')} "
-                        "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, EST_MONTHLY_SAVINGS_USD, STATUS, RESULT_NOTE, EXECUTED_BY) "
-                        f"SELECT 'RESIZE', {sql_literal(str(srow['WAREHOUSE_NAME']))}, {sql_literal(stmt_sz)}, "
-                        f"{sql_number(est_sz)}, {sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}, {identity_sql()}",
-                        page=_PAGE)
-                    if ok:
-                        from app.ui.components import log_ui_event
-                        log_ui_event("remediation_exec", page=_PAGE)
-                    # Next-Fifty #5: the change scan (V038/V145) books a resize from XSMALL..4XLARGE and
-                    # settles it on measured actuals, so no manual row for those (it was a double-booking).
-                    # From a size the scan's map can't rank (5X/6X-LARGE) the app still books it.
-                    _sz_autobooked = remediation.autobook_books_change("RESIZE", _cur_size)
-                    if ok and est_sz > 0 and not _sz_autobooked:
+                if target_size is not None:       # R2-2: nothing picked = no statement, saving or Execute
+                    stmt_sz = remediation.resize_fix(str(srow["WAREHOUSE_NAME"]), target_size)
+                    st.code(stmt_sz, language="sql")
+                    # Round-3 hunt: the booked saving must follow the ACTUAL chosen target vs
+                    # the current size (credits ~halve per size step down), NOT a fixed
+                    # 0.5*MONTHLY tied only to the RECOMMENDATION string — which booked a
+                    # phantom saving even for a same-size or larger pick. Book a positive
+                    # ESTIMATED_USD only on a confirmed downsize.
+                    est_sz = 0.0
+                    _cur_size = normalize_size(srow.get("CURRENT_SIZE"))
+                    _cur_label = picker_size_label(_cur_size, remediation.RESIZE_SIZES)
+                    _tgt_norm = normalize_size(target_size)
+                    if _cur_size and _tgt_norm and _tgt_norm != _cur_size:
+                        _steps = SIZE_ORDER.index(_tgt_norm) - SIZE_ORDER.index(_cur_size)
+                        if _steps < 0:  # a genuine downsize
+                            # Book the CONSERVATIVE idle-scaled saving the rest of the tab uses, NOT the
+                            # whole bill rate-scaled: on a smaller warehouse a compute-bound query runs
+                            # ~2x longer (cost-neutral), so only the IDLE share reliably shrinks when the
+                            # per-hour rate halves (sizing.py rec#13). `_monthly * (1 - 2**steps)` booked
+                            # the optimistic everything-halves ceiling -- ~12x too high for a busy, low-idle
+                            # warehouse. Scale IDLE only, matching POTENTIAL_MONTHLY_SAVING_USD (bug-hunt
+                            # 2026-08-30).
+                            _idle = safe_float(srow.get("IDLE_MONTHLY_USD"))
+                            est_sz = round(max(0.0, _idle * (1.0 - 2.0 ** _steps)), 2)
+                            st.caption(f"Projected saving ~${est_sz:,.0f}/mo resizing {_cur_label} → "
+                                       f"{target_size} (only idle-hour credits reliably shrink; busy "
+                                       "compute-bound work runs ~2x longer on a smaller size). The daily "
+                                       "change scan books this resize to the Savings ledger and settles it "
+                                       "against 14 days of measured actuals — the app logs the estimate to "
+                                       "REMEDIATION_LOG instead of booking a second ledger row.")
+                        else:  # an upsize is a cost increase — never a booked saving
+                            st.caption(f"Resizing UP {_cur_label} → {target_size} raises cost — no saving "
+                                       "booked.")
+                    elif not _cur_size:
+                        st.caption("Current warehouse size unavailable (SHOW WAREHOUSES) — no saving "
+                                   "booked automatically; verify any saving on the Savings ledger.")
+                    blast_radius(str(srow["WAREHOUSE_NAME"]), _PAGE)
+                    from app.logic import remediation as _remediation
+                    st.caption(_remediation.reverse_hint("RESIZE", str(srow["WAREHOUSE_NAME"])))
+                    if (confirm_gate(str(srow["WAREHOUSE_NAME"]), "Execute resize + log", key="sizing",
+                                     prompt="Type the warehouse name to confirm resize", object_name=True)
+                            and write_gate_open("sizing")):
+                        ok, msg = execute_statement(stmt_sz, page=_PAGE)
                         execute_statement(
-                            f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
-                            "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES, FINDING_TYPE, TARGET_OBJECT) "
-                            f"SELECT {sql_literal('Resize ' + str(srow['WAREHOUSE_NAME']) + ' to ' + target_size)}, "
-                            f"'ESTIMATED', {sql_number(est_sz)}, {sql_literal(stmt_sz)}, "
-                            "'Booked from sizing simulator; verify with a proof run on the Savings ledger.', "
-                            f"'RESIZE', {sql_literal(str(srow['WAREHOUSE_NAME']))}", page=_PAGE)
-                    stamp_write("sizing", ok)  # C48
-                    # r-ux: name the object + effect (was generic "Statement executed.")
-                    notify(ok, msg if not ok else
-                           f"Resized {srow['WAREHOUSE_NAME']} to {target_size}; "
-                           + ("the daily change scan books and settles the measured saving." if _sz_autobooked
-                              else "booked an estimated saving — verify it on the Savings ledger."))
+                            f"INSERT INTO {core_object('REMEDIATION_LOG')} "
+                            "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, EST_MONTHLY_SAVINGS_USD, STATUS, RESULT_NOTE, EXECUTED_BY) "
+                            f"SELECT 'RESIZE', {sql_literal(str(srow['WAREHOUSE_NAME']))}, {sql_literal(stmt_sz)}, "
+                            f"{sql_number(est_sz)}, {sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}, {identity_sql()}",
+                            page=_PAGE)
+                        if ok:
+                            from app.ui.components import log_ui_event
+                            log_ui_event("remediation_exec", page=_PAGE)
+                        # Next-Fifty #5: the change scan (V038/V145) books a resize from XSMALL..4XLARGE and
+                        # settles it on measured actuals, so no manual row for those (it was a double-booking).
+                        # From a size the scan's map can't rank (5X/6X-LARGE) the app still books it.
+                        _sz_autobooked = remediation.autobook_books_change("RESIZE", _cur_size)
+                        if ok and est_sz > 0 and not _sz_autobooked:
+                            execute_statement(
+                                f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
+                                "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES, FINDING_TYPE, TARGET_OBJECT) "
+                                f"SELECT {sql_literal('Resize ' + str(srow['WAREHOUSE_NAME']) + ' to ' + target_size)}, "
+                                f"'ESTIMATED', {sql_number(est_sz)}, {sql_literal(stmt_sz)}, "
+                                "'Booked from sizing simulator; verify with a proof run on the Savings ledger.', "
+                                f"'RESIZE', {sql_literal(str(srow['WAREHOUSE_NAME']))}", page=_PAGE)
+                        stamp_write("sizing", ok)  # C48
+                        # r-ux: name the object + effect (was generic "Statement executed.")
+                        notify(ok, msg if not ok else
+                               f"Resized {srow['WAREHOUSE_NAME']} to {target_size}; "
+                               + ("the daily change scan books and settles the measured saving." if _sz_autobooked
+                                  else "booked an estimated saving — verify it on the Savings ledger."))
             _whatif_panel(sized, sizing_days, rate)
             result_caption(prof_res)
 
@@ -1079,10 +1089,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                  "help": "The levers named just below, de-duplicated: a warehouse counted for both idle and "
                          "resize counts once (the larger wins). Idle and right-sizing are measured over this "
                          "window. Unread maintenance is ESTIMATED from the last 30 complete days of maintenance "
-                         "on objects confirmed unread in Storage & waste this session, less any already booked "
-                         "on the Savings ledger when that scan ran (an object booked in another session since "
-                         "then keeps counting until the scan is re-run); an object you stopped without booking "
-                         "keeps counting until those 30 days roll off."},
+                         "on objects confirmed unread in Storage & waste this session, " + H_BOOKED + "; an "
+                         "object you stopped without booking keeps counting until those 30 days roll off."},
                 {"label": "Opportunities", "value": str(len(_roll.items))},
                 {"label": "Overlaps removed", "value": str(len(_roll.dropped)),
                  "help": "Idle/resize double-counts on the same warehouse dropped from the total."},

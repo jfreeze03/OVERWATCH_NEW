@@ -67,6 +67,7 @@ from app.logic.proof import (
     settle_schedule,
 )
 from app.logic.savings_rollup import (
+    H_BOOKED,
     UNREAD_HANDOFF_KEY,
     idle_opportunities,
     lever_basis,
@@ -1017,11 +1018,9 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
                          "included (the same warehouse counts once, the larger wins); and unread maintenance only "
                          "when Cost ▸ Optimization & Savings ▸ Storage & waste confirmed it against access history "
                          "this session, for this Company with the Database filter clear (the last 30 complete "
-                         "days of maintenance, less objects already booked on the Savings ledger when that scan "
-                         "ran; one booked in another session since then keeps counting until the scan is "
-                         "re-run). When the efficiency mart cannot be read or has no metering, the figure counts "
-                         "only the other levers and the delta says the idle timer is missing. The caption below "
-                         "names the levers counted. Estimates, not verified savings."}
+                         "days of maintenance, " + H_BOOKED + "). When the efficiency mart cannot be read or has "
+                         "no metering, the figure counts only the other levers and the delta says the idle timer "
+                         "is missing. The caption below names the levers counted. Estimates, not verified savings."}
     kpi_row([
         _addr,
         ({"label": "Queued work $/mo", "value": format_usd(_qt["monthly_usd"]),

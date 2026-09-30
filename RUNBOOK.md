@@ -306,7 +306,11 @@ Admin → Settings, never in code.
   midnight N days back, and its hours are the hours queries STARTED in.
   An empty SHOW WAREHOUSES reads "cluster ranges unknown", not "no
   multi-cluster warehouse"; the Resize picker opens one size up on a
-  capacity-pressure verdict); toggled scans: repeat-query
+  capacity-pressure verdict where the picker offers one, and otherwise
+  (XXLARGE, larger than every option, or an unknown size) with no size
+  picked, a note saying why, and no statement until a size is picked;
+  a partly-listed profile names the warehouses SHOW did not list);
+  toggled scans: repeat-query
   fingerprints (≥10 identical runs = caching/materialization candidates),
   query efficiency (families scanning >80% of ≥100-partition tables;
   zero-scan share trend), storage waste (Time-Travel/failsafe-heavy tables,
@@ -473,10 +477,14 @@ can open it, including EXECUTIVE. Old Decision Studio links, saved views and
     de-duplicated by entity. A caption names the levers counted and why any
     is missing. If the efficiency mart cannot be read (or has no metering in
     the window), the headline still totals the other counted levers and its
-    delta says the idle timer is not counted; it is a dash only when nothing
-    is counted. Unread maintenance drops out on Refresh, a credit-rate change,
-    or 1h after Storage & waste was last shown; an object booked in another
-    session keeps counting until that scan is re-run.
+    delta says the idle timer is not counted; it is a dash only when no
+    counted lever has an item (a lever counted at $0, such as a clean
+    unread-maintenance scan or one whose objects are all already booked,
+    still leaves the dash). Unread maintenance drops out on Refresh, a
+    credit-rate change, or 1h after Storage & waste was last shown. An object
+    booked in another session keeps counting until the scan is re-run at
+    least 5m after that booking (the Savings-ledger read that leaves booked
+    objects out is cached for up to 5m): at most 1h 5m after the booking.
   - A projection whose sliders default to MEASURED adoption and realization
     ("Reset to measured"). It runs in a fragment, so slider moves cost no
     reads. Verified savings never enter it.

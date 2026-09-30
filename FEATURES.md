@@ -108,7 +108,7 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 | Per-route company delivery filters (Teams = ALFA-only for now) | alert sender v4 (V034) |
 | Measured proc costs: $/call leaderboard, price-a-CALL/session, trend-one-procedure by name | Cost -> Unit costs |
 | Client driver/version inventory with BEHIND flags + Snowflake's support floor (UNSUPPORTED / nearing end of support, yours vs Snowflake-run; #34) | Security -> Clients |
-| Masking / row-access / projection / aggregation policy coverage per database, tag-based masking, same-name environment grouping with each family's databases that have no masked column (#43) | Security -> Exposure |
+| Masking / row-access / projection / aggregation policy coverage per database, tag-based masking, same-name environment grouping with each family's databases that have no column-level masking reference (#43) | Security -> Exposure |
 | Delivery SLOs, alert fatigue, acceptance funnel, per-page cache-hit telemetry | Alerts -> History, Admin -> Performance |
 | Flyway-readiness (ledger panel + adoption runbook) | Admin, docs/FLYWAY_ADOPTION.md |
 | Partial-success batching (one bad member no longer drags siblings serial) | app-wide (v4.20) |

@@ -11,7 +11,9 @@ whose peak was cluster 3.
   (d) no multi-cluster warehouse in SHOW: the no-cap caption and no toggle at all;
   (e) v4.604.0 review r1: an EMPTY SHOW says the cluster ranges are unknown (R1-10); a Small below-cap
       warehouse's resize picker opens on MEDIUM, a size-up (R1-4); the selected row's cluster columns name
-      the check window (R1-9).
+      the check window (R1-9: the rendered headers and help, review r2 R2-8);
+  (f) review r2 R2-2: a 2X-Large or 3X-Large below-cap warehouse (no size up in the picker) opens the picker on
+      nothing, with no statement, saving or Execute until a size is picked.
 
 The shared shaped harness stubs SHOW WAREHOUSES as an empty frame, so only an injected frame reaches the gate
 (tests/test_prc_c1_shaped.py renders that default). The floor venv skips these (_APPTEST_BUTTONGROUP_OK).
@@ -21,6 +23,8 @@ tests/test_cluster_cap_gate.py locks the verdicts, the pure helpers behind (e)'s
 labels, and the page wiring by source."""
 
 from __future__ import annotations
+
+import json
 
 import pandas as pd
 import pytest
@@ -269,8 +273,38 @@ def test_a_small_below_cap_warehouse_opens_the_resize_on_a_size_up(monkeypatch):
     assert "ALTER WAREHOUSE WH_LOW SET WAREHOUSE_SIZE = 'MEDIUM';" in code
     assert "Resizing UP SMALL → MEDIUM raises cost — no saving booked." in text
     assert "Projected saving" not in text
-    evidence = [df.value for df in at.dataframe
+    evidence = [df for df in at.dataframe
                 if isinstance(df.value, pd.DataFrame) and "CLUSTER_CHECK_DAYS" in df.value.columns
                 and "RATIONALE" in df.value.columns and len(df.value) == 1]
-    assert evidence and evidence[0].iloc[0]["CLUSTER_CHECK_DAYS"] == 35
-    assert evidence[0].iloc[0]["PEAK_CLUSTERS"] == 3
+    assert evidence and evidence[0].value.iloc[0]["CLUSTER_CHECK_DAYS"] == 35
+    assert evidence[0].value.iloc[0]["PEAK_CLUSTERS"] == 3
+    # review r2 R2-8: the RENDERED headers name the check window, with the not-the-sizing-window help (a
+    # `_cd = None` or a dropped help passed every test before)
+    cfg = json.loads(evidence[0].proto.columns)
+    assert cfg["PEAK_CLUSTERS"]["label"] == "Peak cluster (last 35 days)"
+    assert cfg["AT_CAP_HOUR_COUNT"]["label"] == "Hours at cap (last 35 days)"
+    for col in ("PEAK_CLUSTERS", "AT_CAP_HOUR_COUNT"):
+        assert "not the sizing window" in cfg[col]["help"], col
+
+
+@_SKIP
+@pytest.mark.parametrize(("size", "note"), [
+    ("3X-Large", "This warehouse (3XLARGE) is larger than every size offered here, so every option is a downsize"),
+    ("2X-Large", "The next size up from XXLARGE is not offered here, so every option is this size (no change)"),
+])
+def test_no_size_up_to_offer_opens_the_picker_on_nothing(monkeypatch, size, note):
+    """Review r2 R2-2 / R2-7: a below-cap warehouse with no size up in the picker opened on XXLARGE — for a
+    3X-Large warehouse a DOWNSIZE that showed and logged a projected saving under a 'size-up route' caption, for
+    a 2X-Large one a no-op. It now opens with nothing picked: the note says why, and no statement, saving or
+    Execute renders until the operator picks a size."""
+    at, _seen = _page(monkeypatch, check=True, select="WH_LOW", size=size)
+    pick = next(s for s in at.selectbox if s.key == "sizing_to_WH_LOW")
+    assert pick.value is None
+    assert list(pick.options) == ["XSMALL", "SMALL", "MEDIUM", "LARGE", "XLARGE", "XXLARGE"]
+    code, text = _pane(at)
+    assert "Cluster cap not reached (review-only)" in text
+    assert note in text and "The picker opens with no size picked: pick one to see the statement." in text
+    assert "WAREHOUSE_SIZE" not in code
+    assert "Projected saving" not in text and "Resizing UP" not in text and "2XLARGE" not in text
+    assert not any(t.key == "sizing_confirm" for t in at.text_input)
+    assert not any(b.key == "sizing_btn" for b in at.button)

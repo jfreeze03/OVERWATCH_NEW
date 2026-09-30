@@ -585,8 +585,9 @@ def masking_environment_parity() -> str:
 
     Grain: (DATABASE_FAMILY, SCHEMA_NAME, OBJECT_NAME), for every masked schema.object in a family that has 2+
     databases with column masking. A family's databases HERE are only those with at least one column-level
-    masking reference (see _db_family), hence MASKED_FAMILY_DATABASES: a database with no masked column is in
-    neither #43 table; the page lists those from SHOW DATABASES (policy_coverage.unmasked_family_databases).
+    masking reference (see _db_family), hence MASKED_FAMILY_DATABASES: a database with no column-level masking
+    reference (tag-only masking included) is in neither #43 table; the page lists those from SHOW DATABASES
+    (policy_coverage.unmasked_family_databases).
     COLUMN_SET is the sorted distinct masked-column list in one database. SAME means masked in every masked family
     database on one column set; otherwise DIFFERS. TOTAL_NAMES and DIFFERING_NAMES are window totals taken before
     the LIMIT (the uncapped-aggregate rule)."""
