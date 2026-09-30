@@ -471,7 +471,12 @@ can open it, including EXECUTIVE. Old Decision Studio links, saved views and
     optional right-sizing, and unread maintenance confirmed in Storage & waste
     this session) plus queued Action Center work normalized to monthly,
     de-duplicated by entity. A caption names the levers counted and why any
-    is missing.
+    is missing. If the efficiency mart cannot be read (or has no metering in
+    the window), the headline still totals the other counted levers and its
+    delta says the idle timer is not counted; it is a dash only when nothing
+    is counted. Unread maintenance drops out on Refresh, a credit-rate change,
+    or 1h after Storage & waste was last shown; an object booked in another
+    session keeps counting until that scan is re-run.
   - A projection whose sliders default to MEASURED adoption and realization
     ("Reset to measured"). It runs in a fragment, so slider moves cost no
     reads. Verified savings never enter it.

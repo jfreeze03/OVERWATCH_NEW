@@ -14,7 +14,7 @@ import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pandas as pd
 
@@ -117,8 +117,14 @@ def unread_maintenance_opportunities(verdicts: pd.DataFrame | None) -> list[Savi
 # Addressable $/mo headlines (Cost ▸ Optimize ▸ Idle & sizing, Proof ▸ Pipeline) read it back through
 # unread_lever. The ONLY path from unread data to a headline is unread_handoff -> session -> unread_lever.
 UNREAD_HANDOFF_KEY = "_ow_unread_maint_handoff"
-# == app.core.query.CACHE_TTLS["historical"], the access-history confirm's cache life (test-pinned)
+# 1h, set equal to app.core.query.CACHE_TTLS["historical"] (test-pinned). It bounds the time since the Storage &
+# waste panel was last SHOWN (the stamp is re-taken on every show, disclosed as '1h after this panel was last
+# shown'), NOT the age of the access-history confirm behind it: that is served from the historical cache, so it
+# can be up to 1h old when stamped. A 'no read in 90 days' verdict does not move in that time (R1-17).
 UNREAD_HANDOFF_MAX_AGE_SEC = 3600
+# R1-17: the stamp and the reader's 'now' are aware UTC (formulas.utc_now, passed in by the UI), so the age never
+# jumps at a DST change; a stamp more than this far in the future (a clock step) is stale, never fresh.
+UNREAD_HANDOFF_MAX_SKEW_SEC = 60
 UNREAD_CONFIRMED = "confirmed"
 UNREAD_CLEAN = "clean"
 UNREAD_CONFIRM_FAILED = "confirm_failed"
@@ -139,9 +145,15 @@ R_STALE = ("the last check was shown over " + _MAX_AGE + " ago, or cached data w
 R_SHORTLIST = "the object-cost ledger could not be read in {where}"
 R_CONFIRM = "the access-history check failed, so no object is confirmed unread"
 R_LEDGER = "the Savings ledger could not be read, so objects already booked there could not be left out"
+R_RATE = ("the credit rate changed since the last check, which priced its objects at the old rate: re-run the scan "
+          "in {where}")
 # qualifiers on a counted lever
 N_FLOOR = "only the top {checked:,} shortlisted objects were checked, so this is a floor"
 N_BOOKED = "{n:,} already booked on the Savings ledger left out"
+# R1-16: the booked set is read when the scan runs; a same-session booking updates it in that run, but no cache
+# salt can see another session's INSERT, so that case is disclosed (the Storage & waste line + both headlines' help)
+N_ELSEWHERE = ("An object booked in another session after this scan keeps counting here until the scan is re-run "
+               "(at most " + _MAX_AGE + ").")
 # Storage & waste, when the booked-objects read failed (rendered as 'unavailable')
 S_LEDGER_UNAVAILABLE = ("The Savings ledger could not be read, so confirmed objects are not added to Addressable "
                         "$/mo (objects already booked could not be left out).")
@@ -160,7 +172,7 @@ def _norm_company(value: object) -> str:
 
 
 def unread_handoff(verdicts: pd.DataFrame | None, *, status: str, company: str, database: object, scope: str,
-                   as_of: datetime, checked: int = 0, truncated: bool = False,
+                   as_of: datetime, rate: float, checked: int = 0, truncated: bool = False,
                    booked: frozenset[str] | None = frozenset()) -> dict[str, object]:
     """The Storage & waste snapshot of the UNREAD_MAINT lever (primitives only: safe in session state).
 
@@ -168,7 +180,9 @@ def unread_handoff(verdicts: pd.DataFrame | None, *, status: str, company: str, 
     unread_maintenance_opportunities, the generator's ONLY call site outside tests), less the objects already
     booked on the Savings ledger (``booked``, from unread_maintenance.booked_objects). ``booked`` None = that
     read failed: with rows to count, the status becomes UNREAD_LEDGER_FAILED and nothing is counted, rather
-    than risk a double count. ``as_of`` is the caller's account-time 'now' (this module reads no clock)."""
+    than risk a double count. ``as_of`` is the caller's aware UTC 'now' (formulas.utc_now; this module reads no
+    clock): a naive stamp never reads fresh. ``rate`` is the credit rate the rows' $/mo were priced at, so a
+    reader on another rate drops them (R1-16) instead of adding old-rate dollars to a new-rate idle figure."""
     opps = unread_maintenance_opportunities(verdicts) if status == UNREAD_CONFIRMED else []
     if status == UNREAD_CONFIRMED and opps and booked is None:
         status, opps = UNREAD_LEDGER_FAILED, []
@@ -180,6 +194,7 @@ def unread_handoff(verdicts: pd.DataFrame | None, *, status: str, company: str, 
         "database": str(database or "").strip().upper(),
         "scope": str(scope or ""),
         "as_of": as_of.isoformat(timespec="seconds"),
+        "rate": float(safe_float(rate)),
         "checked": int(checked),
         "truncated": bool(truncated),
         "booked_excluded": len(opps) - len(kept),
@@ -191,13 +206,37 @@ def _absent(reason: str) -> UnreadLever:
     return UnreadLever(False, (), reason, "")
 
 
-def unread_lever(handoff: object, *, company: str, scope: str, now: datetime, where: str) -> UnreadLever:
+def _handoff_age_sec(as_of: object, now: datetime) -> float:
+    """Seconds from the handoff's stamp to ``now``; inf (stale) for a malformed stamp or when either side is
+    naive, so a wall-clock stamp is never compared across a DST change (R1-17). Taken in UTC: Python subtracts
+    two datetimes sharing one tzinfo as wall clocks, which would repeat the fall-back hour."""
+    try:
+        stamped = datetime.fromisoformat(str(as_of))
+    except (TypeError, ValueError):
+        return math.inf
+    if stamped.utcoffset() is None or now.utcoffset() is None:
+        return math.inf
+    return (now.astimezone(UTC) - stamped.astimezone(UTC)).total_seconds()
+
+
+def _same_rate(stamped: object, rate: float) -> bool:
+    """The handoff's pricing rate equals the reader's (a missing or non-numeric stamp never matches)."""
+    if isinstance(stamped, bool) or not isinstance(stamped, (int, float)):
+        return False
+    a, b = float(stamped), safe_float(rate, default=math.nan)
+    return math.isfinite(a) and math.isfinite(b) and math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-12)
+
+
+def unread_lever(handoff: object, *, company: str, scope: str, now: datetime, rate: float,
+                 where: str) -> UnreadLever:
     """Read the Storage & waste handoff back for a headline. The first failing check wins: no (or a malformed)
     handoff -> not checked; another Company; a Database-scoped scan (Idle & sizing, right-sizing and Proof ▸
     Pipeline ignore that filter, so it is never mixed in); a different cache scope (Refresh or a global-salt
-    write since) or older than UNREAD_HANDOFF_MAX_AGE_SEC -> stale; a failed shortlist / confirm / ledger
-    read. A clean or confirmed scan is included (at $0 when it has no rows), with a note for a top-N floor
-    or booked objects left out. Pure; never raises."""
+    write since), older than UNREAD_HANDOFF_MAX_AGE_SEC, stamped over UNREAD_HANDOFF_MAX_SKEW_SEC in the
+    future, or a naive clock on either side -> stale; a failed shortlist / confirm / ledger read; rows priced
+    at a credit rate other than ``rate`` (the reader's current one: R1-16) -> re-run. A clean or confirmed
+    scan is included (at $0 when it has no rows), with a note for a top-N floor or booked objects left out.
+    ``now`` is the caller's aware UTC 'now' (formulas.utc_now). Pure; never raises."""
     status = handoff.get("status") if isinstance(handoff, Mapping) else None
     if not isinstance(handoff, Mapping) or not isinstance(status, str) or status not in _UNREAD_STATUSES:
         return _absent(R_NOT_RUN.format(where=where))
@@ -208,11 +247,9 @@ def unread_lever(handoff: object, *, company: str, scope: str, now: datetime, wh
     database = str(handoff.get("database") or "").strip().upper()
     if database:
         return _absent(R_DATABASE.format(database=database, where=where))
-    try:
-        age = (now - datetime.fromisoformat(str(handoff.get("as_of")))).total_seconds()
-    except (TypeError, ValueError):
-        age = math.inf
-    if str(handoff.get("scope") or "") != str(scope or "") or age > UNREAD_HANDOFF_MAX_AGE_SEC:
+    age = _handoff_age_sec(handoff.get("as_of"), now)
+    if (str(handoff.get("scope") or "") != str(scope or "")
+            or not -UNREAD_HANDOFF_MAX_SKEW_SEC <= age <= UNREAD_HANDOFF_MAX_AGE_SEC):
         return _absent(R_STALE.format(where=where))
     if status == UNREAD_SHORTLIST_FAILED:
         return _absent(R_SHORTLIST.format(where=where))
@@ -221,8 +258,11 @@ def unread_lever(handoff: object, *, company: str, scope: str, now: datetime, wh
     if status == UNREAD_LEDGER_FAILED:
         return _absent(R_LEDGER)
     rows = handoff.get("rows")
+    rows = rows if isinstance(rows, (list, tuple)) else ()
+    if rows and not _same_rate(handoff.get("rate"), rate):
+        return _absent(R_RATE.format(where=where))       # $0 (no rows) is the same at any rate
     opps: list[SavingsOpportunity] = []
-    for row in rows if isinstance(rows, (list, tuple)) else ():
+    for row in rows:
         if not isinstance(row, (list, tuple)) or len(row) != 3:
             continue
         target, usd, conf = row
@@ -292,8 +332,8 @@ def unread_handoff_note(handoff: object) -> str:
              "checked)" if bool(handoff.get("truncated")) else "")
     booked = f" {booked_n:,} already booked on the Savings ledger are left out." if booked_n else ""
     return (f"{n:,} confirmed-unread object(s) join Addressable $/mo in Idle & sizing and on Proof ▸ Pipeline for "
-            f"this Company{floor}.{booked} They drop out when cached data is refreshed, or {_MAX_AGE} after this "
-            "panel was last shown.")
+            f"this Company{floor}.{booked} They drop out when cached data is refreshed, the credit rate changes, or "
+            f"{_MAX_AGE} after this panel was last shown. {N_ELSEWHERE}")
 
 
 def _overlap_group(source: str) -> frozenset[str] | None:

@@ -7,7 +7,7 @@ wiring claim is also locked by source below)."""
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -430,8 +430,9 @@ def test_rollup_registers_the_lever():
 
 # --- #35: the UNREAD_MAINT lever's session handoff into Addressable $/mo (pure) ----------------------------
 
-_AS_OF = datetime(2026, 9, 30, 10, 0, 0)
+_AS_OF = datetime(2026, 9, 30, 10, 0, 0, tzinfo=UTC)      # R1-17: the UI stamps aware UTC (utc_now)
 _WHERE = "Storage & waste"
+_RATE = 2.0                                                         # _mix()'s pricing rate
 
 
 def _mix(rate: float = 2.0) -> pd.DataFrame:
@@ -451,12 +452,13 @@ def _hand(verdicts=None, status="confirmed", **kw) -> dict:
     kw.setdefault("database", "")
     kw.setdefault("scope", "S")
     kw.setdefault("as_of", _AS_OF)
+    kw.setdefault("rate", _RATE)
     return savings_rollup.unread_handoff(verdicts, status=status, **kw)
 
 
-def _lever(handoff, *, company="ALFA", scope="S", age_sec=60.0, where=_WHERE):
+def _lever(handoff, *, company="ALFA", scope="S", age_sec=60.0, where=_WHERE, rate=_RATE):
     return savings_rollup.unread_lever(handoff, company=company, scope=scope,
-                                       now=_AS_OF + timedelta(seconds=age_sec), where=where)
+                                       now=_AS_OF + timedelta(seconds=age_sec), rate=rate, where=where)
 
 
 def test_handoff_carries_only_confirmed_action_rows():
@@ -474,7 +476,7 @@ def test_handoff_carries_only_confirmed_action_rows():
     h = _hand(unconfirmed)
     assert h["rows"] == [] and h["status"] == "confirmed"
     assert h["company"] == "ALFA" and h["database"] == "" and h["scope"] == "S"
-    assert h["as_of"] == "2026-09-30T10:00:00"
+    assert h["as_of"] == "2026-09-30T10:00:00+00:00" and h["rate"] == 2.0
     assert _hand(None, company="  alfa ", database=" db1 ")["company"] == "ALFA"
     assert _hand(None, company="", database=" db1 ")["company"] == "ALL"
     assert _hand(None, database=" db1 ")["database"] == "DB1"
@@ -486,7 +488,7 @@ def test_handoff_round_trips_to_the_registered_generator():
                    D__S__K={"CLUSTERING_CREDITS": 9.0})
     verdicts = unread_maintenance_verdicts(short, _reads(D__S__A={}, D__S__B={}, D__S__K={"READ_QUERIES": 2}),
                                            rate=3.0)
-    lever = _lever(_hand(verdicts))
+    lever = _lever(_hand(verdicts, rate=3.0), rate=3.0)
     assert lever.included and lever.reason == "" and lever.note == ""
     assert lever.opportunities == tuple(savings_rollup.unread_maintenance_opportunities(verdicts))
     assert [o.target for o in lever.opportunities] == ["D.S.A", "D.S.B"]
@@ -564,6 +566,8 @@ _R = {
     "shortlist": "the object-cost ledger could not be read in Storage & waste",
     "confirm": "the access-history check failed, so no object is confirmed unread",
     "ledger": "the Savings ledger could not be read, so objects already booked there could not be left out",
+    "rate": ("the credit rate changed since the last check, which priced its objects at the old rate: re-run the "
+             "scan in Storage & waste"),
 }
 
 
@@ -577,7 +581,12 @@ _R = {
     ("confirmed", {"scope": "S2"}, "stale"),
     ("confirmed", {"age_sec": 3601}, "stale"),
     ({"as_of": "not a timestamp"}, {}, "stale"),
-    ({"as_of": "2026-09-30T10:00:00+00:00"}, {}, "stale"),                       # tz-mismatched -> never fresh
+    ({"as_of": "2026-09-30T10:00:00"}, {}, "stale"),              # R1-17: a naive wall-clock stamp never fresh
+    ("confirmed", {"age_sec": -61}, "stale"),                     # R1-17: stamped in the future past the skew
+    ("confirmed", {"age_sec": -3600}, "stale"),                   # ... e.g. a DST fall-back repeat of an hour
+    ("confirmed", {"rate": 3.0}, "rate"),                         # R1-16: the rows were priced at $2.00/credit
+    ({"rate": None}, {}, "rate"),                                 # an unstamped handoff never counts dollars
+    ({"rate": "2.0"}, {}, "rate"),
     ({"status": "shortlist_failed"}, {}, "shortlist"),
     ({"status": "confirm_failed"}, {}, "confirm"),
     ({"status": "ledger_failed"}, {}, "ledger"),
@@ -612,6 +621,35 @@ def test_unread_lever_age_boundary_and_scope():
     h = _hand(_mix())
     assert _lever(h, age_sec=3600).included and not _lever(h, age_sec=3601).included
     assert _lever(h, age_sec=-5).included                                      # a clock wobble is not stale
+    assert _lever(h, age_sec=-60).included and not _lever(h, age_sec=-61).included   # R1-17: the skew bound
+    # R1-17: a naive 'now' (the pre-fix account_now wall clock) never reads fresh, even against a naive stamp
+    naive = _hand(_mix(), as_of=_AS_OF.replace(tzinfo=None))
+    assert not savings_rollup.unread_lever(naive, company="ALFA", scope="S", rate=_RATE, where=_WHERE,
+                                           now=_AS_OF.replace(tzinfo=None) + timedelta(minutes=1)).included
+    assert not savings_rollup.unread_lever(h, company="ALFA", scope="S", rate=_RATE, where=_WHERE,
+                                           now=_AS_OF.replace(tzinfo=None) + timedelta(minutes=1)).included
+    # R1-17: across the 2026-11-01 fall-back an aware stamp ages in real time. A stamp at 01:50 CDT is stale 61 real
+    # minutes later (01:51 CST), where the naive wall clock read it as 40 minutes in the future until ~2h had passed.
+    # Both sides here carry the SAME Chicago tzinfo, where Python subtracts wall clocks: the age must be taken in UTC
+    from zoneinfo import ZoneInfo
+    chicago = ZoneInfo("America/Chicago")
+    stamp = datetime(2026, 11, 1, 1, 50, tzinfo=chicago)                        # fold=0: CDT (UTC-5)
+    dst = _hand(_mix(), as_of=stamp)
+
+    def after(minutes: int) -> datetime:
+        return (stamp.astimezone(UTC) + timedelta(minutes=minutes)).astimezone(chicago)
+
+    assert after(61).strftime("%H:%M") == "01:51" and after(61).utcoffset() == timedelta(hours=-6)
+
+    def at(minutes: int) -> bool:
+        return savings_rollup.unread_lever(dst, company="ALFA", scope="S", now=after(minutes), rate=_RATE,
+                                           where=_WHERE).included
+
+    assert at(59) and at(60) and not at(61) and not at(119)
+    # R1-16: a clean / all-booked scan is $0 at any rate, so a rate change leaves it counted
+    assert _lever(_hand(None, status=savings_rollup.UNREAD_CLEAN), rate=9.99).included
+    assert _lever(_hand(_mix(), booked=frozenset({"D.S.A"})), rate=9.99).included
+    assert _lever(h, rate=2.0 + 1e-12).included                                # float noise is the same rate
     assert _lever(_hand(_mix(), company="alfa"), company="ALFA").included
     assert _lever(_hand(_mix(), company="ALFA"), company=" alfa ").included
     assert _lever(_hand(_mix(), company=""), company="ALL").included
@@ -625,6 +663,7 @@ def test_handoff_max_age_is_the_historical_cache_ttl():
     from app.core.query import CACHE_TTLS
     from app.logic.formulas import humanize_duration
     assert savings_rollup.UNREAD_HANDOFF_MAX_AGE_SEC == CACHE_TTLS["historical"] == 3600
+    assert savings_rollup.UNREAD_HANDOFF_MAX_SKEW_SEC == 60
     assert humanize_duration(savings_rollup.UNREAD_HANDOFF_MAX_AGE_SEC) == "1h"
     assert savings_rollup.UNREAD_HANDOFF_KEY == "_ow_unread_maint_handoff"
     assert not savings_rollup.UNREAD_HANDOFF_KEY.startswith(("flt_", "cost_", "opt_"))   # never a widget key
@@ -666,14 +705,18 @@ def test_handoff_note_wording():
         "ledger.")
     assert note(_hand(_mix())) == (
         "1 confirmed-unread object(s) join Addressable $/mo in Idle & sizing and on Proof ▸ Pipeline for this "
-        "Company. They drop out when cached data is refreshed, or 1h after this panel was last shown.")
+        "Company. They drop out when cached data is refreshed, the credit rate changes, or 1h after this panel was "
+        "last shown. An object booked in another session after this scan keeps counting here until the scan is "
+        "re-run (at most 1h).")
     short = _short(D__S__A={"CLUSTERING_CREDITS": 9.0, "MAINT_CREDITS_30D": 4.0},
                    D__S__B={"CLUSTERING_CREDITS": 9.0, "MAINT_CREDITS_30D": 2.0})
     two = unread_maintenance_verdicts(short, _reads(D__S__A={}, D__S__B={}), rate=1.0)
     assert note(_hand(two, checked=50, truncated=True, booked=frozenset({"D.S.B"}))) == (
         "1 confirmed-unread object(s) join Addressable $/mo in Idle & sizing and on Proof ▸ Pipeline for this "
         "Company (a floor: only the top 50 shortlisted objects were checked). 1 already booked on the Savings "
-        "ledger are left out. They drop out when cached data is refreshed, or 1h after this panel was last shown.")
+        "ledger are left out. They drop out when cached data is refreshed, the credit rate changes, or 1h after "
+        "this panel was last shown. An object booked in another session after this scan keeps counting here until "
+        "the scan is re-run (at most 1h).")
     assert savings_rollup.S_LEDGER_UNAVAILABLE == (
         "The Savings ledger could not be read, so confirmed objects are not added to Addressable $/mo (objects "
         "already booked could not be left out).")
@@ -770,6 +813,11 @@ def test_storage_and_waste_publishes_the_handoff_source():
     assert branch.count(write) == 3 and opt.count(write) == 3
     assert "status=UNREAD_CONFIRMED if _conf.ok else UNREAD_CONFIRM_FAILED" in branch
     assert "status=UNREAD_CLEAN" in branch and "status=UNREAD_SHORTLIST_FAILED" in branch
+    # R1-16 / R1-17: every write stamps the aware UTC clock and the rate its rows were priced at (the same `rate`
+    # the verdicts are priced with); the naive account wall clock never stamps it
+    assert branch.count("as_of=utc_now(), rate=rate") == 3
+    assert "as_of=account_now()" not in opt and "unread_maintenance_verdicts(_um.df, _conf.df if _conf.ok else " \
+        "None, rate=rate)" in branch
     toggle = branch.index('key="cost_unread_maint_toggle"')
     writes = [m.start() for m in re.finditer(re.escape(write), branch)]
     assert all(toggle < w for w in writes)
@@ -807,7 +855,7 @@ def test_idle_and_sizing_headline_reads_only_the_handoff_source():
     opt = read("app/ui/pages/cost_parts/optimize.py")
     idle = opt.split('if opt_section == "Idle & sizing":', 1)[1].split('elif opt_section == "Queries & patterns":', 1)[0]
     call = ("_unread = unread_lever(st.session_state.get(UNREAD_HANDOFF_KEY), company=company, scope=cache_scope(),\n"
-            '                               now=account_now(), where="Storage & waste")')
+            '                               now=utc_now(), rate=rate, where="Storage & waste")')
     assert idle.count(call) == 1
     assert idle.index(call) < idle.index("_savings_opps.extend(_unread.opportunities)") < idle.index(
         "_roll = rollup_savings(_savings_opps)")
@@ -822,6 +870,49 @@ def test_idle_and_sizing_headline_reads_only_the_handoff_source():
             "panel above, and the storage-waste and automatic-clustering panels in Storage & waste.") in joined
     assert "or stopping maintenance on an unread object" in joined
     assert ("an object you stopped without booking keeps counting until those 30 days roll off.") in joined
+
+
+def test_the_handoff_clock_is_aware_utc_on_both_sides():
+    """R1-17: the writers (Storage & waste) and both readers (Idle & sizing, Proof ▸ Pipeline) pass
+    formulas.utc_now(), an aware UTC clock, so the 1h life is real time across a DST change; the logic still
+    reads no clock itself."""
+    from app.logic.formulas import utc_now
+    now = utc_now()
+    assert now.utcoffset() == timedelta(0) and abs((datetime.now(UTC) - now).total_seconds()) < 5
+    opt, ds = read("app/ui/pages/cost_parts/optimize.py"), read("app/ui/decision_studio.py")
+    assert opt.count("unread_lever(") == 1 and "now=utc_now(), rate=rate," in opt
+    assert ds.count("unread_lever(") == 1 and "now=utc_now(), rate=rate," in ds
+    assert opt.count("unread_handoff(") == 3 == opt.count("as_of=utc_now(), rate=rate")
+
+
+def test_only_the_book_button_changes_the_unread_booked_set_in_app():
+    """R1-16: the handoff keeps the booked set read when the scan ran and is not invalidated by other Savings-ledger
+    writes. That is safe only while no in-app write can change that set except the Book button, which updates it in
+    the same run (test_a_booked_object_leaves_the_addressable_headline). Lock the premise: the unread finding types
+    are spelled only in the verdict module and ledger_measure's read-only basis map, the booking SQL has one call
+    site, and the app's one ledger REJECT writer (Savings ▸ 'Reject superseded duplicates') matches only the
+    autobooked warehouse levers (a REJECT could only un-book anyway: an under-count). Another session's booking is
+    disclosed instead."""
+    types = ("SUSPEND_RECLUSTER", "DROP_SEARCH_OPTIMIZATION", "SUSPEND_MV_REFRESH")
+    spelled = sorted({str(py.relative_to(ROOT).as_posix()) for py in (ROOT / "app").rglob("*.py")
+                      if any(t in py.read_text(encoding="utf-8") for t in types)})
+    assert spelled == ["app/logic/ledger_measure.py", "app/logic/unread_maintenance.py"], spelled
+    srcs = {str(py.relative_to(ROOT).as_posix()): py.read_text(encoding="utf-8")
+            for py in (ROOT / "app").rglob("*.py")}
+    booking = [(rel, src.count("book_estimated_sql(")) for rel, src in srcs.items()
+               if "book_estimated_sql(" in src.replace("def book_estimated_sql(", "")]
+    assert booking == [("app/ui/pages/cost_parts/optimize.py", 1)], booking
+    assert [rel for rel, src in srcs.items() if "STATE = 'REJECTED'," in src] == ["app/data/mart_sql.py"]
+    from app.config import LEDGER_AUTOBOOKED_LEVERS
+    from app.data import mart_sql
+    assert "FROM ({_ledger_twin_select()}) t" in srcs["app/data/mart_sql.py"].split(
+        "def supersede_ledger_twins_sql(", 1)[1].split("\ndef ", 1)[0]
+    twin = mart_sql._ledger_twin_select()
+    assert "AND UPPER(TRIM(m.FINDING_TYPE)) IN ('AUTO_SUSPEND', 'MAX_CLUSTERS', 'RESIZE')" in twin
+    assert not set(LEDGER_AUTOBOOKED_LEVERS) & set(ARM_FINDING_TYPE.values())
+    assert savings_rollup.N_ELSEWHERE in savings_rollup.unread_handoff_note(_hand(_mix()))
+    joined = _joined(read("app/ui/pages/cost_parts/optimize.py")) + _joined(read("app/ui/decision_studio.py"))
+    assert joined.count("booked in another session since then keeps counting until the scan is re-run") == 2
 
 
 def test_status_chips_cover_every_verdict():

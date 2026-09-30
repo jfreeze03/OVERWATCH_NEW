@@ -498,7 +498,7 @@ def test_pipeline_frame_unions_addressable_and_queued_without_double_counting():
                            SavingsOpportunity("RESIZE", "WH_A", 50.0, 0.6),     # overlap: dropped by rollup
                            SavingsOpportunity("IDLE", "WH_B", 20.0, 0.3)])
     with warnings.catch_warnings():
-        warnings.simplefilter("error", FutureWarning)                      # no all-NA concat deprecation
+        warnings.simplefilter("error")      # no all-NA concat FutureWarning, no NumPy NaT DeprecationWarning (R1-18)
         pf = pipeline_frame(roll.items, _queue())
     addr = pf[pf["KIND"] == "Addressable"]
     assert list(addr["SOURCE_ENTITY_KEY"]) == ["WH_A", "WH_B"]
@@ -547,6 +547,45 @@ def test_pipeline_frame_types_unread_rows_as_objects():
     other = scenario_projection(pipeline_frame(opps[:1], queued("WAREHOUSE")), adoption_pct=100,
                                 realization_pct=100, confidence_floor=0.6)
     assert other["candidates"] == 2.0 and other["gross_estimate"] == 65.0   # never merged with a warehouse
+
+def test_pipeline_frame_keeps_queue_timestamps_without_a_numpy_nat_deprecation():
+    """R1-18: ACTION_QUEUE's CREATED_AT / UPDATED_AT are TIMESTAMP_NTZ NOT NULL, so every queued row brings naive
+    datetime64 columns the synthetic Addressable rows lack. pandas NA-fills those rows with a unit-less
+    dtype.type('NaT'), which NumPy 2.5 deprecates (and will reject: Proof ▸ Pipeline would fail to render
+    whenever it has both kinds of row). The frame must come back with no warning at all, each time column's
+    dtype kept, NaT on the Addressable rows and the queued values untouched."""
+    q = _queue().assign(
+        CREATED_AT=pd.to_datetime(["2026-09-01 08:00"] * 6),
+        UPDATED_AT=pd.to_datetime(["2026-09-02 09:30"] * 6).astype("datetime64[us]"),
+        DUE_DATE=pd.to_datetime(["2026-10-01", None, None, None, None, None]),
+        AGE=pd.to_timedelta([3600] * 6, unit="s"),
+        SEEN_AT=pd.to_datetime(["2026-09-03 10:00"] * 6).tz_localize("UTC"),
+    )
+    times = ["CREATED_AT", "UPDATED_AT", "DUE_DATE", "AGE", "SEEN_AT"]
+    roll = rollup_savings([SavingsOpportunity("IDLE", "WH_A", 80.0, 0.6),
+                           SavingsOpportunity("UNREAD_MAINT", "DB.S.T", 40.0, 0.6)])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")                  # DeprecationWarning and FutureWarning alike
+        pf = pipeline_frame(roll.items, q)
+    assert [str(pf[c].dtype) for c in times] == [str(q[c].dtype) for c in times]
+    assert list(pf.columns[:3]) == ["ACTION_ID", "KIND", "SEVERITY"] and pf.columns[-len(times):].tolist() == times
+    addr = pf[pf["KIND"] == "Addressable"]
+    assert list(addr["SOURCE_ENTITY_KEY"]) == ["WH_A", "DB.S.T"] and addr[times].isna().all().all()
+    queued = pf[pf["KIND"] == "Queued"].reset_index(drop=True)
+    for col in times:
+        pd.testing.assert_series_equal(queued[col], q[col], check_names=False)
+    # the de-duplication and the projection are unchanged by the time columns
+    proj = scenario_projection(pf, adoption_pct=100, realization_pct=100, confidence_floor=0.6)
+    assert proj == scenario_projection(pipeline_frame(roll.items, _queue()), adoption_pct=100,
+                                       realization_pct=100, confidence_floor=0.6)
+    # a queue-only frame and a column whose kind differs between the parts still concat cleanly
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert str(pipeline_frame(None, q)["CREATED_AT"].dtype) == "datetime64[ns]"
+        mixed = pipeline_frame(roll.items, q.assign(SOURCE=pd.to_datetime(["2026-09-01"] * 6)))
+    assert mixed["SOURCE"].iloc[0] == "Cost ▸ Optimization & Savings (IDLE)"          # text on Addressable
+    assert mixed["SOURCE"].iloc[-1] == pd.Timestamp("2026-09-01")                     # the queue's own value
+
 
 def test_pipeline_frame_accepts_an_already_normalised_queue():
     frame, _ = monthly_equivalent(_queue())

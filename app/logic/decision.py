@@ -6,6 +6,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable
 
+import numpy as np
 import pandas as pd
 
 from app.logic.formulas import safe_float
@@ -257,7 +258,35 @@ def pipeline_frame(rollup_items: Iterable[SavingsOpportunity] | None,
     # restored after, so pandas never infers dtypes from all-NA blocks (deprecated behaviour).
     columns = list(dict.fromkeys([*addressable.columns, *queued.columns]))
     parts = [part.dropna(axis=1, how="all") for part in (addressable, queued)]
-    return pd.concat(parts, ignore_index=True, sort=False).reindex(columns=columns)
+    return _concat_rows(parts).reindex(columns=columns)
+
+
+def _naive_time(series: pd.Series) -> bool:
+    """A tz-naive datetime64 / timedelta64 column (a tz-aware one never takes the unit-less NaT path)."""
+    return getattr(series.dtype, "kind", "") in ("M", "m") and getattr(series.dtype, "tz", None) is None
+
+
+def _concat_rows(parts: list[pd.DataFrame]) -> pd.DataFrame:
+    """pd.concat(parts, ignore_index=True, sort=False) that never NA-fills a naive datetime64 / timedelta64
+    column (R1-18): pandas fills the rows of a part that lacks one (the synthetic Addressable rows lack the
+    queue's CREATED_AT / UPDATED_AT, TIMESTAMP_NTZ NOT NULL) with dtype.type('NaT'), a unit-less NaT that
+    NumPy 2.5 deprecates and will reject. Those columns are assembled here with a unit-typed NaT instead,
+    keeping their dtype; a column whose kind differs across parts is left to pandas."""
+    times: dict[str, np.dtype] = {}
+    for part in parts:
+        for col in part.columns:
+            if _naive_time(part[col]):
+                times.setdefault(col, part[col].dtype)
+    times = {col: dtype for col, dtype in times.items()
+             if all(col not in part.columns or (_naive_time(part[col]) and part[col].dtype.kind == dtype.kind)
+                    for part in parts)}
+    order = list(dict.fromkeys(col for part in parts for col in part.columns))
+    out = pd.concat([part.drop(columns=[col for col in times if col in part.columns]) for part in parts],
+                    ignore_index=True, sort=False)
+    for col, dtype in times.items():
+        out[col] = np.concatenate([part[col].to_numpy(dtype=dtype) if col in part.columns
+                                   else np.full(len(part), "NaT", dtype=dtype) for part in parts])
+    return out[order]
 
 
 def slo_summary(frame: pd.DataFrame | None) -> dict[str, float]:
