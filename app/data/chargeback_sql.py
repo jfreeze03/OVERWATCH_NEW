@@ -9,8 +9,10 @@ elapsed-share allocation *within* each warehouse and is labeled allocated.
 from __future__ import annotations
 
 from app import companies
-from app.config import core_object
-from app.data.common import and_where, bounded_days, scope_window_where
+from app.config import MAX_MART_WINDOW_DAYS, core_object, mart_object
+from app.core.sqlsafe import sql_literal
+from app.data.common import account_today_sql, and_where, bounded_days, scope_window_where
+from app.logic.showback import COCO_SOURCES, SERVERLESS_ARMS, STORAGE_TIERS
 
 _DEPT = (
     "COALESCE(D.DEPARTMENT, 'Unmapped')"
@@ -134,6 +136,132 @@ WHERE {where}
 GROUP BY 1, 2, 3, 4
 HAVING SUM(COALESCE(M.CREDITS_TOTAL, 0)) > 0
 ORDER BY DEPARTMENT, CREDITS_TOTAL DESC
+"""
+
+
+def company_allin_showback(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
+    """Company all-in showback (#42 Part 1): marts only, one long LINE_KIND frame for
+    ``app.logic.showback.company_showback``.
+
+    Every credit leg is cut to ``mdays``: the Window's days that daily metering has closed.
+    The newest FACT_METERING_DAILY row is the UTC day still in progress when the loader read
+    it, so it is excluded, and today never counts. The storage legs share ``sdays``: the
+    account-storage days among those metered days, so a day daily metering skipped is left
+    out of every row. COVERAGE rows carry each fact's ledger-wide first/last day (the coverage
+    notes name a late or stale source from them). COMPANY_FOR_USER runs on the grouped user in
+    a derived-table projection with the company test in an outer WHERE (the V030 shape law, as
+    in mart27_sql.live_monthly_spend_by_warehouse). The row count is bounded: tens of service
+    types, a few companies x five serverless arms, one row per Cortex Code user, six storage
+    tiers and six coverage rows.
+    """
+    days = bounded_days(days, MAX_MART_WINDOW_DAYS)
+    today = account_today_sql()
+    if bounds is not None:
+        start, end = bounds
+        w_lo = f"'{start.isoformat()}'::DATE"
+        w_hi = f"LEAST('{end.isoformat()}'::DATE, {today})"
+    else:
+        w_lo = f"DATEADD('day', -{days}, {today})"
+        w_hi = today
+    scoped = str(company or "ALL").upper() not in ("ALL", "")
+    lit = companies.sql_literal(company)
+
+    def co(column: str) -> str:
+        return f"{column} = {lit}" if scoped else ""
+
+    arms = ", ".join(sql_literal(x) for x in SERVERLESS_ARMS)
+    srcs = ", ".join(sql_literal(x) for x in COCO_SOURCES)
+    metering_fact = mart_object("FACT_METERING_DAILY")
+    warehouse_fact = mart_object("FACT_WAREHOUSE_DAILY")
+    object_cost_fact = mart_object("FACT_OBJECT_COST_DAILY")
+    ai_fact = mart_object("FACT_AI_USAGE_DAILY")
+    storage_db_fact = mart_object("FACT_STORAGE_DAILY")
+    storage_acct_fact = mart_object("FACT_STORAGE_ACCOUNT_DAILY")
+    tier_sums = ",\n        ".join(
+        f"SUM(COALESCE(t.{tier}_BYTES, 0) / POWER(1024, 4) / DAY(LAST_DAY(t.DAY))) AS {tier}_TIB_MO"
+        for tier in STORAGE_TIERS)
+    tier_rows = "\n".join(
+        f"UNION ALL SELECT 'STORAGE_ACCT', NULL, '{tier}', NULL, NULL, a.{tier}_TIB_MO, NULL, NULL, NULL "
+        f"FROM stor_acct a WHERE a.N_DAYS > 0"
+        for tier in STORAGE_TIERS)
+    coverage_rows = "\n".join(
+        f"UNION ALL SELECT 'COVERAGE', NULL, '{name}', NULL, NULL, NULL, MIN(x.DAY), MAX(x.DAY), NULL "
+        f"FROM {table} x{where}"
+        for name, table, where in (
+            ("FACT_WAREHOUSE_DAILY", warehouse_fact, ""),
+            ("FACT_OBJECT_COST_DAILY", object_cost_fact, ""),
+            ("FACT_AI_USAGE_DAILY", ai_fact, f" WHERE x.SOURCE IN ({srcs})"),
+            ("FACT_STORAGE_DAILY", storage_db_fact, ""),
+            ("FACT_STORAGE_ACCOUNT_DAILY", storage_acct_fact, ""),
+        ))
+    return f"""
+WITH win AS (
+    SELECT {w_lo} AS W_LO, {w_hi} AS W_HI
+), mcov AS (
+    SELECT MIN(m.DAY) AS M_FIRST, MAX(m.DAY) AS M_LAST FROM {metering_fact} m
+), span AS (
+    SELECT GREATEST(w.W_LO, c.M_FIRST) AS LO, LEAST(w.W_HI, c.M_LAST) AS HI
+    FROM win w CROSS JOIN mcov c
+), mdays AS (
+    SELECT DISTINCT m.DAY FROM {metering_fact} m CROSS JOIN span s
+    WHERE m.DAY >= s.LO AND m.DAY < s.HI
+), sdays AS (
+    SELECT DISTINCT t.DAY FROM {storage_acct_fact} t JOIN mdays d ON d.DAY = t.DAY
+), metering AS (
+    SELECT UPPER(COALESCE(m.SERVICE_TYPE, 'UNKNOWN')) AS SERVICE_TYPE,
+           SUM(COALESCE(m.CREDITS_BILLED, 0)) AS CREDITS,
+           SUM(COALESCE(m.CREDITS_ADJUSTMENT, 0)) AS CREDITS_ADJUSTMENT
+    FROM {metering_fact} m JOIN mdays d ON d.DAY = m.DAY
+    GROUP BY 1
+), wh AS (
+    SELECT w.COMPANY, SUM(COALESCE(w.CREDITS_TOTAL, 0)) AS CREDITS
+    FROM {warehouse_fact} w JOIN mdays d ON d.DAY = w.DAY
+    WHERE {and_where(co("w.COMPANY"))}
+    GROUP BY w.COMPANY
+), sl AS (
+    SELECT COALESCE(o.COMPANY, 'UNKNOWN') AS COMPANY, o.COST_ARM, SUM(COALESCE(o.CREDITS, 0)) AS CREDITS
+    FROM {object_cost_fact} o JOIN mdays d ON d.DAY = o.DAY
+    WHERE {and_where(f"o.COST_ARM IN ({arms})", co("COALESCE(o.COMPANY, 'UNKNOWN')"))}
+    GROUP BY 1, 2
+), coco_user AS (
+    SELECT a.USER_NAME, SUM(COALESCE(a.CREDITS, 0)) AS CREDITS
+    FROM {ai_fact} a JOIN mdays d ON d.DAY = a.DAY
+    WHERE a.SOURCE IN ({srcs})
+    GROUP BY a.USER_NAME
+), coco AS (
+    SELECT c.COMPANY, c.CREDITS
+    FROM (
+        SELECT u.CREDITS, {companies.COMPANY_FOR_USER_FN}(u.USER_NAME) AS COMPANY
+        FROM coco_user u
+    ) c
+    WHERE {and_where(co("c.COMPANY"))}
+), stor_db AS (
+    SELECT sd.COMPANY,
+           SUM((COALESCE(sd.DB_BYTES, 0) + COALESCE(sd.FAILSAFE_BYTES, 0)) / POWER(1024, 4)
+               / DAY(LAST_DAY(sd.DAY))) AS TIB_MO
+    FROM {storage_db_fact} sd JOIN sdays d ON d.DAY = sd.DAY
+    WHERE {and_where(co("sd.COMPANY"))}
+    GROUP BY sd.COMPANY
+), stor_acct AS (
+    SELECT COUNT(*) AS N_DAYS,
+        {tier_sums}
+    FROM {storage_acct_fact} t JOIN sdays d ON d.DAY = t.DAY
+)
+SELECT 'WINDOW' AS LINE_KIND, NULL::VARCHAR AS COMPANY, NULL::VARCHAR AS SERVICE_TYPE,
+       NULL::FLOAT AS CREDITS, NULL::FLOAT AS CREDITS_ADJUSTMENT, NULL::FLOAT AS TIB_MO,
+       w.W_LO AS FIRST_DAY, DATEADD('day', -1, w.W_HI) AS LAST_DAY, NULL::FLOAT AS DAYS_IN_SPAN
+FROM win w
+UNION ALL SELECT 'SPAN', NULL, NULL, NULL, NULL, NULL, MIN(d.DAY), MAX(d.DAY), COUNT(*) FROM mdays d
+UNION ALL SELECT 'STORAGE_SPAN', NULL, NULL, NULL, NULL, NULL, MIN(d.DAY), MAX(d.DAY), COUNT(*) FROM sdays d
+UNION ALL SELECT 'METERING', NULL, m.SERVICE_TYPE, m.CREDITS, m.CREDITS_ADJUSTMENT, NULL, NULL, NULL, NULL
+FROM metering m
+UNION ALL SELECT 'WAREHOUSE', w.COMPANY, NULL, w.CREDITS, NULL, NULL, NULL, NULL, NULL FROM wh w
+UNION ALL SELECT 'SERVERLESS', s.COMPANY, s.COST_ARM, s.CREDITS, NULL, NULL, NULL, NULL, NULL FROM sl s
+UNION ALL SELECT 'COCO', c.COMPANY, NULL, c.CREDITS, NULL, NULL, NULL, NULL, NULL FROM coco c
+UNION ALL SELECT 'STORAGE_DB', sd.COMPANY, NULL, NULL, NULL, sd.TIB_MO, NULL, NULL, NULL FROM stor_db sd
+{tier_rows}
+UNION ALL SELECT 'COVERAGE', NULL, 'FACT_METERING_DAILY', NULL, NULL, NULL, c.M_FIRST, c.M_LAST, NULL FROM mcov c
+{coverage_rows}
 """
 
 

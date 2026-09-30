@@ -269,6 +269,20 @@ Admin → Settings, never in code.
   exact per-department billed credits; role-share within a warehouse as a
   secondary allocated lens; Unmapped bucket reconciles to the account
   total. Monthly statement export.
+- **Company all-in showback** (Chargeback & AI, below Department
+  chargeback) — per company: warehouse metering, the object-cost ledger's
+  serverless arms, Cortex Code (Snowsight + CLI) and estimated storage; the
+  cloud-services adjustment and the unattributed remainder are account
+  rows, so the table ties out to billed metering + estimated storage over
+  the complete metered days. On a long Window, a source that starts later
+  than the Window leaves its earlier dollars on the unattributed row (the
+  notes under the table name it). A negative family residual means the company rows read
+  more than that family's metering in the span (different Snowflake views,
+  different day boundaries); the note under the table names the family.
+  An UNKNOWN row shrinks once a COMPANY_SCOPE mapping lands (Unmapped
+  entities on Spend & Attribution): Cortex Code at once, the warehouse,
+  object-cost and storage lines as the loaders re-stamp recent days (older
+  days keep their stamp until a backfill).
 - **Cortex & Storage** — Cortex daily spend (token-based credits × $2.20),
   storage GB by database × storage rate.
 - **AI Users** — per-user Cortex consumption, exceptions (users over the

@@ -65,6 +65,7 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 | Month-end forecast: linear / seasonal / opt-in `ML.FORECAST` | Overview; `ml_forecast_option.sql` |
 | Renewal planner (growth scenarios, recommended commit) | Cost → Contract |
 | Department budgets + monthly statement exports | Cost → Chargeback |
+| Company all-in showback (warehouse + serverless + Cortex Code + estimated storage by company; cloud-services adjustment and unattributed remainder tie to billed metering + estimated storage) | Cost → Chargeback & AI |
 | Billing truth vs app model (org rate card vs credits x rate, monthly) | Admin → Org spend |
 | Styled HTML executive summary; per-table CSV everywhere | Overview; all tables |
 | Quarterly access-review export pack (grants matrix, unused roles, 90d diff) | Security → Access |

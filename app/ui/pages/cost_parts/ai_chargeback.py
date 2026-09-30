@@ -17,8 +17,10 @@ from app import companies
 from app.config import MAX_LIVE_WINDOW_DAYS, core_object
 from app.core.identity import identity_sql
 from app.core.query import execute_statement, run, run_batch_mixed
+from app.core.result import QueryResult
 from app.core.sqlsafe import sql_literal, sql_number
 from app.data import chargeback_sql, cortex_sql, cost_sql, mart27_sql, mart_sql
+from app.logic import showback
 from app.logic.cortex import (
     BUDGET_LADDER,
     CPR_MIN_PROJECTED_USD,
@@ -55,6 +57,7 @@ from app.ui.components import (
     export_button,
     guard,
     kpi_row,
+    methodology_note,
     notify,
     panel_help,
     reconciliation_footer,
@@ -69,6 +72,27 @@ from app.ui.components import (
 from app.ui.schema_gate import has_migration
 
 _PAGE = "Cost Intelligence"
+
+# #42 Part 1: Company all-in showback (Cost > Chargeback & AI). Marts only; no source label
+# spells the live-telemetry schema (this file sits at its live-scan budget).
+_SHOWBACK_SOURCE = ("FACT_METERING_DAILY + FACT_WAREHOUSE_DAILY + FACT_OBJECT_COST_DAILY + FACT_AI_USAGE_DAILY"
+                    " + FACT_STORAGE_DAILY + FACT_STORAGE_ACCOUNT_DAILY (marts, complete metered days)")
+_SHOWBACK_HELP = (
+    "Metered spend plus estimated storage for the window, split by company wherever the data carries a "
+    "company key: warehouse metering (by warehouse), serverless maintenance from the object-cost ledger "
+    "(by database), Cortex Code in Snowsight and the CLI (by user) and storage (by database). Spend with "
+    "no company key stays on account-level rows, so the rows add up to the all-in total. Showback, not an "
+    "invoice: nothing is spread by a share."
+)
+_SHOWBACK_TABLE_NOTE = (
+    "Warehouse: exact warehouse metering before the cloud-services adjustment, by the warehouse's company "
+    "(the same metering as Department chargeback above, over this panel's days). Serverless: the "
+    "object-cost ledger's clustering, materialized-view refresh, search-optimization, serverless-task and "
+    "Snowpipe credits, by the object's database; its query-compute arms are slices of warehouse compute "
+    "and are left out so nothing counts twice. AI: Cortex Code token credits in Snowsight and the CLI, by "
+    "user (Cortex Code Desktop is not read, so it stays on the unattributed row). Storage: estimated from "
+    "average daily database and fail-safe bytes, by database. Other metered: metering with no company key."
+)
 
 
 # Split out of app/ui/pages/cost.py (V028): section bodies only —
@@ -823,8 +847,13 @@ def _statement_export(company: str, rate: float) -> None:
             )
             st.success(f"{frame['DEPARTMENT'].nunique()} department statements for {month}.")
 
-def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *, bounds: tuple | None = None) -> None:
-    """Department chargeback: warehouse = exact usage (idle + unadjusted CS), role = allocated usage lens."""
+def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *,
+                    bounds: tuple | None = None) -> QueryResult | None:
+    """Department chargeback: warehouse = exact usage (idle + unadjusted CS), role = allocated usage lens.
+
+    Returns the co-scheduled Company all-in showback batch member (#42) for
+    _company_showback_panel, or None when the batch did not return one (the panel then reads
+    it serially). Both exits return it, so the panel never re-reads what the batch fetched."""
     _lm = "_lm" if bounds is not None else ""
     # WLA-1 (round 18): "last month" when bounded to the prior calendar month, else "{days}d".
     _wlab = window_label(bounds, days)
@@ -846,13 +875,19 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *, 
     if is_operator:
         _cb_specs.append({"key": "dmap", "tier": "recent",
                           "sql": chargeback_sql.department_map(), "source": "DEPARTMENT_MAP"})
+    # #42: the Company all-in showback (the next section) rides this SAME round trip — marts
+    # only, hourly-cached; the panel reads it serially only when the batch returns no member.
+    _cb_specs.append({"key": "showback", "tier": "hourly",
+                      "sql": chargeback_sql.company_allin_showback(days, company, bounds=bounds),
+                      "source": _SHOWBACK_SOURCE})
     _pf = run_batch_mixed(_cb_specs, page=_PAGE) or {}
+    _showback = _pf.get("showback")
     dept_res = _pf.get("dept") or run(chargeback_sql.department_window_credits(days, company, bounds=bounds), page=_PAGE,
                    key=f"cb_dept_{company}_{days}{_lm}", tier="historical",
                    source="WAREHOUSE_METERING_HISTORY x DEPARTMENT_MAP")
     if not guard(dept_res, "No warehouse credits in this window.",
                  setup_hint="Not installed yet — an admin can verify on Admin → Migrations & freshness. Seed department names in DEPARTMENT_MAP."):
-        return
+        return _showback
     df = dept_res.df.copy()
     df["USD"] = df["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))
     dept = df.groupby("DEPARTMENT", as_index=False)["USD"].sum().sort_values("USD", ascending=False)
@@ -865,7 +900,8 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *, 
                  "cloud-services credits, unadjusted (the account-level rebate lives "
                  "on Cost Intelligence → Spend & Attribution). Reconciles to the scoped "
                  "warehouse spend by construction; storage, serverless, AI, and transfer "
-                 "are not allocated here."},
+                 "are not allocated here. The Company all-in showback below adds serverless, "
+                 "Cortex Code and storage by company; transfer is not attributed anywhere."},
         {"label": "Departments", "value": f"{dept['DEPARTMENT'].nunique()}"},
         {"label": "Unmapped", "value": format_usd(unmapped_usd),
          "delta": "map warehouses below" if unmapped_usd > 0 else "fully mapped",
@@ -1034,3 +1070,155 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *, 
             notify(ok, msg if not ok else f"Mapped {name} → {department}.")
         elif not is_operator:
             st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")
+    return _showback
+
+
+def _company_showback_panel(company: str, days: int, rate: float, ai_rate: float, settings: dict, *,
+                            bounds: tuple | None = None, prefetched: QueryResult | None = None) -> None:
+    """#42 Part 1: per company, warehouse + serverless + Cortex Code + estimated storage dollars, with
+    the cloud-services adjustment and the unattributed remainder as account-level rows, so the rows
+    tie out to billed metering plus estimated storage. Read-only; marts only; the read rides the
+    Department chargeback batch (``prefetched``) and falls back to one serial run()."""
+    panel_help(_SHOWBACK_HELP)
+    res = prefetched if prefetched is not None else run(
+        chargeback_sql.company_allin_showback(days, company, bounds=bounds), page=_PAGE,
+        key=f"cb_showback_{company}_{days}{'_lm' if bounds is not None else ''}", tier="hourly",
+        source=_SHOWBACK_SOURCE)
+    if res.ok and res.truncated:
+        # one row per Cortex Code user rides this frame: a capped read would under-count the company
+        # rows (and could drop the WINDOW / COVERAGE rows), so it is never totalled
+        empty_state("unavailable", "The showback read hit the row cap, so its company totals would be "
+                                   "incomplete; it is not shown.")
+        result_caption(res)
+        return
+    if not guard(res, "The showback read returned no rows for this window."):
+        return
+    out = showback.company_showback(res.df, rate=rate, ai_rate=ai_rate,
+                                    storage_rates=showback.storage_tier_rates(settings), company=company)
+    s = out["summary"]
+    wlab = window_label(bounds, days)
+    state = out["state"]
+    if state == "shape":
+        empty_state("unavailable",
+                    "The showback read came back without the columns or rows this panel needs, so it cannot "
+                    "be shown.",
+                    detail="Missing: " + ", ".join(str(m) for m in s["missing"]))
+        result_caption(res)
+        return
+    if state == "no_ledger":
+        empty_state("needs_setup",
+                    "Daily metering (FACT_METERING_DAILY) has no rows yet, so there is no billed total to "
+                    "split. It fills once the daily facts loader has run; an admin can check Admin → "
+                    "Migrations & freshness.")
+        result_caption(res)
+        return
+    if state == "no_basis":
+        stall = (f" The newest daily-metering day is {s['stall_day']}, so the metering loader may be behind "
+                 "(Admin → Migrations & freshness).") if s.get("stall_day") else ""
+        empty_state("no_data_yet",
+                    "No complete metered day falls in this Window yet (today and the newest, possibly "
+                    "unfinished, daily-metering day never count). Widen the Window to see the showback." + stall)
+        result_caption(res)
+        return
+
+    span = s["span_label"]
+    table = out["table"]
+    if not s["scoped"]:
+        t = safe_float(s["allin_total_usd"])
+        c = safe_float(s["company_usd"])
+        adj = safe_float(s["adjustment_usd"])
+        u = safe_float(s["unattributed_usd"])
+        pct = s["company_share_pct"]
+        kpi_row([
+            {"label": f"All-in total, {span}", "value": format_usd(t),
+             "help": "Billed metering credits (cloud-services adjustment applied) priced at the configured "
+                     "compute and AI rates, plus storage estimated at the configured storage rates, over the "
+                     "complete metered days shown. The credit part is the same basis as the credit-spend tile "
+                     "on Spend & Attribution, but complete days only. Excludes data transfer, Marketplace and "
+                     "org-currency adjustments."},
+            {"label": "Company-attributed share", "value": f"{pct:.0f}%" if pct is not None else "—",
+             "help": "Company rows, UNKNOWN included, as a share of the all-in total. UNKNOWN is spend whose "
+                     "warehouse, database or user has no company evidence yet; a COMPANY_SCOPE mapping moves "
+                     "it (Cortex Code at once, the other lines as the loaders re-stamp recent days; see "
+                     "Unmapped entities on Spend & Attribution). A different lens from Spend & "
+                     "Attribution's 'Attributable to a company', which counts warehouse metering only."},
+            {"label": "Unattributed (no company key)", "value": format_usd(u),
+             "help": "The all-in total minus the company rows and the cloud-services adjustment: "
+                     "reader-account and replication metering, AI services other than Cortex Code in "
+                     "Snowsight and the CLI, serverless with no object-cost ledger arm, cloud services "
+                     "outside any warehouse, storage with no per-database split, a few hours of day-boundary "
+                     "offset, and anything on days a source has not loaded (named under the table when it "
+                     "happens)."},
+            {"label": "Cloud-services adjustment", "value": format_usd(abs(adj)),
+             "help": "The daily cloud-services adjustment from metering: a credit that lowers the bill (a "
+                     "positive amount here, negative in the table). It is account-level, so it is its own "
+                     "row and is not taken out of any company; company warehouse dollars are exact metering "
+                     "before it, the same basis as Department chargeback above."},
+        ])
+        company_rows = table[~table["COMPANY"].isin((showback.ADJUSTMENT_ROW, showback.UNATTRIBUTED_ROW))]
+        if len(company_rows) >= 2:
+            # takeaway stays off: its share note would be of the company rows, not of the all-in total
+            charts.bar_usd(company_rows, "COMPANY", "TOTAL_USD", title="All-in USD", top_n=10)
+        # No sort_label: with one, a 4+ row table draws F26's 0-floored in-cell bar, and the
+        # adjustment row is negative.
+        styled_table(table, slug="company-showback", size_note=False)
+        st.caption(_SHOWBACK_TABLE_NOTE)
+        # The table carries its own remainder row, so there is no reconciliation_footer (its
+        # "variance" would read as an error); this line is the tie-out.
+        st.caption(md_dollars(
+            f"Ties out: company rows {format_usd(c)} {'−' if adj < 0 else '+'} cloud-services adjustment "
+            f"{format_usd(abs(adj))} {'−' if u < 0 else '+'} unattributed {format_usd(abs(u))} = all-in total "
+            f"{format_usd(t)}. The unattributed row is the remainder, so the rows always add up; its size is "
+            "what carries no company key. Figures are rounded separately."))
+        with st.expander("What the unattributed row holds"):
+            st.caption("Account = the service family's all-in dollars; Company rows = what the company rows "
+                       "above hold of it; Unattributed = the rest after the cloud-services adjustment. The "
+                       "Unattributed column sums to the unattributed row.")
+            styled_table(out["breakdown"], slug="showback-unattributed", size_note=False,
+                         column_config={"CONTENTS": st.column_config.TextColumn("Contents", width="large")})
+    else:
+        if table.empty:
+            if company == "UNKNOWN":
+                empty_state("clean", "Nothing in this span is stamped UNKNOWN: every warehouse, serverless, "
+                                     "Cortex Code and storage line read here has a company.")
+            else:
+                empty_state("no_data_yet", f"No warehouse, serverless, Cortex Code or storage spend is "
+                                           f"stamped {company} in {span}.")
+        else:
+            pct = s["company_share_pct"]
+            kpi_row([
+                {"label": f"{company} all-in, {span}", "value": format_usd(safe_float(s["company_usd"])),
+                 "help": "This company's warehouse, serverless, Cortex Code and estimated storage dollars "
+                         "over the complete metered days shown: the same row the ALL view shows."},
+                {"label": "Share of the account's all-in total",
+                 "value": f"{pct:.0f}%" if pct is not None else "—",
+                 "help": "This company's all-in dollars over the whole account's all-in total for the same "
+                         "days (billed metering plus estimated storage)."},
+            ])
+            styled_table(table, slug="company-showback", size_note=False)
+            st.caption(_SHOWBACK_TABLE_NOTE)
+        st.caption(f"Company scope: {company} only. The other companies, the cloud-services adjustment and "
+                   "the unattributed remainder are account-level rows; set Company to ALL to see them and the "
+                   "tie-out to the all-in total.")
+
+    n = int(safe_float(s["span_days"]))
+    st.caption(f"Covers {span}: {n} complete metered day{'' if n == 1 else 's'} of the selected Window "
+               f"({wlab}).")
+    for note in out["notes"]:
+        st.caption(md_dollars(note))
+    st.caption(md_dollars(
+        f"Billing basis: billed metering credits (cloud-services adjustment applied) x ${rate:.2f} per "
+        f"credit (${ai_rate:.2f} for AI), plus storage estimated at the Admin storage rates. Complete "
+        "metered days only: today and the newest, possibly unfinished, daily-metering day never count. "
+        "Data transfer, Marketplace and org-currency adjustments are not included; the org rate card on "
+        "Contract & Forecast is the invoice. Metering days are UTC while the warehouse and object-cost facts "
+        "use Central days, so a few hours at each end of the span can move between a company row and the "
+        "unattributed row."))
+    result_caption(res)
+    methodology_note(md_dollars(
+        "How it is computed: every row is cut to the days daily metering has closed in the Window. The "
+        "metered side is priced by service family (AI at the AI rate). Company rows use each fact's stored "
+        "company (warehouse, object-cost and storage rows keep the company stamped when they loaded; the "
+        "loaders re-stamp only recent days), while Cortex Code uses today's user mapping. Storage prices "
+        "each day's bytes at 1/(days in that month) of the monthly $/TiB rate. Nothing is allocated by a "
+        "share; the unattributed row is the all-in total minus everything with a key."))
