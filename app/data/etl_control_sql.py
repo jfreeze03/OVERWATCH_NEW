@@ -943,7 +943,8 @@ def run_task_evidence_scan(control_fqn: object, *, task: object, workflow: objec
     the task's CONTROL_STATUS window (+/- EVIDENCE_SLACK_MIN): the bare upper-case name after ``CALL``
     (quotes, schema and arg list dropped) must equal insights.proc_key(task) — the key CHANGED_RECENTLY
     uses. Never CONTAINS, which mis-matches nested prefixes (SP_D_PLCY_TSACTN vs
-    SP_D_PLCY_TSACTN_STS_CANCLTN_RSN). M_* mapping tasks issue no CALL, so they honestly match nothing.
+    SP_D_PLCY_TSACTN_STS_CANCLTN_RSN). A task that issues no CALL (typically an M_* mapping that sends its
+    SQL directly) honestly matches nothing; an M_* task that CALLs a same-named procedure matches normally.
     Exact QUERY_TAG matching is Phase 2 (docs/design/INFORMATICA_QUERY_TAG_ASK.md).
 
     DATABASE: every EDW environment (PRD, SIT, DEV, ...) deploys the same procedure names, so a name match

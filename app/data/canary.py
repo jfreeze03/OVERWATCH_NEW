@@ -179,6 +179,17 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("cortex.ai_functions_daily", lambda: cortex_sql.cortex_ai_functions_daily(1)),
     ("cortex.model_costs", lambda: cortex_sql.cortex_model_costs(1)),
     ("cortex.source_costs", lambda: cortex_sql.cortex_source_costs(1)),
+    # v4.603: the probe=True Cortex reads that had no canary. A probe read logs neither an absent object NOR a
+    # missing column (query.run's expected-absence set), so a drifted column failed silently on every render
+    # (the v4.601.1 QUOTA_ACCESS_BLOCK_HISTORY CREATED_ON class). Each is declared in EXPECTED_GAPS below, so
+    # only a true absence reads GAP; an invalid identifier FAILs. Compile-only (the default) is cheap; the
+    # executed probe of code_token_types pays the same window-flat ~22s secure-view scan as code_user_rollup
+    # (the builder has no window knob by design) against the live tier's 30s timeout, so a timeout there in
+    # execute mode is load, not drift -- compile-only is the drift check.
+    ("cortex.guardrails_daily", lambda: cortex_sql.guardrails_daily(1)),
+    ("cortex.code_token_types", cortex_sql.cortex_code_token_types),
+    ("cortex.quota_access_block_history", lambda: cortex_sql.quota_access_block_history(1)),
+    ("cortex.app_self_cost", lambda: mart_sql.app_cortex_self_cost(1)),
     ("mart.exec_board", lambda: mart_sql.exec_board("ALFA", 7)),
     ("mart.source_freshness", mart_sql.source_freshness),
     ("mart.source_freshness_state", mart_sql.source_freshness_state),
@@ -341,4 +352,10 @@ EXPECTED_GAPS: frozenset[str] = frozenset({
     "cortex.model_costs",
     "cortex.source_costs",
     "cortex.mart_vs_live_ai_recon",   # reads the subscription-gated CORTEX_CODE_* views
+    # v4.603 probe-read canaries: absence is an account-feature state (Guardrails / per-user quota views,
+    # the Cortex Code subscription, the AI-functions view); a missing column is drift and FAILs.
+    "cortex.guardrails_daily",
+    "cortex.code_token_types",
+    "cortex.quota_access_block_history",
+    "cortex.app_self_cost",
 })

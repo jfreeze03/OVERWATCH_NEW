@@ -261,11 +261,21 @@ ORDER BY CREDITS DESC
 def guardrails_daily(days: int = 30) -> str:
     """Cortex Guardrails flag telemetry by day (repo review 2026-08-17).
 
-    OPTIONAL view — CORTEX_AI_GUARDRAILS_USAGE_HISTORY exists only on accounts
-    with Cortex Guardrails enabled; callers MUST pass probe=True and render an
-    honest "not enabled" state on the error path (the CORTEX_AI_FUNCTIONS
-    pattern above). Column set kept minimal so schema drift lands in the same
-    honest-degrade path, never in wrong data."""
+    OPTIONAL view — CORTEX_AI_GUARDRAILS_USAGE_HISTORY can be absent on some
+    accounts/regions, but it EXISTS on this account whether or not Guardrails is
+    enabled (owner probe 2026-09-29: created 2026-05-26). Callers MUST pass
+    probe=True and branch on error_kind (v4.603): an absent object is a setup
+    state ("not readable by this app", never "Guardrails is not enabled"), and
+    any other failure — a missing column included, which a probe read does not
+    log — renders 'unavailable' with the error. Column set kept minimal so schema
+    drift fails loudly, never as wrong data.
+
+    UNVERIFIED columns: START_TIME and GUARDRAILS_RESPONSE were never checked
+    against the view. The owner's column list (S0b, 14 columns, cut off) starts
+    USER_ID, USER_NAME, USER_TAGS, REQUEST_ID, PARENT_REQUEST_ID — the
+    CORTEX_CODE_* shape, whose time column is USAGE_TIME. The canary
+    ``cortex.guardrails_daily`` FAILs if either column is missing; rename them
+    only from the owner's full column list, never by guessing."""
     days = bounded_days(days)
     return f"""
 SELECT
@@ -285,7 +295,9 @@ def cortex_code_token_types() -> str:
     token totals can't show.
 
     OPTIONAL column (newer view versions; VARIANT shape may drift) — callers MUST pass
-    probe=True and degrade honestly to the token-total view.
+    probe=True and degrade honestly to the token-total view (only for the expected-absence
+    kinds; a timeout is a failed read, v4.603). The canary ``cortex.code_token_types`` runs
+    this exact text: a missing TOKENS_GRANULAR FAILs it, a missing subscription is a GAP.
 
     Days-independent (v4.528): scans the full LIVE_DERIVE_DAYS retention ONCE and keeps a
     USAGE_DATE column, so ONE (sql,scope) cache entry serves EVERY window — the caller
@@ -354,8 +366,10 @@ def quota_access_block_history(days: int, *, bounds: tuple | None = None) -> str
     (logic/quotas.block_history) so a new column never breaks the read. The reader passes
     probe=True: the view is absent on accounts without the feature, an EXPECTED absence,
     not an error to log -- the panel still shows a failed read as unavailable, never as
-    "no blocks". Honors the scope-bar 'Last month' bounds so the block window matches the
-    tab's spend window.
+    "no blocks". A probe read does not log a missing column either, so the canary
+    ``cortex.quota_access_block_history`` (v4.603) is what catches the CREATED_ON class: it
+    FAILs on an invalid identifier and is a GAP only when the view is absent. Honors the
+    scope-bar 'Last month' bounds so the block window matches the tab's spend window.
 
     Review (v4.601.1): the read ALSO takes the last BLOCK_STATE_DAYS (32) days, whatever the
     window, and marks each row IN_WINDOW. The window's rows drive the event counts and the table;

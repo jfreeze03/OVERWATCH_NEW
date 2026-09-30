@@ -1507,7 +1507,8 @@ def _ai_guardrails_tab(company: str) -> None:
        (cortex_code_user_daily) as a coverage-gated fallback that shares the
        Cost page's cached scan.
     2. GUARDRAILS — flag telemetry from the optional Cortex Guardrails usage
-       view, probe-gated with an honest not-enabled state."""
+       view, probe-gated: an absent view is a setup state (not readable by this
+       app), any other failure is 'unavailable' with the error (v4.603)."""
     from app.logic.ai_guardrails import (
         TOKEN_Z_FLAG,
         VELOCITY_MIN_REQUESTS,
@@ -1581,13 +1582,24 @@ def _ai_guardrails_tab(company: str) -> None:
                    anchor="sec-ai-guardrails")
     gr = run(cortex_sql.guardrails_daily(30), page=_PAGE, key="ai_guardrails_daily",
              tier="historical", source="CORTEX_AI_GUARDRAILS_USAGE_HISTORY", probe=True)
-    if not gr.ok:
+    # v4.603: branch on the failure kind (the v4.601.1 quota-panel pattern). The read is a probe, so an
+    # absent view AND a missing column go unlogged: the panel must say which it was. The view exists on
+    # this account (owner probe 2026-09-29), so a failure is never "Guardrails is not enabled": an absent
+    # object means the app cannot read the view; anything else (a changed column, a timeout) is a failed read.
+    if not gr.ok and gr.error_kind in ("absent", "unknown_function"):
         empty_state("needs_setup",
-                    "Cortex Guardrails telemetry isn't available on this account (the usage view "
-                    "appears only once Guardrails is enabled on Cortex functions). Behavioral "
-                    "monitoring above still runs; enable Guardrails to add prompt-flag telemetry.")
+                    "The Cortex Guardrails usage view (CORTEX_AI_GUARDRAILS_USAGE_HISTORY) "
+                    "is not readable by this app: it is missing in this account or region, or the app's "
+                    "role cannot see it. Guardrail flags cannot be shown; behavioral monitoring above "
+                    "still runs.")
+    elif not gr.ok:
+        empty_state("unavailable",
+                    "The Cortex Guardrails usage view could not be read, so guardrail flags cannot be shown.",
+                    detail=gr.error)
     elif gr.empty:
-        empty_state("clean", "Guardrails is enabled and recorded no flagged requests in 30 days.")
+        # Zero rows: the view is readable but recorded no guardrails-checked request, which says
+        # nothing about whether Guardrails is enabled -- so not a verified-clean state either.
+        empty_state("no_data_yet", "No guardrails-checked requests were recorded in the last 30 days.")
     else:
         _g = gr.df.copy()
         _req = float(pd.to_numeric(_g["REQUESTS"], errors="coerce").fillna(0).sum())
