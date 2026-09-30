@@ -547,11 +547,12 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                 ops_sql.operator_stats_summary(days, company, wh_filter, user_contains=_op_u, database=_op_db, schema_contains=_op_sc, bounds=bounds),
                 page=_PAGE, key=f"q_opsum_{company}_{days}{_lm}", tier="recent",
                 source="FACT_QUERY_OPERATOR_STATS_DAILY", probe=True)
-            if not _opsum.ok and _opsum.error_kind == "absent":
+            if not _opsum.ok and is_setup_absence(_opsum.error_kind):
                 empty_state(
                     "needs_setup",
-                    "The operator-stats collector isn't set up yet. Once an admin installs the "
-                    "pending Operations objects (Admin ▸ Migrations & freshness), this profiles the "
+                    "The operator-stats collector isn't set up yet, or the app's role cannot read it. "
+                    "Once an admin installs the pending Operations objects (Admin ▸ Migrations & "
+                    "freshness), this profiles the "
                     "recent expensive queries at the operator level — exploding joins, spill causes, "
                     "and per-operator anatomy.")
             elif _opsum.ok and int(_opsum.df.iloc[0].get("QUERIES_PROFILED") or 0) == 0:

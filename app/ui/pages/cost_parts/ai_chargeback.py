@@ -17,7 +17,7 @@ from app import companies
 from app.config import MAX_LIVE_WINDOW_DAYS, core_object
 from app.core.identity import identity_sql
 from app.core.query import execute_statement, run, run_batch_mixed
-from app.core.result import QueryResult
+from app.core.result import QueryResult, is_setup_absence
 from app.core.sqlsafe import sql_literal, sql_number
 from app.data import chargeback_sql, cortex_sql, cost_sql, mart27_sql, mart_sql
 from app.logic import showback
@@ -484,10 +484,11 @@ def _ai_quota_panel(enriched: pd.DataFrame, summary: dict, days: int,
               key=f"ai_quota_blocks_{days}{'_lm' if bounds is not None else ''}", tier="recent",
               source="ACCOUNT_USAGE.QUOTA_ACCESS_BLOCK_HISTORY", probe=True, max_rows=1000)
     if not blk.ok:
-        # v4.601.1: a failed read is never "no blocks". The read is a probe, so Snowflake errors are not logged:
+        # v4.601.1: a failed read is never "no blocks". The read is a probe, so an absent view is not logged:
         # say what happened here instead (the v4.543 reader failed on every account and the panel reported no
-        # blocks and no enforcing quota). An absent view is a setup state; anything else is a failed read.
-        if blk.error_kind == "absent":
+        # blocks and no enforcing quota). A setup absence (absent, or an "Insufficient privileges" error, v4.605)
+        # is a setup state; anything else is a failed read.
+        if is_setup_absence(blk.error_kind):
             empty_state("needs_setup", "The quota block history view is not available to this app (per-user AI "
                         "quotas may not be enabled on this account, or the app's role cannot read it), so "
                         "blocks cannot be shown.")
@@ -681,6 +682,12 @@ def _token_economics_panel(company: str, days: int, cap_credits: float, *, bound
         elif _drift:
             empty_state("unavailable", "A column the Cortex Code token-type read uses is missing from Snowflake's "
                         "view (schema drift), so token economics cannot be shown.", detail=te_res.error)
+        elif is_setup_absence(te_res.error_kind):
+            # v4.605: an "Insufficient privileges" error ('privilege', the one setup-absence kind the tuple above
+            # leaves out because run() logs it) is a setup state like the other panels, never "Retry".
+            empty_state("needs_setup", "The app's role cannot read the Cortex Code usage views (Insufficient "
+                        "privileges), so token economics cannot be shown. Re-apply the app's grants (roles.sql).",
+                        detail=te_res.error)
         else:
             empty_state("unavailable", "The Cortex Code token-type read failed this run, so token economics "
                         "cannot be shown. Retry, or see the Admin error log.", detail=te_res.error)

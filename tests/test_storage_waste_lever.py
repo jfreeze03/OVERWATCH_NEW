@@ -231,7 +231,10 @@ def test_reads_unavailable_note_by_kind():
     # that shows the error itself
     kind, err = _as_run_stores("003001 (42501): SQL access control error: Insufficient privileges to operate on "
                                "view 'ACCESS_HISTORY'")
-    assert kind == "privilege" and reads_unavailable_note(kind, err) == "the access-history read failed: " + setup
+    # the error's own full stop is dropped: the degraded caption appends one (review r3: it read "roles.sql..")
+    assert kind == "privilege" and reads_unavailable_note(kind, err) == (
+        "the access-history read failed: " + setup.rstrip("."))
+    assert not reads_unavailable_note(kind, err).endswith(".")
     # the edition text survives format_snowflake_error, so the edition branch still fires on the real path
     kind, err = _as_run_stores("Unsupported feature 'ACCESS_HISTORY'")
     assert reads_unavailable_note(kind, err) == ah

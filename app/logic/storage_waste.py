@@ -218,9 +218,10 @@ def reads_unavailable_note(error_kind: object, error: object = "") -> str:
     and the SNOWFLAKE grant. A timeout says so; anything else, an "Insufficient privileges" error ('privilege')
     included, shows the error itself (whitespace collapsed, at most 300 characters). This account reads
     ACCESS_HISTORY daily (the object-cost loader), so a timeout or a transient fault is the likelier cause. The
-    Database filter never narrows this scan, so the note never offers it."""
+    Database filter never narrows this scan, so the note never offers it. The error's trailing full stop is
+    dropped: the degraded caption appends its own ('... roles.sql. STALE here ...', never '..')."""
     kind = str(error_kind or "").strip().lower()
-    err = " ".join(str(error or "").split())[:300]
+    err = " ".join(str(error or "").split())[:300].rstrip(" .")   # the caption adds its own full stop
     low = err.lower()
     if "enterprise" in low or "unsupported feature" in low:
         return _NOTE_ACCESS_HISTORY

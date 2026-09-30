@@ -581,7 +581,8 @@ def test_policy_panel_is_off_until_toggled(monkeypatch):
     assert "not counted in the Decision-queue domain scores" in fake.text("caption")
 
 
-@pytest.mark.parametrize("kind", ["absent", "unknown_function"])
+# v4.605 review r3: an "Insufficient privileges" error ('privilege') is a setup absence like guard()'s
+@pytest.mark.parametrize("kind", ["absent", "privilege", "unknown_function"])
 def test_policy_panel_absent_view_is_setup(monkeypatch, kind):
     pc = _pc()
     fake, seen = _render_panel(monkeypatch, _failed(kind))
@@ -680,8 +681,9 @@ def test_parity_toggle_states(monkeypatch):
     sec._render_masking_parity()
     assert seen["runs"] == []                                          # off until toggled
 
-    _, seen = _render_parity(monkeypatch, _failed("absent"))
-    assert seen["empty"] == [("needs_setup", pc.POLICY_VIEW_UNREADABLE)]
+    for kind in ("absent", "privilege"):                              # review r3: privilege is a setup absence
+        _, seen = _render_parity(monkeypatch, _failed(kind))
+        assert seen["empty"] == [("needs_setup", pc.POLICY_VIEW_UNREADABLE)], kind
 
     _, seen = _render_parity(monkeypatch, _failed("timeout"))
     assert seen["empty"] == [("unavailable", "The environment grouping could not be read from Snowflake's "

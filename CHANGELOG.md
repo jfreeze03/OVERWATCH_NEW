@@ -5,7 +5,7 @@
 App-only, no migration. The small buildable-now items left after the 2026-09-30 re-ground-truth: the #35 storage-waste
 lever, a duration humanization sweep (owner decision: the query advisor's #17-locked numbers are humanized too; its hedged
 wording stays), the probe-failure routing the #43 review flagged, and the Chargeback & AI queue write on the shared #15 path.
-Adversarially reviewed before release.
+Adversarially reviewed before release (round 1: 23 findings; round 2: 11; round 3: 4 low -- all fixed).
 
 - **Cost: unread-table storage joins Addressable $/mo (#35 storage leg).**
   - Storage & waste LEVER per table. When the storage-waste scan has read evidence, each table gets a LEVER and an ESTIMATED EST_MONTHLY_USD at STORAGE_USD_PER_TB_MONTH. The new pure module is logic/storage_waste.py, and the frame keeps the same rows in the same order.
@@ -92,10 +92,13 @@ Adversarially reviewed before release.
     checked" line lists each failed read's error in its Error detail. Unknown never counts as pending. An empty routes
     read now says "0 enabled route(s)" (this account: 1). The AST ratchet in tests/test_probe_absence_split.py counts
     a needs_setup branch as split only when a setup-absence check on that read's own error_kind controls it (a lumped
-    tuple, `!=` or a negated check no longer counts; the real v4.604 shape is now flagged), and its allowlist of non-
-    probe sites is exact: file, variable, function and callee, one site each. Owner check after deploy: open Security
-    > Access and toggle "Check admin network-policy coverage". It should render KPIs on this account (S1b lists one
-    USER-level and one ACCOUNT-level network policy).
+    tuple, `!=` or a negated check no longer counts; the real v4.604 shape is now flagged), and a literal kind check
+    must hold 'absent' and 'privilege' together, so `== "absent"` alone is not a split. That moved the policy
+    coverage, environment grouping, Cortex Guardrails, AI-quota block and operator-stats panels onto is_setup_absence,
+    and the CoCo token panel shows needs_setup naming the grants (roles.sql) for a privilege error instead of "Retry",
+    and its allowlist of non-probe sites is exact: file, variable, function and callee, one site each. Owner check
+    after deploy: open Security > Access and toggle "Check admin network-policy coverage". It should render KPIs on
+    this account (S1b lists one USER-level and one ACCOUNT-level network policy).
 - **Cost > Chargeback & AI: Track top exceptions writes through the shared Track statement.**
   - Cost > Chargeback & AI "Track top exceptions as work items" now writes through the shared Track statement
     (fix_queue.track_entities_sql, the one Optimize and Control Room triage use), at most three statements per click

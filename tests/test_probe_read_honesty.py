@@ -91,7 +91,7 @@ def _render_guardrails(monkeypatch, result):
     return fake, seen
 
 
-@pytest.mark.parametrize("kind", ["absent", "unknown_function"])
+@pytest.mark.parametrize("kind", ["absent", "privilege", "unknown_function"])
 def test_guardrails_absent_view_is_setup_and_never_blames_guardrails_being_disabled(monkeypatch, kind):
     _, seen = _render_guardrails(monkeypatch, _failed(kind))
     ((state, msg),) = seen["empty"]
@@ -172,6 +172,15 @@ def test_token_panel_missing_other_column_is_drift(monkeypatch):
     assert state == "unavailable" and "schema drift" in msg
     assert "Admin error log" not in msg and "error log" not in msg.lower()
     assert seen["detail"] == [res.error]
+    assert _TOKENS_NOTE not in fake.text("caption") and seen["runs"] == 1
+
+
+def test_token_panel_privilege_error_is_setup_not_retry(monkeypatch):
+    """v4.605 review r3: 'privilege' is logged by run(), so it is outside the locked caption tuple, but it is a
+    setup absence like on every other panel: needs_setup naming the grants, never 'Retry'."""
+    fake, seen = _render_token_panel(monkeypatch, _failed("privilege"))
+    ((state, msg),) = seen["empty"]
+    assert state == "needs_setup" and "roles.sql" in msg and "Retry" not in msg
     assert _TOKENS_NOTE not in fake.text("caption") and seen["runs"] == 1
 
 

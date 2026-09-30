@@ -700,12 +700,25 @@ def _kind_var(node: ast.AST) -> str | None:
     return None
 
 
+# 'absent' ("does not exist or not authorized") and 'privilege' ("Insufficient privileges") are the one
+# not-authorized family: a literal split must keep them together, or a lost grant renders as a red failed read
+# on one panel and needs_setup on the next (review r3: four panels kept the pre-'privilege' tuple).
+_NOT_AUTHORIZED = frozenset({"absent", "privilege"})
+
+
+def _closed_kinds(kinds: set[object]) -> bool:
+    """A non-empty subset of SETUP_ABSENCE_KINDS that holds both not-authorized kinds or neither."""
+    return (bool(kinds) and kinds <= SETUP_ABSENCE_KINDS
+            and (not kinds & _NOT_AUTHORIZED or kinds >= _NOT_AUTHORIZED))
+
+
 def _absence_subset(node: ast.AST) -> bool:
-    """SETUP_ABSENCE_KINDS itself, or a literal tuple / set / list of kinds that is a non-empty subset of it."""
+    """SETUP_ABSENCE_KINDS itself, or a literal tuple / set / list of constant kinds that _closed_kinds accepts."""
     if isinstance(node, ast.Name | ast.Attribute):
         return (node.id if isinstance(node, ast.Name) else node.attr) == "SETUP_ABSENCE_KINDS"
     return (isinstance(node, ast.Tuple | ast.Set | ast.List) and bool(node.elts)
-            and all(isinstance(e, ast.Constant) and e.value in SETUP_ABSENCE_KINDS for e in node.elts))
+            and all(isinstance(e, ast.Constant) for e in node.elts)
+            and _closed_kinds({e.value for e in node.elts}))
 
 
 def _absence_check(node: ast.AST, *, negative: bool = False) -> str | None:
@@ -714,8 +727,10 @@ def _absence_check(node: ast.AST, *, negative: bool = False) -> str | None:
     positive (negative=False): true ONLY for a subset of SETUP_ABSENCE_KINDS -- is_setup_absence(X.error_kind),
     `X.error_kind == <absence kind>`, `X.error_kind in <subset literal | SETUP_ABSENCE_KINDS>`, or an `or` of such
     checks on one X. negative=True: the complement -- true for EVERY kind outside such a subset (`not <positive>`,
-    `!=`, `not in`). Anything else -- a lumped `in _PROBE_ABSENT`, a literal with 'timeout' or 'missing_column',
-    a positive check under a `not` -- is not a split (review R1-12)."""
+    `!=`, `not in`). A literal kind or kind set must hold 'absent' and 'privilege' together or neither
+    (_closed_kinds), so `== "absent"` alone is not a split (review r3). Anything else -- a lumped
+    `in _PROBE_ABSENT`, a literal with 'timeout' or 'missing_column', a positive check under a `not` -- is not a
+    split (review R1-12)."""
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
         return _absence_check(node.operand, negative=not negative)
     if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "is_setup_absence"
@@ -729,7 +744,7 @@ def _absence_check(node: ast.AST, *, negative: bool = False) -> str | None:
         if var is None:
             return None
         if isinstance(op, ast.Eq | ast.NotEq):
-            fits = isinstance(right, ast.Constant) and right.value in SETUP_ABSENCE_KINDS
+            fits = isinstance(right, ast.Constant) and _closed_kinds({right.value})   # so never "absent" alone
             return var if fits and isinstance(op, ast.NotEq if negative else ast.Eq) else None
         if isinstance(op, ast.In | ast.NotIn):
             return var if _absence_subset(right) and isinstance(op, ast.NotIn if negative else ast.In) else None
@@ -911,6 +926,22 @@ def kind_only():
 def not_in_lumped():
     if not g.ok and g.error_kind not in ("timeout",):
         empty_state("needs_setup", "m")
+def absent_only_tuple():
+    if not k.ok and k.error_kind in ("absent", "unknown_function"):
+        empty_state("needs_setup", "m")
+def absent_only_eq():
+    if not m.ok and m.error_kind == "absent":
+        empty_state("needs_setup", "m")
+def absent_only_kind():
+    if n.error_kind == "absent":
+        empty_state("needs_setup", "m")
+def absent_only_else():
+    if q.ok:
+        pass
+    elif not q.ok and q.error_kind != "absent":
+        empty_state("unavailable", "m")
+    else:
+        empty_state("needs_setup", "m")
 def trailing_else():
     if f.ok:
         pass
@@ -923,10 +954,10 @@ def trailing_else():
 # Every split shape the app uses today (negative controls): none may be flagged.
 _V4605_SPLITS = '''
 def s1():
-    if not r.ok and r.error_kind in ("absent", "unknown_function"):
+    if not r.ok and r.error_kind in ("absent", "privilege", "unknown_function"):
         empty_state("needs_setup", "m")
 def s2():
-    if not r.ok and r.error_kind == "absent":
+    if not r.ok and r.error_kind == "unknown_function":
         empty_state("needs_setup", "m")
 def s3():
     if not r.ok and is_setup_absence(r.error_kind):
@@ -936,7 +967,7 @@ def s4():
             and is_setup_absence(coverage.error_kind)):
         _setup_state("m")
 def s5():
-    if blk.error_kind == "absent":
+    if blk.error_kind in SETUP_ABSENCE_KINDS:
         empty_state("needs_setup", "m")
 def s6():
     if not r.ok and r.error_kind in SETUP_ABSENCE_KINDS:
@@ -960,7 +991,7 @@ def s8():
 def s9():
     if h.ok:
         pass
-    elif not h.ok and h.error_kind != "absent":
+    elif not h.ok and h.error_kind not in ("absent", "privilege"):
         empty_state("unavailable", "m")
     else:
         empty_state("needs_setup", "m")
@@ -991,7 +1022,7 @@ def test_the_ratchet_flags_a_lumped_kind_split():
     """Review R1-12: mentioning X.error_kind is not a split -- the kind must be checked against the setup-absence
     kinds, as a required conjunct, not under a `not`."""
     flagged = sorted(v for v, _ in _setup_on_failure_sites(ast.parse(_PRE_V4605)))
-    assert flagged == ["a", "auth", "b", "c", "d", "e", "f", "g", "npc"]
+    assert flagged == ["a", "auth", "b", "c", "d", "e", "f", "g", "k", "m", "n", "npc", "q"]
     assert _setup_on_failure_sites(ast.parse(_V4605_SPLITS)) == []
 
 

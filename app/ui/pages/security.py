@@ -939,7 +939,7 @@ def _render_policy_coverage() -> None:
         return
     res = run(security_sql.data_policy_coverage(), page=_PAGE, key="sec_policy_cov", tier="hourly",
               probe=True, source="POLICY_REFERENCES (masking, row-access, projection, aggregation)")
-    if not res.ok and res.error_kind in ("absent", "unknown_function"):
+    if not res.ok and is_setup_absence(res.error_kind):
         empty_state("needs_setup", POLICY_VIEW_UNREADABLE)
         return
     if not res.ok:
@@ -1021,7 +1021,7 @@ def _render_masking_parity(masked_dbs: tuple = (), *, tag_masking: bool = False)
         return
     par = run(security_sql.masking_environment_parity(), page=_PAGE, key="sec_policy_parity", tier="hourly",
               probe=True, source="POLICY_REFERENCES (masked tables grouped across environments)")
-    if not par.ok and par.error_kind in ("absent", "unknown_function"):
+    if not par.ok and is_setup_absence(par.error_kind):
         empty_state("needs_setup", POLICY_VIEW_UNREADABLE)
         return
     if not par.ok:
@@ -1857,7 +1857,7 @@ def _ai_guardrails_tab(company: str) -> None:
     # absent view AND a missing column go unlogged: the panel must say which it was. The view exists on
     # this account (owner probe 2026-09-29), so a failure is never "Guardrails is not enabled": an absent
     # object means the app cannot read the view; anything else (a changed column, a timeout) is a failed read.
-    if not gr.ok and gr.error_kind in ("absent", "unknown_function"):
+    if not gr.ok and is_setup_absence(gr.error_kind):
         empty_state("needs_setup",
                     "The Cortex Guardrails usage view (CORTEX_AI_GUARDRAILS_USAGE_HISTORY) "
                     "is not readable by this app: it is missing in this account or region, or the app's "
