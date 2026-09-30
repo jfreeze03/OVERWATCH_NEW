@@ -10,7 +10,7 @@ import csv
 import html as _html
 import math
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from io import StringIO
 
 import pandas as pd
@@ -47,6 +47,13 @@ def account_now() -> datetime:
         return datetime.now(tz=ZoneInfo(ACCOUNT_TIMEZONE)).replace(tzinfo=None)
     except (ImportError, KeyError):  # ZoneInfoNotFoundError is a KeyError
         return datetime.now()
+
+
+def utc_now() -> datetime:
+    """Now as an AWARE UTC datetime, for an elapsed-time stamp the app keeps itself (e.g. the unread-maintenance
+    handoff's 1h life, savings_rollup.unread_lever). Unlike account_now() it never repeats or skips an hour at a
+    DST change. Never compare it with a naive mart timestamp: that is what account_now() is for."""
+    return datetime.now(UTC)
 
 
 def account_today() -> date:

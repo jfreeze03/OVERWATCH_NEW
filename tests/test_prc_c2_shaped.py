@@ -464,3 +464,92 @@ def test_proof_pipeline_without_a_scan_offers_the_doorway():
     at.run()
     assert not at.exception, f"doorway (shaped): {at.exception}"
     assert at.session_state["opt_section"] == "Storage & waste"
+
+
+# --- R1-15 / R1-22: the Proof ▸ Pipeline headline follows the levers counted, not the idle read alone ----------
+
+def _proof_pipeline_with_idle(monkeypatch, idle: QueryResult):
+    """Confirm DB.S.T1 in Storage & waste ($36.80/mo), then open Proof ▸ Pipeline with its efficiency-mart idle read
+    replaced by ``idle`` (failed or empty)."""
+    from app.ui import decision_studio
+    _recording(monkeypatch, frames=_UNREAD_FRAMES)
+    at = _storage({"cost_unread_maint_toggle": True})
+    idle_reads: list[str] = []
+
+    def _run(sql, **kwargs):
+        if "AS IDLE_HOURS" in sql and "MART_WAREHOUSE_EFFICIENCY_DAILY" in sql:
+            idle_reads.append(sql)
+            return idle
+        return _shaped_run(sql, **kwargs)
+
+    monkeypatch.setattr(decision_studio, "run", _run)
+    _nav_to(at, "Proof")
+    at.session_state["decision_section"] = "Pipeline"
+    at.run()
+    assert not at.exception, f"proof pipeline (shaped): {at.exception}"
+    assert not any("could not finish rendering" in str(getattr(e, "value", "")) for e in at.error)
+    assert idle_reads, "the idle read was not replaced"
+    return at
+
+
+def _card(at, label: str) -> tuple[str, str]:
+    """(value, whole card html) of the KPI card titled ``label``."""
+    import re
+    for m in at.markdown:
+        html = str(m.value)
+        if f'class="ow-card__title">{label}<' in html:
+            value = re.search(r'class="ow-card__value">([^<]*)<', html)
+            return (value.group(1) if value else ""), html
+    raise AssertionError(f"no {label!r} card")
+
+
+@_SKIP
+@pytest.mark.parametrize(("idle", "gap", "reason"), [
+    (QueryResult(df=pd.DataFrame(), ok=False, error="MART_WAREHOUSE_EFFICIENCY_DAILY read failed", source="stub"),
+     "efficiency mart unavailable", "the efficiency mart could not be read"),
+    (QueryResult(df=pd.DataFrame(), ok=True, source="stub"),
+     "no warehouse metering in this window", "no warehouse metering in this window"),
+])
+def test_proof_headline_counts_unread_when_the_idle_read_fails(monkeypatch, idle, gap, reason):
+    """R1-15 / R1-22: with the efficiency-mart idle read failed (or empty) and a confirmed unread handoff, the
+    Addressable $/mo headline shows the unread figure the 'Levers counted' caption names and the projection
+    carries, with the missing idle timer named in its delta, never a bare dash beside counted dollars."""
+    at = _proof_pipeline_with_idle(monkeypatch, idle)
+    value, card = _card(at, "Addressable $/mo")
+    assert value == "$36.80", card                                         # 10 credits x the $3.68 rate
+    assert f"1 opportunity · unread maintenance · idle timer not counted ({gap})" in card
+    captions = " ".join(str(c.value) for c in at.caption)
+    assert f"Levers counted: unread maintenance. Not counted: idle timer ({reason})" in captions
+    blob = _texts(at)
+    assert "addressable savings are not sized" not in blob
+    if not idle.ok:                                                          # the failed read still says so
+        assert any("idle-timer savings are not sized" in str(e.value) for e in at.error), [
+            str(e.value) for e in at.error]
+    pipe = [f for f in _frames(at) if {"SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY"} <= set(f.columns)]
+    assert pipe, "the pipeline table did not render"
+    hit = pipe[0][pipe[0]["SOURCE_ENTITY_KEY"] == "DB.S.T1"]
+    assert list(hit["MONTHLY_USD"]) == [36.8]                             # the projection carries the same $
+    addressable = pipe[0][pipe[0]["KIND"] == "Addressable"]
+    assert round(float(addressable["MONTHLY_USD"].sum()), 2) == 36.8
+
+
+@_SKIP
+def test_proof_headline_keeps_the_dash_when_nothing_is_counted(monkeypatch):
+    """R1-15: with the idle read failed and no lever item (no scan this session), the headline stays a dash: a
+    failed read never renders as a clean $0."""
+    from app.ui import decision_studio
+
+    def _run(sql, **kwargs):
+        if "AS IDLE_HOURS" in sql and "MART_WAREHOUSE_EFFICIENCY_DAILY" in sql:
+            return QueryResult(df=pd.DataFrame(), ok=False, error="mart read failed", source="stub")
+        return _shaped_run(sql, **kwargs)
+
+    monkeypatch.setattr(decision_studio, "run", _run)
+    at = AppTest.from_function(_entry, default_timeout=30)
+    at.run()
+    _nav_to(at, "Proof")
+    at.session_state["decision_section"] = "Pipeline"
+    at.run()
+    assert not at.exception, f"proof pipeline (shaped): {at.exception}"
+    value, card = _card(at, "Addressable $/mo")
+    assert value == "—" and "efficiency mart unavailable" in card and "idle timer not counted" not in card

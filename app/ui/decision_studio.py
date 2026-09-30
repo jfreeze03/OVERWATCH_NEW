@@ -45,6 +45,7 @@ from app.logic.formulas import (
     format_usd,
     md_dollars,
     safe_float,
+    utc_now,
 )
 from app.logic.insights import (
     idle_advisor,
@@ -938,7 +939,7 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
             idle_advisor(with_auto_suspend_settings(idle.df, _warehouse_settings()), rate, _idle_days)))
     _sizing = st.toggle("Include right-sizing (mart profile)", key="proof_pipe_sizing",
                         help="Adds the Cost ▸ Optimization & Savings right-sizing opportunities from the efficiency "
-                             "mart (one extra mart read). Off, the addressable figure is idle-timer only — "
+                             "mart (one extra mart read). Off, right-sizing stays out of the addressable figure — "
                              "the same default Cost ▸ Optimization & Savings shows.")
     _sized_ok = False
     if _sizing:
@@ -951,9 +952,10 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
                                          served_days(prof, _span))
             opps.extend(resize_opportunities(sized))
     # Next-Fifty #35: unread maintenance joins only from the Storage & waste session handoff (a confirmed scan,
-    # this Company, Database filter clear, same cache scope, under 1h old): zero reads, no confirm run here.
+    # this Company, Database filter clear, same cache scope and credit rate, under 1h old by the aware UTC clock):
+    # zero reads, no confirm run here.
     _unread = unread_lever(st.session_state.get(UNREAD_HANDOFF_KEY), company=company, scope=cache_scope(),
-                           now=account_now(), where="Cost ▸ Optimization & Savings ▸ Storage & waste")
+                           now=utc_now(), rate=rate, where="Cost ▸ Optimization & Savings ▸ Storage & waste")
     opps.extend(_unread.opportunities)
     roll = rollup_savings(opps)
 
@@ -995,16 +997,19 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
     if not _unread.included:
         _absent["UNREAD_MAINT"] = _unread.reason
     _basis = lever_short(_counted)
-    if not idle.ok:
-        _addr = {"label": "Addressable $/mo", "value": "—", "delta": "efficiency mart unavailable",
-                 "delta_color": "off"}
-    elif idle.empty:
-        _addr = {"label": "Addressable $/mo", "value": "—",
-                 "delta": "no warehouse metering in this window", "delta_color": "off"}
+    # R1-15 / R1-22: the headline follows the levers counted (Cost ▸ Optimization & Savings' rule), not the idle
+    # read alone: whenever the rollup has an item it shows the figure the caption counts and the projection
+    # below carries, and when the idle read failed or was empty the delta names the idle timer as missing. The
+    # dash stays only when no counted lever has an item (nothing is sized, so no $0 reads as clean).
+    _idle_gap = ("efficiency mart unavailable" if not idle.ok
+                 else "no warehouse metering in this window" if idle.empty else "")
+    if _idle_gap and not roll.items:
+        _addr = {"label": "Addressable $/mo", "value": "—", "delta": _idle_gap, "delta_color": "off"}
     else:
         _addr = {"label": "Addressable $/mo", "value": format_usd(roll.total_monthly_usd),
                  "delta": (f"{len(roll.items):,} opportunit{'y' if len(roll.items) == 1 else 'ies'} · {_basis}"
-                           + ("" if not _warehouse_settings().empty else " · AUTO_SUSPEND unverified")),
+                           + (f" · idle timer not counted ({_idle_gap})" if _idle_gap
+                              else "" if not _warehouse_settings().empty else " · AUTO_SUSPEND unverified")),
                  "delta_color": "off",
                  "help": "The Cost ▸ Optimization & Savings addressable net, de-duplicated: idle-timer savings "
                          "per warehouse (net of the resume tail) measured over "
@@ -1012,8 +1017,11 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
                          "included (the same warehouse counts once, the larger wins); and unread maintenance only "
                          "when Cost ▸ Optimization & Savings ▸ Storage & waste confirmed it against access history "
                          "this session, for this Company with the Database filter clear (the last 30 complete "
-                         "days of maintenance, less objects already booked on the Savings ledger). The caption "
-                         "below names the levers counted. Estimates, not verified savings."}
+                         "days of maintenance, less objects already booked on the Savings ledger when that scan "
+                         "ran; one booked in another session since then keeps counting until the scan is "
+                         "re-run). When the efficiency mart cannot be read or has no metering, the figure counts "
+                         "only the other levers and the delta says the idle timer is missing. The caption below "
+                         "names the levers counted. Estimates, not verified savings."}
     kpi_row([
         _addr,
         ({"label": "Queued work $/mo", "value": format_usd(_qt["monthly_usd"]),
@@ -1043,7 +1051,7 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
             key="proof_link_unread", type="tertiary"):
         _open_storage_waste()
     if not idle.ok:
-        empty_state("unavailable", "The warehouse-efficiency mart could not be read — addressable "
+        empty_state("unavailable", "The warehouse-efficiency mart could not be read — idle-timer "
                                    "savings are not sized (no live fallback on this page).",
                     detail=idle.error)
     if not actions.ok:

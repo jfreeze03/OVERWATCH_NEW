@@ -229,6 +229,28 @@ def test_pipeline_counts_unread_only_from_the_session_handoff():
     shell = _src(_SHELL_REL)
     assert "(unread maintenance, when counted, " in shell and "is its last 30 complete days)" in shell
 
+
+def test_pipeline_headline_follows_the_levers_counted():
+    """R1-15 / R1-22 (the floor leg skips the shaped twin in tests/test_prc_c2_shaped.py): the Addressable $/mo
+    headline is gated on the rollup's items, not on the idle read alone, so it never shows a dash beside a
+    'Levers counted: unread maintenance' caption and a projection carrying those dollars. A failed or empty idle
+    read is named in the delta; the dash stays only when nothing is counted; the failure state no longer says the
+    whole addressable figure is unsized."""
+    pipe = _fn(_src(_BODY_REL), "_pipeline_tab")
+    assert ('_idle_gap = ("efficiency mart unavailable" if not idle.ok\n'
+            '                 else "no warehouse metering in this window" if idle.empty else "")') in pipe
+    assert ('    if _idle_gap and not roll.items:\n'
+            '        _addr = {"label": "Addressable $/mo", "value": "—", "delta": _idle_gap, "delta_color": "off"}\n'
+            '    else:\n'
+            '        _addr = {"label": "Addressable $/mo", "value": format_usd(roll.total_monthly_usd),') in pipe
+    assert 'f" · idle timer not counted ({_idle_gap})" if _idle_gap' in pipe
+    assert pipe.count('"value": "—"') == 2              # the headline's dash + the queue-unavailable card only
+    assert pipe.index("roll = rollup_savings(opps)") < pipe.index("if _idle_gap and not roll.items:")
+    joined = re.sub(r'"\s*\n\s*f?"', "", pipe)
+    assert "The warehouse-efficiency mart could not be read — idle-timer savings are not sized" in joined
+    assert "addressable savings are not sized" not in joined
+    assert "Off, the addressable figure is idle-timer only" not in joined
+
 def test_live_proof_sections_reach_no_account_usage():
     """The v451 reach pin allows the body ACCESS_HISTORY only because of the HIDDEN _products;
     the dispatched sections themselves reach no ACCOUNT_USAGE table."""

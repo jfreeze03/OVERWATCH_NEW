@@ -34,12 +34,12 @@ from app.logic.capacity import capacity_forecasts
 from app.logic.consolidation import WarehouseProfile, consolidation_candidates
 from app.logic.date_windows import window_label, window_phrase
 from app.logic.formulas import (
-    account_now,
     account_today,
     format_usd,
     humanize_duration,
     md_dollars,
     safe_float,
+    utc_now,
 )
 from app.logic.insights import (
     IDLE_TARGET_SUSPEND_SEC,
@@ -1015,9 +1015,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                    key=f"opt_experiments_{company}", tier="recent", source="OPTIMIZATION_EXPERIMENTS")
         _exp_df = _exp.df if _exp.usable() else pd.DataFrame()
         # Next-Fifty #35: unread maintenance joins ONLY from the Storage & waste session handoff (a confirmed
-        # scan, this Company, Database filter clear, same cache scope, under 1h old) — zero reads here.
+        # scan, this Company, Database filter clear, same cache scope and credit rate, under 1h old by the aware UTC
+        # clock) — zero reads here.
         _unread = unread_lever(st.session_state.get(UNREAD_HANDOFF_KEY), company=company, scope=cache_scope(),
-                               now=account_now(), where="Storage & waste")
+                               now=utc_now(), rate=rate, where="Storage & waste")
         _savings_opps.extend(_unread.opportunities)
         _roll = rollup_savings(_savings_opps)
         _counted = [lever for lever, on in (("IDLE", _idle_profiles_tx is not None),
@@ -1040,8 +1041,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                          "resize counts once (the larger wins). Idle and right-sizing are measured over this "
                          "window. Unread maintenance is ESTIMATED from the last 30 complete days of maintenance "
                          "on objects confirmed unread in Storage & waste this session, less any already booked "
-                         "on the Savings ledger; an object you stopped without booking keeps counting until "
-                         "those 30 days roll off."},
+                         "on the Savings ledger when that scan ran (an object booked in another session since "
+                         "then keeps counting until the scan is re-run); an object you stopped without booking "
+                         "keeps counting until those 30 days roll off."},
                 {"label": "Opportunities", "value": str(len(_roll.items))},
                 {"label": "Overlaps removed", "value": str(len(_roll.dropped)),
                  "help": "Idle/resize double-counts on the same warehouse dropped from the total."},
@@ -1504,7 +1506,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 # Next-Fifty #35: a clean scan counts the lever at $0 in Addressable $/mo (Idle & sizing, Proof)
                 st.session_state[UNREAD_HANDOFF_KEY] = unread_handoff(
                     None, status=UNREAD_CLEAN, company=company, database=_oc_db, scope=cache_scope(),
-                    as_of=account_now())
+                    as_of=utc_now(), rate=rate)
             elif guard(_um, ""):
                 import hashlib as _hl
 
@@ -1678,7 +1680,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 # rows; it is never cleared when the toggle is off (Streamlit resets it on every revisit).
                 st.session_state[UNREAD_HANDOFF_KEY] = unread_handoff(
                     _uv, status=UNREAD_CONFIRMED if _conf.ok else UNREAD_CONFIRM_FAILED, company=company,
-                    database=_oc_db, scope=cache_scope(), as_of=account_now(), checked=len(_um.df),
+                    database=_oc_db, scope=cache_scope(), as_of=utc_now(), rate=rate, checked=len(_um.df),
                     truncated=_um_trunc, booked=_booked)
                 if st.session_state[UNREAD_HANDOFF_KEY]["status"] == UNREAD_LEDGER_FAILED:
                     empty_state("unavailable", md_dollars(S_LEDGER_UNAVAILABLE), detail=_led_err)
@@ -1690,7 +1692,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 # guard() above already rendered the shortlist's 'unavailable' state
                 st.session_state[UNREAD_HANDOFF_KEY] = unread_handoff(
                     None, status=UNREAD_SHORTLIST_FAILED, company=company, database=_oc_db, scope=cache_scope(),
-                    as_of=account_now())
+                    as_of=utc_now(), rate=rate)
         st.divider()
         st.markdown("**Storage growth movers**")
         days_storage = max(days, 30)
