@@ -173,18 +173,25 @@ def test_a_warehouse_level_zero_is_capped_by_the_account_value(monkeypatch):
     assert kpi["value"] == "6h"
     assert kpi["delta"] == "set at: WAREHOUSE (0 = no warehouse limit); capped by the account value"
     assert "7-day" not in kpi["delta"] and _SEVEN_DAY not in kpi["help"]
-    assert "The warehouse's own value is 0 (no warehouse limit), so the account value (6h) caps reads." in kpi["help"]
+    assert "The warehouse's own value is 0 (no warehouse limit), so the account value caps reads at 6h." in kpi["help"]
+    # review r3: the session side is the account's unless a user or session sets its own, in either direction
+    assert "unless a user or session sets its own" in kpi["help"] and "sets a lower one" not in kpi["help"]
+    assert "a user or session value, which can lower it or raise it up to the warehouse value, is not read" in kpi["help"]
     # the account sets none: Snowflake's 172800 s default caps reads (48h), named as such
     kpi, _ = _tile(monkeypatch, ("0", "WAREHOUSE"), ("172800", ""))
     assert (kpi["value"], kpi["delta"]) == (
-        "48h", "set at: WAREHOUSE (0 = no warehouse limit); capped by Snowflake's default (the account sets none)")
+        "48h", "set at: WAREHOUSE (0 = no warehouse limit); capped by the account value (Snowflake's default; "
+        "the account sets none)")
+    # review r3: named 'the account value' like the posture panel's Cap source, with one parenthetical in the help
+    assert ("so the account value (Snowflake's default; the account sets none) caps reads at 48h."
+            in kpi["help"]) and ") (" not in kpi["help"]
 
 
 def test_a_warehouse_value_above_the_account_value_is_capped_by_it(monkeypatch):
     """Review R2-5: the same rule for a non-zero warehouse value above the account's (8h vs 6h): 6h caps reads."""
     kpi, _ = _tile(monkeypatch, ("28800", "WAREHOUSE"), _ACCOUNT_6H)
     assert (kpi["value"], kpi["delta"]) == ("6h", "set at: WAREHOUSE; capped by the account value")
-    assert "The warehouse's own value is 8h, so the account value (6h) caps reads." in kpi["help"]
+    assert "The warehouse's own value is 8h, so the account value caps reads at 6h." in kpi["help"]
     # a lower warehouse value wins with no cap note; an unparseable value is the dash, never '0s'
     k7, _ = _tile(monkeypatch, ("7200", "WAREHOUSE"), _ACCOUNT_6H)
     assert (k7["value"], k7["delta"]) == ("2h", "set at: WAREHOUSE") and "7-day" not in k7["help"]

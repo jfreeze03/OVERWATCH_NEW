@@ -1473,8 +1473,10 @@ def _ceiling_tile(w_secs: float | None, w_level: str, level_label: str, account_
             "delta_color": "off",
             "help": "The statement timeout every app READ on the app warehouse runs against, regardless of the "
                     "app's per-tier values: Snowflake enforces the lower non-zero of the warehouse's "
-                    "STATEMENT_TIMEOUT_IN_SECONDS and the session's (inherited from the account unless a user "
-                    "sets a lower one). Cortex evaluations are additionally capped per statement."}
+                    "STATEMENT_TIMEOUT_IN_SECONDS and the session's (the account's, unless a user or session sets "
+                    "its own). This tile reads the warehouse and account values only: a user or session value, "
+                    "which can lower it or raise it up to the warehouse value, is not read. Cortex evaluations "
+                    "are additionally capped per statement."}
     w_enforced = stmt_timeout.enforced_s(w_secs)
     if w_secs is None or w_enforced is None:
         return tile
@@ -1491,10 +1493,11 @@ def _ceiling_tile(w_secs: float | None, w_level: str, level_label: str, account_
     eff, src = stmt_timeout.effective_timeout_s(w_secs, w_level, account_s)
     tile["value"] = humanize_duration(eff, "s")
     if src == "Account" and own_wh:
-        cap = "Snowflake's default (the account sets none)" if account_is_default else "the account value"
+        cap = ("the account value (Snowflake's default; the account sets none)" if account_is_default
+               else "the account value")
         own = "0 (no warehouse limit)" if w_zero else humanize_duration(w_enforced, "s")
         tile["delta"] += f"; capped by {cap}"
-        tile["help"] += f" The warehouse's own value is {own}, so {cap} ({humanize_duration(eff, 's')}) caps reads."
+        tile["help"] += f" The warehouse's own value is {own}, so {cap} caps reads at {humanize_duration(eff, 's')}."
     if w_zero and float(account_s) <= 0:
         tile["delta"] += "; 0 = 7-day max"
         tile["help"] += (" The warehouse and the account both resolve to 0, which Snowflake enforces as the "

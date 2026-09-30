@@ -28,8 +28,9 @@ V162-V165 follows 4.602.0's rules (every new read is gated on its own migration;
     minimum-version key of SYSTEM$CLIENT_VERSION_INFO() (the read still succeeds, the values come back empty) or no
     entry lists a minimum, support reads 'unavailable' with dashed KPIs; a renamed nearing-end-of-support or
     recommended key dashes that KPI and adds a caption clause. An entry that lists no minimum gives no verdict: the
-    row reads NO MINIMUM LISTED. A version compared with no minimum counts as 'not checked' on every support KPI,
-    the Snowflake-run one included -- a KPI shows 'N not checked' or a dash, never a green 0 -- and the caption
+    row reads NO MINIMUM LISTED. A version compared with no minimum counts as 'not checked' on the support KPIs for
+    its own side (the three yours-KPIs, or the Snowflake-run one) -- that KPI shows 'N not checked' or a dash,
+    never a green 0 over it -- and the caption
     counts only checked versions. If Snowflake lists a driver twice, the entry with a minimum wins. The inventory no longer stops
     silently at 500 rows: at the app's row cap the support KPIs and lists are withheld with a caption, and the
     family/version counts read 'N+'.

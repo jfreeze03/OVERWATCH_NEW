@@ -367,8 +367,8 @@ SOC. **Governance drift score** at top (§6). Sections:
   the support KPIs show '—', and STATUS (BEHIND = older than the newest
   version of the same driver among your rows) is the fallback. A version
   with no minimum to compare with (NOT LISTED, or NO MINIMUM LISTED: its
-  entry lists no minimum, so no verdict is given) is 'not checked' in every
-  support KPI, yours and Snowflake-run alike: the KPIs show the count (or '—'
+  entry lists no minimum, so no verdict is given) is 'not checked' in the
+  support KPIs for its own side (yours, or Snowflake-run): those show the count (or '—'
   when nothing could be checked) and are never a green 0, and the caption
   names yours. If no entry lists a nearing-end-of-support or recommended
   version (a renamed key), that KPI shows '—' and the caption says so.

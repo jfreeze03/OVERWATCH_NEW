@@ -59,7 +59,8 @@ STATUS_LABELS = {
 STATUS_RANK = {UNSUPPORTED: 0, NEARING_EOS: 1, BELOW_RECOMMENDED: 2, OK: 3, NO_VERSION: 4,
                NOT_COMPARED: 5, NOT_LISTED: 6, UNAVAILABLE: 7}
 # The verdicts that compared a version with a minimum supported version, and the codes that could not: a
-# version with one of the latter is 'not checked' in every support KPI, never counted as clean.
+# version with one of the latter is 'not checked' in the support KPIs for its own side (yours, or
+# Snowflake-run), never counted as clean.
 CHECKED_CODES = (UNSUPPORTED, NEARING_EOS, BELOW_RECOMMENDED, OK)
 NOT_CHECKED_CODES = (NOT_COMPARED, NOT_LISTED)
 
