@@ -606,8 +606,8 @@ def test_the_resize_pane_shows_nothing_until_a_size_is_picked():
 
     tab = _body(read("app/ui/pages/cost_parts/optimize.py"), "def _optimization_tab(")
     assert ('target_size = st.selectbox("Resize to", list(remediation.RESIZE_SIZES), index=_rs_idx,\n'
-            '                                           key=f"sizing_to_{srow[\'WAREHOUSE_NAME\']}", '
-            'placeholder="Pick a size")') in tab
+            '                                           key=f"sizing_to_{srow[\'WAREHOUSE_NAME\']}_{_rs_cur}_{_rs_idx}",\n'
+            '                                           placeholder="Pick a size")') in tab
     fn = next(n for n in ast.walk(ast.parse(read("app/ui/pages/cost_parts/optimize.py")))
               if isinstance(n, ast.FunctionDef) and n.name == "_optimization_tab")
     gates = [n for n in ast.walk(fn) if isinstance(n, ast.If) and ast.unparse(n.test) == "target_size is not None"]
@@ -627,6 +627,50 @@ def test_the_resize_pane_shows_nothing_until_a_size_is_picked():
     assert "_cur_label = picker_size_label(_cur_size, remediation.RESIZE_SIZES)" in tab
     assert "resizing {_cur_label} → \"\n" in tab and 'f"{target_size} (only idle-hour credits' in tab
     assert 'st.caption(f"Resizing UP {_cur_label} → {target_size} raises cost — no saving "' in tab
+
+
+def _picker_script():
+    """The Resize to picker alone, keyed as the page keys it (inputs through session state: AppTest.from_function
+    runs this source in its own script)."""
+    import streamlit as st
+
+    from app.logic import remediation
+    from app.logic.sizing import RECOMMEND_BELOW_CAP, normalize_size, resize_picker_default
+
+    size = st.session_state["t_size"]
+    idx, _note = resize_picker_default(RECOMMEND_BELOW_CAP, size, remediation.RESIZE_SIZES)
+    cur = normalize_size(size) or "UNKNOWN"
+    key = f"sizing_to_WH_LOW_{cur}_{idx}" if st.session_state["t_scoped"] else "sizing_to_WH_LOW"
+    st.selectbox("Resize to", list(remediation.RESIZE_SIZES), index=idx, key=key, placeholder="Pick a size")
+
+
+@pytest.mark.parametrize("scoped", [True, False])
+def test_the_picker_key_carries_what_its_default_is_computed_from(scoped):
+    """Review r3 R3-1, on every leg (the floor's streamlit 1.52.2 as well; the page-level twin is in
+    tests/test_cluster_cap_shaped.py). Streamlit leaves `index` out of a keyed selectbox's identity, so the picker
+    keyed on the warehouse alone (scoped=False) kept XXLARGE while the selected row's size went X-Large -> 2X-Large
+    -> Large -> 3X-Large: beside the no-size-picked note it showed an ALTER, a saving and Execute. The page's key
+    carries the current size and the default index, so each new default is a new widget."""
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_function(_picker_script, default_timeout=30)
+    at.session_state["t_scoped"] = scoped
+    seen = []
+    for size in ("X-Large", "2X-Large", "Large", "3X-Large"):
+        at.session_state["t_size"] = size
+        at.run()
+        assert not at.exception
+        seen.append(at.selectbox[0].value)
+    assert seen == (["XXLARGE", None, "XLARGE", None] if scoped else ["XXLARGE"] * 4)
+    tab = _body(read("app/ui/pages/cost_parts/optimize.py"), "def _optimization_tab(")
+    assert '_rs_cur = normalize_size(srow.get("CURRENT_SIZE")) or "UNKNOWN"' in tab
+    assert tab.index("_rs_cur = ") < tab.index('key=f"sizing_to_{srow[\'WAREHOUSE_NAME\']}_{_rs_cur}_{_rs_idx}"')
+    # the optional half: a successful resize clears the typed name before the confirm input next renders
+    assert ('if st.session_state.pop("_sizing_clear_confirm", False):\n'
+            '                        st.session_state["sizing_confirm"] = ""\n'
+            '                    if (confirm_gate(') in tab
+    assert ('log_ui_event("remediation_exec", page=_PAGE)\n'
+            '                            st.session_state["_sizing_clear_confirm"] = True\n') in tab
 
 
 def test_cluster_range_coverage():
@@ -706,6 +750,40 @@ def test_the_query_advisor_gates_its_cluster_advice():
     assert "add a cluster or move this workload to its own warehouse" in detail
 
 
+def test_the_no_dominant_cause_queue_finding_carries_the_cap_check():
+    """Review r3 R3-2 / R3-7: the advisor's hedged fallback serves two row shapes. With no overload/provisioning
+    split (the older shape) it keeps its v4.588 wording, byte-locked by tests/test_cold_start_split.py. With the
+    split known but no cause dominating most queued runs -- the live case on the fingerprint grain, whose builder
+    always emits the split -- it said "add a cluster" with no cap check, on Operations ▸ Queries and as the fix
+    queue's First fix. It keeps the hedge and now carries the rule; the points (so QOP) are unchanged."""
+    from app.logic.query_advisor import advise
+    from app.logic.query_opt import score_opportunities
+    from app.logic.sizing import CLUSTER_CAP_CHECK_PATH, CLUSTER_CAP_QUALIFIER
+
+    # a current-shape fingerprint (the reviewers' repro): 25s of a 28s run queued, split 12/13, and half of the
+    # queued runs each way, so neither share reaches FINGERPRINT_SPLIT_DOMINANT_SHARE
+    row = {"FINGERPRINT": "fp", "SAMPLE_TEXT": "select ...", "QUERY_TYPE": "SELECT", "WAREHOUSE_NAME": "WH",
+           "WAREHOUSE_SIZE": "MEDIUM", "RUNS": 100, "TOTAL_EXEC_SEC": 1000.0, "ELAPSED_SEC": 28.0,
+           "COMPILE_SEC": 0.5, "EXECUTION_SEC": 2.5, "QUEUED_SEC": 25.0, "QUEUED_OVERLOAD_SEC": 12.0,
+           "QUEUED_PROVISIONING_SEC": 13.0, "QUEUED_RUN_PCT": 0.9, "PROVISIONING_QUEUED_RUN_PCT": 0.5,
+           "OVERLOAD_QUEUED_RUN_PCT": 0.5, "GB_SCANNED": 5.0, "CACHE_PCT": 10.0, "LOCAL_SPILL_GB": 0.0,
+           "REMOTE_SPILL_GB": 0.0, "ROWS_PRODUCED": 100.0, "PARTITIONS_SCANNED": 10.0, "PARTITIONS_TOTAL": 1000.0}
+    hedged = ("Spent 25s queued (of 28.0s total) — either concurrency (add a cluster or size up for parallelism; "
+              + CLUSTER_CAP_QUALIFIER + ") or warehouse resume overhead (lengthen AUTO_SUSPEND / keep it warm).")
+    findings, _ = advise(row)
+    queued = [f for f in findings if f.code in ("queued", "cold_start")]
+    assert [f.code for f in queued] == ["queued"] and queued[0].detail == hedged
+    assert CLUSTER_CAP_CHECK_PATH in queued[0].detail and "either concurrency" in queued[0].detail
+    no_split = {k: v for k, v in row.items() if k not in ("QUEUED_OVERLOAD_SEC", "QUEUED_PROVISIONING_SEC",
+                                                          "PROVISIONING_QUEUED_RUN_PCT", "OVERLOAD_QUEUED_RUN_PCT")}
+    legacy = next(f for f in advise(no_split)[0] if f.code == "queued")
+    assert CLUSTER_CAP_CHECK_PATH not in legacy.detail                  # the byte-locked older-shape text
+    assert queued[0].points == legacy.points                           # only the text moved: QOP byte-stable
+    scored, _ = score_opportunities(pd.DataFrame([row]))
+    assert scored.iloc[0]["PATHOLOGY"] == "Concurrency starvation"
+    assert scored.iloc[0]["FIRST_ACTION"] == hedged
+
+
 def test_the_size_up_follow_up_is_gated_like_the_scale_out_verdict():
     """R2-4 / R2-11: a spill + queueing warehouse reads "Size up", and its rationale's follow-up said "if queueing
     persists after the resize, add a cluster." with no cap check, even on Idle & sizing where the check runs.
@@ -718,7 +796,9 @@ def test_the_size_up_follow_up_is_gated_like_the_scale_out_verdict():
         _wh("SAT", spill=_SPILL, MAX_CLUSTER_COUNT=4.0, **std, **_state("reached", 4.0)),
         _wh("UNCHECKED", spill=_SPILL, MAX_CLUSTER_COUNT=4.0, **std),
         _wh("UNKNOWN", spill=_SPILL),
-        _wh("TEN", spill=_SPILL, MAX_CLUSTER_COUNT=10.0, **std, **_state("reached", 10.0)))
+        _wh("TEN", spill=_SPILL, MAX_CLUSTER_COUNT=10.0, **std, **_state("reached", 10.0)),
+        _wh("TEN_UNCHECKED", spill=_SPILL, MAX_CLUSTER_COUNT=10.0, **std),
+        _wh("TEN_NO_QUERIES", spill=_SPILL, MAX_CLUSTER_COUNT=10.0, **std, **_state(CAP_NO_QUERIES, 10.0)))
     assert set(out["RECOMMENDATION"]) == {RECOMMEND_SIZE_UP}
     why = out["RATIONALE"]
     assert ("if queueing persists after the resize, split the workload: in the last 35 days no query ran above "
@@ -728,8 +808,11 @@ def test_the_size_up_follow_up_is_gated_like_the_scale_out_verdict():
             "the last 35 days.") in why["SAT"]
     for name in ("UNCHECKED", "UNKNOWN"):
         assert f"if queueing persists after the resize, add a cluster ({CLUSTER_CAP_QUALIFIER})." in why[name]
-    assert ("if queueing persists after the resize, split the workload across warehouses (already at 10 "
-            "clusters).") in why["TEN"]
+    # review r3 R3-3 / R3-6: at the generator's cap of 10 it says split whatever the check shows (as documented)
+    for name in ("TEN", "TEN_UNCHECKED", "TEN_NO_QUERIES"):
+        assert ("if queueing persists after the resize, split the workload across warehouses (already at 10 "
+                "clusters).") in why[name], name
+        assert CLUSTER_CAP_QUALIFIER not in why[name] and "add a cluster" not in why[name], name
 
 
 def test_the_operations_cluster_advice_is_gated():
@@ -761,9 +844,13 @@ _ADD_CLUSTER_LABELS = {
 }
 # (file, enclosing function, fragment): advice that may omit the qualifier, and why.
 _ADD_CLUSTER_ALLOWED = {
-    ("app/logic/query_advisor.py", "advise", "either concurrency (add a cluster or size up for parallelism)"):
-        "the split-unknown / no-dominant-cause fallback: tests/test_cold_start_split.py locks it byte for byte on "
-        "purpose (Next-Fifty #17 kept the legacy wording for the older row shape), so review r2 left it as is",
+    ("app/logic/query_advisor.py", "advise",
+     "Spent {queued_sec}s queued (of {elapsed}s total) — either concurrency (add a cluster or size up for "
+     "parallelism) or warehouse resume overhead (lengthen AUTO_SUSPEND / keep it warm)."):
+        "the split-UNKNOWN fallback only (a row without QUEUED_OVERLOAD_SEC / QUEUED_PROVISIONING_SEC, the older row "
+        "shape): tests/test_cold_start_split.py locks it byte for byte (Next-Fifty #17 kept the v4.588 wording for "
+        "that shape). The split-known, no-dominant-cause text carries the qualifier (review r3 R3-2 / R3-7; "
+        "test_the_no_dominant_cause_queue_finding_carries_the_cap_check)",
     ("app/logic/sizing.py", "_pressure_verdict", "{lead} Add a cluster rather than a bigger size. {how}{tail}"):
         "the scale-out verdict itself, after its cap gate: the not-checked / no-queries / never-reached branches "
         "return earlier, so `how` here is single-cluster, ECONOMY, the generator cap, a reached cap, or an "

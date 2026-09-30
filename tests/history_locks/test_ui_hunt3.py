@@ -109,5 +109,6 @@ def test_contract_balance_chart_uses_the_org_currency():
 # 11) Resize target widget key is entity-scoped -----------------------------
 def test_resize_target_widget_key_is_warehouse_scoped():
     opt = _src("app/ui/pages/cost_parts/optimize.py")
-    assert 'key=f"sizing_to_{srow[\'WAREHOUSE_NAME\']}"' in opt
-    assert 'key="sizing_to"' not in opt                       # no fixed key leaking across rows
+    # v4.604.0 review r3 R3-1: the key goes on to carry the current size and the default index (a prefix here)
+    assert 'key=f"sizing_to_{srow[\'WAREHOUSE_NAME\']}_' in opt
+    assert 'key="sizing_to"' not in opt                      # no fixed key leaking across rows
