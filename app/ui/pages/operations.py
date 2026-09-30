@@ -94,7 +94,12 @@ from app.logic.insights import (
     task_release_deltas,
     with_warehouse_settings,
 )
-from app.logic.sizing import size_recommendations, sizing_summary
+from app.logic.sizing import (
+    CLUSTER_CAP_QUALIFIER,
+    size_recommendations,
+    sizing_summary,
+    unchecked_cap_note,
+)
 from app.logic.task_graph import (
     analyze_task_run,
     canonical_task_name,
@@ -449,8 +454,8 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                  "help": "Fingerprints whose typical execution is badly inefficient."},
                 {"label": "Concurrency-starved", "value": f"{_conc:,}",
                  "help": "Fast SQL stuck behind warehouse OVERLOAD queueing — a capacity problem, not "
-                         "bad SQL. Add a cluster (multi-cluster) or split the workload; don't rewrite "
-                         "the query. Resume (cold-start) waits are counted separately."},
+                         "bad SQL. Add a cluster or split the workload (" + CLUSTER_CAP_QUALIFIER + "); "
+                         "don't rewrite the query. Resume (cold-start) waits are counted separately."},
                 {"label": "Cold-start wait", "value": f"{_cold:,}",
                  "help": "Recurring queries whose wait is mostly the warehouse RESUMING from suspend "
                          "(provisioning), not overload. Sizing up buys nothing here — keep it warm "
@@ -3614,8 +3619,8 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
         empty_state("no_data_yet", "No warehouse load intervals recorded in the last 14 days.")
     elif guard(peaks, ""):
         st.caption("PEAK_QUEUED above ~1 on a sustained basis is the signal to add a cluster "
-                   "or split workloads — before users feel it. Select a warehouse to open its "
-                   "Entity 360.")
+                   "or split workloads — before users feel it (" + CLUSTER_CAP_QUALIFIER + "). "
+                   "Select a warehouse to open its Entity 360.")
         entity_nav_table(peaks.df, key=f"ops_wh_peaks_{company}", key_col="WAREHOUSE_NAME",
                          entity_type="WAREHOUSE", hint="", column_config={  # caption above says it
             "PEAK_RUNNING": st.column_config.NumberColumn("Peak Running", format="%.1f"),
@@ -3695,6 +3700,10 @@ def _wh_sizing_efficiency(company: str, rate: float, days: int, *,
                              "SPILL_GB_PER_DAY": st.column_config.NumberColumn("Spill GB/day", format="%.2f"),
                              "MONTHLY_USD_NOW": st.column_config.NumberColumn("Now $/mo", format="$%.0f"),
                          })
+        # review r1 R1-5: this page never runs the cluster-cap check, so its Add a cluster rows on a
+        # multi-cluster warehouse are unchecked — said on the page, not only in the KPI tooltip.
+        if _sum["cap_unchecked"]:
+            st.caption(unchecked_cap_note(_sum["cap_unchecked"]))
         st.caption("Health = 100 − capped penalties for queueing, remote spill, long p95 runtime, "
                    "and low utilization (evidence-gated). On the mart path p95 is the PEAK-DAY "
                    "value (one bad day penalizes), not the window p95. Diagnostic only — generate "
@@ -3981,8 +3990,9 @@ def _contention_tab(company: str, days: int, *, bounds: tuple | None = None) -> 
             # (provisioning) wait is a cold start that a bigger warehouse does not fix.
             if "QUEUED_PROVISIONING_SEC" in pdf.columns:
                 st.caption("Live path: QUEUED_OVERLOAD_SEC is concurrency (add a cluster / split the "
-                           "workload); QUEUED_PROVISIONING_SEC is the warehouse resuming from suspend — "
-                           "a cold-start / auto-suspend cadence signal where sizing up buys nothing.")
+                           "workload; " + CLUSTER_CAP_QUALIFIER + "); QUEUED_PROVISIONING_SEC is the "
+                           "warehouse resuming from suspend — a cold-start / auto-suspend cadence signal "
+                           "where sizing up buys nothing.")
             else:
                 st.caption("Queued time here combines overload and resume (provisioning) wait; the "
                            "live fallback splits them. Right-sizing on Warehouses ▸ Sizing already "

@@ -96,10 +96,13 @@ from app.logic.sizing import (
     RECOMMEND_SCALE_OUT,
     SIZE_ORDER,
     cluster_check_days,
+    cluster_check_label,
     cluster_check_targets,
+    cluster_range_coverage,
     cluster_use_summary,
     normalize_size,
     price_per_run_bounds,
+    resize_picker_default,
     scale_out_plan,
     simulate_scenario,
     size_recommendations,
@@ -161,10 +164,12 @@ _BELOW_CAP_CAPTION = (
 _CLUSTER_USE_NOTE = (
     "Peak cluster = the highest CLUSTER_NUMBER any query ran on (the busiest hour); p95 hourly peak = the "
     "peak that 95% of active hours stay at or under; hours at cap = hours whose peak reached (or passed) "
-    "the current MAX_CLUSTER_COUNT from SHOW WAREHOUSES. Only a warehouse with hours at cap is offered a "
-    "higher maximum, and raising it adds credits while queries queue, so no saving is booked. A cap that "
-    "is never reached costs nothing extra where MIN_CLUSTER_COUNT is 1 — Snowflake starts clusters above "
-    "the minimum only on demand — so no cut is suggested here either.")
+    "the current MAX_CLUSTER_COUNT from SHOW WAREHOUSES. Hours are clock hours counted by the hour a query "
+    "STARTED in, so a long query's later hours are not counted and the hour counts are a floor. Only a "
+    "warehouse with hours at cap is offered a higher maximum, and raising it adds credits while queries "
+    "queue, so no saving is booked. A cap that is never reached costs nothing extra where "
+    "MIN_CLUSTER_COUNT is 1 — Snowflake starts clusters above the minimum only on demand — so no cut is "
+    "suggested here either.")
 
 
 def _scale_out_caption(plan: dict) -> str:
@@ -195,9 +200,10 @@ def _cluster_cap_check(sizing_df: pd.DataFrame, whs_res, sizing_days: int, compa
     (at least 35 days, so a month-end is inside; at most the 90-day live limit). The judged use is
     carried onto the profile (sizing.with_cluster_use) BEFORE size_recommendations, so a higher
     MAX_CLUSTER_COUNT is suggested only where queries reached the current maximum. The frame comes back
-    UNCHANGED when the toggle is off, SHOW WAREHOUSES failed, no warehouse is multi-cluster, the read
-    failed or its shape is unreadable — and then no multi-cluster add-a-cluster row is offered a higher
-    MAX_CLUSTER_COUNT (the gated STANDARD rows say their cap was not checked)."""
+    UNCHANGED when the toggle is off, SHOW WAREHOUSES failed, returned no cluster range for any profile
+    warehouse (ranges unknown — never "no multi-cluster warehouse"; review r1 R1-10), no warehouse is
+    multi-cluster, the read failed or its shape is unreadable — and then no multi-cluster add-a-cluster
+    row is offered a higher MAX_CLUSTER_COUNT (the gated STANDARD rows say their cap was not checked)."""
     targets = cluster_check_targets(sizing_df)
     if not whs_res.ok:
         empty_state("unavailable",
@@ -205,20 +211,31 @@ def _cluster_cap_check(sizing_df: pd.DataFrame, whs_res, sizing_days: int, compa
                     "check cannot run.",
                     detail=str(whs_res.error or "").strip())
         return sizing_df
+    known, unknown = cluster_range_coverage(sizing_df)
+    if not known:
+        # An empty SHOW (or one listing none of these warehouses) is an ABSENT input, not a clean answer:
+        # zero rows are never red (house rule 8), and they are never "no multi-cluster warehouse" either.
+        empty_state("needs_setup",
+                    "SHOW WAREHOUSES returned no cluster range for the warehouses in this profile (dropped, "
+                    "renamed, or not visible to the app's role), so the cluster ranges are unknown and the "
+                    "cluster-cap check cannot run.")
+        return sizing_df
+    unknown_txt = (f" {unknown} warehouse(s) in this profile are not in SHOW WAREHOUSES, so their cluster "
+                   "range is unknown and they are not checked." if unknown else "")
     if not targets:
         st.caption("No warehouse in this profile has MAX_CLUSTER_COUNT above 1 in SHOW WAREHOUSES, so "
-                   "there is no cluster cap to check.")
+                   "there is no cluster cap to check." + unknown_txt)
         return sizing_df
     chk_days = cluster_check_days(sizing_days, bounds[0] if bounds is not None else None, account_today())
     st.caption(f"Cluster-cap check: {len(targets)} multi-cluster warehouse(s) in this profile, over the "
-               f"last {chk_days} days. " + toggle_cost_hint("cluster_use"))
+               f"last {chk_days} days.{unknown_txt} " + toggle_cost_hint("cluster_use"))
     # The label and help stay STATIC (the window and count live in the caption above), so the widget
     # never re-keys — and resets — when the window changes.
     if not st.toggle("Check cluster use (multi-cluster warehouses)", key="sizing_cluster_check",
                      help="Reads QUERY_HISTORY for the multi-cluster warehouses in this profile: the highest "
-                          "cluster any query ran on in each hour, over at least 35 days so a month-end is "
-                          "inside. A higher MAX_CLUSTER_COUNT is suggested only where queries reached the "
-                          "current maximum."):
+                          "cluster any query started on in each clock hour, over at least 35 days so a "
+                          "month-end is inside. A higher MAX_CLUSTER_COUNT is suggested only where queries "
+                          "reached the current maximum."):
         st.caption("Off: the cluster cap is not checked, so add-a-cluster advice on a multi-cluster warehouse "
                    "suggests no higher MAX_CLUSTER_COUNT and prefills none.")
         return sizing_df
@@ -247,10 +264,14 @@ def _cluster_cap_check(sizing_df: pd.DataFrame, whs_res, sizing_days: int, compa
             "MAX_CLUSTER_COUNT": st.column_config.NumberColumn("Max clusters", format="%d"),
             "ACTIVE_HOUR_COUNT": st.column_config.NumberColumn(
                 "Active hours", format="%d",
-                help="Hours in which at least one query ran on a cluster of this warehouse."),
+                help="Clock hours in which at least one query started on a cluster of this warehouse (a "
+                     "long query counts only in the hour it started)."),
             "PEAK_CLUSTERS": st.column_config.NumberColumn("Peak cluster", format="%d"),
             "P95_PEAK_CLUSTERS": st.column_config.NumberColumn("p95 hourly peak", format="%d"),
-            "AT_CAP_HOUR_COUNT": st.column_config.NumberColumn("Hours at cap", format="%d"),
+            "AT_CAP_HOUR_COUNT": st.column_config.NumberColumn(
+                "Hours at cap", format="%d",
+                help="Clock hours in which a query started on the current MAX_CLUSTER_COUNT cluster (or a "
+                     "higher one, if the cap was since lowered)."),
             "CLUSTER_CAP": st.column_config.TextColumn("Cap"),
         })
         st.caption(_CLUSTER_USE_NOTE)
@@ -748,7 +769,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             summary = sizing_summary(sized)
             _sz_cols = ["WAREHOUSE_NAME", "COMPANY", "RECOMMENDATION", "RATIONALE",
                         "CONFIDENCE", "CURRENT_SIZE", "MIN_CLUSTER_COUNT", "MAX_CLUSTER_COUNT",
-                        "SCALING_POLICY", "PEAK_CLUSTERS", "AT_CAP_HOUR_COUNT", "AUTO_SUSPEND",
+                        "SCALING_POLICY", "PEAK_CLUSTERS", "AT_CAP_HOUR_COUNT", "CLUSTER_CHECK_DAYS",
+                        "AUTO_SUSPEND",
                         "ACTIVE_QUERY_DAYS", "ACTIVE_DAYS_PER_30D",
                         "MONTHLY_USD_NOW", "IDLE_MONTHLY_USD", "SCENARIO_DOWN_USD", "SCENARIO_UP_USD",
                         "QUEUED_MIN_PER_DAY", "SPILL_GB_PER_DAY", "P95_ELAPSED_SEC", "IDLE_PCT"]
@@ -805,6 +827,11 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             else:
                 srow = sized.iloc[int(sel_sz)]
                 st.markdown("**Selected recommendation evidence**")
+                # review r1 R1-9: the cluster-cap columns come from the CHECK window, not this row's sizing
+                # window — the header says which (the CSV carries CLUSTER_CHECK_DAYS itself).
+                _cd = srow.get("CLUSTER_CHECK_DAYS")
+                _cd_help = ("From the cluster-cap check window (Check cluster use, read to today), not the "
+                            "sizing window of the other columns.")
                 styled_table(
                     sized.iloc[[int(sel_sz)]][[c for c in _sz_cols if c in sized.columns]],
                     size_note=False,
@@ -822,8 +849,13 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             "Spill GB/day", format="%.2f"),
                         "PROVISION_MIN_PER_DAY": st.column_config.Column("Provision per day"),
                         "IDLE_PCT": st.column_config.NumberColumn("Idle %", format="%.0f%%"),
-                        "PEAK_CLUSTERS": st.column_config.NumberColumn("Peak cluster", format="%d"),
-                        "AT_CAP_HOUR_COUNT": st.column_config.NumberColumn("Hours at cap", format="%d"),
+                        "PEAK_CLUSTERS": st.column_config.NumberColumn(
+                            cluster_check_label("Peak cluster", _cd), format="%d", help=_cd_help),
+                        "AT_CAP_HOUR_COUNT": st.column_config.NumberColumn(
+                            cluster_check_label("Hours at cap", _cd), format="%d", help=_cd_help),
+                        "CLUSTER_CHECK_DAYS": st.column_config.NumberColumn(
+                            "Cap check days", format="%d",
+                            help="Days the cluster-cap check read: whole days back from midnight, plus today."),
                     },
                 )
             if sel_sz is not None and is_operator:
@@ -852,8 +884,15 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     )
                 # Round-3 hunt: scope the widget key to the warehouse — a fixed key let
                 # a size picked for one warehouse persist onto the next selected row.
-                target_size = st.selectbox("Resize to", ["XSMALL", "SMALL", "MEDIUM", "LARGE"],
+                # Review r1 R1-4: a capacity-pressure verdict opens on one size UP (its captions call this the
+                # size-up route), never on a downsize that projects a saving; the options are every size
+                # resize_fix accepts (they stopped at LARGE, so an XLARGE warehouse had no size-up option).
+                _rs_idx, _rs_note = resize_picker_default(srow.get("RECOMMENDATION"), srow.get("CURRENT_SIZE"),
+                                                          remediation.RESIZE_SIZES)
+                target_size = st.selectbox("Resize to", list(remediation.RESIZE_SIZES), index=_rs_idx,
                                            key=f"sizing_to_{srow['WAREHOUSE_NAME']}")
+                if _rs_note:
+                    st.caption(_rs_note)
                 stmt_sz = remediation.resize_fix(str(srow["WAREHOUSE_NAME"]), target_size)
                 st.code(stmt_sz, language="sql")
                 # Round-3 hunt: the booked saving must follow the ACTUAL chosen target vs

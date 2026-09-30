@@ -14,6 +14,9 @@ from .formulas import safe_float
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
 _SIZES = ("XSMALL", "SMALL", "MEDIUM", "LARGE", "XLARGE", "XXLARGE")
+# The Cost ▸ Idle & sizing "Resize to" picker offers exactly what resize_fix accepts (review r1 R1-4: it
+# stopped at LARGE, so an XLARGE warehouse had no size-up option).
+RESIZE_SIZES = _SIZES
 
 
 def _ident(name: str, what: str = "identifier") -> str:

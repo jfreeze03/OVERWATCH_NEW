@@ -53,6 +53,13 @@ CLUSTER_CHECK_MIN_DAYS = 35
 CLUSTER_CHECK_MAX_DAYS = 90          # the live QUERY_HISTORY clamp (data.common.bounded_days)
 CLUSTER_CHECK_MAX_WAREHOUSES = 100   # == the sizing profile's LIMIT 100, so no profile row is ever left out
 CAP_REACHED, CAP_NOT_REACHED, CAP_NO_QUERIES, CAP_NOT_CHECKED = "reached", "not_reached", "no_queries", "not_checked"
+# Where the cluster-cap check lives (review r1 R1-5 / R1-11): every surface that says "add a cluster" without
+# running the check points here, so a higher MAX_CLUSTER_COUNT is never advised on a cap nobody checked.
+CLUSTER_CAP_CHECK_PATH = "Cost Intelligence ▸ Optimization & Savings ▸ Idle & sizing ▸ Check cluster use"
+# The qualifier those surfaces carry (ETL evidence, Operations), inside their own parentheses: no read,
+# just the rule.
+CLUSTER_CAP_QUALIFIER = ("on a multi-cluster warehouse, raise MAX_CLUSTER_COUNT only if its queries reach the "
+                         f"current maximum — {CLUSTER_CAP_CHECK_PATH} checks it")
 RECOMMEND_DOWN = "Size down candidate"
 RECOMMEND_SUSPEND = "Tune auto-suspend first"
 RECOMMEND_CADENCE = "Review cadence / consolidation"
@@ -353,10 +360,13 @@ def _hour_count_txt(n: int) -> str:
 
 
 def cluster_check_days(served_days: int, window_start: date | None, today: date) -> int:
-    """The trailing window the cluster-cap check reads. It is at least CLUSTER_CHECK_MIN_DAYS, so a
-    month-end is inside. It reaches back to the sizing window's start (served days on a trailing window,
-    or today - bounds[0] on a calendar preset). It is at most CLUSTER_CHECK_MAX_DAYS (the live
-    QUERY_HISTORY clamp). Pure: today is passed in."""
+    """The trailing window the cluster-cap check reads, in whole days before today. It is at least
+    CLUSTER_CHECK_MIN_DAYS, so a month-end is inside. It reaches back to the sizing window's first day
+    (served days on a trailing window, or today - bounds[0] on a calendar preset) — in full, because
+    insights_sql.warehouse_cluster_use starts the read at MIDNIGHT (account time) that many days ago,
+    not at now minus N days (review r1 R1-7). It is at most CLUSTER_CHECK_MAX_DAYS (the live
+    QUERY_HISTORY clamp), so a longer window (Current year) is checked over its last 90 days only.
+    Pure: today is passed in."""
     back = max(int(served_days or 0), (today - window_start).days if window_start is not None else 0)
     return max(CLUSTER_CHECK_MIN_DAYS, min(back, CLUSTER_CHECK_MAX_DAYS))
 
@@ -373,14 +383,53 @@ def cluster_check_targets(frame: pd.DataFrame | None) -> list[str]:
     return sorted(names)[:CLUSTER_CHECK_MAX_WAREHOUSES]
 
 
+def cluster_range_coverage(frame: pd.DataFrame | None) -> tuple[int, int]:
+    """(known, unknown): how many distinct warehouses of a sizing profile (after with_warehouse_settings)
+    carry a SHOW MAX_CLUSTER_COUNT, and how many do not (review r1 R1-10). An empty SHOW WAREHOUSES result
+    leaves no MAX_CLUSTER_COUNT column at all, and a SHOW that lists none of the profile's warehouses leaves
+    it NaN on every row: both are (0, n) — the cluster ranges are UNKNOWN, which must never read as "no
+    multi-cluster warehouse". (0, 0) for a None/empty frame or one without WAREHOUSE_NAME. Pure."""
+    if frame is None or frame.empty or "WAREHOUSE_NAME" not in frame.columns:
+        return 0, 0
+    keys = frame["WAREHOUSE_NAME"].astype(str).str.strip().str.upper()
+    if "MAX_CLUSTER_COUNT" not in frame.columns:
+        return 0, int(keys.nunique())
+    has = pd.to_numeric(frame["MAX_CLUSTER_COUNT"], errors="coerce").notna()
+    known = set(keys[has])
+    return len(known), len(set(keys) - known)
+
+
+def cluster_check_label(base: str, days: object) -> str:
+    """A cluster-cap evidence column's header with its window (review r1 R1-9): "Hours at cap (last 35 days)"
+    when the row carries CLUSTER_CHECK_DAYS, else ``base`` unchanged (the value is NaN there). The check
+    window is not the sizing window, and the two sit side by side in the selected-row evidence. Pure."""
+    d = _num(days)
+    return f"{base} (last {int(d)} days)" if d == d and d > 0 else base
+
+
+def unchecked_cap_note(n: int) -> str:
+    """The VISIBLE disclosure for a page that shows add-a-cluster verdicts but never runs the cluster-cap
+    check (Operations ▸ Warehouses ▸ Sizing & efficiency; review r1 R1-5): ``n`` = sizing_summary's
+    cap_unchecked. '' when n <= 0. Pure."""
+    n = int(n or 0)
+    if n <= 0:
+        return ""
+    return (f"{n} \"{RECOMMEND_SCALE_OUT}\" row(s) above are on a multi-cluster warehouse whose cluster cap "
+            "this page does not check: a higher MAX_CLUSTER_COUNT helps only if its queries reach the current "
+            f"maximum. {CLUSTER_CAP_CHECK_PATH} checks it, and a warehouse that never reaches its cap reads "
+            f"\"{RECOMMEND_BELOW_CAP}\" there.")
+
+
 def cluster_use_summary(hist: pd.DataFrame | None, frame: pd.DataFrame, targets: list[str]) -> pd.DataFrame:
     """Judge each target warehouse's cluster use against its CURRENT SHOW MAX_CLUSTER_COUNT (from
     ``frame``, the sizing profile after with_warehouse_settings). ``hist`` is the
     insights_sql.warehouse_cluster_use histogram: (WAREHOUSE_NAME, PEAK_CLUSTER, HOUR_COUNT = clock
-    hours whose highest CLUSTER_NUMBER was PEAK_CLUSTER).
+    hours whose highest CLUSTER_NUMBER was PEAK_CLUSTER). An hour is the hour a query STARTED in, so a long
+    query counts only in its start hour and the hour counts are a floor (review r1 R1-8); the Reached / Not
+    reached answer is unaffected (every clustered query has a start hour inside the window).
 
-    One row per target: ACTIVE_HOUR_COUNT (hours with a clustered query), PEAK_CLUSTERS (the highest
-    cluster any query ran on), P95_PEAK_CLUSTERS (nearest-rank p95 of the hourly peaks),
+    One row per target: ACTIVE_HOUR_COUNT (hours in which a clustered query started), PEAK_CLUSTERS (the
+    highest cluster any query ran on), P95_PEAK_CLUSTERS (nearest-rank p95 of the hourly peaks),
     AT_CAP_HOUR_COUNT (hours whose peak reached, or passed, the current maximum — ">=" so a since-lowered
     cap still counts) and CLUSTER_CAP (Reached / Not reached / No queries). An EMPTY frame (these
     columns) when ``hist`` is None or has rows without the expected columns: the page reads that as
@@ -526,7 +575,9 @@ SIZE_ORDER = ("XSMALL", "SMALL", "MEDIUM", "LARGE", "XLARGE",
 _SIZE_ALIASES = {"X-SMALL": "XSMALL", "XS": "XSMALL", "S": "SMALL", "M": "MEDIUM",
                  "L": "LARGE", "X-LARGE": "XLARGE", "XL": "XLARGE",
                  "2X-LARGE": "2XLARGE", "3X-LARGE": "3XLARGE", "4X-LARGE": "4XLARGE",
-                 "5X-LARGE": "5XLARGE", "6X-LARGE": "6XLARGE", "5X": "5XLARGE", "6X": "6XLARGE"}
+                 "5X-LARGE": "5XLARGE", "6X-LARGE": "6XLARGE", "5X": "5XLARGE", "6X": "6XLARGE",
+                 # the Resize picker's spelling (remediation.RESIZE_SIZES); Snowflake accepts it for 2X-Large
+                 "XXLARGE": "2XLARGE"}
 
 
 def normalize_size(size: object) -> str:
@@ -547,6 +598,31 @@ def shifted_size(size: str, delta: int) -> str:
         return ""
     idx = max(0, min(SIZE_ORDER.index(current) + int(delta), len(SIZE_ORDER) - 1))
     return SIZE_ORDER[idx]
+
+
+def resize_picker_default(recommendation: object, current_size: object,
+                          options: tuple[str, ...] | list[str]) -> tuple[int, str]:
+    """(index, note) for the Cost ▸ Idle & sizing "Resize to" picker (review r1 R1-4). Pure.
+
+    A capacity-pressure verdict (UP_VERDICTS: add a cluster, size up, size up or split) opens on ONE SIZE UP
+    from the current size, so the pane under a verdict whose caption calls the resize "the size-up route"
+    never opens on a downsize that projects a saving. When the picker does not offer the next size, it
+    opens on the current size (a no-op) and ``note`` says so; when it does not offer the current size either
+    (larger than every option), it opens on the largest option and ``note`` says every option is a
+    downsize. Any other verdict, or an unknown current size, keeps the first option with no note (the
+    v4.603 default)."""
+    opts = [normalize_size(o) for o in options]
+    cur = normalize_size(current_size)
+    if not opts or str(recommendation or "") not in UP_VERDICTS or not cur:
+        return 0, ""
+    up = shifted_size(cur, 1)
+    if up != cur and up in opts:
+        return opts.index(up), ""
+    if cur in opts:
+        return opts.index(cur), (f"The next size up from {cur} is not offered here, so the picker opens on the "
+                                 "current size (no change).")
+    return len(opts) - 1, (f"This warehouse ({cur}) is larger than every size offered here, so each option "
+                           "below is a downsize — none is the size-up route.")
 
 
 def simulate_scenario(

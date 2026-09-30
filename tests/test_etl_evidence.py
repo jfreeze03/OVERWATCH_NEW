@@ -389,6 +389,13 @@ def test_verdict_queue_provisioning_vs_overload_wording() -> None:
                        QUEUE_WAREHOUSE="WH_BUSY"))
     assert "queued on WH_BUSY" in over[0].text and "behind other work (overload)" in over[0].text
     assert _levels(_lines(_row(QUEUED_PCT=19.9)))[0] == "clean"
+    # v4.604.0 review r1 R1-11: the overload advice no longer says "add a cluster" ungated -- on a multi-cluster
+    # warehouse a higher MAX_CLUSTER_COUNT helps only if its queries reach the current maximum (Cost checks it)
+    assert over[0].text.endswith(
+        "mostly waiting behind other work (overload) — move this step off the busy window, or add a cluster (on "
+        "a multi-cluster warehouse, raise MAX_CLUSTER_COUNT only if its queries reach the current maximum — Cost "
+        "Intelligence ▸ Optimization & Savings ▸ Idle & sizing ▸ Check cluster use checks it).")
+    assert "add a cluster or move this step off the busy window" not in over[0].text
 
 
 def test_verdict_remote_spill_humanized() -> None:

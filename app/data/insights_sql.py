@@ -10,6 +10,7 @@ from __future__ import annotations
 from app import companies
 from app.config import core_object
 from app.data.common import (
+    account_today_sql,
     and_where,
     bounded_days,
     not_app_self_sql,
@@ -960,7 +961,8 @@ def warehouse_cluster_use(warehouses: tuple[str, ...] | list[str] = (), days: in
 
     - Per warehouse and clock hour, it takes the highest QUERY_HISTORY.CLUSTER_NUMBER any query ran on
       and returns it as a histogram: (WAREHOUSE_NAME, PEAK_CLUSTER, HOUR_COUNT = hours whose peak was
-      that cluster).
+      that cluster). The hour is the one the query STARTED in (DATE_TRUNC of START_TIME), so a long
+      query counts only in its start hour and the hour counts are a floor (review r1 R1-8).
     - The pure sizing.cluster_use_summary judges peak, p95 and hours-at-cap against the CURRENT SHOW
       MAX_CLUSTER_COUNT. The SQL embeds no setting, so a changed cap never busts this cache entry.
     - Rows are bounded by warehouses x distinct cluster numbers, never by queries, so the page reads it
@@ -970,7 +972,9 @@ def warehouse_cluster_use(warehouses: tuple[str, ...] | list[str] = (), days: in
     - It has no company parameter: the caller passes only warehouses from the company-scoped sizing
       profile.
     - The window is clamped to 1..90 days here. The page asks for sizing.cluster_check_days (>= 35) so a
-      month-end is inside."""
+      month-end is inside. It starts at MIDNIGHT (account time, common.account_today_sql) ``days`` days
+      ago, not at now minus ``days`` days, so the sizing window's first day is read in full on a calendar
+      preset and on a trailing window alike (review r1 R1-7; the sizing profile anchors on a date too)."""
     from app.core.sqlsafe import sql_literal
 
     days = bounded_days(days, 90)
@@ -983,7 +987,7 @@ WITH h AS (
            DATE_TRUNC('hour', q.START_TIME) AS HOUR_TS,
            MAX(q.CLUSTER_NUMBER) AS PEAK_CLUSTER
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
-    WHERE q.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+    WHERE q.START_TIME >= DATEADD('day', -{days}, {account_today_sql()})
       AND UPPER(q.WAREHOUSE_NAME) IN ({in_list})
       AND q.CLUSTER_NUMBER IS NOT NULL
     GROUP BY 1, 2

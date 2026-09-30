@@ -134,20 +134,39 @@ def test_cluster_check_days_covers_the_window_min_35_max_90():
 
 def test_any_35_day_window_holds_a_month_end():
     """The caption / CHANGELOG claim: a check of at least 35 days always has a month-end inside. The read is
-    START_TIME >= now - N days, so the N-1 whole days before today are fully covered; for N = 35 some day
-    among them is the last of its month, for every day of 2024-2027. A 30-day window does NOT guarantee it
-    (read on Aug 31: whole days Aug 2..Aug 30, a partial Aug 1 and today — no month-end)."""
+    START_TIME >= midnight N days back (review r1 R1-7: it was now - N days, which left the first day
+    partial), so the N whole days before today are fully covered; for N = 35 some day among them is the
+    last of its month, for every day of 2024-2027 — even counting only N-1 of them. A 30-day window does
+    NOT guarantee it (read on Aug 31: whole days Aug 1..Aug 30 and today — no month-end)."""
     def month_end(d: date) -> bool:
         return (d + timedelta(days=1)).day == 1
 
     def whole_days(today: date, n: int) -> list[date]:
-        return [today - timedelta(days=k) for k in range(1, n)]
+        return [today - timedelta(days=k) for k in range(1, n + 1)]
 
     day = date(2024, 1, 1)
     while day <= date(2027, 12, 31):
-        assert any(month_end(d) for d in whole_days(day, CLUSTER_CHECK_MIN_DAYS)), day
+        assert any(month_end(d) for d in whole_days(day, CLUSTER_CHECK_MIN_DAYS)[:-1]), day
         day += timedelta(days=1)
-    assert not any(month_end(d) for d in whole_days(date(2026, 8, 31), 30))   # Aug 2..Aug 30
+    assert not any(month_end(d) for d in whole_days(date(2026, 8, 31), 30))   # Aug 1..Aug 30
+
+
+def test_a_calendar_window_is_read_from_its_first_midnight():
+    """Review r1 R1-7: on Last month read Sep 30 the check is 60 days, and the builder's bound is the DATE 60
+    days back in account time (Aug 1 00:00 Central) — the sizing window's first day in full, not from 14:00.
+    The trailing profile anchors on a date too, so a 60/90-day trailing window is covered the same way."""
+    today = date(2026, 9, 30)
+    for start, served in ((date(2026, 8, 1), 31), (date(2026, 7, 2), 31)):      # 60 and 90 days back
+        n = cluster_check_days(served, start, today)
+        assert today - timedelta(days=n) == start
+        sql = insights_sql.warehouse_cluster_use(["WH_A"], n)
+        assert (f"q.START_TIME >= DATEADD('day', -{n}, CONVERT_TIMEZONE('America/Chicago', "
+                "CURRENT_TIMESTAMP())::DATE)") in sql
+    for served in (60, 90):
+        sql = insights_sql.warehouse_cluster_use(["WH_A"], cluster_check_days(served, None, today))
+        assert f"DATEADD('day', -{served}, CONVERT_TIMEZONE(" in sql and "CURRENT_TIMESTAMP())\n" not in sql
+    # the docstring no longer over-claims: it names the midnight anchor
+    assert "MIDNIGHT" in sizing.cluster_check_days.__doc__
 
 
 # ---------------------------------------------------------------------------
@@ -408,12 +427,14 @@ def test_warehouse_cluster_use_builder_shape():
     sql = insights_sql.warehouse_cluster_use(["wh_b", "WH_A", "wh_a"])
     tree = sqlglot.parse_one(sql, read="snowflake")
     assert tree.named_selects == ["WAREHOUSE_NAME", "PEAK_CLUSTER", "HOUR_COUNT"]
+    anchor = "CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE"      # common.account_today_sql
     for frag in ("MAX(q.CLUSTER_NUMBER) AS PEAK_CLUSTER", "DATE_TRUNC('hour', q.START_TIME)",
                  "q.CLUSTER_NUMBER IS NOT NULL", "UPPER(q.WAREHOUSE_NAME) IN ('WH_A', 'WH_B')",
-                 "DATEADD('day', -35, CURRENT_TIMESTAMP())", "FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q"):
+                 f"DATEADD('day', -35, {anchor})", "FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q"):
         assert frag in sql, frag
-    assert "DATEADD('day', -90, CURRENT_TIMESTAMP())" in insights_sql.warehouse_cluster_use(["WH_A"], 400)
-    assert "DATEADD('day', -60, CURRENT_TIMESTAMP())" in insights_sql.warehouse_cluster_use(["WH_A"], 60)
+    assert f"DATEADD('day', -90, {anchor})" in insights_sql.warehouse_cluster_use(["WH_A"], 400)
+    assert f"DATEADD('day', -60, {anchor})" in insights_sql.warehouse_cluster_use(["WH_A"], 60)
+    assert "-35, CURRENT_TIMESTAMP()" not in sql                  # review r1 R1-7: never now minus N days
     none = insights_sql.warehouse_cluster_use(())
     assert "IN (NULL)" in none and sqlglot.parse_one(none, read="snowflake") is not None
     hostile = insights_sql.warehouse_cluster_use(["WH'X ZZINJZZ"])
@@ -469,6 +490,17 @@ def test_optimize_wiring():
     assert "stays queued" not in opt and "closed in #38 as a $0 lever" in opt
     assert opt.count("ACCOUNT_USAGE") <= 6
     assert read("app/ui/pages/operations.py").count("ACCOUNT_USAGE") == 42
+    # review r1 R1-10: the range coverage is judged BEFORE "no multi-cluster warehouse" is said
+    assert chk.index("cluster_range_coverage(sizing_df)") < chk.index("No warehouse in this profile has")
+    assert 'empty_state("needs_setup"' in chk
+    # review r1 R1-4: the resize picker's default follows the verdict; options == what resize_fix accepts
+    assert ('_rs_idx, _rs_note = resize_picker_default(srow.get("RECOMMENDATION"), srow.get("CURRENT_SIZE"),'
+            in tab)
+    assert 'st.selectbox("Resize to", list(remediation.RESIZE_SIZES), index=_rs_idx,' in tab
+    assert '["XSMALL", "SMALL", "MEDIUM", "LARGE"]' not in tab
+    # review r1 R1-9: the evidence row's cluster columns carry the check window, and the CSV carries it too
+    assert '"AT_CAP_HOUR_COUNT", "CLUSTER_CHECK_DAYS",' in tab
+    assert 'cluster_check_label("Peak cluster", _cd)' in tab and 'cluster_check_label("Hours at cap", _cd)' in tab
 
 
 def test_operations_help_says_the_cap_is_not_checked():
@@ -479,6 +511,11 @@ def test_operations_help_says_the_cap_is_not_checked():
             "Enterprise edition) only where it does; otherwise size up or split the workload. Cost Intelligence ▸ "
             "Optimization & Savings ▸ Idle & sizing checks it per warehouse (Check cluster use).") in body
     assert "raise MAX_CLUSTER_COUNT (multi-cluster needs Enterprise edition) or split the workload." not in body
+    # review r1 R1-5: a VISIBLE caption under the table (the help above is a hover tooltip only)
+    tbl = body.index("entity_nav_table(_sized[_cols]")
+    note = body.index('st.caption(unchecked_cap_note(_sum["cap_unchecked"]))')
+    assert tbl < note < body.index('st.caption("Health = 100')
+    assert 'if _sum["cap_unchecked"]:' in body[tbl:note]
     # the v4.603 wrapped spelling is gone from the raw source too
     assert ('raise "\n                     "MAX_CLUSTER_COUNT (multi-cluster needs Enterprise edition) or split the '
             'workload."') not in ops
@@ -496,3 +533,98 @@ def test_cluster_use_columns_are_counts_not_durations():
         assert _duration_unit_for_column(col) is None, col
     for col in ("ACTIVE_HOUR_COUNT", "AT_CAP_HOUR_COUNT", "HOUR_COUNT"):
         assert col.endswith(_COUNT_SUFFIXES), col
+
+
+# ---------------------------------------------------------------------------
+# v4.604.0 review r1: the pure helpers behind R1-4 / R1-5 / R1-9 / R1-10
+# ---------------------------------------------------------------------------
+
+def test_resize_picker_opens_on_a_size_up_for_pressure_verdicts():
+    """R1-4: the below-cap pane calls the resize "the size-up route", so a capacity-pressure verdict opens
+    the picker one size UP — never on XSMALL, which for a Small warehouse was a downsize that projected a
+    saving and logged it."""
+    from app.logic import remediation
+    from app.logic.sizing import resize_picker_default
+
+    opts = remediation.RESIZE_SIZES
+    assert opts == ("XSMALL", "SMALL", "MEDIUM", "LARGE", "XLARGE", "XXLARGE")
+    for verdict in (RECOMMEND_BELOW_CAP, RECOMMEND_SCALE_OUT, RECOMMEND_SIZE_UP, RECOMMEND_UP):
+        assert resize_picker_default(verdict, "Small", opts) == (opts.index("MEDIUM"), ""), verdict
+        assert resize_picker_default(verdict, "X-Small", opts) == (opts.index("SMALL"), "")
+        assert resize_picker_default(verdict, "LARGE", opts) == (opts.index("XLARGE"), "")
+        assert resize_picker_default(verdict, "X-Large", opts) == (opts.index("XXLARGE"), "")
+    # the top offered size opens on itself (a no-op) and says so; a bigger warehouse opens on the largest
+    # option and says every option is a downsize
+    idx, note = resize_picker_default(RECOMMEND_BELOW_CAP, "2X-Large", opts)
+    assert (opts[idx], "no change" in note) == ("XXLARGE", True)
+    idx, note = resize_picker_default(RECOMMEND_SIZE_UP, "3X-Large", opts)
+    assert opts[idx] == "XXLARGE" and "each option below is a downsize" in note
+    # every other verdict, and an unknown size, keeps the v4.603 default (first option, no note)
+    for verdict in (RECOMMEND_DOWN, RECOMMEND_SUSPEND, "Keep", ""):
+        assert resize_picker_default(verdict, "Small", opts) == (0, "")
+    assert resize_picker_default(RECOMMEND_BELOW_CAP, None, opts) == (0, "")
+    assert resize_picker_default(RECOMMEND_BELOW_CAP, "", opts) == (0, "")
+    # the picker's XXLARGE spelling is the ladder's 2XLARGE, so an upsize to it is never "size unknown"
+    assert sizing.normalize_size("XXLARGE") == "2XLARGE"
+    assert sizing.normalize_size("2X-Large") == "2XLARGE"
+
+
+def test_cluster_range_coverage():
+    """R1-10: an empty SHOW (no MAX_CLUSTER_COUNT column) and a SHOW that lists none of the profile (NaN on
+    every row) are both (0, n): ranges unknown, not zero multi-cluster warehouses."""
+    from app.logic.sizing import cluster_range_coverage
+
+    names = pd.DataFrame({"WAREHOUSE_NAME": ["WH_A", "wh_a ", "WH_B"]})
+    assert cluster_range_coverage(names) == (0, 2)
+    assert cluster_range_coverage(names.assign(MAX_CLUSTER_COUNT=math.nan)) == (0, 2)
+    assert cluster_range_coverage(names.assign(MAX_CLUSTER_COUNT=[4.0, 4.0, math.nan])) == (1, 1)
+    assert cluster_range_coverage(names.assign(MAX_CLUSTER_COUNT=[1.0, 1.0, 1.0])) == (2, 0)
+    assert cluster_range_coverage(pd.DataFrame()) == (0, 0) and cluster_range_coverage(None) == (0, 0)
+
+
+def test_cluster_check_label_names_the_check_window():
+    """R1-9: the selected-row evidence mixes the sizing window with the cluster-cap check window."""
+    from app.logic.sizing import cluster_check_label
+
+    assert cluster_check_label("Hours at cap", 35.0) == "Hours at cap (last 35 days)"
+    assert cluster_check_label("Peak cluster", 60) == "Peak cluster (last 60 days)"
+    for none in (None, math.nan, 0, ""):
+        assert cluster_check_label("Hours at cap", none) == "Hours at cap"
+
+
+def test_unchecked_cap_note_names_the_check():
+    """R1-5: the Operations table's visible disclosure."""
+    from app.logic.sizing import CLUSTER_CAP_CHECK_PATH, unchecked_cap_note
+
+    assert unchecked_cap_note(0) == "" and unchecked_cap_note(None) == ""
+    note = unchecked_cap_note(3)
+    assert note.startswith('3 "Add a cluster (scale out)" row(s) above are on a multi-cluster warehouse whose '
+                           "cluster cap this page does not check")
+    assert "a higher MAX_CLUSTER_COUNT helps only if its queries reach the current maximum" in note
+    assert CLUSTER_CAP_CHECK_PATH in note and f'"{RECOMMEND_BELOW_CAP}"' in note
+
+
+# ---------------------------------------------------------------------------
+# v4.604.0 review r1 R1-11: the other add-a-cluster surfaces say the cap must be checked first
+# ---------------------------------------------------------------------------
+
+def test_the_query_advisor_gates_its_cluster_advice():
+    from app.logic.query_advisor import advise
+    from app.logic.sizing import CLUSTER_CAP_CHECK_PATH
+
+    findings, _ = advise({"ELAPSED_SEC": 10, "QUEUED_SEC": 7, "QUEUED_OVERLOAD_SEC": 6,
+                          "QUEUED_PROVISIONING_SEC": 1})
+    detail = next(f for f in findings if f.code == "queued").detail
+    assert "raise MAX_CLUSTER_COUNT (multi-cluster) or move this workload" not in detail
+    assert ("On a multi-cluster warehouse, raise MAX_CLUSTER_COUNT only if its queries reach the current maximum "
+            f"({CLUSTER_CAP_CHECK_PATH} checks it) — below the cap, a higher maximum does not help.") in detail
+    assert "add a cluster or move this workload to its own warehouse" in detail
+
+
+def test_the_operations_cluster_advice_is_gated():
+    ops = _flat(read("app/ui/pages/operations.py"))
+    assert "Add a cluster (multi-cluster) or split the workload; don't rewrite" not in ops
+    assert ('bad SQL. Add a cluster or split the workload (" + CLUSTER_CAP_QUALIFIER + "); '
+            "don't rewrite the query.") in ops
+    assert '(add a cluster / split the workload; " + CLUSTER_CAP_QUALIFIER + ");' in ops
+    assert 'before users feel it (" + CLUSTER_CAP_QUALIFIER + ").' in ops
