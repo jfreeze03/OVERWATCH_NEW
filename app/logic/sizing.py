@@ -54,7 +54,10 @@ CLUSTER_CHECK_MAX_DAYS = 90          # the live QUERY_HISTORY clamp (data.common
 CLUSTER_CHECK_MAX_WAREHOUSES = 100   # == the sizing profile's LIMIT 100, so no profile row is ever left out
 CAP_REACHED, CAP_NOT_REACHED, CAP_NO_QUERIES, CAP_NOT_CHECKED = "reached", "not_reached", "no_queries", "not_checked"
 # Where the cluster-cap check lives (review r1 R1-5 / R1-11): every surface that says "add a cluster" without
-# running the check points here, so a higher MAX_CLUSTER_COUNT is never advised on a cap nobody checked.
+# running the check points here (through CLUSTER_CAP_QUALIFIER), so a higher MAX_CLUSTER_COUNT is never advised on
+# a cap nobody checked. tests/test_cluster_cap_gate.py sweeps app/ for add-a-cluster text without the qualifier
+# (review r2 R2-4); its allowlist names the exceptions (labels, the gated verdicts, and the query advisor's
+# split-unknown fallback, byte-locked on purpose by tests/test_cold_start_split.py).
 CLUSTER_CAP_CHECK_PATH = "Cost Intelligence ▸ Optimization & Savings ▸ Idle & sizing ▸ Check cluster use"
 # The qualifier those surfaces carry (ETL evidence, Operations), inside their own parentheses: no read,
 # just the rule.
@@ -216,6 +219,28 @@ def _policy(value: object) -> str:
     return value.strip().upper() if isinstance(value, str) else ""
 
 
+def _queue_follow_up(row) -> str:
+    """The Size up (spill + queueing) rationale's follow-up (review r2 R2-4 / R2-11): add a cluster if the queue
+    persists, gated like the scale-out verdict. On a multi-cluster non-ECONOMY warehouse whose cluster-cap check
+    ran: never reached -> split instead (a higher maximum would not help); at the generator's cap of
+    CLUSTER_RANGE_CAP -> split; reached -> add one, and says so. Otherwise (single-cluster, ECONOMY, unknown
+    range, not checked, no clustered query) the rule itself, CLUSTER_CAP_QUALIFIER."""
+    lead = "if queueing persists after the resize, "
+    mx = _num(row.get("MAX_CLUSTER_COUNT"))
+    if mx == mx and mx > 1 and _policy(row.get("SCALING_POLICY")) != "ECONOMY":
+        n, cap = int(mx), cluster_cap_state(row)
+        d = int(_num(row.get("CLUSTER_CHECK_DAYS"))) if cap in (CAP_REACHED, CAP_NOT_REACHED) else 0
+        if cap == CAP_NOT_REACHED:
+            return (lead + f"split the workload: in the last {d} days no query ran above cluster "
+                    f"{int(_num(row.get('PEAK_CLUSTERS')))} of {n}, so a higher MAX_CLUSTER_COUNT would not help.")
+        if n >= CLUSTER_RANGE_CAP:
+            return lead + f"split the workload across warehouses (already at {n} clusters)."
+        if cap == CAP_REACHED:
+            return (lead + f"add a cluster: queries reached cluster {n} of {n} in "
+                    f"{_hour_count_txt(int(_num(row.get('AT_CAP_HOUR_COUNT'))))} of the last {d} days.")
+    return lead + "add a cluster (" + CLUSTER_CAP_QUALIFIER + ")."
+
+
 def _pressure_verdict(row, queued: float, spill: float, p95: float) -> tuple[str, str]:
     """Next-Fifty #38: split capacity pressure into scale-out (concurrency) vs size-up (per-query).
 
@@ -235,7 +260,7 @@ def _pressure_verdict(row, queued: float, spill: float, p95: float) -> tuple[str
             return RECOMMEND_SIZE_UP, (
                 f"Per-query memory pressure with queueing: {spill:.1f} GB/day remote spill and {q_txt}. "
                 "Size up first — spilling queries hold slots longer, so the queue often clears too; "
-                "if queueing persists after the resize, add a cluster." + step)
+                + _queue_follow_up(row) + step)
         return RECOMMEND_SIZE_UP, (
             f"Per-query memory pressure: {spill:.1f} GB/day remote spill. Size up one step for more "
             "memory per cluster — another cluster does not help a single spilling query." + step)
@@ -389,14 +414,43 @@ def cluster_range_coverage(frame: pd.DataFrame | None) -> tuple[int, int]:
     leaves no MAX_CLUSTER_COUNT column at all, and a SHOW that lists none of the profile's warehouses leaves
     it NaN on every row: both are (0, n) — the cluster ranges are UNKNOWN, which must never read as "no
     multi-cluster warehouse". (0, 0) for a None/empty frame or one without WAREHOUSE_NAME. Pure."""
+    known, unknown = _cluster_range_split(frame)
+    return len(known), len(unknown)
+
+
+def _cluster_range_split(frame: pd.DataFrame | None) -> tuple[set[str], set[str]]:
+    """(known, unknown) warehouse keys (upper-cased, stripped) of a sizing profile: with / without a SHOW
+    MAX_CLUSTER_COUNT. One rule for cluster_range_coverage and cluster_range_unknown."""
     if frame is None or frame.empty or "WAREHOUSE_NAME" not in frame.columns:
-        return 0, 0
+        return set(), set()
     keys = frame["WAREHOUSE_NAME"].astype(str).str.strip().str.upper()
     if "MAX_CLUSTER_COUNT" not in frame.columns:
-        return 0, int(keys.nunique())
+        return set(), set(keys)
     has = pd.to_numeric(frame["MAX_CLUSTER_COUNT"], errors="coerce").notna()
     known = set(keys[has])
-    return len(known), len(set(keys) - known)
+    return known, set(keys) - known
+
+
+# How many unlisted warehouses the partly-listed caption names before "and N more" (review r2 R2-3).
+UNKNOWN_RANGE_NAMES_CAP = 10
+
+
+def cluster_range_unknown(frame: pd.DataFrame | None) -> list[str]:
+    """The profile warehouses with no SHOW MAX_CLUSTER_COUNT (cluster_range_coverage's ``unknown``, by name:
+    upper-cased, stripped, sorted), so a partly-listed profile's caption names them (review r2 R2-3). Pure."""
+    return sorted(_cluster_range_split(frame)[1])
+
+
+def unknown_range_sentence(names: list[str]) -> str:
+    """The partly-listed caption's clause (leading space) naming the profile warehouses SHOW WAREHOUSES did not
+    list, capped at UNKNOWN_RANGE_NAMES_CAP with 'and N more'; '' when there are none. Pure."""
+    if not names:
+        return ""
+    shown = list(names[:UNKNOWN_RANGE_NAMES_CAP])
+    more = len(names) - len(shown)
+    listed = ", ".join(shown) + (f" and {more:,} more" if more > 0 else "")
+    return (f" {len(names):,} warehouse(s) in this profile are not in SHOW WAREHOUSES ({listed}), so their cluster "
+            "range is unknown and they are not checked.")
 
 
 def cluster_check_label(base: str, days: object) -> str:
@@ -600,29 +654,47 @@ def shifted_size(size: str, delta: int) -> str:
     return SIZE_ORDER[idx]
 
 
+def picker_size_label(size: object, options: tuple[str, ...] | list[str]) -> str:
+    """A warehouse size as the "Resize to" picker spells it (review r2 R2-2): the offered option whose ladder size
+    matches (2X-Large -> XXLARGE, the option), else the ladder name (3XLARGE), '' if unknown. Pure."""
+    cur = normalize_size(size)
+    for opt in options:
+        if cur and normalize_size(opt) == cur:
+            return str(opt)
+    return cur
+
+
+# Why the picker opens with nothing picked (review r2 R2-2), after the reason.
+RESIZE_PICK_PROMPT = " The picker opens with no size picked: pick one to see the statement."
+
+
 def resize_picker_default(recommendation: object, current_size: object,
-                          options: tuple[str, ...] | list[str]) -> tuple[int, str]:
-    """(index, note) for the Cost ▸ Idle & sizing "Resize to" picker (review r1 R1-4). Pure.
+                          options: tuple[str, ...] | list[str]) -> tuple[int | None, str]:
+    """(index, note) for the Cost ▸ Idle & sizing "Resize to" picker (review r1 R1-4, r2 R2-2). Pure.
 
     A capacity-pressure verdict (UP_VERDICTS: add a cluster, size up, size up or split) opens on ONE SIZE UP
-    from the current size, so the pane under a verdict whose caption calls the resize "the size-up route"
-    never opens on a downsize that projects a saving. When the picker does not offer the next size, it
-    opens on the current size (a no-op) and ``note`` says so; when it does not offer the current size either
-    (larger than every option), it opens on the largest option and ``note`` says every option is a
-    downsize. Any other verdict, or an unknown current size, keeps the first option with no note (the
-    v4.603 default)."""
+    from the current size where the picker offers it, since the pane under such a verdict calls the resize
+    "the size-up route". Where it does not — the current size is the largest option (its next size is not
+    offered), larger than every option (3XLARGE and up: every option is a downsize), or unknown — ``index``
+    is None: the picker opens with NO size picked, so the pane shows no statement, no saving and no Execute
+    until the operator picks one, and ``note`` says why (sizes spelled as the picker spells them). Any other
+    verdict keeps the first option with no note (the v4.603 default)."""
     opts = [normalize_size(o) for o in options]
-    cur = normalize_size(current_size)
-    if not opts or str(recommendation or "") not in UP_VERDICTS or not cur:
+    if not opts or str(recommendation or "") not in UP_VERDICTS:
         return 0, ""
+    cur = normalize_size(current_size)
+    if not cur:
+        return None, ("The current size of this warehouse is unknown (SHOW WAREHOUSES did not return it), so one "
+                      "size up cannot be offered." + RESIZE_PICK_PROMPT)
     up = shifted_size(cur, 1)
     if up != cur and up in opts:
         return opts.index(up), ""
+    label = picker_size_label(cur, options)
     if cur in opts:
-        return opts.index(cur), (f"The next size up from {cur} is not offered here, so the picker opens on the "
-                                 "current size (no change).")
-    return len(opts) - 1, (f"This warehouse ({cur}) is larger than every size offered here, so each option "
-                           "below is a downsize — none is the size-up route.")
+        return None, (f"The next size up from {label} is not offered here, so every option is this size (no "
+                      "change) or a downsize — none is the size-up route." + RESIZE_PICK_PROMPT)
+    return None, (f"This warehouse ({label}) is larger than every size offered here, so every option is a "
+                  "downsize — none is the size-up route." + RESIZE_PICK_PROMPT)
 
 
 def simulate_scenario(

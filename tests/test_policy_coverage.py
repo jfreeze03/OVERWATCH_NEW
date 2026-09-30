@@ -352,11 +352,12 @@ def test_parity_view_and_counts():
     assert pc.parity_counts(frame) == (1500, 1)                       # from TOTAL_NAMES, not len(frame)
     assert pc.parity_summary_sentence(1500, 1) == (
         "1,500 masked table or view names belong to a database family with two or more masked databases; 1 is "
-        "not masked the same way in every one of them. Databases with no masked column are not part of this "
-        "grouping.")
+        "not masked the same way in every one of them. Databases with no column-level masking reference are not "
+        "part of this grouping.")
     assert pc.parity_summary_sentence(1, 0) == (
         "1 masked table or view name belongs to a database family with two or more masked databases; 0 are not "
-        "masked the same way in every one of them. Databases with no masked column are not part of this grouping.")
+        "masked the same way in every one of them. Databases with no column-level masking reference are not part "
+        "of this grouping.")
 
 
 def test_parity_wording_says_unmasked_databases_are_left_out():
@@ -364,12 +365,12 @@ def test_parity_wording_says_unmasked_databases_are_left_out():
     empty state say so (an unmasked environment is listed from SHOW DATABASES instead)."""
     pc = _pc()
     assert "MASKED_FAMILY_DATABASES" in pc.PARITY_COLUMNS and "FAMILY_DATABASES" not in pc.PARITY_COLUMNS
-    assert "a database with no masked column appears in neither table" in pc.PARITY_LEGEND
+    assert "a database with no column-level masking reference appears in neither table" in pc.PARITY_LEGEND
     assert "A family here is the databases with masked columns" in pc.PARITY_LEGEND
     assert "MASKED_FAMILY_DATABASES counts the family's databases with masked columns" in pc.PARITY_LEGEND
     assert pc.PARITY_NOTHING_TO_GROUP == (
         "No two databases with masked columns share a name up to their last underscore, so there is nothing to "
-        "group. Databases with no masked column are not part of this grouping.")
+        "group. Databases with no column-level masking reference are not part of this grouping.")
 
 
 # The 2026-09-29 shape: ALFA_EDW_* has 7 databases (app/companies.py) but only some carry column masking.
@@ -405,17 +406,38 @@ def test_sibling_lines():
     sibs = pc.unmasked_family_databases(["ALFA_EDW_PRD", "MART_A"], _SHOW_NAMES)
     assert pc.sibling_lines(sibs) == (
         pc.SIBLINGS_LEAD,
-        "ALFA_EDW: no masked column in ALFA_EDW_DEV, ALFA_EDW_MGM, ALFA_EDW_PHX, ALFA_EDW_SAN, ALFA_EDW_SEA and "
-        "ALFA_EDW_SIT.",
-        "MART: no masked column in MART_B.")
-    assert pc.sibling_lines(()) == (pc.SIBLINGS_NONE,)
-    assert pc.sibling_lines((), listed_capped=True) == (pc.SIBLINGS_NONE, pc.SIBLINGS_CAPPED)
+        "ALFA_EDW: no column-level masking reference in ALFA_EDW_DEV, ALFA_EDW_MGM, ALFA_EDW_PHX, ALFA_EDW_SAN, "
+        "ALFA_EDW_SEA and ALFA_EDW_SIT.",
+        "MART: no column-level masking reference in MART_B.",
+        pc.SIBLINGS_LAG)
+    assert pc.sibling_lines(()) == (pc.SIBLINGS_NONE, pc.SIBLINGS_LAG)
+    assert pc.sibling_lines((), listed_capped=True) == (pc.SIBLINGS_NONE, pc.SIBLINGS_LAG, pc.SIBLINGS_CAPPED)
     many = (pc.FamilySiblings("X", tuple(f"X_{i:02d}" for i in range(pc.SIBLING_NAMES_CAP + 3))),)
     line = pc.sibling_lines(many)[1]
     assert line.endswith(f"X_{pc.SIBLING_NAMES_CAP - 1:02d} and 3 more.") and f"X_{pc.SIBLING_NAMES_CAP:02d}" not in line
     # the unchecked states never claim there are none
     for text in (pc.SIBLINGS_UNCHECKED, pc.SIBLINGS_NO_NAMES):
         assert "were not checked" in text and "lists no" not in text
+
+
+def test_sibling_lines_never_say_no_masked_column():
+    """Review R2-1: the lines know only that a database has no COLUMN-LEVEL masking reference. Tag-based masking is
+    not traced to columns, so with masking tags on the account a qualifier follows a non-empty list; the policy
+    view's lag (and the cached database list) is stated on every rendered list; SHOW DATABASES is never 'live'."""
+    pc = _pc()
+    sibs = pc.unmasked_family_databases(["ALFA_EDW_PRD"], _SHOW_NAMES)
+    tagged = pc.sibling_lines(sibs, tag_masking=True, listed_capped=True)
+    assert tagged == (*pc.sibling_lines(sibs)[:-1], pc.SIBLINGS_TAG_QUALIFIER, pc.SIBLINGS_LAG, pc.SIBLINGS_CAPPED)
+    assert pc.SIBLINGS_TAG_QUALIFIER == (
+        "Tag-based masking is not traced to columns here, so a database masked only through a tag (or a tag set on "
+        "the database or schema) can be listed.")
+    assert pc.SIBLINGS_TAG_QUALIFIER not in pc.sibling_lines(sibs)                    # no tags: no qualifier
+    assert pc.sibling_lines((), tag_masking=True) == (pc.SIBLINGS_NONE, pc.SIBLINGS_LAG)  # nothing listed to qualify
+    assert "can lag up to 2 hours" in pc.SIBLINGS_LAG and "cached SHOW DATABASES read" in pc.SIBLINGS_LAG
+    texts = (*tagged, *pc.sibling_lines(()), pc.SIBLINGS_UNCHECKED, pc.SIBLINGS_NO_NAMES, pc.PARITY_LEGEND,
+             pc.PARITY_NOTHING_TO_GROUP, pc.parity_summary_sentence(3, 1))
+    for text in texts:
+        assert "no masked column" not in text and not re.search(r"\blive\b", text, re.IGNORECASE), text
 
 
 def test_network_policy_caption_variants():
@@ -640,8 +662,8 @@ def test_parity_toggle_states(monkeypatch):
     assert seen["empty"] == [("no_data_yet", pc.PARITY_NOTHING_TO_GROUP)]
     # only production masked: nothing to group, but the unmasked environments are still named
     assert pc.SIBLINGS_LEAD in fake.text("caption")
-    assert ("ALFA_EDW: no masked column in ALFA_EDW_DEV, ALFA_EDW_MGM, ALFA_EDW_PHX, ALFA_EDW_SAN, ALFA_EDW_SEA "
-            "and ALFA_EDW_SIT.") in fake.text("caption")
+    assert ("ALFA_EDW: no column-level masking reference in ALFA_EDW_DEV, ALFA_EDW_MGM, ALFA_EDW_PHX, ALFA_EDW_SAN, "
+            "ALFA_EDW_SEA and ALFA_EDW_SIT.") in fake.text("caption")
 
     fake, seen = _render_parity(monkeypatch, _ok(_parity_frame(3, total=3, differing=1)))
     ((key, _sql_text, kw), (dbs_key, dbs_sql, dbs_kw)) = seen["runs"]
@@ -650,8 +672,8 @@ def test_parity_toggle_states(monkeypatch):
     # the sidebar's SHOW DATABASES read (same SQL, tier and max_rows: its cache entry)
     assert dbs_key == "sec_policy_parity_dbs" and dbs_sql == _sql().show_databases_sql()
     assert dbs_kw["tier"] == "metadata" and dbs_kw["max_rows"] == 0
-    assert "ALFA_EDW: no masked column in ALFA_EDW_MGM, ALFA_EDW_PHX, ALFA_EDW_SAN and ALFA_EDW_SEA." \
-        in fake.text("caption")
+    assert ("ALFA_EDW: no column-level masking reference in ALFA_EDW_MGM, ALFA_EDW_PHX, ALFA_EDW_SAN and "
+            "ALFA_EDW_SEA.") in fake.text("caption")
     ((table, kwargs),) = seen["tables"]
     assert list(table.columns) == list(pc.PARITY_COLUMNS) and kwargs["slug"] == "masking-environment-grouping"
     caps = fake.text("caption")
@@ -684,11 +706,15 @@ def test_unmasked_sibling_read_failures_never_say_there_are_none(monkeypatch):
 
 
 def test_policy_panel_passes_its_masked_databases_to_the_grouping(monkeypatch):
-    sec, _fake, _seen = _patch(monkeypatch, {"sec_policy_cov": _ok(_probe_shape())})
+    """... and (review R2-1) whether the account has masking tags, for the unmasked-sibling qualifier."""
     got: list = []
-    monkeypatch.setattr(sec, "_render_masking_parity", lambda masked=(): got.append(masked))
-    sec._render_policy_coverage()
-    assert got == [("EDW_PRD", "EDW_DEV", "EDW_SIT", "MART_A", "OPS")]
+    for tags, want in ((15, True), (0, False)):
+        sec, _fake, _seen = _patch(monkeypatch, {"sec_policy_cov": _ok(_probe_shape().assign(MASKING_TAGS=tags))})
+        monkeypatch.setattr(sec, "_render_masking_parity",
+                            lambda masked=(), *, tag_masking=None: got.append((masked, tag_masking)))
+        sec._render_policy_coverage()
+        assert got.pop() == (("EDW_PRD", "EDW_DEV", "EDW_SIT", "MART_A", "OPS"), want)
+    assert not got
 
 
 def test_unmasked_sibling_read_is_the_sidebars_cached_read():

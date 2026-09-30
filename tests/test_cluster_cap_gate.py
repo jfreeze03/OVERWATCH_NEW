@@ -49,7 +49,7 @@ from app.logic.sizing import (
     sizing_summary,
     with_cluster_use,
 )
-from tests._source import read
+from tests._source import ROOT, read
 
 sqlglot = pytest.importorskip("sqlglot")
 
@@ -501,6 +501,15 @@ def test_optimize_wiring():
     # review r1 R1-9: the evidence row's cluster columns carry the check window, and the CSV carries it too
     assert '"AT_CAP_HOUR_COUNT", "CLUSTER_CHECK_DAYS",' in tab
     assert 'cluster_check_label("Peak cluster", _cd)' in tab and 'cluster_check_label("Hours at cap", _cd)' in tab
+    # review r2 R2-8: ... from the SELECTED row's check window, each with the not-the-sizing-window help (a
+    # `_cd = None` or a dropped help passed every test; the AppTest twin reads the rendered labels too)
+    evidence = tab.split('st.markdown("**Selected recommendation evidence**")', 1)[1].split("if sel_sz is not None", 1)[0]
+    assert '_cd = srow.get("CLUSTER_CHECK_DAYS")' in evidence
+    assert evidence.index('_cd = srow.get("CLUSTER_CHECK_DAYS")') < evidence.index('cluster_check_label("Peak cluster"')
+    assert evidence.count("_cd = ") == 1 and evidence.count("help=_cd_help") == 2
+    assert ('cluster_check_label("Peak cluster", _cd), format="%d", help=_cd_help),' in evidence
+            and 'cluster_check_label("Hours at cap", _cd), format="%d", help=_cd_help),' in evidence)
+    assert "not the \"\n                            \"sizing window of the other columns." in evidence
 
 
 def test_operations_help_says_the_cap_is_not_checked():
@@ -553,20 +562,71 @@ def test_resize_picker_opens_on_a_size_up_for_pressure_verdicts():
         assert resize_picker_default(verdict, "X-Small", opts) == (opts.index("SMALL"), "")
         assert resize_picker_default(verdict, "LARGE", opts) == (opts.index("XLARGE"), "")
         assert resize_picker_default(verdict, "X-Large", opts) == (opts.index("XXLARGE"), "")
-    # the top offered size opens on itself (a no-op) and says so; a bigger warehouse opens on the largest
-    # option and says every option is a downsize
-    idx, note = resize_picker_default(RECOMMEND_BELOW_CAP, "2X-Large", opts)
-    assert (opts[idx], "no change" in note) == ("XXLARGE", True)
-    idx, note = resize_picker_default(RECOMMEND_SIZE_UP, "3X-Large", opts)
-    assert opts[idx] == "XXLARGE" and "each option below is a downsize" in note
-    # every other verdict, and an unknown size, keeps the v4.603 default (first option, no note)
+    # every other verdict keeps the v4.603 default (first option, no note), whatever the size
     for verdict in (RECOMMEND_DOWN, RECOMMEND_SUSPEND, "Keep", ""):
         assert resize_picker_default(verdict, "Small", opts) == (0, "")
-    assert resize_picker_default(RECOMMEND_BELOW_CAP, None, opts) == (0, "")
-    assert resize_picker_default(RECOMMEND_BELOW_CAP, "", opts) == (0, "")
+        assert resize_picker_default(verdict, None, opts) == (0, "")
     # the picker's XXLARGE spelling is the ladder's 2XLARGE, so an upsize to it is never "size unknown"
     assert sizing.normalize_size("XXLARGE") == "2XLARGE"
     assert sizing.normalize_size("2X-Large") == "2XLARGE"
+
+
+def test_resize_picker_opens_on_nothing_where_no_size_up_is_offered():
+    """Review r2 R2-2 / R2-7: under a capacity-pressure verdict with no size up to offer, the picker opened on a
+    no-op (2X-Large), a DOWNSIZE that projected and logged a saving (3X-Large and up, onto XXLARGE), or XSMALL
+    (unknown size). It now opens with NO size picked (index None) and says why, in the picker's spelling."""
+    from app.logic import remediation
+    from app.logic.sizing import RESIZE_PICK_PROMPT, picker_size_label, resize_picker_default
+
+    opts = remediation.RESIZE_SIZES
+    for verdict in (RECOMMEND_BELOW_CAP, RECOMMEND_SCALE_OUT, RECOMMEND_SIZE_UP, RECOMMEND_UP):
+        idx, note = resize_picker_default(verdict, "2X-Large", opts)
+        assert idx is None and note == (
+            "The next size up from XXLARGE is not offered here, so every option is this size (no change) or a "
+            "downsize — none is the size-up route." + RESIZE_PICK_PROMPT), verdict
+        assert "2XLARGE" not in note                          # the option reads XXLARGE (R2-2's label mismatch)
+        for big in ("3X-Large", "4X-Large", "6X-Large"):
+            idx, note = resize_picker_default(verdict, big, opts)
+            assert idx is None and note == (
+                f"This warehouse ({sizing.normalize_size(big)}) is larger than every size offered here, so every "
+                "option is a downsize — none is the size-up route." + RESIZE_PICK_PROMPT), (verdict, big)
+        for unknown in (None, "", "weird", float("nan")):
+            idx, note = resize_picker_default(verdict, unknown, opts)
+            assert idx is None and note.startswith("The current size of this warehouse is unknown"), unknown
+            assert note.endswith(RESIZE_PICK_PROMPT)
+    assert RESIZE_PICK_PROMPT == " The picker opens with no size picked: pick one to see the statement."
+    assert [picker_size_label(s, opts) for s in ("2X-Large", "XXLARGE", "Small", "3X-Large", None)] == [
+        "XXLARGE", "XXLARGE", "SMALL", "3XLARGE", ""]
+
+
+def test_the_resize_pane_shows_nothing_until_a_size_is_picked():
+    """Review r2 R2-2 (the floor leg skips the AppTest twin in tests/test_cluster_cap_shaped.py): with no size
+    picked, the pane renders no statement, no saving caption and no Execute; the picker default can be None."""
+    import ast
+
+    tab = _body(read("app/ui/pages/cost_parts/optimize.py"), "def _optimization_tab(")
+    assert ('target_size = st.selectbox("Resize to", list(remediation.RESIZE_SIZES), index=_rs_idx,\n'
+            '                                           key=f"sizing_to_{srow[\'WAREHOUSE_NAME\']}", '
+            'placeholder="Pick a size")') in tab
+    fn = next(n for n in ast.walk(ast.parse(read("app/ui/pages/cost_parts/optimize.py")))
+              if isinstance(n, ast.FunctionDef) and n.name == "_optimization_tab")
+    gates = [n for n in ast.walk(fn) if isinstance(n, ast.If) and ast.unparse(n.test) == "target_size is not None"]
+    assert len(gates) == 1
+    (gate,) = gates
+    assert not gate.orelse
+    inside = ast.unparse(gate)
+    for needed in ("remediation.resize_fix(", "st.code(stmt_sz", "Projected saving", "Resizing UP",
+                   "confirm_gate(", "Execute resize + log", "write_gate_open('sizing')", "REMEDIATION_LOG",
+                   "SAVINGS_LEDGER", "stamp_write('sizing', ok)"):
+        assert needed in inside, needed
+    # nothing that shows or runs a resize sits outside the gate
+    rest = tab.replace(tab[tab.index("if target_size is not None:"):tab.index("_whatif_panel(sized")], "")
+    for banned in ("resize_fix(", "stmt_sz", "Execute resize", 'write_gate_open("sizing")'):
+        assert banned not in rest, banned
+    # the captions spell both sizes as the picker does (XXLARGE, never 2XLARGE beside an XXLARGE option)
+    assert "_cur_label = picker_size_label(_cur_size, remediation.RESIZE_SIZES)" in tab
+    assert "resizing {_cur_label} → \"\n" in tab and 'f"{target_size} (only idle-hour credits' in tab
+    assert 'st.caption(f"Resizing UP {_cur_label} → {target_size} raises cost — no saving "' in tab
 
 
 def test_cluster_range_coverage():
@@ -580,6 +640,31 @@ def test_cluster_range_coverage():
     assert cluster_range_coverage(names.assign(MAX_CLUSTER_COUNT=[4.0, 4.0, math.nan])) == (1, 1)
     assert cluster_range_coverage(names.assign(MAX_CLUSTER_COUNT=[1.0, 1.0, 1.0])) == (2, 0)
     assert cluster_range_coverage(pd.DataFrame()) == (0, 0) and cluster_range_coverage(None) == (0, 0)
+
+
+def test_a_partly_listed_profile_names_its_unlisted_warehouses():
+    """Review r2 R2-3: the glossary said the partly-listed caption names the unknown warehouses; it only counted
+    them. cluster_range_unknown gives the names (cluster_range_coverage's rule), capped with 'and N more'."""
+    from app.logic.sizing import (
+        UNKNOWN_RANGE_NAMES_CAP,
+        cluster_range_coverage,
+        cluster_range_unknown,
+        unknown_range_sentence,
+    )
+
+    names = pd.DataFrame({"WAREHOUSE_NAME": ["wh_b ", "WH_A", "WH_B", "WH_C"]})
+    assert cluster_range_unknown(names) == ["WH_A", "WH_B", "WH_C"]             # no MAX_CLUSTER_COUNT column
+    frame = names.assign(MAX_CLUSTER_COUNT=[math.nan, 4.0, math.nan, 1.0])
+    assert cluster_range_unknown(frame) == ["WH_B"] and cluster_range_coverage(frame) == (2, 1)
+    assert cluster_range_unknown(pd.DataFrame()) == [] and cluster_range_unknown(None) == []
+    assert unknown_range_sentence([]) == ""
+    assert unknown_range_sentence(["WH_B"]) == (
+        " 1 warehouse(s) in this profile are not in SHOW WAREHOUSES (WH_B), so their cluster range is unknown and "
+        "they are not checked.")
+    many = [f"WH_{i:02d}" for i in range(UNKNOWN_RANGE_NAMES_CAP + 2)]
+    line = unknown_range_sentence(many)
+    assert line.startswith(f" {len(many)} warehouse(s) in this profile are not in SHOW WAREHOUSES (WH_00, ")
+    assert f"WH_{UNKNOWN_RANGE_NAMES_CAP - 1:02d} and 2 more)" in line and f"WH_{UNKNOWN_RANGE_NAMES_CAP:02d}" not in line
 
 
 def test_cluster_check_label_names_the_check_window():
@@ -621,6 +706,32 @@ def test_the_query_advisor_gates_its_cluster_advice():
     assert "add a cluster or move this workload to its own warehouse" in detail
 
 
+def test_the_size_up_follow_up_is_gated_like_the_scale_out_verdict():
+    """R2-4 / R2-11: a spill + queueing warehouse reads "Size up", and its rationale's follow-up said "if queueing
+    persists after the resize, add a cluster." with no cap check, even on Idle & sizing where the check runs.
+    Checked and never at the cap -> split instead; reached -> add one, saying so; otherwise the rule itself."""
+    from app.logic.sizing import CLUSTER_CAP_QUALIFIER
+
+    std = {"SCALING_POLICY": "STANDARD", "MIN_CLUSTER_COUNT": 1.0}
+    out = _sized(
+        _wh("LOW", spill=_SPILL, MAX_CLUSTER_COUNT=4.0, **std, **_state(CAP_NOT_REACHED, 4.0)),
+        _wh("SAT", spill=_SPILL, MAX_CLUSTER_COUNT=4.0, **std, **_state("reached", 4.0)),
+        _wh("UNCHECKED", spill=_SPILL, MAX_CLUSTER_COUNT=4.0, **std),
+        _wh("UNKNOWN", spill=_SPILL),
+        _wh("TEN", spill=_SPILL, MAX_CLUSTER_COUNT=10.0, **std, **_state("reached", 10.0)))
+    assert set(out["RECOMMENDATION"]) == {RECOMMEND_SIZE_UP}
+    why = out["RATIONALE"]
+    assert ("if queueing persists after the resize, split the workload: in the last 35 days no query ran above "
+            "cluster 3 of 4, so a higher MAX_CLUSTER_COUNT would not help.") in why["LOW"]
+    assert "add a cluster" not in why["LOW"]
+    assert ("if queueing persists after the resize, add a cluster: queries reached cluster 4 of 4 in 57 hours of "
+            "the last 35 days.") in why["SAT"]
+    for name in ("UNCHECKED", "UNKNOWN"):
+        assert f"if queueing persists after the resize, add a cluster ({CLUSTER_CAP_QUALIFIER})." in why[name]
+    assert ("if queueing persists after the resize, split the workload across warehouses (already at 10 "
+            "clusters).") in why["TEN"]
+
+
 def test_the_operations_cluster_advice_is_gated():
     ops = _flat(read("app/ui/pages/operations.py"))
     assert "Add a cluster (multi-cluster) or split the workload; don't rewrite" not in ops
@@ -628,3 +739,112 @@ def test_the_operations_cluster_advice_is_gated():
             "don't rewrite the query.") in ops
     assert '(add a cluster / split the workload; " + CLUSTER_CAP_QUALIFIER + ");' in ops
     assert 'before users feel it (" + CLUSTER_CAP_QUALIFIER + ").' in ops
+    assert 'first; add a cluster only if the queue persists (" + CLUSTER_CAP_QUALIFIER + ").' in ops
+
+
+# ---------------------------------------------------------------------------
+# v4.604.0 review r2 R2-4 / R2-11: a sweep, not a list of named sites
+# ---------------------------------------------------------------------------
+
+# Advice to add a cluster or raise the cluster maximum ...
+_ADD_CLUSTER_RE = re.compile(r"\badd (?:a |another |more )?clusters?\b"
+                             r"|\braises? (?:the )?(?:MAX_CLUSTER_COUNT|maximum)\b", re.IGNORECASE)
+# ... must carry the cap check in the SAME string expression: the shared qualifier / check path, or the check's
+# own result ("queries reached cluster n of n", "reaches its MAX_CLUSTER_COUNT ... Check cluster use").
+_CAP_CHECK_RE = re.compile(r"\{CLUSTER_CAP_QUALIFIER\}|\{CLUSTER_CAP_CHECK_PATH\}|reached cluster"
+                           r"|reach(?:es|ing)? (?:the|its) (?:current maximum|MAX_CLUSTER_COUNT)|Check cluster use")
+# Exact texts that NAME the verdict rather than advise it.
+_ADD_CLUSTER_LABELS = {
+    "Add a cluster (scale out)": "sizing.RECOMMEND_SCALE_OUT, the verdict label",
+    "Size up / add cluster": "sizing.RECOMMEND_UP, the legacy merged label (never emitted)",
+    "Add a cluster": "the Operations KPI label (its help carries the check)",
+}
+# (file, enclosing function, fragment): advice that may omit the qualifier, and why.
+_ADD_CLUSTER_ALLOWED = {
+    ("app/logic/query_advisor.py", "advise", "either concurrency (add a cluster or size up for parallelism)"):
+        "the split-unknown / no-dominant-cause fallback: tests/test_cold_start_split.py locks it byte for byte on "
+        "purpose (Next-Fifty #17 kept the legacy wording for the older row shape), so review r2 left it as is",
+    ("app/logic/sizing.py", "_pressure_verdict", "{lead} Add a cluster rather than a bigger size. {how}{tail}"):
+        "the scale-out verdict itself, after its cap gate: the not-checked / no-queries / never-reached branches "
+        "return earlier, so `how` here is single-cluster, ECONOMY, the generator cap, a reached cap, or an "
+        "unknown range (which says the current setting is unknown)",
+    ("app/logic/sizing.py", "_pressure_verdict", "Single-cluster today (MAX_CLUSTER_COUNT = 1): raise "):
+        "a single-cluster warehouse: every query runs on cluster 1 of 1, so its cap is reached by definition",
+    ("app/logic/sizing.py", "scale_out_plan", "Raises MAX_CLUSTER_COUNT {cur_max} → {cur_max + 1}; MIN stays "):
+        "the single-cluster (1 -> 2) prefill note; the multi-cluster prefill note says the cap was reached",
+}
+
+
+def _str_text(node) -> str:
+    """The text a viewer reads from a string expression: literals joined, every non-literal as {its source}."""
+    import ast
+
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(v.value if isinstance(v, ast.Constant) else "{" + ast.unparse(v.value) + "}"
+                       for v in node.values)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _str_text(node.left) + _str_text(node.right)
+    if isinstance(node, ast.IfExp):
+        return _str_text(node.body) + " | " + _str_text(node.orelse)
+    return "{" + ast.unparse(node) + "}"
+
+
+def _add_cluster_texts():
+    """(file, enclosing function, text) for every string expression under app/ that advises adding a cluster:
+    each literal climbed to its whole concatenation (f-string, +, a conditional part); docstrings skipped."""
+    import ast
+
+    out = []
+    for py in sorted((ROOT / "app").rglob("*.py")):
+        rel = py.relative_to(ROOT).as_posix()
+        tree = ast.parse(py.read_text(encoding="utf-8"))
+        parent = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        tops = {}
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+                continue
+            if isinstance(parent.get(node), ast.Expr):
+                continue                                   # a docstring / bare string statement
+            top = node
+            while True:
+                up = parent.get(top)
+                if isinstance(up, ast.JoinedStr) or (isinstance(up, ast.BinOp) and isinstance(up.op, ast.Add)) \
+                        or (isinstance(up, ast.IfExp) and top is not up.test):
+                    top = up
+                    continue
+                break
+            tops[id(top)] = top
+        for top in tops.values():
+            text = _str_text(top)
+            if not _ADD_CLUSTER_RE.search(text):
+                continue
+            fn, up = "", parent.get(top)
+            while up is not None and not fn:
+                fn = up.name if isinstance(up, (ast.FunctionDef, ast.AsyncFunctionDef)) else ""
+                up = parent.get(up)
+            out.append((rel, fn, text))
+    return out
+
+
+def test_every_add_a_cluster_string_carries_the_cap_check():
+    """R2-4 / R2-11: r1 fixed the add-a-cluster sites it named and locked only those, so the query advisor's
+    fallback and the Operations Size up help slipped through. Every string expression in app/ (sizing.py
+    included) that advises adding a cluster or raising the cluster maximum must carry the cap check, or be a
+    verdict label, or be allowlisted with its reason."""
+    texts = _add_cluster_texts()
+    assert len(texts) >= 12, texts                        # the sweep sees the known sites (not vacuous)
+    used = set()
+    bad = []
+    for rel, fn, text in texts:
+        if _CAP_CHECK_RE.search(text) or text in _ADD_CLUSTER_LABELS:
+            continue
+        hit = [key for key in _ADD_CLUSTER_ALLOWED if key[0] == rel and key[1] == fn and key[2] in text]
+        if hit:
+            used.update(hit)
+            continue
+        bad.append((rel, fn, text))
+    assert not bad, "\n".join(f"{r} {f}(): {t}" for r, f, t in bad)
+    assert used == set(_ADD_CLUSTER_ALLOWED), set(_ADD_CLUSTER_ALLOWED) - used   # no stale exemption
+    assert {t for _r, _f, t in texts} >= set(_ADD_CLUSTER_LABELS)

@@ -3681,7 +3681,7 @@ def _wh_sizing_efficiency(company: str, rate: float, days: int, *,
             {"label": "Size up", "value": f"{_sum['size_up']}",
              "delta_color": "inverse" if _sum["size_up"] else "off",
              "help": "Remote spill per day — per-query memory pressure. With queueing too, size up "
-                     "first; add a cluster only if the queue persists."},
+                     "first; add a cluster only if the queue persists (" + CLUSTER_CAP_QUALIFIER + ")."},
             {"label": "Tune auto-suspend first", "value": f"{_sum['suspend']}"},
             {"label": "Size-down candidates", "value": f"{_sum['down']}"},
             {"label": "Idle $ on suspend-first WHs", "value": format_usd(_sum["idle_saving_usd"])},

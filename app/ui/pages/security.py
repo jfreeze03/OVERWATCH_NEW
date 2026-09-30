@@ -975,14 +975,15 @@ def _render_policy_coverage() -> None:
         st.caption(INVENTORY_NOTE)
     result_caption(res)
     if cov.masked_columns > 0:
-        _render_masking_parity(tuple(inventory["DATABASE_NAME"]))
+        _render_masking_parity(tuple(inventory["DATABASE_NAME"]), tag_masking=cov.masking_tags > 0)
 
 
-def _render_unmasked_siblings(masked_dbs: tuple) -> None:
+def _render_unmasked_siblings(masked_dbs: tuple, *, tag_masking: bool) -> None:
     """Review R1-1: the grouping sees only databases with a masked column, so list the databases of each masked
-    database's family that have none, from the sidebar's own SHOW DATABASES read (same SQL, tier and max_rows:
-    its cache entry, no extra scan). A failed or nameless read says they were not checked, never that there are
-    none."""
+    database's family with no column-level masking reference, from the sidebar's own SHOW DATABASES read (same
+    SQL, tier and max_rows: its cache entry, no extra scan). A failed or nameless read says they were not
+    checked, never that there are none. Review R2-1: ``tag_masking`` (the account has masking tags) qualifies the
+    list, since tag-based masking is not traced to columns; the policy-view lag line always renders."""
     dbs = run(security_sql.show_databases_sql(), page=_PAGE, key="sec_policy_parity_dbs", tier="metadata",
               source="SHOW DATABASES", max_rows=0)
     if not dbs.ok:
@@ -993,18 +994,20 @@ def _render_unmasked_siblings(masked_dbs: tuple) -> None:
         empty_state("no_data_yet", SIBLINGS_NO_NAMES)
         return
     siblings = unmasked_family_databases(masked_dbs, names)
-    for line in sibling_lines(siblings, listed_capped=len(names) >= security_sql.SHOW_DATABASES_LIMIT):
+    for line in sibling_lines(siblings, listed_capped=len(names) >= security_sql.SHOW_DATABASES_LIMIT,
+                              tag_masking=tag_masking):
         st.caption(line)
 
 
-def _render_masking_parity(masked_dbs: tuple = ()) -> None:
+def _render_masking_parity(masked_dbs: tuple = (), *, tag_masking: bool = False) -> None:
     """Next-Fifty #43: same-named masked tables grouped across a database family. Its own toggle, one more read
     of the same view. Information only: no Track button, no severity colour, no alert. ``masked_dbs`` are the
-    inventory's databases with a masked column, for the unmasked-sibling lines."""
+    inventory's databases with a masked column, for the unmasked-sibling lines; ``tag_masking`` (review R2-1:
+    the account has masking tags) qualifies those lines on both render paths."""
     if not st.toggle("Group same-named tables across environments", key="sec_policy_parity_toggle",
                      help="One more read of the same view: each masked schema.table name in a database family "
-                          "with two or more masked databases, then the family databases with no masked column "
-                          "(from SHOW DATABASES)."):
+                          "with two or more masked databases, then the family databases with no column-level "
+                          "masking reference (from SHOW DATABASES)."):
         return
     par = run(security_sql.masking_environment_parity(), page=_PAGE, key="sec_policy_parity", tier="hourly",
               probe=True, source="POLICY_REFERENCES (masked tables grouped across environments)")
@@ -1017,7 +1020,7 @@ def _render_masking_parity(masked_dbs: tuple = ()) -> None:
         return
     if par.empty:
         empty_state("no_data_yet", PARITY_NOTHING_TO_GROUP)
-        _render_unmasked_siblings(masked_dbs)
+        _render_unmasked_siblings(masked_dbs, tag_masking=tag_masking)
         return
     total, differing = parity_counts(par.df)
     view = parity_view(par.df)
@@ -1027,7 +1030,7 @@ def _render_masking_parity(masked_dbs: tuple = ()) -> None:
     if total > len(view):
         st.caption(f"Showing the first {len(view):,} of {total:,} names, differences first.")
     st.caption(PARITY_LEGEND)
-    _render_unmasked_siblings(masked_dbs)
+    _render_unmasked_siblings(masked_dbs, tag_masking=tag_masking)
     result_caption(par)
 
 

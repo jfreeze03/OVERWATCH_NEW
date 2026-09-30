@@ -234,8 +234,9 @@ def test_pipeline_headline_follows_the_levers_counted():
     """R1-15 / R1-22 (the floor leg skips the shaped twin in tests/test_prc_c2_shaped.py): the Addressable $/mo
     headline is gated on the rollup's items, not on the idle read alone, so it never shows a dash beside a
     'Levers counted: unread maintenance' caption and a projection carrying those dollars. A failed or empty idle
-    read is named in the delta; the dash stays only when nothing is counted; the failure state no longer says the
-    whole addressable figure is unsized."""
+    read is named in the delta; the dash stays only when no counted lever has an item (review r2 R2-5: a lever
+    counted at $0, such as a clean unread-maintenance scan, still leaves the dash); the failure state no longer
+    says the whole addressable figure is unsized."""
     pipe = _fn(_src(_BODY_REL), "_pipeline_tab")
     assert ('_idle_gap = ("efficiency mart unavailable" if not idle.ok\n'
             '                 else "no warehouse metering in this window" if idle.empty else "")') in pipe
@@ -250,6 +251,16 @@ def test_pipeline_headline_follows_the_levers_counted():
     assert "The warehouse-efficiency mart could not be read — idle-timer savings are not sized" in joined
     assert "addressable savings are not sized" not in joined
     assert "Off, the addressable figure is idle-timer only" not in joined
+
+
+def test_the_runbook_states_the_dash_rule_the_code_applies():
+    """Review r2 R2-5 / R2-10: RUNBOOK said the headline 'is a dash only when nothing is counted', but the code
+    (above) keeps the dash whenever no counted lever has an item, so a lever counted at $0 still shows it."""
+    rb = re.sub(r"\s+", " ", _src("RUNBOOK.md"))
+    assert "a dash only when nothing is counted" not in rb
+    assert ("it is a dash only when no counted lever has an item (a lever counted at $0, such as a clean "
+            "unread-maintenance scan or one whose objects are all already booked, still leaves the dash)") in rb
+
 
 def test_live_proof_sections_reach_no_account_usage():
     """The v451 reach pin allows the body ACCESS_HISTORY only because of the HIDDEN _products;

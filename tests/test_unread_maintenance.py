@@ -706,8 +706,9 @@ def test_handoff_note_wording():
     assert note(_hand(_mix())) == (
         "1 confirmed-unread object(s) join Addressable $/mo in Idle & sizing and on Proof ▸ Pipeline for this "
         "Company. They drop out when cached data is refreshed, the credit rate changes, or 1h after this panel was "
-        "last shown. An object booked in another session after this scan keeps counting here until the scan is "
-        "re-run (at most 1h).")
+        "last shown. An object booked in another session keeps counting here until the scan is re-run at "
+        "least 5m after that booking (the Savings-ledger read that leaves booked objects out is cached for "
+        "up to 5m): at most 1h 5m after the booking.")
     short = _short(D__S__A={"CLUSTERING_CREDITS": 9.0, "MAINT_CREDITS_30D": 4.0},
                    D__S__B={"CLUSTERING_CREDITS": 9.0, "MAINT_CREDITS_30D": 2.0})
     two = unread_maintenance_verdicts(short, _reads(D__S__A={}, D__S__B={}), rate=1.0)
@@ -715,8 +716,9 @@ def test_handoff_note_wording():
         "1 confirmed-unread object(s) join Addressable $/mo in Idle & sizing and on Proof ▸ Pipeline for this "
         "Company (a floor: only the top 50 shortlisted objects were checked). 1 already booked on the Savings "
         "ledger are left out. They drop out when cached data is refreshed, the credit rate changes, or 1h after "
-        "this panel was last shown. An object booked in another session after this scan keeps counting here until "
-        "the scan is re-run (at most 1h).")
+        "this panel was last shown. An object booked in another session keeps counting here until the scan is "
+        "re-run at least 5m after that booking (the Savings-ledger read that leaves booked objects out is cached "
+        "for up to 5m): at most 1h 5m after the booking.")
     assert savings_rollup.S_LEDGER_UNAVAILABLE == (
         "The Savings ledger could not be read, so confirmed objects are not added to Addressable $/mo (objects "
         "already booked could not be left out).")
@@ -911,8 +913,42 @@ def test_only_the_book_button_changes_the_unread_booked_set_in_app():
     assert "AND UPPER(TRIM(m.FINDING_TYPE)) IN ('AUTO_SUSPEND', 'MAX_CLUSTERS', 'RESIZE')" in twin
     assert not set(LEDGER_AUTOBOOKED_LEVERS) & set(ARM_FINDING_TYPE.values())
     assert savings_rollup.N_ELSEWHERE in savings_rollup.unread_handoff_note(_hand(_mix()))
-    joined = _joined(read("app/ui/pages/cost_parts/optimize.py")) + _joined(read("app/ui/decision_studio.py"))
-    assert joined.count("booked in another session since then keeps counting until the scan is re-run") == 2
+    # review r2 R2-6 / R2-9: both headlines' help carry the one shared rule (the ledger read's cache time included)
+    for rel in ("app/ui/pages/cost_parts/optimize.py", "app/ui/decision_studio.py"):
+        src = _joined(read(rel))
+        assert src.count(" + H_BOOKED + ") == 1, rel
+        assert "when that scan ran" not in src and "since then keeps counting until the scan is re-run" not in src
+
+
+def test_another_sessions_booking_is_disclosed_with_the_ledger_cache_time():
+    """Review r2 R2-6 / R2-9: the booked set comes from a 'recent'-tier (5-minute) cached ledger read, and no salt
+    sees another session's booking. So a scan re-run within 5 minutes of that booking still counts the object and
+    re-stamps the handoff for another hour: it can count up to 1h 5m after the booking, and a re-run does not
+    always drop it. The disclosure said 'until the scan is re-run (at most 1h)'."""
+    from app.core.query import CACHE_TTLS
+    assert savings_rollup.BOOKED_LEDGER_CACHE_SEC == CACHE_TTLS["recent"] == 300
+    led = _storage_branch().split('key="booked_unread_ledger"', 1)
+    assert "run(mart_sql.savings_ledger(limit=None), page=_PAGE," in led[0][-80:] and 'tier="recent",' in led[1][:60]
+    # the scenario: the ledger read is cached at t0 - 5s, X is booked elsewhere at t0, the scan is re-run at
+    # t0 + 290s (a cache hit until t0 + 295s: X still counts) and stamped then -- X still counts at t0 + 1h 4m 40s
+    t0 = _AS_OF
+    restamp = _hand(_mix(), as_of=t0 + timedelta(seconds=290))
+    counted = savings_rollup.unread_lever(restamp, company="ALFA", scope="S", rate=_RATE, where=_WHERE,
+                                          now=t0 + timedelta(seconds=3880))
+    assert counted.included and [o.target for o in counted.opportunities] == ["D.S.A"]
+    age_at_check = 3880                                                      # seconds after the booking
+    assert age_at_check > savings_rollup.UNREAD_HANDOFF_MAX_AGE_SEC          # past the old 'at most 1h'
+    assert age_at_check <= savings_rollup.UNREAD_HANDOFF_MAX_AGE_SEC + savings_rollup.BOOKED_LEDGER_CACHE_SEC
+    assert savings_rollup.N_ELSEWHERE == (
+        "An object booked in another session keeps counting here until the scan is re-run at least 5m after that "
+        "booking (the Savings-ledger read that leaves booked objects out is cached for up to 5m): at most 1h 5m "
+        "after the booking.")
+    assert savings_rollup.H_BOOKED == (
+        "less any already booked on the Savings ledger as of the scan's ledger read, which is cached for up to 5m "
+        "(an object booked in another session keeps counting until the scan is re-run at least 5m after that "
+        "booking: at most 1h 5m)")
+    for text in (savings_rollup.N_ELSEWHERE, savings_rollup.H_BOOKED):
+        assert "at most 1h)" not in text and "at most 1h." not in text
 
 
 def test_status_chips_cover_every_verdict():
