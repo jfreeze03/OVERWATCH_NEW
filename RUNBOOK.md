@@ -856,6 +856,11 @@ names TOKENS_GRANULAR) on accounts whose Cortex Code views predate that
 optional column. That is expected only if the CoCo efficiency review has
 never shown token types on the account; if it has, the column was renamed
 or dropped: fix cortex_sql.cortex_code_token_types.
+The three POLICY_REFERENCES checks (security.data_policy_coverage,
+masking_environment_parity, admin_network_policy_coverage) are not declared
+gaps: if the app's role cannot read that view they FAIL here while Security
+shows a calm needs_setup. IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE
+(snowflake/roles.sql) covers that view.
 
 **Numbers look wrong.** Check the source caption first (mart vs live +
 lag). ACCOUNT_USAGE lags ≤45 min (query history) to ≤24h (metering daily);

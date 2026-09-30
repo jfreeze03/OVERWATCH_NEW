@@ -40,6 +40,25 @@ from app.logic.least_privilege import (
     revoke_statements,
     summarize_scopes,
 )
+from app.logic.policy_coverage import (
+    ACCOUNT_POLICY_HINT,
+    INVENTORY_NOTE,
+    NO_MASKING,
+    PARITY_LEGEND,
+    POLICY_VIEW_UNREADABLE,
+    TAG_ONLY_MASKING,
+    account_network_policy_refs,
+    database_inventory,
+    network_policy_caption,
+    not_active_sentence,
+    other_kinds_sentence,
+    parity_counts,
+    parity_summary_sentence,
+    parity_view,
+    row_policy_sentences,
+    summarize_policy_coverage,
+    tag_masking_sentence,
+)
 from app.logic.security import (
     fact_coverage_complete,
 )
@@ -187,10 +206,12 @@ def _render_admin_network_policy(company: str) -> None:
     if not guard(npc, ""):
         return
     df = npc.df
+    account_refs = account_network_policy_refs(df)
     if int(pd.to_numeric(df["USER_POLICY_REFS"], errors="coerce").fillna(0).max()) == 0:
         empty_state("needs_setup", "The policy-reference view lists no user-level network policy on this "
                     "account — either none is set, or this view doesn't expose them here. Coverage is "
-                    "unconfirmed, not zero; verify with SHOW PARAMETERS LIKE 'NETWORK_POLICY' IN USER <admin>.")
+                    "unconfirmed, not zero; verify with SHOW PARAMETERS LIKE 'NETWORK_POLICY' IN USER <admin>.",
+                    hint=ACCOUNT_POLICY_HINT if (account_refs or 0) > 0 else "")
         return
     uncovered = int(df["USER_NETWORK_POLICY"].isna().sum())
     kpi_row([
@@ -201,8 +222,7 @@ def _render_admin_network_policy(company: str) -> None:
     ])
     styled_table(with_user_names(df, _PAGE)[["USER", "USER_NAME", "ADMIN_ROLES", "USER_NETWORK_POLICY"]],
                  height=240)
-    st.caption("A user-level policy overrides the account policy and pins an admin to known networks; "
-               "an admin without one still falls under the account-level policy if one is set.")
+    st.caption(network_policy_caption(account_refs))
     result_caption(npc)
 
 
@@ -885,6 +905,102 @@ def _exposure_tab() -> None:
         styled_table(inbound, height=200, slug="share-inbound")
     st.caption("New consumer accounts or a newly-published listing are the findings to chase. Alerting on *changes* to this surface is the next slice.")
     result_caption(shares)
+
+
+def _render_policy_coverage() -> None:
+    """Next-Fifty #43 Phase 1: masking / row-access / projection / aggregation policy coverage.
+
+    Toggle-gated (off first paint). probe=True with the v4.603 failure split: an absent or unauthorised view is
+    needs_setup, any other failure is 'unavailable' with the error, never an empty or clean state. Account-wide
+    (policy references have no company grain here). Owner defaults: information only -- it feeds no
+    Decision-queue domain score, and the environment grouping below is not a gap worklist."""
+    section_header("Masking and row-access policy coverage", "", "security", anchor="sec-policy-coverage")
+    st.caption("Which columns carry a masking policy, and whether any table or view carries a row-access, "
+               "projection or aggregation policy. Account-wide; information only, not counted in the "
+               "Decision-queue domain scores.")
+    if not st.toggle("Check masking and row-access policy coverage", key="sec_policy_cov_toggle",
+                     help="One read of Snowflake's policy-reference view (up to 2 hours behind)."):
+        return
+    res = run(security_sql.data_policy_coverage(), page=_PAGE, key="sec_policy_cov", tier="hourly",
+              probe=True, source="POLICY_REFERENCES (masking, row-access, projection, aggregation)")
+    if not res.ok and res.error_kind in ("absent", "unknown_function"):
+        empty_state("needs_setup", POLICY_VIEW_UNREADABLE)
+        return
+    if not res.ok:
+        empty_state("unavailable", "Snowflake's policy-reference view could not be read, so masking and "
+                    "row-access coverage cannot be shown.", detail=res.error)
+        return
+    if res.empty:
+        empty_state("no_data_yet", "The policy-reference read returned no summary row, so coverage cannot be "
+                    "shown.")
+        return
+    cov = summarize_policy_coverage(res.df)
+    if cov is None:
+        empty_state("unavailable", "The policy-reference read did not return the expected summary columns, so "
+                    "coverage cannot be shown.")
+        return
+    if cov.masked_columns > 0:
+        kpi_row([
+            {"label": "Masked columns", "value": f"{cov.masked_columns:,}",
+             "help": "Distinct columns, by fully qualified name (database.schema.object.column), that the "
+                     "policy-reference view lists with a masking policy."},
+            {"label": "Tables and views", "value": f"{cov.masked_objects:,}",
+             "help": "Distinct fully qualified tables and views with at least one masked column."},
+            {"label": "Databases", "value": f"{cov.masked_databases:,}",
+             "help": "Databases holding at least one masked column."},
+            {"label": "Masking policies", "value": f"{cov.masking_policies:,}",
+             "help": "Distinct masking policies (database.schema.policy) attached to a column or a tag."},
+        ])
+    elif cov.masking_tags > 0:
+        empty_state("no_data_yet", TAG_ONLY_MASKING)
+    else:
+        empty_state("needs_setup", NO_MASKING)
+    if cov.masked_columns > 0 or cov.masking_tags > 0:
+        st.markdown(tag_masking_sentence(cov))
+    # Always rendered: the explicit statement of which row-level policy kinds are (not) in use.
+    for sentence in row_policy_sentences(cov):
+        st.markdown(sentence)
+    for note in (not_active_sentence(cov), other_kinds_sentence(cov)):
+        if note:
+            st.caption(note)
+    inventory = database_inventory(res.df)
+    if not inventory.empty:
+        styled_table(inventory, height=240, slug="masking-by-database", sort_label="most masked columns first")
+        st.caption(INVENTORY_NOTE)
+    result_caption(res)
+    if cov.masked_columns > 0:
+        _render_masking_parity()
+
+
+def _render_masking_parity() -> None:
+    """Next-Fifty #43: same-named masked tables grouped across a database family. Its own toggle, one more read
+    of the same view. Information only: no Track button, no severity colour, no alert."""
+    if not st.toggle("Group same-named tables across environments", key="sec_policy_parity_toggle",
+                     help="One more read of the same view: each masked schema.table name in a database family "
+                          "with two or more masked databases."):
+        return
+    par = run(security_sql.masking_environment_parity(), page=_PAGE, key="sec_policy_parity", tier="hourly",
+              probe=True, source="POLICY_REFERENCES (masked tables grouped across environments)")
+    if not par.ok and par.error_kind in ("absent", "unknown_function"):
+        empty_state("needs_setup", POLICY_VIEW_UNREADABLE)
+        return
+    if not par.ok:
+        empty_state("unavailable", "The environment grouping could not be read from Snowflake's "
+                    "policy-reference view.", detail=par.error)
+        return
+    if par.empty:
+        empty_state("no_data_yet", "No two databases with masked columns share a name up to their last "
+                    "underscore, so there is nothing to group.")
+        return
+    total, differing = parity_counts(par.df)
+    view = parity_view(par.df)
+    st.caption(parity_summary_sentence(total, differing))
+    styled_table(view, height=320, slug="masking-environment-grouping",
+                 sort_label="differences first, then family, schema and name")
+    if total > len(view):
+        st.caption(f"Showing the first {len(view):,} of {total:,} names, differences first.")
+    st.caption(PARITY_LEGEND)
+    result_caption(par)
 
 
 def _least_privilege_tab() -> None:
@@ -1926,7 +2042,7 @@ def render() -> None:
         },
         "Exposure": {
             "applies": (),
-            "note": "Shares are account-wide objects with no company grain; the exposure inventory is account-wide.",
+            "note": "Shares are account-wide objects with no company grain; the exposure inventory and the masking/row-access policy coverage are account-wide.",
         },
         "Least privilege": {
             "applies": (),
@@ -1963,6 +2079,8 @@ def render() -> None:
         _egress_tab(f["company"], f["days"], f["database"], f["schema_contains"], bounds=f["bounds"])
     elif section == "Exposure":
         _exposure_tab()
+        st.divider()
+        _render_policy_coverage()
     elif section == "Least privilege":
         _least_privilege_tab()
     else:
