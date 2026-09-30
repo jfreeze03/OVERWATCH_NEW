@@ -71,14 +71,22 @@ from app.logic.savings_rollup import (
 )
 from app.logic.serverless_roi import classify_qas_roi
 from app.logic.sizing import (
+    CAP_NO_QUERIES,
+    CAP_NOT_CHECKED,
+    CAP_NOT_REACHED,
+    RECOMMEND_BELOW_CAP,
     RECOMMEND_SCALE_OUT,
     SIZE_ORDER,
+    cluster_check_days,
+    cluster_check_targets,
+    cluster_use_summary,
     normalize_size,
     price_per_run_bounds,
     scale_out_plan,
     simulate_scenario,
     size_recommendations,
     sizing_summary,
+    with_cluster_use,
 )
 from app.logic.unread_maintenance import (
     ACTION_VERDICTS,
@@ -124,21 +132,110 @@ _LEDGER_PAGE_ROWS = 500
 
 _SIZE_UP_ALTERNATIVE = (" The resize below is the size-up alternative — use it only if single queries are "
                         "also slow or spilling.")
+_SIZE_UP_ROUTE = " The resize below is the size-up route."
+_BELOW_CAP_CAPTION = (
+    "No MAX_CLUSTER_COUNT statement is generated: in the checked window no query reached this warehouse's "
+    "current cluster cap, so a higher maximum would not help. The resize below is the size-up route; a "
+    "bigger size raises the hourly rate, so no saving is booked. Splitting the workload onto its own "
+    "warehouse is a manual change.")
+_CLUSTER_USE_NOTE = (
+    "Peak cluster = the highest CLUSTER_NUMBER any query ran on (the busiest hour); p95 hourly peak = the "
+    "peak that 95% of active hours stay at or under; hours at cap = hours whose peak reached (or passed) "
+    "the current MAX_CLUSTER_COUNT from SHOW WAREHOUSES. Only a warehouse with hours at cap is offered a "
+    "higher maximum, and raising it adds credits while queries queue, so no saving is booked. A cap that "
+    "is never reached costs nothing extra where MIN_CLUSTER_COUNT is 1 — Snowflake starts clusters above "
+    "the minimum only on demand — so no cut is suggested here either.")
 
 
 def _scale_out_caption(plan: dict) -> str:
     """The review-only Scale-out pane's caption (Next-Fifty #38; review C19): it names the Operations ▸
     Emergency lever that builds the statement shown — Scaling policy for the SCALING_POLICY = 'STANDARD'
     prefill, Cluster range for the MAX_CLUSTER_COUNT one — and no lever when no statement is shown (the
-    range is unknown or already at the generator's cap)."""
+    range is unknown or already at the generator's cap). #38 remainder (the cluster-cap gate): a
+    multi-cluster plan prefills only when the cluster-cap check shows queries reaching the current
+    maximum; not checked / no queries / never reached shows no statement and points at the resize."""
     note = str(plan.get("note") or "")
     if plan.get("policy_to_standard"):
         return (note + " Starting clusters sooner adds credits while queries queue, so no saving is booked; "
                 "run it from Operations ▸ Emergency ▸ Scaling policy (audited)." + _SIZE_UP_ALTERNATIVE)
-    if plan.get("known") and not plan.get("at_cap"):
+    if plan.get("prefill"):
         return (note + " A wider cluster range adds credits while queries queue, so no saving is booked; "
                 "run it from Operations ▸ Emergency ▸ Cluster range (audited)." + _SIZE_UP_ALTERNATIVE)
+    if plan.get("cap") in (CAP_NOT_CHECKED, CAP_NO_QUERIES, CAP_NOT_REACHED):
+        return note + " No scale-out statement is generated here." + _SIZE_UP_ROUTE
     return note + " No scale-out statement is generated here." + _SIZE_UP_ALTERNATIVE
+
+
+def _cluster_cap_check(sizing_df: pd.DataFrame, whs_res, sizing_days: int, company: str,
+                       bounds: tuple | None) -> pd.DataFrame:
+    """Next-Fifty #38 remainder: the cluster-cap gate on the add-a-cluster advice.
+
+    Behind its own toggle (inside the already-toggled right-sizing profile), one cached live read of each
+    multi-cluster warehouse's hourly peak QUERY_HISTORY.CLUSTER_NUMBER over sizing.cluster_check_days
+    (at least 35 days, so a month-end is inside; at most the 90-day live limit). The judged use is
+    carried onto the profile (sizing.with_cluster_use) BEFORE size_recommendations, so a higher
+    MAX_CLUSTER_COUNT is suggested only where queries reached the current maximum. The frame comes back
+    UNCHANGED when the toggle is off, SHOW WAREHOUSES failed, no warehouse is multi-cluster, the read
+    failed or its shape is unreadable — and then no multi-cluster add-a-cluster row is offered a higher
+    MAX_CLUSTER_COUNT (the gated STANDARD rows say their cap was not checked)."""
+    targets = cluster_check_targets(sizing_df)
+    if not whs_res.ok:
+        empty_state("unavailable",
+                    "SHOW WAREHOUSES could not be read, so cluster ranges are unknown and the cluster-cap "
+                    "check cannot run.",
+                    detail=str(whs_res.error or "").strip())
+        return sizing_df
+    if not targets:
+        st.caption("No warehouse in this profile has MAX_CLUSTER_COUNT above 1 in SHOW WAREHOUSES, so "
+                   "there is no cluster cap to check.")
+        return sizing_df
+    chk_days = cluster_check_days(sizing_days, bounds[0] if bounds is not None else None, account_today())
+    st.caption(f"Cluster-cap check: {len(targets)} multi-cluster warehouse(s) in this profile, over the "
+               f"last {chk_days} days. " + toggle_cost_hint("cluster_use"))
+    # The label and help stay STATIC (the window and count live in the caption above), so the widget
+    # never re-keys — and resets — when the window changes.
+    if not st.toggle("Check cluster use (multi-cluster warehouses)", key="sizing_cluster_check",
+                     help="Reads QUERY_HISTORY for the multi-cluster warehouses in this profile: the highest "
+                          "cluster any query ran on in each hour, over at least 35 days so a month-end is "
+                          "inside. A higher MAX_CLUSTER_COUNT is suggested only where queries reached the "
+                          "current maximum."):
+        st.caption("Off: the cluster cap is not checked, so add-a-cluster advice on a multi-cluster warehouse "
+                   "suggests no higher MAX_CLUSTER_COUNT and prefills none.")
+        return sizing_df
+    # Not a probe read: a failure is a real failure and gets logged. max_rows=0 is safe — the rows are
+    # warehouses x distinct cluster numbers, never queries.
+    res = run(insights_sql.warehouse_cluster_use(tuple(targets), chk_days), page=_PAGE,
+              key=f"cluster_use_{company}_{chk_days}", tier="historical", max_rows=0,
+              source="ACCOUNT_USAGE.QUERY_HISTORY (hourly peak CLUSTER_NUMBER, live)")
+    if not res.ok:
+        guard(res, "")   # the red 'unavailable' "Query failed: <first line>" + its Error detail expander
+        st.caption("The cluster-cap check failed, so the cap was not checked: add-a-cluster advice below "
+                   "suggests no higher MAX_CLUSTER_COUNT for a multi-cluster warehouse.")
+        return sizing_df
+    util = cluster_use_summary(res.df, sizing_df, targets)
+    if util.empty:
+        empty_state("unavailable",
+                    "The cluster-cap read came back without its expected columns, so the cap was not "
+                    "checked.")
+        return sizing_df
+    reached = int((util["AT_CAP_HOUR_COUNT"] > 0).sum())
+    st.caption(f"Cluster-cap check, last {chk_days} days: {reached} of {len(util)} multi-cluster "
+               "warehouse(s) reached their current MAX_CLUSTER_COUNT in at least one hour.")
+    with st.expander(f"Cluster use per multi-cluster warehouse ({len(util)})"):
+        styled_table(util, size_note=False, sort_label="hours at cap, then peak cluster", column_config={
+            "MIN_CLUSTER_COUNT": st.column_config.NumberColumn("Min clusters", format="%d"),
+            "MAX_CLUSTER_COUNT": st.column_config.NumberColumn("Max clusters", format="%d"),
+            "ACTIVE_HOUR_COUNT": st.column_config.NumberColumn(
+                "Active hours", format="%d",
+                help="Hours in which at least one query ran on a cluster of this warehouse."),
+            "PEAK_CLUSTERS": st.column_config.NumberColumn("Peak cluster", format="%d"),
+            "P95_PEAK_CLUSTERS": st.column_config.NumberColumn("p95 hourly peak", format="%d"),
+            "AT_CAP_HOUR_COUNT": st.column_config.NumberColumn("Hours at cap", format="%d"),
+            "CLUSTER_CAP": st.column_config.TextColumn("Cap"),
+        })
+        st.caption(_CLUSTER_USE_NOTE)
+        result_caption(res)
+    return with_cluster_use(sizing_df, util, chk_days)
 
 
 # Split out of app/ui/pages/cost.py (V028): section bodies only —
@@ -620,10 +717,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             # CURRENT_SIZE + cluster config) carried onto the profile BEFORE size_recommendations, so
             # (a) a resize saving uses the operator's ACTUAL current size and (b) the recommender
             # refuses a size-DOWN on a warehouse already at XSMALL — identically on Operations ▸ Sizing.
-            _sizing_df = with_warehouse_settings(
-                prof_res.df,
-                _sizing_whs.df if _sizing_whs.ok and not _sizing_whs.empty else pd.DataFrame(),
-            )
+            _whs_df = _sizing_whs.df if _sizing_whs.ok and not _sizing_whs.empty else pd.DataFrame()
+            _sizing_df = with_warehouse_settings(prof_res.df, _whs_df)
+            # Next-Fifty #38: the cluster-cap check rides on the profile BEFORE the verdicts (they read it)
+            _sizing_df = _cluster_cap_check(_sizing_df, _sizing_whs, sizing_days, company, bounds)
             sized = size_recommendations(_sizing_df, rate, sizing_days)
             _sizing_profiles_tx = sized
             # rec#16: right-sizing opportunities (overlaps idle per warehouse) — shared with Proof ▸ Pipeline
@@ -631,7 +728,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             summary = sizing_summary(sized)
             _sz_cols = ["WAREHOUSE_NAME", "COMPANY", "RECOMMENDATION", "RATIONALE",
                         "CONFIDENCE", "CURRENT_SIZE", "MIN_CLUSTER_COUNT", "MAX_CLUSTER_COUNT",
-                        "SCALING_POLICY", "AUTO_SUSPEND", "ACTIVE_QUERY_DAYS", "ACTIVE_DAYS_PER_30D",
+                        "SCALING_POLICY", "PEAK_CLUSTERS", "AT_CAP_HOUR_COUNT", "AUTO_SUSPEND",
+                        "ACTIVE_QUERY_DAYS", "ACTIVE_DAYS_PER_30D",
                         "MONTHLY_USD_NOW", "IDLE_MONTHLY_USD", "SCENARIO_DOWN_USD", "SCENARIO_UP_USD",
                         "QUEUED_MIN_PER_DAY", "SPILL_GB_PER_DAY", "P95_ELAPSED_SEC", "IDLE_PCT"]
             if "PROVISION_MIN_PER_DAY" in sized.columns:
@@ -653,15 +751,21 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 {"label": "Size-down candidates", "value": f"{summary['down']}"},
             ])
             st.caption(
-                f"Also: {summary['scale_out']} add-a-cluster · {summary['size_up']} size-up · "
-                f"{summary['suspend']} tune-auto-suspend-first · "
+                f"Also: {summary['scale_out']} add-a-cluster · "
+                + (f"{summary['below_cap']} size-up-or-split (cluster cap not reached) · "
+                   if summary["below_cap"] else "")
+                + f"{summary['size_up']} size-up · {summary['suspend']} tune-auto-suspend-first · "
                 f"{summary['observe'] + summary['review']} held for evidence/cadence review. "
                 "Add a cluster = sustained per-day overload queueing without remote spill (concurrency: "
-                "more clusters, not a bigger size; multi-cluster needs Enterprise edition). Size up = "
-                "remote spill per day (per-query memory; with queueing too, size up first). Resume time "
-                "is excluded — a suspend-timer signal, not concurrency. Evidence/cadence = advice "
-                "withheld for episodic evidence, unknown timers, or high idle remaining after an "
-                "already-short timer."
+                "more clusters, not a bigger size; multi-cluster needs Enterprise edition); on a "
+                "multi-cluster warehouse a higher MAX_CLUSTER_COUNT is suggested only when the cluster-cap "
+                "check shows queries reaching the current maximum. Size up = remote spill per day "
+                "(per-query memory; with queueing too, size up first). Resume time is excluded — a "
+                "suspend-timer signal, not concurrency. Evidence/cadence = advice withheld for episodic "
+                "evidence, unknown timers, or high idle remaining after an already-short timer."
+                + (f" {summary['cap_unchecked']} add-a-cluster row(s) on a multi-cluster warehouse were not "
+                   "checked against the cluster cap, so no higher MAX_CLUSTER_COUNT is suggested for them."
+                   if summary["cap_unchecked"] else "")
             )
             _sz_primary = [
                 "WAREHOUSE_NAME", "RECOMMENDATION", "RATIONALE", "CONFIDENCE",
@@ -698,6 +802,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             "Spill GB/day", format="%.2f"),
                         "PROVISION_MIN_PER_DAY": st.column_config.Column("Provision per day"),
                         "IDLE_PCT": st.column_config.NumberColumn("Idle %", format="%.0f%%"),
+                        "PEAK_CLUSTERS": st.column_config.NumberColumn("Peak cluster", format="%d"),
+                        "AT_CAP_HOUR_COUNT": st.column_config.NumberColumn("Hours at cap", format="%d"),
                     },
                 )
             if sel_sz is not None and is_operator:
@@ -705,16 +811,20 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 if str(srow.get("RECOMMENDATION", "")) == RECOMMEND_SCALE_OUT:
                     # Next-Fifty #38: a concurrency verdict's fix is the cluster range (or the scaling
                     # policy), not a resize. Review-only: it adds credits at peaks, so nothing is booked.
-                    _so = scale_out_plan(srow, multi_cluster_evident(
-                        _sizing_whs.df if _sizing_whs.ok and not _sizing_whs.empty else None))
+                    _so = scale_out_plan(srow, multi_cluster_evident(_whs_df if not _whs_df.empty else None))
                     st.markdown("**Scale-out fix (review-only)**")
                     if _so["policy_to_standard"]:
                         st.code(remediation.scaling_policy_fix(str(srow["WAREHOUSE_NAME"]), "STANDARD"),
                                 language="sql")
-                    elif _so["known"] and not _so["at_cap"]:
+                    elif _so["prefill"]:
                         st.code(remediation.cluster_range_fix(str(srow["WAREHOUSE_NAME"]),
                                                               _so["min"], _so["max"]), language="sql")
                     st.caption(_scale_out_caption(_so))
+                elif str(srow.get("RECOMMENDATION", "")) == RECOMMEND_BELOW_CAP:
+                    # #38 remainder: checked, and the cap was never reached — no cluster statement; the
+                    # resize below is the size-up route (an upsize captions its cost, books nothing).
+                    st.markdown("**Cluster cap not reached (review-only)**")
+                    st.caption(_BELOW_CAP_CAPTION)
                 elif not bool(srow.get("ACTIONABLE", False)):
                     st.warning(
                         "This row is not an evidence-backed resize recommendation. The SQL remains "
@@ -926,8 +1036,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         # rec#20: fleet consolidation — same-size warehouses in this scope whose active
         # hours barely overlap can plausibly share one warehouse, retiring the mostly-
         # idle one. Review-only: it names the pair and a conservative saving, proposes
-        # nothing. (Multi-cluster scale-in — lowering MAX_CLUSTER_COUNT on rarely-
-        # saturated warehouses — is the other half of this rec and stays queued.)
+        # nothing. (Multi-cluster scale-in was closed in #38 as a $0 lever: with
+        # MIN_CLUSTER_COUNT = 1 an unreached cap never starts a cluster, so lowering it saves
+        # nothing; Idle & sizing's cluster-cap check shows cluster use instead.)
         st.markdown("**Fleet consolidation candidates (review-only)**")
         st.caption(
             "Same size class, current company scope, active hours that barely overlap → the two "

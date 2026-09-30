@@ -455,7 +455,7 @@ def test_optimize_wiring_source():
     assert "Book only after the ALTER above has run in a worksheet" in branch
     assert "REMEDIATION_LOG" not in branch
     # house budgets: counts unchanged except the one new latched write
-    assert opt.count("ACCOUNT_USAGE") == 5
+    assert opt.count("ACCOUNT_USAGE") == 6        # 5 -> 6 at v4.604: the #38 cluster-cap read's source label
     assert opt.count("methodology_note(") == 4
     assert len(re.findall(r"write_gate_open\(", opt)) == len(re.findall(r"stamp_write\(", opt)) == 7
     assert len(re.findall(r"st\.(?:info|success)\(", opt)) <= 4

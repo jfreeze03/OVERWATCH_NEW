@@ -176,6 +176,9 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("insights.task_failure_details", lambda: insights_sql.task_failure_details(1, "ALFA")),
     ("insights.dormant_users", lambda: insights_sql.dormant_users(30, "ALFA")),
     ("insights.warehouse_sizing_profile", lambda: insights_sql.warehouse_sizing_profile(1, "ALFA")),
+    # Next-Fifty #38 cluster-cap check. NOT an expected gap: CLUSTER_NUMBER is a standard QUERY_HISTORY
+    # column (proven on this account by probe W1c), so a missing column must FAIL the canary.
+    ("insights.warehouse_cluster_use", lambda: insights_sql.warehouse_cluster_use(("WH_ALFA_ADMIN",), 1)),
     ("insights.measured_query_costs", lambda: insights_sql.measured_query_costs(1, "ALFA")),
     ("insights.procedure_costs_usd", lambda: insights_sql.procedure_costs_usd(1, "ALFA")),
     ("graph.graph_daily_costs", lambda: graph_sql.graph_daily_costs(1, "ALFA")),

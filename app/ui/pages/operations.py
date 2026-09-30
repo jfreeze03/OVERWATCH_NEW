@@ -3667,8 +3667,12 @@ def _wh_sizing_efficiency(company: str, rate: float, days: int, *,
             # Next-Fifty #38: the merged "Size up / add cluster" card split by the kind of pressure.
             {"label": "Add a cluster", "value": f"{_sum['scale_out']}",
              "delta_color": "inverse" if _sum["scale_out"] else "off",
-             "help": "Sustained overload queueing without remote spill — concurrency: raise "
-                     "MAX_CLUSTER_COUNT (multi-cluster needs Enterprise edition) or split the workload."},
+             # #38 remainder: this page reads no cluster use, so its count is unchecked against the cap.
+             "help": "Sustained overload queueing without remote spill (concurrency). This count does not "
+                     "check whether a multi-cluster warehouse ever reaches its MAX_CLUSTER_COUNT: raise the "
+                     "maximum (multi-cluster needs Enterprise edition) only where it does; otherwise size up "
+                     "or split the workload. Cost Intelligence ▸ Optimization & Savings ▸ Idle & sizing "
+                     "checks it per warehouse (Check cluster use)."},
             {"label": "Size up", "value": f"{_sum['size_up']}",
              "delta_color": "inverse" if _sum["size_up"] else "off",
              "help": "Remote spill per day — per-query memory pressure. With queueing too, size up "

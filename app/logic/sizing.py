@@ -8,6 +8,8 @@ effects are workload-dependent; the rationale says why, the DBA decides.
 
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
 
 from .formulas import humanize_duration, safe_div, safe_float
@@ -33,15 +35,24 @@ AUTO_SUSPEND_TARGET_SEC = 60
 # help one spilling query. Both at once -> size up FIRST (spilling queries hold slots longer).
 RECOMMEND_SCALE_OUT = "Add a cluster (scale out)"
 RECOMMEND_SIZE_UP = "Size up"
+# Next-Fifty #38 cluster-cap gate: queueing on a multi-cluster warehouse whose queries never reached its
+# current MAX_CLUSTER_COUNT is not cluster-cap-bound (cluster start-up, a few long queries), so a higher
+# maximum would not help. Capacity pressure all the same: actionable, ranked with the up verdicts, $0.
+RECOMMEND_BELOW_CAP = "Size up or split (cluster cap not reached)"
 # Legacy merged verdict (<= v4.600.0). NEVER emitted any more; kept so an old import or an
 # externally built frame still resolves and still counts as capacity pressure.
 RECOMMEND_UP = "Size up / add cluster"
-UP_VERDICTS = frozenset({RECOMMEND_SCALE_OUT, RECOMMEND_SIZE_UP, RECOMMEND_UP})
+UP_VERDICTS = frozenset({RECOMMEND_SCALE_OUT, RECOMMEND_SIZE_UP, RECOMMEND_UP, RECOMMEND_BELOW_CAP})
 # A long peak-day p95 is context for a scale-out row, never a routing signal (on the mart path it
 # is the PEAK daily p95, so it would over-route to size-up). Mirrors wh_health.LONG_P95_SEC.
 LONG_P95_SEC = 120.0
 # remediation.cluster_range_fix clamps MAX_CLUSTER_COUNT to 10; the prefill never promises more.
 CLUSTER_RANGE_CAP = 10
+# Next-Fifty #38 cluster-cap gate. Months are <= 31 days, so any trailing 35-day window holds a month-end.
+CLUSTER_CHECK_MIN_DAYS = 35
+CLUSTER_CHECK_MAX_DAYS = 90          # the live QUERY_HISTORY clamp (data.common.bounded_days)
+CLUSTER_CHECK_MAX_WAREHOUSES = 100   # == the sizing profile's LIMIT 100, so no profile row is ever left out
+CAP_REACHED, CAP_NOT_REACHED, CAP_NO_QUERIES, CAP_NOT_CHECKED = "reached", "not_reached", "no_queries", "not_checked"
 RECOMMEND_DOWN = "Size down candidate"
 RECOMMEND_SUSPEND = "Tune auto-suspend first"
 RECOMMEND_CADENCE = "Review cadence / consolidation"
@@ -199,7 +210,14 @@ def _policy(value: object) -> str:
 
 
 def _pressure_verdict(row, queued: float, spill: float, p95: float) -> tuple[str, str]:
-    """Next-Fifty #38: split capacity pressure into scale-out (concurrency) vs size-up (per-query)."""
+    """Next-Fifty #38: split capacity pressure into scale-out (concurrency) vs size-up (per-query).
+
+    Cluster-cap gate (#38 remainder): on a multi-cluster non-ECONOMY warehouse a higher
+    MAX_CLUSTER_COUNT is suggested ONLY when the cluster-cap check (with_cluster_use) shows queries
+    reaching the current maximum (AT_CAP_HOUR_COUNT > 0). Checked and never at the cap ->
+    RECOMMEND_BELOW_CAP (size up or split; no cluster statement). Not checked, or checked with no
+    clustered query -> the rationale says so and suggests no raise. Single-cluster, ECONOMY and
+    unknown-range rows are unchanged."""
     q_txt = f"{humanize_duration(queued, 'min')}/day overload queueing"
     if spill >= SPILL_UP_GB_PER_DAY:
         cur = normalize_size(row.get("CURRENT_SIZE"))
@@ -214,7 +232,30 @@ def _pressure_verdict(row, queued: float, spill: float, p95: float) -> tuple[str
         return RECOMMEND_SIZE_UP, (
             f"Per-query memory pressure: {spill:.1f} GB/day remote spill. Size up one step for more "
             "memory per cluster — another cluster does not help a single spilling query." + step)
+    lead = f"Concurrency pressure: {q_txt}, remote spill under {SPILL_UP_GB_PER_DAY:g} GB/day."
+    long_tail = (f" Peak-day p95 is {humanize_duration(p95)} — long queries holding the slots point to a "
+                 "size-up." if p95 >= LONG_P95_SEC else "")
     mx = _num(row.get("MAX_CLUSTER_COUNT"))
+    gated = mx == mx and mx > 1 and _policy(row.get("SCALING_POLICY")) != "ECONOMY"
+    cap = cluster_cap_state(row) if gated else ""
+    if cap == CAP_NOT_REACHED:            # any n > 1, including n >= CLUSTER_RANGE_CAP
+        n, d = int(mx), int(_num(row.get("CLUSTER_CHECK_DAYS")))
+        peak = int(_num(row.get("PEAK_CLUSTERS")))
+        return RECOMMEND_BELOW_CAP, (
+            f"Concurrency pressure: {q_txt}, remote spill under {SPILL_UP_GB_PER_DAY:g} GB/day — but the "
+            f"cluster cap is not what holds the queue: in the last {d} days no query ran above cluster "
+            f"{peak} of {n}. Queueing below the cap usually comes from cluster start-up time or a few long "
+            "queries holding the slots; size up so queries finish sooner, or split the workload onto its "
+            "own warehouse. A higher MAX_CLUSTER_COUNT would not help." + long_tail)
+    if gated and mx < CLUSTER_RANGE_CAP and cap in (CAP_NOT_CHECKED, CAP_NO_QUERIES):
+        n = int(mx)
+        why = (f"whether queries ever reach cluster {n} was not checked" if cap == CAP_NOT_CHECKED else
+               "the cluster-cap check found no query with a cluster number on it in the last "
+               f"{int(_num(row.get('CLUSTER_CHECK_DAYS')))} days, so whether queries reach cluster {n} "
+               "is unknown")
+        return RECOMMEND_SCALE_OUT, (
+            f"{lead} Already multi-cluster (up to {n}); {why}, so no higher MAX_CLUSTER_COUNT is "
+            "suggested. Raise it only if they do; otherwise size up or split the workload." + long_tail)
     if mx != mx:
         how = ("Multi-cluster needs Enterprise edition and MAX_CLUSTER_COUNT > 1 (the current setting "
                "is unknown); otherwise move the concurrent workload to its own warehouse.")
@@ -227,20 +268,26 @@ def _pressure_verdict(row, queued: float, spill: float, p95: float) -> tuple[str
                "before starting a cluster — try SCALING_POLICY = STANDARD before raising the maximum.")
     elif mx >= CLUSTER_RANGE_CAP:
         how = f"Already at {int(mx)} clusters — split the workload across warehouses."
-    else:
-        how = (f"Already multi-cluster (up to {int(mx)}): raise MAX_CLUSTER_COUNT to {int(mx) + 1}, "
+    else:                                 # gated, below the generator cap, and the cap was reached
+        n = int(mx)
+        how = (f"Already multi-cluster (up to {n}), and queries reached cluster {n} of {n} in "
+               f"{_hour_count_txt(int(_num(row.get('AT_CAP_HOUR_COUNT'))))} of the last "
+               f"{int(_num(row.get('CLUSTER_CHECK_DAYS')))} days: raise MAX_CLUSTER_COUNT to {n + 1}, "
                "or split the workload.")
     tail = ""
     if p95 >= LONG_P95_SEC:
         tail = (f" Peak-day p95 is {humanize_duration(p95)} — if the queue sits behind a few long "
                 "queries rather than many concurrent ones, size up instead.")
-    return RECOMMEND_SCALE_OUT, (
-        f"Concurrency pressure: {q_txt}, remote spill under {SPILL_UP_GB_PER_DAY:g} GB/day. "
-        "Add a cluster rather than a bigger size. " + how + tail)
+    return RECOMMEND_SCALE_OUT, f"{lead} Add a cluster rather than a bigger size. " + how + tail
 
 
 def scale_out_plan(row, multi_cluster_seen: bool | None = None) -> dict:
-    """Review-only scale-out prefill for ONE RECOMMEND_SCALE_OUT row (Next-Fifty #38). Pure."""
+    """Review-only scale-out prefill for ONE RECOMMEND_SCALE_OUT row (Next-Fifty #38). Pure.
+
+    ``prefill`` is True only when a MAX_CLUSTER_COUNT statement is shown: a single-cluster warehouse
+    (1 -> 2), or a multi-cluster STANDARD one whose cluster-cap check reached the current maximum
+    (``cap`` == CAP_REACHED). Not checked / no queries / never reached -> no prefill, ``max`` stays the
+    current value and the note says why (#38 remainder)."""
     mx = _num(row.get("MAX_CLUSTER_COUNT"))
     mn = _num(row.get("MIN_CLUSTER_COUNT"))
     edition = ("This account already runs multi-cluster warehouses, so the edition supports it."
@@ -248,7 +295,7 @@ def scale_out_plan(row, multi_cluster_seen: bool | None = None) -> dict:
                "Multi-cluster needs Enterprise edition or higher — if the ALTER fails, move the "
                "concurrent workload to its own warehouse instead.")
     plan = {"known": mx == mx, "min": 1, "max": 1, "policy_to_standard": False, "at_cap": False,
-            "note": edition}
+            "prefill": False, "cap": "", "note": edition}
     if mx != mx:
         plan["note"] = "Current cluster range unknown (SHOW WAREHOUSES did not return it). " + edition
         return plan
@@ -264,10 +311,156 @@ def scale_out_plan(row, multi_cluster_seen: bool | None = None) -> dict:
         plan.update(at_cap=True, max=cur_max,
                     note=f"Already at {cur_max} clusters (the generator's cap) — split the workload.")
         return plan
-    plan["max"] = cur_max + 1
-    plan["note"] = (f"Raises MAX_CLUSTER_COUNT {cur_max} → {cur_max + 1}; MIN stays {plan['min']} so the "
-                    "extra cluster runs only while queries queue. " + edition)
+    if cur_max > 1:
+        plan["cap"] = cluster_cap_state(row)
+        if plan["cap"] != CAP_REACHED:
+            plan["max"] = cur_max
+            if plan["cap"] == CAP_NOT_CHECKED:
+                plan["note"] = (f"Whether queries ever reach cluster {cur_max} of {cur_max} was not checked, "
+                                "so no MAX_CLUSTER_COUNT change is prefilled.")
+            elif plan["cap"] == CAP_NO_QUERIES:
+                plan["note"] = ("The cluster-cap check found no query with a cluster number on this "
+                                f"warehouse in the last {int(_num(row.get('CLUSTER_CHECK_DAYS')))} days, "
+                                "so no MAX_CLUSTER_COUNT change is prefilled.")
+            else:
+                plan["note"] = (f"Queries never reached cluster {cur_max} of {cur_max} in the last "
+                                f"{int(_num(row.get('CLUSTER_CHECK_DAYS')))} days, so no MAX_CLUSTER_COUNT "
+                                "change is prefilled.")
+            return plan
+    plan["max"], plan["prefill"] = cur_max + 1, True
+    if cur_max > 1:
+        plan["note"] = (f"Raises MAX_CLUSTER_COUNT {cur_max} → {cur_max + 1}: queries reached cluster "
+                        f"{cur_max} of {cur_max} in "
+                        f"{_hour_count_txt(int(_num(row.get('AT_CAP_HOUR_COUNT'))))} of the last "
+                        f"{int(_num(row.get('CLUSTER_CHECK_DAYS')))} days. MIN stays {plan['min']} so the "
+                        "extra cluster runs only while queries queue. " + edition)
+    else:
+        plan["note"] = (f"Raises MAX_CLUSTER_COUNT {cur_max} → {cur_max + 1}; MIN stays {plan['min']} so the "
+                        "extra cluster runs only while queries queue. " + edition)
     return plan
+
+
+# ---------------------------------------------------------------------------
+# Next-Fifty #38 remainder: the cluster-cap check (pure; the page supplies the histogram)
+# ---------------------------------------------------------------------------
+
+_CLUSTER_USE_COLUMNS = ["WAREHOUSE_NAME", "MIN_CLUSTER_COUNT", "MAX_CLUSTER_COUNT", "ACTIVE_HOUR_COUNT",
+                        "PEAK_CLUSTERS", "P95_PEAK_CLUSTERS", "AT_CAP_HOUR_COUNT", "CLUSTER_CAP"]
+
+
+def _hour_count_txt(n: int) -> str:
+    return f"{n:,} hour" + ("" if n == 1 else "s")
+
+
+def cluster_check_days(served_days: int, window_start: date | None, today: date) -> int:
+    """The trailing window the cluster-cap check reads. It is at least CLUSTER_CHECK_MIN_DAYS, so a
+    month-end is inside. It reaches back to the sizing window's start (served days on a trailing window,
+    or today - bounds[0] on a calendar preset). It is at most CLUSTER_CHECK_MAX_DAYS (the live
+    QUERY_HISTORY clamp). Pure: today is passed in."""
+    back = max(int(served_days or 0), (today - window_start).days if window_start is not None else 0)
+    return max(CLUSTER_CHECK_MIN_DAYS, min(back, CLUSTER_CHECK_MAX_DAYS))
+
+
+def cluster_check_targets(frame: pd.DataFrame | None) -> list[str]:
+    """The multi-cluster warehouses of a sizing profile (after with_warehouse_settings): the upper-cased,
+    stripped, de-duplicated, sorted WAREHOUSE_NAMEs whose SHOW MAX_CLUSTER_COUNT is above 1, capped at
+    CLUSTER_CHECK_MAX_WAREHOUSES. [] when the frame is None/empty or lacks either column. Pure."""
+    if (frame is None or frame.empty or "WAREHOUSE_NAME" not in frame.columns
+            or "MAX_CLUSTER_COUNT" not in frame.columns):
+        return []
+    multi = pd.to_numeric(frame["MAX_CLUSTER_COUNT"], errors="coerce") > 1
+    names = {str(n).strip().upper() for n in frame.loc[multi, "WAREHOUSE_NAME"] if str(n or "").strip()}
+    return sorted(names)[:CLUSTER_CHECK_MAX_WAREHOUSES]
+
+
+def cluster_use_summary(hist: pd.DataFrame | None, frame: pd.DataFrame, targets: list[str]) -> pd.DataFrame:
+    """Judge each target warehouse's cluster use against its CURRENT SHOW MAX_CLUSTER_COUNT (from
+    ``frame``, the sizing profile after with_warehouse_settings). ``hist`` is the
+    insights_sql.warehouse_cluster_use histogram: (WAREHOUSE_NAME, PEAK_CLUSTER, HOUR_COUNT = clock
+    hours whose highest CLUSTER_NUMBER was PEAK_CLUSTER).
+
+    One row per target: ACTIVE_HOUR_COUNT (hours with a clustered query), PEAK_CLUSTERS (the highest
+    cluster any query ran on), P95_PEAK_CLUSTERS (nearest-rank p95 of the hourly peaks),
+    AT_CAP_HOUR_COUNT (hours whose peak reached, or passed, the current maximum — ">=" so a since-lowered
+    cap still counts) and CLUSTER_CAP (Reached / Not reached / No queries). An EMPTY frame (these
+    columns) when ``hist`` is None or has rows without the expected columns: the page reads that as
+    not checked. A zero-row ``hist`` is a valid answer: every target reads No queries. Sorted by hours
+    at cap, then peak (unknown last), then name. Pure."""
+    empty = pd.DataFrame(columns=_CLUSTER_USE_COLUMNS)
+    need = {"WAREHOUSE_NAME", "PEAK_CLUSTER", "HOUR_COUNT"}
+    if hist is None or (not hist.empty and not need.issubset(hist.columns)):
+        return empty
+    if hist.empty:
+        h_all = pd.DataFrame({"KEY": pd.Series(dtype=object), "PEAK": pd.Series(dtype=float),
+                              "HOURS": pd.Series(dtype=float)})
+    else:
+        h_all = pd.DataFrame({"KEY": hist["WAREHOUSE_NAME"].astype(str).str.strip().str.upper(),
+                              "PEAK": pd.to_numeric(hist["PEAK_CLUSTER"], errors="coerce"),
+                              "HOURS": pd.to_numeric(hist["HOUR_COUNT"], errors="coerce")})
+        h_all = h_all[h_all["PEAK"].notna() & (h_all["HOURS"] > 0)]
+    first: dict[str, pd.Series] = {}
+    if frame is not None and not frame.empty and "WAREHOUSE_NAME" in frame.columns:
+        for pos, key in enumerate(frame["WAREHOUSE_NAME"].astype(str).str.strip().str.upper()):
+            first.setdefault(key, frame.iloc[pos])
+    nan = float("nan")
+    rows = []
+    for target in targets:
+        key = str(target).strip().upper()
+        src = first.get(key)
+        name = str(src["WAREHOUSE_NAME"]).strip() if src is not None else key
+        mn = _num(src.get("MIN_CLUSTER_COUNT")) if src is not None else nan
+        mx = _num(src.get("MAX_CLUSTER_COUNT")) if src is not None else nan
+        h = h_all[h_all["KEY"] == key].sort_values("PEAK", kind="stable")
+        active = int(h["HOURS"].sum()) if not h.empty else 0
+        peak = p95 = nan
+        at_cap, label = 0, "No queries"
+        if active > 0:
+            peak = float(h["PEAK"].max())
+            p95 = float(h.loc[h["HOURS"].cumsum() >= 0.95 * active, "PEAK"].iloc[0])
+            at_cap = int(h.loc[h["PEAK"] >= mx, "HOURS"].sum()) if mx == mx else 0
+            label = "Reached" if at_cap > 0 else "Not reached"
+        rows.append({"WAREHOUSE_NAME": name, "MIN_CLUSTER_COUNT": mn, "MAX_CLUSTER_COUNT": mx,
+                     "ACTIVE_HOUR_COUNT": active, "PEAK_CLUSTERS": peak, "P95_PEAK_CLUSTERS": p95,
+                     "AT_CAP_HOUR_COUNT": at_cap, "CLUSTER_CAP": label})
+    if not rows:
+        return empty
+    out = pd.DataFrame(rows, columns=_CLUSTER_USE_COLUMNS)
+    out["_KEY"] = out["WAREHOUSE_NAME"].astype(str).str.upper()
+    return (out.sort_values(["AT_CAP_HOUR_COUNT", "PEAK_CLUSTERS", "_KEY"],
+                            ascending=[False, False, True], na_position="last", kind="stable")
+            .drop(columns="_KEY").reset_index(drop=True))
+
+
+def with_cluster_use(frame: pd.DataFrame, summary: pd.DataFrame, days: int) -> pd.DataFrame:
+    """Carry the cluster-cap check onto the sizing profile BEFORE size_recommendations (the verdicts read
+    it). Case-insensitive on the warehouse name. Matched rows get CLUSTER_CHECK_DAYS, ACTIVE_HOUR_COUNT,
+    PEAK_CLUSTERS, P95_PEAK_CLUSTERS and AT_CAP_HOUR_COUNT; every other row gets NaN (= not checked).
+    An empty summary returns the frame unchanged. Works on a copy. Pure."""
+    if (frame is None or frame.empty or summary is None or summary.empty
+            or "WAREHOUSE_NAME" not in frame.columns or "WAREHOUSE_NAME" not in summary.columns):
+        return frame
+    out = frame.copy()
+    keys = out["WAREHOUSE_NAME"].astype(str).str.strip().str.upper()
+    s_keys = summary["WAREHOUSE_NAME"].astype(str).str.strip().str.upper()
+    matched = keys.isin(set(s_keys))
+    out["CLUSTER_CHECK_DAYS"] = [float(int(days)) if m else float("nan") for m in matched]
+    for col in ("ACTIVE_HOUR_COUNT", "PEAK_CLUSTERS", "P95_PEAK_CLUSTERS", "AT_CAP_HOUR_COUNT"):
+        vals = (pd.to_numeric(summary[col], errors="coerce") if col in summary.columns
+                else pd.Series(float("nan"), index=summary.index))
+        mapping = dict(zip(s_keys, vals, strict=False))
+        out[col] = pd.to_numeric(keys.map(mapping), errors="coerce").astype(float)
+    return out
+
+
+def cluster_cap_state(row) -> str:
+    """CAP_NOT_CHECKED (no CLUSTER_CHECK_DAYS on the row), CAP_NO_QUERIES (checked, no clustered query),
+    else CAP_REACHED when AT_CAP_HOUR_COUNT > 0 and CAP_NOT_REACHED otherwise. Pure."""
+    d = _num(row.get("CLUSTER_CHECK_DAYS"))
+    if d != d:
+        return CAP_NOT_CHECKED
+    if not (_num(row.get("ACTIVE_HOUR_COUNT")) > 0):
+        return CAP_NO_QUERIES
+    return CAP_REACHED if _num(row.get("AT_CAP_HOUR_COUNT")) > 0 else CAP_NOT_REACHED
 
 
 def sizing_summary(out: pd.DataFrame) -> dict:
@@ -280,11 +473,20 @@ def sizing_summary(out: pd.DataFrame) -> dict:
     measurement, and the size-down floor stays honest about SLA risk.
     """
     if out is None or out.empty:
-        return {"up": 0, "scale_out": 0, "size_up": 0, "down": 0, "suspend": 0, "review": 0,
-                "observe": 0,
+        return {"up": 0, "scale_out": 0, "size_up": 0, "below_cap": 0, "cap_unchecked": 0, "down": 0,
+                "suspend": 0, "review": 0, "observe": 0,
                 "potential_saving_usd": 0.0, "potential_saving_high_usd": 0.0,
                 "idle_saving_usd": 0.0}
     rec = out["RECOMMENDATION"]
+    # #38 remainder: add-a-cluster rows on a multi-cluster non-ECONOMY warehouse below the generator cap
+    # whose cluster cap was NOT checked — exactly the rows whose rationale says "was not checked".
+    cap_unchecked = 0
+    if "MAX_CLUSTER_COUNT" in out.columns:
+        mx = pd.to_numeric(out["MAX_CLUSTER_COUNT"], errors="coerce")
+        cand = (rec == RECOMMEND_SCALE_OUT) & (mx > 1) & (mx < CLUSTER_RANGE_CAP)
+        if "SCALING_POLICY" in out.columns:
+            cand &= out["SCALING_POLICY"].map(_policy) != "ECONOMY"
+        cap_unchecked = sum(cluster_cap_state(r) == CAP_NOT_CHECKED for _, r in out[cand].iterrows())
     idle_usd = 0.0
     if "IDLE_MONTHLY_USD" in out.columns:
         idle_usd = round(float(out.loc[rec == RECOMMEND_SUSPEND, "IDLE_MONTHLY_USD"].sum()), 0)
@@ -295,6 +497,8 @@ def sizing_summary(out: pd.DataFrame) -> dict:
         "up": int(rec.isin(UP_VERDICTS).sum()),          # back-compat: every capacity-pressure row
         "scale_out": int((rec == RECOMMEND_SCALE_OUT).sum()),
         "size_up": int((rec == RECOMMEND_SIZE_UP).sum()),
+        "below_cap": int((rec == RECOMMEND_BELOW_CAP).sum()),
+        "cap_unchecked": int(cap_unchecked),
         "down": int((rec == RECOMMEND_DOWN).sum()),
         "suspend": int((rec == RECOMMEND_SUSPEND).sum()),
         "review": int((rec == RECOMMEND_CADENCE).sum()),

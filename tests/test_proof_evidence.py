@@ -454,7 +454,8 @@ def test_optimize_calls_the_shared_helpers():
     assert opt.count("_savings_opps.extend(idle_opportunities(advisor))") == 1
     assert opt.count("_savings_opps.extend(resize_opportunities(sized))") == 1
     assert 'SavingsOpportunity("IDLE"' not in opt and 'SavingsOpportunity("RESIZE"' not in opt
-    assert opt.count("ACCOUNT_USAGE") == 5                    # tests/test_perf_budgets.py ceiling
+    # tests/test_perf_budgets.py ceiling; 5 -> 6 at v4.604 (Next-Fifty #38: the toggled cluster-cap read's label)
+    assert opt.count("ACCOUNT_USAGE") == 6
 
 
 # ---------------------------------------------------------------------------
