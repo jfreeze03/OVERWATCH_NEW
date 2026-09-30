@@ -401,8 +401,9 @@ def test_savings_tab_takes_the_rate_and_settings_from_the_page():
     opt = read("app/ui/pages/cost_parts/optimize.py")
     assert "def _savings_tab(rate: float = 3.68, settings: dict | None = None) -> None:" in opt
     assert "_savings_tab(rate, settings)" in read("app/ui/pages/cost.py")
-    assert ("from app.logic.formulas import account_today, format_usd, humanize_duration, md_dollars, "
-            "safe_float\n") in opt
+    # (v4.604 #35 added account_now, for the unread-maintenance handoff's as_of, so the import wraps)
+    assert ("from app.logic.formulas import (\n    account_now,\n    account_today,\n    format_usd,\n"
+            "    humanize_duration,\n    md_dollars,\n    safe_float,\n)\n") in opt
     # the measured verify adds no write gate, button, raw info/success or ACCOUNT_USAGE literal to the tab
     tab = opt.split("def _savings_tab(", 1)[1].split("\ndef ", 1)[0]
     assert tab.count("write_gate_open(") == 3 and tab.count("st.button(") == 4

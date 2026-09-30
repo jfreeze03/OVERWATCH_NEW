@@ -523,6 +523,31 @@ def test_pipeline_frame_unions_addressable_and_queued_without_double_counting():
                                confidence_floor=0.6)["candidates"] == 0.0
 
 
+
+def test_pipeline_frame_types_unread_rows_as_objects():
+    """Next-Fifty #35: an UNREAD_MAINT opportunity targets an object FQN, so its synthetic row is an OBJECT (the
+    Entity 360 type Storage & waste drills to): it de-duplicates against a queued OBJECT action on the same FQN and
+    never against a warehouse that happens to share the key."""
+    opps = [SavingsOpportunity("UNREAD_MAINT", "DB.S.T", 40.0, 0.6), SavingsOpportunity("IDLE", "WH_A", 10.0, 0.6)]
+    pf = pipeline_frame(opps, None).set_index("SOURCE_ENTITY_KEY")
+    assert pf.loc["DB.S.T", "SOURCE_ENTITY_TYPE"] == "OBJECT"
+    assert pf.loc["DB.S.T", "TITLE"] == "Stop maintenance on unread DB.S.T"
+    assert pf.loc["DB.S.T", "SOURCE"] == "Cost ▸ Optimization & Savings (UNREAD_MAINT)"
+    assert pf.loc["WH_A", "SOURCE_ENTITY_TYPE"] == "WAREHOUSE"               # IDLE / RESIZE rows unchanged
+    assert pf.loc["WH_A", "TITLE"] == "Tighten auto-suspend on WH_A"
+
+    def queued(entity_type: str) -> pd.DataFrame:
+        return pd.DataFrame([{"ACTION_ID": "9", "STATUS": "OPEN", "CONFIDENCE": 0.9, "ESTIMATED_USD": 25.0,
+                              "PERIOD": "MONTHLY", "SOURCE_ENTITY_TYPE": entity_type,
+                              "SOURCE_ENTITY_KEY": "db.s.t", "SEVERITY": "LOW", "TITLE": "q"}])
+
+    same = scenario_projection(pipeline_frame(opps[:1], queued("OBJECT")), adoption_pct=100,
+                               realization_pct=100, confidence_floor=0.6)
+    assert same["candidates"] == 1.0 and same["gross_estimate"] == 40.0     # one object, the larger wins
+    other = scenario_projection(pipeline_frame(opps[:1], queued("WAREHOUSE")), adoption_pct=100,
+                                realization_pct=100, confidence_floor=0.6)
+    assert other["candidates"] == 2.0 and other["gross_estimate"] == 65.0   # never merged with a warehouse
+
 def test_pipeline_frame_accepts_an_already_normalised_queue():
     frame, _ = monthly_equivalent(_queue())
     pf = pipeline_frame([], frame)

@@ -21,7 +21,7 @@ import streamlit as st
 
 from app.config import LEDGER_AUTOBOOKED_LEVERS, core_object
 from app.core.identity import identity_sql
-from app.core.query import execute_statement, run
+from app.core.query import cache_scope, execute_statement, run
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal, sql_number
 from app.core.state import request_navigation
@@ -33,7 +33,14 @@ from app.logic.ai_prompts import idle_warehouse_prompt
 from app.logic.capacity import capacity_forecasts
 from app.logic.consolidation import WarehouseProfile, consolidation_candidates
 from app.logic.date_windows import window_label, window_phrase
-from app.logic.formulas import account_today, format_usd, humanize_duration, md_dollars, safe_float
+from app.logic.formulas import (
+    account_now,
+    account_today,
+    format_usd,
+    humanize_duration,
+    md_dollars,
+    safe_float,
+)
 from app.logic.insights import (
     IDLE_TARGET_SUSPEND_SEC,
     flag_clustering_churn,
@@ -63,11 +70,22 @@ from app.logic.monitors import (
     unmonitored_warehouses,
 )
 from app.logic.savings_rollup import (
+    S_LEDGER_UNAVAILABLE,
+    UNREAD_CLEAN,
+    UNREAD_CONFIRM_FAILED,
+    UNREAD_CONFIRMED,
+    UNREAD_HANDOFF_KEY,
+    UNREAD_LEDGER_FAILED,
+    UNREAD_SHORTLIST_FAILED,
     SavingsOpportunity,
     effort_tier,
     idle_opportunities,
+    lever_basis,
     resize_opportunities,
     rollup_savings,
+    unread_handoff,
+    unread_handoff_note,
+    unread_lever,
 )
 from app.logic.serverless_roi import classify_qas_roi
 from app.logic.sizing import (
@@ -92,7 +110,9 @@ from app.logic.unread_maintenance import (
     ACTION_VERDICTS,
     VERDICT_GONE,
     book_estimated_sql,
+    booked_objects,
     confirm_failure_note,
+    object_key,
     unread_maintenance_verdicts,
 )
 from app.logic.workbench import experiment_state_by_key
@@ -994,16 +1014,39 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         _exp = run(workbench_sql.experiments(entity_type="WAREHOUSE"), page=_PAGE,
                    key=f"opt_experiments_{company}", tier="recent", source="OPTIMIZATION_EXPERIMENTS")
         _exp_df = _exp.df if _exp.usable() else pd.DataFrame()
+        # Next-Fifty #35: unread maintenance joins ONLY from the Storage & waste session handoff (a confirmed
+        # scan, this Company, Database filter clear, same cache scope, under 1h old) — zero reads here.
+        _unread = unread_lever(st.session_state.get(UNREAD_HANDOFF_KEY), company=company, scope=cache_scope(),
+                               now=account_now(), where="Storage & waste")
+        _savings_opps.extend(_unread.opportunities)
         _roll = rollup_savings(_savings_opps)
+        _counted = [lever for lever, on in (("IDLE", _idle_profiles_tx is not None),
+                                            ("RESIZE", _sizing_profiles_tx is not None),
+                                            ("UNREAD_MAINT", _unread.included)) if on]
+        _absent: dict[str, str] = {}
+        if _idle_profiles_tx is None:
+            _absent["IDLE"] = "the idle advisor above returned no rows or could not be read"
+        if _sizing_profiles_tx is None:
+            _absent["RESIZE"] = ("the right-sizing profile above returned no rows or could not be read"
+                                 if st.session_state.get("sizing_load") else
+                                 "turn on 'Load right-sizing profile (heavy scan)' above")
+        if not _unread.included:
+            _absent["UNREAD_MAINT"] = _unread.reason
+        _basis = lever_basis(_counted, _absent, {"UNREAD_MAINT": _unread.note})
         if _roll.items:
             kpi_row([
                 {"label": "Addressable $/mo (net)", "value": format_usd(_roll.total_monthly_usd),
-                 "help": "Idle-timer + right-sizing opportunities, de-duplicated so a warehouse "
-                         "counted for BOTH idle and resize is not double-counted (the larger wins)."},
+                 "help": "The levers named just below, de-duplicated: a warehouse counted for both idle and "
+                         "resize counts once (the larger wins). Idle and right-sizing are measured over this "
+                         "window. Unread maintenance is ESTIMATED from the last 30 complete days of maintenance "
+                         "on objects confirmed unread in Storage & waste this session, less any already booked "
+                         "on the Savings ledger; an object you stopped without booking keeps counting until "
+                         "those 30 days roll off."},
                 {"label": "Opportunities", "value": str(len(_roll.items))},
                 {"label": "Overlaps removed", "value": str(len(_roll.dropped)),
                  "help": "Idle/resize double-counts on the same warehouse dropped from the total."},
             ])
+            st.caption(md_dollars(_basis))
             _rdf = pd.DataFrame([
                 {"Source": o.source, "Warehouse / target": o.target,
                  "$/mo": round(o.monthly_usd, 2), "Confidence": round(o.confidence, 2),
@@ -1022,15 +1065,14 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                       "saving already under test is not a fresh opportunity to re-book."),
                          })
             st.caption(
-                "Ranked by confidence x dollars. **Effort** flags the quick wins — LOW is a "
-                "single ALTER (idle timer / size), so sort by it to bank the easy savings "
-                "first even when they're not the biggest number. The failed-query **Wasted "
-                "spend** board (Operations) and the **Serverless ROI** panel above are "
-                "additional levers not yet folded into this total; storage / clustering plug "
-                "into the same rollup next."
+                "Ranked by confidence x dollars. **Effort** flags the quick wins — LOW is a quick ALTER-level "
+                "change (an idle timer, a size, or stopping maintenance on an unread object), so sort by it to "
+                "bank the easy savings first even when they're not the biggest number. Also not in this total: "
+                "the failed-query **Wasted spend** board (Operations), the **Serverless ROI** panel above, and "
+                "the storage-waste and automatic-clustering panels in Storage & waste."
             )
         else:
-            st.caption("No open idle or right-sizing opportunities to roll up in this window.")
+            st.caption(md_dollars("No open opportunities from the levers counted. " + _basis))
 
         st.divider()
         # rec#20: fleet consolidation — same-size warehouses in this scope whose active
@@ -1459,6 +1501,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 empty_state("clean", "No object paid 1+ credit of clustering, search optimization or MV refresh "
                                      "without a read in the last 90 days.")
                 result_caption(_um)
+                # Next-Fifty #35: a clean scan counts the lever at $0 in Addressable $/mo (Idle & sizing, Proof)
+                st.session_state[UNREAD_HANDOFF_KEY] = unread_handoff(
+                    None, status=UNREAD_CLEAN, company=company, database=_oc_db, scope=cache_scope(),
+                    as_of=account_now())
             elif guard(_um, ""):
                 import hashlib as _hl
 
@@ -1487,6 +1533,22 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 _cands = int(safe_float(_um0.get("CANDIDATES_WIN"), default=float(len(_um.df))))
                 _um_trunc = _cands > len(_um.df)
                 _ua = _uv[_uv["VERDICT"].isin(ACTION_VERDICTS)]
+                # Next-Fifty #35: objects already booked on the Savings ledger stay out of Addressable $/mo (the
+                # Book button's own dedupe). Read only when there is something to count: a confirmed action row
+                # and no Database filter (a Database-scoped scan never joins the headline). The SQL + tier are
+                # Proof's full-ledger read (one shared cache entry); the key must NOT contain 'unread_maint_', or
+                # toggle_cost_hint above would report this fast read instead of the confirm.
+                _booked: frozenset[str] | None = frozenset()
+                _led_err = ""
+                if _conf.ok and not _ua.empty and not str(_oc_db or "").strip():
+                    _led = run(mart_sql.savings_ledger(limit=None), page=_PAGE, key="booked_unread_ledger",
+                               tier="recent",
+                               source="SAVINGS_LEDGER (bookings, to leave booked objects out of Addressable $/mo)")
+                    # a row-capped read may miss the oldest bookings: unknown, never a partial set (no double count)
+                    _booked = booked_objects(_led.df) if _led.ok and not _led.truncated else None
+                    _led_err = (str(_led.error or "") if not _led.ok else
+                                f"The read stopped at its {len(_led.df):,}-row cap, so older bookings could not "
+                                "be checked." if _led.truncated else "")
                 _cap = f" (top {len(_um.df)}, ≥)" if _um_trunc else ""
                 kpi_row([
                     {"label": "Mart shortlist", "value": f"{_cands:,}",
@@ -1572,6 +1634,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                     and write_gate_open(_bk_key)):
                                 ok, msg = execute_statement(_bk, page=_PAGE)
                                 stamp_write(_bk_key, ok)  # C48
+                                if ok and _booked is not None:
+                                    _booked = _booked | {object_key(_fqn)}
                                 notify(ok, f"Booked an ESTIMATED saving for {_fqn}, unless it was already booked "
                                            "(any of its maintenance arms, not rejected): then nothing is added."
                                        if ok else f"Booking failed: {msg}")
@@ -1609,8 +1673,24 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     "materialized view used only through automatic query rewrite may not show as a read, so "
                     "confirm with the owner. Est. $/mo = the last 30 complete days of maintenance credits x "
                     "your rate (ESTIMATED); booked rows stay ESTIMATED until verified on the Savings ledger."))
+                # Next-Fifty #35: the ONLY path from these verdicts to Addressable $/mo (Idle & sizing, Proof ▸
+                # Pipeline): a primitives-only snapshot in a non-widget session key. Only a CONFIRMED scan carries
+                # rows; it is never cleared when the toggle is off (Streamlit resets it on every revisit).
+                st.session_state[UNREAD_HANDOFF_KEY] = unread_handoff(
+                    _uv, status=UNREAD_CONFIRMED if _conf.ok else UNREAD_CONFIRM_FAILED, company=company,
+                    database=_oc_db, scope=cache_scope(), as_of=account_now(), checked=len(_um.df),
+                    truncated=_um_trunc, booked=_booked)
+                if st.session_state[UNREAD_HANDOFF_KEY]["status"] == UNREAD_LEDGER_FAILED:
+                    empty_state("unavailable", md_dollars(S_LEDGER_UNAVAILABLE), detail=_led_err)
+                elif (_n := unread_handoff_note(st.session_state[UNREAD_HANDOFF_KEY])):
+                    st.caption(md_dollars(_n))
                 result_caption(_um)
                 result_caption(_conf)
+            else:
+                # guard() above already rendered the shortlist's 'unavailable' state
+                st.session_state[UNREAD_HANDOFF_KEY] = unread_handoff(
+                    None, status=UNREAD_SHORTLIST_FAILED, company=company, database=_oc_db, scope=cache_scope(),
+                    as_of=account_now())
         st.divider()
         st.markdown("**Storage growth movers**")
         days_storage = max(days, 30)
