@@ -300,13 +300,21 @@ Admin → Settings, never in code.
   first 10 Exceptions rows through the same Track statement as Optimize and
   Control Room triage: one Action Center item per user (keyed on the user,
   every signal in its detail, the strongest signal's severity, under the
-  user's own company or ALL) plus one item for the all-users budget breach,
-  keyed on the Company scope and priced only at the exposure the user items
-  do not already count. Items land UNASSIGNED, priced MONTHLY. A user or
-  scope with an open item from this page is skipped, including items queued
-  before v4.605 (matched by their old title). A Security work item on the
-  same user does not block it. An item still open from an earlier month now
-  blocks a new one; a done or dismissed item does not.
+  user's own company; an unmapped user stays UNKNOWN, so their estimate is
+  never summed into a named Company's queue) plus one item for the
+  all-users budget breach, keyed on the Company scope and priced only at
+  the exposure beyond the user items tracked in the same click. All-users
+  items tracked from different Company views are priced separately and
+  overlap, so do not add them together. Items land UNASSIGNED, priced
+  MONTHLY when priced (the scope item carries no estimate when the user
+  items already count its exposure). A user or scope with an open item
+  from this page is not queued again, including items queued before v4.605
+  under any of the page's three SOURCE names (matched by their old title).
+  When a user's strongest signal is now stronger than their open item's
+  severity, the click first raises that item's severity and notes it in
+  its detail; the estimate stays as first tracked. A Security work item on
+  the same user does not block it. An item still open from an earlier
+  month now blocks a new one; a done or dismissed item does not.
 - **Optimization** — idle advisor (warehouse-hours billed with zero
   queries = auto-suspend opportunity); right-sizing simulator (spill +
   queue profile → size suggestion; its **Check cluster use** toggle reads
@@ -373,7 +381,9 @@ Admin → Settings, never in code.
     tracked (Acknowledge and the incident flow own them).
   - Cost > Chargeback & AI exceptions (v4.605) use the same statement too,
     keyed on the user (USER) or the Company scope (AI_BUDGET, a scope key
-    with no Entity 360 page), keeping the exception's severity.
+    with no Entity 360 page), keeping the exception's severity. A separate
+    UPDATE runs first and only raises the severity of an open user item
+    from that page when the user's signal has since grown stronger.
 
   No live read on first paint. The optional live-profile toggle reuses the
   Queries scan (shared cache).

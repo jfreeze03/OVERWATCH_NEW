@@ -51,9 +51,17 @@ TRACK_SEVERITIES = ("MEDIUM", "LOW")
 # v4.605: Cost > Chargeback & AI exceptions track through the SAME write. One item per user (USER, keyed on the
 # exception's USER_NAME, every signal of that user in its detail) plus the all-users budget breach, keyed on the
 # Company scope (AI_BUDGET -- a scope key, NOT an Entity 360 type: the drill guards in workbench.py and
-# decision_studio.py never open it). The source is the legacy writer's SOURCE, byte-identical, so its still-open
-# rows are recognised (see _LEGACY_TITLE_ARMS). Severity is preserved (the legacy writer's behaviour).
+# decision_studio.py never open it). The source is the legacy writer's last SOURCE, byte-identical; its still-open
+# rows, and those it wrote under its two earlier SOURCE names, are recognised (see _LEGACY_TITLE_ARMS and
+# AI_LEGACY_SOURCES). Severity is preserved (the legacy writer's behaviour), and a later, stronger signal raises
+# the open item's severity (ai_track_escalation_sql) instead of queuing a second item.
 AI_TRACK_SOURCE = "Cost Intelligence > Chargeback & AI > AI users"
+# Every SOURCE the page's pre-v4.605 writer stamped (git log -S on its INSERT): 'Cost & Contract > AI Users' until
+# v4.49, 'Cost & Contract > Chargeback & AI > AI users' from v4.49 until v4.541 (the page rename), AI_TRACK_SOURCE
+# since. No migration ever renamed ACTION_QUEUE.SOURCE and nothing closes an open item on its own, so a still-open
+# legacy row may carry any of the three. Only the legacy TITLE arm reads them: entity-keyed rows exist only under
+# AI_TRACK_SOURCE (v4.605 on).
+AI_LEGACY_SOURCES = (AI_TRACK_SOURCE, "Cost & Contract > Chargeback & AI > AI users", "Cost & Contract > AI Users")
 AI_USER_ENTITY_TYPE = "USER"
 AI_SCOPE_ENTITY_TYPE = "AI_BUDGET"
 AI_TRACK_CAP = 10             # exception ROWS read per click (the legacy writer's head(10))
@@ -69,6 +77,8 @@ _LEGACY_TITLE_ARMS = {
     "AI_BUDGET": ("CONTAINS(UPPER(q.TITLE), ': (ALL USERS) (') "
                   "AND UPPER(COALESCE(q.COMPANY, '')) = UPPER(v.ENTITY_KEY)"),
 }
+# The SOURCE values a legacy TITLE arm may match, per writing source (default: the source itself).
+_LEGACY_SOURCES = {AI_TRACK_SOURCE: AI_LEGACY_SOURCES}
 
 # The portfolio's specific NEXT_MOVE values and the first fix each one implies.
 _HEURISTIC_FIX = {
@@ -442,6 +452,28 @@ def track_items(rows: pd.DataFrame | Iterable[Mapping[str, object]], company: st
     return items
 
 
+def _track_match(kind: str, source: str, source_scoped: bool) -> str:
+    """The existing-item match of a Track statement (the NOT EXISTS of the insert, the WHERE of the AI escalation).
+
+    Unscoped: the entity (type + upper-cased key). ``source_scoped``: the entity under ``source``; for a type in
+    _LEGACY_TITLE_ARMS also a keyless pre-v4.605 row whose TITLE names the entity, under ``source`` or an earlier
+    SOURCE name of the same writer (_LEGACY_SOURCES)."""
+    entity_match = (f"UPPER(q.SOURCE_ENTITY_TYPE) = {sql_literal(kind, 40)}\n"
+                    f"      AND UPPER(q.SOURCE_ENTITY_KEY) = UPPER(v.ENTITY_KEY)")
+    if not source_scoped:
+        return entity_match
+    legacy_arm = _LEGACY_TITLE_ARMS.get(kind, "")
+    if not legacy_arm:
+        return f"q.SOURCE = {sql_literal(source, 120)}\n      AND {entity_match}"
+    legacy_in = ", ".join(sql_literal(s, 120) for s in _LEGACY_SOURCES.get(source, (source,)))
+    return (f"((q.SOURCE = {sql_literal(source, 120)}\n"
+            f"            AND UPPER(q.SOURCE_ENTITY_TYPE) = {sql_literal(kind, 40)}\n"
+            f"            AND UPPER(q.SOURCE_ENTITY_KEY) = UPPER(v.ENTITY_KEY))\n"
+            f"           OR (q.SOURCE IN ({legacy_in})\n"
+            f"               AND q.SOURCE_ENTITY_TYPE IS NULL\n"
+            f"               AND {legacy_arm}))")
+
+
 def track_entities_sql(items: list[dict], *, entity_type: str, source: str, actor_sql: str, bulk: bool,
                        cooldown_days: int = TRACK_COOLDOWN_DAYS, rebroke_keys: Iterable[str] = (),
                        severities: Iterable[str] = TRACK_SEVERITIES, company_from_user: bool = False,
@@ -465,11 +497,13 @@ def track_entities_sql(items: list[dict], *, entity_type: str, source: str, acto
 
     v4.605 options (the defaults leave the statement byte-identical to v4.604): ``severities`` is the
     allowed SEVERITY set (anything else writes LOW); ``company_from_user`` (USER only, ValueError
-    otherwise) resolves COMPANY in SQL as COALESCE(NULLIF(COMPANY_FOR_USER(key), 'UNKNOWN'), 'ALL') --
-    the V163 [28] owner rule, on a plain column (V030 shape law); ``source_scoped`` keys the NOT EXISTS
-    on ``source`` too (a Security work item on the same user never blocks an AI-spend item) and, for a
-    type in _LEGACY_TITLE_ARMS, also lets a still-open pre-v4.605 row of that source (no entity key)
-    block by its TITLE."""
+    otherwise) resolves COMPANY in SQL as COALESCE(COMPANY_FOR_USER(key), 'UNKNOWN') on a plain column
+    (V030 shape law) -- an unmapped user stays UNKNOWN (V044 law, the pre-v4.605 writer's filing), never
+    the V163 [28] alert rule's ALL: a priced item under ALL would be summed into every Company's Queued
+    work $/mo; ``source_scoped`` keys the NOT EXISTS on ``source`` too (a Security work item on the same
+    user never blocks an AI-spend item) and, for a type in _LEGACY_TITLE_ARMS, also lets a still-open
+    pre-v4.605 row (no entity key) block by its TITLE, under ``source`` or any earlier SOURCE name the
+    page wrote (_LEGACY_SOURCES)."""
     kind = str(entity_type or "").strip().upper()
     if kind not in _TRACKABLE_TYPES:
         raise ValueError(f"Track does not cover entity type {kind or '(blank)'}: only "
@@ -508,21 +542,9 @@ def track_entities_sql(items: list[dict], *, entity_type: str, source: str, acto
                  f"               AND COALESCE(q.COMPLETED_AT, q.UPDATED_AT) >= "
                  f"DATEADD('day', -{days}, CURRENT_TIMESTAMP())" + rebroke + ")") if bulk else "")
     rows_sql = ",\n    ".join(values)
-    company_col = (f"COALESCE(NULLIF({companies.COMPANY_FOR_USER_FN}(v.ENTITY_KEY), 'UNKNOWN'), 'ALL')"
+    company_col = (f"COALESCE({companies.COMPANY_FOR_USER_FN}(v.ENTITY_KEY), 'UNKNOWN')"
                    if company_from_user else "v.COMPANY")
-    entity_match = (f"UPPER(q.SOURCE_ENTITY_TYPE) = {sql_literal(kind, 40)}\n"
-                    f"      AND UPPER(q.SOURCE_ENTITY_KEY) = UPPER(v.ENTITY_KEY)")
-    legacy_arm = _LEGACY_TITLE_ARMS.get(kind, "")
-    if source_scoped and legacy_arm:
-        match = (f"q.SOURCE = {sql_literal(source, 120)}\n"
-                 f"      AND ((UPPER(q.SOURCE_ENTITY_TYPE) = {sql_literal(kind, 40)}\n"
-                 f"            AND UPPER(q.SOURCE_ENTITY_KEY) = UPPER(v.ENTITY_KEY))\n"
-                 f"           OR (q.SOURCE_ENTITY_TYPE IS NULL\n"
-                 f"               AND {legacy_arm}))")
-    elif source_scoped:
-        match = f"q.SOURCE = {sql_literal(source, 120)}\n      AND {entity_match}"
-    else:
-        match = entity_match
+    match = _track_match(kind, source, source_scoped)
     return f"""
 INSERT INTO {core_object('ACTION_QUEUE')}
     (COMPANY, SEVERITY, TITLE, DETAIL, OWNER, STATUS, SOURCE, SOURCE_ENTITY_TYPE,
@@ -705,8 +727,10 @@ def ai_exception_track_items(exceptions: pd.DataFrame | None, company: str, *,
     a placeholder: track_entities_sql(company_from_user=True) resolves it per user in SQL.
 
     AI_BUDGET: the '(all users)' row (at most one), keyed on the Company scope ('ALL' when blank). Its
-    ESTIMATED_USD is the scope exposure BEYOND the user items tracked with it (max 0, None at 0), so the queued
-    set sums to the scope total once."""
+    ESTIMATED_USD is the scope exposure BEYOND the user items built in this same call (max 0, None at 0), so one
+    click's items sum to the scope total once. It knows nothing of the queue: an all-users item tracked from
+    another Company view (the ALL scope contains ALFA's and Trexis's), or a user tracked by an earlier click who
+    is outside this click's rows, is not subtracted, and those items overlap in Queued work $/mo."""
     out: dict[str, list[dict]] = {AI_USER_ENTITY_TYPE: [], AI_SCOPE_ENTITY_TYPE: []}
     if exceptions is None or exceptions.empty:
         return out
@@ -760,11 +784,61 @@ def ai_exception_track_items(exceptions: pd.DataFrame | None, company: str, *,
                       f"({_text(scope_rec.get('SOURCE'))})")[:300],
             "DETAIL": (f"{int(safe_float(scope_rec.get('TOTAL_REQUESTS'))):,} requests, projected 30d "
                        f"{format_usd(proj)}, cr/request {safe_float(scope_rec.get('CREDITS_PER_REQUEST')):.4f}. "
-                       "Its estimate is the scope exposure beyond the user items tracked with it (avoids "
-                       "double-counting).")[:1000],
+                       "Its estimate is the scope exposure beyond the user items tracked with it in the same "
+                       "click.")[:1000],
             "ENTITY_KEY": scope[:500],
             "CONFIDENCE": None,
             "ESTIMATED_USD": (round(est, 2) if priced else None),
             "PERIOD": ("MONTHLY" if priced else ""),
         })
     return out
+
+
+def _severity_rank_sql(expr: str) -> str:
+    """SQL twin of actions.SEVERITY_RANK (CRITICAL 0 .. INFO 4); an unknown or NULL severity ranks 9."""
+    whens = " ".join(f"WHEN {sql_literal(k, 20)} THEN {r}" for k, r in SEVERITY_RANK.items())
+    return f"CASE UPPER({expr}) {whens} ELSE 9 END"
+
+
+def ai_track_escalation_sql(items: list[dict], *, actor_sql: str) -> str:
+    """ONE UPDATE that only ever RAISES the severity of this page's open USER items ('' when there are none).
+
+    track_entities_sql keeps one item per user, so while a user's item is open a later, stronger signal (MEDIUM
+    'High usage' tracked, the user now breaches the budget) inserts nothing. This statement runs first, behind the
+    same C48 latch, and matches exactly what blocks that insert (_track_match: SOURCE-scoped entity key, or a
+    pre-v4.605 row by its legacy TITLE under any of AI_LEGACY_SOURCES), OPEN or IN_PROGRESS only. It sets SEVERITY
+    to the new signal's when that ranks strictly higher (never a downgrade, so a re-run is a no-op), prefixes
+    DETAIL with 'Raised from <old> to <new> by a later Track (<new title>)' (clipped at 1000), and stamps
+    UPDATED_AT / UPDATED_BY. TITLE and ESTIMATED_USD stay as first tracked: re-pricing would break the all-users
+    item's de-overlap (and a user may hold several pre-v4.605 per-signal rows). Another source's item (a Security
+    work item on the same user) and a DONE or DROPPED item are never touched. Every value goes through
+    sql_literal; one statement, no ';' outside literals."""
+    allowed = set(AI_TRACK_SEVERITIES)
+    values: list[str] = []
+    for item in items:
+        key = _text(item.get("ENTITY_KEY"))
+        if not key:
+            continue
+        sev = _text(item.get("SEVERITY")).upper()
+        sev = sev if sev in allowed else "LOW"
+        values.append(f"({sql_literal(sev, 20)}, {sql_literal(_text(item.get('TITLE')), 300)}, "
+                      f"{sql_literal(key, 500)})")
+    if not values:
+        return ""
+    rows_sql = ",\n    ".join(values)
+    match = _track_match(AI_USER_ENTITY_TYPE, AI_TRACK_SOURCE, True)
+    return f"""
+UPDATE {core_object('ACTION_QUEUE')} q
+SET SEVERITY = v.SEVERITY,
+    DETAIL = SUBSTR('Raised from ' || COALESCE(UPPER(q.SEVERITY), 'unset') || ' to ' || v.SEVERITY
+                    || ' by a later Track (' || v.TITLE || '). The estimate is the one first tracked. '
+                    || COALESCE(q.DETAIL, ''), 1, 1000),
+    UPDATED_AT = CURRENT_TIMESTAMP(),
+    UPDATED_BY = {actor_sql}
+FROM (VALUES
+    {rows_sql}
+) AS v (SEVERITY, TITLE, ENTITY_KEY)
+WHERE {match}
+  AND UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS')
+  AND {_severity_rank_sql('v.SEVERITY')} < {_severity_rank_sql('q.SEVERITY')}
+""".strip()

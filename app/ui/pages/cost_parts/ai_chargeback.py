@@ -43,6 +43,7 @@ from app.logic.fix_queue import (
     AI_TRACK_SOURCE,
     AI_USER_ENTITY_TYPE,
     ai_exception_track_items,
+    ai_track_escalation_sql,
     track_entities_sql,
 )
 from app.logic.formulas import account_now, account_today, credits_to_usd, format_usd, md_dollars, safe_float
@@ -81,6 +82,8 @@ from app.ui.components import (
 from app.ui.schema_gate import has_migration
 
 _PAGE = "Cost Intelligence"
+# The Track expander's first statement: raise the severity of users' open items (fix_queue.ai_track_escalation_sql).
+_ESCALATE = "ESCALATE"
 
 # #42 Part 1: Company all-in showback (Cost > Chargeback & AI). Marts only; no source label
 # spells the live-telemetry schema (this file sits at its live-scan budget).
@@ -376,18 +379,23 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
 
 def _track_exceptions_expander(exceptions: pd.DataFrame, company: str, is_operator: bool) -> None:
     """Cost > Chargeback & AI > Exceptions: 'Track top exceptions as work items' (v4.605) -- the ONE shared Track
-    write, as Operations > Optimize and Control Room triage use it. Two statements at most (users, then the
-    all-users scope), shown before the one-click button, executed in order behind the C48 latch."""
+    write, as Operations > Optimize and Control Room triage use it. Three statements at most (raise the severity of
+    users' open items, then insert users, then the all-users scope), shown before the one-click button, executed in
+    order behind the C48 latch."""
     with st.expander("Track top exceptions as work items"):
         # Replaces this page's own per-row INSERTs (pre-v4.605). One item per USER, keyed on the user with
         # every signal of that user in its detail, plus the all-users budget breach keyed on the Company
         # scope (AI_BUDGET). The NOT EXISTS is scoped to this page's SOURCE (a Security work item on the same
         # user never blocks an AI-spend item) and entity-keyed, and a still-open pre-v4.605 item from this
-        # page (no entity key) blocks by its legacy TITLE, so nothing queued the old way is duplicated. The
-        # scope item's estimate is the exposure the user items do not already count, so the queued set sums
-        # to the scope total once (fix_queue.ai_exception_track_items).
+        # page (no entity key, under any SOURCE name the page ever wrote) blocks by its legacy TITLE, so nothing
+        # queued the old way is duplicated. One item per user would swallow an escalation, so the first
+        # statement raises an open item's SEVERITY when the user's strongest signal is now stronger (never a
+        # downgrade; its estimate stays as first tracked). The scope item's estimate is the exposure beyond the
+        # user items built in the same click, so one click's items sum to the scope total once; all-users
+        # items from other Company views or clicks are not subtracted (fix_queue.ai_exception_track_items).
         _groups = ai_exception_track_items(exceptions, company)
         _stmts = [(kind, stmt) for kind, stmt in (
+            (_ESCALATE, ai_track_escalation_sql(_groups[AI_USER_ENTITY_TYPE], actor_sql=identity_sql())),
             (AI_USER_ENTITY_TYPE, track_entities_sql(
                 _groups[AI_USER_ENTITY_TYPE], entity_type=AI_USER_ENTITY_TYPE, source=AI_TRACK_SOURCE,
                 actor_sql=identity_sql(), bulk=False, severities=AI_TRACK_SEVERITIES,
@@ -398,32 +406,42 @@ def _track_exceptions_expander(exceptions: pd.DataFrame, company: str, is_operat
                 source_scoped=True)),
         ) if stmt]
         st.caption(f"Tracks the first {AI_TRACK_CAP} rows above into Action Center: one work item per "
-                   "user, keyed on the user, with every signal of that user in its detail. A user who "
-                   "already has an open item from this page (tracked before, from any Company scope) is "
-                   "left as is. Items land UNASSIGNED at the strongest signal's severity, under the user's "
-                   "own company (ALL when the user maps to none), priced at the user's projected 30-day "
-                   "spend (monthly).")
+                   "user, keyed on the user, with every signal of that user in its detail. Items land "
+                   "UNASSIGNED at the strongest signal's severity, under the user's own company (UNKNOWN "
+                   "when the user maps to none, so its estimate is never added to a named Company's "
+                   "queue), priced monthly at the user's projected 30-day spend: all sources when the "
+                   "user has a budget signal (an '(all sources)' row), else the sum of the spiking "
+                   "sources. A user who already has "
+                   "an open item from this page (tracked before, from any Company scope, including one "
+                   "queued under an earlier page name) keeps that one item: the first statement raises its "
+                   "severity when the new signal is stronger and says so in its detail, and its estimate "
+                   "stays as first tracked.")
         if _groups[AI_SCOPE_ENTITY_TYPE]:
             st.caption(f"The all-users budget breach becomes one item for the {company} scope, estimated at "
-                       "only the projected exposure the user items do not already count (none when they "
-                       "count all of it).")
+                       "only the projected exposure beyond the user items tracked in the same click (none "
+                       "when they count all of it). All-users items tracked from different Company views "
+                       "are each priced this way and overlap, so do not add them together: the Queued work "
+                       "total can count that exposure more than once.")
         for _kind, _stmt in _stmts:
             st.code(_stmt, language="sql")
         if (is_operator and _stmts and st.button("Track in Action Center", key="cortex_track_exec")
                 and write_gate_open("cortex_track_exec")):
-            ok_all, _err, _users_done = True, "", False
+            ok_all, _err, _done = True, "", []
             for _kind, _stmt in _stmts:
                 ok, _msg = execute_statement(_stmt.strip(), page=_PAGE)
                 if not ok:
                     ok_all, _err = False, _msg
                     break                          # in order; stop at the first failure
-                _users_done = _users_done or _kind == AI_USER_ENTITY_TYPE
+                _done.append(_kind)
             stamp_write("cortex_track_exec", ok_all)  # C48
             if ok_all:
-                notify(True, "Tracked in Action Center (idempotent: a user or scope that already has an "
-                             "open item, including one queued from this page before, is left as is).")
-            elif _users_done:
+                notify(True, "Tracked in Action Center. An open item is never duplicated; a stronger signal "
+                             "raises its severity.")
+            elif AI_USER_ENTITY_TYPE in _done:
                 notify(False, f"The user items were tracked, but the all-users budget item was not: {_err}")
+            elif _ESCALATE in _done:
+                notify(False, "Open user items were raised where the signal is stronger, but no new item "
+                              f"was tracked: {_err}")
             else:
                 notify(False, _err)
         elif not is_operator:

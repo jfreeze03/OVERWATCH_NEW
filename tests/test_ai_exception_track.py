@@ -1,13 +1,16 @@
 """v4.605: Cost > Chargeback & AI exceptions track through the ONE shared Track write.
 
 Before v4.605 the page built up to 10 INSERTs of its own: de-duplicated on COMPANY + TITLE + open status +
-CREATED_AT in this month, with no SOURCE_ENTITY_TYPE/KEY, OWNER 'DBA / AI Governance' and COMPANY_FOR_USER's raw
-'UNKNOWN'. Now fix_queue.ai_exception_track_items turns the Exceptions table into one USER item per user (every
-signal in its detail) plus one AI_BUDGET item for the all-users breach, keyed on the Company scope, and
-fix_queue.track_entities_sql writes them -- at most two statements, entity-keyed, scoped to the page's SOURCE (a
-Security work item on the same user never blocks), with a legacy-title arm so a still-open pre-v4.605 row is
-never duplicated (no backfill, no migration). The builder's defaults stay byte-identical to v4.604 (goldens
-captured on 4769af4b). The SQL runs for real in sqlite (the tests/test_track_cooldown_harness.py harness).
+CREATED_AT in this month, with no SOURCE_ENTITY_TYPE/KEY and OWNER 'DBA / AI Governance'. Now
+fix_queue.ai_exception_track_items turns the Exceptions table into one USER item per user (every signal in its
+detail) plus one AI_BUDGET item for the all-users breach, keyed on the Company scope, and
+fix_queue.track_entities_sql writes them -- entity-keyed, scoped to the page's SOURCE (a Security work item on the
+same user never blocks), with a legacy-title arm so a still-open pre-v4.605 row is never duplicated, under any of
+the three SOURCE names the page ever wrote (no backfill, no migration). An unmapped user's item stays UNKNOWN
+(COMPANY_FOR_USER's raw value, as before), never ALL. fix_queue.ai_track_escalation_sql runs first and raises an
+open user item's severity when the new signal is stronger (one item per user would otherwise swallow the
+escalation). The builder's defaults stay byte-identical to v4.604 (goldens captured on 4769af4b). The SQL runs for
+real in sqlite (the tests/test_track_cooldown_harness.py harness).
 """
 
 from __future__ import annotations
@@ -38,6 +41,8 @@ sqlglot = pytest.importorskip("sqlglot")
 
 _CB = "app/ui/pages/cost_parts/ai_chargeback.py"
 _SCOPE_TITLE = "Cortex AI budget breach (all users): (all users) ((all sources))"
+# The page's two earlier SOURCE names (git log -S on its INSERT: until v4.49, then until the v4.541 page rename).
+_OLD_SOURCES = ("Cost & Contract > Chargeback & AI > AI users", "Cost & Contract > AI Users")
 
 
 def _row(user: str, usd: float, *, source: str = "(all sources)", signal: str = "Budget breach",
@@ -135,19 +140,25 @@ def test_ai_user_statement_shape():
     groups = ai_exception_track_items(pd.DataFrame([_scope(500.0), _row("JDOE", 300.0), _cpr("XJDOE", 50.0)]),
                                       "ALFA")
     sql = _user_sql(groups[AI_USER_ENTITY_TYPE])
-    assert ("SELECT COALESCE(NULLIF(DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(v.ENTITY_KEY), 'UNKNOWN'), 'ALL'), "
+    # an unmapped user stays UNKNOWN (V044 law): under ALL its estimate would be summed into every Company's queue
+    assert ("SELECT COALESCE(DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(v.ENTITY_KEY), 'UNKNOWN'), "
             "v.SEVERITY") in sql
+    assert "NULLIF(DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER" not in sql
     assert "'CRITICAL'" in sql and "'HIGH'" in sql and "'MONTHLY'" in sql
     assert "'UNASSIGNED', 'OPEN', 'Cost Intelligence > Chargeback & AI > AI users',\n       'USER'" in sql
-    assert ("    WHERE q.SOURCE = 'Cost Intelligence > Chargeback & AI > AI users'\n"
-            "      AND ((UPPER(q.SOURCE_ENTITY_TYPE) = 'USER'\n"
+    # the entity arm keys on the current SOURCE only; the legacy TITLE arm on every SOURCE the page ever wrote
+    assert ("    WHERE ((q.SOURCE = 'Cost Intelligence > Chargeback & AI > AI users'\n"
+            "            AND UPPER(q.SOURCE_ENTITY_TYPE) = 'USER'\n"
             "            AND UPPER(q.SOURCE_ENTITY_KEY) = UPPER(v.ENTITY_KEY))\n"
-            "           OR (q.SOURCE_ENTITY_TYPE IS NULL\n"
+            "           OR (q.SOURCE IN ('Cost Intelligence > Chargeback & AI > AI users', "
+            "'Cost & Contract > Chargeback & AI > AI users', 'Cost & Contract > AI Users')\n"
+            "               AND q.SOURCE_ENTITY_TYPE IS NULL\n"
             "               AND CONTAINS(UPPER(q.TITLE), ': ' || UPPER(v.ENTITY_KEY) || ' (')))\n"
             "      AND (UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS')))") in sql
     scope = _scope_sql(groups[AI_SCOPE_ENTITY_TYPE])
     assert "SELECT v.COMPANY, v.SEVERITY" in scope and "COMPANY_FOR_USER" not in scope
-    assert ("OR (q.SOURCE_ENTITY_TYPE IS NULL\n               AND CONTAINS(UPPER(q.TITLE), ': (ALL USERS) (') "
+    assert ("               AND q.SOURCE_ENTITY_TYPE IS NULL\n"
+            "               AND CONTAINS(UPPER(q.TITLE), ': (ALL USERS) (') "
             "AND UPPER(COALESCE(q.COMPANY, '')) = UPPER(v.ENTITY_KEY)))") in scope
     for stmt in (sql, scope):
         assert _statement_allowed(stmt) == (True, "")
@@ -268,6 +279,11 @@ def test_ai_values_stay_literals():
         assert len(parsed) == 1 and parsed[0].key == "insert"
         residue = re.sub(r"'(?:[^'\\]|\\.|'')*'", "''", sql)
         assert "DROP" not in residue.upper()
+    esc = fix_queue.ai_track_escalation_sql(groups[AI_USER_ENTITY_TYPE], actor_sql="'VIEWER'")
+    assert _statement_allowed(esc) == (True, "")
+    parsed = sqlglot.parse(esc, read="snowflake")
+    assert len(parsed) == 1 and parsed[0].key == "update"
+    assert "DROP" not in re.sub(r"'(?:[^'\\]|\\.|'')*'", "''", esc).upper()
 
 
 # ------------------------------------------------------------------------------ executed in sqlite ----
@@ -322,7 +338,7 @@ def test_ai_track_executes_in_sqlite():
         ("USER", "DOE"), ("USER", "DONEUSER"), ("USER", "NEWUSER"), ("USER", "SECUSER"), ("USER", "XJDOE")]
     by_key = {k: r for _t, k, *r in rows}
     assert by_key["NEWUSER"][0] == "Trexis" and by_key["XJDOE"][0] == "ALFA"   # COMPANY_FOR_USER
-    assert by_key["DOE"][0] == "ALL" and by_key["SECUSER"][0] == "ALL"         # UNKNOWN reads ALL
+    assert by_key["DOE"][0] == "UNKNOWN" and by_key["SECUSER"][0] == "UNKNOWN"  # unmapped: never ALL
     assert by_key["ALL"][0] == "ALL"                                           # the scope item keeps the scope
     assert {tuple(r[2:5]) for r in by_key.values()} == {("UNASSIGNED", "OPEN", AI_TRACK_SOURCE)}
     assert by_key["XJDOE"][1] == "CRITICAL" and by_key["DOE"][1] == "HIGH" and by_key["NEWUSER"][1] == "MEDIUM"
@@ -332,6 +348,83 @@ def test_ai_track_executes_in_sqlite():
     for stmt in stmts:
         con.execute(_to_sqlite(stmt))
     assert len(_new_rows(con)) == len(rows)
+
+
+def _seed_one(con: sqlite3.Connection, company: str, sev: str, title: str, status: str, source: str,
+              etype: str | None = None, ekey: str | None = None, usd: float | None = None,
+              detail: str = "d") -> int:
+    cur = con.execute("INSERT INTO ACTION_QUEUE (COMPANY, SEVERITY, TITLE, DETAIL, OWNER, STATUS, SOURCE, "
+                      "SOURCE_ENTITY_TYPE, SOURCE_ENTITY_KEY, ESTIMATED_USD, PERIOD, UPDATED_BY, CREATED_AT, "
+                      "UPDATED_AT) VALUES (?, ?, ?, ?, 'DBA / AI Governance', ?, ?, ?, ?, ?, 'MONTHLY', 'SEED', "
+                      "'2026-08-01 00:00:00', '2026-08-01 00:00:00')",
+                      (company, sev, title, detail, status, source, etype, ekey, usd))
+    return int(cur.lastrowid or 0)
+
+
+def test_rows_under_the_pages_earlier_source_names_still_block():
+    """R1-18: the page stamped two earlier SOURCE names (git log -S on its INSERT) and no migration renamed them,
+    so a still-open row under either blocks by its legacy TITLE -- a user's and the all-users scope's. Before, the
+    legacy arm required the current SOURCE and both were queued again (QUEUED_MONTHLY_TOTAL counted them twice)."""
+    con = _ai_db()
+    mid, first = _OLD_SOURCES
+    _seed_one(con, "UNKNOWN", "HIGH", "Cortex Budget concentration: OLDUSER ((all sources))", "OPEN", mid)
+    _seed_one(con, "Trexis", "CRITICAL", _SCOPE_TITLE, "OPEN", mid)
+    _seed_one(con, "ALL", "MEDIUM", "Cortex High usage: OLDERUSER ((all sources))", "IN_PROGRESS", first)
+    # a DONE row under an old name never blocks; the legacy TITLE shape under ANOTHER source never blocks either
+    _seed_one(con, "ALL", "HIGH", "Cortex Cost per request spike: DONEOLD (CLI)", "DONE", first)
+    _seed_one(con, "ALFA", "HIGH", "Cortex Budget breach: OTHERSRC ((all sources))", "OPEN", "Security decision queue")
+    ex = pd.DataFrame([_scope(3000.0), _row("OLDUSER", 400.0), _row("OLDERUSER", 300.0), _cpr("DONEOLD", 80.0),
+                       _row("OTHERSRC", 200.0)])
+    trexis = ai_exception_track_items(ex, "Trexis")
+    for stmt in (_user_sql(trexis[AI_USER_ENTITY_TYPE], actor="'VIEWER'"),
+                 _scope_sql(trexis[AI_SCOPE_ENTITY_TYPE], actor="'VIEWER'")):
+        con.execute(_to_sqlite(stmt))
+    assert [(t, k) for t, k, *_ in _new_rows(con)] == [("USER", "DONEOLD"), ("USER", "OTHERSRC")]
+
+
+def test_a_stronger_signal_raises_the_open_item_instead_of_queuing_nothing():
+    """R1-21: one item per user blocked a later, stronger signal outright (a MEDIUM 'High usage' item stayed MEDIUM
+    after the user breached the budget, so the breach never reached Critical / high or the Overview feed). The
+    escalation statement runs first: it raises an open item of this page -- entity-keyed, or a pre-v4.605 row by
+    its TITLE under any of the page's SOURCE names -- to the stronger severity, notes it in DETAIL and leaves the
+    estimate as first tracked. Never a downgrade, never another source's item, never a closed one; a re-run is a
+    no-op."""
+    con = _ai_db()
+    mid, _first = _OLD_SOURCES
+    esc = _seed_one(con, "ALFA", "MEDIUM", "Cortex High usage: ESC ((all sources))", "OPEN", AI_TRACK_SOURCE,
+                    "USER", "esc", 120.0, "first detail")
+    leg = _seed_one(con, "UNKNOWN", "MEDIUM", "Cortex High usage: LEGESC ((all sources))", "IN_PROGRESS", mid,
+                    usd=90.0, detail="legacy detail")
+    strong = _seed_one(con, "ALFA", "CRITICAL", "Cortex Budget breach: STRONG ((all sources))", "OPEN",
+                       AI_TRACK_SOURCE, "USER", "STRONG", 500.0, "s")
+    sec = _seed_one(con, "ALFA", "LOW", "Security exception", "OPEN", "Security decision queue", "USER", "ESC",
+                    None, "sec")
+    done = _seed_one(con, "ALFA", "LOW", "Cortex High usage: DONEESC ((all sources))", "DONE", AI_TRACK_SOURCE,
+                     "USER", "DONEESC", 10.0, "done")
+    ex = pd.DataFrame([_row("ESC", 900.0), _row("LEGESC", 700.0), _cpr("STRONG", 50.0), _row("DONEESC", 600.0)])
+    items = ai_exception_track_items(ex, "ALFA")[AI_USER_ENTITY_TYPE]
+    stmts = [fix_queue.ai_track_escalation_sql(items, actor_sql="'VIEWER'"), _user_sql(items, actor="'VIEWER'")]
+    assert fix_queue.ai_track_escalation_sql([], actor_sql="'VIEWER'") == ""
+
+    def state(action_id: int) -> tuple:
+        return con.execute("SELECT SEVERITY, DETAIL, ESTIMATED_USD, UPDATED_BY, UPDATED_AT, STATUS FROM ACTION_QUEUE "
+                           "WHERE ACTION_ID = ?", (action_id,)).fetchone()
+
+    for _ in range(2):                                   # the second click changes nothing
+        for stmt in stmts:
+            con.execute(_to_sqlite(stmt))
+        assert state(esc) == ("CRITICAL", "Raised from MEDIUM to CRITICAL by a later Track (Cortex Budget breach: "
+                                          "ESC ((all sources))). The estimate is the one first tracked. first detail",
+                              120.0, "VIEWER", "2026-09-29 08:00:00", "OPEN")
+        assert state(leg)[0] == "CRITICAL" and state(leg)[2] == 90.0
+        assert state(leg)[1].startswith("Raised from MEDIUM to CRITICAL by a later Track (Cortex Budget breach: "
+                                        "LEGESC ((all sources))).")
+        assert state(strong) == ("CRITICAL", "s", 500.0, "SEED", "2026-08-01 00:00:00", "OPEN")   # never lowered
+        assert state(sec) == ("LOW", "sec", None, "SEED", "2026-08-01 00:00:00", "OPEN")         # another source
+        assert state(done) == ("LOW", "done", 10.0, "SEED", "2026-08-01 00:00:00", "DONE")       # closed
+        # one item per user still holds: only DONEESC (its item is closed) is queued anew
+        assert con.execute("SELECT SOURCE_ENTITY_TYPE, SOURCE_ENTITY_KEY, SEVERITY FROM ACTION_QUEUE "
+                           "WHERE ACTION_ID > ?", (done,)).fetchall() == [("USER", "DONEESC", "CRITICAL")]
 
 
 # ---------------------------------------------------------------------------------------- the page ----
@@ -346,6 +439,9 @@ def test_chargeback_uses_the_one_track_write():
     assert "entity_type=AI_USER_ENTITY_TYPE" in body and "entity_type=AI_SCOPE_ENTITY_TYPE" in body
     assert body.count("source_scoped=True") == 2 and body.count("company_from_user=True") == 1
     assert body.count("severities=AI_TRACK_SEVERITIES") == 2 and body.count("bulk=False") == 2
+    # R1-21: the severity escalation is the FIRST statement, over the same user items
+    esc_call = "(_ESCALATE, ai_track_escalation_sql(_groups[AI_USER_ENTITY_TYPE], actor_sql=identity_sql()))"
+    assert esc_call in body and body.index(esc_call) < body.index("entity_type=AI_USER_ENTITY_TYPE")
     assert re.search(r'st\.button\("Track in Action Center", key="cortex_track_exec"\)\s*\n\s*'
                      r'and write_gate_open\("cortex_track_exec"\)\):', body)
     assert 'stamp_write("cortex_track_exec", ok_all)  # C48' in body and "st.rerun" not in body
@@ -391,7 +487,7 @@ def _render(monkeypatch, *, operator: bool = True, fail: str = "", click: bool =
     seen: dict = {"ran": [], "stamps": [], "notify": []}
 
     def fake_statement(sql, **_k):
-        kind = "AI_BUDGET" if "'AI_BUDGET'" in sql else "USER"
+        kind = ("ESCALATE" if sql.startswith("UPDATE ") else "AI_BUDGET" if "'AI_BUDGET'" in sql else "USER")
         seen["ran"].append(kind)
         return (False, f"boom-{kind}") if kind == fail else (True, "")
 
@@ -406,24 +502,62 @@ def _render(monkeypatch, *, operator: bool = True, fail: str = "", click: bool =
     return fake, seen
 
 
-def test_track_click_runs_both_statements_and_reports_a_partial_write(monkeypatch):
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def test_track_captions_and_docs_say_what_the_code_does(monkeypatch):
+    """R1-18..R1-23 wording: the page captions, RUNBOOK and FEATURE_GLOSSARY match the code -- the scope item's
+    de-overlap is per click and per Company scope (R1-19), an unmapped user stays UNKNOWN (R1-20), the stronger
+    signal raises the open item (R1-21), 'priced MONTHLY' only when priced and the price basis (R1-22), and the
+    Action Center / Proof ▸ Pipeline text knows the Chargeback & AI items and that AI_BUDGET never drills (R1-23)."""
+    fake, _seen = _render(monkeypatch, click=False)
+    caps = _flat(" ".join(t for k, t in fake.calls if k == "caption"))
+    assert "beyond the user items tracked in the same click" in caps and "overlap, so do not add them" in caps
+    assert "UNKNOWN when the user maps to none" in caps and "ALL when the user maps to none" not in caps
+    assert "all sources when the user has a budget signal" in caps and "else the sum of the spiking sources" in caps
+    assert "raises its severity when the new signal is stronger" in caps and "left as is" not in caps
+    assert "including one queued under an earlier page name" in caps
+    rb = _flat(read("RUNBOOK.md"))
+    assert "Items land UNASSIGNED, priced MONTHLY when priced (the scope item carries no estimate" in rb
+    assert "Items land UNASSIGNED, priced MONTHLY. " not in rb
+    assert "beyond the user items tracked in the same click" in rb and "an unmapped user stays UNKNOWN" in rb
+    assert "under any of the page's three SOURCE names" in rb and "the click first raises that item's severity" in rb
+    gl = _flat(read("FEATURE_GLOSSARY.md"))
+    assert "COMPANY = COALESCE(COMPANY_FOR_USER(user), 'UNKNOWN')" in gl
+    assert "NULLIF(COMPANY_FOR_USER(user), 'UNKNOWN'), 'ALL'), ESTIMATED_USD" not in gl
+    assert "'Cost & Contract > Chargeback & AI > AI users', 'Cost & Contract > AI Users'" in gl
+    assert "fix_queue.ai_track_escalation_sql raises the SEVERITY" in gl
+    intro = gl.split("### Action Center", 1)[1].split("| Metric |", 1)[0]
+    assert "Cost ▸ Chargeback & AI ▸ Track top exceptions (v4.605) writes through the same statement" in intro
+    assert "can arrive CRITICAL or HIGH" in intro and "no Entity 360 page" in intro
+    assert "when it is an Entity 360 type (an AI_BUDGET scope item does not open)" in gl
+
+
+def test_track_click_runs_the_statements_in_order_and_reports_a_partial_write(monkeypatch):
     fake, seen = _render(monkeypatch)
-    assert seen["ran"] == ["USER", "AI_BUDGET"] and seen["stamps"] == [("cortex_track_exec", True)]
+    # R1-21: raise the severity of open user items first, then insert users, then the all-users scope
+    assert seen["ran"] == ["ESCALATE", "USER", "AI_BUDGET"] and seen["stamps"] == [("cortex_track_exec", True)]
     ((ok, msg),) = seen["notify"]
-    assert ok and "idempotent" in msg
+    assert ok and "never duplicated" in msg and "raises its severity" in msg and len(msg) <= 120
     kinds = [k for k, _ in fake.calls]
-    assert kinds.count("code") == 2 and kinds.index("code") < kinds.index("button")
+    assert kinds.count("code") == 3 and kinds.index("code") < kinds.index("button")
     assert fake.calls[0] == ("expander", "Track top exceptions as work items")
     caps = "\n".join(t for k, t in fake.calls if k == "caption")
     assert "Tracks the first 10 rows above into Action Center" in caps and "for the ALFA scope" in caps
     # the user statement lands, the scope one fails: the receipt says which
     _, seen = _render(monkeypatch, fail="AI_BUDGET")
-    assert seen["ran"] == ["USER", "AI_BUDGET"] and seen["stamps"] == [("cortex_track_exec", False)]
+    assert seen["ran"] == ["ESCALATE", "USER", "AI_BUDGET"] and seen["stamps"] == [("cortex_track_exec", False)]
     assert seen["notify"] == [(False, "The user items were tracked, but the all-users budget item was not: "
                                       "boom-AI_BUDGET")]
-    # the user statement fails: stop there, the scope statement never runs
+    # the user statement fails after the escalation: stop there, and say what did land
     _, seen = _render(monkeypatch, fail="USER")
-    assert seen["ran"] == ["USER"] and seen["notify"] == [(False, "boom-USER")]
+    assert seen["ran"] == ["ESCALATE", "USER"]
+    assert seen["notify"] == [(False, "Open user items were raised where the signal is stronger, but no new item "
+                                      "was tracked: boom-USER")]
+    # the escalation fails: nothing else runs
+    _, seen = _render(monkeypatch, fail="ESCALATE")
+    assert seen["ran"] == ["ESCALATE"] and seen["notify"] == [(False, "boom-ESCALATE")]
     # a reader sees the SQL and the copy note, never a button or a write
     fake, seen = _render(monkeypatch, operator=False)
     assert seen["ran"] == [] and not any(k == "button" for k, _ in fake.calls)
