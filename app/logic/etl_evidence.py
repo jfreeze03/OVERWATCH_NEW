@@ -187,8 +187,8 @@ def task_evidence_lines(df: pd.DataFrame | None, *, task: str) -> list[EvidenceL
     """The drill's findings for ``task``, most important first.
 
     Branches, in order: (1) no CONTROL_STATUS rows; (2) no matching CALL (lag-hedged inside
-    QH_LAG_MIN, else the M_* / QUERY_TAG hint); (3) a failed CALL — an error (naming the CALL's
-    database) when the newest attempt failed, a warning when a later attempt succeeded, followed by the
+    QH_LAG_MIN, else the direct-SQL / QUERY_TAG hint); (3) a failed CALL — an error (naming the
+    CALL's database) when the newest attempt failed, a warning when a later attempt succeeded, followed by the
     newest CALL's own reading (its caught statement failures, or, for a task CONTROL_STATUS still failed,
     the Informatica side — hedged inside QH_LAG_MIN and when none of its statements were visible);
     (4) a successful CALL whose statements failed; (5) CONTROL_STATUS says failed but no Snowflake CALL
@@ -218,8 +218,8 @@ def task_evidence_lines(df: pd.DataFrame | None, *, task: str) -> list[EvidenceL
                                  f"and {_ago}. Re-check shortly.")]
         return [EvidenceLine(
             "no_data_yet", f"No Snowflake CALL of {name} ran in its window.",
-            hint=("Mapping (M_*) tasks send their SQL directly rather than as a CALL, and a task whose name "
-                  "differs from its procedure can't be matched by name. Exact matching needs the "
+            hint=("A task that sends its SQL directly instead of as a CALL (typically an M_* mapping), or "
+                  "whose name differs from its procedure, can't be matched by name. Exact matching needs the "
                   f"Informatica QUERY_TAG ({_TAG_ASK_DOC})."))]
 
     out: list[EvidenceLine] = []

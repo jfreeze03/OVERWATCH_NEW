@@ -1629,8 +1629,8 @@ def _task_evidence_drill(fqn: str, tasks, *, workflow: str = "", run_id: str = "
 # Next-Fifty #21: appended to the failure-recurrence / drift / creep captions.
 _CHANGED_RECENTLY_NOTE = (" CHANGED_RECENTLY = the latest redeploy of a stored procedure with the task's name "
                           "in the last 30 days (Change impact registry: date · database · who · verdict) — "
-                          "matched by name across databases, so check the database; M_* mapping rows "
-                          "have no proc and stay blank.")
+                          "matched by name across databases, so check the database; rows with no "
+                          "procedure of that name stay blank.")
 
 
 def _etl_proc_changes(pf: dict | None = None):

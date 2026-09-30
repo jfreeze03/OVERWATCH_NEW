@@ -148,6 +148,12 @@ def test_verdict_no_call_points_at_the_tag_ask() -> None:
     assert _levels(lines) == ["no_data_yet"]
     assert lines[0].text == "No Snowflake CALL of M_LOAD_X ran in its window."
     assert "INFORMATICA_QUERY_TAG_ASK.md" in lines[0].hint and "M_*" in lines[0].hint
+    # v4.603: hedged, not a blanket claim -- an M_* task CAN be a CALLed procedure (owner probe P3,
+    # 2026-09-29: an M_* CONTROL_STATUS task CALLs a procedure of its own name), so the hint says a task that
+    # sends its SQL directly is "typically" a mapping, never that mapping tasks never CALL.
+    assert lines[0].hint.startswith("A task that sends its SQL directly instead of as a CALL (typically an "
+                                    "M_* mapping), or whose name differs from its procedure, can't be matched")
+    assert "Mapping (M_*) tasks send their SQL directly" not in lines[0].hint
 
 
 def test_verdict_failed_call_leads_with_error() -> None:

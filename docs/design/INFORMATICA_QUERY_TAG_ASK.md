@@ -10,7 +10,9 @@ Operations ▸ Pipeline SLA ▸ Tonight ▸ *Explain a task* reads that task's S
 `QUERY_HISTORY`. Today the only link between the two is **the procedure name plus the task's time
 window**, because every `QUERY_TAG` on the nightly cycle is blank. That link:
 
-- misses mapping (`M_*`) tasks, which send their SQL directly instead of calling a procedure;
+- misses tasks that send their SQL directly instead of calling a procedure (typically mapping, `M_*`,
+  tasks; an `M_*` task that calls a procedure of the same name, such as `M_BASE_EDW_LOAD_COMPLETION_DAILY`,
+  is matched);
 - misses a task whose `CONTROL_STATUS.TASK_NAME` differs from the procedure it calls;
 - can confuse two runs of the same procedure that overlap in time (or the same procedure in another environment's
   database — OVERWATCH prefers CONTROL_STATUS's own database, but only the tag is exact);
