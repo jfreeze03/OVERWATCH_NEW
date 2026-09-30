@@ -863,13 +863,17 @@ def test_idle_and_sizing_headline_reads_only_the_handoff_source():
         "_roll = rollup_savings(_savings_opps)")
     for read_call in ("maintenance_on_unread(", "object_reads_confirm(", "savings_ledger(", "unread_handoff("):
         assert read_call not in idle, read_call                                    # zero reads here
-    assert "lever_basis(_counted, _absent, {\"UNREAD_MAINT\": _unread.note})" in idle
+    # #35 storage leg: the storage-waste lever joins the same caption
+    assert ("lever_basis(_counted, _absent, {\"UNREAD_MAINT\": _unread.note, \"STORAGE_WASTE\": _storage.note})"
+            in idle)
     assert "st.caption(md_dollars(_basis))" in idle
     assert 'st.caption(md_dollars("No open opportunities from the levers counted. " + _basis))' in idle
     joined = _joined(opt)
     assert "plug into the same rollup next" not in joined
+    # #35 storage leg: storage waste is in the total now, except the bytes no lever claims
     assert ("Also not in this total: the failed-query **Wasted spend** board (Operations), the **Serverless ROI** "
-            "panel above, and the storage-waste and automatic-clustering panels in Storage & waste.") in joined
+            "panel above, the automatic-clustering panel in Storage & waste, and the storage-waste bytes no lever "
+            "claims (fail-safe, clone-retained, and tables someone reads).") in joined
     assert "or stopping maintenance on an unread object" in joined
     assert ("an object you stopped without booking keeps counting until those 30 days roll off.") in joined
 

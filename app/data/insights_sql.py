@@ -1187,6 +1187,17 @@ def storage_reclaim(company: str = "ALL", min_gb: float = 1.0, read_days: int = 
     identifier never matched TABLE_STORAGE_METRICS' columns and the table came
     back NEVER_READ = TRUE — a "safe to archive" verdict on a table that is
     read every day. objectId is the same TABLE_ID the DML leg already joins on.
+
+    Next-Fifty #35 (storage leg; the rows feed Addressable $/mo through
+    logic.storage_waste): reads count in ANY objectDomain, the #30 confirm's rule
+    (object_reads_confirm). A materialized view or dynamic table read under its
+    own domain used to leave its table NEVER_READ; an extra match can only make a
+    table look READ (the safe direction), so the 'never read' count can only fall.
+    SHARED_DATABASE flags a table in a database granted to a SHARE (the #30 share
+    guard, the same GRANTS_TO_ROLES predicate): a consumer account's reads never
+    reach this account's access history. OLDER_THAN_90D is TRUE only for a table
+    created at least 90 days ago (a NULL created time is FALSE), so a 'no read in
+    90 days' claim spans the whole window. Same single statement, same LIMIT.
     """
     read_days = bounded_days(read_days, 90)
     min_bytes = int(max(0.1, float(min_gb)) * 1024 ** 3)
@@ -1201,9 +1212,13 @@ WITH reads AS (
     FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a,
          LATERAL FLATTEN(input => a.BASE_OBJECTS_ACCESSED) f
     WHERE a.QUERY_START_TIME >= DATEADD('day', -{read_days}, CURRENT_TIMESTAMP())
-      AND f.value:"objectDomain"::STRING = 'Table'
       AND f.value:"objectId" IS NOT NULL
     GROUP BY 1
+),
+shared_db AS (
+    SELECT DISTINCT UPPER(NAME) AS DB
+    FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES
+    WHERE GRANTED_TO = 'SHARE' AND GRANTED_ON = 'DATABASE' AND DELETED_ON IS NULL
 )
 SELECT
     m.TABLE_CATALOG AS DATABASE_NAME,
@@ -1218,7 +1233,9 @@ SELECT
     d.LAST_DML,
     r.LAST_READ,
     IFF(d.LAST_DML IS NULL, 'STALE', 'ACTIVE') AS DML_STATUS,
-    IFF(r.LAST_READ IS NULL, TRUE, FALSE)      AS NEVER_READ
+    IFF(r.LAST_READ IS NULL, TRUE, FALSE)      AS NEVER_READ,
+    (sd.DB IS NOT NULL)                        AS SHARED_DATABASE,
+    IFF(m.TABLE_CREATED <= DATEADD('day', -90, CURRENT_TIMESTAMP()), TRUE, FALSE) AS OLDER_THAN_90D
 FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_STORAGE_METRICS m
 LEFT JOIN (
     SELECT TABLE_ID, MAX(END_TIME) AS LAST_DML
@@ -1228,6 +1245,7 @@ LEFT JOIN (
 ) d ON d.TABLE_ID = m.ID
 {_RETENTION_JOIN_SQL}
 LEFT JOIN reads r ON r.TABLE_ID = m.ID
+LEFT JOIN shared_db sd ON sd.DB = UPPER(m.TABLE_CATALOG)
 WHERE {where}
 -- r36: COALESCE the clone term — RETAINED_FOR_CLONE_BYTES is NULL for never-cloned tables (the
 -- common case), and TT + FS + NULL = NULL, which Snowflake sorts NULLS-FIRST under DESC, so

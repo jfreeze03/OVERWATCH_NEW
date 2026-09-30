@@ -314,7 +314,8 @@ Admin → Settings, never in code.
   fingerprints (≥10 identical runs = caching/materialization candidates),
   query efficiency (families scanning >80% of ≥100-partition tables;
   zero-scan share trend), storage waste (Time-Travel/failsafe-heavy tables,
-  STALE = no DML in 90d); **guarded remediation** (§9); storage growth
+  STALE = no DML in 90d; tables nobody read in 90 days feed Addressable
+  $/mo as storage waste); **guarded remediation** (§9); storage growth
   movers.
 - **Savings ledger** — every claimed saving with STATE: ESTIMATED (booked
   by remediation/advisor) → VERIFIED or REJECTED by the monthly verifier
@@ -473,7 +474,8 @@ can open it, including EXECUTIVE. Old Decision Studio links, saved views and
 - **Pipeline** — what is ahead:
   - Addressable $/mo (the Cost ▸ Optimization & Savings idle-timer rollup,
     optional right-sizing, and unread maintenance confirmed in Storage & waste
-    this session) plus queued Action Center work normalized to monthly,
+    this session, and unread-table storage waste from that section's
+    storage-waste scan) plus queued Action Center work normalized to monthly,
     de-duplicated by entity. A caption names the levers counted and why any
     is missing. If the efficiency mart cannot be read (or has no metering in
     the window), the headline still totals the other counted levers and its
@@ -485,6 +487,8 @@ can open it, including EXECUTIVE. Old Decision Studio links, saved views and
     booked in another session keeps counting until the scan is re-run at
     least 5m after that booking (the Savings-ledger read that leaves booked
     objects out is cached for up to 5m): at most 1h 5m after the booking.
+    Storage waste drops out the same way, but on a storage-rate change rather
+    than a credit-rate change. A table counted by both counts once.
   - A projection whose sliders default to MEASURED adoption and realization
     ("Reset to measured"). It runs in a fragment, so slider moves cost no
     reads. Verified savings never enter it.
