@@ -27,6 +27,7 @@ from app.logic.ledger_measure import OBJECT_FINDING_TYPES, TABLE_FINDING_TYPES
 from app.logic.savings_rollup import SavingsOpportunity, rollup_savings
 from app.logic.storage_waste import (
     FLOOR_LEGEND,
+    H_STORAGE_BASIS,
     LEVER_COLUMNS,
     LEVER_LEGEND,
     STORAGE_BOOKED_TYPES,
@@ -48,11 +49,12 @@ _WHERES = ("Storage & waste", "Cost ▸ Optimization & Savings ▸ Storage & was
 
 def _row(name: str, **kw) -> dict:
     """One storage_reclaim-shaped row (after the panel's DML_STATUS -> STATUS rename): by default a live, stale,
-    never-read, unshared, 90+-day-old table with nothing to free."""
+    never-read, unshared, 90+-day-old, never-cloned (the only live table in its clone group) table with nothing to
+    free."""
     row = {"DATABASE_NAME": "DB", "SCHEMA_NAME": "S", "TABLE_NAME": name, "ACTIVE_GB": 0.0, "TIME_TRAVEL_GB": 0.0,
            "FAILSAFE_GB": 0.0, "CLONE_RETAINED_GB": 0.0, "RETENTION_DAYS": 1.0, "RETENTION_KNOWN": True,
            "LAST_DML": None, "LAST_READ": None, "STATUS": "STALE", "NEVER_READ": True, "SHARED_DATABASE": False,
-           "OLDER_THAN_90D": True}
+           "OLDER_THAN_90D": True, "CLONE_GROUP_LIVE": 1}
     row.update(kw)
     return row
 
@@ -116,10 +118,16 @@ def test_verdict_precedence_and_pricing():
 
 def test_fail_safe_clone_and_stale_time_travel_never_count():
     base = storage_waste_verdicts(_frame(), rate_tb=_RATE)
-    heavy = _frame().assign(FAILSAFE_GB=9999.0, CLONE_RETAINED_GB=8888.0)
+    heavy = _frame().assign(FAILSAFE_GB=9999.0)
     heavy.loc[heavy["TABLE_NAME"] == "STALE_T", "TIME_TRAVEL_GB"] = 7777.0      # a stale table's TT ages out itself
     out = storage_waste_verdicts(heavy, rate_tb=_RATE)
     assert list(out["LEVER"]) == _LEVERS and _ests(out) == _ests(base)
+    # clone-retained bytes are never added to an estimate; on a stale table they make it 'Check clones' (unpriced,
+    # v4.605 review r1: a drop would free nothing a clone still references), and a written table's retention cut
+    # is unchanged by them (Time Travel on a written table is still released)
+    cloned = storage_waste_verdicts(_frame().assign(CLONE_RETAINED_GB=8888.0), rate_tb=_RATE)
+    assert list(cloned["LEVER"]) == [*_LEVERS[:5], "Check clones", *_LEVERS[6:]]
+    assert _ests(cloned) == [None, None, None, None, None, None, 1.84, None, None, None]
     fs_only = storage_waste_verdicts(pd.DataFrame([_row("FS_T", STATUS="ACTIVE", RETENTION_DAYS=30.0,
                                                         TIME_TRAVEL_GB=0.0, FAILSAFE_GB=500.0)]), rate_tb=_RATE)
     assert list(fs_only["LEVER"]) == ["Nothing to reclaim"] and math.isnan(fs_only.loc[0, "EST_MONTHLY_USD"])
@@ -127,6 +135,41 @@ def test_fail_safe_clone_and_stale_time_travel_never_count():
     stale = storage_waste_verdicts(pd.DataFrame([_row("S_T", ACTIVE_GB=2048.0, TIME_TRAVEL_GB=4096.0,
                                                       RETENTION_DAYS=90.0)]), rate_tb=_RATE)
     assert list(stale["LEVER"]) == ["Archive or drop"] and stale.loc[0, "EST_MONTHLY_USD"] == 46.0
+
+
+def test_a_stale_table_sharing_storage_with_a_clone_is_never_priced():
+    """v4.605 review r1: a source owns the micro-partitions its clones share, so dropping it frees nothing a clone
+    still references (they become retained-for-clone bytes of the dropped table). A stale, unread table in a clone
+    group with another live table, or one retaining bytes for a clone, is 'Check clones' with no estimate; an
+    unknown group count is unpriced too (unknown counts as shared, like SHARED_DATABASE)."""
+    def lever(**kw):
+        kw.setdefault("ACTIVE_GB", 2048.0)
+        out = storage_waste_verdicts(pd.DataFrame([_row("T", **kw)]), rate_tb=_RATE)
+        est = out.loc[0, "EST_MONTHLY_USD"]
+        return out.loc[0, "LEVER"], None if math.isnan(est) else est
+
+    assert lever() == ("Archive or drop", 46.0)                                 # never cloned: priced
+    assert lever(CLONE_RETAINED_GB=4096.0) == ("Check clones", None)            # the reviewer's scratch case
+    assert lever(CLONE_GROUP_LIVE=2) == ("Check clones", None)                  # an untouched clone source: 0 retained
+    assert lever(CLONE_GROUP_LIVE="3") == ("Check clones", None)                # the driver's text spelling
+    for unknown in (None, float("nan"), pd.NA, "CLONE_GROUP_LIVE_0"):
+        assert lever(CLONE_GROUP_LIVE=unknown) == ("Check clones", None), unknown
+    assert lever(CLONE_GROUP_LIVE=1.0, CLONE_RETAINED_GB=0.0) == ("Archive or drop", 46.0)
+    # the earlier rules still win (first match): read, shared-out, too new
+    assert lever(CLONE_GROUP_LIVE=2, NEVER_READ=False)[0] == "Keep"
+    assert lever(CLONE_GROUP_LIVE=2, SHARED_DATABASE=True)[0] == "Check share consumers"
+    assert lever(CLONE_GROUP_LIVE=2, OLDER_THAN_90D=False)[0] == "Newer than 90 days"
+    # a written table's retention cut does not depend on clones (its Time Travel is still released)
+    assert lever(STATUS="ACTIVE", CLONE_GROUP_LIVE=5, CLONE_RETAINED_GB=10.0, TIME_TRAVEL_GB=102.4,
+                 RETENTION_DAYS=5.0, ACTIVE_GB=500.0) == ("Cut retention", 1.84)
+    # never counted: not a lever row, never an opportunity
+    frame = pd.DataFrame([_row("C_T", ACTIVE_GB=1024.0, CLONE_GROUP_LIVE=2), _row("P_T", ACTIVE_GB=1024.0)])
+    out = storage_waste_verdicts(frame, rate_tb=_RATE)
+    assert list(lever_rows(out)["TABLE_NAME"]) == ["P_T"]
+    assert [o.target for o in savings_rollup.storage_waste_opportunities(out)] == ["DB.S.P_T"]
+    # a frame without the group count (a builder that dropped it) confirms nothing
+    assert set(storage_waste_verdicts(frame.drop(columns="CLONE_GROUP_LIVE"), rate_tb=_RATE)["LEVER"]) == {
+        "Unconfirmed"}
 
 
 def test_without_read_evidence_every_row_is_unconfirmed():
@@ -139,8 +182,8 @@ def test_without_read_evidence_every_row_is_unconfirmed():
         assert list(out["LEVER"]) == ["Unconfirmed", "Unconfirmed"]
         assert out["EST_MONTHLY_USD"].isna().all() and lever_rows(out).empty
     # one missing evidence column is enough
-    assert set(storage_waste_verdicts(_frame().drop(columns="OLDER_THAN_90D"), rate_tb=_RATE)["LEVER"]) == {
-        "Unconfirmed"}
+    for col in ("OLDER_THAN_90D", "CLONE_GROUP_LIVE"):
+        assert set(storage_waste_verdicts(_frame().drop(columns=col), rate_tb=_RATE)["LEVER"]) == {"Unconfirmed"}
     for empty in (None, pd.DataFrame(), pd.DataFrame(columns=["TABLE_NAME"])):
         out = storage_waste_verdicts(empty, rate_tb=_RATE)
         assert out.empty and set(LEVER_COLUMNS) <= set(out.columns)
@@ -157,11 +200,26 @@ def test_without_read_evidence_every_row_is_unconfirmed():
 
 
 def test_reads_unavailable_note_by_kind():
-    visible = ("ACCESS_HISTORY is not visible to this app (it needs Enterprise edition and IMPORTED PRIVILEGES on "
-               "the SNOWFLAKE database)")
-    assert reads_unavailable_note("absent") == visible
-    assert reads_unavailable_note("sql", "Unsupported feature 'ACCESS_HISTORY'") == visible
-    assert reads_unavailable_note("", "This view requires ENTERPRISE edition") == visible
+    ah = ("ACCESS_HISTORY is not visible to this app (it needs Enterprise edition and IMPORTED PRIVILEGES on the "
+          "SNOWFLAKE database)")
+    grants = ("GRANTS_TO_ROLES (the share guard) is not visible to this app (it needs IMPORTED PRIVILEGES on the "
+              "SNOWFLAKE database)")
+    either = ("ACCESS_HISTORY or GRANTS_TO_ROLES (the share guard) is not visible to this app (both need IMPORTED "
+              "PRIVILEGES on the SNOWFLAKE database; ACCESS_HISTORY also needs Enterprise edition)")
+    # v4.605 review r1: the scan's one statement reads GRANTS_TO_ROLES (the share guard) as well as ACCESS_HISTORY,
+    # so a not-visible failure names the object Snowflake's error names, and both when it names none
+    assert reads_unavailable_note("absent") == either
+    assert reads_unavailable_note("absent", "SQL compilation error:\nObject 'SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY' "
+                                            "does not exist or not authorized.") == ah
+    assert reads_unavailable_note("absent", "SQL compilation error: Object 'SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES' "
+                                            "does not exist or not authorized.") == grants
+    assert reads_unavailable_note("ABSENT", "object '\"SNOWFLAKE\".\"ACCOUNT_USAGE\".\"grants_to_roles\"' does not "
+                                            "exist or not authorized") == grants
+    # another object: the error itself, never a guess
+    other = "SQL compilation error: Object 'SNOWFLAKE.ACCOUNT_USAGE.TABLE_DML_HISTORY' does not exist or not authorized."
+    assert reads_unavailable_note("absent", other) == "the access-history read failed: " + other
+    assert reads_unavailable_note("sql", "Unsupported feature 'ACCESS_HISTORY'") == ah
+    assert reads_unavailable_note("", "This view requires ENTERPRISE edition") == ah
     assert reads_unavailable_note("timeout", "Statement reached its statement or warehouse timeout of 180 "
                                              "second(s).") == "the 90-day access-history read timed out"
     assert reads_unavailable_note(" TIMEOUT ") == "the 90-day access-history read timed out"
@@ -171,7 +229,7 @@ def test_reads_unavailable_note_by_kind():
     assert reads_unavailable_note(None, None) == "the access-history read failed"
     long = reads_unavailable_note("sql", "e" * 1000)
     assert long == "the access-history read failed: " + "e" * 300
-    for kind, err in (("absent", ""), ("timeout", ""), ("sql", "boom"), ("", "")):
+    for kind, err in (("absent", ""), ("absent", other), ("timeout", ""), ("sql", "boom"), ("", "")):
         assert "Database filter" not in reads_unavailable_note(kind, err)       # it never narrows this scan
 
 
@@ -371,20 +429,31 @@ def test_storage_handoff_note_wording():
         "The Savings ledger could not be read, so unread tables are not added to Addressable $/mo (tables already "
         "booked could not be left out).")
     assert LEVER_LEGEND == (
-        "LEVER says whether a table counts in Addressable $/mo (Idle & sizing, Proof ▸ Pipeline). Archive or drop: no "
-        "DML and no read in 90 days; priced on its active bytes, which a drop frees once they age out of Time Travel "
-        "and fail-safe. Cut retention: still written but not read in 90 days; priced on the Time Travel a 1-day "
-        "retention would release (Time Travel × (retention − 1) ÷ retention, the retention control's own estimate). "
-        "Keep: read in 90 days. Check share consumers: its database is shared out, and a consumer account's reads "
-        "never reach this account's access history. Newer than 90 days: too new for a 90-day no-read claim. Object "
-        "gone: no live table under that ID (dropped or replaced). Nothing to reclaim: no active or Time Travel bytes "
-        "to free. Fail-safe (a fixed 7-day tail) and clone-retained bytes (a clone still holds them) never count. "
-        "Confirm with the owner before dropping anything: reads from a replica in another account, and reads rarer "
-        "than every 90 days, are invisible here.")
+        "LEVER says whether a table qualifies for Addressable $/mo (Idle & sizing, Proof ▸ Pipeline); tables already "
+        "booked on the Savings ledger are then left out (the line at the end of this panel counts them). Archive or "
+        "drop: no DML and no read in 90 days, and no clone shares its storage; priced on its active bytes, which a "
+        "drop frees once they age out of Time Travel and fail-safe. Cut retention: still written but not read in 90 "
+        "days; priced on the Time Travel a 1-day retention would release (Time Travel × (retention − 1) ÷ "
+        "retention, the retention control's own estimate). That is a monthly run-rate only while the table keeps "
+        "being written as it was over its retention window (a one-off rewrite ages out of Time Travel on its own), "
+        "and it assumes no account-level MIN_DATA_RETENTION_TIME_IN_DAYS above 1 day (not checked here): a higher "
+        "floor keeps that Time Travel whatever the table's own setting. Keep: read in 90 days. Check share "
+        "consumers: its database is shared out, and a consumer account's reads never reach this account's access "
+        "history. Newer than 90 days: too new for a 90-day no-read claim. Check clones: a stale, unread table that "
+        "shares storage with a clone (another live table in its clone group, or bytes it retains for a clone); not "
+        "priced, because dropping it frees nothing a clone still references. Object gone: no live table under that "
+        "ID (dropped or replaced). Nothing to reclaim: nothing a drop or a 1-day retention would free (a written "
+        "table already at 1 day or less, or with no Time Travel; a stale table with no active bytes, whose Time "
+        "Travel ages out on its own). Fail-safe (a fixed 7-day tail) and clone-retained bytes (a clone still holds "
+        "them) never count. Confirm with the owner before dropping anything: reads from a replica in another "
+        "account, and reads rarer than every 90 days, are invisible here.")
+    assert H_STORAGE_BASIS == (
+        "a stale table's active bytes, or the Time Travel a 1-day retention would release on a table still written "
+        "(a monthly run-rate only while it keeps being written), at your storage rate")
     assert FLOOR_LEGEND == (
         "The scan ranks tables by retention bytes, and a table with no DML for 90 days has little or no Time Travel "
         "or fail-safe left, so most stale tables fall outside the top 50: Archive or drop is a floor.")
-    for text in (LEVER_LEGEND, FLOOR_LEGEND, savings_rollup.N_S_FLOOR, savings_rollup.R_S_RATE):
+    for text in (LEVER_LEGEND, FLOOR_LEGEND, H_STORAGE_BASIS, savings_rollup.N_S_FLOOR, savings_rollup.R_S_RATE):
         assert not re.search(r"\d+(?:\.\d+)?s\b", text), text                  # no raw seconds anywhere
 
 
@@ -516,8 +585,23 @@ def test_storage_reclaim_carries_the_lever_evidence():
     assert ("ORDER BY (m.TIME_TRAVEL_BYTES + m.FAILSAFE_BYTES + COALESCE(m.RETAINED_FOR_CLONE_BYTES, 0)) DESC"
             in sql)
     tree = sqlglot.parse_one(sql, read="snowflake")
-    assert tree.named_selects[-4:] == ["DML_STATUS", "NEVER_READ", "SHARED_DATABASE", "OLDER_THAN_90D"]
+    assert tree.named_selects[-5:] == ["DML_STATUS", "NEVER_READ", "SHARED_DATABASE", "OLDER_THAN_90D",
+                                       "CLONE_GROUP_LIVE"]
     assert len(sqlglot.parse(sql, read="snowflake")) == 1
+    # v4.605 review r1: the live clone-group size, counted over EVERY live table in the account -- before, and
+    # independent of, the Company scope and the LIMIT (a clone can sit in another Company's database, or outside
+    # the top 50) -- and joined on the row's CLONE_GROUP_ID
+    cte = ("clone_groups AS (\n    SELECT CLONE_GROUP_ID, COUNT(*) AS CLONE_GROUP_LIVE\n"
+           "    FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_STORAGE_METRICS\n"
+           "    WHERE DELETED = FALSE AND CLONE_GROUP_ID IS NOT NULL\n    GROUP BY 1\n)")
+    assert cte in sql and sql.index(cte) < sql.index("\nSELECT\n    m.TABLE_CATALOG AS DATABASE_NAME")
+    assert "LEFT JOIN clone_groups cg ON cg.CLONE_GROUP_ID = m.CLONE_GROUP_ID" in sql
+    assert "    cg.CLONE_GROUP_LIVE\nFROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_STORAGE_METRICS m" in sql
+    head = sql.split(cte, 1)[0] + cte                                           # every CTE, up to the group count
+    assert insights_sql.storage_reclaim("ALL").split(cte, 1)[0] + cte == head   # the Company never reaches them
+    assert "ALFA" not in head and "ALFA" in sql.split(cte, 1)[1]
+    groups = next(c for c in tree.find_all(sqlglot.exp.CTE) if c.alias == "clone_groups").this
+    assert groups.args.get("limit") is None and "TABLE_CATALOG" not in groups.sql(dialect="snowflake")
     # the fallbacks are unchanged (V124 parity): neither new column
     for fallback in (insights_sql.storage_waste("ALFA"), mart_sql.table_storage_waste_mart("ALFA")):
         assert "SHARED_DATABASE" not in fallback and "OLDER_THAN_90D" not in fallback
@@ -554,7 +638,7 @@ def test_storage_waste_panel_publishes_the_handoff_source():
     clean = block.index("status=STORAGE_CLEAN")
     assert block.index("if waste.ok and waste.empty:") < clean < block.index('elif guard(waste, ""):')
     confirmed = block.index("status=STORAGE_CONFIRMED if _sv_ok else STORAGE_NO_READS")
-    assert block.index('stamp_write("waste", ok)') < confirmed                  # after any retention change
+    assert block.index("stmt_w = remediation.retention_fix(") < confirmed       # after the retention control
     tail = block.split("status=STORAGE_CONFIRMED if _sv_ok else STORAGE_NO_READS", 1)[1]
     assert "\n            else:\n" in tail and "status=STORAGE_SCAN_FAILED" in tail.split("\n            else:\n", 1)[1]
     assert "storage_handoff_note(st.session_state[STORAGE_HANDOFF_KEY])" in block
@@ -574,10 +658,23 @@ def test_storage_waste_panel_publishes_the_handoff_source():
     assert ("booked_objects(_st_led.df, finding_types=STORAGE_BOOKED_TYPES)\n"
             "                                  if _st_led.ok and not _st_led.truncated else None") in led
     assert block.index("_st_booked: frozenset[str] | None = frozenset()") < block.index(gate)
-    # a retention change this run leaves its table out at once (notify() does not rerun)
-    after = block.split('stamp_write("waste", ok)  # C48\n', 1)[1]
-    assert after.lstrip().startswith("if ok and _st_booked is not None:\n")
-    assert "_st_booked = _st_booked | {object_key(" in after.split("notify(", 1)[0]
+    # v4.605 review r1: the retention control is review only. The executor's allow-list refuses ALTER TABLE (and
+    # must stay that way), so its old Execute button could only log a FAILED row and its 'left out at once' branch
+    # never ran: no write, no latch, no booked-set union; the ALTER is shown for a worksheet
+    control = block.split("stmt_w = remediation.retention_fix(", 1)[1].split(
+        "st.session_state[STORAGE_HANDOFF_KEY] = storage_handoff(", 1)[0]
+    assert 'st.code(stmt_w, language="sql")' in control
+    for gone in ("confirm_gate(", "write_gate_open(", "stamp_write(", "execute_statement(", "notify(",
+                 "REMEDIATION_LOG", "SAVINGS_LEDGER", "_st_booked"):
+        assert gone not in control, gone
+    assert "execute_statement(stmt_w" not in opt and 'key="waste"' not in opt
+    assert ('"Review only: OVERWATCH never runs this ALTER (ALTER TABLE is outside the in-app executor\'s '
+            'allow-list). Confirm with the table\'s owner, then run it in a worksheet. The table keeps counting in '
+            'Addressable $/mo until the storage-waste scan is re-run after account usage shows the change."'
+            ) in _joined(control)
+    assert "estimate assumes no account-level MIN_DATA_RETENTION_TIME_IN_DAYS above the retention you set" in (
+        _joined(control))
+    assert "left out at once" not in block and "_st_booked = _st_booked |" not in block
     # the degraded caption is worded by the error kind (this account is Enterprise), never a blanket edition claim
     assert "reads_unavailable_note(waste.error_kind, waste.error)" in block
     assert block.index("_reads_note = ") < block.index("waste = run_mart_first(")
@@ -588,7 +685,8 @@ def test_storage_waste_panel_publishes_the_handoff_source():
     # never cleared (the toggle resets on every revisit), and no new ACCOUNT_USAGE read or write latch
     assert "pop(STORAGE_HANDOFF_KEY" not in opt and "del st.session_state[STORAGE_HANDOFF_KEY]" not in opt
     assert opt.count("ACCOUNT_USAGE") == 6
-    assert len(re.findall(r"write_gate_open\(", opt)) == len(re.findall(r"stamp_write\(", opt)) == 7
+    # 7 -> 6 in the 2026-09-30 hygiene release review: the retention control's never-succeeding write is gone
+    assert len(re.findall(r"write_gate_open\(", opt)) == len(re.findall(r"stamp_write\(", opt)) == 6
 
 
 def test_headlines_read_only_the_storage_handoff():
@@ -607,7 +705,7 @@ def test_headlines_read_only_the_storage_handoff():
     joined = _joined(idle)
     assert ("Double-counts dropped from the total: idle and resize on the same warehouse, or more than one of unread "
             "maintenance and storage waste on the same table (the larger counts once).") in joined
-    assert "and storage waste (the table's current bytes at your storage rate) are ESTIMATED" in joined
+    assert 'and storage waste (" + H_STORAGE_BASIS + ") are ESTIMATED' in joined
     assert ("A table you dropped or re-set in a worksheet keeps counting until the storage-waste scan is re-run "
             "after account usage shows the change.") in joined
     ds = read("app/ui/decision_studio.py")
@@ -633,26 +731,32 @@ def test_headlines_read_only_the_storage_handoff():
         assert line.rstrip().endswith('"STORAGE_USD_PER_TB_MONTH"), DEFAULT_STORAGE_USD_PER_TB_MONTH)'), line
         assert "23.0" not in line, line
     joined_ds = _joined(pipe)
-    assert ("and storage waste only when that section's storage-waste scan ran this session for this Company (the "
-            "current bytes of tables nobody read in 90 days, at your storage rate). Both are ESTIMATED, \" + H_BOOKED "
-            "+ \"; a table counted by both counts once (the larger wins).") in joined_ds
+    assert ("and storage waste only when that section's storage-waste scan ran this session for this Company "
+            "(tables nobody read in 90 days: \" + H_STORAGE_BASIS\n                         + \"). Both are "
+            "ESTIMATED, \" + H_BOOKED + \"; a table counted by both counts once (the larger wins).") in joined_ds
     shell = read("app/ui/pages/decision_studio.py")
     assert "except storage waste, which is the tables' current bytes;" in _joined(shell)
 
 
-def test_only_the_waste_block_books_retention_in_app():
+def test_no_in_app_write_books_retention():
     """The storage handoff keeps the booked set read when the scan ran, like the unread one. That is safe only while
-    no in-app write can book a RETENTION row except the storage-waste retention control, which leaves its table out
-    in the same run. Lock the premise: 'RETENTION' is spelled as a SQL literal only inside that control's latch, the
-    ledger's finding-type basis is just RETENTION, and the app's one ledger REJECT writer never touches it."""
+    no in-app write can book a RETENTION row in the same run. v4.605 review r1: the storage-waste retention control
+    is review only (the executor's allow-list refuses ALTER TABLE, so its Execute button never succeeded and its
+    booking never ran), so no in-app write books RETENTION at all. Lock the premise: 'RETENTION' is spelled as a
+    SQL literal nowhere in app/, the ledger's finding-type basis is just RETENTION, and the app's one ledger REJECT
+    writer never touches it."""
     spelled = sorted({str(py.relative_to(ROOT).as_posix()) for py in (ROOT / "app").rglob("*.py")
                       if "'RETENTION'" in py.read_text(encoding="utf-8")})
-    assert spelled == ["app/ui/pages/cost_parts/optimize.py"], spelled
-    opt = read("app/ui/pages/cost_parts/optimize.py")
-    start, end = opt.index('write_gate_open("waste")'), opt.index('stamp_write("waste", ok)')
-    hits = [m.start() for m in re.finditer("'RETENTION'", opt)]
-    assert hits and all(start < h < end for h in hits), hits
+    assert spelled == [], spelled
     assert sorted(TABLE_FINDING_TYPES) == ["RETENTION"]
     twin = mart_sql._ledger_twin_select()
     reject_in = twin.split("AND UPPER(TRIM(m.FINDING_TYPE)) IN (", 1)[1].split(")", 1)[0]
     assert "'RETENTION'" not in reject_in and reject_in
+
+
+def test_the_executor_still_refuses_the_retention_alter():
+    """The control stays review only because the allow-list stays narrow: never widen it for this statement."""
+    from app.core.query import _statement_allowed
+    from app.logic import remediation
+    ok, why = _statement_allowed(remediation.retention_fix("DB", "S", "T", 1))
+    assert not ok and "outside the operator allow-list" in why

@@ -778,11 +778,13 @@ def test_optimize_wiring_source():
     # house budgets: counts unchanged except the one new latched write
     assert opt.count("ACCOUNT_USAGE") == 6        # 5 -> 6 at v4.604: the #38 cluster-cap read's source label
     assert opt.count("methodology_note(") == 4
-    assert len(re.findall(r"write_gate_open\(", opt)) == len(re.findall(r"stamp_write\(", opt)) == 7
+    # 7 -> 6 latched writes and 3 -> 2 REMEDIATION_LOG inserts in the 2026-09-30 hygiene release review: the
+    # storage-waste retention control is review only (the allow-list refuses ALTER TABLE, so it never succeeded)
+    assert len(re.findall(r"write_gate_open\(", opt)) == len(re.findall(r"stamp_write\(", opt)) == 6
     assert len(re.findall(r"st\.(?:info|success)\(", opt)) <= 4
-    assert opt.count("INSERT INTO {core_object('REMEDIATION_LOG')}") == 3
-    # the block sits above the storage-waste latch the source-slice locks index from
-    assert opt.index('key="cost_unread_maint_toggle"') < opt.index('write_gate_open("waste")')
+    assert opt.count("INSERT INTO {core_object('REMEDIATION_LOG')}") == 2
+    # the block sits above the storage-waste scan the source-slice locks index from
+    assert opt.index('key="cost_unread_maint_toggle"') < opt.index('key="cost_waste_toggle"')
     # degraded honesty: a failed confirm says so and offers no SQL; a stale ledger warns
     assert "ledger-only shortlist, not suspend candidates; no SQL." in branch
     # PR C review C8 / C18: the reason is worded by the error kind (never a blanket edition claim), and the

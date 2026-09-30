@@ -214,7 +214,9 @@ def test_alert_audit_inserts_stamp_the_viewer():
 
 def test_remediation_log_inserts_stamp_the_viewer():
     expected = {"app/ui/pages/alerts.py": 1,
-                "app/ui/pages/cost_parts/optimize.py": 3,
+                # 3 -> 2 in the 2026-09-30 hygiene release review: the storage-waste retention control is
+                # review only (the executor's allow-list refuses ALTER TABLE, so its audit row was always FAILED)
+                "app/ui/pages/cost_parts/optimize.py": 2,
                 "app/ui/pages/operations.py": 2}
     for rel, n in expected.items():
         src = _read(rel)

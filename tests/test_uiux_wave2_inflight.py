@@ -24,7 +24,7 @@ def _src(rel: str) -> str:
 
 # every file with operator-write click blocks -> expected latched-block count
 LATCHED_FILES = {
-    "app/ui/pages/cost_parts/optimize.py": 7,   # +1 Next-Fifty #5 twin cleanup (ledger_twin_reject); +1 Next-Fifty #30 unread-maintenance ESTIMATED booking
+    "app/ui/pages/cost_parts/optimize.py": 6,   # +1 Next-Fifty #5 twin cleanup (ledger_twin_reject); +1 Next-Fifty #30 unread-maintenance ESTIMATED booking; -1 the 2026-09-30 hygiene release review: the storage-waste retention control is review only (the allow-list refuses ALTER TABLE, so its write never succeeded)
     "app/ui/pages/operations.py": 5,
     "app/ui/pages/alerts.py": 6,
     "app/ui/workbench.py": 5,   # v4.597: -1 the retired Action Center experiment-start expander
@@ -137,13 +137,12 @@ def test_query_layer_writes_paint_the_inflight_state():
 
 
 def test_high_risk_ledger_blocks_stamp_after_the_conditional_booking():
-    # the three optimize.py blocks book conditional SAVINGS_LEDGER rows — the
-    # stamp must come AFTER the booking (all writes covered), before notify
+    # the two optimize.py blocks book conditional SAVINGS_LEDGER rows — the
+    # stamp must come AFTER the booking (all writes covered), before notify.
+    # The third (the storage-waste retention control, "waste") is review only since the 2026-09-30 hygiene
+    # release review: the allow-list refuses ALTER TABLE, so its write never succeeded and its booking never ran.
     src = _src("app/ui/pages/cost_parts/optimize.py")
-    idx = src.index('write_gate_open("waste")')
-    block = src[idx:idx + 2600]
-    assert 'stamp_write("waste", ok)' in block
-    assert block.index("if ok and est_w > 0:") < block.index('stamp_write("waste"')
+    assert 'write_gate_open("waste")' not in src and 'stamp_write("waste"' not in src
     # remed: the ledger booking is now conditional on the lever NOT being autobooked (Next-Fifty #5)
     idx = src.index('write_gate_open("remed")')
     block = src[idx:idx + 2600]
