@@ -108,8 +108,10 @@ COLUMN_HELP = {
                        "1/days-in-month of the monthly rate); not billed metering.",
     "OTHER_METERED_USD": "Metering with no company key (reader accounts, replication and others): "
                          "account-level only.",
-    "SHARE_OF_TOTAL_PCT": "This row's dollars as a share of the all-in total (billed metering plus estimated "
-                          "storage) for the same days.",
+    "SHARE_OF_TOTAL_PCT": "This row's dollars as a share of the spend before the cloud-services adjustment "
+                          "(billed metering plus estimated storage, with the adjustment added back) for the "
+                          "same days: the company rows and the unattributed row add up to 100%; the adjustment "
+                          "row has none.",
     "TRACKED": "Action Center status of this task or warehouse row: Tracked (open), Done or Dismissed within "
                "90 days, Untracked, or Unknown when the status read failed. Alerts are owned through "
                "Acknowledge and the incident flow, so they show no status.",

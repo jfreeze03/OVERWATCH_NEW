@@ -12,6 +12,11 @@ so the rows always add up to the all-in total:
   and the unattributed remainder (billed metering + estimated storage minus everything
   with a key).
 
+Shares are on one basis: the spend BEFORE the cloud-services adjustment (the all-in total
+with the adjustment added back = the company rows + the unattributed row). The company rows
+are metering before the adjustment, so dividing them by the after-adjustment all-in total
+could read over 100% (R1-12); the adjustment row carries no share.
+
 Nothing is allocated by a share. Input is the one long frame
 ``app.data.chargeback_sql.company_allin_showback`` returns (LINE_KIND rows). Pure: no
 ``app.data`` import and no clock; the builder fixes the span in SQL.
@@ -21,7 +26,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 
 import pandas as pd
 
@@ -45,7 +50,7 @@ STORAGE_TIERS: tuple[str, ...] = ("TABLE", "STAGE", "FAILSAFE", "HYBRID", "ARCHI
 
 FRAME_COLUMNS: tuple[str, ...] = (
     "LINE_KIND", "COMPANY", "SERVICE_TYPE", "CREDITS", "CREDITS_ADJUSTMENT", "TIB_MO",
-    "FIRST_DAY", "LAST_DAY", "DAYS_IN_SPAN",
+    "FIRST_DAY", "LAST_DAY", "DAYS_IN_SPAN", "LOADED_AT",
 )
 TABLE_COLUMNS: tuple[str, ...] = (
     "COMPANY", "WAREHOUSE_USD", "SERVERLESS_USD", "AI_USD", "OTHER_METERED_USD",
@@ -90,6 +95,11 @@ _BUCKET_COLUMN = {"WAREHOUSE": "WAREHOUSE_USD", "SERVERLESS": "SERVERLESS_USD", 
 _KEYED_FAMILY_COLUMN = {"Warehouse": "WAREHOUSE_USD", "Serverless": "SERVERLESS_USD", "AI / Cortex": "AI_USD"}
 # a negative family residual smaller than this is rounding noise, not worth a note
 _NEGATIVE_NOTE_FLOOR_USD = 1.0
+# R1-13: the object-cost and Cortex Code facts reload in their own daily runs, after the 06:45 CT
+# metering load has already moved yesterday into the span. A fact whose last load (the COVERAGE
+# row's LOADED_AT, MAX(LOAD_TS): Central wall time) ran before its newest span day ended, plus
+# this allowance for the ACCOUNT_USAGE views' latency (up to ~3 h), holds that day only in part.
+LOAD_LATENCY_HOURS = 3
 
 
 def storage_tier_rates(settings: Mapping[str, object]) -> dict[str, float]:
@@ -148,6 +158,27 @@ def _as_date(value: object) -> date | None:
     return ts.date()
 
 
+def _as_timestamp(value: object) -> datetime | None:
+    """A LOAD_TS cell as a naive datetime (the builder sends TIMESTAMP_NTZ Central wall time; an
+    aware value keeps its wall time, which the connector gives in the session's Central zone);
+    NULL / NaT / junk -> None (never raises)."""
+    try:
+        ts = pd.to_datetime(value, errors="coerce")
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if ts is None or not isinstance(ts, pd.Timestamp) or pd.isna(ts):
+        return None
+    if ts.tzinfo is not None:
+        ts = ts.tz_localize(None)
+    return ts.to_pydatetime()
+
+
+def loaded_before_day_complete(loaded_at: datetime, day: date) -> bool:
+    """True when a load at ``loaded_at`` ran before ``day`` had fully landed: before the day's
+    end (Central) plus LOAD_LATENCY_HOURS. A load then holds that day only in part."""
+    return loaded_at < datetime.combine(day + timedelta(days=1), time()) + timedelta(hours=LOAD_LATENCY_HOURS)
+
+
 def _is_null(value: object) -> bool:
     try:
         return bool(pd.isna(value))
@@ -178,16 +209,36 @@ def _row_dates(frame: pd.DataFrame, kind: str, service: str | None = None) -> tu
 
 
 def coverage_notes(summary: Mapping[str, object],
-                   coverage: Mapping[str, tuple[date | None, date | None]]) -> list[str]:
-    """The named coverage gaps for a span (house rule: a late or stale source is said, and
-    its dollars stay on the unattributed row). ``coverage`` maps a fact table to its
-    ledger-wide (first, last) day. Empty when there is no span to compare against."""
+                   coverage: Mapping[str, tuple[date | None, date | None]],
+                   loaded: Mapping[str, datetime | None] | None = None) -> list[str]:
+    """The named coverage gaps for a span (house rule: a late, stale or partly loaded source
+    is said, and its dollars stay on the unattributed row). ``coverage`` maps a fact table to
+    its ledger-wide (first, last) day; ``loaded`` maps a daily-reloaded keyed fact to its last
+    load time (Central). Empty when there is no span to compare against."""
+    return _coverage_review(summary, coverage, loaded)[0]
+
+
+def keyed_gaps(summary: Mapping[str, object],
+               coverage: Mapping[str, tuple[date | None, date | None]],
+               loaded: Mapping[str, datetime | None] | None = None) -> list[str]:
+    """The keyed facts (in line order) that do not cover the whole span in full: no rows, a
+    late start, an early end, a newest span day loaded only in part, or storage on fewer days
+    than the span. The same comparisons as coverage_notes. While any is listed, an empty
+    company scope is unverified, never a clean verdict (R1-14)."""
+    return _coverage_review(summary, coverage, loaded)[1]
+
+
+def _coverage_review(summary: Mapping[str, object],
+                     coverage: Mapping[str, tuple[date | None, date | None]],
+                     loaded: Mapping[str, datetime | None] | None) -> tuple[list[str], list[str]]:
     notes: list[str] = []
+    gaps: list[str] = []
+    loaded = loaded or {}
     span_first = summary.get("span_first")
     span_last = summary.get("span_last")
     span_days = int(_num(summary.get("span_days")))
     if not isinstance(span_first, date) or not isinstance(span_last, date) or span_days <= 0:
-        return notes
+        return notes, gaps
     window_first = summary.get("window_first")
     window_last = summary.get("window_last")
     metering_first = summary.get("metering_first")
@@ -225,13 +276,31 @@ def coverage_notes(summary: Mapping[str, object],
         if not isinstance(first, date) or not isinstance(last, date):
             notes.append(f"{line_cap}: {table} has no rows yet, so this line is empty and any {line} spend "
                          f"counts as unattributed.")
+            gaps.append(table)
             continue
         if first > lo:
             notes.append(f"{line_cap}: {table} starts {day_label(first)}; any {line} spend before then counts as "
                          f"unattributed.")
+            gaps.append(table)
+        # the fact's newest day inside the span: loaded before it was complete -> held only in part
+        newest = min(last, hi)
+        loaded_at = loaded.get(table)
+        partial = (isinstance(loaded_at, datetime) and newest >= lo
+                   and loaded_before_day_complete(loaded_at, newest))
         if last < hi:
-            notes.append(f"{line_cap}: {table}'s newest row is {day_label(last)}; any {line} spend after it counts "
-                         f"as unattributed.")
+            if partial:
+                notes.append(f"{line_cap}: {table}'s newest row is {day_label(last)}, loaded before that day was "
+                             f"complete; the rest of that day's {line} spend and any after it counts as "
+                             f"unattributed.")
+            else:
+                notes.append(f"{line_cap}: {table}'s newest row is {day_label(last)}; any {line} spend after it "
+                             f"counts as unattributed.")
+            gaps.append(table)
+        elif partial:
+            notes.append(f"{line_cap}: {table}'s rows for {day_label(newest)} were loaded before that day was "
+                         f"complete, so part of that day's {line} spend counts as unattributed until the loader "
+                         f"runs again.")
+            gaps.append(table)
 
     if storage_days == 0 < span_days:
         notes.append("Storage: FACT_STORAGE_ACCOUNT_DAILY has no rows for these days, so storage is in neither "
@@ -241,7 +310,10 @@ def coverage_notes(summary: Mapping[str, object],
         notes.append(f"Storage covers {storage_days} of the span's {span_days} days ({day_label(storage_first)} – "
                      f"{day_label(storage_last)}); storage on the other days is in neither the company rows nor "
                      f"the all-in total.")
-    return notes
+    if storage_days < span_days:
+        # the per-database storage legs ride the account-storage days, so a missing day is unverified too
+        gaps.append("FACT_STORAGE_ACCOUNT_DAILY")
+    return notes, list(dict.fromkeys(gaps))
 
 
 def _base_summary(company: str, scoped: bool) -> dict[str, object]:
@@ -252,25 +324,26 @@ def _base_summary(company: str, scoped: bool) -> dict[str, object]:
         "storage_first": None, "storage_last": None, "storage_days": 0,
         "metering_first": None, "metering_last": None,
         "billed_credit_usd": 0.0, "storage_est_usd": 0.0, "allin_total_usd": 0.0,
-        "company_usd": 0.0, "adjustment_usd": 0.0, "unattributed_usd": None,
+        "company_usd": 0.0, "adjustment_usd": 0.0, "unattributed_usd": None, "share_basis_usd": 0.0,
         "company_share_pct": None, "span_label": None, "stall_day": None, "missing": [],
     }
 
 
 def _result(state: str, summary: dict[str, object], *, table: pd.DataFrame | None = None,
-            breakdown: pd.DataFrame | None = None, notes: list[str] | None = None) -> dict[str, object]:
+            breakdown: pd.DataFrame | None = None, notes: list[str] | None = None,
+            gaps: list[str] | None = None) -> dict[str, object]:
     summary["state"] = state
     return {"state": state,
             "table": table if table is not None else _empty_table(),
             "breakdown": breakdown if breakdown is not None else _empty_breakdown(),
-            "summary": summary, "notes": list(notes or [])}
+            "summary": summary, "notes": list(notes or []), "keyed_gaps": list(gaps or [])}
 
 
 def company_showback(frame: pd.DataFrame | None, *, rate: float, ai_rate: float,
                      storage_rates: Mapping[str, float], company: str = "ALL") -> dict[str, object]:
     """Company rows + account-level rows that tie out to billed metering + estimated storage.
 
-    Returns ``{state, table, breakdown, summary, notes}``; ``state`` is ``ok``, ``shape`` (the
+    Returns ``{state, table, breakdown, summary, notes, keyed_gaps}``; ``state`` is ``ok``, ``shape`` (the
     frame lacks the contract columns or its WINDOW row), ``no_ledger`` (daily metering has
     never loaded) or ``no_basis`` (no complete metered day in the Window). Never raises."""
     company = str(company or "ALL")
@@ -315,6 +388,8 @@ def _company_showback(frame: pd.DataFrame | None, *, rate: float, ai_rate: float
         df[col] = parsed.fillna(0.0)
     unreadable.extend(col for col in ("FIRST_DAY", "LAST_DAY")
                       if any(_as_date(v) is None for v in df[col] if not _is_null(v)))
+    if any(_as_timestamp(v) is None for v in df["LOADED_AT"] if not _is_null(v)):
+        unreadable.append("LOADED_AT")
     if unreadable:
         summary["missing"] = [f"{c} (unreadable values)" for c in unreadable]
         return _result("shape", summary)
@@ -325,8 +400,10 @@ def _company_showback(frame: pd.DataFrame | None, *, rate: float, ai_rate: float
     span_first, span_last, span_days = _row_dates(df, "SPAN")
     storage_first, storage_last, storage_days = _row_dates(df, "STORAGE_SPAN")
     coverage: dict[str, tuple[date | None, date | None]] = {}
+    loaded: dict[str, datetime | None] = {}
     for _, r in df[df["LINE_KIND"] == "COVERAGE"].iterrows():
         coverage[str(r["SERVICE_TYPE"]).upper()] = (_as_date(r["FIRST_DAY"]), _as_date(r["LAST_DAY"]))
+        loaded[str(r["SERVICE_TYPE"]).upper()] = _as_timestamp(r["LOADED_AT"])
     metering_first, metering_last = coverage.get("FACT_METERING_DAILY", (None, None))
     if span_first is None or span_last is None:
         span_days = 0
@@ -343,9 +420,9 @@ def _company_showback(frame: pd.DataFrame | None, *, rate: float, ai_rate: float
                       and metering_last < window_last - timedelta(days=1) else None),
     })
     if metering_first is None:
-        return _result("no_ledger", summary, notes=coverage_notes(summary, coverage))
+        return _result("no_ledger", summary, notes=coverage_notes(summary, coverage, loaded))
     if span_days == 0:
-        return _result("no_basis", summary, notes=coverage_notes(summary, coverage))
+        return _result("no_basis", summary, notes=coverage_notes(summary, coverage, loaded))
 
     # --- metering: billed dollars + the cloud-services adjustment, by family and bucket ---
     billed_cat: dict[str, float] = {}
@@ -394,6 +471,9 @@ def _company_showback(frame: pd.DataFrame | None, *, rate: float, ai_rate: float
     billed_total = sum(billed_cat.values())
     adj_total = sum(adj_cat.values())
     allin = billed_total + storage_est
+    # R1-12: the share basis is the spend before the cloud-services adjustment (= company rows +
+    # the unattributed row), the same basis as the company rows' own warehouse dollars
+    gross = allin - adj_total
     co_sum = {col: float(companies[col].sum()) if not companies.empty else 0.0
               for col in ("WAREHOUSE_USD", "SERVERLESS_USD", "AI_USD", "STORAGE_EST_USD", "TOTAL_USD")}
 
@@ -437,15 +517,18 @@ def _company_showback(frame: pd.DataFrame | None, *, rate: float, ai_rate: float
     table = table.reindex(columns=list(TABLE_COLUMNS))
     for col in TABLE_COLUMNS[1:]:
         table[col] = pd.to_numeric(table[col], errors="coerce")
-    table["SHARE_OF_TOTAL_PCT"] = (table["TOTAL_USD"] / allin * 100.0) if allin > 0 else math.nan
+    table["SHARE_OF_TOTAL_PCT"] = (table["TOTAL_USD"] / gross * 100.0) if gross > 0 else math.nan
+    # the adjustment is a credit on the whole bill, outside the share basis: no share, never a negative %
+    table.loc[table["COMPANY"] == ADJUSTMENT_ROW, "SHARE_OF_TOTAL_PCT"] = math.nan
     table = table.reset_index(drop=True)
 
     summary.update({
         "billed_credit_usd": billed_total, "storage_est_usd": storage_est, "allin_total_usd": allin,
         "company_usd": co_sum["TOTAL_USD"], "adjustment_usd": adj_total, "unattributed_usd": unattributed,
-        "company_share_pct": (co_sum["TOTAL_USD"] / allin * 100.0) if allin > 0 else None,
+        "share_basis_usd": gross,
+        "company_share_pct": (co_sum["TOTAL_USD"] / gross * 100.0) if gross > 0 else None,
     })
-    notes = coverage_notes(summary, coverage)
+    notes, gaps = _coverage_review(summary, coverage, loaded)
     for _, r in breakdown.iterrows():
         u = _num(r["UNATTRIBUTED_USD"])
         if u < -_NEGATIVE_NOTE_FLOOR_USD:
@@ -453,4 +536,4 @@ def _company_showback(frame: pd.DataFrame | None, *, rate: float, ai_rate: float
                          f"{format_usd(-u)} in this span, so its unattributed amount is negative. The two "
                          f"sides come from different Snowflake views with different day boundaries, so they "
                          f"need not match exactly.")
-    return _result("ok", summary, table=table, breakdown=breakdown, notes=notes)
+    return _result("ok", summary, table=table, breakdown=breakdown, notes=notes, gaps=gaps)

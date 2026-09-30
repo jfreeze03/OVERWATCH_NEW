@@ -10,7 +10,7 @@ from the real first/last days; the non-ok states never raise and never read as a
 from __future__ import annotations
 
 import math
-from datetime import date
+from datetime import date, datetime
 
 import pandas as pd
 import pytest
@@ -47,18 +47,21 @@ _COVERAGE = {
 }
 
 
-def _row(kind, company=None, service=None, credits=None, adj=None, tib=None, first=None, last=None, n=None):
+def _row(kind, company=None, service=None, credits=None, adj=None, tib=None, first=None, last=None, n=None,
+         loaded=None):
     return {"LINE_KIND": kind, "COMPANY": company, "SERVICE_TYPE": service, "CREDITS": credits,
             "CREDITS_ADJUSTMENT": adj, "TIB_MO": tib,
             "FIRST_DAY": pd.Timestamp(first) if first else pd.NaT,
-            "LAST_DAY": pd.Timestamp(last) if last else pd.NaT, "DAYS_IN_SPAN": n}
+            "LAST_DAY": pd.Timestamp(last) if last else pd.NaT, "DAYS_IN_SPAN": n,
+            "LOADED_AT": pd.Timestamp(loaded) if loaded else pd.NaT}
 
 
 def _synthetic_frame(*, window=("2026-08-31", "2026-09-29"), span=("2026-08-31", "2026-09-29", 30),
                      storage_span=("2026-08-31", "2026-09-29", 30), metering=None, warehouse=None,
                      serverless=None, coco=None, storage_db=None, storage_acct=None, coverage=None,
-                     only: str | None = None) -> pd.DataFrame:
-    """The builder's long frame. ``only`` keeps the keyed legs of one company (a scoped read)."""
+                     loaded=None, only: str | None = None) -> pd.DataFrame:
+    """The builder's long frame. ``only`` keeps the keyed legs of one company (a scoped read);
+    ``loaded`` maps a COVERAGE table to its LOADED_AT (the builder's MAX(LOAD_TS))."""
     rows = [_row("WINDOW", first=window[0], last=window[1]),
             _row("SPAN", first=span[0], last=span[1], n=span[2]),
             _row("STORAGE_SPAN", first=storage_span[0], last=storage_span[1], n=storage_span[2])]
@@ -75,7 +78,7 @@ def _synthetic_frame(*, window=("2026-08-31", "2026-09-29"), span=("2026-08-31",
         rows += [_row("STORAGE_ACCT", service=tier, tib=t)
                  for tier, t in (storage_acct if storage_acct is not None else _STORAGE_ACCT).items()]
     for table, (first, last) in (coverage if coverage is not None else _COVERAGE).items():
-        rows.append(_row("COVERAGE", service=table, first=first, last=last))
+        rows.append(_row("COVERAGE", service=table, first=first, last=last, loaded=(loaded or {}).get(table)))
     return pd.DataFrame(rows, columns=list(showback.FRAME_COLUMNS))
 
 
@@ -104,7 +107,13 @@ def test_rows_tie_out_to_the_all_in_total_exactly():
     assert (s["company_usd"] + s["adjustment_usd"] + s["unattributed_usd"]
             == pytest.approx(s["allin_total_usd"]))
     assert list(out["table"].columns) == list(showback.TABLE_COLUMNS)
-    assert out["table"]["SHARE_OF_TOTAL_PCT"].sum() == pytest.approx(100.0)
+    # R1-12: shares are of the spend before the cloud-services adjustment (company rows + unattributed),
+    # so those rows sum to 100% and the adjustment row carries no share
+    t = _by_company(out)
+    assert s["share_basis_usd"] == pytest.approx(s["allin_total_usd"] - s["adjustment_usd"])
+    assert s["share_basis_usd"] == pytest.approx(s["company_usd"] + s["unattributed_usd"])
+    assert math.isnan(t.loc[showback.ADJUSTMENT_ROW, "SHARE_OF_TOTAL_PCT"])
+    assert t["SHARE_OF_TOTAL_PCT"].sum(skipna=True) == pytest.approx(100.0)
 
 
 def test_each_column_sums_to_its_billed_family():
@@ -151,7 +160,11 @@ def test_unknown_is_a_company_row_and_counts_in_the_share():
     s = out["summary"]
     company_total = out["table"]["TOTAL_USD"].iloc[:3].sum()
     assert s["company_usd"] == pytest.approx(company_total)
-    assert s["company_share_pct"] == pytest.approx(company_total / s["allin_total_usd"] * 100.0)
+    assert s["company_share_pct"] == pytest.approx(company_total / s["share_basis_usd"] * 100.0)
+    # the KPI is the company rows' own table shares added up, and the unattributed row is its complement
+    assert s["company_share_pct"] == pytest.approx(out["table"]["SHARE_OF_TOTAL_PCT"].iloc[:3].sum())
+    assert (s["company_share_pct"] + _by_company(out).loc[showback.UNATTRIBUTED_ROW, "SHARE_OF_TOTAL_PCT"]
+            == pytest.approx(100.0))
 
 
 def test_unknown_stays_last_among_companies_even_when_largest():
@@ -197,7 +210,14 @@ def test_company_scope_returns_only_that_company_and_share_of_account_total():
     assert s["scoped"] is True and s["unattributed_usd"] is None
     assert s["company_usd"] == pytest.approx(alfa_total)
     assert s["allin_total_usd"] == pytest.approx(full["summary"]["allin_total_usd"])
-    assert s["company_share_pct"] == pytest.approx(alfa_total / s["allin_total_usd"] * 100.0)
+    # the scoped basis is the whole account's (metering is never scoped), the same as the ALL view's
+    assert s["share_basis_usd"] == pytest.approx(full["summary"]["share_basis_usd"])
+    assert s["company_share_pct"] == pytest.approx(alfa_total / full["summary"]["share_basis_usd"] * 100.0)
+    # R1-23: the displayed (and exported) table column is the account share too, never the company's own 100%
+    assert out["table"].loc[0, "SHARE_OF_TOTAL_PCT"] == pytest.approx(s["company_share_pct"])
+    assert out["table"].loc[0, "SHARE_OF_TOTAL_PCT"] == pytest.approx(
+        _by_company(full).loc["ALFA", "SHARE_OF_TOTAL_PCT"])
+    assert out["table"].loc[0, "SHARE_OF_TOTAL_PCT"] < 100.0
     # a stray other-company row (never expected from a scoped read) is still dropped
     stray = _run(_synthetic_frame(), company="ALFA")
     assert stray["table"]["COMPANY"].tolist() == ["ALFA"]
@@ -381,3 +401,148 @@ def test_metering_bucket_routes_every_category():
 def test_attributable_categories_not_widened():
     # the metering lens stays warehouse-only; the showback reads the other facts' keys instead
     assert cost_coverage._ATTRIBUTABLE_CATEGORIES == ("Warehouse",)
+
+
+# ---------------------------------------------------------------------------
+# v4.604.0 review fixes: R1-12 (share basis), R1-13 (partly loaded newest day), R1-14 (keyed gaps)
+# ---------------------------------------------------------------------------
+
+def _cs_capped_frame(**kw) -> pd.DataFrame:
+    """R1-12's reproduction: cloud services at the 10%-of-compute cap on a CS-heavy account, so the
+    company warehouse credits (metering before the adjustment) exceed billed warehouse metering."""
+    return _synthetic_frame(
+        metering=[("WAREHOUSE_METERING", 4080.0, -420.0), ("SERVERLESS_TASK", 300.0, 0.0),
+                  ("AI_SERVICES", 820.0, 0.0)],
+        warehouse={"ALFA": 3000.0, "Trexis": 1200.0, "UNKNOWN": 250.0},
+        serverless=[("ALFA", "SERVERLESS_TASK", 150.0), ("Trexis", "SERVERLESS_TASK", 100.0)],
+        coco=[("ALFA", 500.0), ("Trexis", 220.0)], **kw)
+
+
+def test_share_never_passes_100_when_the_adjustment_exceeds_the_unattributed_row():
+    out = _run(_cs_capped_frame())
+    s = out["summary"]
+    assert out["state"] == "ok"
+    # the scenario: the no-key remainder is smaller than the adjustment credit
+    assert 0 < s["unattributed_usd"] < -s["adjustment_usd"]
+    assert s["company_usd"] > s["allin_total_usd"]        # company rows / all-in would read 105%
+    assert 0 < s["company_share_pct"] <= 100.0
+    gross = s["allin_total_usd"] - s["adjustment_usd"]
+    assert s["share_basis_usd"] == pytest.approx(gross)
+    # "Company-attributed share" is the true complement of "Unattributed (no company key)"
+    assert s["company_share_pct"] + s["unattributed_usd"] / gross * 100.0 == pytest.approx(100.0)
+    t = _by_company(out)
+    assert math.isnan(t.loc[showback.ADJUSTMENT_ROW, "SHARE_OF_TOTAL_PCT"])
+    shares = t["SHARE_OF_TOTAL_PCT"].dropna()
+    assert shares.sum() == pytest.approx(100.0) and (shares.between(0.0, 100.0)).all()
+    # the dollars and the tie-out stay on the billed basis
+    assert t["TOTAL_USD"].sum() == pytest.approx(s["allin_total_usd"])
+    assert s["company_usd"] + s["adjustment_usd"] + s["unattributed_usd"] == pytest.approx(s["allin_total_usd"])
+    assert not out["notes"]                                # every family residual is positive: nothing to say
+    # a scoped read of the same account divides by the same basis
+    alfa = _run(_cs_capped_frame(only="ALFA"), company="ALFA")
+    assert alfa["summary"]["share_basis_usd"] == pytest.approx(gross)
+    assert alfa["summary"]["company_share_pct"] == pytest.approx(t.loc["ALFA", "SHARE_OF_TOTAL_PCT"])
+    assert alfa["table"].loc[0, "SHARE_OF_TOTAL_PCT"] == pytest.approx(alfa["summary"]["company_share_pct"])
+
+
+def test_no_share_without_a_positive_basis():
+    zero = _run(_synthetic_frame(metering=[("WAREHOUSE_METERING", 0.0, 0.0)], warehouse={}, serverless=[],
+                                 coco=[], storage_db={}, storage_span=(None, None, 0)))
+    assert zero["state"] == "ok"
+    assert zero["summary"]["share_basis_usd"] == 0 and zero["summary"]["company_share_pct"] is None
+    assert zero["table"]["SHARE_OF_TOTAL_PCT"].isna().all()
+
+
+_MORNING_BEFORE = {"FACT_OBJECT_COST_DAILY": "2026-09-29 07:05:00", "FACT_AI_USAGE_DAILY": "2026-09-29 07:40:00"}
+_NEXT_MORNING = {"FACT_OBJECT_COST_DAILY": "2026-09-30 07:05:00", "FACT_AI_USAGE_DAILY": "2026-09-30 07:40:00"}
+
+
+def test_partly_loaded_newest_day_is_named_after_the_metering_load():
+    # R1-13: at 06:45 CT on Sep 30 the metering load moves Sep 29 into the span, while the object-cost
+    # and Cortex Code facts still hold only the part of Sep 29 they loaded on the morning of Sep 29
+    out = _run(_synthetic_frame(loaded=_MORNING_BEFORE))
+    assert ("Serverless: FACT_OBJECT_COST_DAILY's rows for Sep 29, 2026 were loaded before that day was "
+            "complete, so part of that day's serverless spend counts as unattributed until the loader runs "
+            "again.") in out["notes"]
+    assert ("Cortex Code: FACT_AI_USAGE_DAILY's rows for Sep 29, 2026 were loaded before that day was "
+            "complete, so part of that day's Cortex Code spend counts as unattributed until the loader runs "
+            "again.") in out["notes"]
+    assert out["keyed_gaps"] == ["FACT_OBJECT_COST_DAILY", "FACT_AI_USAGE_DAILY"]
+    # once the loaders have run after the day ended, the day is complete: nothing to say
+    done = _run(_synthetic_frame(loaded=_NEXT_MORNING))
+    assert done["notes"] == [] and done["keyed_gaps"] == []
+    # no load time on the row (the warehouse and storage facts): never a partial note
+    assert _run(_synthetic_frame())["notes"] == []
+
+
+def test_partial_threshold_is_the_day_end_plus_the_view_latency():
+    assert showback.LOAD_LATENCY_HOURS == 3
+    day = date(2026, 9, 29)
+    assert showback.loaded_before_day_complete(datetime(2026, 9, 29, 23, 59), day)
+    assert showback.loaded_before_day_complete(datetime(2026, 9, 30, 2, 59), day)
+    assert not showback.loaded_before_day_complete(datetime(2026, 9, 30, 3, 0), day)
+    late = _run(_synthetic_frame(loaded={"FACT_OBJECT_COST_DAILY": "2026-09-30 02:59:00"}))
+    assert late["keyed_gaps"] == ["FACT_OBJECT_COST_DAILY"]
+    on_time = _run(_synthetic_frame(loaded={"FACT_OBJECT_COST_DAILY": "2026-09-30 03:00:00"}))
+    assert on_time["keyed_gaps"] == [] and on_time["notes"] == []
+    # an aware value keeps its wall time (the connector hands LTZ back in the session's Central zone)
+    aware = _run(_synthetic_frame(loaded={"FACT_OBJECT_COST_DAILY": "2026-09-29 07:05:00-05:00"}))
+    assert aware["keyed_gaps"] == ["FACT_OBJECT_COST_DAILY"]
+
+
+def test_frozen_loader_newest_day_loaded_in_part_says_on_and_after():
+    # the V139-style freeze: the object-cost fact stopped on the morning of Sep 9
+    cov = dict(_COVERAGE)
+    cov["FACT_OBJECT_COST_DAILY"] = ("2026-06-30", "2026-09-09")
+    frozen = _run(_synthetic_frame(coverage=cov, loaded={"FACT_OBJECT_COST_DAILY": "2026-09-09 07:05:00"}))
+    assert ("Serverless: FACT_OBJECT_COST_DAILY's newest row is Sep 9, 2026, loaded before that day was "
+            "complete; the rest of that day's serverless spend and any after it counts as unattributed."
+            in frozen["notes"])
+    assert not any("any serverless spend after it" in n for n in frozen["notes"])
+    assert frozen["keyed_gaps"] == ["FACT_OBJECT_COST_DAILY"]
+    # a freeze whose last day did complete keeps the 'after it' wording
+    cleanly = _run(_synthetic_frame(coverage=cov, loaded={"FACT_OBJECT_COST_DAILY": "2026-09-10 07:05:00"}))
+    assert ("Serverless: FACT_OBJECT_COST_DAILY's newest row is Sep 9, 2026; any serverless spend after it "
+            "counts as unattributed.") in cleanly["notes"]
+    assert cleanly["keyed_gaps"] == ["FACT_OBJECT_COST_DAILY"]
+    # a newest day before the span is outside it: the partial wording never applies
+    cov["FACT_OBJECT_COST_DAILY"] = ("2026-06-30", "2026-07-15")
+    before = _run(_synthetic_frame(coverage=cov, loaded={"FACT_OBJECT_COST_DAILY": "2026-07-15 07:05:00"}))
+    assert ("Serverless: FACT_OBJECT_COST_DAILY's newest row is Jul 15, 2026; any serverless spend after it "
+            "counts as unattributed.") in before["notes"]
+
+
+def test_unreadable_load_time_is_shape_never_a_clean_read():
+    bad = _synthetic_frame()
+    bad["LOADED_AT"] = bad["LOADED_AT"].astype(object)
+    bad.loc[bad["SERVICE_TYPE"] == "FACT_OBJECT_COST_DAILY", "LOADED_AT"] = "not-a-time"
+    out = _run(bad)
+    assert out["state"] == "shape" and out["summary"]["missing"] == ["LOADED_AT (unreadable values)"]
+
+
+def test_keyed_gaps_list_every_source_that_does_not_cover_the_span():
+    # R1-14: the list an empty company scope checks before it may read verified-clean
+    assert _run(_synthetic_frame())["keyed_gaps"] == []
+    cov = dict(_COVERAGE)
+    cov["FACT_WAREHOUSE_DAILY"] = (None, None)                       # never loaded
+    cov["FACT_OBJECT_COST_DAILY"] = ("2026-06-30", "2026-09-10")     # stale
+    cov["FACT_AI_USAGE_DAILY"] = ("2026-09-05", "2026-09-29")        # starts inside the span
+    out = _run(_synthetic_frame(coverage=cov))
+    assert out["keyed_gaps"] == ["FACT_WAREHOUSE_DAILY", "FACT_OBJECT_COST_DAILY", "FACT_AI_USAGE_DAILY"]
+    # the gaps are exactly the lines the notes name
+    for table in out["keyed_gaps"]:
+        assert any(table in n for n in out["notes"]), table
+    # storage on fewer days than the span leaves the per-database storage line unverified too
+    short = _run(_synthetic_frame(storage_span=("2026-09-10", "2026-09-29", 20)))
+    assert short["keyed_gaps"] == ["FACT_STORAGE_ACCOUNT_DAILY"]
+    none = _run(_synthetic_frame(storage_span=(None, None, 0)))
+    assert none["keyed_gaps"] == ["FACT_STORAGE_ACCOUNT_DAILY"]
+    stale_db = dict(_COVERAGE)
+    stale_db["FACT_STORAGE_DAILY"] = ("2025-01-01", "2026-09-20")
+    assert _run(_synthetic_frame(coverage=stale_db))["keyed_gaps"] == ["FACT_STORAGE_DAILY"]
+    # the same list under a company scope, and an empty list (never a missing key) in the non-ok states
+    scoped = _run(_synthetic_frame(only="UNKNOWN", coverage=cov), company="UNKNOWN")
+    assert scoped["keyed_gaps"] == out["keyed_gaps"]
+    assert _run(None)["keyed_gaps"] == []
+    # the public helper agrees: with no coverage rows at all, every keyed line is a gap
+    assert showback.keyed_gaps(out["summary"], {}) == [t for t, _, _ in showback._SOURCE_LINES]
