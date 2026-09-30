@@ -10,13 +10,13 @@ Adversarially reviewed before release.
 - **Cost: unread-table storage joins Addressable $/mo (#35 storage leg).**
   - Storage & waste LEVER per table. When the storage-waste scan has read evidence, each table gets a LEVER and an ESTIMATED EST_MONTHLY_USD at STORAGE_USD_PER_TB_MONTH. The new pure module is logic/storage_waste.py, and the frame keeps the same rows in the same order.
     - Archive or drop: a table with no DML and no read in 90 days, priced on its active bytes. A stale table that shares storage with a clone (another live table in its clone group, or bytes it retains for a clone) is 'Check clones' and unpriced instead, because dropping it frees nothing a clone still references. storage_reclaim gains CLONE_GROUP_LIVE, counted over every live table before the Company scope and the LIMIT.
-    - Cut retention: a table still written but not read in 90 days, priced on the Time Travel a 1-day retention would release. This is the retention control's own formula. It is a monthly run-rate only while the table keeps being written, and it assumes no account-level MIN_DATA_RETENTION_TIME_IN_DAYS above 1 day (not checked). The legend, both Addressable $/mo help texts and the retention control say so.
+    - Cut retention: a table still written but not read in 90 days, priced on the Time Travel a 1-day retention would release. This is the retention control's own formula. It is a monthly run-rate only while the table keeps being written, and it assumes no account-level MIN_DATA_RETENTION_TIME_IN_DAYS above 1 day (not checked). The legend and both Addressable $/mo help texts state both assumptions; the retention control states the MIN_DATA_RETENTION_TIME_IN_DAYS one.
     - A table counts only if it is live, never read in 90 days, at least 90 days old and not in a shared-out database.
   - A new 'Reclaimable $/mo (unread tables)' KPI sums the two levers; tables already booked on the Savings ledger are in it but left out of Addressable $/mo. A legend explains each LEVER. When the top-50 frame is full, the KPI reads 'top 50, ≥' and a floor legend is shown, because most stale tables rank outside the top 50.
   - Read evidence and the degraded caption:
     - storage_reclaim now counts reads in any access-history object domain, the #30 confirm's rule. This errs on the safe side: a materialized view or dynamic table read no longer leaves its table looking never-read. As a result, 'Stale AND never read (90d)' can only fall. This is intended, not a regression.
     - The same statement gains a share guard (SHARED_DATABASE, from GRANTS_TO_ROLES) and OLDER_THAN_90D.
-    - The degraded (DML-only) caption now says why read evidence is missing, by error kind, instead of '(ACCESS_HISTORY needs Enterprise edition)'. This account is Enterprise, so a timeout now says it timed out. A not-visible error names the object Snowflake's error names: ACCESS_HISTORY, or GRANTS_TO_ROLES for the share guard, or both when it names neither.
+    - The degraded (DML-only) caption now says why read evidence is missing, by error kind, instead of '(ACCESS_HISTORY needs Enterprise edition)'. This account is Enterprise, so a timeout now says it timed out. A not-visible error says ACCESS_HISTORY or GRANTS_TO_ROLES (the share guard), or another ACCOUNT_USAGE view the scan reads, is not visible, with the SNOWFLAKE grant (IMPORTED PRIVILEGES; ACCESS_HISTORY also needs Enterprise edition): run() keeps no object name, so it cannot say which. An 'Insufficient privileges' error shows the error itself.
   - Idle & sizing and Proof ▸ Pipeline count storage waste exactly like unread maintenance. They read it from a session handoff and make zero reads. The handoff is limited to the same Company, the same cache scope and 1h, and is dropped on a storage-rate change. The 'Levers counted / Not counted' line names storage waste and says why it is missing:
     - not checked this session;
     - no read evidence;
@@ -53,7 +53,7 @@ Adversarially reviewed before release.
     - The auto-suspend provisioning note ("2h 30m/day provisioning").
     - Admin ▸ Performance: the Cortex per-statement ceiling reads "1m 30s".
     - The sidebar refresh note, which now uses the shared humanize_age ("just now" under 45 s, then "5m ago").
-    - The Alerts PERF_QUEUED_MINUTES re-check: its label is now "queued time today", and the value and threshold are humanized ("2h 25m vs threshold 30m"). When rounding makes both sides read the same, the sentence names the exact gap ("1h 30m vs threshold 1h 30m, 54s over") or says the value is at the threshold; this applies to the Still over, Was clear and Condition clear messages and the prefilled resolve note. The other rules keep two decimals.
+    - The Alerts PERF_QUEUED_MINUTES re-check: its label is now "queued time today", and the value and threshold are humanized ("2h 25m vs threshold 30m"). When rounding makes both sides read the same, the sentence names the gap ("1h 30m vs threshold 1h 30m, 54s over"; a gap of 59.5s or more is capped at "59s", never "1m" beside two identical readings) or says the value is at the threshold; this applies to the Still over, Was clear and Condition clear messages and the prefilled resolve note. The other rules keep two decimals.
   - Kept on purpose: Snowflake parameter values (AUTO_SUSPEND, STATEMENT_TIMEOUT_IN_SECONDS) stay in the parameter's own seconds. They match the prefilled ALTER, SHOW WAREHOUSES and SP_ALERT_SCAN_DAILY [24]'s "AUTO_SUSPEND 600s -> 60s" title. On this account the multi-cluster warehouses run AUTO_SUSPEND 300, and WH_ALFA_ADMIN and the Streamlit notebook warehouse run 60 (2026-09-29 probe).
   - Fix: Explain a task no longer raises OverflowError when END_AGE_MIN is NULL. It now returns its post-lag reading.
   - The AI grounding prompt's stat keys carry their unit: elapsed_sec=, compile_sec=, queued_sec=.
@@ -61,36 +61,41 @@ Adversarially reviewed before release.
   - Byte locks moved deliberately, each with a comment saying why: test_cold_start_split (_LEGACY_QUEUED), test_cluster_cap_gate (the hedged text and the _ADD_CLUSTER_ALLOWED key), test_etl_evidence, test_v4148_ops_cost, test_insights, test_logic_hunt2, test_ops_hunt and test_statement_params.
 - **A failed probe read shows the kind of failure.**
   - A failed probe read now shows the kind of failure. A new helper, app.core.result.is_setup_absence, keeps
-    needs_setup for a true absence only: the object is missing or not granted ('absent'), or the function does not
-    exist ('unknown_function'). An "Insufficient privileges" error now counts as 'absent' too, the same way as "does
-    not exist or not authorized": both already carried the same setup advice, which guard() shows as needs_setup, and
-    a probe read logs neither. A missing column (schema drift), a timeout or any other failure renders a red
-    "unavailable" state with the error in its detail expander. query.run(probe=True) still does not log a missing
-    column (its expected-absence tuple is unchanged), so that expander is the only record, and no new message points
-    at the Admin error log. Sites fixed (A1-A16): Security > Access password-deprecation readiness and the admin
-    network-policy panel (the reported #9 bug, where a missing column read as "the policy-reference view isn't
-    readable"; the lumped _PROBE_ABSENT tuple is gone, and "The MFA-gap list above still applies" is dropped);
-    Security object-tag coverage; the Security decision queue, which now shows the V075 setup state only when both
-    reads are absent (a failed exception-queue read is "unavailable", no longer "did not resolve"; a failed coverage-
-    contract read next to a readable queue is "unavailable" with its error, every domain score shows --, "coverage is
-    not complete" is never shown, and the Security verdict adds "domain coverage could not be read, so no domain is
-    scored"); the change-risk breakdown; Operations query insights; Spend native ANOMALY_INSIGHTS and account storage
-    tiers; Optimization object cost; Unit costs pattern costs; Admin Flyway ledger and AI reconciliation; Entity 360
-    blast radius (the declared-lineage read and both ACCESS_HISTORY consumer reads: the edition or role is named only
-    for a true absence, a timeout says it timed out, and any other failure shows "unavailable" with its error while
-    the declared half still renders); Proof's consumer-reach line on the hidden data-products board; Contract org
-    balance (a readable but empty view now shows "Org balance view returned no usable rows" instead of "isn't visible
-    to this role"); the CoCo token panel shows its TOKENS_GRANULAR note only when that is the missing column, and any
-    other missing column is "schema drift". Admin > Setup progress: a checklist row whose read fails for a reason
-    other than absence is Unknown. Its fix says Retry for a timeout or any other failure; for a missing column it
-    names the schema drift instead (apply the missing migrations or redeploy, because a retry will not clear it). A
-    separate "N setup item(s) could not be checked" line lists each failed read's error in its Error detail. Unknown
-    never counts as pending. An empty routes read now says "0 enabled route(s)" (this account: 1). The AST ratchet in
-    tests/test_probe_absence_split.py counts a needs_setup branch as split only when a setup-absence check on that
-    read's own error_kind controls it (a lumped tuple, `!=` or a negated check no longer counts; the real v4.604 shape
-    is now flagged), and its allowlist of non-probe sites is exact: file, variable, function and callee, one site
-    each. Owner check after deploy: open Security > Access and toggle "Check admin network-policy coverage". It should
-    render KPIs on this account (S1b lists one USER-level and one ACCOUNT-level network policy).
+    needs_setup for a true absence only: the object is missing or not granted ('absent'), the role lacks a privilege
+    on it ('privilege', an "Insufficient privileges" error), or the function does not exist ('unknown_function'). A
+    privilege error carries the same setup advice as "does not exist or not authorized", which guard() shows as
+    needs_setup, so every panel shows needs_setup for it too. But it proves the object exists, so it is never read as
+    a legitimate zero: a probe read logs it, the Overview health score counts it as a failed read (Incomplete), the
+    canary FAILs it instead of GAP, Admin > Setup progress marks the row Unknown with a re-apply-the-grants FIX (never
+    "nothing applied yet"), and a failed Security coverage-contract read shows "unavailable". A missing column (schema
+    drift), a timeout or any other failure renders a red "unavailable" state with the error in its detail expander.
+    query.run(probe=True) still does not log a missing column (its expected-absence tuple is unchanged), so that
+    expander is the only record, and no new message points at the Admin error log. Sites fixed (A1-A16): Security >
+    Access password-deprecation readiness and the admin network-policy panel (the reported #9 bug, where a missing
+    column read as "the policy-reference view isn't readable"; the lumped _PROBE_ABSENT tuple is gone, and "The MFA-
+    gap list above still applies" is dropped); Security object-tag coverage; the Security decision queue, which now
+    shows the V075 setup state only when both reads are absent (a failed exception-queue read is "unavailable", no
+    longer "did not resolve"; a failed coverage-contract read next to a readable queue is "unavailable" with its
+    error, every domain score shows --, "coverage is not complete" is never shown, and the Security verdict adds
+    "domain coverage could not be read, so no domain is scored"); the change-risk breakdown; Operations query
+    insights; Spend native ANOMALY_INSIGHTS and account storage tiers; Optimization object cost; Unit costs pattern
+    costs; Admin Flyway ledger and AI reconciliation; Entity 360 blast radius (the declared-lineage read and both
+    ACCESS_HISTORY consumer reads: the edition or role is named only for a true absence, a timeout says it timed out,
+    and any other failure shows "unavailable" with its error while the declared half still renders); Proof's consumer-
+    reach line on the hidden data-products board; Contract org balance (a readable but empty view now shows "Org
+    balance view returned no usable rows" instead of "isn't visible to this role"); the CoCo token panel shows its
+    TOKENS_GRANULAR note only when that is the missing column, and any other missing column is "schema drift". Admin >
+    Setup progress: a checklist row whose read fails for a reason other than a missing object, an "Insufficient
+    privileges" error included, is Unknown. Its fix says Retry for a timeout or any other failure; for a missing
+    column it names the schema drift instead (apply the missing migrations or redeploy, because a retry will not clear
+    it); for a privilege error it says to re-apply the grants (roles.sql). A separate "N setup item(s) could not be
+    checked" line lists each failed read's error in its Error detail. Unknown never counts as pending. An empty routes
+    read now says "0 enabled route(s)" (this account: 1). The AST ratchet in tests/test_probe_absence_split.py counts
+    a needs_setup branch as split only when a setup-absence check on that read's own error_kind controls it (a lumped
+    tuple, `!=` or a negated check no longer counts; the real v4.604 shape is now flagged), and its allowlist of non-
+    probe sites is exact: file, variable, function and callee, one site each. Owner check after deploy: open Security
+    > Access and toggle "Check admin network-policy coverage". It should render KPIs on this account (S1b lists one
+    USER-level and one ACCOUNT-level network policy).
 - **Cost > Chargeback & AI: Track top exceptions writes through the shared Track statement.**
   - Cost > Chargeback & AI "Track top exceptions as work items" now writes through the shared Track statement
     (fix_queue.track_entities_sql, the one Optimize and Control Room triage use), at most three statements per click
@@ -108,9 +113,12 @@ Adversarially reviewed before release.
     users', 'Cost Intelligence > Chargeback & AI > AI users'), so nothing is queued twice. There is no backfill. The
     month window is gone: an item still open from an earlier month now blocks a new one (before, a second item was
     allowed and QUEUED_MONTHLY_TOTAL double-counted). A done or dismissed item does not block. One item per user no
-    longer swallows an escalation: when a user's strongest signal now outranks their open item's severity, the click
-    first raises that item's SEVERITY (never lowers it) and prefixes its DETAIL with 'Raised from <old> to <new> by a
-    later Track (<title>)'; TITLE and ESTIMATED_USD stay as first tracked. AI_BUDGET never opens Entity 360.
+    longer swallows an escalation: when a user's strongest signal now outranks every open item of that user from this
+    page, the click first raises the SEVERITY of one of them, the strongest (on a tie the item keyed on the user, else
+    the newest; never lowers it), and prefixes its DETAIL with 'Raised from <old> to <new> by a later Track
+    (<title>)'; TITLE and ESTIMATED_USD stay as first tracked. A user with several items queued before v4.605 keeps
+    them all and only that one is raised, so one breach counts once in Critical / high; a user who already has an open
+    item at that severity is left as is, and a re-run changes nothing. AI_BUDGET never opens Entity 360.
 
 ## 4.604.0 - Masking coverage, a cluster-cap check on the add-a-cluster advice, company all-in showback, unread maintenance in Addressable $/mo (2026-09-30)
 
