@@ -1,15 +1,13 @@
 """Every page renderer runs inside the safe_page error boundary (ARCHITECTURE.md, app/ui/pages/__init__.py).
 
 The V028 split (6329789e: cost.py -> a dispatcher + cost_parts/) silently dropped Cost Intelligence's
-@safe_page, so for months a Python-side bug there (a KeyError on a missing column, say) escaped as
+@safe_page, so from then on a Python-side bug there (a KeyError on a missing column, say) escaped as
 Streamlit's raw traceback: record_error never ran, nothing reached the session error ring or
 APP_ERROR_LOG, and the copyable ref + Retry / Open-error-log controls were missing. main.py calls
 _RENDERERS[page]() with no try of its own, so the decorator is the only boundary -- lock it for every page.
 """
 
 from __future__ import annotations
-
-import pytest
 
 
 def test_every_registered_renderer_carries_the_safe_page_boundary():
@@ -44,10 +42,9 @@ def test_cost_render_contains_a_python_side_failure(monkeypatch):
     assert shown == ["Cost Intelligence could not finish rendering."]
 
 
-@pytest.mark.parametrize("page", ["Cost Intelligence"])
-def test_boundary_page_label_matches_the_renderer_key(page):
+def test_boundary_page_label_matches_the_renderer_key():
     """safe_page's label is the page's own _PAGE, the same string the nav and record_error use."""
     from app import main
     from app.ui.pages import cost
 
-    assert cost._PAGE == page and main._RENDERERS[page] is cost.render
+    assert main._RENDERERS[cost._PAGE] is cost.render
