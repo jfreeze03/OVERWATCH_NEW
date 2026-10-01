@@ -4,6 +4,7 @@ labeled empties, visible truncation. No synthetic fallbacks — ever."""
 from __future__ import annotations
 
 import html
+import math
 import re
 import time
 
@@ -2120,7 +2121,9 @@ def _clean_numeric_cell(v) -> str:
         f = float(v)
     except (TypeError, ValueError):
         return str(v)
-    if f != f:            # NaN (na_rep handles the real NA path; defensive)
+    # NaN (na_rep handles the real NA path; defensive) and ±inf (R1-221: int(inf) raised
+    # OverflowError inside the lazy Styler render, outside every guard, and killed the page).
+    if not math.isfinite(f):
         return "—"
     if f == int(f):
         return f"{int(f):,}"

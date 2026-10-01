@@ -13,6 +13,7 @@ pre-fix code at 04fd374e:
   R1-218  section-count badges keyed on the day count only, so Last month reused the 30d count.
   R1-219  the display-timezone pass blanked NEVER_READ (bool) and turned raw *_TIME numbers into 1970.
   R1-220  Add to Case exported NULL cells as the literal text nan / None / NaT / <NA>.
+  R1-221  a numeric cell of +/-inf crashed the page from inside the table's lazy Styler render.
 """
 
 from __future__ import annotations
@@ -509,3 +510,20 @@ def test_add_to_case_preview_exports_nulls_blank_not_as_nan_text(monkeypatch):
         assert junk not in md, junk
     # non-null cells still render exactly as before
     assert "SVC_X" in md and "| 7 |" in md and "1.5" in md and "2026-09-29 10:05:00" in md and "True" in md
+
+
+# ---------------------------------------------------------------------------
+# R1-221: an infinite numeric cell renders the no-value glyph instead of killing the page
+# ---------------------------------------------------------------------------
+
+def test_clean_numeric_cell_renders_infinity_as_the_em_dash():
+    from app.ui.components import _clean_numeric_cell
+    assert _clean_numeric_cell(math.inf) == "—" and _clean_numeric_cell(-math.inf) == "—"
+    assert _clean_numeric_cell(float("nan")) == "—" and _clean_numeric_cell(2.5) == "2.5"
+
+
+def test_styled_table_with_an_infinite_ratio_still_renders_the_rest_of_the_page():
+    from app.ui.components import _clean_numeric_cell
+    df = pd.DataFrame({"RATIO": [1.5, math.inf], "SCORE": [2.0, -math.inf]})
+    html = df.style.format(_clean_numeric_cell, na_rep="—", subset=["RATIO", "SCORE"]).to_html()
+    assert "1.5" in html and "—" in html                  # the lazy format pass completes
