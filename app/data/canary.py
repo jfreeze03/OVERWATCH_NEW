@@ -66,6 +66,17 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("cost.object_cost_by_arm", lambda: cost_sql.object_cost_by_arm(2, "ALFA")),
     ("cost.object_cost_recon", lambda: cost_sql.object_cost_recon(2)),
     ("cost.object_cost_top", lambda: cost_sql.object_cost_top(2, "ALFA")),
+    # R2-062 (v4.608): the ORGANIZATION_USAGE readers -- the All-in invoice tile, the org balance behind every
+    # runway, the org spend + rate-card reconciliation and the contract items -- had no canary, and several read
+    # probe=True, so a renamed column was neither logged nor caught here. Small windows keep EXPLAIN cheap. Each
+    # is declared in EXPECTED_GAPS below: ORGANIZATION_USAGE needs the org-viewer grant (RUNBOOK: "ORGANIZATION_
+    # USAGE not granted"), so only its ABSENCE reads GAP; a missing column or a privilege error FAILs.
+    ("cost.org_all_in_window_usd", lambda: cost_sql.org_all_in_window_usd(2)),
+    ("cost.org_usage_in_currency", lambda: cost_sql.org_usage_in_currency(2)),
+    ("cost.org_remaining_balance", lambda: cost_sql.org_remaining_balance(2)),
+    ("cost.org_contract_items", cost_sql.org_contract_items),
+    ("cost.org_account_month_usd", lambda: cost_sql.org_account_month_usd(1)),
+    ("cost.org_rate_sheet", cost_sql.org_rate_sheet),
     # Next-Fifty #30: the unread-maintenance shortlist (mart) and its booked proof query. The ACCESS_HISTORY
     # confirm (insights_sql.object_reads_confirm) is not registered itself: the ACCESS_HISTORY columns it reads
     # (BASE_OBJECTS_ACCESSED, QUERY_START_TIME) FAIL on drift through the security.* ACCESS_HISTORY canaries below.
@@ -144,6 +155,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("mart.cloud_svc_top_shapes", lambda: mart_sql.cloud_svc_top_shapes(1, "ALFA")),
     ("mart.cloud_svc_by_user", lambda: mart_sql.cloud_svc_by_user(1, "ALFA")),
     ("mart.cloud_svc_billed_families", lambda: mart_sql.cloud_svc_billed_families(1, "ALFA")),
+    # R2-012 (v4.608): the mart twin of cost.cs_by_query_type now wraps the shared projection to add COVERED_DAYS
+    ("mart.cs_by_query_type_mart", lambda: mart_sql.cs_by_query_type_mart(1, "ALFA")),
     ("cost.cloud_services_ratio", lambda: cost_sql.cloud_services_ratio_by_warehouse(1, "ALFA")),
     ("cost.compile_heavy_families", lambda: cost_sql.compile_heavy_families(1, "ALFA")),
     ("ops.poor_pruning_queries", lambda: ops_sql.poor_pruning_queries(1, "ALFA")),
@@ -260,7 +273,19 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("mart.fact_warehouse_pressure", lambda: mart_sql.fact_warehouse_pressure(1, "ALFA")),
     ("mart.warehouse_capacity_daily", lambda: mart_sql.warehouse_capacity_daily(30, "ALFA")),
     ("mart.fact_cloud_services_ratio", lambda: mart_sql.fact_cloud_services_ratio(2, "ALFA")),
+    # R2-064 (v4.608): the only readers of these columns had no canary. ALERT_EVENTS' V086 SNOOZE_* columns
+    # (a probe=True read on Alerts), MART_TABLE_STORAGE_DAILY's ACTIVE / FAILSAFE / CLONE bytes, LAST_DML and
+    # COMPANY, and the INFORMATION_SCHEMA.ALERT_HISTORY table function behind the email-path verdict (it always
+    # exists; an uninstalled email alert only filters to zero rows). Core objects: absence FAILs (no gap).
+    ("mart.snoozed_alert_events", lambda: mart_sql.snoozed_alert_events(1, "ALFA")),
+    ("mart.table_storage_waste_mart", lambda: mart_sql.table_storage_waste_mart("ALFA")),
+    ("mart.table_storage_breakdown_mart", lambda: mart_sql.table_storage_breakdown_mart("ALFA")),
+    ("mart.email_alert_history", lambda: mart_sql.email_alert_history(1)),
     ("mart27.task_graphs", lambda: mart27_sql.task_graphs(2)),
+    # R2-068 (v4.608): the only reader of MART_TASK_NODE_DAILY's queue / exec timing columns (AVG/P95/MAX
+    # QUEUE_SEC, AVG/MAX_EXEC_SEC, FIRST_START, LAST_COMPLETED) -- mart-only, no live fallback. A core mart:
+    # absence FAILs.
+    ("mart27.task_nodes", lambda: mart27_sql.task_nodes(2, "ALFA")),
     ("mart27.security_posture", lambda: mart27_sql.security_posture(7)),
     ("mart27.incident_timeline", lambda: mart27_sql.incident_timeline(24, "ALFA")),
     ("mart27.eff_idle_analysis", lambda: mart27_sql.eff_idle_analysis(2, "ALFA")),
@@ -416,4 +441,12 @@ EXPECTED_GAPS: frozenset[str] = frozenset({
     # Operations panel reads it probe=True and shows a calm note when it is absent). Only its absence reads
     # GAP; a renamed column (INSIGHT_TYPE_ID, MESSAGE) is drift and FAILs.
     "insights.query_insights_feed",
+    # R2-062 (v4.608): ORGANIZATION_USAGE is visible only with the org-viewer grant (an account-feature state the
+    # pages already degrade on), so its ABSENCE reads GAP; a renamed column or a privilege error still FAILs.
+    "cost.org_all_in_window_usd",
+    "cost.org_usage_in_currency",
+    "cost.org_remaining_balance",
+    "cost.org_contract_items",
+    "cost.org_account_month_usd",
+    "cost.org_rate_sheet",
 })

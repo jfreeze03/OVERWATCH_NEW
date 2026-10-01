@@ -97,7 +97,9 @@ def test_spend_and_optimize_lower_panels_thread_bounds():
                  "marketplace_paid_usage(days, bounds=bounds)",
                  "compute_pool_usage(days, bounds=bounds)",
                  "cs_by_query_type(days, company, bounds=bounds)",
-                 "cloud_svc_top_shapes(days, company, wh_arg, bounds=bounds)",
+                 # R2-012 (v4.608): the drill also asks for the mart's COVERED_DAYS
+                 "cloud_svc_top_shapes(days, company, wh_arg, bounds=bounds, coverage=True)",
+                 "cloud_svc_by_user(days, company, wh_arg, bounds=bounds, coverage=True)",
                  "app_cost_mart(days, company, bounds=bounds)"):
         assert call in spend, call
     for call in ("idle_warehouse_analysis(days, company, bounds=bounds)",

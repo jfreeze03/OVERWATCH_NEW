@@ -449,10 +449,27 @@ LIMIT 500
 """
 
 
+def _cloud_svc_window(days: int, *, bounds: tuple | None = None, col: str = "DAY") -> str:
+    """The page-window predicate every MART_CLOUD_SVC_DAILY reader shares (no scope)."""
+    return (resolve_effective_window(days, col, max_days=MAX_MART_WINDOW_DAYS, bounds=bounds)[1]
+            if bounds is not None
+            else f"{col} >= DATEADD('day', -{bounded_days(days, MAX_MART_WINDOW_DAYS)}, CURRENT_DATE())")
+
+
+def _cloud_svc_covered_days(days: int, *, bounds: tuple | None = None) -> str:
+    """R2-012: the DISTINCT days MART_CLOUD_SVC_DAILY actually holds in the page window, account-wide.
+
+    The statement mart has no backfill: SP_LOAD_CLOUD_SVC_MART (V055) merges only the last 2 days of the
+    72 h extract, so its history starts the day it was first loaded (and again after a rebuild drops it).
+    A 90/180/365-day or Current-year read therefore sums fewer days than its label. Window predicate ONLY
+    (no company / warehouse scope), so a quiet scope never reads as missing loader coverage (the R1-016
+    lesson). components.served_days() takes it over the requested window (the r34 contract)."""
+    return (f'(SELECT COUNT(DISTINCT c0.DAY) FROM {mart_object("MART_CLOUD_SVC_DAILY")} c0 '
+            f'WHERE {_cloud_svc_window(days, bounds=bounds, col="c0.DAY")}) AS COVERED_DAYS')
+
+
 def _cloud_svc_where(days: int, company: str, warehouse: str, *, bounds: tuple | None = None) -> str:
-    where = [resolve_effective_window(days, "DAY", max_days=MAX_MART_WINDOW_DAYS, bounds=bounds)[1]
-             if bounds is not None
-             else f"DAY >= DATEADD('day', -{bounded_days(days, MAX_MART_WINDOW_DAYS)}, CURRENT_DATE())"]
+    where = [_cloud_svc_window(days, bounds=bounds)]
     if str(company).upper() != "ALL":
         where.append(f"COMPANY = {sql_literal(company)}")
     if str(warehouse or "").strip():
@@ -461,7 +478,7 @@ def _cloud_svc_where(days: int, company: str, warehouse: str, *, bounds: tuple |
 
 
 def cloud_svc_top_shapes(days: int, company: str = "ALL", warehouse: str = "", *, bounds: tuple | None = None,
-                         sleep_only: bool = False) -> str:
+                         sleep_only: bool = False, coverage: bool = False) -> str:
     """Top query shapes by cloud-services credits (V055, MART_CLOUD_SVC_DAILY).
 
     The shape-grain lens the compile-heavy view misses: a metadata storm of tiny
@@ -470,7 +487,10 @@ def cloud_svc_top_shapes(days: int, company: str = "ALL", warehouse: str = "", *
     ``sleep_only`` (V160, the COST_SLEEP_POLLING AI evidence pack) keeps only SYSTEM$WAIT sleep statements
     (the shared system_wait statement shape, as cloud_svc_billed_families flags them), so a warehouse's own
     heavy statements never outrank the sleeps the alert is about.
+    ``coverage`` (R2-012) adds COVERED_DAYS (_cloud_svc_covered_days): the days the mart holds in the
+    window, which the Spend drill states when the young mart covers less than the page window.
     """
+    _cov = f", {_cloud_svc_covered_days(days, bounds=bounds)}" if coverage else ""
     return f"""
 SELECT
     QUERY_PARAMETERIZED_HASH,
@@ -480,7 +500,7 @@ SELECT
     ROUND(SUM(CS_CREDITS), 4) AS CS_CREDITS,
     ROUND(SUM(CS_CREDITS) / NULLIF(SUM(RUNS), 0) * 1000, 4) AS CS_CREDITS_PER_1K,
     ROUND(SUM(EXEC_SEC_SUM) / NULLIF(SUM(RUNS), 0), 3) AS AVG_EXEC_S,
-    ROUND(SUM(CACHE_PCT_SUM) / NULLIF(SUM(RUNS), 0) * 100, 0) AS AVG_CACHE_PCT
+    ROUND(SUM(CACHE_PCT_SUM) / NULLIF(SUM(RUNS), 0) * 100, 0) AS AVG_CACHE_PCT{_cov}
 FROM {mart_object("MART_CLOUD_SVC_DAILY")}
 WHERE {and_where(_cloud_svc_where(days, company, warehouse, bounds=bounds), *(_sleep_row_predicates() if sleep_only else ()))}
 GROUP BY QUERY_PARAMETERIZED_HASH
@@ -497,17 +517,20 @@ def _sleep_row_predicates() -> tuple[str, ...]:
             f"REGEXP_INSTR(UPPER(SAMPLE_TEXT), {sql_literal(SLEEP_SQL_PATTERN)}) > 0")
 
 
-def cloud_svc_by_user(days: int, company: str = "ALL", warehouse: str = "", *, bounds: tuple | None = None) -> str:
+def cloud_svc_by_user(days: int, company: str = "ALL", warehouse: str = "", *, bounds: tuple | None = None,
+                      coverage: bool = False) -> str:
     """Cloud-services credits by user/role (V055) — who (or which tool) drives
     the ratio. A service account topping this list points at the fix (throttle
-    its polling / batch its DML / consolidate its metadata calls)."""
+    its polling / batch its DML / consolidate its metadata calls). ``coverage``: as
+    cloud_svc_top_shapes (R2-012)."""
+    _cov = f", {_cloud_svc_covered_days(days, bounds=bounds)}" if coverage else ""
     return f"""
 SELECT
     USER_NAME,
     ANY_VALUE(ROLE_NAME) AS ROLE_NAME,
     SUM(RUNS) AS RUNS,
     ROUND(SUM(CS_CREDITS), 4) AS CS_CREDITS,
-    ROUND(SUM(CS_CREDITS) / NULLIF(SUM(RUNS), 0) * 1000, 4) AS CS_CREDITS_PER_1K
+    ROUND(SUM(CS_CREDITS) / NULLIF(SUM(RUNS), 0) * 1000, 4) AS CS_CREDITS_PER_1K{_cov}
 FROM {mart_object("MART_CLOUD_SVC_DAILY")}
 WHERE {_cloud_svc_where(days, company, warehouse, bounds=bounds)}
 GROUP BY USER_NAME
@@ -541,6 +564,11 @@ def cloud_svc_billed_families(days: int, company: str = "ALL", warehouse: str = 
     bill drops by if every sleep family stopped, never more than that day's billed cloud services
     (summing the per-family marginals would over-count once a day's billed CS is below their sum).
     Billing and the app hint are account facts, so those CTEs ignore the company / warehouse scope.
+    R2-012: ``bill`` also starts at the statement mart's first day (MIN(DAY), account-wide and unscoped):
+    MART_CLOUD_SVC_DAILY has no backfill (SP_LOAD_CLOUD_SVC_MART merges 2 days per load), so on a window
+    older than the mart, metering for days with no statement history made 'N% of metered' and
+    METERED_DAYS read the young mart as missing credits. COVERED_DAYS (_cloud_svc_covered_days) names
+    the days the statement mart holds in the window, for the panel's coverage note.
     Window totals are SUM() OVER () in ``ranked``, BEFORE the top-N filter (never derived from the
     capped frame). Returns the top CS_BILLED_TOP_N by CS plus every sleep-polling family (SLEEP_FLAG,
     the shared system_wait.SLEEP_SQL_PATTERN statement shape). Every aggregate argument is
@@ -560,6 +588,7 @@ WITH bill AS (
     FROM {mart_object("FACT_METERING_DAILY")} x
     WHERE {acct_where}
       AND x.DAY < (SELECT MAX(z.DAY) FROM {mart_object("FACT_METERING_DAILY")} z)
+      AND x.DAY >= (SELECT MIN(m0.DAY) FROM {mart_object("MART_CLOUD_SVC_DAILY")} m0)
     GROUP BY x.DAY
 ),
 billsum AS (
@@ -658,7 +687,8 @@ SELECT
     ROUND(r.SLEEP_CS_CREDITS_ALL, 4) AS SLEEP_CS_CREDITS_ALL,
     ROUND(ss.SLEEP_BILLED_CS_CREDITS_ALL, 4) AS SLEEP_BILLED_CS_CREDITS_ALL,
     ROUND(s.METERED_CS_CREDITS, 4) AS METERED_CS_CREDITS,
-    s.METERED_DAYS, s.UNDER_ALLOWANCE_DAYS, s.LAST_METERED_DAY
+    s.METERED_DAYS, s.UNDER_ALLOWANCE_DAYS, s.LAST_METERED_DAY,
+    {_cloud_svc_covered_days(days, bounds=bounds)}
 FROM ranked r
 CROSS JOIN billsum s
 CROSS JOIN sleepsum ss
@@ -684,17 +714,28 @@ def cs_by_query_type_mart(days: int, company: str = "ALL", warehouse: str = "",
     the mart is loaded from the QH extract at CS>0 only (matching the live
     ``CREDITS_USED_CLOUD_SERVICES > 0`` filter) and its COMPANY column comes
     from COMPANY_FOR_WAREHOUSE at load time rather than the app's warehouse
-    name-pattern clause — the loader's mapping is the authoritative one. The
-    mart also reaches MAX_MART_WINDOW_DAYS where the live scan clamps at 90,
-    which is exactly why callers must read the served window via
-    components.served_days() instead of assuming the requested one.
+    name-pattern clause — the loader's mapping is the authoritative one.
+
+    The served window: callers read it via components.served_days(), never the
+    requested one. The live scan clamps a trailing window at 90; the mart's WHERE
+    allows MAX_MART_WINDOW_DAYS, but R2-012: the mart has no backfill (its history
+    starts at its first load), so it can hold FEWER days than the window. The row
+    therefore carries COVERED_DAYS (_cloud_svc_covered_days, account-wide) beside the
+    live twin's columns, wrapped around the shared projection so the twin tail stays
+    byte-identical; served_days() takes it over the requested window.
     """
-    return cs_by_query_type_projection(
+    proj = cs_by_query_type_projection(
         "SUM(RUNS)",
         "SUM(CS_CREDITS)",
         mart_object("MART_CLOUD_SVC_DAILY"),
         _cloud_svc_where(days, company, warehouse, bounds=bounds),
     )
+    return f"""
+SELECT p.QUERY_TYPE, p.QUERIES, p.CS_CREDITS, p.CS_CREDITS_PER_1K,
+       {_cloud_svc_covered_days(days, bounds=bounds)}
+FROM ({proj}) p
+ORDER BY p.CS_CREDITS DESC
+"""
 
 
 def open_alert_events(limit: int = 200, company: str = "ALL") -> str:
@@ -2343,7 +2384,9 @@ SELECT
     COUNT_IF(RESOLUTION_KIND = 'ACTIONED')            AS ACTIONED,
     COUNT_IF(RESOLUTION_KIND = 'NOISE')               AS NOISE,
     COUNT_IF(RESOLUTION_KIND = 'EXPECTED')            AS EXPECTED,
-    COUNT_IF(RESOLUTION_KIND IS NULL)                 AS UNTAGGED,
+    -- lead (c12): the same "untagged" spelling as alert_fatigue / rule_metric_kinds (NULL OR empty kind);
+    -- IS NULL alone dropped an empty-string kind from every bucket while RESOLVED_EVENTS counted it.
+    COUNT_IF(COALESCE(RESOLUTION_KIND, '') = '')      AS UNTAGGED,
     -- PRECISION_PCT must repeat the COUNT_IF expressions, NOT reference the ACTIONED /
     -- NOISE aliases: Snowflake forbids lateral column-alias references inside the SELECT
     -- list (compiles to "invalid identifier"), so the panel silently returned ok=False.
@@ -2511,7 +2554,9 @@ def fleet_query_stats(days: int = 7, page: str = "") -> str:
     >=2s-or-failed rows (the SLOW_2S threshold telemetry_by_page uses), so
     SLOW_OR_FAILED, P50/P95 and the panel's clean state mean what they say.
     The regression surface, not a complete census — the note on the panel
-    says so.
+    says so. Lead (c09): a 'batch_wall:%' row is a whole batch's wall clock, a SUPERSET of its
+    members' own rows, never a fetch key; it is excluded here as in every other telemetry
+    aggregator, so it no longer takes a slot in the LIMIT-40 list or the per-page slow keys.
 
     C6: ``page`` narrows to one page. The unfiltered call is LIMIT 40 by p95,
     so a page can be ranked a top tuning target and still have every one of its
@@ -2537,6 +2582,7 @@ SELECT
 FROM {core_object("APP_QUERY_TELEMETRY")}
 WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP()){page_filter}
   AND (NOT OK OR ELAPSED_MS >= 2000)
+  AND NOT STARTSWITH(QUERY_KEY, 'batch_wall:')
 GROUP BY PAGE, QUERY_KEY
 ORDER BY P95_MS DESC NULLS LAST
 LIMIT 40

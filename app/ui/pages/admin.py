@@ -1993,7 +1993,7 @@ def _canary_tab() -> None:
         if not gaps.empty:
             st.caption(f"{len(gaps)} GAP: declared account-feature absences (Cortex "
                        "subscription/region, SYSTEM$CLIENT_VERSION_INFO, the optional QUERY_INSIGHTS "
-                       "view) — absence, not drift. "
+                       "view, ORGANIZATION_USAGE without the org-viewer grant) — absence, not drift. "
                        "Anything absent WITHOUT a declaration fails instead.")
         if failed.empty:
             empty_state("clean", f"All {len(frame) - len(gaps)} applicable canary statements passed.")
