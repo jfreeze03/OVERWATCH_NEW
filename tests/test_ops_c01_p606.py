@@ -526,3 +526,31 @@ def test_wh_opener_ok_peaks_still_verifies_clean(monkeypatch):
     headers, seen, _fake = _opener(monkeypatch, peaks)
     assert headers == [("Warehouses that need attention now", "ok")]
     assert [k for k, _m in seen["empty"]] == ["clean"]
+
+
+# ---------------------------- R1-127: Last month's zero never short-circuits the trailing 7-day scan ----
+
+@pytest.mark.parametrize(("bounds", "days", "short_circuit"), [
+    ((date(2026, 8, 1), date(2026, 9, 1)), 31, False),     # Last month: August does not hold Sep 23-30
+    ((date(2026, 9, 1), date(2026, 10, 1)), 29, True),     # Current month on Sep 30 holds the last 7 days
+    (None, 30, True),                                      # a trailing window ends now
+])
+def test_failure_timeline_short_circuit_needs_a_window_holding_the_last_7_days(monkeypatch, bounds, days,
+                                                                               short_circuit):
+    seen_kw: dict = {}
+
+    def timeline(*_a, **kw):
+        seen_kw.update(kw)
+        raise _Stop
+
+    df = pd.DataFrame({"DATABASE_NAME": ["DB"], "SCHEMA_NAME": ["S"], "TASK_NAME": ["T"], "RUNS": [100],
+                       "FAILED": [0], "TOTAL_RUNS_WIN": [100], "TOTAL_FAILED_WIN": [0]})
+    ops, _fake, _seen = _page(monkeypatch, {}, guard=lambda *_a, **_k: True,
+                              _failure_timeline_section=timeline)
+    monkeypatch.setattr(ops, "run", lambda *_a, **_k: _ok(df.copy()))
+    monkeypatch.setattr(ops, "account_today", lambda: date(2026, 9, 30))
+    import app.logic.date_windows as dw
+    monkeypatch.setattr(dw, "account_today", lambda: date(2026, 9, 30))
+    with pytest.raises(_Stop):
+        ops._task_health_view("ALL", days, bounds=bounds)
+    assert (seen_kw["known_failures"] == 0) is short_circuit, seen_kw

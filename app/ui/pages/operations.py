@@ -48,7 +48,7 @@ from app.logic.anomaly import (
     suppress_expected_spikes,
     warehouse_attention_ranking,
 )
-from app.logic.date_windows import window_label
+from app.logic.date_windows import is_prior_month_window, window_label
 from app.logic.dq import row_volume_anomalies, summarize_row_volume
 from app.logic.etl_evidence import (
     evidence_display_frame,
@@ -3046,8 +3046,12 @@ def _task_health_view(company: str, days: int, database: str = "",
                     "averages; ACCOUNT_USAGE.TASK_HISTORY lags ~45min, so this forecasts a trend, "
                     "not a live in-flight run.")
     st.divider()
+    # PR-1 R1-127: the mart's zero is only proof for the trailing 7 days the timeline scans when the
+    # window CONTAINS them. Last month ends at the 1st of this month, so a failure-free August
+    # short-circuited the 7-day TASK_HISTORY scan into a green "no failures in the last 7 days".
+    _kf = None if is_prior_month_window(bounds) else known_failed
     _failure_timeline_section(company, database, schema_contains,
-                              known_failures=known_failed if days >= 7 else None,
+                              known_failures=_kf if days >= 7 else None,
                               known_from_live=not _from_mart)
 
 
