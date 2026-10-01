@@ -286,8 +286,12 @@ GROUP BY 1
 
 
 
+RELEASE_MAX_TASKS = 500   # whole tasks kept by release_task_compare (two rows each at most)
+
+
 def release_task_compare(release_date: str, window_days: int, company: str = "ALL") -> str:
-    """Per-task runs/failures/runtime before vs after a release date."""
+    """Per-task runs/failures/runtime before vs after a release date: whole tasks, the ones that
+    got worse first (capped at RELEASE_MAX_TASKS), with TOTAL_TASKS counted before the cap."""
     release = _iso_date(release_date, "release_date")
     window = max(1, min(int(window_days), 14))
     where = and_where(
@@ -312,19 +316,46 @@ WITH runs AS (
     QUALIFY ROW_NUMBER() OVER (
         PARTITION BY DATABASE_NAME, SCHEMA_NAME, NAME, SCHEDULED_TIME
         ORDER BY COMPLETED_TIME DESC NULLS LAST) = 1
+),
+per AS (
+    SELECT
+        DATABASE_NAME,
+        SCHEMA_NAME,
+        NAME AS TASK_NAME,
+        IFF(QUERY_START_TIME < DATE '{release}', 'BEFORE', 'AFTER') AS PERIOD,
+        COUNT(*) AS RUNS,
+        SUM(IFF(STATE = 'FAILED', 1, 0)) AS FAILED,
+        AVG(DATEDIFF('second', QUERY_START_TIME, COMPLETED_TIME)) AS AVG_SEC
+    FROM runs
+    GROUP BY 1, 2, 3, 4
+),
+-- PR-1 R1-135: the old alphabetical 1000-row cap cut late-named tasks (and split the boundary task,
+-- dropping its BEFORE row) with no truncation flag, so a regression past the cut read as a green
+-- "no task regressed". Score each TASK (both of its rows) the way logic.insights.task_release_deltas
+-- judges GOT_WORSE, keep whole tasks ranked worst-first, and carry the pre-cut task count.
+scored AS (
+    SELECT
+        p.*,
+        SUM(IFF(p.PERIOD = 'AFTER', p.RUNS, 0)) OVER (PARTITION BY p.DATABASE_NAME, p.SCHEMA_NAME, p.TASK_NAME) AS W_RUNS_AFTER,
+        GREATEST(SUM(IFF(p.PERIOD = 'AFTER', p.FAILED, -p.FAILED))
+                     OVER (PARTITION BY p.DATABASE_NAME, p.SCHEMA_NAME, p.TASK_NAME), 0) AS W_NEW_FAILURES,
+        COALESCE(MAX(IFF(p.PERIOD = 'AFTER', p.AVG_SEC, NULL))
+                     OVER (PARTITION BY p.DATABASE_NAME, p.SCHEMA_NAME, p.TASK_NAME), 0) AS W_AVG_AFTER,
+        COALESCE(MAX(IFF(p.PERIOD = 'BEFORE', p.AVG_SEC, NULL))
+                     OVER (PARTITION BY p.DATABASE_NAME, p.SCHEMA_NAME, p.TASK_NAME), 0) AS W_AVG_BEFORE
+    FROM per p
 )
 SELECT
-    DATABASE_NAME,
-    SCHEMA_NAME,
-    NAME AS TASK_NAME,
-    IFF(QUERY_START_TIME < DATE '{release}', 'BEFORE', 'AFTER') AS PERIOD,
-    COUNT(*) AS RUNS,
-    SUM(IFF(STATE = 'FAILED', 1, 0)) AS FAILED,
-    AVG(DATEDIFF('second', QUERY_START_TIME, COMPLETED_TIME)) AS AVG_SEC
-FROM runs
-GROUP BY 1, 2, 3, 4
-ORDER BY DATABASE_NAME, SCHEMA_NAME, TASK_NAME, PERIOD
-LIMIT 1000
+    s.DATABASE_NAME, s.SCHEMA_NAME, s.TASK_NAME, s.PERIOD, s.RUNS, s.FAILED, s.AVG_SEC,
+    COUNT(DISTINCT s.DATABASE_NAME || '.' || s.SCHEMA_NAME || '.' || s.TASK_NAME) OVER () AS TOTAL_TASKS
+FROM scored s
+QUALIFY DENSE_RANK() OVER (
+    ORDER BY IFF(s.W_RUNS_AFTER > 0 AND (s.W_NEW_FAILURES > 0
+                 OR (s.W_AVG_BEFORE > 0 AND s.W_AVG_AFTER > 1.25 * s.W_AVG_BEFORE)), 1, 0) DESC,
+             s.W_NEW_FAILURES DESC,
+             IFF(s.W_AVG_BEFORE > 0, s.W_AVG_AFTER / s.W_AVG_BEFORE, 0) DESC,
+             s.DATABASE_NAME, s.SCHEMA_NAME, s.TASK_NAME) <= {RELEASE_MAX_TASKS}
+ORDER BY s.DATABASE_NAME, s.SCHEMA_NAME, s.TASK_NAME, s.PERIOD
 """
 
 

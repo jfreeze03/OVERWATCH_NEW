@@ -1291,6 +1291,15 @@ def _release_compare_tab(company: str) -> None:
         # still filling (or, for a nightly task right after a deploy, hasn't run yet). Mirrors the
         # query-health sibling above, which shows 'no data yet' when a PERIOD is missing.
         _decidable = bool(deltas["DECIDABLE"].any()) if "DECIDABLE" in deltas.columns else True
+        # PR-1 R1-135: the read keeps whole tasks, the ones that got worse first, up to
+        # RELEASE_MAX_TASKS; TOTAL_TASKS is counted before that cut. Disclose a capped compare so
+        # neither verdict below reads as covering tasks it never saw.
+        _total_tasks = (int(safe_float(t_res.df["TOTAL_TASKS"].iloc[0]))
+                        if "TOTAL_TASKS" in t_res.df.columns else len(deltas))
+        if _total_tasks > len(deltas):
+            st.caption(f"Compared the {len(deltas):,} most-regressed of {_total_tasks:,} tasks with runs "
+                       "in the windows — tasks that got worse rank first, so one is left out only when "
+                       f"more than {len(deltas):,} regressed.")
         if worse.empty:
             if _decidable:
                 empty_state("clean", "No task gained failures or slowed >25% after the release.")

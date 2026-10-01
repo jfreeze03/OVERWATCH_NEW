@@ -417,3 +417,58 @@ def test_ref_gap_headline_marks_a_capped_count():
     body = _fn(read(_OPS), "_reference_gap_panel")
     assert '_plus = "+" if res.truncated else ""' in body
     assert "{n_codes:,}{_plus} new code(s) across {n_types}{_plus} code type(s)" in body
+
+
+# ----------------------------- R1-135: release compare keeps the regressed tasks under its cap ----
+
+def _release_rows(n_tasks: int, regressed: str) -> list[tuple]:
+    """TASK_HISTORY rows: every task runs once before and once after 2026-09-15; ``regressed`` fails
+    three times after the release."""
+    rows = []
+    for i in range(n_tasks):
+        db = "A_DB" if i < n_tasks - 50 else "ZZ_DB"
+        name = f"T{i:04d}"
+        rows.append((db, "S", name, "2026-09-10 01:00:00", "2026-09-10 01:01:40", "SUCCEEDED",
+                     "2026-09-10 01:00:00"))
+        rows.append((db, "S", name, "2026-09-18 01:00:00", "2026-09-18 01:01:40", "SUCCEEDED",
+                     "2026-09-18 01:00:00"))
+        if name == regressed:
+            rows.extend((db, "S", name, f"2026-09-1{d} 02:00:00", f"2026-09-1{d} 02:01:00", "FAILED",
+                         f"2026-09-1{d} 02:00:00") for d in (6, 7, 9))
+    return rows
+
+
+def test_release_task_compare_keeps_a_late_named_regression():
+    import sqlite3
+
+    import sqlglot
+
+    from app.data import insights_sql
+    from app.logic.insights import task_release_deltas
+    sql = insights_sql.release_task_compare("2026-09-15", 7)
+    sqlglot.parse(sql, dialect="snowflake")
+    assert "COUNT(DISTINCT s.DATABASE_NAME || '.' || s.SCHEMA_NAME || '.' || s.TASK_NAME) OVER () AS TOTAL_TASKS" in sql
+    assert f"<= {insights_sql.RELEASE_MAX_TASKS}" in sql and "LIMIT 1000" not in sql
+    lite = sqlglot.transpile(sql, read="snowflake", write="sqlite")[0]
+    # sqlite has no DISTINCT window aggregate; the total is locked on the Snowflake text above
+    lite = lite.replace("COUNT(DISTINCT s.DATABASE_NAME || '.' || s.SCHEMA_NAME || '.' || s.TASK_NAME) OVER ()",
+                        "-1").replace("SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY", "TH")
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE TH (DATABASE_NAME, SCHEMA_NAME, NAME, QUERY_START_TIME, COMPLETED_TIME, STATE, "
+                "SCHEDULED_TIME)")
+    con.executemany("INSERT INTO TH VALUES (?,?,?,?,?,?,?)", _release_rows(600, "T0590"))
+    try:
+        cur = con.execute(lite)
+    except sqlite3.OperationalError as exc:                          # dialect gap -> the SQL locks above
+        pytest.skip(f"sqlite cannot run the transpiled builder: {exc}")
+    df = pd.DataFrame(cur.fetchall(), columns=[d[0] for d in cur.description])
+    tasks = df.groupby(["DATABASE_NAME", "SCHEMA_NAME", "TASK_NAME"])["PERIOD"].nunique()
+    assert len(tasks) == insights_sql.RELEASE_MAX_TASKS and (tasks == 2).all()   # whole tasks only
+    worse = task_release_deltas(df)
+    assert worse.loc[worse["GOT_WORSE"], "TASK_NAME"].tolist() == ["T0590"]
+
+
+def test_release_compare_discloses_a_capped_task_set():
+    body = _fn(read(_OPS), "_release_compare_tab") if "def _release_compare_tab" in read(_OPS) else read(_OPS)
+    assert 'if "TOTAL_TASKS" in t_res.df.columns else len(deltas))' in body
+    assert "most-regressed of {_total_tasks:,} tasks" in body
