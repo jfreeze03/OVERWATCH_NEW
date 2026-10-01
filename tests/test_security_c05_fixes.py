@@ -21,6 +21,7 @@ the pre-fix tree (main 04fd374e):
 from __future__ import annotations
 
 import io
+import operator
 import re
 import zipfile
 from datetime import date, timedelta
@@ -274,21 +275,78 @@ def _fact_days_present(today: date) -> set[date]:
     return {today - timedelta(days=1)} | {today - timedelta(days=n) for n in range(11, 91)}
 
 
-def _coverage_from_sql(sql: str) -> QueryResult:
-    from app.logic.formulas import account_today
-    today = account_today()
-    present = _fact_days_present(today)
-    m = re.search(r"DAY >= DATEADD\('day', -(\d+), CURRENT_DATE\(\)\)", sql)
-    if m:
-        first = today - timedelta(days=int(m.group(1)))
-        days = {d for d in present if d >= first}
-    else:
-        lo = re.search(r"DAY >= " + _ISO, sql)
-        hi = re.search(r"DAY < " + _ISO, sql)
-        days = {d for d in present if d >= date.fromisoformat(lo.group(1))
-                and (hi is None or d < date.fromisoformat(hi.group(1)))}
-    return _ok(pd.DataFrame([{"FIRST_DAY": min(days) if days else None, "LAST_DAY": max(present),
-                              "FACT_ROWS": len(days), "COVERAGE_DAYS": len(days), "LAST_LOAD": None}]))
+def _dense_fact(today: date, *, holes: tuple[int, ...] = (), today_loaded: bool = True,
+                depth: int = 200) -> set[date]:
+    """A FACT_SECURITY_LOGIN_DAILY day set: dense for ``depth`` days back, minus ``holes`` (days ago)."""
+    days = {today - timedelta(days=n) for n in range(0 if today_loaded else 1, depth)}
+    return days - {today - timedelta(days=h) for h in holes}
+
+
+_SQL_COMPARE = {"GTE": operator.ge, "GT": operator.gt, "LT": operator.lt, "LTE": operator.le, "EQ": operator.eq}
+
+
+def _sql_value(node, day: date, today: date):
+    """Evaluate one fact row (its ``DAY``) against the small Snowflake expression subset the coverage reader
+    uses. Anything else fails loudly, so a reader edit can never be scored by a stale model."""
+    from sqlglot import exp
+
+    def ev(n):
+        return _sql_value(n, day, today)
+
+    def as_date(value):
+        return date.fromisoformat(value) if isinstance(value, str) else value
+
+    if isinstance(node, exp.Paren):
+        return ev(node.this)
+    if isinstance(node, exp.Column):
+        assert node.name.upper() == "DAY", node.sql()
+        return day
+    if isinstance(node, (exp.CurrentDate, exp.CurrentTimestamp)):
+        return today                                  # the account clock (Central) in both spellings
+    if isinstance(node, exp.ConvertTimezone):
+        return ev(node.args["timestamp"])
+    if isinstance(node, exp.Cast):
+        return as_date(ev(node.this))
+    if isinstance(node, exp.Literal):
+        return node.this if node.is_string else int(node.this)
+    if isinstance(node, exp.Neg):
+        return -ev(node.this)
+    if isinstance(node, exp.Null):
+        return None
+    if isinstance(node, exp.DateAdd):
+        assert node.text("unit").upper() == "DAY", node.sql()
+        return as_date(ev(node.this)) + timedelta(days=ev(node.expression))
+    if isinstance(node, exp.Least):
+        return min(as_date(ev(arg)) for arg in (node.this, *node.expressions))
+    if isinstance(node, exp.And):
+        return bool(ev(node.this)) and bool(ev(node.expression))
+    if type(node).__name__ in _SQL_COMPARE:
+        return _SQL_COMPARE[type(node).__name__](as_date(ev(node.this)), as_date(ev(node.expression)))
+    if isinstance(node, exp.If):
+        false = node.args.get("false")
+        return ev(node.args["true"]) if ev(node.this) else (ev(false) if false is not None else None)
+    raise AssertionError(f"coverage simulator: unmodelled SQL node {type(node).__name__}: {node.sql()}")
+
+
+def _simulated_coverage(present_for):
+    """A callable(sql) -> the row the coverage reader returns over a fact holding ``present_for(today)``.
+    The reader's WHERE and its COVERAGE_DAYS expression are EVALUATED from the parsed SQL (not
+    pattern-matched), so one model scores the pre- and post-fix readers alike."""
+    def coverage(sql: str) -> QueryResult:
+        import sqlglot
+        from sqlglot import exp
+
+        from app.logic import security as logic
+        today = logic.account_today()
+        tree = sqlglot.parse_one(sql, dialect="snowflake")
+        rows = [d for d in sorted(present_for(today)) if _sql_value(tree.args["where"].this, d, today)]
+        cols = {e.alias: e.this for e in tree.expressions}
+        distinct = cols["COVERAGE_DAYS"].this
+        assert isinstance(distinct, exp.Distinct), "COVERAGE_DAYS must stay a DENSITY (COUNT DISTINCT) count"
+        values = {_sql_value(distinct.expressions[0], d, today) for d in rows} - {None}
+        return _ok(pd.DataFrame([{"FIRST_DAY": rows[0] if rows else None, "LAST_DAY": rows[-1] if rows else None,
+                                  "FACT_ROWS": len(rows), "COVERAGE_DAYS": len(values), "LAST_LOAD": None}]))
+    return coverage
 
 
 def _drive_access(monkeypatch, results: dict, *, days: int = 7, bounds=None, stop_at_view: bool = False):
@@ -316,11 +374,71 @@ def _drive_access(monkeypatch, results: dict, *, days: int = 7, bounds=None, sto
 
 def test_login_fact_gate_measures_density_over_the_served_window(monkeypatch):
     """R1-101: one 90-day density read used to gate a 7-day window, so a 6-day hole inside it passed."""
-    seen = _drive_access(monkeypatch, {"sec_security_": _coverage_from_sql}, days=7, stop_at_view=True)
+    seen = _drive_access(monkeypatch, {"sec_security_": _simulated_coverage(_fact_days_present)}, days=7,
+                         stop_at_view=True)
     logins = next(s for s in seen["batches"][-1] if s["key"] == "logins")
     assert "ACCOUNT_USAGE.LOGIN_HISTORY" in logins["sql"]            # the live reader, not the gappy fact
     assert "FACT_SECURITY_LOGIN_DAILY" not in logins["sql"]
     assert "coverage fallback" in logins["source"]
+
+
+#: (id, page days, calendar window, reader cap, baseline lookback, an interior hole in days ago)
+_GATE_SPANS = [
+    ("7d", 7, None, 30, 0, 4),
+    ("30d", 30, None, 30, 0, 4),
+    ("7d+baseline", 7, None, 90, 90, 50),
+    ("current-month", 30, CURRENT_MONTH_WINDOW, 30, 0, 4),
+    ("last-month", 30, LAST_MONTH_WINDOW, 30, 0, 45),
+    ("current-year", 272, CURRENT_YEAR_WINDOW, 30, 0, 4),
+    ("current-year+baseline", 272, CURRENT_YEAR_WINDOW, 90, 90, 120),
+]
+
+
+@pytest.mark.parametrize("days,window,cap,lookback,hole", [g[1:] for g in _GATE_SPANS],
+                         ids=[g[0] for g in _GATE_SPANS])
+def test_login_fact_gate_rejects_one_interior_hole_with_today_loaded(monkeypatch, days, window, cap,
+                                                                     lookback, hole):
+    """R1-101 follow-up: the trailing count spanned days+1 calendar days (today included) against a
+    requirement of ``days``, and the calendar count ran to the range end against a requirement that
+    stopped at today. Once the hourly load wrote today, today's row stood in for a missing interior
+    day and the gappy fact served under its '(hourly)' label. Count and requirement now cover the
+    same complete days (today excluded on both sides)."""
+    from app.logic import security as logic
+    monkeypatch.setattr(logic, "account_today", lambda: TODAY)
+    served_days, served_bounds = logic.capped_window(days, window_bounds(window, TODAY) if window else None, cap)
+    sql = security_sql.security_login_fact_coverage(served_days, bounds=served_bounds, lookback=lookback)
+    required = logic.coverage_required_days(served_days, served_bounds, lookback=lookback)
+
+    def gate(present: set[date]) -> bool:
+        return logic.fact_coverage_complete(_simulated_coverage(lambda _today: present)(sql), required)
+
+    assert gate(_dense_fact(TODAY))                                   # a dense fact still serves
+    assert gate(_dense_fact(TODAY, today_loaded=False))               # today's partition is never required
+    assert not gate(_dense_fact(TODAY, holes=(hole,)))                # one interior hole, today loaded: live
+    yesterday_in_span = served_bounds is None or served_bounds[1] >= TODAY
+    assert gate(_dense_fact(TODAY, holes=(1,))) is not yesterday_in_span   # a missing yesterday is a hole too
+
+
+@pytest.mark.parametrize("days,window", [(7, None), (30, None), (30, CURRENT_MONTH_WINDOW)])
+def test_access_tab_serves_live_logins_over_a_one_day_hole_with_today_loaded(monkeypatch, days, window):
+    from app.logic import security as logic
+    monkeypatch.setattr(logic, "account_today", lambda: TODAY)
+    bounds = window_bounds(window, TODAY) if window else None
+
+    def served(present_for) -> dict:
+        seen = _drive_access(monkeypatch, {"sec_security_": _simulated_coverage(present_for)}, days=days,
+                             bounds=bounds, stop_at_view=True)
+        return {s["key"]: s for s in seen["batches"][-1]}
+
+    specs = served(lambda t: _dense_fact(t, holes=(4,)))
+    for key in ("logins", "login_reasons"):
+        assert "FACT_SECURITY_LOGIN_DAILY" not in specs[key]["sql"]
+        assert "ACCOUNT_USAGE.LOGIN_HISTORY" in specs[key]["sql"]
+        assert specs[key]["source"] == "ACCOUNT_USAGE.LOGIN_HISTORY (coverage fallback)"
+    specs = served(_dense_fact)                                       # control: no hole, the fact serves
+    for key in ("logins", "login_reasons"):
+        assert "FACT_SECURITY_LOGIN_DAILY" in specs[key]["sql"]
+        assert specs[key]["source"] == "FACT_SECURITY_LOGIN_DAILY (hourly)"
 
 
 def _mfa_unproven_results() -> dict:
@@ -371,7 +489,13 @@ def test_single_factor_header_and_clean_states_name_the_served_window(monkeypatc
     seen = _drive_access(monkeypatch, {"sec_login_fact_coverage": _ok()}, days=272, bounds=bounds)
     served = [m for k, m in seen["empty"] if m.startswith("No failed logins in Aug 31 - Sep 30")]
     assert len(served) == 2                                          # failed logins + their reasons
-    assert any("capped at 30 days" in m for m in served)
+    # the cap note states the SERVED span (a calendar window keeps a whole month: 31 days), never a
+    # '30 days' beside a printed 31-day range
+    assert "No failed logins in Aug 31 - Sep 30 (this reader is capped at the last 31 days)." in served
+    assert not any("capped at 30 days" in m for m in served)
+    seen = _drive_access(monkeypatch, {"sec_login_fact_coverage": _ok()}, days=90)
+    assert ("clean", "No failed logins in the last 30 days (this reader is capped at the last 30 days).") \
+        in seen["empty"]
 
 
 def test_takeover_high_total_mirrors_takeover_severity():
@@ -607,7 +731,7 @@ def test_breakglass_label_follows_the_company_scope(monkeypatch):
 
 # ============================================================ R1-027 / R1-190: export pack ====
 
-def _drive_pack(monkeypatch, days: int, truncated: tuple[str, ...] = ()):
+def _drive_pack(monkeypatch, days: int, truncated: tuple[str, ...] = (), *, bounds=None):
     sec = _sec()
     import app.ui.components as components
     specs: list = []
@@ -623,7 +747,7 @@ def _drive_pack(monkeypatch, days: int, truncated: tuple[str, ...] = ()):
     monkeypatch.setattr(components, "log_ui_event", lambda *_a, **_k: None)
     fake, _ = _harness(monkeypatch, sec, {}, button=True, run_batch=fake_batch,
                        cache_scope=lambda: "s", export_button=lambda *_a, **_k: None)
-    sec._export_pack("ALL", days, f"Last {days} days", bounds=None)
+    sec._export_pack("ALL", days, f"Last {days} days", bounds=bounds)
     blob = fake.session_state["_ow_security_pack"]["data"]
     with zipfile.ZipFile(io.BytesIO(blob)) as z:
         manifest = z.read("MANIFEST.txt").decode("utf-8")
@@ -634,12 +758,22 @@ def _drive_pack(monkeypatch, days: int, truncated: tuple[str, ...] = ()):
 
 def test_pack_manifest_states_each_windowed_sheets_served_span(monkeypatch):
     _, _, lines, mfa_csv, _ = _drive_pack(monkeypatch, 90)
-    assert "covers the last 30 days (reader capped at 30 days" in lines["failed_logins_window"]
+    assert "covers the last 30 days (reader capped at the last 30 days" in lines["failed_logins_window"]
     assert "covers the last 90 days" in lines["role_grants_window"]
     assert "capped" not in lines["role_grants_window"]
     _, _, lines, _, _ = _drive_pack(monkeypatch, 365)
-    assert "covers the last 90 days (reader capped at 90 days" in lines["role_grants_window"]
+    assert "covers the last 90 days (reader capped at the last 90 days" in lines["role_grants_window"]
     assert "TOTAL_USERS_WIN" not in mfa_csv                              # KPI helper never exported
+
+
+def test_pack_manifest_cap_note_matches_the_served_calendar_span(monkeypatch):
+    """R1-182 follow-up: under 'Current year' the 30-day reader keeps a whole month (31 days), so the note
+    said 'capped at 30 days' beside a printed 31-day range."""
+    _, _, lines, _, _ = _drive_pack(monkeypatch, 272, bounds=window_bounds(CURRENT_YEAR_WINDOW, TODAY))
+    assert lines["failed_logins_window"].endswith(
+        "covers Aug 31 - Sep 30 (reader capped at the last 31 days — narrower than the page window)")
+    assert lines["role_grants_window"].endswith(
+        "covers Jul 3 - Sep 30 (reader capped at the last 90 days — narrower than the page window)")
 
 
 def test_pack_flags_truncated_sheets(monkeypatch):

@@ -94,9 +94,10 @@ def coverage_required_days(days: int, bounds: tuple | None, *, lookback: int = 0
     """Distinct fact days a served span must hold before the page trusts the fact over live.
 
     Pairs with ``security_sql.security_login_fact_coverage(days, bounds=..., lookback=...)``, which
-    counts density over exactly that span. Trailing: ``days + lookback`` (the span also holds today,
-    whose partition may not be loaded yet: the one day of slack the 30/30 and 90/90 gates already
-    use). Bounds: every day from ``start - lookback`` up to the earlier of the range end and today."""
+    counts density over exactly these COMPLETE days. Trailing: ``days + lookback`` days before today.
+    Bounds: every day from ``start - lookback`` up to the earlier of the range end and today. Today's
+    partition (partial, or not loaded yet) is neither required here nor counted there: counting it
+    let a loaded today stand in for a missing interior day."""
     if bounds is None:
         return int(days) + int(lookback)
     start, end = bounds

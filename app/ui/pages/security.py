@@ -317,7 +317,9 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
     _ld, _lb = capped_window(days, bounds, 30)
     _nd, _nb = capped_window(days, bounds, 90)
     _login_txt = served_window_text(_ld, _lb)
-    _login_cap = " (this reader is capped at 30 days)" if window_was_capped(days, bounds, _lb, 30) else ""
+    # worded from the SERVED span: a calendar window keeps a whole month (31 days) under the 30-day cap
+    _login_cap = (f" (this reader is capped at the last {_ld} days)"
+                  if window_was_capped(days, bounds, _lb, 30) else "")
     _baseline = security_sql.NETWORK_BASELINE_DAYS
     security_coverage = run(
         security_sql.security_login_fact_coverage(_ld, bounds=_lb), page=_PAGE,
@@ -1570,7 +1572,9 @@ def _pack_window_notes(days: int, bounds: tuple | None) -> dict[str, str]:
     for name, cap in (("role_grants_window", 90), ("failed_logins_window", 30)):
         served_days, served_bounds = capped_window(days, bounds, cap)
         text = served_window_text(served_days, served_bounds)
-        notes[name] = (f"covers {text} (reader capped at {cap} days — narrower than the page window)"
+        # the served span, not ``cap``: a calendar window keeps a whole month (31 days) on the 30-day reader
+        notes[name] = (f"covers {text} (reader capped at the last {served_days} days — narrower than the "
+                       "page window)"
                        if window_was_capped(days, bounds, served_bounds, cap) else f"covers {text}")
     return notes
 
