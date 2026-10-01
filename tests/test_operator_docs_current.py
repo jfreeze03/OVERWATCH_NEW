@@ -134,6 +134,29 @@ def test_full_rebuild_is_tip_agnostic_and_restores_the_opt_ins():
     assert "The runbook is docs/FULL_REBUILD.md" in read("snowflake/rebuild/README.md")
 
 
+def test_full_rebuild_restores_delivery_without_duplicates_or_lost_grants():
+    """d4 review: re-enable only the routes that were live (a duplicate disabled on purpose stays off),
+    re-grant the re-created integration, and say which Section B drops run live."""
+    fr = read("docs/FULL_REBUILD.md")
+    step0 = _section(fr, "## 0. Decide what survives", "## 1. Backups")
+    assert re.search(r"SELECT ROUTE_ID, INTEGRATION_NAME FROM DBA_MAINT_DB\.OVERWATCH\.ALERT_ROUTES\s+WHERE ENABLED;",
+                     step0)
+    assert "SHOW GRANTS ON INTEGRATION OVERWATCH_WEBHOOK_TEAMS;" in step0
+    step7b = _section(fr, "## 7b. Re-install the opt-in objects", "## 8. Prove the chain ticks")
+    assert re.search(r"SET ENABLED = TRUE\s+WHERE ROUTE_ID IN \(", step7b)
+    assert re.search(r"SET ENABLED = TRUE\s+WHERE INTEGRATION_NAME", fr) is None
+    assert "GRANT USAGE ON INTEGRATION OVERWATCH_WEBHOOK_TEAMS TO ROLE SNOW_ACCOUNTADMINS;" in step7b
+    assert "ALERT_DELIVERIES" in step7b and "route_send_failed" in step7b
+    # every table drop that runs live in teardown Section B is named in step 2
+    td = read("snowflake/teardown.sql")
+    section_b = _section(td, "-- B. OPERATOR DATA", "-- C. SHARED INFRASTRUCTURE")
+    live = re.findall(r"^DROP TABLE IF EXISTS DBA_MAINT_DB\.OVERWATCH\.(\w+);", section_b, re.M)
+    assert "ALERT_DELIVERIES" in live
+    step2 = _section(fr, "## 2. Teardown", "## 3. Migrations")
+    missing = [table for table in live if table not in step2]
+    assert not missing, missing
+
+
 def test_manual_deploy_path_uploads_every_app_folder():
     """R1-322 / R1-340: PUT does not recurse, so every folder holding app files is listed."""
     dep = read("DEPLOYMENT.md")

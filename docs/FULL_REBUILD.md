@@ -38,8 +38,14 @@ owns the objects — see DEPLOYMENT.md), in a worksheet with:
       SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;   -- TASK_ALERT_DRILL, TASK_REFRESH_ML_FORECAST
       SHOW NOTIFICATION INTEGRATIONS LIKE 'OVERWATCH%';
       DESC NOTIFICATION INTEGRATION OVERWATCH_EMAIL; -- ALLOWED_ / DEFAULT_RECIPIENTS go with it
+      SHOW GRANTS ON INTEGRATION OVERWATCH_WEBHOOK_TEAMS; -- and each one listed above:
+                                                     -- its grants go with it
+      SELECT ROUTE_ID, INTEGRATION_NAME FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES
+       WHERE ENABLED;                               -- the routes live now (step 7b)
 
-  Keep the Teams Workflows URL to hand: its secret is dropped too.
+  Keep the Teams Workflows URL to hand: its secret is dropped too. Keep the
+  live ROUTE_IDs as well: step 7b re-enables exactly those (the step-1
+  ALERT_ROUTES clone holds them too).
 
 ## 1. Backups (even for the keep-operator-data path — they cost nothing)
 
@@ -67,14 +73,18 @@ everything it made (if V161 still stops on it, re-run V161 once the run ends).
 ## 2. Teardown
 
 Run snowflake/teardown.sql top to bottom (Section A executes; B and C stay
-commented unless you chose the factory reset in step 0). One exception runs
-live: the opt-in tail at the end of Section B drops the ML forecast model,
-the webhook secrets and the OVERWATCH_* notification integrations (step 7b
-puts them back). The file says to run those integration drops as
-ACCOUNTADMIN; if your role cannot drop one, that statement fails and Run All
-stops there, so run the rest of the file, VERIFY included, by hand. The
-VERIFY query at the bottom should list ONLY operator-data tables afterward
-(or nothing, after a factory reset).
+commented unless you chose the factory reset in step 0). Two parts of
+Section B run live anyway. Three rebuildable tables are dropped, and step 3
+re-creates them: APP_QUERY_TELEMETRY and ALERT_DELIVERIES (the per-route
+delivery ledger; step 7b(a) says what its reset means for delivery) come
+back empty, OW_SENDER_LEASE with its one seed row. And the opt-in tail at
+the end of Section B drops the ML forecast model, the webhook secrets and
+the OVERWATCH_* notification integrations (step 7b puts them back). The
+file says to run those integration drops as ACCOUNTADMIN; if your role
+cannot drop one, that statement fails and Run All stops there, so run the
+rest of the file, VERIFY included, by hand. The VERIFY query at the bottom
+should list ONLY operator-data tables afterward (or nothing, after a
+factory reset).
 
 ## 3. Migrations, in order, one file at a time
 
@@ -149,15 +159,40 @@ what step 0 listed:
 
 (a) **Teams delivery** (as ACCOUNTADMIN): snowflake/webhook_delivery.sql's
     first-time setup — the commented `CREATE SECRET IF NOT EXISTS` with the
-    URL pasted in Snowsight only, then open its GATE and run it. Its route
-    INSERT adds nothing when a route already names the integration, and if
-    you kept operator data, replaying V070 in step 3 DISABLED that route
-    (its integration was gone), so re-enable it:
+    URL pasted in Snowsight only, then open its GATE and run it. The
+    re-created integration carries no grants: re-apply each one step 0's
+    SHOW GRANTS listed, at least the one the notifier needs
+    (SP_NOTIFY_WEBHOOK runs as its owner, the deployment role, which is
+    SNOW_ACCOUNTADMINS here):
+
+        GRANT USAGE ON INTEGRATION OVERWATCH_WEBHOOK_TEAMS TO ROLE SNOW_ACCOUNTADMINS;
+
+    A PagerDuty or FinOps integration step 0 listed comes back the same way,
+    from that file's recipe, but skip the recipe's route INSERT: the kept
+    route still exists, and the INSERT would add a second one.
+
+    The setup's own route INSERT adds nothing when a route already names the
+    integration. If you kept operator data, replaying V070 in step 3
+    DISABLED every enabled route whose integration was gone. Re-enable
+    exactly the routes step 0 recorded as live, never every row that names
+    the integration: a duplicate route disabled on purpose would come back,
+    and every alert, digest and escalation would post once per duplicate.
 
         UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES SET ENABLED = TRUE
-         WHERE INTEGRATION_NAME = 'OVERWATCH_WEBHOOK_TEAMS';
+         WHERE ROUTE_ID IN ('<each ROUTE_ID step 0 listed>');
 
-    Then post one test card with the file's rotation-runbook CALL.
+    The teardown also emptied ALERT_DELIVERIES, so the first notifier run
+    after this re-posts every OPEN event of the last 24 hours (7 days for a
+    CRITICAL) that was already delivered. If that burst is unwanted, ACK or
+    resolve the stale events before the UPDATE.
+
+    Post one test card with the file's rotation-runbook CALL, then prove
+    delivery through the notifier itself: that CALL runs with ACCOUNTADMIN's
+    privileges, not the proc owner's, so it cannot catch a missing grant.
+    After the next TASK_ALERT_NOTIFY run with an eligible event,
+    ALERT_DELIVERIES holds new rows for the route and APP_ERROR_LOG has no
+    new `route_send_failed` row (PAGE 'NotifyWebhook').
+
 (b) **Email** (as ACCOUNTADMIN): re-create OVERWATCH_EMAIL from the PREREQS
     block of snowflake/native_alert_templates.sql (real ALLOWED_RECIPIENTS,
     USAGE to SNOW_ACCOUNTADMINS) and set its DEFAULT_RECIPIENTS for the V164
