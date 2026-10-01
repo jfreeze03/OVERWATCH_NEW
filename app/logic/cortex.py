@@ -54,7 +54,7 @@ def _account_day(value: object) -> pd.Timestamp:
     """One first-usage value as its ACCOUNT (Central) calendar day: a naive midnight Timestamp, or
     NaT. A tz-aware value (the live leg's MIN(USAGE_TIME), a TIMESTAMP_TZ) converts to
     ACCOUNT_TIMEZONE before the date is taken; a naive value is account wall time already (the mart
-    leg casts ::TIMESTAMP_NTZ) -- quotas._account_ts's rule. Taking the UTC date instead put an
+    leg converts to Central, then casts ::TIMESTAMP_NTZ; V167) -- quotas._account_ts's rule. Taking the UTC date instead put an
     evening (after ~19:00 Central) first usage on the NEXT day, a day short of account_today()."""
     try:
         ts = pd.Timestamp(value)

@@ -89,7 +89,8 @@ def _txt(value: object) -> str:
 
 def _account_ts(value: object) -> pd.Timestamp | None:
     """A timestamp as tz-NAIVE account (Central) wall time, or None. TIMESTAMP_LTZ values arrive tz-aware
-    (converted); naive values are taken as account time already (the SiS session runs in Central)."""
+    (converted); naive values are taken as account time already (the SiS session runs in Central, and the
+    fact's FIRST_TS / LAST_TS are converted to Central before the ::TIMESTAMP_NTZ cast, V167)."""
     if _txt(value) == "":
         return None
     try:

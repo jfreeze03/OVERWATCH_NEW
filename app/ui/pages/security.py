@@ -2018,7 +2018,7 @@ def _ai_guardrails_tab(company: str) -> None:
     # The live fallback uses the SAME sql + tier="recent" as the Cost page's live leg, so
     # its (sql,scope) cache is shared — the heavy scan is paid at most once across both
     # pages per TTL. probe=True suppresses the expected 002139 no-subscription absence.
-    usage = run(mart27_sql.ai_code_user_daily(company), page=_PAGE,
+    usage = run(mart27_sql.ai_code_user_daily(company, stamped=has_migration(167, _PAGE)), page=_PAGE,
                 key=f"coco_user_daily_fact_{company}", tier="hourly",
                 source="FACT_AI_USAGE_DAILY (Cortex Code, daily loader)",
                 max_rows=200_000)

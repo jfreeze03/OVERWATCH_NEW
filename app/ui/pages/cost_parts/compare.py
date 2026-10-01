@@ -25,6 +25,7 @@ from app.core.query import run, run_batch
 from app.core.result import is_setup_absence
 from app.data import mart27_sql
 from app.logic import compare as compare_logic
+from app.logic.cost_coverage import coverage_stamps, pattern_clean_from
 from app.logic.formulas import (
     account_today,
     blended_billed_usd,
@@ -44,8 +45,28 @@ from app.ui.components import (
     selectable_table,
     styled_table,
 )
+from app.ui.schema_gate import has_migration
 
 _PAGE = "Cost Intelligence"
+
+
+def _pattern_window_restamped(first_day: object) -> bool:
+    """PATTERN-RESTAMP (V167): True when every MART_PATTERN_COST_DAILY row from ``first_day`` on counts executions
+    -- V167 applied (its atomic loader + in-migration twin DELETE) and the day on or after the clean horizon
+    (V120's re-stamp, or the atomic reload's COVERAGE_FROM stamp when deeper). Before V167: False, the
+    caveat stays. Reads the stamp only behind the warehouse-row click (interaction-gated, never first paint)."""
+    if not has_migration(167, _PAGE):
+        return False
+    from datetime import date as _date
+
+    res = run(mart27_sql.fact_coverage_from("MART_PATTERN_COST_DAILY"), page=_PAGE, key="cmp_pattern_coverage",
+              tier="recent", source="SOURCE_FRESHNESS_STATE.COVERAGE_FROM (V167)", probe=True)
+    stamp = coverage_stamps(res.df if res is not None and res.ok else None).get("MART_PATTERN_COST_DAILY")
+    try:
+        day = _date.fromisoformat(str(first_day))
+    except ValueError:
+        return False
+    return day >= pattern_clean_from(stamp, mart27_sql.PATTERN_COST_RESTAMP_FROM)
 
 _PAIRINGS = {
     "Last full month vs prior": "month",
@@ -336,9 +357,12 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
         st.caption("Live per-warehouse scan (QUERY_HISTORY x QUERY_ATTRIBUTION_HISTORY), "
                    "measured compute credits at ~8h view lag — same $ attribution basis as the "
                    "account-wide movers. RUNS counts distinct executions, the basis the "
-                   "account-wide table uses since V120 (mart rows older than V120's 90-day "
-                   "re-stamp may still count attribution rows, which run higher for multi-hour "
-                   "queries). Click another warehouse to switch.")
+                   "account-wide table uses since V120"
+                   + ("" if _pattern_window_restamped(min(a0, b0)) else
+                      " (mart rows older than V120's 90-day "
+                      "re-stamp may still count attribution rows, which run higher for multi-hour "
+                      "queries)")
+                   + ". Click another warehouse to switch.")
         _pat = run(
             mart27_sql.compare_pattern_costs_by_warehouse(a0, a1, b0, b1, _sel_wh),
             page=_PAGE, key=f"cmp_pat_wh_{company}_{a0}_{b0}_{_sel_wh}", tier="recent",

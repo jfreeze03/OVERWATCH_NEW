@@ -15,15 +15,23 @@ from __future__ import annotations
 
 import streamlit as st
 
-from app.config import MAX_LIVE_WINDOW_DAYS
+from app.config import MAX_LIVE_WINDOW_DAYS, MAX_MART_WINDOW_DAYS
 from app.core.query import run, run_batch
 from app.core.result import is_setup_absence
 from app.data import cortex_sql, etl_sql, graph_sql, insights_sql, mart27_sql
 from app.logic import graphs
 from app.logic.call_tree import build_call_tree
+from app.logic.cost_coverage import (
+    ai_fact_coverage_row,
+    ai_fact_note,
+    coverage_stamps,
+    pattern_clean_from,
+    pattern_cost_cap,
+)
 from app.logic.date_windows import window_label, window_phrase
 from app.logic.directory import resolve_display
 from app.logic.formulas import (
+    account_today,
     credits_to_usd,
     format_usd,
     format_usd_precise,
@@ -44,6 +52,7 @@ from app.ui.components import (
     user_display_map,
     with_user_names,
 )
+from app.ui.schema_gate import has_migration
 
 _PAGE = "Cost Intelligence"
 
@@ -55,6 +64,28 @@ _PAGE = "Cost Intelligence"
 # account-wide MAX_LIVE_WINDOW_DAYS guardrail; it never loosens it. Anyone who
 # genuinely wants the long window opts back in with the toggle below.
 _UNIT_COST_MAX_DAYS = 30
+
+
+def _pattern_stamp():
+    """PATTERN-RESTAMP (V167): the pattern mart's atomic-reload stamp (SOURCE_FRESHNESS_STATE.COVERAGE_FROM), which
+    lifts the 90-day pattern cap. One core-table point read, only once V167 is applied; None before it (the column
+    does not exist), with no stamp yet, or when the read fails -- the pre-V167 behaviour."""
+    if not has_migration(167, _PAGE):
+        return None
+    res = run(mart27_sql.fact_coverage_from("MART_PATTERN_COST_DAILY"), page=_PAGE, key="unit_pattern_coverage",
+              tier="recent", source="SOURCE_FRESHNESS_STATE.COVERAGE_FROM (V167)", probe=True)
+    return coverage_stamps(res.df if res is not None and res.ok else None).get("MART_PATTERN_COST_DAILY")
+
+
+def _ai_fact_coverage() -> dict:
+    """R1-016 (V167): how far back the AI fact answers (mart27_sql.ai_fact_coverage; ALL_REACH is the reach the
+    all-source ai_costs_by_model gate tested). Read only on the Functions-only fallback, once V167 is applied;
+    {} before it or on a failed read (the help then names no reach)."""
+    if not has_migration(167, _PAGE):
+        return {}
+    res = run(mart27_sql.ai_fact_coverage(), page=_PAGE, key="unit_ai_reach", tier="recent",
+              source="FACT_AI_USAGE_DAILY + SOURCE_FRESHNESS_STATE (V167 coverage)", probe=True)
+    return ai_fact_coverage_row(res.df if res is not None and res.ok else None)
 
 
 
@@ -111,26 +142,37 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     # pattern read is mart-backed but clamps a trailing window to PATTERN_COST_MAX_DAYS (90): older
     # MART_PATTERN_COST_DAILY rows predate V120's RUNS re-stamp (v4.606 holistic review).
     _live_wlab = window_label(bounds, min(int(days), MAX_LIVE_WINDOW_DAYS))
+    # PATTERN-RESTAMP (V167): the pattern mart's atomic-reload stamp lifts the trailing pattern cap only as far
+    # as the stamp reaches (cost_coverage.pattern_cost_cap); no stamp -> PATTERN_COST_MAX_DAYS, the pre-V167
+    # path. The same cap the builder applies (pattern_cost(coverage_from=...)), so the labels name the read.
+    _pc_cov = _pattern_stamp()
+    _pc_cap = pattern_cost_cap(_pc_cov, floor=mart27_sql.PATTERN_COST_MAX_DAYS, ceiling=MAX_MART_WINDOW_DAYS)
+    _pc_follows = int(days) <= _pc_cap
     # The else branch's "pattern ... panels follow the page window" holds: it renders only when days <=
-    # MAX_LIVE_WINDOW_DAYS, which is not past PATTERN_COST_MAX_DAYS (both 90).
+    # MAX_LIVE_WINDOW_DAYS, which is not past PATTERN_COST_MAX_DAYS (both 90), the floor of _pc_cap.
     if int(uc_days) != int(days):
         st.caption(f"Page window is {_window_label.lower()}, but unit prices use "
                    f"<={_UNIT_COST_MAX_DAYS}d "
                    f"(scanning {uc_days}d) — a per-query price is stable, and the long scan "
                    "is the slowest read on this page. "
-                   + (f"The AI and task-graph pipeline panels below follow the page window from "
-                      f"their marts (a live fallback scans at most {MAX_LIVE_WINDOW_DAYS}d and says "
-                      f"so); the repeated-pattern panel reads at most the last "
-                      f"{mart27_sql.PATTERN_COST_MAX_DAYS} days from its mart (older pattern rows predate "
-                      f"a run-count fix); the ETL and serverless-task panels scan at most the "
-                      f"last {MAX_LIVE_WINDOW_DAYS} days." if _past_live
+                   + ((f"The AI, task-graph pipeline and repeated-pattern panels below follow the page window "
+                       f"from their marts (a live fallback scans at most {MAX_LIVE_WINDOW_DAYS}d and says "
+                       f"so); the ETL and serverless-task panels scan at most the "
+                       f"last {MAX_LIVE_WINDOW_DAYS} days." if _pc_follows else
+                       f"The AI and task-graph pipeline panels below follow the page window from "
+                       f"their marts (a live fallback scans at most {MAX_LIVE_WINDOW_DAYS}d and says "
+                       f"so); the repeated-pattern panel reads at most the last "
+                       f"{_pc_cap} days from its mart (older pattern rows predate "
+                       f"a run-count fix); the ETL and serverless-task panels scan at most the "
+                       f"last {MAX_LIVE_WINDOW_DAYS} days.") if _past_live
                       else "The AI, pattern, ETL and task-graph panels below still follow the "
                            "page window."))
 
     # AI fact-first BEFORE the batch (r18 #3): read FACT_AI_USAGE_DAILY and
     # pay the live Cortex scan only when the fact can't answer — the old
     # order paid the live scan in every batch, then usually threw it away.
-    _ai_m = run(mart27_sql.ai_costs_by_model(days, bounds=bounds), page=_PAGE, key=f"unit_ai_mart_{days}{_lm}",
+    _ai_m = run(mart27_sql.ai_costs_by_model(days, bounds=bounds, stamped=has_migration(167, _PAGE)),
+                page=_PAGE, key=f"unit_ai_mart_{days}{_lm}",
                 tier="recent", source="FACT_AI_USAGE_DAILY (mart, loaded daily — Code + Functions)")
 
     # ---- independent historical reads -> one parallel batch (Codex #15).
@@ -225,6 +267,9 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         # label "last month" then rather than the trailing "{days}d" (which would name a window
         # ending today). The served-days honesty only matters on the trailing branch.
         _ai_wlab = window_label(bounds, _ai_days)
+        # R1-016 (V167): the Functions-only help names the reach the all-source gate tested (ALL_REACH), never
+        # the raw loader stamp; read only on that fallback path.
+        _ai_note = "" if _ai_full else ai_fact_note(_ai_fact_coverage().get("ALL_REACH"), account_today())
         kpis.append({"label": f"AI spend ({_ai_wlab})" + ("" if _ai_full else " · Functions only"),
                      "value": format_usd(credits_to_usd(ai_credits, ai_rate)),
                      "delta": f"{len(ai_res.df)} source/model pair(s)",
@@ -233,8 +278,9 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                               "(unlike the query-cost KPIs beside it); per-user attribution is on "
                               "Chargeback & AI." if _ai_full else
                               "Cortex FUNCTIONS only — the Code+Functions mart (FACT_AI_USAGE_DAILY) "
-                              "was unavailable on this refresh, so Cortex Code spend is excluded and "
-                              f"the window is capped at {MAX_LIVE_WINDOW_DAYS}d (the live-scan limit).")})
+                              "does not cover this whole window (or could not be read), so Cortex Code "
+                              f"spend is excluded and the window is capped at {MAX_LIVE_WINDOW_DAYS}d (the "
+                              "live-scan limit)." + (f" {_ai_note}" if _ai_note else ""))})
     if kpis:
         kpi_row(kpis)
 
@@ -351,17 +397,19 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     # credits per parameterized hash — one cheap query run thousands of
     # times shows its real bill. (Kept: this is the MEASURED pattern lens;
     # Optimization's 'Recurring cost patterns' is the ALLOCATED estimate — distinct.)
-    _pc = run(mart27_sql.pattern_cost(days, company, 25, bounds=bounds), page=_PAGE,
+    _pc = run(mart27_sql.pattern_cost(days, company, 25, bounds=bounds, coverage_from=_pc_cov), page=_PAGE,
               key=f"patterns_{company}_{days}{_lm}", tier="recent",
               source=f"MART_PATTERN_COST_DAILY ({company} + account-level)", probe=True)
     # v4.606 holistic review: pattern_cost clamps a TRAILING window to PATTERN_COST_MAX_DAYS (90; older
-    # mart rows predate V120's RUNS re-stamp), so the caption and the clean state name the window it
-    # reads, never the page's 180/365d. A calendar preset reads its exact range (window_label names it).
-    _pc_days = min(int(days), mart27_sql.PATTERN_COST_MAX_DAYS)
+    # mart rows predate V120's RUNS re-stamp) -- since V167 to pattern_cost_cap(stamp), never past the
+    # pattern mart's atomic re-stamp -- so the caption and the clean state name the window it reads,
+    # never more than it reads. A calendar preset reads its exact range (window_label names it).
+    _pc_days = min(int(days), _pc_cap)
     _pc_cut = bounds is None and int(days) > _pc_days
     # ... and a calendar preset that starts before V120's re-stamp horizon (Current year) still sums the
     # un-restamped rows (the SQL keeps its exact bounds), so the caption says which rows can overstate runs.
-    _pc_restamp = mart27_sql.PATTERN_COST_RESTAMP_FROM
+    # V167: a deeper atomic re-stamp moves that horizon back (pattern_clean_from); no stamp keeps V120's.
+    _pc_restamp = pattern_clean_from(_pc_cov, mart27_sql.PATTERN_COST_RESTAMP_FROM)
     _pc_pre_fix = bounds is not None and bounds[0] < _pc_restamp
     if _pc.ok and not _pc.empty:
         _pd_df = _pc.df.copy()
@@ -745,7 +793,10 @@ def _graphs_tab(company: str, days: int, rate: float, database: str = "",
                          "USD": st.column_config.NumberColumn("$", format="$%.2f"),
                          "USD_PER_RUN": st.column_config.NumberColumn("$/run", format="$%.4f")})
     result_caption(res, note="TREND compares $/run between window halves (±10% = FLAT). "
-                             "Pipeline label = the graph's root task.")
+                             "Pipeline label = the graph's root task"
+                             + ("; on days loaded since V167 a run counts on the day its root task "
+                                "started (older days can still show a child-named row until the "
+                                "owner's task-graph rebuild)." if has_migration(167, _PAGE) else "."))
 
     # R1-163: serverless_task_daily clamps a trailing window to the live-scan limit, so the header
     # names the window actually scanned. R1-061 / R1-167: only a true absence is a grant gap; a

@@ -157,7 +157,7 @@ def test_ai_fact_gains_exact_stamps_and_backs_the_live_first_tab():
     # (on the fallback path). Order is locked by test_v041's _is_live_first; here we
     # only guard that both legs and the probe semantics are present.
     cb = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "ai_chargeback.py").read_text(encoding="utf-8")
-    assert "mart27_sql.ai_code_user_rollup(days, company, bounds=bounds)" in cb  # fact fallback kept
+    assert "mart27_sql.ai_code_user_rollup(days, company, bounds=bounds," in cb  # fact fallback kept (+ V167 stamp)
     assert "cortex_sql.cortex_code_user_daily(company)" in cb      # live leg (now primary)
     assert "probe=True" in cb
     assert "ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY" in cb       # still labeled as such

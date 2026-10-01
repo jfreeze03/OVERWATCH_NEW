@@ -167,9 +167,10 @@ def test_ai_guardrails_fact_read_is_not_row_capped_below_the_builder_limit():
     # read AND the live fallback must pass max_rows=200_000 so the recent days survive.
     src = (_ROOT / "app" / "ui" / "pages" / "security.py").read_text(encoding="utf-8")
     tab = src.split("def _ai_guardrails_tab", 1)[1].split("\ndef ", 1)[0]
-    assert "mart27_sql.ai_code_user_daily(company)" in tab
+    # (V167 / R1-016: the fact read also passes the coverage stamp gate, stamped=has_migration(167, _PAGE))
+    assert "mart27_sql.ai_code_user_daily(company, stamped=has_migration(167, _PAGE))" in tab
     # the fact read block must carry max_rows=200_000 (not the default 5000 cap)
-    fact = tab.split("mart27_sql.ai_code_user_daily(company)", 1)[1].split("if not usage", 1)[0]
+    fact = tab.split("mart27_sql.ai_code_user_daily(company, ", 1)[1].split("if not usage", 1)[0]
     assert "max_rows=200_000" in fact
     # the live fallback shares the Cost page's live scan (same sql + tier="recent")
     fallback = tab.split("if not usage.usable():", 1)[1]

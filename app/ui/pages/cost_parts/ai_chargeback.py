@@ -241,7 +241,8 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
         # the panel still answers with the last loaded day rather than an error. The
         # result_caption discloses the fact source and its older freshness.
         live_res = None
-        rollup_res = run(mart27_sql.ai_code_user_rollup(days, company, bounds=bounds), page=_PAGE,
+        rollup_res = run(mart27_sql.ai_code_user_rollup(days, company, bounds=bounds,
+                                                        stamped=has_migration(167, _PAGE)), page=_PAGE,
                          key=f"cortex_users_{company}_{days}{_lm}", tier="hourly",
                          source="FACT_AI_USAGE_DAILY (Cortex Code, daily loader - live scan unavailable)")
     if not guard(rollup_res,
@@ -317,7 +318,8 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
             # The rollup came off the fact, so the fact covers this window: an
             # empty daily read here is the ANSWER, not a cold mart. Reviving the
             # live scan would pay 15s to confirm what we already know.
-            daily_res = run(mart27_sql.ai_code_daily(days, company, bounds=bounds), page=_PAGE,
+            daily_res = run(mart27_sql.ai_code_daily(days, company, bounds=bounds,
+                                                     stamped=has_migration(167, _PAGE)), page=_PAGE,
                             key=f"cortex_daily_{company}_{days}{_lm}", tier="hourly",
                             source="FACT_AI_USAGE_DAILY (Cortex Code, daily loader)")
         if guard(daily_res, "No daily Cortex Code usage rows."):
