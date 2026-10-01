@@ -185,7 +185,10 @@ def test_objectives_panel_is_honest_about_absence_and_scope():
             "The custom SLO editor was retired (v4.597); any ACTIVE SLO_OBJECTIVES rows still alert and "
             "badge the Entity 360 watchlist.") in joined
     # review r1: the cap is disclosed plainly (no "conservative read" claim -- a stopped task can sit outside)
-    assert "judged over the 200 most-silent tasks only" in joined and "conservative" not in joined
+    # PR-1 R1-129: the read ranks by silence RELATIVE to each task's cadence, so a stopped fast-cadence
+    # task now leads it -- the caption names that order and drops the old "can fall outside" caveat
+    assert "judged over the 200 tasks most overdue against their own cadence only" in joined
+    assert "conservative" not in joined and "most-silent" not in joined
     contract = ops.split('"Pipeline SLA": {', 1)[1].split("},", 1)[0]
     assert "Dynamic-table refresh health honor Company/Database/Schema, as does " in contract
     # review r2: the builder clamps to 90 days, so the note and the tile help say so

@@ -2473,8 +2473,8 @@ def _builtin_objectives_panel(fc: dict, company: str = "ALL", days: int = 0, dat
     cyc = cycle_target_attainment(fc)
     cad = task_cadence_attainment(fresh)
     _misses = ((cyc["judged"] - cyc["met"]) if cyc else 0) + ((cad["late"] + cad["stale"]) if cad else 0)
-    # review r1: the cadence read is LIMIT 200 (most-silent first), so a capped "all on time" is not
-    # proven -- never green then (a stopped fast-cadence task can sit outside the 200)
+    # review r1: the cadence read is LIMIT 200 (most overdue against each task's own cadence first,
+    # PR-1 R1-129), so a capped "all on time" is not proven here -- never green then
     _health = alarm_health(_misses) if (cyc or cad) else ""
     if _health == "ok" and cad.get("capped"):
         _health = ""
@@ -2530,8 +2530,8 @@ def _builtin_objectives_panel(fc: dict, company: str = "ALL", days: int = 0, dat
         "Read-only objectives derived from the ETL clock and each task's own cadence — no setup. "
         "The custom SLO editor was retired (v4.597); any ACTIVE SLO_OBJECTIVES rows still alert and "
         "badge the Entity 360 watchlist."
-        + (" Tasks on cadence is judged over the 200 most-silent tasks only; a recently stopped "
-           "fast-cadence task can fall outside them (Tasks ▸ SLA reads the same 200)."
+        + (" Tasks on cadence is judged over the 200 tasks most overdue against their own cadence "
+           "only (Tasks ▸ SLA reads the same 200)."
            if cad.get("capped") else ""))
 
 
