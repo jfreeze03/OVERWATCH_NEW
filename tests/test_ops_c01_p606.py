@@ -113,3 +113,110 @@ def test_proc_regression_caption_names_the_prior_window():
     src = read(_OPS)
     assert "the prior equal-length window (percent change" not in src
     assert "the calendar month before \"\n                \"under Last month, else the equal-length window just before" in src
+
+
+# ----------------------------------- R1-046 / R1-075 / R1-130: pipeline-SLA failed read by its kind ----
+
+_SETUP = ("absent", "privilege", "unknown_function")
+_FAILED = ("missing_column", "timeout", "other")
+
+
+class _RecSt:
+    """A recording stand-in for streamlit: captions/markdown/warnings, expander labels, inert inputs."""
+
+    def __init__(self, toggles: bool = True):
+        from contextlib import contextmanager
+        self.calls: list[tuple[str, str]] = []
+        self.session_state: dict = {}
+        self._toggles = toggles
+
+        @contextmanager
+        def _expander(label="", *_a, **_k):
+            self.calls.append(("expander", str(label)))
+            yield self
+        self.expander = _expander
+
+    def __getattr__(self, name):           # any other st.* call: record and return an inert value
+        def _call(*a, **_k):
+            self.calls.append((name, str(a[0]) if a else ""))
+            return None
+        return _call
+
+    def caption(self, text, *_a, **_k):
+        self.calls.append(("caption", str(text)))
+
+    def toggle(self, *_a, **_k):
+        return self._toggles
+
+    def columns(self, n, *_a, **_k):
+        from contextlib import nullcontext
+        return [nullcontext() for _ in range(n if isinstance(n, int) else len(n))]
+
+    def text_input(self, *_a, **_k):
+        return ""
+
+    def number_input(self, *_a, value=0.0, **_k):
+        return value
+
+    def button(self, *_a, **_k):
+        return False
+
+    def text(self, kind: str) -> str:
+        return "\n".join(t for k, t in self.calls if k == kind)
+
+
+def _page(monkeypatch, results: dict, *, toggles: bool = True, **extra):
+    """Patch operations' st / run / empty_state / render helpers with recorders."""
+    from app.ui.pages import operations as ops
+    fake = _RecSt(toggles)
+    seen: dict = {"runs": [], "empty": [], "detail": [], "kpis": [], "tables": [], "headers": []}
+
+    def fake_run(_sql, *_a, key: str = "", **_kw):
+        seen["runs"].append(key)
+        return results[key]
+
+    def fake_empty(kind, msg, *_a, **k):
+        seen["empty"].append((kind, msg))
+        seen["detail"].append(k.get("detail"))
+
+    monkeypatch.setattr(ops, "st", fake)
+    monkeypatch.setattr(ops, "run", fake_run)
+    monkeypatch.setattr(ops, "empty_state", fake_empty)
+    for name, value in {"section_header": lambda title, health="", *_a, **_k: seen["headers"].append((title, health)),
+                        "result_caption": lambda *_a, **_k: None, "panel_help": lambda *_a, **_k: None,
+                        "kpi_row": lambda items, *_a, **_k: seen["kpis"].append(items),
+                        "styled_table": lambda df, *_a, **_k: seen["tables"].append(df),
+                        "entity_nav_table": lambda df, *_a, **_k: seen["tables"].append(df),
+                        **extra}.items():
+        monkeypatch.setattr(ops, name, value)
+    return ops, fake, seen
+
+
+def _stop(*_a, **_k):
+    raise _Stop
+
+
+@pytest.mark.parametrize("kind", _SETUP + _FAILED)
+def test_pipeline_sla_failed_read_renders_by_kind(monkeypatch, kind):
+    ops, fake, seen = _page(monkeypatch, {"sla_status": _failed(kind)}, _pipeline_prefetch=_stop)
+    with pytest.raises(_Stop):                       # stop at the next chapter's prefetch
+        ops._pipeline_data_checks(is_operator=True)
+    ((state, msg),) = seen["empty"]
+    if kind in _SETUP:
+        assert state == "needs_setup" and "not installed yet" in msg
+        assert ("expander", "Register a table") not in fake.calls
+    else:
+        assert state == "unavailable" and "not installed" not in msg
+        assert "Pipeline SLA freshness could not be read" in msg
+        assert seen["detail"] == [f"boom ({kind})"]
+        # registering only MERGEs OVERWATCH's own config table, so a failed DML scan keeps it reachable
+        assert ("expander", "Register a table") in fake.calls
+    assert not seen["kpis"] and not seen["tables"]
+
+
+def test_pipeline_sla_ok_empty_keeps_the_register_expander(monkeypatch):
+    ops, fake, seen = _page(monkeypatch, {"sla_status": _ok(pd.DataFrame())}, _pipeline_prefetch=_stop)
+    with pytest.raises(_Stop):
+        ops._pipeline_data_checks(is_operator=False)
+    assert [k for k, _m in seen["empty"]] == ["needs_setup"] and "No tables registered" in seen["empty"][0][1]
+    assert ("expander", "Register a table") in fake.calls

@@ -2717,51 +2717,59 @@ def _pipeline_data_checks(is_operator: bool, company: str = "ALL", database: str
     (+ table registration), reconciliation DQ (source vs target ties out / what keeps breaking),
     volume drops, row-volume anomalies, and stream staleness.
 
-    rec9 note: the freshness read no longer early-returns the whole tab — its ``not res.ok``
-    (PIPELINE_SLA_STATUS not installed) skips only the freshness forecast + register expander;
+    rec9 note: the freshness read no longer early-returns the whole tab — a setup absence
+    (PIPELINE_SLA_STATUS not installed / not readable) skips only the freshness forecast +
+    register expander, and any other failed read renders unavailable and keeps the expander;
     the volume/row-volume/stream signals below read their own independent metering views and
     stay visible (the old linear layout gated them behind the freshness read only incidentally)."""
     # Freshness SLA forecast (account-wide; thresholds are account policy).
     res = run(insights_sql.pipeline_sla_forecast(14), page=_PAGE, key="sla_status", tier="recent",
               source="ACCOUNT_USAGE.TABLE_DML_HISTORY x PIPELINE_SLA_STATUS")
-    if not res.ok:
+    if not res.ok and is_setup_absence(res.error_kind):
         empty_state("needs_setup", "Pipeline SLAs are not installed yet — an admin can verify on Admin → Migrations & freshness.")
+    elif not res.ok:
+        # PR-1 R1-046: a timeout of the 14-day TABLE_DML_HISTORY cadence scan, or schema drift, is a
+        # FAILED read of an installed registry -- never 'not installed yet' (the v4.605 kind split).
+        empty_state("unavailable", "Pipeline SLA freshness could not be read, so registered tables "
+                    "can't be scored right now.", detail=res.error)
+    elif res.empty:
+        empty_state("needs_setup", "No tables registered. Add rows to PIPELINE_SLA_CONFIG below; the view scores them automatically.")
     else:
-        if res.empty:
-            empty_state("needs_setup", "No tables registered. Add rows to PIPELINE_SLA_CONFIG below; the view scores them automatically.")
-        else:
-            # O10: fold each table's refresh cadence into a forward-looking tier so the
-            # tab warns BEFORE a miss, not only after. On-track/at-risk/overdue/breached.
-            df = pipeline_sla_forecast(res.df.copy())
-            met = int(df["SLA_MET"].fillna(False).astype(bool).sum())
-            total = len(df)
-            overdue = int((df["FORECAST"] == "Overdue").sum())
-            at_risk = int((df["FORECAST"] == "At risk").sum())
-            kpi_row([
-                {"label": "SLA compliance", "value": f"{met / total * 100:,.1f}%",
-                 "delta": f"{met}/{total} tables", "delta_color": "off"},
-                {"label": "Breaching now", "value": f"{total - met}",
-                 "delta_color": "inverse" if total - met else "off"},
-                {"label": "Trending to miss", "value": f"{overdue + at_risk}",
-                 "delta": f"{overdue} overdue · {at_risk} at risk", "delta_color": "off",
-                 "help": "Meets SLA now but overdue vs its own refresh cadence, or within "
-                         "one refresh cycle of the deadline — a leading indicator, not a miss yet."},
-            ])
-            _fcols = ["DATABASE_NAME", "SCHEMA_NAME", "TABLE_NAME", "OWNER", "FORECAST",
-                      "DETAIL", "HOURS_SINCE", "MAX_AGE_HOURS"]
-            forecast_rows = df[df["FORECAST"].isin(["Overdue", "At risk"])]
-            if not forecast_rows.empty:
-                st.warning("Forecast — registered tables trending toward a miss (still within SLA now):")
-                styled_table(forecast_rows[_fcols], sort_label="soonest to miss")
-            breaching = df[~df["SLA_MET"].fillna(False).astype(bool)]
-            if not breaching.empty:
-                st.warning("Tables past their freshness SLA:")
-                styled_table(breaching[_fcols])
-            with st.expander("All registered tables"):
-                styled_table(df)
-            result_caption(res, note="Freshness from ACCOUNT_USAGE.TABLES.LAST_ALTERED (metadata lag "
-                                      "up to ~2h); refresh cadence from TABLE_DML_HISTORY over 14 days.")
+        # O10: fold each table's refresh cadence into a forward-looking tier so the
+        # tab warns BEFORE a miss, not only after. On-track/at-risk/overdue/breached.
+        df = pipeline_sla_forecast(res.df.copy())
+        met = int(df["SLA_MET"].fillna(False).astype(bool).sum())
+        total = len(df)
+        overdue = int((df["FORECAST"] == "Overdue").sum())
+        at_risk = int((df["FORECAST"] == "At risk").sum())
+        kpi_row([
+            {"label": "SLA compliance", "value": f"{met / total * 100:,.1f}%",
+             "delta": f"{met}/{total} tables", "delta_color": "off"},
+            {"label": "Breaching now", "value": f"{total - met}",
+             "delta_color": "inverse" if total - met else "off"},
+            {"label": "Trending to miss", "value": f"{overdue + at_risk}",
+             "delta": f"{overdue} overdue · {at_risk} at risk", "delta_color": "off",
+             "help": "Meets SLA now but overdue vs its own refresh cadence, or within "
+                     "one refresh cycle of the deadline — a leading indicator, not a miss yet."},
+        ])
+        _fcols = ["DATABASE_NAME", "SCHEMA_NAME", "TABLE_NAME", "OWNER", "FORECAST",
+                  "DETAIL", "HOURS_SINCE", "MAX_AGE_HOURS"]
+        forecast_rows = df[df["FORECAST"].isin(["Overdue", "At risk"])]
+        if not forecast_rows.empty:
+            st.warning("Forecast — registered tables trending toward a miss (still within SLA now):")
+            styled_table(forecast_rows[_fcols], sort_label="soonest to miss")
+        breaching = df[~df["SLA_MET"].fillna(False).astype(bool)]
+        if not breaching.empty:
+            st.warning("Tables past their freshness SLA:")
+            styled_table(breaching[_fcols])
+        with st.expander("All registered tables"):
+            styled_table(df)
+        result_caption(res, note="Freshness from ACCOUNT_USAGE.TABLES.LAST_ALTERED (metadata lag "
+                                  "up to ~2h); refresh cadence from TABLE_DML_HISTORY over 14 days.")
 
+    # Registering only MERGEs OVERWATCH's own PIPELINE_SLA_CONFIG -- it does not depend on the
+    # TABLE_DML_HISTORY read, so only a true absence of the SLA objects hides it (R1-046).
+    if res.ok or not is_setup_absence(res.error_kind):
         with st.expander("Register a table"):
             # rec43 NOT applied here: st.form would freeze the live SQL preview until
             # submit, so the operator couldn't review the EXACT INSERT before running
