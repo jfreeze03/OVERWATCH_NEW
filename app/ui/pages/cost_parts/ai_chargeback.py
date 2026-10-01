@@ -624,7 +624,7 @@ def _suggested_quota_table(rec: pd.DataFrame | None, enriched: pd.DataFrame,
         {"label": f"Runaway-rule days, {QUOTA_LOOKBACK_DAYS}d", "value": f"{qs['runaway_days']:,}",
          "severity": "warn" if qs["runaway_days"] else "",
          "help": f"User-days over {RUNAWAY_CAP_MULTIPLE:g}x the daily cap AND at least {z_min:g} "
-                 "robust z above the user's own prior 90 active days (fewer than 5 = no baseline, "
+                 "robust z above the user's own active days in the prior 90 days (fewer than 5 = no baseline, "
                  "the cap alone decides) — the per-user AI runaway rule's test at its seed "
                  f"multiple, replayed day by day. {qs['runaway_users']:,} user(s) had at least one."},
         {"label": "Back-test: USD above the limits", "value": format_usd(qs["backtest_usd_over"]),

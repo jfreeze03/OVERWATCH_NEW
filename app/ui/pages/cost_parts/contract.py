@@ -758,7 +758,8 @@ def _contract_tab(settings: dict) -> None:
         "share (org rate-card panel above) before signing."
     )
     burn_res = daily_spend_wide(_PAGE)   # PERF #46: shared wide read; sliced to 30d at use
-    if guard(burn_res, "Need the metering fact loaded to plan (run the hourly task once)."):
+    if guard(burn_res, "Need the metering fact loaded to plan (run TASK_LOAD_DAILY / "
+                       "SP_LOAD_DAILY_FACTS once)."):
         # C1/C4: rate_now, ai_rate, the whole-day filter (N1) and the blended
         # eff_rate are all hoisted above the steering block now — the planner
         # reuses the SAME numbers instead of re-deriving its own, which is how

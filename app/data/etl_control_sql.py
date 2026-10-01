@@ -1052,7 +1052,7 @@ def run_cost_attribution_scan(
 # --- Phase 4b (Next-Fifty #14 Ph1): task evidence (CONTROL_STATUS x QUERY_HISTORY) ---
 # "Why did this ETL task fail or slow down?" — the task's own Snowflake CALL (status, error text) and
 # the statements that CALL ran (queued / compile / execution / spill), for ONE run. QUERY_HISTORY only:
-# QUERY_ATTRIBUTION_HISTORY lags ~6h and drops short or warehouse-less statements, so a morning read of
+# QUERY_ATTRIBUTION_HISTORY lags up to ~8h and drops short or warehouse-less statements, so a morning read of
 # last night's cycle would usually show no children there.
 MAX_EVIDENCE_ROWS = 50   # a task has a handful of CALL attempts; the one bounds-only row counts too
 EVIDENCE_SLACK_MIN = 5   # +/- minutes of Informatica-vs-Snowflake clock skew around the CONTROL_STATUS window
@@ -1096,7 +1096,7 @@ def run_task_evidence_scan(control_fqn: object, *, task: object, workflow: objec
     is in another database. A non-3-part FQN states no database, so no preference applies. The filter
     runs inside ``calls``, so the window totals cover only the kept CALLs.
 
-    CHILDREN: QUERY_HISTORY has no ROOT_QUERY_ID (only QUERY_ATTRIBUTION_HISTORY does, ~6h late), so a
+    CHILDREN: QUERY_HISTORY has no ROOT_QUERY_ID (only QUERY_ATTRIBUTION_HISTORY does, up to ~8h late), so a
     CALL's children are the other statements in the CALL's SESSION_ID that started between the CALL's
     start and end. A wrong linkage shows an empty breakdown, never wrong numbers; the status and error
     verdict does not depend on it. Failed CALLs are KEPT (no credits HAVING — a failed CALL bills ~0).

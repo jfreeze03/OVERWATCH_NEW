@@ -1673,9 +1673,10 @@ def daily_spend_wide(page: str) -> QueryResult:
     shared across Brief/Overview/Contract and across pages within a session. Callers slice
     the returned frame with formulas.daily_spend_last_n(df, n).
 
-    tier='hourly' matches FACT_METERING_DAILY's hourly ingest cadence (a 'recent'/300s TTL
-    would rescan ~12x/hr for data that changes hourly); the refresh salt + domain salts still
-    invalidate immediately on manual refresh / post-write.
+    FACT_METERING_DAILY loads daily (~06:45 CT via TASK_LOAD_DAILY, then
+    TASK_NIGHTLY_RECONCILE); tier='hourly' is just a cheap 1h TTL for data that changes at
+    most once a day (a 'recent'/300s TTL would rescan for nothing). The refresh salt + domain
+    salts still invalidate immediately on manual refresh / post-write.
     """
     from app.core.query import run  # local import: avoid the app.ui<->app.core cycle
     return run(mart_sql.fact_daily_spend(mart_sql.WIDE_DAILY_SPEND_DAYS),

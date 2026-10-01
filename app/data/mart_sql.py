@@ -60,9 +60,12 @@ def exec_board(company: str, days: int, window: object = None) -> str:
     # Calendar-preset WINDOW_DAYS keys off the ACCOUNT clock (America/Chicago), matching
     # the V123 loader (SP_REFRESH_EXEC_BOARD) and every other account_today-anchored
     # calendar-month surface (health-strip MTD, storage calendar, DS quarter, MTD pace
-    # KPI). Session/UTC CURRENT_DATE() drifted one day from those each evening past
-    # Chicago midnight, so the board's days-into-month and the reader<->loader key could
-    # disagree (blank board / a "this month" differing from the pace KPI by a month).
+    # KPI). A session-tz CURRENT_DATE() is Central only through the account default TIMEZONE
+    # (owner's-rights SiS cannot ALTER SESSION); under any other session zone it would drift a
+    # day from those near Chicago midnight, so the board's days-into-month and the reader<->loader
+    # key could disagree. The pin is defence in depth. Note: Overview reads the board only for
+    # trailing windows (calendar presets take the bounded live path), so these two calendar
+    # branches currently have no caller.
     _acct_today = account_today_sql()
     if window == CURRENT_MONTH_WINDOW:
         window_clause = (
@@ -258,9 +261,10 @@ SELECT DAY, {_billed_split_cols()}
 FROM {mart_object("FACT_METERING_DAILY")}
 -- r30 #1: anchor the year boundary to the ACCOUNT clock, matching the MTD (account_
 -- month_start_sql) and quarter (account_today_sql) sibling builders. Session-tz
--- CURRENT_DATE() is UTC under SiS, so on New Year's Eve evening (America/Chicago) it
--- already reads Jan 1 and DATE_TRUNC('year', ...) jumped to the new year -> the YTD
--- chart went empty for the last ~6 hours of the year.
+-- CURRENT_DATE() is Central only through the account default TIMEZONE; under a non-Central
+-- session zone it would read Jan 1 on New Year's Eve evening (America/Chicago) and
+-- DATE_TRUNC('year', ...) would jump to the new year, emptying the YTD chart. The pin keeps
+-- YTD right whatever the session zone.
 WHERE DAY >= DATE_TRUNC('year', {account_today_sql()})
 GROUP BY DAY
 ORDER BY DAY
@@ -2026,9 +2030,10 @@ FROM (
         -- byte-match the COST_CONTRACT_BREACH paging alert (V064 SP_ALERT_SCAN_DAILY) or the KPI
         -- and the alert diverge (test_rec20_alert_matches_app_mart_window). Realigning both to the
         -- account clock would take an owner-applied migration to alter the alert proc, deferred
-        -- until then; the residual ~6h/day account-vs-UTC boundary drift is a rounding-scale bias
-        -- on a 30-day mean. (EXHAUST_DATE's anchor above is account-tz — a displayed date, not
-        -- part of the alert-matched burn.)
+        -- until then. Today both the app session and the alert task inherit the account's Central
+        -- default TIMEZONE, so the window already matches the account clock; moving both onto
+        -- explicit pins would only harden against a future zone change. (EXHAUST_DATE's anchor
+        -- above is account-tz — a displayed date, not part of the alert-matched burn.)
         (SELECT COALESCE(SUM(CREDITS_BILLED), 0) / NULLIF(COUNT(DISTINCT DAY), 0)
          FROM {mart_object("FACT_METERING_DAILY")}
          WHERE DAY BETWEEN DATEADD('day', -30, CURRENT_DATE())
@@ -2876,7 +2881,7 @@ def last_delivery_health() -> str:
     2026-07-31: 'no alerts today — is it QUIET, or is delivery BROKEN?'
 
     Those are different states and the app never separated them. The sender is a
-    per-route DIGEST bounded to a 24h window, and alert scanning dedupes on keys that
+    per-route DIGEST bounded to a send window (24h; 7d for CRITICAL), and alert scanning dedupes on keys that
     mostly carry the day — so a chronic condition raises ONCE and a genuinely quiet
     stretch produces zero messages. Silence alone proves nothing.
 
@@ -2888,7 +2893,7 @@ def last_delivery_health() -> str:
     and names the stuck/failing route.
 
     ELIGIBLE_NOW mirrors the sender's own eligibility predicate per route (open, inside
-    its 24h window, config-joined, matching THIS route's family/company/severity, not
+    its send window (24h; 7d for CRITICAL), config-joined, matching THIS route's family/company/severity, not
     already in the ledger for THIS route).
 
     Recovery-aware failure state (Codex #42): a route is only FAILING_NOW when its
@@ -2903,7 +2908,7 @@ def last_delivery_health() -> str:
     one sender cycle + grace (hourly cadence -> 90m). A brand-new event right after a quiet
     week is young and NOT stuck; an old backlog is stuck even when an unrelated recent send
     would have reset a last-sent test. EXPIRED_UNDELIVERED (open, route-matching, undelivered
-    events that aged past the sender's 24h window) is folded into OLDEST_ELIGIBLE (#15), so a
+    events that aged past the sender's send window) is folded into OLDEST_ELIGIBLE (#15), so a
     stranded route reads STUCK rather than 'Quiet'.
 
     Failures are attributed per route from APP_ERROR_LOG.CONTEXT, which the sender writes
@@ -2950,7 +2955,7 @@ consec AS (
 ),
 eligible AS (
     -- per-route OPEN + undelivered events matching this route's predicate (mirrors the
-    -- sender). #15: split into ELIGIBLE_NOW (inside the sender's 24h window) and
+    -- sender). #15: split into ELIGIBLE_NOW (inside the sender's send window, 24h; 7d for CRITICAL) and
     -- EXPIRED_UNDELIVERED (aged PAST the window still open + undelivered — a stranded
     -- backlog ELIGIBLE_NOW alone can't see, which used to make a broken route read
     -- 'Quiet'). #14: OLDEST_ELIGIBLE = MIN(RAISED_AT) over ALL such events is the age the
@@ -2982,7 +2987,7 @@ summary AS (
     SELECT COUNT(*) AS ENABLED_ROUTES FROM {core_object("ALERT_ROUTES")} WHERE ENABLED
 ),
 dist_eligible AS (
-    -- Account-wide DISTINCT eligible events inside the sender's 24h window. The card's
+    -- Account-wide DISTINCT eligible events inside the sender's send window. The card's
     -- 'Eligible to send now' headline is a count of DISTINCT events that will actually
     -- be delivered — NOT the sum of per-route ELIGIBLE_NOW, which double-counts one
     -- event that matches several enabled routes. Same eligibility predicate as the

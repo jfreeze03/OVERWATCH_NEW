@@ -1333,9 +1333,10 @@ SELECT g.ROLE AS ADMIN_ROLE, g.GRANTEE_NAME AS USER_NAME,
        (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS p
          WHERE p.ROLE = g.ROLE AND p.GRANTEE_NAME = g.GRANTEE_NAME
            AND p.CREATED_ON < g.CREATED_ON) AS PRIOR_GRANTS,
-       -- Account-local (Chicago) so the off-hours/weekend flag grant_anomaly_flags
-       -- computes matches the operator's clock, not the SiS session tz (UTC/LA under
-       -- owner's-rights, where ALTER SESSION is a no-op). Mirrors unload_risk_events.
+       -- Account-local (Chicago), pinned explicitly so the off-hours/weekend flag
+       -- grant_anomaly_flags computes matches the operator's clock even if the session zone
+       -- (Central today only via the account default; ALTER SESSION is a no-op under
+       -- owner's-rights SiS) ever changes. Mirrors unload_risk_events.
        DAYOFWEEKISO(CONVERT_TIMEZONE('America/Chicago', g.CREATED_ON)) AS DOW_ISO,
        HOUR(CONVERT_TIMEZONE('America/Chicago', g.CREATED_ON)) AS HOUR_OF_DAY
 FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS g

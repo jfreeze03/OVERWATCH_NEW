@@ -1796,7 +1796,7 @@ def call_cost_lookup(ident: str, days: int = 7) -> str:
     SESSION_ID (owner question 2026-07-10: 'three procs in one session, no
     graph id'). No task graph needed — children roll up to their CALL via
     QUERY_ATTRIBUTION_HISTORY.ROOT_QUERY_ID for ad-hoc sessions too.
-    ~6h attribution lag; idle time excluded; children that ran without a
+    Up to ~8h attribution lag; idle time excluded; children that ran without a
     warehouse don't appear (same caveats as the proc leaderboard)."""
     from app.core.sqlsafe import sql_literal
     days = bounded_days(days, 30)
@@ -1858,7 +1858,7 @@ def proc_cost_trend(proc_name: str, days: int, company: str = "ALL",
 
     Same extraction and ROOT_QUERY_ID rollup as the $/call leaderboard, so
     the two always agree; a bare name matches qualified CALLs via the
-    suffix arm. Attribution lags ~6h; idle excluded; DATABASE/SCHEMA are
+    suffix arm. Attribution lags up to ~8h; idle excluded; DATABASE/SCHEMA are
     the CALL's session context. POSIX classes only.
     """
     from app.core.sqlsafe import contains_filter, sql_literal
@@ -1938,7 +1938,7 @@ def procedure_child_cost_breakdown(proc_name: str, days: int, company: str = "AL
     the +1d attribution lag headroom mirror the leaderboard's att read. The CALL's own attribution
     row (ROOT_QUERY_ID IS NULL) becomes one 'CALL (own overhead)' bucket; child statements group by
     QUERY_PARAMETERIZED_HASH (a pruned-history child with no hash falls into one 'history pruned'
-    bucket). Attribution lags ~6h; idle time excluded (same caveats)."""
+    bucket). Attribution lags up to ~8h; idle time excluded (same caveats)."""
     from app.core.sqlsafe import contains_filter, sql_literal
 
     days = bounded_days(days)

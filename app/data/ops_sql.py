@@ -1002,7 +1002,7 @@ def proc_sla_rollup(days: int, company: str = "ALL", warehouse_contains: str = "
     same-named procs, mirroring insights_sql.procedure_costs_usd. App-issued CALLs
     (OVERWATCH's own tag/marker, common.not_app_self_sql) are dropped as self-noise; the task-issued proc runs a
     DBA cares about are kept. Ranked by frequency x duration so the procs that
-    dominate the CALL workload surface first. ~6h ACCOUNT_USAGE latency applies.
+    dominate the CALL workload surface first. QUERY_HISTORY latency (up to ~45 min) applies.
     """
     days = bounded_days(days)
     limit = max(5, min(int(limit or 50), 200))
@@ -1068,7 +1068,7 @@ def proc_regression(days: int, company: str = "ALL", warehouse_contains: str = "
     ``days`` full days before it. Under ``bounds`` a whole calendar month (Last month) is
     compared with the calendar month before it; a period-to-date range (Current month /
     Current year) with the equal-length span just before its start. Ranked by p95 growth,
-    worst first. ~6h ACCOUNT_USAGE latency applies to the current window's most recent hours.
+    worst first. QUERY_HISTORY latency (up to ~45 min) applies to the current window's newest minutes.
     """
     days = bounded_days(days)
     min_calls = max(1, min(int(min_calls or 5), 10000))
@@ -1687,7 +1687,8 @@ LIMIT 2000
 def volume_deltas(company: str = "ALL", database: str = "", schema_contains: str = "") -> str:
     """Yesterday's rows-added vs prior-7d average per moving table — the panel behind
     the PIPE_VOLUME_DROP alert. That alert is LIVE: SP_ANOMALY_SWEEP (TASK_ANOMALY_SWEEP,
-    06:40 CT daily) raises a HIGH event when a PROD table's rows-added collapses past a 50%
+    07:00 CT daily — a standalone cron since V114, firing after the 06:45 TASK_LOAD_DAILY)
+    raises a HIGH event when a PROD table's rows-added collapses past a 50%
     drop vs its prior-7-day average, gated on ALERT_CONFIG.ENABLED (so it can be turned off).
 
     Honors the scope-bar company/database/schema filters (the DB-grain diagnostics on this tab

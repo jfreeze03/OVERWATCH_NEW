@@ -827,8 +827,8 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                 "now-fully-failing proc has no latency signal, so watch the rollup's FAIL_PCT "
                 "above. 'Faster but failing' flags a proc that only looks quicker because it now "
                 "errors out. Proc name is parsed from the CALL text and grouped with DB+schema; a "
-                "bare vs fully-qualified CALL can split one proc. ~6h ACCOUNT_USAGE latency, so "
-                "the newest hours under-report.")
+                "bare vs fully-qualified CALL can split one proc. QUERY_HISTORY lags up to ~45 "
+                "min, so the newest minutes under-report.")
 
     section_header("Query drill-through", "", "search")
     candidate_ids: list[str] = []
@@ -1346,10 +1346,18 @@ def _dq_row_volume_panel(preloaded=None) -> None:
     Complements the 50%-cliff Volume drops alert with an outlier-resistant
     (median/MAD) score of yesterday's rows-added vs each table's own trailing
     baseline, so it catches both spikes and drops on steady movers and routes each
-    finding to the catalog owner. Null-rate / schema-drift monitors (which need a
-    stored baseline) and the DQ_BREACH alert are the deferred owner-migration
-    halves."""
+    finding to the catalog owner. Server-side, DQ_BREACH (V132) and DQ_SCHEMA_DRIFT (V133)
+    are live SP_ANOMALY_SWEEP arms; only the null-rate monitor (it needs table-data
+    scans and SELECT grants) remains a deferred owner-migration half."""
     section_header("Row-volume anomalies (registered products, 28d)", "", "pipeline")
+    # Law 12: the help claims the V132/V133 alerts only once applied (V133 requires V132).
+    _dq_alerts_tail = (
+        "Server-side, the daily anomaly sweep books the same robust-z finding as a DQ_BREACH alert "
+        "(V132), and DQ_SCHEMA_DRIFT (V133) alerts when a registered table's columns are added, "
+        "removed or retyped. Only a null-rate monitor is still deferred."
+        if has_migration(133, _PAGE) else
+        "The DQ_BREACH alert, plus null-rate and schema-drift monitors, are the deferred "
+        "owner-migration half.")
     panel_help(
         "Robust z-score (median / MAD, floored at 15% of the median so a rock-steady table "
         "doesn't fire on jitter; threshold 3.5) of each table's MOST RECENT load of "
@@ -1364,8 +1372,7 @@ def _dq_row_volume_panel(preloaded=None) -> None:
         "the backstop), a table whose weekend loads are legitimately smaller-but-nonzero "
         "(its own baseline widens), and objects not registered by their exact "
         "DB.SCHEMA.TABLE name (only the database registration is then used). DAYS_STALE "
-        "marks a row scored on an old load. The DQ_BREACH alert, plus null-rate and "
-        "schema-drift monitors, are the deferred owner-migration half."
+        "marks a row scored on an old load. " + _dq_alerts_tail
     )
     # R1-041: lift run()'s 5,000-row cap — the series is (table, day) rows bounded to 600 tables in SQL.
     rv = preloaded or run(dq_sql.product_row_volume(28), page=_PAGE, key="dq_row_volume", tier="recent",
@@ -2273,13 +2280,13 @@ def _cost_attribution_panel() -> None:
                           "so the tab adds no scan cost until you ask."):
         st.caption("Toggle on to attribute the latest run's measured Snowflake credits to its tasks. "
                    "It reuses the usage views the app already reads and runs only on demand, so it "
-                   "adds no cost until requested. Credits lag ~6h.")
+                   "adds no cost until requested. Credits lag up to ~8h.")
         return
     res = run(scan_sql, page=_PAGE, key="etl_cost_attribution", tier="recent",
               source="CONTROL_STATUS x QUERY_ATTRIBUTION_HISTORY (attributed credits, on demand)",
               max_rows=etl_control_sql.MAX_COST_ROWS)
     if guard(res, "No attributed credits for the latest run yet — Snowflake's usage metering lags up "
-             "to ~6h, so a run from the last few hours appears here once it finishes metering.",
+             "to ~8h, so a run from the last few hours appears here once it finishes metering.",
              setup_hint="The app role needs SELECT on the CONTROL_STATUS table "
                         "(GRANT SELECT ON <table> TO ROLE <app role>); the usage views it already reads."):
         df = res.df.copy()
@@ -2311,7 +2318,7 @@ def _cost_attribution_panel() -> None:
                      "mapped to one of its tasks. The rest — concurrent workflows and ad-hoc queries "
                      "on those warehouses, or statements whose text didn't name a task — stays "
                      "visible in the '(unattributed)' row, never hidden. 0% means nothing has "
-                     "mapped yet (a run from the last few hours may not be metered — ~6h usage "
+                     "mapped yet (a run from the last few hours may not be metered — ~8h usage "
                      "lag); the row then holds every query in the window."},
             {"label": "Costliest task", "value": _top_val, "delta": _top_lbl, "delta_color": "off"},
         ])
@@ -2323,7 +2330,7 @@ def _cost_attribution_panel() -> None:
                    "name wins, so nested task names never double-count). COST_USD prices CREDITS_ATTRIBUTED "
                    "at CREDIT_PRICE_USD. Best-effort attribution, not a billed invoice — the "
                    "'(unattributed)' row is the honest remainder on the run's warehouses. Credits "
-                   "lag up to ~6h.")
+                   "lag up to ~8h.")
         result_caption(res)
 
 

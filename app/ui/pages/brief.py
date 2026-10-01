@@ -181,7 +181,7 @@ def render() -> None:
         f,
         applies=(),
         partial=("company",),
-        note="Company shapes open incidents/events; spend, contract, freshness, and owner queue use fixed account-wide horizons.",
+        note="Company shapes open incidents/events and the owner queue (plus account-level items); spend, contract, and freshness use fixed account-wide horizons.",
     )
     settings = load_settings(_PAGE)
     rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
@@ -639,7 +639,7 @@ def render() -> None:
         spend_series=tuple(brief_spend_series),
         scope_notes=(
             "MTD spend, contract, savings, and freshness are account-wide unless the card says otherwise.",
-            f"Alerts and incidents honor {company} plus account-level events; the action queue is account-wide.",
+            f"Alerts, incidents, and the action queue honor {company} plus account-level items.",
             "Metering can lag up to 24 hours. A dash means telemetry was unavailable, not zero.",
         ),
         title="Morning brief",

@@ -1126,10 +1126,11 @@ def untagged_executions_for_user(user_name: str, days: int, company: str = "ALL"
     Reuses tag_coverage's EXACT predicate (WAREHOUSE_NAME IS NOT NULL,
     COALESCE(EXECUTION_TIME,0) > 0, NULLIF(QUERY_TAG,'') IS NULL) and the same
     company/db/schema scoping, plus an exact USER_NAME match, so it can't widen
-    scope. Grouped by QUERY_TYPE. NOTE: this is a LIVE scan capped at ~90d
-    (bounded_days); when the parent scoreboard is mart-served over a longer window
-    the summed UNTAGGED_EXEC_SEC is a recent-90d subset, not a full reconciliation
-    — the UI captions that."""
+    scope. Grouped by QUERY_TYPE. NOTE: for a TRAILING window this is a LIVE scan
+    capped at ~90d (bounded_days); when the parent scoreboard is mart-served over a
+    longer window the summed UNTAGGED_EXEC_SEC is a recent-90d subset, not a full
+    reconciliation — the UI captions that. A calendar ``bounds`` window is read in
+    full, the same span as the scoreboard."""
     from app.core.sqlsafe import contains_filter
     days = bounded_days(days)
     where = and_where(

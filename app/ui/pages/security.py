@@ -906,8 +906,9 @@ def _exposure_tab() -> None:
     OUTBOUND shares are the exposure surface, ``to`` names the consumer accounts,
     and a marketplace LISTING is broad by construction. Company scoping doesn't
     apply — shares are an account-wide object with no company grain. Clicking an
-    outbound share drills to the objects it exposes (SHOW GRANTS TO SHARE, #8);
-    the alert on *new/broadened* exposure (SEC_NEW_EXPOSURE) is the remaining
+    outbound share drills to the objects it exposes (SHOW GRANTS TO SHARE, #8).
+    SEC_NEW_EXPOSURE (V084) alerts on new grants to the PUBLIC role, not on shares; an
+    alert on new or broadened outbound-share exposure is still the deferred
     owner-migration half of this finding."""
     st.caption("Outbound shares are the surface where this account's data leaves it. Every consumer here should be a known partner.")
     shares = run(security_sql.show_shares_sql(), page=_PAGE, key="sec_shares",

@@ -312,7 +312,7 @@ def render() -> None:
 
     # ---- data loads (mart-first, labeled live fallback) --------------------
     # Deliberately NOT batched together (Codex #4): the board is filter-scoped
-    # while the 45d MTD fact is fixed — coupling them in one batch cache meant
+    # while the 150d MTD fact (daily_spend_wide) is fixed — coupling them in one batch cache meant
     # every company/days change cold-started the fixed read. Serial keeps each
     # on its own cache key, so filter changes only refetch the board.
     # The calendar presets (Last month / Current month / Current year) are BOUNDED windows
@@ -635,9 +635,9 @@ def render() -> None:
         if not drivers.empty
         else pd.DataFrame(columns=["DIMENSION", "VALUE_USD"])
     )
-    # Last month has no board COST_DRIVER row (the board is mart-keyed by trailing days);
-    # derive top warehouse drivers from the SAME bounded warehouse frame the trend used,
-    # so the drivers reflect the exact previous month with no extra query.
+    # A bounded calendar window (Last month / Current month / Current year) skips the board
+    # (it is mart-keyed by trailing days); derive top warehouse drivers from the SAME bounded
+    # warehouse frame the trend used, so the drivers reflect that exact period with no extra query.
     if driver_view.empty and _ov_bounds is not None and trend_source.usable() \
             and "WAREHOUSE_NAME" in trend_source.df.columns:
         _wd = trend_source.df.copy()
@@ -906,8 +906,8 @@ def render() -> None:
         f,
         applies=(),
         partial=("company",),
-        note="MTD, forecast, freshness, and owner queue are account-wide; alerts and the score "
-             "use Company plus account-level events where applicable.",
+        note="MTD, forecast, and freshness are account-wide; alerts, the owner queue, and the score "
+             "use Company plus account-level items where applicable.",
     )
     panel_help(
         "Account-wide billing pace and operating risk. When the platform score is red (<70) or "

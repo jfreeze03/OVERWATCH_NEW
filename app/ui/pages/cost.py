@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from app.config import core_object
+from app.config import MAX_LIVE_WINDOW_DAYS, core_object
 from app.core.errors import safe_page
 from app.core.query import execute_statement, run, run_batch, run_batch_mixed
 from app.core.session import is_operator as _is_operator
@@ -17,6 +17,7 @@ from app.core.sqlsafe import sql_literal
 from app.core.state import filters
 from app.data import cost_sql, mart27_sql, mart_sql
 from app.logic import contract_planner
+from app.logic.date_windows import window_phrase
 from app.logic.directory import resolve_display
 from app.logic.formulas import contract_runway, format_usd, humanize_duration, md_dollars, safe_float
 from app.logic.verdict import contract_runway_clause, contract_runway_signal, page_verdict
@@ -350,9 +351,11 @@ def render() -> None:
                 page=_PAGE, key=f"tagcov_live_{f['company']}_{f['days']}_{_tag_db}_{_tag_sc}{_tag_lm}",
                 tier="historical",
                 source="QUERY_HISTORY (exec-time-weighted, db/schema-scoped live)")
+            # A trailing window clamps to the live cap; a calendar preset (bounds) is read in full.
+            _tag_phrase = window_phrase(_tag_bounds, min(int(f["days"]), MAX_LIVE_WINDOW_DAYS))
             st.caption("Scoped to the active Database/Schema filter via the live "
                        "QUERY_HISTORY path (the tag-coverage mart is user-grain and carries "
-                       "no object columns); the live window clamps to 90 days.")
+                       f"no object columns); the live window covers {_tag_phrase}.")
         else:
             tags_res = run_mart_first(
                 mart27_sql.tag_coverage_daily(f["days"], f["company"], bounds=_tag_bounds),
@@ -422,10 +425,11 @@ def render() -> None:
                 if guard(ut, "No untagged executions for this user in the window/scope."):
                     styled_table(ut.df, height=240)
                     result_caption(ut)
-                    # The drill is a LIVE scan capped at ~90d; the scoreboard above can be
-                    # mart-served over a longer window, so its untagged seconds may exceed
-                    # this decomposition. Say so rather than let the numbers silently differ.
-                    if isinstance(f.get("days"), int) and f["days"] > 90:
+                    # The drill is a LIVE scan capped at ~90d for a TRAILING window; the scoreboard
+                    # above can be mart-served over a longer one, so its untagged seconds may exceed
+                    # this decomposition. Say so rather than let the numbers silently differ. A
+                    # calendar preset (bounds) reads the same explicit span on both, so no caption.
+                    if _tag_bounds is None and isinstance(f.get("days"), int) and f["days"] > 90:
                         st.caption("Live scan of the last ~90 days — with a longer page window the "
                                    "row above (mart-served) can span more, so these totals are a "
                                    "recent-90d subset, not a full-window decomposition.")
