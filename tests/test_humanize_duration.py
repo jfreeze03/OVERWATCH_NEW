@@ -1,8 +1,10 @@
 """rec26 — humanize_duration: compact H/M/S display for raw duration columns.
 
 Display-only formatter (Styler callback); the underlying numeric column is
-untouched so tables still sort by the real value and the CSV keeps the raw
-number. These pin the reading contract across the unit and magnitude ranges.
+untouched, so the CSV keeps the raw number and a Styler-rendered table still
+sorts by the real value (a >400-row table's header sort is textual; its header
+says so -- tests/test_p606_components.py). These pin the reading contract
+across the unit and magnitude ranges.
 """
 from __future__ import annotations
 

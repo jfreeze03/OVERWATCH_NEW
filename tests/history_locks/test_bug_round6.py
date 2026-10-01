@@ -89,7 +89,13 @@ def test_bug4_health_read_distinguishes_error_from_empty():
 def test_bug7_spend_trend_pace_excludes_partial_day():
     ch = _src("app/ui/charts.py")
     assert 'complete = data[~data["PROVISIONAL"]]' in ch
-    assert "complete[\"USD\"].tail(7).mean()" in ch
+    # v4.606 R1-216: the pace compares CALENDAR weeks anchored on the newest COMPLETE day (the
+    # zero-filled `cal` series), not the last 7 ROWS -- a sparse proc trend's rows span weeks. The
+    # r6-bug7 intent (the partial day stays out of the pace) is unchanged: the anchor comes from
+    # `complete`. Behaviour locks: tests/test_p606_components.py.
+    assert 'anchor = complete["Day"].dt.normalize().max()' in ch
+    assert "cal.loc[anchor - week + one_day:anchor].sum()" in ch
+    assert "complete[\"USD\"].tail(7).mean()" not in ch
 
 
 def test_bug8_12_chargeback_pool_window_and_grain():

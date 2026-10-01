@@ -9,6 +9,7 @@ account-clock window — is migration-gated and tracked separately):
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -21,7 +22,10 @@ def _src(rel: str) -> str:
 # --- DAG-1: DAG node durations humanize, not raw seconds --------------------------------
 def test_dag_node_durations_humanize():
     c = _src("app/ui/charts.py")
-    assert "from app.logic.formulas import humanize_duration" in c
+    # v4.606 R1-216: spend_trend now also imports account_today from formulas, and ruff's isort keeps
+    # ONE combined `from app.logic.formulas import ...` line -- so lock the name being imported from
+    # formulas, not the exact byte-run of that line.
+    assert re.search(r"^from app\.logic\.formulas import [^\n]*\bhumanize_duration\b", c, re.M)
     # the critical-path suffix and the selected-run tooltip both humanize RUN_SEC
     assert 'f" · {humanize_duration(duration, \'s\')}"' in c
     assert "f\"selected run: {humanize_duration(row.get('RUN_SEC'), 's')}\"" in c

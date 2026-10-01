@@ -3805,7 +3805,7 @@ def _wh_sizing_efficiency(company: str, rate: float, days: int, *,
     elif guard((_prof := run_mart_first(
                     mart27_sql.eff_sizing_profile(days, company, bounds=bounds),
                     insights_sql.warehouse_sizing_profile(days, company, bounds=bounds),
-                    page=_PAGE, key=f"ops_sizing_{company}_{days}{_lm}", days=days,
+                    page=_PAGE, key=f"ops_sizing_{company}_{days}{_lm}", days=days, bounds=bounds,
                     mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart — p95 is peak daily)",
                     live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")),
                "No warehouse activity to profile in this window."):
@@ -4146,6 +4146,8 @@ def _contention_tab(company: str, days: int, *, bounds: tuple | None = None) -> 
             charts.bar_count(pdf.sort_values(_chart_metric, ascending=False),
                              "WAREHOUSE_NAME", _chart_metric, title=_chart_title,
                              takeaway=True, unit="sec",   # humanize tooltip/takeaway to Hr/Min/Sec
+                             # a per-query average is a rate: no "(x% of <sum of averages>)" share
+                             additive=_chart_metric != "AVG_QUEUE_SEC",
                              # the x-axis is a numeric bar-length scale (Hr/Min/Sec is in the tooltip):
                              # keep 1 decimal for fractional avg queue/query, integer for the total.
                              value_fmt=",.1f" if _chart_metric == "AVG_QUEUE_SEC" else ",.0f")

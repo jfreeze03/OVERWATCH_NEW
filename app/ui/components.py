@@ -4,6 +4,7 @@ labeled empties, visible truncation. No synthetic fallbacks — ever."""
 from __future__ import annotations
 
 import html
+import math
 import re
 import time
 
@@ -63,6 +64,7 @@ def localize_timestamps(df, columns: list[str]):
     display-only — SQL, dedupe keys, and exports stay in account time.
     """
     import pandas as pd
+    from pandas.api import types as ptypes
 
     tz = display_timezone()
     if not tz or tz.startswith("Account") or df is None or getattr(df, "empty", True):
@@ -72,8 +74,17 @@ def localize_timestamps(df, columns: list[str]):
     for col in columns:
         if col not in out.columns:
             continue
+        raw = out[col]
+        # R1-219: the column list comes from a NAME convention (timestampish_columns), and a name
+        # can lie — NEVER_READ is a boolean, a *_TIME can be raw milliseconds. to_datetime(errors=
+        # "coerce") turned the booleans into all-NaT ("—" on every row) and the numbers into 1970
+        # epochs. Only a real datetime column, or text/objects that ALL parse as timestamps, convert.
+        if ptypes.is_bool_dtype(raw) or ptypes.is_numeric_dtype(raw):
+            continue
         try:
-            series = pd.to_datetime(out[col], errors="coerce")
+            series = pd.to_datetime(raw, errors="coerce")
+            if not ptypes.is_datetime64_any_dtype(raw) and int(series.notna().sum()) < int(raw.notna().sum()):
+                continue                      # some non-null cell is not a timestamp: not this column
             # codex#35: an already-tz-aware column must be CONVERTED, not localized again —
             # tz_localize raises on aware input, and the old except-continue then silently
             # skipped conversion, leaving aware timestamps shown in the wrong zone.
@@ -856,7 +867,11 @@ def add_to_case_button(section: str, result: QueryResult, *, summary: str,
             summary=summary, next_action=next_action, as_of=as_of, title=title,
             added_at=account_today().isoformat(),
             preview_columns=list(head.columns),
-            preview_rows=head.astype(str).to_numpy().tolist(),
+            # R1-220: hand NULLs over as None so case_file's own None -> blank guard fires. astype(str)
+            # had already stringified them to 'nan' / 'None' / 'NaT' / '<NA>', which the exported
+            # Case File markdown printed literally (e.g. a locked-out user's FIRST_SUCCESS_AFTER).
+            # astype(object) first, or a float column turns the None straight back into NaN.
+            preview_rows=head.astype(object).where(head.notna(), None).to_numpy().tolist(),
             # Truncated when the query was row-capped OR the source has more
             # rows/columns than the preview shows (the head()/col cap above).
             truncated=(bool(getattr(result, "truncated", False))
@@ -1081,22 +1096,32 @@ def snowsight_profile_column(
         help="Query profile in Snowsight — plan, partitions, spilling.")}
 
 
-def _mark_served(result, *, live: bool, days: int | None):
+def _mark_served(result, *, live: bool, days: int | None, bounds: tuple | None = None):
     """K1: stamp which leg actually answered, and over what window, onto the
     frame the caller receives. Callers must read it through ``served_days()``.
 
-    WHY it lives on ``df.attrs`` and not on QueryResult: the live builders clamp
-    to MAX_LIVE_WINDOW_DAYS (90) while the marts honor 365, so a page that asked
+    WHY it lives on ``df.attrs`` and not on QueryResult: the TRAILING live builders
+    clamp to MAX_LIVE_WINDOW_DAYS (90) while the marts honor 365, so a page that asked
     for 365d and got the live fallback was labeling a 90-day answer "365 days".
     QueryResult is the cached payload shared by both legs; attrs travel with the
     frame through Streamlit's cache copy and through pandas operations, and cost
-    nothing when nobody looks."""
+    nothing when nobody looks.
+
+    R1-213: a CALENDAR window (``bounds`` = filters()['bounds']) is different. Its
+    builders emit ``col >= start AND col < end`` through scope_window_where, which
+    never applies bounded_days' 90 cap, and ``days`` is then only a day OFFSET
+    (Current year on Sep 30 = 272 for a 273-day range). Stamping clamp_days(offset)
+    there said 90 for a whole-year live scan, so every run-rate divided a year of
+    idle $ by 90 (~3x high). With bounds the stamp is the bounds' day SPAN on both
+    legs, unclamped."""
     from app.config import clamp_days
     df = getattr(result, "df", None)
     if df is None:
         return result
     df.attrs["_ow_served_live"] = bool(live)
-    if days is not None:
+    if bounds is not None:
+        df.attrs["_ow_effective_days"] = max(1, int((bounds[1] - bounds[0]).days))
+    elif days is not None:
         effective = clamp_days(days) if live else int(days)
         # Calendar day zero means "today only" for SQL, but downstream rates
         # still need a non-zero elapsed-period denominator.
@@ -1107,8 +1132,10 @@ def _mark_served(result, *, live: bool, days: int | None):
 def served_days(result, requested_days: int) -> int:
     """The window a run_mart_first result ACTUALLY covers (K1 contract).
 
-    The live fallback clamps to MAX_LIVE_WINDOW_DAYS, so captions, per-day
-    averages and run-rate math must divide by this, not by the requested days.
+    The trailing live fallback clamps to MAX_LIVE_WINDOW_DAYS, so captions, per-day
+    averages and run-rate math must divide by this, not by the requested days. A
+    calendar-bounded read (run_mart_first(..., bounds=)) is stamped with its full
+    day span instead: its builders do not clamp.
     Falls back to ``requested_days`` for any result that did not come through
     run_mart_first — an honest no-op, never a wrong clamp."""
     from app.config import clamp_days
@@ -1259,7 +1286,7 @@ def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
                    max_rows: int | None = None, empty_is_answer: bool = False,
                    mart_accept=None, preloaded=None, days: int | None = None,
                    coverage_gate: bool = False, coverage_day_col: str = "DAY",
-                   coverage_freshness_days: int = 2):
+                   coverage_freshness_days: int = 2, bounds: tuple | None = None):
     """Fact-first read with the live builder as labeled fallback — the
     Control Room v4.8.2 pattern as one call (wave 2 adoptions). The mart
     result must be usable (ok AND non-empty) or the live path runs under
@@ -1272,8 +1299,11 @@ def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
     falls through to the serial mart read exactly as before.
 
     K1: pass ``days`` (the window the caller ASKED for) and read the window that
-    was actually served back with ``served_days(result, days)`` — the live legs
-    clamp to 90 and the marts do not.
+    was actually served back with ``served_days(result, days)`` — the TRAILING live
+    legs clamp to 90 and the marts do not. R1-213: when both builders honor the
+    calendar ``bounds`` (filters()['bounds']), pass ``bounds`` too — neither leg
+    clamps a bounded read, so the served window is the bounds' day span, not
+    clamp_days of the day offset (which read 90 for a 273-day Current-year scan).
 
     #16: pass ``coverage_gate=True`` (with ``days``) to apply the shared
     ``coverage_contract`` as the acceptance test when no explicit ``mart_accept``
@@ -1318,7 +1348,7 @@ def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
             except Exception:  # noqa: BLE001
                 pass
         if accepted:
-            return _mark_served(res, live=False, days=days)
+            return _mark_served(res, live=False, days=days, bounds=bounds)
         # r11 #2: the mart answered but does not cover enough of the asked
         # window (an accruing mart holds weeks of a 13-month chart). Prefer
         # live; if live cannot answer, the partial mart still beats an empty
@@ -1326,17 +1356,17 @@ def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
         live = run(live_sql, page=page, key=key, tier=live_tier,
                    source=live_source, **kwargs)
         if live.usable():
-            return _mark_served(live, live=True, days=days)
-        return _mark_served(res, live=False, days=days)
+            return _mark_served(live, live=True, days=days, bounds=bounds)
+        return _mark_served(res, live=False, days=days, bounds=bounds)
     # Codex r9 #2: for marts whose table only exists once loaded (V035), a
     # SUCCESSFUL empty read means "genuinely nothing" — reviving the live
     # scan would pay 46-56 GB to confirm an answer we already hold. Marts
     # with young-coverage ambiguity keep the default (fallback on empty).
     if res is not None and empty_is_answer and res.ok:
-        return _mark_served(res, live=False, days=days)
+        return _mark_served(res, live=False, days=days, bounds=bounds)
     return _mark_served(
         run(live_sql, page=page, key=key, tier=live_tier, source=live_source, **kwargs),
-        live=True, days=days)
+        live=True, days=days, bounds=bounds)
 
 
 class _DirectoryUnavailable(Exception):
@@ -1513,8 +1543,20 @@ def confirm_gate(expected: str, action_label: str, *, key: str, prompt: str = ""
     typed = st.text_input(prompt or f"Type {expected} to confirm", key=f"{key}_confirm")
     match = (str(typed).strip().casefold() == str(expected).strip().casefold()) if object_name \
         else (str(typed).strip() == str(expected))
-    return st.button(action_label, key=f"{key}_btn",
-                     disabled=not (match and enabled), **button_kwargs)
+    clicked = st.button(action_label, key=f"{key}_btn",
+                        disabled=not (match and enabled), **button_kwargs)
+    # R1-214: Streamlit returns a button's trigger value even on a run that renders it
+    # DISABLED — the click was sent from the previous (enabled) render while a rerun was in
+    # flight: the operator picked another warehouse, or edited the typed name, and clicked
+    # Execute before the redraw. The fixed ``{key}_confirm`` keeps the old typed name, so the
+    # raw click fired the write against a target nobody typed. Re-check here, and say why the
+    # click did nothing (house law 11: a swallowed click is never silent).
+    if clicked and not (match and enabled):
+        st.warning(
+            (f"Nothing ran: the typed confirmation does not match {expected}. "
+             "Type it again and click once more.") if not match
+            else "Nothing ran: this action is not available right now.")
+    return bool(clicked) and match and enabled
 
 
 def empty_state(kind: str, message: str, *, hint: str = "", detail: str = "",
@@ -1830,6 +1872,10 @@ def _auto_formats(df, skip: set) -> dict:
 # rule called the first "small." Above either budget, use Arrow-native formats.
 STYLER_MAX_ROWS = 400
 STYLER_MAX_CELLS = 6_000
+# R1-222: the header note on a large table's duration column (its cells are Hr/Min/Sec text there).
+_TEXTUAL_DURATION_SORT_HELP = (
+    f"Sorting by this column header is textual on tables over {STYLER_MAX_ROWS} rows (or "
+    f"{STYLER_MAX_CELLS:,} cells). The row order as loaded and the CSV use the real value.")
 EAGER_CSV_MAX_ROWS = 200
 EAGER_CSV_MAX_CELLS = 1_500
 
@@ -2079,7 +2125,9 @@ def _clean_numeric_cell(v) -> str:
         f = float(v)
     except (TypeError, ValueError):
         return str(v)
-    if f != f:            # NaN (na_rep handles the real NA path; defensive)
+    # NaN (na_rep handles the real NA path; defensive) and ±inf (R1-221: int(inf) raised
+    # OverflowError inside the lazy Styler render, outside every guard, and killed the page).
+    if not math.isfinite(f):
         return "—"
     if f == int(f):
         return f"{int(f):,}"
@@ -2191,6 +2239,7 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
         except Exception:  # noqa: BLE001 - the bar is cosmetic, the table must render
             pass
     _cell_count = len(df) * max(1, len(df.columns))
+    _textual_sort_cols: set = set()
     if len(df) <= STYLER_MAX_ROWS and _cell_count <= STYLER_MAX_CELLS:
         try:
             styler = display_df.style
@@ -2245,6 +2294,11 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                 _du = _duration_unit_for_column(_dc)
                 data[_dc] = data[_dc].map(lambda v, _u=_du: humanize_duration(v, _u))
                 fmts.pop(_dc, None)              # now a string cell; no printf NumberColumn needed
+            # R1-222: those cells are TEXT now, so the grid's header-click sort on them is alphabetical
+            # ('10s' < '1h 3m' < '2m 5s' < '850ms'). Streamlit 1.52 has no hidden sort key, and the
+            # Hr/Min/Sec cells are an owner requirement, so say it on the header (help, added by the
+            # rec13 pass below) instead of letting "slowest first" silently mis-order.
+            _textual_sort_cols = set(_dur_cols)
         cfg = dict(column_config or {})
         for col, fmt in fmts.items():
             if col in cfg and not callable(fmt):
@@ -2315,6 +2369,8 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
         _pretty = _prettify_header(_col)
         _label = _pretty if _pretty != str(_col) else None
         _help = COLUMN_HELP.get(str(_col).upper())   # rec32: which-dollar-is-this on the header
+        if _col in _textual_sort_cols:
+            _help = ((_help + " ") if _help else "") + _TEXTUAL_DURATION_SORT_HELP
         _w = _width_for_column(_col)                 # F33: width intent by name convention
         if _label is None and _col not in _pin_cols and not _help and not _w:
             continue
@@ -2507,6 +2563,13 @@ def selectable_nav_table(df, key: str, on_select, *, height: int | None = None,
     sel = selectable_table(df, key=key, height=height, column_config=column_config,
                            slug=slug, days=days, size_note=size_note, sort_label=sort_label)
     seen_key = f"_ow_navsel_{key}"
+    if sel is None:
+        # R1-215: re-arm on an unselected render. A drill navigates away, the table unmounts and
+        # Streamlit drops its selection, so every return mounts unselected — but the seen index
+        # outlived it and silently swallowed the next click on that row (Back, then the same row
+        # again, did nothing). A None selection never fires, so this cannot re-open the rerun loop.
+        # Same re-arm as workbench's watchlist and charts._read_click_selection.
+        st.session_state.pop(seen_key, None)
     if sel is not None and sel != st.session_state.get(seen_key):
         st.session_state[seen_key] = sel
         on_select(sel)
@@ -2675,9 +2738,11 @@ def decision_rows(
         # suppress the auto provenance/size caption here to avoid saying it twice.
         size_note=False,
     )
-    if on_select is not None and selection is not None:
+    if on_select is not None:
         seen_key = f"_ow_decision_{key}"
-        if selection != st.session_state.get(seen_key):
+        if selection is None:
+            st.session_state.pop(seen_key, None)    # R1-215: re-arm (see selectable_nav_table)
+        elif selection != st.session_state.get(seen_key):
             st.session_state[seen_key] = selection
             on_select(selection)
     return selection
@@ -2725,6 +2790,12 @@ def master_detail(df, *, key: str, id_col: str, list_render_fn, detail_render_fn
         # rec29: resolve position→id only on a CHANGE. st.dataframe's selection
         # is a sticky index that re-emits every rerun; an unconditional resolve
         # would rebind the detail to a different row after a re-sort.
+        if sel is None:
+            # R1-215: re-arm on an unselected render (a return to the page, or a deselect), else a
+            # click on whatever row now sits at the remembered position is ignored and the detail
+            # pane keeps the old item beside a different highlighted row. ``persist`` is left
+            # alone, so the last bound item still shows until the next real click.
+            st.session_state.pop(seen_sel, None)
         if sel is not None and sel != st.session_state.get(seen_sel):
             st.session_state[seen_sel] = sel
             try:
@@ -2810,7 +2881,13 @@ def _badge_scope(dims: tuple = ("company", "days")) -> tuple:
     except Exception:  # noqa: BLE001 - badges are chrome, never break a page
         return tuple((d, None) for d in dims)
     def _val(d: str) -> object:
-        return int(safe_float(f.get("days"))) if d == "days" else str(f.get(d) or "")
+        if d == "days":
+            # R1-218: the day count alone does not name a window — Last month on Oct 15 resolves to
+            # 30 like the 30d preset, and Current month on the 15th to 14 like 14d, yet a bounded
+            # read covers different days. Key on the calendar bounds too (None for a trailing
+            # window), so a preset switch never shows the other window's count.
+            return (int(safe_float(f.get("days"))), f.get("bounds"))
+        return str(f.get(d) or "")
     return tuple((d, _val(d)) for d in dims)
 
 
