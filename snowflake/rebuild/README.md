@@ -40,8 +40,10 @@ Around the files (docs/FULL_REBUILD.md has the statements):
 <!-- end of generated replay notes -->
 
 These files are GENERATED and equality-locked against their sources
-(tests/test_rebuild_bundle.py) — edit the sources, never this folder.
-Two parts are kept by hand and read back by the lock, so it cannot catch a
+(tests/test_rebuild_replay.py re-renders every file and byte-compares;
+tests/test_rebuild_bundle.py checks the copies and 00's coverage) — edit
+the sources, never a generated part of this folder; the two hand-kept parts
+below are edited here. They are read back by the lock, so it cannot catch a
 bad edit there: 00's CLONE list and this README outside the notes block
 above.
 Regenerate the byte-locked files with `python outputs/gen_rebuild_bundle.py`
