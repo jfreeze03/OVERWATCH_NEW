@@ -26,7 +26,16 @@ from app.core.result import is_setup_absence
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal, sql_number
 from app.core.state import request_navigation
-from app.data import cost_sql, insights_sql, mart27_sql, mart_sql, ops_sql, security_sql, workbench_sql
+from app.data import (
+    cost_sql,
+    insights_sql,
+    mart27_sql,
+    mart_sql,
+    ops_sql,
+    recheck_sql,
+    security_sql,
+    workbench_sql,
+)
 from app.data.common import bounded_days
 from app.logic import proven_fix_transfer, remediation
 from app.logic.actions import LEDGER_ESTIMATED, can_verify, split_superseded
@@ -45,6 +54,7 @@ from app.logic.formulas import (
 )
 from app.logic.insights import (
     IDLE_TARGET_SUSPEND_SEC,
+    ShowWarehouseSettings,
     flag_clustering_churn,
     flag_repeat_candidates,
     idle_advisor,
@@ -53,6 +63,7 @@ from app.logic.insights import (
     poor_pruning_summary,
     repeat_min_runs,
     show_auto_suspend,
+    show_warehouse_settings,
     storage_movers,
     suspend_recluster_sql,
     with_auto_suspend_settings,
@@ -581,40 +592,19 @@ def _clear_unread_confirm_latch() -> None:
     st.session_state.pop("_unread_confirm_failed", None)
 
 
-def _exact_show_row(show_df: pd.DataFrame | None, warehouse: str) -> pd.Series | None:
-    """``warehouse``'s own row of a SHOW WAREHOUSES LIKE read (columns lower-cased), or None when the read failed
-    (None), returned nothing, or returned only near-name rows (LIKE's '_' is a one-character wildcard, so
-    'WH_X' also matches 'WHAX'). Case-insensitive on the name. Pure; never raises."""
-    if show_df is None or show_df.empty:
-        return None
-    df = show_df.copy()
-    df.columns = [str(c).lower() for c in df.columns]
-    if "name" not in df.columns:
-        return None
-    match = df[df["name"].astype(str).str.strip().str.upper() == str(warehouse or "").strip().upper()]
-    return None if match.empty else match.iloc[0]
-
-
-def _auto_suspend_in_force(row: pd.Series | None) -> tuple[bool, float | None]:
-    """(known, seconds) for the AUTO_SUSPEND on a live SHOW row (_exact_show_row); (False, None) when the row is
-    absent or the value is unreadable/NULL, so the tighten guard generates no ALTER. Pure."""
-    if row is None:
-        return False, None
-    value = pd.to_numeric(row.get("auto_suspend"), errors="coerce")
-    return (True, float(value)) if pd.notna(value) else (False, None)
-
-
-def _live_warehouse_row(warehouse: str, key: str) -> pd.Series | None:
+def _live_warehouse_settings(warehouse: str, key: str) -> ShowWarehouseSettings:
     """Review R1-170 (twin): ONE warehouse's SHOW row read on the 30 s live tier, for a Remediation lever that is
     about to change that setting. The shared 'jump_wh' SHOW WAREHOUSES entry is on the 4 h metadata tier, so a
-    timer or size a DBA changed in a worksheet since it was cached reads stale there. A failed read, an unsafe
-    name or a missing row is None (the setting is unknown), never the cached value."""
-    sql = insights_sql.warehouse_settings_live_sql(warehouse)
+    timer or size a DBA changed in a worksheet since it was cached reads stale there. The alert drawer's tighten
+    guard reads the same builder (recheck_sql.warehouse_settings_sql) through the same parser
+    (insights.show_warehouse_settings). A failed read, an unsafe name or a missing row is unknown (not listed),
+    never the cached value."""
+    sql = recheck_sql.warehouse_settings_sql(warehouse)
     if not sql:
-        return None
+        return show_warehouse_settings(None, warehouse)
     res = run(sql, page=_PAGE, key=key, tier="live", source=f"SHOW WAREHOUSES LIKE {warehouse}",
               max_rows=0, probe=True)
-    return _exact_show_row(res.df if res.ok else None, warehouse)
+    return show_warehouse_settings(res.df if res.ok else None, warehouse)
 
 
 def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_operator: bool, *, bounds: tuple | None = None) -> None:
@@ -992,18 +982,25 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     # DBA made in a worksheet since then priced the steps from the old size. A failed read is an
                     # unknown size: no saving is projected or booked.
                     _cached_size = normalize_size(srow.get("CURRENT_SIZE"))
-                    _live_sz_row = _live_warehouse_row(str(srow["WAREHOUSE_NAME"]),
-                                                       f"sizing_live_{srow['WAREHOUSE_NAME']}")
-                    _cur_size = normalize_size(_live_sz_row.get("size")) if _live_sz_row is not None else ""
+                    _cur_size = normalize_size(_live_warehouse_settings(
+                        str(srow["WAREHOUSE_NAME"]), f"sizing_live_{srow['WAREHOUSE_NAME']}").size)
                     _cur_label = picker_size_label(_cur_size, remediation.RESIZE_SIZES)
                     if _cur_size and _cached_size and _cur_size != _cached_size:
                         st.caption(f"SHOW WAREHOUSES now reports {_cur_label} (the profile above read "
                                    f"{picker_size_label(_cached_size, remediation.RESIZE_SIZES)} from a "
                                    "cached read): the estimate below uses the size in force now.")
                     _tgt_norm = normalize_size(target_size)
+                    _sz_down = False      # a genuine downsize from the size in force now (the receipt keys on it)
+                    # Next-Fifty #5: the change scan (V038/V145) books a resize from XSMALL..4XLARGE and
+                    # settles it on measured actuals, so no manual row for those (it was a double-booking).
+                    # From a size the scan's map can't rank (5X/6X-LARGE) the app still books it. Decided
+                    # here, before the pane's caption, so the caption and the receipt name the same booker
+                    # (f2 fix-up: a 5X-LARGE downsize was promised a scan booking, then the app booked it).
+                    _sz_autobooked = remediation.autobook_books_change("RESIZE", _cur_size)
                     if _cur_size and _tgt_norm and _tgt_norm != _cur_size:
                         _steps = SIZE_ORDER.index(_tgt_norm) - SIZE_ORDER.index(_cur_size)
-                        if _steps < 0:  # a genuine downsize
+                        _sz_down = _steps < 0
+                        if _sz_down:  # a genuine downsize
                             # Book the CONSERVATIVE idle-scaled saving the rest of the tab uses, NOT the
                             # whole bill rate-scaled: on a smaller warehouse a compute-bound query runs
                             # ~2x longer (cost-neutral), so only the IDLE share reliably shrinks when the
@@ -1013,12 +1010,22 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             # 2026-08-30).
                             _idle = safe_float(srow.get("IDLE_MONTHLY_USD"))
                             est_sz = round(max(0.0, _idle * (1.0 - 2.0 ** _steps)), 2)
+                            if _sz_autobooked:
+                                _sz_booker = ("The daily change scan books this resize to the Savings ledger "
+                                              "and settles it against 14 days of measured actuals — the app "
+                                              "logs the estimate to REMEDIATION_LOG instead of booking a "
+                                              "second ledger row.")
+                            elif est_sz > 0:
+                                _sz_booker = (f"The daily change scan cannot rank a {_cur_label} warehouse, so "
+                                              "it never books this resize: on Execute the app books this "
+                                              "estimate as an ESTIMATED Savings ledger row — verify it there.")
+                            else:
+                                _sz_booker = (f"The daily change scan cannot rank a {_cur_label} warehouse, so "
+                                              "it never books this resize, and with no idle-hour saving to "
+                                              "estimate the app books none.")
                             st.caption(f"Projected saving ~${est_sz:,.0f}/mo resizing {_cur_label} → "
                                        f"{target_size} (only idle-hour credits reliably shrink; busy "
-                                       "compute-bound work runs ~2x longer on a smaller size). The daily "
-                                       "change scan books this resize to the Savings ledger and settles it "
-                                       "against 14 days of measured actuals — the app logs the estimate to "
-                                       "REMEDIATION_LOG instead of booking a second ledger row.")
+                                       "compute-bound work runs ~2x longer on a smaller size). " + _sz_booker)
                         else:  # an upsize is a cost increase — never a booked saving
                             st.caption(f"Resizing UP {_cur_label} → {target_size} raises cost — no saving "
                                        "booked.")
@@ -1046,24 +1053,44 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             from app.ui.components import log_ui_event
                             log_ui_event("remediation_exec", page=_PAGE)
                             st.session_state["_sizing_clear_confirm"] = True
-                        # Next-Fifty #5: the change scan (V038/V145) books a resize from XSMALL..4XLARGE and
-                        # settles it on measured actuals, so no manual row for those (it was a double-booking).
-                        # From a size the scan's map can't rank (5X/6X-LARGE) the app still books it.
-                        _sz_autobooked = remediation.autobook_books_change("RESIZE", _cur_size)
+                        # c02 recheck: the receipt keys off whether a SAVINGS_LEDGER row was actually inserted,
+                        # never off the scan flag alone -- after a failed live size read (no size, est 0, not
+                        # autobooked) it said a saving was booked. f2 fix-up: "inserted" is the INSERT's own
+                        # result -- execute_statement reports a refusal as (False, msg), it never raises, so
+                        # setting the flag after the call receipted a refused INSERT as booked.
+                        _sz_booked, _sz_book_failed, _sz_book_msg = False, False, ""
                         if ok and est_sz > 0 and not _sz_autobooked:
-                            execute_statement(
+                            _sz_booked, _sz_book_msg = execute_statement(
                                 f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
                                 "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES, FINDING_TYPE, TARGET_OBJECT) "
                                 f"SELECT {sql_literal('Resize ' + str(srow['WAREHOUSE_NAME']) + ' to ' + target_size)}, "
                                 f"'ESTIMATED', {sql_number(est_sz)}, {sql_literal(stmt_sz)}, "
                                 "'Booked from sizing simulator; verify with a proof run on the Savings ledger.', "
                                 f"'RESIZE', {sql_literal(str(srow['WAREHOUSE_NAME']))}", page=_PAGE)
+                            _sz_book_failed = not _sz_booked
                         stamp_write("sizing", ok)  # C48
                         # r-ux: name the object + effect (was generic "Statement executed.")
-                        notify(ok, msg if not ok else
-                               f"Resized {srow['WAREHOUSE_NAME']} to {target_size}; "
-                               + ("the daily change scan books and settles the measured saving." if _sz_autobooked
-                                  else "booked an estimated saving — verify it on the Savings ledger."))
+                        # The scan books only a DOWNSIZE from a size it ranks (V153's SIZE arm: new rank < old),
+                        # so an upsize or a same-size ALTER is never promised a measured saving.
+                        if _sz_booked:
+                            _sz_receipt = "booked an estimated saving — verify it on the Savings ledger."
+                        elif _sz_autobooked and _sz_down:
+                            _sz_receipt = "the daily change scan books and settles the measured saving."
+                        elif not _cur_size:
+                            _sz_receipt = "no saving was booked: the current size could not be verified."
+                        elif not _sz_down:
+                            _sz_receipt = "no saving was booked (not a downsize from the current size)."
+                        else:
+                            _sz_receipt = "no saving was booked (no idle-hour saving to estimate)."
+                        if not ok:
+                            notify(False, msg)
+                        elif _sz_book_failed:
+                            # the resize ran; its saving did not land: a persistent error, not a toast (rec48),
+                            # so the operator books it by hand or fixes the grant
+                            notify(False, f"Resized {srow['WAREHOUSE_NAME']} to {target_size}, but the estimated "
+                                          f"saving could not be booked: {_sz_book_msg}")
+                        else:
+                            notify(True, f"Resized {srow['WAREHOUSE_NAME']} to {target_size}; " + _sz_receipt)
             _whatif_panel(sized, sizing_days, rate)
             result_caption(prof_res)
 
@@ -2455,12 +2482,14 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 # picked warehouse's AUTO_SUSPEND from ONE live SHOW row, never the 4 h 'jump_wh' cache above —
                 # a timer a DBA tightened to 30s in a worksheet since then read as the cached 600s, so the plan
                 # RAISED it to 60 and booked a saving. A failed read leaves the setting unknown: no ALTER.
-                _live_known, _live_suspend = _auto_suspend_in_force(
-                    _live_warehouse_row(wh_pick, f"remed_suspend_{wh_pick}"))
+                # R1-071: a NULL on the listed row is the KNOWN never-suspend 0, as on the alert drawer and
+                # Optimize ▸ Idle, so it gets the enable-a-timer ALTER (booked by the app, not the scan).
+                _live = _live_warehouse_settings(wh_pick, f"remed_suspend_{wh_pick}")
                 _pick_mask = idf["WAREHOUSE_NAME"].astype(str) == wh_pick
                 idf = idf.copy()
-                idf.loc[_pick_mask, "AUTO_SUSPEND"] = _live_suspend if _live_known else pd.NA
-                idf.loc[_pick_mask, "AUTO_SUSPEND_KNOWN"] = _live_known
+                idf.loc[_pick_mask, "AUTO_SUSPEND"] = (_live.auto_suspend if _live.auto_suspend is not None
+                                                       else pd.NA)
+                idf.loc[_pick_mask, "AUTO_SUSPEND_KNOWN"] = _live.auto_suspend_known
             row = idf[idf["WAREHOUSE_NAME"].astype(str) == wh_pick]
             idle_credits = float(pd.to_numeric(row["IDLE_CREDITS"], errors="coerce").fillna(0).iloc[0]) if not row.empty else 0.0
             # C1: divide by the window actually served, not the requested one.
@@ -2584,16 +2613,25 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         )
                         execute_statement(log_sql, page=_PAGE)
                         _book_ledger = ok and est_monthly > 0 and not _autobooked
+                        # f2 fix-up: the INSERT's own (ok, msg) -- execute_statement reports a refusal as
+                        # (False, msg), it never raises, so the gate alone receipted a refused INSERT as booked.
+                        _ledger_ok, _ledger_msg = True, ""
                         if _book_ledger:
-                            execute_statement(ledger_sql, page=_PAGE)
+                            _ledger_ok, _ledger_msg = execute_statement(ledger_sql, page=_PAGE)
                         stamp_write("remed", ok)  # C48
-                        # "booked" only when a SAVINGS_LEDGER row was actually inserted (_book_ledger)
-                        # — else it over-claims a booking that didn't happen.
-                        notify(ok, msg if not ok else
-                               f"{fix_kind} on {wh_pick} — executed"
-                               + (" and booked." if _book_ledger
-                                  else "; the daily change scan books and settles its measured saving."
-                                  if _autobooked else "."))
+                        # "booked" only when a SAVINGS_LEDGER row was actually inserted (_book_ledger and the
+                        # INSERT succeeded) — else it over-claims a booking that didn't happen.
+                        if not ok:
+                            notify(False, msg)
+                        elif _book_ledger and not _ledger_ok:
+                            # the ALTER ran; its saving did not land: a persistent error, not a toast (rec48)
+                            notify(False, f"{fix_kind} on {wh_pick} — executed, but its estimated saving could "
+                                          f"not be booked: {_ledger_msg}")
+                        else:
+                            notify(True, f"{fix_kind} on {wh_pick} — executed"
+                                   + (" and booked." if _book_ledger
+                                      else "; the daily change scan books and settles its measured saving."
+                                      if _autobooked else "."))
                 else:
                     st.caption("Copy the SQL freely; executing from the app requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
 

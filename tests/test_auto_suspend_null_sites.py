@@ -22,8 +22,7 @@ import pandas as pd
 import pytest
 
 from app.core.result import QueryResult
-from app.logic import remediation
-from app.ui.pages import alerts
+from app.logic import insights, remediation
 from app.ui.pages.cost_parts import optimize
 
 
@@ -39,11 +38,12 @@ _FLEET = [{"name": "WH_NEVER", "size": "X-Small", "auto_suspend": None},
 
 # ------------------------------------------------------------------------ Alerts closed-loop tighten ----
 # v4.606 integration: the closed-loop guard reads ONE warehouse live (R1-170) and parses it with
-# _auto_suspend_in_force, which now reads the cell through show_auto_suspend (R1-071). These tests pin the
-# R1-071 half on that merged helper; tests/test_alert_suspend_guard_live.py pins the live-read half.
+# insights.auto_suspend_in_force (over show_warehouse_settings, the parser Cost ▸ Optimize ▸ Remediation
+# shares), which reads the cell through show_auto_suspend (R1-071). These tests pin the R1-071 half on that
+# shared parser; tests/test_alert_suspend_guard_live.py pins the live-read half.
 
 def test_alerts_tighten_reads_a_listed_null_as_never_suspend_and_generates_the_alter():
-    known, cur = alerts._auto_suspend_in_force(_show(_FLEET).df, "wh_never")   # case-insensitive match
+    known, cur = insights.auto_suspend_in_force(_show(_FLEET).df, "wh_never")   # case-insensitive match
     assert (known, cur) == (True, 0.0)
     plan = remediation.tighten_suspend_plan("WH_NEVER", cur, known)
     assert plan["stmt"] == remediation.auto_suspend_fix("WH_NEVER", 60) and plan["level"] == "none"
@@ -55,20 +55,24 @@ def test_alerts_tighten_reads_a_listed_null_as_never_suspend_and_generates_the_a
 @pytest.mark.parametrize(("wh", "want"), [("WH_ZERO", (True, 0.0)), ("WH_600", (True, 600.0)),
                                           ("WH_BAD", (False, None)), ("WH_GONE", (False, None))])
 def test_alerts_tighten_keeps_real_values_and_only_an_unreadable_setting_is_unknown(wh, want):
-    assert alerts._auto_suspend_in_force(_show(_FLEET).df, wh) == want
+    assert insights.auto_suspend_in_force(_show(_FLEET).df, wh) == want
 
 
 @pytest.mark.parametrize("df", [None, pd.DataFrame(), pd.DataFrame([{"name": "WH_NEVER", "size": "X-Small"}])])
 def test_alerts_tighten_failed_empty_or_columnless_read_is_unknown(df):
-    assert alerts._auto_suspend_in_force(df, "WH_NEVER") == (False, None)
+    assert insights.auto_suspend_in_force(df, "WH_NEVER") == (False, None)
 
 
 def test_alerts_closed_loop_uses_the_helper():
+    import inspect
+
     from tests._source import read
     src = read("app/ui/pages/alerts.py")
-    assert "_cl_known, _cl_cur = _auto_suspend_in_force(" in src
+    assert "_cl_known, _cl_cur = auto_suspend_in_force(" in src
     assert "_cl_plan = remediation.tighten_suspend_plan(wh_inline, _cl_cur, _cl_known)" in src
-    helper = src.split("def _auto_suspend_in_force(", 1)[1].split("\ndef ", 1)[0]
+    assert "def _auto_suspend_in_force(" not in src          # no page-local parser left to drift
+    assert "show_warehouse_settings(" in inspect.getsource(insights.auto_suspend_in_force)
+    helper = inspect.getsource(insights.show_warehouse_settings)
     assert "show_auto_suspend(" in helper and "pd.to_numeric" not in helper
 
 

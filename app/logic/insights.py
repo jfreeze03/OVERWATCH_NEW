@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import timedelta
 from math import ceil
 
@@ -46,6 +47,58 @@ def show_auto_suspend(value: object) -> float | None:
         return 0.0      # None / NaN / pd.NA: the cell SHOW returned is NULL = never suspends
     num = pd.to_numeric(value, errors="coerce")
     return None if pd.isna(num) else float(num)
+
+
+@dataclass(frozen=True)
+class ShowWarehouseSettings:
+    """The settings on ONE warehouse's own SHOW WAREHOUSES row (show_warehouse_settings).
+
+    ``listed``: SHOW returned the exact-name row. ``auto_suspend``: seconds, where 0 = never suspends (a
+    listed 0 or NULL, R1-071) and None = unknown (not listed, no column, or an unparseable cell).
+    ``size``: SHOW's raw 'size' cell (e.g. 'X-Small'); '' when not listed, no column, or NULL."""
+
+    listed: bool
+    auto_suspend: float | None
+    size: str
+
+    @property
+    def auto_suspend_known(self) -> bool:
+        return self.auto_suspend is not None
+
+
+def show_warehouse_settings(show_df: pd.DataFrame | None, warehouse: str) -> ShowWarehouseSettings:
+    """``warehouse``'s settings from its OWN row of a SHOW WAREHOUSES [LIKE] read: the ONE parser behind the
+    live one-warehouse re-read (recheck_sql.warehouse_settings_sql) that the alert drawer's and Cost ▸ Optimize
+    ▸ Remediation's 'Tighten auto-suspend' guards and the resize lever decide on (review R1-170 + its twin).
+
+    Not listed (listed=False, nothing known) when the read failed (None), returned nothing, has no name column,
+    or returned only near-name rows: LIKE treats '_' as a one-character wildcard, so 'WH_X' also matches 'WHAX'.
+    Case-insensitive on column and warehouse names. AUTO_SUSPEND goes through show_auto_suspend, so a NULL on a
+    listed row is the KNOWN never-suspend 0 (R1-071), and only a missing column or an unparseable cell is
+    unknown -- a tighten guard then generates no ALTER. Pure; never raises."""
+    unlisted = ShowWarehouseSettings(listed=False, auto_suspend=None, size="")
+    if show_df is None or show_df.empty:
+        return unlisted
+    df = show_df.copy()
+    df.columns = [str(c).lower() for c in df.columns]
+    if "name" not in df.columns:
+        return unlisted
+    match = df[df["name"].astype(str).str.strip().str.upper() == str(warehouse or "").strip().upper()]
+    if match.empty:
+        return unlisted
+    row = match.iloc[0]
+    suspend = show_auto_suspend(row.get("auto_suspend")) if "auto_suspend" in df.columns else None
+    size = row.get("size") if "size" in df.columns else None
+    size_known = size is not None and not (pd.api.types.is_scalar(size) and bool(pd.isna(size)))
+    return ShowWarehouseSettings(listed=True, auto_suspend=suspend,
+                                 size=str(size).strip() if size_known else "")
+
+
+def auto_suspend_in_force(show_df: pd.DataFrame | None, warehouse: str) -> tuple[bool, float | None]:
+    """(known, seconds) for ``warehouse``'s AUTO_SUSPEND, the pair remediation.tighten_suspend_plan takes;
+    (False, None) when show_warehouse_settings cannot read it. Pure; never raises."""
+    found = show_warehouse_settings(show_df, warehouse)
+    return found.auto_suspend_known, found.auto_suspend
 
 
 def with_auto_suspend_settings(idle: pd.DataFrame, warehouses: pd.DataFrame) -> pd.DataFrame:

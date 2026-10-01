@@ -138,23 +138,6 @@ LIMIT 100
 """
 
 
-def warehouse_settings_live_sql(warehouse: str) -> str | None:
-    """ONE warehouse's SHOW WAREHOUSES row, re-read live right before a Remediation lever decides on a setting
-    it is about to change (review R1-170's twin on Cost ▸ Optimize: the 'Tighten auto-suspend to 60s' guard
-    and the resize lever read AUTO_SUSPEND / size from the shared 4 h metadata-tier 'jump_wh' SHOW WAREHOUSES
-    entry, so a timer a DBA had tightened to 30 s in a worksheet since then read as the cached 600 s and the
-    plan RAISED it). None for an unsafe name. LIKE treats '_' as a one-character wildcard (WH_X also matches
-    WHAX), so the caller keeps only the exact-name row. SHOW cannot be EXPLAINed, so not a canary.
-    The alert drawer's tighten guard needs the same one-warehouse statement."""
-    from app.core.sqlsafe import safe_identifier, sql_literal
-
-    try:
-        wh = safe_identifier(str(warehouse or "").strip())
-    except ValueError:
-        return None
-    return f"SHOW WAREHOUSES LIKE {sql_literal(wh)}"
-
-
 # ---------------------------------------------------------------------------
 # 2. Repeat-query fingerprints (cache/materialization candidates)
 # ---------------------------------------------------------------------------
