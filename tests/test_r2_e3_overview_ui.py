@@ -168,7 +168,10 @@ def test_score_block_reads_no_utc_clock():
 
     src = read("app/ui/pages/overview.py")
     assert "utcnow" not in src
-    assert "_elapsed_days = _score_window_elapsed_days(account_now())" in src
+    # v4.608 holistic #10: the divisor reads the row's own account clock (READ_AT), falling back to
+    # account_now() -- never a UTC clock either way
+    assert "_elapsed_days = _score_read_elapsed_days(_tr)" in src
+    assert "return _score_window_elapsed_days(account_now(), window_days)" in src
 
 
 def _drivers(got: dict) -> list[tuple]:
