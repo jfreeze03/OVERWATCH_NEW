@@ -4615,9 +4615,14 @@ def _emergency_extras(is_operator: bool) -> None:
                 # C48: short backstop — SYSTEM$CANCEL_QUERY is async and idempotent;
                 # re-cancelling a query that survived the first request must not
                 # sit behind the default 120s bound (fragment seq never advances).
-                if confirm_gate("CANCEL", "Cancel query + audit", key="emg_rq",
+                # PR-1 R1-134: the typed CANCEL and the latch are scoped by the FULL query id. A fixed
+                # confirm key kept CANCEL armed when the operator (or a refreshed, shifted selection)
+                # moved to another query -- a one-click cancel of a query never confirmed -- and
+                # qid[:8] is shared by queries issued close together, so the latch swallowed the next one.
+                _rq_key = f"emg_rq_{qid}"
+                if confirm_gate("CANCEL", "Cancel query + audit", key=_rq_key,
                                 prompt="Type CANCEL to confirm") and write_gate_open(
-                                    f"emg_rq_{qid[:8]}", backstop=15.0):
+                                    _rq_key, backstop=15.0):
                     ok, msg = execute_cancel_query(qid, page=_PAGE)   # B2: SELECT is outside the write allow-list
                     execute_statement(
                         f"INSERT INTO {core_object('REMEDIATION_LOG')} "
@@ -4626,7 +4631,7 @@ def _emergency_extras(is_operator: bool) -> None:
                         f"{sql_literal('SYSTEM$CANCEL_QUERY ' + qid)}, "
                         f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}, {identity_sql()}",
                         page=_PAGE)
-                    stamp_write(f"emg_rq_{qid[:8]}", ok)  # C48
+                    stamp_write(_rq_key, ok)  # C48
                     notify(ok, msg)
 
 

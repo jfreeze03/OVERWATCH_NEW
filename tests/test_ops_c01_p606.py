@@ -638,3 +638,32 @@ def test_task_recent_states_keeps_a_late_named_streak_under_the_cap():
     assert len(df) <= 4000 and df.iloc[0]["TASK_NAME"] == "T399"                # failing tasks lead
     got = task_failure_streaks(df)
     assert got["TASK_NAME"].tolist() == ["T399"] and int(got.iloc[0]["FAIL_STREAK"]) == 5
+
+
+# --------------------------------- R1-134: the cancel-query confirm and latch scope by the full id ----
+
+def test_cancel_query_gate_is_scoped_to_the_selected_query(monkeypatch):
+    # two queries from one burst share their first 8 characters; switching rows must not keep a typed
+    # CANCEL armed (fixed confirm key) or let the latch swallow the second cancel (qid[:8] latch key)
+    qids = ["01bf1a2b-0000-aaaa-0000-000000008a29", "01bf1a2b-0000-aaaa-0000-000000008b31"]
+    whs = _ok(pd.DataFrame({"name": ["WH_A"]}))
+    rq = _ok(pd.DataFrame({"QUERY_ID": qids, "USER_NAME": ["U1", "U2"]}))
+    picked = {"row": 0}
+    gates: list = []
+
+    class _St(_RecSt):
+        def selectbox(self, *_a, **_k):
+            return "WH_A"
+
+    ops, _fake, _seen = _page(monkeypatch, {"emg_show_wh": whs, "emg_running_WH_A": rq},
+                              snowsight_profile_column=lambda df, *_a, **_k: (df, None),
+                              with_user_names=lambda df, *_a, **_k: df,
+                              selectable_table=lambda *_a, **_k: picked["row"],
+                              confirm_gate=lambda verb, label, *, key, **_k: gates.append(("confirm", key)),
+                              write_gate_open=lambda key, **_k: gates.append(("latch", key)))
+    monkeypatch.setattr(ops, "st", _St())
+    for row in (0, 1):
+        picked["row"] = row
+        ops._emergency_extras(True)
+    confirm_keys = [k for kind, k in gates if kind == "confirm"]
+    assert confirm_keys == [f"emg_rq_{q}" for q in qids]               # one confirm per query, never shared

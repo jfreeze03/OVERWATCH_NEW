@@ -99,7 +99,11 @@ def test_latch_keys_scope_by_action_and_target():
     assert al.count("_unsz_key") >= 3                               # def + gate + stamp
     assert 'f"ai_save_{event_id[:8]}:{hash(answer) & 0xFFFFFF}"' in al
     ops = _src("app/ui/pages/operations.py")
-    assert ops.count('f"emg_rq_{qid[:8]}"') == 2
+    # PR-1 R1-134: the cancel's confirm AND latch key is the FULL query id (qid[:8] is shared by queries
+    # issued close together, and the old fixed confirm key "emg_rq" kept a typed CANCEL armed across rows)
+    assert '_rq_key = f"emg_rq_{qid}"' in ops and 'f"emg_rq_{qid[:8]}"' not in ops
+    assert 'key=_rq_key,' in ops and "_rq_key, backstop=15.0" in ops and "stamp_write(_rq_key, ok)" in ops
+    assert 'confirm_gate("CANCEL", "Cancel query + audit", key="emg_rq"' not in ops
     # the emergency surfaces get SHORT backstops (idempotent levers/cancels,
     # back-to-back actions under pressure) and the lever key scopes by
     # lever+target — a bare "emg" inside the fragment/dialog locked out every
