@@ -26,16 +26,34 @@ What the rewrite does, in order:
 
    * has a top-level statement whose kind is not on ``_TOP_LEVEL_KINDS``, the ALLOWLIST of the kinds
      the real chain uses (a test replays every migration through it and requires each kind to be used);
+   * outside a ``$$`` body, holds anything the client (``snow sql``) that splits the file into
+     statements reads differently from Snowflake (and this guard): a ``//`` comment, a backslash in a
+     "quoted" name, a line that starts with ``!`` (a client command such as ``!source``), or a ``/* */``
+     comment with no space on either side (the client deletes comments, joining the two tokens);
+   * anywhere, holds client template syntax -- ``<%``, ``{#``, ``&{``, ``&name`` or ``&&`` -- which
+     ``snow sql`` renders (``ctx.env`` reads the job's environment) before Snowflake sees the SQL;
+   * in any '...' string, at any depth and at every level of a string inside a string, holds a
+     backslash escape the guard cannot decode in place (``\\x``, ``\\u``, octal, ``\\b``, ``\\f``; it
+     decodes ``\\t``, ``\\n`` and ``\\r`` as Snowflake does), since a string can run as SQL;
    * still names DBA_MAINT_DB in any case, anywhere;
-   * carries, in code at any depth (``$$`` bodies included; comments read as whitespace; '...' strings
-     ignored, except that a literal handed straight to EXECUTE IMMEDIATE -- the first piece when it is
-     concatenated -- is read, recursively, as the SQL it runs), a ``_FORBIDDEN`` form -- GRANT /
+   * carries, in code at any depth (``$$`` bodies included; ``--``, ``//`` and ``/* */`` comments read
+     as whitespace, as Snowflake reads them; '...' strings ignored, except that a literal that runs as
+     SQL -- handed straight to EXECUTE IMMEDIATE, the first piece when it is concatenated, or given as
+     a body after ``AS`` -- is read, recursively, as the SQL it runs), a ``_FORBIDDEN`` form -- GRANT /
      REVOKE, warehouse, resource monitor, account or user CREATE / ALTER / DROP, role, integration,
      share, network policy and other account-object DDL, database DDL, a role or warehouse switch, a
-     task start, an external stage or unload -- or a SYSTEM$ function off ``_SYSTEM_FUNCTIONS``;
-   * in that code or those literals, creates, alters, drops, writes, CALLs, renames into or USEs an
-     object whose database is named and is not the clone (``_TARGET``), or hides a name in
-     ``IDENTIFIER('...')``;
+     task or alert start or any other EXECUTE but IMMEDIATE, an external stage, unload, file copy or
+     stage file removal, a body in a language other than SQL (its comments and strings follow other
+     rules) -- or a SYSTEM$ function off ``_SYSTEM_FUNCTIONS``;
+   * in that code or those literals: creates, alters, drops, comments on, writes, CALLs, renames into
+     or USEs an object whose database is named and is not the clone (``_TARGET``: a name in any form --
+     quoted or not, with or without a space after the keyword, ``db..object`` for db.PUBLIC.object, or
+     a name ending in a dot that a concatenation completes at run time); runs a CREATE / ALTER / DROP /
+     UNDROP / COMMENT ON of a kind ``_TARGET`` cannot read the name of (anything off ``_OBJECT_KIND``
+     but an ALTER TABLE sub-clause, ALTER SESSION included); uses ``IDENTIFIER(...)`` whatever its
+     argument (in any '...' string too, around a literal, a bind or a variable), or ``TABLE(...)``
+     around a literal, a bind or a variable (in code or in any string); or hands EXECUTE IMMEDIATE
+     anything but a literal, a ``$$`` block or a ``:variable``;
    * CALLs SP_NOTIFY_WEBHOOK / SP_DAILY_DIGEST, or uses a SYSTEM$SEND_* primitive, anywhere -- top
      level, in a ``$$`` body, or in any '...' string that could be dynamic SQL (read as written and as
      the SQL it would run), a comment between two tokens included -- except a suspended task's
@@ -90,11 +108,16 @@ _FORBIDDEN: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"\b(CREATE|ALTER|DROP|UNDROP)\s+(OR\s+(REPLACE|ALTER)\s+)?(ACCOUNT|USER)\b", re.I)),
     ("integration DDL", re.compile(r"\b(CREATE|ALTER|DROP)\s+(OR\s+REPLACE\s+)?(\w+\s+){0,2}INTEGRATION\b", re.I)),
     ("role DDL", re.compile(r"\b(CREATE|ALTER|DROP)\s+(OR\s+REPLACE\s+)?ROLE\b", re.I)),
-    ("grant to a retired role", re.compile(r"\b(TO|FROM)\s+ROLE\s+OVERWATCH_\w+", re.I)),
+    ("grant to a retired role", re.compile(r'\b(TO|FROM)\s+ROLE(\s+|(?="))"?OVERWATCH_\w+', re.I)),
     ("session role or warehouse switch", re.compile(r"\bUSE\s+(ROLE|WAREHOUSE|SECONDARY\s+ROLES)\b", re.I)),
     ("task or alert start", re.compile(
         r"\bEXECUTE\s+(TASK|ALERT)\b|\bALTER\s+(TASK|ALERT)\b[^;]*?\bRESUME\b|SYSTEM\$TASK_DEPENDENTS_ENABLE",
         re.I)),
+    # a notebook, a service job, a dbt project ...: only EXECUTE IMMEDIATE (checked below) and EXECUTE AS remain
+    ("EXECUTE of a runnable other than a block", re.compile(
+        r"\bEXECUTE\s+(?!(IMMEDIATE|AS|TASK|ALERT)\b)[^\W\d]", re.I)),
+    # its comments and strings follow other rules than the SQL this guard reads (Python's # it's ...)
+    ("body in a language other than SQL", re.compile(r"\bLANGUAGE\s+(?!SQL\b)[^\W\d]", re.I)),
     ("grant or revoke", re.compile(r"\b(GRANT|REVOKE)\b", re.I)),
     ("account-level object DDL", re.compile(
         r"\b(CREATE|ALTER|DROP|UNDROP)\s+(OR\s+(REPLACE|ALTER)\s+)?(SHARE|NETWORK\s+(POLICY|RULE)"
@@ -105,8 +128,10 @@ _FORBIDDEN: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("integration reference", re.compile(
         r"\b(STORAGE|API|NOTIFICATION|ERROR|EXTERNAL_ACCESS)_INTEGRATIONS?\s*=", re.I)),
     ("external stage or data unload", re.compile(
-        r"\bURL\s*=|\bCREDENTIALS\s*=|\bCOPY\s+INTO\b|\b(PUT|GET)\s+(file:|@)", re.I)),
+        r"\bURL\s*=|\bCREDENTIALS\s*=|\bCOPY\s+(FILES\s+)?INTO\b|\b(PUT|GET)\s+(file:|@)", re.I)),
 )
+# REMOVE / RM of staged files ('@...' may be quoted, so this one reads the strings-kept view; see _code_findings)
+_STAGE_REMOVE = re.compile(r"\b(?:REMOVE|RM)\s+['\"]?@", re.I)
 
 # Top-level statement kinds the replay may run: exactly the kinds the real chain uses (after the rewrite
 # and _NEUTRALIZE). Matched against the normalized top-level code (upper-cased, strings and $$ bodies
@@ -133,51 +158,92 @@ _SYSTEM_FUNCTION = re.compile(r"\bSYSTEM\$\w*", re.I)
 
 # The procedures that send to real notification integrations (account-level objects), and the sends.
 _NOTIFIERS = r"(?:SP_NOTIFY_WEBHOOK|SP_DAILY_DIGEST)"
-_PART = r'(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)'
-_NAME = rf"{_PART}(?:\s*\.\s*{_PART}){{0,2}}"
+# One part of a name, "quoted" or not (an unquoted one may hold letters outside ASCII), and a name of up to
+# three parts. A part may be empty: `db..t` is Snowflake's db.PUBLIC.t, and a name that ends in a dot (the
+# first piece of a concatenation) is completed at run time.
+_PART = r'(?:"(?:[^"]|"")+"|[^\W\d][\w$]*)'
+_NAME = rf"{_PART}(?:\s*\.\s*(?:{_PART})?){{0,2}}"
+_NAME_TOKEN = re.compile(rf"{_PART}|\.")
+# Between a keyword and the name after it: whitespace, or none at all before a "quoted" name.
+_SEP = r'(?:\s+|(?="))'
 _SEND = re.compile(
-    rf'\bCALL\s+(?:{_PART}\s*\.\s*){{0,2}}"?{_NOTIFIERS}(?![A-Za-z0-9_$])|\bSYSTEM\$SEND_\w*(?=\s*\()', re.I)
-# IDENTIFIER('db.schema.t') hides a name from _TARGET inside a string; the chain never uses it.
-_IDENTIFIER_LITERAL = re.compile(r"\bIDENTIFIER\s*\(\s*'", re.I)
-# A '...' literal handed straight to EXECUTE IMMEDIATE runs as SQL, so the code checks read it as SQL too.
-_EXECUTE_LITERAL = re.compile(r"\bEXECUTE\s+IMMEDIATE\s+(?:\(\s*)?(?=')", re.I)
+    rf'\bCALL{_SEP}(?:(?:{_PART})?\s*\.\s*){{0,2}}"?{_NOTIFIERS}(?![A-Za-z0-9_$])|\bSYSTEM\$SEND_\w*(?=\s*\()',
+    re.I)
+# IDENTIFIER(...) turns a value -- a '...' or $$...$$ literal, a bind, a variable -- into a name _TARGET cannot
+# read, so in code it is refused whatever its argument (the chain never uses it); in a '...' string, which
+# can be dynamic SQL, when it wraps a literal, a bind or a variable (prose such as "identifier (e.g." is not).
+_IDENTIFIER = re.compile(r"\bIDENTIFIER\s*\(", re.I)
+_IDENTIFIER_OF_VALUE = re.compile(r"\bIDENTIFIER\s*\(\s*['$?:]", re.I)
+# TABLE('db.schema.t') is IDENTIFIER's twin for a table name; TABLE() may wrap only a table function call.
+_TABLE_OF_VALUE = re.compile(r"\bTABLE\s*\(\s*['$?:]", re.I)
+# A '...' literal that runs as SQL -- handed straight to EXECUTE IMMEDIATE, or a body given after AS -- is
+# read as SQL by the code checks too.
+_SQL_LITERAL = re.compile(r"\b(?:EXECUTE\s+IMMEDIATE\s*(?:\(\s*)*|AS\s*)(?=')", re.I)
+# What EXECUTE IMMEDIATE may run: a literal or a $$ block (both read), or a :variable (run time, layer 2).
+_EXECUTE_IMMEDIATE = re.compile(r"\bEXECUTE\s+IMMEDIATE\b", re.I)
+_READABLE_SQL = re.compile(r"\s*(?:\(\s*)*(?:'|\$\$|:[^\W\d])")
 _TASK_DDL = re.compile(r"^(CREATE (OR REPLACE )?TASK|ALTER TASK) ")
+# (an exemption, so it keeps the narrower ASCII name part: a wider one would only widen what it exempts)
 _NOTIFIER_DEFINITION = re.compile(
-    rf'^CREATE (OR REPLACE )?PROCEDURE (?:{_PART} ?\. ?){{0,2}}"?{_NOTIFIERS}"? ?\(')
+    rf'^CREATE (OR REPLACE )?PROCEDURE (?:(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*) ?\. ?){{0,2}}"?{_NOTIFIERS}"? ?\(')
 
-# A named target of DDL, a write, a CALL, a rename/swap or a USE. Its database (by the target's kind:
-# the whole name of a DATABASE / USE, the first of two parts of a SCHEMA, the first of three otherwise)
-# must be the clone; an unqualified target resolves inside the session's database, which a USE can only
-# point at the clone.
+# A named target of DDL, a COMMENT ON, a write, a CALL, a rename/swap or a USE. Its database (by the
+# target's kind: the whole name of a DATABASE / USE, the first of two parts of a SCHEMA, the first of three
+# otherwise) must be the clone; an unqualified target resolves inside the session's database, which a USE
+# can only point at the clone.
+_DDL_VERB = r"CREATE(?:\s+OR\s+(?:REPLACE|ALTER))?|ALTER|DROP|UNDROP|COMMENT(?:\s+IF\s+EXISTS)?\s+ON"
 _OBJECT_KIND = (
     r"(?:(?:TRANSIENT|TEMPORARY|TEMP|VOLATILE|LOCAL|GLOBAL|SECURE|RECURSIVE|MATERIALIZED|DYNAMIC|EXTERNAL"
     r"|HYBRID|ICEBERG|EVENT)\s+)*"
     r"(?P<kind>DATABASE|SCHEMA|TABLE|VIEW|FUNCTION|PROCEDURE|TASK|STAGE|SEQUENCE|STREAM|PIPE|ALERT"
     r"|FILE\s+FORMAT|TAG|(?:MASKING|ROW\s+ACCESS|AGGREGATION|PROJECTION)\s+POLICY|STREAMLIT|NOTEBOOK"
-    r"|SECRET|MODEL)\s+")
+    rf"|SECRET|MODEL){_SEP}")
 _TARGET = re.compile(
-    rf"\b(?:(?:CREATE(?:\s+OR\s+(?:REPLACE|ALTER))?|ALTER|DROP|UNDROP)\s+{_OBJECT_KIND}"
-    r"|TRUNCATE\s+(?:TABLE\s+)?"
-    r"|(?P<use>USE)\s+(?!(?:ROLE|WAREHOUSE|SECONDARY)\b)(?:(?P<use_kind>DATABASE|SCHEMA)\s+)?"
-    r"|(?:INTO|UPDATE|DELETE\s+FROM|CALL|RENAME\s+TO|SWAP\s+WITH)\s+)"
-    rf"(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?P<name>{_NAME})", re.I)
+    rf"\b(?:(?:{_DDL_VERB})\s+{_OBJECT_KIND}"
+    rf"|TRUNCATE(?:\s+(?:TABLE|MATERIALIZED\s+VIEW))?{_SEP}"
+    rf"|(?P<use>USE){_SEP}(?!(?:ROLE|WAREHOUSE|SECONDARY)\b)(?:(?P<use_kind>DATABASE|SCHEMA){_SEP})?"
+    rf"|(?:INTO|UPDATE|DELETE\s+FROM|CALL|RENAME\s+TO|SWAP\s+WITH){_SEP})"
+    rf"(?:IF\s+(?:NOT\s+)?EXISTS{_SEP})?(?P<name>{_NAME})", re.I)
+# The inverse: every CREATE / ALTER / DROP / UNDROP / COMMENT ON in code is of an _OBJECT_KIND kind (so _TARGET
+# reads its name), a form _FORBIDDEN refuses, or an ALTER TABLE sub-clause (never a statement of its own).
+# Anything else -- DATA METRIC FUNCTION, SEMANTIC VIEW, SERVICE, a class instance such as SNOWFLAKE.ML.FORECAST,
+# ALTER SESSION -- is refused until it is reviewed here.
+_DDL = re.compile(rf"\b(?:{_DDL_VERB})\b", re.I)
+_DDL_KIND = re.compile(rf"\s+{_OBJECT_KIND}", re.I)
+_ALTER_SUBCLAUSE = re.compile(
+    r"(?:ALTER|DROP)\s+COLUMN\b|DROP\s+(?:CONSTRAINT|DEFAULT|NOT\s+NULL|PRIMARY\s+KEY|UNIQUE|FOREIGN\s+KEY"
+    r"|CLUSTERING\s+KEY|SEARCH\s+OPTIMIZATION)\b", re.I)
 
 _RESUME_TASK = re.compile(r"\b(ALTER\s+TASK\s+(?:IF\s+EXISTS\s+)?[\w$.\"]+\s+)RESUME\b", re.I)
 _DEPENDENTS_ENABLE = re.compile(r"SYSTEM\$TASK_DEPENDENTS_ENABLE\s*\(", re.I)
 _TASK_WAREHOUSE = re.compile(rf"\bWAREHOUSE(\s*)=(\s*){PROD_WAREHOUSE}\b", re.I)
 _PROD_DB = re.compile(rf"\b{PROD_DB}\b", re.I)
-_SPAN_OPEN = re.compile(r"--|/\*|\$\$|['\"]")
+_SPAN_OPEN = re.compile(r"--|//|/\*|\$\$|['\"]")
+# A client command line (!source, !load ... of a file or a URL): the client acts on it and Snowflake never
+# sees it.
+_CLIENT_COMMAND = re.compile(r"^!", re.M)
+# Backslash escapes in a '...' string: Snowflake decodes \t, \n and \r to whitespace (literal_sql does too)
+# and \xhh, \uhhhh, octal, \b and \f to characters literal_sql cannot put in place, so a string that can run
+# as SQL could spell a quote, a ; or DBA_MAINT\x5fDB unread; those are refused in every string, at every
+# level of a string inside a string (``_unread_escapes``).
+_DECODED_ESCAPE = {"\\t": "  ", "\\n": " \n", "\\r": " \n"}
+_ESCAPE = re.compile(r"\\(.)", re.S)
+_UNDECODED = frozenset("xXuU0123456789bBfF")
+# Client templating: snow sql renders <% %> / &{ } / SnowSQL &name (&& an escape) and drops Jinja {# #}
+# comments in every statement, strings and $$ bodies included, before Snowflake sees it; ctx.env.* reads the
+# job's environment (SNOWFLAKE_DATABASE is DBA_MAINT_DB there).
+_CLIENT_TEMPLATE = re.compile(r"<%|\{#|&[&{A-Za-z_]")
 
 
 def _spans(text: str) -> list[tuple[str, int, int]]:
-    """Split SQL into (kind, start, end) spans: code, comment, string ('...'), dollar ($$...$$),
-    quoted ("..." identifier, treated as code)."""
+    """Split SQL into (kind, start, end) spans: code, comment (``--`` or ``//`` to the line's end, or
+    ``/* */``), string ('...'), dollar ($$...$$), quoted ("..." identifier, treated as code)."""
     out: list[tuple[str, int, int]] = []
     start = 0
     n = len(text)
     while (m := _SPAN_OPEN.search(text, start)) is not None:   # the leftmost opener, tried in this order
         i, two = m.start(), m.group(0)
-        if two == "--":
+        if two in ("--", "//"):
             nl = text.find("\n", i)
             kind, end = "comment", (n if nl < 0 else nl)
         elif two == "/*":
@@ -224,8 +290,29 @@ def _interior(literal: str) -> str:
 
 def literal_sql(interior: str) -> str:
     """A '...' literal's interior as the SQL it holds, same length: each escaped character ('' or a
-    backslash pair) becomes a space plus the character, so ``''x''`` reads as `` 'x '``."""
-    return re.sub(r"''|\\.", lambda m: " " + m.group(0)[1], interior, flags=re.S)
+    backslash pair) becomes a space plus the character, so ``''x''`` reads as `` 'x '``, and \\t, \\n
+    and \\r become the whitespace and line break Snowflake decodes them to (a line break ends a ``--``
+    comment). The escapes it cannot decode in place (\\x, \\u, octal, \\b, \\f) are refused
+    (``_unread_escapes``)."""
+    return re.sub(r"''|\\.", lambda m: _DECODED_ESCAPE.get(m.group(0), " " + m.group(0)[1]), interior,
+                  flags=re.S)
+
+
+def _unread_escapes(sql: str) -> list[int]:
+    """Offsets in ``sql`` of the backslash escapes ``literal_sql`` cannot decode in place, in every '...'
+    string at any depth (``$$`` bodies included) and -- each string read as the SQL it would run -- in the
+    strings inside it, at every level."""
+    found: list[int] = []
+    for kind, start, end in _spans(sql):
+        seg = sql[start:end]
+        if kind == "string":
+            body = _interior(seg)
+            found += [start + 1 + m.start() for m in _ESCAPE.finditer(body) if m.group(1) in _UNDECODED]
+            found += [start + 1 + at for at in _unread_escapes(literal_sql(body))]
+        elif kind == "dollar":
+            body = seg[2:-2] if len(seg) >= 4 and seg.endswith("$$") else seg[2:]
+            found += [start + 2 + at for at in _unread_escapes(body)]
+    return found
 
 
 def code_view(text: str, *, dollar_bodies: bool = True, strings: bool = False, dynamic: bool = False) -> str:
@@ -316,7 +403,14 @@ def top_level_kind(code: str) -> str | None:
 
 
 def _parts(name: str) -> list[str]:
-    return [p.strip() for p in re.findall(_PART, name)]
+    """A ``_NAME``'s parts, an empty one kept: ``db..t`` is ['db', '', 't'], ``db.`` is ['db', '']."""
+    parts = [""]
+    for token in _NAME_TOKEN.findall(name):
+        if token == ".":
+            parts.append("")
+        else:
+            parts[-1] = token
+    return parts
 
 
 def _same_db(part: str, clone_db: str) -> bool:
@@ -333,7 +427,9 @@ def _target_db(m: re.Match[str]) -> str | None:
         return parts[0]
     if kind == "SCHEMA":
         return parts[0] if len(parts) >= 2 else None
-    return parts[0] if len(parts) == 3 else None
+    # db.schema.object or db..object; or db. / db.schema. completed at run time, where the first part may
+    # be the database
+    return parts[0] if len(parts) == 3 or parts[-1] == "" else None
 
 
 def _snip(s: str) -> str:
@@ -343,17 +439,36 @@ def _snip(s: str) -> str:
 def _code_findings(sql: str, clone_db: str) -> list[tuple[int, str, str]]:
     """(offset, what, snippet) for the forms module step 5 refuses in ``sql``'s code at any depth (``$$``
     bodies included, comments and '...' strings ignored), and -- read as the SQL it runs, recursively -- in
-    each '...' literal handed straight to EXECUTE IMMEDIATE (the first piece when it is concatenated)."""
+    each '...' literal that runs as SQL (handed straight to EXECUTE IMMEDIATE, the first piece when it is
+    concatenated, or a body given after AS)."""
     view, kept = code_view(sql), code_view(sql, strings=True)
+    dynamic = code_view(sql, strings=True, dynamic=True)
+
+    def in_code(at: int) -> bool:                       # the words at ``at`` are code, not inside a string
+        return view[at] == kept[at]
+
     found = [(m.start(), what, _snip(m.group(0))) for what, rx in _FORBIDDEN for m in rx.finditer(view)]
+    found += [(m.start(), "stage file removal", _snip(m.group(0))) for m in _STAGE_REMOVE.finditer(kept)
+              if in_code(m.start())]
     found += [(m.start(), "system function", m.group(0)) for m in _SYSTEM_FUNCTION.finditer(view)
               if m.group(0).upper() not in _SYSTEM_FUNCTIONS]
     found += [(m.start(), "name outside the clone", _snip(m.group(0))) for m in _TARGET.finditer(view)
               if (db := _target_db(m)) is not None and not _same_db(db, clone_db)]
-    found += [(m.start(), "IDENTIFIER() of a literal name", _snip(m.group(0)))
-              for m in _IDENTIFIER_LITERAL.finditer(kept)]
-    for m in _EXECUTE_LITERAL.finditer(kept):
-        if view[m.start():m.end()] != kept[m.start():m.end()]:
+    found += [(m.start(), "DDL of an unreviewed kind", _snip(view[m.start():m.end() + 40]))
+              for m in _DDL.finditer(view)
+              if not (_DDL_KIND.match(view, m.end()) or _ALTER_SUBCLAUSE.match(view, m.start())
+                      or any(rx.match(view, m.start()) for _what, rx in _FORBIDDEN))]
+    # in code; and in any string, as written and as the SQL it would run (a string can be dynamic SQL)
+    idents = {m.start(): _snip(m.group(0)) for m in _IDENTIFIER.finditer(view)}
+    idents |= {m.start(): _snip(m.group(0)) for v in (kept, dynamic) for m in _IDENTIFIER_OF_VALUE.finditer(v)
+               if m.start() not in idents}
+    found += [(at, "IDENTIFIER() name", snip) for at, snip in idents.items()]
+    tables = {m.start(): _snip(m.group(0)) for v in (kept, dynamic) for m in _TABLE_OF_VALUE.finditer(v)}
+    found += [(at, "TABLE() name", snip) for at, snip in tables.items()]
+    found += [(m.start(), "EXECUTE IMMEDIATE of an unread expression", _snip(kept[m.start():m.end() + 30]))
+              for m in _EXECUTE_IMMEDIATE.finditer(view) if not _READABLE_SQL.match(kept, m.end())]
+    for m in _SQL_LITERAL.finditer(kept):
+        if not in_code(m.start()):
             continue                                    # the words sit inside a string: prose, not code
         body = _interior(sql[m.end():_quoted_end(sql, m.end())])
         found += [(m.end() + 1 + at, what, snip)
@@ -372,6 +487,27 @@ def violations(text: str, clone_db: str) -> list[tuple[int, str, str]]:
     # A statement starts at top-level code and ends past a code ';', so no span crosses its bounds and a
     # slice of a whole-text view is that view of the statement.
     top_view, code_only_view = code_view(text, dollar_bodies=False), code_view(text)
+    # The client (snow sql -> the connector's split_statements) cuts the file into statements by its own
+    # reading, which differs from Snowflake's -- and so from this guard's -- outside a $$ body: it reads no
+    # // comment, it takes a backslash in a "quoted" name as an escape, it acts on a `!` command line, and
+    # it deletes a /* */ comment outright, so one with no space on either side joins two tokens
+    # (DBA_MAINT/**/_DB). Each could hand Snowflake SQL none of these checks read, so each is refused;
+    # without them the client's statements are exactly ``statements()``, as Snowflake reads them.
+    for kind, start, end in _spans(text):
+        if kind == "comment" and text.startswith("//", start):
+            found.append((line(start), "// comment outside a $$ body", _snip(text[start:end])))
+        elif (kind == "comment" and text.startswith("/*", start) and start > 0 and end < len(text)
+              and not text[start - 1].isspace() and not text[end].isspace()):
+            found.append((line(start), "/* */ comment joining two tokens outside a $$ body",
+                          _snip(text[max(0, start - 20):end + 20])))
+        elif kind == "quoted" and "\\" in text[start:end]:
+            found.append((line(start), "backslash in a quoted name outside a $$ body", _snip(text[start:end])))
+    found += [(line(m.start()), "client command line", _snip(text[m.start():].split("\n", 1)[0]))
+              for m in _CLIENT_COMMAND.finditer(top_view)]
+    found += [(line(m.start()), "client template syntax", _snip(text[m.start():m.start() + 40]))
+              for m in _CLIENT_TEMPLATE.finditer(text)]
+    found += [(line(at), "string escape the guard cannot decode", _snip(text[at:at + 12]))
+              for at in _unread_escapes(text)]
     # every '...' string too, as written and as the SQL it would run: a string can be dynamic SQL
     send_views = (code_view(text, strings=True), code_view(text, strings=True, dynamic=True))
     for start, end, code in statements(text):

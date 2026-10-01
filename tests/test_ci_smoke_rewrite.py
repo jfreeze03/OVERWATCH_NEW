@@ -16,6 +16,12 @@ every migration through it), case-insensitive, with GRANT/REVOKE, SYSTEM$ functi
 database DDL, and DDL / writes / CALLs / USE naming another database refused at any depth, and the
 notifier-CALL ban reaching into $$ bodies and dynamic-SQL strings. Step 0 also turns V164's escalation
 email off in the clone, and ci.yml names the real send guarantee (suspended tasks + the CALL ban).
+
+v4.608 recheck #2-#6 and their siblings: the text guard now reads `//` comments, names with no space
+before a quote, `db..object`, every CREATE / ALTER / DROP kind (refusing the ones it cannot read) and
+IDENTIFIER() of any argument; it decodes string escapes as Snowflake does; and it refuses what the client
+(snow sql) reads differently from Snowflake -- a top-level `//`, a backslash in a quoted name, a `!`
+command, a comment joining two tokens, template syntax -- so what it checked is what runs.
 """
 
 from __future__ import annotations
@@ -155,6 +161,12 @@ def _nested(sql: str) -> str:
     # ... and inside a dynamic-SQL string, read as the SQL it runs
     _nested(f"EXECUTE IMMEDIATE 'CALL/**/{_CLONE}.OVERWATCH.SP_NOTIFY_WEBHOOK()';"),
     _nested(f"LET s VARCHAR := 'CALL /* c */ {_CLONE}.OVERWATCH.SP_DAILY_DIGEST()'; EXECUTE IMMEDIATE :s;"),
+    # v4.608 recheck #3/#4: a quoted name needs no space after CALL, and db..name is db.PUBLIC.name
+    f'CALL"{_CLONE}".OVERWATCH.SP_NOTIFY_WEBHOOK();\n',
+    'CALL"SP_DAILY_DIGEST"();\n',
+    _nested(f'CALL"{_CLONE}".OVERWATCH.SP_DAILY_DIGEST();'),
+    f"CALL {_CLONE}..SP_NOTIFY_WEBHOOK();\n",
+    _nested(f'EXECUTE IMMEDIATE \'CALL"{_CLONE}"..SP_DAILY_DIGEST()\';'),
 ])
 def test_a_notifier_call_or_send_anywhere_outside_a_task_body_fails_closed(sql):
     assert "notification send" in _whats(_mod(), sql)
@@ -200,7 +212,7 @@ _ACCOUNT_LEVEL = [
     ("CALL ALFA_EDW_PRD.PUBLIC.SP_RELOAD();", "name outside the clone"),
     ("USE DATABASE ALFA_EDW_PRD;", "name outside the clone"),
     (f"ALTER TABLE {_CLONE}.OVERWATCH.T RENAME TO ALFA_EDW_PRD.PUBLIC.T;", "name outside the clone"),
-    ("DELETE FROM IDENTIFIER('ALFA_EDW_PRD.PUBLIC.T');", "IDENTIFIER() of a literal name"),
+    ("DELETE FROM IDENTIFIER('ALFA_EDW_PRD.PUBLIC.T');", "IDENTIFIER() name"),
     ("CREATE STAGE S URL = 's3://bucket/x';", "external stage or data unload"),
     ("CREATE OR REPLACE PROCEDURE P() RETURNS VARCHAR LANGUAGE PYTHON EXTERNAL_ACCESS_INTEGRATIONS = (X) "
      "AS 'x';", "integration reference"),
@@ -209,6 +221,38 @@ _ACCOUNT_LEVEL = [
     ("CREATE OR REPLACE USER X;", "account or user change"),
     ("DROP USER SOMEONE;", "account or user change"),
     ("DROP ACCOUNT A;", "account or user change"),
+    # v4.608 recheck #3: a quoted name written straight after the keyword (no space) passed _TARGET
+    ('INSERT INTO"ALFA_EDW_PRD".PUBLIC.T VALUES (1);', "name outside the clone"),
+    ('DELETE FROM"ALFA_EDW_PRD".PUBLIC.T;', "name outside the clone"),
+    ('UPDATE"ALFA_EDW_PRD".PUBLIC.T SET A = 1;', "name outside the clone"),
+    ('DROP TABLE"ALFA_EDW_PRD".PUBLIC.T;', "name outside the clone"),
+    ('DROP TABLE IF EXISTS"ALFA_EDW_PRD".PUBLIC.T;', "name outside the clone"),
+    ('CREATE TABLE"ALFA_EDW_PRD".PUBLIC.T (A INT);', "name outside the clone"),
+    ('CALL"ALFA_EDW_PRD".PUBLIC.SP_RELOAD();', "name outside the clone"),
+    ('MERGE INTO"ALFA_EDW_PRD".PUBLIC.T t USING (SELECT 1 AS A) s ON TRUE WHEN MATCHED THEN DELETE;',
+     "name outside the clone"),
+    ('USE DATABASE"ALFA_EDW_PRD";', "name outside the clone"),
+    (f'ALTER TABLE {_CLONE}.OVERWATCH.T RENAME TO"ALFA_EDW_PRD".PUBLIC.T;', "name outside the clone"),
+    # v4.608 recheck #4: db..name is Snowflake's shorthand for db.PUBLIC.name
+    ("INSERT INTO ALFA_EDW_PRD..T VALUES (1);", "name outside the clone"),
+    ("DROP TABLE ALFA_EDW_PRD..T;", "name outside the clone"),
+    ('DELETE FROM "ALFA_EDW_PRD"..T;', "name outside the clone"),
+    ("CALL ALFA_EDW_PRD..SP_RELOAD();", "name outside the clone"),
+    (f"ALTER TABLE {_CLONE}.OVERWATCH.T RENAME TO ALFA_EDW_PRD..T;", "name outside the clone"),
+    # ... and an unquoted name may hold letters outside ASCII
+    ("INSERT INTO ÄLFA_EDW_PRD.PUBLIC.T VALUES (1);", "name outside the clone"),
+    # v4.608 recheck #6: IDENTIFIER() of any argument hides the name from _TARGET ($$ is a literal too)
+    ("DELETE FROM IDENTIFIER($$ALFA_EDW_PRD.PUBLIC.T$$);", "IDENTIFIER() name"),
+    ("DELETE FROM IDENTIFIER(?);", "IDENTIFIER() name"),
+    ("DELETE FROM IDENTIFIER /* c */ (:t);", "IDENTIFIER() name"),
+    ("USE DATABASE IDENTIFIER('ALFA_EDW_PRD');", "IDENTIFIER() name"),
+    ("DELETE FROM T USING TABLE('ALFA_EDW_PRD.PUBLIC.T') s WHERE T.A = s.A;", "TABLE() name"),
+    # v4.608 recheck sweep: the other writes and starts the name check did not read
+    ("TRUNCATE MATERIALIZED VIEW ALFA_EDW_PRD.PUBLIC.MV;", "name outside the clone"),
+    ("COMMENT ON TABLE ALFA_EDW_PRD.PUBLIC.T IS 'x';", "name outside the clone"),
+    ("COPY FILES INTO @ALFA_EDW_PRD.PUBLIC.STG FROM @S;", "external stage or data unload"),
+    ("REMOVE @ALFA_EDW_PRD.PUBLIC.STG/x;", "stage file removal"),
+    ("EXECUTE NOTEBOOK ALFA_EDW_PRD.PUBLIC.NB();", "EXECUTE of a runnable other than a block"),
 ]
 
 
@@ -249,6 +293,12 @@ def test_account_level_sql_fails_closed_as_a_literal_handed_to_execute_immediate
     ("'EXECUTE IMMEDIATE ''GRANT ROLE SOME_ADMIN TO ROLE PUBLIC'''", "grant or revoke"),
     ("'DROP/**/USER SOMEONE'", "account or user change"),
     ("'GRANT USAGE ON INTEGRATION ' || :name || ' TO ROLE PUBLIC'", "grant or revoke"),
+    # v4.608 recheck sweep: no space before the literal, nested parentheses, and a name the run completes
+    ("(('GRANT ROLE SOME_ADMIN TO ROLE PUBLIC'))", "grant or revoke"),
+    ("'INSERT INTO ALFA_EDW_PRD.' || :rest || ' VALUES (1)'", "name outside the clone"),
+    # ... and anything but a literal, a $$ block or a :variable is SQL the guard cannot read
+    ("CONCAT('GRANT ROLE SOME_ADMIN TO ROLE PUBLIC')", "EXECUTE IMMEDIATE of an unread expression"),
+    ("FROM @ALFA_EDW_PRD.PUBLIC.STG/x.sql", "EXECUTE IMMEDIATE of an unread expression"),
 ])
 def test_a_literal_handed_to_execute_immediate_is_read_as_the_sql_it_runs(literal, what):
     mod = _mod()
@@ -266,8 +316,92 @@ def test_prose_strings_and_the_chains_dynamic_sql_shapes_stay_clean():
                         f"{_CLONE}.OVERWATCH.' || :tname"),
         _proc_executing("'SELECT 1 FROM ' || :cname || ' LIMIT 1'"),
         _proc_executing(f"'DROP TABLE IF EXISTS {_CLONE}.OVERWATCH.T -- it''s a comment'"),
+        # v4.608 recheck: an ALTER TABLE sub-clause is not a statement of its own kind, and a // comment
+        # in a SQL body is a comment (an apostrophe in it opens nothing)
+        _nested(f"ALTER TABLE {_CLONE}.OVERWATCH.T DROP COLUMN IF EXISTS C;"),
+        _nested(f"ALTER TABLE {_CLONE}.OVERWATCH.T ALTER COLUMN C DROP NOT NULL;"),
+        _nested("SELECT 1; // it's a note\n    SELECT 'two';"),
+        "SELECT 1 /* a comment with a space beside it */ + 2, 'R & D';\n",
     ):
         assert mod.violations(sql, _CLONE) == [], sql
+
+
+# v4.608 recheck #2: Snowflake reads `//` as a line comment and the tokenizer did not, so an apostrophe in
+# one opened a string that hid the code after it from every check but the send ban.
+@pytest.mark.parametrize(("sql", "whats"), [
+    ("SELECT 1 // it's\n;\nDROP TABLE ALFA_EDW_PRD.PUBLIC.T;\nSELECT 'x';\n", {"name outside the clone"}),
+    ("EXECUTE IMMEDIATE $$ BEGIN SELECT 1; // it's a probe\n ALTER WAREHOUSE WH_ALFA_ADMIN SET "
+     "STATEMENT_TIMEOUT_IN_SECONDS = 1; GRANT ROLE ACCOUNTADMIN TO USER BOB; RETURN 'x'; END; $$;\n",
+     {"production warehouse", "warehouse DDL", "grant or revoke"}),
+    # outside a $$ body the client splits the file by its own reading, which differs from Snowflake's on a
+    # // comment, a backslash in a quoted name and a `!` command line, so a statement could run unread
+    ("SELECT 1 // ;\nALTER SESSION SET QUERY_TAG = 'x';\n", {"// comment outside a $$ body"}),
+    ('SELECT 1 AS "a\\" -- " ; GRANT ROLE ACCOUNTADMIN TO USER BOB ;\nSELECT 2;\n',
+     {"backslash in a quoted name outside a $$ body"}),
+    ("SELECT 1\n!source evil.sql\n;\n", {"client command line"}),
+    # snow sql deletes comments, so a /* */ with no space on either side joins two tokens: neither the
+    # rewrite nor ci.yml's grep sees DBA_MAINT_DB, and the client sends it
+    ("DELETE FROM DBA_MAINT/**/_DB.OVERWATCH.SETTINGS;\n", {"/* */ comment joining two tokens outside a $$ body"}),
+    ("INSERT INTO ALFA/* x */_EDW_PRD.PUBLIC.T VALUES (1);\n",
+     {"/* */ comment joining two tokens outside a $$ body"}),
+    # ... and renders client templates anywhere (ctx.env reads the job's environment) before Snowflake sees it
+    ("INSERT INTO <% ctx.env.SNOWFLAKE_DATABASE %>.OVERWATCH.SETTINGS (KEY) VALUES ('k');\n",
+     {"client template syntax"}),
+    (_nested("DELETE FROM &{ ctx.env.SNOWFLAKE_DATABASE }.OVERWATCH.ALERT_EVENTS;"), {"client template syntax"}),
+    ("SELECT '&SNOWFLAKE_PASSWORD';\n", {"client template syntax"}),
+    ("SELECT 1 AS A {# ' #};\n", {"client template syntax"}),
+    # a string that runs as SQL is decoded by Snowflake: \x5f is `_`, \x27 a quote, \t whitespace
+    (_proc_executing("'DELETE FROM DBA_MAINT\\x5fDB.OVERWATCH.SETTINGS'"), {"string escape the guard cannot decode"}),
+    (_nested("LET s VARCHAR := 'CALL SP_NOTIFY\\u005fWEBHOOK()'; EXECUTE IMMEDIATE :s;"),
+     {"string escape the guard cannot decode"}),
+    (_nested("LET s VARCHAR := 'EXECUTE IMMEDIATE ''CALL SP_DAILY\\\\x5fDIGEST()'''; EXECUTE IMMEDIATE :s;"),
+     {"string escape the guard cannot decode"}),
+    (_nested("EXECUTE IMMEDIATE 'CALL\\tSP_NOTIFY_WEBHOOK()';"), {"notification send"}),
+    (_nested("EXECUTE IMMEDIATE 'SELECT 1 -- x\\nDROP TABLE ALFA_EDW_PRD.PUBLIC.T';"), {"name outside the clone"}),
+    # a body in another language has other comment and string rules (# it's), so it is not read as SQL
+    (f"CREATE OR REPLACE PROCEDURE {_CLONE}.OVERWATCH.P()\nRETURNS VARCHAR\nLANGUAGE PYTHON\n"
+     "RUNTIME_VERSION = '3.11'\nPACKAGES = ('snowflake-snowpark-python')\nHANDLER = 'run'\nAS\n$$\n"
+     "# it's\ndef run(session):\n    session.sql(\"GRANT ROLE ACCOUNTADMIN TO USER BOB\").collect()\n"
+     "    return 'x'\n$$;\n", {"body in a language other than SQL"}),
+])
+def test_comments_and_bodies_are_read_as_snowflake_and_the_client_read_them(sql, whats):
+    assert whats <= _whats(_mod(), sql)
+
+
+# v4.608 recheck #5: _TARGET read the names of the kinds it listed only, so CREATE / ALTER / DROP of any other
+# kind (or a class instance) named another database unseen. Every DDL of a kind it cannot read is refused.
+@pytest.mark.parametrize("sql", [
+    "CREATE OR REPLACE DATA METRIC FUNCTION ALFA_EDW_PRD.PUBLIC.F(T TABLE(C INT)) RETURNS NUMBER AS 'SELECT 1'",
+    "DROP DATA METRIC FUNCTION ALFA_EDW_PRD.PUBLIC.F(TABLE(INT))",
+    "CREATE SEMANTIC VIEW ALFA_EDW_PRD.PUBLIC.V TABLES (T)",
+    "DROP CORTEX SEARCH SERVICE ALFA_EDW_PRD.PUBLIC.C",
+    "DROP SERVICE ALFA_EDW_PRD.PUBLIC.SVC",
+    "ALTER GIT REPOSITORY ALFA_EDW_PRD.PUBLIC.R FETCH",
+    "DROP IMAGE REPOSITORY ALFA_EDW_PRD.PUBLIC.R",
+    "DROP JOIN POLICY ALFA_EDW_PRD.PUBLIC.P",
+    "DROP SNAPSHOT ALFA_EDW_PRD.PUBLIC.SN",
+    "DROP SNOWFLAKE.ML.FORECAST ALFA_EDW_PRD.PUBLIC.M",
+    "CREATE OR REPLACE AGGREGATE FUNCTION ALFA_EDW_PRD.PUBLIC.F(A INT) RETURNS INT LANGUAGE SQL AS 'A'",
+    "ALTER SESSION SET SEARCH_PATH = 'ALFA_EDW_PRD.PUBLIC'",
+    "COMMENT ON COLUMN ALFA_EDW_PRD.PUBLIC.T.C IS 'x'",
+])
+def test_ddl_of_a_kind_the_guard_cannot_read_fails_closed_at_any_depth(sql):
+    mod = _mod()
+    for text in (sql + ";\n", _nested(sql + ";"), _proc_executing(_quoted(sql))):
+        assert "DDL of an unreviewed kind" in _whats(mod, text), text
+
+
+def test_a_body_given_as_a_literal_is_read_as_the_sql_it_runs():
+    """v4.608 recheck sweep: a procedure or function body may be a '...' literal instead of $$, and it runs
+    as SQL all the same; it was read only by the send ban."""
+    mod = _mod()
+    body = "'BEGIN DROP TABLE ALFA_EDW_PRD.PUBLIC.T; GRANT ROLE SOME_ADMIN TO ROLE PUBLIC; RETURN ''x''; END'"
+    proc = (f"CREATE OR REPLACE PROCEDURE {_CLONE}.OVERWATCH.P()\nRETURNS VARCHAR\nLANGUAGE SQL\nAS {body};\n"
+            f"CALL {_CLONE}.OVERWATCH.P();\n")
+    assert {"name outside the clone", "grant or revoke"} <= _whats(mod, proc)
+    adjacent = (f"CREATE OR REPLACE PROCEDURE {_CLONE}.OVERWATCH.P() RETURNS VARCHAR LANGUAGE SQL AS\n$$\n"
+                "BEGIN\n    EXECUTE IMMEDIATE'GRANT ROLE SOME_ADMIN TO ROLE PUBLIC';\nEND;\n$$;\n")
+    assert "grant or revoke" in _whats(mod, adjacent)
 
 
 @pytest.mark.parametrize("sql", [
