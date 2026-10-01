@@ -1,9 +1,14 @@
 # Performance backlog — full re-analysis at v4.35.1 (2026-07-12)
 
-> **Status (updated 2026-09-03):** Tier A SHIPPED as `V041__loader_efficiency.sql`
-> (riders R1–R11) and is now the backbone through V124 (app v4.456.0). Tiers below
-> that are not marked shipped remain live backlog; check CHANGELOG for anything
-> landed since.
+> **Status (2026-10-01): historical.** A frozen 2026-07-12 analysis, kept because
+> `V041__loader_efficiency.sql` and `V041_LOADER_PASS.md` cite its Tier A. Tier A
+> SHIPPED as V041 (riders R1–R11). Later perf work is in CHANGELOG, not tracked
+> here, and some of it closed items below that are not marked: #19's per-member
+> batch caching and 4-wide bounded batch concurrency (v4.144.0;
+> `query._batch_member_cache_get`, `_execute_batch_bounded`) plus its byte-budgeted
+> member cache (`_BATCH_MEMBER_CACHE_MAX_BYTES`), and most of #9 (v4.3.0, v4.282.0,
+> v4.531.0 and later rounds). Do not treat Tiers B–D as a current backlog: check
+> CHANGELOG and the code before acting on any item.
 
 Ranked by measured pain (fleet boards 07-11/07-12) x effort. This was written when
 everything here was UNIMPLEMENTED as of daaef13; implemented items (Codex r11-r21
@@ -38,8 +43,10 @@ Grep evidence at daaef13: serial `= run(` per page — Admin 27 (8 live-tier),
 Operations 25, Alerts 19 (6 live), Security 10. Brief's v4.19 batching cut
 its p95 from 8.9s to ~2-3s; the same treatment is unapplied elsewhere.
 
-9.  Tier-group Operations' tabs into run_batch calls (only the queries tab
-    batches today). Biggest serial-latency win in the app.
+9.  [PARTLY SHIPPED — Queries, Pipeline SLA, data checks, recurring, task
+    SLA, objectives, adaptive candidacy and warehouse anomalies batch via
+    run_batch; serial `run()` sites remain] Tier-group Operations' tabs into
+    run_batch calls. Biggest serial-latency win in the app.
 10. Admin/Alerts live-tier audit: most of those 14 live reads are config
     tables that belong on recent/metadata; live is deliberate ONLY for the
     operator-edit surfaces (settings table, dept budgets post-save).
@@ -69,11 +76,13 @@ its p95 from 8.9s to ~2-3s; the same treatment is unapplied elsewhere.
 
 ## Tier C — engine round [CORE]
 
-19. Rerun-local memo above st.cache_data (skip unpickle for repeated keys),
-    per-member batch caching (submit only misses, cap ~4 concurrent),
-    Arrow pass-through for table-only consumers, byte-based cache budgets,
-    buffered telemetry flush, quarantine retry backoff by error kind,
-    canary compile-first mode + bounded concurrency (163 serial executes).
+19. [PARTLY SHIPPED — per-member batch caching, the 4-concurrent cap and a
+    byte-based member-cache budget] Rerun-local memo above st.cache_data
+    (skip unpickle for repeated keys), per-member batch caching (submit only
+    misses, cap ~4 concurrent), Arrow pass-through for table-only consumers,
+    byte-based cache budgets, buffered telemetry flush, quarantine retry
+    backoff by error kind, canary compile-first mode + bounded concurrency
+    (163 serial executes).
 
 ## Tier D — render micro [RENDER]
 
@@ -84,5 +93,9 @@ its p95 from 8.9s to ~2-3s; the same treatment is unapplied elsewhere.
 
 ## Standing owner decision
 
-Dedicated XSMALL UI warehouse (raised r14/r16/r18/r19): isolates page
-latency from the task graph. Recommended yes; needs the quota/monitor call.
+Dedicated XSMALL UI warehouse (raised r14/r16/r18/r19): would isolate page
+latency from the task graph. Never built: the app and every task share
+WH_ALFA_ADMIN (`config.APP_WAREHOUSE`, snowflake.yml `query_warehouse`), and
+`tests/test_no_unauthorized_warehouse.py` lets only the owner sanction a new
+one. Still an open owner decision. Resource monitors were retired by owner
+decision (2026-07-13, V045), so no quota/monitor call is involved.

@@ -13,7 +13,7 @@ spreadsheets:
 
 ## Where it lives
 
-A **Compare tab on Cost & Contract** (`cost_parts/compare.py`) — not a new
+A **Compare tab on Cost Intelligence** (`cost_parts/compare.py`) — not a new
 nav page (nav curation is pending on 30d usage data). Honors the triage
 filters: company always; database/schema where the source has the grain.
 

@@ -1,7 +1,7 @@
 # ETL cost tags — the structured QUERY_TAG convention (Phase 3, 2026-07-14)
 
 Cost attribution for pipelines is only as good as the tags on the queries.
-OVERWATCH's ETL unit-cost KPIs (Cost & Contract → Unit costs → *ETL unit costs*)
+OVERWATCH's ETL unit-cost KPIs (Cost Intelligence → Unit costs → *ETL unit costs*)
 read a **JSON object** in Snowflake's `QUERY_TAG`. Set it once per session/run:
 
 ```sql
