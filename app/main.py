@@ -241,16 +241,22 @@ def _parse_view(raw: str) -> dict | None:
 
 
 def _apply_default_landing() -> None:
-    """Once per session: land on the user's saved default view. An explicit
-    ?page= deep link always wins over the default."""
+    """Once per session: hydrate the viewer's display prefs (timezone, density,
+    presentation mode) and land on their saved default view. An explicit ?page=
+    deep link the session ARRIVED with wins over the default view only — the
+    display prefs hydrate either way."""
+    # c09 R1-002: record ONCE, on the session's first call (before _sidebar's remember_page
+    # writes ?page= for every run), whether it arrived on a deep link. Re-reading
+    # st.query_params on a retry saw the app's OWN ?page= write as a deep link, so a
+    # transient prefs failure (r10 #1) or a pre-identity run (r11 #3) lost every saved pref
+    # for the session, and a shared link / reload never hydrated the display prefs at all.
+    if "_ow_arrived_with_page" not in st.session_state:
+        try:
+            st.session_state["_ow_arrived_with_page"] = bool(st.query_params.get("page"))
+        except Exception:  # noqa: BLE001
+            st.session_state["_ow_arrived_with_page"] = False
     if st.session_state.get("_ow_default_applied"):
         return
-    try:
-        if st.query_params.get("page"):
-            st.session_state["_ow_default_applied"] = True   # deep link wins, done
-            return
-    except Exception:  # noqa: BLE001
-        pass
     from app.core.state import consume_pending_navigation
     from app.data import prefs_sql
 
@@ -292,6 +298,8 @@ def _apply_default_landing() -> None:
         # the toggle; programmatic assignment never fires its on_change, so the
         # user's saved 'audit' can't be clobbered by a stale pre-hydrate False.
         st.session_state["_ow_present_mode_toggle"] = (mode_pref == "audit")
+    if st.session_state.get("_ow_arrived_with_page"):
+        return   # deep link wins over the saved DEFAULT_VIEW (the display prefs above still hydrate)
     raw = next((str(r["PREF_VALUE"] or "") for _, r in prefs.df.iterrows()
                 if str(r["PREF_KEY"]) == "DEFAULT_VIEW"), "")
     data = _parse_view(raw)
