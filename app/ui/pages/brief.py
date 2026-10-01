@@ -31,7 +31,14 @@ from app.logic.formulas import (
     md_dollars,
     safe_float,
 )
-from app.logic.verdict import Signal, attention_bundle, attention_healthy, attention_signals, page_verdict
+from app.logic.verdict import (
+    NO_CONTRACT_RUNWAY,
+    attention_bundle,
+    attention_healthy,
+    attention_signals,
+    contract_runway_signal,
+    page_verdict,
+)
 from app.logic.workbench import my_queue_counts
 from app.ui import attention, charts
 from app.ui.components import (
@@ -412,14 +419,14 @@ def render() -> None:
         open_incidents=(_n_inc if _inc.ok else None),
         etl=_etl)
     _vsig = attention_signals(_attn)
-    if _best is not None:
-        _dl = _best["days_left"]
-        if 0 <= _dl <= 30:
-            _vsig.append(Signal("bad", f"contract runway {_dl:,.0f} days"))
-        elif 0 <= _dl <= 90:
-            _vsig.append(Signal("warn", f"contract runway {_dl:,.0f} days"))
+    # The Cost page's shared runway Signal: an overrun (days_left < 0) is Attention, a failed runway
+    # read is Watch, and with no contract configured the all-clear claims nothing about a contract.
+    _rsig = contract_runway_signal(_best, read_ok=exh.usable())
+    if _rsig is not None:
+        _vsig.append(_rsig)
+    _rclause = "contract runway healthy" if _best is not None else NO_CONTRACT_RUNWAY
     page_verdict_line(page_verdict(
-        _vsig, healthy=attention_healthy(_attn) + "; contract runway healthy"))
+        _vsig, healthy=f"{attention_healthy(_attn)}; {_rclause}"))
     contract_runway_bar(_best)
     panel_help(
         "Your one-scroll morning read: the headline numbers, then open fires, then the top "

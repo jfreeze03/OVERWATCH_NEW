@@ -67,7 +67,7 @@ def test_the_sweep_left_no_raw_absence_regression_hotspots():
         "app/ui/pages/decision_studio.py": 0,   # v4.597 Proof shell
         "app/ui/pages/ask.py": 2,            # answer headlines (direct answers, not absences)
         "app/ui/pages/cost.py": 0,           # opener moved to the shared component (C18)
-        "app/ui/pages/cost_parts/spend.py": 3,      # SPCS structural notes
+        "app/ui/pages/cost_parts/spend.py": 2,      # SPCS structural notes (R1-118: the no-rows one is no_data_yet)
         "app/ui/pages/cost_parts/contract.py": 2,   # rate-context notes
         "app/ui/pages/cost_parts/compare.py": 0,
         "app/ui/pages/cost_parts/unit_costs.py": 0,

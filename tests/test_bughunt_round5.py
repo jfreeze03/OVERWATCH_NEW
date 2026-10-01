@@ -42,7 +42,10 @@ def test_storage_account_truth_live_is_bounds_aware():
 # --- tz-window fin-1 (MED): the per-db storage panel has a bounded (last-month) branch
 def test_storage_by_db_has_a_last_month_branch():
     s = _src("app/ui/pages/cost_parts/spend.py")
-    assert "if bounds is not None:" in s.split("def _storage_tab(", 1)[1][:2500]
+    # R1-156: the branch is gated on the LAST_MONTH shape; `bounds is not None` (the round-5 form) also
+    # routed Current month / Current year here after r30 #2 gave them bounds. tests/test_cost_spend_honesty.py
+    # drives all three presets.
+    assert "if is_prior_month_window(bounds):" in s.split("def _storage_tab(", 1)[1][:3000]
     assert 'storage_lastmonth_' in s
     assert 'title="$/month by database (last month)"' in s
 
@@ -62,8 +65,11 @@ def test_operations_and_cost_verdicts_guard_degraded_reads():
     assert 'verdict.Signal("warn", "platform telemetry unavailable' in ops
     assert 'verdict.Signal("warn", "source freshness unavailable")' in ops
     cost = _src("app/ui/pages/cost.py")
-    assert "if not _exh.usable():" in cost
-    assert '"contract runway unavailable' in cost
+    # R1-141 moved the runway band into the shared verdict.contract_runway_signal (Cost + Brief), so
+    # the failed-read guard is now the read_ok argument + the helper's warn, not an inline elif;
+    # tests/test_runway_verdict.py drives the behaviour.
+    assert "contract_runway_signal(_best, read_ok=_exh.usable()" in cost
+    assert '"contract runway unavailable' in _src("app/logic/verdict.py")
 
 
 # --- concurrency fin-1 (LOW): content_request_key is time-independent -----------------
