@@ -13,7 +13,7 @@ from app.core.result import is_setup_absence
 from app.core.session import is_operator
 from app.core.state import filters, navigation_context, request_navigation
 from app.data import graph_sql, mart27_sql, mart_sql, workbench_sql
-from app.logic import lineage, outcomes
+from app.logic import lineage, outcomes, wh_change
 from app.logic.actions import deferred_mask, deferred_summary, rank_actions
 from app.logic.formulas import (
     account_today,
@@ -827,7 +827,15 @@ def render_entity_360(company: str) -> None:
             source="OBJECT_CHANGE_REGISTRY / WAREHOUSE_CHANGE_REGISTRY",
         )
         if changes.ok and not changes.empty:
-            styled_table(changes.df, height=200)
+            # v4.606 holistic review: DETAIL is the change scans' VERDICT_DETAIL, written in SQL
+            # with raw seconds ('p95 1800.0s->2400.0s'); styled_table only humanizes numeric
+            # duration columns, so re-render the text the way the Operations drill and Control
+            # Room's Magnitude do. A copy -- never mutate the cached frame.
+            _chg = changes.df.copy()
+            if "DETAIL" in _chg.columns:
+                _chg["DETAIL"] = _chg["DETAIL"].map(
+                    lambda v: wh_change.humanize_verdict_detail(v) if isinstance(v, str) else v)
+            styled_table(_chg, height=200)
         elif changes.ok:
             empty_state("no_data_yet", "No tracked change in the last 90 days — the "
                         "change-impact scans fill this (Operations → Change impact).")

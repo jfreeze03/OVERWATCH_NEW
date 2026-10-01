@@ -26,9 +26,11 @@ def humanize_verdict_detail(text: str) -> str:
     '1800.0s' right above a KPI showing the same p95 as '30m' (PR-1 R1-124). The numbers are left
     as they are; only the duration tokens are re-rendered. The ALERT_EVENTS.DETAIL copy is SQL-side.
 
-    Shared by every surface that shows the string (v4.606 holistic review: it was private to
-    Operations, so Control Room's ranked-cause Magnitude -- rca.candidates_from_changes -- still read
-    '1800.0s'). Once the scan humanizes VERDICT_DETAIL in SQL the regexes simply find nothing."""
+    Shared by the three app surfaces that show the string (v4.606 holistic review: it was private
+    to Operations, so the others still read '1800.0s'): the Operations warehouse/object change
+    drills, Control Room's ranked-cause Magnitude (rca.candidates_from_changes) and Workbench Entity
+    360's Recent changes DETAIL column. Spend's anomaly drill renders only the change title, not this
+    string. Once the scan humanizes VERDICT_DETAIL in SQL the regexes simply find nothing."""
     def _h(tok: str, unit_sec: float) -> str:
         return "?" if tok == "?" else humanize_duration(safe_float(tok) * unit_sec, "s")
 
