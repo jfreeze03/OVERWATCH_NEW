@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from app.config import MAX_LIVE_WINDOW_DAYS, MAX_MART_WINDOW_DAYS
+from app.config import MAX_LIVE_WINDOW_DAYS
 from app.core.query import run, run_batch
 from app.core.result import is_setup_absence
 from app.data import cortex_sql, etl_sql, graph_sql, insights_sql, mart27_sql
@@ -106,8 +106,11 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     _uc_wlab = window_label(bounds, min(int(uc_days), MAX_LIVE_WINDOW_DAYS))
     _uc_phrase = window_phrase(bounds, min(int(uc_days), MAX_LIVE_WINDOW_DAYS))
     # The ETL / serverless-task reads clamp to the live-scan limit on their own (R1-163); the repeated-
-    # pattern read is mart-backed and clamps to MAX_MART_WINDOW_DAYS instead (R1-015).
+    # pattern read is mart-backed but clamps a trailing window to PATTERN_COST_MAX_DAYS (90): older
+    # MART_PATTERN_COST_DAILY rows predate V120's RUNS re-stamp (v4.606 holistic review).
     _live_wlab = window_label(bounds, min(int(days), MAX_LIVE_WINDOW_DAYS))
+    # The else branch's "pattern ... panels follow the page window" holds: it renders only when days <=
+    # MAX_LIVE_WINDOW_DAYS, which is not past PATTERN_COST_MAX_DAYS (both 90).
     if int(uc_days) != int(days):
         st.caption(f"Page window is {_window_label.lower()}, but unit prices use "
                    f"<={_UNIT_COST_MAX_DAYS}d "
@@ -115,8 +118,9 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                    "is the slowest read on this page. "
                    + (f"The AI and task-graph pipeline panels below follow the page window from "
                       f"their marts (a live fallback scans at most {MAX_LIVE_WINDOW_DAYS}d and says "
-                      f"so), the repeated-pattern panel up to {MAX_MART_WINDOW_DAYS}d from its mart; the "
-                      f"ETL and serverless-task panels scan at most the "
+                      f"so); the repeated-pattern panel reads at most the last "
+                      f"{mart27_sql.PATTERN_COST_MAX_DAYS} days from its mart (older pattern rows predate "
+                      f"a run-count fix); the ETL and serverless-task panels scan at most the "
                       f"last {MAX_LIVE_WINDOW_DAYS} days." if _past_live
                       else "The AI, pattern, ETL and task-graph panels below still follow the "
                            "page window."))
@@ -348,6 +352,11 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     _pc = run(mart27_sql.pattern_cost(days, company, 25, bounds=bounds), page=_PAGE,
               key=f"patterns_{company}_{days}{_lm}", tier="recent",
               source=f"MART_PATTERN_COST_DAILY ({company} + account-level)", probe=True)
+    # v4.606 holistic review: pattern_cost clamps a TRAILING window to PATTERN_COST_MAX_DAYS (90; older
+    # mart rows predate V120's RUNS re-stamp), so the caption and the clean state name the window it
+    # reads, never the page's 180/365d. A calendar preset reads its exact range (window_label names it).
+    _pc_days = min(int(days), mart27_sql.PATTERN_COST_MAX_DAYS)
+    _pc_cut = bounds is None and int(days) > _pc_days
     if _pc.ok and not _pc.empty:
         _pd_df = _pc.df.copy()
         _pd_df["USD"] = _pd_df["CREDITS"].map(safe_float) * rate
@@ -358,12 +367,12 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                          "USD_PER_RUN": st.column_config.NumberColumn("$/run", format="$%.4f")})
         # KEPT: "cheap-but-constant often out-bills expensive-but-rare" is an interpretation
         # takeaway (why to read this grouping) — operator-facing, not audit-only methodology.
-        # R1-163 / R1-015: pattern_cost reads MART_PATTERN_COST_DAILY and clamps a trailing window to the
-        # mart limit (365d), not the 90d live-scan limit, so name the window it actually reads.
         st.caption(f"Measured QUERY_ATTRIBUTION_HISTORY compute "
-                   f"({window_label(bounds, min(int(days), MAX_MART_WINDOW_DAYS))}), grouped by "
+                   f"({window_label(bounds, _pc_days)}), grouped by "
                    "parameterized hash — cheap-but-constant often out-bills "
-                   "expensive-but-rare.")
+                   "expensive-but-rare."
+                   + (f" A trailing window reads at most the last {_pc_days} days: older pattern rows "
+                      "predate the V120 run-count fix and can overstate runs." if _pc_cut else ""))
         # cross-filter honesty: MART_PATTERN_COST_DAILY is keyed by QUERY_HASH + COMPANY only, so
         # it can't narrow to the active object/warehouse/user filters the section banner declares
         # applied — disclose that (mirrors the twin fingerprint rollup on the Optimization tab).
@@ -374,7 +383,8 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
             st.caption(f"Company-wide: this parameterized-hash rollup has no object/warehouse/user "
                        f"grain, so the active {', '.join(_pc_dropped)} filter is not applied here.")
     elif _pc.ok:
-        empty_state("clean", "No repeated pattern crossed the $0.01 floor in this window.")
+        empty_state("clean", "No repeated pattern crossed the $0.01 floor in "
+                             f"{window_phrase(bounds, _pc_days)}.")
     elif is_setup_absence(_pc.error_kind):
         empty_state("needs_setup",
                     "Pattern costs arrive with migration V037 (MART_PATTERN_COST_DAILY v2) — "

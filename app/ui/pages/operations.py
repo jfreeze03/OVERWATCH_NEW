@@ -4179,16 +4179,30 @@ def _contention_tab(company: str, days: int, *, bounds: tuple | None = None) -> 
             page=_PAGE, key=f"c_pressure_{company}_{days}{_lm}",
             mart_source="FACT_QUERY_HOURLY (mart — p95 is peak hourly)",
             live_source="QUERY_HISTORY (live fallback)",
-            mart_tier="hourly", live_tier="recent", days=days)   # R1-018: served window
+            # R1-018: served window; both builders honor the calendar bounds (R1-213 stamp)
+            mart_tier="hourly", live_tier="recent", days=days, bounds=bounds)
         if guard(res, "No queueing or spill pressure in this window.", kind="clean"):
-            # R1-018: the mart leg honors the long Window; only the live fallback is capped
-            # at 90 days, so say so when it is the one that answered.
-            _pressure_served = served_days(res, days)
-            if bounds is None and _pressure_served < int(days):
-                st.caption(f"Served the last {_pressure_served} days — the live fallback "
-                           "reads at most 90.")
+            # R1-018 + v4.606 holistic review: say when the served span is shorter than the Window.
+            # The legs fall short for different reasons. The live fallback reads at most 90 days of
+            # a TRAILING window (a calendar read is unclamped). The mart leg reads FACT_QUERY_HOURLY,
+            # which is never backfilled, so it holds only COVERED_DAYS of history (served_days reads
+            # that scalar): compare it with how far back the window starts -- the trailing day count,
+            # or a calendar window's first day through today (Last month reaches past its own span).
+            if bool(getattr(res.df, "attrs", {}).get("_ow_served_live")):
+                _pressure_served = served_days(res, days)
+                if bounds is None and _pressure_served < int(days):
+                    st.caption(f"Served the last {_pressure_served} days — the live fallback "
+                               "reads at most 90.")
+            elif "COVERED_DAYS" in res.df.columns:
+                _pressure_reach = (int(days) if bounds is None
+                                   else max(1, (account_today() - bounds[0]).days + 1))
+                _pressure_served = served_days(res, _pressure_reach)
+                if _pressure_served < _pressure_reach:
+                    st.caption(f"Covers only the last {_pressure_served} days — the hourly fact holds "
+                               f"{_pressure_served} days of history (it is not backfilled).")
             import pandas as pd
-            pdf = res.df.copy()
+            # COVERED_DAYS is a window-level scalar for the caption above, not a table column
+            pdf = res.df.drop(columns=["COVERED_DAYS"], errors="ignore").copy()
             if {"QUEUED_SEC", "QUERY_COUNT"}.issubset(pdf.columns):
                 _qc = pd.to_numeric(pdf["QUERY_COUNT"], errors="coerce").replace(0, pd.NA)
                 pdf["AVG_QUEUE_SEC"] = pd.to_numeric(pdf["QUEUED_SEC"], errors="coerce") / _qc

@@ -2592,10 +2592,15 @@ def fact_warehouse_pressure(days: int, company: str = "ALL", *, bounds: tuple | 
     the PEAK hourly-group p95 — the caller labels it. Live stays as the
     labeled fallback for pre-fact windows.
 
-    R1-018: the mart leg honors the long window (MAX_MART_WINDOW_DAYS; the fact
-    is retained 400d) — the old hand-rolled 90-day clamp served a 180/365d
-    Warehouses window as 90 days under a section contract that says
-    "Contention uses Window". Only the LIVE fallback stays clamped to 90."""
+    R1-018: the mart leg reads up to MAX_MART_WINDOW_DAYS instead of a hand-rolled
+    90-day clamp; the LIVE fallback stays clamped to 90. But the fact's 400-day
+    RETENTION is not COVERAGE (v4.606 holistic review): FACT_QUERY_HOURLY is
+    deliberately not backfilled (snowflake/backfill_365.sql) and its loader only
+    rewrites the trailing 48 hours, so it holds just the hours loaded since
+    OVERWATCH started. COVERED_DAYS carries that span: one scalar over the WHOLE
+    fact (not the window, the company or the HAVING-filtered warehouses), repeated
+    on every row. served_days() takes it over the requested window, and the
+    Contention caption says when the fact starts after the window does."""
     days = bounded_days(days or 7, MAX_MART_WINDOW_DAYS)
     where = [scope_window_where("HOUR_TS", days, bounds=bounds),
              "WAREHOUSE_NAME IS NOT NULL"]
@@ -2607,7 +2612,10 @@ SELECT
     SUM(QUERY_COUNT) AS QUERY_COUNT,
     ROUND(SUM(COALESCE(QUEUED_SEC_SUM, 0)), 1) AS QUEUED_SEC,
     ROUND(SUM(COALESCE(SPILL_REMOTE_GB, 0)), 2) AS SPILL_REMOTE_GB,
-    MAX(COALESCE(P95_ELAPSED_SEC, 0)) AS P95_ELAPSED_SEC
+    MAX(COALESCE(P95_ELAPSED_SEC, 0)) AS P95_ELAPSED_SEC,
+    -- the days of history the fact holds (it is not backfilled), account clock; see the docstring
+    (SELECT GREATEST(1, DATEDIFF('day', MIN(cov.HOUR_TS), {account_today_sql()}) + 1)
+       FROM {core_object("FACT_QUERY_HOURLY")} cov) AS COVERED_DAYS
 FROM {core_object("FACT_QUERY_HOURLY")}
 WHERE {" AND ".join(where)}
 GROUP BY 1

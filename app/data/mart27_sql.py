@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from app import companies
-from app.config import MAX_MART_WINDOW_DAYS, mart_object
+from app.config import mart_object
 from app.core.sqlsafe import contains_filter, sql_literal
 from app.data.common import (
     ai_service_predicate,
@@ -889,17 +889,27 @@ FROM (
 {comp}ORDER BY w.MONTH, w.WAREHOUSE_NAME"""
 
 
+# v4.606 holistic review (reverts R1-015's 365-day widening): a TRAILING pattern read stays at 90 days.
+# V120 fixed SP_LOAD_PATTERN_COST's RUNS fan-out (RUNS counted QUERY_ATTRIBUTION_HISTORY rows, so an
+# hour-spanning query counted more than once and CREDITS_PER_RUN came out low) but re-stamped only the
+# last 90 days (CALL SP_LOAD_PATTERN_COST(90), applied 2026-09-02). MART_PATTERN_COST_DAILY keeps rows
+# for FACT_RETENTION_DAYS_DAILY and V047's first fill reaches back to about mid-April, so rows older
+# than that re-stamp horizon may still carry the inflated RUNS: a wider trailing read would understate
+# $/run for exactly the long-running patterns V120 fixed, and pass the run floor on inflated counts.
+# The re-stamp CALL (SP_LOAD_PATTERN_COST(365)) is queued for a later migration; raise this only after
+# it has run. The Unit costs caption and page note name this window.
+PATTERN_COST_MAX_DAYS = 90
+
+
 def pattern_cost(days: int = 30, company: str = "ALL", limit: int = 25, *, bounds: tuple | None = None) -> str:
     """Measured $ per repeated statement pattern (V036) — the silent-spend
     table. Attribution credits are MEASURED compute; the sample text rides
     in from the family mart by hash.
 
-    R1-015: clamps to MAX_MART_WINDOW_DAYS like the other long-window mart
-    readers (MART_PATTERN_COST_DAILY keeps FACT_RETENTION_DAYS_DAILY). The old
-    90-day clamp served a trailing 180/365d page window as 90 days with no
-    disclosure (while Current year read the full year to date), under a Unit
-    costs caption that says the pattern panel follows the page window."""
-    d = bounded_days(days, MAX_MART_WINDOW_DAYS)
+    A TRAILING window clamps to PATTERN_COST_MAX_DAYS (90: see the constant —
+    older rows predate V120's RUNS re-stamp). A calendar preset reads its exact
+    [start, end) bounds (scope_window_where ignores ``d`` there), as before."""
+    d = bounded_days(days, PATTERN_COST_MAX_DAYS)
     # bounds -> scale the run-rate floor to the calendar-month span, not the trailing d
     span = (bounds[1] - bounds[0]).days if bounds is not None else d
     min_runs = max(2, (5 * span + 29) // 30)

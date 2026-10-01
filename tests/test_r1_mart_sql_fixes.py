@@ -115,27 +115,156 @@ def test_r1_014_all_scope_sql_is_unchanged_and_company_sql_parses():
 
 
 # ---------------------------------------------------------------------------
-# R1-015 / R1-018 — served-window class: mart readers honor the long Window
+# R1-015 / R1-018 — served-window class: what each mart reader can honestly serve of a long Window
 # ---------------------------------------------------------------------------
 
-def test_r1_015_pattern_cost_honors_the_long_window():
-    sql = mart27_sql.pattern_cost(365, "ALL")
-    assert "DATEADD('day', -365" in sql
-    assert "-90," not in sql
-    assert "bounded_days(days, MAX_MART_WINDOW_DAYS)" in inspect.getsource(mart27_sql.pattern_cost)
-    # the run-rate floor still scales with the span read (365d -> 61 runs)
-    assert "SUM(p.RUNS) >= 61" in sql
+def test_r1_015_pattern_cost_trailing_window_stays_inside_the_v120_restamp():
+    # v4.606 holistic review REVERSED R1-015's widening to 365 days. V120 fixed the loader's RUNS fan-out
+    # but re-stamped only the last 90 days (CALL SP_LOAD_PATTERN_COST(90), applied 2026-09-02); older
+    # MART_PATTERN_COST_DAILY rows (V047's first fill reaches ~mid-April) can still carry inflated RUNS,
+    # so a 180/365d trailing read understated $/run for exactly the patterns V120 fixed, passed the run
+    # floor on inflated counts, and was labelled 365d over ~5.5 months of mart. Raise
+    # PATTERN_COST_MAX_DAYS only after a 365-day re-stamp CALL has run.
+    for days in (180, 365):
+        sql = mart27_sql.pattern_cost(days, "ALL")
+        assert "WHERE p.DAY >= DATEADD('day', -90, CURRENT_DATE())" in sql
+        assert f"-{days}," not in sql
+        # the run floor scales with the 90 days read (15 runs), not the 365-day ask (61)
+        assert "SUM(p.RUNS) >= 15" in sql
+    assert mart27_sql.PATTERN_COST_MAX_DAYS == 90
+    assert "bounded_days(days, PATTERN_COST_MAX_DAYS)" in inspect.getsource(mart27_sql.pattern_cost)
+    # inside the cap a trailing window is read as asked
+    assert "WHERE p.DAY >= DATEADD('day', -30, CURRENT_DATE())" in mart27_sql.pattern_cost(30, "ALL")
+    # a calendar preset keeps reading its exact [start, end) bounds (pre-existing, unchanged here)
+    ytd = mart27_sql.pattern_cost(273, "ALL", bounds=(date(2026, 1, 1), date(2026, 10, 2)))
+    assert "WHERE p.DAY >= '2026-01-01' AND p.DAY < '2026-10-02'" in ytd and "DATEADD" not in ytd
 
 
-def test_r1_018_warehouse_pressure_mart_leg_honors_the_long_window():
-    sql = mart_sql.fact_warehouse_pressure(365, "ALL")
-    assert "HOUR_TS >= DATEADD('day', -365, CURRENT_DATE())" in sql
-    assert "-90," not in sql
-    # the contention panel asks run_mart_first for the served window and discloses a live 90d serve
-    ops = _read("app/ui/pages/operations.py")
-    body = ops.split("def _contention_tab(", 1)[1].split("\ndef ", 1)[0]
-    assert 'mart_tier="hourly", live_tier="recent", days=days)' in body
-    assert "served_days(res, days)" in body and "live fallback " in body
+def _pressure_db(hour_rows: list[tuple[str, str, str, float, float]]) -> sqlite3.Connection:
+    """FACT_QUERY_HOURLY rows (HOUR_TS, COMPANY, WAREHOUSE_NAME, QUEUED_SEC_SUM, SPILL_REMOTE_GB)."""
+    con = sqlite3.connect(":memory:")
+    con.create_function("GREATEST", 2, max)
+    con.create_function("DATEDIFF", 3, lambda _unit, a, b: (date.fromisoformat(str(b)[:10])
+                                                            - date.fromisoformat(str(a)[:10])).days)
+    con.execute("CREATE TABLE FACT_QUERY_HOURLY (HOUR_TS TEXT, COMPANY TEXT, WAREHOUSE_NAME TEXT, "
+                "QUERY_COUNT INTEGER, QUEUED_SEC_SUM REAL, SPILL_REMOTE_GB REAL, P95_ELAPSED_SEC REAL)")
+    con.executemany("INSERT INTO FACT_QUERY_HOURLY VALUES (?, ?, ?, 10, ?, ?, 1.0)", hour_rows)
+    return con
+
+
+def test_r1_018_pressure_reader_reports_the_facts_own_history_span():
+    # v4.606 holistic review: R1-018 widened the mart leg to 365 days on the premise "the fact is
+    # retained 400d" -- but retention is not coverage: FACT_QUERY_HOURLY is never backfilled, so on
+    # 2026-10-01 it holds only the hours loaded since OVERWATCH began (~Jul 7) and a 365d Window
+    # silently summed ~86 days. The reader now carries COVERED_DAYS, ONE scalar over the WHOLE fact:
+    # not the window, the company, or the HAVING-filtered warehouses.
+    sql = mart_sql.fact_warehouse_pressure(30, "ALFA", bounds=(date(2026, 9, 1), date(2026, 10, 1)))
+    assert "AS COVERED_DAYS" in sql
+    sqlglot.parse_one(sql, dialect="snowflake")
+    con = _pressure_db([
+        # the fact's first hour: another company, outside the window, a no-pressure warehouse
+        ("2026-07-07 05:00:00", "TREXIS", "WH_QUIET", 0.0, 0.0),
+        ("2026-09-10 03:00:00", "ALFA", "WH_ALFA", 120.0, 0.0),
+        ("2026-09-11 03:00:00", "ALFA", "WH_IDLE", 0.0, 0.0),        # dropped by HAVING
+    ])
+    df = pd.read_sql_query(_strip_db(sql).replace(account_today_sql(), "'2026-10-01'"), con)
+    assert df["WAREHOUSE_NAME"].tolist() == ["WH_ALFA"]
+    # Jul 7 .. Oct 1 inclusive -- measured from the fact's first hour, which no filter above can see
+    assert int(df["COVERED_DAYS"].iloc[0]) == (date(2026, 10, 1) - date(2026, 7, 7)).days + 1 == 87
+    # the trailing 365d predicate is unchanged (the span limit is disclosed, not hidden behind a cap)
+    assert "HOUR_TS >= DATEADD('day', -365, CURRENT_DATE())" in mart_sql.fact_warehouse_pressure(365, "ALL")
+
+
+class _Cell:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        return False
+
+
+class _ContentionSt:
+    def __init__(self) -> None:
+        self.captions: list[str] = []
+        self.session_state: dict = {}
+
+    def columns(self, spec, *_a, **_k):
+        return tuple(_Cell() for _ in spec)
+
+    def caption(self, text, *_a, **_k):
+        self.captions.append(str(text))
+
+
+def _render_contention(monkeypatch, *, live: bool, days, covered: int | None = None,
+                       bounds: tuple | None = None) -> tuple[list[str], list[pd.DataFrame]]:
+    """Render operations._contention_tab with a pressure result stamped exactly as run_mart_first
+    stamps it (components._mark_served with the days/bounds the page passed). Today = 2026-10-01."""
+    from app.ui import components
+    from app.ui.pages import operations as ops
+    df = pd.DataFrame({"WAREHOUSE_NAME": ["WH_A"], "QUERY_COUNT": [10], "QUEUED_SEC": [50.0],
+                       "SPILL_REMOTE_GB": [0.0], "P95_ELAPSED_SEC": [3.0]})
+    if covered is not None:
+        df["COVERED_DAYS"] = covered
+    pressure = QueryResult(df=df, ok=True, source="t")
+
+    def fake_run_mart_first(_mart, _live, *, key: str, days=None, bounds=None, **_k):
+        if key.startswith("c_pressure"):
+            return components._mark_served(pressure, live=live, days=days, bounds=bounds)
+        return QueryResult(df=pd.DataFrame(), ok=True, source="locks")
+
+    fake, tables = _ContentionSt(), []
+    monkeypatch.setattr(ops, "st", fake)
+    monkeypatch.setattr(ops, "run_mart_first", fake_run_mart_first)
+    monkeypatch.setattr(ops, "guard", lambda res, *_a, **_k: res is pressure)
+    monkeypatch.setattr(ops, "account_today", lambda: date(2026, 10, 1))
+    monkeypatch.setattr(ops, "charts", SimpleNamespace(bar_count=lambda *_a, **_k: None))
+    monkeypatch.setattr(ops, "entity_nav_table", lambda frame, *_a, **_k: tables.append(frame))
+    for name in ("section_header", "result_caption", "styled_table"):
+        monkeypatch.setattr(ops, name, lambda *_a, **_k: None)
+    ops._contention_tab("ALL", days, bounds=bounds)
+    return fake.captions, tables
+
+
+def test_r1_018_contention_says_when_the_hourly_fact_holds_less_than_the_window(monkeypatch):
+    # mart leg, 365d Window, fact holds 86 days: pre-fix the rows were captioned as if they covered the
+    # Window (or blamed "the live fallback", which never ran). Now the fact's own span is named.
+    caps, tables = _render_contention(monkeypatch, live=False, days=365, covered=86)
+    (cap,) = [c for c in caps if "Covers only" in c or "Served the last" in c]
+    assert cap == ("Covers only the last 86 days — the hourly fact holds 86 days of history "
+                   "(it is not backfilled).")
+    # the scalar feeds the caption; it is not a table column
+    assert tables and "COVERED_DAYS" not in tables[0].columns
+    # a fact that covers the whole window says nothing extra
+    caps, _ = _render_contention(monkeypatch, live=False, days=30, covered=86)
+    assert not [c for c in caps if "Covers only" in c or "Served the last" in c]
+
+
+def test_r1_018_contention_live_fallback_keeps_its_90_day_caption(monkeypatch):
+    caps, _ = _render_contention(monkeypatch, live=True, days=365)
+    assert "Served the last 90 days — the live fallback reads at most 90." in caps
+    assert not [c for c in caps if "hourly fact" in c]
+    # a calendar read is unclamped on the live leg too (R1-213), so no 90-day claim there
+    caps, _ = _render_contention(monkeypatch, live=True, days=CalendarDayOffset(273),
+                                 bounds=(date(2026, 1, 1), date(2026, 10, 2)))
+    assert not [c for c in caps if "Served the last" in c or "Covers only" in c]
+
+
+def test_r1_018_contention_calendar_window_compares_against_its_first_day(monkeypatch):
+    ytd = (date(2026, 1, 1), date(2026, 10, 2))
+    caps, _ = _render_contention(monkeypatch, live=False, days=CalendarDayOffset(273), covered=86,
+                                 bounds=ytd)
+    assert "Covers only the last 86 days — the hourly fact holds 86 days of history " \
+           "(it is not backfilled)." in caps
+    # Last month reaches back PAST its own 30-day span: on Oct 1 it starts 31 days ago, so a fact
+    # holding 30 days misses Sep 1 even though 30 == the bounds span.
+    sept = (date(2026, 9, 1), date(2026, 10, 1))
+    caps, _ = _render_contention(monkeypatch, live=False, days=CalendarDayOffset(30), covered=30,
+                                 bounds=sept)
+    assert "Covers only the last 30 days — the hourly fact holds 30 days of history " \
+           "(it is not backfilled)." in caps
+    caps, _ = _render_contention(monkeypatch, live=False, days=CalendarDayOffset(30), covered=31,
+                                 bounds=sept)
+    assert not [c for c in caps if "Covers only" in c]
 
 
 def test_r1_018_ops_diag_keeps_its_disclosed_90_day_cap():
