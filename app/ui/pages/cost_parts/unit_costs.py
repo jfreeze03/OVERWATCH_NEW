@@ -88,7 +88,8 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     # serverless-task panels) clamps a TRAILING window to the MAX_LIVE_WINDOW_DAYS live-scan limit,
     # so past 90d "the full page window" is really the last 90 days. Name what is actually scanned. A
     # calendar preset reads its exact [start, end) range, which window_label names ('last month').
-    # (The repeated-pattern read is mart-backed and clamps to MAX_MART_WINDOW_DAYS instead; see below.)
+    # (The repeated-pattern read is mart-backed and clamps a trailing window to its own
+    # mart27_sql.PATTERN_COST_MAX_DAYS -- older mart rows predate V120's RUNS re-stamp; see below.)
     _past_live = int(days) > MAX_LIVE_WINDOW_DAYS
     _uc_full = _uc_capped and st.toggle(
         (f"Price over the last {MAX_LIVE_WINDOW_DAYS} days (the live-scan limit)" if _past_live
