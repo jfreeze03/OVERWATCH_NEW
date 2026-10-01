@@ -12,6 +12,7 @@ pre-fix code at 04fd374e:
   R1-217  bar_count's takeaway printed a share of a SUM of per-warehouse averages.
   R1-218  section-count badges keyed on the day count only, so Last month reused the 30d count.
   R1-219  the display-timezone pass blanked NEVER_READ (bool) and turned raw *_TIME numbers into 1970.
+  R1-220  Add to Case exported NULL cells as the literal text nan / None / NaT / <NA>.
 """
 
 from __future__ import annotations
@@ -470,3 +471,41 @@ def test_localize_timestamps_leaves_name_lookalike_columns_alone(monkeypatch):
     assert str(out["LAST_READ"].iloc[0]) == "2026-09-29 11:00:00" and pd.isna(out["LAST_READ"].iloc[1])
     assert str(out["CREATED_AT"].iloc[1]) == "2026-09-29 12:30:00"
     assert "America/New_York" in note
+
+
+# ---------------------------------------------------------------------------
+# R1-220: Add to Case hands NULL cells to the Case File as NULLs, not 'nan' / 'NaT'
+# ---------------------------------------------------------------------------
+
+class _CaseSt(_NavSt):
+    def button(self, *_a, **_k):
+        return True
+
+    def toast(self, *_a, **_k):
+        return None
+
+
+def test_add_to_case_preview_exports_nulls_blank_not_as_nan_text(monkeypatch):
+    import app.core.state as state
+    from app.logic import case_file
+    from app.ui import components
+    fake = _CaseSt()
+    monkeypatch.setattr(components, "st", fake)
+    monkeypatch.setattr(state, "filters", lambda: {"company": "ALFA", "window_label": "30d", "days": 30})
+    # a Security account-takeover row for a terminal lock-out: FIRST_SUCCESS_AFTER is NULL
+    df = pd.DataFrame({
+        "USER_NAME": ["SVC_X", "SVC_Y"],
+        "FAILS": pd.array([7, None], dtype="Int64"),
+        "SCORE": [1.5, float("nan")],
+        "NOTE": ["ok", None],
+        "FIRST_SUCCESS_AFTER": pd.to_datetime([None, "2026-09-29 10:05:00"]),
+        "LOCKED": [False, True],
+    })
+    assert components.add_to_case_button("Security", QueryResult(df=df, ok=True, source="t"),
+                                         summary="ATO", key="case_ato") is True
+    item = fake.session_state[case_file.CASE_STATE_KEY][0]
+    md = case_file.assemble_markdown([item], generated="2026-09-30")
+    for junk in ("nan", "NaT", "None", "<NA>"):
+        assert junk not in md, junk
+    # non-null cells still render exactly as before
+    assert "SVC_X" in md and "| 7 |" in md and "1.5" in md and "2026-09-29 10:05:00" in md and "True" in md
