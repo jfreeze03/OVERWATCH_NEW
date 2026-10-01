@@ -46,9 +46,13 @@ def test_no_evidence_is_not_rendered_as_a_healthy_zero() -> None:
     # (not a healthy $0 verified total), and realization reads "—" until something is verified (ROI
     # fixes 2026-09-24: 'n/a' once items are verified but auto-measured, i.e. carry no estimate).
     signals = studio.split("def _proof_signals(", 1)[1].split("\ndef ", 1)[0]
-    assert "if not ledger.ok:\n        _PROOF_MEMO.update(rate=_k, sig=None)\n        return None" in signals
+    # R1-085: the failed read is memoized WITH its kind, so the no-data state splits on it -- needs_setup
+    # ("apply V051+") only for a true absence; a timeout / drift / other failure is unavailable with its error
+    assert ("if not ledger.ok:\n" in signals
+            and "_PROOF_MEMO.update(rate=_k, sig=None, ledger_failure=ledger)\n        return None" in signals)
     proof_tab = studio.split("def _proof_tab(", 1)[1].split("\ndef ", 1)[0]
-    assert 'if sig is None:\n        empty_state("needs_setup"' in proof_tab
+    assert "if sig is None:\n        _failed = _proof_ledger_failure()" in proof_tab
+    assert "if _failed is not None and is_setup_absence(_failed.error_kind):" in proof_tab
     # Next-Fifty #31: realization keeps reverted rows while verified_count drops them, so "anything
     # verified" counts both (the "—" stays for an empty record; "nothing verified yet" never sits beside a
     # real ratio)
