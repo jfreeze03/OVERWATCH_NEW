@@ -15,12 +15,16 @@ _ROOT = Path(__file__).resolve().parents[2]
 def test_new_network_logins_contract():
     from app.data import security_sql
     sql = security_sql.new_network_logins(7)
-    assert "DATEADD('day', -90," in sql                      # fixed 90d baseline
+    # R1-025: the 90-day baseline sits BEFORE the window (history reaches window + 90 days); the old
+    # fixed last-90-days history left a 90d+ window with no baseline at all
+    assert "L.EVENT_TIMESTAMP >= DATEADD('day', -97, CURRENT_TIMESTAMP())" in sql
     assert "'SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS'" in sql  # same list as admin_role_holders (owner 2026-07-13)
     assert "FIRST_SEEN >= DATEADD('day', -7," in sql         # only window-new pairs surface
     assert "FIRST_AUTHENTICATION_FACTOR" in sql              # password vs SSO visible per row
     assert "COALESCE(L.CLIENT_IP, '(none)')" in sql          # null IPs group honestly
-    assert "FIRST_SEEN >= DATEADD('day', -90," in security_sql.new_network_logins(9999)  # clamp
+    wide = security_sql.new_network_logins(9999)
+    assert "FIRST_SEEN >= DATEADD('day', -90," in wide                       # window clamp (90d)
+    assert "L.EVENT_TIMESTAMP >= DATEADD('day', -180, CURRENT_TIMESTAMP())" in wide   # baseline before it
 
 
 def test_dormant_reawakening_contract():

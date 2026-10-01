@@ -114,6 +114,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("security.failed_login_reasons_fact", lambda: security_sql.failed_login_reasons_fact(1, "ALFA")),
     ("security.new_network_logins_fact", lambda: security_sql.new_network_logins_fact(1)),
     ("security.recent_ddl_changes_fact", lambda: security_sql.recent_ddl_changes_fact(1, "ALFA")),
+    ("security.recent_ddl_changes_rollup", lambda: security_sql.recent_ddl_changes_rollup(1, "ALFA")),
+    ("security.recent_ddl_changes_rollup_fact", lambda: security_sql.recent_ddl_changes_rollup_fact(1, "ALFA")),
     ("security.admin_role_activity_fact", lambda: security_sql.admin_role_activity_fact(1)),
     ("security.effective_access", lambda: security_sql.effective_access("ALFA")),
     ("security.egress_baseline", lambda: security_sql.egress_baseline(1)),

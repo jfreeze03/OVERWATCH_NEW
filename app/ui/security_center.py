@@ -25,6 +25,7 @@ from app.logic.security import (
     grant_anomaly_flags,
     posture_alert_rule_sql,
     sensitive_privileges_by_user,
+    window_total,
 )
 from app.logic.verdict import Signal, page_verdict
 from app.logic.workbench import create_action_sql
@@ -45,6 +46,12 @@ from app.ui.components import (
 )
 
 _PAGE = "Security"
+
+
+def drop_window_totals(frame: pd.DataFrame) -> pd.DataFrame:
+    """Drop the pre-LIMIT window-total helper columns (``security_sql.WINDOW_TOTAL_COLUMNS``) a capped
+    Security feed carries for its KPIs, before the frame is displayed or exported."""
+    return frame.drop(columns=[c for c in security_sql.WINDOW_TOTAL_COLUMNS if c in frame.columns])
 
 
 def _cell_text(value: object, default: str = "") -> str:
@@ -181,7 +188,7 @@ def security_posture_verdict(company: str) -> dict | None:
     return page_verdict([
         Signal("bad", f"{len(_act)} domain(s) need action: "
                       + ", ".join(p.domain.title() for p in _act[:3])) if _act else None,
-        Signal("warn", f"{_open_n} open finding(s)") if _open_n else None,
+        Signal("warn", f"{_open_n:,} open finding(s)") if _open_n else None,
         # Review R1-16: an unread coverage contract leaves every domain unscored, so no domain can reach
         # 'need action' -- say so rather than quietly reading a CRITICAL finding as 'Watch'.
         Signal("warn", _COVERAGE_UNREAD_SIGNAL) if _coverage_failed(coverage) else None,
@@ -189,6 +196,20 @@ def security_posture_verdict(company: str) -> dict | None:
 
 
 _COVERAGE_UNREAD_SIGNAL = "domain coverage could not be read, so no domain is scored"
+
+
+def _queue_cap_note(frame: pd.DataFrame, queued: int) -> str:
+    """'Showing N of M queued exceptions' -- names each capped domain with its true total."""
+    capped: list[str] = []
+    if {"DOMAIN", "DOMAIN_ROWS"} <= set(frame.columns):
+        by_domain = frame.groupby(frame["DOMAIN"].astype(str), sort=True)
+        shown = by_domain.size()
+        totals = pd.to_numeric(by_domain["DOMAIN_ROWS"].max(), errors="coerce").fillna(0).astype(int)
+        capped = [f"{dom.title()}: {int(shown[dom]):,} of {int(totals[dom]):,}"
+                  for dom in shown.index if int(totals[dom]) > int(shown[dom])]
+    return (f"Showing {len(frame):,} of {queued:,} queued exceptions — the highest-severity, newest rows "
+            "per domain" + (f" ({'; '.join(capped)})" if capped else "")
+            + ". The domain counts above and the section badge cover all of them.")
 
 
 def _coverage_failed(coverage) -> bool:
@@ -244,7 +265,7 @@ def render_security_overview(company: str) -> None:
         {
             "label": item.domain.title(),
             "value": str(item.score) if item.score is not None else "--",
-            "delta": f"{item.state} | {item.findings} open",
+            "delta": f"{item.state} | {item.findings:,} open",
             "delta_color": "inverse" if item.state == "Act" else "off",
             "help": (
                 f"Coverage: {item.coverage}. A numeric score is shown only when "
@@ -275,7 +296,10 @@ def render_security_overview(company: str) -> None:
     # badge — stashed only once the queue actually resolved, so 0 means clean, not unknown.
     # review fix: the queue SQL is company-filtered but window-independent —
     # keying by days would clear the badge on a window flip for no reason.
-    stash_section_count(_PAGE, "Decision queue", len(queue.df), dims=("company",))
+    # The frame keeps the top 100 rows PER DOMAIN (enough for scoring); the badge is the uncapped
+    # TOTAL_ROWS the builder computes before its QUALIFY (len() read ~100 while ~4,000 were queued).
+    _queued = window_total(queue.df, "TOTAL_ROWS", len(queue.df))
+    stash_section_count(_PAGE, "Decision queue", _queued, dims=("company",))
     if queue.empty:
         unresolved = [
             item.domain for item in posture
@@ -320,6 +344,8 @@ def render_security_overview(company: str) -> None:
         days=None,
         sort_label="severity then detection time",
     )
+    if _queued > len(frame):
+        st.caption(_queue_cap_note(frame, _queued))
     result_caption(queue)
     if selection is None:
         st.caption("Select an exception to open its evidence, entity, or tracked work item.")
@@ -424,6 +450,17 @@ def render_security_overview(company: str) -> None:
                         st.rerun()
 
 
+def _grant_read_failed(result, label: str) -> None:
+    """A failed ACCOUNT_USAGE grants read: a true setup absence (view missing / not authorised) is
+    needs_setup; anything else -- a timeout, schema drift, a compile error -- is unavailable WITH the
+    error, never the quiet 'no_data_yet' caption both panels used to show (probe-honesty contract)."""
+    if is_setup_absence(result.error_kind):
+        empty_state("needs_setup", f"{label}: needs ACCOUNT_USAGE GRANTS_TO_USERS / GRANTS_TO_ROLES "
+                    "visible to the app role (IMPORTED PRIVILEGES on the SNOWFLAKE database).")
+    else:
+        empty_state("unavailable", f"{label} could not be read (ACCOUNT_USAGE grants).", detail=result.error)
+
+
 def _dot_text(value: object) -> str:
     return _cell_text(value).replace("\\", "\\\\").replace('"', '\\"')
 
@@ -448,9 +485,16 @@ def render_effective_access(company: str) -> None:
         empty_state("clean", "No effective role paths are visible for this company scope.")
         return
     if not result.usable():
-        empty_state("no_data_yet", "Effective-access evidence did not resolve for this scope.")
+        # Only a FAILED read reaches here (ok+empty returned above). It used to render as a quiet
+        # 'no_data_yet' caption with no error, so a timeout or a privilege error read as "nothing to show".
+        _grant_read_failed(result, "Effective-access paths")
         return
-    frame = escalation_flags(result.df.copy().reset_index(drop=True))
+    # Pre-LIMIT totals (UNCAPPED-AGGREGATE): the read keeps 3,000 paths, so len() of the frame read
+    # exactly "3,000" on a large account and users whose paths sorted past the cap vanished from the
+    # Users count. The builder now keeps every user's own best path ahead of the cap, too.
+    _raw = result.df
+    _paths_total = window_total(_raw, "TOTAL_PATHS_WIN", len(_raw))
+    frame = drop_window_totals(escalation_flags(result.df.copy().reset_index(drop=True)))
     summary = (
         frame.groupby("USER_NAME", as_index=False)
         .agg(
@@ -467,11 +511,13 @@ def render_effective_access(company: str) -> None:
         .sort_values(["MAX_ESCALATION", "MAX_RISK", "EFFECTIVE_ROLES"], ascending=False)
         .reset_index(drop=True)
     )
-    self_escalators = int(summary["SELF_ESCALATE"].sum())
+    self_escalators = window_total(_raw, "TOTAL_SELF_ESCALATORS_WIN", int(summary["SELF_ESCALATE"].sum()))
+    _high_risk = window_total(_raw, "TOTAL_HIGH_RISK_USERS_WIN", int((summary["MAX_RISK"] >= 70).sum()))
+    _users_total = window_total(_raw, "TOTAL_PATH_USERS_WIN", len(summary))
     kpi_row([
-        {"label": "Users", "value": f"{len(summary):,}"},
-        {"label": "Effective paths", "value": f"{len(frame):,}"},
-        {"label": "High-risk users", "value": f"{int((summary['MAX_RISK'] >= 70).sum()):,}", "delta_color": "inverse"},
+        {"label": "Users", "value": f"{_users_total:,}"},
+        {"label": "Effective paths", "value": f"{_paths_total:,}"},
+        {"label": "High-risk users", "value": f"{_high_risk:,}", "delta_color": "inverse"},
         {
             "label": "Can self-escalate to admin",
             "value": f"{self_escalators:,}",
@@ -483,6 +529,13 @@ def render_effective_access(company: str) -> None:
     selection = selectable_table(
         summary, key="sec_effective_users", height=260, sort_label="escalation risk"
     )
+    if _paths_total > len(frame):
+        st.caption(
+            f"Showing {len(frame):,} of {_paths_total:,} effective paths ({len(summary):,} of "
+            f"{_users_total:,} users): every user's own riskiest path first, then every escalation path, "
+            "then by risk. The counts above cover all of them; a user's graph below draws only the paths "
+            "that were kept."
+        )
     # v4.461 P2 (§8 disclosure): the two composite scores driving this table are
     # heuristic ORDERING devices, not verdicts — surface exactly what folds into each.
     st.caption(
@@ -585,7 +638,7 @@ def render_admin_grant_anomalies(company: str) -> None:
         empty_state("clean", "No admin-role grants landed in the last 90 days for this scope.")
         return
     if not result.usable():
-        empty_state("no_data_yet", "Admin-grant evidence did not resolve for this scope.")
+        _grant_read_failed(result, "The admin-grant timing check")
         return
     frame = grant_anomaly_flags(result.df.copy().reset_index(drop=True))
     first_time = int(frame["FIRST_TIME"].sum())
