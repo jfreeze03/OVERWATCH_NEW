@@ -122,3 +122,33 @@ def test_unparseable_first_usage_keeps_the_asked_window(monkeypatch):
     rollup = _evening_starter(None)
     assert cortex.effective_window_days(rollup, 30) == 30
     assert float(cortex.enrich_user_rollup(rollup, 2.20, 30)["OBSERVABLE_DAYS"].iloc[0]) == 30
+
+
+# ---- R1-102: the alert-explain prompt's instructions never license an answer's figures ---------
+
+
+def _alert_prompt(detail: str = "") -> str:
+    from app.logic.ai_prompts import alert_evidence_prompt
+    rows = pd.DataFrame({"DAY": ["2026-09-28"], "SERVICE_TYPE": ["AI_SERVICES"], "CREDITS_BILLED": [12.5]})
+    return alert_evidence_prompt("cortex", "AI spend spike", detail, rows, "this week vs prior 7 days")
+
+
+def test_alert_prompt_instruction_numbers_do_not_ground_figures():
+    from app.logic.ai_grounding import check_grounding, evidence_section
+    prompt = _alert_prompt()
+    assert "EVIDENCE ROWS:" in prompt
+    # '(1) ... 1-2 ... (3) ... Max 150 words' and 'prior 7 days' sit ahead of the marker now
+    answer = "AI spend jumped 150% to $150; 2% of the account, about $3 per day; costs $7 more, up 7%."
+    check = check_grounding(answer, evidence_section(prompt))
+    assert set(check.ungrounded) == {"$150", "150%", "2%", "$3", "$7", "7%"}
+
+
+def test_alert_prompt_title_detail_and_rows_still_ground_their_own_figures():
+    from app.logic.ai_grounding import check_grounding, evidence_section
+    prompt = _alert_prompt(detail="AI spend up 85% ($412) vs the prior week")
+    section = evidence_section(prompt)
+    assert "ALERT: AI spend spike" in section and "DETAIL: AI spend up 85%" in section
+    assert "CREDITS_BILLED=12.5" in section
+    assert check_grounding("AI spend rose 85% to $412.", section).ok
+    # instructions still lead the prompt (AIP-2 ordering), ahead of the evidence
+    assert prompt.index("Never invent") < prompt.index("EVIDENCE ROWS:") < prompt.index("- DAY=")
