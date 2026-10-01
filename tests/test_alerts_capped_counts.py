@@ -72,7 +72,8 @@ def test_drawer_and_tray_labels_read_the_cap() -> None:
     assert '(f"latest {_hn}" if _hn >= _RULE_HISTORY_CAP else f"{_hn}")' in src
     assert "Snoozed ({len(_snz.df)})" not in src
     assert "Snoozed ({_capped_count(len(_snz.df), _SNOOZED_CAP)})" in src
-    assert "soonest to wake — more events are snoozed" in src
+    assert "soonest to wake — more may be snoozed; any others" in src
+    assert "more events are snoozed" not in src     # a full frame is a possibility, never a fact
 
 
 def test_rendered_storm_tiles_say_500_plus_when_the_uncapped_count_fails(monkeypatch) -> None:
@@ -97,3 +98,30 @@ def test_rendered_storm_tiles_say_500_plus_when_the_uncapped_count_fails(monkeyp
     html = " ".join(md.value for md in at.markdown)
     assert "500+" in html and "200+" in html
     assert any("Tiles counted from the open-events feed" in c.value for c in at.caption)
+
+
+def test_rendered_snoozed_tray_at_exactly_the_cap_never_claims_more(monkeypatch) -> None:
+    """Exactly 100 snoozed events fill the LIMIT 100 frame with nothing hidden: the tray says '100+' and
+    that more MAY be snoozed -- never that more ARE (the pre-fix caption stated it as fact)."""
+    import pytest
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+
+    from app.companies import COMPANIES
+    from app.ui.pages import alerts
+    from tests.test_alerts_failed_reads import _ok, _render_section, _stub
+    n = alerts._SNOOZED_CAP
+    snz = pd.DataFrame({
+        "EVENT_ID": [f"S{i:05d}" for i in range(n)], "RULE_ID": "COST_X",
+        "RAISED_AT": pd.Timestamp("2026-09-30"), "COMPANY": "ALFA", "SEVERITY": "HIGH", "TITLE": "snoozed",
+        "SNOOZED_UNTIL": pd.date_range("2099-01-01", periods=n, freq="min"),
+        "SNOOZE_BY": "op", "SNOOZE_REASON": "noise"})
+    _stub(monkeypatch, {f"alert_snoozed_{comp}": _ok(snz) for comp in COMPANIES})
+    monkeypatch.setattr(alerts, "lazy_sections", lambda *_a, **_k: "Open events")
+    at = AppTest.from_function(_render_section, default_timeout=30)
+    at.run()
+    assert not at.exception, at.exception
+    assert any(f"Snoozed ({n}+)" in e.label for e in at.expander)
+    caps = [c.value for c in at.caption]
+    assert any(f"Showing the {n} soonest to wake — more may be snoozed" in c for c in caps), caps
+    assert not any("more events are snoozed" in c for c in caps)
