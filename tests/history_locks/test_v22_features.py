@@ -6,14 +6,7 @@ from __future__ import annotations
 from app.core.query import should_persist_telemetry
 from app.data import cost_sql, insights_sql, mart_sql
 from app.logic.sizing import normalize_size, shifted_size, simulate_scenario
-from app.ui.pages.alerts import RESOLUTION_KINDS, _lifecycle_stmts
-
-
-def _lifecycle_sql(event_id: str, action: str, note: str, kind: str = "") -> str:
-    # The page builds its SQL preview from _lifecycle_stmts itself; the joined-string wrapper this
-    # file used to import had no caller left and was removed in v4.607, so join the live list here.
-    return "\n".join(_lifecycle_stmts(event_id, action, note, kind))
-
+from app.ui.pages.alerts import RESOLUTION_KINDS, _lifecycle_sql
 
 # ---------------------------------------------------------------------------
 # Right-size what-if simulator (pure)
