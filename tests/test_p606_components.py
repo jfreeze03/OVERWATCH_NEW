@@ -14,6 +14,7 @@ pre-fix code at 04fd374e:
   R1-219  the display-timezone pass blanked NEVER_READ (bool) and turned raw *_TIME numbers into 1970.
   R1-220  Add to Case exported NULL cells as the literal text nan / None / NaT / <NA>.
   R1-221  a numeric cell of +/-inf crashed the page from inside the table's lazy Styler render.
+  R1-222  a >400-row table's Hr/Min/Sec duration column sorted as text with no word of it.
 """
 
 from __future__ import annotations
@@ -527,3 +528,40 @@ def test_styled_table_with_an_infinite_ratio_still_renders_the_rest_of_the_page(
     df = pd.DataFrame({"RATIO": [1.5, math.inf], "SCORE": [2.0, -math.inf]})
     html = df.style.format(_clean_numeric_cell, na_rep="—", subset=["RATIO", "SCORE"]).to_html()
     assert "1.5" in html and "—" in html                  # the lazy format pass completes
+
+
+# ---------------------------------------------------------------------------
+# R1-222: a large table's text duration column says its header sort is textual
+# ---------------------------------------------------------------------------
+
+def _rendered_table_config(monkeypatch, df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    from app.ui import components
+    seen: dict = {}
+
+    def _capture(data, **kwargs):
+        seen["data"], seen["cfg"] = data, kwargs.get("column_config") or {}
+
+    monkeypatch.setattr(components.st, "dataframe", _capture)
+    monkeypatch.setattr(components.st, "download_button", lambda *a, **k: False)
+    monkeypatch.setattr(components.st, "caption", lambda *a, **k: None)
+    components.styled_table(df, size_note=False)
+    return seen["data"], seen["cfg"]
+
+
+def test_large_table_duration_header_says_its_sort_is_textual(monkeypatch):
+    from app.ui.components import STYLER_MAX_ROWS
+    n = STYLER_MAX_ROWS + 1
+    df = pd.DataFrame({"QUERY_ID": [f"q{i}" for i in range(n)],
+                       "ELAPSED_SEC": [float((i * 37) % 4000) + 0.85 for i in range(n)]})
+    data, cfg = _rendered_table_config(monkeypatch, df)
+    assert data["ELAPSED_SEC"].dtype == object                  # Hr/Min/Sec text cells (owner rule) stay
+    help_text = str((cfg.get("ELAPSED_SEC") or {}).get("help") or "")
+    assert "textual" in help_text and "CSV use the real value" in help_text
+    assert df["ELAPSED_SEC"].dtype == float                     # the caller's frame / CSV stays numeric
+
+
+def test_small_table_duration_keeps_numeric_sort_and_no_textual_note(monkeypatch):
+    df = pd.DataFrame({"QUERY_ID": ["a", "b", "c"], "ELAPSED_SEC": [850.0, 10.0, 3780.0]})
+    data, cfg = _rendered_table_config(monkeypatch, df)
+    assert data.data["ELAPSED_SEC"].dtype == float              # a Styler over numeric cells: real sort
+    assert "textual" not in str((cfg.get("ELAPSED_SEC") or {}).get("help") or "")

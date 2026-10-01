@@ -1872,6 +1872,10 @@ def _auto_formats(df, skip: set) -> dict:
 # rule called the first "small." Above either budget, use Arrow-native formats.
 STYLER_MAX_ROWS = 400
 STYLER_MAX_CELLS = 6_000
+# R1-222: the header note on a large table's duration column (its cells are Hr/Min/Sec text there).
+_TEXTUAL_DURATION_SORT_HELP = (
+    f"Sorting by this column header is textual on tables over {STYLER_MAX_ROWS} rows (or "
+    f"{STYLER_MAX_CELLS:,} cells). The row order as loaded and the CSV use the real value.")
 EAGER_CSV_MAX_ROWS = 200
 EAGER_CSV_MAX_CELLS = 1_500
 
@@ -2235,6 +2239,7 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
         except Exception:  # noqa: BLE001 - the bar is cosmetic, the table must render
             pass
     _cell_count = len(df) * max(1, len(df.columns))
+    _textual_sort_cols: set = set()
     if len(df) <= STYLER_MAX_ROWS and _cell_count <= STYLER_MAX_CELLS:
         try:
             styler = display_df.style
@@ -2289,6 +2294,11 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                 _du = _duration_unit_for_column(_dc)
                 data[_dc] = data[_dc].map(lambda v, _u=_du: humanize_duration(v, _u))
                 fmts.pop(_dc, None)              # now a string cell; no printf NumberColumn needed
+            # R1-222: those cells are TEXT now, so the grid's header-click sort on them is alphabetical
+            # ('10s' < '1h 3m' < '2m 5s' < '850ms'). Streamlit 1.52 has no hidden sort key, and the
+            # Hr/Min/Sec cells are an owner requirement, so say it on the header (help, added by the
+            # rec13 pass below) instead of letting "slowest first" silently mis-order.
+            _textual_sort_cols = set(_dur_cols)
         cfg = dict(column_config or {})
         for col, fmt in fmts.items():
             if col in cfg and not callable(fmt):
@@ -2359,6 +2369,8 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
         _pretty = _prettify_header(_col)
         _label = _pretty if _pretty != str(_col) else None
         _help = COLUMN_HELP.get(str(_col).upper())   # rec32: which-dollar-is-this on the header
+        if _col in _textual_sort_cols:
+            _help = ((_help + " ") if _help else "") + _TEXTUAL_DURATION_SORT_HELP
         _w = _width_for_column(_col)                 # F33: width intent by name convention
         if _label is None and _col not in _pin_cols and not _help and not _w:
             continue
