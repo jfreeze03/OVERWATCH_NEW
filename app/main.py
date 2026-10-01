@@ -160,6 +160,7 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
         if page not in pages:
             page = current
         st.session_state["_ow_page"] = page
+        _note_landing_rendered()   # c09 R1-002: what run 1 rendered, while the saved landing is pending
         remember_page(page)
         # C44 review fix: leaving Alerts expires the momentum queue — returning
         # later must not surprise-open a drawer from a spent triage chain. Gated
@@ -237,10 +238,16 @@ def _reconnect_off_sis() -> None:
     so an expired master token kept failing every read through 'Refresh data' and even a browser
     reload. Clear them, as 'Retry connection' does, so the next read reconnects. On SiS the session
     is the platform's (get_active_session) and a browser reload starts a fresh instance -- the
-    session-expired message says so -- so nothing is cleared there."""
+    session-expired message says so -- so nothing is cleared there.
+
+    Only when a read this session actually failed as session-expired (record_error sets
+    SESSION_EXPIRED_KEY): the cache is process-wide (every local tab's ONE connection and the
+    telemetry shape flag), and with externalbrowser SSO a reconnect can open a new login prompt,
+    so a routine Refresh stays a cheap salt bump (c09 R1-006 follow-up)."""
+    from app.core.errors import SESSION_EXPIRED_KEY
     from app.core.session import is_sis
 
-    if not is_sis():
+    if st.session_state.pop(SESSION_EXPIRED_KEY, False) and not is_sis():
         st.cache_resource.clear()
 
 
@@ -254,11 +261,29 @@ def _parse_view(raw: str) -> dict | None:
         return None
 
 
+def _landing_state() -> tuple[str, tuple[str, ...]]:
+    """What a saved DEFAULT_VIEW overwrites: the page and the global scope filters."""
+    from app.core.state import FILTER_DEFAULTS
+
+    return (str(st.session_state.get("_ow_page") or ""),
+            tuple(str(st.session_state.get(k, "")) for k in FILTER_DEFAULTS))
+
+
+def _note_landing_rendered() -> None:
+    """_sidebar calls this once the run's page is resolved. While the saved landing is
+    still pending (a USER_PREFS retry, r10 #1, or a run before identity hydrated, r11 #3),
+    keep what the session's FIRST run rendered, so a later retry can tell whether the
+    viewer has moved since (c09 R1-002 follow-up)."""
+    if not st.session_state.get("_ow_default_applied"):
+        st.session_state.setdefault("_ow_landing_first", _landing_state())
+
+
 def _apply_default_landing() -> None:
     """Once per session: hydrate the viewer's display prefs (timezone, density,
     presentation mode) and land on their saved default view. An explicit ?page=
     deep link the session ARRIVED with wins over the default view only — the
-    display prefs hydrate either way."""
+    display prefs hydrate either way. So does a page or filter the viewer picked
+    while a retry was pending: a late DEFAULT_VIEW never pulls them away."""
     # c09 R1-002: record ONCE, on the session's first call (before _sidebar's remember_page
     # writes ?page= for every run), whether it arrived on a deep link. Re-reading
     # st.query_params on a retry saw the app's OWN ?page= write as a deep link, so a
@@ -271,6 +296,13 @@ def _apply_default_landing() -> None:
             st.session_state["_ow_arrived_with_page"] = False
     if st.session_state.get("_ow_default_applied"):
         return
+    # c09 R1-002 follow-up: a retry runs on the viewer's NEXT interaction, often a nav click
+    # or a scope change. Once the page or a filter differs from what the first run rendered,
+    # the viewer has moved: remember it (sticky, so moving away and back still counts) and
+    # let the retry hydrate the display prefs but leave the page and the filters alone.
+    _first = st.session_state.get("_ow_landing_first")
+    if _first is not None and _landing_state() != _first:
+        st.session_state["_ow_landing_moved"] = True
     from app.core.state import consume_pending_navigation
     from app.data import prefs_sql
 
@@ -312,8 +344,8 @@ def _apply_default_landing() -> None:
         # the toggle; programmatic assignment never fires its on_change, so the
         # user's saved 'audit' can't be clobbered by a stale pre-hydrate False.
         st.session_state["_ow_present_mode_toggle"] = (mode_pref == "audit")
-    if st.session_state.get("_ow_arrived_with_page"):
-        return   # deep link wins over the saved DEFAULT_VIEW (the display prefs above still hydrate)
+    if st.session_state.get("_ow_arrived_with_page") or st.session_state.get("_ow_landing_moved"):
+        return   # deep link wins over the saved DEFAULT_VIEW, and so does where the viewer went since run 1
     raw = next((str(r["PREF_VALUE"] or "") for _, r in prefs.df.iterrows()
                 if str(r["PREF_KEY"]) == "DEFAULT_VIEW"), "")
     data = _parse_view(raw)

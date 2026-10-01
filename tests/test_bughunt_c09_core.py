@@ -31,7 +31,7 @@ def _landing_script():
     remember_page(st.session_state.get("_ow_page") or "Brief")
 
 
-def _prefs_run(monkeypatch, outcomes: list[bool]) -> list[int]:
+def _prefs_run(monkeypatch, outcomes: list[bool], frame: pd.DataFrame = _PREFS) -> list[int]:
     """Patch app.main.run: each USER_PREFS read pops the next outcome (True = the prefs frame, False = a
     transient failure). Returns the read log."""
     import app.main as m
@@ -41,7 +41,7 @@ def _prefs_run(monkeypatch, outcomes: list[bool]) -> list[int]:
     def _run(*_a, **_k):
         reads.append(1)
         ok = outcomes.pop(0) if outcomes else True
-        return (QueryResult(df=_PREFS.copy(), ok=True, source="USER_PREFS") if ok
+        return (QueryResult(df=frame.copy(), ok=True, source="USER_PREFS") if ok
                 else QueryResult(ok=False, error="transient", error_kind="timeout"))
 
     monkeypatch.setattr(m, "run", _run)
@@ -95,6 +95,91 @@ def test_identity_late_run_still_reads_prefs(monkeypatch):
     at.run()
     assert not at.exception
     assert reads == [1] and at.session_state["_ow_present_mode"] == "audit"
+
+
+# R1-002 follow-up: now that the retry runs, a LATE DEFAULT_VIEW must never pull a viewer who has moved.
+
+_PREFS_VIEW = pd.DataFrame({
+    "PREF_KEY": ["PRESENT_MODE", "DEFAULT_VIEW"],
+    "PREF_VALUE": ["audit", '{"page": "Overview", "filters": {"company": "Trexis"}}'],
+})
+
+
+def _sidebar_landing_script():
+    """main()'s order around the landing hook: init_filters, _apply_default_landing, then _sidebar resolves the
+    page into _ow_page, notes what this run rendered, and writes ?page= (remember_page)."""
+    import streamlit as st
+
+    import app.main as m
+    from app.core.state import init_filters, remember_page
+
+    init_filters()
+    m._apply_default_landing()
+    page = st.session_state.get("_ow_page") or "Brief"
+    st.session_state["_ow_page"] = page
+    getattr(m, "_note_landing_rendered", lambda: None)()   # pre-fix: absent, so the behaviour asserts fail
+    remember_page(page)
+
+
+def _first_run_fails(monkeypatch, outcomes: list[bool]):
+    reads = _prefs_run(monkeypatch, outcomes, frame=_PREFS_VIEW)
+    at = AppTest.from_function(_sidebar_landing_script, default_timeout=30)
+    at.session_state["_ow_current_user"] = "JFREEZE"
+    at.run()
+    assert not at.exception
+    assert reads == [1] and at.session_state["_ow_page"] == "Brief"
+    assert at.session_state["flt_company"] == "ALFA"
+    return at, reads
+
+
+def test_late_prefs_retry_never_overrides_a_nav_click(monkeypatch):
+    """The reviewer's probe: run 1's USER_PREFS read fails, the viewer clicks to Alerts (_nav_pick) before the
+    retry, and run 2's read succeeds -- the presentation mode hydrates, the page and the scope stay theirs."""
+    at, reads = _first_run_fails(monkeypatch, [False, True])
+    at.session_state["_ow_page"] = "Alerts"
+    at.run()
+    assert not at.exception
+    assert reads == [1, 1] and at.session_state["_ow_default_applied"] is True
+    assert at.session_state["_ow_present_mode"] == "audit"            # display prefs still hydrate late
+    assert at.session_state["_ow_page"] == "Alerts"                   # never pulled back to Overview
+    assert at.session_state["flt_company"] == "ALFA"                  # nor re-scoped to the view's Trexis
+
+
+def test_late_prefs_retry_never_overrides_a_scope_change(monkeypatch):
+    at, reads = _first_run_fails(monkeypatch, [False, True])
+    at.session_state["flt_company"] = "ALL"                           # a scope pick, same page
+    at.run()
+    assert not at.exception
+    assert reads == [1, 1] and at.session_state["_ow_present_mode"] == "audit"
+    assert at.session_state["_ow_page"] == "Brief" and at.session_state["flt_company"] == "ALL"
+
+
+def test_a_move_is_sticky_across_retries(monkeypatch):
+    """Moving away on one retry and back before the next still counts: the late view is not applied."""
+    at, reads = _first_run_fails(monkeypatch, [False, False, True])
+    at.session_state["_ow_page"] = "Alerts"
+    at.run()
+    assert not at.exception and reads == [1, 1]
+    at.session_state["_ow_page"] = "Brief"
+    at.run()
+    assert not at.exception and reads == [1, 1, 1]
+    assert at.session_state["_ow_page"] == "Brief" and at.session_state["flt_company"] == "ALFA"
+
+
+def test_late_prefs_retry_still_lands_a_viewer_who_has_not_moved(monkeypatch):
+    """r10 #1 survives: with no click between the runs, the saved DEFAULT_VIEW (page AND filters) lands late."""
+    at, reads = _first_run_fails(monkeypatch, [False, True])
+    at.run()
+    assert not at.exception and reads == [1, 1]
+    assert at.session_state["_ow_page"] == "Overview" and at.session_state["flt_company"] == "Trexis"
+
+
+def test_sidebar_notes_the_rendered_landing_before_writing_the_page_param():
+    from tests._source import read
+
+    side = read("app/main.py").split("def _sidebar(", 1)[1].split("\ndef ", 1)[0]
+    i_page = side.index('st.session_state["_ow_page"] = page')
+    assert i_page < side.index("_note_landing_rendered()") < side.index("remember_page(page)")
 
 
 # ------------------------------------------------------------------ R1-003: WH jump carries its company ----
@@ -239,23 +324,52 @@ def test_session_expired_hint_names_a_remedy_that_reconnects(raw):
     assert "local dev: press 'Refresh data'" in msg                    # off SiS: Refresh now reconnects
 
 
-@pytest.mark.parametrize(("sis", "cleared"), [(False, 1), (True, 0)])
-def test_refresh_drops_the_cached_session_off_sis(monkeypatch, sis, cleared):
+_EXPIRED = "390111 (08001): Session no longer exists. New login required to access the service."
+
+
+@pytest.mark.parametrize(("sis", "raw", "cleared"), [
+    (False, _EXPIRED, 1),
+    (False, "Authentication token has expired.  The user must authenticate again.", 1),
+    (False, "000630 (57014): Statement reached its statement or warehouse timeout of 60 second(s)", 0),
+    (True, _EXPIRED, 0),                  # SiS: the platform's session; the message says reload instead
+])
+def test_refresh_reconnects_off_sis_only_after_a_session_expired_read(monkeypatch, sis, raw, cleared):
+    """Off SiS the cached session is process-wide (every local tab's one connection) and an externalbrowser
+    reconnect can open an SSO prompt, so 'Refresh data' drops it ONLY after a read failed session-expired --
+    the classification format_snowflake_error uses -- and once per such failure; any other Refresh stays a
+    salt bump."""
     import streamlit as st
 
+    import app.core.query as q
     import app.core.session as session_mod
     import app.main as m
 
+    st.session_state.clear()
     calls: list[int] = []
     monkeypatch.setattr(session_mod, "is_sis", lambda: sis)
     monkeypatch.setattr(st.cache_resource, "clear", lambda: calls.append(1))
-    m._reconnect_off_sis()
+    monkeypatch.setattr(q, "_telemetry", lambda *_a, **_k: None)
+
+    def _boom(_sql, _scope, _page=""):
+        raise RuntimeError(raw)
+
+    monkeypatch.setitem(q._FETCHERS, "live", _boom)
+    m._reconnect_off_sis()                                              # a routine Refresh: never a reconnect
+    assert calls == []
+    res = q.run("SELECT 1 AS X /* c09 R1-006 follow-up */", page="t", key="k", tier="live")
+    assert res.ok is False
+    expired = "expired" in raw.lower() or "no longer exists" in raw.lower()
+    assert ("Reload the app in your browser to reconnect" in res.error) is expired   # message and flag agree
+    m._reconnect_off_sis()                                              # the Refresh after that failure
+    assert len(calls) == cleared
+    m._reconnect_off_sis()                                              # spent: the next one is a salt bump
     assert len(calls) == cleared
     from tests._source import read
 
     src = read("app/main.py")
     block = src.split('if st.button("Refresh data"', 1)[1].split("st.rerun()", 1)[0]
     assert "_reconnect_off_sis()" in block                              # the sidebar Refresh calls it
+    st.session_state.clear()
 
 
 # ------------------------------------------------------------------ R1-173 / R1-335: DEPLOY_ACTORS is a live setting ----

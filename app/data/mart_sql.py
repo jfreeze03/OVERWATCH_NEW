@@ -1851,11 +1851,15 @@ ORDER BY 1
 
 def ml_forecast_daily() -> str:
     """Reader for the opt-in SNOWFLAKE.ML.FORECAST output table (see
-    snowflake/ml_forecast_option.sql). Absent = engine falls back."""
+    snowflake/ml_forecast_option.sql). Absent = engine falls back.
+
+    c09 R1-229: keeps TODAY's row too (>=, was >). Overview sums only the days after
+    today and reads today's row solely for the #24 prorated today-remainder term,
+    which a strictly-future reader made 0 every day."""
     return f"""
 SELECT TS::DATE AS DAY, FORECAST_CREDITS, LOWER_BOUND, UPPER_BOUND
 FROM {core_object("FORECAST_ML_DAILY")}
-WHERE TS::DATE > CURRENT_DATE()
+WHERE TS::DATE >= CURRENT_DATE()
 ORDER BY DAY
 LIMIT 60
 """

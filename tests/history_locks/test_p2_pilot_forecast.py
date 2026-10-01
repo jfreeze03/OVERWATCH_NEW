@@ -46,7 +46,10 @@ def test_seasonal_falls_back_when_thin():
 def test_ml_forecast_reader():
     sql = mart_sql.ml_forecast_daily()
     assert "FORECAST_ML_DAILY" in sql and "FORECAST_CREDITS" in sql
-    assert "TS::DATE > CURRENT_DATE()" in sql
+    # c09 R1-229: today's row is read too -- Overview prorates its remainder (#24); days after
+    # today are still the only ones summed whole (overview.py slices DAY > today).
+    assert "TS::DATE >= CURRENT_DATE()" in sql
+    assert "TS::DATE > CURRENT_DATE()" not in sql
 
 
 def test_v015_dt_pilot_and_backups():
