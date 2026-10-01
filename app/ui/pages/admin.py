@@ -1365,19 +1365,23 @@ def _access_self_check() -> None:
          "Run snowflake/roles.sql as SNOW_ACCOUNTADMINS."),
         ("Warehouse metadata", "SHOW WAREHOUSES", "USAGE/MONITOR on warehouses (roles.sql)."),
     ]
-    # Perf: the SELECT-shaped probes fetch in one parallel 'metadata' batch (SHOW WAREHOUSES
-    # stays solo — not a SELECT). run_batch falls back per-key through run() on any failure, so
-    # a BLOCKED probe is still detected; the parallel win applies when every source is reachable.
+    # Perf: the SELECT-shaped probes fetch in one parallel batch (SHOW WAREHOUSES stays solo —
+    # not a SELECT). run_batch falls back per-key through run() on any failure, so a BLOCKED probe
+    # is still detected; the parallel win applies when every source is reachable.
+    # c09 R1-174: tier "live" (30s), not "metadata" (4h). Successes are cached and failures are
+    # not, so a 4h tier served a grant revoked AFTER an earlier passing click as a green "All
+    # sources reachable" — exactly when the caption says to run this (after a rebuild, a role
+    # change, or an access error). Each probe is a 1-row read or SHOW with the same 30s timeout.
     _ab = run_batch(
         [{"key": name, "sql": sql, "source": name, "max_rows": 1}
          for name, sql, fix in probes if not sql.startswith("SHOW")],
-        page=_PAGE, tier="metadata")
+        page=_PAGE, tier="live")
     rows = []
     for name, sql, fix in probes:
         if sql.startswith("SHOW"):
-            r = run(sql, page=_PAGE, key=f"acc_{name}", tier="metadata", source=name, max_rows=0)
+            r = run(sql, page=_PAGE, key=f"acc_{name}", tier="live", source=name, max_rows=0)
         else:
-            r = _ab.get(name) or run(sql, page=_PAGE, key=f"acc_{name}", tier="metadata",
+            r = _ab.get(name) or run(sql, page=_PAGE, key=f"acc_{name}", tier="live",
                                      source=name, max_rows=1)
         rows.append({"SOURCE": name, "STATUS": "OK" if r.ok else "BLOCKED",
                      "FIX": "" if r.ok else fix,

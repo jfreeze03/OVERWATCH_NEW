@@ -315,3 +315,37 @@ def test_every_settings_key_the_app_reads_in_sql_is_a_known_setting():
                 read |= set(re.findall(r"'([A-Z0-9_]+)'", m.group(2)))
     assert "DEPLOY_ACTORS" in read                       # the scan sees change_impact_sql's read
     assert read - set(DEFAULT_SETTINGS) == set()
+
+
+# ------------------------------------------------------------------ R1-174: the access self-check probes fresh ----
+
+def test_access_self_check_never_serves_a_stale_ok(monkeypatch):
+    """The probes ran on the 4h 'metadata' tier; successes are cached and failures are not, so a grant revoked
+    after a passing click still read 'All sources reachable' for up to 4h. Every probe now rides a tier whose
+    cache lives no longer than one statement timeout (30s)."""
+    from types import SimpleNamespace
+
+    from app.core.query import CACHE_TTLS
+    from app.ui.pages import admin
+
+    tiers: list[str] = []
+
+    def _batch(specs, *, page, tier):
+        tiers.append(tier)
+        return {s["key"]: QueryResult(ok=True, df=pd.DataFrame({"X": [1]})) for s in specs}
+
+    def _run(*_a, tier, **_k):
+        tiers.append(tier)
+        return QueryResult(ok=True, df=pd.DataFrame({"name": ["WH"]}))
+
+    shown: list = []
+    monkeypatch.setattr(admin, "run_batch", _batch)
+    monkeypatch.setattr(admin, "run", _run)
+    monkeypatch.setattr(admin, "section_header", lambda *_a, **_k: None)
+    monkeypatch.setattr(admin, "styled_table", lambda *_a, **_k: None)
+    monkeypatch.setattr(admin, "empty_state", lambda kind, msg, **_k: shown.append((kind, msg)))
+    monkeypatch.setattr(admin, "st", SimpleNamespace(caption=lambda *_a, **_k: None, button=lambda *_a, **_k: True,
+                                                     error=lambda *_a, **_k: None, divider=lambda: None))
+    admin._access_self_check()
+    assert shown == [("clean", "All 7 sources reachable.")]
+    assert tiers and all(CACHE_TTLS[t] <= 30 for t in tiers), tiers
