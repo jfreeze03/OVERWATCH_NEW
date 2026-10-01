@@ -6,8 +6,8 @@
 > here, and some of it closed items below that are not marked: #19's per-member
 > batch caching and 4-wide bounded batch concurrency (v4.144.0;
 > `query._batch_member_cache_get`, `_execute_batch_bounded`) plus its byte-budgeted
-> member cache (`_BATCH_MEMBER_CACHE_MAX_BYTES`), and most of #9 (v4.3.0, v4.282.0,
-> v4.531.0 and later rounds). Do not treat Tiers B–D as a current backlog: check
+> member cache (`_BATCH_MEMBER_CACHE_MAX_BYTES`), and part of #9 (v4.282.0, v4.531.0
+> and later rounds). Do not treat Tiers B–D as a current backlog: check
 > CHANGELOG and the code before acting on any item.
 
 Ranked by measured pain (fleet boards 07-11/07-12) x effort. This was written when
