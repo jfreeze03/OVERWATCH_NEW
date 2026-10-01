@@ -246,21 +246,17 @@ def test_a_peak_without_an_interval_count_is_only_a_peak() -> None:
     assert out.iloc[1]["REASON"] == "peak queued ~3.0"
 
 
-def test_the_opener_lists_a_sub_bar_queue_instead_of_reading_clean(monkeypatch) -> None:
-    """Review r2 on R1-074, on the rendered opener: no spend anomaly and one warehouse that queued
-    just under the sustained bar. It used to get the green header and the verified-clean row; now it
-    is flagged and listed as a plain peak, the Queueing KPI says none of it is sustained, and the
-    caption no longer claims every queue outranks a spend anomaly."""
+def _render_opener(monkeypatch, peaks_df: pd.DataFrame):
+    """Render operations._wh_activity_anomalies up to the spend section with a quiet 30-day spend
+    frame (no anomaly) and ``peaks_df`` as the concurrency read; returns (fake st, recorded calls)."""
     from datetime import date, timedelta
     from types import SimpleNamespace
 
     from test_ops_c01_p606 import _ok, _page, _Stop
 
-    from app.logic.anomaly import sustained_queue_min_intervals
-
     days = [date(2026, 9, 1) + timedelta(days=i) for i in range(30)]
     res = _ok(pd.DataFrame({"DAY": days, "WAREHOUSE_NAME": ["WH_A"] * 30, "CREDITS_TOTAL": [10.0] * 30}))
-    peaks = _ok(_peaks([("WH_BRIEF", 2.0)], intervals=sustained_queue_min_intervals() - 1))
+    peaks = _ok(peaks_df)
 
     def header(title, health="", *_a, **_k):
         if title.startswith("Warehouse spend"):
@@ -272,14 +268,63 @@ def test_the_opener_lists_a_sub_bar_queue_instead_of_reading_clean(monkeypatch) 
     fake.column_config = SimpleNamespace(NumberColumn=lambda *_a, **_k: None)
     with pytest.raises(_Stop):
         ops._wh_activity_anomalies("ALL", 3.0)
+    return fake, seen
+
+
+def _queueing_kpi(seen) -> dict:
+    ((kpis,),) = [(k,) for k in seen["kpis"]]
+    return {k["label"]: k for k in kpis}["Queueing"]
+
+
+def test_the_opener_lists_a_sub_bar_queue_instead_of_reading_clean(monkeypatch) -> None:
+    """Review r2 on R1-074, on the rendered opener: no spend anomaly and one warehouse that queued
+    just under the sustained bar. It used to get the green header and the verified-clean row; now it
+    is flagged and listed as a plain peak, the Queueing KPI says none of it is sustained, and the
+    caption no longer claims every queue outranks a spend anomaly.
+
+    Review r3: bar - 1 = 83 queued 5-minute intervals is ~6.9h over the 14-day read (~29.6 min/day),
+    so neither label may call it "brief" -- the caption and the KPI help describe a sub-bar row by the
+    sustained RATE it stayed under, never by a duration it did not have."""
+    from app.logic.anomaly import sustained_queue_min_intervals
+
+    fake, seen = _render_opener(monkeypatch, _peaks([("WH_BRIEF", 2.0)],
+                                                    intervals=sustained_queue_min_intervals() - 1))
     assert seen["empty"] == []                                   # neither "clean" nor "no data yet"
     assert seen["headers"][0][0] == "Warehouses that need attention now"
     assert seen["headers"][0][1] not in ("", "ok")               # flagged, never the green all-clear
     (table,) = seen["tables"]
     assert list(table["WAREHOUSE_NAME"]) == ["WH_BRIEF"] and list(table["REASON"]) == ["peak queued ~2.0"]
-    ((kpis,),) = [(k,) for k in seen["kpis"]]
-    queueing = {k["label"]: k for k in kpis}["Queueing"]
+    queueing = _queueing_kpi(seen)
     assert queueing["value"] == "1"
-    assert queueing["help"].startswith("0 of 1 sustained (queued at least 30m/day across the 14-day read)")
+    assert queueing["help"] == ("0 of 1 sustained (queued at least 30m/day across the 14-day read); the "
+                                "rest peaked at the queue floor but stayed under that rate, ranked after "
+                                "spend anomalies.")
     caption = fake.text("caption")
-    assert "sustained queueing outranks a spend anomaly; a brief queue peak ranks after it" in caption
+    assert ("sustained queueing outranks a spend anomaly; a queue below the sustained rate ranks after it"
+            in caption)
+    assert "brief" not in caption.lower() and "brief" not in queueing["help"].lower()
+
+
+def test_the_queueing_help_has_no_rest_clause_when_every_queue_is_sustained(monkeypatch) -> None:
+    """Review r3: the KPI help's "the rest ..." tail was unconditional, so with every queueing warehouse
+    at the sustained bar (N == M) it still described a remainder that does not exist. The tail is emitted
+    only when some queueing warehouse is under the bar."""
+    from app.logic.anomaly import sustained_queue_min_intervals
+
+    bar = sustained_queue_min_intervals()
+    fake, seen = _render_opener(monkeypatch, _peaks([("WH_BUSY", 3.0), ("WH_PROD", 2.0)], intervals=bar))
+    (table,) = seen["tables"]
+    assert sorted(table["WAREHOUSE_NAME"]) == ["WH_BUSY", "WH_PROD"]
+    assert all(r.endswith("sustained (~30m/day over 14d)") for r in table["REASON"])
+    queueing = _queueing_kpi(seen)
+    assert queueing["value"] == "2"
+    assert queueing["help"] == "2 of 2 sustained (queued at least 30m/day across the 14-day read)."
+    assert "the rest" not in queueing["help"]
+    assert "brief" not in fake.text("caption").lower()
+
+    # one of each: the tail comes back, and the count splits 1 of 2
+    mixed = pd.concat([_peaks([("WH_BUSY", 3.0)], intervals=bar),
+                       _peaks([("WH_LOW", 2.0)], intervals=bar - 1)], ignore_index=True)
+    _fake, seen = _render_opener(monkeypatch, mixed)
+    help_text = _queueing_kpi(seen)["help"]
+    assert help_text.startswith("1 of 2 sustained (queued at least 30m/day across the 14-day read); the rest ")

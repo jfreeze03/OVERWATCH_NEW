@@ -3731,9 +3731,16 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
     _n_anom = int(ranked["ANOM_DAYS"].fillna(0).gt(0).sum()) if not ranked.empty else 0
     _n_queue = int(ranked["PEAK_QUEUED"].notna().sum()) if not ranked.empty else 0
     # review r2 on R1-074: a sub-bar queue is demoted, not dropped, so "Queueing" counts it; the help
-    # says how many of those reach the sustained bar (the rest are brief peaks ranked after spend)
+    # says how many of those reach the sustained bar. The rest are described BY THE BAR, never by
+    # duration (review r3): a sub-bar row can hold up to bar-1 queued intervals (~6.9h over 14 days),
+    # so "brief" misdescribed it; and the tail is emitted only when some row actually is under the bar.
     _n_sustained = (int(ranked["QUEUED_INTERVALS"].ge(
         sustained_queue_min_intervals(ATTENTION_PEAKS_WINDOW_DAYS)).sum()) if not ranked.empty else 0)
+    _queue_help = (f"{_n_sustained} of {_n_queue} sustained (queued at least "
+                   f"{humanize_duration(QUEUE_UP_MIN_PER_DAY, 'min')}/day across the "
+                   f"{ATTENTION_PEAKS_WINDOW_DAYS}-day read)"
+                   + ("; the rest peaked at the queue floor but stayed under that rate, ranked after "
+                      "spend anomalies." if _n_sustained < _n_queue else "."))
     section_header("Warehouses that need attention now",
                    alarm_health(len(ranked)) if (_queue_known or len(ranked)) else "",
                    "warehouse", anchor="ops-wh-attention")
@@ -3742,10 +3749,7 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
          "severity": "warn" if len(ranked) else ("ok" if _queue_known else "")},
         {"label": "With anomalous spend", "value": f"{_n_anom}"},
         {"label": "Queueing", "value": f"{_n_queue}" if _queue_known else "—",
-         "help": (f"{_n_sustained} of {_n_queue} sustained (queued at least "
-                  f"{humanize_duration(QUEUE_UP_MIN_PER_DAY, 'min')}/day across the "
-                  f"{ATTENTION_PEAKS_WINDOW_DAYS}-day read); the rest are brief peaks, ranked after spend "
-                  "anomalies.") if _queue_known and _n_queue
+         "help": _queue_help if _queue_known and _n_queue
                  else None if _queue_known else "The concurrency read failed — see Concurrency peaks below."},
     ])
     if ranked.empty and not _queue_known:
@@ -3756,8 +3760,8 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
                     "No warehouse is anomalous or queueing right now — full activity below.")
     else:
         st.caption(("Merged from the spend-anomaly and concurrency signals below, worst-first "
-                    "(sustained queueing outranks a spend anomaly; a brief queue peak ranks after "
-                    "it)." if _queue_known else
+                    "(sustained queueing outranks a spend anomaly; a queue below the sustained rate "
+                    "ranks after it)." if _queue_known else
                     "Spend anomalies only — the concurrency read failed, so queueing is not ranked.")
                    + " Select a warehouse to open its Entity 360.")
         entity_nav_table(
