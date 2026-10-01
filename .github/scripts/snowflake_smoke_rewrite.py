@@ -27,21 +27,26 @@ What the rewrite does, in order:
    * has a top-level statement whose kind is not on ``_TOP_LEVEL_KINDS``, the ALLOWLIST of the kinds
      the real chain uses (a test replays every migration through it and requires each kind to be used);
    * still names DBA_MAINT_DB in any case, anywhere;
-   * carries, in code at any depth (``$$`` bodies included; comments and '...' strings ignored), a
-     ``_FORBIDDEN`` form -- GRANT / REVOKE, warehouse, resource monitor, account, user, role,
-     integration, share, network policy and other account-object DDL, database DDL, a role or warehouse
-     switch, a task start, an external stage or unload -- or a SYSTEM$ function off
-     ``_SYSTEM_FUNCTIONS``;
-   * creates, alters, drops, writes, CALLs, renames into or USEs an object whose database is named and
-     is not the clone (``_TARGET``), or hides a name in ``IDENTIFIER('...')``;
+   * carries, in code at any depth (``$$`` bodies included; comments read as whitespace; '...' strings
+     ignored, except that a literal handed straight to EXECUTE IMMEDIATE -- the first piece when it is
+     concatenated -- is read, recursively, as the SQL it runs), a ``_FORBIDDEN`` form -- GRANT /
+     REVOKE, warehouse, resource monitor, account or user CREATE / ALTER / DROP, role, integration,
+     share, network policy and other account-object DDL, database DDL, a role or warehouse switch, a
+     task start, an external stage or unload -- or a SYSTEM$ function off ``_SYSTEM_FUNCTIONS``;
+   * in that code or those literals, creates, alters, drops, writes, CALLs, renames into or USEs an
+     object whose database is named and is not the clone (``_TARGET``), or hides a name in
+     ``IDENTIFIER('...')``;
    * CALLs SP_NOTIFY_WEBHOOK / SP_DAILY_DIGEST, or uses a SYSTEM$SEND_* primitive, anywhere -- top
-     level, in a ``$$`` body, or in a '...' string that could be dynamic SQL -- except a suspended
-     task's top-level ``AS CALL`` body and SYSTEM$SEND_SNOWFLAKE_NOTIFICATION as code in the two
-     procedures' own definitions.
+     level, in a ``$$`` body, or in any '...' string that could be dynamic SQL (read as written and as
+     the SQL it would run), a comment between two tokens included -- except a suspended task's
+     top-level ``AS CALL`` body and SYSTEM$SEND_SNOWFLAKE_NOTIFICATION as code in the two procedures'
+     own definitions.
 
    A new migration that uses a new top-level statement kind or any form above is refused until it is
-   reviewed here. Nothing else is promised: SQL assembled at run time from pieces, and what a CALLed
-   procedure reaches through it, are beyond a text check and rest on layer 2, the CI role's privileges;
+   reviewed here. Nothing else is promised: SQL assembled at run time -- held in a variable, or the
+   pieces of a concatenation after its first literal (the send ban above still reads every literal) --
+   and what a CALLed procedure reaches through it are beyond a text check and rest on layer 2, the CI
+   role's privileges;
 6. starts every copy with ``USE SECONDARY ROLES NONE``, so each session holds the CI role's own
    privileges and none a user's default secondary roles would add.
 
@@ -81,7 +86,8 @@ _FORBIDDEN: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("production warehouse", re.compile(r"\bWH_ALFA_ADMIN\b", re.I)),
     ("warehouse DDL", re.compile(r"\b(CREATE|ALTER|DROP)\s+(OR\s+REPLACE\s+)?WAREHOUSE\b", re.I)),
     ("resource monitor", re.compile(r"\bRESOURCE\s+MONITOR\b|\bRESOURCE_MONITOR\s*=", re.I)),
-    ("account or user change", re.compile(r"\bALTER\s+(ACCOUNT|USER)\b", re.I)),
+    ("account or user change", re.compile(
+        r"\b(CREATE|ALTER|DROP|UNDROP)\s+(OR\s+(REPLACE|ALTER)\s+)?(ACCOUNT|USER)\b", re.I)),
     ("integration DDL", re.compile(r"\b(CREATE|ALTER|DROP)\s+(OR\s+REPLACE\s+)?(\w+\s+){0,2}INTEGRATION\b", re.I)),
     ("role DDL", re.compile(r"\b(CREATE|ALTER|DROP)\s+(OR\s+REPLACE\s+)?ROLE\b", re.I)),
     ("grant to a retired role", re.compile(r"\b(TO|FROM)\s+ROLE\s+OVERWATCH_\w+", re.I)),
@@ -133,6 +139,8 @@ _SEND = re.compile(
     rf'\bCALL\s+(?:{_PART}\s*\.\s*){{0,2}}"?{_NOTIFIERS}(?![A-Za-z0-9_$])|\bSYSTEM\$SEND_\w*(?=\s*\()', re.I)
 # IDENTIFIER('db.schema.t') hides a name from _TARGET inside a string; the chain never uses it.
 _IDENTIFIER_LITERAL = re.compile(r"\bIDENTIFIER\s*\(\s*'", re.I)
+# A '...' literal handed straight to EXECUTE IMMEDIATE runs as SQL, so the code checks read it as SQL too.
+_EXECUTE_LITERAL = re.compile(r"\bEXECUTE\s+IMMEDIATE\s+(?:\(\s*)?(?=')", re.I)
 _TASK_DDL = re.compile(r"^(CREATE (OR REPLACE )?TASK|ALTER TASK) ")
 _NOTIFIER_DEFINITION = re.compile(
     rf'^CREATE (OR REPLACE )?PROCEDURE (?:{_PART} ?\. ?){{0,2}}"?{_NOTIFIERS}"? ?\(')
@@ -158,16 +166,17 @@ _RESUME_TASK = re.compile(r"\b(ALTER\s+TASK\s+(?:IF\s+EXISTS\s+)?[\w$.\"]+\s+)RE
 _DEPENDENTS_ENABLE = re.compile(r"SYSTEM\$TASK_DEPENDENTS_ENABLE\s*\(", re.I)
 _TASK_WAREHOUSE = re.compile(rf"\bWAREHOUSE(\s*)=(\s*){PROD_WAREHOUSE}\b", re.I)
 _PROD_DB = re.compile(rf"\b{PROD_DB}\b", re.I)
+_SPAN_OPEN = re.compile(r"--|/\*|\$\$|['\"]")
 
 
 def _spans(text: str) -> list[tuple[str, int, int]]:
     """Split SQL into (kind, start, end) spans: code, comment, string ('...'), dollar ($$...$$),
     quoted ("..." identifier, treated as code)."""
     out: list[tuple[str, int, int]] = []
-    i = start = 0
+    start = 0
     n = len(text)
-    while i < n:
-        two = text[i:i + 2]
+    while (m := _SPAN_OPEN.search(text, start)) is not None:   # the leftmost opener, tried in this order
+        i, two = m.start(), m.group(0)
         if two == "--":
             nl = text.find("\n", i)
             kind, end = "comment", (n if nl < 0 else nl)
@@ -177,47 +186,66 @@ def _spans(text: str) -> list[tuple[str, int, int]]:
         elif two == "$$":
             close = text.find("$$", i + 2)
             kind, end = "dollar", (n if close < 0 else close + 2)
-        elif text[i] in "'\"":
-            quote, j = text[i], i + 1
-            while j < n:
-                if quote == "'" and text[j] == "\\":
-                    j += 2
-                    continue
-                if text[j] == quote:
-                    if text[j + 1:j + 2] == quote:
-                        j += 2
-                        continue
-                    break
-                j += 1
-            kind, end = ("string" if quote == "'" else "quoted"), min(j + 1, n)
         else:
-            i += 1
-            continue
+            kind, end = ("string" if two == "'" else "quoted"), _quoted_end(text, i)
         if start < i:
             out.append(("code", start, i))
         out.append((kind, i, end))
-        i = start = end
+        start = end
     if start < n:
         out.append(("code", start, n))
     return out
 
 
+def _quoted_end(text: str, i: int) -> int:
+    """Just past the '...' string or "..." identifier that opens at ``i`` (the text's end when unclosed)."""
+    quote, j, n = text[i], i + 1, len(text)
+    while j < n:
+        if quote == "'" and text[j] == "\\":
+            j += 2
+            continue
+        if text[j] == quote:
+            if text[j + 1:j + 2] == quote:
+                j += 2
+                continue
+            break
+        j += 1
+    return min(j + 1, n)
+
+
 def _blank(segment: str) -> str:
-    return re.sub(r"[^\n]", " ", segment)
+    return "\n".join(" " * len(part) for part in segment.split("\n"))
 
 
-def code_view(text: str, *, dollar_bodies: bool = True, strings: bool = False) -> str:
+def _interior(literal: str) -> str:
+    """The text between a '...' literal's quotes (to its end when unclosed)."""
+    return literal[1:-1] if len(literal) >= 2 and literal.endswith("'") else literal[1:]
+
+
+def literal_sql(interior: str) -> str:
+    """A '...' literal's interior as the SQL it holds, same length: each escaped character ('' or a
+    backslash pair) becomes a space plus the character, so ``''x''`` reads as `` 'x '``."""
+    return re.sub(r"''|\\.", lambda m: " " + m.group(0)[1], interior, flags=re.S)
+
+
+def code_view(text: str, *, dollar_bodies: bool = True, strings: bool = False, dynamic: bool = False) -> str:
     """``text`` with comments and '...' strings blanked (same length, newlines kept). ``$$`` bodies
     are code-viewed recursively, or blanked when ``dollar_bodies`` is False (the top-level view).
-    ``strings=True`` keeps the '...' strings (they can be dynamic SQL); comments are always blanked."""
+    ``strings=True`` keeps the '...' strings (they can be dynamic SQL); comments are always blanked.
+    ``dynamic=True`` (with ``strings``) reads each kept string as the SQL it would run: unescaped by
+    ``literal_sql`` and code-viewed in turn, so a comment between two of its tokens is whitespace."""
     parts = []
     for kind, start, end in _spans(text):
         seg = text[start:end]
         if kind == "comment" or (kind == "string" and not strings):
             parts.append(_blank(seg))
+        elif kind == "string" and dynamic:
+            body = _interior(seg)
+            inner = code_view(literal_sql(body), strings=True, dynamic=True)
+            parts.append("'" + inner + seg[1 + len(body):])
         elif kind == "dollar":
             body = seg[2:-2] if len(seg) >= 4 and seg.endswith("$$") else seg[2:]
-            inner = code_view(body, strings=strings) if dollar_bodies else _blank(body)
+            inner = code_view(body, strings=strings, dynamic=dynamic) if dollar_bodies else _blank(body)
             parts.append("$$" + inner + ("$$" if len(seg) >= 4 and seg.endswith("$$") else ""))
         else:
             parts.append(seg)
@@ -308,32 +336,50 @@ def _target_db(m: re.Match[str]) -> str | None:
     return parts[0] if len(parts) == 3 else None
 
 
+def _snip(s: str) -> str:
+    return " ".join(s.split())[:80]
+
+
+def _code_findings(sql: str, clone_db: str) -> list[tuple[int, str, str]]:
+    """(offset, what, snippet) for the forms module step 5 refuses in ``sql``'s code at any depth (``$$``
+    bodies included, comments and '...' strings ignored), and -- read as the SQL it runs, recursively -- in
+    each '...' literal handed straight to EXECUTE IMMEDIATE (the first piece when it is concatenated)."""
+    view, kept = code_view(sql), code_view(sql, strings=True)
+    found = [(m.start(), what, _snip(m.group(0))) for what, rx in _FORBIDDEN for m in rx.finditer(view)]
+    found += [(m.start(), "system function", m.group(0)) for m in _SYSTEM_FUNCTION.finditer(view)
+              if m.group(0).upper() not in _SYSTEM_FUNCTIONS]
+    found += [(m.start(), "name outside the clone", _snip(m.group(0))) for m in _TARGET.finditer(view)
+              if (db := _target_db(m)) is not None and not _same_db(db, clone_db)]
+    found += [(m.start(), "IDENTIFIER() of a literal name", _snip(m.group(0)))
+              for m in _IDENTIFIER_LITERAL.finditer(kept)]
+    for m in _EXECUTE_LITERAL.finditer(kept):
+        if view[m.start():m.end()] != kept[m.start():m.end()]:
+            continue                                    # the words sit inside a string: prose, not code
+        body = _interior(sql[m.end():_quoted_end(sql, m.end())])
+        found += [(m.end() + 1 + at, what, snip)
+                  for at, what, snip in _code_findings(literal_sql(body), clone_db)]
+    return found
+
+
 def violations(text: str, clone_db: str) -> list[tuple[int, str, str]]:
     """(line, what, snippet) for everything in a rewritten copy the smoke must not run (module step 5)."""
 
     def line(at: int) -> int:
         return text.count("\n", 0, at) + 1
 
-    def snip(s: str) -> str:
-        return " ".join(s.split())[:80]
-
     found = [(line(m.start()), "production database", m.group(0)) for m in _PROD_DB.finditer(text)]
-    view = code_view(text)
-    found += [(line(m.start()), what, snip(m.group(0))) for what, rx in _FORBIDDEN for m in rx.finditer(view)]
-    found += [(line(m.start()), "system function", m.group(0)) for m in _SYSTEM_FUNCTION.finditer(view)
-              if m.group(0).upper() not in _SYSTEM_FUNCTIONS]
-    found += [(line(m.start()), "name outside the clone", snip(m.group(0))) for m in _TARGET.finditer(view)
-              if (db := _target_db(m)) is not None and not _same_db(db, clone_db)]
-    found += [(line(m.start()), "IDENTIFIER() of a literal name", snip(m.group(0)))
-              for m in _IDENTIFIER_LITERAL.finditer(code_view(text, strings=True))]
+    found += [(line(at), what, snip) for at, what, snip in _code_findings(text, clone_db)]
+    # A statement starts at top-level code and ends past a code ';', so no span crosses its bounds and a
+    # slice of a whole-text view is that view of the statement.
+    top_view, code_only_view = code_view(text, dollar_bodies=False), code_view(text)
+    # every '...' string too, as written and as the SQL it would run: a string can be dynamic SQL
+    send_views = (code_view(text, strings=True), code_view(text, strings=True, dynamic=True))
     for start, end, code in statements(text):
         if top_level_kind(code) is None:
             found.append((line(start), "statement kind not on the allowlist", code[:80]))
-        seg = text[start:end]
-        if not _SEND.search(seg):                       # the raw text holds every view's matches
-            continue
-        top, code_only = code_view(seg, dollar_bodies=False), code_view(seg)
-        for m in _SEND.finditer(code_view(seg, strings=True)):  # strings too: they can be dynamic SQL
+        top, code_only = top_view[start:end], code_only_view[start:end]
+        hits = {m.start(): m for view in send_views for m in _SEND.finditer(view[start:end])}
+        for at, m in sorted(hits.items()):
             hit, span = m.group(0), slice(m.start(), m.end())
             if hit.upper().startswith("CALL"):
                 # only a task's own top-level AS CALL body (every clone task stays suspended)
@@ -343,8 +389,8 @@ def violations(text: str, clone_db: str) -> list[tuple[int, str, str]]:
                 allowed = (hit.upper() == "SYSTEM$SEND_SNOWFLAKE_NOTIFICATION" and top[span] != hit
                            and code_only[span] == hit and bool(_NOTIFIER_DEFINITION.search(code)))
             if not allowed:
-                found.append((line(start + m.start()), "notification send", snip(hit)))
-    return sorted(found)
+                found.append((line(start + at), "notification send", _snip(hit)))
+    return sorted(set(found))
 
 
 def sources(root: Path = ROOT) -> list[tuple[Path, str]]:

@@ -145,6 +145,16 @@ def _nested(sql: str) -> str:
     f"call {_CLONE.lower()}.overwatch.sp_daily_digest();\n",
     "SELECT SYSTEM$SEND_SNOWFLAKE_NOTIFICATION('x', 'y');\n",
     _nested("CALL SYSTEM$SEND_EMAIL('OVERWATCH_EMAIL', 'ops@example.com', 's', 'b');"),
+    # review of cfa3cd9e: a comment between two tokens is whitespace to Snowflake, and these passed the
+    # ban (the first three regressed from the base, which matched the comment-blanked statement)
+    f"CALL/**/{_CLONE}.OVERWATCH.SP_NOTIFY_WEBHOOK();\n",
+    f"CALL -- c\n {_CLONE}.OVERWATCH.SP_DAILY_DIGEST();\n",
+    _nested(f"CALL /* c */ {_CLONE}.OVERWATCH.SP_DAILY_DIGEST();"),
+    f"CALL {_CLONE}.OVERWATCH/**/.SP_NOTIFY_WEBHOOK();\n",
+    "SELECT SYSTEM$SEND_SNOWFLAKE_NOTIFICATION/**/('x','y');\n",
+    # ... and inside a dynamic-SQL string, read as the SQL it runs
+    _nested(f"EXECUTE IMMEDIATE 'CALL/**/{_CLONE}.OVERWATCH.SP_NOTIFY_WEBHOOK()';"),
+    _nested(f"LET s VARCHAR := 'CALL /* c */ {_CLONE}.OVERWATCH.SP_DAILY_DIGEST()'; EXECUTE IMMEDIATE :s;"),
 ])
 def test_a_notifier_call_or_send_anywhere_outside_a_task_body_fails_closed(sql):
     assert "notification send" in _whats(_mod(), sql)
@@ -194,6 +204,11 @@ _ACCOUNT_LEVEL = [
     ("CREATE STAGE S URL = 's3://bucket/x';", "external stage or data unload"),
     ("CREATE OR REPLACE PROCEDURE P() RETURNS VARCHAR LANGUAGE PYTHON EXTERNAL_ACCESS_INTEGRATIONS = (X) "
      "AS 'x';", "integration reference"),
+    # review of cfa3cd9e: only ALTER ACCOUNT / ALTER USER were matched, so these passed in a $$ body
+    ("CREATE USER CI_BACKDOOR PASSWORD = 'x';", "account or user change"),
+    ("CREATE OR REPLACE USER X;", "account or user change"),
+    ("DROP USER SOMEONE;", "account or user change"),
+    ("DROP ACCOUNT A;", "account or user change"),
 ]
 
 
@@ -205,6 +220,54 @@ def test_account_level_sql_fails_closed_at_top_level(sql, what):
 @pytest.mark.parametrize(("sql", "what"), _ACCOUNT_LEVEL)
 def test_account_level_sql_fails_closed_nested_in_a_dollar_body(sql, what):
     assert what in _whats(_mod(), _nested(sql))
+
+
+def _proc_executing(literal: str) -> str:
+    """A procedure whose body hands ``literal`` (already quoted) to EXECUTE IMMEDIATE, then a CALL of it."""
+    return (f"CREATE OR REPLACE PROCEDURE {_CLONE}.OVERWATCH.SP_X()\nRETURNS VARCHAR\nLANGUAGE SQL\nAS\n$$\n"
+            f"BEGIN\n    EXECUTE IMMEDIATE {literal};\n    RETURN 'ok';\nEND;\n$$;\n"
+            f"CALL {_CLONE}.OVERWATCH.SP_X();\n")
+
+
+def _quoted(sql: str) -> str:
+    return "'" + sql.rstrip(";").replace("'", "''") + "'"
+
+
+# Review of cfa3cd9e: the account-level checks read code with '...' strings blanked, so a literal handed
+# straight to EXECUTE IMMEDIATE in a procedure body (the shape the chain uses in 12 places) passed them.
+@pytest.mark.parametrize(("sql", "what"), _ACCOUNT_LEVEL)
+def test_account_level_sql_fails_closed_as_a_literal_handed_to_execute_immediate(sql, what):
+    assert what in _whats(_mod(), _proc_executing(_quoted(sql)))
+
+
+@pytest.mark.parametrize(("literal", "what"), [
+    ("'GRANT USAGE ON INTEGRATION OVERWATCH_EMAIL TO ROLE PUBLIC'", "grant or revoke"),
+    ("'DROP TABLE ALFA_EDW_PRD.PUBLIC.CONTROL_STATUS'", "name outside the clone"),
+    ("'SELECT SYSTEM$ABORT_SESSION(1)'", "system function"),
+    ("'ALTER WAREHOUSE WH_X SET WAREHOUSE_SIZE = XLARGE'", "warehouse DDL"),
+    ("/* c */ 'GRANT ROLE SOME_ADMIN TO ROLE PUBLIC'", "grant or revoke"),
+    ("'EXECUTE IMMEDIATE ''GRANT ROLE SOME_ADMIN TO ROLE PUBLIC'''", "grant or revoke"),
+    ("'DROP/**/USER SOMEONE'", "account or user change"),
+    ("'GRANT USAGE ON INTEGRATION ' || :name || ' TO ROLE PUBLIC'", "grant or revoke"),
+])
+def test_a_literal_handed_to_execute_immediate_is_read_as_the_sql_it_runs(literal, what):
+    mod = _mod()
+    found = [(line, w) for line, w, _s in mod.violations(_proc_executing(literal), _CLONE)]
+    assert (7, what) in found, found        # reported on the EXECUTE IMMEDIATE line of the body
+
+
+def test_prose_strings_and_the_chains_dynamic_sql_shapes_stay_clean():
+    mod = _mod()
+    for sql in (
+        "INSERT INTO T (MSG) VALUES ('GRANT USAGE ON INTEGRATION X TO ROLE Y, then DROP USER Z');\n",
+        _nested("LET msg VARCHAR := 'ALTER WAREHOUSE W SET WAREHOUSE_SIZE = XLARGE is the fix';"),
+        _proc_executing("'SELECT ''GRANT ROLE X TO ROLE Y'' AS NOTE'"),
+        _proc_executing(f"'CREATE OR REPLACE TRANSIENT TABLE {_CLONE}.OVERWATCH.' || :tname || '_BAK CLONE "
+                        f"{_CLONE}.OVERWATCH.' || :tname"),
+        _proc_executing("'SELECT 1 FROM ' || :cname || ' LIMIT 1'"),
+        _proc_executing(f"'DROP TABLE IF EXISTS {_CLONE}.OVERWATCH.T -- it''s a comment'"),
+    ):
+        assert mod.violations(sql, _CLONE) == [], sql
 
 
 @pytest.mark.parametrize("sql", [
@@ -341,6 +404,10 @@ def test_the_contract_names_the_real_send_guarantee_and_step0_turns_escalation_o
     assert "every clone task stays SUSPENDED" in flat and "EXECUTE TASK is refused" in flat
     assert "ban on any CALL of SP_NOTIFY_WEBHOOK or SP_DAILY_DIGEST" in flat
     assert "it stops only the Teams legs" in flat
+    # review of cfa3cd9e: the contract says what the text check reads and what it leaves to layer 2
+    assert "A comment between two tokens reads as whitespace" in flat
+    assert "a '...' literal handed straight to EXECUTE IMMEDIATE" in flat
+    assert "layer 1 reads only the literal EXECUTE IMMEDIATE is handed" in flat
     step0 = job[job.index("# 0. Delivery off IN THE CLONE"):job.index("# 1. Migrations in order")]
     (query,) = re.findall(r'sql -q ("[^\n]*")', step0)
     assert "UPDATE $CLONE_DB.OVERWATCH.ALERT_ROUTES SET ENABLED = FALSE;" in query

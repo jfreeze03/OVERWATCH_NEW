@@ -113,7 +113,10 @@ jobs:
   #     warehouse switch, a task start, an external stage or unload, or a
   #     SYSTEM$ function off its allowlist; or CALLs SP_NOTIFY_WEBHOOK or
   #     SP_DAILY_DIGEST (top level, nested in a $$ body, or in a dynamic-SQL
-  #     string) anywhere but a suspended task's own body.
+  #     string) anywhere but a suspended task's own body. A comment between
+  #     two tokens reads as whitespace, and "code" includes a '...' literal
+  #     handed straight to EXECUTE IMMEDIATE (the first piece when it is
+  #     concatenated), read as the SQL it runs.
   # The smoke only ever executes the rewritten copies. What keeps it off the
   # account's real notification integrations is that every clone task stays
   # SUSPENDED and EXECUTE TASK is refused, so the notifier and digest task
@@ -126,7 +129,9 @@ jobs:
   # reached only through SQL built at run time (EXECUTE IMMEDIATE of a
   # variable, or a CALLed procedure that does that) is beyond a text check and
   # rests on layer 2: the CI role must hold no USAGE on any notification
-  # integration (step 5 below).
+  # integration (step 5 below). So does account-level or other-database SQL
+  # held in a variable or in the pieces of a concatenation after its first
+  # literal: layer 1 reads only the literal EXECUTE IMMEDIATE is handed.
   #
   # ####################### OWNER ACTION REQUIRED (role) ########################
   # LAYER 2 (defense-in-depth, fail-closed) is a DEDICATED CI ROLE that has NO
