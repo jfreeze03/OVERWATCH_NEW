@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from app.config import MAX_LIVE_WINDOW_DAYS
+from app.config import MAX_LIVE_WINDOW_DAYS, MAX_MART_WINDOW_DAYS
 from app.core.query import run, run_batch
 from app.core.result import is_setup_absence
 from app.data import cortex_sql, etl_sql, graph_sql, insights_sql, mart27_sql
@@ -105,7 +105,8 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     # the clamped day count.
     _uc_wlab = window_label(bounds, min(int(uc_days), MAX_LIVE_WINDOW_DAYS))
     _uc_phrase = window_phrase(bounds, min(int(uc_days), MAX_LIVE_WINDOW_DAYS))
-    # The pattern / ETL / serverless-task reads clamp to the live-scan limit on their own (R1-163).
+    # The ETL / serverless-task reads clamp to the live-scan limit on their own (R1-163); the repeated-
+    # pattern read is mart-backed and clamps to MAX_MART_WINDOW_DAYS instead (R1-015).
     _live_wlab = window_label(bounds, min(int(days), MAX_LIVE_WINDOW_DAYS))
     if int(uc_days) != int(days):
         st.caption(f"Page window is {_window_label.lower()}, but unit prices use "
@@ -114,7 +115,8 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                    "is the slowest read on this page. "
                    + (f"The AI and task-graph pipeline panels below follow the page window from "
                       f"their marts (a live fallback scans at most {MAX_LIVE_WINDOW_DAYS}d and says "
-                      f"so); the repeated-pattern, ETL and serverless-task panels scan at most the "
+                      f"so), the repeated-pattern panel up to {MAX_MART_WINDOW_DAYS}d from its mart; the "
+                      f"ETL and serverless-task panels scan at most the "
                       f"last {MAX_LIVE_WINDOW_DAYS} days." if _past_live
                       else "The AI, pattern, ETL and task-graph panels below still follow the "
                            "page window."))
@@ -356,8 +358,10 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                          "USD_PER_RUN": st.column_config.NumberColumn("$/run", format="$%.4f")})
         # KEPT: "cheap-but-constant often out-bills expensive-but-rare" is an interpretation
         # takeaway (why to read this grouping) — operator-facing, not audit-only methodology.
-        # R1-163: pattern_cost clamps a trailing window to the live-scan limit, so name the window read.
-        st.caption(f"Measured QUERY_ATTRIBUTION_HISTORY compute ({_live_wlab}), grouped by "
+        # R1-163 / R1-015: pattern_cost reads MART_PATTERN_COST_DAILY and clamps a trailing window to the
+        # mart limit (365d), not the 90d live-scan limit, so name the window it actually reads.
+        st.caption(f"Measured QUERY_ATTRIBUTION_HISTORY compute "
+                   f"({window_label(bounds, min(int(days), MAX_MART_WINDOW_DAYS))}), grouped by "
                    "parameterized hash — cheap-but-constant often out-bills "
                    "expensive-but-rare.")
         # cross-filter honesty: MART_PATTERN_COST_DAILY is keyed by QUERY_HASH + COMPANY only, so

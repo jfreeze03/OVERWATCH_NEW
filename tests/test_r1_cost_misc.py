@@ -539,3 +539,13 @@ def test_cs_answer_without_a_hash_column_is_unchanged():
 def test_ask_page_explains_unpriced_gross_cs_credits():
     src = read("app/ui/pages/ask.py")
     assert "is_gross_cs_column(c)" in src and "not priced here" in src
+
+
+def test_repeated_patterns_label_names_the_mart_window_not_the_live_cap():
+    """v4.606 integration: R1-015 made pattern_cost clamp to MAX_MART_WINDOW_DAYS (365) while R1-163 labelled
+    the panel with the 90-day live-scan limit -- the caption and the page note now name the window it reads."""
+    src = read(_UC)
+    caption = src.split("**Repeated patterns", 1)[1].split("grouped by", 1)[0]
+    assert "MAX_MART_WINDOW_DAYS" in caption and "_live_wlab" not in caption
+    note = src.split("the repeated-pattern panel up to", 1)
+    assert len(note) == 2 and "repeated-pattern, ETL and serverless-task" not in src
