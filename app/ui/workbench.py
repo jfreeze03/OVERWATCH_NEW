@@ -368,23 +368,19 @@ def render_action_center(company: str) -> None:
         key=f"action_center_{company}_{include_closed}", tier="live",
         source="ACTION_QUEUE + V074 lifecycle context",
     )
-    extended = extended_res.ok
-    if extended:
-        frame = extended_res.df.copy()
-    else:
-        base = run(
-            mart_sql.action_queue(500, company), page=_PAGE,
-            key=f"action_center_legacy_{company}",
-            tier="live", source="ACTION_QUEUE (legacy shape)",
-        )
-        if not base.ok:
-            empty_state("needs_setup", "The action queue is not installed yet.")
-            return
-        frame = base.df.copy()
-        empty_state(
-            "needs_setup",
-            "V074 is pending. Showing the existing read-only queue; lifecycle, evidence, ownership, and experiments unlock after the owner applies it.",
-        )
+    # R1-206: V074's lifecycle shape is guaranteed past config.REQUIRED_SCHEMA_FLOOR (88; main.py blocks
+    # the page below it), so a failed read is never "V074 is pending" -- the old read-only legacy fallback
+    # turned every timeout into that claim and locked the editor. needs_setup only for a true absence.
+    if not extended_res.ok and is_setup_absence(extended_res.error_kind):
+        empty_state("needs_setup", "The action queue (ACTION_QUEUE) is not installed or not readable by this "
+                                   "app's role yet.")
+        return
+    if not extended_res.ok:
+        empty_state("unavailable", "The action queue could not be read, so open work is not shown — retry "
+                                   "in a moment.", detail=extended_res.error)
+        return
+    extended = True
+    frame = extended_res.df.copy()
 
     # A pending deep link bypasses the mine filter, so a Brief / Overview click to someone else's item
     # is never swallowed (Next-Fifty #20).
@@ -632,8 +628,13 @@ def _render_data_product_detail(product: str) -> None:
         key=f"product_detail_{product}", tier="live",
         source="ENTITY_CATALOG (by data product)",
     )
-    if not detail.ok:
+    if not detail.ok and is_setup_absence(detail.error_kind):
         empty_state("needs_setup", "V074 is required for the ownership catalog.")
+        return
+    if not detail.ok:
+        # R1-206: a timeout / drift / other failure is a failed read with its error, never "V074 required"
+        empty_state("unavailable", f"The '{product}' data product's catalog entities could not be read.",
+                    detail=detail.error)
         return
     if detail.empty:
         empty_state("no_data_yet",
@@ -710,9 +711,14 @@ def render_entity_360(company: str) -> None:
         key=f"entity_record_{kind}_{key}", tier="live", source="ENTITY_CATALOG",
     )
     catalog_row = record.df.iloc[0] if record.ok and not record.empty else None
-    if not record.ok:
+    # R1-206: split a failed record read on its kind. A timeout / drift / other failure is unavailable with
+    # its error -- never "V074 required", and never the "no ownership record yet" absence claim below.
+    if not record.ok and is_setup_absence(record.error_kind):
         empty_state("needs_setup", "V074 is required for the ownership catalog and watchlists.")
-    if catalog_row is not None:
+    elif not record.ok:
+        empty_state("unavailable", "This entity's ownership record could not be read, so ownership and its "
+                                   "editor are hidden until the read succeeds.", detail=record.error)
+    elif catalog_row is not None:
         status_chips([
             (str(catalog_row.get("CRITICALITY") or "STANDARD"),
              "bad" if str(catalog_row.get("CRITICALITY", "")).upper() == "CRITICAL" else ""),
@@ -785,7 +791,11 @@ def render_entity_360(company: str) -> None:
             if ok:
                 st.rerun()
 
-    _render_catalog_editor(kind, key, catalog_row, company)
+    # R1-206: only over a record read that succeeded -- after a failed read the form would seed blank
+    # per-entity widget keys (Streamlit then ignores value= on later reruns) and Save's full-replace MERGE
+    # would overwrite the existing record's team / owner / steward / notes with those blanks.
+    if record.ok:
+        _render_catalog_editor(kind, key, catalog_row, company)
 
     # CR15: the "changes" this panel's docstring promises (ownership, work,
     # CHANGES, savings, evidence). Reuses the change registries the Operations
@@ -802,8 +812,12 @@ def render_entity_360(company: str) -> None:
         elif changes.ok:
             empty_state("no_data_yet", "No tracked change in the last 90 days — the "
                         "change-impact scans fill this (Operations → Change impact).")
-        else:
+        elif is_setup_absence(changes.error_kind):
             empty_state("needs_setup", "Change tracking needs the change-impact scan (V010).")
+        else:
+            # R1-206: a failed read of an installed registry is unavailable with its error
+            empty_state("unavailable", "Recent changes could not be read for this entity.",
+                        detail=changes.error)
     else:
         st.caption(f"Change tracking is not defined for {kind} entities — warehouse settings "
                    "and proc/task deploys are tracked; other types are not.")
@@ -836,8 +850,11 @@ def render_entity_360(company: str) -> None:
                 st.caption(md_dollars(
                     f"Newest completed item — Held? {_lbl}" + (f": {_basis}" if _basis else "")
                     + ". Measured on this entity's own mart signal since it was marked done."))
-    else:
+    elif related.ok:
         empty_state("no_data_yet", "No action is linked to this entity.")
+    else:
+        # R1-206 (same class): a failed ACTION_QUEUE read is not "no action is linked"
+        empty_state("unavailable", "Linked work could not be read for this entity.", detail=related.error)
 
     if evidence_gate(
         "entity_360",

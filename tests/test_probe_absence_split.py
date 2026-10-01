@@ -652,11 +652,9 @@ def test_setup_checklist_drift_is_not_a_retry(monkeypatch):
 # needs its own allowlist edit. Every pair must still be flagged (fixing one removes it here) and its read must
 # carry no probe=True, directly or through a same-module wrapper (a probe read of this shape is in scope and
 # must split on the kind now). "or-run" = a `prefetched or run(...)` fallback.
+# (R1-206 split the four app/ui/workbench.py sites -- base / detail / record / changes -- on the kind:
+# tests/test_workbench_failed_reads.py renders them.)
 _NON_PROBE_ALLOWLIST: dict[tuple[str, str], tuple[str, str]] = {
-    ("app/ui/workbench.py", "base"): ("render_action_center", "run"),
-    ("app/ui/workbench.py", "detail"): ("_render_data_product_detail", "run"),
-    ("app/ui/workbench.py", "record"): ("render_entity_360", "run"),
-    ("app/ui/workbench.py", "changes"): ("render_entity_360", "run"),
     ("app/ui/pages/alerts.py", "prec"): ("render", "run"),
     ("app/ui/pages/control_room.py", "res"): ("_freshness_board", "run_mart_first"),
     ("app/ui/pages/cost_parts/contract.py", "org_m"): ("_rate_card_reconciliation", "run"),

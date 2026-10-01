@@ -29,7 +29,10 @@ def test_action_queue_scopes_to_company_plus_account_level():
 def test_every_owner_queue_reader_passes_company():
     for rel in ("app/ui/pages/overview.py", "app/ui/workbench.py", "app/ui/pages/brief.py"):
         src = (_ROOT / rel).read_text(encoding="utf-8")
-        assert "action_queue(" in src
+        # R1-206: Action Center dropped its dead pre-V074 legacy read (a failed read rendered "V074 is
+        # pending"; REQUIRED_SCHEMA_FLOOR is past V074), so its one queue read is the company-scoped
+        # V074 action_center builder.
+        assert ("action_queue(" in src) or ("workbench_sql.action_center(company," in src), rel
         # no bare, unscoped action_queue(<n>) read remains on these pages.
         assert not re.search(r"action_queue\(\d+\)\s*[,)]", src), f"{rel}: unscoped action_queue read"
     # v4.597 (Option C): Proof dropped the dead "Apply V074" legacy fallback (REQUIRED_SCHEMA_FLOOR is
