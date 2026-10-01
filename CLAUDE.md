@@ -68,8 +68,13 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
    banner) + byte-concat of all migrations with `-- >>> name` banner
    sandwiches; 01/03/04/05 = generated comment-only banner + byte-copy of
    teardown/roles/backfill/validate; 00 = generated header + the hand-kept
-   CLONE list. `tests/test_rebuild_replay.py` re-renders every file and
-   byte-compares. Regenerate after ANY edit to a source; never hand-edit.
+   CLONE list; README = hand-kept runbook with a generated notes block (the
+   generator also rewrites its 02 file name, migration count and heading).
+   `tests/test_rebuild_replay.py` re-renders every file and byte-compares.
+   Regenerate after ANY edit to a source; never hand-edit a generated part.
+   The lock reads two hand-kept parts back from disk, so an edit there is
+   compared with itself: 00's CLONE list and the README outside its
+   generated notes block.
 7. **Task-graph ordering (V041 incident):** in migrations, task RESUMEs +
    SYSTEM$TASK_DEPENDENTS_ENABLE go BEFORE first-fill CALLs AND again at the
    end — a halted worksheet must never strand the tree suspended. Procs swap

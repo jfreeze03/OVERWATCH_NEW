@@ -3,8 +3,11 @@
 ``render_*`` build each file's text from the sources and the banners below, never from the
 generated file itself (tests/test_rebuild_replay.py compares them with the files on disk, so a hand
 edit of a generated file fails there; holistic #14: 03/04/05 used to read their banner back from
-the bundle file, so an edit there was compared with itself); ``main()`` writes them. The one
-exception is 00's CLONE list, which is maintained by hand below its generated header.
+the bundle file, so an edit there was compared with itself); ``main()`` writes them. Two parts are
+read back from disk and maintained by hand, so an edit there is compared with itself: 00's CLONE
+list, below its generated header, and the README outside its generated notes block
+(``render_readme`` rewrites only that block, the 02 file name, the migration count and the heading
+in the text it reads back).
 """
 
 from __future__ import annotations

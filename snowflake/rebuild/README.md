@@ -41,6 +41,9 @@ Around the files (docs/FULL_REBUILD.md has the statements):
 
 These files are GENERATED and equality-locked against their sources
 (tests/test_rebuild_bundle.py) — edit the sources, never this folder.
+Two parts are kept by hand and read back by the lock, so it cannot catch a
+bad edit there: 00's CLONE list and this README outside the notes block
+above.
 Regenerate the byte-locked files with `python outputs/gen_rebuild_bundle.py`
 after changing a migration, teardown, roles, backfill, or validation source.
 Factory reset instead (drop operator data too): see docs/FULL_REBUILD.md

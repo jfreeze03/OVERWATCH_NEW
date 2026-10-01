@@ -93,6 +93,22 @@ def test_a_hand_edit_to_any_copied_bundle_header_fails_the_lock(tmp_path):
         assert gen.render_copy(bundle, source, header) != (tmp_path / bundle).read_text(encoding="utf-8"), bundle
 
 
+def test_the_generator_docs_name_every_bundle_file_it_reads_back_from_disk():
+    """Holistic #14 follow-up: render_readme reads README.md back from the bundle folder, so a hand edit
+    outside its notes block is compared with itself, yet the generator docstring and CLAUDE.md law 6 named
+    00's CLONE list as the only hand-kept part ("never hand-edit"). Every bundle file a render_* reads
+    back must be named as hand-kept in both, so neither can claim more coverage than the lock gives."""
+    hand_kept = {"00_backup_operator_data.sql": "00's CLONE list",
+                 "README.md": "the README outside its generated notes block"}
+    self_reads = set(re.findall(r'\(REBUILD / "([^"]+)"\)\.read_text', read("outputs/gen_rebuild_bundle.py")))
+    assert self_reads == set(hand_kept), "a render_* reads a new bundle file back: name it as hand-kept here"
+    docstring = " ".join(_gen().__doc__.split())
+    law_6 = " ".join(_section(read("CLAUDE.md"), "6. **Rebuild bundle", "7. **Task-graph").split())
+    for name, phrase in hand_kept.items():
+        assert phrase in docstring, f"gen_rebuild_bundle.py docstring omits {name}: {phrase!r}"
+        assert phrase in law_6, f"CLAUDE.md law 6 omits {name}: {phrase!r}"
+
+
 def test_replay_grants_only_to_live_or_shimmed_roles():
     text = _bundle_02()
     roles_sql = read("snowflake/roles.sql")
