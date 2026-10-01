@@ -1026,11 +1026,11 @@ def test_the_allowlist_is_exact_per_site():
     wrapper, is not hidden by the (file, variable) pair."""
     # c09 R1-175 split admin.py's last un-split `res` site (_migrations_tab), so the allowlisted-site half of
     # this pair is now a stand-in module of the same shape rather than admin.py's source.
-    extra = ast.parse((
+    extra = ast.parse(
         "def _allowlisted_site():\n    res = run('SELECT 0', key='site')\n"
         "    if not res.ok:\n        empty_state('needs_setup', 'Not installed yet.')\n"
         "\n\ndef _mutant_admin():\n    res = run('SELECT 1', key='mutant')\n"
-        "    if not res.ok:\n        empty_state('needs_setup', 'Not installed yet.')\n"))
+        "    if not res.ok:\n        empty_state('needs_setup', 'Not installed yet.')\n")
     nodes = [n for v, n in _setup_on_failure_sites(extra) if v == "res"]
     assert len({id(n) for n in nodes}) == 2                   # the exact-one assertion above fails on this
     wrapped = ast.parse("def _optional(sql):\n    return run(sql, probe=True)\n"

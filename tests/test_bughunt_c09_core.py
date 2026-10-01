@@ -251,7 +251,9 @@ def test_refresh_drops_the_cached_session_off_sis(monkeypatch, sis, cleared):
     monkeypatch.setattr(st.cache_resource, "clear", lambda: calls.append(1))
     m._reconnect_off_sis()
     assert len(calls) == cleared
-    src = (m.__file__ and open(m.__file__, encoding="utf-8").read())
+    from tests._source import read
+
+    src = read("app/main.py")
     block = src.split('if st.button("Refresh data"', 1)[1].split("st.rerun()", 1)[0]
     assert "_reconnect_off_sis()" in block                              # the sidebar Refresh calls it
 
