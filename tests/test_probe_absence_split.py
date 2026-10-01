@@ -662,8 +662,6 @@ _NON_PROBE_ALLOWLIST: dict[tuple[str, str], tuple[str, str]] = {
     ("app/ui/pages/cost_parts/contract.py", "org_m"): ("_rate_card_reconciliation", "run"),
     ("app/ui/pages/cost_parts/contract.py", "model_m"): ("_rate_card_reconciliation", "run"),
     ("app/ui/pages/cost_parts/contract.py", "res"): ("_org_accounts_spend", "run"),
-    ("app/ui/pages/cost_parts/compare.py", "pat"): ("_compare_tab", "_get"),
-    ("app/ui/pages/cost_parts/optimize.py", "res"): ("_savings_tab", "run"),
     ("app/ui/pages/operations.py", "res"): ("_pipeline_data_checks", "run"),
     ("app/ui/pages/overview.py", "actions_res"): ("render", "or-run"),
     ("app/ui/pages/brief.py", "events"): ("render", "or-run"),

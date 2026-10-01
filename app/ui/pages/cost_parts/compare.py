@@ -22,6 +22,7 @@ import pandas as pd
 import streamlit as st
 
 from app.core.query import run, run_batch
+from app.core.result import is_setup_absence
 from app.data import mart27_sql
 from app.logic import compare as compare_logic
 from app.logic.formulas import (
@@ -58,13 +59,35 @@ def _side_value(df: pd.DataFrame, side: str, col: str) -> float:
     return safe_float(rows.iloc[0].get(col)) if not rows.empty else 0.0
 
 
-def _delta_chip(a: float, b: float, decimals: int = 1) -> str:
+def _has_side(df: pd.DataFrame, side: str) -> bool:
+    """True when the GROUP BY SIDE reader returned a row for ``side`` -- a window with no fact rows
+    returns NO row (compare_activity / compare_billed), which _side_value reads as 0.0. Callers use this
+    to tell 'B not loaded' from a real B of zero (R1-150)."""
+    return bool(len(df)) and "SIDE" in df.columns and bool((df["SIDE"].astype(str) == side).any())
+
+
+_NO_B = "no B-side data"
+_BOTH_ZERO = "0 on both sides"
+
+
+def _delta_chip(a: float, b: float, decimals: int = 1, *, b_present: bool = True) -> str:
     """pct_delta returns None when B is zero (its documented contract —
-    live crash 2026-07-11: an empty B side met an f-string format spec)."""
+    live crash 2026-07-11: an empty B side met an f-string format spec).
+
+    R1-150: a zero B is not always missing data. 'no B-side data' is said only when the B side has no
+    rows at all (b_present=False); a LOADED B of zero has no % change -- say what it is instead."""
     d = pct_delta(a, b)
-    if d is None:
-        return "no B-side data"
-    return f"{d:+.{decimals}f}% vs B"
+    if d is not None:
+        return f"{d:+.{decimals}f}% vs B"
+    if not b_present:
+        return _NO_B
+    return _BOTH_ZERO if safe_float(a) == 0 else "up from 0 vs B"
+
+
+def _chip_color(chip: str, polarity: str) -> str:
+    """A chip that is not a comparison (B not loaded, or zero on both sides) renders neutral: under the
+    fixed 'inverse' polarity a sign-less chip would otherwise draw a red up-arrow, i.e. a rise."""
+    return "off" if chip in (_NO_B, _BOTH_ZERO) else polarity
 
 
 def _coverage_warning(df: pd.DataFrame, pair: dict) -> str:
@@ -166,15 +189,19 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
         else:  # defensive fallback for an old-shape frame
             a_usd = float(wh.df["A_CREDITS"].map(safe_float).sum()) * rate
             b_usd = float(wh.df["B_CREDITS"].map(safe_float).sum()) * rate
+        # B is loaded when the coverage CTE saw a B-window day (B_DAYS, carried on every row)
+        _wh_b = (safe_float(wh.df["B_DAYS"].iloc[0]) > 0 if "B_DAYS" in wh.df.columns and len(wh.df)
+                 else b_usd > 0)
+        _wh_chip = _delta_chip(a_usd, b_usd, b_present=_wh_b)
         kpis.append({
             "label": f"Warehouse spend — {pair['label_a']}",
             "value": format_usd(a_usd),
-            "delta": _delta_chip(a_usd, b_usd),
+            "delta": _wh_chip,
             # Higher-is-worse: color by the metric's fixed polarity, not the A-vs-B
             # outcome. 'inverse' -> a negative delta (A cheaper than B) reads GREEN and a
             # positive delta reads RED. The old `else "normal"` painted a favorable
             # (negative) delta RED — every comparison read as bad (round-2 bug hunt).
-            "delta_color": "inverse",
+            "delta_color": _chip_color(_wh_chip, "inverse"),
             "help": "Exact warehouse metering x rate, company-scopable. "
                     f"B = {format_usd(b_usd)}.",
         })
@@ -182,18 +209,29 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
         aq, bq = _side_value(act.df, "A", "QUERIES"), _side_value(act.df, "B", "QUERIES")
         af, bf = _side_value(act.df, "A", "FAILS"), _side_value(act.df, "B", "FAILS")
         aqu, bqu = _side_value(act.df, "A", "QUEUED_SEC"), _side_value(act.df, "B", "QUEUED_SEC")
+        _act_b = _has_side(act.df, "B")
         kpis.append({"label": "Queries", "value": f"{aq:,.0f}",
-                     "delta": _delta_chip(aq, bq), "delta_color": "off",
+                     "delta": _delta_chip(aq, bq, b_present=_act_b), "delta_color": "off",
                      "help": f"B = {bq:,.0f}. FACT_QUERY_HOURLY, company-scoped."})
-        a_rate = (af / aq * 100) if aq else 0.0
-        b_rate = (bf / bq * 100) if bq else 0.0
-        kpis.append({"label": "Fail rate", "value": f"{a_rate:.2f}%",
-                     "delta": f"{a_rate - b_rate:+.2f} pts vs B",
-                     "delta_color": "inverse",   # higher-is-worse: A better than B -> green
-                     "help": f"B = {b_rate:.2f}% ({bf:,.0f} of {bq:,.0f})."})
+        # R1-150 (house law 8): a rate with no query denominator is None, never a fabricated 0.00% --
+        # the old 0.0 fallback drew a red "+2.50 pts vs B" against a B side with no queries at all
+        # (beside a Queries card saying 'no B-side data'), and an empty A read '0.00%' in green.
+        a_rate = (af / aq * 100) if aq else None
+        b_rate = (bf / bq * 100) if bq else None
+        if a_rate is not None and b_rate is not None:
+            _fr_delta, _fr_color = f"{a_rate - b_rate:+.2f} pts vs B", "inverse"   # higher-is-worse
+        elif b_rate is None:
+            _fr_delta, _fr_color = ("no B-side queries" if _act_b else "no B-side data"), "off"
+        else:
+            _fr_delta, _fr_color = "no A-side queries", "off"
+        kpis.append({"label": "Fail rate", "value": f"{a_rate:.2f}%" if a_rate is not None else "—",
+                     "delta": _fr_delta, "delta_color": _fr_color,
+                     "help": (f"B = {b_rate:.2f}% ({bf:,.0f} of {bq:,.0f})." if b_rate is not None
+                              else "B = — (no queries in the B window).")})
+        _q_chip = _delta_chip(aqu, bqu, b_present=_act_b)
         kpis.append({"label": "Queued", "value": humanize_duration(aqu, "s"),
-                     "delta": _delta_chip(aqu, bqu),
-                     "delta_color": "inverse",   # higher-is-worse
+                     "delta": _q_chip,
+                     "delta_color": _chip_color(_q_chip, "inverse"),   # higher-is-worse
                      "help": f"B = {humanize_duration(bqu, 's')}."})
     if bill.usable():
         # C1: price AI/Cortex credits at the AI rate. compare_billed carries the
@@ -206,11 +244,12 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
         else:
             ab = _side_value(bill.df, "A", "CREDITS_BILLED") * rate
             bb = _side_value(bill.df, "B", "CREDITS_BILLED") * rate
+        _bill_chip = _delta_chip(ab, bb, b_present=_has_side(bill.df, "B"))
         kpis.append({
             "label": "Account billed",
             "value": format_usd(ab),
-            "delta": _delta_chip(ab, bb),
-            "delta_color": "inverse",   # higher-is-worse: A billed less than B -> green
+            "delta": _bill_chip,
+            "delta_color": _chip_color(_bill_chip, "inverse"),   # higher-is-worse: A billed less than B -> green
             "help": "Every service, account-wide — metering-daily has no "
                     "company grain, so this ignores the company filter. AI/Cortex "
                     f"credits price at the AI rate. B = {format_usd(bb)}.",
@@ -219,6 +258,17 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
         kpi_row(kpis)
     elif all(r.ok for r in (wh, act, bill)):
         empty_state("no_data_yet", "No fact rows in either window yet — the hourly loaders fill these.")
+    # R1-152: a failed activity / billed read used to drop its KPIs (and the Volume shape table) with no
+    # message -- a shorter strip that read as complete. Name what is missing and why (the warehouse
+    # read's failure is shown by the movers guard below).
+    for _r, _src, _lost in (
+            (act, "Query activity (FACT_QUERY_HOURLY)",
+             "the Queries, Fail rate and Queued KPIs and the Volume shape table"),
+            (bill, "Account billed credits (FACT_METERING_DAILY)", "the Account billed KPI")):
+        if not _r.ok and is_setup_absence(_r.error_kind):
+            empty_state("needs_setup", f"{_src} isn't readable by this app here. Not shown: {_lost}.")
+        elif not _r.ok:
+            empty_state("unavailable", f"{_src} could not be read. Missing here: {_lost}.", detail=_r.error)
 
     # ---- warehouse movers ---------------------------------------------------
     st.markdown("**Warehouse movers — who moved the bill**")
@@ -285,10 +335,13 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
         _pat_empty = "No repeated pattern crossed the 0.01-credit floor in either window."
         _pat_note = ("Measured QUERY_ATTRIBUTION_HISTORY credits per parameterized hash — "
                      "new-in-A patterns show B = $0.")
-    if not _sel_wh and not pat.ok:
+    # R1-151: needs_setup ONLY for a true absence of the mart (is_setup_absence). It used to fire for
+    # ANY failed read -- a timeout told an admin to apply V037, installed since v4.37 -- and hid the
+    # error; every other failure now falls through to guard(), which renders 'unavailable' + detail.
+    if not _sel_wh and not pat.ok and is_setup_absence(pat.error_kind):
         empty_state("needs_setup",
-                    "Pattern movers need migration V037 (MART_PATTERN_COST_DAILY v2) — "
-                    "an admin can apply the pending schema update on Admin → Migrations & freshness.")
+                    "Pattern movers read MART_PATTERN_COST_DAILY, which isn't readable by this app here — "
+                    "an admin can see what's pending on Admin → Migrations & freshness.")
     # review fix: verified-clean green only for the LIVE per-warehouse scan;
     # the account-wide mart leg's empty also covers installed-but-not-yet-
     # loaded windows, which must not read as an all-clear.
@@ -308,6 +361,12 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
         result_caption(_pat, note=_pat_note)
 
     # ---- volume shape ---------------------------------------------------------
+    # R1-152: an ok-but-empty activity read says so under the heading (it used to drop the section with
+    # no word); a FAILED read is named once, beside the KPI strip above, so no second red block here.
+    if act.ok and act.empty:
+        st.markdown("**Volume shape**")
+        empty_state("no_data_yet", "No query activity in either window yet — the hourly loaders fill "
+                                   "FACT_QUERY_HOURLY.")
     if act.usable():
         st.markdown("**Volume shape**")
         # A/B is a long-format, mixed-unit column (counts, a duration, GB), so the shared machinery
@@ -323,13 +382,16 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
                 return humanize_gb(v)
             return f"{v:,.0f}"
         rows = []
+        # R1-150: a side with no fact rows is "—", not a fabricated 0 (and no Δ% against it)
+        _a_has, _b_has = _has_side(act.df, "A"), _has_side(act.df, "B")
         for metric, col, kind in (("Queries", "QUERIES", "count"), ("Fails", "FAILS", "count"),
                                   ("Queued", "QUEUED_SEC", "dur_s"), ("Remote spill", "SPILL_REMOTE_GB", "gb")):
             a_v = _side_value(act.df, "A", col)
             b_v = _side_value(act.df, "B", col)
-            d = pct_delta(a_v, b_v)          # None when B is zero — never format it
-            rows.append({"METRIC": metric, "A": _cmp_cell(a_v, kind), "B": _cmp_cell(b_v, kind),
-                         "DELTA_PCT": d})
+            # None when B is zero — never format it
+            d = pct_delta(a_v, b_v) if _a_has and _b_has else None
+            rows.append({"METRIC": metric, "A": _cmp_cell(a_v, kind) if _a_has else "—",
+                         "B": _cmp_cell(b_v, kind) if _b_has else "—", "DELTA_PCT": d})
         styled_table(pd.DataFrame(rows), height=180, column_config={
             "DELTA_PCT": st.column_config.NumberColumn("Δ %", format="%+.1f%%")})  # r-ux: signed (rec33)
         result_caption(act)
