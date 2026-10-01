@@ -200,10 +200,12 @@ def test_the_new_canaries_compile_the_columns_that_had_none():
 # each UNION branch at the same position). A correlated reference (NOT EXISTS (... WHERE d.X = e.X)) resolves
 # outward through subquery / set-operation / lateral scopes, never across a CTE or derived-table boundary. A
 # derived projection (MIN(DAY) AS FIRST_DAY) and a FLATTEN output (f.VALUE) add nothing beyond their own inputs,
-# and an unqualified name that is a select alias of its scope (GROUP BY USAGE_DATE) is the alias, not a column.
-# A column the reader cannot attribute (an unqualified name beside several sources that may hold it, a table
-# function's output) is reported, never counted: the canary side stays a lower bound, so a twin never passes on
-# a guess about what a canary compiles, and a twin must have none (qualify it: house law 8).
+# and an unqualified name that is a select alias of its scope (GROUP BY USAGE_DATE) is the alias, not a column,
+# when no source can hold that name. A JOIN ... USING (K) key counts on both sides (recheck #10).
+# A column the reader cannot attribute (an unqualified name beside several sources that may hold it, a select
+# alias a source may also hold, a USING key with no single side, a NATURAL JOIN's keys, a table function's
+# output) is reported, never counted: the canary side stays a lower bound, so a twin never passes on a guess
+# about what a canary compiles, and a twin must have none (qualify it: house law 8).
 
 _OPAQUE = frozenset({ScopeType.ROOT, ScopeType.CTE, ScopeType.DERIVED_TABLE})
 _FLATTEN_COLUMNS = frozenset({"SEQ", "KEY", "PATH", "INDEX", "VALUE", "THIS"})    # fixed by Snowflake
@@ -310,14 +312,57 @@ def _is_alias_reference(scope: Scope, col: exp.Column) -> bool:
     return False
 
 
+def _may_hold(scope: Scope, name: str) -> list[str]:
+    """The aliases of ``scope``'s FROM sources that have (or may have) the column ``name``."""
+    return [alias for alias, (_node, source) in scope.selected_sources.items() if _projects(source, name) is not False]
+
+
+def _join_keys(scope: Scope) -> tuple[set[tuple[str, str]], set[str]]:
+    """recheck #10: JOIN ... USING (K) compiles K on both sides, but sqlglot keeps K as an identifier, not a column,
+    so ``scope.columns`` never holds it. K counts toward the join's own source and the one earlier FROM source that
+    has (or may have) it; a side the reader cannot attribute is reported, and so is a NATURAL JOIN (its keys are
+    whatever both sides share, which the SQL does not say)."""
+    select = scope.expression
+    out: set[tuple[str, str]] = set()
+    unattributed: set[str] = set()
+    if not isinstance(select, exp.Select):
+        return out, unattributed
+    sources = {alias.upper(): source for alias, (_node, source) in scope.selected_sources.items()}
+    from_ = select.args.get("from_") or select.args.get("from")
+    earlier = [from_.this.alias_or_name] if isinstance(from_, exp.From) else []
+    for join in select.args.get("joins") or []:
+        right = join.this.alias_or_name
+        if str(join.args.get("method") or "").upper() == "NATURAL":
+            unattributed.add(f"NATURAL JOIN {right}")
+        for key in join.args.get("using") or []:
+            name = key.name.upper()
+            left = [a for a in earlier if _projects(sources.get(a.upper()), name) is not False]
+            for side, where in ((right, "on"), (left[0] if len(left) == 1 else None, "before")):
+                pairs = _resolve(scope, exp.column(name, table=side)) if side is not None else None
+                if pairs is None:
+                    unattributed.add(f"USING ({key.name}) {where} {right}")
+                else:
+                    out |= pairs
+        earlier.append(right)
+    return out, unattributed
+
+
 def _read_columns(sql: str) -> tuple[set[tuple[str, str]], set[str]]:
     """(the (table, column) pairs ``sql`` compiles, the column references the reader cannot attribute)."""
     out: set[tuple[str, str]] = set()
     unattributed: set[str] = set()
     for scope in traverse_scope(sqlglot.parse_one(sql, read="snowflake")):
+        keys, unkeyed = _join_keys(scope)
+        out |= keys
+        unattributed |= unkeyed
         for col in scope.columns:
-            if (isinstance(col.this, exp.Star) or col.find_ancestor(exp.Select) is not scope.expression
-                    or _is_alias_reference(scope, col)):
+            if isinstance(col.this, exp.Star) or col.find_ancestor(exp.Select) is not scope.expression:
+                continue
+            if _is_alias_reference(scope, col):
+                # recheck #10: the alias only when no source can hold the name; Snowflake may bind a same-named
+                # source column first, which a reader that cannot see the table's columns cannot rule out
+                if _may_hold(scope, col.name.upper()):
+                    unattributed.add(col.sql(dialect="snowflake"))
                 continue
             pairs = _resolve(scope, col)
             if pairs is None:
@@ -424,7 +469,8 @@ def test_twins_read_only_columns_a_canary_compiles(name):
         cols, unattributed = _read_columns(sql)
         assert cols, f"{name} rendered SQL that reads no attributable column"
         assert not unattributed, (f"{name}: the twin check cannot attribute {sorted(unattributed)} to a table "
-                                  "(qualify them, house law 8), so it cannot vouch for them")
+                                  "(qualify them, house law 8; join ON qualified keys, not USING / NATURAL; "
+                                  "rename a select alias a source may also hold), so it cannot vouch for them")
         reads |= cols
     missing = sorted(reads - _canary_columns())
     assert not missing, f"{name} is not a twin: no registered canary compiles {missing}"
@@ -466,6 +512,54 @@ FROM s, LATERAL FLATTEN(input => ARRAY_CONSTRUCT(1)) f, DBA_MAINT_DB.OVERWATCH.I
     assert unattributed == {"UNKNOWN_COL"}
 
 
+def test_a_join_using_key_counts_on_both_sides_or_is_reported():
+    """recheck #10 (v4.608): sqlglot keeps a USING key as an identifier, not a column, so the reader never saw it:
+    a twin's JOIN ... USING (K) compiled K on two tables with no canary behind it and still passed. K counts toward
+    the join's own source and the one earlier source that has (or may have) it; a side the reader cannot
+    attribute, and a NATURAL JOIN's implicit keys, are reported."""
+    probe = ("SELECT e.EVENT_ID, e.RULE_ID FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e "
+             "JOIN DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT a USING (NOT_A_REAL_COLUMN)")
+    cols, unattributed = _read_columns(probe)
+    assert cols == {("OVERWATCH.ALERT_EVENTS", "EVENT_ID"), ("OVERWATCH.ALERT_EVENTS", "RULE_ID"),
+                    ("OVERWATCH.ALERT_EVENTS", "NOT_A_REAL_COLUMN"), ("OVERWATCH.ALERT_AUDIT", "NOT_A_REAL_COLUMN")}
+    assert not unattributed
+    assert ("OVERWATCH.ALERT_AUDIT", "NOT_A_REAL_COLUMN") not in _canary_columns()     # so such a twin FAILs
+    sql = """
+WITH c AS (SELECT RULE_ID, COUNT(*) AS N FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG GROUP BY RULE_ID)
+SELECT c.N, i.INCIDENT_ID
+FROM c
+JOIN DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e USING (RULE_ID)
+JOIN DBA_MAINT_DB.OVERWATCH.INCIDENTS i USING (SEVERITY)
+JOIN DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT a USING (NOTE)
+JOIN (SELECT 1 AS Z) q USING (Y)
+NATURAL JOIN DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES r
+"""
+    cols, unattributed = _read_columns(sql)
+    assert cols == {
+        ("OVERWATCH.ALERT_CONFIG", "RULE_ID"), ("OVERWATCH.ALERT_EVENTS", "RULE_ID"),   # the CTE traces to its table
+        ("OVERWATCH.ALERT_EVENTS", "SEVERITY"), ("OVERWATCH.INCIDENTS", "SEVERITY"),    # c cannot hold SEVERITY
+        ("OVERWATCH.ALERT_AUDIT", "NOTE"), ("OVERWATCH.INCIDENTS", "INCIDENT_ID"),
+    }
+    assert unattributed == {"USING (NOTE) before a",        # e and i may both hold NOTE
+                            "USING (Y) on q", "USING (Y) before q",
+                            "NATURAL JOIN r"}
+
+
+def test_a_select_alias_a_source_may_also_hold_is_reported():
+    """recheck #10 (v4.608): an unqualified name matching a derived select alias was always taken as the alias and
+    dropped, but Snowflake can bind a same-named source column first, so beside a source that may hold the name it
+    is reported, never silently skipped. Beside sources that cannot hold it, it is still the alias."""
+    sql = ("SELECT UPPER(e.SEVERITY) AS NOT_A_REAL_COLUMN FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e "
+           "WHERE NOT_A_REAL_COLUMN = 'x'")
+    assert _read_columns(sql) == ({("OVERWATCH.ALERT_EVENTS", "SEVERITY")}, {"NOT_A_REAL_COLUMN"})
+    sql = """
+WITH c AS (SELECT RULE_ID, SEVERITY FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS)
+SELECT UPPER(c.SEVERITY) AS SEV, COUNT(c.RULE_ID) AS N FROM c GROUP BY SEV ORDER BY N
+"""
+    assert _read_columns(sql) == ({("OVERWATCH.ALERT_EVENTS", "SEVERITY"), ("OVERWATCH.ALERT_EVENTS", "RULE_ID")},
+                                  set())
+
+
 # ============================================== #7: RUNBOOK names every probe reader without a canary ====
 #: The inline (non-builder) probe=True statements, by their opening text, and how RUNBOOK names each.
 _INLINE_PROBES = {
@@ -476,77 +570,152 @@ _INLINE_PROBES = {
 _UNTRACED = {("app/ui/pages/admin.py", "_sql")}       # the canary runner itself (each CANARIES statement)
 
 
-def _probe_reads(source: str, *, probe: bool = True) -> tuple[set[str], set[str], set[str]]:
-    """(builders, inline SQL, untraced names) behind every ``run(..., probe=True)`` in ``source`` (with
-    ``probe=False``: every plain ``run()``, which logs a failure to APP_ERROR_LOG). A builder is a ``*_sql``
-    module function: called inline, assigned to a name in the enclosing function (closures included; a tuple's
-    first element; either arm of a conditional), or passed to a same-module wrapper that forwards its parameter
-    to such a read (security_center._optional_result)."""
+_Reads = tuple[set[str], set[str], set[str]]     # (builders, inline SQL, untraced names)
+
+
+def _wrapper_params(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[list[str], bool]:
+    """A function's positional parameters as its callers pass them, and whether it is a method (self / cls bound,
+    so a ``x.method(...)`` call's first argument is its second parameter)."""
+    params = [a.arg for a in fn.args.posonlyargs + fn.args.args]
+    is_method = bool(params) and params[0] in ("self", "cls")
+    return (params[1:] if is_method else params), is_method
+
+
+def _probe_scan(source: str, *, probe: bool = True) -> tuple[set[str], set[str], set[str], dict[str, bool]]:
+    """(builders, inline SQL, untraced names, {probe wrapper: is a method}) behind every ``run(..., probe=True)``
+    in ``source`` (with ``probe=False``: every plain ``run()``, which logs a failure to APP_ERROR_LOG). A builder
+    is a ``*_sql`` module function: called inline, assigned to a name in the enclosing function (closures
+    included; a tuple's first element; either arm of a conditional), or passed to a same-module wrapper that
+    forwards its parameter to such a read (security_center._optional_result; a method wrapper too).
+
+    recheck #11: no read vanishes. A conditional's arm that is no builder and no literal is untraced (an empty
+    string or None runs nothing), a literal arm is inline SQL, and a wrapper this module never calls is untraced
+    (_probe_reads_in reports a call from another module at the caller)."""
     tree = ast.parse(source)
     funcs = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
 
-    def builders_of(node: ast.AST | None) -> set[str]:
+    def merge(into: _Reads, found: _Reads) -> None:
+        for acc, part in zip(into, found, strict=True):
+            acc |= part
+
+    def sql_of(node: ast.AST | None) -> _Reads | None:
+        """What one statement expression runs, or None when it holds no builder and no literal (a name, another
+        call: the caller follows or reports it)."""
         if isinstance(node, ast.IfExp):
-            return builders_of(node.body) | builders_of(node.orelse)
+            arms = [(arm, sql_of(arm)) for arm in (node.body, node.orelse)]
+            if all(found is None for _arm, found in arms):
+                return None
+            reads: _Reads = (set(), set(), set())
+            for arm, found in arms:
+                merge(reads, found if found is not None else (set(), set(), {ast.unparse(arm)}))
+            return reads
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name) and node.func.value.id.endswith("_sql")):
-            return {f"{node.func.value.id}.{node.func.attr}"}
-        return set()
+            return {f"{node.func.value.id}.{node.func.attr}"}, set(), set()
+        if isinstance(node, ast.Constant) and (node.value is None or node.value == ""):
+            return set(), set(), set()                           # runs nothing
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return set(), {node.value.strip()}, set()
+        if isinstance(node, ast.JoinedStr):
+            text = "".join(v.value if isinstance(v, ast.Constant) else "{x}" for v in node.values)
+            return set(), {text.strip()}, set()
+        return None
 
-    def names_in(fn: ast.AST) -> dict[str, set[str]]:
-        names: dict[str, set[str]] = {}
+    def names_in(fn: ast.AST) -> dict[str, _Reads]:
+        names: dict[str, _Reads] = {}
         for n in ast.walk(fn):
-            if isinstance(n, (ast.Assign, ast.AnnAssign)) and (found := builders_of(n.value)):
+            if (isinstance(n, (ast.Assign, ast.AnnAssign)) and (found := sql_of(n.value)) is not None
+                    and (found[0] or found[1])):
                 for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
                     t = t.elts[0] if isinstance(t, (ast.Tuple, ast.List)) and t.elts else t
                     if isinstance(t, ast.Name):
-                        names.setdefault(t.id, set()).update(found)
+                        merge(names.setdefault(t.id, (set(), set(), set())), found)
         return names
 
     def enclosing(node: ast.AST) -> list:
         return sorted((f for f in funcs if f.lineno <= node.lineno <= (f.end_lineno or f.lineno)),
                       key=lambda f: f.lineno)                    # outermost first
 
-    builders: set[str] = set()
-    inline: set[str] = set()
-    untraced: set[str] = set()
-    wrappers: dict[str, tuple[int, str]] = {}
+    def follow(node: ast.AST | None, scopes: list) -> _Reads | None:
+        if (found := sql_of(node)) is not None:
+            return found
+        named = [r for f in scopes if (r := names_in(f).get(node.id)) is not None] \
+            if isinstance(node, ast.Name) else []
+        if not named:
+            return None
+        reads: _Reads = (set(), set(), set())
+        for r in named:
+            merge(reads, r)
+        return reads
+
+    reads: _Reads = (set(), set(), set())
+    wrappers: dict[str, tuple[int, str, bool]] = {}
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", "")) == "run"
                 and node.args and (any(k.arg == "probe" and isinstance(k.value, ast.Constant)
                                        and k.value.value is True for k in node.keywords) is probe)):
             continue
         arg, scopes = node.args[0], enclosing(node)
-        if found := builders_of(arg):
-            builders |= found
-        elif isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-            inline.add(arg.value.strip())
-        elif isinstance(arg, ast.JoinedStr):
-            inline.add("".join(v.value if isinstance(v, ast.Constant) else "{x}" for v in arg.values).strip())
-        elif isinstance(arg, ast.Name):
-            found = set().union(*(names_in(f).get(arg.id, set()) for f in scopes)) if scopes else set()
-            params = [a.arg for a in scopes[-1].args.args] if scopes else []
-            if found:
-                builders |= found
-            elif arg.id in params:
-                wrappers[scopes[-1].name] = (params.index(arg.id), arg.id)
-            else:
-                untraced.add(arg.id)
+        if (found := follow(arg, scopes)) is not None:
+            merge(reads, found)
+            continue
+        params, is_method = _wrapper_params(scopes[-1]) if scopes else ([], False)
+        if isinstance(arg, ast.Name) and arg.id in params:
+            wrappers[scopes[-1].name] = (params.index(arg.id), arg.id, is_method)
         else:
-            untraced.add(ast.unparse(arg))
+            reads[2].add(ast.unparse(arg))
+    called: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in wrappers:
-            idx, param = wrappers[node.func.id]
-            passed = node.args[idx] if idx < len(node.args) else next(
-                (k.value for k in node.keywords if k.arg == param), None)
-            scopes = enclosing(node)
-            found = builders_of(passed) or (
-                set().union(*(names_in(f).get(passed.id, set()) for f in scopes))
-                if isinstance(passed, ast.Name) and scopes else set())
-            if found:
-                builders |= found
-            else:
-                untraced.add(f"{node.func.id}({ast.unparse(passed) if passed is not None else '?'})")
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name, via_attribute = ((func.id, False) if isinstance(func, ast.Name) else
+                               (func.attr, True) if isinstance(func, ast.Attribute) else ("", False))
+        if name not in wrappers or wrappers[name][2] is not via_attribute:
+            continue
+        idx, param, _is_method = wrappers[name]
+        called.add(name)
+        passed = node.args[idx] if idx < len(node.args) else next(
+            (k.value for k in node.keywords if k.arg == param), None)
+        if (found := follow(passed, enclosing(node))) is not None:
+            merge(reads, found)
+        else:
+            reads[2].add(f"{name}({ast.unparse(passed) if passed is not None else '?'})")
+    reads[2].update(f"{name}(<no caller in this module>)" for name in set(wrappers) - called)
+    return *reads, {name: is_method for name, (_i, _p, is_method) in wrappers.items()}
+
+
+def _probe_reads(source: str, *, probe: bool = True) -> _Reads:
+    """(builders, inline SQL, untraced names) behind the probe reads in one module (see _probe_scan)."""
+    builders, inline, untraced, _wrappers = _probe_scan(source, probe=probe)
+    return builders, inline, untraced
+
+
+def _probe_reads_in(files: dict[str, str], *, probe: bool = True) -> tuple[set[str], set[str], set[tuple[str, str]]]:
+    """_probe_reads over several modules (``{path: source}``), untraced names keyed by file. A wrapper is followed
+    inside its own module only, so a call to it from another module (by its imported name, unless that module
+    defines its own; or through any attribute) is untraced at the caller, never dropped (recheck #11)."""
+    builders: set[str] = set()
+    inline: set[str] = set()
+    untraced: set[tuple[str, str]] = set()
+    wrappers: dict[str, dict[str, bool]] = {}
+    for rel, src in files.items():
+        b, i, u, wrappers[rel] = _probe_scan(src, probe=probe)
+        builders |= b
+        inline |= i
+        untraced |= {(rel, name) for name in u}
+    homes = {name: home for home, found in wrappers.items() for name in found}
+    if not homes:
+        return builders, inline, untraced
+    for rel, src in files.items():
+        tree = ast.parse(src)
+        own = {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        for node in ast.walk(tree):
+            func = node.func if isinstance(node, ast.Call) else None
+            name = (func.id if isinstance(func, ast.Name) and func.id not in own else
+                    func.attr if isinstance(func, ast.Attribute) else "")
+            if name in homes and homes[name] != rel:
+                untraced.add((rel, f"{name}(<a probe wrapper in {homes[name]}>)"))
     return builders, inline, untraced
 
 
@@ -593,17 +762,62 @@ def test_the_probe_read_scan_follows_names_and_wrappers():
     assert _probe_reads(src, probe=False)[0] == {"ops_sql.g"}
 
 
+def test_the_probe_read_scan_never_drops_a_read():
+    """recheck #11 (v4.608): a probe wrapper with no caller in its module, a method wrapper, and the non-builder
+    arm of a conditional each vanished from the scan (no builder, no inline SQL, nothing untraced), so a probe
+    reader routed through them was missing from RUNBOOK with the test green. Each now lands somewhere: an inline
+    arm is matched against _INLINE_PROBES, anything else is untraced; an empty string or None runs nothing."""
+    import textwrap
+    src = textwrap.dedent("""
+        def optional_read(sql, key):              # its callers live in another module
+            return run(sql, key=key, probe=True)
+
+        def mixed(flag, wh):
+            sql = mart_sql.a(1) if flag else f"SHOW TASKS IN {wh}"
+            return run(sql, probe=True)
+
+        def mixed_direct(flag, other):
+            return run(cost_sql.b(1) if flag else other, probe=True)
+
+        def guarded(flag):
+            sql = mart_sql.c(1) if flag else ""
+            if sql:
+                return run(sql, probe=True)
+
+        class Reader:
+            def read(self, sql):
+                return run(sql, probe=True)
+
+            def go(self):
+                return self.read(mart_sql.d(1) if self else None)
+        """)
+    assert _probe_reads(src) == ({"mart_sql.a", "cost_sql.b", "mart_sql.c", "mart_sql.d"}, {"SHOW TASKS IN {x}"},
+                                 {"optional_read(<no caller in this module>)", "other"})
+
+
+def test_a_probe_wrapper_called_from_another_module_is_untraced():
+    """recheck #11 (v4.608): wrappers are followed inside their own module only, so a call from another module
+    (imported by name, or through the module) is reported at the caller, never dropped. A module's own function
+    of the same name is its own."""
+    wrapper = "def _optional(sql, key):\n    return run(sql, key=key, probe=True)\n\n" \
+              "def here():\n    return _optional(mart_sql.a(1), 'k')\n"
+    files = {
+        "app/ui/a.py": wrapper,
+        "app/ui/b.py": "from app.ui.a import _optional\n\ndef there():\n    return _optional(mart_sql.b(1), 'k')\n",
+        "app/ui/c.py": "from app.ui import a\n\ndef there():\n    return a._optional(cost_sql.c(1), 'k')\n",
+        "app/ui/d.py": "def _optional(x):\n    return x\n\ndef mine():\n    return _optional(1)\n",
+    }
+    builders, inline, untraced = _probe_reads_in(files)
+    assert builders == {"mart_sql.a"} and not inline
+    assert untraced == {("app/ui/b.py", "_optional(<a probe wrapper in app/ui/a.py>)"),
+                        ("app/ui/c.py", "_optional(<a probe wrapper in app/ui/a.py>)")}
+
+
 @functools.cache
 def _app_probe_reads(probe: bool = True) -> tuple[frozenset[str], frozenset[str], frozenset[tuple[str, str]]]:
-    builders: set[str] = set()
-    inline: set[str] = set()
-    untraced: set[tuple[str, str]] = set()
-    for path in sorted((_ROOT / "app").rglob("*.py")):
-        b, i, u = _probe_reads(path.read_text(encoding="utf-8"), probe=probe)
-        rel = path.relative_to(_ROOT).as_posix()
-        builders |= b
-        inline |= i
-        untraced |= {(rel, name) for name in u}
+    files = {path.relative_to(_ROOT).as_posix(): path.read_text(encoding="utf-8")
+             for path in sorted((_ROOT / "app").rglob("*.py"))}
+    builders, inline, untraced = _probe_reads_in(files, probe=probe)
     return frozenset(builders), frozenset(inline), frozenset(untraced)
 
 
@@ -689,3 +903,30 @@ def test_glossary_canary_row_names_every_v4608_security_canary():
         assert name in registered, name
         assert name in row, name
     assert "tests/test_security_e1_fixes.py" in row
+
+
+def test_glossary_canary_row_v4608_counts_match_the_names_it_lists():
+    """recheck #12 (v4.608): the row said '14 cost / mart entries' and left out
+    mart.fact_query_window_summary.read_clock (Overview's score read-clock shape), one of the 35 statements v4.608
+    added. Each v4.608 clause's stated count must equal the registered canaries it names (a full name, or the bare
+    builder after a ' / ': 'cost.org_all_in_window_usd / org_usage_in_currency')."""
+    row = next(ln for ln in (_ROOT / "FEATURE_GLOSSARY.md").read_text(encoding="utf-8").splitlines()
+               if ln.startswith("| **N registered statements"))
+    registered = {name for name, _ in canary.CANARIES}
+    clauses = {
+        "ops": r"v4\.608 adds (\d+) Operations / ETL entries: (.*?); v4\.608 also adds",
+        "cost / mart": r"v4\.608 also adds (\d+) cost / mart entries: (.*?); v4\.608 also adds",
+        "security": r"v4\.608 also adds (\d+) security entries(.*?)never GAPs\.",
+    }
+    named_by: dict[str, set[str]] = {}
+    for label, pattern in clauses.items():
+        m = re.search(pattern, row)
+        assert m, f"the canary row's v4.608 {label} clause is missing"
+        text = m.group(2)
+        named = {n for n in registered
+                 if re.search(rf"(?:(?<![\w.]){re.escape(n)}|(?<=[\w.] / ){re.escape(n.split('.', 1)[1])})(?![\w.])",
+                              text)}
+        assert len(named) == int(m.group(1)), f"{label}: the row says {m.group(1)}, names {sorted(named)}"
+        named_by[label] = named
+    assert "mart.fact_query_window_summary.read_clock" in named_by["cost / mart"]
+    assert sum(len(v) for v in named_by.values()) == len(set().union(*named_by.values()))   # no name counted twice
