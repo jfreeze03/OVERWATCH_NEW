@@ -180,7 +180,7 @@ def test_optimize_passes_the_bounds_to_the_idle_prompt():
         "app/ui/pages/cost_parts/optimize.py")
 
 
-def _idle_ai_panel_key(today: date, preset: str) -> str:
+def _idle_ai_panel_key(today: date, preset: object) -> str:
     """The idle AI panel's session key as optimize.py builds it, for ``preset`` viewed on ``today``."""
     import functools
 
@@ -250,6 +250,46 @@ def test_add_to_case_hands_raw_cells_with_nulls_as_none():
     body = comp.split("def add_to_case_button", 1)[1].split("\ndef ", 1)[0]
     assert "head.astype(str)" not in body                 # stringified NULLs before case_file saw them
     assert "preview_rows=head.astype(object).where(head.notna(), None).to_numpy().tolist()" in body
+
+
+class _CaseClickSt:
+    """``st`` stand-in for add_to_case_button: the button is clicked, session_state is a dict."""
+
+    def __init__(self):
+        self.session_state: dict = {}
+
+    def button(self, *_a, **_k):
+        return True
+
+    def toast(self, *_a, **_k):
+        return None
+
+
+def test_add_to_case_exports_null_cells_as_the_dash_end_to_end(monkeypatch):
+    # R1-105 and c04's R1-220 are one fix: components hands NULLs over as None and case_file renders
+    # them NULL_CELL. Lock the merged output end to end (a check that only bans 'nan' / 'NaT' text
+    # passes for a blank cell too).
+    import app.core.state as state
+    from app.core.result import QueryResult
+    from app.logic import case_file
+    from app.ui import components
+    fake = _CaseClickSt()
+    monkeypatch.setattr(components, "st", fake)
+    monkeypatch.setattr(state, "filters", lambda: {"company": "ALFA", "window_label": "30d", "days": 30})
+    df = pd.DataFrame({
+        "USER_NAME": ["SVC_A", "SVC_B"],
+        "FAILURES": pd.array([12, None], dtype="Int64"),
+        "FIRST_SUCCESS_AFTER": pd.to_datetime([None, "2026-09-30 10:05:00"]),
+        "BREAKTHROUGH_MIN": [float("nan"), 4.5],
+        "LAST_ERROR": [None, "locked"],
+    })
+    assert components.add_to_case_button("Security", QueryResult(df=df, ok=True, source="t"),
+                                         summary="Failed-login bursts", key="case_fl") is True
+    md = case_file.assemble_markdown(fake.session_state[case_file.CASE_STATE_KEY], generated="g")
+    assert "| SVC_A | 12 | — | — | — |" in md
+    assert "| SVC_B | — | 2026-09-30 10:05:00 | 4.5 | locked |" in md
+    for token in ("nan", "NaT", "None", "<NA>"):
+        assert token not in md, token
 
 
 # ---- R1-112: no idle evidence is not 0% idle in the adaptive-compute candidacy -----------------
