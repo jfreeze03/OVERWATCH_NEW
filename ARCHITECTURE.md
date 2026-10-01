@@ -22,11 +22,12 @@ helpers `app.core.sqlsafe` and `app.core.result`, with one exception:
 `data/prefs_sql.py` (at module level) and `mart_sql`'s last-visit read
 (lazily) import `app.core.identity` for the viewer-identity SQL, and that
 module imports Streamlit. Both layers are tested without a Snowflake
-connection. CI installs Streamlit (`requirements-dev.txt`, for the AppTest page
-smokes and the floor-compat leg), so the CI environment does not enforce this
-rule: code review does, plus import-purity tests on a few logic modules
-(client_support, policy_coverage, storage_waste, savings_rollup,
-unread_maintenance).
+connection. CI installs Streamlit in both legs: `requirements-dev.txt` for the
+main lint-and-test job, which runs the AppTest page smokes, and an explicit
+`streamlit==1.52.2` floor pin for the floor-compat job. So the CI environment
+does not enforce this rule: code review does, plus import-purity tests on a
+few logic modules (client_support, policy_coverage, storage_waste,
+savings_rollup, unread_maintenance).
 
 ## Data flow (mart-first)
 
@@ -79,9 +80,11 @@ unread_maintenance).
   sanctioned runtime modules listed in `ruff.toml` per-file-ignores
   (`app/core/errors.py`, `session.py`, `query.py`, `state.py`, `ai.py`), and
   (b) at line-level `# noqa: BLE001` sites. Those cover best-effort chrome and
-  cosmetic paths (chart theming, table styling, telemetry, deep links), where
-  the page deliberately degrades instead of breaking; each should carry a
-  reason comment.
+  cosmetic paths (chart theming, table styling, telemetry, deep links) plus a
+  few guarded fallbacks (`load_settings` falling back to code-default rates,
+  `run_mart_first`'s `mart_accept` coverage probe falling through to the live
+  path), where the page deliberately degrades instead of breaking. Most sites
+  carry a reason comment; some still do not.
 - **Empty/absent-state vocabulary (C25):** `components.empty_state(kind, ...)`
   is the one rendering of absence, so color carries meaning — `clean` =
   verified-clean compact green row, `needs_setup` = blue info (configure or
@@ -200,9 +203,14 @@ unread_maintenance).
 - Operator actions are gated at each call site by the viewer-username allowlist
   `config.OPERATOR_USERS` (`session.is_operator()`). The executors re-check the
   owner-privileged statements themselves: the `ALTER WAREHOUSE/PIPE/TASK/USER`
-  and `ALTER ACCOUNT SET` levers and query cancel (`query._PRIVILEGED_PREFIXES`).
-  Every in-app write passes the executor allow-list: one statement, aimed at
-  OVERWATCH objects or a lever. Write friction follows CLAUDE.md law 11: one
+  and `ALTER ACCOUNT SET` levers (`query._PRIVILEGED_PREFIXES`) and query cancel.
+  Operator and UI writes go through the executors (`query.execute_statement`,
+  `execute_statement_async`, `execute_action`), whose allow-list admits one
+  statement aimed at OVERWATCH objects or a lever. Two paths skip that
+  allow-list: the best-effort `APP_ERROR_LOG` sink in `errors.py` inserts
+  directly, and query cancel (`SYSTEM$CANCEL_QUERY`, a SELECT) has its own
+  seam, `execute_cancel_query`, which regex-validates the query id and builds
+  the statement itself. Write friction follows CLAUDE.md law 11: one
   click for reversible upserts to OVERWATCH's own tables (e.g. alert ACK),
   type-to-confirm (`confirm_gate`) for classifying or account-touching writes
   (alert RESOLVE, incident declare/close, warehouse levers) and for Admin
