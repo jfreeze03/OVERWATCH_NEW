@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import re
 from datetime import timedelta
 
 import streamlit as st
@@ -4174,6 +4175,24 @@ def _contention_tab(company: str, days: int, *, bounds: tuple | None = None) -> 
 
 
 
+_VD_P95_RE = re.compile(r"p95 (\?|-?[0-9.]+)s->(\?|-?[0-9.]+)s")
+_VD_QUEUE_RE = re.compile(r"queue (\?|-?[0-9.]+)->(\?|-?[0-9.]+) min/d")
+
+
+def _humanize_verdict_detail(text: str) -> str:
+    """A change scan's VERDICT_DETAIL string with its durations in Hr/Min/Sec.
+
+    SP_WAREHOUSE_CHANGE_SCAN (V109) and the object-change scan (V140) build the string in SQL with
+    raw seconds ('p95 1800.0s->2400.0s', 'queue 145.00->200.00 min/d'), so the drill caption read
+    '1800.0s' right above a KPI showing the same p95 as '30m' (PR-1 R1-124). The numbers are left
+    as they are; only the duration tokens are re-rendered. The ALERT_EVENTS.DETAIL copy is SQL-side."""
+    def _h(tok: str, unit_sec: float) -> str:
+        return "?" if tok == "?" else humanize_duration(safe_float(tok) * unit_sec, "s")
+
+    out = _VD_P95_RE.sub(lambda m: f"p95 {_h(m.group(1), 1)} → {_h(m.group(2), 1)}", text)
+    return _VD_QUEUE_RE.sub(lambda m: f"queue {_h(m.group(1), 60)} → {_h(m.group(2), 60)}/day", out)
+
+
 def _wh_change_block(company: str, is_operator: bool) -> None:
     st.divider()
     section_header("Warehouse setting changes", "", "warehouse", anchor="ops-change-wh")
@@ -4226,7 +4245,7 @@ def _wh_change_block(company: str, is_operator: bool) -> None:
                         f"{row.get('OLD_VALUE', '?')} → {row.get('NEW_VALUE', '?')}")
             _verdict_detail = str(row.get("VERDICT_DETAIL") or "").strip()
             if _verdict_detail:
-                st.caption(f"**{row.get('VERDICT')}** — {_verdict_detail}")
+                st.caption(f"**{row.get('VERDICT')}** — {_humanize_verdict_detail(_verdict_detail)}")
             if deltas:
                 def _wc_val(d: dict) -> str:
                     # P95_S is an elapsed time in seconds — humanize it (30m, 1h 30m),
@@ -4360,7 +4379,7 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
             # r4: the full verdict rationale lives here now (was a wide table column)
             _vd = str(crow.get("VERDICT_DETAIL") or "").strip()
             if _vd:
-                st.caption(f"**{crow.get('VERDICT')}** — {_vd}")
+                st.caption(f"**{crow.get('VERDICT')}** — {_humanize_verdict_detail(_vd)}")
         pick = clicked_obj or st.selectbox("Object (or click a row above)", picks, key="chg_pick")
         # T1.4: the 28d QUERY/TASK_HISTORY scan used to run every render on the
         # auto-selected first object. A row click loads it immediately; otherwise it
