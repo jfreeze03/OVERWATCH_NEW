@@ -263,9 +263,13 @@ print(f"wrote {target} ({len(out):,} chars)")
 # Optional read-only extras (never written by the byte-identity test)
 # ---------------------------------------------------------------------------------------------------------------
 VIEW_BODY = view[view.index(" AS\n") + len(" AS\n"):].rstrip("\n").rstrip(";")
-PREFLIGHT = f"""-- PREFLIGHT V170 (read-only; run BEFORE applying V170, any role that reads DBA_MAINT_DB.OVERWATCH).
--- Every statement is a SELECT. P170.1 is the V170 INCIDENT_PROPOSALS body verbatim, run as a query, so what you
--- preview is what the view will return after the apply; compare it with P170.2 (today's view).
+PREFLIGHT = f"""-- PREFLIGHT V170 (read-only after the session pin; run BEFORE applying V170, any role that reads
+-- DBA_MAINT_DB.OVERWATCH). Every statement after the pin is a SELECT. P170.1 is the V170 INCIDENT_PROPOSALS body
+-- verbatim, run as a query, so what you preview is what the view will return after the apply; compare it with the
+-- live view in P170.2. The pin comes first because ALERT_EVENTS.RAISED_AT is Central wall-clock NTZ and both grids
+-- keep alerts with RAISED_AT >= CURRENT_TIMESTAMP() - 2 days: in a UTC worksheet that 48h window sits about 5h
+-- off from the one the app (account timezone Central) sees.
+ALTER SESSION SET TIMEZONE = 'America/Chicago';
 
 -- P170.1  open proposals as V170 will classify and score them (ENTITY_KIND / CONFIDENCE / EVIDENCE).
 {VIEW_BODY}
@@ -283,7 +287,10 @@ WHERE PROCEDURE_SCHEMA = 'OVERWATCH' AND PROCEDURE_NAME = 'SP_INCIDENT_DECLARE'
 ORDER BY ARGUMENT_SIGNATURE;
 """
 
-PART_B = """-- RUN_NEXT PART B -- V170 verify (read-only; every statement is a SELECT).
+PART_B = """-- RUN_NEXT PART B -- V170 verify (read-only after the session pin; every other statement is a SELECT).
+-- Central first (correction 5): the proposal view (V170.3) and V170.6 window Central wall-clock NTZ timestamps
+-- against CURRENT_TIMESTAMP(), so a UTC worksheet would read a window about 5h off from the app.
+ALTER SESSION SET TIMEZONE = 'America/Chicago';
 
 -- V170.1  both SP_INCIDENT_DECLARE overloads exist: expect TWO rows, the 4-arg and the 5-arg (P_ACTOR VARCHAR).
 SELECT PROCEDURE_NAME, ARGUMENT_SIGNATURE, LAST_ALTERED
@@ -347,5 +354,6 @@ for _env, _text in (("PREFLIGHT_OUT", PREFLIGHT), ("PART_B_OUT", PART_B)):
     _dest = os.environ.get(_env)
     if _dest:
         assert "\r" not in _text and "$$" not in _text
+        assert _text.count("ALTER SESSION SET TIMEZONE = 'America/Chicago';") == 1    # Central first, once
         Path(_dest).write_text(_text, encoding="utf-8", newline="\n")
         print(f"wrote {_dest} ({len(_text):,} chars)")

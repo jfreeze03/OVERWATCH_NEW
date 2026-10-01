@@ -285,6 +285,28 @@ def _declare_verdict(msg: object) -> tuple[str, int | None]:
     return "failed", None
 
 
+def _declared_by_caption(v170_applied: bool, declared_by: object) -> str | None:
+    """R2-028 disclosure under the Open incidents table (its Declared by, and the members' Linked by).
+
+    Before V170 SP_INCIDENT_DECLARE writes neither column, so a manual declare takes the V032
+    CURRENT_USER() default -- the app owner under owner's-rights SiS. V170 credits the declaring DBA
+    from then on but never rewrites history, so an incident declared before the apply keeps the app
+    owner for as long as it stays open. After the apply the caption therefore stays while ANY listed
+    incident is a manual declare (``declared_by`` = the open-incident frame's DECLARED_BY column);
+    an all-auto-declared (or empty) list has nothing to explain."""
+    if not v170_applied:
+        return ("Declared by and Linked by on a manual declare show the app owner until the V170 "
+                "schema update is applied (auto-declared incidents show SP_INCIDENT_AUTODECLARE).")
+    if declared_by is None:
+        return None
+    names = pd.Series(declared_by, dtype=object).dropna().astype(str).str.strip().str.upper()
+    if not ((names != "") & (names != "SP_INCIDENT_AUTODECLARE")).any():
+        return None
+    return ("Manual declares made before the V170 schema update took effect still show the app owner as "
+            "Declared by and Linked by (history is not rewritten); declares since show the DBA who typed "
+            "DECLARE.")
+
+
 def _incident_close_sql(incident_id: str, kind: str, note: str) -> str:
     """Forward-only close: only OPEN/MITIGATED rows move — history never rewrites.
     The app has no reopen: a recurrence is a NEW incident (INCIDENTS.REOPENED_FROM
@@ -1329,11 +1351,12 @@ def render() -> None:
                     with_user_names(oi.df, _PAGE, user_col="DECLARED_BY", display_col="Declared by"),
                     _PAGE, user_col="OWNER", display_col="Owner"),
                 key="cr_inc_sel", height=190)
-            if not has_migration(170, _PAGE):
-                # R2-028: before V170 SP_INCIDENT_DECLARE writes neither column, so both take their V032
-                # CURRENT_USER() default -- the app owner under owner's-rights SiS. Claimed fixed only once applied.
-                st.caption("Declared by and Linked by on a manual declare show the app owner until the V170 "
-                           "schema update is applied (auto-declared incidents show SP_INCIDENT_AUTODECLARE).")
+            # R2-028: before V170 manual declares credit the app owner (claimed fixed only once applied); after
+            # it, earlier manual declares still do (no history rewrite), so the disclosure stays while one is listed.
+            _decl_cap = _declared_by_caption(has_migration(170, _PAGE),
+                                             oi.df["DECLARED_BY"] if "DECLARED_BY" in oi.df.columns else None)
+            if _decl_cap:
+                st.caption(_decl_cap)
             requested_incident = str(
                 navigation_context().get("incident_id") or ""
             ).strip()

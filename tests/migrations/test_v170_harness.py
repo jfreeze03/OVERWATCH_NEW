@@ -348,6 +348,26 @@ def test_exh_band_folds_into_the_family_account_proposal():
     assert sorted(old) == ["COST_CONTRACT_BREACH|ALFA|ACCOUNT|ACCOUNT", "COST_CONTRACT_BREACH|ALFA|SCOPE|EXH"]
 
 
+@pytest.mark.parametrize("key", ["COST_DAILY_CREDITS|ALL|{day}", "COST_BUDGET_PACE|ALL|{day}",
+                                 "COST_FORECAST_BREACH|ALL|{day}", "PIPE_ETL_CYCLE_LATE|EXH|{day}"])
+def test_account_level_repeat_days_drop_from_medium_to_low(key):
+    """Disclosed in the CHANGELOG / glossary (review r1): V072 read the ALL / EXH token as an entity, so two repeat
+    days scored the repeat-day MEDIUM tier. That tier is entity-scoped (ENTITY_KIND <> 'ACCOUNT') and an ACCOUNT
+    proposal joins no change / task evidence (no entity to match), so the family now reads LOW -- the score every
+    other account-level proposal already had under V072."""
+    con = _connect()
+    for d in (1, 2):
+        _alert(con, key.format(day=(_NOW - timedelta(days=d)).date().isoformat()), hours_ago=2 + 20 * (d - 1))
+    (new,) = _proposals(con).values()
+    (old,) = _proposals(con, _VIEW072).values()
+    assert (old["ENTITY_KIND"], old["ALERTS"], old["CONFIDENCE"]) == ("SCOPE", 2, "MEDIUM")
+    assert (new["ENTITY_KIND"], new["ALERTS"], new["CONFIDENCE"]) == ("ACCOUNT", 2, "LOW")
+    # no evidence leg joins an ACCOUNT proposal: a warehouse change in the window does not lift it
+    con.execute("INSERT INTO WAREHOUSE_CHANGE_REGISTRY VALUES ('w9', 'WH_ANY', ?)", (_ago(2.25),))
+    (still,) = _proposals(con).values()
+    assert (still["MATCHED_WH_CHANGES"], still["CONFIDENCE"]) == (0, "LOW")
+
+
 def _task_fixture(con, *, days: int = 1, task_change: bool = False, rule: str = "PIPE_TASK_FAILURES") -> None:
     for d in range(days):
         day = (_NOW - timedelta(days=1 + d)).date().isoformat()

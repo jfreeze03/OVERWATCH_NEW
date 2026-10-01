@@ -191,6 +191,13 @@ def test_v170_preflight_and_part_b_are_read_only_and_parse(tmp_path, which):
     pre, part_b = _extras(tmp_path)
     sql = pre if which == "preflight" else part_b
     code = _strip_noise(sql)                       # comments + strings out
+    # Central FIRST (correction 5): RAISED_AT / DETECTED_AT are Central wall-clock NTZ, and P170.1 / P170.2 / V170.3
+    # filter them against CURRENT_TIMESTAMP() -- in the owner's UTC worksheet the 48h window would sit ~5h off from
+    # what the app (account TZ = Central) sees. The pin is the ONLY non-SELECT statement.
+    stmts = [s.strip() for s in code.split(";") if s.strip()]
+    assert stmts[0] == "ALTER SESSION SET TIMEZONE =" and sql.count("ALTER SESSION SET TIMEZONE") == 1
+    assert "\nALTER SESSION SET TIMEZONE = 'America/Chicago';\n" in sql
+    code = code.replace("ALTER SESSION SET TIMEZONE =", "", 1)
     for banned in ("INSERT", "UPDATE", "DELETE", "MERGE", "CALL", "CREATE", "ALTER", "DROP", "TRUNCATE",
                    "GRANT", "REVOKE", "EXECUTE"):
         assert not re.search(rf"\b{banned}\b", code, re.I), (which, banned)
@@ -198,7 +205,8 @@ def test_v170_preflight_and_part_b_are_read_only_and_parse(tmp_path, which):
     assert "$$" not in sql and "@" not in sql
     sqlglot = pytest.importorskip("sqlglot")
     from sqlglot import exp
-    parsed = [p for p in sqlglot.parse(sql, dialect="snowflake") if p is not None]
+    body = sql.replace("ALTER SESSION SET TIMEZONE = 'America/Chicago';", "")
+    parsed = [p for p in sqlglot.parse(body, dialect="snowflake") if p is not None]
     assert len(parsed) == (3 if which == "preflight" else 6)
     writes = (exp.Insert, exp.Update, exp.Delete, exp.Merge, exp.Create, exp.Drop, exp.Command)
     for tree in parsed:
@@ -612,11 +620,45 @@ def test_legacy_declare_reference_writes_the_viewer_too():
         sqlglot.parse_one(sql, read="snowflake")
 
 
+_PRE_V170_CAPTION = ("Declared by and Linked by on a manual declare show the app owner until the V170 schema update "
+                     "is applied (auto-declared incidents show SP_INCIDENT_AUTODECLARE).")
+_POST_V170_CAPTION = ("Manual declares made before the V170 schema update took effect still show the app owner as "
+                      "Declared by and Linked by (history is not rewritten); declares since show the DBA who typed "
+                      "DECLARE.")
+
+
+@pytest.mark.parametrize(("applied", "declared_by", "want"), [
+    # before V170: today's caption, unchanged, whatever is listed
+    (False, ["SP_INCIDENT_AUTODECLARE"], _PRE_V170_CAPTION),
+    (False, ["APP_OWNER"], _PRE_V170_CAPTION),
+    (False, None, _PRE_V170_CAPTION),
+    # after V170 the history is NOT rewritten: an open manual declare may still carry the pre-apply app-owner stamp,
+    # so the disclosure stays while one is listed (the reviewer's scenario: declared on 4.609.0 before the apply)
+    (True, ["APP_OWNER"], _POST_V170_CAPTION),
+    (True, ["SP_INCIDENT_AUTODECLARE", "JDOE"], _POST_V170_CAPTION),
+    # ... and goes away when every listed incident is auto-declared (nothing to explain)
+    (True, ["SP_INCIDENT_AUTODECLARE"], None),
+    (True, [" sp_incident_autodeclare ", None, "", float("nan")], None),
+    (True, [], None),
+    (True, None, None),
+])
+def test_declared_by_caption_keeps_a_disclosure_after_v170(applied, declared_by, want):
+    import pandas as pd
+
+    from app.ui.pages.control_room import _declared_by_caption
+    assert _declared_by_caption(applied, declared_by) == want
+    if declared_by is not None:                    # the render passes the open-incident frame's column
+        assert _declared_by_caption(applied, pd.Series(declared_by, dtype=object)) == want
+
+
 def test_declare_captions_are_schema_gated():
     body = _CR.split('elif section == "Incidents & triage":', 1)[1]
-    # pre-V170 honesty: manual declares credit the app owner until the 5-arg overload exists
-    assert "if not has_migration(170, _PAGE):" in body
-    assert "Declared by and Linked by on a manual declare show the app owner until" in body
+    # pre-V170 honesty: manual declares credit the app owner until the 5-arg overload exists; after the apply the
+    # caption is kept (history is not rewritten) while a manual declare is listed -- both decided by the helper
+    assert body.count("_declared_by_caption(has_migration(170, _PAGE),") == 1
+    i = body.index("_declared_by_caption(has_migration(170, _PAGE),")
+    assert 'oi.df["DECLARED_BY"] if "DECLARED_BY" in oi.df.columns else None' in body[i:i + 200]
+    assert "selectable_table(" in body[i - 600:i]          # right under the Open incidents table
     # the V170 confidence rule is claimed only once applied
     assert "reach HIGH only with a matching task change" in body
     gate = body.index("reach HIGH only with a matching task change")
