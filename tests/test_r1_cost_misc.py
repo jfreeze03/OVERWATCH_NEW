@@ -541,11 +541,110 @@ def test_ask_page_explains_unpriced_gross_cs_credits():
     assert "is_gross_cs_column(c)" in src and "not priced here" in src
 
 
-def test_repeated_patterns_label_names_the_mart_window_not_the_live_cap():
-    """v4.606 integration: R1-015 made pattern_cost clamp to MAX_MART_WINDOW_DAYS (365) while R1-163 labelled
-    the panel with the 90-day live-scan limit -- the caption and the page note now name the window it reads."""
+def test_repeated_patterns_label_names_the_window_the_panel_reads():
+    """v4.606 holistic review (corrects the integration lock that named MAX_MART_WINDOW_DAYS): R1-015's
+    widening to 365 days is reverted for TRAILING windows -- older MART_PATTERN_COST_DAILY rows predate
+    V120's 90-day RUNS re-stamp -- so pattern_cost clamps to PATTERN_COST_MAX_DAYS (90) and the caption,
+    clean state and page note name that window, never a 365d the mart cannot honestly serve. Still not
+    the live-scan label (_live_wlab): the two limits are separate constants that only happen to agree."""
     src = read(_UC)
+    assert "MAX_MART_WINDOW_DAYS" not in src
+    assert "_pc_days = min(int(days), mart27_sql.PATTERN_COST_MAX_DAYS)" in src
     caption = src.split("**Repeated patterns", 1)[1].split("grouped by", 1)[0]
-    assert "MAX_MART_WINDOW_DAYS" in caption and "_live_wlab" not in caption
-    note = src.split("the repeated-pattern panel up to", 1)
-    assert len(note) == 2 and "repeated-pattern, ETL and serverless-task" not in src
+    assert "window_label(bounds, _pc_days)" in caption and "_live_wlab" not in caption
+    note = src.split("the repeated-pattern panel reads at most the last", 1)
+    assert len(note) == 2 and "{mart27_sql.PATTERN_COST_MAX_DAYS} days from its mart" in note[1]
+
+
+class _PatternsRendered(Exception):
+    pass
+
+
+def _render_unit_costs_to_patterns(monkeypatch, days, pattern_res, *, bounds=None):
+    """Render _unit_costs_tab with the measured reads failed, through the Repeated patterns panel (the
+    next md_dollars call, the trend expander's label, stops it). Unit prices stay on their 30-day cap
+    (toggle off) so the page's window note renders on a long trailing window."""
+    from app.ui.pages.cost_parts import unit_costs as uc
+    lm = "_lm" if bounds is not None else ""
+
+    def _stop(*_a, **_k):
+        raise _PatternsRendered
+
+    fake, seen = _patch(monkeypatch, uc, {f"unit_ai_mart_{days}{lm}": _failed("other"),
+                                          f"patterns_ALL_{days}{lm}": pattern_res},
+                        run_batch=lambda _jobs, **_k: {"q": _failed("other"), "p": _failed("other"),
+                                                       "ai": _failed("other")},
+                        panel_help=lambda *_a, **_k: None, md_dollars=_stop)
+    fake._off = (f"uc_full_window_ALL_{days}",)
+    fake.column_config = SimpleNamespace(NumberColumn=lambda *_a, **_k: None)
+    with pytest.raises(_PatternsRendered):
+        uc._unit_costs_tab({"company": "ALL", "days": days, "database": "", "schema_contains": "",
+                            "bounds": bounds, "warehouse_contains": "", "user_contains": ""}, 3.0, 2.2)
+    return fake, seen
+
+
+_PATTERNS = pd.DataFrame({"SAMPLE_TEXT": ["select 1"], "RUNS": [400], "CREDITS": [2.0],
+                          "CREDITS_PER_RUN": [0.005], "USERS": [3]})
+
+
+@pytest.mark.parametrize("days", [180, 365])
+def test_repeated_patterns_on_a_long_trailing_window_say_they_read_90_days(monkeypatch, days):
+    fake, seen = _render_unit_costs_to_patterns(monkeypatch, days, _ok(_PATTERNS.copy()))
+    caps = fake.text("caption")
+    assert "Measured QUERY_ATTRIBUTION_HISTORY compute (90d), grouped by" in caps
+    assert "A trailing window reads at most the last 90 days: older pattern rows predate the V120 "            "run-count fix" in caps
+    assert "the repeated-pattern panel reads at most the last 90 days from its mart" in caps
+    assert "365d" not in caps and f"({days}d)" not in caps
+    assert _V120_CAVEAT not in caps
+    # the verified-clean state names the same window
+    _fake, seen = _render_unit_costs_to_patterns(monkeypatch, days, _ok(pd.DataFrame()))
+    assert ("clean", "No repeated pattern crossed the $0.01 floor in the last 90 days.") in seen["empty"]
+
+
+def test_repeated_patterns_inside_the_cap_add_no_disclosure(monkeypatch):
+    fake, _ = _render_unit_costs_to_patterns(monkeypatch, 60, _ok(_PATTERNS.copy()))
+    caps = fake.text("caption")
+    assert "compute (60d), grouped by" in caps and "reads at most the last" not in caps
+    assert _V120_CAVEAT not in caps
+
+
+_V120_CAVEAT = "Rows before Jun 4, 2026 predate the V120 run-count fix and can overstate runs"
+
+
+def test_pattern_cost_restamp_horizon_is_the_day_v120_reached():
+    """V120's apply-time CALL SP_LOAD_PATTERN_COST(90) ran on 2026-09-02 (CHANGELOG) and re-merged
+    START_TIME >= DATEADD('day', -90, CURRENT_DATE()), so the first re-stamped day is 90 days earlier."""
+    from datetime import timedelta
+
+    from app.data import mart27_sql
+    v120 = read("snowflake/migrations/V120__pattern_cost_runs_fanout_fix.sql")
+    assert "CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_PATTERN_COST(90);" in v120
+    assert "V120 re-stamped 90 days at apply on 2026-09-02" in read("CHANGELOG.md")
+    assert date(2026, 9, 2) - timedelta(days=90) == mart27_sql.PATTERN_COST_RESTAMP_FROM
+
+
+@pytest.mark.parametrize(("today", "window", "label", "caveat"), [
+    (date(2026, 10, 15), "CURRENT_YEAR_WINDOW", "current year", True),    # Jan 1: before the re-stamp
+    (date(2026, 10, 15), "LAST_MONTH_WINDOW", "last month", False),
+    (date(2026, 10, 15), "CURRENT_MONTH_WINDOW", "current month", False),
+    (date(2026, 6, 15), "LAST_MONTH_WINDOW", "last month", True),         # May: wholly before it
+    (date(2027, 2, 15), "CURRENT_YEAR_WINDOW", "current year", False),    # a later year starts after it
+])
+def test_repeated_patterns_on_a_calendar_preset_flag_rows_before_the_v120_restamp(monkeypatch, today, window,
+                                                                                    label, caveat):
+    """Holistic-review fix-up: a calendar preset reads its exact [start, end) range (scope_window_where
+    ignores the 90-day clamp there), so Current year sums MART_PATTERN_COST_DAILY rows from before V120's
+    re-stamp horizon (DAY >= 2026-06-04), which can overstate runs. The caption names the preset (never
+    "90d", never the trailing-cut sentence) and flags those rows for exactly the calendar windows that
+    start before the horizon."""
+    from app import config
+    from app.logic import date_windows
+    monkeypatch.setattr(date_windows, "account_today", lambda: today)
+    bounds = date_windows.window_bounds(getattr(config, window), today=today)
+    assert bounds is not None
+    days = date_windows.CalendarDayOffset((bounds[1] - bounds[0]).days - 1)
+    fake, _ = _render_unit_costs_to_patterns(monkeypatch, days, _ok(_PATTERNS.copy()), bounds=bounds)
+    caps = fake.text("caption")
+    assert f"compute ({label}), grouped by" in caps
+    assert "reads at most the last" not in caps and "(90d)" not in caps
+    assert (_V120_CAVEAT + " (understating the cost per run).") in caps if caveat else _V120_CAVEAT not in caps
