@@ -29,6 +29,13 @@ _APP_EXPR = (
 )
 
 
+# V166 (C10): how many days before its window a query's SESSION is looked up. V166's SP_LOAD_APP_COST pads
+# SESSIONS by the same days before its reload start (tests/migrations/test_v166_* locks the parity). At 7 the
+# loader's LAST reload of a day -- the narrowest -- relabelled a keep-alive / pooled session opened 7-10 days
+# earlier '(unknown)'; sessions opened earlier still, and system/task sessions with no SESSIONS row, stay there.
+SESSION_PAD_DAYS = 30
+
+
 def _company_col_clause(company: str) -> str:
     """Filter the mart's pre-stamped COMPANY column ('' = ALL)."""
     c = str(company or "ALL")
@@ -78,19 +85,19 @@ def app_cost_live(days: int = 30, company: str = "ALL", *,
     ACCOUNT_USAGE, capped to 90d); serves until FACT_APP_COST_DAILY loads.
 
     The RESULT window is defined by the q (QUERY_HISTORY) scan; the cred/sess scans are
-    join sources scanned a little WIDER (attribution +1d, sessions +7d) so an in-window
-    query never loses its credit/app for lack of a match. 'Last month' (bounds) applies
-    the bounded [start, end) to q and the same padded lower bounds to cred/sess."""
+    join sources scanned a little WIDER (attribution +1d, sessions +SESSION_PAD_DAYS, 30d) so
+    an in-window query never loses its credit/app for lack of a match. 'Last month' (bounds)
+    applies the bounded [start, end) to q and the same padded lower bounds to cred/sess."""
     days = bounded_days(days, 90)
     if bounds is not None:
         _si, _ei = f"'{bounds[0].isoformat()}'", f"'{bounds[1].isoformat()}'"
         q_scope = f"q.START_TIME >= {_si} AND q.START_TIME < {_ei}"
         cred_scope = f"START_TIME >= DATEADD('day', -1, {_si}) AND START_TIME < {_ei}"
-        sess_scope = f"CREATED_ON >= DATEADD('day', -7, {_si}) AND CREATED_ON < {_ei}"
+        sess_scope = f"CREATED_ON >= DATEADD('day', -{SESSION_PAD_DAYS}, {_si}) AND CREATED_ON < {_ei}"
     else:
         q_scope = f"q.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
         cred_scope = f"START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())"
-        sess_scope = f"CREATED_ON >= DATEADD('day', -{days + 7}, CURRENT_TIMESTAMP())"
+        sess_scope = f"CREATED_ON >= DATEADD('day', -{days + SESSION_PAD_DAYS}, CURRENT_TIMESTAMP())"
     q_where = and_where(
         q_scope,
         companies.warehouse_company_scope(company, "q.WAREHOUSE_NAME"),

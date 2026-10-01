@@ -2234,7 +2234,7 @@ def security_change_fact_coverage(days: int = 30, *, bounds: tuple | None = None
 
     CHANGE RISK COMPLETE (``security_domain_coverage``) proves FRESHNESS only: the extract and the
     fact were both stamped in the last 3 hours. The fact is refilled hourly from the 72-hour
-    OW_QH_EXTRACT alone (V105's d<=3 arm), and the extract's catch-up is clamped at that retention
+    OW_QH_EXTRACT alone (V166's d<=3 arm), and the extract's catch-up is clamped at that retention
     (V152), so a loader or task-tree outage longer than 72 hours leaves a permanent hole (V100's
     header records one such loss). An hour after the loader resumes the stamps read COMPLETE again,
     and a 7-90 day panel served from the holed fact under its 'last N days' label, down to the green

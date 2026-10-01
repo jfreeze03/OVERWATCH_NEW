@@ -53,6 +53,26 @@ def test_app_cost_live_reader_joins_all_three_and_is_canary_clean():
     sqlglot.parse(live, dialect="snowflake")
 
 
+def test_app_cost_live_pads_sessions_by_the_shared_session_pad():
+    """V166 C10: the live twin resolves a query's session SESSION_PAD_DAYS (30) before its window, the same pad
+    V166's SP_LOAD_APP_COST uses before its reload start (tests/migrations/test_v166_* locks that parity). At 7
+    days a keep-alive / pooled session opened a week before the query fell into '(unknown)'."""
+    from datetime import date
+    assert app_cost_sql.SESSION_PAD_DAYS == 30
+    rolling = app_cost_sql.app_cost_live(30, "ALL")
+    assert "CREATED_ON >= DATEADD('day', -60, CURRENT_TIMESTAMP())" in rolling
+    assert "-37, CURRENT_TIMESTAMP()" not in rolling
+    bounded = app_cost_sql.app_cost_live(30, "ALL", bounds=(date(2026, 8, 1), date(2026, 9, 1)))
+    assert "CREATED_ON >= DATEADD('day', -30, '2026-08-01') AND CREATED_ON < '2026-09-01'" in bounded
+    assert "DATEADD('day', -7, '2026-08-01')" not in bounded
+    # the result window (q) and the attribution pad (cred) are unchanged
+    assert "q.START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())" in rolling
+    assert "START_TIME >= DATEADD('day', -31, CURRENT_TIMESTAMP())" in rolling
+    assert "START_TIME >= DATEADD('day', -1, '2026-08-01') AND START_TIME < '2026-09-01'" in bounded
+    for sql in (rolling, bounded):
+        sqlglot.parse_one(sql, dialect="snowflake")
+
+
 def test_v077_teardown_covered():
     td = (_ROOT / "snowflake" / "teardown.sql").read_text(encoding="utf-8")
     for obj in ("FACT_APP_COST_DAILY", "SP_LOAD_APP_COST", "TASK_LOAD_APP_COST"):

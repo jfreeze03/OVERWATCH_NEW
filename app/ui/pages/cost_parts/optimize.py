@@ -590,8 +590,9 @@ def _spend_ceilings_panel(idle_head, rate: float, company: str = "ALL") -> None:
 
 def _object_ledger_coverage_note(ledger_start: object, days: int, bounds: tuple | None) -> str:
     """R2-013: '' when the object ledger covers the whole window, else a sentence naming its first day and how
-    many of the window's days it covers. FACT_OBJECT_COST_DAILY is never backfilled (first fill 14 days), so a
-    180/365-day or Current-year window can start months before it; the totals then cover only the ledger's
+    many of the window's days it covers. FACT_OBJECT_COST_DAILY is not backfilled by default (first fill 14
+    days; backfill_365.sql has an opt-in SP_LOAD_OBJECT_COST(365) block), so a 180/365-day or Current-year
+    window can start months before it; the totals then cover only the ledger's
     days. Calendar span, never a row count (R1-021 / W12). ``ledger_start`` is the builder's ledger-wide
     LEDGER_START_DAY (cost_sql.object_cost_by_arm)."""
     first = pd.to_datetime(ledger_start, errors="coerce")
@@ -1709,7 +1710,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             kpi_row([{"label": "Object-attributed spend", "value": format_usd(_obj_attr),
                       "help": "Sum of the OBJECT arms x the configured rate (excludes the non-object "
                               "QUERY_COMPUTE_RESIDUAL arm, shown separately in the chart). Additive."}])
-            # R2-013: a window older than the (never-backfilled) ledger sums only the ledger's days -- say so.
+            # R2-013: a window older than the ledger (not backfilled by default) sums only the ledger's days -- say so.
             _oc_cov = _object_ledger_coverage_note(
                 _adf["LEDGER_START_DAY"].iloc[0] if "LEDGER_START_DAY" in _adf.columns else None, days, bounds)
             if _oc_cov:
