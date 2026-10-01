@@ -1250,7 +1250,19 @@ the same day.
       `CREATE ROLE IF NOT EXISTS OVERWATCH_MONITOR;` and
       `CREATE ROLE IF NOT EXISTS OVERWATCH_OPERATOR;`: V006-V008 grant to
       these retired roles, roles.sql drops them again, and rebuild/02 runs
-      both lines first. V158's tail starts a backup
+      both lines first. V002 sets WH_ALFA_ADMIN's
+      STATEMENT_TIMEOUT_IN_SECONDS back to 300 and attaches OVERWATCH_RM
+      (30 credits a month, SUSPEND at 100%) until V045 drops it. The
+      warehouse is account-level and survives the dropped schema, so this
+      hits its live value. Record the value first with
+      `SHOW PARAMETERS LIKE 'STATEMENT_TIMEOUT_IN_SECONDS' IN WAREHOUSE WH_ALFA_ADMIN;`,
+      put it back afterwards
+      (`ALTER WAREHOUSE WH_ALFA_ADMIN SET STATEMENT_TIMEOUT_IN_SECONDS = <value>;`,
+      or `UNSET` if it showed no warehouse-level value), and if the run stops
+      between V002 and V045, detach the monitor before anything else
+      (`ALTER WAREHOUSE WH_ALFA_ADMIN SET RESOURCE_MONITOR = NULL;` then
+      `DROP RESOURCE MONITOR IF EXISTS OVERWATCH_RM;`; docs/FULL_REBUILD.md
+      steps 3 and 3b). V158's tail starts a backup
       run seconds before V161, which waits up to about 4 minutes for it. If V161
       still stops ("V161 stopped: a TASK_BACKUP_OPERATOR run was still in
       flight", or a statement timeout), re-run it once that run shows a final

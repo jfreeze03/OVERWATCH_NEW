@@ -159,22 +159,55 @@ now, but the rule stands for every file). Notes:
 After the last migration and before step 4, as the table-owner role
 (SNOW_ACCOUNTADMINS here), with step 1's date suffix. On the
 keep-operator-data path, restore the five config tables the replay rewrote
-(step 3's notes say how) from the step-1 clones. First keep the rules the
-replay re-seeded after you had deleted them, so their events can be closed
-once the rows are gone:
+(step 3's notes say how) from the step-1 clones. The replay's own scans
+raised events under the config it had reset: V045 switches
+PIPE_TASK_FAILURES on and then scans, and V020/V028 re-enable
+SEC_CRED_EXPIRY at a 10-day threshold. Nothing closes those events once
+your values are back: the hourly scan auto-clears only enabled rules, and
+the notifier posts an OPEN event whether or not its rule is enabled. So
+first keep two lists, in the same worksheet: the rules the replay
+re-seeded after you had deleted them, and every rule whose row the replay
+changed at all (re-seeded, switched on, threshold or auto-clear reset):
 
     CREATE TEMPORARY TABLE OW_REPLAY_ONLY_RULES AS
       SELECT RULE_ID FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
       MINUS SELECT RULE_ID FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG_BAK_<date>;
+    CREATE TEMPORARY TABLE OW_REPLAY_TOUCHED_RULES AS
+      SELECT RULE_ID FROM (SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
+                           MINUS SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG_BAK_<date>);
     INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.SETTINGS       SELECT * FROM DBA_MAINT_DB.OVERWATCH.SETTINGS_BAK_<date>;
     INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE  SELECT * FROM DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE_BAK_<date>;
     INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG   SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG_BAK_<date>;
     INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES   SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES_BAK_<date>;
     INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.DEPARTMENT_MAP SELECT * FROM DBA_MAINT_DB.OVERWATCH.DEPARTMENT_MAP_BAK_<date>;
+
+Then close, as EXPECTED, every event of a rule only the replay re-seeded,
+and every event raised since the step-1 clone (so by the replay) whose rule
+is off or gone in the restored ALERT_CONFIG:
+
     UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
        SET STATUS = 'RESOLVED', RESOLUTION_KIND = 'EXPECTED', RESOLVED_AT = CURRENT_TIMESTAMP()
      WHERE STATUS IN ('OPEN', 'ACK', 'SNOOZED')
        AND RULE_ID IN (SELECT RULE_ID FROM OW_REPLAY_ONLY_RULES);
+    UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+       SET STATUS = 'RESOLVED', RESOLUTION_KIND = 'EXPECTED', RESOLVED_AT = CURRENT_TIMESTAMP()
+     WHERE STATUS IN ('OPEN', 'ACK', 'SNOOZED')
+       AND RULE_ID NOT IN (SELECT RULE_ID FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED)
+       AND EVENT_ID NOT IN (SELECT EVENT_ID FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS_BAK_<date>);
+
+A rule that is on again keeps its events, because your own threshold may
+raise the same ones. The replay may still have raised some under a
+threshold it had reset. List the events it raised for the rules it
+changed, and ACK each one your values would not have raised before step 7b
+re-enables the routes (the notifier posts only OPEN events):
+
+    SELECT EVENT_ID, RULE_ID, RAISED_AT, TITLE FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+     WHERE STATUS = 'OPEN'
+       AND RULE_ID IN (SELECT RULE_ID FROM OW_REPLAY_TOUCHED_RULES)
+       AND EVENT_ID NOT IN (SELECT EVENT_ID FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS_BAK_<date>);
+    UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+       SET STATUS = 'ACK', ACK_BY = CURRENT_USER(), ACK_AT = CURRENT_TIMESTAMP()
+     WHERE STATUS = 'OPEN' AND EVENT_ID IN ('<each EVENT_ID to keep quiet>');
 
 The restored ALERT_ROUTES has each route's pre-teardown ENABLED flag, but
 the teardown dropped the OVERWATCH_* notification integrations. Keep every

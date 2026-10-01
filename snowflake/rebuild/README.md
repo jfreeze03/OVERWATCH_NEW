@@ -27,7 +27,8 @@ Around the files (docs/FULL_REBUILD.md has the statements):
   OVERWATCH_RM resource monitor V002 attached before anything else (step 3).
 - **Between 02 and 03, if you kept operator data** (step 3b): restore SETTINGS,
   COMPANY_SCOPE, ALERT_CONFIG, ALERT_ROUTES and DEPARTMENT_MAP from the 00
-  clones (the replay re-ran one-time config statements on them) and put the
+  clones (the replay re-ran one-time config statements on them), close the
+  events the replay raised for rules that are off again, and put the
   warehouse timeout back.
 - **After 05** (step 7b): re-create the opt-in objects 01 dropped (email alerts,
   drill, ML forecast, notification integrations and secrets) and re-enable the
