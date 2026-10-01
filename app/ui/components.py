@@ -2534,6 +2534,13 @@ def selectable_nav_table(df, key: str, on_select, *, height: int | None = None,
     sel = selectable_table(df, key=key, height=height, column_config=column_config,
                            slug=slug, days=days, size_note=size_note, sort_label=sort_label)
     seen_key = f"_ow_navsel_{key}"
+    if sel is None:
+        # R1-215: re-arm on an unselected render. A drill navigates away, the table unmounts and
+        # Streamlit drops its selection, so every return mounts unselected — but the seen index
+        # outlived it and silently swallowed the next click on that row (Back, then the same row
+        # again, did nothing). A None selection never fires, so this cannot re-open the rerun loop.
+        # Same re-arm as workbench's watchlist and charts._read_click_selection.
+        st.session_state.pop(seen_key, None)
     if sel is not None and sel != st.session_state.get(seen_key):
         st.session_state[seen_key] = sel
         on_select(sel)
@@ -2702,9 +2709,11 @@ def decision_rows(
         # suppress the auto provenance/size caption here to avoid saying it twice.
         size_note=False,
     )
-    if on_select is not None and selection is not None:
+    if on_select is not None:
         seen_key = f"_ow_decision_{key}"
-        if selection != st.session_state.get(seen_key):
+        if selection is None:
+            st.session_state.pop(seen_key, None)    # R1-215: re-arm (see selectable_nav_table)
+        elif selection != st.session_state.get(seen_key):
             st.session_state[seen_key] = selection
             on_select(selection)
     return selection
@@ -2752,6 +2761,12 @@ def master_detail(df, *, key: str, id_col: str, list_render_fn, detail_render_fn
         # rec29: resolve position→id only on a CHANGE. st.dataframe's selection
         # is a sticky index that re-emits every rerun; an unconditional resolve
         # would rebind the detail to a different row after a re-sort.
+        if sel is None:
+            # R1-215: re-arm on an unselected render (a return to the page, or a deselect), else a
+            # click on whatever row now sits at the remembered position is ignored and the detail
+            # pane keeps the old item beside a different highlighted row. ``persist`` is left
+            # alone, so the last bound item still shows until the next real click.
+            st.session_state.pop(seen_sel, None)
         if sel is not None and sel != st.session_state.get(seen_sel):
             st.session_state[seen_sel] = sel
             try:

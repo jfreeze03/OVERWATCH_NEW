@@ -7,10 +7,12 @@ pre-fix code at 04fd374e:
   R1-211  delta_css painted a NULL (NaN) delta cell green/red.
   R1-213  run_mart_first stamped a calendar-bounded live read as 90 days (Current year ~3x high).
   R1-214  confirm_gate returned a click from a run whose typed text no longer matched.
+  R1-215  the row-click seen-guards never re-armed, so a return-then-re-click did nothing.
 """
 
 from __future__ import annotations
 
+import contextlib
 import math
 from datetime import date
 from pathlib import Path
@@ -214,3 +216,93 @@ def test_confirm_gate_apptest_target_switch_and_click_in_one_rerun_runs_nothing(
     at.button(key="remed_btn").click()
     at.run()
     assert at.session_state["_p606_fired"] == ["WH_B"]
+
+
+# ---------------------------------------------------------------------------
+# R1-215: an unselected render re-arms every row-click seen-guard
+# ---------------------------------------------------------------------------
+
+class _NavSt:
+    """``st`` stand-in for the selection primitives: a plain-dict session_state and no-op layout."""
+
+    def __init__(self):
+        self.session_state: dict = {}
+
+    def caption(self, *_a, **_k):
+        return None
+
+    def container(self, *_a, **_k):
+        return contextlib.nullcontext()
+
+    def columns(self, *_a, **_k):
+        return contextlib.nullcontext(), contextlib.nullcontext()
+
+
+def test_selectable_nav_table_fires_again_after_a_return_to_the_page(monkeypatch):
+    from app.ui import components
+    monkeypatch.setattr(components, "st", _NavSt())
+    # click row 0 -> drill away (the table unmounts, Streamlit drops its selection) -> back, which
+    # mounts unselected -> click row 0 again
+    emitted = iter([0, None, 0])
+    monkeypatch.setattr(components, "selectable_table", lambda *_a, **_k: next(emitted))
+    fired: list[int] = []
+    for _ in range(3):
+        components.selectable_nav_table(pd.DataFrame({"A": [1, 2]}), key="ov_actions_sel",
+                                        on_select=fired.append, hint="")
+    assert fired == [0, 0]
+
+
+def test_selectable_nav_table_still_ignores_a_sticky_reemitted_selection(monkeypatch):
+    from app.ui import components
+    monkeypatch.setattr(components, "st", _NavSt())
+    emitted = iter([1, 1, 1])               # the same sticky index re-emitted on every rerun
+    monkeypatch.setattr(components, "selectable_table", lambda *_a, **_k: next(emitted))
+    fired: list[int] = []
+    for _ in range(3):
+        components.selectable_nav_table(pd.DataFrame({"A": [1, 2]}), key="k", on_select=fired.append, hint="")
+    assert fired == [1]                     # the rerun-loop guard is intact
+
+
+def test_master_detail_binds_the_row_clicked_after_a_return(monkeypatch):
+    from app.ui import components
+    monkeypatch.setattr(components, "st", _NavSt())
+    frames = iter([pd.DataFrame({"FP": ["X", "Y"]}),     # click row 0 (X)
+                   pd.DataFrame({"FP": ["Y", "X"]}),     # return: re-ranked, nothing selected
+                   pd.DataFrame({"FP": ["Y", "X"]})])    # click row 0 again -- now Y
+    emitted = iter([0, None, 0])
+    shown: list[str] = []
+    for _ in range(3):
+        components.master_detail(next(frames), key="ac", id_col="FP",
+                                 list_render_fn=lambda _df, _k: next(emitted),
+                                 detail_render_fn=lambda row: shown.append(str(row["FP"])))
+    # the return keeps the last bound item (identity persistence); the new click rebinds to Y
+    assert shown == ["X", "X", "Y"]
+
+
+def test_decision_rows_on_select_re_arms_after_an_unselected_render(monkeypatch):
+    from app.ui import components
+    monkeypatch.setattr(components, "st", _NavSt())
+    emitted = iter([0, None, 0])
+    monkeypatch.setattr(components, "selectable_table", lambda *_a, **_k: next(emitted))
+    fired: list[int] = []
+    frame = pd.DataFrame({"TITLE": ["a", "b"], "DETAIL": ["x", "y"]})
+    for _ in range(3):
+        components.decision_rows(frame, key="d", decision_col="TITLE", why_col="DETAIL",
+                                 on_select=fired.append)
+    assert fired == [0, 0]
+
+
+def test_every_seen_guard_re_arms_before_it_checks():
+    # pin the order the way test_v4153_watchlist_guard does for the watchlist
+    comp = _src("app/ui/components.py")
+    for fn, rearm, guard in (
+        ("def selectable_nav_table", "st.session_state.pop(seen_key, None)",
+         "sel != st.session_state.get(seen_key)"),
+        ("def master_detail", "st.session_state.pop(seen_sel, None)\n        if sel is not None",
+         "sel != st.session_state.get(seen_sel)"),
+        ("def decision_rows", "st.session_state.pop(seen_key, None)",
+         "selection != st.session_state.get(seen_key)"),
+    ):
+        body = comp.split(fn, 1)[1].split("\ndef ", 1)[0]
+        assert rearm in body and guard in body, fn
+        assert body.index(rearm) < body.index(guard), fn
