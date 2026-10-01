@@ -17,12 +17,6 @@ before moving on:
 Then, one hour later: snowflake/loader_chain_check.sql — every task
 'started', freshness < 2h behind. Fleet board after 24h.
 
-01 also drops the opt-in objects — the four NATIVE_ALERT_* email alerts, the
-alert drill, the ML forecast, the OVERWATCH_* notification integrations and
-their secrets — and nothing in this folder re-creates them. List them before
-01 and put them back afterwards (docs/FULL_REBUILD.md steps 0 and 7b); if you
-kept operator data, re-enable the Teams route the V070 replay disabled.
-
 These files are GENERATED and equality-locked against their sources
 (tests/test_rebuild_bundle.py) — edit the sources, never this folder.
 Regenerate the byte-locked files with `python outputs/gen_rebuild_bundle.py`

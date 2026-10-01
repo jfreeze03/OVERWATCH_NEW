@@ -130,7 +130,8 @@ def test_full_rebuild_is_tip_agnostic_and_restores_the_opt_ins():
     for needle in ("NATIVE_ALERT_*", "TASK_ALERT_DRILL", "FORECAST_ML_DAILY", "OVERWATCH_EMAIL",
                    "OVERWATCH_WEBHOOK_TEAMS", "SET ENABLED = TRUE"):
         assert needle in fr, needle
-    assert "docs/FULL_REBUILD.md steps 0 and 7b" in read("snowflake/rebuild/README.md")
+    # the generated bundle's README is not hand-edited (house law 6); it points at this runbook
+    assert "The runbook is docs/FULL_REBUILD.md" in read("snowflake/rebuild/README.md")
 
 
 def test_manual_deploy_path_uploads_every_app_folder():
