@@ -266,3 +266,30 @@ def test_low_qas_spend_with_eligible_workload_is_not_an_enable_candidate():
     # no spend at all is still the enable opportunity, and >= the floor is still "Working"
     assert classify_qas_roi(0.0, 400).action == "enable"
     assert classify_qas_roi(5.0, 400).verdict.startswith("Working")
+
+
+# ---- R1-122: the drill streak counts consecutive calendar months, not passing events ----------
+
+
+def _drill(raised: str, ok: bool = True) -> dict:
+    return {"RAISED_AT": raised, "NOTIFIED_AT": raised if ok else None, "ACK_AT": raised if ok else None}
+
+
+def test_drill_streak_breaks_on_a_missing_month():
+    from app.logic.drill import drill_report
+    # Sep and Jul passed, no August drill at all (task suspended): the streak is 1, not 2
+    df = pd.DataFrame([_drill("2026-09-01 09:00"), _drill("2026-07-01 09:00")])
+    assert drill_report(df)["streak_months"] == 1
+
+
+def test_drill_streak_is_one_outcome_per_month():
+    from app.logic.drill import drill_report
+    # two passing rows in September (a hand insert) count once; Aug passed; Jul failed
+    df = pd.DataFrame([_drill("2026-09-15 09:00"), _drill("2026-09-01 09:00"),
+                       _drill("2026-08-01 09:00"), _drill("2026-07-01 09:00", ok=False)])
+    report = drill_report(df)
+    assert report["streak_months"] == 2
+    assert report["last"]["delivered"] and report["last"]["acked"]
+    # a year boundary is consecutive: Jan after Dec
+    df = pd.DataFrame([_drill("2027-01-01 09:00"), _drill("2026-12-01 09:00")])
+    assert drill_report(df)["streak_months"] == 2
