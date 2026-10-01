@@ -173,10 +173,13 @@ def test_objectives_panel_is_honest_about_absence_and_scope():
     ops = _src("app/ui/pages/operations.py")
     panel = _body(ops, "_builtin_objectives_panel")
     assert '_health = alarm_health(_misses) if (cyc or cad) else ""' in panel
-    # review r1: a capped cadence read (LIMIT 200) is never shown green -- header or tile
-    assert 'if _health == "ok" and cad.get("capped"):' in panel
+    # review r1: a capped cadence read (LIMIT 200) is never shown green -- header or tile -- unless the cut
+    # is PROVEN (v4.608: the Tasks ▸ SLA rule, TOTAL_TASKS > rows read and _freshness_cut_is_safe; render-
+    # tested in tests/test_p608_ops_etl.py)
+    assert 'if _health == "ok" and cad.get("unproven"):' in panel
+    assert 'cad["unproven"] = bool(cad["capped"] and not _freshness_cut_is_safe(_fres.df))' in panel
     assert 'section_header("Built-in objectives", _health, "pipeline"' in panel
-    assert '"" if cad.get("capped") else "ok"' in panel
+    assert '"" if cad.get("unproven") else "ok"' in panel
     assert '"value": "—"' in panel and '"needs setup"' in panel and "0/0" not in panel
     assert "execute_statement(" not in panel and "st.button(" not in panel   # read-only
     # join the source's adjacent string literals ("..." <newline> "..." and "..." + ("...")

@@ -161,7 +161,8 @@ def test_pipeline_sla_forecast_joins_cadence_to_status():
     assert "DBA_MAINT_DB.OVERWATCH.PIPELINE_SLA_STATUS" in sql
     assert "SNOWFLAKE.ACCOUNT_USAGE.TABLE_DML_HISTORY" in sql
     assert "MEDIAN(GAP_MIN)" in sql                    # per-table refresh cadence
-    assert "LAG(START_TIME)" in sql                    # gap between successive DML
+    assert "LAG(h.START_TIME)" in sql                  # gap between successive DML
+    assert "JOIN reg r" in sql                         # v4.608: only the registered tables are windowed
     for col in ("MEDIAN_GAP_MIN", "RUNWAY_HOURS", "HOURS_SINCE", "SLA_MET"):
         assert col in sql, col
     assert "DATEADD('day', -14," in sql                # bounded window

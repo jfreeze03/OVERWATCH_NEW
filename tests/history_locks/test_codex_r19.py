@@ -34,7 +34,8 @@ def test_action_queue_filters_open_in_sql_and_mirrors_logic():
 
 def test_failure_timeline_skips_scan_when_summary_says_zero():
     assert "known_failures: float | None = None" in _OPS
-    assert "if known_failures is not None and known_failures <= 0:" in _OPS
+    # v4.608 R2-008 / R2-113: only a LIVE zero skips the scan (the task mart loads once a day)
+    assert "if known_from_live and known_failures is not None and known_failures <= 0:" in _OPS
     assert "if days >= 7 else None" in _OPS               # 7d detail needs >=7d summary
 
 

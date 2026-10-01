@@ -37,6 +37,20 @@ XLAT_VALUE_COL = "SRC_IDNTFTN_VAL"
 
 MAX_CODES = 1000  # a real gap is a handful of codes; the cap only guards a misconfig
 
+# The daily PIPE_REF_GAP alert's own check-name allowlist (v4.608 R2-109). SP_SCAN_REF_GAPS (V129, its only
+# definer) keeps a configured check only when RLIKE(nm_clean, '<this>') matches and drops the rest with no
+# log, while this panel scans any non-empty name (it binds the name as a string literal). A name outside the
+# set is therefore scanned here but never alerted; parse_ref_gap_checks warns about it. A re-derivation of
+# SP_SCAN_REF_GAPS must update this constant: tests/test_p608_ops_etl.py pins it to the latest definer's text.
+ALERT_NAME_PATTERN = r"^[-A-Za-z0-9_.:/ ]+$"
+ALERT_NAME_CHARS = "letters, digits, spaces and - _ . : /"
+
+
+def alert_scans_name(name: object) -> bool:
+    """True when the daily PIPE_REF_GAP alert (SP_SCAN_REF_GAPS) keeps a check with this family name."""
+    import re
+    return re.fullmatch(ALERT_NAME_PATTERN, str(name)) is not None
+
 
 @dataclass(frozen=True)
 class RefGapCheck:
@@ -60,6 +74,11 @@ class RefGapCheck:
         """The staging table's database (first FQN segment), for the scope filter."""
         return self.staging_fqn.split(".", 1)[0].strip().upper()
 
+    @property
+    def alerted(self) -> bool:
+        """Whether the daily PIPE_REF_GAP alert scans this check too (its name passes the proc's allowlist)."""
+        return alert_scans_name(self.name)
+
 
 def parse_ref_gap_checks(raw: object) -> tuple[list[RefGapCheck], list[str]]:
     """Parse the ETL_REF_GAP_CHECKS setting into checks + parse warnings.
@@ -70,7 +89,9 @@ def parse_ref_gap_checks(raw: object) -> tuple[list[RefGapCheck], list[str]]:
     single-line Admin text field); blank entries and those beginning with ``#``
     are ignored. A malformed entry (not exactly three non-empty fields) is skipped
     and named in the returned warnings — a bad row never silently drops a check
-    with no signal.
+    with no signal. A check whose name the daily PIPE_REF_GAP alert would drop
+    (``alert_scans_name`` False: a character outside ALERT_NAME_CHARS) is KEPT —
+    this panel still scans it — and named in the warnings as not alerted (R2-109).
     """
     text = str(raw or "").strip()
     if not text:
@@ -92,6 +113,9 @@ def parse_ref_gap_checks(raw: object) -> tuple[list[RefGapCheck], list[str]]:
         if not name:
             warnings.append(f"Ignored malformed check (empty name): {seg!r}")
             continue
+        if not alert_scans_name(name):
+            warnings.append(f"Check {name!r} is scanned here, but the daily PIPE_REF_GAP alert skips it: alerted "
+                            f"check names may use only {ALERT_NAME_CHARS}.")
         checks.append(RefGapCheck(name=name, staging_fqn=parts[1], staging_col=parts[2], pinned=pinned))
     return checks, warnings
 

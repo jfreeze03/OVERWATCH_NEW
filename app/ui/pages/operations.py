@@ -10,7 +10,14 @@ import streamlit as st
 from app.config import MAX_LIVE_WINDOW_DAYS, core_object
 from app.core.errors import safe_page
 from app.core.identity import identity_sql
-from app.core.query import execute_cancel_query, execute_statement, run, run_batch, run_batch_mixed
+from app.core.query import (
+    CACHE_TTLS,
+    execute_cancel_query,
+    execute_statement,
+    run,
+    run_batch,
+    run_batch_mixed,
+)
 from app.core.result import QueryResult, is_setup_absence
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
@@ -1079,18 +1086,15 @@ def _failure_timeline_section(company: str, database: str = "", schema_contains:
     # clean 7d body when the only failure is >7 days ago. known_failures is used only as
     # a perf short-circuit: 0 over the whole window means 0 in the 7d subset too, so skip
     # the ~15s scan and render clean.
+    # v4.608 R2-008 / R2-113: ONLY a live count (known_from_live) is as fresh as the scan it skips.
+    # FACT_TASK_DAILY is loaded once a day (TASK_LOAD_DAILY, ~06:45 CT, holding TASK_HISTORY up to
+    # ~06:00), not hourly, so its zero says nothing about a failure since that load: the old
+    # mart-zero branch rendered a green "no failures" for up to ~24h over a failure the live scan
+    # below would show. A mart-served count now always falls through to that (hourly-cached) scan.
     _TITLE = "Failure root-cause timeline (7d)"
-    if known_failures is not None and known_failures <= 0:
+    if known_from_live and known_failures is not None and known_failures <= 0:
         section_header(_TITLE, alarm_health(0), "alerts")
-        if known_from_live:
-            empty_state("clean", "No task failures in the last 7 days for this scope.")
-        else:
-            # F10: the 0 came from the hourly FACT_TASK_DAILY mart, which lags the live
-            # TASK_HISTORY this body scans (mart rebuild ~1h + source ~45min), so a failure in
-            # the most recent hour may not be in it yet — disclose the basis instead of
-            # asserting a verified-fresh all-clear (bug-hunt 2026-08-30).
-            empty_state("clean", "No task failures in the last 7 days for this scope, per the "
-                        "hourly task mart — a failure in the most recent ~hour may not yet show.")
+        empty_state("clean", "No task failures in the last 7 days for this scope.")
         return
     # P6: hourly, not recent. This is the page's most expensive read (~15s: a 7-day
     # TASK_HISTORY failure scan) and ACCOUNT_USAGE.TASK_HISTORY lags up to ~45 min
@@ -1469,10 +1473,16 @@ def _reference_gap_panel(database: str = "") -> None:
                  "translation. Add the translation rows before the next cycle or the load "
                  "will fail on the missing code.")
         styled_table(df, height=280)
+        # v4.608 R2-109: SP_SCAN_REF_GAPS drops a check whose name fails its allowlist, so the alert claim
+        # names the scanned checks it does not cover (each is also warned about above)
+        _unalerted = [c.name for c in checks if not c.alerted]
         st.caption(f"Each row is a code present in the staging table but missing from {xlat}. "
                    "This is the generalized form of the manual morning check, run live across "
                    "every configured code type (pinned checks show under any Database scope). "
-                   "The daily PIPE_REF_GAP alert (once installed) pages on the same gap.")
+                   "The daily PIPE_REF_GAP alert (once installed) pages on the same gap"
+                   + (f", except for {', '.join(repr(n) for n in _unalerted)}, whose "
+                      f"{'name falls' if len(_unalerted) == 1 else 'names fall'} outside the alert's allowed "
+                      "characters (see the warning above)." if _unalerted else "."))
         result_caption(res)
 
 
@@ -2522,14 +2532,28 @@ def _builtin_objectives_panel(fc: dict, company: str = "ALL", days: int = 0, dat
          "source": "TASK_HISTORY (cadence + silence)"},
     ], page=_PAGE, tier="recent")
     _fres = _fb.get("fresh") if _fb is not None else None
-    fresh = task_freshness_status(_fres.df) if (_fres is not None and _fres.usable()) else None
+    _fres_ok = _fres is not None and _fres.usable()
+    fresh = task_freshness_status(_fres.df) if _fres_ok else None
     cyc = cycle_target_attainment(fc)
     cad = task_cadence_attainment(fresh)
-    _misses = ((cyc["judged"] - cyc["met"]) if cyc else 0) + ((cad["late"] + cad["stale"]) if cad else 0)
     # review r1: the cadence read is LIMIT 200 (most overdue against each task's own cadence first,
-    # PR-1 R1-129), so a capped "all on time" is not proven here -- never green then
+    # PR-1 R1-129), so a capped "all on time" is not proven by the rows alone -- never green then.
+    # v4.608 (PR-1 lead): the Tasks ▸ SLA rule, not a row count -- capped = the pre-LIMIT TOTAL_TASKS
+    # exceeds the rows read (exactly 200 tasks is the whole set, not a cap), and a capped all-on-time is
+    # PROVEN when the last task read is still inside its usual gap (_freshness_cut_is_safe: every task
+    # below the cut is less overdue). Only an unproven cut withholds green; an old-shape frame without
+    # TOTAL_TASKS keeps the row-count cap and is never proven.
+    _cad_total = 0
+    if cad:
+        if "TOTAL_TASKS" in _fres.df.columns:
+            _cad_total = int(safe_float(_fres.df["TOTAL_TASKS"].iloc[0]))
+            cad["capped"] = _cad_total > len(_fres.df)
+            cad["unproven"] = bool(cad["capped"] and not _freshness_cut_is_safe(_fres.df))
+        else:
+            cad["unproven"] = bool(cad.get("capped"))
+    _misses = ((cyc["judged"] - cyc["met"]) if cyc else 0) + ((cad["late"] + cad["stale"]) if cad else 0)
     _health = alarm_health(_misses) if (cyc or cad) else ""
-    if _health == "ok" and cad.get("capped"):
+    if _health == "ok" and cad.get("unproven"):
         _health = ""
     section_header("Built-in objectives", _health, "pipeline", anchor="ops-builtin-objectives")
     _settings = load_settings(_PAGE)
@@ -2564,9 +2588,11 @@ def _builtin_objectives_panel(fc: dict, company: str = "ALL", days: int = 0, dat
     if cad and cad["total"]:
         cad_tile = {"label": "Tasks on cadence", "value": f"{cad['on_time']}/{cad['total']}",
                     "severity": ("warn" if cad["on_time"] != cad["total"] else
-                                 "" if cad.get("capped") else "ok"),
+                                 "" if cad.get("unproven") else "ok"),
                     "delta": (f"{cad['late']} late · {cad['stale']} stale"
-                              + (" · top 200 read" if cad.get("capped") else "")), "delta_color": "off",
+                              + ((f" · {cad['total']:,} of {_cad_total:,} read" if _cad_total
+                                  else " · top 200 read") if cad.get("capped") else "")),
+                    "delta_color": "off",
                     "help": "Scheduled tasks on time against their OWN cadence (median gap, judged "
                             "against their longest normal gap). Late ~ one cadence overdue, stale ~ two "
                             "(silently stopped). Honors Company / Database / Schema; the cadence is read "
@@ -2585,7 +2611,10 @@ def _builtin_objectives_panel(fc: dict, company: str = "ALL", days: int = 0, dat
         "badge the Entity 360 watchlist."
         + (" Tasks on cadence is judged over the 200 tasks most overdue against their own cadence "
            "only (Tasks ▸ SLA reads the same 200)."
-           if cad.get("capped") else ""))
+           if cad.get("capped") else "")
+        # v4.608: a proven cut says why the capped tile may still be green
+        + (" The last task read is still inside its usual gap, so every task below the read is on time too."
+           if cad.get("capped") and not cad.get("unproven") else ""))
 
 
 def _cycle_eta_panel(fc: dict, night_res: QueryResult | None) -> None:
@@ -3104,7 +3133,9 @@ def _task_health_view(company: str, days: int, database: str = "",
     # PR-1 R1-127: the mart's zero is only proof for the trailing 7 days the timeline scans when the
     # window CONTAINS them. Last month ends at the 1st of this month, so a failure-free August
     # short-circuited the 7-day TASK_HISTORY scan into a green "no failures in the last 7 days".
-    _kf = None if is_prior_month_window(bounds) else known_failed
+    # v4.608 R2-008 / R2-113: nor is a MART count proof -- FACT_TASK_DAILY loads once a day (~06:45 CT),
+    # so only the live fallback's count (read on the recent tier, through ~45 min ago) may skip the scan.
+    _kf = None if (_from_mart or is_prior_month_window(bounds)) else known_failed
     _failure_timeline_section(company, database, schema_contains,
                               known_failures=_kf if days >= 7 else None,
                               known_from_live=not _from_mart)
@@ -4058,6 +4089,13 @@ def _stmt_timeout_posture_panel(company: str, days: int) -> None:
         # review C15/C20: the ENFORCED value (0 = the 7-day maximum reads 168h, never "0s")
         stmt_timeout.account_value_kpi(account_s, acct_how),
     ])
+    # v4.608 R2-099: the timeout values are metadata-tier SHOW PARAMETERS, a process-wide cache entry up to
+    # 4h old until Refresh data, so a cap set since that read still reads Uncapped here -- and the script
+    # below would LOOSEN it (its undo would erase it). Said beside the KPI and inside the script, which is
+    # pasted into a worksheet without this page around it.
+    _show_age = humanize_duration(CACHE_TTLS["metadata"])
+    st.caption(f"Timeout values come from SHOW PARAMETERS cached for up to {_show_age} (Refresh data in the "
+               "sidebar re-reads them): a cap set since that read still shows as Uncapped here.")
     entity_nav_table(
         posture[stmt_timeout.DISPLAY_COLUMNS], key=f"ops_wh_timeout_tbl_{company}",
         key_col="WAREHOUSE_NAME", entity_type="WAREHOUSE", column_config={
@@ -4081,6 +4119,9 @@ def _stmt_timeout_posture_panel(company: str, days: int) -> None:
                     "and the run counts show as a dash.", detail=tail.error)
     script = stmt_timeout.fix_script(posture, tail_days, tail_ok=tail.ok)
     if script:
+        script = (f"-- Values read from SHOW PARAMETERS cached for up to {_show_age}. Before each ALTER, re-check "
+                  "it with SHOW PARAMETERS LIKE 'STATEMENT_TIMEOUT_IN_SECONDS' IN WAREHOUSE <name>: a cap set "
+                  "since that read would be loosened, and its undo would erase it.\n" + script)
         st.caption("Review only — nothing here runs. Check each line, delete the warehouses that "
                    "legitimately run longer, then paste into a worksheet. Each ALTER is followed by its "
                    "exact undo as a comment.")
@@ -4523,6 +4564,23 @@ _EMERGENCY_CATALOG = """
 """
 
 
+def _emergency_warehouse(label: str, names: list, key: str) -> str:
+    """The warehouse an Emergency lever or the kill-switch targets (v4.608 R2-100).
+
+    ``names`` is SHOW WAREHOUSES on the metadata tier: a process-wide cache entry up to 4h old until
+    Refresh data, so a warehouse created since -- often the runaway one -- is missing from it. A name typed
+    in the box under the pick always wins, upper-cased like the unquoted identifier the levers emit (the
+    lever builders validate it, remediation._ident; the kill-switch binds it as a string literal). With
+    no list the box is the only input, as before. Returns '' when nothing is picked or typed."""
+    picked = st.selectbox(label, names, key=key) if names else ""
+    typed = st.text_input(
+        f"{label}: not in the list? Type its name" if names else label, key=f"{key}_txt",
+        help=(f"The list is SHOW WAREHOUSES, cached for up to {humanize_duration(CACHE_TTLS['metadata'])} "
+              "(Refresh data in the sidebar re-reads it), so a warehouse created since is missing; a name "
+              "typed here is used instead of the pick."))
+    return str(typed or "").strip().upper() or str(picked or "")
+
+
 def _emergency_tab(is_operator: bool) -> None:
     """On-the-fly incident levers: generate exact SQL, confirm, execute, audit."""
     st.caption(
@@ -4560,8 +4618,7 @@ def _emergency_tab(is_operator: bool) -> None:
     try:
         if action in ("Suspend warehouse", "Resume warehouse", "Warehouse statement timeout",
                       "Cluster range", "Scaling policy"):
-            wh = (st.selectbox("Warehouse", wh_names, key="emg_wh") if wh_names
-                  else st.text_input("Warehouse", key="emg_wh_txt"))
+            wh = _emergency_warehouse("Warehouse", wh_names, "emg_wh")
             if action == "Suspend warehouse" and wh:
                 stmt = remediation.suspend_warehouse(wh)
             elif action == "Resume warehouse" and wh:
@@ -4695,8 +4752,7 @@ def _emergency_extras(is_operator: bool) -> None:
             _rqdf.columns = [str(c).lower() for c in _rqdf.columns]
             if "name" in _rqdf.columns:
                 _rq_names = sorted(_rqdf["name"].astype(str))
-        _rq_pick = (st.selectbox("Warehouse to inspect", _rq_names, key="emg_rq_wh")
-                    if _rq_names else st.text_input("Warehouse to inspect", key="emg_rq_wh_txt"))
+        _rq_pick = _emergency_warehouse("Warehouse to inspect", _rq_names, "emg_rq_wh")
         if not _rq_pick:
             st.caption("Pick a warehouse — the in-flight view is per warehouse "
                        "(current-user scoping is unavailable inside SiS).")
@@ -4840,7 +4896,10 @@ def render() -> None:
                     "the Tasks-on-cadence objective, which reads its cadence over max(Window, 14) days, "
                     "capped at 90. "
                     "The SLA finish forecast, projected finish and cycle timeline use fixed 14-night "
-                    "baselines. (The DQ row-volume panel is "
+                    "baselines. The ETL run panels (workflow runtimes, failure recurrence, runtime creep, "
+                    "recon recurrence) judge the newest run, so they read the Window as a span ending now: "
+                    "under Last month, that many days back from today, never the closed month; each "
+                    "caption names the span it read. (The DQ row-volume panel is "
                     "still account-wide.)",
         },
         "Release compare": {

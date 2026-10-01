@@ -1205,7 +1205,14 @@ ORDER BY 1
 
 def warehouse_concurrency_peaks(days: int, company: str = "ALL") -> str:
     """Peak running/queued load per warehouse — right-size multi-cluster
-    BEFORE queuing hurts, not after."""
+    BEFORE queuing hurts, not after.
+
+    PEAK_QUEUED is TRUNCATED to one decimal, never rounded (v4.608, PR-1 lead): the Warehouses
+    opener keeps a warehouse in its queue signal at PEAK_QUEUED >= 1.0
+    (anomaly.warehouse_attention_ranking's queue_floor), and ROUND turned a 0.95 peak into 1.0,
+    so a warehouse that never averaged one queued query passed that floor. TRUNC keeps
+    ``PEAK_QUEUED >= 1.0`` exactly ``MAX(AVG_QUEUED_LOAD) >= 1``; the shown value can read up to
+    0.1 low, never high."""
     days = bounded_days(days)
     where = and_where(
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
@@ -1215,7 +1222,7 @@ def warehouse_concurrency_peaks(days: int, company: str = "ALL") -> str:
 SELECT
     WAREHOUSE_NAME,
     ROUND(MAX(AVG_RUNNING), 1) AS PEAK_RUNNING,
-    ROUND(MAX(AVG_QUEUED_LOAD), 1) AS PEAK_QUEUED,
+    TRUNC(MAX(AVG_QUEUED_LOAD), 1) AS PEAK_QUEUED,
     COUNT_IF(AVG_QUEUED_LOAD > 0.5) AS QUEUED_INTERVALS,
     COUNT(*) AS INTERVALS
 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_LOAD_HISTORY
