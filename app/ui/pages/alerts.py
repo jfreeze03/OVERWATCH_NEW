@@ -117,6 +117,33 @@ def _failed_read(res: QueryResult, sentence: str, setup: str = _SOURCE_ABSENT) -
     return True
 
 
+# Row caps of the LIMITed alert reads whose length a label used to print as a count (reviews R1-177/R1-179):
+# the open feed (mart_sql.open_alert_events, shared with Control Room), the snoozed tray, and the drawer's
+# rule history (mart_sql.events_for_rule's fixed LIMIT 20).
+_OPEN_FEED_CAP = 500
+_SNOOZED_CAP = 100
+_RULE_HISTORY_CAP = 20
+
+
+def _capped_count(n: int, cap: int) -> str:
+    """A count read off a LIMIT-``cap`` frame: 'N+' once the frame is full (more may exist past the cap)."""
+    return f"{n:,}+" if n >= cap else f"{n:,}"
+
+
+def _feed_fallback_counts(df: pd.DataFrame, cap: int) -> tuple[int, int, int, str, str, str, bool]:
+    """(crit, high, total, crit_text, high_text, total_text, capped) counted from the open feed when the uncapped
+    count failed (review R1-177). The feed is severity-first then newest, LIMIT ``cap``: once it is full the total
+    is a floor ('500+'); CRITICAL is exact only if the feed also holds a less severe row, HIGH only if it holds a
+    MEDIUM/LOW one -- otherwise more of that severity may lie past the cap. Pure."""
+    sev = df["SEVERITY"].astype(str).str.upper() if "SEVERITY" in df.columns else pd.Series(dtype=str)
+    crit, high, total = int((sev == "CRITICAL").sum()), int((sev == "HIGH").sum()), len(df)
+    if total < cap:
+        return crit, high, total, f"{crit}", f"{high}", f"{total}", False
+    crit_s = f"{crit}" if bool((sev != "CRITICAL").any()) else f"{crit}+"
+    high_s = f"{high}" if bool((~sev.isin(("CRITICAL", "HIGH"))).any()) else f"{high}+"
+    return crit, high, total, crit_s, high_s, f"{total}+", True
+
+
 RESOLUTION_KINDS = ("ACTIONED", "NOISE", "EXPECTED")
 
 
@@ -1330,7 +1357,12 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                         key=f"hist_rule_{event_id[:8]}", tier="recent",
                         source="ALERT_EVENTS (90d, this rule)")
                     if hist.usable() and len(hist.df) > 1:
-                        with st.expander(f"This rule recently ({len(hist.df)} events)"):
+                        # review R1-179: events_for_rule is LIMIT 20 -- at the cap the count is the latest 20,
+                        # not the rule's 90-day total
+                        _hn = len(hist.df)
+                        with st.expander("This rule recently ("
+                                         + (f"latest {_hn}" if _hn >= _RULE_HISTORY_CAP else f"{_hn}")
+                                         + " events)"):
                             styled_table(hist.df, height=220)
                     # rec26: how was this resolved last time? The kind + note from the account's
                     # own history is a playbook this exact alert has earned. styled_table (not
@@ -1620,7 +1652,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
     # renders OUTSIDE the `if guard(events, ...)` block on purpose: an empty open
     # feed must not present a green "found nothing over threshold" all-clear while a
     # snoozed CRITICAL is still pending (it would be invisible until its auto-wake).
-    _snz = run(mart_sql.snoozed_alert_events(100, company), page=_PAGE,
+    _snz = run(mart_sql.snoozed_alert_events(_SNOOZED_CAP, company), page=_PAGE,
                key=f"alert_snoozed_{company}", tier="live",
                source="ALERT_EVENTS (STATUS=SNOOZED)", probe=True)
     if not _snz.ok:
@@ -1631,7 +1663,12 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
         # a not-ok here is transient, not an absent-column benign miss.)
         st.caption("💤 Snoozed-events check unavailable — a snoozed alert may still be pending.")
     if _snz.usable() and not _snz.empty:
-        with st.expander(f"💤 Snoozed ({len(_snz.df)}) — hidden from triage until their wake time"):
+        # review R1-179: the read is LIMITed, so a full tray is a floor ('100+'), never the snoozed total
+        with st.expander(f"💤 Snoozed ({_capped_count(len(_snz.df), _SNOOZED_CAP)}) — hidden from triage "
+                         "until their wake time"):
+            if len(_snz.df) >= _SNOOZED_CAP:
+                st.caption(f"Showing the {_SNOOZED_CAP} soonest to wake — more events are snoozed; the rest "
+                           "wake on schedule.")
             # F52: a relative countdown, soonest wake first — a snooze reads as
             # a running timer, not a black-hole timestamp.
             _sdf = _snz.df.copy()
@@ -1774,31 +1811,41 @@ def render() -> None:
         # The uncapped aggregate owns the tiles; feed-derived counts are only a
         # labeled fallback when that tiny aggregate fails.
         _counts_known = counts.usable()
+        crit_s, high_s, total_s, _feed_capped = f"{crit_n}", f"{high_n}", f"{total_n}", False
         if not _counts_known and events.ok:
             if events.empty:
                 crit_n = high_n = total_n = 0
+                crit_s = high_s = total_s = "0"
             else:
-                _sev = events.df["SEVERITY"].astype(str).str.upper()
-                crit_n = int((_sev == "CRITICAL").sum())
-                high_n = int((_sev == "HIGH").sum())
-                total_n = len(events.df)
+                # review R1-177: counted from the LIMIT-capped feed, so a full feed is a floor ('500+'), never
+                # a total that silently stops at the cap during a storm
+                crit_n, high_n, total_n, crit_s, high_s, total_s, _feed_capped = _feed_fallback_counts(
+                    events.df, _OPEN_FEED_CAP)
             _counts_known = True
         if _counts_known:
             kpi_row([
-                {"label": "Open critical", "value": f"{crit_n}",
+                {"label": "Open critical", "value": crit_s,
                  "severity": "bad" if crit_n else "ok",
                  "delta_color": "inverse" if crit_n else "off"},
-                {"label": "Open high", "value": f"{high_n}",
+                {"label": "Open high", "value": high_s,
                  "severity": "warn" if high_n else "ok"},
                 # v4.461 P2: 'Open total' is neutral — a colored card stripe should
                 # always mean a threshold was crossed (P0/F13). Critical/high above
                 # carry the severity; the running total is context.
-                {"label": "Open total", "value": f"{total_n}",
+                {"label": "Open total", "value": total_s,
                  "help": ("True open+ack count across all severities. The feed table below "
-                          "shows the 500 most severe/newest; tiles count every open event."
-                          if counts.usable() and total_n > 500
+                          f"shows the {_OPEN_FEED_CAP} most severe/newest; tiles count every open event."
+                          if counts.usable() and total_n > _OPEN_FEED_CAP
+                          else f"Counted from the {_OPEN_FEED_CAP}-row feed because the uncapped count "
+                               "failed; at least this many are open."
+                          if _feed_capped
                           else "Open + acknowledged events across all severities.")},
             ])
+            if not counts.usable():
+                # house law 8: say which path served the tiles
+                st.caption(f"Tiles counted from the open-events feed (capped at {_OPEN_FEED_CAP} rows) — the "
+                           "uncapped count failed"
+                           + ("; '+' marks a floor, more may be open." if _feed_capped else "."))
         _open_events_section(events, is_operator, company)
     elif section == "Rules":
         # r-ux: a "Jump to > Rule · X" palette pick lands here with rule_id in the nav context —
