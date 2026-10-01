@@ -213,3 +213,42 @@ def test_add_to_case_hands_raw_cells_with_nulls_as_none():
     body = comp.split("def add_to_case_button", 1)[1].split("\ndef ", 1)[0]
     assert "head.astype(str)" not in body                 # stringified NULLs before case_file saw them
     assert "preview_rows=head.astype(object).where(head.notna(), None).to_numpy().tolist()" in body
+
+
+# ---- R1-112: no idle evidence is not 0% idle in the adaptive-compute candidacy -----------------
+
+
+def _bursty_80pct_idle():
+    from app.logic.adaptive import adaptive_compute_candidacy
+    # 1 cr/hr 08-17 with a 15 cr peak at 12-14: bursty (6.7x peak-to-mean), ~52 cr/day
+    prof = {**dict.fromkeys(range(8, 18), 1.0), 12: 15.0, 13: 15.0, 14: 15.0}
+    hourly = pd.DataFrame({"WAREHOUSE_NAME": ["WH_B"] * len(prof), "HOUR_OF_DAY": list(prof),
+                           "AVG_CREDITS": list(prof.values())})
+    idle = pd.DataFrame({"WAREHOUSE_NAME": ["WH_B"], "TOTAL_CREDITS": [1000.0], "IDLE_CREDITS": [800.0]})
+    other = pd.DataFrame({"WAREHOUSE_NAME": ["WH_OTHER"], "TOTAL_CREDITS": [10.0], "IDLE_CREDITS": [1.0]})
+    return adaptive_compute_candidacy, hourly, idle, other
+
+
+def test_adaptive_with_idle_evidence_routes_heavy_idle_to_auto_suspend():
+    score, hourly, idle, _ = _bursty_80pct_idle()
+    row = score(hourly, idle).iloc[0]
+    assert row["VERDICT"] == "Auto-suspend first" and float(row["IDLE_PCT"]) == 80.0
+
+
+def test_adaptive_without_idle_evidence_shows_no_idle_pct_and_no_discount():
+    score, hourly, _, other = _bursty_80pct_idle()
+    # the idle read failed (None), or the warehouse is missing from the LIMIT-100 idle frame
+    for idle in (None, other):
+        row = score(hourly, idle).iloc[0]
+        assert pd.isna(row["IDLE_PCT"]), idle                 # "—", never a made-up 0%
+        assert "idle n/a" in row["RATIONALE"]
+        assert row["VERDICT"] == "Strong candidate"           # no discount, and no idle override
+        assert int(row["SCORE"]) == 100
+
+
+def test_adaptive_panel_surfaces_a_failed_idle_read():
+    from tests._source import read as _read
+    body = _read("app/ui/pages/operations.py").split("def _adaptive_candidacy_panel", 1)[1].split("\ndef ", 1)[0]
+    i = body.index("if not idle.ok:")
+    assert 'empty_state("unavailable", "The idle read failed' in body[i:i + 600]
+    assert "detail=str(idle.error" in body[i:i + 600]

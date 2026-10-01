@@ -3955,6 +3955,12 @@ def _adaptive_candidacy_panel(company: str, days: int, *, bounds: tuple | None =
                "lever); flat load ⇒ a fixed size is fine. An ordering heuristic — the rationale "
                "shows the inputs.")
     result_caption(hourly)
+    if not idle.ok:
+        # The scores above carry no idle discount and no auto-suspend routing (IDLE_PCT "—");
+        # say so instead of letting the methodology caption imply they do (R1-112).
+        empty_state("unavailable", "The idle read failed: these scores carry no idle discount and "
+                                   "no auto-suspend-first routing (Idle % shows —).",
+                    detail=str(idle.error or ""))
 
 def _contention_tab(company: str, days: int, *, bounds: tuple | None = None) -> None:
     _lm = "_lm" if bounds is not None else ""
