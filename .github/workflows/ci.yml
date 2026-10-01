@@ -110,8 +110,9 @@ jobs:
   #     a database other than the clone as a DDL / COMMENT / write / CALL /
   #     USE target (in any form: quoted or not, with or without a space after
   #     the keyword, db..object); runs CREATE / ALTER / DROP / UNDROP /
-  #     COMMENT ON of a kind whose name it cannot read (ALTER SESSION
-  #     included), IDENTIFIER(), TABLE() of a literal or variable, or
+  #     COMMENT ON of a kind whose name it cannot read (ALTER SESSION and
+  #     MODEL MONITOR included, and any whose name is followed straight by
+  #     a qualified one), IDENTIFIER(), TABLE() of a literal or variable, or
   #     EXECUTE IMMEDIATE of anything but a literal, a $$ block or a
   #     :variable; carries a GRANT or REVOKE,
   #     warehouse / monitor / account / user / integration / role / share /
@@ -131,8 +132,10 @@ jobs:
   #     a /* */ comment with no space on either side (the client deletes it,
   #     joining two tokens); and anywhere, client template syntax (<%, {#,
   #     &{, &name), which snow sql renders from the job's environment. In
-  #     any '...' string it refuses an escape it cannot decode in place
-  #     (\x, \u, octal, \b, \f): a string can run as SQL.
+  #     any '...' string, at every level, it refuses every backslash escape
+  #     but \', \", \\, \t and \n, which it decodes exactly as Snowflake
+  #     does (Snowflake drops the backslash of most others: DBA_MAINT\_DB is
+  #     DBA_MAINT_DB): a string can run as SQL.
   # The smoke only ever executes the rewritten copies. What keeps it off the
   # account's real notification integrations is that every clone task stays
   # SUSPENDED and EXECUTE TASK is refused, so the notifier and digest task

@@ -33,8 +33,9 @@ What the rewrite does, in order:
    * anywhere, holds client template syntax -- ``<%``, ``{#``, ``&{``, ``&name`` or ``&&`` -- which
      ``snow sql`` renders (``ctx.env`` reads the job's environment) before Snowflake sees the SQL;
    * in any '...' string, at any depth and at every level of a string inside a string, holds a
-     backslash escape the guard cannot decode in place (``\\x``, ``\\u``, octal, ``\\b``, ``\\f``; it
-     decodes ``\\t``, ``\\n`` and ``\\r`` as Snowflake does), since a string can run as SQL;
+     backslash escape other than ``\\'``, ``\\"``, ``\\\\``, ``\\t`` and ``\\n`` (those, and ``''``, it
+     decodes exactly as Snowflake does; Snowflake drops the backslash of most others, so ``\\_`` is
+     ``_``), since a string can run as SQL;
    * still names DBA_MAINT_DB in any case, anywhere;
    * carries, in code at any depth (``$$`` bodies included; ``--``, ``//`` and ``/* */`` comments read
      as whitespace, as Snowflake reads them; '...' strings ignored, except that a literal that runs as
@@ -50,7 +51,9 @@ What the rewrite does, in order:
      quoted or not, with or without a space after the keyword, ``db..object`` for db.PUBLIC.object, or
      a name ending in a dot that a concatenation completes at run time); runs a CREATE / ALTER / DROP /
      UNDROP / COMMENT ON of a kind ``_TARGET`` cannot read the name of (anything off ``_OBJECT_KIND``
-     but an ALTER TABLE sub-clause, ALTER SESSION included); uses ``IDENTIFIER(...)`` whatever its
+     but an ALTER TABLE sub-clause, ALTER SESSION and MODEL MONITOR included), or one whose name is
+     followed straight by a qualified name (a kind of two words whose first is a listed kind, where
+     ``_TARGET`` would read the second word as the name); uses ``IDENTIFIER(...)`` whatever its
      argument (in any '...' string too, around a literal, a bind or a variable), or ``TABLE(...)``
      around a literal, a bind or a variable (in code or in any string); or hands EXECUTE IMMEDIATE
      anything but a literal, a ``$$`` block or a ``:variable``;
@@ -197,7 +200,7 @@ _OBJECT_KIND = (
     r"|HYBRID|ICEBERG|EVENT)\s+)*"
     r"(?P<kind>DATABASE|SCHEMA|TABLE|VIEW|FUNCTION|PROCEDURE|TASK|STAGE|SEQUENCE|STREAM|PIPE|ALERT"
     r"|FILE\s+FORMAT|TAG|(?:MASKING|ROW\s+ACCESS|AGGREGATION|PROJECTION)\s+POLICY|STREAMLIT|NOTEBOOK"
-    rf"|SECRET|MODEL){_SEP}")
+    rf"|SECRET|MODEL(?!\s+MONITOR\b)){_SEP}")
 _TARGET = re.compile(
     rf"\b(?:(?:{_DDL_VERB})\s+{_OBJECT_KIND}"
     rf"|TRUNCATE(?:\s+(?:TABLE|MATERIALIZED\s+VIEW))?{_SEP}"
@@ -207,9 +210,12 @@ _TARGET = re.compile(
 # The inverse: every CREATE / ALTER / DROP / UNDROP / COMMENT ON in code is of an _OBJECT_KIND kind (so _TARGET
 # reads its name), a form _FORBIDDEN refuses, or an ALTER TABLE sub-clause (never a statement of its own).
 # Anything else -- DATA METRIC FUNCTION, SEMANTIC VIEW, SERVICE, a class instance such as SNOWFLAKE.ML.FORECAST,
-# ALTER SESSION -- is refused until it is reviewed here.
+# ALTER SESSION, MODEL MONITOR -- is refused until it is reviewed here.
 _DDL = re.compile(rf"\b(?:{_DDL_VERB})\b", re.I)
 _DDL_KIND = re.compile(rf"\s+{_OBJECT_KIND}", re.I)
+# A kind of two words whose first is a listed kind word (MODEL MONITOR before it was named above, or any added
+# later) has _TARGET read its second word as the name: a DDL name followed straight by a qualified one is refused.
+_NAME_AFTER_NAME = re.compile(rf"\s*(?:IF\s+(?:NOT\s+)?EXISTS{_SEP})?{_PART}\s*\.", re.I)
 _ALTER_SUBCLAUSE = re.compile(
     r"(?:ALTER|DROP)\s+COLUMN\b|DROP\s+(?:CONSTRAINT|DEFAULT|NOT\s+NULL|PRIMARY\s+KEY|UNIQUE|FOREIGN\s+KEY"
     r"|CLUSTERING\s+KEY|SEARCH\s+OPTIMIZATION)\b", re.I)
@@ -222,13 +228,13 @@ _SPAN_OPEN = re.compile(r"--|//|/\*|\$\$|['\"]")
 # A client command line (!source, !load ... of a file or a URL): the client acts on it and Snowflake never
 # sees it.
 _CLIENT_COMMAND = re.compile(r"^!", re.M)
-# Backslash escapes in a '...' string: Snowflake decodes \t, \n and \r to whitespace (literal_sql does too)
-# and \xhh, \uhhhh, octal, \b and \f to characters literal_sql cannot put in place, so a string that can run
-# as SQL could spell a quote, a ; or DBA_MAINT\x5fDB unread; those are refused in every string, at every
-# level of a string inside a string (``_unread_escapes``).
-_DECODED_ESCAPE = {"\\t": "  ", "\\n": " \n", "\\r": " \n"}
-_ESCAPE = re.compile(r"\\(.)", re.S)
-_UNDECODED = frozenset("xXuU0123456789bBfF")
+# Escapes in a '...' string. literal_sql decodes these exactly as Snowflake does. Snowflake decodes \xhh,
+# \uhhhh, octal, \b, \f and \r to characters too, and drops the backslash of any other (\_ is _, \A is A), so
+# a string that can run as SQL could spell a quote, a ; or DBA_MAINT\_DB in a way no check reads; every escape
+# but these is refused in every string, at every level of a string inside a string (``_unread_escapes``).
+# (\r is refused, not decoded: whether a carriage return ends a -- comment is the reader's own rule.)
+_DECODED_ESCAPE = {"''": "'", "\\'": "'", '\\"': '"', "\\\\": "\\", "\\t": "\t", "\\n": "\n"}
+_ESCAPE = re.compile(r"\\.", re.S)
 # Client templating: snow sql renders <% %> / &{ } / SnowSQL &name (&& an escape) and drops Jinja {# #}
 # comments in every statement, strings and $$ bodies included, before Snowflake sees it; ctx.env.* reads the
 # job's environment (SNOWFLAKE_DATABASE is DBA_MAINT_DB there).
@@ -289,25 +295,28 @@ def _interior(literal: str) -> str:
 
 
 def literal_sql(interior: str) -> str:
-    """A '...' literal's interior as the SQL it holds, same length: each escaped character ('' or a
-    backslash pair) becomes a space plus the character, so ``''x''`` reads as `` 'x '``, and \\t, \\n
-    and \\r become the whitespace and line break Snowflake decodes them to (a line break ends a ``--``
-    comment). The escapes it cannot decode in place (\\x, \\u, octal, \\b, \\f) are refused
-    (``_unread_escapes``)."""
-    return re.sub(r"''|\\.", lambda m: _DECODED_ESCAPE.get(m.group(0), " " + m.group(0)[1]), interior,
-                  flags=re.S)
+    """A '...' literal's interior as the SQL it holds, decoded as Snowflake decodes it -- ``''`` and \\'
+    to a quote, \\" to a double quote, \\\\ to a backslash, \\t to a tab, \\n to a line break, and any
+    other escape to its character (Snowflake's rule for all but \\x, \\u, octal, \\b, \\f and \\r; every
+    one of these others is refused by ``_unread_escapes``) -- then padded with spaces at its end to the
+    interior's length. Decoded characters stay side by side, so a quote run such as ``''''`` reads as the
+    ``''`` Snowflake reads one level down, never as two strings; offsets inside it are approximate (they
+    serve the line of a finding only)."""
+    decoded = re.sub(r"''|\\.", lambda m: _DECODED_ESCAPE.get(m.group(0), m.group(0)[1]), interior,
+                     flags=re.S)
+    return decoded + " " * (len(interior) - len(decoded))
 
 
 def _unread_escapes(sql: str) -> list[int]:
-    """Offsets in ``sql`` of the backslash escapes ``literal_sql`` cannot decode in place, in every '...'
-    string at any depth (``$$`` bodies included) and -- each string read as the SQL it would run -- in the
-    strings inside it, at every level."""
+    """Offsets in ``sql`` of the backslash escapes ``literal_sql`` does not decode as Snowflake does (all
+    but ``_DECODED_ESCAPE``), in every '...' string at any depth (``$$`` bodies included) and -- each string
+    read as the SQL it would run -- in the strings inside it, at every level."""
     found: list[int] = []
     for kind, start, end in _spans(sql):
         seg = sql[start:end]
         if kind == "string":
             body = _interior(seg)
-            found += [start + 1 + m.start() for m in _ESCAPE.finditer(body) if m.group(1) in _UNDECODED]
+            found += [start + 1 + m.start() for m in _ESCAPE.finditer(body) if m.group(0) not in _DECODED_ESCAPE]
             found += [start + 1 + at for at in _unread_escapes(literal_sql(body))]
         elif kind == "dollar":
             body = seg[2:-2] if len(seg) >= 4 and seg.endswith("$$") else seg[2:]
@@ -452,12 +461,15 @@ def _code_findings(sql: str, clone_db: str) -> list[tuple[int, str, str]]:
               if in_code(m.start())]
     found += [(m.start(), "system function", m.group(0)) for m in _SYSTEM_FUNCTION.finditer(view)
               if m.group(0).upper() not in _SYSTEM_FUNCTIONS]
-    found += [(m.start(), "name outside the clone", _snip(m.group(0))) for m in _TARGET.finditer(view)
+    targets = list(_TARGET.finditer(view))
+    found += [(m.start(), "name outside the clone", _snip(m.group(0))) for m in targets
               if (db := _target_db(m)) is not None and not _same_db(db, clone_db)]
     found += [(m.start(), "DDL of an unreviewed kind", _snip(view[m.start():m.end() + 40]))
               for m in _DDL.finditer(view)
               if not (_DDL_KIND.match(view, m.end()) or _ALTER_SUBCLAUSE.match(view, m.start())
                       or any(rx.match(view, m.start()) for _what, rx in _FORBIDDEN))]
+    found += [(m.start(), "DDL of an unreviewed kind", _snip(view[m.start():m.end() + 40]))
+              for m in targets if m.group("kind") and _NAME_AFTER_NAME.match(view, m.end())]
     # in code; and in any string, as written and as the SQL it would run (a string can be dynamic SQL)
     idents = {m.start(): _snip(m.group(0)) for m in _IDENTIFIER.finditer(view)}
     idents |= {m.start(): _snip(m.group(0)) for v in (kept, dynamic) for m in _IDENTIFIER_OF_VALUE.finditer(v)

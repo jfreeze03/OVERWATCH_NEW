@@ -18,10 +18,12 @@ notifier-CALL ban reaching into $$ bodies and dynamic-SQL strings. Step 0 also t
 email off in the clone, and ci.yml names the real send guarantee (suspended tasks + the CALL ban).
 
 v4.608 recheck #2-#6 and their siblings: the text guard now reads `//` comments, names with no space
-before a quote, `db..object`, every CREATE / ALTER / DROP kind (refusing the ones it cannot read) and
-IDENTIFIER() of any argument; it decodes string escapes as Snowflake does; and it refuses what the client
-(snow sql) reads differently from Snowflake -- a top-level `//`, a backslash in a quoted name, a `!`
-command, a comment joining two tokens, template syntax -- so what it checked is what runs.
+before a quote, `db..object`, every CREATE / ALTER / DROP kind (refusing the ones it cannot read, MODEL
+MONITOR and any name followed straight by a qualified one included) and IDENTIFIER() of any argument; it
+decodes '' and the escapes \\' \\" \\\\ \\t \\n exactly as Snowflake does and refuses every other escape
+(Snowflake reads \\_ as _); and it refuses what the client (snow sql) reads differently from Snowflake --
+a top-level `//`, a backslash in a quoted name, a `!` command, a comment joining two tokens, template
+syntax -- so what it checked is what runs.
 """
 
 from __future__ import annotations
@@ -322,8 +324,24 @@ def test_prose_strings_and_the_chains_dynamic_sql_shapes_stay_clean():
         _nested(f"ALTER TABLE {_CLONE}.OVERWATCH.T ALTER COLUMN C DROP NOT NULL;"),
         _nested("SELECT 1; // it's a note\n    SELECT 'two';"),
         "SELECT 1 /* a comment with a space beside it */ + 2, 'R & D';\n",
+        # the escapes the guard reads, in prose and in SQL it runs
+        "SELECT 'line one\\nline two\\tend', 'it\\'s', 'say \\\"hi\\\"', 'a\\\\b';\n",
+        _proc_executing(f"'INSERT INTO {_CLONE}.OVERWATCH.T (MSG) VALUES (''it\\'\\'s ''''quoted''''\\n'')'"),
+        _nested(f"ALTER TABLE {_CLONE}.OVERWATCH.T RENAME TO {_CLONE}.OVERWATCH.T2;"),
+        _nested(f"CREATE OR REPLACE TABLE {_CLONE}.OVERWATCH.T2 CLONE {_CLONE}.OVERWATCH.T;"),
     ):
         assert mod.violations(sql, _CLONE) == [], sql
+
+
+def test_the_escapes_it_reads_decode_exactly_as_snowflake_does():
+    """v4.608 recheck: each escape was read as a space plus its character, so two decoded quotes in a row
+    read as ' ' one level down; now the interior decodes exactly (padded at its end to keep its length)."""
+    mod = _mod()
+    interior = "a''b\\'c\\\"d\\\\e\\tf\\ng''''h"
+    decoded = "a'b'c\"d\\e\tf\ng''h"
+    assert mod.literal_sql(interior) == decoded + " " * (len(interior) - len(decoded))
+    # an escape it refuses is still read as Snowflake reads the "other" ones (the backslash dropped), not split
+    assert mod.literal_sql("DBA_MAINT\\_DB") == "DBA_MAINT_DB "
 
 
 # v4.608 recheck #2: Snowflake reads `//` as a line comment and the tokenizer did not, so an apostrophe in
@@ -358,6 +376,30 @@ def test_prose_strings_and_the_chains_dynamic_sql_shapes_stay_clean():
      {"string escape the guard cannot decode"}),
     (_nested("EXECUTE IMMEDIATE 'CALL\\tSP_NOTIFY_WEBHOOK()';"), {"notification send"}),
     (_nested("EXECUTE IMMEDIATE 'SELECT 1 -- x\\nDROP TABLE ALFA_EDW_PRD.PUBLIC.T';"), {"name outside the clone"}),
+    # v4.608 recheck: Snowflake drops the backslash of any other escape (\_ is _), which the guard read as a
+    # space, splitting the name; every escape but \' \" \\ \t \n is refused at every level
+    ("EXECUTE IMMEDIATE $$ BEGIN EXECUTE IMMEDIATE 'DELETE FROM DBA_MAINT\\_DB.OVERWATCH.SETTINGS'; END; $$;\n",
+     {"string escape the guard cannot decode", "name outside the clone"}),
+    (_proc_executing("'DELETE FROM DBA_MAI\\NT_DB.OVERWATCH.SETTINGS'"), {"string escape the guard cannot decode"}),
+    (_nested("EXECUTE IMMEDIATE 'GR\\ANT ROLE ACCOUNTADMIN TO USER BOB';"),
+     {"string escape the guard cannot decode", "grant or revoke"}),
+    (_nested("EXECUTE IMMEDIATE 'CREATE OR REPLACE TABLE ALFA\\_EDW_PRD.PUBLIC.T (A INT)';"),
+     {"string escape the guard cannot decode", "name outside the clone"}),
+    (_nested("LET s VARCHAR := 'CALL SP_NOTIFY\\_WEBHOOK()'; EXECUTE IMMEDIATE :s;"),
+     {"string escape the guard cannot decode", "notification send"}),
+    (_nested("LET s VARCHAR := 'SELECT SYSTEM\\$SEND_EMAIL(''i'', ''a'', ''s'', ''b'')'; EXECUTE IMMEDIATE :s;"),
+     {"string escape the guard cannot decode", "notification send"}),
+    # ... \r too: whether it ends a -- comment is the reader's call, so it is not read either way
+    (_nested("EXECUTE IMMEDIATE 'SELECT 1 -- x\\rDROP TABLE ALFA_EDW_PRD.PUBLIC.T';"),
+     {"string escape the guard cannot decode"}),
+    # ... and the escapes it reads decode exactly: a quote it read as ' ' (a space between two quotes) closed and
+    # reopened a string one level down that Snowflake reads as one string holding an escaped quote, and back
+    (_nested("EXECUTE IMMEDIATE 'EXECUTE IMMEDIATE ''BEGIN SELECT ''''a''''; DROP TABLE ALFA_EDW_PRD.PUBLIC.T; "
+             "END''';"), {"name outside the clone"}),
+    (_nested("EXECUTE IMMEDIATE 'EXECUTE IMMEDIATE \\'BEGIN SELECT \\'\\'a\\'\\'; DROP TABLE ALFA_EDW_PRD.PUBLIC.T; "
+             "END\\'';"), {"name outside the clone"}),
+    (_nested("EXECUTE IMMEDIATE 'BEGIN LET a := ''x\\\\'' ''; DROP TABLE ALFA_EDW_PRD.PUBLIC.T; LET c := ''y''; "
+             "END';"), {"name outside the clone"}),
     # a body in another language has other comment and string rules (# it's), so it is not read as SQL
     (f"CREATE OR REPLACE PROCEDURE {_CLONE}.OVERWATCH.P()\nRETURNS VARCHAR\nLANGUAGE PYTHON\n"
      "RUNTIME_VERSION = '3.11'\nPACKAGES = ('snowflake-snowpark-python')\nHANDLER = 'run'\nAS\n$$\n"
@@ -384,6 +426,16 @@ def test_comments_and_bodies_are_read_as_snowflake_and_the_client_read_them(sql,
     "CREATE OR REPLACE AGGREGATE FUNCTION ALFA_EDW_PRD.PUBLIC.F(A INT) RETURNS INT LANGUAGE SQL AS 'A'",
     "ALTER SESSION SET SEARCH_PATH = 'ALFA_EDW_PRD.PUBLIC'",
     "COMMENT ON COLUMN ALFA_EDW_PRD.PUBLIC.T.C IS 'x'",
+    # v4.608 recheck: MODEL MONITOR began with a listed kind (MODEL), and _TARGET read MONITOR as the name
+    "CREATE OR REPLACE MODEL MONITOR ALFA_EDW_PRD.PUBLIC.MM WITH MODEL = M SOURCE = S",
+    "ALTER MODEL MONITOR ALFA_EDW_PRD.PUBLIC.MM SUSPEND",
+    "DROP MODEL MONITOR IF EXISTS ALFA_EDW_PRD.PUBLIC.MM",
+    'DROP MODEL MONITOR"ALFA_EDW_PRD".PUBLIC.MM',
+    "CREATE MODEL MONITOR MM WITH MODEL = M SOURCE = S",
+    # ... and any kind spelled as a listed kind word plus another word: a name followed by a qualified name
+    'DROP MODEL "MONITOR" ALFA_EDW_PRD.PUBLIC.MM',
+    "DROP STAGE BUNDLE IF EXISTS ALFA_EDW_PRD..B",
+    'ALTER TASK GRAPH"ALFA_EDW_PRD".PUBLIC.G SUSPEND',
 ])
 def test_ddl_of_a_kind_the_guard_cannot_read_fails_closed_at_any_depth(sql):
     mod = _mod()
@@ -475,6 +527,13 @@ def test_main_writes_nothing_when_a_migration_is_unsafe(tmp_path):
     (root / "snowflake" / "migrations" / "V001__x.sql").write_text(
         "CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.T (A INT);\n"
         "grant usage on integration overwatch_email to role snow_sysadmins;\n", encoding="utf-8")
+    assert mod.main(["--out", str(out), "--clone-db", _CLONE, "--ci-warehouse", _WH, "--root", str(root)]) == 1
+    assert not out.exists()
+    # v4.608 recheck: an escaped production name (DBA_MAINT\_DB) was rewritten by nothing, so ci.yml's grep found
+    # no DBA_MAINT_DB in the copy and the replay ran it; now nothing is written
+    (root / "snowflake" / "migrations" / "V001__x.sql").write_text(
+        "EXECUTE IMMEDIATE $$ BEGIN EXECUTE IMMEDIATE 'DELETE FROM DBA_MAINT\\_DB.OVERWATCH.SETTINGS'; END; $$;\n",
+        encoding="utf-8")
     assert mod.main(["--out", str(out), "--clone-db", _CLONE, "--ci-warehouse", _WH, "--root", str(root)]) == 1
     assert not out.exists()
     (root / "snowflake" / "migrations" / "V001__x.sql").write_text(
