@@ -142,9 +142,9 @@ def _latest_proc(name: str) -> str:
     pat = re.compile(r"CREATE OR REPLACE PROCEDURE DBA_MAINT_DB\.OVERWATCH\." + name + r"\(")
     for mig in reversed(_MIGRATIONS):
         text = mig.read_text(encoding="utf-8")
-        hit = pat.search(text)
-        if hit:
-            return text[hit.start():text.index("\n$$;", hit.start())]
+        hits = list(pat.finditer(text))
+        if hits:
+            return text[hits[-1].start():text.index("\n$$;", hits[-1].start())]
     raise AssertionError(f"no migration defines {name}")
 
 
