@@ -7,6 +7,7 @@ contrast stays readable on the dark theme.
 
 from __future__ import annotations
 
+import math
 import re
 
 from app.ui import palette
@@ -171,7 +172,11 @@ def delta_css(value: object, column: object = "") -> str:
         v = float(value)
     except (TypeError, ValueError):
         return ""
-    if v == 0:
+    # A NULL delta reaches Styler.map as float NaN (_coerce_object_numerics), and
+    # float(nan) succeeds: NaN > 0 is False, so it used to read as a DECREASE and
+    # paint the em-dash cell green (red on a good-up column). A missing prior has
+    # no direction, and neither does ±inf.
+    if not math.isfinite(v) or v == 0:
         return ""
     is_good = (v > 0) == delta_up_is_good(column)
     if is_good:
