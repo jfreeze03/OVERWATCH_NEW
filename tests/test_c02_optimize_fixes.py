@@ -904,17 +904,26 @@ def _recording_receipts(monkeypatch) -> list[tuple[bool, str]]:
     return receipts
 
 
+_SCAN_BOOKS_RESIZE = ("The daily change scan books this resize to the Savings ledger and settles it against 14 days "
+                      "of measured actuals — the app logs the estimate to REMEDIATION_LOG instead of booking a second "
+                      "ledger row.")
+_APP_BOOKS_RESIZE = ("The daily change scan cannot rank a 5XLARGE warehouse, so it never books this resize: on Execute "
+                     "the app books this estimate as an ESTIMATED Savings ledger row — verify it there.")
+
+
 @_SKIP
-@pytest.mark.parametrize(("live_size", "pick", "receipt", "ledger_rows"), [
+@pytest.mark.parametrize(("live_size", "pick", "receipt", "ledger_rows", "caption"), [
     # a downsize from a size the change scan ranks: the scan books it, the app does not
-    ("Large", "SMALL", "the daily change scan books and settles the measured saving.", 0),
+    ("Large", "SMALL", "the daily change scan books and settles the measured saving.", 0, _SCAN_BOOKS_RESIZE),
     # an UPSIZE from a ranked size: the scan books only a downsize (V153), so no saving is promised
-    ("Medium", "LARGE", "no saving was booked (not a downsize from the current size).", 0),
-    # a downsize from a size the scan cannot rank (5X-Large): the app books the ESTIMATED row, and says so
-    ("5X-Large", "XXLARGE", "booked an estimated saving — verify it on the Savings ledger.", 1),
+    ("Medium", "LARGE", "no saving was booked (not a downsize from the current size).", 0,
+     "Resizing UP MEDIUM → LARGE raises cost — no saving booked."),
+    # a downsize from a size the scan cannot rank (5X-Large): the app books the ESTIMATED row, and says so --
+    # BEFORE Execute too (f2 fix-up: the pane promised the scan would book it, then the app booked a row)
+    ("5X-Large", "XXLARGE", "booked an estimated saving — verify it on the Savings ledger.", 1, _APP_BOOKS_RESIZE),
 ])
-def test_the_resize_receipt_says_only_what_was_booked(monkeypatch, live_size, pick, receipt, ledger_rows):
-    from test_cluster_cap_shaped import _page, _pick, _recording_writes
+def test_the_resize_receipt_says_only_what_was_booked(monkeypatch, live_size, pick, receipt, ledger_rows, caption):
+    from test_cluster_cap_shaped import _page, _pane, _pick, _recording_writes
 
     import app.ui.pages.cost_parts.optimize as opt
 
@@ -931,12 +940,82 @@ def test_the_resize_receipt_says_only_what_was_booked(monkeypatch, live_size, pi
     writes = _recording_writes(monkeypatch)
     receipts = _recording_receipts(monkeypatch)
     _pick(at).select(pick).run()
+    _code, text = _pane(at)
+    assert caption in text
+    # the scan's promise is made only where the scan books the resize (a ranked size, a downsize)
+    assert (_SCAN_BOOKS_RESIZE in text) is (caption == _SCAN_BOOKS_RESIZE)
     at.text_input(key="sizing_confirm").input("WH_LOW").run()
     at.button(key="sizing_btn").click().run()
     assert not at.exception
     assert f"ALTER WAREHOUSE WH_LOW SET WAREHOUSE_SIZE = '{pick}';" in writes
     assert sum("SAVINGS_LEDGER" in w for w in writes) == ledger_rows
     assert receipts == [(True, f"Resized WH_LOW to {pick}; {receipt}")]
+
+
+def _ledger_insert_refused(monkeypatch) -> list[str]:
+    """Every statement the Execute gate runs; each succeeds except a SAVINGS_LEDGER INSERT, which execute_statement
+    reports the way it reports any failure -- (False, msg), never an exception."""
+    import app.ui.pages.cost_parts.optimize as opt
+
+    writes: list[str] = []
+
+    def _execute(sql, **_kwargs):
+        writes.append(str(sql))
+        if "SAVINGS_LEDGER" in str(sql):
+            return False, "insufficient privileges"
+        return True, "Statement executed."
+
+    monkeypatch.setattr(opt, "execute_statement", _execute)
+    return writes
+
+
+@_SKIP
+def test_a_refused_resize_ledger_insert_is_never_receipted_as_booked(monkeypatch):
+    """f2 fix-up: 5X-Large -> XXLARGE is a downsize the scan cannot rank, so the app INSERTs the ESTIMATED row. When
+    that INSERT fails, the resize still happened but nothing was booked: the receipt says so and stays on screen
+    (pre-fix: 'booked an estimated saving' off the attempt alone -- the INSERT's (ok, msg) was discarded)."""
+    from test_cluster_cap_shaped import _page, _pick
+
+    import app.ui.pages.cost_parts.optimize as opt
+
+    at, _seen = _page(monkeypatch, check=True, select="WH_LOW", size="5X-Large")
+    cached_run = opt.run
+
+    def _run(*args, **kwargs):
+        sql = str(args[0] if args else kwargs.get("sql", ""))
+        if sql.startswith("SHOW WAREHOUSES LIKE"):
+            return _ok(pd.DataFrame({"name": ["WH_LOW"], "size": ["5X-Large"], "auto_suspend": [300]}))
+        return cached_run(*args, **kwargs)
+
+    monkeypatch.setattr(opt, "run", _run)
+    writes = _ledger_insert_refused(monkeypatch)
+    receipts = _recording_receipts(monkeypatch)
+    _pick(at).select("XXLARGE").run()
+    at.text_input(key="sizing_confirm").input("WH_LOW").run()
+    at.button(key="sizing_btn").click().run()
+    assert not at.exception
+    assert writes[0] == "ALTER WAREHOUSE WH_LOW SET WAREHOUSE_SIZE = 'XXLARGE';"
+    assert sum("SAVINGS_LEDGER" in w for w in writes) == 1                 # attempted once, refused
+    assert receipts == [(False, "Resized WH_LOW to XXLARGE, but the estimated saving could not be booked: "
+                                "insufficient privileges")]
+    assert not any("booked an estimated saving" in msg for _ok_flag, msg in receipts)
+
+
+@_SKIP
+def test_a_refused_tighten_ledger_insert_is_never_receipted_as_booked(monkeypatch):
+    """f2 fix-up, the tighten twin: a live never-suspend timer (0) is enabled to 60 s, which the scan never books, so
+    the app INSERTs the ESTIMATED row. Pre-fix _book_ledger was the INSERT's gate, not its result: a refused INSERT
+    was receipted 'executed and booked.'"""
+    at = _tighten_page(monkeypatch, cached=600, live=pd.DataFrame({"name": ["WH_X"], "auto_suspend": [0]}),
+                       executed=[], seen=[])
+    writes = _ledger_insert_refused(monkeypatch)
+    receipts = _recording_receipts(monkeypatch)
+    _execute_tighten(at)
+    assert writes[0] == "ALTER WAREHOUSE WH_X SET AUTO_SUSPEND = 60;"
+    assert sum("SAVINGS_LEDGER" in w for w in writes) == 1
+    assert receipts == [(False, "Tighten auto-suspend to 60s on WH_X — executed, but its estimated saving could not "
+                                "be booked: insufficient privileges")]
+    assert not any("and booked." in msg for _ok_flag, msg in receipts)
 
 
 # ---- R1-017 (sibling): a failed experiments read is named on the proven-fix transfer panel ------------------

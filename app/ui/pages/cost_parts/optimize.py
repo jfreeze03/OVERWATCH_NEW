@@ -991,6 +991,12 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                    "cached read): the estimate below uses the size in force now.")
                     _tgt_norm = normalize_size(target_size)
                     _sz_down = False      # a genuine downsize from the size in force now (the receipt keys on it)
+                    # Next-Fifty #5: the change scan (V038/V145) books a resize from XSMALL..4XLARGE and
+                    # settles it on measured actuals, so no manual row for those (it was a double-booking).
+                    # From a size the scan's map can't rank (5X/6X-LARGE) the app still books it. Decided
+                    # here, before the pane's caption, so the caption and the receipt name the same booker
+                    # (f2 fix-up: a 5X-LARGE downsize was promised a scan booking, then the app booked it).
+                    _sz_autobooked = remediation.autobook_books_change("RESIZE", _cur_size)
                     if _cur_size and _tgt_norm and _tgt_norm != _cur_size:
                         _steps = SIZE_ORDER.index(_tgt_norm) - SIZE_ORDER.index(_cur_size)
                         _sz_down = _steps < 0
@@ -1004,12 +1010,22 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             # 2026-08-30).
                             _idle = safe_float(srow.get("IDLE_MONTHLY_USD"))
                             est_sz = round(max(0.0, _idle * (1.0 - 2.0 ** _steps)), 2)
+                            if _sz_autobooked:
+                                _sz_booker = ("The daily change scan books this resize to the Savings ledger "
+                                              "and settles it against 14 days of measured actuals — the app "
+                                              "logs the estimate to REMEDIATION_LOG instead of booking a "
+                                              "second ledger row.")
+                            elif est_sz > 0:
+                                _sz_booker = (f"The daily change scan cannot rank a {_cur_label} warehouse, so "
+                                              "it never books this resize: on Execute the app books this "
+                                              "estimate as an ESTIMATED Savings ledger row — verify it there.")
+                            else:
+                                _sz_booker = (f"The daily change scan cannot rank a {_cur_label} warehouse, so "
+                                              "it never books this resize, and with no idle-hour saving to "
+                                              "estimate the app books none.")
                             st.caption(f"Projected saving ~${est_sz:,.0f}/mo resizing {_cur_label} → "
                                        f"{target_size} (only idle-hour credits reliably shrink; busy "
-                                       "compute-bound work runs ~2x longer on a smaller size). The daily "
-                                       "change scan books this resize to the Savings ledger and settles it "
-                                       "against 14 days of measured actuals — the app logs the estimate to "
-                                       "REMEDIATION_LOG instead of booking a second ledger row.")
+                                       "compute-bound work runs ~2x longer on a smaller size). " + _sz_booker)
                         else:  # an upsize is a cost increase — never a booked saving
                             st.caption(f"Resizing UP {_cur_label} → {target_size} raises cost — no saving "
                                        "booked.")
@@ -1037,23 +1053,21 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             from app.ui.components import log_ui_event
                             log_ui_event("remediation_exec", page=_PAGE)
                             st.session_state["_sizing_clear_confirm"] = True
-                        # Next-Fifty #5: the change scan (V038/V145) books a resize from XSMALL..4XLARGE and
-                        # settles it on measured actuals, so no manual row for those (it was a double-booking).
-                        # From a size the scan's map can't rank (5X/6X-LARGE) the app still books it.
-                        _sz_autobooked = remediation.autobook_books_change("RESIZE", _cur_size)
-                        # c02 recheck: the receipt keys off whether a SAVINGS_LEDGER row was actually inserted
-                        # (the tighten path's _book_ledger), never off the scan flag alone -- after a failed
-                        # live size read (no size, est 0, not autobooked) it said a saving was booked.
-                        _sz_booked = False
+                        # c02 recheck: the receipt keys off whether a SAVINGS_LEDGER row was actually inserted,
+                        # never off the scan flag alone -- after a failed live size read (no size, est 0, not
+                        # autobooked) it said a saving was booked. f2 fix-up: "inserted" is the INSERT's own
+                        # result -- execute_statement reports a refusal as (False, msg), it never raises, so
+                        # setting the flag after the call receipted a refused INSERT as booked.
+                        _sz_booked, _sz_book_failed, _sz_book_msg = False, False, ""
                         if ok and est_sz > 0 and not _sz_autobooked:
-                            execute_statement(
+                            _sz_booked, _sz_book_msg = execute_statement(
                                 f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
                                 "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES, FINDING_TYPE, TARGET_OBJECT) "
                                 f"SELECT {sql_literal('Resize ' + str(srow['WAREHOUSE_NAME']) + ' to ' + target_size)}, "
                                 f"'ESTIMATED', {sql_number(est_sz)}, {sql_literal(stmt_sz)}, "
                                 "'Booked from sizing simulator; verify with a proof run on the Savings ledger.', "
                                 f"'RESIZE', {sql_literal(str(srow['WAREHOUSE_NAME']))}", page=_PAGE)
-                            _sz_booked = True
+                            _sz_book_failed = not _sz_booked
                         stamp_write("sizing", ok)  # C48
                         # r-ux: name the object + effect (was generic "Statement executed.")
                         # The scan books only a DOWNSIZE from a size it ranks (V153's SIZE arm: new rank < old),
@@ -1068,8 +1082,15 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             _sz_receipt = "no saving was booked (not a downsize from the current size)."
                         else:
                             _sz_receipt = "no saving was booked (no idle-hour saving to estimate)."
-                        notify(ok, msg if not ok else
-                               f"Resized {srow['WAREHOUSE_NAME']} to {target_size}; " + _sz_receipt)
+                        if not ok:
+                            notify(False, msg)
+                        elif _sz_book_failed:
+                            # the resize ran; its saving did not land: a persistent error, not a toast (rec48),
+                            # so the operator books it by hand or fixes the grant
+                            notify(False, f"Resized {srow['WAREHOUSE_NAME']} to {target_size}, but the estimated "
+                                          f"saving could not be booked: {_sz_book_msg}")
+                        else:
+                            notify(True, f"Resized {srow['WAREHOUSE_NAME']} to {target_size}; " + _sz_receipt)
             _whatif_panel(sized, sizing_days, rate)
             result_caption(prof_res)
 
@@ -2592,16 +2613,25 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         )
                         execute_statement(log_sql, page=_PAGE)
                         _book_ledger = ok and est_monthly > 0 and not _autobooked
+                        # f2 fix-up: the INSERT's own (ok, msg) -- execute_statement reports a refusal as
+                        # (False, msg), it never raises, so the gate alone receipted a refused INSERT as booked.
+                        _ledger_ok, _ledger_msg = True, ""
                         if _book_ledger:
-                            execute_statement(ledger_sql, page=_PAGE)
+                            _ledger_ok, _ledger_msg = execute_statement(ledger_sql, page=_PAGE)
                         stamp_write("remed", ok)  # C48
-                        # "booked" only when a SAVINGS_LEDGER row was actually inserted (_book_ledger)
-                        # — else it over-claims a booking that didn't happen.
-                        notify(ok, msg if not ok else
-                               f"{fix_kind} on {wh_pick} — executed"
-                               + (" and booked." if _book_ledger
-                                  else "; the daily change scan books and settles its measured saving."
-                                  if _autobooked else "."))
+                        # "booked" only when a SAVINGS_LEDGER row was actually inserted (_book_ledger and the
+                        # INSERT succeeded) — else it over-claims a booking that didn't happen.
+                        if not ok:
+                            notify(False, msg)
+                        elif _book_ledger and not _ledger_ok:
+                            # the ALTER ran; its saving did not land: a persistent error, not a toast (rec48)
+                            notify(False, f"{fix_kind} on {wh_pick} — executed, but its estimated saving could "
+                                          f"not be booked: {_ledger_msg}")
+                        else:
+                            notify(True, f"{fix_kind} on {wh_pick} — executed"
+                                   + (" and booked." if _book_ledger
+                                      else "; the daily change scan books and settles its measured saving."
+                                      if _autobooked else "."))
                 else:
                     st.caption("Copy the SQL freely; executing from the app requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
 
