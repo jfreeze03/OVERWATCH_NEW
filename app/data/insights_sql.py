@@ -171,10 +171,29 @@ def repeat_query_fingerprints(days: int, company: str = "ALL", min_runs: int = 1
     result cache scans nothing — averaging its 0% "local cache" reading in made
     well-cached families look cache-poor); a family whose runs ALL scan zero
     bytes is fully cached already, hence the COALESCE to 100.
+
+    R1-144 (uncapped aggregate): the page's "Repeated fingerprints" / "Compute in repeats" /
+    "Materialization candidates" tiles are WINDOW totals, but the frame stops at LIMIT 100 (under the
+    5000-row run() cap, so it is never marked truncated) — they pinned at 100 / summed the top 100.
+    FINGERPRINTS_WIN, ELAPSED_HOURS_WIN and CANDIDATES_WIN are computed BEFORE the LIMIT over every
+    family that passed HAVING. GATE_PASS is the SQL twin of insights.flag_repeat_candidates' gate
+    (>= REPEAT_MIN_ELAPSED_HOURS and >= REPEAT_MIN_RUNS_PER_30D per 30 days, <= REPEAT_LOW_CACHE_PCT
+    cache, rounded as that function rounds), normalized by the span this WHERE scans: the bounds' span
+    under a calendar preset (R1-142 — the bounded scan ignores the 90d clamp, so a Current-year read
+    covers ~273 days, not 90), else the clamped trailing days. The page normalizes by the same number.
+    Gate-passing families rank first, as the page's table sorts them, so the LIMIT never drops a
+    candidate in favour of a pricier non-candidate.
     """
     from app.core.sqlsafe import contains_filter
+    from app.logic.insights import (
+        REPEAT_GATE_BASE_DAYS,
+        REPEAT_LOW_CACHE_PCT,
+        REPEAT_MIN_ELAPSED_HOURS,
+        REPEAT_MIN_RUNS_PER_30D,
+    )
 
     days = bounded_days(days)
+    norm_days = max(1, (bounds[1] - bounds[0]).days if bounds is not None else int(days))
     min_runs = max(2, min(int(min_runs), 1000))
     where = and_where(
         scope_window_where("START_TIME", days, bounds=bounds),
@@ -191,28 +210,45 @@ def repeat_query_fingerprints(days: int, company: str = "ALL", min_runs: int = 1
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
     )
+    per_30d = f"/ {norm_days} * {REPEAT_GATE_BASE_DAYS}"
     return f"""
+WITH fam AS (
+    SELECT
+        QUERY_PARAMETERIZED_HASH AS FINGERPRINT,
+        COUNT(*) AS RUNS,
+        COUNT(DISTINCT USER_NAME) AS USERS,
+        COUNT(DISTINCT WAREHOUSE_NAME) AS WAREHOUSES,
+        SUM(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 3600000.0 AS TOTAL_ELAPSED_HOURS,
+        AVG(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 1000.0 AS AVG_ELAPSED_SEC,
+        SUM(COALESCE(BYTES_SCANNED, 0)) / POWER(1024, 4) AS TOTAL_TB_SCANNED,
+        COALESCE(
+            SUM(IFF(COALESCE(BYTES_SCANNED, 0) > 0,
+                    COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0) * BYTES_SCANNED, 0))
+            / NULLIF(SUM(IFF(COALESCE(BYTES_SCANNED, 0) > 0, BYTES_SCANNED, 0)), 0) * 100,
+            100) AS AVG_CACHE_PCT,
+        SUM(COALESCE(EXECUTION_TIME, 0) / 3600000.0 * {_SIZE_CREDIT_FACTOR_SQL}) AS EST_CREDITS,
+        ANY_VALUE(LEFT(QUERY_TEXT, 200)) AS QUERY_PREVIEW,
+        MAX(START_TIME) AS LAST_RUN
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE {where}
+    GROUP BY QUERY_PARAMETERIZED_HASH
+    HAVING COUNT(*) >= {min_runs}
+),
+gated AS (
+    SELECT fam.*,
+           IFF(ROUND(TOTAL_ELAPSED_HOURS {per_30d}, 2) >= {REPEAT_MIN_ELAPSED_HOURS}
+               AND ROUND(RUNS {per_30d}, 1) >= {REPEAT_MIN_RUNS_PER_30D}
+               AND AVG_CACHE_PCT <= {REPEAT_LOW_CACHE_PCT}, 1, 0) AS GATE_PASS
+    FROM fam
+)
 SELECT
-    QUERY_PARAMETERIZED_HASH AS FINGERPRINT,
-    COUNT(*) AS RUNS,
-    COUNT(DISTINCT USER_NAME) AS USERS,
-    COUNT(DISTINCT WAREHOUSE_NAME) AS WAREHOUSES,
-    SUM(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 3600000.0 AS TOTAL_ELAPSED_HOURS,
-    AVG(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 1000.0 AS AVG_ELAPSED_SEC,
-    SUM(COALESCE(BYTES_SCANNED, 0)) / POWER(1024, 4) AS TOTAL_TB_SCANNED,
-    COALESCE(
-        SUM(IFF(COALESCE(BYTES_SCANNED, 0) > 0,
-                COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0) * BYTES_SCANNED, 0))
-        / NULLIF(SUM(IFF(COALESCE(BYTES_SCANNED, 0) > 0, BYTES_SCANNED, 0)), 0) * 100,
-        100) AS AVG_CACHE_PCT,
-    SUM(COALESCE(EXECUTION_TIME, 0) / 3600000.0 * {_SIZE_CREDIT_FACTOR_SQL}) AS EST_CREDITS,
-    ANY_VALUE(LEFT(QUERY_TEXT, 200)) AS QUERY_PREVIEW,
-    MAX(START_TIME) AS LAST_RUN
-FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE {where}
-GROUP BY QUERY_PARAMETERIZED_HASH
-HAVING COUNT(*) >= {min_runs}
-ORDER BY EST_CREDITS * (1 - AVG_CACHE_PCT / 100) DESC, TOTAL_ELAPSED_HOURS DESC
+    FINGERPRINT, RUNS, USERS, WAREHOUSES, TOTAL_ELAPSED_HOURS, AVG_ELAPSED_SEC, TOTAL_TB_SCANNED,
+    AVG_CACHE_PCT, EST_CREDITS, QUERY_PREVIEW, LAST_RUN, GATE_PASS,
+    COUNT(*) OVER () AS FINGERPRINTS_WIN,
+    SUM(TOTAL_ELAPSED_HOURS) OVER () AS ELAPSED_HOURS_WIN,
+    SUM(GATE_PASS) OVER () AS CANDIDATES_WIN
+FROM gated
+ORDER BY GATE_PASS DESC, EST_CREDITS * (1 - AVG_CACHE_PCT / 100) DESC, TOTAL_ELAPSED_HOURS DESC
 LIMIT 100
 """
 

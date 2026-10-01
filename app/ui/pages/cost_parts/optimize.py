@@ -1431,6 +1431,13 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 # family mart has no size grain). This is a toggle-gated opt-in scan, so always run
                 # the definitionally-correct live builder (cost-hunt3 -> live route, 2026-08-30).
                 _rq_days = bounded_days(days)
+                if bounds is not None:
+                    # R1-142 (W12): a calendar preset scans its FULL bounded range (scope_window_where
+                    # ignores the 90d clamp once bounds is set) — Current year on Sep 30 reads 273 days —
+                    # so the min-runs prefilter and every per-30d rate normalize by the bounds' SPAN, not
+                    # the clamped day offset (273 days / 90 read ~3x high in Avoidable $/30d and flipped
+                    # the candidate gate; the 1st of a month's offset 0 fell back to a 30-day prefilter).
+                    _rq_days = _span
                 rq_res = run(
                     insights_sql.repeat_query_fingerprints(
                         _rq_days, company, repeat_min_runs(_rq_days),
@@ -1445,13 +1452,26 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 rq_days = served_days(rq_res, _rq_days)
                 candidates = flag_repeat_candidates(rq_res.df, rq_days)
                 hot = candidates[candidates["CANDIDATE"]]
+                # R1-144 (uncapped aggregate): the tiles are WINDOW totals; the frame stops at the
+                # builder's LIMIT 100, so read the pre-LIMIT *_WIN columns (an old-shape result falls
+                # back to the frame) and say when the table below is only the top of the list.
+                _rq0 = rq_res.df.iloc[0]
+                # (never below what the frame itself holds: a window total covers at least its own rows)
+                _rq_total = max(len(candidates), int(safe_float(_rq0.get("FINGERPRINTS_WIN"))))
+                _rq_hot = max(len(hot), int(safe_float(_rq0.get("CANDIDATES_WIN"))))
+                _rq_hours = max(float(candidates["TOTAL_ELAPSED_HOURS"].sum()),
+                                safe_float(_rq0.get("ELAPSED_HOURS_WIN")))
                 kpi_row([
-                    {"label": "Repeated fingerprints", "value": f"{len(candidates)}"},
-                    {"label": "Materialization candidates", "value": f"{len(hot)}",
+                    {"label": "Repeated fingerprints", "value": f"{_rq_total:,}"},
+                    {"label": "Materialization candidates", "value": f"{_rq_hot:,}",
                      "help": ">=10 runs and >=0.5h of compute per normalized 30 days, with <=25% cache hit."},
                     {"label": "Compute in repeats",
-                     "value": humanize_duration(candidates["TOTAL_ELAPSED_HOURS"].sum(), "h")},
+                     "value": humanize_duration(_rq_hours, "h")},
                 ])
+                if _rq_total > len(candidates):
+                    st.caption(f"The table lists the top {len(candidates):,} of {_rq_total:,} repeated "
+                               "fingerprints (candidates first, then by avoidable cost); the tiles above count "
+                               "all of them.")
                 # C3: WHY and LAST_RUN were computed on every path and rendered on
                 # none — the engine's own recommendation, and the "is this pattern
                 # still running?" column, were dead code. Both belong in the table.
