@@ -17,8 +17,10 @@ ignore = [
 ]
 
 [lint.per-file-ignores]
-# The error boundary and session bootstrap are the two sanctioned places that
-# may catch broad exceptions (they record them; they do not swallow them).
+# The five sanctioned runtime modules below (error boundary, session bootstrap,
+# query executor, filter state, AI client) may catch broad exceptions (they
+# record them; they do not swallow them). Anywhere else a broad catch needs a
+# line-level `# noqa: BLE001` that says what it catches and why.
 "app/core/errors.py" = ["BLE001"]
 "app/core/session.py" = ["BLE001"]
 "app/core/query.py" = ["BLE001"]

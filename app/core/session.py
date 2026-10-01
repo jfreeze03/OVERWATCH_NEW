@@ -1,6 +1,6 @@
 """Snowflake session management.
 
-SiS-first: get_active_session() (each viewer's own role) with a
+SiS-first: get_active_session() (the app owner's rights for every viewer) with a
 st.connection("snowflake") fallback for local dev. Query tag and statement
 timeout are tracked as attributes ON the session object — a recycled
 connection can never inherit stale session_state flags (old-app finding M4).

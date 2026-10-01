@@ -3651,8 +3651,9 @@ LIMIT {limit}
 
 
 def source_freshness_state() -> str:
-    """Freshness as a lookup (V040): the 10-minute snapshot table, staleness
-    computed from LAST_LOAD_TS at read — same contract as source_freshness()
+    """Freshness as a lookup (V040): the state table each loader stamps on a successful
+    load (V041 retired V040's 10-minute snapshot task), staleness computed from
+    LAST_LOAD_TS at read — same contract as source_freshness()
     so every board renders unchanged whichever path serves."""
     return f"""
 SELECT SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT,

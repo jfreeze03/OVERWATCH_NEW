@@ -893,7 +893,7 @@ def _sql_hash16(sql: str) -> str:
     return hashlib.sha1(str(sql).encode()).hexdigest()[:16]
 
 
-def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | None:
+def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict:
     """Parallel fetch for multi-query sections: [{key, sql, source, max_rows?}].
 
     ALWAYS returns {key: QueryResult} with every key present (v4.20, Codex
@@ -901,7 +901,9 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
     failures are never cached — but when the parallel path fails, the
     fallback now runs PER KEY through run(): successes cache individually
     and one bad query no longer drags its siblings back to serial-cold.
-    Callers' `(_b or {}).get(k) or run(...)` pattern still works unchanged.
+    Every return path is a dict, so callers index it directly (never append
+    `or {}` to the call: the r8 lock); an older `(_b or {}).get(k)` guard is
+    harmless but unnecessary.
     """
     tier = tier if tier in _BATCH_FETCHERS else "recent"
     started = time.perf_counter()

@@ -1285,21 +1285,26 @@ def render() -> None:
         with st.expander("Score trend — 30 days, retro-computed from facts (account-wide)"):
             charts.daily_metric_line(score_series, "DAY", "SCORE",
                                      title="Platform score (retro, account-wide)", unit="count")
-            # KEPT: "judge the trend, not the level" + "read the first few days as
-            # unreliable, not a real improvement" are interpretation/misread caveats, and
-            # the retro trend chart renders in operator mode too — so it stays visible.
+            # KEPT: "judge the trend, not the level" and the budget-basis / left-out
+            # partial-month notes are interpretation/misread caveats, and the retro trend
+            # chart renders in operator mode too — so it stays visible.
             st.caption(
                 "Live-score weights replayed over each day's facts. Stale-source and "
                 "open-action penalties aren't in the facts, so retro sits a few points "
-                "high — judge the trend, not the level. Weights calibrate on "
+                "high. With a monthly budget set, the retro budget penalty uses "
+                "cumulative month-to-date spend while the live score uses the projected "
+                "month-end, so in a month on pace to overrun retro can sit up to 20 "
+                "points higher, most of all early in the month — judge the trend, not "
+                "the level. Weights calibrate on "
                 "Admin → Settings. Note: the retro inputs (FACT_PLATFORM_SCORE_DAILY) "
                 "have no company grain, so this trend is account-wide even under a "
                 "company filter. The headline blends company-scoped 24h throughput/"
                 "pressure (same per-day basis as this line) with account-wide budget, "
                 "alerts, telemetry and owner-queue signals, so its level can differ. "
-                "Month-to-date spend restarts at the left edge of this window, so "
-                "the budget penalty is understated until the first whole month begins "
-                "— read the first few days as unreliable, not as a real improvement."
+                "With a budget set, the days before the first whole month in this "
+                "window are left out (their month-to-date spend would restart "
+                "mid-month and understate the budget penalty), so the line can start "
+                "later than 30 days back."
             )
 
     # ---- Daily AI digest ------------------------------------------------------

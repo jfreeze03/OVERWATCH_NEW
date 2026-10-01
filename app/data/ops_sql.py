@@ -339,10 +339,14 @@ OPT_IN_OVERWATCH_TASKS: dict[str, str] = {
     "TASK_ALERT_DRILL": "snowflake/alert_drill.sql",
     "TASK_REFRESH_ML_FORECAST": "snowflake/ml_forecast_option.sql",
 }
-#: Expected tasks that are legitimately suspended until the owner opts in (RUNBOOK: "every task
-#: started except TASK_ALERT_NOTIFY before its integration exists") — a warning, not a failure.
+#: Expected tasks whose suspension grades as a warning, not a failure. Since V071 the migrations
+#: resume TASK_ALERT_NOTIFY with the hourly tree whether or not a delivery integration exists (it
+#: sends only through enabled ALERT_ROUTES rows), so a suspended notifier means it was suspended
+#: after deploy; Task health still grades it "Suspended (expected)", as RUNBOOK says.
 SUSPENDED_OK_OVERWATCH_TASKS: dict[str, str] = {
-    "TASK_ALERT_NOTIFY": "suspended until a delivery integration exists (Alerts ▸ Native delivery)",
+    "TASK_ALERT_NOTIFY": ("suspended after deploy: since V071 the migrations leave it started whether or "
+                          "not a delivery integration exists, so resume it to deliver "
+                          "(Alerts ▸ Native delivery)"),
 }
 #: INFORMATION_SCHEMA.TASK_HISTORY's RESULT_LIMIT (its maximum). The limit spans EVERY task the role
 #: can see, account-wide, so a busy account can fill it before OVERWATCH's rows — the run summary

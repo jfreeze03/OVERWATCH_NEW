@@ -1,5 +1,7 @@
 # CI / local development toolchain.
-# app/logic and app/data are Streamlit-free by design, so tests only need these.
+# app/logic and app/data never import Streamlit directly, but prefs_sql (at import) and
+# mart_sql (lazily) reach it through app.core.identity, and the AppTest page smokes need
+# it, so Streamlit is installed below too.
 pandas~=2.2
 pytest~=8.3
 ruff~=0.9

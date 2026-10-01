@@ -12,8 +12,9 @@ hardcoded (owner decision, 2026-07). Rules:
 - ``KEBARR1`` holds both companies' roles and is classified as **ALFA** by
   explicit policy override.
 
-This scoping is a shared-account convenience filter, not a security boundary;
-Snowflake RBAC under Streamlit-in-Snowflake is the boundary. The same rules
+This scoping is a shared-account convenience filter, not a security boundary:
+under owner's-rights Streamlit-in-Snowflake, RBAC decides who can open the app
+and config.OPERATOR_USERS gates writes. The same rules
 are seeded into ``DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE`` by V001 and
 ``tests/test_companies.py`` keeps code and seed in sync.
 """

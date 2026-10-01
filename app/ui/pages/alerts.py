@@ -1259,7 +1259,8 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                         f"{str(row['TITLE'])[:80]} (event {event_id[:8]})" + _nxt_label)
                                     st.rerun()
                         else:
-                            st.caption("Executing requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS; the SQL is copyable for review.")
+                            st.caption("Running this in the app is limited to operators (config "
+                                       "OPERATOR_USERS); the SQL is copyable for review.")
                     st.markdown("**Supporting evidence**")
                     with st.expander("Playbook — what to do first", expanded=False):
                         st.markdown(playbook_for(str(row["RULE_ID"])))
@@ -1745,7 +1746,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                         st.session_state["_ow_alert_receipt"] = f"Un-snooze recorded — {_uns_txt}"
                         st.rerun()
             else:
-                st.caption("Un-snoozing requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
+                st.caption("Un-snoozing in the app is limited to operators (config OPERATOR_USERS).")
 
 
 @safe_page(_PAGE)

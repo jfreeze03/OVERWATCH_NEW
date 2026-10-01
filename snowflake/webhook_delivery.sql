@@ -5,16 +5,21 @@
 --
 -- Everything else is in the numbered chain already:
 --   V012: SP_NOTIFY_WEBHOOK (route-aware sender) + ALERT_ROUTES
---   V018: TASK_ALERT_NOTIFY chained AFTER the scan + guarded auto-resume
---         + morning-digest delivery through the same route
+--   V018/V070/V071: TASK_ALERT_NOTIFY chained AFTER the scan and resumed with
+--         the hourly tree (V071); delivery goes through each enabled
+--         ALERT_ROUTES row's own integration (V070); the morning digest
+--         (SP_DAILY_DIGEST, V165) goes to every enabled DELIVER_DIGEST route
+--         that is not CRITICAL-only (V112)
 --   V164: actionable lines ('[SEV] title | company | detail | event <id>') + a one-time
 --         CRITICAL escalation (SETTINGS ESCALATE_AFTER_MIN / ESCALATE_EMAIL_INTEGRATION):
 --         re-posted to the route(s) that delivered it, emailed via OVERWATCH_EMAIL's
 --         DEFAULT_RECIPIENTS (recipe at the end of this file)
 --
 -- Run as ACCOUNTADMIN in a Snowsight worksheet. First-time setup: uncomment the
--- CREATE SECRET below (paste the value there) and open the GATE, then re-run
--- V018 (or just: ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_ALERT_NOTIFY RESUME;).
+-- CREATE SECRET below (paste the value there) and open the GATE; the file ends
+-- with ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_ALERT_NOTIFY RESUME;. Never re-run
+-- V018 for this: it CREATE OR REPLACEs SP_DAILY_DIGEST with its retired body
+-- and undoes V070/V112/V165.
 -- A rotated URL needs only the ROTATION step further down -- not a re-run of
 -- this file.
 
