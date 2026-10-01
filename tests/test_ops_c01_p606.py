@@ -341,3 +341,21 @@ def test_lock_waits_page_drops_the_post_limit_pandas_seam():
     # the Warehouses section now declares the Database filter as panel-dependent (Lock waits applies it)
     assert '"partial": ("days", "database"),' in body
 
+
+
+# ------------------------------------- R1-059 / R1-138: SLA finish forecast's zero-row scan ----
+
+def test_sla_finish_forecast_zero_nights_is_setup_not_clean(monkeypatch):
+    # a misnamed ETL_CYCLE_START_WORKFLOW makes the all-time scan return zero rows; that used to render
+    # the green verified-clean "Checked · Clear" row and tell the Tonight tile "no judged nights yet"
+    ops, fake, seen = _page(monkeypatch, {"etl_cycle_finish": _ok(pd.DataFrame(
+        columns=["CYCLE_DATE", "CYCLE_START", "CYCLE_FINISH"]))},
+        load_settings=lambda *_a, **_k: {"ETL_CONTROL_STATUS_FQN": "DB.SCH.CONTROL_STATUS",
+                                         "ETL_CYCLE_START_WORKFLOW": "WF_TYPO_DOES_NOT_EXIST",
+                                         "ETL_CYCLE_END_WORKFLOW": "WF_BASE_GW_CLOSEOUT_CTL_DLY"})
+    out = ops._sla_finish_forecast_panel(pf=None)
+    assert out == {"_reason": "needs_setup"}
+    ((state, msg),) = seen["empty"]
+    assert state == "needs_setup" and "WF_TYPO_DOES_NOT_EXIST" in msg and "ETL_CYCLE_START_WORKFLOW" in msg
+    body = _fn(read(_OPS), "_sla_finish_forecast_panel")
+    assert 'kind="clean"' not in body and 'empty_state("clean"' not in body

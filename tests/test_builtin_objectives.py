@@ -142,8 +142,10 @@ def test_objectives_paint_first_but_reuse_the_forecast():
     # the forecast panel returns its fc ({} on every early exit) — the r8 locks still hold
     panel = _body(ops, "_sla_finish_forecast_panel")
     assert "def _sla_finish_forecast_panel(*, pf: dict | None = None) -> dict:" in ops
-    # every early exit says WHY (review r1): setup (x2) / empty / unavailable-or-empty; never a bare {}
-    assert panel.count('return {"_reason": "needs_setup"}') == 2 and 'return {"_reason": "empty"}' in panel
+    # every early exit says WHY (review r1): setup (x3) / empty / unavailable-or-empty; never a bare {}.
+    # PR-1 R1-059: the third setup exit is a zero-row all-time scan -- the starter workflow never ran,
+    # a misnamed anchor -- which used to return "empty" under a green verified-clean row.
+    assert panel.count('return {"_reason": "needs_setup"}') == 3 and 'return {"_reason": "empty"}' in panel
     assert 'return {"_reason": "unavailable" if not res.ok else "empty"}' in panel
     assert "return {}" not in panel and "return fc" in panel
     assert not re.search(r"\n\s+return\n", panel)                  # no bare return left

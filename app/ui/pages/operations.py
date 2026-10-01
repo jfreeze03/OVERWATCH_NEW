@@ -1864,14 +1864,22 @@ def _sla_finish_forecast_panel(*, pf: dict | None = None) -> dict:
         return {"_reason": "needs_setup"}
     res = (pf or {}).get("cycle_finish") or run(scan_sql, page=_PAGE, key="etl_cycle_finish", tier="recent",
               source="CONTROL_STATUS (cycle finish vs deadline)", max_rows=etl_control_sql.MAX_SLA_NIGHTS)
-    if guard(res, "No completed nightly cycles in the window — the starter and terminal workflows "
-             "haven't both run. Check the two anchor workflow names on Admin ▸ SETTINGS.", kind="clean",
+    if res.ok and res.empty:
+        # PR-1 R1-059 / R1-138: the scan is all-time and LEFT JOINs the terminal onto the starter, so
+        # zero rows means the STARTER never ran in CONTROL_STATUS -- a misnamed / renamed anchor (the
+        # loader logs it as etl_cycle_scan_misconfig), never a verified-green "clean". A wrong
+        # terminal name still returns nights (INCOMPLETE), so only the starter is named here.
+        empty_state("needs_setup", f"No nightly cycle found — the starter workflow '{start_wf}' has no "
+                    "runs in CONTROL_STATUS. Check ETL_CYCLE_START_WORKFLOW on Admin ▸ SETTINGS.")
+        return {"_reason": "needs_setup"}
+    if guard(res, "No nightly cycle found in CONTROL_STATUS.",
              setup_hint="The app role needs SELECT on the CONTROL_STATUS table "
                         "(GRANT SELECT ON <table> TO ROLE <app role>)."):
         fc = etl_cycle_sla_forecast(res.df, target_hhmm=target, breach_hhmm=breach,
                                     spike_calendar=str(settings.get("EXPECTED_SPIKE_CALENDAR") or ""))
         if not fc:
-            empty_state("clean", "No completed nightly cycles in the window yet.")
+            # nothing forecastable is a no-data state, never a green all-clear (house law 8)
+            empty_state("no_data_yet", "No completed nightly cycles to forecast yet.")
             return {"_reason": "empty"}
 
         def _signed(sec: object, early: str = "early", late: str = "late") -> str:
