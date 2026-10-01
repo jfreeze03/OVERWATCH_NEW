@@ -66,7 +66,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("cost.object_cost_recon", lambda: cost_sql.object_cost_recon(2)),
     ("cost.object_cost_top", lambda: cost_sql.object_cost_top(2, "ALFA")),
     # Next-Fifty #30: the unread-maintenance shortlist (mart) and its booked proof query. The ACCESS_HISTORY
-    # confirm (insights_sql.object_reads_confirm) is deliberately not here: Enterprise-only, like storage_reclaim.
+    # confirm (insights_sql.object_reads_confirm) is not registered itself: the ACCESS_HISTORY columns it reads
+    # (BASE_OBJECTS_ACCESSED, QUERY_START_TIME) FAIL on drift through the security.* ACCESS_HISTORY canaries below.
     ("cost.maintenance_on_unread", lambda: cost_sql.maintenance_on_unread(7, "ALFA")),
     ("cost.unread_maintenance_proof",
      lambda: cost_sql.unread_maintenance_proof("DB.S.T", account_today() - timedelta(days=15), 1.0)),
@@ -121,6 +122,17 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("security.data_policy_coverage", security_sql.data_policy_coverage),
     ("security.masking_environment_parity", security_sql.masking_environment_parity),
     ("security.admin_network_policy_coverage", lambda: security_sql.admin_network_policy_coverage("ALFA")),
+    # R2-069: the ACCESS_HISTORY readers, one per distinct column set, as plain FAILs (not EXPECTED_GAPS).
+    # This account is Enterprise (RUNBOOK), so an absent view means a lost IMPORTED PRIVILEGES grant and a
+    # missing column is drift. Three of these run probe=True, which leaves a missing column unlogged, so this
+    # is their only drift record. Between them they cover every ACCESS_HISTORY column the app reads:
+    # QUERY_START_TIME, BASE_OBJECTS_ACCESSED, OBJECTS_MODIFIED (+ the GRANTS_TO_ROLES / TABLE_STORAGE_METRICS
+    # bridge), DIRECT_OBJECTS_ACCESSED, USER_NAME and QUERY_ID (+ the ENTITY_CATALOG join).
+    ("security.access_evidence_days", security_sql.access_evidence_days),
+    ("security.grant_scope_usage", lambda: security_sql.grant_scope_usage(1, 1)),
+    ("security.unused_table_grants", lambda: security_sql.unused_table_grants(1, 1)),
+    ("graph.object_blast_consumers", lambda: graph_sql.object_blast_consumers(("DB.S.T",), 1)),
+    ("workbench.product_consumer_reads", lambda: workbench_sql.product_consumer_reads(1, "ALFA")),
     ("change_impact.change_registry", lambda: change_impact_sql.change_registry(30, "ALFA")),
     ("mart.fact_metering_by_service", lambda: mart_sql.fact_metering_by_service(7)),
     ("mart.fact_query_window_summary", lambda: mart_sql.fact_query_window_summary(1, "ALFA")),
