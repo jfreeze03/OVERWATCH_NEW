@@ -252,7 +252,8 @@ def workflow_runtimes_scan(
     globally-newest run (back-compatible default). Per-workflow matters because each RUN_ID is
     ONE workflow's execution, so the single globally-latest run only ever shows one workflow —
     the picker lets the operator see any workflow's latest run, not just whichever finished last.
-    ``days`` (> 0) honors the scope-bar Window; ``0`` means all time. Returns one row per task:
+    ``days`` honors the scope-bar Window via ``_window_clause`` (a plain ``0`` means all time; a
+    calendar day-0 offset means today — operations._etl_window_suffix labels it). Returns one row per task:
     WORKFLOW_NAME, TASK_NAME, TASK_STATUS, the start/end window, and RUNTIME_SEC = end − start (a
     still-running task with a NULL end is measured to CURRENT_TIMESTAMP(), so a hung task
     surfaces), and RUN_ID (text; the same run on every row) so a drill can bind exactly the run

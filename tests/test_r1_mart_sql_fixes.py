@@ -9,16 +9,19 @@ never rewritten, only the Snowflake spellings sqlite lacks.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import re
 import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
 from app.config import DEFAULT_MAX_ROWS
+from app.core.result import QueryResult
 from app.data import (
     change_impact_sql,
     chargeback_sql,
@@ -379,6 +382,73 @@ def test_r1_062_serverless_task_daily_keeps_newest_days_and_flags_truncation():
     assert "if guard(sls," in block and "result_caption(sls)" in block
 
 
+class _PanelSt:
+    """The slice of streamlit the Serverless-tasks and Workflow-runtimes panels touch, recording the
+    captions a viewer would see (AppTest is skipped on the floor CI leg, so these run everywhere)."""
+
+    def __init__(self) -> None:
+        self.captions: list[str] = []
+        self.column_config = SimpleNamespace(NumberColumn=lambda *_a, **k: dict(k))
+
+    def caption(self, text, *_a, **_k) -> None:
+        self.captions.append(str(text))
+
+    def markdown(self, *_a, **_k) -> None:
+        return None
+
+    def error(self, *_a, **_k) -> None:
+        return None
+
+    def expander(self, *_a, **_k):
+        return contextlib.nullcontext()
+
+
+def _render_serverless(monkeypatch, sls: QueryResult) -> list[tuple[str, str, str]]:
+    """Run unit_costs._graphs_tab with one task-graph row (so the Serverless panel is reached) and
+    the given SERVERLESS_TASK_HISTORY read; return every (kind, message, hint) empty_state got."""
+    import app.ui.components as components
+    import app.ui.pages.cost_parts.unit_costs as uc
+
+    seen: list[tuple[str, str, str]] = []
+    _rec = lambda kind, msg, *_a, hint="", **_k: seen.append((kind, msg, hint))  # noqa: E731
+    # the panel splits a failed read on the kind itself (uc.empty_state) and lets guard() gate an
+    # ok read (components.empty_state): record both
+    monkeypatch.setattr(components, "empty_state", _rec)
+    monkeypatch.setattr(uc, "empty_state", _rec)
+    daily = pd.DataFrame({"DAY": [date(2026, 9, 30)], "PIPELINE": ["P"], "USD": [1.0], "USD_PER_RUN": [1.0]})
+    summary = pd.DataFrame({"PIPELINE": ["P"], "USD": [1.0], "SUCCESS_PCT": [100.0]})
+    monkeypatch.setattr(uc, "st", _PanelSt())
+    monkeypatch.setattr(uc, "run_mart_first",
+                        lambda *_a, **_k: QueryResult(df=pd.DataFrame({"X": [1]}), ok=True, source="t"))
+    monkeypatch.setattr(uc, "graphs", SimpleNamespace(enrich_graph_daily=lambda *_a: daily,
+                                                      pipeline_summary=lambda _d: summary))
+    monkeypatch.setattr(uc, "charts", SimpleNamespace(daily_stacked_usd=lambda *_a, **_k: None))
+    for name in ("kpi_row", "styled_table", "result_caption"):
+        monkeypatch.setattr(uc, name, lambda *_a, **_k: None)
+    monkeypatch.setattr(uc, "run", lambda *_a, **_k: sls)
+    uc._graphs_tab("ALL", 30, 3.0)
+    return seen
+
+
+def test_r1_062_review_zero_serverless_rows_carry_no_access_hint(monkeypatch):
+    # A successful zero-row read PROVES the role can read SERVERLESS_TASK_HISTORY, so it is the verified
+    # clean row (R1-061) with no access hint under it.
+    seen = _render_serverless(monkeypatch, QueryResult(df=pd.DataFrame(), ok=True, source="t"))
+    assert seen == [("clean", "No serverless task credits in this scope/window.", "")]
+
+
+def test_r1_062_review_a_failed_serverless_read_names_the_grant_or_the_error(monkeypatch):
+    # v4.606 integration: an "Insufficient privileges" error is a setup absence (v4.605 r3), so it names
+    # the grant; any other failure is unavailable with the error (R1-061 / R1-167).
+    priv = QueryResult(df=pd.DataFrame(), ok=False, source="t", error_kind="privilege",
+                       error="SQL access control error: Insufficient privileges")
+    ((kind, msg, _hint),) = _render_serverless(monkeypatch, priv)
+    assert kind == "needs_setup" and "IMPORTED PRIVILEGES" in msg
+    tmo = QueryResult(df=pd.DataFrame(), ok=False, source="t", error_kind="timeout", error="timed out")
+    ((kind, msg, _hint),) = _render_serverless(monkeypatch, tmo)
+    assert kind == "unavailable" and "could not be read" in msg
+
+
 # ---------------------------------------------------------------------------
 # R1-063 — a calendar day-0 Window is 'today', never an all-time scan
 # ---------------------------------------------------------------------------
@@ -398,6 +468,60 @@ def test_r1_063_calendar_day_zero_reads_today_not_all_time():
     assert etl_control_sql.recon_window_phrase(CalendarDayOffset(0)) == "today"
     assert etl_control_sql.recon_window_phrase(0) == "in the last 90 days"
     assert "drift" not in inspect.getdoc(etl_control_sql._window_clause)
+
+
+def test_r1_063_review_unscoped_reads_claim_no_window():
+    # v4.606 integration: the label itself is operations._etl_window_suffix (R1-139, which also names a
+    # mid-period calendar offset by its first day); the reads it labels stay unscoped for these inputs.
+    for unscoped in (0, -3, None, "30"):
+        assert etl_control_sql._window_clause(unscoped) == ""
+
+
+def _render_runtimes(monkeypatch, days: object, *, tasks: pd.DataFrame | None = None):
+    """Run operations._workflow_runtimes_panel against a stubbed CONTROL_STATUS: the workflow list
+    is empty unless ``tasks`` is given (then one workflow whose latest run is ``tasks``)."""
+    import app.ui.pages.operations as ops
+
+    seen: list[tuple[str, str]] = []
+    fake = _PanelSt()
+    wf_list = (pd.DataFrame() if tasks is None
+               else pd.DataFrame({"WORKFLOW_NAME": ["WF_NIGHTLY"], "LAST_RUN_AT": [datetime(2026, 10, 1, 1)],
+                                  "RUNS": [1]}))
+
+    def fake_run(_sql, *_a, key: str = "", **_k):
+        df = wf_list if key.startswith("etl_wf_list") else tasks
+        return QueryResult(df=df if df is not None else pd.DataFrame(), ok=True, source="t")
+
+    monkeypatch.setattr(ops, "st", fake)
+    monkeypatch.setattr(ops, "run", fake_run)
+    monkeypatch.setattr(ops, "load_settings", lambda _p: {"ETL_CONTROL_STATUS_FQN": "DB.S.CONTROL_STATUS"})
+    monkeypatch.setattr(ops, "empty_state", lambda kind, msg, *_a, **_k: seen.append((kind, msg)))
+    for name in ("section_header", "kpi_row", "styled_table", "result_caption", "_task_evidence_drill"):
+        monkeypatch.setattr(ops, name, lambda *_a, **_k: None)
+    ops._workflow_runtimes_panel(days)
+    return seen, fake.captions
+
+
+def test_r1_063_review_runtimes_panel_says_today_on_a_calendar_day_zero(monkeypatch):
+    # Current month on the 1st: the list read is today only, so the empty state must say so.
+    seen, _ = _render_runtimes(monkeypatch, CalendarDayOffset(0))
+    assert seen == [("no_data_yet", "No ETL runs recorded (today). Widen the scope-bar Window to see "
+                                    "older runs.")]
+    start = datetime(2026, 10, 1, 1)
+    tasks = pd.DataFrame({"WORKFLOW_NAME": ["WF_NIGHTLY"], "TASK_NAME": ["SP_LOAD"],
+                          "TASK_STATUS": ["SUCCESS"], "TASK_START_DTTM": [start],
+                          "TASK_END_DTTM": [start + timedelta(minutes=5)], "RUNTIME_SEC": [300.0],
+                          "RUN_ID": ["R1"]})
+    seen, captions = _render_runtimes(monkeypatch, CalendarDayOffset(0), tasks=tasks)
+    assert seen == []
+    assert any(c.startswith("Latest run of WF_NIGHTLY (today) — 1 task(s).") for c in captions)
+
+
+def test_r1_063_review_runtimes_panel_keeps_trailing_and_unscoped_labels(monkeypatch):
+    seen, _ = _render_runtimes(monkeypatch, 30)
+    assert seen[0][1].startswith("No ETL runs recorded (last 30d).")
+    seen, _ = _render_runtimes(monkeypatch, 0)     # unscoped = all time: no window claimed
+    assert seen[0][1].startswith("No ETL runs recorded. Widen")
 
 
 # ---------------------------------------------------------------------------

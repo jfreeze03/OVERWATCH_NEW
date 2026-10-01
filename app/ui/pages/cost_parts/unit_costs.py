@@ -57,6 +57,7 @@ _PAGE = "Cost Intelligence"
 _UNIT_COST_MAX_DAYS = 30
 
 
+
 def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     company, days = f["company"], f["days"]
     database, schema_contains = f["database"], f["schema_contains"]
