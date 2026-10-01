@@ -9,6 +9,7 @@ pre-fix code at 04fd374e:
   R1-214  confirm_gate returned a click from a run whose typed text no longer matched.
   R1-215  the row-click seen-guards never re-armed, so a return-then-re-click did nothing.
   R1-216  spend_trend averaged/paced ROWS, not calendar days, and always dimmed the newest row.
+  R1-217  bar_count's takeaway printed a share of a SUM of per-warehouse averages.
 """
 
 from __future__ import annotations
@@ -371,3 +372,42 @@ def test_spend_trend_dense_window_ending_today_still_dims_only_today(monkeypatch
     assert "pace +0% vs the prior week" in cap            # today's partial $20 stays out of the pace
     assert "Newest day is dimmed" in cap
 
+
+# ---------------------------------------------------------------------------
+# R1-217: a rate metric's takeaway names the top bar without a share of a sum of rates
+# ---------------------------------------------------------------------------
+
+def _contention_frame() -> pd.DataFrame:
+    """Operations > Warehouses contention's derivation (operations.py: AVG_QUEUE_SEC = QUEUED_SEC / QUERY_COUNT)."""
+    pdf = pd.DataFrame({"WAREHOUSE_NAME": ["WH_A", "WH_B", "WH_C"], "QUEUED_SEC": [1200.0, 50.0, 880.0],
+                        "QUERY_COUNT": [100, 5, 100]})
+    pdf["AVG_QUEUE_SEC"] = pdf["QUEUED_SEC"] / pdf["QUERY_COUNT"].replace(0, pd.NA)
+    return pdf.sort_values("AVG_QUEUE_SEC", ascending=False)
+
+
+def _bar_caps(monkeypatch, *args, **kwargs) -> list[str]:
+    from app.ui import charts
+    caps: list[str] = []
+    monkeypatch.setattr(charts.st, "altair_chart", lambda *a, **k: None)
+    monkeypatch.setattr(charts.st, "caption", lambda msg, *a, **k: caps.append(str(msg)))
+    charts.bar_count(*args, **kwargs)
+    return caps
+
+
+def test_bar_count_rate_takeaway_has_no_share_of_a_sum_of_averages(monkeypatch):
+    caps = _bar_caps(monkeypatch, _contention_frame(), "WAREHOUSE_NAME", "AVG_QUEUE_SEC",
+                     title="Average queue per query", takeaway=True, unit="sec", additive=False,
+                     value_fmt=",.1f")
+    assert caps == ["Top: WH_A 12s."]                 # was 'Top: WH_A 12s (39% of 31s).'
+
+
+def test_bar_count_additive_takeaway_keeps_its_share(monkeypatch):
+    df = pd.DataFrame({"TASK": ["T1", "T2"], "FAILURES": [3, 1]})
+    caps = _bar_caps(monkeypatch, df, "TASK", "FAILURES", takeaway=True)
+    assert caps == ["Top: T1 3 (75% of 4)."]            # a count still sums: unchanged default
+
+
+def test_contention_chart_declares_its_average_non_additive():
+    ops = _src("app/ui/pages/operations.py")
+    seg = ops.split('"WAREHOUSE_NAME", _chart_metric, title=_chart_title,', 1)[1].split(")\n", 1)[0]
+    assert 'additive=_chart_metric != "AVG_QUEUE_SEC"' in seg

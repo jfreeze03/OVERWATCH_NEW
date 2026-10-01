@@ -1198,13 +1198,16 @@ def daily_stacked_count(df: pd.DataFrame, day_col: str, category_col: str,
 
 
 def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "", top_n: int = 10,
-              *, takeaway: bool = False, value_fmt: str = ",.0f", unit: str = "") -> None:
+              *, takeaway: bool = False, value_fmt: str = ",.0f", unit: str = "",
+              additive: bool = True) -> None:
     # value_fmt defaults to integer (",.0f") for the count callers (statements, failures);
     # pass a fractional format (e.g. ",.1f") for a rate metric like avg seconds/query, else
     # the axis/tooltip/takeaway round a genuine 0.4s to "0".
     # `unit`: a DURATION unit (sec/s/ms/min/h) humanizes the tooltip + takeaway to Hr/Min/Sec so a
     # bar-chart duration matches the tables/KPIs ("1h 40m", not raw "6008"); the numeric x-axis stays
     # a bar-length scale (Altair axes can't render Hr/Min/Sec). Non-duration units are unchanged.
+    # `additive=False` (R1-217): the value is a per-row RATE (e.g. average queue seconds per query),
+    # so a column sum is not a quantity -- the takeaway names the top bar without a "(x% of total)".
     data = df[[label_col, value_col]].head(top_n).copy()
     data.columns = ["Label", "Value"]
     data["Value"] = pd.to_numeric(data["Value"], errors="coerce").fillna(0.0)
@@ -1234,8 +1237,10 @@ def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "",
         _full_total = float(pd.to_numeric(df[value_col], errors="coerce").fillna(0).sum())
         if _full_total > 0:
             top = data.loc[data["Value"].idxmax()]
+            # A sum of per-warehouse averages is no quantity ("39% of 31s" when the pooled average was
+            # 10.4s): a non-additive metric passes total 0, which _share_note renders as "Top: X v."
             st.caption(_share_note(
-                str(top["Label"]), float(top["Value"]), _full_total, dollars=False,
+                str(top["Label"]), float(top["Value"]), _full_total if additive else 0.0, dollars=False,
                 value_fmt=value_fmt,
                 value_fn=(lambda v: _fmt_metric_value(v, unit)) if _dur else None))
     st.altair_chart(chart, width="stretch")
