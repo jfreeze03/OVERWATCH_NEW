@@ -19,9 +19,15 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-_WH_RE = re.compile(r"\bWH_[A-Z0-9_]+\b")
+from .navigate import rule_warehouse
+
 _DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
-_SERVICE_AFTER_RE = re.compile(r"\bSERVICE\s+([A-Z0-9_]+)")
+# R2-089: V150 SP_ANOMALY_SWEEP titles are SERIES || ' spiked to ' / ' collapsed to ' (' spent ' before V076),
+# where SERIES = 'WAREHOUSE <name>' or 'SERVICE <type>'. Parsed from the TITLE only and anchored: the sweep's
+# pre-explain appends ' | AI: <free LLM text>' to DETAIL (and the drawer can append a hypothesis), so a DETAIL
+# saying '... the ingestion service running ...' once became a metering plan for service 'RUNNING'. Matched
+# case-sensitively on the raw title, exactly as the sweep writes it.
+_SWEEP_SERIES_RE = re.compile(r"^\s*(WAREHOUSE|SERVICE)\s+(\S+)\s+(?:spent|spiked to|collapsed to)\s")
 _LEADING_TOKEN_RE = re.compile(r"^\s*([A-Z][A-Z0-9_]{2,})\b")
 # R1-052: PERF_FINGERPRINT_DRIFT's DETAIL is 'Hash <QUERY_PARAMETERIZED_HASH> | runs ...' (SP_ANOMALY_SWEEP, V150)
 _FAMILY_HASH_RE = re.compile(r"\bHash\s+([0-9A-Fa-f]{16,64})\b")
@@ -29,6 +35,12 @@ _FAMILY_HASH_RE = re.compile(r"\bHash\s+([0-9A-Fa-f]{16,64})\b")
 # ' cloud-services spiked to|collapsed to ' || credits || ' credits on ' || DAY || ' (z=..)'.
 _CS_ANOMALY_SERIES_RE = re.compile(r"^\s*CLOUD SVC (.+?) cloud-services (?:spiked|collapsed) to\b",
                                    re.IGNORECASE)
+
+# R2-046 / R2-090: the rules whose condition the generic query-families-by-elapsed pack actually explains --
+# warehouse / account credits burned by query families, and remote spill, which is per query family too (the
+# WAREHOUSE-series COST_ANOMALY_SWEEP gets the same pack from its own branch in plan_for_alert). An explicit
+# allow-list, so a new rule is withheld by default instead of falling into off-topic latency rows.
+GENERIC_EVIDENCE_RULES = frozenset({"COST_WH_DAILY_CREDITS", "COST_DAILY_CREDITS", "PERF_SPILL_GB"})
 
 # Human labels for the caption over the "Assemble evidence" button — they tell
 # the DBA which evidence the AI will be grounded in BEFORE they spend credits.
@@ -99,9 +111,11 @@ def plan_for_alert(rule_id: str, title: str, detail: str = "",
     rid = str(rule_id or "").strip().upper()
     title = str(title or "")
     detail = str(detail or "")
-    both = f"{title} {detail}".upper()
-    wh_match = _WH_RE.search(both)
-    warehouse = wh_match.group(0) if wh_match else ""
+    # R2-092: a warehouse-led title (COST_WH_DAILY_CREDITS, PERF_QUEUED_MINUTES, ...) is read by its position,
+    # so a warehouse without the WH_ prefix (COMPUTE_WH, BLCOMPUTE_WH) is still scoped; others fall back to a
+    # WH_* token anywhere in the title or detail, never in an appended AI narrative (navigate.rule_warehouse,
+    # shared with the drawer's re-check, inline fix and Investigate filter so the copies cannot drift).
+    warehouse = rule_warehouse(rid, title, detail)
     day = _day_from(title, raised_at)
 
     if rid in ("COST_CLOUD_SVC_RATIO", "COST_CLOUD_SVC_ANOMALY"):
@@ -133,12 +147,18 @@ def plan_for_alert(rule_id: str, title: str, detail: str = "",
                             days=14, service=service)
 
     if rid == "COST_ANOMALY_SWEEP":
-        match = _SERVICE_AFTER_RE.search(both)
-        service = match.group(1) if match else ""
-        if not service:
+        series = _SWEEP_SERIES_RE.match(title)
+        if series is None:
             return None
-        return EvidencePlan("metering_service", f"{day} in 30-day context",
-                            days=30, service=service, day=day)
+        if series.group(1) == "SERVICE":
+            return EvidencePlan("metering_service", f"{day} in 30-day context",
+                                days=30, service=series.group(2), day=day)
+        # R2-089: a WAREHOUSE series had no plan at all (no SERVICE token), so Explain with AI was withheld for
+        # every warehouse spike. Its evidence is the generic pack scoped to that warehouse and the title's day --
+        # the evidence the sweep's own pre-explain grounds on (V150). An unquotable name gets no pack.
+        if not warehouse:
+            return None
+        return EvidencePlan("generic", f"{day} vs prior 7 days", days=7, warehouse=warehouse, day=day)
 
     if rid == "PERF_FINGERPRINT_DRIFT":
         family = _family_text(title)
@@ -176,10 +196,15 @@ def plan_for_alert(rule_id: str, title: str, detail: str = "",
         # withheld (the DETAIL carries the z, the user's median and the cap arithmetic).
         return None
 
-    if rid.startswith(("COST_", "PERF_")):
-        # A query-latency-shaped anomaly we don't have a bespoke pack for: the
+    if rid in GENERIC_EVIDENCE_RULES:
+        # A query-latency-shaped alert we don't have a bespoke pack for: the
         # original query-families-by-elapsed pack is the right generic evidence.
         return EvidencePlan("generic", f"{day} vs prior 7 days", days=7,
                             warehouse=warehouse, day=day)
 
+    # R2-046 / R2-090: every other rule -- including any rule added later -- gets no pack rather than
+    # account-wide query latency for a metric it does not measure (budget-pace and forecast dollars, the
+    # contract runway, database bytes, transfer bytes, another org account's spend, a per-company failure
+    # rate). The old COST_/PERF_ prefix catch-all did exactly that, and took a contract alert's day from its
+    # PROJECTED exhaust date: a future day with no history, so the pack always came back empty.
     return None

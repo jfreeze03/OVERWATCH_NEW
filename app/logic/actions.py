@@ -49,13 +49,20 @@ def deferred_summary(df: pd.DataFrame | None, today: object) -> tuple[int, date 
     return int(mask.sum()), (None if pd.isna(nxt) else nxt.date())
 
 #: C2: rules whose server-side events DUPLICATE a signal the app computes itself.
-#: SP_ANOMALY_SWEEP writes COST_ANOMALY_SWEEP events from the same
-#: FACT_WAREHOUSE_DAILY series the app scores in-process, so the morning queue
-#: showed each spend break twice — and with DISAGREEING severities, because the
-#: sweep escalates at z >= 2*threshold while the app escalated at z >= 5. They
+#: SP_ANOMALY_SWEEP writes COST_ANOMALY_SWEEP events for WAREHOUSE series from the
+#: same FACT_WAREHOUSE_DAILY data the app scores in-process, so the morning queue
+#: showed each warehouse spend break twice — and with DISAGREEING severities, because
+#: the sweep escalates at z >= 2*threshold while the app escalated at z >= 5. They
 #: still belong on the Alerts page (that is the alert surface); they are dropped
 #: only from this merged triage feed, where the app's own row is the richer twin.
+#: R2-087: ONLY the warehouse series (DUPLICATE_ALERT_TITLE_PREFIX). The sweep also
+#: scores SERVICE series (FACT_METERING_DAILY by SERVICE_TYPE: AUTO_CLUSTERING, PIPE,
+#: SERVERLESS_TASK, the WAREHOUSE_METERING aggregate ...), which the app does not
+#: score at all, so dropping them by rule id left no twin: a HIGH service spike
+#: vanished from the queue, and when it was the only open alert the queue read as
+#: the green verified-clean "Nothing to triage".
 DUPLICATE_ALERT_RULE_IDS = ("COST_ANOMALY_SWEEP",)
+DUPLICATE_ALERT_TITLE_PREFIX = "WAREHOUSE "   # V150: TITLE = SERIES || ..., SERIES = 'WAREHOUSE <name>'
 
 #: D6/C2: escalate a spend anomaly to HIGH on SHAPE **or** on MONEY.
 #: The z gate matches SP_ANOMALY_SWEEP's ``IFF(z >= zthr * 2, 'HIGH', 'MEDIUM')``
@@ -453,13 +460,18 @@ def _opt_text(value: object) -> str | None:
 
 def _dedupe_alert_feed(alerts: pd.DataFrame) -> pd.DataFrame:
     """C2: drop the server-sweep events the app recomputes itself (see
-    DUPLICATE_ALERT_RULE_IDS). Frames without a RULE_ID column pass through —
-    an older reader that cannot tell the rules apart keeps every row rather
-    than guessing which ones are twins."""
+    DUPLICATE_ALERT_RULE_IDS): a sweep row is a twin only when its TITLE names a
+    WAREHOUSE series (R2-087) -- a SERVICE-series row has no in-app twin and stays.
+    Frames without a RULE_ID column pass through — an older reader that cannot tell
+    the rules apart keeps every row rather than guessing which ones are twins, and so
+    does a sweep row whose title is missing."""
     if "RULE_ID" not in alerts.columns:
         return alerts
     rule = alerts["RULE_ID"].astype(str).str.upper().str.strip()
-    return alerts[~rule.isin(DUPLICATE_ALERT_RULE_IDS)]
+    title = (alerts["TITLE"].fillna("").astype(str).str.upper().str.lstrip()
+             if "TITLE" in alerts.columns else pd.Series("", index=alerts.index))
+    twin = rule.isin(DUPLICATE_ALERT_RULE_IDS) & title.str.startswith(DUPLICATE_ALERT_TITLE_PREFIX)
+    return alerts[~twin]
 
 
 def _collapse_task_failures(task_failures: pd.DataFrame) -> pd.DataFrame:

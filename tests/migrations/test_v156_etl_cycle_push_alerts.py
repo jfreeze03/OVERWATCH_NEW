@@ -366,8 +366,9 @@ def test_v156_clock_parse_sql_is_the_mirrored_expression():
 
 def _sql_hhmm(raw: str, fallback: int) -> int:
     """Python mirror of the proc's target_off / breach_off IFF (after the SELECT's TRIM), pinned as exact text
-    by test_v156_clock_parse_sql_is_the_mirrored_expression."""
-    raw = raw.strip()
+    by test_v156_clock_parse_sql_is_the_mirrored_expression. R2-108: Snowflake's TRIM with no characters argument
+    removes blank spaces only (not tabs or newlines), so the mirror strips spaces only."""
+    raw = raw.strip(" ")
     if re.fullmatch(r"[0-9]{1,2}:[0-9]{1,2}", raw):
         h, m = (int(x) for x in raw.split(":"))
         if h <= 23 and m <= 59:
@@ -376,7 +377,10 @@ def _sql_hhmm(raw: str, fallback: int) -> int:
 
 
 @pytest.mark.parametrize("raw", ["07:00", "7:5", " 06:30 ", "23:59", "00:00", "24:00", "07:60", "",
-                                 "ab:cd", "07:00:00", "0700", "7"])
+                                 "ab:cd", "07:00:00", "0700", "7",
+                                 # R2-108: strings int() accepted but the proc's RLIKE refuses
+                                 "7: 30", "07 :30", "+7:30", "007:30", "07:030", "7:3_0", "-0:30",
+                                 "\u0667:\u0663\u0660", "\t07:30", "7:30 AM"])
 def test_v156_clock_parse_matches_insights_parse_hhmm(raw):
     h, m = insights._parse_hhmm(raw, (7, 0))
     assert _sql_hhmm(raw, 420) == h * 60 + m
