@@ -79,3 +79,29 @@ def test_an_empty_notebook_feed_still_says_no_rows(monkeypatch):
     at = _drill(monkeypatch, QueryResult(df=pd.DataFrame(), ok=True, source="stub"))
     assert _NO_ROWS in _text(at.caption)                 # quiet no_data_yet, not a blue info banner
     assert _NO_ROWS not in _text(at.info) and "failed" not in _text(at.error)
+
+
+def _ordered(at, *types: str) -> list[tuple[str, str]]:
+    """Main-area elements of the given types in render order (Block.__iter__ is depth-first)."""
+    return [(e.type, str(getattr(e, "value", ""))) for e in at.main if e.type in types]
+
+
+@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
+@pytest.mark.parametrize("kind", ["timeout", "other"])
+def test_failed_notebook_error_sits_under_the_notebook_subset_heading(monkeypatch, kind):
+    """R1-118 follow-up: the drill's 'failed' line points the reader to the error 'under Notebook subset
+    below', but that heading rendered only on a SUCCESSFUL read -- on a failure the page showed a bare
+    'Query failed' with no heading. The pointer must land: drill line, then the heading, then the error."""
+    at = _drill(monkeypatch, QueryResult(ok=False, error=f"boom ({kind})", error_kind=kind))
+    order = _ordered(at, "markdown", "error")
+
+    def _at(pred) -> int:
+        hits = [i for i, (t, v) in enumerate(order) if pred(t, v)]
+        assert hits, order
+        return hits[0]
+
+    i_drill = _at(lambda t, v: t == "error" and "failed, so per-user cost is unknown" in v)
+    i_head = _at(lambda t, v: t == "markdown" and "Notebook subset" in v)
+    i_err = _at(lambda t, v: t == "error" and f"Query failed: boom ({kind})" in v)
+    assert "under Notebook subset below" in order[i_drill][1]
+    assert i_drill < i_head < i_err, order

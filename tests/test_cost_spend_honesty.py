@@ -130,10 +130,11 @@ def _fail(kind: str) -> QueryResult:
 _EMPTY = _ok(pd.DataFrame())
 
 
-def _wh(b_days: float = 30.0, b_credits: float = 80.0) -> QueryResult:
+def _wh(b_days: float = 30.0, b_credits: float = 80.0, a_days: float = 30.0,
+        a_credits: float = 100.0) -> QueryResult:
     return _ok(pd.DataFrame({
-        "WAREHOUSE_NAME": ["WH_A"], "A_CREDITS": [100.0], "B_CREDITS": [b_credits],
-        "A_DAYS": [30.0], "B_DAYS": [b_days], "TOTAL_A_CREDITS": [100.0], "TOTAL_B_CREDITS": [b_credits],
+        "WAREHOUSE_NAME": ["WH_A"], "A_CREDITS": [a_credits], "B_CREDITS": [b_credits],
+        "A_DAYS": [a_days], "B_DAYS": [b_days], "TOTAL_A_CREDITS": [a_credits], "TOTAL_B_CREDITS": [b_credits],
         "LOADED_THROUGH": ["2099-01-01"]}))
 
 
@@ -180,18 +181,77 @@ def test_compare_fail_rate_never_fabricates_a_zero_b_side(monkeypatch):
     fr = _kpi("Fail rate")
     assert fr["value"] == "2.50%"
     assert fr["delta"] == "no B-side data" and fr["delta_color"] == "off"
-    assert "0.00%" not in fr["help"] and "no queries" in fr["help"]
+    # the help says what the delta says: B has no rows at all (not 'no queries in the B window')
+    assert "0.00%" not in fr["help"] and "no B-side data" in fr["help"] and "no queries" not in fr["help"]
     assert _kpi("Queries")["delta"] == "no B-side data"
+    assert _kpi("Queries")["help"].startswith("B = —.")                     # not a fabricated 'B = 0'
     assert _kpi("Queued")["delta"] == "no B-side data" and _kpi("Queued")["delta_color"] == "off"
+    assert _kpi("Queued")["help"] == "B = —."
     # the Volume shape table shows the absent side as a dash, never a fabricated 0
     vol = _TABLES[-1]
     assert list(vol["B"]) == ["—"] * 4 and vol["DELTA_PCT"].isna().all()
 
 
 def test_compare_fail_rate_with_no_a_side_is_a_dash(monkeypatch):
+    """R1-150: with no A row, Queries and Queued showed a made-up 0 and '-100.0% vs B' -- GREEN on the
+    inverse Queued chip, i.e. 'A better than B' claimed on missing data."""
     _render_compare(monkeypatch, act=_act(("B", 900.0, 10.0, 200.0)))
     fr = _kpi("Fail rate")
+    assert fr["value"] == "—" and fr["delta"] == "no A-side data" and fr["delta_color"] == "off"
+    for label in ("Queries", "Queued"):
+        k = _kpi(label)
+        assert k["value"] == "—", (label, k)
+        assert k["delta"] == "no A-side data" and k["delta"] != "-100.0% vs B", (label, k)
+        assert k["delta_color"] == "off", (label, k)
+        assert "—" not in k["help"], (label, k)                                # B is real: show it
+    # the Volume shape table agrees: the absent A side is a dash, never a fabricated 0
+    vol = _TABLES[-1]
+    assert list(vol["A"]) == ["—"] * 4 and vol["DELTA_PCT"].isna().all()
+
+
+def test_compare_a_loaded_with_zero_queries_says_no_a_side_queries(monkeypatch):
+    """A LOADED A side with zero queries is a real 0 (a % change against B is honest); only its fail rate
+    has no denominator."""
+    _render_compare(monkeypatch, act=_act(("A", 0.0, 0.0, 0.0), ("B", 900.0, 10.0, 200.0)))
+    fr = _kpi("Fail rate")
     assert fr["value"] == "—" and fr["delta"] == "no A-side queries" and fr["delta_color"] == "off"
+    assert _kpi("Queries")["value"] == "0" and _kpi("Queries")["delta"] == "-100.0% vs B"
+
+
+def test_compare_b_loaded_with_zero_queries_help_says_no_queries(monkeypatch):
+    _render_compare(monkeypatch, act=_act(("A", 1000.0, 25.0, 300.0), ("B", 0.0, 0.0, 0.0)))
+    fr = _kpi("Fail rate")
+    assert fr["delta"] == "no B-side queries" and fr["delta_color"] == "off"
+    assert fr["help"] == "B = — (no queries in the B window)."
+
+
+def test_compare_billed_and_warehouse_with_no_a_side_are_dashes(monkeypatch):
+    """R1-150, same class on the money cards: a missing A side is never '$0.00, -100.0% vs B' (green)."""
+    bill = _ok(pd.DataFrame([{"SIDE": "B", "CREDITS_BILLED": 100.0, "CREDITS_BILLED_AI": 0.0,
+                              "CREDITS_BILLED_OTHER": 100.0}]))
+    _render_compare(monkeypatch, wh=_wh(a_days=0.0, a_credits=0.0), bill=bill)
+    for label in ("Warehouse spend", "Account billed"):
+        k = _kpi(label)
+        assert k["value"] == "—", (label, k)
+        assert k["delta"] == "no A-side data" and k["delta_color"] == "off", (label, k)
+        assert "B = $" in k["help"], (label, k)
+
+
+def test_compare_billed_with_no_b_side_shows_a_dash_for_b(monkeypatch):
+    bill = _ok(pd.DataFrame([{"SIDE": "A", "CREDITS_BILLED": 100.0, "CREDITS_BILLED_AI": 0.0,
+                              "CREDITS_BILLED_OTHER": 100.0}]))
+    _render_compare(monkeypatch, bill=bill)
+    k = _kpi("Account billed")
+    assert k["delta"] == "no B-side data" and k["delta_color"] == "off"
+    assert k["help"].endswith("B = —.") and "B = $0.00" not in k["help"]
+
+
+def test_delta_chip_a_absence_wins_over_the_fabricated_minus_100():
+    from app.ui.pages.cost_parts.compare import _chip_color, _delta_chip
+
+    assert _delta_chip(0.0, 50.0, a_present=False) == "no A-side data"
+    assert _chip_color(_delta_chip(0.0, 50.0, a_present=False), "inverse") == "off"
+    assert _delta_chip(0.0, 50.0) == "-100.0% vs B"                       # a LOADED A of 0 is a real move
 
 
 def test_compare_a_loaded_zero_b_is_not_missing_data(monkeypatch):
@@ -265,7 +325,12 @@ def test_savings_ledger_absence_is_needs_setup(monkeypatch, kind):
 
     _fake, seen = _patch(monkeypatch, optimize, {"savings_ledger": _failed(kind)})
     optimize._savings_tab(3.0, {})
-    assert [s for s, _m in seen["empty"]] == ["needs_setup"]
+    ((state, msg),) = seen["empty"]
+    assert state == "needs_setup"
+    # R1-151: SETUP_ABSENCE_KINDS includes 'privilege' (the table exists; SAVINGS_LEDGER since V005), so the
+    # wording is the neutral compare.py one -- never 'not installed' / 'apply the pending schema update'.
+    assert "not installed" not in msg and "apply the pending schema update" not in msg
+    assert "SAVINGS_LEDGER" in msg and "isn't readable by this app" in msg
 
 
 # ------------------------------------------------------- Spend & Attribution (spend.py) ----
