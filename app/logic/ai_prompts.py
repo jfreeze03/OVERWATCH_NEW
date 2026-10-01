@@ -189,7 +189,7 @@ _EVIDENCE_COLUMNS: dict[str, list[str]] = {
     "cloud_svc_sleep": ["SAMPLE_TEXT", "QUERY_TYPE", "RUNS", "CS_CREDITS",
                         "CS_CREDITS_PER_1K", "AVG_EXEC_S", "AVG_CACHE_PCT"],
     "cortex": ["DAY", "SERVICE_TYPE", "CREDITS_BILLED"],
-    "metering_service": ["DAY", "SERVICE_TYPE", "CREDITS_USED",
+    "metering_service": ["DAY", "SERVICE_TYPE", "CREDITS_BILLED", "CREDITS_USED",
                          "CREDITS_COMPUTE", "CREDITS_CLOUD_SERVICES"],
     "query_family": ["DAY", "RUNS", "P50_SEC", "P95_SEC", "WAREHOUSE_NAME", "SAMPLE_TEXT"],
     "queueing": ["HOUR_TS", "RUNS", "QUEUED_MIN", "P95_SEC"],
@@ -204,7 +204,10 @@ _EVIDENCE_FRAMING: dict[str, str] = {
                         "CS_CREDITS_PER_1K means long sleeps (how often it polls shows in RUNS and CS_CREDITS), "
                         "not metadata/compile overhead"),
     "cortex": "Daily AI/Cortex billed credits by service type",
-    "metering_service": "Daily billed credits for this service type",
+    "metering_service": ("Daily credits for this service type: CREDITS_BILLED is after the "
+                         "cloud-services adjustment (the basis COST_ANOMALY_SWEEP scores); "
+                         "CREDITS_USED is gross metered usage before it (the basis "
+                         "COST_SERVERLESS_CREEP scores)"),
     "query_family": "This query family's daily run count and p50/p95 latency in seconds",
     "queueing": "The warehouse's worst queueing hours (queued minutes and p95 latency)",
     "generic": ("Query families by elapsed hours on the anomalous day vs their "

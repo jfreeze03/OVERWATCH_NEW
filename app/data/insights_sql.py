@@ -991,10 +991,13 @@ LIMIT 15
 
 
 def metering_service_history(days: int, service: str) -> str:
-    """Daily billed credits for ONE metering SERVICE_TYPE — the evidence behind a
+    """Daily credits for ONE metering SERVICE_TYPE — the evidence behind a
     COST_ANOMALY_SWEEP (which day spiked) or COST_SERVERLESS_CREEP (week-over-week
     growth) alert. Scoped to the named service so the AI reasons about the metric
-    that fired, not warehouse query latency."""
+    that fired, not warehouse query latency. Both bases ship because the two rules
+    score different ones: CREDITS_BILLED is after the cloud-services adjustment (the
+    basis COST_ANOMALY_SWEEP scores, via FACT_METERING_DAILY); CREDITS_USED is gross
+    metered usage before the adjustment (the basis COST_SERVERLESS_CREEP scores)."""
     from app.core.sqlsafe import sql_literal
 
     days = bounded_days(days)
@@ -1003,6 +1006,7 @@ def metering_service_history(days: int, service: str) -> str:
 SELECT
     USAGE_DATE AS DAY,
     UPPER(COALESCE(SERVICE_TYPE, 'UNKNOWN')) AS SERVICE_TYPE,
+    ROUND(SUM(COALESCE(CREDITS_BILLED, 0)), 2) AS CREDITS_BILLED,
     ROUND(SUM(COALESCE(CREDITS_USED, 0)), 2) AS CREDITS_USED,
     ROUND(SUM(COALESCE(CREDITS_USED_COMPUTE, 0)), 2) AS CREDITS_COMPUTE,
     ROUND(SUM(COALESCE(CREDITS_USED_CLOUD_SERVICES, 0)), 2) AS CREDITS_CLOUD_SERVICES
