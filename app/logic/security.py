@@ -97,12 +97,17 @@ def coverage_required_days(days: int, bounds: tuple | None, *, lookback: int = 0
     counts density over exactly these COMPLETE days. Trailing: ``days + lookback`` days before today.
     Bounds: every day from ``start - lookback`` up to the earlier of the range end and today. Today's
     partition (partial, or not loaded yet) is neither required here nor counted there: counting it
-    let a loaded today stand in for a missing interior day."""
+    let a loaded today stand in for a missing interior day.
+
+    The first day of a period-to-date window (the 1st under 'Current month', Jan 1 under 'Current
+    year', no baseline) serves today alone, so the span holds NO complete day: this returns 0, and
+    ``fact_coverage_complete`` then decides on freshness alone. That used to be clamped to 1 against
+    a count that can only be 0 there, so the fact could never serve on that day."""
     if bounds is None:
-        return int(days) + int(lookback)
+        return max(1, int(days) + int(lookback))
     start, end = bounds
     current = today or account_today()
-    return max(1, (min(end, current) - (start - timedelta(days=int(lookback)))).days)
+    return max(0, (min(end, current) - (start - timedelta(days=int(lookback)))).days)
 
 
 def window_total(frame: pd.DataFrame | None, column: str, fallback: int) -> int:
@@ -116,7 +121,13 @@ def window_total(frame: pd.DataFrame | None, column: str, fallback: int) -> int:
 
 
 def fact_coverage_complete(result: object, days: int, *, lag_days: int = 1) -> bool:
-    """True only when a fact result proves both span and recent freshness."""
+    """True only when a fact result proves both span and recent freshness.
+
+    ``days`` = 0 (``coverage_required_days`` on the first day of a period-to-date window, a span with
+    no complete day) leaves freshness as the whole proof: LAST_DAY >= today - lag. The calendar
+    coverage read only sees days from the span start (today) on, so that passes only once today's
+    partition is loaded; until then the live reader serves instead of an empty fact (no fabricated
+    zero). A missing ``days`` still asks for one day."""
     if result is None or not bool(getattr(result, "usable", lambda: False)()):
         return False
     frame = getattr(result, "df", pd.DataFrame())
@@ -125,7 +136,7 @@ def fact_coverage_complete(result: object, days: int, *, lag_days: int = 1) -> b
     row = frame.iloc[0]
     coverage = int(safe_float(row.get("COVERAGE_DAYS")))
     last_day = pd.to_datetime(row.get("LAST_DAY"), errors="coerce")
-    required = max(1, min(int(days or 1), 3650))
+    required = max(0, min(int(1 if days is None else days), 3650))
     return (
         coverage >= required
         and not pd.isna(last_day)

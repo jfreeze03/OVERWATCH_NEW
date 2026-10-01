@@ -382,41 +382,60 @@ def test_login_fact_gate_measures_density_over_the_served_window(monkeypatch):
     assert "coverage fallback" in logins["source"]
 
 
-#: (id, page days, calendar window, reader cap, baseline lookback, an interior hole in days ago)
+FIRST_OF_MONTH = date(2026, 10, 1)
+FIRST_OF_YEAR = date(2027, 1, 1)
+
+#: (id, page days, calendar window, reader cap, baseline lookback, an interior hole in days ago (None: the
+#: span holds no complete day), the account's today)
 _GATE_SPANS = [
-    ("7d", 7, None, 30, 0, 4),
-    ("30d", 30, None, 30, 0, 4),
-    ("7d+baseline", 7, None, 90, 90, 50),
-    ("current-month", 30, CURRENT_MONTH_WINDOW, 30, 0, 4),
-    ("last-month", 30, LAST_MONTH_WINDOW, 30, 0, 45),
-    ("current-year", 272, CURRENT_YEAR_WINDOW, 30, 0, 4),
-    ("current-year+baseline", 272, CURRENT_YEAR_WINDOW, 90, 90, 120),
+    ("7d", 7, None, 30, 0, 4, TODAY),
+    ("30d", 30, None, 30, 0, 4, TODAY),
+    ("7d+baseline", 7, None, 90, 90, 50, TODAY),
+    ("current-month", 30, CURRENT_MONTH_WINDOW, 30, 0, 4, TODAY),
+    ("last-month", 30, LAST_MONTH_WINDOW, 30, 0, 45, TODAY),
+    ("current-year", 272, CURRENT_YEAR_WINDOW, 30, 0, 4, TODAY),
+    ("current-year+baseline", 272, CURRENT_YEAR_WINDOW, 90, 90, 120, TODAY),
+    # the first day of a period-to-date window serves today alone: no complete day to require
+    ("first-of-month", 0, CURRENT_MONTH_WINDOW, 30, 0, None, FIRST_OF_MONTH),
+    ("first-of-month+baseline", 0, CURRENT_MONTH_WINDOW, 90, 90, 50, FIRST_OF_MONTH),
+    ("first-of-year", 0, CURRENT_YEAR_WINDOW, 30, 0, None, FIRST_OF_YEAR),
+    ("first-of-year+baseline", 0, CURRENT_YEAR_WINDOW, 90, 90, 50, FIRST_OF_YEAR),
 ]
 
 
-@pytest.mark.parametrize("days,window,cap,lookback,hole", [g[1:] for g in _GATE_SPANS],
+@pytest.mark.parametrize("days,window,cap,lookback,hole,today", [g[1:] for g in _GATE_SPANS],
                          ids=[g[0] for g in _GATE_SPANS])
 def test_login_fact_gate_rejects_one_interior_hole_with_today_loaded(monkeypatch, days, window, cap,
-                                                                     lookback, hole):
+                                                                     lookback, hole, today):
     """R1-101 follow-up: the trailing count spanned days+1 calendar days (today included) against a
     requirement of ``days``, and the calendar count ran to the range end against a requirement that
     stopped at today. Once the hourly load wrote today, today's row stood in for a missing interior
     day and the gappy fact served under its '(hourly)' label. Count and requirement now cover the
-    same complete days (today excluded on both sides)."""
+    same complete days (today excluded on both sides).
+
+    The first day of a period-to-date window (no baseline) holds no complete day: the requirement
+    was clamped to 1 against a count that can only be 0 there, so even a dense fact never served. It
+    is 0 now and freshness decides: the fact serves once today's partition is loaded, live before."""
     from app.logic import security as logic
-    monkeypatch.setattr(logic, "account_today", lambda: TODAY)
-    served_days, served_bounds = logic.capped_window(days, window_bounds(window, TODAY) if window else None, cap)
+    monkeypatch.setattr(logic, "account_today", lambda: today)
+    served_days, served_bounds = logic.capped_window(days, window_bounds(window, today) if window else None, cap)
     sql = security_sql.security_login_fact_coverage(served_days, bounds=served_bounds, lookback=lookback)
     required = logic.coverage_required_days(served_days, served_bounds, lookback=lookback)
+    assert (required == 0) is (hole is None)                          # only a today-only span requires 0 days
 
     def gate(present: set[date]) -> bool:
         return logic.fact_coverage_complete(_simulated_coverage(lambda _today: present)(sql), required)
 
-    assert gate(_dense_fact(TODAY))                                   # a dense fact still serves
-    assert gate(_dense_fact(TODAY, today_loaded=False))               # today's partition is never required
-    assert not gate(_dense_fact(TODAY, holes=(hole,)))                # one interior hole, today loaded: live
-    yesterday_in_span = served_bounds is None or served_bounds[1] >= TODAY
-    assert gate(_dense_fact(TODAY, holes=(1,))) is not yesterday_in_span   # a missing yesterday is a hole too
+    assert gate(_dense_fact(today))                                   # a dense fact still serves
+    # today's partition is never required -- unless it IS the whole span: then the unloaded fact holds
+    # nothing for it, and the live reader serves rather than an empty fact's fabricated zero
+    assert gate(_dense_fact(today, today_loaded=False)) is (hole is not None)
+    if hole is not None:
+        assert not gate(_dense_fact(today, holes=(hole,)))            # one interior hole, today loaded: live
+    yesterday = today - timedelta(days=1)
+    yesterday_in_span = (served_bounds is None
+                         or served_bounds[0] - timedelta(days=lookback) <= yesterday < served_bounds[1])
+    assert gate(_dense_fact(today, holes=(1,))) is not yesterday_in_span   # a missing yesterday is a hole too
 
 
 @pytest.mark.parametrize("days,window", [(7, None), (30, None), (30, CURRENT_MONTH_WINDOW)])
@@ -439,6 +458,31 @@ def test_access_tab_serves_live_logins_over_a_one_day_hole_with_today_loaded(mon
     for key in ("logins", "login_reasons"):
         assert "FACT_SECURITY_LOGIN_DAILY" in specs[key]["sql"]
         assert specs[key]["source"] == "FACT_SECURITY_LOGIN_DAILY (hourly)"
+
+
+@pytest.mark.parametrize("window,today", [(CURRENT_MONTH_WINDOW, FIRST_OF_MONTH), (CURRENT_YEAR_WINDOW, FIRST_OF_YEAR)],
+                         ids=["first-of-month", "first-of-year"])
+def test_access_tab_first_day_of_period_serves_the_fact_once_today_loads(monkeypatch, window, today):
+    """On the 1st of the month (Jan 1 for the year) the served span is today alone. The gate asked for
+    one complete day the count could never hold, so a dense, fresh fact always fell back to live."""
+    from app.logic import security as logic
+    from app.logic.date_windows import resolve_window_days
+    monkeypatch.setattr(logic, "account_today", lambda: today)
+
+    def served(present_for) -> dict:
+        seen = _drive_access(monkeypatch, {"sec_security_": _simulated_coverage(present_for)},
+                             days=resolve_window_days(window, today), bounds=window_bounds(window, today),
+                             stop_at_view=True)
+        return {s["key"]: s for s in seen["batches"][-1]}
+
+    specs = served(_dense_fact)                                       # today's partition loaded: the fact
+    for key in ("logins", "login_reasons"):
+        assert "FACT_SECURITY_LOGIN_DAILY" in specs[key]["sql"]
+        assert specs[key]["source"] == "FACT_SECURITY_LOGIN_DAILY (hourly)"
+    specs = served(lambda t: _dense_fact(t, today_loaded=False))      # not loaded yet: live, never an empty fact
+    for key in ("logins", "login_reasons"):
+        assert "ACCOUNT_USAGE.LOGIN_HISTORY" in specs[key]["sql"]
+        assert specs[key]["source"] == "ACCOUNT_USAGE.LOGIN_HISTORY (coverage fallback)"
 
 
 def _mfa_unproven_results() -> dict:
