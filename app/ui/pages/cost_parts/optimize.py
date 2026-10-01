@@ -2358,7 +2358,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             "writes a REMEDIATION_LOG audit row with the estimate. Auto-suspend and resize changes are "
             "then booked and settled by the daily change scan against 14 days of measured actuals "
             "(V038) — the app no longer books a second, manual ledger row for them. An off-hours "
-            "schedule (invisible to the scan) still books an ESTIMATED ledger item — verify it on the "
+            "schedule is a multi-statement task script the app never runs: run it in a worksheet, then "
+            "book its ESTIMATED saving here (the scan can't see a schedule) and verify it on the "
             "Savings ledger below. Anyone can copy the SQL for review."
         )
         # Same builder PAIR as the advisor above (r20 #1): identical SQL identity
@@ -2450,7 +2451,47 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 # warehouse getting its first timer is not — the app keeps booking that one).
                 _autobooked = (_lever in LEDGER_AUTOBOOKED_LEVERS and remediation.autobook_books_change(
                     _lever, _rec_row["AUTO_SUSPEND"].iloc[0] if not _rec_row.empty else None))
-                if is_operator:
+                # The app-booked ESTIMATED ledger row: a SCHEDULE (the change scan cannot see a suspend/resume
+                # schedule), or an AUTO_SUSPEND the scan can't book; other AUTO_SUSPEND changes are autobooked
+                # (V038/V145) — Next-Fifty #5. A SCHEDULE booking is idempotent per warehouse (any state but
+                # REJECTED): it is a one-click button now, not a type-to-confirm execute.
+                ledger_sql = (
+                    f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
+                    "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES, FINDING_TYPE, TARGET_OBJECT) "
+                    f"SELECT {sql_literal(f'{fix_kind} on {wh_pick}')}, 'ESTIMATED', "
+                    f"{sql_number(est_monthly)}, {sql_literal(stmt[:4000])}, "
+                    f"{sql_literal('Booked by guarded remediation; verify with a proof run on the Savings ledger.')}, "
+                    # V053: AUTO_SUSPEND rows are what the monthly verifier re-measures (P1-A).
+                    f"{sql_literal(_lever)}, {sql_literal(wh_pick)}"
+                    + (f" WHERE NOT EXISTS (SELECT 1 FROM {core_object('SAVINGS_LEDGER')} "
+                       f"WHERE TARGET_OBJECT = {sql_literal(wh_pick)} AND FINDING_TYPE = 'SCHEDULE' "
+                       "AND STATE <> 'REJECTED')" if _lever == "SCHEDULE" else "")
+                )
+                if _lever == "SCHEDULE":
+                    # R1-086: REVIEW ONLY. The schedule is a comment-led, multi-statement CREATE TASK script;
+                    # the executor runs one allow-listed statement (house law 9) and CREATE TASK is not on
+                    # the list (never widened), so every in-app "Execute" was refused and logged a FAILED
+                    # REMEDIATION_LOG row with nothing booked. The operator runs it in a worksheet, then
+                    # books the estimate here — the #30 unread-maintenance pattern.
+                    st.caption("Review only — OVERWATCH never runs this script (one statement per call, and "
+                               "CREATE TASK is outside its executor allow-list). Run it in a worksheet as a "
+                               "role with CREATE TASK on DBA_MAINT_DB.OVERWATCH and OPERATE on the "
+                               "warehouse, then book the estimated saving.")
+                    if is_operator and est_monthly > 0:
+                        st.caption("Book only after the script above has run — the row stays ESTIMATED until "
+                                   "you verify it on the Savings ledger.")
+                        _sched_key = f"remed_sched_book_{wh_pick}"
+                        if (st.button("Book estimated saving", key="remed_sched_book_btn")
+                                and write_gate_open(_sched_key)):
+                            ok, msg = execute_statement(ledger_sql, page=_PAGE)
+                            stamp_write(_sched_key, ok)  # C48
+                            notify(ok, f"Booked an ESTIMATED saving for the off-hours schedule on {wh_pick}, "
+                                       "unless one is already booked (not rejected): then nothing is added."
+                                   if ok else f"Booking failed: {msg}")
+                    elif not is_operator:
+                        st.caption("Copy the SQL freely; booking its saving requires SNOW_ACCOUNTADMINS / "
+                                   "SNOW_SYSADMINS.")
+                elif is_operator:
                     if (confirm_gate(wh_pick, "Execute + log" if _autobooked else "Execute + log + book estimated savings", key="remed",
                                      prompt="Type the warehouse name to confirm execution", object_name=True)
                             and write_gate_open("remed")):
@@ -2458,24 +2499,13 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         log_sql = (
                             f"INSERT INTO {core_object('REMEDIATION_LOG')} "
                             "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, EST_MONTHLY_SAVINGS_USD, STATUS, RESULT_NOTE, EXECUTED_BY) "
-                            f"SELECT {sql_literal('AUTO_SUSPEND' if fix_kind.startswith('Tighten') else 'SCHEDULE')}, "
+                            f"SELECT {sql_literal(_lever)}, "
                             f"{sql_literal(wh_pick)}, {sql_literal(stmt[:4000])}, {sql_number(est_monthly)}, "
                             f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}, {identity_sql()}"
                         )
                         execute_statement(log_sql, page=_PAGE)
                         _book_ledger = ok and est_monthly > 0 and not _autobooked
                         if _book_ledger:
-                            # SCHEDULE only: the change scan cannot see a suspend/resume schedule, so the
-                            # app books it; AUTO_SUSPEND is autobooked (V038/V145) — Next-Fifty #5.
-                            ledger_sql = (
-                                f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
-                                "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES, FINDING_TYPE, TARGET_OBJECT) "
-                                f"SELECT {sql_literal(f'{fix_kind} on {wh_pick}')}, 'ESTIMATED', "
-                                f"{sql_number(est_monthly)}, {sql_literal(stmt[:4000])}, "
-                                f"{sql_literal('Booked by guarded remediation; verify with a proof run on the Savings ledger.')}, "
-                                # V053: AUTO_SUSPEND rows are what the monthly verifier re-measures (P1-A).
-                                f"{sql_literal('AUTO_SUSPEND' if fix_kind.startswith('Tighten') else 'SCHEDULE')}, {sql_literal(wh_pick)}"
-                            )
                             execute_statement(ledger_sql, page=_PAGE)
                         stamp_write("remed", ok)  # C48
                         # "booked" only when a SAVINGS_LEDGER row was actually inserted (_book_ledger)
