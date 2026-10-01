@@ -89,6 +89,24 @@ def test_units_bind():
     assert not check_digest("5 days", FACTS).ok                      # 'days' binds to WINDOW_DAYS only
 
 
+# V171 R1-228: the spend keys say warehouse compute; they still bind through the _USD suffix and the CREDIT substring
+WAREHOUSE_FACTS = FACTS.replace("SPEND_USD=", "WAREHOUSE_SPEND_USD=").replace("; CREDITS=", "; WAREHOUSE_CREDITS=")
+
+
+@pytest.mark.parametrize("body, ok", [
+    ("Warehouse compute spend was $12,345.67 over the 7 complete days.", True),   # $ -> WAREHOUSE_SPEND_USD
+    ("Warehouse compute used 3,354.80 credits.", True),                           # credits -> WAREHOUSE_CREDITS
+    ("Roughly 3,355 credits and $12,346 of warehouse compute.", True),
+    ("Warehouse compute was 12,345.67 credits.", False),                          # dollars called credits
+    ("Warehouse compute cost $3,354.80.", False),                                 # credits called dollars
+])
+def test_the_warehouse_spend_keys_bind_like_the_v165_keys(body, ok):
+    assert "SPEND_USD=12345.67" in WAREHOUSE_FACTS and "WAREHOUSE_CREDITS=3354.80" in WAREHOUSE_FACTS
+    res = check_digest(body, WAREHOUSE_FACTS)
+    assert res.ok is ok and res.checked > 0, res
+    assert (res.checked, res.ungrounded) == ((r := check_digest(body, FACTS)).checked, r.ungrounded)
+
+
 def test_na_and_missing_facts_license_nothing():
     facts = "WINDOW_DAYS=7; SPEND_USD=n/a; CREDITS=n/a; OPEN_CRITICAL_ALERTS=0"
     assert not check_digest("Spend was $12,345.67.", facts).ok

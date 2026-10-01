@@ -187,3 +187,43 @@ def test_after_v165_a_measured_row_states_the_check(monkeypatch, row):
             "checked against those facts, and a templated digest is sent when any does not match. Account-wide "
             "narrative — does not change with the company filter.")
     assert want in captions, captions
+
+
+# -- V171 (R1-228): the caption names the window and the scope, only for a row V171 wrote --------------------------
+
+_WINDOW = ("for the 7 complete days to yesterday (warehouse compute spend; serverless, AI and storage not "
+           "included)")
+_V171_ROW = {**_AI, "FACTS": "WINDOW_DAYS=7; WAREHOUSE_SPEND_USD=12345.67; WAREHOUSE_CREDITS=3354.80; "
+                             "OPEN_CRITICAL_ALERTS=0"}
+
+
+@pytest.mark.parametrize("row", [_V171_ROW, {**_TEMPLATE, "FACTS": _V171_ROW["FACTS"]}])
+def test_after_v171_a_v171_row_names_the_window_and_the_scope(monkeypatch, row):
+    _stub_digest(monkeypatch, row)
+    at = _render("Overview")
+    captions = [str(c.value) for c in at.caption]
+    want = ("Written daily by TASK_DAILY_DIGEST from exec-board facts " + _WINDOW + " and alert counts only; every "
+            "figure is checked against those facts, and a templated digest is sent when any does not match. "
+            "Account-wide narrative — does not change with the company filter.")
+    assert want in captions, captions
+
+
+def test_after_v171_a_pre_v171_row_does_not_claim_the_window(monkeypatch):
+    """The 07:20 row written before the apply (V165 facts: today-inclusive, SPEND_USD) stays up for up to a day."""
+    _stub_digest(monkeypatch, {**_AI, "FACTS": "WINDOW_DAYS=7; SPEND_USD=12345.67; CREDITS=3354.80"})
+    at = _render("Overview")
+    captions = " ".join(str(c.value) for c in at.caption)
+    assert _CHECKED_CLAUSE in captions and _WINDOW not in captions and "7 complete days" not in captions
+
+
+def test_before_v171_the_caption_keeps_its_pre_171_text(monkeypatch):
+    """Deployed before V171 is applied (the house order): no window claim, even for a row shaped like V171's."""
+    _database_at(monkeypatch, 170)
+    _stub_digest(monkeypatch, _V171_ROW)
+    at = _render("Overview")
+    captions = [str(c.value) for c in at.caption]
+    want = ("Written daily by TASK_DAILY_DIGEST from exec-board facts and alert counts only; every figure is "
+            "checked against those facts, and a templated digest is sent when any does not match. Account-wide "
+            "narrative — does not change with the company filter.")
+    assert want in captions, captions
+    assert not [c for c in captions if "7 complete days" in c]

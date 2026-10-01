@@ -958,3 +958,61 @@ def test_task_evidence_scan_is_account_wide() -> None:
     params = inspect.signature(etl.run_task_evidence_scan).parameters
     assert "company" not in params            # stays out of the company filter matrix, like its siblings
     assert "ACCOUNT_USAGE.QUERY_HISTORY" in etl._QH_FQN
+
+
+# --- server parity: the daily PIPE_REF_GAP alert runs the panel's per-check SQL (V171 R2-019 / R2-104) ---------
+
+def _latest_ref_gap_body() -> str:
+    """The LATEST SP_SCAN_REF_GAPS definition (last definer wins, as the account resolves it)."""
+    from tests.test_alert_rule_consistency import _latest_proc_bodies
+    proc = _latest_proc_bodies()["SP_SCAN_REF_GAPS"]
+    return proc[proc.index("$$") + 2:proc.rindex("$$")]
+
+
+def _render_server_check(body: str, name: str, fqn: str, col: str, xlat: str) -> str:
+    """Evaluate the proc's OWN q_name and per-check concatenation templates (sqlite speaks || and '' the same
+    way) for one parsed check -- the statement SP_SCAN_REF_GAPS inserts from for that check."""
+    import re
+    import sqlite3
+    q_name = re.search(r"\n        SELECT nm_clean, (.*?) AS q_name, fqn, col\n", body).group(1)
+    i = body.index("    SELECT nm_clean AS CHECK_NAME,\n") + len("    SELECT nm_clean AS CHECK_NAME,\n")
+    check_sql = body[i:body.index(" AS CHECK_SQL\n", i)]
+    assert check_sql.count(":xlat") == 1 and ":" not in check_sql.replace(":xlat", "")
+    sql = (f"SELECT {check_sql.replace(':xlat', 'xv')} FROM (SELECT {q_name} AS q_name, fqn, col, xv "
+           "FROM (SELECT ? AS nm_clean, ? AS fqn, ? AS col, ? AS xv))")
+    (out,) = sqlite3.connect(":memory:").execute(sql, (name, fqn, col, xlat)).fetchone()
+    return out
+
+
+@pytest.mark.parametrize("name, fqn, col", [
+    ("pc_uwissuetype.code", _STG, "CODE_STG"),
+    ("pc_policystatus.id", "DB.SCH.PC_POLICYSTATUS", "ID"),
+    ("a-b/c:d e.f", "DB.SCH.T", "CODE"),
+])
+def test_the_alert_scan_runs_the_panels_per_check_sql(name, fqn, col) -> None:
+    """V171: SP_SCAN_REF_GAPS builds each check's statement exactly as the panel's _check_sql does (both MINUS
+    operands TO_VARCHAR since v4.527 on the panel, V171 on the server), so panel and alert agree on every gap."""
+    server = _render_server_check(_latest_ref_gap_body(), name, fqn, col, _XLAT)
+    app = etl._check_sql(etl.RefGapCheck(name=name, staging_fqn=fqn, staging_col=col), _XLAT)
+    assert " ".join(server.split()) == " ".join(app.split())
+    for twin in (server, app):
+        assert f"SELECT TO_VARCHAR(s.{col}) AS NEW_CODE" in twin
+        assert f"SELECT TO_VARCHAR(x.{etl.XLAT_VALUE_COL}) FROM {_XLAT} x" in twin
+
+
+def test_server_parity_has_teeth() -> None:
+    body = _latest_ref_gap_body()
+    uncast = body.replace("MINUS SELECT TO_VARCHAR(x.SRC_IDNTFTN_VAL) FROM", "MINUS SELECT x.SRC_IDNTFTN_VAL FROM")
+    assert uncast != body
+    server = _render_server_check(uncast, "pc_uwissuetype.code", _STG, "CODE_STG", _XLAT)
+    app = etl._check_sql(etl.RefGapCheck("pc_uwissuetype.code", _STG, "CODE_STG"), _XLAT)
+    assert " ".join(server.split()) != " ".join(app.split())
+
+
+def test_the_alert_scan_isolates_each_check() -> None:
+    """V171 R2-019: one statement per check in its own EXCEPTION block, so one failing check (a missing grant, a
+    renamed table) no longer blanks the alert for every other check; the panel shows the same per-check gaps."""
+    body = _latest_ref_gap_body()
+    loop = body[body.index("FOR r IN c_checks DO"):body.index("END FOR;")]
+    assert "EXECUTE IMMEDIATE :ins_sql;" in loop and "'ref_gap_check_failed'" in loop and "EXCEPTION" in loop
+    assert "LISTAGG(" not in body and "UNION ALL" not in body

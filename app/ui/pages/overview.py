@@ -1497,7 +1497,14 @@ def render() -> None:
             # grounding record -- before the apply (the deploy-first order) and on the pre-V165 row that stays
             # up until the next 07:20 run, the chip says "Figures not checked" and this keeps the pre-4.602 text.
             _checked = _grounded and prov.ai_written is not None
-            st.caption("Written daily by TASK_DAILY_DIGEST from exec-board facts and alert counts only"
+            # V171 (R1-228): the facts are the 7 COMPLETE days to yesterday and the spend is warehouse compute
+            # only. Claimed only once V171 is applied AND this row was written by it (its FACTS carry the V171
+            # key): the row written before the apply covers the old today-inclusive window until the next 07:20.
+            _windowed = has_migration(171, _PAGE) and "WAREHOUSE_SPEND_USD=" in str(row.get("FACTS") or "")
+            st.caption("Written daily by TASK_DAILY_DIGEST from exec-board facts"
+                       + (" for the 7 complete days to yesterday (warehouse compute spend; serverless, AI and "
+                          "storage not included)" if _windowed else "")
+                       + " and alert counts only"
                        + ("; every figure is checked against those facts, and a templated digest is sent "
                           "when any does not match" if _checked else "")
                        + ". Account-wide narrative — does not change with the company filter.")
