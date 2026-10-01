@@ -31,8 +31,12 @@ def test_delivery_slo_reads_ledger_events_and_error_log():
         assert col in sql, col
     assert "route_send_failed" in sql and "LOGGED_AT" in sql   # APP_ERROR_LOG's real ts col
     # route failures dedup to distinct (route, day) so one hourly-retrying broken route
-    # counts once per day, not once per run (was COUNT(*) of raw retry rows)
-    assert "COUNT(DISTINCT CONTEXT" in sql
+    # counts once per day, not once per run (was COUNT(*) of raw retry rows).
+    # R1-019 (deliberate change): the key is the ROUTE ID (CONTEXT token 2, last_delivery_health's
+    # key), not the full CONTEXT — V164's drain and escalation write two different suffixes for
+    # one route, which the full-string key counted as two route-days.
+    assert "COUNT(DISTINCT SPLIT_PART(CONTEXT, ' ', 2) || '|'" in sql
+    assert "COUNT(DISTINCT CONTEXT" not in sql
     assert "DATEADD('minute', -30" in sql                      # criticals get 30m grace
     # alert-hunt #6: undelivered-criticals is ROUTE-level (an eligible enabled route with
     # no delivery), not event-level "any delivery" — so a CRIT delivered to a sibling
