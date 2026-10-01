@@ -121,6 +121,10 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("security.login_fact_coverage", lambda: security_sql.login_fact_coverage(1)),
     ("security.security_login_fact_coverage", lambda: security_sql.security_login_fact_coverage(1)),
     ("security.security_change_fact_coverage", lambda: security_sql.security_change_fact_coverage(1)),
+    # holistic #7 (v4.608): the change-risk noise diagnostic, a probe=True read and the only reader of
+    # FACT_SECURITY_CHANGE.CHANGE_KIND, so a renamed column was neither logged nor caught here. A core fact
+    # (V075): absence FAILs (no gap).
+    ("security.change_risk_destructive_breakdown", lambda: security_sql.change_risk_destructive_breakdown(1)),
     ("security.failed_logins_fact", lambda: security_sql.failed_logins_fact(1, "ALFA")),
     ("security.failed_login_reasons_fact", lambda: security_sql.failed_login_reasons_fact(1, "ALFA")),
     ("security.new_network_logins_fact", lambda: security_sql.new_network_logins_fact(1)),
@@ -294,6 +298,10 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("mart27.role_share", lambda: mart27_sql.role_share(1, "ALFA")),
     ("mart27.schema_window_summary", lambda: mart27_sql.schema_window_summary(1, "ALFA")),
     ("mart27.ai_costs_by_model", lambda: mart27_sql.ai_costs_by_model(2)),
+    # holistic #17 (v4.608): the only canary that compiles FACT_AI_USAGE_DAILY's V042 EMAIL / FIRST_TS / LAST_TS,
+    # read fact-first by the Security AI-guardrails tab (the Cost AI-users fact fallback reads the same three).
+    # A core mart: absence FAILs (no gap). Days-independent (365d), so it renders with its company only.
+    ("mart27.ai_code_user_daily", lambda: mart27_sql.ai_code_user_daily("ALFA")),
     ("mart27.unused_roles_via_fact", lambda: mart27_sql.unused_roles_via_fact(90)),
     ("mart27.tag_coverage_daily", lambda: mart27_sql.tag_coverage_daily(2, "ALFA")),
     ("mart27.lock_wait_daily", lambda: mart27_sql.lock_wait_daily(2, "ALFA")),
@@ -318,6 +326,9 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("incidents.proposals", lambda: mart_sql.incident_proposals(5)),
     ("incidents.metrics", lambda: mart_sql.incident_metrics(7)),
     ("mart.open_alert_events", lambda: mart_sql.open_alert_events(1)),
+    # holistic #18 (v4.608): the Alerts drawer's 'How this was resolved before' read, the only reader of
+    # ALERT_AUDIT.EVENT_ID / NOTE. Core objects: absence FAILs (no gap). The rule id must be an identifier.
+    ("mart.resolutions_for_rule", lambda: mart_sql.resolutions_for_rule("CANARY_PROBE", 1)),
     ("mart.alert_event_history", lambda: mart_sql.alert_event_history(2)),
     ("mart.alert_mttr", lambda: mart_sql.alert_mttr(7)),
     ("mart.alert_rules", mart_sql.alert_rules),

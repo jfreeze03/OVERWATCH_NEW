@@ -1187,20 +1187,40 @@ and Admin → Setup progress marks the row Unknown with a re-apply-the-grants
 FIX. A missing column (schema drift), a timeout or any other
 failure shows "unavailable" with the error in its detail expander. A probe
 read does not write a missing column to APP_ERROR_LOG, so that expander is
-the only record: copy the error, then run Admin → Canary. That helps only
-when the panel's builder is registered in app/data/canary.py (it then FAILs
-there on drift). Every ACCESS_HISTORY column the app reads is covered there
-too, as a FAIL: this account is Enterprise. Since v4.608 the six
-ORGANIZATION_USAGE readers (cost.org_*) and the optional QUERY_INSIGHTS view
-are registered as declared gaps: absent, they read GAP; a renamed column
-FAILs. Two probe readers are still not registered: the SHOW-based reads
-(EXPLAIN cannot compile SHOW) by design, and email_notification_history
-and object_tag_probe; for those the expander error is the only record.
-A timeout usually clears on a retry; drift does not (apply the missing
-migrations, or redeploy). Admin → Setup progress marks a checklist row
-Unknown (not Pending) when its read fails this way: FIX says Retry for a
-timeout and names the schema drift for a missing column, and the
-"could not be checked" line's Error detail lists each failed read's error.
+the only record: copy the error, then run Admin → Canary. That helps when
+the panel's builder is registered in app/data/canary.py (it then FAILs
+there on drift), or when it is a twin: a registered canary compiles every
+column it reads, so drift FAILs the sibling. Every ACCESS_HISTORY column
+the app reads is covered there too, as a FAIL: this account is Enterprise.
+Since v4.608 the six ORGANIZATION_USAGE readers (cost.org_*) and the
+optional QUERY_INSIGHTS view are registered as declared gaps: absent, they
+read GAP; a renamed column FAILs. These probe readers are not registered
+(tests/test_canary_coverage.py derives this list from app/ and checks the
+twins). Twins, whose columns a registered canary compiles:
+mart_sql.open_alert_severity_counts, cortex_sql.cortex_code_user_daily,
+change_impact_sql.proc_redeploys and workbench_sql.product_mapping_totals.
+Partly covered: insights_sql.object_reads_confirm (its ACCESS_HISTORY
+columns FAIL through the security.* canaries; its ACCOUNT_USAGE.TABLES and
+GRANTS_TO_ROLES join columns have no canary). SHOW-based, because EXPLAIN
+cannot compile SHOW: mart_sql.email_alert_objects,
+ops_sql.overwatch_task_states, ops_sql.warehouse_stmt_timeout_sql,
+ops_sql.account_stmt_timeout_sql, recheck_sql.warehouse_settings_sql and
+Admin's inline SHOW PARAMETERS IN WAREHOUSE read. Reads of the customer ETL
+tables named in SETTINGS, which a default-argument canary cannot name:
+etl_control_sql.reference_gap_scan, etl_control_sql.cycle_night_health_scan
+and etl_control_sql.cycle_finish_history_scan. Deliberately not registered:
+mart_sql.email_notification_history (unproven without the opt-in email
+integration), mart_sql.flyway_history (absent until Flyway is adopted),
+cost_sql.native_anomaly_insights (a SELECT * on an optional feed, so a
+canary sees only absence) and security_sql.object_tag_probe (the
+TAG_REFERENCES existence probe). The Snowsight-link context lookup
+(CURRENT_ORGANIZATION_NAME()) reads no object. For every one but the twins,
+the expander error is the only record. A timeout usually clears on a retry;
+drift does not (apply the missing migrations, or redeploy). Admin → Setup
+progress marks a checklist row Unknown (not Pending) when its read fails
+this way: FIX says Retry for a timeout and names the schema drift for a
+missing column, and the "could not be checked" line's Error detail lists
+each failed read's error.
 An ACCESS_HISTORY read (Entity 360 blast radius, Proof consumer reach) names
 the edition or role only when the view is absent; this account is
 Enterprise, so a timeout there says it timed out.
