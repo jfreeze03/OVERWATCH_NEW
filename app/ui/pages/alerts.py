@@ -144,6 +144,39 @@ def _feed_fallback_counts(df: pd.DataFrame, cap: int) -> tuple[int, int, int, st
     return crit, high, total, crit_s, high_s, f"{total}+", True
 
 
+def _rule_current(rules_df: pd.DataFrame, rule_id: str) -> tuple[float | None, bool]:
+    """(THRESHOLD_NUM, ENABLED) of ``rule_id`` in the ALERT_CONFIG frame: the threshold is None when absent or
+    unreadable (never a fabricated 0.0); ENABLED reads Snowflake BOOLEAN / 'true' text, True when unknown."""
+    rows = rules_df[rules_df["RULE_ID"].astype(str) == str(rule_id)] if "RULE_ID" in rules_df.columns else rules_df
+    if rows.empty:
+        return None, True
+    thr = safe_float(rows.iloc[0].get("THRESHOLD_NUM"), default=float("nan"))
+    raw = rows.iloc[0].get("ENABLED")
+    if isinstance(raw, str):
+        enabled = raw.strip().lower() in ("true", "1", "yes", "y")
+    else:
+        enabled = True if raw is None or (isinstance(raw, float) and math.isnan(raw)) else bool(raw)
+    return (thr if math.isfinite(thr) else None), enabled
+
+
+def _rule_change_sql(rule_id: str, cur_threshold: float | None, cur_enabled: bool,
+                     new_threshold: float | None, new_enabled: bool) -> str:
+    """The generate-only ALERT_CONFIG UPDATE for the threshold generator, writing ONLY the columns that change
+    (review R1-233): toggling Enabled never rewrites THRESHOLD_NUM, and an empty threshold box (None) leaves it
+    alone. '' when nothing changes."""
+    sets = []
+    if new_threshold is not None and (cur_threshold is None
+                                      or abs(float(new_threshold) - float(cur_threshold)) > 1e-12):
+        sets.append(f"THRESHOLD_NUM = {float(new_threshold)}")
+    if bool(new_enabled) != bool(cur_enabled):
+        sets.append(f"ENABLED = {str(bool(new_enabled)).upper()}")
+    if not sets:
+        return ""
+    return (f"UPDATE {core_object('ALERT_CONFIG')}\n"
+            f"SET {', '.join(sets)}, UPDATED_AT = CURRENT_TIMESTAMP()\n"
+            f"WHERE RULE_ID = {sql_literal(rule_id)};")
+
+
 RESOLUTION_KINDS = ("ACTIONED", "NOISE", "EXPECTED")
 
 
@@ -1933,15 +1966,26 @@ def render() -> None:
                 if not rules.empty:
                     rule_ids = rules.df["RULE_ID"].astype(str).tolist()
                     rule_id = st.selectbox("Rule", rule_ids, key="rule_pick")
-                    new_threshold = st.number_input("New threshold", min_value=0.0, step=1.0, key="rule_thresh")
-                    enabled = st.checkbox("Enabled", value=True, key="rule_enabled")
-                    st.code(
-                        f"UPDATE {core_object('ALERT_CONFIG')}\n"
-                        f"SET THRESHOLD_NUM = {new_threshold}, ENABLED = {str(bool(enabled)).upper()}, "
-                        "UPDATED_AT = CURRENT_TIMESTAMP()\n"
-                        f"WHERE RULE_ID = {sql_literal(rule_id)};",
-                        language="sql",
-                    )
+                    # Review R1-233: seed both inputs from the PICKED rule (per-rule keys, so a new pick
+                    # re-seeds) and emit only what changed. The box used to default to 0.0 and the UPDATE
+                    # always wrote THRESHOLD_NUM, so using the generator just to toggle Enabled wrote
+                    # THRESHOLD_NUM = 0.0 -- which makes most arms fire on every row (SEC_TRUST_REGRESSION
+                    # [29] raised every unchanged at-risk count as a 'regression').
+                    _cur_thr, _cur_en = _rule_current(rules.df, rule_id)
+                    new_threshold = st.number_input(
+                        "New threshold", min_value=0.0, step=1.0,
+                        value=_cur_thr if _cur_thr is not None and _cur_thr >= 0 else None,
+                        key=f"rule_thresh:{rule_id}")
+                    enabled = st.checkbox("Enabled", value=_cur_en, key=f"rule_enabled:{rule_id}")
+                    _change_sql = _rule_change_sql(rule_id, _cur_thr, _cur_en, new_threshold, enabled)
+                    if _change_sql:
+                        st.code(_change_sql, language="sql")
+                        if new_threshold is not None and float(new_threshold) == 0.0 and _cur_thr != 0.0:
+                            st.warning("A threshold of 0 makes most rules fire on every row they evaluate "
+                                       "(a '>= 0' test is always true) — check this is what you mean.")
+                    else:
+                        st.caption("No change from the rule's current threshold and Enabled — edit either "
+                                   "to generate an UPDATE.")
                     st.caption("Rule changes are generate-only: review, then run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
                     st.caption("WINDOW_HOURS is informational: each rule family's scan "
                                "window is fixed in SP_ALERT_SCAN (see the runbook's rule "
