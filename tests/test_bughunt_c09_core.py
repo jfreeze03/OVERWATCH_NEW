@@ -254,3 +254,64 @@ def test_refresh_drops_the_cached_session_off_sis(monkeypatch, sis, cleared):
     src = (m.__file__ and open(m.__file__, encoding="utf-8").read())
     block = src.split('if st.button("Refresh data"', 1)[1].split("st.rerun()", 1)[0]
     assert "_reconnect_off_sis()" in block                              # the sidebar Refresh calls it
+
+
+# ------------------------------------------------------------------ R1-173 / R1-335: DEPLOY_ACTORS is a live setting ----
+
+def _settings_tab_outcome(monkeypatch, keys: list[str]) -> tuple[list[str], list]:
+    from types import SimpleNamespace
+
+    from app.ui.pages import admin
+
+    warnings: list[str] = []
+    options: list = []
+
+    def _selectbox(_label, opts, **_k):
+        options.extend(opts)
+        return opts[0]
+
+    frame = pd.DataFrame({"KEY": keys, "VALUE": [""] * len(keys),
+                          "UPDATED_AT": [None] * len(keys), "UPDATED_BY": [""] * len(keys)})
+    monkeypatch.setattr(admin, "run", lambda *_a, **_k: QueryResult(df=frame.copy(), ok=True, source="SETTINGS"))
+    monkeypatch.setattr(admin, "load_settings", lambda _p: {"_source": "stub"})
+    monkeypatch.setattr(admin, "guard", lambda res, *_a, **_k: res.usable())
+    for name in ("panel_help", "styled_table", "result_caption", "section_header"):
+        monkeypatch.setattr(admin, name, lambda *_a, **_k: None)
+    monkeypatch.setattr(admin, "with_user_names", lambda df, *_a, **_k: df)
+    monkeypatch.setattr(admin, "_setting_value_input", lambda *_a, **_k: "")
+    monkeypatch.setattr(admin, "st", SimpleNamespace(caption=lambda *_a, **_k: None, warning=warnings.append,
+                                                     selectbox=_selectbox, code=lambda *_a, **_k: None))
+    admin._settings_tab(is_operator=False)
+    return warnings, options
+
+
+def test_deploy_actors_is_editable_and_never_called_safe_to_delete(monkeypatch):
+    from app.config import DEFAULT_SETTINGS
+
+    # every migration-seeded key that is still live, plus the V033 / V032 rows the account carries
+    keys = [k for k in DEFAULT_SETTINGS if k != "DEPLOY_ACTORS"] + ["DEPLOY_ACTORS", "INCIDENT_REOPEN_DAYS"]
+    warnings, options = _settings_tab_outcome(monkeypatch, keys)
+    assert warnings == ["Settings rows the app no longer reads (safe to delete): INCIDENT_REOPEN_DAYS"]
+    assert "DEPLOY_ACTORS" in options                    # docs/FLYWAY_ADOPTION.md: set it on Admin > Settings
+
+
+def test_every_settings_key_the_app_reads_in_sql_is_a_known_setting():
+    """Recurrence lock: a SETTINGS key an app SQL builder reads (`KEY = 'X'` / `KEY IN ('X', ...)`) must be in
+    DEFAULT_SETTINGS, or Admin flags the live row 'safe to delete' and offers no editor for it."""
+    import re
+
+    from app.config import DEFAULT_SETTINGS
+    from tests._source import ROOT
+
+    read: set[str] = set()
+    for path in sorted((ROOT / "app" / "data").glob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if "SETTINGS" not in text:
+            continue
+        for m in re.finditer(r"\bKEY\s*(?:=\s*'([A-Z0-9_]+)'|IN\s*\(([^)]*)\))", text):
+            if m.group(1):
+                read.add(m.group(1))
+            else:
+                read |= set(re.findall(r"'([A-Z0-9_]+)'", m.group(2)))
+    assert "DEPLOY_ACTORS" in read                       # the scan sees change_impact_sql's read
+    assert read - set(DEFAULT_SETTINGS) == set()
