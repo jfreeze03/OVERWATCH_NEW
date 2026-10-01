@@ -4117,6 +4117,12 @@ def _adaptive_candidacy_panel(company: str, days: int, *, bounds: tuple | None =
                "lever); flat load ⇒ a fixed size is fine. An ordering heuristic — the rationale "
                "shows the inputs.")
     result_caption(hourly)
+    if not idle.ok:
+        # The scores above carry no idle discount and no auto-suspend routing (IDLE_PCT "—");
+        # say so instead of letting the methodology caption imply they do (R1-112).
+        empty_state("unavailable", "The idle read failed: these scores carry no idle discount and "
+                                   "no auto-suspend-first routing (Idle % shows —).",
+                    detail=str(idle.error or ""))
 
 def _contention_tab(company: str, days: int, *, bounds: tuple | None = None) -> None:
     _lm = "_lm" if bounds is not None else ""
@@ -4256,9 +4262,10 @@ def _wh_change_block(company: str, is_operator: bool) -> None:
         )
     elif guard(res, "", setup_hint="Not installed yet — apply V024, then the daily scan populates this."):
         df = res.df.copy()
+        # The tiles read the builder's untruncated window totals; the table is the newest 200.
         k = wh_change.registry_kpis(df)
         kpi_row([
-            {"label": "Changes tracked (90d)", "value": f"{k['changes']}"},
+            {"label": "Changes tracked (90d)", "value": f"{k['changes']:,}"},
             {"label": "Regressed", "value": f"{k['regressed']}",
              "delta_color": "inverse" if k["regressed"] else "off",
              "help": "Worse $/day, p95, queueing, or failure rate vs the frozen pre-change baseline."},
@@ -4266,6 +4273,9 @@ def _wh_change_block(company: str, is_operator: bool) -> None:
             {"label": "Still accumulating", "value": f"{k['pending']}",
              "help": "Fewer than 3 after-days or 20 after-queries so far — no verdict yet."},
         ])
+        if k["changes"] > len(df):
+            st.caption(f"Table below shows the latest {len(df)} of {k['changes']:,} tracked "
+                       "changes; the tiles count all of them.")
         sel = selectable_table(df[[c for c in (
             "VERDICT", "WAREHOUSE_NAME", "SETTING", "OLD_VALUE", "NEW_VALUE",
             "CHANGE_SEEN_AT") if c in df.columns]],

@@ -31,11 +31,17 @@ def classify_qas_roi(qas_usd: float, eligible_queries: object, *,
     count of queries eligible for acceleration.
 
     - paying but little eligible workload -> "Paying, little benefit" (drop)
-    - eligible workload but not paying     -> "Eligible, QAS off" (enable)
+    - eligible workload, no QAS spend      -> "Eligible, QAS off" (enable)
+    - eligible workload, spend under floor -> "QAS on, low spend" (keep)
     - paying and eligible                  -> "Working" (keep)
     - neither material                     -> "Minimal" ("")
+
+    Any QAS spend in the window proves QAS was ON (Snowflake bills QAS credits only on a
+    warehouse that has it enabled), so a spend under the floor is "low spend", never "off" —
+    the same ``> 0`` test the Optimize drill uses, so the verdict and the drill agree.
     """
-    paying = safe_float(qas_usd) >= safe_float(spend_floor)
+    spend = safe_float(qas_usd)
+    paying = spend >= safe_float(spend_floor)
     try:
         eligible = int(safe_float(eligible_queries)) >= int(eligible_floor)
     except (TypeError, ValueError):
@@ -43,6 +49,8 @@ def classify_qas_roi(qas_usd: float, eligible_queries: object, *,
     if paying and not eligible:
         return QasVerdict("Paying, little benefit — QAS rarely helps here", "drop")
     if eligible and not paying:
+        if spend > 0:
+            return QasVerdict("QAS on, low spend — eligible workload is being accelerated", "keep")
         return QasVerdict("Eligible workload, QAS off — acceleration opportunity", "enable")
     if paying and eligible:
         return QasVerdict("Working — QAS spend is matched by eligible workload", "keep")

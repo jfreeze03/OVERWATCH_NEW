@@ -213,8 +213,10 @@ def test_change_deltas_skips_missing_sides():
 
 def test_registry_kpis_counts_and_empty():
     df = pd.DataFrame({"VERDICT": ["REGRESSED", "IMPROVED", "PENDING", "NO_BASELINE", "NEUTRAL"]})
+    # pending is PENDING only: NO_BASELINE is a final verdict the scan never revisits, so it is
+    # not "Still accumulating" (bug-hunt R1-121; was 2 when NO_BASELINE counted as pending).
     assert wh_change.registry_kpis(df) == {
-        "changes": 5, "regressed": 1, "improved": 1, "pending": 2}
+        "changes": 5, "regressed": 1, "improved": 1, "pending": 1}
     assert wh_change.registry_kpis(pd.DataFrame()) == {
         "changes": 0, "regressed": 0, "improved": 0, "pending": 0}
 

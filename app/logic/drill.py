@@ -3,14 +3,17 @@
 Pure evaluation of OPS_ALERT_DRILL events (inserted monthly by the opt-in
 snowflake/alert_drill.sql task): delivered = the notify chain stamped
 NOTIFIED_AT; acknowledged = a human pressed ACK. The streak is consecutive
-months, newest backward, where both happened.
+CALENDAR months, newest backward, where both happened: one outcome per month
+(passed if any drill that month passed), broken by a failed month OR a missing
+one (a suspended or torn-down drill task writes no row, and that is exactly the
+reach failure the scoreboard exists to catch).
 """
 
 from __future__ import annotations
 
 import pandas as pd
 
-from .formulas import safe_float
+from .formulas import ACCOUNT_TIMEZONE, safe_float
 
 
 def drill_report(events: pd.DataFrame | None) -> dict:
@@ -28,12 +31,20 @@ def drill_report(events: pd.DataFrame | None) -> dict:
     def _passed(row) -> bool:
         return pd.notna(row.get("NOTIFIED_AT")) and pd.notna(row.get("ACK_AT"))
 
+    # One outcome per calendar month (account time), then walk back month by month. Counting
+    # passing EVENTS instead read Sep + Jul passes with no August drill as a 2-month streak.
+    raised = frame["RAISED_AT"]
+    if getattr(raised.dt, "tz", None) is not None:
+        raised = raised.dt.tz_convert(ACCOUNT_TIMEZONE).dt.tz_localize(None)
+    passed = pd.Series([_passed(row) for _, row in frame.iterrows()], index=frame.index)
+    by_month = passed.groupby(raised.dt.to_period("M")).any().sort_index(ascending=False)
     streak = 0
-    for _, row in frame.iterrows():
-        if _passed(row):
-            streak += 1
-        else:
-            break
+    expected = None
+    for month, ok in by_month.items():
+        if (expected is not None and month != expected) or not ok:
+            break           # a missing month or a failed month ends the streak
+        streak += 1
+        expected = month - 1
     last = frame.iloc[0]
     mtta_min = None
     if pd.notna(last.get("ACK_AT")):

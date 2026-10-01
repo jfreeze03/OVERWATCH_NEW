@@ -197,7 +197,13 @@ SELECT
     BASELINE_QUEUED_MIN_PER_DAY, AFTER_QUEUED_MIN_PER_DAY,
     BASELINE_SPILL_GB_PER_DAY, AFTER_SPILL_GB_PER_DAY,
     BASELINE_FAIL_PCT, AFTER_FAIL_PCT,
-    TRACKING_UNTIL, ALERTED{", COUNT(*) OVER () AS TOTAL_CHANGES" if win else ""}
+    TRACKING_UNTIL, ALERTED,
+    -- untruncated window totals for the KPI tiles and the onset-mode caption (window functions run
+    -- before the LIMIT; R1-065 / R1-060), so >200 changes in the window no longer reads 200 (wh_change.registry_kpis)
+    COUNT(*) OVER () AS TOTAL_CHANGES,
+    COUNT_IF(w.VERDICT = 'REGRESSED') OVER () AS TOTAL_REGRESSED,
+    COUNT_IF(w.VERDICT = 'IMPROVED') OVER () AS TOTAL_IMPROVED,
+    COUNT_IF(w.VERDICT = 'PENDING') OVER () AS TOTAL_PENDING
 FROM {core_object("WAREHOUSE_CHANGE_REGISTRY")} w
 -- uncorrelated by construction (live round 9): the setting resolves once,
 -- POSITION runs per row — no correlated-aggregate subquery for Snowflake

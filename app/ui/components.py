@@ -867,10 +867,9 @@ def add_to_case_button(section: str, result: QueryResult, *, summary: str,
             summary=summary, next_action=next_action, as_of=as_of, title=title,
             added_at=account_today().isoformat(),
             preview_columns=list(head.columns),
-            # R1-220: hand NULLs over as None so case_file's own None -> blank guard fires. astype(str)
-            # had already stringified them to 'nan' / 'None' / 'NaT' / '<NA>', which the exported
-            # Case File markdown printed literally (e.g. a locked-out user's FIRST_SUCCESS_AFTER).
-            # astype(object) first, or a float column turns the None straight back into NaN.
+            # R1-220 / R1-105: hand NULLs over as None (case_file renders them "—"). astype(str) had
+            # already stringified them to 'nan' / 'None' / 'NaT' / '<NA>', which the exported Case File
+            # markdown printed literally. astype(object) first, or a float column turns None back into NaN.
             preview_rows=head.astype(object).where(head.notna(), None).to_numpy().tolist(),
             # Truncated when the query was row-capped OR the source has more
             # rows/columns than the preview shows (the head()/col cap above).

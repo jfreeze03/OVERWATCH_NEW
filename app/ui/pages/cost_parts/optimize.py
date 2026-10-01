@@ -752,7 +752,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 # without {_lm} the cached answer can survive a Trailing<->Last-month
                 # switch when the day-count matches (bug-hunt round 6).
                 key=f"idle_{company}_{days}{_lm}",
-                prompt=idle_warehouse_prompt(advisor, company, idle_days),
+                # bounds: a calendar preset names its own dates, not "last N days" (R1-106)
+                prompt=idle_warehouse_prompt(advisor, company, idle_days, bounds=bounds),
                 settings=settings,
                 page=_PAGE,
                 subject="evaluate idle warehouse spend",
