@@ -300,8 +300,10 @@ def _apply_default_landing() -> None:
     prefs = run(prefs_sql.user_prefs(), page="Views", key="user_prefs", tier="live",
                 source="USER_PREFS")
     if not prefs.ok:
-        # r10 #1: commit-on-success — a transient failure retries next rerun
-        # instead of silently skipping the saved landing for the session.
+        # r10 #1: commit-on-success — a transient failure retries the USER_PREFS
+        # read next rerun, so the display prefs (timezone, density, presentation
+        # mode) still hydrate. The saved DEFAULT_VIEW only lands if no page has
+        # rendered yet (see the c09 R1-002 follow-up below).
         tries = int(st.session_state.get("_ow_default_attempts", 0)) + 1
         st.session_state["_ow_default_attempts"] = tries
         if tries >= 3:
