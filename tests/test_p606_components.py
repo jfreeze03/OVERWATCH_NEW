@@ -10,6 +10,7 @@ pre-fix code at 04fd374e:
   R1-215  the row-click seen-guards never re-armed, so a return-then-re-click did nothing.
   R1-216  spend_trend averaged/paced ROWS, not calendar days, and always dimmed the newest row.
   R1-217  bar_count's takeaway printed a share of a SUM of per-warehouse averages.
+  R1-218  section-count badges keyed on the day count only, so Last month reused the 30d count.
 """
 
 from __future__ import annotations
@@ -411,3 +412,34 @@ def test_contention_chart_declares_its_average_non_additive():
     ops = _src("app/ui/pages/operations.py")
     seg = ops.split('"WAREHOUSE_NAME", _chart_metric, title=_chart_title,', 1)[1].split(")\n", 1)[0]
     assert 'additive=_chart_metric != "AVG_QUEUE_SEC"' in seg
+
+
+# ---------------------------------------------------------------------------
+# R1-218: a section badge is keyed on the window's bounds, not just its day count
+# ---------------------------------------------------------------------------
+
+def _window_filters(window, today: date) -> dict:
+    from app.logic.date_windows import resolve_window_days, window_bounds
+    return {"company": "ALFA", "days": resolve_window_days(window, today=today),
+            "bounds": window_bounds(window, today=today)}
+
+
+def test_badge_stashed_under_30d_does_not_show_under_last_month_of_the_same_length(monkeypatch):
+    import app.core.state as state
+    from app.config import CURRENT_MONTH_WINDOW, LAST_MONTH_WINDOW
+    from app.ui import components
+    monkeypatch.setattr(components, "st", _NavSt())
+    today = date(2026, 10, 15)                       # Sep has 30 days: Last month resolves to 30
+    current = {"f": _window_filters(30, today)}
+    monkeypatch.setattr(state, "filters", lambda: current["f"])
+    components.stash_section_count("Operations", "Optimize", 12, dims=("company", "days"))
+    assert components.stashed_counts("Operations") == {"Optimize": 12}
+    current["f"] = _window_filters(LAST_MONTH_WINDOW, today)
+    assert current["f"]["days"] == 30                # the collision this guards
+    assert components.stashed_counts("Operations") == {}          # unbadged, never the 30d count
+    current["f"] = _window_filters(CURRENT_MONTH_WINDOW, today)   # resolves to 14 on the 15th
+    components.stash_section_count("Operations", "Optimize", 3, dims=("company", "days"))
+    current["f"] = _window_filters(14, today)
+    assert components.stashed_counts("Operations") == {}
+    current["f"] = _window_filters(CURRENT_MONTH_WINDOW, today)
+    assert components.stashed_counts("Operations") == {"Optimize": 3}   # same window: still badged

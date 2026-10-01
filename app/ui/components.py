@@ -2852,7 +2852,13 @@ def _badge_scope(dims: tuple = ("company", "days")) -> tuple:
     except Exception:  # noqa: BLE001 - badges are chrome, never break a page
         return tuple((d, None) for d in dims)
     def _val(d: str) -> object:
-        return int(safe_float(f.get("days"))) if d == "days" else str(f.get(d) or "")
+        if d == "days":
+            # R1-218: the day count alone does not name a window — Last month on Oct 15 resolves to
+            # 30 like the 30d preset, and Current month on the 15th to 14 like 14d, yet a bounded
+            # read covers different days. Key on the calendar bounds too (None for a trailing
+            # window), so a preset switch never shows the other window's count.
+            return (int(safe_float(f.get("days"))), f.get("bounds"))
+        return str(f.get(d) or "")
     return tuple((d, _val(d)) for d in dims)
 
 
