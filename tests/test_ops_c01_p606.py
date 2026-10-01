@@ -374,9 +374,10 @@ def test_recon_scans_carry_pre_limit_window_totals():
     assert "COUNT(*) OVER () AS TOTAL_ERRORS, COUNT(DISTINCT MTRC) OVER () AS TOTAL_METRICS" in errs
     rec = etl.recon_recurrence_scan(_RECON_SETTINGS["ETL_RECON_ERROR_FQN"])
     assert "COUNT(*) OVER () AS TOTAL_CHECKS" in rec
-    assert "SUM(IFF(a.NEWEST_BROKEN_RN = 1, 1, 0)) OVER () AS ACTIVE_CHECKS_TOTAL" in rec
+    assert "SUM(IFF(r.BROKE_LATEST_CYCLE, 1, 0)) OVER () AS ACTIVE_CHECKS_TOTAL" in rec
     # still-breaking checks rank first, so the LIMIT evicts resolved ones before a latest-cycle break
-    assert "ORDER BY (a.NEWEST_BROKEN_RN = 1) DESC, RECURRENCE_PCT DESC" in rec
+    assert "ORDER BY r.BROKE_LATEST_CYCLE DESC, r.RECURRENCE_PCT DESC" in rec
+    assert rec.index("ACTIVE_CHECKS_TOTAL") < rec.index(") r\n") < rec.index("LIMIT 300")
     for sql in (errs, rec):
         sqlglot.parse(sql, dialect="snowflake")
 

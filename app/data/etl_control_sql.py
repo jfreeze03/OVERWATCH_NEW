@@ -738,25 +738,29 @@ def recon_recurrence_scan(
         "         MAX_BY(TARGET_ERROR, LOAD_DTTM) AS TARGET_ERROR\n"
         "  FROM errs GROUP BY 1, 2, 3, 4\n"
         ")\n"
+        # PR-1 R1-137: the per-check rows are wrapped so the banner's totals and the cap's order read
+        # the finished BROKE_LATEST_CYCLE column: TOTAL_CHECKS / ACTIVE_CHECKS_TOTAL are window
+        # totals over every check (evaluated before the LIMIT), and still-breaking checks rank first
+        # -- the Python tier ladder's order -- so the cap evicts resolved checks, never a
+        # low-recurrence break in the latest cycle (which used to sort last and fall off).
+        "SELECT r.*,\n"
+        "       COUNT(*) OVER () AS TOTAL_CHECKS,\n"
+        "       SUM(IFF(r.BROKE_LATEST_CYCLE, 1, 0)) OVER () AS ACTIVE_CHECKS_TOTAL\n"
+        "FROM (\n"
         "SELECT a.MTRC, a.FRQCY, a.VALUE_TYPE, a.RECON_MTRC_LAYER,\n"
         "       a.BROKEN_CYCLES, f.TOTAL_ERROR_CYCLES,\n"
         "       ROUND(100.0 * a.BROKEN_CYCLES / NULLIF(f.TOTAL_ERROR_CYCLES, 0), 0) AS RECURRENCE_PCT,\n"
         f"       a.RECENT_BROKEN, LEAST({_k}, f.TOTAL_ERROR_CYCLES) AS RECENT_WINDOW,\n"
         "       (a.NEWEST_BROKEN_RN = 1) AS BROKE_LATEST_CYCLE,\n"
         "       a.FIRST_BROKEN_ON, a.LAST_BROKEN_ON, x.ERROR_ROWS,\n"
-        "       x.SOURCE_LAYER, x.TARGET_LAYER, x.SOURCE_ERROR, x.TARGET_ERROR,\n"
-        # pre-LIMIT totals for the banner (PR-1 R1-137): checks in the window, and how many broke in
-        # their frequency's latest cycle -- the 'still breaking' count must never come from the cap
-        "       COUNT(*) OVER () AS TOTAL_CHECKS,\n"
-        "       SUM(IFF(a.NEWEST_BROKEN_RN = 1, 1, 0)) OVER () AS ACTIVE_CHECKS_TOTAL\n"
+        "       x.SOURCE_LAYER, x.TARGET_LAYER, x.SOURCE_ERROR, x.TARGET_ERROR\n"
         "  FROM agg a\n"
         "  JOIN freq f ON f.FRQCY = a.FRQCY\n"
         "  JOIN ctx  x ON x.MTRC = a.MTRC AND x.FRQCY = a.FRQCY\n"
         "               AND x.VALUE_TYPE = a.VALUE_TYPE AND x.RECON_MTRC_LAYER = a.RECON_MTRC_LAYER\n"
-        # still-breaking first (the Python tier ladder's order), so the cap evicts resolved checks
-        # before one that broke in the latest cycle -- a low-recurrence NEW break used to sort last
-        "  ORDER BY (a.NEWEST_BROKEN_RN = 1) DESC, RECURRENCE_PCT DESC, a.RECENT_BROKEN DESC,\n"
-        "           a.BROKEN_CYCLES DESC, x.ERROR_ROWS DESC\n"
+        ") r\n"
+        "  ORDER BY r.BROKE_LATEST_CYCLE DESC, r.RECURRENCE_PCT DESC, r.RECENT_BROKEN DESC,\n"
+        "           r.BROKEN_CYCLES DESC, r.ERROR_ROWS DESC\n"
         f"  LIMIT {int(max_rows)}"
     )
 
