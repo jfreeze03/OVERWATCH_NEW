@@ -415,6 +415,71 @@ def test_recon_recurrence_banner_reads_the_active_total(monkeypatch):
     assert "300 of 405 checks" in fake.text("caption")
 
 
+def test_recon_recurrence_scan_totals_each_tier_before_the_limit():
+    import sqlglot
+
+    from app.data import etl_control_sql as etl
+    rec = etl.recon_recurrence_scan(_RECON_SETTINGS["ETL_RECON_ERROR_FQN"])
+    chronic, new = etl.recon_tier_predicates("r")
+    assert f"SUM(CASE WHEN {chronic} THEN 1 ELSE 0 END) OVER () AS CHRONIC_CHECKS_TOTAL" in rec
+    assert f"SUM(CASE WHEN {new} THEN 1 ELSE 0 END) OVER () AS NEW_CHECKS_TOTAL" in rec
+    assert rec.index("CHRONIC_CHECKS_TOTAL") < rec.index("NEW_CHECKS_TOTAL") < rec.index(") r\n") \
+        < rec.index("LIMIT 300")
+    sqlglot.parse(rec, dialect="snowflake")
+
+
+def test_recon_tier_predicates_match_the_classifier_row_by_row():
+    # the SQL twin must tier every row exactly as app.logic.insights.recon_recurrence does (its
+    # thresholds, its fillna(0), its CHRONIC-before-NEW ladder), or the banner and table disagree
+    import itertools
+    import sqlite3
+
+    from app.data import etl_control_sql as etl
+    from app.logic.insights import recon_recurrence
+    grid = list(itertools.product([True, False], [None, 0, 59, 60, 100], [None, 1, 2, 3, 4],
+                                  [None, 1, 2, 3, 10], [None, 0, 1, 2, 5]))
+    df = pd.DataFrame([{"MTRC": f"M{i}", "BROKE_LATEST_CYCLE": latest, "RECURRENCE_PCT": pct,
+                        "BROKEN_CYCLES": broken, "TOTAL_ERROR_CYCLES": total, "RECENT_BROKEN": recent}
+                       for i, (latest, pct, broken, total, recent) in enumerate(grid)])
+    tiered = recon_recurrence(df)
+    want = dict(zip(tiered["MTRC"], tiered["TIER"], strict=True))
+    chronic, new = etl.recon_tier_predicates("r")
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE t (MTRC TEXT, BROKE_LATEST_CYCLE INT, RECURRENCE_PCT REAL, BROKEN_CYCLES INT,"
+                " TOTAL_ERROR_CYCLES INT, RECENT_BROKEN INT)")
+    con.executemany("INSERT INTO t VALUES (?,?,?,?,?,?)", [(f"M{i}", int(g[0]), *g[1:]) for i, g in enumerate(grid)])
+    got = dict(con.execute(f"SELECT MTRC, CASE WHEN {chronic} THEN 'CHRONIC' WHEN {new} THEN 'NEW' ELSE '' END "
+                           "FROM t r").fetchall())
+    assert con.execute(f"SELECT COUNT(*) FROM t r WHERE ({chronic}) AND ({new})").fetchone() == (0,)
+    mismatched = {m: (want[m], got[m]) for m in want
+                  if (want[m] if want[m] in ("CHRONIC", "NEW") else "") != got[m]}
+    assert not mismatched
+    assert {"CHRONIC", "NEW"} <= set(want.values())          # the grid exercises both tiers
+
+
+def test_recon_recurrence_banner_counts_tiers_past_the_cap(monkeypatch):
+    # R1-137 review: 450 checks break in the latest cycle, the cap keeps the 300 highest-recurrence
+    # (200 chronic + 100 intermittent) and evicts the 150 NEW ones -- counted from the frame the
+    # banner read "(200 chronic, 0 newly-breaking)" under "the count above covers all of them".
+    n = 300
+    chronic_row = {"BROKEN_CYCLES": 40, "TOTAL_ERROR_CYCLES": 50, "RECURRENCE_PCT": 80, "RECENT_BROKEN": 5}
+    flapping_row = {"BROKEN_CYCLES": 10, "TOTAL_ERROR_CYCLES": 50, "RECURRENCE_PCT": 20, "RECENT_BROKEN": 2}
+    rows = [{"MTRC": f"M{i}", "FRQCY": "DAILY", "VALUE_TYPE": "V", "RECON_MTRC_LAYER": "L",
+             **(chronic_row if i < 200 else flapping_row), "RECENT_WINDOW": 5, "BROKE_LATEST_CYCLE": True,
+             "ERROR_ROWS": 10, "TOTAL_CHECKS": 450, "ACTIVE_CHECKS_TOTAL": 450,
+             "CHRONIC_CHECKS_TOTAL": 200, "NEW_CHECKS_TOTAL": 150} for i in range(n)]
+    ops, fake, seen = _page(monkeypatch, {"etl_recon_recurrence_0": _ok(pd.DataFrame(rows))},
+                            load_settings=lambda *_a, **_k: _RECON_SETTINGS, guard=lambda *_a, **_k: True)
+    ops._recon_recurrence_panel(0, pf=None)
+    assert "450 metric(s) still breaking as of the latest cycle (200 chronic, 150 newly-breaking)" \
+        in fake.text("error"), fake.text("error")
+    cap = fake.text("caption")
+    assert "300 of 450 checks" in cap and "the 300 highest-recurrence of 450" in cap, cap
+    assert "every still-breaking check first" not in cap
+    ((shown,),) = [(t,) for t in seen["tables"]]
+    assert not {"CHRONIC_CHECKS_TOTAL", "NEW_CHECKS_TOTAL"} & set(shown.columns)
+
+
 def test_ref_gap_headline_marks_a_capped_count():
     body = _fn(read(_OPS), "_reference_gap_panel")
     assert '_plus = "+" if res.truncated else ""' in body
@@ -478,6 +543,18 @@ def test_release_compare_discloses_a_capped_task_set():
 
 # ------------------------------------------------ R1-139: the ETL Window label on a calendar offset ----
 
+def _date_anchored_clause(real):
+    """The calendar-aware ``_window_clause`` shape (R1-063, cluster c10): a calendar offset anchors on
+    the account DATE -- the period's first day at midnight -- and its 0 reads today only."""
+    from app.data.common import account_today_sql
+
+    def clause(days, col="TASK_START_DTTM", indent="  "):
+        if getattr(days, "calendar_window", False) and int(days) >= 0:
+            return f"{indent}AND {col} >= DATEADD('day', -{int(days)}, {account_today_sql()})\n"
+        return real(days, col, indent)
+    return clause
+
+
 @pytest.mark.parametrize(("days", "today", "want"), [
     (CalendarDayOffset(0), date(2026, 9, 1), " (today)"),         # Current month on the 1st: was no label
     (CalendarDayOffset(9), date(2026, 9, 10), " (since Sep 1)"),  # Current month on Sep 10: was "(last 9d)"
@@ -485,10 +562,38 @@ def test_release_compare_discloses_a_capped_task_set():
     (0, date(2026, 9, 10), ""),
 ])
 def test_etl_window_suffix_names_a_calendar_period(monkeypatch, days, today, want):
+    from app.data import etl_control_sql
     from app.ui.pages import operations as ops
     monkeypatch.setattr(ops, "account_today", lambda: today)
+    monkeypatch.setattr(etl_control_sql, "_window_clause", _date_anchored_clause(etl_control_sql._window_clause))
     assert ops._etl_window_suffix(days) == want
+    # the integration merge must keep THIS line (c10's review commit rewrites the same base line to
+    # etl_control_sql.window_suffix, which calls a since-the-1st read 'last Nd')
     assert "_scope = _etl_window_suffix(days)" in _fn(read(_OPS), "_workflow_runtimes_panel")
+
+
+@pytest.mark.parametrize("days", [CalendarDayOffset(0), CalendarDayOffset(9), 7, 0, -3, None])
+def test_etl_window_suffix_never_names_a_window_the_read_skipped(monkeypatch, days):
+    # R1-139 review: the label is read off the clause the readers really emit, so it is truthful with
+    # or without the calendar-aware _window_clause -- an all-time read (an unscoped clause, which is
+    # what a calendar day 0 got before R1-063) never shows ' (today)'.
+    from app.data import etl_control_sql
+    from app.data.common import account_today_sql
+    from app.ui.pages import operations as ops
+    monkeypatch.setattr(ops, "account_today", lambda: date(2026, 9, 10))
+    clause, label = etl_control_sql._window_clause(days), ops._etl_window_suffix(days)
+    if not clause:
+        assert label == ""
+    elif account_today_sql() in clause:
+        assert label.startswith((" (today)", " (since "))
+    else:
+        assert label == f" (last {int(days)}d)"
+    # a now-anchored read of a calendar offset (no R1-063 anchor) says 'last Nd', never 'since'
+    monkeypatch.setattr(etl_control_sql, "_window_clause",
+                        lambda d, *_a, **_k: "" if not d else f"  AND X >= DATEADD('day', -{int(d)}, "
+                                                              "CURRENT_TIMESTAMP())\n")
+    assert ops._etl_window_suffix(CalendarDayOffset(0)) == ""
+    assert ops._etl_window_suffix(CalendarDayOffset(9)) == " (last 9d)"
 
 
 # ------------------------------- R1-073 / R1-131: a failed concurrency read is not "nobody queueing" ----

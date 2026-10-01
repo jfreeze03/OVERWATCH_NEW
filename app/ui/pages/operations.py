@@ -28,6 +28,7 @@ from app.data import (
     security_sql,
     workbench_sql,
 )
+from app.data.common import account_today_sql
 from app.logic import (
     cs_driver,
     failure_advisor,
@@ -1484,16 +1485,24 @@ def _reference_gap_panel(database: str = "") -> None:
 
 
 def _etl_window_suffix(days: int) -> str:
-    """The scope suffix for an ETL panel's Window: ' (last Nd)' for a trailing window, '' unscoped.
+    """The scope suffix naming the Window the ETL readers actually read, '' when they read all time.
 
     PR-1 R1-139: a Current month / Current year Window arrives as a CalendarDayOffset, which is 0 on
     the period's first day -- the old ``if days`` truthiness test dropped the label exactly then, and
-    called a mid-month offset 'last Nd'. The ETL readers anchor a calendar offset on the account
-    date (etl_control_sql._window_clause), so name the period's first day instead."""
-    if getattr(days, "calendar_window", False):
-        start = account_today() - timedelta(days=int(days))
-        return " (today)" if int(days) == 0 else f" (since {start:%b} {start.day})"
-    return f" (last {days}d)" if days else ""
+    called a mid-month offset 'last Nd'. The label is read off the filter
+    ``etl_control_sql._window_clause`` emits for this Window (the clause every runtimes / list
+    reader shares), so it can never name a window the read did not apply: no clause -> '' (all
+    time); a now-anchored clause -> ' (last Nd)'; an account-DATE-anchored clause (a calendar
+    offset, which starts at the period's first day at midnight) -> ' (today)' on that first day,
+    else ' (since <first day>)'."""
+    clause = etl_control_sql._window_clause(days)
+    if not clause:
+        return ""
+    n = int(days)
+    if account_today_sql() not in clause:
+        return f" (last {n}d)"
+    start = account_today() - timedelta(days=n)
+    return " (today)" if n == 0 else f" (since {start:%b} {start.day})"
 
 
 def _workflow_runtimes_panel(days: int = 0, *, pf: dict | None = None) -> None:
@@ -2182,17 +2191,22 @@ def _recon_recurrence_panel(days: int = 0, *, pf: dict | None = None) -> None:
         if rec.empty:
             empty_state("clean", f"No reconciliation errors {_win} — every metric ties out.")
             return
-        chronic = int((rec["TIER"] == "CHRONIC").sum())
-        # PR-1 R1-137: the still-breaking and total counts come from the scan's pre-LIMIT window
-        # totals -- counted from the capped frame, a latest-cycle break past row 300 read as "none
-        # broke in the latest cycle". The scan now ranks still-breaking checks first, so the chronic
-        # / new tiers (both require a latest-cycle break) are read from that head of the frame.
+        # PR-1 R1-137: every banner count comes from the scan's pre-LIMIT window totals -- counted
+        # from the capped frame, a latest-cycle break past row 300 read as "none broke in the latest
+        # cycle". The scan ranks still-breaking checks first but by recurrence, so once more than
+        # 300 break in one cycle the low-recurrence NEW ones are the first the LIMIT evicts: the
+        # chronic / newly-breaking split is totalled in SQL too (etl_control_sql.recon_tier_predicates,
+        # the classifier's twin). The frame counts are only the fallback for a scan without them.
         _raw = res.df
-        active = (int(safe_float(_raw["ACTIVE_CHECKS_TOTAL"].iloc[0])) if "ACTIVE_CHECKS_TOTAL" in _raw.columns
-                  else int(rec["BROKE_LATEST_CYCLE"].astype(bool).sum()))
-        _n_checks = (int(safe_float(_raw["TOTAL_CHECKS"].iloc[0])) if "TOTAL_CHECKS" in _raw.columns
-                     else len(rec))
-        newb = int((rec["TIER"] == "NEW").sum())
+
+        def _window_total(col: str, frame_count: int) -> int:
+            return int(safe_float(_raw[col].iloc[0])) if col in _raw.columns else frame_count
+
+        _shown_active = int(rec["BROKE_LATEST_CYCLE"].astype(bool).sum())
+        active = _window_total("ACTIVE_CHECKS_TOTAL", _shown_active)
+        chronic = _window_total("CHRONIC_CHECKS_TOTAL", int((rec["TIER"] == "CHRONIC").sum()))
+        newb = _window_total("NEW_CHECKS_TOTAL", int((rec["TIER"] == "NEW").sum()))
+        _n_checks = _window_total("TOTAL_CHECKS", len(rec))
         top = rec.iloc[0]
         _hop = f"{top.get('SOURCE_LAYER', '')}→{top.get('TARGET_LAYER', '')}"
         if chronic or active:
@@ -2207,8 +2221,10 @@ def _recon_recurrence_panel(days: int = 0, *, pf: dict | None = None) -> None:
                        "resolved — none broke in the latest cycle.")
         styled_table(rec, height=320)
         if _n_checks > len(rec):
-            st.caption(f"The table shows {len(rec):,} of {_n_checks:,} checks — every still-breaking "
-                       "check first; the still-breaking count above covers all of them.")
+            _first = ("every still-breaking check first" if active <= _shown_active else
+                      f"still-breaking checks first, the {_shown_active:,} highest-recurrence of {active:,}")
+            st.caption(f"The table shows {len(rec):,} of {_n_checks:,} checks — {_first}; the counts "
+                       "above cover every check in the window.")
         st.caption("Recurrence = distinct cycles THIS check broke ÷ distinct cycles ANY check of the "
                    "same frequency broke — a cycle = one night's recon batch (DATE(LOAD_DTTM)). This "
                    "table logs only failures, so cycles where everything reconciled are NOT counted: a "
