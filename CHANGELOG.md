@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.607.0 - Cleanup: dead code, files and tests removed; operator docs brought up to date (2026-10-01)
+
+App-only, no migration. The non-bug half of the round-1 hunt (163 dead-code, file, test and doc findings) plus round 2's
+19 cleanup and doc findings, each re-verified against v4.606.0 before anything was removed: a symbol counted as dead only
+after a reference scan found no caller (identifier, string, dynamic dispatch, monkeypatch target or doc), and tests that
+record an owner decision, a past incident or a migration were kept or turned into absence locks. Built in seven clusters,
+each reviewed adversarially and fixed again, then merged with one follow-up pass for edits that crossed cluster lines.
+
+- **Dead code removed.**
+  - 15 SQL builders no page called: nine V027 / wave-2 mart readers, mart_sql.billed_split, cost_sql.storage_by_database (and its live twin), chargeback_sql.role_department_map_join, security_sql.egress_daily and admin_role_activity_fact, and workbench_sql.experiment_verified_totals and slo_objectives. Their 17 Admin canary rows went with them, plus one duplicate canary, so a canary run no longer pays for a WAREHOUSE_METERING_HISTORY scan and a QUERY_HISTORY scan.
+  - The name-pattern company clauses (warehouse_clause, database_clause, environment_clause, ENVIRONMENTS, ALFA_DATABASE_PATTERNS) and the two sqlsafe helpers only they used: company scope runs only through the COMPANY_FOR_* UDF axis, which the tests now lock.
+  - Unused helpers, constants and parameters across app/logic, app/core and app/ui (among them insights.idle_suspend_sql, formulas.exec_summary_html, verdict.oldest_open_hours, actions.savings_by_month, decision.slo_summary, outcomes.rebroke_families, components.section_scope_note / stalest_day / coverage_contract, run_mart_first's never-used coverage parameters, and two write-only Security selection sentinels).
+  - Pages no longer add "or {}" after run_batch (house law 8), and the Operations operator profile reads its V147 check through the shared schema gate (house law 12).
+- **Small behaviour corrections found on the way.**
+  - Overview no longer re-runs a failed month-to-date read; the tile shows "Unavailable" at once.
+  - "Explain with AI" evidence for anomaly-sweep and serverless-creep alerts includes CREDITS_BILLED, the number the sweep scores.
+  - Captions corrected on Brief, Overview, Compare, Alerts, Admin, Spend, Pipeline SLA, Control Room and Task health (owner queue is company-filtered; the send window is 24h, 7d for CRITICAL; a recurrence is a new incident, not a "reopen"; each loader stamps freshness; only operators listed in OPERATOR_USERS can save or run in the app; the score-trend note states the retro-vs-live budget gap).
+  - The SEC_BREAK_GLASS_USE playbook is marked retired, and OPS_CANARY_FAIL's first query looks back 7 days for the weekly canary.
+- **Tests.**
+  - Floor CI (Streamlit 1.52.2, the version SiS runs) now renders the page and section AppTests: a test-harness shim back-ports Streamlit 1.55's ButtonGroup fix, so about 170 tests that used to skip there now run, and a lock stops the skips coming back. The page render sweeps now also fail when a page's error boundary catches an exception.
+  - Removed one assertion that could never fail, one exact duplicate test and unused test constants; tests of removed helpers now exercise the live code or became absence locks.
+  - New doc locks: the operator docs (task table, every seeded alert rule, the manual PUT path, the email pre-flight) and every repo path named in CLAUDE.md and AGENTS.md must match the code.
+- **Docs.**
+  - RUNBOOK.md brought up to date throughout: install roles, all 32 live tasks, KPI and freshness rules, scores without a resource-monitor deduction, forecast formulas, retention, alert delivery, the 11 missing alert rules, no WH_ALFA_ADMIN hard cap, and the canary's logging behaviour.
+  - docs/FULL_REBUILD.md covers the current chain, warns that the teardown's live tail drops the notification integrations, and adds a step that restores email, Teams (routes and grants), the drill and the ML forecast.
+  - DEPLOYMENT.md's manual path uploads every app folder (it skipped four) and re-runs roles.sql after CREATE OR REPLACE STREAMLIT; the email runbook's pre-flight no longer blocks on rows that are never emailed.
+  - README.md, ARCHITECTURE.md and FEATURES.md describe owner's-rights SiS, viewer-keyed profiles and the OPERATOR_USERS write allowlist (not "Snowflake roles are the boundary"), about 45 alert rules, and the current page locations.
+  - FEATURE_GLOSSARY.md: rows for removed panels are gone, the Brief / Control Room / Watchlist / contract-runway rows match the pages, and the time convention says SQL runs on the account's Central clock while the SiS server clock is UTC.
+  - CLAUDE.md and AGENTS.md no longer point at the stale 2026-07-14 handoff (removed; its re-run recipe would now roll a loader back) and list only the open items that are still open. REBUILD_PLAN.md (the finished July rebuild plan) is removed. Design notes are marked historical where they are.
+  - snowflake/alert_pipeline_check.sql, webhook_delivery.sql and native_alert_templates.sql headers match the current scans, tasks and delivery (never re-run V018), and .streamlit/secrets.toml.example connects as a role that still exists.
+
 ## 4.606.0 - Bug-hunt round 1: 194 fixes across every page, plus the Control Room timeline crash (2026-10-01)
 
 App-only, no migration. A full-codebase hunt (27 finders, a skeptic per finding) confirmed 361 of 370 findings at
