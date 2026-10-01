@@ -152,3 +152,28 @@ def test_alert_prompt_title_detail_and_rows_still_ground_their_own_figures():
     assert check_grounding("AI spend rose 85% to $412.", section).ok
     # instructions still lead the prompt (AIP-2 ordering), ahead of the evidence
     assert prompt.index("Never invent") < prompt.index("EVIDENCE ROWS:") < prompt.index("- DAY=")
+
+
+# ---- R1-106: the idle-warehouse prompt names a calendar preset's own dates ----------------------
+
+
+def test_idle_prompt_names_last_month_not_last_n_days(monkeypatch):
+    from app.logic import ai_prompts, date_windows
+    monkeypatch.setattr(date_windows, "account_today", lambda: date(2026, 9, 30))
+    advisor = pd.DataFrame({"WAREHOUSE_NAME": ["WH_A"], "IDLE_USD": [12.0]})
+    last_month = ai_prompts.idle_warehouse_prompt(advisor, "ALL", 31,
+                                                  bounds=(date(2026, 8, 1), date(2026, 9, 1)))
+    assert "last month (Aug 1 - Aug 31, 2026)" in last_month
+    assert "last 31 days" not in last_month              # Aug 31-Sep 30 on Sep 30: the wrong dates
+    current = ai_prompts.idle_warehouse_prompt(advisor, "ALL", 30,
+                                               bounds=(date(2026, 9, 1), date(2026, 10, 1)))
+    assert "the current month (Sep 1 - Sep 30, 2026)" in current
+    # a trailing window keeps its wording; the dates sit ahead of the evidence marker
+    trailing = ai_prompts.idle_warehouse_prompt(advisor, "ALL", 30)
+    assert "Idle warehouse analysis for ALL, last 30 days." in trailing
+    assert last_month.index("Aug 31, 2026") < last_month.index("EVIDENCE ROWS:")
+
+
+def test_optimize_passes_the_bounds_to_the_idle_prompt():
+    assert "idle_warehouse_prompt(advisor, company, idle_days, bounds=bounds)" in read(
+        "app/ui/pages/cost_parts/optimize.py")

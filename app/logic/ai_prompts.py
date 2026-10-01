@@ -12,10 +12,12 @@ Contract (the rebuild's honesty rules applied to AI):
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from .date_windows import window_phrase
 from .formulas import safe_float
 
 if TYPE_CHECKING:
@@ -90,7 +92,20 @@ def task_failure_prompt(timeline: pd.DataFrame, company: str, window_days: int =
     )
 
 
-def idle_warehouse_prompt(advisor: pd.DataFrame, company: str, window_days: int) -> str:
+def _window_text(window_days: int, bounds: tuple[date, date] | None) -> str:
+    """The evidence window for a prompt's CONTEXT line. A calendar preset (``bounds`` = start,
+    exclusive end) is named with its dates -- the model has no clock, and 'last 31 days' read on
+    Sep 30 is NOT the Aug 1-31 that 'Last month' evidence covers."""
+    if bounds is None:
+        return f"last {window_days} days"
+    start, end = bounds
+    last = end - timedelta(days=1)
+    return (f"{window_phrase(bounds, window_days)} "
+            f"({start:%b} {start.day} - {last:%b} {last.day}, {last.year})")
+
+
+def idle_warehouse_prompt(advisor: pd.DataFrame, company: str, window_days: int,
+                          *, bounds: tuple[date, date] | None = None) -> str:
     evidence = _serialize_rows(
         advisor,
         ["WAREHOUSE_NAME", "COMPANY", "METERED_HOURS", "IDLE_HOURS", "TOTAL_CREDITS",
@@ -99,7 +114,8 @@ def idle_warehouse_prompt(advisor: pd.DataFrame, company: str, window_days: int)
          "ACTIONABLE_MONTHLY_USD", "SAVINGS_CONFIDENCE"],
     )
     return _assemble(
-        f"Idle warehouse analysis for {company}, last {window_days} days. IDLE_* = credits billed in "
+        f"Idle warehouse analysis for {company}, {_window_text(window_days, bounds)}. "
+        "IDLE_* = credits billed in "
         "hour slices where zero queries ran on that warehouse.",
         evidence,
         "Recommend auto-suspend only where ACTIONABLE=True. Use ACTIONABLE_MONTHLY_USD as the "
