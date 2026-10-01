@@ -862,15 +862,32 @@ def _clamp_pct(value: object) -> int:
     return round(max(0.0, min(safe_float(value), 100.0)))
 
 
-def _projection_defaults(sig: dict | None, carried: dict | None) -> dict:
+def _projection_defaults(sig: dict | None, carried: dict | None, *, ledger_failure=None) -> dict:
     """The projection's slider defaults and where each came from. Adoption = the MEASURED acceptance
     rate (Proof ▸ Acted on), realization = the measured realization rate, else the carried realization
     vs OVERWATCH's own estimate; each falls back to a labelled assumption. The confidence floor is
-    policy, never measured."""
+    policy, never measured.
+
+    ``ledger_failure`` is the failed savings-ledger read behind a None ``sig`` (_proof_ledger_failure):
+    _proof_signals returns before the acceptance read, so neither "nothing decided yet" nor "no verified
+    item" is known -- both helps then say the proof record could not be read (or is not set up yet, for a
+    true absence) instead (R1-209 review)."""
     acc = (sig or {}).get("acc") or {}
     acc_pct = acc.get("ACCEPTANCE_PCT")
     _acc_res = (sig or {}).get("acc_read")
-    if _acc_res is not None and not _acc_res.ok:
+    _unread = None
+    if sig is None and ledger_failure is not None:
+        _kind = str(getattr(ledger_failure, "error_kind", "") or "").strip().lower()
+        _unread = ("the proof record could not be read (the savings-ledger read failed)"
+                   if not is_setup_absence(_kind)
+                   else "this app's role cannot read the proof record yet (the savings-ledger grants)"
+                   if _kind == "privilege"
+                   else "the proof record is not set up yet (no savings ledger to read)")
+    if _unread is not None:
+        adoption = _ASSUMED_ADOPTION_PCT
+        adoption_help = (f"Assumed — {_unread}, so {_ASSUMED_ADOPTION_PCT}% is a placeholder, not a "
+                         "measurement.")
+    elif _acc_res is not None and not _acc_res.ok:
         # R1-209: a failed acceptance read cannot say "nothing decided yet"
         adoption = _ASSUMED_ADOPTION_PCT
         adoption_help = (f"Assumed — the acceptance read (ACTION_QUEUE) could not be completed, so "
@@ -886,7 +903,11 @@ def _projection_defaults(sig: dict | None, carried: dict | None) -> dict:
                          f"{_ASSUMED_ADOPTION_PCT}% is a placeholder, not a measurement.")
     real = (sig or {}).get("realization")
     carried_pct = (carried or {}).get("carried_pct")
-    if real is not None:
+    if _unread is not None:
+        realization = _ASSUMED_REALIZATION_PCT
+        realization_help = (f"Assumed — {_unread}, so {_ASSUMED_REALIZATION_PCT}% is a placeholder, not a "
+                            "measurement.")
+    elif real is not None:
         realization = _clamp_pct(real)
         realization_help = (f"Measured: verified items realized {safe_float(real):,.0f}% of their up-front "
                             "estimates — Proof ▸ Realization rate.")
@@ -1197,7 +1218,7 @@ def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None 
                     probe=True)
         carried = carried_realization(
             ledger_with_attribution(sig["ledger"].df, _attr.df if _attr.usable() else None))
-    _pipeline_projection(pipeline, _projection_defaults(sig, carried))
+    _pipeline_projection(pipeline, _projection_defaults(sig, carried, ledger_failure=_ledger_fail))
 
     # DS #1: pin items on watched entities to the top WITHIN their severity band, so a watched
     # entity's item surfaces first without burying a CRITICAL under a watched LOW. The watchlist and
