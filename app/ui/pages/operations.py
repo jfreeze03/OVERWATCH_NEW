@@ -827,8 +827,8 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                 "now-fully-failing proc has no latency signal, so watch the rollup's FAIL_PCT "
                 "above. 'Faster but failing' flags a proc that only looks quicker because it now "
                 "errors out. Proc name is parsed from the CALL text and grouped with DB+schema; a "
-                "bare vs fully-qualified CALL can split one proc. QUERY_HISTORY lags up to ~45 "
-                "min, so the newest minutes under-report.")
+                "bare vs fully-qualified CALL can split one proc. ACCOUNT_USAGE.QUERY_HISTORY lags "
+                "up to ~45 min, so the newest minutes under-report.")
 
     section_header("Query drill-through", "", "search")
     candidate_ids: list[str] = []

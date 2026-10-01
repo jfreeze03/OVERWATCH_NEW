@@ -168,5 +168,8 @@ def test_cache_pct_readers_scale_fraction_to_percent():
     # R1-144 moved the per-family aggregate into the `fam` CTE (one indent deeper, so the pre-LIMIT window
     # totals can read it); the x100 scale contract this test pins is unchanged
     assert "0)), 0) * 100,\n            100) AS AVG_CACHE_PCT" in ins
+    # v4.607: the mart read point (mart27_sql.family_repeat_fingerprints) was deleted -- the
+    # repeat-query panel is live-only since cost-hunt3 -- so the live reader above is the one
+    # read point left; lock that the unscaled-risk second reader does not come back.
     m27 = (_ROOT / "app" / "data" / "mart27_sql.py").read_text(encoding="utf-8")
-    assert "NULLIF(SUM(f.RUNS), 0) * 100, 1) AS AVG_CACHE_PCT" in m27
+    assert "def family_repeat_fingerprints" not in m27
