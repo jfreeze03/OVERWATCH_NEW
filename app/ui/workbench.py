@@ -26,7 +26,14 @@ from app.logic.formulas import (
     safe_float,
 )
 from app.logic.sizing import size_recommendations
-from app.logic.watch_monitor import WATCH_SIGNAL_TYPES, watch_summary, watch_unchecked, watched_status
+from app.logic.watch_monitor import (
+    WATCH_SIGNAL_TYPES,
+    watch_steady,
+    watch_summary,
+    watch_unchecked,
+    watch_unchecked_types,
+    watched_status,
+)
 from app.logic.wh_health import warehouse_health
 from app.logic.workbench import (
     ACTION_STATUSES,
@@ -355,6 +362,29 @@ def _with_held(frame: pd.DataFrame, *, key: str, type_col: str = "SOURCE_ENTITY_
 _ACTION_READ_CAP = 500
 
 
+def _with_pinned_action(frame: pd.DataFrame, company: str, include_closed: bool, action_id: str) -> pd.DataFrame:
+    """'Assigned to me': keep the item open on screen (or deep-linked) listed when the owner-scoped read does not
+    hold it -- someone else's item -- from a small read keyed on that one id, in the list's company /
+    completed-work scope. The owner-scoped read's SQL never carries the pin, so a new selection never re-reads
+    the queue. The row stays OUT of the viewer's KPI totals: it carries the owner-scoped read's own window
+    totals (constant on every row), or zeros when the viewer owns nothing in scope, never counts of its own.
+    A failed read says so rather than silently dropping the item."""
+    res = run(workbench_sql.action_center(company, include_closed, 1, action_id=action_id), page=_PAGE,
+              key=f"action_center_item_{company}_{include_closed}_{action_id}", tier="live",
+              source="ACTION_QUEUE (the open work item)")
+    if not res.ok:
+        empty_state("unavailable", "The open work item could not be read, so it is not listed here.",
+                    detail=res.error)
+        return frame
+    if res.empty:
+        return frame
+    if frame.empty:
+        zeros = {c: (None if c == "NEXT_RESUME_DATE" else 0) for c in ACTION_WINDOW_COLS}
+        return res.df.head(1).assign(**zeros).reset_index(drop=True)
+    pinned = res.df.head(1).assign(**{c: frame.iloc[0][c] for c in ACTION_WINDOW_COLS if c in frame.columns})
+    return pd.concat([frame, pinned.reindex(columns=frame.columns)], ignore_index=True)
+
+
 def render_action_center(company: str) -> None:
     """Persistent owner queue with exact-row navigation and lifecycle controls."""
     # Codex-adj P1: the header stripe was a CONSTANT "warn" (amber on every render, incl. a
@@ -379,11 +409,12 @@ def render_action_center(company: str) -> None:
     # completed work the open items sort first, so closed history never pushes open work past the cap.
     # 'Assigned to me' filters in the read itself (owner=, before the LIMIT): it used to filter only the
     # first 500 rows, so the viewer's own work past the cap was never listed and the counts covered only
-    # the rows read.
+    # the rows read. The read never depends on the selected item (review fix): baking the pin into its SQL
+    # made every new selection a fresh live read; the pin is merged below from its own small read.
     extended_res = run(
         workbench_sql.action_center(company, include_closed, _ACTION_READ_CAP, with_kpi_totals=True,
-                                    owner=_me if _mine else "", keep_action_id=_pin if _mine else ""),
-        page=_PAGE, key=f"action_center_{company}_{include_closed}" + (f"_mine_{_me}_{_pin}" if _mine else ""),
+                                    owner=_me if _mine else ""),
+        page=_PAGE, key=f"action_center_{company}_{include_closed}" + (f"_mine_{_me}" if _mine else ""),
         tier="live", source="ACTION_QUEUE + V074 lifecycle context",
     )
     # R1-206: V074's lifecycle shape is guaranteed past config.REQUIRED_SCHEMA_FLOOR (88; main.py blocks
@@ -403,6 +434,9 @@ def render_action_center(company: str) -> None:
     _matching = (int(safe_float(frame.iloc[0].get("KPI_MATCHING_TOTAL")))
                  if not frame.empty and "KPI_MATCHING_TOTAL" in frame.columns else len(frame))
 
+    if _mine and _pin and ("ACTION_ID" not in frame.columns
+                           or _pin not in set(frame["ACTION_ID"].astype(str))):
+        frame = _with_pinned_action(frame, company, include_closed, _pin)
     if _mine and not frame.empty:
         # The read is already owner-scoped (its window totals count only the viewer's work); this row filter
         # is a guard that keeps exactly owned_by's rows plus the pinned item.
@@ -1091,8 +1125,9 @@ def watched_attention(viewer: str, rate: float) -> pd.DataFrame:
     Cheap and degradation-safe: cost from FACT_WAREHOUSE_DAILY (mart), health from
     the efficiency MART only (probe — never the heavy live sizing scan). A failed cost
     or health read is passed as None (not evaluated), so a warehouse watch names what
-    was not checked instead of reading 'steady' (R2-074); an ok-but-empty read is an
-    evaluated one. Never falls back to a scan.
+    was not checked instead of reading 'steady' (R2-074); a failed task / query-family
+    signals read does the same for the watches it covered (signals_failed). An
+    ok-but-empty read is an evaluated one. Never falls back to a scan.
     Cross-company (company='ALL') so a watched entity is evaluated no matter which
     company filter the viewer is on, and both surfaces share one cache identity."""
     cols = ["ENTITY_TYPE", "ENTITY_KEY", "LABEL", "ATTENTION", "STATUS", "SEVERITY"]
@@ -1115,7 +1150,8 @@ def watched_attention(viewer: str, rate: float) -> pd.DataFrame:
     _cal = str(load_settings(_PAGE).get("EXPECTED_SPIKE_CALENDAR") or "")
     # Next-Fifty #46: task / query-family arms. The signals read fires ONLY when this viewer watches a
     # TASK or QUERY_FINGERPRINT (a warehouse-only watchlist pays nothing), newest watches first, capped.
-    entity_daily, signal_keys = None, None
+    entity_daily, signal_keys, signals_failed = None, None, False
+    reads = [("FACT_WAREHOUSE_DAILY", daily), ("MART_WAREHOUSE_EFFICIENCY_DAILY", prof)]
     if "ENTITY_TYPE" in wl.df.columns and "ENTITY_KEY" in wl.df.columns:
         _since = account_today() - timedelta(days=_WATCH_WINDOW_DAYS)
         _watched: list[tuple[str, str]] = []
@@ -1129,25 +1165,34 @@ def watched_attention(viewer: str, rate: float) -> pd.DataFrame:
         if _sig_sql:
             sig = run(_sig_sql, page=_PAGE, key="watch_auto_signals", tier="recent", probe=True,
                       source="MART_TASK_NODE_DAILY + MART_QUERY_FAMILY_DAILY + MART_PATTERN_COST_DAILY")
+            # R2-074: a failed signals read marks the watches it covered not checked (never blank -> 'steady')
+            signal_keys, signals_failed = _watched, not sig.ok
             if sig.ok:
-                entity_daily, signal_keys = sig.df, _watched
+                entity_daily = sig.df
+            reads.append(("MART_TASK_NODE_DAILY + MART_QUERY_FAMILY_DAILY + MART_PATTERN_COST_DAILY", sig))
     status = watched_status(wl.df, daily.df if daily.ok else None, health, rate, calendar=_cal,
-                            entity_daily=entity_daily, signal_keys=signal_keys)
-    status.attrs["read_errors"] = "\n".join(
-        f"{src}: {res.error}" for src, res in (("FACT_WAREHOUSE_DAILY", daily),
-                                               ("MART_WAREHOUSE_EFFICIENCY_DAILY", prof)) if not res.ok)
+                            entity_daily=entity_daily, signal_keys=signal_keys, signals_failed=signals_failed)
+    status.attrs["read_errors"] = "\n".join(f"{src}: {res.error}" for src, res in reads if not res.ok)
     return status
 
 
 def _watch_unchecked_state(status: pd.DataFrame) -> None:
-    """R2-074: a watched warehouse whose cost or health read failed was not evaluated -- say so (unavailable,
-    the read errors one click away), never let it count toward a 'steady' list."""
+    """R2-074: a watched entity whose cost / health read (a warehouse) or signals read (a task or query family)
+    failed was not evaluated -- say so (unavailable, the read errors one click away), never let it count toward a
+    'steady' list."""
     n = watch_unchecked(status)
-    if n:
-        empty_state("unavailable",
-                    f"Could not fully check {n} watched " + ("warehouse" if n == 1 else "warehouses")
-                    + ": a cost or health read failed, so STATUS names what was not checked.",
-                    detail=str(status.attrs.get("read_errors") or ""))
+    if not n:
+        return
+    types = watch_unchecked_types(status)
+    noun = (("warehouse" if n == 1 else "warehouses") if types <= {"WAREHOUSE"}
+            else ("entity" if n == 1 else "entities"))
+    reasons = ((["a cost or health read failed"] if "WAREHOUSE" in types else [])
+               + (["the task / query-family signals read failed"] if types & set(WATCH_SIGNAL_TYPES) else [])
+               ) or ["a read failed"]
+    empty_state("unavailable",
+                f"Could not fully check {n} watched {noun}: " + " and ".join(reasons)
+                + ", so STATUS names what was not checked.",
+                detail=str(status.attrs.get("read_errors") or ""))
 
 
 def render_watch_badge(viewer: str, rate: float) -> None:
@@ -1162,8 +1207,17 @@ def render_watch_badge(viewer: str, rate: float) -> None:
         if watch_unchecked(status):
             _watch_unchecked_state(status)      # R2-074: a failed read is never '★ N … steady'
             return
-        st.caption(f"★ {summary['watched']} watched "
-                   + ("entity is" if summary["watched"] == 1 else "entities are") + " steady.")
+        # R2-074: 'steady' counts only the watches that were evaluated; a blank STATUS (a type with no automatic
+        # signal, or a task / family watch past the signals cap) is named as having no automatic check.
+        steady = watch_steady(status)
+        others = summary["watched"] - steady            # no move and nothing failed: the blank-STATUS watches
+        parts = []
+        if steady:
+            parts.append(f"{steady} watched " + ("entity is" if steady == 1 else "entities are") + " steady")
+        if others:
+            parts.append(f"{others} " + ("more" if steady else "watched") + " "
+                         + ("entity has" if others == 1 else "entities have") + " no automatic check")
+        st.caption("★ " + "; ".join(parts) + ".")
         return
     # Preview the MOST SEVERE movers, not the first-added: rank warn > watch > other before
     # truncating, so a real spend spike isn't dropped below soft health-watches added earlier.

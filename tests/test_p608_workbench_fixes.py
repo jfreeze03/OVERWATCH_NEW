@@ -6,7 +6,8 @@ today only (it was a trailing 30 days via ``int(days or 30)``), and a calendar p
 R2-078: a failed metrics / evidence / catalog-browse read renders by its kind (unavailable with the error, or
 needs_setup for a true absence) -- never a silently missing block or the quiet "choose an entity" prompt.
 R2-074: a watched warehouse whose cost or health read failed is never 'steady' on the Brief badge or the
-Watchlist; the surfaces say what could not be checked.
+Watchlist; the surfaces say what could not be checked. Review fix: the same for a task / query-family watch whose
+signals read failed, and 'steady' counts only evaluated watches (a type with no automatic check is named as such).
 
 Rendered with the tests/test_workbench_failed_reads.py fakes (no SQL runs).
 """
@@ -270,3 +271,112 @@ def test_watched_attention_marks_a_failed_cost_read_as_not_evaluated(monkeypatch
     status = wb.watched_attention("JOE", 3.68)
     assert status["STATUS"].str.contains("spend not checked").all()
     assert status.attrs["read_errors"] == "FACT_WAREHOUSE_DAILY: boom (other)"
+
+
+# ----------------------------------------------- R2-074 review fix: the task / query-family signals read ----
+
+def _signal_page(monkeypatch, watches: list[tuple[str, str]], *, signals=None, cost=None):
+    """Brief / Watchlist fakes over a mixed watchlist: health reads ok-empty (evaluated), the cost read returns
+    ``cost`` and the task / query-family signals read ``signals`` (each default: ok-empty)."""
+    from app.ui import workbench as wb
+    from tests.test_probe_absence_split import _FakeSt
+    fake = _FakeSt()
+    seen: dict = {"empty": [], "detail": [], "runs": []}
+    wl = pd.DataFrame([{"ENTITY_TYPE": t, "ENTITY_KEY": k, "LABEL": k} for t, k in watches])
+    results = {"watch_auto_list": _ok(wl), "watchlist_all": _ok(wl),
+               "watch_auto_cost": cost if cost is not None else _ok(pd.DataFrame()),
+               "watch_auto_health": _ok(pd.DataFrame()), "watchlist_slo": _ok(pd.DataFrame()),
+               "watch_auto_signals": signals if signals is not None else _ok(pd.DataFrame())}
+
+    def fake_run(_sql, *_a, key: str = "", **_k):
+        seen["runs"].append(key)
+        return results[key]
+
+    def fake_empty(kind, msg, *_a, **k):
+        seen["empty"].append((kind, msg))
+        seen["detail"].append(k.get("detail"))
+
+    monkeypatch.setattr(wb, "st", fake)
+    monkeypatch.setattr(wb, "run", fake_run)
+    monkeypatch.setattr(wb, "empty_state", fake_empty)
+    monkeypatch.setattr(wb, "load_settings", lambda *_a, **_k: {})
+    return wb, fake, seen
+
+
+@pytest.mark.parametrize("etype", ["TASK", "QUERY_FINGERPRINT"])
+def test_failed_signals_read_never_yields_a_steady_brief_badge(monkeypatch, etype):
+    """Review fix: a failed watch_auto_signals read left the task / family row blank, which watch_unchecked did not
+    count, so the badge printed '★ 1 watched entity is steady.' over a read that never ran."""
+    wb, fake, seen = _signal_page(monkeypatch, [(etype, "DB.S.T1")], signals=_failed("timeout"))
+    wb.render_watch_badge("JOE", 3.68)
+    assert "steady" not in fake.text("caption")
+    ((state, msg),) = seen["empty"]
+    assert state == "unavailable"
+    assert msg == ("Could not fully check 1 watched entity: the task / query-family signals read failed, so "
+                   "STATUS names what was not checked.")
+    assert seen["detail"] == ["MART_TASK_NODE_DAILY + MART_QUERY_FAMILY_DAILY + MART_PATTERN_COST_DAILY: "
+                              "boom (timeout)"]
+    status = wb.watched_attention("JOE", 3.68)
+    assert status["STATUS"].str.contains("not checked").all() and not status["ATTENTION"].any()
+
+
+def test_failed_signals_read_beside_a_failed_cost_read_names_both(monkeypatch):
+    wb, _fake, seen = _signal_page(monkeypatch, [("WAREHOUSE", "WH_ETL"), ("TASK", "DB.S.T1")],
+                                   signals=_failed("other"), cost=_failed("timeout"))
+    wb.render_watch_badge("JOE", 3.68)
+    ((state, msg),) = seen["empty"]
+    assert state == "unavailable" and msg.startswith("Could not fully check 2 watched entities: a cost or health "
+                                                     "read failed and the task / query-family signals read failed")
+    assert "FACT_WAREHOUSE_DAILY: boom (timeout)" in seen["detail"][0]
+    assert "MART_PATTERN_COST_DAILY: boom (other)" in seen["detail"][0]
+
+
+def test_watchlist_tab_shows_the_unavailable_notice_for_a_failed_signals_read(monkeypatch):
+    wb, _fake, seen = _signal_page(monkeypatch, [("TASK", "DB.S.T1")], signals=_failed("timeout"))
+    tables: list[pd.DataFrame] = []
+    monkeypatch.setattr(wb, "viewer_name", lambda: "JOE")
+    monkeypatch.setattr(wb, "guard", lambda res, *_a, **_k: res.usable())
+    monkeypatch.setattr(wb, "selectable_table", lambda df, *_a, **_k: tables.append(df))
+    wb.render_watchlist()
+    assert [s for s, _m in seen["empty"]] == ["unavailable"]
+    assert "signals read failed" in seen["empty"][0][1]
+    (table,) = tables
+    assert table["STATUS"].tolist() == ["not checked (the task signals read failed)"]
+
+
+def test_a_watch_with_no_automatic_check_is_never_counted_steady(monkeypatch):
+    """A DATABASE watch (no proactive arm: STATUS blank) is pinned, never evaluated -- the badge does not call it
+    steady."""
+    wb, fake, seen = _signal_page(monkeypatch, [("DATABASE", "DB1")])
+    wb.render_watch_badge("JOE", 3.68)
+    assert fake.text("caption") == "★ 1 watched entity has no automatic check."
+    assert seen["empty"] == [] and "watch_auto_signals" not in seen["runs"]
+
+
+def test_steady_counts_only_the_evaluated_watches(monkeypatch):
+    signals = _ok(pd.DataFrame(columns=["ENTITY_TYPE", "ENTITY_KEY_U", "DAY"]))
+    wb, fake, _seen = _signal_page(monkeypatch, [("WAREHOUSE", "WH_ETL"), ("TASK", "DB.S.T1"),
+                                                 ("DATABASE", "DB1"), ("USER", "ANA")], signals=signals)
+    wb.render_watch_badge("JOE", 3.68)
+    # the warehouse ('steady') and the task ('no runs in the last 30 days') were evaluated; the other two were not
+    assert fake.text("caption") == "★ 2 watched entities are steady; 2 more entities have no automatic check."
+
+
+def test_signals_failed_marks_only_the_watches_the_read_covered():
+    from app.logic.watch_monitor import watch_steady, watch_unchecked, watch_unchecked_types
+    wl = pd.DataFrame([{"ENTITY_TYPE": t, "ENTITY_KEY": k, "LABEL": k}
+                       for t, k in (("TASK", "DB.S.T1"), ("QUERY_FINGERPRINT", "abc"), ("TASK", "DB.S.CAPPED"),
+                                    ("WAREHOUSE", "WH_ETL"))])
+    out = watched_status(wl, pd.DataFrame(), pd.DataFrame(), signals_failed=True,
+                         signal_keys=[("TASK", "db.s.t1"), ("QUERY_FINGERPRINT", "ABC")]).set_index("ENTITY_KEY")
+    assert out.loc["DB.S.T1", "STATUS"] == "not checked (the task signals read failed)"
+    assert out.loc["abc", "STATUS"] == "not checked (the query-family signals read failed)"
+    assert out.loc["DB.S.CAPPED", "STATUS"] == ""            # past the signals cap: not read, still blank
+    assert out.loc["WH_ETL", "STATUS"] == "steady"
+    assert not out["ATTENTION"].any()
+    frame = out.reset_index()
+    assert watch_unchecked(frame) == 2 and watch_unchecked_types(frame) == {"TASK", "QUERY_FINGERPRINT"}
+    assert watch_steady(frame) == 1
+    # without the flag (the read never ran) nothing changes: the rows stay blank
+    quiet = watched_status(wl, pd.DataFrame(), pd.DataFrame())
+    assert quiet.loc[quiet["ENTITY_TYPE"] != "WAREHOUSE", "STATUS"].eq("").all()

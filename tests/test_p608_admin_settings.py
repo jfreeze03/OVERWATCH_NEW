@@ -227,3 +227,36 @@ def test_egress_rate_editor_cannot_go_negative(monkeypatch):
     ((_k, _label, kw),) = [c for c in fake.calls if c[0] == "number_input"]
     assert kw["min_value"] == 0.0 and value == "0"            # a stored negative opens clamped to the floor
     assert not [c for c in fake.calls if c[0] == "text_input"]
+
+
+# ------------------------------------------- R2-107 review fix: the override editor opens on validate's truth ----
+
+def test_stored_truthy_override_opens_at_true_and_raises_no_validate_warning(monkeypatch):
+    """validate.sql accepts TRUE / Y / YES / 1 in any case. The enum editor picked index 0 (FALSE) for anything but
+    the literal 'TRUE', then warned of a -20013 validate does not raise -- and saving as shown broke the override."""
+    for stored in ("yes", "Y", "1", "true", "TRUE", "Yes"):
+        fake = _St(key="CREDIT_PRICE_OVERRIDE")
+        sql = _settings_tab(monkeypatch, {"CREDIT_PRICE_USD": "3.5", "CREDIT_PRICE_OVERRIDE": stored}, fake=fake)
+        assert "'TRUE' AS VALUE" in sql, stored
+        assert not any("-20013" in w for w in fake.texts("warning")), stored
+
+
+def test_falsy_or_absent_override_opens_at_false_and_warns_like_validate(monkeypatch):
+    # ' yes' (padded) fails validate's untrimmed UPPER(VALUE) IN (...) test, so it reads FALSE here as well
+    for current in ({"CREDIT_PRICE_USD": "3.5"}, {"CREDIT_PRICE_USD": "3.5", "CREDIT_PRICE_OVERRIDE": "no"},
+                    {"CREDIT_PRICE_USD": "3.5", "CREDIT_PRICE_OVERRIDE": " yes"}):
+        fake = _St(key="CREDIT_PRICE_OVERRIDE")
+        sql = _settings_tab(monkeypatch, current, fake=fake)
+        assert "'FALSE' AS VALUE" in sql, current
+        assert any("-20013" in w for w in fake.texts("warning")), current
+
+
+def test_override_truth_matches_validate_sql():
+    from app.ui.pages import admin
+    body = read("snowflake/validate.sql")
+    # both of validate's override tests (the report row and the RAISE) use exactly this untrimmed form
+    checks = re.findall(r"KEY = 'CREDIT_PRICE_OVERRIDE'\s+AND UPPER\(COALESCE\(VALUE, ''\)\) IN \(([^)]*)\)", body)
+    assert len(checks) == 2
+    assert {tuple(re.findall(r"'([^']*)'", c)) for c in checks} == {admin._OVERRIDE_TRUE}
+    assert [admin._override_on(v) for v in ("yes", "y", "1", "True", " yes", "", None, "0", "no")] == [
+        True, True, True, True, False, False, False, False, False]

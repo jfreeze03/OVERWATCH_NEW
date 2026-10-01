@@ -45,7 +45,8 @@ WATCH_FAMILY_MIN_P95_SEC = 10.0
 WATCH_FAMILY_MIN_USD = 10.0
 
 # R2-074: a warehouse watch is 'steady' only when BOTH of its reads were evaluated. A read the caller could not
-# make (passed as None) names what was not checked, so a failed read never reads as a verified-clean state.
+# make (passed as None) names what was not checked, so a failed read never reads as a verified-clean state; a task /
+# query-family watch whose signals read failed (signals_failed) says so the same way.
 NOT_CHECKED = "not checked"
 
 
@@ -57,6 +58,12 @@ def _unchecked_note(cost_checked: bool, health_checked: bool) -> str:
         return f"{NOT_CHECKED} (the cost and health reads failed)"
     return (f"spend {NOT_CHECKED} (the cost read failed)" if not cost_checked
             else f"health {NOT_CHECKED} (the health read failed)")
+
+
+def _signals_unchecked_note(etype: str) -> str:
+    """The STATUS of a TASK / QUERY_FINGERPRINT watch whose entity-signals read failed (always contains
+    NOT_CHECKED), so it is counted as not evaluated -- never blank, never 'steady' (R2-074)."""
+    return f"{NOT_CHECKED} (the {'task' if etype == 'TASK' else 'query-family'} signals read failed)"
 
 
 def _signal_rows(entity_daily: pd.DataFrame, etype: str, ekey: str) -> pd.DataFrame:
@@ -145,6 +152,7 @@ def watched_status(watchlist: pd.DataFrame | None,
                    *,
                    entity_daily: pd.DataFrame | None = None,
                    signal_keys: Iterable[tuple[str, str]] | None = None,
+                   signals_failed: bool = False,
                    today: date | None = None) -> pd.DataFrame:
     """Per watched entity: does it need attention, and why.
 
@@ -161,6 +169,9 @@ def watched_status(watchlist: pd.DataFrame | None,
       entities (None = not read: those watches pass through blank, the pre-#46 behaviour).
     ``signal_keys``: the (TYPE, KEY) pairs that read covered (None = every such watch);
       a watch outside it stays blank rather than reading as 'no runs'.
+    ``signals_failed``: the entity-signals read ran and FAILED (``entity_daily`` is then None): the TASK /
+      QUERY_FINGERPRINT watches it covered say they were not checked (R2-074), so a failed read is never a
+      blank row a caller could count as steady.
     ``today``: the account day (default formulas.account_today()).
     Returns ENTITY_TYPE, ENTITY_KEY, LABEL, ATTENTION (bool), STATUS, SEVERITY —
     attention rows first. Empty watchlist -> empty frame."""
@@ -229,11 +240,13 @@ def watched_status(watchlist: pd.DataFrame | None,
                     severity = "warn"
                 elif not severity:
                     severity = "watch"
-        elif (etype in WATCH_SIGNAL_TYPES and entity_daily is not None
-              and (covered is None or (etype, ekey) in covered)):
-            rows_e = _signal_rows(entity_daily, etype, ekey)
-            parts, severity, quiet = (_task_arm(rows_e, day) if etype == "TASK"
-                                      else _family_arm(rows_e, day, rate, calendar))
+        elif etype in WATCH_SIGNAL_TYPES and (covered is None or (etype, ekey) in covered):
+            if entity_daily is not None:
+                rows_e = _signal_rows(entity_daily, etype, ekey)
+                parts, severity, quiet = (_task_arm(rows_e, day) if etype == "TASK"
+                                          else _family_arm(rows_e, day, rate, calendar))
+            elif signals_failed:
+                quiet = _signals_unchecked_note(etype)
         if parts and is_warehouse and unchecked:
             parts = [*parts, unchecked]
         status = "; ".join(parts) if parts else quiet
@@ -249,12 +262,36 @@ def watched_status(watchlist: pd.DataFrame | None,
     return out.sort_values("ATTENTION", ascending=False, kind="stable").reset_index(drop=True)[cols]
 
 
+def _unchecked_mask(status: pd.DataFrame) -> pd.Series:
+    return status["STATUS"].fillna("").astype(str).str.contains(NOT_CHECKED, regex=False)
+
+
 def watch_unchecked(status: pd.DataFrame | None) -> int:
-    """How many watched entities have an arm that was not evaluated (a failed cost / health read): the
-    surfaces render 'unavailable' for these instead of calling the list steady (R2-074)."""
+    """How many watched entities have an arm that was not evaluated (a failed cost / health / entity-signals
+    read): the surfaces render 'unavailable' for these instead of calling the list steady (R2-074)."""
     if status is None or status.empty or "STATUS" not in status.columns:
         return 0
-    return int(status["STATUS"].astype(str).str.contains(NOT_CHECKED, regex=False).sum())
+    return int(_unchecked_mask(status).sum())
+
+
+def watch_unchecked_types(status: pd.DataFrame | None) -> set[str]:
+    """The ENTITY_TYPEs (upper-cased) of the watches watch_unchecked counts, so a surface can name which
+    read failed (a warehouse's cost / health read, or the task / query-family signals read)."""
+    if status is None or status.empty or not {"STATUS", "ENTITY_TYPE"}.issubset(status.columns):
+        return set()
+    return set(status.loc[_unchecked_mask(status), "ENTITY_TYPE"].astype(str).str.strip().str.upper())
+
+
+def watch_steady(status: pd.DataFrame | None) -> int:
+    """How many watched entities were EVALUATED and did not move: a non-blank STATUS that is neither a move
+    (ATTENTION) nor 'not checked'. A blank STATUS (a type with no automatic signal, or a task / family watch
+    past the signals cap) was never evaluated, so it is never counted as steady (R2-074)."""
+    if status is None or status.empty or "STATUS" not in status.columns:
+        return 0
+    text = status["STATUS"].fillna("").astype(str).str.strip()
+    moved = (status["ATTENTION"].eq(True) if "ATTENTION" in status.columns
+             else pd.Series(False, index=status.index))
+    return int(((text != "") & ~moved & ~_unchecked_mask(status)).sum())
 
 
 def watch_summary(status: pd.DataFrame | None) -> dict:

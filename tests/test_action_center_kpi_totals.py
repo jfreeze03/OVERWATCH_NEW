@@ -10,7 +10,8 @@ took the 500 slots and pushed open LOW / MEDIUM items out: flipping a display to
 * action_summary reads those totals when the frame carries them;
 * the page discloses the list cap; 'Assigned to me' filters in the read itself (v4.608: it was a row filter
   over the capped read, so the viewer's own work past the 500 cap was never listed), and its totals count only
-  the viewer's work.
+  the viewer's work; that read never depends on the selected item (review fix) -- someone else's open item is
+  kept listed from its own one-row read, outside the viewer's counts.
 
 The builder is EXECUTED (sqlglot -> SQLite) against an in-memory ACTION_QUEUE and must agree with
 action_summary over the WHOLE population.
@@ -162,14 +163,103 @@ def test_assigned_to_me_lists_the_viewers_work_past_the_cap(monkeypatch):
     assert "The list shows the first" not in captions                   # 7 rows: nothing is capped
 
 
-def test_the_open_item_stays_listed_but_never_counts_as_the_viewers_work(monkeypatch):
+# ------------------------------------------- 'Assigned to me' + the open item (v4.608 review fix) ----
+
+def _render_mine(monkeypatch, rows: list[dict], *, selected: str = "", deep_link: str = "",
+                 fail_item: bool = False, real_held: bool = False):
+    """Render Action Center with both toggles on for viewer ANA, executing every ACTION_QUEUE read the page builds
+    against ``rows``; ``selected`` is the master-detail selection. Returns (kpis, listed ids, [(key, sql)], seen)."""
+    from tests.test_probe_absence_split import _failed, _ok
+    from tests.test_workbench_failed_reads import _patch_page
+    wb, fake, seen = _patch_page(monkeypatch, {})
+    reads: list[tuple[str, str]] = []
+
+    def _run(sql, *_a, key: str = "", **_k):
+        reads.append((key, sql))
+        if fail_item and key.startswith("action_center_item_"):
+            return _failed("timeout")
+        return _ok(_execute(sql, rows)) if key.startswith("action_center_") else _ok(pd.DataFrame())
+
+    listed: list[pd.DataFrame] = []
+    monkeypatch.setattr(wb, "run", _run)
+    monkeypatch.setattr(wb, "master_detail", lambda display, *_a, **_k: listed.append(display))
+    monkeypatch.setattr(wb, "account_today", lambda: _TODAY)
+    monkeypatch.setattr(wb, "viewer_name", lambda: "ANA")
+    monkeypatch.setattr(wb, "is_operator", lambda: False)
+    monkeypatch.setattr(wb, "navigation_context", lambda: {"action_id": deep_link} if deep_link else {})
+    if not real_held:
+        monkeypatch.setattr(wb, "_with_held", lambda f, **_k: f)
+    fake.session_state["_ow_md_sel_action_center"] = selected
+    wb.render_action_center("ALL")
+    kpis = {k["label"]: k["value"] for k in seen["kpis"][0]} if seen["kpis"] else {}
+    ids = list(listed[0]["ACTION_ID"].astype(str)) if listed else []
+    return kpis, ids, reads, seen
+
+
+def _queue_sql(reads: list[tuple[str, str]]) -> str:
+    (sql,) = [s for k, s in reads if k.startswith("action_center_ALL_")]
+    return sql
+
+
+def test_assigned_to_me_read_never_depends_on_the_selected_item(monkeypatch):
+    """Review fix: the open item was baked into the owner-scoped read's SQL (OR ACTION_ID = '<pin>'), and run()
+    caches by SQL text, so every newly clicked item missed the cache and re-read ACTION_QUEUE live."""
+    rows = [_row(1, OWNER="ANA"), _row(2, OWNER="ana", SEVERITY="HIGH"), _row(3, OWNER="BO")]
+    _k1, ids1, reads1, _s1 = _render_mine(monkeypatch, rows, selected="a0001")
+    _k2, ids2, reads2, _s2 = _render_mine(monkeypatch, rows, selected="a0002")
+    assert _queue_sql(reads1) == _queue_sql(reads2)                   # one cache identity for every selection
+    assert [k for k, _ in reads1] == [k for k, _ in reads2]
+    assert "UPPER(TRIM(COALESCE(OWNER, ''))) = 'ANA'" in _queue_sql(reads1)      # still filtered in the read
+    assert "a0001" not in _queue_sql(reads1) and "a0002" not in _queue_sql(reads2)
+    assert not [k for k, _ in reads1 + reads2 if k.startswith("action_center_item_")]   # own items: no extra read
+    assert sorted(ids1) == sorted(ids2) == ["a0001", "a0002"]
+
+
+def test_the_open_item_someone_else_owns_stays_listed_outside_the_viewers_counts(monkeypatch):
     rows = [_row(1, OWNER="ANA"), _row(2, OWNER="BO", SEVERITY="CRITICAL")]
-    sql = workbench_sql.action_center("ALL", True, 500, with_kpi_totals=True, owner="ana", keep_action_id="a0002")
-    frame = _execute(sql, rows)
-    assert set(frame["ACTION_ID"]) == {"a0001", "a0002"}                # BO's open item stays on screen
-    assert logic_wb.action_summary(frame)["open"] == 1.0                # ...outside ANA's counts
-    assert logic_wb.action_summary(frame)["critical_high"] == 0.0
-    assert int(frame.iloc[0]["KPI_MATCHING_TOTAL"]) == 2
-    # without the owner, the builder (and its cache identity) is byte-identical to before
+    kpis, ids, reads, _seen = _render_mine(monkeypatch, rows, selected="a0002")
+    assert sorted(ids) == ["a0001", "a0002"]                          # BO's open item stays on screen
+    assert kpis["Open work"] == "1" and kpis["Critical / high"] == "0"  # ...outside ANA's counts
+    assert "a0002" not in _queue_sql(reads)
+    ((key, sql),) = [(k, s) for k, s in reads if k.startswith("action_center_item_")]
+    assert "a0002" in key and "ACTION_ID = 'a0002'" in sql and "KPI_" not in sql
+    sqlglot.parse_one(sql, read="snowflake")
+
+
+def test_a_deep_link_to_someone_elses_item_lists_it_with_zero_counts_when_the_viewer_owns_nothing(monkeypatch):
+    rows = [_row(2, OWNER="BO", SEVERITY="CRITICAL", ESTIMATED_USD=900.0)]
+    kpis, ids, _reads, seen = _render_mine(monkeypatch, rows, deep_link="a0002")
+    assert ids == ["a0002"]
+    assert kpis["Open work"] == "0" and kpis["Critical / high"] == "0"
+    assert kpis["Estimated opportunity"] == "$0.00"
+    assert not [s for s, _m in seen["empty"] if s == "clean"]         # the item is shown, not "nothing assigned"
+
+
+def test_a_failed_open_item_read_says_so_and_keeps_the_viewers_list(monkeypatch):
+    rows = [_row(1, OWNER="ANA"), _row(2, OWNER="BO")]
+    kpis, ids, _reads, seen = _render_mine(monkeypatch, rows, selected="a0002", fail_item=True)
+    assert ids == ["a0001"] and kpis["Open work"] == "1"
+    assert ("unavailable", "The open work item could not be read, so it is not listed here.") in seen["empty"]
+    assert "boom (timeout)" in seen["detail"]
+
+
+def test_worst_case_summary_reads_stay_within_the_declared_contract(monkeypatch):
+    """Include completed work + 'Assigned to me' + someone else's open item: the queue, the one-row item read and
+    Held? -- the read-model caption ('up to N reads') must not under-declare it."""
+    from app.logic.read_models import get_contract
+    rows = [_row(1, OWNER="ANA", STATUS="DONE", COMPLETED_AT="2026-09-25 10:00:00",
+                 SOURCE_ENTITY_TYPE="WAREHOUSE", SOURCE_ENTITY_KEY="WH_A"),
+            _row(2, OWNER="BO")]
+    _kpis, ids, reads, _seen = _render_mine(monkeypatch, rows, selected="a0002", real_held=True)
+    keys = [k for k, _ in reads]
+    assert sorted(ids) == ["a0001", "a0002"] and "action_held_signals" in keys
+    assert len(keys) == 3 <= get_contract("action_center").summary_reads
+
+
+def test_the_item_read_and_the_default_builder():
+    rows = [_row(1, OWNER="ANA"), _row(2, OWNER="BO", SEVERITY="CRITICAL")]
+    item = _execute(workbench_sql.action_center("ALL", True, 1, action_id=" a0002 "), rows)
+    assert list(item["ACTION_ID"]) == ["a0002"] and not [c for c in item.columns if c.startswith("KPI_")]
+    # without an owner or an item, the builder (and its cache identity) is byte-identical to before
     assert workbench_sql.action_center("ALL", True, 500, with_kpi_totals=True) == workbench_sql.action_center(
-        "ALL", True, 500, with_kpi_totals=True, owner="", keep_action_id="a0002")
+        "ALL", True, 500, with_kpi_totals=True, owner="", action_id="")

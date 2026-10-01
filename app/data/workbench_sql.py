@@ -28,18 +28,15 @@ _ACTION_TOTALS = f""",
            AS NO_PERIOD_TOTAL"""
 
 
-def _action_kpi_totals(scope: str = "") -> str:
+def _action_kpi_totals() -> str:
     """R1-091/207: Action Center's headline KPIs as UNCAPPED window totals, computed before the LIMIT over
     every matching row, with logic.workbench.action_summary's masks: ACTIVE = OPEN / IN_PROGRESS and not
     deferred to a future account day (actions.deferred_mask); overdue = DUE_DATE before the account today;
     a team placeholder owner (TEAM_PLACEHOLDER_OWNERS, blank included) is Unassigned. DEFERRED_TOTAL /
-    NEXT_RESUME_DATE carry mart_sql.action_queue's names, so actions.deferred_summary reads them as-is.
-    ``scope`` (a predicate, e.g. the 'Assigned to me' owner match) narrows every KPI but KPI_MATCHING_TOTAL,
-    so an item kept only because it is open on screen never counts as the viewer's work."""
+    NEXT_RESUME_DATE carry mart_sql.action_queue's names, so actions.deferred_summary reads them as-is."""
     today = account_today_sql()
-    within = f"({scope}) AND " if scope else ""
-    parked = f"{within}UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS') AND DEFER_UNTIL > {today}"
-    active = f"{within}UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS') AND NOT COALESCE(DEFER_UNTIL > {today}, FALSE)"
+    parked = f"UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS') AND DEFER_UNTIL > {today}"
+    active = f"UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS') AND NOT COALESCE(DEFER_UNTIL > {today}, FALSE)"
     placeholders = ", ".join(sql_literal(o) for o in sorted(TEAM_PLACEHOLDER_OWNERS))
     return f""",
        COUNT(*) OVER () AS KPI_MATCHING_TOTAL,
@@ -55,7 +52,7 @@ def _action_kpi_totals(scope: str = "") -> str:
 
 def action_center(company: str = "ALL", include_closed: bool = False,
                   limit: int = 500, *, with_totals: bool = False, with_kpi_totals: bool = False,
-                  owner: str = "", keep_action_id: str = "") -> str:
+                  owner: str = "", action_id: str = "") -> str:
     """Extended ACTION_QUEUE shape installed by V074. ``with_totals`` (v4.597, Proof ▸ Pipeline) adds
     UNCAPPED window totals computed before the LIMIT -- the open count and the monthly run-rate of every
     matching item (MONTHLY as-is, ANNUAL / 12; the same buckets as decision.monthly_equivalent) -- so a
@@ -65,8 +62,9 @@ def action_center(company: str = "ALL", include_closed: bool = False,
 
     ``owner`` ('Assigned to me') filters in SQL, BEFORE the LIMIT, on logic.workbench.owned_by's rule (the
     trimmed, upper-cased OWNER equals the viewer), so the viewer's work is never cut by other owners' items
-    taking the cap, and the KPI totals count only it; ``keep_action_id`` keeps the item open on screen (or
-    deep-linked) in the list even when someone else owns it, outside those KPIs."""
+    taking the cap, and the KPI totals count only it. The read depends on the viewer, never on the selected
+    item, so a new selection re-uses the cached read. ``action_id`` narrows the read to that one item (the
+    page's small separate read for an open / deep-linked item someone else owns; no KPI totals there)."""
     cap = max(1, min(int(limit), 1000))
     clauses: list[str] = []
     if not include_closed:
@@ -76,11 +74,12 @@ def action_center(company: str = "ALL", include_closed: bool = False,
             f"(UPPER(COMPANY) IN ({sql_literal(str(company).upper())}, 'ALL'))"
         )
     viewer = str(owner or "").strip().upper()
-    owner_match = f"UPPER(TRIM(COALESCE(OWNER, ''))) = {sql_literal(viewer, 200)}" if viewer else ""
-    if owner_match:
-        keep = str(keep_action_id or "").strip()
-        clauses.append(f"({owner_match} OR ACTION_ID = {sql_literal(keep, 80)})" if keep else f"({owner_match})")
-    kpi_totals = _action_kpi_totals(owner_match) if with_kpi_totals else ""
+    if viewer:
+        clauses.append(f"UPPER(TRIM(COALESCE(OWNER, ''))) = {sql_literal(viewer, 200)}")
+    item = str(action_id or "").strip()
+    if item:
+        clauses.append(f"ACTION_ID = {sql_literal(item, 80)}")
+    kpi_totals = _action_kpi_totals() if with_kpi_totals else ""
     open_first = "IFF(UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS'), 0, 1), " if include_closed else ""
     return f"""
 SELECT ACTION_ID, CREATED_AT, COMPANY, SEVERITY, TITLE, DETAIL, OWNER, STATUS,

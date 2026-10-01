@@ -851,6 +851,12 @@ _DEPLOY_GATE_SETTINGS: dict[str, str] = {
 _VALIDATE_RATE = 3.68                       # validate.sql's e_rate_368 check: ABS(rate - 3.68) > 0.0001
 _OVERRIDE_TRUE = ("TRUE", "Y", "YES", "1")  # validate.sql: UPPER(COALESCE(VALUE, '')) IN (...)
 
+
+def _override_on(value: object) -> bool:
+    """validate.sql's override test exactly: UPPER(COALESCE(VALUE, '')) IN _OVERRIDE_TRUE -- any case, no trim."""
+    return str(value or "").upper() in _OVERRIDE_TRUE
+
+
 _SETTING_EDITORS: dict[str, tuple[str, object]] = {
     "FORECAST_ENGINE": ("enum", ["linear", "seasonal", "ml_forecast"]),
     "INCIDENT_AUTO_DECLARE_CRITICAL": ("enum", ["TRUE", "FALSE"]),
@@ -946,6 +952,10 @@ def _setting_value_input(key: str, current: dict[str, str]) -> str:
         return model
     if kind == "enum":
         options = list(spec)  # type: ignore[arg-type]
+        if key == "CREDIT_PRICE_OVERRIDE":
+            # review fix: validate also takes 'yes' / 'Y' / '1' / 'true', so a stored truthy value opens at TRUE --
+            # opening at FALSE warned of a -20013 that validate does not raise, and saving as shown broke it
+            cur = "TRUE" if _override_on(cur) else "FALSE"
         idx = options.index(cur) if cur in options else 0
         return st.selectbox("New value", options, index=idx, key=wkey)
     if kind == "date":
@@ -980,7 +990,7 @@ def _validate_rate_note(key: str, new_value: str, current: dict[str, str]) -> No
         return
     rate = safe_float(new_value if key == "CREDIT_PRICE_USD" else current.get("CREDIT_PRICE_USD"), _VALIDATE_RATE)
     override = new_value if key == "CREDIT_PRICE_OVERRIDE" else current.get("CREDIT_PRICE_OVERRIDE", "")
-    if abs(rate - _VALIDATE_RATE) > 0.0001 and str(override or "").strip().upper() not in _OVERRIDE_TRUE:
+    if abs(rate - _VALIDATE_RATE) > 0.0001 and not _override_on(override):
         st.warning(md_dollars(
             f"A compute rate of ${rate:g} (not {_VALIDATE_RATE}) needs CREDIT_PRICE_OVERRIDE = TRUE: without it "
             "snowflake/validate.sql fails with -20013. Set CREDIT_PRICE_OVERRIDE here as well."))
