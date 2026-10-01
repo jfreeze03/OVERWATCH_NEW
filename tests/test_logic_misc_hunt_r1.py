@@ -73,3 +73,21 @@ def test_month_start_density_guard_still_blocks_a_sparse_account():
                            for i in range(0, 120, 3)])
     p = month_end_projection(sparse, date(2026, 10, 2), engine="linear").projected_usd
     assert p == 3000.0      # 0 complete MTD + $100 x 30 (today + 29 remaining); no fabricated Oct 1
+
+
+# ---- R1-079: no COLUMN_HELP entry pairs two "$" into a LaTeX span in a header tooltip ----------
+
+
+def test_every_column_help_entry_has_at_most_one_dollar():
+    from app.logic.metric_registry import COLUMN_HELP
+    # Header help renders markdown, where two "$" pair into inline math. Covers every entry, not
+    # only the keys an earlier lock enumerated (SPEND_USD / USD carried two and slipped through).
+    assert {k: v for k, v in COLUMN_HELP.items() if v.count("$") > 1} == {}
+
+
+def test_usd_column_help_names_the_settings_rates_not_literals():
+    from app.logic.metric_registry import COLUMN_HELP
+    for key in ("SPEND_USD", "USD"):
+        text = COLUMN_HELP[key]
+        assert "CREDIT_PRICE_USD" in text and "AI_CREDIT_PRICE_USD" in text, key
+        assert "3.68" not in text and "2.20" not in text, key
