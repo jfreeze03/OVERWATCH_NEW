@@ -95,3 +95,21 @@ def test_identity_late_run_still_reads_prefs(monkeypatch):
     at.run()
     assert not at.exception
     assert reads == [1] and at.session_state["_ow_present_mode"] == "audit"
+
+
+# ------------------------------------------------------------------ R1-003: WH jump carries its company ----
+
+@pytest.mark.parametrize(("pick", "company"), [
+    ("WH · WH_TRXS_LOAD", "Trexis"),          # offered under the default ALFA scope before 'Load all'
+    ("WH · WH_ALFA_ADMIN", "ALFA"),
+    ("WH · SOME_OTHER_WH", "ALL"),            # name-unclassified: never a company it may not belong to
+])
+def test_warehouse_jump_carries_a_company_that_cannot_contradict_it(monkeypatch, pick, company):
+    import app.main as m
+
+    navs: list[tuple] = []
+    monkeypatch.setattr(m, "request_navigation", lambda *a, **k: navs.append((a, k)))
+    m._dispatch_jump(pick, ("Operations",))
+    (args, _kw), = navs
+    assert args[:2] == ("Operations", "Queries")
+    assert args[2] == {"company": company, "warehouse_contains": pick.split(" · ", 1)[1]}

@@ -486,7 +486,7 @@ def _record_recent(label: str) -> None:
 def _dispatch_jump(pick: str, pages: tuple) -> None:
     """C3: resolve a 'Kind · name' jump selection to a navigation (shared by the
     selectbox and the recents buttons)."""
-    from app.companies import ALFA_DATABASES, TREXIS_DATABASES
+    from app.companies import ALFA_DATABASES, TREXIS_DATABASES, classify_warehouse
     kind, _, name = pick.partition(" · ")
     if kind == "Page":
         request_navigation(name)
@@ -505,7 +505,16 @@ def _dispatch_jump(pick: str, pages: tuple) -> None:
     elif kind == "WH":
         # Queries honors warehouse_contains; the Warehouses tab ignores it (would show an
         # "Active but ignored: Warehouse" no-op) — route the WH pick to Queries like the DB pick.
-        request_navigation("Operations", "Queries", {"warehouse_contains": name})
+        # c09 R1-003: and carry a company that cannot contradict the warehouse, as the DB pick
+        # does (r6-bug9). The list offers warehouses of BOTH tenants whatever the filter says, so
+        # WH_TRXS_LOAD under the default ALFA scope rendered COMPANY = 'ALFA' AND WAREHOUSE ILIKE
+        # '%WH_TRXS_LOAD%' -- an empty Queries tab for a busy warehouse. classify_warehouse reads
+        # names only (the SQL's COMPANY_FOR_WAREHOUSE reads COMPANY_SCOPE first), so an UNKNOWN
+        # name lands under ALL rather than a company it may not belong to.
+        _wco = classify_warehouse(name)
+        request_navigation("Operations", "Queries",
+                           {"company": _wco if _wco in ("ALFA", "Trexis") else "ALL",
+                            "warehouse_contains": name})
     elif kind == "Rule":
         # r-ux: carry the searched rule's identity so Alerts ▸ Rules lands ON that rule (its
         # precision drill + threshold generator preselect it), like every other palette target —
