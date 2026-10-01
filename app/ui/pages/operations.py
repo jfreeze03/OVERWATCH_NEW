@@ -3713,14 +3713,11 @@ def _wh_sizing_efficiency(company: str, rate: float, days: int, *,
         from app.logic.wh_health import warehouse_health
         # Next-Fifty #16: the SAME settings mapping as Cost ▸ Optimize (CURRENT_SIZE included), so an
         # XSMALL warehouse is never a "Size down candidate" here while Optimize correctly refuses it.
-        # W12: Current month / Current year pass a day OFFSET (Sep 2 MTD = 1) while the mart read
-        # covers the bounds' day SPAN -- divide by the span, as Cost ▸ Optimize does, so the two
-        # pages show the same run-rate (the offset doubled every $/day on the 2nd of the month).
-        _span = (bounds[1] - bounds[0]).days if bounds is not None else days
         _sized = size_recommendations(
             with_warehouse_settings(
                 _prof.df, _whs.df if _whs.ok and not _whs.empty else pd.DataFrame()),
-            rate, served_days(_prof, _span))
+            # R1-143 (W12): a calendar preset passes a day OFFSET; divide by the bounds' SPAN, as Cost ▸ Optimize does
+            rate, served_days(_prof, (bounds[1] - bounds[0]).days if bounds is not None else days))
         _sum = sizing_summary(_sized)
         # Wave 3: per-warehouse health chip — a transparent 0-100 grade (base 100 minus
         # capped queue/spill/runtime/low-util penalties) joined onto the sizing table.

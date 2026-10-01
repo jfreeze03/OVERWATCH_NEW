@@ -76,7 +76,9 @@ def test_ops_sizing_divides_by_the_bounds_span(monkeypatch):
                                   bounds=(date(2026, 9, 1), date(2026, 9, 3)))
     assert seen["days"] == 2
     body = _fn(read(_OPS), "_wh_sizing_efficiency")
-    assert "served_days(_prof, _span)" in body and "served_days(_prof, days)" not in body
+    # the line is byte-identical to c02's R1-143 fix of the same site, so the two branches merge clean
+    assert "served_days(_prof, (bounds[1] - bounds[0]).days if bounds is not None else days))" in body
+    assert "served_days(_prof, days)" not in body
 
 
 # ------------------------------------------- R1-039: proc_regression's PRIOR window per preset ----
