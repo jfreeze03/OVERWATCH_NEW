@@ -66,7 +66,8 @@ def token_economics(frame: pd.DataFrame | None) -> pd.DataFrame:
     out["CACHE_WRITE"] = _series("cache_write_input", "cache_write", "cache_creation", "cache_write_tokens")
     out["TOTAL"] = pivot.sum(axis=1)
     denom = out["CACHE_READ"] + out["INPUT"]
-    out["CACHE_HIT_PCT"] = (out["CACHE_READ"] / denom.where(denom > 0) * 100).fillna(0.0).round(1)
+    # R1-104: no prompt tokens (cache_read + input == 0) has NO hit rate -- NaN renders '—', never 0.0%
+    out["CACHE_HIT_PCT"] = (out["CACHE_READ"] / denom.where(denom > 0) * 100).round(1)
     out = out.reset_index()
     return out.sort_values("TOTAL", ascending=False).reset_index(drop=True)[cols]
 
@@ -123,15 +124,18 @@ def coco_efficiency(economics: pd.DataFrame | None, user_daily: pd.DataFrame | N
     if economics is not None and not economics.empty and "USER_NAME" in economics.columns:
         e = economics.copy()
         e["USER_NAME"] = e["USER_NAME"].astype(str)
-        for c in ("INPUT", "OUTPUT", "CACHE_READ", "CACHE_WRITE", "TOTAL", "CACHE_HIT_PCT"):
+        for c in ("INPUT", "OUTPUT", "CACHE_READ", "CACHE_WRITE", "TOTAL"):
             e[c] = pd.to_numeric(e.get(c, pd.Series(0.0, index=e.index)), errors="coerce").fillna(0.0)
+        e["CACHE_HIT_PCT"] = pd.to_numeric(e.get("CACHE_HIT_PCT", pd.Series(float("nan"), index=e.index)),
+                                           errors="coerce")
         # cache_read bills far cheaper than input, so the FULL-price burn is input+output+
         # cache_write; a high cache-write share = context churn (whole-file rewrites / jumping
         # around). read-amp = context re-read per token of new conversation = session length.
         _billable = e["INPUT"] + e["OUTPUT"] + e["CACHE_WRITE"]
-        e["CACHE_WRITE_PCT"] = (e["CACHE_WRITE"] / _billable.where(_billable > 0) * 100).fillna(0.0).round(1)
+        # R1-104: a zero denominator has no ratio (house law 8) -- NaN renders '—', never a measured 0
+        e["CACHE_WRITE_PCT"] = (e["CACHE_WRITE"] / _billable.where(_billable > 0) * 100).round(1)
         _newconv = e["INPUT"] + e["OUTPUT"]
-        e["READ_AMP"] = (e["CACHE_READ"] / _newconv.where(_newconv > 0)).fillna(0.0).round(1)
+        e["READ_AMP"] = (e["CACHE_READ"] / _newconv.where(_newconv > 0)).round(1)
         cache = e[["USER_NAME", "CACHE_WRITE_PCT", "READ_AMP", "CACHE_HIT_PCT", "TOTAL"]]
 
     # --- per-user credits / requests / days-over-cap from the (windowed) daily frame ---
@@ -189,9 +193,13 @@ def coco_efficiency(economics: pd.DataFrame | None, user_daily: pd.DataFrame | N
             out[c] = 0.0
     else:
         return pd.DataFrame(columns=cols)
-    for c in ("TOTAL_CREDITS", "AVG_DAILY_CR", "CR_PER_REQ", "DAYS_OVER_CAP", "ACTIVE_DAYS",
-              "CACHE_WRITE_PCT", "READ_AMP", "CACHE_HIT_PCT", "TOTAL"):
+    for c in ("TOTAL_CREDITS", "AVG_DAILY_CR", "CR_PER_REQ", "DAYS_OVER_CAP", "ACTIVE_DAYS"):
         out[c] = pd.to_numeric(out.get(c, pd.Series(0.0, index=out.index)), errors="coerce").fillna(0.0)
+    # R1-104: a credit user with no token-grain rows (e.g. usage that predates TOKENS_GRANULAR) has NO cache
+    # behaviour -- it stays NaN ('—'), never the worst-possible 0.0% cache-hit / 0 read-amp. Sorting on TOTAL
+    # is NaN-safe (last).
+    for c in ("CACHE_WRITE_PCT", "READ_AMP", "CACHE_HIT_PCT", "TOTAL"):
+        out[c] = pd.to_numeric(out.get(c, pd.Series(float("nan"), index=out.index)), errors="coerce")
 
     # --- peer-relative multiples over the DISPLAYED set (compare UNROUNDED, round for display) ---
     # Leave-one-out medians: compare each user to the median of everyone ELSE, so a dominant user
