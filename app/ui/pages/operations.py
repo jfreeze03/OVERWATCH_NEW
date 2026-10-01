@@ -990,8 +990,11 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             # -> bounded_days). Monthly-ize AND label by the window ACTUALLY SCANNED, not the raw
             # 180/365 pick — else the run-rate is divided by up to 365 over a 90-day sum (~4x low)
             # and the tile lies about its window (same served-window rule as the Queries/clustering
-            # tiles). Bounded presets scan the full [start,end) range, so days is already right.
-            _waste_served = days if bounds is not None else min(int(days), MAX_LIVE_WINDOW_DAYS)
+            # tiles). Bounded presets scan the full [start,end) range, so divide by its day SPAN:
+            # Current month / Current year pass a day OFFSET (Sep 2 MTD = 1) one less than the
+            # span the scan covers (W12 -- the rule Cost ▸ Optimize and Proof already follow).
+            _waste_served = ((bounds[1] - bounds[0]).days if bounds is not None
+                             else min(int(days), MAX_LIVE_WINDOW_DAYS))
             monthly = _wasted_total / max(_waste_served, 1) * 30.0
             # TLH-1: the scan is LIMIT-50 by wasted $ desc, so this sum is the top-50
             # fingerprints, NOT the whole-window waste. Label + monthly-ize the shown
@@ -3662,10 +3665,14 @@ def _wh_sizing_efficiency(company: str, rate: float, days: int, *,
         from app.logic.wh_health import warehouse_health
         # Next-Fifty #16: the SAME settings mapping as Cost ▸ Optimize (CURRENT_SIZE included), so an
         # XSMALL warehouse is never a "Size down candidate" here while Optimize correctly refuses it.
+        # W12: Current month / Current year pass a day OFFSET (Sep 2 MTD = 1) while the mart read
+        # covers the bounds' day SPAN -- divide by the span, as Cost ▸ Optimize does, so the two
+        # pages show the same run-rate (the offset doubled every $/day on the 2nd of the month).
+        _span = (bounds[1] - bounds[0]).days if bounds is not None else days
         _sized = size_recommendations(
             with_warehouse_settings(
                 _prof.df, _whs.df if _whs.ok and not _whs.empty else pd.DataFrame()),
-            rate, served_days(_prof, days))
+            rate, served_days(_prof, _span))
         _sum = sizing_summary(_sized)
         # Wave 3: per-warehouse health chip — a transparent 0-100 grade (base 100 minus
         # capped queue/spill/runtime/low-util penalties) joined onto the sizing table.
