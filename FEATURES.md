@@ -55,9 +55,8 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 | Cluster-cap check: a higher MAX_CLUSTER_COUNT is suggested only where a multi-cluster warehouse's queries reached its current maximum (hourly peak cluster, ≥35 days); otherwise "Size up or split" | Cost → Optimization (Idle & sizing) |
 | Storage reclaim shortlist: stale AND never-read 90d (ACCESS_HISTORY), with a LEVER per table (Archive or drop / Cut retention; a stale table sharing storage with a clone is 'Check clones', unpriced) whose unread-table $/mo joins the de-duplicated Addressable $/mo (one saving per table) | Cost → Optimization |
 | Savings verifier flips ESTIMATED → VERIFIED/REJECTED from actuals monthly | Cost → Savings ledger |
-| Emergency levers: suspend WH, timeouts, cluster caps, monitor quotas, pipe/task pause, disable user, Cortex allowlist | Admin → Emergency |
+| Emergency levers: suspend/resume WH, warehouse statement timeout, cluster range, scaling policy, pipe pause/resume, task suspend/resume, disable/re-enable user, Cortex allowlist and account statement timeout (account-level: run as SNOW_ACCOUNTADMINS); validated SQL, type EMERGENCY, every execution audited to REMEDIATION_LOG (resource-monitor levers were removed in v4.45) | Operations → Emergency |
 | Live query kill-switch (`SYSTEM$CANCEL_QUERY`, audited): each running query needs its own typed CANCEL, and the audit row and toast carry Snowflake's answer (FAILED with its message when the query was no longer running) | Operations → Emergency |
-| Budget ↔ resource-monitor sync | Admin → Emergency |
 
 ## Plan & report
 | Capability | Where |
