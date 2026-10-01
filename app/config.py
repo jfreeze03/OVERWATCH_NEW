@@ -7,7 +7,7 @@ page, not in code.
 
 from __future__ import annotations
 
-APP_VERSION = "4.607.0"
+APP_VERSION = "4.608.0"
 
 # The build's load-bearing schema floor. main() reads the live max(SCHEMA_VERSION)
 # once per session and, if it is BELOW this, renders ONE actionable blocked state
