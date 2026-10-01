@@ -27,7 +27,7 @@ from datetime import timedelta
 import pandas as pd
 
 from .anomaly import robust_zscores
-from .formulas import account_today, safe_float
+from .formulas import ACCOUNT_TIMEZONE, account_today, safe_float
 
 # A spike is UNUSUAL FOR THIS ACCOUNT, not just an expensive model. Score each
 # (user, source)'s credits-per-request against a robust median/MAD baseline over
@@ -50,6 +50,28 @@ BUDGET_LADDER = ((1.00, "Critical", "Budget breach"),
 _SEVERITY_ORDER = {"Critical": 0, "High": 1, "Medium": 2}
 
 
+def _account_day(value: object) -> pd.Timestamp:
+    """One first-usage value as its ACCOUNT (Central) calendar day: a naive midnight Timestamp, or
+    NaT. A tz-aware value (the live leg's MIN(USAGE_TIME), a TIMESTAMP_TZ) converts to
+    ACCOUNT_TIMEZONE before the date is taken; a naive value is account wall time already (the mart
+    leg casts ::TIMESTAMP_NTZ) -- quotas._account_ts's rule. Taking the UTC date instead put an
+    evening (after ~19:00 Central) first usage on the NEXT day, a day short of account_today()."""
+    try:
+        ts = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return pd.NaT
+    if pd.isna(ts):
+        return pd.NaT
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert(ACCOUNT_TIMEZONE).tz_localize(None)
+    return ts.normalize()
+
+
+def _account_days(values: pd.Series) -> pd.Series:
+    """_account_day over a column (datetime64, naive; NaT where unparseable)."""
+    return pd.to_datetime(values.map(_account_day), errors="coerce")
+
+
 def effective_window_days(rollup: pd.DataFrame, window_days: int,
                           *, bounds: tuple | None = None) -> int:
     """The projection divisor: days this SCOPE has actually been observable.
@@ -70,7 +92,8 @@ def effective_window_days(rollup: pd.DataFrame, window_days: int,
     if rollup is None or rollup.empty or "FIRST_USAGE" not in rollup.columns:
         return asked
     try:
-        first = pd.to_datetime(rollup["FIRST_USAGE"], errors="coerce", utc=True).min()
+        # the account calendar day, never the UTC date (see _account_day)
+        first = _account_days(rollup["FIRST_USAGE"]).min()
     except (TypeError, ValueError):      # exotic/mixed dtypes: keep the asked window
         return asked
     if pd.isna(first):
@@ -217,18 +240,20 @@ def enrich_user_rollup(df: pd.DataFrame, ai_rate_usd: float,
     # a brand-new user's first afternoon is not inflated into a false breach.
     cap = max(int(window_days or 30), 1)
     if "FIRST_USAGE" in out.columns:
-        _first = pd.to_datetime(out["FIRST_USAGE"], errors="coerce", utc=True)
+        # The account (Central) calendar day of each first usage, naive -- never the UTC date,
+        # which put an evening first usage on the next day against a Central anchor (_account_day).
+        _first = _account_days(out["FIRST_USAGE"])
         # Anchor the per-user elapsed span at the WINDOW END (last day of the bounded
         # month), not today — else a 'Last month' view taken mid-current-month divides the
         # month's credits by days-to-today and under-projects the burn (see effective_window_days).
         _anchor = (bounds[1] - timedelta(days=1)) if bounds is not None else account_today()
-        _now = pd.Timestamp(_anchor).tz_localize("UTC")
-        # .normalize() to date-grain FIRST: a first-usage timestamp carries a time-of-day, and
-        # a bare (_now - _first).dt.days would FLOOR the intraday fraction, landing one day short
+        _now = pd.Timestamp(_anchor)
+        # Date-grain FIRST (_account_days normalizes): a first-usage timestamp carries a time-of-day,
+        # and a bare (_now - _first).dt.days would FLOOR the intraday fraction, landing one day short
         # for every real (non-midnight) request — so this must match effective_window_days'
         # date-based inclusive '(today - first.date()).days + 1', or the per-user projection and
         # the _MIN_OBSERVABLE_DAYS breach guard drift a day off the scope divisor.
-        _elapsed = (_now - _first.dt.normalize()).dt.days + 1
+        _elapsed = (_now - _first).dt.days + 1
         out["OBSERVABLE_DAYS"] = _elapsed.clip(lower=1, upper=cap).fillna(float(window))
         # TENURE_DAYS is the user's TRUE days-since-first-usage, NOT clipped to the asked window.
         # OBSERVABLE_DAYS above is the window-clamped PROJECTION divisor; TENURE_DAYS is the small-N

@@ -91,3 +91,34 @@ def test_usd_column_help_names_the_settings_rates_not_literals():
         text = COLUMN_HELP[key]
         assert "CREDIT_PRICE_USD" in text and "AI_CREDIT_PRICE_USD" in text, key
         assert "3.68" not in text and "2.20" not in text, key
+
+
+# ---- R1-093: AI-user tenure and the projection divisor count Central calendar days -------------
+
+
+def _evening_starter(first_usage: object) -> pd.DataFrame:
+    return pd.DataFrame({"USER_NAME": ["eve"], "FIRST_USAGE": [first_usage], "TOTAL_CREDITS": [40.0],
+                         "AVG_DAILY_CREDITS": [10.0], "CREDITS_PER_REQUEST": [1.0], "TOTAL_REQUESTS": [40]})
+
+
+def test_evening_first_usage_counts_its_central_day(monkeypatch):
+    from app.logic import cortex
+    monkeypatch.setattr(cortex, "account_today", lambda: date(2026, 9, 30))
+    # Sep 27 20:30 Central is Sep 28 in UTC; Sep 27..30 is 4 Central calendar days (was 3)
+    for first in (pd.Timestamp("2026-09-27 20:30", tz="America/Chicago"),
+                  pd.Timestamp("2026-09-28 01:30", tz="UTC"),          # the same instant, UTC offset
+                  pd.Timestamp("2026-09-27 20:30")):                   # naive = Central wall time
+        rollup = _evening_starter(first)
+        assert cortex.effective_window_days(rollup, 30) == 4, first
+        enriched = cortex.enrich_user_rollup(rollup, 2.20, 30)
+        assert float(enriched["OBSERVABLE_DAYS"].iloc[0]) == 4, first
+        assert float(enriched["TENURE_DAYS"].iloc[0]) == 4, first
+        assert float(enriched["PROJECTED_30D_CREDITS"].iloc[0]) == 300.0, first   # was 400
+
+
+def test_unparseable_first_usage_keeps_the_asked_window(monkeypatch):
+    from app.logic import cortex
+    monkeypatch.setattr(cortex, "account_today", lambda: date(2026, 9, 30))
+    rollup = _evening_starter(None)
+    assert cortex.effective_window_days(rollup, 30) == 30
+    assert float(cortex.enrich_user_rollup(rollup, 2.20, 30)["OBSERVABLE_DAYS"].iloc[0]) == 30

@@ -56,7 +56,10 @@ def test_cortex_projection_divisor_anchors_on_window_end_not_today(monkeypatch):
     monkeypatch.setattr(cortex, "account_today", lambda: date(2026, 9, 17))
     # a user whose first August usage is Aug 25 has 7 observable in-window days (Aug 25-31),
     # NOT (today - Aug 25) ~= 24 days. effective_window_days must return 7 under bounds.
-    rollup = pd.DataFrame({"USER_NAME": ["bob"], "FIRST_USAGE": [pd.Timestamp("2026-08-25", tz="UTC")],
+    # First usage is dated on the ACCOUNT (Central) calendar (R1-093): the old UTC-midnight
+    # fixture is Aug 24 19:00 Central, i.e. an Aug 24 first usage, so state Aug 25 in Central.
+    rollup = pd.DataFrame({"USER_NAME": ["bob"],
+                           "FIRST_USAGE": [pd.Timestamp("2026-08-25 09:00", tz="America/Chicago")],
                            "TOTAL_CREDITS": [40.0], "AVG_DAILY_CREDITS": [40.0 / 7],
                            "CREDITS_PER_REQUEST": [1.0], "TOTAL_REQUESTS": [40]})
     assert cortex.effective_window_days(rollup, 31, bounds=_AUG) == 7
