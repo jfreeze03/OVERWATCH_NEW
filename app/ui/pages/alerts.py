@@ -1199,11 +1199,15 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                 # F50: PERSIST the verdict per event — it used to vanish on the
                                 # very next rerun, the moment the operator touched the decide bar.
                                 # at_dt (full datetime) is the freshness gate; "at" is display.
+                                # closed_day (review R1-040): a full-day-total event raised for an
+                                # EARLIER day than today -- today's partial re-check can't clear it.
                                 st.session_state[_rc_key] = {
                                     "value": current_v, "thr": thr,
                                     "label": recheck_sql.recheck_label(_rid),
                                     "at": account_now().strftime("%H:%M"),
                                     "at_dt": account_now(),
+                                    "closed_day": recheck_sql.recheck_closed_day(
+                                        _rid, str(row["TITLE"]), account_now().date().isoformat()),
                                 }
                         else:
                             st.session_state[_rc_key] = {"error": rc.error or "no data today.",
@@ -1220,6 +1224,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                             _rct = _rc_state.get("thr")
                             _rcl = str(_rc_state.get("label") or "")
                             _rca = str(_rc_state.get("at") or "")
+                            _rc_day = str(_rc_state.get("closed_day") or "")
                             # review fix: the one-click resolve is evidence for an AUDIT
                             # note — gate it on freshness (30 min) so a persisted CLEAR
                             # can't resurface days later as if measured just now.
@@ -1234,10 +1239,17 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                     st.warning(f"Still over: {_rcl} = "
                                                f"{_recheck_vs_text(_rid, _rcv, safe_float(_rct))} "
                                                f"(re-checked {_rca}).")
-                                elif not _rc_fresh:
-                                    st.info(f"Was clear when re-checked {_rca}: {_rcl} = "
-                                            f"{_recheck_vs_text(_rid, _rcv, safe_float(_rct))} "
-                                            "— re-check again before resolving.")
+                                elif not _rc_fresh or _rc_day:
+                                    # Review R1-040: an event for a CLOSED day (a full-day total, e.g.
+                                    # yesterday's credits) re-checks today's partial day -- under the
+                                    # threshold is not that event's condition clearing, so no clear verdict
+                                    # and no ACTIONED prefill; only "still over" (today too) is evidence.
+                                    st.info((f"Today so far (re-checked {_rca}): {_rcl} = " if _rc_day
+                                             else f"Was clear when re-checked {_rca}: {_rcl} = ")
+                                            + f"{_recheck_vs_text(_rid, _rcv, safe_float(_rct))} "
+                                            + (f"— this alert is for {_rc_day}, a closed day; a partial day "
+                                               "cannot clear a full-day total, so this is not a clear."
+                                               if _rc_day else "— re-check again before resolving."))
                                 else:
                                     st.success(f"Condition clear: {_rcl} = "
                                                f"{_recheck_vs_text(_rid, _rcv, safe_float(_rct))} "
