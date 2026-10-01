@@ -727,7 +727,11 @@ def _contract_tab(settings: dict) -> None:
                      "the same basis as the renewal planner below and the year projection above "
                      "(no longer the optimistic lifetime average)."},
         ])
-    result_caption(res, note="Billed credits (cloud-services adjustment applied) since contract start.")
+    # R1-159: once the term is over the bounded read is the final in-term total, not credits to date.
+    result_caption(res, note=(
+        "Billed credits (cloud-services adjustment applied) from the contract start up to the term end "
+        f"{end.isoformat()} (end day excluded)." if _term_ended else
+        "Billed credits (cloud-services adjustment applied) since contract start."))
     # C8: a Snowflake capacity commitment is a DOLLAR balance drawn by compute,
     # storage AND transfer; this pacing counts credit-billed services only
     # (compute + serverless + AI). Storage and data-transfer dollars draw the same

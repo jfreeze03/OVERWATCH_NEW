@@ -723,24 +723,25 @@ def _graphs_tab(company: str, days: int, rate: float, database: str = "",
     result_caption(res, note="TREND compares $/run between window halves (±10% = FLAT). "
                              "Pipeline label = the graph's root task.")
 
+    # R1-163: serverless_task_daily clamps a trailing window to the live-scan limit, so the header
+    # names the window actually scanned. R1-061 / R1-167: only a true absence is a grant gap; a
+    # timeout or a dropped column is a failed read and says so with its error. guard() renders the
+    # OK read: the clean empty row, and the truncation line once run()'s row cap cuts the task-day
+    # rows (R1-062); result_caption names the source under the table.
     sls = run(graph_sql.serverless_task_daily(days, company, database, schema_contains, bounds=bounds),
               page=_PAGE, key=f"sls_costs_{company}_{days}_{database}_{schema_contains}{_lm}",
               tier="historical", source="SERVERLESS_TASK_HISTORY")
-    # R1-163: serverless_task_daily clamps a trailing window to the live-scan limit.
     _sls_wlab = window_label(bounds, min(int(days), MAX_LIVE_WINDOW_DAYS))
     st.markdown(f"**Serverless tasks (billed separately, task-day grain, {_sls_wlab})**")
-    # R1-061 / R1-167: only a true absence is a grant gap; a timeout or a dropped column is a failed
-    # read and says so with its error (the old caption called every failure "not accessible").
-    if sls.ok and sls.empty:
-        empty_state("clean", "No serverless task credits in this scope/window.")
-    elif not sls.ok and is_setup_absence(sls.error_kind):
+    if not sls.ok and is_setup_absence(sls.error_kind):
         empty_state("needs_setup", "SERVERLESS_TASK_HISTORY is not readable by this app's role "
                                    "(an IMPORTED PRIVILEGES grant on the SNOWFLAKE database).")
     elif not sls.ok:
         empty_state("unavailable", "Serverless task credits (SERVERLESS_TASK_HISTORY) could not be read.",
                     detail=sls.error)
-    else:
+    elif guard(sls, "No serverless task credits in this scope/window.", kind="clean"):
         sdf = sls.df.copy()
         sdf["USD"] = sdf["SERVERLESS_CREDITS"].map(lambda c: credits_to_usd(c, rate))
         styled_table(sdf, height=220, column_config={
             "USD": st.column_config.NumberColumn("$", format="$%.2f")})
+        result_caption(sls)
