@@ -5,8 +5,15 @@ alert_pipeline_check.sql FIX C sent the owner back to this file whenever Teams d
 OVERWATCH_WEBHOOK_TEAMS -- ROUTE_ID is a UUID default and the key is not enforced, and SP_NOTIFY_WEBHOOK /
 SP_DAILY_DIGEST deliver per ROUTE_ID, so every alert, digest and escalation posted twice -- and (b) run
 unedited, CREATE OR REPLACEd the live secret with the '<REDACTED-...>' placeholder, killing every send.
-Now the route insert is NOT EXISTS-guarded, the secret is written only by a block that RAISEs while the
-placeholder remains, and FIX C points at the rotation-only ALTER SECRET step.
+Now the route insert is NOT EXISTS-guarded, the first live statement is a gate that RAISEs unless the
+operator opens it in Snowsight, and FIX C points at the rotation-only ALTER SECRET step.
+
+Review follow-up: the first guard took the pasted sig as a scripting variable's DEFAULT and built the
+CREATE SECRET from it. QUERY_HISTORY keeps an anonymous block's (and a SET's) full text verbatim -- 365
+days in ACCOUNT_USAGE, and OVERWATCH ingests QUERY_TEXT -- and nothing can recognise a variable's DEFAULT
+as a secret. So the secret is now written only by a commented, top-level CREATE SECRET IF NOT EXISTS
+(first-time setup, uncommented in Snowsight) or the rotation runbook's ALTER SECRET; no block or SET
+carries it, and the gate that stops an unedited Run All holds no secret at all.
 """
 
 from __future__ import annotations
@@ -104,27 +111,39 @@ def test_a_deliberately_disabled_route_is_not_re_added():
     assert [enabled for _rid, enabled in _teams_routes(db)] == [0]
 
 
-def test_an_unedited_run_aborts_before_touching_the_secret_or_integration():
+def test_no_live_statement_carries_or_writes_the_secret():
+    """QUERY_HISTORY keeps a block's / a SET's whole text: the sig may only ever travel in a top-level
+    CREATE / ALTER SECRET the operator types in Snowsight -- never in anything this file runs as committed."""
     stmts = _statements(_WD)
-    # nothing at top level writes the secret: only the guarded block may
-    assert not [s for s in stmts if re.match(r"CREATE\s+(OR\s+REPLACE\s+)?SECRET\b", s, re.I)]
-    guard_at = next(i for i, s in enumerate(stmts)
-                    if s.startswith("EXECUTE IMMEDIATE $$") and "OVERWATCH_TEAMS_URL" in s)
-    guard = stmts[guard_at]
-    default = re.search(r"teams_secret VARCHAR DEFAULT '([^']*)';", guard).group(1)
-    raise_at = guard.index("RAISE placeholder_still_present;")
-    assert guard.index("IF (CONTAINS(teams_secret, '<')) THEN") < raise_at
-    assert raise_at < guard.index("CREATE OR REPLACE SECRET DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL")
-    # Run All halts at the first failing statement: as committed, the guard raises, and every
-    # statement that recreates the integration comes after it.
-    assert "<" in default and default == "<REDACTED-PASTE-IN-SNOWSIGHT>"
+    assert not [s for s in stmts if re.match(r"(CREATE|ALTER)\s+(OR\s+REPLACE\s+)?SECRET\b", s, re.I)]
+    for s in stmts:
+        if s.startswith("EXECUTE IMMEDIATE") or re.match(r"SET\b", s, re.I):
+            for marker in ("SECRET_STRING", "OVERWATCH_TEAMS_URL", "REDACTED-PASTE", "sig=", "/workflows/"):
+                assert marker not in s, (marker, s.splitlines()[0])
+    # the first-time recipe is commented, top-level, and can never overwrite the live secret
+    assert "--   CREATE SECRET IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL" in _WD
+    assert "--       SECRET_STRING = '<REDACTED-PASTE-IN-SNOWSIGHT>';" in _WD
+    assert not re.search(r"CREATE\s+OR\s+REPLACE\s+SECRET\s+DBA_MAINT_DB\.OVERWATCH\.OVERWATCH_TEAMS_URL", _WD, re.I)
+    # the operator is told why, and to rotate if an older revision's SET form ever held the real value
+    flat = " ".join(_WD.replace("--", " ").split())
+    assert "NEVER put it in a scripting block (a DECLARE ... DEFAULT) or a SET variable" in flat
+    assert "treat the sig as exposed: regenerate the Workflows URL in Teams, then rotate" in flat
+
+
+def test_an_unedited_run_aborts_before_touching_the_integration():
+    stmts = _statements(_WD)
+    # Run All halts at the first failing statement: the gate is the FIRST live statement, raises as
+    # committed, and every statement that recreates the integration comes after it.
+    gate = stmts[0]
+    assert gate.startswith("EXECUTE IMMEDIATE $$") and gate.endswith("$$")
+    assert re.search(r"^\s*recreate_integration BOOLEAN DEFAULT FALSE;$", gate, re.M)
+    raise_at = gate.index("RAISE not_confirmed;")
+    assert gate.index("IF (NOT recreate_integration) THEN") < raise_at < gate.index("RETURN ")
     integration_at = next(i for i, s in enumerate(stmts)
                           if s.startswith("CREATE OR REPLACE NOTIFICATION INTEGRATION OVERWATCH_WEBHOOK_TEAMS"))
-    assert guard_at < integration_at
-    # the secret value is escaped into the dynamic DDL, so a quote in it cannot break out, and the DDL
-    # runs through a variable (EXECUTE IMMEDIATE :ddl -- the repo idiom), not an inline expression
-    assert "REPLACE(teams_secret, '''', '''''')" in guard
-    assert guard.index("ddl := 'CREATE OR REPLACE SECRET") < guard.index("EXECUTE IMMEDIATE :ddl;")
+    assert integration_at > 0
+    # the gate's message routes a rotation to the runbook, not to this file
+    assert "ROTATION RUNBOOK" in gate and "ALTER SECRET" in gate
 
 
 def test_fix_c_points_at_the_rotation_step_not_a_full_re_run():
