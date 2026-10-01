@@ -236,7 +236,14 @@ def test_expected_gaps_reference_real_canaries_and_stay_feature_gated():
     assert names >= EXPECTED_GAPS              # no phantom declarations
     # v4.603 (Next-Fifty #34) moved this lock deliberately: SYSTEM$CLIENT_VERSION_INFO() is the one
     # non-Cortex account-feature function whose absence is a state, not drift. Name it; never a prefix.
-    assert all(n.startswith("cortex.") or n == "security.client_version_info" for n in EXPECTED_GAPS)
+    # v4.608 (R2-062) names the six ORGANIZATION_USAGE readers the same way: the org views need the
+    # org-viewer grant (an account-feature state), and each one must actually read ORGANIZATION_USAGE.
+    org_gaps = {"cost.org_all_in_window_usd", "cost.org_usage_in_currency", "cost.org_remaining_balance",
+                "cost.org_contract_items", "cost.org_account_month_usd", "cost.org_rate_sheet"}
+    assert all(n.startswith("cortex.") or n == "security.client_version_info" or n in org_gaps
+               for n in EXPECTED_GAPS)
+    builders = dict(CANARIES)
+    assert all("SNOWFLAKE.ORGANIZATION_USAGE." in builders[n]() for n in org_gaps & EXPECTED_GAPS)
     core = {n for n in names if n.startswith(("mart.", "chargeback.", "recheck."))}
     assert not (core & EXPECTED_GAPS)          # core objects absent => FAIL
 

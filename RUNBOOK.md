@@ -1176,9 +1176,11 @@ the only record: copy the error, then run Admin → Canary. That helps only
 when the panel's builder is registered in app/data/canary.py (it then FAILs
 there on drift). Several probe readers are not registered, by design (the
 SHOW-based reads, which EXPLAIN cannot compile, and the Enterprise-only
-ACCESS_HISTORY reads) or not yet (e.g. the org_*, operator_* and email_*
-reads, query_insights_feed, object_tag_probe); for those the expander error
-is the only record.
+ACCESS_HISTORY reads) or not yet (e.g. the operator_* reads,
+email_notification_history, query_insights_feed, object_tag_probe); for
+those the expander error is the only record. Since v4.608 the six
+ORGANIZATION_USAGE readers (cost.org_*) are registered as declared gaps:
+without the org-viewer grant they read GAP, and a renamed column FAILs.
 A timeout usually clears on a retry; drift does not (apply the missing
 migrations, or redeploy). Admin → Setup progress marks a checklist row
 Unknown (not Pending) when its read fails this way: FIX says Retry for a

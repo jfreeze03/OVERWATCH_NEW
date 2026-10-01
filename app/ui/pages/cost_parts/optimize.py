@@ -16,6 +16,8 @@ projection on this page.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pandas as pd
 import streamlit as st
 
@@ -584,6 +586,29 @@ def _spend_ceilings_panel(idle_head, rate: float, company: str = "ALL") -> None:
                        "SUSPEND), or set an account-level monitor to cap the whole account.")
         elif acct is None:
             empty_state("clean", "Every active warehouse is attached to a resource monitor.")
+
+
+def _object_ledger_coverage_note(ledger_start: object, days: int, bounds: tuple | None) -> str:
+    """R2-013: '' when the object ledger covers the whole window, else a sentence naming its first day and how
+    many of the window's days it covers. FACT_OBJECT_COST_DAILY is never backfilled (first fill 14 days), so a
+    180/365-day or Current-year window can start months before it; the totals then cover only the ledger's
+    days. Calendar span, never a row count (R1-021 / W12). ``ledger_start`` is the builder's ledger-wide
+    LEDGER_START_DAY (cost_sql.object_cost_by_arm)."""
+    first = pd.to_datetime(ledger_start, errors="coerce")
+    if pd.isna(first):
+        return ""
+    first_day = first.date()
+    if bounds is not None:
+        w0, w1 = bounds[0], bounds[1]
+    else:
+        w1 = account_today()
+        w0 = w1 - timedelta(days=bounded_days(days, 400))     # the builder's trailing clamp
+    if first_day <= w0:
+        return ""
+    span = max(1, (w1 - w0).days)
+    covered = max(0, min(span, (w1 - first_day).days))
+    return (f"The object ledger starts {first_day:%Y-%m-%d} (it is not backfilled), so these totals cover "
+            f"{covered} of the window's {span} days.")
 
 
 def _clear_unread_confirm_latch() -> None:
@@ -1684,6 +1709,11 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             kpi_row([{"label": "Object-attributed spend", "value": format_usd(_obj_attr),
                       "help": "Sum of the OBJECT arms x the configured rate (excludes the non-object "
                               "QUERY_COMPUTE_RESIDUAL arm, shown separately in the chart). Additive."}])
+            # R2-013: a window older than the (never-backfilled) ledger sums only the ledger's days -- say so.
+            _oc_cov = _object_ledger_coverage_note(
+                _adf["LEDGER_START_DAY"].iloc[0] if "LEDGER_START_DAY" in _adf.columns else None, days, bounds)
+            if _oc_cov:
+                st.caption(_oc_cov)
             charts.bar_usd(_adf.sort_values("USD", ascending=False), "COST_ARM", "USD",
                            title="$ by cost arm", takeaway=True)
             _top = run(cost_sql.object_cost_top(days, company, 25, database=_oc_db, bounds=bounds), page=_PAGE,
@@ -2335,7 +2365,11 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             str(wrow["DATABASE_NAME"]), str(wrow["SCHEMA_NAME"]), str(wrow["TABLE_NAME"])),
                             page=_PAGE,
                             key=f"retlive_{wrow['DATABASE_NAME']}_{wrow['SCHEMA_NAME']}_{wrow['TABLE_NAME']}",
-                            tier="metadata", source="live table retention (metadata view)")
+                            # R2-097: tier "live" (30 s cache), never "metadata": that tier caches for 4 h
+                            # process-wide, and nothing a worksheet ALTER does invalidates it, so a retention
+                            # lowered since an earlier selection read as the old value and _can_reduce let this
+                            # statement RAISE it. One tiny filtered INFORMATION_SCHEMA read per selected table.
+                            tier="live", source="table retention (INFORMATION_SCHEMA, live)")
                         if _rl.usable():
                             _cur_ret = safe_float(_rl.df.iloc[0].get("RETENTION_DAYS"), 0.0)
                             _ret_known = True
@@ -2371,8 +2405,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         est_w = round(_freed_gb / 1024 * _rate_tb, 2)
                         st.caption(
                             f"{_basis} (~${est_w:,.2f}/mo, ESTIMATED). Current retention is read live from "
-                            "the table's metadata at selection, so this statement can't silently raise a "
-                            "retention that was lowered elsewhere. Time-Travel bytes also age out on their "
+                            "the table's metadata on each render (at most ~30 s old), so this statement can't "
+                            "silently raise a retention that was lowered elsewhere. Time-Travel bytes also age "
+                            "out on their "
                             f"own as the existing window rolls forward. The {_fs_gb:,.0f} GB of failsafe is "
                             "NOT included: it drains on a fixed 7-day schedule regardless of this setting. The "
                             "estimate assumes no account-level MIN_DATA_RETENTION_TIME_IN_DAYS above the "
