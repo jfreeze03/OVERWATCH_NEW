@@ -6,6 +6,9 @@ says so out loud instead of pretending otherwise (old-app review point).
 
 from __future__ import annotations
 
+import dataclasses
+import re
+
 import pandas as pd
 import streamlit as st
 
@@ -67,7 +70,12 @@ from app.logic.policy_coverage import (
     unmasked_family_databases,
 )
 from app.logic.security import (
+    capped_window,
+    coverage_required_days,
     fact_coverage_complete,
+    served_window_text,
+    window_total,
+    window_was_capped,
 )
 from app.ui import charts
 from app.ui.components import (
@@ -99,6 +107,7 @@ from app.ui.components import (
 )
 from app.ui.schema_gate import has_migration
 from app.ui.security_center import (
+    drop_window_totals,
     render_admin_grant_anomalies,
     render_effective_access,
     render_security_overview,
@@ -106,6 +115,17 @@ from app.ui.security_center import (
 )
 
 _PAGE = "Security"
+
+
+_drop_totals = drop_window_totals
+
+
+def _result_without_totals(result):
+    """The same QueryResult with its window-total helper columns dropped (Case File evidence previews)."""
+    try:
+        return dataclasses.replace(result, df=_drop_totals(result.df))
+    except TypeError:          # a non-dataclass stand-in: hand it through unchanged
+        return result
 
 
 def _auth_inventory(company: str):
@@ -289,13 +309,29 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
         security_sql.login_fact_coverage(30), page=_PAGE, key="sec_login_fact_coverage",
         tier="hourly", source="FACT_LOGIN_DAILY coverage", probe=True,
     )
+    # The windows the capped readers actually serve (calendar bounds are capped too, inside the
+    # builders): the 30-day login readers, and the new-network window whose 90-day baseline precedes
+    # it. Each fact gate checks DENSITY over exactly the span its read serves: one 90-day density read
+    # used to gate a 7- or 30-day window, so a hole inside the served window passed on the other 80+
+    # days and failed logins in the hole went uncounted under a mart label.
+    _ld, _lb = capped_window(days, bounds, 30)
+    _nd, _nb = capped_window(days, bounds, 90)
+    _login_txt = served_window_text(_ld, _lb)
+    _login_cap = " (this reader is capped at 30 days)" if window_was_capped(days, bounds, _lb, 30) else ""
+    _baseline = security_sql.NETWORK_BASELINE_DAYS
     security_coverage = run(
-        security_sql.security_login_fact_coverage(90), page=_PAGE,
-        key="sec_security_login_coverage_90", tier="hourly",
-        source="FACT_SECURITY_LOGIN_DAILY coverage", probe=True,
+        security_sql.security_login_fact_coverage(_ld, bounds=_lb), page=_PAGE,
+        key=f"sec_security_login_coverage_{_ld}{_lm}", tier="hourly",
+        source="FACT_SECURITY_LOGIN_DAILY coverage (served window)", probe=True,
     )
-    use_security_fact = fact_coverage_complete(security_coverage, min(days, 30))
-    use_security_network_fact = fact_coverage_complete(security_coverage, 90)
+    network_coverage = run(
+        security_sql.security_login_fact_coverage(_nd, bounds=_nb, lookback=_baseline), page=_PAGE,
+        key=f"sec_security_network_coverage_{_nd}{_lm}", tier="hourly",
+        source="FACT_SECURITY_LOGIN_DAILY coverage (window + 90-day baseline)", probe=True,
+    )
+    use_security_fact = fact_coverage_complete(security_coverage, coverage_required_days(_ld, _lb))
+    use_security_network_fact = fact_coverage_complete(
+        network_coverage, coverage_required_days(_nd, _nb, lookback=_baseline))
     _logins_sql = (
         security_sql.failed_logins_fact(days, company, bounds=bounds)
         if use_security_fact else security_sql.failed_logins(days, company, bounds=bounds)
@@ -353,10 +389,14 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
                 # proved MFA posture, so an empty result here is UNKNOWN, not clean. Do not
                 # let it fall through to the green "no gaps" state (bug-hunt 2026-08-30).
                 _mfa_unproven = True
-        # C23: severity comes from the data — amber only when the gap list has rows.
-        section_header("MFA gaps with password-login evidence (30d)", alarm_health(mfa),
+        # C23: severity comes from the data — amber only when the gap list has rows. When neither the
+        # fact nor the live fallback proved posture the stripe is NEUTRAL: alarm_health(ok+empty mart) used
+        # to paint it green above the 'unconfirmed, not clear' body (a false all-clear on the lead finding).
+        _mfa_total = window_total(mfa.df, "TOTAL_USERS_WIN", len(mfa.df)) if mfa.usable() else 0
+        section_header("MFA gaps with password-login evidence (30d)",
+                       alarm_health(None if _mfa_unproven else mfa),
                        "security", anchor="sec-mfa",
-                       badge=(f"{len(mfa.df)} to fix" if (mfa.usable() and not mfa.empty) else ""))
+                       badge=(f"{_mfa_total:,} to fix" if (mfa.usable() and not mfa.empty) else ""))
         if _mfa_unproven:
             empty_state("no_data_yet", "MFA evidence did not resolve — neither the login fact nor "
                         "the live LOGIN_HISTORY fallback returned. MFA posture is unconfirmed, not clear.")
@@ -368,8 +408,11 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
             st.caption("Password logins in the last 30 days with no MFA. "
                        "SSO/key-pair-only users are excluded by design.")
             # #25: rows are users → drill to Entity 360 (mirrors the dormant-users table).
-            entity_nav_table(with_user_names(mfa.df, _PAGE), key=f"sec_mfa_{company}",
+            entity_nav_table(with_user_names(_drop_totals(mfa.df), _PAGE), key=f"sec_mfa_{company}",
                              key_col="USER_NAME", entity_type="USER")
+            if _mfa_total > len(mfa.df):
+                st.caption(f"Showing the {len(mfa.df):,} users with the most password logins of "
+                           f"{_mfa_total:,}; the badge counts all of them.")
             result_caption(mfa)
 
         # Next-Fifty #9: password sign-in deprecation readiness (WILL BREAK / MIGRATE / READY + ALTER USER stubs).
@@ -383,25 +426,33 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
         sf = run(security_sql.single_factor_logins(min(days, 30), company, bounds=bounds), page=_PAGE,
                  key=f"single_factor_{company}_{days}{_lm}", tier="recent",
                  source="ACCOUNT_USAGE.LOGIN_HISTORY (PASSWORD, no second factor, success)")
-        # C23: the (cached) read moves above the header so severity is data-derived.
-        section_header("Single-factor logins (MFA-bypassed, 30d)", alarm_health(sf),
-                       "security", anchor="sec-single-factor")
+        # C23: the (cached) read moves above the header so severity is data-derived. The header names the
+        # window the reader SERVES (it said "30d" under a 7-day window, and under 'Current year').
+        section_header(f"Single-factor logins (MFA-bypassed, {served_window_text(_ld, _lb, short=True)})",
+                       alarm_health(sf), "security", anchor="sec-single-factor")
         if sf.ok and sf.empty:
-            empty_state("clean", "No successful password login landed without a second factor in this window "
-                                 "(reader capped at 30d).")
+            empty_state("clean", "No successful password login landed without a second factor in "
+                                 f"{_login_txt}{_login_cap}.")
         elif guard(sf, ""):
-            _bypass = sf.df[sf.df["HAS_MFA"].astype(bool)]
+            _sf = sf.df
+            _bypass = _sf[_sf["HAS_MFA"].astype(bool)]
+            # pre-LIMIT totals: the reader keeps 200 users, so len() saturated at 200 with no notice
+            _sf_total = window_total(_sf, "TOTAL_USERS_WIN", len(_sf))
+            _sf_enrolled = window_total(_sf, "TOTAL_ENROLLED_WIN", len(_bypass))
             kpi_row([
-                {"label": "Users with single-factor logins", "value": f"{len(sf.df)}"},
-                {"label": "Enrolled yet single-factor", "value": f"{len(_bypass)}",
+                {"label": "Users with single-factor logins", "value": f"{_sf_total:,}"},
+                {"label": "Enrolled yet single-factor", "value": f"{_sf_enrolled:,}",
                  "help": "HAS_MFA is TRUE now yet they authenticated single-factor — a bypass CANDIDATE "
                          "to verify. HAS_MFA is a current snapshot, so a login made before they enrolled, "
                          "MFA caching, or a temporary admin bypass also land here.",
-                 "delta_color": "inverse" if len(_bypass) else "off"},
+                 "delta_color": "inverse" if _sf_enrolled else "off"},
             ])
             # #25: rows are users → drill to Entity 360.
-            entity_nav_table(with_user_names(sf.df, _PAGE), key=f"sec_single_factor_{company}_{days}",
+            entity_nav_table(with_user_names(_drop_totals(_sf), _PAGE), key=f"sec_single_factor_{company}_{days}",
                              key_col="USER_NAME", entity_type="USER")
+            if _sf_total > len(_sf):
+                st.caption(f"Showing the first {len(_sf):,} of {_sf_total:,} users (enrolled users first); "
+                           "the counts above cover all of them.")
             st.caption("PASSWORD logins with an empty SECOND_AUTHENTICATION_FACTOR; currently-enrolled "
                        "users sort first. HAS_MFA is a point-in-time snapshot — a login before MFA "
                        "enrollment, MFA caching, or a temporary admin bypass can also appear here; verify "
@@ -416,7 +467,7 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
             tier="hourly" if use_security_fact else "recent", source=_activity_source,
         )
         if res.ok and res.empty:
-            empty_state("clean", "No failed logins in this window (reader capped at 30d).")
+            empty_state("clean", f"No failed logins in {_login_txt}{_login_cap}.")
         elif guard(res, ""):
             # #25: failed_logins aggregates one row per user (GROUP BY USER_NAME) → drill.
             entity_nav_table(with_user_names(res.df, _PAGE), key=f"sec_faillog_{company}_{days}",
@@ -431,7 +482,7 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
             tier="hourly" if use_security_fact else "recent", source=_activity_source,
         )
         if reasons.ok and reasons.empty:
-            empty_state("clean", "No failed logins in the window.")
+            empty_state("clean", f"No failed logins in {_login_txt}.")
         elif guard(reasons, ""):
             styled_table(reasons.df)
             result_caption(reasons)
@@ -444,14 +495,24 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
                   source=_network_source)
         section_header("New networks for privileged users (90-day baseline)", alarm_health(nn), "alerts",
                        anchor="sec-newnet")
+        # The baseline is the 90 days BEFORE the window starts (the builders used to read a fixed last-90
+        # days, so a 90-day or wider window had no baseline and listed every routine admin IP as new).
+        _nn_txt = served_window_text(_nd, _nb)
+        _nn_cap = (" The window is capped at the last 90 days so a full 90-day baseline precedes it."
+                   if window_was_capped(days, bounds, _nb, 90) else "")
         if nn.ok and nn.empty:
-            empty_state("clean", "No break-glass account logged in from a network unseen in the last 90 days.")
+            empty_state("clean", "No break-glass account logged in from a network unseen in the 90 days "
+                                 f"before {_nn_txt}." + _nn_cap)
         elif guard(nn, ""):
             # v4.461 P2: the count folds into the caption; the table is the evidence.
-            styled_table(with_user_names(nn.df, _PAGE))
-            st.caption(f"{len(nn.df)} new (user, network) pair(s) — an admin-role user's (user, IP) "
-                       "first appeared inside this window (an IP quiet 90+ days re-flags on purpose). "
-                       "Expected after travel, VPN changes, or a new automation host — anything else is the finding.")
+            _nn_total = window_total(nn.df, "TOTAL_PAIRS_WIN", len(nn.df))
+            styled_table(with_user_names(_drop_totals(nn.df), _PAGE))
+            st.caption(f"{_nn_total:,} new (user, network) pair(s) — an admin-role user's (user, IP) "
+                       f"first appeared inside {_nn_txt} and was not seen in the 90 days before it (an IP "
+                       "quiet 90+ days re-flags on purpose). Expected after travel, VPN changes, or a new "
+                       "automation host — anything else is the finding."
+                       + (f" Showing the newest {len(nn.df):,}." if _nn_total > len(nn.df) else "")
+                       + _nn_cap)
             result_caption(nn)
 
         # Account-takeover candidates: a failed-login burst FOLLOWED BY a success —
@@ -484,19 +545,23 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
                       page=_PAGE, key=f"takeover_{company}_{days}{_lm}", tier="recent",
                       source="ACCOUNT_USAGE.LOGIN_HISTORY (fail-burst → success correlation)")
             if ato.ok and ato.empty:
-                empty_state("clean", "No user shows a failed-login burst in this window (reader capped at 30d).")
+                empty_state("clean", f"No user shows a failed-login burst in {_login_txt}{_login_cap}.")
             elif guard(ato, ""):
                 ranked = takeover_severity(ato.df)
-                broke = ranked[ranked["SUCCEEDED_AFTER"].astype(bool)]
-                high = ranked[ranked["SEVERITY"] == "High"]
+                # pre-LIMIT totals: the reader keeps 100 users, so in a spray over 100+ users len() read
+                # exactly 100 — the case summary below carried the same saturated count
+                _bursts = window_total(ato.df, "TOTAL_BURSTS_WIN", len(ranked))
+                _broke = window_total(ato.df, "TOTAL_BROKE_WIN",
+                                      int(ranked["SUCCEEDED_AFTER"].astype(bool).sum()))
+                _high = window_total(ato.df, "TOTAL_HIGH_WIN", int((ranked["SEVERITY"] == "High").sum()))
                 kpi_row([
-                    {"label": "Failure bursts", "value": f"{len(ranked)}",
+                    {"label": "Failure bursts", "value": f"{_bursts:,}",
                      "help": "Users with 5+ failed logins in the window."},
-                    {"label": "Succeeded after (breakthrough)", "value": f"{len(broke)}",
+                    {"label": "Succeeded after (breakthrough)", "value": f"{_broke:,}",
                      "help": "A successful login followed the failure burst — the dangerous case.",
-                     "delta_color": "inverse" if len(broke) else "off"},
-                    {"label": "High severity", "value": f"{len(high)}",
-                     "delta_color": "inverse" if len(high) else "off"},
+                     "delta_color": "inverse" if _broke else "off"},
+                    {"label": "High severity", "value": f"{_high:,}",
+                     "delta_color": "inverse" if _high else "off"},
                 ])
                 styled_table(
                     with_user_names(ranked, _PAGE)[[
@@ -504,12 +569,14 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
                         "FIRST_FAILURE", "FIRST_SUCCESS_AFTER", "BREAKTHROUGH_MIN", "LAST_ERROR"]],
                 )
                 st.caption("A burst followed by a success is the signal; a burst with no later success is "
-                           "a locked-out user. Confirm against expected activity before acting — read-only.")
+                           "a locked-out user. Confirm against expected activity before acting — read-only."
+                           + (f" Showing {len(ranked):,} of {_bursts:,} users (breakthroughs first)."
+                              if _bursts > len(ranked) else ""))
                 result_caption(ato)
                 add_to_case_button(
-                    "Security · Access", ato,
+                    "Security · Access", _result_without_totals(ato),
                     title="Failed-login bursts (credential-compromise candidates)",
-                    summary=f"{len(ranked)} burst(s); {len(broke)} with a later success, {len(high)} high severity.",
+                    summary=f"{_bursts:,} burst(s); {_broke:,} with a later success, {_high:,} high severity.",
                     next_action="Confirm against expected activity; reset credentials if a success was unexpected.",
                     key="ow_case_add_sec_burst")
 
@@ -1120,25 +1187,37 @@ def _least_privilege_tab() -> None:
     if scopes.ok and scopes.empty:
         empty_state("no_data_yet", "No direct table data-privilege grants resolve to a live table — nothing to review here.")
     elif guard(scopes, "", setup_hint="Needs GRANTS_TO_ROLES and TABLE_STORAGE_METRICS alongside ACCESS_HISTORY."):
-        classified = classify_grant_scopes(scopes.df)
+        # The read has no LIMIT of its own any more: it was LIMIT 500, below run()'s row cap, so a cut
+        # feed never set res.truncated while these four counts silently covered the 500 most-unused
+        # scopes. run()'s cap is now the only cut (guard() banners it) and every count below is marked
+        # as a floor ("+") when it fires.
+        _sc_total = window_total(scopes.df, "TOTAL_SCOPES_WIN", len(scopes.df))
+        classified = classify_grant_scopes(_drop_totals(scopes.df))
         have_evidence = True
         stats = summarize_scopes(classified)
+        _sc_cut = bool(getattr(scopes, "truncated", False)) or _sc_total > len(classified)
+        _fl = "+" if _sc_cut else ""
+        _fl_help = " At least this many: the scope list hit the row cap." if _sc_cut else ""
         kpi_row([
-            {"label": "Roles reviewed", "value": f"{stats['roles']}"},
-            {"label": "Unused scopes", "value": f"{stats['unused']}",
+            {"label": "Roles reviewed", "value": f"{stats['roles']:,}{_fl}",
+             "help": "Distinct roles holding a direct table data-privilege grant." + _fl_help},
+            {"label": "Unused scopes", "value": f"{stats['unused']:,}{_fl}",
              "delta_color": "inverse" if stats["unused"] else "off",
-             "help": f"Role×schema footprints where the role touched none of its granted tables in the covered {coverage_days}d."},
-            {"label": "Over-broad scopes", "value": f"{stats['over_broad']}",
+             "help": f"Role×schema footprints where the role touched none of its granted tables in the covered {coverage_days}d." + _fl_help},
+            {"label": "Over-broad scopes", "value": f"{stats['over_broad']:,}{_fl}",
              "delta_color": "inverse" if stats["over_broad"] else "off",
-             "help": "Granted many tables in a schema but exercised a third or fewer — narrow the grant."},
-            {"label": "Unused table grants", "value": f"{stats['unused_tables']:,}",
-             "help": "Total granted tables (by name) that saw no read or write in the covered window."},
+             "help": "Granted many tables in a schema but exercised a third or fewer — narrow the grant." + _fl_help},
+            {"label": "Unused table grants", "value": f"{stats['unused_tables']:,}{_fl}",
+             "help": "Total granted tables (by name) that saw no read or write in the covered window." + _fl_help},
         ])
         section_header("Over-broad grant scopes (role × schema)", "warn", "security")
         _scope_sel = selectable_table(classified, key="sec_lp_scopes_sel", height=340,
                                       slug="lp-scopes", sort_label="most unused tables first")
         st.caption("VERDICT: UNUSED = touched none of its grants (revoke the scope); OVER-BROAD = used a third or fewer (narrow it); FOCUSED = mostly used.")
         st.caption("Select a scope row to filter the per-table revoke shortlist below to that role and schema.")
+        if _sc_cut:
+            st.caption(f"Showing the {len(classified):,} most-unused of {max(_sc_total, len(classified)):,} "
+                       "role × schema scopes (the row cap); the counts above cover the scopes shown.")
         result_caption(scopes)
 
     if have_evidence and st.toggle("Show the per-table revoke shortlist", key="sec_lp_unused_on"):
@@ -1152,7 +1231,12 @@ def _least_privilege_tab() -> None:
             # #4: when a scope row is selected above, post-filter this same loaded
             # frame (no new read) to that role + db.schema so the shortlist matches
             # the scope the reviewer is inspecting. Pure pandas; guards missing cols.
-            shortlist = unused.df
+            # The shortlist is worst-scope first with no LIMIT of its own (it was role-alphabetical
+            # LIMIT 500, so a late-alphabet role vanished and a selected scope could filter to an empty
+            # table and a silently partial REVOKE script); run()'s cap is the only, disclosed, cut.
+            _ut_total = window_total(unused.df, "TOTAL_GRANTS_WIN", len(unused.df))
+            _ut_cut = bool(getattr(unused, "truncated", False)) or _ut_total > len(unused.df)
+            shortlist = _drop_totals(unused.df)
             if _scope_sel is not None and 0 <= _scope_sel < len(classified):
                 _scope = classified.iloc[int(_scope_sel)]
                 _role = str(_scope.get("ROLE_NAME") or "")
@@ -1169,8 +1253,20 @@ def _least_privilege_tab() -> None:
                     ]
                     st.caption(f"Filtered to the selected scope — {_role} on {_db}.{_schema}. "
                                "Clear the selection to see all.")
-            styled_table(shortlist, height=320, slug="lp-unused", sort_label="role then object")
+            if shortlist.empty:
+                # a filtered-to-nothing selection is an absence outcome, never a bare empty table
+                empty_state("no_data_yet" if _ut_cut else "clean",
+                            "No untouched table grant for the selected scope "
+                            + ("in the rows loaded — the shortlist hit the row cap, so this scope may be "
+                               "partial; clear the selection to see the loaded rows." if _ut_cut
+                               else "— every granted table in it was read or modified in the covered window."))
+            else:
+                styled_table(shortlist, height=320, slug="lp-unused",
+                             sort_label="worst scope first, then role and object")
             st.caption(f"Each row is a privilege on a table no query has touched in the covered ~{coverage_days}d window. Confirm the object isn't seasonal before revoking.")
+            if _ut_cut:
+                st.caption(f"Showing {len(unused.df):,} of {max(_ut_total, len(unused.df)):,} untouched grants "
+                           "(worst scopes first, the row cap); the REVOKE script below covers the rows shown.")
             result_caption(unused)
             # CoCo Security #11: turn the shortlist into copy-paste REVOKEs — the DBA's
             # bottleneck is writing the statements, not knowing they're needed. The app
@@ -1453,6 +1549,32 @@ def _tag_governance_panel(company: str) -> None:
     st.divider()
 
 
+#: The auditor pack's per-sheet row cap. Each security builder reads up to it (``limit=``) and the
+#: sheet is fetched with ``max_rows`` = the SQL's own trailing LIMIT (capped here), so run()'s n+1 check
+#: arms res.truncated whenever a sheet holds more rows than it wrote — every builder LIMIT used to sit
+#: below the pack's 10,000 max_rows, so a sheet cut at exactly 200/1,000/5,000 rows read as complete.
+_PACK_ROW_CAP = 10_000
+_PACK_TAIL_LIMIT = re.compile(r"\bLIMIT\s+(\d+)\s*;?\s*$", re.IGNORECASE)
+
+
+def _pack_sheet_cap(sql: str) -> int:
+    """max_rows for one pack sheet: its own trailing LIMIT when below the pack cap, else the pack cap."""
+    tail = _PACK_TAIL_LIMIT.search(str(sql).rstrip())
+    return min(int(tail.group(1)), _PACK_ROW_CAP) if tail else _PACK_ROW_CAP
+
+
+def _pack_window_notes(days: int, bounds: tuple | None) -> dict[str, str]:
+    """The span each windowed pack sheet ACTUALLY covers (its reader cap applies; calendar bounds too),
+    so the manifest never asserts the page window over a sheet that read less."""
+    notes: dict[str, str] = {}
+    for name, cap in (("role_grants_window", 90), ("failed_logins_window", 30)):
+        served_days, served_bounds = capped_window(days, bounds, cap)
+        text = served_window_text(served_days, served_bounds)
+        notes[name] = (f"covers {text} (reader capped at {cap} days — narrower than the page window)"
+                       if window_was_capped(days, bounds, served_bounds, cap) else f"covers {text}")
+    return notes
+
+
 def _export_pack(company: str, days: int, window_label: str, *, bounds: tuple | None = None) -> None:
     """One-click access-review bundle: CSVs zipped in memory, stdlib only."""
     _lm = "_lm" if bounds is not None else ""
@@ -1475,15 +1597,15 @@ def _export_pack(company: str, days: int, window_label: str, *, bounds: tuple | 
 
     sheets = {
         "dormant_users": insights_sql.dormant_users(90, company),
-        "mfa_gaps_password_login": security_sql.users_without_mfa(company),
+        "mfa_gaps_password_login": security_sql.users_without_mfa(company, limit=_PACK_ROW_CAP),
         "break_glass_holders": security_sql.admin_role_holders(company),
-        "role_grants_window": security_sql.recent_role_grants(days, bounds=bounds),
-        "failed_logins_window": security_sql.failed_logins(days, company, bounds=bounds),
-        "expiring_credentials_10d": security_sql.expiring_credentials(10, company),
-        "role_privilege_matrix": security_sql.role_privilege_matrix(),
-        "unused_roles_90d": security_sql.unused_roles(90),
-        "direct_role_grants": security_sql.direct_role_grants(),
-        "grant_changes_90d": security_sql.grant_changes(90),
+        "role_grants_window": security_sql.recent_role_grants(days, bounds=bounds, limit=_PACK_ROW_CAP),
+        "failed_logins_window": security_sql.failed_logins(days, company, bounds=bounds, limit=_PACK_ROW_CAP),
+        "expiring_credentials_10d": security_sql.expiring_credentials(10, company),   # LIMIT 300: flagged if hit
+        "role_privilege_matrix": security_sql.role_privilege_matrix(limit=_PACK_ROW_CAP),
+        "unused_roles_90d": security_sql.unused_roles(90, limit=_PACK_ROW_CAP),
+        "direct_role_grants": security_sql.direct_role_grants(limit=_PACK_ROW_CAP),
+        "grant_changes_90d": security_sql.grant_changes(90, limit=_PACK_ROW_CAP),
     }
     if build and cached.get("key") != pack_key:
         log_ui_event("csv_export", page="Security")
@@ -1495,10 +1617,11 @@ def _export_pack(company: str, days: int, window_label: str, *, bounds: tuple | 
         buffer = io.BytesIO()
         rows_written = {}
         failures: dict[str, str] = {}
+        truncated: dict[str, int] = {}
         with st.status("Building access-review evidence", expanded=True) as status:
             st.write("Reading ten evidence sheets in bounded batches...")
             _pack_batch = run_batch(
-                [{"key": name, "sql": sql, "source": name, "max_rows": 10_000}
+                [{"key": name, "sql": sql, "source": name, "max_rows": _pack_sheet_cap(sql)}
                  for name, sql in sheets.items()],
                 page=_PAGE, tier="recent")
             progress = st.progress(0.0, text="Writing evidence files")
@@ -1506,20 +1629,22 @@ def _export_pack(company: str, days: int, window_label: str, *, bounds: tuple | 
                 for index, (name, sql) in enumerate(sheets.items(), start=1):
                     res = (_pack_batch or {}).get(name) or run(
                         sql, page=_PAGE, key=f"pack_{name}", tier="recent",
-                        source=name, max_rows=10_000)
+                        source=name, max_rows=_pack_sheet_cap(sql))
                     # The MFA sheet is the top access-control finding in a compliance
                     # artifact: an empty mart read must be PROVEN against live LOGIN_HISTORY,
                     # never written as a 0-row "all clear" (mirrors the Access tab). A live
                     # read that itself fails routes to the failures branch below rather than
                     # a silent empty CSV (bug-hunt 2026-08-30).
                     if name == "mfa_gaps_password_login" and res.ok and res.empty:
-                        res = run(security_sql.users_without_mfa_live(company), page=_PAGE,
+                        res = run(security_sql.users_without_mfa_live(company, limit=_PACK_ROW_CAP), page=_PAGE,
                                   key="pack_mfa_live", tier="recent",
                                   source="ACCOUNT_USAGE.USERS + LOGIN_HISTORY (live proof)",
-                                  max_rows=10_000)
+                                  max_rows=_PACK_ROW_CAP)
                     if res.ok:
-                        frame = res.df
+                        frame = _drop_totals(res.df)   # the MFA sheets carry a KPI helper total
                         rows_written[name] = len(frame)
+                        if bool(getattr(res, "truncated", False)):
+                            truncated[name] = len(frame)
                     else:
                         failures[name] = str(res.error or "Unknown read failure")
                         frame = pd.DataFrame({"ERROR": [failures[name]]})
@@ -1529,15 +1654,27 @@ def _export_pack(company: str, days: int, window_label: str, *, bounds: tuple | 
                     frame = recommend_for_sheet(name, frame)
                     bundle.writestr(f"{name}.csv", frame.to_csv(index=False))
                     progress.progress(index / len(sheets), text=f"Writing {name}.csv")
+                _served = _pack_window_notes(days, bounds)
                 manifest_lines = [
                     f"OVERWATCH access review pack — {company} — generated {stamp}",
-                    f"Window: {window_label} (dormant users fixed at 90d)",
+                    f"Window: {window_label} (dormant users fixed at 90d; each windowed sheet states "
+                    "the span it covers below)",
                     ("Company-scoped sheets: dormant_users, mfa_gaps_password_login, "
                      "break_glass_holders, failed_logins_window, expiring_credentials_10d"),
                     ("Account-wide governance sheets: role_grants_window, role_privilege_matrix, "
                      "unused_roles_90d, direct_role_grants, grant_changes_90d"),
-                    *(f"{name}.csv: {rows} rows" for name, rows in rows_written.items()),
+                    *(f"{name}.csv: {rows:,} rows"
+                      + (f" — {_served[name]}" if name in _served else "")
+                      + (" — TRUNCATED at the sheet's row cap; more rows exist" if name in truncated else "")
+                      for name, rows in rows_written.items()),
                 ]
+                if truncated:
+                    manifest_lines.extend([
+                        "",
+                        "TRUNCATED SHEETS (row cap reached — each is the top N by its sort, not the full "
+                        "population):",
+                        *(f"{name}: first {rows:,} rows written" for name, rows in truncated.items()),
+                    ])
                 if failures:
                     manifest_lines.extend([
                         "",
@@ -1547,9 +1684,9 @@ def _export_pack(company: str, days: int, window_label: str, *, bounds: tuple | 
                 bundle.writestr("MANIFEST.txt", "\n".join(manifest_lines))
             progress.empty()
             status.update(
-                label=("Evidence pack built with gaps" if failures else "Evidence pack ready"),
+                label=("Evidence pack built with gaps" if (failures or truncated) else "Evidence pack ready"),
                 state="error" if failures else "complete",
-                expanded=bool(failures),
+                expanded=bool(failures or truncated),
             )
         cached = {
             "key": pack_key,
@@ -1557,6 +1694,7 @@ def _export_pack(company: str, days: int, window_label: str, *, bounds: tuple | 
             "stamp": stamp,
             "rows": rows_written,
             "failures": failures,
+            "truncated": truncated,
         }
         st.session_state["_ow_security_pack"] = cached
 
@@ -1567,6 +1705,8 @@ def _export_pack(company: str, days: int, window_label: str, *, bounds: tuple | 
     cached_failures = cached.get("failures")
     rows_written = dict(cached_rows) if isinstance(cached_rows, dict) else {}
     failures = dict(cached_failures) if isinstance(cached_failures, dict) else {}
+    cached_truncated = cached.get("truncated")
+    truncated = dict(cached_truncated) if isinstance(cached_truncated, dict) else {}
     export_button(
         "Access-review pack (.zip)", data=cached.get("data", b""),
         file_name=f"overwatch_access_review_{company}_{stamp}.zip", mime="application/zip",
@@ -1574,7 +1714,10 @@ def _export_pack(company: str, days: int, window_label: str, *, bounds: tuple | 
     )
     st.caption(
         f"{sum(rows_written.values()):,} rows across {len(sheets)} files"
-        + (f"; {len(failures)} failed sheet(s) are disclosed in MANIFEST.txt." if failures else ".")
+        + (f"; {len(failures)} failed sheet(s) are disclosed in MANIFEST.txt" if failures else "")
+        + (f"; {len(truncated)} sheet(s) hit their row cap ({', '.join(truncated)}) and are marked "
+           "TRUNCATED in MANIFEST.txt" if truncated else "")
+        + "."
     )
 
 
@@ -1907,11 +2050,15 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
     elif guard(gc, ""):
         _g = gc.df.copy()
         _chg = _g["CHANGE"].astype(str)
+        # pre-LIMIT totals: the feed keeps the newest 500 events, so over a 90/180-day window len() and
+        # the Granted/Revoked split used to describe only those 500 (and read exactly "500")
+        _gc_total = window_total(_g, "TOTAL_CHANGES_WIN", len(_g))
         kpi_row([
-            {"label": f"Grant changes, {_gc_days}d", "value": f"{len(_g):,}",
+            {"label": f"Grant changes, {_gc_days}d", "value": f"{_gc_total:,}",
              "help": "Grant + revoke events across roles, users, and object privileges, newest first."},
-            {"label": "Granted", "value": f"{int((_chg == 'GRANTED').sum()):,}"},
-            {"label": "Revoked", "value": f"{int((_chg == 'REVOKED').sum()):,}", "delta_color": "off"},
+            {"label": "Granted", "value": f"{window_total(_g, 'GRANTED_WIN', int((_chg == 'GRANTED').sum())):,}"},
+            {"label": "Revoked", "value": f"{window_total(_g, 'REVOKED_WIN', int((_chg == 'REVOKED').sum())):,}",
+             "delta_color": "off"},
         ])
         _cols = [c for c in ("CHANGED_AT", "CHANGE", "GRANT_TYPE", "CHANGED_BY", "GRANTEE", "WHAT")
                  if c in _g.columns]
@@ -1933,6 +2080,8 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
             "history lags up to ~2h). Object-lifecycle noise excluded: every CREATE (incl. "
             "procs' TMP_* objects) records an OWNERSHIP self-grant by the creating role — "
             "filtered out; ownership TRANSFERS (different grantor) still show."
+            + (f" Showing the newest {len(_g):,} of {_gc_total:,} changes; the counts above cover all "
+               "of them (narrow the window to list the rest)." if _gc_total > len(_g) else "")
         )
         result_caption(gc)
     st.divider()
@@ -1956,7 +2105,8 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
         page=_PAGE, key=f"ddl_fact_{company}_{days}_{database}_{schema_contains}{_lm}",
         tier="hourly", source="FACT_SECURITY_CHANGE (hourly)", probe=True,
     )
-    if fact.ok and _domain_covered(coverage, "CHANGE RISK"):
+    _from_fact = fact.ok and _domain_covered(coverage, "CHANGE RISK")
+    if _from_fact:
         res = fact
     else:
         res = run(
@@ -1964,46 +2114,81 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
             page=_PAGE, key=f"ddl_{company}_{days}_{database}_{schema_contains}{_lm}",
             tier="recent", source="ACCOUNT_USAGE.QUERY_HISTORY (coverage fallback)",
         )
+    # Both paths serve the same capped window (90 days; calendar bounds capped too) — the live
+    # fallback used to cap at 30 under the same label, so days 31-90 vanished on a stale extract.
+    _cd, _cb = capped_window(days, bounds, 90)
+    _ddl_txt = served_window_text(_cd, _cb)
+    _ddl_cap = (" (window capped at the last 90 days)" if window_was_capped(days, bounds, _cb, 90) else "")
     # No early return on an empty window (v4.49): the bare `return` here used
     # to hide every panel below whenever a quiet week had no DDL.
     if res.ok and res.empty:
-        empty_state("clean", "No DDL/DCL changes recorded in this window for this scope.")
+        empty_state("clean", f"No DDL/DCL changes recorded in {_ddl_txt} for this scope{_ddl_cap}.")
+        result_caption(res)      # say which path served the all-clear (the fallback is labelled)
     elif guard(res, ""):
         # Redesign 2026-07-09: the flat total/day bar answered neither of the
         # questions people ask ("what kind of change?", "who?"). Stack by
         # change kind; put the who right beside it.
         ddl_df = res.df.copy()
         ddl_df["CHANGE_KIND"] = ddl_df["QUERY_TYPE"].map(_change_kind)
-        _high_risk = int(
+        _high_risk = window_total(ddl_df, "HIGH_RISK_GROUPS_WIN", int(
             ddl_df.get("RISK_LEVEL", pd.Series(dtype=str)).astype(str)
             .str.upper().isin(("CRITICAL", "HIGH")).sum()
-        )
-        _unregistered = int(
+        ))
+        _unregistered = window_total(ddl_df, "UNREGISTERED_GROUPS_WIN", int(
             (ddl_df.get("CHANGE_REGISTRATION", pd.Series(dtype=str)).astype(str)
              .str.upper() == "UNREGISTERED").sum()
-        )
+        ))
+        _groups = window_total(ddl_df, "TOTAL_GROUPS_WIN", len(ddl_df))
         kpi_row([
-            {"label": "High-risk change groups", "value": f"{_high_risk}",
+            {"label": "High-risk change groups", "value": f"{_high_risk:,}",
              "delta_color": "inverse" if _high_risk else "off"},
-            {"label": "Unregistered groups", "value": f"{_unregistered}",
+            {"label": "Unregistered groups", "value": f"{_unregistered:,}",
              "delta_color": "inverse" if _unregistered else "off",
              "help": "Object changes with no registry entry within 24 hours."},
         ])
+        # The feed keeps the newest 300 change groups. When the window holds more, the charts read the
+        # uncapped rollup (same scope + window) — charting the capped frame silently dropped the oldest
+        # days of a 30/90-day window. A failed rollup read falls back to the shown groups, disclosed.
+        daily = by_user = None
+        _chart_note = ""
+        if _groups > len(ddl_df):
+            _roll_sql = (security_sql.recent_ddl_changes_rollup_fact if _from_fact
+                         else security_sql.recent_ddl_changes_rollup)(
+                days, company, database, schema_contains, bounds=bounds)
+            roll = run(_roll_sql, page=_PAGE,
+                       key=f"ddl_rollup{'_fact' if _from_fact else ''}_{company}_{days}_{database}_"
+                           f"{schema_contains}{_lm}",
+                       tier="hourly" if _from_fact else "recent",
+                       source=(res.source or "") + " (uncapped chart rollup)")
+            if roll.usable() and {"GRAIN", "DAY", "QUERY_TYPE", "USER_NAME", "STATEMENTS"} <= set(roll.df.columns):
+                _rdf = roll.df
+                _dt = _rdf[_rdf["GRAIN"].astype(str) == "DAY_TYPE"].copy()
+                _dt["CHANGE_KIND"] = _dt["QUERY_TYPE"].map(_change_kind)
+                daily = _dt.groupby(["DAY", "CHANGE_KIND"], as_index=False)["STATEMENTS"].sum()
+                by_user = (_rdf[_rdf["GRAIN"].astype(str) == "USER"]
+                           .groupby("USER_NAME", as_index=False)["STATEMENTS"].sum())
+            else:
+                _chart_note = (f" The charts cover only the newest {len(ddl_df):,} of {_groups:,} change "
+                               "groups (the full-window rollup did not load).")
+        if daily is None or by_user is None:
+            daily = ddl_df.groupby(["DAY", "CHANGE_KIND"], as_index=False)["STATEMENTS"].sum()
+            by_user = ddl_df.groupby("USER_NAME", as_index=False)["STATEMENTS"].sum()
         left, right = st.columns((3, 2))
         with left:
-            daily = ddl_df.groupby(["DAY", "CHANGE_KIND"], as_index=False)["STATEMENTS"].sum()
             charts.daily_stacked_count(daily.sort_values("DAY"), "DAY", "CHANGE_KIND",
                                        "STATEMENTS", title="Change statements/day")
         with right:
             _nm = user_display_map(_PAGE)
-            by_user = (ddl_df.groupby("USER_NAME", as_index=False)["STATEMENTS"].sum()
-                       .sort_values("STATEMENTS", ascending=False))
+            by_user = by_user.sort_values("STATEMENTS", ascending=False)
             by_user["USER"] = by_user["USER_NAME"].map(lambda u: resolve_display(u, _nm))
             charts.bar_count(by_user, "USER", "STATEMENTS",
                              title="Statements by user", top_n=8)
         st.caption("Left: what kind of change landed each day (create / alter / "
-                   "drop-truncate / grants / other). Right: who made them. Rows below have the objects.")
-        display, profile_config = snowsight_profile_column(res.df, _PAGE)
+                   "drop-truncate / grants / other). Right: who made them. Rows below have the objects."
+                   + (f" The table lists the newest {len(ddl_df):,} of {_groups:,} change groups in "
+                      f"{_ddl_txt}; the counts above cover all of them." if _groups > len(ddl_df) else "")
+                   + _chart_note)
+        display, profile_config = snowsight_profile_column(_drop_totals(res.df), _PAGE)
         styled_table(with_user_names(display, _PAGE), column_config=profile_config,
                      sort_label="risk then latest change")
         result_caption(res)
@@ -2023,9 +2208,19 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
     )
     # r-ux: this panel "should hug zero", so the stripe is DATA-derived — amber ONLY when there IS
     # admin-role activity, green when it hugs zero, neutral on a failed read (was a standing "warn").
-    section_header("Break-glass role activity (account-wide; should hug zero)", alarm_health(bga), "admin")
+    # The read is company-scoped (v4.144: COMPANY_FOR_USER on the statement's user), so "account-wide"
+    # is claimed only at Company = ALL; under ALFA a Trexis- or UNKNOWN-classified user's ACCOUNTADMIN
+    # statements are filtered out, and a clean state must say whose statements it checked.
+    _bg_all = str(company or "ALL").upper() == "ALL"
+    _bg_txt = served_window_text(*capped_window(days, bounds, 90))
+    section_header("Break-glass role activity (account-wide; should hug zero)" if _bg_all
+                   else f"Break-glass role activity ({company}-classified users; should hug zero)",
+                   alarm_health(bga), "admin")
     if bga.ok and bga.empty:
-        empty_state("clean", "No statements ran under ACCOUNTADMIN / SNOW_ACCOUNTADMINS in the window.")
+        empty_state("clean", f"No statements ran under ACCOUNTADMIN / SNOW_ACCOUNTADMINS in {_bg_txt}."
+                    if _bg_all else
+                    f"No statements by {company}-classified users ran under ACCOUNTADMIN / SNOW_ACCOUNTADMINS "
+                    f"in {_bg_txt}. Switch Company to ALL for the account-wide view.")
     elif guard(bga, ""):
         styled_table(bga.df)
         st.caption("Evidence only — no alert fires on admin-role use. Routine work "

@@ -405,8 +405,14 @@ def test_security_page_wires_decisions_drills_and_fact_fallbacks() -> None:
     center = _read("app/ui/security_center.py")
     assert page.index("render_security_overview") < page.index("_governance_score_panel()")
     assert "security_login_fact_coverage" in page and "fact_coverage_complete" in page
-    assert "fact_coverage_complete(security_coverage, 90)" in page
-    assert "security_login_fact_coverage(90)" in page
+    # R1-101 (2026-09-30): these used to pin ONE 90-day density read gating both the 7-30 day login
+    # readers and the new-network read, so an interior gap inside a 7-day window passed on the other
+    # 80+ days. Each gate now reads density over exactly the span its read serves (the login window;
+    # the network window plus its 90-day baseline) and compares it with coverage_required_days().
+    assert "security_login_fact_coverage(_ld, bounds=_lb)" in page
+    assert "security_login_fact_coverage(_nd, bounds=_nb, lookback=_baseline)" in page
+    assert "fact_coverage_complete(security_coverage, coverage_required_days(_ld, _lb))" in page
+    assert "network_coverage, coverage_required_days(_nd, _nb, lookback=_baseline))" in page
     assert "admin_role_holders(company)" in page
     assert "new_network_logins_fact(days, company, bounds=bounds)" in page
     assert "_domain_covered(coverage, \"TRUST CENTER\")" in page
