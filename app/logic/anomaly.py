@@ -240,16 +240,54 @@ def flag_anomalies(
     return out
 
 
+def unscorable_groups(df: pd.DataFrame, value_col: str, group_col: str, *,
+                      min_active_days: int = ANOMALY_MIN_ACTIVE_DAYS,
+                      min_value: float = ANOMALY_MIN_USD) -> int:
+    """How many groups flag_anomalies(..., min_value, min_active_days) can NEVER flag while
+    they hold a material day — the disclosure an all-clear owes its reader (E5).
+
+    The gate is flag_anomalies' own: a group with fewer than ``min_active_days`` non-zero
+    rows is never IS_ANOMALY (that also covers robust_zscores' <5-point cutoff, as long as
+    min_active_days >= 5). Only groups whose largest value reaches ``min_value`` count — a
+    group that never spent a material amount hides nothing the scorer would have raised.
+    R1-203: the caption used to count only warehouses with <5 distinct days, so an 8-day-old
+    warehouse's spike sat behind a clean triage whose caption implied it was scored."""
+    if df is None or df.empty or value_col not in df.columns or group_col not in df.columns:
+        return 0
+    vals = pd.to_numeric(df[value_col], errors="coerce").fillna(0.0)
+    by = vals.groupby(df[group_col], dropna=False)
+    active = (vals > 0).groupby(df[group_col], dropna=False).sum()
+    material = by.max() >= float(min_value)
+    return int(((active < int(min_active_days)) & material).sum())
+
+
 def anomaly_summary(df: pd.DataFrame, label_col: str, value_col: str,
-                    day_col: str = "DAY") -> list[dict]:
-    """Compact anomaly rows for KPI/alert surfaces, strongest first.
+                    day_col: str = "DAY", *, day_from: object = None,
+                    day_to: object = None) -> list[dict]:
+    """Compact anomaly rows for KPI/alert surfaces, strongest first (top 10).
 
     Each row carries its ``day`` (the value of ``day_col``, or None when the frame
     has no such column) so callers can age one-off spikes out instead of re-firing a
-    stale, dateless anomaly every rerun (r6-bug5)."""
+    stale, dateless anomaly every rerun (r6-bug5).
+
+    ``day_from`` / ``day_to`` (dates, inclusive; either may be None) keep only the hits
+    whose CALENDAR day falls in that window, BEFORE the top-10 cap. A caller that wants
+    one day's (or one window's) anomalies must filter here, never on the capped list:
+    MAD z-scores are window-wide, so 10+ stronger HISTORICAL spikes or weekend collapses
+    elsewhere in a 30-day frame would otherwise take every slot and silently evict the
+    current spike (R1-202; watch_monitor's cost arm cuts its frame the same way). The
+    comparison is on normalized dates, so a datetime64 DAY and a DATE DAY both match."""
     if df.empty or "IS_ANOMALY" not in df.columns:
         return []
     hits = df[df["IS_ANOMALY"]].copy()
+    if (day_from is not None or day_to is not None) and day_col in hits.columns:
+        _days = pd.to_datetime(hits[day_col], errors="coerce").dt.date
+        keep = _days.notna()
+        if day_from is not None:
+            keep &= _days >= pd.Timestamp(day_from).date()
+        if day_to is not None:
+            keep &= _days <= pd.Timestamp(day_to).date()
+        hits = hits[keep]
     if hits.empty:
         return []
     hits = hits.reindex(hits["Z_SCORE"].abs().sort_values(ascending=False).index)
