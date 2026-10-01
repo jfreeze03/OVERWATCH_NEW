@@ -3613,22 +3613,34 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
     # need me now?" before the full activity scroll. Zero new reads; idle-waste and adaptive-resize
     # candidacy stay on the Sizing lens (toggle-gated) so first-paint cost is unchanged.
     ranked = warehouse_attention_ranking(anomalies, peaks.df if peaks.ok else None)
+    # PR-1 R1-073 / R1-131: a failed concurrency read is UNKNOWN queueing, not "nobody queueing" --
+    # it used to give a green header, "Queueing 0" and the verified-clean row while the Concurrency
+    # section below showed the same read as failed. The header stays amber when spend anomalies
+    # exist and goes neutral (never green) when nothing is flagged and the queue signal is unknown.
+    _queue_known = peaks.ok
     _n_anom = int(ranked["ANOM_DAYS"].fillna(0).gt(0).sum()) if not ranked.empty else 0
     _n_queue = int(ranked["PEAK_QUEUED"].notna().sum()) if not ranked.empty else 0
-    section_header("Warehouses that need attention now", alarm_health(len(ranked)),
+    section_header("Warehouses that need attention now",
+                   alarm_health(len(ranked)) if (_queue_known or len(ranked)) else "",
                    "warehouse", anchor="ops-wh-attention")
     kpi_row([
         {"label": "Warehouses flagged", "value": f"{len(ranked)}",
-         "severity": "warn" if len(ranked) else "ok"},
+         "severity": "warn" if len(ranked) else ("ok" if _queue_known else "")},
         {"label": "With anomalous spend", "value": f"{_n_anom}"},
-        {"label": "Queueing", "value": f"{_n_queue}"},
+        {"label": "Queueing", "value": f"{_n_queue}" if _queue_known else "—",
+         "help": None if _queue_known else "The concurrency read failed — see Concurrency peaks below."},
     ])
-    if ranked.empty:
+    if ranked.empty and not _queue_known:
+        empty_state("no_data_yet", "No spend anomaly in the last 30 days; queueing could not be checked "
+                                   "(the concurrency read failed — see Concurrency peaks below).")
+    elif ranked.empty:
         empty_state("clean",
                     "No warehouse is anomalous or queueing right now — full activity below.")
     else:
-        st.caption("Merged from the spend-anomaly and concurrency signals below, worst-first "
-                   "(queueing outranks a spend anomaly). Select a warehouse to open its Entity 360.")
+        st.caption(("Merged from the spend-anomaly and concurrency signals below, worst-first "
+                    "(queueing outranks a spend anomaly)." if _queue_known else
+                    "Spend anomalies only — the concurrency read failed, so queueing is not ranked.")
+                   + " Select a warehouse to open its Entity 360.")
         entity_nav_table(
             ranked.head(5)[["WAREHOUSE_NAME", "REASON", "WORST_Z", "PEAK_QUEUED", "ANOM_USD"]],
             key=f"ops_wh_attention_{company}", key_col="WAREHOUSE_NAME",

@@ -489,3 +489,40 @@ def test_etl_window_suffix_names_a_calendar_period(monkeypatch, days, today, wan
     monkeypatch.setattr(ops, "account_today", lambda: today)
     assert ops._etl_window_suffix(days) == want
     assert "_scope = _etl_window_suffix(days)" in _fn(read(_OPS), "_workflow_runtimes_panel")
+
+
+# ------------------------------- R1-073 / R1-131: a failed concurrency read is not "nobody queueing" ----
+
+def _opener(monkeypatch, peaks):
+    from datetime import timedelta
+    days = [date(2026, 9, 1) + timedelta(days=i) for i in range(30)]
+    res = _ok(pd.DataFrame({"DAY": days * 2, "WAREHOUSE_NAME": ["WH_A"] * 30 + ["WH_B"] * 30,
+                            "CREDITS_TOTAL": [10.0] * 60}))
+    headers: list = []
+
+    def header(title, health="", *_a, **_k):
+        if title.startswith("Warehouse spend"):
+            raise _Stop
+        headers.append((title, health))
+
+    ops, fake, seen = _page(monkeypatch, {}, run_batch_mixed=lambda *_a, **_k: {"res": res, "peaks": peaks},
+                            load_settings=lambda *_a, **_k: {}, section_header=header)
+    with pytest.raises(_Stop):
+        ops._wh_activity_anomalies("ALL", 3.0)
+    return headers, seen, fake
+
+
+def test_wh_opener_failed_peaks_is_not_a_green_all_clear(monkeypatch):
+    headers, seen, _fake = _opener(monkeypatch, _failed("timeout"))
+    assert headers == [("Warehouses that need attention now", "")]            # neutral, never green
+    ((kpis,),) = [(k,) for k in seen["kpis"]]
+    assert {k["label"]: k["value"] for k in kpis}["Queueing"] == "—"          # no fabricated 0
+    assert [k for k, _m in seen["empty"]] == ["no_data_yet"]
+    assert "queueing could not be checked" in seen["empty"][0][1]
+
+
+def test_wh_opener_ok_peaks_still_verifies_clean(monkeypatch):
+    peaks = _ok(pd.DataFrame(columns=["WAREHOUSE_NAME", "PEAK_QUEUED"]))
+    headers, seen, _fake = _opener(monkeypatch, peaks)
+    assert headers == [("Warehouses that need attention now", "ok")]
+    assert [k for k, _m in seen["empty"]] == ["clean"]
