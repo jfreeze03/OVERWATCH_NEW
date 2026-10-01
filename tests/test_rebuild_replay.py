@@ -20,8 +20,14 @@ the rest of the README are hand-kept by design).
 
 from __future__ import annotations
 
+import builtins
+import importlib.abc
 import importlib.util
+import pathlib
 import re
+import shutil
+
+import pytest
 
 from tests._source import ROOT, read
 
@@ -29,8 +35,27 @@ _SF = ROOT / "snowflake"
 _RB = _SF / "rebuild"
 
 
-def _gen():
-    spec = importlib.util.spec_from_file_location("gen_rebuild_bundle", ROOT / "outputs" / "gen_rebuild_bundle.py")
+_GENERATOR = ROOT / "outputs" / "gen_rebuild_bundle.py"
+
+
+class _MutatedSource(importlib.abc.SourceLoader):
+    """Loads ``text`` as if it were the generator file (no bytecode cache read or written)."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def get_filename(self, fullname: str) -> str:
+        return str(_GENERATOR)
+
+    def get_data(self, path: str) -> bytes:
+        return self.text.encode("utf-8")
+
+
+def _gen(source: str | None = None):
+    """The generator as a fresh module. ``source`` loads a mutated copy of its text in its place (same
+    ``__file__``, so ROOT, SNOWFLAKE and REBUILD resolve to the real folders)."""
+    loader = None if source is None else _MutatedSource(source)
+    spec = importlib.util.spec_from_file_location("gen_rebuild_bundle", _GENERATOR, loader=loader)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -93,20 +118,126 @@ def test_a_hand_edit_to_any_copied_bundle_header_fails_the_lock(tmp_path):
         assert gen.render_copy(bundle, source, header) != (tmp_path / bundle).read_text(encoding="utf-8"), bundle
 
 
-def test_the_generator_docs_name_every_bundle_file_it_reads_back_from_disk():
+# The bundle files the generator reads back from disk, by design, and how the docs name each one.
+_HAND_KEPT = {"00_backup_operator_data.sql": "00's CLONE list",
+              "README.md": "the README outside its generated notes block"}
+_RENDERS = ("render_backup", "render_copy", "render_migration_bundle", "render_readme")
+
+
+def _bundle_reads(load, scratch) -> set[str]:
+    """Every bundle file the generator reads back from disk, found by running it rather than by reading
+    its source (recheck #7: a regex for a quoted ``(REBUILD / "name").read_text`` missed the variable
+    path ``(REBUILD / bundle_name)`` that holistic #14 was). Path.read_text / read_bytes / open (read
+    modes) and open() are recorded while ``load()`` imports the generator (module-level code, which
+    still sees the real bundle folder), then, with REBUILD pointed at a copy of the bundle in
+    ``scratch``, while every render_* runs and while ``main()`` runs (it writes only into ``scratch``).
+    A read of the real bundle folder, past REBUILD, counts too."""
+    shutil.copytree(_RB, scratch)
+    bases = (pathlib.Path(scratch).resolve(), _RB.resolve())
+    seen: set[str] = set()
+
+    def note(path, mode="r") -> None:
+        if isinstance(path, int) or any(flag in mode for flag in "wax"):
+            return
+        resolved = pathlib.Path(path).resolve()
+        seen.update(resolved.relative_to(base).as_posix() for base in bases if resolved.is_relative_to(base))
+
+    def recorded(original, takes_mode: bool):
+        def wrapper(self, *args, **kwargs):
+            note(self, (args[0] if args else kwargs.get("mode", "r")) if takes_mode else "r")
+            return original(self, *args, **kwargs)
+        return wrapper
+
+    real_open = builtins.open
+
+    def open_recorder(file, *args, **kwargs):
+        note(file, args[0] if args else kwargs.get("mode", "r"))
+        return real_open(file, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as io:
+        for method, takes_mode in (("read_text", False), ("read_bytes", False), ("open", True)):
+            io.setattr(pathlib.Path, method, recorded(getattr(pathlib.Path, method), takes_mode))
+        io.setattr(builtins, "open", open_recorder)
+        gen = load()                                 # recheck: a read at import time counts too
+        renders = sorted(name for name in vars(gen) if name.startswith("render_") and callable(getattr(gen, name)))
+        assert renders == sorted(_RENDERS), f"{renders}: call every new render_* here so its read-backs are seen"
+        gen.REBUILD = scratch                        # a fresh module per load: nothing to put back
+        gen.render_migration_bundle()
+        for bundle, source, header in gen.COPIES:
+            gen.render_copy(bundle, source, header)
+        gen.render_backup()
+        gen.render_readme()
+        gen.main()
+    return seen
+
+
+def test_the_generator_docs_name_every_bundle_file_it_reads_back_from_disk(tmp_path):
     """Holistic #14 follow-up: render_readme reads README.md back from the bundle folder, so a hand edit
     outside its notes block is compared with itself, yet the generator docstring and CLAUDE.md law 6 named
-    00's CLONE list as the only hand-kept part ("never hand-edit"). Every bundle file a render_* reads
-    back must be named as hand-kept in both, so neither can claim more coverage than the lock gives."""
-    hand_kept = {"00_backup_operator_data.sql": "00's CLONE list",
-                 "README.md": "the README outside its generated notes block"}
-    self_reads = set(re.findall(r'\(REBUILD / "([^"]+)"\)\.read_text', read("outputs/gen_rebuild_bundle.py")))
-    assert self_reads == set(hand_kept), "a render_* reads a new bundle file back: name it as hand-kept here"
+    00's CLONE list as the only hand-kept part ("never hand-edit"). Every bundle file the generator reads
+    back must be named as hand-kept in both, so neither can claim more coverage than the lock gives
+    (recheck #7: the read-backs are now found by running the generator, see _bundle_reads)."""
+    reads = _bundle_reads(_gen, tmp_path / "bundle")
+    assert reads == set(_HAND_KEPT), (
+        f"the generator reads {sorted(reads)} back from the bundle folder: a generated file must be rendered "
+        "from its sources, or named as hand-kept here and in the docs")
     docstring = " ".join(_gen().__doc__.split())
     law_6 = " ".join(_section(read("CLAUDE.md"), "6. **Rebuild bundle", "7. **Task-graph").split())
-    for name, phrase in hand_kept.items():
+    for name, phrase in _HAND_KEPT.items():
         assert phrase in docstring, f"gen_rebuild_bundle.py docstring omits {name}: {phrase!r}"
         assert phrase in law_6, f"CLAUDE.md law 6 omits {name}: {phrase!r}"
+    # recheck #9: the README's own rule leaves room for the hand-kept parts it then names (it said "never
+    # this folder"), and it names the lock that re-renders every file, not only the copy-body lock
+    readme = " ".join((_RB / "README.md").read_text(encoding="utf-8").split())
+    assert "never this folder" not in readme
+    assert "never a generated part of this folder; the two hand-kept parts below are edited here" in readme
+    assert "tests/test_rebuild_replay.py" in readme and "tests/test_rebuild_bundle.py" in readme
+
+
+def test_the_read_back_check_sees_a_banner_read_through_a_variable_path(tmp_path):
+    """Recheck #7: the generator before holistic #14 (83e32ae6^) read the 03/04/05 banner back through
+    ``(REBUILD / bundle_name).read_text``, and the old regex check returned the clean set for it. Put that
+    shape back (its render_copy and COPIES, verbatim) and the check must name the three files."""
+
+    def load():
+        gen = _gen()
+
+        def render_copy(bundle_name: str, source_name: str, header: str | None = None) -> str:
+            if header is None:
+                header = (gen.REBUILD / bundle_name).read_text(encoding="utf-8").split("\n\n", 1)[0]
+            source = (gen.SNOWFLAKE / source_name).read_text(encoding="utf-8")
+            return f"{header}\n\n{source}"
+
+        gen.render_copy = render_copy
+        gen.COPIES = (
+            ("01_teardown_rebuildables.sql", "teardown.sql", gen.TEARDOWN_BANNER),
+            ("03_roles.sql", "roles.sql", None),
+            ("04_backfill_365.sql", "backfill_365.sql", None),
+            ("05_validate.sql", "validate.sql", None))
+        return gen
+
+    reads = _bundle_reads(load, tmp_path / "bundle")
+    assert reads - set(_HAND_KEPT) == {"03_roles.sql", "04_backfill_365.sql", "05_validate.sql"}, reads
+
+
+def test_the_read_back_check_sees_a_banner_read_at_import_time(tmp_path):
+    """Recheck #7 follow-up: the #14 shape moved to module level (03's banner read back into a constant
+    COPIES then uses) reads the bundle while the generator is imported, before any render_* runs. The
+    check imports the generator with the recorders installed, so it must name 03_roles.sql."""
+    source = _GENERATOR.read_text(encoding="utf-8")
+    copies = source[source.index("COPIES = ("):source.index("def render_backup")]
+    mutated = source.replace(copies, (
+        '_BANNER_03 = (REBUILD / "03_roles.sql").read_text(encoding="utf-8").split("\\n\\n", 1)[0]\n'
+        "COPIES = (\n"
+        '    ("01_teardown_rebuildables.sql", "teardown.sql", TEARDOWN_BANNER),\n'
+        '    ("03_roles.sql", "roles.sql", _BANNER_03),\n'
+        "    *((bundle, source, COPY_BANNER.format(bundle=bundle, source=source))\n"
+        '      for bundle, source in (("04_backfill_365.sql", "backfill_365.sql"),\n'
+        '                             ("05_validate.sql", "validate.sql"))),\n'
+        ")\n\n\n"))
+    assert mutated != source and "_BANNER_03" in mutated
+    reads = _bundle_reads(lambda: _gen(mutated), tmp_path / "bundle")
+    assert reads - set(_HAND_KEPT) == {"03_roles.sql"}, reads
 
 
 def test_replay_grants_only_to_live_or_shimmed_roles():
@@ -191,6 +322,22 @@ _REPLAY_DML_NEEDS_NO_RESTORE = {
     "OBJECT_CHANGE_REGISTRY",
 }
 
+# Kept operator tables the replay writes through what it runs at apply time (CALL / EXECUTE TASK, see
+# _replay_call_writes) WITHOUT a step-3b restore, and why (recheck #8). Every entry must still be written
+# that way and none may be restored, so the list cannot go stale.
+_REPLAY_CALL_WRITES_NEED_NO_RESTORE = {
+    "ALERT_EVENTS": "the scans the replay CALLs (SP_ALERT_SCAN, SP_ALERT_SCAN_DAILY, SP_ANOMALY_SWEEP, "
+                    "SP_SCAN_CLOUD_SVC_ANOMALY) raise what their scheduled runs would; step 3b closes what "
+                    "they raised for a rule that is off again and lists the rest for review",
+    "APP_ERROR_LOG": "the scan and loader procs log their own failures, as their scheduled runs do: error "
+                     "history, not config",
+    "DQ_SCHEMA_SNAPSHOT": "V133's SP_ANOMALY_SWEEP takes the column baseline the daily sweep takes anyway",
+    "WAREHOUSE_CHANGE_REGISTRY": "V033's SP_CHANGE_ATTRIBUTION fills CHANGED_BY with the UPDATE the current "
+                                 "(V159) body runs on every scheduled pass; V159 only adds a skip gate",
+    "OPERATOR_BACKUP_LOG": "V158's EXECUTE TASK logs one backup generation, and V161 retires the table later "
+                           "in the same replay",
+}
+
 
 def _restored_tables(fr: str) -> set[str]:
     step3b = _section(fr, "## 3b. Put back what the replay rewrote", "## 4. Grants")
@@ -209,25 +356,161 @@ def _overwatch_table(name: str) -> str | None:
     return parts[-1] if parts[:-1] in ([], ["OVERWATCH"], ["DBA_MAINT_DB", "OVERWATCH"]) else None
 
 
+# The variable an apply-time block reads SCHEMA_VERSION's tip into; ``IF (v < N)`` on it is a first-apply
+# branch, which a replay skips (SCHEMA_VERSION already holds every version).
+_TIP_VARIABLE = re.compile(r"\bSELECT\s+MAX\s*\(\s*VERSION\s*\)\s+INTO\s+:(\w+)\s+FROM\s+[\w$.\"]*\bSCHEMA_VERSION\b",
+                           re.I)
+
+
+# What bounds an IF's THEN arm: a nested Snowflake Scripting IF (its condition is parenthesized, so
+# IFF( / IF EXISTS never match), a CASE, their ends, and ELSE / ELSEIF. A bare END closes a CASE
+# expression, or a BEGIN...END block when no CASE is open; END LOOP / FOR / WHILE / REPEAT bound nothing.
+_ARM_TOKEN = re.compile(r"\bIF\s*\(|\bCASE\b|\bEND\s+(?:IF|CASE)\b|\bELSE(?:IF)?\b"
+                        r"|\bEND\b(?!\s+(?:LOOP|FOR|WHILE|REPEAT)\b)", re.I)
+
+
+def _then_arm_end(body: str, after_then: int) -> int:
+    """Where the THEN arm that starts at ``after_then`` ends: the first ELSE, ELSEIF or END IF at its
+    own depth (a nested IF's, or a CASE's ELSE, stays inside the arm)."""
+    open_blocks = ["IF"]
+    for token in _ARM_TOKEN.finditer(body, after_then):
+        word = " ".join(token.group(0).upper().rstrip("(").split())
+        if word in ("IF", "CASE"):
+            open_blocks.append(word)
+        elif word in ("END IF", "END CASE"):
+            assert open_blocks[-1] == word[4:], f"{word} closes an open {open_blocks[-1]}; teach this scan"
+            open_blocks.pop()
+        elif word == "END":
+            if open_blocks[-1] == "CASE":
+                open_blocks.pop()
+        elif open_blocks[-1] == "CASE":
+            continue                                  # a CASE's ELSE
+        if not open_blocks or (word in ("ELSE", "ELSEIF") and open_blocks == ["IF"]):
+            return token.start()
+    raise AssertionError(f"a first-apply IF without its END IF; teach this scan: {body[after_then:][:80]}")
+
+
+def _tip_assignments(body: str, variable: str) -> int:
+    """How many times a block's code assigns ``variable``: SELECT / FETCH ... INTO it, ``v :=`` and LET."""
+    return len(re.findall(rf"\bINTO\s+(?:[:\w$]+\s*,\s*)*:?{variable}\b|\bLET\s+{variable}\b"
+                          rf"|(?<![\w$:.]){variable}\s*:=", body, re.I))
+
+
+def _apply_time_view(smoke, raw: str) -> str:
+    """The code a top-level ``EXECUTE IMMEDIATE $$...$$`` block runs on a replay: its body with comments
+    and strings blanked, and the THEN arm behind every first-apply version check blanked too (V038's
+    ``IF (v < 38) THEN CALL SP_LEDGER_AUTOBOOK()`` never runs on a replay; that guard exists so the old
+    autobook cannot settle V153's in-flight rows). Only the THEN arm: an ELSE / ELSEIF arm is what a
+    replay runs (recheck: blanking up to the first END IF hid it, and stopped inside a nested IF). Only
+    while the variable holds the tip: one assigned again (``SELECT COUNT(*) INTO :v``) is an ordinary IF."""
+    assert raw.count("$$") >= 2, f"EXECUTE IMMEDIATE without a $$ block; teach this scan: {raw[:80]}"
+    body = smoke.code_view(raw[raw.index("$$") + 2:raw.rindex("$$")])
+    arms = [(guard.start(), _then_arm_end(body, guard.end()))
+            for variable in sorted(set(_TIP_VARIABLE.findall(body))) if _tip_assignments(body, variable) == 1
+            for guard in re.finditer(rf"\bIF\s*\(\s*:?{variable}\s*<\s*\d+\s*\)\s*THEN\b", body, re.I)]
+    for start, end in arms:
+        body = body[:start] + re.sub(r"[^\n]", " ", body[start:end]) + body[end:]
+    return body
+
+
 def _replay_dml_targets(text: str) -> set[str]:
     """The OVERWATCH tables one migration's replay writes with one-time DML: every top-level DML
     statement, at any indentation, plus the DML inside every top-level ``EXECUTE IMMEDIATE $$...$$``
-    block (the apply-time anonymous block, a common migration idiom: V070, V118, V145). DML inside a
-    CREATE PROCEDURE / TASK body does not run during the replay and is not counted (holistic #15: the
-    scan matched column-0 DML only and missed those three blocks)."""
+    block (the apply-time anonymous block, a common migration idiom: V070, V118, V145) outside a
+    first-apply version branch. DML inside a CREATE PROCEDURE / TASK body does not run here; what an
+    apply-time CALL runs is _replay_call_writes (holistic #15: the scan matched column-0 DML only and
+    missed those three blocks)."""
     smoke = _smoke()
     targets: set[str] = set()
     for start, end, code in smoke.statements(text):
         if code.startswith("EXECUTE IMMEDIATE"):
-            raw = text[start:end]
-            assert raw.count("$$") >= 2, f"EXECUTE IMMEDIATE without a $$ block; teach this scan: {raw[:80]}"
-            body = smoke.code_view(raw[raw.index("$$") + 2:raw.rindex("$$")])
-            names = [m.group(1) for m in _DML_TARGET.finditer(body)]
+            names = [m.group(1) for m in _DML_TARGET.finditer(_apply_time_view(smoke, text[start:end]))]
         else:
             m = _DML_TARGET.match(code)
             names = [m.group(1)] if m else []
         targets |= {table for table in map(_overwatch_table, names) if table}
     return targets
+
+
+_CALL_TARGET = re.compile(r"\bCALL\s+([\w$.\"]+)", re.I)
+_CREATE_PROCEDURE = re.compile(r"CREATE (?:OR REPLACE )?(?:SECURE )?PROCEDURE (?:IF NOT EXISTS )?([\w$.\"]+)")
+_CREATE_TASK = re.compile(r"CREATE (OR REPLACE )?TASK (IF NOT EXISTS )?([\w$.\"]+)")
+_EXECUTE_TASK = re.compile(r"EXECUTE TASK ([\w$.\"]+)")
+
+
+def _replay_call_writes(chain: list[tuple[str, str]]) -> dict[str, set[tuple[str, str]]]:
+    """{table: {(version, procedure or task)}}: the OVERWATCH tables the replay of ``chain`` ((version,
+    text) in apply order) writes through what it runs at apply time without spelling the DML out
+    (recheck #8: V153's tail ``CALL SP_LEDGER_AUTOBOOK()`` adopts, books and settles SAVINGS_LEDGER rows
+    during the replay, and the DML scan never saw it).
+
+    Counted: every top-level CALL, every CALL in a top-level EXECUTE IMMEDIATE block outside a first-apply
+    version branch (_apply_time_view), and every EXECUTE TASK (the task's body). A CALL runs the bodies
+    in effect at that point of the replay (the latest definition of every overload of that name), read
+    with their dynamic-SQL strings as SQL, and the procedures those CALL in turn."""
+    smoke = _smoke()
+    procedures: dict[str, dict[str, str]] = {}          # name -> {signature: body}, as defined so far
+    tasks: dict[str, str] = {}                          # name -> body, as defined so far
+    writes: dict[str, set[tuple[str, str]]] = {}
+
+    def called(code: str) -> list[str]:
+        return [name for name in map(_overwatch_table, (m.group(1) for m in _CALL_TARGET.finditer(code))) if name]
+
+    def run(code: str, seen: frozenset[str]) -> set[str]:
+        tables = {table for table in map(_overwatch_table, (m.group(1) for m in _DML_TARGET.finditer(code)))
+                  if table}
+        return tables | {table for name in called(code) for table in call(name, seen)}
+
+    def call(name: str, seen: frozenset[str]) -> set[str]:
+        if name in seen:
+            return set()
+        return {table for body in procedures.get(name, {}).values() for table in run(body, seen | {name})}
+
+    for version, text in chain:
+        for start, end, code in smoke.statements(text):
+            raw = text[start:end]
+            if m := _CREATE_PROCEDURE.match(code):
+                assert raw.count("$$") >= 2, f"{version}: a procedure body without $$; teach this scan"
+                signature = code[m.end():code.index(" RETURNS ")]
+                procedures.setdefault(_overwatch_table(m.group(1)) or m.group(1), {})[signature] = smoke.code_view(
+                    raw[raw.index("$$") + 2:raw.rindex("$$")], strings=True, dynamic=True)
+                continue
+            if m := _CREATE_TASK.match(code):
+                name = _overwatch_table(m.group(3)) or m.group(3)
+                if m.group(1) or not m.group(2) or name not in tasks:     # IF NOT EXISTS keeps the live one
+                    header = re.search(r"\bAS\b", smoke.code_view(raw), re.I)
+                    assert header, f"{version}: a task without AS; teach this scan"
+                    tasks[name] = smoke.code_view(raw, strings=True, dynamic=True)[header.end():]
+                continue
+            if code.startswith("CALL "):
+                runs = [(name, call(name, frozenset())) for name in called(code)]
+            elif code.startswith("EXECUTE IMMEDIATE"):
+                runs = [(name, call(name, frozenset())) for name in called(_apply_time_view(smoke, raw))]
+            elif m := _EXECUTE_TASK.match(code):
+                name = _overwatch_table(m.group(1)) or m.group(1)
+                runs = [(name, run(tasks.get(name, ""), frozenset()))]
+            else:
+                assert not _CALL_TARGET.search(code), f"{version}: a CALL inside {code[:60]}; teach this scan"
+                continue
+            for name, tables in runs:
+                assert name in procedures or name in tasks, (
+                    f"{version} runs {name} before any migration defines it; teach this scan")
+                for table in tables:
+                    writes.setdefault(table, set()).add((version, name))
+    return writes
+
+
+def _chain_tables() -> set[str]:
+    """Every OVERWATCH table a migration creates (TEMPORARY ones excluded): the names a write can really
+    land in, so a phrase in a dynamic-SQL string ('... update downstream consumers.') is not a table."""
+    smoke = _smoke()
+    create = re.compile(r"\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:TRANSIENT\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+                        r"([\w$.\"]+)", re.I)
+    return {table
+            for path in sorted((_SF / "migrations").glob("V[0-9]*.sql"))
+            for table in map(_overwatch_table, (m.group(1) for m in create.finditer(
+                smoke.code_view(path.read_text(encoding="utf-8")))))
+            if table}
 
 
 def test_replay_dml_scan_reads_apply_time_blocks_but_not_proc_or_task_bodies():
@@ -245,22 +528,112 @@ def test_replay_dml_scan_reads_apply_time_blocks_but_not_proc_or_task_bodies():
     assert _replay_dml_targets(text) == {"ONE_TIME", "MERGED", "TOP_LEVEL"}
 
 
+def _guarded_block(declare: str, body: str) -> str:
+    return ("EXECUTE IMMEDIATE\n$$\nDECLARE\n    v NUMBER;\n" + declare + "BEGIN\n"
+            "    SELECT MAX(VERSION) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;\n" + body + "END;\n$$;\n")
+
+
+def test_the_first_apply_blank_covers_the_then_arm_only():
+    """Recheck: the first-apply blank ran from ``IF (v < N) THEN`` to the first END IF, so it hid an
+    ELSE / ELSEIF arm (the branch a replay runs) and stopped inside a nested IF. Only the THEN arm is
+    first-apply code, at its own nesting depth (a nested IF or a CASE's ELSE stays inside it), and only
+    while the variable still holds the tip: a later ``SELECT ... INTO :v`` makes it an ordinary IF."""
+    else_arm = _guarded_block("", (
+        "    IF (v < 5) THEN\n        UPDATE DBA_MAINT_DB.OVERWATCH.THEN_ARM SET A = 1;\n"
+        "    ELSE\n        DELETE FROM DBA_MAINT_DB.OVERWATCH.ELSE_ARM WHERE A = 1;\n    END IF;\n"))
+    assert _replay_dml_targets(else_arm) == {"ELSE_ARM"}
+    nested = _guarded_block("    n NUMBER;\n", (
+        "    IF (:v < 5) THEN\n"
+        "        IF (n > 0) THEN\n            UPDATE DBA_MAINT_DB.OVERWATCH.NESTED_THEN SET A = 1;\n"
+        "        ELSE\n            UPDATE DBA_MAINT_DB.OVERWATCH.NESTED_ELSE SET A = 1;\n        END IF;\n"
+        "        UPDATE DBA_MAINT_DB.OVERWATCH.AFTER_NESTED SET A = CASE WHEN n > 0 THEN 1 ELSE 2 END;\n"
+        "        UPDATE DBA_MAINT_DB.OVERWATCH.AFTER_CASE SET A = 1;\n"
+        "    ELSEIF (n > 1) THEN\n        UPDATE DBA_MAINT_DB.OVERWATCH.ELSEIF_ARM SET A = 1;\n"
+        "    ELSE\n        INSERT INTO DBA_MAINT_DB.OVERWATCH.LAST_ARM SELECT 1;\n    END IF;\n"
+        "    MERGE INTO DBA_MAINT_DB.OVERWATCH.AFTER_GUARD t USING (SELECT 1 AS X) s ON TRUE\n"
+        "        WHEN MATCHED THEN UPDATE SET A = 1;\n"))
+    assert _replay_dml_targets(nested) == {"ELSEIF_ARM", "LAST_ARM", "AFTER_GUARD"}
+    reassigned = _guarded_block("", (
+        "    SELECT COUNT(*) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SOME_QUEUE;\n"
+        "    IF (v < 1) THEN\n        INSERT INTO DBA_MAINT_DB.OVERWATCH.EMPTY_QUEUE SELECT 1;\n    END IF;\n"))
+    assert _replay_dml_targets(reassigned) == {"EMPTY_QUEUE"}
+
+
+def test_replay_call_scan_runs_the_bodies_in_effect_at_each_apply_time_call():
+    """Recheck #8: a top-level CALL, or one in an apply-time block outside a first-apply branch, runs the
+    body defined so far (never a later one), its dynamic SQL and the procedures it CALLs; EXECUTE TASK
+    runs the live task (CREATE TASK IF NOT EXISTS keeps the first). A task body or a procedure that is
+    only defined runs nothing, and neither does the THEN arm behind ``IF (v < N)`` on SCHEMA_VERSION's
+    tip; its ELSE arm runs on a replay, so the CALL and the DML there are counted."""
+    v1 = (
+        "CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_INNER() RETURNS VARCHAR LANGUAGE SQL AS\n"
+        "$$\nBEGIN\n    UPDATE DBA_MAINT_DB.OVERWATCH.INNER_T SET A = 1;\n    RETURN 'ok';\nEND;\n$$;\n"
+        "CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_OUTER() RETURNS VARCHAR LANGUAGE SQL AS\n"
+        "$$\nBEGIN\n    EXECUTE IMMEDIATE 'DELETE FROM DBA_MAINT_DB.OVERWATCH.DYNAMIC_T WHERE A = ''x''';\n"
+        "    CALL DBA_MAINT_DB.OVERWATCH.SP_INNER();\n    RETURN 'ok';\nEND;\n$$;\n"
+        "CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_GUARDED() RETURNS VARCHAR LANGUAGE SQL AS\n"
+        "$$\nBEGIN\n    INSERT INTO DBA_MAINT_DB.OVERWATCH.GUARDED_T SELECT 1;\n    RETURN 'ok';\nEND;\n$$;\n"
+        "CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ELSE_ARM() RETURNS VARCHAR LANGUAGE SQL AS\n"
+        "$$\nBEGIN\n    INSERT INTO DBA_MAINT_DB.OVERWATCH.ELSE_PROC_T SELECT 1;\n    RETURN 'ok';\nEND;\n$$;\n"
+        "CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_X\n    WAREHOUSE = WH\n"
+        "    SCHEDULE = 'USING CRON 0 5 * * * UTC'\nAS\n    CALL DBA_MAINT_DB.OVERWATCH.SP_INNER();\n"
+        "CALL DBA_MAINT_DB.OVERWATCH.SP_OUTER();\n")
+    v2 = (
+        "EXECUTE IMMEDIATE\n$$\nDECLARE\n    v NUMBER;\nBEGIN\n"
+        "    SELECT MAX(VERSION) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;\n"
+        "    IF (v < 2) THEN\n        CALL DBA_MAINT_DB.OVERWATCH.SP_GUARDED();\n    END IF;\n"
+        "    CALL DBA_MAINT_DB.OVERWATCH.SP_INNER();\nEND;\n$$;\n"
+        + _guarded_block("", (
+            "    IF (v < 2) THEN\n        CALL DBA_MAINT_DB.OVERWATCH.SP_GUARDED();\n"
+            "        DELETE FROM DBA_MAINT_DB.OVERWATCH.THEN_ARM_T WHERE A = 1;\n"
+            "    ELSE\n        CALL DBA_MAINT_DB.OVERWATCH.SP_ELSE_ARM();\n"
+            "        UPDATE DBA_MAINT_DB.OVERWATCH.ELSE_ARM_T SET A = 1;\n    END IF;\n")) +
+        "CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_X WAREHOUSE = WH AS\n"
+        "    CALL DBA_MAINT_DB.OVERWATCH.SP_GUARDED();\n"
+        "EXECUTE TASK DBA_MAINT_DB.OVERWATCH.TASK_X;\n"
+        "CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_INNER() RETURNS VARCHAR LANGUAGE SQL AS\n"
+        "$$\nBEGIN\n    MERGE INTO DBA_MAINT_DB.OVERWATCH.LATER_T t USING (SELECT 1 AS X) s ON TRUE\n"
+        "        WHEN MATCHED THEN UPDATE SET A = 1;\n    RETURN 'ok';\nEND;\n$$;\n")
+    assert _replay_call_writes([("V001", v1), ("V002", v2)]) == {
+        "INNER_T": {("V001", "SP_OUTER"), ("V002", "SP_INNER"), ("V002", "TASK_X")},
+        "DYNAMIC_T": {("V001", "SP_OUTER")},
+        "ELSE_PROC_T": {("V002", "SP_ELSE_ARM")},
+    }
+    assert _replay_dml_targets(v2) == {"ELSE_ARM_T"}
+
+
 def test_full_rebuild_restores_every_kept_table_the_replay_rewrites():
     teardown = read("snowflake/teardown.sql")
     dropped = set(re.findall(r"^DROP (?:DYNAMIC )?TABLE IF EXISTS DBA_MAINT_DB\.OVERWATCH\.(\w+);", teardown, re.M))
-    rewritten: dict[str, set[str]] = {}
-    for path in sorted((_SF / "migrations").glob("V[0-9]*.sql")):
-        for table in _replay_dml_targets(path.read_text(encoding="utf-8")):
+    chain = [(path.name[:4], path.read_text(encoding="utf-8"))
+             for path in sorted((_SF / "migrations").glob("V[0-9]*.sql"))]
+    one_time: dict[str, set[str]] = {}
+    for version, text in chain:
+        for table in _replay_dml_targets(text):
             if table not in dropped and table != "SCHEMA_VERSION":
-                rewritten.setdefault(table, set()).add(path.name[:4])
-    assert {"ALERT_CONFIG", "ALERT_ROUTES", "SETTINGS"} <= set(rewritten), "scan went vacuous"
+                one_time.setdefault(table, set()).add(version)
+    assert {"ALERT_CONFIG", "ALERT_ROUTES", "SETTINGS"} <= set(one_time), "scan went vacuous"
     # ...and it reads the apply-time EXECUTE IMMEDIATE blocks (V070's route disable, V118/V145's one-time
     # SAVINGS_LEDGER corrections), which a column-0 scan never saw
-    assert "V070" in rewritten["ALERT_ROUTES"] and {"V118", "V145"} <= rewritten.get("SAVINGS_LEDGER", set())
+    assert "V070" in one_time["ALERT_ROUTES"] and {"V118", "V145"} <= one_time.get("SAVINGS_LEDGER", set())
+    # recheck #8: ...and what the procedures and tasks the replay runs at apply time write to kept tables
+    kept = _chain_tables() - dropped - {"SCHEMA_VERSION"}
+    called = {table: hits for table, hits in _replay_call_writes(chain).items() if table in kept}
+    rewritten = {table: set(versions) for table, versions in one_time.items()}
+    for table, hits in called.items():
+        rewritten.setdefault(table, set()).update(version for version, _name in hits)
+    assert ("V153", "SP_LEDGER_AUTOBOOK") in called.get("SAVINGS_LEDGER", set()), called.get("SAVINGS_LEDGER")
+    assert "V153" in rewritten["SAVINGS_LEDGER"], sorted(rewritten["SAVINGS_LEDGER"])
+    # V038's first autobook sits behind IF (v < 38), which a replay skips
+    assert not any(version == "V038" for version, _name in called["SAVINGS_LEDGER"]), called["SAVINGS_LEDGER"]
     fr = read("docs/FULL_REBUILD.md")
     restored = _restored_tables(fr)
-    missing = set(rewritten) - restored - _REPLAY_DML_NEEDS_NO_RESTORE
+    missing = (set(one_time) - restored - _REPLAY_DML_NEEDS_NO_RESTORE) | (
+        set(called) - restored - set(_REPLAY_CALL_WRITES_NEED_NO_RESTORE))
     assert not missing, {t: sorted(rewritten[t]) for t in missing}
+    # the CALL-path exemptions stay true: each is still written that way and none is restored
+    for table, reason in _REPLAY_CALL_WRITES_NEED_NO_RESTORE.items():
+        assert table in called and table not in restored, (table, reason)
     # every restored table has a step-1 clone to restore from
     bak = (_RB / "00_backup_operator_data.sql").read_text(encoding="utf-8")
     for table in restored:
