@@ -37,11 +37,12 @@ XLAT_VALUE_COL = "SRC_IDNTFTN_VAL"
 
 MAX_CODES = 1000  # a real gap is a handful of codes; the cap only guards a misconfig
 
-# The daily PIPE_REF_GAP alert's own check-name allowlist (v4.608 R2-109). SP_SCAN_REF_GAPS (V129, its only
-# definer) keeps a configured check only when RLIKE(nm_clean, '<this>') matches and drops the rest with no
-# log, while this panel scans any non-empty name (it binds the name as a string literal). A name outside the
-# set is therefore scanned here but never alerted; parse_ref_gap_checks warns about it. A re-derivation of
-# SP_SCAN_REF_GAPS must update this constant: tests/test_p608_ops_etl.py pins it to the latest definer's text.
+# The daily PIPE_REF_GAP alert's own check-name allowlist (v4.608 R2-109). SP_SCAN_REF_GAPS (V171, its current
+# definer, re-derived from V129 with the allowlist line unchanged) keeps a configured check only when
+# RLIKE(nm_clean, '<this>') matches and drops the rest with no log, while this panel scans any non-empty name
+# (it binds the name as a string literal). A name outside the set is therefore scanned here but never alerted;
+# parse_ref_gap_checks warns about it. A re-derivation of SP_SCAN_REF_GAPS must update this constant:
+# tests/test_p608_ops_etl.py pins it to the latest definer's text.
 ALERT_NAME_PATTERN = r"^[-A-Za-z0-9_.:/ ]+$"
 ALERT_NAME_CHARS = "letters, digits, spaces and - _ . : /"
 
@@ -146,6 +147,10 @@ def _check_sql(check: RefGapCheck, xlat_fqn: str) -> str:
     SnowparkFetchDataException 1406 and sinks the whole UNION-ALL scan) — the compare
     is string-vs-string, and the outer TO_VARCHAR keeps NEW_CODE type-stable for the
     UNION. Identifiers are validated (fail-closed); the family name is a quoted literal.
+
+    The daily alert's server twin, SP_SCAN_REF_GAPS (V171), builds the same statement per check
+    (both casts) and runs each check on its own, so one failing check no longer silences the
+    others; tests/test_etl_control_sql.py renders the proc's template and locks the two together.
     """
     from app.core.sqlsafe import safe_identifier, sql_literal
 
