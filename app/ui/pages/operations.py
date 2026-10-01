@@ -1105,11 +1105,19 @@ def _failure_timeline_section(company: str, database: str = "", schema_contains:
         empty_state("clean", "No task failures in the last 7 days for this scope.")
         return
     timeline = build_failure_timeline(res.df)
-    # Alarm driven by the ACTUAL 7d failures the body shows (matches the "Failures (7d)" KPI).
-    section_header(_TITLE, alarm_health(len(timeline)), "alerts")
+    # R1-043: the builder stops at 500 rows (under run()'s cap, so never marked truncated); the KPI and the
+    # alarm read its pre-LIMIT window total (an old-shape result falls back to the frame).
+    _fail_total = len(timeline)
+    if "TOTAL_FAILURES_WIN" in res.df.columns:
+        _fail_total = max(_fail_total, int(safe_float(res.df["TOTAL_FAILURES_WIN"].iloc[0], float(_fail_total))))
+    # Alarm driven by the ACTUAL 7d failures (matches the "Failures (7d)" KPI).
+    section_header(_TITLE, alarm_health(_fail_total), "alerts")
     roots = timeline[timeline["ROLE_IN_GRAPH"] == "Root cause"]
+    if _fail_total > len(timeline):
+        st.caption(f"Root causes, error families and the table below cover {len(timeline):,} of {_fail_total:,} "
+                   "failures (each task's first failure in the window, then the newest).")
     kpi_row([
-        {"label": "Failures (7d)", "value": f"{len(timeline)}"},
+        {"label": "Failures (7d)", "value": f"{_fail_total:,}"},
         {"label": "Root causes", "value": f"{len(roots)}",
          "help": "First failure per task-graph run; fix these, the cascade follows."},
         {"label": "Top error family",

@@ -445,8 +445,14 @@ LIMIT 200
 # 5. Task failure detail (root-cause timeline)
 # ---------------------------------------------------------------------------
 
-def task_failure_details(days: int, company: str = "ALL", database: str = "", schema_contains: str = "") -> str:
-    from app.core.sqlsafe import contains_filter
+def task_failure_details(days: int, company: str = "ALL", database: str = "", schema_contains: str = "", *,
+                         onset: object = None) -> str:
+    """Terminal task failures in the window, at most 500 rows (see TOTAL_FAILURES_WIN / REPEAT_FAILURE below).
+
+    ``onset`` (an incident's onset, account time): the incident RCA feed passes it so the rows nearest the onset
+    are the ones kept — rank_root_causes scores a failure by how close before the onset it ran, so a
+    newest-first cut kept exactly the wrong rows (R1-043). Without it the newest are kept (Operations)."""
+    from app.core.sqlsafe import contains_filter, sql_literal
 
     # Cap 30 (was 14) so the incident RCA auto-investigation feed, which asks for the incident's
     # onset-covering window (up to 30 days), is not silently clamped shorter than the sibling RCA
@@ -467,6 +473,17 @@ def task_failure_details(days: int, company: str = "ALL", database: str = "", sc
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
     )
+    recency = "QUERY_START_TIME DESC"
+    if onset is not None:
+        import pandas as pd
+
+        _onset = pd.to_datetime(onset, errors="coerce")
+        if pd.notna(_onset):
+            # naive account time (Central), like account_now(); QUERY_START_TIME (LTZ) cast to NTZ is
+            # its session-time (Central) wall clock, so the two compare on one clock
+            _iso = (_onset.tz_localize(None) if _onset.tzinfo else _onset).strftime("%Y-%m-%d %H:%M:%S")
+            recency = (f"ABS(DATEDIFF('second', QUERY_START_TIME::TIMESTAMP_NTZ, "
+                       f"{sql_literal(_iso)}::TIMESTAMP_NTZ)), QUERY_START_TIME DESC")
     return f"""
 WITH terminal AS (
     SELECT
@@ -491,10 +508,20 @@ SELECT
     QUERY_START_TIME,
     DATEDIFF('second', QUERY_START_TIME, COMPLETED_TIME) AS RUN_SEC,
     COALESCE(ERROR_CODE::VARCHAR, '') AS ERROR_CODE,
-    LEFT(COALESCE(ERROR_MESSAGE, ''), 300) AS ERROR_MESSAGE
+    LEFT(COALESCE(ERROR_MESSAGE, ''), 300) AS ERROR_MESSAGE,
+    -- R1-043: the window's TRUE failure count, before the LIMIT (window functions run after the
+    -- STATE filter) — the frame stops at 500, under run()'s 5000-row cap, so it is never marked
+    -- truncated and a len(frame) KPI silently pinned at 500.
+    COUNT(*) OVER () AS TOTAL_FAILURES_WIN,
+    -- 0 = the task's FIRST failure in the window, 1 = a later one. Each task's first failure is kept
+    -- before any newer repeat: a newest-first cut dropped exactly the onset-era failures the incident
+    -- RCA ranks (a task that started failing before onset and kept failing every minute lost its
+    -- pre-onset row, demoting the true cause from HIGH to LOW).
+    IFF(ROW_NUMBER() OVER (PARTITION BY DATABASE_NAME, SCHEMA_NAME, NAME
+                           ORDER BY QUERY_START_TIME) = 1, 0, 1) AS REPEAT_FAILURE
 FROM terminal
 WHERE STATE = 'FAILED'
-ORDER BY QUERY_START_TIME DESC
+ORDER BY REPEAT_FAILURE, {recency}
 LIMIT 500
 """
 
