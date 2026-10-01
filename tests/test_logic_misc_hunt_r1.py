@@ -180,6 +180,42 @@ def test_optimize_passes_the_bounds_to_the_idle_prompt():
         "app/ui/pages/cost_parts/optimize.py")
 
 
+def _idle_ai_panel_key(today: date, preset: str) -> str:
+    """The idle AI panel's session key as optimize.py builds it, for ``preset`` viewed on ``today``."""
+    import functools
+
+    from app.logic import date_windows as dw
+    src = read("app/ui/pages/cost_parts/optimize.py")
+    call = src.split('subject="evaluate idle warehouse spend"', 1)[0].rsplit("ai_evaluation_panel(", 1)[1]
+    m = re.search(r'\bkey=(f"[^"\n]*")', call)
+    assert m is not None
+    bounds = dw.window_bounds(preset, today)
+    names = {"__builtins__": {}, "company": "ALL", "days": dw.resolve_window_days(preset, today),
+             "_lm": "_lm" if bounds is not None else "", "bounds": bounds,
+             "window_label": functools.partial(dw.window_label, today=today)}
+    return str(eval(m.group(1), names))
+
+
+def test_idle_ai_panel_key_separates_calendar_presets_of_equal_length():
+    # R1-106 review: the prompts now name each preset's own dates, but the stored answer was keyed
+    # idle_{company}_{days}{_lm}, and {_lm} is the same for all three presets. On Oct 31 Current month
+    # (Oct 1-31) and Last month (Sep 1-30) are both 30 days, so one preset's answer rendered under
+    # the other's panel; on Feb 1 Current year (Jan 1-Feb 1) and Last month (January) are both 31.
+    from app.config import CURRENT_MONTH_WINDOW, CURRENT_YEAR_WINDOW, LAST_MONTH_WINDOW
+    from app.logic import date_windows as dw
+    presets = (CURRENT_MONTH_WINDOW, LAST_MONTH_WINDOW, CURRENT_YEAR_WINDOW)
+    for today, a, b in ((date(2026, 10, 31), CURRENT_MONTH_WINDOW, LAST_MONTH_WINDOW),
+                        (date(2026, 12, 31), CURRENT_MONTH_WINDOW, LAST_MONTH_WINDOW),
+                        (date(2027, 2, 1), CURRENT_YEAR_WINDOW, LAST_MONTH_WINDOW)):
+        assert dw.resolve_window_days(a, today) == dw.resolve_window_days(b, today)   # the collision
+        assert _idle_ai_panel_key(today, a) != _idle_ai_panel_key(today, b), today
+        # one key per distinct evidence window (January's current month == current year: same dates)
+        windows = {dw.window_bounds(p, today) for p in presets}
+        assert len({_idle_ai_panel_key(today, p) for p in presets}) == len(windows), today
+    # a trailing window keeps a key of its own
+    assert _idle_ai_panel_key(date(2026, 10, 31), 30) == "idle_ALL_30_30d"
+
+
 # ---- R1-105: Case File previews render NULL cells as "—", never 'nan' / 'None' / 'NaT' ---------
 
 
