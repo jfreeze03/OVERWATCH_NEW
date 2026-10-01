@@ -102,6 +102,13 @@ DEFAULT_SETTINGS = {
     # Listed here so Admin shows it as an editable setting, not an orphan "no longer read" row (wave 4: V162's
     # identity rules never auto-declare, whatever this says).
     "INCIDENT_AUTO_DECLARE_CRITICAL": "TRUE",
+    # Change attribution (seeded '' by V033; read at query time by
+    # change_impact_sql.warehouse_change_registry): a comma list of deploy service users
+    # (Flyway / Terraform), matched case-insensitively against CHANGED_BY -> CHANGE_SOURCE
+    # MANAGED, else MANUAL. '' = every attributed change reads MANUAL (no IaC yet). Listed here
+    # (c09 R1-173) so Admin can edit it and never flags it "no longer read (safe to delete)" --
+    # deleting a populated row silently flips every MANAGED change back to MANUAL.
+    "DEPLOY_ACTORS": "",
     # Known-spike calendar (repo review 2026-08-17): predictable spend spikes the
     # anomaly panels label "expected" instead of flagging. Semicolon rules:
     # MONTH_END:<n> | QUARTER_END:<n> | YYYY-MM-DD..YYYY-MM-DD:<label>.

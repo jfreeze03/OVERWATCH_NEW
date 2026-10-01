@@ -658,11 +658,6 @@ _NON_PROBE_ALLOWLIST: dict[tuple[str, str], tuple[str, str]] = {
     ("app/ui/workbench.py", "record"): ("render_entity_360", "run"),
     ("app/ui/workbench.py", "changes"): ("render_entity_360", "run"),
     # ("app/ui/pages/control_room.py", "res") _freshness_board: split on the kind in R1-204 -- removed.
-    ("app/ui/pages/overview.py", "actions_res"): ("render", "or-run"),
-    ("app/ui/pages/brief.py", "events"): ("render", "or-run"),
-    ("app/ui/pages/brief.py", "actions"): ("render", "or-run"),
-    ("app/ui/pages/admin.py", "res"): ("_migrations_tab", "run"),
-    ("app/ui/pages/admin.py", "fq"): ("_performance_tab", "run"),
     ("app/ui/decision_studio.py", "result"): ("_products", "run"),
 }
 
@@ -1022,9 +1017,13 @@ def test_the_ratchet_flags_a_lumped_kind_split():
 def test_the_allowlist_is_exact_per_site():
     """Review R1-14: a second un-split `res` site in an allowlisted file, or a probe read through a same-module
     wrapper, is not hidden by the (file, variable) pair."""
-    extra = ast.parse(read("app/ui/pages/admin.py") + (
+    # c09 R1-175 split admin.py's last un-split `res` site (_migrations_tab), so the allowlisted-site half of
+    # this pair is now a stand-in module of the same shape rather than admin.py's source.
+    extra = ast.parse(
+        "def _allowlisted_site():\n    res = run('SELECT 0', key='site')\n"
+        "    if not res.ok:\n        empty_state('needs_setup', 'Not installed yet.')\n"
         "\n\ndef _mutant_admin():\n    res = run('SELECT 1', key='mutant')\n"
-        "    if not res.ok:\n        empty_state('needs_setup', 'Not installed yet.')\n"))
+        "    if not res.ok:\n        empty_state('needs_setup', 'Not installed yet.')\n")
     nodes = [n for v, n in _setup_on_failure_sites(extra) if v == "res"]
     assert len({id(n) for n in nodes}) == 2                   # the exact-one assertion above fails on this
     wrapped = ast.parse("def _optional(sql):\n    return run(sql, probe=True)\n"

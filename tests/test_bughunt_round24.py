@@ -65,7 +65,10 @@ def test_warehouse_jumps_route_to_queries_not_warehouses():
     ov = _src("app/ui/pages/overview.py")
     assert 'request_navigation("Operations", "Queries",\n                                       {"warehouse_contains": _picked_wh})' in ov
     main = _src("app/main.py")
-    assert 'request_navigation("Operations", "Queries", {"warehouse_contains": name})' in main
+    # c09 R1-003: the palette's WH pick now also carries the warehouse's company (it used to land under
+    # the current company filter, an empty Queries tab for another tenant's warehouse) -- still Queries.
+    assert 'request_navigation("Operations", "Queries",\n                           {"company": _wco' in main
+    assert '"warehouse_contains": name})' in main
     # neither jump routes to the warehouse-contains-ignoring Warehouses tab any more
     assert 'request_navigation("Operations", "Warehouses", {"warehouse_contains"' not in main
 

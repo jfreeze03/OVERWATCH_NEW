@@ -2514,8 +2514,11 @@ FROM f_fn, l_fn
 def fleet_query_stats(days: int = 7, page: str = "") -> str:
     """Slow/failed fetches across ALL viewers (APP_QUERY_TELEMETRY, V021).
 
-    Only rows the app chose to persist land here (>=2s or failed), so this is
-    the regression surface, not a complete census — the note on the panel
+    The table persists every >=2s or failed fetch PLUS a ~2% healthy sample
+    (query.should_persist_telemetry); c09 R1-176: the WHERE keeps only the
+    >=2s-or-failed rows (the SLOW_2S threshold telemetry_by_page uses), so
+    SLOW_OR_FAILED, P50/P95 and the panel's clean state mean what they say.
+    The regression surface, not a complete census — the note on the panel
     says so.
 
     C6: ``page`` narrows to one page. The unfiltered call is LIMIT 40 by p95,
@@ -2541,6 +2544,7 @@ SELECT
     MAX_BY(QUERY_ID, IFF(QUERY_ID IS NOT NULL, ELAPSED_MS, NULL)) AS SLOWEST_QUERY_ID
 FROM {core_object("APP_QUERY_TELEMETRY")}
 WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP()){page_filter}
+  AND (NOT OK OR ELAPSED_MS >= 2000)
 GROUP BY PAGE, QUERY_KEY
 ORDER BY P95_MS DESC NULLS LAST
 LIMIT 40
