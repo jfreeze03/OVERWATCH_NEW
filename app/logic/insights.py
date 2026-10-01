@@ -914,6 +914,33 @@ CREEP_MIN_SLOPE_SEC = 5.0     # ignore < 5 sec/run drift (noise, not a trend)
 CREEP_MIN_LATEST_SEC = 30.0   # ignore trivially short tasks (seconds-long steps)
 
 
+def _creep_series_rows(df: pd.DataFrame | None) -> pd.DataFrame | None:
+    """The task_runtime_history_scan rows a creep fit can use (numeric RN + RUNTIME_SEC), or None
+    when there are none -- shared by etl_runtime_creep and creep_fit_coverage so the 'fitted'
+    count and the fit itself can never disagree on which runs count."""
+    if (df is None or df.empty
+            or not {"WORKFLOW_NAME", "TASK_NAME", "RN", "RUNTIME_SEC"}.issubset(df.columns)):
+        return None
+    work = df.copy()
+    work["RUNTIME_SEC"] = pd.to_numeric(work["RUNTIME_SEC"], errors="coerce")
+    work["RN"] = pd.to_numeric(work["RN"], errors="coerce")
+    work = work.dropna(subset=["RUNTIME_SEC", "RN"])
+    return None if work.empty else work
+
+
+def creep_fit_coverage(df: pd.DataFrame | None, *, min_runs: int = CREEP_MIN_RUNS) -> tuple[int, int]:
+    """(task series with >= ``min_runs`` usable runs, all task series) in a task_runtime_history_scan
+    frame: the series etl_runtime_creep actually FITS vs every series it saw. An empty creep result
+    is a verified all-clear only when the first is > 0 -- on the 1st of the month under Current
+    month every nightly task has one run in the Window, nothing is fitted, and 'the fitted trends
+    are flat' would be false (v4.606 holistic review). (0, 0) on empty / malformed input. Pure."""
+    work = _creep_series_rows(df)
+    if work is None:
+        return 0, 0
+    sizes = work.groupby(["WORKFLOW_NAME", "TASK_NAME"]).size()
+    return int(sizes.ge(min_runs).sum()), len(sizes)
+
+
 def etl_runtime_creep(
     df: pd.DataFrame, *, min_runs: int = CREEP_MIN_RUNS, horizon_runs: int = CREEP_HORIZON_RUNS,
     min_slope_sec: float = CREEP_MIN_SLOPE_SEC, min_latest_sec: float = CREEP_MIN_LATEST_SEC,
@@ -931,16 +958,10 @@ def etl_runtime_creep(
     Empty in → empty out. Pure: no Streamlit, no I/O."""
     cols = ["WORKFLOW_NAME", "TASK_NAME", "RUNS", "LATEST_SEC", "BASELINE_SEC",
             "SLOPE_SEC_PER_RUN", "PROJECTED_SEC", "RUNS_TO_2X"]
-    if (df is None or df.empty
-            or not {"WORKFLOW_NAME", "TASK_NAME", "RN", "RUNTIME_SEC"}.issubset(df.columns)):
+    work = _creep_series_rows(df)
+    if work is None:
         return pd.DataFrame(columns=cols)
     from app.logic.forecast import _robust_slope
-    work = df.copy()
-    work["RUNTIME_SEC"] = pd.to_numeric(work["RUNTIME_SEC"], errors="coerce")
-    work["RN"] = pd.to_numeric(work["RN"], errors="coerce")
-    work = work.dropna(subset=["RUNTIME_SEC", "RN"])
-    if work.empty:
-        return pd.DataFrame(columns=cols)
     rows = []
     for (wf, task), g in work.groupby(["WORKFLOW_NAME", "TASK_NAME"]):
         gg = g.sort_values("RN", ascending=False)     # oldest (highest RN) → newest (RN=1) last
@@ -1722,8 +1743,9 @@ def cycle_timeline_frame(night_df: pd.DataFrame | None, *, start_workflow: str =
 def task_cadence_attainment(fresh: pd.DataFrame | None, *, row_cap: int = 200) -> dict:
     """Built-in objective "Tasks on cadence": of the tasks with a derivable cadence
     (``task_freshness_status`` output), how many are On-time vs Late vs Stale against their own
-    schedule. ``capped`` is True when the frame hit the builder's LIMIT (``row_cap``, the 200
-    most-silent tasks first), so the ratio covers those and not every task. {} on no data."""
+    schedule. ``capped`` is True when the frame hit the builder's LIMIT (``row_cap``:
+    ops_sql.task_freshness_sla keeps the 200 tasks most overdue RELATIVE to their own cadence, PR-1
+    R1-129), so the ratio covers those and not every task. {} on no data."""
     if fresh is None or fresh.empty or "STATUS" not in fresh.columns:
         return {}
     status = fresh["STATUS"].astype(str)

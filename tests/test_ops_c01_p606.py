@@ -777,16 +777,45 @@ def test_cancel_query_gate_is_scoped_to_the_selected_query(monkeypatch):
 # ------------------------------------------- R1-124: change-scan verdict captions humanize durations ----
 
 def test_verdict_detail_durations_render_in_hr_min_sec():
-    from app.ui.pages import operations as ops
+    # v4.606 holistic review: the helper moved to the pure app.logic.wh_change so Control Room's
+    # ranked-cause Magnitude (rca.candidates_from_changes) shares it -- tests/test_rca.py locks that side
+    from app.logic.wh_change import humanize_verdict_detail
     wh = ("credits/day 10.5->12.25 | p95 1800.0s->2400.0s | queue 145.00->200.00 min/d "
           "| fail 0->1.5% | 120->140 queries")
-    got = ops._humanize_verdict_detail(wh)
+    got = humanize_verdict_detail(wh)
     assert "1800.0s" not in got and "2400.0s" not in got and "min/d" not in got
     assert got == ("credits/day 10.5->12.25 | p95 30m → 40m | queue 2h 25m → 3h 20m/day "
                    "| fail 0->1.5% | 120->140 queries")                  # non-durations untouched
     obj = "runs 10->12 | fails 0->1 | p95 ?s->95.5s | credits/call 0.0012->0.0019"
-    assert ops._humanize_verdict_detail(obj) == ("runs 10->12 | fails 0->1 | p95 ? → 1m 36s "
-                                                 "| credits/call 0.0012->0.0019")
+    assert humanize_verdict_detail(obj) == ("runs 10->12 | fails 0->1 | p95 ? → 1m 36s "
+                                            "| credits/call 0.0012->0.0019")
     body = read(_OPS)
-    assert body.count("_humanize_verdict_detail(_verdict_detail)") == 1
-    assert body.count("_humanize_verdict_detail(_vd)") == 1
+    assert body.count("wh_change.humanize_verdict_detail(_verdict_detail)") == 1
+    assert body.count("wh_change.humanize_verdict_detail(_vd)") == 1
+    assert "def _humanize_verdict_detail" not in body and "_VD_P95_RE" not in body   # no private twin
+
+
+def test_workbench_recent_changes_detail_renders_hr_min_sec(monkeypatch):
+    """v4.606 holistic-review follow-up: Workbench Entity 360's Recent changes table renders
+    workbench_sql.entity_recent_changes, whose DETAIL is the same VERDICT_DETAIL string (raw seconds,
+    'p95 1800.0s->2400.0s'). styled_table only humanizes NUMERIC duration columns, so the text column
+    still read '1800.0s' while Operations and Control Room read '30m'. Driven through the real
+    render_entity_360 with the tests/test_workbench_failed_reads.py recording fakes."""
+    from tests.test_workbench_failed_reads import _patch_page
+
+    detail = "credits/day 12.34->15.67 | p95 1800.0s->2400.0s | queue 145.00->200.00 min/d"
+    df = pd.DataFrame([
+        {"CHANGED_AT": "2026-09-20 08:00", "CHANGE": "WAREHOUSE_SIZE: MEDIUM -> LARGE",
+         "CHANGED_BY": "JOE", "VERDICT": "REGRESSED", "DETAIL": detail},
+        {"CHANGED_AT": "2026-09-21 08:00", "CHANGE": "AUTO_SUSPEND: 600 -> 60",
+         "CHANGED_BY": "JOE", "VERDICT": "PENDING", "DETAIL": None},     # no verdict text yet
+    ])
+    wb, _fake, seen = _patch_page(monkeypatch, {"entity_changes_WAREHOUSE_WH_A": _ok(df)},
+                                  entity_key="WH_A")
+    wb.render_entity_360("ALL")
+    (tbl,) = [t for t in seen["tables"] if "DETAIL" in t.columns]
+    assert tbl["DETAIL"].iloc[0] == "credits/day 12.34->15.67 | p95 30m → 40m | queue 2h 25m → 3h 20m/day"
+    assert "1800.0s" not in tbl["DETAIL"].iloc[0] and "min/d" not in tbl["DETAIL"].iloc[0]
+    assert tbl["DETAIL"].iloc[1] is None                                  # a NULL detail stays NULL
+    assert list(tbl.columns) == list(df.columns)                          # same table, same columns
+    assert df["DETAIL"].iloc[0] == detail                                 # the cached frame is untouched

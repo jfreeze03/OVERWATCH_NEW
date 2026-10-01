@@ -29,6 +29,7 @@ from datetime import datetime
 import pandas as pd
 
 from app.logic.formulas import ACCOUNT_TIMEZONE, humanize_duration, safe_float
+from app.logic.wh_change import humanize_verdict_detail
 
 # Scoring weights + bands (uncalibrated starting points; the why-breakdown makes them auditable).
 _W_PROX, _W_MAG, _W_MATCH = 0.45, 0.35, 0.20
@@ -111,7 +112,11 @@ def candidates_from_changes(df: pd.DataFrame | None) -> list[dict]:
         return out
     for _, r in df.iterrows():
         verdict = _first(r, "VERDICT").upper()
-        detail = _first(r, "DETAIL", "VERDICT_DETAIL")
+        # v4.606 holistic review (R1-124's twin): the change scans write VERDICT_DETAIL with raw
+        # seconds ('p95 1800.0s->2400.0s'); humanize BEFORE the magnitude_text slice below, so the
+        # Control Room's Magnitude reads '30m → 40m' like the Operations drill (and a cut never
+        # lands inside a raw token the regex would then miss).
+        detail = humanize_verdict_detail(_first(r, "DETAIL", "VERDICT_DETAIL"))
         mag = 1.0 if verdict == "REGRESSED" else (0.6 if detail else 0.35)
         entity = _first(r, "ENTITY", "WAREHOUSE_NAME", "OBJECT_NAME", "DATABASE_NAME", "TARGET")
         change = _first(r, "CHANGE", "CHANGE_DDL")

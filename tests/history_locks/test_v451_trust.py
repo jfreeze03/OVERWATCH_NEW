@@ -182,6 +182,7 @@ def _gate_args() -> dict[str, list[dict]]:
 
     from app.data.etl_control_sql import RefGapCheck
     from app.logic.alert_evidence import _KIND_LABEL, EvidencePlan
+    from app.logic.date_windows import CalendarDayOffset
     from app.logic.ledger_measure import BASES
 
     recent = date.today() - timedelta(days=7)
@@ -197,6 +198,9 @@ def _gate_args() -> dict[str, list[dict]]:
         "cost_sql.contract_consumed_credits": [{"contract_start_date": "2026-01-01"}],
         "cost_sql.unread_maintenance_proof": [
             {"fqn": "DB.S.T", "booked_on": date(2026, 6, 1), "baseline_monthly_credits": 10.0}],
+        # the shared Window-label helper (v4.606 holistic review): a pure phrase, rendered so its
+        # (empty) reach is checked rather than skipped
+        "etl_control_sql.calendar_window_phrase": [{"days": CalendarDayOffset(9), "today": date(2026, 9, 10)}],
         "etl_control_sql.cycle_finish_history_scan": [{**ctl, "start_workflow": "WF_A", "end_workflow": "WF_Z"}],
         "etl_control_sql.recon_errors_scan": [{"recon_fqn": "DB.S.RECON"}],
         "etl_control_sql.recon_recurrence_scan": [{"recon_fqn": "DB.S.RECON"}],

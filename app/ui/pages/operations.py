@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import re
 from datetime import timedelta
 
 import streamlit as st
@@ -74,12 +73,14 @@ from app.logic.formulas import (
 )
 from app.logic.incident import route_incidents, summarize_incidents
 from app.logic.insights import (
+    CREEP_MIN_RUNS,
     DURATION_MIN_ACTIVE_DAYS,
     ETL_CHANGE_LOOKBACK_DAYS,
     annotate_proc_changes,
     build_failure_timeline,
     cluster_failures_by_family,
     compare_release_periods,
+    creep_fit_coverage,
     cycle_night_summary,
     cycle_target_attainment,
     cycle_timeline_frame,
@@ -1497,15 +1498,16 @@ def _etl_window_suffix(days: int) -> str:
     reader shares), so it can never name a window the read did not apply: no clause -> '' (all
     time); a now-anchored clause -> ' (last Nd)'; an account-DATE-anchored clause (a calendar
     offset, which starts at the period's first day at midnight) -> ' (today)' on that first day,
-    else ' (since <first day>)'."""
+    else ' (since <first day>)' -- worded by ``etl_control_sql.calendar_window_phrase``, the rule the
+    recon recurrence label shares, so the two ETL labels can never name one read two ways."""
     clause = etl_control_sql._window_clause(days)
     if not clause:
         return ""
     n = int(days)
     if account_today_sql() not in clause:
         return f" (last {n}d)"
-    start = account_today() - timedelta(days=n)
-    return " (today)" if n == 0 else f" (since {start:%b} {start.day})"
+    phrase = etl_control_sql.calendar_window_phrase(days, today=account_today())
+    return f" ({phrase})" if phrase else f" (last {n}d)"
 
 
 def _workflow_runtimes_panel(days: int = 0, *, pf: dict | None = None) -> None:
@@ -1727,7 +1729,8 @@ def _failure_recurrence_panel(days: int = 0, *, pf: dict | None = None) -> None:
     recent run outcomes (CONTROL_STATUS terminal status per run) it derives a leading-FAILED streak, a
     failure rate, and a recency-weighted propensity, then an evidence-gated verdict — actively broken,
     chronic, intermittent — never a manufactured probability. Config-gated on ETL_CONTROL_STATUS_FQN;
-    honors the scope-bar Window; clean when nothing has failed in the scoped runs."""
+    honors the scope-bar Window and names it (_etl_window_suffix: on the 1st under Current month the
+    read is today's runs only); clean when nothing has failed in the scoped runs."""
     section_header("Failure recurrence",
                    "warn", "pipeline", anchor="ops-failure-recurrence")
     fqn = str(load_settings(_PAGE).get("ETL_CONTROL_STATUS_FQN") or "").strip()
@@ -1739,10 +1742,11 @@ def _failure_recurrence_panel(days: int = 0, *, pf: dict | None = None) -> None:
     if not hist_sql:
         empty_state("needs_setup", "ETL_CONTROL_STATUS_FQN is not a valid table name.")
         return
+    _scope = _etl_window_suffix(days)   # holistic review: every outcome names the Window it read
     res = (pf or {}).get("status_history") or run(hist_sql, page=_PAGE, key=f"etl_status_history_{days}", tier="recent",
               source="CONTROL_STATUS (per-task run status series)",
               max_rows=etl_control_sql.MAX_FAILREC_ROWS)
-    if guard(res, "No run history yet to judge recurrence.",
+    if guard(res, f"No run history{_scope} to judge recurrence yet.",
              setup_hint="The app role needs SELECT on the CONTROL_STATUS table "
                         "(GRANT SELECT ON <table> TO ROLE <app role>)."):
         rec = task_failure_recurrence(res.df)
@@ -1752,8 +1756,8 @@ def _failure_recurrence_panel(days: int = 0, *, pf: dict | None = None) -> None:
             st.caption(f"⚠ Judged the first {etl_control_sql.MAX_HISTORY_SERIES} task series — some "
                        "tasks were not analyzed at this scale.")
         if rec.empty:
-            empty_state("clean", "No task has failed in the scoped runs — nothing is trending toward a "
-                        "repeat failure. (A task needs a failure in the window to appear.)")
+            empty_state("clean", f"No task has failed in the scoped runs{_scope} — nothing is trending "
+                        "toward a repeat failure. (A task needs a failure in the window to appear.)")
             return
         rec, _nchg = annotate_proc_changes(rec, _etl_proc_changes(pf))
         _lead = (f"{_nchg} of these tasks match a proc (by name) redeployed in the last 7 days — check "
@@ -1761,7 +1765,7 @@ def _failure_recurrence_panel(days: int = 0, *, pf: dict | None = None) -> None:
         n = len(rec)
         active = int((rec["SEVERITY"] == "High").sum())
         top = rec.iloc[0]
-        st.warning(f"🔴 {_lead}{n} task(s) failing or at risk of failing again — {active} actively broken. "
+        st.warning(f"🔴 {_lead}{n} task(s) failing or at risk of failing again{_scope} — {active} actively broken. "
                    f"Top: **{top.get('TASK_NAME')}** — {top.get('VERDICT')}.")
         styled_table(rec, height=320)
         st.caption("Each RUN_ID is one workflow's nightly execution. FAIL_STREAK = consecutive failed "
@@ -1828,7 +1832,9 @@ def _runtime_creep_panel(days: int = 0, *, pf: dict | None = None) -> None:
     so a task marching toward its window is caught while there's still time to act. For each
     creeping task: the per-run gain, the projected runtime a horizon ahead, and ~how many runs
     until it doubles its baseline. Config-gated on ETL_CONTROL_STATUS_FQN; honors the scope-bar
-    Window; a clean state when nothing is trending materially slower."""
+    Window and names it; a clean state only when at least one task had the CREEP_MIN_RUNS runs a fit
+    needs and none is trending materially slower -- too few runs in the Window (the 1st of the month
+    under Current month) is no_data_yet, never a green all-clear over nothing fitted."""
     section_header("Runtime creep (projected SLA breach)",
                    "warn", "pipeline", anchor="ops-wf-creep")
     fqn = str(load_settings(_PAGE).get("ETL_CONTROL_STATUS_FQN") or "").strip()
@@ -1840,10 +1846,11 @@ def _runtime_creep_panel(days: int = 0, *, pf: dict | None = None) -> None:
     if not hist_sql:
         empty_state("needs_setup", "ETL_CONTROL_STATUS_FQN is not a valid table name.")
         return
+    _scope = _etl_window_suffix(days)   # holistic review: every outcome names the Window it read
     res = (pf or {}).get("runtime_history") or run(hist_sql, page=_PAGE, key=f"etl_runtime_history_{days}", tier="recent",
               source="CONTROL_STATUS (per-task runtime series)",
               max_rows=etl_control_sql.MAX_HISTORY_ROWS)
-    if guard(res, "No runtime history yet to fit a trend.",
+    if guard(res, f"No runtime history{_scope} to fit a trend yet.",
              setup_hint="The app role needs SELECT on the CONTROL_STATUS table "
                         "(GRANT SELECT ON <table> TO ROLE <app role>)."):
         creep = etl_runtime_creep(res.df)
@@ -1855,8 +1862,17 @@ def _runtime_creep_panel(days: int = 0, *, pf: dict | None = None) -> None:
             st.caption(f"⚠ Fitted the first {etl_control_sql.MAX_HISTORY_SERIES} task series — some "
                        "tasks were not analyzed at this scale.")
         if creep.empty:
-            empty_state("clean", "No task is trending materially slower run-over-run — the fitted "
-                        "trends are flat or improving. (A task needs a few runs of history to trend.)")
+            _fit, _series = creep_fit_coverage(res.df)
+            if not _fit:
+                # holistic review: nothing was FITTED (on the 1st under Current month every nightly
+                # task has one run in the Window), so 'the fitted trends are flat' would be false --
+                # a scope state (no_data_yet), not a verified-clean green row (house law 8).
+                empty_state("no_data_yet", f"Not enough runs{_scope} to fit a trend — each task needs at "
+                            f"least {CREEP_MIN_RUNS}" + ("; widen the scope-bar Window." if _scope else "."))
+                return
+            empty_state("clean", f"No task is trending materially slower run-over-run{_scope} — the fitted "
+                        f"trends are flat or improving. ({_fit} of {_series} task(s) had the "
+                        f"{CREEP_MIN_RUNS}+ runs a trend needs.)")
             return
         creep, _nchg = annotate_proc_changes(creep, _etl_proc_changes(pf))
         _lead = (f"{_nchg} of these tasks match a proc (by name) redeployed in the last 7 days — check "
@@ -1866,7 +1882,7 @@ def _runtime_creep_panel(days: int = 0, *, pf: dict | None = None) -> None:
         _gain = humanize_duration(safe_float(top.get("SLOPE_SEC_PER_RUN")), "s")
         _r2x = int(safe_float(top.get("RUNS_TO_2X")))
         _when = "already ≥2× its baseline" if _r2x <= 0 else f"~{_r2x} run(s) from 2× its baseline"
-        st.warning(f"🟠 {_lead}{n} task(s) are trending slower run-over-run. Steepest: "
+        st.warning(f"🟠 {_lead}{n} task(s) are trending slower run-over-run{_scope}. Steepest: "
                    f"**{top.get('TASK_NAME')}** gaining {_gain}/run — {_when}.")
         # Show the slope as a humanized per-run rate (a raw '45.0' would read as a bare duration);
         # the _SEC columns (LATEST/BASELINE/PROJECTED) humanize themselves in the table machinery.
@@ -2183,7 +2199,9 @@ def _recon_recurrence_panel(days: int = 0, *, pf: dict | None = None) -> None:
     if not scan_sql:
         empty_state("needs_setup", "ETL_RECON_ERROR_FQN is not a valid table name.")
         return
-    _win = etl_control_sql.recon_window_phrase(days)   # R1-063: 'today' on a calendar day 0
+    # R1-063: 'today' on a calendar day 0; holistic review: 'since <first day>' mid-period, the
+    # runtimes label's rule (etl_control_sql.calendar_window_phrase), never 'in the last N days'
+    _win = etl_control_sql.recon_window_phrase(days, today=account_today())
     res = (pf or {}).get("recon_recurrence") or run(scan_sql, page=_PAGE, key=f"etl_recon_recurrence_{days}", tier="recent",
               source="RECON_MTRC_ERROR (recurrence)", max_rows=etl_control_sql.MAX_RECON_RECURRENCE_ROWS)
     if guard(res, f"No reconciliation errors {_win} — every metric ties out.",
@@ -4254,25 +4272,6 @@ def _contention_tab(company: str, days: int, *, bounds: tuple | None = None) -> 
                            "is cost-capped); the mart covers up to 14.")
 
 
-
-_VD_P95_RE = re.compile(r"p95 (\?|-?[0-9.]+)s->(\?|-?[0-9.]+)s")
-_VD_QUEUE_RE = re.compile(r"queue (\?|-?[0-9.]+)->(\?|-?[0-9.]+) min/d")
-
-
-def _humanize_verdict_detail(text: str) -> str:
-    """A change scan's VERDICT_DETAIL string with its durations in Hr/Min/Sec.
-
-    SP_WAREHOUSE_CHANGE_SCAN (V109) and the object-change scan (V140) build the string in SQL with
-    raw seconds ('p95 1800.0s->2400.0s', 'queue 145.00->200.00 min/d'), so the drill caption read
-    '1800.0s' right above a KPI showing the same p95 as '30m' (PR-1 R1-124). The numbers are left
-    as they are; only the duration tokens are re-rendered. The ALERT_EVENTS.DETAIL copy is SQL-side."""
-    def _h(tok: str, unit_sec: float) -> str:
-        return "?" if tok == "?" else humanize_duration(safe_float(tok) * unit_sec, "s")
-
-    out = _VD_P95_RE.sub(lambda m: f"p95 {_h(m.group(1), 1)} → {_h(m.group(2), 1)}", text)
-    return _VD_QUEUE_RE.sub(lambda m: f"queue {_h(m.group(1), 60)} → {_h(m.group(2), 60)}/day", out)
-
-
 def _wh_change_block(company: str, is_operator: bool) -> None:
     st.divider()
     section_header("Warehouse setting changes", "", "warehouse", anchor="ops-change-wh")
@@ -4329,7 +4328,7 @@ def _wh_change_block(company: str, is_operator: bool) -> None:
                         f"{row.get('OLD_VALUE', '?')} → {row.get('NEW_VALUE', '?')}")
             _verdict_detail = str(row.get("VERDICT_DETAIL") or "").strip()
             if _verdict_detail:
-                st.caption(f"**{row.get('VERDICT')}** — {_humanize_verdict_detail(_verdict_detail)}")
+                st.caption(f"**{row.get('VERDICT')}** — {wh_change.humanize_verdict_detail(_verdict_detail)}")
             if deltas:
                 def _wc_val(d: dict) -> str:
                     # P95_S is an elapsed time in seconds — humanize it (30m, 1h 30m),
@@ -4463,7 +4462,7 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
             # r4: the full verdict rationale lives here now (was a wide table column)
             _vd = str(crow.get("VERDICT_DETAIL") or "").strip()
             if _vd:
-                st.caption(f"**{crow.get('VERDICT')}** — {_humanize_verdict_detail(_vd)}")
+                st.caption(f"**{crow.get('VERDICT')}** — {wh_change.humanize_verdict_detail(_vd)}")
         pick = clicked_obj or st.selectbox("Object (or click a row above)", picks, key="chg_pick")
         # T1.4: the 28d QUERY/TASK_HISTORY scan used to run every render on the
         # auto-selected first object. A row click loads it immediately; otherwise it

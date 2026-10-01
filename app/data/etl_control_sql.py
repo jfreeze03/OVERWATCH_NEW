@@ -26,6 +26,7 @@ SQL. Pure module: bounded output, no Streamlit, no dollar rates.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, timedelta
 
 # The Teradata ETL translation (XLAT) table's own column convention. These are
 # fixed for the reference table (the family axis is SRC_IDNTFTN_NM, the translated
@@ -699,12 +700,41 @@ def _recon_window_start(days: object) -> str:
     return f"DATEADD('day', -{n if n > 0 else RECON_RECURRENCE_LOOKBACK_DAYS}, CURRENT_TIMESTAMP())"
 
 
-def recon_window_phrase(days: object) -> str:
-    """How the recurrence panel names the window recon_recurrence_scan actually read (R1-063):
-    'today' for a calendar day-0 offset, never the 90-day default it no longer falls back to."""
+def calendar_window_phrase(days: object, *, today: date) -> str | None:
+    """How a CALENDAR-offset Window (``date_windows.CalendarDayOffset``) reads once _window_clause /
+    _recon_window_start anchor it on the account DATE: 'today' at offset 0 (the period's first day),
+    else 'since <Mon> <d>' -- the first day the read covers (today - N, at midnight). None for
+    anything else (a plain int is a trailing now-anchored window; the caller names it).
+
+    The ONE rule every ETL Window label uses (operations._etl_window_suffix and recon_window_phrase):
+    the v4.606 holistic review found the runtimes label saying 'since Sep 1' while the recon
+    recurrence panel called the same since-the-1st read 'in the last 9 days'. ``today`` is the
+    ACCOUNT clock's date (``formulas.account_today``), passed in so this stays pure."""
+    if not getattr(days, "calendar_window", False):
+        return None
     n = int(days) if isinstance(days, (int, float)) else 0
-    if getattr(days, "calendar_window", False) and n == 0:
+    if n < 0:
+        return None
+    if n == 0:
         return "today"
+    start = today - timedelta(days=n)
+    return f"since {start:%b} {start.day}"
+
+
+def recon_window_phrase(days: object, *, today: date | None = None) -> str:
+    """How the recurrence panel names the window recon_recurrence_scan actually read (R1-063): a
+    calendar offset by calendar_window_phrase ('today' on the period's first day, else 'since <first
+    day>' -- never 'in the last N days' for a read that starts on the 1st), a plain N as 'in the
+    last N days', anything else as the 90-day default _recon_window_start falls back to. ``today``
+    (the account date) is only needed for a mid-period calendar offset; the page passes it."""
+    if getattr(days, "calendar_window", False):
+        if today is None:
+            from app.logic.formulas import account_today
+            today = account_today()
+        phrase = calendar_window_phrase(days, today=today)
+        if phrase is not None:
+            return phrase
+    n = int(days) if isinstance(days, (int, float)) else 0
     return f"in the last {n if n > 0 else RECON_RECURRENCE_LOOKBACK_DAYS} days"
 
 
