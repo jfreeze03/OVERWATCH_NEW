@@ -96,13 +96,19 @@ def test_duration_detectors_gate_on_min_active_days():
 
 
 # ---- F10 (LOW): failure-timeline all-clear discloses its mart basis ----------------
-def test_failure_timeline_discloses_hourly_mart_basis():
+# v4.608 R2-008 / R2-113 moved this lock: F10's premise ("the hourly task mart") was wrong --
+# FACT_TASK_DAILY loads once a day (TASK_LOAD_DAILY, ~06:45 CT), so a mart zero could hide a failure
+# for up to ~24h behind a green row. A mart count never short-circuits the live scan now; the
+# behaviour is render-tested in tests/test_p608_ops_etl.py.
+def test_failure_timeline_short_circuits_only_on_a_live_count():
     body = _src("app/ui/pages/operations.py")
     section = body.split("def _failure_timeline_section", 1)[1].split("\ndef ", 1)[0]
     assert "known_from_live: bool = False" in section
-    assert "per the" in section and "hourly task mart" in section
-    # the caller passes whether the count came from the live fallback vs the lagging mart
+    assert "if known_from_live and known_failures is not None and known_failures <= 0:" in section
+    assert "hourly task mart" not in section            # the mart-zero clean row is gone
+    # the caller passes whether the count came from the live fallback vs the daily mart
     assert "known_from_live=not _from_mart" in body
+    assert "_kf = None if (_from_mart or is_prior_month_window(bounds)) else known_failed" in body
 
 
 # ---- V101 / V102: owner-gated retry-collapse migrations ----------------------------

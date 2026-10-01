@@ -236,7 +236,10 @@ def test_expected_gaps_reference_real_canaries_and_stay_feature_gated():
     assert names >= EXPECTED_GAPS              # no phantom declarations
     # v4.603 (Next-Fifty #34) moved this lock deliberately: SYSTEM$CLIENT_VERSION_INFO() is the one
     # non-Cortex account-feature function whose absence is a state, not drift. Name it; never a prefix.
-    assert all(n.startswith("cortex.") or n == "security.client_version_info" for n in EXPECTED_GAPS)
+    # v4.608 (R2-065) named one more, by exact name: ACCOUNT_USAGE.QUERY_INSIGHTS, an optional view (newer
+    # accounts/editions) whose absence the Operations panel already treats as a state.
+    assert {n for n in EXPECTED_GAPS if not n.startswith("cortex.")} == {
+        "security.client_version_info", "insights.query_insights_feed"}
     core = {n for n in names if n.startswith(("mart.", "chargeback.", "recheck."))}
     assert not (core & EXPECTED_GAPS)          # core objects absent => FAIL
 

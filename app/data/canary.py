@@ -13,6 +13,7 @@ from app.data import (
     app_cost_sql,
     change_impact_sql,
     chargeback_sql,
+    chatter_sql,
     cortex_sql,
     cost_sql,
     etl_sql,
@@ -168,6 +169,31 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("ops.task_graph_run_nodes", lambda: ops_sql.task_graph_run_nodes()),
     ("ops.task_graph_versions", lambda: ops_sql.task_graph_versions()),
     ("ops.task_graph_version_nodes", lambda: ops_sql.task_graph_version_nodes()),
+    # v4.608 R2-063 / R2-065 / R2-066 / R2-067: Operations / ETL readers that had no canary. The first four
+    # ops entries and query_insights_feed / object_dependency_edges are probe=True reads, which log neither an
+    # absent object nor a missing column, so a drifted column failed every render with no APP_ERROR_LOG row
+    # while this registry stayed green. The operator boards pass the identity filters so the V147
+    # USER_NAME / DATABASE_NAME / SCHEMA_NAME grain compiles too; query_detail takes a VALID id (a bad one
+    # raises) and a recent start hint so its scan stays bounded. Every one reads a core object or a standard
+    # view (absence FAILs) except insights.query_insights_feed: QUERY_INSIGHTS is an optional view (newer
+    # accounts/editions), declared in EXPECTED_GAPS so only its absence reads GAP and a missing column FAILs.
+    ("ops.operator_stats_summary", lambda: ops_sql.operator_stats_summary(
+        1, "ALFA", "WH", user_contains="X", database="DBA_MAINT_DB", schema_contains="X")),
+    ("ops.operator_problem_board", lambda: ops_sql.operator_problem_board(
+        1, "ALFA", "WH", user_contains="X", database="DBA_MAINT_DB", schema_contains="X")),
+    ("ops.operator_anatomy", lambda: ops_sql.operator_anatomy("canary-probe")),
+    ("ops.table_pruning_candidates", lambda: ops_sql.table_pruning_candidates(1, "ALFA")),
+    ("ops.query_opportunity_fingerprints", lambda: ops_sql.query_opportunity_fingerprints(1, "ALFA")),
+    ("ops.running_queries", lambda: ops_sql.running_queries("WH_ALFA_ADMIN")),
+    ("insights.query_insights_feed", lambda: insights_sql.query_insights_feed(1)),
+    ("insights.table_retention_live",
+     lambda: insights_sql.table_retention_live("DBA_MAINT_DB", "OVERWATCH", "SETTINGS")),
+    ("insights.table_storage_breakdown", lambda: insights_sql.table_storage_breakdown("ALFA")),
+    ("insights.query_detail", lambda: insights_sql.query_detail(
+        "00000000-0000-0000-0000-000000000000", (account_today() - timedelta(days=1)).isoformat())),
+    ("graph.object_dependency_edges", lambda: graph_sql.object_dependency_edges(1)),
+    ("chatter.by_application", lambda: chatter_sql.chatter_by_application(1)),
+    ("chatter.families_for_application", lambda: chatter_sql.chatter_families_for_application("canary-probe", 1)),
     ("ops.volume_deltas", lambda: ops_sql.volume_deltas()),
     ("mart.dept_budgets", lambda: mart_sql.dept_budgets()),
     ("mart.app_usage_summary", lambda: mart_sql.app_usage_summary(1)),
@@ -386,4 +412,8 @@ EXPECTED_GAPS: frozenset[str] = frozenset({
     "cortex.code_token_types",
     "cortex.quota_access_block_history",
     "cortex.app_self_cost",
+    # v4.608 R2-065: ACCOUNT_USAGE.QUERY_INSIGHTS is an optional view (newer accounts/editions; the
+    # Operations panel reads it probe=True and shows a calm note when it is absent). Only its absence reads
+    # GAP; a renamed column (INSIGHT_TYPE_ID, MESSAGE) is drift and FAILs.
+    "insights.query_insights_feed",
 })
