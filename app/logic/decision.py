@@ -57,7 +57,16 @@ def prioritize_workloads(frame: pd.DataFrame | None, rate: float,
     ).round(2)
 
     out["IMPACT_USD_30D"] = (credits * max(safe_float(rate), 0.0) / horizon * 30).round(2)
-    out["FAIL_PCT"] = (fails / runs.replace(0, pd.NA) * 100).fillna(0.0).round(2)
+    # R1-083: FAILS comes from the family mart, so its rate is over the SAME population's runs
+    # (FAMILY_RUNS, the optimize-queue / advisor shape). The pattern mart's RUNS counts only
+    # warehouse-attributed runs (no result-cache hits, no compile-time failures), so FAILS / RUNS
+    # read high -- past 100%, or across the 2% "Stabilize failures" gate on a 1% family. RUNS stays
+    # the per-row fallback (a NaN / zero FAMILY_RUNS, or the non-advisor portfolio), clamped to 100.
+    fail_den = runs
+    if "FAMILY_RUNS" in out.columns:
+        family_runs = pd.to_numeric(out["FAMILY_RUNS"], errors="coerce")
+        fail_den = family_runs.where(family_runs.gt(0), runs)
+    out["FAIL_PCT"] = (fails / fail_den.replace(0, np.nan) * 100).fillna(0.0).clip(0.0, 100.0).round(2)
     run_evidence = (runs / 30).clip(upper=1.0)
     day_evidence = (active_days / min(horizon, 30)).clip(upper=1.0)
     cost_evidence = credits.gt(0).astype(float)
