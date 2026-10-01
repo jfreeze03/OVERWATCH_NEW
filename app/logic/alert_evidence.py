@@ -25,6 +25,10 @@ _SERVICE_AFTER_RE = re.compile(r"\bSERVICE\s+([A-Z0-9_]+)")
 _LEADING_TOKEN_RE = re.compile(r"^\s*([A-Z][A-Z0-9_]{2,})\b")
 # R1-052: PERF_FINGERPRINT_DRIFT's DETAIL is 'Hash <QUERY_PARAMETERIZED_HASH> | runs ...' (SP_ANOMALY_SWEEP, V150)
 _FAMILY_HASH_RE = re.compile(r"\bHash\s+([0-9A-Fa-f]{16,64})\b")
+# V150 SP_SCAN_CLOUD_SVC_ANOMALY titles: 'CLOUD SVC ' || COALESCE(WAREHOUSE_NAME, 'NONE') ||
+# ' cloud-services spiked to|collapsed to ' || credits || ' credits on ' || DAY || ' (z=..)'.
+_CS_ANOMALY_SERIES_RE = re.compile(r"^\s*CLOUD SVC (.+?) cloud-services (?:spiked|collapsed) to\b",
+                                   re.IGNORECASE)
 
 # Human labels for the caption over the "Assemble evidence" button — they tell
 # the DBA which evidence the AI will be grounded in BEFORE they spend credits.
@@ -100,11 +104,21 @@ def plan_for_alert(rule_id: str, title: str, detail: str = "",
     warehouse = wh_match.group(0) if wh_match else ""
     day = _day_from(title, raised_at)
 
-    if rid == "COST_CLOUD_SVC_RATIO":
-        # The ratio is driven by query SHAPES on the warehouse (compile/metadata
-        # overhead) — without a warehouse there is nothing honest to scope to.
+    if rid in ("COST_CLOUD_SVC_RATIO", "COST_CLOUD_SVC_ANOMALY"):
+        # Cloud-services credits are driven by query SHAPES on the warehouse (compile/metadata
+        # overhead) — without a warehouse there is nothing honest to scope to. Review R1-110: V157
+        # retired the RATIO rule (kept: its closed rows still render) for V150's per-warehouse
+        # ANOMALY rule, which fell through to the generic query-latency pack. Its warehouse comes
+        # from the fixed title shape, so a name without the WH_ prefix is still scoped, and the
+        # NULL-warehouse series ('CLOUD SVC NONE') gets no pack rather than an account-wide one.
+        if rid == "COST_CLOUD_SVC_ANOMALY":
+            series = _CS_ANOMALY_SERIES_RE.match(title)
+            warehouse = series.group(1).strip() if series else ""
+            if warehouse.upper() == "NONE":
+                warehouse = ""
         if not warehouse:
             return None
+        # V150 scores only the last 3 complete days, so the alert's day is inside this window.
         return EvidencePlan("cloud_svc", "last 7 days", days=7, warehouse=warehouse)
 
     if rid == "COST_AI_CREEP":

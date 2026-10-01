@@ -657,7 +657,6 @@ _NON_PROBE_ALLOWLIST: dict[tuple[str, str], tuple[str, str]] = {
     ("app/ui/workbench.py", "detail"): ("_render_data_product_detail", "run"),
     ("app/ui/workbench.py", "record"): ("render_entity_360", "run"),
     ("app/ui/workbench.py", "changes"): ("render_entity_360", "run"),
-    ("app/ui/pages/alerts.py", "prec"): ("render", "run"),
     ("app/ui/pages/control_room.py", "res"): ("_freshness_board", "run_mart_first"),
     ("app/ui/pages/cost_parts/contract.py", "org_m"): ("_rate_card_reconciliation", "run"),
     ("app/ui/pages/cost_parts/contract.py", "model_m"): ("_rate_card_reconciliation", "run"),

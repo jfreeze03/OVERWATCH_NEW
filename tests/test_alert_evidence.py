@@ -162,3 +162,45 @@ def test_evidence_plan_caption_fields_are_populated() -> None:
     assert isinstance(plan, EvidencePlan)
     assert plan.label == "this warehouse's queueing by hour"
     assert "warehouse WH_ALFA_BI_PRD" in plan.scope_note
+
+
+# Review R1-110: V157 retired COST_CLOUD_SVC_RATIO for V150's COST_CLOUD_SVC_ANOMALY, which had no branch and fell
+# through to the generic query-latency pack (QUERY_HISTORY elapsed hours) -- the off-topic evidence this module
+# exists to prevent. Titles below are V150's exact shape ('CLOUD SVC ' || COALESCE(WAREHOUSE_NAME, 'NONE') || ...).
+_CS_SPIKE = "CLOUD SVC WH_ALFA_ETL_PRD cloud-services spiked to 12.34 credits on 2026-09-29 (z=5.1)"
+_CS_COLLAPSE = "CLOUD SVC WH_ALFA_ETL_PRD cloud-services collapsed to 0.4 credits on 2026-09-29 (z=-4.2)"
+
+
+def test_v150_title_shape_is_what_the_resolver_parses() -> None:
+    from pathlib import Path
+    v150 = (Path(__file__).resolve().parents[1] / "snowflake" / "migrations"
+            / "V150__cloud_svc_anomaly_baseline.sql").read_text(encoding="utf-8")
+    assert "SELECT 'CLOUD SVC ' || COALESCE(WAREHOUSE_NAME, 'NONE') AS SERIES" in v150
+    assert ("l.SERIES || IFF(l.SIGNED_Z < 0, ' cloud-services collapsed to ', ' cloud-services spiked to ')"
+            in v150)
+
+
+def test_cloud_svc_anomaly_gets_the_cloud_services_pack_for_its_warehouse() -> None:
+    for title in (_CS_SPIKE, _CS_COLLAPSE):
+        plan = plan_for_alert("COST_CLOUD_SVC_ANOMALY", title, "Median 2.1 CS credits/day", "2026-09-30 06:00:00")
+        assert plan is not None and plan.kind == "cloud_svc", title
+        assert plan.warehouse == "WH_ALFA_ETL_PRD" and plan.days == 7
+        sql = alert_evidence_sql.build(plan)
+        assert "MART_CLOUD_SVC_DAILY" in sql and "WAREHOUSE_NAME = 'WH_ALFA_ETL_PRD'" in sql
+        assert "QUERY_HISTORY" not in sql and "ELAPSED_H" not in sql      # never the latency pack
+
+
+def test_cloud_svc_anomaly_scopes_a_warehouse_without_the_wh_prefix() -> None:
+    plan = plan_for_alert("COST_CLOUD_SVC_ANOMALY",
+                          "CLOUD SVC COMPUTE_WH cloud-services spiked to 3.0 credits on 2026-09-29 (z=4.0)", "", "")
+    assert plan is not None and plan.kind == "cloud_svc" and plan.warehouse == "COMPUTE_WH"
+    assert "WAREHOUSE_NAME = 'COMPUTE_WH'" in alert_evidence_sql.build(plan)
+
+
+def test_cloud_svc_anomaly_without_a_warehouse_withholds_evidence() -> None:
+    # the NULL-warehouse series, and an unparseable title, get no pack -- never an account-wide one
+    assert plan_for_alert("COST_CLOUD_SVC_ANOMALY",
+                          "CLOUD SVC NONE cloud-services spiked to 9.9 credits on 2026-09-29 (z=6.0)", "", "") is None
+    assert plan_for_alert("COST_CLOUD_SVC_ANOMALY", "cloud-services oddity", "", "") is None
+    # the retired ratio rule keeps its pack (its closed rows still render)
+    assert plan_for_alert("COST_CLOUD_SVC_RATIO", _CLOUD, "", "").kind == "cloud_svc"

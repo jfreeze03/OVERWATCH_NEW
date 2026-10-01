@@ -326,6 +326,9 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("mart.score_inputs_daily", lambda: mart_sql.score_inputs_daily(7)),
     ("insights.expensive_patterns_usd", lambda: insights_sql.expensive_patterns_usd(1, "ALFA", 5)),
     ("recheck.wh_daily_credits", lambda: recheck_sql.recheck_sql("COST_WH_DAILY_CREDITS", "WH_ALFA_ADMIN") or ""),
+    # review R1-040: the queued/spill re-checks now read FACT_QUERY_HOURLY's QUEUED_SEC_SUM / SPILL_REMOTE_GB
+    ("recheck.queued_minutes", lambda: recheck_sql.recheck_sql("PERF_QUEUED_MINUTES", "WH_ALFA_ADMIN") or ""),
+    ("recheck.spill_gb", lambda: recheck_sql.recheck_sql("PERF_SPILL_GB", "WH_ALFA_ADMIN") or ""),
     ("mart.day_spend_movers", lambda: mart_sql.day_spend_movers("2026-01-02")),
     ("mart.day_activity", lambda: mart_sql.day_activity("2026-01-02")),
     ("mart.day_task_failures", lambda: mart_sql.day_task_failures("2026-01-02")),

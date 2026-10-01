@@ -19,10 +19,11 @@ from app.config import core_object
 from app.core.errors import safe_page
 from app.core.identity import idempotency_key, identity_sql, viewer_name
 from app.core.query import execute_action, execute_statement, run, run_batch
+from app.core.result import QueryResult, is_setup_absence
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters, navigation_context, request_navigation
-from app.data import alert_evidence_sql, mart_sql, ops_sql, recheck_sql, security_sql
+from app.data import alert_evidence_sql, mart_sql, ops_sql, recheck_sql
 from app.logic import email_path, remediation, stmt_timeout, tuning
 from app.logic.ai_prompts import alert_evidence_prompt
 from app.logic.alert_evidence import plan_for_alert
@@ -93,6 +94,87 @@ def _optional_number(value: object, suffix: str = "", decimals: int = 0) -> str:
 
 
 _SETUP_HINT = "Alerting is not installed yet — an admin can verify on Admin → Migrations & freshness."
+
+
+_SOURCE_ABSENT = ("This panel's source isn't installed or isn't readable by this app — an admin can check "
+                  "Admin → Migrations & freshness.")
+
+
+def _failed_read(res: QueryResult, sentence: str, setup: str = _SOURCE_ABSENT) -> bool:
+    """Render a FAILED read by its kind and return True; False when the read succeeded, so the caller renders its
+    data or its own ok-and-empty wording (v4.605 rule; reviews R1-045 / R1-116 / R1-168 / R1-172).
+
+    needs_setup (``setup``) only for a true absence (is_setup_absence: the object is missing or not readable by
+    the app's role); schema drift, a timeout or any other failure is 'unavailable' with ``sentence`` and the error
+    one click away. A failed read must never reach the "not installed yet", "appears once ..." or all-clear
+    wording an ok-but-empty read earns -- those blame setup, the data or nothing for a read that broke."""
+    if res.ok:
+        return False
+    if is_setup_absence(res.error_kind):
+        empty_state("needs_setup", setup)
+    else:
+        empty_state("unavailable", sentence, detail=str(res.error or ""))
+    return True
+
+
+# Row caps of the LIMITed alert reads whose length a label used to print as a count (reviews R1-177/R1-179):
+# the open feed (mart_sql.open_alert_events, shared with Control Room), the snoozed tray, and the drawer's
+# rule history (mart_sql.events_for_rule's fixed LIMIT 20).
+_OPEN_FEED_CAP = 500
+_SNOOZED_CAP = 100
+_RULE_HISTORY_CAP = 20
+
+
+def _capped_count(n: int, cap: int) -> str:
+    """A count read off a LIMIT-``cap`` frame: 'N+' once the frame is full (more may exist past the cap)."""
+    return f"{n:,}+" if n >= cap else f"{n:,}"
+
+
+def _feed_fallback_counts(df: pd.DataFrame, cap: int) -> tuple[int, int, int, str, str, str, bool]:
+    """(crit, high, total, crit_text, high_text, total_text, capped) counted from the open feed when the uncapped
+    count failed (review R1-177). The feed is severity-first then newest, LIMIT ``cap``: once it is full the total
+    is a floor ('500+'); CRITICAL is exact only if the feed also holds a less severe row, HIGH only if it holds a
+    MEDIUM/LOW one -- otherwise more of that severity may lie past the cap. Pure."""
+    sev = df["SEVERITY"].astype(str).str.upper() if "SEVERITY" in df.columns else pd.Series(dtype=str)
+    crit, high, total = int((sev == "CRITICAL").sum()), int((sev == "HIGH").sum()), len(df)
+    if total < cap:
+        return crit, high, total, f"{crit}", f"{high}", f"{total}", False
+    crit_s = f"{crit}" if bool((sev != "CRITICAL").any()) else f"{crit}+"
+    high_s = f"{high}" if bool((~sev.isin(("CRITICAL", "HIGH"))).any()) else f"{high}+"
+    return crit, high, total, crit_s, high_s, f"{total}+", True
+
+
+def _rule_current(rules_df: pd.DataFrame, rule_id: str) -> tuple[float | None, bool]:
+    """(THRESHOLD_NUM, ENABLED) of ``rule_id`` in the ALERT_CONFIG frame: the threshold is None when absent or
+    unreadable (never a fabricated 0.0); ENABLED reads Snowflake BOOLEAN / 'true' text, True when unknown."""
+    rows = rules_df[rules_df["RULE_ID"].astype(str) == str(rule_id)] if "RULE_ID" in rules_df.columns else rules_df
+    if rows.empty:
+        return None, True
+    thr = safe_float(rows.iloc[0].get("THRESHOLD_NUM"), default=float("nan"))
+    raw = rows.iloc[0].get("ENABLED")
+    if isinstance(raw, str):
+        enabled = raw.strip().lower() in ("true", "1", "yes", "y")
+    else:
+        enabled = True if raw is None or (isinstance(raw, float) and math.isnan(raw)) else bool(raw)
+    return (thr if math.isfinite(thr) else None), enabled
+
+
+def _rule_change_sql(rule_id: str, cur_threshold: float | None, cur_enabled: bool,
+                     new_threshold: float | None, new_enabled: bool) -> str:
+    """The generate-only ALERT_CONFIG UPDATE for the threshold generator, writing ONLY the columns that change
+    (review R1-233): toggling Enabled never rewrites THRESHOLD_NUM, and an empty threshold box (None) leaves it
+    alone. '' when nothing changes."""
+    sets = []
+    if new_threshold is not None and (cur_threshold is None
+                                      or abs(float(new_threshold) - float(cur_threshold)) > 1e-12):
+        sets.append(f"THRESHOLD_NUM = {float(new_threshold)}")
+    if bool(new_enabled) != bool(cur_enabled):
+        sets.append(f"ENABLED = {str(bool(new_enabled)).upper()}")
+    if not sets:
+        return ""
+    return (f"UPDATE {core_object('ALERT_CONFIG')}\n"
+            f"SET {', '.join(sets)}, UPDATED_AT = CURRENT_TIMESTAMP()\n"
+            f"WHERE RULE_ID = {sql_literal(rule_id)};")
 
 
 RESOLUTION_KINDS = ("ACTIONED", "NOISE", "EXPECTED")
@@ -487,8 +569,10 @@ def _delivery_status() -> None:
     # actually name, and check for ANY of them.
     integ = run("SHOW NOTIFICATION INTEGRATIONS", page=_PAGE,
                 key="delivery_integ", tier="metadata", source="SHOW INTEGRATIONS", max_rows=0)
+    # Review R1-169: the 5-minute tier Admin's task-health read uses, not the 4 h metadata entry -- this banner
+    # answers "who gets paged right now", so a task a DBA suspended in a worksheet must not read LIVE for hours.
     task = run("SHOW TASKS LIKE 'TASK_ALERT_NOTIFY' IN SCHEMA DBA_MAINT_DB.OVERWATCH",
-               page=_PAGE, key="delivery_task", tier="metadata", source="SHOW TASKS", max_rows=0)
+               page=_PAGE, key="delivery_task", tier="recent", source="SHOW TASKS", max_rows=0)
     last = run(f"SELECT MAX(NOTIFIED_AT) AS LAST_SEND FROM {core_object('ALERT_EVENTS')}",
                page=_PAGE, key="delivery_last", tier="live", source="ALERT_EVENTS")
     # Which integrations do the ENABLED routes actually name? That is the set that has
@@ -544,10 +628,24 @@ def _delivery_status() -> None:
                        f"does not exist ({', '.join(missing)}) — every run logs a failure "
                        "for it, burying real errors. Disable those routes in ALERT_ROUTES "
                        "or create the integration.")
-    elif has_integ:
+    elif has_integ and task_state == "suspended":
         st.warning("Integration exists but the notify task is suspended — an admin can "
                    "resume TASK_ALERT_NOTIFY (one statement, see the runbook's delivery "
                    "section). Until then, 2am alerts wait for someone to look.")
+    elif has_integ and not task.ok:
+        # Review R1-169 (the #32 rule, for the task read): a FAILED SHOW TASKS is not evidence of a state.
+        st.warning("Delivery status unable to verify — the SHOW TASKS read failed, so whether "
+                   "TASK_ALERT_NOTIFY is running is unknown. This is NOT proof alerts are undelivered "
+                   "or that the task is suspended; retry, or check the warehouse/grants. Treat delivery "
+                   "as UNKNOWN until it resolves.")
+    elif has_integ:
+        # an ok read with no row (the task is not created, or the owner role holds no privilege on it) or with no
+        # readable state -- the deploy_health NOT_VISIBLE / "State unknown" cases, never "suspended"
+        st.warning("Delivery status unknown — SHOW TASKS does not show TASK_ALERT_NOTIFY's state to the app's "
+                   "owner role (not created, or the role holds no privilege on it"
+                   + (f"; state reads '{task_state}'" if task_state else "")
+                   + "). This is NOT evidence it is suspended; check Task health on Admin → "
+                     "Migrations & freshness.")
     else:
         st.error(f"Enabled route(s) point at an integration that does not exist "
                  f"({', '.join(missing)}) — alerts stay in-app only. One-time setup: "
@@ -581,6 +679,23 @@ def _plan_notice(plan: dict | None) -> None:
         st.warning(plan["message"])
     elif plan["level"] == "info":
         st.info(plan["message"])
+
+
+def _auto_suspend_in_force(show_df: pd.DataFrame | None, warehouse: str) -> tuple[bool, float | None]:
+    """(known, seconds) for ``warehouse``'s AUTO_SUSPEND from a SHOW WAREHOUSES frame; (False, None) when the
+    read failed (None), the exact-name row is absent (LIKE's '_' wildcard can return near-name rows) or the
+    value is unreadable/NULL -- the tighten guard then generates no ALTER. Pure; never raises."""
+    if show_df is None or show_df.empty:
+        return False, None
+    df = show_df.copy()
+    df.columns = [str(c).lower() for c in df.columns]
+    if "name" not in df.columns or "auto_suspend" not in df.columns:
+        return False, None
+    match = df[df["name"].astype(str).str.strip().str.upper() == str(warehouse or "").strip().upper()]
+    if match.empty:
+        return False, None
+    value = pd.to_numeric(match.iloc[0].get("auto_suspend"), errors="coerce")
+    return (True, float(value)) if pd.notna(value) else (False, None)
 
 
 # The cap the drawer's 'Statement timeout 1h' lever sets (its impact read covers stmt_timeout.IMPACT_DAYS).
@@ -1199,11 +1314,15 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                 # F50: PERSIST the verdict per event — it used to vanish on the
                                 # very next rerun, the moment the operator touched the decide bar.
                                 # at_dt (full datetime) is the freshness gate; "at" is display.
+                                # closed_day (review R1-040): a full-day-total event raised for an
+                                # EARLIER day than today -- today's partial re-check can't clear it.
                                 st.session_state[_rc_key] = {
                                     "value": current_v, "thr": thr,
                                     "label": recheck_sql.recheck_label(_rid),
                                     "at": account_now().strftime("%H:%M"),
                                     "at_dt": account_now(),
+                                    "closed_day": recheck_sql.recheck_closed_day(
+                                        _rid, str(row["TITLE"]), account_now().date().isoformat()),
                                 }
                         else:
                             st.session_state[_rc_key] = {"error": rc.error or "no data today.",
@@ -1220,6 +1339,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                             _rct = _rc_state.get("thr")
                             _rcl = str(_rc_state.get("label") or "")
                             _rca = str(_rc_state.get("at") or "")
+                            _rc_day = str(_rc_state.get("closed_day") or "")
                             # review fix: the one-click resolve is evidence for an AUDIT
                             # note — gate it on freshness (30 min) so a persisted CLEAR
                             # can't resurface days later as if measured just now.
@@ -1234,10 +1354,17 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                     st.warning(f"Still over: {_rcl} = "
                                                f"{_recheck_vs_text(_rid, _rcv, safe_float(_rct))} "
                                                f"(re-checked {_rca}).")
-                                elif not _rc_fresh:
-                                    st.info(f"Was clear when re-checked {_rca}: {_rcl} = "
-                                            f"{_recheck_vs_text(_rid, _rcv, safe_float(_rct))} "
-                                            "— re-check again before resolving.")
+                                elif not _rc_fresh or _rc_day:
+                                    # Review R1-040: an event for a CLOSED day (a full-day total, e.g.
+                                    # yesterday's credits) re-checks today's partial day -- under the
+                                    # threshold is not that event's condition clearing, so no clear verdict
+                                    # and no ACTIONED prefill; only "still over" (today too) is evidence.
+                                    st.info((f"Today so far (re-checked {_rca}): {_rcl} = " if _rc_day
+                                             else f"Was clear when re-checked {_rca}: {_rcl} = ")
+                                            + f"{_recheck_vs_text(_rid, _rcv, safe_float(_rct))} "
+                                            + (f"— this alert is for {_rc_day}, a closed day; a partial day "
+                                               "cannot clear a full-day total, so this is not a clear."
+                                               if _rc_day else "— re-check again before resolving."))
                                 else:
                                     st.success(f"Condition clear: {_rcl} = "
                                                f"{_recheck_vs_text(_rid, _rcv, safe_float(_rct))} "
@@ -1263,7 +1390,12 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                         key=f"hist_rule_{event_id[:8]}", tier="recent",
                         source="ALERT_EVENTS (90d, this rule)")
                     if hist.usable() and len(hist.df) > 1:
-                        with st.expander(f"This rule recently ({len(hist.df)} events)"):
+                        # review R1-179: events_for_rule is LIMIT 20 -- at the cap the count is the latest 20,
+                        # not the rule's 90-day total
+                        _hn = len(hist.df)
+                        with st.expander("This rule recently ("
+                                         + (f"latest {_hn}" if _hn >= _RULE_HISTORY_CAP else f"{_hn}")
+                                         + " events)"):
                             styled_table(hist.df, height=220)
                     # rec26: how was this resolved last time? The kind + note from the account's
                     # own history is a playbook this exact alert has earned. styled_table (not
@@ -1317,23 +1449,19 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                             if fix_kind.startswith("Tighten"):
                                 # r34: read the CURRENT AUTO_SUSPEND before generating a tighten — a
                                 # blind SET=60 RAISES an already-30s timer (the A3 hazard), the
-                                # unguarded twin of the Remediation tab guard (optimize.py). Reuses
-                                # the cached 'jump_wh' SHOW WAREHOUSES read (no extra query).
-                                _cl_known, _cl_cur = False, None
-                                _cl_whs = run(security_sql.show_warehouses_sql(), page=_PAGE,
-                                              key="jump_wh", tier="metadata",
-                                              source="SHOW WAREHOUSES", max_rows=0)
-                                if _cl_whs.ok and not _cl_whs.empty:
-                                    _clw = _cl_whs.df.copy()
-                                    _clw.columns = [str(c).lower() for c in _clw.columns]
-                                    if "name" in _clw.columns:
-                                        _clm = _clw[_clw["name"].astype(str).str.strip().str.upper()
-                                                    == str(wh_inline).strip().upper()]
-                                        if not _clm.empty and "auto_suspend" in _clw.columns:
-                                            _clv = pd.to_numeric(_clm.iloc[0].get("auto_suspend"),
-                                                                 errors="coerce")
-                                            if pd.notna(_clv):
-                                                _cl_known, _cl_cur = True, float(_clv)
+                                # unguarded twin of the Remediation tab guard (optimize.py). Review
+                                # R1-170: this read gates an EXECUTABLE ALTER + a ledger booking, so it
+                                # is ONE warehouse's SHOW on the 30 s live tier (like the timeout lever,
+                                # review C13), never the shared 4 h 'jump_wh' metadata entry, which can
+                                # hold a timer a DBA tightened in a worksheet since and so loosen it. A
+                                # failed read leaves the setting unknown (no ALTER), never the cache.
+                                _cl_sql = recheck_sql.warehouse_settings_sql(wh_inline)
+                                _cl_whs = (run(_cl_sql, page=_PAGE, key=f"clf_suspend_{event_id[:8]}",
+                                               tier="live", source=f"SHOW WAREHOUSES LIKE {wh_inline}",
+                                               max_rows=0, probe=True)
+                                           if _cl_sql else None)
+                                _cl_known, _cl_cur = _auto_suspend_in_force(
+                                    _cl_whs.df if _cl_whs is not None and _cl_whs.ok else None, wh_inline)
                                 _cl_plan = remediation.tighten_suspend_plan(wh_inline, _cl_cur, _cl_known)
                                 stmt_cl = _cl_plan["stmt"]
                                 _plan_notice(_cl_plan)
@@ -1438,7 +1566,15 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                             ev = run(alert_evidence_sql.build(plan),
                                      page=_PAGE, key=f"ai_ev_{plan.kind}_{event_id[:8]}", tier="historical",
                                      source="ACCOUNT_USAGE / marts (per-alert evidence)")
-                            if not ev.ok or ev.empty:
+                            # Review R1-045: a FAILED evidence read (timeout, drift, an unreadable mart) is
+                            # not "no rows for this scope" -- it renders by its kind, with the error.
+                            if _failed_read(ev, "Could not assemble the evidence for this alert, so the AI "
+                                                "evaluation stays locked.",
+                                            setup="The evidence source for this alert isn't installed or "
+                                                  "isn't readable by this app — an admin can check Admin → "
+                                                  "Migrations & freshness."):
+                                st.session_state.pop(_expl_prompt_key, None)
+                            elif ev.empty:
                                 st.session_state.pop(_expl_prompt_key, None)
                                 empty_state("no_data_yet",
                                             "No evidence rows for this alert's scope — the driver may be "
@@ -1549,7 +1685,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
     # renders OUTSIDE the `if guard(events, ...)` block on purpose: an empty open
     # feed must not present a green "found nothing over threshold" all-clear while a
     # snoozed CRITICAL is still pending (it would be invisible until its auto-wake).
-    _snz = run(mart_sql.snoozed_alert_events(100, company), page=_PAGE,
+    _snz = run(mart_sql.snoozed_alert_events(_SNOOZED_CAP, company), page=_PAGE,
                key=f"alert_snoozed_{company}", tier="live",
                source="ALERT_EVENTS (STATUS=SNOOZED)", probe=True)
     if not _snz.ok:
@@ -1560,7 +1696,12 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
         # a not-ok here is transient, not an absent-column benign miss.)
         st.caption("💤 Snoozed-events check unavailable — a snoozed alert may still be pending.")
     if _snz.usable() and not _snz.empty:
-        with st.expander(f"💤 Snoozed ({len(_snz.df)}) — hidden from triage until their wake time"):
+        # review R1-179: the read is LIMITed, so a full tray is a floor ('100+'), never the snoozed total
+        with st.expander(f"💤 Snoozed ({_capped_count(len(_snz.df), _SNOOZED_CAP)}) — hidden from triage "
+                         "until their wake time"):
+            if len(_snz.df) >= _SNOOZED_CAP:
+                st.caption(f"Showing the {_SNOOZED_CAP} soonest to wake — more events are snoozed; the rest "
+                           "wake on schedule.")
             # F52: a relative countdown, soonest wake first — a snooze reads as
             # a running timer, not a black-hole timestamp.
             _sdf = _snz.df.copy()
@@ -1703,31 +1844,41 @@ def render() -> None:
         # The uncapped aggregate owns the tiles; feed-derived counts are only a
         # labeled fallback when that tiny aggregate fails.
         _counts_known = counts.usable()
+        crit_s, high_s, total_s, _feed_capped = f"{crit_n}", f"{high_n}", f"{total_n}", False
         if not _counts_known and events.ok:
             if events.empty:
                 crit_n = high_n = total_n = 0
+                crit_s = high_s = total_s = "0"
             else:
-                _sev = events.df["SEVERITY"].astype(str).str.upper()
-                crit_n = int((_sev == "CRITICAL").sum())
-                high_n = int((_sev == "HIGH").sum())
-                total_n = len(events.df)
+                # review R1-177: counted from the LIMIT-capped feed, so a full feed is a floor ('500+'), never
+                # a total that silently stops at the cap during a storm
+                crit_n, high_n, total_n, crit_s, high_s, total_s, _feed_capped = _feed_fallback_counts(
+                    events.df, _OPEN_FEED_CAP)
             _counts_known = True
         if _counts_known:
             kpi_row([
-                {"label": "Open critical", "value": f"{crit_n}",
+                {"label": "Open critical", "value": crit_s,
                  "severity": "bad" if crit_n else "ok",
                  "delta_color": "inverse" if crit_n else "off"},
-                {"label": "Open high", "value": f"{high_n}",
+                {"label": "Open high", "value": high_s,
                  "severity": "warn" if high_n else "ok"},
                 # v4.461 P2: 'Open total' is neutral — a colored card stripe should
                 # always mean a threshold was crossed (P0/F13). Critical/high above
                 # carry the severity; the running total is context.
-                {"label": "Open total", "value": f"{total_n}",
+                {"label": "Open total", "value": total_s,
                  "help": ("True open+ack count across all severities. The feed table below "
-                          "shows the 500 most severe/newest; tiles count every open event."
-                          if counts.usable() and total_n > 500
+                          f"shows the {_OPEN_FEED_CAP} most severe/newest; tiles count every open event."
+                          if counts.usable() and total_n > _OPEN_FEED_CAP
+                          else f"Counted from the {_OPEN_FEED_CAP}-row feed because the uncapped count "
+                               "failed; at least this many are open."
+                          if _feed_capped
                           else "Open + acknowledged events across all severities.")},
             ])
+            if not counts.usable():
+                # house law 8: say which path served the tiles
+                st.caption(f"Tiles counted from the open-events feed (capped at {_OPEN_FEED_CAP} rows) — the "
+                           "uncapped count failed"
+                           + ("; '+' marks a floor, more may be open." if _feed_capped else "."))
         _open_events_section(events, is_operator, company)
     elif section == "Rules":
         # r-ux: a "Jump to > Rule · X" palette pick lands here with rule_id in the nav context —
@@ -1754,8 +1905,13 @@ def render() -> None:
             st.markdown("**Rule precision (90d)** — is each rule worth its pages?")
             prec = run(mart_sql.rule_precision(90), page=_PAGE, key="rule_precision",
                        tier="recent", source="ALERT_EVENTS.RESOLUTION_KIND")
+            # Review R1-116: RESOLUTION_KIND is V021, far below the floor -- a timeout or drift here is a failed
+            # read ('unavailable' + the error), never "apply the pending schema update"; needs_setup only when
+            # ALERT_EVENTS itself is missing or unreadable.
             if not prec.ok:
-                empty_state("needs_setup", "Precision is not installed yet — an admin can apply the pending schema update on Admin → Migrations & freshness.")
+                _failed_read(prec, "Rule precision could not be read.",
+                             setup="Rule precision needs ALERT_EVENTS, which isn't installed or isn't readable by "
+                                   "this app — an admin can check Admin → Migrations & freshness.")
             elif prec.empty:
                 empty_state("no_data_yet",
                             "No resolved events in 90d — precision appears once alerts get closed "
@@ -1779,8 +1935,8 @@ def render() -> None:
                         st.markdown(f"**Recent resolutions for {_prec_rid}**")
                         styled_table(_prec_res.df[["RESOLVED_AT", "RESOLUTION_KIND", "RESOLUTION_NOTE"]],
                                      height=180, slug="rule-prec-resolutions")
-                    else:
-                        st.caption(f"No resolved events yet for {_prec_rid}.")
+                    elif not _failed_read(_prec_res, f"Recent resolutions for {_prec_rid} could not be read."):
+                        empty_state("no_data_yet", f"No resolved events yet for {_prec_rid}.")
                 st.caption(
                     "Precision = ACTIONED / (ACTIONED + NOISE); EXPECTED is excluded. High NOISE "
                     "with low precision = move the threshold away from noise in the rule's firing "
@@ -1803,22 +1959,33 @@ def render() -> None:
                             "while cutting NOISE, with the basis stated per rule. Apply through "
                             "the generator below — same review-then-run flow as always."
                         )
-                else:
-                    st.caption("Suggestions appear once resolved events carry metric values "
-                               "and resolution kinds.")
+                elif not _failed_read(mk, "Suggested thresholds could not be read."):
+                    empty_state("no_data_yet", "Suggestions appear once resolved events carry metric values "
+                                               "and resolution kinds.")
             with st.expander("Generate a threshold change"):
                 if not rules.empty:
                     rule_ids = rules.df["RULE_ID"].astype(str).tolist()
                     rule_id = st.selectbox("Rule", rule_ids, key="rule_pick")
-                    new_threshold = st.number_input("New threshold", min_value=0.0, step=1.0, key="rule_thresh")
-                    enabled = st.checkbox("Enabled", value=True, key="rule_enabled")
-                    st.code(
-                        f"UPDATE {core_object('ALERT_CONFIG')}\n"
-                        f"SET THRESHOLD_NUM = {new_threshold}, ENABLED = {str(bool(enabled)).upper()}, "
-                        "UPDATED_AT = CURRENT_TIMESTAMP()\n"
-                        f"WHERE RULE_ID = {sql_literal(rule_id)};",
-                        language="sql",
-                    )
+                    # Review R1-233: seed both inputs from the PICKED rule (per-rule keys, so a new pick
+                    # re-seeds) and emit only what changed. The box used to default to 0.0 and the UPDATE
+                    # always wrote THRESHOLD_NUM, so using the generator just to toggle Enabled wrote
+                    # THRESHOLD_NUM = 0.0 -- which makes most arms fire on every row (SEC_TRUST_REGRESSION
+                    # [29] raised every unchanged at-risk count as a 'regression').
+                    _cur_thr, _cur_en = _rule_current(rules.df, rule_id)
+                    new_threshold = st.number_input(
+                        "New threshold", min_value=0.0, step=1.0,
+                        value=_cur_thr if _cur_thr is not None and _cur_thr >= 0 else None,
+                        key=f"rule_thresh:{rule_id}")
+                    enabled = st.checkbox("Enabled", value=_cur_en, key=f"rule_enabled:{rule_id}")
+                    _change_sql = _rule_change_sql(rule_id, _cur_thr, _cur_en, new_threshold, enabled)
+                    if _change_sql:
+                        st.code(_change_sql, language="sql")
+                        if new_threshold is not None and float(new_threshold) == 0.0 and _cur_thr != 0.0:
+                            st.warning("A threshold of 0 makes most rules fire on every row they evaluate "
+                                       "(a '>= 0' test is always true) — check this is what you mean.")
+                    else:
+                        st.caption("No change from the rule's current threshold and Enabled — edit either "
+                                   "to generate an UPDATE.")
                     st.caption("Rule changes are generate-only: review, then run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
                     st.caption("WINDOW_HOURS is informational: each rule family's scan "
                                "window is fixed in SP_ALERT_SCAN (see the runbook's rule "
@@ -1871,8 +2038,9 @@ def render() -> None:
                 {"label": "Events (90d)", "value": f"{int(df['EVENTS'].sum()):,}"},
             ])
             styled_table(df, height=240)
-        else:
-            st.caption("MTTA/MTTR appears once events have been acknowledged/resolved via the lifecycle workflow.")
+        elif not _failed_read(mttr, "MTTA / MTTR could not be read."):
+            empty_state("no_data_yet",
+                        "MTTA/MTTR appears once events have been acknowledged/resolved via the lifecycle workflow.")
 
         st.markdown("**Incident lifecycle (90d, incident grain)**")
         # Moved from Control Room (v4.50): retrospective process-health
@@ -1910,8 +2078,10 @@ def render() -> None:
                 # INCIDENT_MEMBERS kind WH_CHANGE|DEPLOY), so each was a permanent
                 # misleading 0%. Change correlation lives in the Control Room RCA.
             ])
-        else:
-            st.caption("Incident lifecycle metrics appear once incidents are declared (Control Room).")
+        # incident_metrics always returns ONE row (CROSS JOINed aggregates), so not usable() is in practice a
+        # failed read -- never the "appear once" wording below.
+        elif not _failed_read(inc_met, "Incident lifecycle metrics could not be read."):
+            empty_state("no_data_yet", "Incident lifecycle metrics appear once incidents are declared (Control Room).")
 
         st.markdown("**Delivery health (SLO)** — did alerts leave the building, and how fast?")
         slo = _hb.get("slo") or run(mart_sql.delivery_slo_summary(30), page=_PAGE, key="delivery_slo",
@@ -1952,22 +2122,35 @@ def render() -> None:
                      tier="recent", source="ALERT_DELIVERIES by route")
             if rt.usable():
                 styled_table(rt.df, height=170)
+            else:
+                _failed_read(rt, "Deliveries by route could not be read.")
             # rec19: per-route BACKLOG — what SP_NOTIFY_WEBHOOK will drain next and
             # the age of the oldest pending event (the starvation signal rec8 fixes).
             # Same send-eligibility predicate as the drainer, so the two agree.
             st.markdown("**Route backlog** — open eligible events not yet delivered, oldest first.")
             bl = _db.get("bl") or run(mart_sql.route_backlog(), page=_PAGE, key="route_backlog",
                      tier="recent", source="ALERT_EVENTS x ALERT_ROUTES (send-eligibility)")
-            if bl.usable() and not bl.df.empty:
+            # Review R1-168: the all-clear is earned only by a SUCCESSFUL read. route_backlog returns one row per
+            # ENABLED route (LEFT JOIN, BACKLOG 0 when nothing waits), so an ok read with no rows means no
+            # enabled route -- and a failed read was the only other way to reach the old clean sentence.
+            if not bl.ok:
+                _failed_read(bl, "Route backlog unavailable — a stuck route may be hidden.")
+            elif bl.empty:
+                empty_state("needs_setup", "No enabled alert route — nothing is queued for delivery.")
+            else:
                 styled_table(bl.df, height=170, column_config={
                     "OLDEST_MIN": st.column_config.Column("Oldest"),
                 })
-                st.caption("A rising OLDEST while the notify task runs means a route is starved — "
-                           "check its integration. The oldest-first drain (V064) clears the tail first.")
-            else:
-                st.caption("No route has an undelivered backlog right now.")
-        else:
-            st.caption("Delivery SLOs appear once the per-route ledger has rows.")
+                # BACKLOG is a COUNT per enabled route (never NULL); the clean row needs the column to be read
+                if ("BACKLOG" in bl.df.columns
+                        and safe_float(pd.to_numeric(bl.df["BACKLOG"], errors="coerce").fillna(0).sum()) <= 0):
+                    empty_state("clean", "No route has an undelivered backlog right now.")
+                else:
+                    st.caption("A rising OLDEST while the notify task runs means a route is starved — "
+                               "check its integration. The oldest-first drain (V064) clears the tail first.")
+        # delivery_slo_summary is one FROM-less row of scalar subqueries, so not usable() is a failed read.
+        elif not _failed_read(slo, "Delivery SLOs could not be read — undelivered criticals may be hidden."):
+            empty_state("no_data_yet", "Delivery SLOs appear once the per-route ledger has rows.")
 
         st.markdown("**Alert fatigue** — which rules burn attention without earning it?")
         fat = _hb.get("fat") or run(mart_sql.alert_fatigue(30), page=_PAGE, key="alert_fatigue",
@@ -1990,9 +2173,9 @@ def render() -> None:
                 if _fat_ev.usable():
                     st.markdown(f"**Recent events for {_fat_rid}**")
                     styled_table(_fat_ev.df, height=220)
-                else:
-                    st.caption(f"No events in 90d for {_fat_rid}.")
-        else:
+                elif not _failed_read(_fat_ev, f"Recent events for {_fat_rid} could not be read."):
+                    empty_state("no_data_yet", f"No events in 90d for {_fat_rid}.")
+        elif not _failed_read(fat, "Alert fatigue could not be read."):
             empty_state("no_data_yet", "Fatigue metrics appear once events exist in the window.")
 
     else:
