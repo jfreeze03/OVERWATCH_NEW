@@ -252,3 +252,17 @@ def test_adaptive_panel_surfaces_a_failed_idle_read():
     i = body.index("if not idle.ok:")
     assert 'empty_state("unavailable", "The idle read failed' in body[i:i + 600]
     assert "detail=str(idle.error" in body[i:i + 600]
+
+
+# ---- R1-120: a warehouse with QAS spend under the floor is not "QAS off" ----------------------
+
+
+def test_low_qas_spend_with_eligible_workload_is_not_an_enable_candidate():
+    from app.logic.serverless_roi import classify_qas_roi
+    for spend in (0.01, 3.0, 4.99):
+        v = classify_qas_roi(spend, 400)
+        assert v.action != "enable" and "off" not in v.verdict, spend
+        assert v.action == "keep" and "low spend" in v.verdict, spend
+    # no spend at all is still the enable opportunity, and >= the floor is still "Working"
+    assert classify_qas_roi(0.0, 400).action == "enable"
+    assert classify_qas_roi(5.0, 400).verdict.startswith("Working")
