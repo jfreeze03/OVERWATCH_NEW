@@ -1205,7 +1205,8 @@ ORDER BY CHANGED_AT DESC
 """
 
 
-def recent_grant_changes(days: int = 30, company: str = "ALL", limit: int = 500) -> str:
+def recent_grant_changes(days: int = 30, company: str = "ALL", limit: int = 500, *,
+                         onset: object = None) -> str:
     """Most-recent grant/revoke CHANGES across roles, users, and objects — the
     "who changed what for whom, and when" access-change feed (owner ask 2026-08-17).
 
@@ -1219,7 +1220,15 @@ def recent_grant_changes(days: int = 30, company: str = "ALL", limit: int = 500)
     ``company`` scopes by the GRANTEE (owner ask 2026-08-17): a role granted to a
     Trexis user or a privilege granted to a %TRXS% role is Trexis. Role-grain grants
     use the role heuristic (role_clause); user-grain grants use user classification.
-    'ALL' = account-wide (both clauses collapse to no-op)."""
+    'ALL' = account-wide (both clauses collapse to no-op).
+
+    ``onset`` (an incident's start; the auto-investigation feed): the rows are cut to the
+    change registries' onset window (change_impact_sql._onset_window on CHANGED_AT: onset -
+    ONSET_LEAD_DAYS .. onset + ONSET_AFTER_DAYS) and ordered NEAREST onset first, so post-onset
+    churn can no longer push the pre-onset trigger past the LIMIT (a newest-first read from now
+    did). The trailing ``days`` cutoff stays as the micro-partition prune, so pass one that reaches
+    back past onset - ONSET_LEAD_DAYS; TOTAL_CHANGES_WIN is then the onset window's pre-LIMIT count.
+    Without ``onset`` the SQL is unchanged."""
     days = bounded_days(days, 365)
     limit = max(10, min(int(limit or 500), 2000))
     cutoff = f"DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
@@ -1246,6 +1255,12 @@ def recent_grant_changes(days: int = 30, company: str = "ALL", limit: int = 500)
     # but LOAD-BEARING for micro-partition pruning: the IFF-over-the-join-column alone cannot
     # prune, so this literal-cutoff predicate keeps the base scan pruned to relevant partitions.
     ev = "(SELECT 'GRANTED' AS CHG UNION ALL SELECT 'REVOKED' AS CHG)"
+    onset_where, order_by = "", "CHANGED_AT DESC"
+    if onset is not None:
+        # R1-060's twin for grants (holistic review): the registries' onset window + nearest-first order
+        from app.data.change_impact_sql import _onset_window
+        _win = _onset_window("CHANGED_AT", onset)   # ValueError on a non-timestamp: no text reaches the SQL
+        onset_where, order_by = f"\n  AND {_win[0]}", f"{_win[1]}, CHANGED_AT DESC"
     return f"""
 WITH changes AS (
     SELECT IFF(ev.CHG = 'GRANTED', CREATED_ON, DELETED_ON) AS CHANGED_AT,
@@ -1271,8 +1286,8 @@ SELECT CHANGED_AT, CHANGE, GRANT_TYPE,
        SUM(IFF(CHANGE = 'GRANTED', 1, 0)) OVER () AS GRANTED_WIN,
        SUM(IFF(CHANGE = 'REVOKED', 1, 0)) OVER () AS REVOKED_WIN
 FROM changes
-WHERE CHANGED_AT IS NOT NULL
-ORDER BY CHANGED_AT DESC
+WHERE CHANGED_AT IS NOT NULL{onset_where}
+ORDER BY {order_by}
 LIMIT {limit}
 """
 

@@ -550,6 +550,13 @@ def render_effective_access(company: str) -> None:
     # Only act on a GENUINELY-NEW row click: st.dataframe selection is sticky and re-emits every
     # rerun, so an unconditional write reverts the user's OWN selectbox pick back to the last-clicked
     # row on the next rerun. Change-detection sentinel, like operations.py's drill selections.
+    if selection is None:
+        # R1-215 re-arm (the components primitives' rule): leaving the section unmounts the table, so
+        # every return mounts it unselected while the selectbox reseeds to users[0] -- a sentinel that
+        # outlived the selection swallowed the next click on that same row, leaving the graph on another
+        # user than the highlighted one. A None selection never writes the selectbox key, so the sticky
+        # re-emit guard (the reason the sentinel exists) stays intact.
+        st.session_state.pop("_sec_effective_sel_last", None)
     if selection is not None and selection != st.session_state.get("_sec_effective_sel_last"):
         st.session_state["_sec_effective_sel_last"] = selection
         try:

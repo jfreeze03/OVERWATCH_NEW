@@ -464,10 +464,21 @@ def decision_verdict(rate: float) -> dict:
                                                 "failed) — retry in a moment")], healthy="")
         return {}
     proof = proof_verdict(sig["roi"], sig["realization"], sig["acc"]["ACCEPTANCE_PCT"], sig["prec"])
+    # R1-087's verdict twin (holistic review): a FAILED acceptance / precision read reaches proof_verdict as
+    # None, which it lists as "not yet measured" -- a broken read posing as data that does not exist yet,
+    # under a possible "Healthy". Each failed side read is its own warn (worded by its kind, like the cards),
+    # ahead of proof_verdict's signals. (.ok, as the cards: an ok-but-empty read IS a real "nothing yet".)
+    _failed_reads = [
+        Signal("warn", f"{_what} {'needs setup' if is_setup_absence(_res.error_kind) else 'could not be read'}"
+                       f" (the {_table} read failed)")
+        for _res, _what, _table in ((sig.get("acc_read"), "team follow-through", "ACTION_QUEUE"),
+                                    (sig.get("prec_read"), "alert precision", "ALERT_EVENTS"))
+        if _res is not None and not _res.ok
+    ]
     # The healthy sentence is proof_verdict's own headline, which names only MEASURED facts (and lists what
     # is not measured yet) - the old hard-coded sentence claimed realization, precision and follow-through
     # even while they were unmeasured (owner screenshot 2026-09-24).
-    return page_verdict(decision_studio_signals(proof), healthy=proof["headline"])
+    return page_verdict(_failed_reads + decision_studio_signals(proof), healthy=proof["headline"])
 
 
 def _proof_tab(rate: float) -> None:

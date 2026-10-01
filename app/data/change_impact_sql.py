@@ -174,8 +174,9 @@ _WH_NAME_RE = re.compile(r"^[A-Za-z0-9_$]{1,200}$")
 def warehouse_change_registry(days: int, company: str = "ALL",
                               warehouse_contains: str = "", *, onset: object = None) -> str:
     """Detected warehouse setting changes: frozen baseline vs after + verdict. With ``onset``
-    the window is anchored on it (``days`` is ignored), the cap keeps the nearest rows and
-    TOTAL_CHANGES carries the pre-LIMIT count (R1-060)."""
+    the window is anchored on it (``days`` is ignored) and the cap keeps the nearest rows. In
+    every mode TOTAL_CHANGES / TOTAL_REGRESSED / TOTAL_IMPROVED / TOTAL_PENDING carry the
+    pre-LIMIT window counts (R1-060 / R1-065)."""
     days = bounded_days(days, 180)
     win = _onset_window("w.CHANGE_SEEN_AT", onset) if onset is not None else None
     where = and_where(

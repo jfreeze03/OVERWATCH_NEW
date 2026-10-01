@@ -569,7 +569,11 @@ def _auto_investigation(inc_row, company: str, rate: float) -> None:
     _days = max(3, min((pd.Timestamp(account_now()) - onset_dt).days + 3, 30))
     # R1-060: the two change registries read a window ANCHORED on onset (onset - 3d .. onset + 1d,
     # nearest first) — a newest-first LIMIT 200 from now let post-onset churn push the pre-onset
-    # trigger out of the feed (and missed it entirely for an onset 27+ days back).
+    # trigger out of the feed (and missed it entirely for an onset 27+ days back). The grant feed reads
+    # the same onset window; its trailing cutoff only prunes the GRANTS_* scan, so it reaches back past
+    # onset - ONSET_LEAD_DAYS (a day of slack for the partial day) however old the incident is.
+    _grant_days = max(_days, (pd.Timestamp(account_now()) - onset_dt).days
+                      + change_impact_sql.ONSET_LEAD_DAYS + 1)
     _b = run_batch([
         {"key": "ai_obj", "sql": change_impact_sql.change_registry(_days, company, onset=onset_dt),
          "source": "OBJECT_CHANGE_REGISTRY (around onset)"},
@@ -577,8 +581,8 @@ def _auto_investigation(inc_row, company: str, rate: float) -> None:
          "source": "WAREHOUSE_CHANGE_REGISTRY (around onset)"},
         {"key": "ai_task", "sql": insights_sql.task_failure_details(_days, company, onset=onset_dt),
          "source": "TASK_HISTORY failures"},
-        {"key": "ai_grant", "sql": security_sql.recent_grant_changes(_days, company),
-         "source": "GRANTS_TO_USERS changes"},
+        {"key": "ai_grant", "sql": security_sql.recent_grant_changes(_grant_days, company, onset=onset_dt),
+         "source": "GRANTS_TO_USERS + GRANTS_TO_ROLES changes (around onset)"},
         {"key": "ai_whd", "sql": mart_sql.fact_warehouse_daily(max(_days, 14), company),
          "source": "FACT_WAREHOUSE_DAILY (spend anomaly)"},
     ], page=_PAGE, tier="recent")
@@ -616,17 +620,26 @@ def _auto_investigation(inc_row, company: str, rate: float) -> None:
     summ = rca_summary(hyps)
     _banner = st.info if not summ["has_lead"] else (st.warning if summ["top_band"] == "MEDIUM" else st.error)
     _banner(md_dollars(summ["headline"]))
-    # R1-060 backstop: the onset-anchored registry reads still cap at 200 rows (nearest onset
-    # first) — when one cut, say how much went unranked instead of implying the window was whole.
-    _cut = []
-    for _noun, _r in (("object", _obj), ("warehouse", _wh)):
-        if _r is not None and _r.usable() and "TOTAL_CHANGES" in _r.df.columns:
-            _tot = int(safe_float(_r.df["TOTAL_CHANGES"].iloc[0]))
+    # R1-060 backstop: the onset-anchored reads still cap (registries 200 rows, grants and task
+    # failures 500; nearest onset first) — when one cut, say how much went unranked instead of
+    # implying the window was whole. Each feed carries its own pre-LIMIT window total.
+    _cut, _cut_tasks = [], False
+    for _noun, _r, _tot_col in (("object changes", _obj, "TOTAL_CHANGES"),
+                                ("warehouse changes", _wh, "TOTAL_CHANGES"),
+                                ("grant changes", _grant, "TOTAL_CHANGES_WIN"),
+                                ("task failures", _task, "TOTAL_FAILURES_WIN")):
+        if _r is not None and _r.usable() and _tot_col in _r.df.columns:
+            _tot = int(safe_float(_r.df[_tot_col].iloc[0]))
             if _tot > len(_r.df):
-                _cut.append(f"{len(_r.df):,} of {_tot:,} {_noun} changes")
+                _cut.append(f"{len(_r.df):,} of {_tot:,} {_noun}")
+                _cut_tasks = _cut_tasks or _noun == "task failures"
     if _cut:
+        _rest = ("changes and task failures" if _cut_tasks and len(_cut) > 1
+                 else "task failures" if _cut_tasks else "changes")
         st.caption("Ranked from the " + "; ".join(_cut) + " nearest onset — the rest of the "
-                   "window's changes were not ranked.")
+                   f"window's {_rest} were not ranked."
+                   + (" Each task's first failure in the window is kept ahead of its repeats."
+                      if _cut_tasks else ""))
     if hyps:
         _rows = pd.DataFrame([{
             "Confidence": h["band"], "Hypothesis": h["title"], "When": h["lead_text"],
