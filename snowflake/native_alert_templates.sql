@@ -108,7 +108,8 @@ IF (EXISTS (
            || COALESCE(' - ' || LEFT(h.LAST_ERROR, 240), '') || ')' AS DETAIL
     FROM (SELECT 'TASK_ALERT_SCAN' AS TASK_NAME
           UNION ALL
-          -- notify only runs when a delivery route exists (V018 leaves it suspended otherwise)
+          -- notify is resumed with the hourly tree since V071; it is only expected to
+          -- succeed (and only checked) when an ALERT_ROUTES row is enabled
           SELECT DISTINCT 'TASK_ALERT_NOTIFY' FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES WHERE ENABLED) t
     LEFT JOIN (
         SELECT NAME,

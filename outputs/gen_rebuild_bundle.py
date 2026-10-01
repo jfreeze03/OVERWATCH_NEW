@@ -9,11 +9,21 @@ ROOT = Path(__file__).resolve().parents[1]
 SNOWFLAKE = ROOT / "snowflake"
 REBUILD = SNOWFLAKE / "rebuild"
 UNDERLINE = "-- ==========================================================================="
+# The 01 banner says what running the copy does, so the generator owns it (v4.607 review: the
+# preserved "Sections B/C stay commented" banner missed Section B's live tail).
+TEARDOWN_BANNER = (
+    "-- 01_teardown_rebuildables.sql — BYTE-IDENTICAL copy of snowflake/\n"
+    "-- teardown.sql (locked by tests/test_rebuild_bundle.py). Section A runs, and\n"
+    "-- so does Section B's live tail (three rebuildable tables, the ML forecast\n"
+    "-- model, the webhook secrets and the notification integrations); the rest of\n"
+    "-- B and all of C stay commented, so the operator data B lists survives."
+)
 
 
-def _copy_body(bundle_name: str, source_name: str) -> None:
+def _copy_body(bundle_name: str, source_name: str, header: str | None = None) -> None:
     bundle = REBUILD / bundle_name
-    header = bundle.read_text(encoding="utf-8").split("\n\n", 1)[0]
+    if header is None:
+        header = bundle.read_text(encoding="utf-8").split("\n\n", 1)[0]
     source = (SNOWFLAKE / source_name).read_text(encoding="utf-8")
     # newline="\n": the bundle is LF in git (.gitattributes); a Windows run otherwise rewrote every
     # bundle file as CRLF in the working copy, burying the one real change in noise.
@@ -51,8 +61,8 @@ def main() -> None:
         if stale != target:
             stale.unlink()
 
+    _copy_body("01_teardown_rebuildables.sql", "teardown.sql", TEARDOWN_BANNER)
     for bundle, source in (
-        ("01_teardown_rebuildables.sql", "teardown.sql"),
         ("03_roles.sql", "roles.sql"),
         ("04_backfill_365.sql", "backfill_365.sql"),
         ("05_validate.sql", "validate.sql"),

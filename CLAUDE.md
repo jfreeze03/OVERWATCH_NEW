@@ -92,8 +92,10 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
    (`prefs_sql.upsert_pref_sql`) is back for it.
 9. **Identity:** owner's-rights SiS — `CURRENT_USER()` = app owner. Viewer
    identity via `app/core/identity.py` (`st.user`, CURRENT_USER() fallback)
-   for prefs/usage/audit. Executor allow-list: one statement, OVERWATCH
-   objects or warehouse levers only. Cache invalidation is domain-scoped.
+   for prefs/usage/audit. Executor allow-list: one statement, DML/CALL on
+   DBA_MAINT_DB.OVERWATCH objects or an Emergency lever (ALTER WAREHOUSE /
+   PIPE / TASK / USER, ALTER ACCOUNT SET) only. Cache invalidation is
+   domain-scoped.
 10. **Formulas:** `app/logic/formulas.py` is the only place credits become
     dollars; `app/logic/metric_registry.py` is the semantic contract
     (BILLED/METERED/MEASURED/ALLOCATED/ESTIMATED + grain + lag). SQL builders

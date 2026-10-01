@@ -1,7 +1,10 @@
 """Security — access posture and change evidence.
 
-Navigation profiles are cosmetic; Snowflake RBAC is the boundary. This page
-says so out loud instead of pretending otherwise (old-app review point).
+Navigation profiles filter pages, not data. Under owner's-rights SiS every
+viewer runs as the app owner, so Snowflake RBAC only decides who can open the
+app and config.OPERATOR_USERS gates writes. The page reports the account's
+RBAC posture and grants or revokes nothing, and says so out loud (old-app
+review point).
 """
 
 from __future__ import annotations

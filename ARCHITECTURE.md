@@ -31,19 +31,26 @@ savings_rollup, unread_maintenance).
 
 ## Data flow (mart-first)
 
-1. Scheduled tasks (V002) load compact **fact tables** from ACCOUNT_USAGE:
-   hourly (`SP_LOAD_HOURLY_FACTS` — query/warehouse facts) and daily
-   (`SP_LOAD_DAILY_FACTS` — metering-daily with cloud-services adjustment,
-   tasks, logins, storage). All MERGEs over bounded re-scan windows.
-2. After the hourly load, chained tasks refresh `MART_EXEC_BOARD` (the one
-   first-paint aggregate) and run the alert scan.
+1. Scheduled tasks load compact **fact tables** from ACCOUNT_USAGE. Hourly:
+   the root `TASK_LOAD_HOURLY` runs `SP_LOAD_HOURLY_FACTS` (warehouse
+   metering into `FACT_WAREHOUSE_DAILY`), then `TASK_QH_EXTRACT` runs
+   `SP_LOAD_QH_EXTRACT` (stages QUERY_HISTORY into `OW_QH_EXTRACT` and loads
+   `FACT_QUERY_HOURLY` / `FACT_QUERY_DAILY` and `MART_CLOUD_SVC_DAILY`).
+   Daily: `SP_LOAD_DAILY_FACTS` (metering-daily with cloud-services
+   adjustment, tasks, logins, storage). All MERGEs over bounded re-scan
+   windows. RUNBOOK §4 has the full task table.
+2. Chained AFTER `TASK_QH_EXTRACT` (V071), tasks refresh `MART_EXEC_BOARD`
+   (the one first-paint aggregate) and run the alert scan, so both read
+   freshly loaded query facts.
 3. Pages read marts/facts first. When a mart object is missing or stale, pages
    fall back to **bounded live aggregates** (fixed short windows, GROUP BY
    pushdown, row caps, tier-cached) and label the source. Live detail drilldowns
    are explicit user actions, never first paint.
-4. `MART_SOURCE_FRESHNESS` exposes per-fact freshness; every page shows a
-   source + freshness caption. ACCOUNT_USAGE latency (up to ~45 min for query
-   history, up to 24h for metering-daily) is labeled, not hidden.
+4. Each loader stamps its own row in `SOURCE_FRESHNESS_STATE`, the primary
+   per-source freshness read (the `MART_SOURCE_FRESHNESS` view is the
+   pre-V040 fallback); every page shows a source + freshness caption.
+   ACCOUNT_USAGE latency (up to ~45 min for query history, up to 24h for
+   metering-daily) is labeled, not hidden.
 
 ## Query engine (`app/core/query.py`)
 
