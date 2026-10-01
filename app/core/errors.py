@@ -84,7 +84,11 @@ def format_snowflake_error(error: object, max_len: int = 300) -> str:
     if "timeout" in lower:
         return "The query hit its statement timeout. Narrow the window or filters and retry."
     if "session no longer exists" in lower or ("token" in lower and "expired" in lower):
-        return "The Snowflake session expired. Press 'Refresh data' in the sidebar (or reload the app) to reconnect."
+        # c09 R1-006: name a remedy that works where the user is. 'Refresh data' used to be the only
+        # advice, but it only bumped the read salt -- the expired session stayed cached. In SiS a browser
+        # reload starts a fresh app instance; off SiS (local dev) Refresh now drops the cached session.
+        return ("The Snowflake session expired. Reload the app in your browser to reconnect "
+                "(local dev: press 'Refresh data' in the sidebar).")
     text = re.sub(r"^\(\d+\):?\s*[0-9a-f-]*:?\s*", "", text)
     text = re.sub(r"\s+", " ", text)
     return text if len(text) <= max_len else text[: max_len - 3] + "..."

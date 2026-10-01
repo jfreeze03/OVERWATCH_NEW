@@ -176,6 +176,7 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
         _global_jump(pages)
         if st.button("Refresh data", width="stretch"):
             bump_refresh_salt()
+            _reconnect_off_sis()   # c09 R1-006: what the session-expired message tells users to press
             # Re-resolve the role too: a grant/role change mid-session should
             # be picked up here, not only on a full browser reload.
             st.session_state.pop("_ow_current_role", None)
@@ -228,6 +229,19 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
         # rec11: the ACCOUNT_USAGE lag note lives once per page in page_header now
         # (was duplicated here in the sidebar — same sentence twice is chrome noise).
     return page
+
+
+def _reconnect_off_sis() -> None:
+    """c09 R1-006: off Streamlit-in-Snowflake the Snowpark session (session._connect) and the raw
+    connection under it (st.connection) are OURS, cached by st.cache_resource for the whole process,
+    so an expired master token kept failing every read through 'Refresh data' and even a browser
+    reload. Clear them, as 'Retry connection' does, so the next read reconnects. On SiS the session
+    is the platform's (get_active_session) and a browser reload starts a fresh instance -- the
+    session-expired message says so -- so nothing is cleared there."""
+    from app.core.session import is_sis
+
+    if not is_sis():
+        st.cache_resource.clear()
 
 
 def _parse_view(raw: str) -> dict | None:

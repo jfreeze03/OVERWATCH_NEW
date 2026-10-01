@@ -225,3 +225,32 @@ def test_run_batch_tuple_cache_replay_is_captioned_as_cached(monkeypatch):
     out = q.run_batch([{"key": "k", "sql": "SELECT 1 AS X /* c09 R1-005 tuple */", "source": "s"}],
                       page="t", tier="recent")
     assert out["k"].ok and out["k"].cache_hit is True
+
+
+# ------------------------------------------------------------------ R1-006: the session-expired remedy works ----
+
+@pytest.mark.parametrize("raw", ["390111: Session no longer exists: 12345",
+                                 "Authentication token has expired. The user must authenticate again."])
+def test_session_expired_hint_names_a_remedy_that_reconnects(raw):
+    from app.core.errors import format_snowflake_error
+
+    msg = format_snowflake_error(raw)
+    assert "Reload the app in your browser to reconnect" in msg        # SiS: a reload is a fresh instance
+    assert "local dev: press 'Refresh data'" in msg                    # off SiS: Refresh now reconnects
+
+
+@pytest.mark.parametrize(("sis", "cleared"), [(False, 1), (True, 0)])
+def test_refresh_drops_the_cached_session_off_sis(monkeypatch, sis, cleared):
+    import streamlit as st
+
+    import app.core.session as session_mod
+    import app.main as m
+
+    calls: list[int] = []
+    monkeypatch.setattr(session_mod, "is_sis", lambda: sis)
+    monkeypatch.setattr(st.cache_resource, "clear", lambda: calls.append(1))
+    m._reconnect_off_sis()
+    assert len(calls) == cleared
+    src = (m.__file__ and open(m.__file__, encoding="utf-8").read())
+    block = src.split('if st.button("Refresh data"', 1)[1].split("st.rerun()", 1)[0]
+    assert "_reconnect_off_sis()" in block                              # the sidebar Refresh calls it
