@@ -594,7 +594,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     _idle_head = run_mart_first(
         mart27_sql.eff_idle_analysis(days, company, bounds=bounds),
         insights_sql.idle_warehouse_analysis(days, company, bounds=bounds),
-        page=_PAGE, key=f"idle_{company}_{days}{_lm}", days=days,
+        page=_PAGE, key=f"idle_{company}_{days}{_lm}", days=days, bounds=bounds,
         mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, refreshed every 4h; today up to 4h behind)",
         live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")
     if _idle_head.ok and not _idle_head.empty:
@@ -641,7 +641,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         idle_res = run_mart_first(
             mart27_sql.eff_idle_analysis(days, company, bounds=bounds),
             insights_sql.idle_warehouse_analysis(days, company, bounds=bounds),
-            page=_PAGE, key=f"idle_{company}_{days}{_lm}", days=days,
+            page=_PAGE, key=f"idle_{company}_{days}{_lm}", days=days, bounds=bounds,
             mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, refreshed every 4h; today up to 4h behind)",
             live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")
         if guard(idle_res, "No warehouse metering in this window."):
@@ -770,7 +770,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         elif guard((prof_res := run_mart_first(
                         mart27_sql.eff_sizing_profile(days, company, bounds=bounds),
                         insights_sql.warehouse_sizing_profile(days, company, bounds=bounds),
-                        page=_PAGE, key=f"sizing_{company}_{days}{_lm}", days=days,
+                        page=_PAGE, key=f"sizing_{company}_{days}{_lm}", days=days, bounds=bounds,
                         mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart — p95 is peak daily)",
                         live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")),
                    "No warehouse activity to profile in this window."):
@@ -2297,7 +2297,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         idle_res = run_mart_first(
             mart27_sql.eff_idle_analysis(days, company, bounds=bounds),
             insights_sql.idle_warehouse_analysis(days, company, bounds=bounds),
-            page=_PAGE, key=f"remed_idle_{company}_{days}{_lm}", days=days,
+            page=_PAGE, key=f"remed_idle_{company}_{days}{_lm}", days=days, bounds=bounds,
             mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, refreshed every 4h; today up to 4h behind)",
             live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")
         if guard(idle_res, "No warehouse activity in the window to remediate."):

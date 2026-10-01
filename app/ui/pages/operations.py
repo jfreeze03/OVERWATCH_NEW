@@ -3651,7 +3651,7 @@ def _wh_sizing_efficiency(company: str, rate: float, days: int, *,
     elif guard((_prof := run_mart_first(
                     mart27_sql.eff_sizing_profile(days, company, bounds=bounds),
                     insights_sql.warehouse_sizing_profile(days, company, bounds=bounds),
-                    page=_PAGE, key=f"ops_sizing_{company}_{days}{_lm}", days=days,
+                    page=_PAGE, key=f"ops_sizing_{company}_{days}{_lm}", days=days, bounds=bounds,
                     mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart — p95 is peak daily)",
                     live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")),
                "No warehouse activity to profile in this window."):

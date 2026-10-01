@@ -1081,22 +1081,32 @@ def snowsight_profile_column(
         help="Query profile in Snowsight — plan, partitions, spilling.")}
 
 
-def _mark_served(result, *, live: bool, days: int | None):
+def _mark_served(result, *, live: bool, days: int | None, bounds: tuple | None = None):
     """K1: stamp which leg actually answered, and over what window, onto the
     frame the caller receives. Callers must read it through ``served_days()``.
 
-    WHY it lives on ``df.attrs`` and not on QueryResult: the live builders clamp
-    to MAX_LIVE_WINDOW_DAYS (90) while the marts honor 365, so a page that asked
+    WHY it lives on ``df.attrs`` and not on QueryResult: the TRAILING live builders
+    clamp to MAX_LIVE_WINDOW_DAYS (90) while the marts honor 365, so a page that asked
     for 365d and got the live fallback was labeling a 90-day answer "365 days".
     QueryResult is the cached payload shared by both legs; attrs travel with the
     frame through Streamlit's cache copy and through pandas operations, and cost
-    nothing when nobody looks."""
+    nothing when nobody looks.
+
+    R1-213: a CALENDAR window (``bounds`` = filters()['bounds']) is different. Its
+    builders emit ``col >= start AND col < end`` through scope_window_where, which
+    never applies bounded_days' 90 cap, and ``days`` is then only a day OFFSET
+    (Current year on Sep 30 = 272 for a 273-day range). Stamping clamp_days(offset)
+    there said 90 for a whole-year live scan, so every run-rate divided a year of
+    idle $ by 90 (~3x high). With bounds the stamp is the bounds' day SPAN on both
+    legs, unclamped."""
     from app.config import clamp_days
     df = getattr(result, "df", None)
     if df is None:
         return result
     df.attrs["_ow_served_live"] = bool(live)
-    if days is not None:
+    if bounds is not None:
+        df.attrs["_ow_effective_days"] = max(1, int((bounds[1] - bounds[0]).days))
+    elif days is not None:
         effective = clamp_days(days) if live else int(days)
         # Calendar day zero means "today only" for SQL, but downstream rates
         # still need a non-zero elapsed-period denominator.
@@ -1107,8 +1117,10 @@ def _mark_served(result, *, live: bool, days: int | None):
 def served_days(result, requested_days: int) -> int:
     """The window a run_mart_first result ACTUALLY covers (K1 contract).
 
-    The live fallback clamps to MAX_LIVE_WINDOW_DAYS, so captions, per-day
-    averages and run-rate math must divide by this, not by the requested days.
+    The trailing live fallback clamps to MAX_LIVE_WINDOW_DAYS, so captions, per-day
+    averages and run-rate math must divide by this, not by the requested days. A
+    calendar-bounded read (run_mart_first(..., bounds=)) is stamped with its full
+    day span instead: its builders do not clamp.
     Falls back to ``requested_days`` for any result that did not come through
     run_mart_first — an honest no-op, never a wrong clamp."""
     from app.config import clamp_days
@@ -1259,7 +1271,7 @@ def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
                    max_rows: int | None = None, empty_is_answer: bool = False,
                    mart_accept=None, preloaded=None, days: int | None = None,
                    coverage_gate: bool = False, coverage_day_col: str = "DAY",
-                   coverage_freshness_days: int = 2):
+                   coverage_freshness_days: int = 2, bounds: tuple | None = None):
     """Fact-first read with the live builder as labeled fallback — the
     Control Room v4.8.2 pattern as one call (wave 2 adoptions). The mart
     result must be usable (ok AND non-empty) or the live path runs under
@@ -1272,8 +1284,11 @@ def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
     falls through to the serial mart read exactly as before.
 
     K1: pass ``days`` (the window the caller ASKED for) and read the window that
-    was actually served back with ``served_days(result, days)`` — the live legs
-    clamp to 90 and the marts do not.
+    was actually served back with ``served_days(result, days)`` — the TRAILING live
+    legs clamp to 90 and the marts do not. R1-213: when both builders honor the
+    calendar ``bounds`` (filters()['bounds']), pass ``bounds`` too — neither leg
+    clamps a bounded read, so the served window is the bounds' day span, not
+    clamp_days of the day offset (which read 90 for a 273-day Current-year scan).
 
     #16: pass ``coverage_gate=True`` (with ``days``) to apply the shared
     ``coverage_contract`` as the acceptance test when no explicit ``mart_accept``
@@ -1318,7 +1333,7 @@ def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
             except Exception:  # noqa: BLE001
                 pass
         if accepted:
-            return _mark_served(res, live=False, days=days)
+            return _mark_served(res, live=False, days=days, bounds=bounds)
         # r11 #2: the mart answered but does not cover enough of the asked
         # window (an accruing mart holds weeks of a 13-month chart). Prefer
         # live; if live cannot answer, the partial mart still beats an empty
@@ -1326,17 +1341,17 @@ def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
         live = run(live_sql, page=page, key=key, tier=live_tier,
                    source=live_source, **kwargs)
         if live.usable():
-            return _mark_served(live, live=True, days=days)
-        return _mark_served(res, live=False, days=days)
+            return _mark_served(live, live=True, days=days, bounds=bounds)
+        return _mark_served(res, live=False, days=days, bounds=bounds)
     # Codex r9 #2: for marts whose table only exists once loaded (V035), a
     # SUCCESSFUL empty read means "genuinely nothing" — reviving the live
     # scan would pay 46-56 GB to confirm an answer we already hold. Marts
     # with young-coverage ambiguity keep the default (fallback on empty).
     if res is not None and empty_is_answer and res.ok:
-        return _mark_served(res, live=False, days=days)
+        return _mark_served(res, live=False, days=days, bounds=bounds)
     return _mark_served(
         run(live_sql, page=page, key=key, tier=live_tier, source=live_source, **kwargs),
-        live=True, days=days)
+        live=True, days=days, bounds=bounds)
 
 
 class _DirectoryUnavailable(Exception):
