@@ -448,7 +448,13 @@ def test_deploy_and_rebuild_surfaces_track_v075() -> None:
         "REVOKE UPDATE, DELETE ON TABLE DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT"
     ) == 2
     assert "ACCESS_REVIEW_DECISION_LOG" not in roles
-    assert "SP_LOAD_SECURITY_FACTS(90)" in _read("snowflake/backfill_365.sql")
+    # The opt-in backfill fills the security facts at the loader's 180-day maximum (v4.606 holistic
+    # review; it was 90 here, the same depth as V075's own first fill above). The new-network fact
+    # gate needs the window plus a 90-day baseline, 180 days at a 90-day window, so a 90-day fill
+    # kept that panel on a live LOGIN_HISTORY scan of up to 180 days for weeks after a rebuild.
+    backfill = _read("snowflake/backfill_365.sql")
+    assert "CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_SECURITY_FACTS(180);" in backfill
+    assert "SP_LOAD_SECURITY_FACTS(90)" not in backfill
     teardown = _read("snowflake/teardown.sql")
     for name in (
         "TASK_LOAD_SECURITY_FACTS",
