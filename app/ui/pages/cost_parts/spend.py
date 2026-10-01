@@ -938,27 +938,32 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 cs_types = run_mart_first(
                     mart_sql.cs_by_query_type_mart(days, company="ALL", warehouse=_sel_wh, bounds=bounds),
                     cost_sql.cs_by_query_type(days, company, warehouse=_sel_wh, bounds=bounds),
-                    page=_PAGE, key=f"cs_types_{company}_{days}_{_sel_wh}",
+                    page=_PAGE, key=f"cs_types_{company}_{days}_{_sel_wh}", bounds=bounds,
                     mart_source="MART_CLOUD_SVC_DAILY (CS credits by QUERY_TYPE, per warehouse, loaded hourly)",
                     live_source="ACCOUNT_USAGE.QUERY_HISTORY (CS credits by QUERY_TYPE, per warehouse, live fallback)")
             else:
                 cs_types = run_mart_first(
                     mart_sql.cs_by_query_type_mart(days, company, bounds=bounds),
                     cost_sql.cs_by_query_type(days, company, bounds=bounds),
-                    page=_PAGE, key=f"cs_types_{company}_{days}",
+                    page=_PAGE, key=f"cs_types_{company}_{days}", bounds=bounds,
                     mart_source="MART_CLOUD_SVC_DAILY (CS credits by QUERY_TYPE, loaded hourly)",
                     live_source="ACCOUNT_USAGE.QUERY_HISTORY (CS credits by QUERY_TYPE, live fallback)")
             if guard(cs_types, "No cloud-services credits recorded on queries in this window."):
                 styled_table(cs_types.df, height=220)
                 result_caption(cs_types)
-                # K1: the live builder clamps to MAX_LIVE_WINDOW_DAYS, so on a long page
-                # window the fallback answers a SHORTER window than the header implies.
+                # K1: the TRAILING live builder clamps to MAX_LIVE_WINDOW_DAYS, so on a long
+                # page window the fallback answers a SHORTER window than the header implies.
                 # served_days() reports what actually got scanned; never re-derive it here.
-                _cs_days = served_days(cs_types, days)
+                # R1-213: a calendar window (bounds) is scanned whole on both legs, so both
+                # reads pass bounds (stamped with the span) and the caption compares against
+                # the span -- `days` is only the day OFFSET there (272 for Current year on
+                # Sep 30, a 273-day range), and clamp_days(offset) falsely read "90d of 272d".
+                _cs_span = (bounds[1] - bounds[0]).days if bounds is not None else days
+                _cs_days = served_days(cs_types, _cs_span)
                 st.caption("Metadata storms show up here — SHOW/DESCRIBE floods bill "
                            "cloud services without ever touching a warehouse."
-                           + (f" Scanned {_cs_days}d of the {days}d window (the live "
-                              "fallback caps its scan)." if _cs_days != days else ""))
+                           + (f" Scanned {_cs_days}d of the {_cs_span}d window (the live "
+                              "fallback caps its scan)." if _cs_days != _cs_span else ""))
 
     # V055: shape/user drill-down from MART_CLOUD_SVC_DAILY — for ANY warehouse
     # (not only ELEVATED), no live QUERY_HISTORY scan. Names the exact query
