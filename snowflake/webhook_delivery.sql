@@ -8,7 +8,7 @@
 --   V018/V070/V071: TASK_ALERT_NOTIFY chained AFTER the scan and resumed with
 --         the hourly tree (V071); delivery goes through each enabled
 --         ALERT_ROUTES row's own integration (V070); the morning digest
---         (SP_DAILY_DIGEST, V165) goes to every enabled DELIVER_DIGEST route
+--         (SP_DAILY_DIGEST, V171) goes to every enabled DELIVER_DIGEST route
 --         that is not CRITICAL-only (V112)
 --   V164: actionable lines ('[SEV] title | company | detail | event <id>') + a one-time
 --         CRITICAL escalation (SETTINGS ESCALATE_AFTER_MIN / ESCALATE_EMAIL_INTEGRATION):
@@ -19,7 +19,7 @@
 -- CREATE SECRET below (paste the value there) and open the GATE; the file ends
 -- with ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_ALERT_NOTIFY RESUME;. Never re-run
 -- V018 for this: it CREATE OR REPLACEs SP_DAILY_DIGEST with its retired body
--- and undoes V070/V112/V165.
+-- and undoes V070/V112/V165/V171.
 -- A rotated URL needs only the ROTATION step further down -- not a re-run of
 -- this file.
 

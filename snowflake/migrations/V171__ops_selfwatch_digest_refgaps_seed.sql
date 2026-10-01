@@ -7,7 +7,8 @@
 -- WHY:
 --   R2-026  SP_CANARY_SENTINEL (V017) probes each source with SELECT 1, which names no column, yet its
 --           OPS_CANARY_FAIL detail blamed ACCOUNT_USAGE column drift; and its render-SLA handler always logged
---           'APP_USAGE.RENDER_MS not readable', whatever actually failed.
+--           'APP_USAGE.RENDER_MS not readable', whatever actually failed. Its OPS_SLOW_RENDER title printed the
+--           p95 as raw seconds (95.5s), against the owner rule that every duration reads in Hr/Min/Sec.
 --   R1-228  SP_DAILY_DIGEST (V165) read the exec board's 7-day KPI rows, which are today-INCLUSIVE (seven full days
 --           plus today so far: about 7.25 days at the 07:20 run), and called warehouse metering plain spend in the
 --           facts, the prompt and the template.
@@ -24,9 +25,10 @@
 --     non-3.68 rate) is never touched, and FALSE is outside validate's TRUE / Y / YES / 1 list, so the -20013
 --     gate stays armed exactly as an absent row did.
 --   ~ SP_CANARY_SENTINEL re-derived from V017 (its current definer; V016 has no render-SLA block), byte-identical
---     except K1 the OPS_CANARY_FAIL detail (a missing or renamed object or lost access, never column drift) and
---     K2 the render-SLA handler logs 'render SLA check failed: ' plus the error. Kept: the 24 probes, fails,
---     the 180-day purge and RETURN 'sentinel v2: '.
+--     except K1 the OPS_CANARY_FAIL detail (a missing or renamed object or lost access, never column drift),
+--     K2 the render-SLA handler logs 'render SLA check failed: ' plus the error, and K3 the OPS_SLOW_RENDER title
+--     shows the p95 in Hr/Min/Sec like the app (1m 36s, not 95.5s; METRIC_VALUE and the threshold compare stay
+--     in seconds). Kept: the 24 probes, fails, the 180-day purge and RETURN 'sentinel v2: '.
 --   ~ SP_DAILY_DIGEST re-derived from V165, byte-identical except C1 the CORTEX_MODEL read normalized like the
 --     app (trimmed, lower-case, a valid name else llama3.1-8b); E1 the facts cover the 7 complete days ending
 --     yesterday (spend = the board's ALL / 7-day DAILY_SPEND rows for those days, queries from FACT_QUERY_DAILY,
@@ -40,7 +42,7 @@
 --
 -- COST: the digest reads three small day-grain ranges (the board and two app-owned facts, 7 days) instead of one
 -- board read: no ACCOUNT_USAGE, same one Cortex call. The ref-gap scan runs one statement per configured check
--- (a handful) instead of one per run. The canary is unchanged.
+-- (a handful) instead of one per run. The canary probes are unchanged (the title CASE is per slow page).
 -- LATENCY: unchanged; TASK_DAILY_DIGEST runs 07:20 America/Chicago, the canary Mondays 05:30, the ref-gap scan
 -- inside the daily alert scan.
 -- FIRST RUN: nothing runs at apply time (a digest CALL spends Cortex credits and posts to Teams). The next 07:20
@@ -77,7 +79,7 @@ USING (
 ON t.KEY = s.KEY
 WHEN NOT MATCHED THEN INSERT (KEY, VALUE) VALUES (s.KEY, s.VALUE);
 
--- >>> derived:SP_CANARY_SENTINEL  (from V017; OPS_CANARY_FAIL detail no longer blames column drift + render-SLA handler logs SQLERRM, V171)
+-- >>> derived:SP_CANARY_SENTINEL  (from V017; OPS_CANARY_FAIL detail no longer blames column drift + render-SLA handler logs SQLERRM + OPS_SLOW_RENDER title in Hr/Min/Sec, V171)
 CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_CANARY_SENTINEL()
 RETURNS VARCHAR
 LANGUAGE SQL
@@ -156,7 +158,19 @@ BEGIN
         INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
             (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
         SELECT c.RULE_ID, 'ALL', c.SEVERITY,
-               r.PAGE || ' p95 first paint ' || r.P95_S || 's (7d, n=' || r.N || ')',
+               -- K3: V171 - the p95 in Hr/Min/Sec like the app (formulas.humanize_duration; the HD template the
+               -- V172 change scans use). HALF_TO_EVEN needs a fixed-point operand, hence the NUMBER(18, 1) cast
+               -- (P95_S is already rounded to 0.1 s). METRIC_VALUE and the THRESHOLD_NUM compare stay in seconds.
+               r.PAGE || ' p95 first paint '
+               || CASE WHEN (r.P95_S::NUMBER(18, 1)) IS NULL THEN '?'
+                       WHEN ROUND((r.P95_S::NUMBER(18, 1)) * 1000, 0, 'HALF_TO_EVEN') = 0 THEN '0s'
+                       WHEN (r.P95_S::NUMBER(18, 1)) < 1 THEN ROUND((r.P95_S::NUMBER(18, 1)) * 1000, 0, 'HALF_TO_EVEN')::INT || 'ms'
+                       WHEN (r.P95_S::NUMBER(18, 1)) < 10 THEN TO_VARCHAR(ROUND((r.P95_S::NUMBER(18, 1)), 1, 'HALF_TO_EVEN'), 'FM90.0') || 's'
+                       ELSE TRIM(IFF(ROUND((r.P95_S::NUMBER(18, 1)), 0, 'HALF_TO_EVEN') >= 3600, FLOOR(ROUND((r.P95_S::NUMBER(18, 1)), 0, 'HALF_TO_EVEN') / 3600)::INT || 'h ', '')
+                                 || IFF(MOD(FLOOR(ROUND((r.P95_S::NUMBER(18, 1)), 0, 'HALF_TO_EVEN') / 60), 60) > 0, MOD(FLOOR(ROUND((r.P95_S::NUMBER(18, 1)), 0, 'HALF_TO_EVEN') / 60), 60)::INT || 'm ', '')
+                                 || IFF(ROUND((r.P95_S::NUMBER(18, 1)), 0, 'HALF_TO_EVEN') < 3600 AND MOD(ROUND((r.P95_S::NUMBER(18, 1)), 0, 'HALF_TO_EVEN'), 60) > 0, MOD(ROUND((r.P95_S::NUMBER(18, 1)), 0, 'HALF_TO_EVEN'), 60)::INT || 's', ''))
+                  END
+               || ' (7d, n=' || r.N || ')',
                'Persisted first-paint times (APP_USAGE.RENDER_MS). Admin > Performance ' ||
                    'shows the slow statement families; lazy sections and run_batch are the levers.',
                r.P95_S,
@@ -641,5 +655,5 @@ $$;
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 171 AS VERSION,
-       'Ops self-watch, digest window, ref-gap isolation, override seed (round 2). SETTINGS CREDIT_PRICE_OVERRIDE seeded FALSE (WHEN NOT MATCHED; validate.sql reads FALSE as no override). SP_CANARY_SENTINEL re-derived from V017: the OPS_CANARY_FAIL detail no longer blames column drift (SELECT 1 sees a missing object or lost access only) and the render-SLA handler logs the real error. SP_DAILY_DIGEST re-derived from V165: facts cover the 7 complete days ending yesterday (the board ALL 7-day DAILY_SPEND rows for those days, FACT_QUERY_DAILY, FACT_TASK_DAILY; the today-inclusive KPI rows are no longer read), keys WAREHOUSE_SPEND_USD and WAREHOUSE_CREDITS, the prompt and template say warehouse compute only, never total spend; CORTEX_MODEL is normalized like the app (trimmed, lower-case, a valid name else llama3.1-8b). SP_SCAN_REF_GAPS re-derived from V129: both MINUS operands TO_VARCHAR (parity with the Operations panel) and one statement per check in its own EXCEPTION block (ref_gap_check_failed names a failing check; the scan raises only when every check failed). No task change, no new object, no procedure run at apply time.' AS DESCRIPTION
+       'Ops self-watch, digest window, ref-gap isolation, override seed (round 2). SETTINGS CREDIT_PRICE_OVERRIDE seeded FALSE (WHEN NOT MATCHED; validate.sql reads FALSE as no override). SP_CANARY_SENTINEL re-derived from V017: the OPS_CANARY_FAIL detail no longer blames column drift (SELECT 1 sees a missing object or lost access only), the render-SLA handler logs the real error, and the OPS_SLOW_RENDER title shows the p95 in Hr/Min/Sec (METRIC_VALUE stays seconds). SP_DAILY_DIGEST re-derived from V165: facts cover the 7 complete days ending yesterday (the board ALL 7-day DAILY_SPEND rows for those days, FACT_QUERY_DAILY, FACT_TASK_DAILY; the today-inclusive KPI rows are no longer read), keys WAREHOUSE_SPEND_USD and WAREHOUSE_CREDITS, the prompt and template say warehouse compute only, never total spend; CORTEX_MODEL is normalized like the app (trimmed, lower-case, a valid name else llama3.1-8b). SP_SCAN_REF_GAPS re-derived from V129: both MINUS operands TO_VARCHAR (parity with the Operations panel) and one statement per check in its own EXCEPTION block (ref_gap_check_failed names a failing check; the scan raises only when every check failed). No task change, no new object, no procedure run at apply time.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 171);

@@ -17,6 +17,8 @@ every one with its OWN copies of the old text):
   SP_CANARY_SENTINEL (V017)
     K1  the OPS_CANARY_FAIL DETAIL no longer blames ACCOUNT_USAGE column drift (SELECT 1 names no column)
     K2  the render-SLA handler captures SQLERRM and logs it (it always said 'APP_USAGE.RENDER_MS not readable')
+    K3  the OPS_SLOW_RENDER TITLE renders the p95 in Hr/Min/Sec like app.logic.formulas.humanize_duration (owner
+        rule; the HD template the V172 change scans use); METRIC_VALUE and the THRESHOLD_NUM compare stay seconds
   SP_DAILY_DIGEST (V165)
     C1  CORTEX_MODEL read like app.core.ai.normalize_model (trimmed, lower-case, a valid name else the default)
     E1  the facts are the 7 COMPLETE days ending yesterday: spend from the board's ALL / 7-day DAILY_SPEND rows
@@ -37,8 +39,8 @@ migration quotes it. The CORTEX_MODEL expression is the same literal the V172 SP
 
 Nothing runs at apply time: no CALL of SP_DAILY_DIGEST (Cortex credits + a Teams post), SP_CANARY_SENTINEL or
 SP_SCAN_REF_GAPS. The generator never imports app/. With PREFLIGHT_OUT set, also writes the read-only V171
-PREFLIGHT section (P171.1-P171.4) built from the SAME E1 / C1 text; with PART_B_OUT set, the read-only PART B
-verify grids (V171.1-V171.4). The byte-identity test never sets either.
+PREFLIGHT section (P171.1-P171.5) built from the SAME E1 / C1 / K3 text; with PART_B_OUT set, the read-only PART
+B verify grids (V171.1-V171.4). The byte-identity test never sets either.
 
 Run: python outputs/gen_v171.py
 """
@@ -104,11 +106,44 @@ NEW_K2 = """\
                    'render SLA check failed: ' || LEFT(:emsg, 500), 'source probes unaffected', CURRENT_ROLE();
 """
 
+
+
+# K3 (owner rule: durations in Hr/Min/Sec). HD(S, NUL) renders a seconds expression S like
+# app.logic.formulas.humanize_duration(S, 's'): the same CASE text the V172 change scans use for VERDICT_DETAIL.
+# ROUND(.., 'HALF_TO_EVEN') is Python's round() and needs a fixed-point operand; P95_S is
+# ROUND(APPROX_PERCENTILE(..) / 1000, 1), so the title casts it to NUMBER(18, 1) (exact: already one decimal).
+def hd(s: str, nul: str, ind: str) -> str:
+    r = f"ROUND({s}, 0, 'HALF_TO_EVEN')"
+    w = ind + "     "
+    return (f"CASE WHEN {s} IS NULL THEN '{nul}'\n"
+            f"{w}WHEN ROUND({s} * 1000, 0, 'HALF_TO_EVEN') = 0 THEN '0s'\n"
+            f"{w}WHEN {s} < 1 THEN ROUND({s} * 1000, 0, 'HALF_TO_EVEN')::INT || 'ms'\n"
+            f"{w}WHEN {s} < 10 THEN TO_VARCHAR(ROUND({s}, 1, 'HALF_TO_EVEN'), 'FM90.0') || 's'\n"
+            f"{w}ELSE TRIM(IFF({r} >= 3600, FLOOR({r} / 3600)::INT || 'h ', '')\n"
+            f"{w}          || IFF(MOD(FLOOR({r} / 60), 60) > 0, MOD(FLOOR({r} / 60), 60)::INT || 'm ', '')\n"
+            f"{w}          || IFF({r} < 3600 AND MOD({r}, 60) > 0, MOD({r}, 60)::INT || 's', ''))\n"
+            f"{ind}END")
+
+
+_KT = "               "                          # the render-SLA SELECT list indent
+OLD_K3 = "               r.PAGE || ' p95 first paint ' || r.P95_S || 's (7d, n=' || r.N || ')',\n"
+K3_TITLE = (f"{_KT}r.PAGE || ' p95 first paint '\n"
+            f"{_KT}|| {hd('(r.P95_S::NUMBER(18, 1))', '?', _KT + '   ')}\n"
+            f"{_KT}|| ' (7d, n=' || r.N || ')'")
+NEW_K3 = (f"{_KT}-- K3: V171 - the p95 in Hr/Min/Sec like the app (formulas.humanize_duration; the HD template the\n"
+          f"{_KT}-- V172 change scans use). HALF_TO_EVEN needs a fixed-point operand, hence the NUMBER(18, 1) cast\n"
+          f"{_KT}-- (P95_S is already rounded to 0.1 s). METRIC_VALUE and the THRESHOLD_NUM compare stay in seconds.\n"
+          + K3_TITLE + ",\n")
+
 canary = extract_proc(V017, "SP_CANARY_SENTINEL()")
 assert "\\" not in canary and canary.count("fails := fails + 1;") == 1
 canary = _swap(canary, OLD_K1, NEW_K1, "K1 OPS_CANARY_FAIL detail")
 canary = _swap(canary, OLD_K2, NEW_K2, "K2 render-SLA handler")
+canary = _swap(canary, OLD_K3, NEW_K3, "K3 OPS_SLOW_RENDER title in Hr/Min/Sec")
 _cb = _body(canary)
+assert "|| r.P95_S || 's" not in _cb and _cb.count("'HALF_TO_EVEN'") == 10
+assert _cb.count("               r.P95_S,\n") == 1 and _cb.count("AND r.P95_S > c.THRESHOLD_NUM") == 1   # seconds
+assert "'" not in NEW_K3.split(K3_TITLE)[0]                    # the K3 comment lines carry no quote
 assert "column drift after" not in _cb and "cannot see column drift" in _cb
 assert _cb.count("fails := fails + 1;") == 1 and "RETURN 'sentinel v2: ' || :fails || ' failure(s)';" in _cb
 assert _cb.count("'SNOWFLAKE.ACCOUNT_USAGE.") == 20 and _cb.count("'DBA_MAINT_DB.OVERWATCH.") == 4
@@ -359,7 +394,8 @@ HEADER = f"""-- {NAME}
 -- WHY:
 --   R2-026  SP_CANARY_SENTINEL (V017) probes each source with SELECT 1, which names no column, yet its
 --           OPS_CANARY_FAIL detail blamed ACCOUNT_USAGE column drift; and its render-SLA handler always logged
---           'APP_USAGE.RENDER_MS not readable', whatever actually failed.
+--           'APP_USAGE.RENDER_MS not readable', whatever actually failed. Its OPS_SLOW_RENDER title printed the
+--           p95 as raw seconds (95.5s), against the owner rule that every duration reads in Hr/Min/Sec.
 --   R1-228  SP_DAILY_DIGEST (V165) read the exec board's 7-day KPI rows, which are today-INCLUSIVE (seven full days
 --           plus today so far: about 7.25 days at the 07:20 run), and called warehouse metering plain spend in the
 --           facts, the prompt and the template.
@@ -376,9 +412,10 @@ HEADER = f"""-- {NAME}
 --     non-3.68 rate) is never touched, and FALSE is outside validate's TRUE / Y / YES / 1 list, so the -20013
 --     gate stays armed exactly as an absent row did.
 --   ~ SP_CANARY_SENTINEL re-derived from V017 (its current definer; V016 has no render-SLA block), byte-identical
---     except K1 the OPS_CANARY_FAIL detail (a missing or renamed object or lost access, never column drift) and
---     K2 the render-SLA handler logs 'render SLA check failed: ' plus the error. Kept: the 24 probes, fails,
---     the 180-day purge and RETURN 'sentinel v2: '.
+--     except K1 the OPS_CANARY_FAIL detail (a missing or renamed object or lost access, never column drift),
+--     K2 the render-SLA handler logs 'render SLA check failed: ' plus the error, and K3 the OPS_SLOW_RENDER title
+--     shows the p95 in Hr/Min/Sec like the app (1m 36s, not 95.5s; METRIC_VALUE and the threshold compare stay
+--     in seconds). Kept: the 24 probes, fails, the 180-day purge and RETURN 'sentinel v2: '.
 --   ~ SP_DAILY_DIGEST re-derived from V165, byte-identical except C1 the CORTEX_MODEL read normalized like the
 --     app (trimmed, lower-case, a valid name else llama3.1-8b); E1 the facts cover the 7 complete days ending
 --     yesterday (spend = the board's ALL / 7-day DAILY_SPEND rows for those days, queries from FACT_QUERY_DAILY,
@@ -392,7 +429,7 @@ HEADER = f"""-- {NAME}
 --
 -- COST: the digest reads three small day-grain ranges (the board and two app-owned facts, 7 days) instead of one
 -- board read: no ACCOUNT_USAGE, same one Cortex call. The ref-gap scan runs one statement per configured check
--- (a handful) instead of one per run. The canary is unchanged.
+-- (a handful) instead of one per run. The canary probes are unchanged (the title CASE is per slow page).
 -- LATENCY: unchanged; TASK_DAILY_DIGEST runs 07:20 America/Chicago, the canary Mondays 05:30, the ref-gap scan
 -- inside the daily alert scan.
 -- FIRST RUN: nothing runs at apply time (a digest CALL spends Cortex credits and posts to Teams). The next 07:20
@@ -432,7 +469,7 @@ WHEN NOT MATCHED THEN INSERT (KEY, VALUE) VALUES (s.KEY, s.VALUE);
 """
 
 MARK_CANARY = ("-- >>> derived:SP_CANARY_SENTINEL  (from V017; OPS_CANARY_FAIL detail no longer blames column drift + "
-               "render-SLA handler logs SQLERRM, V171)\n")
+               "render-SLA handler logs SQLERRM + OPS_SLOW_RENDER title in Hr/Min/Sec, V171)\n")
 MARK_DIGEST = ("-- >>> derived:SP_DAILY_DIGEST  (from V165; 7 complete days to yesterday + warehouse compute spend "
                "keys and wording + CORTEX_MODEL normalized like the app, V171)\n")
 MARK_REFGAP = ("-- >>> derived:SP_SCAN_REF_GAPS  (from V129; both MINUS operands TO_VARCHAR + one EXECUTE IMMEDIATE "
@@ -442,7 +479,8 @@ DESCRIPTION = (
     "Ops self-watch, digest window, ref-gap isolation, override seed (round 2). SETTINGS CREDIT_PRICE_OVERRIDE "
     "seeded FALSE (WHEN NOT MATCHED; validate.sql reads FALSE as no override). SP_CANARY_SENTINEL re-derived from "
     "V017: the OPS_CANARY_FAIL detail no longer blames column drift (SELECT 1 sees a missing object or lost access "
-    "only) and the render-SLA handler logs the real error. SP_DAILY_DIGEST re-derived from V165: facts cover the 7 "
+    "only), the render-SLA handler logs the real error, and the OPS_SLOW_RENDER title shows the p95 in Hr/Min/Sec "
+    "(METRIC_VALUE stays seconds). SP_DAILY_DIGEST re-derived from V165: facts cover the 7 "
     "complete days ending yesterday (the board ALL 7-day DAILY_SPEND rows for those days, FACT_QUERY_DAILY, "
     "FACT_TASK_DAILY; the today-inclusive KPI rows are no longer read), keys WAREHOUSE_SPEND_USD and "
     "WAREHOUSE_CREDITS, the prompt and template say warehouse compute only, never total spend; CORTEX_MODEL is "
@@ -505,6 +543,13 @@ _new_ctes = ",\n    ".join(
     + f"\n        {_central(fw)}\n    )"
     for i, (exprs, into, fw) in enumerate(E1_READS, start=1))
 
+# (label = the literal, the humanize_duration(p95, 's') text) -- tests/migrations/test_v171_* checks each WANT
+# against the app's humanize_duration; the generator never imports app/.
+K3_PROBES = (("8.1", "8.1s"), ("9.9", "9.9s"), ("12.3", "12s"), ("45.0", "45s"), ("59.4", "59s"), ("59.5", "1m"),
+             ("94.5", "1m 34s"), ("95.5", "1m 36s"), ("119.6", "2m"), ("3599.6", "1h"), ("3690.0", "1h 1m"),
+             ("8700.0", "2h 25m"), ("0.4", "400ms"), ("0.0", "0s"), ("NULL", "?"))
+_k3_rows = ",\n         ".join(f"('{v}', {v}, 'Overview p95 first paint {want} (7d, n=25)')" for v, want in K3_PROBES)
+
 PREFLIGHT = f"""-- PREFLIGHT -- V171 section (READ-ONLY). Run before applying V171; changes nothing.
 -- P171.1 the digest facts today (V165: the board's today-INCLUSIVE 7-day KPI rows) beside V171's (the 7 complete
 --        days ending yesterday). expect V171_SPEND_USD a little below V165_SPEND_USD (today's partial day left
@@ -536,6 +581,17 @@ SELECT ERROR_TYPE, COUNT(*) AS N, MAX(LOGGED_AT) AS LAST_AT, MAX(LEFT(ERROR_MESS
 SELECT COUNT(*) AS N, LISTAGG(VALUE, ', ') AS VALUES_SEEN
   FROM DBA_MAINT_DB.OVERWATCH.SETTINGS
  WHERE KEY = 'CREDIT_PRICE_OVERRIDE';
+
+-- P171.5 the K3 OPS_SLOW_RENDER title (the proc's exact TITLE text) on FLOAT p95 literals, the type the proc's
+--        ROUND(APPROX_PERCENTILE(..)) gives. expect every RESULT OK: the CASE compiles and reads like the app
+--        (Hr/Min/Sec) before the Monday 05:30 canary run uses it.
+SELECT 'P171.5 title p95 ' || r.LBL AS CHECK_NAME, r.WANT,
+{K3_TITLE} AS GOT,
+       IFF(GOT = r.WANT, 'OK', 'FAIL: the title renders differently') AS RESULT
+FROM (SELECT column1 AS LBL, column2::FLOAT AS P95_S, 'Overview' AS PAGE, 25 AS N, column3 AS WANT
+      FROM VALUES
+         {_k3_rows}) r
+ORDER BY 1;
 """
 
 # ===================================================================================================
@@ -543,8 +599,8 @@ SELECT COUNT(*) AS N, LISTAGG(VALUE, ', ') AS VALUES_SEEN
 # ===================================================================================================
 PART_B_DDL = (
     ("V171.1", "SP_CANARY_SENTINEL", _cb,
-     ("cannot see column drift", "render SLA check failed: ", "sentinel v2: "),
-     ("Likely ACCOUNT_USAGE column drift", "APP_USAGE.RENDER_MS not readable")),
+     ("cannot see column drift", "render SLA check failed: ", "sentinel v2: ", "HALF_TO_EVEN"),
+     ("Likely ACCOUNT_USAGE column drift", "APP_USAGE.RENDER_MS not readable", "s (7d, n=")),
     ("V171.2", "SP_DAILY_DIGEST", _db,
      ("WAREHOUSE_SPEND_USD=", "PERIOD_START < CURRENT_DATE()", "FACT_TASK_DAILY", "RLIKE(cm, ",
       "never total spend", "REGEXP_SUBSTR_ALL"),

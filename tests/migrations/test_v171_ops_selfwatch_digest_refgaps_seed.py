@@ -14,15 +14,20 @@ shipped text:
     reversing every delta with this file's OWN copies of the old and new text gives the base back
     byte-for-byte; a mutation inside or outside a delta breaks it;
   * content -- the canary text and handler, the digest window / keys / prompt / template and the CORTEX_MODEL
-    read (parity with app.core.ai.normalize_model), the per-check ref-gap loop and both casts, the seed.
+    read (parity with app.core.ai.normalize_model), the per-check ref-gap loop and both casts, the seed;
+  * executed -- the K3 OPS_SLOW_RENDER title runs in sqlite (the proc's own text) and reads like
+    app.logic.formulas.humanize_duration (owner rule: durations in Hr/Min/Sec).
 """
 
 from __future__ import annotations
 
+import math
 import os
 import re
+import sqlite3
 import subprocess
 import sys
+from decimal import ROUND_HALF_EVEN, ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 import pytest
@@ -61,7 +66,8 @@ _CB, _DB, _RB = _body(_CAN), _body(_DIG), _body(_REF)
 
 _MARKERS = {
     "SP_CANARY_SENTINEL": ("-- >>> derived:SP_CANARY_SENTINEL  (from V017; OPS_CANARY_FAIL detail no longer blames "
-                           "column drift + render-SLA handler logs SQLERRM, V171)\n", 17),
+                           "column drift + render-SLA handler logs SQLERRM + OPS_SLOW_RENDER title in Hr/Min/Sec, "
+                           "V171)\n", 17),
     "SP_DAILY_DIGEST": ("-- >>> derived:SP_DAILY_DIGEST  (from V165; 7 complete days to yesterday + warehouse compute "
                         "spend keys and wording + CORTEX_MODEL normalized like the app, V171)\n", 165),
     "SP_SCAN_REF_GAPS": ("-- >>> derived:SP_SCAN_REF_GAPS  (from V129; both MINUS operands TO_VARCHAR + one EXECUTE "
@@ -71,6 +77,30 @@ _MARKERS = {
 # ---------------------------------------------------------------------------------------------------------------
 # Test-side copies of every delta (independent of outputs/gen_v171.py): (new text, old text).
 # ---------------------------------------------------------------------------------------------------------------
+def _hd(s: str, nul: str, ind: str) -> str:
+    """This file's own copy of the HD template (a seconds expression S rendered like humanize_duration(S, 's'))."""
+    r = f"ROUND({s}, 0, 'HALF_TO_EVEN')"
+    w = ind + "     "
+    return (f"CASE WHEN {s} IS NULL THEN '{nul}'\n"
+            f"{w}WHEN ROUND({s} * 1000, 0, 'HALF_TO_EVEN') = 0 THEN '0s'\n"
+            f"{w}WHEN {s} < 1 THEN ROUND({s} * 1000, 0, 'HALF_TO_EVEN')::INT || 'ms'\n"
+            f"{w}WHEN {s} < 10 THEN TO_VARCHAR(ROUND({s}, 1, 'HALF_TO_EVEN'), 'FM90.0') || 's'\n"
+            f"{w}ELSE TRIM(IFF({r} >= 3600, FLOOR({r} / 3600)::INT || 'h ', '')\n"
+            f"{w}          || IFF(MOD(FLOOR({r} / 60), 60) > 0, MOD(FLOOR({r} / 60), 60)::INT || 'm ', '')\n"
+            f"{w}          || IFF({r} < 3600 AND MOD({r}, 60) > 0, MOD({r}, 60)::INT || 's', ''))\n"
+            f"{ind}END")
+
+
+_KT = " " * 15                                   # the render-SLA SELECT list indent
+_K3_TITLE = (f"{_KT}r.PAGE || ' p95 first paint '\n"
+             f"{_KT}|| {_hd('(r.P95_S::NUMBER(18, 1))', '?', _KT + '   ')}\n"
+             f"{_KT}|| ' (7d, n=' || r.N || ')'")
+_NEW_K3 = (f"{_KT}-- K3: V171 - the p95 in Hr/Min/Sec like the app (formulas.humanize_duration; the HD template the\n"
+           f"{_KT}-- V172 change scans use). HALF_TO_EVEN needs a fixed-point operand, hence the NUMBER(18, 1) cast\n"
+           f"{_KT}-- (P95_S is already rounded to 0.1 s). METRIC_VALUE and the THRESHOLD_NUM compare stay in seconds.\n"
+           + _K3_TITLE + ",\n")
+_OLD_K3 = "               r.PAGE || ' p95 first paint ' || r.P95_S || 's (7d, n=' || r.N || ')',\n"
+
 _CANARY_DELTAS = (
     ("""\
                'CANARY_RESULTS.ERROR holds the error for each failing object. This probe (SELECT 1) ' ||
@@ -86,6 +116,7 @@ _CANARY_DELTAS = (
      ""),
     ("                   'render SLA check failed: ' || LEFT(:emsg, 500), 'source probes unaffected', CURRENT_ROLE();\n",
      "                   'APP_USAGE.RENDER_MS not readable', 'source probes unaffected', CURRENT_ROLE();\n"),
+    (_NEW_K3, _OLD_K3),
 )
 
 _NEW_E1 = """\
@@ -339,7 +370,7 @@ def test_v171_preflight_and_part_b_are_read_only_and_parse(tmp_path, which):
 
 def test_v171_preflight_previews_the_procs_own_reads(tmp_path):
     pre, part_b = _extras(tmp_path)
-    assert re.findall(r"^-- (P171\.\d) ", pre, re.M) == ["P171.1", "P171.2", "P171.3", "P171.4"]
+    assert re.findall(r"^-- (P171\.\d) ", pre, re.M) == ["P171.1", "P171.2", "P171.3", "P171.4", "P171.5"]
     assert re.findall(r"^-- (V171\.\d) ", part_b, re.M) == ["V171.1", "V171.5", "V171.6"]
     for label, proc in (("V171.1", "SP_CANARY_SENTINEL"), ("V171.2", "SP_DAILY_DIGEST"), ("V171.3", "SP_SCAN_REF_GAPS")):
         assert part_b.count(f"SELECT '{label} {proc} is the V171 proc' AS CHECK_NAME,") == 1, label
@@ -488,6 +519,9 @@ def test_v171_proc_normalizes_back_to_its_base_byte_for_byte(proc):
     ("SP_SCAN_REF_GAPS", "        RAISE all_failed;", "        RETURN 'x';"),
     ("SP_CANARY_SENTINEL", "'render SLA check failed: ' || LEFT(:emsg, 500)",
      "'render SLA check failed: ' || LEFT(:emsg, 50)"),
+    ("SP_CANARY_SENTINEL", "FLOOR(ROUND((r.P95_S::NUMBER(18, 1)), 0, 'HALF_TO_EVEN') / 3600)::INT || 'h '",
+     "FLOOR(ROUND((r.P95_S::NUMBER(18, 1)), 0, 'HALF_TO_EVEN') / 3600)::INT || 'Hr '"),
+    ("SP_CANARY_SENTINEL", "|| ' (7d, n=' || r.N || ')',", "|| 's (7d, n=' || r.N || ')',"),
 ])
 def test_v171_normalize_has_teeth(proc, old, new):
     p, base, deltas = _CASES[proc]
@@ -510,6 +544,119 @@ def test_v171_canary_detail_and_render_handler():
     assert _CB.count("fails := fails + 1;") == 1 and "RETURN 'sentinel v2: ' || :fails || ' failure(s)';" in _CB
     assert _CB.index("    END FOR;") < _CB.index("            emsg := SQLERRM;   -- K2")    # the probe loop is done
     assert "EXECUTE AS OWNER" in _CAN
+
+
+# -- K3: the OPS_SLOW_RENDER title in Hr/Min/Sec, executed in sqlite ---------------------------------------------------
+
+def _title_expr(body: str) -> str:
+    """The render-SLA INSERT's TITLE expression, from the proc's own text."""
+    start = body.index("               r.PAGE || ' p95 first paint '")
+    return body[start:body.index(",\n               'Persisted first-paint times", start)].strip()
+
+
+def _to_sqlite(expr: str) -> str:
+    """Minimal, fail-closed Snowflake -> sqlite for the title: the NUMBER(18, 1) cast -> NUM1(); x::INT ->
+    CAST(x AS INTEGER) over the call right before it. ROUND(.., 'HALF_TO_EVEN'), TO_VARCHAR(.., 'FM90.0'), IFF,
+    FLOOR and MOD are UDFs with Snowflake semantics (registered in _title_db)."""
+    out = expr.replace("r.P95_S::NUMBER(18, 1)", "NUM1(r.P95_S)")
+    while "::INT" in out:
+        i = out.index("::INT")
+        after = out[i + 5:i + 6]
+        assert out[i - 1] == ")" and not (after.isalnum() or after == "_"), out[i - 20:i + 8]
+        depth, j = 0, i - 1
+        while True:
+            depth += {")": 1, "(": -1}.get(out[j], 0)
+            if depth == 0:
+                break
+            j -= 1
+        k = j
+        while k and (out[k - 1].isalnum() or out[k - 1] == "_"):
+            k -= 1
+        out = f"{out[:k]}CAST({out[k:i]} AS INTEGER){out[i + 5:]}"
+    assert "::" not in out and "--" not in out, out
+    return out
+
+
+def _dec(x) -> Decimal:
+    return Decimal(repr(x))
+
+
+def _round_mode(x, n, mode):
+    assert mode == "HALF_TO_EVEN", mode
+    if x is None:
+        return None
+    d = _dec(x).quantize(Decimal(1).scaleb(-n), rounding=ROUND_HALF_EVEN)
+    return int(d) if n == 0 else float(d)
+
+
+def _to_varchar(x, fmt):
+    assert fmt == "FM90.0", fmt
+    return None if x is None else str(_dec(x).quantize(Decimal("0.1"), rounding=ROUND_HALF_EVEN))
+
+
+def _num1(x):
+    return None if x is None else float(_dec(x).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+
+
+def _title_db() -> sqlite3.Connection:
+    con = sqlite3.connect(":memory:")
+    con.create_function("NUM1", 1, _num1)
+    con.create_function("ROUND", 3, _round_mode)
+    con.create_function("TO_VARCHAR", 2, _to_varchar)
+    con.create_function("IFF", 3, lambda c, a, b: a if c else b)
+    con.create_function("FLOOR", 1, lambda x: None if x is None else math.floor(x))
+    con.create_function("MOD", 2, lambda a, b: None if a is None or b is None else a % b)
+    con.execute("CREATE TABLE R (PAGE TEXT, P95_S REAL, N INTEGER)")
+    return con
+
+
+# P95_S as the proc computes it: ROUND(APPROX_PERCENTILE(RENDER_MS, 0.95) / 1000, 1), so one decimal.
+_P95_GRID = [0.0, 0.4, 0.5, 1.0, 5.0, 8.1, 9.9, 10.0, 12.3, 45.0, 59.4, 59.5, 60.0, 94.5, 95.5, 119.6, 600.0,
+             3599.4, 3599.6, 3600.0, 3630.0, 3690.0, 8700.0, 86400.0, None]
+
+
+def _render_titles(body: str) -> list[str | None]:
+    con = _title_db()
+    con.executemany("INSERT INTO R VALUES (?, ?, ?)", [("Overview", v, 20 + k) for k, v in enumerate(_P95_GRID)])
+    return [row[0] for row in con.execute(f"SELECT {_to_sqlite(_title_expr(body))} FROM R r ORDER BY ROWID")]
+
+
+def test_v171_slow_render_title_reads_hr_min_sec_executed():
+    """K3 (owner rule): the title's p95 renders like the app's humanize_duration, never raw seconds."""
+    from app.logic.formulas import humanize_duration
+    got = _render_titles(_CB)
+    for k, (v, title) in enumerate(zip(_P95_GRID, got, strict=True)):
+        want = "?" if v is None else humanize_duration(v, "s")
+        assert title == f"Overview p95 first paint {want} (7d, n={20 + k})", (v, title)
+    assert got[_P95_GRID.index(95.5)] == "Overview p95 first paint 1m 36s (7d, n=34)"
+    # teeth: V017's title through the same harness printed raw seconds
+    old = _render_titles(_body(_CAN017))
+    assert old[_P95_GRID.index(95.5)] == "Overview p95 first paint 95.5s (7d, n=34)"
+    assert old[_P95_GRID.index(3690.0)] == "Overview p95 first paint 3690.0s (7d, n=41)"
+
+
+def test_v171_slow_render_metric_and_threshold_stay_in_seconds():
+    block = _between(_CB, "    -- Render-time SLA (guarded)", "    EXCEPTION\n")
+    assert _title_expr(_CB) == _K3_TITLE.strip()
+    assert block.count("               r.P95_S,\n") == 1                     # METRIC_VALUE: seconds
+    assert block.count("AND r.P95_S > c.THRESHOLD_NUM") == 1
+    assert block.count("ROUND(APPROX_PERCENTILE(RENDER_MS, 0.95) / 1000, 1) AS P95_S,") == 1
+    assert "|| r.P95_S || 's" not in block and "'HALF_TO_EVEN'" in block
+    old = _between(_body(_CAN017), "    -- Render-time SLA (guarded)", "    EXCEPTION\n")
+    assert block.replace(_NEW_K3, _OLD_K3) == old                            # the title is the only change in the INSERT
+
+
+def test_v171_preflight_probes_the_slow_render_title(tmp_path):
+    from app.logic.formulas import humanize_duration
+    pre, _part_b = _extras(tmp_path)
+    probe = pre[pre.index("-- P171.5 "):]
+    assert _title_expr(_CB) + " AS GOT," in probe                           # the proc's own text, verbatim
+    rows = re.findall(r"\('([^']*)', ([0-9.]+|NULL), '([^']*)'\)", probe)
+    assert len(rows) >= 10
+    for lbl, val, want in rows:
+        hum = "?" if val == "NULL" else humanize_duration(float(val), "s")
+        assert lbl == val and want == f"Overview p95 first paint {hum} (7d, n=25)", (lbl, want)
+    assert "column2::FLOAT AS P95_S" in probe                               # the FLOAT the proc's ROUND gives
 
 
 def test_v171_canary_checks_array_is_v017s():

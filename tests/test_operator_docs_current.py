@@ -181,3 +181,23 @@ def test_email_preflight_matches_the_delivery_alert():
     assert "OR PAGE = 'NotifyWebhook')" not in preflight
     checked = re.search(r"PAGE = 'NotifyWebhook'\s+AND ERROR_TYPE IN \(([^)]*)\)", preflight)
     assert checked and re.findall(r"'(\w+)'", checked.group(1)) == emailed
+
+
+def _definer_versions(name: str) -> list[int]:
+    """Every migration version that CREATE OR REPLACEs the procedure, ascending (the last one is its current definer)."""
+    pat = re.compile(r"CREATE OR REPLACE PROCEDURE DBA_MAINT_DB\.OVERWATCH\." + name + r"\(")
+    return sorted(int(re.match(r"V(\d+)__", mig.name).group(1))
+                  for mig in (ROOT / "snowflake" / "migrations").glob("V[0-9]*__*.sql")
+                  if pat.search(mig.read_text(encoding="utf-8")))
+
+
+def test_webhook_setup_names_the_digest_current_definer():
+    """V171 review: webhook_delivery.sql names SP_DAILY_DIGEST's current definer, and its never-re-run-V018 warning
+    lists every later re-definition that a V018 re-run would undo (it went stale when V171 re-derived the digest)."""
+    wd = read("snowflake/webhook_delivery.sql")
+    versions = _definer_versions("SP_DAILY_DIGEST")
+    assert versions[:2] == [7, 18] and len(versions) > 2
+    assert f"(SP_DAILY_DIGEST, V{versions[-1]:03d})" in wd
+    assert len(re.findall(r"\(SP_DAILY_DIGEST, V\d+\)", wd)) == 1
+    undone = "/".join(f"V{v:03d}" for v in versions if v > 18)
+    assert f" and undoes {undone}." in wd.replace("\n-- ", " ")
