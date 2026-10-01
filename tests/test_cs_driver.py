@@ -49,7 +49,7 @@ def test_fbe_is_system_generated_and_resize_irrelevant():
     cls, conf = classify_row(_fam("CALL SYSTEM$FBE_CAPTURE_FILE_REVISION_HISTORY('workspace', (?), (?))",
                                    runs=410, compile_pct=99.7, total_s=0.55))
     assert cls == SYSTEM_GENERATED and conf == "HIGH"
-    assert cs.resize_verdict(cls, 99.7, 0.55) == RESIZE_NOT_INDICATED
+    assert cs.resize_verdict(cls, 99.7) == RESIZE_NOT_INDICATED
     assert cs.remediation_owner(cls).startswith("Platform")
 
 
@@ -92,7 +92,7 @@ def test_compile_heavy_warehouse_backed():
     cls, _ = classify_row(_fam("SELECT a,b,c FROM big_join WHERE ...", compile_pct=62.0, total_s=8.0,
                                WAREHOUSE_NAME="WH_ALFA_QA"))
     assert cls == COMPILE_HEAVY
-    assert cs.resize_verdict(cls, 62.0, 8.0) == RESIZE_NOT_INDICATED  # compile-bound => resize won't help
+    assert cs.resize_verdict(cls, 62.0) == RESIZE_NOT_INDICATED  # compile-bound => resize won't help
 
 
 def test_metadata_chatter_shape_when_subsecond():
@@ -104,7 +104,7 @@ def test_normal_exec_dominated_is_insufficient_evidence():
     cls, _ = classify_row(_fam("SELECT sum(x) FROM fact GROUP BY 1", compile_pct=5.0, total_s=25.0))
     assert cls == NORMAL
     # exec-dominated but no spill/queue columns here -> Phase 0 never claims RESIZE MAY HELP
-    assert cs.resize_verdict(cls, 5.0, 25.0) == RESIZE_INSUFFICIENT
+    assert cs.resize_verdict(cls, 5.0) == RESIZE_INSUFFICIENT
 
 
 def test_thin_sample_decays_confidence():
@@ -175,7 +175,7 @@ def test_control_m_poll_is_sleep_polling_not_benign_platform():
                WAREHOUSE_NAME="WH_ALFA_TRANSFORM_PRD")
     cls, conf = classify_row(row)
     assert (cls, conf) == (SLEEP_POLLING, "HIGH")
-    assert cs.resize_verdict(cls, 0.7, 10.0) == RESIZE_NOT_INDICATED
+    assert cs.resize_verdict(cls, 0.7) == RESIZE_NOT_INDICATED
     assert cs.remediation_owner(cls) == "Job scheduler / task owner"
 
 
