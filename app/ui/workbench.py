@@ -874,6 +874,10 @@ def render_entity_360(company: str) -> None:
 
 
 _BLAST_WINDOW_DAYS = 30
+# The account-wide declared-edge fetch: the builder's LIMIT and run()'s max_rows are ONE number, so the
+# n+1 canary arms and `truncated` can fire. R1-056: the builder's default (10,000) is below max_rows, so
+# run() kept the smaller trailing LIMIT and a >10k-edge graph was cut with no lower-bound warning.
+_DEP_EDGE_CAP = 50000
 
 
 def _object_blast_radius_panel(key: str) -> None:
@@ -884,11 +888,11 @@ def _object_blast_radius_panel(key: str) -> None:
     probe-gated (OBJECT_DEPENDENCIES is unverified here; ACCESS_HISTORY is Enterprise-
     only), so each half degrades on its own."""
     st.markdown("**Downstream blast radius**")
-    # max_rows honors the builder's own 50k clamp instead of the 5k default, and
-    # `truncated` is surfaced below — the declared-dependent count is never silently cut.
-    edges = run(graph_sql.object_dependency_edges(), page=_PAGE, key="object_dep_edges",
+    # The builder's LIMIT and max_rows are the same 50k cap (the builder's own clamp), so run() fetches
+    # cap+1 and `truncated` is surfaced below — the declared-dependent count is never silently cut.
+    edges = run(graph_sql.object_dependency_edges(_DEP_EDGE_CAP), page=_PAGE, key="object_dep_edges",
                 tier="historical", source="ACCOUNT_USAGE.OBJECT_DEPENDENCIES",
-                probe=True, max_rows=50000)
+                probe=True, max_rows=_DEP_EDGE_CAP)
     if not edges.ok and is_setup_absence(edges.error_kind):
         st.caption("Declared object lineage needs ACCOUNT_USAGE.OBJECT_DEPENDENCIES, "
                    "which isn't available to this role/account yet — blast radius hidden.")
