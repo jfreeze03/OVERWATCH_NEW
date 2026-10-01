@@ -77,3 +77,39 @@ def test_ops_sizing_divides_by_the_bounds_span(monkeypatch):
     assert seen["days"] == 2
     body = _fn(read(_OPS), "_wh_sizing_efficiency")
     assert "served_days(_prof, _span)" in body and "served_days(_prof, days)" not in body
+
+
+# ------------------------------------------- R1-039: proc_regression's PRIOR window per preset ----
+
+def _split(sql: str) -> tuple[str, str]:
+    """(scan-from literal, CUR-split literal) of a bounded proc_regression render."""
+    import re
+    scan = re.search(r"START_TIME >= '(\d{4}-\d{2}-\d{2})' AND START_TIME < '(\d{4}-\d{2}-\d{2})'", sql)
+    cur = re.search(r"IFF\(START_TIME >= '(\d{4}-\d{2}-\d{2})', 'CUR', 'PRIOR'\)", sql)
+    assert scan and cur, sql
+    return f"{scan.group(1)}..{scan.group(2)}", cur.group(1)
+
+
+@pytest.mark.parametrize(("bounds", "scan", "cur"), [
+    # Last month (a whole calendar month): August vs July, unchanged
+    ((date(2026, 8, 1), date(2026, 9, 1)), "2026-07-01..2026-09-01", "2026-08-01"),
+    # Current month on Sep 3: Sep 1-3 vs the 3 days before (was: vs all of August)
+    ((date(2026, 9, 1), date(2026, 9, 4)), "2026-08-29..2026-09-04", "2026-09-01"),
+    # Current month on the 1st: today vs yesterday -- never an empty PRIOR
+    ((date(2026, 9, 1), date(2026, 9, 2)), "2026-08-31..2026-09-02", "2026-09-01"),
+    # Current year on Sep 30: 273 days vs the 273 before (was: nine months vs December alone)
+    ((date(2026, 1, 1), date(2026, 10, 1)), "2025-04-03..2026-10-01", "2026-01-01"),
+    # Current month on its last day is a whole month: the calendar month before
+    ((date(2026, 9, 1), date(2026, 10, 1)), "2026-08-01..2026-10-01", "2026-09-01"),
+    # a January whole month wraps the year
+    ((date(2026, 1, 1), date(2026, 2, 1)), "2025-12-01..2026-02-01", "2026-01-01"),
+])
+def test_proc_regression_prior_window_per_preset(bounds, scan, cur):
+    from app.data import ops_sql
+    assert _split(ops_sql.proc_regression(int((bounds[1] - bounds[0]).days), bounds=bounds)) == (scan, cur)
+
+
+def test_proc_regression_caption_names_the_prior_window():
+    src = read(_OPS)
+    assert "the prior equal-length window (percent change" not in src
+    assert "the calendar month before \"\n                \"under Last month, else the equal-length window just before" in src

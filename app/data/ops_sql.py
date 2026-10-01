@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 
 from app import companies
 from app.config import CORE_SCHEMA, OVERWATCH_DB, core_object
@@ -1012,7 +1013,7 @@ def proc_regression(days: int, company: str = "ALL", warehouse_contains: str = "
                     user_contains: str = "", database: str = "",
                     schema_contains: str = "", min_calls: int = 5, *,
                     bounds: tuple | None = None) -> str:
-    """Stored procedures whose runtime crept up vs the prior equal-length window.
+    """Stored procedures whose runtime crept up vs the prior window.
 
     Emits, per proc, this window's vs the previous window's success-only p95/avg
     and the percent change, so a proc that got slower surfaces even if it is cheap.
@@ -1026,19 +1027,31 @@ def proc_regression(days: int, company: str = "ALL", warehouse_contains: str = "
     rounding. Latency is success-only, and the fail-rate delta is surfaced so 'faster
     because it now errors out' is not mistaken for an improvement. The current window
     is the trailing ``days`` days including today so far; the prior window is exactly
-    ``days`` full days before it. Ranked by p95 growth, worst first. ~6h ACCOUNT_USAGE
-    latency applies to the current window's most recent hours.
+    ``days`` full days before it. Under ``bounds`` a whole calendar month (Last month) is
+    compared with the calendar month before it; a period-to-date range (Current month /
+    Current year) with the equal-length span just before its start. Ranked by p95 growth,
+    worst first. ~6h ACCOUNT_USAGE latency applies to the current window's most recent hours.
     """
     days = bounded_days(days)
     min_calls = max(1, min(int(min_calls or 5), 10000))
-    # Vs-prior: for 'Last month' (bounds) CURRENT is that calendar month and PRIOR is
-    # the month before it — scan [prior_start, cur_end) and split the CUR/PRIOR IFF on
-    # cur_start. Trailing keeps the 2*days scan split on the -days CURRENT_DATE anchor.
+    # Vs-prior under bounds: scan [prior_start, cur_end) and split the CUR/PRIOR IFF on
+    # cur_start. A whole calendar month ('Last month') compares with the month before it.
+    # PR-1 R1-039: Current month / Current year bounds are PERIOD-TO-DATE, and the old
+    # always-the-month-before rule compared a 3-day MTD with all of August and nine months
+    # of YTD with December alone -- they compare with the equal-length span just before
+    # cur_start (on the 1st: today vs yesterday, never an empty PRIOR). Trailing keeps the
+    # 2*days scan split on the -days CURRENT_DATE anchor.
     if bounds is not None:
         cur_start, cur_end = bounds
-        prior_start = (cur_start.replace(year=cur_start.year - 1, month=12)
-                       if cur_start.month == 1
-                       else cur_start.replace(month=cur_start.month - 1))
+        _next_month = (cur_start.replace(year=cur_start.year + 1, month=1)
+                       if cur_start.month == 12
+                       else cur_start.replace(month=cur_start.month + 1))
+        if cur_start.day == 1 and cur_end == _next_month:
+            prior_start = (cur_start.replace(year=cur_start.year - 1, month=12)
+                           if cur_start.month == 1
+                           else cur_start.replace(month=cur_start.month - 1))
+        else:
+            prior_start = cur_start - timedelta(days=max((cur_end - cur_start).days, 1))
         outer_bounds = (prior_start, cur_end)
         cur_from = f"START_TIME >= '{cur_start.isoformat()}'"
     else:

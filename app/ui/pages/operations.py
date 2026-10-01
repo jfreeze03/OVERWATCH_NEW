@@ -766,7 +766,8 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         key="ops_proc_reg_toggle",
         help="A live scan that rolls up CALL statements per stored procedure "
              "(success-only p95/avg, ranked by SLA impact) and flags the ones whose "
-             "p95 crept up versus the previous equal-length window.")
+             "p95 crept up versus the prior window (the calendar month before under Last "
+             "month, else the equal-length window just before).")
     if _proc_reg_on:
         _pb = run_batch([
             {"key": "roll", "sql": ops_sql.proc_sla_rollup(
@@ -820,8 +821,10 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             styled_table(_pr[_pr_cols], slug="proc_regression", days=days,
                          sort_label="worst first")
             st.caption(
-                "Success-only p95 this window vs the prior equal-length window (percent change "
-                "from the unrounded values). A proc needs at least "
+                "Success-only p95 this window vs the prior window — the calendar month before "
+                "under Last month, else the equal-length window just before (percent change "
+                "from the unrounded values; QUERY_HISTORY keeps one year, so late in a Current-"
+                "year window the prior side is cut short). A proc needs at least "
                 f"{proc_regression.MIN_CALLS} successful calls in BOTH windows to be compared — a "
                 "now-fully-failing proc has no latency signal, so watch the rollup's FAIL_PCT "
                 "above. 'Faster but failing' flags a proc that only looks quicker because it now "
