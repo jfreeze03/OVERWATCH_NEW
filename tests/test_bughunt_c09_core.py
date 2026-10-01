@@ -349,3 +349,20 @@ def test_access_self_check_never_serves_a_stale_ok(monkeypatch):
     admin._access_self_check()
     assert shown == [("clean", "All 7 sources reachable.")]
     assert tiers and all(CACHE_TTLS[t] <= 30 for t in tiers), tiers
+
+
+# ------------------------------------------------------------------ R1-176: fleet stats count only slow/failed ----
+
+@pytest.mark.parametrize("page", ["", "Watch"])
+def test_fleet_query_stats_excludes_the_healthy_sample(page):
+    """APP_QUERY_TELEMETRY also persists a ~2% healthy sample (SAMPLE_PROB 0.02); without a predicate those rows
+    were counted as SLOW_OR_FAILED and pulled P50/P95, so the clean state was unreachable. The WHERE must keep
+    only >=2s-or-failed rows (the SLOW_2S threshold telemetry_by_page uses), with or without a page filter."""
+    import sqlglot
+
+    from app.data import mart_sql
+
+    sql = mart_sql.fleet_query_stats(7, page=page)
+    where = sqlglot.parse_one(sql, read="snowflake").args["where"].sql(dialect="snowflake")
+    assert "(NOT OK OR ELAPSED_MS >= 2000)" in where, where
+    assert ("PAGE = 'Watch'" in where) == bool(page)

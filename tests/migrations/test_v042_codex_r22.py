@@ -189,5 +189,8 @@ def test_query_detail_is_time_bounded_from_the_table_path():
 
 def test_fleet_board_names_its_sampling_bias():
     adm = (_ROOT / "app" / "ui" / "pages" / "admin.py").read_text(encoding="utf-8")
-    assert "EXCEPTION-WEIGHTED sample" in adm
+    # c09 R1-176: fleet_query_stats now filters to >=2s-or-failed rows (the ~2% healthy sample no longer
+    # leaks into SLOW_OR_FAILED), so the board is exception-ONLY, not an exception-weighted sample; the
+    # bias it names (p50/p95 read high) is unchanged.
+    assert "EXCEPTION-ONLY view" in adm
     assert "read HIGHER than true fleet latency" in adm

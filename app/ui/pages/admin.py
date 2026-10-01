@@ -1732,8 +1732,8 @@ def _performance_tab() -> None:
             fq.df, _PAGE, id_col="SLOWEST_QUERY_ID", label="Slowest profile")
         styled_table(_fq, height=280, column_config=_fq_cfg or None)
         st.caption(
-            "Only fetches ≥2s or failed are persisted, plus a ~2% healthy sample "
-            "(fire-and-forget, 60/session cap) — an EXCEPTION-WEIGHTED sample, so "
+            "Only fetches ≥2s or failed are counted here (the ~2% healthy sample the "
+            "app also persists is filtered out) — an EXCEPTION-ONLY view, so "
             "p50/p95 here read HIGHER than true fleet latency (r22 #20; weighted "
             "stats are queued). This is the regression surface across every user, "
             "not a complete census. Slowest profile opens the longest persisted server "
