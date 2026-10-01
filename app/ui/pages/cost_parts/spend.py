@@ -666,8 +666,19 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                         # empty case a "native-app pool" (a user-owned non-notebook pool
                         # shows APPLICATION_NAME='Unassigned'; the notebook feed can also
                         # simply be empty this window).
-                        if not _nb_ok:
-                            st.info(
+                        # R1-118: a FAILED notebook read is not "the feed has no rows" (usable() mixed the two);
+                        # its full error renders once, under Notebook subset below.
+                        if notebooks is not None and not notebooks.ok and is_setup_absence(notebooks.error_kind):
+                            empty_state("needs_setup", f"**{_pool_name}**: the per-user drill reads "
+                                        "NOTEBOOKS_CONTAINER_RUNTIME_HISTORY, which isn't readable by this app "
+                                        "here, so no per-user split can be shown.")
+                        elif notebooks is not None and not notebooks.ok:
+                            empty_state("unavailable", f"**{_pool_name}**: the notebook-runtime read "
+                                        "(NOTEBOOKS_CONTAINER_RUNTIME_HISTORY) failed, so per-user cost is unknown "
+                                        "— the error is under Notebook subset below.")
+                        elif not _nb_ok:
+                            empty_state(
+                                "no_data_yet",
                                 f"**{_pool_name}** — {format_usd(_pool_usd)} — the per-user drill reads the "
                                 "notebook-runtime feed (NOTEBOOKS_CONTAINER_RUNTIME_HISTORY), which has no "
                                 "rows for this window, so no per-user split can be shown here."
@@ -1284,9 +1295,23 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                 _adf["USD"] = _adf["CREDITS"].map(safe_float).map(lambda c: credits_to_usd(c, rate))
                 _nm = user_display_map(_PAGE)
                 _adf["USER_NAME"] = [resolve_display(u, _nm) for u in _adf["USER_NAME"]]
-                _byapp = (_adf.groupby("APPLICATION", as_index=False)
-                          .agg(USD=("USD", "sum"), QUERIES=("QUERIES", "sum"))
-                          .sort_values("USD", ascending=False).head(15))
+                # R1-157 (UNCAPPED-AGGREGATE): both builders are application x user x company grain with
+                # LIMIT 1000, so summing the frame drops the low-credit tail -- a program spread thinly
+                # across many users is understated or vanishes, which can reorder the ranking. Chart the
+                # per-application totals the builder computes BEFORE its LIMIT (APP_CREDITS/APP_QUERIES,
+                # app_cost_sql -- review R1-031) when present; otherwise sum the frame and, if it hit the
+                # cap, say the totals are a lower bound instead of claiming the ranking is reliable.
+                if {"APP_CREDITS", "APP_QUERIES"} <= set(_adf.columns):
+                    _byapp = _adf.drop_duplicates("APPLICATION")[["APPLICATION", "APP_CREDITS", "APP_QUERIES"]]
+                    _byapp = _byapp.assign(
+                        USD=_byapp["APP_CREDITS"].map(safe_float).map(lambda c: credits_to_usd(c, rate)),
+                        QUERIES=_byapp["APP_QUERIES"])[["APPLICATION", "USD", "QUERIES"]]
+                    _app_capped = False
+                else:
+                    _byapp = (_adf.groupby("APPLICATION", as_index=False)
+                              .agg(USD=("USD", "sum"), QUERIES=("QUERIES", "sum")))
+                    _app_capped = len(_adf) >= _APP_COST_ROW_CAP
+                _byapp = _byapp.sort_values("USD", ascending=False).head(15)
                 charts.bar_usd(_byapp, "APPLICATION", "USD",
                                title="Measured $ by application", top_n=15)
                 styled_table(
@@ -1301,8 +1326,13 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                     "high line for one program is where to look for a misconfiguration. "
                     "The FACT_APP_COST_DAILY window fills in as the daily loader runs, so soon "
                     "after V077 is applied it may be shorter than the page window; the live "
-                    "fallback (this toggle before V077 loads) covers up to 90 days. Ranking by "
-                    "program is reliable even while the window is short."))
+                    "fallback (this toggle before V077 loads) covers up to 90 days."
+                    + ("" if _app_capped else " Ranking by program is reliable even while the window is "
+                                               "short.")))
+                if _app_capped:
+                    st.caption(f"The read hit its {_APP_COST_ROW_CAP:,}-row cap (application x user x company, "
+                               "largest first), so the per-application totals above are a LOWER BOUND and the "
+                               "ranking can be off: a program spread thinly across many users loses the most.")
                 result_caption(_app)
 
     st.markdown("**Daily anomaly check (per warehouse)**")
@@ -1374,8 +1404,16 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
             )
         else:
             empty_state("clean", "No daily spend anomalies in the last 30 days (median/MAD z < 3.5).")
+    # R1-077/R1-160: a FAILED read is not "facts haven't loaded yet" -- usable() is ok AND non-empty, so a
+    # timeout used to fall into the loading caption and the spike/collapse check silently switched off.
+    elif not daily.ok and is_setup_absence(daily.error_kind):
+        empty_state("needs_setup", "The daily anomaly check reads FACT_WAREHOUSE_DAILY, which isn't readable by "
+                                   "this app here, so no anomaly flags were evaluated.")
+    elif not daily.ok:
+        empty_state("unavailable", "The daily anomaly check could not read FACT_WAREHOUSE_DAILY, so no anomaly "
+                                   "flags were evaluated.", detail=daily.error)
     else:
-        st.caption("Anomaly flags appear once 30 days of per-warehouse daily facts have loaded.")
+        empty_state("no_data_yet", "Anomaly flags appear once 30 days of per-warehouse daily facts have loaded.")
     # Repo review wave 2: Snowflake's managed ML anomaly feed as an INDEPENDENT
     # second opinion beside the z-score sweep above. Optional (SNOWFLAKE.LOCAL),
     # probe-gated; schema renders as-is on purpose (raw honesty over guessed cols).
@@ -1419,6 +1457,8 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
 # the last 30 complete days, so D - 1 is at most 31 days back; one constant = one cache entry per
 # warehouse whatever day is flagged.
 _ANOM_CHANGE_LOOKBACK_DAYS = 32
+# app_cost_sql.app_cost_mart / app_cost_live end LIMIT 1000 at application x user x company grain (R1-157).
+_APP_COST_ROW_CAP = 1000
 # ...and the loaded days each user/database is averaged over (the reader clamps to [7, 28]).
 _ANOM_BASELINE_DAYS = 14
 
@@ -1528,8 +1568,14 @@ def _below_warehouse_drill(company: str, exp, flagged_wh: str, rate: float) -> N
         result_caption(xd)
 
     st.markdown("**Setting changes near that day**")
-    if chg is None or not chg.ok:
+    if chg is None:   # defensive: run_batch returns every key
         st.caption("Warehouse change tracking isn't readable here right now.")
+    elif not chg.ok and is_setup_absence(chg.error_kind):
+        empty_state("needs_setup", "Warehouse setting changes (WAREHOUSE_CHANGE_REGISTRY) aren't readable by "
+                                   "this app here.")
+    elif not chg.ok:
+        # R1-160: a failed read gets the red state + its error, not a bare caption
+        empty_state("unavailable", "Warehouse setting changes could not be read for this day.", detail=chg.error)
     else:
         cands = changes_near_day(chg.df if chg.usable() else None, wh, fday)
         for c in cands:
@@ -1716,7 +1762,10 @@ def _storage_tab(company: str, days: int, settings: dict, *, bounds: tuple | Non
     # current MTD. The Last-month window IS the previous COMPLETE calendar month, which is
     # exactly storage_by_database_calendar(prior=True), so render that (a completed month,
     # watermark-backfilled vs its month-end) as the primary and skip the MTD-vs-prior frame.
-    if bounds is not None:
+    # R1-156: gate on the LAST_MONTH shape, not on bounds being set -- since r30 #2 window_bounds returns
+    # bounds for Current month / Current year too, which routed both into last month's storage and never
+    # showed MTD (date_windows.is_prior_month_window names this exact anti-pattern).
+    if is_prior_month_window(bounds):
         first_this = today.replace(day=1)
         last_prior = first_this - timedelta(days=1)          # last day of the bounded month
         period_days_prior = last_prior.day                   # its calendar length
@@ -1729,6 +1778,10 @@ def _storage_tab(company: str, days: int, settings: dict, *, bounds: tuple | Non
             pm = run(cost_sql.storage_by_database_calendar_live(company, _db, prior=True), page=_PAGE,
                      key=f"storage_lastmonth_live_{company}", tier="historical",
                      source="DATABASE_STORAGE_USAGE_HISTORY (previous full month daily-average, live)")
+            # R1-155: the rescale below must use the watermark of the result that SERVED (as the MTD path
+            # does). Reusing the stale FACT watermark multiplied the complete live month by
+            # month_days / fact_loaded_days (Aug fact stalled on the 20th: 1 TiB read as 1.55 TiB).
+            pm_latest = _loader_watermark(pm)
         if guard(pm, "No storage rows for this scope in the previous month."):
             pdf = pm.df.copy()
             rate_tb = safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0)

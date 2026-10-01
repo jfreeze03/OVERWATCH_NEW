@@ -266,3 +266,217 @@ def test_savings_ledger_absence_is_needs_setup(monkeypatch, kind):
     _fake, seen = _patch(monkeypatch, optimize, {"savings_ledger": _failed(kind)})
     optimize._savings_tab(3.0, {})
     assert [s for s, _m in seen["empty"]] == ["needs_setup"]
+
+
+# ------------------------------------------------------- Spend & Attribution (spend.py) ----
+def _attribution(monkeypatch, *, daily, chg=None, toggles=(), app=None):
+    """Drive the real spend._attribution_tab under AppTest (the tests/test_spend_grain_coverage.py and
+    tests/test_spend_below_warehouse_wiring.py pattern): every other read is ok-empty."""
+    from app.ui.pages.cost_parts import spend
+    from tests.test_spend_below_warehouse_wiring import _xdim_frame
+
+    empty = _ok(pd.DataFrame())
+    charts_seen: list[pd.DataFrame] = []
+
+    def _batch(specs, **_k):
+        out = {}
+        for s in specs:
+            if s["key"] == "xdim":
+                out["xdim"] = _ok(_xdim_frame(_flag_day()))
+            elif s["key"] == "whchg":
+                out["whchg"] = chg if chg is not None else empty
+            else:
+                out[s["key"]] = empty
+        return out
+
+    def _mart_first(*_a, key: str = "", **_k):
+        return app if (app is not None and key.startswith("app_cost_")) else empty
+
+    monkeypatch.setattr(spend, "run", lambda *a, **k: empty)
+    monkeypatch.setattr(spend, "run_mart_first", _mart_first)
+    monkeypatch.setattr(spend, "run_batch", _batch)
+    monkeypatch.setattr(spend, "load_settings", lambda *_a, **_k: {})
+    monkeypatch.setattr(spend, "user_display_map", lambda *_a, **_k: {})
+    monkeypatch.setattr(spend.charts, "bar_usd", lambda df, *a, **k: charts_seen.append(df.copy()))
+    wh = _ok(pd.DataFrame({"WAREHOUSE_NAME": ["WH_A"], "COMPANY": ["ALFA"],
+                           "CREDITS_CURRENT": [10.0], "CREDITS_PRIOR": [8.0]}))
+    monkeypatch.setattr(spend, "_C07_TEST_ARGS", {"wh_res": wh, "daily_res": daily, "grain_res": empty},
+                        raising=False)
+
+    def _app():
+        from app.ui.pages.cost_parts import spend as _spend
+        _spend._attribution_tab("ALL", 30, 3.0, **_spend._C07_TEST_ARGS)
+
+    at = AppTest.from_function(_app, default_timeout=60)
+    for key in toggles:
+        at.session_state[key] = True
+    at.run()
+    assert not at.exception, at.exception
+    return at, charts_seen
+
+
+def _flag_day():
+    from datetime import timedelta
+
+    from app.logic.formulas import account_today
+    return account_today() - timedelta(days=1)
+
+
+def _spiking_daily() -> QueryResult:
+    from datetime import timedelta
+    fday = _flag_day()
+    days = [fday - timedelta(days=o) for o in range(21, 0, -1)] + [fday]
+    return _ok(pd.DataFrame({"DAY": days, "WAREHOUSE_NAME": "WH_A", "COMPANY": "ALFA",
+                             "CREDITS_TOTAL": [33.4] * 21 + [300.0], "CREDITS_COMPUTE": [33.0] * 21 + [296.0]}))
+
+
+def _captions(at) -> str:
+    return " | ".join(str(c.value) for c in at.caption)
+
+
+_LOADING = "Anomaly flags appear once 30 days of per-warehouse daily facts have loaded."
+
+
+@pytest.mark.parametrize("kind", ["timeout", "missing_column", "other"])
+def test_failed_daily_anomaly_read_is_unavailable_not_loading(monkeypatch, kind):
+    """R1-077 / R1-160: a failed FACT_WAREHOUSE_DAILY read rendered the 'appear once ... loaded' caption, so
+    the spike/collapse check silently switched off and read as 'no data yet'."""
+    at, _ = _attribution(monkeypatch, daily=_fail(kind))
+    assert _LOADING not in _captions(at)
+    assert "The daily anomaly check could not read FACT_WAREHOUSE_DAILY" in _errors(at)
+    assert any(f"boom ({kind})" in str(c.value) for c in at.code)          # the detail expander
+
+
+def test_absent_daily_fact_is_needs_setup_and_empty_is_loading(monkeypatch):
+    at, _ = _attribution(monkeypatch, daily=_fail("absent"))
+    assert "FACT_WAREHOUSE_DAILY, which isn't readable" in _infos(at) and _LOADING not in _captions(at)
+    at, _ = _attribution(monkeypatch, daily=_ok(pd.DataFrame()))
+    assert _LOADING in _captions(at) and not _errors(at)
+
+
+def test_failed_change_registry_read_is_unavailable_with_detail(monkeypatch):
+    """R1-160: the below-warehouse drill showed a bare caption for a failed WAREHOUSE_CHANGE_REGISTRY read."""
+    at, _ = _attribution(monkeypatch, daily=_spiking_daily(), chg=_fail("timeout"),
+                         toggles=("spend_anom_below_wh_load",))
+    assert "Warehouse setting changes could not be read for this day." in _errors(at)
+    assert "isn't readable here right now" not in _captions(at)
+    assert any("boom (timeout)" in str(c.value) for c in at.code)
+
+
+def _app_frame(n_users: int = 300) -> pd.DataFrame:
+    rows = [{"APPLICATION": "Snowsight", "USER_NAME": f"U{i}", "COMPANY": "ALFA", "QUERIES": 10.0,
+             "CREDITS": 2.0} for i in range(n_users)]
+    rows += [{"APPLICATION": "JDBC", "USER_NAME": f"J{i}", "COMPANY": "ALFA", "QUERIES": 5.0,
+              "CREDITS": 1.8} for i in range(n_users)]
+    rows += [{"APPLICATION": "ODBC", "USER_NAME": f"O{i}", "COMPANY": "ALFA", "QUERIES": 5.0,
+              "CREDITS": 1.7} for i in range(1000 - 2 * n_users)]
+    return pd.DataFrame(rows)        # exactly the 1,000-row LIMIT; Tableau's 400 x 1.6 rows fell past it
+
+
+def test_app_cost_totals_from_a_capped_frame_are_disclosed(monkeypatch):
+    """R1-157: per-application totals summed a LIMIT-1000 application x user x company frame and the caption
+    still said the ranking was reliable."""
+    at, charts_seen = _attribution(monkeypatch, daily=_ok(pd.DataFrame()), toggles=("spend_app_cost_load",),
+                                   app=_ok(_app_frame()))
+    caps = _captions(at)
+    assert "LOWER BOUND" in caps and "1,000-row cap" in caps
+    assert "Ranking by program is reliable" not in caps
+    assert charts_seen and set(charts_seen[-1]["APPLICATION"]) == {"Snowsight", "JDBC", "ODBC"}
+
+
+def test_app_cost_totals_use_the_pre_limit_application_totals(monkeypatch):
+    """With the builder's pre-LIMIT APP_CREDITS / APP_QUERIES (review R1-031) the chart is exact: Tableau,
+    whose every user row fell past the cap, is charted at its true total and ranks first."""
+    df = _app_frame()
+    totals = {"Snowsight": (600.0, 3000.0), "JDBC": (540.0, 1500.0), "ODBC": (680.0, 2000.0),
+              "Tableau": (640.0, 400.0)}
+    df["APP_CREDITS"] = df["APPLICATION"].map(lambda a: totals[a][0])
+    df["APP_QUERIES"] = df["APPLICATION"].map(lambda a: totals[a][1])
+    tab = pd.DataFrame([{"APPLICATION": "Tableau", "USER_NAME": "T0", "COMPANY": "ALFA", "QUERIES": 1.0,
+                         "CREDITS": 1.6, "APP_CREDITS": 640.0 * 3, "APP_QUERIES": 400.0}])
+    df = pd.concat([df, tab], ignore_index=True)
+    at, charts_seen = _attribution(monkeypatch, daily=_ok(pd.DataFrame()), toggles=("spend_app_cost_load",),
+                                   app=_ok(df))
+    chart = charts_seen[-1].set_index("APPLICATION")
+    assert chart.loc["Tableau", "USD"] == pytest.approx(640.0 * 3 * 3.0)
+    assert chart.loc["Snowsight", "USD"] == pytest.approx(600.0 * 3.0)
+    assert next(iter(chart.index)) == "Tableau"
+    assert "LOWER BOUND" not in _captions(at)
+
+
+# ---------------------------------------------------- storage (R1-155 / R1-156) ----
+_TIB = float(1024 ** 4)
+
+
+def _storage(monkeypatch, *, bounds, fact_latest="2026-08-20", fact_tib=20 / 31):
+    from app.logic import date_windows
+    from app.ui.pages.cost_parts import spend
+
+    today = date(2026, 9, 30)
+    runs: list[str] = []
+    kpis: list[list[dict]] = []
+    bars: list[pd.DataFrame] = []
+    tiers: list = []
+
+    def _frame(latest: str, tib: float) -> QueryResult:
+        return _ok(pd.DataFrame({"DATABASE_NAME": ["DB1"], "DB_BYTES": [tib * _TIB], "FAILSAFE_BYTES": [0.0],
+                                 "DAYS_AVERAGED": [20.0], "LATEST_DAY": [latest]}))
+
+    def _run(_sql, *_a, key: str = "", **_k):
+        runs.append(key)
+        if key.startswith(("storage_lastmonth_live_", "storage_prior_live_")):
+            return _frame("2026-08-31", 1.0)
+        if key.startswith(("storage_lastmonth_", "storage_prior_")):
+            return _frame(fact_latest, fact_tib)
+        if key.startswith("storage_mtd_"):
+            return _frame("2026-09-29", 1.2)
+        return _ok(pd.DataFrame())
+
+    monkeypatch.setattr(spend, "account_today", lambda: today)
+    monkeypatch.setattr(date_windows, "account_today", lambda: today)
+    monkeypatch.setattr(spend, "run", _run)
+    monkeypatch.setattr(spend, "kpi_row", lambda items, *a, **k: kpis.append(list(items)))
+    monkeypatch.setattr(spend.charts, "bar_usd", lambda df, *a, **k: bars.append(df.copy()))
+    monkeypatch.setattr(spend, "_storage_table_drill", lambda *a, **k: None)
+    monkeypatch.setattr(spend, "_account_storage_tiers", lambda *a, bounds=None, **k: tiers.append(bounds))
+    monkeypatch.setattr(spend, "_C07_STORAGE_ARGS", {"bounds": bounds}, raising=False)
+
+    def _app():
+        from app.ui.pages.cost_parts import spend as _spend
+        _spend._storage_tab("ALL", 30, {"STORAGE_USD_PER_TB_MONTH": 23}, **_spend._C07_STORAGE_ARGS)
+
+    at = AppTest.from_function(_app, default_timeout=30)
+    at.run()
+    assert not at.exception, at.exception
+    return runs, kpis, bars, tiers
+
+
+def test_last_month_live_fallback_is_not_rescaled_by_the_stale_fact_watermark(monkeypatch):
+    """R1-155: the fact stalled on Aug 20 sent the panel to the live leg (already a full-month average), but
+    the rescale reused the FACT watermark: 1 TiB read as 1.55 TiB (and $35.65/mo against a $23 bar)."""
+    runs, kpis, bars, _ = _storage(monkeypatch, bounds=(date(2026, 8, 1), date(2026, 9, 1)))
+    assert runs[:2] == ["storage_lastmonth_ALL", "storage_lastmonth_live_ALL"]
+    kpi = kpis[-1][0]
+    assert kpi["label"] == "Storage last month (daily avg)"
+    assert kpi["value"] == "1.00 TiB"
+    assert float(bars[-1]["USD_MONTH"].sum()) == pytest.approx(23.0)
+    assert "$23.00" in kpi["delta"]                                       # the KPI matches its own chart
+
+
+def test_last_month_fact_with_a_short_tail_is_still_backfilled(monkeypatch):
+    """The fact-served path keeps its watermark backfill (a 1-day tail gap: Aug 30 of 31)."""
+    _runs, kpis, _bars, _ = _storage(monkeypatch, bounds=(date(2026, 8, 1), date(2026, 9, 1)),
+                                     fact_latest="2026-08-30", fact_tib=30 / 31)
+    assert kpis[-1][0]["value"] == "1.00 TiB"
+
+
+@pytest.mark.parametrize("preset_bounds", [(date(2026, 9, 1), date(2026, 10, 1)),     # Current month
+                                           (date(2026, 1, 1), date(2026, 10, 1))])    # Current year
+def test_period_to_date_presets_show_mtd_storage_not_last_month(monkeypatch, preset_bounds):
+    """R1-156: Current month / Current year carried bounds since r30 #2, so 'bounds is not None' sent both
+    into the previous-month branch and the per-database panel never showed MTD."""
+    runs, kpis, _bars, tiers = _storage(monkeypatch, bounds=preset_bounds)
+    assert not any(r.startswith("storage_lastmonth_") for r in runs), runs
+    assert runs[0] == "storage_mtd_ALL"
+    assert kpis[-1][0]["label"] == "Storage MTD (daily avg)"
+    assert tiers == [preset_bounds]                     # the tier panel still honours the selected window
