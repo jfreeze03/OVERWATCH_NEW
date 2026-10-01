@@ -1199,9 +1199,11 @@ read GAP; a renamed column FAILs. These probe readers are not registered
 twins). Twins, whose columns a registered canary compiles:
 mart_sql.open_alert_severity_counts, cortex_sql.cortex_code_user_daily,
 change_impact_sql.proc_redeploys and workbench_sql.product_mapping_totals.
-Partly covered: insights_sql.object_reads_confirm (its ACCESS_HISTORY
-columns FAIL through the security.* canaries; its ACCOUNT_USAGE.TABLES and
-GRANTS_TO_ROLES join columns have no canary). SHOW-based, because EXPLAIN
+Partly covered: insights_sql.object_reads_confirm
+(graph.object_blast_consumers and workbench.product_consumer_reads compile
+every ACCESS_HISTORY column it reads, so drift there FAILs; its
+ACCOUNT_USAGE.TABLES name columns TABLE_CATALOG, TABLE_SCHEMA and TABLE_NAME
+and GRANTS_TO_ROLES.GRANTED_TO have no canary). SHOW-based, because EXPLAIN
 cannot compile SHOW: mart_sql.email_alert_objects,
 ops_sql.overwatch_task_states, ops_sql.warehouse_stmt_timeout_sql,
 ops_sql.account_stmt_timeout_sql, recheck_sql.warehouse_settings_sql and
@@ -1214,8 +1216,15 @@ integration), mart_sql.flyway_history (absent until Flyway is adopted),
 cost_sql.native_anomaly_insights (a SELECT * on an optional feed, so a
 canary sees only absence) and security_sql.object_tag_probe (the
 TAG_REFERENCES existence probe). The Snowsight-link context lookup
-(CURRENT_ORGANIZATION_NAME()) reads no object. For every one but the twins,
-the expander error is the only record. A timeout usually clears on a retry;
+(CURRENT_ORGANIZATION_NAME()) reads no object. For the SHOW-based reads and
+the deliberate exemptions, the expander error is the only record. Also
+logged to APP_ERROR_LOG, because Operations ▸ Pipeline runs the same SQL
+without probe: etl_control_sql.reference_gap_scan and
+etl_control_sql.cycle_finish_history_scan (the Brief and Control Room read
+both as fail-silent probes that show nothing on failure). The night
+roll-up, etl_control_sql.cycle_night_health_scan, is logged only when its
+ETA columns fail and the base roll-up still answers (once per process).
+A timeout usually clears on a retry;
 drift does not (apply the missing migrations, or redeploy). Admin → Setup
 progress marks a checklist row Unknown (not Pending) when its read fails
 this way: FIX says Retry for a timeout and names the schema drift for a

@@ -10,8 +10,9 @@ The ratchet below fails on any public builder in cost_sql / mart_sql / mart27_sq
 nor a named exemption with its reason, and on an exemption that is no longer needed (the list only shrinks).
 
 A twin exemption ("reads only columns a registered canary already compiles") is checked, not trusted: each twin
-is rendered, the (table, column) pairs it compiles are read off the parsed SQL, and they must be a subset of
-the pairs the registered canaries compile (the R2-069 ACCESS_HISTORY lock's method, for every table). Two false
+is rendered, the (table, column) pairs it compiles are read off the parsed SQL (correlated outer references
+included), and they must be a subset of the pairs the registered canaries compile (the R2-069 ACCESS_HISTORY
+lock's method, for every table); a twin may read no column the reader cannot attribute to a table. Two false
 twin claims shipped before this check (holistic review #17 / #18): ai_code_user_daily (FACT_AI_USAGE_DAILY's
 V042 EMAIL / FIRST_TS / LAST_TS) and resolutions_for_rule (ALERT_AUDIT.EVENT_ID / NOTE). Both are canaried now.
 
@@ -30,13 +31,14 @@ from pathlib import Path
 import pytest
 import sqlglot
 from sqlglot import exp
-from sqlglot.optimizer.scope import Scope, traverse_scope
+from sqlglot.optimizer.scope import Scope, ScopeType, traverse_scope
 
 from app.data import (
     canary,
     change_impact_sql,
     cortex_sql,
     cost_sql,
+    insights_sql,
     mart27_sql,
     mart_sql,
     security_sql,
@@ -193,14 +195,19 @@ def test_the_new_canaries_compile_the_columns_that_had_none():
 
 
 # ============================================== the twin claim, checked: (table, column) read off the SQL ====
-# A column counts toward the physical table it compiles against: through its alias, as the scope's only source,
-# or traced through a CTE / derived table (a plain pass-through projection, a star, or each UNION branch at the
-# same position). A derived projection (MIN(DAY) AS FIRST_DAY) adds nothing beyond its own inputs, and an
-# unqualified name that is a select alias of its scope (GROUP BY USAGE_DATE) is the alias, not a column. A
-# column the parser cannot attribute (a correlated outer reference, a FLATTEN value, an unqualified name beside
-# several sources) is not counted on either side: the canary side stays a lower bound, so a twin never passes
-# on a guess about what a canary compiles; on the twin side such a column goes unchecked (qualify it: house
-# law 8).
+# A column counts toward the physical table it compiles against: through its alias, as the one source that has
+# (or may have) the name, or traced through a CTE / derived table (a plain pass-through projection, a star, or
+# each UNION branch at the same position). A correlated reference (NOT EXISTS (... WHERE d.X = e.X)) resolves
+# outward through subquery / set-operation / lateral scopes, never across a CTE or derived-table boundary. A
+# derived projection (MIN(DAY) AS FIRST_DAY) and a FLATTEN output (f.VALUE) add nothing beyond their own inputs,
+# and an unqualified name that is a select alias of its scope (GROUP BY USAGE_DATE) is the alias, not a column.
+# A column the reader cannot attribute (an unqualified name beside several sources that may hold it, a table
+# function's output) is reported, never counted: the canary side stays a lower bound, so a twin never passes on
+# a guess about what a canary compiles, and a twin must have none (qualify it: house law 8).
+
+_OPAQUE = frozenset({ScopeType.ROOT, ScopeType.CTE, ScopeType.DERIVED_TABLE})
+_FLATTEN_COLUMNS = frozenset({"SEQ", "KEY", "PATH", "INDEX", "VALUE", "THIS"})    # fixed by Snowflake
+
 
 def _table_key(table: exp.Table) -> str:
     return f"{table.db.upper() or 'OVERWATCH'}.{table.name.upper()}"   # an unqualified name is the app schema
@@ -236,19 +243,52 @@ def _projected(scope: Scope, name: str, depth: int) -> set[tuple[str, str]] | No
     return None
 
 
+def _is_flatten(source: object) -> bool:
+    return isinstance(source, Scope) and source.is_udtf and isinstance(source.expression.this, exp.Explode)
+
+
+def _projects(source: object, name: str) -> bool | None:
+    """Whether a FROM source exposes ``name``: from its select list (or FLATTEN's fixed columns), None when that
+    cannot be known (a physical table, a star, another table function)."""
+    if _is_flatten(source):
+        return name in _FLATTEN_COLUMNS
+    if not isinstance(source, Scope):
+        return None
+    branches = _branches(source)
+    if not all(isinstance(b.expression, exp.Select) for b in branches):
+        return None
+    selects = branches[0].expression.selects
+    if any(isinstance(p, exp.Star) or (isinstance(p, exp.Column) and isinstance(p.this, exp.Star)) for p in selects):
+        return None
+    return name in {p.alias_or_name.upper() for p in selects}
+
+
 def _resolve(scope: Scope, col: exp.Column, depth: int = 0) -> set[tuple[str, str]] | None:
+    """The physical (table, column) pairs ``col`` compiles against: set() for a value no table holds (a derived
+    projection, a FLATTEN output), None when the reader cannot attribute it."""
     if depth > 16:
         return None
-    sources = {alias.upper(): source for alias, (_node, source) in scope.selected_sources.items()}
     qualifier, name = col.table.upper(), col.name.upper()
-    if qualifier:
-        source = sources.get(qualifier)
-    elif len(sources) == 1:
-        source = next(iter(sources.values()))
-    else:
-        return None
+    while True:
+        sources = {alias.upper(): source for alias, (_node, source) in scope.selected_sources.items()}
+        if qualifier:
+            source = sources.get(qualifier)
+        else:                                  # the one source that has (or may have) the name
+            maybe = [s for s in sources.values() if _projects(s, name) is not False]
+            if len(maybe) > 1:
+                return None
+            source = maybe[0] if maybe else None
+        if source is not None:
+            break
+        # a correlated reference: resolve outward through subquery / set-operation / lateral scopes, never across
+        # a CTE or derived-table boundary (neither can see the enclosing query's FROM)
+        if scope.parent is None or scope.scope_type in _OPAQUE:
+            return None
+        scope = scope.parent
     if isinstance(source, exp.Table):
         return {(_table_key(source), name)} if source.name and not isinstance(source.this, exp.Func) else None
+    if _is_flatten(source):
+        return set() if name in _FLATTEN_COLUMNS else None
     return _projected(source, name, depth) if isinstance(source, Scope) else None
 
 
@@ -270,15 +310,25 @@ def _is_alias_reference(scope: Scope, col: exp.Column) -> bool:
     return False
 
 
-def _table_columns(sql: str) -> set[tuple[str, str]]:
+def _read_columns(sql: str) -> tuple[set[tuple[str, str]], set[str]]:
+    """(the (table, column) pairs ``sql`` compiles, the column references the reader cannot attribute)."""
     out: set[tuple[str, str]] = set()
+    unattributed: set[str] = set()
     for scope in traverse_scope(sqlglot.parse_one(sql, read="snowflake")):
         for col in scope.columns:
             if (isinstance(col.this, exp.Star) or col.find_ancestor(exp.Select) is not scope.expression
                     or _is_alias_reference(scope, col)):
                 continue
-            out |= _resolve(scope, col) or set()
-    return out
+            pairs = _resolve(scope, col)
+            if pairs is None:
+                unattributed.add(col.sql(dialect="snowflake"))
+            else:
+                out |= pairs
+    return out, unattributed
+
+
+def _table_columns(sql: str) -> set[tuple[str, str]]:
+    return _read_columns(sql)[0]
 
 
 @functools.cache
@@ -367,14 +417,53 @@ def test_the_twin_map_is_every_twin_claim():
 @pytest.mark.parametrize("name", sorted(_TWINS))
 def test_twins_read_only_columns_a_canary_compiles(name):
     """holistic #17 / #18: a twin claim that is false leaves a column no canary compiles, so drift there never
-    reaches Admin > Canary. Every twin's (table, column) set must be inside what the canaries compile."""
+    reaches Admin > Canary. Every twin's (table, column) set must be inside what the canaries compile, and a
+    twin may read nothing the reader cannot attribute (an unchecked column would make the claim a guess)."""
     reads: set[tuple[str, str]] = set()
     for sql in _TWINS[name]():
-        cols = _table_columns(sql)
+        cols, unattributed = _read_columns(sql)
         assert cols, f"{name} rendered SQL that reads no attributable column"
+        assert not unattributed, (f"{name}: the twin check cannot attribute {sorted(unattributed)} to a table "
+                                  "(qualify them, house law 8), so it cannot vouch for them")
         reads |= cols
     missing = sorted(reads - _canary_columns())
     assert not missing, f"{name} is not a twin: no registered canary compiles {missing}"
+
+
+def test_a_correlated_outer_reference_counts_toward_the_outer_table():
+    """Review of 91e3d3ac: a qualified correlated reference (NOT EXISTS (... WHERE d.EVENT_ID = e.EVENT_ID)) was
+    dropped, so a twin could read an outer column no canary compiles and still pass. It resolves outward through
+    subquery and set-operation scopes, never across a CTE or derived-table boundary."""
+    sql = """
+WITH c AS (SELECT x.RULE_ID FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG x
+           WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES r WHERE r.FAMILY = e.FAMILY))
+SELECT e.EVENT_ID FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES d
+                  WHERE d.EVENT_ID = e.EVENT_ID AND d.ROUTE_ID = e.SEVERITY
+                  UNION ALL
+                  SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT a WHERE a.NOTE = e.RULE_ID)
+"""
+    cols, unattributed = _read_columns(sql)
+    assert {("OVERWATCH.ALERT_EVENTS", "SEVERITY"), ("OVERWATCH.ALERT_EVENTS", "RULE_ID"),
+            ("OVERWATCH.ALERT_DELIVERIES", "ROUTE_ID"), ("OVERWATCH.ALERT_AUDIT", "NOTE")} <= cols
+    assert unattributed == {"e.FAMILY"}          # the CTE body cannot see the outer query's alias
+
+
+def test_a_star_over_several_ctes_and_a_flatten_are_attributed():
+    """A star over several CTEs resolves each name to the one CTE that projects it, a FLATTEN's fixed output
+    columns are no table's, and an unqualified name beside a physical table stays unattributed."""
+    sql = """
+WITH a AS (SELECT COUNT(*) AS N FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS),
+b AS (SELECT MAX(SOURCE_NAME) AS W, ANY_VALUE(LAST_LOAD_TS) AS LAST_LOAD_TS
+      FROM DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE),
+s AS (SELECT * FROM a, b)
+SELECT s.N, s.W, s.LAST_LOAD_TS, f.value, f.INDEX, UNKNOWN_COL
+FROM s, LATERAL FLATTEN(input => ARRAY_CONSTRUCT(1)) f, DBA_MAINT_DB.OVERWATCH.INCIDENTS i
+"""
+    cols, unattributed = _read_columns(sql)
+    assert cols == {("OVERWATCH.SOURCE_FRESHNESS_STATE", "SOURCE_NAME"),
+                    ("OVERWATCH.SOURCE_FRESHNESS_STATE", "LAST_LOAD_TS")}
+    assert unattributed == {"UNKNOWN_COL"}
 
 
 # ============================================== #7: RUNBOOK names every probe reader without a canary ====
@@ -387,11 +476,12 @@ _INLINE_PROBES = {
 _UNTRACED = {("app/ui/pages/admin.py", "_sql")}       # the canary runner itself (each CANARIES statement)
 
 
-def _probe_reads(source: str) -> tuple[set[str], set[str], set[str]]:
-    """(builders, inline SQL, untraced names) behind every ``run(..., probe=True)`` in ``source``. A builder is
-    a ``*_sql`` module function: called inline, assigned to a name in the enclosing function (closures included;
-    a tuple's first element; either arm of a conditional), or passed to a same-module wrapper that forwards
-    its parameter to such a read (security_center._optional_result)."""
+def _probe_reads(source: str, *, probe: bool = True) -> tuple[set[str], set[str], set[str]]:
+    """(builders, inline SQL, untraced names) behind every ``run(..., probe=True)`` in ``source`` (with
+    ``probe=False``: every plain ``run()``, which logs a failure to APP_ERROR_LOG). A builder is a ``*_sql``
+    module function: called inline, assigned to a name in the enclosing function (closures included; a tuple's
+    first element; either arm of a conditional), or passed to a same-module wrapper that forwards its parameter
+    to such a read (security_center._optional_result)."""
     tree = ast.parse(source)
     funcs = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
 
@@ -423,8 +513,8 @@ def _probe_reads(source: str) -> tuple[set[str], set[str], set[str]]:
     wrappers: dict[str, tuple[int, str]] = {}
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", "")) == "run"
-                and node.args and any(k.arg == "probe" and isinstance(k.value, ast.Constant)
-                                      and k.value.value is True for k in node.keywords)):
+                and node.args and (any(k.arg == "probe" and isinstance(k.value, ast.Constant)
+                                       and k.value.value is True for k in node.keywords) is probe)):
             continue
         arg, scopes = node.args[0], enclosing(node)
         if found := builders_of(arg):
@@ -500,15 +590,16 @@ def test_the_probe_read_scan_follows_names_and_wrappers():
     assert _probe_reads(src) == (
         {"ops_sql.a", "mart_sql.b", "cost_sql.c", "etl_control_sql.d", "insights_sql.e", "security_sql.f"},
         {"SHOW TASKS IN {x}"}, {"sql"})
+    assert _probe_reads(src, probe=False)[0] == {"ops_sql.g"}
 
 
 @functools.cache
-def _app_probe_reads() -> tuple[frozenset[str], frozenset[str], frozenset[tuple[str, str]]]:
+def _app_probe_reads(probe: bool = True) -> tuple[frozenset[str], frozenset[str], frozenset[tuple[str, str]]]:
     builders: set[str] = set()
     inline: set[str] = set()
     untraced: set[tuple[str, str]] = set()
     for path in sorted((_ROOT / "app").rglob("*.py")):
-        b, i, u = _probe_reads(path.read_text(encoding="utf-8"))
+        b, i, u = _probe_reads(path.read_text(encoding="utf-8"), probe=probe)
         rel = path.relative_to(_ROOT).as_posix()
         builders |= b
         inline |= i
@@ -545,6 +636,45 @@ def test_runbook_names_every_probe_reader_without_a_canary():
     assert set(re.findall(r"\b[a-z0-9_]+_sql\.[a-z0-9_]+\b", twins.group(1))) == (
         uncanaried & set(_TWINS)), "RUNBOOK's twins must be exactly the checked twins"
     assert "Two probe readers" not in para
+
+
+def test_runbook_says_which_uncanaried_probe_readers_also_log():
+    """Review of 91e3d3ac: 'For every one but the twins, the expander error is the only record' was false. Operations
+    runs reference_gap_scan and cycle_finish_history_scan without probe too, so a missing column there reaches
+    APP_ERROR_LOG. The 'also logged' sentence names exactly the uncanaried, non-twin probe readers that a plain
+    run() also reads (derived from app/), and the blanket claim is gone."""
+    probes, _inline, _untraced = _app_probe_reads()
+    plain = _app_probe_reads(probe=False)[0]
+    logged = (probes - _registered() - set(_TWINS)) & plain
+    assert {"etl_control_sql.reference_gap_scan", "etl_control_sql.cycle_finish_history_scan"} <= logged  # sanity
+    para = _runbook_probe_paragraph()
+    also = re.search(r"Also logged to APP_ERROR_LOG(.*?)\. [A-Z]", para)
+    assert also, "RUNBOOK's 'Also logged to APP_ERROR_LOG' sentence is missing"
+    assert set(re.findall(r"\b[a-z0-9_]+_sql\.[a-z0-9_]+\b", also.group(1))) == logged
+    only = [s for s in re.split(r"(?<=\.) (?=[A-Z])", para) if "the expander error is the only record" in s]
+    assert len(only) == 1 and not set(re.findall(r"\b[a-z0-9_]+_sql\.[a-z0-9_]+\b", only[0])) & logged
+    assert "For every one but the twins" not in para
+
+
+def test_runbook_partly_covered_reader_claims_hold():
+    """Review of 91e3d3ac: the sentence credited 'the security.* canaries' with object_reads_confirm's ACCESS_HISTORY
+    columns, but QUERY_ID and USER_NAME compile only in graph.object_blast_consumers and
+    workbench.product_consumer_reads. The canaries the sentence names must compile every ACCESS_HISTORY column the
+    reader reads, and each column no canary compiles must be named."""
+    part = re.search(r"Partly covered: insights_sql\.object_reads_confirm \((.*?)\)\. [A-Z]",
+                     _runbook_probe_paragraph())
+    assert part, "RUNBOOK's 'Partly covered' sentence is missing"
+    text = part.group(1)
+    reads = _table_columns(insights_sql.object_reads_confirm(("DB.S.T",), 90))
+    access = {p for p in reads if p[0] == "ACCOUNT_USAGE.ACCESS_HISTORY"}
+    named = {n: b for n, b in canary.CANARIES if re.search(rf"(?<![\w.]){re.escape(n)}(?![\w])", text)}
+    assert named, "name the canaries that compile its ACCESS_HISTORY columns"
+    assert access and access <= set().union(*(_table_columns(b()) for b in named.values()))
+    uncovered = reads - _canary_columns()
+    assert uncovered and not {p for p in uncovered if p in access}
+    for _table, column in uncovered:
+        assert column in text, f"name {column}: no canary compiles it"
+    assert "security.* canaries" not in text
 
 
 def test_glossary_canary_row_names_every_v4608_security_canary():
