@@ -56,15 +56,6 @@ READ_MODELS = (
         4,
     ),
     ReadModelContract(
-        "slo_cockpit",
-        "objective status and error-budget burn",
-        "owning entity's metric and work history",
-        "selected objective row",
-        "objective window over daily marts",
-        1,
-        4,
-    ),
-    ReadModelContract(
         "control_pulse",
         "since-yesterday health",
         "14-day query activity trend",
