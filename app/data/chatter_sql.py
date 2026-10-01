@@ -119,7 +119,7 @@ def chatter_families_for_application(application: str = "", days: int = 30,
     return f"""
 WITH q AS (
     SELECT q.SESSION_ID, q.QUERY_PARAMETERIZED_HASH, LEFT(q.QUERY_TEXT, 90) AS QUERY_TEXT,
-           q.QUERY_TYPE, q.COMPILATION_TIME, q.TOTAL_ELAPSED_TIME,
+           q.QUERY_TYPE, q.WAREHOUSE_NAME, q.COMPILATION_TIME, q.TOTAL_ELAPSED_TIME,
            COALESCE(q.CREDITS_USED_CLOUD_SERVICES, 0) AS CS_CREDITS
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
     WHERE {q_where}
@@ -133,6 +133,8 @@ sess AS (
 SELECT q.QUERY_PARAMETERIZED_HASH,
        ANY_VALUE(q.QUERY_TEXT) AS SAMPLE_TEXT,
        ANY_VALUE(q.QUERY_TYPE) AS QUERY_TYPE,
+       -- R1-090: cs_driver reads 'NONE' as a warehouse-less (metadata) family -- deterministic for a mixed family
+       IFF(COUNT_IF(q.WAREHOUSE_NAME IS NULL) * 2 >= COUNT(*), 'NONE', MAX(q.WAREHOUSE_NAME)) AS WAREHOUSE_NAME,
        COUNT(*) AS RUNS,
        ROUND(AVG(q.COMPILATION_TIME) / 1000, 2) AS AVG_COMPILE_S,
        ROUND(AVG(q.TOTAL_ELAPSED_TIME) / 1000, 2) AS AVG_TOTAL_S,
