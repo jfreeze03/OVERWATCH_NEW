@@ -3665,7 +3665,8 @@ def _wh_sizing_efficiency(company: str, rate: float, days: int, *,
         _sized = size_recommendations(
             with_warehouse_settings(
                 _prof.df, _whs.df if _whs.ok and not _whs.empty else pd.DataFrame()),
-            rate, served_days(_prof, days))
+            # R1-143 (W12): a calendar preset passes a day OFFSET; divide by the bounds' SPAN, as Cost ▸ Optimize does
+            rate, served_days(_prof, (bounds[1] - bounds[0]).days if bounds is not None else days))
         _sum = sizing_summary(_sized)
         # Wave 3: per-warehouse health chip — a transparent 0-100 grade (base 100 minus
         # capped queue/spill/runtime/low-util penalties) joined onto the sizing table.

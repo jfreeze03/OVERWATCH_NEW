@@ -79,13 +79,30 @@ query_hours AS (
 )"""
 
 
+def _bounded_covered_days(bounds: tuple | None) -> str:
+    """R1-042: the ``COVERED_DAYS`` select item for a calendar-bounded LIVE idle/sizing read ('' when trailing).
+
+    Under bounds, scope_window_where ignores the bounded_days clamp and scans the FULL [start, end) range
+    (the house convention for calendar presets — Current year reads Jan 1 onward live, r9/r10). But
+    run_mart_first stamps a live leg with clamp_days(days), so served_days() divided ~273 days of
+    Current-year credits by 90 (every idle / sizing / remediation run-rate ~3x high on the live
+    fallback; 2x on the 2nd of a Current month, where the day OFFSET is 1 and the span 2). served_days
+    takes a reader's own COVERED_DAYS over that stamp, so the live twin now states the span its WHERE
+    scanned — the mart twin's COVERED_DAYS contract. The trailing SQL stays byte-identical: there the
+    builder really does clamp, and the stamp is right."""
+    if bounds is None:
+        return ""
+    return f",\n    {max(1, (bounds[1] - bounds[0]).days)} AS COVERED_DAYS"
+
+
 def idle_warehouse_analysis(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """Per warehouse: total vs idle credits (hour slices with no queries).
 
     WAREHOUSE_METERING_HISTORY bills by hour slice; joining each slice to
     query activity in the same warehouse-hour isolates credits burned while
     nothing ran — the auto-suspend opportunity. "Active" is span-based (see
-    _active_hours_cte), not start-hour-based.
+    _active_hours_cte), not start-hour-based. A calendar-bounded read carries
+    COVERED_DAYS (see _bounded_covered_days).
     """
     days = bounded_days(days)
     where = and_where(
@@ -107,7 +124,7 @@ SELECT
     COUNT_IF(COALESCE(M.CREDITS_USED, 0) > 0) AS METERED_HOURS,
     SUM(IFF(Q.HOUR_TS IS NULL AND COALESCE(M.CREDITS_USED, 0) > 0, 1, 0)) AS IDLE_HOURS,
     SUM(COALESCE(M.CREDITS_USED, 0)) AS TOTAL_CREDITS,
-    SUM(IFF(Q.HOUR_TS IS NULL, COALESCE(M.CREDITS_USED, 0), 0)) AS IDLE_CREDITS
+    SUM(IFF(Q.HOUR_TS IS NULL, COALESCE(M.CREDITS_USED, 0), 0)) AS IDLE_CREDITS{_bounded_covered_days(bounds)}
 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY M
 LEFT JOIN query_hours Q
        ON Q.WAREHOUSE_NAME = M.WAREHOUSE_NAME
@@ -489,7 +506,7 @@ SELECT
     COALESCE(MAX(P.P95_ELAPSED_SEC), 0) AS P95_ELAPSED_SEC,
     COALESCE(MAX(Q.QUEUED_SEC), 0) AS QUEUED_SEC,
     COALESCE(MAX(Q.QUEUED_PROVISIONING_SEC), 0) AS QUEUED_PROVISIONING_SEC,
-    COALESCE(MAX(Q.SPILL_REMOTE_GB), 0) AS SPILL_REMOTE_GB
+    COALESCE(MAX(Q.SPILL_REMOTE_GB), 0) AS SPILL_REMOTE_GB{_bounded_covered_days(bounds)}
 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY M
 LEFT JOIN query_hours H
        ON H.WAREHOUSE_NAME = M.WAREHOUSE_NAME
