@@ -4,10 +4,11 @@ Streamlit-in-Snowflake cost/ops/security monitor for a shared ALFA+Trexis
 account. Owner: Joe (jfreeze03). Everything lives in `DBA_MAINT_DB.OVERWATCH`
 (schema SHARED with a previous app — never drop the schema/database).
 
-Session-specific state (HEAD, deploy status, pending work) lives in
-`docs/handoff/CODE_HANDOFF_2026-07-14.md` — read it, but trust `git log` over
-its snapshot numbers. This file is the durable stuff: laws, history, owner
-decisions.
+Session state (HEAD, deploy status, pending work) is not kept in a doc: read
+`git log` for HEAD, the top `CHANGELOG.md` entry and `APP_VERSION` in
+`app/config.py` for the release, and the `V001..Vnnn applied` label in
+`snowflake/validate.sql` for the migration tip. This file is the durable
+stuff: laws, history, owner decisions.
 
 ## Gates (run before every commit)
 
@@ -25,9 +26,12 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
 
 1. **Derivation law.** A migration that re-derives a proc/UDF re-emits the
    CURRENT definition byte-identically plus enumerated edits, via a
-   forward-generation script in `outputs/gen_v0XX.py`; the matching
-   `tests/test_v0XX_*.py` regenerates and byte-compares. Derive from the
-   LATEST definition (V047 broke by deriving from V036 instead of V037).
+   forward-generation script in `outputs/gen_vNNN.py`;
+   `tests/migrations/test_generators_regenerate.py` re-runs EVERY generator
+   and byte-compares its migration (a new one is covered the day it lands),
+   and most also have their own regen in `tests/migrations/test_vNNN_*.py`.
+   Derive from the LATEST definition (V047 broke by deriving from V036
+   instead of V037).
    Enforced by `tests/test_proc_lineage.py`: every re-derived proc, view or
    UDF's declared base must be its immediately previous definer (the V123
    class; views/UDFs tracked since wave 2a, one V088 waiver); from V151
@@ -136,8 +140,9 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
   app; auto-suspend tracking stays. No hard cap on WH_ALFA_ADMIN — COST
   alert rules are the guardrails.
 - **UNKNOWN classification is law** (V044/V048): unmapped entities surface on
-  Cost → Chargeback ("Unmapped entities" worklist) instead of silently
-  billing ALFA; KEBARR1 override → ALFA stands.
+  Cost Intelligence → Spend & Attribution ("Unmapped entities" worklist,
+  behind the "Load storage & unmapped-entity detail" toggle) instead of
+  silently billing ALFA; KEBARR1 override → ALFA stands.
 - **Cortex user attribution stays live-first, byte-exact v4.34.2 shape**
   (exact emails + timestamps; owner rejected the mart swap that lost them).
 - **No monthly-budget KPI** on Overview; MTD-vs-prior-month pace instead.
@@ -181,8 +186,8 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
   halted) and a mart swap that dropped cortex emails/timestamps. Incident
   review: `docs/reviews/V041_INCIDENT_REVIEW_20260712.md`.
 - **v4.37** full-rebuild bundle (`snowflake/rebuild/`, backup clones
-  `*_BAK_20260712` — Joe may drop them when satisfied) + hardened chain;
-  rebuild executed clean.
+  `*_BAK_20260712`, dropped by Joe 2026-09-28) + hardened chain; rebuild
+  executed clean.
 - **v4.38 (V042)** Codex r22 ship-half: FACT_QUERY_DAILY, atomic extract with
   gated watermark, purge coverage, AI usage stamps. r23: telemetry-picked
   perf (batching, predicate-first).
@@ -219,11 +224,17 @@ recorded in locks/comments so the story survives (grep "owner" in tests/).
 
 ## Standing open items
 
-- r28+ queue: proc-based atomic action layer (intent + idempotency),
-  reconciliation v2 by dimension, evidence-grade savings verification
-  (execute proof + snapshots). (Since shipped: the Action Queue operating-center
-  foundation on ACTION_QUEUE in V074, and V049 write-target attribution — no
-  longer open items.)
-- `_BAK_20260712` clones: droppable whenever Joe is satisfied.
-- Python floor is now 3.11 (datetime.UTC in tests) — pin in docs/CI if a
-  3.10 environment ever shows up.
+- r28+ queue: reconciliation v2 by dimension is the one item still open
+  (SP_NIGHTLY_RECONCILE is still the V064 shape). Shipped since: the action
+  layer (V051 OW_ACTION_INTENTS + SP_ALERT_LIFECYCLE; V074/V092
+  SP_ACTION_LIFECYCLE with REQUEST_KEY idempotency; the remediation/verify
+  procs were deliberately dropped in V053), evidence-grade savings
+  verification (V053 PROOF_QUERY_ID/PROOF_RESULT, stamped by the measured
+  verify in `app/logic/ledger_measure.py`), the V074 Action Queue foundation
+  and V049 write-target attribution.
+- Backups: V161 (owner decision 2026-09-28) retired TASK_BACKUP_OPERATOR (V158's
+  OVERWATCH_BAK generations and V089's weekly `*_BAK_LAST` copies), and Joe
+  dropped the July-12 `*_BAK_20260712` clones the same day. Recovery is Time
+  Travel plus manual TRANSIENT clones taken before a risky change: teardown.sql
+  B0, or `snowflake/rebuild/00_backup_operator_data.sql` after changing its
+  hard-coded `_20260712` suffix to today's date.
