@@ -24,6 +24,23 @@ def _first_cells(table_text: str) -> set[str]:
             for line in table_text.splitlines() if line.startswith("| ")}
 
 
+def _current_proc(name: str) -> str:
+    """A procedure's CURRENT body: the last migration that CREATE OR REPLACEs it."""
+    pat = re.compile(r"CREATE OR REPLACE PROCEDURE DBA_MAINT_DB\.OVERWATCH\." + name + r"\(")
+    for mig in sorted((ROOT / "snowflake" / "migrations").glob("V[0-9]*__*.sql"), reverse=True):
+        text = mig.read_text(encoding="utf-8")
+        hits = list(pat.finditer(text))
+        if hits:
+            start = hits[-1].start()
+            return text[start:text.index("\n$$;", start)]
+    raise AssertionError(f"no migration defines {name}")
+
+
+def _task_row(task: str) -> str:
+    table = _section(read("RUNBOOK.md"), "## 4. Scheduled automation", "**Notes on the automation:**")
+    return next(line for line in table.splitlines() if line.startswith(f"| {task} |"))
+
+
 def test_runbook_task_table_is_the_live_task_set():
     """R1-346: one row per task the migrations leave live, plus the struck-through retired one."""
     rb = read("RUNBOOK.md")
@@ -36,6 +53,39 @@ def test_runbook_task_table_is_the_live_task_set():
         row = next(line for line in table.splitlines() if line.startswith(f"| {task} |"))
         assert "after TASK_QH_EXTRACT (V071)" in row, row
     assert "SP_ANOMALY_SWEEP (v3)" in table and "(v2)" not in table
+
+
+def test_runbook_task_rows_name_what_each_proc_writes():
+    """d4 review: each Writes cell matches the proc's current definer -- no invented column, no
+    missing mart, no missing rule."""
+    # SP_CHANGE_ATTRIBUTION only SETs CHANGED_BY; CHANGE_SOURCE exists in no migration (it is the
+    # change-impact read's derived column, RUNBOOK §21).
+    attribution = _task_row("TASK_CHANGE_ATTRIBUTION")
+    set_cols = set(re.findall(r"\bSET\s+(\w+)\s*=", _current_proc("SP_CHANGE_ATTRIBUTION")))
+    assert set_cols == {"CHANGED_BY"}, set_cols
+    assert "WAREHOUSE_CHANGE_REGISTRY.CHANGED_BY" in attribution
+    assert not any("CHANGE_SOURCE" in p.read_text(encoding="utf-8")
+                   for p in (ROOT / "snowflake" / "migrations").glob("V[0-9]*__*.sql"))
+    assert "CHANGE_SOURCE is derived from it on read" in attribution
+    # every proc the extract CALLs (SP_LOAD_CLOUD_SVC_MART fills MART_CLOUD_SVC_DAILY) is named
+    extract = _task_row("TASK_QH_EXTRACT")
+    called = re.findall(r"CALL DBA_MAINT_DB\.OVERWATCH\.(\w+)\(", _current_proc("SP_LOAD_QH_EXTRACT"))
+    assert "SP_LOAD_CLOUD_SVC_MART" in called
+    assert "MART_CLOUD_SVC_DAILY" in extract
+    for proc in called:
+        assert proc in extract, proc
+    # every rule the sweep raises itself, and every scanner it CALLs plus that scanner's rule
+    sweep_row = _task_row("TASK_ANOMALY_SWEEP")
+    sweep = _current_proc("SP_ANOMALY_SWEEP")
+    rules = set(re.findall(r"\bRULE_ID = '([A-Z][A-Z0-9_]+)'", sweep))
+    scanners = re.findall(r"CALL DBA_MAINT_DB\.OVERWATCH\.(SP_SCAN_\w+)\(", sweep)
+    assert {"PIPE_DT_FAILURES", "COST_ORG_ACCOUNT_CREEP", "PIPE_VOLUME_DROP"} <= rules
+    assert scanners
+    for scanner in scanners:
+        assert scanner in sweep_row, scanner
+        rules |= set(re.findall(r"\bRULE_ID = '([A-Z][A-Z0-9_]+)'", _current_proc(scanner)))
+    missing = sorted(rule for rule in rules if rule not in sweep_row)
+    assert not missing, missing
 
 
 def _seeded_rule_ids() -> set[str]:
