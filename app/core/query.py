@@ -1426,6 +1426,12 @@ def execute_cancel_query(query_id: str, *, page: str) -> tuple[bool, str]:
     regex-validated and the exact statement is built here, so no operator text
     reaches the SQL beyond a validated query id. The role + typed-confirm gate is
     upstream; the caller still writes the REMEDIATION_LOG audit row.
+
+    c09 R1-004: SYSTEM$CANCEL_QUERY reports a cancel it could NOT make as a result
+    row, not an error ("Identified SQL statement is not currently executing." -- e.g. the
+    query finished after the 30s-cached running list was read). Success is therefore
+    Snowflake's own "query [<id>] terminated." row; anything else returns ok=False with
+    Snowflake's answer verbatim, so the caller's audit row reads FAILED, not EXECUTED.
     """
     qid = str(query_id or "").strip()
     if not _QUERY_ID_RE.match(qid):
@@ -1435,16 +1441,29 @@ def execute_cancel_query(query_id: str, *, page: str) -> tuple[bool, str]:
     if denied:
         return False, denied
     from app.core.sqlsafe import sql_literal
+    cancel_sql = f"SELECT SYSTEM$CANCEL_QUERY({sql_literal(qid)})"
     try:
         with st.spinner("Cancelling query…"):   # C48 in-flight state
             session = get_session()
             apply_query_tag(session, build_query_tag(page=page, tier="write"))
-            submit_collect(session, session.sql(f"SELECT SYSTEM$CANCEL_QUERY({sql_literal(qid)})"),
-                           statement_params(session, page=page, tier="write"))
-        return True, f"Cancel requested for {qid}."
+            rows = submit_collect(session, session.sql(cancel_sql),
+                                  statement_params(session, page=page, tier="write"))
     except Exception as exc:
         record_error(page, exc, context=f"execute_cancel_query: {qid}")
         return False, format_snowflake_error(exc)
+    try:
+        answer = str(rows[0][0] or "").strip() if rows else ""
+    except (IndexError, KeyError, TypeError):
+        answer = ""
+    if not answer:
+        return False, (f"Cancel sent for {qid}, but Snowflake returned no confirmation that it "
+                       "terminated -- check the running list before re-cancelling.")
+    if "terminated" not in answer.lower():
+        return False, f"Snowflake: {answer}"
+    # A confirmed cancel changes what the cached running-queries list shows; invalidate like
+    # any other account-touching action (r24 #8) so the cancelled row leaves the list.
+    _bump_refresh(cancel_sql)
+    return True, f"Snowflake: {answer}"
 
 
 # codex#6: 'invalid identifier' removed — a missing PROCEDURE raises "unknown user-defined

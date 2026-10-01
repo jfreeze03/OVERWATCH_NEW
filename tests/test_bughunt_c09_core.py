@@ -113,3 +113,74 @@ def test_warehouse_jump_carries_a_company_that_cannot_contradict_it(monkeypatch,
     (args, _kw), = navs
     assert args[:2] == ("Operations", "Queries")
     assert args[2] == {"company": company, "warehouse_contains": pick.split(" · ", 1)[1]}
+
+
+# ------------------------------------------------------------------ R1-004: cancel reports Snowflake's answer ----
+
+_QID = "01b2c3d4-0000-1111-2222-333344445555"
+
+
+class _CancelStmt:
+    def __init__(self, log: list, sql: str, reply) -> None:
+        self.log, self.sql, self.reply = log, sql, reply
+
+    def collect(self, **_kw):
+        self.log.append(self.sql)
+        return self.reply
+
+
+class _CancelSession:
+    def __init__(self, reply) -> None:
+        self.log: list[str] = []
+        self.reply = reply
+
+    def sql(self, sql: str) -> _CancelStmt:
+        return _CancelStmt(self.log, sql, self.reply)
+
+
+def _wire_cancel(monkeypatch, reply):
+    import contextlib
+
+    import streamlit as st
+
+    import app.core.query as q
+    import app.core.session as session_mod
+
+    st.session_state.clear()
+    sess, errors = _CancelSession(reply), []
+    monkeypatch.setattr(q, "get_session", lambda: sess)
+    monkeypatch.setattr(q, "apply_query_tag", lambda *a, **k: None)
+    monkeypatch.setattr(q.st, "spinner", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(q, "record_error", lambda page, exc, context="": errors.append(exc) or "ref")
+    monkeypatch.setattr(session_mod, "is_operator", lambda: True)
+    return q, sess, errors
+
+
+@pytest.mark.parametrize("reply", [
+    [("Identified SQL statement is not currently executing.",)],     # finished after the cached list was read
+    [],                                                                # no confirmation at all
+    [(None,)],
+])
+def test_cancel_that_snowflake_did_not_make_is_not_a_success(monkeypatch, reply):
+    import streamlit as st
+
+    q, sess, errors = _wire_cancel(monkeypatch, reply)
+    ok, msg = q.execute_cancel_query(_QID, page="Operations")
+    assert ok is False                                 # the caller's REMEDIATION_LOG row reads FAILED
+    assert sess.log == [f"SELECT SYSTEM$CANCEL_QUERY('{_QID}')"]
+    if reply and reply[0][0]:
+        assert msg == "Snowflake: Identified SQL statement is not currently executing."
+    else:
+        assert "no confirmation" in msg
+    assert not errors and "_ow_refresh_salt" not in st.session_state
+    st.session_state.clear()
+
+
+def test_confirmed_cancel_is_a_success_and_refreshes_the_running_list(monkeypatch):
+    import streamlit as st
+
+    q, _sess, _errors = _wire_cancel(monkeypatch, [(f"query [{_QID}] terminated.",)])
+    ok, msg = q.execute_cancel_query(_QID, page="Operations")
+    assert ok is True and msg == f"Snowflake: query [{_QID}] terminated."
+    assert "_ow_refresh_salt" in st.session_state      # the cached running-queries list re-reads
+    st.session_state.clear()
