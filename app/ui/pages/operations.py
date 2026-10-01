@@ -4571,14 +4571,28 @@ def _emergency_warehouse(label: str, names: list, key: str) -> str:
     Refresh data, so a warehouse created since -- often the runaway one -- is missing from it. A name typed
     in the box under the pick always wins, upper-cased like the unquoted identifier the levers emit (the
     lever builders validate it, remediation._ident; the kill-switch binds it as a string literal). With
-    no list the box is the only input, as before. Returns '' when nothing is picked or typed."""
-    picked = st.selectbox(label, names, key=key) if names else ""
+    no list the box is the only input, as before. Returns '' when nothing is picked or typed.
+
+    The box keeps its value across fragment reruns and lever switches, so an old typed name used to
+    override a later pick in silence (suspend the typed WH_NEW, pick the runaway WH_B, run again: WH_NEW
+    again). Picking from the list now clears the box, and a typed name that overrides a different pick is
+    named under the inputs."""
+    txt_key = f"{key}_txt"
+
+    def _pick_clears_typed() -> None:
+        st.session_state[txt_key] = ""
+
+    picked = st.selectbox(label, names, key=key, on_change=_pick_clears_typed) if names else ""
     typed = st.text_input(
-        f"{label}: not in the list? Type its name" if names else label, key=f"{key}_txt",
+        f"{label}: not in the list? Type its name" if names else label, key=txt_key,
         help=(f"The list is SHOW WAREHOUSES, cached for up to {humanize_duration(CACHE_TTLS['metadata'])} "
               "(Refresh data in the sidebar re-reads it), so a warehouse created since is missing; a name "
-              "typed here is used instead of the pick."))
-    return str(typed or "").strip().upper() or str(picked or "")
+              "typed here is used instead of the pick. Picking from the list clears this box."))
+    target = str(typed or "").strip().upper()
+    if target and names and target != str(picked or "").strip().upper():
+        st.caption(f"Targeting the typed warehouse {target}; the list pick {picked} is ignored (clear the box "
+                   "to use it).")
+    return target or str(picked or "")
 
 
 def _emergency_tab(is_operator: bool) -> None:
@@ -4615,10 +4629,14 @@ def _emergency_tab(is_operator: bool) -> None:
     ], key="emg_action")
 
     stmt = ""
+    # The object the statement acts on, named in the receipt (an account lever leaves it empty: its name
+    # already says ACCOUNT). A receipt without it read "Executed: Suspend warehouse." whichever warehouse ran.
+    target = ""
     try:
         if action in ("Suspend warehouse", "Resume warehouse", "Warehouse statement timeout",
                       "Cluster range", "Scaling policy"):
             wh = _emergency_warehouse("Warehouse", wh_names, "emg_wh")
+            target = wh
             if action == "Suspend warehouse" and wh:
                 stmt = remediation.suspend_warehouse(wh)
             elif action == "Resume warehouse" and wh:
@@ -4648,16 +4666,19 @@ def _emergency_tab(is_operator: bool) -> None:
             parts = [p for p in fqn.split(".") if p.strip()]
             if len(parts) == 3:
                 stmt = remediation.pause_pipe(*parts, paused=(action == "Pause pipe"))
+                target = ".".join(p.strip().upper() for p in parts)
         elif action in ("Suspend task", "Resume task"):
             fqn = st.text_input("Task (DB.SCHEMA.TASK — suspend the ROOT of a graph)",
                                 key="emg_task")
             parts = [p for p in fqn.split(".") if p.strip()]
             if len(parts) == 3:
                 stmt = remediation.suspend_task_fqn(*parts, resume=(action == "Resume task"))
+                target = ".".join(p.strip().upper() for p in parts)
         elif action in ("Disable user", "Re-enable user"):
             usr = st.text_input("User name", key="emg_user")
             if usr:
                 stmt = remediation.disable_user(usr, disabled=(action == "Disable user"))
+                target = usr.strip().upper()
         elif action == "Cortex allowlist (ACCOUNT)":
             choice = st.radio("Allowlist", ["None (block all AI)", "All (restore)",
                                             "Pinned models"], key="emg_cx")
@@ -4714,7 +4735,8 @@ def _emergency_tab(is_operator: bool) -> None:
                 )
                 execute_statement(log_sql, page=_PAGE)
                 stamp_write(_emg_key, ok)  # C48
-                notify(ok, msg if not ok else f"Executed: {action}.")
+                notify(ok, msg if not ok else (f"Executed: {action} on {target}." if target
+                                               else f"Executed: {action}."))
 
         if not is_operator:
             _emg_preview()

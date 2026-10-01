@@ -168,6 +168,16 @@ def test_task_health_mart_zero_reaches_the_live_failure_scan(monkeypatch):
     assert "hourly task mart" not in read(_OPS)
 
 
+def test_glossary_timeline_row_says_a_mart_count_never_skips_the_scan():
+    # FIX-UP: the row still said only Last month forced the scan, i.e. that a mart zero skips it elsewhere
+    (row,) = [ln for ln in read("FEATURE_GLOSSARY.md").splitlines()
+              if ln.startswith("| **Failures (7d) [timeline]** |")]
+    assert ("v4.608: a FACT_TASK_DAILY count (loaded once a day, ~06:45 CT) never short-circuits the 7-day scan. "
+            "Only the live fallback's zero, over a window that holds the last 7 days (not Last month), skips "
+            "it.") in row
+    assert "mart zero no longer short-circuits" not in row
+
+
 # ------------- PR-1 lead: Built-in objectives' "Tasks on cadence" uses the Tasks ▸ SLA cap rule ----
 
 def _fresh_frame(n: int, total: int, *, last_mins: float = 10.0) -> pd.DataFrame:
@@ -258,6 +268,97 @@ def test_kill_switch_inspects_a_typed_warehouse(monkeypatch):
     ops._emergency_extras(True)
     assert seen["runs"] == ["emg_show_wh", "emg_running_WH_ADHOC"]
     assert seen["empty"] == [("clean", "Nothing running or queued right now.")]
+
+
+# FIX-UP (review of R2-100): the type-in box keeps its value across fragment reruns and lever switches, so an
+# old typed name silently overrode a later pick: type WH_NEW and suspend it, pick the runaway WH_B, run the
+# lever again, and WH_NEW was suspended again under a receipt that named no warehouse.
+
+class _SessionSt(_RecSt):
+    """_RecSt whose type-in boxes read session_state (like a keyed widget) and whose selectboxes record their
+    on_change callback by key; ``dialog`` is absent, so an operator's confirm renders inline."""
+
+    def __init__(self, *, picks: dict, typed: dict):
+        super().__init__()
+        self.session_state.update(typed)
+        self._picks = picks
+        self.on_change: dict = {}
+
+    def __getattr__(self, name):
+        if name == "dialog":
+            raise AttributeError(name)
+        return super().__getattr__(name)
+
+    def selectbox(self, label, options, *_a, key: str = "", on_change=None, **_k):
+        self.calls.append(("selectbox", f"{key}:{list(options)}"))
+        self.on_change[key] = on_change
+        return self._picks.get(key, next(iter(options), None))
+
+    def text_input(self, label, *_a, key: str = "", **_k):
+        self.calls.append(("text_input", key))
+        return self.session_state.get(key, "")
+
+
+_WHS = pd.DataFrame({"name": ["WH_A", "WH_B", "WH_NEW"]})
+
+
+def test_a_typed_name_overriding_a_different_pick_is_named_under_the_inputs(monkeypatch):
+    fake = _SessionSt(picks={"emg_wh": "WH_B"}, typed={"emg_wh_txt": "wh_new"})
+    ops, fake, _seen = _page(monkeypatch, lambda *_a, **_k: _ok(_WHS.copy()), st=fake)
+    ops._emergency_tab(False)
+    assert fake.text("code") == "ALTER WAREHOUSE WH_NEW SUSPEND;"        # typed still wins...
+    assert ("Targeting the typed warehouse WH_NEW; the list pick WH_B is ignored (clear the box to use it)."
+            in fake.text("caption"))                                      # ...but never silently
+
+
+@pytest.mark.parametrize("typed", ["", "wh_b", " WH_B "])
+def test_no_override_caption_when_the_box_is_empty_or_names_the_pick(monkeypatch, typed):
+    fake = _SessionSt(picks={"emg_wh": "WH_B"}, typed={"emg_wh_txt": typed})
+    ops, fake, _seen = _page(monkeypatch, lambda *_a, **_k: _ok(_WHS.copy()), st=fake)
+    ops._emergency_tab(False)
+    assert fake.text("code") == "ALTER WAREHOUSE WH_B SUSPEND;"
+    assert "Targeting the typed warehouse" not in fake.text("caption")
+
+
+@pytest.mark.parametrize(("wkey", "render"), [("emg_wh", "_emergency_tab"), ("emg_rq_wh", "_emergency_extras")])
+def test_picking_from_the_list_clears_the_typed_box(monkeypatch, wkey, render):
+    fake = _SessionSt(picks={wkey: "WH_B"}, typed={f"{wkey}_txt": "WH_NEW"})
+
+    def run_fn(_sql, *, key, **_k):
+        return _ok(_WHS.copy()) if key == "emg_show_wh" else _ok(pd.DataFrame())
+
+    ops, fake, seen = _page(monkeypatch, run_fn, st=fake)
+    getattr(ops, render)(False)
+    assert callable(fake.on_change.get(wkey)), "the list pick must clear the typed box"
+    fake.on_change[wkey]()                      # the operator picks WH_B from the list
+    assert fake.session_state[f"{wkey}_txt"] == ""
+    fake.calls.clear()
+    seen["runs"].clear()
+    getattr(ops, render)(False)                 # the rerun the pick triggers targets the pick
+    if render == "_emergency_tab":
+        assert fake.text("code") == "ALTER WAREHOUSE WH_B SUSPEND;"
+    else:
+        assert seen["runs"] == ["emg_show_wh", "emg_running_WH_B"]
+    assert "Targeting the typed warehouse" not in fake.text("caption")
+
+
+def test_emergency_receipt_names_the_warehouse_it_ran_on(monkeypatch):
+    executed: list[str] = []
+    receipts: list[tuple[bool, str]] = []
+
+    def execute(sql, *_a, **_k):
+        executed.append(sql)
+        return True, "Statement executed successfully."
+
+    fake = _SessionSt(picks={"emg_wh": "WH_B"}, typed={})
+    ops, fake, _seen = _page(
+        monkeypatch, lambda *_a, **_k: _ok(_WHS.copy()), st=fake,
+        confirm_gate=lambda *_a, **_k: True, write_gate_open=lambda *_a, **_k: True,
+        stamp_write=lambda *_a, **_k: None, execute_statement=execute, identity_sql=lambda: "'TESTER'",
+        notify=lambda ok, msg, *_a, **_k: receipts.append((ok, msg)))
+    ops._emergency_tab(True)                    # operator, no st.dialog: the inline confirm flow
+    assert executed[0] == "ALTER WAREHOUSE WH_B SUSPEND;"
+    assert receipts == [(True, "Executed: Suspend warehouse on WH_B.")]
 
 
 # ------------------------- R2-109: a ref-gap check the PIPE_REF_GAP alert would drop is named, not silent ----
@@ -391,31 +492,127 @@ _PROBE_EXEMPT = {
     "ops_sql.warehouse_stmt_timeout_sql": "SHOW PARAMETERS: SHOW cannot be EXPLAINed",
     "ops_sql.account_stmt_timeout_sql": "SHOW PARAMETERS: SHOW cannot be EXPLAINed",
     "graph_sql.object_blast_consumers": "ACCESS_HISTORY reader: its canary coverage is R2-069 (security cluster)",
+    # FIX-UP: probe reads the inline-only scan never saw (the SQL reaches run() through a local name)
+    "etl_control_sql.cycle_night_health_scan": (
+        "reads the customer CONTROL_STATUS table named in SETTINGS (ETL_CONTROL_STATUS_FQN): a default-arg "
+        "canary has no table to name (an ETA-column fault the base re-read survives is logged once by "
+        "attention.cycle_night_read)"),
+    "etl_control_sql.cycle_finish_history_scan": (
+        "reads the customer CONTROL_STATUS table named in SETTINGS (ETL_CONTROL_STATUS_FQN): a default-arg "
+        "canary has no table to name"),
+    "etl_control_sql.reference_gap_scan": (
+        "reads the customer staging and XLAT tables named in SETTINGS (ETL_REF_GAP_CHECKS / ETL_REF_GAP_XLAT): "
+        "a default-arg canary has no table to name"),
+    "insights_sql.object_reads_confirm": (
+        "ACCESS_HISTORY (Enterprise-only) confirm, deliberately not canaried (app/data/canary.py, Next-Fifty "
+        "#30): its canary coverage is R2-069 (security cluster)"),
 }
+
+_OPS_ETL_MODS = ("ops_sql", "insights_sql", "graph_sql", "chatter_sql", "etl_control_sql")
+
+
+def _probe_builders(source: str) -> set[str]:
+    """``mod.func`` for every probe=True call whose SQL argument is an _OPS_ETL_MODS builder: written inline
+    (``run(ops_sql.x(...), probe=True)``) or through a name assigned in the same function (``sql =
+    ops_sql.x(...)``, ``sql: str = ...``, or the first element of ``sql, errs = etl_control_sql.y(...)``).
+    A function's names include its nested functions' (closures); module-level names only module-level code's."""
+    import ast
+
+    def builder(node) -> str | None:
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name) and node.func.value.id in _OPS_ETL_MODS):
+            return f"{node.func.value.id}.{node.func.attr}"
+        return None
+
+    def probe_arg(node):
+        if isinstance(node, ast.Call) and node.args and any(
+                k.arg == "probe" and isinstance(k.value, ast.Constant) and k.value.value is True
+                for k in node.keywords):
+            return node.args[0]
+        return None
+
+    def module_level(tree) -> list:
+        out, stack = [], [tree]
+        while stack:
+            node = stack.pop()
+            out.append(node)
+            stack.extend(c for c in ast.iter_child_nodes(node)
+                         if not isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef)))
+        return out
+
+    tree = ast.parse(source)
+    found = {b for n in ast.walk(tree) if (b := builder(probe_arg(n)))}
+    funcs = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    for nodes in [module_level(tree)] + [list(ast.walk(f)) for f in funcs]:
+        names: dict[str, set[str]] = {}
+        for n in nodes:
+            if isinstance(n, (ast.Assign, ast.AnnAssign)) and (b := builder(n.value)):
+                for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                    t = t.elts[0] if isinstance(t, (ast.Tuple, ast.List)) and t.elts else t
+                    if isinstance(t, ast.Name):
+                        names.setdefault(t.id, set()).add(b)
+        for n in nodes:
+            arg = probe_arg(n)
+            if isinstance(arg, ast.Name):
+                found |= names.get(arg.id, set())
+    return found
+
+
+def test_probe_lock_resolves_a_builder_read_through_a_local_name():
+    # FIX-UP: the lock saw only `run(mod.func(...), probe=True)`; `sql = mod.func(...); run(sql, probe=True)`
+    # (attention.py's shape, and cost Optimize's _conf_sql) passed it uncanaried and unexempted
+    import textwrap
+    src = textwrap.dedent("""
+        def inline():
+            return run(ops_sql.a(1), probe=True)
+
+        def through_a_name():
+            sql = ops_sql.b(1)
+            return run(sql, page="p", probe=True)
+
+        def annotated():
+            sql: str = graph_sql.e(1)
+            return run(sql, probe=True)
+
+        def tuple_unpack():
+            scan_sql, _errs = etl_control_sql.c([], "X")
+            return run(scan_sql, probe=True)
+
+        def closure():
+            sql = insights_sql.f(1)
+
+            def go():
+                return run(sql, probe=True)
+            return go()
+
+        def not_a_probe():
+            sql = ops_sql.d(1)
+            return run(sql)
+
+        def other_scope():
+            return run(sql, probe=True)
+        """)
+    assert _probe_builders(src) =={"ops_sql.a", "ops_sql.b", "graph_sql.e", "etl_control_sql.c",
+                                    "insights_sql.f"}
 
 
 def test_every_probe_read_of_an_ops_etl_builder_is_canaried_or_exempt():
-    import ast
     import pathlib
 
     from app.data import canary
-    mods = ("ops_sql", "insights_sql", "graph_sql", "chatter_sql", "etl_control_sql")
     canary_src = read("app/data/canary.py")
     root = pathlib.Path(__file__).resolve().parents[1] / "app"
     probes: set[str] = set()
     for path in root.rglob("*.py"):
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if not (isinstance(node, ast.Call) and node.args and any(
-                    k.arg == "probe" and isinstance(k.value, ast.Constant) and k.value.value is True
-                    for k in node.keywords)):
-                continue
-            first = node.args[0]
-            if (isinstance(first, ast.Call) and isinstance(first.func, ast.Attribute)
-                    and isinstance(first.func.value, ast.Name) and first.func.value.id in mods):
-                probes.add(f"{first.func.value.id}.{first.func.attr}")
-    assert "ops_sql.operator_stats_summary" in probes and "graph_sql.object_dependency_edges" in probes
+        probes |= _probe_builders(path.read_text(encoding="utf-8"))
+    # inline reads and reads through a local name (attention.py, cost Optimize's confirm) are both seen
+    assert {"ops_sql.operator_stats_summary", "graph_sql.object_dependency_edges",
+            "etl_control_sql.cycle_night_health_scan", "etl_control_sql.cycle_finish_history_scan",
+            "etl_control_sql.reference_gap_scan", "insights_sql.object_reads_confirm"} <= probes
     missing = sorted(p for p in probes if p not in _PROBE_EXEMPT and f"{p}(" not in canary_src)
     assert not missing, f"probe=True reads with no canary: {missing}"
+    stale = sorted(set(_PROBE_EXEMPT) - probes)
+    assert not stale, f"exemptions no probe=True read uses any more: {stale}"
     assert len(canary.CANARIES) == len(dict(canary.CANARIES))          # names stay unique
 
 
