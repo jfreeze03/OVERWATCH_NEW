@@ -4077,9 +4077,10 @@ def _wh_change_block(company: str, is_operator: bool) -> None:
         )
     elif guard(res, "", setup_hint="Not installed yet — apply V024, then the daily scan populates this."):
         df = res.df.copy()
+        # The tiles read the builder's untruncated window totals; the table is the newest 200.
         k = wh_change.registry_kpis(df)
         kpi_row([
-            {"label": "Changes tracked (90d)", "value": f"{k['changes']}"},
+            {"label": "Changes tracked (90d)", "value": f"{k['changes']:,}"},
             {"label": "Regressed", "value": f"{k['regressed']}",
              "delta_color": "inverse" if k["regressed"] else "off",
              "help": "Worse $/day, p95, queueing, or failure rate vs the frozen pre-change baseline."},
@@ -4087,6 +4088,9 @@ def _wh_change_block(company: str, is_operator: bool) -> None:
             {"label": "Still accumulating", "value": f"{k['pending']}",
              "help": "Fewer than 3 after-days or 20 after-queries so far — no verdict yet."},
         ])
+        if k["changes"] > len(df):
+            st.caption(f"Table below shows the latest {len(df)} of {k['changes']:,} tracked "
+                       "changes; the tiles count all of them.")
         sel = selectable_table(df[[c for c in (
             "VERDICT", "WAREHOUSE_NAME", "SETTING", "OLD_VALUE", "NEW_VALUE",
             "CHANGE_SEEN_AT") if c in df.columns]],

@@ -55,14 +55,38 @@ def change_deltas(row: dict) -> list[dict]:
     return out
 
 
+# KPI key -> the untruncated window total change_impact_sql.warehouse_change_registry carries.
+_WINDOW_TOTALS = (
+    ("changes", "TOTAL_CHANGES"),
+    ("regressed", "TOTAL_REGRESSED"),
+    ("improved", "TOTAL_IMPROVED"),
+    ("pending", "TOTAL_PENDING"),
+)
+
+
 def registry_kpis(df: pd.DataFrame) -> dict:
-    """Counts by verdict for the KPI row; safe on empty/missing frames."""
+    """Counts by verdict for the KPI row; safe on empty/missing frames.
+
+    The registry read is capped (newest 200 rows), so counting the frame undercounted any
+    window with more changes: the tile read 200 and Regressed/Improved covered only the newest
+    rows. The builder now carries untruncated window totals (window functions run before the
+    LIMIT); read those, and count the frame only when they are absent (an older builder, tests).
+
+    "pending" is PENDING only. NO_BASELINE (the warehouse was idle before the change) is a FINAL
+    verdict the scan never revisits, like INSUFFICIENT_AFTER, so it is not "still accumulating";
+    the object-change panel already counts PENDING only.
+    """
     if df is None or df.empty or "VERDICT" not in getattr(df, "columns", ()):
         return {"changes": 0, "regressed": 0, "improved": 0, "pending": 0}
     v = df["VERDICT"].astype(str).str.upper()
-    return {
+    out = {
         "changes": len(df),
         "regressed": int((v == "REGRESSED").sum()),
         "improved": int((v == "IMPROVED").sum()),
-        "pending": int(v.isin(["PENDING", "NO_BASELINE"]).sum()),
+        "pending": int((v == "PENDING").sum()),
     }
+    first = df.iloc[0]
+    for key, col in _WINDOW_TOTALS:
+        if col in df.columns and pd.notna(first[col]):
+            out[key] = int(safe_float(first[col]))
+    return out
