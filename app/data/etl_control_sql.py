@@ -668,6 +668,26 @@ MAX_RECON_RECURRENCE_ROWS = 300
 RECON_RECENT_K = 5                    # "recent" = broke in N of the last K cohort cycles
 
 
+def recon_tier_predicates(alias: str = "r") -> tuple[str, str]:
+    """(CHRONIC, NEW) as SQL predicates over a recon_recurrence_scan row -- the SQL twin of
+    ``app.logic.insights.recon_recurrence``'s tier ladder, built from the SAME thresholds, so the
+    scan can total each tier before its LIMIT (PR-1 R1-137). COALESCE(..., 0) mirrors the
+    classifier's ``fillna(0)``; NEW excludes CHRONIC as the ladder's ``elif`` does. Pure.
+    tests/test_ops_c01_p606.py evaluates both against the classifier row by row."""
+    from app.logic.insights import RECON_CHRONIC_PCT, RECON_EMERGING_MAX, RECON_MIN_CYCLES
+
+    a = alias
+    pct, broken = f"COALESCE({a}.RECURRENCE_PCT, 0)", f"COALESCE({a}.BROKEN_CYCLES, 0)"
+    total, recent = f"COALESCE({a}.TOTAL_ERROR_CYCLES, 0)", f"COALESCE({a}.RECENT_BROKEN, 0)"
+    _chronic_min = int(RECON_MIN_CYCLES)
+    recurs = (f"{pct} >= {float(RECON_CHRONIC_PCT)} AND {broken} >= {_chronic_min}"
+              f" AND {total} >= {_chronic_min}")
+    chronic = f"{a}.BROKE_LATEST_CYCLE AND {recurs}"
+    new = (f"{a}.BROKE_LATEST_CYCLE AND NOT ({recurs})"
+           f" AND {broken} <= {int(RECON_EMERGING_MAX)} AND {recent} >= {broken}")
+    return chronic, new
+
+
 def recon_recurrence_scan(
     recon_fqn: object, *, days: object = 0, max_rows: int = MAX_RECON_RECURRENCE_ROWS
 ) -> str:
@@ -743,9 +763,13 @@ def recon_recurrence_scan(
         # totals over every check (evaluated before the LIMIT), and still-breaking checks rank first
         # -- the Python tier ladder's order -- so the cap evicts resolved checks, never a
         # low-recurrence break in the latest cycle (which used to sort last and fall off).
+        # CHRONIC_ / NEW_CHECKS_TOTAL total the tier ladder the same way: past the cap the still-
+        # breaking rows are ranked by recurrence, so a frame count drops the low-recurrence NEW ones.
         "SELECT r.*,\n"
         "       COUNT(*) OVER () AS TOTAL_CHECKS,\n"
-        "       SUM(IFF(r.BROKE_LATEST_CYCLE, 1, 0)) OVER () AS ACTIVE_CHECKS_TOTAL\n"
+        "       SUM(IFF(r.BROKE_LATEST_CYCLE, 1, 0)) OVER () AS ACTIVE_CHECKS_TOTAL,\n"
+        f"       SUM(CASE WHEN {recon_tier_predicates('r')[0]} THEN 1 ELSE 0 END) OVER () AS CHRONIC_CHECKS_TOTAL,\n"
+        f"       SUM(CASE WHEN {recon_tier_predicates('r')[1]} THEN 1 ELSE 0 END) OVER () AS NEW_CHECKS_TOTAL\n"
         "FROM (\n"
         "SELECT a.MTRC, a.FRQCY, a.VALUE_TYPE, a.RECON_MTRC_LAYER,\n"
         "       a.BROKEN_CYCLES, f.TOTAL_ERROR_CYCLES,\n"
