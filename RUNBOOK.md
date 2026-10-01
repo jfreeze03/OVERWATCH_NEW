@@ -292,7 +292,9 @@ Admin → Settings, never in code.
   FACT_METERING_DAILY; live fallback METERING_DAILY_HISTORY (lags ≤24h).
 - **MTD credit spend vs last month** — account-wide month-to-date billed $
   (today included). The delta compares the same number of completed days
-  (today excluded) against the prior month; no configuration is needed
+  (today excluded, and before the 06:45 Central daily load also yesterday,
+  whose metering row is still a partial snapshot) against the prior month;
+  no configuration is needed
   (owner 2026-07-13: no monthly-budget KPI). When the prior month has no
   daily facts the card reads plain "MTD credit spend" with no delta. A set
   `MONTHLY_BUDGET_USD` adds a "% of budget" note to this card's help, and a
@@ -584,8 +586,9 @@ SOC. **Governance drift score** at top (§6). Sections:
 ### Alerts
 - **Open events** — click a row → drawer: full detail, rule config, that
   rule's recent history, first-response playbook, **Explain with AI** for
-  COST_/PERF_ events (§8), Investigate→ (jumps to the owning page/section
-  with filters applied), ack/resolve with note (audited). Bulk ack/resolve
+  the alerts that have a matching evidence pack (§8), Investigate→ (jumps to
+  the owning page/section with filters applied), ack/resolve with note
+  (audited). Bulk ack/resolve
   below. The tiles above the queue are Open critical / high / total.
 - **Rules** — ALERT_CONFIG: enable/disable, thresholds (SQL generated,
   operator executes). The generator opens on the picked rule's current
@@ -731,7 +734,10 @@ are not scored (retired 2026-07-13, owner decision).
 - Neither engine projects with fewer than 7 complete days of history (the
   basis reads "Needs at least 7 days of history"). A missing completed day
   this month (no fact row) is filled at the baseline mean when the
-  surrounding history is dense, never counted as $0.
+  surrounding history is dense, never counted as $0. Complete days end at
+  the metering fact's newest row: before the 06:45 Central daily load that
+  row (yesterday) is still a partial snapshot, so Overview projects it with
+  today instead of counting it, and the basis says so.
 - **ml_forecast**: reads `FORECAST_ML_DAILY` (materialized by the opt-in
   `ml_forecast_option.sql`: `SP_REFRESH_ML_FORECAST` retrains the
   SNOWFLAKE.ML.FORECAST model on every complete day, then writes the 45 days
@@ -773,10 +779,16 @@ required "inconclusive" escape, word limits.
 - **Pre-explained anomalies** — sweep v3 appends a grounded hypothesis to
   fresh COST_ANOMALY_SWEEP events server-side (capped 5/run) so webhook
   messages arrive explained.
-- **Anomaly explanation (on-demand)** — alert drawer, COST_/PERF_ events: assembles
-  the event day's evidence (top query families by elapsed-hours vs their
-  prior-7-day average, warehouse-scoped) and asks for the 1-2 most likely
-  drivers with numbers, or "inconclusive". Operators may append the
+- **Anomaly explanation (on-demand)** — alert drawer: assembles the evidence
+  pack that matches the alert's metric (cloud-services credits by query
+  shape, AI/Cortex spend, a service's daily credits, a query family's
+  latency, a warehouse's queueing) and asks for the 1-2 most likely drivers
+  with numbers, or "inconclusive". The generic pack (top query families by
+  elapsed-hours vs their prior-7-day average, warehouse-scoped) serves only
+  daily credits (account / warehouse), remote spill and a warehouse spike
+  from the anomaly sweep; any other alert (budget pace / forecast, contract,
+  storage, egress, org spend, query failure rate, security ...) shows no
+  Explain button rather than off-topic rows. Operators may append the
   hypothesis to the event (audited UPDATE).
 
 ## 9. The find→fix→prove loop

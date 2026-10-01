@@ -42,6 +42,7 @@ from app.logic.formulas import (
     format_credits,
     format_usd,
     md_dollars,
+    metering_complete_before,
     month_days,
     pct_delta,
     safe_float,
@@ -205,7 +206,10 @@ def _mtd_spend_usd(rate: float, ai_rate: float,
     frame = res.df.copy()
     frame["DAY"] = pd.to_datetime(frame["DAY"], errors="coerce").dt.date
     month_start = account_today().replace(day=1)
-    mtd = (frame[(frame["DAY"] >= month_start) & (frame["DAY"] < account_today())]
+    # R2-050: 'complete' ends at the fact's own newest (still-loading) day, not at account today -- before the
+    # 06:45 Central load yesterday's row is a partial snapshot (formulas.metering_complete_before).
+    mtd = (frame[(frame["DAY"] >= month_start)
+                 & (frame["DAY"] < metering_complete_before(frame, account_today()))]
            if exclude_today else frame[frame["DAY"] >= month_start])
     if _billed_split_available(mtd):
         spend = blended_billed_usd(mtd["CREDITS_BILLED_OTHER"].map(safe_float).sum(),
@@ -262,7 +266,10 @@ def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
                    " Note: the AI/compute rate split is unavailable on this refresh, so every "
                    "credit is priced at the compute rate — AI/Cortex-heavy spend may read high.")
     frame["USD"] = _billed_usd_series(frame, rate, ai_rate)
-    mtd, prior, pct = mtd_pace_vs_prior_month(frame[["DAY", "USD"]], account_today())
+    # R2-050: compare the days the metering fact has COMPLETED (its newest row is still loading until 06:45)
+    _complete_before = metering_complete_before(frame, account_today())
+    mtd, prior, pct = mtd_pace_vs_prior_month(frame[["DAY", "USD"]], account_today(),
+                                              complete_before=_complete_before)
     # Credit sub-line: when the AI/OTHER split is present, sum billed CREDITS directly over
     # the SAME MTD window (run a credits series through mtd_pace) rather than back-solving
     # mtd_usd/rate — the USD blends AI credits at ai_rate, so mtd/rate would undercount
@@ -271,7 +278,7 @@ def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
         _cr_frame = frame[["DAY"]].assign(
             USD=frame["CREDITS_BILLED_OTHER"].map(safe_float)
             + frame["CREDITS_BILLED_AI"].map(safe_float))
-        _mtd_cr, _, _ = mtd_pace_vs_prior_month(_cr_frame, account_today())
+        _mtd_cr, _, _ = mtd_pace_vs_prior_month(_cr_frame, account_today(), complete_before=_complete_before)
         _mtd_credits = safe_float(_mtd_cr)
     else:
         _mtd_credits = safe_float(mtd) / rate if rate > 0 else None
@@ -372,10 +379,12 @@ def render() -> None:
     # the month and mismatches the account-wide "Projected month-end" KPI (which
     # sits beside the account-wide MTD KPI). Project from the account-wide 150d
     # frame already loaded above; fall back to the board frame only if it failed.
+    _proj_cut = None    # R2-050: the first incomplete metering day (only for the FACT_METERING_DAILY frame)
     if _bt_hist.usable():
         _proj = _bt_hist.df.copy()
         _proj["USD"] = _billed_usd_series(_proj, rate, ai_rate)
         proj_daily = _proj[["DAY", "USD"]]
+        _proj_cut = metering_complete_before(_proj, account_today())
     else:
         proj_daily = daily
     # N4: Overview never adopted the first-paint run_batch that Brief/Control Room
@@ -466,7 +475,8 @@ def render() -> None:
         if forecast is None:
             engine = "seasonal"  # honest fallback when the ML view isn't installed
     if forecast is None:
-        forecast = (month_end_projection(proj_daily, account_today(), engine=engine)
+        # R2-050: the metering fact's newest row is still loading until 06:45 Central -- project it, never count it
+        forecast = (month_end_projection(proj_daily, account_today(), engine=engine, complete_before=_proj_cut)
                     if not proj_daily.empty else month_end_projection(pd.DataFrame(), account_today(), engine=engine))
         if _ml_stale_note:
             forecast = dataclasses.replace(forecast, basis=f"{forecast.basis} {_ml_stale_note}".strip())
@@ -810,15 +820,19 @@ def render() -> None:
         # mtd_spend biased an on-budget account "burning fast" by today's partial spend
         # (and the displayed "MTD credit spend" KPI stays on the full today-inclusive value).
         _mtd_complete = _mtd_spend_usd(rate, ai_rate, preloaded=_bt_hist, exclude_today=True)[0]
-        _pace_var, _expected_td = budget_pace_variance(_mtd_complete, budget, account_today())
+        # R2-050: the same complete-day cut _mtd_spend_usd summed over, so both sides count the same days
+        _pace_cut = metering_complete_before(_bt_hist.df if _bt_hist.usable() else None, account_today())
+        _pace_var, _expected_td = budget_pace_variance(_mtd_complete, budget, account_today(),
+                                                       complete_before=_pace_cut)
         _dim, _elapsed, _rem = month_days(account_today())
+        _pace_days = max((_pace_cut - account_today().replace(day=1)).days, 0)   # the days `expected` covers
         _pace_word = "ahead of" if _pace_var > 0 else "behind" if _pace_var < 0 else "on"
         _pace_sign = "+" if _pace_var > 0 else "-" if _pace_var < 0 else ""
         account_kpis.insert(1, {
             "label": "Pace vs budget calendar",
             "value": f"{_pace_sign}{format_usd(abs(_pace_var))}",
             "delta": (f"{_pace_word} straight-line "
-                      f"({format_usd(_expected_td)} expected by day {_elapsed}/{_dim})"),
+                      f"({format_usd(_expected_td)} expected after {_pace_days} complete day(s) of {_dim})"),
             # neutral delta (flat dash) — the severity stripe carries good/bad; the prose
             # delta has no leading sign, so a colored arrow would always point the same way.
             "delta_color": "off",
@@ -832,7 +846,8 @@ def render() -> None:
             "as_of": _ov_asof_meter,
             "help": "Signed variance of MTD billed spend vs the budget's own straight-line "
                     "expected-to-date (MONTHLY_BUDGET_USD / days_in_month x completed days — "
-                    "today excluded, since metering lags). "
+                    "today excluded, since metering lags, and before the 06:45 Central load also "
+                    "yesterday, whose metering row is still a partial snapshot). "
                     "Positive = ahead of the flat daily budget target (burning fast); negative = "
                     "behind. Isolates calendar PACE from the structural 'will we end over' the "
                     "projected month-end KPI. Account-wide billed credits (AI at the AI rate).",

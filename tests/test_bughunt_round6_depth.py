@@ -32,8 +32,10 @@ def test_linear_forecast_anchors_on_today_not_last_present_day():
     r_fresh = month_end_projection(fresh, today=today)
     assert abs(r_gap.projected_usd - r_fresh.projected_usd) / r_fresh.projected_usd < 0.05
     src = _read("app/logic/forecast.py")
-    assert "today_x = float((today - _origin).days)" in src
-    assert "slope * (today_x + k)) for k in range(project_days)" in src
+    # R2-050: the anchor is the first incomplete day -- today unless the caller says a still-loading day precedes it
+    assert "start_x = float((start - _origin).days)" in src
+    assert "slope * (start_x + k)) for k in range(project_days)" in src
+    assert "start = max(cut, month_start)" in src
     assert "last_x = xs[-1]" not in src and "slope * (last_x + k)" not in src  # anchor gone
 
 

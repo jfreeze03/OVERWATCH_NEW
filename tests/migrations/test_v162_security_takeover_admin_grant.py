@@ -625,7 +625,9 @@ def test_v162_tuning_never_suggests_a_threshold_for_admin_grants():
     import pandas as pd
 
     from app.logic import tuning
-    assert frozenset({_GRANT}) == tuning.NO_THRESHOLD_RULES
+    # R2-038 / R2-086 widened the set to every rule whose raiser ignores THRESHOLD_NUM; its exact membership is
+    # pinned (and re-derived from the raisers) by tests/test_r2_alerts_logic.py
+    assert _GRANT in tuning.NO_THRESHOLD_RULES and _TAKE not in tuning.NO_THRESHOLD_RULES
     ev = pd.DataFrame({"METRIC_VALUE": [1.0] * 12, "RESOLUTION_KIND": ["NOISE"] * 10 + ["ACTIONED"] * 2})
     got = tuning.suggest_threshold(ev, 0.0, rule_id=_GRANT)
     assert got == {"ok": False, "basis": "Raised once per grant; this rule has no threshold.", "noise_n": 10,

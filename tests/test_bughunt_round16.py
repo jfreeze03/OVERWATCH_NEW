@@ -62,4 +62,6 @@ def test_mtd_spend_exclude_today_drops_partial(monkeypatch):
     # the pace card feeds the COMPLETE-days MTD into budget_pace_variance
     src = _src("app/ui/pages/overview.py")
     assert "exclude_today=True)[0]" in src
-    assert "budget_pace_variance(_mtd_complete, budget, account_today())" in src
+    # R2-050: ... over the same complete-day cut _mtd_spend_usd summed (the metering fact's own newest day)
+    assert "budget_pace_variance(_mtd_complete, budget, account_today(),\n" in src
+    assert "complete_before=_pace_cut)" in src

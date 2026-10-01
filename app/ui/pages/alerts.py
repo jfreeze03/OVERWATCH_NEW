@@ -564,8 +564,11 @@ def _delivery_status() -> None:
     # never exists, so the banner claimed "No webhook integration — alerts stay in-app
     # only" while Teams was delivering fine. Resolve the integrations the ENABLED ROUTES
     # actually name, and check for ANY of them.
+    # R2-098: the 5-minute tier too (was the shared 4 h metadata entry, which no app write invalidates) -- an
+    # integration dropped or recreated in a worksheet must not read as up / missing for hours under a verdict
+    # that answers "who gets paged right now". A cheap metadata SHOW in a lazy section.
     integ = run("SHOW NOTIFICATION INTEGRATIONS", page=_PAGE,
-                key="delivery_integ", tier="metadata", source="SHOW INTEGRATIONS", max_rows=0)
+                key="delivery_integ", tier="recent", source="SHOW INTEGRATIONS", max_rows=0)
     # Review R1-169: the 5-minute tier Admin's task-health read uses, not the 4 h metadata entry -- this banner
     # answers "who gets paged right now", so a task a DBA suspended in a worksheet must not read LIVE for hours.
     task = run("SHOW TASKS LIKE 'TASK_ALERT_NOTIFY' IN SCHEMA DBA_MAINT_DB.OVERWATCH",
@@ -1378,6 +1381,11 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                          + (f"latest {_hn}" if _hn >= _RULE_HISTORY_CAP else f"{_hn}")
                                          + " events)"):
                             styled_table(hist.df, height=220)
+                    elif not hist.ok:
+                        # merge-notes lead (c03): a FAILED history read rendered nothing at all -- the same
+                        # blank as a rule with no recent events. It renders by its kind instead.
+                        _failed_read(hist, "This rule's recent events could not be read, so its history "
+                                           "is missing from this drawer.")
                     # rec26: how was this resolved last time? The kind + note from the account's
                     # own history is a playbook this exact alert has earned. styled_table (not
                     # markdown) so a note can't inject formatting.
@@ -1391,6 +1399,9 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                          height=180, slug="rule-resolutions")
                             st.caption("The last few times this rule was closed — kind and note from "
                                        "your own history, the playbook this alert has earned.")
+                    elif not _res.ok:
+                        _failed_read(_res, "How this rule was resolved before could not be read, so its "
+                                           "past resolutions are missing from this drawer.")
                     if wh_inline:
                         with st.expander(f"Respond — closed loop on {wh_inline}", expanded=False):
                             st.caption("Playbook above says what; this generates the how. Execute is "

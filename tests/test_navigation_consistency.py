@@ -52,7 +52,11 @@ def _seeded_rule_ids() -> set[str]:
     for sql in (_ROOT / "snowflake" / "migrations").glob("*.sql"):
         ids.update(re.findall(r"'((?:COST|PERF|PIPE|SEC|OPS)_[A-Z_0-9]+)'",
                               sql.read_text(encoding="utf-8")))
-    return ids
+    # R2-088: the DQ_* / WH_* rules were never scraped (that prefix regex would also pick up warehouse names
+    # like 'WH_ALFA_ETL'), so their Overview landing went unnoticed. Add every rule an ALERT_CONFIG seed
+    # statement names (test_alert_rule_consistency's replay), whatever its family.
+    from tests.test_alert_rule_consistency import _config_seeded_ever
+    return ids | _config_seeded_ever()
 
 
 def test_page_section_keys_match_source():
@@ -72,10 +76,13 @@ def test_static_targets_point_at_real_sections():
 def test_every_seeded_rule_resolves_to_a_real_target():
     seeded = _seeded_rule_ids()
     assert len(seeded) >= 20, f"rule scrape looks broken: {sorted(seeded)}"
+    assert {"DQ_BREACH", "DQ_RECON_ERROR", "DQ_SCHEMA_DRIFT", "WH_CHANGE_REGRESSION"} <= seeded
     for rid in sorted(seeded):
         tgt = investigation_target(rid, "warehouse WH_TEST_X on DBX.SCH. something")
         page = tgt["page"]
         assert page in _PAGE_FILES, f"{rid}: unknown page {page!r}"
+        # R2-088: Overview has no alert panel -- only the OPS_* self-watch rules land there on purpose
+        assert page != "Overview" or rid.startswith("OPS_"), f"{rid}: Investigate lands on Overview"
         if tgt["section"]:
             labels, _ = _lazy_sections_of(_PAGE_FILES[page])
             assert tgt["section"] in labels, f"{rid}: {page} lacks {tgt['section']!r}"

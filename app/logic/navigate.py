@@ -126,14 +126,27 @@ _RULE_TARGETS = {
     "COST_IDLE_OPPORTUNITY": ("Cost Intelligence", "Optimization & Savings"),
     # V160: the billed-family panel (Cloud-services health) lives on Spend & Attribution.
     "COST_SLEEP_POLLING": ("Cost Intelligence", "Spend & Attribution"),
+    # R2-088: the DQ_* and WH_CHANGE_* families have no family default, so these landed on Overview, which
+    # has no panel for any of them. Each goes where its playbook's step 1 (and its own DETAIL) sends the user.
+    "DQ_BREACH": ("Operations", "Pipeline SLA"),           # Data checks > Row-volume anomalies
+    "DQ_RECON_ERROR": ("Operations", "Pipeline SLA"),      # Data checks > Reconciliation errors
+    "DQ_SCHEMA_DRIFT": ("Security", "Changes"),            # Who changed what (DDL/DCL)
+    "WH_CHANGE_REGRESSION": ("Operations", "Change impact"),   # Warehouse setting changes
+    # R2-091: the BUDGET / TASK family defaults never matched a rule id (these are COST_* / PIPE_*), so
+    # they took the COST / PIPE default. The contract runway and the org per-account spend both live on
+    # Contract & Forecast; a task-failure alert's panels are on Operations > Tasks; a PUBLIC grant's evidence
+    # (Recent grant changes) is on Security > Changes, like SEC_ADMIN_GRANT's. COST_BUDGET_PACE and
+    # COST_FORECAST_BREACH keep the COST default: Contract & Forecast has no monthly-budget content.
+    "COST_CONTRACT_BREACH": ("Cost Intelligence", "Contract & Forecast"),
+    "COST_ORG_ACCOUNT_CREEP": ("Cost Intelligence", "Contract & Forecast"),
+    "PIPE_TASK_FAILURES": ("Operations", "Tasks"),
+    "SEC_NEW_EXPOSURE": ("Security", "Changes"),
 }
 
 _FAMILY_DEFAULTS = (
-    ("BUDGET", ("Cost Intelligence", "Contract & Forecast")),
     ("COST", ("Cost Intelligence", "Spend & Attribution")),
     ("PERF", ("Operations", "Queries")),
     ("PIPE", ("Operations", "Pipeline SLA")),
-    ("TASK", ("Operations", "Tasks")),
     ("SEC", ("Security", "Access")),
 )
 
@@ -162,8 +175,7 @@ def inline_fix_warehouse(rule_id: str, text: str = "") -> str:
     rid = str(rule_id or "").strip().upper()
     if rid not in INLINE_FIX_RULES:
         return ""
-    m = _WH_RE.search(str(text or "").upper())
-    return m.group(0) if m else ""
+    return rule_warehouse(rid, text)
 
 
 def fix_target(rule_id: str, text: str = "") -> dict | None:
@@ -178,6 +190,48 @@ def fix_target(rule_id: str, text: str = "") -> dict | None:
 
 _WH_RE = re.compile(r"\bWH_[A-Z0-9_]+\b")
 _DB_RE = re.compile(r"\b([A-Z][A-Z0-9_]{2,})\.([A-Z][A-Z0-9_]{2,})\.")
+# An unquoted Snowflake identifier (app.core.sqlsafe's _IDENT_RE): the only warehouse name a title token may be.
+_IDENT_RE = re.compile(r"^[A-Z_][A-Z0-9_$]{0,254}$")
+
+# R2-092: the warehouse-led raisers write the warehouse name FIRST in the title, with no prefix rule, so
+# BLCOMPUTE_WH or COMPUTE_WH never matched _WH_RE (a '_' before 'WH' is no word boundary) and the drawer lost
+# the re-check, the inline fix, warehouse-scoped evidence and the Investigate filter without a word. The name
+# is read from each raiser's fixed title shape instead (anchored, so a DETAIL can never supply it); an
+# unparseable or legacy title falls back to _WH_RE.
+_TITLE_WAREHOUSE_RES: dict[str, re.Pattern[str]] = {
+    "COST_WH_DAILY_CREDITS": re.compile(r"^\s*(\S+) used \d"),                # [02] '<WH> used N credits on D'
+    "PERF_QUEUED_MINUTES": re.compile(r"^\s*(\S+) queued \d"),                # [04] '<WH> queued N min in 24h'
+    "PERF_SPILL_GB": re.compile(r"^\s*(\S+) spilled \d"),                     # [05] '<WH> spilled N GB remote ...'
+    "COST_IDLE_OPPORTUNITY": re.compile(r"^\s*(\S+) idle waste ~\$"),         # [24] '<WH> idle waste ~$N/mo: ...'
+    "COST_SLEEP_POLLING": re.compile(r"^\s*(\S+) sleep polling ~\$"),         # V160 ('No warehouse ...' never matches)
+    # V150 SP_ANOMALY_SWEEP: SERIES = 'WAREHOUSE <name>' or 'SERVICE <type>' ('spent' = the pre-V076 wording)
+    "COST_ANOMALY_SWEEP": re.compile(r"^\s*WAREHOUSE (\S+) (?:spent|spiked to|collapsed to) \d"),
+    "COST_CLOUD_SVC_ANOMALY": re.compile(r"^\s*CLOUD SVC (\S+) cloud-services (?:spiked|collapsed) to "),
+    "WH_CHANGE_REGRESSION": re.compile(r"^\s*Warehouse (\S+) regressed after "),   # SP_WAREHOUSE_CHANGE_SCAN
+}
+
+
+def rule_warehouse(rule_id: str, text: str = "") -> str:
+    """The warehouse an alert names (upper case, as Snowflake stores an unquoted name), or ''. ``text`` is the
+    event TITLE (optionally followed by its DETAIL, as the drawer passes it).
+
+    A rule whose raiser leads its title with the warehouse (_TITLE_WAREHOUSE_RES) is read from that position
+    and must be an unquoted (upper-case) identifier as Snowflake stores it: a quoted name (lower case,
+    punctuation) or the cloud-services NULL series ('NONE') yields '' rather than a guess at a different
+    warehouse. Any other rule, or a title in an older shape, falls back to the first WH_* token in the text."""
+    rid = str(rule_id or "").strip().upper()
+    raw = str(text or "")
+    shape = _TITLE_WAREHOUSE_RES.get(rid)
+    if shape is not None:
+        m = shape.match(raw)
+        if m:
+            name = m.group(1)
+            if not _IDENT_RE.match(name) or (rid == "COST_CLOUD_SVC_ANOMALY" and name == "NONE"):
+                return ""
+            return name
+    wh = _WH_RE.search(raw.upper())
+    return wh.group(0) if wh else ""
+
 
 # Account-wide self-watch rules whose text carries file names and raw loader error messages, not
 # entities: OPS_PIPELINE_DEGRADED's STALE leg ends "snowflake/loader_chain_check.sql." (read as database
@@ -188,10 +242,19 @@ _DB_RE = re.compile(r"\b([A-Z][A-Z0-9_]{2,})\.([A-Z][A-Z0-9_]{2,})\.")
 # login error text -- never a warehouse or database -- so they get no entity filter either.
 # V163: COST_AI_USER_RUNAWAY titles lead with a user name and SEC_TRUST_REGRESSION with a scanner name, neither
 # a warehouse or database (a dotted user name reads as DB.SCHEMA.), so Investigate applies no filter.
+# R2-037: every other arm whose TITLE leads with a user name gets the same carve-out -- SEC_CRED_EXPIRY ([10]
+# '<USER> <type> '<NAME>' expires ...'), SEC_NEW_ADMIN_NETWORK ([18] '<USER> logged in from new network <IP>')
+# and SEC_FAILED_LOGINS (daily [07] '<USER> had N failed logins on D'); first.last.name read as database FIRST.
+# tests/test_r2_alerts_logic.py scans the current raiser bodies so a new user-led arm cannot slip past.
+# The list stays explicit: SEC_NEW_EXPOSURE and SEC_POSTURE_METRIC can carry real object names.
+# DQ_RECON_ERROR's text is a count plus reconciliation METRIC names (never an entity), so a dotted metric
+# name must not become a database filter either.
 _NO_ENTITY_FILTER_RULES = frozenset({
     "OPS_PIPELINE_DEGRADED",
     "SEC_LOGIN_TAKEOVER", "SEC_ADMIN_GRANT",
     "COST_AI_USER_RUNAWAY", "SEC_TRUST_REGRESSION",
+    "SEC_CRED_EXPIRY", "SEC_NEW_ADMIN_NETWORK", "SEC_FAILED_LOGINS",
+    "DQ_RECON_ERROR",
 })
 
 
@@ -212,9 +275,9 @@ def investigation_target(rule_id: str, text: str = "") -> dict:
         return {"page": page, "section": section, "filters": {}}
     filters: dict = {}
     upper = str(text or "").upper()
-    wh = _WH_RE.search(upper)
+    wh = rule_warehouse(rid, str(text or ""))   # R2-092: a warehouse-led title is read by its position
     if wh:
-        filters["warehouse_contains"] = wh.group(0)
+        filters["warehouse_contains"] = wh
     db = _DB_RE.search(upper)
     if db and db.group(1) not in ("SNOWFLAKE",):
         filters["database"] = db.group(1)
