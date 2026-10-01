@@ -8,6 +8,7 @@ from app import companies
 from app.config import core_object, mart_object
 from app.core.sqlsafe import contains_filter, in_list, sql_literal
 from app.data.common import (
+    account_today_sql,
     and_where,
     bounded_days,
     resolve_effective_window,
@@ -2148,7 +2149,12 @@ def security_login_fact_coverage(days: int = 30, *, bounds: tuple | None = None,
 
     One 90-day density read used to gate a 7- or 30-day window, so a hole INSIDE the served window
     passed on the other 80+ days and failed logins in the hole silently went uncounted under a mart
-    source label. LAST_DAY stays the fact's newest day (freshness), never the window's last."""
+    source label. LAST_DAY stays the fact's newest day (freshness), never the window's last.
+
+    COVERAGE_DAYS counts COMPLETE days only (before today), the exact days coverage_required_days
+    asks for. The span also holds today, and counting today's partition let it stand in for a missing
+    interior day: with today loaded, a 7-day window holed on one day still counted 7 of the 8 days
+    it reads and passed. Today is neither required nor counted."""
     # DENSITY, not span — see login_fact_coverage. An interior gap must deflate COVERAGE_DAYS so
     # fact_coverage_complete keeps the page on the live path until the fact is genuinely dense.
     days = bounded_days(days, maximum=90)
@@ -2156,16 +2162,19 @@ def security_login_fact_coverage(days: int = 30, *, bounds: tuple | None = None,
     if bounds is not None:
         _start, _end = bounds
         _first = (_start - timedelta(days=lookback)).isoformat()
+        # the requirement stops at the earlier of the range end and the account's today (Python
+        # account_today), so the count stops there too, on the same Central clock
         return f"""
 SELECT MIN(DAY) AS FIRST_DAY, MAX(DAY) AS LAST_DAY, COUNT(*) AS FACT_ROWS,
-       COUNT(DISTINCT IFF(DAY < '{_end.isoformat()}', DAY, NULL)) AS COVERAGE_DAYS,
+       COUNT(DISTINCT IFF(DAY < LEAST('{_end.isoformat()}'::DATE, {account_today_sql()}), DAY, NULL))
+           AS COVERAGE_DAYS,
        MAX(LOAD_TS) AS LAST_LOAD
 FROM {core_object('FACT_SECURITY_LOGIN_DAILY')}
 WHERE DAY >= '{_first}'
 """
     return f"""
 SELECT MIN(DAY) AS FIRST_DAY, MAX(DAY) AS LAST_DAY, COUNT(*) AS FACT_ROWS,
-       COUNT(DISTINCT DAY) AS COVERAGE_DAYS,
+       COUNT(DISTINCT IFF(DAY < CURRENT_DATE(), DAY, NULL)) AS COVERAGE_DAYS,
        MAX(LOAD_TS) AS LAST_LOAD
 FROM {core_object('FACT_SECURITY_LOGIN_DAILY')}
 WHERE DAY >= DATEADD('day', -{days + lookback}, CURRENT_DATE())

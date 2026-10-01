@@ -33,8 +33,14 @@ def _src(rel: str) -> str:
 
 # ---- HIGH (#1/#9): login fact-coverage measures day density, not calendar span -----
 def test_login_fact_coverage_uses_distinct_day_density():
-    for sql in (security_sql.login_fact_coverage(30), security_sql.security_login_fact_coverage(30)):
-        assert "COUNT(DISTINCT DAY) AS COVERAGE_DAYS" in sql
+    # R1-101 follow-up (2026-10-01): the V075 security gate counts COMPLETE days only (today excluded),
+    # the same days coverage_required_days asks for, so a loaded today can't fill an interior hole.
+    for sql, density in (
+        (security_sql.login_fact_coverage(30), "COUNT(DISTINCT DAY) AS COVERAGE_DAYS"),
+        (security_sql.security_login_fact_coverage(30),
+         "COUNT(DISTINCT IFF(DAY < CURRENT_DATE(), DAY, NULL)) AS COVERAGE_DAYS"),
+    ):
+        assert density in sql
         assert "DATEDIFF('day', MIN(DAY), MAX(DAY)) + 1 AS COVERAGE_DAYS" not in sql
         sqlglot.parse(sql, dialect="snowflake")
 
