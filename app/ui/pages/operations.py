@@ -1470,7 +1470,9 @@ def _workflow_runtimes_panel(days: int = 0, *, pf: dict | None = None) -> None:
             "is Informatica-orchestrated proc CALLs that Snowflake's TASK_HISTORY can't see — this "
             "surfaces each task's runtime and status for the latest run straight from the log.")
         return
-    _scope = f" (last {days}d)" if days else ""
+    # R1-063 review: label the Window by the same rule the list/runtimes reads use — a calendar
+    # day 0 (Current month on the 1st) reads TODAY only, so it says so instead of a blank suffix.
+    _scope = etl_control_sql.window_suffix(days)
     # Picker: which workflow's latest run to show. Each RUN_ID is one workflow, so without a
     # picker the panel only ever shows whichever workflow finished most recently. The list is
     # scoped to the Window, so it also honors the scope bar.

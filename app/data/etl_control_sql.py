@@ -214,6 +214,17 @@ def _window_clause(days: object, col: str = "TASK_START_DTTM", indent: str = "  
     return f"{indent}AND {col} >= DATEADD('day', -{n}, CURRENT_TIMESTAMP())\n"
 
 
+def window_suffix(days: object) -> str:
+    """The ``' (…)'`` label naming the Window a ``_window_clause`` reader actually read, by the
+    same rule: ``' (today)'`` for a CALENDAR day-0 offset (Current month on the 1st / Current
+    year on Jan 1 — the read is today only, R1-063), ``' (last Nd)'`` for any other positive
+    offset, and ``''`` when the read is unscoped (plain 0 / negative / non-numeric = all time)."""
+    n = int(days) if isinstance(days, (int, float)) else 0
+    if getattr(days, "calendar_window", False) and n == 0:
+        return " (today)"
+    return f" (last {n}d)" if n > 0 else ""
+
+
 def workflow_list_scan(control_fqn: object, *, days: object = 0, max_rows: int = MAX_WORKFLOWS) -> str:
     """Distinct workflows with a run in the Window, for the runtimes picker.
 
@@ -252,7 +263,8 @@ def workflow_runtimes_scan(
     globally-newest run (back-compatible default). Per-workflow matters because each RUN_ID is
     ONE workflow's execution, so the single globally-latest run only ever shows one workflow —
     the picker lets the operator see any workflow's latest run, not just whichever finished last.
-    ``days`` (> 0) honors the scope-bar Window; ``0`` means all time. Returns one row per task:
+    ``days`` honors the scope-bar Window via ``_window_clause`` (a plain ``0`` means all time; a
+    calendar day-0 offset means today — ``window_suffix`` labels it). Returns one row per task:
     WORKFLOW_NAME, TASK_NAME, TASK_STATUS, the start/end window, and RUNTIME_SEC = end − start (a
     still-running task with a NULL end is measured to CURRENT_TIMESTAMP(), so a hung task
     surfaces), and RUN_ID (text; the same run on every row) so a drill can bind exactly the run

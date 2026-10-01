@@ -55,6 +55,9 @@ _PAGE = "Cost Intelligence"
 # genuinely wants the long window opts back in with the toggle below.
 _UNIT_COST_MAX_DAYS = 30
 
+# R1-062 review: the Serverless-tasks panel's access hint — shown under a FAILED read only.
+_SLS_ACCESS_HINT = "SERVERLESS_TASK_HISTORY may not be accessible on this account/role."
+
 
 def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     company, days = f["company"], f["days"]
@@ -653,9 +656,11 @@ def _graphs_tab(company: str, days: int, rate: float, database: str = "",
               tier="historical", source="SERVERLESS_TASK_HISTORY")
     st.markdown("**Serverless tasks (billed separately, task-day grain)**")
     # R1-062: guard() routes the empty / unavailable states through empty_state and shows the
-    # truncation line when run()'s row cap cuts the (now newest-first) task-day rows.
+    # truncation line when run()'s row cap cuts the (now newest-first) task-day rows. The access
+    # hint rides only a FAILED read: a zero-row read proves the role can see the view, so the
+    # quiet empty caption stands alone (as it did before guard()).
     if guard(sls, "No serverless task credits in this scope/window.",
-             setup_hint="SERVERLESS_TASK_HISTORY may not be accessible on this account/role."):
+             setup_hint="" if sls.ok else _SLS_ACCESS_HINT):
         sdf = sls.df.copy()
         sdf["USD"] = sdf["SERVERLESS_CREDITS"].map(lambda c: credits_to_usd(c, rate))
         styled_table(sdf, height=220, column_config={
