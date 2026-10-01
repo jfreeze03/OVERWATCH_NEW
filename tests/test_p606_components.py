@@ -8,6 +8,7 @@ pre-fix code at 04fd374e:
   R1-213  run_mart_first stamped a calendar-bounded live read as 90 days (Current year ~3x high).
   R1-214  confirm_gate returned a click from a run whose typed text no longer matched.
   R1-215  the row-click seen-guards never re-armed, so a return-then-re-click did nothing.
+  R1-216  spend_trend averaged/paced ROWS, not calendar days, and always dimmed the newest row.
 """
 
 from __future__ import annotations
@@ -306,3 +307,67 @@ def test_every_seen_guard_re_arms_before_it_checks():
         body = comp.split(fn, 1)[1].split("\ndef ", 1)[0]
         assert rearm in body and guard in body, fn
         assert body.index(rearm) < body.index(guard), fn
+
+
+# ---------------------------------------------------------------------------
+# R1-216: spend_trend's 7-day average / pace are calendar days; only today is partial
+# ---------------------------------------------------------------------------
+
+_TODAY = date(2026, 9, 30)
+
+
+def _render_trend(monkeypatch, df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+    """Run the real charts.spend_trend with st stubbed; return the frame it charted and its caption."""
+    from app.ui import charts
+    seen: dict = {}
+    caps: list[str] = []
+    real_layer = charts.alt.layer
+
+    def _layer(*layers, **kw):
+        if "data" in kw:
+            seen["data"] = kw["data"].copy()
+        return real_layer(*layers, **kw)
+
+    monkeypatch.setattr(charts, "account_today", lambda: _TODAY, raising=False)
+    monkeypatch.setattr(charts.alt, "layer", _layer)
+    monkeypatch.setattr(charts.st, "altair_chart", lambda *a, **k: None)
+    monkeypatch.setattr(charts.st, "caption", lambda msg, *a, **k: caps.append(str(msg)))
+    charts.spend_trend(df)
+    return seen["data"], caps[-1]
+
+
+def _mwf_proc() -> pd.DataFrame:
+    """A Mon/Wed/Fri proc (no row on other days): $100 per call-day, $200 from Mon Sep 21; last run Fri Sep 25."""
+    days = [d for d in pd.date_range("2026-08-31", "2026-09-25") if d.dayofweek in (0, 2, 4)]
+    return pd.DataFrame({"DAY": days, "USD": [200.0 if d >= pd.Timestamp("2026-09-21") else 100.0 for d in days]})
+
+
+def test_spend_trend_paces_a_sparse_proc_by_calendar_week(monkeypatch):
+    data, cap = _render_trend(monkeypatch, _mwf_proc())
+    # calendar weeks anchored on Fri Sep 25: Sep 19-25 = $600 vs Sep 12-18 = $300 -> +100%
+    # (the row-based pace read +29%: 7 rows of a Mon/Wed/Fri series span 2+ weeks)
+    assert "pace +100% vs the prior week" in cap
+    last = data.sort_values("Day").iloc[-1]
+    assert last["AVG7"] == pytest.approx(600 / 7, abs=0.01)      # $85.71/day over 7 CALENDAR days
+    # a Friday five days old is complete: nothing dimmed, no partial-day disclaimer
+    assert not data["PROVISIONAL"].any()
+    assert "Newest day is dimmed" not in cap
+
+
+def test_spend_trend_last_month_window_has_no_partial_day(monkeypatch):
+    days = pd.date_range("2026-08-01", "2026-08-31")
+    df = pd.DataFrame({"DAY": days, "USD": [150.0 if d >= pd.Timestamp("2026-08-25") else 100.0 for d in days]})
+    data, cap = _render_trend(monkeypatch, df)
+    assert not data["PROVISIONAL"].any()                  # Aug 31 is a closed day on Sep 30
+    assert "Newest day is dimmed" not in cap
+    assert "pace +50% vs the prior week" in cap           # Aug 25-31 vs Aug 18-24
+
+
+def test_spend_trend_dense_window_ending_today_still_dims_only_today(monkeypatch):
+    days = pd.date_range("2026-09-01", "2026-09-30")
+    df = pd.DataFrame({"DAY": days, "USD": [20.0 if d == pd.Timestamp("2026-09-30") else 100.0 for d in days]})
+    data, cap = _render_trend(monkeypatch, df)
+    assert data.loc[data["PROVISIONAL"], "Day"].dt.date.tolist() == [_TODAY]
+    assert "pace +0% vs the prior week" in cap            # today's partial $20 stays out of the pace
+    assert "Newest day is dimmed" in cap
+
