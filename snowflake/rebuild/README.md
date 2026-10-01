@@ -11,7 +11,7 @@ before moving on:
 | 01 | 01_teardown_rebuildables.sql | drops every rebuildable OVERWATCH object (operator data survives) | VERIFY select lists ONLY operator tables |
 | 02 | 02_migrations_V001_V165.sql | all 165 migrations, in order | runs to the end; halts AT the failure if any |
 | 03 | 03_roles.sql | grants incl. the V041 objects | 'roles applied' |
-| 04 | 04_backfill_365.sql | year of dailies, 90d marts (extract first) | last pane BACKFILL_CALLS_FAILED = 0 and LOADER_ARMS_FAILED = 0 (FAILURES names each one; if it stops early, run its `ALTER TASK ... TASK_LOAD_HOURLY RESUME` and `SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY')`, the two statements just above its final verify SELECT, or loader_chain_check.sql step 0) |
+| 04 | 04_backfill_365.sql | year of dailies, 90d marts (extract first), 180d security facts | last pane BACKFILL_CALLS_FAILED = 0 and LOADER_ARMS_FAILED = 0 (FAILURES names each one; if it stops early, run its `ALTER TASK ... TASK_LOAD_HOURLY RESUME` and `SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY')`, the two statements just above its final verify SELECT, or loader_chain_check.sql step 0) |
 | 05 | 05_validate.sql | post-install checks | every row OK |
 
 Then, one hour later: snowflake/loader_chain_check.sql — every task

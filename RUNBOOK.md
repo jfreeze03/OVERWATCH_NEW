@@ -142,8 +142,9 @@ Teams needs the Workflows Adaptive-Card recipe in that file, see §19),
 `native_alert_templates.sql` (CREATE ALERT equivalents if you prefer
 native alerts), `ml_forecast_option.sql` (SNOWFLAKE.ML.FORECAST engine; its
 procedure retrains the model on every run — see §7), `backfill_365.sql`
-(one-time year of daily facts — run before ACCOUNT_USAGE history ages out;
-it suspends the hourly task graph around its extract-fed loads, each load
+(one-time year of daily facts and 180 days of security facts — run before
+ACCOUNT_USAGE history ages out; it suspends the hourly task graph around its
+extract-fed loads, each load
 is guarded so an error becomes a `FAILED:` row and Run All still reaches the
 RESUME, and its last pane's `BACKFILL_CALLS_FAILED` and `LOADER_ARMS_FAILED`
 must both read 0. If the worksheet stops early (a timeout or Stop), run its

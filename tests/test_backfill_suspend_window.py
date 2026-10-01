@@ -28,8 +28,12 @@ _ROOT = Path(__file__).resolve().parents[1]
 _BF = (_ROOT / "snowflake" / "backfill_365.sql").read_text(encoding="utf-8")
 _MIGRATIONS = sorted((_ROOT / "snowflake" / "migrations").glob("V[0-9]*.sql"))
 _VERIFY = "SELECT COUNT_IF(PAGE = 'Backfill365') AS BACKFILL_CALLS_FAILED"
+# SP_LOAD_SECURITY_FACTS runs at 180, the loader's maximum (v4.606 holistic review; it was 90): the
+# new-network fact gate needs the window plus a 90-day baseline, 180 days at a 90-day window, so a
+# 90-day fill kept the panel on its live LOGIN_HISTORY scan. tests/test_backfill_security_fact_span.py
+# proves the fill against the real gate.
 _LOADS = ("SP_LOAD_QH_EXTRACT(90)", "SP_LOAD_MARTS_V27('HOURLY', 90)", "SP_LOAD_OPS_DIAG(90)",
-          "SP_LOAD_MARTS_V27('DAILY', 365)", "SP_LOAD_PLATFORM_SCORE(120)", "SP_LOAD_SECURITY_FACTS(90)")
+          "SP_LOAD_MARTS_V27('DAILY', 365)", "SP_LOAD_PLATFORM_SCORE(120)", "SP_LOAD_SECURITY_FACTS(180)")
 
 
 def _statements(text: str) -> list[str]:

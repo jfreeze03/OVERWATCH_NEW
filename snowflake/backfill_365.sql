@@ -278,26 +278,31 @@ EXCEPTION
         RETURN 'FAILED: SP_LOAD_PLATFORM_SCORE(120) - ' || emsg;
 END;
 $$;
--- V075: security detail is intentionally bounded to 90d even in the 365d pack.
+-- V075: security detail stays bounded below the 365d pack, at the loader maximum of 180 days
+-- (v4.606; it was 90). FACT_SECURITY_LOGIN_DAILY keeps 180 days, and the Security page serves the
+-- new-network fact only when it is dense over the window plus the 90-day baseline before it (180
+-- days at a 90-day window). A 90-day fill failed that gate for every window until the hourly task
+-- had added the missing days, so the page fell back to a live LOGIN_HISTORY scan of up to 180 days.
+-- The 180-day call also reloads FACT_SECURITY_CHANGE from 180 days of QUERY_HISTORY (one-time).
 EXECUTE IMMEDIATE $$
 DECLARE
     rv VARCHAR;
     emsg VARCHAR;
 BEGIN
-    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_SECURITY_FACTS(90);
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_SECURITY_FACTS(180);
     SELECT $1 INTO :rv FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
     IF (rv IS NULL OR rv ILIKE 'MARTS WITH ERRORS%' OR rv ILIKE '%extract committed: false%') THEN
         INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
-        SELECT 'Backfill365', 'backfill_verdict_failed', LEFT(COALESCE(:rv, 'no verdict returned'), 2000), 'SP_LOAD_SECURITY_FACTS(90)', CURRENT_ROLE();
-        RETURN 'FAILED: SP_LOAD_SECURITY_FACTS(90) -> ' || COALESCE(rv, 'no verdict returned');
+        SELECT 'Backfill365', 'backfill_verdict_failed', LEFT(COALESCE(:rv, 'no verdict returned'), 2000), 'SP_LOAD_SECURITY_FACTS(180)', CURRENT_ROLE();
+        RETURN 'FAILED: SP_LOAD_SECURITY_FACTS(180) -> ' || COALESCE(rv, 'no verdict returned');
     END IF;
-    RETURN 'ok: SP_LOAD_SECURITY_FACTS(90) -> ' || rv;
+    RETURN 'ok: SP_LOAD_SECURITY_FACTS(180) -> ' || rv;
 EXCEPTION
     WHEN OTHER THEN
         emsg := SQLERRM;
         INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
-        SELECT 'Backfill365', 'backfill_call_failed', LEFT(:emsg, 2000), 'SP_LOAD_SECURITY_FACTS(90)', CURRENT_ROLE();
-        RETURN 'FAILED: SP_LOAD_SECURITY_FACTS(90) - ' || emsg;
+        SELECT 'Backfill365', 'backfill_call_failed', LEFT(:emsg, 2000), 'SP_LOAD_SECURITY_FACTS(180)', CURRENT_ROLE();
+        RETURN 'FAILED: SP_LOAD_SECURITY_FACTS(180) - ' || emsg;
 END;
 $$;
 -- Optional full-year sweep for the cheap daily marts (wh efficiency, graphs)
