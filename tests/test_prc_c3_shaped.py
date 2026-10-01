@@ -1,5 +1,5 @@
-"""PR C slice C3 on rendered pages (AppTest, streamlit >= 1.55 like the rest of the shaped harness; the floor
-leg skips these, and tests/test_triage_track.py + tests/test_optimize_queue.py lock the same wiring by source):
+"""PR C slice C3 on rendered pages (AppTest over the shaped harness, both CI legs;
+tests/test_triage_track.py + tests/test_optimize_queue.py also lock the same wiring by source):
 
   (a) Action Center with *Include completed work*: completed warehouse / task items carry a measured Held?
       label, the signals read fires, and the selected DONE item shows its outcome chip + basis caption.
@@ -19,7 +19,6 @@ from datetime import timedelta
 import pandas as pd
 import pytest
 from test_pages_shaped import (  # noqa: F401 - _stub_shaped is the harness's autouse fixture
-    _APPTEST_BUTTONGROUP_OK,
     _entry,
     _nav_to,
     _shaped_batch,
@@ -32,8 +31,6 @@ from streamlit.testing.v1 import AppTest
 
 from app.core.result import QueryResult
 from app.logic.formulas import account_today
-
-_SKIP = pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 
 
 def _blob(at) -> str:
@@ -53,7 +50,6 @@ def _signals(kind: str, key: str, done, before: float, after: float, col: str = 
     return pd.DataFrame(rows)
 
 
-@_SKIP
 def test_action_center_completed_work_carries_held(monkeypatch):
     from app.ui import workbench
 
@@ -110,7 +106,6 @@ def test_action_center_completed_work_carries_held(monkeypatch):
     assert "Measured since it was marked done:" in blob
 
 
-@_SKIP
 def test_entity_360_work_and_outcomes_carries_held(monkeypatch):
     from app.ui import workbench
 
@@ -147,7 +142,6 @@ def test_entity_360_work_and_outcomes_carries_held(monkeypatch):
     assert "Newest completed item — Held? Held 19 days" in _blob(at)
 
 
-@_SKIP
 def test_control_room_triage_ranks_unowned_first_and_offers_track():
     at = AppTest.from_function(_entry, default_timeout=60)
     at.run()
@@ -166,7 +160,6 @@ def test_control_room_triage_ranks_unowned_first_and_offers_track():
     assert "Track" in [str(b.label) for b in at.button]
 
 
-@_SKIP
 def test_optimize_done_family_that_never_held_reads_not_fixed(monkeypatch):
     from app.ui.pages.ops_parts import optimize_queue
 
@@ -227,7 +220,6 @@ def _triage_signals(done) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-@_SKIP
 def test_action_center_triage_items_read_held_on_their_own_signal(monkeypatch):
     """review C4: before the fix both rows read 'Not fixed' (the spike on the 20%-drop level rule, the failure
     burst on its unchanged P95) and the detail told the operator to reopen correctly-fixed work."""
@@ -272,7 +264,6 @@ def test_action_center_triage_items_read_held_on_their_own_signal(monkeypatch):
     assert "3 failed of 8,064 runs in the 28 days before" in blob
 
 
-@_SKIP
 def test_entity_360_judges_a_triage_item_on_its_own_signal(monkeypatch):
     """review C4 on Entity 360: related_actions now carries SOURCE, so a resolved triage spike reads Held (the
     level rule read this quiet warehouse 'Not fixed': spend never fell 20% because it was never meant to)."""

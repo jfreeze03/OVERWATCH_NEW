@@ -1,9 +1,9 @@
-"""Next-Fifty #31 on the rendered Proof page (AppTest, streamlit >= 1.55 like the rest of the shaped harness):
+"""Next-Fifty #31 on the rendered Proof page (AppTest over the shaped harness, both CI legs):
 the "Saved to date" card renders beside the run-rate under production-SHAPED data, and a ledger whose every
 verified item was later undone reads the all-reverted caption + the Reverted savings list — never "No
 savings verified yet" — with the accrued card still disclosing its split.
 
-Review r1 (the floor venv skips these; tests/test_saved_to_date.py locks the same wiring by source):
+Review r1 (tests/test_saved_to_date.py also locks the same wiring by source):
   F25 — the shaped render asserts text ONLY the Saved to date card emits (its title, its "accrued" chip, its
         delta), so deleting the card fails it; the run-rate card's help also names "Saved to date".
   F2/F6/F21 — a $0 accrual beside a verified run-rate reads "nothing accrued yet", not "nothing verified yet".
@@ -19,7 +19,6 @@ from datetime import date
 import pandas as pd
 import pytest
 from test_pages_shaped import (  # noqa: F401 - _stub_shaped is the harness's autouse fixture
-    _APPTEST_BUTTONGROUP_OK,
     _entry,
     _nav_to,
     _shaped_batch,
@@ -32,14 +31,11 @@ from streamlit.testing.v1 import AppTest
 
 from app.core.result import QueryResult
 
-_SKIP = pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
-
 
 def _blob(at) -> str:
     return " ".join(str(m.value) for m in at.markdown) + " " + " ".join(str(c.value) for c in at.caption)
 
 
-@_SKIP
 def test_proof_renders_saved_to_date_shaped():
     at = AppTest.from_function(_entry, default_timeout=30)
     at.run()
@@ -88,7 +84,6 @@ def _reverted_summary() -> pd.DataFrame:
         "SAVED_SINCE_DATE": date(2026, 6, 1)}])
 
 
-@_SKIP
 def test_all_reverted_ledger_reads_honestly(monkeypatch):
     import app.ui.decision_studio as ds
 
@@ -158,7 +153,6 @@ def _old_kept_row() -> dict:
             "SOURCE_CHANGE_ID": None, "TARGET_OBJECT": "WH_S", "REVERTED_AT": None}
 
 
-@_SKIP
 def test_old_item_plus_recent_undone_item_names_the_undo(monkeypatch):
     # F3/F5: verified_count (kept) = 1 old item, and the one item verified inside the window was undone
     ledger = pd.DataFrame([*_reverted_ledger().to_dict("records"), _old_kept_row()])
@@ -169,7 +163,6 @@ def test_old_item_plus_recent_undone_item_names_the_undo(monkeypatch):
     assert "none verified in the last" not in blob
 
 
-@_SKIP
 def test_reverted_count_is_the_sql_figure_and_the_pointer_needs_the_list(monkeypatch):
     # F7: the uncapped SQL says 2 undone items left the run-rate; the (capped) ledger frame holds none of them.
     # The delta carries the SQL count, and the caption does not point at a list that is not there.
@@ -183,7 +176,6 @@ def test_reverted_count_is_the_sql_figure_and_the_pointer_needs_the_list(monkeyp
     assert not [e for e in at.expander if str(e.label).startswith("Reverted savings")]
 
 
-@_SKIP
 def test_truncated_ledger_qualifies_the_reverted_list(monkeypatch):
     # F7: the list reads the row-capped frame -> its title says "newest ledger rows" when truncated
     at = _render(monkeypatch, _reverted_ledger(), _reverted_summary(), truncated=True)

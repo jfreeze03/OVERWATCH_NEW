@@ -11,7 +11,6 @@ import pandas as pd
 import pytest
 
 st = pytest.importorskip("streamlit")
-from packaging.version import parse as _parse_version  # noqa: E402
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
 from app.config import PAGES_BY_PROFILE  # noqa: E402
@@ -26,11 +25,9 @@ _PAGES = PAGES_BY_PROFILE["DBA"]
 # `ValueError: content: "S" is not in list` before the app's own nav logic ever runs. The
 # app renders correctly at runtime on those versions; only the test harness mis-introspects.
 # Fixed in streamlit 1.55.0 (verified by bisect: 1.54.0 fails, 1.55.0 passes). The
-# floor-compat CI job pins streamlit==1.52.2 (still < 1.55.0), and only the multi-run
-# nav test below trips it (the 2-run test_each_page_renders survives). Guarding just
-# that test keeps the floor gate green while the test still runs on the modern
-# lint-and-test job and locally.
-_APPTEST_BUTTONGROUP_OK = _parse_version(st.__version__) >= _parse_version("1.55.0")
+# floor-compat CI job pins streamlit==1.52.2 (still < 1.55.0). The multi-run nav test
+# below was once skipped there; tests/conftest.py now back-ports the 1.55 fix onto the
+# floor harness, so every AppTest here (and the shaped suites) runs on both CI legs.
 
 
 def _fake_run(*_args, **kwargs):
@@ -102,6 +99,11 @@ def _ss(at, key):
     return at.session_state[key] if key in at.session_state else None  # noqa: SIM401
 
 
+def _caught_render_error(at) -> bool:
+    """True when app.core.errors.safe_page caught a body exception (it renders st.error, not a raise)."""
+    return any("could not finish rendering" in str(getattr(e, "value", "")) for e in at.error)
+
+
 def _selected_pages(at, current: str) -> set:
     """The live per-group radios are keyed `_ow_nav_{group}_{current}`; exactly one
     should hold a page. (Reading session_state sidesteps AppTest's KeyError on
@@ -115,11 +117,6 @@ def _selected_pages(at, current: str) -> set:
     return sel
 
 
-@pytest.mark.skipif(
-    not _APPTEST_BUTTONGROUP_OK,
-    reason="streamlit<1.55 AppTest ButtonGroup single-select bug char-iterates the section "
-    "switcher's scalar value; app is correct at runtime, harness fixed in streamlit 1.55.0",
-)
 def test_nav_single_select_across_groups():
     # multi-select bug: clicking a page in a DIFFERENT group (Analyze) than the current
     # one (Watch) must navigate AND leave exactly ONE group highlighted — the old
@@ -147,6 +144,8 @@ def test_each_page_renders(page):
     _nav_to(at, page)
     at.run()
     assert not at.exception, f"{page}: {at.exception}"
+    # safe_page turns a body exception into an st.error, so `not at.exception` alone misses it
+    assert not _caught_render_error(at), f"{page}: the safe_page boundary caught a render error"
     # honest-empty pattern: the page produced *some* content, not a blank body
     assert at.title or at.markdown, page
 
@@ -165,3 +164,4 @@ def test_scope_pages_render_with_last_month_selected(page):
     _nav_to(at, page)
     at.run()
     assert not at.exception, f"{page} (Last month): {at.exception}"
+    assert not _caught_render_error(at), f"{page} (Last month): the safe_page boundary caught a render error"

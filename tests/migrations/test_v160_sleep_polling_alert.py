@@ -15,7 +15,8 @@ clear text lives in its own module. What this file proves, from the shipped text
   * the DEDUPE_KEY suffix parsing (SUBSTR -16/6, -15/5, LENGTH - 15/14) holds on MED and HIGH keys built in
     Python, TITLE carries exactly one '$', DETAIL / TITLE are LEFT-bounded to the ALERT_EVENTS widths;
   * the RUN_NEXT PART B GET_DDL fragments (spec 3.7 V160.2 / V160.3);
-  * the v4.596.0 app lockstep (playbook, navigation, Admin, validate floor, docs, teardown, RUNBOOK).
+  * the v4.596.0 app lockstep (playbook, navigation, Admin, docs, teardown, RUNBOOK); the validate tip is
+    derived in tests/test_release_lockstep.py.
 """
 
 from __future__ import annotations
@@ -914,8 +915,9 @@ def test_v160_part_b_get_ddl_fragments():
     assert "/11 rule blocks ok" in body157 and "SP_SCAN_SLEEP_POLLING" not in body157
 
 
-# -- app lockstep (v4.596.0). These complete when the lead's lockstep lands: playbooks, navigate, Admin,
-#    snowflake/validate.sql, snowflake/teardown.sql, DEPLOYMENT.md, README.md, RUNBOOK.md.
+# -- app lockstep (v4.596.0, landed with the lead's lockstep): playbooks, navigate, Admin,
+#    snowflake/teardown.sql, DEPLOYMENT.md, README.md, RUNBOOK.md; the validate tip is derived in
+#    tests/test_release_lockstep.py.
 
 def test_v160_playbook():
     from app.logic.playbooks import PLAYBOOKS, playbook_for

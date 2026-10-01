@@ -233,7 +233,7 @@ def test_pipeline_counts_unread_only_from_the_session_handoff():
 
 
 def test_pipeline_headline_follows_the_levers_counted():
-    """R1-15 / R1-22 (the floor leg skips the shaped twin in tests/test_prc_c2_shaped.py): the Addressable $/mo
+    """R1-15 / R1-22 (the shaped twin is in tests/test_prc_c2_shaped.py): the Addressable $/mo
     headline is gated on the rollup's items, not on the idle read alone, so it never shows a dash beside a
     'Levers counted: unread maintenance' caption and a projection carrying those dollars. A failed or empty idle
     read is named in the delta; the dash stays only when no counted lever has an item (review r2 R2-5: a lever

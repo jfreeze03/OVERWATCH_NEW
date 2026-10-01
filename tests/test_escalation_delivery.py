@@ -15,7 +15,6 @@ import re
 import pandas as pd
 import pytest
 from test_pages_shaped import (  # noqa: F401 - _stub_shaped is the harness's autouse fixture
-    _APPTEST_BUTTONGROUP_OK,
     _entry,
     _nav_to,
     _shaped_run,
@@ -24,8 +23,6 @@ from test_pages_shaped import (  # noqa: F401 - _stub_shaped is the harness's au
 
 from app.data import mart_sql
 from tests._source import page_source
-
-_SKIP = pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 
 
 def _latest_notifier() -> str:
@@ -178,7 +175,6 @@ def _native_delivery(monkeypatch, applied: bool):
     return at, seen
 
 
-@_SKIP
 def test_native_delivery_states_the_policy_once_v164_is_applied(monkeypatch):
     at, seen = _native_delivery(monkeypatch, applied=True)
     assert sum("ACTION = 'ESCALATE'" in s for s in seen) == 1
@@ -189,7 +185,6 @@ def test_native_delivery_states_the_policy_once_v164_is_applied(monkeypatch):
     assert "**Routing (family → channel)**" in text
 
 
-@_SKIP
 def test_native_delivery_says_nothing_about_escalation_before_v164(monkeypatch):
     at, seen = _native_delivery(monkeypatch, applied=False)
     assert not any("ACTION = 'ESCALATE'" in s for s in seen)            # no read before the apply

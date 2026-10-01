@@ -13,9 +13,7 @@ import pytest
 
 st = pytest.importorskip("streamlit")
 import usage_sim  # noqa: E402
-from packaging.version import parse as _parse_version  # noqa: E402
 
-_APPTEST_BUTTONGROUP_OK = _parse_version(st.__version__) >= _parse_version("1.55.0")
 _SUBSET = ["Brief", "Overview", "Operations", "Security"]
 
 
@@ -55,7 +53,6 @@ def test_patched_module_set_covers_the_pages():
     assert expected <= names, f"unpatched modules: {expected - names}"
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_simulate_renders_pages_and_records_reads():
     report = usage_sim.simulate(pages=_SUBSET, scopes={"default": {}}, measure_rerun=False)
     flows = report["flows"]
@@ -74,7 +71,6 @@ def test_simulate_renders_pages_and_records_reads():
     assert by_page["Operations"]["total"] > 0
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_filter_rerun_stays_within_budget():
     """R41: a whole-script rerun from a filter tweak (no navigation) must not amplify the
     per-interaction read count — the core Streamlit rerun concern. Exercises the previously
@@ -94,7 +90,6 @@ def test_filter_rerun_stays_within_budget():
         f"filter-tweak rerun ({tweak['total']}) amplified vs nav ({nav['total']})")
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_report_formats_without_error():
     report = usage_sim.simulate(pages=["Brief"], scopes={"default": {}}, measure_rerun=False)
     text = usage_sim.format_report(report)
@@ -138,7 +133,6 @@ def test_first_paint_budget_covers_every_dba_page():
     assert set(_FIRST_PAINT_BUDGET) == set(usage_sim.DEFAULT_PAGES)
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_first_paint_reads_stay_within_budget(_all_pages_report):
     flows = _all_pages_report["flows"]
     assert {f["page"] for f in flows} == set(_FIRST_PAINT_BUDGET)

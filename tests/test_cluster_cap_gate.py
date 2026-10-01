@@ -600,7 +600,7 @@ def test_resize_picker_opens_on_nothing_where_no_size_up_is_offered():
 
 
 def test_the_resize_pane_shows_nothing_until_a_size_is_picked():
-    """Review r2 R2-2 (the floor leg skips the AppTest twin in tests/test_cluster_cap_shaped.py): with no size
+    """Review r2 R2-2 (the AppTest twin is in tests/test_cluster_cap_shaped.py): with no size
     picked, the pane renders no statement, no saving caption and no Execute; the picker default can be None."""
     import ast
 

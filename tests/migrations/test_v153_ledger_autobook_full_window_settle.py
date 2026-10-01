@@ -284,8 +284,8 @@ def test_app_remeasure_mirrors_the_proc_gate_rn_rate_and_volume():
     assert ">= 5," in sql.split("AS REMEASURED_14D_MONTHLY_USD", 1)[0].rsplit("AS MEASURED_AFTER_DAYS", 1)[1]
 
 
-# --- lockstep (pinned to the WAVE TIP V154; these fail on the slice branch until the integrator lands
-# --- validate.sql / DEPLOYMENT.md / README.md / admin._EXPECTED_MIGRATIONS for the whole wave) ----------
+# --- lockstep: this migration's DEPLOYMENT.md/README.md run-doc line and its admin _EXPECTED_MIGRATIONS
+# --- entry (landed by the wave-2a integrator); the validate tip is derived in tests/test_release_lockstep.py
 def test_validate_and_docs_track_v153():
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert _NAME in _read(rel), rel

@@ -708,8 +708,9 @@ def test_v162_runbook_rollback_clears_the_identity_events_before_v154_returns():
     assert stmt.key == "update"
 
 
-# -- integration lockstep (validate / docs / Admin). Completed by the wave-4 integrator: snowflake/validate.sql,
-#    DEPLOYMENT.md, README.md and admin._EXPECTED_MIGRATIONS are shared files a single slice does not edit.
+# -- integration lockstep (docs / Admin), landed by the wave-4 integrator: DEPLOYMENT.md, README.md and
+#    admin._EXPECTED_MIGRATIONS are shared files a single slice does not edit; the validate tip is derived
+#    in tests/test_release_lockstep.py.
 
 def test_validate_and_docs_track_v162():
     for rel in ("DEPLOYMENT.md", "README.md"):

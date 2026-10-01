@@ -16,7 +16,6 @@ from app.core.result import QueryResult
 
 st = pytest.importorskip("streamlit")
 from tests.test_pages_shaped import (  # noqa: E402,F401  (autouse fixture: shaped reads everywhere)
-    _APPTEST_BUTTONGROUP_OK,
     _entry,
     _nav_to,
     _shaped_run,
@@ -58,7 +57,6 @@ def _text(elements) -> str:
     return " | ".join(str(e.value) for e in elements)
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 @pytest.mark.parametrize("kind", ["timeout", "missing_column", "other"])
 def test_failed_notebook_read_is_not_reported_as_no_rows(monkeypatch, kind):
     at = _drill(monkeypatch, QueryResult(ok=False, error=f"boom ({kind})", error_kind=kind))
@@ -67,14 +65,12 @@ def test_failed_notebook_read_is_not_reported_as_no_rows(monkeypatch, kind):
     assert "the notebook-runtime read (NOTEBOOKS_CONTAINER_RUNTIME_HISTORY) failed" in _text(at.error)
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_unreadable_notebook_view_is_needs_setup(monkeypatch):
     at = _drill(monkeypatch, QueryResult(ok=False, error="boom (privilege)", error_kind="privilege"))
     assert "NOTEBOOKS_CONTAINER_RUNTIME_HISTORY, which isn't readable" in _text(at.info)
     assert _NO_ROWS not in _text(at.info) + _text(at.caption)
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_an_empty_notebook_feed_still_says_no_rows(monkeypatch):
     at = _drill(monkeypatch, QueryResult(df=pd.DataFrame(), ok=True, source="stub"))
     assert _NO_ROWS in _text(at.caption)                 # quiet no_data_yet, not a blue info banner
@@ -86,7 +82,6 @@ def _ordered(at, *types: str) -> list[tuple[str, str]]:
     return [(e.type, str(getattr(e, "value", ""))) for e in at.main if e.type in types]
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 @pytest.mark.parametrize("kind", ["timeout", "other"])
 def test_failed_notebook_error_sits_under_the_notebook_subset_heading(monkeypatch, kind):
     """R1-118 follow-up: the drill's 'failed' line points the reader to the error 'under Notebook subset

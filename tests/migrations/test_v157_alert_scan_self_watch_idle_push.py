@@ -1862,9 +1862,9 @@ def test_v157_part_b_get_ddl_fragments_are_in_the_procs():
     assert _H.count("IF (MOD(ct_hour, 4) = 1) THEN") == 4 and _H.count("IF (MOD(ct_hour, 3) = 2) THEN") == 1
 
 
-# -- integration lockstep (validate floor / docs / Admin). Pinned to the WAVE TIP V158; these are completed
-#    by the wave-2b integrator (snowflake/validate.sql, DEPLOYMENT.md, README.md and
-#    admin._EXPECTED_MIGRATIONS are shared files a single slice does not edit).
+# -- integration lockstep: this migration's DEPLOYMENT.md/README.md run-doc line and its admin
+#    _EXPECTED_MIGRATIONS entry, landed by the wave-2b integrator (shared files a single slice does not
+#    edit); the validate tip is derived in tests/test_release_lockstep.py.
 
 def test_validate_and_docs_track_v157():
     for rel in ("DEPLOYMENT.md", "README.md"):

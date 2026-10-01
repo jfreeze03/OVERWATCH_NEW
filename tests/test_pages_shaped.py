@@ -24,14 +24,11 @@ import pandas as pd
 import pytest
 
 st = pytest.importorskip("streamlit")
-from packaging.version import parse as _parse_version  # noqa: E402
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
 from app.config import PAGES_BY_PROFILE  # noqa: E402
 from app.core.result import QueryResult  # noqa: E402
 from tests._source import migration_tip  # noqa: E402
-
-_APPTEST_BUTTONGROUP_OK = _parse_version(st.__version__) >= _parse_version("1.55.0")
 
 # Every DBA page, rendered with SHAPED (non-empty, correctly-typed) data so the
 # populated column-indexing branches actually execute — not just the empty branches.
@@ -223,7 +220,6 @@ def test_batched_stubs_shape_every_member():
     assert list(mf2.df.columns) == ["QUX"]
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 @pytest.mark.parametrize("page", _SHAPED_PAGES)
 def test_pages_render_with_shaped_data(page):
     at = AppTest.from_function(_entry, default_timeout=25)
@@ -236,10 +232,12 @@ def test_pages_render_with_shaped_data(page):
     # gate bypass held and the populated branches actually ran)
     assert not any("migrated through" in str(getattr(e, "value", "")) for e in at.error), \
         f"{page}: schema gate blocked the render"
+    # safe_page turns a body exception into an st.error, so `not at.exception` alone misses it
+    assert not any("could not finish rendering" in str(getattr(e, "value", "")) for e in at.error), \
+        f"{page}: the safe_page boundary caught a render error"
     assert at.title or at.markdown, page
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_operations_warehouses_sizing_lens_renders_shaped():
     """deferred-item (Warehouses sub-nav): the tab's SECOND nested lens ('Sizing &
     efficiency') is not the default, so test_pages_render_with_shaped_data only ever
@@ -268,7 +266,6 @@ def test_operations_warehouses_sizing_lens_renders_shaped():
     assert "Adaptive-compute candidacy" in blob, "adaptive-candidacy panel did not paint"
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_cost_chargeback_section_renders_shaped():
     """#42 Part 1: Cost > Chargeback & AI is not the default section, so the page sweep never paints
     it. Drive it under shaped data so Department chargeback, the Company all-in showback (its batched
@@ -287,7 +284,6 @@ def test_cost_chargeback_section_renders_shaped():
     assert "Department chargeback" in blob and "Query-tag governance" in blob
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_operations_optimize_renders_shaped():
     """v4.597 (Option C): Operations > Optimize is not the default section, so the page sweep never
     paints it. Drive it with the live-profile toggle ON, an operator role and a selected family, so
@@ -312,7 +308,6 @@ def test_operations_optimize_renders_shaped():
     assert "Track" in labels, "the operator Track button did not render in the detail pane"
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_operations_optimize_failed_tracked_read_is_unknown(monkeypatch):
     """Review r2: when the Action Center status read FAILS, the queue says so, shows every family as
     Unknown (not Untracked) and holds Track all at 0 -- it never states tracking facts it could not read."""
@@ -342,7 +337,6 @@ def test_operations_optimize_failed_tracked_read_is_unknown(monkeypatch):
     assert "Track all ACT NOW (0)" in labels, labels
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_etl_configured_morning_surfaces_render(monkeypatch):
     """Next-Fifty #1: with the default (empty) ETL_CONTROL_STATUS_FQN the whole-night glance, the
     Brief tile's populated branches and the shared attention verdict stay dormant. Configure it and
@@ -373,7 +367,6 @@ def test_etl_configured_morning_surfaces_render(monkeypatch):
     assert "Built-in objectives" in blob, "the built-in objectives panel did not paint on Tonight"
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_proof_sections_render_shaped():
     """v4.597 (Option C): drive BOTH Proof sections under shaped data — the merged Proof tab (hero,
     run-rate, per-item evidence + the SQL attribution split) and the Pipeline tab with right-sizing
@@ -430,7 +423,6 @@ def _texts(at) -> str:
                     + list(at.info) + list(at.error))
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_admin_migrations_task_health_renders_shaped(monkeypatch):
     """v4.599 (#26): Migrations & freshness with Task health switched ON. Under the shaped stub the SHOW
     TASKS read parses as a Command (no columns -> empty frame), which exercises the NOT_VISIBLE branch;
@@ -470,7 +462,6 @@ def test_admin_migrations_task_health_renders_shaped(monkeypatch):
         "the graded task table did not render"
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 # v4.599 (#50/#47): the 'Section visits' and 'Ask demand' panels (admin._usage_detail_panels).
 def test_admin_performance_usage_panels_render_shaped():
     """v4.599: Admin > Performance under shaped data paints the new usage panels (Section visits,
@@ -492,7 +483,6 @@ def _nav_context(at) -> dict:
 _EVIDENCE_MARK = "ON k.SESSION_ID = c.SESSION_ID"     # only etl_control_sql.run_task_evidence_scan emits it
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_task_evidence_drill_renders_shaped_and_is_off_by_default(monkeypatch):
     """Next-Fifty #14 Ph1: Operations ▸ Pipeline SLA ▸ Tonight with the ETL tables configured. Off by
     default, neither 'Explain a task' drill reads (or renders its picker); switched on at both sites
@@ -544,7 +534,6 @@ def test_task_evidence_drill_renders_shaped_and_is_off_by_default(monkeypatch):
     assert any("Failed:" in str(e.value) for e in at.error), [str(e.value) for e in at.error]
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_queries_opportunity_row_opens_in_optimize(monkeypatch):
     """#28: select a row on Operations ▸ Queries' opportunity board, click "Open in Optimize →": the SAME
     family lands selected on Operations ▸ Optimize with the live profile on (its diagnosis matches the QOP
@@ -582,7 +571,6 @@ def test_queries_opportunity_row_opens_in_optimize(monkeypatch):
     assert "from the live query profile" in blob, "the landing diagnosis is not the live one"
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_optimize_names_a_family_it_does_not_queue():
     """#28: a deep link to a family the fix queue does not list lands with an explanation in the empty
     detail pane (not a previously selected, unrelated family), is consumed on arrival, and the notice is
@@ -607,7 +595,6 @@ def test_optimize_names_a_family_it_does_not_queue():
     assert "is not in this fix queue" not in _texts(at), "the notice lingered past its arrival"
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_optimize_keeps_a_deep_link_through_a_failed_queue_read(monkeypatch):
     """#28: when the fix-queue read fails, Optimize returns at its guard BEFORE consuming the link, so the
     deep-linked family (and its one-shot live_profile) still land on the next successful rerun."""
@@ -642,7 +629,6 @@ def test_optimize_keeps_a_deep_link_through_a_failed_queue_read(monkeypatch):
     assert "First fix:" in " ".join(str(m.value) for m in at.markdown)
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_optimize_consumes_and_explains_a_deep_link_into_an_empty_queue(monkeypatch):
     """#28 (review F23): the queue read SUCCEEDS but lists no family in this Company and Window. The link is
     used up on arrival (fingerprint AND the one-shot live_profile, so no live scan switches on later), and

@@ -1,4 +1,4 @@
-"""PR C slice C1 on the RENDERED pages (AppTest, streamlit >= 1.55 like the rest of the shaped harness):
+"""PR C slice C1 on the RENDERED pages (AppTest over the shaped harness, both CI legs):
 
   (a) Operations ▸ Warehouses ▸ Sizing & efficiency with the statement-timeout toggle ON paints the posture
       panel and a review-only script that tightens ONLY the uncapped warehouse (Next-Fifty #33);
@@ -8,8 +8,8 @@
   (d) Cost ▸ Remediation & ledger: an ESTIMATED schedule item paints its measured before/after and the
       verify amount is prefilled from it (#46(d)).
 
-The floor venv skips these (_APPTEST_BUTTONGROUP_OK); tests/test_stmt_timeout.py, tests/test_ledger_measure.py
-and tests/test_sizing_scale_split.py lock the same wiring by source and pure behaviour."""
+tests/test_stmt_timeout.py, tests/test_ledger_measure.py and tests/test_sizing_scale_split.py also lock the
+same wiring by source and pure behaviour."""
 
 from __future__ import annotations
 
@@ -18,7 +18,6 @@ from datetime import date
 import pandas as pd
 import pytest
 from test_pages_shaped import (  # noqa: F401 - _stub_shaped is the harness's autouse fixture
-    _APPTEST_BUTTONGROUP_OK,
     _entry,
     _nav_to,
     _shaped_batch,
@@ -34,8 +33,6 @@ from streamlit.testing.v1 import AppTest
 from app.core.result import QueryResult
 from app.data import mart_sql
 from app.logic.stmt_timeout import CAP_LADDER_S
-
-_SKIP = pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 
 
 def _ok(df: pd.DataFrame) -> QueryResult:
@@ -131,7 +128,6 @@ def _amount_input(at):
     return found[0]
 
 
-@_SKIP
 def test_statement_timeout_posture_renders_and_scripts_only_the_uncapped_warehouse(monkeypatch):
     seen = _ops_recorder(monkeypatch)
     at = AppTest.from_function(_entry, default_timeout=30)
@@ -154,7 +150,6 @@ def _card(blob: str, title: str) -> str:
     return blob[at_title:nxt if nxt > 0 else at_title + 3000]
 
 
-@_SKIP
 def test_statement_timeout_account_zero_reads_as_the_seven_day_max(monkeypatch):
     """Review C15/C20: ALTER ACCOUNT SET STATEMENT_TIMEOUT_IN_SECONDS = 0 enforces the 7-day maximum; the
     'Account value' tile shows 168h (and says why), never '0s' beside the uncapped caption."""
@@ -167,7 +162,6 @@ def test_statement_timeout_account_zero_reads_as_the_seven_day_max(monkeypatch):
     assert "The account value is also 48 hours or more" in blob
 
 
-@_SKIP
 def test_statement_timeout_company_scope_with_a_failed_tail_is_unavailable(monkeypatch):
     """Review C16: under a company scope the warehouse list IS the runtime tail; when that read fails the
     panel says the read failed (the red 'unavailable' state), not that the scope returned none."""
@@ -179,7 +173,6 @@ def test_statement_timeout_company_scope_with_a_failed_tail_is_unavailable(monke
     assert "returned none" not in _blob(at)
 
 
-@_SKIP
 def test_statement_timeout_managed_compute_and_fired_below_cap_name_their_cause(monkeypatch):
     """#33 D4/D5 on the rendered panel: a COMPUTE_SERVICE_WH* pool SHOW never lists is Managed compute (its own
     caption, not the 'dropped, renamed, or not visible' one), and a cancel that fired below the effective cap
@@ -199,7 +192,6 @@ def test_statement_timeout_managed_compute_and_fired_below_cap_name_their_cause(
     assert "at whichever ceiling was lowest for that statement" in _card(blob, "Timed out (30d)")
 
 
-@_SKIP
 def test_statement_timeout_reads_wait_for_the_toggle(monkeypatch):
     seen = _ops_recorder(monkeypatch)
     at = AppTest.from_function(_entry, default_timeout=30)
@@ -211,7 +203,6 @@ def test_statement_timeout_reads_wait_for_the_toggle(monkeypatch):
     assert not at.code or all("STATEMENT_TIMEOUT_IN_SECONDS" not in str(c.value) for c in at.code)
 
 
-@_SKIP
 def test_cost_optimize_sizing_profile_renders_shaped():
     """Next-Fifty #38: Cost > Optimization & Savings > Idle & sizing with the heavy sizing toggle ON
     paints the split verdict caption (add-a-cluster / size-up) from the shaped profile."""
@@ -250,7 +241,6 @@ def _measurement() -> pd.DataFrame:
                           "LOADED_THROUGH": date(2026, 9, 27)}])
 
 
-@_SKIP
 def test_ledger_verify_prefills_the_measured_saving(monkeypatch):
     import app.ui.pages.cost_parts.optimize as opt
 
@@ -356,7 +346,6 @@ def _prefill_for(after_credits: float) -> float:
     return round((1400.0 / 14 - after_credits / 30) * 30 * 3.68, 2)
 
 
-@_SKIP
 def test_ledger_prefill_rearms_after_leaving_and_returning(monkeypatch):
     """C12: leaving Remediation & ledger drops the number_input's widget state; the prefill must re-arm on
     the way back instead of rendering 0 under a 'Measured saving / mo' KPI that says it was prefilled."""
@@ -374,7 +363,6 @@ def test_ledger_prefill_rearms_after_leaving_and_returning(monkeypatch):
     assert f"VERIFIED_USD = {expected}" in page.update_sql()
 
 
-@_SKIP
 def test_ledger_prefill_never_overwrites_an_edit_when_the_measurement_moves(monkeypatch):
     """C17: an operator's typed amount survives the measurement moving (the daily load landing), both on
     the next render and in the UPDATE the Verify click executes."""
@@ -398,7 +386,6 @@ def test_ledger_prefill_never_overwrites_an_edit_when_the_measurement_moves(monk
     assert page.verify_updates() == [shown]
 
 
-@_SKIP
 def test_ledger_verify_click_writes_exactly_what_was_shown_when_the_measurement_moves(monkeypatch):
     """C17: the measurement moves between the render and the Verify click (untouched prefill). The click's
     rerun must write the UPDATE st.code showed -- the same VERIFIED_USD and the same PROOF_RESULT --
@@ -435,7 +422,6 @@ def _other_row(item_id: str, *, finding: str, source: str, state: str, created: 
     return df
 
 
-@_SKIP
 def test_ledger_verify_is_not_prefilled_when_another_change_on_the_warehouse_overlaps(monkeypatch):
     """C22: a settled AUTO_SUSPEND change on WH_A three days after this SCHEDULE booking sits inside its
     measured window: the warehouse delta is not this item's alone, so the amount is not prefilled and the

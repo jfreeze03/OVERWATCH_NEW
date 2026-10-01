@@ -17,7 +17,6 @@ from streamlit.testing.v1 import AppTest  # noqa: E402
 
 from app.core.result import QueryResult  # noqa: E402
 from tests.test_pages_shaped import (  # noqa: E402, F401  (_stub_shaped: the harness's autouse stub fixture)
-    _APPTEST_BUTTONGROUP_OK,
     _entry,
     _nav_to,
     _shaped_batch,
@@ -108,7 +107,6 @@ def _popover_labels(at: AppTest) -> list[str]:
     return labels
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 @pytest.mark.parametrize("page", ["Brief", "Overview"])
 def test_a_templated_digest_says_so_and_offers_the_withheld_draft(monkeypatch, page):
     _stub_digest(monkeypatch, _TEMPLATE)
@@ -124,7 +122,6 @@ def test_a_templated_digest_says_so_and_offers_the_withheld_draft(monkeypatch, p
     assert "Show the withheld AI draft" in _popover_labels(at)
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 @pytest.mark.parametrize("page, want", [
     ("Brief", "AI morning narrative — 2026-09-30"),
     ("Overview", "AI morning narrative — 2026-09-30 (llama3.1-8b)"),
@@ -141,7 +138,6 @@ def test_an_ai_digest_shows_the_measured_match(monkeypatch, page, want):
 
 # -- review r1 -----------------------------------------------------------------------------------------------------
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 @pytest.mark.parametrize("page", ["Brief", "Overview"])
 def test_unmatched_dollar_figures_are_escaped(monkeypatch, page):
     """W12: two UNGROUNDED dollar tokens must not pair into a LaTeX span (md_dollars at the sink)."""
@@ -152,7 +148,6 @@ def test_unmatched_dollar_figures_are_escaped(monkeypatch, page):
     assert line == ["Unmatched figures in the withheld draft: \\$12,345, \\$2,100"], captions
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_before_v165_nothing_claims_the_figures_are_checked(monkeypatch):
     """W4 / W15: deployed before V165 is applied (the house order), the legacy read's row carries no grounding
     record; the Overview caption keeps its pre-4.602 wording and neither page's source claims the check."""
@@ -171,7 +166,6 @@ def test_before_v165_nothing_claims_the_figures_are_checked(monkeypatch):
     assert sources and set(sources) == {"DAILY_DIGEST (Cortex draft)"}, sources
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_after_v165_a_pre_v165_row_still_does_not_claim_the_check(monkeypatch):
     """W4: the 07:20 row written before the apply stays up for up to a day; its chip says 'Figures not
     checked', so the caption must not say every figure is checked."""
@@ -184,7 +178,6 @@ def test_after_v165_a_pre_v165_row_still_does_not_claim_the_check(monkeypatch):
                             "templated on mismatch)"}, sources
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 @pytest.mark.parametrize("row", [_AI, _TEMPLATE])
 def test_after_v165_a_measured_row_states_the_check(monkeypatch, row):
     _stub_digest(monkeypatch, row)

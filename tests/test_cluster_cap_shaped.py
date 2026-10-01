@@ -1,4 +1,4 @@
-"""Next-Fifty #38 remainder on the RENDERED page (AppTest, streamlit >= 1.55 like the rest of the shaped harness):
+"""Next-Fifty #38 remainder on the RENDERED page (AppTest over the shaped harness, both CI legs):
 Cost ▸ Optimization & Savings ▸ Idle & sizing with the right-sizing profile loaded and two queue-heavy
 multi-cluster warehouses (max 4, STANDARD) -- WH_SAT, whose queries reached cluster 4 of 4, and WH_LOW,
 whose peak was cluster 3.
@@ -18,8 +18,8 @@ whose peak was cluster 3.
       the picker on its new default, and a resize clears the typed confirm.
 
 The shared shaped harness stubs SHOW WAREHOUSES as an empty frame, so only an injected frame reaches the gate
-(tests/test_prc_c1_shaped.py renders that default). The floor venv skips these (_APPTEST_BUTTONGROUP_OK).
-Every leg runs the floor twins: tests/test_cluster_cap_render.py calls the page's _cluster_cap_check with a
+(tests/test_prc_c1_shaped.py renders that default). The fake-st and source twins add to these:
+tests/test_cluster_cap_render.py calls the page's _cluster_cap_check with a
 fake st for the gate's own paths -- (a), (c) the failed read, (d) and (e)'s empty SHOW -- and
 tests/test_cluster_cap_gate.py locks the verdicts, the pure helpers behind (e)'s picker default and window
 labels, and the page wiring by source."""
@@ -31,7 +31,6 @@ import json
 import pandas as pd
 import pytest
 from test_pages_shaped import (  # noqa: F401 - _stub_shaped is the harness's autouse fixture
-    _APPTEST_BUTTONGROUP_OK,
     _entry,
     _nav_to,
     _shaped_mart_first,
@@ -44,8 +43,6 @@ from streamlit.testing.v1 import AppTest
 
 from app.core.result import QueryResult
 from app.logic.sizing import RECOMMEND_BELOW_CAP, RECOMMEND_SCALE_OUT
-
-_SKIP = pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 
 # the owner's W1c probe shapes: WH_TRXS_TRANSFORM's (57 hours at 4 of 4) and WH_ALFA_LOAD_PRD's (peak 3 of 4)
 _HIST = {"WH_SAT": {1: 72, 2: 40, 3: 55, 4: 57}, "WH_LOW": {1: 300, 2: 20, 3: 3}}
@@ -159,7 +156,6 @@ def _pick(at, warehouse: str = "WH_LOW"):
     return picks[0]
 
 
-@_SKIP
 def test_toggle_off_reads_nothing_and_says_the_cap_was_not_checked(monkeypatch):
     at, seen = _page(monkeypatch, check=False)
     assert seen, "the recorder saw no reads: the section did not render"
@@ -176,7 +172,6 @@ def test_toggle_off_reads_nothing_and_says_the_cap_was_not_checked(monkeypatch):
     assert any(t.key == "sizing_cluster_check" and t.value is False for t in at.toggle)
 
 
-@_SKIP
 def test_toggle_on_gates_the_advice_on_hours_at_the_cap(monkeypatch):
     at, seen = _page(monkeypatch, check=True)
     reads = [s for s in seen if "CLUSTER_NUMBER" in s]
@@ -205,7 +200,6 @@ def test_toggle_on_gates_the_advice_on_hours_at_the_cap(monkeypatch):
     assert (got.loc["WH_LOW", "PEAK_CLUSTERS"], got.loc["WH_LOW", "CLUSTER_CAP"]) == (3, "Not reached")
 
 
-@_SKIP
 def test_a_failed_read_is_red_and_the_advice_says_not_checked(monkeypatch):
     at, _seen = _page(monkeypatch, check=True, fails=True)
     errors = " ".join(str(e.value) for e in at.error)
@@ -225,7 +219,6 @@ def _pane(at) -> tuple[str, str]:
     return code, text
 
 
-@_SKIP
 @pytest.mark.parametrize(("check", "select", "raise_to_5"),
                          [(True, "WH_SAT", True), (True, "WH_LOW", False), (False, "WH_SAT", False)])
 def test_the_operator_pane_prefills_only_a_reached_cap(monkeypatch, check, select, raise_to_5):
@@ -251,7 +244,6 @@ def test_the_operator_pane_prefills_only_a_reached_cap(monkeypatch, check, selec
                 "prefilled. No scale-out statement is generated here. The resize below is the size-up route.") in text
 
 
-@_SKIP
 def test_no_multi_cluster_warehouse_offers_no_check(monkeypatch):
     at, seen = _page(monkeypatch, check=True, max_clusters=1)
     assert ("No warehouse in this profile has MAX_CLUSTER_COUNT above 1 in SHOW WAREHOUSES, so there is no "
@@ -261,7 +253,6 @@ def test_no_multi_cluster_warehouse_offers_no_check(monkeypatch):
     assert "Single-cluster today (MAX_CLUSTER_COUNT = 1)" in _sized(at).loc["WH_SAT", "RATIONALE"]
 
 
-@_SKIP
 def test_an_empty_show_says_the_cluster_ranges_are_unknown(monkeypatch):
     """Review r1 R1-10: zero SHOW rows are an absent input — never "no warehouse has MAX_CLUSTER_COUNT above 1"."""
     at, seen = _page(monkeypatch, check=True, show_empty=True)
@@ -273,7 +264,6 @@ def test_an_empty_show_says_the_cluster_ranges_are_unknown(monkeypatch):
     assert "the current setting is unknown" in _sized(at).loc["WH_SAT", "RATIONALE"]
 
 
-@_SKIP
 def test_a_small_below_cap_warehouse_opens_the_resize_on_a_size_up(monkeypatch):
     """Review r1 R1-4: the below-cap pane calls the resize the size-up route, so the picker opens on MEDIUM for a
     Small warehouse (it opened on XSMALL: a downsize projecting a saving). Review r1 R1-9: the selected row's
@@ -300,7 +290,6 @@ def test_a_small_below_cap_warehouse_opens_the_resize_on_a_size_up(monkeypatch):
         assert "not the sizing window" in cfg[col]["help"], col
 
 
-@_SKIP
 @pytest.mark.parametrize(("size", "note"), [
     ("3X-Large", "This warehouse (3XLARGE) is larger than every size offered here, so every option is a downsize"),
     ("2X-Large", "The next size up from XXLARGE is not offered here, so every option is this size (no change)"),
@@ -346,7 +335,6 @@ def _resize(at, writes: list[str], to: str) -> None:
     assert any("REMEDIATION_LOG" in w for w in writes)
 
 
-@_SKIP
 def test_the_picker_follows_its_default_when_the_size_changes_under_a_selected_row(monkeypatch):
     """Review r3 R3-1: the picker was keyed on the warehouse alone and Streamlit leaves `index` out of a keyed
     selectbox's identity, so while WH_LOW stayed selected an earlier value outlived a new default. After an
@@ -376,7 +364,6 @@ def test_the_picker_follows_its_default_when_the_size_changes_under_a_selected_r
             assert "The picker opens with no size picked" not in text
 
 
-@_SKIP
 def test_a_resize_clears_the_typed_confirm(monkeypatch):
     """Review r3 R3-1: after a resize (Large -> XLARGE) the picker opens on the NEW size up, XXLARGE, so the name
     typed for the first resize is cleared: a second Execute needs a new confirm."""

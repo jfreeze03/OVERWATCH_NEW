@@ -18,10 +18,11 @@ from pathlib import Path
 
 import pytest
 
-# #31 (Codex): the floor-compat CI job does not install sqlglot, but this module
-# imported it at top level — so a clean floor runner failed at COLLECTION, not just
-# on this test. importorskip lets the module load there and skips only the parse
-# assertion; where sqlglot is installed (the main suite) it runs unchanged.
+# #31 (Codex): this module imported sqlglot at top level, so a runner without it
+# failed at COLLECTION. Both CI legs (main and floor-compat, ci.yml) now install
+# sqlglot, so the module always runs in CI. The module-level importorskip stays as
+# a local-dev convenience: without sqlglot pytest skips the WHOLE module at
+# collection — the non-SQL delivery-card locks too, not just the parse assertion.
 sqlglot = pytest.importorskip("sqlglot")
 
 _ROOT = Path(__file__).resolve().parents[1]

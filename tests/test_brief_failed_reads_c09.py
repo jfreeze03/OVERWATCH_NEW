@@ -15,7 +15,6 @@ from streamlit.testing.v1 import AppTest  # noqa: E402
 
 from app.core.result import QueryResult  # noqa: E402
 from tests.test_pages_shaped import (  # noqa: E402, F401  (_stub_shaped: the harness's autouse stub fixture)
-    _APPTEST_BUTTONGROUP_OK,
     _entry,
     _nav_to,
     _shaped_batch,
@@ -23,7 +22,6 @@ from tests.test_pages_shaped import (  # noqa: E402, F401  (_stub_shaped: the ha
     _stub_shaped,
 )
 
-_SKIP = pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 _FEEDS = ("events", "acts_", "brief_events_", "brief_actions_")
 
 
@@ -53,7 +51,6 @@ def _render_brief(monkeypatch, kind: str):
     return [str(i.value) for i in at.info], [str(e.value) for e in at.error]
 
 
-@_SKIP
 @pytest.mark.parametrize("kind", ["timeout", "other", "missing_column"])
 def test_failed_fires_and_asks_are_unavailable_not_not_installed(monkeypatch, kind):
     infos, errors = _render_brief(monkeypatch, kind)
@@ -62,7 +59,6 @@ def test_failed_fires_and_asks_are_unavailable_not_not_installed(monkeypatch, ki
     assert any("Couldn't read the action queue right now." in e for e in errors)
 
 
-@_SKIP
 @pytest.mark.parametrize("kind", ["absent", "privilege", "unknown_function"])
 def test_absent_alerting_and_queue_keep_the_setup_wording(monkeypatch, kind):
     infos, errors = _render_brief(monkeypatch, kind)

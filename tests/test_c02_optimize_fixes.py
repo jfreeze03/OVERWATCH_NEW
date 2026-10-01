@@ -38,7 +38,6 @@ import pandas as pd
 import pytest
 import sqlglot
 from test_pages_shaped import (  # noqa: F401 - _stub_shaped is the harness's autouse fixture
-    _APPTEST_BUTTONGROUP_OK,
     _entry,
     _nav_to,
     _shaped_mart_first,
@@ -59,7 +58,6 @@ from app.ui import components as _components
 # the REAL run_mart_first, captured before the shaped harness's autouse fixture swaps the page read stubs in
 _RUN_MART_FIRST = _components.run_mart_first
 
-_SKIP = pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 _CY = (date(2026, 1, 1), date(2026, 10, 1))       # Current year on 2026-09-30: offset 272, span 273
 _LM = (date(2026, 8, 1), date(2026, 9, 1))        # Last month on 2026-09-30
 
@@ -120,7 +118,6 @@ def _cost_page(monkeypatch, section: str, *, run_hook=None, mart_hook=None, oper
 
 # ---- R1-017: a failed verified-wins read is 'unavailable', never "nothing verified" ----------------------
 
-@_SKIP
 @pytest.mark.parametrize("kind", ["timeout", "missing_column"])
 def test_failed_verified_wins_read_is_unavailable_not_none_yet(monkeypatch, kind):
     def hook(_sql, kw):
@@ -133,7 +130,6 @@ def test_failed_verified_wins_read_is_unavailable_not_none_yet(monkeypatch, kind
         str(e.value) for e in at.error)
 
 
-@_SKIP
 def test_empty_verified_wins_read_still_says_none_yet(monkeypatch):
     def hook(_sql, kw):
         return _ok(pd.DataFrame()) if str(kw.get("key", "")).startswith("opt_verified_wins") else None
@@ -308,7 +304,6 @@ def test_control_room_rca_passes_the_incident_onset():
     assert "insights_sql.task_failure_details(_days, company, onset=onset_dt)" in src
 
 
-@_SKIP
 def test_operations_failures_kpi_reads_the_window_total(monkeypatch):
     import app.ui.pages.operations as ops
 
@@ -379,7 +374,6 @@ def _waste_selected(monkeypatch):
     monkeypatch.setattr(components, "_st_dataframe", _st_dataframe)
 
 
-@_SKIP
 def test_tco_drill_failed_read_shows_a_dash_not_zero_reads(monkeypatch):
     _waste_selected(monkeypatch)
     seen: list[str] = []
@@ -458,7 +452,6 @@ def _schedule_page(monkeypatch, executed: list) -> AppTest:
                       state={"remed_kind": "Off-hours suspend/resume schedule"})
 
 
-@_SKIP
 def test_off_hours_schedule_is_review_only_with_a_one_click_booking(monkeypatch):
     executed: list[str] = []
     at = _schedule_page(monkeypatch, executed)
@@ -517,7 +510,6 @@ def _consolidation_page(monkeypatch) -> AppTest:
                       state={"flt_company": "ALL", "opt_consolidation_toggle": True})
 
 
-@_SKIP
 def test_consolidation_never_pairs_an_alfa_and_a_trexis_warehouse(monkeypatch):
     at = _consolidation_page(monkeypatch)
     tables = [df.value for df in at.dataframe
@@ -595,7 +587,6 @@ def _repeat_table(at) -> pd.DataFrame:
     raise AssertionError("the repeat-query table did not render")
 
 
-@_SKIP
 def test_repeat_scan_normalizes_current_year_by_its_span(monkeypatch):
     seen: list[str] = []
     at = _repeat_page(monkeypatch, window="CURRENT_YEAR", today=date(2026, 9, 30), n=3, span=273, seen=seen)
@@ -604,14 +595,12 @@ def test_repeat_scan_normalizes_current_year_by_its_span(monkeypatch):
     assert list(table["RUNS_PER_30D"]) == [30.0] * 3                  # 273 runs over 273 days; pre-fix 91.0
 
 
-@_SKIP
 def test_repeat_scan_first_of_month_prefilter_is_one_day(monkeypatch):
     seen: list[str] = []
     _repeat_page(monkeypatch, window="CURRENT_MONTH", today=date(2026, 10, 1), n=1, span=1, seen=seen)
     assert seen and "HAVING COUNT(*) >= 2" in seen[0]                 # pre-fix: >= 10 (the 30-day fallback)
 
 
-@_SKIP
 def test_repeat_tiles_are_window_totals_not_the_top_100(monkeypatch):
     seen: list[str] = []
     at = _repeat_page(monkeypatch, window=30, today=date(2026, 9, 30), n=100, span=30, seen=seen)
@@ -633,7 +622,6 @@ def test_storage_growth_builder_carries_uncapped_totals_and_the_database_filter(
     sqlglot.parse_one(sql, read="snowflake")
 
 
-@_SKIP
 @pytest.mark.parametrize(("window", "served"), [(365, 90), (180, 90), (30, 30)])
 def test_storage_growth_tile_names_the_served_window(monkeypatch, window, served):
     seen: list[str] = []
@@ -651,7 +639,6 @@ def test_storage_growth_tile_names_the_served_window(monkeypatch, window, served
         assert f"Growth ({window}d)" not in tiles                     # pre-fix: "Growth (365d)" over 90 days
 
 
-@_SKIP
 def test_storage_tiles_read_the_uncapped_window_totals(monkeypatch):
     """The builder stops at the top 100 growers; the two storage tiles read its pre-LIMIT totals (150 TB held,
     12 TB net growth across every database in scope), not the sum of the rows the LIMIT kept (2 TB / 0.4 TB)."""
@@ -705,7 +692,6 @@ def _execute_tighten(at) -> None:
     assert not at.exception
 
 
-@_SKIP
 def test_tighten_guard_reads_the_timer_live_not_the_stale_cache(monkeypatch):
     """The cache still says 600 s; a DBA has since set 30 s. Pre-fix the plan generated SET = 60 (raising the
     timer) behind an Execute that logged a positive saving. The live row decides: no ALTER, nothing to execute.
@@ -727,7 +713,6 @@ def test_tighten_guard_reads_the_timer_live_not_the_stale_cache(monkeypatch):
         "live", "remed_suspend_WH_X", 0, True)
 
 
-@_SKIP
 def test_a_failed_live_read_generates_no_alter_even_when_the_cache_says_600(monkeypatch):
     executed: list[str] = []
     at = _tighten_page(monkeypatch, cached=600, live=_failed("timeout"), executed=executed, seen=[])
@@ -737,7 +722,6 @@ def test_a_failed_live_read_generates_no_alter_even_when_the_cache_says_600(monk
     assert executed == []
 
 
-@_SKIP
 def test_a_live_600_tightens_where_the_stale_cache_said_30(monkeypatch):
     """The other direction: the cache says 30 s, but the timer was loosened to 600 s since. The live value
     generates the tighten (pre-fix: 'already at 30s', nothing offered), and 600 -> 60 is a downward change the
@@ -752,7 +736,6 @@ def test_a_live_600_tightens_where_the_stale_cache_said_30(monkeypatch):
     assert not any("SAVINGS_LEDGER" in s for s in executed)
 
 
-@_SKIP
 def test_a_live_never_suspend_timer_is_booked_by_the_app(monkeypatch):
     """The cache says 600 s, the live timer is 0 (never suspend). The scan does not book enabling a timer, so the
     app must: the autobook decision follows the live value (pre-fix: the cached 600 read as autobooked, and the
@@ -766,7 +749,6 @@ def test_a_live_never_suspend_timer_is_booked_by_the_app(monkeypatch):
     assert len(booked) == 1 and "'AUTO_SUSPEND', 'WH_X'" in booked[0]
 
 
-@_SKIP
 def test_a_live_null_timer_is_never_suspend_and_gets_the_enable_a_timer_alter(monkeypatch):
     """R1-071 on the shared parser: SHOW lists WH_X with a NULL auto_suspend (it never suspends). Pre-merge the
     Remediation guard's own parser read that NULL as unknown -- a false 'could not be verified' and no ALTER --
@@ -832,7 +814,6 @@ def test_one_builder_and_one_parser_serve_every_live_settings_read():
     assert "auto_suspend_in_force(" in al
 
 
-@_SKIP
 def test_the_resize_estimate_uses_the_size_in_force_now(monkeypatch):
     """The profile was mapped from the cached 'jump_wh' read (Large); a DBA has since resized to Medium. A pick
     of SMALL is ONE step down, not two: the caption names the live size and says the cached one differed."""
@@ -862,7 +843,6 @@ def test_the_resize_estimate_uses_the_size_in_force_now(monkeypatch):
     assert live_reads and set(live_reads) == {"SHOW WAREHOUSES LIKE 'WH_LOW'"}
 
 
-@_SKIP
 def test_a_failed_live_size_read_projects_and_books_no_resize_saving(monkeypatch):
     from test_cluster_cap_shaped import _page, _pane, _pick, _recording_writes
 
@@ -911,7 +891,6 @@ _APP_BOOKS_RESIZE = ("The daily change scan cannot rank a 5XLARGE warehouse, so 
                      "the app books this estimate as an ESTIMATED Savings ledger row — verify it there.")
 
 
-@_SKIP
 @pytest.mark.parametrize(("live_size", "pick", "receipt", "ledger_rows", "caption"), [
     # a downsize from a size the change scan ranks: the scan books it, the app does not
     ("Large", "SMALL", "the daily change scan books and settles the measured saving.", 0, _SCAN_BOOKS_RESIZE),
@@ -969,7 +948,6 @@ def _ledger_insert_refused(monkeypatch) -> list[str]:
     return writes
 
 
-@_SKIP
 def test_a_refused_resize_ledger_insert_is_never_receipted_as_booked(monkeypatch):
     """f2 fix-up: 5X-Large -> XXLARGE is a downsize the scan cannot rank, so the app INSERTs the ESTIMATED row. When
     that INSERT fails, the resize still happened but nothing was booked: the receipt says so and stays on screen
@@ -1001,7 +979,6 @@ def test_a_refused_resize_ledger_insert_is_never_receipted_as_booked(monkeypatch
     assert not any("booked an estimated saving" in msg for _ok_flag, msg in receipts)
 
 
-@_SKIP
 def test_a_refused_tighten_ledger_insert_is_never_receipted_as_booked(monkeypatch):
     """f2 fix-up, the tighten twin: a live never-suspend timer (0) is enabled to 60 s, which the scan never books, so
     the app INSERTs the ESTIMATED row. Pre-fix _book_ledger was the INSERT's gate, not its result: a refused INSERT
@@ -1050,7 +1027,6 @@ def _transfer_rows(at) -> pd.DataFrame:
     raise AssertionError("the proven-fix transfer table did not render")
 
 
-@_SKIP
 def test_failed_experiments_read_says_the_exclusion_was_not_checked(monkeypatch):
     at = _transfer_page(monkeypatch, _failed("timeout"))
     assert list(_transfer_rows(at)["CANDIDATE_WAREHOUSE"]) == ["WH_CAND"]
@@ -1059,7 +1035,6 @@ def test_failed_experiments_read_says_the_exclusion_was_not_checked(monkeypatch)
             "under experiment is not excluded from these suggestions") in errors       # pre-fix: silent
 
 
-@_SKIP
 def test_unreadable_experiments_table_is_a_setup_note(monkeypatch):
     at = _transfer_page(monkeypatch, _failed("absent"))
     assert list(_transfer_rows(at)["CANDIDATE_WAREHOUSE"]) == ["WH_CAND"]
@@ -1067,7 +1042,6 @@ def test_unreadable_experiments_table_is_a_setup_note(monkeypatch):
     assert "OPTIMIZATION_EXPERIMENTS) could not be read" not in " ".join(str(e.value) for e in at.error)
 
 
-@_SKIP
 def test_a_clean_experiments_read_adds_no_note(monkeypatch):
     at = _transfer_page(monkeypatch, _ok(pd.DataFrame()))
     assert list(_transfer_rows(at)["CANDIDATE_WAREHOUSE"]) == ["WH_CAND"]
