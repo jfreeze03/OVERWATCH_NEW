@@ -61,10 +61,15 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
    both from the migrations directory. Per-migration tests lock their own
    content and run-doc line and **must not pin the tip or APP_VERSION** (the
    guard test fails if they do).
-6. **Rebuild bundle is GENERATED** (`snowflake/rebuild/`): 02 = byte-concat of
-   all migrations with `-- >>> name` banner sandwiches; 01/03/04/05 =
-   banner + byte-copy of teardown/roles/backfill/validate. Regenerate after
-   ANY edit to a source; never hand-edit.
+6. **Rebuild bundle is GENERATED** (`snowflake/rebuild/`) by
+   `outputs/gen_rebuild_bundle.py`: 02 = a generated header (with the replay
+   shim's `CREATE ROLE IF NOT EXISTS` lines for the retired roles V006-V008
+   grant to, which 03 drops again; the only SQL allowed before the V001
+   banner) + byte-concat of all migrations with `-- >>> name` banner
+   sandwiches; 01/03/04/05 = generated comment-only banner + byte-copy of
+   teardown/roles/backfill/validate; 00 = generated header + the hand-kept
+   CLONE list. `tests/test_rebuild_replay.py` re-renders every file and
+   byte-compares. Regenerate after ANY edit to a source; never hand-edit.
 7. **Task-graph ordering (V041 incident):** in migrations, task RESUMEs +
    SYSTEM$TASK_DEPENDENTS_ENABLE go BEFORE first-fill CALLs AND again at the
    end — a halted worksheet must never strand the tree suspended. Procs swap

@@ -32,6 +32,16 @@ def test_bundle_copies_are_byte_identical_to_their_sources():
             "(see snowflake/rebuild/README.md), never hand-edit it.")
 
 
+def test_bundle_file_headers_are_comments_only():
+    """Holistic #14, defense in depth: the header _body skips may only explain, never execute. (02's
+    header carries the replay shim; tests/test_rebuild_replay.py pins its executable lines exactly.)"""
+    for name in ("00_backup_operator_data.sql", "01_teardown_rebuildables.sql", "03_roles.sql",
+                 "04_backfill_365.sql", "05_validate.sql"):
+        header = (_RB / name).read_text(encoding="utf-8").split("\n\n", 1)[0]
+        assert header.strip(), name
+        assert all(line.startswith("--") for line in header.splitlines()), name
+
+
 def test_bundle_migrations_are_the_ordered_byte_concatenation():
     migs = sorted((_SF / "migrations").glob("V[0-9]*.sql"))
     # contiguous 1..N (validate.sql enforces), so the bundle is named for the tip.

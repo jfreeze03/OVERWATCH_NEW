@@ -1,8 +1,10 @@
 """Regenerate the Snowflake full-rebuild bundle from its source files.
 
-``render_*`` build each file's text without touching the disk (tests/test_rebuild_replay.py
-compares them with the files on disk, so a hand edit of a generated file fails there);
-``main()`` writes them.
+``render_*`` build each file's text from the sources and the banners below, never from the
+generated file itself (tests/test_rebuild_replay.py compares them with the files on disk, so a hand
+edit of a generated file fails there; holistic #14: 03/04/05 used to read their banner back from
+the bundle file, so an edit there was compared with itself); ``main()`` writes them. The one
+exception is 00's CLONE list, which is maintained by hand below its generated header.
 """
 
 from __future__ import annotations
@@ -23,6 +25,11 @@ TEARDOWN_BANNER = (
     "-- model, the webhook secrets and the notification integrations); the rest of\n"
     "-- B and all of C stay commented, so the operator data B lists survives."
 )
+# 03/04/05 are plain byte copies; their banner is generated too (holistic #14).
+COPY_BANNER = (
+    "-- {bundle} — BYTE-IDENTICAL copy of snowflake/{source} (locked by\n"
+    "-- tests/test_rebuild_bundle.py); numbered for the rebuild order."
+)
 # 02's header is generated too (R2-001/R2-002/R2-004): it carries the replay shim and says what a
 # replay does to kept operator data and to WH_ALFA_ADMIN. {shim} is the generated role block.
 MIGRATION_HEADER = """\
@@ -39,13 +46,17 @@ MIGRATION_HEADER = """\
 -- every version, so every guard passes and the one-time statements run again:
 -- V034 sets every 'ALL' route's COMPANY_FILTER to 'ALFA'; V019/V020/V028,
 -- V043/V045, V091 and V157 reset rule flags, thresholds and auto-clear; V001
--- resets COMPANY_SCOPE notes; the seed MERGEs put back the rules, routes,
--- settings, scope and department rows you deleted. After the last file,
--- docs/FULL_REBUILD.md step 3b restores those tables from the 00 clones.
+-- resets COMPANY_SCOPE notes; V070 disables routes whose integration is gone;
+-- V118 and V145 re-run their one-time SAVINGS_LEDGER corrections; the seed
+-- MERGEs put back the rules, routes, settings, scope and department rows you
+-- deleted. After the last file, docs/FULL_REBUILD.md step 3b restores those
+-- tables from the 00 clones.
 -- V002 also sets WH_ALFA_ADMIN's STATEMENT_TIMEOUT_IN_SECONDS back to 300 and
--- attaches OVERWATCH_RM (30 credits a month, SUSPEND at 100%) until V045 drops
--- it: if Run All stops anywhere in between, detach it first (step 3); step 3b
--- puts back the timeout step 0 recorded.
+-- attaches OVERWATCH_RM (30 credits a month, SUSPEND at 100%) in place of any
+-- monitor until V045 sets it to NULL and drops it, so the replay detaches any
+-- monitor the warehouse had. If Run All stops anywhere in between, detach it
+-- first (step 3); step 3b puts back the timeout step 0 recorded, and a monitor
+-- step 0 found only on the owner's yes.
 
 {shim}
 """
@@ -57,7 +68,9 @@ SHIM_TEMPLATE = """\
 -- or fresh account; 03_roles.sql drops them again. They need the CREATE ROLE
 -- privilege: if Run All stops here, nothing else has run yet, so create them as
 -- a role that can, resume from the V001 banner, and drop them with that role
--- after 03.
+-- before 03 (03_roles.sql opens with DROP ROLE IF EXISTS for both, which then
+-- finds nothing; run as a role that cannot drop them, it would stop 03 before
+-- its first grant).
 {creates}"""
 # 00's CLONE list is maintained by hand; its header is generated so it stays true (R2-004: it said
 # the keep-operator-data rebuild never touches these tables).
@@ -68,10 +81,11 @@ BACKUP_HEADER = (
     "-- FIRST change every _20260712 suffix (the CREATEs and the verify below)\n"
     "-- to today's date, then run it, verify the counts, and proceed.\n"
     "-- Not just insurance: on the keep-operator-data path the 02 replay re-runs\n"
-    "-- one-time config statements against these tables (route company filters,\n"
-    "-- rule flags and thresholds, re-seeded rows), and docs/FULL_REBUILD.md step 3b\n"
-    "-- restores SETTINGS, COMPANY_SCOPE, ALERT_CONFIG, ALERT_ROUTES and\n"
-    "-- DEPARTMENT_MAP from these clones. Drop them when the rebuild proves out.\n"
+    "-- one-time statements against these tables (route company filters, rule\n"
+    "-- flags and thresholds, re-seeded rows, ledger corrections), and\n"
+    "-- docs/FULL_REBUILD.md step 3b restores SETTINGS, COMPANY_SCOPE, ALERT_CONFIG,\n"
+    "-- ALERT_ROUTES, DEPARTMENT_MAP and SAVINGS_LEDGER from these clones. Drop them\n"
+    "-- when the rebuild proves out.\n"
     "-- Since V161 there is no scheduled backup: these clones are the only\n"
     "-- copy outside Time Travel. No IF NOT EXISTS: an unedited suffix that\n"
     "-- already exists fails loudly instead of keeping an old clone. After a\n"
@@ -86,15 +100,19 @@ README_NOTES = """{begin}
 Around the files (docs/FULL_REBUILD.md has the statements):
 
 - **Before 00** (step 0): list the opt-in objects and the live ALERT_ROUTES, and
-  record WH_ALFA_ADMIN's STATEMENT_TIMEOUT_IN_SECONDS: V002 sets it back to 300.
+  record WH_ALFA_ADMIN's STATEMENT_TIMEOUT_IN_SECONDS (V002 sets it back to 300)
+  and its resource_monitor (the replay detaches any monitor: if step 0 finds one
+  other than OVERWATCH_RM, ask the owner before 02 whether it goes back).
 - **02**: its generated header re-creates the retired roles {grantors} grant
   to (03 drops them again). If Run All stops between V002 and V045, detach the
   OVERWATCH_RM resource monitor V002 attached before anything else (step 3).
-- **Between 02 and 03, if you kept operator data** (step 3b): restore SETTINGS,
-  COMPANY_SCOPE, ALERT_CONFIG, ALERT_ROUTES and DEPARTMENT_MAP from the 00
-  clones (the replay re-ran one-time config statements on them), close the
-  events the replay raised for rules that are off again, and put the
-  warehouse timeout back.
+- **Between 02 and 03** (step 3b): if you kept operator data, restore SETTINGS,
+  COMPANY_SCOPE, ALERT_CONFIG, ALERT_ROUTES, DEPARTMENT_MAP and SAVINGS_LEDGER
+  from the 00 clones (the replay re-ran one-time statements on them) and close
+  the events the replay raised for rules that are off again. On every path, put
+  the warehouse timeout back (and, on the owner's yes, the monitor step 0
+  found), and if another role created the 02 shim's roles, drop them with it
+  now: 03 opens by dropping them.
 - **After 05** (step 7b): re-create the opt-in objects 01 dropped (email alerts,
   drill, ML forecast, notification integrations and secrets) and re-enable the
   routes step 0 listed.
@@ -164,18 +182,19 @@ def render_migration_bundle(paths: list[Path] | None = None) -> tuple[str, str]:
     return f"02_migrations_V001_V{tip:03d}.sql", header + "\n".join(parts)
 
 
-def render_copy(bundle_name: str, source_name: str, header: str | None = None) -> str:
-    if header is None:
-        header = (REBUILD / bundle_name).read_text(encoding="utf-8").split("\n\n", 1)[0]
+def render_copy(bundle_name: str, source_name: str, header: str) -> str:
+    """snowflake/<source_name> byte for byte behind its generated banner. ``bundle_name`` keeps the
+    COPIES triple's shape; the banner is never read back from the bundle file (holistic #14)."""
     source = (SNOWFLAKE / source_name).read_text(encoding="utf-8")
     return f"{header}\n\n{source}"
 
 
 COPIES = (
     ("01_teardown_rebuildables.sql", "teardown.sql", TEARDOWN_BANNER),
-    ("03_roles.sql", "roles.sql", None),
-    ("04_backfill_365.sql", "backfill_365.sql", None),
-    ("05_validate.sql", "validate.sql", None),
+    *((bundle, source, COPY_BANNER.format(bundle=bundle, source=source))
+      for bundle, source in (("03_roles.sql", "roles.sql"),
+                             ("04_backfill_365.sql", "backfill_365.sql"),
+                             ("05_validate.sql", "validate.sql"))),
 )
 
 
