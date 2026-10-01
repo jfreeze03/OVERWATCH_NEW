@@ -62,7 +62,9 @@ def test_no_evidence_is_not_rendered_as_a_healthy_zero() -> None:
     # eligible-but-unpriced queue reads "Unpriced" rather than a misleading $0.00 — now in the
     # Proof ▸ Pipeline projection.
     projection = studio.split("def _pipeline_projection(", 1)[1].split("\ndef _pipeline_tab(", 1)[0]
-    assert 'return "No evidence"' in projection
+    # R1-088: still "No evidence" (never a healthy $0) -- unless priced open items exist only under the
+    # confidence floor, which reads "Below floor" with a caption naming them
+    assert 'return "Below floor" if _excl_n else "No evidence"' in projection
     assert 'return format_usd(value) if _priced else "Unpriced"' in projection
     assert _optional_number(None, "%") == "n/a"
     assert _optional_number(float("nan"), "%") == "n/a"

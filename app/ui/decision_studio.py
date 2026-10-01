@@ -35,6 +35,7 @@ from app.logic import insights
 from app.logic.actions import ledger_totals, savings_by_lever, savings_month_calendar
 from app.logic.date_windows import is_prior_month_window, window_phrase
 from app.logic.decision import (
+    floor_exclusions,
     monthly_equivalent,
     pipeline_frame,
     prioritize_workloads,
@@ -950,10 +951,13 @@ def _pipeline_projection(frame: pd.DataFrame, defaults: dict) -> None:
     # decision, a tracked query family) yields candidates > 0 with gross == 0. Rendering that as
     # "$0.00" reads as "worth nothing" when the dollars are unquantified, not zero (ds-hunt 2026-08-30).
     _priced = has_candidates and projection["gross_estimate"] > 0
+    # R1-088: priced open items the floor leaves out (a NULL confidence counted apart from an authored low one)
+    _excl = floor_exclusions(frame, confidence_floor=confidence)
+    _excl_n = int(_excl["no_conf_count"] + _excl["below_floor_count"])
 
     def _capture(value: float) -> str:
         if not has_candidates:
-            return "No evidence"
+            return "Below floor" if _excl_n else "No evidence"
         return format_usd(value) if _priced else "Unpriced"
 
     kpi_row([
@@ -969,6 +973,17 @@ def _pipeline_projection(frame: pd.DataFrame, defaults: dict) -> None:
          "help": "In play × adoption × realization; the range moves realization ±20 points. A model of "
                  "what is ahead, never a verified saving."},
     ])
+    if _excl_n:
+        _parts = []
+        if _excl["no_conf_count"]:
+            _parts.append(f"{int(_excl['no_conf_count']):,} with no authored confidence (e.g. an AI exception, "
+                          "whose estimate is projected spend, not a saving)")
+        if _excl["below_floor_count"]:
+            _parts.append(f"{int(_excl['below_floor_count']):,} below the {confidence:.2f} confidence floor")
+        st.caption(md_dollars(
+            f"{_excl_n:,} priced open item(s) "
+            f"({format_usd(_excl['no_conf_usd'] + _excl['below_floor_usd'])}/mo) are not projected: "
+            + "; ".join(_parts) + "."))
 
 
 def _pipeline_tab(company: str, days: int, rate: float, *, bounds: tuple | None = None) -> None:

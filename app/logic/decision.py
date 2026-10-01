@@ -165,6 +165,45 @@ def scenario_projection(actions: pd.DataFrame | None, *, adoption_pct: float,
     }
 
 
+def _entity_ids(view: pd.DataFrame) -> pd.Series:
+    """scenario_projection's de-duplication key: TYPE:KEY when the entity has a key, else the ACTION_ID."""
+    entity_type = view.get("SOURCE_ENTITY_TYPE", pd.Series("", index=view.index)).fillna("").astype(str)
+    entity_key = view.get("SOURCE_ENTITY_KEY", pd.Series("", index=view.index)).fillna("").astype(str)
+    action_id = view.get("ACTION_ID", pd.Series(view.index, index=view.index)).astype(str)
+    entity_id = (entity_type.str.upper() + ":" + entity_key.str.upper()).str.strip(":")
+    return entity_id.where(entity_key.str.strip().str.len().gt(0), action_id)
+
+
+def floor_exclusions(actions: pd.DataFrame | None, *, confidence_floor: float) -> dict[str, float]:
+    """R1-088: the PRICED open items scenario_projection leaves out at ``confidence_floor``, so the Pipeline
+    can say so instead of silently reading "No evidence" beside a priced queue.
+
+    A NULL confidence is not a measured 0 -- an AI-exception or triage item carries no authored confidence
+    -- but it still does not pass the floor (an AI exception's estimate is projected spend, not a saving), so
+    it is counted apart: ``no_conf_count`` / ``no_conf_usd`` (NULL) and ``below_floor_count`` /
+    ``below_floor_usd`` (authored, under the floor). OPEN / IN_PROGRESS rows with an estimate > 0 only,
+    de-duplicated by entity like the projection (largest estimate wins), never counting an entity the
+    projection already counts."""
+    out = {"no_conf_count": 0.0, "no_conf_usd": 0.0, "below_floor_count": 0.0, "below_floor_usd": 0.0}
+    if actions is None or actions.empty:
+        return out
+    view = actions.copy()
+    status = view.get("STATUS", pd.Series("OPEN", index=view.index)).astype(str).str.upper()
+    raw = pd.to_numeric(view.get("CONFIDENCE", pd.Series(np.nan, index=view.index)), errors="coerce")
+    conf = raw.fillna(0.0).clip(0.0, 1.0)
+    est = pd.to_numeric(view.get("ESTIMATED_USD", pd.Series(0.0, index=view.index)),
+                        errors="coerce").fillna(0.0).clip(lower=0.0)
+    view = view.assign(_ENTITY=_entity_ids(view), _ESTIMATE=est)
+    open_ = status.isin(("OPEN", "IN_PROGRESS"))
+    counted = set(view.loc[open_ & (conf >= confidence_floor), "_ENTITY"])
+    excluded = open_ & (conf < confidence_floor) & (est > 0) & ~view["_ENTITY"].isin(counted)
+    for prefix, mask in (("no_conf", excluded & raw.isna()), ("below_floor", excluded & raw.notna())):
+        rows = view[mask].sort_values("_ESTIMATE", ascending=False).drop_duplicates("_ENTITY")
+        out[f"{prefix}_count"] = float(len(rows))
+        out[f"{prefix}_usd"] = round(float(rows["_ESTIMATE"].sum()), 2)
+    return out
+
+
 # ACTION_QUEUE.PERIOD (V083; logic.workbench.ACTION_ESTIMATE_PERIODS) -> monthly run-rate divisor.
 # ONE_TIME is kept OUT of the run-rate (reported beside it); NULL / '' / anything else is "unspecified",
 # excluded from the run-rate but counted, so the projection never silently mixes time bases.
