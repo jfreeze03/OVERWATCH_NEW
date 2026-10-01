@@ -119,15 +119,17 @@ def fact_query_window_summary(days: int, company: str = "ALL", warehouse_contain
     the UI labels it as such. No schema dimension in the fact, so callers
     fall back to live when a schema filter is active.
 
-    ``read_clock`` (v4.608 holistic #10, Overview's platform score only): also return the window's own
-    start (WIN_START_AT, byte-for-byte the CURRENT_DATE() anchor the WHERE filters on) and the moment the
-    sums were read (READ_AT), both on the session clock CURRENT_DATE() uses -- the account's Central
-    default, the TIMEZONE STANDARD's accepted pattern for trailing windows. A caller that de-cumulates the
-    sums by the span they cover then divides by the span AT READ TIME, so an hourly-cached frame served
-    after Central midnight (or later in the hour) keeps its per-day rate. Opt-in: CURRENT_TIMESTAMP()
-    makes a statement ineligible for Snowflake's result cache, and the other callers' SQL (their cache
-    identity) stays unchanged. A bounded calendar window has no CURRENT_DATE() anchor to report, so
-    asking for both is a caller error.
+    ``read_clock`` (v4.608 holistic #10): also return the window's own start (WIN_START_AT, byte-for-byte
+    the CURRENT_DATE() anchor the WHERE filters on) and the moment the sums were read (READ_AT), both on
+    the session clock CURRENT_DATE() uses -- the account's Central default, the TIMEZONE STANDARD's
+    accepted pattern for trailing windows. A caller that de-cumulates the sums by the span they cover
+    (Overview's platform score) then divides by the span AT READ TIME, so an hourly-cached frame served
+    after Central midnight (or later in the hour) keeps its per-day rate. Control Room's Pulse asks for it
+    too, though it reads only the sums: with no Database filter its days=1 read is then the SAME SQL as
+    the score's, so the two pages share one hourly cache entry (the app cache keys on SQL text). Opt-in:
+    CURRENT_TIMESTAMP() makes a statement ineligible for Snowflake's result cache, so the Operations
+    summary and any other caller keep their SQL unchanged. A bounded calendar window has no
+    CURRENT_DATE() anchor to report, so asking for both is a caller error.
     """
     from app import companies
     from app.core.sqlsafe import contains_filter

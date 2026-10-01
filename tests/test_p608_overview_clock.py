@@ -133,8 +133,9 @@ def test_score_window_sql_returns_its_own_account_clock():
 
 
 def test_other_window_summary_callers_keep_their_sql():
-    """Control Room's pulse and the Operations Queries summary never asked for the clock: their SQL (and so
-    their cache identity and result-cache eligibility) is unchanged."""
+    """The builder default and the Operations Queries summary never ask for the clock: their SQL (and so
+    their cache identity and result-cache eligibility) is unchanged. A bounded window has no clock to
+    report. (Control Room's Pulse DOES ask -- see the shared-cache test below.)"""
     from app.logic.date_windows import window_bounds
 
     aug = window_bounds("LAST_MONTH", date(2026, 9, 17))
@@ -189,3 +190,52 @@ def test_cached_window_served_after_central_midnight_keeps_its_per_day_rate(monk
     sig = got["signals"][-1]
     assert sig["queue_minutes"] == pytest.approx(9.0)
     assert sig["spill_gb"] == pytest.approx(4.0)
+
+
+def test_control_room_pulse_shares_the_score_reads_hourly_cache_entry(monkeypatch):
+    """Review of #10: with no Database filter, Control Room's Pulse and Overview's score read the SAME window
+    (days=1, the viewer's company) at tier='hourly', and run_batch's member cache is keyed on (tier, capped
+    SQL, scope). Asking only Overview for the read clock made the two SQL texts differ, so whichever page was
+    visited second ran its own FACT_QUERY_HOURLY read every hour per company. The Pulse asks for the clock
+    too (it reads only the sums, so the two extra columns are inert there) -- in the batch member AND in its
+    run() fallback -- and the two pages share one entry again."""
+    from streamlit.testing.v1 import AppTest
+
+    from app.ui.pages import control_room, overview
+    from tests.test_pages_shaped import _entry, _nav_to, _shaped_batch, _shaped_run
+
+    batch_seen: list[tuple] = []
+    run_seen: list[tuple] = []
+
+    def _recording_batch(specs, **k):
+        batch_seen.extend((k.get("tier"), str(s["key"]), str(s["sql"])) for s in specs)
+        out = _shaped_batch(specs, **k)
+        if "pulse" in out:
+            out["pulse"] = None                     # force the Pulse's run() fallback so it is read too
+        return out
+
+    def _recording_run(*a, **k):
+        run_seen.append((k.get("tier"), str(k.get("key", "")), str(a[0] if a else k.get("sql", ""))))
+        return _shaped_run(*a, **k)
+
+    monkeypatch.setattr(overview, "run_batch", _recording_batch)
+    monkeypatch.setattr(control_room, "run_batch", _recording_batch)
+    monkeypatch.setattr(control_room, "run", _recording_run)
+
+    at = AppTest.from_function(_entry, default_timeout=60)
+    at.run()
+    _nav_to(at, "Overview")
+    at.run()
+    assert not at.exception
+    _nav_to(at, "Control Room")
+    at.session_state["cr_section"] = "Pulse"
+    at.run()
+    assert not at.exception
+
+    score = [(t, sql) for t, key, sql in batch_seen if key.startswith("score_throughput_")]
+    pulse = [(t, sql) for t, key, sql in batch_seen if key == "pulse"]
+    pulse_fallback = [(t, sql) for t, key, sql in run_seen if key.startswith("pulse_fact_")]
+    assert score and pulse and pulse_fallback, (batch_seen, run_seen)
+    assert "READ_AT" in score[-1][1]
+    assert pulse[-1] == score[-1]                   # same tier, same SQL text -> one member-cache entry
+    assert pulse_fallback[-1] == score[-1]          # and the run() fallback shares it too

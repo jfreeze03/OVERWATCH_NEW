@@ -563,6 +563,7 @@ def render() -> None:
     # board/150d stay unbatched (filter-scoped + fixed cold-start each other, Codex #4);
     # health_strip stays on the shared shell cache; the live alert/action reads batch above.
     # holistic #10: read_clock -> the row also carries WIN_START_AT / READ_AT for the per-day divisor below
+    # (Control Room's Pulse asks for the clock too, so with no Database filter both pages share this entry)
     _thr_sql = mart_sql.fact_query_window_summary(_SCORE_HEALTH_WINDOW_DAYS, company, read_clock=True)
     _tk_sql = mart_sql.fact_task_daily(_SCORE_HEALTH_WINDOW_DAYS, company)
     _score_pf = run_batch([

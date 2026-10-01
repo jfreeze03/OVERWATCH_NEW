@@ -1014,14 +1014,19 @@ def render() -> None:
         # sparkline are two FACT_QUERY_HOURLY reads at tier='hourly' — co-schedule them in
         # ONE round trip (mirrors the Operations Queries _mart_pf batch). Each keeps its run()
         # fallback below, so a None/failed prefetch member just re-reads serially.
+        # v4.608 holistic #10 review: read_clock=True although the Pulse reads only the sums -- with
+        # no Database filter this is then the SAME SQL as Overview's score read (days=1, the
+        # company, tier='hourly'), so the two pages share one member-cache entry instead of each
+        # running its own FACT_QUERY_HOURLY read every hour. The two clock columns are inert here.
+        _pulse_sql = mart_sql.fact_query_window_summary(1, company, "", "", f["database"], read_clock=True)
         _pulse_pf = run_batch([
-            {"key": "pulse", "sql": mart_sql.fact_query_window_summary(1, company, "", "", f["database"]),
+            {"key": "pulse", "sql": _pulse_sql,
              "source": "FACT_QUERY_HOURLY (mart, loaded hourly)"},
             {"key": "act", "sql": mart_sql.fact_daily_activity(14, company, f["database"]),
              "source": "FACT_QUERY_HOURLY (daily)"},
         ], page=_PAGE, tier="hourly") if not f["schema_contains"] else {}
         if not f["schema_contains"]:
-            m_pulse = _pulse_pf.get("pulse") or run(mart_sql.fact_query_window_summary(1, company, "", "", f["database"]),
+            m_pulse = _pulse_pf.get("pulse") or run(_pulse_sql,
                           page=_PAGE, key=f"pulse_fact_{company}", tier="hourly",
                           source="FACT_QUERY_HOURLY (mart, loaded hourly)")
             if m_pulse.ok and not m_pulse.empty and safe_float(m_pulse.df.iloc[0].get("QUERY_COUNT")) > 0:

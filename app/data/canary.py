@@ -151,7 +151,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("change_impact.change_registry", lambda: change_impact_sql.change_registry(30, "ALFA")),
     ("mart.fact_metering_by_service", lambda: mart_sql.fact_metering_by_service(7)),
     ("mart.fact_query_window_summary", lambda: mart_sql.fact_query_window_summary(1, "ALFA")),
-    # v4.608 holistic #10: Overview's score asks for the read clock (WIN_START_AT / READ_AT)
+    # v4.608 holistic #10: Overview's score (and Control Room's Pulse, sharing its cache entry) ask for
+    # the read clock (WIN_START_AT / READ_AT)
     ("mart.fact_query_window_summary.read_clock",
      lambda: mart_sql.fact_query_window_summary(1, "ALFA", read_clock=True)),
     ("mart.app_statement_stats", lambda: mart_sql.app_statement_stats(1)),
