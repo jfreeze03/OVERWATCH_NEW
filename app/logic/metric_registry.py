@@ -356,7 +356,10 @@ METRICS: tuple[Metric, ...] = (
            "days-left = (contracted - consumed) / trailing-30-COMPLETE-day burn. The canonical "
            "CREDITS runway: the Contract planner, COST_CONTRACT_BREACH (always), and the "
            "Brief/Overview/Cost-verdict fallback when the billing balance is unreadable — "
-           "burn averages complete days only (today's partial EXCLUDED), never a literal /30.",
+           "burn averages complete days only (today's partial EXCLUDED), never a literal /30. "
+           "R2-042 / V169: consumed counts the term [CONTRACT_START_DATE, CONTRACT_END_DATE), the end "
+           "exclusive (blank = unbounded); TOTAL needs a parsable start; a projected exhaustion on or after "
+           "the end outlasts the term (no concern), and after the end the runway is withheld.",
            window="trailing-complete-days", partial_day="excluded", unit="days", filters=(),
            required_sources=("FACT_METERING_DAILY",),
            coverage="days = (contract - consumed) / trailing-30-complete-day burn", owner="finops"),

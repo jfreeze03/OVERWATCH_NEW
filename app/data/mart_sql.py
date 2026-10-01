@@ -2070,16 +2070,31 @@ def contract_exhaustion() -> str:
     so the Brief runway can't contradict the Contract page. The old form summed a
     31-date span that INCLUDED today's partial and divided by a literal 30, biasing
     burn low, overstating days-left, and potentially suppressing COST_CONTRACT_BREACH.
-    n/a until configured. The COST_CONTRACT_BREACH paging alert (SP_ALERT_SCAN_DAILY)
-    was aligned to THIS exact burn in V064 — SUM / NULLIF(COUNT(DISTINCT DAY), 0) over
-    DAY BETWEEN today-30 AND today-1 — so the alert and this KPI now byte-match and no
-    divergence remains (gap-audit rec #10; the earlier "align it in V065" note was
-    stale, and is why the audit re-flagged an already-fixed alert — no V081 needed)."""
+    n/a until configured.
+
+    The term (R2-042): CONSUMED counts [CONTRACT_START_DATE, CONTRACT_END_DATE) -- the end is
+    EXCLUSIVE, the app's contract_pace clock (forecast.py) -- and a blank end keeps it
+    unbounded. TERM_END is exposed so formulas.contract_runway reads a contract whose
+    projected exhaustion falls on or after the end as "outlasts the term", never a red
+    countdown; once the term is over (account today >= TERM_END) TOTAL reads 0 and the
+    always-on bars render nothing, like the Contract tab's term-ended panel. TERM_OVER is TRUE
+    for exactly that case on a CONFIGURED contract (the source TOTAL: start set, credits > 0),
+    so the page verdicts say the term ended instead of "no contract runway configured"
+    (formulas.contract_term_ended -> verdict.contract_runway_clause).
+
+    The COST_CONTRACT_BREACH paging arm (SP_ALERT_SCAN_DAILY) shares the burn since V064, and
+    since V169 also this start gate (r33 [3]; R2-103) and the end bound -- before V169 the
+    alert paged on a fabricated runway with no start date and past the term end. The parity is
+    locked against the CURRENT definer by tests/history_locks/test_contract_breach_start_gate_parity.py.
+    """
+    today = account_today_sql()
     return f"""
-SELECT TOTAL, CONSUMED, DAILY_BURN,
+SELECT IFF(TERM_END IS NOT NULL AND {today} >= TERM_END, 0, TOTAL) AS TOTAL,
+       CONSUMED, DAILY_BURN, TERM_END,
+       (src.TERM_END IS NOT NULL AND {today} >= src.TERM_END AND src.TOTAL > 0) AS TERM_OVER,
        CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)) AS DAYS_LEFT,
        DATEADD('day', CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)),
-               {account_today_sql()}) AS EXHAUST_DATE
+               {today}) AS EXHAUST_DATE
 FROM (
     SELECT
         -- r33: gate TOTAL on a CONFIGURED contract start. CONTRACT_CREDITS and
@@ -2091,13 +2106,19 @@ FROM (
         (SELECT IFF(TRY_TO_DATE(MAX(IFF(KEY = 'CONTRACT_START_DATE', VALUE, NULL))) IS NULL, 0,
                     COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CONTRACT_CREDITS', VALUE, NULL))), 0))
          FROM {core_object("SETTINGS")}) AS TOTAL,
+        -- R2-042: only the term's credits: [start, CONTRACT_END_DATE), the end EXCLUSIVE.
         (SELECT COALESCE(SUM(CREDITS_BILLED), 0) FROM {mart_object("FACT_METERING_DAILY")}
          WHERE DAY >= COALESCE((SELECT TRY_TO_DATE(MAX(IFF(KEY = 'CONTRACT_START_DATE', VALUE, NULL)))
-                                FROM {core_object("SETTINGS")}), {account_today_sql()})) AS CONSUMED,
+                                FROM {core_object("SETTINGS")}), {today})
+           AND DAY < COALESCE(
+               (SELECT TRY_TO_DATE(MAX(IFF(KEY = 'CONTRACT_END_DATE', VALUE, NULL)))
+                FROM {core_object("SETTINGS")}), '9999-12-31'::DATE)) AS CONSUMED,
+        (SELECT TRY_TO_DATE(MAX(IFF(KEY = 'CONTRACT_END_DATE', VALUE, NULL)))
+         FROM {core_object("SETTINGS")}) AS TERM_END,
         -- r33: the DAILY_BURN window stays session-tz CURRENT_DATE() ON PURPOSE — it must
-        -- byte-match the COST_CONTRACT_BREACH paging alert (V064 SP_ALERT_SCAN_DAILY) or the KPI
-        -- and the alert diverge (test_rec20_alert_matches_app_mart_window). Realigning both to the
-        -- account clock would take an owner-applied migration to alter the alert proc, deferred
+        -- byte-match the COST_CONTRACT_BREACH paging alert (the current SP_ALERT_SCAN_DAILY definer)
+        -- or the KPI and the alert diverge (test_contract_breach_start_gate_parity). Realigning both
+        -- to the account clock would take an owner-applied migration to alter the alert proc, deferred
         -- until then. Today both the app session and the alert task inherit the account's Central
         -- default TIMEZONE, so the window already matches the account clock; moving both onto
         -- explicit pins would only harden against a future zone change. (EXHAUST_DATE's anchor
@@ -2106,7 +2127,7 @@ FROM (
          FROM {mart_object("FACT_METERING_DAILY")}
          WHERE DAY BETWEEN DATEADD('day', -30, CURRENT_DATE())
                        AND DATEADD('day', -1, CURRENT_DATE())) AS DAILY_BURN
-)
+) src
 """
 
 

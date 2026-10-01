@@ -36,6 +36,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 import pandas as pd
+import pytest
 
 from app.data import mart_sql
 from app.logic.contract_planner import plan_scenarios
@@ -89,10 +90,39 @@ def test_round33_contract_exhaustion_account_tz_and_start_gate():
     assert "IFF(TRY_TO_DATE(MAX(IFF(KEY = 'CONTRACT_START_DATE', VALUE, NULL))) IS NULL, 0," in sql
     # [2]/[4]: EXHAUST_DATE's displayed anchor rides the account clock.
     assert "CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE) AS EXHAUST_DATE" in sql
-    # ...but the DAILY_BURN window STAYS session-tz so it byte-matches the V064 alert (invariant
-    # in test_rec20_alert_matches_app_mart_window). Realigning it needs an owner migration.
+    # ...but the DAILY_BURN window STAYS session-tz so it byte-matches the COST_CONTRACT_BREACH alert (the
+    # CURRENT SP_ALERT_SCAN_DAILY definer: tests/history_locks/test_contract_breach_start_gate_parity.py; the
+    # historical V064 twin is test_rec20_alert_matches_app_mart_window). Realigning it needs an owner migration.
     assert "DAY BETWEEN DATEADD('day', -30, CURRENT_DATE())" in sql
     assert "AND DATEADD('day', -1, CURRENT_DATE())" in sql
+
+
+def test_r2_042_contract_exhaustion_counts_the_term_only_and_goes_quiet_after_it():
+    """R2-042: CONSUMED counts [CONTRACT_START_DATE, CONTRACT_END_DATE) -- the end EXCLUSIVE, the app's
+    contract_pace clock -- and TERM_END is exposed so formulas.contract_runway can tell a contract that outlasts
+    its term. Once the term is over (account today >= TERM_END) TOTAL reads 0, so the always-on runway bars render
+    nothing, like the Contract tab's term-ended panel and the V169 alert (silent after the term)."""
+    sql = mart_sql.contract_exhaustion()
+    flat = " ".join(sql.split())
+    assert ("AND DAY < COALESCE( (SELECT TRY_TO_DATE(MAX(IFF(KEY = 'CONTRACT_END_DATE', VALUE, NULL))) "
+            "FROM DBA_MAINT_DB.OVERWATCH.SETTINGS), '9999-12-31'::DATE)") in flat
+    assert "AS TERM_END" in sql and "SELECT IFF(TERM_END IS NOT NULL AND " in flat
+    assert ("CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE >= TERM_END, 0, TOTAL) AS TOTAL, "
+            "CONSUMED, DAILY_BURN, TERM_END,") in flat
+    # the stale "no divergence remains" claim is gone (the alert lacked the start gate until V169)
+    doc = mart_sql.contract_exhaustion.__doc__ or ""
+    assert "no divergence remains" not in doc and "V169" in doc
+    assert "V064 SP_ALERT_SCAN_DAILY" not in sql
+    # review r1: TERM_OVER tells a configured contract past its term (TOTAL withheld to 0) apart from an
+    # unconfigured one, so the verdict clause never says "no contract runway configured" for it. It reads the
+    # SOURCE TOTAL (the start-gated credits), qualified so the outer TOTAL alias can never shadow it.
+    assert ("(src.TERM_END IS NOT NULL AND CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE "
+            ">= src.TERM_END AND src.TOTAL > 0) AS TERM_OVER") in flat
+    assert flat.rstrip().endswith(") src")
+    sqlglot = pytest.importorskip("sqlglot")
+    (tree,) = sqlglot.parse(sql, dialect="snowflake")
+    assert [c.alias_or_name for c in tree.expressions][:5] == ["TOTAL", "CONSUMED", "DAILY_BURN", "TERM_END",
+                                                                "TERM_OVER"]
 
 
 # --- [5] plan_scenarios overflow guard -------------------------------------

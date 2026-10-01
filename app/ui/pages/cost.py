@@ -19,7 +19,14 @@ from app.data import cost_sql, mart27_sql, mart_sql
 from app.logic import contract_planner
 from app.logic.date_windows import window_phrase
 from app.logic.directory import resolve_display
-from app.logic.formulas import contract_runway, format_usd, humanize_duration, md_dollars, safe_float
+from app.logic.formulas import (
+    contract_runway,
+    contract_term_ended,
+    format_usd,
+    humanize_duration,
+    md_dollars,
+    safe_float,
+)
 from app.logic.verdict import contract_runway_clause, contract_runway_signal, page_verdict
 from app.ui.components import (
     alarm_health,
@@ -172,9 +179,12 @@ def render() -> None:
     _b = ("billing balance" if _best is not None and _best["basis"] == "balance"
           else "configured credits")
     _rsig = contract_runway_signal(_best, read_ok=_exh.usable(), basis=_b)
+    # review r1: a configured contract past its term (TOTAL withheld, TERM_OVER) names the ended term in the
+    # healthy clause instead of "no contract runway configured"
+    _term_over = contract_term_ended(_exh.df.iloc[0]) if _exh.usable() else None
     _vsig = [_rsig] if _rsig is not None else []
     page_verdict_line(page_verdict(
-        _vsig, healthy=f"{contract_runway_clause(_best)} — open a section for detail"))
+        _vsig, healthy=f"{contract_runway_clause(_best, term_ended=_term_over)} — open a section for detail"))
     # Cost3/C18: the "what changed since your last visit" opener, now the shared
     # component (severity-mapped line + one-hop jumps to Alerts/Action Center).
     since_last_visit_opener(_PAGE, f["company"])
