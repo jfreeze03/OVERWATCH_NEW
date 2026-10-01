@@ -899,6 +899,12 @@ FROM (
 # The re-stamp CALL (SP_LOAD_PATTERN_COST(365)) is queued for a later migration; raise this only after
 # it has run. The Unit costs caption and page note name this window.
 PATTERN_COST_MAX_DAYS = 90
+# The first day V120's re-stamp reached: CALL SP_LOAD_PATTERN_COST(90) on 2026-09-02 re-merged
+# START_TIME >= DATEADD('day', -90, CURRENT_DATE()), i.e. DAY >= 2026-06-04. A calendar preset keeps
+# its exact bounds (the SQL is unchanged), so a calendar window that starts before this day (Current
+# year) still sums un-restamped rows; the Unit costs caption says so. Retire it with the clamp above
+# once SP_LOAD_PATTERN_COST(365) has run.
+PATTERN_COST_RESTAMP_FROM = date(2026, 6, 4)
 
 
 def pattern_cost(days: int = 30, company: str = "ALL", limit: int = 25, *, bounds: tuple | None = None) -> str:

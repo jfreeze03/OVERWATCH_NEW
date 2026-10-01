@@ -357,6 +357,10 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     # reads, never the page's 180/365d. A calendar preset reads its exact range (window_label names it).
     _pc_days = min(int(days), mart27_sql.PATTERN_COST_MAX_DAYS)
     _pc_cut = bounds is None and int(days) > _pc_days
+    # ... and a calendar preset that starts before V120's re-stamp horizon (Current year) still sums the
+    # un-restamped rows (the SQL keeps its exact bounds), so the caption says which rows can overstate runs.
+    _pc_restamp = mart27_sql.PATTERN_COST_RESTAMP_FROM
+    _pc_pre_fix = bounds is not None and bounds[0] < _pc_restamp
     if _pc.ok and not _pc.empty:
         _pd_df = _pc.df.copy()
         _pd_df["USD"] = _pd_df["CREDITS"].map(safe_float) * rate
@@ -372,7 +376,10 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                    "parameterized hash — cheap-but-constant often out-bills "
                    "expensive-but-rare."
                    + (f" A trailing window reads at most the last {_pc_days} days: older pattern rows "
-                      "predate the V120 run-count fix and can overstate runs." if _pc_cut else ""))
+                      "predate the V120 run-count fix and can overstate runs." if _pc_cut else "")
+                   + (f" Rows before {_pc_restamp:%b} {_pc_restamp.day}, {_pc_restamp.year} predate the "
+                      "V120 run-count fix and can overstate runs (understating the cost per run)."
+                      if _pc_pre_fix else ""))
         # cross-filter honesty: MART_PATTERN_COST_DAILY is keyed by QUERY_HASH + COMPANY only, so
         # it can't narrow to the active object/warehouse/user filters the section banner declares
         # applied — disclose that (mirrors the twin fingerprint rollup on the Optimization tab).
