@@ -82,6 +82,10 @@ from app.ui.components import (
 from app.ui.schema_gate import has_migration
 
 _PAGE = "Cost Intelligence"
+# R1-162: chargeback_sql.department_window_credits / department_month_credits read the hourly-loaded
+# FACT_WAREHOUSE_DAILY mart (v4.54), not the live metering view, so the source label names the mart.
+_DEPT_MART = "FACT_WAREHOUSE_DAILY x DEPARTMENT_MAP"
+_DEPT_SOURCE = _DEPT_MART + " (mart, loaded hourly)"
 # The Track expander's first statement: raise at most one open item per user (fix_queue.ai_track_escalation_sql).
 _ESCALATE = "ESCALATE"
 
@@ -159,15 +163,28 @@ def _cortex_spend_tab(days: int, ai_rate: float, *, bounds: tuple | None = None)
             fn_res = run(cortex_sql.cortex_ai_functions_daily(days, bounds=bounds), page=_PAGE,
                          key=f"cortex_fn_{days}{_lm}", tier="metadata",
                          source="ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY")
+            # R1-036: this is a plain live read that clamps a TRAILING window to the live-scan limit
+            # (a calendar preset reads its exact range), so name the window it served -- a 365d page
+            # must not read "no usage" for a 90-day scan. served_days() would not help: run() stamps
+            # no served window.
+            _fn_capped = bounds is None and int(days) > MAX_LIVE_WINDOW_DAYS
+            _fn_win = window_label(bounds, min(int(days), MAX_LIVE_WINDOW_DAYS))
+            _fn_cap = f" (live view, capped at {MAX_LIVE_WINDOW_DAYS}d)" if _fn_capped else ""
             if fn_res.ok and not fn_res.empty:
                 fn = fn_res.df.copy()
                 fn["USD"] = fn["TOTAL_CREDITS"].map(safe_float) * ai_rate
                 charts.daily_stacked_usd(fn, "DAY", "SOURCE", "USD")
-                result_caption(fn_res)
+                result_caption(fn_res, note=f"AI Functions credits, {_fn_win}{_fn_cap}.")
             elif fn_res.ok:
-                st.caption("No AI Functions usage in this window.")
+                empty_state("no_data_yet", f"No AI Functions usage in {_fn_win}{_fn_cap}.")
+            # R1-036 / R1-166: only a true absence is "not readable"; a timeout or drift is a failed
+            # read with its error (the old caption called every failure "not available").
+            elif is_setup_absence(fn_res.error_kind):
+                empty_state("needs_setup",
+                            "CORTEX_AI_FUNCTIONS_USAGE_HISTORY is not readable by this app's role "
+                            "(the view is absent on some accounts).")
             else:
-                st.caption(f"View not available in this account/role: {fn_res.error}")
+                empty_state("unavailable", "AI Functions usage could not be read.", detail=fn_res.error)
 
 
 def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_operator: bool, *, bounds: tuple | None = None) -> None:
@@ -827,7 +844,7 @@ def _statement_export(company: str, rate: float) -> None:
 
         month_res = run(chargeback_sql.department_month_credits(month, company), page=_PAGE,
                         key=f"cb_month_{company}_{month}", tier="historical",
-                        source="WAREHOUSE_METERING_HISTORY (calendar month)")
+                        source=_DEPT_MART + " (calendar month)")
         if not month_res.usable():
             # r-ux: separate a clean EMPTY month (no credits — neutral no_data) from a FAILED read
             # (unavailable + the error in a collapsed detail expander), instead of dumping either
@@ -902,7 +919,7 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *,
     _cb_specs = [
         {"key": "dept", "tier": "historical",
          "sql": chargeback_sql.department_window_credits(days, company, bounds=bounds),
-         "source": "WAREHOUSE_METERING_HISTORY x DEPARTMENT_MAP"},
+         "source": _DEPT_SOURCE},
         {"key": "share", "tier": "hourly",
          "sql": mart27_sql.role_share(days, company, bounds=bounds),
          "source": "FACT_QUERY_ROLE_HOURLY (mart — exec-sec share)"},
@@ -920,7 +937,7 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *,
     _showback = _pf.get("showback")
     dept_res = _pf.get("dept") or run(chargeback_sql.department_window_credits(days, company, bounds=bounds), page=_PAGE,
                    key=f"cb_dept_{company}_{days}{_lm}", tier="historical",
-                   source="WAREHOUSE_METERING_HISTORY x DEPARTMENT_MAP")
+                   source=_DEPT_SOURCE)
     if not guard(dept_res, "No warehouse credits in this window.",
                  setup_hint="Not installed yet — an admin can verify on Admin → Migrations & freshness. Seed department names in DEPARTMENT_MAP."):
         return _showback
@@ -988,7 +1005,7 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *,
         if bounds is None and "QUERY_HISTORY" in str(share_res.source) and days > MAX_LIVE_WINDOW_DAYS:
             _pr = run(chargeback_sql.department_window_credits(MAX_LIVE_WINDOW_DAYS, company),
                       page=_PAGE, key=f"cb_dept_{company}_{MAX_LIVE_WINDOW_DAYS}", tier="historical",
-                      source="WAREHOUSE_METERING_HISTORY x DEPARTMENT_MAP (share-matched window)")
+                      source=_DEPT_MART + " (share-matched window)")
             if _pr.usable():
                 _pool_df = _pr.df.copy()
                 _pool_df["USD"] = _pool_df["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))
@@ -1014,6 +1031,15 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *,
                     "ALLOCATED_USD": st.column_config.NumberColumn("Allocated $", format="$%.0f"),
                 },
             )
+    # R1-166: the header + caption above used to sit over nothing when the share read was empty or failed.
+    elif share_res.ok:
+        empty_state("no_data_yet", f"No role activity on these warehouses in {_wlab}.")
+    elif is_setup_absence(share_res.error_kind):
+        empty_state("needs_setup", "The role-share sources are not readable by this app's role, so no role "
+                                   "allocation is shown.")
+    else:
+        empty_state("unavailable", "Role usage shares could not be read, so no role allocation is shown.",
+                    detail=share_res.error)
 
     st.markdown("**Department budgets & pace**")
     panel_help(
@@ -1027,6 +1053,12 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *,
         styled_table(with_user_names(bud.df, _PAGE, user_col="UPDATED_BY", display_col="Updated by"))
     elif bud.ok:
         empty_state("needs_setup", "No department budgets set yet — add one below and the pace alert goes live.")
+    # R1-166: a failed budgets read used to leave the section blank under its header.
+    elif is_setup_absence(bud.error_kind):
+        empty_state("needs_setup", "DEPT_BUDGETS is not installed or not readable yet — an admin can check "
+                                   "Admin → Migrations & freshness.")
+    else:
+        empty_state("unavailable", "Department budgets could not be read.", detail=bud.error)
     if is_operator:
         dmap = _pf.get("dmap") or run(chargeback_sql.department_map(), page=_PAGE, key="cb_dmap_bud", tier="recent",
                    source="DEPARTMENT_MAP")
@@ -1075,6 +1107,14 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *,
         if map_res.usable():
             styled_table(with_user_names(map_res.df, _PAGE, user_col="UPDATED_BY", display_col="Updated by"),
                          height=280)
+        # R1-166: the same silent-on-failure shape -- say whether the map is empty or unreadable.
+        elif map_res.ok:
+            empty_state("no_data_yet", "No warehouse or role mappings yet — add one below.")
+        elif is_setup_absence(map_res.error_kind):
+            empty_state("needs_setup", "DEPARTMENT_MAP is not installed or not readable yet — an admin can "
+                                       "check Admin → Migrations & freshness.")
+        else:
+            empty_state("unavailable", "The department mapping could not be read.", detail=map_res.error)
         unmapped_whs = sorted(df[df["DEPARTMENT"] == "Unmapped"]["WAREHOUSE_NAME"].unique())
         c1, c2, c3 = st.columns(3)
         with c1:

@@ -1622,7 +1622,14 @@ SELECT
     ROUND(APPROX_PERCENTILE(calls.ELAPSED_MS, 0.95) / 1000, 1) AS P95_S,
     ROUND(SUM(COALESCE(att.CREDITS, 0)), 4) AS TOTAL_CREDITS,
     ROUND(SUM(COALESCE(att.CREDITS, 0)) / COUNT(*), 6) AS CREDITS_PER_CALL,
-    COUNT(att.CREDITS) AS ATTRIBUTED_CALLS
+    COUNT(att.CREDITS) AS ATTRIBUTED_CALLS,
+    -- R1-158: the per-CALL leader over EVERY group. Window functions run before ORDER BY / LIMIT, so
+    -- this names the true priciest-per-call proc even when it ranks below the top {limit} by TOTAL
+    -- (a rare, heavy monthly batch); a re-sort of the LIMITed rows could never see it.
+    FIRST_VALUE(calls.PROC_NAME) OVER (
+        ORDER BY SUM(COALESCE(att.CREDITS, 0)) / COUNT(*) DESC, calls.PROC_NAME) AS PC_LEADER_NAME,
+    FIRST_VALUE(ROUND(SUM(COALESCE(att.CREDITS, 0)) / COUNT(*), 6)) OVER (
+        ORDER BY SUM(COALESCE(att.CREDITS, 0)) / COUNT(*) DESC, calls.PROC_NAME) AS PC_LEADER_CREDITS
 FROM calls
 LEFT JOIN att ON att.RID = calls.QUERY_ID
 WHERE calls.PROC_NAME IS NOT NULL

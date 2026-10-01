@@ -21,7 +21,7 @@ from app.core.sqlsafe import sql_literal
 from app.core.state import filters
 from app.logic.ai_grounding import numbers_preserved as _numbers_preserved  # moved (Next-Fifty #24)
 from app.logic.ask import REGISTRY, question_stem, route
-from app.logic.ask.pricing import add_usd_estimates, is_ai_credit_column
+from app.logic.ask.pricing import add_usd_estimates, is_ai_credit_column, is_gross_cs_column
 from app.logic.ask.types import AnswerResult, AskParams
 from app.logic.formulas import md_dollars, safe_float
 from app.ui.components import load_settings, log_ui_event, page_header, styled_table
@@ -171,6 +171,11 @@ def _render_result(result: AnswerResult, company: str, params: AskParams,
                     _note = f"at ${compute_rate:.2f}/credit (compute rate)"
                 st.caption(f"$ columns are estimates = credits × rate, {_note}. "
                            "Edit the rates on Admin → Settings.")
+            # R1-115: gross cloud-services credits are left un-priced (pricing.is_gross_cs_column); say why.
+            if any(is_gross_cs_column(c) and str(c).upper().endswith("CREDITS") for c in ev.columns):
+                st.caption("CS credits are gross usage, before the account-level ~10% cloud-services "
+                           "adjustment, so they are not priced here. Cost ▸ Spend & Attribution ▸ "
+                           "'Which statement families bill the most cloud services' prices what is billed.")
 
     # Use the answer's OWN effective window (an answerer may clamp it, e.g. the
     # spend mart's 182-day horizon), never the raw request, so the caption can't
