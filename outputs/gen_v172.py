@@ -35,7 +35,7 @@ Repairs (after the CREATEs, before the version row; each idempotent and bounded)
 Reads V109, V133, V140 and V150 ONLY; never imports app/ (the literals the tests lock against the app are copies).
 No CALL, task or DROP statement at apply time. With PREFLIGHT_OUT set, also writes the read-only PREFLIGHT
 section (P172.1-P172.6); with PART_B_OUT set, the RUN_NEXT PART B verify grids (V172.1-V172.4); with REPAIR_OUT
-set, the owner-run OWNER_REPAIRS block (R172.1-R172.4). PART B and the repairs open with ALTER SESSION SET
+set, the owner-run OWNER_REPAIRS block (R172.0-R172.4). PART B and the repairs open with ALTER SESSION SET
 TIMEZONE = 'America/Chicago'. The byte-identity test never sets any of them.
 
 Run: python outputs/gen_v172.py
@@ -363,8 +363,9 @@ assert len(_creep) - 2 <= 100                       # the V164 SP_NOTIFY_WEBHOOK
 # ===================================================================================================
 # The repairs (plain statements; the UDF only ever on a plain column of a derived table, V030)
 # ===================================================================================================
-LIVE_UNLINKED = """\
-                AND e.STATUS IN ('OPEN', 'ACK', 'SNOOZED')
+LIVE_STATUSES = "('OPEN', 'ACK', 'SNOOZED')"      # the re-stamps' live set; the R172.1 owner list reads the same
+LIVE_UNLINKED = f"""\
+                AND e.STATUS IN {LIVE_STATUSES}
                 AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.INCIDENT_MEMBERS m
                                 WHERE m.MEMBER_KIND = 'ALERT' AND m.REF_ID = e.EVENT_ID)"""
 FQN_DB = "SPLIT_PART(SPLIT_PART(e.DEDUPE_KEY, '|', 2), '.', 1)"
@@ -769,13 +770,33 @@ for _proc, _frags in DDL_PRESENT.items():
         _ddl_rows.append(f"SELECT 'V172.1 {_proc} DDL lacks: {_f}', "
                          f"IFF(NOT CONTAINS({_ddl}, '{_f}'), 'OK', 'FAIL: still the old body')")
 _ddl_union = "\nUNION ALL\n".join(_ddl_rows)
-SINCE_APPLY = ("DATEADD('hour', -6, (SELECT MAX(APPLIED_AT) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION "
-               "WHERE VERSION = 172))")
+# V172.4 / R172.4 (review r1). One guarded arm = PAGE + ERROR_TYPE + CONTEXT (each arm logs its own CONTEXT
+# literal; the volume-drop and DQ_BREACH arms share 'dml_history_unavailable'). An arm is NEW when it logged since
+# the apply and not in the 14 days before; PRE-EXISTING arms (by design on an account without TASK_VERSIONS,
+# ORGANIZATION_USAGE or Cortex) are listed, never failed. The boundary is APPLIED_AT itself: the apply session
+# (RUN_NEXT pins Central first, correction 4) and the tasks (account zone, Central) both stamp Central wall-clock,
+# so a margin would only count the old bodies' last runs.
+_log_arms = re.findall(r"SELECT '(\w+)', '(\w+)',[^;]*?'([^']*)', CURRENT_ROLE\(\)", ci + sw)
+assert len(_log_arms) == 9 == len(set(_log_arms)) and {p for p, _, _ in _log_arms} == {"AnomalySweep",
+                                                                                        "ChangeImpactScan"}
+assert ci.count("APP_ERROR_LOG") == 2 and sw.count("APP_ERROR_LOG") == 7
+assert all("APP_ERROR_LOG" not in b for b in (wh, dr, cs))
+APPLY_AT = "(SELECT MAX(APPLIED_AT) AS T FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 172)"
+ERR_ARMS = f"""\
+    SELECT l.PAGE, l.ERROR_TYPE, l.CONTEXT,
+           COALESCE(l.ERROR_TYPE, '?') || ' (' || COALESCE(l.CONTEXT, '?') || ')' AS ARM, MAX(a.T) AS T,
+           COUNT_IF(l.LOGGED_AT < a.T) AS ROWS_BEFORE, COUNT_IF(l.LOGGED_AT >= a.T) AS ROWS_SINCE
+    FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG l
+    JOIN {APPLY_AT} a
+      ON l.LOGGED_AT >= DATEADD('day', -14, a.T)
+    WHERE l.PAGE IN ('AnomalySweep', 'ChangeImpactScan')
+    GROUP BY l.PAGE, l.ERROR_TYPE, l.CONTEXT
+    HAVING COUNT_IF(l.LOGGED_AT >= a.T) > 0"""
 
 PART_B = f"""\
 -- PART B -- V172 verify (READ-ONLY after the session pin). V172.1 + V172.2 right after the apply; V172.3 after the
--- next 06:40 / 06:50 Central change scans; V172.4 after the next TASK_ANOMALY_SWEEP. Every RESULT should read OK
--- (or the count named); paste the grids back.
+-- next 06:40 / 06:50 Central change scans; V172.4 after the next TASK_ANOMALY_SWEEP (07:00 Central). Every RESULT
+-- should read OK (or the count named); paste the grids back.
 {TZ_PIN}
 
 SELECT 'V172.1 SCHEMA_VERSION has 172' AS CHECK_NAME,
@@ -828,40 +849,62 @@ SELECT 'V172.3 tracking PROCEDURE rows with no frozen baseline',
 FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY
 WHERE OBJECT_TYPE = 'PROCEDURE' AND CURRENT_DATE() <= TRACKING_UNTIL AND BASELINE_FROM IS NULL;
 
--- V172.4 after the next TASK_ANOMALY_SWEEP and TASK_CHANGE_IMPACT_SCAN: no arm failed since the apply (a compile
---        surprise in a re-derived arm would be swallowed by its EXCEPTION and logged here). -6h absorbs a UTC apply
---        worksheet against the Central task clock.
-SELECT 'V172.4 no ' || p.PAGE || ' error since the apply' AS CHECK_NAME,
-       IFF(COUNT(l.PAGE) = 0, 'OK',
-           'FAIL: ' || COUNT(l.PAGE) || ' row(s): ' || LISTAGG(DISTINCT l.ERROR_TYPE, ', ')) AS RESULT
+-- V172.4 after the next TASK_CHANGE_IMPACT_SCAN (06:50) and TASK_ANOMALY_SWEEP (07:00 Central): no guarded arm
+--        started failing at the apply. A compile surprise in a re-derived arm is swallowed by its EXCEPTION and
+--        logged to APP_ERROR_LOG. An arm is PAGE + ERROR_TYPE + CONTEXT (the CONTEXT tells the volume-drop and
+--        DQ_BREACH arms apart). FAIL names an arm that logged since the apply and was silent in the 14 days before.
+--        An arm that logged before V172 too is pre-existing, listed after OK and never failed: on an account without
+--        TASK_VERSIONS, ORGANIZATION_USAGE or Cortex it logs on every run by design. R172.4 shows both sides. The
+--        boundary is the apply itself: APPLIED_AT (RUN_NEXT pins Central before the apply) and LOGGED_AT (the tasks
+--        run in the account zone) are both Central wall-clock, and the old bodies' last runs fall before it.
+SELECT 'V172.4 no new ' || p.PAGE || ' error since the apply' AS CHECK_NAME,
+       CASE WHEN MAX(a.T) IS NULL THEN 'FAIL: SCHEMA_VERSION has no 172 row'
+            WHEN COUNT_IF(x.ROWS_BEFORE = 0) > 0
+                THEN 'FAIL: new since the apply (read R172.4): '
+                     || LISTAGG(IFF(x.ROWS_BEFORE = 0, x.ARM, NULL), '; ')
+            ELSE 'OK' END
+       || IFF(COUNT_IF(x.ROWS_BEFORE > 0) > 0,
+              ' -- pre-existing, logged in the 14 days before V172 too: '
+              || LISTAGG(IFF(x.ROWS_BEFORE > 0, x.ARM, NULL), '; '), '') AS RESULT
 FROM (SELECT column1 AS PAGE FROM VALUES ('AnomalySweep'), ('ChangeImpactScan')) p
-LEFT JOIN DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG l
-       ON l.PAGE = p.PAGE AND l.LOGGED_AT >= {SINCE_APPLY}
-GROUP BY p.PAGE;
+CROSS JOIN {APPLY_AT} a
+LEFT JOIN (
+{ERR_ARMS}
+) x ON x.PAGE = p.PAGE
+GROUP BY p.PAGE
+ORDER BY 1;
 """
 
 # ===================================================================================================
 # OWNER_REPAIRS block (owner-run, after ALL of V162-V172 are applied). Central session first.
 # ===================================================================================================
 REPAIR = f"""\
--- OWNER REPAIRS -- V172 (R172.1-R172.4). Owner-run, after the apply, in a Snowsight worksheet. The first statement
+-- OWNER REPAIRS -- V172 (R172.0-R172.4). Owner-run, after the apply, in a Snowsight worksheet. The first statement
 -- pins the session to Central (the scans key days by CURRENT_DATE / ::DATE in the account zone). Every block is
--- read-only except the two commented, optional statements; nothing here re-raises an alert.
+-- read-only except two commented statements: the R172.0 CALL (recommended right after the apply) and the
+-- optional close under R172.3. Nothing here re-raises an alert.
 {TZ_PIN}
 
--- R172.0 (OPTIONAL) refresh the change-impact registry now instead of at 06:50 Central -- the same work as the
--- daily TASK_CHANGE_IMPACT_SCAN (it can raise PERF_CHANGE_REGRESSION for rows that now cross the bar). Uncomment
--- to run; otherwise read R172.1 after the next scheduled run.
+-- R172.0 (RECOMMENDED, right after the apply, off-peak) refresh the change-impact registry now instead of at 06:50
+-- Central. Until that scan runs, the tracking rows sit on mixed bases: R4 re-froze the TASK baselines per scheduled
+-- run while AFTER_CALLS, AFTER_FAILS, VERDICT and VERDICT_DETAIL still hold the last V140 scan's attempt-based
+-- values (a task with 7 of 14 runs retried once on both sides: BASELINE_CALLS 14 beside AFTER_CALLS 21, a +7
+-- calls delta, under the old 'runs 21->21' text), and the PROCEDURE baselines R3 nulled still show their old
+-- VERDICT. This CALL is the daily TASK_CHANGE_IMPACT_SCAN's own work (one scan's ACCOUNT_USAGE reads) and can
+-- raise PERF_CHANGE_REGRESSION for rows that now cross the bar, as the 06:50 run would. Uncomment to run; if
+-- skipped, the Operations change table reads mixed until 06:50.
 -- CALL DBA_MAINT_DB.OVERWATCH.SP_CHANGE_IMPACT_SCAN();
 
--- R172.1 (R2-021 / R2-025 / R2-022) OPEN or ACK PERF_CHANGE_REGRESSION alerts whose re-computed verdict is no
---        longer REGRESSED (a suffix-collision or retry over-count raised them). Resolve them in the app as
---        EXPECTED (Alerts drawer, type-to-confirm) -- never by SQL: RESOLVE feeds per-rule precision.
+-- R172.1 (R2-021 / R2-025 / R2-022) live PERF_CHANGE_REGRESSION alerts -- OPEN, ACK or SNOOZED, the set the R1b
+--        re-stamp covers -- whose re-computed verdict is no longer REGRESSED (a suffix-collision or retry
+--        over-count raised them). Read after R172.0 or the next 06:50 scan. Resolve them in the app as EXPECTED
+--        (Alerts drawer, type-to-confirm; wake a SNOOZED one first via Alerts > Snoozed > Wake selected now, or it
+--        wakes back into triage still open) -- never by SQL: RESOLVE feeds per-rule precision.
 SELECT e.EVENT_ID, e.STATUS, e.SEVERITY, e.TITLE, r.OBJECT_TYPE, r.VERDICT, r.VERDICT_DETAIL, r.LAST_EVALUATED_AT
 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
 JOIN DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
   ON e.DEDUPE_KEY = 'PERF_CHANGE_REGRESSION|' || r.OBJECT_NAME || '|' || TO_VARCHAR(r.CHANGE_SEEN_AT::DATE)
-WHERE e.RULE_ID = 'PERF_CHANGE_REGRESSION' AND e.STATUS IN ('OPEN', 'ACK')
+WHERE e.RULE_ID = 'PERF_CHANGE_REGRESSION' AND e.STATUS IN {LIVE_STATUSES}
   AND r.VERDICT <> 'REGRESSED'
 ORDER BY e.RAISED_AT;
 
@@ -902,14 +945,26 @@ ORDER BY 1, 4;
 --    AND EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
 --                WHERE c.RULE_ID = e.RULE_ID AND NOT c.ENABLED AND e.RAISED_AT > c.UPDATED_AT);
 
--- R172.4 (R2-024) after the next TASK_ANOMALY_SWEEP: the re-derived arms raised without error (expect 0 rows).
-SELECT l.LOGGED_AT, l.ERROR_TYPE, l.ERROR_MESSAGE, l.CONTEXT
-FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG l
-WHERE l.PAGE IN ('AnomalySweep', 'ChangeImpactScan')
-  AND l.LOGGED_AT >= {SINCE_APPLY}
-ORDER BY l.LOGGED_AT DESC;
+-- R172.4 (every re-derived guarded arm) after the next TASK_ANOMALY_SWEEP (07:00 Central): the APP_ERROR_LOG rows
+--        of each arm that logged since the apply, beside the same arm's rows in the 14 days before (the V172.4 arm
+--        table). NEW since V172 = the arm was silent before: a compile surprise in a re-derived arm, swallowed by
+--        its EXCEPTION -- fix it before the next run. PRE-EXISTING = the arm already logged before V172 (by design
+--        on an account without TASK_VERSIONS, ORGANIZATION_USAGE or Cortex): a V172 problem only if its since-V172
+--        ERROR_MESSAGE differs from the before one. No rows = no arm logged since the apply.
+SELECT IFF(x.ROWS_BEFORE = 0, 'NEW since V172', 'PRE-EXISTING') AS ARM_STATUS, x.PAGE, x.ARM,
+       IFF(l.LOGGED_AT >= x.T, 'since V172', 'before V172') AS SIDE, l.LOGGED_AT, l.ERROR_MESSAGE
+FROM (
+{ERR_ARMS}
+) x
+JOIN DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG l
+  ON l.PAGE = x.PAGE AND EQUAL_NULL(l.ERROR_TYPE, x.ERROR_TYPE) AND EQUAL_NULL(l.CONTEXT, x.CONTEXT)
+ AND l.LOGGED_AT >= DATEADD('day', -14, x.T)
+ORDER BY 1, 2, 3, l.LOGGED_AT DESC;
 """
-assert REPAIR.splitlines()[3] == TZ_PIN and PART_B.splitlines()[3] == TZ_PIN
+for _x in (PART_B, REPAIR):                       # Central first (correction 4): the first statement
+    assert next(ln for ln in _x.splitlines() if ln and not ln.startswith("--")) == TZ_PIN
+assert f"AND e.STATUS IN {LIVE_STATUSES}" in REPAIR and f"e.STATUS IN {LIVE_STATUSES}" in LIVE_UNLINKED
+assert PART_B.count(ERR_ARMS) == 1 and REPAIR.count(ERR_ARMS) == 1 and "'hour', -6" not in PART_B + REPAIR
 for _sql in (PREFLIGHT, PART_B, REPAIR):
     assert "\\" not in _sql and "$$" not in _sql and "\r" not in _sql
 

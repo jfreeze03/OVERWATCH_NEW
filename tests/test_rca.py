@@ -187,7 +187,7 @@ def test_changes_adapter_magnitude_humanizes_verdict_detail_durations():
                          "VERDICT": "REGRESSED", "VERDICT_DETAIL": detail}])
     mt = candidates_from_changes(reg)[0]["magnitude_text"]
     assert mt == "Regressed — " + humanize_verdict_detail(detail)[:60]
-    assert "p95 30m → 40m" in mt
+    assert "p95 30m -> 40m" in mt                                         # the V172 scans' ASCII arrow
     assert not re.search(r"[0-9.]+s->", mt) and "1800.0s" not in mt
     # humanize first, THEN cut: a raw p95 token straddling char 60 is still humanized (slicing first
     # left 'p95 1800.0s->24', which the regex can no longer match)

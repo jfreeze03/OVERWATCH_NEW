@@ -796,11 +796,15 @@ def test_verdict_detail_durations_render_in_hr_min_sec():
           "| fail 0->1.5% | 120->140 queries")
     got = humanize_verdict_detail(wh)
     assert "1800.0s" not in got and "2400.0s" not in got and "min/d" not in got
-    assert got == ("credits/day 10.5->12.25 | p95 30m → 40m | queue 2h 25m → 3h 20m/day "
+    # V172 review: the shim writes the scans' own spaced ASCII ' -> ' (V172 SQL), so a pre-V172 row and a V172
+    # row read the same arrow side by side in the 90-day drills (no Unicode arrow beside an ASCII one)
+    assert got == ("credits/day 10.5->12.25 | p95 30m -> 40m | queue 2h 25m -> 3h 20m/day "
                    "| fail 0->1.5% | 120->140 queries")                  # non-durations untouched
+    assert "→" not in got
     obj = "runs 10->12 | fails 0->1 | p95 ?s->95.5s | credits/call 0.0012->0.0019"
-    assert humanize_verdict_detail(obj) == ("runs 10->12 | fails 0->1 | p95 ? → 1m 36s "
+    assert humanize_verdict_detail(obj) == ("runs 10->12 | fails 0->1 | p95 ? -> 1m 36s "
                                             "| credits/call 0.0012->0.0019")
+    assert humanize_verdict_detail(got) == got                            # the shim's own output is a fixed point
     body = read(_OPS)
     assert body.count("wh_change.humanize_verdict_detail(_verdict_detail)") == 1
     assert body.count("wh_change.humanize_verdict_detail(_vd)") == 1
@@ -849,7 +853,7 @@ def test_workbench_recent_changes_detail_renders_hr_min_sec(monkeypatch):
                                   entity_key="WH_A")
     wb.render_entity_360("ALL")
     (tbl,) = [t for t in seen["tables"] if "DETAIL" in t.columns]
-    assert tbl["DETAIL"].iloc[0] == "credits/day 12.34->15.67 | p95 30m → 40m | queue 2h 25m → 3h 20m/day"
+    assert tbl["DETAIL"].iloc[0] == "credits/day 12.34->15.67 | p95 30m -> 40m | queue 2h 25m -> 3h 20m/day"
     assert "1800.0s" not in tbl["DETAIL"].iloc[0] and "min/d" not in tbl["DETAIL"].iloc[0]
     assert tbl["DETAIL"].iloc[1] is None                                  # a NULL detail stays NULL
     assert list(tbl.columns) == list(df.columns)                          # same table, same columns

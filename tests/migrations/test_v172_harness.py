@@ -548,6 +548,131 @@ def test_repairs_rerun_before_the_version_row_is_harmless():
     assert _snapshot(con) == first
 
 
+# ============================================================================================================
+# Owner grids (review r1): V172.4 / R172.4 flag only arms new since the apply; R172.1 reads every live status
+# ============================================================================================================
+_ARM_RE = re.compile(r"SELECT '(AnomalySweep|ChangeImpactScan)', '(\w+)',[^;]*?'([^']*)', CURRENT_ROLE\(\)", re.S)
+_APPLY = "2026-09-30 11:30:00"                           # Central wall-clock (RUN_NEXT pins Central before the apply)
+
+
+def _owner_grids(tmp_path) -> tuple[str, str]:
+    from tests.migrations.test_v172_detection_scans_company_and_accuracy import _extras
+    ex = _extras(tmp_path)
+    return ex["part_b"], ex["repair"]
+
+
+def _grid_sql(stmt: str) -> str:
+    s = _to_sqlite(stmt.strip().rstrip(";")).replace("LISTAGG(", "GROUP_CONCAT(")
+    vals = "FROM VALUES ('AnomalySweep'), ('ChangeImpactScan')) p"
+    s = s.replace(vals, "FROM (VALUES ('AnomalySweep'), ('ChangeImpactScan'))) p")
+    assert "LISTAGG" not in s and "FROM VALUES" not in s, s
+    return s
+
+
+def _arms() -> dict[str, tuple[str, str, str]]:
+    found = _ARM_RE.findall(_proc_body(_MIG, "SP_CHANGE_IMPACT_SCAN") + _proc_body(_MIG, "SP_ANOMALY_SWEEP"))
+    assert len(found) == 9
+    return {ctx: (page, et, ctx) for page, et, ctx in found}
+
+
+def _error_log_db(applied: bool = True) -> sqlite3.Connection:
+    con = _db()
+    con.create_function("EQUAL_NULL", 2, lambda a, b: int(a == b))
+    con.execute("DROP TABLE SCHEMA_VERSION")
+    con.execute("CREATE TABLE SCHEMA_VERSION (VERSION INT, APPLIED_AT TEXT)")
+    con.execute("CREATE TABLE APP_ERROR_LOG (LOGGED_AT TEXT, PAGE TEXT, ERROR_TYPE TEXT, ERROR_MESSAGE TEXT, "
+                "CONTEXT TEXT, ROLE_NAME TEXT)")
+    if applied:
+        con.execute("INSERT INTO SCHEMA_VERSION VALUES (171, '2026-09-29 10:00:00'), (172, ?)", (_APPLY,))
+    arms = _arms()
+
+    def log(at: str, ctx: str, msg: str = "boom") -> None:
+        page, et, c = arms[ctx]
+        con.execute("INSERT INTO APP_ERROR_LOG VALUES (?, ?, ?, ?, ?, 'OWNER')", (at, page, et, msg, c))
+
+    for day in range(10, 31):                             # 2026-09-10 .. 2026-10-01, the daily 06:50 / 07:00 runs
+        d = f"2026-09-{day:02d}"
+        log(f"{d} 06:50:00", "TASK registration skipped; procedures still tracked")    # no TASK_VERSIONS: by design
+        log(f"{d} 07:00:00", "org creep check skipped")                                # no ORGANIZATION_USAGE
+        log(f"{d} 07:00:00", "volume-drop check skipped")
+    log("2026-10-01 06:50:00", "TASK registration skipped; procedures still tracked")
+    log("2026-10-01 07:00:00", "org creep check skipped")
+    log("2026-10-01 07:00:00", "volume-drop check skipped")
+    log("2026-10-01 07:00:00", "DQ_BREACH check skipped", "SQL compilation error: invalid identifier")   # NEW arm
+    log("2026-09-12 07:00:00", "DQ_SCHEMA_DRIFT check skipped")                        # 18 days before: out of reach
+    log("2026-10-01 07:00:00", "DQ_SCHEMA_DRIFT check skipped", "SQL compilation error: drift")         # NEW arm
+    log("2026-09-29 07:00:00", "COST_CLOUD_SVC_ANOMALY check skipped")                 # the OLD bodies' runs --
+    log("2026-09-30 07:00:00", "COST_CLOUD_SVC_ANOMALY check skipped")                 # 4.5h before the apply
+    con.execute("INSERT INTO APP_ERROR_LOG VALUES ('2026-10-01 07:05:00', 'Alerts', 'x', 'y', 'z', 'OWNER')")
+    return con
+
+
+def test_v172_4_fails_only_for_an_arm_new_since_the_apply(tmp_path):
+    part_b, _ = _owner_grids(tmp_path)
+    stmt = _grid_sql(part_b[part_b.index("SELECT 'V172.4 "):])
+    got = dict(_error_log_db().execute(stmt).fetchall())
+    sweep, scan = got["V172.4 no new AnomalySweep error since the apply"], got[
+        "V172.4 no new ChangeImpactScan error since the apply"]
+    fail, pre = sweep.split(" -- pre-existing, logged in the 14 days before V172 too: ")
+    assert fail.startswith("FAIL: new since the apply (read R172.4): ")
+    assert set(fail.split(": ", 2)[2].split("; ")) == {"dml_history_unavailable (DQ_BREACH check skipped)",
+                                                        "schema_drift_scan_failed (DQ_SCHEMA_DRIFT check skipped)"}
+    assert set(pre.split("; ")) == {"dml_history_unavailable (volume-drop check skipped)",
+                                    "org_usage_unavailable (org creep check skipped)"}
+    assert "cloud_svc" not in sweep             # the old bodies' runs 4.5h before the apply are not since the apply
+    assert scan == ("OK -- pre-existing, logged in the 14 days before V172 too: task_versions_unavailable "
+                    "(TASK registration skipped; procedures still tracked)")
+    quiet = _error_log_db()
+    quiet.execute("DELETE FROM APP_ERROR_LOG WHERE LOGGED_AT >= ?", (_APPLY,))
+    assert sorted(r[1] for r in quiet.execute(stmt).fetchall()) == ["OK", "OK"]
+    unapplied = _error_log_db(applied=False)
+    assert {r[1] for r in unapplied.execute(stmt).fetchall()} == {"FAIL: SCHEMA_VERSION has no 172 row"}
+
+
+def test_r172_4_lists_both_sides_of_every_arm_logging_since_the_apply(tmp_path):
+    _, rep = _owner_grids(tmp_path)
+    r4 = rep[rep.index("-- R172.4 "):]
+    rows = _error_log_db().execute(_grid_sql(r4[:r4.index(";\n") + 1])).fetchall()
+    by_arm: dict[str, set] = {}
+    for status, page, arm, side, _at, _msg in rows:
+        by_arm.setdefault(arm, set()).add((status, page, side))
+    assert by_arm == {
+        "dml_history_unavailable (DQ_BREACH check skipped)": {("NEW since V172", "AnomalySweep", "since V172")},
+        "schema_drift_scan_failed (DQ_SCHEMA_DRIFT check skipped)": {("NEW since V172", "AnomalySweep",
+                                                                      "since V172")},
+        "dml_history_unavailable (volume-drop check skipped)": {("PRE-EXISTING", "AnomalySweep", "before V172"),
+                                                                ("PRE-EXISTING", "AnomalySweep", "since V172")},
+        "org_usage_unavailable (org creep check skipped)": {("PRE-EXISTING", "AnomalySweep", "before V172"),
+                                                            ("PRE-EXISTING", "AnomalySweep", "since V172")},
+        "task_versions_unavailable (TASK registration skipped; procedures still tracked)": {
+            ("PRE-EXISTING", "ChangeImpactScan", "before V172"), ("PRE-EXISTING", "ChangeImpactScan", "since V172")},
+    }
+    assert [r[0] for r in rows][:2] == ["NEW since V172"] * 2                 # the new arms lead the grid
+    assert min(r[4] for r in rows) >= "2026-09-16 11:30:00"                   # 14 days before the apply, no more
+    assert sum(1 for r in rows if r[2].startswith("task_versions")) == 15     # 14 runs before + the one since
+
+
+def test_r172_1_lists_snoozed_false_alerts_too(tmp_path):
+    _, rep = _owner_grids(tmp_path)
+    r1 = rep[rep.index("-- R172.1 "):rep.index("-- R172.2 ")]
+    con = _db()
+    con.execute("DROP TABLE ALERT_EVENTS")
+    con.execute("CREATE TABLE ALERT_EVENTS (EVENT_ID TEXT, RULE_ID TEXT, STATUS TEXT, SEVERITY TEXT, TITLE TEXT, "
+                "DEDUPE_KEY TEXT, RAISED_AT TEXT)")
+    con.execute("DROP TABLE OBJECT_CHANGE_REGISTRY")
+    con.execute("CREATE TABLE OBJECT_CHANGE_REGISTRY (OBJECT_TYPE TEXT, OBJECT_NAME TEXT, CHANGE_SEEN_AT TEXT, "
+                "VERDICT TEXT, VERDICT_DETAIL TEXT, LAST_EVALUATED_AT TEXT)")
+    for i, (status, verdict) in enumerate((("OPEN", "NEUTRAL"), ("ACK", "IMPROVED"), ("SNOOZED", "NEUTRAL"),
+                                           ("RESOLVED", "NEUTRAL"), ("SNOOZED", "REGRESSED"))):
+        obj = f"DB.S.SP_{i}"
+        con.execute("INSERT INTO OBJECT_CHANGE_REGISTRY VALUES ('PROCEDURE', ?, '2026-09-25 10:00:00', ?, 'd', ?)",
+                    (obj, verdict, _t()))
+        con.execute("INSERT INTO ALERT_EVENTS VALUES (?, 'PERF_CHANGE_REGRESSION', ?, 'HIGH', 't', ?, ?)",
+                    (f"e{i}", status, f"PERF_CHANGE_REGRESSION|{obj}|2026-09-25", _t(hours=-i)))
+    got = [r[0] for r in con.execute(_grid_sql(r1)).fetchall()]
+    assert sorted(got) == ["e0", "e1", "e2"]          # the snoozed false alert is listed; RESOLVED / REGRESSED not
+
+
 def test_translation_fails_closed():
     with pytest.raises(AssertionError):
         _to_sqlite("SELECT :unknown_bind")

@@ -421,6 +421,69 @@ def _between(text: str, start: str, end: str) -> str:
     return text[i:text.index(end, i)]
 
 
+_ARM_RE = re.compile(r"SELECT '(AnomalySweep|ChangeImpactScan)', '(\w+)',[^;]*?'([^']*)', CURRENT_ROLE\(\)", re.S)
+
+
+def test_v172_error_log_checks_flag_only_arms_new_since_the_apply(tmp_path):
+    """Review r1 (V172.4 / R172.4). APPLIED_AT (the RUN_NEXT session, Central-pinned by correction 4) and LOGGED_AT
+    (the 06:50 / 07:00 Central tasks) are both Central wall-clock, so the old -6h margin only reached back over the
+    last OLD-body run; and every guarded arm that fails by design on this account (no TASK_VERSIONS, ORGANIZATION_USAGE
+    or Cortex) read 'FAIL: n row(s)'. Now: the boundary is APPLIED_AT exactly, an arm is PAGE + ERROR_TYPE + CONTEXT,
+    FAIL names only an arm silent in the 14 days before the apply, and PART B and R172.4 share that arm table."""
+    ex = _extras(tmp_path)
+    part_b, rep = ex["part_b"], ex["repair"]
+    for sql in (part_b, rep):
+        assert "'hour', -6" not in sql and "-6h" not in sql
+    arms = _between(part_b, "    SELECT l.PAGE, l.ERROR_TYPE, l.CONTEXT,", "    HAVING COUNT_IF(l.LOGGED_AT >= a.T) > 0\n")
+    assert part_b.count(arms) == 1 and rep.count(arms) == 1                    # one arm table, both grids
+    assert "GROUP BY l.PAGE, l.ERROR_TYPE, l.CONTEXT" in arms
+    assert "COUNT_IF(l.LOGGED_AT < a.T) AS ROWS_BEFORE" in arms
+    assert "ON l.LOGGED_AT >= DATEADD('day', -14, a.T)" in arms
+    assert "JOIN (SELECT MAX(APPLIED_AT) AS T FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 172) a" in arms
+    v4 = part_b[part_b.index("SELECT 'V172.4 "):]
+    assert "WHEN MAX(a.T) IS NULL THEN 'FAIL: SCHEMA_VERSION has no 172 row'" in v4      # never OK unapplied
+    assert "WHEN COUNT_IF(x.ROWS_BEFORE = 0) > 0" in v4 and "ELSE 'OK' END" in v4
+    r4 = rep[rep.index("-- R172.4 "):]
+    assert "IFF(x.ROWS_BEFORE = 0, 'NEW since V172', 'PRE-EXISTING') AS ARM_STATUS" in r4
+    assert "EQUAL_NULL(l.CONTEXT, x.CONTEXT)" in r4
+    # the CONTEXT literal is what tells two arms of one ERROR_TYPE apart (volume drop vs DQ_BREACH): every guarded
+    # arm of the two logging procs is a distinct (PAGE, ERROR_TYPE, CONTEXT), and the page list is exactly theirs
+    found = _ARM_RE.findall(_body(_CI) + _body(_SW))
+    assert len(found) == 9 and len(set(found)) == 9, found
+    assert len({(pg, et) for pg, et, _ in found}) == 8                          # dml_history_unavailable twice
+    assert {pg for pg, _, _ in found} == {"AnomalySweep", "ChangeImpactScan"}
+    for sql in (arms, v4):
+        assert "('AnomalySweep', 'ChangeImpactScan')" in sql or "('AnomalySweep'), ('ChangeImpactScan')" in sql
+    for proc in (_WH, _DR, _CS):                                                # the other three never log
+        assert "APP_ERROR_LOG" not in proc
+
+
+def test_v172_r172_1_reads_every_status_the_restamp_covers(tmp_path):
+    """Review r1: R1b re-stamps OPEN / ACK / SNOOZED PERF_CHANGE_REGRESSION events, so the owner's list of alerts the
+    re-computed verdict no longer supports must read the same set -- a snoozed false alert otherwise wakes back
+    into triage (V086) still open. A SNOOZED one is woken first (the Alerts > Snoozed control) and then resolved."""
+    rep = _extras(tmp_path)["repair"]
+    r1 = _between(rep, "-- R172.1 ", "-- R172.2 ")
+    statuses = re.search(r"AND e\.STATUS IN (\([^)]*\))", _repair("-- R1b live PERF")).group(1)
+    assert "'SNOOZED'" in statuses and r1.count(f"e.STATUS IN {statuses}") == 1
+    assert "Wake selected now" in r1 and 'st.button("Wake selected now"' in read("app/ui/pages/alerts.py")
+    assert "never by SQL" in r1
+
+
+def test_v172_r172_0_is_recommended_and_names_the_mixed_basis_gap(tmp_path):
+    """Review r1: R4 re-freezes TASK baselines at apply while AFTER_* / VERDICT / VERDICT_DETAIL keep the last V140
+    scan's attempt-based values, and R3 nulls PROCEDURE baselines under their old VERDICT -- the change table is on
+    mixed bases until the next 06:50 scan. R172.0 (one scan, the daily task's work) closes the gap: recommended."""
+    rep = _extras(tmp_path)["repair"]
+    r0 = _between(rep, "-- R172.0 ", "-- R172.1 ")
+    assert r0.startswith("-- R172.0 (RECOMMENDED, right after the apply")
+    assert r0.count("-- CALL DBA_MAINT_DB.OVERWATCH.SP_CHANGE_IMPACT_SCAN();") == 1          # still commented
+    for phrase in ("mixed bases", "AFTER_CALLS", "VERDICT_DETAIL", "R3", "R4", "06:50"):
+        assert phrase in r0, phrase
+    head = rep[:rep.index("ALTER SESSION")]
+    assert "R172.0" in head and "recommended" in head
+
+
 # ---------------------------------------------------------------------------------------------------------------
 # Shape
 # ---------------------------------------------------------------------------------------------------------------
@@ -698,6 +761,25 @@ def test_v172_humanized_detail_fits_and_the_app_shim_leaves_it_alone():
     assert len(wh) <= 500 and len(obj) <= 500                                      # VERDICT_DETAIL VARCHAR(500)
     for text in (wh, obj, "credits/day 10.5->12.25 | p95 5.0s -> 6.1s | queue 0s -> 30s/day"):
         assert humanize_verdict_detail(text) == text
+
+
+def test_v172_scans_and_the_app_shim_write_the_same_arrow():
+    """Review r1: the 90-day drills (Operations object / warehouse change, Workbench Recent changes, rca Magnitude)
+    list closed pre-V172 rows -- re-rendered by the shim -- beside V172 rows humanized in SQL. Both must print the
+    scans' ASCII ' -> ' (every line V172 adds is ASCII), so an old row reads exactly like a new one."""
+    from app.logic.wh_change import humanize_verdict_detail
+    sql_arrows = re.findall(r"^\s*\|\| '([^']*->[^']*)'$", _body(_CI) + _body(_WH), re.M)
+    assert sql_arrows == [" -> "] * 3                                 # between each pair of HD CASE blocks
+    old_wh = "credits/day 1.0->1.0 | p95 1800.0s->2400.0s | queue 145.00->200.00 min/d | fail 0->0% | 20->20 queries"
+    new_wh = (f"credits/day 1.0->1.0 | p95 {_mirror(Decimal('1800.0'), '?')}{sql_arrows[0]}"
+              f"{_mirror(Decimal('2400.0'), '?')} | queue {_mirror(Decimal('145.00') * 60, '0s')}{sql_arrows[0]}"
+              f"{_mirror(Decimal('200.00') * 60, '0s')}/day | fail 0->0% | 20->20 queries")
+    assert humanize_verdict_detail(old_wh) == new_wh == ("credits/day 1.0->1.0 | p95 30m -> 40m "
+                                                         "| queue 2h 25m -> 3h 20m/day | fail 0->0% | 20->20 queries")
+    old_obj = "runs 10->12 | fails 0->1 | p95 ?s->95.5s | credits/call n/a->n/a"
+    assert humanize_verdict_detail(old_obj) == (f"runs 10->12 | fails 0->1 | p95 ?{sql_arrows[0]}"
+                                                f"{_mirror(Decimal('95.5'), '?')} | credits/call n/a->n/a")
+    assert "\u2192" not in read("app/logic/wh_change.py")
 
 
 # ---------------------------------------------------------------------------------------------------------------
