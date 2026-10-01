@@ -110,8 +110,8 @@ def _handler(page: str, fact: str) -> str:
             "            emsg := SQLERRM;\n"
             "            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, "
             "ROLE_NAME)\n"
-            f"            SELECT '{page}', 'fact_load_failed', :emsg, '{fact} - previous fill retained on rollback, "
-            "error re-raised', CURRENT_ROLE();\n"
+            f"            SELECT '{page}', 'fact_load_failed', LEFT(:emsg, 2000), '{fact} - previous fill retained on "
+            "rollback, error re-raised', CURRENT_ROLE();\n"
             "            RAISE;\n"
             "    END;\n")
 
@@ -221,6 +221,13 @@ def test_v166_preflight_previews_the_repair_with_its_own_text(extras):
     assert "JOIN s ON t.DAY = s.DAY AND t.DATABASE_NAME = s.DATABASE_NAME" in pre      # ... on its own ON clause
     assert "OPTIONAL" in pre[pre.index("-- P166.4 "):].splitlines()[0]
     assert "TABLE(GENERATOR(ROWCOUNT => 401))" in pre               # the R2-011 calendar-gap grid
+    # P166.4 (review r1): the session-age buckets need SESSIONS' full retention (the 'older than 30 days' bucket is
+    # the C10-width owner question), so the label says so instead of '7 days of ... SESSIONS', and only the week's
+    # sessions are aggregated
+    s_cte = _between(pre[pre.index("-- P166.4 "):], "s AS (\n", "\n)\n")
+    assert "WHERE SESSION_ID IN (SELECT SESSION_ID FROM q)" in s_cte and "GROUP BY 1" in s_cte
+    flat = " ".join(pre.replace("--", " ").split())
+    assert "SESSIONS full retention" in flat and "x SESSIONS)" not in flat
 
 
 def test_v166_part_b_checks_each_proc_and_the_repair(extras):
@@ -262,9 +269,11 @@ def test_v166_repair_pins_central_first_and_guards_every_heal(extras):
         assert "WHEN OTHER THEN" in handler and "RETURN 'FAILED: '" in handler and "RAISE" not in handler
         assert "'OwnerRepair'" in handler and "'OwnerRepair'" in body
         assert re.search(r"'V166 ' \|\| [^,]*:n[^,]*, CURRENT_ROLE\(\)", b) or ":n" not in b
-    # the security heal refuses to overlap the hourly graph; the verdicts are the latest procs' own RETURNs
+    # the security heal holds the hourly graph (test_v166_repair_security_heal_holds_the_hourly_graph); the verdicts
+    # are the latest procs' own RETURNs
     sec, stor, app = blocks
-    assert "NOT BETWEEN 30 AND 50) THEN" in sec and "RETURN 'WAIT: " in sec
+    assert _HOURLY_SUSPEND in sec and "RETURN 'WAIT: " in sec
+    assert not [b for b in (stor, app) if "ALTER TASK" in b or "called" in b]
     assert "rv = 'security facts loaded 180d'" in sec
     assert "RETURN 'security facts loaded ' || d || 'd';" in _P["SP_LOAD_SECURITY_FACTS"]
     for b, name in ((stor, "SP_LOAD_STORAGE_TRUTH"), (app, "SP_LOAD_APP_COST")):
@@ -281,6 +290,59 @@ def test_v166_repair_pins_central_first_and_guards_every_heal(extras):
     for s in stmts:
         if not s.startswith("EXECUTE IMMEDIATE"):
             assert sqlglot.parse_one(s, dialect="snowflake") is not None, s[:60]
+
+
+_HOURLY = "DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY"
+_HOURLY_SUSPEND = f"ALTER TASK IF EXISTS {_HOURLY} SUSPEND;"
+_HOURLY_RESUME = f"ALTER TASK IF EXISTS {_HOURLY} RESUME;"
+_HOURLY_ENABLE = f"SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('{_HOURLY}');"
+
+
+def test_v166_repair_security_heal_holds_the_hourly_graph(extras):
+    """R166.2 (review r1). The d>3 arm commits each DELETE before its INSERT and FACT_SECURITY_CHANGE's key is not
+    enforced. The old wall-clock guard (:30-:50 Central) checked only the start: a long scan, or a slow graph whose
+    TASK_LOAD_SECURITY_FACTS ran at :30 or later, still overlapped the hourly insert (doubled rows), and a failed CALL
+    left ~177 days deleted under a pane that did not say so. Now (the backfill_365 B12 pattern, which runs this same
+    CALL inside its suspend window): SUSPEND the hourly root first, refuse (WAIT) while a graph run is still in flight
+    (a suspended root finishes its current run), RESUME on every exit the block can catch, a standalone RESUME pair
+    right after it for the exits it cannot (timeout / Stop), and the risk named in the header and both FAILED panes.
+    The executed walk of every path is test_v166_harness.py::test_security_heal_paths."""
+    from tests.test_backfill_suspend_window import _statements
+    rep = extras["REPAIR_OUT"]
+    stmts = _statements(rep)
+    at = next(i for i, s in enumerate(stmts) if "SP_LOAD_SECURITY_FACTS(180);" in s)
+    sec = stmts[at]
+    assert [s.strip() + ";" for s in stmts[at + 1:at + 3]] == [_HOURLY_RESUME, _HOURLY_ENABLE]   # the safety net
+    assert "MINUTE(" not in sec and "NOT BETWEEN" not in sec                                    # no wall-clock guess
+    code = [ln.strip() for ln in sec.splitlines() if ln.strip() and not ln.strip().startswith("--")]
+    begin = code.index("BEGIN")
+    assert code[begin + 1] == _HOURLY_SUSPEND                     # before anything else the block does
+    probe = " ".join(code[begin + 2:begin + 5])
+    assert probe == ("SELECT COUNT(*) INTO :running FROM TABLE(DBA_MAINT_DB.INFORMATION_SCHEMA.CURRENT_TASK_GRAPHS("
+                     "ROOT_TASK_NAME => 'TASK_LOAD_HOURLY')) WHERE DATABASE_NAME = 'DBA_MAINT_DB' AND SCHEMA_NAME = "
+                     "'OVERWATCH' AND STATE = 'EXECUTING';")
+    assert code[begin + 5] == "IF (running > 0) THEN"
+    call = code.index("CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_SECURITY_FACTS(180);")
+    assert code[call - 1] == "called := TRUE;"                    # the note is only for a CALL that started
+    # every RETURN after the SUSPEND has a RESUME (+ dependents) as the nearest task statement above it
+    for i, ln in enumerate(code):
+        if ln.startswith("RETURN "):
+            above = [x for x in code[:i] if x.startswith("ALTER TASK")]
+            assert above[-1] == _HOURLY_RESUME, ln[:50]
+    for i, ln in enumerate(code):
+        if ln == _HOURLY_RESUME:
+            assert code[i + 1] == _HOURLY_ENABLE
+    # the risk: in the header and in both FAILED panes (the handler's only once the CALL started)
+    head = _between(rep, "-- R166.2 ", "EXECUTE IMMEDIATE $$")
+    flat = " ".join(head.replace("--", " ").split())
+    for frag in ("FACT_SECURITY_LOGIN_DAILY", "commits each DELETE before its INSERT", "STATEMENT_TIMEOUT_IN_SECONDS",
+                 "SUSPEND", "WAIT", "RESUME"):
+        assert frag in flat, frag
+    noted = [ln for ln in code if ln.startswith("RETURN 'FAILED: ") and "FACT_SECURITY_LOGIN_DAILY" in ln]
+    assert len(noted) == 2 and all("re-run this block" in ln and "FACT_SECURITY_CHANGE" in ln for ln in noted)
+    handler = code[code.index("EXCEPTION"):]
+    assert handler[handler.index(noted[1]) - 1] == "IF (called) THEN"
+    assert len([ln for ln in handler if ln.startswith("RETURN 'FAILED: ")]) == 2
 
 
 # -- guard, order, shape ---------------------------------------------------------------------------------------
@@ -504,10 +566,29 @@ def test_v166_r2_011_statement_order_and_dml_only_transaction(name, fact, page):
     assert not re.search(r"\b(?:CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|MERGE)\b", txn)   # B34: no implicit commit
     assert txn.count("DELETE FROM") == 1 and txn.count("INSERT INTO") == 1
     handler = _between(p, "    EXCEPTION\n", "    END;\n")
-    assert f"SELECT '{page}', 'fact_load_failed', :emsg, '{fact} - " in handler
+    assert f"SELECT '{page}', 'fact_load_failed', LEFT(:emsg, 2000), '{fact} - " in handler
     assert "    emsg VARCHAR;" in p[:p.index("\nBEGIN\n")]
     # the declared base had no wrap at all (the defect)
     assert "BEGIN TRANSACTION" not in _PB[name] and "EXCEPTION" not in _PB[name]
+
+
+def test_v166_r2_011_logged_error_fits_the_app_error_log_column():
+    """APP_ERROR_LOG.ERROR_MESSAGE is VARCHAR(2000) (V001; no later migration alters the table). Snowflake rejects an
+    over-long string instead of truncating it, so a raw SQLERRM past 2000 characters would fail the handler's INSERT,
+    raise THAT error in place of the load's, and leave no fact_load_failed row for the self-watch ERR leg,
+    SP_ALERT_SCAN_DAILY or NATIVE_ALERT_STALE_FACTS. The handler binds the message cut to the column width."""
+    from tests.test_proc_lineage import _migrations
+    v001 = _between(read("snowflake/migrations/V001__core.sql"), "TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (",
+                    ");")
+    width = int(re.search(r"\n\s+ERROR_MESSAGE\s+VARCHAR\((\d+)\),", v001).group(1))
+    assert width == 2000
+    later = [v for v, t in _migrations().items() if v > 1 and re.search(r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?"
+                                                                       r"DBA_MAINT_DB\.OVERWATCH\.APP_ERROR_LOG\b", t)]
+    assert later == [], later
+    for name in ("SP_LOAD_APP_COST", "SP_LOAD_STORAGE_TRUTH"):
+        handler = _between(_P[name], "    EXCEPTION\n", "    END;\n")
+        assert handler.count(f"'fact_load_failed', LEFT(:emsg, {width}), '") == 1, name
+        assert not re.search(r"'fact_load_failed', :emsg\b", handler), name
 
 
 def test_v166_r2_011_failure_rows_reach_the_three_alert_legs():
@@ -523,7 +604,7 @@ def test_v166_r2_011_failure_rows_reach_the_three_alert_legs():
     skip = set(re.findall(r"'(\w+)'", excluded.group(1))) if excluded else set()
     for name, fact in (("SP_LOAD_APP_COST", "FACT_APP_COST_DAILY"),
                        ("SP_LOAD_STORAGE_TRUTH", "FACT_STORAGE_ACCOUNT_DAILY")):
-        ctx = re.search(r"'fact_load_failed', :emsg, '([^']*)'", _P[name]).group(1)
+        ctx = re.search(r"'fact_load_failed', LEFT\(:emsg, 2000\), '([^']*)'", _P[name]).group(1)
         assert ctx.split(" ", 1)[0] == fact and fact not in skip, (name, ctx)
 
 

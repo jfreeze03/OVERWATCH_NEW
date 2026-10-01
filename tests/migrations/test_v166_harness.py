@@ -430,3 +430,196 @@ def test_repair_gap_depth_matches_the_grid(repair_text, days):
     c.executemany("INSERT INTO FACT_STORAGE_ACCOUNT_DAILY VALUES (?)", [(d,) for d in days])
     got = c.execute(_to_sqlite(sel, _TODAY, {})).fetchone()[0]
     assert got == _grid_depth(days, _TODAY)
+
+
+# ============================================================================================================
+# The owner R166.2 security heal, walked statement by statement over every path (review r1)
+# ============================================================================================================
+_HOURLY = "DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY"
+_OK_VERDICT = "security facts loaded 180d"
+_RETURN_PARTS = r"'(?:[^']|'')*'|COALESCE\(rv, '[^']*'\)|\w+"
+
+
+class _Raised(Exception):
+    pass
+
+
+def _units(code: str) -> list[str]:
+    """The block's statements in order: an 'IF (...) THEN' line is one unit, otherwise lines join until one ends in
+    ';'. Comment lines are dropped."""
+    units: list[str] = []
+    buf: list[str] = []
+    for raw in code.splitlines():
+        ln = raw.strip()
+        if not ln or ln.startswith("--"):
+            continue
+        if not buf and re.fullmatch(r"IF \(.*\) THEN", ln):
+            units.append(ln)
+            continue
+        buf.append(ln)
+        if ln.endswith(";"):
+            units.append(" ".join(buf))
+            buf = []
+    assert not buf, buf
+    return units
+
+
+def _concat(expr: str, env: dict) -> str:
+    """A RETURN expression: string literals, rv / emsg, COALESCE(rv, 'literal'), joined by ||. Nothing else."""
+    parts = re.findall(_RETURN_PARTS, expr)
+    assert re.sub(r"\s+", "", "||".join(parts)) == re.sub(r"\s+", "", expr), expr    # nothing unmodelled
+    out = []
+    for part in parts:
+        if part.startswith("'"):
+            out.append(part[1:-1].replace("''", "'"))
+        elif part.startswith("COALESCE("):
+            out.append(env["rv"] if env["rv"] is not None else re.search(r"'([^']*)'", part).group(1))
+        else:
+            assert part in ("rv", "emsg"), part
+            out.append(env[part])
+    return "".join(out)
+
+
+def _cond(c: str, env: dict) -> bool:
+    if c == "running > 0":
+        return env["running"] > 0
+    if c == "called":
+        return env["called"]
+    m = re.fullmatch(r"rv IS NULL OR NOT \(rv = '([^']*)'\)", c)
+    assert m, c                                               # an unmodelled condition fails closed
+    return env["rv"] is None or env["rv"] != m.group(1)
+
+
+def _step(u: str, env: dict, fail_at: str | None) -> None:
+    if u == f"ALTER TASK IF EXISTS {_HOURLY} SUSPEND;":
+        if fail_at == "suspend":
+            raise _Raised
+        env["graph"] = "suspended"
+    elif u == f"ALTER TASK IF EXISTS {_HOURLY} RESUME;":
+        env["graph"], env["dependents"] = "started", False
+    elif u == f"SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('{_HOURLY}');":
+        env["dependents"] = True
+    elif u.startswith("SELECT COUNT(*) INTO :running FROM TABLE(DBA_MAINT_DB.INFORMATION_SCHEMA.CURRENT_TASK_GRAPHS("):
+        if fail_at == "probe":
+            raise _Raised
+        env["running"] = env["in_flight"]
+    elif u == "called := TRUE;":
+        env["called"] = True
+    elif u == "CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_SECURITY_FACTS(180);":
+        # the invariant the block exists for: the loader runs only with the root suspended and no run in flight
+        assert env["graph"] == "suspended" and env["running"] == 0 and env["in_flight"] == 0
+        env["calls"] += 1
+        if fail_at == "call":
+            raise _Raised
+    elif u == "SELECT $1 INTO :rv FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));":
+        env["rv"] = env["verdict"]
+    elif u.startswith("INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG "):
+        env["log"].append(re.search(r"SELECT 'OwnerRepair', '(\w+)'", u).group(1))
+    elif u == "emsg := SQLERRM;":
+        env["emsg"] = "boom"
+    else:
+        raise AssertionError(f"unmodelled statement: {u[:80]}")
+
+
+def _walk(units: list[str], env: dict, fail_at: str | None) -> str | None:
+    skip = 0
+    for u in units:
+        if skip:
+            skip += u.startswith("IF (")
+            skip -= u == "END IF;"
+            continue
+        if u.startswith("IF ("):
+            skip = 0 if _cond(u[4:u.rindex(") THEN")], env) else 1
+        elif u.startswith("RETURN "):
+            return _concat(u[len("RETURN "):-1], env)
+        elif u != "END IF;":
+            _step(u, env, fail_at)
+    return None
+
+
+def _run_heal(block: str, *, in_flight: int = 0, fail_at: str | None = None, verdict: str = _OK_VERDICT) -> dict:
+    code = block[block.index("\nBEGIN\n") + len("\nBEGIN\n"):]
+    body, _, handler = code.partition("\nEXCEPTION\n")
+    handler = handler[handler.index("WHEN OTHER THEN") + len("WHEN OTHER THEN"):handler.rindex("\nEND;")]
+    env = {"graph": "started", "dependents": True, "in_flight": in_flight, "running": None, "called": False,
+           "rv": None, "verdict": verdict, "emsg": None, "calls": 0, "log": []}
+    try:
+        pane = _walk(_units(body), env, fail_at)
+    except _Raised:
+        pane = _walk(_units(handler), env, None)
+    env["pane"] = pane
+    return env
+
+
+@pytest.fixture(scope="module")
+def heal_block(repair_text) -> str:
+    from tests.test_backfill_suspend_window import _statements
+    blocks = [s for s in _statements(repair_text) if "SP_LOAD_SECURITY_FACTS(180);" in s]
+    assert len(blocks) == 1
+    return blocks[0]
+
+
+_NOTE_FRAGS = ("FACT_SECURITY_CHANGE", "FACT_SECURITY_LOGIN_DAILY", "re-run this block")
+_HEAL_PATHS = [
+    ("a graph run still in flight", {"in_flight": 1}, "WAIT: ", False, [], 0),
+    ("the heal succeeds", {}, f"ok: SP_LOAD_SECURITY_FACTS(180) -> {_OK_VERDICT}", False, [], 1),
+    ("an unexpected verdict", {"verdict": "security facts loaded 90d"},
+     "FAILED: SP_LOAD_SECURITY_FACTS(180) -> security facts loaded 90d", True, ["repair_verdict_failed"], 1),
+    ("the CALL fails part-way", {"fail_at": "call"}, "FAILED: SP_LOAD_SECURITY_FACTS(180) - boom", True,
+     ["repair_call_failed"], 1),
+    ("the SUSPEND fails", {"fail_at": "suspend"}, "FAILED: SP_LOAD_SECURITY_FACTS(180) - boom", False,
+     ["repair_call_failed"], 0),
+    ("the in-flight probe fails", {"fail_at": "probe"}, "FAILED: SP_LOAD_SECURITY_FACTS(180) - boom", False,
+     ["repair_call_failed"], 0),
+]
+
+
+@pytest.mark.parametrize(("label", "kw", "pane_start", "noted", "log", "calls"), _HEAL_PATHS,
+                         ids=[p[0] for p in _HEAL_PATHS])
+def test_security_heal_paths(heal_block, label, kw, pane_start, noted, log, calls):
+    """Every path the block can catch ends with the hourly graph RESUMEd and its dependents enabled; the loader runs
+    only with the root suspended and no run in flight; the emptied-facts note rides exactly the FAILED panes of a
+    CALL that started (a failure before it changed nothing). A timeout or a Stop is not catchable: the standalone
+    RESUME pair after the block covers it (test_v166_repair_security_heal_holds_the_hourly_graph)."""
+    env = _run_heal(heal_block, **kw)
+    assert env["pane"] is not None and env["pane"].startswith(pane_start), (label, env["pane"])
+    assert env["graph"] == "started" and env["dependents"], (label, env["graph"])
+    assert all(f in env["pane"] for f in _NOTE_FRAGS) is noted, (label, env["pane"])
+    assert env["log"] == log and env["calls"] == calls, label
+
+
+_NL = chr(10)
+_HEAL_MUTATIONS = [
+    ("the WAIT branch forgets the RESUME",
+     f"    IF (running > 0) THEN{_NL}        ALTER TASK IF EXISTS {_HOURLY} RESUME;{_NL}",
+     f"    IF (running > 0) THEN{_NL}"),
+    ("the note is never armed", f"    called := TRUE;{_NL}", ""),
+    ("the note is armed before the SUSPEND", f"    ALTER TASK IF EXISTS {_HOURLY} SUSPEND;{_NL}",
+     f"    called := TRUE;{_NL}    ALTER TASK IF EXISTS {_HOURLY} SUSPEND;{_NL}"),
+    ("no in-flight refusal", f"    IF (running > 0) THEN{_NL}", f"    IF (running < 0) THEN{_NL}"),
+    ("the handler forgets the RESUME",
+     f"        ALTER TASK IF EXISTS {_HOURLY} RESUME;{_NL}"
+     f"        SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('{_HOURLY}');{_NL}        IF (called) THEN{_NL}",
+     f"        IF (called) THEN{_NL}"),
+]
+
+
+@pytest.mark.parametrize(("label", "old", "new"), _HEAL_MUTATIONS, ids=[m[0] for m in _HEAL_MUTATIONS])
+def test_security_heal_walk_has_teeth(heal_block, label, old, new):
+    assert heal_block.count(old) == 1, label
+    mutated = heal_block.replace(old, new)
+    caught = [kw for kw in ({"in_flight": 1}, {}, {"verdict": "x"}, {"fail_at": "call"}, {"fail_at": "suspend"})
+              if _heal_walk_breaks(mutated, kw)]
+    assert caught, label
+
+
+def _heal_walk_breaks(block: str, kw: dict) -> bool:
+    """True when the walk under ``kw`` violates an invariant test_security_heal_paths holds the shipped block to."""
+    try:
+        env = _run_heal(block, **kw)
+    except AssertionError:                     # the CALL ran unsuspended / mid-run, or an unmodelled statement
+        return True
+    noted = env["pane"] is not None and all(f in env["pane"] for f in _NOTE_FRAGS)
+    return (env["graph"] != "started" or not env["dependents"]
+            or (kw.get("fail_at") == "call" and not noted)
+            or (kw.get("fail_at") == "suspend" and noted))

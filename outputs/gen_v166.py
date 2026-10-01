@@ -127,6 +127,9 @@ assert daily.count("WITH task_attempts AS (") == 1 and daily.count("GROUP BY 1, 
 # R2-011 + C10 -- SP_LOAD_APP_COST (from V077): one transaction; SESSIONS lookback 7 -> 30 days.
 # R2-011 -- SP_LOAD_STORAGE_TRUTH (from V046): one transaction.
 # Only DML inside each transaction (no implicit commit, B34); the freshness MERGE stays after the COMMIT.
+# The handler logs LEFT(:emsg, 2000): APP_ERROR_LOG.ERROR_MESSAGE is VARCHAR(2000) (V001) and Snowflake rejects an
+# over-long string, which would raise THAT error in place of the load's and leave no fact_load_failed row (the
+# V156+ house form; review r1).
 # ---------------------------------------------------------------------------------------------------
 SESSION_PAD_DAYS = 30      # copy of app/data/app_cost_sql.SESSION_PAD_DAYS (the V166 test locks the parity)
 _EMSG_DECL = "    emsg VARCHAR;               -- V166 (R2-011): the rolled-back load error, logged then re-raised\n"
@@ -139,8 +142,8 @@ def _handler(page: str, fact: str) -> str:
             "            ROLLBACK;\n"
             "            emsg := SQLERRM;\n"
             "            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)\n"
-            f"            SELECT '{page}', 'fact_load_failed', :emsg, '{fact} - previous fill retained on rollback, "
-            "error re-raised', CURRENT_ROLE();\n"
+            f"            SELECT '{page}', 'fact_load_failed', LEFT(:emsg, 2000), '{fact} - previous fill retained on "
+            "rollback, error re-raised', CURRENT_ROLE();\n"
             "            RAISE;\n"
             "    END;\n")
 
@@ -265,8 +268,8 @@ HEADER = f"""-- {NAME}
 -- FIRST RUN: the next hourly SP_LOAD_SECURITY_FACTS(3), then the daily runs: storage truth 06:30 CT,
 -- SP_LOAD_DAILY_FACTS() 06:45 CT (TASK_LOAD_DAILY, then the nightly reconcile), app cost 06:55 CT. Apply
 -- outside 06:30-07:15 CT so no run straddles the swap. Nothing runs at apply time except the storage repair. Owner-run
--- heals, in a Central session after V166 is applied (OWNER_REPAIRS): SP_LOAD_SECURITY_FACTS(180) at about
--- :35 past the hour, the R2-011 gap grids, then SP_LOAD_STORAGE_TRUTH(N) only when they show holes and ONE
+-- heals, in a Central session after V166 is applied (OWNER_REPAIRS): SP_LOAD_SECURITY_FACTS(180) with the hourly
+-- graph suspended around it, the R2-011 gap grids, then SP_LOAD_STORAGE_TRUTH(N) only when they show holes and ONE
 -- off-peak SP_LOAD_APP_COST of at least 30 days (relabels sessions, fills any R2-011 hole, atomic now).
 -- ROLLBACK: re-run the base CREATE PROCEDURE of each proc (V105, V101, V077, V046). The repaired storage
 -- rows can stay: they are what Snowflake bills, and the live twin already shows them.
@@ -414,6 +417,7 @@ c AS (
 s AS (
     SELECT SESSION_ID, MIN(CREATED_ON) AS CREATED_ON
       FROM SNOWFLAKE.ACCOUNT_USAGE.SESSIONS
+     WHERE SESSION_ID IN (SELECT SESSION_ID FROM q)
      GROUP BY 1
 )
 SELECT CASE WHEN s.SESSION_ID IS NULL THEN 'no SESSIONS row (stays unknown)'
@@ -434,8 +438,9 @@ PREFLIGHT = f"""\
 -- What the grids answer: P166.1 which FACT_STORAGE_DAILY rows V166's repair MERGE rewrites (its own source SELECT,
 -- joined on its own ON clause) and how many TB-days each database gains; P166.2 / P166.3 whether a failed
 -- app-cost or storage-truth run already left a hole (R2-011; V166 stops new ones, the owner-run heal fills old
--- ones); P166.4 OPTIONAL (7 days of QUERY_HISTORY x QUERY_ATTRIBUTION_HISTORY x SESSIONS) how many of the last
--- week's attributed credits the 30-day session lookback relabels from (unknown).
+-- ones); P166.4 OPTIONAL (the last 7 days of QUERY_HISTORY x QUERY_ATTRIBUTION_HISTORY, matched against
+-- SESSIONS full retention) how many of the last week's attributed credits the 30-day session lookback relabels
+-- from (unknown).
 
 -- P166.1 the R2-009 repair, previewed. One row per database with a re-created or clone-refreshed day in the
 --        view's 365 days. expect a handful of rows (none = nothing to repair); every value positive.
@@ -446,7 +451,10 @@ PREFLIGHT = f"""\
 --        whose error came from the INSERT predicts a P166.2 hole at D-3.
 {GRID_FAILED_RUNS}
 -- P166.4 OPTIONAL C10 session-age buckets for the last 7 days of attributed queries. The 7-30 day bucket is what
---        V166 relabels from (unknown) on newly loaded days.
+--        V166 relabels from (unknown) on newly loaded days; the older-than-30 bucket is what a wider lookback would
+--        add (the C10-width owner question), so SESSIONS is read over its full retention (365 days; only the
+--        week's sessions are aggregated). The heaviest grid here: on WH_ALFA_ADMIN (300 s statement timeout,
+--        V002) it can time out; skip it or run it on a warehouse with a longer timeout.
 {_C10_PROBE}"""
 
 _PROCS = (
@@ -523,24 +531,41 @@ SELECT LOGGED_AT, PAGE, ERROR_TYPE, CONTEXT, LEFT(ERROR_MESSAGE, 300) AS ERROR_M
 """
 
 
-def _guarded_block(call: str, label: str, prelude: str, ok_test: str, declare: str = "") -> str:
+def _guarded_block(call: str, label: str, prelude: str, ok_test: str, declare: str = "",
+                   cleanup: tuple[str, ...] = (), fail_note: str = "") -> str:
     """One owner-run CALL in an anonymous block that reads the loader's own verdict (the backfill_365 idiom) and
     logs a failure as PAGE 'OwnerRepair'. ``label`` is a scripting expression naming the call as run (a variable
     bare, as RETURN reads it); inside the APP_ERROR_LOG INSERTs the same variable is bound (:n). ``prelude`` may
-    RETURN early (a SKIP / WAIT pane)."""
+    RETURN early (a SKIP / WAIT pane). ``cleanup`` statements run right after the verdict is read and in the handler
+    after its log row (so every exit the block can catch runs them). ``fail_note`` is appended to both FAILED panes;
+    in the handler only once the CALL has started (``called``), since a failure before it changed nothing."""
     label_sql = label.replace("|| n ||", "|| :n ||")
+    after_call = "".join(f"    {c}\n" for c in cleanup)
+    on_error = "".join(f"        {c}\n" for c in cleanup)
+    note = f" || '{fail_note}'" if fail_note else ""
+    assert "'" not in fail_note
+    if fail_note:
+        declare += "    called BOOLEAN DEFAULT FALSE;\n"
+        arm = "    called := TRUE;\n"
+        handler_return = (f"        IF (called) THEN\n"
+                          f"            RETURN 'FAILED: ' || {label} || ' - ' || emsg{note};\n"
+                          f"        END IF;\n"
+                          f"        RETURN 'FAILED: ' || {label} || ' - ' || emsg;\n")
+    else:
+        arm = ""
+        handler_return = f"        RETURN 'FAILED: ' || {label} || ' - ' || emsg;\n"
     return f"""\
 EXECUTE IMMEDIATE $$
 DECLARE
     rv VARCHAR;
     emsg VARCHAR;
 {declare}BEGIN
-{prelude}    CALL DBA_MAINT_DB.OVERWATCH.{call};
+{prelude}{arm}    CALL DBA_MAINT_DB.OVERWATCH.{call};
     SELECT $1 INTO :rv FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
-    IF (rv IS NULL OR NOT ({ok_test})) THEN
+{after_call}    IF (rv IS NULL OR NOT ({ok_test})) THEN
         INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
         SELECT 'OwnerRepair', 'repair_verdict_failed', LEFT(COALESCE(:rv, 'no verdict returned'), 2000), 'V166 ' || {label_sql}, CURRENT_ROLE();
-        RETURN 'FAILED: ' || {label} || ' -> ' || COALESCE(rv, 'no verdict returned');
+        RETURN 'FAILED: ' || {label} || ' -> ' || COALESCE(rv, 'no verdict returned'){note};
     END IF;
     RETURN 'ok: ' || {label} || ' -> ' || rv;
 EXCEPTION
@@ -548,8 +573,7 @@ EXCEPTION
         emsg := SQLERRM;
         INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
         SELECT 'OwnerRepair', 'repair_call_failed', LEFT(:emsg, 2000), 'V166 ' || {label_sql}, CURRENT_ROLE();
-        RETURN 'FAILED: ' || {label} || ' - ' || emsg;
-END;
+{on_error}{handler_return}END;
 $$;
 """
 
@@ -594,14 +618,36 @@ def _gap_n(fact: str) -> str:
 """
 
 
+# R166.2 holds the hourly graph for the CALL (review r1; the backfill_365 B12 pattern, which runs this same CALL inside
+# its suspend window). TASK_LOAD_SECURITY_FACTS runs in TASK_LOAD_HOURLY's graph (V075: AFTER the V27 hourly marts),
+# the d>3 arm commits each DELETE before its INSERT, and FACT_SECURITY_CHANGE's key is not enforced, so an overlapping
+# hourly insert doubles rows. A wall-clock window checked only the start; suspending the root stops new graph runs
+# for the whole CALL, and CURRENT_TASK_GRAPHS refuses while a run already in flight (a suspended root still finishes
+# it) has not ended. Every exit the block can catch RESUMEs; the standalone pair after it covers a timeout / Stop.
+HOURLY_ROOT = "DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY"
+RESUME_HOURLY = (f"ALTER TASK IF EXISTS {HOURLY_ROOT} RESUME;",
+                 f"SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('{HOURLY_ROOT}');")
+SEC_FAIL_NOTE = (" -- FACT_SECURITY_CHANGE / FACT_SECURITY_LOGIN_DAILY may now hold only the ~3 days the hourly run "
+                 "refills (the d>3 arm commits each DELETE before its INSERT); re-run this block, on a warehouse whose "
+                 "STATEMENT_TIMEOUT_IN_SECONDS allows a 180-day QUERY_HISTORY scan, until it reads ok")
 REPAIR_SEC = _guarded_block(
     "SP_LOAD_SECURITY_FACTS(180)", "'SP_LOAD_SECURITY_FACTS(180)'",
-    prelude=("    -- never alongside the hourly graph (TASK_LOAD_SECURITY_FACTS runs after the :07 marts): the d>3\n"
-             "    -- DELETE + INSERT is not one transaction and the fact key is not enforced, so an overlap doubles rows\n"
-             "    IF (MINUTE(CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())) NOT BETWEEN 30 AND 50) THEN\n"
-             "        RETURN 'WAIT: run this block between :30 and :50 past the hour (Central), never :07-:25';\n"
-             "    END IF;\n"),
-    ok_test="rv = 'security facts loaded 180d'")
+    declare="    running NUMBER DEFAULT 0;\n",
+    prelude=("    -- never alongside the hourly graph: the d>3 DELETE + INSERT is not one transaction and the fact key\n"
+             "    -- is not enforced, so an overlapping TASK_LOAD_SECURITY_FACTS insert doubles rows. Suspend the root\n"
+             "    -- for the whole CALL (no new graph run starts), then refuse while a run already in flight is not done.\n"
+             f"    ALTER TASK IF EXISTS {HOURLY_ROOT} SUSPEND;\n"
+             "    SELECT COUNT(*) INTO :running\n"
+             "      FROM TABLE(DBA_MAINT_DB.INFORMATION_SCHEMA.CURRENT_TASK_GRAPHS(ROOT_TASK_NAME => 'TASK_LOAD_HOURLY'))\n"
+             "     WHERE DATABASE_NAME = 'DBA_MAINT_DB' AND SCHEMA_NAME = 'OVERWATCH' AND STATE = 'EXECUTING';\n"
+             "    IF (running > 0) THEN\n"
+             + "".join(f"        {c}\n" for c in RESUME_HOURLY)
+             + "        RETURN 'WAIT: an hourly graph run (TASK_LOAD_HOURLY) is still in flight; nothing was loaded and "
+               "the graph is resumed. Re-run this block in a few minutes';\n"
+               "    END IF;\n"),
+    ok_test="rv = 'security facts loaded 180d'",
+    cleanup=RESUME_HOURLY,
+    fail_note=SEC_FAIL_NOTE)
 REPAIR_STORAGE = _guarded_block(
     "SP_LOAD_STORAGE_TRUTH(:n)", "'SP_LOAD_STORAGE_TRUTH(' || n || ')'",
     declare="    n INT;\n",
@@ -628,10 +674,21 @@ ALTER SESSION SET TIMEZONE = 'America/Chicago';
 --        admitted DDL/DCL rows than QUERY_HISTORY (the V166 d<=3 arm admission). Hour grain on purpose: the
 --        R2-007 holes are shorter than a day. R166.2 is idempotent, so the probe only tells you it is needed.
 {_SEC_HOLE_PROBE}
--- R166.2 the R2-007 heal: the d>3 arm rebuilds 180 days of FACT_SECURITY_CHANGE from QUERY_HISTORY with the
---        current classifier. The block runs only between :30 and :50 past the hour (Central) and otherwise
---        returns WAIT. expect 'ok: SP_LOAD_SECURITY_FACTS(180) -> security facts loaded 180d'.
+-- R166.2 the R2-007 heal: the d>3 arm rebuilds 180 days of FACT_SECURITY_CHANGE (and FACT_SECURITY_LOGIN_DAILY)
+--        from ACCOUNT_USAGE with the current classifier. The block SUSPENDs TASK_LOAD_HOURLY (its graph runs
+--        TASK_LOAD_SECURITY_FACTS after the hourly marts) for the whole CALL, returns WAIT (graph resumed, nothing
+--        loaded) while a graph run is still in flight, and RESUMEs the graph on every exit it can catch.
+--        RISK: the d>3 arm commits each DELETE before its INSERT, so a CALL that fails or is cancelled part-way
+--        leaves FACT_SECURITY_CHANGE / FACT_SECURITY_LOGIN_DAILY holding only the ~3 days the hourly run refills,
+--        until this block reads ok. Run it on a warehouse whose STATEMENT_TIMEOUT_IN_SECONDS allows a 180-day
+--        QUERY_HISTORY scan (WH_ALFA_ADMIN is 300 s per V002) and re-run it until it does; a FAILED pane says so.
+--        expect 'ok: SP_LOAD_SECURITY_FACTS(180) -> security facts loaded 180d'.
 {REPAIR_SEC}
+-- R166.2 (continued) ALWAYS run these two right after the block, whatever its pane says (idempotent). A timeout or
+--        a Stop ends the block before its own RESUME, and until these run the WHOLE hourly graph stays suspended:
+--        no hourly loads, no alert scan, no Teams delivery (the V041 stranding class).
+{chr(10).join(RESUME_HOURLY)}
+
 -- R166.3 R2-011: calendar gaps a failed run already left (the same grid as PREFLIGHT P166.2), and the failed
 --        runs that predict them. R166.4 / R166.5 read the gap depth themselves.
 {GRID_GAPS}

@@ -40,8 +40,8 @@
 -- FIRST RUN: the next hourly SP_LOAD_SECURITY_FACTS(3), then the daily runs: storage truth 06:30 CT,
 -- SP_LOAD_DAILY_FACTS() 06:45 CT (TASK_LOAD_DAILY, then the nightly reconcile), app cost 06:55 CT. Apply
 -- outside 06:30-07:15 CT so no run straddles the swap. Nothing runs at apply time except the storage repair. Owner-run
--- heals, in a Central session after V166 is applied (OWNER_REPAIRS): SP_LOAD_SECURITY_FACTS(180) at about
--- :35 past the hour, the R2-011 gap grids, then SP_LOAD_STORAGE_TRUTH(N) only when they show holes and ONE
+-- heals, in a Central session after V166 is applied (OWNER_REPAIRS): SP_LOAD_SECURITY_FACTS(180) with the hourly
+-- graph suspended around it, the R2-011 gap grids, then SP_LOAD_STORAGE_TRUTH(N) only when they show holes and ONE
 -- off-peak SP_LOAD_APP_COST of at least 30 days (relabels sessions, fills any R2-011 hole, atomic now).
 -- ROLLBACK: re-run the base CREATE PROCEDURE of each proc (V105, V101, V077, V046). The repaired storage
 -- rows can stay: they are what Snowflake bills, and the live twin already shows them.
@@ -636,7 +636,7 @@ BEGIN
             ROLLBACK;
             emsg := SQLERRM;
             INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
-            SELECT 'AppCost', 'fact_load_failed', :emsg, 'FACT_APP_COST_DAILY - previous fill retained on rollback, error re-raised', CURRENT_ROLE();
+            SELECT 'AppCost', 'fact_load_failed', LEFT(:emsg, 2000), 'FACT_APP_COST_DAILY - previous fill retained on rollback, error re-raised', CURRENT_ROLE();
             RAISE;
     END;
 
@@ -688,7 +688,7 @@ BEGIN
             ROLLBACK;
             emsg := SQLERRM;
             INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
-            SELECT 'StorageTruth', 'fact_load_failed', :emsg, 'FACT_STORAGE_ACCOUNT_DAILY - previous fill retained on rollback, error re-raised', CURRENT_ROLE();
+            SELECT 'StorageTruth', 'fact_load_failed', LEFT(:emsg, 2000), 'FACT_STORAGE_ACCOUNT_DAILY - previous fill retained on rollback, error re-raised', CURRENT_ROLE();
             RAISE;
     END;
 
