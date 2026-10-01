@@ -474,3 +474,18 @@ def test_release_compare_discloses_a_capped_task_set():
     body = _fn(read(_OPS), "_release_compare_tab") if "def _release_compare_tab" in read(_OPS) else read(_OPS)
     assert 'if "TOTAL_TASKS" in t_res.df.columns else len(deltas))' in body
     assert "most-regressed of {_total_tasks:,} tasks" in body
+
+
+# ------------------------------------------------ R1-139: the ETL Window label on a calendar offset ----
+
+@pytest.mark.parametrize(("days", "today", "want"), [
+    (CalendarDayOffset(0), date(2026, 9, 1), " (today)"),         # Current month on the 1st: was no label
+    (CalendarDayOffset(9), date(2026, 9, 10), " (since Sep 1)"),  # Current month on Sep 10: was "(last 9d)"
+    (7, date(2026, 9, 10), " (last 7d)"),
+    (0, date(2026, 9, 10), ""),
+])
+def test_etl_window_suffix_names_a_calendar_period(monkeypatch, days, today, want):
+    from app.ui.pages import operations as ops
+    monkeypatch.setattr(ops, "account_today", lambda: today)
+    assert ops._etl_window_suffix(days) == want
+    assert "_scope = _etl_window_suffix(days)" in _fn(read(_OPS), "_workflow_runtimes_panel")

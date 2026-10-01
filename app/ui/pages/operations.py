@@ -1461,6 +1461,19 @@ def _reference_gap_panel(database: str = "") -> None:
         result_caption(res)
 
 
+def _etl_window_suffix(days: int) -> str:
+    """The scope suffix for an ETL panel's Window: ' (last Nd)' for a trailing window, '' unscoped.
+
+    PR-1 R1-139: a Current month / Current year Window arrives as a CalendarDayOffset, which is 0 on
+    the period's first day -- the old ``if days`` truthiness test dropped the label exactly then, and
+    called a mid-month offset 'last Nd'. The ETL readers anchor a calendar offset on the account
+    date (etl_control_sql._window_clause), so name the period's first day instead."""
+    if getattr(days, "calendar_window", False):
+        start = account_today() - timedelta(days=int(days))
+        return " (today)" if int(days) == 0 else f" (since {start:%b} {start.day})"
+    return f" (last {days}d)" if days else ""
+
+
 def _workflow_runtimes_panel(days: int = 0, *, pf: dict | None = None) -> None:
     """A chosen workflow's latest ETL run — per-task runtimes + a child↔total reconciliation.
 
@@ -1483,7 +1496,7 @@ def _workflow_runtimes_panel(days: int = 0, *, pf: dict | None = None) -> None:
             "is Informatica-orchestrated proc CALLs that Snowflake's TASK_HISTORY can't see — this "
             "surfaces each task's runtime and status for the latest run straight from the log.")
         return
-    _scope = f" (last {days}d)" if days else ""
+    _scope = _etl_window_suffix(days)
     # Picker: which workflow's latest run to show. Each RUN_ID is one workflow, so without a
     # picker the panel only ever shows whichever workflow finished most recently. The list is
     # scoped to the Window, so it also honors the scope bar.
