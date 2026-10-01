@@ -114,11 +114,14 @@ def _load_board(company: str, days: int, window: object = None) -> QueryResult:
 def _live_fallback_daily(company: str, days: int, rate: float,
                          bounds: tuple | None = None) -> tuple[pd.DataFrame, QueryResult]:
     """Daily warehouse-spend series for the paths the trailing-window exec_board can't serve —
-    the 'Last month' calendar window (its explicit (start, end) range) and the mart-not-deployed
-    fallback. perf: MART-FIRST — FACT_WAREHOUSE_DAILY carries the same DAY/WAREHOUSE_NAME/
-    CREDITS_TOTAL columns for 365d and CAN express a bounded month, so it serves this read and the
-    live WAREHOUSE_METERING_HISTORY scan is only the labeled fallback (Last month is a closed
-    calendar period, so the fact's hourly loader lag is immaterial). Real data, never fabricated."""
+    every calendar preset window (Last month / Current month / Current year: any window with
+    bounds, read over its explicit (start, end) range) and the mart-not-deployed fallback.
+    perf: MART-FIRST — FACT_WAREHOUSE_DAILY carries the same DAY/WAREHOUSE_NAME/CREDITS_TOTAL
+    columns for 365d and CAN express a bounded range, so it serves this read and the live
+    WAREHOUSE_METERING_HISTORY scan is only the labeled fallback. Last month is a closed calendar
+    period, so the fact's hourly loader lag is immaterial there; Current month and Current year
+    run to today, and render() drops today's still-filling partial day downstream
+    (daily_complete) as it does for every window. Real data, never fabricated."""
     _lm = "_lm" if bounds is not None else ""
     res = run_mart_first(
         mart_sql.fact_warehouse_daily(days, company, bounds=bounds),
@@ -312,7 +315,8 @@ def render() -> None:
     # The calendar presets (Last month / Current month / Current year) are BOUNDED windows
     # (f["bounds"] is set only for them); the exec board is keyed by trailing WINDOW_DAYS and
     # has no row for them, so skip the mart and read the bounded live daily aggregate (real
-    # data; a closed month is today-excluded by its month end).
+    # data; a closed month is today-excluded by its month end, the open presets by
+    # daily_complete below).
     _ov_bounds = f["bounds"]
     board_res = _load_board(company, days, f["window"]) if _ov_bounds is None else None
     board = board_res.df if (board_res is not None and board_res.usable()) else pd.DataFrame(

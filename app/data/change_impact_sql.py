@@ -46,10 +46,9 @@ ONSET_LEAD_DAYS = 3
 ONSET_AFTER_DAYS = 1
 
 
-def _onset_window(column: str, onset: object) -> tuple[str, str]:
-    """(WHERE clause, ORDER BY key) for ``column`` (a TIMESTAMP_LTZ) around ``onset`` — a naive
-    account-time datetime / ISO string (INCIDENTS.STARTED_AT is NTZ); an aware one converts to
-    account time. Both sides compare as Central wall clock (the timezone standard in common.py).
+def _onset_wall_clock(onset: object) -> str:
+    """``onset`` as an account-time (Central) wall-clock 'YYYY-MM-DD HH:MM:SS' — a naive datetime /
+    ISO string is taken as account time (INCIDENTS.STARTED_AT is NTZ); an aware one converts to it.
     Raises ValueError on anything that is not a timestamp, so no text reaches the SQL."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -58,7 +57,28 @@ def _onset_window(column: str, onset: object) -> tuple[str, str]:
     ts = onset if isinstance(onset, datetime) else datetime.fromisoformat(str(onset).strip())
     if ts.tzinfo is not None:
         ts = ts.astimezone(ZoneInfo(ACCOUNT_TIMEZONE)).replace(tzinfo=None)
-    lit = f"'{ts.strftime('%Y-%m-%d %H:%M:%S')}'::TIMESTAMP_NTZ"
+    return ts.strftime('%Y-%m-%d %H:%M:%S')
+
+
+def _onset_prune_bounds(onset: object) -> tuple[str, str]:
+    """(lo, hi) for a PRUNE predicate on a raw TIMESTAMP_LTZ column (GRANTS_* CREATED_ON /
+    DELETED_ON) around ``onset``: _onset_window's range widened by a day on each side. Both are
+    TIMESTAMP_LTZ constants -- the column's own type, like the default feed's CURRENT_TIMESTAMP()
+    cutoff -- so the base scan prunes to the onset's few days however old the incident is. The day
+    of slack absorbs the session-vs-account clock (an LTZ literal reads in the session timezone);
+    the exact Central-wall-clock cut stays _onset_window's job."""
+    lit = f"'{_onset_wall_clock(onset)}'::TIMESTAMP_LTZ"
+    return (f"DATEADD('day', -{ONSET_LEAD_DAYS + 1}, {lit})",
+            f"DATEADD('day', {ONSET_AFTER_DAYS + 1}, {lit})")
+
+
+def _onset_window(column: str, onset: object) -> tuple[str, str]:
+    """(WHERE clause, ORDER BY key) for ``column`` (a TIMESTAMP_LTZ) around ``onset`` — a naive
+    account-time datetime / ISO string (INCIDENTS.STARTED_AT is NTZ); an aware one converts to
+    account time. Both sides compare as Central wall clock (the timezone standard in common.py).
+    Raises ValueError on anything that is not a timestamp, so no text reaches the SQL."""
+    from app.logic.formulas import ACCOUNT_TIMEZONE
+    lit = f"'{_onset_wall_clock(onset)}'::TIMESTAMP_NTZ"
     seen = f"CONVERT_TIMEZONE('{ACCOUNT_TIMEZONE}', {column})::TIMESTAMP_NTZ"
     return (f"{seen} BETWEEN DATEADD('day', -{ONSET_LEAD_DAYS}, {lit}) "
             f"AND DATEADD('day', {ONSET_AFTER_DAYS}, {lit})",

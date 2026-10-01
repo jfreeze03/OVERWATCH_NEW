@@ -570,10 +570,8 @@ def _auto_investigation(inc_row, company: str, rate: float) -> None:
     # R1-060: the two change registries read a window ANCHORED on onset (onset - 3d .. onset + 1d,
     # nearest first) — a newest-first LIMIT 200 from now let post-onset churn push the pre-onset
     # trigger out of the feed (and missed it entirely for an onset 27+ days back). The grant feed reads
-    # the same onset window; its trailing cutoff only prunes the GRANTS_* scan, so it reaches back past
-    # onset - ONSET_LEAD_DAYS (a day of slack for the partial day) however old the incident is.
-    _grant_days = max(_days, (pd.Timestamp(account_now()) - onset_dt).days
-                      + change_impact_sql.ONSET_LEAD_DAYS + 1)
+    # the same onset window, and its GRANTS_* prune is bounded on both sides from onset (a day of slack
+    # each side), so an old incident scans its onset's few days, never every day since.
     _b = run_batch([
         {"key": "ai_obj", "sql": change_impact_sql.change_registry(_days, company, onset=onset_dt),
          "source": "OBJECT_CHANGE_REGISTRY (around onset)"},
@@ -581,7 +579,7 @@ def _auto_investigation(inc_row, company: str, rate: float) -> None:
          "source": "WAREHOUSE_CHANGE_REGISTRY (around onset)"},
         {"key": "ai_task", "sql": insights_sql.task_failure_details(_days, company, onset=onset_dt),
          "source": "TASK_HISTORY failures"},
-        {"key": "ai_grant", "sql": security_sql.recent_grant_changes(_grant_days, company, onset=onset_dt),
+        {"key": "ai_grant", "sql": security_sql.recent_grant_changes(_days, company, onset=onset_dt),
          "source": "GRANTS_TO_USERS + GRANTS_TO_ROLES changes (around onset)"},
         {"key": "ai_whd", "sql": mart_sql.fact_warehouse_daily(max(_days, 14), company),
          "source": "FACT_WAREHOUSE_DAILY (spend anomaly)"},

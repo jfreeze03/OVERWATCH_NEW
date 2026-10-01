@@ -5,7 +5,8 @@
     user while the selectbox, graph and detail showed another.
 (c) Auto-investigation: the grant feed read newest-first LIMIT 500 from now (not onset-anchored like the
     object / warehouse / task feeds), and the "N of TOTAL ... not ranked" disclosure named only the two change
-    registries -- a cut grant or task-failure feed went unsaid.
+    registries -- a cut grant or task-failure feed went unsaid. Its GRANTS_* prune is two-sided from the
+    onset literal (fix-up review): a trailing cutoff wide enough to reach an old onset scanned up to 365 days.
 (d) Proof: the page-open verdict listed a FAILED acceptance / precision read as "not yet measured" (and could
     call the page Healthy) while the cards said the read failed.
 (e) Overview: the spend-unavailable help said the exec board "does not cover a calendar-month window" under
@@ -99,6 +100,19 @@ def test_effective_access_reclick_after_a_deselect_binds_the_clicked_user(monkey
 
 _ONSET = pd.Timestamp("2026-09-20 09:00:00")
 _LIT = "'2026-09-20 09:00:00'::TIMESTAMP_NTZ"
+def _prune_bounds(onset: pd.Timestamp) -> tuple[str, str]:
+    # the onset window plus a day of slack each side, as TIMESTAMP_LTZ constants (the GRANTS_* columns' type)
+    ltz = f"'{onset.strftime('%Y-%m-%d %H:%M:%S')}'::TIMESTAMP_LTZ"
+    return (f"DATEADD('day', -{change_impact_sql.ONSET_LEAD_DAYS + 1}, {ltz})",
+            f"DATEADD('day', {change_impact_sql.ONSET_AFTER_DAYS + 1}, {ltz})")
+
+
+def _prune_span(onset: pd.Timestamp) -> str:
+    lo, hi = _prune_bounds(onset)
+    return f"CREATED_ON BETWEEN {lo} AND {hi} OR DELETED_ON BETWEEN {lo} AND {hi}"
+
+
+_LO, _HI = _prune_bounds(_ONSET)
 
 
 def test_grant_feed_default_mode_is_unchanged():
@@ -113,11 +127,44 @@ def test_grant_feed_onset_mode_reads_the_onset_window_nearest_first():
     assert f"WHERE CHANGED_AT IS NOT NULL\n  AND {where}\n" in sql
     assert f"BETWEEN DATEADD('day', -{change_impact_sql.ONSET_LEAD_DAYS}, {_LIT})" in sql
     assert f"ORDER BY {order}, CHANGED_AT DESC\nLIMIT 500\n" in sql
-    # the trailing prune predicate and the pre-LIMIT total survive (TOTAL_CHANGES_WIN = the onset window's count)
-    assert "(CREATED_ON >= DATEADD('day', -13, CURRENT_TIMESTAMP()) OR DELETED_ON >= DATEADD" in sql
+    # both arms prune on the onset's two-sided span (no trailing cutoff); the pre-LIMIT total survives
+    # (TOTAL_CHANGES_WIN = the onset window's count)
+    assert sql.count(f"WHERE ({_prune_span(_ONSET)}) AND IFF(ev.CHG = 'GRANTED', CREATED_ON, DELETED_ON) "
+                     f"BETWEEN {_LO} AND {_HI}") == 2
+    assert "CURRENT_TIMESTAMP()" not in sql
     assert "COUNT(*) OVER () AS TOTAL_CHANGES_WIN" in sql
     sqlglot = pytest.importorskip("sqlglot")
     sqlglot.parse_one(sql, dialect="snowflake")
+
+
+@pytest.mark.parametrize("company", ["ALL", "Trexis", "ALFA", "UNKNOWN"])
+def test_grant_feed_onset_prune_is_bounded_on_both_sides_for_an_old_onset(company):
+    # the fix-up review's case: an open incident whose onset was 120 days ago. A trailing cutoff wide enough
+    # to reach it scanned ~124 days of GRANTS_TO_USERS + GRANTS_TO_ROLES (up to 365) to keep ~4 days of rows;
+    # the outer onset filter runs over the CTE after the CROSS JOIN, so it cannot prune.
+    onset = pd.Timestamp(datetime.combine(_TODAY - timedelta(days=120), datetime.min.time())) + timedelta(hours=9)
+    sql = security_sql.recent_grant_changes(124, company, onset=onset)
+    assert "CURRENT_TIMESTAMP()" not in sql                         # no trailing cutoff anywhere ...
+    assert not re.search(r"DATEADD\('day', -1\d\d,", sql)           # ... and no -124-day one
+    span = _prune_span(onset)
+    assert sql.count(f"WHERE ({span}) AND ") == 2                   # both UNION arms prune on the upper bound too
+    if company in ("Trexis", "ALFA", "UNKNOWN"):                    # the user-scope DISTINCT sub-scan as well
+        assert f"FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS WHERE {span})" in sql
+    # days no longer shapes the onset-mode read (as in the registries): any lookback gives the same SQL
+    assert security_sql.recent_grant_changes(3, company, onset=onset) == sql
+    assert security_sql.recent_grant_changes(365, company, onset=onset) == sql
+    sqlglot = pytest.importorskip("sqlglot")
+    sqlglot.parse_one(sql, dialect="snowflake")
+
+
+def test_grant_feed_onset_prune_brackets_the_exact_onset_window():
+    # the prune is a superset of the exact (Central wall clock) cut, with a day of slack each side for the
+    # session-vs-account clock, so it can never drop a row the onset window keeps
+    lo, hi = change_impact_sql._onset_prune_bounds(_ONSET)
+    assert (lo, hi) == (_LO, _HI)
+    assert change_impact_sql._onset_prune_bounds(pd.Timestamp("2026-09-20 14:00:00", tz="UTC")) == (_LO, _HI)
+    with pytest.raises(ValueError):
+        change_impact_sql._onset_prune_bounds("2026-09-20'; DROP TABLE X; --")
 
 
 def test_grant_feed_onset_rejects_text():
@@ -125,18 +172,21 @@ def test_grant_feed_onset_rejects_text():
         security_sql.recent_grant_changes(13, "ALL", onset="2026-09-20'; DROP TABLE X; --")
 
 
-@pytest.mark.parametrize("age_days", [2, 20, 40, 200])
-def test_auto_investigation_reads_grants_around_onset(_rca_page, age_days):  # noqa: F811
+@pytest.mark.parametrize("age_days", [2, 20, 40, 120, 200])
+@pytest.mark.parametrize("company", ["ALL", "Trexis"])
+def test_auto_investigation_reads_grants_around_onset(_rca_page, age_days, company):  # noqa: F811
     specs, _out, _feeds = _rca_page
     onset = pd.Timestamp(datetime.combine(_TODAY - timedelta(days=age_days), datetime.min.time())) + timedelta(hours=9)
     from app.ui.pages import control_room
-    control_room._auto_investigation(pd.Series({"STARTED_AT": onset, "INCIDENT_ID": "i-g"}), "ALL", 3.0)
+    control_room._auto_investigation(pd.Series({"STARTED_AT": onset, "INCIDENT_ID": "i-g"}), company, 3.0)
     sql = {s["key"]: s["sql"] for s in specs}["ai_grant"]
     lit = f"'{onset.strftime('%Y-%m-%d %H:%M:%S')}'::TIMESTAMP_NTZ"
     assert f"BETWEEN DATEADD('day', -3, {lit})" in sql and "ORDER BY ABS(DATEDIFF(" in sql
-    # the prune cutoff reaches back past onset - ONSET_LEAD_DAYS, however old the incident (was capped at 30d)
-    prune = int(re.search(r"CREATED_ON >= DATEADD\('day', -(\d+)", sql).group(1))
-    assert prune >= age_days + change_impact_sql.ONSET_LEAD_DAYS
+    # the GRANTS_* prune is the onset's own few days, however old the incident: bounded on both sides from the
+    # onset literal, never a trailing cutoff from now (which had to widen to age + 4 days, up to 365)
+    assert sql.count(f"WHERE ({_prune_span(onset)}) AND ") == 2
+    assert "CURRENT_TIMESTAMP()" not in sql
+    assert not re.search(r"CREATED_ON >= DATEADD", sql)
 
 
 def _grant_feed(n: int, total: int, onset: pd.Timestamp) -> pd.DataFrame:
@@ -276,3 +326,15 @@ def test_spend_failure_help_names_the_calendar_window_picked(window):
 def test_overview_hands_the_picked_window_to_the_spend_help():
     src = (_ROOT / "app" / "ui" / "pages" / "overview.py").read_text(encoding="utf-8")
     assert '"help": _spend_failure_help(board_res, trend_source, window_label=str(f["window_label"])),' in src
+
+
+def test_live_fallback_docstring_names_every_calendar_preset():
+    # fix-up review (item e's missed twin): the bounded fallback serves Last month, Current month AND Current
+    # year (every window with bounds), and only Last month is a closed period
+    from app.ui.pages import overview as ov
+
+    doc = " ".join((ov._live_fallback_daily.__doc__ or "").split())
+    assert "Last month / Current month / Current year" in doc
+    assert "the 'Last month' calendar window (its explicit (start, end) range)" not in doc
+    assert "Last month is a closed calendar period, so the fact's hourly loader lag is immaterial there" in doc
+    assert "daily_complete" in doc                 # the open presets drop today's partial day downstream
