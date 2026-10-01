@@ -5,7 +5,8 @@ Each test drives the real function (with ``st`` stubbed where it renders) and fa
 pre-fix code at 04fd374e:
 
   R1-211  delta_css painted a NULL (NaN) delta cell green/red.
-  R1-213  run_mart_first stamped a calendar-bounded live read as 90 days (Current year ~3x high).
+  R1-213  run_mart_first stamped a calendar-bounded live read as 90 days (Current year ~3x high);
+          review r1: the Spend CS statement-type caption said "Scanned 90d of the 272d window".
   R1-214  confirm_gate returned a click from a run whose typed text no longer matched.
   R1-215  the row-click seen-guards never re-armed, so a return-then-re-click did nothing.
   R1-216  spend_trend averaged/paced ROWS, not calendar days, and always dimmed the newest row.
@@ -140,6 +141,96 @@ def test_idle_and_sizing_call_sites_pass_their_bounds():
         assert lines and all("days=days, bounds=bounds," in ln for ln in lines), key
     ops = _src("app/ui/pages/operations.py")
     assert 'key=f"ops_sizing_{company}_{days}{_lm}", days=days, bounds=bounds,' in ops
+    # review r1 (R1-213 sibling): both Spend cloud-services statement-type reads -- the
+    # account-wide one and the per-warehouse drill -- pass their bounds too.
+    spend = _src("app/ui/pages/cost_parts/spend.py")
+    for key in ('key=f"cs_types_{company}_{days}_{_sel_wh}"', 'key=f"cs_types_{company}_{days}"'):
+        assert f"page=_PAGE, {key}, bounds=bounds," in spend, key
+
+
+def _render_cs_types(monkeypatch, *, days: int, bounds, mart_up: bool):
+    """Render the real Spend tab (AppTest) with one ELEVATED warehouse, so the cloud-services
+    statement-type panel paints. The cs_types mart leg fails (or answers, ``mart_up``); the live
+    twin answers and its SQL is recorded. Every other read is an empty-but-ok stub."""
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+
+    from app.ui import components
+    from app.ui.pages.cost_parts import spend
+
+    components._MART_FAIL_BACKOFF.clear()
+    empty = QueryResult(df=pd.DataFrame(), ok=True, source="stub")
+    types = pd.DataFrame({"QUERY_TYPE": ["SHOW", "DESCRIBE"], "QUERIES": [900, 400],
+                          "CS_CREDITS": [3.0, 1.0], "CS_CREDITS_PER_1K": [3.33, 2.5]})
+    live_sql: list[str] = []
+
+    def _run(sql, *_a, **kwargs):
+        key = str(kwargs.get("key", ""))
+        if key.startswith("cs_types_") and key.endswith("_fact"):
+            if mart_up:
+                return QueryResult(df=types.copy(), ok=True, source="mart stub")
+            return QueryResult(df=pd.DataFrame(), ok=False, error="mart down")
+        if key.startswith("cs_types_"):
+            live_sql.append(str(sql))
+            return QueryResult(df=types.copy(), ok=True, source="live stub")
+        return empty
+
+    monkeypatch.setattr("app.core.query.run", _run)        # run_mart_first's own reads
+    monkeypatch.setattr(spend, "run", _run)
+    monkeypatch.setattr(spend, "run_batch", lambda specs, **_k: {s["key"]: empty for s in specs})
+    monkeypatch.setattr(spend, "load_settings", lambda *_a, **_k: {})
+    monkeypatch.setattr(spend, "can_open", lambda _page: True)
+    monkeypatch.setattr(spend, "request_navigation", lambda *_a, **_k: None)
+    # the tab returns early on an empty metering read, so hand it one warehouse-metering day
+    metering = QueryResult(df=pd.DataFrame({
+        "DAY": [date(2026, 9, 29)], "SERVICE_TYPE": ["WAREHOUSE_METERING"], "CREDITS_USED": [100.0],
+        "CREDITS_BILLED": [100.0], "CREDITS_ADJUSTMENT": [0.0]}), ok=True, source="metering stub")
+    csr = QueryResult(df=pd.DataFrame({
+        "WAREHOUSE_NAME": ["WH_A"], "COMPANY": ["ALFA"], "COMPUTE_CREDITS": [70.0],
+        "CLOUD_SVC_CREDITS": [30.0], "TOTAL_CREDITS": [100.0], "CLOUD_SVC_PCT": [30.0],
+        "STATUS": ["ELEVATED"]}), ok=True, source="csr stub")
+    # AppTest runs the function's SOURCE as a script (no closures): hand the inputs over through a
+    # module attribute the script imports (the tests/test_spend_grain_coverage.py pattern).
+    monkeypatch.setattr(spend, "_CS_TYPES_TEST_ARGS", {
+        "days": days, "bounds": bounds,
+        "pre": {"metering_res": metering, "csr_res": csr, "coco_res": empty, "allin_res": empty,
+                "napp_res": empty, "csfam_res": empty}}, raising=False)
+
+    def _app():
+        from app.ui.pages.cost_parts import spend as _spend
+        _a = _spend._CS_TYPES_TEST_ARGS
+        _spend._spend_tab("ALL", _a["days"], 3.0, 3.0, bounds=_a["bounds"], **_a["pre"])
+
+    try:
+        at = AppTest.from_function(_app, default_timeout=60)
+        at.run()
+    finally:
+        components._MART_FAIL_BACKOFF.clear()
+    assert not at.exception, at.exception
+    cs_caps = [str(c.value) for c in at.caption if "Metadata storms show up here" in str(c.value)]
+    assert len(cs_caps) == 1, "the statement-type panel did not render"
+    return cs_caps[0], live_sql
+
+
+@pytest.mark.parametrize("mart_up", [False, True])
+def test_cs_statement_types_caption_reports_no_clamp_for_a_whole_year_scan(monkeypatch, mart_up):
+    # Current year on 2026-09-30: day offset 272, bounds Jan 1 .. Oct 1 (a 273-day range). Both legs
+    # scan the whole range; the old caption said "Scanned 90d of the 272d window" on the live leg.
+    from app.config import CURRENT_YEAR_WINDOW
+    days, bounds, span = _bounded(CURRENT_YEAR_WINDOW, date(2026, 9, 30))
+    assert (days, span) == (272, 273)
+    cap, live_sql = _render_cs_types(monkeypatch, days=days, bounds=bounds, mart_up=mart_up)
+    if not mart_up:
+        assert live_sql and "START_TIME >= '2026-01-01' AND START_TIME < '2026-10-01'" in live_sql[0]
+    # no false clamp disclosure, and no "273d of the 272d window" from comparing the span to the offset
+    assert "Scanned" not in cap, cap
+
+
+def test_cs_statement_types_caption_still_discloses_the_trailing_live_clamp(monkeypatch):
+    # K1 unchanged: a trailing 365d window served by the 90d-clamped live scan says so.
+    cap, live_sql = _render_cs_types(monkeypatch, days=365, bounds=None, mart_up=False)
+    assert live_sql
+    assert "Scanned 90d of the 365d window (the live fallback caps its scan)." in cap
 
 
 # ---------------------------------------------------------------------------
