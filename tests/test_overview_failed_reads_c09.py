@@ -260,7 +260,9 @@ def _ml_table_as_read(today: datetime.date) -> QueryResult:
 
     from app.data import mart_sql
 
-    m = re.search(r"WHERE TS::DATE (>=|>) CURRENT_DATE\(\)", mart_sql.ml_forecast_daily())
+    # v4.606 integration: the reader compares against the account-clock today (account_today_sql(), R1-230),
+    # so match the operator, not the right-hand side
+    m = re.search(r"WHERE TS::DATE (>=|>) ", mart_sql.ml_forecast_daily())
     assert m, "the reader's date predicate moved"
     table = _ml_frame(today, 41).df
     keep = table["DAY"] >= today if m.group(1) == ">=" else table["DAY"] > today
