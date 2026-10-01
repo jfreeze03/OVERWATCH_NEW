@@ -9,17 +9,24 @@ app/
   config.py                 constants, thresholds, defaults (pure)
   companies.py              ALFA/Trexis hardcoded scope + KEBARR1 override (pure)
   logic/                    business math — pure Python, no Streamlit, unit-tested
-  data/                     SQL string builders — pure Python, no Streamlit, unit-tested
+  data/                     SQL string builders — pure Python (prefs_sql/mart_sql reach core.identity), unit-tested
   core/                     runtime: session, cached query engine, errors, state
   ui/                       components, Altair charts, pages
 snowflake/migrations/       versioned setup SQL (V001, V002, … one file per change) + SCHEMA_VERSION
-tests/                      pytest over logic/, data/, companies, sqlsafe
+tests/                      pytest: logic/data units, AppTest page smokes, migration + history locks
 ```
 
-Dependency rule: `logic/` and `data/` import nothing from `core/` or `ui/` and
-never import Streamlit. That is what makes them testable in CI without a
-Snowflake connection, and it is enforced by code review + the CI test matrix
-(CI installs no Streamlit).
+Dependency rule: `logic/` and `data/` never import `ui/` and never import
+Streamlit directly. From `core/` they may import only the Streamlit-free
+helpers `app.core.sqlsafe` and `app.core.result`, with one exception:
+`data/prefs_sql.py` (at module level) and `mart_sql`'s last-visit read
+(lazily) import `app.core.identity` for the viewer-identity SQL, and that
+module imports Streamlit. Both layers are tested without a Snowflake
+connection. CI installs Streamlit (`requirements-dev.txt`, for the AppTest page
+smokes and the floor-compat leg), so the CI environment does not enforce this
+rule: code review does, plus import-purity tests on a few logic modules
+(client_support, policy_coverage, storage_waste, savings_rollup,
+unread_maintenance).
 
 ## Data flow (mart-first)
 
@@ -47,9 +54,12 @@ Snowflake connection, and it is enforced by code review + the CI test matrix
   `run()` catches outside the cache and returns a typed `QueryResult`
   (`ok/error/truncated/source/fetched_at`). A transient failure can never pin
   an empty frame for the TTL (old-app finding H1).
-- Cache keys include company, environment, date window, filters, **and current
-  role** — on SiS different users' role-scoped results never cross (old-app C2
-  hygiene).
+- Cache keys are the SQL text (company, environment, date window and filters
+  are baked into each builder's SQL) plus a scope of **current role**, the
+  refresh/domain salts and, for per-viewer reads (`USER_PREFS`) only, the
+  viewer (`query._cache_scope`; old-app C2 hygiene). Under owner's-rights SiS
+  every viewer shares the owner's role, so account-wide reads are shared
+  across viewers by design.
 - Row caps fetch `max_rows + 1` and set `truncated`; the UI renders a banner.
   No silent LIMIT injection (old-app M1).
 - Statement timeout and query tag are tracked **on the session object**, not in
@@ -65,8 +75,13 @@ Snowflake connection, and it is enforced by code review + the CI test matrix
   recorded to an in-session ring buffer and best-effort inserted into
   `APP_ERROR_LOG`, then a friendly error renders. Nothing is swallowed
   invisibly; the Admin page lists recent errors.
-- Ruff `BLE001` bans blind `except Exception:` everywhere except the three
-  sanctioned runtime modules that record what they catch.
+- Ruff `BLE001` bans blind `except Exception:` except (a) in the five
+  sanctioned runtime modules listed in `ruff.toml` per-file-ignores
+  (`app/core/errors.py`, `session.py`, `query.py`, `state.py`, `ai.py`), and
+  (b) at line-level `# noqa: BLE001` sites. Those cover best-effort chrome and
+  cosmetic paths (chart theming, table styling, telemetry, deep links), where
+  the page deliberately degrades instead of breaking; each should carry a
+  reason comment.
 - **Empty/absent-state vocabulary (C25):** `components.empty_state(kind, ...)`
   is the one rendering of absence, so color carries meaning — `clean` =
   verified-clean compact green row, `needs_setup` = blue info (configure or
@@ -159,23 +174,39 @@ Snowflake connection, and it is enforced by code review + the CI test matrix
 - User/database spend: allocated from query elapsed-time share (or
   `QUERY_ATTRIBUTION_HISTORY` when present) and always labeled **allocated**.
 - Rates come from `SETTINGS` (seeded $3.68 compute / $2.20 Cortex /
-  $23 TB-mo). The Admin page edits them with the operator role; code ships
-  matching defaults only as offline fallback.
+  $23 TB-mo). The Admin page edits them (viewers on the `OPERATOR_USERS`
+  allowlist, type-to-confirm); code ships matching defaults only as offline
+  fallback.
 - All conversion math lives in `app/logic/formulas.py` and is regression-tested.
 
 ## Security model
 
-- **The security boundary is Snowflake RBAC under Streamlit-in-Snowflake.**
-  Each viewer's own role limits what data the app can read for them.
+- **The app runs owner's-rights under Streamlit-in-Snowflake.** Every viewer's
+  statements execute as the app owner. Snowflake RBAC decides who can open the
+  app (USAGE on the Streamlit object: SNOW_ACCOUNTADMINS + SNOW_SYSADMINS, per
+  `roles.sql`). It does NOT limit data per viewer: every viewer reads with the
+  owner's privileges. Viewer identity comes from `st.user`
+  (`app/core/identity.py`).
 - Company scoping (ALFA vs Trexis) is a shared-account *convenience filter*,
   hardcoded deliberately in `app/companies.py` and seeded to
   `COMPANY_SCOPE` (a pytest keeps code and seed in sync). It is not an
   isolation mechanism and the docs never claim it is.
 - User classification: `TRXS_*` → Trexis; explicit override `KEBARR1` → ALFA
   (holds both companies' roles, treated as ALFA by policy).
-- Role → navigation profile mapping filters *pages*, not data. Data-changing
-  actions (settings updates, alert ack/resolve) require the operator role and
-  typed confirmation; everything else generates SQL for a human to run.
+- Page visibility depends on the viewer's username (`config.VIEWER_PROFILES`;
+  an identified viewer not in the map gets READER). It filters *pages*, not
+  data. Off-SiS, with no viewer identity, it falls back to the role → profile
+  map.
+- Operator actions are gated at each call site by the viewer-username allowlist
+  `config.OPERATOR_USERS` (`session.is_operator()`). The executors re-check the
+  owner-privileged statements themselves: the `ALTER WAREHOUSE/PIPE/TASK/USER`
+  and `ALTER ACCOUNT SET` levers and query cancel (`query._PRIVILEGED_PREFIXES`).
+  Every in-app write passes the executor allow-list: one statement, aimed at
+  OVERWATCH objects or a lever. Write friction follows CLAUDE.md law 11: one
+  click for reversible upserts to OVERWATCH's own tables (e.g. alert ACK),
+  type-to-confirm (`confirm_gate`) for classifying or account-touching writes
+  (alert RESOLVE, incident declare/close, warehouse levers) and for Admin
+  settings edits.
 - Local/Community-Cloud runs use one shared connection and are **dev-only**;
   `DEPLOYMENT.md` says so explicitly.
 
@@ -209,21 +240,27 @@ session's approximate cache-hit rate — measure before optimizing further.
 
 ## Deliberate choices reviewers will ask about
 
-**Custom alert scan instead of native `CREATE ALERT`.** One task + one proc
-evaluates ~26 rules with shared dedupe keys, severity escalation, channel
-routing, and rules-as-rows editable in-app. Native ALERTs would mean ~26
-separately billed serverless schedules with no shared dedupe or routing and
+**Custom alert scans instead of native `CREATE ALERT`.** An hourly scan
+(`SP_ALERT_SCAN`), a daily scan (`SP_ALERT_SCAN_DAILY`), the anomaly sweep and
+several single-purpose scanners (canary, change-impact, SLO breach, warehouse
+change, ETL cycle, schema drift, cloud-services anomaly, sleep polling)
+evaluate ~45 rules with shared dedupe keys, severity escalation, channel
+routing, and rules-as-rows editable in-app. Native ALERTs would mean dozens of
+separately billed schedules (one per rule) with no shared dedupe or routing and
 config drift outside the app. `native_alert_templates.sql` ships for teams
 that prefer them. This is a costed choice, not unfamiliarity.
 
-**Scheduled MERGE facts instead of Dynamic Tables everywhere.** Loaders run
-on the dedicated XSMALL under a resource monitor — predictable cost, explicit
-procs covered by teardown/canary/tests. DTs bill serverless refresh outside
-that budget and cannot source SNOWFLAKE share views (no change tracking), so
-they cannot replace the ACCOUNT_USAGE loaders anyway. `MART_SPEND_ROLLUP_DT`
-(V015) was a measured DT pilot; the 2026-08-17 audit found nothing read it while
-it billed serverless refresh, so V090 dropped it and the app standardized on
-scheduled-task marts.
+**Scheduled MERGE facts instead of Dynamic Tables everywhere.** Loaders run as
+scheduled tasks on the shared XSMALL `WH_ALFA_ADMIN` (the app's own warehouse,
+60s auto-suspend): predictable cost, explicit procs covered by
+teardown/canary/tests. There is no resource monitor: V045 dropped
+`OVERWATCH_RM` because it was suspending the app mid-use, and COST alert rules
+are the guardrail. A Dynamic Table refreshes on its own TARGET_LAG schedule
+whether or not anything reads it, and DTs cannot source SNOWFLAKE share views
+(no change tracking), so they cannot replace the ACCOUNT_USAGE loaders anyway.
+`MART_SPEND_ROLLUP_DT` (V015) was a measured DT pilot; the 2026-08-17 audit
+found nothing read it while it kept refreshing every ~6h on `WH_ALFA_ADMIN`, so
+V090 dropped it and the app standardized on scheduled-task marts.
 
 **String-built SQL with a safety layer instead of Snowpark binds.** Builders
 are pure functions emitting complete statements the app also SHOWS to users
@@ -233,7 +270,8 @@ are pure functions emitting complete statements the app also SHOWS to users
 Snowpark binds would not remove the display/require-review path.
 
 **Hardcoded company scope instead of row access policies.** Two companies,
-one account, scope is convenience not a security boundary (roles are). RAPs
+one account, scope is convenience not a security boundary (the Streamlit
+grant and the `OPERATOR_USERS` / `VIEWER_PROFILES` allowlists are). RAPs
 cannot bind SNOWFLAKE.ACCOUNT_USAGE itself, and policy sprawl across derived
 objects buys admin burden without closing the actual exposure. Revisit on a
 compliance driver.
@@ -255,7 +293,8 @@ Render is not the bottleneck; warehouse scans are. The standing rules:
    QUERY_ATTRIBUTION_HISTORY; filter the driving window first (the 139s
    lesson).
 3. **Tier-grouped batching** — independent same-tier reads go out in one
-   `run_batch` (all four tiers); filter-scoped and fixed reads are never
+   `run_batch` (all five tiers: live, recent, hourly, historical, metadata);
+   filter-scoped and fixed reads are never
    coupled in one batch cache. Serial cached paths remain as fallback.
 4. **Telemetry closes the loop** — slow/failed fetches persist always, plus
    a ~2% sample of everything for the healthy baseline; `batch_fallback`
@@ -263,5 +302,6 @@ Render is not the bottleneck; warehouse scans are. The standing rules:
    table is the optimization queue, ordered by evidence.
 The V027 mart family (docs/design/V027_MART_FAMILY.md) shipped as the fact-first
 backbone — its scheduled marts replaced the recurring live ACCOUNT_USAGE scans,
-with the live builders kept as labeled fallback (migrations now run through V124).
+with the live builders kept as labeled fallback (the current migration tip is the
+range named in `snowflake/validate.sql`'s first check).
 
