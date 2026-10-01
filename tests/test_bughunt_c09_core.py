@@ -184,3 +184,44 @@ def test_confirmed_cancel_is_a_success_and_refreshes_the_running_list(monkeypatc
     assert ok is True and msg == f"Snowflake: query [{_QID}] terminated."
     assert "_ow_refresh_salt" in st.session_state      # the cached running-queries list re-reads
     st.session_state.clear()
+
+
+# ------------------------------------------------------------------ R1-005: batch cache hits say so (R12) ----
+
+def _quiet_batch_layer(monkeypatch):
+    import streamlit as st
+
+    import app.core.query as q
+
+    st.session_state.clear()
+    monkeypatch.setattr(q, "_telemetry", lambda *a, **k: None)
+    monkeypatch.setattr(q, "record_error", lambda *a, **k: "ref")
+    return q
+
+
+def test_run_batch_mixed_member_cache_hit_is_captioned_as_cached(monkeypatch):
+    q = _quiet_batch_layer(monkeypatch)
+    calls: list[tuple] = []
+
+    def _exec(sqls, *_a, **_k):
+        calls.append(sqls)
+        return tuple(pd.DataFrame({"X": [1]}) for _ in sqls)
+
+    monkeypatch.setattr(q, "_execute_batch", _exec)
+    spec = [{"key": "k", "sql": "SELECT 1 AS X /* c09 R1-005 mixed */", "tier": "hourly", "source": "s"}]
+    first = q.run_batch_mixed(spec, page="t")["k"]
+    second = q.run_batch_mixed(spec, page="t")["k"]
+    assert len(calls) == 1                              # the second answer never left the member cache
+    assert first.ok and first.cache_hit is False
+    assert second.ok and second.cache_hit is True       # 'served ... cached', never 'fetched <now>'
+
+
+def test_run_batch_tuple_cache_replay_is_captioned_as_cached(monkeypatch):
+    q = _quiet_batch_layer(monkeypatch)
+    # A tuple-level st.cache_data hit replays frames WITHOUT running _execute_batch, so _BATCH_MEMBER_MS
+    # stays None (the #29 sentinel) -- emulate exactly that.
+    monkeypatch.setitem(q._BATCH_FETCHERS, "recent",
+                        lambda sqls, *_a, **_k: tuple(pd.DataFrame({"X": [1]}) for _ in sqls))
+    out = q.run_batch([{"key": "k", "sql": "SELECT 1 AS X /* c09 R1-005 tuple */", "source": "s"}],
+                      page="t", tier="recent")
+    assert out["k"].ok and out["k"].cache_hit is True

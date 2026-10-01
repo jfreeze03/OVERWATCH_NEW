@@ -1045,6 +1045,9 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
         out[str(spec["key"])] = QueryResult(
             df=df, ok=True, truncated=truncated, source=str(spec.get("source", "")),
             tier=tier, fetched_at=datetime.now(), elapsed_ms=member_ms,
+            # c09 R1-005 (R12): a tuple-cache replay is a HIT -- the caption must say "served ...
+            # cached", not "fetched <now>" (telemetry above already knew; the result did not).
+            cache_hit=cache_hit_batch,
         )
         # r29b: only (re)stamp the member cache from a FRESH tuple fetch. On a tuple-cache
         # HIT `frames` is already up to CACHE_TTLS[tier] old, so re-putting it with a fresh
@@ -1116,7 +1119,8 @@ def run_batch_mixed(specs: list[dict], *, page: str) -> dict:
                        sql_hash=_sql_hash16(sql), cache_hit=True)
             out[key] = QueryResult(df=frame, ok=True, truncated=truncated,
                                    source=str(spec.get("source", "")), tier=tier,
-                                   fetched_at=datetime.now(), elapsed_ms=0.0)
+                                   fetched_at=datetime.now(), cache_hit=True,   # c09 R1-005 (R12)
+                                   elapsed_ms=0.0)
             continue
         pending.append((spec, tier, capped_sql, scope, cap))
     if not pending:
