@@ -70,7 +70,10 @@ def test_queries_sparkline_suppressed_under_unhonored_filters():
 #    failure can't paint an amber header over a verified-clean 7d body.
 def test_failure_timeline_alarm_reflects_seven_day_body():
     ops = _src("app/ui/pages/operations.py")
-    assert "alarm_health(len(timeline))" in ops
+    # R1-043: the alarm reads the 7-day body's pre-LIMIT total (TOTAL_FAILURES_WIN; len(timeline) on an old-shape
+    # result) since the body stops at 500 rows — still the 7d body, never the window-wide known_failures
+    assert "alarm_health(_fail_total)" in ops
+    assert "_fail_total = len(timeline)" in ops
     # the old bug: alarm computed straight from the window-wide known_failures
     assert "alarm_health(None if known_failures is None else int(known_failures))" not in ops
 

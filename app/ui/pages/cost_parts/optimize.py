@@ -1968,8 +1968,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 )
                 result_caption(sg_res, note=(f"Window widened to {days_storage}d for a stable growth slope."
                                              if days < days_storage else
-                                             f"Live scan capped at {days_storage}d (the live ACCOUNT_USAGE "
-                                             "limit)." if days > days_storage else f"{days_storage}d window."))
+                                             f"Live scan capped at {days_storage}d (the live-scan limit)."
+                                             if days > days_storage else f"{days_storage}d window."))
                 _low = int(movers["LOW_CONFIDENCE"].sum()) if "LOW_CONFIDENCE" in movers.columns else 0
                 st.caption(
                     "The projection is a least-squares slope over every observed day, not first-vs-last "

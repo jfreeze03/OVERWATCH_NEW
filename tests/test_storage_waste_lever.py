@@ -716,8 +716,9 @@ def test_storage_waste_panel_publishes_the_handoff_source():
     # never cleared (the toggle resets on every revisit), and no new ACCOUNT_USAGE read or write latch
     assert "pop(STORAGE_HANDOFF_KEY" not in opt and "del st.session_state[STORAGE_HANDOFF_KEY]" not in opt
     assert opt.count("ACCOUNT_USAGE") == 6
-    # 7 -> 6 in the 2026-09-30 hygiene release review: the retention control's never-succeeding write is gone
-    assert len(re.findall(r"write_gate_open\(", opt)) == len(re.findall(r"stamp_write\(", opt)) == 6
+    # 7 -> 6 in the 2026-09-30 hygiene release review: the retention control's never-succeeding write is gone;
+    # 6 -> 7 with R1-086: the off-hours schedule is review only, and its ESTIMATED booking is its own latched button
+    assert len(re.findall(r"write_gate_open\(", opt)) == len(re.findall(r"stamp_write\(", opt)) == 7
 
 
 def test_headlines_read_only_the_storage_handoff():
