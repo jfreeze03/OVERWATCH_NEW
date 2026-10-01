@@ -63,6 +63,7 @@ def localize_timestamps(df, columns: list[str]):
     display-only — SQL, dedupe keys, and exports stay in account time.
     """
     import pandas as pd
+    from pandas.api import types as ptypes
 
     tz = display_timezone()
     if not tz or tz.startswith("Account") or df is None or getattr(df, "empty", True):
@@ -72,8 +73,17 @@ def localize_timestamps(df, columns: list[str]):
     for col in columns:
         if col not in out.columns:
             continue
+        raw = out[col]
+        # R1-219: the column list comes from a NAME convention (timestampish_columns), and a name
+        # can lie — NEVER_READ is a boolean, a *_TIME can be raw milliseconds. to_datetime(errors=
+        # "coerce") turned the booleans into all-NaT ("—" on every row) and the numbers into 1970
+        # epochs. Only a real datetime column, or text/objects that ALL parse as timestamps, convert.
+        if ptypes.is_bool_dtype(raw) or ptypes.is_numeric_dtype(raw):
+            continue
         try:
-            series = pd.to_datetime(out[col], errors="coerce")
+            series = pd.to_datetime(raw, errors="coerce")
+            if not ptypes.is_datetime64_any_dtype(raw) and int(series.notna().sum()) < int(raw.notna().sum()):
+                continue                      # some non-null cell is not a timestamp: not this column
             # codex#35: an already-tz-aware column must be CONVERTED, not localized again —
             # tz_localize raises on aware input, and the old except-continue then silently
             # skipped conversion, leaving aware timestamps shown in the wrong zone.

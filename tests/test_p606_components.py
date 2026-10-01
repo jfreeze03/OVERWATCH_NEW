@@ -11,6 +11,7 @@ pre-fix code at 04fd374e:
   R1-216  spend_trend averaged/paced ROWS, not calendar days, and always dimmed the newest row.
   R1-217  bar_count's takeaway printed a share of a SUM of per-warehouse averages.
   R1-218  section-count badges keyed on the day count only, so Last month reused the 30d count.
+  R1-219  the display-timezone pass blanked NEVER_READ (bool) and turned raw *_TIME numbers into 1970.
 """
 
 from __future__ import annotations
@@ -443,3 +444,29 @@ def test_badge_stashed_under_30d_does_not_show_under_last_month_of_the_same_leng
     assert components.stashed_counts("Operations") == {}
     current["f"] = _window_filters(CURRENT_MONTH_WINDOW, today)
     assert components.stashed_counts("Operations") == {"Optimize": 3}   # same window: still badged
+
+
+# ---------------------------------------------------------------------------
+# R1-219: the display-timezone pass converts only columns that ARE timestamps
+# ---------------------------------------------------------------------------
+
+def test_localize_timestamps_leaves_name_lookalike_columns_alone(monkeypatch):
+    from app.ui import components
+    fake = _NavSt()
+    fake.session_state["_ow_display_tz"] = "America/New_York"
+    monkeypatch.setattr(components, "st", fake)
+    df = pd.DataFrame({
+        "NEVER_READ": [True, False],                                    # bool, name ends in _READ
+        "TOTAL_ELAPSED_TIME": [125000, 3400],                           # raw ms, name ends in _TIME
+        "STATUS_AT": ["n/a", "2026-09-29 10:00:00"],                    # text that is not all timestamps
+        "LAST_READ": pd.to_datetime(["2026-09-29 10:00:00", None]),     # a real timestamp (+ a NULL)
+        "CREATED_AT": ["2026-09-29 10:00:00", "2026-09-29 11:30:00"],   # timestamp text
+    })
+    out, note = components.localize_timestamps(df, components.timestampish_columns(df.columns))
+    assert out["NEVER_READ"].tolist() == [True, False]
+    assert out["TOTAL_ELAPSED_TIME"].tolist() == [125000, 3400]
+    assert out["STATUS_AT"].tolist() == ["n/a", "2026-09-29 10:00:00"]
+    # the real timestamps still convert (Central -> Eastern, +1h) and the note still shows
+    assert str(out["LAST_READ"].iloc[0]) == "2026-09-29 11:00:00" and pd.isna(out["LAST_READ"].iloc[1])
+    assert str(out["CREATED_AT"].iloc[1]) == "2026-09-29 12:30:00"
+    assert "America/New_York" in note
