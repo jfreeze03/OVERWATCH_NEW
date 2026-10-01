@@ -42,7 +42,8 @@ scheduled task — cheap to read, may lag its cadence. A **live** read hits
 **Time: account vs server.** Streamlit-in-Snowflake cannot ALTER SESSION, so SQL `CURRENT_DATE()` /
 `CURRENT_TIMESTAMP()` resolve in the account's default TIMEZONE. That default is **America/Chicago**
 (verified 2026-09-21, level ACCOUNT), the same clock as the app's `account_now()` / `account_today()`.
-New builders still pin Central explicitly (`account_today_sql()`, `account_month_start_sql()` or
+The server (the Python process under SiS) runs on UTC, 5-6 hours ahead of Chicago, so app code
+uses `account_now()` / `account_today()`, never `datetime.now()` / `date.today()`. New builders still pin Central explicitly (`account_today_sql()`, `account_month_start_sql()` or
 `CONVERT_TIMEZONE('America/Chicago', …)`); see the TIMEZONE STANDARD in `app/data/common.py`, locked by
 `tests/test_timezone_standard.py`. "Yesterday", "complete days", and the exhaustion clock use account
 time. A per-day rate divides by the days actually elapsed in the window.
