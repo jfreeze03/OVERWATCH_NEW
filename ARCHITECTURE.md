@@ -98,10 +98,13 @@ savings_rollup, unread_maintenance).
   install first), `no_data_yet` = quiet caption (a successful read returned
   zero rows), `unavailable` = red lead line with the full error one click away.
   `guard()` routes its empty branch through it (callers whose empty is the
-  verified-good outcome pass `kind="clean"`; a setup hint is suppressed under
-  a clean empty — a successful read proves setup exists) and its error branch
-  renders as `unavailable` — except absence-of-setup (the missing-migrations
-  error), which stays a calm `needs_setup`. An empty state may carry its next best action (`action_label`
+  verified-good outcome pass `kind="clean"`) and its error branch renders as
+  `unavailable` — except absence-of-setup (the missing-migrations error), which
+  stays a calm `needs_setup`. `setup_hint` never renders on an empty read of any
+  kind (a successful read proves setup exists, so empty-read guidance belongs in
+  `empty_message`); on the error branch it renders under `needs_setup`, and under
+  `unavailable` only for a setup absence or schema drift (`is_setup_absence` /
+  `is_schema_drift`), never under a timeout or other failure. An empty state may carry its next best action (`action_label`
   + `on_action`, F56) so an empty panel is a doorway, not a dead end.
 - **Presentation mode (C19):** `components.present_mode()` returns `operator`
   (default — the lean daily-triage surface) or `audit` (the full evidence
