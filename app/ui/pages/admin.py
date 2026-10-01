@@ -1303,7 +1303,7 @@ def _self_cost_tab() -> None:
          "source": "QUERY_HISTORY (WH_ALFA_ADMIN; app vs tasks by tag/marker)"},
         {"key": "self_queue", "sql": mart_sql.app_warehouse_queue_by_hour(14),
          "source": "QUERY_HISTORY (WH_ALFA_ADMIN, QUEUED_OVERLOAD_TIME by hour)"},
-    ], page=_PAGE, tier="historical") or {}
+    ], page=_PAGE, tier="historical")
     section_header("App vs tasks on the shared warehouse (14d)", "", "cost")
     res = _pf.get("self_cost") or run(mart_sql.app_self_cost(14), page=_PAGE, key="self_cost", tier="historical",
                                       source="QUERY_HISTORY (WH_ALFA_ADMIN; app vs tasks by tag/marker)")

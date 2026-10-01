@@ -249,7 +249,7 @@ def render() -> None:
             # v4.597: + "grain" (the metered-grain coverage ratio, moved from Decision Studio ▸
             # Cost Truth) rides the same on-demand round trip; first paint is unchanged.
             _pf = run_batch([j for j in _all_jobs if j["key"] in ("wh", "daily", "grain")],
-                            page=_PAGE, tier="hourly") or {}
+                            page=_PAGE, tier="hourly")
             section_header("Attribution", "", "chargeback", anchor="cost-attribution")
             _attribution_tab(f["company"], f["days"], rate, f["database"], f["schema_contains"],
                              bounds=f["bounds"], wh_res=_pf.get("wh"), daily_res=_pf.get("daily"),

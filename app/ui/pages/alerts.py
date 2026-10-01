@@ -1082,7 +1082,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                              "source": "ALERT_EVENTS (90d, this rule)"},
                             {"key": "res", "sql": mart_sql.resolutions_for_rule(str(row["RULE_ID"])),
                              "source": "ALERT_EVENTS (resolved, this rule)"},
-                        ], page=_PAGE, tier="recent") or {}
+                        ], page=_PAGE, tier="recent")
                     rules_res = _dr.get("rules") or run(
                         mart_sql.alert_rules(), page=_PAGE, key="rules_for_drawer",
                         tier="recent", source="ALERT_CONFIG")

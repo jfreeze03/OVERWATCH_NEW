@@ -1514,7 +1514,7 @@ def _below_warehouse_drill(company: str, exp, flagged_wh: str, rate: float) -> N
         {"key": "whchg",
          "sql": change_impact_sql.warehouse_change_registry(_ANOM_CHANGE_LOOKBACK_DAYS, company, wh),
          "source": "WAREHOUSE_CHANGE_REGISTRY (daily 06:40 CT scan)"},
-    ], page=_PAGE, tier="hourly") or {}
+    ], page=_PAGE, tier="hourly")
     xd, chg = _b.get("xdim"), _b.get("whchg")
 
     if xd is None:

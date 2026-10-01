@@ -631,7 +631,7 @@ def render() -> None:
         generated=account_now().strftime("%Y-%m-%d %H:%M") + " (account time)",
         cards=tuple(
             (str(item.get("label", "Metric")),
-             str(item.get("value", "-")).replace("â€”", "-")
+             str(item.get("value", "-"))
              + (f" | {item['delta']}" if item.get("delta") else ""))
             for item in kpis
         ),
