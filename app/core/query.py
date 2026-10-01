@@ -549,7 +549,8 @@ def _bump_refresh(sql: str) -> None:
 
 # r27 #10 (light): operator writes are app-constructed and confirmation-gated,
 # but the executor itself now refuses anything outside the action surface —
-# one statement, aimed at OVERWATCH objects or a warehouse lever.
+# one statement, aimed at OVERWATCH objects or an Emergency lever (ALTER WAREHOUSE / PIPE / TASK / USER,
+# ALTER ACCOUNT SET).
 _WRITE_PREFIXES = (
     "ALTER WAREHOUSE ",
     # Bug round 2 B1: the Emergency-tab levers (Operations) build these exact
@@ -616,7 +617,7 @@ def _statement_allowed(sql: str) -> tuple[bool, str]:
         return False, "multi-statement strings are not executed — one statement per call."
     if not body.upper().startswith(_WRITE_PREFIXES):
         return False, ("statement is outside the operator allow-list "
-                       "(OVERWATCH tables, OVERWATCH procs, warehouse levers): "
+                       "(OVERWATCH tables, OVERWATCH procs, Emergency levers): "
                        + body[:80])
     return True, ""
 
