@@ -1,9 +1,14 @@
 """Month-end spend projection with an honest uncertainty band.
 
-Simple, explainable math (recent daily average + variability band), because an
-executive will ask "how did you get this number" and the answer must fit in
-one sentence. No fabricated series: with insufficient history the projection
-declines to guess (``ok=False``) instead of inventing a line.
+Simple, explainable math, because an executive will ask "how did you get this
+number" and the answer must fit in one sentence: the linear (default) engine fits
+a robust (Theil-Sen) calendar-day trend over the last 14 complete-day rows and
+projects it forward from today; the seasonal engine uses day-of-week means over
+up to 6 weeks of complete days (it needs >= 28, else it falls back to linear).
+Either way the band is the residual std against that fit x sqrt(days projected),
+widened for parameter uncertainty and within-week autocorrelation. No fabricated
+series: with insufficient history the projection declines to guess
+(``ok=False``) instead of inventing a line.
 """
 
 from __future__ import annotations

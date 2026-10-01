@@ -16,23 +16,30 @@ DESIGN (four steps)
     4. Narrate — the deterministic headline is authoritative; the UI may OPTIONALLY
                  ask Cortex to rephrase the already-grounded result (invents nothing).
 
-REVERT PATH (no damage to the original app) — delete THREE new paths and revert
-THREE marked "ASK-OVERWATCH" wiring blocks:
+REVERT PATH (no damage to the rest of the app). The feature is on main and its wiring
+carries no "ASK-OVERWATCH" markers, so revert it by hand:
     delete   app/logic/ask/
     delete   app/ui/pages/ask.py
-    delete   tests/test_ask_registry.py
+    delete   tests/test_ask_registry.py and tests/test_ask_pricing.py
     revert   app/main.py            (the `ask` import + the "Ask": ask.render entry)
-    revert   app/config.py          (drop "Ask" from PAGES_BY_PROFILE["DBA"])
-    revert   tests/history_locks/test_codex_r2_wave.py  (restore the DBA nav pin to
-             ["Watch","Analyze","Govern"] and delete the dict(dba)["More"]==["Ask"] line)
+    revert   app/config.py          (drop "Ask" from PAGES_BY_PROFILE["DBA"] and the
+             NAV_GROUPS "Ask OVERWATCH" entry)
+    revert   tests/history_locks/test_codex_r2_wave.py  (the DBA nav pin back to
+             ["Watch","Analyze","Govern"]; delete the dict(dba)["Ask OVERWATCH"]==["Ask"] assert)
+    revert   tests/history_locks/test_brief_landing.py  (the asserts that "Ask" is in the
+             DBA profile and comes last)
+    revert   tests/test_usage_sim.py  ("app.ui.pages.ask" in the expected patched modules, and
+             the "Ask" _FIRST_PAINT_BUDGET row: its coverage test requires a budget row for
+             exactly the DBA pages)
+    revert   tests/usage_sim.py and tests/test_pages_shaped.py  (the `ask` page import and
+             its place in the patched-module list)
+    then     run `grep -rnE "app[./]logic[./]ask|app[./]ui[./]pages[./]ask" tests/` and remove
+             or adjust every remaining hit: many bug-hunt and UI-wave locks import this
+             package or read the page, and the list grows, so it is not copied here.
 This package imports app.data builders and app.logic.anomaly READ-ONLY and mutates
-nothing, so those deletions leave the original app byte-for-byte unchanged. (The
-whole feature lives on branch feature/ask-overwatch, so `git checkout main` also
-reverts it cleanly.)
+nothing, so once the wiring above is reverted the rest of the app is unchanged.
 The Admin 'Ask demand' panel and mart_sql.ask_demand_summary read only APP_USAGE and
-survive a revert. The Ask telemetry tests live in tests/test_ask_registry.py and are
-deleted with it; also drop the "Ask" row from tests/test_usage_sim.py _FIRST_PAINT_BUDGET
-(its coverage test requires a budget row for exactly the DBA pages).
+survive a revert (tests/test_app_telemetry.py locks that they never import this package).
 """
 
 from __future__ import annotations
