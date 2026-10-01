@@ -353,6 +353,43 @@ def test_v167_owner_repairs_pin_central_and_rebuild_from_the_arm_text(extras):
         assert len(re.findall(r"^\s*CALL ", blk_text, re.M)) <= 1
 
 
+@pytest.mark.parametrize(("call", "label"), [
+    ("DBA_MAINT_DB.OVERWATCH.SP_LOAD_PATTERN_COST(364)", "SP_LOAD_PATTERN_COST(364)"),
+    ("DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(90)", "SP_LOAD_QH_EXTRACT(90)"),
+    ("DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 90)", "SP_LOAD_MARTS_V27(HOURLY, 90)"),
+])
+def test_v167_owner_repair_call_blocks_carry_the_backfill_365_handler(extras, call, label):
+    """review: the step-2/3 CALL blocks follow backfill_365's R1-231 idiom IN FULL -- a raised error (not only a
+    failure verdict) is caught, logged to APP_ERROR_LOG and returned as a 'FAILED: ...' pane, so a Snowsight Run
+    All still reaches step 3's RESUME + SYSTEM$TASK_DEPENDENTS_ENABLE instead of stranding TASK_LOAD_HOURLY
+    (hourly loads, alert scans and delivery) suspended. Only a timeout or a Stop escapes (the !! note says so)."""
+    rep = extras["repair"]
+    blocks = [b for b in re.findall(r"EXECUTE IMMEDIATE \$\$\n(.*?)\$\$;", rep, re.S) if f"CALL {call};" in b]
+    assert len(blocks) == 1, call
+    blk = blocks[0]
+    assert "    rv VARCHAR;\n    emsg VARCHAR;\n" in blk
+    verdict, handler = blk.split("\nEXCEPTION\n", 1)
+    assert ("INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)\n"
+            f"        SELECT 'OwnerRepairV167', 'owner_repair_verdict_failed', LEFT(COALESCE(:rv, 'no verdict "
+            f"returned'), 2000), '{label}', CURRENT_ROLE();\n"
+            f"        RETURN 'FAILED: {label} -> ' || COALESCE(rv, 'no verdict returned');") in verdict
+    assert handler == (
+        "    WHEN OTHER THEN\n"
+        "        emsg := SQLERRM;\n"
+        "        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)\n"
+        f"        SELECT 'OwnerRepairV167', 'owner_repair_call_failed', LEFT(:emsg, 2000), '{label}', CURRENT_ROLE();\n"
+        f"        RETURN 'FAILED: {label} - ' || emsg;\n"
+        "END;\n")
+    # the step-3 CALLs sit inside the suspend window, so a caught failure still runs the RESUME after them
+    if "PATTERN" not in call:
+        s3 = _between(rep, "-- ---- step 3", "-- ---- step 4")
+        assert (s3.index("TASK_LOAD_HOURLY SUSPEND;") < s3.index(f"CALL {call};")
+                < s3.index("TASK_LOAD_HOURLY RESUME;"))
+    # the docstring's claim is now true: the generator's block shape is backfill_365's handler shape
+    bf = read("snowflake/backfill_365.sql")
+    assert "EXCEPTION\n    WHEN OTHER THEN\n        emsg := SQLERRM;\n        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG" in bf
+
+
 def test_v167_owner_repair_sql_parses(extras):
     """The plain read-only probes parse; the scripting blocks are Snowsight-only (dialect gap)."""
     sqlglot = pytest.importorskip("sqlglot")

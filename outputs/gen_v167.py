@@ -660,17 +660,29 @@ ORDER BY 1;
 # OWNER_REPAIRS (owner-run, ordered, after ALL of V166-V172 are applied). Central session first.
 # ===================================================================================================
 def _verdict_block(call: str, label: str, fail_like: str = "rv ILIKE 'MARTS WITH ERRORS%'") -> str:
-    """The backfill_365 R1-231 idiom: one guarded CALL per block; its pane reads ok / FAILED."""
+    """The backfill_365 R1-231 idiom, in full: one guarded CALL per block. A failure verdict OR a raised error
+    becomes a 'FAILED: ...' pane plus an APP_ERROR_LOG row (PAGE 'OwnerRepairV167'), so a Run All still reaches
+    step 3's RESUME + SYSTEM$TASK_DEPENDENTS_ENABLE (review: without the EXCEPTION handler a raised error aborted
+    the worksheet and stranded TASK_LOAD_HOURLY suspended). Only a statement timeout or a Stop escapes."""
     return f"""EXECUTE IMMEDIATE $$
 DECLARE
     rv VARCHAR;
+    emsg VARCHAR;
 BEGIN
     CALL {call};
     SELECT $1 INTO :rv FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
     IF (rv IS NULL OR {fail_like}) THEN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'OwnerRepairV167', 'owner_repair_verdict_failed', LEFT(COALESCE(:rv, 'no verdict returned'), 2000), '{label}', CURRENT_ROLE();
         RETURN 'FAILED: {label} -> ' || COALESCE(rv, 'no verdict returned');
     END IF;
     RETURN 'ok: {label} -> ' || rv;
+EXCEPTION
+    WHEN OTHER THEN
+        emsg := SQLERRM;
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'OwnerRepairV167', 'owner_repair_call_failed', LEFT(:emsg, 2000), '{label}', CURRENT_ROLE();
+        RETURN 'FAILED: {label} - ' || emsg;
 END;
 $$;
 """
@@ -797,6 +809,8 @@ ORDER BY 1;
 -- Inside a TASK_LOAD_HOURLY suspend window (backfill_365.sql B12), so the minute-7 watermark trim cannot shrink
 -- the widened extract mid-run. N = max(90, the deepest hole step 0 found): edit both 90s together. Idle days
 -- older than N keep their pre-V167 (overstated) idle.
+-- Each CALL block catches its own error (logged to APP_ERROR_LOG, PAGE 'OwnerRepairV167', pane 'FAILED: ...'),
+-- so a Run All still reaches the RESUME; a statement timeout or a Stop cannot be caught that way:
 -- !! IF THIS STOPS BEFORE THE RESUME, run the RESUME + SYSTEM$TASK_DEPENDENTS_ENABLE lines by hand !!
 ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY SUSPEND;
 {_verdict_block("DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(90)", "SP_LOAD_QH_EXTRACT(90)",

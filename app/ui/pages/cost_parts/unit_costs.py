@@ -22,7 +22,8 @@ from app.data import cortex_sql, etl_sql, graph_sql, insights_sql, mart27_sql
 from app.logic import graphs
 from app.logic.call_tree import build_call_tree
 from app.logic.cost_coverage import (
-    coverage_reach_phrase,
+    ai_fact_coverage_row,
+    ai_fact_note,
     coverage_stamps,
     pattern_clean_from,
     pattern_cost_cap,
@@ -65,17 +66,26 @@ _PAGE = "Cost Intelligence"
 _UNIT_COST_MAX_DAYS = 30
 
 
-def _fact_stamps() -> dict:
-    """V167's loaded-from watermarks (SOURCE_FRESHNESS_STATE.COVERAGE_FROM) for the two facts this tab gates on:
-    the AI fact's reach (R1-016, named in the AI KPI's help) and the pattern mart's atomic re-stamp
-    (PATTERN-RESTAMP, which lifts the 90-day pattern cap). ONE core-table read, only once V167 is applied;
-    {} before it (the column does not exist) or when the read fails -- the pre-V167 behaviour."""
+def _pattern_stamp():
+    """PATTERN-RESTAMP (V167): the pattern mart's atomic-reload stamp (SOURCE_FRESHNESS_STATE.COVERAGE_FROM), which
+    lifts the 90-day pattern cap. One core-table point read, only once V167 is applied; None before it (the column
+    does not exist), with no stamp yet, or when the read fails -- the pre-V167 behaviour."""
+    if not has_migration(167, _PAGE):
+        return None
+    res = run(mart27_sql.fact_coverage_from("MART_PATTERN_COST_DAILY"), page=_PAGE, key="unit_pattern_coverage",
+              tier="recent", source="SOURCE_FRESHNESS_STATE.COVERAGE_FROM (V167)", probe=True)
+    return coverage_stamps(res.df if res is not None and res.ok else None).get("MART_PATTERN_COST_DAILY")
+
+
+def _ai_fact_coverage() -> dict:
+    """R1-016 (V167): how far back the AI fact answers (mart27_sql.ai_fact_coverage; ALL_REACH is the reach the
+    all-source ai_costs_by_model gate tested). Read only on the Functions-only fallback, once V167 is applied;
+    {} before it or on a failed read (the help then names no reach)."""
     if not has_migration(167, _PAGE):
         return {}
-    res = run(mart27_sql.fact_coverage_from(("FACT_AI_USAGE_DAILY", "MART_PATTERN_COST_DAILY")), page=_PAGE,
-              key="unit_fact_coverage", tier="recent", source="SOURCE_FRESHNESS_STATE.COVERAGE_FROM (V167)",
-              probe=True)
-    return coverage_stamps(res.df if res is not None and res.ok else None)
+    res = run(mart27_sql.ai_fact_coverage(), page=_PAGE, key="unit_ai_reach", tier="recent",
+              source="FACT_AI_USAGE_DAILY + SOURCE_FRESHNESS_STATE (V167 coverage)", probe=True)
+    return ai_fact_coverage_row(res.df if res is not None and res.ok else None)
 
 
 
@@ -135,8 +145,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     # PATTERN-RESTAMP (V167): the pattern mart's atomic-reload stamp lifts the trailing pattern cap only as far
     # as the stamp reaches (cost_coverage.pattern_cost_cap); no stamp -> PATTERN_COST_MAX_DAYS, the pre-V167
     # path. The same cap the builder applies (pattern_cost(coverage_from=...)), so the labels name the read.
-    _stamps = _fact_stamps()
-    _pc_cov = _stamps.get("MART_PATTERN_COST_DAILY")
+    _pc_cov = _pattern_stamp()
     _pc_cap = pattern_cost_cap(_pc_cov, floor=mart27_sql.PATTERN_COST_MAX_DAYS, ceiling=MAX_MART_WINDOW_DAYS)
     _pc_follows = int(days) <= _pc_cap
     # The else branch's "pattern ... panels follow the page window" holds: it renders only when days <=
@@ -258,7 +267,9 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         # label "last month" then rather than the trailing "{days}d" (which would name a window
         # ending today). The served-days honesty only matters on the trailing branch.
         _ai_wlab = window_label(bounds, _ai_days)
-        _ai_reach = coverage_reach_phrase(_stamps.get("FACT_AI_USAGE_DAILY"), account_today())
+        # R1-016 (V167): the Functions-only help names the reach the all-source gate tested (ALL_REACH), never
+        # the raw loader stamp; read only on that fallback path.
+        _ai_note = "" if _ai_full else ai_fact_note(_ai_fact_coverage().get("ALL_REACH"), account_today())
         kpis.append({"label": f"AI spend ({_ai_wlab})" + ("" if _ai_full else " · Functions only"),
                      "value": format_usd(credits_to_usd(ai_credits, ai_rate)),
                      "delta": f"{len(ai_res.df)} source/model pair(s)",
@@ -269,7 +280,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                               "Cortex FUNCTIONS only — the Code+Functions mart (FACT_AI_USAGE_DAILY) "
                               "does not cover this whole window (or could not be read), so Cortex Code "
                               f"spend is excluded and the window is capped at {MAX_LIVE_WINDOW_DAYS}d (the "
-                              "live-scan limit)." + (f" The AI fact {_ai_reach}." if _ai_reach else ""))})
+                              "live-scan limit)." + (f" {_ai_note}" if _ai_note else ""))})
     if kpis:
         kpi_row(kpis)
 
@@ -783,8 +794,9 @@ def _graphs_tab(company: str, days: int, rate: float, database: str = "",
                          "USD_PER_RUN": st.column_config.NumberColumn("$/run", format="$%.4f")})
     result_caption(res, note="TREND compares $/run between window halves (±10% = FLAT). "
                              "Pipeline label = the graph's root task"
-                             + ("; on the mart a run counts on the day its root task started (V167)."
-                                if has_migration(167, _PAGE) else "."))
+                             + ("; on days loaded since V167 a run counts on the day its root task "
+                                "started (older days can still show a child-named row until the "
+                                "owner's task-graph rebuild)." if has_migration(167, _PAGE) else "."))
 
     # R1-163: serverless_task_daily clamps a trailing window to the live-scan limit, so the header
     # names the window actually scanned. R1-061 / R1-167: only a true absence is a grant gap; a

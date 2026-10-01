@@ -319,6 +319,9 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     # (MIGRATION_GATED below) -- a missing column is drift (missing_column), never a declared gap, so
     # EXPECTED_GAPS cannot cover the deploy-to-apply window. Core table: after V167 an absence FAILs.
     ("mart27.fact_coverage_from", mart27_sql.fact_coverage_from),
+    # R1-016 (V167): the AI fact's gate reaches (the stamped coverage CTEs) + its last both-arm load day; reads the
+    # same V167 column, so the runner skips it until has_migration(167) too.
+    ("mart27.ai_fact_coverage", mart27_sql.ai_fact_coverage),
     ("insights.call_cost_lookup", lambda: insights_sql.call_cost_lookup("canary-probe", 1)),
     ("insights.call_children_costs", lambda: insights_sql.call_children_costs("canary-probe", 1)),
     ("insights.proc_cost_trend", lambda: insights_sql.proc_cost_trend("CANARY_PROBE", 1, "ALFA")),
@@ -438,6 +441,7 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
 # runs it like any other entry. canary.py stays pure -- the runner owns the gate (gated_out below).
 MIGRATION_GATED: dict[str, int] = {
     "mart27.fact_coverage_from": 167,
+    "mart27.ai_fact_coverage": 167,
 }
 
 

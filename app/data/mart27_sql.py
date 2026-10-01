@@ -322,17 +322,15 @@ def ai_costs_by_model(days: int, *, bounds: tuple | None = None, stamped: bool =
     (same class as the compile-heavy live failure).
 
     ``stamped`` (R1-016, V167; pages pass ``has_migration(167, page)``): the coverage gate's first day
-    becomes the EARLIER of the fact's MIN(DAY) and the loader's COVERAGE_FROM stamp, so a window that
-    starts before the account's first AI use but inside the loaded reach is answered, not blanked.
+    becomes the EARLIER of the fact's MIN(DAY) and the loader's COVERAGE_FROM stamp -- floored at
+    AI_FUNCTIONS_VIEW_FROM, the first day the loader can reload Functions -- so a window that starts before
+    the account's first AI use but inside the loaded reach is answered, not blanked (_ai_all_first_day).
     False renders today's SQL byte-for-byte."""
     days = bounded_days(days, 400)
     win = scope_window_where("a.DAY", days, bounds=bounds)
     cov_bound = (f"'{bounds[0].isoformat()}'" if bounds is not None
                  else f"DATEADD('day', -{days} + 1, CURRENT_DATE())")
-    first_day = (f"(SELECT MIN(a2.DAY) FROM {mart_object('FACT_AI_USAGE_DAILY')} a2)" if not stamped else
-                 f"(SELECT {_LOADED_FROM}\n"
-                 f"       FROM (SELECT MIN(a2.DAY) AS FIRST_DAY FROM {mart_object('FACT_AI_USAGE_DAILY')} a2) f\n"
-                 f"       CROSS JOIN ({_ai_stamp_select('s2')}) st)")
+    first_day = _ai_all_first_day(stamped)
     return f"""
 SELECT
     a.SOURCE AS FUNCTION_NAME,
@@ -387,11 +385,35 @@ _AI_CODE_SOURCE_ARM = "SOURCE <> 'Functions'"
 # gate's first day is the EARLIER of the two, NULL-safe both ways: no stamp keeps MIN(DAY) (today's gate), no
 # fact rows keep the stamp (a loaded, empty window is answered as zero rows -- the loader covered it).
 _LOADED_FROM = "LEAST(COALESCE(st.CF, f.FIRST_DAY), COALESCE(f.FIRST_DAY, st.CF))"
+# V146: the canonical CORTEX_AI_FUNCTIONS_USAGE_HISTORY holds data from this day only. The fact's older Functions
+# rows came from the FROZEN CORTEX_FUNCTIONS_USAGE_HISTORY, which no loader reads any more, so a rebuild (any drop
+# of FACT_AI_USAGE_DAILY) cannot reload them -- yet the rebuild backfill's DAILY 365 still stamps
+# COVERAGE_FROM = today - 364. The stamp therefore vouches for Cortex Code back to its reach but for Functions only
+# from this day: the all-source gate (ai_costs_by_model) floors it here, so a window that starts earlier keeps the
+# pre-V167 MIN(DAY) test (rows, not the stamp, prove that span) and falls back to the labelled Functions-only read.
+# The Code-only gates keep the raw stamp (the Code views reload their whole retention). Retire once today - 364 is
+# past it (2027-01-05).
+AI_FUNCTIONS_VIEW_FROM = date(2026, 1, 5)
 
 
-def _ai_stamp_select(alias: str = "s") -> str:
-    return (f"SELECT MAX({alias}.COVERAGE_FROM) AS CF FROM {core_object('SOURCE_FRESHNESS_STATE')} {alias} "
+def _ai_stamp_select(alias: str = "s", *, floor: date | None = None) -> str:
+    cf = f"MAX({alias}.COVERAGE_FROM)"
+    if floor is not None:
+        # GREATEST is NULL when the stamp is NULL, so "no stamp" still falls through to MIN(DAY)
+        cf = f"GREATEST({cf}, DATE('{floor.isoformat()}'))"
+    return (f"SELECT {cf} AS CF FROM {core_object('SOURCE_FRESHNESS_STATE')} {alias} "
             f"WHERE {alias}.SOURCE_NAME = 'FACT_AI_USAGE_DAILY'")
+
+
+def _ai_all_first_day(stamped: bool = False) -> str:
+    """The all-source (Code + Functions) coverage gate's first day, as a scalar subquery: ai_costs_by_model's test,
+    shared with ai_fact_coverage so the reach a help names is the reach this gate compared. Unstamped = the
+    pre-V167 MIN(DAY), byte-for-byte; stamped = _LOADED_FROM with the stamp floored at AI_FUNCTIONS_VIEW_FROM."""
+    if not stamped:
+        return f"(SELECT MIN(a2.DAY) FROM {mart_object('FACT_AI_USAGE_DAILY')} a2)"
+    return (f"(SELECT {_LOADED_FROM}\n"
+            f"       FROM (SELECT MIN(a2.DAY) AS FIRST_DAY FROM {mart_object('FACT_AI_USAGE_DAILY')} a2) f\n"
+            f"       CROSS JOIN ({_ai_stamp_select('s2', floor=AI_FUNCTIONS_VIEW_FROM)}) st)")
 
 
 def _ai_code_coverage_cte(stamped: bool = False) -> str:
@@ -410,6 +432,34 @@ def _ai_code_coverage_cte(stamped: bool = False) -> str:
     ) f
     CROSS JOIN ({_ai_stamp_select()}) st
 )"""
+
+
+def ai_fact_coverage() -> str:
+    """How far back FACT_AI_USAGE_DAILY answers (R1-016, V167) -- one row:
+
+    CODE_REACH: the Cortex Code gates' first day (_ai_code_coverage_cte(True): ai_code_daily / _user_rollup /
+    _user_daily); ALL_REACH: the all-source gate's first day (_ai_all_first_day(True): ai_costs_by_model). Both are
+    rendered from the SAME text those gates compare, so a help that names a reach names the one the gate tested --
+    never the raw stamp, which sits at the first post-apply run's today-2 until OWNER_REPAIRS step 1 while the fact
+    already holds months of rows. COVERAGE_FROM: the loader's raw loaded-from stamp. LOADED_ON: the Central day of
+    the last DAILY run that loaded BOTH AI arms -- SNAPSHOT_TS (TIMESTAMP_NTZ, Central wall clock), which only that
+    freshness MERGE advances for this source (or a hand-run SP_SNAPSHOT_FRESHNESS), never a run where either arm
+    failed. Reads the V167 column: callers read it behind ``has_migration(167, page)`` (the Admin canary skips it
+    until then, canary.MIGRATION_GATED). A small mart + core-table read, no ACCOUNT_USAGE."""
+    return f"""
+WITH {_ai_code_coverage_cte(True)}
+SELECT
+    cov.FIRST_DAY AS CODE_REACH,
+    {_ai_all_first_day(True)} AS ALL_REACH,
+    ld.COVERAGE_FROM,
+    ld.LOADED_ON
+FROM cov
+CROSS JOIN (
+    SELECT MAX(s3.COVERAGE_FROM) AS COVERAGE_FROM, DATE(MAX(s3.SNAPSHOT_TS)) AS LOADED_ON
+    FROM {core_object("SOURCE_FRESHNESS_STATE")} s3
+    WHERE s3.SOURCE_NAME = 'FACT_AI_USAGE_DAILY'
+) ld
+"""
 
 
 _COVERAGE_SOURCE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,99}$")

@@ -52,7 +52,9 @@ def test_r1_016_stamped_false_is_todays_sql_and_true_reads_the_v167_stamp(name):
     assert plain == default()                 # the canary and every pre-V167 call site are unchanged
     assert "COVERAGE_FROM" not in plain and "SOURCE_FRESHNESS_STATE" not in plain
     stamped = render(True)
-    assert _STAMP_LOCK in stamped and "COVERAGE_FROM) AS CF" in stamped
+    assert _STAMP_LOCK in stamped
+    # the Code gates read the raw stamp; the all-source gate floors it at the Functions view horizon
+    assert re.search(r"MAX\(s2?\.COVERAGE_FROM\)(, DATE\('2026-01-05'\)\))? AS CF", stamped)
     assert _STAMP_SRC in stamped and "SOURCE_NAME = 'FACT_AI_USAGE_DAILY'" in stamped
     import sqlglot
     sqlglot.parse_one(stamped, read="snowflake")
@@ -63,6 +65,28 @@ def test_r1_016_ai_costs_by_model_stamp_gates_all_sources():
     assert "SELECT MIN(a2.DAY) AS FIRST_DAY FROM DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY a2" in sql
     assert "SOURCE <> 'Functions'" not in sql                   # Code + Functions, as before
     assert "<= DATEADD('day', -365 + 1, CURRENT_DATE())" in sql
+    # review (rebuild): the canonical Functions view holds data only from 2026-01-05 (V146), so the loader's
+    # stamp cannot vouch for Functions before it -- the all-source gate floors the stamp there (NULL stays NULL)
+    assert date(2026, 1, 5) == mart27_sql.AI_FUNCTIONS_VIEW_FROM
+    assert "SELECT GREATEST(MAX(s2.COVERAGE_FROM), DATE('2026-01-05')) AS CF FROM " in sql
+    # the Code-only gates keep the raw stamp: the Code views reload their whole retention
+    assert "GREATEST(" not in mart27_sql.ai_code_daily(365, "ALL", stamped=True)
+
+
+def test_ai_fact_coverage_renders_each_gates_own_reach_text():
+    """review (R1-016 reach): the help names the reach the gate tests -- the reach builder embeds the SAME text the
+    Code gates (_ai_code_coverage_cte) and the all-source gate (ai_costs_by_model) compare, not the stamp alone."""
+    sql = mart27_sql.ai_fact_coverage()
+    assert "WITH " + mart27_sql._ai_code_coverage_cte(True) in sql
+    assert "cov.FIRST_DAY AS CODE_REACH" in sql
+    all_first = mart27_sql._ai_all_first_day(True)
+    assert f"{all_first} AS ALL_REACH" in sql
+    assert f"AND {all_first}\n      <= " in mart27_sql.ai_costs_by_model(365, stamped=True)
+    assert f"AND {mart27_sql._ai_all_first_day(False)}\n      <= " in mart27_sql.ai_costs_by_model(365)
+    assert "DATE(MAX(s3.SNAPSHOT_TS)) AS LOADED_ON" in sql and "MAX(s3.COVERAGE_FROM) AS COVERAGE_FROM" in sql
+    assert "ACCOUNT_USAGE" not in sql
+    import sqlglot
+    sqlglot.parse_one(sql, read="snowflake")
 
 
 def test_fact_coverage_from_is_a_core_point_read_with_validated_names():
@@ -83,10 +107,12 @@ def test_fact_coverage_canary_is_registered_and_skipped_until_v167():
     drift (missing_column), never a declared gap, so the runner skips the entry until has_migration(167)."""
     reg = dict(canary.CANARIES)
     assert reg["mart27.fact_coverage_from"]() == mart27_sql.fact_coverage_from()
-    assert canary.MIGRATION_GATED == {"mart27.fact_coverage_from": 167}
-    assert "mart27.fact_coverage_from" not in canary.EXPECTED_GAPS
-    assert canary.gated_out("mart27.fact_coverage_from", frozenset(range(1, 167)))
-    assert not canary.gated_out("mart27.fact_coverage_from", frozenset(range(1, 168)))
+    assert reg["mart27.ai_fact_coverage"]() == mart27_sql.ai_fact_coverage()
+    assert canary.MIGRATION_GATED == {"mart27.fact_coverage_from": 167, "mart27.ai_fact_coverage": 167}
+    for name in canary.MIGRATION_GATED:
+        assert name not in canary.EXPECTED_GAPS
+        assert canary.gated_out(name, frozenset(range(1, 167)))
+        assert not canary.gated_out(name, frozenset(range(1, 168)))
     assert not canary.gated_out("mart27.pattern_cost", frozenset())   # an ungated entry always runs
     # the AI builders' canaries stay bare (unstamped): they compile before V167 too
     assert reg["mart27.ai_costs_by_model"]() == mart27_sql.ai_costs_by_model(2)
@@ -106,6 +132,10 @@ def _least(*a):
     return None if any(v is None for v in a) else min(a)
 
 
+def _greatest(*a):          # Snowflake GREATEST: NULL when any argument is NULL
+    return None if any(v is None for v in a) else max(a)
+
+
 def _lite(sql: str) -> str:
     out = sql.replace("DBA_MAINT_DB.OVERWATCH.", "").replace("SNOWFLAKE.ACCOUNT_USAGE.", "")
     out = out.replace("CURRENT_DATE()", f"'{_TODAY.isoformat()}'").replace("ANY_VALUE(", "MAX(")
@@ -115,18 +145,23 @@ def _lite(sql: str) -> str:
     return out
 
 
-def _ai_db(stamp: str | None) -> sqlite3.Connection:
+_FACT_ROWS = [("2026-06-15", "U1", "Snowsight", "n/a", 5.0),        # Code first use mid-year
+              ("2026-09-20", "U2", "CLI", "n/a", 7.0),
+              ("2026-01-10", "ACCOUNT", "Functions", "llama", 3.0)]  # Functions started earlier
+
+
+def _ai_db(stamp: str | None, rows: list | None = None, loaded_on: str | None = None) -> sqlite3.Connection:
     con = sqlite3.connect(":memory:")
     con.create_function("DATEADD", 3, _dateadd)
     con.create_function("LEAST", -1, _least)
+    con.create_function("GREATEST", -1, _greatest)
     con.execute("CREATE TABLE FACT_AI_USAGE_DAILY (DAY TEXT, USER_NAME TEXT, SOURCE TEXT, MODEL_NAME TEXT, "
                 "EMAIL TEXT, FIRST_TS TEXT, LAST_TS TEXT, REQUESTS INT, TOKENS INT, CREDITS REAL)")
-    rows = [("2026-06-15", "U1", "Snowsight", "n/a", 5.0),        # Code first use mid-year
-            ("2026-09-20", "U2", "CLI", "n/a", 7.0),
-            ("2026-01-10", "ACCOUNT", "Functions", "llama", 3.0)]  # Functions started earlier
-    con.executemany("INSERT INTO FACT_AI_USAGE_DAILY VALUES (?, ?, ?, ?, NULL, NULL, NULL, 1, 10, ?)", rows)
-    con.execute("CREATE TABLE SOURCE_FRESHNESS_STATE (SOURCE_NAME TEXT, COVERAGE_FROM TEXT)")
-    con.execute("INSERT INTO SOURCE_FRESHNESS_STATE VALUES ('FACT_AI_USAGE_DAILY', ?)", (stamp,))
+    con.executemany("INSERT INTO FACT_AI_USAGE_DAILY VALUES (?, ?, ?, ?, NULL, NULL, NULL, 1, 10, ?)",
+                    _FACT_ROWS if rows is None else rows)
+    con.execute("CREATE TABLE SOURCE_FRESHNESS_STATE (SOURCE_NAME TEXT, COVERAGE_FROM TEXT, SNAPSHOT_TS TEXT)")
+    con.execute("INSERT INTO SOURCE_FRESHNESS_STATE VALUES ('FACT_AI_USAGE_DAILY', ?, ?)",
+                (stamp, f"{loaded_on} 06:47:12" if loaded_on else None))
     con.execute("CREATE TABLE USERS (NAME TEXT, FIRST_NAME TEXT, LAST_NAME TEXT, DELETED_ON TEXT)")
     return con
 
@@ -152,11 +187,78 @@ def test_r1_016_stamped_gate_answers_a_window_that_starts_before_first_use(stamp
         assert _credits(con, mart27_sql.ai_code_daily(days, "ALL"), "TOTAL_CREDITS") == 0.0   # pre-V167
     year = _credits(con, mart27_sql.ai_code_daily(274, "ALL", bounds=_YEAR, stamped=True), "TOTAL_CREDITS")
     assert year == (12.0 if answered else 0.0)
-    model = _credits(con, mart27_sql.ai_costs_by_model(365, stamped=True), "CREDITS")
+    # Code + Functions: a window that starts on or after the Functions view horizon (2026-01-05) but before the
+    # account's first AI use is answered by the stamp; one that starts before the horizon still needs ROWS
+    # (the stamp cannot vouch for Functions there -- see the horizon test below)
+    con.execute("DELETE FROM FACT_AI_USAGE_DAILY WHERE SOURCE = 'Functions'")      # first Functions use: Mar 1
+    con.execute("INSERT INTO FACT_AI_USAGE_DAILY VALUES ('2026-03-01', 'ACCOUNT', 'Functions', 'llama', "
+                "NULL, NULL, NULL, 1, 10, 3.0)")
+    model = _credits(con, mart27_sql.ai_costs_by_model(260, stamped=True), "CREDITS")
     assert model == (15.0 if answered else 0.0)                  # Code + Functions
-    assert _credits(con, mart27_sql.ai_costs_by_model(365), "CREDITS") == 0.0
+    assert _credits(con, mart27_sql.ai_costs_by_model(260), "CREDITS") == 0.0
+    assert _credits(con, mart27_sql.ai_costs_by_model(365, stamped=True), "CREDITS") == 0.0
     rollup = _credits(con, mart27_sql.ai_code_user_rollup(365, "ALL", stamped=True), "TOTAL_CREDITS")
     assert rollup == (12.0 if answered else 0.0)
+
+
+def test_r1_016_all_source_gate_never_trusts_the_stamp_before_the_functions_view_horizon():
+    """review (rebuild): teardown / rebuild drop FACT_AI_USAGE_DAILY and the backfill's DAILY 365 stamps
+    COVERAGE_FROM = today - 364, but the canonical CORTEX_AI_FUNCTIONS_USAGE_HISTORY holds data only from
+    2026-01-05 (V146; the older Functions history came from the frozen view no loader reads). A 365d / Current-year
+    Unit costs 'AI spend' must not pass on the stamp and sum a year with a quarter of Functions spend missing: it
+    keeps the pre-V167 MIN(DAY) test there and falls back to the honestly labelled Functions-only read."""
+    rebuilt = [("2026-06-15", "U1", "Snowsight", "n/a", 5.0), ("2026-09-20", "U2", "CLI", "n/a", 7.0),
+               ("2026-01-05", "ACCOUNT", "Functions", "llama", 3.0)]      # the canonical view's first day
+    con = _ai_db((_TODAY - timedelta(days=364)).isoformat(), rebuilt)
+    for model_sql in (mart27_sql.ai_costs_by_model(365, stamped=True),
+                      mart27_sql.ai_costs_by_model(274, bounds=_YEAR, stamped=True)):
+        assert _credits(con, model_sql, "CREDITS") == 0.0
+    # the Code views reload their whole retention: the Code-only readers still answer the year from the stamp
+    assert _credits(con, mart27_sql.ai_code_daily(365, "ALL", stamped=True), "TOTAL_CREDITS") == 12.0
+    # from the horizon on, the stamp vouches for both arms
+    assert _credits(con, mart27_sql.ai_costs_by_model(269, stamped=True), "CREDITS") == 15.0   # from 2026-01-06
+    # a non-rebuilt fact that kept frozen-view Functions rows answers as before V167 (rows, not the stamp)
+    con.execute("INSERT INTO FACT_AI_USAGE_DAILY VALUES ('2025-10-02', 'ACCOUNT', 'Functions', 'llama', "
+                "NULL, NULL, NULL, 1, 10, 2.0)")
+    assert _credits(con, mart27_sql.ai_costs_by_model(365, stamped=True), "CREDITS") == 17.0
+    assert _credits(con, mart27_sql.ai_costs_by_model(365), "CREDITS") == 17.0
+
+
+_GRID_STARTS = (date(2025, 10, 2), date(2025, 12, 1), date(2026, 1, 5), date(2026, 1, 6), date(2026, 2, 1),
+                date(2026, 6, 15), date(2026, 6, 16), date(2026, 9, 29), _TODAY)
+
+
+@pytest.mark.parametrize("stamp", [None, "2025-10-02", "2026-03-01", "2026-09-29"])
+@pytest.mark.parametrize(("code_first", "fn_first"), [("2026-06-15", "2026-01-10"), ("2025-11-20", None),
+                                                      (None, "2025-12-01"), (None, None)])
+def test_ai_fact_coverage_reach_is_the_reach_each_gate_tests(stamp, code_first, fn_first):
+    """Executed parity: for every window start, a stamped Code read answers iff CODE_REACH <= start and the
+    all-source read answers iff ALL_REACH <= start (a usage row on today keeps every window non-empty, so an
+    empty read IS a failed gate)."""
+    rows = [(_TODAY.isoformat(), "U9", "CLI", "n/a", 1.0), (_TODAY.isoformat(), "ACCOUNT", "Functions", "m", 1.0)]
+    rows += [(code_first, "U1", "Snowsight", "n/a", 1.0)] if code_first else []
+    rows += [(fn_first, "ACCOUNT", "Functions", "m", 1.0)] if fn_first else []
+    con = _ai_db(stamp, rows)
+    cov = pd.read_sql_query(_lite(mart27_sql.ai_fact_coverage()), con)
+    assert len(cov) == 1
+    code_reach, all_reach = cov["CODE_REACH"].iloc[0], cov["ALL_REACH"].iloc[0]
+    assert cov["COVERAGE_FROM"].iloc[0] == stamp
+    for start in _GRID_STARTS:
+        days = (_TODAY - start).days + 1
+        code = pd.read_sql_query(_lite(mart27_sql.ai_code_daily(days, "ALL", stamped=True)), con)
+        model = pd.read_sql_query(_lite(mart27_sql.ai_costs_by_model(days, stamped=True)), con)
+        assert (not code.empty) == (code_reach is not None and code_reach <= start.isoformat()), (start, code_reach)
+        assert (not model.empty) == (all_reach is not None and all_reach <= start.isoformat()), (start, all_reach)
+
+
+def test_ai_fact_coverage_names_the_last_both_arm_load_day():
+    con = _ai_db("2025-10-02", loaded_on="2026-09-23")
+    cov = pd.read_sql_query(_lite(mart27_sql.ai_fact_coverage()), con)
+    assert cov["LOADED_ON"].iloc[0] == "2026-09-23"
+    con = _ai_db(None)                                           # no stamp row content yet
+    cov = pd.read_sql_query(_lite(mart27_sql.ai_fact_coverage()), con)
+    assert cov["LOADED_ON"].iloc[0] is None and cov["COVERAGE_FROM"].iloc[0] is None
+    assert cov["CODE_REACH"].iloc[0] == "2026-06-15"             # no stamp: the fact's first Code day
 
 
 def test_r1_016_a_loaded_window_with_no_usage_is_answered_not_blanked():
@@ -224,44 +326,158 @@ def test_r1_016_every_ai_fact_reader_passes_the_v167_gate(rel, calls):
 def test_r1_016_help_texts_say_what_the_dash_means():
     spend = read("app/ui/pages/cost_parts/spend.py")
     assert "'—' until the fact loads." not in spend
-    assert ("'—' while FACT_AI_USAGE_DAILY does not reach back to this window's start (or could "
-            "\"\n                 \"not be read).") in spend
+    assert ("'—' while FACT_AI_USAGE_DAILY does not reach back to this window's start or is not "
+            "\"\n                 \"loaded through its end (or could not be read).") in spend
     uc = read("app/ui/pages/cost_parts/unit_costs.py")
     assert "was unavailable on this refresh" not in uc
     assert "does not cover this whole window (or could not be read)" in uc
 
 
-def test_r1_016_spend_reach_is_read_only_after_v167_and_named(monkeypatch):
+_COV_COLS = ("CODE_REACH", "ALL_REACH", "COVERAGE_FROM", "LOADED_ON")
+
+
+def _cov_frame(**vals) -> pd.DataFrame:
+    return pd.DataFrame({c: [vals.get(c)] for c in _COV_COLS})
+
+
+def test_r1_016_spend_reads_the_ai_coverage_only_after_v167(monkeypatch):
     from app.ui.pages.cost_parts import spend
     monkeypatch.setattr(spend, "has_migration", lambda n, _p: False)
     monkeypatch.setattr(spend, "run", lambda *_a, **_k: pytest.fail("no V167 column read before the apply"))
-    assert spend._ai_fact_reach() == ""
-    stamp = account_today() - timedelta(days=364)
+    assert spend._ai_fact_coverage() == {}
+    reach, loaded = account_today() - timedelta(days=364), account_today()
     seen = []
     monkeypatch.setattr(spend, "has_migration", lambda n, _p: n <= 167)
     monkeypatch.setattr(spend, "run", lambda sql, **k: seen.append((sql, k["key"])) or _ok(
-        pd.DataFrame({"SOURCE_NAME": ["FACT_AI_USAGE_DAILY"], "COVERAGE_FROM": [stamp]})))
-    assert spend._ai_fact_reach() == f"holds 365 days, from {stamp:%b} {stamp.day}, {stamp.year}"
-    assert seen == [(mart27_sql.fact_coverage_from("FACT_AI_USAGE_DAILY"), "coco_ai_reach")]
+        _cov_frame(CODE_REACH=reach, ALL_REACH=reach, COVERAGE_FROM=reach, LOADED_ON=loaded)))
+    assert spend._ai_fact_coverage() == {"CODE_REACH": reach, "ALL_REACH": reach, "COVERAGE_FROM": reach,
+                                         "LOADED_ON": loaded}
+    assert seen == [(mart27_sql.ai_fact_coverage(), "coco_ai_reach")]
     monkeypatch.setattr(spend, "run", lambda *_a, **_k: _failed("missing_column"))
-    assert spend._ai_fact_reach() == "" and spend._ai_fact_stamp() is None   # a failed read never guesses
-    # the stamp is read only when the tile has no figure, never on a populated one; an OK-but-empty stamped
-    # read whose stamp reaches the gate's own start day is a VERIFIED zero ($0.00), anything else names the reach
-    body = read("app/ui/pages/cost_parts/spend.py")
-    block = body[body.index("    _coco_reach = \"\"\n    if coco_usd is None:"):body.index("    # rec #8: the all-in")]
-    assert "_coco_stamp = _ai_fact_stamp()" in block
-    assert ("_coco_start = bounds[0] if bounds is not None else account_today() - timedelta(days=int(days) - 1)"
-            in block)
-    assert "if _coco_verified_zero(coco_res, _coco_stamp, _coco_start):\n            coco_usd = 0.0" in block
-    assert "_coco_reach = coverage_reach_phrase(_coco_stamp, account_today())" in block
-    start = date(2026, 9, 2)
+    assert spend._ai_fact_coverage() == {}                       # a failed read never guesses
+    # review: the stamp-only helpers are gone (one was dead in app code; the tab names the gate's reach now)
+    assert not hasattr(spend, "_ai_fact_reach") and not hasattr(spend, "_ai_fact_stamp")
+
+
+def test_r1_016_coco_zero_needs_the_gates_reach_and_a_fresh_load():
+    """review: an OK-but-empty stamped CoCo read is a MEASURED $0.00 only when the gate's own reach covers the
+    window start AND the fact's last both-arm DAILY load reaches the window end (the d=3 cadence: on or after
+    min(last day, today) - 1). A deep reach alone is not enough: COVERAGE_FROM only moves earlier, and the
+    freshness MERGE skips the row whenever either AI arm fails, so an ai_code arm that dies on every run (it
+    swallows its own error; V078 recorded exactly that) would otherwise turn an unloaded week into '$0.00'."""
+    from app.ui.pages.cost_parts import spend
+    today = date(2026, 10, 1)
+    start, last = today - timedelta(days=6), today                 # a trailing 7d window
+    fresh = {"CODE_REACH": date(2026, 6, 15), "LOADED_ON": today}
     empty, rows = _ok(pd.DataFrame()), _ok(pd.DataFrame({"TOTAL_CREDITS": [1.0]}))
-    assert spend._coco_verified_zero(empty, date(2025, 10, 2), start)          # covered and empty: $0.00
-    assert not spend._coco_verified_zero(empty, date(2026, 9, 3), start)       # stamp short of the start
-    assert not spend._coco_verified_zero(empty, None, start)                   # no stamp: no claim
-    assert not spend._coco_verified_zero(_failed("timeout"), date(2025, 10, 2), start)
-    assert not spend._coco_verified_zero(rows, date(2025, 10, 2), start)       # rows: the figure stands
-    assert not spend._coco_verified_zero(None, date(2025, 10, 2), start)
+    zero = spend._coco_verified_zero
+    assert zero(empty, fresh, start, last, today)                                   # covered + fresh: $0.00
+    assert zero(empty, {**fresh, "LOADED_ON": today - timedelta(days=1)}, start, last, today)   # before 06:45
+    assert not zero(empty, {**fresh, "LOADED_ON": today - timedelta(days=2)}, start, last, today)   # stale
+    assert not zero(empty, {"CODE_REACH": date(2025, 10, 2)}, start, last, today)   # no load day: no claim
+    assert not zero(empty, {**fresh, "CODE_REACH": start + timedelta(days=1)}, start, last, today)  # short reach
+    assert not zero(empty, {}, start, last, today)                                  # before V167 / failed read
+    assert not zero(_failed("timeout"), fresh, start, last, today)
+    assert not zero(rows, fresh, start, last, today)                                # rows: the figure stands
+    assert not zero(None, fresh, start, last, today)
+    # 'Last month' (Aug): loaded through Aug 31 within the cadence, whatever has happened since
+    lm = (date(2026, 8, 1), date(2026, 8, 31))
+    assert zero(empty, {"CODE_REACH": date(2026, 6, 15), "LOADED_ON": date(2026, 8, 30)}, *lm, today)
+    assert not zero(empty, {"CODE_REACH": date(2026, 6, 15), "LOADED_ON": date(2026, 8, 29)}, *lm, today)
+
+
+def _render_coco_tile(monkeypatch, *, v167: bool, cov: pd.DataFrame | None, days: int = 7, bounds=None):
+    """Render the real Spend tab (AppTest) with an OK-but-empty prefetched CoCo read and return the CoCo
+    companion tile plus the read keys (hero_metric patched to record its companions)."""
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+
+    from app.core.result import QueryResult
+    from app.ui import components
+    from app.ui.pages.cost_parts import spend
+
+    components._MART_FAIL_BACKOFF.clear()
+    empty = QueryResult(df=pd.DataFrame(), ok=True, source="stub")
+    keys: list[str] = []
+    tiles: list[list[dict]] = []
+
+    def _run(_sql, *_a, **kwargs):
+        key = str(kwargs.get("key", ""))
+        keys.append(key)
+        if key == "coco_ai_reach":
+            return QueryResult(df=cov.copy(), ok=True, source="cov stub") if cov is not None else QueryResult(
+                df=pd.DataFrame(), ok=False, error="boom")
+        return empty
+
+    monkeypatch.setattr("app.core.query.run", _run)
+    monkeypatch.setattr(spend, "run", _run)
+    monkeypatch.setattr(spend, "run_batch", lambda specs, **_k: {s["key"]: empty for s in specs})
+    monkeypatch.setattr(spend, "load_settings", lambda *_a, **_k: {})
+    monkeypatch.setattr(spend, "can_open", lambda _page: True)
+    monkeypatch.setattr(spend, "request_navigation", lambda *_a, **_k: None)
+    monkeypatch.setattr(spend, "has_migration", lambda n, _p: v167 and n <= 167)
+    monkeypatch.setattr(spend, "hero_metric", lambda _hero, comps=None: tiles.append(list(comps or [])))
+    metering = QueryResult(df=pd.DataFrame({
+        "DAY": [account_today() - timedelta(days=1)], "SERVICE_TYPE": ["WAREHOUSE_METERING"],
+        "CREDITS_USED": [100.0], "CREDITS_BILLED": [100.0], "CREDITS_ADJUSTMENT": [0.0]}), ok=True, source="m")
+    monkeypatch.setattr(spend, "_COCO_TEST_ARGS", {
+        "days": days, "bounds": bounds,
+        "pre": {"metering_res": metering, "csr_res": empty, "coco_res": empty, "allin_res": empty,
+                "napp_res": empty, "csfam_res": empty}}, raising=False)
+
+    def _app():
+        from app.ui.pages.cost_parts import spend as _spend
+        _a = _spend._COCO_TEST_ARGS
+        _spend._spend_tab("ALL", _a["days"], 3.0, 3.0, bounds=_a["bounds"], **_a["pre"])
+
+    try:
+        at = AppTest.from_function(_app, default_timeout=60)
+        at.run()
+    finally:
+        components._MART_FAIL_BACKOFF.clear()
+    assert not at.exception, at.exception
+    coco = [c for row in tiles for c in row if str(c.get("label", "")).startswith("— of which CoCo")]
+    assert len(coco) == 1, tiles
+    return coco[0], keys
+
+
+def test_r1_016_coco_tile_stale_load_renders_a_dash_not_a_measured_zero(monkeypatch):
+    """review: deep reach, a stale last load (the ai_code arm failing for a week), an OK-but-empty read: '—' and
+    the help names the last load day -- never a '$0.00' the loader did not measure."""
+    from app.logic.formulas import format_usd
+    today = account_today()
+    stale = today - timedelta(days=9)
+    tile, keys = _render_coco_tile(monkeypatch, v167=True, cov=_cov_frame(
+        CODE_REACH=today - timedelta(days=364), ALL_REACH=today - timedelta(days=270),
+        COVERAGE_FROM=today - timedelta(days=364), LOADED_ON=stale))
+    assert tile["value"] == "—" and "coco_ai_reach" in keys
+    assert f"Its last full daily load ran {stale:%b} {stale.day}, {stale.year}." in tile["help"]
+    # the same reach, loaded today: a measured zero
+    tile, _keys = _render_coco_tile(monkeypatch, v167=True, cov=_cov_frame(
+        CODE_REACH=today - timedelta(days=364), COVERAGE_FROM=today - timedelta(days=364), LOADED_ON=today))
+    assert tile["value"] == format_usd(0.0)
+
+
+def test_r1_016_coco_tile_names_the_gates_reach_not_the_stamp(monkeypatch):
+    """review: before OWNER_REPAIRS step 1 the stamp is the first post-apply run's today-2 while the fact holds
+    Cortex Code rows back to first use; a 180d window still fails the gate, and the help must name the gate's
+    reach (the earlier of the two), never '3 days'."""
+    today = account_today()
+    reach = today - timedelta(days=108)
+    tile, _keys = _render_coco_tile(monkeypatch, v167=True, days=180, cov=_cov_frame(
+        CODE_REACH=reach, ALL_REACH=reach, COVERAGE_FROM=today - timedelta(days=2), LOADED_ON=today))
+    assert tile["value"] == "—"
+    assert f"The AI fact holds 109 days, from {reach:%b} {reach.day}, {reach.year}." in tile["help"]
+    assert "holds 3 days" not in tile["help"] and "last full daily load" not in tile["help"]
+
+
+def test_r1_016_coco_tile_before_v167_reads_nothing_new(monkeypatch):
+    tile, keys = _render_coco_tile(monkeypatch, v167=False, cov=None)
+    assert tile["value"] == "—" and "coco_ai_reach" not in keys
+    assert "The AI fact" not in tile["help"]
+    # a failed coverage read after the apply claims nothing either
+    tile, keys = _render_coco_tile(monkeypatch, v167=True, cov=None)
+    assert tile["value"] == "—" and "coco_ai_reach" in keys and "The AI fact" not in tile["help"]
 
 
 def test_coverage_helpers_parse_and_phrase():
@@ -273,6 +489,24 @@ def test_coverage_helpers_parse_and_phrase():
         "holds 2 days, from Sep 30, 2026"
     assert cost_coverage.coverage_reach_phrase(None, _TODAY) == ""
     assert cost_coverage.coverage_reach_phrase(_TODAY + timedelta(days=1), _TODAY) == ""
+
+
+def test_ai_fact_coverage_helpers_parse_judge_and_phrase():
+    row = cost_coverage.ai_fact_coverage_row(pd.DataFrame({
+        "CODE_REACH": ["2026-06-15"], "ALL_REACH": [pd.Timestamp("2026-01-05")], "COVERAGE_FROM": [None],
+        "LOADED_ON": ["junk"]}))
+    assert row == {"CODE_REACH": date(2026, 6, 15), "ALL_REACH": date(2026, 1, 5)}
+    assert cost_coverage.ai_fact_coverage_row(None) == {} and cost_coverage.ai_fact_coverage_row(pd.DataFrame()) == {}
+    fresh = cost_coverage.ai_fact_fresh
+    assert fresh(_TODAY, _TODAY, _TODAY) and fresh(_TODAY - timedelta(days=1), _TODAY, _TODAY)
+    assert not fresh(_TODAY - timedelta(days=2), _TODAY, _TODAY) and not fresh(None, _TODAY, _TODAY)
+    assert fresh(date(2026, 8, 30), date(2026, 8, 31), _TODAY)          # a closed window: its own last day
+    note = cost_coverage.ai_fact_note
+    assert note(date(2026, 9, 30), _TODAY) == "The AI fact holds 2 days, from Sep 30, 2026."
+    assert note(None, _TODAY) == ""
+    assert note(date(2026, 9, 30), _TODAY, loaded_on=date(2026, 9, 20), window_last=_TODAY) == (
+        "The AI fact holds 2 days, from Sep 30, 2026. Its last full daily load ran Sep 20, 2026.")
+    assert note(None, _TODAY, loaded_on=_TODAY, window_last=_TODAY) == ""      # fresh: nothing to add
 
 
 # ------------------------------------------------------------------ Unit costs: the pattern panel render ----
@@ -287,22 +521,24 @@ _REAL_PATTERN_COST = mart27_sql.pattern_cost        # captured before any render
 _V120_CAVEAT = "Rows before Jun 4, 2026 predate the V120 run-count fix and can overstate runs"
 
 
-def _render_uc(monkeypatch, days, *, v167: bool, pattern_stamp: date | None = None, ai_stamp: date | None = None,
-               bounds=None, ai_live: bool = False):
+def _render_uc(monkeypatch, days, *, v167: bool, pattern_stamp: date | None = None, ai_cov: dict | None = None,
+               bounds=None, ai_live: bool = False, ai_mart: bool = False):
     """Render _unit_costs_tab through the Repeated patterns panel (the trend expander's md_dollars label stops
     it), the measured reads failed, has_migration answering for V167 as asked."""
     from app.ui.pages.cost_parts import unit_costs as uc
     lm = "_lm" if bounds is not None else ""
-    cov = pd.DataFrame({"SOURCE_NAME": ["FACT_AI_USAGE_DAILY", "MART_PATTERN_COST_DAILY"],
-                        "COVERAGE_FROM": [ai_stamp, pattern_stamp]})
+    cov = pd.DataFrame({"SOURCE_NAME": ["MART_PATTERN_COST_DAILY"], "COVERAGE_FROM": [pattern_stamp]})
 
     def _stop(*_a, **_k):
         raise _Rendered
 
     live_ai = _ok(pd.DataFrame({"FUNCTION_NAME": ["COMPLETE"], "MODEL_NAME": ["m"], "CREDITS": [1.0]}))
-    fake, seen = _patch(monkeypatch, uc, {f"unit_ai_mart_{days}{lm}": _failed("other"),
+    mart_ai = _ok(pd.DataFrame({"FUNCTION_NAME": ["Snowsight"], "MODEL_NAME": ["n/a"], "CREDITS": [2.0]}))
+    fake, seen = _patch(monkeypatch, uc, {f"unit_ai_mart_{days}{lm}": mart_ai if ai_mart else _failed("other"),
                                           f"patterns_ALL_{days}{lm}": _ok(_PATTERNS.copy()),
-                                          "unit_fact_coverage": _ok(cov)},
+                                          "unit_pattern_coverage": _ok(cov),
+                                          "unit_ai_reach": _ok(_cov_frame(**ai_cov)) if ai_cov else
+                                          _failed("other")},
                         run_batch=lambda _jobs, **_k: {"q": _failed("other"), "p": _failed("other"),
                                                        "ai": live_ai if ai_live else _failed("other")},
                         panel_help=lambda *_a, **_k: None, md_dollars=_stop)
@@ -321,7 +557,7 @@ def _render_uc(monkeypatch, days, *, v167: bool, pattern_stamp: date | None = No
 def test_pattern_restamp_pre_v167_path_is_unchanged_and_reads_no_stamp(monkeypatch):
     fake, seen, sqls = _render_uc(monkeypatch, 365, v167=False)
     caps = fake.text("caption")
-    assert "unit_fact_coverage" not in seen["runs"]
+    assert "unit_pattern_coverage" not in seen["runs"] and "unit_ai_reach" not in seen["runs"]
     assert "Measured QUERY_ATTRIBUTION_HISTORY compute (90d), grouped by" in caps
     assert "A trailing window reads at most the last 90 days" in caps
     assert "the repeated-pattern panel reads at most the last 90 days from its mart" in caps
@@ -332,7 +568,7 @@ def test_pattern_restamp_a_covered_window_reads_it_whole_and_drops_the_disclosur
     stamp = account_today() - timedelta(days=400)
     fake, seen, sqls = _render_uc(monkeypatch, 365, v167=True, pattern_stamp=stamp)
     caps = fake.text("caption")
-    assert seen["runs"].count("unit_fact_coverage") == 1
+    assert seen["runs"].count("unit_pattern_coverage") == 1
     assert "Measured QUERY_ATTRIBUTION_HISTORY compute (365d), grouped by" in caps
     assert "reads at most the last" not in caps and _V120_CAVEAT not in caps
     assert "The AI, task-graph pipeline and repeated-pattern panels below follow the page window" in caps
@@ -360,25 +596,48 @@ def test_pattern_restamp_current_year_caveat_follows_the_clean_horizon(monkeypat
     assert (_V120_CAVEAT in caps) is caveat, caps
 
 
-def test_r1_016_unit_costs_ai_help_names_the_stamped_reach(monkeypatch):
-    stamp = account_today() - timedelta(days=30)
-    _fake, seen, _sqls = _render_uc(monkeypatch, 365, v167=True, ai_stamp=stamp, ai_live=True)
+def test_r1_016_unit_costs_ai_help_names_the_all_source_gates_reach(monkeypatch):
+    """review: the Functions-only help names the reach ai_costs_by_model's gate tested (ALL_REACH: the earlier
+    of the all-source first day and the horizon-floored stamp), never the raw stamp -- before OWNER_REPAIRS
+    step 1 that stamp is today-2 while the fact holds months of rows."""
+    today = account_today()
+    reach = today - timedelta(days=30)
+    cov = {"CODE_REACH": today - timedelta(days=10), "ALL_REACH": reach, "COVERAGE_FROM": today - timedelta(days=2),
+           "LOADED_ON": today}
+    _fake, seen, _sqls = _render_uc(monkeypatch, 365, v167=True, ai_cov=cov, ai_live=True)
     ai = next(k for row in seen["kpis"] for k in row if k["label"].startswith("AI spend"))
     assert ai["label"].endswith("· Functions only")
     assert "does not cover this whole window (or could not be read)" in ai["help"]
-    assert f"The AI fact holds 31 days, from {stamp:%b} {stamp.day}, {stamp.year}." in ai["help"]
+    assert f"The AI fact holds 31 days, from {reach:%b} {reach.day}, {reach.year}." in ai["help"]
+    assert "holds 3 days" not in ai["help"] and "holds 11 days" not in ai["help"]
+    assert seen["runs"].count("unit_ai_reach") == 1
+    # a failed coverage read names nothing
+    _fake, seen, _sqls = _render_uc(monkeypatch, 365, v167=True, ai_cov=None, ai_live=True)
+    ai = next(k for row in seen["kpis"] for k in row if k["label"].startswith("AI spend"))
+    assert "The AI fact" not in ai["help"]
+    # before the apply: no V167 read, no reach
     _fake, seen, _sqls = _render_uc(monkeypatch, 365, v167=False, ai_live=True)
     ai = next(k for row in seen["kpis"] for k in row if k["label"].startswith("AI spend"))
-    assert "The AI fact holds" not in ai["help"]
+    assert "The AI fact holds" not in ai["help"] and "unit_ai_reach" not in seen["runs"]
+    # the mart answered: the full-window KPI needs no reach, so the coverage is never read
+    _fake, seen, _sqls = _render_uc(monkeypatch, 365, v167=True, ai_cov=cov, ai_mart=True)
+    ai = next(k for row in seen["kpis"] for k in row if k["label"].startswith("AI spend"))
+    assert not ai["label"].endswith("· Functions only") and "unit_ai_reach" not in seen["runs"]
 
 
 # ----------------------------------------------------------------------------- the other captions ----
 
 def test_r2_014_task_graph_caption_claims_root_day_keying_only_after_v167():
+    """review: V167 stops NEW phantom rows; the nightly sweep clears D-3 onward, but every older day keeps its
+    phantoms until OWNER_REPAIRS step 4 (the 364-day rebuild) -- so the caption claims root-day keying only for
+    the days loaded since V167 and says older days wait for the rebuild (law 12: claim what V167 guarantees)."""
     src = read("app/ui/pages/cost_parts/unit_costs.py")
     assert ('"Pipeline label = the graph\'s root task"\n'
-            '                             + ("; on the mart a run counts on the day its root task started (V167)."\n'
-            '                                if has_migration(167, _PAGE) else "."))') in src
+            '                             + ("; on days loaded since V167 a run counts on the day its root task "\n'
+            '                                "started (older days can still show a child-named row until the "\n'
+            '                                "owner\'s task-graph rebuild)." if has_migration(167, _PAGE) else "."))'
+            ) in src
+    assert "on the mart a run counts on the day its root task started (V167)" not in src
 
 
 def test_c10_unknown_application_caption_names_the_30_day_session_pad():

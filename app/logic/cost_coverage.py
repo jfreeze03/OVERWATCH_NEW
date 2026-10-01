@@ -7,7 +7,7 @@ is additive when Snowflake does not expose the required allocation key.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 
@@ -389,12 +389,45 @@ def coverage_stamps(frame: pd.DataFrame | None) -> dict[str, date]:
         return {}
     out: dict[str, date] = {}
     for name, value in zip(frame["SOURCE_NAME"], frame["COVERAGE_FROM"], strict=False):
-        if value is None or (not isinstance(value, str) and pd.isna(value)):
-            continue
-        ts = pd.to_datetime(value, errors="coerce")
-        if pd.notna(ts):
-            out[str(name).strip().upper()] = ts.date()
+        day = _as_date(value)
+        if day is not None:
+            out[str(name).strip().upper()] = day
     return out
+
+
+def _as_date(value: object) -> date | None:
+    """A DATE-ish cell as a date; None for NULL / NaT / unparseable (never raises)."""
+    if value is None or (not isinstance(value, str) and pd.isna(value)):
+        return None
+    ts = pd.to_datetime(value, errors="coerce")
+    return ts.date() if pd.notna(ts) else None
+
+
+_AI_COVERAGE_COLUMNS = ("CODE_REACH", "ALL_REACH", "COVERAGE_FROM", "LOADED_ON")
+
+
+def ai_fact_coverage_row(frame: pd.DataFrame | None) -> dict[str, date]:
+    """mart27_sql.ai_fact_coverage's one row as {column: date} (CODE_REACH / ALL_REACH / COVERAGE_FROM /
+    LOADED_ON). A NULL or unparseable value, a missing column or no frame is simply absent -- the caller then claims
+    nothing. Never raises."""
+    if frame is None or getattr(frame, "empty", True):
+        return {}
+    row = frame.iloc[0]
+    out: dict[str, date] = {}
+    for col in _AI_COVERAGE_COLUMNS:
+        day = _as_date(row[col]) if col in frame.columns else None
+        if day is not None:
+            out[col] = day
+    return out
+
+
+def ai_fact_fresh(loaded_on: date | None, window_last: date, today: date) -> bool:
+    """True when FACT_AI_USAGE_DAILY's last both-arm DAILY load (ai_fact_coverage LOADED_ON) reaches the window's
+    last day on the DAILY cadence: on or after min(window_last, today) - 1 (the ~06:45 Central run loads through
+    its own day; before it runs, yesterday's is the latest). An empty read of a fact that stopped loading proves
+    nothing about the days since its last load: the AI arms swallow their own errors and the freshness MERGE skips
+    the row whenever either fails, while COVERAGE_FROM (the reach) only ever moves earlier."""
+    return loaded_on is not None and loaded_on >= min(window_last, today) - timedelta(days=1)
 
 
 def coverage_reach_phrase(stamp: date | None, today: date) -> str:
@@ -404,6 +437,20 @@ def coverage_reach_phrase(stamp: date | None, today: date) -> str:
         return ""
     n = (today - stamp).days + 1
     return f"holds {n} day{'s' if n != 1 else ''}, from {stamp:%b} {stamp.day}, {stamp.year}"
+
+
+def ai_fact_note(reach: date | None, today: date, *, loaded_on: date | None = None,
+                 window_last: date | None = None) -> str:
+    """The sentence(s) an AI tile's help adds when the fact did not answer: the reach its gate tested ('The AI fact
+    holds N days, from <day>.'), plus -- given the load day and the window's last day -- when the last both-arm load
+    is too old for that window. '' when there is nothing true to name."""
+    parts = []
+    phrase = coverage_reach_phrase(reach, today)
+    if phrase:
+        parts.append(f"The AI fact {phrase}.")
+    if loaded_on is not None and window_last is not None and not ai_fact_fresh(loaded_on, window_last, today):
+        parts.append(f"Its last full daily load ran {loaded_on:%b} {loaded_on.day}, {loaded_on.year}.")
+    return " ".join(parts)
 
 
 def pattern_cost_cap(coverage_from: date | None, today: date | None = None, *, floor: int,
