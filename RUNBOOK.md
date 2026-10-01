@@ -145,8 +145,11 @@ procedure retrains the model on every run — see §7), `backfill_365.sql`
 (one-time year of daily facts — run before ACCOUNT_USAGE history ages out;
 it suspends the hourly task graph around its extract-fed loads, each load
 is guarded so an error becomes a `FAILED:` row and Run All still reaches the
-RESUME, and its last pane `BACKFILL_CALLS_FAILED` must read 0. If the
-worksheet stops early (a timeout or Stop), run its last two statements or
+RESUME, and its last pane's `BACKFILL_CALLS_FAILED` and `LOADER_ARMS_FAILED`
+must both read 0. If the worksheet stops early (a timeout or Stop), run its
+`ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY RESUME` and
+`SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY')`
+(the two statements just above the file's final verify SELECT) or
 `loader_chain_check.sql` step 0, or the hourly graph stays suspended).
 `teardown.sql` is the surgical uninstall (never drops the schema).
 
@@ -599,9 +602,10 @@ fixed (drift items are countable facts).
   after it; the weekly task, created suspended, repeats both); MTD actual +
   today's forecast prorated by the hours left + the forecast days to
   month-end, credits × rate; falls back to seasonal when the table is absent,
-  or when it stops short of month-end (the basis names the table's last day
-  and says to retrain). Installed before v4.606.0? Re-run
-  `ml_forecast_option.sql` once — the old procedure never retrained, so its
+  when it has no day from today onward (the basis says so and says to
+  retrain), or when its days from today onward stop short of month-end (the
+  basis names the table's last day and says to retrain). Installed before
+  v4.606.0? Re-run `ml_forecast_option.sql` once — the old procedure never retrained, so its
   horizon drained week by week.
 Every basis string names the engine in the KPI help.
 
@@ -951,7 +955,7 @@ Snowflake release note that mentions ACCOUNT_USAGE, and after migrations.
 | ORGANIZATION_USAGE not granted | Org spend tab shows the grant hint, nothing else breaks |
 | TRUST_CENTER not granted | Trust Center section shows the grant hint |
 | Cortex/model unavailable | The morning digest sends the templated facts digest and logs `digest_ai_failed` (V165); AI panels surface the error; nothing else breaks |
-| FORECAST_ML_DAILY absent, or stops before month-end | Forecast engine uses seasonal, basis string says so (a short table: its last day + "retrain it with SP_REFRESH_ML_FORECAST") |
+| FORECAST_ML_DAILY absent, empty from today on, or stops before month-end | Forecast engine uses seasonal, basis string says so (a table with days from today on that stops short: its last day + "retrain it with SP_REFRESH_ML_FORECAST"; a table with no day from today on: "no row for today or later" + the same retrain hint) |
 | Webhook integration missing | SP_NOTIFY_WEBHOOK returns a friendly failure; per-route errors log to APP_ERROR_LOG; events stay queued (NOTIFIED_AT null) |
 | ALTER SESSION unsupported (SiS) | SiS stamps its own app QUERY_TAG on every statement (self-traffic keys on it); the warehouse-level timeout is the backstop for reads; Cortex also sends a 1m 30s per-statement timeout |
 | Schema/db filters on mart-only panels | Panels that lack the dimension switch to live sources automatically |
@@ -1117,7 +1121,9 @@ undelivered write a loud `undelivered_expired` error-log row. **V022 has
 not run against the live account yet** — apply, re-run roles.sql, then
 prove it with the fire drill. Opt-in scripts: `alert_drill.sql` (monthly
 synthetic CRITICAL; resolve as EXPECTED; Admin → Canary scores the streak:
-consecutive calendar months, newest back, with a drill both delivered and
+consecutive calendar months (account time), counted back from the month whose
+drill is due now (this month once the 1st's 09:00 CT run plus a 1h grace has
+passed, else last month), each with a drill both delivered and
 acknowledged — a failed month or a month with no drill ends it).
 
 **Rule catalogue additions (§12).** `OPS_ALERT_DRILL` (PLATFORM, CRITICAL,
@@ -1311,10 +1317,14 @@ forward-only — reopen is a NEW incident carrying REOPENED_FROM.
 CONFIG_CHANGE / DATA / CAPACITY / EXTERNAL / UNKNOWN), one-line note, type
 RESOLVE. Only OPEN/MITIGATED rows move — resolved history never rewrites.
 
-**Metrics** (Control Room KPI strip, 90d): TTD (earliest evidence ->
-detection), incident MTTA/MTTR, reopen rate (14d window —
-INCIDENT_REOPEN_DAYS), alerts-per-incident compression, change-correlated %
-(incidents with a WH_CHANGE/DEPLOY member — rises as IaC attribution lands).
+**Metrics** (Alerts → History, "Incident lifecycle (90d, incident grain)",
+company-scoped): incident MTTA (detected -> first response, AUTO-declared
+incidents only), time to mitigate, MTTR (medians) and alerts per incident
+(storm compression). Reopen rate (INCIDENT_REOPEN_DAYS) and
+change-correlated % are no longer shown: no writer persists REOPENED_FROM or
+a WH_CHANGE/DEPLOY member, so both read a permanent 0% (Admin → Settings
+lists INCIDENT_REOPEN_DAYS as a row the app no longer reads). Change
+correlation lives in the Control Room RCA.
 
 **Attribution (V033):** the warehouse-change scorecard shows CHANGED_BY and
 CHANGE_SOURCE. MANAGED = a DEPLOY_ACTORS service user (Settings; a comma
