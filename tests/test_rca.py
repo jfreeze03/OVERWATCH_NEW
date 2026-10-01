@@ -171,6 +171,37 @@ def test_changes_adapter_prefers_setting_over_change_source():
     assert bare["title"] == "Warehouse change on WH_X: change" and bare["evidence"]["source"] == ""
 
 
+def test_changes_adapter_magnitude_humanizes_verdict_detail_durations():
+    """v4.606 holistic review (R1-124's twin): the change scans write VERDICT_DETAIL with raw
+    seconds, and the Operations drill humanized it while Control Room's ranked-cause Magnitude --
+    this adapter's magnitude_text -- still read 'p95 1800.0s->2400.0s'. The shared
+    wh_change.humanize_verdict_detail now runs BEFORE the 60-char slice."""
+    import re
+
+    from app.logic.wh_change import humanize_verdict_detail
+
+    detail = ("credits/day 12.34->15.67 | p95 1800.0s->2400.0s | queue 145.00->200.00 min/d "
+              "| fail 0->1.5% | 120->140 queries")
+    reg = pd.DataFrame([{"WAREHOUSE_NAME": "WH_ETL", "SETTING": "SIZE", "OLD_VALUE": "MEDIUM",
+                         "NEW_VALUE": "LARGE", "CHANGE_SEEN_AT": _ONSET - timedelta(hours=2),
+                         "VERDICT": "REGRESSED", "VERDICT_DETAIL": detail}])
+    mt = candidates_from_changes(reg)[0]["magnitude_text"]
+    assert mt == "Regressed — " + humanize_verdict_detail(detail)[:60]
+    assert "p95 30m → 40m" in mt
+    assert not re.search(r"[0-9.]+s->", mt) and "1800.0s" not in mt
+    # humanize first, THEN cut: a raw p95 token straddling char 60 is still humanized (slicing first
+    # left 'p95 1800.0s->24', which the regex can no longer match)
+    long = "credits/day 1234.5678->2345.6789 | runs 10->12 | p95 1800.0s->2400.0s | queue 1->2 min/d"
+    assert long.index("p95") < 60 < long.index("2400.0s") + len("2400.0s")
+    mt = candidates_from_changes(pd.DataFrame([{"OBJECT_NAME": "DB.S.SP_X", "CHANGE_DDL": "CREATE PROC",
+                                                "VERDICT": "REGRESSED", "VERDICT_DETAIL": long}]))[0][
+        "magnitude_text"]
+    assert "1800.0s" not in mt and "p95 30m" in mt
+    # a detail with no duration token passes through unchanged
+    plain = candidates_from_changes(pd.DataFrame([{"OBJECT_NAME": "DB.S.T", "VERDICT_DETAIL": "runs 1->2"}]))
+    assert plain[0]["magnitude_text"] == "changed — runs 1->2"
+
+
 # ------------------------------------------------- live-data timestamp types ----
 
 def test_tz_aware_ltz_candidates_rank_against_a_naive_ntz_onset():

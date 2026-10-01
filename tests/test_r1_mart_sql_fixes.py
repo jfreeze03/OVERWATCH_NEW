@@ -470,6 +470,27 @@ def test_r1_063_calendar_day_zero_reads_today_not_all_time():
     assert "drift" not in inspect.getdoc(etl_control_sql._window_clause)
 
 
+def test_r1_063_holistic_recon_phrase_names_a_mid_period_calendar_read_by_its_first_day():
+    # v4.606 holistic review: Current month on Sep 10 reads LOAD_DTTM >= Sep 1 (account date), which
+    # the phrase called 'in the last 9 days' while the runtimes label said 'since Sep 1'. One rule now:
+    # etl_control_sql.calendar_window_phrase, shared with operations._etl_window_suffix.
+    sep10 = date(2026, 9, 10)
+    assert f"DATEADD('day', -9, {account_today_sql()})" in \
+        etl_control_sql.recon_recurrence_scan("DB.S.R", days=CalendarDayOffset(9))
+    assert etl_control_sql.recon_window_phrase(CalendarDayOffset(9), today=sep10) == "since Sep 1"
+    assert etl_control_sql.recon_window_phrase(CalendarDayOffset(272), today=date(2026, 9, 30)) == "since Jan 1"
+    assert etl_control_sql.recon_window_phrase(CalendarDayOffset(0), today=sep10) == "today"
+    # plain-int trailing windows and the unscoped 90-day default keep their wording
+    assert etl_control_sql.recon_window_phrase(30, today=sep10) == "in the last 30 days"
+    assert etl_control_sql.recon_window_phrase(0, today=sep10) == "in the last 90 days"
+    assert etl_control_sql.recon_window_phrase(None) == "in the last 90 days"
+    # the shared helper: None for anything that is not a calendar offset
+    assert etl_control_sql.calendar_window_phrase(CalendarDayOffset(9), today=sep10) == "since Sep 1"
+    assert etl_control_sql.calendar_window_phrase(CalendarDayOffset(0), today=sep10) == "today"
+    for not_calendar in (9, 0, None, "9"):
+        assert etl_control_sql.calendar_window_phrase(not_calendar, today=sep10) is None
+
+
 def test_r1_063_review_unscoped_reads_claim_no_window():
     # v4.606 integration: the label itself is operations._etl_window_suffix (R1-139, which also names a
     # mid-period calendar offset by its first day); the reads it labels stay unscoped for these inputs.

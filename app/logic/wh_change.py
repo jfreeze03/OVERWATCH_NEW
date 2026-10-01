@@ -2,15 +2,38 @@
 
 Verdicts are computed and stored by SP_WAREHOUSE_CHANGE_SCAN (single source
 of truth so the alert and the page can never disagree); this module only
-derives display artifacts from registry rows — per-metric deltas and the
-KPI counts.
+derives display artifacts from registry rows — per-metric deltas, the
+KPI counts, and the VERDICT_DETAIL text with its durations humanized.
 """
 
 from __future__ import annotations
 
+import re
+
 import pandas as pd
 
-from .formulas import safe_float
+from .formulas import humanize_duration, safe_float
+
+_VD_P95_RE = re.compile(r"p95 (\?|-?[0-9.]+)s->(\?|-?[0-9.]+)s")
+_VD_QUEUE_RE = re.compile(r"queue (\?|-?[0-9.]+)->(\?|-?[0-9.]+) min/d")
+
+
+def humanize_verdict_detail(text: str) -> str:
+    """A change scan's VERDICT_DETAIL string with its durations in Hr/Min/Sec.
+
+    SP_WAREHOUSE_CHANGE_SCAN (V109) and the object-change scan (V140) build the string in SQL with
+    raw seconds ('p95 1800.0s->2400.0s', 'queue 145.00->200.00 min/d'), so the drill caption read
+    '1800.0s' right above a KPI showing the same p95 as '30m' (PR-1 R1-124). The numbers are left
+    as they are; only the duration tokens are re-rendered. The ALERT_EVENTS.DETAIL copy is SQL-side.
+
+    Shared by every surface that shows the string (v4.606 holistic review: it was private to
+    Operations, so Control Room's ranked-cause Magnitude -- rca.candidates_from_changes -- still read
+    '1800.0s'). Once the scan humanizes VERDICT_DETAIL in SQL the regexes simply find nothing."""
+    def _h(tok: str, unit_sec: float) -> str:
+        return "?" if tok == "?" else humanize_duration(safe_float(tok) * unit_sec, "s")
+
+    out = _VD_P95_RE.sub(lambda m: f"p95 {_h(m.group(1), 1)} → {_h(m.group(2), 1)}", text)
+    return _VD_QUEUE_RE.sub(lambda m: f"queue {_h(m.group(1), 60)} → {_h(m.group(2), 60)}/day", out)
 
 _METRICS = (
     ("CREDITS_PER_DAY", "credits/day", 1),

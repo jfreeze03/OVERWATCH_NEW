@@ -777,16 +777,19 @@ def test_cancel_query_gate_is_scoped_to_the_selected_query(monkeypatch):
 # ------------------------------------------- R1-124: change-scan verdict captions humanize durations ----
 
 def test_verdict_detail_durations_render_in_hr_min_sec():
-    from app.ui.pages import operations as ops
+    # v4.606 holistic review: the helper moved to the pure app.logic.wh_change so Control Room's
+    # ranked-cause Magnitude (rca.candidates_from_changes) shares it -- tests/test_rca.py locks that side
+    from app.logic.wh_change import humanize_verdict_detail
     wh = ("credits/day 10.5->12.25 | p95 1800.0s->2400.0s | queue 145.00->200.00 min/d "
           "| fail 0->1.5% | 120->140 queries")
-    got = ops._humanize_verdict_detail(wh)
+    got = humanize_verdict_detail(wh)
     assert "1800.0s" not in got and "2400.0s" not in got and "min/d" not in got
     assert got == ("credits/day 10.5->12.25 | p95 30m → 40m | queue 2h 25m → 3h 20m/day "
                    "| fail 0->1.5% | 120->140 queries")                  # non-durations untouched
     obj = "runs 10->12 | fails 0->1 | p95 ?s->95.5s | credits/call 0.0012->0.0019"
-    assert ops._humanize_verdict_detail(obj) == ("runs 10->12 | fails 0->1 | p95 ? → 1m 36s "
-                                                 "| credits/call 0.0012->0.0019")
+    assert humanize_verdict_detail(obj) == ("runs 10->12 | fails 0->1 | p95 ? → 1m 36s "
+                                            "| credits/call 0.0012->0.0019")
     body = read(_OPS)
-    assert body.count("_humanize_verdict_detail(_verdict_detail)") == 1
-    assert body.count("_humanize_verdict_detail(_vd)") == 1
+    assert body.count("wh_change.humanize_verdict_detail(_verdict_detail)") == 1
+    assert body.count("wh_change.humanize_verdict_detail(_vd)") == 1
+    assert "def _humanize_verdict_detail" not in body and "_VD_P95_RE" not in body   # no private twin
