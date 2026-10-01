@@ -1012,7 +1012,13 @@ def _migrations_tab() -> None:
               source="SCHEMA_VERSION")
     if not res.ok:
         empty_state("unavailable", "Cannot read SCHEMA_VERSION.", detail=res.error)
-        empty_state("needs_setup", "Run snowflake/migrations/V001__core.sql first.")
+        # c09 R1-175: setup advice only for a true absence (the v4.605 kind split Setup progress
+        # already makes). A timeout or drift on an installed account is not "run V001", and an
+        # "Insufficient privileges" error proves the table exists: re-apply the grants instead.
+        if is_setup_absence(res.error_kind):
+            empty_state("needs_setup", "Re-apply the app's grants (snowflake/roles.sql): SCHEMA_VERSION "
+                        "exists but this role cannot read it." if is_privilege_error(res.error_kind)
+                        else "Run snowflake/migrations/V001__core.sql first.")
         _task_health_panel()      # review r1: the task reads do not depend on SCHEMA_VERSION
         return
     applied = set()
@@ -1101,6 +1107,10 @@ def _migrations_tab() -> None:
             if stale.empty:
                 empty_state("clean", "Nothing stale past its cadence (3h hourly / 30h daily) — "
                                      "the loaders are keeping up.")
+            elif not errs.ok:
+                # c09 R1-175: a log we could not read is not "no matching error logged".
+                empty_state("unavailable", "APP_ERROR_LOG could not be read, so loader errors are not "
+                            "matched to the stale sources below.", detail=errs.error)
             for _, s in stale.iterrows():
                 name = str(s["SOURCE_NAME"])
                 hint = ""
@@ -1127,8 +1137,9 @@ def _migrations_tab() -> None:
                 # brief.py:379 / alerts DETAIL guarding pattern for the same data class).
                 st.markdown(md_dollars(
                     f"- **{name}** — {_age}. "
-                    + (hint or "no matching error logged — switch on Task health below "
-                               "(tasks suspend if a migration half-applied).")))
+                    + (hint or ("no matching error logged" if errs.ok else "error log unreadable")
+                       + " — switch on Task health below "
+                         "(tasks suspend if a migration half-applied).")))
     _task_health_panel()
 
 
@@ -1620,8 +1631,11 @@ def _performance_tab() -> None:
                 if _slo_det.usable():
                     st.markdown(f"**Slow keys on {_slo_pg}**")
                     styled_table(_slo_det.df, height=200)
-                else:
+                elif _slo_det.ok:
                     st.caption(f"No slow (≥2s) or failed fetch persisted for {_slo_pg} in 7d.")
+                else:   # c09 R1-175: a failed read is not "nothing persisted"
+                    empty_state("unavailable", f"Slow keys for {_slo_pg} could not be read.",
+                                detail=_slo_det.error)
         st.caption(
             "Render p95 uses complete APP_USAGE first paints (minimum n=20). Failure and "
             "cache rates are sample-reweighted; batch-wall telemetry is excluded from totals."
@@ -1722,8 +1736,11 @@ def _performance_tab() -> None:
     section_header("Fleet slow/failed fetches (all viewers, 7d)", "", "operations")
     fq = run(mart_sql.fleet_query_stats(7), page=_PAGE, key="fleet_qstats", tier="recent",
              source="APP_QUERY_TELEMETRY (V021)")
-    if not fq.ok:
+    if not fq.ok and is_setup_absence(fq.error_kind):
         empty_state("needs_setup", "Needs migration V021 + a roles.sql re-run (APP_QUERY_TELEMETRY INSERT grant).")
+    elif not fq.ok:   # c09 R1-175: a timeout or drift is a failed read, never "needs migration"
+        empty_state("unavailable", "Fleet fetch telemetry (APP_QUERY_TELEMETRY) could not be read.",
+                    detail=fq.error)
     elif fq.empty:
         empty_state("clean", "No slow (≥2s) or failed fetches persisted in 7 days — every viewer is "
                     "riding the cache.")
@@ -1828,6 +1845,7 @@ def _perf_rider_panels(fq_df=None) -> None:
                 # (Joe 2026-07-11: "the screen flashes and does nothing").
                 _pg = str(_tt.iloc[int(_sel)]["PAGE"])
                 _det = None if fq_df is None else fq_df[fq_df["PAGE"].astype(str) == _pg]
+                _det_err = ""
                 # C6: fq_df is the fleet list, LIMIT 40 by p95 — a page can top the
                 # PAIN board and still have every slow key below that cut. Absence
                 # from fq_df is therefore NOT evidence of absence, and the old
@@ -1839,7 +1857,10 @@ def _perf_rider_panels(fq_df=None) -> None:
                                key=f"fleet_qstats_pg:{_pg}", tier="recent",
                                source="APP_QUERY_TELEMETRY (V021), this page only")
                     _det = _one.df if _one.usable() else None
-                if _det is None or _det.empty:
+                    _det_err = "" if _one.ok else (_one.error or "read failed")
+                if _det_err:   # c09 R1-175: a failed read proves neither claim in the caption below
+                    empty_state("unavailable", f"Slow keys for {_pg} could not be read.", detail=_det_err)
+                elif _det is None or _det.empty:
                     st.caption(f"{_pg}: no slow (≥2s) or failed fetch persisted for this page "
                                "in 7d — its wait is spread across sub-2s fetches, which only "
                                "the ~2% sample sees.")
@@ -1849,8 +1870,13 @@ def _perf_rider_panels(fq_df=None) -> None:
         except (KeyError, TypeError, ValueError) as exc:
             # never silent: a broken drill must say so, not flash and shrug
             st.caption(f"Tuning-target drill unavailable — {type(exc).__name__}: {str(exc)[:80]}")
-    else:
+    elif tbp.ok:
         st.caption("Per-page telemetry appears after V027 and a day of traffic.")
+    elif is_setup_absence(tbp.error_kind):   # c09 R1-175: setup advice only for a true absence
+        empty_state("needs_setup", "Per-page telemetry needs APP_QUERY_TELEMETRY (V021 + the V027 rider) "
+                    "and a roles.sql re-run.")
+    else:
+        empty_state("unavailable", "Fleet telemetry by page could not be read.", detail=tbp.error)
 
     section_header("Usage events (30d) & remediation acceptance (90d)", "", "operations")
     ue = run(mart_sql.usage_event_summary(30), page=_PAGE, key="usage_events", tier="recent",
