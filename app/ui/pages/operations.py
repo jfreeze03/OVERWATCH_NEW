@@ -444,24 +444,31 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             _cold = int((_scored["PATHOLOGY"] == "Cold-start wait").sum())
             _spill = int(_scored["PATHOLOGY"].str.startswith("Spill").sum())
             _actionable = int((_scored["QOP"] > 0).sum()) if len(_scored) else 0
+            # R1-092: the feed is the 500 largest-footprint fingerprints; past that the counts are a lower bound
+            _qscope = query_opt.fingerprint_scope(_qopp.df)
             kpi_row([
-                {"label": "Opportunities", "value": f"{_actionable:,}",
+                {"label": "Opportunities", "value": query_opt.scoped_count(_actionable, _qscope),
                  "help": "Recurring queries (fingerprints) with an ACTIONABLE inefficiency (QOP>0) "
                          "this window, ranked by OOS (a typical run's inefficiency x the "
                          "fingerprint's compute footprint). Clean queries are scored but not counted."},
-                {"label": "High QOP (>=60)", "value": f"{_crit:,}",
+                {"label": "High QOP (>=60)", "value": query_opt.scoped_count(_crit, _qscope),
                  "severity": "warn" if _crit else "",
                  "help": "Fingerprints whose typical execution is badly inefficient."},
-                {"label": "Concurrency-starved", "value": f"{_conc:,}",
+                {"label": "Concurrency-starved", "value": query_opt.scoped_count(_conc, _qscope),
                  "help": "Fast SQL stuck behind warehouse OVERLOAD queueing — a capacity problem, not "
                          "bad SQL. Add a cluster or split the workload (" + CLUSTER_CAP_QUALIFIER + "); "
                          "don't rewrite the query. Resume (cold-start) waits are counted separately."},
-                {"label": "Cold-start wait", "value": f"{_cold:,}",
+                {"label": "Cold-start wait", "value": query_opt.scoped_count(_cold, _qscope),
                  "help": "Recurring queries whose wait is mostly the warehouse RESUMING from suspend "
                          "(provisioning), not overload. Sizing up buys nothing here — keep it warm "
                          "across the schedule or accept the resume latency."},
-                {"label": "Memory spill", "value": f"{_spill:,}"},
+                {"label": "Memory spill", "value": query_opt.scoped_count(_spill, _qscope)},
             ])
+            if _qscope["capped"]:
+                st.caption(f"Counts cover the {_qscope['served']:,} largest-footprint fingerprints of "
+                           f"{_qscope['total']:,} recurring queries this window, so each is a lower bound (≥). "
+                           "The footprint ranks execution / compile time, not queueing, so concurrency-starved "
+                           "and cold-start families with little compute are the likeliest to sit outside it.")
             _disp = _scored.head(50).copy()
             _disp["SAMPLE"] = _disp["SAMPLE_TEXT"].str.slice(0, 60)
             _sel = selectable_table(

@@ -57,6 +57,28 @@ _OUTPUT_COLS = ["FINGERPRINT", "SAMPLE_TEXT", "QUERY_TYPE", "WAREHOUSE_NAME", "R
                 "FIRST_ACTION", "LAST_SEEN", "_FINDINGS"]
 
 
+#: ops_sql.query_opportunity_fingerprints' LIMIT: the largest-footprint fingerprints it serves.
+FINGERPRINT_CAP = 500
+
+
+def fingerprint_scope(df: pd.DataFrame | None) -> dict:
+    """R1-092: how much of the window the fingerprint feed covers. ``served`` = rows read; ``total`` = the
+    builder's uncapped FINGERPRINTS_TOTAL window column (every qualifying fingerprint, computed before the
+    LIMIT; the row count when absent); ``capped`` = more exist than were served. Counts taken from the served
+    rows are then a LOWER BOUND -- and a biased one: the footprint ORDER BY ignores queue time, so the
+    concurrency-starved / cold-start families the KPIs exist to surface are the ones the cap drops."""
+    served = 0 if df is None else len(df)
+    total = served
+    if df is not None and not df.empty and "FINGERPRINTS_TOTAL" in df.columns:
+        total = max(served, int(safe_float(df.iloc[0].get("FINGERPRINTS_TOTAL"))))
+    return {"served": served, "total": total, "capped": total > served}
+
+
+def scoped_count(n: int, scope: dict) -> str:
+    """A KPI count over the served fingerprints: '≥ N' when the feed was capped (a lower bound), else 'N'."""
+    return f"≥ {n:,}" if scope.get("capped") else f"{n:,}"
+
+
 def pathology_label(code: str) -> str:
     """The human pathology label for one advisor finding ``code`` (the same map the fingerprint
     board names its PATHOLOGY from), or "Other" for an unmapped code. Public so the Operations >
