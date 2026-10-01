@@ -15,6 +15,7 @@ from app.core.state import filters, navigation_context, request_navigation
 from app.data import graph_sql, mart27_sql, mart_sql, workbench_sql
 from app.logic import lineage, outcomes, wh_change
 from app.logic.actions import deferred_mask, deferred_summary, rank_actions
+from app.logic.date_windows import window_phrase
 from app.logic.formulas import (
     account_today,
     credits_to_usd,
@@ -25,7 +26,7 @@ from app.logic.formulas import (
     safe_float,
 )
 from app.logic.sizing import size_recommendations
-from app.logic.watch_monitor import WATCH_SIGNAL_TYPES, watch_summary, watched_status
+from app.logic.watch_monitor import WATCH_SIGNAL_TYPES, watch_summary, watch_unchecked, watched_status
 from app.logic.wh_health import warehouse_health
 from app.logic.workbench import (
     ACTION_STATUSES,
@@ -367,12 +368,23 @@ def render_action_center(company: str) -> None:
                           help=f"Only work whose Owner is you ({_me or 'viewer unknown'}). Team labels "
                                "like DBA count as Unassigned.")
     read_model_caption("action_center")
+    # A pending deep link bypasses the mine filter, so a Brief / Overview click to someone else's item
+    # is never swallowed (Next-Fifty #20).
+    _deep_link = str(navigation_context().get("action_id") or "").strip()
+    # the deep-linked / currently-open item stays in the filtered list, so a same-page jump to someone
+    # else's item is never swallowed on the next rerun (review fix)
+    _pin = _deep_link or str(st.session_state.get("_ow_md_sel_action_center") or "")
+    _mine = bool(mine_only and _me)
     # R1-091/207: the KPIs read the read's UNCAPPED window totals (with_kpi_totals), and with Include
     # completed work the open items sort first, so closed history never pushes open work past the cap.
+    # 'Assigned to me' filters in the read itself (owner=, before the LIMIT): it used to filter only the
+    # first 500 rows, so the viewer's own work past the cap was never listed and the counts covered only
+    # the rows read.
     extended_res = run(
-        workbench_sql.action_center(company, include_closed, _ACTION_READ_CAP, with_kpi_totals=True),
-        page=_PAGE, key=f"action_center_{company}_{include_closed}", tier="live",
-        source="ACTION_QUEUE + V074 lifecycle context",
+        workbench_sql.action_center(company, include_closed, _ACTION_READ_CAP, with_kpi_totals=True,
+                                    owner=_me if _mine else "", keep_action_id=_pin if _mine else ""),
+        page=_PAGE, key=f"action_center_{company}_{include_closed}" + (f"_mine_{_me}_{_pin}" if _mine else ""),
+        tier="live", source="ACTION_QUEUE + V074 lifecycle context",
     )
     # R1-206: V074's lifecycle shape is guaranteed past config.REQUIRED_SCHEMA_FLOOR (88; main.py blocks
     # the page below it), so a failed read is never "V074 is pending" -- the old read-only legacy fallback
@@ -391,18 +403,13 @@ def render_action_center(company: str) -> None:
     _matching = (int(safe_float(frame.iloc[0].get("KPI_MATCHING_TOTAL")))
                  if not frame.empty and "KPI_MATCHING_TOTAL" in frame.columns else len(frame))
 
-    # A pending deep link bypasses the mine filter, so a Brief / Overview click to someone else's item
-    # is never swallowed (Next-Fifty #20).
-    _deep_link = str(navigation_context().get("action_id") or "").strip()
-    # the deep-linked / currently-open item stays in the filtered list, so a same-page jump to someone
-    # else's item is never swallowed on the next rerun (review fix)
-    _pin = _deep_link or str(st.session_state.get("_ow_md_sel_action_center") or "")
-    if mine_only and _me and not frame.empty:
+    if _mine and not frame.empty:
+        # The read is already owner-scoped (its window totals count only the viewer's work); this row filter
+        # is a guard that keeps exactly owned_by's rows plus the pinned item.
         _keep = owned_by(frame, _me)
         if _pin and "ACTION_ID" in frame.columns:
             _keep = _keep | (frame["ACTION_ID"].astype(str) == _pin)
-        # the window totals count EVERY owner's work: after this filter the counts come from the rows
-        frame = frame[_keep].reset_index(drop=True).drop(columns=list(ACTION_WINDOW_COLS), errors="ignore")
+        frame = frame[_keep].reset_index(drop=True)
     _window_counts = set(ACTION_WINDOW_COLS) <= set(frame.columns)
 
     if frame.empty:
@@ -458,12 +465,13 @@ def render_action_center(company: str) -> None:
                        f"above; next resumes {next_resume}.")
         if _read_capped:
             # R1-091/207: disclose the list cap (UNCAPPED-AGGREGATE): the counts are window totals over every
-            # matching item, except under 'Assigned to me', which filters the rows read
+            # matching item ('Assigned to me' is filtered in the read, so its totals are the viewer's work)
             _order = ("open work first, then severity" if include_closed else "severity") + ", overdue, estimate"
             st.caption(f"The list shows the first {_ACTION_READ_CAP:,} of {_matching:,} matching items "
-                       f"({_order}); "
+                       f"({_order}"
+                       + (", assigned to you" if _mine else "") + "); "
                        + ("the counts above cover all of them." if _window_counts else
-                          "'Assigned to me' and the counts above cover only those rows."))
+                          "the counts above cover only those rows."))
         # Next-Fifty #46: completed work is listed only with Include completed work, so the Held? read is
         # gated on that toggle (never first paint) and on V074's lifecycle columns.
         if include_closed and extended:
@@ -712,11 +720,19 @@ def render_entity_360(company: str) -> None:
             workbench_sql.entity_catalog(limit=100), page=_PAGE, key="entity_catalog_browse",
             tier="live", source="ENTITY_CATALOG",
         )
+        _pick_prompt = "Choose an entity or open one from an action, table, or universal search."
         if catalog.ok and not catalog.empty:
             st.markdown("**Catalog**")
             styled_table(catalog.df, height=320)
+        elif catalog.ok:
+            empty_state("no_data_yet", _pick_prompt)
+        elif is_setup_absence(catalog.error_kind):
+            empty_state("needs_setup", "V074 is required for the ownership catalog and watchlists.",
+                        hint=_pick_prompt)
         else:
-            empty_state("no_data_yet", "Choose an entity or open one from an action, table, or universal search.")
+            # R2-078: a failed browse read is not the quiet "choose an entity" prompt
+            empty_state("unavailable", "The entity catalog could not be read.", hint=_pick_prompt,
+                        detail=catalog.error)
         return
 
     if kind == "DATA_PRODUCT":
@@ -760,10 +776,18 @@ def render_entity_360(company: str) -> None:
         st.link_button("Open in Snowsight ↗", _ss_url)
 
     if kind in workbench_sql.ENTITY_METRIC_TYPES:
-        scoped_days = int(filters().get("days") or 30)
+        # R2-055: the page Window as-is -- no int() / `or 30`, which turned Current month's legitimate day-0
+        # offset on the 1st (a falsy CalendarDayOffset(0)) into a trailing 30 days -- plus its calendar bounds,
+        # so Last month reads the previous calendar month instead of a trailing span ending today.
+        _flt = filters()
+        scoped_days = _flt.get("days")
+        if scoped_days is None:
+            scoped_days = 30
+        _bounds = _flt.get("bounds")
+        _bkey = f"_{_bounds[0]}_{_bounds[1]}" if _bounds else ""
         metrics = run(
-            workbench_sql.entity_metric_snapshot(kind, key, scoped_days), page=_PAGE,
-            key=f"entity_metrics_{kind}_{key}_{scoped_days}", tier="recent",
+            workbench_sql.entity_metric_snapshot(kind, key, scoped_days, bounds=_bounds), page=_PAGE,
+            key=f"entity_metrics_{kind}_{key}_{scoped_days}{_bkey}", tier="recent",
             source=f"existing OVERWATCH marts ({kind.lower()} grain)",
         )
         if metrics.ok and not metrics.empty:
@@ -773,9 +797,14 @@ def render_entity_360(company: str) -> None:
             bases = ", ".join(sorted(set(metrics.df["BASIS"].dropna().astype(str))))
             as_of = pd.to_datetime(metrics.df["AS_OF"], errors="coerce").max()
             freshness = f" · through {as_of}" if pd.notna(as_of) else ""
-            st.caption(f"{scoped_days}-day entity evidence · basis: {bases}{freshness}")
+            st.caption(f"Entity evidence for {window_phrase(_bounds, scoped_days)} · basis: {bases}{freshness}")
         elif metrics.ok:
             empty_state("no_data_yet", "No measured entity metrics exist in this window.")
+        elif is_setup_absence(metrics.error_kind):
+            empty_state("needs_setup", f"The {kind.lower()} metric mart is not installed or not readable yet.")
+        else:
+            # R2-078: a failed metrics read is not a silently missing KPI block
+            empty_state("unavailable", "Entity metrics could not be read for this window.", detail=metrics.error)
     else:
         # rec26: ALERT/INCIDENT/ACTION/DATA_PRODUCT have no metric snapshot defined —
         # say so, so the absent KPI block does not read as a broken/empty load.
@@ -910,6 +939,17 @@ def render_entity_360(company: str) -> None:
             st.markdown("**Evidence relationships**")
             linked, cfg = snowsight_profile_column(links.df, _PAGE, id_col="QUERY_ID")
             styled_table(linked, height=240, column_config=cfg)
+        # R2-078: one failed read beside empty ones rendered nothing at all, and beside a filled one it read as
+        # "none" -- each failed read now says so by its kind.
+        for _label, _res in (("Remediation history (REMEDIATION_LOG)", remediations),
+                             ("Savings outcomes (SAVINGS_LEDGER)", savings),
+                             ("Evidence relationships (EVIDENCE_LINKS)", links)):
+            if _res.ok:
+                continue
+            if is_setup_absence(_res.error_kind):
+                empty_state("needs_setup", f"{_label} is not installed or not readable yet.")
+            else:
+                empty_state("unavailable", f"{_label} could not be read for this entity.", detail=_res.error)
         if all(r.ok and r.empty for r in (remediations, savings, links)):
             empty_state("no_data_yet", "No evidence, remediation, or savings outcome is linked yet.")
 
@@ -1049,8 +1089,10 @@ def watched_attention(viewer: str, rate: float) -> pd.DataFrame:
     """Per watched entity: cost spike/drop + health-grade status (attention first).
 
     Cheap and degradation-safe: cost from FACT_WAREHOUSE_DAILY (mart), health from
-    the efficiency MART only (probe — never the heavy live sizing scan). An absent
-    source degrades to cost-only, or to a steady list, rather than loading a scan.
+    the efficiency MART only (probe — never the heavy live sizing scan). A failed cost
+    or health read is passed as None (not evaluated), so a warehouse watch names what
+    was not checked instead of reading 'steady' (R2-074); an ok-but-empty read is an
+    evaluated one. Never falls back to a scan.
     Cross-company (company='ALL') so a watched entity is evaluated no matter which
     company filter the viewer is on, and both surfaces share one cache identity."""
     cols = ["ENTITY_TYPE", "ENTITY_KEY", "LABEL", "ATTENTION", "STATUS", "SEVERITY"]
@@ -1062,10 +1104,11 @@ def watched_attention(viewer: str, rate: float) -> pd.DataFrame:
         return pd.DataFrame(columns=cols)
     daily = run(mart_sql.fact_warehouse_daily(_WATCH_WINDOW_DAYS, "ALL"), page=_PAGE,
                 key="watch_auto_cost", tier="recent", source="FACT_WAREHOUSE_DAILY", probe=True)
-    health = pd.DataFrame()
     prof = run(mart27_sql.eff_sizing_profile(_WATCH_WINDOW_DAYS, "ALL"), page=_PAGE,
                key="watch_auto_health", tier="recent",
                source="MART_WAREHOUSE_EFFICIENCY_DAILY", probe=True)
+    # R2-074: None = the read failed (not evaluated); an ok-but-empty read is evaluated with no grade.
+    health: pd.DataFrame | None = pd.DataFrame() if prof.ok else None
     if prof.usable():
         sized = size_recommendations(prof.df, rate, served_days(prof, _WATCH_WINDOW_DAYS))
         health = warehouse_health(sized)
@@ -1088,8 +1131,23 @@ def watched_attention(viewer: str, rate: float) -> pd.DataFrame:
                       source="MART_TASK_NODE_DAILY + MART_QUERY_FAMILY_DAILY + MART_PATTERN_COST_DAILY")
             if sig.ok:
                 entity_daily, signal_keys = sig.df, _watched
-    return watched_status(wl.df, daily.df if daily.usable() else None, health, rate, calendar=_cal,
-                          entity_daily=entity_daily, signal_keys=signal_keys)
+    status = watched_status(wl.df, daily.df if daily.ok else None, health, rate, calendar=_cal,
+                            entity_daily=entity_daily, signal_keys=signal_keys)
+    status.attrs["read_errors"] = "\n".join(
+        f"{src}: {res.error}" for src, res in (("FACT_WAREHOUSE_DAILY", daily),
+                                               ("MART_WAREHOUSE_EFFICIENCY_DAILY", prof)) if not res.ok)
+    return status
+
+
+def _watch_unchecked_state(status: pd.DataFrame) -> None:
+    """R2-074: a watched warehouse whose cost or health read failed was not evaluated -- say so (unavailable,
+    the read errors one click away), never let it count toward a 'steady' list."""
+    n = watch_unchecked(status)
+    if n:
+        empty_state("unavailable",
+                    f"Could not fully check {n} watched " + ("warehouse" if n == 1 else "warehouses")
+                    + ": a cost or health read failed, so STATUS names what was not checked.",
+                    detail=str(status.attrs.get("read_errors") or ""))
 
 
 def render_watch_badge(viewer: str, rate: float) -> None:
@@ -1101,6 +1159,9 @@ def render_watch_badge(viewer: str, rate: float) -> None:
         return
     summary = watch_summary(status)
     if not summary["attention"]:
+        if watch_unchecked(status):
+            _watch_unchecked_state(status)      # R2-074: a failed read is never '★ N … steady'
+            return
         st.caption(f"★ {summary['watched']} watched "
                    + ("entity is" if summary["watched"] == 1 else "entities are") + " steady.")
         return
@@ -1114,6 +1175,7 @@ def render_watch_badge(viewer: str, rate: float) -> None:
     st.warning("★ " + str(summary["attention"]) + " of " + str(summary["watched"])
                + " watched " + ("entity has" if summary["attention"] == 1 else "entities have")
                + " moved:\n\n" + "\n\n".join(md_dollars(x) for x in lines))
+    _watch_unchecked_state(status)
     if st.button("Open Watchlist", key="brief_watch_jump", type="secondary"):
         st.session_state["_ow_entity_view_pending"] = "Watchlist"
         request_navigation("Control Room", "Entity 360")
@@ -1183,6 +1245,7 @@ def render_watchlist() -> None:
     rate = safe_float(load_settings(_PAGE).get("CREDIT_PRICE_USD"), 3.68)
     status = watched_attention(viewer, rate)
     if not status.empty:
+        _watch_unchecked_state(status)
         frame = frame.merge(status[["ENTITY_TYPE", "ENTITY_KEY", "STATUS", "SEVERITY", "ATTENTION"]],
                             on=["ENTITY_TYPE", "ENTITY_KEY"], how="left")
         moved = status[status["ATTENTION"]]

@@ -44,6 +44,20 @@ WATCH_TASK_MIN_P95_SEC = 60.0
 WATCH_FAMILY_MIN_P95_SEC = 10.0
 WATCH_FAMILY_MIN_USD = 10.0
 
+# R2-074: a warehouse watch is 'steady' only when BOTH of its reads were evaluated. A read the caller could not
+# make (passed as None) names what was not checked, so a failed read never reads as a verified-clean state.
+NOT_CHECKED = "not checked"
+
+
+def _unchecked_note(cost_checked: bool, health_checked: bool) -> str:
+    """'' when both warehouse arms were evaluated, else what was not checked (always contains NOT_CHECKED)."""
+    if cost_checked and health_checked:
+        return ""
+    if not cost_checked and not health_checked:
+        return f"{NOT_CHECKED} (the cost and health reads failed)"
+    return (f"spend {NOT_CHECKED} (the cost read failed)" if not cost_checked
+            else f"health {NOT_CHECKED} (the health read failed)")
+
 
 def _signal_rows(entity_daily: pd.DataFrame, etype: str, ekey: str) -> pd.DataFrame:
     """One watched entity's rows from entity_daily_signals, DAY parsed to a date (case-insensitive key)."""
@@ -136,8 +150,11 @@ def watched_status(watchlist: pd.DataFrame | None,
 
     ``watchlist``: USER_WATCHLIST rows (ENTITY_TYPE, ENTITY_KEY, LABEL).
     ``wh_daily``: FACT_WAREHOUSE_DAILY (WAREHOUSE_NAME, DAY, CREDITS_TOTAL) — the
-      cost-anomaly input; priced with ``rate``.
-    ``health``: warehouse_health output (WAREHOUSE_NAME, GRADE).
+      cost-anomaly input; priced with ``rate``. None = not evaluated (the read failed):
+      a warehouse watch then says spend was not checked, never 'steady' (an empty frame
+      is an evaluated read with no spend).
+    ``health``: warehouse_health output (WAREHOUSE_NAME, GRADE). None = not evaluated,
+      as for ``wh_daily``; an empty frame is an evaluated read with no grade.
     ``calendar``: EXPECTED_SPIKE_CALENDAR — known month/quarter-end spikes are labeled
       expected, not flagged (same hygiene as the Cost surfaces).
     ``entity_daily``: entity_daily_signals rows for the watched TASK / QUERY_FINGERPRINT
@@ -186,6 +203,7 @@ def watched_status(watchlist: pd.DataFrame | None,
         grade_by_wh = {str(r["WAREHOUSE_NAME"]).upper(): str(r.get("GRADE", ""))
                        for _, r in health.iterrows()}
 
+    unchecked = _unchecked_note(wh_daily is not None, health is not None)
     rows = []
     for _, w in watchlist.iterrows():
         etype = str(w.get("ENTITY_TYPE", "")).upper()
@@ -196,6 +214,9 @@ def watched_status(watchlist: pd.DataFrame | None,
         is_warehouse = etype == "WAREHOUSE"
         if is_warehouse:
             quiet = "steady"        # evaluated, nothing moved
+            if unchecked:           # R2-074: an arm was not evaluated, so nothing is verified steady
+                checked_arm = "spend" if wh_daily is not None else ("health" if health is not None else "")
+                quiet = f"{checked_arm} steady; {unchecked}" if checked_arm else unchecked
             hit = cost_hits.get(ekey)
             if hit:
                 z = safe_float(hit.get("z"))
@@ -213,6 +234,8 @@ def watched_status(watchlist: pd.DataFrame | None,
             rows_e = _signal_rows(entity_daily, etype, ekey)
             parts, severity, quiet = (_task_arm(rows_e, day) if etype == "TASK"
                                       else _family_arm(rows_e, day, rate, calendar))
+        if parts and is_warehouse and unchecked:
+            parts = [*parts, unchecked]
         status = "; ".join(parts) if parts else quiet
         rows.append({
             "ENTITY_TYPE": str(w.get("ENTITY_TYPE", "")),
@@ -224,6 +247,14 @@ def watched_status(watchlist: pd.DataFrame | None,
         })
     out = pd.DataFrame(rows)
     return out.sort_values("ATTENTION", ascending=False, kind="stable").reset_index(drop=True)[cols]
+
+
+def watch_unchecked(status: pd.DataFrame | None) -> int:
+    """How many watched entities have an arm that was not evaluated (a failed cost / health read): the
+    surfaces render 'unavailable' for these instead of calling the list steady (R2-074)."""
+    if status is None or status.empty or "STATUS" not in status.columns:
+        return 0
+    return int(status["STATUS"].astype(str).str.contains(NOT_CHECKED, regex=False).sum())
 
 
 def watch_summary(status: pd.DataFrame | None) -> dict:

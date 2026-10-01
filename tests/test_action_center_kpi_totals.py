@@ -8,7 +8,9 @@ took the 500 slots and pushed open LOW / MEDIUM items out: flipping a display to
   LIMIT, with action_summary's own masks (deferred excluded, team placeholders = Unassigned), and with
   include_closed the open work sorts FIRST;
 * action_summary reads those totals when the frame carries them;
-* the page discloses the list cap, and 'Assigned to me' (a row filter after the read) drops the totals.
+* the page discloses the list cap; 'Assigned to me' filters in the read itself (v4.608: it was a row filter
+  over the capped read, so the viewer's own work past the 500 cap was never listed), and its totals count only
+  the viewer's work.
 
 The builder is EXECUTED (sqlglot -> SQLite) against an in-memory ACTION_QUEUE and must agree with
 action_summary over the WHOLE population.
@@ -108,10 +110,20 @@ def test_builder_shape_and_default_unchanged():
 
 # ---------------------------------------------------------------------------------------- the page ----
 
-def _render(monkeypatch, frame: pd.DataFrame, *, mine: bool = False):
+def _render(monkeypatch, frame: pd.DataFrame | None = None, *, mine: bool = False, rows: list[dict] | None = None,
+            sqls: list[str] | None = None):
+    """Render Action Center over ``frame`` (the toggle-off read), or -- with ``rows`` -- execute whatever SQL the
+    page builds against that ACTION_QUEUE (so the 'Assigned to me' read is the page's own)."""
     from tests.test_probe_absence_split import _ok
     from tests.test_workbench_failed_reads import _patch_page
-    wb, fake, seen = _patch_page(monkeypatch, {"action_center_ALL_True": _ok(frame)})
+    wb, fake, seen = _patch_page(monkeypatch, {"action_center_ALL_True": _ok(frame if frame is not None
+                                                                              else pd.DataFrame())})
+    if rows is not None:
+        def _run(sql, *_a, key: str = "", **_k):
+            if sqls is not None:
+                sqls.append(sql)
+            return _ok(_execute(sql, rows)) if key.startswith("action_center_") else _ok(pd.DataFrame())
+        monkeypatch.setattr(wb, "run", _run)
     monkeypatch.setattr(wb, "account_today", lambda: _TODAY)
     monkeypatch.setattr(wb, "viewer_name", lambda: "ANA" if mine else "")
     monkeypatch.setattr(wb, "_with_held", lambda f, **_k: f)
@@ -133,7 +145,31 @@ def test_page_reads_the_window_totals_and_discloses_the_cap(monkeypatch):
 
 
 def test_assigned_to_me_counts_the_rows_it_shows(monkeypatch):
-    frame = _execute(workbench_sql.action_center("ALL", True, 500, with_kpi_totals=True), _queue())
-    kpis, captions = _render(monkeypatch, frame, mine=True)
+    sqls: list[str] = []
+    kpis, _captions = _render(monkeypatch, mine=True, rows=_queue(), sqls=sqls)
     assert kpis["Open work"] == "6"         # ANA's 5 overdue HIGH items + the one that resumed today, not 306
-    assert "'Assigned to me' and the counts above cover only those rows." in captions
+    assert kpis["Unassigned"] == "0" and kpis["Critical / high"] == "5"
+    assert "UPPER(TRIM(COALESCE(OWNER, ''))) = 'ANA'" in sqls[0]       # filtered in the read, before the LIMIT
+
+
+def test_assigned_to_me_lists_the_viewers_work_past_the_cap(monkeypatch):
+    """600 other-owner HIGH items fill the 500-row cap ahead of the viewer's LOW items: a row filter over the
+    capped read listed none of them and counted 0; the owner-scoped read lists and counts all of them."""
+    rows = [_row(i, SEVERITY="HIGH", OWNER="BO") for i in range(600)]
+    rows += [_row(900 + i, SEVERITY="LOW", OWNER="ana ", ESTIMATED_USD=20.0) for i in range(7)]
+    kpis, captions = _render(monkeypatch, mine=True, rows=rows)
+    assert kpis["Open work"] == "7" and kpis["Estimated opportunity"] == "$140.00"
+    assert "The list shows the first" not in captions                   # 7 rows: nothing is capped
+
+
+def test_the_open_item_stays_listed_but_never_counts_as_the_viewers_work(monkeypatch):
+    rows = [_row(1, OWNER="ANA"), _row(2, OWNER="BO", SEVERITY="CRITICAL")]
+    sql = workbench_sql.action_center("ALL", True, 500, with_kpi_totals=True, owner="ana", keep_action_id="a0002")
+    frame = _execute(sql, rows)
+    assert set(frame["ACTION_ID"]) == {"a0001", "a0002"}                # BO's open item stays on screen
+    assert logic_wb.action_summary(frame)["open"] == 1.0                # ...outside ANA's counts
+    assert logic_wb.action_summary(frame)["critical_high"] == 0.0
+    assert int(frame.iloc[0]["KPI_MATCHING_TOTAL"]) == 2
+    # without the owner, the builder (and its cache identity) is byte-identical to before
+    assert workbench_sql.action_center("ALL", True, 500, with_kpi_totals=True) == workbench_sql.action_center(
+        "ALL", True, 500, with_kpi_totals=True, owner="", keep_action_id="a0002")

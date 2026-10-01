@@ -28,15 +28,18 @@ _ACTION_TOTALS = f""",
            AS NO_PERIOD_TOTAL"""
 
 
-def _action_kpi_totals() -> str:
+def _action_kpi_totals(scope: str = "") -> str:
     """R1-091/207: Action Center's headline KPIs as UNCAPPED window totals, computed before the LIMIT over
     every matching row, with logic.workbench.action_summary's masks: ACTIVE = OPEN / IN_PROGRESS and not
     deferred to a future account day (actions.deferred_mask); overdue = DUE_DATE before the account today;
     a team placeholder owner (TEAM_PLACEHOLDER_OWNERS, blank included) is Unassigned. DEFERRED_TOTAL /
-    NEXT_RESUME_DATE carry mart_sql.action_queue's names, so actions.deferred_summary reads them as-is."""
+    NEXT_RESUME_DATE carry mart_sql.action_queue's names, so actions.deferred_summary reads them as-is.
+    ``scope`` (a predicate, e.g. the 'Assigned to me' owner match) narrows every KPI but KPI_MATCHING_TOTAL,
+    so an item kept only because it is open on screen never counts as the viewer's work."""
     today = account_today_sql()
-    parked = f"UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS') AND DEFER_UNTIL > {today}"
-    active = f"UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS') AND NOT COALESCE(DEFER_UNTIL > {today}, FALSE)"
+    within = f"({scope}) AND " if scope else ""
+    parked = f"{within}UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS') AND DEFER_UNTIL > {today}"
+    active = f"{within}UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS') AND NOT COALESCE(DEFER_UNTIL > {today}, FALSE)"
     placeholders = ", ".join(sql_literal(o) for o in sorted(TEAM_PLACEHOLDER_OWNERS))
     return f""",
        COUNT(*) OVER () AS KPI_MATCHING_TOTAL,
@@ -51,13 +54,19 @@ def _action_kpi_totals() -> str:
 
 
 def action_center(company: str = "ALL", include_closed: bool = False,
-                  limit: int = 500, *, with_totals: bool = False, with_kpi_totals: bool = False) -> str:
+                  limit: int = 500, *, with_totals: bool = False, with_kpi_totals: bool = False,
+                  owner: str = "", keep_action_id: str = "") -> str:
     """Extended ACTION_QUEUE shape installed by V074. ``with_totals`` (v4.597, Proof ▸ Pipeline) adds
     UNCAPPED window totals computed before the LIMIT -- the open count and the monthly run-rate of every
     matching item (MONTHLY as-is, ANNUAL / 12; the same buckets as decision.monthly_equivalent) -- so a
     headline never sums the capped frame. ``with_kpi_totals`` (R1-091/207, Action Center) adds the
     uncapped KPI counts (_action_kpi_totals). With ``include_closed`` the open work sorts FIRST, so closed
-    CRITICAL / HIGH history never pushes open items past the cap."""
+    CRITICAL / HIGH history never pushes open items past the cap.
+
+    ``owner`` ('Assigned to me') filters in SQL, BEFORE the LIMIT, on logic.workbench.owned_by's rule (the
+    trimmed, upper-cased OWNER equals the viewer), so the viewer's work is never cut by other owners' items
+    taking the cap, and the KPI totals count only it; ``keep_action_id`` keeps the item open on screen (or
+    deep-linked) in the list even when someone else owns it, outside those KPIs."""
     cap = max(1, min(int(limit), 1000))
     clauses: list[str] = []
     if not include_closed:
@@ -66,7 +75,12 @@ def action_center(company: str = "ALL", include_closed: bool = False,
         clauses.append(
             f"(UPPER(COMPANY) IN ({sql_literal(str(company).upper())}, 'ALL'))"
         )
-    kpi_totals = _action_kpi_totals() if with_kpi_totals else ""
+    viewer = str(owner or "").strip().upper()
+    owner_match = f"UPPER(TRIM(COALESCE(OWNER, ''))) = {sql_literal(viewer, 200)}" if viewer else ""
+    if owner_match:
+        keep = str(keep_action_id or "").strip()
+        clauses.append(f"({owner_match} OR ACTION_ID = {sql_literal(keep, 80)})" if keep else f"({owner_match})")
+    kpi_totals = _action_kpi_totals(owner_match) if with_kpi_totals else ""
     open_first = "IFF(UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS'), 0, 1), " if include_closed else ""
     return f"""
 SELECT ACTION_ID, CREATED_AT, COMPANY, SEVERITY, TITLE, DETAIL, OWNER, STATUS,
@@ -227,8 +241,13 @@ ENTITY_METRIC_TYPES = (
 
 
 def entity_metric_snapshot(entity_type: str = "WAREHOUSE", entity_key: str = "WH",
-                           days: int = 30) -> str:
-    """Standard long-form metric snapshot for an Entity 360 summary."""
+                           days: int = 30, *, bounds: tuple | None = None) -> str:
+    """Standard long-form metric snapshot for an Entity 360 summary.
+
+    ``days`` is the page's day offset (a CalendarDayOffset keeps its day-0 meaning: today only). ``bounds``
+    (date_windows.window_bounds, start inclusive / end exclusive) reads a calendar preset by its real range
+    -- Last month = the previous calendar month, never a trailing span ending today (R2-055); None keeps the
+    trailing ``DAY >= DATEADD('day', -days, CURRENT_DATE())`` form byte for byte."""
     kind = _entity_type(entity_type)
     if kind not in ENTITY_METRIC_TYPES:
         raise ValueError(f"No metric snapshot is defined for {kind or 'blank'}")
@@ -237,8 +256,9 @@ def entity_metric_snapshot(entity_type: str = "WAREHOUSE", entity_key: str = "WH
         raise ValueError("entity_key is required")
     horizon = bounded_days(days, 400)
     literal = sql_literal(key, 500)
+    day_where = scope_window_where("DAY", horizon, bounds=bounds)
     if kind != "WAREHOUSE":
-        return _entity_metric_nonwarehouse(kind, literal, horizon)
+        return _entity_metric_nonwarehouse(kind, literal, day_where)
     if kind == "WAREHOUSE":
         return f"""
 SELECT METRIC, VALUE, UNIT, BASIS, AS_OF
@@ -246,27 +266,27 @@ FROM (
     SELECT 'Credits' METRIC, SUM(CREDITS_TOTAL)::FLOAT VALUE, 'credits' UNIT,
            'METERED' BASIS, MAX(DAY)::TIMESTAMP_NTZ AS AS_OF
     FROM {core_object('MART_WAREHOUSE_EFFICIENCY_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {day_where}
       AND UPPER(WAREHOUSE_NAME) = {literal}
     UNION ALL
     SELECT 'Queries', SUM(QUERIES)::FLOAT, 'count', 'MEASURED', MAX(DAY)::TIMESTAMP_NTZ
     FROM {core_object('MART_WAREHOUSE_EFFICIENCY_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {day_where}
       AND UPPER(WAREHOUSE_NAME) = {literal}
     UNION ALL
     SELECT 'Failures', SUM(FAILS)::FLOAT, 'count', 'MEASURED', MAX(DAY)::TIMESTAMP_NTZ
     FROM {core_object('MART_WAREHOUSE_EFFICIENCY_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {day_where}
       AND UPPER(WAREHOUSE_NAME) = {literal}
     UNION ALL
     SELECT 'P95 runtime', MAX(P95_S)::FLOAT, 'seconds', 'MEASURED', MAX(DAY)::TIMESTAMP_NTZ
     FROM {core_object('MART_WAREHOUSE_EFFICIENCY_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {day_where}
       AND UPPER(WAREHOUSE_NAME) = {literal}
     UNION ALL
     SELECT 'Remote spill', SUM(SPILL_GB)::FLOAT, 'GB', 'MEASURED', MAX(DAY)::TIMESTAMP_NTZ
     FROM {core_object('MART_WAREHOUSE_EFFICIENCY_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {day_where}
       AND UPPER(WAREHOUSE_NAME) = {literal}
 )
 WHERE AS_OF IS NOT NULL
@@ -1027,7 +1047,8 @@ ORDER BY CASE BASIS WHEN 'BILLED' THEN 0 WHEN 'METERED' THEN 1
 """
 
 
-def _entity_metric_nonwarehouse(kind: str, literal: str, horizon: int) -> str:
+def _entity_metric_nonwarehouse(kind: str, literal: str, day_where: str) -> str:
+    """The non-warehouse arms; ``day_where`` is entity_metric_snapshot's DAY predicate (trailing or bounded)."""
     if kind in ("DATABASE", "OBJECT"):
         predicate = (
             f"UPPER(SPLIT_PART(OBJECT_FQN, '.', 1)) = {literal}"
@@ -1040,18 +1061,18 @@ FROM (
     SELECT 'Measured credits' METRIC, SUM(CREDITS)::FLOAT VALUE, 'credits' UNIT,
            'MEASURED' BASIS, MAX(DAY)::TIMESTAMP_NTZ AS AS_OF
     FROM {core_object('FACT_OBJECT_COST_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE()) AND {predicate}
+    WHERE {day_where} AND {predicate}
     UNION ALL
     SELECT 'Costed objects', COUNT(DISTINCT OBJECT_FQN)::FLOAT, 'count',
            'MEASURED', MAX(DAY)::TIMESTAMP_NTZ
     FROM {core_object('FACT_OBJECT_COST_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE()) AND {predicate}
+    WHERE {day_where} AND {predicate}
     UNION ALL
     SELECT 'Maintenance credits',
            SUM(IFF(COST_ARM NOT LIKE 'QUERY_COMPUTE%', CREDITS, 0))::FLOAT,
            'credits', 'MEASURED', MAX(DAY)::TIMESTAMP_NTZ
     FROM {core_object('FACT_OBJECT_COST_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE()) AND {predicate}
+    WHERE {day_where} AND {predicate}
 )
 WHERE AS_OF IS NOT NULL
 ORDER BY METRIC
@@ -1063,25 +1084,25 @@ FROM (
     SELECT 'Runs' METRIC, SUM(RUNS)::FLOAT VALUE, 'count' UNIT,
            'MEASURED' BASIS, MAX(LAST_COMPLETED)::TIMESTAMP_NTZ AS AS_OF
     FROM {core_object('MART_TASK_NODE_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {day_where}
       AND UPPER(DATABASE_NAME || '.' || SCHEMA_NAME || '.' || TASK_NAME) = {literal}
     UNION ALL
     SELECT 'Failures', SUM(FAILED)::FLOAT, 'count', 'MEASURED',
            MAX(LAST_COMPLETED)::TIMESTAMP_NTZ
     FROM {core_object('MART_TASK_NODE_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {day_where}
       AND UPPER(DATABASE_NAME || '.' || SCHEMA_NAME || '.' || TASK_NAME) = {literal}
     UNION ALL
     SELECT 'P95 dispatch queue', MAX(P95_QUEUE_SEC)::FLOAT, 'seconds', 'MEASURED',
            MAX(LAST_COMPLETED)::TIMESTAMP_NTZ
     FROM {core_object('MART_TASK_NODE_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {day_where}
       AND UPPER(DATABASE_NAME || '.' || SCHEMA_NAME || '.' || TASK_NAME) = {literal}
     UNION ALL
     SELECT 'P95 execution', MAX(P95_EXEC_SEC)::FLOAT, 'seconds', 'MEASURED',
            MAX(LAST_COMPLETED)::TIMESTAMP_NTZ
     FROM {core_object('MART_TASK_NODE_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {day_where}
       AND UPPER(DATABASE_NAME || '.' || SCHEMA_NAME || '.' || TASK_NAME) = {literal}
 )
 WHERE AS_OF IS NOT NULL
@@ -1094,28 +1115,28 @@ FROM (
     SELECT 'Runs' METRIC, SUM(RUNS)::FLOAT VALUE, 'count' UNIT,
            'MEASURED' BASIS, MAX(DAY)::TIMESTAMP_NTZ AS AS_OF
     FROM {core_object('MART_QUERY_FAMILY_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {day_where}
       AND UPPER(TO_VARCHAR(QUERY_HASH)) = {literal}
     UNION ALL
     SELECT 'Failures', SUM(FAILS)::FLOAT, 'count', 'MEASURED', MAX(DAY)::TIMESTAMP_NTZ
     FROM {core_object('MART_QUERY_FAMILY_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {day_where}
       AND UPPER(TO_VARCHAR(QUERY_HASH)) = {literal}
     UNION ALL
     SELECT 'Total execution', SUM(TOTAL_EXEC_SEC)::FLOAT, 'seconds', 'MEASURED',
            MAX(DAY)::TIMESTAMP_NTZ
     FROM {core_object('MART_QUERY_FAMILY_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {day_where}
       AND UPPER(TO_VARCHAR(QUERY_HASH)) = {literal}
     UNION ALL
     SELECT 'P95 runtime', MAX(P95_S)::FLOAT, 'seconds', 'MEASURED', MAX(DAY)::TIMESTAMP_NTZ
     FROM {core_object('MART_QUERY_FAMILY_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {day_where}
       AND UPPER(TO_VARCHAR(QUERY_HASH)) = {literal}
     UNION ALL
     SELECT 'Users', MAX(USERS)::FLOAT, 'count', 'MEASURED', MAX(DAY)::TIMESTAMP_NTZ
     FROM {core_object('MART_QUERY_FAMILY_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {day_where}
       AND UPPER(TO_VARCHAR(QUERY_HASH)) = {literal}
 )
 WHERE AS_OF IS NOT NULL
@@ -1128,13 +1149,13 @@ FROM (
     SELECT 'Allocated credits' METRIC, SUM(ALLOC_CREDITS)::FLOAT VALUE,
            'credits' UNIT, 'ALLOCATED' BASIS, MAX(DAY)::TIMESTAMP_NTZ AS AS_OF
     FROM {core_object('MART_COST_ALLOCATION_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {day_where}
       AND DIMENSION = {sql_literal(dimension)} AND UPPER(KEY_NAME) = {literal}
     UNION ALL
     SELECT 'Execution', SUM(EXEC_SEC)::FLOAT, 'seconds', 'ALLOCATED',
            MAX(DAY)::TIMESTAMP_NTZ
     FROM {core_object('MART_COST_ALLOCATION_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {day_where}
       AND DIMENSION = {sql_literal(dimension)} AND UPPER(KEY_NAME) = {literal}
 )
 WHERE AS_OF IS NOT NULL
