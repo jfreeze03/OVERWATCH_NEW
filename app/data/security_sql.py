@@ -2154,7 +2154,11 @@ def security_login_fact_coverage(days: int = 30, *, bounds: tuple | None = None,
     COVERAGE_DAYS counts COMPLETE days only (before today), the exact days coverage_required_days
     asks for. The span also holds today, and counting today's partition let it stand in for a missing
     interior day: with today loaded, a 7-day window holed on one day still counted 7 of the 8 days
-    it reads and passed. Today is neither required nor counted."""
+    it reads and passed. Today is neither required nor counted.
+
+    The first day of a period-to-date window (no baseline) serves today alone: COVERAGE_DAYS is 0
+    there and so is the requirement, and freshness decides. LAST_DAY only sees days from the span
+    start on, so the fact serves once today's partition is loaded, and the live reader before that."""
     # DENSITY, not span — see login_fact_coverage. An interior gap must deflate COVERAGE_DAYS so
     # fact_coverage_complete keeps the page on the live path until the fact is genuinely dense.
     days = bounded_days(days, maximum=90)
