@@ -207,9 +207,9 @@ def test_v154_plain_sql_parses():
         sqlglot.parse(statement, dialect="snowflake")
 
 
-# -- integration lockstep (validate floor / docs / Admin). Pinned to the WAVE TIP V154; these are
-#    completed by the wave-2a integrator (snowflake/validate.sql, DEPLOYMENT.md, README.md and
-#    admin._EXPECTED_MIGRATIONS are shared files a single slice does not edit).
+# -- integration lockstep: this migration's DEPLOYMENT.md/README.md run-doc line and its admin
+#    _EXPECTED_MIGRATIONS entry, landed by the wave-2a integrator (shared files a single slice does not
+#    edit); the validate tip is derived in tests/test_release_lockstep.py.
 
 def test_validate_and_docs_track_v154():
     for rel in ("DEPLOYMENT.md", "README.md"):

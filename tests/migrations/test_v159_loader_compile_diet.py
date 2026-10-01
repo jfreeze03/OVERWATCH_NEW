@@ -508,8 +508,9 @@ def test_v159_plain_sql_parses():
 
 
 # ---------------------------------------------------------------------------------------------------
-# Lockstep with the shared files. Pinned to the WAVE-2b TIP (V159): EXPECTED to fail on the w2br-v159 slice
-# branch until the integrator lands validate.sql / DEPLOYMENT.md / README.md / admin _EXPECTED_MIGRATIONS.
+# Lockstep with the shared files (landed by the wave-2b integrator): this migration's DEPLOYMENT.md/README.md
+# run-doc line and its admin _EXPECTED_MIGRATIONS entry; the validate tip is derived in
+# tests/test_release_lockstep.py.
 # ---------------------------------------------------------------------------------------------------
 def test_validate_and_docs_track_v159():
     for rel in ("DEPLOYMENT.md", "README.md"):

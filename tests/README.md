@@ -12,9 +12,15 @@ Living gates (run + evolve with every change):
   test_actions / test_insights / test_cortex / test_chargeback /
   test_change_impact / test_ai / test_status_colors / test_design_system /
   test_user_prefs / test_teardown_coverage — domain units
-- test_hardening_v21 / test_v22_features / test_v24_features /
-  test_v25_features — regression locks for the 4.1—4.5 passes
-- test_stress — opt-in (OW_STRESS=1 / `make stress`) render+logic volume
+- test_hardening_v21 — regression lock for the 4.1 pass (the 4.2—4.5 locks
+  live in history_locks/)
+- test_stress — opt-in (OW_STRESS=1 / `make stress`) render+logic volume;
+  test_stress_harness_targets keeps its stub targets honest without OW_STRESS
+- test_usage_sim — CI run of usage_sim.py, the headless queries-per-interaction
+  profiler (`python tests/usage_sim.py` for the text report)
+- conftest.py — session-scoped autouse guard: no test ever opens a real
+  Snowflake session (refuses app.core.session._connect; SNOWFLAKE_HOME points
+  at an empty temp folder)
 
 Phase 4 — locks that DERIVE their targets instead of listing them, so a builder
 or module added tomorrow is covered without anyone remembering to add it:
@@ -38,6 +44,13 @@ or module added tomorrow is covered without anyone remembering to add it:
   `changelog_entry` (one CHANGELOG section by heading). Import it as
   `from tests._source import ...`; new tests use it instead of a local `_src`
 
+migrations/ — per-migration lock modules (test_v027_* … test_v165_*): each
+locks its own migration's SQL contract (the newer ones its run-doc line too)
+and never pins the tip (house law 5); test_generators_regenerate re-runs every
+outputs/gen_v*.py and checks it reproduces the checked-in migration (house
+law 1).
+
 history_locks/ — frozen locks from earlier feature waves (V012—V018 era,
-P1/P2 polish rounds). They still run in CI; they just don't need to crowd
-the top level. Fix them only if a deliberate contract change breaks one.
+P1/P2 polish rounds, the 4.2—4.5 test_v22/v24/v25_features passes). They still
+run in CI; they just don't need to crowd the top level. Fix them only if a
+deliberate contract change breaks one.

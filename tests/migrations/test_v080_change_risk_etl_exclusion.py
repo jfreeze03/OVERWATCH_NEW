@@ -26,8 +26,6 @@ _ENVS = ("PRD", "MGM", "SAN", "SEA", "DEV", "PHX")
 _TEMPLATES = ("TF_SFR_{}_GLUE", "TF_SFR_{}_INFORMATICA", "TF_O_{}_ALFA_SYSADMIN")
 _ROLES = tuple(t.format(env) for t in _TEMPLATES for env in _ENVS)
 
-_OLD_WHERE = ("    WHERE EVENT_TS >= DATEADD('day', -7, CURRENT_TIMESTAMP()) "
-              "AND RISK_SCORE >= 70")
 # The exact text V080 appends after the CHANGE RISK WHERE (kept byte-for-byte in
 # sync with outputs/gen_v080.py so the reverse-derivation check is exact).
 _role_list = ",\n".join(

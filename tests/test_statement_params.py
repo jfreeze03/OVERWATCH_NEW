@@ -168,15 +168,6 @@ def test_cortex_carries_its_ceiling(monkeypatch):
                                       "STATEMENT_TIMEOUT_IN_SECONDS": str(ai.CORTEX_TIMEOUT_SECONDS)}
 
 
-def test_error_sink_tags_its_insert(monkeypatch):
-    stmt = _Stmt()
-    monkeypatch.setattr(session, "get_cached_session", lambda: _Sis(stmt))
-    errors.record_error("Security", RuntimeError("boom"), context="t")
-    (name, kw), = stmt.calls
-    assert name == "collect_nowait"
-    assert kw["statement_params"] == {"QUERY_TAG": "OVERWATCH|page=Security|tier=write"}
-
-
 def test_every_seam_routes_through_the_transport():
     for fn in (q._execute, q._execute_batch, q.execute_statement, q.execute_statement_async,
                q.execute_cancel_query, q.execute_action, ai.cortex_complete, errors.record_error,

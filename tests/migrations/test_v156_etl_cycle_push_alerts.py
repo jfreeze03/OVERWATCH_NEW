@@ -21,8 +21,8 @@ out-of-window call returns after the rule count and the SETTINGS read, BEFORE th
 retry auto-clear UPDATE runs only when an OPEN event exists. The gate's SQL expression is translated from its
 sqlglot tree and checked against a datetime model of the owner rule for every target minute and hour.
 
-The validate / docs / admin pins below are asserted at the WAVE TIP (V159) and fail until the wave-2b
-integration commit bumps those shared files.
+The docs / admin lockstep below (landed by the wave-2b integration commit) checks this migration's own
+run-doc line and admin entry; the validate tip is derived in tests/test_release_lockstep.py.
 """
 
 from __future__ import annotations

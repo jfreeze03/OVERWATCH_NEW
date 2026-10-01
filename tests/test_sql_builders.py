@@ -214,7 +214,6 @@ def test_database_options_scoped_per_company():
 
     assert "ALFA_EDW_PRD" in database_options("ALFA")
     assert "TRXS_EDW_PRD" not in database_options("ALFA")
-    assert database_options("Trexis") == tuple(sorted(database_options("Trexis"))) or True  # membership below
     assert "TRXS_EDW_PRD" in database_options("Trexis")
     assert "ALFA_EDW_PRD" in database_options("ALL") and "TRXS_EDW_PRD" in database_options("ALL")
 

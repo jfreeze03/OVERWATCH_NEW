@@ -9,7 +9,7 @@ import pytest
 from app.data import cost_sql, mart_sql
 from app.logic import actions as actions_logic
 
-# skip cleanly on the CI floor-compat job, which installs no sqlglot
+# local-dev convenience: skips this module if sqlglot is absent (both CI legs install it)
 sqlglot = pytest.importorskip("sqlglot")
 
 _ROOT = Path(__file__).resolve().parents[2]
