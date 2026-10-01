@@ -229,8 +229,10 @@ recorded in locks/comments so the story survives (grep "owner" in tests/).
   layer (V051 OW_ACTION_INTENTS + SP_ALERT_LIFECYCLE; V074/V092
   SP_ACTION_LIFECYCLE with REQUEST_KEY idempotency; the remediation/verify
   procs were deliberately dropped in V053), evidence-grade savings
-  verification (V053 PROOF_QUERY_ID/PROOF_RESULT, stamped by the measured
-  verify in `app/logic/ledger_measure.py`), the V074 Action Queue foundation
+  verification for the mart-measurable finding types (V053
+  PROOF_QUERY_ID/PROOF_RESULT, stamped by the measured verify in
+  `app/ui/pages/cost_parts/optimize.py` from `app/logic/ledger_measure.py`;
+  other rows still hand-verify), the V074 Action Queue foundation
   and V049 write-target attribution.
 - Backups: V161 (owner decision 2026-09-28) retired TASK_BACKUP_OPERATOR (V158's
   OVERWATCH_BAK generations and V089's weekly `*_BAK_LAST` copies), and Joe
