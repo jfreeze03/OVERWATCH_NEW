@@ -11,6 +11,7 @@ Contract (the old app broke all four of these):
 from __future__ import annotations
 
 import dataclasses
+import math
 import numbers
 from datetime import date, timedelta
 
@@ -113,9 +114,11 @@ def _score_window_elapsed_days(now: object, window_days: int = _SCORE_HEALTH_WIN
     ``window_days`` before that day's Central midnight (or at ``win_start`` when the read reported it)
     and the divisor is (24h + Central hours since midnight) / 24 for the 1-day window. A UTC-anchored
     divisor (R2-016 / R2-049) read the same steady workload ~1.7x high every Central evening and ~0.85x
-    the rest of the day. Clamped to [1.0, window_days + 1]: at any read moment the window has covered at
-    least the floor and less than window_days + 1 days by construction; the clamp only defends a skewed
-    or garbage clock."""
+    the rest of the day. This is a WALL-CLOCK span, so on the two DST change days it is an hour off the
+    real time the sums cover; the score prefers the read's READ_ELAPSED_SEC (_score_read_elapsed_days)
+    and lands here only for a row without it. Clamped to [1.0, window_days + 1]: at any read moment the
+    window has covered at least the floor and less than window_days + 1 wall-clock days by construction;
+    the clamp only defends a skewed or garbage clock."""
     ts = pd.Timestamp(now)
     start = pd.Timestamp(win_start) if win_start is not None else ts.normalize() - timedelta(days=int(window_days))
     return min(max((ts - start).total_seconds() / 86400.0, 1.0), float(window_days) + 1.0)
@@ -135,17 +138,47 @@ def _wall_clock_ts(value: object) -> pd.Timestamp | None:
     return ts.tz_localize(None) if ts.tzinfo is not None else ts
 
 
+# A DST change inside the window moves its REAL span one hour off the wall-clock span, so the real-seconds
+# divisor's defensive clamp is the wall-clock one widened by that hour.
+_DST_HOUR_DAYS = 1.0 / 24.0
+
+
+def _elapsed_seconds(value: object) -> float | None:
+    """A READ_ELAPSED_SEC cell as finite seconds; None for a missing, non-numeric, NaN or boolean cell
+    (a Python or numpy bool -- a one-element boolean Series hands back numpy's)."""
+    if value is None or pd.api.types.is_bool(value):
+        return None
+    try:
+        sec = float(value)
+    except (TypeError, ValueError):
+        return None
+    return sec if math.isfinite(sec) else None
+
+
 def _score_read_elapsed_days(row: object, window_days: int = _SCORE_HEALTH_WINDOW_DAYS) -> float:
     """v4.608 holistic #10: the score divisor on the window read's OWN clock.
 
     The throughput read is cached for an hour (tier='hourly', keyed on SQL text whose CURRENT_DATE() never
     changes), so a frame summed at 23:50 Central can be served at 00:20. Divided by the render clock's
     post-midnight divisor (~1.01) its ~47.8h of queueing read ~2x per day and fired the queue / spill
-    drivers until the entry expired. The read reports WIN_START_AT and READ_AT (fact_query_window_summary
-    read_clock=True), so the divisor is the span the sums actually covered when they were read. A row
-    without them (a stub, a pre-change cache entry) falls back to account_now(), the R2-049 behaviour."""
+    drivers until the entry expired. So the read reports its own clock (fact_query_window_summary
+    read_clock=True) and the divisor is taken from it.
+
+    The divisor is READ_ELAPSED_SEC, the REAL seconds the window had covered when it was read, measured in
+    SQL between instants. That is the span the sums cover even on the two DST change days: the hourly fact
+    keeps both 01:00 hours of the fall-back night (25 real hours that day) and has no 02:00 hour in spring
+    (23), and the wall-clock READ_AT - WIN_START_AT misses that hour -- ~4% high the morning after the
+    fall-back (a steady 9.7 min/day of queueing read 10.1, over the 10-minute bar), ~4% low after spring
+    forward. Clamped to the wall-clock bounds widened by that one hour. A row without the column (a stub, a
+    read from before it) falls back to the WALL-CLOCK span of its WIN_START_AT / READ_AT -- an hour off on
+    a DST change day -- and a row without those either to account_now(), the R2-049 behaviour."""
     get = getattr(row, "get", None)
-    read_at = _wall_clock_ts(get("READ_AT")) if callable(get) else None
+    if not callable(get):
+        return _score_window_elapsed_days(account_now(), window_days)
+    elapsed = _elapsed_seconds(get("READ_ELAPSED_SEC"))
+    if elapsed is not None:
+        return min(max(elapsed / 86400.0, 1.0 - _DST_HOUR_DAYS), float(window_days) + 1.0 + _DST_HOUR_DAYS)
+    read_at = _wall_clock_ts(get("READ_AT"))
     if read_at is None:
         return _score_window_elapsed_days(account_now(), window_days)
     return _score_window_elapsed_days(read_at, window_days, win_start=_wall_clock_ts(get("WIN_START_AT")))
@@ -562,7 +595,8 @@ def render() -> None:
     # company-scoped — batch them into one round trip (finishing N4 for the score path).
     # board/150d stay unbatched (filter-scoped + fixed cold-start each other, Codex #4);
     # health_strip stays on the shared shell cache; the live alert/action reads batch above.
-    # holistic #10: read_clock -> the row also carries WIN_START_AT / READ_AT for the per-day divisor below
+    # holistic #10: read_clock -> the row also carries WIN_START_AT / READ_AT and READ_ELAPSED_SEC (the real
+    # seconds between them, DST-proof) for the per-day divisor below
     # (Control Room's Pulse asks for the clock too, so with no Database filter both pages share this entry)
     _thr_sql = mart_sql.fact_query_window_summary(_SCORE_HEALTH_WINDOW_DAYS, company, read_clock=True)
     _tk_sql = mart_sql.fact_task_daily(_SCORE_HEALTH_WINDOW_DAYS, company)
@@ -597,7 +631,8 @@ def render() -> None:
     # (CURRENT_DATE() resolves in the account's America/Chicago default and HOUR_TS is
     # Central wall-clock NTZ -- the TIMEZONE STANDARD in app/data/common.py), never the UTC
     # process clock. holistic #10: and it is the clock the sums were READ at (the row's
-    # WIN_START_AT / READ_AT), not the render's -- a frame cached before Central midnight and
+    # READ_ELAPSED_SEC, the real seconds since WIN_START_AT, so a DST change day keeps its 25th / 23rd
+    # hour), not the render's -- a frame cached before Central midnight and
     # served after it was divided by the new day's ~1.0 divisor (~2x per day for up to an hour).
     _elapsed_days = _score_read_elapsed_days(_tr)
     queued_minutes = (safe_float(_tr.get("QUEUED_SEC")) / 60.0 / _elapsed_days) if _tr is not None else 0.0
@@ -1028,13 +1063,17 @@ def render() -> None:
             charts.budget_burndown_chart(_burn)   # Wave 1 #31: house Altair grammar, not raw st.line_chart
             _last = _burn.iloc[-1]
             _gap = float(_last["CUM_ACTUAL_USD"]) - float(_last["BUDGET_LINE_USD"])
+            # recheck of #9: the yesterday clause describes the metering cut, so it is said only when that cut
+            # was applied (_proj_cut set: the FACT_METERING_DAILY frame). The fallback frame is cut at today.
+            _burn_cut_note = (
+                "today's partial is excluded, and until the 06:45 Central load lands so is yesterday's "
+                "(its metering row is still a partial snapshot)" if _proj_cut is not None
+                else "today's partial is excluded")
             st.caption(md_dollars(
                 f"Cumulative {format_usd(_last['CUM_ACTUAL_USD'])} vs "
                 f"{format_usd(_last['BUDGET_LINE_USD'])} on the flat budget line — "
                 f"{format_usd(abs(_gap))} {'over' if _gap >= 0 else 'under'} pace. Complete days "
-                "only: today's partial is excluded, and until the 06:45 Central load lands so is yesterday's "
-                "(its metering row is still a partial snapshot); MONTHLY_BUDGET_USD straight-lined "
-                "across the month."))
+                f"only: {_burn_cut_note}; MONTHLY_BUDGET_USD straight-lined across the month."))
     # CoCo Overview #10: the open-crit/high KPI is a dead-end count — give it a path
     # to the actual events, but only when there's something open to work.
     if (alerts_res.ok and (critical_alerts or high_alerts)

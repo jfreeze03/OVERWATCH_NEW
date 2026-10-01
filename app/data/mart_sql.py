@@ -122,9 +122,16 @@ def fact_query_window_summary(days: int, company: str = "ALL", warehouse_contain
     ``read_clock`` (v4.608 holistic #10): also return the window's own start (WIN_START_AT, byte-for-byte
     the CURRENT_DATE() anchor the WHERE filters on) and the moment the sums were read (READ_AT), both on
     the session clock CURRENT_DATE() uses -- the account's Central default, the TIMEZONE STANDARD's
-    accepted pattern for trailing windows. A caller that de-cumulates the sums by the span they cover
-    (Overview's platform score) then divides by the span AT READ TIME, so an hourly-cached frame served
-    after Central midnight (or later in the hour) keeps its per-day rate. Control Room's Pulse asks for it
+    accepted pattern for trailing windows -- plus READ_ELAPSED_SEC, the REAL seconds between the two. The
+    stamps are Central wall clock, so their difference misses the DST hour on the two change days (the
+    hourly fact keeps both 01:00 hours of the fall-back night and has no 02:00 hour in spring) while the
+    sums cover real time. READ_ELAPSED_SEC turns the same CURRENT_DATE() anchor into an instant (a DATE
+    cast to TIMESTAMP_LTZ is that day's midnight in the session zone) and takes both ends to UTC before
+    the DATEDIFF: the UTC wall clock has no DST hour, so the count is the true elapsed time however
+    DATEDIFF reads its operands. Not a displayed timestamp, so the TIMEZONE STANDARD's Central pin does
+    not apply. A caller that de-cumulates the sums by the span they cover (Overview's platform score)
+    then divides by the span AT READ TIME, so an hourly-cached frame served after Central midnight (or
+    later in the hour) keeps its per-day rate. Control Room's Pulse asks for it
     too, though it reads only the sums: with no Database filter its days=1 read is then the SAME SQL as
     the score's, so the two pages share one hourly cache entry (the app cache keys on SQL text). Opt-in:
     CURRENT_TIMESTAMP() makes a statement ineligible for Snowflake's result cache, so the Operations
@@ -147,8 +154,11 @@ def fact_query_window_summary(days: int, company: str = "ALL", warehouse_contain
     where.append(contains_filter("USER_NAME", user_contains))
     where.append(companies.database_equals_clause(database, "DATABASE_NAME"))
     # constants beside the ungrouped aggregates: the one result row carries them even when no hour matched
-    clock = (f",\n    DATEADD('day', -{days}, CURRENT_DATE())::TIMESTAMP_NTZ AS WIN_START_AT,"
-             "\n    CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS READ_AT") if read_clock else ""
+    anchor = f"DATEADD('day', -{days}, CURRENT_DATE())"
+    clock = (f",\n    {anchor}::TIMESTAMP_NTZ AS WIN_START_AT,"
+             "\n    CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS READ_AT,"
+             f"\n    DATEDIFF('second', CONVERT_TIMEZONE('UTC', {anchor}::TIMESTAMP_LTZ), "
+             "CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP())) AS READ_ELAPSED_SEC") if read_clock else ""
     return f"""
 SELECT
     SUM(QUERY_COUNT) AS QUERY_COUNT,

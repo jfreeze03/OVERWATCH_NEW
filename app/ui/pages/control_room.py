@@ -1017,7 +1017,7 @@ def render() -> None:
         # v4.608 holistic #10 review: read_clock=True although the Pulse reads only the sums -- with
         # no Database filter this is then the SAME SQL as Overview's score read (days=1, the
         # company, tier='hourly'), so the two pages share one member-cache entry instead of each
-        # running its own FACT_QUERY_HOURLY read every hour. The two clock columns are inert here.
+        # running its own FACT_QUERY_HOURLY read every hour. The three clock columns are inert here.
         _pulse_sql = mart_sql.fact_query_window_summary(1, company, "", "", f["database"], read_clock=True)
         _pulse_pf = run_batch([
             {"key": "pulse", "sql": _pulse_sql,
