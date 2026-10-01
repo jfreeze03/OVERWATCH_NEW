@@ -921,12 +921,12 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 result_caption(comp)
                 _summ = cs_driver.driver_summary(_fam_df)
                 if _summ["not_indicated"]:
+                    # R1-090 review: worded per class -- a compile-heavy plan is not a caching / polling fix
                     st.caption(
-                        f"{_summ['not_indicated']} of {_summ['total']} families are compile/metadata-shaped — "
-                        "**resize not indicated** (the cost lives in the cloud-services / compile layer, which a "
-                        "warehouse resize does not change). Route by the *Remediation owner* column — the fix is "
-                        "behavioural (cache metadata, cut polling / reconnects), not sizing. Cloud-services credits "
-                        "are gross usage, before the account-level ~10% rebate.")
+                        f"{_summ['not_indicated']} of {_summ['total']} families — **resize not indicated** (the cost "
+                        "lives in the cloud-services / compile layer, which a warehouse resize does not change), so "
+                        f"the fix is not sizing: {cs_driver.not_indicated_remedies(_summ)}. Route by the *Remediation "
+                        "owner* column. Cloud-services credits are gross usage, before the account-level ~10% rebate.")
             st.markdown("**Cloud-services credits by statement type**")
             # MART_CLOUD_SVC_DAILY carries per-query CS credits WITH a WAREHOUSE_NAME dimension
             # (K2 contract: cs_by_query_type_mart emits the same columns as cost_sql.cs_by_query_type),
