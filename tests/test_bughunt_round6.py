@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from pathlib import Path
 
@@ -110,8 +111,23 @@ def test_ops_ai_panel_key_includes_database_and_schema():
 # --- SR-3 (LOW): idle AI panel key carries the Last-month discriminator -------------
 def test_idle_ai_panel_key_includes_lm():
     opt = _src("app/ui/pages/cost_parts/optimize.py")
-    assert 'key=f"idle_{company}_{days}{_lm}"' in opt          # both the data read AND the AI panel
-    assert opt.count('key=f"idle_{company}_{days}{_lm}"') >= 2
+    # BOTH idle data reads keep the discriminator: _idle_head and idle_res share one cached
+    # scan, so dropping {_lm} from either one must fail here (an `in` check only needs one).
+    assert opt.count('key=f"idle_{company}_{days}{_lm}", days=days, bounds=bounds') == 2
+    # ... AND the AI panel. Since R1-106 (v4.606) the panel key also carries the preset's
+    # window_label, so it no longer equals the read key byte-for-byte; a substring count over
+    # the whole file would only see the two data reads. Slice the panel call itself (the same
+    # cut test_logic_misc_hunt_r1._idle_ai_panel_key makes; its
+    # test_idle_ai_panel_key_separates_calendar_presets_of_equal_length owns the behaviour).
+    marker = 'subject="evaluate idle warehouse spend"'
+    assert opt.count(marker) == 1
+    call = opt.split(marker, 1)[0].rsplit("ai_evaluation_panel(", 1)[1]
+    m = re.search(r'\bkey=(f"[^"\n]*")', call)
+    assert m is not None, "idle ai_evaluation_panel call has no single-line f-string key="
+    key = m.group(1)
+    assert key.startswith('f"idle_{company}_{days}'), key
+    assert "{_lm}" in key, key
+    assert "{window_label(bounds, days)" in key, key
 
 
 # --- CV-1 (LOW): daily_stacked_usd is currency-aware --------------------------------
