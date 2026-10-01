@@ -1467,10 +1467,18 @@ LIMIT {limit}
 def table_tco(database: str, schema: str, table: str, days: int = 30) -> str:
     """Object-level cost evidence: reads, writers, last touch from
     ACCESS_HISTORY for ONE table (Enterprise edition; the page degrades).
-    Storage dollars come from the reclaim row the caller already has."""
-    from app.core.sqlsafe import safe_identifier
+    Storage dollars come from the reclaim row the caller already has.
 
-    fqn = ".".join(safe_identifier(part) for part in (database, schema, table)).upper()
+    R1-044: matched on the quote-stripped, upper-cased objectName — object_reads_confirm's rule.
+    ACCESS_HISTORY reports objectName exactly as the identifier was created (storage_reclaim's D4
+    note), so the old exact compare against an upper-cased FQN never matched a quoted mixed-case
+    table ("MyTable"): 0 reads and writes for a table read daily. The key is a sql_literal (never
+    raises, injection-safe), so a quote-requiring name (2023_ARCHIVE, ORDERS-OLD) is checked too
+    instead of failing safe_identifier and leaving the drill with no evidence. Extra matches can
+    only make a table look READ, the safe direction for a reclaim prompt."""
+    from app.core.sqlsafe import sql_literal
+
+    key = sql_literal(".".join(str(part or "") for part in (database, schema, table)).upper().replace('"', ""), 600)
     days = bounded_days(days, 90)
     return f"""
 WITH touches AS (
@@ -1479,14 +1487,14 @@ WITH touches AS (
     FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a,
          LATERAL FLATTEN(input => a.BASE_OBJECTS_ACCESSED) f
     WHERE a.QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
-      AND f.value:"objectName"::STRING = '{fqn}'
+      AND UPPER(REPLACE(f.value:"objectName"::STRING, '"', '')) = {key}
     UNION ALL
     SELECT a.QUERY_START_TIME, a.USER_NAME,
            f.value:"objectName"::STRING, 'WRITE'
     FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a,
          LATERAL FLATTEN(input => a.OBJECTS_MODIFIED) f
     WHERE a.QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
-      AND f.value:"objectName"::STRING = '{fqn}'
+      AND UPPER(REPLACE(f.value:"objectName"::STRING, '"', '')) = {key}
 )
 SELECT KIND,
        COUNT(*)                  AS TOUCHES,

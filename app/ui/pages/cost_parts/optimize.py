@@ -2162,19 +2162,29 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                 _last_read = krow.get("LAST_TOUCH")
                             else:
                                 _writes = int(safe_float(krow["TOUCHES"]))
+                    # R1-147 (house law 8): a FAILED evidence read is unknown, never 0 — the tiles show the
+                    # no-value dash and no "no reads" verdict fires on evidence that was never gathered.
                     kpi_row([
                         {"label": "Storage $/mo", "value": f"${_st_usd:,.2f}",
                          "help": f"{_st_gb:,.1f} GB total incl. retention"
                                  + (" + clone-retained." if _has_clone
                                     else " (clone-retained not measured on this fallback path).")},
-                        {"label": "Reads (30d)", "value": f"{_reads:,}",
-                         "severity": "warn" if _reads == 0 else "ok"},
-                        {"label": "Writes (30d)", "value": f"{_writes:,}",
+                        {"label": "Reads (30d)", "value": f"{_reads:,}" if tco.ok else "—",
+                         "severity": ("warn" if _reads == 0 else "ok") if tco.ok else ""},
+                        {"label": "Writes (30d)", "value": f"{_writes:,}" if tco.ok else "—",
                          "help": "Writes with zero reads = paying to refresh an unread table."},
                     ])
-                    if tco is not None and not tco.ok:
-                        st.caption("Read/write evidence needs ACCESS_HISTORY (Enterprise) — "
-                                   "storage economics shown from TABLE_STORAGE_METRICS alone.")
+                    if not tco.ok and is_setup_absence(tco.error_kind):
+                        empty_state("needs_setup",
+                                    "Read/write evidence reads ACCESS_HISTORY, which this app cannot see — reads "
+                                    "and writes are unknown here, not zero. Storage economics come from the "
+                                    "storage scan alone.")
+                    elif not tco.ok:
+                        empty_state("unavailable",
+                                    "Read/write evidence (ACCESS_HISTORY, last 30 days) could not be read"
+                                    + (" — the read timed out" if str(tco.error_kind) == "timeout" else "")
+                                    + ", so reads and writes are unknown here, not zero. Storage economics "
+                                    "come from the storage scan alone.", detail=tco.error)
                     elif _writes > 0 and _reads == 0:
                         st.warning("Being refreshed but never read in 30d — retire-candidate: "
                                    "pause the writer AND reduce retention below.")
