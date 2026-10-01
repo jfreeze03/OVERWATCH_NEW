@@ -19,7 +19,7 @@ from app.data import cost_sql, mart27_sql, mart_sql
 from app.logic import contract_planner
 from app.logic.directory import resolve_display
 from app.logic.formulas import contract_runway, format_usd, humanize_duration, md_dollars, safe_float
-from app.logic.verdict import Signal, page_verdict
+from app.logic.verdict import contract_runway_clause, contract_runway_signal, page_verdict
 from app.ui.components import (
     alarm_health,
     empty_state,
@@ -138,21 +138,18 @@ def render() -> None:
     _best = contract_planner.best_runway(
         _bal.df if (_bal is not None and _bal.usable()) else None,
         contract_runway(_exh.df.iloc[0]) if _exh.usable() else None)
-    _vsig = []
-    if _best is not None:
-        _dl = _best["days_left"]
-        _b = "billing balance" if _best["basis"] == "balance" else "configured credits"
-        if 0 <= _dl <= 30:
-            _vsig.append(Signal("bad", f"contract runway {_dl:,.0f} days at current burn ({_b})"))
-        elif 0 <= _dl <= 90:
-            _vsig.append(Signal("warn", f"contract runway {_dl:,.0f} days at current burn ({_b})"))
-    elif not _exh.usable():
-        # A failed runway read must NOT read as green "contract on track" — that is a
-        # positive claim on missing data (the false-all-clear class the sibling pages
-        # guard). Surface Watch instead. (bug-hunt round 5)
-        _vsig.append(Signal("warn", "contract runway unavailable — telemetry not read"))
+    # The shared runway Signal (verdict.contract_runway_signal, also the Brief's): it branches on the
+    # runway's own sign + severity, so an OVERRUN contract (days_left < 0, severity 'bad') reads
+    # Attention, not "Healthy — contract on track" (the old 0..30 / 0..90 bands dropped every negative).
+    # A failed runway read must NOT read as green either -- that is a positive claim on missing data
+    # (the false-all-clear class the sibling pages guard), so read_ok=_exh.usable() surfaces Watch
+    # (bug-hunt round 5); a clean read with no contract configured claims nothing about a contract.
+    _b = ("billing balance" if _best is not None and _best["basis"] == "balance"
+          else "configured credits")
+    _rsig = contract_runway_signal(_best, read_ok=_exh.usable(), basis=_b)
+    _vsig = [_rsig] if _rsig is not None else []
     page_verdict_line(page_verdict(
-        _vsig, healthy="contract on track at the current burn — open a section for detail"))
+        _vsig, healthy=f"{contract_runway_clause(_best)} — open a section for detail"))
     # Cost3/C18: the "what changed since your last visit" opener, now the shared
     # component (severity-mapped line + one-hop jumps to Alerts/Action Center).
     since_last_visit_opener(_PAGE, f["company"])

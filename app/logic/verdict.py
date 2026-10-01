@@ -62,6 +62,47 @@ def page_verdict(signals, *, healthy: str) -> dict:
             "body": body, "sentence": f"{label} — {body}"}
 
 
+RUNWAY_ON_TRACK = "contract on track at the current burn"
+NO_CONTRACT_RUNWAY = "no contract runway configured"
+
+
+def contract_runway_signal(best: dict | None, *, read_ok: bool = True, basis: str = "") -> Signal | None:
+    """The contract-runway Signal for a page verdict (Cost Intelligence + Brief share it, so they
+    cannot drift apart), from a contract_planner.best_runway dict.
+
+    Branches on the runway's OWN sign and severity (formulas.contract_runway) instead of re-deriving
+    the band: a NEGATIVE days_left is never "on track". Severity 'bad' there is an exhausted / overrun
+    commitment (CONSUMED past TOTAL: DAYS_LEFT = CEIL(-200/10) = -20; only the credits basis goes
+    negative, the balance basis clamps an exhausted balance to 0), 'warn' the -1 sentinel for a burn
+    that could not be computed (DAILY_BURN NULL or 0). The old `0 <= days <= 30/90` bands dropped
+    both, so an overrun contract read "Healthy — contract on track" while COST_CONTRACT_BREACH paged
+    CRITICAL. 0..30 days = bad, 31..90 = warn, beyond that no concern (None).
+
+    best=None: no runway. A FAILED read (read_ok=False) is a warn -- missing data must never read as
+    an all-clear (bug-hunt round 5); a successful read with no runway is "no contract configured" (no
+    concern; the caller's healthy text must then not claim "on track" -- contract_runway_clause).
+    ``basis`` ('configured credits' / 'billing balance') is appended to the in-band phrases."""
+    if best is None:
+        return None if read_ok else Signal("warn", "contract runway unavailable — telemetry not read")
+    days = safe_float(best.get("days_left"), -1.0)
+    sfx = f" ({basis})" if basis else ""
+    if days < 0:
+        if str(best.get("severity") or "") == "bad":
+            return Signal("bad", "contract commitment exhausted — consumption is past the configured credits")
+        return Signal("warn", f"contract runway not computable — no trailing-30-day burn{sfx}")
+    if days <= 30:
+        return Signal("bad", f"contract runway {days:,.0f} days at current burn{sfx}")
+    if days <= 90:
+        return Signal("warn", f"contract runway {days:,.0f} days at current burn{sfx}")
+    return None
+
+
+def contract_runway_clause(best: dict | None) -> str:
+    """The healthy-verdict clause for the runway: claims "on track" only for a real runway; with no
+    contract configured it says so instead of asserting anything about a contract that doesn't exist."""
+    return RUNWAY_ON_TRACK if best is not None else NO_CONTRACT_RUNWAY
+
+
 def oldest_open_hours(
     frame: pd.DataFrame | None,
     *,
