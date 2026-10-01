@@ -54,9 +54,13 @@ def test_triage_queue_anomaly_without_day_stays_blank():
 
 
 def test_control_room_filters_anomalies_to_latest_day():
+    # R1-202 moved the latest-day cut INSIDE anomaly_summary, BEFORE its top-10: filtering the
+    # already-capped list let 10+ stronger historical spikes evict yesterday's spike. The
+    # behaviour is locked in tests/test_control_room_review_r1.py; this pins the wiring.
     cr = _src("app/ui/pages/control_room.py")
-    assert '_latest = str(_wh_complete["DAY"].max())' in cr
-    assert 'str(a.get("day") or "") == _latest' in cr
+    assert '_latest = pd.to_datetime(_wh_complete["DAY"], errors="coerce").max()' in cr
+    assert "day_from=_latest.date(), day_to=_latest.date()" in cr
+    assert 'str(a.get("day") or "") == _latest' not in cr      # the post-cap filter is gone
 
 
 # ---------------------------------------------------------------------------

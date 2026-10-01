@@ -16,6 +16,7 @@ import streamlit as st
 from app.config import THRESHOLDS
 from app.core.errors import safe_page
 from app.core.query import run, run_batch, run_batch_mixed
+from app.core.result import is_setup_absence
 from app.core.state import filters, navigation_context, request_navigation
 from app.data import cost_sql, mart27_sql, mart_sql, ops_sql, security_sql, workbench_sql
 from app.logic.actions import ANOMALY_HIGH_EXCESS_USD, ANOMALY_HIGH_Z, triage_queue
@@ -27,6 +28,7 @@ from app.logic.anomaly import (
     complete_days_only,
     flag_anomalies,
     suppress_expected_spikes,
+    unscorable_groups,
 )
 from app.logic.date_windows import is_prior_month_window
 from app.logic.fix_queue import (
@@ -565,11 +567,14 @@ def _auto_investigation(inc_row, company: str, rate: float) -> None:
                "remediates.")
     # Window-covering lookback: a couple of days of lead-in before onset, through now.
     _days = max(3, min((pd.Timestamp(account_now()) - onset_dt).days + 3, 30))
+    # R1-060: the two change registries read a window ANCHORED on onset (onset - 3d .. onset + 1d,
+    # nearest first) — a newest-first LIMIT 200 from now let post-onset churn push the pre-onset
+    # trigger out of the feed (and missed it entirely for an onset 27+ days back).
     _b = run_batch([
-        {"key": "ai_obj", "sql": change_impact_sql.change_registry(_days, company),
-         "source": "OBJECT_CHANGE_REGISTRY"},
-        {"key": "ai_wh", "sql": change_impact_sql.warehouse_change_registry(_days, company),
-         "source": "WAREHOUSE_CHANGE_REGISTRY"},
+        {"key": "ai_obj", "sql": change_impact_sql.change_registry(_days, company, onset=onset_dt),
+         "source": "OBJECT_CHANGE_REGISTRY (around onset)"},
+        {"key": "ai_wh", "sql": change_impact_sql.warehouse_change_registry(_days, company, onset=onset_dt),
+         "source": "WAREHOUSE_CHANGE_REGISTRY (around onset)"},
         {"key": "ai_task", "sql": insights_sql.task_failure_details(_days, company, onset=onset_dt),
          "source": "TASK_HISTORY failures"},
         {"key": "ai_grant", "sql": security_sql.recent_grant_changes(_days, company),
@@ -597,12 +602,31 @@ def _auto_investigation(inc_row, company: str, rate: float) -> None:
         _priced["USD"] = pd.to_numeric(_priced.get("CREDITS_TOTAL"), errors="coerce").fillna(0.0) * rate
         _flagged = flag_anomalies(_priced, "USD", group_col="WAREHOUSE_NAME",
                                   min_value=ANOMALY_MIN_USD, min_active_days=ANOMALY_MIN_ACTIVE_DAYS)
-        cands += candidates_from_anomalies(anomaly_summary(_flagged, "WAREHOUSE_NAME", "USD"))
+        # R1-202: only SPIKES around onset can be cause candidates (candidates_from_anomalies drops
+        # collapses), so cut to those BEFORE the top-10 summary — older spikes and weekend
+        # collapses elsewhere in the window must not take every slot and evict the onset spike.
+        _spikes = _flagged[pd.to_numeric(_flagged["Z_SCORE"], errors="coerce").fillna(0.0) > 0]
+        _onset_day = onset_dt.date()
+        cands += candidates_from_anomalies(anomaly_summary(
+            _spikes, "WAREHOUSE_NAME", "USD",
+            day_from=_onset_day - timedelta(days=change_impact_sql.ONSET_LEAD_DAYS),
+            day_to=_onset_day + timedelta(days=change_impact_sql.ONSET_AFTER_DAYS)))
 
     hyps = rank_root_causes(cands, onset_dt, top=5)
     summ = rca_summary(hyps)
     _banner = st.info if not summ["has_lead"] else (st.warning if summ["top_band"] == "MEDIUM" else st.error)
     _banner(md_dollars(summ["headline"]))
+    # R1-060 backstop: the onset-anchored registry reads still cap at 200 rows (nearest onset
+    # first) — when one cut, say how much went unranked instead of implying the window was whole.
+    _cut = []
+    for _noun, _r in (("object", _obj), ("warehouse", _wh)):
+        if _r is not None and _r.usable() and "TOTAL_CHANGES" in _r.df.columns:
+            _tot = int(safe_float(_r.df["TOTAL_CHANGES"].iloc[0]))
+            if _tot > len(_r.df):
+                _cut.append(f"{len(_r.df):,} of {_tot:,} {_noun} changes")
+    if _cut:
+        st.caption("Ranked from the " + "; ".join(_cut) + " nearest onset — the rest of the "
+                   "window's changes were not ranked.")
     if hyps:
         _rows = pd.DataFrame([{
             "Confidence": h["band"], "Hypothesis": h["title"], "When": h["lead_text"],
@@ -711,16 +735,34 @@ def _day_replay() -> None:
         ddl_count, grants_count, task_failures,
         crit_n, rate,
     )
-    if not any(r.usable() for r in (movers, activity, ddl, grants, tasks, alerts_d)):
-        empty_state("no_data_yet", f"No telemetry loaded for {day_iso} — facts cover ~120 days back.")
-        return
     # A read that FAILED (ok=False) is not "quiet" — it's unknown. Most domains disclose their
     # own read failure via guard() at their sub-panel below, but `activity` (query health) has NO
     # sub-panel (it only feeds the headlines), so a failed activity read would otherwise vanish
     # into a green all-clear. Demote off the clean verdict when any read failed and name the gap.
-    _failed = [n for n, r in (("spend movers", movers), ("query health", activity),
-                              ("DDL changes", ddl), ("grant changes", grants),
-                              ("task runs", tasks), ("alerts", alerts_d)) if not r.ok]
+    _all = (("spend movers", movers), ("query health", activity), ("DDL changes", ddl),
+            ("grant changes", grants), ("task runs", tasks), ("alerts", alerts_d))
+    _failed = [n for n, r in _all if not r.ok]
+    # R1-210: failure first. day_activity is an aggregate that returns ONE row whenever it succeeds,
+    # so the old "nothing usable -> No telemetry loaded" branch only ever fired on a FAILED read,
+    # rendering it as a quiet no-data caption (and skipping the partial disclosure below). Every
+    # read failing is unknown, not empty; "nothing loaded" is an ok activity row with NULL counts.
+    if len(_failed) == len(_all):
+        # the first NON-absence failure if any (then the replay is unavailable), else any: it is
+        # "not installed" only when every read failed as a setup absence
+        _first = next((r for _, r in _all if not is_setup_absence(r.error_kind)), _all[0][1])
+        if is_setup_absence(_first.error_kind):
+            empty_state("needs_setup", f"Day replay for {day_iso} has no installed sources to read "
+                                       f"({', '.join(_failed)}).")
+        else:
+            empty_state("unavailable", f"Day replay for {day_iso} could not be read "
+                                       f"({', '.join(_failed)}).", detail=_first.error)
+        return
+    _act_loaded = (activity.usable() and "QUERY_COUNT" in activity.df.columns
+                   and bool(activity.df["QUERY_COUNT"].notna().any()))
+    if not _failed and not _act_loaded and not any(
+            r.usable() for r in (movers, ddl, grants, tasks, alerts_d)):
+        empty_state("no_data_yet", f"No telemetry loaded for {day_iso} — facts cover ~120 days back.")
+        return
     if heads:
         for h in heads:
             (st.error if h["severity"] == "bad" else
@@ -769,7 +811,15 @@ def _freshness_board() -> None:
         mart_tier="recent", live_tier="recent")   # state moves every 10 min (r14 #13)
     section_header("Telemetry freshness")
     if not res.ok:
-        empty_state("needs_setup", "Freshness board is not installed yet; the live fallbacks on this page still work.")
+        # R1-204 (the v4.605 kind split): "not installed" only for a true absence; a timeout or
+        # schema drift on an installed board is a failed read, so staleness is UNKNOWN, not absent.
+        if is_setup_absence(res.error_kind):
+            empty_state("needs_setup", "Freshness board is not installed yet; the live fallbacks on this page still work.")
+        else:
+            empty_state("unavailable", "Freshness board could not be read, so source staleness is unknown; "
+                                       "the live fallbacks on this page still work.", detail=res.error,
+                        action_label="Full freshness table → Admin", action_key="cr_freshness_admin",
+                        on_action=lambda: request_navigation("Admin", "Migrations & freshness"))
         return
     if res.empty:
         empty_state("no_data_yet", "Freshness view exists but has no rows — have the loader tasks run yet?")
@@ -1063,6 +1113,12 @@ def render() -> None:
             with c_fails:
                 charts.daily_metric_line(act.df, "DAY", "FAILS", "Failed queries", unit="count")
             result_caption(act)
+        elif act is None:
+            # fsl-1 skipped the read under a Schema filter (act is None, never a result): say why
+            # the trend is absent instead of dereferencing it (R1-201 — `act.ok` raised
+            # AttributeError and replaced the section with the page-error panel).
+            st.caption("14-day trend hidden under a Schema filter: the daily activity fact has "
+                       "database grain only, so it cannot honor the schema scope.")
         elif not act.ok:
             empty_state("unavailable", "Activity trend unavailable.", detail=act.error)
         elif act.usable():
@@ -1111,6 +1167,12 @@ def render() -> None:
         # Codex-review rec20: relabel the auto-completed status to a done state.
         if hasattr(_load_status, "update"):
             _load_status.update(label="Control Room loaded", state="complete")
+        # The triage alert feed, resolved here (prefetch-else-run, same read as before) so the
+        # exception row below only promises "in the triage queue" when the queue could read it.
+        alerts = _live_pf.get("cra") or run(mart_sql.open_alert_events(500, company), page=_PAGE,
+                     key=f"cr_alerts_{company}", tier="live",
+                     source="ALERT_EVENTS" if company == "ALL"
+                     else f"ALERT_EVENTS ({company} + account-level)")
         inc_met = _inc_met   # hoisted to the verdict above (same SQL/tier/key -> one cache entry)
         # rec10: lead the section with the house exception-first summary — the DBA's
         # first triage question is "what needs me", answered from numbers already in
@@ -1121,7 +1183,9 @@ def render() -> None:
         _exc = []
         if _open_crit:
             _exc.append({"label": "Open criticals", "value": f"{_open_crit:,}",
-                         "detail": "Open CRITICAL alert events — in the triage queue below.",
+                         "detail": ("Open CRITICAL alert events — in the triage queue below." if alerts.ok
+                                    else "Open CRITICAL alert events — the triage queue could not read "
+                                         "alerts; see Alerts."),
                          "severity": "bad"})
         if _open_now:
             _exc.append({"label": "Open incidents", "value": f"{_open_now:,}",
@@ -1262,7 +1326,14 @@ def render() -> None:
                     key=f"inc_props_{company}", tier="live",
                     source=f"INCIDENT_PROPOSALS ({company} + account-level — a human confirms)")) if _is_op else None
         if _is_op and props is not None and props.usable():
-            with st.expander(f"Proposed incidents ({len(props.df)}) — nothing groups silently"):
+            # R1-212: the read is incident_proposals(20, ...) — a full page means there may be more,
+            # so the label says "20+" (and the caption below why) instead of a capped len().
+            _props_capped = len(props.df) >= 20
+            with st.expander(f"Proposed incidents ({len(props.df)}{'+' if _props_capped else ''}) "
+                             "— nothing groups silently"):
+                if _props_capped:
+                    st.caption(f"Showing the {len(props.df)} most severe/newest proposals; more may be "
+                               "open. Declare or resolve these to bring the rest into view.")
                 _proposal_columns = [
                     "PROPOSAL_KEY", "SUGGESTED_TITLE", "SEVERITY", "COMPANY",
                     "ENTITY_KIND", "ENTITY_NAME", "CONFIDENCE", "ALERTS",
@@ -1330,10 +1401,7 @@ def render() -> None:
 
         # ---- Triage queue ----------------------------------------------------------
         section_header("Triage queue")
-        alerts = _live_pf.get("cra") or run(mart_sql.open_alert_events(500, company), page=_PAGE,
-                     key=f"cr_alerts_{company}", tier="live",
-                     source="ALERT_EVENTS" if company == "ALL"
-                     else f"ALERT_EVENTS ({company} + account-level)")
+        # (the alert feed, `alerts`, is resolved above, before the Incidents exception row)
         # r28b: pass the schema filter on the WARM mart path too — the live fallback below
         # already applies f["schema_contains"], so without this the triage queue silently
         # shows all-schema task failures whenever the mart serves, breaking the section's
@@ -1361,7 +1429,18 @@ def render() -> None:
             # day never reads "expected" there but anomalous in this triage queue.
             flagged = suppress_expected_spikes(
                 flagged, str(settings.get("EXPECTED_SPIKE_CALENDAR") or ""))
-            anomalies = anomaly_summary(flagged, "WAREHOUSE_NAME", "USD")
+            # r6-bug5: only surface anomalies from the MOST RECENT complete day. flag_anomalies
+            # is MAD-based, so a one-off spike keeps |z| high for the whole trailing-30d frame;
+            # without this the SAME 30-day-old spike re-fired as an undismissable, dateless HIGH
+            # every morning, indistinguishable from an overnight break. R1-202: the cut runs
+            # INSIDE anomaly_summary, BEFORE its top-10 — filtering the capped list afterwards let
+            # 10+ stronger historical spikes / weekend collapses evict yesterday's spike and paint
+            # a green "Nothing to triage" over it.
+            _latest = pd.to_datetime(_wh_complete["DAY"], errors="coerce").max() \
+                if "DAY" in _wh_complete.columns else pd.NaT
+            anomalies = (anomaly_summary(flagged, "WAREHOUSE_NAME", "USD",
+                                         day_from=_latest.date(), day_to=_latest.date())
+                         if pd.notna(_latest) else [])
             # D6: anomaly_summary carries the z but not the BASELINE, and a z alone is
             # $-blind — z=8 on a $12/day sandbox outranked z=4 on a $9k/day production
             # warehouse. Attach each hit's excess over its own robust (median) baseline
@@ -1372,19 +1451,14 @@ def render() -> None:
             for _a in anomalies:
                 _a["excess_usd"] = safe_float(_a.get("value")) - safe_float(_med.get(_a.get("label")))
             _base_median_usd = safe_float(_med.median()) if len(_med) else 0.0
-            # E5: robust_zscores returns all-zero for a series with <5 points, so a
-            # warehouse created this week CANNOT be flagged however wild its spend.
-            # That exclusion has to be visible, or the all-clear over-promises.
-            _day_counts = _wh_complete.groupby("WAREHOUSE_NAME")["DAY"].nunique()
-            _thin_warehouses = int((_day_counts < 5).sum())
-            # r6-bug5: only surface anomalies from the MOST RECENT complete day. flag_anomalies
-            # is MAD-based, so a one-off spike keeps |z| high for the whole trailing-30d frame;
-            # without this the SAME 30-day-old spike re-fired as an undismissable, dateless HIGH
-            # every morning, indistinguishable from an overnight break. anomaly_summary now
-            # carries each hit's day, so the triage feed can age stale spikes out.
-            if anomalies and "DAY" in _wh_complete.columns and not _wh_complete.empty:
-                _latest = str(_wh_complete["DAY"].max())
-                anomalies = [a for a in anomalies if str(a.get("day") or "") == _latest]
+            # E5: a warehouse with fewer than ANOMALY_MIN_ACTIVE_DAYS non-zero complete days
+            # CANNOT be flagged however wild its spend (flag_anomalies' gate, which also covers
+            # robust_zscores' <5-point cutoff). That exclusion has to be visible, or the all-clear
+            # over-promises. R1-203: count with the REAL gate — the old <5-distinct-days count
+            # missed every 5-9-day-old warehouse and every mostly idle one.
+            _thin_warehouses = unscorable_groups(_wh_complete, "USD", "WAREHOUSE_NAME",
+                                                 min_active_days=ANOMALY_MIN_ACTIVE_DAYS,
+                                                 min_value=ANOMALY_MIN_USD)
 
         queue = triage_queue(
             alerts.df if alerts.usable() else None,
@@ -1403,6 +1477,23 @@ def render() -> None:
             _tracked_ok = bool(_trk.ok)
             _tracked_df = _trk.df if _trk.usable() else None
         queue = with_triage_track_status(queue, _tracked_df, read_ok=_tracked_ok)
+        # R1-205: a source that FAILED to load is disclosed whether or not the queue is empty — under
+        # a non-empty queue a failed alert / warehouse read used to vanish behind a "Sources: alerts,
+        # task facts, spend anomalies" caption, and the empty branch called a timeout "not installed".
+        # One state per failed source, by its kind: needs_setup only for a true absence, otherwise
+        # unavailable with the error.
+        _triage_sources = (("Open alerts", "alerts", alerts), ("Task facts", "task facts", tasks),
+                           ("Warehouse spend fact", "spend anomalies", wh_daily))
+        _failed_src = [(_name, _short, _r) for _name, _short, _r in _triage_sources if not _r.ok]
+        for _name, _short, _r in _failed_src:
+            _gap = ("spend anomalies not scanned" if _r is wh_daily
+                    else f"{_short} are missing from the queue")
+            if is_setup_absence(_r.error_kind):
+                empty_state("needs_setup", f"{_name} not installed yet — {_gap}.")
+            else:
+                empty_state("unavailable", f"{_name} could not be read — {_gap}, so the queue is incomplete.",
+                            detail=_r.error)
+        _loaded_src = [_short for _, _short, _r in _triage_sources if _r.ok]
         if queue.empty:
             # R3-1: wh_daily gates the spend-anomaly scan — if that read failed the
             # queue is empty for the WRONG reason, so a failed FACT_WAREHOUSE_DAILY must
@@ -1410,11 +1501,9 @@ def render() -> None:
             sources_ok = alerts.ok and tasks.ok and wh_daily.ok
             if sources_ok:
                 empty_state("clean", "Nothing to triage: no open alerts, task failures, or spend anomalies in scope.")
-            else:
-                st.info("Triage inputs incomplete: "
-                        + ("alert tables not installed; " if not alerts.ok else "")
-                        + ("task facts not installed; " if not tasks.ok else "")
-                        + ("warehouse spend fact unavailable — spend anomalies not scanned." if not wh_daily.ok else ""))
+            elif _loaded_src:
+                empty_state("no_data_yet", "Nothing to triage from the sources that loaded ("
+                            + ", ".join(_loaded_src) + ") — no all-clear while a source is unread.")
         else:
             # N3: the DBA's one morning list is now actionable — select a row to jump
             # to the page that owns it (alerts/ops/cost), instead of a read-only wall.
@@ -1477,10 +1566,22 @@ def render() -> None:
             selectable_nav_table(_qdisp[_disp], key="cr_triage_sel", on_select=_open_triage,
                                  height=260, size_note=False,  # the caption below states the count
                                  hint="")  # caption below carries the affordance — no double (v4.575 default)
+            # R1-205: name only the sources that actually loaded (the failed ones are disclosed above).
+            # R1-212: the alert feed is open_alert_events(500, ...) — at that cap the item count is
+            # the capped list's, so say so and give the uncapped open count the page already holds.
+            _cap_note = ""
+            if alerts.usable() and len(alerts.df) >= 500:
+                _tot_open = int(safe_float(_crit_counts.df.iloc[0].get("TOTAL"))) if _crit_known else 0
+                _cap_note = (" Alert rows are capped at the 500 most severe/newest open events"
+                             + (f" ({_tot_open:,} open in scope, counting the spend-sweep events shown "
+                                "only on Alerts)" if _tot_open else "")
+                             + " — the full list is on Alerts.")
             st.caption(f"{len(queue)} item(s), ranked by severity, then unowned first (an alert nobody "
                        "has acknowledged; a task or warehouse with no open Action Center item), then by "
-                       "dollars at risk — select one to open its page. Sources: alerts, task facts, spend "
-                       "anomalies. Task rows are one per task (failures summed across the "
+                       "dollars at risk — select one to open its page. Sources: "
+                       + (", ".join(_loaded_src) or "none")
+                       + ("; not loaded: " + ", ".join(_s for _, _s, _ in _failed_src) if _failed_src else "")
+                       + "." + _cap_note + " Task rows are one per task (failures summed across the "
                        "last 3 days incl. today), not one per day."
                        + (" Task failures follow the database filter; alerts and "
                           "spend anomalies don't have database grain." if f["database"] else ""))
@@ -1500,9 +1601,10 @@ def render() -> None:
                 "The server sweep SP_ANOMALY_SWEEP escalates on the configurable "
                 "ALERT_CONFIG.THRESHOLD_NUM, so where that threshold has been tuned the two can "
                 "differ; its COST_ANOMALY_SWEEP events (excluded here, shown on Alerts) stay "
-                "authoritative. A warehouse needs 5+ complete days of history "
-                "to be scored at all"
-                + (f" — {_thin_warehouses} currently do not have them and are unscored."
+                f"authoritative. A warehouse needs {ANOMALY_MIN_ACTIVE_DAYS}+ active (non-zero-spend) "
+                "complete days in the 30-day window to be flagged at all"
+                + (f" — {_thin_warehouses} with a material-spend day currently do not and are "
+                   "unscored (new or mostly idle)."
                    if _thin_warehouses else ".")))
 
     elif section == "Timeline & movers":
