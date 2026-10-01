@@ -21,6 +21,7 @@ the rest of the README are hand-kept by design).
 from __future__ import annotations
 
 import builtins
+import importlib.abc
 import importlib.util
 import pathlib
 import re
@@ -34,8 +35,27 @@ _SF = ROOT / "snowflake"
 _RB = _SF / "rebuild"
 
 
-def _gen():
-    spec = importlib.util.spec_from_file_location("gen_rebuild_bundle", ROOT / "outputs" / "gen_rebuild_bundle.py")
+_GENERATOR = ROOT / "outputs" / "gen_rebuild_bundle.py"
+
+
+class _MutatedSource(importlib.abc.SourceLoader):
+    """Loads ``text`` as if it were the generator file (no bytecode cache read or written)."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def get_filename(self, fullname: str) -> str:
+        return str(_GENERATOR)
+
+    def get_data(self, path: str) -> bytes:
+        return self.text.encode("utf-8")
+
+
+def _gen(source: str | None = None):
+    """The generator as a fresh module. ``source`` loads a mutated copy of its text in its place (same
+    ``__file__``, so ROOT, SNOWFLAKE and REBUILD resolve to the real folders)."""
+    loader = None if source is None else _MutatedSource(source)
+    spec = importlib.util.spec_from_file_location("gen_rebuild_bundle", _GENERATOR, loader=loader)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -104,15 +124,15 @@ _HAND_KEPT = {"00_backup_operator_data.sql": "00's CLONE list",
 _RENDERS = ("render_backup", "render_copy", "render_migration_bundle", "render_readme")
 
 
-def _bundle_reads(gen, scratch, monkeypatch) -> set[str]:
+def _bundle_reads(load, scratch) -> set[str]:
     """Every bundle file the generator reads back from disk, found by running it rather than by reading
     its source (recheck #7: a regex for a quoted ``(REBUILD / "name").read_text`` missed the variable
-    path ``(REBUILD / bundle_name)`` that holistic #14 was). The bundle is copied to ``scratch`` and the
-    generator pointed at it; Path.read_text / read_bytes / open (read modes) and open() are recorded
-    while every render_* runs, then while ``main()`` runs (it writes only into ``scratch``). A read of
-    the real bundle folder, past REBUILD, counts too."""
+    path ``(REBUILD / bundle_name)`` that holistic #14 was). Path.read_text / read_bytes / open (read
+    modes) and open() are recorded while ``load()`` imports the generator (module-level code, which
+    still sees the real bundle folder), then, with REBUILD pointed at a copy of the bundle in
+    ``scratch``, while every render_* runs and while ``main()`` runs (it writes only into ``scratch``).
+    A read of the real bundle folder, past REBUILD, counts too."""
     shutil.copytree(_RB, scratch)
-    monkeypatch.setattr(gen, "REBUILD", scratch)
     bases = (pathlib.Path(scratch).resolve(), _RB.resolve())
     seen: set[str] = set()
 
@@ -134,12 +154,14 @@ def _bundle_reads(gen, scratch, monkeypatch) -> set[str]:
         note(file, args[0] if args else kwargs.get("mode", "r"))
         return real_open(file, *args, **kwargs)
 
-    renders = sorted(name for name in vars(gen) if name.startswith("render_") and callable(getattr(gen, name)))
-    assert renders == sorted(_RENDERS), f"{renders}: call every new render_* here so its read-backs are seen"
     with pytest.MonkeyPatch.context() as io:
         for method, takes_mode in (("read_text", False), ("read_bytes", False), ("open", True)):
             io.setattr(pathlib.Path, method, recorded(getattr(pathlib.Path, method), takes_mode))
         io.setattr(builtins, "open", open_recorder)
+        gen = load()                                 # recheck: a read at import time counts too
+        renders = sorted(name for name in vars(gen) if name.startswith("render_") and callable(getattr(gen, name)))
+        assert renders == sorted(_RENDERS), f"{renders}: call every new render_* here so its read-backs are seen"
+        gen.REBUILD = scratch                        # a fresh module per load: nothing to put back
         gen.render_migration_bundle()
         for bundle, source, header in gen.COPIES:
             gen.render_copy(bundle, source, header)
@@ -149,13 +171,13 @@ def _bundle_reads(gen, scratch, monkeypatch) -> set[str]:
     return seen
 
 
-def test_the_generator_docs_name_every_bundle_file_it_reads_back_from_disk(tmp_path, monkeypatch):
+def test_the_generator_docs_name_every_bundle_file_it_reads_back_from_disk(tmp_path):
     """Holistic #14 follow-up: render_readme reads README.md back from the bundle folder, so a hand edit
     outside its notes block is compared with itself, yet the generator docstring and CLAUDE.md law 6 named
     00's CLONE list as the only hand-kept part ("never hand-edit"). Every bundle file the generator reads
     back must be named as hand-kept in both, so neither can claim more coverage than the lock gives
     (recheck #7: the read-backs are now found by running the generator, see _bundle_reads)."""
-    reads = _bundle_reads(_gen(), tmp_path / "bundle", monkeypatch)
+    reads = _bundle_reads(_gen, tmp_path / "bundle")
     assert reads == set(_HAND_KEPT), (
         f"the generator reads {sorted(reads)} back from the bundle folder: a generated file must be rendered "
         "from its sources, or named as hand-kept here and in the docs")
@@ -172,26 +194,50 @@ def test_the_generator_docs_name_every_bundle_file_it_reads_back_from_disk(tmp_p
     assert "tests/test_rebuild_replay.py" in readme and "tests/test_rebuild_bundle.py" in readme
 
 
-def test_the_read_back_check_sees_a_banner_read_through_a_variable_path(tmp_path, monkeypatch):
+def test_the_read_back_check_sees_a_banner_read_through_a_variable_path(tmp_path):
     """Recheck #7: the generator before holistic #14 (83e32ae6^) read the 03/04/05 banner back through
     ``(REBUILD / bundle_name).read_text``, and the old regex check returned the clean set for it. Put that
     shape back (its render_copy and COPIES, verbatim) and the check must name the three files."""
-    gen = _gen()
 
-    def render_copy(bundle_name: str, source_name: str, header: str | None = None) -> str:
-        if header is None:
-            header = (gen.REBUILD / bundle_name).read_text(encoding="utf-8").split("\n\n", 1)[0]
-        source = (gen.SNOWFLAKE / source_name).read_text(encoding="utf-8")
-        return f"{header}\n\n{source}"
+    def load():
+        gen = _gen()
 
-    monkeypatch.setattr(gen, "render_copy", render_copy)
-    monkeypatch.setattr(gen, "COPIES", (
-        ("01_teardown_rebuildables.sql", "teardown.sql", gen.TEARDOWN_BANNER),
-        ("03_roles.sql", "roles.sql", None),
-        ("04_backfill_365.sql", "backfill_365.sql", None),
-        ("05_validate.sql", "validate.sql", None)))
-    reads = _bundle_reads(gen, tmp_path / "bundle", monkeypatch)
+        def render_copy(bundle_name: str, source_name: str, header: str | None = None) -> str:
+            if header is None:
+                header = (gen.REBUILD / bundle_name).read_text(encoding="utf-8").split("\n\n", 1)[0]
+            source = (gen.SNOWFLAKE / source_name).read_text(encoding="utf-8")
+            return f"{header}\n\n{source}"
+
+        gen.render_copy = render_copy
+        gen.COPIES = (
+            ("01_teardown_rebuildables.sql", "teardown.sql", gen.TEARDOWN_BANNER),
+            ("03_roles.sql", "roles.sql", None),
+            ("04_backfill_365.sql", "backfill_365.sql", None),
+            ("05_validate.sql", "validate.sql", None))
+        return gen
+
+    reads = _bundle_reads(load, tmp_path / "bundle")
     assert reads - set(_HAND_KEPT) == {"03_roles.sql", "04_backfill_365.sql", "05_validate.sql"}, reads
+
+
+def test_the_read_back_check_sees_a_banner_read_at_import_time(tmp_path):
+    """Recheck #7 follow-up: the #14 shape moved to module level (03's banner read back into a constant
+    COPIES then uses) reads the bundle while the generator is imported, before any render_* runs. The
+    check imports the generator with the recorders installed, so it must name 03_roles.sql."""
+    source = _GENERATOR.read_text(encoding="utf-8")
+    copies = source[source.index("COPIES = ("):source.index("def render_backup")]
+    mutated = source.replace(copies, (
+        '_BANNER_03 = (REBUILD / "03_roles.sql").read_text(encoding="utf-8").split("\\n\\n", 1)[0]\n'
+        "COPIES = (\n"
+        '    ("01_teardown_rebuildables.sql", "teardown.sql", TEARDOWN_BANNER),\n'
+        '    ("03_roles.sql", "roles.sql", _BANNER_03),\n'
+        "    *((bundle, source, COPY_BANNER.format(bundle=bundle, source=source))\n"
+        '      for bundle, source in (("04_backfill_365.sql", "backfill_365.sql"),\n'
+        '                             ("05_validate.sql", "validate.sql"))),\n'
+        ")\n\n\n"))
+    assert mutated != source and "_BANNER_03" in mutated
+    reads = _bundle_reads(lambda: _gen(mutated), tmp_path / "bundle")
+    assert reads - set(_HAND_KEPT) == {"03_roles.sql"}, reads
 
 
 def test_replay_grants_only_to_live_or_shimmed_roles():
@@ -316,16 +362,54 @@ _TIP_VARIABLE = re.compile(r"\bSELECT\s+MAX\s*\(\s*VERSION\s*\)\s+INTO\s+:(\w+)\
                            re.I)
 
 
+# What bounds an IF's THEN arm: a nested Snowflake Scripting IF (its condition is parenthesized, so
+# IFF( / IF EXISTS never match), a CASE, their ends, and ELSE / ELSEIF. A bare END closes a CASE
+# expression, or a BEGIN...END block when no CASE is open; END LOOP / FOR / WHILE / REPEAT bound nothing.
+_ARM_TOKEN = re.compile(r"\bIF\s*\(|\bCASE\b|\bEND\s+(?:IF|CASE)\b|\bELSE(?:IF)?\b"
+                        r"|\bEND\b(?!\s+(?:LOOP|FOR|WHILE|REPEAT)\b)", re.I)
+
+
+def _then_arm_end(body: str, after_then: int) -> int:
+    """Where the THEN arm that starts at ``after_then`` ends: the first ELSE, ELSEIF or END IF at its
+    own depth (a nested IF's, or a CASE's ELSE, stays inside the arm)."""
+    open_blocks = ["IF"]
+    for token in _ARM_TOKEN.finditer(body, after_then):
+        word = " ".join(token.group(0).upper().rstrip("(").split())
+        if word in ("IF", "CASE"):
+            open_blocks.append(word)
+        elif word in ("END IF", "END CASE"):
+            assert open_blocks[-1] == word[4:], f"{word} closes an open {open_blocks[-1]}; teach this scan"
+            open_blocks.pop()
+        elif word == "END":
+            if open_blocks[-1] == "CASE":
+                open_blocks.pop()
+        elif open_blocks[-1] == "CASE":
+            continue                                  # a CASE's ELSE
+        if not open_blocks or (word in ("ELSE", "ELSEIF") and open_blocks == ["IF"]):
+            return token.start()
+    raise AssertionError(f"a first-apply IF without its END IF; teach this scan: {body[after_then:][:80]}")
+
+
+def _tip_assignments(body: str, variable: str) -> int:
+    """How many times a block's code assigns ``variable``: SELECT / FETCH ... INTO it, ``v :=`` and LET."""
+    return len(re.findall(rf"\bINTO\s+(?:[:\w$]+\s*,\s*)*:?{variable}\b|\bLET\s+{variable}\b"
+                          rf"|(?<![\w$:.]){variable}\s*:=", body, re.I))
+
+
 def _apply_time_view(smoke, raw: str) -> str:
     """The code a top-level ``EXECUTE IMMEDIATE $$...$$`` block runs on a replay: its body with comments
-    and strings blanked, and every branch behind a first-apply version check blanked too (V038's
+    and strings blanked, and the THEN arm behind every first-apply version check blanked too (V038's
     ``IF (v < 38) THEN CALL SP_LEDGER_AUTOBOOK()`` never runs on a replay; that guard exists so the old
-    autobook cannot settle V153's in-flight rows)."""
+    autobook cannot settle V153's in-flight rows). Only the THEN arm: an ELSE / ELSEIF arm is what a
+    replay runs (recheck: blanking up to the first END IF hid it, and stopped inside a nested IF). Only
+    while the variable holds the tip: one assigned again (``SELECT COUNT(*) INTO :v``) is an ordinary IF."""
     assert raw.count("$$") >= 2, f"EXECUTE IMMEDIATE without a $$ block; teach this scan: {raw[:80]}"
     body = smoke.code_view(raw[raw.index("$$") + 2:raw.rindex("$$")])
-    for variable in _TIP_VARIABLE.findall(body):
-        body = re.sub(rf"\bIF\s*\(\s*:?{variable}\s*<\s*\d+\s*\)\s*THEN\b.*?\bEND\s+IF\b",
-                      lambda m: re.sub(r"[^\n]", " ", m.group(0)), body, flags=re.I | re.S)
+    arms = [(guard.start(), _then_arm_end(body, guard.end()))
+            for variable in sorted(set(_TIP_VARIABLE.findall(body))) if _tip_assignments(body, variable) == 1
+            for guard in re.finditer(rf"\bIF\s*\(\s*:?{variable}\s*<\s*\d+\s*\)\s*THEN\b", body, re.I)]
+    for start, end in arms:
+        body = body[:start] + re.sub(r"[^\n]", " ", body[start:end]) + body[end:]
     return body
 
 
@@ -444,11 +528,43 @@ def test_replay_dml_scan_reads_apply_time_blocks_but_not_proc_or_task_bodies():
     assert _replay_dml_targets(text) == {"ONE_TIME", "MERGED", "TOP_LEVEL"}
 
 
+def _guarded_block(declare: str, body: str) -> str:
+    return ("EXECUTE IMMEDIATE\n$$\nDECLARE\n    v NUMBER;\n" + declare + "BEGIN\n"
+            "    SELECT MAX(VERSION) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;\n" + body + "END;\n$$;\n")
+
+
+def test_the_first_apply_blank_covers_the_then_arm_only():
+    """Recheck: the first-apply blank ran from ``IF (v < N) THEN`` to the first END IF, so it hid an
+    ELSE / ELSEIF arm (the branch a replay runs) and stopped inside a nested IF. Only the THEN arm is
+    first-apply code, at its own nesting depth (a nested IF or a CASE's ELSE stays inside it), and only
+    while the variable still holds the tip: a later ``SELECT ... INTO :v`` makes it an ordinary IF."""
+    else_arm = _guarded_block("", (
+        "    IF (v < 5) THEN\n        UPDATE DBA_MAINT_DB.OVERWATCH.THEN_ARM SET A = 1;\n"
+        "    ELSE\n        DELETE FROM DBA_MAINT_DB.OVERWATCH.ELSE_ARM WHERE A = 1;\n    END IF;\n"))
+    assert _replay_dml_targets(else_arm) == {"ELSE_ARM"}
+    nested = _guarded_block("    n NUMBER;\n", (
+        "    IF (:v < 5) THEN\n"
+        "        IF (n > 0) THEN\n            UPDATE DBA_MAINT_DB.OVERWATCH.NESTED_THEN SET A = 1;\n"
+        "        ELSE\n            UPDATE DBA_MAINT_DB.OVERWATCH.NESTED_ELSE SET A = 1;\n        END IF;\n"
+        "        UPDATE DBA_MAINT_DB.OVERWATCH.AFTER_NESTED SET A = CASE WHEN n > 0 THEN 1 ELSE 2 END;\n"
+        "        UPDATE DBA_MAINT_DB.OVERWATCH.AFTER_CASE SET A = 1;\n"
+        "    ELSEIF (n > 1) THEN\n        UPDATE DBA_MAINT_DB.OVERWATCH.ELSEIF_ARM SET A = 1;\n"
+        "    ELSE\n        INSERT INTO DBA_MAINT_DB.OVERWATCH.LAST_ARM SELECT 1;\n    END IF;\n"
+        "    MERGE INTO DBA_MAINT_DB.OVERWATCH.AFTER_GUARD t USING (SELECT 1 AS X) s ON TRUE\n"
+        "        WHEN MATCHED THEN UPDATE SET A = 1;\n"))
+    assert _replay_dml_targets(nested) == {"ELSEIF_ARM", "LAST_ARM", "AFTER_GUARD"}
+    reassigned = _guarded_block("", (
+        "    SELECT COUNT(*) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SOME_QUEUE;\n"
+        "    IF (v < 1) THEN\n        INSERT INTO DBA_MAINT_DB.OVERWATCH.EMPTY_QUEUE SELECT 1;\n    END IF;\n"))
+    assert _replay_dml_targets(reassigned) == {"EMPTY_QUEUE"}
+
+
 def test_replay_call_scan_runs_the_bodies_in_effect_at_each_apply_time_call():
     """Recheck #8: a top-level CALL, or one in an apply-time block outside a first-apply branch, runs the
     body defined so far (never a later one), its dynamic SQL and the procedures it CALLs; EXECUTE TASK
     runs the live task (CREATE TASK IF NOT EXISTS keeps the first). A task body or a procedure that is
-    only defined runs nothing, and neither does a branch behind ``IF (v < N)`` on SCHEMA_VERSION's tip."""
+    only defined runs nothing, and neither does the THEN arm behind ``IF (v < N)`` on SCHEMA_VERSION's
+    tip; its ELSE arm runs on a replay, so the CALL and the DML there are counted."""
     v1 = (
         "CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_INNER() RETURNS VARCHAR LANGUAGE SQL AS\n"
         "$$\nBEGIN\n    UPDATE DBA_MAINT_DB.OVERWATCH.INNER_T SET A = 1;\n    RETURN 'ok';\nEND;\n$$;\n"
@@ -457,6 +573,8 @@ def test_replay_call_scan_runs_the_bodies_in_effect_at_each_apply_time_call():
         "    CALL DBA_MAINT_DB.OVERWATCH.SP_INNER();\n    RETURN 'ok';\nEND;\n$$;\n"
         "CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_GUARDED() RETURNS VARCHAR LANGUAGE SQL AS\n"
         "$$\nBEGIN\n    INSERT INTO DBA_MAINT_DB.OVERWATCH.GUARDED_T SELECT 1;\n    RETURN 'ok';\nEND;\n$$;\n"
+        "CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ELSE_ARM() RETURNS VARCHAR LANGUAGE SQL AS\n"
+        "$$\nBEGIN\n    INSERT INTO DBA_MAINT_DB.OVERWATCH.ELSE_PROC_T SELECT 1;\n    RETURN 'ok';\nEND;\n$$;\n"
         "CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_X\n    WAREHOUSE = WH\n"
         "    SCHEDULE = 'USING CRON 0 5 * * * UTC'\nAS\n    CALL DBA_MAINT_DB.OVERWATCH.SP_INNER();\n"
         "CALL DBA_MAINT_DB.OVERWATCH.SP_OUTER();\n")
@@ -465,6 +583,11 @@ def test_replay_call_scan_runs_the_bodies_in_effect_at_each_apply_time_call():
         "    SELECT MAX(VERSION) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;\n"
         "    IF (v < 2) THEN\n        CALL DBA_MAINT_DB.OVERWATCH.SP_GUARDED();\n    END IF;\n"
         "    CALL DBA_MAINT_DB.OVERWATCH.SP_INNER();\nEND;\n$$;\n"
+        + _guarded_block("", (
+            "    IF (v < 2) THEN\n        CALL DBA_MAINT_DB.OVERWATCH.SP_GUARDED();\n"
+            "        DELETE FROM DBA_MAINT_DB.OVERWATCH.THEN_ARM_T WHERE A = 1;\n"
+            "    ELSE\n        CALL DBA_MAINT_DB.OVERWATCH.SP_ELSE_ARM();\n"
+            "        UPDATE DBA_MAINT_DB.OVERWATCH.ELSE_ARM_T SET A = 1;\n    END IF;\n")) +
         "CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_X WAREHOUSE = WH AS\n"
         "    CALL DBA_MAINT_DB.OVERWATCH.SP_GUARDED();\n"
         "EXECUTE TASK DBA_MAINT_DB.OVERWATCH.TASK_X;\n"
@@ -474,7 +597,9 @@ def test_replay_call_scan_runs_the_bodies_in_effect_at_each_apply_time_call():
     assert _replay_call_writes([("V001", v1), ("V002", v2)]) == {
         "INNER_T": {("V001", "SP_OUTER"), ("V002", "SP_INNER"), ("V002", "TASK_X")},
         "DYNAMIC_T": {("V001", "SP_OUTER")},
+        "ELSE_PROC_T": {("V002", "SP_ELSE_ARM")},
     }
+    assert _replay_dml_targets(v2) == {"ELSE_ARM_T"}
 
 
 def test_full_rebuild_restores_every_kept_table_the_replay_rewrites():
