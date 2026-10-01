@@ -122,7 +122,7 @@ def test_cs_by_query_type_mart_carries_account_wide_covered_days():
 @pytest.mark.parametrize("builder", [mart_sql.cloud_svc_top_shapes, mart_sql.cloud_svc_by_user])
 def test_drill_readers_add_covered_days_only_on_request(builder):
     plain = builder(90, "ALFA", "WH_A")
-    assert "COVERED_DAYS" not in plain                           # Ask / the alert evidence pack keep their shape
+    assert "COVERED_DAYS" not in plain                           # the alert evidence pack keeps its shape
     cov = builder(90, "ALFA", "WH_A", coverage=True)
     assert "COUNT(DISTINCT c0.DAY)" in cov and "AS COVERED_DAYS" in cov
     assert cov.replace(", (SELECT COUNT(DISTINCT c0.DAY) FROM DBA_MAINT_DB.OVERWATCH.MART_CLOUD_SVC_DAILY c0 "
