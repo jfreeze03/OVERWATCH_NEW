@@ -157,7 +157,10 @@ def test_takeover_small_breakthrough_is_medium_and_sorted_first():
 
 def test_task_recent_states_shape():
     sql = ops_sql.task_recent_states(7, "ALFA", schema_contains="DW")
-    assert "ROW_NUMBER() OVER (" in sql and "ORDER BY SCHEDULED_TIME DESC) <= 12" in sql
+    # PR-1 R1-129: the per-task row number is a column now; a task whose newest run failed keeps its
+    # last 12 runs, every other task only its newest (it cannot be in a streak), failing tasks first
+    assert "ROW_NUMBER() OVER (" in sql and "ORDER BY SCHEDULED_TIME DESC) AS RN" in sql
+    assert "WHERE RN = 1 OR (NEWEST_STATE = 'FAILED' AND RN <= 12)" in sql
     assert "STATE IN ('SUCCEEDED', 'FAILED')" in sql
     assert "SCHEDULED_TIME >= DATEADD('day', -7, CURRENT_DATE())" in sql
     assert "ACCOUNT_USAGE.TASK_HISTORY" in sql
@@ -175,7 +178,9 @@ def test_task_freshness_sla_shape():
     assert "DATEDIFF('minute', l.LAST_SUCCESS, CURRENT_TIMESTAMP()) AS MINS_SINCE_SUCCESS" in sql
     assert "INTERVALS >= 3" in sql                 # only trustworthy cadences
     # the silent (NULL last-success) tasks must survive LIMIT, not be truncated first
-    assert "ORDER BY MINS_SINCE_SUCCESS DESC NULLS FIRST" in sql
+    # PR-1 R1-129: ranked by silence RELATIVE to the task's own yard, absolute minutes as the tie-break
+    assert "/ NULLIF(GREATEST(COALESCE(c.LONG_GAP_MIN, 0), c.MEDIAN_GAP_MIN), 0) DESC NULLS FIRST" in sql
+    assert "MINS_SINCE_SUCCESS DESC NULLS FIRST" in sql
 
 
 def test_query_optimization_triage_shape():

@@ -3055,6 +3055,32 @@ def _task_health_view(company: str, days: int, database: str = "",
                               known_from_live=not _from_mart)
 
 
+def _sla_read_failed(res: QueryResult, what: str) -> None:
+    """A failed Tasks ▸ SLA read, by its kind (v4.605): a true absence is needs_setup, any other
+    failure is unavailable with the error -- never the panel's "no runs" / "not enough history"
+    caption, which a timeout used to share (PR-1 R1-128)."""
+    if is_setup_absence(res.error_kind):
+        empty_state("needs_setup", f"TASK_HISTORY is not readable by this app, so {what} are not evaluated.")
+    else:
+        empty_state("unavailable", f"Task run history could not be read, so {what} are not evaluated.",
+                    detail=res.error)
+
+
+def _freshness_cut_is_safe(raw) -> bool:
+    """True when a LIMIT-capped task_freshness_sla frame proves the tasks below its cut on time.
+
+    The builder ranks by silence relative to each task's yard (its longest normal gap, the
+    classifier's yardstick), so if the LAST row read is still inside its yard, every task below
+    the cut is too (R1-129). A silent last row (no success in the window) proves nothing."""
+    import pandas as pd
+    if raw is None or raw.empty:
+        return True
+    last = raw.iloc[-1]
+    mins = pd.to_numeric(last.get("MINS_SINCE_SUCCESS"), errors="coerce")
+    yard = max(safe_float(last.get("LONG_GAP_MIN")), safe_float(last.get("MEDIAN_GAP_MIN")))
+    return bool(pd.notna(mins) and yard > 0 and mins < yard)
+
+
 def _task_sla_view(company: str, days: int, database: str = "",
                    schema_contains: str = "") -> None:
     """Two 'task health beyond run counts' lenses (repo wave-2): tasks failing
@@ -3079,12 +3105,20 @@ def _task_sla_view(company: str, days: int, database: str = "",
     streaks = task_failure_streaks(_sres.df) if _streaks_known else None
     section_header("Actively broken tasks (failure streaks)",
                    alarm_health(len(streaks)) if _streaks_known else "", "alerts")
-    if not _streaks_known:
-        st.caption("No SUCCEEDED/FAILED task runs in this window/scope.")
+    if _sres is not None and not _sres.ok:
+        # PR-1 R1-128: a failed read is not "no runs" -- split it by kind (v4.605) with the error.
+        _sla_read_failed(_sres, "failure streaks")
+    elif not _streaks_known:
+        empty_state("no_data_yet", "No SUCCEEDED/FAILED task runs in this window/scope.")
     else:
         if streaks.empty:
+            # failing tasks lead the read (task_recent_states), so even a capped read that holds no
+            # streak proves none exists -- the cut only ever drops healthy tasks' newest rows
             empty_state("clean", "No task is in a failure streak — every task's newest run succeeded.")
         else:
+            if getattr(_sres, "truncated", False):
+                st.caption("The read hit its row cap: failing tasks are read first, but more tasks may "
+                           "be failing than shown — narrow the Database / Schema filter.")
             broken = streaks[streaks["ACTIVELY_BROKEN"]]
             kpi_row([
                 {"label": "Tasks failing now", "value": f"{len(streaks)}",
@@ -3105,12 +3139,27 @@ def _task_sla_view(company: str, days: int, database: str = "",
     fresh = task_freshness_status(_fres.df) if _fresh_known else None
     late = (fresh[fresh["STATUS"].isin(["Late", "Stale"])]
             if _fresh_known and not fresh.empty else fresh)
+    # PR-1 R1-129: the read stops at the 200 tasks most overdue RELATIVE to their own cadence. A
+    # capped "all on time" is proven only when the last task read is still inside its yard (every
+    # task below the cut is less overdue); otherwise it is unproven -- never green then.
+    _fresh_total = (int(safe_float(_fres.df["TOTAL_TASKS"].iloc[0]))
+                    if _fresh_known and "TOTAL_TASKS" in _fres.df.columns else 0)
+    _fresh_capped = _fresh_known and _fresh_total > len(_fres.df)
+    _fresh_unproven = bool(_fresh_capped and (late is None or late.empty)
+                           and not _freshness_cut_is_safe(_fres.df))
     section_header("Task freshness (silent-stop)",
-                   alarm_health(len(late)) if _fresh_known else "", "clock")
-    if not _fresh_known:
-        st.caption("Not enough scheduled history to derive task cadence in this window/scope.")
+                   alarm_health(len(late)) if _fresh_known and not _fresh_unproven else "", "clock")
+    if _fres is not None and not _fres.ok:
+        _sla_read_failed(_fres, "task freshness")                 # R1-128
+    elif not _fresh_known:
+        empty_state("no_data_yet", "Not enough scheduled history to derive task cadence in this window/scope.")
     else:
-        if fresh.empty or late.empty:
+        if _fresh_unproven:
+            empty_state("no_data_yet", f"None of the {len(_fres.df):,} most-overdue tasks read (of "
+                        f"{_fresh_total:,}) is late, but the last one read is already past its usual "
+                        "gap, so the tasks below the read are not proven on time — narrow the "
+                        "Database / Schema filter.")
+        elif fresh.empty or late.empty:
             empty_state("clean", "Every task with a derivable cadence is on-time against its own schedule.")
         else:
             stale = late[late["STATUS"] == "Stale"]
@@ -3124,6 +3173,9 @@ def _task_sla_view(company: str, days: int, database: str = "",
                 late[["STATUS", "DATABASE_NAME", "SCHEMA_NAME", "TASK_NAME",
                       "MEDIAN_GAP_MIN", "MINS_SINCE_SUCCESS", "OVERDUE_MIN", "LAST_SUCCESS"]],
                 sort_label="overdue desc")
+            if _fresh_capped:
+                st.caption(f"Read the {len(_fres.df):,} tasks most overdue against their own cadence, of "
+                           f"{_fresh_total:,} with a derivable cadence.")
         result_caption(_fres)
     st.caption(f"Cadence is each task's own median scheduled-gap; Late/Stale is judged against "
                f"its longest NORMAL gap (p90), so a weekend or overnight idle isn't misread as "
@@ -3133,7 +3185,8 @@ def _task_sla_view(company: str, days: int, database: str = "",
     # fully-qualified name where both frames carry it. Values already computed
     # above; zero new queries. Skipped when neither feed was usable, so the badge
     # never asserts "0" on missing data.
-    if _streaks_known and _fresh_known:   # review fix: half the evidence must not badge
+    # R1-129: nor may an unproven capped freshness read badge "0"
+    if _streaks_known and _fresh_known and not _fresh_unproven:   # review fix: half the evidence must not badge
         _frames = [_fr for _fr in (streaks if _streaks_known else None,
                                    late if _fresh_known else None)
                    if _fr is not None and not _fr.empty]

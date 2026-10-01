@@ -258,9 +258,10 @@ def task_recent_states(days: int, company: str = "ALL", database: str = "",
 
     ``task_runs`` collapses each task with ``MAX_BY(STATE, ...)`` — it sees only the
     newest state, so it can't tell a one-off failure from a task stuck failing every
-    run. This returns the last ``per_task`` SUCCEEDED/FAILED runs per task so
-    ``logic.insights.task_failure_streaks`` can count the leading FAILED streak
-    (consecutive failures since the last success). SKIPPED/CANCELLED are excluded so
+    run. This returns, for a task whose newest run FAILED, its last ``per_task``
+    SUCCEEDED/FAILED runs, so ``logic.insights.task_failure_streaks`` can count the
+    leading FAILED streak (consecutive failures since the last success); every other
+    task contributes only its newest run (it cannot be in a streak), failing tasks first. SKIPPED/CANCELLED are excluded so
     the streak measures real success-vs-failure, not scheduler skips. TASK_HISTORY
     prunes on SCHEDULED_TIME, so the window bounds that column."""
     days = bounded_days(days)
@@ -290,13 +291,26 @@ WITH attempts AS (
     QUALIFY ROW_NUMBER() OVER (
         PARTITION BY DATABASE_NAME, SCHEMA_NAME, NAME, SCHEDULED_TIME
         ORDER BY COMPLETED_TIME DESC NULLS LAST) = 1
+),
+ranked AS (
+    SELECT
+        DATABASE_NAME, SCHEMA_NAME, TASK_NAME, SCHEDULED_TIME, STATE, ERROR_MESSAGE,
+        ROW_NUMBER() OVER (
+            PARTITION BY DATABASE_NAME, SCHEMA_NAME, TASK_NAME
+            ORDER BY SCHEDULED_TIME DESC) AS RN,
+        FIRST_VALUE(STATE) OVER (
+            PARTITION BY DATABASE_NAME, SCHEMA_NAME, TASK_NAME
+            ORDER BY SCHEDULED_TIME DESC) AS NEWEST_STATE
+    FROM attempts
 )
+-- PR-1 R1-129: only a task whose NEWEST run failed can have a streak, so a healthy task needs just
+-- its newest row (it still proves the task ran -- "no runs" stays distinct from "clean"), and the
+-- failing tasks lead the order. The old 12-rows-for-every-task, alphabetical frame overran the
+-- caller's row cap past ~333 tasks and silently dropped late-named broken tasks.
 SELECT DATABASE_NAME, SCHEMA_NAME, TASK_NAME, SCHEDULED_TIME, STATE, ERROR_MESSAGE
-FROM attempts
-QUALIFY ROW_NUMBER() OVER (
-    PARTITION BY DATABASE_NAME, SCHEMA_NAME, TASK_NAME
-    ORDER BY SCHEDULED_TIME DESC) <= {per_task}
-ORDER BY DATABASE_NAME, SCHEMA_NAME, TASK_NAME, SCHEDULED_TIME DESC
+FROM ranked
+WHERE RN = 1 OR (NEWEST_STATE = 'FAILED' AND RN <= {per_task})
+ORDER BY IFF(NEWEST_STATE = 'FAILED', 0, 1), DATABASE_NAME, SCHEMA_NAME, TASK_NAME, SCHEDULED_TIME DESC
 """
 
 
@@ -446,7 +460,9 @@ SELECT c.DATABASE_NAME, c.SCHEMA_NAME, c.TASK_NAME,
        ROUND(c.LONG_GAP_MIN, 1) AS LONG_GAP_MIN,
        c.INTERVALS,
        l.LAST_SUCCESS, l.LAST_SCHEDULED, l.LAST_STATE,
-       DATEDIFF('minute', l.LAST_SUCCESS, CURRENT_TIMESTAMP()) AS MINS_SINCE_SUCCESS
+       DATEDIFF('minute', l.LAST_SUCCESS, CURRENT_TIMESTAMP()) AS MINS_SINCE_SUCCESS,
+       -- PR-1 R1-129: pre-LIMIT count, so a capped read can say "200 of N"
+       COUNT(*) OVER () AS TOTAL_TASKS
 FROM cadence c
 JOIN last_run l
   ON l.DATABASE_NAME = c.DATABASE_NAME
@@ -456,7 +472,13 @@ WHERE c.MEDIAN_GAP_MIN IS NOT NULL AND c.INTERVALS >= 3
 -- NULLS FIRST: a task with no SUCCEEDED run in the window has NULL
 -- MINS_SINCE_SUCCESS but is the HIGHEST-severity 'silent' case — keep it under the
 -- LIMIT, don't let it be truncated first (the classifier ranks these Stale/High).
-ORDER BY MINS_SINCE_SUCCESS DESC NULLS FIRST
+-- PR-1 R1-129: rank by silence RELATIVE to the task's own yard (the longest normal gap the
+-- classifier judges against), not absolute minutes -- 200 on-time nightly tasks used to outrank a
+-- 5-minute task stopped for 3 hours and push it past the LIMIT. Ranked this way, a cut whose last
+-- row is still inside its yard proves every task below the cut is on time too.
+ORDER BY DATEDIFF('minute', l.LAST_SUCCESS, CURRENT_TIMESTAMP())
+             / NULLIF(GREATEST(COALESCE(c.LONG_GAP_MIN, 0), c.MEDIAN_GAP_MIN), 0) DESC NULLS FIRST,
+         MINS_SINCE_SUCCESS DESC NULLS FIRST
 LIMIT 200
 """
 

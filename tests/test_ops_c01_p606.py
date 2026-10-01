@@ -554,3 +554,87 @@ def test_failure_timeline_short_circuit_needs_a_window_holding_the_last_7_days(m
     with pytest.raises(_Stop):
         ops._task_health_view("ALL", days, bounds=bounds)
     assert (seen_kw["known_failures"] == 0) is short_circuit, seen_kw
+
+
+# ------------------------------ R1-128 / R1-129: Tasks ▸ SLA failed reads and capped all-clears ----
+
+def _sla_view(monkeypatch, streak, fresh):
+    ops, fake, seen = _page(monkeypatch, {}, run_batch=lambda *_a, **_k: {"streak": streak, "fresh": fresh},
+                            stash_section_count=lambda *a, **_k: seen_badge.append(a[2]))
+    seen_badge: list = []
+    ops._task_sla_view("ALL", 14)
+    return fake, seen, seen_badge
+
+
+@pytest.mark.parametrize("kind", _SETUP + _FAILED)
+def test_task_sla_failed_reads_render_by_kind(monkeypatch, kind):
+    fake, seen, badge = _sla_view(monkeypatch, _failed(kind), _failed(kind))
+    states = [k for k, _m in seen["empty"]]
+    assert states == (["needs_setup"] * 2 if kind in _SETUP else ["unavailable"] * 2)
+    if kind not in _SETUP:
+        assert seen["detail"] == [f"boom ({kind})"] * 2
+    text = fake.text("caption") + " ".join(m for _k, m in seen["empty"])
+    assert "No SUCCEEDED/FAILED task runs" not in text and "Not enough scheduled history" not in text
+    assert badge == []                                   # no "0" badge from a failed read
+
+
+def _fresh_frame(n: int, last_mins: float, total: int) -> pd.DataFrame:
+    """n nightly tasks (yard 1440 min), all on time but the last read at ``last_mins`` silence."""
+    mins = [600.0] * (n - 1) + [last_mins]
+    return pd.DataFrame({"DATABASE_NAME": ["DB"] * n, "SCHEMA_NAME": ["S"] * n,
+                         "TASK_NAME": [f"T{i}" for i in range(n)], "MEDIAN_GAP_MIN": [1440.0] * n,
+                         "LONG_GAP_MIN": [1440.0] * n, "INTERVALS": [10] * n, "MINS_SINCE_SUCCESS": mins,
+                         "LAST_SUCCESS": ["2026-09-29"] * n, "TOTAL_TASKS": [total] * n})
+
+
+def test_task_freshness_capped_read_is_not_green_unless_the_cut_is_proven(monkeypatch):
+    streak = _ok(pd.DataFrame({"DATABASE_NAME": ["DB"], "SCHEMA_NAME": ["S"], "TASK_NAME": ["T"],
+                               "SCHEDULED_TIME": ["2026-09-29"], "STATE": ["SUCCEEDED"], "ERROR_MESSAGE": [""]}))
+    # 200 of 251 read; the last one read is past its yard (inside the lag, so not Late) -> unproven
+    _fake, seen, badge = _sla_view(monkeypatch, streak, _ok(_fresh_frame(200, 1460.0, 251)))
+    assert [k for k, _m in seen["empty"]] == ["clean", "no_data_yet"]       # streaks clean, freshness not
+    assert "200 most-overdue tasks read (of 251)" in seen["empty"][1][1]
+    assert badge == []
+    # the last one read is inside its yard -> every task below the cut is on time too -> verified clean
+    _fake, seen, badge = _sla_view(monkeypatch, streak, _ok(_fresh_frame(200, 900.0, 251)))
+    assert [k for k, _m in seen["empty"]] == ["clean", "clean"] and badge == [0]
+
+
+def test_task_freshness_ranks_by_silence_relative_to_the_task_yard():
+    from app.data import ops_sql
+    sql = ops_sql.task_freshness_sla(14, "ALL")
+    assert ("ORDER BY DATEDIFF('minute', l.LAST_SUCCESS, CURRENT_TIMESTAMP())\n"
+            "             / NULLIF(GREATEST(COALESCE(c.LONG_GAP_MIN, 0), c.MEDIAN_GAP_MIN), 0) DESC NULLS FIRST") in sql
+    assert "COUNT(*) OVER () AS TOTAL_TASKS" in sql and sql.rstrip().endswith("LIMIT 200")
+
+
+def test_task_recent_states_keeps_a_late_named_streak_under_the_cap():
+    # 400 healthy tasks x 12 runs used to fill the 4,000-row cap alphabetically and drop T399's streak
+    import sqlite3
+
+    import sqlglot
+
+    from app.data import ops_sql
+    from app.logic.insights import task_failure_streaks
+    lite = sqlglot.transpile(ops_sql.task_recent_states(7), read="snowflake", write="sqlite")[0]
+    lite = (lite.replace("SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY", "TH")
+                .replace("CURRENT_DATE", "'2026-09-30'")) + "\nLIMIT 4001"     # run()'s row-cap probe
+    con = sqlite3.connect(":memory:")
+    con.create_function("LEFT", 2, lambda s, n: None if s is None else str(s)[:n])
+    con.execute("CREATE TABLE TH (DATABASE_NAME, SCHEMA_NAME, NAME, SCHEDULED_TIME, COMPLETED_TIME, STATE, "
+                "ERROR_MESSAGE)")
+    rows = []
+    for t in range(400):
+        for r in range(12):
+            ts = f"2026-09-29 {r:02d}:00:00"
+            state = "FAILED" if (t == 399 and r >= 7) else "SUCCEEDED"
+            rows.append(("DB", "S", f"T{t:03d}", ts, ts, state, "boom" if state == "FAILED" else None))
+    con.executemany("INSERT INTO TH VALUES (?,?,?,?,?,?,?)", rows)
+    try:
+        cur = con.execute(lite)
+    except sqlite3.OperationalError as exc:                          # dialect gap -> the SQL lock
+        pytest.skip(f"sqlite cannot run the transpiled builder: {exc}")
+    df = pd.DataFrame(cur.fetchall(), columns=[d[0] for d in cur.description])
+    assert len(df) <= 4000 and df.iloc[0]["TASK_NAME"] == "T399"                # failing tasks lead
+    got = task_failure_streaks(df)
+    assert got["TASK_NAME"].tolist() == ["T399"] and int(got.iloc[0]["FAIL_STREAK"]) == 5
