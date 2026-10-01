@@ -81,7 +81,7 @@ def test_remaining_pages_thread_bounds_into_their_scope_reads():
     # Operations threads bounds into its four scope tabs + representative reads
     assert "fact_query_window_summary(" in ops and "bounds=bounds" in ops
     assert "mart27_sql.task_nodes(days, company, database, schema_contains, bounds=bounds)" in ops
-    assert "lock_contention(min(days, 14), bounds=bounds)" in ops
+    assert "lock_contention(min(days, 14), bounds=bounds, " in ops   # + company/database (PR-1 R1-133)
     # Security threads bounds into its change/login/egress reads
     assert "new_network_logins_fact(days, company, bounds=bounds)" in sec
     assert "admin_role_activity(days, company, bounds=bounds)" in sec

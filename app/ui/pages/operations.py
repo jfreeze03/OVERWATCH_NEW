@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import contextlib
+import re
 from datetime import timedelta
 
 import streamlit as st
 
-from app import companies
 from app.config import MAX_LIVE_WINDOW_DAYS, core_object
 from app.core.errors import safe_page
 from app.core.identity import identity_sql
@@ -49,7 +49,7 @@ from app.logic.anomaly import (
     suppress_expected_spikes,
     warehouse_attention_ranking,
 )
-from app.logic.date_windows import window_label
+from app.logic.date_windows import is_prior_month_window, window_label
 from app.logic.dq import row_volume_anomalies, summarize_row_volume
 from app.logic.etl_evidence import (
     evidence_display_frame,
@@ -769,7 +769,8 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         key="ops_proc_reg_toggle",
         help="A live scan that rolls up CALL statements per stored procedure "
              "(success-only p95/avg, ranked by SLA impact) and flags the ones whose "
-             "p95 crept up versus the previous equal-length window.")
+             "p95 crept up versus the prior window (the calendar month before under Last "
+             "month, else the equal-length window just before).")
     if _proc_reg_on:
         _pb = run_batch([
             {"key": "roll", "sql": ops_sql.proc_sla_rollup(
@@ -823,8 +824,10 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             styled_table(_pr[_pr_cols], slug="proc_regression", days=days,
                          sort_label="worst first")
             st.caption(
-                "Success-only p95 this window vs the prior equal-length window (percent change "
-                "from the unrounded values). A proc needs at least "
+                "Success-only p95 this window vs the prior window — the calendar month before "
+                "under Last month, else the equal-length window just before (percent change "
+                "from the unrounded values; QUERY_HISTORY keeps one year, so late in a Current-"
+                "year window the prior side is cut short). A proc needs at least "
                 f"{proc_regression.MIN_CALLS} successful calls in BOTH windows to be compared — a "
                 "now-fully-failing proc has no latency signal, so watch the rollup's FAIL_PCT "
                 "above. 'Faster but failing' flags a proc that only looks quicker because it now "
@@ -993,8 +996,11 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             # -> bounded_days). Monthly-ize AND label by the window ACTUALLY SCANNED, not the raw
             # 180/365 pick — else the run-rate is divided by up to 365 over a 90-day sum (~4x low)
             # and the tile lies about its window (same served-window rule as the Queries/clustering
-            # tiles). Bounded presets scan the full [start,end) range, so days is already right.
-            _waste_served = days if bounds is not None else min(int(days), MAX_LIVE_WINDOW_DAYS)
+            # tiles). Bounded presets scan the full [start,end) range, so divide by its day SPAN:
+            # Current month / Current year pass a day OFFSET (Sep 2 MTD = 1) one less than the
+            # span the scan covers (W12 -- the rule Cost ▸ Optimize and Proof already follow).
+            _waste_served = ((bounds[1] - bounds[0]).days if bounds is not None
+                             else min(int(days), MAX_LIVE_WINDOW_DAYS))
             monthly = _wasted_total / max(_waste_served, 1) * 30.0
             # TLH-1: the scan is LIMIT-50 by wasted $ desc, so this sum is the top-50
             # fingerprints, NOT the whole-window waste. Label + monthly-ize the shown
@@ -1289,6 +1295,15 @@ def _release_compare_tab(company: str) -> None:
         # still filling (or, for a nightly task right after a deploy, hasn't run yet). Mirrors the
         # query-health sibling above, which shows 'no data yet' when a PERIOD is missing.
         _decidable = bool(deltas["DECIDABLE"].any()) if "DECIDABLE" in deltas.columns else True
+        # PR-1 R1-135: the read keeps whole tasks, the ones that got worse first, up to
+        # RELEASE_MAX_TASKS; TOTAL_TASKS is counted before that cut. Disclose a capped compare so
+        # neither verdict below reads as covering tasks it never saw.
+        _total_tasks = (int(safe_float(t_res.df["TOTAL_TASKS"].iloc[0]))
+                        if "TOTAL_TASKS" in t_res.df.columns else len(deltas))
+        if _total_tasks > len(deltas):
+            st.caption(f"Compared the {len(deltas):,} most-regressed of {_total_tasks:,} tasks with runs "
+                       "in the windows — tasks that got worse rank first, so one is left out only when "
+                       f"more than {len(deltas):,} regressed.")
         if worse.empty:
             if _decidable:
                 empty_state("clean", "No task gained failures or slowed >25% after the release.")
@@ -1437,7 +1452,10 @@ def _reference_gap_panel(database: str = "") -> None:
         df = res.df.copy()
         n_codes = len(df)
         n_types = int(df["CHECK_NAME"].nunique()) if "CHECK_NAME" in df.columns else 0
-        st.error(f"🔴 {n_codes} new code(s) across {n_types} code type(s){_scope} have NO XLAT "
+        # PR-1 R1-066: past the MAX_CODES cap (a misconfiguration guard) the frame holds the first
+        # codes alphabetically, so both counts are floors -- say so rather than print the cap
+        _plus = "+" if res.truncated else ""
+        st.error(f"🔴 {n_codes:,}{_plus} new code(s) across {n_types}{_plus} code type(s){_scope} have NO XLAT "
                  "translation. Add the translation rows before the next cycle or the load "
                  "will fail on the missing code.")
         styled_table(df, height=280)
@@ -1446,6 +1464,19 @@ def _reference_gap_panel(database: str = "") -> None:
                    "every configured code type (pinned checks show under any Database scope). "
                    "The daily PIPE_REF_GAP alert (once installed) pages on the same gap.")
         result_caption(res)
+
+
+def _etl_window_suffix(days: int) -> str:
+    """The scope suffix for an ETL panel's Window: ' (last Nd)' for a trailing window, '' unscoped.
+
+    PR-1 R1-139: a Current month / Current year Window arrives as a CalendarDayOffset, which is 0 on
+    the period's first day -- the old ``if days`` truthiness test dropped the label exactly then, and
+    called a mid-month offset 'last Nd'. The ETL readers anchor a calendar offset on the account
+    date (etl_control_sql._window_clause), so name the period's first day instead."""
+    if getattr(days, "calendar_window", False):
+        start = account_today() - timedelta(days=int(days))
+        return " (today)" if int(days) == 0 else f" (since {start:%b} {start.day})"
+    return f" (last {days}d)" if days else ""
 
 
 def _workflow_runtimes_panel(days: int = 0, *, pf: dict | None = None) -> None:
@@ -1470,7 +1501,7 @@ def _workflow_runtimes_panel(days: int = 0, *, pf: dict | None = None) -> None:
             "is Informatica-orchestrated proc CALLs that Snowflake's TASK_HISTORY can't see — this "
             "surfaces each task's runtime and status for the latest run straight from the log.")
         return
-    _scope = f" (last {days}d)" if days else ""
+    _scope = _etl_window_suffix(days)
     # Picker: which workflow's latest run to show. Each RUN_ID is one workflow, so without a
     # picker the panel only ever shows whichever workflow finished most recently. The list is
     # scoped to the Window, so it also honors the scope bar.
@@ -1863,14 +1894,22 @@ def _sla_finish_forecast_panel(*, pf: dict | None = None) -> dict:
         return {"_reason": "needs_setup"}
     res = (pf or {}).get("cycle_finish") or run(scan_sql, page=_PAGE, key="etl_cycle_finish", tier="recent",
               source="CONTROL_STATUS (cycle finish vs deadline)", max_rows=etl_control_sql.MAX_SLA_NIGHTS)
-    if guard(res, "No completed nightly cycles in the window — the starter and terminal workflows "
-             "haven't both run. Check the two anchor workflow names on Admin ▸ SETTINGS.", kind="clean",
+    if res.ok and res.empty:
+        # PR-1 R1-059 / R1-138: the scan is all-time and LEFT JOINs the terminal onto the starter, so
+        # zero rows means the STARTER never ran in CONTROL_STATUS -- a misnamed / renamed anchor (the
+        # loader logs it as etl_cycle_scan_misconfig), never a verified-green "clean". A wrong
+        # terminal name still returns nights (INCOMPLETE), so only the starter is named here.
+        empty_state("needs_setup", f"No nightly cycle found — the starter workflow '{start_wf}' has no "
+                    "runs in CONTROL_STATUS. Check ETL_CYCLE_START_WORKFLOW on Admin ▸ SETTINGS.")
+        return {"_reason": "needs_setup"}
+    if guard(res, "No nightly cycle found in CONTROL_STATUS.",
              setup_hint="The app role needs SELECT on the CONTROL_STATUS table "
                         "(GRANT SELECT ON <table> TO ROLE <app role>)."):
         fc = etl_cycle_sla_forecast(res.df, target_hhmm=target, breach_hhmm=breach,
                                     spike_calendar=str(settings.get("EXPECTED_SPIKE_CALENDAR") or ""))
         if not fc:
-            empty_state("clean", "No completed nightly cycles in the window yet.")
+            # nothing forecastable is a no-data state, never a green all-clear (house law 8)
+            empty_state("no_data_yet", "No completed nightly cycles to forecast yet.")
             return {"_reason": "empty"}
 
         def _signed(sec: object, early: str = "early", late: str = "late") -> str:
@@ -2078,14 +2117,21 @@ def _recon_error_panel(*, pf: dict | None = None) -> None:
              setup_hint="The app role needs SELECT on the RECON_MTRC_ERROR table "
                         "(GRANT SELECT ON <table> TO ROLE <app role>)."):
         df = res.df.copy()
-        n = len(df)
-        n_mtrc = int(df["MTRC"].nunique()) if "MTRC" in df.columns else 0
-        st.error(f"🔴 {n} reconciliation error(s) across {n_mtrc} metric(s) in the last {_days} days "
+        # PR-1 R1-066 / R1-137: the headline counts the WHOLE window -- the scan's pre-LIMIT window
+        # totals -- never the newest-MAX_RECON_ROWS frame (which read "500 errors" and dropped every
+        # metric whose errors fell past the cut). An old-shape frame falls back to the frame count.
+        n = (int(safe_float(df["TOTAL_ERRORS"].iloc[0])) if "TOTAL_ERRORS" in df.columns
+             else len(df))
+        n_mtrc = (int(safe_float(df["TOTAL_METRICS"].iloc[0])) if "TOTAL_METRICS" in df.columns
+                  else int(df["MTRC"].nunique()) if "MTRC" in df.columns else 0)
+        df = df.drop(columns=[c for c in ("TOTAL_ERRORS", "TOTAL_METRICS") if c in df.columns])
+        st.error(f"🔴 {n:,} reconciliation error(s) across {n_mtrc:,} metric(s) in the last {_days} days "
                  "— source and target layers disagree. Investigate before the numbers are trusted "
                  "downstream.")
         styled_table(df, height=320)
         st.caption(f"From RECON_MTRC_ERROR — each row is a metric whose SOURCE_LAYER and TARGET_LAYER "
-                   f"did not reconcile in the last {_days} days, newest first.")
+                   f"did not reconcile in the last {_days} days, newest first"
+                   + (f"; the table shows the newest {len(df):,} of {n:,}." if n > len(df) else "."))
         result_caption(res)
 
 
@@ -2120,7 +2166,15 @@ def _recon_recurrence_panel(days: int = 0, *, pf: dict | None = None) -> None:
             empty_state("clean", f"No reconciliation errors {_win} — every metric ties out.")
             return
         chronic = int((rec["TIER"] == "CHRONIC").sum())
-        active = int(rec["BROKE_LATEST_CYCLE"].astype(bool).sum())
+        # PR-1 R1-137: the still-breaking and total counts come from the scan's pre-LIMIT window
+        # totals -- counted from the capped frame, a latest-cycle break past row 300 read as "none
+        # broke in the latest cycle". The scan now ranks still-breaking checks first, so the chronic
+        # / new tiers (both require a latest-cycle break) are read from that head of the frame.
+        _raw = res.df
+        active = (int(safe_float(_raw["ACTIVE_CHECKS_TOTAL"].iloc[0])) if "ACTIVE_CHECKS_TOTAL" in _raw.columns
+                  else int(rec["BROKE_LATEST_CYCLE"].astype(bool).sum()))
+        _n_checks = (int(safe_float(_raw["TOTAL_CHECKS"].iloc[0])) if "TOTAL_CHECKS" in _raw.columns
+                     else len(rec))
         newb = int((rec["TIER"] == "NEW").sum())
         top = rec.iloc[0]
         _hop = f"{top.get('SOURCE_LAYER', '')}→{top.get('TARGET_LAYER', '')}"
@@ -2132,9 +2186,12 @@ def _recon_recurrence_panel(days: int = 0, *, pf: dict | None = None) -> None:
                      f"({safe_float(top.get('RECURRENCE_PCT')):.0f}%) at {_hop} — investigate the "
                      "source feed before the next cycle.")
         else:
-            st.warning(f"🟠 {len(rec)} metric(s) broke recon in this window, but all are isolated or "
+            st.warning(f"🟠 {_n_checks:,} metric(s) broke recon in this window, but all are isolated or "
                        "resolved — none broke in the latest cycle.")
         styled_table(rec, height=320)
+        if _n_checks > len(rec):
+            st.caption(f"The table shows {len(rec):,} of {_n_checks:,} checks — every still-breaking "
+                       "check first; the still-breaking count above covers all of them.")
         st.caption("Recurrence = distinct cycles THIS check broke ÷ distinct cycles ANY check of the "
                    "same frequency broke — a cycle = one night's recon batch (DATE(LOAD_DTTM)). This "
                    "table logs only failures, so cycles where everything reconciled are NOT counted: a "
@@ -2427,8 +2484,8 @@ def _builtin_objectives_panel(fc: dict, company: str = "ALL", days: int = 0, dat
     cyc = cycle_target_attainment(fc)
     cad = task_cadence_attainment(fresh)
     _misses = ((cyc["judged"] - cyc["met"]) if cyc else 0) + ((cad["late"] + cad["stale"]) if cad else 0)
-    # review r1: the cadence read is LIMIT 200 (most-silent first), so a capped "all on time" is not
-    # proven -- never green then (a stopped fast-cadence task can sit outside the 200)
+    # review r1: the cadence read is LIMIT 200 (most overdue against each task's own cadence first,
+    # PR-1 R1-129), so a capped "all on time" is not proven here -- never green then
     _health = alarm_health(_misses) if (cyc or cad) else ""
     if _health == "ok" and cad.get("capped"):
         _health = ""
@@ -2484,8 +2541,8 @@ def _builtin_objectives_panel(fc: dict, company: str = "ALL", days: int = 0, dat
         "Read-only objectives derived from the ETL clock and each task's own cadence — no setup. "
         "The custom SLO editor was retired (v4.597); any ACTIVE SLO_OBJECTIVES rows still alert and "
         "badge the Entity 360 watchlist."
-        + (" Tasks on cadence is judged over the 200 most-silent tasks only; a recently stopped "
-           "fast-cadence task can fall outside them (Tasks ▸ SLA reads the same 200)."
+        + (" Tasks on cadence is judged over the 200 tasks most overdue against their own cadence "
+           "only (Tasks ▸ SLA reads the same 200)."
            if cad.get("capped") else ""))
 
 
@@ -2722,51 +2779,59 @@ def _pipeline_data_checks(is_operator: bool, company: str = "ALL", database: str
     (+ table registration), reconciliation DQ (source vs target ties out / what keeps breaking),
     volume drops, row-volume anomalies, and stream staleness.
 
-    rec9 note: the freshness read no longer early-returns the whole tab — its ``not res.ok``
-    (PIPELINE_SLA_STATUS not installed) skips only the freshness forecast + register expander;
+    rec9 note: the freshness read no longer early-returns the whole tab — a setup absence
+    (PIPELINE_SLA_STATUS not installed / not readable) skips only the freshness forecast +
+    register expander, and any other failed read renders unavailable and keeps the expander;
     the volume/row-volume/stream signals below read their own independent metering views and
     stay visible (the old linear layout gated them behind the freshness read only incidentally)."""
     # Freshness SLA forecast (account-wide; thresholds are account policy).
     res = run(insights_sql.pipeline_sla_forecast(14), page=_PAGE, key="sla_status", tier="recent",
               source="ACCOUNT_USAGE.TABLE_DML_HISTORY x PIPELINE_SLA_STATUS")
-    if not res.ok:
+    if not res.ok and is_setup_absence(res.error_kind):
         empty_state("needs_setup", "Pipeline SLAs are not installed yet — an admin can verify on Admin → Migrations & freshness.")
+    elif not res.ok:
+        # PR-1 R1-046: a timeout of the 14-day TABLE_DML_HISTORY cadence scan, or schema drift, is a
+        # FAILED read of an installed registry -- never 'not installed yet' (the v4.605 kind split).
+        empty_state("unavailable", "Pipeline SLA freshness could not be read, so registered tables "
+                    "can't be scored right now.", detail=res.error)
+    elif res.empty:
+        empty_state("needs_setup", "No tables registered. Add rows to PIPELINE_SLA_CONFIG below; the view scores them automatically.")
     else:
-        if res.empty:
-            empty_state("needs_setup", "No tables registered. Add rows to PIPELINE_SLA_CONFIG below; the view scores them automatically.")
-        else:
-            # O10: fold each table's refresh cadence into a forward-looking tier so the
-            # tab warns BEFORE a miss, not only after. On-track/at-risk/overdue/breached.
-            df = pipeline_sla_forecast(res.df.copy())
-            met = int(df["SLA_MET"].fillna(False).astype(bool).sum())
-            total = len(df)
-            overdue = int((df["FORECAST"] == "Overdue").sum())
-            at_risk = int((df["FORECAST"] == "At risk").sum())
-            kpi_row([
-                {"label": "SLA compliance", "value": f"{met / total * 100:,.1f}%",
-                 "delta": f"{met}/{total} tables", "delta_color": "off"},
-                {"label": "Breaching now", "value": f"{total - met}",
-                 "delta_color": "inverse" if total - met else "off"},
-                {"label": "Trending to miss", "value": f"{overdue + at_risk}",
-                 "delta": f"{overdue} overdue · {at_risk} at risk", "delta_color": "off",
-                 "help": "Meets SLA now but overdue vs its own refresh cadence, or within "
-                         "one refresh cycle of the deadline — a leading indicator, not a miss yet."},
-            ])
-            _fcols = ["DATABASE_NAME", "SCHEMA_NAME", "TABLE_NAME", "OWNER", "FORECAST",
-                      "DETAIL", "HOURS_SINCE", "MAX_AGE_HOURS"]
-            forecast_rows = df[df["FORECAST"].isin(["Overdue", "At risk"])]
-            if not forecast_rows.empty:
-                st.warning("Forecast — registered tables trending toward a miss (still within SLA now):")
-                styled_table(forecast_rows[_fcols], sort_label="soonest to miss")
-            breaching = df[~df["SLA_MET"].fillna(False).astype(bool)]
-            if not breaching.empty:
-                st.warning("Tables past their freshness SLA:")
-                styled_table(breaching[_fcols])
-            with st.expander("All registered tables"):
-                styled_table(df)
-            result_caption(res, note="Freshness from ACCOUNT_USAGE.TABLES.LAST_ALTERED (metadata lag "
-                                      "up to ~2h); refresh cadence from TABLE_DML_HISTORY over 14 days.")
+        # O10: fold each table's refresh cadence into a forward-looking tier so the
+        # tab warns BEFORE a miss, not only after. On-track/at-risk/overdue/breached.
+        df = pipeline_sla_forecast(res.df.copy())
+        met = int(df["SLA_MET"].fillna(False).astype(bool).sum())
+        total = len(df)
+        overdue = int((df["FORECAST"] == "Overdue").sum())
+        at_risk = int((df["FORECAST"] == "At risk").sum())
+        kpi_row([
+            {"label": "SLA compliance", "value": f"{met / total * 100:,.1f}%",
+             "delta": f"{met}/{total} tables", "delta_color": "off"},
+            {"label": "Breaching now", "value": f"{total - met}",
+             "delta_color": "inverse" if total - met else "off"},
+            {"label": "Trending to miss", "value": f"{overdue + at_risk}",
+             "delta": f"{overdue} overdue · {at_risk} at risk", "delta_color": "off",
+             "help": "Meets SLA now but overdue vs its own refresh cadence, or within "
+                     "one refresh cycle of the deadline — a leading indicator, not a miss yet."},
+        ])
+        _fcols = ["DATABASE_NAME", "SCHEMA_NAME", "TABLE_NAME", "OWNER", "FORECAST",
+                  "DETAIL", "HOURS_SINCE", "MAX_AGE_HOURS"]
+        forecast_rows = df[df["FORECAST"].isin(["Overdue", "At risk"])]
+        if not forecast_rows.empty:
+            st.warning("Forecast — registered tables trending toward a miss (still within SLA now):")
+            styled_table(forecast_rows[_fcols], sort_label="soonest to miss")
+        breaching = df[~df["SLA_MET"].fillna(False).astype(bool)]
+        if not breaching.empty:
+            st.warning("Tables past their freshness SLA:")
+            styled_table(breaching[_fcols])
+        with st.expander("All registered tables"):
+            styled_table(df)
+        result_caption(res, note="Freshness from ACCOUNT_USAGE.TABLES.LAST_ALTERED (metadata lag "
+                                  "up to ~2h); refresh cadence from TABLE_DML_HISTORY over 14 days.")
 
+    # Registering only MERGEs OVERWATCH's own PIPELINE_SLA_CONFIG -- it does not depend on the
+    # TABLE_DML_HISTORY read, so only a true absence of the SLA objects hides it (R1-046).
+    if res.ok or not is_setup_absence(res.error_kind):
         with st.expander("Register a table"):
             # rec43 NOT applied here: st.form would freeze the live SQL preview until
             # submit, so the operator couldn't review the EXACT INSERT before running
@@ -2994,9 +3059,39 @@ def _task_health_view(company: str, days: int, database: str = "",
                     "averages; ACCOUNT_USAGE.TASK_HISTORY lags ~45min, so this forecasts a trend, "
                     "not a live in-flight run.")
     st.divider()
+    # PR-1 R1-127: the mart's zero is only proof for the trailing 7 days the timeline scans when the
+    # window CONTAINS them. Last month ends at the 1st of this month, so a failure-free August
+    # short-circuited the 7-day TASK_HISTORY scan into a green "no failures in the last 7 days".
+    _kf = None if is_prior_month_window(bounds) else known_failed
     _failure_timeline_section(company, database, schema_contains,
-                              known_failures=known_failed if days >= 7 else None,
+                              known_failures=_kf if days >= 7 else None,
                               known_from_live=not _from_mart)
+
+
+def _sla_read_failed(res: QueryResult, what: str) -> None:
+    """A failed Tasks ▸ SLA read, by its kind (v4.605): a true absence is needs_setup, any other
+    failure is unavailable with the error -- never the panel's "no runs" / "not enough history"
+    caption, which a timeout used to share (PR-1 R1-128)."""
+    if is_setup_absence(res.error_kind):
+        empty_state("needs_setup", f"TASK_HISTORY is not readable by this app, so {what} are not evaluated.")
+    else:
+        empty_state("unavailable", f"Task run history could not be read, so {what} are not evaluated.",
+                    detail=res.error)
+
+
+def _freshness_cut_is_safe(raw) -> bool:
+    """True when a LIMIT-capped task_freshness_sla frame proves the tasks below its cut on time.
+
+    The builder ranks by silence relative to each task's yard (its longest normal gap, the
+    classifier's yardstick), so if the LAST row read is still inside its yard, every task below
+    the cut is too (R1-129). A silent last row (no success in the window) proves nothing."""
+    import pandas as pd
+    if raw is None or raw.empty:
+        return True
+    last = raw.iloc[-1]
+    mins = pd.to_numeric(last.get("MINS_SINCE_SUCCESS"), errors="coerce")
+    yard = max(safe_float(last.get("LONG_GAP_MIN")), safe_float(last.get("MEDIAN_GAP_MIN")))
+    return bool(pd.notna(mins) and yard > 0 and mins < yard)
 
 
 def _task_sla_view(company: str, days: int, database: str = "",
@@ -3023,12 +3118,20 @@ def _task_sla_view(company: str, days: int, database: str = "",
     streaks = task_failure_streaks(_sres.df) if _streaks_known else None
     section_header("Actively broken tasks (failure streaks)",
                    alarm_health(len(streaks)) if _streaks_known else "", "alerts")
-    if not _streaks_known:
-        st.caption("No SUCCEEDED/FAILED task runs in this window/scope.")
+    if _sres is not None and not _sres.ok:
+        # PR-1 R1-128: a failed read is not "no runs" -- split it by kind (v4.605) with the error.
+        _sla_read_failed(_sres, "failure streaks")
+    elif not _streaks_known:
+        empty_state("no_data_yet", "No SUCCEEDED/FAILED task runs in this window/scope.")
     else:
         if streaks.empty:
+            # failing tasks lead the read (task_recent_states), so even a capped read that holds no
+            # streak proves none exists -- the cut only ever drops healthy tasks' newest rows
             empty_state("clean", "No task is in a failure streak — every task's newest run succeeded.")
         else:
+            if getattr(_sres, "truncated", False):
+                st.caption("The read hit its row cap: failing tasks are read first, but more tasks may "
+                           "be failing than shown — narrow the Database / Schema filter.")
             broken = streaks[streaks["ACTIVELY_BROKEN"]]
             kpi_row([
                 {"label": "Tasks failing now", "value": f"{len(streaks)}",
@@ -3049,12 +3152,27 @@ def _task_sla_view(company: str, days: int, database: str = "",
     fresh = task_freshness_status(_fres.df) if _fresh_known else None
     late = (fresh[fresh["STATUS"].isin(["Late", "Stale"])]
             if _fresh_known and not fresh.empty else fresh)
+    # PR-1 R1-129: the read stops at the 200 tasks most overdue RELATIVE to their own cadence. A
+    # capped "all on time" is proven only when the last task read is still inside its yard (every
+    # task below the cut is less overdue); otherwise it is unproven -- never green then.
+    _fresh_total = (int(safe_float(_fres.df["TOTAL_TASKS"].iloc[0]))
+                    if _fresh_known and "TOTAL_TASKS" in _fres.df.columns else 0)
+    _fresh_capped = _fresh_known and _fresh_total > len(_fres.df)
+    _fresh_unproven = bool(_fresh_capped and (late is None or late.empty)
+                           and not _freshness_cut_is_safe(_fres.df))
     section_header("Task freshness (silent-stop)",
-                   alarm_health(len(late)) if _fresh_known else "", "clock")
-    if not _fresh_known:
-        st.caption("Not enough scheduled history to derive task cadence in this window/scope.")
+                   alarm_health(len(late)) if _fresh_known and not _fresh_unproven else "", "clock")
+    if _fres is not None and not _fres.ok:
+        _sla_read_failed(_fres, "task freshness")                 # R1-128
+    elif not _fresh_known:
+        empty_state("no_data_yet", "Not enough scheduled history to derive task cadence in this window/scope.")
     else:
-        if fresh.empty or late.empty:
+        if _fresh_unproven:
+            empty_state("no_data_yet", f"None of the {len(_fres.df):,} most-overdue tasks read (of "
+                        f"{_fresh_total:,}) is late, but the last one read is already past its usual "
+                        "gap, so the tasks below the read are not proven on time — narrow the "
+                        "Database / Schema filter.")
+        elif fresh.empty or late.empty:
             empty_state("clean", "Every task with a derivable cadence is on-time against its own schedule.")
         else:
             stale = late[late["STATUS"] == "Stale"]
@@ -3068,6 +3186,9 @@ def _task_sla_view(company: str, days: int, database: str = "",
                 late[["STATUS", "DATABASE_NAME", "SCHEMA_NAME", "TASK_NAME",
                       "MEDIAN_GAP_MIN", "MINS_SINCE_SUCCESS", "OVERDUE_MIN", "LAST_SUCCESS"]],
                 sort_label="overdue desc")
+            if _fresh_capped:
+                st.caption(f"Read the {len(_fres.df):,} tasks most overdue against their own cadence, of "
+                           f"{_fresh_total:,} with a derivable cadence.")
         result_caption(_fres)
     st.caption(f"Cadence is each task's own median scheduled-gap; Late/Stale is judged against "
                f"its longest NORMAL gap (p90), so a weekend or overnight idle isn't misread as "
@@ -3077,7 +3198,8 @@ def _task_sla_view(company: str, days: int, database: str = "",
     # fully-qualified name where both frames carry it. Values already computed
     # above; zero new queries. Skipped when neither feed was usable, so the badge
     # never asserts "0" on missing data.
-    if _streaks_known and _fresh_known:   # review fix: half the evidence must not badge
+    # R1-129: nor may an unproven capped freshness read badge "0"
+    if _streaks_known and _fresh_known and not _fresh_unproven:   # review fix: half the evidence must not badge
         _frames = [_fr for _fr in (streaks if _streaks_known else None,
                                    late if _fresh_known else None)
                    if _fr is not None and not _fr.empty]
@@ -3561,22 +3683,34 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
     # need me now?" before the full activity scroll. Zero new reads; idle-waste and adaptive-resize
     # candidacy stay on the Sizing lens (toggle-gated) so first-paint cost is unchanged.
     ranked = warehouse_attention_ranking(anomalies, peaks.df if peaks.ok else None)
+    # PR-1 R1-073 / R1-131: a failed concurrency read is UNKNOWN queueing, not "nobody queueing" --
+    # it used to give a green header, "Queueing 0" and the verified-clean row while the Concurrency
+    # section below showed the same read as failed. The header stays amber when spend anomalies
+    # exist and goes neutral (never green) when nothing is flagged and the queue signal is unknown.
+    _queue_known = peaks.ok
     _n_anom = int(ranked["ANOM_DAYS"].fillna(0).gt(0).sum()) if not ranked.empty else 0
     _n_queue = int(ranked["PEAK_QUEUED"].notna().sum()) if not ranked.empty else 0
-    section_header("Warehouses that need attention now", alarm_health(len(ranked)),
+    section_header("Warehouses that need attention now",
+                   alarm_health(len(ranked)) if (_queue_known or len(ranked)) else "",
                    "warehouse", anchor="ops-wh-attention")
     kpi_row([
         {"label": "Warehouses flagged", "value": f"{len(ranked)}",
-         "severity": "warn" if len(ranked) else "ok"},
+         "severity": "warn" if len(ranked) else ("ok" if _queue_known else "")},
         {"label": "With anomalous spend", "value": f"{_n_anom}"},
-        {"label": "Queueing", "value": f"{_n_queue}"},
+        {"label": "Queueing", "value": f"{_n_queue}" if _queue_known else "—",
+         "help": None if _queue_known else "The concurrency read failed — see Concurrency peaks below."},
     ])
-    if ranked.empty:
+    if ranked.empty and not _queue_known:
+        empty_state("no_data_yet", "No spend anomaly in the last 30 days; queueing could not be checked "
+                                   "(the concurrency read failed — see Concurrency peaks below).")
+    elif ranked.empty:
         empty_state("clean",
                     "No warehouse is anomalous or queueing right now — full activity below.")
     else:
-        st.caption("Merged from the spend-anomaly and concurrency signals below, worst-first "
-                   "(queueing outranks a spend anomaly). Select a warehouse to open its Entity 360.")
+        st.caption(("Merged from the spend-anomaly and concurrency signals below, worst-first "
+                    "(queueing outranks a spend anomaly)." if _queue_known else
+                    "Spend anomalies only — the concurrency read failed, so queueing is not ranked.")
+                   + " Select a warehouse to open its Entity 360.")
         entity_nav_table(
             ranked.head(5)[["WAREHOUSE_NAME", "REASON", "WORST_Z", "PEAK_QUEUED", "ANOM_USD"]],
             key=f"ops_wh_attention_{company}", key_col="WAREHOUSE_NAME",
@@ -3677,7 +3811,8 @@ def _wh_sizing_efficiency(company: str, rate: float, days: int, *,
         _sized = size_recommendations(
             with_warehouse_settings(
                 _prof.df, _whs.df if _whs.ok and not _whs.empty else pd.DataFrame()),
-            rate, served_days(_prof, days))
+            # R1-143 (W12): a calendar preset passes a day OFFSET; divide by the bounds' SPAN, as Cost ▸ Optimize does
+            rate, served_days(_prof, (bounds[1] - bounds[0]).days if bounds is not None else days))
         _sum = sizing_summary(_sized)
         # Wave 3: per-warehouse health chip — a transparent 0-100 grade (base 100 minus
         # capped queue/spill/runtime/low-util penalties) joined onto the sizing table.
@@ -4033,38 +4168,47 @@ def _contention_tab(company: str, days: int, *, bounds: tuple | None = None) -> 
         _lock_db = str(st.session_state.get("flt_database", "") or "").strip()
         # V035: the live scan read 46-56 GB / 74-259s per view (Joe's own
         # Heaviest-queries panel, 2026-07-10) — mart-first, always.
+        # #34 + PR-1 R1-133: both builders narrow to the company and the Database filter IN SQL,
+        # before their LIMIT 50 -- the old pandas seam filtered an account-wide top 50, so a
+        # database ranked 51st read as "no lock waits in this scope" (the live fallback also took
+        # its company only there). The live leg scopes by the object's database company.
         res = run_mart_first(
-            mart27_sql.lock_wait_daily(min(days, 14), company, bounds=bounds),
-            ops_sql.lock_contention(min(days, 14), bounds=bounds),
+            mart27_sql.lock_wait_daily(min(days, 14), company, bounds=bounds, database=_lock_db),
+            ops_sql.lock_contention(min(days, 14), bounds=bounds, company=company, database=_lock_db),
             page=_PAGE, key=f"c_locks_{company}_{days}_{_lock_db}{_lm}",  # #34: scope in the cache key
             mart_source=f"MART_LOCK_WAIT_DAILY ({company} + account-level)",
-            live_source="ACCOUNT_USAGE.LOCK_WAIT_HISTORY (account-wide, pre-V035)",
+            live_source="ACCOUNT_USAGE.LOCK_WAIT_HISTORY (scoped by database company, pre-V035)",
             empty_is_answer=True)
-        if guard(res, "No lock waits recorded (or the view is not accessible in this edition)."):
-            # #34: bring both paths to one company + database contract. Neither
-            # builder (both outside this cluster) takes a database predicate, and
-            # the live LOCK_WAIT_HISTORY fallback carries no company scope at all
-            # (COMPANY lives only on the mart) — yet both return DATABASE_NAME. Scope
-            # at the seam on that object grain: the live fallback to the company by
-            # database classification, and the active Database filter to both.
-            _ldf = res.df
-            _served_live = bool(getattr(_ldf, "attrs", {}).get("_ow_served_live"))
-            if _served_live and company not in ("ALL", "") and "DATABASE_NAME" in _ldf.columns:
-                _ldf = _ldf[_ldf["DATABASE_NAME"].map(companies.classify_database) == company]
-            if _lock_db and "DATABASE_NAME" in _ldf.columns:
-                _ldf = _ldf[_ldf["DATABASE_NAME"].astype(str).str.upper() == _lock_db.upper()]
-            if _ldf.empty:
-                st.caption("No lock waits in this company/database scope.")
-            else:
-                styled_table(_ldf)
-                result_caption(res)
-                # The mart covers up to 14 days but the live LOCK_WAIT_HISTORY fallback is
-                # cost-capped to the last 7 (ops_sql.lock_contention), so the counts roughly
-                # halve when it serves — disclose the shorter span rather than imply 14 days.
-                if _served_live:
-                    st.caption("Live fallback: lock waits cover the last ~7 days (the live scan "
-                               "is cost-capped); the mart covers up to 14.")
+        if guard(res, "No lock waits recorded in this company/database scope (or the view is not "
+                      "accessible in this edition)."):
+            _served_live = bool(getattr(res.df, "attrs", {}).get("_ow_served_live"))
+            styled_table(res.df)
+            result_caption(res)
+            # The mart covers up to 14 days but the live LOCK_WAIT_HISTORY fallback is
+            # cost-capped to the last 7 (ops_sql.lock_contention), so the counts roughly
+            # halve when it serves — disclose the shorter span rather than imply 14 days.
+            if _served_live:
+                st.caption("Live fallback: lock waits cover the last ~7 days (the live scan "
+                           "is cost-capped); the mart covers up to 14.")
 
+
+
+_VD_P95_RE = re.compile(r"p95 (\?|-?[0-9.]+)s->(\?|-?[0-9.]+)s")
+_VD_QUEUE_RE = re.compile(r"queue (\?|-?[0-9.]+)->(\?|-?[0-9.]+) min/d")
+
+
+def _humanize_verdict_detail(text: str) -> str:
+    """A change scan's VERDICT_DETAIL string with its durations in Hr/Min/Sec.
+
+    SP_WAREHOUSE_CHANGE_SCAN (V109) and the object-change scan (V140) build the string in SQL with
+    raw seconds ('p95 1800.0s->2400.0s', 'queue 145.00->200.00 min/d'), so the drill caption read
+    '1800.0s' right above a KPI showing the same p95 as '30m' (PR-1 R1-124). The numbers are left
+    as they are; only the duration tokens are re-rendered. The ALERT_EVENTS.DETAIL copy is SQL-side."""
+    def _h(tok: str, unit_sec: float) -> str:
+        return "?" if tok == "?" else humanize_duration(safe_float(tok) * unit_sec, "s")
+
+    out = _VD_P95_RE.sub(lambda m: f"p95 {_h(m.group(1), 1)} → {_h(m.group(2), 1)}", text)
+    return _VD_QUEUE_RE.sub(lambda m: f"queue {_h(m.group(1), 60)} → {_h(m.group(2), 60)}/day", out)
 
 
 def _wh_change_block(company: str, is_operator: bool) -> None:
@@ -4119,7 +4263,7 @@ def _wh_change_block(company: str, is_operator: bool) -> None:
                         f"{row.get('OLD_VALUE', '?')} → {row.get('NEW_VALUE', '?')}")
             _verdict_detail = str(row.get("VERDICT_DETAIL") or "").strip()
             if _verdict_detail:
-                st.caption(f"**{row.get('VERDICT')}** — {_verdict_detail}")
+                st.caption(f"**{row.get('VERDICT')}** — {_humanize_verdict_detail(_verdict_detail)}")
             if deltas:
                 def _wc_val(d: dict) -> str:
                     # P95_S is an elapsed time in seconds — humanize it (30m, 1h 30m),
@@ -4253,7 +4397,7 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
             # r4: the full verdict rationale lives here now (was a wide table column)
             _vd = str(crow.get("VERDICT_DETAIL") or "").strip()
             if _vd:
-                st.caption(f"**{crow.get('VERDICT')}** — {_vd}")
+                st.caption(f"**{crow.get('VERDICT')}** — {_humanize_verdict_detail(_vd)}")
         pick = clicked_obj or st.selectbox("Object (or click a row above)", picks, key="chg_pick")
         # T1.4: the 28d QUERY/TASK_HISTORY scan used to run every render on the
         # auto-selected first object. A row click loads it immediately; otherwise it
@@ -4508,9 +4652,14 @@ def _emergency_extras(is_operator: bool) -> None:
                 # C48: short backstop — SYSTEM$CANCEL_QUERY is async and idempotent;
                 # re-cancelling a query that survived the first request must not
                 # sit behind the default 120s bound (fragment seq never advances).
-                if confirm_gate("CANCEL", "Cancel query + audit", key="emg_rq",
+                # PR-1 R1-134: the typed CANCEL and the latch are scoped by the FULL query id. A fixed
+                # confirm key kept CANCEL armed when the operator (or a refreshed, shifted selection)
+                # moved to another query -- a one-click cancel of a query never confirmed -- and
+                # qid[:8] is shared by queries issued close together, so the latch swallowed the next one.
+                _rq_key = f"emg_rq_{qid}"
+                if confirm_gate("CANCEL", "Cancel query + audit", key=_rq_key,
                                 prompt="Type CANCEL to confirm") and write_gate_open(
-                                    f"emg_rq_{qid[:8]}", backstop=15.0):
+                                    _rq_key, backstop=15.0):
                     ok, msg = execute_cancel_query(qid, page=_PAGE)   # B2: SELECT is outside the write allow-list
                     execute_statement(
                         f"INSERT INTO {core_object('REMEDIATION_LOG')} "
@@ -4519,7 +4668,7 @@ def _emergency_extras(is_operator: bool) -> None:
                         f"{sql_literal('SYSTEM$CANCEL_QUERY ' + qid)}, "
                         f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}, {identity_sql()}",
                         page=_PAGE)
-                    stamp_write(f"emg_rq_{qid[:8]}", ok)  # C48
+                    stamp_write(_rq_key, ok)  # C48
                     notify(ok, msg)
 
 
@@ -4598,9 +4747,10 @@ def render() -> None:
         },
         "Warehouses": {
             "applies": ("company",),
-            "partial": ("days",),
+            "partial": ("days", "database"),
             "note": ("Contention uses Window; warehouse anomaly history is a fixed 30-day view; the "
-                     "statement-timeout runtime tail reads max(Window, 30) days, capped at 90."),
+                     "statement-timeout runtime tail reads max(Window, 30) days, capped at 90. "
+                     "Lock waits also narrow to the Database filter."),
         },
         "Optimize": {
             "applies": ("company", "days"),

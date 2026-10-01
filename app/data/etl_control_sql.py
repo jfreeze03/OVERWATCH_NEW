@@ -655,7 +655,10 @@ def recon_errors_scan(
         return ""
     return (
         "SELECT MTRC, FRQCY, VALUE_TYPE, RECON_MTRC_LAYER,\n"
-        "       SOURCE_LAYER, TARGET_LAYER, SOURCE_ERROR, TARGET_ERROR, LOAD_DTTM\n"
+        "       SOURCE_LAYER, TARGET_LAYER, SOURCE_ERROR, TARGET_ERROR, LOAD_DTTM,\n"
+        # window totals run before the LIMIT, so the panel's headline counts every error row and
+        # metric in the window, not the newest max_rows (PR-1 R1-066 / R1-137, uncapped-aggregate)
+        "       COUNT(*) OVER () AS TOTAL_ERRORS, COUNT(DISTINCT MTRC) OVER () AS TOTAL_METRICS\n"
         f"  FROM {tbl}\n"
         f"  WHERE LOAD_DTTM >= DATEADD('day', -{int(days)}, CURRENT_TIMESTAMP())\n"
         "  ORDER BY LOAD_DTTM DESC, MTRC\n"
@@ -781,6 +784,15 @@ def recon_recurrence_scan(
         "         MAX_BY(TARGET_ERROR, LOAD_DTTM) AS TARGET_ERROR\n"
         "  FROM errs GROUP BY 1, 2, 3, 4\n"
         ")\n"
+        # PR-1 R1-137: the per-check rows are wrapped so the banner's totals and the cap's order read
+        # the finished BROKE_LATEST_CYCLE column: TOTAL_CHECKS / ACTIVE_CHECKS_TOTAL are window
+        # totals over every check (evaluated before the LIMIT), and still-breaking checks rank first
+        # -- the Python tier ladder's order -- so the cap evicts resolved checks, never a
+        # low-recurrence break in the latest cycle (which used to sort last and fall off).
+        "SELECT r.*,\n"
+        "       COUNT(*) OVER () AS TOTAL_CHECKS,\n"
+        "       SUM(IFF(r.BROKE_LATEST_CYCLE, 1, 0)) OVER () AS ACTIVE_CHECKS_TOTAL\n"
+        "FROM (\n"
         "SELECT a.MTRC, a.FRQCY, a.VALUE_TYPE, a.RECON_MTRC_LAYER,\n"
         "       a.BROKEN_CYCLES, f.TOTAL_ERROR_CYCLES,\n"
         "       ROUND(100.0 * a.BROKEN_CYCLES / NULLIF(f.TOTAL_ERROR_CYCLES, 0), 0) AS RECURRENCE_PCT,\n"
@@ -798,7 +810,9 @@ def recon_recurrence_scan(
         "  JOIN freq f ON f.FRQCY = a.FRQCY\n"
         "  JOIN ctx  x ON x.MTRC = a.MTRC AND x.FRQCY = a.FRQCY\n"
         "               AND x.VALUE_TYPE = a.VALUE_TYPE AND x.RECON_MTRC_LAYER = a.RECON_MTRC_LAYER\n"
-        "  ORDER BY RECURRENCE_PCT DESC, a.RECENT_BROKEN DESC, a.BROKEN_CYCLES DESC, x.ERROR_ROWS DESC\n"
+        ") r\n"
+        "  ORDER BY r.BROKE_LATEST_CYCLE DESC, r.RECURRENCE_PCT DESC, r.RECENT_BROKEN DESC,\n"
+        "           r.BROKEN_CYCLES DESC, r.ERROR_ROWS DESC\n"
         f"  LIMIT {int(max_rows)}"
     )
 

@@ -16,9 +16,12 @@ def _read(rel: str) -> str:
 def test_wasted_spend_monthlyizes_and_labels_by_the_served_window():
     # the live wasted-spend scan clamps a trailing window to 90d, so the monthly divisor AND the
     # tile label must use the SERVED window, not the raw 180/365 pick (else ~2-4x understated + a
-    # served-window label lie). Bounded presets scan the full range, so days stays right there.
+    # served-window label lie). Bounded presets scan the full range, so they divide by its day SPAN
+    # (PR-1 R1-049 corrected the old "days stays right there": the Current-month / Current-year
+    # offset is one less than the span, which doubled the run-rate on the 2nd of the month).
     src = _read("app/ui/pages/operations.py")
-    assert "_waste_served = days if bounds is not None else min(int(days), MAX_LIVE_WINDOW_DAYS)" in src
+    assert "_waste_served = ((bounds[1] - bounds[0]).days if bounds is not None" in src
+    assert "else min(int(days), MAX_LIVE_WINDOW_DAYS))" in src
     assert "monthly = _wasted_total / max(_waste_served, 1) * 30.0" in src
     assert "window_label(bounds, _waste_served)" in src
     # the raw-days divisor + label are gone

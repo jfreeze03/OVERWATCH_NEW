@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 
 from app import companies
 from app.config import CORE_SCHEMA, OVERWATCH_DB, core_object
@@ -257,9 +258,10 @@ def task_recent_states(days: int, company: str = "ALL", database: str = "",
 
     ``task_runs`` collapses each task with ``MAX_BY(STATE, ...)`` — it sees only the
     newest state, so it can't tell a one-off failure from a task stuck failing every
-    run. This returns the last ``per_task`` SUCCEEDED/FAILED runs per task so
-    ``logic.insights.task_failure_streaks`` can count the leading FAILED streak
-    (consecutive failures since the last success). SKIPPED/CANCELLED are excluded so
+    run. This returns, for a task whose newest run FAILED, its last ``per_task``
+    SUCCEEDED/FAILED runs, so ``logic.insights.task_failure_streaks`` can count the
+    leading FAILED streak (consecutive failures since the last success); every other
+    task contributes only its newest run (it cannot be in a streak), failing tasks first. SKIPPED/CANCELLED are excluded so
     the streak measures real success-vs-failure, not scheduler skips. TASK_HISTORY
     prunes on SCHEDULED_TIME, so the window bounds that column."""
     days = bounded_days(days)
@@ -289,13 +291,26 @@ WITH attempts AS (
     QUALIFY ROW_NUMBER() OVER (
         PARTITION BY DATABASE_NAME, SCHEMA_NAME, NAME, SCHEDULED_TIME
         ORDER BY COMPLETED_TIME DESC NULLS LAST) = 1
+),
+ranked AS (
+    SELECT
+        DATABASE_NAME, SCHEMA_NAME, TASK_NAME, SCHEDULED_TIME, STATE, ERROR_MESSAGE,
+        ROW_NUMBER() OVER (
+            PARTITION BY DATABASE_NAME, SCHEMA_NAME, TASK_NAME
+            ORDER BY SCHEDULED_TIME DESC) AS RN,
+        FIRST_VALUE(STATE) OVER (
+            PARTITION BY DATABASE_NAME, SCHEMA_NAME, TASK_NAME
+            ORDER BY SCHEDULED_TIME DESC) AS NEWEST_STATE
+    FROM attempts
 )
+-- PR-1 R1-129: only a task whose NEWEST run failed can have a streak, so a healthy task needs just
+-- its newest row (it still proves the task ran -- "no runs" stays distinct from "clean"), and the
+-- failing tasks lead the order. The old 12-rows-for-every-task, alphabetical frame overran the
+-- caller's row cap past ~333 tasks and silently dropped late-named broken tasks.
 SELECT DATABASE_NAME, SCHEMA_NAME, TASK_NAME, SCHEDULED_TIME, STATE, ERROR_MESSAGE
-FROM attempts
-QUALIFY ROW_NUMBER() OVER (
-    PARTITION BY DATABASE_NAME, SCHEMA_NAME, TASK_NAME
-    ORDER BY SCHEDULED_TIME DESC) <= {per_task}
-ORDER BY DATABASE_NAME, SCHEMA_NAME, TASK_NAME, SCHEDULED_TIME DESC
+FROM ranked
+WHERE RN = 1 OR (NEWEST_STATE = 'FAILED' AND RN <= {per_task})
+ORDER BY IFF(NEWEST_STATE = 'FAILED', 0, 1), DATABASE_NAME, SCHEMA_NAME, TASK_NAME, SCHEDULED_TIME DESC
 """
 
 
@@ -445,7 +460,9 @@ SELECT c.DATABASE_NAME, c.SCHEMA_NAME, c.TASK_NAME,
        ROUND(c.LONG_GAP_MIN, 1) AS LONG_GAP_MIN,
        c.INTERVALS,
        l.LAST_SUCCESS, l.LAST_SCHEDULED, l.LAST_STATE,
-       DATEDIFF('minute', l.LAST_SUCCESS, CURRENT_TIMESTAMP()) AS MINS_SINCE_SUCCESS
+       DATEDIFF('minute', l.LAST_SUCCESS, CURRENT_TIMESTAMP()) AS MINS_SINCE_SUCCESS,
+       -- PR-1 R1-129: pre-LIMIT count, so a capped read can say "200 of N"
+       COUNT(*) OVER () AS TOTAL_TASKS
 FROM cadence c
 JOIN last_run l
   ON l.DATABASE_NAME = c.DATABASE_NAME
@@ -455,7 +472,13 @@ WHERE c.MEDIAN_GAP_MIN IS NOT NULL AND c.INTERVALS >= 3
 -- NULLS FIRST: a task with no SUCCEEDED run in the window has NULL
 -- MINS_SINCE_SUCCESS but is the HIGHEST-severity 'silent' case — keep it under the
 -- LIMIT, don't let it be truncated first (the classifier ranks these Stale/High).
-ORDER BY MINS_SINCE_SUCCESS DESC NULLS FIRST
+-- PR-1 R1-129: rank by silence RELATIVE to the task's own yard (the longest normal gap the
+-- classifier judges against), not absolute minutes -- 200 on-time nightly tasks used to outrank a
+-- 5-minute task stopped for 3 hours and push it past the LIMIT. Ranked this way, a cut whose last
+-- row is still inside its yard proves every task below the cut is on time too.
+ORDER BY DATEDIFF('minute', l.LAST_SUCCESS, CURRENT_TIMESTAMP())
+             / NULLIF(GREATEST(COALESCE(c.LONG_GAP_MIN, 0), c.MEDIAN_GAP_MIN), 0) DESC NULLS FIRST,
+         MINS_SINCE_SUCCESS DESC NULLS FIRST
 LIMIT 200
 """
 
@@ -486,8 +509,9 @@ LIMIT 50
 """
 
 
-def lock_contention(days: int, *, bounds: tuple | None = None) -> str:
-    """Lock waits (account-wide; LOCK_WAIT_HISTORY has no warehouse grain).
+def lock_contention(days: int, *, bounds: tuple | None = None, company: str = "ALL",
+                    database: str = "") -> str:
+    """Lock waits (LOCK_WAIT_HISTORY has no warehouse grain).
     Window capped at 7d (was 14): the 14-day scan read ~56GB per run on this
     account (fleet board, 2026-07-10) and lock triage is a this-week
     question — history beyond that lives in the incident timeline.
@@ -495,12 +519,24 @@ def lock_contention(days: int, *, bounds: tuple | None = None) -> str:
     The 7d cost cap holds under Last-month bounds too: an unclamped bounds would
     make scope_window_where ignore ``days`` and scan the whole ~31-day month (~4x
     the cap this builder exists to enforce), so bounds are intersected with the last
-    7 days of the bounded window on this LIVE fallback path (bug-hunt round 5)."""
+    7 days of the bounded window on this LIVE fallback path (bug-hunt round 5).
+
+    ``company`` / ``database`` narrow the scan in SQL, BEFORE the LIMIT 50 -- the page used to
+    filter an account-wide top 50 in pandas, so a database ranked 51st read as 'no lock waits'
+    (PR-1 R1-133). Company is the object's database company (COMPANY_FOR_DATABASE on a plain
+    column, the V030 shape), the axis the mart's COMPANY column carries."""
     days = bounded_days(days, maximum=7)
     if bounds is not None:
-        from datetime import timedelta
         _start, _end = bounds
-        bounds = (max(_start, _end - timedelta(days=days)), _end)
+        # Clip to the 7-day CAP, not the day OFFSET: Current month on the 1st passes
+        # CalendarDayOffset(0), and (end - 0d, end) was an EMPTY window, while on days 2-7 the
+        # offset (one less than the span) dropped the 1st (PR-1 R1-053).
+        bounds = (max(_start, _end - timedelta(days=7)), _end)
+    where = and_where(
+        scope_window_where("REQUESTED_AT", days, bounds=bounds),
+        companies.database_company_scope(company),
+        companies.database_equals_clause(database),
+    )
     return f"""
 SELECT
     DATABASE_NAME,
@@ -516,7 +552,7 @@ SELECT
     COUNT_IF(ACQUIRED_AT IS NULL) AS NEVER_ACQUIRED,
     MAX(REQUESTED_AT) AS LAST_SEEN
 FROM SNOWFLAKE.ACCOUNT_USAGE.LOCK_WAIT_HISTORY
-WHERE {scope_window_where("REQUESTED_AT", days, bounds=bounds)}
+WHERE {where}
 GROUP BY 1, 2, 3, 4
 ORDER BY NEVER_ACQUIRED DESC, ACQUIRED_WAIT_SEC DESC
 LIMIT 50
@@ -1012,7 +1048,7 @@ def proc_regression(days: int, company: str = "ALL", warehouse_contains: str = "
                     user_contains: str = "", database: str = "",
                     schema_contains: str = "", min_calls: int = 5, *,
                     bounds: tuple | None = None) -> str:
-    """Stored procedures whose runtime crept up vs the prior equal-length window.
+    """Stored procedures whose runtime crept up vs the prior window.
 
     Emits, per proc, this window's vs the previous window's success-only p95/avg
     and the percent change, so a proc that got slower surfaces even if it is cheap.
@@ -1026,19 +1062,31 @@ def proc_regression(days: int, company: str = "ALL", warehouse_contains: str = "
     rounding. Latency is success-only, and the fail-rate delta is surfaced so 'faster
     because it now errors out' is not mistaken for an improvement. The current window
     is the trailing ``days`` days including today so far; the prior window is exactly
-    ``days`` full days before it. Ranked by p95 growth, worst first. ~6h ACCOUNT_USAGE
-    latency applies to the current window's most recent hours.
+    ``days`` full days before it. Under ``bounds`` a whole calendar month (Last month) is
+    compared with the calendar month before it; a period-to-date range (Current month /
+    Current year) with the equal-length span just before its start. Ranked by p95 growth,
+    worst first. ~6h ACCOUNT_USAGE latency applies to the current window's most recent hours.
     """
     days = bounded_days(days)
     min_calls = max(1, min(int(min_calls or 5), 10000))
-    # Vs-prior: for 'Last month' (bounds) CURRENT is that calendar month and PRIOR is
-    # the month before it — scan [prior_start, cur_end) and split the CUR/PRIOR IFF on
-    # cur_start. Trailing keeps the 2*days scan split on the -days CURRENT_DATE anchor.
+    # Vs-prior under bounds: scan [prior_start, cur_end) and split the CUR/PRIOR IFF on
+    # cur_start. A whole calendar month ('Last month') compares with the month before it.
+    # PR-1 R1-039: Current month / Current year bounds are PERIOD-TO-DATE, and the old
+    # always-the-month-before rule compared a 3-day MTD with all of August and nine months
+    # of YTD with December alone -- they compare with the equal-length span just before
+    # cur_start (on the 1st: today vs yesterday, never an empty PRIOR). Trailing keeps the
+    # 2*days scan split on the -days CURRENT_DATE anchor.
     if bounds is not None:
         cur_start, cur_end = bounds
-        prior_start = (cur_start.replace(year=cur_start.year - 1, month=12)
-                       if cur_start.month == 1
-                       else cur_start.replace(month=cur_start.month - 1))
+        _next_month = (cur_start.replace(year=cur_start.year + 1, month=1)
+                       if cur_start.month == 12
+                       else cur_start.replace(month=cur_start.month + 1))
+        if cur_start.day == 1 and cur_end == _next_month:
+            prior_start = (cur_start.replace(year=cur_start.year - 1, month=12)
+                           if cur_start.month == 1
+                           else cur_start.replace(month=cur_start.month - 1))
+        else:
+            prior_start = cur_start - timedelta(days=max((cur_end - cur_start).days, 1))
         outer_bounds = (prior_start, cur_end)
         cur_from = f"START_TIME >= '{cur_start.isoformat()}'"
     else:
@@ -1688,7 +1736,11 @@ FROM (
     -- cannot establish a baseline and is filtered out.
     HAVING AVG_ROWS >= 1000 AND DAYS_ACTIVE_7D >= 3
 )
-ORDER BY DROP_PCT DESC
+-- Severity first, THEN the drop: a weekday-suppressed NORMAL row keeps DROP_PCT = 100, so a
+-- bare DROP_PCT DESC put 50 Sunday/Monday business-day tables above (and past the LIMIT, out
+-- of) a genuine FAILED table (PR-1 R1-047). NORMAL rows stay as the informational tail.
+ORDER BY CASE STATUS WHEN 'FAILED' THEN 0 WHEN 'WATCH' THEN 1 ELSE 2 END,
+         DROP_PCT DESC, DATABASE_NAME, SCHEMA_NAME, TABLE_NAME
 LIMIT 50
 """
 
