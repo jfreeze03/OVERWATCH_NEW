@@ -2077,7 +2077,10 @@ def contract_exhaustion() -> str:
     unbounded. TERM_END is exposed so formulas.contract_runway reads a contract whose
     projected exhaustion falls on or after the end as "outlasts the term", never a red
     countdown; once the term is over (account today >= TERM_END) TOTAL reads 0 and the
-    always-on bars render nothing, like the Contract tab's term-ended panel.
+    always-on bars render nothing, like the Contract tab's term-ended panel. TERM_OVER is TRUE
+    for exactly that case on a CONFIGURED contract (the source TOTAL: start set, credits > 0),
+    so the page verdicts say the term ended instead of "no contract runway configured"
+    (formulas.contract_term_ended -> verdict.contract_runway_clause).
 
     The COST_CONTRACT_BREACH paging arm (SP_ALERT_SCAN_DAILY) shares the burn since V064, and
     since V169 also this start gate (r33 [3]; R2-103) and the end bound -- before V169 the
@@ -2088,6 +2091,7 @@ def contract_exhaustion() -> str:
     return f"""
 SELECT IFF(TERM_END IS NOT NULL AND {today} >= TERM_END, 0, TOTAL) AS TOTAL,
        CONSUMED, DAILY_BURN, TERM_END,
+       (src.TERM_END IS NOT NULL AND {today} >= src.TERM_END AND src.TOTAL > 0) AS TERM_OVER,
        CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)) AS DAYS_LEFT,
        DATEADD('day', CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)),
                {today}) AS EXHAUST_DATE
@@ -2123,7 +2127,7 @@ FROM (
          FROM {mart_object("FACT_METERING_DAILY")}
          WHERE DAY BETWEEN DATEADD('day', -30, CURRENT_DATE())
                        AND DATEADD('day', -1, CURRENT_DATE())) AS DAILY_BURN
-)
+) src
 """
 
 

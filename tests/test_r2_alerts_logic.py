@@ -396,9 +396,13 @@ def test_r2_045_metric_not_in_threshold_units_is_withheld():
         assert sql in bodies, sql
     for gone in ("               m.MTD_USD,\n", "AND m.MTD_USD > :budget_usd"):
         assert gone not in bodies, gone
-    for rule, units in (("COST_BUDGET_PACE", "month-to-date dollars through yesterday"),
+    for rule, units in (("COST_BUDGET_PACE", "month-to-date dollars (through yesterday since V169)"),
                         ("COST_FORECAST_BREACH", "projected month-end dollars")):
         assert units in tuning.METRIC_NOT_THRESHOLD_UNITS[rule], rule
+    # law 12 (review r1): tuning.py is pure and cannot schema-gate, and the app deploys before V169 is applied
+    # (and the NOISE / ACTIONED sample is pre-V169 events), so the withhold text must hold on BOTH sides of the
+    # apply: it may name V169's basis only as "since V169", never as the unconditional basis.
+    assert "month-to-date dollars through yesterday" not in tuning.METRIC_NOT_THRESHOLD_UNITS["COST_BUDGET_PACE"]
     pace = _ev([21000, 24000, 28000, 30000, 33000, 36000], ["NOISE"] * 6)
     for rule in sorted(tuning.METRIC_NOT_THRESHOLD_UNITS):
         got = tuning.suggest_threshold(pace, 1.10, rule_id=rule)

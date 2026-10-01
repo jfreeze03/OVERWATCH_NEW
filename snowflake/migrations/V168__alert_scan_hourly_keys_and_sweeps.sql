@@ -39,6 +39,14 @@
 -- below its CLEAR threshold (PREFLIGHT P168.1 counts them; nothing is written at apply time). A failures-only or
 -- success pair first seen in the last 24h does not re-raise (the guard reads its V162 undated key). The apply day
 -- can raise one legitimate CRIT|<yesterday> PIPE_COPY_FAILURES event for a day whose full count first reaches 10.
+-- Two apply-window suppressions, once each: (1) PIPE_COPY_FAILURES -- a table whose yesterday failures V162 re-raised
+-- after midnight under today's date (title '... (24h)', the R2-035 carry-over) folds the apply day's new failures of
+-- the same band into that event, so nothing pages for them that day unless they cross into the other band; PREFLIGHT
+-- P168.2 flags those keys (HELD_BY_A_V162_EVENT). (2) SEC_NEW_ADMIN_NETWORK -- the guard cannot tell a V162 undated
+-- event's outcome, so a success that follows a failures-only V162 event inside its 48h does not raise its own event
+-- (R2-039's separate success event holds from the first V168 key on); PREFLIGHT P168.4 (second grid) lists the
+-- candidates. Standing (as under V162): within one failure day, a new failure that lands after an operator resolved
+-- that day's PIPE_COPY_FAILURES event stays suppressed until the next Central day, unless it crosses WARN -> CRIT.
 -- ROLLBACK: re-run V162's SP_ALERT_SCAN (V162__security_takeover_admin_grant.sql, the second CREATE PROCEDURE). A
 -- pair raised under V168 in the last 24h may raise once more under the undated key; the NAME text can stay.
 -- Apply AFTER V167. Idempotent; safe to re-run.

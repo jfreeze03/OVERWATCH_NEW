@@ -17,7 +17,7 @@ import pytest
 
 from app.core.result import QueryResult
 from app.logic import contract_planner
-from app.logic.formulas import contract_runway
+from app.logic.formulas import contract_runway, contract_term_ended
 from app.logic.verdict import (
     NO_CONTRACT_RUNWAY,
     RUNWAY_ON_TRACK,
@@ -95,6 +95,31 @@ def test_a_contract_that_outlasts_its_term_is_not_a_runway_concern():
     no_end = {k: v for k, v in _OUTLASTS.items() if k != "TERM_END"}
     assert contract_runway(pd.Series(no_end))["severity"] == "bad"
     assert contract_runway(pd.Series(dict(_OUTLASTS, TERM_END=None)))["severity"] == "bad"
+
+
+# A configured contract whose term is over: contract_exhaustion reads TOTAL 0 (the bars render nothing, like the
+# Contract tab's term-ended panel) and flags TERM_OVER; an end date alone with nothing configured is not TERM_OVER.
+_TERM_OVER = {"TOTAL": 0.0, "CONSUMED": 98000.0, "DAILY_BURN": 80.0, "DAYS_LEFT": -1225.0,
+              "EXHAUST_DATE": "2023-06-01", "TERM_END": "2026-09-01", "TERM_OVER": True}
+_END_ONLY = {"TOTAL": 0.0, "CONSUMED": 0.0, "DAILY_BURN": 80.0, "DAYS_LEFT": 0.0,
+             "EXHAUST_DATE": "2026-10-01", "TERM_END": "2026-09-01", "TERM_OVER": False}
+
+
+def test_a_contract_whose_term_is_over_says_so_and_never_reads_unconfigured():
+    """Review r1 (R2-042 twin): once account today >= CONTRACT_END_DATE the runway is withheld (TOTAL 0), and the
+    healthy clause must not then claim nothing is configured -- it names the ended term and where to set the next."""
+    assert _best(_TERM_OVER) is None                                       # the bars still render nothing
+    assert contract_term_ended(pd.Series(_TERM_OVER)) == "2026-09-01"
+    clause = contract_runway_clause(None, term_ended="2026-09-01")
+    assert clause != NO_CONTRACT_RUNWAY and "configured" not in clause and "on track" not in clause
+    assert "term" in clause and "2026-09-01" in clause and "Admin" in clause
+    # an end date alone (no credits / start), a missing column, no row: still the unconfigured clause
+    for row in (pd.Series(_END_ONLY), pd.Series(_NO_CONTRACT), None):
+        assert contract_term_ended(row) is None
+    assert contract_runway_clause(None, term_ended=None) == NO_CONTRACT_RUNWAY
+    # a live runway (e.g. the billing balance basis) keeps its own clause
+    assert contract_runway_clause(_best(_LONG), term_ended="2026-09-01") == RUNWAY_ON_TRACK
+    assert contract_term_ended(pd.Series({**_TERM_OVER, "TERM_OVER": None})) is None
 
 
 def test_no_runway_is_quiet_when_read_and_watch_when_the_read_failed():
@@ -183,6 +208,18 @@ def test_pages_claim_nothing_about_an_unconfigured_contract(monkeypatch, page):
     v = _drive(monkeypatch, page, _NO_CONTRACT)
     assert v["label"] == "Healthy", v
     assert NO_CONTRACT_RUNWAY in v["body"]
+    assert "on track" not in v["body"] and "contract runway healthy" not in v["body"]
+
+
+@pytest.mark.parametrize("page", ["Cost Intelligence", "Brief"])
+def test_pages_say_the_term_is_over_not_unconfigured(monkeypatch, page):
+    """Review r1: a configured contract past its term (TOTAL 0 + TERM_OVER) used to read 'no contract runway
+    configured' on both verdicts -- the forgotten roll-forward case. It names the ended term instead (no concern is
+    raised: a post-term nudge is the open R2-042 owner question)."""
+    v = _drive(monkeypatch, page, _TERM_OVER)
+    assert v["label"] == "Healthy", v
+    assert NO_CONTRACT_RUNWAY not in v["body"] and "configured" not in v["body"]
+    assert "term" in v["body"] and "2026-09-01" in v["body"] and "Admin" in v["body"]
     assert "on track" not in v["body"] and "contract runway healthy" not in v["body"]
 
 

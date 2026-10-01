@@ -113,9 +113,16 @@ def test_r2_042_contract_exhaustion_counts_the_term_only_and_goes_quiet_after_it
     doc = mart_sql.contract_exhaustion.__doc__ or ""
     assert "no divergence remains" not in doc and "V169" in doc
     assert "V064 SP_ALERT_SCAN_DAILY" not in sql
+    # review r1: TERM_OVER tells a configured contract past its term (TOTAL withheld to 0) apart from an
+    # unconfigured one, so the verdict clause never says "no contract runway configured" for it. It reads the
+    # SOURCE TOTAL (the start-gated credits), qualified so the outer TOTAL alias can never shadow it.
+    assert ("(src.TERM_END IS NOT NULL AND CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE "
+            ">= src.TERM_END AND src.TOTAL > 0) AS TERM_OVER") in flat
+    assert flat.rstrip().endswith(") src")
     sqlglot = pytest.importorskip("sqlglot")
     (tree,) = sqlglot.parse(sql, dialect="snowflake")
-    assert [c.alias_or_name for c in tree.expressions][:4] == ["TOTAL", "CONSUMED", "DAILY_BURN", "TERM_END"]
+    assert [c.alias_or_name for c in tree.expressions][:5] == ["TOTAL", "CONSUMED", "DAILY_BURN", "TERM_END",
+                                                                "TERM_OVER"]
 
 
 # --- [5] plan_scenarios overflow guard -------------------------------------

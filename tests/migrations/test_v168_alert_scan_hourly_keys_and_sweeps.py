@@ -238,6 +238,10 @@ def test_v168_preflight_and_part_b_are_read_only_and_parse(tmp_path, which):
     from sqlglot import exp
     parsed = [p for p in sqlglot.parse(sql, dialect="snowflake") if p is not None]
     assert len(parsed) == (5 if which == "preflight" else 3)
+    # review r1 / correction 5: P168.1, the second P168.4 grid and V168.4 compare ALERT_EVENTS.RAISED_AT (Central
+    # wall-clock TIMESTAMP_NTZ) with CURRENT_TIMESTAMP(); in the owner's UTC worksheet they shift 5-6h, so each file
+    # says it runs in a Central session (the integrator's RUN_NEXT leads with the timezone pin)
+    assert "in a Central session" in sql[:400], which
     writes = (exp.Insert, exp.Update, exp.Delete, exp.Merge, exp.Create, exp.Drop, exp.Command)
     for tree in parsed:
         assert tree.key == "select" or isinstance(tree, exp.Union), tree.key
@@ -256,6 +260,11 @@ def test_v168_preflight_carries_the_arm_and_sweep_text_verbatim(tmp_path):
     assert firing in pre
     for grid in ("-- P168.1 ", "-- P168.2 ", "-- P168.3 ", "-- P168.4 "):
         assert pre.count(grid) == 1, grid
+    # review r1: P168.2 flags a key already held by a V162 event (title '... (24h)'), which absorbs the apply day's
+    # new failures of that band (V168 FIRST RUN (1))
+    p2 = pre[pre.index("-- P168.2 "):pre.index("-- P168.3 ")]
+    assert "e.TITLE AS EXISTING_TITLE" in p2
+    assert "e.TITLE LIKE '%failed file load(s) (24h)' AS HELD_BY_A_V162_EVENT" in p2
 
 
 def test_v168_owner_repair_is_optional_and_fully_commented(tmp_path):
@@ -264,6 +273,7 @@ def test_v168_owner_repair_is_optional_and_fully_commented(tmp_path):
     assert not _strip_noise(rp).strip()
     flat = " ".join(ln.lstrip("- ") for ln in rp.splitlines())
     assert "R168.1 OPTIONAL (owner decision)" in flat and "SNOOZED rows are left to wake" in flat
+    assert "in a Central session" in rp[:400]
     assert "RESOLUTION_KIND = 'SUPERSEDED'" in flat and "never DELETE" in flat
     sqlglot = pytest.importorskip("sqlglot")
     lines = rp.splitlines()

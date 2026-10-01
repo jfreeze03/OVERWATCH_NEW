@@ -167,6 +167,24 @@ def contract_runway(row: pd.Series | None, *, lead_days: int = 30) -> dict | Non
     }
 
 
+def contract_term_ended(row: pd.Series | None) -> str | None:
+    """The ended term's TERM_END (ISO date) when a contract_exhaustion row flags TERM_OVER, else None.
+
+    Review r1 (R2-042 twin): once account today >= CONTRACT_END_DATE (EXCLUSIVE) the runway is withheld
+    (TOTAL 0, so contract_runway returns None and the bars render nothing). TERM_OVER is TRUE only for a
+    CONFIGURED contract (start set, credits > 0), so the page verdicts can say the term ended instead of
+    claiming no contract is configured. Pure: the flag and the date come from the row, not a clock."""
+    if row is None:
+        return None
+    flag = row.get("TERM_OVER")
+    if flag is None or (not isinstance(flag, str) and bool(pd.isna(flag))):
+        return None
+    if str(flag).strip().upper() not in ("TRUE", "1", "1.0", "YES"):
+        return None
+    end = _coerce_date(row.get("TERM_END"))
+    return end.isoformat() if end else None
+
+
 def safe_div(numerator: float, denominator: float, default: float = 0.0) -> float:
     """Division that treats a zero/invalid denominator as ``default``."""
     den = safe_float(denominator)

@@ -31,7 +31,7 @@ else is byte-identical to V163 and the V169 test normalizes it back:
 R2-045 (pace ratio as METRIC_VALUE) is NOT here: it waits on the owner (owner_questions). The COST_EGRESS_SPIKE NAME
 refresh touches the row only while NAME still equals its V043 seed. No CALL, DROP, task or ALERT_EVENTS write at
 apply time. With PREFLIGHT_OUT / PART_B_OUT / REPAIR_OUT set, also writes the read-only PREFLIGHT (P169.1-P169.7),
-the RUN_NEXT PART B verify grids (V169.1-V169.3) and the comment-only owner repair notes, built from the SAME arm
+the RUN_NEXT PART B verify grids (V169.1-V169.4) and the comment-only owner repair notes, built from the SAME arm
 text. The byte-identity test never sets them.
 
 Run: python outputs/gen_v169.py
@@ -375,6 +375,13 @@ HEADER = f"""-- {NAME}
 -- slightly more sensitive (it now projects today); COST_IDLE_OPPORTUNITY may raise for never-suspend warehouses for
 -- the first time (PREFLIGHT P169.6 lists them); a contract past its end or outlasting it goes quiet; one egress
 -- spike confined to 00:00-07:00 of yesterday can raise once more. Nothing runs at apply time.
+-- DQ_RECON_ERROR keeps two residuals of its cycle-day key. (a) Once, at the transition: a pre-V169 scan keyed the
+-- SCAN date, so a failing cycle that loads later on a date the old scan already keyed (A 21:00 after the A ~07:00
+-- scan wrote DQ_RECON_ERROR|A) folds into that older event and is not paged; V163 would have paged it as |A+1.
+-- (b) Standing: a failing re-run that loads on a date whose event already exists (after that morning's scan)
+-- folds into that date's event and does not page the next morning -- one page per failing cycle date, the
+-- Reconciliation errors panel's cycle definition. PREFLIGHT P169.4 shows the newest load and its hour; PART B
+-- V169.4 (the morning after the first scan) flags a newest cycle covered only by an event raised before it loaded.
 -- ROLLBACK: re-run V163's SP_ALERT_SCAN_DAILY (V163__ai_runaway_trust_regression.sql, the CREATE PROCEDURE); the
 -- NAME text can stay.
 -- Apply AFTER V168. Idempotent; safe to re-run.
@@ -533,15 +540,18 @@ LEFT JOIN g_old o ON o.DATABASE_NAME = m.DATABASE_NAME
 LEFT JOIN g_new n ON n.DATABASE_NAME = m.DATABASE_NAME
 ORDER BY m.USAGE_DATE DESC, m.DATABASE_NAME;
 
--- P169.4 R2-020 / R2-043: the key the next scan writes (newest error-cycle date) and whether it exists, plus the
---        DQ_RECON_ERROR events of the last 90 days in raise order (a next-day twin of the same TITLE is a duplicate
---        page; resolve a still-OPEN older twin in Alerts).
+-- P169.4 R2-020 / R2-043: the key the next scan writes (newest error-cycle date), the newest load's HOUR and whether
+--        that key exists. FOLDS_INTO_OLDER_EVENT = the key was raised BEFORE the newest cycle loaded: after V169
+--        that cycle is not paged (V169 FIRST RUN (a), once at the transition; a NEWEST_LOAD_HOUR after the ~07:00
+--        scan makes it likely around the apply). Then the DQ_RECON_ERROR events of the last 90 days in raise order
+--        (a next-day twin of the same TITLE is a duplicate page; resolve a still-OPEN older twin in Alerts).
 WITH n AS (
     SELECT MAX(LATEST_LOAD) AS NEWEST_LOAD FROM DBA_MAINT_DB.OVERWATCH.ETL_RECON_RESULTS
 )
-SELECT n.NEWEST_LOAD,
+SELECT n.NEWEST_LOAD, HOUR(n.NEWEST_LOAD) AS NEWEST_LOAD_HOUR,
        'DQ_RECON_ERROR|' || TO_VARCHAR(COALESCE(TO_DATE(n.NEWEST_LOAD), CURRENT_DATE())) AS NEXT_KEY,
-       e.STATUS AS EXISTING_STATUS
+       e.STATUS AS EXISTING_STATUS, e.RAISED_AT AS EXISTING_RAISED_AT,
+       e.RAISED_AT < n.NEWEST_LOAD AS FOLDS_INTO_OLDER_EVENT
 FROM n
 LEFT JOIN DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
        ON e.DEDUPE_KEY = 'DQ_RECON_ERROR|' || TO_VARCHAR(COALESCE(TO_DATE(n.NEWEST_LOAD), CURRENT_DATE()));
@@ -614,8 +624,9 @@ _RULES = ("COST_BUDGET_PACE", "COST_FORECAST_BREACH", "COST_CONTRACT_BREACH", "C
 _rule_like = " OR ".join(f"CONTEXT LIKE 'rule {r} %'" for r in _RULES)
 
 PART_B = f"""\
--- PART B -- V169 verify (READ-ONLY). V169.1 + V169.2 right after the apply; V169.3 the next morning, after the
--- ~07:00 Central daily scan. Every RESULT should read OK; paste the grids back.
+-- PART B -- V169 verify (READ-ONLY; run in a Central session). Run V169.1 + V169.2 right after the apply and
+-- the grids V169.3 + V169.4 the next morning, after the ~07:00 Central daily scan. Every RESULT should read OK;
+-- paste the grids back.
 SELECT 'V169.1 SCHEMA_VERSION has 169' AS CHECK_NAME,
        IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 169) = 1,
            'OK', 'FAIL: V169 did not finish') AS RESULT
@@ -638,7 +649,32 @@ SELECT 'V169.3 no rule_block_failed for the changed arms (24h)',
                AND ({_rule_like} OR CONTEXT LIKE 'rule DQ_RECON_ERROR %')
                AND LOGGED_AT >= DATEADD('hour', -24, CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::TIMESTAMP_NTZ)) = 0,
            'OK', 'FAIL: see APP_ERROR_LOG ERROR_MESSAGE for the rule');
+
+-- V169.4 the morning after the first post-apply daily scan (and after any failing reconciliation cycle): the newest
+--        error cycle in ETL_RECON_RESULTS was paged by an event raised AFTER it loaded. CHECK = it folded into an
+--        older event (FIRST RUN (a) the transition into a pre-V169 scan-date key, or (b) a same-date re-run that
+--        failed after that date's page) or has no event; review Operations > Pipeline SLA > Data checks >
+--        Reconciliation errors. RAISED_AT and LATEST_LOAD are both TIMESTAMP_NTZ, compared as stored.
+WITH n AS (
+    SELECT MAX(LATEST_LOAD) AS NEWEST_LOAD,
+           'DQ_RECON_ERROR|' || TO_VARCHAR(TO_DATE(MAX(LATEST_LOAD))) AS CYCLE_KEY
+    FROM DBA_MAINT_DB.OVERWATCH.ETL_RECON_RESULTS
+)
+SELECT 'V169.4 newest reconciliation error cycle was paged' AS CHECK_NAME,
+       CASE WHEN n.NEWEST_LOAD IS NULL THEN 'OK: no reconciliation error in the look-back'
+            WHEN e.RAISED_AT IS NULL THEN 'CHECK: no event keyed ' || n.CYCLE_KEY
+                 || ' (below the rule threshold, the rule disabled, or no daily scan since that load)'
+            WHEN e.RAISED_AT < n.NEWEST_LOAD THEN 'CHECK: the cycle loaded ' || TO_VARCHAR(n.NEWEST_LOAD)
+                 || ' folded into the event raised ' || TO_VARCHAR(e.RAISED_AT)
+                 || ' and was not paged; review Reconciliation errors'
+            ELSE 'OK' END AS RESULT
+FROM n
+LEFT JOIN DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+       ON e.DEDUPE_KEY = n.CYCLE_KEY;
 """
+
+# the V169.4 grid keys exactly as arm [18] does for a non-empty table (the COALESCE only covers no rows)
+assert "TO_VARCHAR(COALESCE(TO_DATE(r.NEWEST_LOAD), CURRENT_DATE()))" in _between(daily, *S18)
 
 REPAIR = """\
 -- V169 owner repairs: NONE run here. The facts are correct; only the arms' arithmetic changed. Resolve historic

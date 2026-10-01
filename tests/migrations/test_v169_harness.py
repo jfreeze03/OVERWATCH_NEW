@@ -492,6 +492,84 @@ def test_recon_transition_and_degenerate_threshold():
     assert date.fromisoformat(ev["DEDUPE_KEY"].split("|")[1])
 
 
+def _flat_header() -> str:
+    head = _V169[:_V169.index("EXECUTE IMMEDIATE")]
+    return " ".join(" ".join(ln[2:].strip() for ln in head.splitlines() if ln.startswith("--")).split())
+
+
+def test_recon_residuals_are_codified_and_named_in_the_first_run_header():
+    """Review r1: the cycle-day key keeps two residuals, both documented in V169's FIRST RUN paragraph.
+    (a) once, at the transition: the pre-V169 scan on A (~07:00) keyed the SCAN date |A; a NEW failing cycle loads at
+    A 21:00, so the V169 scan on A+1 keys it |A too and it folds into the old event -- V163 would have paged |A+1.
+    (b) standing: a failing re-run that loads on A after A's own page folds into |A and does not page on A+1."""
+    a, a1 = date(2026, 9, 29), date(2026, 9, 30)
+    loads = [("M", 2, datetime(2026, 9, 28, 23)), ("M2", 1, datetime(2026, 9, 29, 21))]
+    db = _recon(a1, loads)
+    db.events.append(("DQ_RECON_ERROR", "ALL", "HIGH", "x", None, 2, "DQ_RECON_ERROR|2026-09-29"))  # V163 scan on A
+    assert db.run(_arm("18")) == []                                                           # (a) folded
+    old = _recon(a1, loads)
+    old.events.append(("DQ_RECON_ERROR", "ALL", "HIGH", "x", None, 2, "DQ_RECON_ERROR|2026-09-29"))
+    assert [e["DEDUPE_KEY"] for e in old.run(_arm("18", old=True))] == ["DQ_RECON_ERROR|2026-09-30"]
+    db = _recon(a, [("M", 2, datetime(2026, 9, 29, 4))])
+    assert [e["DEDUPE_KEY"] for e in db.run(_arm("18"))] == ["DQ_RECON_ERROR|2026-09-29"]
+    db.tables["ETL_RECON_RESULTS"].append(("M", 1, _ms(datetime(2026, 9, 29, 15))))          # the same-date re-run
+    db.today = a1
+    assert db.run(_arm("18")) == []                                                           # (b) folded
+    flat = _flat_header()
+    for phrase in ("DQ_RECON_ERROR keeps two residuals of its cycle-day key",
+                   "(a) Once, at the transition:", "folds into that older event and is not paged",
+                   "(b) Standing: a failing re-run", "does not page the next morning",
+                   "PREFLIGHT P169.4 shows the newest load and its hour", "PART B V169.4"):
+        assert phrase in flat, phrase
+
+
+def _part_b_grid(tmp_path, label: str) -> str:
+    env = {k: v for k, v in os.environ.items() if k not in ("V169_OUT", "PREFLIGHT_OUT", "PART_B_OUT", "REPAIR_OUT")}
+    env.update(V169_OUT=str(tmp_path / "m.sql"), PART_B_OUT=str(tmp_path / "pb.sql"))
+    out = subprocess.run([sys.executable, str(ROOT / "outputs" / "gen_v169.py")], env=env, cwd=tmp_path,
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    pb = (tmp_path / "pb.sql").read_text(encoding="utf-8")
+    grid = pb[pb.index(f"-- {label} "):]
+    return grid[:grid.index(";\n") + 1]
+
+
+def _grid_rows(sql: str, recon: list[tuple[str, str]], events: list[tuple[str, str]]) -> list[dict]:
+    """Run a read-only grid on sqlite: ETL_RECON_RESULTS (MTRC, LATEST_LOAD) and ALERT_EVENTS (DEDUPE_KEY, RAISED_AT),
+    timestamps as ISO text (both TIMESTAMP_NTZ in Snowflake, compared as stored)."""
+    code = "\n".join(ln for ln in sql.splitlines() if not ln.lstrip().startswith("--"))
+    code = code.replace("DBA_MAINT_DB.OVERWATCH.", "").rstrip().rstrip(";")
+    con = sqlite3.connect(":memory:")
+    con.create_function("TO_DATE", 1, lambda x: None if x is None else str(x)[:10])
+    con.create_function("TO_VARCHAR", 1, lambda x: None if x is None else str(x))
+    con.execute("CREATE TABLE ETL_RECON_RESULTS (MTRC, N, LATEST_LOAD)")
+    con.execute("CREATE TABLE ALERT_EVENTS (EVENT_ID INTEGER PRIMARY KEY AUTOINCREMENT, DEDUPE_KEY, RAISED_AT)")
+    con.executemany("INSERT INTO ETL_RECON_RESULTS VALUES (?, 1, ?)", recon)
+    con.executemany("INSERT INTO ALERT_EVENTS (DEDUPE_KEY, RAISED_AT) VALUES (?, ?)", events)
+    cur = con.execute(code)
+    cols = [c[0] for c in cur.description]
+    return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+
+
+def test_part_b_v169_4_flags_a_newest_cycle_covered_only_by_an_older_event(tmp_path):
+    """Review r1: PART B V169.4 (after the first post-apply daily scan) reads OK when the newest error cycle has an
+    event raised after it loaded, CHECK when it folded into an older one (the transition / same-date residual) or
+    has no event at all, and OK with nothing in the look-back."""
+    sql = _part_b_grid(tmp_path, "V169.4")
+    key = "DQ_RECON_ERROR|2026-09-29"
+    paged = _grid_rows(sql, [("M", "2026-09-29 04:00:00")], [(key, "2026-09-29 07:05:00")])
+    assert [r["RESULT"] for r in paged] == ["OK"]
+    folded = _grid_rows(sql, [("M", "2026-09-28 23:00:00"), ("M2", "2026-09-29 21:00:00")],
+                        [(key, "2026-09-29 07:05:00")])
+    (r,) = folded
+    assert r["RESULT"].startswith("CHECK: the cycle loaded 2026-09-29 21:00:00 folded into ")
+    assert "2026-09-29 07:05:00" in r["RESULT"] and "Reconciliation errors" in r["RESULT"]
+    (none,) = _grid_rows(sql, [("M", "2026-09-29 04:00:00")], [])
+    assert none["RESULT"].startswith("CHECK: no event keyed DQ_RECON_ERROR|2026-09-29")
+    assert [r["RESULT"] for r in _grid_rows(sql, [], [])] == ["OK: no reconciliation error in the look-back"]
+    assert {r["CHECK_NAME"] for r in paged + folded} == {"V169.4 newest reconciliation error cycle was paged"}
+
+
 # ============================================================================================================
 # [19] COST_EGRESS_SPIKE (R2-047)
 # ============================================================================================================

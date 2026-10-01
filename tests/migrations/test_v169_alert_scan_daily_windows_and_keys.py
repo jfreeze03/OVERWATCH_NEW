@@ -257,7 +257,7 @@ def test_v169_preflight_and_part_b_are_read_only_and_parse(tmp_path, which):
     sqlglot = pytest.importorskip("sqlglot")
     from sqlglot import exp
     parsed = [p for p in sqlglot.parse(sql, dialect="snowflake") if p is not None]
-    assert len(parsed) == (9 if which == "preflight" else 2)
+    assert len(parsed) == (9 if which == "preflight" else 3)
     writes = (exp.Insert, exp.Update, exp.Delete, exp.Merge, exp.Create, exp.Drop, exp.Command)
     for tree in parsed:
         assert tree.key == "select" or isinstance(tree, exp.Union), tree.key
@@ -265,10 +265,22 @@ def test_v169_preflight_and_part_b_are_read_only_and_parse(tmp_path, which):
     if which == "preflight":
         for grid in (f"-- P169.{k} " for k in range(1, 8)):
             assert sql.count(grid) == 1, grid
+    else:
+        for grid in ("-- V169.3 ", "-- V169.4 "):
+            assert sql.count(grid) == 1, grid
+    # correction 5 / review r1: the grids compare RAISED_AT (Central wall-clock TIMESTAMP_NTZ) and read CURRENT_DATE()
+    # as the scan does, so each file says it runs in a Central session (the integrator's RUN_NEXT leads with the
+    # ALTER SESSION SET TIMEZONE = 'America/Chicago' pin)
+    assert "in a Central session" in sql[:400], which
 
 
 def test_v169_preflight_carries_the_arm_text(tmp_path):
     pre, _, rp = _extras(tmp_path)
+    # review r1: P169.4 shows the newest load's hour and whether that cycle folds into an older event
+    p4 = pre[pre.index("-- P169.4 "):pre.index("-- P169.5 ")]
+    for col in ("HOUR(n.NEWEST_LOAD) AS NEWEST_LOAD_HOUR", "e.RAISED_AT AS EXISTING_RAISED_AT",
+                "e.RAISED_AT < n.NEWEST_LOAD AS FOLDS_INTO_OLDER_EVENT"):
+        assert col in p4, col
     a16, a24, a12 = _between(_D, *_S16), _between(_D, *_S24), _between(_D, *_S12)
     p16 = a16[a16.index("        JOIN (\n            SELECT TOTAL") + len("        JOIN "):a16.index(" p ON c.RULE_ID")]
     assert f"WITH p AS {p16}" in pre

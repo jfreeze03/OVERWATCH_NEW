@@ -331,6 +331,14 @@ HEADER = f"""-- {NAME}
 -- below its CLEAR threshold (PREFLIGHT P168.1 counts them; nothing is written at apply time). A failures-only or
 -- success pair first seen in the last 24h does not re-raise (the guard reads its V162 undated key). The apply day
 -- can raise one legitimate CRIT|<yesterday> PIPE_COPY_FAILURES event for a day whose full count first reaches 10.
+-- Two apply-window suppressions, once each: (1) PIPE_COPY_FAILURES -- a table whose yesterday failures V162 re-raised
+-- after midnight under today's date (title '... (24h)', the R2-035 carry-over) folds the apply day's new failures of
+-- the same band into that event, so nothing pages for them that day unless they cross into the other band; PREFLIGHT
+-- P168.2 flags those keys (HELD_BY_A_V162_EVENT). (2) SEC_NEW_ADMIN_NETWORK -- the guard cannot tell a V162 undated
+-- event's outcome, so a success that follows a failures-only V162 event inside its 48h does not raise its own event
+-- (R2-039's separate success event holds from the first V168 key on); PREFLIGHT P168.4 (second grid) lists the
+-- candidates. Standing (as under V162): within one failure day, a new failure that lands after an operator resolved
+-- that day's PIPE_COPY_FAILURES event stays suppressed until the next Central day, unless it crosses WARN -> CRIT.
 -- ROLLBACK: re-run V162's SP_ALERT_SCAN (V162__security_takeover_admin_grant.sql, the second CREATE PROCEDURE). A
 -- pair raised under V168 in the last 24h may raise once more under the undated key; the NAME text can stay.
 -- Apply AFTER V167. Idempotent; safe to re-run.
@@ -436,8 +444,10 @@ KEY18 = ("'SEC_NEW_ADMIN_NETWORK|' || LEFT(nn.USER_NAME, 200) || '|' || nn.CLIEN
 assert KEY18.replace("'SEC_NEW_ADMIN_NETWORK|' || ", "c.RULE_ID || '|' || ") in _arm18
 
 PREFLIGHT = f"""-- ====================================================================================================
---  V168 PREFLIGHT (read-only; run BEFORE applying V168). SP_ALERT_SCAN keys and sweeps (R2-034/035/036/039).
---  Each grid runs the arm's OWN text (outputs/gen_v168.py). Changes nothing.
+--  V168 PREFLIGHT (read-only; run BEFORE applying V168, in a Central session). SP_ALERT_SCAN keys and sweeps.
+--  P168.1 and the second P168.4 grid compare ALERT_EVENTS.RAISED_AT (Central wall-clock TIMESTAMP_NTZ) with
+--  CURRENT_TIMESTAMP(): a UTC worksheet shifts them 5-6h. Each grid runs the arm's OWN text (outputs/gen_v168.py).
+--  Changes nothing.
 -- ====================================================================================================
 
 -- P168.1 R2-034 census: OPEN PERF events older than 48h that V162's sweep can no longer clear. WILL_AUTO_CLEAR =
@@ -458,12 +468,15 @@ ORDER BY 1;
 
 -- P168.2 R2-035: what arm [14] keys now (per table and Central failure day, yesterday + today) and whether the key
 --        already exists. A NULL EXISTING_STATUS on a yesterday row is the one legitimate apply-day event (a day
---        whose full count first crossed the band).
+--        whose full count first crossed the band). HELD_BY_A_V162_EVENT on a today row = a V162 event (title
+--        '... (24h)', possibly yesterday's carry-over re-minted after midnight) that absorbs today's new failures of
+--        that band until midnight (V168 FIRST RUN (1)): watch that table on Operations today.
 WITH p AS (
 {P14_SRC}        )
 SELECT p.DB, p.SCH, p.TBL, p.FAIL_DAY, p.FAILED_FILES, p.PIPE,
        {KEY14} AS DEDUPE_KEY_PREVIEW,
-       e.STATUS AS EXISTING_STATUS
+       e.STATUS AS EXISTING_STATUS, e.TITLE AS EXISTING_TITLE,
+       e.TITLE LIKE '%failed file load(s) (24h)' AS HELD_BY_A_V162_EVENT
 FROM p
 LEFT JOIN DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
        ON e.DEDUPE_KEY = {KEY14}
@@ -532,8 +545,9 @@ _ddl_rows = "\nUNION ALL\n".join(
        for f in PART_B_ABSENT])
 
 PART_B = f"""\
--- PART B -- V168 verify (READ-ONLY). V168.1 + V168.2 right after the apply; V168.3 + V168.4 after the next :07
--- Central hourly scan. Every RESULT should read OK (or the count named); paste the grids back.
+-- PART B -- V168 verify (READ-ONLY; run in a Central session: V168.4 compares RAISED_AT, Central wall-clock, with
+-- CURRENT_TIMESTAMP()). V168.1 + V168.2 right after the apply; V168.3 + V168.4 after the next :07 Central hourly
+-- scan. Every RESULT should read OK (or the count named); paste the grids back.
 SELECT 'V168.1 SCHEMA_VERSION has 168' AS CHECK_NAME,
        IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 168) = 1,
            'OK', 'FAIL: V168 did not finish') AS RESULT
@@ -578,6 +592,7 @@ WHERE ev.STATUS = 'OPEN'
 # uncomment only on the owner's yes. A machine close (SUPERSEDED) is excluded from per-rule precision.
 # ---------------------------------------------------------------------------------------------------
 REPAIR = """\
+-- Run in a Central session (RAISED_AT is Central wall-clock; the RUN_NEXT file leads with the timezone pin).
 -- R168.1 OPTIONAL (owner decision): close the still-OPEN / ACK PIPE_COPY_FAILURES carry-over duplicates that
 -- PREFLIGHT P168.3 lists (a scan-day key whose day had no failure for that table). SNOOZED rows are left to wake.
 -- Uncomment to run; never DELETE, never rewrite DEDUPE_KEY.

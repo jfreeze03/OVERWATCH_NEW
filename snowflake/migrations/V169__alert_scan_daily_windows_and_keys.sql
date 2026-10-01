@@ -36,6 +36,13 @@
 -- slightly more sensitive (it now projects today); COST_IDLE_OPPORTUNITY may raise for never-suspend warehouses for
 -- the first time (PREFLIGHT P169.6 lists them); a contract past its end or outlasting it goes quiet; one egress
 -- spike confined to 00:00-07:00 of yesterday can raise once more. Nothing runs at apply time.
+-- DQ_RECON_ERROR keeps two residuals of its cycle-day key. (a) Once, at the transition: a pre-V169 scan keyed the
+-- SCAN date, so a failing cycle that loads later on a date the old scan already keyed (A 21:00 after the A ~07:00
+-- scan wrote DQ_RECON_ERROR|A) folds into that older event and is not paged; V163 would have paged it as |A+1.
+-- (b) Standing: a failing re-run that loads on a date whose event already exists (after that morning's scan)
+-- folds into that date's event and does not page the next morning -- one page per failing cycle date, the
+-- Reconciliation errors panel's cycle definition. PREFLIGHT P169.4 shows the newest load and its hour; PART B
+-- V169.4 (the morning after the first scan) flags a newest cycle covered only by an event raised before it loaded.
 -- ROLLBACK: re-run V163's SP_ALERT_SCAN_DAILY (V163__ai_runaway_trust_regression.sql, the CREATE PROCEDURE); the
 -- NAME text can stay.
 -- Apply AFTER V168. Idempotent; safe to re-run.

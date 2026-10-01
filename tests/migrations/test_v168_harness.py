@@ -443,6 +443,46 @@ def test_arm18_a_pre_v168_undated_key_blocks_its_own_episode_only():
     assert len(s.arm(raw, _at(_SEP, 5, 7))) == 1
 
 
+def _flat_header() -> str:
+    head = _V168[:_V168.index("EXECUTE IMMEDIATE")]
+    return " ".join(" ".join(ln[2:].strip() for ln in head.splitlines() if ln.startswith("--")).split())
+
+
+def test_apply_window_suppressions_are_codified_and_named_in_the_first_run_header():
+    """Review r1: two once-only apply-window suppressions and one standing same-day behaviour, all in FIRST RUN.
+    (1) [14]: V162 re-minted D's afternoon failures after midnight as WARN|D+1 (the R2-035 carry-over, resolved
+    NOISE); V168 is applied on D+1; a new 14:00 failure on D+1 keys WARN|D+1 too and folds into that event.
+    (2) [18]: a failures-only pair raised by V162 (undated key) just before the apply; its success an hour later
+    strips to the same undated base inside 48h, so it raises nothing during the transition."""
+    d1 = _D + timedelta(days=1)
+    s = _Scan([_cfg(_COPY, 0)])
+    s.copy = _fail(_at(_D, 14), 3)
+    for t in _hourly(_at(_D, 14, 30), _at(d1, 0, 30)):
+        s.arm(_ARM14_162, t)
+    assert [e["DEDUPE_KEY"] for e in s.events] == [_key14("WARN", _D), _key14("WARN", d1)]   # V162: D + carry-over
+    for e in s.events:
+        e.update(STATUS="RESOLVED", RESOLUTION_KIND="NOISE")
+    s.copy += _fail(_at(d1, 14), 2)
+    assert s.arm(_ARM14, _at(d1, 14, 7)) == []                                     # (1) folded into WARN|D+1
+    s.copy += _fail(_at(d1, 15), 8)                                                # ...until the day reaches 10
+    assert [e["DEDUPE_KEY"] for e in s.arm(_ARM14, _at(d1, 15, 7))] == [_key14("CRIT", d1)]
+    s = _Scan([_cfg(_NET, 1)])
+    s.logins = [_login("JDOE", _at(_SEP, 3), False)]
+    (v162,) = s.arm(_ARM18_162, _at(_SEP, 4, 7))
+    assert v162["DEDUPE_KEY"] == f"{_NET}|JDOE|203.0.113.9" and "logged in" in v162["TITLE"]
+    s.logins.append(_login("JDOE", _at(_SEP, 5), True))
+    assert s.arm(_ARM18, _at(_SEP, 6, 7)) == []                                    # (2) the success is swallowed
+    flat = _flat_header()
+    for phrase in ("Two apply-window suppressions, once each:",
+                   "folds the apply day's new failures of the same band into that event",
+                   "PREFLIGHT P168.2 flags those keys",
+                   "a success that follows a failures-only V162 event inside its 48h does not raise its own event",
+                   "PREFLIGHT P168.4 (second grid) lists the candidates",
+                   "Standing (as under V162):",
+                   "stays suppressed until the next Central day, unless it crosses WARN -> CRIT"):
+        assert phrase in flat, phrase
+
+
 def test_arm18_ip_prefixes_never_collide():
     """R2-036 (e): 10.0.0.1 never blocks 10.0.0.12 (and back), in either outcome."""
     s = _Scan([_cfg(_NET, 1)])

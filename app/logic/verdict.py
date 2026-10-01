@@ -101,10 +101,20 @@ def contract_runway_signal(best: dict | None, *, read_ok: bool = True, basis: st
     return None
 
 
-def contract_runway_clause(best: dict | None) -> str:
+def contract_term_over_clause(term_end: str) -> str:
+    """The healthy-verdict clause for a configured contract whose term is over (no runway is computed past
+    CONTRACT_END_DATE, which is the first day AFTER the term): names the end and where the next term is set."""
+    return f"contract term over (term end {term_end}); set the new term on Admin to resume the runway"
+
+
+def contract_runway_clause(best: dict | None, *, term_ended: str | None = None) -> str:
     """The healthy-verdict clause for the runway: claims "on track" only for a real runway; with no
-    contract configured it says so instead of asserting anything about a contract that doesn't exist."""
-    return RUNWAY_ON_TRACK if best is not None else NO_CONTRACT_RUNWAY
+    contract configured it says so instead of asserting anything about a contract that doesn't exist.
+    ``term_ended`` (formulas.contract_term_ended) is a CONFIGURED contract past its term: the runway is
+    withheld there too, but saying "not configured" would be false (review r1) -- it names the ended term."""
+    if best is not None:
+        return RUNWAY_ON_TRACK
+    return contract_term_over_clause(term_ended) if term_ended else NO_CONTRACT_RUNWAY
 
 
 def operations_signals(inputs: pd.DataFrame | None, stale_sources: int = 0) -> list[Signal]:

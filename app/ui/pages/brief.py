@@ -23,6 +23,7 @@ from app.logic.formulas import (
     account_now,
     blended_billed_usd,
     contract_runway,
+    contract_term_ended,
     daily_spend_last_n,
     executive_slide_bullets,
     executive_summary_csv,
@@ -33,10 +34,10 @@ from app.logic.formulas import (
     safe_float,
 )
 from app.logic.verdict import (
-    NO_CONTRACT_RUNWAY,
     attention_bundle,
     attention_healthy,
     attention_signals,
+    contract_runway_clause,
     contract_runway_signal,
     page_verdict,
 )
@@ -474,7 +475,10 @@ def render() -> None:
     _rsig = contract_runway_signal(_best, read_ok=exh.usable())
     if _rsig is not None:
         _vsig.append(_rsig)
-    _rclause = "contract runway healthy" if _best is not None else NO_CONTRACT_RUNWAY
+    # review r1: a configured contract past its term (TOTAL withheld, TERM_OVER) names the ended term -- never
+    # "no contract runway configured" (the forgotten roll-forward case)
+    _rclause = ("contract runway healthy" if _best is not None else contract_runway_clause(
+        None, term_ended=contract_term_ended(exh.df.iloc[0]) if exh.usable() else None))
     page_verdict_line(page_verdict(
         _vsig, healthy=f"{attention_healthy(_attn)}; {_rclause}"))
     contract_runway_bar(_best)
