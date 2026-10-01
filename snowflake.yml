@@ -15,8 +15,12 @@ entities:
     # artifact_repositories. If this app previously ran on a container, run
     # snowflake/warehouse_runtime_reset.sql once before saving App settings.
     title: "OVERWATCH — Snowflake Command Center"
+    # Every file the app reads at runtime must be listed: Alerts > Native delivery shows BOTH
+    # snowflake/ templates (tests/test_deploy_artifacts.py locks the pair). Deploy from a clean,
+    # committed tree -- the secret scan checks tracked files, and these ship to every viewer.
     artifacts:
       - streamlit_app.py
       - environment.yml
       - app/
       - snowflake/native_alert_templates.sql
+      - snowflake/webhook_delivery.sql

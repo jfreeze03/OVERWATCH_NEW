@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import re
+import subprocess
+import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -11,6 +15,22 @@ _V087 = (_ROOT / "snowflake" / "migrations" / "V087__security_posture_rule.sql")
 # The three rules opted into auto-clear — ALL live-window (DEDUPE_KEY carries
 # CURRENT_DATE, re-evaluated every scan), never a day-stamped historical fact.
 _SEEDED = ("PERF_QUERY_FAIL_PCT", "PERF_QUEUED_MINUTES", "PERF_SPILL_GB")
+
+
+def test_v091_regenerates_byte_identical(tmp_path):
+    """Derivation law. gen_v091 hardcoded the owner's checkout as ROOT, so it never regenerated THIS
+    tree's V091 (and silently rewrote that checkout's) -- nothing ran it (R1-272). It now resolves ROOT
+    from its own file and honors V091_OUT, like its siblings."""
+    gen = (_ROOT / "outputs" / "gen_v091.py").read_text(encoding="utf-8")
+    assert "ROOT = Path(__file__).resolve().parents[1]" in gen
+    assert not re.search(r"Path\(r?[\"'][A-Za-z]:", gen)      # no absolute checkout path
+    out = tmp_path / "regen.sql"
+    r = subprocess.run([sys.executable, str(_ROOT / "outputs" / "gen_v091.py")],
+                       env={**os.environ, "V091_OUT": str(out)}, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert out.read_text(encoding="utf-8") == _V091, (
+        "V091 drifted from its forward-generation — edit outputs/gen_v091.py, "
+        "regenerate, never hand-edit the migration.")
 
 
 def test_v091_version_guard_and_footer():

@@ -12,11 +12,15 @@ Removing (a) and (b) reproduces V087's SP body byte-for-byte — the repo's
 derived-scan discipline. Owner applies V091 in Snowsight after V090.
 """
 
+import os
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\jfree\Documents\GitHub\OVERWATCH_NEW")
+# ROOT from this file, like every sibling generator: the old hardcoded owner-checkout path made a run
+# from any other tree (a worktree, a scratch copy, CI) read V087 from -- and rewrite V091 in -- that
+# checkout instead of its own. V091_OUT redirects the output (the regen test writes to a tmp file).
+ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "snowflake" / "migrations" / "V087__security_posture_rule.sql"
-DST = ROOT / "snowflake" / "migrations" / "V091__alert_auto_clear.sql"
+DST = Path(os.environ.get("V091_OUT") or (ROOT / "snowflake" / "migrations" / "V091__alert_auto_clear.sql"))
 
 s = SRC.read_text(encoding="utf-8")
 

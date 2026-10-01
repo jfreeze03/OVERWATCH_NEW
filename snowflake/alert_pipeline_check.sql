@@ -104,6 +104,10 @@ SHOW RESOURCE MONITORS;  -- expect none since V045
 -- FIX B (scan or sender FAILING in STEP 2): send me the ERROR_MESSAGE text —
 -- that is the actual bug and we fix it in the repo, not in the worksheet.
 --
--- FIX C (deliveries failing with webhook/HTTP errors in STEP 4): recreate the
--- Teams integration per snowflake/webhook_delivery.sql (v2 Adaptive Card).
+-- FIX C (deliveries failing with webhook/HTTP errors in STEP 4): the Teams URL
+-- rotated -- run ONLY the ROTATION RUNBOOK step of snowflake/webhook_delivery.sql
+-- (ALTER SECRET ... SET SECRET_STRING with the new value, pasted in Snowsight).
+-- Do NOT re-run that whole file for a rotation: recreating the integration drops
+-- its grants. Re-run it only if the URL prefix or the Adaptive Card template
+-- changed (it is idempotent: it never adds a second route).
 -- ============================================================================

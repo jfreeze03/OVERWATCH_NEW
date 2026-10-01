@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import ast
 import importlib
-import inspect
 import re
 from datetime import date
 from pathlib import Path
@@ -274,20 +273,9 @@ def test_live_proof_sections_reach_no_account_usage():
     live = body.split("def _products(", 1)[0] + body.split("def _products(", 1)[1].split(
         "\n_PROOF_MEMO: dict = {}", 1)[1]
     assert "def _proof_tab(" in live and "def _pipeline_tab(" in live and "def _products(" not in live
-    tables: set = set()
-    for mod_name, fn_name in sorted(set(trust._BUILDER_RE.findall(live))):
-        try:
-            mod = importlib.import_module(f"app.data.{mod_name}")
-        except ModuleNotFoundError:
-            continue
-        fn = getattr(mod, fn_name, None)
-        if fn is None or not inspect.isfunction(fn):
-            continue
-        try:
-            sql = trust._render_builder(fn)
-        except (KeyError, TypeError, ValueError):
-            continue
-        tables |= set(trust._AU_RE.findall(sql))
+    # the v451 gate's own renderer (R1-293): an unrenderable builder FAILS here instead of being skipped
+    tables, skipped = trust._reachable_tables(live)
+    assert not {k: v for k, v in skipped.items() if k not in trust._UNRENDERABLE}, skipped
     assert tables == set()
     # ... and the hidden body really is unreachable: nothing dispatches it
     assert "_products(" not in _src(_SHELL_REL)
