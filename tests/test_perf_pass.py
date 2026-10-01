@@ -127,7 +127,7 @@ def test_canary_release_anchor_is_recent_not_fixed():
 
 def test_health_values_are_owned_by_the_single_global_pulse():
     src = (_ROOT / "app" / "main.py").read_text(encoding="utf-8")
-    assert "_sidebar(pages, role, profile, connected)" in src
+    assert "_sidebar(pages, connected)" in src
     assert "_topbar_scope()" in src
     assert "_health_strip(" not in src
     body = src.split("def _persistent_status_bar", 1)[1].split("\ndef ", 1)[0]
