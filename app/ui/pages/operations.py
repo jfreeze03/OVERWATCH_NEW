@@ -44,10 +44,12 @@ from app.logic.ai_prompts import release_compare_prompt, task_failure_prompt
 from app.logic.anomaly import (
     ANOMALY_MIN_ACTIVE_DAYS,
     ANOMALY_MIN_USD,
+    ATTENTION_PEAKS_WINDOW_DAYS,
     anomaly_markers,
     complete_days_only,
     flag_anomalies,
     suppress_expected_spikes,
+    sustained_queue_min_intervals,
     warehouse_attention_ranking,
 )
 from app.logic.date_windows import is_prior_month_window, window_label
@@ -97,6 +99,7 @@ from app.logic.insights import (
 )
 from app.logic.sizing import (
     CLUSTER_CAP_QUALIFIER,
+    QUEUE_UP_MIN_PER_DAY,
     size_recommendations,
     sizing_summary,
     unchecked_cap_note,
@@ -3687,8 +3690,8 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
     _wh_pf = run_batch_mixed([
         {"key": "res", "sql": mart_sql.fact_warehouse_daily(30, company), "tier": "hourly",
          "source": "FACT_WAREHOUSE_DAILY"},
-        {"key": "peaks", "sql": ops_sql.warehouse_concurrency_peaks(14, company), "tier": "recent",
-         "source": _peaks_src},
+        {"key": "peaks", "sql": ops_sql.warehouse_concurrency_peaks(ATTENTION_PEAKS_WINDOW_DAYS, company),
+         "tier": "recent", "source": _peaks_src},
     ], page=_PAGE)   # run_batch_mixed always returns a dict (contract) — no `or {}` guard needed
     res = _wh_pf.get("res") or run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE, key=f"w_fact_{company}",
               tier="hourly", source="FACT_WAREHOUSE_DAILY")
@@ -3708,14 +3711,18 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
     anomalies = flagged[flagged["IS_ANOMALY"]]
     # Hoisted (was below the concurrency header): the opener merges it with the anomalies,
     # and the concurrency section below still consumes this same object — one read, one fallback.
-    peaks = _wh_pf.get("peaks") or run(ops_sql.warehouse_concurrency_peaks(14, company), page=_PAGE,
-                key=f"conc_peaks_{company}", tier="recent", source=_peaks_src)
+    # Both peaks reads and the ranking share ATTENTION_PEAKS_WINDOW_DAYS: the sustained bar is scaled
+    # to the window the counts were read over (tests/test_wh_attention.py locks every call to the name).
+    peaks = _wh_pf.get("peaks") or run(
+        ops_sql.warehouse_concurrency_peaks(ATTENTION_PEAKS_WINDOW_DAYS, company), page=_PAGE,
+        key=f"conc_peaks_{company}", tier="recent", source=_peaks_src)
 
     # rec5: lead with WHAT'S WRONG — a worst-first opener merged from the two frames already
     # loaded above (spend anomalies + sustained queueing), so the tab answers "which warehouses
     # need me now?" before the full activity scroll. Zero new reads; idle-waste and adaptive-resize
     # candidacy stay on the Sizing lens (toggle-gated) so first-paint cost is unchanged.
-    ranked = warehouse_attention_ranking(anomalies, peaks.df if peaks.ok else None)
+    ranked = warehouse_attention_ranking(anomalies, peaks.df if peaks.ok else None,
+                                         window_days=ATTENTION_PEAKS_WINDOW_DAYS)
     # PR-1 R1-073 / R1-131: a failed concurrency read is UNKNOWN queueing, not "nobody queueing" --
     # it used to give a green header, "Queueing 0" and the verified-clean row while the Concurrency
     # section below showed the same read as failed. The header stays amber when spend anomalies
@@ -3723,6 +3730,17 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
     _queue_known = peaks.ok
     _n_anom = int(ranked["ANOM_DAYS"].fillna(0).gt(0).sum()) if not ranked.empty else 0
     _n_queue = int(ranked["PEAK_QUEUED"].notna().sum()) if not ranked.empty else 0
+    # review r2 on R1-074: a sub-bar queue is demoted, not dropped, so "Queueing" counts it; the help
+    # says how many of those reach the sustained bar. The rest are described BY THE BAR, never by
+    # duration (review r3): a sub-bar row can hold up to bar-1 queued intervals (~6.9h over 14 days),
+    # so "brief" misdescribed it; and the tail is emitted only when some row actually is under the bar.
+    _n_sustained = (int(ranked["QUEUED_INTERVALS"].ge(
+        sustained_queue_min_intervals(ATTENTION_PEAKS_WINDOW_DAYS)).sum()) if not ranked.empty else 0)
+    _queue_help = (f"{_n_sustained} of {_n_queue} sustained (queued at least "
+                   f"{humanize_duration(QUEUE_UP_MIN_PER_DAY, 'min')}/day across the "
+                   f"{ATTENTION_PEAKS_WINDOW_DAYS}-day read)"
+                   + ("; the rest peaked at the queue floor but stayed under that rate, ranked after "
+                      "spend anomalies." if _n_sustained < _n_queue else "."))
     section_header("Warehouses that need attention now",
                    alarm_health(len(ranked)) if (_queue_known or len(ranked)) else "",
                    "warehouse", anchor="ops-wh-attention")
@@ -3731,7 +3749,8 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
          "severity": "warn" if len(ranked) else ("ok" if _queue_known else "")},
         {"label": "With anomalous spend", "value": f"{_n_anom}"},
         {"label": "Queueing", "value": f"{_n_queue}" if _queue_known else "—",
-         "help": None if _queue_known else "The concurrency read failed — see Concurrency peaks below."},
+         "help": _queue_help if _queue_known and _n_queue
+                 else None if _queue_known else "The concurrency read failed — see Concurrency peaks below."},
     ])
     if ranked.empty and not _queue_known:
         empty_state("no_data_yet", "No spend anomaly in the last 30 days; queueing could not be checked "
@@ -3741,7 +3760,8 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
                     "No warehouse is anomalous or queueing right now — full activity below.")
     else:
         st.caption(("Merged from the spend-anomaly and concurrency signals below, worst-first "
-                    "(queueing outranks a spend anomaly)." if _queue_known else
+                    "(sustained queueing outranks a spend anomaly; a queue below the sustained rate "
+                    "ranks after it)." if _queue_known else
                     "Spend anomalies only — the concurrency read failed, so queueing is not ranked.")
                    + " Select a warehouse to open its Entity 360.")
         entity_nav_table(
@@ -3800,7 +3820,8 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
         anchor="ops-wh-concurrency",
     )
     if peaks.ok and peaks.empty:
-        empty_state("no_data_yet", "No warehouse load intervals recorded in the last 14 days.")
+        empty_state("no_data_yet", "No warehouse load intervals recorded in the last "
+                                   f"{ATTENTION_PEAKS_WINDOW_DAYS} days.")
     elif guard(peaks, ""):
         st.caption("PEAK_QUEUED above ~1 on a sustained basis is the signal to add a cluster "
                    "or split workloads — before users feel it (" + CLUSTER_CAP_QUALIFIER + "). "

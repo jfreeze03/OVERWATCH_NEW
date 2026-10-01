@@ -1019,8 +1019,9 @@ def render() -> None:
         # hidden when the prior day is zero (pct_delta -> None).
         _q_delta = None
         if _activity_ready:
-            from datetime import timedelta
-
+            # timedelta is the MODULE import: a branch-local `from datetime import timedelta` here made
+            # the name local to all of render(), so the Timeline & movers drill (which never runs this
+            # branch) raised UnboundLocalError on any row selection (R2-057; tests/test_local_import_scope.py).
             from app.logic.formulas import account_today
             # "vs prior day" must compare the two CONSECUTIVE calendar days, not the last two
             # PRESENT rows: fact_daily_activity has no date spine, so a quiet/zero day has no row

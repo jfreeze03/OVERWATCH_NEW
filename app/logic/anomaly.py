@@ -314,7 +314,9 @@ def anomaly_summary(df: pd.DataFrame, label_col: str, value_col: str,
 # "sustained overload" RATE (30 min/day) across that window: 30 min x 14 days / 5 min = 84 queued
 # intervals on the opener. (Review r1: a flat 6 was 30 min per 14 days, ~2 min/day, so six scattered
 # 5-minute bursts still read "sustained".) The rate is the same; the measure differs: wall-clock
-# queued intervals here, summed per-query overload queue time in sizing.
+# queued intervals here, summed per-query overload queue time in sizing. Below the rate a warehouse
+# whose peak reaches the floor still SHOWS, as a plain peak after the spend anomalies (review r2:
+# dropping it let the opener read clean over hours of real queueing).
 LOAD_INTERVAL_MIN = 5              # ACCOUNT_USAGE.WAREHOUSE_LOAD_HISTORY's interval grain
 # The window the Warehouses opener reads warehouse_concurrency_peaks over
 # (operations._wh_activity_anomalies); tests/test_wh_attention.py locks the call sites to it.
@@ -337,11 +339,14 @@ def warehouse_attention_ranking(anomalies: pd.DataFrame, peaks: pd.DataFrame | N
     ``anomalies`` is the flagged-anomaly subset (the IS_ANOMALY rows, cols WAREHOUSE_NAME,
     USD, Z_SCORE). ``peaks`` is the concurrency-peaks frame (WAREHOUSE_NAME, PEAK_QUEUED,
     QUEUED_INTERVALS) read over ``window_days``, or None when that read failed. A warehouse is in
-    the queue signal when its PEAK_QUEUED reaches ``queue_floor`` AND its QUEUED_INTERVALS reach
+    the queue signal when its PEAK_QUEUED reaches ``queue_floor``; it is SUSTAINED queueing (called
+    so, and sorted above every spend anomaly) only when its QUEUED_INTERVALS also reach
     ``sustained_queue_min_intervals(window_days)``, i.e. sizing's 30 min/day sustained-overload rate
     across the window (R1-074: a one-off 5-minute burst, or a few scattered ones, is not "users
-    feeling it now"); a frame without QUEUED_INTERVALS (an older shape) keeps the peak as a plain
-    peak — shown, never called sustained, never sorted first. Returns one row per flagged
+    feeling it now"). A sub-bar count, or a frame without QUEUED_INTERVALS (an older shape), keeps
+    the row as a plain peak ("peak queued ~X") — shown, never called sustained, sorted after every
+    spend anomaly; it is demoted, never dropped, so a warehouse that queued below the bar cannot
+    leave the opener reading clean. Returns one row per flagged
     warehouse with WORST_Z (max |z|), ANOM_DAYS (count of anomalous days), ANOM_USD (summed
     anomalous-day spend),
     PEAK_QUEUED, QUEUED_INTERVALS and a human REASON — sorted sustained-queueing-first, then by
@@ -375,9 +380,11 @@ def warehouse_attention_ranking(anomalies: pd.DataFrame, peaks: pd.DataFrame | N
         # NaN when the frame predates the count: the peak then stays a plain (unsorted) peak
         _p["QUEUED_INTERVALS"] = (pd.to_numeric(_p["QUEUED_INTERVALS"], errors="coerce")
                                   if "QUEUED_INTERVALS" in _p.columns else float("nan"))
-        _min_n = sustained_queue_min_intervals(window_days)
-        _p = _p[(_p["PEAK_QUEUED"] >= queue_floor)
-                & (_p["QUEUED_INTERVALS"].isna() | (_p["QUEUED_INTERVALS"] >= _min_n))]
+        # Every warehouse whose peak reaches the floor stays IN the opener (review r2 on R1-074:
+        # deleting the sub-bar ones made a warehouse that queued for hours below the 30 min/day bar
+        # vanish, and the opener could then read "checked, clean"). The interval bar only decides
+        # whether the row is called sustained and sorted first (_HAS_Q below), never whether it shows.
+        _p = _p[_p["PEAK_QUEUED"] >= queue_floor]
         queue = _p.groupby("WAREHOUSE_NAME", as_index=False).agg(
             PEAK_QUEUED=("PEAK_QUEUED", "max"), QUEUED_INTERVALS=("QUEUED_INTERVALS", "max"))
     else:
@@ -389,8 +396,12 @@ def warehouse_attention_ranking(anomalies: pd.DataFrame, peaks: pd.DataFrame | N
     if spend.empty and queue.empty:
         return pd.DataFrame(columns=cols)
     merged = spend.merge(queue, on="WAREHOUSE_NAME", how="outer")
-    # sustained = the interval gate passed (a known count); a count-less peak is only a peak
-    merged["_HAS_Q"] = merged["PEAK_QUEUED"].notna() & merged["QUEUED_INTERVALS"].notna()
+    # sustained = a peak at the floor AND a known count at the bar; a sub-bar count and a count-less
+    # peak (NaN >= n is False) are both only a peak: shown, never called sustained, sorted after
+    # every spend anomaly (WORST_Z NaN sorts last)
+    _min_n = sustained_queue_min_intervals(window_days)
+    merged["_HAS_Q"] = (merged["PEAK_QUEUED"].notna()
+                        & pd.to_numeric(merged["QUEUED_INTERVALS"], errors="coerce").ge(_min_n))
     _days = max(int(window_days), 1)
 
     def _reason(row) -> str:
