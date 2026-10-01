@@ -577,6 +577,42 @@ def _clear_unread_confirm_latch() -> None:
     st.session_state.pop("_unread_confirm_failed", None)
 
 
+def _exact_show_row(show_df: pd.DataFrame | None, warehouse: str) -> pd.Series | None:
+    """``warehouse``'s own row of a SHOW WAREHOUSES LIKE read (columns lower-cased), or None when the read failed
+    (None), returned nothing, or returned only near-name rows (LIKE's '_' is a one-character wildcard, so
+    'WH_X' also matches 'WHAX'). Case-insensitive on the name. Pure; never raises."""
+    if show_df is None or show_df.empty:
+        return None
+    df = show_df.copy()
+    df.columns = [str(c).lower() for c in df.columns]
+    if "name" not in df.columns:
+        return None
+    match = df[df["name"].astype(str).str.strip().str.upper() == str(warehouse or "").strip().upper()]
+    return None if match.empty else match.iloc[0]
+
+
+def _auto_suspend_in_force(row: pd.Series | None) -> tuple[bool, float | None]:
+    """(known, seconds) for the AUTO_SUSPEND on a live SHOW row (_exact_show_row); (False, None) when the row is
+    absent or the value is unreadable/NULL, so the tighten guard generates no ALTER. Pure."""
+    if row is None:
+        return False, None
+    value = pd.to_numeric(row.get("auto_suspend"), errors="coerce")
+    return (True, float(value)) if pd.notna(value) else (False, None)
+
+
+def _live_warehouse_row(warehouse: str, key: str) -> pd.Series | None:
+    """Review R1-170 (twin): ONE warehouse's SHOW row read on the 30 s live tier, for a Remediation lever that is
+    about to change that setting. The shared 'jump_wh' SHOW WAREHOUSES entry is on the 4 h metadata tier, so a
+    timer or size a DBA changed in a worksheet since it was cached reads stale there. A failed read, an unsafe
+    name or a missing row is None (the setting is unknown), never the cached value."""
+    sql = insights_sql.warehouse_settings_live_sql(warehouse)
+    if not sql:
+        return None
+    res = run(sql, page=_PAGE, key=key, tier="live", source=f"SHOW WAREHOUSES LIKE {warehouse}",
+              max_rows=0, probe=True)
+    return _exact_show_row(res.df if res.ok else None, warehouse)
+
+
 def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_operator: bool, *, bounds: tuple | None = None) -> None:
     """Optimization insights: idle/right-sizing advisors, expensive queries and
     patterns, the object-cost ledger, efficiency/storage/clustering scans, and
@@ -944,8 +980,19 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     # phantom saving even for a same-size or larger pick. Book a positive
                     # ESTIMATED_USD only on a confirmed downsize.
                     est_sz = 0.0
-                    _cur_size = normalize_size(srow.get("CURRENT_SIZE"))
+                    # Review R1-170 (twin): the saving and the autobook decision use the size in force NOW (one
+                    # live SHOW row), not the 4 h 'jump_wh' cache the profile above was mapped from — a resize a
+                    # DBA made in a worksheet since then priced the steps from the old size. A failed read is an
+                    # unknown size: no saving is projected or booked.
+                    _cached_size = normalize_size(srow.get("CURRENT_SIZE"))
+                    _live_sz_row = _live_warehouse_row(str(srow["WAREHOUSE_NAME"]),
+                                                       f"sizing_live_{srow['WAREHOUSE_NAME']}")
+                    _cur_size = normalize_size(_live_sz_row.get("size")) if _live_sz_row is not None else ""
                     _cur_label = picker_size_label(_cur_size, remediation.RESIZE_SIZES)
+                    if _cur_size and _cached_size and _cur_size != _cached_size:
+                        st.caption(f"SHOW WAREHOUSES now reports {_cur_label} (the profile above read "
+                                   f"{picker_size_label(_cached_size, remediation.RESIZE_SIZES)} from a "
+                                   "cached read): the estimate below uses the size in force now.")
                     _tgt_norm = normalize_size(target_size)
                     if _cur_size and _tgt_norm and _tgt_norm != _cur_size:
                         _steps = SIZE_ORDER.index(_tgt_norm) - SIZE_ORDER.index(_cur_size)
@@ -1283,6 +1330,19 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                  "EVIDENCE_VERIFIED_USD": st.column_config.NumberColumn(
                                      "Proven $/mo", format="$%.0f"),
                              })
+                # R1-017 (sibling): the 'under experiment' exclusion reads OPTIMIZATION_EXPERIMENTS, and a failed
+                # read collapsed to an empty frame, so a warehouse already under test was suggested silently.
+                # Say so by KIND (the verified-wins read's idiom above) whenever suggestions are shown.
+                if not _exp.ok and is_setup_absence(_exp.error_kind):
+                    empty_state("needs_setup",
+                                "Open optimization experiments (OPTIMIZATION_EXPERIMENTS) aren't readable by this "
+                                "app, so a warehouse already under experiment is not excluded from these "
+                                "suggestions — check before replicating a fix.")
+                elif not _exp.ok:
+                    empty_state("unavailable",
+                                "Open optimization experiments (OPTIMIZATION_EXPERIMENTS) could not be read, so a "
+                                "warehouse already under experiment is not excluded from these suggestions — "
+                                "check before replicating a fix.", detail=_exp.error)
                 st.caption("Apply one through the guarded ALTER + rollback in Remediation & ledger.")
 
     elif opt_section == "Queries & patterns":
@@ -2382,6 +2442,18 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                    key="remed_wh")
             fix_kind = st.radio("Fix", ["Tighten auto-suspend to 60s", "Off-hours suspend/resume schedule"],
                                 horizontal=True, key="remed_kind")
+            _tighten = fix_kind.startswith("Tighten")
+            if _tighten:
+                # Review R1-170 (twin): the tighten guard, its estimate and the autobook decision below read the
+                # picked warehouse's AUTO_SUSPEND from ONE live SHOW row, never the 4 h 'jump_wh' cache above —
+                # a timer a DBA tightened to 30s in a worksheet since then read as the cached 600s, so the plan
+                # RAISED it to 60 and booked a saving. A failed read leaves the setting unknown: no ALTER.
+                _live_known, _live_suspend = _auto_suspend_in_force(
+                    _live_warehouse_row(wh_pick, f"remed_suspend_{wh_pick}"))
+                _pick_mask = idf["WAREHOUSE_NAME"].astype(str) == wh_pick
+                idf = idf.copy()
+                idf.loc[_pick_mask, "AUTO_SUSPEND"] = _live_suspend if _live_known else pd.NA
+                idf.loc[_pick_mask, "AUTO_SUSPEND_KNOWN"] = _live_known
             row = idf[idf["WAREHOUSE_NAME"].astype(str) == wh_pick]
             idle_credits = float(pd.to_numeric(row["IDLE_CREDITS"], errors="coerce").fillna(0).iloc[0]) if not row.empty else 0.0
             # C1: divide by the window actually served, not the requested one.
