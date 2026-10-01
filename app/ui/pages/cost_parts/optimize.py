@@ -629,6 +629,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         # rec#20: idle-tail $ and size class per warehouse, for the consolidation scan.
         _idle_by_wh: dict[str, float] = {}
         _size_by_wh: dict[str, str] = {}
+        # R1-113: each warehouse's OWN company (the idle frame's COMPANY_FOR_WAREHOUSE label) — the
+        # consolidation owner gate, so the ALL scope never pairs an ALFA and a Trexis warehouse.
+        _company_by_wh: dict[str, str] = {}
         # P1 #34: capture the idle/sizing advisor frames for the proven-fix transfer
         # panel at the end of this section (sizing is toggle-gated, so may stay None).
         _idle_profiles_tx: pd.DataFrame | None = None
@@ -675,6 +678,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             _idle_by_wh = {str(r["WAREHOUSE_NAME"]).strip().upper():
                            safe_float(r["PROJECTED_MONTHLY_IDLE_USD"])
                            for _, r in advisor.iterrows()}
+            for _, r in advisor.iterrows():
+                _co = r.get("COMPANY")
+                _company_by_wh[str(r["WAREHOUSE_NAME"]).strip().upper()] = (
+                    _co.strip() if isinstance(_co, str) and _co.strip() else "UNKNOWN")
             if _whs.ok and not _whs.empty:
                 _sw = _whs.df.copy()
                 _sw.columns = [str(c).lower() for c in _sw.columns]
@@ -1179,7 +1186,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         # nothing; Idle & sizing's cluster-cap check shows cluster use instead.)
         st.markdown("**Fleet consolidation candidates (review-only)**")
         st.caption(
-            "Same size class, current company scope, active hours that barely overlap → the two "
+            "Same size class, same company, active hours that barely overlap → the two "
             "workloads plausibly fit on one warehouse. Estimated saving is the retired warehouse's "
             "monthly idle tail (conservative). Verify concurrency and ownership before merging."
         )
@@ -1197,8 +1204,15 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         int(h) for h, qc in zip(group["HOUR_OF_DAY"], group["AVG_QUERIES"], strict=False)
                         if safe_float(qc) >= 1.0)
                     if hours and _size_by_wh.get(key):   # need a known size class to merge safely
+                        # R1-113: the owner is the warehouse's OWN company. The page scope here made every
+                        # profile 'ALL' under the ALL scope, so the module's same-owner gate never fired and
+                        # an ALFA + Trexis pair was proposed on this shared chargeback account. A warehouse
+                        # the idle advisor did not return keeps the scope (a single-company scope already
+                        # filtered the read); under ALL it stays 'ALL' and can only pair with another such
+                        # warehouse — and with no idle tail it is never the retired side ($5 floor).
                         profiles.append(WarehouseProfile(
-                            name=str(wh), size_class=_size_by_wh[key], owner=str(company),
+                            name=str(wh), size_class=_size_by_wh[key],
+                            owner=_company_by_wh.get(key, str(company)),
                             active_hours=hours, monthly_idle_usd=_idle_by_wh.get(key, 0.0)))
                 cands = consolidation_candidates(profiles)
                 if cands:
@@ -1210,6 +1224,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     ])
                     cdf = pd.DataFrame([
                         {"Keep": c.keep, "Retire": c.retire, "Size": c.size_class,
+                         **({"Company": c.owner} if str(company).upper() == "ALL" else {}),
                          "Shared active hours": c.shared_hours, "Est. $/mo": c.est_monthly_saving_usd}
                         for c in cands])
                     styled_table(cdf, height=280, sort_label="estimated saving",
