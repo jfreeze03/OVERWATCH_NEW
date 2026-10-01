@@ -19,6 +19,7 @@ from app.config import core_object
 from app.core.errors import safe_page
 from app.core.identity import idempotency_key, identity_sql, viewer_name
 from app.core.query import execute_action, execute_statement, run, run_batch
+from app.core.result import QueryResult, is_setup_absence
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters, navigation_context, request_navigation
@@ -93,6 +94,27 @@ def _optional_number(value: object, suffix: str = "", decimals: int = 0) -> str:
 
 
 _SETUP_HINT = "Alerting is not installed yet — an admin can verify on Admin → Migrations & freshness."
+
+
+_SOURCE_ABSENT = ("This panel's source isn't installed or isn't readable by this app — an admin can check "
+                  "Admin → Migrations & freshness.")
+
+
+def _failed_read(res: QueryResult, sentence: str, setup: str = _SOURCE_ABSENT) -> bool:
+    """Render a FAILED read by its kind and return True; False when the read succeeded, so the caller renders its
+    data or its own ok-and-empty wording (v4.605 rule; reviews R1-045 / R1-116 / R1-168 / R1-172).
+
+    needs_setup (``setup``) only for a true absence (is_setup_absence: the object is missing or not readable by
+    the app's role); schema drift, a timeout or any other failure is 'unavailable' with ``sentence`` and the error
+    one click away. A failed read must never reach the "not installed yet", "appears once ..." or all-clear
+    wording an ok-but-empty read earns -- those blame setup, the data or nothing for a read that broke."""
+    if res.ok:
+        return False
+    if is_setup_absence(res.error_kind):
+        empty_state("needs_setup", setup)
+    else:
+        empty_state("unavailable", sentence, detail=str(res.error or ""))
+    return True
 
 
 RESOLUTION_KINDS = ("ACTIONED", "NOISE", "EXPECTED")
@@ -487,8 +509,10 @@ def _delivery_status() -> None:
     # actually name, and check for ANY of them.
     integ = run("SHOW NOTIFICATION INTEGRATIONS", page=_PAGE,
                 key="delivery_integ", tier="metadata", source="SHOW INTEGRATIONS", max_rows=0)
+    # Review R1-169: the 5-minute tier Admin's task-health read uses, not the 4 h metadata entry -- this banner
+    # answers "who gets paged right now", so a task a DBA suspended in a worksheet must not read LIVE for hours.
     task = run("SHOW TASKS LIKE 'TASK_ALERT_NOTIFY' IN SCHEMA DBA_MAINT_DB.OVERWATCH",
-               page=_PAGE, key="delivery_task", tier="metadata", source="SHOW TASKS", max_rows=0)
+               page=_PAGE, key="delivery_task", tier="recent", source="SHOW TASKS", max_rows=0)
     last = run(f"SELECT MAX(NOTIFIED_AT) AS LAST_SEND FROM {core_object('ALERT_EVENTS')}",
                page=_PAGE, key="delivery_last", tier="live", source="ALERT_EVENTS")
     # Which integrations do the ENABLED routes actually name? That is the set that has
@@ -544,10 +568,24 @@ def _delivery_status() -> None:
                        f"does not exist ({', '.join(missing)}) — every run logs a failure "
                        "for it, burying real errors. Disable those routes in ALERT_ROUTES "
                        "or create the integration.")
-    elif has_integ:
+    elif has_integ and task_state == "suspended":
         st.warning("Integration exists but the notify task is suspended — an admin can "
                    "resume TASK_ALERT_NOTIFY (one statement, see the runbook's delivery "
                    "section). Until then, 2am alerts wait for someone to look.")
+    elif has_integ and not task.ok:
+        # Review R1-169 (the #32 rule, for the task read): a FAILED SHOW TASKS is not evidence of a state.
+        st.warning("Delivery status unable to verify — the SHOW TASKS read failed, so whether "
+                   "TASK_ALERT_NOTIFY is running is unknown. This is NOT proof alerts are undelivered "
+                   "or that the task is suspended; retry, or check the warehouse/grants. Treat delivery "
+                   "as UNKNOWN until it resolves.")
+    elif has_integ:
+        # an ok read with no row (the task is not created, or the owner role holds no privilege on it) or with no
+        # readable state -- the deploy_health NOT_VISIBLE / "State unknown" cases, never "suspended"
+        st.warning("Delivery status unknown — SHOW TASKS does not show TASK_ALERT_NOTIFY's state to the app's "
+                   "owner role (not created, or the role holds no privilege on it"
+                   + (f"; state reads '{task_state}'" if task_state else "")
+                   + "). This is NOT evidence it is suspended; check Task health on Admin → "
+                     "Migrations & freshness.")
     else:
         st.error(f"Enabled route(s) point at an integration that does not exist "
                  f"({', '.join(missing)}) — alerts stay in-app only. One-time setup: "
@@ -1450,7 +1488,15 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                             ev = run(alert_evidence_sql.build(plan),
                                      page=_PAGE, key=f"ai_ev_{plan.kind}_{event_id[:8]}", tier="historical",
                                      source="ACCOUNT_USAGE / marts (per-alert evidence)")
-                            if not ev.ok or ev.empty:
+                            # Review R1-045: a FAILED evidence read (timeout, drift, an unreadable mart) is
+                            # not "no rows for this scope" -- it renders by its kind, with the error.
+                            if _failed_read(ev, "Could not assemble the evidence for this alert, so the AI "
+                                                "evaluation stays locked.",
+                                            setup="The evidence source for this alert isn't installed or "
+                                                  "isn't readable by this app — an admin can check Admin → "
+                                                  "Migrations & freshness."):
+                                st.session_state.pop(_expl_prompt_key, None)
+                            elif ev.empty:
                                 st.session_state.pop(_expl_prompt_key, None)
                                 empty_state("no_data_yet",
                                             "No evidence rows for this alert's scope — the driver may be "
@@ -1766,8 +1812,13 @@ def render() -> None:
             st.markdown("**Rule precision (90d)** — is each rule worth its pages?")
             prec = run(mart_sql.rule_precision(90), page=_PAGE, key="rule_precision",
                        tier="recent", source="ALERT_EVENTS.RESOLUTION_KIND")
+            # Review R1-116: RESOLUTION_KIND is V021, far below the floor -- a timeout or drift here is a failed
+            # read ('unavailable' + the error), never "apply the pending schema update"; needs_setup only when
+            # ALERT_EVENTS itself is missing or unreadable.
             if not prec.ok:
-                empty_state("needs_setup", "Precision is not installed yet — an admin can apply the pending schema update on Admin → Migrations & freshness.")
+                _failed_read(prec, "Rule precision could not be read.",
+                             setup="Rule precision needs ALERT_EVENTS, which isn't installed or isn't readable by "
+                                   "this app — an admin can check Admin → Migrations & freshness.")
             elif prec.empty:
                 empty_state("no_data_yet",
                             "No resolved events in 90d — precision appears once alerts get closed "
@@ -1791,8 +1842,8 @@ def render() -> None:
                         st.markdown(f"**Recent resolutions for {_prec_rid}**")
                         styled_table(_prec_res.df[["RESOLVED_AT", "RESOLUTION_KIND", "RESOLUTION_NOTE"]],
                                      height=180, slug="rule-prec-resolutions")
-                    else:
-                        st.caption(f"No resolved events yet for {_prec_rid}.")
+                    elif not _failed_read(_prec_res, f"Recent resolutions for {_prec_rid} could not be read."):
+                        empty_state("no_data_yet", f"No resolved events yet for {_prec_rid}.")
                 st.caption(
                     "Precision = ACTIONED / (ACTIONED + NOISE); EXPECTED is excluded. High NOISE "
                     "with low precision = move the threshold away from noise in the rule's firing "
@@ -1815,9 +1866,9 @@ def render() -> None:
                             "while cutting NOISE, with the basis stated per rule. Apply through "
                             "the generator below — same review-then-run flow as always."
                         )
-                else:
-                    st.caption("Suggestions appear once resolved events carry metric values "
-                               "and resolution kinds.")
+                elif not _failed_read(mk, "Suggested thresholds could not be read."):
+                    empty_state("no_data_yet", "Suggestions appear once resolved events carry metric values "
+                                               "and resolution kinds.")
             with st.expander("Generate a threshold change"):
                 if not rules.empty:
                     rule_ids = rules.df["RULE_ID"].astype(str).tolist()
@@ -1883,8 +1934,9 @@ def render() -> None:
                 {"label": "Events (90d)", "value": f"{int(df['EVENTS'].sum()):,}"},
             ])
             styled_table(df, height=240)
-        else:
-            st.caption("MTTA/MTTR appears once events have been acknowledged/resolved via the lifecycle workflow.")
+        elif not _failed_read(mttr, "MTTA / MTTR could not be read."):
+            empty_state("no_data_yet",
+                        "MTTA/MTTR appears once events have been acknowledged/resolved via the lifecycle workflow.")
 
         st.markdown("**Incident lifecycle (90d, incident grain)**")
         # Moved from Control Room (v4.50): retrospective process-health
@@ -1922,8 +1974,10 @@ def render() -> None:
                 # INCIDENT_MEMBERS kind WH_CHANGE|DEPLOY), so each was a permanent
                 # misleading 0%. Change correlation lives in the Control Room RCA.
             ])
-        else:
-            st.caption("Incident lifecycle metrics appear once incidents are declared (Control Room).")
+        # incident_metrics always returns ONE row (CROSS JOINed aggregates), so not usable() is in practice a
+        # failed read -- never the "appear once" wording below.
+        elif not _failed_read(inc_met, "Incident lifecycle metrics could not be read."):
+            empty_state("no_data_yet", "Incident lifecycle metrics appear once incidents are declared (Control Room).")
 
         st.markdown("**Delivery health (SLO)** — did alerts leave the building, and how fast?")
         slo = _hb.get("slo") or run(mart_sql.delivery_slo_summary(30), page=_PAGE, key="delivery_slo",
@@ -1964,22 +2018,35 @@ def render() -> None:
                      tier="recent", source="ALERT_DELIVERIES by route")
             if rt.usable():
                 styled_table(rt.df, height=170)
+            else:
+                _failed_read(rt, "Deliveries by route could not be read.")
             # rec19: per-route BACKLOG — what SP_NOTIFY_WEBHOOK will drain next and
             # the age of the oldest pending event (the starvation signal rec8 fixes).
             # Same send-eligibility predicate as the drainer, so the two agree.
             st.markdown("**Route backlog** — open eligible events not yet delivered, oldest first.")
             bl = _db.get("bl") or run(mart_sql.route_backlog(), page=_PAGE, key="route_backlog",
                      tier="recent", source="ALERT_EVENTS x ALERT_ROUTES (send-eligibility)")
-            if bl.usable() and not bl.df.empty:
+            # Review R1-168: the all-clear is earned only by a SUCCESSFUL read. route_backlog returns one row per
+            # ENABLED route (LEFT JOIN, BACKLOG 0 when nothing waits), so an ok read with no rows means no
+            # enabled route -- and a failed read was the only other way to reach the old clean sentence.
+            if not bl.ok:
+                _failed_read(bl, "Route backlog unavailable — a stuck route may be hidden.")
+            elif bl.empty:
+                empty_state("needs_setup", "No enabled alert route — nothing is queued for delivery.")
+            else:
                 styled_table(bl.df, height=170, column_config={
                     "OLDEST_MIN": st.column_config.Column("Oldest"),
                 })
-                st.caption("A rising OLDEST while the notify task runs means a route is starved — "
-                           "check its integration. The oldest-first drain (V064) clears the tail first.")
-            else:
-                st.caption("No route has an undelivered backlog right now.")
-        else:
-            st.caption("Delivery SLOs appear once the per-route ledger has rows.")
+                # BACKLOG is a COUNT per enabled route (never NULL); the clean row needs the column to be read
+                if ("BACKLOG" in bl.df.columns
+                        and safe_float(pd.to_numeric(bl.df["BACKLOG"], errors="coerce").fillna(0).sum()) <= 0):
+                    empty_state("clean", "No route has an undelivered backlog right now.")
+                else:
+                    st.caption("A rising OLDEST while the notify task runs means a route is starved — "
+                               "check its integration. The oldest-first drain (V064) clears the tail first.")
+        # delivery_slo_summary is one FROM-less row of scalar subqueries, so not usable() is a failed read.
+        elif not _failed_read(slo, "Delivery SLOs could not be read — undelivered criticals may be hidden."):
+            empty_state("no_data_yet", "Delivery SLOs appear once the per-route ledger has rows.")
 
         st.markdown("**Alert fatigue** — which rules burn attention without earning it?")
         fat = _hb.get("fat") or run(mart_sql.alert_fatigue(30), page=_PAGE, key="alert_fatigue",
@@ -2002,9 +2069,9 @@ def render() -> None:
                 if _fat_ev.usable():
                     st.markdown(f"**Recent events for {_fat_rid}**")
                     styled_table(_fat_ev.df, height=220)
-                else:
-                    st.caption(f"No events in 90d for {_fat_rid}.")
-        else:
+                elif not _failed_read(_fat_ev, f"Recent events for {_fat_rid} could not be read."):
+                    empty_state("no_data_yet", f"No events in 90d for {_fat_rid}.")
+        elif not _failed_read(fat, "Alert fatigue could not be read."):
             empty_state("no_data_yet", "Fatigue metrics appear once events exist in the window.")
 
     else:
