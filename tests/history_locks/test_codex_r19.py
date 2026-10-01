@@ -40,11 +40,13 @@ def test_failure_timeline_skips_scan_when_summary_says_zero():
 
 def test_storage_builders_use_monthly_average_billing_basis():
     # F1 (2026-07-14): Snowflake bills storage on the monthly average of daily
-    # bytes, not a latest-day snapshot. Both builders now AVG the window per
-    # database (superseding the r19 QUALIFY-latest-day snapshot).
-    for sql in (cost_sql.storage_by_database(90, "ALFA"),
-                cost_sql.storage_by_database_live(90, "ALFA")):
-        assert "AVG(COALESCE(" in sql
+    # bytes, not a latest-day snapshot (superseding the r19 QUALIFY-latest-day
+    # snapshot). v4.607: the trailing-window storage_by_database[_live] pair was
+    # deleted (no page caller since item 7); the calendar-month pair Spend reads
+    # carries the basis, dividing by the days in the period.
+    for sql in (cost_sql.storage_by_database_calendar("ALFA"),
+                cost_sql.storage_by_database_calendar_live("ALFA")):
+        assert "/ NULLIF(DATEDIFF('day'," in sql
         assert "QUALIFY DAY = MAX(DAY) OVER ()" not in sql
         assert "DAYS_AVERAGED" in sql
         sqlglot.parse(sql, dialect="snowflake")

@@ -215,39 +215,6 @@ LIMIT {cap}
 """
 
 
-def experiment_verified_totals() -> str:
-    """Uncapped VERIFIED count + summed VERIFIED_USD over the whole experiments table. The browsable
-    experiments() list is capped (LIMIT 300, active-first) for the master/detail table, so computing
-    the 'Verified' count and 'Verified value' headlines from that capped frame silently dropped the
-    oldest settled VERIFIED experiments once the account holds > 300 -- this aggregate is not capped,
-    so the director-facing totals stay complete (ds-hunt 2026-08-30)."""
-    return f"""
-SELECT COUNT(*) AS TOTAL_COUNT,
-       COUNT_IF(UPPER(STATUS) = 'VERIFIED') AS VERIFIED_COUNT,
-       ROUND(COALESCE(SUM(IFF(UPPER(STATUS) = 'VERIFIED', VERIFIED_USD, 0)), 0), 2) AS VERIFIED_USD
-FROM {core_object("OPTIMIZATION_EXPERIMENTS")}
-"""
-
-
-def slo_objectives(active_only: bool = True, entity_type: str = "",
-                   entity_key: str = "") -> str:
-    clauses = ["ACTIVE"] if active_only else []
-    if _entity_type(entity_type):
-        clauses.append(f"UPPER(ENTITY_TYPE) = {sql_literal(_entity_type(entity_type))}")
-    if str(entity_key or "").strip():
-        clauses.append(
-            f"UPPER(ENTITY_KEY) = {sql_literal(str(entity_key).strip().upper(), 500)}"
-        )
-    return f"""
-SELECT SLO_ID, NAME, ENTITY_TYPE, ENTITY_KEY, METRIC_KEY, COMPARATOR,
-       TARGET_VALUE, ERROR_BUDGET_PCT, WINDOW_DAYS, OWNER_NAME, ACTIVE,
-       NOTES, UPDATED_AT, UPDATED_BY
-FROM {core_object("SLO_OBJECTIVES")}
-WHERE {and_where(*clauses)}
-ORDER BY ENTITY_TYPE, ENTITY_KEY, NAME
-"""
-
-
 ENTITY_METRIC_TYPES = (
     "WAREHOUSE",
     "DATABASE",

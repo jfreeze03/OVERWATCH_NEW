@@ -1,7 +1,7 @@
 """Department chargeback builders.
 
-Exact usage (not billed): WAREHOUSE_METERING_HISTORY joined to DEPARTMENT_MAP — exact
-credits, idle included (a department owns its warehouse's idle time), always
+Exact usage (not billed): FACT_WAREHOUSE_DAILY (exact warehouse metering, loaded hourly
+from WAREHOUSE_METERING_HISTORY) joined to DEPARTMENT_MAP — exact credits, idle included (a department owns its warehouse's idle time), always
 reconciling to the scoped total via the 'Unmapped' bucket. The role lens is
 elapsed-share allocation *within* each warehouse and is labeled allocated.
 """
@@ -153,8 +153,8 @@ def company_allin_showback(days: int, company: str = "ALL", *, bounds: tuple | N
     those facts reload in their own daily runs after the 06:45 CT metering load has moved
     yesterday into the span, so until they run, the span's newest day holds only the part
     loaded the morning before, and the notes say so (R1-13). COMPANY_FOR_USER runs on the grouped user in
-    a derived-table projection with the company test in an outer WHERE (the V030 shape law, as
-    in mart27_sql.live_monthly_spend_by_warehouse). The row count is bounded: tens of service
+    a derived-table projection with the company test in an outer WHERE (the V030 shape law).
+    The row count is bounded: tens of service
     types, a few companies x five serverless arms, one row per Cortex Code user, six storage
     tiers and six coverage rows.
     """
@@ -279,36 +279,4 @@ def department_map() -> str:
 SELECT MAP_TYPE, NAME, DEPARTMENT, OWNER, UPDATED_AT, UPDATED_BY
 FROM {core_object("DEPARTMENT_MAP")}
 ORDER BY MAP_TYPE, DEPARTMENT, NAME
-"""
-
-
-def role_department_map_join(days: int, company: str = "ALL") -> str:
-    """Role usage tagged with the role's department (usage lens, allocated)."""
-    days = bounded_days(days)
-    where = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
-        "WAREHOUSE_NAME IS NOT NULL",
-        "EXECUTION_STATUS = 'SUCCESS'",
-        companies.warehouse_company_scope(company),
-    )
-    return f"""
-SELECT
-    COALESCE(R.DEPARTMENT, 'Unmapped role') AS ROLE_DEPARTMENT,
-    COALESCE(Q.ROLE_NAME, 'UNKNOWN') AS ROLE_NAME,
-    COUNT(*) AS QUERY_COUNT,
-    SUM(COALESCE(Q.TOTAL_ELAPSED_TIME, 0)) / 1000.0 AS ELAPSED_SEC
-FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY Q
--- Collapse the ROLE map to ONE row per UPPER(NAME) before the join (latest UPDATED_AT
--- wins), exactly as _MAP_JOIN does for WAREHOUSE: a raw LEFT JOIN fans out — doubling
--- this role's QUERY_COUNT / ELAPSED_SEC — if two case-variant ROLE rows (legal under the
--- case-sensitive PK) collide on the case-insensitive join. (bug-hunt round 5)
-LEFT JOIN (
-    SELECT NAME, DEPARTMENT FROM {core_object("DEPARTMENT_MAP")}
-    WHERE MAP_TYPE = 'ROLE'
-    QUALIFY ROW_NUMBER() OVER (PARTITION BY UPPER(NAME) ORDER BY UPDATED_AT DESC NULLS LAST, NAME) = 1
-) R ON UPPER(R.NAME) = UPPER(Q.ROLE_NAME)
-WHERE {where}
-GROUP BY 1, 2
-ORDER BY ELAPSED_SEC DESC
-LIMIT 500
 """

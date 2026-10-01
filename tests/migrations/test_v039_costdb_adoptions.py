@@ -55,7 +55,6 @@ def test_live_warehouse_builders_skip_the_pseudo_warehouse():
         insights_sql.idle_warehouse_analysis(7, "ALFA"),
         insights_sql.warehouse_sizing_profile(7, "ALFA"),
         insights_sql.warehouse_hourly_activity(7, "ALFA"),
-        mart27_sql.live_monthly_spend_by_warehouse(12, "ALFA"),
     ]
     for sql in checks:
         assert "WAREHOUSE_ID > 0" in sql, sql[:120]

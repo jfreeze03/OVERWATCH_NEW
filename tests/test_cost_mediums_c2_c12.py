@@ -34,8 +34,6 @@ def test_c2_every_attribution_credit_reference_carries_qas():
 
 def test_c3_storage_having_counts_failsafe():
     builders = [
-        cost_sql.storage_by_database(30),
-        cost_sql.storage_by_database_live(30),
         cost_sql.storage_by_database_calendar(),
         cost_sql.storage_by_database_calendar_live(),
     ]

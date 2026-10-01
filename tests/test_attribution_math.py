@@ -25,10 +25,12 @@ def test_shares_are_global_filters_only_choose_display_rows():
 
 
 def test_mart_reader_obeys_the_same_global_share_law():
-    sql = mart27_sql.alloc_attribution(30, "DATABASE", "ALFA")
+    # v4.607: retargeted from the deleted owner-scoped alloc_attribution (retired from Spend
+    # in P0-1) to alloc_xdim_attribution, the mart path Spend actually serves.
+    sql = mart27_sql.alloc_xdim_attribution(30, "DATABASE", "ALFA")
     assert "(SELECT SUM(ALLOC_CREDITS) FROM scoped)" in sql
     assert "RATIO_TO_REPORT" not in sql
-    scoped_cte = sql.split("WITH scoped AS", 1)[1].split("\n)\n", 1)[0]
+    scoped_cte = sql.split("scoped AS (", 1)[1].split("\n)\n", 1)[0]
     assert "USER$" not in scoped_cte                     # visibility outside the denominator
     assert "USER$" in sql.split("FROM scoped", 1)[1]     # but applied to display rows
 

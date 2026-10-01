@@ -52,7 +52,9 @@ def test_deliveries_for_event_joins_routes_and_scopes_event():
 
 # --- rec29: billed split reader emits the AI/OTHER partitions ---------------------
 def test_billed_split_emits_ai_and_other_partitions():
-    sql = mart_sql.billed_split(30)
+    # v4.607: the windowed billed_split reader (Cost Truth's, retired v4.597) was deleted as
+    # canary-only; rec29's AI/OTHER split rides the shared per-day metering reader instead.
+    sql = mart_sql.fact_daily_spend(30)
     assert "CREDITS_BILLED_AI" in sql and "CREDITS_BILLED_OTHER" in sql
     assert "FACT_METERING_DAILY" in sql
     # AI predicate present so the split is real (Cortex/AI/intelligence).
@@ -120,4 +122,4 @@ def test_setup_progress_panel_registered():
 def test_new_builders_have_canaries():
     canary = _src("app/data/canary.py")
     assert "deliveries_for_event" in canary
-    assert "billed_split" in canary
+    assert "mart_sql.fact_daily_spend(" in canary   # v4.607: carries rec29's split (billed_split deleted)

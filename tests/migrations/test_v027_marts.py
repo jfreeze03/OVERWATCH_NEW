@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from app.data import mart27_sql
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -93,24 +91,25 @@ def test_teardown_covers_v027():
 # Readers
 # ---------------------------------------------------------------------------
 
-def test_readers_are_thin_and_bounded():
-    assert "MART_WAREHOUSE_EFFICIENCY_DAILY" in mart27_sql.warehouse_efficiency(7, "ALFA")
-    assert "COMPANY = 'ALFA'" in mart27_sql.warehouse_efficiency(7, "ALFA")
-    assert "COMPANY = '" not in mart27_sql.warehouse_efficiency(7, "ALL")
-    assert "-400," in mart27_sql.query_families(999999)                # clamped
-    assert "LIMIT 2000" in mart27_sql.query_families(7, 99999)
-    assert "UPPER(DATABASE_NAME) = 'ALFA_EDW_PRD'" in mart27_sql.schema_hourly(7, "ALFA", "ALFA_EDW_PRD")
-    assert "DIMENSION = 'USER'" in mart27_sql.cost_allocation(7, "USER")
-    with pytest.raises(ValueError):
-        mart27_sql.cost_allocation(7, "PLANET")
-    assert "COMPANY_FOR_USER" in mart27_sql.ai_usage(7, "ALFA")        # user-grain scoping
+# v4.607 (dead-code cleanup): the six thin V027 readers (warehouse_efficiency,
+# query_families, role_hourly, schema_hourly, cost_allocation, ai_usage) lost their
+# last page caller to the wave-2 aggregate readers and were canary/test-only; they
+# were deleted with their canary rows. The marts themselves stay loaded and are read
+# by the wave-2 readers (eff_*, family_*, role_share, schema_window_summary, ...).
+_RETIRED_THIN_READERS = ("warehouse_efficiency", "query_families", "role_hourly",
+                         "schema_hourly", "cost_allocation", "ai_usage")
 
 
-def test_all_nine_readers_are_canaried():
+def test_retired_thin_readers_stay_absent():
     src = (_ROOT / "app" / "data" / "canary.py").read_text(encoding="utf-8")
-    for name in ("warehouse_efficiency", "query_families", "role_hourly", "schema_hourly",
-                 "cost_allocation", "task_graphs", "security_posture", "incident_timeline",
-                 "ai_usage"):
+    for name in _RETIRED_THIN_READERS:
+        assert not hasattr(mart27_sql, name), name
+        assert f"mart27_sql.{name}(" not in src, name
+
+
+def test_surviving_v027_readers_are_canaried():
+    src = (_ROOT / "app" / "data" / "canary.py").read_text(encoding="utf-8")
+    for name in ("task_graphs", "security_posture", "incident_timeline"):
         assert f"mart27_sql.{name}" in src, name
 
 

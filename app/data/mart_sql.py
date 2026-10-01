@@ -249,19 +249,6 @@ def _billed_split_cols(credits_col: str = "CREDITS_BILLED") -> str:
     )
 
 
-def billed_split(days: int = 30, *, bounds: tuple | None = None) -> str:
-    """rec29: windowed billed credits split into AI vs OTHER partitions (account-
-    wide — billing carries no company grain) so the Cost Truth BILLED basis
-    dollarizes with the house rate mix (AI/Cortex at ai_rate, compute at the
-    compute rate) instead of a naive single rate. Feeds blended_billed_usd."""
-    horizon = bounded_days(days, 400)
-    return f"""
-SELECT {_billed_split_cols()}
-FROM {core_object('FACT_METERING_DAILY')}
-WHERE {scope_window_where('DAY', horizon, bounds=bounds)}
-"""
-
-
 def fact_daily_spend_year() -> str:
     """Calendar-year billed credits per day (COST_DB recon R9). Own builder:
     bounded_days clamps at 90 by default, which would silently turn "YTD"

@@ -1290,8 +1290,8 @@ def run_task_evidence_scan(control_fqn: object, *, task: object, workflow: objec
 # night-keyed by DATE(TASK_START_DTTM - 12h) so the ~22:00 start and the ~02:47 finish belong to
 # the SAME cycle. All deadline / margin / trend math is Python (the clock times never touch SQL);
 # this builder is config-driven only by the two anchor WORKFLOW NAMES (escaped literals — data).
-SLA_BASELINE_RUNS = 14      # ~2 weeks of nightly cycles to fit the margin trend
-# Next-Fifty #18: nights RETURNED — the forecaster fits only the newest SLA_BASELINE_RUNS; the older
+# Next-Fifty #18: nights RETURNED — the forecaster fits only the newest
+# insights.SLA_FORECAST_FIT_NIGHTS (14, ~2 weeks of nightly cycles); the older
 # nights size the month/quarter-end history. > one quarter (~91 nights) so a quarter-end night is
 # always sized from a PREVIOUS quarter-end. days=0 already scans every row, so no extra scan.
 SLA_HISTORY_NIGHTS = 100

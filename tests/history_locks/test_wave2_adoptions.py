@@ -12,8 +12,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from app.data import mart27_sql
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -62,12 +60,6 @@ def test_family_readers_match_live_contracts():
     for col in ("QUERY_PARAMETERIZED_HASH", "AVG_COMPILE_S", "AVG_TOTAL_S",
                 "COMPILE_PCT", "TOTAL_COMPILE_HOURS"):
         assert col in comp, col
-    rq = mart27_sql.family_repeat_fingerprints(30, "ALFA", 10,
-                                               database="ALFA_EDW_PRD", schema_contains="rpt")
-    for col in ("FINGERPRINT", "TOTAL_ELAPSED_HOURS", "AVG_ELAPSED_SEC",
-                "TOTAL_TB_SCANNED", "AVG_CACHE_PCT", "QUERY_PREVIEW", "LAST_RUN"):
-        assert col in rq, col
-    assert "UPPER(f.DATABASE_NAME) = 'ALFA_EDW_PRD'" in rq        # filter parity (qualified)
 
 
 def test_role_share_keeps_both_leak_guards():
@@ -80,14 +72,6 @@ def test_role_share_keeps_both_leak_guards():
     # after (law locks live in test_r18_batch1).
     assert "RATIO_TO_REPORT(ELAPSED_SEC) OVER (PARTITION BY WAREHOUSE_NAME)" in sql
     assert "LIKE '%TRXS%'" in mart27_sql.role_share(7, "Trexis")
-
-
-def test_alloc_reader_contract_and_bounds():
-    sql = mart27_sql.alloc_attribution(30, "USER", "ALFA")
-    for col in ("ELAPSED_SEC", "ELAPSED_SHARE", "ALLOC_CREDITS"):
-        assert col in sql, col
-    with pytest.raises(ValueError):
-        mart27_sql.alloc_attribution(30, "PLANET")
 
 
 def test_schema_summary_matches_query_window_contract():
@@ -122,7 +106,7 @@ def test_optimize_adopts_eff_and_family_marts():
     assert "insights_sql.warehouse_sizing_profile" in _OPT
     # repeat-query panel is LIVE-ONLY (cost-hunt3 2026-08-30): the family mart diverged from the
     # live twin on cache% and population and can't price the $ column, so this toggle-gated panel
-    # calls the live builder directly (not the mart) -- the mart reader stays for canary/other use.
+    # calls the live builder directly (not the mart). v4.607 deleted the then canary-only mart reader.
     assert "mart27_sql.family_repeat_fingerprints" not in _OPT
     assert "insights_sql.repeat_query_fingerprints" in _OPT
 
@@ -185,6 +169,5 @@ def test_security_gains_posture_trend():
 def test_new_readers_are_canaried():
     canary = (_ROOT / "app" / "data" / "canary.py").read_text(encoding="utf-8")
     for name in ("eff_idle_analysis", "eff_sizing_profile", "family_compile_heavy",
-                 "family_repeat_fingerprints", "role_share", "alloc_attribution",
-                 "schema_window_summary", "ai_costs_by_model"):
+                 "role_share", "schema_window_summary", "ai_costs_by_model"):
         assert f"mart27_sql.{name}" in canary, name
