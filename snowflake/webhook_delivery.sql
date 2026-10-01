@@ -12,10 +12,11 @@
 --         re-posted to the route(s) that delivered it, emailed via OVERWATCH_EMAIL's
 --         DEFAULT_RECIPIENTS (recipe at the end of this file)
 --
--- Run as ACCOUNTADMIN with the Teams secret pasted into the PASTE TARGET below
--- (in Snowsight), then re-run V018 (or just: ALTER TASK
--- DBA_MAINT_DB.OVERWATCH.TASK_ALERT_NOTIFY RESUME;). A rotated URL needs only
--- the ROTATION step further down -- not a re-run of this file.
+-- Run as ACCOUNTADMIN in a Snowsight worksheet. First-time setup: uncomment the
+-- CREATE SECRET below (paste the value there) and open the GATE, then re-run
+-- V018 (or just: ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_ALERT_NOTIFY RESUME;).
+-- A rotated URL needs only the ROTATION step further down -- not a re-run of
+-- this file.
 
 
 -- ---------------------------------------------------------------------------
@@ -29,26 +30,37 @@
 -- <REDACTED-PASTE-IN-SNOWSIGHT>  (NEVER PASTE THE REAL URL INTO THIS FILE —
 -- it lands in git + git history; keep it in the SECRET object in Snowsight.)
 --
--- PASTE TARGET: the teams_secret DEFAULT in the block below = everything after
--- /workflows/ in that URL (the flow id + ?api-version=...&sig=...). The block
--- RAISEs while the placeholder (any '<') is still there, so an unedited Run All
--- stops HERE -- before anything below can overwrite the live secret with the
--- placeholder (every send would fail) or recreate the integration (CREATE OR
--- REPLACE drops every grant on it; SP_NOTIFY_WEBHOOK runs as owner).
+-- FIRST-TIME SETUP ONLY (the secret does not exist yet). In the Snowsight
+-- worksheet, uncomment this statement and paste the value there: everything
+-- after /workflows/ in that URL (the flow id + ?api-version=...&sig=...).
+--   CREATE SECRET IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL
+--       TYPE = GENERIC_STRING
+--       SECRET_STRING = '<REDACTED-PASTE-IN-SNOWSIGHT>';
+-- Once it exists, change the value ONLY with the ROTATION RUNBOOK's ALTER
+-- SECRET below (IF NOT EXISTS never overwrites the live secret).
+-- Keep the value in a TOP-LEVEL CREATE / ALTER SECRET. NEVER put it in a
+-- scripting block (a DECLARE ... DEFAULT) or a SET variable: QUERY_HISTORY
+-- keeps that statement's whole text verbatim -- 365 days in ACCOUNT_USAGE,
+-- readable by every role with ACCOUNT_USAGE access -- and OVERWATCH ingests
+-- QUERY_TEXT itself (OW_QH_EXTRACT -> change-risk QUERY_PREVIEW, Query
+-- detail). If the real value was EVER run that way (an older revision of this
+-- file used SET variables for it), treat the sig as exposed: regenerate the
+-- Workflows URL in Teams, then rotate (ROTATION RUNBOOK below).
+--
+-- GATE: Run All stops HERE unless you set recreate_integration TRUE in your
+-- Snowsight copy -- first-time setup, or the URL PREFIX (before /workflows/)
+-- or the card template changed. The CREATE OR REPLACE below drops every grant
+-- on the integration (SP_NOTIFY_WEBHOOK runs as owner), and a rotation never
+-- needs it. The gate holds no secret, so its text is safe in QUERY_HISTORY.
 EXECUTE IMMEDIATE $$
 DECLARE
-    teams_secret VARCHAR DEFAULT '<REDACTED-PASTE-IN-SNOWSIGHT>';
-    ddl VARCHAR;
-    placeholder_still_present EXCEPTION (-20001, 'ABORT: webhook_delivery.sql still holds the placeholder Teams secret. Paste the real value (everything after /workflows/ in the Workflows URL) into teams_secret in a Snowsight worksheet, then re-run. A rotated URL needs only the ROTATION step (ALTER SECRET), not this file.');
+    recreate_integration BOOLEAN DEFAULT FALSE;
+    not_confirmed EXCEPTION (-20001, 'ABORT: webhook_delivery.sql stops before recreating OVERWATCH_WEBHOOK_TEAMS (CREATE OR REPLACE drops every grant on it). A rotated URL needs only the ROTATION RUNBOOK step (ALTER SECRET), not this file. First-time setup or a URL prefix / card template change: create the secret first (the commented CREATE SECRET IF NOT EXISTS), set recreate_integration TRUE in your Snowsight copy, then re-run.');
 BEGIN
-    IF (CONTAINS(teams_secret, '<')) THEN
-        RAISE placeholder_still_present;
+    IF (NOT recreate_integration) THEN
+        RAISE not_confirmed;
     END IF;
-    -- the repo's dynamic-DDL idiom (EXECUTE IMMEDIATE :var); the value is quote-escaped into the DDL
-    ddl := 'CREATE OR REPLACE SECRET DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL TYPE = GENERIC_STRING SECRET_STRING = '''
-           || REPLACE(teams_secret, '''', '''''') || '''';
-    EXECUTE IMMEDIATE :ddl;
-    RETURN 'OVERWATCH_TEAMS_URL set';
+    RETURN 'gate open: recreating OVERWATCH_WEBHOOK_TEAMS';
 END;
 $$;
  CREATE OR REPLACE NOTIFICATION INTEGRATION OVERWATCH_WEBHOOK_TEAMS
@@ -79,8 +91,8 @@ $$;
 --   ALTER SECRET DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL
 --       SET SECRET_STRING = '<everything after /workflows/ in the new URL>';
 -- The integration, its grants and ALERT_ROUTES stay as they are. Re-run the
--- setup above only when the URL PREFIX (before /workflows/) or the card
--- template changes -- and then check the grants it dropped:
+-- setup above (GATE opened) only when the URL PREFIX (before /workflows/) or
+-- the card template changes -- and then check the grants it dropped:
 --   SHOW GRANTS ON INTEGRATION OVERWATCH_WEBHOOK_TEAMS;
 -- Prove delivery end to end (posts one real card):
 --   CALL SYSTEM$SEND_SNOWFLAKE_NOTIFICATION(
