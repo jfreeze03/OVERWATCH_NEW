@@ -112,6 +112,29 @@ def test_runway_bar_label_only_for_balance(monkeypatch):
     assert "ow-runway__track" in seen[-1] and "% of contract consumed" in seen[-1]
 
 
+def test_runway_bar_says_a_contract_outlasts_its_term(monkeypatch):
+    """R2-042: a credits runway whose exhaustion falls on or after CONTRACT_END_DATE reads 'outlasts the term',
+    never a countdown to a date the term never reaches."""
+    from app.logic.formulas import contract_runway
+    from app.ui import components
+    seen: list[str] = []
+    monkeypatch.setattr(components.st, "markdown", lambda html, **_k: seen.append(html))
+    rw = contract_runway(pd.Series({"TOTAL": 100000.0, "CONSUMED": 99000.0, "DAILY_BURN": 80.0, "DAYS_LEFT": 13.0,
+                                    "EXHAUST_DATE": "2027-01-02", "TERM_END": "2027-01-01"}))
+    components.contract_runway_bar(rw)
+    assert "ow-runway--ok" in seen[-1] and "99% of contract consumed" in seen[-1]
+    assert "outlasts the term (ends 2027-01-01 · decide by 2026-12-02)" in seen[-1] and "exhausts" not in seen[-1]
+    assert "days left" not in seen[-1]
+    components.contract_runway_bar(_CREDITS)                      # no TERM_END key: unchanged label
+    assert "200 days left (exhausts 2027-04-12" in seen[-1]
+
+
+def test_metric_registry_bounds_the_credits_runway_to_the_term():
+    m = mr.get("contract_runway")
+    assert m is not None and "CONTRACT_END_DATE" in m.notes and "exclusive" in m.notes
+    assert "outlasts the term" in m.notes and mr.validate() == []
+
+
 def test_metric_registry_names_the_balance_runway():
     m = mr.get("contract_balance_runway")
     assert m is not None and m.method == mr.BILLED

@@ -84,6 +84,10 @@ def contract_runway_signal(best: dict | None, *, read_ok: bool = True, basis: st
     ``basis`` ('configured credits' / 'billing balance') is appended to the in-band phrases."""
     if best is None:
         return None if read_ok else Signal("warn", "contract runway unavailable — telemetry not read")
+    if best.get("outlasts_term"):
+        # R2-042: the credits outlast CONTRACT_END_DATE (formulas.contract_runway) -- no runway concern,
+        # like the COST_CONTRACT_BREACH alert since V169
+        return None
     days = safe_float(best.get("days_left"), -1.0)
     sfx = f" ({basis})" if basis else ""
     if days < 0:

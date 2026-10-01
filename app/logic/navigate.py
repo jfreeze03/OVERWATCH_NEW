@@ -267,7 +267,8 @@ def rule_warehouse(rule_id: str, text: str = "", detail: str = "") -> str:
 # V163: COST_AI_USER_RUNAWAY titles lead with a user name and SEC_TRUST_REGRESSION with a scanner name, neither
 # a warehouse or database (a dotted user name reads as DB.SCHEMA.), so Investigate applies no filter.
 # R2-037: every other arm whose TITLE leads with a user name gets the same carve-out -- SEC_CRED_EXPIRY ([10]
-# '<USER> <type> '<NAME>' expires ...'), SEC_NEW_ADMIN_NETWORK ([18] '<USER> logged in from new network <IP>')
+# '<USER> <type> '<NAME>' expires ...'), SEC_NEW_ADMIN_NETWORK ([18] '<USER> logged in from new network <IP>', and
+# since V168 for a failures-only pair '<USER>: N failed login attempt(s) from new network <IP> (0 successful)')
 # and SEC_FAILED_LOGINS (daily [07] '<USER> had N failed logins on D'); first.last.name read as database FIRST.
 # tests/test_r2_alerts_logic.py scans the current raiser bodies (a user-name column concatenated anywhere in a
 # TITLE or DETAIL) so a new user-led arm cannot slip past.

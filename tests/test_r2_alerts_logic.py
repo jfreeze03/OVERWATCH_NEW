@@ -102,6 +102,9 @@ def test_r2_037_sleep_polling_keeps_its_warehouse_and_gets_no_database(owner):
 
 @pytest.mark.parametrize(("rule", "text"), [
     ("SEC_NEW_ADMIN_NETWORK", "first.last.name logged in from new network 10.1.2.3 First seen 2026-09-30"),
+    # V168 (R2-039): the failures-only title shape
+    ("SEC_NEW_ADMIN_NETWORK", "first.last.name: 3 failed login attempt(s) from new network 10.1.2.3 (0 successful) "
+                              "First seen 2026-09-30"),
     ("SEC_CRED_EXPIRY", "first.last.name programmatic_access_token 'MY_PAT' expires in 5 day(s) Rotate before"),
     ("SEC_FAILED_LOGINS", "first.last.name had 12 failed logins on 2026-09-30 WH_X"),
     ("DQ_RECON_ERROR", "42 reconciliation error(s) across 3 metric(s) Metric(s): POLICY.PREMIUM.AMT, CLM.PAID.X"),
@@ -130,6 +133,44 @@ def test_r2_037_user_text_sets_no_sticky_filter(rule, text):
 def test_r2_088_091_investigate_lands_where_the_playbook_points(rule, page, section):
     got = navigate.investigation_target(rule, "")
     assert (got["page"], got["section"]) == (page, section)
+
+
+def _detail_pointer(proc: str, start: str, end: str, pattern: str) -> tuple[str, ...]:
+    """The 'review in / Breakdown:' pointer an arm's DETAIL names, read from the LATEST raiser body."""
+    body = _raiser_bodies()[proc]
+    i = body.index(start)
+    arm = body[i:body.index(end, i)]
+    found = re.findall(pattern, arm)
+    assert len(found) == 1, (proc, start, found)
+    return found[0] if isinstance(found[0], tuple) else (found[0],)
+
+
+def test_r2_091_new_exposure_detail_points_where_investigate_lands():
+    """V168 (R2-091): arm [20]'s DETAIL said 'review in Security -> Access', where no PUBLIC-grant panel exists, while
+    Investigate and the playbook go to Security > Changes. The arm text and the route must agree."""
+    (section,) = _detail_pointer("SP_ALERT_SCAN", "    -- [20] SEC_NEW_EXPOSURE", "    END IF;   -- /V157 cadence gate: [20]",
+                                 r"review in Security -> (\w+)")
+    target = navigate.investigation_target("SEC_NEW_EXPOSURE", "")
+    assert (target["page"], section) == ("Security", target["section"]) == ("Security", "Changes")
+    # the other two identity arms already agree: [26] Access (account-takeover lens), [27] Changes
+    for start, end, rule in (("    -- [26] SEC_LOGIN_TAKEOVER", "    -- [27] SEC_ADMIN_GRANT", "SEC_LOGIN_TAKEOVER"),
+                             ("    -- [27] SEC_ADMIN_GRANT", "    IF (MOD(ct_hour, 3) = 2) THEN", "SEC_ADMIN_GRANT")):
+        (sec,) = _detail_pointer("SP_ALERT_SCAN", start, end, r"review in Security -> (\w+)")
+        assert sec == navigate.investigation_target(rule, "")["section"], rule
+
+
+def test_r2_095_org_creep_breakdown_pointer_matches_its_route():
+    """R2-095: COST_ORG_ACCOUNT_CREEP's DETAIL said 'Breakdown: Admin > Org spend' while Investigate routes to Cost
+    Intelligence > Contract & Forecast. The SP_ANOMALY_SWEEP fix ships in V172 (detection cluster): this lock
+    skips while the latest sweep still carries the old pointer and arms itself the day V172 lands (the
+    integrator removes the skip guard once V172 is merged)."""
+    body = _raiser_bodies()["SP_ANOMALY_SWEEP"]
+    if "'. Breakdown: Admin > Org spend.'" in body:
+        pytest.skip("R2-095 lands with V172 (SP_ANOMALY_SWEEP re-derivation, detection cluster)")
+    page, section = _detail_pointer("SP_ANOMALY_SWEEP", "    -- COST_ORG_ACCOUNT_CREEP (guarded)",
+                                    "o ON c.RULE_ID = 'COST_ORG_ACCOUNT_CREEP'", r"Breakdown: ([\w &]+) > ([\w &]+)\.")
+    target = navigate.investigation_target("COST_ORG_ACCOUNT_CREEP", "")
+    assert (page, section) == (target["page"], target["section"]) == ("Cost Intelligence", "Contract & Forecast")
 
 
 def test_r2_088_only_ops_rules_land_on_overview():
@@ -280,6 +321,7 @@ def test_r2_089_llm_text_in_detail_never_picks_the_series():
     ("COST_CONTRACT_BREACH", "Contract EXHAUSTED: 1200 credits over (crossed 2026-09-20, 11 day(s) ago)", ""),
     ("COST_STORAGE_SURGE", "ALFA_DW grew 412.3 GB in a day", "Growth on 2026-09-28 vs 7d median"),
     ("COST_EGRESS_SPIKE", "Egress 250.4 GB in 24h (threshold 100 GB)", "DATA_TRANSFER_HISTORY"),
+    ("COST_EGRESS_SPIKE", "Egress 250.4 GB on 2026-09-29 (14d avg 12.0 GB/day)", "Top destination: X"),   # V169
     ("COST_BUDGET_PACE", "MTD spend $41000 is 1.32x the budget pace", "Budget $100000/mo"),
     ("COST_FORECAST_BREACH", "Projected month-end $120560 exceeds budget $100000", "MTD $50000"),
     ("COST_ORG_ACCOUNT_CREEP", "TRXS_DR org spend up 250% week-over-week", "Last 7d 3500 vs prior 1000 USD"),
@@ -344,12 +386,19 @@ def test_r2_038_no_threshold_set_matches_the_raisers():
 def test_r2_045_metric_not_in_threshold_units_is_withheld():
     assert set(tuning.METRIC_NOT_THRESHOLD_UNITS) == {"COST_BUDGET_PACE", "COST_FORECAST_BREACH", "DQ_RECON_ERROR"}
     bodies = "\n".join(_raiser_bodies().values())
-    # the facts the classification rests on: dollars / error counts written, a multiple / metric count tested
-    for sql in ("               m.MTD_USD,\n", "AND m.MTD_USD > :budget_usd * (m.DAY_OF_MONTH - 1) / m.DAYS_IN_MONTH "
-                "* c.THRESHOLD_NUM", "               m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - "
-                "m.DAY_OF_MONTH),\n", "> :budget_usd * c.THRESHOLD_NUM", "               r.ERRORS,\n",
+    # the facts the classification rests on: dollars / error counts written, a multiple / metric count tested.
+    # R2-041 (V169): [08] / [09] read month-to-date over COMPLETE days (MTD_COMPLETE_USD) and [09] projects the
+    # remaining days including today -- still dollars against a multiple, so the withhold stands (R2-045 deferred)
+    for sql in ("               m.MTD_COMPLETE_USD,\n", "AND m.MTD_COMPLETE_USD > :budget_usd * (m.DAY_OF_MONTH - 1) / "
+                "m.DAYS_IN_MONTH * c.THRESHOLD_NUM", "               m.MTD_COMPLETE_USD + m.DAILY_RATE_USD * "
+                "(m.DAYS_IN_MONTH - m.DAY_OF_MONTH + 1),\n", "> :budget_usd * c.THRESHOLD_NUM", "               r.ERRORS,\n",
                 "r.METRICS >= COALESCE(c.THRESHOLD_NUM, 1)"):
         assert sql in bodies, sql
+    for gone in ("               m.MTD_USD,\n", "AND m.MTD_USD > :budget_usd"):
+        assert gone not in bodies, gone
+    for rule, units in (("COST_BUDGET_PACE", "month-to-date dollars through yesterday"),
+                        ("COST_FORECAST_BREACH", "projected month-end dollars")):
+        assert units in tuning.METRIC_NOT_THRESHOLD_UNITS[rule], rule
     pace = _ev([21000, 24000, 28000, 30000, 33000, 36000], ["NOISE"] * 6)
     for rule in sorted(tuning.METRIC_NOT_THRESHOLD_UNITS):
         got = tuning.suggest_threshold(pace, 1.10, rule_id=rule)

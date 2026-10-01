@@ -315,7 +315,18 @@ def render() -> None:
     _best = contract_planner.best_runway(
         _bal.df if (_bal is not None and _bal.usable()) else None,
         contract_runway(exh.df.iloc[0]) if exh.usable() else None)
-    if _best is not None and _best["days_left"] >= 0:
+    if _best is not None and _best.get("outlasts_term"):
+        # R2-042: the credits last past CONTRACT_END_DATE (EXCLUSIVE): no countdown to a date the term never
+        # reaches -- the COST_CONTRACT_BREACH alert stays quiet for the same contract since V169
+        secondary.append({
+            "label": "Credit commitment",
+            "value": "Outlasts the term",
+            "delta": (f"term ends {_best.get('term_end')}; {_best['days_left']:,.0f} days of credits "
+                      "at current burn"),
+            "delta_color": "off",
+            "help": contract_planner.runway_basis_note(_best),
+        })
+    elif _best is not None and _best["days_left"] >= 0:
         secondary.append({
             "label": ("Contract balance exhausts" if _best["basis"] == "balance"
                       else "Credit commitment exhausts"),

@@ -69,6 +69,34 @@ def test_in_band_runways_keep_their_bands_and_basis():
     assert contract_runway_signal(_best(_LONG)) is None
 
 
+_OUTLASTS = {"TOTAL": 100000.0, "CONSUMED": 99000.0, "DAILY_BURN": 80.0, "DAYS_LEFT": 13.0,
+             "EXHAUST_DATE": "2027-01-02", "TERM_END": "2027-01-01"}
+
+
+def test_a_contract_that_outlasts_its_term_is_not_a_runway_concern():
+    """R2-042: CONTRACT_END_DATE is the first day AFTER the term. 13 days of credits left on 12-20 exhaust on
+    2027-01-02, after the term ends: the runway is fine (the V169 alert stays quiet too), never a red countdown."""
+    rw = contract_runway(pd.Series(_OUTLASTS))
+    assert rw is not None and rw["severity"] == "ok" and rw["outlasts_term"] is True
+    assert rw["term_end"] == "2027-01-01" and rw["decide_by"] == "2026-12-02"     # the term end drives renewal
+    best = _best(_OUTLASTS)
+    assert contract_runway_signal(best, basis="configured credits") is None
+    assert contract_runway_clause(best) == RUNWAY_ON_TRACK
+    assert page_verdict([], healthy=contract_runway_clause(best))["label"] == "Healthy"
+    # exhausting INSIDE the term keeps its band (12-27 < 01-01) and its own decide-by
+    inside = dict(_OUTLASTS, CONSUMED=99500.0, DAYS_LEFT=7.0, EXHAUST_DATE="2026-12-27")
+    rw_in = contract_runway(pd.Series(inside))
+    assert rw_in["severity"] == "bad" and rw_in["outlasts_term"] is False and rw_in["decide_by"] == "2026-11-27"
+    sig = contract_runway_signal(_best(inside))
+    assert sig is not None and sig.level == "bad"
+    # the last term day still counts as inside (end exclusive): 12-31 < 01-01
+    assert contract_runway(pd.Series(dict(inside, EXHAUST_DATE="2026-12-31")))["outlasts_term"] is False
+    # no TERM_END (blank setting, or a pre-V169 row) keeps the old behaviour exactly
+    no_end = {k: v for k, v in _OUTLASTS.items() if k != "TERM_END"}
+    assert contract_runway(pd.Series(no_end))["severity"] == "bad"
+    assert contract_runway(pd.Series(dict(_OUTLASTS, TERM_END=None)))["severity"] == "bad"
+
+
 def test_no_runway_is_quiet_when_read_and_watch_when_the_read_failed():
     assert _best(_NO_CONTRACT) is None                       # TOTAL <= 0 -> no contract configured
     assert contract_runway_signal(None, read_ok=True) is None
@@ -139,6 +167,15 @@ def test_pages_flag_an_overrun_contract(monkeypatch, page):
 def test_pages_watch_an_uncomputable_burn(monkeypatch, page):
     v = _drive(monkeypatch, page, _NULL_BURN)
     assert v["label"] == "Watch" and "not computable" in v["body"], v
+
+
+@pytest.mark.parametrize("page", ["Cost Intelligence", "Brief"])
+def test_pages_read_a_contract_that_outlasts_its_term_as_healthy(monkeypatch, page):
+    """R2-042: 13 days of credits that run past CONTRACT_END_DATE are no runway concern on either page."""
+    v = _drive(monkeypatch, page, _OUTLASTS)
+    assert v["label"] == "Healthy", v
+    assert "13 days" not in v["body"] and NO_CONTRACT_RUNWAY not in v["body"]
+    assert RUNWAY_ON_TRACK in v["body"] or "contract runway healthy" in v["body"]     # Cost / Brief wording
 
 
 @pytest.mark.parametrize("page", ["Cost Intelligence", "Brief"])

@@ -124,6 +124,12 @@ def contract_runway(row: pd.Series | None, *, lead_days: int = 30) -> dict | Non
     talks can start before the runway ends). Colour by runway: <=30 days left = bad,
     <=90 = warn, else ok. Returns None when no contract is configured (TOTAL <= 0)
     so callers render nothing. Pure — the dates come from the row, not a clock.
+
+    R2-042: with the row's TERM_END (CONTRACT_END_DATE, the first day AFTER the term) set and
+    the projected exhaustion on or after it, the credits outlast the term: severity 'ok' and
+    ``outlasts_term`` True (the bar reads "outlasts the term (ends <TERM_END>)" and the page
+    verdict raises nothing), with the decide-by date counted back from the term end. No
+    TERM_END keeps the old bands exactly.
     """
     if row is None:
         return None
@@ -134,8 +140,13 @@ def contract_runway(row: pd.Series | None, *, lead_days: int = 30) -> dict | Non
     days_left = safe_float(row.get("DAYS_LEFT"), -1.0)
     pct = round(min(consumed / total * 100.0, 100.0), 1)
     exhaust = _coerce_date(row.get("EXHAUST_DATE"))
-    decide_by = exhaust - timedelta(days=max(0, int(lead_days))) if exhaust else None
-    if days_left < 0:
+    term_end = _coerce_date(row.get("TERM_END"))
+    outlasts = bool(term_end and exhaust and days_left >= 0 and exhaust >= term_end)
+    runway_end = term_end if outlasts else exhaust
+    decide_by = runway_end - timedelta(days=max(0, int(lead_days))) if runway_end else None
+    if outlasts:
+        severity = "ok"
+    elif days_left < 0:
         # exhausted/overrun (pct at the cap), or burn couldn't be computed — surface it
         severity = "bad" if pct >= 100 else "warn"
     elif days_left <= 30:
@@ -151,6 +162,8 @@ def contract_runway(row: pd.Series | None, *, lead_days: int = 30) -> dict | Non
         "decide_by": decide_by.isoformat() if decide_by else None,
         "severity": severity,
         "lead_days": int(lead_days),
+        "term_end": term_end.isoformat() if term_end else None,
+        "outlasts_term": outlasts,
     }
 
 
