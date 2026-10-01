@@ -107,16 +107,35 @@ jobs:
   #     is a kind the chain is known to use (an ALLOWLIST: schema-object DDL,
   #     DML, CALL, anonymous blocks, reads, USE), and if any code, $$ bodies
   #     included, still names DBA_MAINT_DB (any case) or WH_ALFA_ADMIN; names
-  #     a database other than the clone as a DDL / write / CALL / USE target;
-  #     carries a GRANT or REVOKE, warehouse / monitor / account / user /
-  #     integration / role / share / network-policy / database DDL, a role or
-  #     warehouse switch, a task start, an external stage or unload, or a
+  #     a database other than the clone as a DDL / COMMENT / write / CALL /
+  #     USE target (in any form: quoted or not, with or without a space after
+  #     the keyword, db..object); runs CREATE / ALTER / DROP / UNDROP /
+  #     COMMENT ON of a kind whose name it cannot read (ALTER SESSION and
+  #     MODEL MONITOR included, and any whose name is followed straight by
+  #     a qualified one), IDENTIFIER(), TABLE() of a literal or variable, or
+  #     EXECUTE IMMEDIATE of anything but a literal, a $$ block or a
+  #     :variable; carries a GRANT or REVOKE,
+  #     warehouse / monitor / account / user / integration / role / share /
+  #     network-policy / database DDL, a role or warehouse switch, a task
+  #     start or any other EXECUTE, an external stage, unload, file copy or
+  #     stage file removal, a body in a language other than SQL, or a
   #     SYSTEM$ function off its allowlist; or CALLs SP_NOTIFY_WEBHOOK or
   #     SP_DAILY_DIGEST (top level, nested in a $$ body, or in a dynamic-SQL
   #     string) anywhere but a suspended task's own body. A comment between
-  #     two tokens reads as whitespace, and "code" includes a '...' literal
-  #     handed straight to EXECUTE IMMEDIATE (the first piece when it is
-  #     concatenated), read as the SQL it runs.
+  #     two tokens reads as whitespace (--, // and /* */, as Snowflake reads
+  #     them), and "code" includes a '...' literal handed straight to EXECUTE
+  #     IMMEDIATE (the first piece when it is concatenated) or given as a
+  #     body after AS, read as the SQL it runs.
+  #   * FAILS CLOSED, too, on what the client (snow sql) reads differently
+  #     from Snowflake: outside a $$ body, a // comment, a backslash in a
+  #     "quoted" name, a line starting with ! (!source of a file or a URL) or
+  #     a /* */ comment with no space on either side (the client deletes it,
+  #     joining two tokens); and anywhere, client template syntax (<%, {#,
+  #     &{, &name), which snow sql renders from the job's environment. In
+  #     any '...' string, at every level, it refuses every backslash escape
+  #     but \', \", \\, \t and \n, which it decodes exactly as Snowflake
+  #     does (Snowflake drops the backslash of most others: DBA_MAINT\_DB is
+  #     DBA_MAINT_DB): a string can run as SQL.
   # The smoke only ever executes the rewritten copies. What keeps it off the
   # account's real notification integrations is that every clone task stays
   # SUSPENDED and EXECUTE TASK is refused, so the notifier and digest task
