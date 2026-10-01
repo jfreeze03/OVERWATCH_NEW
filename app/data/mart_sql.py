@@ -3677,13 +3677,23 @@ GROUP BY 1, 2
 ORDER BY DAY
 """
 
-def unmapped_entities(days: int = 7) -> str:
+def unmapped_entities(days: int = 7, *, bounds: tuple | None = None) -> str:
     """V044 (#18): everything the loaders stamped UNKNOWN — the explicit-
     classification worklist behind honest chargeback. Mart-only (zero
     ACCOUNT_USAGE): rows appear as facts re-stamp (trailing 3d nightly,
     go-forward hourly). Fix = a COMPANY_SCOPE mapping row; the panel
-    prints the exact INSERT."""
-    days = bounded_days(days, 30)
+    prints the exact INSERT.
+
+    R1-145: serves the PAGE window. It used to clamp to 30 days while the panel's scope chip, KPI
+    help ("in this window"), 'Est. $ (window)' column and green "every entity in the window carries
+    company evidence" claimed the full window — so at 90/365d or Current year a warehouse billed
+    UNKNOWN 31+ days ago dropped out of the billed-blind $ and the clean state covered unchecked
+    days. All three sources are FACT_* tables (V014 retention 400d hourly / 800d daily), so the mart
+    window cap applies, not the 90d live one; ``bounds`` (date_windows.window_bounds) gives Last month
+    its calendar month and the period-to-date presets their exact range instead of a trailing span."""
+    days = bounded_days(days, MAX_MART_WINDOW_DAYS)
+    _w_day = scope_window_where("DAY", days, bounds=bounds)
+    _w_hour = scope_window_where("HOUR_TS", days, bounds=bounds)
     # r7 uncapped-aggregate: only the WAREHOUSE grain carries credits, and it sorts LAST
     # alphabetically (DATABASE < USER < WAREHOUSE), so >300 unmapped DB+USER rows would
     # evict every credit-bearing warehouse row past the LIMIT — the "billed blind" $ then
@@ -3695,17 +3705,17 @@ WITH unm AS (
            'credits' AS MEASURE, ROUND(SUM(CREDITS_TOTAL), 2) AS VALUE,
            MAX(DAY) AS LAST_SEEN
     FROM {core_object("FACT_WAREHOUSE_DAILY")}
-    WHERE COMPANY = 'UNKNOWN' AND DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+    WHERE COMPANY = 'UNKNOWN' AND {_w_day}
     GROUP BY 2
     UNION ALL
     SELECT 'DATABASE', DATABASE_NAME, 'queries', SUM(QUERIES), MAX(DATE(HOUR_TS))
     FROM {core_object("FACT_QUERY_SCHEMA_HOURLY")}
-    WHERE COMPANY = 'UNKNOWN' AND HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())
+    WHERE COMPANY = 'UNKNOWN' AND {_w_hour}
     GROUP BY 2
     UNION ALL
     SELECT 'USER', USER_NAME, 'logins', SUM(LOGINS), MAX(DAY)
     FROM {core_object("FACT_LOGIN_DAILY")}
-    WHERE COMPANY = 'UNKNOWN' AND DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+    WHERE COMPANY = 'UNKNOWN' AND {_w_day}
     GROUP BY 2
 )
 SELECT GRAIN, ENTITY, MEASURE, VALUE, LAST_SEEN,

@@ -74,17 +74,26 @@ def _unmapped_mapper(df, is_operator: bool) -> None:
     an operator applies it in place, otherwise it's copy-paste for Snowsight. The
     next loader pass re-stamps go-forward facts — history needs a backfill re-run."""
     with st.expander("Map an entity to a company"):
-        entities = [str(e) for e in df["ENTITY"].dropna().tolist() if str(e).strip()]
-        if not entities:
+        # R1-146: pick a ROW, not a name. The same name can be UNKNOWN under two grains (a FIVETRAN
+        # user and a FIVETRAN database; an ANALYTICS warehouse and database): the old name picker
+        # listed it twice, Streamlit resolves duplicate options by value (the second entry cannot be
+        # selected), and a name lookup took the first row in GRAIN order -- so the credit-bearing
+        # WAREHOUSE (or USER) row could never be mapped and Apply wrote a DATABASE scope instead.
+        _rows = df[df["ENTITY"].notna() & df["ENTITY"].astype(str).str.strip().ne("")].reset_index(drop=True)
+        if _rows.empty:
             st.caption("Nothing to map in this window.")
             return
         c1, c2 = st.columns([3, 2])
         with c1:
-            pick = st.selectbox("Entity", entities, key="unmap_entity")
+            _idx = st.selectbox(
+                "Entity", list(range(len(_rows))), key="unmap_entity_row",
+                format_func=lambda i: f"{_rows.at[i, 'ENTITY']} · {str(_rows.at[i, 'GRAIN']).title()}")
         with c2:
             company_choice = st.selectbox("Company", ["ALFA", "Trexis"], key="unmap_company")
-        _row = df[df["ENTITY"].astype(str) == str(pick)]
-        grain = str(_row.iloc[0]["GRAIN"]).upper() if len(_row) else "WAREHOUSE"
+        # a sticky index can outlive a window change that shrinks the worklist
+        _row = _rows.iloc[int(_idx) if _idx is not None and 0 <= int(_idx) < len(_rows) else 0]
+        pick = str(_row["ENTITY"])
+        grain = str(_row["GRAIN"]).upper()
         scope_type = _SCOPE_FOR_GRAIN.get(grain, "USER_OVERRIDE")
         pattern = str(pick).upper()
         note = f"Classified via OVERWATCH ({grain})"
@@ -104,10 +113,13 @@ def _unmapped_mapper(df, is_operator: bool) -> None:
             f"Maps **{pick}** ({scope_type}) → **{company_choice}**. Go-forward facts stamp "
             "immediately; the nightly reconcile re-stamps the trailing 3 days. Older history "
             "keeps its original stamp until a full loader backfill re-run.")
-        if is_operator and st.button("Apply mapping", key="unmap_apply") and write_gate_open(f"unmap_apply:{pick}:{company_choice}"):
+        # the latch key and the receipt carry the grain too: a same-name mapping at another grain is a
+        # genuinely different write (C48 scoped key), and the toast names which one ran
+        if is_operator and st.button("Apply mapping", key="unmap_apply") and write_gate_open(
+                f"unmap_apply:{scope_type}:{pick}:{company_choice}"):
             ok, msg = execute_statement(merge_sql.replace("\n", " "), page=_PAGE)
-            stamp_write(f"unmap_apply:{pick}:{company_choice}", ok)  # C48
-            notify(ok, msg if not ok else f"Mapped {pick} → {company_choice}.")
+            stamp_write(f"unmap_apply:{scope_type}:{pick}:{company_choice}", ok)  # C48
+            notify(ok, msg if not ok else f"Mapped {pick} ({scope_type}) → {company_choice}.")
         elif not is_operator:
             st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS — in-app "
                        "execution needs an admin profile.")
@@ -253,8 +265,11 @@ def render() -> None:
             section_header("Storage", "", "cost", anchor="cost-storage")
             _storage_tab(f["company"], f["days"], settings, bounds=f["bounds"])
             st.divider()
-            unm = run(mart_sql.unmapped_entities(f["days"]), page=_PAGE,
-                      key=f"unmapped_{f['days']}", tier="hourly",
+            # R1-145: the worklist serves the page window (bounds included), so the "in this window"
+            # KPI help, the 'Est. $ (window)' column and the clean claim below are true as worded.
+            _unm_b = f"_{f['bounds'][0]}_{f['bounds'][1]}" if f["bounds"] is not None else ""
+            unm = run(mart_sql.unmapped_entities(f["days"], bounds=f["bounds"]), page=_PAGE,
+                      key=f"unmapped_{f['days']}{_unm_b}", tier="hourly",
                       source="FACT_WAREHOUSE_DAILY + FACT_QUERY_SCHEMA_HOURLY + FACT_LOGIN_DAILY (COMPANY='UNKNOWN')")
             # C23: "empty is the goal state" — so the header is green when it is.
             section_header("Unmapped entities", alarm_health(unm), "chargeback",

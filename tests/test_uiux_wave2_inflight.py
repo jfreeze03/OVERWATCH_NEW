@@ -114,7 +114,8 @@ def test_latch_keys_scope_by_action_and_target():
     assert cb.count('f"bud_save:{pick_dept}"') == 2
     assert cb.count('f"cb_map_exec:{name}"') == 2
     cost = _src("app/ui/pages/cost.py")
-    assert cost.count('f"unmap_apply:{pick}:{company_choice}"') == 2
+    # R1-146: scoped by grain too -- the same name at another grain is a genuinely different mapping
+    assert cost.count('f"unmap_apply:{scope_type}:{pick}:{company_choice}"') == 2
 
 
 def test_every_write_click_block_is_latched():
