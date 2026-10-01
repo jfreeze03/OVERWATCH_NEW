@@ -1032,8 +1032,11 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *,
                 },
             )
     # R1-166: the header + caption above used to sit over nothing when the share read was empty or failed.
+    # An empty share is always the LIVE leg (an empty mart falls through), which clamps a trailing
+    # window to MAX_LIVE_WINDOW_DAYS: name the window it scanned (served_days), not the one asked for.
     elif share_res.ok:
-        empty_state("no_data_yet", f"No role activity on these warehouses in {_wlab}.")
+        empty_state("no_data_yet", "No role activity on these warehouses in "
+                                   f"{window_label(bounds, served_days(share_res, days))}.")
     elif is_setup_absence(share_res.error_kind):
         empty_state("needs_setup", "The role-share sources are not readable by this app's role, so no role "
                                    "allocation is shown.")

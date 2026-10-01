@@ -724,10 +724,14 @@ def _graphs_tab(company: str, days: int, rate: float, database: str = "",
     result_caption(res, note="TREND compares $/run between window halves (±10% = FLAT). "
                              "Pipeline label = the graph's root task.")
 
+    # R1-163: serverless_task_daily clamps a trailing window to the live-scan limit, so the header
+    # names the window actually scanned. R1-061 / R1-167: only a true absence is a grant gap; a
+    # timeout or a dropped column is a failed read and says so with its error. guard() renders the
+    # OK read: the clean empty row, and the truncation line once run()'s row cap cuts the task-day
+    # rows (R1-062); result_caption names the source under the table.
     sls = run(graph_sql.serverless_task_daily(days, company, database, schema_contains, bounds=bounds),
               page=_PAGE, key=f"sls_costs_{company}_{days}_{database}_{schema_contains}{_lm}",
               tier="historical", source="SERVERLESS_TASK_HISTORY")
-    # R1-163: serverless_task_daily clamps a trailing window to the live-scan limit.
     _sls_wlab = window_label(bounds, min(int(days), MAX_LIVE_WINDOW_DAYS))
     st.markdown(f"**Serverless tasks (billed separately, task-day grain, {_sls_wlab})**")
     # R1-061 / R1-167: only a true absence is a grant gap; a timeout or a dropped column is a failed

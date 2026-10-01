@@ -103,9 +103,11 @@ def _contract(monkeypatch, today: date):
         return pd.DataFrame({"ACTIONABLE": pd.Series([], dtype=bool)})
 
     burn = _ok(pd.DataFrame({"CREDITS_BILLED": [40.0] * 30}))   # no DAY column: every row is whole-day
+    notes: list[tuple[object, str]] = []
     fake, seen = _patch(
         monkeypatch, contract, {"steer_wh_settings": _ok(pd.DataFrame())},
         run_mart_first=fake_rmf, guard=lambda r, *_a, **_k: r.usable(),
+        result_caption=lambda r, note="", **_k: notes.append((r, note)),
         daily_spend_wide=lambda _page: burn, account_today=lambda: today,
         idle_advisor=fake_idle_advisor, with_auto_suspend_settings=lambda df, _whs: df,
         panel_help=lambda *_a, **_k: None,
@@ -116,6 +118,8 @@ def _contract(monkeypatch, today: date):
     fake.success = lambda text, *_a, **_k: fake.calls.append(("success", str(text)))
     contract._contract_tab({"CONTRACT_CREDITS": 10_000, "CONTRACT_START_DATE": _START.isoformat(),
                             "CONTRACT_END_DATE": _END.isoformat(), "CREDIT_PRICE_USD": 3.0})
+    # the source note under the consumed figure (the result_caption fed the contract_consumed read)
+    seen["consumed_notes"] = [n for r, n in notes if r is rmf_results["contract_consumed"]]
     return fake, seen, rmf, advisor_days
 
 
@@ -135,6 +139,7 @@ def test_running_term_keeps_pace_and_steering(monkeypatch, today):
     # R1-021: the idle lever divides by the 27 days the mart COVERS, not the fixed 30-day ask
     assert advisor_days == [27]
     assert "Exhaustion here is CREDITS-based" in fake.text("caption")
+    assert seen["consumed_notes"] == ["Billed credits (cloud-services adjustment applied) since contract start."]
 
 
 @pytest.mark.parametrize("today", [_END, date(2026, 9, 15)])      # the (exclusive) end day, and after
@@ -149,6 +154,10 @@ def test_ended_term_shows_the_final_figure_and_withholds_pace(monkeypatch, today
     plan = seen["tables"][-1]
     assert "RECOMMENDED_COMMIT_USD" in plan.columns and "CURRENT_CONTRACT_EXHAUSTED" not in plan.columns
     assert "no remaining balance to exhaust" in fake.text("caption")
+    # R1-159 review: the source note names the term bound, not "since contract start" (credits to date)
+    (note,) = seen["consumed_notes"]
+    assert "since contract start" not in note
+    assert "up to the term end 2026-09-01 (end day excluded)" in note
 
 
 def test_contract_consumed_builders_keep_the_retention_floor_unfiltered():
@@ -276,23 +285,55 @@ def test_chargeback_share_budget_and_map_reads_split_on_the_kind():
     assert any(k == "no_data_yet" for _t, k, _d in _branches(_AC, "_chargeback_tab", "map_res"))
 
 
+@pytest.mark.parametrize(("days", "label"), [(30, "30d"), (365, "90d")])
+def test_empty_role_share_names_the_window_the_live_leg_scanned(monkeypatch, days, label):
+    # R1-166 review: an ok-but-empty share is the live leg (an empty mart falls through), and the live
+    # builder clamps a trailing window to 90d, so a 365d page must not say "no role activity in 365d"
+    from contextlib import nullcontext
+
+    from app.ui import components
+    from app.ui.pages.cost_parts import ai_chargeback as ac
+    dept = _ok(pd.DataFrame({"DEPARTMENT": ["Ops"], "WAREHOUSE_NAME": ["WH_A"], "COMPANY": ["ALFA"],
+                             "CREDITS_TOTAL": [10.0]}))
+    share = components._mark_served(_ok(pd.DataFrame()), live=True, days=None)   # run_mart_first's stamp
+    fake, seen = _patch(
+        monkeypatch, ac, {"cb_map": _ok(pd.DataFrame())},
+        run_batch_mixed=lambda _specs, **_k: {"dept": dept, "bud": _ok(pd.DataFrame())},
+        run_mart_first=lambda *_a, **_k: share, guard=lambda r, *_a, **_k: r.usable(),
+        charts=SimpleNamespace(bar_usd=lambda *_a, **_k: None), reconciliation_footer=lambda *_a, **_k: None,
+        panel_help=lambda *_a, **_k: None, _statement_export=lambda *_a, **_k: None)
+    fake.columns = lambda n: [nullcontext() for _ in range(n)]
+    fake.column_config = SimpleNamespace(NumberColumn=lambda *_a, **_k: None)
+    fake.selectbox = lambda _label, options, **_k: options[0]
+    fake.text_input = lambda _label, value="", **_k: value
+    fake.code = lambda *_a, **_k: None
+    ac._chargeback_tab("ALL", days, 3.0, False)
+    ((state, msg),) = [(k, m) for k, m in seen["empty"] if "role activity" in m]
+    assert state == "no_data_yet" and msg == f"No role activity on these warehouses in {label}."
+
+
 # -------------------------------------- R1-061 / R1-167 / R1-163: serverless tasks, rendered ----
 
 def _serverless(monkeypatch, sls, days: int = 30):
+    from app.ui import components
     from app.ui.pages.cost_parts import unit_costs as uc
     daily = pd.DataFrame({"DAY": [], "PIPELINE": [], "USD": []})
+    captioned: list = []
     fake, seen = _patch(
         monkeypatch, uc, {f"sls_costs_ALL_{days}__": sls},
         run_mart_first=lambda *_a, **_k: _ok(pd.DataFrame({"X": [1]})),
-        # v4.606 integration: an ok serverless read now goes through guard() (R1-062), so the fake mirrors the
-        # real gate -- an empty ok read records its kind, a failed read is not rendered here.
-        guard=lambda res, msg, setup_hint="", kind="no_data_yet": (
-            res.ok and (not res.empty or bool(uc.empty_state(kind, msg)))),
+        # the task-graph panel above renders; the Serverless panel goes through the REAL guard()
+        guard=lambda res, *a, **k: components.guard(res, *a, **k) if res is sls else True,
+        result_caption=lambda res, *_a, **_k: captioned.append(res),
         graphs=SimpleNamespace(
             enrich_graph_daily=lambda _df, _rate: daily,
             pipeline_summary=lambda _d: pd.DataFrame(columns=["PIPELINE", "USD", "SUCCESS_PCT"])))
+    # guard()'s absence states land in seen["empty"] and its truncation line in the fake's captions
+    monkeypatch.setattr(components, "empty_state", uc.empty_state)
+    monkeypatch.setattr(components, "st", fake)
     fake.column_config = SimpleNamespace(NumberColumn=lambda *_a, **_k: None)
     uc._graphs_tab("ALL", days, 3.0)
+    seen["captioned"] = [r for r in captioned if r is sls]
     return fake, seen
 
 
@@ -313,6 +354,19 @@ def test_serverless_empty_is_clean_and_the_header_names_the_scanned_window(monke
     fake, seen = _serverless(monkeypatch, _ok(pd.DataFrame()), days=365)
     assert [k for k, _m in seen["empty"]] == ["clean"]
     assert "task-day grain, 90d)" in fake.text("markdown")      # the read clamps 365d to the live limit
+
+
+@pytest.mark.parametrize("truncated", [False, True])
+def test_serverless_rows_disclose_a_cut_and_name_the_source(monkeypatch, truncated):
+    # R1-061 x R1-062: the task-day rows (newest first) render through guard(), which adds the quiet
+    # truncation line when run()'s row cap cut them, and result_caption names the source under the table
+    sls = _ok(pd.DataFrame({"DAY": ["2026-09-30"], "TASK_NAME": ["T"], "SERVERLESS_CREDITS": [1.5]}))
+    sls.truncated = truncated
+    fake, seen = _serverless(monkeypatch, sls)
+    assert seen["empty"] == [] and seen["captioned"] == [sls]
+    (table,) = [t for t in seen["tables"] if "SERVERLESS_CREDITS" in t.columns]
+    assert table["USD"].tolist() == [4.5]
+    assert ("Showing the first 1 rows" in fake.text("caption")) is truncated
 
 
 # ----------------------------------------------- R1-119 / R1-167: the deep unit-cost sites (AST) ----
@@ -364,6 +418,55 @@ def test_priciest_proc_kpi_prefers_the_builder_leader():
     # the leaderboard table drops the KPI-only window columns and says it ranks by total
     assert 'drop(columns=["PC_LEADER_NAME", "PC_LEADER_CREDITS"], errors="ignore")' in src
     assert "top 50 by measured spend" in src
+
+
+class _KpisRendered(Exception):
+    """Raised by the fake kpi_row: the unit-cost KPI row is all the render tests below need to see."""
+
+
+_NO_LEADER_COLS = object()
+
+
+def _priciest_per_call_kpi(monkeypatch, leader: object) -> dict:
+    """Render _unit_costs_tab up to its KPI row over a top-50-by-TOTAL procedure frame whose in-frame
+    per-call leader (DB.S.FREQ_07, 0.35 cr/call) is NOT row 0, carrying the builder's PC_LEADER_* columns
+    (``leader`` as the name, 2.0 cr/call) unless ``leader`` is _NO_LEADER_COLS."""
+    from app.ui.pages.cost_parts import unit_costs as uc
+    procs = pd.DataFrame({"PROC_NAME": [f"DB.S.FREQ_{i:02d}" for i in range(50)],
+                          "TOTAL_CREDITS": [100.0 - i for i in range(50)],
+                          "CREDITS_PER_CALL": [0.35 if i == 7 else 0.01 for i in range(50)]})
+    if leader is not _NO_LEADER_COLS:
+        procs["PC_LEADER_NAME"] = [leader] * len(procs)
+        procs["PC_LEADER_CREDITS"] = 2.0
+    kpis: list[dict] = []
+
+    def kpi_row(items, *_a, **_k):
+        kpis.extend(items)
+        raise _KpisRendered
+
+    _patch(monkeypatch, uc, {"unit_ai_mart_30": _failed("other")},
+           run_batch=lambda _jobs, **_k: {"q": _failed("other"), "p": _ok(procs), "ai": _failed("other")},
+           panel_help=lambda *_a, **_k: None, kpi_row=kpi_row)
+    with pytest.raises(_KpisRendered):
+        uc._unit_costs_tab({"company": "ALL", "days": 30, "database": "", "schema_contains": "",
+                            "bounds": None, "warehouse_contains": "", "user_contains": ""}, 3.0, 2.2)
+    (kpi,) = [k for k in kpis if k["label"] == "Priciest procedure (per call)"]
+    return kpi
+
+
+def test_priciest_proc_kpi_names_the_leader_ranked_below_the_top_50(monkeypatch):
+    # R1-158 review: a $6/call monthly batch proc ranking past 50th by total is named from PC_LEADER_*
+    kpi = _priciest_per_call_kpi(monkeypatch, "DB.S.MONTHLY_BATCH")
+    assert (kpi["value"], kpi["delta"]) == ("$6.00", "DB.S.MONTHLY_BATCH")
+    assert "across every procedure" in kpi["help"]
+
+
+@pytest.mark.parametrize("leader", [_NO_LEADER_COLS, None, float("nan"), "  "])
+def test_priciest_proc_kpi_without_a_builder_leader_re_sorts_the_frame(monkeypatch, leader):
+    # no (or a blank) PC_LEADER_NAME: the in-frame per-call leader, never row 0 (the top proc by total)
+    kpi = _priciest_per_call_kpi(monkeypatch, leader)
+    assert (kpi["value"], kpi["delta"]) == ("$1.05", "DB.S.FREQ_07")
+    assert "among the procedures listed below" in kpi["help"]
 
 
 # ---------------------------------------------- R1-031: app cost totals are not the capped frame ----
