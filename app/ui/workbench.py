@@ -29,6 +29,7 @@ from app.logic.watch_monitor import WATCH_SIGNAL_TYPES, watch_summary, watched_s
 from app.logic.wh_health import warehouse_health
 from app.logic.workbench import (
     ACTION_STATUSES,
+    ACTION_WINDOW_COLS,
     CRITICALITIES,
     ENTITY_TYPES,
     UNASSIGNED_OWNER,
@@ -350,6 +351,9 @@ def _with_held(frame: pd.DataFrame, *, key: str, type_col: str = "SOURCE_ENTITY_
     return out
 
 
+_ACTION_READ_CAP = 500
+
+
 def render_action_center(company: str) -> None:
     """Persistent owner queue with exact-row navigation and lifecycle controls."""
     # Codex-adj P1: the header stripe was a CONSTANT "warn" (amber on every render, incl. a
@@ -363,9 +367,11 @@ def render_action_center(company: str) -> None:
                           help=f"Only work whose Owner is you ({_me or 'viewer unknown'}). Team labels "
                                "like DBA count as Unassigned.")
     read_model_caption("action_center")
+    # R1-091/207: the KPIs read the read's UNCAPPED window totals (with_kpi_totals), and with Include
+    # completed work the open items sort first, so closed history never pushes open work past the cap.
     extended_res = run(
-        workbench_sql.action_center(company, include_closed, 500), page=_PAGE,
-        key=f"action_center_{company}_{include_closed}", tier="live",
+        workbench_sql.action_center(company, include_closed, _ACTION_READ_CAP, with_kpi_totals=True),
+        page=_PAGE, key=f"action_center_{company}_{include_closed}", tier="live",
         source="ACTION_QUEUE + V074 lifecycle context",
     )
     # R1-206: V074's lifecycle shape is guaranteed past config.REQUIRED_SCHEMA_FLOOR (88; main.py blocks
@@ -381,6 +387,9 @@ def render_action_center(company: str) -> None:
         return
     extended = True
     frame = extended_res.df.copy()
+    _read_capped = len(frame) >= _ACTION_READ_CAP
+    _matching = (int(safe_float(frame.iloc[0].get("KPI_MATCHING_TOTAL")))
+                 if not frame.empty and "KPI_MATCHING_TOTAL" in frame.columns else len(frame))
 
     # A pending deep link bypasses the mine filter, so a Brief / Overview click to someone else's item
     # is never swallowed (Next-Fifty #20).
@@ -392,7 +401,9 @@ def render_action_center(company: str) -> None:
         _keep = owned_by(frame, _me)
         if _pin and "ACTION_ID" in frame.columns:
             _keep = _keep | (frame["ACTION_ID"].astype(str) == _pin)
-        frame = frame[_keep].reset_index(drop=True)
+        # the window totals count EVERY owner's work: after this filter the counts come from the rows
+        frame = frame[_keep].reset_index(drop=True).drop(columns=list(ACTION_WINDOW_COLS), errors="ignore")
+    _window_counts = set(ACTION_WINDOW_COLS) <= set(frame.columns)
 
     if frame.empty:
         empty_state("clean", "Nothing assigned to you in this scope." if mine_only and _me
@@ -445,6 +456,14 @@ def render_action_center(company: str) -> None:
         if n_def:
             st.caption(f"Deferred ({n_def}): parked until their resume date and left out of the counts "
                        f"above; next resumes {next_resume}.")
+        if _read_capped:
+            # R1-091/207: disclose the list cap (UNCAPPED-AGGREGATE): the counts are window totals over every
+            # matching item, except under 'Assigned to me', which filters the rows read
+            _order = ("open work first, then severity" if include_closed else "severity") + ", overdue, estimate"
+            st.caption(f"The list shows the first {_ACTION_READ_CAP:,} of {_matching:,} matching items "
+                       f"({_order}); "
+                       + ("the counts above cover all of them." if _window_counts else
+                          "'Assigned to me' and the counts above cover only those rows."))
         # Next-Fifty #46: completed work is listed only with Include completed work, so the Held? read is
         # gated on that toggle (never first paint) and on V074's lifecycle columns.
         if include_closed and extended:

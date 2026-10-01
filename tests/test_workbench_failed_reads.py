@@ -81,7 +81,7 @@ def _patch_page(monkeypatch, results: dict, *, entity_key: str = ""):
         "styled_table": lambda df, *_a, **_k: seen["tables"].append(df),
         "status_chips": lambda *_a, **_k: None, "exception_summary": lambda *_a, **_k: None,
         "master_detail": lambda *_a, **_k: None, "viewer_name": lambda: "",
-        "navigation_context": lambda: {}, "snowsight_object_url": lambda *_a, **_k: "",
+        "navigation_context": dict, "snowsight_object_url": lambda *_a, **_k: "",
         "filters": lambda: {"days": 30}, "load_settings": lambda *_a, **_k: {},
         "evidence_gate": lambda *_a, **_k: False, "is_operator": lambda: True,
         "_render_catalog_editor": lambda *a, **_k: seen["editor"].append(a),

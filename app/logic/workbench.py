@@ -608,12 +608,31 @@ def my_queue_counts(frame: pd.DataFrame | None, viewer: str) -> dict[str, int]:
     return {"mine": int(mine.sum()), "mine_overdue": int(late.sum())}
 
 
+#: R1-091/207: workbench_sql.action_center(with_kpi_totals=True)'s UNCAPPED window totals -> action_summary keys.
+ACTION_KPI_TOTAL_COLS: dict[str, str] = {
+    "open": "KPI_OPEN_TOTAL", "critical_high": "KPI_CRITICAL_HIGH_TOTAL", "overdue": "KPI_OVERDUE_TOTAL",
+    "unassigned": "KPI_UNASSIGNED_TOTAL", "estimated_usd": "KPI_ESTIMATED_USD_TOTAL", "deferred": "DEFERRED_TOTAL",
+}
+#: Every window-total column that read carries (KPI counts, the matching total, the next resume day).
+ACTION_WINDOW_COLS: tuple[str, ...] = (*ACTION_KPI_TOTAL_COLS.values(), "KPI_MATCHING_TOTAL", "NEXT_RESUME_DATE")
+
+
 def action_summary(frame: pd.DataFrame | None) -> dict[str, float]:
     """Action Center KPIs. Next-Fifty #20: items deferred to a future resume date are left out of
-    every count (and counted in 'deferred'); a team placeholder owner such as 'DBA' is Unassigned."""
+    every count (and counted in 'deferred'); a team placeholder owner such as 'DBA' is Unassigned.
+
+    R1-091/207: when the frame carries the UNCAPPED window totals (ACTION_KPI_TOTAL_COLS, computed before
+    the read's LIMIT) they ARE the KPIs -- never a pandas sum over the capped frame, which undercounted a
+    >500-item queue and dropped open work whenever 'Include completed work' let closed rows into the cap.
+    A caller that filters rows after the read (e.g. 'Assigned to me') must drop those columns first."""
     if frame is None or frame.empty:
         return {"open": 0.0, "critical_high": 0.0, "overdue": 0.0,
                 "unassigned": 0.0, "estimated_usd": 0.0, "deferred": 0.0}
+    if set(ACTION_KPI_TOTAL_COLS.values()).issubset(frame.columns):
+        row = frame.iloc[0]
+        out = {k: safe_float(row.get(col)) for k, col in ACTION_KPI_TOTAL_COLS.items()}
+        out["estimated_usd"] = round(out["estimated_usd"], 2)
+        return out
     view = frame.copy()
     status = view.get("STATUS", pd.Series("", index=view.index)).astype(str).str.upper()
     open_mask = status.isin(("OPEN", "IN_PROGRESS"))
