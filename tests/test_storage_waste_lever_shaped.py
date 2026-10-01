@@ -1,5 +1,5 @@
-"""Next-Fifty #35 storage leg on the rendered pages (AppTest, streamlit >= 1.55 like the rest of the shaped harness;
-the floor leg skips these, and tests/test_storage_waste_lever.py locks the same wiring by source).
+"""Next-Fifty #35 storage leg on the rendered pages (AppTest over the shaped harness, both CI legs;
+tests/test_storage_waste_lever.py also locks the same wiring by source).
 
 Cost ▸ Optimization & Savings ▸ Storage & waste — the storage-waste scan is OFF by default (no read on first paint);
 on, its read-evidence rows get a LEVER and publish the session handoff that Idle & sizing and Proof ▸ Pipeline count in
@@ -11,7 +11,6 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 from test_pages_shaped import (  # noqa: F401 - _stub_shaped is the harness's autouse fixture
-    _APPTEST_BUTTONGROUP_OK,
     _entry,
     _nav_to,
     _shaped_from_sql,
@@ -36,8 +35,6 @@ from streamlit.testing.v1 import AppTest
 from app.core.result import QueryResult
 from app.data import insights_sql
 from app.logic.savings_rollup import STORAGE_HANDOFF_KEY, UNREAD_HANDOFF_KEY
-
-_SKIP = pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 
 _RECLAIM_MARK = "AS OLDER_THAN_90D"              # only insights_sql.storage_reclaim emits it
 _LEDGER_MARK = "REMEASURED_14D_MONTHLY_USD"      # mart_sql.savings_ledger
@@ -87,7 +84,6 @@ def _proof_pipeline(at) -> AppTest:
     return at
 
 
-@_SKIP
 def test_storage_waste_scan_is_off_by_default(monkeypatch):
     sqls, _ = _recording(monkeypatch)
     at = _storage()
@@ -96,7 +92,6 @@ def test_storage_waste_scan_is_off_by_default(monkeypatch):
     assert STORAGE_HANDOFF_KEY not in at.session_state
 
 
-@_SKIP
 def test_unread_tables_join_the_addressable_headline(monkeypatch):
     sqls, _ = _recording(monkeypatch, frames=_FRAMES)
     at = _storage({"cost_waste_toggle": True})
@@ -125,7 +120,6 @@ def test_unread_tables_join_the_addressable_headline(monkeypatch):
     assert not [s for s in issued if "NEVER_READ" in s or _LEDGER_MARK in s]
 
 
-@_SKIP
 def test_no_read_evidence_keeps_storage_out(monkeypatch):
     from app.ui.pages.cost_parts import optimize
     sqls: list[str] = []
@@ -151,7 +145,6 @@ def test_no_read_evidence_keeps_storage_out(monkeypatch):
             in _texts(at))
 
 
-@_SKIP
 def test_a_failed_ledger_read_keeps_storage_out_and_says_so(monkeypatch):
     from app.ui.pages.cost_parts import optimize
     sqls: list[str] = []
@@ -176,7 +169,6 @@ def test_a_failed_ledger_read_keeps_storage_out_and_says_so(monkeypatch):
     assert not set(_addressable_rows(at)["Warehouse / target"]) & {"DB.S.STALE_T", "DB.S.WRITTEN_T"}
 
 
-@_SKIP
 def test_a_booked_retention_leaves_the_table_out(monkeypatch):
     ledger = pd.DataFrame([{"TARGET_OBJECT": "DB.S.WRITTEN_T", "FINDING_TYPE": "RETENTION", "STATE": "ESTIMATED"}])
     sqls, _ = _recording(monkeypatch, frames={_RECLAIM_MARK: _RECLAIM, _LEDGER_MARK: ledger})
@@ -190,7 +182,6 @@ def test_a_booked_retention_leaves_the_table_out(monkeypatch):
     assert "storage waste (1 already booked on the Savings ledger left out)" in _texts(at)
 
 
-@_SKIP
 def test_one_saving_per_table_with_unread_maintenance(monkeypatch):
     t1 = _reclaim(_row("DB", "S", "T1", DML_STATUS="ACTIVE", TIME_TRAVEL_GB=102.4, RETENTION_DAYS=5.0,
                        ACTIVE_GB=10.0))
@@ -208,7 +199,6 @@ def test_one_saving_per_table_with_unread_maintenance(monkeypatch):
     assert "Levers counted: idle timer + unread maintenance + storage waste." in _texts(at)
 
 
-@_SKIP
 def test_proof_pipeline_counts_storage_and_offers_its_doorway(monkeypatch):
     # (a) after the scan: counted, an OBJECT row per table, no storage doorway
     _recording(monkeypatch, frames=_FRAMES)
@@ -226,7 +216,6 @@ def test_proof_pipeline_counts_storage_and_offers_its_doorway(monkeypatch):
     assert list(written["TITLE"]) == ["Cut Time Travel retention on unread DB.S.WRITTEN_T"]
 
 
-@_SKIP
 def test_proof_pipeline_offers_the_storage_doorway_when_unread_is_counted(monkeypatch):
     # (b) an unread handoff only: the unread lever is counted, so the storage-waste doorway takes its place
     _recording(monkeypatch, frames={"MAINT_CREDITS_30D": _SHORT, "OBJECTS_MODIFIED": _READS, _LEDGER_MARK: _LEDGER})
@@ -245,7 +234,6 @@ def test_proof_pipeline_offers_the_storage_doorway_when_unread_is_counted(monkey
     assert at.session_state["opt_section"] == "Storage & waste"
 
 
-@_SKIP
 def test_proof_pipeline_without_any_scan_offers_only_the_unread_doorway():
     # (c) neither handoff: the unread doorway already opens the same section
     at = AppTest.from_function(_entry, default_timeout=30)

@@ -79,12 +79,8 @@ def test_split_columns_match_the_original_builders():
 
 # --- live-path wiring: rendered Operations serves summary+fails from the one bundle scan -----
 st = pytest.importorskip("streamlit")
-from packaging.version import parse as _parse_version  # noqa: E402
-
-_APPTEST_OK = _parse_version(st.__version__) >= _parse_version("1.55.0")
 
 
-@pytest.mark.skipif(not _APPTEST_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_live_path_serves_summary_and_failures_from_one_bundle_scan():
     import usage_sim
     # schema filter + a specific company => the _use_diag False live path (the old 3-scan case)

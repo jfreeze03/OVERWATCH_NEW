@@ -513,7 +513,7 @@ def test_r1_062_serverless_task_daily_keeps_newest_days_and_flags_truncation():
 
 class _PanelSt:
     """The slice of streamlit the Serverless-tasks and Workflow-runtimes panels touch, recording the
-    captions a viewer would see (AppTest is skipped on the floor CI leg, so these run everywhere)."""
+    captions a viewer would see, so each panel's captions are asserted without a page render."""
 
     def __init__(self) -> None:
         self.captions: list[str] = []

@@ -33,12 +33,8 @@ def test_untagged_worklist_is_gated_behind_an_explicit_pick():
 
 
 st = pytest.importorskip("streamlit")
-from packaging.version import parse as _parse_version  # noqa: E402
-
-_APPTEST_OK = _parse_version(st.__version__) >= _parse_version("1.55.0")
 
 
-@pytest.mark.skipif(not _APPTEST_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_security_landing_does_not_scan_the_untagged_worklist():
     import usage_sim
     report = usage_sim.simulate(pages=["Security"], scopes={"default": {}}, measure_rerun=False)

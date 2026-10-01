@@ -6,8 +6,8 @@ explicit override when it would cancel anything (or the impact is unknown), D3 t
 7-day maximum, D4 Snowflake-managed COMPUTE_SERVICE_WH* pools get their own status, D5 'Timed out' is paired
 with the ceiling that fired. D2 (Admin's V002 wording) is locked in test_admin_timeout_wording.py.
 
-Pure, builder, fake-rendered and source locks: they run on the floor-compat leg too (the shaped AppTests in
-test_prc_c1_shaped.py skip there)."""
+Pure, builder, fake-rendered and source locks, on both CI legs (the shaped AppTests are in
+test_prc_c1_shaped.py)."""
 
 from __future__ import annotations
 

@@ -13,7 +13,6 @@ import pandas as pd
 import pytest
 
 from tests._source import read
-from tests.test_pages_shaped import _APPTEST_BUTTONGROUP_OK
 
 _RULES = pd.DataFrame({"RULE_ID": ["COST_X", "SEC_TRUST_REGRESSION"], "FAMILY": ["COST", "SECURITY"],
                        "NAME": ["x", "trust"], "ENABLED": [True, True], "SEVERITY": ["HIGH", "HIGH"],
@@ -62,9 +61,8 @@ def test_generator_seeds_from_the_picked_rule() -> None:
 
 
 # The second .run() makes AppTest serialize every widget, and streamlit<1.55's AppTest mis-serializes the
-# single-select section switcher (ButtonGroup) as an index array -- the same floor gap the shaped harness
-# skips on. The pure _rule_change_sql tests above cover the UPDATE shape on every version.
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
+# single-select section switcher (ButtonGroup) as an index array; tests/conftest.py back-ports the 1.55 fix,
+# so this runs on the floor leg too. The pure _rule_change_sql tests above cover the UPDATE shape as well.
 def test_rendered_enable_toggle_keeps_the_threshold(monkeypatch) -> None:
     pytest.importorskip("streamlit")
     from streamlit.testing.v1 import AppTest
@@ -74,7 +72,7 @@ def test_rendered_enable_toggle_keeps_the_threshold(monkeypatch) -> None:
     _stub(monkeypatch, {"alert_rules": _ok(_RULES)})
     # Pin the section by stubbing the picker, not by seeding its session key: this test re-runs the
     # script, and on the Streamlit 1.52.2 floor (ci.yml floor-compat) a re-run re-serializes the
-    # section ButtonGroup, whose `indices` walks a seeded 'Rules' string per character and raises.
+    # section ButtonGroup, whose unshimmed `indices` walks a seeded 'Rules' string per character and raises.
     monkeypatch.setattr(alerts, "lazy_sections", lambda *_a, **_k: "Rules")
     at = AppTest.from_function(_render_section, default_timeout=30)
     at.session_state["rule_pick"] = "SEC_TRUST_REGRESSION"

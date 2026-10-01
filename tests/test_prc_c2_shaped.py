@@ -1,6 +1,5 @@
-"""PR C slice C2 on the rendered pages (AppTest, streamlit >= 1.55 like the rest of the shaped harness; the floor
-leg skips these, and tests/test_cycle_eta_surfaces.py + tests/test_unread_maintenance.py lock the same wiring by
-source).
+"""PR C slice C2 on the rendered pages (AppTest over the shaped harness, both CI legs;
+tests/test_cycle_eta_surfaces.py + tests/test_unread_maintenance.py also lock the same wiring by source).
 
 - #36: Operations ▸ Pipeline SLA ▸ Tonight with an in-flight cycle paints "Tonight's projected finish" (three
   tiles + the V156 disclosure) under the glance, and the cycle-timeline toggle renders the per-workflow table.
@@ -17,7 +16,6 @@ from datetime import timedelta
 import pandas as pd
 import pytest
 from test_pages_shaped import (  # noqa: F401 - _stub_shaped is the harness's autouse fixture
-    _APPTEST_BUTTONGROUP_OK,
     _entry,
     _nav_to,
     _shaped_batch,
@@ -32,8 +30,6 @@ from streamlit.testing.v1 import AppTest
 from app.config import DEFAULT_SETTINGS
 from app.core.result import QueryResult
 from app.data import etl_control_sql
-
-_SKIP = pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 
 _FQN = "DB.SCH.CONTROL_STATUS"
 _START_WF = DEFAULT_SETTINGS["ETL_CYCLE_START_WORKFLOW"]
@@ -147,7 +143,6 @@ def _tonight(at_state: dict | None = None) -> AppTest:
     return at
 
 
-@_SKIP
 def test_tonight_projected_finish_and_timeline_render_shaped(monkeypatch):
     _etl_configured(monkeypatch)
     at = _tonight()
@@ -170,7 +165,6 @@ def test_tonight_projected_finish_and_timeline_render_shaped(monkeypatch):
     assert any("TIMELINE_NOTE" in getattr(f, "columns", []) for f in frames), "the timeline table did not render"
 
 
-@_SKIP
 def test_failed_eta_columns_keep_the_glance(monkeypatch):
     keys = _etl_configured(monkeypatch, fail_enriched=True)
     at = _tonight()
@@ -182,7 +176,6 @@ def test_failed_eta_columns_keep_the_glance(monkeypatch):
     assert "no upstream workflow has finished yet" not in blob                         # unknown, not "not yet"
 
 
-@_SKIP
 def test_brief_tile_shows_the_projection(monkeypatch):
     _etl_configured(monkeypatch)
     at = AppTest.from_function(_entry, default_timeout=30)
@@ -232,7 +225,6 @@ def _recording(monkeypatch, *, frames: dict | None = None) -> tuple[list[str], l
     return sqls, writes
 
 
-@_SKIP
 def test_unread_maintenance_is_off_by_default_and_renders_shaped(monkeypatch):
     sqls, _ = _recording(monkeypatch)
     at = _storage()
@@ -258,7 +250,6 @@ _READS = pd.DataFrame([{"OBJECT_FQN": "DB.S.T1", "MATCHED_BY_ID": True, "SHARED_
                         "READ_QUERIES": 0, "READ_USERS": 0, "LAST_READ": None, "WRITE_QUERIES": 2}])
 
 
-@_SKIP
 def test_operator_books_a_confirmed_unread_object(monkeypatch):
     _, writes = _recording(monkeypatch, frames={"MAINT_CREDITS_30D": _SHORT, "OBJECTS_MODIFIED": _READS})
     at = _storage({"cost_unread_maint_toggle": True, "unread_maint_sel_last": "DB.S.T1",
@@ -277,7 +268,6 @@ def test_operator_books_a_confirmed_unread_object(monkeypatch):
     assert "WHERE NOT EXISTS" in writes[0]
 
 
-@_SKIP
 def test_a_failed_confirm_is_worded_by_kind_and_latched(monkeypatch):
     """PR C review C8 / C18: a timed-out access-history confirm says it timed out (not 'needs Enterprise
     edition'), the failure is latched so a rerun does not re-issue the (up to 180 s) scan, and the retry button
@@ -341,7 +331,6 @@ def _idle_and_sizing(at, sqls: list[str]) -> list[str]:
     return sqls[before:]
 
 
-@_SKIP
 def test_confirmed_unread_joins_the_addressable_headline(monkeypatch):
     from app.logic.savings_rollup import UNREAD_HANDOFF_KEY
     sqls, _ = _recording(monkeypatch, frames=_UNREAD_FRAMES)
@@ -360,7 +349,6 @@ def test_confirmed_unread_joins_the_addressable_headline(monkeypatch):
                 or "REMEASURED_14D_MONTHLY_USD" in s]
 
 
-@_SKIP
 def test_a_failed_confirm_keeps_unread_out_of_the_headline(monkeypatch):
     from app.ui.pages.cost_parts import optimize
     sqls: list[str] = []
@@ -384,7 +372,6 @@ def test_a_failed_confirm_keeps_unread_out_of_the_headline(monkeypatch):
     assert "DB.S.T1" not in list(rows["Warehouse / target"])
 
 
-@_SKIP
 def test_a_failed_ledger_read_keeps_unread_out_and_says_so(monkeypatch):
     from app.ui.pages.cost_parts import optimize
     sqls: list[str] = []
@@ -407,7 +394,6 @@ def test_a_failed_ledger_read_keeps_unread_out_and_says_so(monkeypatch):
     assert "DB.S.T1" not in list(_addressable_rows(at)["Warehouse / target"])
 
 
-@_SKIP
 def test_a_booked_object_leaves_the_addressable_headline(monkeypatch):
     from app.logic.savings_rollup import UNREAD_HANDOFF_KEY
     sqls, writes = _recording(monkeypatch, frames=_UNREAD_FRAMES)
@@ -427,7 +413,6 @@ def test_a_booked_object_leaves_the_addressable_headline(monkeypatch):
     assert "1 already booked on the Savings ledger left out" in _texts(at)
 
 
-@_SKIP
 def test_proof_pipeline_counts_the_session_confirmed_unread(monkeypatch):
     _recording(monkeypatch, frames=_UNREAD_FRAMES)
     at = _storage({"cost_unread_maint_toggle": True})
@@ -446,7 +431,6 @@ def test_proof_pipeline_counts_the_session_confirmed_unread(monkeypatch):
     assert list(hit["TITLE"]) == ["Stop maintenance on unread DB.S.T1"]
 
 
-@_SKIP
 def test_proof_pipeline_without_a_scan_offers_the_doorway():
     at = AppTest.from_function(_entry, default_timeout=30)
     at.run()
@@ -503,7 +487,6 @@ def _card(at, label: str) -> tuple[str, str]:
     raise AssertionError(f"no {label!r} card")
 
 
-@_SKIP
 @pytest.mark.parametrize(("idle", "gap", "reason"), [
     (QueryResult(df=pd.DataFrame(), ok=False, error="MART_WAREHOUSE_EFFICIENCY_DAILY read failed", source="stub"),
      "efficiency mart unavailable", "the efficiency mart could not be read"),
@@ -533,7 +516,6 @@ def test_proof_headline_counts_unread_when_the_idle_read_fails(monkeypatch, idle
     assert round(float(addressable["MONTHLY_USD"].sum()), 2) == 36.8
 
 
-@_SKIP
 def test_proof_headline_keeps_the_dash_when_nothing_is_counted(monkeypatch):
     """R1-15: with the idle read failed and no lever item (no scan this session), the headline stays a dash: a
     failed read never renders as a clean $0."""

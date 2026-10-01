@@ -1,7 +1,7 @@
 """Next-Fifty #35 storage leg (v4.605): unread-table storage joins the de-duplicated Addressable $/mo.
 
-Pure + SQL + source locks (both CI legs; the rendered twin is tests/test_storage_waste_lever_shaped.py, skipped on
-the streamlit floor). Cost ▸ Optimization & Savings ▸ Storage & waste's read-evidence scan (insights_sql.
+Pure + SQL + source locks (both CI legs; the rendered twin is tests/test_storage_waste_lever_shaped.py).
+Cost ▸ Optimization & Savings ▸ Storage & waste's read-evidence scan (insights_sql.
 storage_reclaim) gets one LEVER per table (logic.storage_waste): Archive or drop (a stale, unread table's active
 bytes) or Cut retention (the Time Travel a 1-day retention would release on a written but unread table). The
 panel publishes a session handoff (savings_rollup.storage_handoff) that Idle & sizing and Proof ▸ Pipeline read
@@ -638,7 +638,7 @@ def test_storage_reclaim_carries_the_lever_evidence():
         assert "SHARED_DATABASE" not in fallback and "OLDER_THAN_90D" not in fallback
 
 
-# --- 17-19: the wiring (source; the floor leg skips the shaped twin) -----------------------------------------
+# --- 17-19: the wiring (source; the rendered twin is tests/test_storage_waste_lever_shaped.py) ---------------
 
 def _joined(src: str) -> str:
     return re.sub(r'"\s*\n\s*f?"', "", src)

@@ -1,8 +1,8 @@
 """Next-Fifty #30: maintenance spend on objects nobody reads — builders, verdicts, SQL, booking, wiring.
 
 Pure + source locks (both CI legs). The mart shortlist is EXECUTED in tests/test_unread_maintenance_harness.py;
-the rendered panel is driven in tests/test_prc_c2_shaped.py (skipped on the streamlit 1.52.2 floor, so every
-wiring claim is also locked by source below)."""
+the rendered panel is driven in tests/test_prc_c2_shaped.py, and every wiring claim is also locked by source
+below."""
 
 from __future__ import annotations
 
@@ -809,9 +809,10 @@ def test_optimize_wiring_source():
 
 
 def test_storage_and_waste_publishes_the_handoff_source():
-    """#35 (the floor leg skips the shaped twin): Storage & waste is the ONLY writer of the handoff, only inside the
-    scan toggle, once per outcome (clean / confirmed-or-confirm-failed / shortlist failed); a booking leaves the
-    object out in the same run; the booked-objects read is gated and never clears the handoff."""
+    """#35 (shaped twin: tests/test_storage_waste_lever_shaped.py): Storage & waste is the ONLY writer of the
+    handoff, only inside the scan toggle, once per outcome (clean / confirmed-or-confirm-failed / shortlist
+    failed); a booking leaves the object out in the same run; the booked-objects read is gated and never clears
+    the handoff."""
     opt = read("app/ui/pages/cost_parts/optimize.py")
     branch = _storage_branch()
     write = "st.session_state[UNREAD_HANDOFF_KEY] = unread_handoff("
