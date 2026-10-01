@@ -135,6 +135,26 @@ def _live_fallback_daily(company: str, days: int, rate: float,
     return daily[["DAY", "USD"]], res
 
 
+def _spend_failure_help(board_res: QueryResult | None, trend_source: QueryResult) -> str:
+    """c09 R1-191: the 'Unavailable' spend hero's help names what was actually read (house law 8).
+
+    Only the LAST leg failed: the daily spend comes from the exec board when it is usable, else from
+    _live_fallback_daily, whose run_mart_first returns a failure only from its final live read. The
+    exec board was not read at all for the 'Last month' window (board_res None), and it may have
+    answered empty; FACT_WAREHOUSE_DAILY may have failed, answered empty, or been skipped by the
+    mart backoff -- so neither is claimed to have failed unless it did."""
+    if board_res is None:
+        board = "The exec board does not cover a calendar-month window, so it was not read"
+    elif not board_res.ok:
+        board = "The exec board read failed"
+    else:
+        board = "The exec board returned no rows"
+    failed = str(trend_source.source or "").strip() or "the warehouse metering read"
+    error = str(trend_source.error or "").strip()[:200] or "read failed"
+    return (f"Warehouse spend could not be read, so no total is shown. {board}; FACT_WAREHOUSE_DAILY "
+            f"did not serve it; the last fallback, {failed}, failed: {error}.")
+
+
 def _billed_split_available(frame: pd.DataFrame) -> bool:
     """True when the AI/OTHER split columns are present (rec#28).
 
@@ -321,8 +341,9 @@ def render() -> None:
     window_spend = (float(daily_complete["USD"].sum()) if not daily_complete.empty
                     else 0.0)
     # c09 R1-191: that 0.0 is honest only for a read that SUCCEEDED with no complete day. When the
-    # spend read itself failed (board AND the FACT_WAREHOUSE_DAILY / live metering fallback), the
-    # hero, the case summary and the executive export say "unavailable", never a fabricated $0.00.
+    # spend read itself failed (no usable board, and the fallback's last leg -- live metering --
+    # failed), the hero, the case summary and the executive export say "unavailable", never a
+    # fabricated $0.00; the hero's help names which reads ran (_spend_failure_help).
     _spend_failed = not trend_source.ok
     # rec28: the credits behind the dollar headline, for reconciling against Snowsight.
     # This card's value IS credits x rate (warehouse metering), so credits = USD / rate —
@@ -377,6 +398,8 @@ def render() -> None:
             # was dropped entirely — the projection omitted today's remaining spend.
             # Prorate today's OWN forecast row by the fraction of the account day
             # still ahead and add it back as an explicit today-remainder term.
+            # (c09 R1-229: the reader keeps TS::DATE >= CURRENT_DATE() for exactly
+            # this row; a strictly-future reader made the term 0 every day.)
             _secs_elapsed = now.hour * 3600 + now.minute * 60 + now.second
             _frac_left = max(0.0, min(1.0, 1.0 - _secs_elapsed / 86400.0))
             today_remainder_cr = float(pd.to_numeric(
@@ -426,7 +449,7 @@ def render() -> None:
                           "estimate (AI/OTHER split queued for V061).",
                 )
         elif mlres.ok:   # c09 R1-229: the table exists but its horizon is already behind today
-            _ml_stale_note = ("The ML forecast table has no day after today, so the seasonal engine is "
+            _ml_stale_note = ("The ML forecast table has no row for today or later, so the seasonal engine is "
                               "used — retrain it with SP_REFRESH_ML_FORECAST (snowflake/ml_forecast_option.sql).")
         if forecast is None:
             engine = "seasonal"  # honest fallback when the ML view isn't installed
@@ -668,9 +691,7 @@ def render() -> None:
             "value": "Unavailable",
             "severity": "warn",
             "method": "metering", "scope": "company",
-            "help": "Warehouse spend could not be read (exec board, FACT_WAREHOUSE_DAILY and the live "
-                    "WAREHOUSE_METERING_HISTORY fallback all failed), so no total is shown: "
-                    + (str(trend_source.error)[:200] or "read failed") + ".",
+            "help": _spend_failure_help(board_res, trend_source),
         } if _spend_failed else {
             "label": f"Spend, {_ov_spend_lbl} ({company})",
             "value": format_usd(window_spend),
