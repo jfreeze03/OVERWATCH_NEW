@@ -11,7 +11,7 @@ import time
 import streamlit as st
 
 from app.config import ACCOUNT_USAGE_LAG_NOTE, DEFAULT_SETTINGS
-from app.core.result import QueryResult
+from app.core.result import QueryResult, is_schema_drift, is_setup_absence
 from app.data import mart_sql
 from app.logic.formulas import ACCOUNT_TIMEZONE, account_today, format_usd, safe_float
 from app.logic.metric_registry import COLUMN_HELP
@@ -371,13 +371,19 @@ def spark_svg(values, width: int = 84, height: int = 24, color: str = palette.IN
     pts = [(round(i / (n - 1) * (width - 2) + 1, 1),
             round(height - 2 - (v - lo) / rng * (height - 4), 1)) for i, v in enumerate(nums)]
     line = " ".join(f"{x},{y}" for x, y in pts)
-    uid = abs(hash(line)) % 100000
     area = ""
     if fill:
-        area = (f'<defs><linearGradient id="g{uid}" x1="0" y1="0" x2="0" y2="1">'
+        # R2-060: the gradient's only content is its COLOR (objectBoundingBox units make it geometry-free),
+        # so its id is keyed on the color alone. Keyed on the point geometry, two cards with the same
+        # normalized shape (any two flat series, or proportional ones) but different severity colors
+        # emitted ONE id with two definitions, and url(#id) painted the second card's area in the first
+        # card's tint. Same-color cards now share an id whose definition is byte-identical (harmless);
+        # different colors never collide. Deterministic across reruns and processes (no salted hash()).
+        gid = "owspk-" + "".join(c if c.isalnum() else f"_{ord(c):x}" for c in str(color))
+        area = (f'<defs><linearGradient id="{gid}" x1="0" y1="0" x2="0" y2="1">'
                 f'<stop offset="0" stop-color="{color}" stop-opacity="0.35"/>'
                 f'<stop offset="1" stop-color="{color}" stop-opacity="0"/></linearGradient></defs>'
-                f'<polygon points="1,{height-1} {line} {width-1},{height-1}" fill="url(#g{uid})"/>')
+                f'<polygon points="1,{height-1} {line} {width-1},{height-1}" fill="url(#{gid})"/>')
     last = pts[-1]
     # F29 (a11y): the spark is decorative — the card's number + delta already
     # state the trend — so screen readers and Tab order skip it.
@@ -1404,10 +1410,16 @@ def guard(result: QueryResult, empty_message: str, setup_hint: str = "",
             # text one click away (same idiom as the connection-error screen).
             _err = str(result.error or "").strip()
             _first = _err.splitlines()[0] if _err else ""
+            # R2-072: the caller's setup_hint ("not installed", "apply V0xx", "grant X", "needs Enterprise
+            # edition") explains an ABSENCE or schema drift. Under a timeout or any other failure the
+            # object is there and readable, so the hint would send an admin to fix setup that is already
+            # in place (the v4.605 rule: a timeout says it timed out). Kept for a true absence
+            # (is_setup_absence, e.g. unknown_function) and a missing column (is_schema_drift).
+            _kind = result.error_kind
             empty_state("unavailable",
                         f"Query failed: {_first}" if _first else "Query failed",
                         detail=_err if _err and _err != _first else "",
-                        hint=setup_hint)
+                        hint=setup_hint if (is_setup_absence(_kind) or is_schema_drift(_kind)) else "")
         return False
     if result.empty:
         # review fix: a successful read PROVES setup exists — a setup hint
