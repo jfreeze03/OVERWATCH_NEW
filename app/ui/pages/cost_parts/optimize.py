@@ -1812,17 +1812,23 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     as_of=utc_now(), rate=rate)
         st.divider()
         st.markdown("**Storage growth movers**")
-        days_storage = max(days, 30)
-        sg_res = run(insights_sql.storage_growth_by_database(days_storage, company), page=_PAGE,
-                     key=f"storgrow_{company}_{days_storage}", tier="historical",
+        # R1-148 (SERVED-WINDOW): this is a plain live read and storage_growth_by_database clamps to
+        # bounded_days (90), so clamp HERE too — the tile label, cache key, table key and caption then name
+        # the window the SQL actually reads (a 365d / 180d / Current-year pick read 90 days under a
+        # "Growth (365d)" label). The 30-day floor keeps a stable slope on a short pick.
+        days_storage = bounded_days(max(days, 30))
+        # #33: honor the global Database filter IN the SQL (R1-148: a post-LIMIT-100 filter showed "no
+        # storage history" for a selected database outside the top 100 growers).
+        _sg_db = str(st.session_state.get("flt_database", "") or "").strip()
+        sg_res = run(insights_sql.storage_growth_by_database(days_storage, company, database=_sg_db), page=_PAGE,
+                     key=f"storgrow_{company}_{days_storage}_{_sg_db}", tier="historical",
                      source="DATABASE_STORAGE_USAGE_HISTORY")
-        if guard(sg_res, "No storage history for this scope."):
+        if guard(sg_res, "No storage history for the selected database in this window." if _sg_db
+                 else "No storage history for this scope."):
             movers = storage_movers(sg_res.df, safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0))
-            # #33: honor the global Database filter. storage_growth_by_database
-            # (outside this cluster) returns every database in the company scope, so
-            # narrow to the selected database on movers' own DATABASE_NAME grain —
-            # filtering rows keeps every column, so the KPIs/chart stay well-typed.
-            _sg_db = str(st.session_state.get("flt_database", "") or "").strip()
+            # The SQL already narrowed to the selected database; this re-check on movers' own
+            # DATABASE_NAME grain is belt-and-braces (filtering rows keeps every column, so the KPIs/chart
+            # stay well-typed).
             if _sg_db and not movers.empty and "DATABASE_NAME" in movers.columns:
                 movers = movers[movers["DATABASE_NAME"].astype(str).str.upper() == _sg_db.upper()]
             if _sg_db and movers.empty:
@@ -1838,16 +1844,23 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     ((movers["GROWTH_USD_30D"] > 0) & ~movers["PROJECTABLE"]).sum()
                 )
                 _shrinking = int((movers["GROWTH_USD_30D"] < 0).sum())
+                # R1-148 (uncapped aggregate): the builder stops at the top 100 growers, so the two
+                # storage tiles read its pre-LIMIT totals over every database in scope (an old-shape
+                # result falls back to the frame) — summing the capped frame cut the shrinking ones.
+                _sg0, _tib = sg_res.df.iloc[0], 1024.0 ** 4
+                _sg_win = {"CURRENT_BYTES_WIN", "GROWTH_BYTES_WIN"} <= set(sg_res.df.columns)
+                _sg_cur_tb = (safe_float(_sg0.get("CURRENT_BYTES_WIN")) / _tib if _sg_win
+                              else float(movers['CURRENT_TB'].sum()))
+                _sg_grow_tb = (safe_float(_sg0.get("GROWTH_BYTES_WIN")) / _tib if _sg_win
+                               else float(movers['GROWTH_TB'].sum()))
                 kpi_row([
                     # CD-1: pass the raw TiB value + unit="tb" so the tile formats through
                     # the canonical formatter — the SAME humanize path the sibling movers
                     # TABLE below derives from the CURRENT_TB / GROWTH_TB column names. A raw
                     # "%.2f TB" collapsed a sub-TB net growth to "0.03 TB" (reads as nothing)
                     # while the table showed "30.7 GB"; unit= ends that drift by construction.
-                    {"label": "Current storage",
-                     "value": float(movers['CURRENT_TB'].sum()), "unit": "tb"},
-                    {"label": f"Growth ({days_storage}d)",
-                     "value": float(movers['GROWTH_TB'].sum()), "unit": "tb"},
+                    {"label": "Current storage", "value": _sg_cur_tb, "unit": "tb"},
+                    {"label": f"Growth ({days_storage}d)", "value": _sg_grow_tb, "unit": "tb"},
                     # E6: gainers-only, and it always was — the label now says so instead
                     # of reading like the account's net storage trend.
                     {"label": "Projected growth $/mo (confident gainers)",
@@ -1929,7 +1942,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     hint="Click a database row to drill to the tables driving its storage.",
                 )
                 result_caption(sg_res, note=(f"Window widened to {days_storage}d for a stable growth slope."
-                                             if days < days_storage else f"{days_storage}d window."))
+                                             if days < days_storage else
+                                             f"Live scan capped at {days_storage}d (the live ACCOUNT_USAGE "
+                                             "limit)." if days > days_storage else f"{days_storage}d window."))
                 _low = int(movers["LOW_CONFIDENCE"].sum()) if "LOW_CONFIDENCE" in movers.columns else 0
                 st.caption(
                     "The projection is a least-squares slope over every observed day, not first-vs-last "
@@ -2131,16 +2146,16 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     _st_gb = (safe_float(_trow.get("ACTIVE_GB")) + safe_float(_trow.get("TIME_TRAVEL_GB"))
                               + safe_float(_trow.get("FAILSAFE_GB")) + safe_float(_trow.get("CLONE_RETAINED_GB")))
                     _st_usd = round(_st_gb / 1024 * safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0), 2)
-                    try:
-                        tco = run(insights_sql.table_tco(str(_trow["DATABASE_NAME"]), str(_trow["SCHEMA_NAME"]),
-                                                         str(_trow["TABLE_NAME"]), 30),
-                                  page=_PAGE, key=f"tco_{sel_w}", tier="historical",
-                                  source="ACCESS_HISTORY (reads + writes, 30d)")
-                    except ValueError:
-                        tco = None  # exotic identifier: storage economics still shown
+                    # R1-044: table_tco matches the quote-stripped, upper-cased objectName with a string
+                    # literal, so it never raises — a quote-requiring name is checked too (it used to skip
+                    # the read and fall through to a fabricated 0).
+                    tco = run(insights_sql.table_tco(str(_trow["DATABASE_NAME"]), str(_trow["SCHEMA_NAME"]),
+                                                     str(_trow["TABLE_NAME"]), 30),
+                              page=_PAGE, key=f"tco_{sel_w}", tier="historical",
+                              source="ACCESS_HISTORY (reads + writes, 30d)")
                     _reads = _writes = 0
                     _last_read = None
-                    if tco is not None and tco.usable():
+                    if tco.usable():
                         for _, krow in tco.df.iterrows():
                             if str(krow["KIND"]) == "READ":
                                 _reads = int(safe_float(krow["TOUCHES"]))

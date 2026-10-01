@@ -257,7 +257,7 @@ LIMIT 100
 # 3. Storage growth movers
 # ---------------------------------------------------------------------------
 
-def storage_growth_by_database(days: int, company: str = "ALL") -> str:
+def storage_growth_by_database(days: int, company: str = "ALL", database: str = "") -> str:
     """Per-database storage endpoints PLUS a least-squares slope.
 
     D4 (audit 2026-07-31): (LAST - FIRST) / SPAN is an endpoint diff — one
@@ -266,11 +266,21 @@ def storage_growth_by_database(days: int, company: str = "ALL") -> str:
     resistant answer; DAYS_OBSERVED lets the caller mark a short/sparse series
     LOW CONFIDENCE instead of projecting it as fact. Endpoints stay in the
     output because the current/first sizes are what a reader recognises.
+
+    R1-148: the frame stops at the top 100 growers, so the page's "Current storage" / "Growth" tiles
+    read DATABASES_WIN / CURRENT_BYTES_WIN / GROWTH_BYTES_WIN (computed before the LIMIT, over every
+    database in scope) instead of summing the capped frame, where the shrinking databases are the ones
+    cut. ``database`` (the global Database filter, case-insensitive) narrows in SQL: a post-LIMIT filter
+    showed a false "no storage history" for a database outside the top 100.
     """
+    from app.core.sqlsafe import sql_literal
+
     days = bounded_days(days)
+    db = str(database or "").strip()
     where = and_where(
         f"USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())",
         companies.database_company_scope(company),
+        f"UPPER(DATABASE_NAME) = {sql_literal(db.upper(), 300)}" if db else "",
     )
     return f"""
 WITH daily AS (
@@ -293,7 +303,10 @@ SELECT
     MAX_BY(FAILSAFE_BYTES, USAGE_DATE) AS FAILSAFE_BYTES,
     DATEDIFF('day', MIN(USAGE_DATE), MAX(USAGE_DATE)) AS SPAN_DAYS,
     COUNT(*) AS DAYS_OBSERVED,
-    REGR_SLOPE(DB_BYTES, DATEDIFF('day', DATE '1970-01-01', USAGE_DATE)) AS SLOPE_BYTES_PER_DAY
+    REGR_SLOPE(DB_BYTES, DATEDIFF('day', DATE '1970-01-01', USAGE_DATE)) AS SLOPE_BYTES_PER_DAY,
+    COUNT(*) OVER () AS DATABASES_WIN,
+    SUM(MAX_BY(DB_BYTES, USAGE_DATE)) OVER () AS CURRENT_BYTES_WIN,
+    SUM(MAX_BY(DB_BYTES, USAGE_DATE) - MIN_BY(DB_BYTES, USAGE_DATE)) OVER () AS GROWTH_BYTES_WIN
 FROM daily
 GROUP BY 1, 2
 HAVING MAX_BY(DB_BYTES, USAGE_DATE) > 0 OR MIN_BY(DB_BYTES, USAGE_DATE) > 0
