@@ -3658,18 +3658,26 @@ ORDER BY HOURS_SINCE_LOAD DESC
 """
 
 
-def fact_contract_consumed(start_iso: str) -> str:
+def fact_contract_consumed(start_iso: str, end_iso: str | None = None) -> str:
     """Contract-period billed credits from the daily fact (r13 #7) — the live
     METERING_DAILY_HISTORY rescan becomes the coverage-guarded fallback.
 
     FACT_FIRST_DAY is the fact's OWN earliest day, computed WITHOUT the
     contract filter (Codex r14 #8: MIN(DAY) inside WHERE DAY >= start made a
     quiet contract-start day read as "no coverage" forever). The caller
-    trusts the sum only when FACT_FIRST_DAY <= contract start."""
+    trusts the sum only when FACT_FIRST_DAY <= contract start.
+
+    ``end_iso`` (R1-159) bounds the sum to the TERM, END-EXCLUSIVE — the same clock
+    forecast.contract_pace runs (term_days = end - start) — so a term that ended before
+    SETTINGS was rolled stops accruing post-term credits. The bound sits inside the IFF,
+    never a WHERE, so FACT_FIRST_DAY stays the unfiltered retention floor."""
     from datetime import date
     start = date.fromisoformat(str(start_iso)).isoformat()
+    in_term = f"DAY >= '{start}'"
+    if end_iso:
+        in_term += f" AND DAY < '{date.fromisoformat(str(end_iso)).isoformat()}'"
     return f"""
-SELECT SUM(IFF(DAY >= '{start}', CREDITS_BILLED, 0)) AS CREDITS_BILLED_TO_DATE,
+SELECT SUM(IFF({in_term}, CREDITS_BILLED, 0)) AS CREDITS_BILLED_TO_DATE,
        MIN(DAY) AS FACT_FIRST_DAY
 FROM {mart_object("FACT_METERING_DAILY")}
 """

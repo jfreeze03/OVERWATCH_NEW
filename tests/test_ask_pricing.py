@@ -22,10 +22,32 @@ def test_dollarizes_credit_columns_and_leaves_ratios_alone():
 
 def test_rate_and_run_columns_are_not_dollarized():
     ev = pd.DataFrame({"QUERY_TYPE": ["SELECT"], "RUNS": [81287],
-                       "CS_CREDITS": [125.1954], "CS_PER_1K_RUNS": [1.5402]})
+                       "ALLOC_CREDITS": [125.1954], "CS_PER_1K_RUNS": [1.5402]})
     out, cols, _ = add_usd_estimates(ev, compute_rate=3.68, ai_rate=2.20)
-    assert cols == ["CS_CREDITS_USD"]
+    assert cols == ["ALLOC_CREDITS_USD"]
     assert "CS_PER_1K_RUNS_USD" not in out.columns and "RUNS_USD" not in out.columns
+
+
+def test_gross_cloud_services_credits_are_not_dollarized():
+    # R1-115: gross CS credits are usage BEFORE the account-level ~10% daily adjustment, so
+    # gross x compute rate put dollars on statements that bill $0. Only the billed twin is priced.
+    ev = pd.DataFrame({"QUERY_TYPE": ["SHOW"], "RUNS": [81287], "CS_CREDITS": [125.1954],
+                       "CLOUD_SVC_CREDITS": [3.0], "CLOUD_SERVICES_CREDITS": [2.0],
+                       "BILLED_CS_CREDITS": [10.0]})
+    out, cols, rates = add_usd_estimates(ev, compute_rate=3.68, ai_rate=2.20)
+    assert cols == ["BILLED_CS_CREDITS_USD"] and rates == {3.68}
+    assert out["BILLED_CS_CREDITS_USD"].iloc[0] == 36.8
+    for gross in ("CS_CREDITS", "CLOUD_SVC_CREDITS", "CLOUD_SERVICES_CREDITS"):
+        assert f"{gross}_USD" not in out.columns, gross
+
+
+def test_is_gross_cs_column_is_segment_based():
+    from app.logic.ask.pricing import is_gross_cs_column
+    assert is_gross_cs_column("CS_CREDITS") and is_gross_cs_column("cloud_svc_credits")
+    assert not is_gross_cs_column("BILLED_CS_CREDITS")
+    # whole segments only: CSV / CLOUDS / ACCESS never read as cloud services
+    for col in ("CREDITS", "ALLOC_CREDITS", "CSV_CREDITS", "ACCESS_CREDITS", "CLOUD_CREDITS"):
+        assert not is_gross_cs_column(col), col
 
 
 def test_ai_named_column_uses_ai_rate_but_warehouse_credits_do_not():

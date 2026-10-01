@@ -4,9 +4,16 @@ Credits are priced at the compute rate ($3.68 default) or the AI/Cortex "CoCo" r
 ($2.20 default). The rate is chosen per COLUMN, not per question: a column whose name
 carries an AI/Cortex segment (AI_CREDITS, CORTEX_CREDITS, TOKEN_CREDITS, ...) prices at
 the AI rate; every other credit column prices at the compute rate. An answerer whose
-whole intent is AI can force the AI rate via `intent_is_ai`. This keeps a warehouse /
-cloud-services credit column from ever being mispriced at the AI rate, while a future
-Cortex answerer gets the right rate automatically.
+whole intent is AI can force the AI rate via `intent_is_ai`. This keeps a warehouse credit
+column from ever being mispriced at the AI rate, while a future Cortex answerer gets the
+right rate automatically.
+
+A GROSS cloud-services column (CS_CREDITS, CLOUD_SVC_CREDITS: per-statement usage before the
+account-level ~10% daily adjustment) is never dollarized (R1-115): Snowflake bills only the
+part of a day's cloud services above 10% of that day's warehouse compute, so gross x rate can
+put hundreds of dollars on statements that bill $0 -- the same contract as cs_driver /
+metric_registry, where only BILLED_CS_CREDITS is priced. A BILLED_* cloud-services column is
+still dollarized.
 
 Pure and Streamlit-free so it is unit-tested (tests/test_ask_pricing.py).
 """
@@ -19,9 +26,22 @@ import pandas as pd
 # segments (never as substrings) so ALLOC_CREDITS / MAIN_CREDITS never trip on "AI".
 _AI_SEGMENTS = frozenset({"AI", "GENAI", "CORTEX", "COCO", "LLM", "TOKEN", "TOKENS"})
 
+# Whole underscore segments that mark a cloud-services credit column (CS_CREDITS, CLOUD_SVC_CREDITS,
+# CLOUD_SERVICES_CREDITS); BILLED marks the billed (post-adjustment) twin, which IS priced.
+_CS_SEGMENTS = frozenset({"CS"})
+_CLOUD_SVC_SEGMENTS = frozenset({"SVC", "SERVICE", "SERVICES"})
+
+
+def is_gross_cs_column(col: object) -> bool:
+    """Public: a GROSS cloud-services credit column (before the ~10% daily adjustment), which
+    add_usd_estimates leaves un-dollarized (R1-115). BILLED_CS_CREDITS is not gross."""
+    segs = set(str(col).upper().split("_"))
+    cloud = bool(_CS_SEGMENTS & segs) or ("CLOUD" in segs and bool(_CLOUD_SVC_SEGMENTS & segs))
+    return cloud and "BILLED" not in segs
+
 
 def _is_credit_quantity(col: object) -> bool:
-    """A column that holds an amount OF credits (ALLOC_CREDITS, CS_CREDITS, CREDITS).
+    """A column that holds an amount OF credits (ALLOC_CREDITS, IDLE_CREDITS, CREDITS).
 
     Deliberately narrow: a ratio/share (CREDIT_SHARE_PCT) or a rate (CS_CREDITS_PER_1K) is NOT
     a credit amount and must not be dollarized.
@@ -64,7 +84,7 @@ def add_usd_estimates(
     # Iterate the ORIGINAL column order; inserting shifts positions, so recompute the
     # insert index from the (possibly grown) frame each time.
     for col in list(ev.columns):
-        if not _is_credit_quantity(col):
+        if not _is_credit_quantity(col) or is_gross_cs_column(col):
             continue
         usd_name = f"{col}_USD"
         if usd_name in out.columns:

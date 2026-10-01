@@ -238,6 +238,8 @@ def _analyze_spend_by_user(
 # Answerer 2 — "which query is causing cloud services to spike?"
 # --------------------------------------------------------------------------- #
 _CS_INTENT = "cloud_services_spike_by_query"
+# MART_CLOUD_SVC_DAILY's COALESCE(QUERY_PARAMETERIZED_HASH, 'n/a') bucket (cs_driver._NO_HASH twin).
+_CS_NO_HASH = "N/A"
 
 
 def _needs_cs_by_query(params: AskParams) -> list[QuerySpec]:
@@ -291,33 +293,62 @@ def _analyze_cs_by_query(
             params=meta,
         )
 
-    top = s.iloc[0]
-    # QUERY_TYPE can be SQL NULL (ANY_VALUE over a null group) -> None/NaN, which
-    # str() would render as the literal "None"/"nan". Coerce those to "query".
-    _qt = top.get("QUERY_TYPE")
-    qtype = str(_qt) if (_qt is not None and not pd.isna(_qt) and str(_qt).strip()) else "query"
-    cs = float(top["CS_CREDITS"])
-    runs = int(_num(top.get("RUNS", 0)))
+    # R1-114: MART_CLOUD_SVC_DAILY folds every statement with no parameterized hash into ONE 'n/a' row
+    # (COALESCE(hash, 'n/a')), and cloud_svc_top_shapes groups only by hash with ANY_VALUE type/sample,
+    # so that row is unrelated statements under one arbitrary sample -- never a single pattern
+    # (cs_driver labels it "Mixed statements (no family hash)" with LOW confidence). Rank the driver
+    # from the hashed rows and name the mixed bucket as what it is; the share base keeps it, so the
+    # percentages stay honest.
+    if "QUERY_PARAMETERIZED_HASH" in s.columns:
+        mixed = s["QUERY_PARAMETERIZED_HASH"].astype(str).str.strip().str.upper() == _CS_NO_HASH
+    else:
+        mixed = pd.Series(False, index=s.index)
+    mixed_cs = float(s.loc[mixed, "CS_CREDITS"].sum())
+    mixed_runs = int(sum(_num(v) for v in s.loc[mixed, "RUNS"])) if "RUNS" in s.columns else 0
+    mixed_label = (f"{_fmt(mixed_cs)} CS credits across {mixed_runs:,} runs of unhashed mixed "
+                   "statements (no single query family)")
+    hashed = s[~mixed]
     # cloud_svc_top_shapes is LIMIT 30, so total_cs is the sum of the TOP shapes,
     # not all cloud-services credits — label the share for exactly that base so
     # the headline never overstates the top shape's fraction of true CS spend.
     n_shapes = len(s)
-    share = cs / total_cs
-    if n_shapes == 1:
-        share_clause = "the only cloud-services query shape this window"
+    if hashed.empty:
+        headline = (
+            f"Cloud-services credits over {params.days}d could not be attributed to a query family: "
+            f"{mixed_label}."
+        )
     else:
-        share_clause = f"{share * 100:.0f}% of the top {n_shapes} query shapes' CS credits"
-
-    headline = (
-        f"The biggest cloud-services driver over {params.days}d is a {qtype} "
-        f"pattern: {_fmt(cs)} CS credits across {runs:,} runs ({share_clause})."
-    )
+        top = hashed.iloc[0]
+        # QUERY_TYPE can be SQL NULL (ANY_VALUE over a null group) -> None/NaN, which
+        # str() would render as the literal "None"/"nan". Coerce those to "query".
+        _qt = top.get("QUERY_TYPE")
+        qtype = str(_qt) if (_qt is not None and not pd.isna(_qt) and str(_qt).strip()) else "query"
+        cs = float(top["CS_CREDITS"])
+        runs = int(_num(top.get("RUNS", 0)))
+        share = cs / total_cs
+        if n_shapes == 1:
+            share_clause = "the only cloud-services query shape this window"
+        else:
+            share_clause = f"{share * 100:.0f}% of the top {n_shapes} query shapes' CS credits"
+        if bool(mixed.iloc[0]):
+            headline = (
+                f"The largest cloud-services bucket over {params.days}d is {mixed_label}; the top "
+                f"identifiable driver is a {qtype} pattern: {_fmt(cs)} CS credits across {runs:,} runs "
+                f"({share_clause})."
+            )
+        else:
+            headline = (
+                f"The biggest cloud-services driver over {params.days}d is a {qtype} "
+                f"pattern: {_fmt(cs)} CS credits across {runs:,} runs ({share_clause})."
+            )
 
     bullets: list[str] = []
     for i in range(min(3, len(s))):
         r = s.iloc[i]
+        _what = ("Mixed statements (no family hash)" if bool(mixed.iloc[i])
+                 else _code(_sample(r.get('SAMPLE_TEXT'), 90)))
         bullets.append(
-            f"{_code(_sample(r.get('SAMPLE_TEXT'), 90))} — "
+            f"{_what} — "
             f"{_fmt(float(r['CS_CREDITS']))} CS credits ({int(_num(r.get('RUNS', 0))):,} runs)"
         )
 
@@ -345,10 +376,19 @@ def _analyze_cs_by_query(
             )
             bullets.append(f"Elevated cloud-services share on: {names}")
 
-    ev_cols = [c for c in ("QUERY_TYPE", "SAMPLE_TEXT", "RUNS", "CS_CREDITS", "CS_CREDITS_PER_1K") if c in s.columns]
+    ev_cols = [c for c in ("QUERY_PARAMETERIZED_HASH", "QUERY_TYPE", "SAMPLE_TEXT", "RUNS", "CS_CREDITS",
+                           "CS_CREDITS_PER_1K") if c in s.columns]
     ev = s.head(10)[ev_cols].copy()
     if "SAMPLE_TEXT" in ev.columns:
         ev["SAMPLE_TEXT"] = ev["SAMPLE_TEXT"].map(lambda t: _sample(t, 100))
+    # R1-114: the mixed bucket's type and sample are one arbitrary statement (ANY_VALUE): label the row
+    # instead of presenting that statement as the bucket.
+    _ev_mixed = mixed.head(10).to_numpy()
+    if _ev_mixed.any():
+        if "QUERY_TYPE" in ev.columns:
+            ev.loc[_ev_mixed, "QUERY_TYPE"] = "(mixed)"
+        if "SAMPLE_TEXT" in ev.columns:
+            ev.loc[_ev_mixed, "SAMPLE_TEXT"] = "(mixed statements, no family hash)"
     return AnswerResult(
         intent=_CS_INTENT,
         headline=headline,

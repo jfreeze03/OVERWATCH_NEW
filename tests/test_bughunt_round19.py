@@ -134,7 +134,10 @@ def test_format_usd_precise_preserves_subcent_and_defers_above_one():
 
 def test_unit_costs_per_call_kpis_use_precise_formatter():
     src = _src("app/ui/pages/cost_parts/unit_costs.py")
-    assert 'format_usd_precise(credits_to_usd(safe_float(top_p.get("CREDITS_PER_CALL"))' in src
+    # R1-158 (v4.606): the KPI now prices the per-call leader over EVERY proc (the builder's PC_LEADER_*
+    # columns, falling back to the in-frame CREDITS_PER_CALL), so the precise formatter wraps that value.
+    assert 'format_usd_precise(credits_to_usd(_pc_credits, rate, round_cents=False))' in src
+    assert 'safe_float(top_p.get("CREDITS_PER_CALL"))' in src           # the in-frame fallback stays
     assert "format_usd_precise(_tot / _calls)" in src
 
 

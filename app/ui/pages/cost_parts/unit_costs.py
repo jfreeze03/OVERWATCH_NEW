@@ -21,7 +21,7 @@ from app.core.result import is_setup_absence
 from app.data import cortex_sql, etl_sql, graph_sql, insights_sql, mart27_sql
 from app.logic import graphs
 from app.logic.call_tree import build_call_tree
-from app.logic.date_windows import window_label
+from app.logic.date_windows import window_label, window_phrase
 from app.logic.directory import resolve_display
 from app.logic.formulas import (
     credits_to_usd,
@@ -38,6 +38,7 @@ from app.ui.components import (
     panel_help,
     result_caption,
     run_mart_first,
+    served_days,
     snowsight_profile_column,
     styled_table,
     user_display_map,
@@ -82,20 +83,40 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     # (resolve_effective_window ignores the day count when bounds is set), so the cap, the
     # toggle, and the "scanning Nd" caption are all moot then — show them only when they bite.
     _uc_capped = bounds is None and int(days) > _UNIT_COST_MAX_DAYS
+    # R1-163: every live read on this tab (the measured query/procedure builders, the pattern, ETL
+    # and serverless-task panels) clamps a TRAILING window to the MAX_LIVE_WINDOW_DAYS live-scan limit,
+    # so past 90d "the full page window" is really the last 90 days. Name what is actually scanned. A
+    # calendar preset reads its exact [start, end) range, which window_label names ('last month').
+    _past_live = int(days) > MAX_LIVE_WINDOW_DAYS
     _uc_full = _uc_capped and st.toggle(
-        f"Price over the full {_window_label.lower()}",
+        (f"Price over the last {MAX_LIVE_WINDOW_DAYS} days (the live-scan limit)" if _past_live
+         else f"Price over the full {_window_label.lower()}"),
         key=f"uc_full_window_{company}_{days}",
         help="Off by default. The measured query/procedure reads are capped at "
              f"{_UNIT_COST_MAX_DAYS} days because a long QUERY_ATTRIBUTION_HISTORY scan "
              "costs tens of seconds and barely changes a per-query price. Turn it on to "
-             "scan the whole page window anyway.")
+             + (f"scan the last {MAX_LIVE_WINDOW_DAYS} days anyway (these reads never scan past "
+                f"{MAX_LIVE_WINDOW_DAYS}d, whatever the page window)." if _past_live
+                else "scan the whole page window anyway."))
     uc_days = _UNIT_COST_MAX_DAYS if (_uc_capped and not _uc_full) else days
+    # R1-164: the window the measured reads SCAN, as a label -- 'last month' / 'current year' under a
+    # calendar preset (never a raw '31d' / '272d' that reads as a trailing window ending today), else
+    # the clamped day count.
+    _uc_wlab = window_label(bounds, min(int(uc_days), MAX_LIVE_WINDOW_DAYS))
+    _uc_phrase = window_phrase(bounds, min(int(uc_days), MAX_LIVE_WINDOW_DAYS))
+    # The pattern / ETL / serverless-task reads clamp to the live-scan limit on their own (R1-163).
+    _live_wlab = window_label(bounds, min(int(days), MAX_LIVE_WINDOW_DAYS))
     if int(uc_days) != int(days):
         st.caption(f"Page window is {_window_label.lower()}, but unit prices use "
                    f"<={_UNIT_COST_MAX_DAYS}d "
                    f"(scanning {uc_days}d) — a per-query price is stable, and the long scan "
-                   "is the slowest read on this page. The AI, pattern, ETL and task-graph "
-                   "panels below still follow the page window.")
+                   "is the slowest read on this page. "
+                   + (f"The AI and task-graph pipeline panels below follow the page window from "
+                      f"their marts (a live fallback scans at most {MAX_LIVE_WINDOW_DAYS}d and says "
+                      f"so); the repeated-pattern, ETL and serverless-task panels scan at most the "
+                      f"last {MAX_LIVE_WINDOW_DAYS} days." if _past_live
+                      else "The AI, pattern, ETL and task-graph panels below still follow the "
+                           "page window."))
 
     # AI fact-first BEFORE the batch (r18 #3): read FACT_AI_USAGE_DAILY and
     # pay the live Cortex scan only when the fact can't answer — the old
@@ -114,11 +135,11 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         {"key": "q", "sql": insights_sql.measured_query_costs(
             uc_days, company, database, schema_contains,
             f["warehouse_contains"], f["user_contains"], 50, bounds=bounds),
-         "source": f"QUERY_ATTRIBUTION_HISTORY + QUERY_HISTORY ({uc_days}d)", "max_rows": 50},
+         "source": f"QUERY_ATTRIBUTION_HISTORY + QUERY_HISTORY ({_uc_wlab})", "max_rows": 50},
         {"key": "p", "sql": insights_sql.procedure_costs_usd(
             uc_days, company, database, schema_contains, 50,
             warehouse_contains=f["warehouse_contains"], user_contains=f["user_contains"], bounds=bounds),
-         "source": f"QUERY_ATTRIBUTION_HISTORY (rolled up to CALL, {uc_days}d)", "max_rows": 50},
+         "source": f"QUERY_ATTRIBUTION_HISTORY (rolled up to CALL, {_uc_wlab})", "max_rows": 50},
     ]
     if not _ai_m.usable():
         _jobs.append({"key": "ai", "sql": cortex_sql.cortex_model_costs(days, bounds=bounds),
@@ -134,12 +155,12 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                         uc_days, company, database, schema_contains,
                         f["warehouse_contains"], f["user_contains"], 50, bounds=bounds),
                     page=_PAGE, key=f"unit_q_{company}_{uc_days}_{database}{_lm}", tier="historical",
-                    source=f"QUERY_ATTRIBUTION_HISTORY + QUERY_HISTORY ({uc_days}d)")
+                    source=f"QUERY_ATTRIBUTION_HISTORY + QUERY_HISTORY ({_uc_wlab})")
         p_res = run(insights_sql.procedure_costs_usd(
                         uc_days, company, database, schema_contains, 50,
                         warehouse_contains=f["warehouse_contains"], user_contains=f["user_contains"], bounds=bounds),
                     page=_PAGE, key=f"unit_p_{company}_{uc_days}_{database}{_lm}", tier="historical",
-                    source=f"QUERY_ATTRIBUTION_HISTORY (rolled up to CALL, {uc_days}d)")
+                    source=f"QUERY_ATTRIBUTION_HISTORY (rolled up to CALL, {_uc_wlab})")
         ai_res = _ai_m if _ai_m.usable() else run(
             cortex_sql.cortex_model_costs(days, bounds=bounds), page=_PAGE,
             key=f"unit_ai_{days}{_lm}", tier="historical",
@@ -154,6 +175,13 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                               f"· {top_q.get('WAREHOUSE_NAME')}",
                      "delta_color": "off"})
     if p_res.usable():
+        # R1-158: a re-sort of this frame only sees the top-50-by-TOTAL rows, so a rare, heavy proc
+        # (one $6 monthly CALL) ranking 80th by total was never named. The builder now carries the
+        # per-call leader over EVERY group (PC_LEADER_* window columns, evaluated before the LIMIT);
+        # prefer it, and keep the in-frame re-sort below only for a frame without those columns.
+        _row0 = p_res.df.iloc[0]
+        _lead_name = _row0.get("PC_LEADER_NAME") if "PC_LEADER_NAME" in p_res.df.columns else None
+        _pc_all = _lead_name is not None and _lead_name == _lead_name and bool(str(_lead_name).strip())
         # procedure_costs_usd orders by TOTAL_CREDITS DESC, so iloc[0] is the highest-
         # TOTAL procedure. This KPI is about $/CALL, so pick the row that is actually
         # priciest per call (else a high-volume/cheap proc headlines a near-$0 value
@@ -164,12 +192,18 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
             _pp = _pp.assign(_pc=_pp["CREDITS_PER_CALL"].map(safe_float)).sort_values(
                 "_pc", ascending=False)
         top_p = _pp.iloc[0]
+        _pc_name, _pc_credits = ((str(_lead_name), safe_float(_row0.get("PC_LEADER_CREDITS"))) if _pc_all else
+                                 (str(top_p.get("PROC_NAME")), safe_float(top_p.get("CREDITS_PER_CALL"))))
         kpis.append({"label": "Priciest procedure (per call)",
                      # format_usd_precise, not format_usd: a sub-cent $/call (e.g. $0.0034 on an
                      # XS warehouse) must not collapse to "$0.00" and contradict the $%.4f "$/call"
                      # leaderboard row below that names the same proc.
-                     "value": format_usd_precise(credits_to_usd(safe_float(top_p.get("CREDITS_PER_CALL")), rate, round_cents=False)),
-                     "delta": str(top_p.get("PROC_NAME")), "delta_color": "off"})
+                     "value": format_usd_precise(credits_to_usd(_pc_credits, rate, round_cents=False)),
+                     "delta": _pc_name, "delta_color": "off",
+                     "help": ("The highest cost per call across every procedure CALLed in the window, "
+                              "not only the 50 listed below (the list ranks by total spend)." if _pc_all else
+                              "The highest cost per call among the procedures listed below (the top 50 "
+                              "by total spend).")})
     if ai_res.usable():
         ai_credits = float(ai_res.df["CREDITS"].map(safe_float).sum())
         # The mart (_ai_m) covers Cortex Functions + Code; the live fallback
@@ -212,9 +246,12 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                                    "the idle advisor, not the query that happened to run.")
 
     st.divider()
-    st.markdown("**Stored procedures — $/call leaderboard**")
+    # R1-158: the list is the top 50 by TOTAL measured $ (procedure_costs_usd's ORDER BY), so say so;
+    # the per-call leader over every proc is the KPI above.
+    st.markdown("**Stored procedures — top 50 by measured spend, with $/call**")
     if guard(p_res, "No CALLs with attributed credits in this scope/window."):
-        pdf = p_res.df.copy()
+        # the PC_LEADER_* window columns repeat one account-wide value on every row: KPI-only
+        pdf = p_res.df.drop(columns=["PC_LEADER_NAME", "PC_LEADER_CREDITS"], errors="ignore").copy()
         # Click a row -> the trend panel below prefills with that proc
         # (Codex r7 #5: the trend was findable only by typing).
         pdf["USD_TOTAL"] = pdf["TOTAL_CREDITS"].map(lambda c: credits_to_usd(c, rate))
@@ -263,7 +300,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                           bounds=bounds),
                       page=_PAGE, key=f"uc_proc_kids_{_bd_name[:30]}_{_bd_db}_{company}_{uc_days}{_lm}",
                       tier="historical",
-                      source=f"QUERY_ATTRIBUTION_HISTORY (child statements rolled up, {uc_days}d)")
+                      source=f"QUERY_ATTRIBUTION_HISTORY (child statements rolled up, {_uc_wlab})")
             if guard(_bd, "No attributed child statements for this proc in the window "
                           "(attribution lags ~8h)."):
                 _bdf = _bd.df.copy()
@@ -277,7 +314,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                 # not a child); a pruned-history child stays counted (it is a real child statement).
                 _n_children = int((_bdf["STEP_TYPE"] != "CALL (own overhead)").sum())
                 kpi_row([
-                    {"label": f"Proc total ({uc_days}d)", "value": format_usd(_tot)},
+                    {"label": f"Proc total ({_uc_wlab})", "value": format_usd(_tot)},
                     {"label": "Distinct child steps", "value": f"{_n_children:,}"},
                     {"label": "Top cost driver",
                      "value": f"{safe_float(_top['PCT']):.0f}%" if _top is not None else "n/a",
@@ -318,7 +355,8 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                          "USD_PER_RUN": st.column_config.NumberColumn("$/run", format="$%.4f")})
         # KEPT: "cheap-but-constant often out-bills expensive-but-rare" is an interpretation
         # takeaway (why to read this grouping) — operator-facing, not audit-only methodology.
-        st.caption("Measured QUERY_ATTRIBUTION_HISTORY compute, grouped by "
+        # R1-163: pattern_cost clamps a trailing window to the live-scan limit, so name the window read.
+        st.caption(f"Measured QUERY_ATTRIBUTION_HISTORY compute ({_live_wlab}), grouped by "
                    "parameterized hash — cheap-but-constant often out-bills "
                    "expensive-but-rare.")
         # cross-filter honesty: MART_PATTERN_COST_DAILY is keyed by QUERY_HASH + COMPANY only, so
@@ -345,8 +383,8 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
             "Type a procedure name (bare or db.schema-qualified — paste PROC_NAME "
             "from the leaderboard above). Same measured rollup as the leaderboard "
             "(children via ROOT_QUERY_ID), sliced by day; honors the page filters "
-            f"and the same {uc_days}-day scan window. Attribution lags ~8h; idle "
-            "time excluded."
+            f"and the same scan window as the leaderboard ({_uc_phrase}). Attribution lags ~8h; "
+            "idle time excluded."
         )
         _pname = st.text_input("Procedure name", key="uc_proc_trend_name")
         if _pname.strip():
@@ -359,7 +397,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                            bounds=bounds),
                        page=_PAGE, key=f"proc_trend_{_pname.strip()[:30]}_{company}_{uc_days}{_lm}",
                        tier="historical",
-                       source=f"QUERY_ATTRIBUTION_HISTORY rolled to CALLs, day grain ({uc_days}d)")
+                       source=f"QUERY_ATTRIBUTION_HISTORY rolled to CALLs, day grain ({_uc_wlab})")
             if guard(tres, "No CALLs matched that name in this window/scope — "
                            "check spelling (bare names match any db.schema)."):
                 tdf = tres.df.copy()
@@ -374,7 +412,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                 _tot = float(tdf["USD"].sum())
                 _calls = int(tdf["CALLS"].sum())
                 kpi_row([
-                    {"label": f"Total, {uc_days}d", "value": format_usd(_tot)},
+                    {"label": f"Total, {_uc_wlab}", "value": format_usd(_tot)},
                     {"label": "Calls", "value": f"{_calls:,}"},
                     {"label": "Avg $/call",
                      # sub-cent-aware: this trend sub-table shows $/call at $%.4f below, so the
@@ -441,6 +479,20 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                             "Parent-before-child execution order. Indentation follows "
                             "PARENT_QUERY_ID; orphaned history stays visible at the top level."
                         )
+                    # R1-119: an empty or failed children read used to render nothing, so a
+                    # timeout looked like a CALL with no breakdown. Empty = even the CALL's own row
+                    # is unattributed yet (ATTRIBUTED_QUERIES = 0 above); a failure says so.
+                    elif kids.ok:
+                        empty_state("no_data_yet",
+                                    "No attribution rows for this CALL yet: QUERY_ATTRIBUTION_HISTORY "
+                                    "lags ~8h, so the per-step breakdown appears once it catches up.")
+                    elif is_setup_absence(kids.error_kind):
+                        empty_state("needs_setup",
+                                    "QUERY_ATTRIBUTION_HISTORY is not readable by this app's role, so "
+                                    "the per-step breakdown for this CALL can't be shown.")
+                    else:
+                        empty_state("unavailable", "The per-step breakdown for this CALL could not be read.",
+                                    detail=kids.error)
 
     st.divider()
     st.markdown("**AI — $ by function/model (or Cortex Code source)**")
@@ -451,12 +503,20 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         ai_res = run(cortex_sql.cortex_source_costs(days, bounds=bounds), page=_PAGE,
                      key=f"unit_ai_src_{days}{_lm}", tier="historical",
                      source="CORTEX_CODE_*_USAGE_HISTORY (source grain)")
-    if not ai_res.ok:
-        st.caption("Neither CORTEX_AI_FUNCTIONS_USAGE_HISTORY nor the Cortex Code usage views "
-                   "are accessible on this account/role — per-user AI spend remains "
-                   "available under Chargeback & AI.")
+    # R1-167 / R1-036: a failed read here is the Cortex CODE source read alone (the functions view
+    # may have been readable and empty), and only a true absence is a grant problem -- a timeout or
+    # drift renders as a failed read with its error. That fallback scans at most the live-scan limit.
+    if not ai_res.ok and is_setup_absence(ai_res.error_kind):
+        empty_state("needs_setup",
+                    "The Cortex Code usage views (CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY / "
+                    "CORTEX_CODE_CLI_USAGE_HISTORY) are not readable by this app's role — per-user "
+                    "AI spend remains available under Chargeback & AI.")
+    elif not ai_res.ok:
+        empty_state("unavailable", "Cortex Code usage (source grain) could not be read.",
+                    detail=ai_res.error)
     elif ai_res.empty:
-        st.caption("No Cortex usage recorded in this window (functions or code).")
+        empty_state("no_data_yet", "No Cortex usage recorded in "
+                    f"{window_phrase(bounds, min(int(days), MAX_LIVE_WINDOW_DAYS))} (functions or code).")
     else:
         adf = ai_res.df.copy()
         adf["USD"] = adf["CREDITS"].map(lambda c: credits_to_usd(c, ai_rate))
@@ -497,16 +557,21 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         # window/scope, so submit them as one parallel batch instead of two serial round-trips.
         _etl_cov_sql = etl_sql.etl_tag_coverage(days, company, f["database"], f["schema_contains"], bounds=bounds)
         _etl_pipe_sql = etl_sql.etl_cost_by_pipeline(days, company, f["database"], f["schema_contains"], bounds=bounds)
+        # R1-163: both reads clamp a trailing window to the live-scan limit, so the source names the
+        # window they actually scanned (the board has no other window label).
+        _etl_cov_src = f"QUERY_HISTORY + QUERY_ATTRIBUTION_HISTORY (tag coverage, {_live_wlab})"
+        _etl_pipe_src = f"QUERY_HISTORY + QUERY_ATTRIBUTION_HISTORY (per pipeline, {_live_wlab})"
         _etl_pf = run_batch([
-            {"key": "cov", "sql": _etl_cov_sql,
-             "source": "QUERY_HISTORY + QUERY_ATTRIBUTION_HISTORY (tag coverage)"},
-            {"key": "pipe", "sql": _etl_pipe_sql,
-             "source": "QUERY_HISTORY + QUERY_ATTRIBUTION_HISTORY (per pipeline)"},
+            {"key": "cov", "sql": _etl_cov_sql, "source": _etl_cov_src},
+            {"key": "pipe", "sql": _etl_pipe_sql, "source": _etl_pipe_src},
         ], page=_PAGE, tier="historical")
+        # run_batch already re-runs a failed member alone through run(), so a FAILED member is final
+        # here; re-reading it would pay a persistent timeout a third time (R1-167). Only a member
+        # the batch did not return at all takes the serial read.
         cov = _etl_pf.get("cov")
-        if cov is None or not cov.ok:
+        if cov is None:
             cov = run(_etl_cov_sql, page=_PAGE, key=f"etl_cov_{company}_{days}{_lm}", tier="historical",
-                      source="QUERY_HISTORY + QUERY_ATTRIBUTION_HISTORY (tag coverage)")
+                      source=_etl_cov_src)
         # empty-vs-zero: etl_tag_coverage is a bare aggregate (no GROUP BY), so it ALWAYS
         # returns one row — all-NULL when no compute was attributed in scope/window. safe_float
         # would render that NaN as a measured "0%"/"$0.00" (a fabricated governance failure), so
@@ -525,13 +590,20 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                  "help": "Measured compute with no pipeline tag, at the configured rate."},
             ])
         elif cov.ok:
-            st.caption("No measured ETL compute in this window/scope — no credits were attributed "
-                       "to queries here, so tag coverage isn't measurable yet "
-                       "(QUERY_ATTRIBUTION_HISTORY lags ~8h).")
+            empty_state("no_data_yet",
+                        "No measured ETL compute in this window/scope — no credits were attributed "
+                        "to queries here, so tag coverage isn't measurable yet "
+                        "(QUERY_ATTRIBUTION_HISTORY lags ~8h).")
+        # R1-167: a failed coverage read used to drop the KPI with no trace.
+        elif is_setup_absence(cov.error_kind):
+            empty_state("needs_setup", "ETL tag coverage needs QUERY_HISTORY and QUERY_ATTRIBUTION_HISTORY, "
+                                       "which this app's role can't read.")
+        else:
+            empty_state("unavailable", "ETL tag coverage could not be read.", detail=cov.error)
         etl = _etl_pf.get("pipe")
-        if etl is None or not etl.ok:
+        if etl is None:
             etl = run(_etl_pipe_sql, page=_PAGE, key=f"etl_pipe_{company}_{days}{_lm}", tier="historical",
-                      source="QUERY_HISTORY + QUERY_ATTRIBUTION_HISTORY (per pipeline)")
+                      source=_etl_pipe_src)
         if guard(etl, "No tagged pipeline runs with attributed credits in this window — "
                       "adopt the JSON QUERY_TAG (docs/design/ETL_COST_TAGS.md)."):
             edf = etl.df.copy()
@@ -614,12 +686,15 @@ def _graphs_tab(company: str, days: int, rate: float, database: str = "",
         live_source="TASK_HISTORY + QUERY_ATTRIBUTION_HISTORY (live fallback)")
     if not guard(res, "No task-graph runs in this scope/window."):
         return
+    # R1-163: the mart honors the page window; the live fallback clamps to the live-scan limit, so the
+    # spend KPI names the window that actually served (a calendar preset names its period).
+    _tg_wlab = window_label(bounds, served_days(res, days))
     daily = graphs.enrich_graph_daily(res.df, rate)
     summary = graphs.pipeline_summary(daily)
     top = summary.iloc[0] if not summary.empty else None
     worst = summary.sort_values("SUCCESS_PCT").iloc[0] if not summary.empty else None
     kpi_row([
-        {"label": "Pipeline spend (window)",
+        {"label": f"Pipeline spend ({_tg_wlab})",
          "value": format_usd(float(summary["USD"].sum()) if not summary.empty else 0.0),
          "delta": f"{len(summary)} pipeline(s)", "delta_color": "off"},
         {"label": "Most expensive",
@@ -651,11 +726,20 @@ def _graphs_tab(company: str, days: int, rate: float, database: str = "",
     sls = run(graph_sql.serverless_task_daily(days, company, database, schema_contains, bounds=bounds),
               page=_PAGE, key=f"sls_costs_{company}_{days}_{database}_{schema_contains}{_lm}",
               tier="historical", source="SERVERLESS_TASK_HISTORY")
-    st.markdown("**Serverless tasks (billed separately, task-day grain)**")
-    # R1-062: guard() routes the empty / unavailable states through empty_state and shows the
-    # truncation line when run()'s row cap cuts the (now newest-first) task-day rows.
-    if guard(sls, "No serverless task credits in this scope/window.",
-             setup_hint="SERVERLESS_TASK_HISTORY may not be accessible on this account/role."):
+    # R1-163: serverless_task_daily clamps a trailing window to the live-scan limit.
+    _sls_wlab = window_label(bounds, min(int(days), MAX_LIVE_WINDOW_DAYS))
+    st.markdown(f"**Serverless tasks (billed separately, task-day grain, {_sls_wlab})**")
+    # R1-061 / R1-167: only a true absence is a grant gap; a timeout or a dropped column is a failed
+    # read and says so with its error (the old caption called every failure "not accessible").
+    if not sls.ok and is_setup_absence(sls.error_kind):
+        empty_state("needs_setup", "SERVERLESS_TASK_HISTORY is not readable by this app's role "
+                                   "(an IMPORTED PRIVILEGES grant on the SNOWFLAKE database).")
+    elif not sls.ok:
+        empty_state("unavailable", "Serverless task credits (SERVERLESS_TASK_HISTORY) could not be read.",
+                    detail=sls.error)
+    # R1-062: an ok read goes through guard(), so a clean empty is the verified-good row and the
+    # truncation line shows when run()'s row cap cuts the (newest-first) task-day rows.
+    elif guard(sls, "No serverless task credits in this scope/window.", kind="clean"):
         sdf = sls.df.copy()
         sdf["USD"] = sdf["SERVERLESS_CREDITS"].map(lambda c: credits_to_usd(c, rate))
         styled_table(sdf, height=220, column_config={

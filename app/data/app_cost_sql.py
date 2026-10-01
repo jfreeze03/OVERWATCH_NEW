@@ -37,9 +37,20 @@ def _company_col_clause(company: str) -> str:
     return f"UPPER(COMPANY) = {sql_literal(c.upper(), 40)}"
 
 
+# R1-031: the per-APPLICATION totals ride the user-grain rows as window columns, computed over EVERY
+# (application, user, company) group BEFORE the row cap, and the cap keeps each application's top row
+# as well as the top 1000 rows -- so "Measured $ by application" is exact for every application, even
+# one spread across hundreds of light users whose rows all fall past the cap (a bare LIMIT 1000 dropped
+# them, understating or erasing that application with no truncation banner).
+_APP_ROW_CAP = 1000
+
+
 def app_cost_mart(days: int = 30, company: str = "ALL", *,
                   bounds: tuple | None = None) -> str:
-    """Measured cost by application x user from FACT_APP_COST_DAILY (V077)."""
+    """Measured cost by application x user from FACT_APP_COST_DAILY (V077).
+
+    One row per (APPLICATION, USER_NAME, COMPANY), capped at the top 1000 by credits plus each
+    application's top row; APP_CREDITS / APP_QUERIES are that application's UNCAPPED totals."""
     days = bounded_days(days, 365)
     where = and_where(
         scope_window_where("DAY", days, bounds=bounds),
@@ -47,13 +58,16 @@ def app_cost_mart(days: int = 30, company: str = "ALL", *,
     )
     return f"""
 SELECT APPLICATION, USER_NAME, COMPANY,
-       SUM(QUERIES) AS QUERIES, SUM(CREDITS) AS CREDITS
+       SUM(QUERIES) AS QUERIES, SUM(CREDITS) AS CREDITS,
+       SUM(SUM(CREDITS)) OVER (PARTITION BY APPLICATION) AS APP_CREDITS,
+       SUM(SUM(QUERIES)) OVER (PARTITION BY APPLICATION) AS APP_QUERIES
 FROM {core_object('FACT_APP_COST_DAILY')}
 WHERE {where}
 GROUP BY APPLICATION, USER_NAME, COMPANY
 HAVING SUM(CREDITS) > 0
+QUALIFY ROW_NUMBER() OVER (ORDER BY SUM(CREDITS) DESC) <= {_APP_ROW_CAP}
+     OR ROW_NUMBER() OVER (PARTITION BY APPLICATION ORDER BY SUM(CREDITS) DESC) = 1
 ORDER BY CREDITS DESC
-LIMIT 1000
 """
 
 
@@ -104,12 +118,16 @@ sess AS (
 SELECT COALESCE(s.APPLICATION, '(unknown)') AS APPLICATION,
        q.USER_NAME,
        {companies.company_case_sql('q.WAREHOUSE_NAME')} AS COMPANY,
-       COUNT(*) AS QUERIES, SUM(c.CREDITS) AS CREDITS
+       COUNT(*) AS QUERIES, SUM(c.CREDITS) AS CREDITS,
+       SUM(SUM(c.CREDITS)) OVER (PARTITION BY COALESCE(s.APPLICATION, '(unknown)')) AS APP_CREDITS,
+       SUM(COUNT(*)) OVER (PARTITION BY COALESCE(s.APPLICATION, '(unknown)')) AS APP_QUERIES
 FROM q
 JOIN cred c ON c.QUERY_ID = q.QUERY_ID
 LEFT JOIN sess s ON s.SESSION_ID = q.SESSION_ID
 GROUP BY 1, 2, 3
 HAVING SUM(c.CREDITS) > 0
+QUALIFY ROW_NUMBER() OVER (ORDER BY SUM(c.CREDITS) DESC) <= {_APP_ROW_CAP}
+     OR ROW_NUMBER() OVER (PARTITION BY COALESCE(s.APPLICATION, '(unknown)')
+                           ORDER BY SUM(c.CREDITS) DESC) = 1
 ORDER BY CREDITS DESC
-LIMIT 1000
 """

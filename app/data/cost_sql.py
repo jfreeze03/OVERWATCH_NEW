@@ -900,15 +900,26 @@ ORDER BY DAY, CONTRACT_NUMBER
 """
 
 
-def contract_consumed_credits(contract_start_date: str) -> str:
+def _iso_day(value: object, name: str) -> str:
+    text = str(value or "").strip()
+    if len(text) != 10 or text[4] != "-" or text[7] != "-" or not text.replace("-", "").isdigit():
+        raise ValueError(f"{name} must be YYYY-MM-DD, got {text!r}")
+    return text
+
+
+def contract_consumed_credits(contract_start_date: str, contract_end_date: str | None = None) -> str:
     """Total billed credits since the contract start (account-wide).
 
     ``contract_start_date`` must be ISO ``YYYY-MM-DD``; validated by caller
-    (settings layer) — defensively re-checked here.
+    (settings layer) — defensively re-checked here. ``contract_end_date`` (R1-159,
+    same check) bounds the sum to the term, END-EXCLUSIVE like forecast.contract_pace's
+    clock, so a term that ended before SETTINGS was rolled stops accruing post-term
+    credits; it sits inside the IFF, so SOURCE_FIRST_DAY stays unfiltered.
     """
-    text = str(contract_start_date or "").strip()
-    if len(text) != 10 or text[4] != "-" or text[7] != "-" or not text.replace("-", "").isdigit():
-        raise ValueError(f"contract_start_date must be YYYY-MM-DD, got {text!r}")
+    text = _iso_day(contract_start_date, "contract_start_date")
+    in_term = f"USAGE_DATE >= DATE '{text}'"
+    if contract_end_date:
+        in_term += f" AND USAGE_DATE < DATE '{_iso_day(contract_end_date, 'contract_end_date')}'"
     # C7 coverage: sum the contract window via IFF (no WHERE) so SOURCE_FIRST_DAY is
     # the source's own earliest RETAINED day — the retention floor — NOT a
     # contract-filtered MIN (which read a quiet-start contract as no-coverage: the
@@ -916,7 +927,7 @@ def contract_consumed_credits(contract_start_date: str) -> str:
     # when SOURCE_FIRST_DAY is truly after the contract start (retention too short).
     return f"""
 SELECT
-    SUM(IFF(USAGE_DATE >= DATE '{text}', {_BILLED}, 0)) AS CREDITS_BILLED_TO_DATE,
+    SUM(IFF({in_term}, {_BILLED}, 0)) AS CREDITS_BILLED_TO_DATE,
     MIN(USAGE_DATE) AS SOURCE_FIRST_DAY,
     MAX(USAGE_DATE) AS LAST_DAY
 FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY
