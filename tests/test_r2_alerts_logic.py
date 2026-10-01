@@ -364,9 +364,11 @@ def test_r2_086_rules_that_never_read_their_threshold_are_withheld():
 
 
 def _proc_reads_threshold(body: str, rid: str) -> bool:
-    """A proc that reads the rule's THRESHOLD_NUM into a variable before its INSERT (the z / % sweeps)."""
-    return bool(re.search(r"THRESHOLD_NUM\)?,?[^;]*?INTO\s+:\w+\s+FROM\s+DBA_MAINT_DB\.OVERWATCH\.ALERT_CONFIG"
-                          rf"\s+WHERE\s+RULE_ID\s*=\s*'{rid}'", body))
+    """A proc that reads the rule's THRESHOLD_NUM into a variable before its INSERT (the z / % sweeps). The
+    multi-target form counts too: V172's SP_SCAN_CLOUD_SVC_ANOMALY reads ``COUNT(*), COALESCE(MAX(THRESHOLD_NUM),
+    3.5) INTO :enabled_cnt, :zthr`` (R1-227)."""
+    return bool(re.search(r"THRESHOLD_NUM\)?,?[^;]*?INTO\s+:\w+(?:\s*,\s*:\w+)*\s+FROM\s+"
+                          rf"DBA_MAINT_DB\.OVERWATCH\.ALERT_CONFIG\s+WHERE\s+RULE_ID\s*=\s*'{rid}'", body))
 
 
 def test_r2_038_no_threshold_set_matches_the_raisers():

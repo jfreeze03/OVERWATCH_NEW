@@ -158,10 +158,12 @@ def test_settle_gate_is_the_closed_window_on_metered_credits():
     # the scan's own closed-window predicate (the same session-clock CURRENT_DATE() that wrote TRACKING_UNTIL)
     assert "WHERE CURRENT_DATE() > TRACKING_UNTIL AND VERDICT = 'PENDING'" in _V109
     assert "CURRENT_TIMESTAMP(), DATEADD('day', 14, CURRENT_DATE())" in _V109   # TRACKING_UNTIL = seen day + 14
-    # V109 is still the scan's current definer (a later re-derive must re-check this gate's partner)
-    later = [p.name for p in _MIG.glob("V*.sql") if int(p.name[1:4]) > 109
-             and "PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_WAREHOUSE_CHANGE_SCAN(" in p.read_text(encoding="utf-8")]
-    assert not later, later
+    # whichever migration is the scan's CURRENT definer (V109, then V172's Hr/Min/Sec re-derivation) must keep this
+    # gate's partner: the closed-window predicate and the TRACKING_UNTIL literal it settles against
+    from tests.test_alert_rule_consistency import _latest_proc_bodies
+    scan = _latest_proc_bodies()["SP_WAREHOUSE_CHANGE_SCAN"]
+    assert "WHERE CURRENT_DATE() > TRACKING_UNTIL AND VERDICT = 'PENDING'" in scan
+    assert "CURRENT_TIMESTAMP(), DATEADD('day', 14, CURRENT_DATE())" in scan
     # STATE / VERIFIED_USD / VERIFIED_AT / VERIFIED_BY are the V145 assignments; volume never moves dollars
     head = settle.split("           NOTES = LEFT(COALESCE(l.NOTES, '') || ' | measured on", 1)[0]
     head = head.split("    UPDATE DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER l\n", 1)[1]     # the SET list before NOTES
