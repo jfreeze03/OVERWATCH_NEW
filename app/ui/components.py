@@ -1786,7 +1786,8 @@ _PRINTF_EQUIV = {"${:,.2f}": "$%.2f", "{:,.2f}": "%.2f", "{:,.1f}": "%.1f", "{:,
                  "${:+,.2f}": "$%+.2f", "{:+,.2f}": "%+.2f", "{:+,.1f}": "%+.1f", "{:+,.0f}": "%+.0f"}
 
 # Columns that hold account-time timestamps, by naming convention — the
-# display-timezone conversion (Views popover) applies to every table via
+# display-timezone conversion (a hydrated DISPLAY_TZ pref; the Views popover editor went
+# in v4.157.0) applies to every table via
 # _render_table, not just the pages that remembered to call it.
 _TS_SUFFIXES = ("_AT", "_TIME", "_TS", "_DML", "_READ", "_SEND")
 _TS_EXACT = ("AT", "TIMESTAMP", "NEWEST", "OLDEST", "LAST_DML", "LAST_READ", "LAST_SEND")

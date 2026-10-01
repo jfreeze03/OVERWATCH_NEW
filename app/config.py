@@ -231,8 +231,10 @@ THRESHOLDS = {
 ACCOUNT_USAGE_LAG_NOTE = "Account telemetry can lag up to ~45 min (metering-daily up to 24h)."
 
 # ---------------------------------------------------------------------------
-# Role -> navigation profile (page FILTERING only; Snowflake RBAC is the
-# actual security boundary under Streamlit-in-Snowflake).
+# Role -> navigation profile (page FILTERING only). The off-SiS fallback: under
+# owner's-rights Streamlit-in-Snowflake every viewer runs as the owner, so RBAC
+# only decides who can open the app; pages key on the viewer (VIEWER_PROFILES
+# below) and writes on OPERATOR_USERS, the app's authorization boundary.
 # ---------------------------------------------------------------------------
 ROLE_PROFILE_OVERRIDES = {
     # r27 #8: the SNOW_PRI_* viewer-role overrides were traces of roles

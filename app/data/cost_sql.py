@@ -62,10 +62,10 @@ ORDER BY DAY
 def _wh_company_scope(company: str) -> str:
     """Company scope for a live WAREHOUSE_METERING_HISTORY read via the COMPANY_SCOPE-aware
     UDF (COMPANY_FOR_WAREHOUSE) — the SAME axis the COMPANY label and the mart path use, and
-    the pattern ops_sql._query_scope (C10) established. The name-pattern warehouse_clause()
-    drops a COMPANY_SCOPE-mapped warehouse whose name doesn't match WH_ALFA_/the Trexis list
-    from its per-company view, so the live leg disagreed with the mart for a mapped warehouse
-    (round-11 MC-1). Empty for ALL (no filter)."""
+    the pattern ops_sql._query_scope (C10) established. The retired name-pattern
+    warehouse_clause() (removed in v4.607) dropped a COMPANY_SCOPE-mapped warehouse whose name
+    didn't match WH_ALFA_/the Trexis list from its per-company view, so the live leg disagreed
+    with the mart for a mapped warehouse (round-11 MC-1). Empty for ALL (no filter)."""
     return ("" if str(company or "ALL").upper() == "ALL"
             else f"{companies.company_case_sql('WAREHOUSE_NAME')} = {sql_literal(company)}")
 

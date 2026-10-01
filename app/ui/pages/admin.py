@@ -996,7 +996,8 @@ def _settings_tab(is_operator: bool) -> None:
             if ok:
                 st.caption("New value takes effect within one cache cycle (≤5 min) or after Refresh.")
     else:
-        st.caption("Executing requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS; anyone can copy the SQL for review.")
+        st.caption("Saving in the app is limited to operators (config OPERATOR_USERS); "
+                   "anyone can copy the SQL for review.")
 
 
 def _migrations_tab() -> None:
@@ -1069,9 +1070,9 @@ def _migrations_tab() -> None:
     fresh = run_mart_first(
         mart_sql.source_freshness_state(), mart_sql.source_freshness(),
         page=_PAGE, key="adm_freshness",
-        mart_source="SOURCE_FRESHNESS_STATE (10-min snapshot)",
+        mart_source="SOURCE_FRESHNESS_STATE (stamped by each loader)",
         live_source="MART_SOURCE_FRESHNESS (aggregate view, pre-V040 fallback)",
-        mart_tier="recent", live_tier="recent")   # state moves every 10 min (r14 #13)
+        mart_tier="recent", live_tier="recent")   # state moves on every loader run (r14 #13)
     if guard(fresh, "Freshness view empty — have the loader tasks run yet?",
              setup_hint="Tasks resume at the end of V004 — switch on Task health below to see which "
                         "are suspended or failing."):

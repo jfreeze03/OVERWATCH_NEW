@@ -1,9 +1,10 @@
 """Governance-drift score: hygiene debt with named deductions. Pure module.
 
 Same philosophy as the platform score — an executive can ask "why 82?" and
-get exact items. Weights are fixed and documented here (drift items are
-countable facts, unlike the platform score's tunable severities); caps stop
-any one category from dominating.
+get exact items. The per-unit weights below are defaults: each one can be
+overridden by its GOV_PTS_* SETTINGS key (resolve_gov_weights, editable on
+Admin > Settings), like the platform score's SCORE_PTS_* weights. The caps
+are fixed so no one category dominates.
 """
 
 from __future__ import annotations

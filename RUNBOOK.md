@@ -86,7 +86,10 @@ on Cost Intelligence → Spend & Attribution (Unmapped entities) until a
 `COMPANY_SCOPE` row maps it, so nothing silently bills ALFA. User `KEBARR1`
 holds both companies' roles and is classified **ALFA** by explicit
 override. This is a convenience scope on a shared account, not a security
-boundary — Snowflake roles are the security boundary.
+boundary. Who can open the app is USAGE on the Streamlit object
+(SNOW_ACCOUNTADMINS + SNOW_SYSADMINS); inside it every query runs with the
+owner's rights, so page visibility (`config.VIEWER_PROFILES`) and writes
+(`config.OPERATOR_USERS`) are keyed on the viewer.
 
 **Honesty contracts** enforced by tests: no synthetic data anywhere; empty
 states say why and what would fill them; estimated vs verified savings
@@ -332,8 +335,9 @@ Freshness & replay · Entity 360.
 - **Incident correlation timeline** (Timeline & movers) — 7 days of alerts +
   task failures + DDL on one axis; click a row → everything ±30 minutes.
 - **Spend movers** (Timeline & movers) — window vs prior window per
-  warehouse (`warehouse_window_vs_prior`, lag-offset so both windows are
-  complete).
+  warehouse (`warehouse_window_vs_prior`: the window vs the equal-length
+  calendar window before it; the trailing presets exclude today, so both
+  windows are complete).
 
 ### Cost Intelligence (sections)
 - **Spend** — daily billed by service category; KPIs: billed $, cloud-
@@ -1123,7 +1127,8 @@ Route rows ENABLED with the right MIN_SEVERITY? APP_ERROR_LOG shows
 `route_send_failed` with the integration name when a single route breaks.
 
 **Canary failures.** Column drift in ACCOUNT_USAGE or a dropped object.
-The failing check names the builder; APP_ERROR_LOG has the SQL error.
+The failing check names the builder, and the ERROR column on the canary
+page has the SQL error (see the logging note below).
 One conditional exception: cortex.code_token_types also FAILs (its error
 names TOKENS_GRANULAR) on accounts whose Cortex Code views predate that
 optional column. That is expected only if the CoCo efficiency review has
@@ -1135,6 +1140,10 @@ gaps: if the app's role cannot read that view they FAIL here while Security
 shows a calm needs_setup. IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE
 (snowflake/roles.sql) covers that view. A renamed column FAILs here too,
 and Security then shows a red "unavailable" with the error (v4.605).
+Logging: a drift or absence FAIL (invalid identifier, does not exist,
+unknown function) is not written to APP_ERROR_LOG, because the canary runs
+as probe reads; only timeouts, privilege errors and other failures are
+logged there. The results last only for the session: copy them.
 
 **A red "unavailable" on an optional panel** (v4.605). A probe read shows
 needs_setup only when the object is missing or not granted (or the function
@@ -1146,8 +1155,13 @@ and Admin → Setup progress marks the row Unknown with a re-apply-the-grants
 FIX. A missing column (schema drift), a timeout or any other
 failure shows "unavailable" with the error in its detail expander. A probe
 read does not write a missing column to APP_ERROR_LOG, so that expander is
-the only record: copy the error, then run Admin → Canary (a registered
-builder FAILs there on drift).
+the only record: copy the error, then run Admin → Canary. That helps only
+when the panel's builder is registered in app/data/canary.py (it then FAILs
+there on drift). Several probe readers are not registered, by design (the
+SHOW-based reads, which EXPLAIN cannot compile, and the Enterprise-only
+ACCESS_HISTORY reads) or not yet (e.g. the org_*, operator_* and email_*
+reads, query_insights_feed, object_tag_probe); for those the expander error
+is the only record.
 A timeout usually clears on a retry; drift does not (apply the missing
 migrations, or redeploy). Admin → Setup progress marks a checklist row
 Unknown (not Pending) when its read fails this way: FIX says Retry for a
@@ -1160,7 +1174,8 @@ Enterprise, so a timeout there says it timed out.
 **Numbers look wrong.** Check the source caption first (mart vs live +
 lag). ACCOUNT_USAGE lags ≤45 min (query history) to ≤24h (metering daily);
 never compare a half-filled current window to a complete prior one — the
-app's comparison queries lag-offset both windows for exactly this reason.
+app's comparison queries use complete calendar days (today excluded) for
+exactly this reason.
 
 **Arrow/serialization error on a table.** A mixed-type object column from
 a new source; wrap the offending column in TO_VARCHAR in its builder (the
@@ -1265,8 +1280,11 @@ acknowledged — a failed month or a month with no drill ends it).
 
 **Rule catalogue additions (§12).** `OPS_ALERT_DRILL` (PLATFORM, CRITICAL,
 ENABLED=FALSE — the drill task inserts events directly; the scan never
-fires it). `WINDOW_HOURS` on every rule is informational: scan windows are
-fixed per family in `SP_ALERT_SCAN`; edit thresholds, not windows.
+fires it). `WINDOW_HOURS` is informational for every rule except
+`DQ_RECON_ERROR`: scan windows are fixed per family in `SP_ALERT_SCAN` /
+`SP_ALERT_SCAN_DAILY`, so edit thresholds, not windows. `DQ_RECON_ERROR`'s
+`WINDOW_HOURS` is the reconciliation look-back `SP_SCAN_RECON_ERRORS` reads
+(default 48h, named in the alert text).
 
 **Alert lifecycle.** Resolutions carry a kind — ACTIONED / NOISE /
 EXPECTED. Kinds feed the per-rule precision score and the threshold

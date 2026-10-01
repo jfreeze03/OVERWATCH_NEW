@@ -64,7 +64,7 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 | Brief (phone-first: numbers, fires, asks, exhaustion date, **ROI: verified savings vs app cost**) | Brief |
 | Month-end forecast: linear / seasonal / opt-in `ML.FORECAST` | Overview; `ml_forecast_option.sql` |
 | Renewal planner (growth scenarios, recommended commit) | Cost → Contract |
-| Department budgets + monthly statement exports | Cost → Chargeback |
+| Department budgets + monthly statement exports | Cost → Chargeback & AI |
 | Company all-in showback (warehouse + serverless + Cortex Code + estimated storage by company; cloud-services adjustment and unattributed remainder tie to billed metering + estimated storage) | Cost → Chargeback & AI |
 | Billing truth vs app model (org rate card vs credits x rate, monthly) | Cost → Contract & Forecast |
 | Styled HTML executive summary; per-table CSV everywhere | Overview; all tables |
@@ -102,7 +102,7 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 | Capability | Where |
 |---|---|
 | Nine scheduled marts + tag coverage, fact-first panels with labeled live fallbacks | everywhere (V027-V031) |
-| Incident object: declare/auto-declare/proposals, TTD/MTTA/MTTR/reopen/compression, lineage joins | Control Room, Brief (V032) |
+| Incident object: declare/auto-declare/proposals, lineage joins; lifecycle metrics MTTA / time to mitigate / MTTR / alerts-per-incident compression (reopen rate removed: nothing writes REOPENED_FROM) | Control Room, Brief (V032); metrics on Alerts → History |
 | Change attribution: CHANGED_BY + MANAGED/MANUAL vs DEPLOY_ACTORS | Operations scorecard (V033) |
 | Per-route company delivery filters (Teams = ALFA-only for now) | alert sender v4 (V034) |
 | Measured proc costs: top 50 procedures by measured spend with $/call, a "Priciest procedure (per call)" KPI over every procedure CALLed in the window, price-a-CALL/session, trend-one-procedure by name | Cost -> Unit costs |

@@ -461,9 +461,12 @@ consequences the code accounts for:
 - Viewer identity comes from `st.user` (`app/core/identity.py`), because
   `CURRENT_USER()` returns the app owner inside the app. Preferences,
   usage telemetry, and audit actor stamps all ride `identity_sql()`.
-- The in-app execution gate (typed confirmation + admin profile) is a UX
-  guard, not a security boundary; the executor additionally enforces a
-  statement allow-list (OVERWATCH tables/procs and warehouse levers only).
+- The in-app execution gate is the `config.OPERATOR_USERS` viewer allowlist
+  (`session.is_operator()`), plus a typed confirmation for classifying or
+  account-touching writes. Because every viewer runs as the owner, that
+  allowlist is the app's authorization boundary; the executor re-checks it for
+  owner-privileged statements and enforces a statement allow-list (OVERWATCH
+  tables/procs and warehouse levers only).
 
 - Own the Streamlit app and the OVERWATCH objects with **SNOW_SYSADMINS** so
   day-to-day operation never requires the break-glass role.
