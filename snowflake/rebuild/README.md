@@ -21,15 +21,19 @@ Then, one hour later: snowflake/loader_chain_check.sql — every task
 Around the files (docs/FULL_REBUILD.md has the statements):
 
 - **Before 00** (step 0): list the opt-in objects and the live ALERT_ROUTES, and
-  record WH_ALFA_ADMIN's STATEMENT_TIMEOUT_IN_SECONDS: V002 sets it back to 300.
+  record WH_ALFA_ADMIN's STATEMENT_TIMEOUT_IN_SECONDS (V002 sets it back to 300)
+  and its resource_monitor (the replay detaches any monitor: if step 0 finds one
+  other than OVERWATCH_RM, ask the owner before 02 whether it goes back).
 - **02**: its generated header re-creates the retired roles V006, V007 and V008 grant
   to (03 drops them again). If Run All stops between V002 and V045, detach the
   OVERWATCH_RM resource monitor V002 attached before anything else (step 3).
-- **Between 02 and 03, if you kept operator data** (step 3b): restore SETTINGS,
-  COMPANY_SCOPE, ALERT_CONFIG, ALERT_ROUTES and DEPARTMENT_MAP from the 00
-  clones (the replay re-ran one-time config statements on them), close the
-  events the replay raised for rules that are off again, and put the
-  warehouse timeout back.
+- **Between 02 and 03** (step 3b): if you kept operator data, restore SETTINGS,
+  COMPANY_SCOPE, ALERT_CONFIG, ALERT_ROUTES, DEPARTMENT_MAP and SAVINGS_LEDGER
+  from the 00 clones (the replay re-ran one-time statements on them) and close
+  the events the replay raised for rules that are off again. On every path, put
+  the warehouse timeout back (and, on the owner's yes, the monitor step 0
+  found), and if another role created the 02 shim's roles, drop them with it
+  now: 03 opens by dropping them.
 - **After 05** (step 7b): re-create the opt-in objects 01 dropped (email alerts,
   drill, ML forecast, notification integrations and secrets) and re-enable the
   routes step 0 listed.
@@ -37,6 +41,9 @@ Around the files (docs/FULL_REBUILD.md has the statements):
 
 These files are GENERATED and equality-locked against their sources
 (tests/test_rebuild_bundle.py) — edit the sources, never this folder.
+Two parts are kept by hand and read back by the lock, so it cannot catch a
+bad edit there: 00's CLONE list and this README outside the notes block
+above.
 Regenerate the byte-locked files with `python outputs/gen_rebuild_bundle.py`
 after changing a migration, teardown, roles, backfill, or validation source.
 Factory reset instead (drop operator data too): see docs/FULL_REBUILD.md

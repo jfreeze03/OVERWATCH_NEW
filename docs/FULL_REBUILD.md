@@ -10,7 +10,7 @@ then run every migration in snowflake/migrations/ in order (or paste
 snowflake/rebuild/02_migrations_V001_V<tip>.sql, the same chain behind a
 two-line role shim, step 3). Same end state as a virgin install, except for
 the opt-in objects the migrations never create (step 7b) and the kept
-config the replay rewrites (step 3b).
+operator data the replay rewrites (step 3b).
 
 Everything below runs in Snowsight as your deployment role, the one that
 owns the objects: SNOW_ACCOUNTADMINS here (DEPLOYMENT.md §1 and §2; step
@@ -49,11 +49,20 @@ owns the objects: SNOW_ACCOUNTADMINS here (DEPLOYMENT.md §1 and §2; step
   live ROUTE_IDs as well: step 7b re-enables exactly those (the step-1
   ALERT_ROUTES clone holds them too).
 - **WH_ALFA_ADMIN settings** (shared with the app and every loader): the
-  replay resets them (step 3), and step 3b puts back what you record now:
+  replay changes two of them (step 3), and step 3b puts back what you record
+  now:
 
       SHOW PARAMETERS LIKE 'STATEMENT_TIMEOUT_IN_SECONDS' IN WAREHOUSE WH_ALFA_ADMIN;
                                                      -- note the value and level
-      SHOW WAREHOUSES LIKE 'WH_ALFA_ADMIN';          -- resource_monitor: null
+      SHOW WAREHOUSES LIKE 'WH_ALFA_ADMIN';          -- note resource_monitor
+
+  V002 sets the timeout to 300. It also swaps whatever monitor is attached
+  for OVERWATCH_RM, and V045 then sets RESOURCE_MONITOR = NULL, so the replay
+  detaches any monitor attached now. Expect `null` (owner decision: no
+  resource monitor on WH_ALFA_ADMIN). OVERWATCH_RM is a leftover of an
+  aborted run: let it go. If it names any other monitor, note the name and
+  ask the owner before step 3 whether it goes back; step 3b re-attaches it
+  only on a yes.
 
 - **Rebuild at the tip the account is on.** If the repo has migrations the
   account has not applied, apply them the normal way first (DEPLOYMENT.md
@@ -118,13 +127,20 @@ now, but the rule stands for every file). Notes:
       CREATE ROLE IF NOT EXISTS OVERWATCH_OPERATOR;
 
   They need the CREATE ROLE privilege. If your role lacks it, create them as
-  a role that has it, and drop them with that role after step 4.
+  a role that has it, and drop them with that role before step 4 (once step
+  3b is done). roles.sql opens with `DROP ROLE IF EXISTS` for both: that then
+  finds nothing to drop, where a role that cannot drop them would stop
+  roles.sql before its first grant. roles.sql also needs an ACCOUNTADMIN-tier
+  role (IMPORTED PRIVILEGES), which a role without CREATE ROLE is not, so run
+  step 4 as a role that has both.
 - **V002 changes WH_ALFA_ADMIN.** It sets STATEMENT_TIMEOUT_IN_SECONDS back
   to 300 (step 3b restores the value step 0 recorded), creates the
   OVERWATCH_RM resource monitor (30 credits a month, SUSPEND at 100%) and
-  attaches it; V045 detaches and drops it again (owner decision: no resource
-  monitor, no hard cap on WH_ALFA_ADMIN). If the run stops anywhere between
-  V002 and V045, detach it before you investigate:
+  attaches it in place of any monitor step 0 found; V045 detaches and drops
+  it again (owner decision: no resource monitor, no hard cap on
+  WH_ALFA_ADMIN; step 3b re-attaches a step-0 monitor only on the owner's
+  yes). If the run stops anywhere between V002 and V045, detach it before
+  you investigate:
 
       ALTER WAREHOUSE WH_ALFA_ADMIN SET RESOURCE_MONITOR = NULL;
       DROP RESOURCE MONITOR IF EXISTS OVERWATCH_RM;
@@ -143,7 +159,10 @@ now, but the rule stands for every file). Notes:
   route's COMPANY_FILTER to 'ALFA'; V019/V020/V028 reset SEC_CRED_EXPIRY
   (enabled, threshold 10); V043/V045 re-enable PIPE_TASK_FAILURES; V091 and
   V157 turn AUTO_CLEAR_ENABLED on for five rules; V001 resets COMPANY_SCOPE
-  notes; and the seed MERGEs put back the rules, routes, settings, scope and
+  notes; V070 disables every enabled route whose integration the teardown
+  dropped; V118 and V145 re-run their one-time SAVINGS_LEDGER corrections
+  (apply-time EXECUTE IMMEDIATE blocks, guarded so a re-run normally changes
+  nothing); and the seed MERGEs put back the rules, routes, settings, scope and
   department rows you had deleted (V011 even re-adds two retired rules, which
   V034 and V157 delete again). Step 3b puts your values back.
 - If you factory-reset, apply every migration, then restore your real values
@@ -158,8 +177,11 @@ now, but the rule stands for every file). Notes:
 
 After the last migration and before step 4, as the table-owner role
 (SNOW_ACCOUNTADMINS here), with step 1's date suffix. On the
-keep-operator-data path, restore the five config tables the replay rewrote
-(step 3's notes say how) from the step-1 clones. The replay's own scans
+keep-operator-data path, restore the five config tables and SAVINGS_LEDGER,
+the kept tables the replay rewrote (step 3's notes say how), from the step-1
+clones. Restoring SAVINGS_LEDGER also undoes the settle V153's tail CALL ran
+during the replay; TASK_LEDGER_AUTOBOOK settles those windows again on its
+next daily run. The replay's own scans
 raised events under the config it had reset: V045 switches
 PIPE_TASK_FAILURES on and then scans, and V020/V028 re-enable
 SEC_CRED_EXPIRY at a 10-day threshold. Nothing closes those events once
@@ -180,6 +202,7 @@ changed at all (re-seeded, switched on, threshold or auto-clear reset):
     INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG   SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG_BAK_<date>;
     INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES   SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES_BAK_<date>;
     INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.DEPARTMENT_MAP SELECT * FROM DBA_MAINT_DB.OVERWATCH.DEPARTMENT_MAP_BAK_<date>;
+    INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER SELECT * FROM DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER_BAK_<date>;
 
 Then close, as EXPECTED, every event of a rule only the replay re-seeded,
 and every event raised since the step-1 clone (so by the replay) whose rule
@@ -219,14 +242,22 @@ route whose integration is gone switched off until step 7b brings it back
      WHERE ENABLED AND UPPER(INTEGRATION_NAME) NOT IN
            (SELECT UPPER("name") FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
 
-On every path, put back the warehouse timeout step 0 recorded (V002 set it
-to 300) and confirm no resource monitor is attached:
+On every path, put back the warehouse settings step 0 recorded: the timeout
+(V002 set it to 300), and the resource monitor only on the owner's yes in
+step 0. The replay detached it; skip that line when step 0 showed `null` or
+OVERWATCH_RM (owner decision: no monitor on WH_ALFA_ADMIN):
 
     ALTER WAREHOUSE WH_ALFA_ADMIN SET STATEMENT_TIMEOUT_IN_SECONDS = <step-0 value>;
-    SHOW WAREHOUSES LIKE 'WH_ALFA_ADMIN';            -- resource_monitor: null
+    ALTER WAREHOUSE WH_ALFA_ADMIN SET RESOURCE_MONITOR = <step-0 monitor>;  -- owner's yes only
+    SHOW WAREHOUSES LIKE 'WH_ALFA_ADMIN';            -- resource_monitor: null, or that monitor
 
 (If step 0 showed no warehouse-level value, run `ALTER WAREHOUSE
 WH_ALFA_ADMIN UNSET STATEMENT_TIMEOUT_IN_SECONDS` instead.)
+
+If step 3 created the two retired roles with a role other than your
+deployment role, drop them with it now, before step 4:
+`DROP ROLE IF EXISTS OVERWATCH_MONITOR;` and
+`DROP ROLE IF EXISTS OVERWATCH_OPERATOR;`.
 
 ## 4. Grants
 

@@ -1267,19 +1267,26 @@ the same day.
       `CREATE ROLE IF NOT EXISTS OVERWATCH_MONITOR;` and
       `CREATE ROLE IF NOT EXISTS OVERWATCH_OPERATOR;`: V006-V008 grant to
       these retired roles, roles.sql drops them again, and rebuild/02 runs
-      both lines first. V002 sets WH_ALFA_ADMIN's
-      STATEMENT_TIMEOUT_IN_SECONDS back to 300 and attaches OVERWATCH_RM
-      (30 credits a month, SUSPEND at 100%) until V045 drops it. The
+      both lines first. If your role lacks CREATE ROLE, create them as a role
+      that has it and drop them with that role before roles.sql (whose own
+      DROPs would otherwise stop it before its first grant). V002 sets
+      WH_ALFA_ADMIN's STATEMENT_TIMEOUT_IN_SECONDS back to 300 and attaches
+      OVERWATCH_RM (30 credits a month, SUSPEND at 100%) in place of any
+      monitor until V045 sets RESOURCE_MONITOR to NULL and drops it. The
       warehouse is account-level and survives the dropped schema, so this
-      hits its live value. Record the value first with
-      `SHOW PARAMETERS LIKE 'STATEMENT_TIMEOUT_IN_SECONDS' IN WAREHOUSE WH_ALFA_ADMIN;`,
-      put it back afterwards
+      hits its live settings. Record them first with
+      `SHOW PARAMETERS LIKE 'STATEMENT_TIMEOUT_IN_SECONDS' IN WAREHOUSE WH_ALFA_ADMIN;`
+      and `SHOW WAREHOUSES LIKE 'WH_ALFA_ADMIN';` (its resource_monitor), and
+      put the timeout back afterwards
       (`ALTER WAREHOUSE WH_ALFA_ADMIN SET STATEMENT_TIMEOUT_IN_SECONDS = <value>;`,
-      or `UNSET` if it showed no warehouse-level value), and if the run stops
-      between V002 and V045, detach the monitor before anything else
-      (`ALTER WAREHOUSE WH_ALFA_ADMIN SET RESOURCE_MONITOR = NULL;` then
+      or `UNSET` if it showed no warehouse-level value). Expect no monitor
+      (owner decision); the replay detaches any monitor, so if it named one
+      other than OVERWATCH_RM, ask the owner before re-attaching it
+      (`ALTER WAREHOUSE WH_ALFA_ADMIN SET RESOURCE_MONITOR = <monitor>;`). If
+      the run stops between V002 and V045, detach the monitor before anything
+      else (`ALTER WAREHOUSE WH_ALFA_ADMIN SET RESOURCE_MONITOR = NULL;` then
       `DROP RESOURCE MONITOR IF EXISTS OVERWATCH_RM;`; docs/FULL_REBUILD.md
-      steps 3 and 3b). V158's tail starts a backup
+      steps 0, 3 and 3b). V158's tail starts a backup
       run seconds before V161, which waits up to about 4 minutes for it. If V161
       still stops ("V161 stopped: a TASK_BACKUP_OPERATOR run was still in
       flight", or a statement timeout), re-run it once that run shows a final

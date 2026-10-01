@@ -11,13 +11,17 @@
 -- every version, so every guard passes and the one-time statements run again:
 -- V034 sets every 'ALL' route's COMPANY_FILTER to 'ALFA'; V019/V020/V028,
 -- V043/V045, V091 and V157 reset rule flags, thresholds and auto-clear; V001
--- resets COMPANY_SCOPE notes; the seed MERGEs put back the rules, routes,
--- settings, scope and department rows you deleted. After the last file,
--- docs/FULL_REBUILD.md step 3b restores those tables from the 00 clones.
+-- resets COMPANY_SCOPE notes; V070 disables routes whose integration is gone;
+-- V118 and V145 re-run their one-time SAVINGS_LEDGER corrections; the seed
+-- MERGEs put back the rules, routes, settings, scope and department rows you
+-- deleted. After the last file, docs/FULL_REBUILD.md step 3b restores those
+-- tables from the 00 clones.
 -- V002 also sets WH_ALFA_ADMIN's STATEMENT_TIMEOUT_IN_SECONDS back to 300 and
--- attaches OVERWATCH_RM (30 credits a month, SUSPEND at 100%) until V045 drops
--- it: if Run All stops anywhere in between, detach it first (step 3); step 3b
--- puts back the timeout step 0 recorded.
+-- attaches OVERWATCH_RM (30 credits a month, SUSPEND at 100%) in place of any
+-- monitor until V045 sets it to NULL and drops it, so the replay detaches any
+-- monitor the warehouse had. If Run All stops anywhere in between, detach it
+-- first (step 3); step 3b puts back the timeout step 0 recorded, and a monitor
+-- step 0 found only on the owner's yes.
 
 -- REPLAY SHIM (generated, not a migration). V006, V007 and V008 grant to
 -- OVERWATCH_MONITOR and OVERWATCH_OPERATOR, the roles retired on 2026-07-13
@@ -26,7 +30,9 @@
 -- or fresh account; 03_roles.sql drops them again. They need the CREATE ROLE
 -- privilege: if Run All stops here, nothing else has run yet, so create them as
 -- a role that can, resume from the V001 banner, and drop them with that role
--- after 03.
+-- before 03 (03_roles.sql opens with DROP ROLE IF EXISTS for both, which then
+-- finds nothing; run as a role that cannot drop them, it would stop 03 before
+-- its first grant).
 CREATE ROLE IF NOT EXISTS OVERWATCH_MONITOR;
 CREATE ROLE IF NOT EXISTS OVERWATCH_OPERATOR;
 

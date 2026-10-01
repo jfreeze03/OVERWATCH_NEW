@@ -4,10 +4,11 @@
 -- FIRST change every _20260712 suffix (the CREATEs and the verify below)
 -- to today's date, then run it, verify the counts, and proceed.
 -- Not just insurance: on the keep-operator-data path the 02 replay re-runs
--- one-time config statements against these tables (route company filters,
--- rule flags and thresholds, re-seeded rows), and docs/FULL_REBUILD.md step 3b
--- restores SETTINGS, COMPANY_SCOPE, ALERT_CONFIG, ALERT_ROUTES and
--- DEPARTMENT_MAP from these clones. Drop them when the rebuild proves out.
+-- one-time statements against these tables (route company filters, rule
+-- flags and thresholds, re-seeded rows, ledger corrections), and
+-- docs/FULL_REBUILD.md step 3b restores SETTINGS, COMPANY_SCOPE, ALERT_CONFIG,
+-- ALERT_ROUTES, DEPARTMENT_MAP and SAVINGS_LEDGER from these clones. Drop them
+-- when the rebuild proves out.
 -- Since V161 there is no scheduled backup: these clones are the only
 -- copy outside Time Travel. No IF NOT EXISTS: an unedited suffix that
 -- already exists fails loudly instead of keeping an old clone. After a
