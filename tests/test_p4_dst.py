@@ -170,9 +170,10 @@ def test_pure_layers_never_read_the_server_clock():
 
     These layers compute windows, boundaries and projections against
     ACCOUNT_USAGE, which stores account time. A bare date.today() here is a
-    silent off-by-one for part of every day. Wall-clock stamps (cache
-    fetched_at, export filenames) legitimately use the server clock and live
-    in app/core and app/ui, which this guard deliberately does not cover.
+    silent off-by-one for part of every day. Opaque process-clock values (cache
+    salts, relative refresh ages) live in app/core and app/ui, which this guard
+    deliberately does not cover; a stamp a viewer SEES there (fetched_at, error
+    refs, export headers) is account time too (r7, R2-051).
     """
     offenders = []
     for path in _pure_modules():

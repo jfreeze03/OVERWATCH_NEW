@@ -1011,7 +1011,10 @@ def _settings_tab(is_operator: bool) -> None:
     # perf T1.11 retier was declined here to keep that guarantee — see test_codex_r24.
     res = run(mart_sql.settings(), page=_PAGE, key="settings_table", tier="live",
               source="SETTINGS")
-    if guard(res, "SETTINGS is empty.", setup_hint="Run migration V001 to create and seed it."):
+    # R2-072 follow-up: guard() renders setup_hint on a FAILED read only; the re-seed guidance an empty
+    # SETTINGS needs lives in the empty message.
+    if guard(res, "SETTINGS is empty — migration V001 seeds it.",
+             setup_hint="Run migration V001 to create and seed it."):
         styled_table(with_user_names(res.df, _PAGE, user_col="UPDATED_BY", display_col="Updated by"))
         result_caption(res)
         # r27 H2: keys the app no longer reads (retired features leave rows
@@ -1144,7 +1147,8 @@ def _migrations_tab() -> None:
         mart_source="SOURCE_FRESHNESS_STATE (stamped by each loader)",
         live_source="MART_SOURCE_FRESHNESS (aggregate view, pre-V040 fallback)",
         mart_tier="recent", live_tier="recent")   # state moves on every loader run (r14 #13)
-    if guard(fresh, "Freshness view empty — have the loader tasks run yet?",
+    if guard(fresh, "Freshness view empty — have the loader tasks run yet? Switch on Task health below to "
+                    "see which are suspended or failing.",
              setup_hint="Tasks resume at the end of V004 — switch on Task health below to see which "
                         "are suspended or failing."):
         styled_table(fresh.df)
@@ -1739,7 +1743,8 @@ def _performance_tab() -> None:
     # one thing it cannot have is BYTES_SCANNED, so the scan stays one click away.
     res = run(mart_sql.app_statement_stats_telemetry(7), page=_PAGE, key="app_stmt_tel",
               tier="recent", source="APP_QUERY_TELEMETRY (the app's own fetch log)")
-    if guard(res, "No fetches persisted in the last 7 days.",
+    if guard(res, "No fetches persisted in the last 7 days. If the app has been in use, check the "
+                  "APP_QUERY_TELEMETRY INSERT grant (a roles.sql re-run restores it).",
              setup_hint="Needs migration V021 + a roles.sql re-run (APP_QUERY_TELEMETRY INSERT grant)."):
         _stmt, _stmt_cfg = snowsight_profile_column(
             res.df, _PAGE, id_col="SLOWEST_QUERY_ID", label="Slowest profile")

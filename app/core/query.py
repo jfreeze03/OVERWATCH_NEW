@@ -46,6 +46,18 @@ _BATCH_MEMBER_CACHE_MAX_BYTES = 128 * 1024 * 1024
 _TELEMETRY_KEY = "_ow_query_telemetry"
 _TELEMETRY_MAX = 200
 
+
+def _account_clock() -> datetime:
+    """R2-051: the wall-clock stamp a viewer SEES (QueryResult.fetched_at -> 'fetched/served HH:MM:SS' in
+    result_caption and the Case File, the Admin telemetry 'at' column) is account time, the clock every
+    mart timestamp and the Case File header use -- not the UTC process clock, which ran 5-6 hours ahead
+    (and a calendar day ahead every Central evening). Opaque cache salts stay on the process clock."""
+    # lazy, as app.core.identity does: app.core imports no app.logic module at load
+    from app.logic.formulas import account_now
+
+    return account_now()
+
+
 # A real row cap already present in the statement, not just the word "limit"
 # somewhere in the text — that used to disable the cap silently, leaving the
 # query unbounded. \b keeps a column such as RATE_LIMIT from matching, and
@@ -674,7 +686,7 @@ def _telemetry(page: str, tier: str, key: str, elapsed_ms: float, rows: int, ok:
     try:
         entries = st.session_state.setdefault(_TELEMETRY_KEY, [])
         entries.append({
-            "at": datetime.now().isoformat(timespec="seconds"),
+            "at": _account_clock().isoformat(timespec="seconds"),
             "page": page or "unknown",
             "tier": tier,
             "key": key[:60],
@@ -954,7 +966,7 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict:
             out_direct[key] = QueryResult(
                 df=frame, ok=True, truncated=truncated,
                 source=str(spec.get("source", "")), tier=tier,
-                fetched_at=datetime.now(), cache_hit=True, elapsed_ms=0.0)
+                fetched_at=_account_clock(), cache_hit=True, elapsed_ms=0.0)
             continue
         uncached_specs.append(spec)
         capped.append(capped_sql)
@@ -1001,7 +1013,7 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict:
                 out[str(spec["key"])] = QueryResult(
                     df=df, ok=True, truncated=truncated,
                     source=str(spec.get("source", "")), tier=tier,
-                    fetched_at=datetime.now(), elapsed_ms=member_ms)
+                    fetched_at=_account_clock(), elapsed_ms=member_ms)
                 _batch_member_cache_put(tier, capped[idx], member_scopes[idx], df, truncated)
             else:
                 solo = run(
@@ -1049,7 +1061,7 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict:
                    sql_hash=_sql_hash16(spec["sql"]), cache_hit=cache_hit_batch)
         out[str(spec["key"])] = QueryResult(
             df=df, ok=True, truncated=truncated, source=str(spec.get("source", "")),
-            tier=tier, fetched_at=datetime.now(), elapsed_ms=member_ms,
+            tier=tier, fetched_at=_account_clock(), elapsed_ms=member_ms,
             # c09 R1-005 (R12): a tuple-cache replay is a HIT -- the caption must say "served ...
             # cached", not "fetched <now>" (telemetry above already knew; the result did not).
             cache_hit=cache_hit_batch,
@@ -1124,7 +1136,7 @@ def run_batch_mixed(specs: list[dict], *, page: str) -> dict:
                        sql_hash=_sql_hash16(sql), cache_hit=True)
             out[key] = QueryResult(df=frame, ok=True, truncated=truncated,
                                    source=str(spec.get("source", "")), tier=tier,
-                                   fetched_at=datetime.now(), cache_hit=True,   # c09 R1-005 (R12)
+                                   fetched_at=_account_clock(), cache_hit=True,   # c09 R1-005 (R12)
                                    elapsed_ms=0.0)
             continue
         pending.append((spec, tier, capped_sql, scope, cap))
@@ -1162,7 +1174,7 @@ def run_batch_mixed(specs: list[dict], *, page: str) -> dict:
                            cache_hit=False)
                 out[key] = QueryResult(df=df, ok=True, truncated=truncated,
                                        source=str(spec.get("source", "")), tier=tier,
-                                       fetched_at=datetime.now(), elapsed_ms=member_ms)
+                                       fetched_at=_account_clock(), elapsed_ms=member_ms)
                 _batch_member_cache_put(tier, capped_sql, scope, df, truncated)
             else:                                   # failer OR unsubmitted -> solo run() at its tier
                 solo = run(str(spec["sql"]), page=page, key=f"bfb:{key}", tier=tier,
@@ -1202,7 +1214,7 @@ def run_batch_mixed(specs: list[dict], *, page: str) -> dict:
                    sql_hash=_sql_hash16(spec["sql"]), cache_hit=False)
         out[key] = QueryResult(df=df, ok=True, truncated=truncated,
                                source=str(spec.get("source", "")), tier=tier,
-                               fetched_at=datetime.now(), elapsed_ms=member_ms)
+                               fetched_at=_account_clock(), elapsed_ms=member_ms)
         _batch_member_cache_put(tier, capped_sql, scope, df, truncated)
     # Wall row is a SUPERSET of its members — key it under the 'batch_wall:' prefix that every
     # fleet-seconds aggregator (mart_sql fleet/pain/fetch rollups) already excludes, so a mixed
@@ -1252,7 +1264,7 @@ def run(
                    query_id=_qid)
         return QueryResult(
             df=df, ok=True, truncated=truncated, source=source, tier=tier,
-            fetched_at=datetime.now(), cache_hit=cache_hit, elapsed_ms=elapsed, query_id=_qid,
+            fetched_at=_account_clock(), cache_hit=cache_hit, elapsed_ms=elapsed, query_id=_qid,
         )
     except Exception as exc:
         elapsed = (time.perf_counter() - started) * 1000
@@ -1266,7 +1278,7 @@ def run(
         return QueryResult(
             df=pd.DataFrame(), ok=False, error=format_snowflake_error(exc),
             error_kind=kind, source=source, tier=tier,
-            fetched_at=datetime.now(), elapsed_ms=elapsed,
+            fetched_at=_account_clock(), elapsed_ms=elapsed,
         )
 
 

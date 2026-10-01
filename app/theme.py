@@ -297,7 +297,10 @@ div[data-testid="stMetric"]::before { content:""; position:absolute; left:0; top
 .ow-chip-bad{color:var(--ow-bad);border-color:rgba(248,113,113,0.42);background:var(--ow-bad-dim);}
 .ow-chip-warn{color:var(--ow-warn);border-color:rgba(245,158,11,0.42);background:var(--ow-warn-dim);}
 .ow-scope-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:4px 0 8px;}
-div[data-testid="stVerticalBlockBorderWrapper"]:has(.ow-scope-active){
+/* R2-059: Streamlit >= 1.52 draws a bordered keyed container as ONE div (data-testid
+   stVerticalBlock + class st-key-<key>) that carries the border itself -- the old
+   border-wrapper element of older releases no longer exists, so the glow targets the keyed toolbar. */
+.st-key-ow_triage_toolbar:has(.ow-scope-active){
   border-color:rgba(96,165,250,0.38);
   box-shadow:0 0 0 1px rgba(96,165,250,0.20),var(--ow-shadow);}
 .st-key-ow_triage_toolbar{margin-bottom:8px;}

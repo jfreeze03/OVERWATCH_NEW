@@ -99,6 +99,23 @@ _SCORE_DRIVER_NAV = {
 _SCORE_HEALTH_WINDOW_DAYS = 1
 
 
+def _score_window_elapsed_days(now: object, window_days: int = _SCORE_HEALTH_WINDOW_DAYS) -> float:
+    """C8 de-cumulation divisor: the days the score's midnight-aligned window has covered at ``now``.
+
+    The window SQL (mart_sql.fact_query_window_summary -> scope_window_where) is
+    ``HOUR_TS >= DATEADD('day', -window_days, CURRENT_DATE())``. Both ends run on the ACCOUNT clock:
+    CURRENT_DATE() resolves in the account's default TIMEZONE (America/Chicago, the TIMEZONE STANDARD
+    in app/data/common.py) and HOUR_TS is Central wall-clock NTZ (the loader truncates the LTZ
+    START_TIME in a Central session). So pass ``account_now()``: the window opens ``window_days``
+    before Central midnight today and the divisor is (24h + Central hours since midnight) / 24 for the
+    1-day window. A UTC-anchored divisor (R2-016 / R2-049) read the same steady workload ~1.7x high
+    every Central evening and ~0.85x the rest of the day. Floor 1.0: elapsed is >= window_days by
+    construction; the clamp only defends a skewed clock, erring toward the smaller divisor."""
+    ts = pd.Timestamp(now)
+    win_start = ts.normalize() - timedelta(days=int(window_days))
+    return max((ts - win_start).total_seconds() / 86400.0, 1.0)
+
+
 def _board_panel(board: pd.DataFrame, panel: str) -> pd.DataFrame:
     return board[board["PANEL"] == panel].copy()
 
@@ -514,18 +531,11 @@ def render() -> None:
     # actually covered to get a per-DAY rate: stable across the day, and the same
     # basis the retro score sparkline uses (score_history feeds one day per row).
     # The failure percentages are ratios and were already time-invariant.
-    # The SQL window anchors on CURRENT_DATE(), which under SiS is the UTC server
-    # date (ALTER SESSION TIMEZONE is a no-op) — NOT account time. The de-cumulation
-    # divisor must share that clock: in the Chicago evening UTC has already rolled to
-    # the next date, so an account-time anchor sits ~a day off and the per-day rate is
-    # diluted (or inflated). Derive both anchor and elapsed from the same UTC midnight
-    # the SQL used.
-    _now_utc = pd.Timestamp.utcnow().tz_localize(None)
-    _win_start = _now_utc.normalize() - timedelta(days=_SCORE_HEALTH_WINDOW_DAYS)
-    # Floor at 1.0: the window opens a full day before UTC midnight of today, so
-    # elapsed is >= 1 by construction — the clamp only defends against a skewed clock,
-    # and it errs toward the smaller divisor (never dilutes a real penalty away).
-    _elapsed_days = max((_now_utc - _win_start).total_seconds() / 86400.0, 1.0)
+    # R2-016 / R2-049: the divisor shares the SQL's clock, which is the ACCOUNT clock
+    # (CURRENT_DATE() resolves in the account's America/Chicago default and HOUR_TS is
+    # Central wall-clock NTZ -- the TIMEZONE STANDARD in app/data/common.py), so it is
+    # anchored on account_now(), never the UTC process clock.
+    _elapsed_days = _score_window_elapsed_days(account_now())
     queued_minutes = (safe_float(_tr.get("QUEUED_SEC")) / 60.0 / _elapsed_days) if _tr is not None else 0.0
     spill_gb = (safe_float(_tr.get("SPILL_REMOTE_GB")) / _elapsed_days) if _tr is not None else 0.0
     # A-score-3: FACT_TASK_DAILY is DAY-grain, so this covers the previous + current
@@ -867,6 +877,16 @@ def render() -> None:
         _rw_bal.df if (_rw_bal is not None and _rw_bal.usable()) else None,
         contract_runway(_rw.df.iloc[0]) if _rw.usable() else None)
     contract_runway_bar(_rw_best)
+    if _rw_best is None and not _rw.ok:
+        # R2-085: no runway on either basis because the credits read FAILED (the billing balance was not
+        # usable either) -- say so; a configured account must not look unconfigured. A successful read
+        # with no contract configured (TOTAL <= 0) still renders nothing, as before.
+        if is_setup_absence(_rw.error_kind):
+            empty_state("needs_setup", "The contract runway needs OVERWATCH's SETTINGS and metering marts "
+                                       "installed.")
+        else:
+            empty_state("unavailable", "Contract runway unavailable — the contract read failed.",
+                        detail=_rw.error)
     st.caption("Whole-account contract commitment — not narrowed by the company filter."
                + (" " + contract_planner.runway_basis_note(_rw_best) if _rw_best else ""))
 
@@ -1082,8 +1102,27 @@ def render() -> None:
                 st.caption(f"Top driver: **{_d0['DIMENSION']}** — {format_usd(safe_float(_d0['VALUE_USD']))} "
                            f"({safe_float(_d0['VALUE_USD']) / _dtot * 100:.0f}% of warehouse compute "
                            f"spend, {_drv_thru} — serverless & AI shown separately below).")
+        # R2-075: branch on what was actually read. A FAILED exec-board read (a timeout, any non-absence
+        # failure) is 'unavailable' -- never "appears once the mart is installed" while the trend below is
+        # served by an installed mart. On a calendar window the drivers come from the bounded warehouse
+        # frame (above), so a failed read of THAT is unavailable too. "Installed" wording only for a true
+        # absence of the board (or a board read that answered nothing); "no rows" only after a successful read.
+        elif board_res is not None and not board_res.ok and not is_setup_absence(board_res.error_kind):
+            empty_state("unavailable", "The cost-driver ranking couldn't be read (the exec board read failed).",
+                        detail=board_res.error)
+        elif not using_mart and not trend_source.ok:
+            # The board did not serve (absent, empty, or not read for a calendar window) AND the warehouse-spend
+            # read failed, so no read produced an answer and "No cost-driver rows" would be a guess. An ABSENT
+            # board is still what a trailing-window ranking waits on (it comes only from the board), so that
+            # keeps the installed wording; otherwise (an empty board, or a calendar window whose bounded frame
+            # IS the ranking) the panel says the spend read failed.
+            if board_res is not None and is_setup_absence(board_res.error_kind):
+                empty_state("needs_setup", "Driver ranking appears once the exec board mart is installed.")
+            else:
+                empty_state("unavailable", "The cost-driver ranking couldn't be read (the warehouse spend read "
+                                           "failed).", detail=trend_source.error)
         elif not using_mart and not daily.empty:
-            st.caption("Driver ranking appears once the exec board mart is installed.")
+            empty_state("needs_setup", "Driver ranking appears once the exec board mart is installed.")
         else:
             empty_state("no_data_yet", "No cost-driver rows for this scope/window.")
 
@@ -1169,7 +1208,18 @@ def render() -> None:
                     "DELTA_USD": st.column_config.NumberColumn("Δ $", format="$%+.0f"),
                     "DELTA_PCT": st.column_config.NumberColumn("Δ %", format="%+.1f%%"),
                 })
-        result_caption(_mres)
+    elif not _mres.ok:
+        # R2-085: a failed read (both the mart and the FACT_WAREHOUSE_DAILY rollup) says so instead of
+        # leaving the section header over nothing; an ok-but-empty read says the fact has no rows yet.
+        if is_setup_absence(_mres.error_kind):
+            empty_state("needs_setup", "Monthly spend by warehouse appears once FACT_WAREHOUSE_DAILY is "
+                                       "installed.")
+        else:
+            empty_state("unavailable", "Monthly spend by warehouse unavailable.", detail=_mres.error)
+    else:
+        empty_state("no_data_yet", "No monthly warehouse spend for this scope yet — FACT_WAREHOUSE_DAILY "
+                                   "fills it in.")
+    result_caption(_mres)
 
     # ---- Spend trend ---------------------------------------------------------
     section_header("Spend trend")
