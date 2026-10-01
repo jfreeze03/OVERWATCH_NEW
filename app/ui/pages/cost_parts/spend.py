@@ -41,6 +41,8 @@ from app.logic.anomaly_explain import (
 from app.logic.cost_coverage import (
     attribution_gap,
     attribution_gap_trend,
+    coverage_reach_phrase,
+    coverage_stamps,
     drill_ready_spend_share,
     metered_grain_coverage,
     service_category,
@@ -85,6 +87,7 @@ from app.ui.components import (
     with_user_name_parts,
     with_user_names,
 )
+from app.ui.schema_gate import has_migration
 
 _PAGE = "Cost Intelligence"
 
@@ -119,7 +122,9 @@ def _spend_attr_recent_jobs(company: str, days: int, bounds: tuple | None = None
         # (ALL) to match the '(account)' basis of the other tiles; a small day×source
         # aggregate off FACT_AI_USAGE_DAILY, so it rides the same batch, not a serial
         # round-trip.
-        {"key": "coco", "sql": mart27_sql.ai_code_daily(days, "ALL", bounds=bounds),
+        # R1-016 (V167): stamped -> the coverage gate also trusts the loader's COVERAGE_FROM reach.
+        {"key": "coco", "sql": mart27_sql.ai_code_daily(days, "ALL", bounds=bounds,
+                                                        stamped=has_migration(167, _PAGE)),
          "source": "FACT_AI_USAGE_DAILY (Cortex Code Snowsight+CLI, daily loader)"},
         # v4.597 (Option C): the metered-grain coverage ratio that moved here from Decision
         # Studio ▸ Cost Truth. Attribution-toggle only (cost.py filters it into the on-demand
@@ -127,6 +132,31 @@ def _spend_attr_recent_jobs(company: str, days: int, bounds: tuple | None = None
         {"key": "grain", "sql": workbench_sql.cost_truth(days, company, bounds=bounds),
          "source": "FACT_WAREHOUSE_DAILY + FACT_OBJECT_COST_DAILY + MART_COST_ALLOCATION_DAILY (grain coverage)"},
     ]
+
+
+def _ai_fact_stamp():
+    """R1-016 (V167): the AI fact's loaded-from day (SOURCE_FRESHNESS_STATE.COVERAGE_FROM), read only when the
+    CoCo tile has no figure and V167's column exists -- a core-table point read, never on a populated tile.
+    None before V167, with no stamp yet, or on a failed read (the caller then claims nothing)."""
+    if not has_migration(167, _PAGE):
+        return None
+    res = run(mart27_sql.fact_coverage_from("FACT_AI_USAGE_DAILY"), page=_PAGE, key="coco_ai_reach",
+              tier="recent", source="SOURCE_FRESHNESS_STATE.COVERAGE_FROM (V167)", probe=True)
+    return coverage_stamps(res.df if res is not None and res.ok else None).get("FACT_AI_USAGE_DAILY")
+
+
+def _coco_verified_zero(coco_res, stamp, window_start) -> bool:
+    """True when the stamped CoCo read answered OK with no rows AND the AI fact's loaded-from stamp reaches the
+    window's first day: the loader covered the window and found no Cortex Code usage -- a measured $0.00,
+    never a fabricated one (a failed read, no stamp, or a stamp short of the window keeps the tile at '—')."""
+    return (coco_res is not None and bool(getattr(coco_res, "ok", False))
+            and getattr(getattr(coco_res, "df", None), "empty", False) and stamp is not None
+            and stamp <= window_start)
+
+
+def _ai_fact_reach() -> str:
+    """'holds N days, from <day>' for the AI fact (R1-016), or '' when there is no stamp to name."""
+    return coverage_reach_phrase(_ai_fact_stamp(), account_today())
 
 
 def _spend_attribution_capability(df, rate: float, ai_rate: float,
@@ -427,11 +457,23 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
     # differ" expander below and on Admin.
     coco_usd = None
     if coco_res is None:
-        coco_res = run(mart27_sql.ai_code_daily(days, "ALL", bounds=bounds), page=_PAGE,
+        coco_res = run(mart27_sql.ai_code_daily(days, "ALL", bounds=bounds,
+                                                stamped=has_migration(167, _PAGE)), page=_PAGE,
                        key=f"coco_spend_{days}", tier="hourly",
                        source="FACT_AI_USAGE_DAILY (Cortex Code Snowsight+CLI, daily loader)")
     if coco_res is not None and coco_res.usable() and "TOTAL_CREDITS" in coco_res.df.columns:
         coco_usd = credits_to_usd(float(coco_res.df["TOTAL_CREDITS"].map(safe_float).sum()), ai_rate)
+    _coco_reach = ""
+    if coco_usd is None:
+        # R1-016 (V167): an OK-but-empty stamped read whose loaded-from day reaches the window start is a
+        # VERIFIED zero (the loader covered the window and found no Cortex Code usage), not a missing fact --
+        # the gate's own start day (bounds[0], else today - days + 1). Otherwise the help names the reach.
+        _coco_stamp = _ai_fact_stamp()
+        _coco_start = bounds[0] if bounds is not None else account_today() - timedelta(days=int(days) - 1)
+        if _coco_verified_zero(coco_res, _coco_stamp, _coco_start):
+            coco_usd = 0.0
+        else:
+            _coco_reach = coverage_reach_phrase(_coco_stamp, account_today())
     # rec #8: the all-in invoice total (org rate card) for the same window — the
     # storage / transfer / marketplace / adjustments the metering credit-spend tile
     # structurally omits, so the headline reconciles to the invoice. Degrades quietly
@@ -486,7 +528,8 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                  "inside the Credit-spend and Total-credits tiles — post-V079 CoCo bills as "
                  "SNOWFLAKE_COCO_SNOWSIGHT within METERING_DAILY_HISTORY. Shown here from the "
                  "near-real-time loader for freshness; do NOT add it to the totals on the left. "
-                 "'—' until the fact loads."},
+                 "'—' while FACT_AI_USAGE_DAILY does not reach back to this window's start (or could "
+                 "not be read)." + (f" The AI fact {_coco_reach}." if _coco_reach else "")},
     ]
     hero_metric(_hero, _companions)
     st.caption("Account-wide by service (METERING_DAILY_HISTORY has no company grain; company split lives in Attribution)."
@@ -1364,7 +1407,8 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                 st.caption(md_dollars(
                     "MEASURED warehouse compute + query acceleration, attributed to the client "
                     "program and user; excludes idle, serverless, storage and AI. '(unknown)' = a "
-                    "session that reported no application or could not be joined to a session. A "
+                    "session that reported no application, or whose session could not be found (opened "
+                    "more than 30 days earlier, or a system/task session with no SESSIONS row). A "
                     "high line for one program is where to look for a misconfiguration. "
                     "The FACT_APP_COST_DAILY window fills in as the daily loader runs, so soon "
                     "after V077 is applied it may be shorter than the page window; the live "

@@ -602,9 +602,10 @@ def test_ai_users_tab_is_live_first_for_current_cortex_usage():
     body = cb.split("def _ai_users_tab", 1)[1].split("\ndef ", 1)[0]
     # the live scan is the PRIMARY read and precedes the fact fallback
     assert "cortex_sql.cortex_code_user_daily(company)" in body
-    assert "mart27_sql.ai_code_user_rollup(days, company, bounds=bounds)" in body
+    # (V167 / R1-016: the fact fallback also passes stamped=has_migration(167, _PAGE), the coverage stamp gate)
+    assert "mart27_sql.ai_code_user_rollup(days, company, bounds=bounds," in body
     assert (body.index("cortex_sql.cortex_code_user_daily(company)")
-            < body.index("mart27_sql.ai_code_user_rollup(days, company, bounds=bounds)"))
+            < body.index("mart27_sql.ai_code_user_rollup(days, company, bounds=bounds,"))
     # the live leg is read at tier="recent", not the 4h "metadata" fallback cache
     live_leg = body.split("cortex_sql.cortex_code_user_daily(company)", 1)[1].split("empty_state", 1)[0]
     assert 'tier="recent"' in live_leg

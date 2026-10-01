@@ -138,6 +138,12 @@ def test_r1_015_pattern_cost_trailing_window_stays_inside_the_v120_restamp():
     # a calendar preset keeps reading its exact [start, end) bounds (pre-existing, unchanged here)
     ytd = mart27_sql.pattern_cost(273, "ALL", bounds=(date(2026, 1, 1), date(2026, 10, 2)))
     assert "WHERE p.DAY >= '2026-01-01' AND p.DAY < '2026-10-02'" in ytd and "DATEADD" not in ytd
+    # V167 (PATTERN-RESTAMP): only a coverage_from stamp (passed behind has_migration(167)) lifts the cap, and
+    # only as far as the atomic re-stamp reached -- a stamp past a year reads the full 365d at its 61-run floor
+    from app.logic.formulas import account_today
+    assert mart27_sql.pattern_cost(365, "ALL", coverage_from=None) == mart27_sql.pattern_cost(365, "ALL")
+    restamped = mart27_sql.pattern_cost(365, "ALL", coverage_from=account_today() - timedelta(days=366))
+    assert "WHERE p.DAY >= DATEADD('day', -365, CURRENT_DATE())" in restamped and "SUM(p.RUNS) >= 61" in restamped
 
 
 def _pressure_db(hour_rows: list[tuple[str, str, str, float, float]]) -> sqlite3.Connection:

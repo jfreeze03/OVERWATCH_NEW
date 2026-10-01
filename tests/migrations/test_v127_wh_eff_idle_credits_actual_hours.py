@@ -111,13 +111,14 @@ def test_v127_is_the_latest_full_loader_definition() -> None:
     defs = sorted(p for p in _MIG_DIR.glob("V[0-9]*.sql")
                   if "CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27"
                   in p.read_text(encoding="utf-8"))
-    # V159 (wave-2b rework, D5 loader compile diet) gates the HOURLY day-grain arms [1] / [6] / [6b] to
-    # every 4th Central hour (always when d > 2), so it is now the latest full-loader definition; it was
-    # re-derived from V152 (Next-Fifty #10c: the MART_TASK_NODE_DAILY freshness srcmap row), which was
-    # re-derived from V146 (the ai_functions repoint onto the canonical CORTEX_AI_FUNCTIONS_USAGE_HISTORY),
-    # from V142 (A4 single-scan), and V127 the baseline before that. The wh_eff arm V127 introduced is
-    # carried byte-identical (only wrapped by the gate).
-    assert defs[-1].name == "V159__loader_compile_diet.sql"
+    # V167 (R2-015 / R2-014 / R2-052 / R1-016) is now the latest full-loader definition. It was re-derived
+    # from V159 (wave-2b rework, D5 loader compile diet: the HOURLY day-grain arms [1] / [6] / [6b] run every
+    # 4th Central hour, always when d > 2), which was re-derived from V152 (Next-Fifty #10c: the
+    # MART_TASK_NODE_DAILY freshness srcmap row), from V146 (the ai_functions repoint onto the canonical
+    # CORTEX_AI_FUNCTIONS_USAGE_HISTORY), from V142 (A4 single-scan), and V127 the baseline before that. The
+    # wh_eff arm V127 introduced is carried byte-identical except V159's gate and V167's span-source pad
+    # (R2-015: the qh source reads one more day plus an END_TIME floor; IDLE_CREDITS itself is untouched).
+    assert defs[-1].name == "V167__mart_loader_edges_ai_coverage_pattern_reload.sql"
     latest = _proc_block(defs[-1].read_text(encoding="utf-8"))
     arm = latest[latest.index("-- [1] warehouse efficiency"):latest.index("loaded := loaded || 'wh_eff ';")]
     v127_arm = _proc_block(_V127)

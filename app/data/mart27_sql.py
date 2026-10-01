@@ -9,10 +9,11 @@ log before it pages a user.
 
 from __future__ import annotations
 
+import re
 from datetime import date, timedelta
 
 from app import companies
-from app.config import mart_object
+from app.config import MAX_MART_WINDOW_DAYS, core_object, mart_object
 from app.core.sqlsafe import contains_filter, sql_literal
 from app.data.common import (
     ai_service_predicate,
@@ -26,6 +27,7 @@ from app.logic.anomaly_explain import (
     UNCLASSIFIED_USERS_LABEL,
     outside_company_label,
 )
+from app.logic.cost_coverage import pattern_cost_cap
 
 
 def _company_arm(company: str, column: str = "COMPANY") -> str:
@@ -313,15 +315,24 @@ WHERE {and_where(*parts)}
 """
 
 
-def ai_costs_by_model(days: int, *, bounds: tuple | None = None) -> str:
+def ai_costs_by_model(days: int, *, bounds: tuple | None = None, stamped: bool = False) -> str:
     """cortex_sql model/source cost contract from FACT_AI_USAGE_DAILY —
     Code + Functions in one read, loaded daily. Qualified (a.) — TOKENS and
     CREDITS output aliases shadowed the columns in the per-1M expression
-    (same class as the compile-heavy live failure)."""
+    (same class as the compile-heavy live failure).
+
+    ``stamped`` (R1-016, V167; pages pass ``has_migration(167, page)``): the coverage gate's first day
+    becomes the EARLIER of the fact's MIN(DAY) and the loader's COVERAGE_FROM stamp, so a window that
+    starts before the account's first AI use but inside the loaded reach is answered, not blanked.
+    False renders today's SQL byte-for-byte."""
     days = bounded_days(days, 400)
     win = scope_window_where("a.DAY", days, bounds=bounds)
     cov_bound = (f"'{bounds[0].isoformat()}'" if bounds is not None
                  else f"DATEADD('day', -{days} + 1, CURRENT_DATE())")
+    first_day = (f"(SELECT MIN(a2.DAY) FROM {mart_object('FACT_AI_USAGE_DAILY')} a2)" if not stamped else
+                 f"(SELECT {_LOADED_FROM}\n"
+                 f"       FROM (SELECT MIN(a2.DAY) AS FIRST_DAY FROM {mart_object('FACT_AI_USAGE_DAILY')} a2) f\n"
+                 f"       CROSS JOIN ({_ai_stamp_select('s2')}) st)")
     return f"""
 SELECT
     a.SOURCE AS FUNCTION_NAME,
@@ -338,7 +349,7 @@ WHERE {win}
   -- window, so a young/backfilling fact falls back to the live Functions reader (honestly
   -- labeled ' - Functions only' + the 90d cap) instead of answering a 365d question with three
   -- weeks of credits and silently UNDER-REPORTING account AI spend under a full-window label.
-  AND (SELECT MIN(a2.DAY) FROM {mart_object("FACT_AI_USAGE_DAILY")} a2)
+  AND {first_day}
       <= {cov_bound}
 GROUP BY a.SOURCE, a.MODEL_NAME
 ORDER BY CREDITS DESC
@@ -369,14 +380,61 @@ LIMIT 200
 # taken over the SAME source filter we serve: the Functions arm's history
 # says nothing about how far back the code views were loaded.
 _AI_CODE_SOURCE_ARM = "SOURCE <> 'Functions'"
+# R1-016 (V167): FACT_AI_USAGE_DAILY holds only days that HAD usage, so MIN(DAY) is the account's first AI use,
+# not how far back the loader reached -- a 180d / 365d / Current-year window that starts before first use was
+# blanked although every credit is loaded. V167's DAILY freshness MERGE records the loader's reach in
+# SOURCE_FRESHNESS_STATE.COVERAGE_FROM (the earliest whole day a run that loaded BOTH AI arms covered). The
+# gate's first day is the EARLIER of the two, NULL-safe both ways: no stamp keeps MIN(DAY) (today's gate), no
+# fact rows keep the stamp (a loaded, empty window is answered as zero rows -- the loader covered it).
+_LOADED_FROM = "LEAST(COALESCE(st.CF, f.FIRST_DAY), COALESCE(f.FIRST_DAY, st.CF))"
 
 
-def _ai_code_coverage_cte() -> str:
-    return f"""cov AS (
+def _ai_stamp_select(alias: str = "s") -> str:
+    return (f"SELECT MAX({alias}.COVERAGE_FROM) AS CF FROM {core_object('SOURCE_FRESHNESS_STATE')} {alias} "
+            f"WHERE {alias}.SOURCE_NAME = 'FACT_AI_USAGE_DAILY'")
+
+
+def _ai_code_coverage_cte(stamped: bool = False) -> str:
+    if not stamped:
+        return f"""cov AS (
     SELECT MIN(DAY) AS FIRST_DAY
     FROM {mart_object("FACT_AI_USAGE_DAILY")}
     WHERE {_AI_CODE_SOURCE_ARM}
 )"""
+    return f"""cov AS (
+    SELECT {_LOADED_FROM} AS FIRST_DAY
+    FROM (
+        SELECT MIN(DAY) AS FIRST_DAY
+        FROM {mart_object("FACT_AI_USAGE_DAILY")}
+        WHERE {_AI_CODE_SOURCE_ARM}
+    ) f
+    CROSS JOIN ({_ai_stamp_select()}) st
+)"""
+
+
+_COVERAGE_SOURCE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,99}$")
+
+
+def fact_coverage_from(sources: str | tuple[str, ...] = ("FACT_AI_USAGE_DAILY", "MART_PATTERN_COST_DAILY")) -> str:
+    """The loader-written loaded-from watermark per source (SOURCE_FRESHNESS_STATE.COVERAGE_FROM, V167).
+
+    FACT_AI_USAGE_DAILY: the earliest whole day a DAILY run that loaded both AI arms covered (R1-016);
+    MART_PATTERN_COST_DAILY: the deepest day an atomic SP_LOAD_PATTERN_COST reload replaced (PATTERN-RESTAMP).
+    The column exists only once V167 is applied: callers read it behind ``has_migration(167, page)`` (the Admin
+    canary skips it until then, canary.MIGRATION_GATED). A core-table point read, no ACCOUNT_USAGE."""
+    names = (sources,) if isinstance(sources, str) else tuple(sources)
+    if not names:
+        raise ValueError("fact_coverage_from needs at least one source name")
+    for name in names:
+        if not _COVERAGE_SOURCE_RE.match(str(name)):
+            raise ValueError(f"not a SOURCE_FRESHNESS_STATE source name: {name!r}")
+    in_list = ", ".join(sql_literal(n) for n in names)
+    return f"""
+SELECT SOURCE_NAME, COVERAGE_FROM
+FROM {core_object("SOURCE_FRESHNESS_STATE")}
+WHERE SOURCE_NAME IN ({in_list})
+ORDER BY SOURCE_NAME
+"""
 
 
 def _ai_code_window(days: int, bounds: tuple | None = None) -> str:
@@ -393,7 +451,8 @@ def _ai_code_window(days: int, bounds: tuple | None = None) -> str:
             f"<= DATEADD('day', -{days} + 1, CURRENT_DATE())")
 
 
-def ai_code_user_rollup(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
+def ai_code_user_rollup(days: int, company: str = "ALL", *, bounds: tuple | None = None,
+                        stamped: bool = False) -> str:
     """cortex_sql.cortex_code_user_rollup contract from FACT_AI_USAGE_DAILY.
 
     Company scope is applied ONCE per grouped user (a ~50-row set), not per
@@ -404,13 +463,15 @@ def ai_code_user_rollup(days: int, company: str = "ALL", *, bounds: tuple | None
     so they ride a post-aggregation join to the small USERS dimension. The
     join is pre-collapsed to one row per NAME: a recreated login yields
     several USERS rows, and a fan-out here would DOUBLE a user's credits.
+
+    ``stamped``: the R1-016 coverage gate (see _LOADED_FROM); False renders today's SQL byte-for-byte.
     """
     days = bounded_days(days, 400)
     scope = ""
     if str(company or "ALL").upper() != "ALL":
         scope = f"WHERE {companies.COMPANY_FOR_USER_FN}(b.USER_NAME) = {sql_literal(company)}"
     return f"""
-WITH {_ai_code_coverage_cte()},
+WITH {_ai_code_coverage_cte(stamped)},
 by_user AS (
     SELECT
         USER_NAME,
@@ -454,7 +515,7 @@ LIMIT 500
 """
 
 
-def ai_code_user_daily(company: str = "ALL") -> str:
+def ai_code_user_daily(company: str = "ALL", *, stamped: bool = False) -> str:
     """cortex_sql.cortex_code_user_daily contract from FACT_AI_USAGE_DAILY.
 
     The user-day-source frame behind the Security AI-guardrails tab (user_behavior).
@@ -471,12 +532,14 @@ def ai_code_user_daily(company: str = "ALL") -> str:
     scope is applied ONCE per grouped user, not per fact row. Emits the live builder's 11
     columns in the same order (USER_NAME, EMAIL, FIRST_NAME, LAST_NAME, SOURCE, USAGE_DATE,
     REQUESTS, CREDITS, TOKENS, FIRST_TS, LAST_TS).
+
+    ``stamped``: the R1-016 coverage gate (see _LOADED_FROM); False renders today's SQL byte-for-byte.
     """
     scope = ""
     if str(company or "ALL").upper() != "ALL":
         scope = f"WHERE {companies.COMPANY_FOR_USER_FN}(b.USER_NAME) = {sql_literal(company)}"
     return f"""
-WITH {_ai_code_coverage_cte()},
+WITH {_ai_code_coverage_cte(stamped)},
 by_day AS (
     SELECT
         USER_NAME,
@@ -518,7 +581,8 @@ LIMIT 200000
 """
 
 
-def ai_code_daily(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
+def ai_code_daily(days: int, company: str = "ALL", *, bounds: tuple | None = None,
+                  stamped: bool = False) -> str:
     """cortex_sql.cortex_code_daily contract from FACT_AI_USAGE_DAILY.
 
     ACTIVE_USERS counts distinct USER_NAME where the live builder counts
@@ -529,6 +593,8 @@ def ai_code_daily(days: int, company: str = "ALL", *, bounds: tuple | None = Non
     Company scope evaluates COMPANY_FOR_USER once per DISTINCT user rather
     than once per fact row (the live builder's per-raw-row UDF call is the
     P9 finding); the day/source grouping then needs no UDF at all.
+
+    ``stamped``: the R1-016 coverage gate (see _LOADED_FROM); False renders today's SQL byte-for-byte.
     """
     days = bounded_days(days, 400)
     scope = ""
@@ -544,7 +610,7 @@ def ai_code_daily(days: int, company: str = "ALL", *, bounds: tuple | None = Non
           WHERE {companies.COMPANY_FOR_USER_FN}(USER_NAME) = {sql_literal(company)}
       )"""
     return f"""
-WITH {_ai_code_coverage_cte()}
+WITH {_ai_code_coverage_cte(stamped)}
 SELECT
     DAY,
     SOURCE,
@@ -704,26 +770,36 @@ ORDER BY 1, 2"""
 # for FACT_RETENTION_DAYS_DAILY and V047's first fill reaches back to about mid-April, so rows older
 # than that re-stamp horizon may still carry the inflated RUNS: a wider trailing read would understate
 # $/run for exactly the long-running patterns V120 fixed, and pass the run floor on inflated counts.
-# The re-stamp CALL (SP_LOAD_PATTERN_COST(365)) is queued for a later migration; raise this only after
-# it has run. The Unit costs caption and page note name this window.
+# V167 (PATTERN-RESTAMP) makes the loader an atomic window replace that stamps its reach in
+# SOURCE_FRESHNESS_STATE.COVERAGE_FROM; the owner-run CALL SP_LOAD_PATTERN_COST(364) re-stamps the year. This
+# stays the cap -- and the whole pre-apply path -- until a read window's first day is on or after that stamp
+# (cost_coverage.pattern_cost_cap). The Unit costs caption and page note name the window actually read.
 PATTERN_COST_MAX_DAYS = 90
 # The first day V120's re-stamp reached: CALL SP_LOAD_PATTERN_COST(90) on 2026-09-02 re-merged
 # START_TIME >= DATEADD('day', -90, CURRENT_DATE()), i.e. DAY >= 2026-06-04. A calendar preset keeps
 # its exact bounds (the SQL is unchanged), so a calendar window that starts before this day (Current
-# year) still sums un-restamped rows; the Unit costs caption says so. Retire it with the clamp above
-# once SP_LOAD_PATTERN_COST(365) has run.
+# year) still sums un-restamped rows; the Unit costs caption says so. After V167 a deeper COVERAGE_FROM
+# stamp moves that horizon back (cost_coverage.pattern_clean_from); retire both once every deployment
+# carries the stamp.
 PATTERN_COST_RESTAMP_FROM = date(2026, 6, 4)
 
 
-def pattern_cost(days: int = 30, company: str = "ALL", limit: int = 25, *, bounds: tuple | None = None) -> str:
+
+def pattern_cost(days: int = 30, company: str = "ALL", limit: int = 25, *, bounds: tuple | None = None,
+                 coverage_from: date | None = None) -> str:
     """Measured $ per repeated statement pattern (V036) — the silent-spend
     table. Attribution credits are MEASURED compute; the sample text rides
     in from the family mart by hash.
 
     A TRAILING window clamps to PATTERN_COST_MAX_DAYS (90: see the constant —
     older rows predate V120's RUNS re-stamp). A calendar preset reads its exact
-    [start, end) bounds (scope_window_where ignores ``d`` there), as before."""
-    d = bounded_days(days, PATTERN_COST_MAX_DAYS)
+    [start, end) bounds (scope_window_where ignores ``d`` there), as before.
+    ``coverage_from`` (V167's MART_PATTERN_COST_DAILY stamp, passed only behind has_migration(167)) lifts
+    the trailing clamp to cost_coverage.pattern_cost_cap (never past the stamp); None renders today's SQL
+    byte-for-byte."""
+    d = (bounded_days(days, PATTERN_COST_MAX_DAYS) if coverage_from is None
+         else bounded_days(days, pattern_cost_cap(coverage_from, floor=PATTERN_COST_MAX_DAYS,
+                                                  ceiling=MAX_MART_WINDOW_DAYS)))
     # bounds -> scale the run-rate floor to the calendar-month span, not the trailing d
     span = (bounds[1] - bounds[0]).days if bounds is not None else d
     min_runs = max(2, (5 * span + 29) // 30)

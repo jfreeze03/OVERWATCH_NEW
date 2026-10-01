@@ -309,18 +309,28 @@ def test_v159_gate_selects_exactly_the_intended_central_hours():
 
 
 def test_v159_reconcile_and_backfill_always_run_the_gated_arms():
-    """The :d > 2 escape is mandatory: SP_NIGHTLY_RECONCILE DELETEs D-3..today of two of the gated marts and
-    re-loads with ('HOURLY', 3); the hourly task passes 2. Read every caller's real argument and push it
-    through the proc's own DAYS_BACK clamp and the real gate condition."""
+    """The :d > 2 escape is mandatory: SP_NIGHTLY_RECONCILE re-loads D-3..today of two of the gated marts with
+    ('HOURLY', 3) -- the only load that re-covers D-3 -- and the hourly task passes 2. Since V167 (R2-018) the
+    reconcile no longer DELETEs those two marts first: it SWEEPS their D-3..today rows the reload did not
+    re-stamp, AFTER the CALL and only when the arm's own :loaded token is in the CALL's verdict (a failed arm
+    keeps its rows instead of leaving a hole). Read every caller's real argument and push it through the
+    proc's own DAYS_BACK clamp and the real gate condition."""
     from tests.test_alert_rule_consistency import _latest_proc_bodies
     pred = _sql_predicate(next(iter(_gates().values())))
     clamp = _clamp_d()
     recon = _latest_proc_bodies()["SP_NIGHTLY_RECONCILE"]
+    marts = _latest_proc_bodies()["SP_LOAD_MARTS_V27"]
     recon_call = recon.index("CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 3);")
-    for table in ("MART_WAREHOUSE_EFFICIENCY_DAILY", "MART_TASK_GRAPH_DAILY"):
-        delete = re.search(rf"DELETE FROM DBA_MAINT_DB\.OVERWATCH\.{table}\n\s+WHERE DAY >= DATEADD\('day', -3, "
-                           r"CURRENT_DATE\(\)\);", recon)
-        assert delete and delete.start() < recon_call, table
+    diag_call = recon.index("CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_OPS_DIAG(3);")
+    for table, token in (("MART_WAREHOUSE_EFFICIENCY_DAILY", "wh_eff"), ("MART_TASK_GRAPH_DAILY", "graphs")):
+        deletes = list(re.finditer(rf"DELETE FROM DBA_MAINT_DB\.OVERWATCH\.{table}\n(.*?);", recon, re.S))
+        assert len(deletes) == 1, table
+        sweep = deletes[0]
+        assert recon_call < sweep.start() < diag_call, table       # rv still holds the marts verdict there
+        assert "WHERE DAY >= DATEADD('day', -3, CURRENT_DATE())" in sweep.group(1), table
+        assert "AND LOAD_TS < :recon_start" in sweep.group(1), table
+        assert f"AND ARRAY_CONTAINS('{token}'::VARIANT, SPLIT(:rv, ' '))" in sweep.group(1), table
+        assert f"loaded := loaded || '{token} ';" in marts, token
     task = _one(r"CREATE OR REPLACE TASK DBA_MAINT_DB\.OVERWATCH\.TASK_LOAD_MARTS_V27_HOURLY\n.*?"
                 r"SP_LOAD_MARTS_V27\('HOURLY', (\d+)\);", _read("snowflake/migrations/V041__loader_efficiency.sql"))
     later = [p.name for p in _MIGDIR.glob("V*.sql")

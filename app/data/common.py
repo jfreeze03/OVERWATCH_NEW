@@ -108,8 +108,9 @@ def account_today_sql() -> str:
 # ACCOUNT). The deployed Streamlit-in-Snowflake app CANNOT ALTER SESSION (an
 # owner's-rights no-op), so that account default is the ONLY lever keeping the
 # app's clock Central -- every session-tz read (CURRENT_DATE()/CURRENT_TIMESTAMP()/
-# a bare ts::DATE, and any raw timestamp rendered to a user) resolves in Central
-# ONLY because the account default is Central. Rules for NEW builders:
+# a bare ts::DATE of a TIMESTAMP_LTZ or _NTZ value, and any raw timestamp rendered to
+# a user) resolves in Central ONLY because the account default is Central. A
+# TIMESTAMP_TZ value is NOT session-resolved (the third rule). Rules for NEW builders:
 #   * A displayed timestamp or a day/month BOUNDARY that must be account-correct
 #     REGARDLESS of the session zone MUST pin Central explicitly -- use
 #     account_today_sql() / account_month_start_sql(), or wrap the column in
@@ -118,6 +119,12 @@ def account_today_sql() -> str:
 #   * scope_window_where()/resolve_effective_window() intentionally use session-tz
 #     CURRENT_DATE() for rolling trailing windows (the convention above); that is
 #     correct while the account is Central and is the accepted pattern.
+#   * A TIMESTAMP_TZ column (the Cortex Code views' USAGE_TIME) carries its OWN offset, and
+#     ::DATE, ::TIMESTAMP_NTZ, HOUR() and DAYOFWEEK read THAT offset, never the session
+#     zone -- the session-zone rule above does not apply to it. Always convert first:
+#     CONVERT_TIMEZONE('America/Chicago', ts)::DATE (R2-052; V167 re-keyed the fact the same
+#     way). tests/test_timezone_standard.py rejects a bare USAGE_TIME::DATE /
+#     USAGE_TIME)::TIMESTAMP_NTZ in app/data and in the latest SP_LOAD_MARTS_V27.
 # tests/test_timezone_standard.py locks ACCOUNT_TIMEZONE and the Central-pinned
 # helpers so a future edit can't silently re-anchor the app's clock.
 # ---------------------------------------------------------------------------
