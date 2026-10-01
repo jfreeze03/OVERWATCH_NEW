@@ -12,6 +12,7 @@ from app.config import SAVINGS_ACTIVE_MONTHS
 from app.core.errors import safe_page
 from app.core.identity import viewer_name
 from app.core.query import run, run_batch
+from app.core.result import is_setup_absence
 from app.core.state import can_open, filters, request_navigation
 from app.data import mart_sql
 from app.logic import case_file, contract_planner
@@ -528,8 +529,10 @@ def render() -> None:
         # rec23/house-rule-8: green means VERIFIED CLEAN, never "nothing loaded".
         if events.ok:
             empty_state("clean", "No open alerts.")
-        else:
+        elif is_setup_absence(events.error_kind):
             empty_state("needs_setup", "Alerting not installed yet.")
+        else:   # c09 R1-194: a timeout or other failure is a failed read, not "not installed"
+            empty_state("unavailable", "Couldn't read open alerts right now.", detail=events.error)
 
     section_header("Asks", "", "bolt")
     brief_action_lines: list[str] = []
@@ -580,8 +583,10 @@ def render() -> None:
     else:
         if actions.ok:
             empty_state("clean", "Action queue is empty.")
-        else:
+        elif is_setup_absence(actions.error_kind):
             empty_state("needs_setup", "Action queue not installed yet.")
+        else:   # c09 R1-194
+            empty_state("unavailable", "Couldn't read the action queue right now.", detail=actions.error)
 
     # Watch automation (owner ask 2026-08-17): the proactive half of "watch". If
     # any watched entity moved (cost spike/drop or health drop), the badge leads

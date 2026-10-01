@@ -665,8 +665,6 @@ _NON_PROBE_ALLOWLIST: dict[tuple[str, str], tuple[str, str]] = {
     ("app/ui/pages/cost_parts/compare.py", "pat"): ("_compare_tab", "_get"),
     ("app/ui/pages/cost_parts/optimize.py", "res"): ("_savings_tab", "run"),
     ("app/ui/pages/operations.py", "res"): ("_pipeline_data_checks", "run"),
-    ("app/ui/pages/brief.py", "events"): ("render", "or-run"),
-    ("app/ui/pages/brief.py", "actions"): ("render", "or-run"),
     ("app/ui/decision_studio.py", "result"): ("_products", "run"),
 }
 
