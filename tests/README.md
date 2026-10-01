@@ -20,7 +20,9 @@ Living gates (run + evolve with every change):
   profiler (`python tests/usage_sim.py` for the text report)
 - conftest.py — session-scoped autouse guard: no test ever opens a real
   Snowflake session (refuses app.core.session._connect; SNOWFLAKE_HOME points
-  at an empty temp folder)
+  at an empty temp folder); it also back-ports the streamlit 1.55 AppTest
+  ButtonGroup fix onto the 1.52.2 floor so the shaped AppTests run on both CI
+  legs (locked by test_floor_apptest_shim; delete it once the floor reaches 1.55)
 
 Phase 4 — locks that DERIVE their targets instead of listing them, so a builder
 or module added tomorrow is covered without anyone remembering to add it:

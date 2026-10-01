@@ -809,10 +809,11 @@ def test_optimize_wiring_source():
 
 
 def test_storage_and_waste_publishes_the_handoff_source():
-    """#35 (shaped twin: tests/test_storage_waste_lever_shaped.py): Storage & waste is the ONLY writer of the
-    handoff, only inside the scan toggle, once per outcome (clean / confirmed-or-confirm-failed / shortlist
-    failed); a booking leaves the object out in the same run; the booked-objects read is gated and never clears
-    the handoff."""
+    """#35 (shaped twin: tests/test_prc_c2_shaped.py's "#35: confirmed unread maintenance joins Addressable
+    $/mo" section; the storage leg's tests/test_storage_waste_lever_shaped.py also renders this handoff beside
+    its own): Storage & waste is the ONLY writer of the handoff, only inside the scan toggle, once per outcome
+    (clean / confirmed-or-confirm-failed / shortlist failed); a booking leaves the object out in the same run;
+    the booked-objects read is gated and never clears the handoff."""
     opt = read("app/ui/pages/cost_parts/optimize.py")
     branch = _storage_branch()
     write = "st.session_state[UNREAD_HANDOFF_KEY] = unread_handoff("
