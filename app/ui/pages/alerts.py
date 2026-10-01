@@ -23,7 +23,7 @@ from app.core.result import QueryResult, is_setup_absence
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters, navigation_context, request_navigation
-from app.data import alert_evidence_sql, mart_sql, ops_sql, recheck_sql, security_sql
+from app.data import alert_evidence_sql, mart_sql, ops_sql, recheck_sql
 from app.logic import email_path, remediation, stmt_timeout, tuning
 from app.logic.ai_prompts import alert_evidence_prompt
 from app.logic.alert_evidence import plan_for_alert
@@ -619,6 +619,23 @@ def _plan_notice(plan: dict | None) -> None:
         st.warning(plan["message"])
     elif plan["level"] == "info":
         st.info(plan["message"])
+
+
+def _auto_suspend_in_force(show_df: pd.DataFrame | None, warehouse: str) -> tuple[bool, float | None]:
+    """(known, seconds) for ``warehouse``'s AUTO_SUSPEND from a SHOW WAREHOUSES frame; (False, None) when the
+    read failed (None), the exact-name row is absent (LIKE's '_' wildcard can return near-name rows) or the
+    value is unreadable/NULL -- the tighten guard then generates no ALTER. Pure; never raises."""
+    if show_df is None or show_df.empty:
+        return False, None
+    df = show_df.copy()
+    df.columns = [str(c).lower() for c in df.columns]
+    if "name" not in df.columns or "auto_suspend" not in df.columns:
+        return False, None
+    match = df[df["name"].astype(str).str.strip().str.upper() == str(warehouse or "").strip().upper()]
+    if match.empty:
+        return False, None
+    value = pd.to_numeric(match.iloc[0].get("auto_suspend"), errors="coerce")
+    return (True, float(value)) if pd.notna(value) else (False, None)
 
 
 # The cap the drawer's 'Statement timeout 1h' lever sets (its impact read covers stmt_timeout.IMPACT_DAYS).
@@ -1367,23 +1384,19 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                             if fix_kind.startswith("Tighten"):
                                 # r34: read the CURRENT AUTO_SUSPEND before generating a tighten — a
                                 # blind SET=60 RAISES an already-30s timer (the A3 hazard), the
-                                # unguarded twin of the Remediation tab guard (optimize.py). Reuses
-                                # the cached 'jump_wh' SHOW WAREHOUSES read (no extra query).
-                                _cl_known, _cl_cur = False, None
-                                _cl_whs = run(security_sql.show_warehouses_sql(), page=_PAGE,
-                                              key="jump_wh", tier="metadata",
-                                              source="SHOW WAREHOUSES", max_rows=0)
-                                if _cl_whs.ok and not _cl_whs.empty:
-                                    _clw = _cl_whs.df.copy()
-                                    _clw.columns = [str(c).lower() for c in _clw.columns]
-                                    if "name" in _clw.columns:
-                                        _clm = _clw[_clw["name"].astype(str).str.strip().str.upper()
-                                                    == str(wh_inline).strip().upper()]
-                                        if not _clm.empty and "auto_suspend" in _clw.columns:
-                                            _clv = pd.to_numeric(_clm.iloc[0].get("auto_suspend"),
-                                                                 errors="coerce")
-                                            if pd.notna(_clv):
-                                                _cl_known, _cl_cur = True, float(_clv)
+                                # unguarded twin of the Remediation tab guard (optimize.py). Review
+                                # R1-170: this read gates an EXECUTABLE ALTER + a ledger booking, so it
+                                # is ONE warehouse's SHOW on the 30 s live tier (like the timeout lever,
+                                # review C13), never the shared 4 h 'jump_wh' metadata entry, which can
+                                # hold a timer a DBA tightened in a worksheet since and so loosen it. A
+                                # failed read leaves the setting unknown (no ALTER), never the cache.
+                                _cl_sql = recheck_sql.warehouse_settings_sql(wh_inline)
+                                _cl_whs = (run(_cl_sql, page=_PAGE, key=f"clf_suspend_{event_id[:8]}",
+                                               tier="live", source=f"SHOW WAREHOUSES LIKE {wh_inline}",
+                                               max_rows=0, probe=True)
+                                           if _cl_sql else None)
+                                _cl_known, _cl_cur = _auto_suspend_in_force(
+                                    _cl_whs.df if _cl_whs is not None and _cl_whs.ok else None, wh_inline)
                                 _cl_plan = remediation.tighten_suspend_plan(wh_inline, _cl_cur, _cl_known)
                                 stmt_cl = _cl_plan["stmt"]
                                 _plan_notice(_cl_plan)
