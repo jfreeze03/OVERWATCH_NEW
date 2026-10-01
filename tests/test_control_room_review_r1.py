@@ -144,7 +144,10 @@ def test_the_registries_can_read_a_window_anchored_on_onset():
         change_impact_sql.change_registry(30, onset="x'; DROP TABLE t; --")
     # without onset the builders are unchanged (newest first from now)
     assert "ORDER BY CHANGE_SEEN_AT DESC" in change_impact_sql.change_registry(30, "ALFA")
-    assert "TOTAL_CHANGES" not in change_impact_sql.warehouse_change_registry(90)
+    # v4.606 integration: R1-065 now carries the untruncated TOTAL_CHANGES (and the verdict totals) in the default
+    # read too, for the Operations tiles; what onset mode adds is the window anchored on onset, nearest first.
+    _default = change_impact_sql.warehouse_change_registry(90)
+    assert "ORDER BY ABS(DATEDIFF('second'" not in _default and "TOTAL_REGRESSED" in _default
 
 
 class _Rec:

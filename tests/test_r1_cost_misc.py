@@ -284,7 +284,10 @@ def _serverless(monkeypatch, sls, days: int = 30):
     fake, seen = _patch(
         monkeypatch, uc, {f"sls_costs_ALL_{days}__": sls},
         run_mart_first=lambda *_a, **_k: _ok(pd.DataFrame({"X": [1]})),
-        guard=lambda *_a, **_k: True,
+        # v4.606 integration: an ok serverless read now goes through guard() (R1-062), so the fake mirrors the
+        # real gate -- an empty ok read records its kind, a failed read is not rendered here.
+        guard=lambda res, msg, setup_hint="", kind="no_data_yet": (
+            res.ok and (not res.empty or bool(uc.empty_state(kind, msg)))),
         graphs=SimpleNamespace(
             enrich_graph_daily=lambda _df, _rate: daily,
             pipeline_summary=lambda _d: pd.DataFrame(columns=["PIPELINE", "USD", "SUCCESS_PCT"])))

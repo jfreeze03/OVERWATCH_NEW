@@ -261,6 +261,8 @@ class _MaxBy:
 def _recon_db(rows: list[tuple[str, str, str]]) -> sqlite3.Connection:
     con = sqlite3.connect(":memory:")
     con.create_aggregate("MAX_BY", 2, _MaxBy)
+    # v4.606 integration: R1-137 wraps the recurrence scan with SUM(IFF(...)) OVER () totals.
+    con.create_function("IFF", 3, lambda c, a, b: a if c else b)
     con.create_function("DATEDIFF", 3, lambda u, a, b: (date.fromisoformat(str(b)[:10])
                                                         - date.fromisoformat(str(a)[:10])).days)
     con.execute("CREATE TABLE RECON_MTRC_ERROR (MTRC TEXT, FRQCY TEXT, VALUE_TYPE TEXT, "
@@ -371,7 +373,9 @@ def test_r1_062_serverless_task_daily_keeps_newest_days_and_flags_truncation():
     assert "ORDER BY DAY DESC, SERVERLESS_CREDITS DESC" in sql
     assert _with_row_cap(sql, DEFAULT_MAX_ROWS) != sql     # the cap+1 canary arms -> truncated can fire
     caller = _read("app/ui/pages/cost_parts/unit_costs.py")
-    block = caller.split("graph_sql.serverless_task_daily(", 1)[1][:1400]
+    # v4.606 integration: R1-061/163/167 put the kind split and the served-window label in front of the
+    # guard(), so the block runs longer than the original 1,400 characters.
+    block = caller.split("graph_sql.serverless_task_daily(", 1)[1][:2400]
     assert "if guard(sls," in block and "result_caption(sls)" in block
 
 

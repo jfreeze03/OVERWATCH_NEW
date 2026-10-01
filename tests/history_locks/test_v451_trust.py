@@ -243,6 +243,7 @@ _UNRENDERABLE = {
     "etl_control_sql.filter_checks_by_database": "filters parsed RefGapChecks; renders no SQL",
     "etl_control_sql.parse_ref_gap_checks": "parses the ETL_REF_GAP_CHECKS setting; renders no SQL",
     "ops_sql.split_health_bundle": "splits an already-fetched DataFrame; renders no SQL",
+    "recheck_sql.recheck_closed_day": "pure helper: whether an event's title day is closed; renders no SQL",
 }
 
 
