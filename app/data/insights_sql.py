@@ -978,15 +978,20 @@ ORDER BY DAY
 """
 
 
-def query_family_drift_history(days: int, family_text: str, warehouse: str = "") -> str:
+def query_family_drift_history(days: int, family_text: str, warehouse: str = "", *,
+                               family_hash: str = "") -> str:
     """Daily runs and p50/p95 latency for the query family behind a
-    PERF_FINGERPRINT_DRIFT alert. Matched by the statement sample the alert
-    title carries so the drift the alert reported is visible over time — not
-    whatever family is heaviest account-wide.
+    PERF_FINGERPRINT_DRIFT alert — not whatever family is heaviest account-wide.
 
-    The sample is real SQL (it starts with CALL/SELECT/...), so it can't go
-    through the UI contains-filter sanitizer (that strips SQL keywords). It is
-    matched as a literal LIKE instead: sql_literal quotes it safely and ~ escapes
+    R1-052: matched by the family's own QUERY_PARAMETERIZED_HASH when the alert's DETAIL carries it
+    ("Hash <hex> | runs ..."): the raiser groups by that hash, while the title's 60-char sample is ONE
+    run's literal text, so a comparison literal inside it matched only the runs with that one value (a
+    single-day "family history"), and two families sharing a prefix blended. SUCCESS runs only, the
+    raiser's p95 basis.
+
+    Fallback (no hash): the statement sample the title carries. It is real SQL (it starts with
+    CALL/SELECT/...), so it can't go through the UI contains-filter sanitizer (that strips SQL
+    keywords). It is matched as a literal LIKE instead: sql_literal quotes it safely and ~ escapes
     LIKE metacharacters so an underscore in a proc name stays literal.
     """
     from app.core.sqlsafe import sql_literal
@@ -995,8 +1000,12 @@ def query_family_drift_history(days: int, family_text: str, warehouse: str = "")
     clauses = [
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
         "QUERY_PARAMETERIZED_HASH IS NOT NULL",
+        "EXECUTION_STATUS = 'SUCCESS'",
     ]
-    like = str(family_text or "").strip()
+    fhash = str(family_hash or "").strip()
+    like = "" if fhash else str(family_text or "").strip()
+    if fhash:
+        clauses.append(f"QUERY_PARAMETERIZED_HASH = {sql_literal(fhash, 128)}")
     if like:
         esc = like.replace("~", "~~").replace("%", "~%").replace("_", "~_")
         clauses.append(
