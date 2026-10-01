@@ -1174,9 +1174,10 @@ failure shows "unavailable" with the error in its detail expander. A probe
 read does not write a missing column to APP_ERROR_LOG, so that expander is
 the only record: copy the error, then run Admin → Canary. That helps only
 when the panel's builder is registered in app/data/canary.py (it then FAILs
-there on drift). Several probe readers are not registered, by design (the
-SHOW-based reads, which EXPLAIN cannot compile, and the Enterprise-only
-ACCESS_HISTORY reads) or not yet (e.g. the org_*, operator_* and email_*
+there on drift). Every ACCESS_HISTORY column the app reads is covered there
+too, as a FAIL: this account is Enterprise. Several probe readers are not
+registered, by design (the SHOW-based reads, which EXPLAIN cannot compile)
+or not yet (e.g. the org_*, operator_* and email_*
 reads, query_insights_feed, object_tag_probe); for those the expander error
 is the only record.
 A timeout usually clears on a retry; drift does not (apply the missing
