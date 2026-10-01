@@ -66,16 +66,23 @@ def _has_side(df: pd.DataFrame, side: str) -> bool:
     return bool(len(df)) and "SIDE" in df.columns and bool((df["SIDE"].astype(str) == side).any())
 
 
+_NO_A = "no A-side data"
 _NO_B = "no B-side data"
 _BOTH_ZERO = "0 on both sides"
+_DASH = "—"
 
 
-def _delta_chip(a: float, b: float, decimals: int = 1, *, b_present: bool = True) -> str:
+def _delta_chip(a: float, b: float, decimals: int = 1, *, b_present: bool = True,
+                a_present: bool = True) -> str:
     """pct_delta returns None when B is zero (its documented contract —
     live crash 2026-07-11: an empty B side met an f-string format spec).
 
     R1-150: a zero B is not always missing data. 'no B-side data' is said only when the B side has no
-    rows at all (b_present=False); a LOADED B of zero has no % change -- say what it is instead."""
+    rows at all (b_present=False); a LOADED B of zero has no % change -- say what it is instead. The same
+    holds for A: an A side with no rows (a_present=False) is 'no A-side data', never the '-100.0% vs B'
+    its fabricated 0 would compute (green under 'inverse': 'A better than B' claimed on missing data)."""
+    if not a_present:
+        return _NO_A
     d = pct_delta(a, b)
     if d is not None:
         return f"{d:+.{decimals}f}% vs B"
@@ -85,9 +92,9 @@ def _delta_chip(a: float, b: float, decimals: int = 1, *, b_present: bool = True
 
 
 def _chip_color(chip: str, polarity: str) -> str:
-    """A chip that is not a comparison (B not loaded, or zero on both sides) renders neutral: under the
-    fixed 'inverse' polarity a sign-less chip would otherwise draw a red up-arrow, i.e. a rise."""
-    return "off" if chip in (_NO_B, _BOTH_ZERO) else polarity
+    """A chip that is not a comparison (a side not loaded, or zero on both sides) renders neutral: under
+    the fixed 'inverse' polarity a sign-less chip would otherwise draw a red up-arrow, i.e. a rise."""
+    return "off" if chip in (_NO_A, _NO_B, _BOTH_ZERO) else polarity
 
 
 def _coverage_warning(df: pd.DataFrame, pair: dict) -> str:
@@ -189,13 +196,15 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
         else:  # defensive fallback for an old-shape frame
             a_usd = float(wh.df["A_CREDITS"].map(safe_float).sum()) * rate
             b_usd = float(wh.df["B_CREDITS"].map(safe_float).sum()) * rate
-        # B is loaded when the coverage CTE saw a B-window day (B_DAYS, carried on every row)
+        # A / B is loaded when the coverage CTE saw a day in that window (A_DAYS / B_DAYS, on every row)
+        _wh_a = (safe_float(wh.df["A_DAYS"].iloc[0]) > 0 if "A_DAYS" in wh.df.columns and len(wh.df)
+                 else a_usd > 0)
         _wh_b = (safe_float(wh.df["B_DAYS"].iloc[0]) > 0 if "B_DAYS" in wh.df.columns and len(wh.df)
                  else b_usd > 0)
-        _wh_chip = _delta_chip(a_usd, b_usd, b_present=_wh_b)
+        _wh_chip = _delta_chip(a_usd, b_usd, b_present=_wh_b, a_present=_wh_a)
         kpis.append({
             "label": f"Warehouse spend — {pair['label_a']}",
-            "value": format_usd(a_usd),
+            "value": format_usd(a_usd) if _wh_a else _DASH,
             "delta": _wh_chip,
             # Higher-is-worse: color by the metric's fixed polarity, not the A-vs-B
             # outcome. 'inverse' -> a negative delta (A cheaper than B) reads GREEN and a
@@ -203,36 +212,44 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
             # (negative) delta RED — every comparison read as bad (round-2 bug hunt).
             "delta_color": _chip_color(_wh_chip, "inverse"),
             "help": "Exact warehouse metering x rate, company-scopable. "
-                    f"B = {format_usd(b_usd)}.",
+                    f"B = {format_usd(b_usd) if _wh_b else _DASH}.",
         })
     if act.usable():
         aq, bq = _side_value(act.df, "A", "QUERIES"), _side_value(act.df, "B", "QUERIES")
         af, bf = _side_value(act.df, "A", "FAILS"), _side_value(act.df, "B", "FAILS")
         aqu, bqu = _side_value(act.df, "A", "QUEUED_SEC"), _side_value(act.df, "B", "QUEUED_SEC")
-        _act_b = _has_side(act.df, "B")
-        kpis.append({"label": "Queries", "value": f"{aq:,.0f}",
-                     "delta": _delta_chip(aq, bq, b_present=_act_b), "delta_color": "off",
-                     "help": f"B = {bq:,.0f}. FACT_QUERY_HOURLY, company-scoped."})
+        # R1-150: a side with no fact rows (no GROUP BY SIDE row) is "—" on every card, never the 0 that
+        # _side_value fabricates -- a missing A drew 'Queued 0s, -100.0% vs B' in GREEN ('A better').
+        _act_a, _act_b = _has_side(act.df, "A"), _has_side(act.df, "B")
+        kpis.append({"label": "Queries", "value": f"{aq:,.0f}" if _act_a else _DASH,
+                     "delta": _delta_chip(aq, bq, b_present=_act_b, a_present=_act_a), "delta_color": "off",
+                     "help": f"B = {f'{bq:,.0f}' if _act_b else _DASH}. FACT_QUERY_HOURLY, company-scoped."})
         # R1-150 (house law 8): a rate with no query denominator is None, never a fabricated 0.00% --
         # the old 0.0 fallback drew a red "+2.50 pts vs B" against a B side with no queries at all
         # (beside a Queries card saying 'no B-side data'), and an empty A read '0.00%' in green.
+        # A side with no rows says 'no X-side data' (the Queries / Queued wording); a LOADED side with
+        # zero queries says 'no X-side queries'.
         a_rate = (af / aq * 100) if aq else None
         b_rate = (bf / bq * 100) if bq else None
         if a_rate is not None and b_rate is not None:
             _fr_delta, _fr_color = f"{a_rate - b_rate:+.2f} pts vs B", "inverse"   # higher-is-worse
-        elif b_rate is None:
-            _fr_delta, _fr_color = ("no B-side queries" if _act_b else "no B-side data"), "off"
+        elif a_rate is None:
+            _fr_delta, _fr_color = ("no A-side queries" if _act_a else _NO_A), "off"
         else:
-            _fr_delta, _fr_color = "no A-side queries", "off"
-        kpis.append({"label": "Fail rate", "value": f"{a_rate:.2f}%" if a_rate is not None else "—",
-                     "delta": _fr_delta, "delta_color": _fr_color,
-                     "help": (f"B = {b_rate:.2f}% ({bf:,.0f} of {bq:,.0f})." if b_rate is not None
-                              else "B = — (no queries in the B window).")})
-        _q_chip = _delta_chip(aqu, bqu, b_present=_act_b)
-        kpis.append({"label": "Queued", "value": humanize_duration(aqu, "s"),
+            _fr_delta, _fr_color = ("no B-side queries" if _act_b else _NO_B), "off"
+        if b_rate is not None:
+            _fr_help = f"B = {b_rate:.2f}% ({bf:,.0f} of {bq:,.0f})."
+        elif _act_b:
+            _fr_help = "B = — (no queries in the B window)."
+        else:
+            _fr_help = f"B = — ({_NO_B}: FACT_QUERY_HOURLY has no rows in the B window)."
+        kpis.append({"label": "Fail rate", "value": f"{a_rate:.2f}%" if a_rate is not None else _DASH,
+                     "delta": _fr_delta, "delta_color": _fr_color, "help": _fr_help})
+        _q_chip = _delta_chip(aqu, bqu, b_present=_act_b, a_present=_act_a)
+        kpis.append({"label": "Queued", "value": humanize_duration(aqu, "s") if _act_a else _DASH,
                      "delta": _q_chip,
                      "delta_color": _chip_color(_q_chip, "inverse"),   # higher-is-worse
-                     "help": f"B = {humanize_duration(bqu, 's')}."})
+                     "help": f"B = {humanize_duration(bqu, 's') if _act_b else _DASH}."})
     if bill.usable():
         # C1: price AI/Cortex credits at the AI rate. compare_billed carries the
         # AI/OTHER split; fall back to the flat rate if it's absent (old cache).
@@ -244,15 +261,16 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
         else:
             ab = _side_value(bill.df, "A", "CREDITS_BILLED") * rate
             bb = _side_value(bill.df, "B", "CREDITS_BILLED") * rate
-        _bill_chip = _delta_chip(ab, bb, b_present=_has_side(bill.df, "B"))
+        _bill_a, _bill_b = _has_side(bill.df, "A"), _has_side(bill.df, "B")
+        _bill_chip = _delta_chip(ab, bb, b_present=_bill_b, a_present=_bill_a)
         kpis.append({
             "label": "Account billed",
-            "value": format_usd(ab),
+            "value": format_usd(ab) if _bill_a else _DASH,
             "delta": _bill_chip,
             "delta_color": _chip_color(_bill_chip, "inverse"),   # higher-is-worse: A billed less than B -> green
             "help": "Every service, account-wide — metering-daily has no "
                     "company grain, so this ignores the company filter. AI/Cortex "
-                    f"credits price at the AI rate. B = {format_usd(bb)}.",
+                    f"credits price at the AI rate. B = {format_usd(bb) if _bill_b else _DASH}.",
         })
     if kpis:
         kpi_row(kpis)

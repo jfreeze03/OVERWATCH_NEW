@@ -710,14 +710,17 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                                          "(NOTEBOOKS_CONTAINER_RUNTIME_HISTORY).")
             if notebooks is not None and notebooks.ok and notebooks.empty:
                 empty_state("no_data_yet", "No notebook container runtime was recorded in this window.")
-            elif notebooks is not None and guard(notebooks, ""):
-                notebook_df = with_user_name_parts(notebooks.df, _PAGE)
-                notebook_df["USD"] = (
-                    pd.to_numeric(notebook_df["CREDITS"], errors="coerce").fillna(0.0) * rate
-                )
+            elif notebooks is not None:
+                # R1-118: the heading renders BEFORE the guard, so a failed read's error sits under
+                # "Notebook subset" -- where the pool drill's 'failed' line above points the reader.
                 st.markdown("**Notebook subset**")
-                styled_table(notebook_df, height=300, sort_label="credits desc")
-                result_caption(notebooks)
+                if guard(notebooks, ""):
+                    notebook_df = with_user_name_parts(notebooks.df, _PAGE)
+                    notebook_df["USD"] = (
+                        pd.to_numeric(notebook_df["CREDITS"], errors="coerce").fillna(0.0) * rate
+                    )
+                    styled_table(notebook_df, height=300, sort_label="credits desc")
+                    result_caption(notebooks)
             st.caption(
                 "Account-wide: these views carry no company key. Notebook credits are a subset of "
                 "SPCS credits and must not be added to the compute-pool total."

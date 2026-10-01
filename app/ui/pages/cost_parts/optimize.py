@@ -2438,10 +2438,12 @@ def _savings_tab(rate: float = 3.68, settings: dict | None = None) -> None:
     settings = settings or {}
     res = run(mart_sql.savings_ledger(), page=_PAGE, key="savings_ledger",
               tier="live", source="SAVINGS_LEDGER")
-    # R1-151 (c07): "not installed" ONLY for a true absence -- SAVINGS_LEDGER has existed since V005, so a
-    # timeout or any other failure is a failed read, never a pointer to Migrations.
+    # R1-151 (c07): needs_setup ONLY for a true absence -- SAVINGS_LEDGER has existed since V005, so a
+    # timeout or any other failure is a failed read, never a pointer to Migrations. Even the absence wording
+    # is neutral: is_setup_absence also covers 'privilege' (the table exists), so never "not installed".
     if not res.ok and is_setup_absence(res.error_kind):
-        empty_state("needs_setup", "Savings ledger is not installed yet — an admin can apply the pending schema update on Admin → Migrations & freshness.")
+        empty_state("needs_setup", "The savings ledger (SAVINGS_LEDGER) isn't readable by this app here — an "
+                    "admin can see what's pending on Admin → Migrations & freshness.")
         return
     if not res.ok:
         empty_state("unavailable", "The savings ledger could not be read right now; this is a failed read, not a "
