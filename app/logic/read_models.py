@@ -25,7 +25,9 @@ READ_MODELS = (
         "activity, comments and typed evidence links",
         "selected work item",
         "live",
-        2,
+        # the queue, Held? (with Include completed work) and, under 'Assigned to me', the one-row read of an open
+        # item someone else owns (v4.608 review fix: kept out of the queue read's SQL, so a selection is no re-read)
+        3,
         2,
     ),
     ReadModelContract(

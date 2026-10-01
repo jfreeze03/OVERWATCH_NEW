@@ -871,11 +871,11 @@ RESUME shows up only by re-running that proof.
 CREDIT_PRICE_USD 3.68 · AI_CREDIT_PRICE_USD 2.20 · STORAGE_USD_PER_TB_MONTH
 23.00 · MONTHLY_BUDGET_USD 0=off · AI_MONTHLY_BUDGET_USD 0=off ·
 CONTRACT_CREDITS / CONTRACT_START_DATE / CONTRACT_END_DATE (ISO dates) ·
-CORTEX_MODEL llama3.1-8b · FORECAST_ENGINE linear|seasonal|ml_forecast ·
+CORTEX_MODEL llama3.1-8b (saved trimmed and lower-case; blank = the default) · FORECAST_ENGINE linear|seasonal|ml_forecast ·
 SCORE_PTS_* (nine platform-score weights, §6) · FACT_RETENTION_DAYS_HOURLY
 400 (floor 90) · FACT_RETENTION_DAYS_DAILY 800 (floor 365, raised from 180
 in V054) · ERROR_LOG_RETENTION_DAYS 180 (floor 30) · APP_USAGE_RETENTION_DAYS
-365 (floor 90) (the floors are enforced in SP_PURGE_FACTS) ·
+365 (floor 90) (the floors are enforced in SP_PURGE_FACTS, and the Admin editors start at them) ·
 INCIDENT_AUTO_DECLARE_CRITICAL
 TRUE (hourly auto-declare switch; the two V162 identity rules never
 auto-declare either way) · AI_RUNAWAY_ROBUST_Z 3.5 and
@@ -886,9 +886,12 @@ OVERWATCH_EMAIL (blank = no email leg; recipients = that integration's
 DEFAULT_RECIPIENTS, set in Snowsight, never stored here) (V164, §19) ·
 DEPLOY_ACTORS '' (comma list of deploy service users whose warehouse changes
 read MANAGED; §21 Attribution — deleting a populated row flips them to
-MANUAL). Values
+MANUAL) · CREDIT_PRICE_OVERRIDE FALSE (read only by validate.sql: set TRUE to run a
+CREDIT_PRICE_USD other than 3.68 on purpose, else validate fails with -20013;
+not seeded, and Admin never lists it as safe to delete). Values
 are strings; bad numbers fall back to defaults. Changes take effect within
-one cache cycle (≤5 min) or after Refresh.
+one cache cycle (≤5 min) or after Refresh; a retention change applies at the next
+monthly purge (TASK_PURGE_FACTS).
 
 ## 12. Alert engine reference
 
