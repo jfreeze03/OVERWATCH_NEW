@@ -1779,12 +1779,16 @@ def dormant_severity(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["DAYS_DORMANT"] = out["DAYS_DORMANT"].map(safe_float)
     out["ROLE_COUNT"] = out["ROLE_COUNT"].map(safe_float)
-    out["SEVERITY"] = out.apply(
-        lambda r: "High" if r["DAYS_DORMANT"] >= 180 or r["ROLE_COUNT"] >= 5
+    # R1-054: a never-logged-in account (90d+ old, still holding access) stays High. Its DAYS_DORMANT is now
+    # the honest days-since-created lower bound, not the old fabricated 9999 that put it there.
+    _never = (out["NEVER_LOGGED_IN"].map(lambda v: str(v).strip().upper() in ("TRUE", "1"))
+              if "NEVER_LOGGED_IN" in out.columns else pd.Series(False, index=out.index))
+    out["SEVERITY"] = [
+        "High" if never or r["DAYS_DORMANT"] >= 180 or r["ROLE_COUNT"] >= 5
         else "Medium" if r["DAYS_DORMANT"] >= 90
-        else "Low",
-        axis=1,
-    )
+        else "Low"
+        for never, (_, r) in zip(_never, out.iterrows(), strict=True)
+    ]
     # Sort worst-first so a High-by-role-count row (moderate gap, many roles) leads instead of
     # being buried under longer-gap Medium rows -- the table is read top-down as a triage list
     # (mirrors takeover_severity, bug-hunt 2026-08-30).

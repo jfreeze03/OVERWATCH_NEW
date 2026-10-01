@@ -748,13 +748,18 @@ SELECT
     U.EMAIL,
     U.CREATED_ON,
     U.LAST_SUCCESS_LOGIN,
-    COALESCE(DATEDIFF('day', U.LAST_SUCCESS_LOGIN, CURRENT_TIMESTAMP()), 9999) AS DAYS_DORMANT,
+    -- R1-054: a never-logged-in user showed a fabricated sentinel (27 years) on screen and in the
+    -- access-review CSV. DAYS_DORMANT is now the honest lower bound — days since the last login, or
+    -- since the account was created when it never logged in (dormant_reawakening's rule) — and
+    -- NEVER_LOGGED_IN says which; never-logged-in users still lead the list ahead of the LIMIT.
+    DATEDIFF('day', COALESCE(U.LAST_SUCCESS_LOGIN, U.CREATED_ON), CURRENT_TIMESTAMP()) AS DAYS_DORMANT,
+    (U.LAST_SUCCESS_LOGIN IS NULL) AS NEVER_LOGGED_IN,
     COALESCE(R.ROLE_COUNT, 0) AS ROLE_COUNT,
     LEFT(COALESCE(R.ROLES, ''), 300) AS ROLES
 FROM SNOWFLAKE.ACCOUNT_USAGE.USERS U
 LEFT JOIN role_counts R ON R.GRANTEE_NAME = U.NAME
 WHERE {where}
-ORDER BY DAYS_DORMANT DESC, ROLE_COUNT DESC
+ORDER BY NEVER_LOGGED_IN DESC, DAYS_DORMANT DESC, ROLE_COUNT DESC
 LIMIT 300
 """
 
