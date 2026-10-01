@@ -177,3 +177,39 @@ def test_idle_prompt_names_last_month_not_last_n_days(monkeypatch):
 def test_optimize_passes_the_bounds_to_the_idle_prompt():
     assert "idle_warehouse_prompt(advisor, company, idle_days, bounds=bounds)" in read(
         "app/ui/pages/cost_parts/optimize.py")
+
+
+# ---- R1-105: Case File previews render NULL cells as "—", never 'nan' / 'None' / 'NaT' ---------
+
+
+def test_case_file_preview_renders_nulls_as_a_dash():
+    import numpy as np
+
+    from app.logic import case_file as cf
+    # a locked-out user's failed-login burst: no success after it, so three NULL columns
+    item = cf.new_case_item(
+        section="Security", title="Failed-login bursts",
+        preview_columns=["USER_NAME", "FAILURES", "FIRST_SUCCESS_AFTER", "BREAKTHROUGH_MIN", "LAST_ERROR"],
+        preview_rows=[["SVC_A", 12, pd.NaT, np.nan, None], ["SVC_B", pd.NA, "2026-09-30", 4.5, "locked"]])
+    assert item["preview"]["rows"] == [["SVC_A", "12", "—", "—", "—"],
+                                       ["SVC_B", "—", "2026-09-30", "4.5", "locked"]]
+    md = cf.assemble_markdown([item], generated="g")
+    assert "| SVC_A | 12 | — | — | — |" in md
+    for token in ("nan", "NaT", "None", "<NA>"):
+        assert token not in md, token
+
+
+def test_add_to_case_sink_turns_every_null_kind_into_none():
+    # the exact expression add_to_case_button uses, on a frame shaped like the failed-login read
+    head = pd.DataFrame({"USER_NAME": ["SVC_A"], "FAILURES": pd.array([None], dtype="Int64"),
+                         "FIRST_SUCCESS_AFTER": [pd.NaT], "BREAKTHROUGH_MIN": [float("nan")],
+                         "LAST_ERROR": [None]})
+    rows = head.astype(object).where(head.notna(), None).to_numpy().tolist()
+    assert rows == [["SVC_A", None, None, None, None]]
+
+
+def test_add_to_case_hands_raw_cells_with_nulls_as_none():
+    comp = read("app/ui/components.py")
+    body = comp.split("def add_to_case_button", 1)[1].split("\ndef ", 1)[0]
+    assert "head.astype(str)" not in body                 # stringified NULLs before case_file saw them
+    assert "preview_rows=head.astype(object).where(head.notna(), None).to_numpy().tolist()" in body

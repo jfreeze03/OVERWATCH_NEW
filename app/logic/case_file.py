@@ -46,15 +46,39 @@ def escape_md_cell(value: object) -> str:
     return s.replace("\\", "\\\\").replace("|", "\\|").strip()
 
 
+# A NULL cell in the handoff document, as the app renders NULL everywhere else.
+NULL_CELL = "—"
+
+
+def _preview_cell(value: object) -> str:
+    """One preview cell as text; a NULL is NULL_CELL, never 'None' / 'nan' / 'NaT' / '<NA>'. The UI
+    sink hands NULLs over as None; a NaN / NaT that still arrives is caught by self-inequality (they
+    are the only values unequal to themselves), which keeps this module free of pandas."""
+    if value is None:
+        return NULL_CELL
+    try:
+        if value != value:
+            return NULL_CELL
+    except TypeError:     # pd.NA: its self-comparison is NA, whose truth value raises
+        return NULL_CELL
+    except ValueError:    # an array-like cell: no single truth value, render it as text
+        pass
+    return str(value)
+
+
 def preview_from_records(
     columns: Sequence[object], rows: Sequence[Sequence[object]]
 ) -> tuple[list[str], list[list[str]]]:
     """Cap a ``df.head()`` projection to MAX_PREVIEW_COLS x MAX_PREVIEW_ROWS and
-    stringify every cell (so the item holds only serializable primitives)."""
+    stringify every cell (so the item holds only serializable primitives).
+
+    Pass RAW cell values with NULLs as None (not ``df.astype(str)``, which had already turned
+    them into 'nan' / 'None' / 'NaT' text before this ran, so the exported table read
+    '| SVC_A | 12 | NaT | nan |' for a locked-out user)."""
     cols = [str(c) for c in list(columns)[:MAX_PREVIEW_COLS]]
     ncol = len(cols)
     out_rows = [
-        [("" if v is None else str(v)) for v in list(row)[:ncol]]
+        [_preview_cell(v) for v in list(row)[:ncol]]
         for row in list(rows)[:MAX_PREVIEW_ROWS]
     ]
     return cols, out_rows
