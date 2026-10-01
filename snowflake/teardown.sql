@@ -326,8 +326,8 @@ DROP SECRET IF EXISTS DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL;    -- recipe (
 -- ===========================================================================
 -- C. SHARED INFRASTRUCTURE — uncomment only if you really mean it.
 -- ===========================================================================
--- The warehouse also serves the Streamlit app; the resource monitor caps it;
--- roles may be granted into your role hierarchy.
+-- The warehouse also serves the Streamlit app (no resource monitor since V045 --
+-- owner decision: no hard cap on WH_ALFA_ADMIN).
 -- DROP STREAMLIT IF EXISTS DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP;
 -- ALTER WAREHOUSE IF EXISTS WH_ALFA_ADMIN SET RESOURCE_MONITOR = NULL;  -- already NULL: V045
 -- DROP WAREHOUSE IF EXISTS WH_ALFA_ADMIN;
