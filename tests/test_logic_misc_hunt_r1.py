@@ -293,3 +293,32 @@ def test_drill_streak_is_one_outcome_per_month():
     # a year boundary is consecutive: Jan after Dec
     df = pd.DataFrame([_drill("2027-01-01 09:00"), _drill("2026-12-01 09:00")])
     assert drill_report(df)["streak_months"] == 2
+
+
+# ---- R1-123: threshold suggestions read UNTAGGED_N and do not overstate their evidence --------
+
+
+def _rule_events(noise, actioned=(), untagged=None):
+    rows = [{"RULE_ID": "COST_SPIKE", "METRIC_VALUE": v, "RESOLUTION_KIND": "NOISE"} for v in noise]
+    rows += [{"RULE_ID": "COST_SPIKE", "METRIC_VALUE": v, "RESOLUTION_KIND": "ACTIONED"} for v in actioned]
+    frame = pd.DataFrame(rows)
+    if untagged is not None:
+        frame["UNTAGGED_N"] = untagged
+    return frame
+
+
+def test_suggestion_basis_names_tagged_resolutions_and_flags_untagged_majority():
+    from app.logic.tuning import suggestions_by_rule
+    out = suggestions_by_rule(_rule_events([10, 11, 12, 11, 10], untagged=300), {"COST_SPIKE": 8.0})
+    row = out.iloc[0]
+    assert int(row["UNTAGGED_N"]) == 300                          # the fetched denominator is read
+    assert row["BASIS"].startswith("All 5 tagged resolutions with a metric value were noise;")
+    assert "All 5 resolved events" not in row["BASIS"]
+    assert "300 more closed untagged; tag them before trusting this." in row["BASIS"]
+    assert float(row["SUGGESTED_THRESHOLD"]) == 12.98              # threshold math unchanged
+
+
+def test_suggestion_without_an_untagged_majority_carries_no_caveat():
+    from app.logic.tuning import suggestions_by_rule
+    out = suggestions_by_rule(_rule_events([10, 11, 12, 11, 10], untagged=3), {"COST_SPIKE": 8.0})
+    assert int(out.iloc[0]["UNTAGGED_N"]) == 3 and "Caveat" not in out.iloc[0]["BASIS"]

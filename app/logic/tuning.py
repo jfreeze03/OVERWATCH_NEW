@@ -99,9 +99,12 @@ def suggest_threshold(metric_values: pd.DataFrame, current_threshold: float,
             if current > 0 and suggested <= current:
                 suggested = round(current * 1.5, 2)
             tail = "clears 95% of them (+10%)"
+        # "tagged resolutions with a metric value": the rows here are only the ACTIONED/NOISE closes
+        # that carry a METRIC_VALUE -- untagged, EXPECTED and NULL-metric closes are not counted, so
+        # "All N resolved events" overstated the evidence (R1-123).
         return {"ok": True, "suggested": suggested, "noise_n": n_noise, "actioned_n": 0,
-                "basis": f"All {n_noise} resolved events were noise; {suggested} {tail}. "
-                         "If it keeps firing, consider disabling the rule."}
+                "basis": f"All {n_noise} tagged resolutions with a metric value were noise; "
+                         f"{suggested} {tail}. If it keeps firing, consider disabling the rule."}
 
     if inverse:
         # Mirror image: actioned values sit BELOW the threshold, noise ABOVE it.
@@ -137,20 +140,35 @@ def suggest_threshold(metric_values: pd.DataFrame, current_threshold: float,
 
 def suggestions_by_rule(events: pd.DataFrame, thresholds: dict[str, float]) -> pd.DataFrame:
     """Vector version for the Rules panel: events [RULE_ID, METRIC_VALUE,
-    RESOLUTION_KIND] + {rule_id: current_threshold} -> one row per rule."""
+    RESOLUTION_KIND] + {rule_id: current_threshold} -> one row per rule.
+
+    D7 / R1-123: mart_sql.rule_metric_kinds also carries UNTAGGED_N per rule (closes with no
+    resolution kind, constant within a rule). When present it rides through as a column, and a
+    suggestion whose untagged closes outnumber its tagged ones says so in its BASIS -- 5 tagged and
+    300 untagged closes must not read as authoritative as 305 tagged ones. The math is unchanged."""
     if events is None or events.empty:
         return pd.DataFrame()
+    has_untagged = "UNTAGGED_N" in events.columns
     rows = []
     for rule_id, block in events.groupby(events["RULE_ID"].astype(str)):
         # A1: rule_id selects the comparison direction — an inverse-metric rule
         # (SEC_CRED_EXPIRY, COST_CONTRACT_BREACH) must be tuned DOWNWARD.
         result = suggest_threshold(block, safe_float(thresholds.get(rule_id, 0.0)), rule_id)
-        rows.append({
+        noise_n, actioned_n = result.get("noise_n", 0), result.get("actioned_n", 0)
+        basis = str(result.get("basis", ""))
+        row = {
             "RULE_ID": rule_id,
             "CURRENT_THRESHOLD": safe_float(thresholds.get(rule_id, 0.0)),
             "SUGGESTED_THRESHOLD": result.get("suggested"),
-            "NOISE_N": result.get("noise_n", 0),
-            "ACTIONED_N": result.get("actioned_n", 0),
-            "BASIS": result.get("basis", ""),
-        })
+            "NOISE_N": noise_n,
+            "ACTIONED_N": actioned_n,
+            "BASIS": basis,
+        }
+        if has_untagged:
+            untagged = int(safe_float(block["UNTAGGED_N"].iloc[0]))
+            row["UNTAGGED_N"] = untagged
+            if result.get("ok") and untagged > noise_n + actioned_n:
+                row["BASIS"] = (f"{basis} Caveat: {untagged} more closed untagged; tag them "
+                                "before trusting this.")
+        rows.append(row)
     return pd.DataFrame(rows).sort_values("NOISE_N", ascending=False).reset_index(drop=True)
