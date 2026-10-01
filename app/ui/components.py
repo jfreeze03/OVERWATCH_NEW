@@ -1395,6 +1395,9 @@ def guard(result: QueryResult, empty_message: str, setup_hint: str = "",
     outcome ("scan ran, nothing over threshold") pass ``kind="clean"``. The
     ERROR branch renders as 'unavailable' (red lead line, full error one
     click away), except absence-of-setup, which stays a calm 'needs_setup'.
+    ``setup_hint`` renders on the ERROR branch only (setup absence, or a true
+    absence / schema drift under 'unavailable'); a successful zero-row read
+    proves setup exists, so guidance for an empty read goes in ``empty_message``.
     """
     if not result.ok:
         # Absence-of-setup is a state, not a failure: fresh deployments show
@@ -1422,10 +1425,13 @@ def guard(result: QueryResult, empty_message: str, setup_hint: str = "",
                         hint=setup_hint if (is_setup_absence(_kind) or is_schema_drift(_kind)) else "")
         return False
     if result.empty:
-        # review fix: a successful read PROVES setup exists — a setup hint
-        # under a verified-clean green row is always a contradiction.
-        empty_state(kind, empty_message,
-                    hint="" if kind == "clean" else setup_hint)
+        # review fix + R2-072 follow-up: a successful read PROVES setup exists, so the
+        # caller's setup hint never renders under it — not under a verified-clean green
+        # row, and not under a quiet no-rows caption either ("No alert events in the
+        # last 30 days." over "Alerting is not installed yet" contradicted itself). The
+        # hint belongs to the error branch's absence / drift path only; a caller with
+        # guidance for an EMPTY read puts it in empty_message.
+        empty_state(kind, empty_message)
         return False
     if result.truncated:
         # F31: a quiet line, not a yellow alarm — for capped scans (heaviest

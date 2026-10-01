@@ -245,7 +245,8 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
                          key=f"cortex_users_{company}_{days}{_lm}", tier="hourly",
                          source="FACT_AI_USAGE_DAILY (Cortex Code, daily loader - live scan unavailable)")
     if not guard(rollup_res,
-                 "No Cortex Code usage (Snowsight or CLI) recorded in this window for this scope.",
+                 "No Cortex Code usage (Snowsight or CLI) recorded in this window for this scope. "
+                 "If these views aren't enabled in this account, this tab stays empty.",
                  setup_hint="If these views aren't enabled in this account, this tab stays empty."):
         return
 

@@ -1110,9 +1110,17 @@ def render() -> None:
         elif board_res is not None and not board_res.ok and not is_setup_absence(board_res.error_kind):
             empty_state("unavailable", "The cost-driver ranking couldn't be read (the exec board read failed).",
                         detail=board_res.error)
-        elif board_res is None and not trend_source.ok:
-            empty_state("unavailable", "The cost-driver ranking couldn't be read (the warehouse spend read "
-                                       "failed).", detail=trend_source.error)
+        elif not using_mart and not trend_source.ok:
+            # The board did not serve (absent, empty, or not read for a calendar window) AND the warehouse-spend
+            # read failed, so no read produced an answer and "No cost-driver rows" would be a guess. An ABSENT
+            # board is still what a trailing-window ranking waits on (it comes only from the board), so that
+            # keeps the installed wording; otherwise (an empty board, or a calendar window whose bounded frame
+            # IS the ranking) the panel says the spend read failed.
+            if board_res is not None and is_setup_absence(board_res.error_kind):
+                empty_state("needs_setup", "Driver ranking appears once the exec board mart is installed.")
+            else:
+                empty_state("unavailable", "The cost-driver ranking couldn't be read (the warehouse spend read "
+                                           "failed).", detail=trend_source.error)
         elif not using_mart and not daily.empty:
             empty_state("needs_setup", "Driver ranking appears once the exec board mart is installed.")
         else:

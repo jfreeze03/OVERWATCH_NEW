@@ -3701,7 +3701,8 @@ def _wh_activity_anomalies(company: str, rate: float) -> None:
     ], page=_PAGE)   # run_batch_mixed always returns a dict (contract) — no `or {}` guard needed
     res = _wh_pf.get("res") or run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE, key=f"w_fact_{company}",
               tier="hourly", source="FACT_WAREHOUSE_DAILY")
-    if not guard(res, "No warehouse dailies yet — the hourly loader fills them.",
+    if not guard(res, "No warehouse dailies yet — the hourly loader fills them. The live equivalent lives on "
+                      "Cost Intelligence > Spend & Attribution.",
                  setup_hint="Live equivalent lives on Cost Intelligence > Spend & Attribution."):
         return
     df = res.df.copy()

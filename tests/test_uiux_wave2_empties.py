@@ -37,9 +37,15 @@ def test_guard_routes_both_branches_through_the_vocabulary():
     body = comp.split("def guard(", 1)[1].split("\ndef ", 1)[0]
     # empty branch: quiet caption by default, kind= for verified-clean callers;
     # review fix: a successful read proves setup exists, so a setup hint is
-    # suppressed under a verified-clean green row (always a contradiction)
+    # suppressed under a verified-clean green row (always a contradiction) --
+    # R2-072 follow-up: and under EVERY empty kind (a no-rows caption over
+    # "not installed yet" contradicted itself too), so the empty branch passes
+    # no hint at all
     assert 'kind: str = "no_data_yet"' in comp.split("def guard(", 1)[1].split(")", 1)[0]
-    assert 'hint="" if kind == "clean" else setup_hint' in body
+    empty_branch = body.split("if result.empty:", 1)[1].split("return False", 1)[0]
+    empty_code = "\n".join(ln for ln in empty_branch.splitlines() if not ln.strip().startswith("#"))
+    assert "empty_state(kind, empty_message)" in empty_code
+    assert "setup_hint" not in empty_code and "hint=" not in empty_code
     # error branch: 'unavailable' with the detail expander; setup absence stays calm
     assert 'empty_state("unavailable"' in body
     assert 'empty_state("needs_setup"' in body

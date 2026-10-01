@@ -199,6 +199,24 @@ def test_calendar_window_with_a_failed_spend_read_is_unavailable(monkeypatch):
     assert kind_seen == "unavailable" and "warehouse spend read failed" in msg
 
 
+@pytest.mark.parametrize("board_kind", ["absent", "privilege"])
+def test_absent_exec_board_with_a_failed_spend_read_never_says_no_rows(monkeypatch, board_kind):
+    """R2-075 follow-up: the board is absent (or unreadable -- a setup absence) AND the warehouse-spend fallback
+    failed, so no read succeeded; the panel must not report an empty result ('No cost-driver rows'). On a
+    trailing window the ranking comes only from the board, so its absence is what the panel is waiting on."""
+    got = _render_overview(monkeypatch, fail={"exec_board_": _failed(board_kind), "live_wh_daily_": _failed()})
+    assert _drivers(got) == [("needs_setup", "Driver ranking appears once the exec board mart is installed.", "")]
+
+
+def test_empty_exec_board_with_a_failed_spend_read_is_unavailable(monkeypatch):
+    """R2-075 follow-up: the board answered no rows and the warehouse-spend fallback failed -- whether there is
+    any spend to rank is unknown, so the panel says the read failed instead of 'No cost-driver rows'."""
+    empty_board = QueryResult(ok=True, df=pd.DataFrame(), source="stub")
+    got = _render_overview(monkeypatch, fail={"exec_board_": empty_board, "live_wh_daily_": _failed()})
+    (kind_seen, msg, detail), = _drivers(got)
+    assert kind_seen == "unavailable" and "warehouse spend read failed" in msg and detail == "stub timeout"
+
+
 def test_failed_monthly_chart_read_is_unavailable(monkeypatch):
     """R2-085: both monthly legs fail -> an unavailable state (not a header over nothing)."""
     got = _render_overview(monkeypatch, fail={"ov_monthly_": _failed()})
@@ -442,6 +460,71 @@ def test_guard_needs_setup_branch_keeps_its_hint(monkeypatch):
                       error_kind="absent")
     components.guard(res, "", setup_hint="apply V024")
     assert seen == [("needs_setup", "apply V024")]
+
+
+class _StRecorder:
+    """Stands in for components.st: records every Streamlit call so a test can see what was RENDERED."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple, dict]] = []
+
+    def __getattr__(self, name):
+        def _call(*a, **k):
+            self.calls.append((name, a, k))
+            return self if name == "expander" else False
+        return _call
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def rendered(self) -> str:
+        return " ".join(str(x) for _n, a, k in self.calls for x in (*a, *k.values()))
+
+
+@pytest.mark.parametrize("kind", ["no_data_yet", "clean", "needs_setup"])
+def test_guard_empty_read_never_renders_the_setup_hint(monkeypatch, kind):
+    """R2-072 follow-up: a successful zero-row read PROVES the setup exists, so the caller's setup hint must not
+    render under it (Alerts > History said 'No alert events in the last 30 days.' over 'Alerting is not
+    installed yet'). Guidance a caller wants under an empty read belongs in its empty message."""
+    from app.ui import components
+
+    rec = _StRecorder()
+    monkeypatch.setattr(components, "st", rec)
+    res = QueryResult(ok=True, df=pd.DataFrame(), source="stub")
+    assert components.guard(res, "No rows.", setup_hint="SETUP-HINT-X", kind=kind) is False
+    assert "No rows." in rec.rendered()
+    assert "SETUP-HINT-X" not in rec.rendered()
+
+
+def _guard_empty_messages(rel: str) -> list[str]:
+    import ast
+
+    from tests._source import read
+
+    out = []
+    for node in ast.walk(ast.parse(read(rel))):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "guard" and len(node.args) >= 2:
+            msg = node.args[1]
+            if isinstance(msg, ast.Constant) and isinstance(msg.value, str):
+                out.append(msg.value)
+    return out
+
+
+@pytest.mark.parametrize(("rel", "phrase"), [
+    ("app/ui/pages/admin.py", "migration V001 seeds it"),
+    ("app/ui/pages/admin.py", "switch on Task health below"),
+    ("app/ui/pages/admin.py", "APP_QUERY_TELEMETRY INSERT grant"),
+    ("app/ui/pages/operations.py", "Cost Intelligence > Spend & Attribution"),
+    ("app/ui/pages/cost_parts/ai_chargeback.py", "this tab stays empty"),
+])
+def test_empty_read_guidance_moved_into_the_empty_message(rel, phrase):
+    """R2-072 follow-up (deliberate): these callers' hints explained an EMPTY read (re-seed SETTINGS, the loader
+    tasks, the telemetry INSERT grant, the live equivalent, a feature not enabled), so with guard() no longer
+    rendering setup_hint under an empty read the guidance moved into the empty message, where it still shows."""
+    assert any(phrase.lower() in m.lower() for m in _guard_empty_messages(rel)), (rel, phrase)
 
 
 # ================================================================================== theme ====
