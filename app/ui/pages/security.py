@@ -637,8 +637,6 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
             frame = ur.df.reset_index(drop=True)
             sel = selectable_table(frame, key="sec_unused_role_drill",
                                    sort_label="most-granted first")
-            if sel is not None and sel != st.session_state.get("_sec_unused_role_sel"):
-                st.session_state["_sec_unused_role_sel"] = sel
             st.caption("These roles were never *directly assumed* as the executing role in 90d — a role "
                        "exercised only through inheritance (granted to a role users actually SET) won't "
                        "appear here, so confirm holders + grants (click a row) before revoking. "
@@ -908,8 +906,9 @@ def _exposure_tab() -> None:
     OUTBOUND shares are the exposure surface, ``to`` names the consumer accounts,
     and a marketplace LISTING is broad by construction. Company scoping doesn't
     apply — shares are an account-wide object with no company grain. Clicking an
-    outbound share drills to the objects it exposes (SHOW GRANTS TO SHARE, #8);
-    the alert on *new/broadened* exposure (SEC_NEW_EXPOSURE) is the remaining
+    outbound share drills to the objects it exposes (SHOW GRANTS TO SHARE, #8).
+    SEC_NEW_EXPOSURE (V084) alerts on new grants to the PUBLIC role, not on shares; an
+    alert on new or broadened outbound-share exposure is still the deferred
     owner-migration half of this finding."""
     st.caption("Outbound shares are the surface where this account's data leaves it. Every consumer here should be a known partner.")
     shares = run(security_sql.show_shares_sql(), page=_PAGE, key="sec_shares",
@@ -964,8 +963,6 @@ def _exposure_tab() -> None:
         sel = selectable_table(frame, key="sec_share_drill", height=320,
                                slug="share-exposure",
                                sort_label="most-exposing first, then consumer count")
-        if sel is not None and sel != st.session_state.get("_sec_share_sel"):
-            st.session_state["_sec_share_sel"] = sel
         share = str(frame.iloc[sel]["SHARE_NAME"]) if sel is not None and 0 <= sel < len(frame) else ""
         if share:
             section_header(f"Objects exposed by {share}", "", "security")

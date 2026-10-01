@@ -13,11 +13,6 @@ from app.config import core_object
 from app.core.identity import identity_sql
 from app.core.sqlsafe import sql_literal
 
-# Offered display timezones; 'Account' means render as stored (account time).
-DISPLAY_TIMEZONES = ("Account (America/Chicago)", "America/New_York",
-                     "America/Los_Angeles", "UTC", "Europe/London")
-VIEW_NAME_RE = re.compile(r"^[A-Za-z0-9 _\-]{1,40}$")
-
 # C19: the pref-write path (upsert_pref_sql) returned with the operator/audit
 # presentation mode — it was retired with the Views popover in v4.157.0 (nobody
 # used the density toggle daily), but PRESENT_MODE reintroduces a live pref, so

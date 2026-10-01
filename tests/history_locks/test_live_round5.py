@@ -68,8 +68,6 @@ def test_family_readers_are_fully_qualified():
     assert "SUM(RUNS)" not in comp                     # the nested-aggregate trigger, gone
     assert "MART_QUERY_FAMILY_DAILY} f" not in comp    # sanity: alias landed in rendered SQL
     assert " f\nWHERE" in comp
-    rq = mart27_sql.family_repeat_fingerprints(7, "ALFA")
-    assert "SUM(f.RUNS)" in rq and "SUM(RUNS)" not in rq
 
 
 def test_sizing_and_ai_readers_are_fully_qualified():

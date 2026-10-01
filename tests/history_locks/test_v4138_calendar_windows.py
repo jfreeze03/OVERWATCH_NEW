@@ -128,7 +128,7 @@ def test_exec_board_selects_calendar_row_with_snowflake_account_date():
     mtd = mart_sql.exec_board("ALL", 2, CURRENT_MONTH_WINDOW)
     ytd = mart_sql.exec_board("Trexis", 214, CURRENT_YEAR_WINDOW)
     # V123: keyed off the ACCOUNT clock (account_today_sql), matching the loader and the
-    # account_today-anchored MTD siblings — NOT session/UTC CURRENT_DATE().
+    # account_today-anchored MTD siblings — NOT session-tz CURRENT_DATE().
     _acct = "CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE"
     assert f"WINDOW_DAYS = DATEDIFF('day', DATE_TRUNC('month', {_acct})" in mtd
     assert f"WINDOW_DAYS = DATEDIFF('day', DATE_TRUNC('year', {_acct})" in ytd

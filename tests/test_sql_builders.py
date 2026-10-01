@@ -21,7 +21,6 @@ LIVE_BUILDERS = [
     lambda: cost_sql.hourly_credits(48, "ALFA"),
     lambda: cost_sql.allocated_attribution(7, "USER_NAME", "ALFA"),
     lambda: cost_sql.cortex_daily_spend(7),
-    lambda: cost_sql.storage_by_database(7, "ALFA"),
     lambda: ops_sql.query_window_summary(7, "ALFA"),
     lambda: ops_sql.top_queries_by_elapsed(7, "ALFA"),
     lambda: ops_sql.failures_by_error(7, "Trexis"),

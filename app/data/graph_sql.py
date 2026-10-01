@@ -7,7 +7,7 @@ Grain honesty:
   the root task fires first, so this is the root without needing a TASK_ID
   column (ACCOUNT_USAGE.TASK_HISTORY does not expose one).
 - Warehouse-task credits are MEASURED per run via QUERY_ATTRIBUTION_HISTORY
-  (child statements roll up to the task's query; ~6h lag). Serverless task
+  (child statements roll up to the task's query; up to ~8h lag). Serverless task
   credits live at task-day grain in SERVERLESS_TASK_HISTORY and are reported
   separately — never smeared across graphs they can't be tied to.
 """

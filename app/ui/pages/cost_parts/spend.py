@@ -39,7 +39,6 @@ from app.logic.anomaly_explain import (
     outside_company_label,
 )
 from app.logic.cost_coverage import (
-    SERVICE_CATEGORY,
     attribution_gap,
     attribution_gap_trend,
     drill_ready_spend_share,
@@ -89,8 +88,6 @@ from app.ui.components import (
 
 _PAGE = "Cost Intelligence"
 
-_SERVICE_CATEGORY = SERVICE_CATEGORY
-
 
 # Split out of app/ui/pages/cost.py (V028): section bodies only —
 # navigation/dispatch stays in cost.py. Import preamble mirrored from
@@ -111,7 +108,7 @@ def _spend_attr_recent_jobs(company: str, days: int, bounds: tuple | None = None
     read so the total/by-service/trend reflect the exact previous month."""
     return [
         {"key": "metering", "sql": mart_sql.fact_metering_by_service(days, bounds=bounds),
-         "source": "FACT_METERING_DAILY (mart, loaded hourly)"},
+         "source": "FACT_METERING_DAILY (mart, loaded daily ~06:45 CT)"},
         {"key": "csr", "sql": mart_sql.fact_cloud_services_ratio(days, company, bounds=bounds),
          "source": "FACT_WAREHOUSE_DAILY (cloud-services share)"},
         {"key": "wh", "sql": mart_sql.fact_warehouse_window_vs_prior(days, company, bounds=bounds),
@@ -358,7 +355,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
         res = metering_res if metering_res is not None else run(
             mart_sql.fact_metering_by_service(days, bounds=bounds), page=_PAGE,
             key=f"metering_fact_{days}{_lm}",
-            tier="hourly", source="FACT_METERING_DAILY (mart, loaded hourly)")
+            tier="hourly", source="FACT_METERING_DAILY (mart, loaded daily ~06:45 CT)")
         _metering_live = False
         if not res.ok or res.empty:
             _metering_live = True
@@ -1517,7 +1514,7 @@ def _below_warehouse_drill(company: str, exp, flagged_wh: str, rate: float) -> N
         {"key": "whchg",
          "sql": change_impact_sql.warehouse_change_registry(_ANOM_CHANGE_LOOKBACK_DAYS, company, wh),
          "source": "WAREHOUSE_CHANGE_REGISTRY (daily 06:40 CT scan)"},
-    ], page=_PAGE, tier="hourly") or {}
+    ], page=_PAGE, tier="hourly")
     xd, chg = _b.get("xdim"), _b.get("whchg")
 
     if xd is None:

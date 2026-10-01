@@ -158,6 +158,15 @@ def test_control_room_v154_caption_rides_the_shared_gate():
     assert "cr_incident_loop_migver" not in cr
 
 
+def test_operations_operator_grain_rides_the_shared_gate():
+    # v4.607 (R1-140): the Operator profile's V147 identity-grain gate was a private SCHEMA_VERSION
+    # read (its own key, hand-parsed VERSION), the class house law 12 forbids; it now asks the gate.
+    ops = read("app/ui/pages/operations.py")
+    assert "_op_grain = has_migration(147, _PAGE)" in ops
+    assert "ops_operator_grain_migver" not in ops
+    assert "_operator_identity_grain_available" not in ops
+
+
 # --- the page harnesses stub it ---------------------------------------------------------------------
 def _module_level_readers() -> set[str]:
     """app/ui modules that import a read entry point from app.core.query at module level."""

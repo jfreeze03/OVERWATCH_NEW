@@ -91,13 +91,14 @@ def test_workload_portfolio_scopes_families_on_company():
 def test_family_builders_scope_on_exact_company_not_database_heuristic():
     ch = mart27_sql.family_compile_heavy(30, "ALFA")
     assert "f.COMPANY = 'ALFA'" in ch
-    rp = mart27_sql.family_repeat_fingerprints(30, "ALFA")
-    assert "f.COMPANY = 'ALFA'" in rp
     # ALL scope adds no company predicate (empty arm), still bounded by DAY
     ch_all = mart27_sql.family_compile_heavy(30, "ALL")
     assert "f.COMPANY" not in ch_all and "f.DAY >=" in ch_all
 
 
-def test_query_families_surfaces_the_company_column():
-    sql = mart27_sql.query_families(2, 10)
-    assert "QUERY_HASH, COMPANY, SAMPLE_TEXT" in sql
+def test_retired_query_family_readers_stay_absent():
+    # v4.607: the thin query_families / family_repeat_fingerprints readers were deleted
+    # (canary/test-only); the regrained COMPANY column is read by family_compile_heavy
+    # (above) and workload_portfolio. Lock that neither retired reader comes back.
+    assert not hasattr(mart27_sql, "query_families")
+    assert not hasattr(mart27_sql, "family_repeat_fingerprints")

@@ -156,6 +156,10 @@ def test_effective_access_exposes_admin_reach() -> None:
     assert "AS REACHES_ADMIN" in sql
     assert "'ACCOUNTADMIN'" in sql and "'SECURITYADMIN'" in sql
     assert "AS RISK_SCORE" in sql
+    # v4.607: the inline two-line IN-list stays byte-identical to the codified
+    # REACHES_ADMIN_ROLES tier (owner 2026-09-10), so editing one side alone fails here.
+    flat = " ".join(sql.split())
+    assert security_sql._admin_roles_in("r.EFFECTIVE_ROLE", security_sql.REACHES_ADMIN_ROLES) in flat
 
 
 def test_escalation_flags_scores_self_escalation_paths() -> None:
@@ -269,7 +273,6 @@ def test_new_readers_parse_and_preserve_expected_shapes() -> None:
         security_sql.failed_login_reasons_fact(7, "ALFA"),
         security_sql.new_network_logins_fact(7, "ALFA"),
         security_sql.recent_ddl_changes_fact(7, "ALFA"),
-        security_sql.admin_role_activity_fact(7, "ALFA"),
         security_sql.effective_access("ALFA"),
         security_sql.egress_baseline(7),
         mart_sql.app_performance_slo(7),

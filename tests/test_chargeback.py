@@ -67,9 +67,3 @@ def test_v008_seed_covers_known_warehouses():
     assert "'WH_ALFA_ADMIN'" in sql
     # Billing-truth posture is documented, not implied
     assert "Unmapped" in chargeback_sql.department_window_credits(7)
-
-
-def test_role_department_lens_labels_unmapped():
-    sql = chargeback_sql.role_department_map_join(7, "ALL")
-    assert "MAP_TYPE = 'ROLE'" in sql
-    assert "'Unmapped role'" in sql

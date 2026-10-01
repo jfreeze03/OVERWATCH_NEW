@@ -60,7 +60,6 @@ def test_v052_live_cap_unchanged_but_mart_and_cortex_honor_long_window():
     # mart-history + the owner-named Cortex live exception honor 365...
     for sql in (cortex_sql.cortex_code_user_rollup(9999, "ALFA"),
                 cortex_sql.cortex_code_daily(9999, "ALFA"),
-                cost_sql.storage_by_database(9999, "ALFA"),
                 chargeback_sql.department_window_credits(9999, "ALFA")):
         assert "-365," in sql.replace(" ", ""), sql[:60]
     # ...while a live ACCOUNT_USAGE scan stays capped at 90

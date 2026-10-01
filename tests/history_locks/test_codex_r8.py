@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import tokenize
 from pathlib import Path
 
 from app.data import mart27_sql
@@ -10,9 +12,43 @@ _ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_run_batch_callers_trust_the_contract():
-    for page in ("brief.py", "operations.py", "security.py"):
+    for page in ("brief.py", "operations.py", "security.py", "overview.py"):
         txt = (_ROOT / "app" / "ui" / "pages" / page).read_text(encoding="utf-8")
         assert ") or {}" not in txt, page          # dict guaranteed since v4.20
+
+
+def _run_batch_or_empty_sites(src: str) -> list[int]:
+    """Lines where a run_batch(...) call (not run_batch_mixed) is followed by `or {}`."""
+    toks = [t for t in tokenize.generate_tokens(io.StringIO(src).readline)
+            if t.type not in (tokenize.NL, tokenize.NEWLINE, tokenize.COMMENT)]
+    hits = []
+    for i, tok in enumerate(toks[:-1]):
+        if not (tok.type == tokenize.NAME and tok.string == "run_batch" and toks[i + 1].string == "("):
+            continue
+        depth, j = 0, i + 1
+        while j < len(toks):
+            depth += {"(": 1, ")": -1}.get(toks[j].string, 0)
+            if depth == 0:
+                break
+            j += 1
+        tail = [t.string for t in toks[j + 1:j + 4]]
+        if tail == ["or", "{", "}"]:
+            hits.append(tok.start[0])
+    return hits
+
+
+def test_no_run_batch_caller_guards_against_none():
+    # v4.607 (law 8): every app/ui run_batch caller trusts the dict contract, not just the
+    # three pages above. run_batch_mixed callers are a separate contract and not scanned.
+    offenders = {}
+    for path in sorted((_ROOT / "app" / "ui").rglob("*.py")):
+        hits = _run_batch_or_empty_sites(path.read_text(encoding="utf-8"))
+        if hits:
+            offenders[str(path.relative_to(_ROOT))] = hits
+    assert offenders == {}
+    # the scanner itself sees the pattern it guards against
+    assert _run_batch_or_empty_sites("x = run_batch([f(a)], page=p) or {}\n") == [1]
+    assert _run_batch_or_empty_sites("x = run_batch_mixed([f(a)], page=p) or {}\n") == []
 
 
 def test_new_readers_use_the_shared_literal_helper():

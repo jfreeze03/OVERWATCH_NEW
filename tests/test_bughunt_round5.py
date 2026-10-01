@@ -110,10 +110,11 @@ def test_workbench_clears_comment_after_save():
 
 # --- sql-agg fin-2 (LOW): role->department join dedups the map like _MAP_JOIN ---------
 def test_role_department_join_dedups_the_map():
-    sql = chargeback_sql.role_department_map_join(30, "ALFA")
-    sqlglot.parse(sql, dialect="snowflake")
-    assert "QUALIFY ROW_NUMBER() OVER (PARTITION BY UPPER(NAME)" in sql
-    assert "MAP_TYPE = 'ROLE'" in sql
+    # v4.607: the never-wired role->department builder this fixed (role_department_map_join,
+    # canary-only, a live QUERY_HISTORY scan per canary run) was deleted. Lock that it stays
+    # gone; the WAREHOUSE map join it mirrored keeps its dedup (tests/test_chargeback.py).
+    assert not hasattr(chargeback_sql, "role_department_map_join")
+    assert "role_department_map_join" not in _src("app/data/canary.py")
 
 
 # --- formula-edge fin-2 (LOW): age humanizers promote at the unit boundary -----------

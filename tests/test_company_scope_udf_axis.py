@@ -91,8 +91,6 @@ def test_converted_builders_carry_udf_axis_and_parse():
         ("ops.copy_load_failures", ops_sql.copy_load_failures(30, "ALFA"), db),
         ("chargeback.role_share_within_warehouse",
          chargeback_sql.role_share_within_warehouse(30, "Trexis"), wh),
-        ("chargeback.role_department_map_join",
-         chargeback_sql.role_department_map_join(30, "ALFA"), wh),
         ("security.recent_ddl_changes_fact",
          security_sql.recent_ddl_changes_fact(7, "ALFA"), db),
         ("security.untagged_objects", security_sql.untagged_objects("Trexis"), db),

@@ -12,8 +12,10 @@ the table load": comparing only the days a table actually added rows (rows-added
 falsely flagged because the newest data across the account happens to land on a
 weekend. The complementary "a load was expected and didn't run" question is
 already answered by the freshness-SLA and Volume-drops panels next to this one.
-Null-rate-spike and schema-drift monitors (which need a stored baseline) and the
-DQ_BREACH alert are the deferred owner-migration halves.
+Server-side, the DQ_BREACH alert (V132, an SP_ANOMALY_SWEEP arm reproducing this
+scoring) and the DQ_SCHEMA_DRIFT monitor (V133) are live; only the null-rate-spike
+monitor (it needs table-data scans and SELECT grants) remains a deferred
+owner-migration half.
 """
 
 from __future__ import annotations

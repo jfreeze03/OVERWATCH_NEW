@@ -107,9 +107,11 @@ def test_tier_rate_defaults_present():
 # ---------------------------------------------------------------------------
 
 def test_per_db_storage_is_windowed_average_not_snapshot():
-    for sql in (cost_sql.storage_by_database(90, "ALFA"),
-                cost_sql.storage_by_database_live(90, "ALFA")):
-        assert "AVG(COALESCE(" in sql and "DAYS_AVERAGED" in sql
+    # v4.607: the trailing-window storage_by_database[_live] pair was deleted (no page caller
+    # since item 7); the calendar-month pair Spend reads keeps the F1a averaged basis.
+    for sql in (cost_sql.storage_by_database_calendar("ALFA"),
+                cost_sql.storage_by_database_calendar_live("ALFA")):
+        assert "/ NULLIF(DATEDIFF('day'," in sql and "DAYS_AVERAGED" in sql
         assert "QUALIFY DAY = MAX(DAY) OVER ()" not in sql
         sqlglot.parse(sql, dialect="snowflake")
 
@@ -125,7 +127,8 @@ def test_allocation_caveat_and_size_note():
     # now the window-matched _pool — full for a mart dim, <=90d for a live one)
     assert 'alloc["ALLOCATED_USD"] = alloc["ELAPSED_SHARE"].map(safe_float) * _pool' in sp
     cs = (_ROOT / "app" / "data" / "cost_sql.py").read_text(encoding="utf-8")
-    assert "mart27_sql.alloc_attribution" in cs and "warehouse-size-blind" in cs
+    assert "mart27_sql.alloc_xdim_attribution" in cs and "warehouse-size-blind" in cs
+    assert "the normal path is mart27_sql.alloc_attribution" not in cs   # v4.607: retired pointer
     # live builder keeps the tested global elapsed-share law (unchanged)
     live = cost_sql.allocated_attribution(7, "USER_NAME", "ALFA")
     assert "(SELECT SUM(ELAPSED_MS) FROM scoped)" in live and "RATIO_TO_REPORT" not in live

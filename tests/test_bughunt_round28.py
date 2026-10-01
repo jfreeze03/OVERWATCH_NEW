@@ -72,8 +72,9 @@ def test_cost_truth_billed_gates_on_key_column_not_bare_aggregate_usable():
                if "billed_split(" in py.read_text(encoding="utf-8")]
     assert readers == []
     assert "def _cost_truth" not in _read("app/ui/decision_studio.py")
-    # billed_split really is a bare aggregate (SUM, no GROUP BY) — the reason .usable()
-    # can't be trusted as a presence signal
-    bs = _read("app/data/mart_sql.py").split("def billed_split", 1)[1].split("\ndef ", 1)[0]
-    assert "GROUP BY" not in bs and "SUM(" in _read("app/data/mart_sql.py").split(
+    # v4.607: the bare-aggregate billed_split reader itself was deleted (canary-only after the
+    # Cost Truth retirement); a revival must re-earn the key-column presence gate above. The
+    # split fragment it wrapped stays a SUM over the live per-day readers.
+    assert "def billed_split" not in _read("app/data/mart_sql.py")
+    assert "SUM(" in _read("app/data/mart_sql.py").split(
         "def _billed_split_cols", 1)[1].split("\ndef ", 1)[0]

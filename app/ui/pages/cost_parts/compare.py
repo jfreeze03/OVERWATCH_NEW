@@ -335,9 +335,10 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
         st.markdown(f"**Pattern movers on {_sel_wh} — the silent-spend delta (measured $)**")
         st.caption("Live per-warehouse scan (QUERY_HISTORY x QUERY_ATTRIBUTION_HISTORY), "
                    "measured compute credits at ~8h view lag — same $ attribution basis as the "
-                   "account-wide movers. RUNS here counts distinct executions (the account-wide "
-                   "table counts attribution rows, which run higher for multi-hour queries). "
-                   "Click another warehouse to switch.")
+                   "account-wide movers. RUNS counts distinct executions, the basis the "
+                   "account-wide table uses since V120 (mart rows older than V120's 90-day "
+                   "re-stamp may still count attribution rows, which run higher for multi-hour "
+                   "queries). Click another warehouse to switch.")
         _pat = run(
             mart27_sql.compare_pattern_costs_by_warehouse(a0, a1, b0, b1, _sel_wh),
             page=_PAGE, key=f"cmp_pat_wh_{company}_{a0}_{b0}_{_sel_wh}", tier="recent",

@@ -2,8 +2,10 @@
 
 App-only half: a robust-z row-volume monitor over ACCOUNT_USAGE.TABLE_DML_HISTORY,
 scoped to catalog-registered data products so scans stay bounded and every finding
-routes to a known owner. Null-rate spike and schema-drift monitors (which need a
-stored baseline) and the DQ_BREACH alert are the deferred owner-migration halves.
+routes to a known owner. Server-side, the DQ_BREACH alert (V132, an SP_ANOMALY_SWEEP
+arm reproducing this robust-z scoring) and the DQ_SCHEMA_DRIFT monitor (V133) are live;
+only the null-rate monitor (it needs table-data scans and SELECT grants) remains a
+deferred owner-migration half.
 """
 
 from __future__ import annotations

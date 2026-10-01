@@ -1206,8 +1206,8 @@ def recon_recurrence(
 SLA_FORECAST_MIN_RUNS = 4          # complete nights needed before a trend is fitted
 SLA_FORECAST_HORIZON_RUNS = 7      # project the margin this many nights ahead
 SLA_FORECAST_MIN_SLOPE_SEC = 120.0  # < 2 min/night margin drift is noise, not a trend
-# Next-Fifty #18: the trend fits the newest N nights (mirrors etl_control_sql.SLA_BASELINE_RUNS — the
-# logic layer must not import the data layer); older returned nights feed only the month-end history.
+# Next-Fifty #18: the trend fits the newest N nights (the one source of the fit size; the data layer's
+# SLA_HISTORY_NIGHTS scan returns more); older returned nights feed only the month-end history.
 SLA_FORECAST_FIT_NIGHTS = 14
 
 

@@ -16,7 +16,9 @@ _OPS = (_ROOT / "app" / "ui" / "pages" / "operations.py").read_text(encoding="ut
 
 
 def test_ops_diag_hourly_windows_are_day_aligned_like_the_summary():
-    for sql in (mart27_sql.role_hourly(7), mart27_sql.schema_hourly(7)):
+    # v4.607: the thin role_hourly/schema_hourly readers were deleted (canary/test-only);
+    # the surviving readers of the same two hourly facts carry the day-aligned anchor.
+    for sql in (mart27_sql.role_share(7), mart27_sql.schema_window_summary(7)):
         assert "CURRENT_TIMESTAMP" not in sql
         assert "HOUR_TS >= DATEADD('day', -7, CURRENT_DATE())" in sql
     # the live summary they must line up with is day-aligned (CURRENT_DATE) too

@@ -152,7 +152,8 @@ def _stub_runtime(monkeypatch):
         if hasattr(module, "run"):
             monkeypatch.setattr(module, "run", _keyed_run)
         if hasattr(module, "run_batch"):
-            monkeypatch.setattr(module, "run_batch", lambda *_a, **_k: None)  # serial path
+            # serial path: an empty dict, the run_batch contract (callers no longer guard `or {}`)
+            monkeypatch.setattr(module, "run_batch", lambda *_a, **_k: {})
         if hasattr(module, "run_batch_mixed"):
             monkeypatch.setattr(module, "run_batch_mixed", lambda *_a, **_k: None)  # serial path (#58)
         if hasattr(module, "execute_statement"):

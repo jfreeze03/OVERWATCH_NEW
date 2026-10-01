@@ -135,6 +135,19 @@ def test_sleep_polling_gets_the_cloud_services_pack_for_its_warehouse() -> None:
     assert plan_for_alert("COST_SLEEP_POLLING", "No warehouse sleep polling ~$30/week: User X", "", "2026-09-28") is None
 
 
+def test_metering_service_evidence_carries_the_billed_basis_the_sweep_scores() -> None:
+    # v4.607 (R1-051): COST_ANOMALY_SWEEP scores SUM(CREDITS_BILLED) per service while the evidence
+    # read returned only gross CREDITS_USED (the COST_SERVERLESS_CREEP basis) under a 'billed' label.
+    # Both bases now ship, survive the column filter, and the framing names which is which.
+    from app.logic.ai_prompts import _EVIDENCE_COLUMNS, _EVIDENCE_FRAMING
+    plan = plan_for_alert("COST_ANOMALY_SWEEP", _SWEEP, "", "2026-08-10")
+    sql = alert_evidence_sql.build(plan)
+    assert "AS CREDITS_BILLED" in sql and "AS CREDITS_USED" in sql
+    assert {"CREDITS_BILLED", "CREDITS_USED"} <= set(_EVIDENCE_COLUMNS["metering_service"])
+    framing = _EVIDENCE_FRAMING["metering_service"]
+    assert "COST_ANOMALY_SWEEP" in framing and "COST_SERVERLESS_CREEP" in framing
+
+
 def test_prompt_framing_matches_the_family_and_forbids_invention() -> None:
     cloud_df = pd.DataFrame({
         "SAMPLE_TEXT": ["SHOW TABLES"], "QUERY_TYPE": ["SHOW"], "RUNS": [4000],

@@ -72,8 +72,8 @@ DEFAULT_SETTINGS = {
     "COCO_DAILY_CAP_CREDITS": 15.0,  # per-user daily Cortex Code allowance the token-economics
     #                                  efficiency review measures against (30 for exception users)
     # V163 COST_AI_USER_RUNAWAY (Next-Fifty #37a): a user's AI day raises only when it is above the rule's
-    # THRESHOLD_NUM x COCO_DAILY_CAP_CREDITS AND at least this robust z above their own prior 90 active days
-    # (fewer than 5 such days = no baseline, the cap alone decides). The switch adds AI Functions spend, but
+    # THRESHOLD_NUM x COCO_DAILY_CAP_CREDITS AND at least this robust z above their own active days in the
+    # prior 90 days (fewer than 5 such days = no baseline, the cap alone decides). The switch adds AI Functions spend, but
     # only rows booked to a user count and the loader books Functions to the account today (inert).
     "AI_RUNAWAY_ROBUST_Z": 3.5,
     "AI_RUNAWAY_INCLUDE_FUNCTIONS": "FALSE",

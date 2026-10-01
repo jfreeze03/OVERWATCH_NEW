@@ -54,10 +54,11 @@ def test_dormant_reawakening_contract():
 
 def test_egress_builders_contract():
     from app.data import security_sql
-    e = security_sql.egress_daily(30)
-    assert "DATA_TRANSFER_HISTORY" in e
-    assert "TARGET_REGION" in e and "TRANSFER_TYPE" in e
-    assert "HAVING SUM(BYTES_TRANSFERRED) > 0" in e           # zero-byte rows stay off the chart
+    # v4.607: egress_daily (the Security egress KPI/chart read) lost its panel when the $ egress
+    # story moved to Cost (v4.258 consolidation) and was deleted as canary-only; the Egress tab's
+    # DATA_TRANSFER_HISTORY lens is egress_baseline, which keeps the true-egress predicate.
+    assert not hasattr(security_sql, "egress_daily")
+    assert "(TARGET_REGION IS NOT NULL OR TARGET_CLOUD IS NOT NULL)" in security_sql.egress_baseline(30)
     u = security_sql.unload_activity(30, "ALFA")
     assert "QUERY_TYPE = 'UNLOAD'" in u
     assert "EXECUTION_STATUS = 'SUCCESS'" in u
@@ -100,5 +101,5 @@ def test_egress_section_and_new_network_panel_wired():
 
 def test_r25_builders_are_canaried():
     canary = (_ROOT / "app" / "data" / "canary.py").read_text(encoding="utf-8")
-    for fn in ("new_network_logins", "egress_daily", "unload_activity", "unload_risk_events"):
+    for fn in ("new_network_logins", "egress_baseline", "unload_activity", "unload_risk_events"):
         assert f"security_sql.{fn}" in canary, f"{fn} has no canary — every reader gets one"

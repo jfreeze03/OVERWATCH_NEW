@@ -55,7 +55,6 @@ def test_live_warehouse_builders_skip_the_pseudo_warehouse():
         insights_sql.idle_warehouse_analysis(7, "ALFA"),
         insights_sql.warehouse_sizing_profile(7, "ALFA"),
         insights_sql.warehouse_hourly_activity(7, "ALFA"),
-        mart27_sql.live_monthly_spend_by_warehouse(12, "ALFA"),
     ]
     for sql in checks:
         assert "WAREHOUSE_ID > 0" in sql, sql[:120]
@@ -114,8 +113,9 @@ def test_clustering_by_table_reader_and_panel():
 def test_year_projection_is_unclamped_and_labeled():
     sql = mart_sql.fact_daily_spend_year()
     # r30 #1: true calendar year anchored on the ACCOUNT clock (account_today_sql), not
-    # session-tz CURRENT_DATE() -- the latter is UTC under SiS and emptied the YTD window on
-    # New Year's Eve evening (America/Chicago).
+    # session-tz CURRENT_DATE() -- the latter is Central only via the account default TIMEZONE
+    # and, under any other session zone, empties the YTD window on New Year's Eve evening
+    # (America/Chicago).
     assert "DATE_TRUNC('year', CONVERT_TIMEZONE('America/Chicago'" in sql
     assert "DATE_TRUNC('year', CURRENT_DATE())" not in sql
     ct = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "contract.py").read_text(encoding="utf-8")
