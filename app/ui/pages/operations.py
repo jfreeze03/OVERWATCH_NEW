@@ -7,7 +7,6 @@ from datetime import timedelta
 
 import streamlit as st
 
-from app import companies
 from app.config import MAX_LIVE_WINDOW_DAYS, core_object
 from app.core.errors import safe_page
 from app.core.identity import identity_sql
@@ -4033,37 +4032,28 @@ def _contention_tab(company: str, days: int, *, bounds: tuple | None = None) -> 
         _lock_db = str(st.session_state.get("flt_database", "") or "").strip()
         # V035: the live scan read 46-56 GB / 74-259s per view (Joe's own
         # Heaviest-queries panel, 2026-07-10) — mart-first, always.
+        # #34 + PR-1 R1-133: both builders narrow to the company and the Database filter IN SQL,
+        # before their LIMIT 50 -- the old pandas seam filtered an account-wide top 50, so a
+        # database ranked 51st read as "no lock waits in this scope" (the live fallback also took
+        # its company only there). The live leg scopes by the object's database company.
         res = run_mart_first(
-            mart27_sql.lock_wait_daily(min(days, 14), company, bounds=bounds),
-            ops_sql.lock_contention(min(days, 14), bounds=bounds),
+            mart27_sql.lock_wait_daily(min(days, 14), company, bounds=bounds, database=_lock_db),
+            ops_sql.lock_contention(min(days, 14), bounds=bounds, company=company, database=_lock_db),
             page=_PAGE, key=f"c_locks_{company}_{days}_{_lock_db}{_lm}",  # #34: scope in the cache key
             mart_source=f"MART_LOCK_WAIT_DAILY ({company} + account-level)",
-            live_source="ACCOUNT_USAGE.LOCK_WAIT_HISTORY (account-wide, pre-V035)",
+            live_source="ACCOUNT_USAGE.LOCK_WAIT_HISTORY (scoped by database company, pre-V035)",
             empty_is_answer=True)
-        if guard(res, "No lock waits recorded (or the view is not accessible in this edition)."):
-            # #34: bring both paths to one company + database contract. Neither
-            # builder (both outside this cluster) takes a database predicate, and
-            # the live LOCK_WAIT_HISTORY fallback carries no company scope at all
-            # (COMPANY lives only on the mart) — yet both return DATABASE_NAME. Scope
-            # at the seam on that object grain: the live fallback to the company by
-            # database classification, and the active Database filter to both.
-            _ldf = res.df
-            _served_live = bool(getattr(_ldf, "attrs", {}).get("_ow_served_live"))
-            if _served_live and company not in ("ALL", "") and "DATABASE_NAME" in _ldf.columns:
-                _ldf = _ldf[_ldf["DATABASE_NAME"].map(companies.classify_database) == company]
-            if _lock_db and "DATABASE_NAME" in _ldf.columns:
-                _ldf = _ldf[_ldf["DATABASE_NAME"].astype(str).str.upper() == _lock_db.upper()]
-            if _ldf.empty:
-                st.caption("No lock waits in this company/database scope.")
-            else:
-                styled_table(_ldf)
-                result_caption(res)
-                # The mart covers up to 14 days but the live LOCK_WAIT_HISTORY fallback is
-                # cost-capped to the last 7 (ops_sql.lock_contention), so the counts roughly
-                # halve when it serves — disclose the shorter span rather than imply 14 days.
-                if _served_live:
-                    st.caption("Live fallback: lock waits cover the last ~7 days (the live scan "
-                               "is cost-capped); the mart covers up to 14.")
+        if guard(res, "No lock waits recorded in this company/database scope (or the view is not "
+                      "accessible in this edition)."):
+            _served_live = bool(getattr(res.df, "attrs", {}).get("_ow_served_live"))
+            styled_table(res.df)
+            result_caption(res)
+            # The mart covers up to 14 days but the live LOCK_WAIT_HISTORY fallback is
+            # cost-capped to the last 7 (ops_sql.lock_contention), so the counts roughly
+            # halve when it serves — disclose the shorter span rather than imply 14 days.
+            if _served_live:
+                st.caption("Live fallback: lock waits cover the last ~7 days (the live scan "
+                           "is cost-capped); the mart covers up to 14.")
 
 
 
@@ -4596,9 +4586,10 @@ def render() -> None:
         },
         "Warehouses": {
             "applies": ("company",),
-            "partial": ("days",),
+            "partial": ("days", "database"),
             "note": ("Contention uses Window; warehouse anomaly history is a fixed 30-day view; the "
-                     "statement-timeout runtime tail reads max(Window, 30) days, capped at 90."),
+                     "statement-timeout runtime tail reads max(Window, 30) days, capped at 90. "
+                     "Lock waits also narrow to the Database filter."),
         },
         "Optimize": {
             "applies": ("company", "days"),

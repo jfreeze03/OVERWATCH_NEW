@@ -63,5 +63,6 @@ def test_lock_waits_discloses_live_fallback_seven_day_cap():
     src = _src("app/ui/pages/operations.py")
     assert "if _served_live:" in src
     assert "Live fallback: lock waits cover the last ~7 days" in src
-    # the mart/live call contract itself is unchanged (min(days, 14) to both arms)
-    assert "ops_sql.lock_contention(min(days, 14), bounds=bounds)" in src
+    # the mart/live call contract keeps min(days, 14) to both arms (PR-1 R1-133 added the SQL-side
+    # company/database scope after bounds, so the lock pins the prefix)
+    assert "ops_sql.lock_contention(min(days, 14), bounds=bounds, " in src

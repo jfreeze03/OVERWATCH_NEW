@@ -780,15 +780,20 @@ LIMIT 30
 """
 
 
-def lock_wait_daily(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
+def lock_wait_daily(days: int, company: str = "ALL", *, bounds: tuple | None = None,
+                    database: str = "") -> str:
     """Lock waits from MART_LOCK_WAIT_DAILY (V035) — the live scan read
     46-56 GB per view; the daily task pays that once. Same ranking as the
-    live builder: never-acquired first (those are the aborted statements)."""
+    live builder: never-acquired first (those are the aborted statements).
+    ``database`` narrows BEFORE the LIMIT 50 (PR-1 R1-133), as lock_wait_spikes does."""
     d = bounded_days(days, 90)
     comp = ""
     if company and company != "ALL":
         comp = (f"    AND (c.COMPANY = {companies.sql_literal(company)}"
                 " OR UPPER(c.COMPANY) = 'ALL')\n")
+    dbf = companies.database_equals_clause(database, "c.DATABASE_NAME")
+    if dbf:
+        comp += f"    AND {dbf}\n"
     return f"""SELECT
     c.DATABASE_NAME,
     c.SCHEMA_NAME,

@@ -253,9 +253,8 @@ def test_volume_deltas_failed_row_survives_fifty_suppressed_weekday_rows():
     for d in range(2, 9):                                          # Sep 20..Sep 26 (d-8 .. d-2)
         day = f"2026-09-{28 - d:02d}"
         wd = date(2026, 9, 28 - d).weekday()
-        for t in range(60):
-            if wd < 5:
-                rows.append(("BIZ_DB", "S", f"T{t:02d}", day + " 01:00:00", 2000))
+        if wd < 5:
+            rows.extend(("BIZ_DB", "S", f"T{t:02d}", day + " 01:00:00", 2000) for t in range(60))
         rows.append(("DAILY_DB", "S", "FEED", day + " 01:00:00", 10000))
     rows.append(("DAILY_DB", "S", "FEED", "2026-09-27 01:00:00", 3000))   # yesterday: a 70% drop
     con.executemany("INSERT INTO DML VALUES (?,?,?,?,?)", rows)
@@ -265,3 +264,80 @@ def test_volume_deltas_failed_row_survives_fifty_suppressed_weekday_rows():
         pytest.skip(f"sqlite cannot run the transpiled builder: {exc}")
     assert len(got) == 50
     assert got[0][2] == "FEED" and got[0][-1] == "FAILED"
+
+
+# --------------------------------------------- R1-053: lock_contention clips to the 7-day CAP ----
+
+@pytest.mark.parametrize(("days", "bounds", "start", "end"), [
+    # Current month on the 1st: offset 0 used to render an EMPTY [Sep 2, Sep 2) window
+    (CalendarDayOffset(0), (date(2026, 9, 1), date(2026, 9, 2)), "2026-09-01", "2026-09-02"),
+    # Sep 5 (offset 4): the offset clip dropped the 1st
+    (CalendarDayOffset(4), (date(2026, 9, 1), date(2026, 9, 6)), "2026-09-01", "2026-09-06"),
+    # late in the month the 7-day cost cap still holds
+    (CalendarDayOffset(29), (date(2026, 9, 1), date(2026, 10, 1)), "2026-09-24", "2026-10-01"),
+    # Current year on Jan 1
+    (CalendarDayOffset(0), (date(2026, 1, 1), date(2026, 1, 2)), "2026-01-01", "2026-01-02"),
+    # Last month: unchanged (round 5)
+    (31, (date(2026, 8, 1), date(2026, 9, 1)), "2026-08-25", "2026-09-01"),
+])
+def test_lock_contention_bounds_clip_uses_the_cap_not_the_offset(days, bounds, start, end):
+    from app.data import ops_sql
+    sql = ops_sql.lock_contention(min(days, 14), bounds=bounds)
+    assert f"REQUESTED_AT >= '{start}' AND REQUESTED_AT < '{end}'" in sql
+
+
+# ------------------------------------- R1-133: lock waits scope in SQL, before the LIMIT 50 ----
+
+def test_lock_builders_scope_company_and_database_before_the_limit():
+    import sqlglot
+
+    from app.data import mart27_sql, ops_sql
+    live = ops_sql.lock_contention(7, company="ALFA", database="TARGET_DB")
+    assert "DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME) = 'ALFA'" in live
+    assert "UPPER(DATABASE_NAME) IN ('TARGET_DB')" in live
+    assert live.index("TARGET_DB") < live.index("GROUP BY") < live.index("LIMIT 50")
+    mart = mart27_sql.lock_wait_daily(14, "ALFA", database="TARGET_DB")
+    assert "UPPER(c.DATABASE_NAME) IN ('TARGET_DB')" in mart
+    assert mart.index("TARGET_DB") < mart.index("GROUP BY") < mart.index("LIMIT 50")
+    for sql in (live, mart):
+        sqlglot.parse(sql, dialect="snowflake")
+    # unscoped renders keep their old shape
+    assert "COMPANY_FOR_DATABASE" not in ops_sql.lock_contention(7)
+    assert "UPPER(c.DATABASE_NAME) IN" not in mart27_sql.lock_wait_daily(14, "ALFA")
+
+
+def test_lock_wait_daily_database_ranked_past_fifty_still_serves():
+    # The reviewer's mart repro: 55 busier groups in other ALFA databases rank above TARGET_DB's 5,
+    # so the account-wide LIMIT 50 used to hold none of them and the page said "no lock waits".
+    import sqlite3
+
+    import sqlglot
+
+    from app.data import mart27_sql
+    sql = mart27_sql.lock_wait_daily(14, "ALFA", database="TARGET_DB")
+    lite = sqlglot.transpile(sql, read="snowflake", write="sqlite")[0]
+    lite = lite.replace("DBA_MAINT_DB.OVERWATCH.MART_LOCK_WAIT_DAILY", "MART").replace("CURRENT_DATE", "'2026-09-30'")
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE MART (DAY, COMPANY, DATABASE_NAME, SCHEMA_NAME, OBJECT_NAME, LOCK_TYPE, "
+                "WAIT_EVENTS, ACQUIRED_WAIT_SEC, NEVER_ACQUIRED, LAST_SEEN)")
+    rows = [("2026-09-29", "ALFA", f"OTHER_{i:02d}", "S", "T", "TABLE", 5, 50, 3, "2026-09-29")
+            for i in range(55)]
+    rows += [("2026-09-29", "ALFA", "TARGET_DB", "S", f"T{i}", "TABLE", 2, 10, 0, "2026-09-29")
+             for i in range(5)]
+    con.executemany("INSERT INTO MART VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+    try:
+        got = con.execute(lite).fetchall()
+    except sqlite3.OperationalError as exc:                          # dialect gap -> the SQL lock above
+        pytest.skip(f"sqlite cannot run the transpiled builder: {exc}")
+    assert len(got) == 5 and {r[0] for r in got} == {"TARGET_DB"}
+
+
+def test_lock_waits_page_drops_the_post_limit_pandas_seam():
+    body = read(_OPS)
+    assert "mart27_sql.lock_wait_daily(min(days, 14), company, bounds=bounds, database=_lock_db)" in body
+    assert "ops_sql.lock_contention(min(days, 14), bounds=bounds, company=company, database=_lock_db)" in body
+    assert "classify_database) == company" not in body
+    assert 'st.caption("No lock waits in this company/database scope.")' not in body   # C25: no raw absence
+    # the Warehouses section now declares the Database filter as panel-dependent (Lock waits applies it)
+    assert '"partial": ("days", "database"),' in body
+
