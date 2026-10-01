@@ -170,22 +170,23 @@ INLINE_FIX_RULES = ("COST_CLOUD_SVC_RATIO", "COST_WH_DAILY_CREDITS",
                     "COST_IDLE_OPPORTUNITY")
 
 
-def inline_fix_warehouse(rule_id: str, text: str = "") -> str:
-    """The warehouse an inline fix should target, or '' when not applicable."""
+def inline_fix_warehouse(rule_id: str, text: str = "", detail: str = "") -> str:
+    """The warehouse an inline fix should target, or '' when not applicable. ``text`` is the event TITLE and
+    ``detail`` its DETAIL (see rule_warehouse)."""
     rid = str(rule_id or "").strip().upper()
     if rid not in INLINE_FIX_RULES:
         return ""
-    return rule_warehouse(rid, text)
+    return rule_warehouse(rid, text, detail)
 
 
-def fix_target(rule_id: str, text: str = "") -> dict | None:
+def fix_target(rule_id: str, text: str = "", detail: str = "") -> dict | None:
     """Like investigation_target but lands where the FIX is generated."""
     rid = str(rule_id or "").strip().upper()
     if rid not in FIX_TARGETS:
         return None
     page, section = FIX_TARGETS[rid]
     return {"page": page, "section": section,
-            "filters": investigation_target(rid, text)["filters"]}
+            "filters": investigation_target(rid, text, detail)["filters"]}
 
 
 _WH_RE = re.compile(r"\bWH_[A-Z0-9_]+\b")
@@ -209,18 +210,37 @@ _TITLE_WAREHOUSE_RES: dict[str, re.Pattern[str]] = {
     "COST_CLOUD_SVC_ANOMALY": re.compile(r"^\s*CLOUD SVC (\S+) cloud-services (?:spiked|collapsed) to "),
     "WH_CHANGE_REGRESSION": re.compile(r"^\s*Warehouse (\S+) regressed after "),   # SP_WAREHOUSE_CHANGE_SCAN
 }
+# Shaped rules whose every title the shape does not match names NO warehouse: SP_ANOMALY_SWEEP's SERVICE series
+# (AUTO_CLUSTERING, the WAREHOUSE_METERING aggregate; every sweep title since V012 is SERIES-led) and V160's
+# 'No warehouse' sleep-polling series (whose tail is a user name). Neither falls back to a WH_* token.
+_TITLE_SHAPE_ONLY_RULES = frozenset({"COST_ANOMALY_SWEEP", "COST_SLEEP_POLLING"})
+# Free LLM text appended to an event's DETAIL: the sweep's pre-explain (' | AI: ', V016..V150) and the drawer's
+# saved hypothesis (' | AI hypothesis: ', alerts.py). Both are appended after the raiser's own DETAIL, so
+# everything from the first marker on is model output, never a source for an entity filter or a fix target.
+_AI_TAIL_RE = re.compile(r"\s\|\sAI(?: hypothesis)?:\s")
 
 
-def rule_warehouse(rule_id: str, text: str = "") -> str:
+def _raiser_text(text: str) -> str:
+    """``text`` up to the first appended AI narrative (the raiser-written part only)."""
+    raw = str(text or "")
+    m = _AI_TAIL_RE.search(raw)
+    return raw[:m.start()] if m else raw
+
+
+def rule_warehouse(rule_id: str, text: str = "", detail: str = "") -> str:
     """The warehouse an alert names (upper case, as Snowflake stores an unquoted name), or ''. ``text`` is the
-    event TITLE (optionally followed by its DETAIL, as the drawer passes it).
+    event TITLE and ``detail`` its DETAIL (an older caller may still pass 'TITLE DETAIL' as ``text``).
 
     A rule whose raiser leads its title with the warehouse (_TITLE_WAREHOUSE_RES) is read from that position
     and must be an unquoted (upper-case) identifier as Snowflake stores it: a quoted name (lower case,
     punctuation) or the cloud-services NULL series ('NONE') yields '' rather than a guess at a different
-    warehouse. Any other rule, or a title in an older shape, falls back to the first WH_* token in the text."""
+    warehouse. A shaped rule never reads its DETAIL: a title in an older shape falls back to the first WH_*
+    token in the TITLE only, and a _TITLE_SHAPE_ONLY_RULES title the shape does not match (a SERVICE sweep
+    series, the 'No warehouse' poller) names none. Any other rule takes the first WH_* token in the title or
+    DETAIL. An appended AI narrative (_AI_TAIL_RE) is never read: the sweep's ' | AI: ' text once made an
+    AUTO_CLUSTERING spike offer a closed-loop fix on a warehouse the model happened to mention."""
     rid = str(rule_id or "").strip().upper()
-    raw = str(text or "")
+    raw = _raiser_text(text)
     shape = _TITLE_WAREHOUSE_RES.get(rid)
     if shape is not None:
         m = shape.match(raw)
@@ -229,7 +249,11 @@ def rule_warehouse(rule_id: str, text: str = "") -> str:
             if not _IDENT_RE.match(name) or (rid == "COST_CLOUD_SVC_ANOMALY" and name == "NONE"):
                 return ""
             return name
-    wh = _WH_RE.search(raw.upper())
+        if rid in _TITLE_SHAPE_ONLY_RULES:
+            return ""
+        wh = _WH_RE.search(raw.upper())
+        return wh.group(0) if wh else ""
+    wh = _WH_RE.search(f"{raw} {_raiser_text(detail)}".upper())
     return wh.group(0) if wh else ""
 
 
@@ -245,7 +269,8 @@ def rule_warehouse(rule_id: str, text: str = "") -> str:
 # R2-037: every other arm whose TITLE leads with a user name gets the same carve-out -- SEC_CRED_EXPIRY ([10]
 # '<USER> <type> '<NAME>' expires ...'), SEC_NEW_ADMIN_NETWORK ([18] '<USER> logged in from new network <IP>')
 # and SEC_FAILED_LOGINS (daily [07] '<USER> had N failed logins on D'); first.last.name read as database FIRST.
-# tests/test_r2_alerts_logic.py scans the current raiser bodies so a new user-led arm cannot slip past.
+# tests/test_r2_alerts_logic.py scans the current raiser bodies (a user-name column concatenated anywhere in a
+# TITLE or DETAIL) so a new user-led arm cannot slip past.
 # The list stays explicit: SEC_NEW_EXPOSURE and SEC_POSTURE_METRIC can carry real object names.
 # DQ_RECON_ERROR's text is a count plus reconciliation METRIC names (never an entity), so a dotted metric
 # name must not become a database filter either.
@@ -256,10 +281,18 @@ _NO_ENTITY_FILTER_RULES = frozenset({
     "SEC_CRED_EXPIRY", "SEC_NEW_ADMIN_NETWORK", "SEC_FAILED_LOGINS",
     "DQ_RECON_ERROR",
 })
+# Rules whose title-led warehouse filter is real but whose text carries no database: COST_SLEEP_POLLING (V160)
+# ends its title and DETAIL with the poller's OWNER_HINT ('User <USER_NAME>' or '<APP> · <USER_NAME>'), so
+# 'User first.last.name' read as database FIRST. They keep the warehouse filter and never get a database one.
+_NO_DATABASE_FILTER_RULES = frozenset({
+    "COST_SLEEP_POLLING",
+})
 
 
-def investigation_target(rule_id: str, text: str = "") -> dict:
-    """-> {"page": str, "section": str, "filters": {...}} for one event."""
+def investigation_target(rule_id: str, text: str = "", detail: str = "") -> dict:
+    """-> {"page": str, "section": str, "filters": {...}} for one event. ``text`` is the event TITLE and
+    ``detail`` its DETAIL (an older caller may pass 'TITLE DETAIL' as ``text``); an appended AI narrative in
+    either is never read for a filter."""
     rid = str(rule_id or "").strip().upper()
     page, section = _RULE_TARGETS.get(rid, ("", ""))
     if not page:
@@ -274,11 +307,11 @@ def investigation_target(rule_id: str, text: str = "") -> dict:
     if rid in _NO_ENTITY_FILTER_RULES:
         return {"page": page, "section": section, "filters": {}}
     filters: dict = {}
-    upper = str(text or "").upper()
-    wh = rule_warehouse(rid, str(text or ""))   # R2-092: a warehouse-led title is read by its position
+    wh = rule_warehouse(rid, str(text or ""), str(detail or ""))   # R2-092: a warehouse-led title by position
     if wh:
         filters["warehouse_contains"] = wh
-    db = _DB_RE.search(upper)
-    if db and db.group(1) not in ("SNOWFLAKE",):
-        filters["database"] = db.group(1)
+    if rid not in _NO_DATABASE_FILTER_RULES:
+        db = _DB_RE.search(f"{_raiser_text(text)} {_raiser_text(detail)}".upper())
+        if db and db.group(1) not in ("SNOWFLAKE",):
+            filters["database"] = db.group(1)
     return {"page": page, "section": section, "filters": filters}

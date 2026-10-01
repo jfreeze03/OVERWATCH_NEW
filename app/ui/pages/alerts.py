@@ -1114,10 +1114,11 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                     # snooze + investigate/fix) was the LAST thing rendered, below six
                     # evidence panels, so every triage required scrolling the whole drawer.
                     # The evidence panels follow, demoted into a supporting group.
-                    target = investigation_target(str(row["RULE_ID"]),
-                                                  f"{row['TITLE']} {detail_text}")
-                    fix = fix_target(str(row["RULE_ID"]), f"{row['TITLE']} {detail_text}")
-                    wh_inline = inline_fix_warehouse(str(row["RULE_ID"]), f"{row['TITLE']} {detail_text}")
+                    # The TITLE and DETAIL go in apart: a warehouse-led rule reads its warehouse from the title
+                    # only, and neither read takes an entity from an appended AI narrative (navigate).
+                    target = investigation_target(str(row["RULE_ID"]), str(row["TITLE"]), detail_text)
+                    fix = fix_target(str(row["RULE_ID"]), str(row["TITLE"]), detail_text)
+                    wh_inline = inline_fix_warehouse(str(row["RULE_ID"]), str(row["TITLE"]), detail_text)
                     # rec18: two rows — nav buttons + action radio share one row; the note
                     # gets a full-width row of its own instead of a cramped ~30% column.
                     c_inv, c_fix, c_act = st.columns([1.1, 1.1, 0.9])
@@ -1268,7 +1269,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                     with st.expander("Playbook — what to do first", expanded=False):
                         st.markdown(playbook_for(str(row["RULE_ID"])))
                     _rid = str(row["RULE_ID"]).upper()
-                    _wh_guess = inline_fix_warehouse(_rid, f"{row['TITLE']} {detail_text}")
+                    _wh_guess = inline_fix_warehouse(_rid, str(row["TITLE"]), detail_text)
                     _rc_sql = recheck_sql.recheck_sql(_rid, _wh_guess, str(row.get("COMPANY", "")))
                     _rc_key = f"_ow_recheck_{event_id[:8]}"
                     if _rc_sql and st.button(

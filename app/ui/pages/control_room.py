@@ -1599,12 +1599,14 @@ def render() -> None:
                        + (" Task failures follow the database filter; alerts and "
                           "spend anomalies don't have database grain." if f["database"] else ""))
             _triage_track_panel(queue, company, can_write=_is_op, tracked_ok=_tracked_ok)
-        # C2: the app scores FACT_WAREHOUSE_DAILY itself, so the server twin's
+        # C2: the app scores FACT_WAREHOUSE_DAILY itself, so the server twin's warehouse-series
         # COST_ANOMALY_SWEEP events are dropped from THIS feed (they stay on Alerts) —
         # otherwise every spend break arrived twice, once from each scorer, at two
-        # different severities. E5: name the baseline, the scoring minimum and the money
-        # floor OUTSIDE the empty/non-empty branch, because "nothing to triage" is
-        # exactly where the reader most needs to know what was never in scope.
+        # different severities. R2-087: its SERVICE-series events (AUTO_CLUSTERING, the
+        # WAREHOUSE_METERING aggregate) have no in-app twin and stay in the queue. E5: name
+        # the baseline, the scoring minimum and the money floor OUTSIDE the empty/non-empty
+        # branch, because "nothing to triage" is exactly where the reader most needs to know
+        # what was never in scope.
         if wh_daily.usable():
             st.caption(md_dollars(
                 "Spend anomalies: robust median/MAD z-score per warehouse over the last 30 "
@@ -1613,8 +1615,9 @@ def render() -> None:
                 f"{format_usd(ANOMALY_HIGH_EXCESS_USD)}/day over baseline — fixed in-app defaults. "
                 "The server sweep SP_ANOMALY_SWEEP escalates on the configurable "
                 "ALERT_CONFIG.THRESHOLD_NUM, so where that threshold has been tuned the two can "
-                "differ; its COST_ANOMALY_SWEEP events (excluded here, shown on Alerts) stay "
-                f"authoritative. A warehouse needs {ANOMALY_MIN_ACTIVE_DAYS}+ active (non-zero-spend) "
+                "differ; its warehouse-series COST_ANOMALY_SWEEP events (excluded here, shown on "
+                "Alerts) stay authoritative; its service-series events have no in-app twin and stay "
+                f"in the queue. A warehouse needs {ANOMALY_MIN_ACTIVE_DAYS}+ active (non-zero-spend) "
                 "complete days in the 30-day window to be flagged at all"
                 + (f" — {_thin_warehouses} with a material-spend day currently do not and are "
                    "unscored (new or mostly idle)."

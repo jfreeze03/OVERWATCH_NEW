@@ -11,7 +11,7 @@ Contract (the old app broke all four of these):
 from __future__ import annotations
 
 import dataclasses
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -238,6 +238,23 @@ def _open_alert_counts(company: str = "ALL",
     return res, int(safe_float(_row.get("CRIT"))), int(safe_float(_row.get("HIGH")))
 
 
+def _no_pace_reason(frame: pd.DataFrame, complete_before: date) -> str:
+    """Why the MTD card has no pace vs last month (mtd_pace_vs_prior_month returned pct None).
+
+    No complete metering day this month yet (the 1st, and the 2nd until its 06:45 Central load -- R2-050) is not
+    missing history: the backfill instruction is only right when the prior month has no daily rows at all."""
+    month_start = account_today().replace(day=1)
+    if complete_before <= month_start:
+        return ("Pace vs last month appears after this month's first complete metering day "
+                "(loaded 06:45 Central).")
+    days = pd.to_datetime(frame["DAY"], errors="coerce").dropna().dt.date
+    prior_start = (month_start - timedelta(days=1)).replace(day=1)
+    if not ((days >= prior_start) & (days < month_start)).any():
+        return ("Pace vs last month appears once the prior month has "
+                "daily facts (backfill_365.sql loads the year).")
+    return "No pace vs last month: last month's same days show no billed spend to compare against."
+
+
 def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
                   ai_rate: float, budget: float) -> dict:
     """MTD paced against the prior month's same first-N-days (owner
@@ -288,8 +305,7 @@ def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
         return {"label": "MTD credit spend", "value": format_usd(mtd),
                 "sub": f"{format_credits(_mtd_credits)} cr" if _mtd_credits is not None else None,
                 "method": _method, "scope": "account-wide",
-                "help": "Pace vs last month appears once the prior month has "
-                        "daily facts (backfill_365.sql loads the year)." + budget_note + _split_note}
+                "help": _no_pace_reason(frame, _complete_before) + budget_note + _split_note}
     return {"label": "MTD credit spend vs last month",
             "value": format_usd(mtd),
             "sub": f"{format_credits(_mtd_credits)} cr" if _mtd_credits is not None else None,

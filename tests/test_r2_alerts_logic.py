@@ -52,6 +52,54 @@ def test_r2_037_every_user_led_title_gets_no_entity_filter():
     assert not missing, f"user-led titles that would set a bogus database filter: {sorted(missing)}"
 
 
+# A user-name column concatenated at ANY position of an arm's TITLE or DETAIL (investigation_target reads both, as
+# the drawer passes them): before or after a '||', bare or inside LEFT(..)/COALESCE(..). OWNER_HINT is V160's
+# 'User ' || USER_NAME / '<APP> · ' || USER_NAME (asserted below). DEDUPE_KEY lines ('<alias>.RULE_ID || '|'') are
+# never shown, so they are skipped.
+_USER_COLS = r"(?:USER_NAME|GRANTEE_NAME|OWNER_HINT)"
+_USER_CONCAT = re.compile(
+    rf"\|\|\s*(?:(?:LEFT|COALESCE)\(\s*)?[A-Za-z_]\w*\.{_USER_COLS}\b"
+    rf"|\b[A-Za-z_]\w*\.{_USER_COLS}\b(?:\s*,\s*[^)]*\))?\s*\|\|")
+_DEDUPE_LINE = re.compile(r"RULE_ID\s*\|\|\s*'\|'")
+
+
+def _user_named_rules() -> set[str]:
+    return {rid for _p, rids, stmt in _arms()
+            if any(_USER_CONCAT.search(line) for line in stmt.splitlines() if not _DEDUPE_LINE.search(line))
+            for rid in rids}
+
+
+def test_r2_037_a_user_name_anywhere_in_the_text_never_sets_a_database_filter():
+    """The line-start scan above missed COST_SLEEP_POLLING, whose title ENDS with the poller's owner ('User
+    first.last.name'), so its Investigate set a sticky database filter FIRST. Every arm that shows a user name at
+    any position must be carved out of the database filter (or out of every entity filter)."""
+    flagged = _user_named_rules()
+    assert {"SEC_CRED_EXPIRY", "SEC_NEW_ADMIN_NETWORK", "SEC_FAILED_LOGINS", "COST_AI_USER_RUNAWAY",
+            "SEC_LOGIN_TAKEOVER", "SEC_ADMIN_GRANT", "COST_SLEEP_POLLING"} <= flagged, sorted(flagged)
+    carved = navigate._NO_ENTITY_FILTER_RULES | navigate._NO_DATABASE_FILTER_RULES
+    missing = flagged - carved
+    assert not missing, f"user names in the alert text that would set a bogus database filter: {sorted(missing)}"
+    # OWNER_HINT really is a user name: SP_SCAN_SLEEP_POLLING builds it from USER_NAME (cs_driver.owner_hint twin)
+    body = _raiser_bodies()["SP_SCAN_SLEEP_POLLING"]
+    assert "'User ' || a.USER_NAME" in body and "ap.USER_TOP_APP || ' · ' || a.USER_NAME" in body
+
+
+@pytest.mark.parametrize("owner", ["User first.last.name", "ControlM · first.last.name"])
+def test_r2_037_sleep_polling_keeps_its_warehouse_and_gets_no_database(owner):
+    title = f"WH_ALFA_LOAD sleep polling ~$105/week: {owner}"
+    detail = f"Sleep polling on 7 of the 7 complete days ... Owner: {owner}. Next step: ..."
+    want = {"warehouse_contains": "WH_ALFA_LOAD"}
+    assert navigate.investigation_target("COST_SLEEP_POLLING", title)["filters"] == want
+    assert navigate.investigation_target("COST_SLEEP_POLLING", title, detail)["filters"] == want
+    assert navigate.investigation_target("COST_SLEEP_POLLING", f"{title} {detail}")["filters"] == want
+    assert navigate.investigation_target("COST_SLEEP_POLLING", "WH_X sleep polling ~$1/week: User first.last.name"
+                                         )["filters"] == {"warehouse_contains": "WH_X"}
+    # the 'No warehouse' series names no warehouse, not even one hidden in a user name
+    assert navigate.rule_warehouse("COST_SLEEP_POLLING", "No warehouse sleep polling ~$30/week: User WH_SVC.A.B") == ""
+    # the carve-out is rule-scoped: an entity rule reading the same text still extracts the (bogus) database
+    assert navigate.investigation_target("PERF_SPILL_GB", title)["filters"].get("database") == "FIRST"
+
+
 @pytest.mark.parametrize(("rule", "text"), [
     ("SEC_NEW_ADMIN_NETWORK", "first.last.name logged in from new network 10.1.2.3 First seen 2026-09-30"),
     ("SEC_CRED_EXPIRY", "first.last.name programmatic_access_token 'MY_PAT' expires in 5 day(s) Rotate before"),
@@ -154,6 +202,45 @@ def test_r2_092_a_non_wh_prefixed_warehouse_keeps_every_drawer_affordance():
     assert plan is not None and plan.kind == "queueing" and plan.warehouse == "CROWDSTRIKE_WH"
     gen = plan_for_alert("COST_WH_DAILY_CREDITS", title, "", "2026-09-30")
     assert gen is not None and gen.warehouse == "BLCOMPUTE_WH" and gen.day == "2026-09-30"
+
+
+_SVC_SWEEP = "SERVICE AUTO_CLUSTERING spiked to 140.0 credits on 2026-09-29 (z=8.1)"
+_SVC_AI_DETAIL = ("Median 12.0 credits/day over the prior 28d. Robust z-score 8.1 vs threshold 3.5. | AI: The top "
+                  "family 'USE WAREHOUSE WH_ALFA_ETL; MERGE INTO ALFA_DB.RAW.CLAIMS ...' ran 4.1h vs 0.3h.")
+
+
+def test_r2_092_a_service_series_sweep_never_takes_a_warehouse_from_the_ai_detail():
+    """A SERVICE-series sweep title matches no WAREHOUSE shape, and rule_warehouse fell back to the first WH_* token
+    in TITLE + DETAIL -- the sweep's ' | AI: ' text -- so an AUTO_CLUSTERING spike offered 'Respond -- closed loop
+    on WH_ALFA_ETL' (an ALTER WAREHOUSE booked against the event) and scoped Investigate / Generate fix to it."""
+    for args in ((_SVC_SWEEP, _SVC_AI_DETAIL), (f"{_SVC_SWEEP} {_SVC_AI_DETAIL}",)):
+        assert navigate.rule_warehouse("COST_ANOMALY_SWEEP", *args) == ""
+        assert navigate.inline_fix_warehouse("COST_ANOMALY_SWEEP", *args) == ""
+        assert navigate.investigation_target("COST_ANOMALY_SWEEP", *args)["filters"] == {}
+        assert navigate.fix_target("COST_ANOMALY_SWEEP", *args)["filters"] == {}
+    # the WAREHOUSE series keeps its title-led warehouse, whatever the AI text names
+    wh_title = "WAREHOUSE COMPUTE_WH spiked to 99.0 credits on 2026-09-28 (z=5.0)"
+    assert navigate.inline_fix_warehouse("COST_ANOMALY_SWEEP", wh_title, _SVC_AI_DETAIL) == "COMPUTE_WH"
+    assert navigate.investigation_target("COST_ANOMALY_SWEEP", wh_title, _SVC_AI_DETAIL)["filters"] == {
+        "warehouse_contains": "COMPUTE_WH"}
+
+
+def test_r2_092_a_shaped_rule_never_reads_its_warehouse_from_the_detail():
+    # an older title shape falls back to a WH_* token in the TITLE only
+    assert navigate.rule_warehouse("PERF_SPILL_GB", "Remote spill on WH_ALFA_LOAD", "see WH_DECOY") == "WH_ALFA_LOAD"
+    assert navigate.rule_warehouse("PERF_SPILL_GB", "Remote spill high", "warehouse WH_DECOY") == ""
+    assert navigate.inline_fix_warehouse("PERF_QUEUED_MINUTES", "Queueing high", "WH_DECOY queued") == ""
+    # a rule without a title shape still reads the raiser's DETAIL, but never an appended AI narrative
+    assert navigate.rule_warehouse("COST_CLOUD_SVC_RATIO", "cloud-services ratio 31.2%", "on WH_TRXS") == "WH_TRXS"
+    for tail in (" | AI: WH_LLM_PICK ran 4h", " | AI hypothesis: WH_LLM_PICK is the cause"):
+        assert navigate.rule_warehouse("COST_CLOUD_SVC_RATIO", "cloud-services ratio 31.2%", "x" + tail) == ""
+        assert navigate.rule_warehouse("COST_CLOUD_SVC_RATIO", "cloud-services ratio 31.2% x" + tail) == ""
+    # nor a database: the AI text's 'ALFA_DB.RAW.CLAIMS' is no Investigate scope
+    spill = "COMPUTE_WH spilled 12.5 GB remote in 24h"
+    assert navigate.investigation_target("PERF_SPILL_GB", spill, _SVC_AI_DETAIL)["filters"] == {
+        "warehouse_contains": "COMPUTE_WH"}
+    assert navigate.investigation_target("PERF_SPILL_GB", spill, "MERGE INTO ALFA_DB.RAW.CLAIMS")["filters"] == {
+        "warehouse_contains": "COMPUTE_WH", "database": "ALFA_DB"}
 
 
 # ----------------------------------------------------------------------------- alert evidence: R2-089 ----
@@ -303,6 +390,23 @@ def test_r2_087_service_series_sweep_events_stay_in_the_triage_queue():
     assert not alone.empty and alone.iloc[0]["SEVERITY"] == "HIGH"
 
 
+def test_r2_087_control_room_caption_says_only_warehouse_series_sweep_events_are_excluded():
+    """The triage caption still said the sweep's COST_ANOMALY_SWEEP events were all excluded (shown on Alerts) while
+    the SERVICE-series ones sat in the queue right above it."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/ui/pages/control_room.py").read_text(encoding="utf-8")
+    body = src.split('"Spend anomalies: robust median/MAD z-score per warehouse', 1)[1].split("elif section ==", 1)[0]
+    caption = re.sub(r'"\s*\n\s*f?"', "", body)          # join the implicit string concatenation
+    assert ("its warehouse-series COST_ANOMALY_SWEEP events (excluded here, shown on Alerts) stay authoritative; "
+            "its service-series events have no in-app twin and stay in the queue.") in caption
+    assert "its COST_ANOMALY_SWEEP events (excluded here" not in caption
+    # ... and that is what the feed does: the SERVICE row stays, the WAREHOUSE twin goes
+    kept = actions._dedupe_alert_feed(pd.DataFrame([
+        _alert("SERVICE AUTO_CLUSTERING spiked to 140 credits on 2026-09-29 (z=8.1)"),
+        _alert("WAREHOUSE WH_ALFA_BI_PRD spiked to 182.4 credits on 2026-09-28 (z=6.3)")]))
+    assert list(kept["TITLE"]) == ["SERVICE AUTO_CLUSTERING spiked to 140 credits on 2026-09-29 (z=8.1)"]
+
+
 # -------------------------------------------------------------------------------- ETL clock: R2-108 ----
 
 @pytest.mark.parametrize("raw", ["7: 30", "07 :30", "+7:30", "007:30", "07:030", "7:3_0", "-0:30",
@@ -379,3 +483,44 @@ def test_r2_050_after_the_load_nothing_changes():
     assert with_cut.projected_usd == pytest.approx(30_000.0) and "still in progress" not in with_cut.basis
     assert metering_complete_before(pd.DataFrame(), today) == today
     assert metering_complete_before(None, today) == today
+
+
+def test_r2_050_a_failed_load_names_the_real_newest_day_and_every_projected_day():
+    """Oct 2 with the Oct 1 06:45 load failed: the newest row is Sep 30 (still partial). The basis called 2026-10-01
+    -- a day with no row at all -- 'the newest metering day' and counted 'today + 29 remaining' while 31 days were
+    projected."""
+    from app.logic.forecast import month_end_projection
+    from app.logic.formulas import metering_complete_before
+    today = date(2026, 10, 2)
+    frame = _flat(date(2026, 9, 30), partial_share=0.45)
+    cut = metering_complete_before(frame, today)
+    assert cut == date(2026, 9, 30)
+    for engine in ("linear", "seasonal"):
+        fc = month_end_projection(frame, today, engine=engine, complete_before=cut)
+        assert fc.ok and fc.projected_usd == pytest.approx(31_000.0), (engine, fc)
+        assert "No day of this month has loaded yet" in fc.basis and "loaded through 2026-09-30" in fc.basis
+        assert "2026-10-01 is projected with today" in fc.basis
+        assert "31 days (2026-10-01 through month end)" in fc.basis
+        assert "newest metering day (2026-10-01)" not in fc.basis and "today + 29" not in fc.basis
+
+
+def test_r2_050_a_stale_fact_projects_and_names_every_unloaded_day():
+    """Mid-month with the fact 5 days stale (newest Sep 10, today Sep 15): Sep 10-30 (21 days) are projected; the
+    basis named only 2026-09-10 and said 'today + 15 remaining'."""
+    from app.logic.forecast import month_end_projection
+    from app.logic.formulas import metering_complete_before
+    today = date(2026, 9, 15)
+    frame = _flat(date(2026, 9, 10), partial_share=0.45)
+    cut = metering_complete_before(frame, today)
+    for engine in ("linear", "seasonal"):
+        fc = month_end_projection(frame, today, engine=engine, complete_before=cut)
+        assert fc.ok and fc.projected_usd == pytest.approx(30_000.0), (engine, fc)
+        assert "Metering is loaded through 2026-09-10" in fc.basis and "still in progress" in fc.basis
+        assert "2026-09-10 to 2026-09-14 are projected with today" in fc.basis
+        assert "21 days (2026-09-10 through month end)" in fc.basis and "today + 15" not in fc.basis
+    # the routine pre-load hour (newest = yesterday) names one projected day; after the load nothing changes
+    fc = month_end_projection(_flat(date(2026, 9, 14), partial_share=0.45), today, complete_before=date(2026, 9, 14))
+    assert "Metering is loaded through 2026-09-14" in fc.basis and "2026-09-14 is projected with today" in fc.basis
+    assert "17 days (2026-09-14 through month end)" in fc.basis
+    assert "today + 15 remaining days" in month_end_projection(_flat(today, partial_share=0.3), today,
+                                                                complete_before=today).basis

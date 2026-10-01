@@ -113,9 +113,9 @@ def plan_for_alert(rule_id: str, title: str, detail: str = "",
     detail = str(detail or "")
     # R2-092: a warehouse-led title (COST_WH_DAILY_CREDITS, PERF_QUEUED_MINUTES, ...) is read by its position,
     # so a warehouse without the WH_ prefix (COMPUTE_WH, BLCOMPUTE_WH) is still scoped; others fall back to a
-    # WH_* token anywhere in the title or detail (navigate.rule_warehouse, shared with the drawer's re-check,
-    # inline fix and Investigate filter so the copies cannot drift).
-    warehouse = rule_warehouse(rid, f"{title} {detail}")
+    # WH_* token anywhere in the title or detail, never in an appended AI narrative (navigate.rule_warehouse,
+    # shared with the drawer's re-check, inline fix and Investigate filter so the copies cannot drift).
+    warehouse = rule_warehouse(rid, title, detail)
     day = _day_from(title, raised_at)
 
     if rid in ("COST_CLOUD_SVC_RATIO", "COST_CLOUD_SVC_ANOMALY"):

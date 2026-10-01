@@ -86,3 +86,73 @@ def test_r2_050_overview_mtd_and_pace_stop_at_the_metering_fact_newest_day(monke
     assert complete == pytest.approx(13 * 100.0 * 3.68)          # Sep 1-13; the Sep 14 snapshot is not a whole day
     kpi = ov._mtd_pace_kpi(0.0, res, 3.68, 2.20, 0.0)
     assert kpi["delta"].startswith("+0% vs ") or kpi["delta"].startswith("-0% vs "), kpi["delta"]
+
+
+@pytest.mark.parametrize(("today", "newest"), [
+    ("2026-10-02", "2026-10-01"),     # 03:00 Central on the 2nd: Oct 1 is the 06:45 partial snapshot
+    ("2026-10-01", "2026-10-01"),     # all day on the 1st, after its load
+    ("2026-10-02", "2026-09-30"),     # the 2nd after a failed Oct 1 load
+])
+def test_r2_050_no_complete_day_yet_is_not_missing_history(monkeypatch, today, newest):
+    """With no complete metering day this month the MTD card has no pace, and its help blamed missing prior-month
+    facts and told the reader to run backfill_365.sql -- with September fully loaded."""
+    from datetime import date
+
+    from app.core.result import QueryResult
+    from app.ui.pages import overview as ov
+    monkeypatch.setattr(ov, "account_today", lambda: date.fromisoformat(today))
+    days = pd.date_range("2026-08-01", newest).date
+    res = QueryResult(df=pd.DataFrame({"DAY": days, "CREDITS_BILLED": [100.0] * (len(days) - 1) + [45.0]}), ok=True)
+    kpi = ov._mtd_pace_kpi(0.0, res, 3.68, 2.20, 0.0)
+    assert kpi["label"] == "MTD credit spend" and "delta" not in kpi
+    assert "backfill" not in kpi["help"] and "prior month has daily facts" not in kpi["help"]
+    assert kpi["help"].startswith("Pace vs last month appears after this month's first complete metering day")
+
+
+def test_r2_050_backfill_hint_only_when_the_prior_month_has_no_rows(monkeypatch):
+    from datetime import date
+
+    from app.core.result import QueryResult
+    from app.ui.pages import overview as ov
+    monkeypatch.setattr(ov, "account_today", lambda: date(2026, 10, 15))
+    days = pd.date_range("2026-10-01", "2026-10-14").date
+    res = QueryResult(df=pd.DataFrame({"DAY": days, "CREDITS_BILLED": [100.0] * len(days)}), ok=True)
+    kpi = ov._mtd_pace_kpi(0.0, res, 3.68, 2.20, 0.0)
+    assert "delta" not in kpi and "backfill_365.sql" in kpi["help"]
+    # September loaded but billed nothing on the same days: no pace, and no backfill instruction
+    days = pd.date_range("2026-09-01", "2026-10-14").date
+    zero = QueryResult(df=pd.DataFrame({"DAY": days, "CREDITS_BILLED": [0.0 if d.month == 9 else 100.0
+                                                                         for d in days]}), ok=True)
+    kpi = ov._mtd_pace_kpi(0.0, zero, 3.68, 2.20, 0.0)
+    assert "delta" not in kpi and "backfill" not in kpi["help"] and "no billed spend" in kpi["help"]
+
+
+def _sweep_drawer():
+    # AppTest runs this body as its own script: everything it needs is built here, not read from module globals
+    import pandas as _pd
+
+    from app.core.result import QueryResult as _QR
+    from app.ui.pages import alerts
+    event = _pd.DataFrame({
+        "EVENT_ID": ["e1e2e3e4-0000-4000-8000-000000000001"], "RULE_ID": ["COST_ANOMALY_SWEEP"],
+        "RAISED_AT": [_pd.Timestamp("2026-09-30 06:40:12")], "COMPANY": ["ALL"], "SEVERITY": ["HIGH"],
+        "TITLE": ["SERVICE AUTO_CLUSTERING spiked to 140.0 credits on 2026-09-29 (z=8.1)"],
+        "DETAIL": ["Median 12.0 credits/day over the prior 28d. | AI: The top family 'USE WAREHOUSE WH_ALFA_ETL; "
+                   "MERGE ...' ran 4.1h vs 0.3h."],
+        "METRIC_VALUE": [8.1], "STATUS": ["OPEN"], "ACK_BY": [None], "ACK_AT": [None],
+    })
+    alerts._open_events_section(_QR(df=event, ok=True), True, "ALL")
+
+
+def test_r2_092_drawer_offers_no_closed_loop_on_a_warehouse_the_ai_text_named(monkeypatch):
+    """An AUTO_CLUSTERING spike whose pre-explain mentions WH_ALFA_ETL offered 'Respond -- closed loop on
+    WH_ALFA_ETL' (an ALTER WAREHOUSE booked against this event) and a re-check scoped to it."""
+    _stub(monkeypatch, {})
+    at = AppTest.from_function(_sweep_drawer, default_timeout=20)
+    # a real (hex) event id: the closed-loop expander's ledger read validates it
+    at.session_state["_ow_nav_context"] = {"event_id": "e1e2e3e4-0000-4000-8000-000000000001"}
+    at.run()
+    assert not at.exception, at.exception
+    assert any(b.label == "Investigate →" for b in at.button), "the drawer did not open"
+    assert not any("WH_ALFA_ETL" in str(e.label) for e in at.expander), [e.label for e in at.expander]
+    assert not any("WH_ALFA_ETL" in str(getattr(b, "help", "") or "") for b in at.button)

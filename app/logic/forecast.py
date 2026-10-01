@@ -172,8 +172,8 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
             daily_rate_usd=round(add / project_days, 2) if project_days else 0.0,
             days_remaining=remaining,
             basis=f"Seasonal engine: day-of-week means over {len(frame_b)}d "
-                  f"(>= 4 samples/weekday), today + {remaining} remaining days per weekday."
-                  + _loading_note(start, today),
+                  f"(>= 4 samples/weekday), {_projected_span(start, today, remaining, project_days)} per weekday."
+                  + _loading_note(cut, start, today),
         )
 
     # Linear engine (rec#15): a robust Theil-Sen daily trend, not a flat mean —
@@ -218,16 +218,35 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
         daily_rate_usd=round(add / project_days, 2) if project_days else 0.0,
         days_remaining=remaining,
         basis=f"Linear engine: complete-day MTD + robust {_BASELINE_DAYS}d trend x "
-              f"(today + {remaining} remaining) days." + _loading_note(start, today),
+              f"{_projected_span(start, today, remaining, project_days)}." + _loading_note(cut, start, today),
     )
 
 
-def _loading_note(start: date, today: date) -> str:
-    """R2-050: name the still-loading metering day(s) the projection estimated instead of counting."""
+def _projected_span(start: date, today: date, remaining: int, project_days: int) -> str:
+    """The projected days in the basis: 'today + N remaining days', or -- when not-yet-loaded days before today
+    are projected too (R2-050) -- every projected day from the first one, so the count matches the projection."""
+    if start >= today:
+        return f"today + {remaining} remaining days"
+    return f"{project_days} days ({start.isoformat()} through month end)"
+
+
+def _loading_note(cut: date, start: date, today: date) -> str:
+    """R2-050: name the newest loaded metering day and the days the projection estimated instead of counting.
+
+    ``cut`` is the first incomplete day: for a FACT_METERING_DAILY frame (formulas.metering_complete_before) the
+    newest loaded DAY, which was still in progress at its 06:45 Central load. ``start`` is the first projected day
+    of this month. After a failed or late load the newest row can be days old, or in the prior month, so the note
+    names it and the whole projected span rather than calling ``start`` the newest metering day."""
     if start >= today:
         return ""
-    return (f" The newest metering day ({start.isoformat()}) was still in progress at the last daily load "
-            "(06:45 Central), so it is projected with today rather than counted as a whole day.")
+    last = today - timedelta(days=1)
+    span = (f"{start.isoformat()} is" if start == last
+            else f"{start.isoformat()} to {last.isoformat()} are")
+    if cut < start:
+        return (f" No day of this month has loaded yet (metering is loaded through {cut.isoformat()}, still in "
+                f"progress at its 06:45 Central load), so {span} projected with today.")
+    return (f" Metering is loaded through {cut.isoformat()}, which was still in progress at its 06:45 Central "
+            f"load, so {span} projected with today rather than counted as complete.")
 
 
 def contract_pace(
