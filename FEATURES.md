@@ -9,13 +9,13 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 ## Watch (always-on, no humans required)
 | Capability | Where |
 |---|---|
-| 26 alert rules (cost, perf, pipeline, security, platform) with editable thresholds | Alerts → Rules; catalogue in RUNBOOK §12 |
+| ~45 alert rules (cost, perf, pipeline incl. data quality, security, platform, warehouse) with editable thresholds | Alerts → Rules; catalogue in RUNBOOK §12 |
 | Webhook delivery **in-chain** (V018): notify task after every scan, guarded auto-resume, live status chip, per-family routing | Alerts (chip at top; routes in Native delivery) |
 | Anomaly sweep (robust-z per warehouse/service series) — **events arrive pre-explained by grounded Cortex** | daily task; hypothesis in event DETAIL |
 | Contract-breach projection (weekly, CRITICAL ≤14d) | scan rule + Brief KPI + Cost → Contract |
 | Fingerprint drift (p95/query-family, no change event needed, Mondays) | `PERF_FINGERPRINT_DRIFT` |
 | Change-impact regression tracker (frozen 14d baselines, measured credits/call) | Operations → Change impact |
-| Dept budget pace, org account creep, volume drops, COPY/DT failures, credential expiry, break-glass use | scan + sweep rules |
+| Dept budget pace, org account creep, volume drops, COPY/DT failures, credential expiry | scan + sweep rules (break-glass role activity is evidence only on Security → Changes; no alert since V034) |
 | Self-monitoring: weekly source sentinel (24 probes) + render-time SLA | `OPS_CANARY_FAIL` / `OPS_SLOW_RENDER`; Admin → Canary |
 | Mart reconciliation — totals MATCH the source, not just fresh (±2%/±5% bands) | Admin → Canary |
 | Fleet slow/failed fetch telemetry across all viewers (V021) | Admin → Performance |
@@ -32,7 +32,7 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 | Contract steering: gap-to-commit $/day vs named levers | Cost → Contract |
 | Price-a-pattern: $/run now and at ±size steps | Cost → Optimization |
 | Monthly alert fire drill with streak scoring (opt-in alert_drill.sql) | Admin → Canary |
-| Query-tag governance scoreboard (exec-time-weighted) | Cost → Attribution |
+| Query-tag governance scoreboard (exec-time-weighted) | Cost → Chargeback & AI |
 | Restated-days detector (numbers that moved after close) | Admin → Canary |
 | Query drill-through, heaviest queries (row-click), pruning/compile/cache diagnostics | Operations → Queries; Cost → Optimization |
 | Most expensive queries in **allocated $** (hour-share model, labeled) | Cost → Optimization |
@@ -66,7 +66,7 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 | Renewal planner (growth scenarios, recommended commit) | Cost → Contract |
 | Department budgets + monthly statement exports | Cost → Chargeback |
 | Company all-in showback (warehouse + serverless + Cortex Code + estimated storage by company; cloud-services adjustment and unattributed remainder tie to billed metering + estimated storage) | Cost → Chargeback & AI |
-| Billing truth vs app model (org rate card vs credits x rate, monthly) | Admin → Org spend |
+| Billing truth vs app model (org rate card vs credits x rate, monthly) | Cost → Contract & Forecast |
 | Styled HTML executive summary; per-table CSV everywhere | Overview; all tables |
 | Quarterly access-review export pack (grants matrix, unused roles, 90d diff) | Security → Access |
 | Governance-drift + platform scores, both settings-tunable with named deductions | Security / Overview |
@@ -81,7 +81,7 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 |---|---|
 | Mart-first facts + hourly/daily loaders; 365d backfill script; retention purge with floors | V002 + `backfill_365.sql` + `SP_PURGE_FACTS` |
 | DR runbook: Time Travel undo (INSERT OVERWRITE ... AT / BEFORE), UNDROP, and manual TRANSIENT clones before a risky change. Scheduled operator backups (V015 weekly, V158 daily in `OVERWATCH_BAK`) were retired by V161 | RUNBOOK §16; `rebuild/00_backup_operator_data.sql` |
-| Saved views, default landing, display timezone (per user) | 💾 Views popover |
+| Per-user prefs: operator/audit presentation mode (saved to USER_PREFS on toggle). A saved default landing view, display timezone and density are still applied at startup if a USER_PREFS row exists, but there is no in-app editor for them since v4.157.0 | Sidebar → Audit detail toggle; USER_PREFS (V013) |
 | Usage analytics (page adoption + render ms) | Admin → Performance |
 | Parallel batch fetch, lazy sections, SQL-keyed cache, fragments | core runtime |
 | **Design system**: token layer, card variants, severity stripes, SVG icons, sparklines, persistent status bar, refined charts, responsive | app/theme.py, app/ui/icons.py, app/ui/components.py |
@@ -90,7 +90,7 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 | Capability | Where |
 |---|---|
 | Unit costs: measured $ per query, $/call per stored proc (top 50 by measured spend; the per-call leader across every proc), AI $ by function/model with $/1M tokens; Cortex-Code fallback | Cost → Unit costs |
-| Task-graph cost trends: $/run, success %, p95 wall, CHEAPER/PRICIER/FLAT per pipeline (db/schema filterable) | Operations → Task graphs ($) |
+| Task-graph cost trends: $/run, success %, p95 wall, CHEAPER/PRICIER/FLAT per pipeline (db/schema filterable) | Cost → Unit costs (Task-graph pipeline costs) |
 | Warehouse change scorecard (V024): snapshot-diff detection, frozen 14d baselines, WH_CHANGE_REGRESSION alerts | Operations → Change impact |
 | Contract billing truth: ORGANIZATION_USAGE balance burn-down, runway, on-demand overrun (zero config) | Cost → Contract & Forecast |
 | Spend tie-out: billed vs warehouse-exact vs Snowsight (storage/transfer) explained with live numbers | Cost → Spend expander |
