@@ -24,8 +24,11 @@ def _imports(src: str) -> str:
 def test_storage_mover_tiles_byte_humanize():
     s = _src("app/ui/pages/cost_parts/optimize.py")
     # migrated to the canonical unit API (root-cause fix): raw TiB value + unit="tb"
-    assert '"value": float(movers[\'CURRENT_TB\'].sum()), "unit": "tb"' in s
-    assert '"value": float(movers[\'GROWTH_TB\'].sum()), "unit": "tb"' in s
+    # R1-148: the tiles read the builder's pre-LIMIT window totals (falling back to the frame sums on an
+    # old-shape result) -- still raw TiB through unit="tb"
+    assert '{"label": "Current storage", "value": _sg_cur_tb, "unit": "tb"}' in s
+    assert '"value": _sg_grow_tb, "unit": "tb"}' in s
+    assert "else float(movers['CURRENT_TB'].sum()))" in s and "else float(movers['GROWTH_TB'].sum()))" in s
     # the raw fixed-decimal-TB formatting that read "0.03 TB" is gone
     assert "CURRENT_TB'].sum()):,.2f}" not in s
     assert "GROWTH_TB'].sum()):,.2f}" not in s

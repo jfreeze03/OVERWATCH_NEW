@@ -79,13 +79,30 @@ query_hours AS (
 )"""
 
 
+def _bounded_covered_days(bounds: tuple | None) -> str:
+    """R1-042: the ``COVERED_DAYS`` select item for a calendar-bounded LIVE idle/sizing read ('' when trailing).
+
+    Under bounds, scope_window_where ignores the bounded_days clamp and scans the FULL [start, end) range
+    (the house convention for calendar presets — Current year reads Jan 1 onward live, r9/r10). But
+    run_mart_first stamps a live leg with clamp_days(days), so served_days() divided ~273 days of
+    Current-year credits by 90 (every idle / sizing / remediation run-rate ~3x high on the live
+    fallback; 2x on the 2nd of a Current month, where the day OFFSET is 1 and the span 2). served_days
+    takes a reader's own COVERED_DAYS over that stamp, so the live twin now states the span its WHERE
+    scanned — the mart twin's COVERED_DAYS contract. The trailing SQL stays byte-identical: there the
+    builder really does clamp, and the stamp is right."""
+    if bounds is None:
+        return ""
+    return f",\n    {max(1, (bounds[1] - bounds[0]).days)} AS COVERED_DAYS"
+
+
 def idle_warehouse_analysis(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """Per warehouse: total vs idle credits (hour slices with no queries).
 
     WAREHOUSE_METERING_HISTORY bills by hour slice; joining each slice to
     query activity in the same warehouse-hour isolates credits burned while
     nothing ran — the auto-suspend opportunity. "Active" is span-based (see
-    _active_hours_cte), not start-hour-based.
+    _active_hours_cte), not start-hour-based. A calendar-bounded read carries
+    COVERED_DAYS (see _bounded_covered_days).
     """
     days = bounded_days(days)
     where = and_where(
@@ -107,7 +124,7 @@ SELECT
     COUNT_IF(COALESCE(M.CREDITS_USED, 0) > 0) AS METERED_HOURS,
     SUM(IFF(Q.HOUR_TS IS NULL AND COALESCE(M.CREDITS_USED, 0) > 0, 1, 0)) AS IDLE_HOURS,
     SUM(COALESCE(M.CREDITS_USED, 0)) AS TOTAL_CREDITS,
-    SUM(IFF(Q.HOUR_TS IS NULL, COALESCE(M.CREDITS_USED, 0), 0)) AS IDLE_CREDITS
+    SUM(IFF(Q.HOUR_TS IS NULL, COALESCE(M.CREDITS_USED, 0), 0)) AS IDLE_CREDITS{_bounded_covered_days(bounds)}
 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY M
 LEFT JOIN query_hours Q
        ON Q.WAREHOUSE_NAME = M.WAREHOUSE_NAME
@@ -154,10 +171,29 @@ def repeat_query_fingerprints(days: int, company: str = "ALL", min_runs: int = 1
     result cache scans nothing — averaging its 0% "local cache" reading in made
     well-cached families look cache-poor); a family whose runs ALL scan zero
     bytes is fully cached already, hence the COALESCE to 100.
+
+    R1-144 (uncapped aggregate): the page's "Repeated fingerprints" / "Compute in repeats" /
+    "Materialization candidates" tiles are WINDOW totals, but the frame stops at LIMIT 100 (under the
+    5000-row run() cap, so it is never marked truncated) — they pinned at 100 / summed the top 100.
+    FINGERPRINTS_WIN, ELAPSED_HOURS_WIN and CANDIDATES_WIN are computed BEFORE the LIMIT over every
+    family that passed HAVING. GATE_PASS is the SQL twin of insights.flag_repeat_candidates' gate
+    (>= REPEAT_MIN_ELAPSED_HOURS and >= REPEAT_MIN_RUNS_PER_30D per 30 days, <= REPEAT_LOW_CACHE_PCT
+    cache, rounded as that function rounds), normalized by the span this WHERE scans: the bounds' span
+    under a calendar preset (R1-142 — the bounded scan ignores the 90d clamp, so a Current-year read
+    covers ~273 days, not 90), else the clamped trailing days. The page normalizes by the same number.
+    Gate-passing families rank first, as the page's table sorts them, so the LIMIT never drops a
+    candidate in favour of a pricier non-candidate.
     """
     from app.core.sqlsafe import contains_filter
+    from app.logic.insights import (
+        REPEAT_GATE_BASE_DAYS,
+        REPEAT_LOW_CACHE_PCT,
+        REPEAT_MIN_ELAPSED_HOURS,
+        REPEAT_MIN_RUNS_PER_30D,
+    )
 
     days = bounded_days(days)
+    norm_days = max(1, (bounds[1] - bounds[0]).days if bounds is not None else int(days))
     min_runs = max(2, min(int(min_runs), 1000))
     where = and_where(
         scope_window_where("START_TIME", days, bounds=bounds),
@@ -174,28 +210,45 @@ def repeat_query_fingerprints(days: int, company: str = "ALL", min_runs: int = 1
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
     )
+    per_30d = f"/ {norm_days} * {REPEAT_GATE_BASE_DAYS}"
     return f"""
+WITH fam AS (
+    SELECT
+        QUERY_PARAMETERIZED_HASH AS FINGERPRINT,
+        COUNT(*) AS RUNS,
+        COUNT(DISTINCT USER_NAME) AS USERS,
+        COUNT(DISTINCT WAREHOUSE_NAME) AS WAREHOUSES,
+        SUM(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 3600000.0 AS TOTAL_ELAPSED_HOURS,
+        AVG(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 1000.0 AS AVG_ELAPSED_SEC,
+        SUM(COALESCE(BYTES_SCANNED, 0)) / POWER(1024, 4) AS TOTAL_TB_SCANNED,
+        COALESCE(
+            SUM(IFF(COALESCE(BYTES_SCANNED, 0) > 0,
+                    COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0) * BYTES_SCANNED, 0))
+            / NULLIF(SUM(IFF(COALESCE(BYTES_SCANNED, 0) > 0, BYTES_SCANNED, 0)), 0) * 100,
+            100) AS AVG_CACHE_PCT,
+        SUM(COALESCE(EXECUTION_TIME, 0) / 3600000.0 * {_SIZE_CREDIT_FACTOR_SQL}) AS EST_CREDITS,
+        ANY_VALUE(LEFT(QUERY_TEXT, 200)) AS QUERY_PREVIEW,
+        MAX(START_TIME) AS LAST_RUN
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE {where}
+    GROUP BY QUERY_PARAMETERIZED_HASH
+    HAVING COUNT(*) >= {min_runs}
+),
+gated AS (
+    SELECT fam.*,
+           IFF(ROUND(TOTAL_ELAPSED_HOURS {per_30d}, 2) >= {REPEAT_MIN_ELAPSED_HOURS}
+               AND ROUND(RUNS {per_30d}, 1) >= {REPEAT_MIN_RUNS_PER_30D}
+               AND AVG_CACHE_PCT <= {REPEAT_LOW_CACHE_PCT}, 1, 0) AS GATE_PASS
+    FROM fam
+)
 SELECT
-    QUERY_PARAMETERIZED_HASH AS FINGERPRINT,
-    COUNT(*) AS RUNS,
-    COUNT(DISTINCT USER_NAME) AS USERS,
-    COUNT(DISTINCT WAREHOUSE_NAME) AS WAREHOUSES,
-    SUM(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 3600000.0 AS TOTAL_ELAPSED_HOURS,
-    AVG(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 1000.0 AS AVG_ELAPSED_SEC,
-    SUM(COALESCE(BYTES_SCANNED, 0)) / POWER(1024, 4) AS TOTAL_TB_SCANNED,
-    COALESCE(
-        SUM(IFF(COALESCE(BYTES_SCANNED, 0) > 0,
-                COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0) * BYTES_SCANNED, 0))
-        / NULLIF(SUM(IFF(COALESCE(BYTES_SCANNED, 0) > 0, BYTES_SCANNED, 0)), 0) * 100,
-        100) AS AVG_CACHE_PCT,
-    SUM(COALESCE(EXECUTION_TIME, 0) / 3600000.0 * {_SIZE_CREDIT_FACTOR_SQL}) AS EST_CREDITS,
-    ANY_VALUE(LEFT(QUERY_TEXT, 200)) AS QUERY_PREVIEW,
-    MAX(START_TIME) AS LAST_RUN
-FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE {where}
-GROUP BY QUERY_PARAMETERIZED_HASH
-HAVING COUNT(*) >= {min_runs}
-ORDER BY EST_CREDITS * (1 - AVG_CACHE_PCT / 100) DESC, TOTAL_ELAPSED_HOURS DESC
+    FINGERPRINT, RUNS, USERS, WAREHOUSES, TOTAL_ELAPSED_HOURS, AVG_ELAPSED_SEC, TOTAL_TB_SCANNED,
+    AVG_CACHE_PCT, EST_CREDITS, QUERY_PREVIEW, LAST_RUN, GATE_PASS,
+    COUNT(*) OVER () AS FINGERPRINTS_WIN,
+    SUM(TOTAL_ELAPSED_HOURS) OVER () AS ELAPSED_HOURS_WIN,
+    SUM(GATE_PASS) OVER () AS CANDIDATES_WIN
+FROM gated
+ORDER BY GATE_PASS DESC, EST_CREDITS * (1 - AVG_CACHE_PCT / 100) DESC, TOTAL_ELAPSED_HOURS DESC
 LIMIT 100
 """
 
@@ -204,7 +257,7 @@ LIMIT 100
 # 3. Storage growth movers
 # ---------------------------------------------------------------------------
 
-def storage_growth_by_database(days: int, company: str = "ALL") -> str:
+def storage_growth_by_database(days: int, company: str = "ALL", database: str = "") -> str:
     """Per-database storage endpoints PLUS a least-squares slope.
 
     D4 (audit 2026-07-31): (LAST - FIRST) / SPAN is an endpoint diff — one
@@ -213,11 +266,21 @@ def storage_growth_by_database(days: int, company: str = "ALL") -> str:
     resistant answer; DAYS_OBSERVED lets the caller mark a short/sparse series
     LOW CONFIDENCE instead of projecting it as fact. Endpoints stay in the
     output because the current/first sizes are what a reader recognises.
+
+    R1-148: the frame stops at the top 100 growers, so the page's "Current storage" / "Growth" tiles
+    read DATABASES_WIN / CURRENT_BYTES_WIN / GROWTH_BYTES_WIN (computed before the LIMIT, over every
+    database in scope) instead of summing the capped frame, where the shrinking databases are the ones
+    cut. ``database`` (the global Database filter, case-insensitive) narrows in SQL: a post-LIMIT filter
+    showed a false "no storage history" for a database outside the top 100.
     """
+    from app.core.sqlsafe import sql_literal
+
     days = bounded_days(days)
+    db = str(database or "").strip()
     where = and_where(
         f"USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())",
         companies.database_company_scope(company),
+        f"UPPER(DATABASE_NAME) = {sql_literal(db.upper(), 300)}" if db else "",
     )
     return f"""
 WITH daily AS (
@@ -240,7 +303,10 @@ SELECT
     MAX_BY(FAILSAFE_BYTES, USAGE_DATE) AS FAILSAFE_BYTES,
     DATEDIFF('day', MIN(USAGE_DATE), MAX(USAGE_DATE)) AS SPAN_DAYS,
     COUNT(*) AS DAYS_OBSERVED,
-    REGR_SLOPE(DB_BYTES, DATEDIFF('day', DATE '1970-01-01', USAGE_DATE)) AS SLOPE_BYTES_PER_DAY
+    REGR_SLOPE(DB_BYTES, DATEDIFF('day', DATE '1970-01-01', USAGE_DATE)) AS SLOPE_BYTES_PER_DAY,
+    COUNT(*) OVER () AS DATABASES_WIN,
+    SUM(MAX_BY(DB_BYTES, USAGE_DATE)) OVER () AS CURRENT_BYTES_WIN,
+    SUM(MAX_BY(DB_BYTES, USAGE_DATE) - MIN_BY(DB_BYTES, USAGE_DATE)) OVER () AS GROWTH_BYTES_WIN
 FROM daily
 GROUP BY 1, 2
 HAVING MAX_BY(DB_BYTES, USAGE_DATE) > 0 OR MIN_BY(DB_BYTES, USAGE_DATE) > 0
@@ -410,8 +476,14 @@ LIMIT 200
 # 5. Task failure detail (root-cause timeline)
 # ---------------------------------------------------------------------------
 
-def task_failure_details(days: int, company: str = "ALL", database: str = "", schema_contains: str = "") -> str:
-    from app.core.sqlsafe import contains_filter
+def task_failure_details(days: int, company: str = "ALL", database: str = "", schema_contains: str = "", *,
+                         onset: object = None) -> str:
+    """Terminal task failures in the window, at most 500 rows (see TOTAL_FAILURES_WIN / REPEAT_FAILURE below).
+
+    ``onset`` (an incident's onset, account time): the incident RCA feed passes it so the rows nearest the onset
+    are the ones kept — rank_root_causes scores a failure by how close before the onset it ran, so a
+    newest-first cut kept exactly the wrong rows (R1-043). Without it the newest are kept (Operations)."""
+    from app.core.sqlsafe import contains_filter, sql_literal
 
     # Cap 30 (was 14) so the incident RCA auto-investigation feed, which asks for the incident's
     # onset-covering window (up to 30 days), is not silently clamped shorter than the sibling RCA
@@ -432,6 +504,17 @@ def task_failure_details(days: int, company: str = "ALL", database: str = "", sc
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
     )
+    recency = "QUERY_START_TIME DESC"
+    if onset is not None:
+        import pandas as pd
+
+        _onset = pd.to_datetime(onset, errors="coerce")
+        if pd.notna(_onset):
+            # naive account time (Central), like account_now(); QUERY_START_TIME (LTZ) cast to NTZ is
+            # its session-time (Central) wall clock, so the two compare on one clock
+            _iso = (_onset.tz_localize(None) if _onset.tzinfo else _onset).strftime("%Y-%m-%d %H:%M:%S")
+            recency = (f"ABS(DATEDIFF('second', QUERY_START_TIME::TIMESTAMP_NTZ, "
+                       f"{sql_literal(_iso)}::TIMESTAMP_NTZ)), QUERY_START_TIME DESC")
     return f"""
 WITH terminal AS (
     SELECT
@@ -456,10 +539,20 @@ SELECT
     QUERY_START_TIME,
     DATEDIFF('second', QUERY_START_TIME, COMPLETED_TIME) AS RUN_SEC,
     COALESCE(ERROR_CODE::VARCHAR, '') AS ERROR_CODE,
-    LEFT(COALESCE(ERROR_MESSAGE, ''), 300) AS ERROR_MESSAGE
+    LEFT(COALESCE(ERROR_MESSAGE, ''), 300) AS ERROR_MESSAGE,
+    -- R1-043: the window's TRUE failure count, before the LIMIT (window functions run after the
+    -- STATE filter) — the frame stops at 500, under run()'s 5000-row cap, so it is never marked
+    -- truncated and a len(frame) KPI silently pinned at 500.
+    COUNT(*) OVER () AS TOTAL_FAILURES_WIN,
+    -- 0 = the task's FIRST failure in the window, 1 = a later one. Each task's first failure is kept
+    -- before any newer repeat: a newest-first cut dropped exactly the onset-era failures the incident
+    -- RCA ranks (a task that started failing before onset and kept failing every minute lost its
+    -- pre-onset row, demoting the true cause from HIGH to LOW).
+    IFF(ROW_NUMBER() OVER (PARTITION BY DATABASE_NAME, SCHEMA_NAME, NAME
+                           ORDER BY QUERY_START_TIME) = 1, 0, 1) AS REPEAT_FAILURE
 FROM terminal
 WHERE STATE = 'FAILED'
-ORDER BY QUERY_START_TIME DESC
+ORDER BY REPEAT_FAILURE, {recency}
 LIMIT 500
 """
 
@@ -520,7 +613,7 @@ SELECT
     COALESCE(MAX(P.P95_ELAPSED_SEC), 0) AS P95_ELAPSED_SEC,
     COALESCE(MAX(Q.QUEUED_SEC), 0) AS QUEUED_SEC,
     COALESCE(MAX(Q.QUEUED_PROVISIONING_SEC), 0) AS QUEUED_PROVISIONING_SEC,
-    COALESCE(MAX(Q.SPILL_REMOTE_GB), 0) AS SPILL_REMOTE_GB
+    COALESCE(MAX(Q.SPILL_REMOTE_GB), 0) AS SPILL_REMOTE_GB{_bounded_covered_days(bounds)}
 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY M
 LEFT JOIN query_hours H
        ON H.WAREHOUSE_NAME = M.WAREHOUSE_NAME
@@ -686,13 +779,18 @@ SELECT
     U.EMAIL,
     U.CREATED_ON,
     U.LAST_SUCCESS_LOGIN,
-    COALESCE(DATEDIFF('day', U.LAST_SUCCESS_LOGIN, CURRENT_TIMESTAMP()), 9999) AS DAYS_DORMANT,
+    -- R1-054: a never-logged-in user showed a fabricated sentinel (27 years) on screen and in the
+    -- access-review CSV. DAYS_DORMANT is now the honest lower bound — days since the last login, or
+    -- since the account was created when it never logged in (dormant_reawakening's rule) — and
+    -- NEVER_LOGGED_IN says which; never-logged-in users still lead the list ahead of the LIMIT.
+    DATEDIFF('day', COALESCE(U.LAST_SUCCESS_LOGIN, U.CREATED_ON), CURRENT_TIMESTAMP()) AS DAYS_DORMANT,
+    (U.LAST_SUCCESS_LOGIN IS NULL) AS NEVER_LOGGED_IN,
     COALESCE(R.ROLE_COUNT, 0) AS ROLE_COUNT,
     LEFT(COALESCE(R.ROLES, ''), 300) AS ROLES
 FROM SNOWFLAKE.ACCOUNT_USAGE.USERS U
 LEFT JOIN role_counts R ON R.GRANTEE_NAME = U.NAME
 WHERE {where}
-ORDER BY DAYS_DORMANT DESC, ROLE_COUNT DESC
+ORDER BY NEVER_LOGGED_IN DESC, DAYS_DORMANT DESC, ROLE_COUNT DESC
 LIMIT 300
 """
 
@@ -916,15 +1014,20 @@ ORDER BY DAY
 """
 
 
-def query_family_drift_history(days: int, family_text: str, warehouse: str = "") -> str:
+def query_family_drift_history(days: int, family_text: str, warehouse: str = "", *,
+                               family_hash: str = "") -> str:
     """Daily runs and p50/p95 latency for the query family behind a
-    PERF_FINGERPRINT_DRIFT alert. Matched by the statement sample the alert
-    title carries so the drift the alert reported is visible over time — not
-    whatever family is heaviest account-wide.
+    PERF_FINGERPRINT_DRIFT alert — not whatever family is heaviest account-wide.
 
-    The sample is real SQL (it starts with CALL/SELECT/...), so it can't go
-    through the UI contains-filter sanitizer (that strips SQL keywords). It is
-    matched as a literal LIKE instead: sql_literal quotes it safely and ~ escapes
+    R1-052: matched by the family's own QUERY_PARAMETERIZED_HASH when the alert's DETAIL carries it
+    ("Hash <hex> | runs ..."): the raiser groups by that hash, while the title's 60-char sample is ONE
+    run's literal text, so a comparison literal inside it matched only the runs with that one value (a
+    single-day "family history"), and two families sharing a prefix blended. SUCCESS runs only, the
+    raiser's p95 basis.
+
+    Fallback (no hash): the statement sample the title carries. It is real SQL (it starts with
+    CALL/SELECT/...), so it can't go through the UI contains-filter sanitizer (that strips SQL
+    keywords). It is matched as a literal LIKE instead: sql_literal quotes it safely and ~ escapes
     LIKE metacharacters so an underscore in a proc name stays literal.
     """
     from app.core.sqlsafe import sql_literal
@@ -933,8 +1036,12 @@ def query_family_drift_history(days: int, family_text: str, warehouse: str = "")
     clauses = [
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
         "QUERY_PARAMETERIZED_HASH IS NOT NULL",
+        "EXECUTION_STATUS = 'SUCCESS'",
     ]
-    like = str(family_text or "").strip()
+    fhash = str(family_hash or "").strip()
+    like = "" if fhash else str(family_text or "").strip()
+    if fhash:
+        clauses.append(f"QUERY_PARAMETERIZED_HASH = {sql_literal(fhash, 128)}")
     if like:
         esc = like.replace("~", "~~").replace("%", "~%").replace("_", "~_")
         clauses.append(
@@ -1405,10 +1512,18 @@ LIMIT {limit}
 def table_tco(database: str, schema: str, table: str, days: int = 30) -> str:
     """Object-level cost evidence: reads, writers, last touch from
     ACCESS_HISTORY for ONE table (Enterprise edition; the page degrades).
-    Storage dollars come from the reclaim row the caller already has."""
-    from app.core.sqlsafe import safe_identifier
+    Storage dollars come from the reclaim row the caller already has.
 
-    fqn = ".".join(safe_identifier(part) for part in (database, schema, table)).upper()
+    R1-044: matched on the quote-stripped, upper-cased objectName — object_reads_confirm's rule.
+    ACCESS_HISTORY reports objectName exactly as the identifier was created (storage_reclaim's D4
+    note), so the old exact compare against an upper-cased FQN never matched a quoted mixed-case
+    table ("MyTable"): 0 reads and writes for a table read daily. The key is a sql_literal (never
+    raises, injection-safe), so a quote-requiring name (2023_ARCHIVE, ORDERS-OLD) is checked too
+    instead of failing safe_identifier and leaving the drill with no evidence. Extra matches can
+    only make a table look READ, the safe direction for a reclaim prompt."""
+    from app.core.sqlsafe import sql_literal
+
+    key = sql_literal(".".join(str(part or "") for part in (database, schema, table)).upper().replace('"', ""), 600)
     days = bounded_days(days, 90)
     return f"""
 WITH touches AS (
@@ -1417,14 +1532,14 @@ WITH touches AS (
     FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a,
          LATERAL FLATTEN(input => a.BASE_OBJECTS_ACCESSED) f
     WHERE a.QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
-      AND f.value:"objectName"::STRING = '{fqn}'
+      AND UPPER(REPLACE(f.value:"objectName"::STRING, '"', '')) = {key}
     UNION ALL
     SELECT a.QUERY_START_TIME, a.USER_NAME,
            f.value:"objectName"::STRING, 'WRITE'
     FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a,
          LATERAL FLATTEN(input => a.OBJECTS_MODIFIED) f
     WHERE a.QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
-      AND f.value:"objectName"::STRING = '{fqn}'
+      AND UPPER(REPLACE(f.value:"objectName"::STRING, '"', '')) = {key}
 )
 SELECT KIND,
        COUNT(*)                  AS TOUCHES,
@@ -1753,6 +1868,13 @@ def proc_cost_trend(proc_name: str, days: int, company: str = "ALL",
         contains_filter("c.WAREHOUSE_NAME", warehouse_contains),
         contains_filter("c.USER_NAME", user_contains),
     )
+    # R1-037: the attribution read spans the SAME window as the $/call leaderboard's att_guard — the
+    # bounded calendar range under a calendar preset. A trailing -(days+1) read under "Last month"
+    # started ~Aug 29 while the CALL scan covered Aug 1..31, so every earlier call came back $0 (read on
+    # the page as "attribution not caught up") and the drill's total understated its leaderboard row.
+    att_win = (resolve_effective_window(days, "START_TIME", bounds=bounds)[1]
+               if bounds is not None
+               else f"START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())")
     return f"""
 WITH calls AS (
     SELECT c.QUERY_ID, DATE(c.START_TIME) AS DAY, c.EXECUTION_STATUS,
@@ -1768,7 +1890,7 @@ att AS (
     SELECT COALESCE(ROOT_QUERY_ID, QUERY_ID) AS RID,
            SUM(CREDITS_ATTRIBUTED_COMPUTE + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
-    WHERE START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())
+    WHERE {att_win}
       AND COALESCE(ROOT_QUERY_ID, QUERY_ID) IN (SELECT QUERY_ID FROM named)
     GROUP BY 1
 )

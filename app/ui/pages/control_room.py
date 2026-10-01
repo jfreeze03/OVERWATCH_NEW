@@ -570,7 +570,7 @@ def _auto_investigation(inc_row, company: str, rate: float) -> None:
          "source": "OBJECT_CHANGE_REGISTRY"},
         {"key": "ai_wh", "sql": change_impact_sql.warehouse_change_registry(_days, company),
          "source": "WAREHOUSE_CHANGE_REGISTRY"},
-        {"key": "ai_task", "sql": insights_sql.task_failure_details(_days, company),
+        {"key": "ai_task", "sql": insights_sql.task_failure_details(_days, company, onset=onset_dt),
          "source": "TASK_HISTORY failures"},
         {"key": "ai_grant", "sql": security_sql.recent_grant_changes(_days, company),
          "source": "GRANTS_TO_USERS changes"},

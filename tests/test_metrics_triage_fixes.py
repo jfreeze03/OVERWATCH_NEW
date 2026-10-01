@@ -165,6 +165,8 @@ def test_cache_pct_readers_scale_fraction_to_percent():
     # runs excluded) but NOT the scale contract this test exists to pin: the 0-1
     # fraction is still multiplied by 100 before flag_repeat_candidates sees it.
     assert "COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0) * BYTES_SCANNED" in ins
-    assert "0)), 0) * 100,\n        100) AS AVG_CACHE_PCT" in ins
+    # R1-144 moved the per-family aggregate into the `fam` CTE (one indent deeper, so the pre-LIMIT window
+    # totals can read it); the x100 scale contract this test pins is unchanged
+    assert "0)), 0) * 100,\n            100) AS AVG_CACHE_PCT" in ins
     m27 = (_ROOT / "app" / "data" / "mart27_sql.py").read_text(encoding="utf-8")
     assert "NULLIF(SUM(f.RUNS), 0) * 100, 1) AS AVG_CACHE_PCT" in m27

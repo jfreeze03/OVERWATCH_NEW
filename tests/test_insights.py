@@ -79,7 +79,9 @@ def test_sizing_profile_splits_provisioning_out_of_queueing():
 def test_repeat_fingerprints_rank_credit_weighted_and_weight_cache_by_bytes():
     sql = insights_sql.repeat_query_fingerprints(7, "ALFA")
     assert "EST_CREDITS" in sql and "WAREHOUSE_SIZE" in sql
-    assert "ORDER BY EST_CREDITS * (1 - AVG_CACHE_PCT / 100) DESC" in sql
+    # R1-144: gate-passing families rank first (as the page's table sorts them, so the LIMIT 100 never
+    # drops a candidate for a pricier non-candidate); the credit-weighted key still orders within each.
+    assert "ORDER BY GATE_PASS DESC, EST_CREDITS * (1 - AVG_CACHE_PCT / 100) DESC" in sql
     # cache % is BYTES_SCANNED-weighted and ignores zero-scan (result-cache) runs
     assert "IFF(COALESCE(BYTES_SCANNED, 0) > 0, BYTES_SCANNED, 0)" in sql
     assert "AVG(COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0)) * 100" not in sql

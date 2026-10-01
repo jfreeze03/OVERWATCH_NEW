@@ -779,8 +779,9 @@ def test_optimize_wiring_source():
     assert opt.count("ACCOUNT_USAGE") == 6        # 5 -> 6 at v4.604: the #38 cluster-cap read's source label
     assert opt.count("methodology_note(") == 4
     # 7 -> 6 latched writes and 3 -> 2 REMEDIATION_LOG inserts in the 2026-09-30 hygiene release review: the
-    # storage-waste retention control is review only (the allow-list refuses ALTER TABLE, so it never succeeded)
-    assert len(re.findall(r"write_gate_open\(", opt)) == len(re.findall(r"stamp_write\(", opt)) == 6
+    # storage-waste retention control is review only (the allow-list refuses ALTER TABLE, so it never succeeded);
+    # 6 -> 7 with R1-086: the off-hours schedule is review only, and its ESTIMATED booking is its own latched button
+    assert len(re.findall(r"write_gate_open\(", opt)) == len(re.findall(r"stamp_write\(", opt)) == 7
     assert len(re.findall(r"st\.(?:info|success)\(", opt)) <= 4
     assert opt.count("INSERT INTO {core_object('REMEDIATION_LOG')}") == 2
     # the block sits above the storage-waste scan the source-slice locks index from

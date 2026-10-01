@@ -23,6 +23,8 @@ _WH_RE = re.compile(r"\bWH_[A-Z0-9_]+\b")
 _DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _SERVICE_AFTER_RE = re.compile(r"\bSERVICE\s+([A-Z0-9_]+)")
 _LEADING_TOKEN_RE = re.compile(r"^\s*([A-Z][A-Z0-9_]{2,})\b")
+# R1-052: PERF_FINGERPRINT_DRIFT's DETAIL is 'Hash <QUERY_PARAMETERIZED_HASH> | runs ...' (SP_ANOMALY_SWEEP, V150)
+_FAMILY_HASH_RE = re.compile(r"\bHash\s+([0-9A-Fa-f]{16,64})\b")
 
 # Human labels for the caption over the "Assemble evidence" button — they tell
 # the DBA which evidence the AI will be grounded in BEFORE they spend credits.
@@ -48,6 +50,7 @@ class EvidencePlan:
     service: str = ""
     day: str = ""
     family_text: str = ""
+    family_hash: str = ""   # R1-052: the drifted family's QUERY_PARAMETERIZED_HASH, from the alert DETAIL
 
     @property
     def label(self) -> str:
@@ -60,7 +63,9 @@ class EvidencePlan:
             bits.append(f"warehouse {self.warehouse}")
         if self.service:
             bits.append(f"service {self.service}")
-        if self.family_text:
+        if self.family_hash:
+            bits.append(f"family hash {self.family_hash}")
+        elif self.family_text:
             bits.append(f'family "{self.family_text[:44]}"')
         return " · ".join(bits)
 
@@ -123,10 +128,14 @@ def plan_for_alert(rule_id: str, title: str, detail: str = "",
 
     if rid == "PERF_FINGERPRINT_DRIFT":
         family = _family_text(title)
-        if len(family) < 8:
+        # R1-052: the raiser groups by QUERY_PARAMETERIZED_HASH and writes it into DETAIL; the title's
+        # sample is ONE run's literal text, so match the family by its hash whenever DETAIL carries it.
+        hash_match = _FAMILY_HASH_RE.search(detail)
+        family_hash = hash_match.group(1) if hash_match else ""
+        if len(family) < 8 and not family_hash:
             return None
         return EvidencePlan("query_family", "last 14 days", days=14,
-                            warehouse=warehouse, family_text=family)
+                            warehouse=warehouse, family_text=family, family_hash=family_hash)
 
     if rid == "PERF_QUEUED_MINUTES":
         if not warehouse:

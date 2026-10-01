@@ -30,9 +30,9 @@ def build(plan: EvidencePlan) -> str:
         # The named service's daily credits (spike day / growth in context).
         return insights_sql.metering_service_history(plan.days, plan.service)
     if plan.kind == "query_family":
-        # The drifted family's own daily p50/p95 latency history.
+        # The drifted family's own daily p50/p95 latency history — by its hash when DETAIL carries one (R1-052).
         return insights_sql.query_family_drift_history(
-            plan.days, plan.family_text, plan.warehouse)
+            plan.days, plan.family_text, plan.warehouse, family_hash=plan.family_hash)
     if plan.kind == "queueing":
         # The warehouse's worst queueing hours.
         return insights_sql.warehouse_queue_by_hour(plan.days, plan.warehouse)

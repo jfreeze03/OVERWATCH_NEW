@@ -659,7 +659,7 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
                 kpi_row([
                     {"label": "Dormant users", "value": f"{len(ranked)}"},
                     {"label": "High severity", "value": f"{len(high)}",
-                     "help": "180+ days dormant, or 5+ roles still granted.",
+                     "help": "180+ days dormant, never logged in, or 5+ roles still granted.",
                      "delta_color": "inverse" if len(high) else "off"},
                     {"label": "Service accounts", "value": "—" if _svc is None else f"{n_svc}",
                      "help": "USERS.TYPE is SERVICE, LEGACY_SERVICE, SNOWFLAKE_SERVICE or SERVICE_AGENT — "

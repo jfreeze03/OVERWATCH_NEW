@@ -145,8 +145,13 @@ def test_blast_radius_identifier_safety():
 def test_table_tco_identifier_safety():
     sql = table_tco("DB1", "SCH", "T1", 30)
     assert "'DB1.SCH.T1'" in sql and "OBJECTS_MODIFIED" in sql
-    with pytest.raises(ValueError):
-        table_tco("DB1", "SCH", "T1; DROP", 30)
+    # R1-044: table_tco no longer raises on an exotic name — the safe_identifier ValueError left the
+    # TCO drill with no evidence and a fabricated "0 reads". The name is matched as a sql_literal (quote-
+    # stripped, upper-cased objectName), so a hostile value stays inert inside one quoted string literal.
+    hostile = table_tco("DB1", "SCH", "T1'; DROP TABLE X; --", 30)
+    assert "'DB1.SCH.T1''; DROP TABLE X; --'" in hostile
+    import sqlglot
+    assert len(sqlglot.parse(hostile, dialect="snowflake")) == 1
 
 
 def test_tag_coverage_shape():
