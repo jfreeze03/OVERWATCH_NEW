@@ -10,7 +10,7 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 | Capability | Where |
 |---|---|
 | ~45 alert rules (cost, perf, pipeline incl. data quality, security, platform, warehouse) with editable thresholds | Alerts → Rules; catalogue in RUNBOOK §12 |
-| Webhook delivery **in-chain** (V018): notify task after every scan, guarded auto-resume, live status chip, per-family routing | Alerts (chip at top; routes in Native delivery) |
+| Webhook delivery **in-chain** (V018 → V070/V071): the notify task runs after every scan and is resumed with the hourly tree (V071); it sends only through ENABLED ALERT_ROUTES rows, each through its own integration (V070), so delivery is live only when an enabled route names an integration that exists; live status chip, per-family routing | Alerts (chip at top; routes in Native delivery) |
 | Anomaly sweep (robust-z per warehouse/service series) — **events arrive pre-explained by grounded Cortex** | daily task; hypothesis in event DETAIL |
 | Contract-breach projection (weekly, CRITICAL ≤14d) | scan rule + Brief KPI + Cost → Contract |
 | Fingerprint drift (p95/query-family, no change event needed, Mondays) | `PERF_FINGERPRINT_DRIFT` |

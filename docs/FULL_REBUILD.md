@@ -11,8 +11,9 @@ snowflake/rebuild/02_migrations_V001_V<tip>.sql, the same chain). Same end
 state as a virgin install, except for the opt-in objects the migrations
 never create (step 7b).
 
-Everything below runs in Snowsight as your deployment role (the one that
-owns the objects — see DEPLOYMENT.md), in a worksheet with:
+Everything below runs in Snowsight as your deployment role, the one that
+owns the objects: SNOW_ACCOUNTADMINS here (DEPLOYMENT.md §1 and §2; step
+7b(a)'s integration grant names it), in a worksheet with:
 
     USE DATABASE DBA_MAINT_DB;
     USE SCHEMA OVERWATCH;

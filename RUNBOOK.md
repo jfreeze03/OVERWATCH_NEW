@@ -10,7 +10,7 @@ troubleshooting, and disaster recovery.
 that watches this Snowflake account's cost, performance, pipelines, and
 governance for the two companies sharing it (ALFA and Trexis). Hourly tasks
 copy ACCOUNT_USAGE telemetry into small fact tables; hourly and daily scans
-raise alert events against ~30 rules and push them to webhooks; the daily scans
+raise alert events against ~45 rules and push them to webhooks; the daily scans
 catch anomalies, regressions, and drift; the app renders it all with honest
 labels and generates (never silently executes) the SQL to fix what it finds.
 
@@ -340,7 +340,9 @@ Freshness & replay · Entity 360.
   windows are complete).
 
 ### Cost Intelligence (sections)
-- **Spend** — daily billed by service category; KPIs: billed $, cloud-
+Sections: Spend & Attribution · Contract & Forecast · Chargeback & AI ·
+Unit costs · Compare · Optimization & Savings.
+- **Spend** (Spend & Attribution) — daily billed by service category; KPIs: billed $, cloud-
   services rebate (always shown separately), AI spend at the AI rate.
   **Cloud-services health**: per-warehouse ratio = cloud-services credits ÷
   total credits (WATCH above 10%, ELEVATED above 20% — reading bands only:
@@ -350,7 +352,7 @@ Freshness & replay · Entity 360.
   robust baseline). When ELEVATED, the
   compile-heavy families table explains why (families ≥20 runs averaging
   >0.5s compile).
-- **Attribution** — allocated spend by dimension. Warehouse metering is
+- **Attribution** (Spend & Attribution) — allocated spend by dimension. Warehouse metering is
   exact billing truth; per-user/database attribution allocates each
   warehouse-hour's credits by elapsed-time share and is labeled
   "allocated". Waterfall = top contributors + Other, cumulative.
@@ -362,7 +364,10 @@ Freshness & replay · Entity 360.
   Allocated is the owner-scoped MART_COST_ALLOCATION_DAILY, so per company it
   can exceed 100%; read it under Company = ALL. It is one extra mart read,
   inside the "Load company attribution" toggle only.
-- **Contract** — pacing: consumed share vs elapsed-time share of
+- **Storage** (Spend & Attribution, behind the "Load storage &
+  unmapped-entity detail" toggle, with the Unmapped entities worklist) —
+  storage GB by database × storage rate.
+- **Contract** (Contract & Forecast) — pacing: consumed share vs elapsed-time share of
   `CONTRACT_CREDITS` between `CONTRACT_START_DATE`/`END`; pace ratio >1 =
   burning faster than the clock. Consumed counts the term only, up to
   (not including) `CONTRACT_END_DATE`. Once the term is over the section
@@ -374,7 +379,7 @@ Freshness & replay · Entity 360.
   ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY billed currency by account and
   service type, 30 days; without ORGANIZATION_USAGE_VIEWER it shows the
   grant hint.
-- **Chargeback** — department = warehouse owner (`DEPARTMENT_MAP`):
+- **Chargeback** (Chargeback & AI) — department = warehouse owner (`DEPARTMENT_MAP`):
   exact per-department billed credits; role-share within a warehouse as a
   secondary allocated lens; Unmapped bucket reconciles to the account
   total. Monthly statement export.
@@ -401,9 +406,9 @@ Freshness & replay · Entity 360.
   past mid-morning means that loader is behind (Admin → Migrations &
   freshness). With Company = UNKNOWN, an empty table reads verified-clean
   only when every keyed source covers the span in full.
-- **Cortex & Storage** — Cortex daily spend (token-based credits × $2.20),
-  storage GB by database × storage rate.
-- **AI Users** — per-user Cortex consumption, exceptions (users over the
+- **Cortex / AI spend** (Chargeback & AI) — Cortex daily spend
+  (token-based credits × $2.20).
+- **AI Users** (Chargeback & AI) — per-user Cortex consumption, exceptions (users over the
   per-user expectation), AI budget pacing when `AI_MONTHLY_BUDGET_USD` set.
   **Track top exceptions as work items** (v4.605, operators) writes the
   first 10 Exceptions rows through the same Track statement as Optimize and
@@ -428,7 +433,18 @@ Freshness & replay · Entity 360.
   open item at that severity is left as is. A Security work item on
   the same user does not block it. An item still open from an earlier
   month now blocks a new one; a done or dismissed item does not.
-- **Optimization** — idle advisor (warehouse-hours billed with zero
+- **Unit costs** — measured $ per query (QUERY_ATTRIBUTION_HISTORY credits,
+  ~8h lag, warehouse idle time excluded), the top 50 stored procedures by
+  measured spend with $/call, repeated patterns, AI $ by function/model
+  with $/1M tokens, ETL unit costs for tagged pipelines (on demand),
+  task-graph pipeline costs and serverless tasks.
+- **Compare** — period vs period from facts and marts: last full month
+  vs prior, or trailing 7d / 30d vs prior; warehouse movers, pattern
+  movers (measured $) and volume shape. Clicking a warehouse row scopes
+  the pattern movers to it with a live QUERY_HISTORY x
+  QUERY_ATTRIBUTION_HISTORY read, the section's one live scan.
+  Panel-local periods replace the global Window; only Company applies.
+- **Optimization** (Optimization & Savings) — idle advisor (warehouse-hours billed with zero
   queries = auto-suspend opportunity); right-sizing simulator (spill +
   queue profile → size suggestion; its **Check cluster use** toggle reads
   each multi-cluster warehouse's hourly peak cluster over ≥35 days, and a
@@ -449,7 +465,8 @@ Freshness & replay · Entity 360.
   STALE = no DML in 90d; tables nobody read in 90 days feed Addressable
   $/mo as storage waste); **guarded remediation** (§9); storage growth
   movers.
-- **Savings ledger** — every claimed saving with STATE: ESTIMATED (booked
+- **Savings ledger** (Optimization & Savings ▸ Remediation & ledger) —
+  every claimed saving with STATE: ESTIMATED (booked
   by remediation/advisor) → VERIFIED or REJECTED by the monthly verifier
   comparing actual before/after spend. The two are never summed together.
 

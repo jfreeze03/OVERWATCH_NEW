@@ -464,12 +464,27 @@ consequences the code accounts for:
 - The in-app execution gate is the `config.OPERATOR_USERS` viewer allowlist
   (`session.is_operator()`), plus a typed confirmation for classifying or
   account-touching writes. Because every viewer runs as the owner, that
-  allowlist is the app's authorization boundary; the executor re-checks it for
-  owner-privileged statements and enforces a statement allow-list (OVERWATCH
-  tables/procs and warehouse levers only).
+  allowlist is the app's authorization boundary. The executors run one
+  statement at a time from a fixed allow-list: DML (INSERT / UPDATE / DELETE /
+  MERGE) on DBA_MAINT_DB.OVERWATCH objects, CALLs of DBA_MAINT_DB.OVERWATCH
+  procs, and the Operations ▸ Emergency levers `ALTER WAREHOUSE`,
+  `ALTER PIPE`, `ALTER TASK`, `ALTER USER` and `ALTER ACCOUNT SET`. The
+  executor re-checks OPERATOR_USERS itself for those ALTER levers (and for
+  query cancel), so anyone on the list can, with the owner's rights, change
+  warehouse settings (size, suspend, timeouts, clusters), pause or resume
+  pipes, suspend or resume tasks, disable or re-enable users and set account
+  parameters.
 
-- Own the Streamlit app and the OVERWATCH objects with **SNOW_SYSADMINS** so
-  day-to-day operation never requires the break-glass role.
+- **The deployment role, SNOW_ACCOUNTADMINS (§1), owns the Streamlit app and
+  the OVERWATCH objects.** On this account it is a routine operating role,
+  not a break-glass one (V025 owner decision). The repo's owner-side grants
+  name it: the integration USAGE grant in docs/FULL_REBUILD.md step 7b(a)
+  (SP_NOTIFY_WEBHOOK runs as its owner), the PREREQS of
+  snowflake/native_alert_templates.sql (a file run as the app owner role, so
+  the app can see its alerts) and requirement 4 of
+  docs/EMAIL_RECIPIENT_RUNBOOK.md. If
+  you deploy as SNOW_SYSADMINS instead (§1 allows it), that role becomes the
+  owner: point each of those grants at it.
 - `ALERT_AUDIT` and `REMEDIATION_LOG` are append-only (UPDATE/DELETE
   explicitly revoked, even from the two admin roles). Admins can re-grant —
   the revokes block accidents, not adversaries; export on a schedule if an
@@ -571,11 +586,16 @@ surgical by design — the schema is shared with the old app, so it never drops
   the ML forecast model, the webhook secrets and the OVERWATCH_* notification
   integrations (OVERWATCH_EMAIL, OVERWATCH_WEBHOOK_TEAMS, …). Re-create those
   with their opt-in scripts afterwards (docs/FULL_REBUILD.md step 7b).
-- **Section B (commented):** operator data — settings, company scope, alert
-  config/events/audit, action queue, savings ledger, error log,
-  schema_version. Uncomment only for a factory reset, and run the provided
-  `CLONE` backups first: since V161 retired the scheduled backups they are the
-  only copy outside Time Travel. `UNDROP TABLE ...` also works within Time Travel.
+- **Section B (commented, except two live parts):** operator data — settings,
+  company scope, alert config/events/audit, action queue, savings ledger,
+  error log, schema_version, OVERWATCH_STAGE. Uncomment only for a factory
+  reset, and run the provided `CLONE` backups first: since V161 retired the
+  scheduled backups they are the only copy outside Time Travel. `UNDROP TABLE
+  ...` also works within Time Travel. Two parts of Section B run live: the
+  three rebuildable tables APP_QUERY_TELEMETRY, ALERT_DELIVERIES and
+  OW_SENDER_LEASE (the migrations re-create them; the emptied delivery ledger
+  makes the first notifier run re-post the last 24 h of OPEN events, 7 days
+  for a CRITICAL — docs/FULL_REBUILD.md step 7b(a)), and the opt-in tail above.
 - **Section C (commented):** warehouse, Streamlit app
   object, roles — shared infrastructure, dropped only deliberately.
 
@@ -583,7 +603,8 @@ The verify query at the bottom lists any surviving OVERWATCH objects. A unit
 test (`tests/test_teardown_coverage.py`) fails CI if a migration creates an
 object the teardown does not cover, or if a destructive drop ever goes live.
 
-Restore = migrations in order -> roles.sql -> validate.sql (all rows OK).
+Restore = every migration in order (V001 through the repo tip) -> roles.sql ->
+validate.sql (all rows OK) -> docs/FULL_REBUILD.md step 7b for the opt-in objects.
 
 ## 6. Disaster recovery (summary — full detail in RUNBOOK.md)
 
