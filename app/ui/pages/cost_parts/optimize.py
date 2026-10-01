@@ -1229,9 +1229,19 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             "above to include size-down transfers.")
         _vw = run(mart_sql.verified_wins(company), page=_PAGE, key=f"opt_verified_wins_{company}",
                   tier="recent", source="SAVINGS_LEDGER x WAREHOUSE_CHANGE_REGISTRY (verified wins)")
-        if not _vw.usable():
-            st.caption("No verified savings yet — a fix must be applied and verified before it can "
-                       "be replicated.")
+        # R1-017: absence by KIND (house law 8, the object-cost read's idiom above). A failed read (a
+        # timeout, schema drift, the registry's revert CTE) is never "No verified savings yet" — that
+        # told an operator with verified wins that none exist.
+        if _vw.ok and _vw.empty:
+            empty_state("no_data_yet", "No verified savings yet — a fix must be applied and verified before it "
+                        "can be replicated.")
+        elif not _vw.ok and is_setup_absence(_vw.error_kind):
+            empty_state("needs_setup",
+                        "Proven-fix transfer reads the savings ledger and the warehouse change registry — an "
+                        "admin can see what's pending on Admin → Migrations & freshness.")
+        elif not _vw.ok:
+            empty_state("unavailable", "Verified wins (SAVINGS_LEDGER x WAREHOUSE_CHANGE_REGISTRY) could not be "
+                        "read, so proven fixes can't be matched to other warehouses.", detail=_vw.error)
         else:
             _tx = proven_fix_transfer.transfer_suggestions(
                 _vw.df, idle_profiles=_idle_profiles_tx, sizing_profiles=_sizing_profiles_tx,
