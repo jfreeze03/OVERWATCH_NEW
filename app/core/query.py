@@ -47,8 +47,11 @@ _TELEMETRY_KEY = "_ow_query_telemetry"
 _TELEMETRY_MAX = 200
 
 # A real row cap already present in the statement, not just the word "limit"
-# somewhere in a column name (RATE_LIMIT) or comment (the \b word boundary) —
-# those used to disable the cap silently, leaving the query unbounded.
+# somewhere in the text — that used to disable the cap silently, leaving the
+# query unbounded. \b keeps a column such as RATE_LIMIT from matching, and
+# requiring a number keeps prose such as "limits apply" from matching. A
+# statement whose trailing comment ends in "LIMIT <n>" would still be read as
+# a cap.
 # r10 #6: only a TRAILING limit bounds the OUTER result — a subquery's
 # LIMIT deep inside the text used to disable the cap and leave the outer
 # statement unbounded.

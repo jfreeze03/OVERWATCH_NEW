@@ -148,7 +148,7 @@ def test_roi_readers_call_the_30d_builder() -> None:
 # --------------------------------------------------------------------------- #
 # Finding #5 -- the partial current month never reads as a complete month
 # --------------------------------------------------------------------------- #
-def test_savings_by_month_drops_the_partial_current_month(monkeypatch) -> None:
+def test_partial_current_month_is_flagged_mtd_not_complete(monkeypatch) -> None:
     monkeypatch.setattr(actions, "account_now", lambda: _dt.datetime(2026, 8, 30, 12, 0, 0))
     ledger = pd.DataFrame(
         {
