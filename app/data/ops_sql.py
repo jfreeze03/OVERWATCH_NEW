@@ -1701,7 +1701,11 @@ FROM (
     -- cannot establish a baseline and is filtered out.
     HAVING AVG_ROWS >= 1000 AND DAYS_ACTIVE_7D >= 3
 )
-ORDER BY DROP_PCT DESC
+-- Severity first, THEN the drop: a weekday-suppressed NORMAL row keeps DROP_PCT = 100, so a
+-- bare DROP_PCT DESC put 50 Sunday/Monday business-day tables above (and past the LIMIT, out
+-- of) a genuine FAILED table (PR-1 R1-047). NORMAL rows stay as the informational tail.
+ORDER BY CASE STATUS WHEN 'FAILED' THEN 0 WHEN 'WATCH' THEN 1 ELSE 2 END,
+         DROP_PCT DESC, DATABASE_NAME, SCHEMA_NAME, TABLE_NAME
 LIMIT 50
 """
 

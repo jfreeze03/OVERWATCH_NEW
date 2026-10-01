@@ -220,3 +220,48 @@ def test_pipeline_sla_ok_empty_keeps_the_register_expander(monkeypatch):
         ops._pipeline_data_checks(is_operator=False)
     assert [k for k, _m in seen["empty"]] == ["needs_setup"] and "No tables registered" in seen["empty"][0][1]
     assert ("expander", "Register a table") in fake.calls
+
+
+# ------------------------------------------- R1-047: volume_deltas keeps FAILED rows above the LIMIT ----
+
+def test_volume_deltas_ranks_by_severity_before_the_limit():
+    import sqlglot
+
+    from app.data import ops_sql
+    sql = ops_sql.volume_deltas()
+    assert ("ORDER BY CASE STATUS WHEN 'FAILED' THEN 0 WHEN 'WATCH' THEN 1 ELSE 2 END,\n"
+            "         DROP_PCT DESC, DATABASE_NAME, SCHEMA_NAME, TABLE_NAME\nLIMIT 50") in sql
+    assert "ORDER BY DROP_PCT DESC\nLIMIT 50" not in sql
+    sqlglot.parse(sql, dialect="snowflake")
+
+
+def test_volume_deltas_failed_row_survives_fifty_suppressed_weekday_rows():
+    # The reviewer's Monday scenario run through sqlite: 60 Mon-Fri tables (yesterday = Sunday = 0
+    # rows, same weekday last week = 0 -> NORMAL at DROP_PCT 100) and one daily table that fell 70%.
+    import sqlite3
+
+    import sqlglot
+
+    from app.data import ops_sql
+    lite = sqlglot.transpile(ops_sql.volume_deltas(), read="snowflake", write="sqlite")[0]
+    lite = (lite.replace("SNOWFLAKE.ACCOUNT_USAGE.TABLE_DML_HISTORY", "DML")
+                .replace("CURRENT_DATE", "'2026-09-28'"))
+    con = sqlite3.connect(":memory:")
+    con.create_function("REGEXP_LIKE", 3, lambda *_a: 0)
+    con.execute("CREATE TABLE DML (DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, START_TIME, ROWS_ADDED)")
+    rows = []
+    for d in range(2, 9):                                          # Sep 20..Sep 26 (d-8 .. d-2)
+        day = f"2026-09-{28 - d:02d}"
+        wd = date(2026, 9, 28 - d).weekday()
+        for t in range(60):
+            if wd < 5:
+                rows.append(("BIZ_DB", "S", f"T{t:02d}", day + " 01:00:00", 2000))
+        rows.append(("DAILY_DB", "S", "FEED", day + " 01:00:00", 10000))
+    rows.append(("DAILY_DB", "S", "FEED", "2026-09-27 01:00:00", 3000))   # yesterday: a 70% drop
+    con.executemany("INSERT INTO DML VALUES (?,?,?,?,?)", rows)
+    try:
+        got = con.execute(lite).fetchall()
+    except sqlite3.OperationalError as exc:                          # dialect gap -> the SQL lock above
+        pytest.skip(f"sqlite cannot run the transpiled builder: {exc}")
+    assert len(got) == 50
+    assert got[0][2] == "FEED" and got[0][-1] == "FAILED"
