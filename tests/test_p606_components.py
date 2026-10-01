@@ -307,7 +307,11 @@ def test_confirm_gate_apptest_target_switch_and_click_in_one_rerun_runs_nothing(
     at.run()
     assert not at.exception
     assert "_p606_fired" not in at.session_state                # nothing ran against WH_B
-    assert any("Nothing ran" in str(w.value) for w in at.warning)
+    # Streamlit <= 1.58 still delivers the click to a button that this run renders disabled, so
+    # confirm_gate must refuse it and say so; newer Streamlit (1.64, CI's lint-and-test leg) drops
+    # that click itself. Either way nothing runs, and a click that DID arrive always gets the receipt.
+    if at.button(key="remed_btn").value:
+        assert any("Nothing ran" in str(w.value) for w in at.warning)
     # control: typing the new target and clicking runs it exactly once
     at.text_input(key="remed_confirm").input("WH_B")
     at.run()
