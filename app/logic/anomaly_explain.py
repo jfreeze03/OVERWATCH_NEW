@@ -25,7 +25,8 @@ from app.logic.rca import candidates_from_changes
 
 _DEFAULT_BASELINE_DAYS = 14
 _MAX_DRIVERS = 6
-# Next-Fifty #27: the below-warehouse drill refuses an average over fewer loaded days.
+# Next-Fifty #27: the below-warehouse drill refuses an average over fewer loaded days; since R1-070
+# the warehouse waterfall refuses a median over fewer loaded days too.
 _MIN_BASELINE_DAYS = 7
 UNALLOCATED_LABEL = "Not allocated to a query (idle / carry-over hours)"
 
@@ -115,7 +116,9 @@ def explain_by_warehouse(frame: pd.DataFrame, flagged_day: object, *,
     with no prior history contributes its whole spend (a brand-new driver); one
     with history but silent on the flagged day contributes a negative delta (it
     went quiet). Contributions are ranked by absolute size and sum to the total
-    delta.
+    delta. Refuses (ok False, the reason in ``narrative``) when fewer than
+    ``_MIN_BASELINE_DAYS`` days before the flagged day are loaded — no baseline is
+    not a $0 baseline.
     """
     fday = _to_date(flagged_day)
     if (frame is None or frame.empty or fday is None
@@ -126,6 +129,21 @@ def explain_by_warehouse(frame: pd.DataFrame, flagged_day: object, *,
     work["_D"] = pd.to_datetime(work[day_col], errors="coerce").dt.date
     work["_V"] = work[value_col].map(safe_float)
     work = work.dropna(subset=["_D"])
+
+    # R1-070: a baseline needs loaded history. A flagged day at the frame's left edge (a one-off
+    # spike keeps its MAD z for the whole window, so it is often the oldest day) had NO prior rows:
+    # every warehouse got a fabricated $0 "usual", the whole day's spend read as the move, steady
+    # warehouses appeared as drivers and a collapse read as "above". Count loaded DAYS before the
+    # flagged day across the frame (not rows per warehouse, so a genuinely new warehouse in a frame
+    # WITH history still counts as a brand-new driver) and refuse below the drill's floor, as
+    # explain_below_warehouse does.
+    _need = max(1, min(_MIN_BASELINE_DAYS, int(baseline_days)))
+    n_prior = int(work.loc[work["_D"] < fday, "_D"].nunique())
+    if n_prior < _need:
+        return AnomalyExplanation(
+            False, fday, 0.0, 0.0, 0.0, (),
+            f"Not enough history before {fday} to explain it: {n_prior} earlier day(s) loaded, "
+            f"at least {_need} needed for a fair baseline.")
 
     actual = work[work["_D"] == fday].groupby(group_col)["_V"].sum()
     before = work[work["_D"] < fday]

@@ -80,3 +80,21 @@ def test_drill_is_wired_into_the_spend_anomaly_panel():
            / "spend.py").read_text(encoding="utf-8")
     assert "explain_by_warehouse(" in src
     assert "root-cause waterfall" in src
+
+
+def test_a_flagged_day_without_history_is_refused_not_explained_against_zero():
+    """R1-070: a spike on the frame's OLDEST day (a one-off spike keeps its MAD z all window long, so
+    it is often the strongest hit) had no prior rows -> every warehouse's 'usual' was a fabricated
+    $0, the whole day's spend read as the move and a steady WH_B showed as a driver. Refuse instead."""
+    frame = _frame("WH_A", 4000.0)
+    left_edge = frame[frame["DAY"] >= _FLAG]                     # the flagged day is the first loaded
+    exp = explain_by_warehouse(left_edge, _FLAG)
+    assert not exp.ok and not exp.drivers
+    assert "Not enough history before 2026-07-20" in exp.narrative and "$0.00" not in exp.narrative
+    # six prior days is still too thin (the below-warehouse drill's 7-day floor) ...
+    six = frame[frame["DAY"] >= _FLAG - timedelta(days=6)]
+    assert not explain_by_warehouse(six, _FLAG).ok
+    # ... seven is enough, and the result is the unchanged waterfall
+    seven = explain_by_warehouse(frame[frame["DAY"] >= _FLAG - timedelta(days=7)], _FLAG)
+    assert seven.ok and seven.drivers[0].name == "WH_A" and seven.drivers[0].share_pct == 100.0
+    assert [d.name for d in seven.drivers] == ["WH_A"]           # the steady WH_B is not a driver
