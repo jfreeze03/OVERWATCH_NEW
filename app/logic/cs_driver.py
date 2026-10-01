@@ -191,7 +191,12 @@ def classify_row(row: pd.Series | dict) -> tuple[str, str]:
     if compile_pct >= _COMPILE_DOMINANT_PCT:
         # compile phase dominates. Sub-second total => metadata-only (no real
         # warehouse execution); otherwise a genuinely compile-heavy plan.
-        if 0 < total_s <= _METADATA_MAX_TOTAL_S or _text(row, "WAREHOUSE_NAME") in ("", "NONE", "NULL"):
+        # R1-090: "no warehouse" is a NULL / 'NONE' WAREHOUSE_NAME VALUE, never an absent column -- the
+        # Cost ▸ Spend compile-heavy builders (live + mart, and the per-warehouse drill) select none, so
+        # every compile-dominated family there read Metadata chatter and COMPILE_HEAVY could never appear.
+        # ("in" checks a dict's keys and a Series' index.)
+        no_warehouse = "WAREHOUSE_NAME" in row and _text(row, "WAREHOUSE_NAME") in ("", "NONE", "NULL")
+        if 0 < total_s <= _METADATA_MAX_TOTAL_S or no_warehouse:
             return METADATA_CHATTER, conf("MEDIUM")
         return COMPILE_HEAVY, conf("MEDIUM")
     if compile_pct > 0 and total_s > 0:

@@ -32,11 +32,29 @@ IDLE_TARGET_SUSPEND_SEC = 60
 IDLE_RESUME_TAIL_SEC = IDLE_TARGET_SUSPEND_SEC
 
 
+def show_auto_suspend(value: object) -> float | None:
+    """One SHOW WAREHOUSES ``auto_suspend`` cell as seconds, or None when it cannot be read.
+
+    R1-071: SHOW reports a warehouse that never suspends (AUTO_SUSPEND = NULL) as NULL -- "a value
+    of null indicates the warehouse never automatically suspends" -- so a NULL on a row SHOW DID
+    return is the KNOWN never-suspend setting, the same as 0 (proof.py and the mart's setting rank
+    already read it that way), never 'unknown'. Only an unparseable value is None."""
+    if isinstance(value, str):
+        if value.strip().upper() in ("NULL", "NONE", "NAN"):
+            return 0.0
+    elif value is None or (pd.api.types.is_scalar(value) and bool(pd.isna(value))):
+        return 0.0      # None / NaN / pd.NA: the cell SHOW returned is NULL = never suspends
+    num = pd.to_numeric(value, errors="coerce")
+    return None if pd.isna(num) else float(num)
+
+
 def with_auto_suspend_settings(idle: pd.DataFrame, warehouses: pd.DataFrame) -> pd.DataFrame:
     """Attach case-insensitive SHOW WAREHOUSES auto-suspend evidence.
 
     Missing metadata stays explicitly unknown. AUTO_SUSPEND=0 is a known,
     disabled setting and must not be conflated with a failed metadata read.
+    A warehouse SHOW lists with a NULL auto_suspend never suspends: known, 0
+    (show_auto_suspend, R1-071) -- only a warehouse SHOW did not list is unknown.
     """
     if idle is None or idle.empty:
         return pd.DataFrame() if idle is None else idle.copy()
@@ -50,7 +68,7 @@ def with_auto_suspend_settings(idle: pd.DataFrame, warehouses: pd.DataFrame) -> 
     if not {"name", "auto_suspend"}.issubset(settings.columns):
         return out
     values = {
-        str(name).strip().upper(): pd.to_numeric(value, errors="coerce")
+        str(name).strip().upper(): show_auto_suspend(value)
         for name, value in zip(settings["name"], settings["auto_suspend"], strict=False)
     }
     mapped = out["WAREHOUSE_NAME"].astype(str).str.strip().str.upper().map(values)
@@ -2208,6 +2226,13 @@ def pipeline_sla_forecast(df: pd.DataFrame, *, overdue_k: float = 1.5) -> pd.Dat
         if not is_met:
             forecasts.append("Breached")
             severities.append("High")
+            if pd.isna(hours_since.iloc[i]):
+                # R1-076: PIPELINE_SLA_STATUS LEFT JOINs ACCOUNT_USAGE.TABLES, so a registered table it
+                # cannot find has no LAST_ALTERED -- never a fabricated "0s old" next to an em-dash age
+                details.append("no LAST_ALTERED — not found in ACCOUNT_USAGE.TABLES (dropped, renamed, "
+                               "mis-registered or a quoted mixed-case name; a new table can take ~2h to "
+                               "appear)")
+                continue
             details.append(f"already {humanize_duration(hs, 'h')} old (past its "
                            f"{humanize_duration(safe_float(max_age.iloc[i]), 'h')} limit)")
             continue

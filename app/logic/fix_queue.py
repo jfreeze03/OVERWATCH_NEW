@@ -277,8 +277,8 @@ def diagnose_workloads(portfolio: pd.DataFrame | None, *, live_scored: pd.DataFr
                 else:
                     first_fix += (f"The marts cannot see {_MART_BLIND}: turn on the live query "
                                   "profile above to diagnose it.")
-        # FAIL_PCT = family-mart FAILS over pattern-mart RUNS (two populations), so it can read past
-        # 100% on a thin join; the failed-run share of observed cost can never exceed that cost.
+        # FAIL_PCT = family-mart FAILS over the same family's FAMILY_RUNS (decision.prioritize_workloads,
+        # R1-083); the clamp stays: the failed-run share of observed cost can never exceed that cost.
         fail_pct = max(0.0, min(safe_float(rec.get("FAIL_PCT")), 100.0))
         impact = safe_float(rec.get("IMPACT_USD_30D"))
         priced = (round(impact * fail_pct / 100.0, 2)
