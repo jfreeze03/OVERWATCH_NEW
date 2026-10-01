@@ -12,8 +12,10 @@
 --         re-posted to the route(s) that delivered it, emailed via OVERWATCH_EMAIL's
 --         DEFAULT_RECIPIENTS (recipe at the end of this file)
 --
--- Run as ACCOUNTADMIN, paste your Slack/Teams webhook URL, then re-run
--- V018 (or just: ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_ALERT_NOTIFY RESUME;)
+-- Run as ACCOUNTADMIN with the Teams secret pasted into the PASTE TARGET below
+-- (in Snowsight), then re-run V018 (or just: ALTER TASK
+-- DBA_MAINT_DB.OVERWATCH.TASK_ALERT_NOTIFY RESUME;). A rotated URL needs only
+-- the ROTATION step further down -- not a re-run of this file.
 
 
 -- ---------------------------------------------------------------------------
@@ -26,21 +28,71 @@
 -- PASTE YOUR TEAMS WORKFLOWS HTTP URL IN SNOWSIGHT ONLY.
 -- <REDACTED-PASTE-IN-SNOWSIGHT>  (NEVER PASTE THE REAL URL INTO THIS FILE —
 -- it lands in git + git history; keep it in the SECRET object in Snowsight.)
- CREATE OR REPLACE SECRET DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL
-    TYPE = GENERIC_STRING
-     SECRET_STRING = '<REDACTED-PASTE-IN-SNOWSIGHT>';
+--
+-- PASTE TARGET: the teams_secret DEFAULT in the block below = everything after
+-- /workflows/ in that URL (the flow id + ?api-version=...&sig=...). The block
+-- RAISEs while the placeholder (any '<') is still there, so an unedited Run All
+-- stops HERE -- before anything below can overwrite the live secret with the
+-- placeholder (every send would fail) or recreate the integration (CREATE OR
+-- REPLACE drops every grant on it; SP_NOTIFY_WEBHOOK runs as owner).
+EXECUTE IMMEDIATE $$
+DECLARE
+    teams_secret VARCHAR DEFAULT '<REDACTED-PASTE-IN-SNOWSIGHT>';
+    ddl VARCHAR;
+    placeholder_still_present EXCEPTION (-20001, 'ABORT: webhook_delivery.sql still holds the placeholder Teams secret. Paste the real value (everything after /workflows/ in the Workflows URL) into teams_secret in a Snowsight worksheet, then re-run. A rotated URL needs only the ROTATION step (ALTER SECRET), not this file.');
+BEGIN
+    IF (CONTAINS(teams_secret, '<')) THEN
+        RAISE placeholder_still_present;
+    END IF;
+    -- the repo's dynamic-DDL idiom (EXECUTE IMMEDIATE :var); the value is quote-escaped into the DDL
+    ddl := 'CREATE OR REPLACE SECRET DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL TYPE = GENERIC_STRING SECRET_STRING = '''
+           || REPLACE(teams_secret, '''', '''''') || '''';
+    EXECUTE IMMEDIATE :ddl;
+    RETURN 'OVERWATCH_TEAMS_URL set';
+END;
+$$;
  CREATE OR REPLACE NOTIFICATION INTEGRATION OVERWATCH_WEBHOOK_TEAMS
      TYPE = WEBHOOK ENABLED = TRUE
      WEBHOOK_URL = 'https://default22d2e650b7a647b5af0ef9719fea2b.b8.environment.api.powerplatform.com/powerautomate/automations/direct/workflows/SNOWFLAKE_WEBHOOK_SECRET'
      WEBHOOK_SECRET = DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL
      WEBHOOK_BODY_TEMPLATE = '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.adaptive","content":{"$schema":"http://adaptivecards.io/schemas/adaptive-card.json","type":"AdaptiveCard","version":"1.4","body":[{"type":"TextBlock","text":"SNOWFLAKE_WEBHOOK_MESSAGE","wrap":true}]}}]}'
      WEBHOOK_HEADERS = ('Content-Type' = 'application/json');
+-- Idempotent: ROUTE_ID is a UUID default and Snowflake does not enforce the key,
+-- so a bare INSERT minted a SECOND enabled route on every re-run -- and
+-- SP_NOTIFY_WEBHOOK / SP_DAILY_DIGEST deliver per ROUTE_ID, so every alert,
+-- digest and escalation then posted twice (plus a backlog burst on the new
+-- route). Keyed on the integration alone, NOT on ENABLED: a route you disabled
+-- on purpose is never re-added.
  INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES (FAMILY, MIN_SEVERITY, INTEGRATION_NAME)
- SELECT 'ALL', 'HIGH', 'OVERWATCH_WEBHOOK_TEAMS';
+ SELECT 'ALL', 'HIGH', 'OVERWATCH_WEBHOOK_TEAMS'
+ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES
+                   WHERE INTEGRATION_NAME = 'OVERWATCH_WEBHOOK_TEAMS');
 
 -- V026's sender JSON-escapes the message (quotes, newlines, tabs), so
 -- multi-alert digests render as line breaks in the card instead of
 -- breaking the flow. Workflows replies 202 Accepted on success.
+
+-- ---------------------------------------------------------------------------
+-- ROTATION RUNBOOK -- the Teams URL was regenerated, or deliveries fail with
+-- webhook/HTTP errors (alert_pipeline_check.sql STEP 4 / FIX C). Change ONLY
+-- the secret, in a Snowsight worksheet (paste the new value there, never here):
+--   ALTER SECRET DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL
+--       SET SECRET_STRING = '<everything after /workflows/ in the new URL>';
+-- The integration, its grants and ALERT_ROUTES stay as they are. Re-run the
+-- setup above only when the URL PREFIX (before /workflows/) or the card
+-- template changes -- and then check the grants it dropped:
+--   SHOW GRANTS ON INTEGRATION OVERWATCH_WEBHOOK_TEAMS;
+-- Prove delivery end to end (posts one real card):
+--   CALL SYSTEM$SEND_SNOWFLAKE_NOTIFICATION(
+--     SNOWFLAKE.NOTIFICATION.TEXT_PLAIN('OVERWATCH rotation test ' || CURRENT_TIMESTAMP()),
+--     SNOWFLAKE.NOTIFICATION.INTEGRATION('OVERWATCH_WEBHOOK_TEAMS'));
+-- Every card arriving TWICE = a duplicate route left by an older, unguarded
+-- re-run of this file. Keep the oldest enabled row, disable the others:
+--   SELECT ROUTE_ID, FAMILY, MIN_SEVERITY, COMPANY_FILTER, ENABLED, CREATED_AT
+--     FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES
+--    WHERE INTEGRATION_NAME = 'OVERWATCH_WEBHOOK_TEAMS' ORDER BY CREATED_AT;
+--   UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES SET ENABLED = FALSE
+--    WHERE ROUTE_ID = '<a newer duplicate ROUTE_ID>';
 
 -- ---------------------------------------------------------------------------
 -- Severity-based multi-channel routing (the sender already walks
