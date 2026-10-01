@@ -1823,6 +1823,13 @@ def proc_cost_trend(proc_name: str, days: int, company: str = "ALL",
         contains_filter("c.WAREHOUSE_NAME", warehouse_contains),
         contains_filter("c.USER_NAME", user_contains),
     )
+    # R1-037: the attribution read spans the SAME window as the $/call leaderboard's att_guard — the
+    # bounded calendar range under a calendar preset. A trailing -(days+1) read under "Last month"
+    # started ~Aug 29 while the CALL scan covered Aug 1..31, so every earlier call came back $0 (read on
+    # the page as "attribution not caught up") and the drill's total understated its leaderboard row.
+    att_win = (resolve_effective_window(days, "START_TIME", bounds=bounds)[1]
+               if bounds is not None
+               else f"START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())")
     return f"""
 WITH calls AS (
     SELECT c.QUERY_ID, DATE(c.START_TIME) AS DAY, c.EXECUTION_STATUS,
@@ -1838,7 +1845,7 @@ att AS (
     SELECT COALESCE(ROOT_QUERY_ID, QUERY_ID) AS RID,
            SUM(CREDITS_ATTRIBUTED_COMPUTE + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
-    WHERE START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())
+    WHERE {att_win}
       AND COALESCE(ROOT_QUERY_ID, QUERY_ID) IN (SELECT QUERY_ID FROM named)
     GROUP BY 1
 )
