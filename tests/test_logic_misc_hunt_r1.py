@@ -5,7 +5,8 @@ locks beside them (what a fix must NOT change) pass on both."""
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+import re
+from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
 import sqlglot
@@ -179,6 +180,42 @@ def test_optimize_passes_the_bounds_to_the_idle_prompt():
         "app/ui/pages/cost_parts/optimize.py")
 
 
+def _idle_ai_panel_key(today: date, preset: object) -> str:
+    """The idle AI panel's session key as optimize.py builds it, for ``preset`` viewed on ``today``."""
+    import functools
+
+    from app.logic import date_windows as dw
+    src = read("app/ui/pages/cost_parts/optimize.py")
+    call = src.split('subject="evaluate idle warehouse spend"', 1)[0].rsplit("ai_evaluation_panel(", 1)[1]
+    m = re.search(r'\bkey=(f"[^"\n]*")', call)
+    assert m is not None
+    bounds = dw.window_bounds(preset, today)
+    names = {"__builtins__": {}, "company": "ALL", "days": dw.resolve_window_days(preset, today),
+             "_lm": "_lm" if bounds is not None else "", "bounds": bounds,
+             "window_label": functools.partial(dw.window_label, today=today)}
+    return str(eval(m.group(1), names))
+
+
+def test_idle_ai_panel_key_separates_calendar_presets_of_equal_length():
+    # R1-106 review: the prompts now name each preset's own dates, but the stored answer was keyed
+    # idle_{company}_{days}{_lm}, and {_lm} is the same for all three presets. On Oct 31 Current month
+    # (Oct 1-31) and Last month (Sep 1-30) are both 30 days, so one preset's answer rendered under
+    # the other's panel; on Feb 1 Current year (Jan 1-Feb 1) and Last month (January) are both 31.
+    from app.config import CURRENT_MONTH_WINDOW, CURRENT_YEAR_WINDOW, LAST_MONTH_WINDOW
+    from app.logic import date_windows as dw
+    presets = (CURRENT_MONTH_WINDOW, LAST_MONTH_WINDOW, CURRENT_YEAR_WINDOW)
+    for today, a, b in ((date(2026, 10, 31), CURRENT_MONTH_WINDOW, LAST_MONTH_WINDOW),
+                        (date(2026, 12, 31), CURRENT_MONTH_WINDOW, LAST_MONTH_WINDOW),
+                        (date(2027, 2, 1), CURRENT_YEAR_WINDOW, LAST_MONTH_WINDOW)):
+        assert dw.resolve_window_days(a, today) == dw.resolve_window_days(b, today)   # the collision
+        assert _idle_ai_panel_key(today, a) != _idle_ai_panel_key(today, b), today
+        # one key per distinct evidence window (January's current month == current year: same dates)
+        windows = {dw.window_bounds(p, today) for p in presets}
+        assert len({_idle_ai_panel_key(today, p) for p in presets}) == len(windows), today
+    # a trailing window keeps a key of its own
+    assert _idle_ai_panel_key(date(2026, 10, 31), 30) == "idle_ALL_30_30d"
+
+
 # ---- R1-105: Case File previews render NULL cells as "—", never 'nan' / 'None' / 'NaT' ---------
 
 
@@ -213,6 +250,46 @@ def test_add_to_case_hands_raw_cells_with_nulls_as_none():
     body = comp.split("def add_to_case_button", 1)[1].split("\ndef ", 1)[0]
     assert "head.astype(str)" not in body                 # stringified NULLs before case_file saw them
     assert "preview_rows=head.astype(object).where(head.notna(), None).to_numpy().tolist()" in body
+
+
+class _CaseClickSt:
+    """``st`` stand-in for add_to_case_button: the button is clicked, session_state is a dict."""
+
+    def __init__(self):
+        self.session_state: dict = {}
+
+    def button(self, *_a, **_k):
+        return True
+
+    def toast(self, *_a, **_k):
+        return None
+
+
+def test_add_to_case_exports_null_cells_as_the_dash_end_to_end(monkeypatch):
+    # R1-105 and c04's R1-220 are one fix: components hands NULLs over as None and case_file renders
+    # them NULL_CELL. Lock the merged output end to end (a check that only bans 'nan' / 'NaT' text
+    # passes for a blank cell too).
+    import app.core.state as state
+    from app.core.result import QueryResult
+    from app.logic import case_file
+    from app.ui import components
+    fake = _CaseClickSt()
+    monkeypatch.setattr(components, "st", fake)
+    monkeypatch.setattr(state, "filters", lambda: {"company": "ALFA", "window_label": "30d", "days": 30})
+    df = pd.DataFrame({
+        "USER_NAME": ["SVC_A", "SVC_B"],
+        "FAILURES": pd.array([12, None], dtype="Int64"),
+        "FIRST_SUCCESS_AFTER": pd.to_datetime([None, "2026-09-30 10:05:00"]),
+        "BREAKTHROUGH_MIN": [float("nan"), 4.5],
+        "LAST_ERROR": [None, "locked"],
+    })
+    assert components.add_to_case_button("Security", QueryResult(df=df, ok=True, source="t"),
+                                         summary="Failed-login bursts", key="case_fl") is True
+    md = case_file.assemble_markdown(fake.session_state[case_file.CASE_STATE_KEY], generated="g")
+    assert "| SVC_A | 12 | — | — | — |" in md
+    assert "| SVC_B | — | 2026-09-30 10:05:00 | 4.5 | locked |" in md
+    for token in ("nan", "NaT", "None", "<NA>"):
+        assert token not in md, token
 
 
 # ---- R1-112: no idle evidence is not 0% idle in the adaptive-compute candidacy -----------------
@@ -269,6 +346,8 @@ def test_low_qas_spend_with_eligible_workload_is_not_an_enable_candidate():
 
 
 # ---- R1-122: the drill streak counts consecutive calendar months, not passing events ----------
+# Every call pins ``now``: since the streak is anchored on the account calendar (R1-122 review), a
+# test that leaves it to the real clock would go red as soon as its rows are older than a month.
 
 
 def _drill(raised: str, ok: bool = True) -> dict:
@@ -279,7 +358,7 @@ def test_drill_streak_breaks_on_a_missing_month():
     from app.logic.drill import drill_report
     # Sep and Jul passed, no August drill at all (task suspended): the streak is 1, not 2
     df = pd.DataFrame([_drill("2026-09-01 09:00"), _drill("2026-07-01 09:00")])
-    assert drill_report(df)["streak_months"] == 1
+    assert drill_report(df, now=datetime(2026, 9, 20))["streak_months"] == 1
 
 
 def test_drill_streak_is_one_outcome_per_month():
@@ -287,12 +366,61 @@ def test_drill_streak_is_one_outcome_per_month():
     # two passing rows in September (a hand insert) count once; Aug passed; Jul failed
     df = pd.DataFrame([_drill("2026-09-15 09:00"), _drill("2026-09-01 09:00"),
                        _drill("2026-08-01 09:00"), _drill("2026-07-01 09:00", ok=False)])
-    report = drill_report(df)
+    report = drill_report(df, now=datetime(2026, 9, 20))
     assert report["streak_months"] == 2
     assert report["last"]["delivered"] and report["last"]["acked"]
     # a year boundary is consecutive: Jan after Dec
     df = pd.DataFrame([_drill("2027-01-01 09:00"), _drill("2026-12-01 09:00")])
-    assert drill_report(df)["streak_months"] == 2
+    assert drill_report(df, now=datetime(2027, 1, 10))["streak_months"] == 2
+
+
+def test_drill_streak_is_zero_while_the_newest_drill_is_months_old():
+    from app.logic.drill import drill_report
+    # task suspended since June, viewed in September: Jul/Aug/Sep wrote no row. The walk used to
+    # start at June's pass and showed a green 3-month streak; the gap that is still open breaks it.
+    df = pd.DataFrame([_drill("2026-06-01 09:00"), _drill("2026-05-01 09:00"), _drill("2026-04-01 09:00")])
+    report = drill_report(df, now=datetime(2026, 9, 20))
+    assert report["ran"] and report["streak_months"] == 0
+    assert report["last"]["delivered"] and report["last"]["acked"]   # the last drill itself did pass
+    # one missed month is enough: viewed in July, June's pass is no longer the newest due month
+    assert drill_report(df, now=datetime(2026, 7, 20))["streak_months"] == 0
+    assert drill_report(df, now=datetime(2026, 6, 20))["streak_months"] == 3
+
+
+def test_drill_month_is_due_an_hour_after_the_first_of_month_run():
+    from app.logic.drill import drill_report
+    df = pd.DataFrame([_drill("2026-09-01 09:00"), _drill("2026-08-01 09:00")])
+    # before (and within an hour of) the 09:00 CT run on Oct 1, September is still the newest due month
+    assert drill_report(df, now=datetime(2026, 10, 1, 8, 30))["streak_months"] == 2
+    assert drill_report(df, now=datetime(2026, 10, 1, 9, 59))["streak_months"] == 2
+    # from 10:00 CT, October's drill is due and missing
+    assert drill_report(df, now=datetime(2026, 10, 1, 10, 0))["streak_months"] == 0
+    assert drill_report(df, now=datetime(2026, 10, 15))["streak_months"] == 0
+    # an October drill that already ran (a manual EXECUTE TASK before 09:00) is the newest outcome
+    early = pd.DataFrame([_drill("2026-10-01 07:00"), *df.to_dict("records")])
+    assert drill_report(early, now=datetime(2026, 10, 1, 8, 0))["streak_months"] == 3
+    # an aware ``now`` is read on the account clock: 14:30 UTC = 09:30 CDT, 15:30 UTC = 10:30 CDT
+    assert drill_report(df, now=datetime(2026, 10, 1, 14, 30, tzinfo=UTC))["streak_months"] == 2
+    assert drill_report(df, now=datetime(2026, 10, 1, 15, 30, tzinfo=UTC))["streak_months"] == 0
+
+
+def test_drill_streak_defaults_to_the_account_clock(monkeypatch):
+    from app.logic import drill
+    df = pd.DataFrame([_drill("2026-06-01 09:00"), _drill("2026-05-01 09:00")])
+    monkeypatch.setattr(drill, "account_now", lambda: datetime(2026, 9, 20, 12, 0))
+    assert drill.drill_report(df)["streak_months"] == 0
+    monkeypatch.setattr(drill, "account_now", lambda: datetime(2026, 6, 20, 12, 0))
+    assert drill.drill_report(df)["streak_months"] == 2
+
+
+def test_drill_due_hour_matches_the_drill_task_schedule():
+    from app.logic import drill
+    from app.logic.formulas import ACCOUNT_TIMEZONE
+    sql = read("snowflake/alert_drill.sql")
+    m = re.search(r"SCHEDULE = 'USING CRON (\d+) (\d+) (\d+) \* \* ([\w/]+)'", sql)
+    assert m is not None
+    minute, hour, day, tz = m.groups()
+    assert (int(minute), int(hour), int(day), tz) == (0, drill.DRILL_HOUR, drill.DRILL_DAY, ACCOUNT_TIMEZONE)
 
 
 # ---- R1-123: threshold suggestions read UNTAGGED_N and do not overstate their evidence --------

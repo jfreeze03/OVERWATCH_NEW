@@ -790,8 +790,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 # Match the idle read's cache discriminator (optimize.py:303): the idle
                 # evidence differs between trailing and the bounded previous month, so
                 # without {_lm} the cached answer can survive a Trailing<->Last-month
-                # switch when the day-count matches (bug-hunt round 6).
-                key=f"idle_{company}_{days}{_lm}",
+                # switch when the day-count matches (bug-hunt round 6). {_lm} alone is the same for
+                # all three calendar presets, and Current month and Last month both resolve to 30 days
+                # on Oct 31 / Dec 31: the preset label keeps one preset's stored answer off the other.
+                key=f"idle_{company}_{days}{_lm}_{window_label(bounds, days).replace(' ', '_')}",
                 # bounds: a calendar preset names its own dates, not "last N days" (R1-106)
                 prompt=idle_warehouse_prompt(advisor, company, idle_days, bounds=bounds),
                 settings=settings,
