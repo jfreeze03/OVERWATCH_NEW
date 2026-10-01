@@ -70,8 +70,6 @@ _UNQUOTED = re.compile(r"^[A-Z_][A-Z0-9_$]*$")
 _NUMERIC_COLS = ("EFFECTIVE_TIMEOUT_SEC", "COMPLETED_RUNS", "P99_ELAPSED_SEC", "MAX_ELAPSED_SEC",
                  "TIMEOUT_CANCELLED_RUNS", "SUGGESTED_TIMEOUT_SEC", "WOULD_CANCEL_RUNS",
                  "WAREHOUSE_TIMEOUT_SEC", "TIMEOUT_FIRED_MIN_SEC", "TIMEOUT_FIRED_MAX_SEC")
-_TAIL_COLS = ("COMPLETED_RUNS", "P99_ELAPSED_SEC", "MAX_ELAPSED_SEC", "TIMEOUT_CANCELLED_RUNS",
-              "TIMEOUT_FIRED_MIN_SEC", "TIMEOUT_FIRED_MAX_SEC")
 FIRED_BELOW_NOTE = "below cap"
 # Review R2-10: what can set a ceiling BELOW a warehouse's effective cap (today's min(warehouse, account)): every
 # other level of the 'Timed out' list (user, session, client, task), or a warehouse / account value that was

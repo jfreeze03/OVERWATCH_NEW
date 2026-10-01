@@ -16,7 +16,12 @@ from zoneinfo import ZoneInfo
 from app.core.ai import CORTEX_TIMEOUT_SECONDS, MAX_PROMPT_CHARS, normalize_model
 from app.core.errors import format_snowflake_error
 from app.core.query import _with_row_cap
-from app.logic.formulas import ACCOUNT_TIMEZONE, account_today, exec_summary_html
+from app.logic.formulas import (
+    ACCOUNT_TIMEZONE,
+    ExecutiveSummaryView,
+    account_today,
+    executive_summary_html,
+)
 
 # ---------------------------------------------------------------------------
 # Row-cap LIMIT detection
@@ -73,14 +78,17 @@ def test_account_timezone_is_chicago():
 # ---------------------------------------------------------------------------
 
 def _summary(**overrides):
+    # The production renderer (Overview + Brief exports); the legacy keyword wrapper
+    # exec_summary_html it used to go through had no caller and was removed in v4.607.
     kwargs = {
         "company": "ALFA", "days": 7, "generated": "2026-07-07 09:00",
-        "window_spend": "$1,000", "mtd_line": "$2,000", "forecast_line": "$3,000",
-        "alerts_line": "0 critical", "score_line": "98/100",
-        "drivers": [], "actions": [],
+        "cards": (("Window spend", "$1,000"), ("Month to date", "$2,000"),
+                  ("Projected month-end", "$3,000"), ("Open alerts", "0 critical"),
+                  ("Platform score", "98/100")),
+        "drivers": (), "actions": (),
     }
     kwargs.update(overrides)
-    return exec_summary_html(**kwargs)
+    return executive_summary_html(ExecutiveSummaryView(**kwargs))
 
 
 def test_exec_summary_escapes_company():
@@ -91,8 +99,8 @@ def test_exec_summary_escapes_company():
 
 def test_exec_summary_escapes_drivers_and_actions():
     html = _summary(
-        drivers=[("<b>drv</b>", "1.0", 'evidence & "quotes"')],
-        actions=["<img src=x onerror=y>"],
+        drivers=(("<b>drv</b>", "-1.0 pts", 'evidence & "quotes"'),),
+        actions=("<img src=x onerror=y>",),
     )
     assert "<b>drv</b>" not in html
     assert "<img" not in html

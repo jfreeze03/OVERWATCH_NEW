@@ -311,15 +311,6 @@ def idle_advisor(df: pd.DataFrame, credit_rate_usd: float, window_days: int) -> 
             .drop(columns="_ACTION_ORDER").reset_index(drop=True))
 
 
-def idle_suspend_sql(warehouse: str, seconds: int = 60) -> str:
-    """Generated (not executed) remediation for a flagged warehouse."""
-    from app.core.sqlsafe import safe_identifier
-
-    wh = safe_identifier(str(warehouse))
-    seconds = max(30, min(int(seconds), 3600))
-    return f"ALTER WAREHOUSE {wh} SET AUTO_SUSPEND = {seconds};"
-
-
 # ---- 2. Repeat-query candidates ---------------------------------------------
 
 # D3: the gate is "half an hour of compute PER 30 DAYS", not "half an hour in
