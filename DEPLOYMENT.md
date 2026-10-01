@@ -520,6 +520,7 @@ CREATE OR REPLACE STREAMLIT DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP
 
 The uploaded set must mirror `snowflake.yml`'s `artifacts`: if the app gains
 a subfolder or a runtime-read file, add it here too.
+
 `LIST @DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE` (or the directory table)
 shows what is deployed; re-running PUT with OVERWRITE replaces files and the
 app picks them up on next open.
