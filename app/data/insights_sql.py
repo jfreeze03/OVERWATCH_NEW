@@ -272,6 +272,11 @@ def storage_growth_by_database(days: int, company: str = "ALL", database: str = 
     database in scope) instead of summing the capped frame, where the shrinking databases are the ones
     cut. ``database`` (the global Database filter, case-insensitive) narrows in SQL: a post-LIMIT filter
     showed a false "no storage history" for a database outside the top 100.
+
+    V166 (R2-009): a name-day SUMs its DATABASE_STORAGE_USAGE_HISTORY rows. The view has one row per
+    DATABASE_ID, a re-created or clone-refreshed database keeps its dropped IDs under the same name, and each
+    row is already that ID's daily average, so the AVG divided the name-day's bytes by the row count (the
+    loader and storage_by_database_calendar_live SUM too).
     """
     from app.core.sqlsafe import sql_literal
 
@@ -287,8 +292,8 @@ WITH daily AS (
     SELECT
         DATABASE_NAME,
         USAGE_DATE,
-        AVG(COALESCE(AVERAGE_DATABASE_BYTES, 0)) AS DB_BYTES,
-        AVG(COALESCE(AVERAGE_FAILSAFE_BYTES, 0)) AS FAILSAFE_BYTES
+        SUM(COALESCE(AVERAGE_DATABASE_BYTES, 0)) AS DB_BYTES,
+        SUM(COALESCE(AVERAGE_FAILSAFE_BYTES, 0)) AS FAILSAFE_BYTES
     FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY
     WHERE {where}
     GROUP BY 1, 2

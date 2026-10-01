@@ -2,7 +2,10 @@
 
 Adversarial data-loader pass (6 finders). Eight surfaced, six confirmed, two refuted. Four fixes here
 (2 app + V113 + V114); three deferred (SP_LOAD_APP_COST/SP_LOAD_STORAGE_TRUTH txn-wrap, IDLE_PCT
-weighting) with a documented rationale.
+weighting). The txn-wrap deferral's rationale (a failed run self-heals on the next one) was wrong: under
+autocommit a failed INSERT left the DELETE committed and the next run's window starts a day later, so the
+oldest reloaded day was lost for good. V166 (R2-011) wraps both loaders in one transaction (ROLLBACK +
+fact_load_failed + re-RAISE); tests/migrations/test_v166_fact_loader_window_integrity.py locks it.
   - [MED] backfill_365 FACT_TASK_DAILY collapses auto-retries to the terminal attempt (was RUNS=2/FAILED=1).
   - [LOW] ops_diag mart readers window on CURRENT_DATE (day-aligned, matching the live twins).
   - [MED/V113] MART_INCIDENT_TIMELINE TASK_FAIL uses COMPLETED_TIME (matching the live reader).

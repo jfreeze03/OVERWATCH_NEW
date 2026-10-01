@@ -602,8 +602,9 @@ def object_cost_by_arm(days: int = 30, company: str = "ALL", database: str = "",
     R2-013: LEDGER_START_DAY is the ledger's first loaded day, LEDGER-WIDE (no window, company or
     Database filter: the loader writes a residual row every day, so the unscoped MIN is loader
     coverage, while a scoped MIN would read a quiet database as a short ledger -- the R1-016 trap).
-    FACT_OBJECT_COST_DAILY is never backfilled (V048..V139 first-fill 14 days; backfill_365 does not
-    call SP_LOAD_OBJECT_COST), so a 180/365-day or Current-year window can start before it; the
+    FACT_OBJECT_COST_DAILY is not backfilled by default (V048..V139 first-fill 14 days; the daily task
+    reloads 3; snowflake/backfill_365.sql carries only an opt-in, commented SP_LOAD_OBJECT_COST(365) block
+    after the hourly-graph RESUME, V166), so a 180/365-day or Current-year window can start before it; the
     panel says how many of the window's days the ledger covers."""
     days = bounded_days(days, 400)
     comp = "" if str(company).upper() in ("ALL", "") else f"COMPANY = {companies.sql_literal(company)}"
