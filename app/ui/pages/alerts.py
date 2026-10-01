@@ -1700,7 +1700,8 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
         with st.expander(f"💤 Snoozed ({_capped_count(len(_snz.df), _SNOOZED_CAP)}) — hidden from triage "
                          "until their wake time"):
             if len(_snz.df) >= _SNOOZED_CAP:
-                st.caption(f"Showing the {_SNOOZED_CAP} soonest to wake — more events are snoozed; the rest "
+                # a full LIMIT frame means more MAY be snoozed (exactly the cap fills it too) -- never 'are'
+                st.caption(f"Showing the {_SNOOZED_CAP} soonest to wake — more may be snoozed; any others "
                            "wake on schedule.")
             # F52: a relative countdown, soonest wake first — a snooze reads as
             # a running timer, not a black-hole timestamp.
