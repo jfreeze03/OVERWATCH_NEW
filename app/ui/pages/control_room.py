@@ -1400,7 +1400,7 @@ def render() -> None:
                             log_ui_event("incident_declare", page=_PAGE)
                     stamp_write(_exec_key, _ok_all)  # C48: single stamp, both paths
         # Next-Fifty #12b: the attach / auto-mitigate sentence is claimed only once V154 is applied
-        # (schema-gated like operations._operator_identity_grain_available) — a deploy can land first.
+        # (schema-gated via the shared has_migration) — a deploy can land first.
         _loop_txt = (" With auto-declare on, later CRITICALs of an already-open family attach to it, and "
                      "an OPEN incident whose member alerts have all been resolved for an hour moves to "
                      "MITIGATED — closing stays human." if _v154_applied() else "")

@@ -39,7 +39,6 @@ from app.logic.anomaly_explain import (
     outside_company_label,
 )
 from app.logic.cost_coverage import (
-    SERVICE_CATEGORY,
     attribution_gap,
     attribution_gap_trend,
     drill_ready_spend_share,
@@ -88,8 +87,6 @@ from app.ui.components import (
 )
 
 _PAGE = "Cost Intelligence"
-
-_SERVICE_CATEGORY = SERVICE_CATEGORY
 
 
 # Split out of app/ui/pages/cost.py (V028): section bodies only —

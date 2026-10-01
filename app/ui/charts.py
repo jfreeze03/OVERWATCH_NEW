@@ -26,7 +26,6 @@ _HEIGHT = CHART_H_MD
 HEATMAP_MAX_ROWS = 20  # 24px/row; beyond this the heatmap became a scroll trap
 
 _ACCENT = palette.ACCENT
-_ACCENT2 = palette.ACCENT2
 _GRID = "rgba(148,163,184,0.14)"
 _LABEL = palette.LOW
 _TITLE = palette.INK_SOFT

@@ -150,6 +150,7 @@ from app.ui.components import (
     write_gate_open,
 )
 from app.ui.pages.ops_parts.optimize_queue import render_optimize
+from app.ui.schema_gate import has_migration
 
 _PAGE = "Operations"
 
@@ -167,28 +168,6 @@ def _split_queries_health(res):
     src = res.source
     return (QueryResult(df=summary_df, ok=True, source=src),
             QueryResult(df=fails_df, ok=True, source=src))
-
-
-def _operator_identity_grain_available() -> bool:
-    """True once V147 is applied — the operator-stats fact then carries USER_NAME/
-    DATABASE_NAME/SCHEMA_NAME, so the Operator profile can honor the User/Database/Schema
-    scope filters. Before V147 those columns DO NOT EXIST, so the reader must never reference
-    them (it would compile-error); the caller suppresses the section for those filters instead.
-
-    Gated on the applied SCHEMA_VERSION set (the same signal Admin ▸ Migrations reads), NOT a
-    fact-column probe: reading a missing column is a compilation error (not a calm 'absent'),
-    whereas the migration-version read is a cheap metadata lookup with no live-scan budget or
-    reachable-table cost, and it self-heals the moment the owner applies V147."""
-    import pandas as pd
-    res = run(mart_sql.schema_version(), page=_PAGE, key="ops_operator_grain_migver",
-              tier="metadata", source="SCHEMA_VERSION", probe=True)
-    if not res.ok or not res.usable() or "VERSION" not in res.df.columns:
-        return False
-    try:
-        applied = {int(v) for v in pd.to_numeric(res.df["VERSION"], errors="coerce").dropna()}
-    except (TypeError, ValueError):
-        return False
-    return 147 in applied
 
 
 def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
@@ -542,7 +521,9 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         # the section is suppressed for a User/Database/Schema filter rather than shown with
         # data broader than the active scope. Once V147 lands, the filters thread through
         # exactly like the query-level sections and the grain self-heals (no redeploy).
-        _op_grain = _operator_identity_grain_available()
+        # Gated on the shared schema gate (house law 12), NOT a fact-column probe: reading a
+        # missing column is a compile error, not a calm 'absent'.
+        _op_grain = has_migration(147, _PAGE)
         _op_u = user_filter if _op_grain else ""
         _op_db = database if _op_grain else ""
         _op_sc = schema_contains if _op_grain else ""
@@ -1924,7 +1905,7 @@ def _sla_finish_forecast_panel(*, pf: dict | None = None) -> dict:
     end_wf = str(settings.get("ETL_CYCLE_END_WORKFLOW") or "").strip()
     target = str(settings.get("ETL_SLA_TARGET_HHMM") or "07:00").strip()
     breach = str(settings.get("ETL_SLA_BREACH_HHMM") or "08:00").strip()
-    # r8: this forecast FITS a fixed SLA_BASELINE_RUNS=14-night baseline (the scan returns
+    # r8: this forecast FITS a fixed insights.SLA_FORECAST_FIT_NIGHTS=14-night baseline (the scan returns
     # SLA_HISTORY_NIGHTS; the forecaster fits the newest 14 and uses the rest only for month-end
     # history) — the SAME builder + design the Brief's "Nightly cycle" tile reuses. It
     # must NOT thread the scope-bar Window: the Pipeline SLA tab's own scope contract declares Window

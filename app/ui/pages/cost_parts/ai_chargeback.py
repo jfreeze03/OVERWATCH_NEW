@@ -119,9 +119,9 @@ def _cortex_spend_tab(days: int, ai_rate: float, *, bounds: tuple | None = None)
     # v4.50: the storage panels moved to Spend & Attribution — storage is
     # neither chargeback nor AI, and the section label was hiding it.
     st.markdown("**Cortex / AI spend (account-wide)**")
-    # NB: do NOT arm coverage_gate here. The AI-service metering series is naturally SPARSE (no
-    # DAY row on idle days, and AI adoption may post-date a long window), so coverage_contract's
-    # dense-series reach-back/interior-gap rules would reject a perfectly good mart on the common
+    # NB: no dense-series coverage predicate (mart_accept) here. The AI-service metering series is
+    # naturally SPARSE (no DAY row on idle days, and AI adoption may post-date a long window), so a
+    # reach-back/interior-gap acceptance test would reject a perfectly good mart on the common
     # case and degrade to the 90d-clamped live fallback — undercounting long windows. served_days
     # already labels the live-fallback path honestly; the mart is trusted for its available history.
     _lm = "_lm" if bounds is not None else ""

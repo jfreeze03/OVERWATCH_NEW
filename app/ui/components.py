@@ -659,8 +659,7 @@ def section_filter_contract(
     only panel-dependently. Otherwise the full contract stays one glance away as a
     quiet caption, so the banner keeps meaning "your filter doesn't bite here"
     instead of wallpapering every section. Company/days always carry a value
-    (defaults), so they never trigger the banner on their own — the same judgment
-    ``section_scope_note`` codified."""
+    (defaults), so they never trigger the banner on their own."""
     text = filter_contract_text(filters, applies=applies, partial=partial, note=note)
     at_risk = [
         key for key in _active_scope_dimensions(filters)
@@ -675,29 +674,6 @@ def section_filter_contract(
     else:
         st.caption(text)
     return text
-
-
-def section_scope_note(filters: dict, *, honored: tuple[str, ...] = ()) -> str:
-    """rec 11: one honest line naming which ACTIVE global filters a section does
-    NOT apply. The Overview headline KPIs are account-/company-scoped and
-    deliberately ignore the warehouse/schema/user/database dimension chips (those
-    bite on the Operations/Cost detail pages). A user who set one of those chips
-    should be told it is inert here, not left to assume the number narrowed.
-    Returns '' when nothing active is ignored, so the caller renders NOTHING on
-    the common no-filter path — the note only appears when it prevents a
-    misread. `honored` names the filter keys this particular section DOES apply."""
-    ignored = [
-        lbl.lower()
-        for key, lbl in _SCOPE_DIM_LABELS.items()
-        if key not in ("company", "days")
-        if key not in honored and str(filters.get(key, "") or "").strip()
-    ]
-    if not ignored:
-        return ""
-    joined = ", ".join(ignored)
-    plural = "filters" if len(ignored) > 1 else "filter"
-    return (f"Scope: account-/company-wide. These figures ignore the active "
-            f"{joined} {plural} — those apply on the Operations and Cost detail pages.")
 
 
 def kpi_row(items: list[dict], columns: int | None = None) -> None:
@@ -1180,70 +1156,6 @@ def storage_snapshot_fresh(df, max_age_days: int = 2) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Cluster-3 coverage contract (finding #16). One shared acceptance test for
-# mart-first reads so a stale / short / gappy mart yields to the (correct) live
-# fallback instead of silently answering a long window with incomplete data.
-# The freshness/coverage primitives here read the WORST row of a multi-scope
-# frame — the coverage law that one fresh database must never mask a stale or
-# missing peer (findings #20/#21 use these directly on the storage frames).
-# ---------------------------------------------------------------------------
-
-
-def stalest_day(df, col: str = "LATEST_DAY"):
-    """The MINIMUM (oldest) date across all rows of ``col`` — the honest
-    freshness of a multi-scope frame. Cluster-3 law: freshness is the WORST
-    row, never MAX(), so one fresh database can't hide a stale/missing peer.
-    Returns a ``date`` or None (empty frame / absent column)."""
-    import pandas as pd
-    cols = getattr(df, "columns", [])
-    if df is None or getattr(df, "empty", True) or col not in cols:
-        return None
-    d = pd.to_datetime(df[col], errors="coerce").min()
-    return d.date() if pd.notna(d) else None
-
-
-def coverage_contract(days: int, *, day_col: str = "DAY", freshness_days: int = 2):
-    """A ``run_mart_first`` acceptance predicate enforcing the Cluster-3
-    coverage contract on a DAY-grain mart frame:
-
-      * first observed day <= the requested window start (the mart reaches back
-        far enough to answer the asked window),
-      * latest observed day is fresh (within ``freshness_days`` of yesterday),
-      * no interior day gaps across the observed span.
-
-    Returns a predicate ``df -> bool``. A stale, short, or gappy mart is
-    REJECTED so the caller serves the live fallback. Frames WITHOUT ``day_col``
-    (pre-aggregated readers with no per-day grain) cannot be evaluated here, so
-    the predicate ACCEPTS them — it must never suppress a mart it cannot prove
-    incomplete; those readers gate their coverage in SQL instead (e.g.
-    mart27_sql.alloc_xdim_attribution's scoped ``cov`` CTE)."""
-    from datetime import timedelta
-
-    def _accept(df) -> bool:
-        import pandas as pd
-        if df is None or getattr(df, "empty", True):
-            return False
-        if day_col not in getattr(df, "columns", []):
-            return True
-        d = pd.to_datetime(df[day_col], errors="coerce").dropna()
-        if d.empty:
-            return True
-        present = pd.Index(d.dt.normalize().unique())
-        first = present.min().date()
-        latest = present.max().date()
-        today = account_today()
-        window_start = today - timedelta(days=int(days))
-        if first > window_start:                                # doesn't reach the window start
-            return False
-        if latest < today - timedelta(days=1 + int(freshness_days)):   # stale tail
-            return False
-        span = (latest - first).days + 1                        # interior gaps
-        return len(present) >= span                             # every day in the span is present
-
-    return _accept
-
-
-# ---------------------------------------------------------------------------
 # Mart-first failure backoff. A mart read that FAILS (down / not-yet-loaded /
 # erroring) is never cached (query.run: "Failures are never cached"), so
 # run_mart_first would re-probe it — re-paying the round-trip — on EVERY render
@@ -1284,8 +1196,7 @@ def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
                    mart_tier: str = "hourly", live_tier: str = "historical",
                    max_rows: int | None = None, empty_is_answer: bool = False,
                    mart_accept=None, preloaded=None, days: int | None = None,
-                   coverage_gate: bool = False, coverage_day_col: str = "DAY",
-                   coverage_freshness_days: int = 2, bounds: tuple | None = None):
+                   bounds: tuple | None = None):
     """Fact-first read with the live builder as labeled fallback — the
     Control Room v4.8.2 pattern as one call (wave 2 adoptions). The mart
     result must be usable (ok AND non-empty) or the live path runs under
@@ -1304,21 +1215,10 @@ def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
     clamps a bounded read, so the served window is the bounds' day span, not
     clamp_days of the day offset (which read 90 for a 273-day Current-year scan).
 
-    #16: pass ``coverage_gate=True`` (with ``days``) to apply the shared
-    ``coverage_contract`` as the acceptance test when no explicit ``mart_accept``
-    is given — a stale/short/gappy DAY-grain mart then yields to the live
-    fallback. Left OFF by default so existing callers are unchanged. FOLLOW-UP
-    (do not edit here): the day-grain mart-first sites in operations.py,
-    optimize.py, overview.py, security.py, contract.py, ai_chargeback.py,
-    control_room.py, cost.py, unit_costs.py should opt into ``coverage_gate`` in
-    an incremental pass now that the contract exists."""
+    Coverage: a reader whose mart may be stale / short / gappy either gates its
+    coverage in SQL (e.g. mart27_sql.alloc_xdim_attribution's ``cov`` CTE) or
+    passes a ``mart_accept`` predicate; a rejected mart yields to the live leg."""
     from app.core.query import run
-    # #16: the coverage contract is the DEFAULT acceptance test when the caller
-    # opts in and hasn't supplied its own probe. Aggregated readers (no day_col)
-    # accept transparently — they gate coverage in SQL — so this is safe to arm.
-    if mart_accept is None and coverage_gate and days is not None:
-        mart_accept = coverage_contract(
-            days, day_col=coverage_day_col, freshness_days=coverage_freshness_days)
     kwargs: dict = {} if max_rows is None else {"max_rows": max_rows}
     if preloaded is not None and preloaded.ok:
         res = preloaded

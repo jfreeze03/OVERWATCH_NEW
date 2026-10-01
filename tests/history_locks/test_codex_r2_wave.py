@@ -281,21 +281,7 @@ def test_rec13_overview_billed_kpis_carry_method_and_scope():
     assert '"method": "metering", "scope": "company"' in ov
 
 
-def test_rec11_section_scope_note_only_fires_on_ignored_filters():
-    from app.ui.components import section_scope_note
-    # no dimension chip set -> no note (zero clutter on the common path)
-    assert section_scope_note({"company": "ALFA", "days": 30}) == ""
-    # an active warehouse chip the section ignores -> honest one-liner naming it
-    note = section_scope_note({"warehouse_contains": "WH_ALFA_ADMIN"})
-    assert "warehouse" in note and "ignore" in note.lower()
-    # a chip the section DOES honor is not reported as ignored
-    assert section_scope_note({"warehouse_contains": "x"}, honored=("warehouse_contains",)) == ""
-    # multiple ignored chips are pluralized
-    multi = section_scope_note({"warehouse_contains": "a", "user_contains": "b"})
-    assert "filters" in multi and "warehouse" in multi and "user" in multi
-
-
-def test_rec11_overview_renders_section_scope_note():
+def test_rec11_overview_renders_section_filter_contract():
     ov = _src("app/ui/pages/overview.py")
     assert "section_filter_contract(" in ov
     assert 'section_header("Company economics"' in ov

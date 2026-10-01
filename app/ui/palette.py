@@ -4,7 +4,8 @@ Before this module the severity/status hues were typed as raw hex literals in
 four places — main.py `_STRIP_COLORS`, components.py `_SEV_HEX`, charts.py
 `SEV_COLORS`, status_colors.py `delta_css` — plus a *fifth*, unaligned copy in
 `.streamlit/config.toml`. A1 aligned them by hand; nothing stopped the next
-divergence. Now every consumer imports these constants, `config.toml` mirrors
+divergence. Now every consumer (components.py, charts.py, status_colors.py)
+imports these constants, `config.toml` mirrors
 the chrome tokens, and `tests/test_palette_drift.py` fails CI if any of them
 drifts from the `--ow-*` design tokens declared in `app/theme.py`.
 
@@ -32,7 +33,7 @@ ACCENT2 = "#2dd4bf"
 # HIGH series never reads as CRITICAL red; LOW/LABEL is the muted chart slate.
 HIGH = "#fb923c"      # HIGH severity — orange, distinct from CRITICAL red (r4)
 LOW = "#94a3b8"       # LOW severity / chart axis labels
-MUTED = "#94a3b8"     # neutral slate (sidebar strip / status cells)
+MUTED = "#94a3b8"     # neutral slate (status cells)
 
 # --- Chrome tokens (mirror theme.py; config.toml is aligned to these) --------
 BG = "#111827"        # app background       (--ow-bg)
@@ -42,9 +43,7 @@ INK = "#f8fafc"       # primary text         (--ow-ink)
 INK_SOFT = "#cbd5e1"  # secondary text       (--ow-ink-soft)
 INK_MUTE = "#94a3b8"  # muted labels         (--ow-ink-mute)
 
-# Convenience maps for the consumers that key by state / severity name.
-# State-keyed (sidebar health strip): OK/WARN/BAD/INFO/MUTED.
-STATE_HUES = {"OK": OK, "WARN": WARN, "BAD": BAD, "INFO": INFO, "MUTED": MUTED}
+# Convenience map for the consumers that key by severity name.
 # Severity-keyed (chart series): CRITICAL/HIGH/MEDIUM/LOW/INFO/OK.
 # F16: INFO severity is SLATE, matching STATUS_COLOR_MAP's table cells — an INFO
 # event must not be grey in the table and blue in the chart beside it. Blue
