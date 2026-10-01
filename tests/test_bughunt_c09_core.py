@@ -68,7 +68,9 @@ def test_deep_link_arrival_still_hydrates_display_prefs(monkeypatch):
 
 def test_transient_prefs_failure_retries_despite_the_apps_own_page_param(monkeypatch):
     """r10 #1's bounded retry: run 1's USER_PREFS read fails, the app writes ?page=brief itself, and run 2
-    must still retry (prefs AND the saved landing) instead of reading its own write as a deep link."""
+    must still retry (prefs AND the saved landing) instead of reading its own write as a deep link. The hook
+    alone here: no page is noted as rendered, so the landing may still apply (in main()'s order it does not --
+    see the R1-002 follow-up locks below)."""
     reads = _prefs_run(monkeypatch, [False, True])
     at = AppTest.from_function(_landing_script, default_timeout=30)
     at.session_state["_ow_current_user"] = "JFREEZE"
@@ -97,7 +99,7 @@ def test_identity_late_run_still_reads_prefs(monkeypatch):
     assert reads == [1] and at.session_state["_ow_present_mode"] == "audit"
 
 
-# R1-002 follow-up: now that the retry runs, a LATE DEFAULT_VIEW must never pull a viewer who has moved.
+# R1-002 follow-up: now that the retry runs, a LATE DEFAULT_VIEW must never navigate once a page has rendered.
 
 _PREFS_VIEW = pd.DataFrame({
     "PREF_KEY": ["PRESENT_MODE", "DEFAULT_VIEW"],
@@ -166,12 +168,64 @@ def test_a_move_is_sticky_across_retries(monkeypatch):
     assert at.session_state["_ow_page"] == "Brief" and at.session_state["flt_company"] == "ALFA"
 
 
-def test_late_prefs_retry_still_lands_a_viewer_who_has_not_moved(monkeypatch):
-    """r10 #1 survives: with no click between the runs, the saved DEFAULT_VIEW (page AND filters) lands late."""
+def test_first_run_success_still_lands_the_saved_view(monkeypatch):
+    """The saved DEFAULT_VIEW (page AND filters) still lands when the session's first USER_PREFS read succeeds."""
+    reads = _prefs_run(monkeypatch, [True], frame=_PREFS_VIEW)
+    at = AppTest.from_function(_sidebar_landing_script, default_timeout=30)
+    at.session_state["_ow_current_user"] = "JFREEZE"
+    at.run()
+    assert not at.exception and reads == [1]
+    assert at.session_state["_ow_present_mode"] == "audit"
+    assert at.session_state["_ow_page"] == "Overview" and at.session_state["flt_company"] == "Trexis"
+
+
+def test_late_prefs_retry_after_a_rendered_run_hydrates_display_prefs_only(monkeypatch):
+    """c09 R1-002 recheck: once a run has rendered a page, a late successful retry hydrates PRESENT_MODE but
+    never applies the DEFAULT_VIEW navigation or filters -- even with no move before the retry run, because
+    the rerun carrying the retry IS the viewer's interaction with the page on screen."""
     at, reads = _first_run_fails(monkeypatch, [False, True])
     at.run()
     assert not at.exception and reads == [1, 1]
-    assert at.session_state["_ow_page"] == "Overview" and at.session_state["flt_company"] == "Trexis"
+    assert at.session_state["_ow_default_applied"] is True
+    assert at.session_state["_ow_present_mode"] == "audit"
+    assert at.session_state["_ow_present_mode_toggle"] is True
+    assert at.session_state["_ow_page"] == "Brief"                    # not the saved view's Overview
+    assert at.session_state["flt_company"] == "ALFA"                  # nor its Trexis scope
+    assert "_ow_nav_pending" not in at.session_state
+
+
+def _sidebar_landing_click_script():
+    """_sidebar_landing_script plus a Brief-body button whose handler runs AFTER the landing hook, the way a
+    page-body action does in main()."""
+    import streamlit as st
+
+    import app.main as m
+    from app.core.state import init_filters, remember_page
+
+    init_filters()
+    m._apply_default_landing()
+    page = st.session_state.get("_ow_page") or "Brief"
+    st.session_state["_ow_page"] = page
+    m._note_landing_rendered()
+    remember_page(page)
+    if page == "Brief" and st.button("Open alerts", key="brief_open_alerts"):
+        st.session_state["_ow_brief_clicked"] = True
+
+
+def test_late_prefs_retry_never_preempts_an_action_handled_in_the_retry_run(monkeypatch):
+    """The recheck's probe: run 1's USER_PREFS read fails; the viewer clicks a Brief button; that rerun's retry
+    succeeds BEFORE the Brief body runs. A late DEFAULT_VIEW used to swap the page to Overview, so the click's
+    handler never ran. Now the page stays and the click lands."""
+    reads = _prefs_run(monkeypatch, [False, True], frame=_PREFS_VIEW)
+    at = AppTest.from_function(_sidebar_landing_click_script, default_timeout=30)
+    at.session_state["_ow_current_user"] = "JFREEZE"
+    at.run()
+    assert not at.exception and reads == [1]
+    at.button(key="brief_open_alerts").click().run()
+    assert not at.exception and reads == [1, 1]
+    assert at.session_state["_ow_present_mode"] == "audit"
+    assert at.session_state["_ow_page"] == "Brief"
+    assert at.session_state["_ow_brief_clicked"] is True
 
 
 def test_sidebar_notes_the_rendered_landing_before_writing_the_page_param():
