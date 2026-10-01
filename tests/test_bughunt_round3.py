@@ -37,7 +37,12 @@ def test_never_suspend_zero_is_preserved_in_whatif():
     assert int(safe_float(None, 600)) == 600       # missing -> default
     opt = _src("app/ui/pages/cost_parts/optimize.py")
     assert 'get("auto_suspend"), 600) or 600)' not in opt   # the truthiness bug is gone
-    assert 'live_suspend = int(safe_float(match.iloc[0].get("auto_suspend"), 600))' in opt
+    # R1-071: the cell now goes through insights.show_auto_suspend, which also keeps a real 0 (and reads a
+    # listed NULL as the same never-suspend 0); 600 stands in only for a missing / unparseable cell.
+    # Executed in tests/test_auto_suspend_null_sites.py.
+    from app.logic.insights import show_auto_suspend
+    assert show_auto_suspend(0) == 0.0 and show_auto_suspend("abc") is None
+    assert "live_suspend = int(_wi_susp) if _wi_susp is not None else 600" in opt
 
 
 # --- DTE-1..4: data-derived strings are escaped before markdown ------------------

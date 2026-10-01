@@ -34,6 +34,7 @@ from app.logic.formulas import (
     md_dollars,
     safe_float,
 )
+from app.logic.insights import show_auto_suspend
 from app.logic.navigate import fix_target, inline_fix_warehouse, investigation_target
 from app.logic.playbooks import playbook_for
 from app.logic.verdict import Signal, page_verdict
@@ -581,6 +582,29 @@ def _plan_notice(plan: dict | None) -> None:
         st.warning(plan["message"])
     elif plan["level"] == "info":
         st.info(plan["message"])
+
+
+def _current_auto_suspend(wh_inline: str) -> tuple[bool, float | None]:
+    """The closed loop's tighten guard input (r34): ``(known, seconds)`` for ``wh_inline``, read from the
+    cached 'jump_wh' SHOW WAREHOUSES result (no extra query) BEFORE a tighten is generated -- a blind SET=60
+    RAISES an already-30s timer (the A3 hazard), the unguarded twin of the Remediation tab guard.
+
+    R1-071: the matched cell goes through insights.show_auto_suspend, the Optimize ▸ Idle reading, so a
+    warehouse SHOW lists with a NULL auto_suspend (it never suspends) is KNOWN at 0 and gets the
+    enable-a-timer ALTER; only a failed read, an unlisted warehouse or an unparseable cell is unknown."""
+    whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="jump_wh", tier="metadata",
+              source="SHOW WAREHOUSES", max_rows=0)
+    if not whs.ok or whs.empty:
+        return False, None
+    w = whs.df.copy()
+    w.columns = [str(c).lower() for c in w.columns]
+    if not {"name", "auto_suspend"}.issubset(w.columns):
+        return False, None
+    m = w[w["name"].astype(str).str.strip().str.upper() == str(wh_inline).strip().upper()]
+    if m.empty:
+        return False, None
+    cur = show_auto_suspend(m.iloc[0].get("auto_suspend"))
+    return cur is not None, cur
 
 
 # The cap the drawer's 'Statement timeout 1h' lever sets (its impact read covers stmt_timeout.IMPACT_DAYS).
@@ -1315,25 +1339,9 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                                 horizontal=True, key=f"clf_kind_{event_id[:8]}")
                             _cl_plan: dict | None = None
                             if fix_kind.startswith("Tighten"):
-                                # r34: read the CURRENT AUTO_SUSPEND before generating a tighten — a
-                                # blind SET=60 RAISES an already-30s timer (the A3 hazard), the
-                                # unguarded twin of the Remediation tab guard (optimize.py). Reuses
-                                # the cached 'jump_wh' SHOW WAREHOUSES read (no extra query).
-                                _cl_known, _cl_cur = False, None
-                                _cl_whs = run(security_sql.show_warehouses_sql(), page=_PAGE,
-                                              key="jump_wh", tier="metadata",
-                                              source="SHOW WAREHOUSES", max_rows=0)
-                                if _cl_whs.ok and not _cl_whs.empty:
-                                    _clw = _cl_whs.df.copy()
-                                    _clw.columns = [str(c).lower() for c in _clw.columns]
-                                    if "name" in _clw.columns:
-                                        _clm = _clw[_clw["name"].astype(str).str.strip().str.upper()
-                                                    == str(wh_inline).strip().upper()]
-                                        if not _clm.empty and "auto_suspend" in _clw.columns:
-                                            _clv = pd.to_numeric(_clm.iloc[0].get("auto_suspend"),
-                                                                 errors="coerce")
-                                            if pd.notna(_clv):
-                                                _cl_known, _cl_cur = True, float(_clv)
+                                # r34: read the CURRENT AUTO_SUSPEND before generating a tighten (a
+                                # listed NULL = never suspends, R1-071) -- see _current_auto_suspend
+                                _cl_known, _cl_cur = _current_auto_suspend(wh_inline)
                                 _cl_plan = remediation.tighten_suspend_plan(wh_inline, _cl_cur, _cl_known)
                                 stmt_cl = _cl_plan["stmt"]
                                 _plan_notice(_cl_plan)
