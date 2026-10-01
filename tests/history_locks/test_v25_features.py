@@ -3,6 +3,8 @@ radius, object TCO, pattern pricing, fire drill, tag governance, restatements.""
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pandas as pd
 import pytest
 
@@ -112,7 +114,8 @@ def test_drill_streak_counts_consecutive_passes():
         {"RAISED_AT": "2026-05-01", "NOTIFIED_AT": None, "ACK_AT": None},
         {"RAISED_AT": "2026-04-01", "NOTIFIED_AT": "2026-04-01 09:00", "ACK_AT": "2026-04-01 09:05"},
     ])
-    report = drill_report(df)
+    # now pinned to mid-July: the streak counts back from the month that is due (R1-122 review)
+    report = drill_report(df, now=datetime(2026, 7, 15))
     assert report["streak_months"] == 2  # broken by May
     assert report["last"]["delivered"] and report["last"]["acked"]
     assert report["last"]["mtta_min"] == 10.0

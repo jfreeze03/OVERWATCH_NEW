@@ -5,7 +5,8 @@ locks beside them (what a fix must NOT change) pass on both."""
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+import re
+from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
 import sqlglot
@@ -269,6 +270,8 @@ def test_low_qas_spend_with_eligible_workload_is_not_an_enable_candidate():
 
 
 # ---- R1-122: the drill streak counts consecutive calendar months, not passing events ----------
+# Every call pins ``now``: since the streak is anchored on the account calendar (R1-122 review), a
+# test that leaves it to the real clock would go red as soon as its rows are older than a month.
 
 
 def _drill(raised: str, ok: bool = True) -> dict:
@@ -279,7 +282,7 @@ def test_drill_streak_breaks_on_a_missing_month():
     from app.logic.drill import drill_report
     # Sep and Jul passed, no August drill at all (task suspended): the streak is 1, not 2
     df = pd.DataFrame([_drill("2026-09-01 09:00"), _drill("2026-07-01 09:00")])
-    assert drill_report(df)["streak_months"] == 1
+    assert drill_report(df, now=datetime(2026, 9, 20))["streak_months"] == 1
 
 
 def test_drill_streak_is_one_outcome_per_month():
@@ -287,12 +290,61 @@ def test_drill_streak_is_one_outcome_per_month():
     # two passing rows in September (a hand insert) count once; Aug passed; Jul failed
     df = pd.DataFrame([_drill("2026-09-15 09:00"), _drill("2026-09-01 09:00"),
                        _drill("2026-08-01 09:00"), _drill("2026-07-01 09:00", ok=False)])
-    report = drill_report(df)
+    report = drill_report(df, now=datetime(2026, 9, 20))
     assert report["streak_months"] == 2
     assert report["last"]["delivered"] and report["last"]["acked"]
     # a year boundary is consecutive: Jan after Dec
     df = pd.DataFrame([_drill("2027-01-01 09:00"), _drill("2026-12-01 09:00")])
-    assert drill_report(df)["streak_months"] == 2
+    assert drill_report(df, now=datetime(2027, 1, 10))["streak_months"] == 2
+
+
+def test_drill_streak_is_zero_while_the_newest_drill_is_months_old():
+    from app.logic.drill import drill_report
+    # task suspended since June, viewed in September: Jul/Aug/Sep wrote no row. The walk used to
+    # start at June's pass and showed a green 3-month streak; the gap that is still open breaks it.
+    df = pd.DataFrame([_drill("2026-06-01 09:00"), _drill("2026-05-01 09:00"), _drill("2026-04-01 09:00")])
+    report = drill_report(df, now=datetime(2026, 9, 20))
+    assert report["ran"] and report["streak_months"] == 0
+    assert report["last"]["delivered"] and report["last"]["acked"]   # the last drill itself did pass
+    # one missed month is enough: viewed in July, June's pass is no longer the newest due month
+    assert drill_report(df, now=datetime(2026, 7, 20))["streak_months"] == 0
+    assert drill_report(df, now=datetime(2026, 6, 20))["streak_months"] == 3
+
+
+def test_drill_month_is_due_an_hour_after_the_first_of_month_run():
+    from app.logic.drill import drill_report
+    df = pd.DataFrame([_drill("2026-09-01 09:00"), _drill("2026-08-01 09:00")])
+    # before (and within an hour of) the 09:00 CT run on Oct 1, September is still the newest due month
+    assert drill_report(df, now=datetime(2026, 10, 1, 8, 30))["streak_months"] == 2
+    assert drill_report(df, now=datetime(2026, 10, 1, 9, 59))["streak_months"] == 2
+    # from 10:00 CT, October's drill is due and missing
+    assert drill_report(df, now=datetime(2026, 10, 1, 10, 0))["streak_months"] == 0
+    assert drill_report(df, now=datetime(2026, 10, 15))["streak_months"] == 0
+    # an October drill that already ran (a manual EXECUTE TASK before 09:00) is the newest outcome
+    early = pd.DataFrame([_drill("2026-10-01 07:00"), *df.to_dict("records")])
+    assert drill_report(early, now=datetime(2026, 10, 1, 8, 0))["streak_months"] == 3
+    # an aware ``now`` is read on the account clock: 14:30 UTC = 09:30 CDT, 15:30 UTC = 10:30 CDT
+    assert drill_report(df, now=datetime(2026, 10, 1, 14, 30, tzinfo=UTC))["streak_months"] == 2
+    assert drill_report(df, now=datetime(2026, 10, 1, 15, 30, tzinfo=UTC))["streak_months"] == 0
+
+
+def test_drill_streak_defaults_to_the_account_clock(monkeypatch):
+    from app.logic import drill
+    df = pd.DataFrame([_drill("2026-06-01 09:00"), _drill("2026-05-01 09:00")])
+    monkeypatch.setattr(drill, "account_now", lambda: datetime(2026, 9, 20, 12, 0))
+    assert drill.drill_report(df)["streak_months"] == 0
+    monkeypatch.setattr(drill, "account_now", lambda: datetime(2026, 6, 20, 12, 0))
+    assert drill.drill_report(df)["streak_months"] == 2
+
+
+def test_drill_due_hour_matches_the_drill_task_schedule():
+    from app.logic import drill
+    from app.logic.formulas import ACCOUNT_TIMEZONE
+    sql = read("snowflake/alert_drill.sql")
+    m = re.search(r"SCHEDULE = 'USING CRON (\d+) (\d+) (\d+) \* \* ([\w/]+)'", sql)
+    assert m is not None
+    minute, hour, day, tz = m.groups()
+    assert (int(minute), int(hour), int(day), tz) == (0, drill.DRILL_HOUR, drill.DRILL_DAY, ACCOUNT_TIMEZONE)
 
 
 # ---- R1-123: threshold suggestions read UNTAGGED_N and do not overstate their evidence --------
