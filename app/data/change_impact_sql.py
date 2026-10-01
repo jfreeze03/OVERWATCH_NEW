@@ -148,7 +148,8 @@ WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
   -- longer matches SP_LOAD: strip ALL whitespace, then require 'CALL<name>(' (unqualified)
   -- or '.<name>(' (schema-qualified). QUERY_TYPE='CALL' guarantees the target follows CALL.
   -- (Same-named procs in different schemas still blend — disambiguating needs the schema
-  -- threaded from the caller.)
+  -- threaded from the caller.) The V172 SP_CHANGE_IMPACT_SCAN is the anchored twin: its four
+  -- QUERY_HISTORY sites use this same rule, so the verdict reconciles with this drill.
   AND (POSITION({_call} IN REGEXP_REPLACE(UPPER(QUERY_TEXT), '[[:space:]]', '')) > 0
        OR POSITION({_dotted} IN REGEXP_REPLACE(UPPER(QUERY_TEXT), '[[:space:]]', '')) > 0)
 GROUP BY 1

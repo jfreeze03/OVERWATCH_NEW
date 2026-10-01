@@ -7,6 +7,7 @@ tests/test_probe_absence_split.py pattern); source locks cover the sites buried 
 from __future__ import annotations
 
 import ast
+import re
 from datetime import date
 from types import SimpleNamespace
 
@@ -804,6 +805,29 @@ def test_verdict_detail_durations_render_in_hr_min_sec():
     assert body.count("wh_change.humanize_verdict_detail(_verdict_detail)") == 1
     assert body.count("wh_change.humanize_verdict_detail(_vd)") == 1
     assert "def _humanize_verdict_detail" not in body and "_VD_P95_RE" not in body   # no private twin
+    # V172 humanizes in SQL with a spaced ASCII ' -> ': the shim (kept for registry rows whose tracking closed
+    # before V172 and for as-raised ALERT_EVENTS) leaves the new text exactly as the scan wrote it
+    for v172 in ("credits/day 10.5->12.25 | p95 30m -> 40m | queue 2h 25m -> 3h 20m/day | fail 0->1.5% "
+                 "| 120->140 queries",
+                 "runs 10->12 | fails 0->1 | p95 ? -> 1m 36s | credits/call 0.0012->0.0019",
+                 "runs 10->12 | fails 0->0 | p95 5.0s -> 9.9s | credits/call n/a->n/a",
+                 "credits/day 1.0->1.0 | p95 500ms -> 0s | queue 0s -> 600ms/day | fail 0->0% | 20->20 queries"):
+        assert humanize_verdict_detail(v172) == v172, v172
+
+
+def test_pipeline_sla_caption_says_met_means_touched():
+    """R2-033 (caption half; the per-table 'rows loaded' basis is an owner call): the freshness source is
+    TABLES.LAST_ALTERED, which any DDL, any DML that changed no rows, or a Snowflake metadata operation moves, so
+    'met' means the table was TOUCHED, not that rows were loaded -- the caption must say so, not imply a load."""
+    fn = _fn(read(_OPS), "_pipeline_data_checks")
+    note = fn[fn.index('result_caption(res, note="Freshness from'):]
+    note = note[:note.index(")\n")]
+    text = "".join(re.findall(r'"([^"]*)"', note))
+    assert text.startswith("Freshness from ACCOUNT_USAGE.TABLES.LAST_ALTERED (metadata lag up to ~2h).")
+    for phrase in ("Any DDL", "any DML even if it changed no rows", "a Snowflake metadata operation counts",
+                   "'met' means the table was touched, not that rows were loaded",
+                   "Refresh cadence from TABLE_DML_HISTORY over 14 days."):
+        assert phrase in text, phrase
 
 
 def test_workbench_recent_changes_detail_renders_hr_min_sec(monkeypatch):

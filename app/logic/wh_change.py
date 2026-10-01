@@ -30,7 +30,9 @@ def humanize_verdict_detail(text: str) -> str:
     to Operations, so the others still read '1800.0s'): the Operations warehouse/object change
     drills, Control Room's ranked-cause Magnitude (rca.candidates_from_changes) and Workbench Entity
     360's Recent changes DETAIL column. Spend's anomaly drill renders only the change title, not this
-    string. Once the scan humanizes VERDICT_DETAIL in SQL the regexes simply find nothing."""
+    string. V172 humanizes VERDICT_DETAIL in SQL (both scans, the formulas.humanize_duration twin) with a
+    spaced ASCII ' -> ' arrow, so the regexes find nothing on the new text and it passes through unchanged;
+    the shim stays for registry rows whose tracking closed before V172 and for as-raised ALERT_EVENTS."""
     def _h(tok: str, unit_sec: float) -> str:
         return "?" if tok == "?" else humanize_duration(safe_float(tok) * unit_sec, "s")
 
