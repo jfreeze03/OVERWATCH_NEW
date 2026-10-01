@@ -211,11 +211,6 @@ SNOOZE_PRESETS = {
 }
 
 
-def _lifecycle_sql(event_id: str, action: str, note: str, kind: str = "") -> str:
-    """Joined display form of _lifecycle_stmts (kept for the SQL preview + tests)."""
-    return "\n".join(_lifecycle_stmts(event_id, action, note, kind))
-
-
 def _lifecycle_stmts(event_id: str, action: str, note: str, kind: str = "") -> list[str]:
     """ACK/RESOLVE update + audit insert as a STRUCTURED statement list.
 
