@@ -480,6 +480,15 @@ table enabled). `snowflake.yml` pins the deploy there.
 snow streamlit deploy --replace
 ```
 
+Deploy from a clean, committed tree: the deploy uploads whatever is on
+disk, but the secret scan (tests/test_no_committed_secrets.py) checks only
+tracked files, and everything shipped is readable by every viewer (Alerts ▸
+Native delivery renders both snowflake/ templates) — so never deploy with a
+real webhook secret pasted into `webhook_delivery.sql`. `snowflake.yml`'s `artifacts` list is what ships —
+`streamlit_app.py`, `environment.yml`, `app/`,
+`snowflake/native_alert_templates.sql` and `snowflake/webhook_delivery.sql`
+(tests/test_deploy_artifacts.py locks the two templates in).
+
 Manual path (no CLI — SnowSQL or any PUT-capable client):
 
 ```sql
@@ -487,6 +496,9 @@ PUT file://streamlit_app.py @DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE/app/ OVERWRI
 PUT file://environment.yml  @DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE/app/ OVERWRITE=TRUE AUTO_COMPRESS=FALSE;
 PUT file://app/*            @DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE/app/app/ OVERWRITE=TRUE AUTO_COMPRESS=FALSE;
 -- (repeat per subfolder: app/core, app/data, app/logic, app/ui, app/ui/pages)
+-- the two templates Alerts > Native delivery reads (else it says "File not found in this deployment"):
+PUT file://snowflake/native_alert_templates.sql @DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE/app/snowflake/ OVERWRITE=TRUE AUTO_COMPRESS=FALSE;
+PUT file://snowflake/webhook_delivery.sql       @DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE/app/snowflake/ OVERWRITE=TRUE AUTO_COMPRESS=FALSE;
 
 CREATE OR REPLACE STREAMLIT DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP
     ROOT_LOCATION = '@DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE/app'
@@ -598,7 +610,7 @@ Restore = migrations in order -> roles.sql -> validate.sql (all rows OK).
    live `SHOW TASKS` state/warehouse/schedule/predecessor against the expected
    set, catching a stale `CREATE TASK IF NOT EXISTS` whose updated definition
    never re-applied).
-4. `snow streamlit deploy --replace`.
+4. `snow streamlit deploy --replace`, from a clean, committed tree (§3).
 5. Check app settings → runtime = **Run on warehouse**. If save reports a
    retained `ARTIFACT_REPOSITORIES` setting, run
    `snowflake/warehouse_runtime_reset.sql` as the app-owning role (see §6).
