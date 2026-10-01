@@ -1,12 +1,16 @@
 -- ============================================================================
 -- OVERWATCH alert-pipeline diagnosis (2026-07-12, "no alerts anymore")
 -- Run top to bottom in a Snowsight worksheet as ACCOUNTADMIN.
--- The pipeline has two scans feeding one sender:
+-- The main raisers are two scans feeding one sender:
 --   Hourly: TASK_LOAD_HOURLY -> TASK_QH_EXTRACT -> TASK_ALERT_SCAN -> SP_ALERT_SCAN
 --     -> ALERT_EVENTS -> TASK_ALERT_NOTIFY -> SP_NOTIFY_WEBHOOK
 --     -> ALERT_ROUTES / notification integration -> Teams card.
 --   Daily:  TASK_LOAD_DAILY -> TASK_NIGHTLY_RECONCILE -> TASK_ALERT_SCAN_DAILY
 --     -> SP_ALERT_SCAN_DAILY -> ALERT_EVENTS.
+-- Standalone scheduled roots (their own cron, in neither chain) raise into the same
+-- ALERT_EVENTS: TASK_ANOMALY_SWEEP (SP_ANOMALY_SWEEP), TASK_CANARY_SENTINEL
+-- (SP_CANARY_SENTINEL, weekly on Mondays), TASK_WAREHOUSE_CHANGE_SCAN and
+-- TASK_CHANGE_IMPACT_SCAN.
 -- Read the WHAT-IT-MEANS comment after each step; fixes are at the bottom.
 -- ============================================================================
 
@@ -28,6 +32,8 @@ ORDER BY IFF("state" = 'suspended', 0, 1), "name";
 -- No rows for TASK_ALERT_SCAN / TASK_ALERT_SCAN_DAILY -> chain not firing
 --   (see STEP 1 / FIX A). A failed parent (TASK_QH_EXTRACT,
 --   TASK_NIGHTLY_RECONCILE) stops its scan, so the parents are listed too.
+-- The standalone raisers are listed as well; TASK_CANARY_SENTINEL runs weekly
+--   (Mondays), so no row for it in a mid-week 48h window is normal.
 -- Rows with STATE = 'FAILED'   -> read ERROR_MESSAGE; that's the bug.
 -- ---------------------------------------------------------------------------
 SELECT NAME, STATE, ERROR_MESSAGE,
@@ -37,7 +43,8 @@ FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(
        RESULT_LIMIT => 1000))
 WHERE NAME IN ('TASK_ALERT_SCAN', 'TASK_ALERT_SCAN_DAILY', 'TASK_ALERT_NOTIFY',
                'TASK_LOAD_HOURLY', 'TASK_QH_EXTRACT', 'TASK_LOAD_DAILY',
-               'TASK_NIGHTLY_RECONCILE', 'TASK_WAREHOUSE_CHANGE_SCAN')
+               'TASK_NIGHTLY_RECONCILE', 'TASK_ANOMALY_SWEEP', 'TASK_CANARY_SENTINEL',
+               'TASK_WAREHOUSE_CHANGE_SCAN', 'TASK_CHANGE_IMPACT_SCAN')
 ORDER BY SCHEDULED_TIME DESC;
 
 -- ---------------------------------------------------------------------------
@@ -101,12 +108,18 @@ SHOW RESOURCE MONITORS;  -- expect none since V045
 -- ============================================================================
 -- FIXES
 -- ============================================================================
--- FIX A (by far the most common): resume the hourly and daily chains.
+-- FIX A (by far the most common): resume the hourly and daily chains + the standalone raisers.
 -- SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY');
 -- SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY');
 -- ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_ALERT_NOTIFY RESUME;
 --   ^ child of TASK_ALERT_SCAN; the hourly DEPENDENTS_ENABLE above already resumes it --
 --     a standalone resume for when only the sender is suspended
+-- The standalone roots (own cron; neither DEPENDENTS_ENABLE above reaches them):
+-- ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_ANOMALY_SWEEP RESUME;
+-- ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_CANARY_SENTINEL RESUME;
+-- ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_CHANGE_IMPACT_SCAN RESUME;
+-- SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.TASK_WAREHOUSE_CHANGE_SCAN');
+--   ^ also resumes its child TASK_LEDGER_AUTOBOOK
 --
 -- FIX B (scan or sender FAILING in STEP 2): send me the ERROR_MESSAGE text —
 -- that is the actual bug and we fix it in the repo, not in the worksheet.
