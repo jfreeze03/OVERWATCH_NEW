@@ -84,10 +84,11 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     # (resolve_effective_window ignores the day count when bounds is set), so the cap, the
     # toggle, and the "scanning Nd" caption are all moot then — show them only when they bite.
     _uc_capped = bounds is None and int(days) > _UNIT_COST_MAX_DAYS
-    # R1-163: every live read on this tab (the measured query/procedure builders, the pattern, ETL
-    # and serverless-task panels) clamps a TRAILING window to the MAX_LIVE_WINDOW_DAYS live-scan limit,
+    # R1-163: every live read on this tab (the measured query/procedure builders, the ETL and
+    # serverless-task panels) clamps a TRAILING window to the MAX_LIVE_WINDOW_DAYS live-scan limit,
     # so past 90d "the full page window" is really the last 90 days. Name what is actually scanned. A
     # calendar preset reads its exact [start, end) range, which window_label names ('last month').
+    # (The repeated-pattern read is mart-backed and clamps to MAX_MART_WINDOW_DAYS instead; see below.)
     _past_live = int(days) > MAX_LIVE_WINDOW_DAYS
     _uc_full = _uc_capped and st.toggle(
         (f"Price over the last {MAX_LIVE_WINDOW_DAYS} days (the live-scan limit)" if _past_live
@@ -755,16 +756,12 @@ def _graphs_tab(company: str, days: int, rate: float, database: str = "",
               tier="historical", source="SERVERLESS_TASK_HISTORY")
     _sls_wlab = window_label(bounds, min(int(days), MAX_LIVE_WINDOW_DAYS))
     st.markdown(f"**Serverless tasks (billed separately, task-day grain, {_sls_wlab})**")
-    # R1-061 / R1-167: only a true absence is a grant gap; a timeout or a dropped column is a failed
-    # read and says so with its error (the old caption called every failure "not accessible").
     if not sls.ok and is_setup_absence(sls.error_kind):
         empty_state("needs_setup", "SERVERLESS_TASK_HISTORY is not readable by this app's role "
                                    "(an IMPORTED PRIVILEGES grant on the SNOWFLAKE database).")
     elif not sls.ok:
         empty_state("unavailable", "Serverless task credits (SERVERLESS_TASK_HISTORY) could not be read.",
                     detail=sls.error)
-    # R1-062: an ok read goes through guard(), so a clean empty is the verified-good row and the
-    # truncation line shows when run()'s row cap cuts the (newest-first) task-day rows.
     elif guard(sls, "No serverless task credits in this scope/window.", kind="clean"):
         sdf = sls.df.copy()
         sdf["USD"] = sdf["SERVERLESS_CREDITS"].map(lambda c: credits_to_usd(c, rate))

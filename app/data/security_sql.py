@@ -1205,7 +1205,8 @@ ORDER BY CHANGED_AT DESC
 """
 
 
-def recent_grant_changes(days: int = 30, company: str = "ALL", limit: int = 500) -> str:
+def recent_grant_changes(days: int = 30, company: str = "ALL", limit: int = 500, *,
+                         onset: object = None) -> str:
     """Most-recent grant/revoke CHANGES across roles, users, and objects — the
     "who changed what for whom, and when" access-change feed (owner ask 2026-08-17).
 
@@ -1219,12 +1220,35 @@ def recent_grant_changes(days: int = 30, company: str = "ALL", limit: int = 500)
     ``company`` scopes by the GRANTEE (owner ask 2026-08-17): a role granted to a
     Trexis user or a privilege granted to a %TRXS% role is Trexis. Role-grain grants
     use the role heuristic (role_clause); user-grain grants use user classification.
-    'ALL' = account-wide (both clauses collapse to no-op)."""
+    'ALL' = account-wide (both clauses collapse to no-op).
+
+    ``onset`` (an incident's start; the auto-investigation feed): the rows are cut to the
+    change registries' onset window (change_impact_sql._onset_window on CHANGED_AT: onset -
+    ONSET_LEAD_DAYS .. onset + ONSET_AFTER_DAYS) and ordered NEAREST onset first, so post-onset
+    churn can no longer push the pre-onset trigger past the LIMIT (a newest-first read from now
+    did). ``days`` is then ignored (as in the registries): the trailing cutoff gives way to a prune
+    bounded on BOTH sides from the onset (change_impact_sql._onset_prune_bounds: that window plus a
+    day of slack each side), so an old incident scans its onset's few days of GRANTS_*, not every
+    day since. TOTAL_CHANGES_WIN is the onset window's pre-LIMIT count. Without ``onset`` the SQL
+    is unchanged."""
     days = bounded_days(days, 365)
     limit = max(10, min(int(limit or 500), 2000))
-    cutoff = f"DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
+    onset_where, order_by = "", "CHANGED_AT DESC"
+    if onset is None:
+        cutoff = f"DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
+        span, arm_span = f"CREATED_ON >= {cutoff} OR DELETED_ON >= {cutoff}", f">= {cutoff}"
+    else:
+        # R1-060's twin for grants (holistic review): the registries' onset window + nearest-first
+        # order. The prune is two-sided from the onset literal -- a trailing cutoff wide enough to
+        # reach an old onset scanned up to 365 days of GRANTS_* to keep ~4.
+        from app.data.change_impact_sql import _onset_prune_bounds, _onset_window
+        _win = _onset_window("CHANGED_AT", onset)   # ValueError on a non-timestamp: no text reaches the SQL
+        onset_where, order_by = f"\n  AND {_win[0]}", f"{_win[1]}, CHANGED_AT DESC"
+        lo, hi = _onset_prune_bounds(onset)
+        span = f"CREATED_ON BETWEEN {lo} AND {hi} OR DELETED_ON BETWEEN {lo} AND {hi}"
+        arm_span = f"BETWEEN {lo} AND {hi}"
     u_scope = companies.user_scope_subquery(company, "GRANTEE_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS",
-                                            distinct_where=f"CREATED_ON >= {cutoff} OR DELETED_ON >= {cutoff}")   # grantee is a user
+                                            distinct_where=span)   # grantee is a user
     r_scope = companies.role_clause(company, "GRANTEE_NAME")   # grantee is a role
     # Owner finding 2026-08-17: every object CREATE (incl. the TMP_* stages/formats
     # procs make per run) records an OWNERSHIP grant BY the creating role TO itself
@@ -1245,6 +1269,7 @@ def recent_grant_changes(days: int = 30, company: str = "ALL", limit: int = 500)
     # (CREATED_ON >= cutoff OR DELETED_ON >= cutoff) predicate is redundant with the IFF filter
     # but LOAD-BEARING for micro-partition pruning: the IFF-over-the-join-column alone cannot
     # prune, so this literal-cutoff predicate keeps the base scan pruned to relevant partitions.
+    # (Onset mode keeps the same shape with a two-sided ``span``: the BETWEEN literals prune.)
     ev = "(SELECT 'GRANTED' AS CHG UNION ALL SELECT 'REVOKED' AS CHG)"
     return f"""
 WITH changes AS (
@@ -1253,14 +1278,14 @@ WITH changes AS (
            GRANTED_BY AS CHANGED_BY, GRANTEE_NAME AS GRANTEE, ROLE AS WHAT
     FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
     CROSS JOIN {ev} ev
-    WHERE {and_where(f"(CREATED_ON >= {cutoff} OR DELETED_ON >= {cutoff})", f"IFF(ev.CHG = 'GRANTED', CREATED_ON, DELETED_ON) >= {cutoff}", u_scope)}
+    WHERE {and_where(f"({span})", f"IFF(ev.CHG = 'GRANTED', CREATED_ON, DELETED_ON) {arm_span}", u_scope)}
     UNION ALL
     SELECT IFF(ev.CHG = 'GRANTED', CREATED_ON, DELETED_ON), ev.CHG, 'Privilege -> role',
            GRANTED_BY, GRANTEE_NAME,
            PRIVILEGE || ' ON ' || GRANTED_ON || ' ' || COALESCE(NAME, '')
     FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES
     CROSS JOIN {ev} ev
-    WHERE {and_where(f"(CREATED_ON >= {cutoff} OR DELETED_ON >= {cutoff})", f"IFF(ev.CHG = 'GRANTED', CREATED_ON, DELETED_ON) >= {cutoff}", r_scope, self_own)}
+    WHERE {and_where(f"({span})", f"IFF(ev.CHG = 'GRANTED', CREATED_ON, DELETED_ON) {arm_span}", r_scope, self_own)}
 )
 SELECT CHANGED_AT, CHANGE, GRANT_TYPE,
        COALESCE(NULLIF(TRIM(CHANGED_BY), ''), '(system)') AS CHANGED_BY,
@@ -1271,8 +1296,8 @@ SELECT CHANGED_AT, CHANGE, GRANT_TYPE,
        SUM(IFF(CHANGE = 'GRANTED', 1, 0)) OVER () AS GRANTED_WIN,
        SUM(IFF(CHANGE = 'REVOKED', 1, 0)) OVER () AS REVOKED_WIN
 FROM changes
-WHERE CHANGED_AT IS NOT NULL
-ORDER BY CHANGED_AT DESC
+WHERE CHANGED_AT IS NOT NULL{onset_where}
+ORDER BY {order_by}
 LIMIT {limit}
 """
 

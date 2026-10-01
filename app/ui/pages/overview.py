@@ -114,11 +114,14 @@ def _load_board(company: str, days: int, window: object = None) -> QueryResult:
 def _live_fallback_daily(company: str, days: int, rate: float,
                          bounds: tuple | None = None) -> tuple[pd.DataFrame, QueryResult]:
     """Daily warehouse-spend series for the paths the trailing-window exec_board can't serve —
-    the 'Last month' calendar window (its explicit (start, end) range) and the mart-not-deployed
-    fallback. perf: MART-FIRST — FACT_WAREHOUSE_DAILY carries the same DAY/WAREHOUSE_NAME/
-    CREDITS_TOTAL columns for 365d and CAN express a bounded month, so it serves this read and the
-    live WAREHOUSE_METERING_HISTORY scan is only the labeled fallback (Last month is a closed
-    calendar period, so the fact's hourly loader lag is immaterial). Real data, never fabricated."""
+    every calendar preset window (Last month / Current month / Current year: any window with
+    bounds, read over its explicit (start, end) range) and the mart-not-deployed fallback.
+    perf: MART-FIRST — FACT_WAREHOUSE_DAILY carries the same DAY/WAREHOUSE_NAME/CREDITS_TOTAL
+    columns for 365d and CAN express a bounded range, so it serves this read and the live
+    WAREHOUSE_METERING_HISTORY scan is only the labeled fallback. Last month is a closed calendar
+    period, so the fact's hourly loader lag is immaterial there; Current month and Current year
+    run to today, and render() drops today's still-filling partial day downstream
+    (daily_complete) as it does for every window. Real data, never fabricated."""
     _lm = "_lm" if bounds is not None else ""
     res = run_mart_first(
         mart_sql.fact_warehouse_daily(days, company, bounds=bounds),
@@ -135,16 +138,20 @@ def _live_fallback_daily(company: str, days: int, rate: float,
     return daily[["DAY", "USD"]], res
 
 
-def _spend_failure_help(board_res: QueryResult | None, trend_source: QueryResult) -> str:
+def _spend_failure_help(board_res: QueryResult | None, trend_source: QueryResult, *,
+                        window_label: str = "") -> str:
     """c09 R1-191: the 'Unavailable' spend hero's help names what was actually read (house law 8).
 
     Only the LAST leg failed: the daily spend comes from the exec board when it is usable, else from
     _live_fallback_daily, whose run_mart_first returns a failure only from its final live read. The
-    exec board was not read at all for the 'Last month' window (board_res None), and it may have
-    answered empty; FACT_WAREHOUSE_DAILY may have failed, answered empty, or been skipped by the
-    mart backoff -- so neither is claimed to have failed unless it did."""
+    exec board was not read at all for a calendar preset window -- Last month, Current month or
+    Current year, every window with bounds (board_res None; ``window_label`` names the one picked) --
+    and it may have answered empty; FACT_WAREHOUSE_DAILY may have failed, answered empty, or been
+    skipped by the mart backoff -- so neither is claimed to have failed unless it did."""
     if board_res is None:
-        board = "The exec board does not cover a calendar-month window, so it was not read"
+        _which = (str(window_label).strip()
+                  or "a calendar window (Last month, Current month or Current year)")
+        board = f"The exec board covers trailing windows only, so it was not read for {_which}"
     elif not board_res.ok:
         board = "The exec board read failed"
     else:
@@ -305,9 +312,11 @@ def render() -> None:
     # while the 45d MTD fact is fixed — coupling them in one batch cache meant
     # every company/days change cold-started the fixed read. Serial keeps each
     # on its own cache key, so filter changes only refetch the board.
-    # 'Last month' is a BOUNDED calendar window (f["bounds"] is set only then); the exec
-    # board is keyed by trailing WINDOW_DAYS and has no row for it, so skip the mart and
-    # read the bounded live daily aggregate (real data, today-excluded by the month end).
+    # The calendar presets (Last month / Current month / Current year) are BOUNDED windows
+    # (f["bounds"] is set only for them); the exec board is keyed by trailing WINDOW_DAYS and
+    # has no row for them, so skip the mart and read the bounded live daily aggregate (real
+    # data; a closed month is today-excluded by its month end, the open presets by
+    # daily_complete below).
     _ov_bounds = f["bounds"]
     board_res = _load_board(company, days, f["window"]) if _ov_bounds is None else None
     board = board_res.df if (board_res is not None and board_res.usable()) else pd.DataFrame(
@@ -398,8 +407,9 @@ def render() -> None:
             # was dropped entirely — the projection omitted today's remaining spend.
             # Prorate today's OWN forecast row by the fraction of the account day
             # still ahead and add it back as an explicit today-remainder term.
-            # (c09 R1-229: the reader keeps TS::DATE >= CURRENT_DATE() for exactly
-            # this row; a strictly-future reader made the term 0 every day.)
+            # (c09 R1-229: the reader keeps TS::DATE >= account_today_sql() -- the
+            # account clock, R1-230 -- for exactly this row; a strictly-future reader
+            # made the term 0 every day.)
             _secs_elapsed = now.hour * 3600 + now.minute * 60 + now.second
             _frac_left = max(0.0, min(1.0, 1.0 - _secs_elapsed / 86400.0))
             today_remainder_cr = float(pd.to_numeric(
@@ -691,7 +701,7 @@ def render() -> None:
             "value": "Unavailable",
             "severity": "warn",
             "method": "metering", "scope": "company",
-            "help": _spend_failure_help(board_res, trend_source),
+            "help": _spend_failure_help(board_res, trend_source, window_label=str(f["window_label"])),
         } if _spend_failed else {
             "label": f"Spend, {_ov_spend_lbl} ({company})",
             "value": format_usd(window_spend),

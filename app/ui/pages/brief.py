@@ -524,6 +524,11 @@ def render() -> None:
                                          key="brief_fires_sel", height=TABLE_H_SM)
             # rec29 sticky-selection guard: st.dataframe re-emits the selection on
             # every rerun, so open the event's drawer only when the row CHANGES.
+            if _fire_sel is None:
+                # R1-215 re-arm (as components.selectable_nav_table): the drawer navigates away, so the
+                # table returns unselected -- a sentinel that outlived it swallowed the next click on
+                # the same row after Back. A None selection never navigates, so no rerun loop.
+                st.session_state.pop("_brief_fire_sel_last", None)
             if _fire_sel is not None and _fire_sel != st.session_state.get("_brief_fire_sel_last"):
                 st.session_state["_brief_fire_sel_last"] = _fire_sel
                 _eid = str(_fires.iloc[int(_fire_sel)]["EVENT_ID"])

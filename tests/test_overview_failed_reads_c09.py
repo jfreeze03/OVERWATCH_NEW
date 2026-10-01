@@ -146,7 +146,10 @@ def test_spend_failure_help_names_only_the_reads_that_ran_and_failed():
         assert text.startswith("Warehouse spend could not be read, so no total is shown.")
         assert f"the last fallback, {_LIVE_SRC}, failed: stub timeout." in text
         assert "all failed" not in text
-    assert "does not cover a calendar-month window, so it was not read" in skipped
+    # holistic review: every calendar preset skips the board, so the default names all three (and the page
+    # passes the picked one -- tests/test_p606_h3_ui.py), never only "a calendar-month window"
+    assert ("The exec board covers trailing windows only, so it was not read for a calendar window "
+            "(Last month, Current month or Current year);") in skipped
     assert "The exec board read failed" in failed
     assert "The exec board returned no rows" in empty
     sourceless = ov._spend_failure_help(None, QueryResult(ok=False, error=""))
