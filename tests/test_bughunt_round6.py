@@ -111,8 +111,9 @@ def test_ops_ai_panel_key_includes_database_and_schema():
 # --- SR-3 (LOW): idle AI panel key carries the Last-month discriminator -------------
 def test_idle_ai_panel_key_includes_lm():
     opt = _src("app/ui/pages/cost_parts/optimize.py")
-    # the idle data read keeps the discriminator (test_p606_components also pins it)
-    assert 'key=f"idle_{company}_{days}{_lm}", days=days, bounds=bounds' in opt
+    # BOTH idle data reads keep the discriminator: _idle_head and idle_res share one cached
+    # scan, so dropping {_lm} from either one must fail here (an `in` check only needs one).
+    assert opt.count('key=f"idle_{company}_{days}{_lm}", days=days, bounds=bounds') == 2
     # ... AND the AI panel. Since R1-106 (v4.606) the panel key also carries the preset's
     # window_label, so it no longer equals the read key byte-for-byte; a substring count over
     # the whole file would only see the two data reads. Slice the panel call itself (the same
