@@ -156,7 +156,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("mart.fact_metering_by_service", lambda: mart_sql.fact_metering_by_service(7)),
     ("mart.fact_query_window_summary", lambda: mart_sql.fact_query_window_summary(1, "ALFA")),
     # v4.608 holistic #10: Overview's score (and Control Room's Pulse, sharing its cache entry) ask for
-    # the read clock (WIN_START_AT / READ_AT)
+    # the read clock (WIN_START_AT / READ_AT, and READ_ELAPSED_SEC: the real seconds between them, via
+    # CONVERT_TIMEZONE('UTC', ...) so a DST change day counts its hour)
     ("mart.fact_query_window_summary.read_clock",
      lambda: mart_sql.fact_query_window_summary(1, "ALFA", read_clock=True)),
     ("mart.app_statement_stats", lambda: mart_sql.app_statement_stats(1)),

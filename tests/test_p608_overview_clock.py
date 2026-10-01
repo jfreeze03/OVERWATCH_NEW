@@ -4,11 +4,14 @@
        first incomplete day (formulas.metering_complete_before), the cut the card already uses (R2-050). Before
        the 06:45 Central load the newest FACT_METERING_DAILY row is yesterday's partial snapshot; the burndown
        counted it as a whole day, so on the same render the card read 'on straight-line' while the chart and its
-       'Complete days only' caption read $550 under pace.
+       'Complete days only' caption read $550 under pace. Recheck: the caption's 'so is yesterday's' clause is
+       said only when that metering cut was applied, not on the fallback frame cut at today.
   #10  The platform score's queue / spill per-day divisor comes from the score read's OWN clock (the window
        SQL returns WIN_START_AT and READ_AT on the account clock), not the render clock. A window read at 23:50
        Central and served from the hourly cache after midnight was divided by the new day's ~1.0 divisor,
        reading a steady 9 min/day of queueing as ~17.7 min/day (a queue deduction) until the entry expired.
+       Recheck: the divisor is the SQL's READ_ELAPSED_SEC (real seconds between UTC instants), so the two DST
+       change days keep their 25th / missing hour; the wall-clock stamps are only the fallback.
 """
 
 from __future__ import annotations
@@ -111,6 +114,31 @@ def test_burndown_after_the_load_keeps_yesterday_and_drops_only_today(monkeypatc
     assert "after 14 complete day(s) of 30" in pace["delta"]
 
 
+def test_burndown_caption_names_the_metering_cut_only_when_it_was_applied(monkeypatch):
+    """Recheck of #9: when the account-wide 150d metering read fails, _proj_cut stays None and the burndown
+    runs on the exec-board / FACT_WAREHOUSE_DAILY fallback frame cut at account-today only -- yesterday is
+    IN the chart. The caption must not then claim 'until the 06:45 Central load lands so is yesterday's
+    (its metering row is still a partial snapshot)': that cut never happened and the source is not the
+    metering fact. The plain 'today's partial is excluded' wording stays."""
+    from app.ui.pages import overview as ov
+
+    _freeze_clock(monkeypatch, "2026-09-15 08:00")          # 03:00 CDT Sep 15, before the 06:45 load
+    days = pd.date_range("2026-09-01", "2026-09-15").date
+    fallback = pd.DataFrame({"DAY": days, "USD": [1000.0] * len(days)})
+    monkeypatch.setattr(ov, "_load_board",
+                        lambda *a, **k: QueryResult(ok=False, source="stub", error="board down"))
+    monkeypatch.setattr(ov, "_live_fallback_daily",
+                        lambda *a, **k: (fallback.copy(), QueryResult(ok=True, source="stub", df=fallback.copy())))
+    failed = QueryResult(ok=False, source="stub", error="metering read failed")
+    got = _render_with_budget(monkeypatch, failed, 30000.0)
+
+    burn = got["burn"][-1]
+    assert pd.Timestamp(burn["DAY"].max()).date() == date(2026, 9, 14)     # yesterday kept: only today cut
+    cap = [c for c in got["captions"] if c.startswith("Cumulative ")][-1]
+    assert "today's partial is excluded" in cap, cap
+    assert "06:45" not in cap and "yesterday" not in cap and "metering row" not in cap, cap
+
+
 def test_burndown_source_is_cut_with_the_projection_cut():
     from tests._source import read
 
@@ -128,8 +156,24 @@ def test_score_window_sql_returns_its_own_account_clock():
     assert "HOUR_TS >= DATEADD('day', -1, CURRENT_DATE())" in sql
     assert "DATEADD('day', -1, CURRENT_DATE())::TIMESTAMP_NTZ AS WIN_START_AT" in sql
     assert "CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS READ_AT" in sql
+    # recheck (DST): the REAL seconds the window has covered, measured in SQL between the two instants. Both
+    # ends are taken to UTC first, where the wall clock has no DST hour, so the count is the true elapsed time
+    # whichever way DATEDIFF reads its operands -- the anchor is the same CURRENT_DATE() the WHERE filters on.
+    assert ("DATEDIFF('second', CONVERT_TIMEZONE('UTC', DATEADD('day', -1, CURRENT_DATE())::TIMESTAMP_LTZ), "
+            "CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP())) AS READ_ELAPSED_SEC") in sql
     selects = sqlglot.parse_one(sql, read="snowflake").named_selects
-    assert {"QUERY_COUNT", "QUEUED_SEC", "SPILL_REMOTE_GB", "WIN_START_AT", "READ_AT"} <= set(selects)
+    assert {"QUERY_COUNT", "QUEUED_SEC", "SPILL_REMOTE_GB", "WIN_START_AT", "READ_AT",
+            "READ_ELAPSED_SEC"} <= set(selects)
+
+
+def test_read_clock_canary_probes_the_elapsed_seconds_column():
+    """The Admin canary compiles the read_clock variant, so a CONVERT_TIMEZONE / DATEDIFF drift in the elapsed
+    column is caught before the score reads it."""
+    from app.data import canary
+
+    probe = dict(canary.CANARIES)["mart.fact_query_window_summary.read_clock"]()
+    assert probe == mart_sql.fact_query_window_summary(1, "ALFA", read_clock=True)
+    assert "AS READ_ELAPSED_SEC" in probe
 
 
 def test_other_window_summary_callers_keep_their_sql():
@@ -143,6 +187,7 @@ def test_other_window_summary_callers_keep_their_sql():
                 mart_sql.fact_query_window_summary(7, "ALL", "WH_", "KEB", "ALFA_DW"),
                 mart_sql.fact_query_window_summary(31, "ALL", bounds=aug)):
         assert "READ_AT" not in sql and "WIN_START_AT" not in sql and "CURRENT_TIMESTAMP" not in sql
+        assert "READ_ELAPSED_SEC" not in sql and "CONVERT_TIMEZONE" not in sql
     with pytest.raises(ValueError):
         mart_sql.fact_query_window_summary(31, "ALL", bounds=aug, read_clock=True)
 
@@ -175,6 +220,78 @@ def test_score_divisor_reads_the_row_clock(monkeypatch):
             == pytest.approx((24 + 20 / 60) / 24.0)
 
 
+def _real_span_sec(win_start: str, read_at: str) -> float:
+    """What the SQL's READ_ELAPSED_SEC carries: the real seconds between two Central wall-clock moments, both
+    placed in the account zone first, so a DST change between them counts its hour."""
+    tz = formulas.ACCOUNT_TIMEZONE
+    return (pd.Timestamp(read_at, tz=tz) - pd.Timestamp(win_start, tz=tz)).total_seconds()
+
+
+@pytest.mark.parametrize("win_start, read_at, real_hours, wall_hours", [
+    ("2026-11-01", "2026-11-02 00:30", 25.5, 24.5),                  # fall back: Sun Nov 1 runs 25 hours
+    ("2026-11-01", "2026-11-02 23:59", 48 + 59 / 60, 47 + 59 / 60),  # late next day: past the old 2.0 cap
+    ("2026-03-08", "2026-03-09 00:30", 23.5, 24.5),                  # spring forward: Sun Mar 8 runs 23 hours
+    ("2026-03-08", "2026-03-09 00:00", 23.0, 24.0),                  # at midnight: under the old 1.0 floor
+])
+def test_score_divisor_counts_the_dst_hour(monkeypatch, win_start, read_at, real_hours, wall_hours):
+    """Recheck of #10: the window's sums cover REAL time (FACT_QUERY_HOURLY keeps both 01:00 hours of the
+    fall-back night as separate rows; spring-forward has no 02:00 hour), so the per-day divisor must be the
+    real span. The wall-clock READ_AT - WIN_START_AT read 24.5h on the morning after the fall-back (real
+    25.5h), so a steady 9.7 min/day of queueing read 10.1 and crossed the 10-minute bar; spring-forward
+    read ~4% low. The SQL's READ_ELAPSED_SEC is the real span and wins; the stamps stay the fallback."""
+    from app.ui.pages import overview as ov
+
+    _freeze_clock(monkeypatch, "2026-10-01 05:20")
+    assert _real_span_sec(win_start, read_at) == pytest.approx(real_hours * 3600.0)
+    stamps = {"WIN_START_AT": pd.Timestamp(win_start), "READ_AT": pd.Timestamp(read_at)}
+    row = pd.Series({**stamps, "READ_ELAPSED_SEC": _real_span_sec(win_start, read_at)})
+    assert ov._score_read_elapsed_days(row) == pytest.approx(real_hours / 24.0)
+    # a row without the column (a stub) keeps the wall-clock stamps: the fallback, an hour off on these days
+    assert ov._score_read_elapsed_days(pd.Series(stamps)) == pytest.approx(wall_hours / 24.0)
+
+
+def test_score_divisor_reads_the_elapsed_column_safely(monkeypatch):
+    from decimal import Decimal
+
+    import numpy as np
+
+    from app.ui.pages import overview as ov
+
+    _freeze_clock(monkeypatch, "2026-10-01 05:20")          # 00:20 CDT Oct 1
+    stamps = {"READ_AT": pd.Timestamp("2026-09-30 23:50"), "WIN_START_AT": pd.Timestamp("2026-09-29")}
+    # the SQL's elapsed seconds win over the stamps, in whatever numeric type the connector hands back
+    for sec in (108000, Decimal("108000"), np.int64(108000), 108000.0):
+        assert ov._score_read_elapsed_days(pd.Series({**stamps, "READ_ELAPSED_SEC": sec})) \
+            == pytest.approx(30 / 24.0)
+    # missing or not a number -> the row's wall-clock stamps (and with none of them, the render clock)
+    for junk in (None, float("nan"), pd.NA, "not a number", True, pd.Timestamp("2026-09-30")):
+        assert ov._score_read_elapsed_days(pd.Series({**stamps, "READ_ELAPSED_SEC": junk})) \
+            == pytest.approx((47 + 50 / 60) / 24.0)
+        assert ov._score_read_elapsed_days(pd.Series({"READ_ELAPSED_SEC": junk})) \
+            == pytest.approx((24 + 20 / 60) / 24.0)
+    # a skewed or garbage count is clamped to the window's bounds, widened by the one DST hour
+    assert ov._score_read_elapsed_days(pd.Series({"READ_ELAPSED_SEC": -5})) == pytest.approx(23 / 24.0)
+    assert ov._score_read_elapsed_days(pd.Series({"READ_ELAPSED_SEC": 10 ** 9})) == pytest.approx(49 / 24.0)
+
+
+def test_steady_queueing_on_the_fall_back_morning_stays_under_the_bar(monkeypatch):
+    """00:30 CST Nov 2 (06:30 UTC): the window opened at 00:00 CDT Nov 1, 25.5 real hours earlier. A steady
+    9.7 min/day of queueing reads 9.7 -- the wall-clock 24.5h divisor read 10.1, over the 10-minute bar."""
+    _freeze_clock(monkeypatch, "2026-11-02 06:30")
+    elapsed = _real_span_sec("2026-11-01", "2026-11-02 00:30")
+    span_days = elapsed / 86400.0
+    window = QueryResult(ok=True, source="stub", df=pd.DataFrame({
+        "QUERY_COUNT": [1000.0], "FAILED_COUNT": [0.0],
+        "QUEUED_SEC": [9.7 * 60.0 * span_days], "SPILL_REMOTE_GB": [4.0 * span_days],
+        "WIN_START_AT": [pd.Timestamp("2026-11-01")], "READ_AT": [pd.Timestamp("2026-11-02 00:30")],
+        "READ_ELAPSED_SEC": [elapsed]}))
+    got = _render_overview(monkeypatch, frames={"score_throughput_": window})
+    sig = got["signals"][-1]
+    assert sig["queue_minutes"] == pytest.approx(9.7)
+    assert sig["queue_minutes"] < 10.0
+    assert sig["spill_gb"] == pytest.approx(4.0)
+
+
 def test_cached_window_served_after_central_midnight_keeps_its_per_day_rate(monkeypatch):
     """The window was read at 23:50 CDT Sep 30 (it opened Sep 29 00:00, 47h50m earlier) and is served from the
     hourly cache at 00:20 CDT Oct 1. A steady 9 min/day of queueing and 4 GB/day of spill still read 9 and 4
@@ -197,7 +314,7 @@ def test_control_room_pulse_shares_the_score_reads_hourly_cache_entry(monkeypatc
     (days=1, the viewer's company) at tier='hourly', and run_batch's member cache is keyed on (tier, capped
     SQL, scope). Asking only Overview for the read clock made the two SQL texts differ, so whichever page was
     visited second ran its own FACT_QUERY_HOURLY read every hour per company. The Pulse asks for the clock
-    too (it reads only the sums, so the two extra columns are inert there) -- in the batch member AND in its
+    too (it reads only the sums, so the extra clock columns are inert there) -- in the batch member AND in its
     run() fallback -- and the two pages share one entry again."""
     from streamlit.testing.v1 import AppTest
 
@@ -236,6 +353,6 @@ def test_control_room_pulse_shares_the_score_reads_hourly_cache_entry(monkeypatc
     pulse = [(t, sql) for t, key, sql in batch_seen if key == "pulse"]
     pulse_fallback = [(t, sql) for t, key, sql in run_seen if key.startswith("pulse_fact_")]
     assert score and pulse and pulse_fallback, (batch_seen, run_seen)
-    assert "READ_AT" in score[-1][1]
-    assert pulse[-1] == score[-1]                   # same tier, same SQL text -> one member-cache entry
+    assert "READ_AT" in score[-1][1] and "AS READ_ELAPSED_SEC" in score[-1][1]
+    assert pulse[-1] == score[-1]                  # same tier, same SQL text -> one member-cache entry
     assert pulse_fallback[-1] == score[-1]          # and the run() fallback shares it too
