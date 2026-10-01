@@ -1,5 +1,81 @@
 # Changelog
 
+## 4.606.0 - Bug-hunt round 1: 196 fixes across every page, plus the Control Room timeline crash (2026-10-01)
+
+App-only, no migration. A full-codebase hunt (27 finders, a skeptic per finding) confirmed 361 of 370 findings at
+v4.605.0; this release fixes the 196 bugs among them (the dead-code, file, test and doc findings follow in a separate
+release). The fixes were built in 13 file-disjoint clusters, each with a test that fails on the pre-fix code, then reviewed
+adversarially, fixed again, merged and re-checked as one tree, including on Streamlit 1.52.2. One round-2 finding, the
+Control Room timeline crash, ships here too. Server-side defects the hunt found (rule-disable guards, digest wording, a
+never-suspend alert arm, AI coverage tracking) are queued for one later migration, not this release.
+
+- **Shared tables, charts and navigation.**
+  - Cost Intelligence had lost its page error boundary in the V028 split, so a crash there showed a raw traceback and was never logged. It is restored, and a test now requires every page renderer to carry one.
+  - Type-to-confirm actions can no longer run against a target that was not typed: a click that arrives after the target or the typed name changed does nothing and says "Nothing ran".
+  - Clicking the same row again after returning to a page opens it (the selection guard re-arms).
+  - Tables no longer colour an empty (NULL) change cell; an infinite ratio or score shows "—" instead of crashing the page; tables over 400 rows say that clicking a duration header sorts the text (the loaded order and the CSV use the real value).
+  - With a non-account display timezone, yes/no columns and raw-millisecond "…_TIME" columns no longer turn blank or into 1970 dates.
+  - Section count badges no longer carry a count from one window into another of the same length.
+  - Live fallbacks of calendar-window reads (Current month / Current year / Last month) are stamped with the real calendar span, so idle, sizing and other run-rates no longer divide a whole period by 90 days (about 3x high) or an early-month period by too few days.
+  - The daily spend chart's 7-day average and week-over-week pace use calendar days, and only today's bar is dimmed as partial.
+  - Case File exports and previews show empty cells as "—", never nan / None / NaT / <NA>.
+  - Opening the app from a shared link or a reload restores your saved presentation mode, density and timezone. If reading your preferences fails at first and succeeds later, only those display settings are restored; the app never jumps you to your saved default view or changes your filters after you have started working.
+  - Jump-to a warehouse opens its queries under that warehouse's own company.
+  - "Session expired" says to reload the app in the browser. Off SiS, Refresh reconnects only after a read actually failed with an expired session.
+  - USD column header tooltips no longer render as garbled maths and name the configured CREDIT_PRICE_USD / AI_CREDIT_PRICE_USD rates.
+- **Overview and Brief.**
+  - When spend history cannot be read, the spend headline, case summary and executive export say "Unavailable" (naming the read that failed) instead of $0.00; the export no longer reports "0 critical | 0 high" when the alert tables could not be read.
+  - A temporary read failure no longer says the action queue or alerting "isn't installed yet", or that month-to-date "Needs daily facts".
+  - The Cost Intelligence and Brief verdicts call an overrun contract "Attention needed — contract commitment exhausted", say Watch when the burn cannot be computed, and say "no contract runway configured" when there is no contract.
+  - Projected month-end no longer reads 3-6% low on the first days of a month while yesterday has not loaded. With the opt-in ML engine, the weekly task now retrains the model, the projection includes the rest of today, and Overview falls back to the seasonal engine (saying why) if the forecast stops short of month-end. Re-run snowflake/ml_forecast_option.sql once to install the retraining procedure.
+  - Top movers shows a blank change, not "+0.0%", for a warehouse with no prior spend.
+- **Control Room.**
+  - Selecting an event in Timeline & movers opens its ±30-minute drill again (it raised an error on every selection).
+  - Opening an incident no longer crashes the ranked root causes when a change, task failure or grant falls in its window; the auto-investigation reads change history and task failures around the incident start (nearest first) and says how many were not ranked.
+  - Triage always shows yesterday's warehouse spend spike (the day is cut before the top 10), names any source that failed to load even when the queue has rows, states the real 10-active-day anomaly rule, and says when the alert feed is capped at 500. Pulse no longer errors under a Schema filter.
+  - The freshness board and day replay show a failed read as unavailable, never "not installed" or a green "quiet day"; proposed incidents read "20+" when the list is full.
+- **Operations.**
+  - Queries: Wasted spend and Warehouses ▸ Sizing divide by the days the scan covers (up to 2x high early in a calendar period before); Heaviest queries for one company is served from the stored list only when it is provably complete; "Failures (7d)" counts every failure in the window, not at most 500; Optimization opportunities show "≥ N" when more than 500 fingerprints exist.
+  - Warehouses: "Warehouses that need attention now" ranks queueing above spend anomalies only when it held at least 30 min/day across the 14-day read; queueing below that rate stays listed as "peak queued ~X", ranked after them, so the opener can never read clean over real queueing; a failed concurrency read is neutral, never "nobody is queueing". Queue & spill pressure covers the whole window. Lock waits apply the Database and company filters in the query, and the live fallback reads a calendar period from its first day. The contention takeaway no longer quotes a share of a sum of averages.
+  - Warehouse setting changes: the tiles count every change in the window (not the newest 200), "Still accumulating" excludes NO_BASELINE, verdict durations read in Hr/Min/Sec, and a user is deploy-managed only on an exact DEPLOY_ACTORS match.
+  - Pipeline and ETL: Pipeline SLA shows a failed freshness read as unavailable and keeps the Register-a-table form; a table missing from ACCOUNT_USAGE.TABLES no longer reads "already 0s old"; data-quality row volume scores every registered table (up to 600, it stopped near 179); volume drops list failed and watch rows first; reconciliation errors and recurrence count the whole window and call a check still breaking only within its cadence; the SLA finish forecast shows a setup prompt for a misnamed starter workflow; ETL cost attribution covers only the run's warehouses; on the 1st of a month the ETL panels read today, not all history, and label it.
+  - Tasks: SLA reads put the most urgent tasks first and go green only when proven; a failed TASK_HISTORY read shows its error; the failure timeline always runs its 7-day scan for Last month; release compare always keeps regressed tasks.
+  - Emergency: each running query needs its own CANCEL confirmation, and the kill-switch records Snowflake's actual answer (a cancel of a finished query is logged as failed).
+  - Chatter by application shows statements with no session record as "(no session record)"; adaptive-compute candidacy shows unknown idle as "—" and says the idle read failed.
+- **Cost Intelligence.**
+  - Spend: last-month storage by database is no longer inflated on the live fallback; Current month/year show month-to-date storage; "Measured $ by application" uses exact per-application totals (every application keeps a row); the root-cause waterfall is withheld for a flagged day with fewer than 7 earlier days; compile-heavy families get their own remedy; failed daily-anomaly, warehouse-change and notebook reads say so; the statement-type scan note no longer claims a 90-day cut under Current year.
+  - Compare: no made-up 0.00% fail rate or coloured delta against a side with no queries; "no B-side data" only when B has none; a failed read names what is missing.
+  - Unmapped entities covers the selected window (up to 365 days), and the mapper picks the exact NAME · Grain row.
+  - Chargeback & AI: AI users who first used Cortex after about 7 pm Central are dated on the Central calendar; CoCo users without token data show "—" for cache hit and read-amp; source labels name FACT_WAREHOUSE_DAILY; the role detail drops a $0 "NONE" warehouse; failed reads are shown by kind.
+  - Unit costs: labels name the window actually read (calendar presets, the 90-day live limit, and the repeated-patterns mart's 365 days); repeated patterns cover the whole window; "Priciest procedure (per call)" names the true per-call leader; serverless tasks read newest days first, show a cut, and split a zero-row read (verified clean) from a failed one; a failed ETL batch read is not retried a third time.
+  - Contract & Forecast: consumed credits stop at CONTRACT_END_DATE, and after the term ends the tab shows the final consumption and result and withholds pace, projection and steering; the steering auto-suspend lever divides by the days the mart covers.
+  - Ask: the cloud-services answer no longer presents the unhashed mixed bucket as one pattern, and gross cloud-services credits are not priced as dollars.
+- **Cost ▸ Optimize.**
+  - Run-rates for idle, sizing, remediation and repeat queries under Current year/month use the full period; repeat-query and storage-growth tiles count the whole window and storage growth honours the Database filter; procedure cost trend credits every call under calendar presets.
+  - The Remediation and alert-drawer "Tighten auto-suspend" fixes share one live re-read of the warehouse, never the 4-hour cache, so a timer tightened elsewhere is never raised back to 60s; a never-suspend warehouse is treated as known and gets the "turn on a timer" fix. The what-if prices a never-suspend warehouse correctly.
+  - The resize lever prices from the warehouse's live size, and every receipt says a saving was booked only when a ledger row was actually written.
+  - The off-hours suspend/resume schedule is a review-only script with a "Book estimated saving" button (its Execute always failed before).
+  - Fleet consolidation never pairs warehouses of different companies; QAS ROI calls low QAS spend "QAS on, low spend"; a failed verified-savings or experiments read is disclosed; the object TCO drill matches quoted, mixed-case and very long names and shows "—" when its read fails.
+- **Alerts.**
+  - Re-check for queued-time and remote-spill alerts measures the alert's own trailing 24 hours; a closed-day daily-credit alert never offers "Condition clear".
+  - The Rules threshold generator starts from the rule's current threshold and updates only what you change (toggling Enabled used to write a 0 threshold); a 0 warns.
+  - Failed reads on Rules, History, the evidence assembler and the route backlog say so; native delivery never calls a failed or empty task read "suspended", and refreshes every 5 minutes; the webhook template shows on the deployed app.
+  - Tiles show "500+" on the capped fallback; the drawer says "latest 20" and the snoozed tray "100+"; route failures count each route once per day; cloud-services anomaly alerts get their own AI evidence pack; Explain this alert no longer accepts instruction numbers as evidence; suggested thresholds name tagged resolutions and warn on an untagged majority.
+- **Security.**
+  - Capped login, admin-activity, DDL and role-grant readers hold their cap under calendar presets ("Current year" no longer ran a 273-day scan under a "30d" label), and headers name the window served.
+  - New networks compare against the 90 days before the window; login-fact gates require every complete day of the served window (a one-day loader gap falls back to live).
+  - Counts no longer saturate at a query LIMIT (MFA gaps, single-factor, takeover, new networks, grant changes, DDL groups, effective access, decision queue), and cut lists say "showing N of M"; least privilege is no longer cut at 500.
+  - Failed effective-access and admin-grant reads show the error or the setup need; tag coverage ignores a dropped predecessor's tag; the auditor export pack marks truncated sheets and states each sheet's span; dormant users who never logged in show days since creation and stay High.
+- **Action Center, Entity 360 and Proof.**
+  - Action Center KPIs count every matching item, open work lists first, and a failed read shows the error (the ownership editor is hidden after a failed read so blanks cannot overwrite the record).
+  - Held? reads "Not measurable" for a task with no runs since done; the fix-queue failure rate uses the family's own runs, capped at 100%; Entity 360 blast radius reads up to 50,000 dependency edges and says when it hit the cap.
+  - Proof shows failed ledger, acceptance and precision reads as unavailable (no "Apply V051+", no zero counts) and counts priced items below the confidence floor ("Below floor").
+- **Admin.**
+  - Migrations & freshness and Performance show a failed read as unreadable; Performance's slow/failed fetches count only slow or failed fetches; the access self-check probes fresh on every click; DEPLOY_ACTORS is an editable setting; the drill streak counts consecutive calendar months up to the month whose drill is due.
+- **Scripts, deploy and tests.**
+  - backfill_365.sql (rebuild step 04) can no longer leave the hourly task graph suspended: each load reports its own verdict, and the final pane counts failures. Re-running webhook_delivery.sql no longer adds a second Teams route or puts the secret in query history. snowflake.yml now ships webhook_delivery.sql.
+  - Every migration generator is regenerated and compared in CI; the scan-surface gate renders every builder a page calls; the opt-in stress harness runs again; an AST ratchet forbids a function-local import that shadows a module name.
+
 ## 4.605.0 - Hygiene: storage waste in Addressable $/mo, every duration in Hr/Min/Sec, probe failures read by kind, one Track write for AI exceptions (2026-09-30)
 
 App-only, no migration. The small buildable-now items left after the 2026-09-30 re-ground-truth: the #35 storage-waste
