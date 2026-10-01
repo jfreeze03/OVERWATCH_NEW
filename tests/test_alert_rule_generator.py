@@ -64,10 +64,14 @@ def test_rendered_enable_toggle_keeps_the_threshold(monkeypatch) -> None:
     pytest.importorskip("streamlit")
     from streamlit.testing.v1 import AppTest
 
+    from app.ui.pages import alerts
     from tests.test_alerts_failed_reads import _ok, _render_section, _stub
     _stub(monkeypatch, {"alert_rules": _ok(_RULES)})
+    # Pin the section by stubbing the picker, not by seeding its session key: this test re-runs the
+    # script, and on the Streamlit 1.52.2 floor (ci.yml floor-compat) a re-run re-serializes the
+    # section ButtonGroup, whose `indices` walks a seeded 'Rules' string per character and raises.
+    monkeypatch.setattr(alerts, "lazy_sections", lambda *_a, **_k: "Rules")
     at = AppTest.from_function(_render_section, default_timeout=30)
-    at.session_state["alerts_section"] = "Rules"
     at.session_state["rule_pick"] = "SEC_TRUST_REGRESSION"
     at.run()
     assert not at.exception, at.exception
