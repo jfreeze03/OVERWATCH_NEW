@@ -96,19 +96,42 @@ jobs:
   # LAYER 1 (the "Rewrite SQL onto the clone" step): before anything is applied,
   # .github/scripts/snowflake_smoke_rewrite.py COPIES every .sql file the smoke
   # runs (migrations, validate.sql, task_audit.sql) into a temp dir and:
-  #   * rewrites the identifier DBA_MAINT_DB to $CLONE_DB (schema kept);
+  #   * rewrites the identifier DBA_MAINT_DB, in any letter case, to $CLONE_DB
+  #     (schema kept);
   #   * comments out the account-level statements (warehouse and resource
   #     monitor DDL, grants to the retired roles, EXECUTE TASK);
   #   * moves task compute to $CI_WAREHOUSE and keeps every task SUSPENDED
   #     (ALTER TASK ... RESUME -> SUSPEND, no SYSTEM$TASK_DEPENDENTS_ENABLE);
   #   * starts each copy with USE SECONDARY ROLES NONE;
-  #   * FAILS CLOSED (writes nothing, exit 1) if any copy still names
-  #     DBA_MAINT_DB or WH_ALFA_ADMIN, or still carries warehouse / monitor /
-  #     account / user / integration / role DDL, a retired-role grant, a role or
-  #     warehouse switch, a task start, or a CALL of the notifier or digest.
-  # The smoke only ever executes the rewritten copies. Right after the clone it
-  # also disables every ALERT_ROUTES row IN THE CLONE, so nothing it runs can
-  # post through the account's real notification integrations.
+  #   * FAILS CLOSED (writes nothing, exit 1) unless every top-level statement
+  #     is a kind the chain is known to use (an ALLOWLIST: schema-object DDL,
+  #     DML, CALL, anonymous blocks, reads, USE), and if any code, $$ bodies
+  #     included, still names DBA_MAINT_DB (any case) or WH_ALFA_ADMIN; names
+  #     a database other than the clone as a DDL / write / CALL / USE target;
+  #     carries a GRANT or REVOKE, warehouse / monitor / account / user /
+  #     integration / role / share / network-policy / database DDL, a role or
+  #     warehouse switch, a task start, an external stage or unload, or a
+  #     SYSTEM$ function off its allowlist; or CALLs SP_NOTIFY_WEBHOOK or
+  #     SP_DAILY_DIGEST (top level, nested in a $$ body, or in a dynamic-SQL
+  #     string) anywhere but a suspended task's own body. A comment between
+  #     two tokens reads as whitespace, and "code" includes a '...' literal
+  #     handed straight to EXECUTE IMMEDIATE (the first piece when it is
+  #     concatenated), read as the SQL it runs.
+  # The smoke only ever executes the rewritten copies. What keeps it off the
+  # account's real notification integrations is that every clone task stays
+  # SUSPENDED and EXECUTE TASK is refused, so the notifier and digest task
+  # bodies never run, plus layer 1's ban on any CALL of SP_NOTIFY_WEBHOOK or
+  # SP_DAILY_DIGEST and on any SYSTEM$SEND_* outside their own definitions.
+  # Step 0's ALERT_ROUTES disable is NOT that guarantee: it stops only the
+  # Teams legs. V164's CRITICAL escalation emails ESCALATE_EMAIL_INTEGRATION
+  # whatever the routes say, so step 0 also sets ESCALATE_AFTER_MIN to '0' and
+  # blanks ESCALATE_EMAIL_INTEGRATION in the clone (belt and braces). A send
+  # reached only through SQL built at run time (EXECUTE IMMEDIATE of a
+  # variable, or a CALLed procedure that does that) is beyond a text check and
+  # rests on layer 2: the CI role must hold no USAGE on any notification
+  # integration (step 5 below). So does account-level or other-database SQL
+  # held in a variable or in the pieces of a concatenation after its first
+  # literal: layer 1 reads only the literal EXECUTE IMMEDIATE is handed.
   #
   # ####################### OWNER ACTION REQUIRED (role) ########################
   # LAYER 2 (defense-in-depth, fail-closed) is a DEDICATED CI ROLE that has NO
@@ -132,6 +155,9 @@ jobs:
   #      DBA_MAINT_DB or DBA_MAINT_DB.OVERWATCH.*, and must NOT inherit them via
   #      SNOW_SYSADMINS or any prod admin role. Cloning READS prod; it never
   #      writes, so USAGE + SELECT on the source is sufficient and fail-closed.
+  #      It must also hold NO USAGE on any NOTIFICATION INTEGRATION (the
+  #      OVERWATCH_EMAIL email, the Teams webhook), so a send the layer-1 text
+  #      checks cannot see has no channel.
   #   6. GRANT ROLE OVERWATCH_CI_SMOKE TO USER <ci_user>; and set repo secrets
   #      SNOWFLAKE_CI_ROLE=OVERWATCH_CI_SMOKE and SNOWFLAKE_CI_WAREHOUSE=<dedicated wh>.
   # KNOWN GAP (why the job is still non-gating): a database clone keeps its child
@@ -220,9 +246,10 @@ jobs:
             --clone-db "$CLONE_DB" --ci-warehouse "$CI_WAREHOUSE"
 
           # ---- Fail-closed guard: abort BEFORE applying if any prod ref remains
-          if grep -rIl 'DBA_MAINT_DB' "$REWRITE_DIR" >/dev/null 2>&1; then
+          #      (case-insensitive: Snowflake folds unquoted identifiers to upper case)
+          if grep -rIil 'DBA_MAINT_DB' "$REWRITE_DIR" >/dev/null 2>&1; then
             echo "FATAL: SQL rewrite incomplete — DBA_MAINT_DB still present in:" >&2
-            grep -rIl 'DBA_MAINT_DB' "$REWRITE_DIR" >&2
+            grep -rIil 'DBA_MAINT_DB' "$REWRITE_DIR" >&2
             echo "Refusing to apply: the smoke must never touch production." >&2
             exit 1
           fi
@@ -256,10 +283,15 @@ jobs:
                      -q "DROP DATABASE IF EXISTS $CLONE_DB;" || true
           }
           trap cleanup EXIT
-          # 0. Delivery off IN THE CLONE before anything runs: notification
-          #    integrations are account-level, so an enabled cloned route would post
-          #    through the real Teams integration.
-          sql -q "USE SECONDARY ROLES NONE; UPDATE $CLONE_DB.OVERWATCH.ALERT_ROUTES SET ENABLED = FALSE;"
+          # 0. Delivery off IN THE CLONE before anything runs (belt and braces: the
+          #    guarantee is the suspended tasks + layer 1's notifier-CALL ban).
+          #    Notification integrations are account-level, so an enabled cloned
+          #    route would post through the real Teams integration, and V164's
+          #    CRITICAL escalation emails ESCALATE_EMAIL_INTEGRATION whatever the
+          #    routes say: escalation goes off ('0') and its email leg blank. A MERGE,
+          #    so a missing key is inserted; V164 seeds them WHEN NOT MATCHED only,
+          #    so the replay keeps these values.
+          sql -q "USE SECONDARY ROLES NONE; UPDATE $CLONE_DB.OVERWATCH.ALERT_ROUTES SET ENABLED = FALSE; MERGE INTO $CLONE_DB.OVERWATCH.SETTINGS t USING (SELECT * FROM VALUES ('ESCALATE_AFTER_MIN', '0'), ('ESCALATE_EMAIL_INTEGRATION', '') AS s(KEY, VALUE)) s ON t.KEY = s.KEY WHEN MATCHED THEN UPDATE SET VALUE = s.VALUE WHEN NOT MATCHED THEN INSERT (KEY, VALUE) VALUES (s.KEY, s.VALUE);"
           # 1. Migrations in order — REWRITTEN copies (clone-scoped, never prod).
           #    Additive; the clone already has prod state, so this proves the
           #    chain re-applies cleanly / is idempotent. Every task stays suspended.
