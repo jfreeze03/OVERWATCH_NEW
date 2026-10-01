@@ -1246,7 +1246,11 @@ the same day.
 4. **Schema gone:** UNDROP first (`UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH;`); it
    brings back every table in it, manual clones included. Past retention the
    operator data is gone with the schema (the manual clones lived in it too):
-   1) Apply every migration in order, V001 onward. V158's tail starts a backup
+   1) Apply every migration in order, V001 onward. Before V006, run
+      `CREATE ROLE IF NOT EXISTS OVERWATCH_MONITOR;` and
+      `CREATE ROLE IF NOT EXISTS OVERWATCH_OPERATOR;`: V006-V008 grant to
+      these retired roles, roles.sql drops them again, and rebuild/02 runs
+      both lines first. V158's tail starts a backup
       run seconds before V161, which waits up to about 4 minutes for it. If V161
       still stops ("V161 stopped: a TASK_BACKUP_OPERATOR run was still in
       flight", or a statement timeout), re-run it once that run shows a final

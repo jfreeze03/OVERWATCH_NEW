@@ -7,9 +7,10 @@ build." This runbook is that, made safe.
 schema is SHARED with the previous app's objects (teardown.sql's safety
 model). "Full rebuild" here means: drop every OVERWATCH object by name,
 then run every migration in snowflake/migrations/ in order (or paste
-snowflake/rebuild/02_migrations_V001_V<tip>.sql, the same chain). Same end
-state as a virgin install, except for the opt-in objects the migrations
-never create (step 7b).
+snowflake/rebuild/02_migrations_V001_V<tip>.sql, the same chain behind a
+two-line role shim, step 3). Same end state as a virgin install, except for
+the opt-in objects the migrations never create (step 7b) and the kept
+config the replay rewrites (step 3b).
 
 Everything below runs in Snowsight as your deployment role, the one that
 owns the objects: SNOW_ACCOUNTADMINS here (DEPLOYMENT.md §1 and §2; step
@@ -47,8 +48,19 @@ owns the objects: SNOW_ACCOUNTADMINS here (DEPLOYMENT.md §1 and §2; step
   Keep the Teams Workflows URL to hand: its secret is dropped too. Keep the
   live ROUTE_IDs as well: step 7b re-enables exactly those (the step-1
   ALERT_ROUTES clone holds them too).
+- **WH_ALFA_ADMIN settings** (shared with the app and every loader): the
+  replay resets them (step 3), and step 3b puts back what you record now:
 
-## 1. Backups (even for the keep-operator-data path — they cost nothing)
+      SHOW PARAMETERS LIKE 'STATEMENT_TIMEOUT_IN_SECONDS' IN WAREHOUSE WH_ALFA_ADMIN;
+                                                     -- note the value and level
+      SHOW WAREHOUSES LIKE 'WH_ALFA_ADMIN';          -- resource_monitor: null
+
+- **Rebuild at the tip the account is on.** If the repo has migrations the
+  account has not applied, apply them the normal way first (DEPLOYMENT.md
+  §1), then start here: step 3b restores the step-1 clones over the replayed
+  tables, which only works when both have the same columns.
+
+## 1. Backups (the keep-operator-data path too: step 3b restores from them)
 
 Run teardown.sql "B0. Backups" (the commented CLONE block) with today's
 date suffix; verify counts:
@@ -95,14 +107,45 @@ error** — never run past a failure (a partial apply is how task trees end
 up suspended; V041 resumes its graph both before and after its first fills
 now, but the rule stands for every file). Notes:
 
+- **Before V006, create the two retired roles.** V006, V007 and V008 grant
+  to OVERWATCH_MONITOR and OVERWATCH_OPERATOR, the roles retired on
+  2026-07-13 (owner decision). No migration creates them, so V006 stops on
+  any current or fresh account without them; step 4's roles.sql drops both
+  again. rebuild/02 runs these two lines first (its generated replay shim);
+  one file at a time, run them yourself:
+
+      CREATE ROLE IF NOT EXISTS OVERWATCH_MONITOR;
+      CREATE ROLE IF NOT EXISTS OVERWATCH_OPERATOR;
+
+  They need the CREATE ROLE privilege. If your role lacks it, create them as
+  a role that has it, and drop them with that role after step 4.
+- **V002 changes WH_ALFA_ADMIN.** It sets STATEMENT_TIMEOUT_IN_SECONDS back
+  to 300 (step 3b restores the value step 0 recorded), creates the
+  OVERWATCH_RM resource monitor (30 credits a month, SUSPEND at 100%) and
+  attaches it; V045 detaches and drops it again (owner decision: no resource
+  monitor, no hard cap on WH_ALFA_ADMIN). If the run stops anywhere between
+  V002 and V045, detach it before you investigate:
+
+      ALTER WAREHOUSE WH_ALFA_ADMIN SET RESOURCE_MONITOR = NULL;
+      DROP RESOURCE MONITOR IF EXISTS OVERWATCH_RM;
+
+  If a first-fill CALL is cancelled at 300 s, set the step-0 timeout back
+  (step 3b's ALTER WAREHOUSE) and resume from that file.
 - Several migrations end with a first-fill `CALL SP_LOAD_*` / `SP_REFRESH_*` at
   the file tail (mart/fact seed) — these are the slow ones; expect a few minutes
   each on WH_ALFA_ADMIN. The mart family (V027+) and the per-table storage mart
   (V124) added more of them, so watch for the trailing `CALL` in each file rather
   than relying on a fixed list.
-- If you kept operator data, SCHEMA_VERSION already holds 1..tip: the
-  guards pass, IF NOT EXISTS objects recreate only what teardown dropped,
-  and the version MERGEs no-op. That is the designed restore path.
+- If you kept operator data, SCHEMA_VERSION already holds 1..tip, so every
+  guard passes and the whole chain runs again against the kept tables, its
+  one-time statements included. IF NOT EXISTS objects recreate only what
+  teardown dropped and the version MERGEs no-op, but V034 sets every 'ALL'
+  route's COMPANY_FILTER to 'ALFA'; V019/V020/V028 reset SEC_CRED_EXPIRY
+  (enabled, threshold 10); V043/V045 re-enable PIPE_TASK_FAILURES; V091 and
+  V157 turn AUTO_CLEAR_ENABLED on for five rules; V001 resets COMPANY_SCOPE
+  notes; and the seed MERGEs put back the rules, routes, settings, scope and
+  department rows you had deleted (V011 even re-adds two retired rules, which
+  V034 and V157 delete again). Step 3b puts your values back.
 - If you factory-reset, apply every migration, then restore your real values
   from the step-1 clones, SETTINGS first, as the table-owner role (V001 re-seeds
   the SETTINGS/ALERT_CONFIG/COMPANY_SCOPE defaults):
@@ -110,6 +153,47 @@ now, but the rule stands for every file). Notes:
       (or UPDATE the handful you care about: rates, budgets, routes.)
   There is no scheduled backup to fall back on since V161: the step-1 clones are
   the only copy.
+
+## 3b. Put back what the replay rewrote
+
+After the last migration and before step 4, as the table-owner role
+(SNOW_ACCOUNTADMINS here), with step 1's date suffix. On the
+keep-operator-data path, restore the five config tables the replay rewrote
+(step 3's notes say how) from the step-1 clones. First keep the rules the
+replay re-seeded after you had deleted them, so their events can be closed
+once the rows are gone:
+
+    CREATE TEMPORARY TABLE OW_REPLAY_ONLY_RULES AS
+      SELECT RULE_ID FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
+      MINUS SELECT RULE_ID FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG_BAK_<date>;
+    INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.SETTINGS       SELECT * FROM DBA_MAINT_DB.OVERWATCH.SETTINGS_BAK_<date>;
+    INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE  SELECT * FROM DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE_BAK_<date>;
+    INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG   SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG_BAK_<date>;
+    INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES   SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES_BAK_<date>;
+    INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.DEPARTMENT_MAP SELECT * FROM DBA_MAINT_DB.OVERWATCH.DEPARTMENT_MAP_BAK_<date>;
+    UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+       SET STATUS = 'RESOLVED', RESOLUTION_KIND = 'EXPECTED', RESOLVED_AT = CURRENT_TIMESTAMP()
+     WHERE STATUS IN ('OPEN', 'ACK', 'SNOOZED')
+       AND RULE_ID IN (SELECT RULE_ID FROM OW_REPLAY_ONLY_RULES);
+
+The restored ALERT_ROUTES has each route's pre-teardown ENABLED flag, but
+the teardown dropped the OVERWATCH_* notification integrations. Keep every
+route whose integration is gone switched off until step 7b brings it back
+(run the two statements together; the UPDATE reads the SHOW's result):
+
+    SHOW NOTIFICATION INTEGRATIONS;
+    UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES SET ENABLED = FALSE
+     WHERE ENABLED AND UPPER(INTEGRATION_NAME) NOT IN
+           (SELECT UPPER("name") FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+
+On every path, put back the warehouse timeout step 0 recorded (V002 set it
+to 300) and confirm no resource monitor is attached:
+
+    ALTER WAREHOUSE WH_ALFA_ADMIN SET STATEMENT_TIMEOUT_IN_SECONDS = <step-0 value>;
+    SHOW WAREHOUSES LIKE 'WH_ALFA_ADMIN';            -- resource_monitor: null
+
+(If step 0 showed no warehouse-level value, run `ALTER WAREHOUSE
+WH_ALFA_ADMIN UNSET STATEMENT_TIMEOUT_IN_SECONDS` instead.)
 
 ## 4. Grants
 
@@ -173,8 +257,9 @@ what step 0 listed:
     route still exists, and the INSERT would add a second one.
 
     The setup's own route INSERT adds nothing when a route already names the
-    integration. If you kept operator data, replaying V070 in step 3
-    DISABLED every enabled route whose integration was gone. Re-enable
+    integration. If you kept operator data, replaying V070 in step 3 (and
+    step 3b after the restore) DISABLED every enabled route whose integration
+    was gone. Re-enable
     exactly the routes step 0 recorded as live, never every row that names
     the integration: a duplicate route disabled on purpose would come back,
     and every alert, digest and escalation would post once per duplicate.
