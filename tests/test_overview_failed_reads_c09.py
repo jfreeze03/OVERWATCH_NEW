@@ -180,3 +180,54 @@ def test_new_warehouse_mover_has_no_fabricated_zero_percent(monkeypatch):
     assert mv.loc["WH_OLD", "DELTA_PCT"] == pytest.approx(10.0)
     assert mv.loc["WH_X", "DELTA_PCT"] == pytest.approx(-100.0)
     assert mv.index[0] == "WH_NEW"                                 # still the biggest mover by |Δ$|
+
+
+# ------------------------------------------------------------------------------------- R1-229 ----
+
+def _ml_frame(first: datetime.date, n: int) -> QueryResult:
+    days = [first + datetime.timedelta(days=i) for i in range(n)]
+    return QueryResult(ok=True, source="stub", df=pd.DataFrame({
+        "DAY": days, "FORECAST_CREDITS": [100.0] * n, "LOWER_BOUND": [90.0] * n, "UPPER_BOUND": [110.0] * n}))
+
+
+def _render_ml(monkeypatch, ml: QueryResult) -> dict:
+    from app.config import DEFAULT_SETTINGS
+    from app.ui.pages import overview as ov
+
+    monkeypatch.setattr(ov, "account_today", lambda: datetime.date(2026, 10, 10))
+    settings = {**DEFAULT_SETTINGS, "_source": "stub", "FORECAST_ENGINE": "ml_forecast"}
+    monkeypatch.setattr(ov, "load_settings", lambda _p: dict(settings))
+    got = _render(monkeypatch, frames={"ml_forecast": ml})
+    return next(k for k in got["kpis"] if k.get("label") == "Projected month-end credit spend")
+
+
+@_SKIP
+def test_ml_horizon_short_of_month_end_falls_back_to_seasonal(monkeypatch):
+    """A model trained once (last TS 08-31) forecasts 09-01..10-15; on 10-10 only 10-11..10-15 remain. That
+    5-day partial sum used to be the month-end projection; it now falls back to the disclosed seasonal engine
+    and names the stale horizon."""
+    kpi = _render_ml(monkeypatch, _ml_frame(datetime.date(2026, 10, 11), 5))
+    assert "SNOWFLAKE.ML.FORECAST via FORECAST_ML_DAILY" not in kpi["help"]
+    assert "The ML forecast table ends 2026-10-15, before month-end (2026-10-31)" in kpi["help"]
+
+
+@_SKIP
+def test_ml_horizon_covering_month_end_is_used(monkeypatch):
+    kpi = _render_ml(monkeypatch, _ml_frame(datetime.date(2026, 10, 11), 40))
+    assert "SNOWFLAKE.ML.FORECAST via FORECAST_ML_DAILY" in kpi["help"]
+    assert "ML forecast table ends" not in kpi["help"]
+
+
+def test_ml_option_procedure_retrains_before_it_refreshes():
+    """The weekly task CALLs SP_REFRESH_ML_FORECAST; a trained ML.FORECAST model is immutable and forecasts from
+    its last training day, so the procedure itself must re-create the model before re-materializing."""
+    from tests._source import read
+
+    script = read("snowflake/ml_forecast_option.sql")
+    body = script.split("CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_REFRESH_ML_FORECAST()", 1)[1]
+    body = body.split("$$", 2)[1]
+    train = body.index("CREATE OR REPLACE SNOWFLAKE.ML.FORECAST DBA_MAINT_DB.OVERWATCH.OVERWATCH_SPEND_FORECAST(")
+    assert train < body.index("CREATE OR REPLACE TABLE DBA_MAINT_DB.OVERWATCH.FORECAST_ML_DAILY")
+    assert "WHERE DAY < CURRENT_DATE()" in body                      # trains through every complete day
+    task = script.split("CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_REFRESH_ML_FORECAST", 1)[1]
+    assert "CALL DBA_MAINT_DB.OVERWATCH.SP_REFRESH_ML_FORECAST();" in task

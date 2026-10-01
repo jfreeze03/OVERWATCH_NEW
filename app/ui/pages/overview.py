@@ -10,6 +10,7 @@ Contract (the old app broke all four of these):
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import timedelta
 
 import pandas as pd
@@ -361,6 +362,7 @@ def render() -> None:
         company, prefetched=_live_pf.get(f"alert_counts_{company}"))
     engine = str(settings.get("FORECAST_ENGINE") or "linear").strip().lower()
     forecast = None
+    _ml_stale_note = ""
     if engine == "ml_forecast":
         mlres = run(mart_sql.ml_forecast_daily(), page=_PAGE, key="ml_forecast",
                     tier="hourly", source="FORECAST_ML_DAILY (SNOWFLAKE.ML.FORECAST)")
@@ -380,7 +382,18 @@ def render() -> None:
             today_remainder_cr = float(pd.to_numeric(
                 mdf.loc[mdf["DAY"] == today, "FORECAST_CREDITS"], errors="coerce"
             ).fillna(0).sum()) * _frac_left
+            _ml_horizon = mdf["DAY"].max()
             mdf = mdf[(mdf["DAY"] > today) & (mdf["DAY"] < month_end)]
+            # c09 R1-229: the table covers only the 45 days after the model's LAST TRAINING day. A
+            # horizon that stops before month-end would sum a few days and report the partial sum as
+            # the month-end projection (days_remaining shrinking with it), so it falls back to the
+            # disclosed seasonal engine instead, with the stale horizon named in the basis.
+            _last_day = month_end - timedelta(days=1)
+            if today < _last_day and _ml_horizon < _last_day:
+                _ml_stale_note = (f"The ML forecast table ends {_ml_horizon}, before month-end ({_last_day}), so "
+                                  "the seasonal engine is used — retrain it with SP_REFRESH_ML_FORECAST "
+                                  "(snowflake/ml_forecast_option.sql).")
+                mdf = mdf.iloc[0:0]
             if not mdf.empty:
                 # mtd_now rides proj_daily, already AI-split-priced (C1). The
                 # FORECAST_* legs price via formulas.credits_to_usd at the compute
@@ -412,11 +425,16 @@ def render() -> None:
                           "today's remainder prorated in; a disclosed compute-rate "
                           "estimate (AI/OTHER split queued for V061).",
                 )
+        elif mlres.ok:   # c09 R1-229: the table exists but its horizon is already behind today
+            _ml_stale_note = ("The ML forecast table has no day after today, so the seasonal engine is "
+                              "used — retrain it with SP_REFRESH_ML_FORECAST (snowflake/ml_forecast_option.sql).")
         if forecast is None:
             engine = "seasonal"  # honest fallback when the ML view isn't installed
     if forecast is None:
         forecast = (month_end_projection(proj_daily, account_today(), engine=engine)
                     if not proj_daily.empty else month_end_projection(pd.DataFrame(), account_today(), engine=engine))
+        if _ml_stale_note:
+            forecast = dataclasses.replace(forecast, basis=f"{forecast.basis} {_ml_stale_note}".strip())
 
     # C2/N5: pull the score's throughput+pressure signals from a FIXED recent
     # window (not the exec board, which is windowed to the user's 7/30/90d spend
