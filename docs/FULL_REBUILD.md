@@ -1,4 +1,4 @@
-# Full rebuild — drop the OVERWATCH objects and reinstall V001..V124
+# Full rebuild — drop the OVERWATCH objects and reinstall V001 through the repo tip
 
 Owner ask 2026-07-12: "a full database drop instead of this incremental
 build." This runbook is that, made safe.
@@ -6,7 +6,10 @@ build." This runbook is that, made safe.
 **The one rule: never drop DBA_MAINT_DB or the OVERWATCH schema.** The
 schema is SHARED with the previous app's objects (teardown.sql's safety
 model). "Full rebuild" here means: drop every OVERWATCH object by name,
-then run all 124 migrations in order. Same end state as a virgin install.
+then run every migration in snowflake/migrations/ in order (or paste
+snowflake/rebuild/02_migrations_V001_V<tip>.sql, the same chain). Same end
+state as a virgin install, except for the opt-in objects the migrations
+never create (step 7b).
 
 Everything below runs in Snowsight as your deployment role (the one that
 owns the objects — see DEPLOYMENT.md), in a worksheet with:
@@ -26,6 +29,17 @@ owns the objects — see DEPLOYMENT.md), in a worksheet with:
     rebuilt from ACCOUNT_USAGE at all.
   - Factory reset (drop these too) only if you want zero history: run the
     Section B0 clone backups FIRST, verify row counts, then Section B.
+- **Opt-in objects** (the email alerts, the alert drill, the ML forecast,
+  the OVERWATCH_* notification integrations and their secrets): always
+  dropped, and no migration re-creates them (step 7b). Note which ones you
+  have first:
+
+      SHOW ALERTS IN SCHEMA DBA_MAINT_DB.OVERWATCH;
+      SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;   -- TASK_ALERT_DRILL, TASK_REFRESH_ML_FORECAST
+      SHOW NOTIFICATION INTEGRATIONS LIKE 'OVERWATCH%';
+      DESC NOTIFICATION INTEGRATION OVERWATCH_EMAIL; -- ALLOWED_ / DEFAULT_RECIPIENTS go with it
+
+  Keep the Teams Workflows URL to hand: its secret is dropped too.
 
 ## 1. Backups (even for the keep-operator-data path — they cost nothing)
 
@@ -53,23 +67,29 @@ everything it made (if V161 still stops on it, re-run V161 once the run ends).
 ## 2. Teardown
 
 Run snowflake/teardown.sql top to bottom (Section A executes; B and C stay
-commented unless you chose the factory reset in step 0). The VERIFY query
-at the bottom should list ONLY operator-data tables afterward (or nothing,
-after a factory reset).
+commented unless you chose the factory reset in step 0). One exception runs
+live: the opt-in tail at the end of Section B drops the ML forecast model,
+the webhook secrets and the OVERWATCH_* notification integrations (step 7b
+puts them back). The file says to run those integration drops as
+ACCOUNTADMIN; if your role cannot drop one, that statement fails and Run All
+stops there, so run the rest of the file, VERIFY included, by hand. The
+VERIFY query at the bottom should list ONLY operator-data tables afterward
+(or nothing, after a factory reset).
 
 ## 3. Migrations, in order, one file at a time
 
-V001 → V124, each file fully, **stopping at the first error** — never run
-past a failure (a partial apply is how task trees end up suspended; V041
-resumes its graph both before and after its first fills now, but the rule
-stands for every file). Notes:
+V001 → the repo tip (every file in snowflake/migrations/, enumerated in
+admin.py `_EXPECTED_MIGRATIONS`), each file fully, **stopping at the first
+error** — never run past a failure (a partial apply is how task trees end
+up suspended; V041 resumes its graph both before and after its first fills
+now, but the rule stands for every file). Notes:
 
 - Several migrations end with a first-fill `CALL SP_LOAD_*` / `SP_REFRESH_*` at
   the file tail (mart/fact seed) — these are the slow ones; expect a few minutes
   each on WH_ALFA_ADMIN. The mart family (V027+) and the per-table storage mart
   (V124) added more of them, so watch for the trailing `CALL` in each file rather
   than relying on a fixed list.
-- If you kept operator data, SCHEMA_VERSION already holds 1..124: the
+- If you kept operator data, SCHEMA_VERSION already holds 1..tip: the
   guards pass, IF NOT EXISTS objects recreate only what teardown dropped,
   and the version MERGEs no-op. That is the designed restore path.
 - If you factory-reset, apply every migration, then restore your real values
@@ -110,7 +130,45 @@ snowflake/loader_chain_check.sql when you need task-state diagnosis.)
 ## 7. Redeploy the app
 
 Push the current build to the stage / Streamlit-in-Snowflake as usual
-(DEPLOYMENT.md). App v4.456.0 expects exactly V001..V124.
+(DEPLOYMENT.md). The app expects V001 through its own tip: Admin ▸
+Migrations & freshness shows any drift, and validate.sql's first row checks
+the full chain.
+
+## 7b. Re-install the opt-in objects
+
+teardown.sql (rebuild/01) dropped these, and no migration re-creates them:
+the four NATIVE_ALERT_* email alerts; TASK_ALERT_DRILL; the ML forecast
+(OVERWATCH_SPEND_FORECAST, SP_REFRESH_ML_FORECAST, TASK_REFRESH_ML_FORECAST,
+FORECAST_ML_DAILY); the OVERWATCH_EMAIL, OVERWATCH_WEBHOOK_TEAMS (and Slack
+/ PagerDuty / FinOps recipe) notification integrations; and the
+OVERWATCH_TEAMS_URL / OVERWATCH_WEBHOOK_URL secrets. Until they are back,
+Alerts ▸ Native delivery reads the email path as not installed, a dead
+scan or notifier sends no email, the monthly drill stops, and
+`FORECAST_ENGINE = ml_forecast` falls back to the seasonal engine. Put back
+what step 0 listed:
+
+(a) **Teams delivery** (as ACCOUNTADMIN): snowflake/webhook_delivery.sql's
+    first-time setup — the commented `CREATE SECRET IF NOT EXISTS` with the
+    URL pasted in Snowsight only, then open its GATE and run it. Its route
+    INSERT adds nothing when a route already names the integration, and if
+    you kept operator data, replaying V070 in step 3 DISABLED that route
+    (its integration was gone), so re-enable it:
+
+        UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES SET ENABLED = TRUE
+         WHERE INTEGRATION_NAME = 'OVERWATCH_WEBHOOK_TEAMS';
+
+    Then post one test card with the file's rotation-runbook CALL.
+(b) **Email** (as ACCOUNTADMIN): re-create OVERWATCH_EMAIL from the PREREQS
+    block of snowflake/native_alert_templates.sql (real ALLOWED_RECIPIENTS,
+    USAGE to SNOW_ACCOUNTADMINS) and set its DEFAULT_RECIPIENTS for the V164
+    escalation email (docs/EMAIL_RECIPIENT_RUNBOOK.md, step 2). Then, as
+    SNOW_ACCOUNTADMINS, re-run native_alert_templates.sql with the real
+    recipient. The alerts come back suspended: resume all four only after
+    step 8 passes and that runbook's pre-flight is clean.
+(c) **Drill and ML forecast**: re-run snowflake/alert_drill.sql (it resumes
+    its own task) and snowflake/ml_forecast_option.sql (it retrains and
+    rewrites FORECAST_ML_DAILY; its weekly task is created suspended, so
+    resume it if it ran before).
 
 ## 8. Prove the chain ticks
 
