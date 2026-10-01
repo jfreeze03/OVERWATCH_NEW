@@ -3030,8 +3030,8 @@ SELECT r.ROUTE_ID,
        -- so the bar is one cycle + a 30m grace = 90m. A brand-new event right after a quiet
        -- week is young -> not stuck (the old last-sent test wrongly reddened it); an old
        -- backlog is stuck even if an unrelated send just landed (which used to mask it).
-       -- OLDEST_ELIGIBLE spans expired (>24h) undelivered events too (#15), so a stranded
-       -- route is stuck, not 'Quiet'.
+       -- OLDEST_ELIGIBLE spans expired (past the send window) undelivered events too (#15),
+       -- so a stranded route is stuck, not 'Quiet'.
        (el.OLDEST_ELIGIBLE IS NOT NULL
         AND DATEDIFF('minute', el.OLDEST_ELIGIBLE, CURRENT_TIMESTAMP()) >= 90) AS STUCK,
        el.OLDEST_ELIGIBLE,

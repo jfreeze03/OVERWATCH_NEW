@@ -1123,7 +1123,8 @@ def render() -> None:
         mart_source=f"MART_WAREHOUSE_EFFICIENCY_DAILY ({company} + account-level, accruing)",
         live_source="FACT_WAREHOUSE_DAILY (365d backfill, monthly rollup)",
         # r11 #2: the eff mart accrues from deploy day — until it spans a
-        # year, the 13-month live view is the truer boss chart.
+        # year, the FACT_WAREHOUSE_DAILY 365d monthly rollup
+        # (fact_monthly_spend_by_warehouse) is the truer boss chart.
         mart_accept=lambda df: df["MONTH"].nunique() >= 12)
     if _mres.ok and not _mres.empty:
         _md = _mres.df.copy()

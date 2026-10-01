@@ -380,8 +380,8 @@ def _last_delivery_card() -> None:
     The owner hit exactly this on 2026-07-31: a full day of Teams silence with no way
     to tell a healthy quiet stretch from a dead pipe (the app HAD the timestamp, buried
     as a suffix on a banner). Silence alone is not a fault signal — the sender is a
-    per-key 24h digest, so a chronic condition raises once and quiet days are legitimately
-    empty. What decides it is whether anything is WAITING, so the card reports both.
+    per-key digest bounded to a send window (24h; 7d for CRITICAL), so a chronic condition
+    raises once and quiet days are legitimately empty. What decides it is whether anything is WAITING, so the card reports both.
 
     The builder now returns one row PER ENABLED ROUTE (Codex #29): a healthy route no
     longer masks a dead sibling and one dead route no longer reddens the whole card. We

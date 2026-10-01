@@ -156,9 +156,10 @@ def test_role_share_mart_abstains_only_on_a_genuine_retention_shortfall():
 
 def test_cache_pct_readers_scale_fraction_to_percent():
     """Chip fix: PERCENTAGE_SCANNED_FROM_CACHE is a 0-1 fraction (empirically
-    confirmed on live rows, owner 2026-07-29), so BOTH repeat-query read points
-    scale x100 — otherwise flag_repeat_candidates' percent threshold
+    confirmed on live rows, owner 2026-07-29), so the live repeat-query read point
+    scales x100 — otherwise flag_repeat_candidates' percent threshold
     (REPEAT_LOW_CACHE_PCT=25.0) passes every row and captions misreport cache.
+    The mart read point (mart27_sql.family_repeat_fingerprints) was deleted in v4.607.
     Matches the x100-at-read pattern established for MART_CLOUD_SVC_DAILY (#9)."""
     ins = (_ROOT / "app" / "data" / "insights_sql.py").read_text(encoding="utf-8")
     # D3 (audit 2026-07-31) changed the AGGREGATION (BYTES_SCANNED-weighted, zero-scan
