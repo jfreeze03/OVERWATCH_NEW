@@ -100,8 +100,11 @@ def test_c10_ops_query_scope_is_warehouse_primary():
 def test_c11_ddl_scoped_actor_or_object():
     sql = security_sql.recent_ddl_changes(7, "ALFA")
     body = (_ROOT / "app" / "data" / "security_sql.py").read_text(encoding="utf-8")
-    fn = body.split("def recent_ddl_changes", 1)[1].split("\ndef ", 1)[0]
+    # R1-188: the grouped + scoped CTEs moved into _recent_ddl_ctes, shared by the detail feed and its
+    # uncapped chart rollup, so the two can never disagree on scope
+    fn = body.split("def _recent_ddl_ctes", 1)[1].split("\ndef ", 1)[0]
     assert "_actor_or_object" in fn
+    assert "_recent_ddl_ctes(" in body.split("def recent_ddl_changes(", 1)[1].split("\ndef ", 1)[0]
     assert " OR " in sql                               # union of user + database lenses
 
 
