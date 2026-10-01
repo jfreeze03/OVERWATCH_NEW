@@ -111,17 +111,29 @@ ORDER BY DAY, SERVICE_TYPE
 
 def fact_query_window_summary(days: int, company: str = "ALL", warehouse_contains: str = "",
                               user_contains: str = "", database: str = "", *,
-                              bounds: tuple | None = None) -> str:
+                              bounds: tuple | None = None, read_clock: bool = False) -> str:
     """Ops Queries-tab hot path from FACT_QUERY_HOURLY.
 
     Counts, failures, queued time and spill are exact sums of the hourly
     fact. P95 is the PEAK hourly-group p95 (a true p95 needs raw rows) —
     the UI labels it as such. No schema dimension in the fact, so callers
     fall back to live when a schema filter is active.
+
+    ``read_clock`` (v4.608 holistic #10, Overview's platform score only): also return the window's own
+    start (WIN_START_AT, byte-for-byte the CURRENT_DATE() anchor the WHERE filters on) and the moment the
+    sums were read (READ_AT), both on the session clock CURRENT_DATE() uses -- the account's Central
+    default, the TIMEZONE STANDARD's accepted pattern for trailing windows. A caller that de-cumulates the
+    sums by the span they cover then divides by the span AT READ TIME, so an hourly-cached frame served
+    after Central midnight (or later in the hour) keeps its per-day rate. Opt-in: CURRENT_TIMESTAMP()
+    makes a statement ineligible for Snowflake's result cache, and the other callers' SQL (their cache
+    identity) stays unchanged. A bounded calendar window has no CURRENT_DATE() anchor to report, so
+    asking for both is a caller error.
     """
     from app import companies
     from app.core.sqlsafe import contains_filter
 
+    if read_clock and bounds is not None:
+        raise ValueError("read_clock reports a trailing CURRENT_DATE() window; a bounded window has none")
     days = bounded_days(days, MAX_MART_WINDOW_DAYS)
     # triage #12: midnight-aligned window (CURRENT_DATE) to match the live twin
     # ops_sql.query_window_summary and fact_warehouse_pressure, so the same
@@ -132,13 +144,16 @@ def fact_query_window_summary(days: int, company: str = "ALL", warehouse_contain
     where.append(contains_filter("WAREHOUSE_NAME", warehouse_contains))
     where.append(contains_filter("USER_NAME", user_contains))
     where.append(companies.database_equals_clause(database, "DATABASE_NAME"))
+    # constants beside the ungrouped aggregates: the one result row carries them even when no hour matched
+    clock = (f",\n    DATEADD('day', -{days}, CURRENT_DATE())::TIMESTAMP_NTZ AS WIN_START_AT,"
+             "\n    CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS READ_AT") if read_clock else ""
     return f"""
 SELECT
     SUM(QUERY_COUNT) AS QUERY_COUNT,
     SUM(FAILED_COUNT) AS FAILED_COUNT,
     MAX(P95_ELAPSED_SEC) AS P95_ELAPSED_SEC,
     SUM(QUEUED_SEC_SUM) AS QUEUED_SEC,
-    SUM(SPILL_REMOTE_GB) AS SPILL_REMOTE_GB
+    SUM(SPILL_REMOTE_GB) AS SPILL_REMOTE_GB{clock}
 FROM {mart_object("FACT_QUERY_HOURLY")}
 WHERE {and_where(*where)}
 """

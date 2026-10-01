@@ -11,6 +11,7 @@ Contract (the old app broke all four of these):
 from __future__ import annotations
 
 import dataclasses
+import numbers
 from datetime import date, timedelta
 
 import pandas as pd
@@ -100,21 +101,54 @@ _SCORE_DRIVER_NAV = {
 _SCORE_HEALTH_WINDOW_DAYS = 1
 
 
-def _score_window_elapsed_days(now: object, window_days: int = _SCORE_HEALTH_WINDOW_DAYS) -> float:
+def _score_window_elapsed_days(now: object, window_days: int = _SCORE_HEALTH_WINDOW_DAYS,
+                               win_start: object = None) -> float:
     """C8 de-cumulation divisor: the days the score's midnight-aligned window has covered at ``now``.
 
     The window SQL (mart_sql.fact_query_window_summary -> scope_window_where) is
     ``HOUR_TS >= DATEADD('day', -window_days, CURRENT_DATE())``. Both ends run on the ACCOUNT clock:
     CURRENT_DATE() resolves in the account's default TIMEZONE (America/Chicago, the TIMEZONE STANDARD
     in app/data/common.py) and HOUR_TS is Central wall-clock NTZ (the loader truncates the LTZ
-    START_TIME in a Central session). So pass ``account_now()``: the window opens ``window_days``
-    before Central midnight today and the divisor is (24h + Central hours since midnight) / 24 for the
-    1-day window. A UTC-anchored divisor (R2-016 / R2-049) read the same steady workload ~1.7x high
-    every Central evening and ~0.85x the rest of the day. Floor 1.0: elapsed is >= window_days by
-    construction; the clamp only defends a skewed clock, erring toward the smaller divisor."""
+    START_TIME in a Central session). So ``now`` is an account-clock moment: the window opens
+    ``window_days`` before that day's Central midnight (or at ``win_start`` when the read reported it)
+    and the divisor is (24h + Central hours since midnight) / 24 for the 1-day window. A UTC-anchored
+    divisor (R2-016 / R2-049) read the same steady workload ~1.7x high every Central evening and ~0.85x
+    the rest of the day. Clamped to [1.0, window_days + 1]: at any read moment the window has covered at
+    least the floor and less than window_days + 1 days by construction; the clamp only defends a skewed
+    or garbage clock."""
     ts = pd.Timestamp(now)
-    win_start = ts.normalize() - timedelta(days=int(window_days))
-    return max((ts - win_start).total_seconds() / 86400.0, 1.0)
+    start = pd.Timestamp(win_start) if win_start is not None else ts.normalize() - timedelta(days=int(window_days))
+    return min(max((ts - start).total_seconds() / 86400.0, 1.0), float(window_days) + 1.0)
+
+
+def _wall_clock_ts(value: object) -> pd.Timestamp | None:
+    """A datetime-like cell as a naive wall-clock Timestamp; None for a missing, unparseable or NUMERIC cell
+    (a number is not a clock, though pandas would read it as epoch nanoseconds)."""
+    if value is None or isinstance(value, (bool, numbers.Number)):
+        return None
+    try:
+        ts = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(ts):
+        return None
+    return ts.tz_localize(None) if ts.tzinfo is not None else ts
+
+
+def _score_read_elapsed_days(row: object, window_days: int = _SCORE_HEALTH_WINDOW_DAYS) -> float:
+    """v4.608 holistic #10: the score divisor on the window read's OWN clock.
+
+    The throughput read is cached for an hour (tier='hourly', keyed on SQL text whose CURRENT_DATE() never
+    changes), so a frame summed at 23:50 Central can be served at 00:20. Divided by the render clock's
+    post-midnight divisor (~1.01) its ~47.8h of queueing read ~2x per day and fired the queue / spill
+    drivers until the entry expired. The read reports WIN_START_AT and READ_AT (fact_query_window_summary
+    read_clock=True), so the divisor is the span the sums actually covered when they were read. A row
+    without them (a stub, a pre-change cache entry) falls back to account_now(), the R2-049 behaviour."""
+    get = getattr(row, "get", None)
+    read_at = _wall_clock_ts(get("READ_AT")) if callable(get) else None
+    if read_at is None:
+        return _score_window_elapsed_days(account_now(), window_days)
+    return _score_window_elapsed_days(read_at, window_days, win_start=_wall_clock_ts(get("WIN_START_AT")))
 
 
 def _board_panel(board: pd.DataFrame, panel: str) -> pd.DataFrame:
@@ -528,7 +562,8 @@ def render() -> None:
     # company-scoped — batch them into one round trip (finishing N4 for the score path).
     # board/150d stay unbatched (filter-scoped + fixed cold-start each other, Codex #4);
     # health_strip stays on the shared shell cache; the live alert/action reads batch above.
-    _thr_sql = mart_sql.fact_query_window_summary(_SCORE_HEALTH_WINDOW_DAYS, company)
+    # holistic #10: read_clock -> the row also carries WIN_START_AT / READ_AT for the per-day divisor below
+    _thr_sql = mart_sql.fact_query_window_summary(_SCORE_HEALTH_WINDOW_DAYS, company, read_clock=True)
     _tk_sql = mart_sql.fact_task_daily(_SCORE_HEALTH_WINDOW_DAYS, company)
     _score_pf = run_batch([
         {"key": f"score_throughput_{company}", "sql": _thr_sql,
@@ -559,9 +594,11 @@ def render() -> None:
     # The failure percentages are ratios and were already time-invariant.
     # R2-016 / R2-049: the divisor shares the SQL's clock, which is the ACCOUNT clock
     # (CURRENT_DATE() resolves in the account's America/Chicago default and HOUR_TS is
-    # Central wall-clock NTZ -- the TIMEZONE STANDARD in app/data/common.py), so it is
-    # anchored on account_now(), never the UTC process clock.
-    _elapsed_days = _score_window_elapsed_days(account_now())
+    # Central wall-clock NTZ -- the TIMEZONE STANDARD in app/data/common.py), never the UTC
+    # process clock. holistic #10: and it is the clock the sums were READ at (the row's
+    # WIN_START_AT / READ_AT), not the render's -- a frame cached before Central midnight and
+    # served after it was divided by the new day's ~1.0 divisor (~2x per day for up to an hour).
+    _elapsed_days = _score_read_elapsed_days(_tr)
     queued_minutes = (safe_float(_tr.get("QUEUED_SEC")) / 60.0 / _elapsed_days) if _tr is not None else 0.0
     spill_gb = (safe_float(_tr.get("SPILL_REMOTE_GB")) / _elapsed_days) if _tr is not None else 0.0
     # A-score-3: FACT_TASK_DAILY is DAY-grain, so this covers the previous + current
@@ -975,8 +1012,13 @@ def render() -> None:
         # "under pace" gap past ~the 8th. Use the same account-wide full-month frame
         # the Projected month-end KPI uses (proj_daily), today's partial excluded to
         # match the caption and budget_burndown's complete-days convention.
+        # v4.608 holistic #9: cut with the SAME metering cut as the pace card above (R2-050) -- before
+        # the 06:45 Central load the fact's newest row is yesterday's partial snapshot, and counting it
+        # as a whole day put the burndown 'under pace' while the card read on straight-line.
+        # _proj_cut is None for the exec-board fallback frame, which keeps the account-today cut.
+        _burn_cut = _proj_cut or account_today()
         _burn_src = (
-            proj_daily[pd.to_datetime(proj_daily["DAY"], errors="coerce").dt.date < account_today()]
+            proj_daily[pd.to_datetime(proj_daily["DAY"], errors="coerce").dt.date < _burn_cut]
             if not proj_daily.empty else proj_daily
         )
         _burn = budget_burndown(_burn_src, budget, account_today())
@@ -989,7 +1031,9 @@ def render() -> None:
                 f"Cumulative {format_usd(_last['CUM_ACTUAL_USD'])} vs "
                 f"{format_usd(_last['BUDGET_LINE_USD'])} on the flat budget line — "
                 f"{format_usd(abs(_gap))} {'over' if _gap >= 0 else 'under'} pace. Complete days "
-                "only (today's partial excluded); MONTHLY_BUDGET_USD straight-lined across the month."))
+                "only: today's partial is excluded, and until the 06:45 Central load lands so is yesterday's "
+                "(its metering row is still a partial snapshot); MONTHLY_BUDGET_USD straight-lined "
+                "across the month."))
     # CoCo Overview #10: the open-crit/high KPI is a dead-end count — give it a path
     # to the actual events, but only when there's something open to work.
     if (alerts_res.ok and (critical_alerts or high_alerts)
