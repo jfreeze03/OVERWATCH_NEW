@@ -96,11 +96,13 @@ WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP()) {comp}
 
 
 def warehouse_settings_sql(warehouse: str) -> str | None:
-    """ONE warehouse's SHOW WAREHOUSES row, for a live re-read of a setting a drawer lever is about to change
-    (review R1-170: the 'Tighten auto-suspend' guard read AUTO_SUSPEND from the shared 4 h metadata-tier
-    'jump_wh' SHOW WAREHOUSES entry, so a timer a DBA tightened in a worksheet since then read stale and the
-    plan RAISED it). None for an unsafe name. LIKE treats '_' as a one-character wildcard (WH_X also matches
-    WHAX), so the caller keeps only the exact-name row. SHOW cannot be EXPLAINed, so not a canary."""
+    """ONE warehouse's SHOW WAREHOUSES row, for a live re-read of a setting a lever is about to change (review
+    R1-170: the 'Tighten auto-suspend' guard read AUTO_SUSPEND from the shared 4 h metadata-tier 'jump_wh'
+    SHOW WAREHOUSES entry, so a timer a DBA tightened in a worksheet since then read stale and the plan RAISED
+    it). The ONE builder for every such re-read: the alert drawer's tighten guard, and (the R1-170 twin) Cost ▸
+    Optimize ▸ Remediation's tighten guard and the resize lever's current size. None for an unsafe name. LIKE
+    treats '_' as a one-character wildcard (WH_X also matches WHAX), so the caller keeps only the exact-name row
+    (insights.show_warehouse_settings). SHOW cannot be EXPLAINed, so not a canary."""
     try:
         wh = safe_identifier(str(warehouse or "").strip())
     except ValueError:

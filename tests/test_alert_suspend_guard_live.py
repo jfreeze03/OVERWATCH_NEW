@@ -37,30 +37,30 @@ def test_tighten_guard_reads_one_warehouse_on_the_live_tier() -> None:
 
 
 def test_live_value_decides_the_plan_not_a_cached_one() -> None:
-    from app.ui.pages.alerts import _auto_suspend_in_force
+    from app.logic.insights import auto_suspend_in_force
     # the DBA tightened WH_X to 30 s: the live row decides -> no ALTER that would raise it to 60
     live = pd.DataFrame({"name": ["WH_X"], "auto_suspend": [30]})
-    known, cur = _auto_suspend_in_force(live, "WH_X")
+    known, cur = auto_suspend_in_force(live, "WH_X")
     assert (known, cur) == (True, 30.0)
     plan = remediation.tighten_suspend_plan("WH_X", cur, known)
     assert plan["stmt"] == "" and "already at AUTO_SUSPEND=30s" in plan["message"]
     # a looser live timer still tightens
-    known, cur = _auto_suspend_in_force(pd.DataFrame({"name": ["WH_X"], "auto_suspend": [600]}), "WH_X")
+    known, cur = auto_suspend_in_force(pd.DataFrame({"name": ["WH_X"], "auto_suspend": [600]}), "WH_X")
     assert remediation.tighten_suspend_plan("WH_X", cur, known)["stmt"] == "ALTER WAREHOUSE WH_X SET AUTO_SUSPEND = 60;"
 
 
 def test_like_wildcard_rows_and_failed_reads_are_unknown() -> None:
-    from app.ui.pages.alerts import _auto_suspend_in_force
+    from app.logic.insights import auto_suspend_in_force
     # LIKE 'WH_X' also matches 'WHAX': only the exact (case-insensitive) name counts
     near = pd.DataFrame({"NAME": ["WHAX", "wh_x"], "AUTO_SUSPEND": [600, 45]})
-    assert _auto_suspend_in_force(near, "WH_X") == (True, 45.0)
-    assert _auto_suspend_in_force(pd.DataFrame({"name": ["WHAX"], "auto_suspend": [600]}), "WH_X") == (False, None)
-    assert _auto_suspend_in_force(None, "WH_X") == (False, None)                       # the read failed
-    assert _auto_suspend_in_force(pd.DataFrame(), "WH_X") == (False, None)
+    assert auto_suspend_in_force(near, "WH_X") == (True, 45.0)
+    assert auto_suspend_in_force(pd.DataFrame({"name": ["WHAX"], "auto_suspend": [600]}), "WH_X") == (False, None)
+    assert auto_suspend_in_force(None, "WH_X") == (False, None)                       # the read failed
+    assert auto_suspend_in_force(pd.DataFrame(), "WH_X") == (False, None)
     # R1-071: a NULL on a LISTED row is the known never-suspend setting (0), not an unknown value
-    assert _auto_suspend_in_force(pd.DataFrame({"name": ["WH_X"], "auto_suspend": [None]}), "WH_X") == (True, 0.0)
-    assert _auto_suspend_in_force(pd.DataFrame({"name": ["WH_X"], "auto_suspend": ["?"]}), "WH_X") == (False, None)
-    assert _auto_suspend_in_force(pd.DataFrame({"name": ["WH_X"]}), "WH_X") == (False, None)
+    assert auto_suspend_in_force(pd.DataFrame({"name": ["WH_X"], "auto_suspend": [None]}), "WH_X") == (True, 0.0)
+    assert auto_suspend_in_force(pd.DataFrame({"name": ["WH_X"], "auto_suspend": ["?"]}), "WH_X") == (False, None)
+    assert auto_suspend_in_force(pd.DataFrame({"name": ["WH_X"]}), "WH_X") == (False, None)
     # unknown -> the guard generates nothing executable
     assert remediation.tighten_suspend_plan("WH_X", None, False)["stmt"] == ""
 

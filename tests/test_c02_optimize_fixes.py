@@ -20,6 +20,9 @@ paths the fixes must leave unchanged:
   R1-148  the storage-growth tile names the window the SQL serves (R1-048) and its totals are uncapped;
   R1-170  (twin, fix-up) Remediation's tighten guard, estimate and autobook decision, and the resize lever's
           current size, read ONE warehouse's SHOW row on the live tier, never the 4 h 'jump_wh' cache;
+          (v4.606 integration, fails on 8c0eac76) that read is the alert drawer's builder
+          (recheck_sql.warehouse_settings_sql) through ONE parser (insights.show_warehouse_settings), so a listed
+          NULL timer is the never-suspend 0 here too (R1-071), and the resize receipt names only what was booked;
   R1-044  (fix-up) a long legal FQN (3 x 255 characters) keeps its whole match key;
   R1-017  (sibling, fix-up) a failed experiments read is named on the proven-fix transfer panel.
 
@@ -763,25 +766,70 @@ def test_a_live_never_suspend_timer_is_booked_by_the_app(monkeypatch):
     assert len(booked) == 1 and "'AUTO_SUSPEND', 'WH_X'" in booked[0]
 
 
-def test_exact_show_row_and_auto_suspend_parse():
-    from app.ui.pages.cost_parts.optimize import _auto_suspend_in_force, _exact_show_row
+@_SKIP
+def test_a_live_null_timer_is_never_suspend_and_gets_the_enable_a_timer_alter(monkeypatch):
+    """R1-071 on the shared parser: SHOW lists WH_X with a NULL auto_suspend (it never suspends). Pre-merge the
+    Remediation guard's own parser read that NULL as unknown -- a false 'could not be verified' and no ALTER --
+    while the alert drawer and Optimize ▸ Idle read it as the known never-suspend 0. It is that 0 here too: the
+    timer is enabled, and since the scan never books enabling a timer, the app books the ESTIMATED row."""
+    executed: list[str] = []
+    at = _tighten_page(monkeypatch, cached=600, live=pd.DataFrame({"name": ["WH_X"], "auto_suspend": [None]}),
+                       executed=executed, seen=[])
+    assert "could not be verified" not in " ".join(str(w.value) for w in at.warning)
+    assert "ALTER WAREHOUSE WH_X SET AUTO_SUSPEND = 60;" in "\n".join(str(c.value) for c in at.code)
+    _execute_tighten(at)
+    assert executed[0] == "ALTER WAREHOUSE WH_X SET AUTO_SUSPEND = 60;"
+    booked = [s for s in executed if s.startswith("INSERT INTO DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER")]
+    assert len(booked) == 1 and "'AUTO_SUSPEND', 'WH_X'" in booked[0]
 
-    near = pd.DataFrame({"NAME": ["WHAX", "wh_x"], "AUTO_SUSPEND": [600, 45]})
-    assert _auto_suspend_in_force(_exact_show_row(near, "WH_X")) == (True, 45.0)
-    assert _exact_show_row(pd.DataFrame({"name": ["WHAX"], "auto_suspend": [600]}), "WH_X") is None
-    assert _exact_show_row(None, "WH_X") is None and _exact_show_row(pd.DataFrame(), "WH_X") is None
-    assert _exact_show_row(pd.DataFrame({"auto_suspend": [600]}), "WH_X") is None
-    assert _auto_suspend_in_force(None) == (False, None)
-    nulls = pd.DataFrame({"name": ["WH_X"], "auto_suspend": [None]})
-    assert _auto_suspend_in_force(_exact_show_row(nulls, "WH_X")) == (False, None)
-    assert _auto_suspend_in_force(_exact_show_row(pd.DataFrame({"name": ["WH_X"]}), "WH_X")) == (False, None)
+
+def test_show_warehouse_settings_parse():
+    """The ONE parser of a live one-warehouse SHOW read (insights.show_warehouse_settings), shared with the
+    alert drawer: the exact-name row only, case-insensitive; a listed NULL timer is the known never-suspend 0."""
+    from app.logic.insights import auto_suspend_in_force, show_warehouse_settings
+
+    near = pd.DataFrame({"NAME": ["WHAX", "wh_x"], "AUTO_SUSPEND": [600, 45], "SIZE": ["Large", "Medium"]})
+    got = show_warehouse_settings(near, "WH_X")
+    assert (got.listed, got.auto_suspend, got.auto_suspend_known, got.size) == (True, 45.0, True, "Medium")
+    assert auto_suspend_in_force(near, "WH_X") == (True, 45.0)
+    for df in (pd.DataFrame({"name": ["WHAX"], "auto_suspend": [600], "size": ["Large"]}), None, pd.DataFrame(),
+               pd.DataFrame({"auto_suspend": [600]})):
+        got = show_warehouse_settings(df, "WH_X")
+        assert (got.listed, got.auto_suspend, got.auto_suspend_known, got.size) == (False, None, False, "")
+        assert auto_suspend_in_force(df, "WH_X") == (False, None)
+    nulls = pd.DataFrame({"name": ["WH_X"], "auto_suspend": [None], "size": [None]})
+    assert auto_suspend_in_force(nulls, "WH_X") == (True, 0.0)              # R1-071: never suspends
+    assert show_warehouse_settings(nulls, "WH_X").size == ""                # a NULL size is unknown, never 'None'
+    bare = pd.DataFrame({"name": ["WH_X"]})                                 # SHOW without either column
+    assert auto_suspend_in_force(bare, "WH_X") == (False, None) and show_warehouse_settings(bare, "WH_X").size == ""
+    assert auto_suspend_in_force(pd.DataFrame({"name": ["WH_X"], "auto_suspend": ["?"]}), "WH_X") == (False, None)
 
 
-def test_warehouse_settings_live_builder_is_one_validated_warehouse():
-    assert insights_sql.warehouse_settings_live_sql("WH_ALFA_BI_PRD") == "SHOW WAREHOUSES LIKE 'WH_ALFA_BI_PRD'"
-    assert insights_sql.warehouse_settings_live_sql(" wh_x ") == "SHOW WAREHOUSES LIKE 'wh_x'"
+def test_the_shared_live_settings_builder_is_one_validated_warehouse():
+    from app.data import recheck_sql
+
+    assert recheck_sql.warehouse_settings_sql("WH_ALFA_BI_PRD") == "SHOW WAREHOUSES LIKE 'WH_ALFA_BI_PRD'"
+    assert recheck_sql.warehouse_settings_sql(" wh_x ") == "SHOW WAREHOUSES LIKE 'wh_x'"
     for bad in ("", "WH; DROP TABLE X", "WH'X", None):
-        assert insights_sql.warehouse_settings_live_sql(bad) is None  # type: ignore[arg-type]
+        assert recheck_sql.warehouse_settings_sql(bad) is None  # type: ignore[arg-type]
+
+
+def test_one_builder_and_one_parser_serve_every_live_settings_read():
+    """v4.606 integration: c02 (Optimize) and c03 (Alerts) each added a one-warehouse SHOW builder and an
+    exact-name parser. Folded to ONE of each so the two tighten guards (and the resize lever) cannot drift --
+    the copies had already diverged on a listed NULL timer (R1-071)."""
+    from tests._source import read
+
+    opt = read("app/ui/pages/cost_parts/optimize.py")
+    al = read("app/ui/pages/alerts.py")
+    assert not hasattr(insights_sql, "warehouse_settings_live_sql")
+    for src in (opt, al):
+        assert "recheck_sql.warehouse_settings_sql(" in src
+        assert "def _exact_show_row(" not in src and "def _auto_suspend_in_force(" not in src
+    helper = opt.split("def _live_warehouse_settings(", 1)[1].split("\ndef ", 1)[0]
+    assert "return show_warehouse_settings(res.df if res.ok else None, warehouse)" in helper
+    assert 'tier="live"' in helper and "max_rows=0" in helper and "probe=True" in helper
+    assert "auto_suspend_in_force(" in al
 
 
 @_SKIP
@@ -829,6 +877,7 @@ def test_a_failed_live_size_read_projects_and_books_no_resize_saving(monkeypatch
 
     monkeypatch.setattr(opt, "run", _run)
     writes = _recording_writes(monkeypatch)
+    receipts = _recording_receipts(monkeypatch)
     _pick(at).select("SMALL").run()
     assert not at.exception
     _code, text = _pane(at)
@@ -841,6 +890,53 @@ def test_a_failed_live_size_read_projects_and_books_no_resize_saving(monkeypatch
     logged = [w for w in writes if "REMEDIATION_LOG" in w]
     assert len(logged) == 1 and "WAREHOUSE_SIZE = ''SMALL'';', 0.0, 'EXECUTED'" in logged[0]   # est 0
     assert not any("SAVINGS_LEDGER" in w for w in writes)
+    # c02 recheck: the receipt follows the (absent) ledger row -- pre-fix it said a saving was booked
+    assert receipts == [(True, "Resized WH_LOW to SMALL; no saving was booked: the current size could not be "
+                               "verified.")]
+
+
+def _recording_receipts(monkeypatch) -> list[tuple[bool, str]]:
+    """Every notify() receipt the Cost ▸ Optimize page raises, as (ok, message)."""
+    import app.ui.pages.cost_parts.optimize as opt
+
+    receipts: list[tuple[bool, str]] = []
+    monkeypatch.setattr(opt, "notify", lambda ok, msg: receipts.append((ok, msg)))
+    return receipts
+
+
+@_SKIP
+@pytest.mark.parametrize(("live_size", "pick", "receipt", "ledger_rows"), [
+    # a downsize from a size the change scan ranks: the scan books it, the app does not
+    ("Large", "SMALL", "the daily change scan books and settles the measured saving.", 0),
+    # an UPSIZE from a ranked size: the scan books only a downsize (V153), so no saving is promised
+    ("Medium", "LARGE", "no saving was booked (not a downsize from the current size).", 0),
+    # a downsize from a size the scan cannot rank (5X-Large): the app books the ESTIMATED row, and says so
+    ("5X-Large", "XXLARGE", "booked an estimated saving — verify it on the Savings ledger.", 1),
+])
+def test_the_resize_receipt_says_only_what_was_booked(monkeypatch, live_size, pick, receipt, ledger_rows):
+    from test_cluster_cap_shaped import _page, _pick, _recording_writes
+
+    import app.ui.pages.cost_parts.optimize as opt
+
+    at, _seen = _page(monkeypatch, check=True, select="WH_LOW", size=live_size)
+    cached_run = opt.run
+
+    def _run(*args, **kwargs):
+        sql = str(args[0] if args else kwargs.get("sql", ""))
+        if sql.startswith("SHOW WAREHOUSES LIKE"):
+            return _ok(pd.DataFrame({"name": ["WH_LOW"], "size": [live_size], "auto_suspend": [300]}))
+        return cached_run(*args, **kwargs)
+
+    monkeypatch.setattr(opt, "run", _run)
+    writes = _recording_writes(monkeypatch)
+    receipts = _recording_receipts(monkeypatch)
+    _pick(at).select(pick).run()
+    at.text_input(key="sizing_confirm").input("WH_LOW").run()
+    at.button(key="sizing_btn").click().run()
+    assert not at.exception
+    assert f"ALTER WAREHOUSE WH_LOW SET WAREHOUSE_SIZE = '{pick}';" in writes
+    assert sum("SAVINGS_LEDGER" in w for w in writes) == ledger_rows
+    assert receipts == [(True, f"Resized WH_LOW to {pick}; {receipt}")]
 
 
 # ---- R1-017 (sibling): a failed experiments read is named on the proven-fix transfer panel ------------------
