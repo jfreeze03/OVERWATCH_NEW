@@ -6,6 +6,7 @@ pre-fix code at 04fd374e:
 
   R1-211  delta_css painted a NULL (NaN) delta cell green/red.
   R1-213  run_mart_first stamped a calendar-bounded live read as 90 days (Current year ~3x high).
+  R1-214  confirm_gate returned a click from a run whose typed text no longer matched.
 """
 
 from __future__ import annotations
@@ -130,3 +131,86 @@ def test_idle_and_sizing_call_sites_pass_their_bounds():
         assert lines and all("days=days, bounds=bounds," in ln for ln in lines), key
     ops = _src("app/ui/pages/operations.py")
     assert 'key=f"ops_sizing_{company}_{days}{_lm}", days=days, bounds=bounds,' in ops
+
+
+# ---------------------------------------------------------------------------
+# R1-214: confirm_gate re-checks the typed text on the click's own run
+# ---------------------------------------------------------------------------
+
+class _GateSt:
+    """Just enough of ``st`` for confirm_gate: the typed text, the click, and any warning."""
+
+    def __init__(self, typed: str, clicked: bool):
+        self.typed, self.clicked = typed, clicked
+        self.disabled: bool | None = None
+        self.warnings: list[str] = []
+
+    def text_input(self, *_a, **_k):
+        return self.typed
+
+    def button(self, *_a, disabled=False, **_k):
+        self.disabled = disabled
+        return self.clicked          # Streamlit hands back the trigger even when rendered disabled
+
+    def warning(self, msg, *_a, **_k):
+        self.warnings.append(str(msg))
+
+
+@pytest.mark.parametrize(("typed", "expected", "object_name", "enabled"), [
+    ("WH_A", "WH_B", True, True),        # target changed under a still-typed old name
+    ("WH_X", "WH_A", True, True),        # typed text edited, then clicked
+    ("cancel", "CANCEL", False, True),   # an action verb stays exact-case
+    ("WH_A", "WH_A", True, False),       # matched, but the entitlement gate is closed
+])
+def test_confirm_gate_never_fires_a_click_the_gate_did_not_authorize(monkeypatch, typed, expected,
+                                                                      object_name, enabled):
+    from app.ui import components
+    fake = _GateSt(typed, clicked=True)
+    monkeypatch.setattr(components, "st", fake)
+    assert components.confirm_gate(expected, "Execute", key="remed", object_name=object_name,
+                                   enabled=enabled) is False
+    assert fake.disabled is True
+    assert len(fake.warnings) == 1 and fake.warnings[0].startswith("Nothing ran")   # never a silent drop
+
+
+def test_confirm_gate_fires_on_a_matching_click_and_stays_quiet_without_one(monkeypatch):
+    from app.ui import components
+    fake = _GateSt("wh_alfa_admin", clicked=True)
+    monkeypatch.setattr(components, "st", fake)
+    assert components.confirm_gate("WH_ALFA_ADMIN", "Execute", key="k", object_name=True) is True
+    assert fake.warnings == []
+    idle = _GateSt("WH_X", clicked=False)
+    monkeypatch.setattr(components, "st", idle)
+    assert components.confirm_gate("WH_A", "Execute", key="k", object_name=True) is False
+    assert idle.warnings == []                    # no click -> no receipt
+
+
+def _remed_gate_script():
+    import streamlit as st
+
+    from app.ui.components import confirm_gate
+    wh = st.selectbox("Warehouse", ["WH_A", "WH_B"], key="remed_wh")
+    if confirm_gate(wh, "Execute", key="remed", object_name=True):
+        st.session_state["_p606_fired"] = [*st.session_state.get("_p606_fired", []), wh]
+
+
+def test_confirm_gate_apptest_target_switch_and_click_in_one_rerun_runs_nothing():
+    testing = pytest.importorskip("streamlit.testing.v1")
+    at = testing.AppTest.from_function(_remed_gate_script, default_timeout=15)
+    at.run()
+    at.text_input(key="remed_confirm").input("WH_A")
+    at.run()
+    assert at.button(key="remed_btn").disabled is False         # WH_A typed: Execute enabled
+    # the operator switches the target and clicks the still-enabled Execute before the redraw
+    at.selectbox(key="remed_wh").select("WH_B")
+    at.button(key="remed_btn").click()
+    at.run()
+    assert not at.exception
+    assert "_p606_fired" not in at.session_state                # nothing ran against WH_B
+    assert any("Nothing ran" in str(w.value) for w in at.warning)
+    # control: typing the new target and clicking runs it exactly once
+    at.text_input(key="remed_confirm").input("WH_B")
+    at.run()
+    at.button(key="remed_btn").click()
+    at.run()
+    assert at.session_state["_p606_fired"] == ["WH_B"]

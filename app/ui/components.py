@@ -1528,8 +1528,20 @@ def confirm_gate(expected: str, action_label: str, *, key: str, prompt: str = ""
     typed = st.text_input(prompt or f"Type {expected} to confirm", key=f"{key}_confirm")
     match = (str(typed).strip().casefold() == str(expected).strip().casefold()) if object_name \
         else (str(typed).strip() == str(expected))
-    return st.button(action_label, key=f"{key}_btn",
-                     disabled=not (match and enabled), **button_kwargs)
+    clicked = st.button(action_label, key=f"{key}_btn",
+                        disabled=not (match and enabled), **button_kwargs)
+    # R1-214: Streamlit returns a button's trigger value even on a run that renders it
+    # DISABLED — the click was sent from the previous (enabled) render while a rerun was in
+    # flight: the operator picked another warehouse, or edited the typed name, and clicked
+    # Execute before the redraw. The fixed ``{key}_confirm`` keeps the old typed name, so the
+    # raw click fired the write against a target nobody typed. Re-check here, and say why the
+    # click did nothing (house law 11: a swallowed click is never silent).
+    if clicked and not (match and enabled):
+        st.warning(
+            (f"Nothing ran: the typed confirmation does not match {expected}. "
+             "Type it again and click once more.") if not match
+            else "Nothing ran: this action is not available right now.")
+    return bool(clicked) and match and enabled
 
 
 def empty_state(kind: str, message: str, *, hint: str = "", detail: str = "",
