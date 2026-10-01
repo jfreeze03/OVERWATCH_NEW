@@ -131,8 +131,13 @@ FROM SNOWFLAKE.ACCOUNT_USAGE.SERVERLESS_TASK_HISTORY
 WHERE {where}
 GROUP BY 1, 2, 3, 4
 HAVING SUM(COALESCE(CREDITS_USED, 0)) > 0
-ORDER BY DAY, SERVERLESS_CREDITS DESC
-LIMIT 2000
+-- R1-062: NEWEST day first, and no builder LIMIT below run()'s cap. The old
+-- 'ORDER BY DAY ... LIMIT 2000' kept the OLDEST days, and a trailing LIMIT under the
+-- cap is kept verbatim by _with_row_cap, so result.truncated could never fire: past
+-- ~22 serverless tasks/day over 90d the table silently lost its most recent days.
+-- Same treatment as graph_daily_costs above.
+ORDER BY DAY DESC, SERVERLESS_CREDITS DESC
+LIMIT 50000
 """
 
 

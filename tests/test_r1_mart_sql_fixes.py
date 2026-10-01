@@ -1,0 +1,457 @@
+"""PR-1 (v4.606.0) c10-mart-sql fixes — the confirmed R1 findings on the mart / ETL / DQ / chatter
+SQL builders. Each test fails on the pre-fix builder (04fd374e) and pins the corrected behaviour.
+
+Where the defect is an EXECUTED-SQL outcome (a lossy top-N, a double-counted route-day, a stale
+'still breaking' flag, an account-wide coverage remainder, a substring actor match), the real
+builder SQL runs in an in-memory sqlite with a minimal dialect shim — the logic under test is
+never rewritten, only the Snowflake spellings sqlite lacks.
+"""
+
+from __future__ import annotations
+
+import inspect
+import re
+import sqlite3
+from datetime import date, datetime, timedelta
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+from app.config import DEFAULT_MAX_ROWS
+from app.data import (
+    change_impact_sql,
+    chargeback_sql,
+    chatter_sql,
+    dq_sql,
+    etl_control_sql,
+    etl_sql,
+    graph_sql,
+    mart27_sql,
+    mart_sql,
+)
+from app.data.common import account_today_sql
+from app.logic.date_windows import CalendarDayOffset
+from app.logic.insights import recon_recurrence
+
+sqlglot = pytest.importorskip("sqlglot")
+
+_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _read(rel: str) -> str:
+    return (_ROOT / rel).read_text(encoding="utf-8")
+
+
+def _strip_db(sql: str) -> str:
+    return re.sub(r"\bDBA_MAINT_DB\.OVERWATCH\.", "", sql)
+
+
+# ---------------------------------------------------------------------------
+# R1-014 — company-scoped Heaviest queries off a mart that keeps a GLOBAL per-hour top-50
+# ---------------------------------------------------------------------------
+
+_SEPT = (date(2026, 9, 1), date(2026, 10, 1))
+
+
+def _ops_diag_db(rows: list[tuple[str, str, str, float]]) -> sqlite3.Connection:
+    """MART_OPS_DIAG_HOURLY holding what SP_LOAD_OPS_DIAG (V062) stored: (HOUR_TS, COMPANY, QUERY_ID,
+    ELAPSED_SEC) TOP_ELAPSED rows, already cut to the hour's top-50 across ALL companies."""
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE MART_OPS_DIAG_HOURLY (HOUR_TS TEXT, KIND TEXT, COMPANY TEXT, QUERY_ID TEXT, "
+                "START_TIME TEXT, USER_NAME TEXT, WAREHOUSE_NAME TEXT, WAREHOUSE_SIZE TEXT, "
+                "DATABASE_NAME TEXT, QUERY_TYPE TEXT, EXECUTION_STATUS TEXT, ELAPSED_SEC REAL, "
+                "QUEUED_SEC REAL, SPILL_REMOTE_GB REAL, QUERY_PREVIEW TEXT)")
+    con.executemany(
+        "INSERT INTO MART_OPS_DIAG_HOURLY VALUES (?, 'TOP_ELAPSED', ?, ?, ?, 'U', 'WH', 'S', 'DB', "
+        "'SELECT', 'SUCCESS', ?, 0, 0, 'q')",
+        [(h, c, qid, h, e) for h, c, qid, e in rows])
+    # an older FAIL_FAMILY row (the mart predates the window) opens the reader's own coverage gate
+    con.execute("INSERT INTO MART_OPS_DIAG_HOURLY (HOUR_TS, KIND, COMPANY) "
+                "VALUES ('2026-08-31 00:00:00', 'FAIL_FAMILY', 'ALFA')")
+    return con
+
+
+def _top(con: sqlite3.Connection, company: str) -> pd.DataFrame:
+    sql = mart27_sql.ops_diag_top_queries(30, company, 50, bounds=_SEPT)
+    return pd.read_sql_query(_strip_db(sql), con)
+
+
+def test_r1_014_company_read_abstains_when_a_cut_hour_could_hide_its_heaviest_query():
+    # Hour H: 50 Trexis queries of 30 min filled the loader's per-hour cut, so ALFA's 25-min query
+    # in that hour was never stored. ALFA's other 49 stored queries are 5 min each.
+    h = "2026-09-10 03:00:00"
+    rows = [(h, "Trexis", f"T{i}", 1800.0) for i in range(50)]
+    rows += [(f"2026-09-{11 + i // 3:02d} {i % 3:02d}:00:00", "ALFA", f"A{i}", 300.0) for i in range(49)]
+    con = _ops_diag_db(rows)
+    # pre-fix this returned the 49 lighter ALFA rows as the ALFA top-50 (non-empty, so run_mart_first
+    # never fell back). Now the exactness certificate fails -> ZERO rows -> the live filtered top-N.
+    assert _top(con, "ALFA").empty
+    # Company=ALL is exact by construction (any global top-50 member is in its hour's top-50)
+    assert len(_top(con, "ALL")) == 50
+
+
+def test_r1_014_company_read_serves_when_the_certificate_proves_exactness():
+    # The cut hour's lightest kept row (100 s) is below ALFA's 50th-heaviest stored (300 s), so no
+    # unstored query of that hour could have ranked: the mart answer is exact and is served.
+    h = "2026-09-10 03:00:00"
+    rows = [(h, "Trexis", f"T{i}", 100.0) for i in range(50)]
+    rows += [(f"2026-09-{11 + i // 3:02d} {i % 3:02d}:00:00", "ALFA", f"A{i}", 300.0 + i) for i in range(60)]
+    df = _top(_ops_diag_db(rows), "ALFA")
+    assert len(df) == 50 and df["ELAPSED_SEC"].min() == 310.0
+
+
+def test_r1_014_all_scope_sql_is_unchanged_and_company_sql_parses():
+    all_sql = mart27_sql.ops_diag_top_queries(7, "ALL", 50)
+    assert "cut_hours" not in all_sql and "NOT EXISTS" not in all_sql    # ALL keeps the exact old shape
+    comp = mart27_sql.ops_diag_top_queries(7, "ALFA", 50)
+    assert "cut_hours AS (" in comp and f"HAVING COUNT(*) >= {mart27_sql.OPS_DIAG_HOURLY_TOP_N}" in comp
+    sqlglot.parse_one(comp, dialect="snowflake")
+    # a limit past the loader's per-hour 50 is not exact even for ALL -> certified too
+    assert "cut_hours" in mart27_sql.ops_diag_top_queries(7, "ALL", 100)
+
+
+# ---------------------------------------------------------------------------
+# R1-015 / R1-018 — served-window class: mart readers honor the long Window
+# ---------------------------------------------------------------------------
+
+def test_r1_015_pattern_cost_honors_the_long_window():
+    sql = mart27_sql.pattern_cost(365, "ALL")
+    assert "DATEADD('day', -365" in sql
+    assert "-90," not in sql
+    assert "bounded_days(days, MAX_MART_WINDOW_DAYS)" in inspect.getsource(mart27_sql.pattern_cost)
+    # the run-rate floor still scales with the span read (365d -> 61 runs)
+    assert "SUM(p.RUNS) >= 61" in sql
+
+
+def test_r1_018_warehouse_pressure_mart_leg_honors_the_long_window():
+    sql = mart_sql.fact_warehouse_pressure(365, "ALL")
+    assert "HOUR_TS >= DATEADD('day', -365, CURRENT_DATE())" in sql
+    assert "-90," not in sql
+    # the contention panel asks run_mart_first for the served window and discloses a live 90d serve
+    ops = _read("app/ui/pages/operations.py")
+    body = ops.split("def _contention_tab(", 1)[1].split("\ndef ", 1)[0]
+    assert 'mart_tier="hourly", live_tier="recent", days=days)' in body
+    assert "served_days(res, days)" in body and "live fallback " in body
+
+
+def test_r1_018_ops_diag_keeps_its_disclosed_90_day_cap():
+    # Deliberate: raising it would trip the coverage gate into the (also 90-capped) live scan.
+    assert mart27_sql.OPS_DIAG_MAX_DAYS == 90
+    for sql in (mart27_sql.ops_diag_top_queries(365), mart27_sql.ops_diag_failures(365)):
+        assert "d.HOUR_TS >= DATEADD('day', -90, CURRENT_DATE())" in sql
+    ops = _read("app/ui/pages/operations.py")
+    assert "Heaviest queries and Failures by error read the" in ops and "last 90 days." in ops
+
+
+# ---------------------------------------------------------------------------
+# R1-019 — delivery SLO route failures dedupe on the ROUTE id, not the CONTEXT text
+# ---------------------------------------------------------------------------
+
+def test_r1_019_route_failures_count_one_route_day_once():
+    sql = mart_sql.delivery_slo_summary(30)
+    m = re.search(r"\(SELECT COUNT\(DISTINCT .*?\) AS ROUTE_FAILURES", sql, re.S)
+    assert m, "ROUTE_FAILURES subquery not found"
+    expr = _strip_db(m.group(0)[: -len(" AS ROUTE_FAILURES")])
+    expr = expr.replace("DATEADD('day', -30, CURRENT_TIMESTAMP())", "'2026-09-01 00:00:00'")
+    con = sqlite3.connect(":memory:")
+    con.create_function("SPLIT_PART", 3, lambda s, d, n: (str(s).split(d) + [""] * n)[n - 1])
+    con.create_function("DATE_TRUNC", 2, lambda unit, ts: str(ts)[:10])
+    con.create_function("TO_VARCHAR", 1, str)
+    con.execute("CREATE TABLE APP_ERROR_LOG (PAGE TEXT, ERROR_TYPE TEXT, CONTEXT TEXT, LOGGED_AT TEXT)")
+    # one route (3) broken all day: the hourly drain AND the V164 escalation re-post both fail
+    con.executemany("INSERT INTO APP_ERROR_LOG VALUES ('NotifyWebhook', 'route_send_failed', ?, ?)", [
+        ("route 3 integration TEAMS_A - will retry next run; other routes unaffected", "2026-09-29 08:00:00"),
+        ("route 3 integration TEAMS_A - will retry next run; other routes unaffected", "2026-09-29 09:00:00"),
+        ("route 3 integration TEAMS_A - escalation re-post; the email leg is unaffected", "2026-09-29 09:00:00"),
+        ("route 4 integration TEAMS_B - will retry next run; other routes unaffected", "2026-09-29 09:00:00"),
+        ("route 3 integration TEAMS_A - will retry next run; other routes unaffected", "2026-09-30 09:00:00"),
+    ])
+    (n,) = con.execute(f"SELECT {expr}").fetchone()
+    assert n == 3          # (route 3, 09-29), (route 4, 09-29), (route 3, 09-30) — was 4
+
+
+# ---------------------------------------------------------------------------
+# R1-020 — role_share mart twin drops the 'NONE' pseudo-warehouse like the live twin
+# ---------------------------------------------------------------------------
+
+def test_r1_020_role_share_excludes_the_none_warehouse_before_the_share():
+    sql = mart27_sql.role_share(30, "ALL")
+    scoped = sql.split("WITH scoped AS (", 1)[1].split("), shared AS", 1)[0]
+    assert "UPPER(WAREHOUSE_NAME) <> 'NONE'" in scoped     # before RATIO_TO_REPORT and the LIMIT
+    assert "WAREHOUSE_NAME IS NOT NULL" in chargeback_sql.role_share_within_warehouse(30, "ALL")
+    # the other FACT_QUERY_ROLE_HOURLY reader keeps warehouse-less role use (it is still role use)
+    assert "'NONE'" not in mart27_sql.unused_roles_via_fact(90)
+
+
+# ---------------------------------------------------------------------------
+# R1-041 — the DQ row-volume series must not be cut by run()'s 5,000-row default
+# ---------------------------------------------------------------------------
+
+def test_r1_041_dq_row_volume_cap_fits_the_whole_bounded_series():
+    assert dq_sql.DQ_MAX_ROWS >= dq_sql.DQ_MAX_TABLES * dq_sql.DQ_WINDOW_DAYS
+    assert dq_sql.DQ_MAX_ROWS > DEFAULT_MAX_ROWS
+    sql = dq_sql.product_row_volume(dq_sql.DQ_WINDOW_DAYS)
+    assert f"QUALIFY DENSE_RANK() OVER (ORDER BY m.FQN) <= {dq_sql.DQ_MAX_TABLES}" in sql
+    ops = _read("app/ui/pages/operations.py")
+    sites = [m.start() for m in re.finditer(r"dq_sql\.product_row_volume\(28\)", ops)]
+    assert len(sites) == 2
+    for at in sites:                                   # the run() fallback AND the run_batch spec
+        assert "dq_sql.DQ_MAX_ROWS" in ops[at:at + 260], ops[at:at + 260]
+
+
+def test_r1_041_run_keeps_every_row_of_a_200_table_series(monkeypatch):
+    from app.core import query as q
+    monkeypatch.setattr(q, "apply_query_tag", lambda *a, **k: None)
+    monkeypatch.setattr(q, "apply_statement_timeout", lambda *a, **k: None)
+    monkeypatch.setattr(q, "record_error", lambda *a, **k: None)
+    monkeypatch.setattr(q, "_telemetry", lambda *a, **k: None)
+    full = pd.DataFrame({"FQN": [f"DB.S.T{t:03d}" for t in range(200) for _ in range(28)],
+                         "DAY": [d for _ in range(200) for d in range(28)],
+                         "ROWS_ADDED": 10_000})
+
+    def fetch(sql, scope, page):                       # honors the trailing LIMIT run() appends
+        lim = re.search(r"LIMIT (\d+)\s*$", sql)
+        return full.head(int(lim.group(1))) if lim else full
+
+    monkeypatch.setitem(q._FETCHERS, "recent", fetch)
+    sql = dq_sql.product_row_volume(28)
+    capped = q.run(sql, page="T", key="dq", tier="recent")             # the old call: default cap
+    assert capped.truncated and capped.df["FQN"].nunique() < 200
+    res = q.run(sql, page="T", key="dq", tier="recent", max_rows=dq_sql.DQ_MAX_ROWS)
+    assert not res.truncated and len(res.df) == 5600 and res.df["FQN"].nunique() == 200
+
+
+# ---------------------------------------------------------------------------
+# R1-055 — a statement with no SESSIONS row is not a non-self-reporting client
+# ---------------------------------------------------------------------------
+
+def test_r1_055_no_session_record_is_its_own_bucket():
+    assert chatter_sql.NO_SESSION_RECORD == "(no session record)"
+    by_app = chatter_sql.chatter_by_application()
+    assert "COALESCE(s.APPLICATION, '(no session record)') AS APPLICATION" in by_app
+    assert "COALESCE(s.APPLICATION, '(unknown)')" not in by_app
+    fam = chatter_sql.chatter_families_for_application("(no session record)")
+    assert "COALESCE(s.APPLICATION, '(no session record)') = '(no session record)'" in fam
+    # '(unknown)' stays _APP_EXPR's: a session that reports no client program (the KPI's population)
+    assert "'(unknown)')" in by_app.split("sess AS (", 1)[1]
+    ops = _read("app/ui/pages/operations.py")
+    assert "'(no session record)'" in ops
+
+
+# ---------------------------------------------------------------------------
+# R1-057 — recon 'still breaking' is anchored to the calendar, not only the error cohort
+# ---------------------------------------------------------------------------
+
+_NOW = datetime(2026, 9, 30, 10, 0, 0)
+
+
+class _MaxBy:
+    def __init__(self):
+        self.best = None
+
+    def step(self, v, k):
+        if k is not None and (self.best is None or k > self.best[0]):
+            self.best = (k, v)
+
+    def finalize(self):
+        return None if self.best is None else self.best[1]
+
+
+def _recon_db(rows: list[tuple[str, str, str]]) -> sqlite3.Connection:
+    con = sqlite3.connect(":memory:")
+    con.create_aggregate("MAX_BY", 2, _MaxBy)
+    con.create_function("DATEDIFF", 3, lambda u, a, b: (date.fromisoformat(str(b)[:10])
+                                                        - date.fromisoformat(str(a)[:10])).days)
+    con.execute("CREATE TABLE RECON_MTRC_ERROR (MTRC TEXT, FRQCY TEXT, VALUE_TYPE TEXT, "
+                "RECON_MTRC_LAYER TEXT, SOURCE_LAYER TEXT, TARGET_LAYER TEXT, SOURCE_ERROR TEXT, "
+                "TARGET_ERROR TEXT, LOAD_DTTM TEXT)")
+    con.executemany("INSERT INTO RECON_MTRC_ERROR VALUES (?, ?, 'AMT', 'EDW', 'LDW', 'EDW', 's', 't', ?)",
+                    rows)
+    return con
+
+
+def _recon_scan(con: sqlite3.Connection) -> pd.DataFrame:
+    sql = etl_control_sql.recon_recurrence_scan("RECON_MTRC_ERROR", days=0)
+    sql = re.sub(r"DATEADD\('day', -(\d+), CURRENT_TIMESTAMP\(\)\)",
+                 lambda m: f"'{(_NOW - timedelta(days=int(m.group(1)))).isoformat(' ')}'", sql)
+    sql = sql.replace(account_today_sql(), f"'{_NOW.date().isoformat()}'")
+    sql = sql.replace("CAST(LOAD_DTTM AS DATE)", "date(LOAD_DTTM)").replace("LEAST(", "MIN(")
+    assert "CURRENT_TIMESTAMP" not in sql and "::" not in sql
+    return pd.read_sql_query(sql, con)
+
+
+def test_r1_057_a_quiet_cohort_resolves_instead_of_reading_still_breaking():
+    # DAILY metric M_PREM broke Sep 1-3; every recon has passed since (the table logs only failures).
+    con = _recon_db([("M_PREM", "DAILY", f"2026-09-0{d} 02:00:00") for d in (1, 2, 3)]
+                    + [("M_CLM", "DAILY", "2026-09-01 02:00:00")])
+    scan = _recon_scan(con)
+    prem = scan[scan["MTRC"] == "M_PREM"].iloc[0]
+    assert not bool(prem["BROKE_LATEST_CYCLE"]) and int(prem["DAYS_SINCE_LAST_BREAK"]) == 27
+    rec = recon_recurrence(scan)
+    tiers = dict(zip(rec["MTRC"], rec["TIER"], strict=True))
+    assert tiers == {"M_PREM": "RESOLVED", "M_CLM": "RESOLVED"}       # was CHRONIC / High
+
+
+def test_r1_057_a_fresh_break_still_reads_latest_and_unknown_cadence_keeps_the_cohort_rule():
+    con = _recon_db([("M_DAY", "DAILY", "2026-09-28 02:00:00"), ("M_DAY", "DAILY", "2026-09-29 02:00:00"),
+                     ("M_ODD", "AD-HOC", "2026-07-15 02:00:00")])
+    scan = _recon_scan(con).set_index("MTRC")
+    assert bool(scan.loc["M_DAY", "BROKE_LATEST_CYCLE"])               # 1 day ago, within DAILY's 3
+    assert bool(scan.loc["M_ODD", "BROKE_LATEST_CYCLE"])               # no cadence -> cohort-only
+
+
+# ---------------------------------------------------------------------------
+# R1-058 — ETL cost attribution's remainder is the run's warehouses, not the whole account
+# ---------------------------------------------------------------------------
+
+def _cost_db(task_a: str = "SP_A_LOAD") -> sqlite3.Connection:
+    con = sqlite3.connect(":memory:")
+    con.create_function("CONTAINS", 2, lambda s, sub: int(str(sub) in str(s)))
+    con.execute("CREATE TABLE CONTROL_STATUS (WORKFLOW_NAME TEXT, TASK_NAME TEXT, TASK_STATUS TEXT, "
+                "TASK_START_DTTM TEXT, TASK_END_DTTM TEXT, RUN_ID TEXT)")
+    con.executemany("INSERT INTO CONTROL_STATUS VALUES (?, ?, 'SUCCESS', ?, ?, ?)", [
+        ("WF_B", "SP_B_LOAD", "2026-09-30 00:30:00", "2026-09-30 02:30:00", "R_B"),
+        ("WF_A", task_a, "2026-09-30 01:00:00", "2026-09-30 02:00:00", "R_A"),
+    ])
+    con.execute("CREATE TABLE QH (QUERY_ID TEXT, QUERY_TEXT TEXT, START_TIME TEXT)")
+    con.executemany("INSERT INTO QH VALUES (?, ?, ?)", [
+        ("CALL_A", "CALL SP_A_LOAD()", "2026-09-30 01:05:00"),
+        ("CALL_B", "CALL SP_B_LOAD()", "2026-09-30 01:10:00"),   # a concurrent workflow, other WH
+        ("BI_1", "SELECT * FROM SALES", "2026-09-30 01:20:00"),  # BI, other WH
+        ("ADHOC", "SELECT 1 FROM ETL_STAGE", "2026-09-30 01:30:00"),  # ad-hoc on the run's WH
+    ])
+    con.execute("CREATE TABLE QAH (QUERY_ID TEXT, ROOT_QUERY_ID TEXT, WAREHOUSE_NAME TEXT, START_TIME TEXT, "
+                "CREDITS_ATTRIBUTED_COMPUTE REAL, CREDITS_USED_QUERY_ACCELERATION REAL)")
+    con.executemany("INSERT INTO QAH VALUES (?, ?, ?, ?, ?, 0)", [
+        ("CHILD_A", "CALL_A", "WH_ETL", "2026-09-30 01:06:00", 10.0),
+        ("CHILD_B", "CALL_B", "WH_B", "2026-09-30 01:11:00", 30.0),
+        ("BI_1", None, "WH_BI", "2026-09-30 01:20:00", 20.0),
+        ("ADHOC", None, "WH_ETL", "2026-09-30 01:30:00", 5.0),
+    ])
+    return con
+
+
+def _attribute(con: sqlite3.Connection) -> dict[str, float]:
+    sql = etl_control_sql.run_cost_attribution_scan("CONTROL_STATUS", run_id="R_A")
+    sql = (sql.replace("SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY", "QAH")
+              .replace("SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY", "QH")
+              .replace("CURRENT_TIMESTAMP()", "CURRENT_TIMESTAMP"))
+    df = pd.read_sql_query(sql, con)
+    return dict(zip(df["TASK_NAME"], df["CREDITS_ATTRIBUTED"], strict=True))
+
+
+def test_r1_058_unattributed_holds_only_the_runs_warehouses():
+    got = _attribute(_cost_db())
+    # WF_A's own task is fully charged; the remainder is the ad-hoc query on WH_ETL only — not the
+    # concurrent WF_B CALL (WH_B) nor the BI query (WH_BI). Was 55 (coverage 10/65 = 15%).
+    assert got == {"SP_A_LOAD": 10.0, etl_control_sql.UNATTRIBUTED_TASK: 5.0}
+
+
+def test_r1_058_nothing_matched_keeps_the_whole_window_so_zero_coverage_is_honest():
+    got = _attribute(_cost_db(task_a="SP_NEVER_IN_TEXT"))
+    assert got == {etl_control_sql.UNATTRIBUTED_TASK: 65.0}
+
+
+def test_r1_058_panel_no_longer_calls_one_workflow_each_night():
+    ops = _read("app/ui/pages/operations.py")
+    body = ops.split("def _cost_attribution_panel(", 1)[1].split("\ndef ", 1)[0]
+    assert "Each night's measured Snowflake credits" not in body
+    assert "usually \"\n" not in body and "hasn't finished metering it" not in body
+    assert "latest workflow run" in body
+
+
+# ---------------------------------------------------------------------------
+# R1-062 — serverless task days: newest first, and a cut is detectable
+# ---------------------------------------------------------------------------
+
+def test_r1_062_serverless_task_daily_keeps_newest_days_and_flags_truncation():
+    from app.core.query import _with_row_cap
+    sql = graph_sql.serverless_task_daily(90)
+    assert "ORDER BY DAY DESC, SERVERLESS_CREDITS DESC" in sql
+    assert _with_row_cap(sql, DEFAULT_MAX_ROWS) != sql     # the cap+1 canary arms -> truncated can fire
+    caller = _read("app/ui/pages/cost_parts/unit_costs.py")
+    block = caller.split("graph_sql.serverless_task_daily(", 1)[1][:1400]
+    assert "if guard(sls," in block and "result_caption(sls)" in block
+
+
+# ---------------------------------------------------------------------------
+# R1-063 — a calendar day-0 Window is 'today', never an all-time scan
+# ---------------------------------------------------------------------------
+
+def test_r1_063_calendar_day_zero_reads_today_not_all_time():
+    today = f"DATEADD('day', -0, {account_today_sql()})"
+    for sql in (etl_control_sql.workflow_list_scan("DB.S.CS", days=CalendarDayOffset(0)),
+                etl_control_sql.task_status_history_scan("DB.S.CS", days=CalendarDayOffset(0))):
+        assert f"TASK_START_DTTM >= {today}" in sql
+    # a plain 0 is still 'unscoped' (the existing lock), and a mid-period calendar offset anchors on
+    # the period's first day at midnight, not now-minus-N
+    assert "DATEADD" not in etl_control_sql.workflow_list_scan("DB.S.CS", days=0)
+    assert f"DATEADD('day', -5, {account_today_sql()})" in \
+        etl_control_sql.workflow_list_scan("DB.S.CS", days=CalendarDayOffset(5))
+    recon = etl_control_sql.recon_recurrence_scan("DB.S.R", days=CalendarDayOffset(0))
+    assert f"LOAD_DTTM >= {today}" in recon and "-90," not in recon
+    assert etl_control_sql.recon_window_phrase(CalendarDayOffset(0)) == "today"
+    assert etl_control_sql.recon_window_phrase(0) == "in the last 90 days"
+    assert "drift" not in inspect.getdoc(etl_control_sql._window_clause)
+
+
+# ---------------------------------------------------------------------------
+# R1-064 — failed-runs drill elapsed time humanizes (named in milliseconds)
+# ---------------------------------------------------------------------------
+
+def test_r1_064_failed_runs_elapsed_is_an_ms_duration_column():
+    from app.ui.components import _duration_unit_for_column
+    sql = etl_sql.etl_failed_runs_for_pipeline("nightly_load", 30, "ALFA")
+    assert "q.TOTAL_ELAPSED_TIME AS TOTAL_ELAPSED_MS," in sql
+    assert "q.TOTAL_ELAPSED_TIME,\n" not in sql
+    assert _duration_unit_for_column("TOTAL_ELAPSED_MS") == "ms"
+
+
+# ---------------------------------------------------------------------------
+# R1-067 — DEPLOY_ACTORS matches whole list members, never a substring
+# ---------------------------------------------------------------------------
+
+def _change_source(actors: str | None, changed_by: str | None) -> str:
+    sql = change_impact_sql.warehouse_change_registry(90, "ALL")
+    iff = re.search(r"IFF\(w\.CHANGED_BY IS NULL.*?\) AS CHANGE_SOURCE", sql, re.S).group(0)
+    iff = iff[: -len(" AS CHANGE_SOURCE")]
+    iff = re.sub(r"POSITION\((.+?) IN (da\.ACTORS)\)", r"instr(\2, \1)", iff, flags=re.S)
+    sub = re.search(r"CROSS JOIN (\(SELECT .*?\)) da", sql, re.S).group(1)
+    con = sqlite3.connect(":memory:")
+    con.create_function("IFF", 3, lambda c, a, b: a if c else b)
+    con.create_function("REGEXP_REPLACE", 3,
+                        lambda s, pat, rep: re.sub(pat.replace("[[:space:]]", r"\s"), rep, s or ""))
+    con.execute("CREATE TABLE SETTINGS (KEY TEXT, VALUE TEXT)")
+    if actors is not None:
+        con.execute("INSERT INTO SETTINGS VALUES ('DEPLOY_ACTORS', ?)", (actors,))
+    q = f"SELECT {iff} FROM (SELECT ? AS CHANGED_BY) w CROSS JOIN {_strip_db(sub)} da"
+    return con.execute(q, (changed_by,)).fetchone()[0]
+
+
+def test_r1_067_deploy_actor_match_is_whole_member():
+    assert _change_source("SVC_FLYWAY_PRD", "SVC_FLYWAY") == "MANUAL"          # prefix: was MANAGED
+    assert _change_source("FLYWAY_SVC,TERRAFORM_SVC", "SVC") == "MANUAL"       # substring: was MANAGED
+    assert _change_source("SVC_FLYWAY_PRD", "svc_flyway_prd") == "MANAGED"
+    assert _change_source("FLYWAY_SVC, TERRAFORM_SVC\n", "terraform_svc") == "MANAGED"  # spaced list
+    assert _change_source("", "JOE") == "MANUAL"                               # empty setting
+    assert _change_source(None, "JOE") == "MANUAL"                             # no setting row
+    assert _change_source("SVC_FLYWAY_PRD", None) == "UNKNOWN"
+
+
+# ---------------------------------------------------------------------------
+# R1-230 — the ML forecast reader keeps TODAY's row for the #24 today-remainder term
+# ---------------------------------------------------------------------------
+
+def test_r1_230_ml_forecast_reader_keeps_today():
+    sql = mart_sql.ml_forecast_daily()
+    assert f"WHERE TS::DATE >= {account_today_sql()}" in sql
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE FORECAST_ML_DAILY (TS TEXT, FORECAST_CREDITS REAL, LOWER_BOUND REAL, "
+                "UPPER_BOUND REAL)")
+    con.executemany("INSERT INTO FORECAST_ML_DAILY VALUES (?, 100, 80, 120)",
+                    [((date(2026, 9, 13) + timedelta(days=i)).isoformat(),) for i in range(45)])
+    run_sql = (_strip_db(sql).replace("TS::DATE", "date(TS)")
+               .replace(account_today_sql(), "'2026-09-14'"))
+    days = [r[0] for r in con.execute(run_sql)]
+    assert days[0] == "2026-09-14"          # today's row is present for the remainder proration

@@ -652,12 +652,12 @@ def _graphs_tab(company: str, days: int, rate: float, database: str = "",
               page=_PAGE, key=f"sls_costs_{company}_{days}_{database}_{schema_contains}{_lm}",
               tier="historical", source="SERVERLESS_TASK_HISTORY")
     st.markdown("**Serverless tasks (billed separately, task-day grain)**")
-    if not sls.ok:
-        st.caption("SERVERLESS_TASK_HISTORY is not accessible on this account/role.")
-    elif sls.empty:
-        st.caption("No serverless task credits in this scope/window.")
-    else:
+    # R1-062: guard() routes the empty / unavailable states through empty_state and shows the
+    # truncation line when run()'s row cap cuts the (now newest-first) task-day rows.
+    if guard(sls, "No serverless task credits in this scope/window.",
+             setup_hint="SERVERLESS_TASK_HISTORY may not be accessible on this account/role."):
         sdf = sls.df.copy()
         sdf["USD"] = sdf["SERVERLESS_CREDITS"].map(lambda c: credits_to_usd(c, rate))
         styled_table(sdf, height=220, column_config={
             "USD": st.column_config.NumberColumn("$", format="$%.2f")})
+        result_caption(sls)

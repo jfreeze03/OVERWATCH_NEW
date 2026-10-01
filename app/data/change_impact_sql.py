@@ -156,7 +156,7 @@ SELECT
     WAREHOUSE_NAME, COMPANY, SETTING, OLD_VALUE, NEW_VALUE, CHANGE_SEEN_AT,
     CHANGED_BY,
     IFF(w.CHANGED_BY IS NULL, 'UNKNOWN',
-        IFF(POSITION(UPPER(w.CHANGED_BY) IN da.ACTORS) > 0,
+        IFF(POSITION(',' || UPPER(TRIM(w.CHANGED_BY)) || ',' IN da.ACTORS) > 0,
             'MANAGED', 'MANUAL')) AS CHANGE_SOURCE,
     VERDICT, VERDICT_DETAIL,
     BASELINE_QUERIES, AFTER_QUERIES, AFTER_DAYS,
@@ -169,8 +169,11 @@ SELECT
 FROM {core_object("WAREHOUSE_CHANGE_REGISTRY")} w
 -- uncorrelated by construction (live round 9): the setting resolves once,
 -- POSITION runs per row — no correlated-aggregate subquery for Snowflake
--- to reject. Empty ACTORS means POSITION()=0 -> every human is MANUAL.
-CROSS JOIN (SELECT UPPER(COALESCE(MAX(VALUE), '')) AS ACTORS
+-- to reject. R1-067: DEPLOY_ACTORS is a comma list, so match a WHOLE member —
+-- ',' || actor || ',' inside ',' || list-without-whitespace || ',' — never a
+-- substring ('SVC_FLYWAY' must not read MANAGED off 'SVC_FLYWAY_PRD'). An empty
+-- setting is ',,' -> POSITION()=0 -> every human is MANUAL.
+CROSS JOIN (SELECT ',' || REGEXP_REPLACE(UPPER(COALESCE(MAX(VALUE), '')), '[[:space:]]', '') || ',' AS ACTORS
             FROM DBA_MAINT_DB.OVERWATCH.SETTINGS WHERE KEY = 'DEPLOY_ACTORS') da
 WHERE {where}
 ORDER BY CHANGE_SEEN_AT DESC

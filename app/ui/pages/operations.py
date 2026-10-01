@@ -679,7 +679,10 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             kpi_row([
                 {"label": "Applications", "value": f"{_apps:,}",
                  "help": "Distinct client applications / drivers generating metadata or compile-heavy "
-                         "statements this window (self-reported; unresolved sessions bucket as '(unknown)')."},
+                         "statements this window (self-reported; sessions that report no client program "
+                         "bucket as '(unknown)'; statements whose session has no SESSIONS row in the "
+                         "scanned range — opened more than 7 days before the window, too recent for "
+                         "SESSIONS' ~3h lag, or system-owned — bucket as '(no session record)')."},
                 {"label": "Top driver", "value": _top},
                 {"label": "Unresolved runs", "value": f"{_unknown:,}",
                  "help": "Runs from sessions whose client program did not self-report (many ODBC / "
@@ -1346,8 +1349,9 @@ def _dq_row_volume_panel(preloaded=None) -> None:
         "marks a row scored on an old load. The DQ_BREACH alert, plus null-rate and "
         "schema-drift monitors, are the deferred owner-migration half."
     )
+    # R1-041: lift run()'s 5,000-row cap — the series is (table, day) rows bounded to 600 tables in SQL.
     rv = preloaded or run(dq_sql.product_row_volume(28), page=_PAGE, key="dq_row_volume", tier="recent",
-             source="ACCOUNT_USAGE.TABLE_DML_HISTORY x ENTITY_CATALOG")
+             source="ACCOUNT_USAGE.TABLE_DML_HISTORY x ENTITY_CATALOG", max_rows=dq_sql.DQ_MAX_ROWS)
     if rv.ok and rv.empty:
         empty_state("needs_setup", "No registered-product tables added rows in the window. Register data products in the catalog (Control Room ▸ Entity 360) to monitor their volume here.")
         return
@@ -2104,16 +2108,16 @@ def _recon_recurrence_panel(days: int = 0, *, pf: dict | None = None) -> None:
     if not scan_sql:
         empty_state("needs_setup", "ETL_RECON_ERROR_FQN is not a valid table name.")
         return
-    _win = days if days else etl_control_sql.RECON_RECURRENCE_LOOKBACK_DAYS
+    _win = etl_control_sql.recon_window_phrase(days)   # R1-063: 'today' on a calendar day 0
     res = (pf or {}).get("recon_recurrence") or run(scan_sql, page=_PAGE, key=f"etl_recon_recurrence_{days}", tier="recent",
               source="RECON_MTRC_ERROR (recurrence)", max_rows=etl_control_sql.MAX_RECON_RECURRENCE_ROWS)
-    if guard(res, f"No reconciliation errors in the last {_win} days — every metric ties out.",
+    if guard(res, f"No reconciliation errors {_win} — every metric ties out.",
              kind="clean",
              setup_hint="The app role needs SELECT on the RECON_MTRC_ERROR table "
                         "(GRANT SELECT ON <table> TO ROLE <app role>)."):
         rec = recon_recurrence(res.df)
         if rec.empty:
-            empty_state("clean", f"No reconciliation errors in the last {_win} days — every metric ties out.")
+            empty_state("clean", f"No reconciliation errors {_win} — every metric ties out.")
             return
         chronic = int((rec["TIER"] == "CHRONIC").sum())
         active = int(rec["BROKE_LATEST_CYCLE"].astype(bool).sum())
@@ -2149,17 +2153,20 @@ def _cost_attribution_panel() -> None:
     whose name is in its text. The tags carry no run/task id (verified live), so text+window
     is the join; the longest matching task name wins so nested names never double-count.
     Queries that match no task stay in one '(unattributed)' row, so the coverage figure is
-    honest — this is a best-effort model, not a billed invoice. Account-wide (one nightly
-    cycle); config-gated on ETL_CONTROL_STATUS_FQN + fail-silent-with-grant-hint. Reads the
-    same 'latest run' the runtimes/drift panels do, so the three line up."""
+    honest — this is a best-effort model, not a billed invoice. One workflow run (a RUN_ID
+    is one workflow's execution): the '(unattributed)' row is the unmatched compute on that
+    run's own warehouses, not the whole account's (R1-058). Config-gated on
+    ETL_CONTROL_STATUS_FQN + fail-silent-with-grant-hint. Reads the same 'latest run' the
+    runtimes/drift panels do, so the three line up."""
     section_header("Cost attribution (credits & $ per task, latest run)",
                    "warn", "pipeline", anchor="ops-cost-attribution")
     settings = load_settings(_PAGE)
     fqn = str(settings.get("ETL_CONTROL_STATUS_FQN") or "").strip()
     if not fqn:
         empty_state("needs_setup", "Not configured — set ETL_CONTROL_STATUS_FQN on Admin ▸ SETTINGS "
-                    "(shared with the runtimes panel). This charges each night's measured Snowflake "
-                    "credits to the task that spent them, so you can see which task costs the most.")
+                    "(shared with the runtimes panel). This charges the latest workflow run's measured "
+                    "Snowflake credits to the task that spent them, so you can see which of its tasks "
+                    "costs the most.")
         return
     scan_sql = etl_control_sql.run_cost_attribution_scan(fqn)
     if not scan_sql:
@@ -2208,19 +2215,23 @@ def _cost_attribution_panel() -> None:
             {"label": "Attributed run cost", "value": format_usd(credits_to_usd(attr_credits, rate, round_cents=False)),
              "delta": f"{attr_credits:,.2f} credits", "delta_color": "off"},
             {"label": "Coverage", "value": f"{coverage:,.0f}%", "delta_color": "off",
-             "help": "Share of the run window's metered credits that mapped to a task. The rest is "
-                     "warehouse overhead or queries whose text didn't name a task — kept visible in "
-                     "the '(unattributed)' row, never hidden. Low coverage on a fresh run usually "
-                     "means Snowflake hasn't finished metering it (~6h usage lag)."},
+             "help": "Share of the credits metered on this run's warehouses during its window that "
+                     "mapped to one of its tasks. The rest — concurrent workflows and ad-hoc queries "
+                     "on those warehouses, or statements whose text didn't name a task — stays "
+                     "visible in the '(unattributed)' row, never hidden. 0% means nothing has "
+                     "mapped yet (a run from the last few hours may not be metered — ~6h usage "
+                     "lag); the row then holds every query in the window."},
             {"label": "Costliest task", "value": _top_val, "delta": _top_lbl, "delta_color": "off"},
         ])
         styled_table(df, height=320)
-        st.caption("Each night's measured Snowflake credits, charged to the task that spent them: a "
+        st.caption("The latest workflow run's measured Snowflake credits, charged to the task that "
+                   "spent them: a "
                    "query's fair-share compute credits (QUERY_ATTRIBUTION_HISTORY) attributed to the "
                    "CONTROL_STATUS task whose window contains it and whose name is in its text (longest "
                    "name wins, so nested task names never double-count). COST_USD prices CREDITS_ATTRIBUTED "
                    "at CREDIT_PRICE_USD. Best-effort attribution, not a billed invoice — the "
-                   "'(unattributed)' row is the honest remainder. Credits lag up to ~6h.")
+                   "'(unattributed)' row is the honest remainder on the run's warehouses. Credits "
+                   "lag up to ~6h.")
         result_caption(res)
 
 
@@ -2809,7 +2820,8 @@ def _pipeline_data_checks(is_operator: bool, company: str = "ALL", database: str
         {"key": "vd", "sql": ops_sql.volume_deltas(company, database, schema_contains),
          "source": "ACCOUNT_USAGE.TABLE_DML_HISTORY"},
         {"key": "rv", "sql": dq_sql.product_row_volume(28),
-         "source": "ACCOUNT_USAGE.TABLE_DML_HISTORY x ENTITY_CATALOG"},
+         "source": "ACCOUNT_USAGE.TABLE_DML_HISTORY x ENTITY_CATALOG",
+         "max_rows": dq_sql.DQ_MAX_ROWS},   # R1-041: the 5,000 default cut the series mid-table
     ], page=_PAGE, tier="recent")
 
     section_header("Volume drops (yesterday vs prior-7d average)", "", "pipeline")
@@ -3972,8 +3984,14 @@ def _contention_tab(company: str, days: int, *, bounds: tuple | None = None) -> 
             page=_PAGE, key=f"c_pressure_{company}_{days}{_lm}",
             mart_source="FACT_QUERY_HOURLY (mart — p95 is peak hourly)",
             live_source="QUERY_HISTORY (live fallback)",
-            mart_tier="hourly", live_tier="recent")
+            mart_tier="hourly", live_tier="recent", days=days)   # R1-018: served window
         if guard(res, "No queueing or spill pressure in this window.", kind="clean"):
+            # R1-018: the mart leg honors the long Window; only the live fallback is capped
+            # at 90 days, so say so when it is the one that answered.
+            _pressure_served = served_days(res, days)
+            if bounds is None and _pressure_served < int(days):
+                st.caption(f"Served the last {_pressure_served} days — the live fallback "
+                           "reads at most 90.")
             import pandas as pd
             pdf = res.df.copy()
             if {"QUEUED_SEC", "QUERY_COUNT"}.issubset(pdf.columns):
@@ -4569,7 +4587,9 @@ def render() -> None:
         "Queries": {
             "applies": ("company", "days", "database", "warehouse_contains",
                         "user_contains", "schema_contains"),
-            "note": "Schema scope uses the live path where the hourly fact lacks that grain.",
+            "note": ("Schema scope uses the live path where the hourly fact lacks that grain. On a "
+                     "trailing Window over 90 days, Heaviest queries and Failures by error read the "
+                     "last 90 days."),
         },
         "Tasks": {
             "applies": (),
