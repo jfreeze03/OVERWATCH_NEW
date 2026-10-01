@@ -228,10 +228,14 @@ def score_history(inputs: pd.DataFrame, weights: dict | None = None,
 
     ``inputs`` (one row per DAY): CREDITS_BILLED, CREDITS_BILLED_AI, CRIT_RAISED,
     HIGH_RAISED, QUERY_COUNT, FAILED_COUNT, QUEUED_SEC, SPILL_GB, TASK_RUNS,
-    TASK_FAILED. Budget pct uses the month-to-date cumulative spend against the
-    monthly budget, like the live score. Labeled RETRO: the live score also counts
-    stale sources and open actions, which facts don't carry per-day — the
-    trend is comparable, the absolute value can differ by a few points.
+    TASK_FAILED. Budget pct uses the month-to-date CUMULATIVE spend against the
+    monthly budget. The live score instead uses the PROJECTED month-end (rec #37),
+    falling back to cumulative MTD only when no projection is available. Projected
+    >= MTD, so with a budget set and spend on pace to overrun, the retro budget
+    penalty is smaller than the live one: the gap can reach the 20-point Budget-pace
+    cap and is largest early in the month. Labeled RETRO: the live score also counts
+    stale sources and open actions, which facts don't carry per-day — judge the
+    trend, not the absolute level.
     The critical VETO also diverges here: retro feeds CRIT_RAISED (raised that
     day), not open criticals, so the veto caps only raise-days — a critical
     that stays open all week reads Healthy on the retro trend from day two

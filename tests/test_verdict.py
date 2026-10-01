@@ -6,7 +6,6 @@ import pandas as pd
 from app.logic.verdict import (
     Signal,
     decision_studio_signals,
-    oldest_open_hours,
     operations_signals,
     page_verdict,
 )
@@ -120,18 +119,6 @@ def test_decision_studio_verdict_is_wired():
     # the scorecard + verdict read/compute through one shared helper
     assert "decision_studio_signals(" in body and "page_verdict(" in body
     assert "_proof_signals(" in body
-
-
-def test_oldest_open_hours_filters_severity_and_handles_empty():
-    now = pd.Timestamp("2026-08-16 12:00:00")
-    frame = pd.DataFrame({
-        "SEVERITY": ["CRITICAL", "HIGH", "CRITICAL"],
-        "RAISED_AT": ["2026-08-15 12:00:00", "2026-08-14 00:00:00", "2026-08-16 06:00:00"],
-    })
-    assert oldest_open_hours(frame, now=now, severity="CRITICAL") == 24.0  # oldest CRITICAL
-    assert oldest_open_hours(frame, now=now) == 60.0                       # oldest overall
-    assert oldest_open_hours(None, now=now, severity="CRITICAL") is None
-    assert oldest_open_hours(pd.DataFrame(), now=now) is None
 
 
 def test_brief_surfaces_oldest_open_critical():

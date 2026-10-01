@@ -5,7 +5,10 @@ two finders), zero refuted. All app-side, no migration.
   - [MED] proof_verdict dropped the untagged-share caveat and left level='good', headlining the
     untrustworthy precision as proof.
   - [MED] slo_summary computed worst_burn/has_burn over ALL rows, so a STALE objective (verdict
-    withheld) still fired the reliability alarm.
+    withheld) still fired the reliability alarm. (slo_summary fed only the custom SLO board, which
+    Option C retired in v4.597; the function and its #5/#6 locks went in v4.607. The read-only
+    built-in objectives that replaced the board surface staleness themselves:
+    tests/history_locks/test_wave2_slo_trio.py::test_slo_board_surfaces_the_trio.)
   - [MED] _products "Consumers served" summed per-product distinct readers (overcounts distinct
     accounts) -> relabeled to an honest "Consumer reach".
   - [LOW] _scenarios rendered "$0.00" for eligible-but-unpriced candidates -> "Unpriced".
@@ -18,7 +21,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from app.logic.decision import scenario_projection, slo_summary
+from app.logic.decision import scenario_projection
 from app.logic.proof import proof_verdict
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -48,33 +51,6 @@ def test_trustworthy_precision_stays_good() -> None:
     verdict = proof_verdict(roi, realization_pct=80.0, acceptance_pct=70.0, precision=precision)
     assert verdict["level"] == "good"
     assert "earning its keep" in verdict["headline"]
-
-
-# --------------------------------------------------------------------------- #
-# Findings #5/#6 -- worst_burn / has_burn respect the STALE verdict withholding
-# --------------------------------------------------------------------------- #
-def test_worst_burn_excludes_stale_objectives() -> None:
-    frame = pd.DataFrame({
-        "STATUS": ["MET", "BREACH", "STALE"],
-        "BURN_MULTIPLE": [0.5, 1.5, 9.0],   # the stale 9.0x must NOT drive the alarm
-    })
-    s = slo_summary(frame)
-    assert s["worst_burn"] == 1.5, "stale objective's burn must not become the worst burn"
-    assert s["has_burn"] == 1.0
-    assert s["stale"] == 1.0 and s["breach"] == 1.0
-
-
-def test_all_stale_burn_reads_as_no_burn() -> None:
-    frame = pd.DataFrame({"STATUS": ["STALE", "NO_DATA"], "BURN_MULTIPLE": [4.0, None]})
-    s = slo_summary(frame)
-    assert s["worst_burn"] == 0.0
-    assert s["has_burn"] == 0.0, "a burn carried only by a verdict-withheld row must not alarm"
-
-
-def test_fresh_breach_still_drives_the_burn_alarm() -> None:
-    frame = pd.DataFrame({"STATUS": ["BREACH"], "BURN_MULTIPLE": [3.0]})
-    s = slo_summary(frame)
-    assert s["worst_burn"] == 3.0 and s["has_burn"] == 1.0
 
 
 # --------------------------------------------------------------------------- #

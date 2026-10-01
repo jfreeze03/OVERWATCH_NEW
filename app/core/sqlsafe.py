@@ -98,33 +98,6 @@ def in_list(column: str, values: list[str] | tuple[str, ...]) -> str:
     return f"UPPER({column}) IN ({literals})"
 
 
-def not_in_list(column: str, values: list[str] | tuple[str, ...], allow_null: bool = True) -> str:
-    """``UPPER(col) NOT IN (...)``, NULL-tolerant by default; '' if empty."""
-    items = [str(v).strip() for v in values if str(v or "").strip()]
-    if not items:
-        return ""
-    column = safe_identifier(column, allow_qualified=True)
-    literals = ", ".join(sql_literal(v.upper(), 300) for v in items)
-    predicate = f"UPPER({column}) NOT IN ({literals})"
-    return f"({column} IS NULL OR {predicate})" if allow_null else predicate
-
-
-def like_any(column: str, patterns: list[str] | tuple[str, ...]) -> str:
-    """OR-joined ILIKE for wildcard patterns, exact IN for the rest; '' if empty."""
-    items = [str(v).strip() for v in patterns if str(v or "").strip()]
-    if not items:
-        return ""
-    column = safe_identifier(column, allow_qualified=True)
-    exact = [v for v in items if "%" not in v]
-    wild = [v for v in items if "%" in v]
-    parts: list[str] = []
-    if exact:
-        literals = ", ".join(sql_literal(v.upper(), 300) for v in exact)
-        parts.append(f"UPPER({column}) IN ({literals})")
-    parts.extend(f"{column} ILIKE {sql_literal(v, 300)}" for v in wild)
-    return parts[0] if len(parts) == 1 else "(" + " OR ".join(parts) + ")"
-
-
 def contains_filter(column: str, raw_value: object) -> str:
     """Case-insensitive contains clause from sanitized UI text; '' when off.
 

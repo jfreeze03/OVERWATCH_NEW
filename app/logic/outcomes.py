@@ -492,10 +492,3 @@ def family_outcomes(tracked: pd.DataFrame | None, daily: pd.DataFrame | None, to
     """KEY_UPPER -> the action_held result for every evaluated Done family (the done_family_entities set)."""
     return {key: action_held(fix_queue.TRACK_ENTITY_TYPE, key, done, daily, today)
             for key, done in _done_family_rows(tracked, keys, today)}
-
-
-def rebroke_families(tracked: pd.DataFrame | None, daily: pd.DataFrame | None, today: date,
-                     keys: Iterable[object]) -> dict[str, dict]:
-    """The evaluated Done families whose measured outcome lifts the Track-all cooldown."""
-    return {k: r for k, r in family_outcomes(tracked, daily, today, keys).items()
-            if r["state"] in OVERRIDES_COOLDOWN}

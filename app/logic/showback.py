@@ -218,16 +218,6 @@ def coverage_notes(summary: Mapping[str, object],
     return _coverage_review(summary, coverage, loaded)[0]
 
 
-def keyed_gaps(summary: Mapping[str, object],
-               coverage: Mapping[str, tuple[date | None, date | None]],
-               loaded: Mapping[str, datetime | None] | None = None) -> list[str]:
-    """The keyed facts (in line order) that do not cover the whole span in full: no rows, a
-    late start, an early end, a newest span day loaded only in part, or storage on fewer days
-    than the span. The same comparisons as coverage_notes. While any is listed, an empty
-    company scope is unverified, never a clean verdict (R1-14)."""
-    return _coverage_review(summary, coverage, loaded)[1]
-
-
 def _coverage_review(summary: Mapping[str, object],
                      coverage: Mapping[str, tuple[date | None, date | None]],
                      loaded: Mapping[str, datetime | None] | None) -> tuple[list[str], list[str]]:

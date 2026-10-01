@@ -102,13 +102,14 @@ def test_rec10_top_actions_are_clickable():
 
 # rec20 — the exec export carries a trend sparkline + a print stylesheet
 def test_rec20_export_trend_and_print_css():
-    from app.logic.formulas import exec_summary_html
-    kw = {"company": "ALFA", "days": 30, "generated": "now", "window_spend": "$1",
-          "mtd_line": "$5", "forecast_line": "$4", "alerts_line": "0",
-          "score_line": "100/100 (Healthy)", "drivers": [], "actions": []}
-    with_trend = exec_summary_html(**kw, spend_series=[10.0, 12.0, 9.0, 15.0, 11.0])
+    from app.logic.formulas import ExecutiveSummaryView, executive_summary_html
+    kw = {"company": "ALFA", "days": 30, "generated": "now",
+          "cards": (("Window spend", "$1"), ("Month to date", "$5"), ("Projected month-end", "$4"),
+                    ("Open alerts", "0"), ("Platform score", "100/100 (Healthy)"))}
+    with_trend = executive_summary_html(
+        ExecutiveSummaryView(**kw, spend_series=(10.0, 12.0, 9.0, 15.0, 11.0)))
     assert "<polyline" in with_trend and "@page" in with_trend and "Spend trend" in with_trend
     # no series -> no sparkline, but the print stylesheet is still present
-    without = exec_summary_html(**kw, spend_series=None)
+    without = executive_summary_html(ExecutiveSummaryView(**kw))
     assert "<polyline" not in without and "@page" in without
     assert without.startswith("<!DOCTYPE html>") and "<script" not in without.lower()

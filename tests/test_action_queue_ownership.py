@@ -68,10 +68,14 @@ def test_action_summary_excludes_deferred_and_counts_it(monkeypatch):
                  "estimated_usd": 10.0, "deferred": 1.0}
 
 
-def test_team_placeholder_owners_are_unassigned():
+def test_team_placeholder_owners_are_unassigned(monkeypatch):
+    # Runs the live rule (action_summary's Unassigned KPI); the stand-alone is_unassigned_owner
+    # twin it used to call was never wired into the app and was removed in v4.607.
+    monkeypatch.setattr(wb, "account_today", lambda: date(2026, 9, 24))
     for v in ("DBA", "dba / ai governance", "", None, float("nan"), "UNASSIGNED", "  dba team "):
-        assert wb.is_unassigned_owner(v), v
-    assert not wb.is_unassigned_owner("KEBARR1")
+        one = pd.DataFrame({"STATUS": ["OPEN"], "OWNER": [v]})
+        assert wb.action_summary(one)["unassigned"] == 1.0, v
+    assert wb.action_summary(pd.DataFrame({"STATUS": ["OPEN"], "OWNER": ["KEBARR1"]}))["unassigned"] == 0.0
 
 
 def test_owner_choices_defaults_and_legacy():

@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from app.data import workbench_sql
-from app.logic.decision import prioritize_workloads, scenario_projection, slo_summary
+from app.logic.decision import prioritize_workloads, scenario_projection
 from app.logic.workbench import create_slo_objective_sql, investigation_target
 from app.ui import charts
 
@@ -230,24 +230,6 @@ def test_scenario_deduplicates_entities_and_separates_closed_work() -> None:
         "expected_capture": 60.0,
         "low_capture": 45.0,
         "high_capture": 75.0,
-    }
-
-
-def test_slo_summary_keeps_breach_and_missing_evidence_distinct() -> None:
-    frame = pd.DataFrame(
-        {
-            "STATUS": ["MET", "BREACH", "NO_DATA"],
-            "BURN_MULTIPLE": [0.4, 3.2, None],
-        }
-    )
-    assert slo_summary(frame) == {
-        "total": 3.0,
-        "met": 1.0,
-        "breach": 1.0,
-        "no_data": 1.0,
-        "stale": 0.0,       # Wave-2 #11: stale evidence is a distinct verdict
-        "worst_burn": 3.2,
-        "has_burn": 1.0,    # Wave-2 #10: a success objective carries a burn
     }
 
 

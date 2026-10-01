@@ -7,7 +7,6 @@ page, not in code.
 
 from __future__ import annotations
 
-APP_NAME = "OVERWATCH"
 APP_VERSION = "4.606.0"
 
 # The build's load-bearing schema floor. main() reads the live max(SCHEMA_VERSION)

@@ -21,11 +21,18 @@ from app.logic.outcomes import (
     family_outcomes,
     held_basis,
     held_columns,
-    rebroke_families,
 )
 
 TODAY = date(2026, 9, 29)
 DONE = date(2026, 9, 1)
+
+
+def rebroke_families(tracked, daily, today, keys) -> set[str]:
+    """The evaluated Done families whose measured outcome lifts the Track-all cooldown: the page's own
+    filter over family_outcomes (ops_parts/optimize_queue.py `_rebroke`, pinned verbatim by
+    tests/test_optimize_queue.py). v4.607: the app-side twin of this helper had no caller and was removed."""
+    return {k for k, r in family_outcomes(tracked, daily, today, keys).items()
+            if r["state"] in outcomes.OVERRIDES_COOLDOWN}
 
 
 def _frame(kind: str, key: str, series: dict, loaded: date | None = TODAY - timedelta(days=1)) -> pd.DataFrame:
@@ -127,7 +134,7 @@ def test_a_stray_failure_on_a_fixed_high_volume_family_keeps_the_cooldown():
     r = action_held("QUERY_FINGERPRINT", "FP", DONE, daily, TODAY)
     assert r["state"] == outcomes.HELD and r["state"] not in outcomes.OVERRIDES_COOLDOWN
     tracked = _tracked([("FP", "DONE", 0, 0, 1, pd.Timestamp(DONE))])
-    assert rebroke_families(tracked, daily, TODAY, ["FP"]) == {}
+    assert rebroke_families(tracked, daily, TODAY, ["FP"]) == set()
     # the same family still failing at 3% never held: it lifts the cooldown
     same = _fam_rate(dict.fromkeys(range(1, 28), 300.0))
     assert action_held("QUERY_FINGERPRINT", "FP", DONE, same, TODAY)["state"] == outcomes.NOT_FIXED

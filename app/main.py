@@ -89,7 +89,7 @@ _RENDERERS = {
 }
 
 
-def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -> str:
+def _sidebar(pages: tuple[str, ...], connected: bool) -> str:
     """Navigation-only sidebar; scope filters live in the top bar (original-app layout)."""
     with st.sidebar:
         # Branding, pronounced. Version lives on Admin (App version); the connected role
@@ -446,7 +446,7 @@ def _global_jump(pages: tuple) -> None:
     def _go(dest: str) -> None:
         st.session_state["_ow_jump_nonce"] = _jump_nonce + 1
         _record_recent(dest)
-        _dispatch_jump(dest, pages)   # reruns for a real navigation
+        _dispatch_jump(dest)   # reruns for a real navigation
         st.rerun()                    # covers the current-page no-op
 
     _recents = [r for r in (st.session_state.get("_ow_jump_recents") or []) if r in options]
@@ -522,7 +522,7 @@ def _record_recent(label: str) -> None:
     st.session_state["_ow_jump_recents"] = recents[:6]
 
 
-def _dispatch_jump(pick: str, pages: tuple) -> None:
+def _dispatch_jump(pick: str) -> None:
     """C3: resolve a 'Kind · name' jump selection to a navigation (shared by the
     selectbox and the recents buttons)."""
     from app.companies import ALFA_DATABASES, TREXIS_DATABASES, classify_warehouse
@@ -579,9 +579,10 @@ def _health_values_cached(scope: str) -> dict[str, tuple[str, str]]:
     """P1: the strip renders on the SHELL of every page, so at the 30s live TTL
     every viewer re-paid it several times a minute for badges whose inputs move
     on a 10-minute (freshness snapshot) / daily (metering) cadence. 120s is the
-    shell's own budget; the underlying run() stays on the live tier so the
-    Brief/Control Room reads of the SAME statement keep sharing one cache entry,
-    and the in-page Alerts panels are untouched — they are the live surface.
+    shell's own budget; the underlying run() stays on the 'recent' tier (300s), the
+    same tier as every other health_strip read (Brief, Control Room, Operations,
+    Overview), so they all keep sharing one cache entry, and the in-page Alerts
+    panels are untouched — they are the live surface.
 
     ``scope`` is core.query's cache identity (role + refresh salt + the alerts
     domain salt), so Refresh and any ack/resolve write still invalidate this
@@ -879,7 +880,7 @@ def main() -> None:
     profile = active_profile(role)
     pages = PAGES_BY_PROFILE.get(profile, PAGES_BY_PROFILE["ANALYST"])
 
-    page = _sidebar(pages, role, profile, connected)
+    page = _sidebar(pages, connected)
     if connected:
         _topbar_scope()
 

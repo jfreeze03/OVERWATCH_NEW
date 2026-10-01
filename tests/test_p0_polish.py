@@ -5,7 +5,7 @@ from pathlib import Path
 
 from app.core.sqlsafe import contains_filter
 from app.logic import scoring
-from app.logic.formulas import exec_summary_html
+from app.logic.formulas import ExecutiveSummaryView, executive_summary_html
 
 _PAGES = Path(__file__).resolve().parents[1] / "app" / "ui" / "pages"
 
@@ -47,13 +47,14 @@ def test_score_weights_configurable_and_bounded():
 
 
 def test_exec_summary_html_self_contained():
-    html = exec_summary_html(
-        company="ALFA", days=30, generated="2026-07-07 12:00", window_spend="$1,234",
-        mtd_line="$5,000 vs $50,000 budget", forecast_line="$48,000 ($45,000–$51,000)",
-        alerts_line="1 critical · 2 high", score_line="88/100 (Healthy)",
-        drivers=[("Critical alerts", "6.0", "1 open critical alerts.")],
-        actions=["[HIGH] Fix loader — owner KEBARR1"],
-    )
+    html = executive_summary_html(ExecutiveSummaryView(
+        company="ALFA", days=30, generated="2026-07-07 12:00",
+        cards=(("Window spend", "$1,234"), ("Month to date", "$5,000 vs $50,000 budget"),
+               ("Projected month-end", "$48,000 ($45,000–$51,000)"),
+               ("Open alerts", "1 critical · 2 high"), ("Platform score", "88/100 (Healthy)")),
+        drivers=(("Critical alerts", "-6.0 pts", "1 open critical alerts."),),
+        actions=("[HIGH] Fix loader — owner KEBARR1",),
+    ))
     assert html.startswith("<!DOCTYPE html>")
     assert "ALFA" in html and "88/100" in html and "Critical alerts" in html
     assert "<script" not in html.lower()  # static document, nothing executable

@@ -204,7 +204,7 @@ def classify_row(row: pd.Series | dict) -> tuple[str, str]:
     return UNKNOWN, "LOW"
 
 
-def resize_verdict(driver_class: str, compile_pct: float, total_s: float) -> str:
+def resize_verdict(driver_class: str, compile_pct: float) -> str:
     """Two-state resize relevance (Phase 0). RESIZE NOT INDICATED for anything whose
     cost lives in the compile/cloud-services layer; INSUFFICIENT EVIDENCE otherwise
     (this frame has no spill/queue columns, so RESIZE MAY HELP is never asserted)."""
@@ -299,7 +299,7 @@ def classify_families(df: pd.DataFrame, *, with_action: bool = False) -> pd.Data
         cls, confidence = classify_row(row)
         classes.append(cls)
         confs.append(confidence)
-        verdicts.append(resize_verdict(cls, _num(row, "COMPILE_PCT"), _num(row, "AVG_TOTAL_S")))
+        verdicts.append(resize_verdict(cls, _num(row, "COMPILE_PCT")))
         owners.append(remediation_owner(cls))
         if with_action:
             hints.append(owner_hint(row))

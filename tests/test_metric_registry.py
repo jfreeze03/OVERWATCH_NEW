@@ -19,6 +19,18 @@ def test_core_metrics_registered():
         assert k in keys, k
 
 
+def test_latency_claims_match_the_source_lag():
+    # ~45 min is QUERY_HISTORY's lag. WAREHOUSE_METERING_HISTORY lags up to ~3h (its cloud-services
+    # column up to ~6h), so no row reading it may claim ~45 min, and the CS ratio is bound by the CS
+    # column. MART_PATTERN_COST_DAILY reloads once a day after TASK_LOAD_DAILY (V036), not hourly.
+    for m in mr.METRICS:
+        if "WAREHOUSE_METERING_HISTORY" in m.source:
+            assert "45 min" not in m.latency, m.key
+    assert "~6h" in mr.get("cloud_services_ratio").latency
+    assert "~3h" in mr.get("department_chargeback").latency     # FACT_WAREHOUSE_DAILY <- metering
+    assert "daily load" in mr.get("pattern_cost").latency
+
+
 def test_rows_render():
     rows = mr.as_rows()
     assert len(rows) == len(mr.METRICS) and set(rows[0]) >= {"Metric", "Method", "Source"}

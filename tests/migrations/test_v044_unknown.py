@@ -54,7 +54,10 @@ def test_app_mirrors_and_pill_and_worklist():
     assert co.classify_database("RANDOM_DB") == "UNKNOWN"
     assert co.classify_database("DBA_MAINT_DB") == "ALFA"     # app infra, seeded
     assert "UNKNOWN" in co.user_clause("UNKNOWN")
-    assert "NOT LIKE" in co.warehouse_clause("UNKNOWN")
+    # the UNKNOWN residual is a scope-able company on the live warehouse axis (v4.607: the
+    # name-pattern warehouse_clause this line used to check is gone; nothing called it)
+    assert co.warehouse_company_scope("UNKNOWN").endswith(
+        "COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME) = 'UNKNOWN'")
     from app.data import mart_sql
     sql = mart_sql.unmapped_entities(7)
     assert "COMPANY = 'UNKNOWN'" in sql and "ACCOUNT_USAGE" not in sql   # mart-only worklist

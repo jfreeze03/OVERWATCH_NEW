@@ -75,7 +75,6 @@ ANOMALY_HIGH_EXCESS_USD = 500.0
 LEDGER_ESTIMATED = "ESTIMATED"
 LEDGER_VERIFIED = "VERIFIED"
 LEDGER_REJECTED = "REJECTED"
-LEDGER_STATES = (LEDGER_ESTIMATED, LEDGER_VERIFIED, LEDGER_REJECTED)
 
 
 def _datetime_col(view: pd.DataFrame, column: str) -> pd.Series:
@@ -339,47 +338,13 @@ def ledger_totals(df: pd.DataFrame, active_months: int = SAVINGS_ACTIVE_MONTHS) 
     }
 
 
-def savings_by_month(df: pd.DataFrame, months: int = 12) -> pd.DataFrame:
-    """Newly verified savings per calendar month — the monthly run-rate ADDED that month (each
-    VERIFIED_USD is a recurring monthly saving; the ACTIVE run-rate is the trailing-12-month sum,
-    ``ledger_totals``' verified_active_usd). VERIFIED items only, bucketed by VERIFIED_AT, most recent ``months`` months,
-    oldest-first for a time-ordered chart. Columns MONTH (YYYY-MM), VERIFIED_USD.
-    Empty in, empty out."""
-    cols = ["MONTH", "VERIFIED_USD"]
-    if df is None or df.empty or "STATE" not in df.columns:
-        return pd.DataFrame(columns=cols)
-    df, _ = split_superseded(df)
-    df, _ = split_reverted(df)      # Next-Fifty #31: a change the scan saw undone left the run-rate
-    if df.empty:
-        return pd.DataFrame(columns=cols)
-    ver = df[df["STATE"].astype(str).str.upper() == LEDGER_VERIFIED].copy()
-    if ver.empty:
-        return pd.DataFrame(columns=cols)
-    ver["_AT"] = pd.to_datetime(ver.get("VERIFIED_AT"), errors="coerce")
-    ver = ver.dropna(subset=["_AT"])
-    if ver.empty:
-        return pd.DataFrame(columns=cols)
-    ver["MONTH"] = ver["_AT"].dt.strftime("%Y-%m")
-    ver["VERIFIED_USD"] = pd.to_numeric(ver.get("VERIFIED_USD"), errors="coerce").fillna(0.0)
-    out = (ver.groupby("MONTH", as_index=False)["VERIFIED_USD"].sum()
-           .sort_values("MONTH"))
-    # Drop the current calendar month: it is a month-to-date PARTIAL, and on a run-rate line a
-    # partial trailing bucket reads as a velocity collapse next to full months even when the true
-    # monthly rate is flat. Complete months only, matching the codebase's run-rate convention
-    # (bug-hunt 2026-08-30).
-    out = out[out["MONTH"] != account_now().strftime("%Y-%m")]
-    if out.empty:
-        return pd.DataFrame(columns=cols)
-    return out.tail(max(1, int(months))).reset_index(drop=True)[cols]
-
-
 def savings_month_calendar(df: pd.DataFrame, months: int = 12) -> pd.DataFrame:
     """Newly verified run-rate per calendar month for the Proof ▸ Proof bars (formerly the ROI section): the LAST ``months``
     calendar months ending with the CURRENT month, zero-filled (a month with nothing verified is a real
     $0 bar, not a missing point), the current month flagged PARTIAL and labelled month-to-date. Unlike
-    savings_by_month (a complete-months series for trend lines), bars show the partial month honestly
-    instead of hiding it: the owner's screenshot (2026-09-24) showed one August dot while most of the
-    quarter had verified in September. Columns MONTH (YYYY-MM), MONTH_LABEL, VERIFIED_USD, PARTIAL.
+    the old savings_by_month (a complete-months series that dropped the current month; removed in v4.607
+    with no caller left), bars show the partial month honestly instead of hiding it: the owner's
+    screenshot (2026-09-24) showed one August dot while most of the quarter had verified in September. Columns MONTH (YYYY-MM), MONTH_LABEL, VERIFIED_USD, PARTIAL.
     Empty (no verified rows at all) in -> empty out."""
     cols = ["MONTH", "MONTH_LABEL", "VERIFIED_USD", "PARTIAL"]
     if df is None or df.empty or "STATE" not in df.columns:

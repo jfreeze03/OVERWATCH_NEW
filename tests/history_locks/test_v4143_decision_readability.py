@@ -24,7 +24,6 @@ def test_read_model_contracts_are_complete_unique_and_truthful() -> None:
         "entity_360",
         "task_run",
         "workload_portfolio",
-        "slo_cockpit",
         "control_pulse",
     }
     assert get_contract(" ENTITY_360 ").summary_reads == 4

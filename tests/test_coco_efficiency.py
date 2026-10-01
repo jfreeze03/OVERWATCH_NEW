@@ -181,7 +181,7 @@ def test_dominant_user_flags_in_a_two_user_company_scope():
 def test_zero_credit_users_do_not_drag_the_peer_baseline_to_zero():
     # A zero-credit user is not a spending peer. If zeros stay in the leave-one-out baseline its
     # median can collapse to 0 and (via the med>0 guard) silently drop a genuinely dominant heavy
-    # user's flag. positive_baseline must exclude them so HEAVY still flags.
+    # user's flag. The positive-only baseline must exclude them so HEAVY still flags.
     today = dt.date(2026, 8, 24)
     rows = [
         {"USER_NAME": "HEAVY", "USAGE_DATE": str(today - dt.timedelta(days=1 + i)),

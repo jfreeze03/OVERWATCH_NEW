@@ -57,8 +57,15 @@ _W3_JSON = json.dumps([
 ])
 
 
+def _parse(entries: list) -> list[cs.ClientFloor]:
+    """Entries through the LIVE path: the client_version_info builder's RAW_ENTRY column (each entry's own
+    JSON) into floors_from_frame. v4.607: the stand-alone parse_client_version_info / normalize_entry
+    parser had no app caller (read_floors only ever uses floors_from_frame) and was removed."""
+    return cs.floors_from_frame(pd.DataFrame({"RAW_ENTRY": [json.dumps(e) for e in entries]}))
+
+
 def _floors() -> list[cs.ClientFloor]:
-    return cs.parse_client_version_info(_W3_JSON)
+    return _parse(json.loads(_W3_JSON))
 
 
 # ---------------------------------------------------------------------------
@@ -141,21 +148,21 @@ def test_parser_tolerates_key_spellings_missing_keys_and_junk():
            {"client_app_id": "Y", "min_supported_version": "2.0", "recommended_version": "3.0"},
            {"clientAppId": "Z"},                                                   # no version keys at all
            {"minimumSupportedVersion": "9.9"},                                      # names no client: dropped
-           "not an object", 7]
-    floors = cs.parse_client_version_info(raw)
+           "not an object", 7]                                                     # not entries: skipped
+    floors = _parse(raw)
     assert [(f.client_id, f.client_app_id) for f in floors] == [("X1", ""), ("", "Y"), ("", "Z")]
     assert floors[1].min_supported == "2.0" and floors[1].recommended == "3.0"
     index = cs.floor_index(floors)
     assert set(index) == {"X1", "Y", "Z"}
     z = index["Z"]
     assert cs.support_status("1.0", z.min_supported, z.nearing_eos, z.recommended) == cs.NOT_LISTED
-    assert cs.parse_client_version_info("not json") == [] and cs.parse_client_version_info(None) == []
-    assert len(cs.parse_client_version_info({"clients": json.loads(_W3_JSON)})) == 7   # wrapped array
+    assert cs.floors_from_frame(pd.DataFrame({"RAW_ENTRY": ["not json", None]})) == []
+    assert cs.floors_from_frame(None) == [] and cs.floors_from_frame(pd.DataFrame()) == []
 
 
 def test_client_app_id_beats_client_id_in_the_index():
-    floors = cs.parse_client_version_info([{"clientId": "Go", "clientAppId": "GoOther", "minimumSupportedVersion": "9"},
-                                           {"clientId": "GO_ID", "clientAppId": "Go", "minimumSupportedVersion": "1"}])
+    floors = _parse([{"clientId": "Go", "clientAppId": "GoOther", "minimumSupportedVersion": "9"},
+                     {"clientId": "GO_ID", "clientAppId": "Go", "minimumSupportedVersion": "1"}])
     assert cs.floor_index(floors)["GO"].min_supported == "1"
 
 
@@ -221,10 +228,10 @@ def test_a_second_minimum_less_entry_never_erases_a_drivers_minimum():
           "minimumNearingEndOfSupportVersion": "1.12.1", "recommendedVersion": "2.2.0"}
     bare = {"clientId": "GO", "clientAppId": "Go", "recommendedVersion": "2.2.0"}
     for entries in ([go, bare], [bare, go]):
-        index = cs.floor_index(cs.parse_client_version_info(entries))
+        index = cs.floor_index(_parse(entries))
         assert index["GO"].min_supported == "1.11.2", entries
     # with it, the web app's Go 1.1.5 stays UNSUPPORTED (Snowflake-run) instead of BELOW RECOMMENDED
-    floors = [f for f in _floors() if f.client_app_id != "Go"] + cs.parse_client_version_info([go, bare])
+    floors = [f for f in _floors() if f.client_app_id != "Go"] + _parse([go, bare])
     counts = cs.support_counts(cs.annotate_support(_drivers(), floors))
     assert counts["unsupported_snowflake"] == 2 and counts["unsupported_yours"] == 3
 

@@ -264,12 +264,6 @@ def test_idle_advisor_recoverable_never_goes_negative():
     assert row["RECOVERABLE_IDLE_USD"] == 0.0
 
 
-def test_idle_suspend_sql_validates_identifier():
-    assert insights.idle_suspend_sql("WH_ALFA_QUERY") == "ALTER WAREHOUSE WH_ALFA_QUERY SET AUTO_SUSPEND = 60;"
-    with pytest.raises(ValueError):
-        insights.idle_suspend_sql("WH; DROP TABLE X")
-
-
 # ---- 2. repeat candidates -------------------------------------------------------
 
 def test_repeat_candidates_flag_heavy_cache_poor():

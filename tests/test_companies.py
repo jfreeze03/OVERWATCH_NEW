@@ -38,16 +38,16 @@ def test_database_classification_and_environment():
     assert co.classify_environment("ALFA_EDW_DEV") == "NONPROD"
 
 
-def test_warehouse_clause_partitions_the_account():
-    trexis = co.warehouse_clause("Trexis")
-    alfa = co.warehouse_clause("ALFA")
-    assert "IN" in trexis and "WH_TRXS_LOAD" in trexis
+def test_warehouse_scope_partitions_the_account():
     # V044 (#18): the account no longer partitions two-ways — ALFA needs
-    # WH_ALFA_* evidence; UNKNOWN takes the residual
-    assert "WH!_ALFA!_%" in alfa
-    unknown = co.warehouse_clause("UNKNOWN")
-    assert "NOT IN" in unknown and "WH_TRXS_LOAD" in unknown and "NOT LIKE" in unknown
-    assert co.warehouse_clause("ALL") == ""
+    # WH_ALFA_* evidence; UNKNOWN takes the residual. v4.607: the name-pattern
+    # warehouse_clause that once spelled this out in SQL is gone (no caller since
+    # the MC-1 sweep); the live scope is the COMPANY_FOR_WAREHOUSE axis, which
+    # names all three companies and filters nothing for ALL.
+    for company in ("ALFA", "Trexis", "UNKNOWN"):
+        assert co.warehouse_company_scope(company) == (
+            f"DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME) = '{company}'")
+    assert co.warehouse_company_scope("ALL") == ""
 
 
 def test_user_clause_is_role_based_via_company_for_user():
@@ -63,11 +63,9 @@ def test_clauses_pass_injection_gate():
     # assert_no_control_tokens runs inside every builder; a change that breaks
     # that contract should explode here, not in production.
     for company in co.COMPANIES:
-        co.warehouse_clause(company)
-        co.database_clause(company)
         co.user_clause(company)
-    for env in co.ENVIRONMENTS:
-        co.environment_clause(env)
+        co.role_clause(company)
+        co.database_visibility_clause(company)
 
 
 def test_company_scope_seed_matches_code():

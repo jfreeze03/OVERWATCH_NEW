@@ -18,7 +18,7 @@ import app.logic.actions as actions_mod
 from app import config
 from app.config import LEDGER_TWIN_MATCH_DAYS
 from app.data import mart_sql
-from app.logic.actions import ledger_totals, savings_by_lever, savings_by_month, split_superseded
+from app.logic.actions import ledger_totals, savings_by_lever, savings_month_calendar, split_superseded
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -94,7 +94,7 @@ def test_month_and_lever_rollups_drop_superseded(monkeypatch):
         {"STATE": "VERIFIED", "VERIFIED_USD": 900, "ESTIMATED_USD": 900, "VERIFIED_AT": "2026-07-20",
          "FINDING_TYPE": "RESIZE", "SUPERSEDED_BY_CHANGE_ID": "CHG9"},
     ])
-    by_month = savings_by_month(rows)
+    by_month = savings_month_calendar(rows, 12)
     assert float(by_month["VERIFIED_USD"].sum()) == 100.0
     by_lever = savings_by_lever(rows)
     assert float(by_lever["VERIFIED_USD"].sum()) == 100.0

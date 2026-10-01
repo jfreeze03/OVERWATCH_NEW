@@ -28,11 +28,19 @@ def _state_fn(name: str) -> str:
 
 
 def test_b6_jump_box_cleared_only_when_a_jump_is_consumed():
-    """B6: the _ow_jump reset must run AFTER the no-pending early return — the old
-    unconditional clear erased the user's pick on the rerun that delivered it."""
+    """B6: the old unconditional jump-box clear ran every rerun and erased the user's pick
+    on the rerun that delivered it. The B6 fix moved the reset after the no-pending early
+    return; since C3 (v4.313) the box is keyed `_ow_jump_{nonce}` and clears itself by
+    remounting under a bumped nonce only when a jump fires, so consume_pending_navigation
+    no longer touches any jump-box key (the fixed `_ow_jump` key it reset is gone)."""
     body = _state_fn("consume_pending_navigation")
     assert "if not pending:\n        return" in body
-    assert body.index('pop("_ow_nav_pending"') < body.index('"_ow_jump"] = None')
+    assert '"_ow_jump"]' not in body                    # no write to a key no widget uses
+    main = (_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    jump = main.split("def _global_jump", 1)[1].split("\ndef ", 1)[0]
+    assert 'key=f"_ow_jump_{_jump_nonce}"' in jump     # the box clears by nonce remount ...
+    go = jump.split("def _go(dest: str)", 1)[1]
+    assert go.index('"_ow_jump_nonce"] = _jump_nonce + 1') < go.index("_dispatch_jump(")  # ... per jump
 
 
 def test_b7_db_validation_uses_live_classification():

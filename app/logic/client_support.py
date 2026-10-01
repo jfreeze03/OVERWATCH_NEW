@@ -249,26 +249,6 @@ def _normalize_pairs(pairs: Iterable[tuple[object, object]]) -> ClientFloor | No
                        recommended=found.get("recommended", ""))
 
 
-def normalize_entry(entry: Mapping) -> ClientFloor | None:
-    """A raw JSON entry or a builder row -> ClientFloor. None when it names no client at all.
-
-    Tolerates key-spelling variants (clientAppId / clientId / CLIENT_APP_ID ...) and missing keys: a
-    missing version key is blank, and an entry with no version key at all reads NOT_LISTED downstream.
-    The first non-blank value in the mapping's own order wins for each field."""
-    return _normalize_pairs(entry.items())
-
-
-def _entries(doc: object) -> list:
-    if isinstance(doc, list):
-        return doc
-    if isinstance(doc, Mapping):
-        for value in doc.values():      # tolerate a wrapper object around the documented array
-            if isinstance(value, list):
-                return value
-        return [doc]
-    return []
-
-
 def _json_object(raw: object) -> Mapping | None:
     if _is_blank(raw):
         return None
@@ -277,24 +257,6 @@ def _json_object(raw: object) -> Mapping | None:
     except ValueError:
         return None
     return parsed if isinstance(parsed, Mapping) else None
-
-
-def parse_client_version_info(raw: object) -> list[ClientFloor]:
-    """The function's raw JSON text (or an already-decoded list) -> one ClientFloor per client entry.
-    Unparseable text and non-object entries yield nothing, never an exception."""
-    doc = raw
-    if isinstance(raw, (str, bytes)):
-        try:
-            doc = json.loads(raw)
-        except ValueError:
-            return []
-    out: list[ClientFloor] = []
-    for item in _entries(doc):
-        if isinstance(item, Mapping):
-            floor = normalize_entry(item)
-            if floor is not None:
-                out.append(floor)
-    return out
 
 
 def floors_from_frame(df: pd.DataFrame | None) -> list[ClientFloor]:
