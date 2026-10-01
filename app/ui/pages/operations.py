@@ -724,10 +724,12 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                     result_caption(_fam)
                     _summ = cs_driver.driver_summary(_cls)
                     if _summ["not_indicated"]:
+                        # R1-090 review: worded per class -- a compile-heavy plan is not a caching / polling fix
                         st.caption(
-                            f"{_summ['not_indicated']} of {_summ['total']} families are compile / "
-                            "metadata-shaped — resize not indicated; the fix is behavioural (cache "
-                            "metadata, cut polling / reconnects), owned by this application's team.")
+                            f"{_summ['not_indicated']} of {_summ['total']} families — resize not indicated "
+                            "(compile / cloud-services work a resize does not change): "
+                            f"{cs_driver.not_indicated_remedies(_summ)}. The *Remediation owner* column names "
+                            "who acts.")
 
     section_header("Optimization triage", "", "optimize")
     _triage_on = st.toggle(

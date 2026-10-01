@@ -57,7 +57,9 @@ def test_like_wildcard_rows_and_failed_reads_are_unknown() -> None:
     assert _auto_suspend_in_force(pd.DataFrame({"name": ["WHAX"], "auto_suspend": [600]}), "WH_X") == (False, None)
     assert _auto_suspend_in_force(None, "WH_X") == (False, None)                       # the read failed
     assert _auto_suspend_in_force(pd.DataFrame(), "WH_X") == (False, None)
-    assert _auto_suspend_in_force(pd.DataFrame({"name": ["WH_X"], "auto_suspend": [None]}), "WH_X") == (False, None)
+    # R1-071: a NULL on a LISTED row is the known never-suspend setting (0), not an unknown value
+    assert _auto_suspend_in_force(pd.DataFrame({"name": ["WH_X"], "auto_suspend": [None]}), "WH_X") == (True, 0.0)
+    assert _auto_suspend_in_force(pd.DataFrame({"name": ["WH_X"], "auto_suspend": ["?"]}), "WH_X") == (False, None)
     assert _auto_suspend_in_force(pd.DataFrame({"name": ["WH_X"]}), "WH_X") == (False, None)
     # unknown -> the guard generates nothing executable
     assert remediation.tighten_suspend_plan("WH_X", None, False)["stmt"] == ""

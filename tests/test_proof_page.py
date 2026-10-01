@@ -145,8 +145,9 @@ def test_projection_fragment_is_memo_free_and_floor_compatible():
     assert 'st.button("Reset to measured"' in frag and "on_click=_reset_to_measured" in frag
     # the page calls the fragment with values computed in the full run, after the memo-hit read
     pipe = _fn(body, "_pipeline_tab")
-    assert pipe.index("sig = _proof_signals(rate)") < pipe.index(
-        "_pipeline_projection(pipeline, _projection_defaults(sig, carried))")
+    # (R1-209 review: plus the memoized ledger failure, so a failed read is never "nothing decided yet")
+    assert pipe.index("sig = _proof_signals(rate)") < pipe.index("_ledger_fail = _proof_ledger_failure()") < pipe.index(
+        "_pipeline_projection(pipeline, _projection_defaults(sig, carried, ledger_failure=_ledger_fail))")
 
 
 def test_projection_defaults_are_measured_first_and_labelled():

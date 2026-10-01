@@ -52,6 +52,7 @@ from app.logic.insights import (
     multi_cluster_evident,
     poor_pruning_summary,
     repeat_min_runs,
+    show_auto_suspend,
     storage_movers,
     suspend_recluster_sql,
     with_auto_suspend_settings,
@@ -341,10 +342,13 @@ def _whatif_panel(sized, days: int, rate: float) -> None:
             match = wdf_wi[wdf_wi.get("name", "").astype(str) == wi_pick] if "name" in wdf_wi.columns else wdf_wi.iloc[0:0]
             if not match.empty:
                 live_size = str(match.iloc[0].get("size", "") or "")
-                # No trailing `or 600`: safe_float already defaults 600 only on None/NaN/parse
-                # error, so a REAL auto_suspend=0 (a never-suspend warehouse) is preserved
-                # instead of being silently modeled as a 600s suspend (round-3 bug hunt).
-                live_suspend = int(safe_float(match.iloc[0].get("auto_suspend"), 600))
+                # A REAL auto_suspend=0 (never suspends) is preserved, never modeled as a 600s suspend
+                # (round-3 bug hunt) -- and so is a listed NULL, which SHOW uses for the same never-suspend
+                # setting (R1-071: show_auto_suspend, the Optimize ▸ Idle reading). 600 stands in only for a
+                # missing column or an unparseable cell.
+                _wi_susp = (show_auto_suspend(match.iloc[0].get("auto_suspend"))
+                            if "auto_suspend" in match.columns else None)
+                live_suspend = int(_wi_susp) if _wi_susp is not None else 600
         c_sz, c_sus = st.columns(2)
         with c_sz:
             delta_wi = st.select_slider("Size step", options=[-2, -1, 0, 1, 2], value=0,

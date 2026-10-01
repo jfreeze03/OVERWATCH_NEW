@@ -1448,7 +1448,7 @@ _IDLE_SPEC = {
     "WH_A": (10.0, 4.5, 10.0, 6.0, 600),           # 45% idle, 10-minute timer -> actionable
     "WH_B": (10.0, 4.5, 10.0, 6.0, 30),            # already tighter than 60s -> excluded by both
     "WH_C": (10.0, 4.5, 10.0, 6.0, 0),             # never suspends -> actionable (enable a timer)
-    "WH_D": (10.0, 4.5, 10.0, 6.0, None),          # unknown timer -> excluded by both
+    "WH_D": (10.0, 4.5, 10.0, 6.0, None),          # NULL timer: the app's never-suspend (R1-071); [24] excludes it
     "WH_E": (10.0, 1.996, 4.0, 3.0, 300),          # 19.96% idle rounds to 20.0 -> FLAGGED; 2.5 credits/h
     "WH_F": (0.5, 0.06, 2.0, 1.0, 600),            # < 1 idle credit in the window -> not flagged
     "WH_G": (10.0, 4.5, 10.0, 6.0, 600),           # dropped/renamed since the prior batch -> never raises
@@ -1482,17 +1482,24 @@ def _idle_tables(days: int = 14, batch_at: float = _IDLE_BATCH, threshold: float
 
 def _idle_app_side(days: int = 14) -> pd.DataFrame:
     """What Optimize > Idle & sizing computes: eff_idle_analysis' aggregate over the same complete days, the
-    LIVE SHOW WAREHOUSES timer (WH_G is gone), then insights.idle_advisor."""
-    from app.logic.insights import idle_advisor
+    LIVE SHOW WAREHOUSES timer (WH_G is gone) merged by the page's own insights.with_auto_suspend_settings
+    (never a hand-copied merge: R1-071 review), then insights.idle_advisor."""
+    from app.logic.insights import idle_advisor, with_auto_suspend_settings
     rows = [{"WAREHOUSE_NAME": wh, "METERED_HOURS": b * days, "IDLE_HOURS": max(b - a, 0) * days,
              "TOTAL_CREDITS": c * days, "IDLE_CREDITS": i * days}
             for wh, (c, i, b, a, _s) in _IDLE_SPEC.items()]
     agg = pd.DataFrame(rows)
-    live = pd.DataFrame([{"WAREHOUSE_NAME": wh, "AUTO_SUSPEND": s[-1]} for wh, s in _IDLE_SPEC.items()
-                         if wh != "WH_G"])
-    agg = agg.merge(live, on="WAREHOUSE_NAME", how="left")
-    agg["AUTO_SUSPEND_KNOWN"] = agg["AUTO_SUSPEND"].notna()
-    return idle_advisor(agg, _IDLE_PRICE, days).set_index("WAREHOUSE_NAME")
+    # SHOW-shaped (lower-case name / auto_suspend), so a listed NULL timer reads exactly as on the page
+    live = pd.DataFrame([{"name": wh, "auto_suspend": s[-1]} for wh, s in _IDLE_SPEC.items() if wh != "WH_G"])
+    return idle_advisor(with_auto_suspend_settings(agg, live), _IDLE_PRICE, days).set_index("WAREHOUSE_NAME")
+
+
+# R1-071 (the deferred SQL half): the app reads a SHOW-listed NULL auto_suspend as the KNOWN never-suspend 0
+# (insights.show_auto_suspend), so WH_D is ACTIONABLE on Optimize ▸ Idle; this migration's [24] (carried
+# byte-identical by its later definers) still requires `w.AUTO_SUSPEND IS NOT NULL` and skips it. An EXPECTED,
+# tracked divergence: the re-derivation of [24] that reads a NULL snapshot timer as never-suspend owns closing
+# it, and its own parity test must assert the full set (no carve-out).
+_ARM24_NULL_TIMER_GAP = {"WH_D"}
 
 
 def _by_wh(rows: list[dict]) -> dict:
@@ -1503,18 +1510,23 @@ def test_v157_arm24_executed_sql_matches_insights_idle_advisor():
     """Formula parity with the Optimize ACTIONABLE figure, SQL vs app: the shipped [24] text is EXECUTED over
     the fixture and must raise exactly the app's ACTIONABLE warehouses at its USD/month (same flag, same
     resume-tail haircut, same run-rate, same settings gate) -- and never a warehouse missing from the newest
-    SHOW WAREHOUSES batch."""
+    SHOW WAREHOUSES batch -- except the one tracked NULL-timer gap (_ARM24_NULL_TIMER_GAP, R1-071)."""
     app = _idle_app_side()
     app_actionable = set(app.index[app["ACTIONABLE"].astype(bool)])
-    assert app_actionable == {"WH_A", "WH_C", "WH_E"}
+    assert app_actionable == {"WH_A", "WH_C", "WH_D", "WH_E"}
     assert app.loc["WH_E", "IDLE_PCT"] == 20.0 and bool(app.loc["WH_E", "FLAGGED"])
     assert not bool(app.loc["WH_F", "FLAGGED"]) and app.loc["WH_B", "ACTION_STATUS"] == "ALREADY TUNED"
-    assert app.loc["WH_D", "ACTION_STATUS"] == "VERIFY SETTING"
+    # R1-071: a SHOW-listed NULL timer is the known never-suspend 0 on the app side -- WH_C's twin
+    assert app.loc["WH_D", "ACTION_STATUS"] == "ACTIONABLE" and app.loc["WH_D", "AUTO_SUSPEND"] == 0
+    assert app.loc["WH_D", "ACTIONABLE_MONTHLY_USD"] == pytest.approx(app.loc["WH_C", "ACTIONABLE_MONTHLY_USD"])
     assert app.loc["WH_G", "ACTION_STATUS"] == "VERIFY SETTING"          # not in live SHOW WAREHOUSES
 
     arm = _by_wh(_run_arm(_ARM24, _idle_tables(), _IDLE_NOW, _IDLE_PRICE))
-    assert set(arm) == app_actionable, sorted(arm)
-    for wh in app_actionable:
+    # the gap is exactly the arm's NOT NULL settings gate: nothing else may diverge
+    assert "AND w.AUTO_SUSPEND IS NOT NULL" in _ARM24
+    assert app_actionable >= _ARM24_NULL_TIMER_GAP and not _ARM24_NULL_TIMER_GAP & set(arm)
+    assert set(arm) == app_actionable - _ARM24_NULL_TIMER_GAP, sorted(arm)
+    for wh in app_actionable - _ARM24_NULL_TIMER_GAP:
         assert abs(arm[wh]["METRIC_VALUE"] - app.loc[wh, "ACTIONABLE_MONTHLY_USD"]) <= 0.05, wh
     # hand-checked anchors (catch a formula drift shared by both sides): WH_A recovers 63 idle credits minus
     # 84 active hours x 60s x 1 credit/h = 61.6 credits over 14 days -> 61.6 x 3.68 / 14 x 30; WH_E (2.5

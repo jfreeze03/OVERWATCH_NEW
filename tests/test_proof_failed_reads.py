@@ -140,3 +140,51 @@ def test_successful_side_reads_keep_their_counts(monkeypatch):
     cards = _cards(seen)
     assert "done ·" in cards["Acted on"]["delta"] and "actioned ·" in cards["Alert precision"]["delta"]
     assert not [m for _s, m in seen["empty"] if "Team follow-through" in m or "Alert precision" in m]
+
+
+# ------------------------------------------------------------- Proof ▸ Pipeline projection defaults ----
+
+class _Stop(Exception):
+    """Raised by the stubbed projection fragment: the defaults are what this test is about."""
+
+
+def _pipeline_defaults(monkeypatch, failing: dict[str, QueryResult]) -> dict:
+    from types import SimpleNamespace
+    _patch(monkeypatch, failing)
+    got: dict = {}
+
+    def fake_projection(_frame, defaults):
+        got.update(defaults)
+        raise _Stop
+
+    monkeypatch.setattr(ds, "st", SimpleNamespace(session_state={}, toggle=lambda *_a, **_k: False,
+                                                  caption=lambda *_a, **_k: None, button=lambda *_a, **_k: False))
+    monkeypatch.setattr(ds, "load_settings", lambda *_a, **_k: {})
+    # one priced open row, so the tab reaches the projection whatever the shaped stubs return
+    monkeypatch.setattr(ds, "pipeline_frame", lambda *_a, **_k: pd.DataFrame([{
+        "ACTION_ID": "a", "STATUS": "OPEN", "PERIOD": "MONTHLY", "SOURCE_ENTITY_TYPE": "WAREHOUSE",
+        "SOURCE_ENTITY_KEY": "WH_A", "CONFIDENCE": 0.8, "ESTIMATED_USD": 100.0}]))
+    monkeypatch.setattr(ds, "_pipeline_projection", fake_projection)
+    with pytest.raises(_Stop):
+        ds._pipeline_tab("ALL", 30, 3.68)
+    return got
+
+
+@pytest.mark.parametrize(("kind", "reason"), [
+    *((k, "the proof record could not be read (the savings-ledger read failed)") for k in _FAILED),
+    ("absent", "the proof record is not set up yet"), ("unknown_function", "the proof record is not set up yet"),
+    ("privilege", "this app's role cannot read the proof record yet")])
+def test_pipeline_defaults_after_a_failed_ledger_read_claim_nothing_measured(monkeypatch, kind, reason):
+    """R1-209 review: a failed ledger read returns before the acceptance read, so neither 'nothing decided yet'
+    nor 'no verified item' is known -- both defaults are placeholders because the record was not read."""
+    d = _pipeline_defaults(monkeypatch, {"decision_roi_ledger_full": _failed(kind)})
+    assert (d["adoption"], d["realization"]) == (ds._ASSUMED_ADOPTION_PCT, ds._ASSUMED_REALIZATION_PCT)
+    for help_text in (d["adoption_help"], d["realization_help"]):
+        assert help_text.startswith("Assumed — ") and reason in help_text and "placeholder" in help_text
+        assert "nothing decided yet" not in help_text and "no verified item" not in help_text
+
+
+def test_pipeline_defaults_after_a_good_ledger_read_keep_their_measured_wording(monkeypatch):
+    d = _pipeline_defaults(monkeypatch, {})
+    for help_text in (d["adoption_help"], d["realization_help"]):
+        assert "proof record" not in help_text

@@ -35,6 +35,7 @@ from app.logic.formulas import (
     md_dollars,
     safe_float,
 )
+from app.logic.insights import show_auto_suspend
 from app.logic.navigate import fix_target, inline_fix_warehouse, investigation_target
 from app.logic.playbooks import playbook_for
 from app.logic.verdict import Signal, page_verdict
@@ -684,7 +685,9 @@ def _plan_notice(plan: dict | None) -> None:
 def _auto_suspend_in_force(show_df: pd.DataFrame | None, warehouse: str) -> tuple[bool, float | None]:
     """(known, seconds) for ``warehouse``'s AUTO_SUSPEND from a SHOW WAREHOUSES frame; (False, None) when the
     read failed (None), the exact-name row is absent (LIKE's '_' wildcard can return near-name rows) or the
-    value is unreadable/NULL -- the tighten guard then generates no ALTER. Pure; never raises."""
+    value is unparseable -- the tighten guard then generates no ALTER. R1-071: a NULL on a listed row is the
+    KNOWN never-suspend setting (insights.show_auto_suspend reads it as 0), so it gets the enable-a-timer
+    ALTER instead of a false "could not read". Pure; never raises."""
     if show_df is None or show_df.empty:
         return False, None
     df = show_df.copy()
@@ -694,8 +697,8 @@ def _auto_suspend_in_force(show_df: pd.DataFrame | None, warehouse: str) -> tupl
     match = df[df["name"].astype(str).str.strip().str.upper() == str(warehouse or "").strip().upper()]
     if match.empty:
         return False, None
-    value = pd.to_numeric(match.iloc[0].get("auto_suspend"), errors="coerce")
-    return (True, float(value)) if pd.notna(value) else (False, None)
+    value = show_auto_suspend(match.iloc[0].get("auto_suspend"))
+    return (True, float(value)) if value is not None else (False, None)
 
 
 # The cap the drawer's 'Statement timeout 1h' lever sets (its impact read covers stmt_timeout.IMPACT_DAYS).
