@@ -303,20 +303,35 @@ def anomaly_summary(df: pd.DataFrame, label_col: str, value_col: str,
     ]
 
 
+# R1-074: PEAK_QUEUED is a single-interval MAX(AVG_QUEUED_LOAD), so on its own it cannot say
+# "sustained". ops_sql.warehouse_concurrency_peaks also returns QUEUED_INTERVALS (the intervals with
+# AVG_QUEUED_LOAD > 0.5); queueing counts as sustained — and sorts above every spend anomaly — only
+# from this many such intervals: ~30 minutes at the load view's 5-minute grain, the same bar as
+# sizing.QUEUE_UP_MIN_PER_DAY's "sustained overload" (30 min/day).
+QUEUE_MIN_INTERVALS = 6
+
+
 def warehouse_attention_ranking(anomalies: pd.DataFrame, peaks: pd.DataFrame | None,
-                                *, queue_floor: float = 1.0) -> pd.DataFrame:
+                                *, queue_floor: float = 1.0,
+                                min_queued_intervals: int = QUEUE_MIN_INTERVALS) -> pd.DataFrame:
     """rec5: merge the two ALREADY-loaded warehouse signals — daily-spend anomalies and
     sustained concurrency queueing — into one worst-first "needs attention now" table for
     the Warehouses opener. Pure pandas: no Streamlit, no new read.
 
     ``anomalies`` is the flagged-anomaly subset (the IS_ANOMALY rows, cols WAREHOUSE_NAME,
-    USD, Z_SCORE). ``peaks`` is the concurrency-peaks frame (WAREHOUSE_NAME, PEAK_QUEUED),
-    or None when that read failed. Returns one row per flagged warehouse with WORST_Z
+    USD, Z_SCORE). ``peaks`` is the concurrency-peaks frame (WAREHOUSE_NAME, PEAK_QUEUED,
+    QUEUED_INTERVALS), or None when that read failed. A warehouse is in the queue signal when
+    its PEAK_QUEUED reaches ``queue_floor`` AND it queued in at least ``min_queued_intervals``
+    intervals (R1-074: a one-off 5-minute burst is not "users feeling it now"); a frame without
+    QUEUED_INTERVALS (an older shape) keeps the peak as a plain peak — shown, never called
+    sustained, never sorted first. Returns one row per flagged warehouse with WORST_Z
     (max |z|), ANOM_DAYS (count of anomalous days), ANOM_USD (summed anomalous-day spend),
-    PEAK_QUEUED, and a human REASON — sorted queueing-first, then by |z|, then queue depth.
-    Empty frame when nothing is anomalous or queueing (so the opener shows the clean state).
-    Column names carry no _SEC/_MS suffix: these are counts and dollars, not durations."""
-    cols = ["WAREHOUSE_NAME", "WORST_Z", "ANOM_DAYS", "ANOM_USD", "PEAK_QUEUED", "REASON"]
+    PEAK_QUEUED, QUEUED_INTERVALS and a human REASON — sorted sustained-queueing-first, then by
+    |z|, then queue depth. Empty frame when nothing is anomalous or queueing (so the opener
+    shows the clean state). Column names carry no _SEC/_MS suffix: these are counts and
+    dollars, not durations."""
+    cols = ["WAREHOUSE_NAME", "WORST_Z", "ANOM_DAYS", "ANOM_USD", "PEAK_QUEUED", "QUEUED_INTERVALS",
+            "REASON"]
     if anomalies is not None and not anomalies.empty \
             and {"WAREHOUSE_NAME", "Z_SCORE"}.issubset(anomalies.columns):
         _a = anomalies.copy()
@@ -339,16 +354,24 @@ def warehouse_attention_ranking(anomalies: pd.DataFrame, peaks: pd.DataFrame | N
             and {"WAREHOUSE_NAME", "PEAK_QUEUED"}.issubset(peaks.columns):
         _p = peaks.copy()
         _p["PEAK_QUEUED"] = pd.to_numeric(_p["PEAK_QUEUED"], errors="coerce")
-        queue = (_p[_p["PEAK_QUEUED"] >= queue_floor]
-                 .groupby("WAREHOUSE_NAME", as_index=False)["PEAK_QUEUED"].max())
+        # NaN when the frame predates the count: the peak then stays a plain (unsorted) peak
+        _p["QUEUED_INTERVALS"] = (pd.to_numeric(_p["QUEUED_INTERVALS"], errors="coerce")
+                                  if "QUEUED_INTERVALS" in _p.columns else float("nan"))
+        _p = _p[(_p["PEAK_QUEUED"] >= queue_floor)
+                & (_p["QUEUED_INTERVALS"].isna() | (_p["QUEUED_INTERVALS"] >= int(min_queued_intervals)))]
+        queue = _p.groupby("WAREHOUSE_NAME", as_index=False).agg(
+            PEAK_QUEUED=("PEAK_QUEUED", "max"), QUEUED_INTERVALS=("QUEUED_INTERVALS", "max"))
     else:
         queue = pd.DataFrame({
             "WAREHOUSE_NAME": pd.Series(dtype=object),
             "PEAK_QUEUED": pd.Series(dtype="float64"),
+            "QUEUED_INTERVALS": pd.Series(dtype="float64"),
         })
     if spend.empty and queue.empty:
         return pd.DataFrame(columns=cols)
     merged = spend.merge(queue, on="WAREHOUSE_NAME", how="outer")
+    # sustained = the interval gate passed (a known count); a count-less peak is only a peak
+    merged["_HAS_Q"] = merged["PEAK_QUEUED"].notna() & merged["QUEUED_INTERVALS"].notna()
 
     def _reason(row) -> str:
         parts = []
@@ -358,13 +381,16 @@ def warehouse_attention_ranking(anomalies: pd.DataFrame, peaks: pd.DataFrame | N
             parts.append(f"spend anomaly z={float(_z):.1f} on {_d} day{'s' if _d != 1 else ''}")
         _q = row.get("PEAK_QUEUED")
         if pd.notna(_q):
-            parts.append(f"queued ~{float(_q):.1f} sustained")
+            if row.get("_HAS_Q"):
+                _n = int(row.get("QUEUED_INTERVALS") or 0)
+                parts.append(f"queued ~{float(_q):.1f} sustained ({_n} queued intervals)")
+            else:
+                parts.append(f"peak queued ~{float(_q):.1f}")
         return " · ".join(parts)
 
     merged["REASON"] = merged.apply(_reason, axis=1)
-    # Worst-first: a queueing warehouse (users feeling it now) outranks a pure spend
+    # Worst-first: a SUSTAINED-queueing warehouse (users feeling it now) outranks a pure spend
     # anomaly, then by |z|, then by queue depth.
-    merged["_HAS_Q"] = merged["PEAK_QUEUED"].notna()
     merged = (merged.sort_values(by=["_HAS_Q", "WORST_Z", "PEAK_QUEUED"],
                                  ascending=[False, False, False], na_position="last")
               .drop(columns="_HAS_Q"))

@@ -13,8 +13,13 @@ def _anoms(rows: list[tuple[str, float, float]]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["WAREHOUSE_NAME", "USD", "Z_SCORE"])
 
 
-def _peaks(rows: list[tuple[str, float]]) -> pd.DataFrame:
-    return pd.DataFrame(rows, columns=["WAREHOUSE_NAME", "PEAK_QUEUED"])
+def _peaks(rows: list[tuple[str, float]], intervals: int = 24) -> pd.DataFrame:
+    # the builder's real shape (ops_sql.warehouse_concurrency_peaks): R1-074 gates "sustained" on
+    # QUEUED_INTERVALS, so a default fixture models a warehouse that queued for ~2h of intervals
+    df = pd.DataFrame(rows, columns=["WAREHOUSE_NAME", "PEAK_QUEUED"])
+    df["QUEUED_INTERVALS"] = intervals
+    df["INTERVALS"] = 4000
+    return df
 
 
 def test_merges_both_signals_and_queueing_sorts_above_pure_spend() -> None:
@@ -54,7 +59,36 @@ def test_empty_inputs_and_none_peaks_return_empty() -> None:
 
 def test_columns_are_stable_and_carry_no_duration_suffix() -> None:
     out = warehouse_attention_ranking(_anoms([("WH_A", 100.0, 4.0)]), _peaks([("WH_B", 2.0)]))
+    # R1-074 added QUEUED_INTERVALS (the count behind "sustained") between PEAK_QUEUED and REASON
     assert list(out.columns) == [
-        "WAREHOUSE_NAME", "WORST_Z", "ANOM_DAYS", "ANOM_USD", "PEAK_QUEUED", "REASON"]
+        "WAREHOUSE_NAME", "WORST_Z", "ANOM_DAYS", "ANOM_USD", "PEAK_QUEUED", "QUEUED_INTERVALS", "REASON"]
     # counts + dollars, never durations -> no _SEC/_MS/_S suffix obligation
     assert not any(c.endswith(("_SEC", "_MS", "_S", "_MIN")) for c in out.columns)
+
+
+def test_a_one_interval_burst_is_not_sustained_and_never_outranks_spend() -> None:
+    """R1-074: PEAK_QUEUED is a single-interval MAX. A 5-minute burst (1 queued interval of 4000)
+    used to read "queued ~1.0 sustained" and sort above a z=12 $9,000 spend anomaly -- five such
+    bursts pushed every real anomaly out of the opener's head(5)."""
+    from app.logic.anomaly import QUEUE_MIN_INTERVALS
+
+    anomalies = _anoms([("WH_PROD", 9000.0, 12.0)])
+    bursts = pd.concat([_peaks([(f"WH_SANDBOX_{i}", 1.0)], intervals=1) for i in range(5)])
+    out = warehouse_attention_ranking(anomalies, bursts)
+    assert list(out["WAREHOUSE_NAME"]) == ["WH_PROD"]                # the bursts are not attention
+    assert "sustained" not in " ".join(out["REASON"])
+    # at the floor the queue signal is real again, sorts first and says how long
+    held = _peaks([("WH_BUSY", 1.0)], intervals=QUEUE_MIN_INTERVALS)
+    out = warehouse_attention_ranking(anomalies, held)
+    assert list(out["WAREHOUSE_NAME"]) == ["WH_BUSY", "WH_PROD"]
+    assert out.iloc[0]["REASON"] == f"queued ~1.0 sustained ({QUEUE_MIN_INTERVALS} queued intervals)"
+    assert int(out.iloc[0]["QUEUED_INTERVALS"]) == QUEUE_MIN_INTERVALS
+
+
+def test_a_peak_without_an_interval_count_is_only_a_peak() -> None:
+    # an older frame shape (no QUEUED_INTERVALS): the peak is shown, never called sustained,
+    # never sorted above a spend anomaly
+    peaks = pd.DataFrame({"WAREHOUSE_NAME": ["WH_OLDSHAPE"], "PEAK_QUEUED": [3.0]})
+    out = warehouse_attention_ranking(_anoms([("WH_PROD", 900.0, 5.0)]), peaks)
+    assert list(out["WAREHOUSE_NAME"]) == ["WH_PROD", "WH_OLDSHAPE"]
+    assert out.iloc[1]["REASON"] == "peak queued ~3.0"
