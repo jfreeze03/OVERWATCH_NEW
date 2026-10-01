@@ -6,9 +6,13 @@ inflating the baseline. Pure functions over pandas frames; no Streamlit.
 
 from __future__ import annotations
 
+import math
 from datetime import timedelta
 
 import pandas as pd
+
+from .formulas import humanize_duration
+from .sizing import QUEUE_UP_MIN_PER_DAY
 
 # Standard-normal consistency constants (Iglewicz & Hoaglin modified z-scores).
 _MAD_K = 0.6745
@@ -304,28 +308,42 @@ def anomaly_summary(df: pd.DataFrame, label_col: str, value_col: str,
 
 
 # R1-074: PEAK_QUEUED is a single-interval MAX(AVG_QUEUED_LOAD), so on its own it cannot say
-# "sustained". ops_sql.warehouse_concurrency_peaks also returns QUEUED_INTERVALS (the intervals with
-# AVG_QUEUED_LOAD > 0.5); queueing counts as sustained — and sorts above every spend anomaly — only
-# from this many such intervals: ~30 minutes at the load view's 5-minute grain, the same bar as
-# sizing.QUEUE_UP_MIN_PER_DAY's "sustained overload" (30 min/day).
-QUEUE_MIN_INTERVALS = 6
+# "sustained". ops_sql.warehouse_concurrency_peaks also returns QUEUED_INTERVALS: the intervals with
+# AVG_QUEUED_LOAD > 0.5, counted over the WHOLE read window (not per day). Queueing counts as
+# sustained, and sorts above every spend anomaly, only at sizing.QUEUE_UP_MIN_PER_DAY's
+# "sustained overload" RATE (30 min/day) across that window: 30 min x 14 days / 5 min = 84 queued
+# intervals on the opener. (Review r1: a flat 6 was 30 min per 14 days, ~2 min/day, so six scattered
+# 5-minute bursts still read "sustained".) The rate is the same; the measure differs: wall-clock
+# queued intervals here, summed per-query overload queue time in sizing.
+LOAD_INTERVAL_MIN = 5              # ACCOUNT_USAGE.WAREHOUSE_LOAD_HISTORY's interval grain
+# The window the Warehouses opener reads warehouse_concurrency_peaks over
+# (operations._wh_activity_anomalies); tests/test_wh_attention.py locks the call sites to it.
+ATTENTION_PEAKS_WINDOW_DAYS = 14
+
+
+def sustained_queue_min_intervals(window_days: int = ATTENTION_PEAKS_WINDOW_DAYS) -> int:
+    """The QUEUED_INTERVALS count that reaches sizing.QUEUE_UP_MIN_PER_DAY (minutes of queueing per
+    day) over a ``window_days`` peaks window at the load view's LOAD_INTERVAL_MIN grain."""
+    return max(1, math.ceil(QUEUE_UP_MIN_PER_DAY * max(int(window_days), 1) / LOAD_INTERVAL_MIN))
 
 
 def warehouse_attention_ranking(anomalies: pd.DataFrame, peaks: pd.DataFrame | None,
                                 *, queue_floor: float = 1.0,
-                                min_queued_intervals: int = QUEUE_MIN_INTERVALS) -> pd.DataFrame:
+                                window_days: int = ATTENTION_PEAKS_WINDOW_DAYS) -> pd.DataFrame:
     """rec5: merge the two ALREADY-loaded warehouse signals — daily-spend anomalies and
     sustained concurrency queueing — into one worst-first "needs attention now" table for
     the Warehouses opener. Pure pandas: no Streamlit, no new read.
 
     ``anomalies`` is the flagged-anomaly subset (the IS_ANOMALY rows, cols WAREHOUSE_NAME,
     USD, Z_SCORE). ``peaks`` is the concurrency-peaks frame (WAREHOUSE_NAME, PEAK_QUEUED,
-    QUEUED_INTERVALS), or None when that read failed. A warehouse is in the queue signal when
-    its PEAK_QUEUED reaches ``queue_floor`` AND it queued in at least ``min_queued_intervals``
-    intervals (R1-074: a one-off 5-minute burst is not "users feeling it now"); a frame without
-    QUEUED_INTERVALS (an older shape) keeps the peak as a plain peak — shown, never called
-    sustained, never sorted first. Returns one row per flagged warehouse with WORST_Z
-    (max |z|), ANOM_DAYS (count of anomalous days), ANOM_USD (summed anomalous-day spend),
+    QUEUED_INTERVALS) read over ``window_days``, or None when that read failed. A warehouse is in
+    the queue signal when its PEAK_QUEUED reaches ``queue_floor`` AND its QUEUED_INTERVALS reach
+    ``sustained_queue_min_intervals(window_days)``, i.e. sizing's 30 min/day sustained-overload rate
+    across the window (R1-074: a one-off 5-minute burst, or a few scattered ones, is not "users
+    feeling it now"); a frame without QUEUED_INTERVALS (an older shape) keeps the peak as a plain
+    peak — shown, never called sustained, never sorted first. Returns one row per flagged
+    warehouse with WORST_Z (max |z|), ANOM_DAYS (count of anomalous days), ANOM_USD (summed
+    anomalous-day spend),
     PEAK_QUEUED, QUEUED_INTERVALS and a human REASON — sorted sustained-queueing-first, then by
     |z|, then queue depth. Empty frame when nothing is anomalous or queueing (so the opener
     shows the clean state). Column names carry no _SEC/_MS suffix: these are counts and
@@ -357,8 +375,9 @@ def warehouse_attention_ranking(anomalies: pd.DataFrame, peaks: pd.DataFrame | N
         # NaN when the frame predates the count: the peak then stays a plain (unsorted) peak
         _p["QUEUED_INTERVALS"] = (pd.to_numeric(_p["QUEUED_INTERVALS"], errors="coerce")
                                   if "QUEUED_INTERVALS" in _p.columns else float("nan"))
+        _min_n = sustained_queue_min_intervals(window_days)
         _p = _p[(_p["PEAK_QUEUED"] >= queue_floor)
-                & (_p["QUEUED_INTERVALS"].isna() | (_p["QUEUED_INTERVALS"] >= int(min_queued_intervals)))]
+                & (_p["QUEUED_INTERVALS"].isna() | (_p["QUEUED_INTERVALS"] >= _min_n))]
         queue = _p.groupby("WAREHOUSE_NAME", as_index=False).agg(
             PEAK_QUEUED=("PEAK_QUEUED", "max"), QUEUED_INTERVALS=("QUEUED_INTERVALS", "max"))
     else:
@@ -372,6 +391,7 @@ def warehouse_attention_ranking(anomalies: pd.DataFrame, peaks: pd.DataFrame | N
     merged = spend.merge(queue, on="WAREHOUSE_NAME", how="outer")
     # sustained = the interval gate passed (a known count); a count-less peak is only a peak
     merged["_HAS_Q"] = merged["PEAK_QUEUED"].notna() & merged["QUEUED_INTERVALS"].notna()
+    _days = max(int(window_days), 1)
 
     def _reason(row) -> str:
         parts = []
@@ -382,8 +402,10 @@ def warehouse_attention_ranking(anomalies: pd.DataFrame, peaks: pd.DataFrame | N
         _q = row.get("PEAK_QUEUED")
         if pd.notna(_q):
             if row.get("_HAS_Q"):
-                _n = int(row.get("QUEUED_INTERVALS") or 0)
-                parts.append(f"queued ~{float(_q):.1f} sustained ({_n} queued intervals)")
+                # the per-day rate the gate measured, whole minutes, humanized (never raw minutes)
+                _per_day = round(float(row.get("QUEUED_INTERVALS") or 0) * LOAD_INTERVAL_MIN / _days)
+                parts.append(f"queued ~{float(_q):.1f} sustained "
+                             f"(~{humanize_duration(_per_day, 'min')}/day over {_days}d)")
             else:
                 parts.append(f"peak queued ~{float(_q):.1f}")
         return " · ".join(parts)
