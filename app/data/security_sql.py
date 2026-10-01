@@ -2196,6 +2196,14 @@ def security_login_fact_coverage(days: int = 30, *, bounds: tuple | None = None,
     # fact_coverage_complete keeps the page on the live path until the fact is genuinely dense.
     days = bounded_days(days, maximum=90)
     lookback = max(0, min(int(lookback or 0), NETWORK_BASELINE_DAYS))
+    return _fact_day_coverage("FACT_SECURITY_LOGIN_DAILY", days, bounds, lookback)
+
+
+def _fact_day_coverage(table: str, days: int, bounds: tuple | None, lookback: int = 0) -> str:
+    """Complete-day DENSITY of a DAY-keyed fact over a served span (see security_login_fact_coverage,
+    whose contract this is): COVERAGE_DAYS = distinct days before today (and before the range end)
+    from the span start back ``lookback`` days; LAST_DAY = the fact's newest day (freshness). Pair it
+    with ``logic.security.coverage_required_days(days, bounds, lookback=...)``."""
     if bounds is not None:
         _start, _end = bounds
         _first = (_start - timedelta(days=lookback)).isoformat()
@@ -2206,16 +2214,39 @@ SELECT MIN(DAY) AS FIRST_DAY, MAX(DAY) AS LAST_DAY, COUNT(*) AS FACT_ROWS,
        COUNT(DISTINCT IFF(DAY < LEAST('{_end.isoformat()}'::DATE, {account_today_sql()}), DAY, NULL))
            AS COVERAGE_DAYS,
        MAX(LOAD_TS) AS LAST_LOAD
-FROM {core_object('FACT_SECURITY_LOGIN_DAILY')}
+FROM {core_object(table)}
 WHERE DAY >= '{_first}'
 """
     return f"""
 SELECT MIN(DAY) AS FIRST_DAY, MAX(DAY) AS LAST_DAY, COUNT(*) AS FACT_ROWS,
        COUNT(DISTINCT IFF(DAY < CURRENT_DATE(), DAY, NULL)) AS COVERAGE_DAYS,
        MAX(LOAD_TS) AS LAST_LOAD
-FROM {core_object('FACT_SECURITY_LOGIN_DAILY')}
+FROM {core_object(table)}
 WHERE DAY >= DATEADD('day', -{days + lookback}, CURRENT_DATE())
 """
+
+
+def security_change_fact_coverage(days: int = 30, *, bounds: tuple | None = None) -> str:
+    """Span proof for the fact-served 'Who changed what' panel: FACT_SECURITY_CHANGE's complete-day
+    density over exactly the window ``recent_ddl_changes_fact`` serves (90-day cap, calendar bounds
+    capped too). Pair it with ``logic.security.coverage_required_days(days, bounds)`` over the same
+    ``capped_window(days, bounds, 90)``.
+
+    CHANGE RISK COMPLETE (``security_domain_coverage``) proves FRESHNESS only: the extract and the
+    fact were both stamped in the last 3 hours. The fact is refilled hourly from the 72-hour
+    OW_QH_EXTRACT alone (V105's d<=3 arm), and the extract's catch-up is clamped at that retention
+    (V152), so a loader or task-tree outage longer than 72 hours leaves a permanent hole (V100's
+    header records one such loss). An hour after the loader resumes the stamps read COMPLETE again,
+    and a 7-90 day panel served from the holed fact under its 'last N days' label, down to the green
+    'No DDL/DCL changes recorded' state and the High-risk / Unregistered KPIs. Every served day must
+    now hold fact rows, or the panel keeps the live QUERY_HISTORY read (the safe direction, and the
+    cost it paid before the fact could serve). The fact keeps every successful DDL/DCL statement
+    (ALTER_SESSION and the ETL's CREATE/DROP churn included), so a real day is rarely empty; a
+    genuinely quiet day only costs the live read. A loss shorter than a whole day is below this
+    day-grain check, as it is for the login facts."""
+    days = bounded_days(days, maximum=90)
+    bounds = capped_window(days, bounds, 90)[1]
+    return _fact_day_coverage("FACT_SECURITY_CHANGE", days, bounds)
 
 
 def failed_logins_fact(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:

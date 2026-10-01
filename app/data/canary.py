@@ -108,6 +108,7 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("security.trust_center_delta", security_sql.trust_center_delta),
     ("security.login_fact_coverage", lambda: security_sql.login_fact_coverage(1)),
     ("security.security_login_fact_coverage", lambda: security_sql.security_login_fact_coverage(1)),
+    ("security.security_change_fact_coverage", lambda: security_sql.security_change_fact_coverage(1)),
     ("security.failed_logins_fact", lambda: security_sql.failed_logins_fact(1, "ALFA")),
     ("security.failed_login_reasons_fact", lambda: security_sql.failed_login_reasons_fact(1, "ALFA")),
     ("security.new_network_logins_fact", lambda: security_sql.new_network_logins_fact(1)),
@@ -128,6 +129,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     # is their only drift record. Between them they cover every ACCESS_HISTORY column the app reads:
     # QUERY_START_TIME, BASE_OBJECTS_ACCESSED, OBJECTS_MODIFIED (+ the GRANTS_TO_ROLES / TABLE_STORAGE_METRICS
     # bridge), DIRECT_OBJECTS_ACCESSED, USER_NAME and QUERY_ID (+ the ENTITY_CATALOG join).
+    # tests/test_security_e1_fixes.py finds every reader in app/ and the columns each one reads, and fails on
+    # one no canary below reads.
     ("security.access_evidence_days", security_sql.access_evidence_days),
     ("security.grant_scope_usage", lambda: security_sql.grant_scope_usage(1, 1)),
     ("security.unused_table_grants", lambda: security_sql.unused_table_grants(1, 1)),

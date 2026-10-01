@@ -3,10 +3,12 @@
 Each test drives the real builder (executed through sqlglot -> SQLite where the arithmetic matters) or the
 real page/panel function with recording fakes, and fails on the pre-fix tree (e504d089):
 
-* R2-006  CHANGE RISK coverage accepts the extract loader's own STATUS stamp ('loader'), so it can be COMPLETE.
+* R2-006  CHANGE RISK coverage accepts the extract loader's own STATUS stamp ('loader'), so it can be COMPLETE;
+          COMPLETE is freshness only, so 'Who changed what' serves the fact only when it holds every served day.
 * R2-032  Trust Center 'Worsening scanners' counts REGRESSED scanners only, never a brand-new one.
 * R2-054  Egress vs-prior on the 1st of the period (CalendarDayOffset(0)) is a 1-day span, not 30.
-* R2-069  every ACCESS_HISTORY column the app reads is covered by a FAIL-on-drift canary.
+* R2-069  every ACCESS_HISTORY column the app reads is covered by a FAIL-on-drift canary (readers and columns
+          are discovered, not listed).
 * R2-079  a failed 90-day posture read renders 'unavailable' instead of vanishing.
 * R2-080  the governance score names the read(s) that actually served it.
 * R2-081  the service-account split note is worded by the failed read's KIND.
@@ -18,8 +20,10 @@ real page/panel function with recording fakes, and fails on the pre-fix tree (e5
 
 from __future__ import annotations
 
+import ast
 import re
 import sqlite3
+from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
@@ -27,9 +31,10 @@ import pandas as pd
 import pytest
 import sqlglot
 
+from app.config import CURRENT_MONTH_WINDOW, CURRENT_YEAR_WINDOW, LAST_MONTH_WINDOW
 from app.core.result import QueryResult
-from app.data import canary, security_sql
-from app.logic.date_windows import CalendarDayOffset
+from app.data import canary, graph_sql, insights_sql, security_sql, workbench_sql
+from app.logic.date_windows import CalendarDayOffset, window_bounds
 from tests._source import ROOT
 
 _SETUP = ("absent", "privilege", "unknown_function")
@@ -225,6 +230,110 @@ def test_accepted_extract_status_is_the_one_the_latest_definer_writes():
         assert f"'{status}'" in qhx.split("SELECT", 1)[1]
 
 
+# ============================== R2-006 follow-up: COMPLETE proves freshness, the served span needs density ====
+# bcdec477 made CHANGE RISK able to read COMPLETE, which made the dormant fact path of 'Who changed what' live. That
+# contract is 3h freshness only. FACT_SECURITY_CHANGE refills hourly from the 72h OW_QH_EXTRACT alone, so an outage
+# past 72h leaves a permanent hole, and an hour after the loader resumes the stamps read COMPLETE again: the 7-90
+# day panel served the holed fact, green 'No DDL/DCL changes' state and zero KPIs included.
+
+_SPAN_TODAY = date(2026, 9, 30)
+_SPAN_WINDOWS = [(7, None), (30, None), (90, None), (365, None),
+                 (0, CURRENT_MONTH_WINDOW), (0, LAST_MONTH_WINDOW), (0, CURRENT_YEAR_WINDOW)]
+
+
+def _span_gate(monkeypatch, days: int, window: str | None, present: set[date]) -> tuple[bool, date, date]:
+    """(gate, first served day, last complete served day): the page's own span gate (capped_window(.., 90) +
+    coverage_required_days + fact_coverage_complete) over security_change_fact_coverage's SQL, evaluated by the
+    c05 coverage simulator against a FACT_SECURITY_CHANGE holding rows on ``present`` days."""
+    from app.logic import security as logic
+    from tests.test_security_c05_fixes import _simulated_coverage
+    monkeypatch.setattr(logic, "account_today", lambda: _SPAN_TODAY)
+    bounds = window_bounds(window, _SPAN_TODAY) if window else None
+    cd, cb = logic.capped_window(days, bounds, 90)
+    sql = security_sql.security_change_fact_coverage(cd, bounds=cb)
+    assert "FACT_SECURITY_CHANGE" in sql
+    gate = logic.fact_coverage_complete(_simulated_coverage(lambda _t: present)(sql),
+                                        logic.coverage_required_days(cd, cb))
+    if cb is None:
+        return gate, _SPAN_TODAY - timedelta(days=cd), _SPAN_TODAY - timedelta(days=1)
+    return gate, cb[0], min(cb[1], _SPAN_TODAY) - timedelta(days=1)
+
+
+@pytest.mark.parametrize("days,window", _SPAN_WINDOWS, ids=[f"{d}d" if w is None else w for d, w in _SPAN_WINDOWS])
+def test_change_fact_span_gate_needs_every_served_day(monkeypatch, days, window):
+    dense = {_SPAN_TODAY - timedelta(days=n) for n in range(200)}
+    ok, first, last = _span_gate(monkeypatch, days, window, dense)
+    assert ok                                                               # a dense, fresh fact serves
+    assert _span_gate(monkeypatch, days, window, dense - {_SPAN_TODAY})[0]  # today's partition is not required
+    mid = first + (last - first) / 2
+    outage = {mid - timedelta(days=1), mid, mid + timedelta(days=1)}       # a >72h loader outage, lost for good
+    assert not _span_gate(monkeypatch, days, window, dense - outage)[0]
+    assert not _span_gate(monkeypatch, days, window, dense - {first})[0]    # the oldest served day counts too
+    young = {d for d in dense if d > first + timedelta(days=2)}             # MIN(DAY) after the served start
+    assert not _span_gate(monkeypatch, days, window, young)[0]
+    # a hole BEFORE the served span is not this window's problem
+    assert _span_gate(monkeypatch, days, window, dense - {first - timedelta(days=3)})[0]
+
+
+def _ddl_frame(user: str) -> pd.DataFrame:
+    return pd.DataFrame([{"DAY": pd.Timestamp("2026-09-29"), "USER_NAME": user, "ROLE_NAME": "R",
+                          "QUERY_TYPE": "GRANT", "DATABASE_NAME": "DB", "SCHEMA_NAME": "S", "STATEMENTS": 1,
+                          "LAST_CHANGE": pd.Timestamp("2026-09-29"), "RISK_LEVEL": "HIGH",
+                          "CHANGE_REGISTRATION": "UNREGISTERED", "TOTAL_GROUPS_WIN": 1,
+                          "HIGH_RISK_GROUPS_WIN": 1, "UNREGISTERED_GROUPS_WIN": 1}])
+
+
+def _drive_who_changed(monkeypatch, *, fact_rows: bool, present: set[date]) -> dict:
+    """'Who changed what' with FRESH stamps (CHANGE RISK COMPLETE) over a fact holding ``present`` days."""
+    from app.logic import security as logic
+    from tests.test_security_c05_fixes import _drive_changes, _simulated_coverage
+    monkeypatch.setattr(logic, "account_today", lambda: _SPAN_TODAY)
+    covered = _ok(pd.DataFrame([{"DOMAIN": "CHANGE RISK", "COVERAGE": "COMPLETE"}]))
+    return _drive_changes(monkeypatch, {
+        "sec_change_coverage": covered,
+        "ddl_fact_": _ok(_ddl_frame("FACT_USER") if fact_rows else None, source="FACT_SECURITY_CHANGE (hourly)"),
+        "sec_change_fact_span_": _simulated_coverage(lambda _t: present),
+        "ddl_ALL": _ok(_ddl_frame("LIVE_USER"), source="ACCOUNT_USAGE.QUERY_HISTORY (coverage fallback)"),
+    }, days=30)
+
+
+def _ddl_users_shown(seen: dict) -> set[str]:
+    return {str(u) for df in seen["tables"] if "USER_NAME" in df.columns for u in df["USER_NAME"]}
+
+
+@pytest.mark.parametrize("fact_rows", [False, True], ids=["empty-fact", "fact-with-rows"])
+def test_who_changed_what_serves_live_over_a_holed_fact_with_fresh_stamps(monkeypatch, fact_rows):
+    from tests.test_security_c05_fixes import _dense_fact
+    seen = _drive_who_changed(monkeypatch, fact_rows=fact_rows,
+                              present=_dense_fact(_SPAN_TODAY, holes=(10, 11, 12)))
+    keys = [key for key, _sql in seen["runs"]]
+    assert any(key.startswith("ddl_ALL") for key in keys)                  # the live QUERY_HISTORY read served
+    assert not [m for _k, m in seen["empty"] if "No DDL/DCL changes" in m]  # no all-clear from a holed fact
+    assert _ddl_users_shown(seen) == {"LIVE_USER"}
+    (span_sql,) = [sql for key, sql in seen["runs"] if key.startswith("sec_change_fact_span_")]
+    assert "FACT_SECURITY_CHANGE" in span_sql and "DATEADD('day', -30, CURRENT_DATE())" in span_sql
+
+
+@pytest.mark.parametrize("fact_rows", [False, True], ids=["empty-fact", "fact-with-rows"])
+def test_who_changed_what_serves_a_dense_fact(monkeypatch, fact_rows):
+    from tests.test_security_c05_fixes import _dense_fact
+    seen = _drive_who_changed(monkeypatch, fact_rows=fact_rows, present=_dense_fact(_SPAN_TODAY))
+    assert not any(key.startswith("ddl_ALL") for key, _sql in seen["runs"])  # no live scan when the fact covers
+    clean = [m for _k, m in seen["empty"] if "No DDL/DCL changes" in m]
+    if fact_rows:
+        assert not clean and _ddl_users_shown(seen) == {"FACT_USER"}
+    else:
+        assert clean == ["No DDL/DCL changes recorded in the last 30 days for this scope."]
+
+
+def test_who_changed_what_skips_the_span_read_when_the_domain_is_stale(monkeypatch):
+    from tests.test_security_c05_fixes import _drive_changes
+    stale = _ok(pd.DataFrame([{"DOMAIN": "CHANGE RISK", "COVERAGE": "STALE"}]))
+    seen = _drive_changes(monkeypatch, {"sec_change_coverage": stale}, days=30)
+    keys = [key for key, _sql in seen["runs"]]
+    assert not any(key.startswith("sec_change_fact_span_") for key in keys)
+    assert any(key.startswith("ddl_ALL") for key in keys)
+
 # ===================================================== R2-032: Worsening scanners = REGRESSED only ====
 
 def _delta_row(scanner: str, current: int, prior: int | None, state: str, severity: str = "HIGH") -> dict:
@@ -273,36 +382,159 @@ def test_egress_baseline_on_the_first_of_the_period_is_one_day():
 
 
 # ===================================================== R2-069: ACCESS_HISTORY drift FAILs in the canary ====
+# Both sides of the lock are DERIVED: the readers are found in app/ (a function whose SQL selects FROM/JOIN the
+# view, directly or through a module constant or private helper it uses), and the columns are read off the parsed
+# SQL (the view's alias-qualified columns, or its unqualified ones where it is the scope's only source). A new
+# reader fails until it is rendered below, and a new column on any reader fails until a canary reads it.
 
-_ACCESS_HISTORY_COLUMNS = ("QUERY_START_TIME", "BASE_OBJECTS_ACCESSED", "OBJECTS_MODIFIED",
-                           "DIRECT_OBJECTS_ACCESSED", "USER_NAME", "QUERY_ID")
+#: Every app reader of ACCOUNT_USAGE.ACCESS_HISTORY, rendered with representative arguments (both window shapes
+#: where a reader has two). The key set must equal the discovered readers.
+_ACCESS_HISTORY_READERS: dict[str, Callable[[], tuple[str, ...]]] = {
+    "app.data.security_sql.access_evidence_days": lambda: (security_sql.access_evidence_days(),),
+    "app.data.security_sql.grant_scope_usage": lambda: (security_sql.grant_scope_usage(90),),
+    "app.data.security_sql.unused_table_grants": lambda: (security_sql.unused_table_grants(90),),
+    "app.data.graph_sql.object_blast_consumers": lambda: (graph_sql.object_blast_consumers(("DB.S.T",)),),
+    "app.data.workbench_sql.product_consumer_reads": lambda: (
+        workbench_sql.product_consumer_reads(30, "ALFA"),
+        workbench_sql.product_consumer_reads(30, "ALFA", bounds=(date(2026, 9, 1), date(2026, 10, 1)))),
+    "app.data.insights_sql.storage_reclaim": lambda: (insights_sql.storage_reclaim("ALFA"),),
+    "app.data.insights_sql.table_tco": lambda: (insights_sql.table_tco("DB", "S", "T"),),
+    "app.data.insights_sql.object_reads_confirm": lambda: (insights_sql.object_reads_confirm(("DB.S.T",), 7),),
+}
+
+#: SQL that selects from the view: FROM / JOIN / a comma join, any qualifier (a {placeholder} included).
+_SELECTS_ACCESS_HISTORY = re.compile(r"(?:\bFROM|\bJOIN|,)\s+[\w.\"{}]*\.ACCESS_HISTORY\b")
+
+
+def _access_history_readers(source: str) -> set[str]:
+    """Module-level functions of ``source`` whose SQL selects from ACCESS_HISTORY: a non-docstring string (an
+    f-string's placeholders kept as {x}) selects from it, or the function uses a module-level constant or helper
+    that does. Docstrings, comments and source labels ('ACCOUNT_USAGE.ACCESS_HISTORY (Enterprise)') don't count."""
+    tree = ast.parse(source)
+    defs: dict[str, ast.AST] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defs[node.name] = node
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target]):
+                if isinstance(target, ast.Name):
+                    defs[target.id] = node
+
+    def texts(node: ast.AST) -> list[str]:
+        doc = (node.body[0].value if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and ast.get_docstring(node, clean=False) is not None else None)
+        out = []
+        for n in ast.walk(node):
+            if isinstance(n, ast.JoinedStr):
+                out.append("".join(v.value if isinstance(v, ast.Constant) else "{x}" for v in n.values))
+            elif isinstance(n, ast.Constant) and isinstance(n.value, str) and n is not doc:
+                out.append(n.value)
+        return out
+
+    bearing = {name for name, node in defs.items() if any(_SELECTS_ACCESS_HISTORY.search(s) for s in texts(node))}
+    grew = True
+    while grew:
+        grew = False
+        for name, node in defs.items():
+            if name not in bearing and {n.id for n in ast.walk(node) if isinstance(n, ast.Name)} & bearing:
+                bearing.add(name)
+                grew = True
+    return {name for name in bearing
+            if isinstance(defs[name], (ast.FunctionDef, ast.AsyncFunctionDef)) and not name.startswith("_")}
 
 
 def _access_history_columns_read(sql: str) -> set[str]:
-    """ACCESS_HISTORY columns a statement reads, through the alias it gives the view (or unqualified)."""
+    """ACCESS_HISTORY columns a statement reads, from the parsed SQL: in every scope that selects from the view,
+    the columns qualified by its alias, and the unqualified ones when the view is the scope's only source. An
+    unqualified column beside another source cannot be attributed, so it fails (qualify it: house law 8)."""
+    from sqlglot import exp
+    from sqlglot.optimizer.scope import traverse_scope
+
     cols: set[str] = set()
-    for m in re.finditer(r"ACCOUNT_USAGE\.ACCESS_HISTORY(?:\s+(?:AS\s+)?([A-Za-z_]\w*))?", sql):
-        alias = m.group(1)
-        prefix = rf"\b{alias}\." if alias and alias.upper() not in ("WHERE", "JOIN", "ON", "GROUP") else r"(?<![\w.])"
-        cols |= {c for c in _ACCESS_HISTORY_COLUMNS if re.search(prefix + c + r"\b", sql)}
+    for scope in traverse_scope(sqlglot.parse_one(sql, read="snowflake")):
+        selected = scope.selected_sources
+        views = {alias.upper() for alias, (_node, source) in selected.items()
+                 if isinstance(source, exp.Table) and source.name.upper() == "ACCESS_HISTORY"
+                 and source.db.upper() == "ACCOUNT_USAGE"}
+        if not views:
+            continue
+        for col in scope.columns:
+            qualifier = col.table.upper()
+            if qualifier in views or (not qualifier and len(selected) == 1):
+                cols.add(col.name.upper())
+            else:
+                assert qualifier, f"unqualified {col.sql()} beside ACCESS_HISTORY and {sorted(selected)}"
     return cols
 
 
+def test_the_access_history_column_reader_is_derived_from_the_sql():
+    """The ratchet itself: a column the old fixed vocabulary did not list is found, through the alias, an
+    unaliased single source, or a CTE that projects it; another table's same-named alias is not."""
+    sql = """
+WITH ah AS (SELECT QUERY_ID, POLICIES_REFERENCED FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY)
+SELECT a.OBJECTS_MODIFIED_BY_DDL, f.value:"objectName"::STRING AS N
+FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a, LATERAL FLATTEN(input => a.BASE_OBJECTS_ACCESSED) f
+UNION ALL
+SELECT a.CREDITS, NULL FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY a
+"""
+    assert _access_history_columns_read(sql) == {"QUERY_ID", "POLICIES_REFERENCED", "OBJECTS_MODIFIED_BY_DDL",
+                                                 "BASE_OBJECTS_ACCESSED"}
+    with pytest.raises(AssertionError, match="unqualified"):
+        _access_history_columns_read(
+            "SELECT USER_NAME FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a, LATERAL FLATTEN(input => a.X) f")
+
+
+def test_the_access_history_reader_finder_sees_new_readers():
+    src = '''
+_CTE = """t AS (SELECT a.QUERY_ID FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a)"""
+
+def _helper(days):
+    return f"SELECT 1 FROM {AU}.ACCESS_HISTORY WHERE QUERY_START_TIME >= {days}"
+
+def direct():
+    return "SELECT a.USER_NAME FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a"
+
+def via_constant():
+    return f"WITH {_CTE} SELECT * FROM t"
+
+def via_helper():
+    return _helper(7)
+
+def label_only():
+    """Reads SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY (Enterprise)."""
+    return run(sql, source="ACCOUNT_USAGE.ACCESS_HISTORY (Enterprise)")
+'''
+    assert _access_history_readers(src) == {"direct", "via_constant", "via_helper"}
+
+
+def test_the_reader_map_is_every_access_history_reader():
+    found = set()
+    for path in sorted((ROOT / "app").rglob("*.py")):
+        module = ".".join(path.relative_to(ROOT).with_suffix("").parts)
+        found |= {f"{module}.{name}" for name in _access_history_readers(path.read_text(encoding="utf-8"))}
+    assert found == set(_ACCESS_HISTORY_READERS), (
+        f"render new readers in _ACCESS_HISTORY_READERS: {sorted(found - set(_ACCESS_HISTORY_READERS))}; "
+        f"drop gone ones: {sorted(set(_ACCESS_HISTORY_READERS) - found)}")
+
+
 def test_every_access_history_column_the_app_reads_has_a_fail_on_drift_canary():
-    from app.data import graph_sql, insights_sql, workbench_sql
-    readers = (security_sql.access_evidence_days(), security_sql.grant_scope_usage(90),
-               security_sql.unused_table_grants(90), graph_sql.object_blast_consumers(("DB.S.T",)),
-               workbench_sql.product_consumer_reads(30, "ALFA"), insights_sql.object_reads_confirm(("DB.S.T",), 7))
-    app_reads = set().union(*(_access_history_columns_read(sql) for sql in readers))
+    app_reads: dict[str, set[str]] = {}
+    for name, render in _ACCESS_HISTORY_READERS.items():
+        for sql in render():
+            cols = _access_history_columns_read(sql)
+            assert cols, f"{name} rendered SQL that reads no ACCESS_HISTORY column"
+            app_reads.setdefault(name, set()).update(cols)
+    every = set().union(*app_reads.values())
     assert {"QUERY_START_TIME", "BASE_OBJECTS_ACCESSED", "OBJECTS_MODIFIED", "DIRECT_OBJECTS_ACCESSED",
-            "USER_NAME"} <= app_reads
-    canaried = {name: fn() for name, fn in canary.CANARIES if "ACCOUNT_USAGE.ACCESS_HISTORY" in fn()}
+            "USER_NAME", "QUERY_ID"} <= every
+    canaried = {name: sql for name, sql in ((n, fn()) for n, fn in canary.CANARIES)
+                if _SELECTS_ACCESS_HISTORY.search(sql) and _access_history_columns_read(sql)}
     assert canaried, "no canary reads ACCESS_HISTORY"                # was: none, by a stale Standard-edition rule
     covered = set().union(*(_access_history_columns_read(sql) for sql in canaried.values()))
-    assert app_reads <= covered, app_reads - covered
-    for name, sql in canaried.items():
+    missing = {name: sorted(cols - covered) for name, cols in app_reads.items() if cols - covered}
+    assert not missing, f"no FAIL-on-drift canary reads these ACCESS_HISTORY columns: {missing}"
+    for name in canaried:
         assert name not in canary.EXPECTED_GAPS, name               # Enterprise account: absence is a FAIL
-        sqlglot.parse_one(sql, read="snowflake")
 
 
 # ===================================================== R2-079: failed posture read is not silent ====

@@ -2173,7 +2173,21 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
         page=_PAGE, key=f"ddl_fact_{company}_{days}_{database}_{schema_contains}{_lm}",
         tier="hourly", source="FACT_SECURITY_CHANGE (hourly)", probe=True,
     )
+    # Both paths serve the same capped window (90 days; calendar bounds capped too) — the live
+    # fallback used to cap at 30 under the same label, so days 31-90 vanished on a stale extract.
+    _cd, _cb = capped_window(days, bounds, 90)
     _from_fact = fact.ok and _domain_covered(coverage, "CHANGE RISK")
+    if _from_fact:
+        # CHANGE RISK COMPLETE proves the extract and the fact were stamped in the last 3h, not that
+        # the fact covers this window: it refills only from the 72h extract, so an outage past 72h
+        # leaves a permanent hole that a fresh stamp cannot see. Require every served day, as the
+        # login facts do; a hole serves the live read (no lying 'No DDL/DCL changes' or zero KPIs).
+        span = run(
+            security_sql.security_change_fact_coverage(_cd, bounds=_cb), page=_PAGE,
+            key=f"sec_change_fact_span_{_cd}{_lm}", tier="hourly",
+            source="FACT_SECURITY_CHANGE coverage (served window)", probe=True,
+        )
+        _from_fact = fact_coverage_complete(span, coverage_required_days(_cd, _cb))
     if _from_fact:
         res = fact
     else:
@@ -2182,9 +2196,6 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
             page=_PAGE, key=f"ddl_{company}_{days}_{database}_{schema_contains}{_lm}",
             tier="recent", source="ACCOUNT_USAGE.QUERY_HISTORY (coverage fallback)",
         )
-    # Both paths serve the same capped window (90 days; calendar bounds capped too) — the live
-    # fallback used to cap at 30 under the same label, so days 31-90 vanished on a stale extract.
-    _cd, _cb = capped_window(days, bounds, 90)
     _ddl_txt = served_window_text(_cd, _cb)
     _ddl_cap = (" (window capped at the last 90 days)" if window_was_capped(days, bounds, _cb, 90) else "")
     # No early return on an empty window (v4.49): the bare `return` here used
