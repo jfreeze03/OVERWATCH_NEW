@@ -200,12 +200,20 @@ def test_the_new_canaries_compile_the_columns_that_had_none():
 # each UNION branch at the same position). A correlated reference (NOT EXISTS (... WHERE d.X = e.X)) resolves
 # outward through subquery / set-operation / lateral scopes, never across a CTE or derived-table boundary. A
 # derived projection (MIN(DAY) AS FIRST_DAY) and a FLATTEN output (f.VALUE) add nothing beyond their own inputs,
-# and an unqualified name that is a select alias of its scope (GROUP BY USAGE_DATE) is the alias, not a column,
-# when no source can hold that name. A JOIN ... USING (K) key counts on both sides (recheck #10).
+# and an unqualified name that is a select alias of its scope is the alias, not a column, only when no source can
+# hold that name (GROUP BY SEV over CTEs whose select lists have no SEV). A JOIN ... USING (K) key counts on both
+# sides (recheck #10).
 # A column the reader cannot attribute (an unqualified name beside several sources that may hold it, a select
-# alias a source may also hold, a USING key with no single side, a NATURAL JOIN's keys, a table function's
-# output) is reported, never counted: the canary side stays a lower bound, so a twin never passes on a guess
-# about what a canary compiles, and a twin must have none (qualify it: house law 8).
+# alias beside a source that may hold the name -- any physical table, whose columns the reader cannot see -- a
+# USING key with no single side, a NATURAL JOIN's keys, a table function's output) is reported, never counted:
+# the canary side stays a lower bound, so a twin never passes on a guess about what a canary compiles, and a twin
+# must have none (_UNATTRIBUTED_ADVICE says how to clear each kind).
+
+#: How a twin clears an unattributed column. Beside a physical table every name may be a column (Snowflake binds a
+#: same-named column before a select alias), so only the expression or its ordinal clears an alias reference.
+_UNATTRIBUTED_ADVICE = ("qualify each column, house law 8; join ON qualified keys, not USING / NATURAL; GROUP BY / "
+                        "filter on the expression or its ordinal, not a select alias, beside a physical table "
+                        "(Snowflake binds a same-named column first)")
 
 _OPAQUE = frozenset({ScopeType.ROOT, ScopeType.CTE, ScopeType.DERIVED_TABLE})
 _FLATTEN_COLUMNS = frozenset({"SEQ", "KEY", "PATH", "INDEX", "VALUE", "THIS"})    # fixed by Snowflake
@@ -383,7 +391,8 @@ def _canary_columns() -> frozenset[tuple[str, str]]:
 
 def test_the_table_column_reader_is_derived_from_the_sql():
     """The ratchet itself: columns are attributed through aliases, CTE pass-through, a star and UNION branches;
-    a derived projection, a select-alias reference and another table's same-named alias add nothing."""
+    a derived projection, a select-alias reference and another table's same-named alias add nothing. GROUP BY
+    USAGE_DATE beside the physical table may bind a USAGE_DATE column there, so it is reported, not counted."""
     sql = """
 WITH cov AS (SELECT MIN(DAY) AS FIRST_DAY FROM DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY),
 w AS (SELECT * FROM DBA_MAINT_DB.OVERWATCH.INCIDENTS),
@@ -408,6 +417,7 @@ SELECT a.CREDITS, NULL, NULL, NULL FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERI
         ("OVERWATCH.ALERT_AUDIT", "NOTE"), ("OVERWATCH.ALERT_AUDIT", "EVENT_ID"),
         ("ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY", "CREDITS"),
     }
+    assert _read_columns(sql)[1] == {"USAGE_DATE"}
 
 
 #: Every twin, rendered with representative arguments (every optional filter and window shape it has). The
@@ -469,11 +479,23 @@ def test_twins_read_only_columns_a_canary_compiles(name):
         cols, unattributed = _read_columns(sql)
         assert cols, f"{name} rendered SQL that reads no attributable column"
         assert not unattributed, (f"{name}: the twin check cannot attribute {sorted(unattributed)} to a table "
-                                  "(qualify them, house law 8; join ON qualified keys, not USING / NATURAL; "
-                                  "rename a select alias a source may also hold), so it cannot vouch for them")
+                                  f"({_UNATTRIBUTED_ADVICE}), so it cannot vouch for them")
         reads |= cols
     missing = sorted(reads - _canary_columns())
     assert not missing, f"{name} is not a twin: no registered canary compiles {missing}"
+
+
+def test_the_unattributed_advice_clears_what_it_reports():
+    """Recheck of 6e7d684b: the advice said 'rename a select alias a source may also hold', but a physical table
+    may hold any name, so beside one no rename clears the failure. Grouping on the expression or its ordinal
+    does, and the advice says so."""
+    shape = "SELECT UPPER(e.SEVERITY) AS {a}, COUNT(*) AS N FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e GROUP BY {g}"
+    for alias in ("SEV", "NO_TABLE_HAS_A_COLUMN_NAMED_THIS"):
+        assert _read_columns(shape.format(a=alias, g=alias))[1] == {alias}       # a rename does not clear it
+    for group in ("1", "UPPER(e.SEVERITY)"):
+        assert _read_columns(shape.format(a="SEV", g=group)) == ({("OVERWATCH.ALERT_EVENTS", "SEVERITY")}, set())
+    assert "rename" not in _UNATTRIBUTED_ADVICE
+    assert "ordinal" in _UNATTRIBUTED_ADVICE and "physical table" in _UNATTRIBUTED_ADVICE
 
 
 def test_a_correlated_outer_reference_counts_toward_the_outer_table():
@@ -584,13 +606,18 @@ def _wrapper_params(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[list[st
 def _probe_scan(source: str, *, probe: bool = True) -> tuple[set[str], set[str], set[str], dict[str, bool]]:
     """(builders, inline SQL, untraced names, {probe wrapper: is a method}) behind every ``run(..., probe=True)``
     in ``source`` (with ``probe=False``: every plain ``run()``, which logs a failure to APP_ERROR_LOG). A builder
-    is a ``*_sql`` module function: called inline, assigned to a name in the enclosing function (closures
-    included; a tuple's first element; either arm of a conditional), or passed to a same-module wrapper that
-    forwards its parameter to such a read (security_center._optional_result; a method wrapper too).
+    is a ``*_sql`` module function: called inline (as run's first argument or its ``sql=``), assigned to a name
+    in the enclosing function (closures included; a tuple's first element; either arm of a conditional), or
+    passed to a same-module wrapper that forwards its parameter to such a read (security_center._optional_result;
+    a method wrapper too; a parameter the body may also reassign).
 
-    recheck #11: no read vanishes. A conditional's arm that is no builder and no literal is untraced (an empty
-    string or None runs nothing), a literal arm is inline SQL, and a wrapper this module never calls is untraced
-    (_probe_reads_in reports a call from another module at the caller)."""
+    What the scan cannot follow is untraced, not dropped (recheck #11 and its recheck): a conditional's arm that is
+    no builder and no literal (an empty string or None runs nothing; a literal arm is inline SQL), a name's other
+    binding it cannot follow that may reach the read (an assignment, a later tuple element, a for / with / walrus
+    target, untraced as the name; it comes first, a loop holds both, or a closure reads it), a run() with no SQL
+    argument, a wrapper passed as a value (map / partial), and a wrapper this module
+    never calls (_probe_reads_in reports a use from another module at the caller). It reads source: a run()
+    reached through another name for run, or a probe=True passed in **kwargs, is outside it."""
     tree = ast.parse(source)
     funcs = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
 
@@ -621,15 +648,55 @@ def _probe_scan(source: str, *, probe: bool = True) -> tuple[set[str], set[str],
             return set(), {text.strip()}, set()
         return None
 
-    def names_in(fn: ast.AST) -> dict[str, _Reads]:
+    def bound(target: ast.AST) -> list[str]:
+        if isinstance(target, ast.Starred):
+            return bound(target.value)
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return [name for elt in target.elts for name in bound(elt)]
+        return [target.id] if isinstance(target, ast.Name) else []
+
+    loops = [n for n in ast.walk(tree) if isinstance(n, (ast.For, ast.AsyncFor, ast.While, ast.ListComp,
+                                                         ast.SetComp, ast.DictComp, ast.GeneratorExp))]
+
+    def reaches(fn: ast.AST, line: int, at: int) -> bool:
+        """A binding on ``line`` of ``fn`` may reach a read on ``at``: it comes first, or a loop inside ``fn``
+        holds both (a later iteration). A later binding in straight-line code does not (optimize.py rebinds
+        _msql from the shown state after its probe read)."""
+        return line <= at or any(getattr(fn, "lineno", 0) < lp.lineno <= at and line <= (lp.end_lineno or lp.lineno)
+                                 for lp in loops)
+
+    def names_in(fn: ast.AST, at: int | None = None) -> dict[str, _Reads]:
+        """What each name bound in ``fn`` may hold (with ``at``: by a binding that may reach a read on that line):
+        the builders and literals of its assignments (an empty string or None adds nothing), and the name itself,
+        untraced, for a binding the scan cannot follow."""
         names: dict[str, _Reads] = {}
+
+        def bind(target: ast.AST, name: str, found: _Reads | None) -> None:
+            if at is None or reaches(fn, getattr(target, "lineno", 0), at):
+                merge(names.setdefault(name, (set(), set(), set())),
+                      found if found is not None else (set(), set(), {name}))
+
         for n in ast.walk(fn):
-            if (isinstance(n, (ast.Assign, ast.AnnAssign)) and (found := sql_of(n.value)) is not None
-                    and (found[0] or found[1])):
-                for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
-                    t = t.elts[0] if isinstance(t, (ast.Tuple, ast.List)) and t.elts else t
-                    if isinstance(t, ast.Name):
-                        merge(names.setdefault(t.id, (set(), set(), set())), found)
+            targets: list[ast.AST] = []
+            value: ast.AST | None = None
+            if isinstance(n, ast.Assign):
+                targets, value = n.targets, n.value
+            elif isinstance(n, (ast.AnnAssign, ast.NamedExpr)) and n.value is not None:
+                targets, value = [n.target], n.value
+            elif isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)):
+                targets = [n.target]
+            elif isinstance(n, ast.withitem) and n.optional_vars is not None:
+                targets = [n.optional_vars]
+            found = sql_of(value) if value is not None else None
+            if found is not None and not any(found):
+                continue                                         # an empty string or None: runs nothing
+            for t in targets:
+                # the value is the first name's (a builder returning (sql, errors)); a later element is not
+                first, *rest = bound(t) or [""]
+                if first:
+                    bind(t, first, found)
+                for name in rest:
+                    bind(t, name, None)
         return names
 
     def enclosing(node: ast.AST) -> list:
@@ -637,9 +704,12 @@ def _probe_scan(source: str, *, probe: bool = True) -> tuple[set[str], set[str],
                       key=lambda f: f.lineno)                    # outermost first
 
     def follow(node: ast.AST | None, scopes: list) -> _Reads | None:
+        """What ``node`` runs: its own SQL, or the bindings of its name that may reach it (in its own function;
+        every binding in an enclosing one, which a closure may read after any of them)."""
         if (found := sql_of(node)) is not None:
             return found
-        named = [r for f in scopes if (r := names_in(f).get(node.id)) is not None] \
+        named = [r for f in scopes
+                 if (r := names_in(f, node.lineno if f is scopes[-1] else None).get(node.id)) is not None] \
             if isinstance(node, ast.Name) else []
         if not named:
             return None
@@ -652,20 +722,31 @@ def _probe_scan(source: str, *, probe: bool = True) -> tuple[set[str], set[str],
     wrappers: dict[str, tuple[int, str, bool]] = {}
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", "")) == "run"
-                and node.args and (any(k.arg == "probe" and isinstance(k.value, ast.Constant)
-                                       and k.value.value is True for k in node.keywords) is probe)):
+                and (any(k.arg == "probe" and isinstance(k.value, ast.Constant)
+                         and k.value.value is True for k in node.keywords) is probe)):
             continue
-        arg, scopes = node.args[0], enclosing(node)
+        arg = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg == "sql"), None)
+        scopes = enclosing(node)
+        if arg is None:
+            reads[2].add("run(<no SQL argument>)")
+            continue
         if (found := follow(arg, scopes)) is not None:
             merge(reads, found)
-            continue
         params, is_method = _wrapper_params(scopes[-1]) if scopes else ([], False)
-        if isinstance(arg, ast.Name) and arg.id in params:
+        if isinstance(arg, ast.Name) and arg.id in params:     # its callers' SQL too, even beside a reassignment
             wrappers[scopes[-1].name] = (params.index(arg.id), arg.id, is_method)
-        else:
+        elif found is None:
             reads[2].add(ast.unparse(arg))
     called: set[str] = set()
+    call_funcs = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
     for node in ast.walk(tree):
+        if (isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load)
+                and id(node) not in call_funcs):                 # a wrapper passed as a value (map / partial)
+            used, via_attribute = (node.id, False) if isinstance(node, ast.Name) else (node.attr, True)
+            if used in wrappers and wrappers[used][2] is via_attribute:
+                called.add(used)
+                reads[2].add(f"{used}(<passed as a value>)")
+            continue
         if not isinstance(node, ast.Call):
             continue
         func = node.func
@@ -693,8 +774,9 @@ def _probe_reads(source: str, *, probe: bool = True) -> _Reads:
 
 def _probe_reads_in(files: dict[str, str], *, probe: bool = True) -> tuple[set[str], set[str], set[tuple[str, str]]]:
     """_probe_reads over several modules (``{path: source}``), untraced names keyed by file. A wrapper is followed
-    inside its own module only, so a call to it from another module (by its imported name, unless that module
-    defines its own; or through any attribute) is untraced at the caller, never dropped (recheck #11)."""
+    inside its own module only, so a use of it from another module (a call or a value passed on; by its imported
+    name or an ``import ... as`` alias, unless that module defines its own; or through any attribute) is untraced
+    at the caller, not dropped (recheck #11 and its recheck)."""
     builders: set[str] = set()
     inline: set[str] = set()
     untraced: set[tuple[str, str]] = set()
@@ -710,10 +792,15 @@ def _probe_reads_in(files: dict[str, str], *, probe: bool = True) -> tuple[set[s
     for rel, src in files.items():
         tree = ast.parse(src)
         own = {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        aliases = {a.asname: a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
+                   for a in n.names if a.asname}
         for node in ast.walk(tree):
-            func = node.func if isinstance(node, ast.Call) else None
-            name = (func.id if isinstance(func, ast.Name) and func.id not in own else
-                    func.attr if isinstance(func, ast.Attribute) else "")
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in own:
+                name = aliases.get(node.id, node.id)
+            elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+                name = node.attr
+            else:
+                continue
             if name in homes and homes[name] != rel:
                 untraced.add((rel, f"{name}(<a probe wrapper in {homes[name]}>)"))
     return builders, inline, untraced
@@ -762,11 +849,15 @@ def test_the_probe_read_scan_follows_names_and_wrappers():
     assert _probe_reads(src, probe=False)[0] == {"ops_sql.g"}
 
 
-def test_the_probe_read_scan_never_drops_a_read():
+def test_each_probe_read_shape_lands_in_builders_inline_or_untraced():
     """recheck #11 (v4.608): a probe wrapper with no caller in its module, a method wrapper, and the non-builder
     arm of a conditional each vanished from the scan (no builder, no inline SQL, nothing untraced), so a probe
-    reader routed through them was missing from RUNBOOK with the test green. Each now lands somewhere: an inline
-    arm is matched against _INLINE_PROBES, anything else is untraced; an empty string or None runs nothing."""
+    reader routed through them was missing from RUNBOOK with the test green. Recheck of 6e7d684b: so did the SQL
+    passed as run(sql=...), a second assignment the scan cannot follow beside one it can, the callers of a wrapper
+    whose parameter is also reassigned, a wrapper passed as a value (map / partial), and a wrapper imported under
+    another name. Each shape here lands somewhere: an inline arm is matched against _INLINE_PROBES, anything else
+    is untraced; an empty string or None runs nothing. The scan covers these shapes, not every program: a run()
+    reached through another name for run, or a probe=True passed in **kwargs, is outside it."""
     import textwrap
     src = textwrap.dedent("""
         def optional_read(sql, key):              # its callers live in another module
@@ -790,14 +881,83 @@ def test_the_probe_read_scan_never_drops_a_read():
 
             def go(self):
                 return self.read(mart_sql.d(1) if self else None)
+
+            def many(self):
+                return list(map(self.read, [mart_sql.z(1)]))
+
+        def keyword():
+            return run(sql=mart_sql.e(1), page="p", probe=True)
+
+        def reassigned(flag, fallback):
+            chosen = mart_sql.f(1)
+            if flag:
+                chosen = fallback
+            return run(chosen, probe=True)
+
+        def param_or_builder(sql, flag):
+            if flag:
+                sql = mart_sql.g(1)
+            return run(sql, probe=True)
+
+        def passes_a_builder():
+            return param_or_builder(cost_sql.h(1), False)
+
+        def _opt(sql):
+            return run(sql, probe=True)
+
+        def calls_it():
+            return _opt(mart_sql.i(1))
+
+        def maps_it():
+            return list(map(_opt, [mart_sql.y(1)]))
+
+        def tuple_rest(pairs):
+            pair_sql = mart_sql.j(1)
+            if pairs:
+                _n, pair_sql = pairs[0]
+            return run(pair_sql, probe=True)
+
+        def rebound_in_a_loop(items):
+            looped = mart_sql.k(1)
+            for item in items:
+                run(looped, probe=True)
+                looped = item                     # the next iteration reads it
+
+        def closure_rebinds(pick):
+            late = mart_sql.l(1)
+
+            def go():
+                return run(late, probe=True)
+            late = pick()                         # go() runs after it
+            return go()
+
+        def rebound_after_the_read(state):        # optimize.py's _msql: straight-line, so it cannot reach the read
+            shown = mart_sql.m(1)
+            run(shown, probe=True)
+            shown = state["sql"]
+            return shown
         """)
-    assert _probe_reads(src) == ({"mart_sql.a", "cost_sql.b", "mart_sql.c", "mart_sql.d"}, {"SHOW TASKS IN {x}"},
-                                 {"optional_read(<no caller in this module>)", "other"})
+    assert _probe_reads(src) == (
+        {"mart_sql.a", "cost_sql.b", "mart_sql.c", "mart_sql.d", "mart_sql.e", "mart_sql.f", "mart_sql.g",
+         "cost_sql.h", "mart_sql.i", "mart_sql.j", "mart_sql.k", "mart_sql.l", "mart_sql.m"},
+        {"SHOW TASKS IN {x}"},
+        {"optional_read(<no caller in this module>)", "other", "chosen",
+         "read(<passed as a value>)", "_opt(<passed as a value>)", "pair_sql", "looped", "late"})
+    files = {
+        "app/ui/a.py": "def _optional(sql, key):\n    return run(sql, key=key, probe=True)\n\n"
+                       "def here():\n    return _optional(mart_sql.a(1), 'k')\n",
+        "app/ui/b.py": "from app.ui.a import _optional as opt\n\ndef there():\n    return opt(mart_sql.b(1), 'k')\n",
+        "app/ui/c.py": "import functools\nfrom app.ui.a import _optional\n\n"
+                       "def there():\n    return functools.partial(_optional, key='k')(cost_sql.c(1))\n",
+    }
+    assert _probe_reads_in(files) == ({"mart_sql.a"}, set(),
+                                      {("app/ui/b.py", "_optional(<a probe wrapper in app/ui/a.py>)"),
+                                       ("app/ui/c.py", "_optional(<a probe wrapper in app/ui/a.py>)")})
 
 
 def test_a_probe_wrapper_called_from_another_module_is_untraced():
     """recheck #11 (v4.608): wrappers are followed inside their own module only, so a call from another module
-    (imported by name, or through the module) is reported at the caller, never dropped. A module's own function
+    (imported by name, or through the module) is reported at the caller, not dropped. A module's own function
     of the same name is its own."""
     wrapper = "def _optional(sql, key):\n    return run(sql, key=key, probe=True)\n\n" \
               "def here():\n    return _optional(mart_sql.a(1), 'k')\n"
