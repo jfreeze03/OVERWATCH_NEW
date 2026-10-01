@@ -10,6 +10,7 @@ from __future__ import annotations
 import streamlit as st
 
 from app.config import core_object
+from app.core.errors import safe_page
 from app.core.query import execute_statement, run, run_batch, run_batch_mixed
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
@@ -112,6 +113,10 @@ def _unmapped_mapper(df, is_operator: bool) -> None:
                        "execution needs an admin profile.")
 
 
+# The page boundary every renderer in main._RENDERERS carries (tests/test_page_boundaries.py): the
+# V028 split (6329789e, cost.py -> cost_parts/) dropped it, so a Python-side bug on this page showed
+# Streamlit's raw traceback and never reached record_error / APP_ERROR_LOG.
+@safe_page(_PAGE)
 def render() -> None:
     f = filters()
     settings = load_settings(_PAGE)
