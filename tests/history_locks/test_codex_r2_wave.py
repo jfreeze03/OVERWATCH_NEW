@@ -281,6 +281,18 @@ def test_rec13_overview_billed_kpis_carry_method_and_scope():
     assert '"method": "metering", "scope": "company"' in ov
 
 
+def test_rec11_section_scope_note_stays_retired():
+    """Codex R2 rec 11 (section scope): the standalone section_scope_note helper was deleted in
+    v4.607 (no caller left). Rec 11's judgment -- name a filter only when the section ignores it --
+    now lives in components.section_filter_contract, whose banner behaviour is locked by
+    tests/test_uiux_wave1_leftovers.py::test_contract_banner_only_when_a_sharp_filter_is_at_risk.
+    Lock the retired helper as ABSENT so a second, drifting scope-note path does not come back."""
+    import app.ui.components as components
+    assert not hasattr(components, "section_scope_note")
+    assert hasattr(components, "section_filter_contract")
+    assert "def section_scope_note" not in _src("app/ui/components.py")
+
+
 def test_rec11_overview_renders_section_filter_contract():
     ov = _src("app/ui/pages/overview.py")
     assert "section_filter_contract(" in ov
