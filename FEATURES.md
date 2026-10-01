@@ -50,13 +50,13 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 ## Fix (guarded, audited, verified)
 | Capability | Where |
 |---|---|
-| One-click remediation: auto-suspend, off-hours schedules, resize — audit row + ESTIMATED savings (retention: a review-only ALTER for a worksheet; the executor never runs ALTER TABLE) | Cost → Optimization |
+| Guarded remediation: auto-suspend and resize execute behind a typed confirm with an audit row (the daily change scan books their saving; the app books ESTIMATED only where the scan can't); an off-hours suspend/resume schedule is a review-only script for a worksheet plus a one-click "Book estimated saving" (one ESTIMATED item per warehouse); retention: a review-only ALTER for a worksheet (the executor never runs CREATE TASK or ALTER TABLE) | Cost → Optimization |
 | Interactive right-size what-if (size step + auto-suspend, bounded $ range) | Cost → Optimization |
 | Cluster-cap check: a higher MAX_CLUSTER_COUNT is suggested only where a multi-cluster warehouse's queries reached its current maximum (hourly peak cluster, ≥35 days); otherwise "Size up or split" | Cost → Optimization (Idle & sizing) |
 | Storage reclaim shortlist: stale AND never-read 90d (ACCESS_HISTORY), with a LEVER per table (Archive or drop / Cut retention; a stale table sharing storage with a clone is 'Check clones', unpriced) whose unread-table $/mo joins the de-duplicated Addressable $/mo (one saving per table) | Cost → Optimization |
 | Savings verifier flips ESTIMATED → VERIFIED/REJECTED from actuals monthly | Cost → Savings ledger |
 | Emergency levers: suspend WH, timeouts, cluster caps, monitor quotas, pipe/task pause, disable user, Cortex allowlist | Admin → Emergency |
-| Live query kill-switch (`SYSTEM$CANCEL_QUERY`, audited) | Admin → Emergency |
+| Live query kill-switch (`SYSTEM$CANCEL_QUERY`, audited): each running query needs its own typed CANCEL, and the audit row and toast carry Snowflake's answer (FAILED with its message when the query was no longer running) | Operations → Emergency |
 | Budget ↔ resource-monitor sync | Admin → Emergency |
 
 ## Plan & report
@@ -90,7 +90,7 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 ## Cost intelligence (v4.7–v4.9)
 | Capability | Where |
 |---|---|
-| Unit costs: measured $ per query, $/call per stored proc (every proc), AI $ by function/model with $/1M tokens; Cortex-Code fallback | Cost → Unit costs |
+| Unit costs: measured $ per query, $/call per stored proc (top 50 by measured spend; the per-call leader across every proc), AI $ by function/model with $/1M tokens; Cortex-Code fallback | Cost → Unit costs |
 | Task-graph cost trends: $/run, success %, p95 wall, CHEAPER/PRICIER/FLAT per pipeline (db/schema filterable) | Operations → Task graphs ($) |
 | Warehouse change scorecard (V024): snapshot-diff detection, frozen 14d baselines, WH_CHANGE_REGRESSION alerts | Operations → Change impact |
 | Contract billing truth: ORGANIZATION_USAGE balance burn-down, runway, on-demand overrun (zero config) | Cost → Contract & Forecast |
@@ -106,11 +106,11 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 | Incident object: declare/auto-declare/proposals, TTD/MTTA/MTTR/reopen/compression, lineage joins | Control Room, Brief (V032) |
 | Change attribution: CHANGED_BY + MANAGED/MANUAL vs DEPLOY_ACTORS | Operations scorecard (V033) |
 | Per-route company delivery filters (Teams = ALFA-only for now) | alert sender v4 (V034) |
-| Measured proc costs: $/call leaderboard, price-a-CALL/session, trend-one-procedure by name | Cost -> Unit costs |
+| Measured proc costs: top 50 procedures by measured spend with $/call, a "Priciest procedure (per call)" KPI over every procedure CALLed in the window, price-a-CALL/session, trend-one-procedure by name | Cost -> Unit costs |
 | Client driver/version inventory with BEHIND flags + Snowflake's support floor (UNSUPPORTED / nearing end of support, yours vs Snowflake-run; #34) | Security -> Clients |
 | Masking / row-access / projection / aggregation policy coverage per database, tag-based masking, same-name environment grouping with each family's databases that have no column-level masking reference (#43) | Security -> Exposure |
 | Cortex AI exceptions tracked as Action Center work items: one per user plus the all-users budget scope, through the shared idempotent Track write; a later, stronger signal raises the open item's severity (v4.605) | Cost -> Chargeback & AI |
-| Optional panels fail by kind: needs setup only for a missing or ungranted object; schema drift, timeouts and other failed reads show "unavailable" with the error, and Setup progress marks them Unknown (v4.605) | Security, Cost, Operations, Admin, Control Room |
+| Optional panels fail by kind: needs setup only for a missing or ungranted object; schema drift, timeouts and other failed reads show "unavailable" with the error, and Setup progress marks them Unknown (v4.605; v4.606 extends it to Alerts, Overview, Brief and Proof: a failed read is never shown as $0.00, a zero count, an all-clear or "not installed") | Security, Cost, Operations, Admin, Control Room, Alerts, Overview, Brief, Proof |
 | Delivery SLOs, alert fatigue, acceptance funnel, per-page cache-hit telemetry | Alerts -> History, Admin -> Performance |
 | Flyway-readiness (ledger panel + adoption runbook) | Admin, docs/FLYWAY_ADOPTION.md |
 | Partial-success batching (one bad member no longer drags siblings serial) | app-wide (v4.20) |
