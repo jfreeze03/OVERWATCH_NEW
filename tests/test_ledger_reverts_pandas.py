@@ -15,7 +15,6 @@ from app.logic import proof
 from app.logic.actions import (
     ledger_totals,
     savings_by_lever,
-    savings_by_month,
     savings_month_calendar,
     split_reverted,
 )
@@ -114,7 +113,6 @@ def test_month_and_lever_rollups_drop_reverted_rows(_sep28):
     cal = savings_month_calendar(rows, 12)
     assert float(cal["VERIFIED_USD"].sum()) == 110.0                  # a (Jul) + d (Jun); b / c undone
     assert float(cal.loc[cal["MONTH"] == "2026-07", "VERIFIED_USD"].iloc[0]) == 80.0
-    assert float(savings_by_month(rows)["VERIFIED_USD"].sum()) == 110.0
     lever = savings_by_lever(rows).set_index("LEVER")
     assert set(lever.index) == {"SCHEDULE", "AUTO_SUSPEND"} and lever.loc["AUTO_SUSPEND", "VERIFIED_USD"] == 30.0
     # all reverted -> empty (never a $0 lever row)

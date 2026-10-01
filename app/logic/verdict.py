@@ -103,33 +103,6 @@ def contract_runway_clause(best: dict | None) -> str:
     return RUNWAY_ON_TRACK if best is not None else NO_CONTRACT_RUNWAY
 
 
-def oldest_open_hours(
-    frame: pd.DataFrame | None,
-    *,
-    now,
-    severity: str | None = None,
-    time_col: str = "RAISED_AT",
-    severity_col: str = "SEVERITY",
-) -> float | None:
-    """Hours since the oldest still-open row was raised (CoCo do-first: duration,
-    not count — the MTTR-pressure signal a raw count hides).
-
-    Optionally filters to `severity` (case-insensitive). `now` is an account-time
-    timestamp the caller supplies — this stays pure, with no clock of its own.
-    Returns None when the frame is empty/absent or carries no parseable timestamp
-    in `time_col`.
-    """
-    if frame is None or getattr(frame, "empty", True) or time_col not in frame.columns:
-        return None
-    view = frame
-    if severity is not None and severity_col in frame.columns:
-        view = frame[frame[severity_col].astype(str).str.upper() == severity.upper()]
-    raised = pd.to_datetime(view.get(time_col), errors="coerce").dropna()
-    if raised.empty:
-        return None
-    return max(0.0, (pd.Timestamp(now) - raised.min()).total_seconds() / 3600.0)
-
-
 def operations_signals(inputs: pd.DataFrame | None, stale_sources: int = 0) -> list[Signal]:
     """Wave 1 #7: ops-health Signals for the Operations page verdict.
 

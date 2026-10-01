@@ -10,6 +10,9 @@ owner-gated migration (V106).
   - [MED] tag_coverage / untagged_executions_for_user scoped company by WAREHOUSE on a USER-grain board.
   - [MED] ROI "pays for itself" divided monthly-magnitude savings by a QTD run cost (mismatched horizon).
   - [MED] savings_by_month included the partial current month, reading as a velocity collapse.
+    (v4.592 moved the Proof bars to savings_month_calendar, which shows that month flagged PARTIAL
+    and labelled MTD instead of dropping it; savings_by_month, left with no caller, went in v4.607,
+    so the lock now pins the calendar's honest partial-month label.)
   - [LOW/V106] COST_DEPT_BUDGET_PACE alert join folded case on one side only.
 """
 
@@ -143,7 +146,7 @@ def test_roi_readers_call_the_30d_builder() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Finding #5 -- verified-savings-by-month drops the partial current month
+# Finding #5 -- the partial current month never reads as a complete month
 # --------------------------------------------------------------------------- #
 def test_savings_by_month_drops_the_partial_current_month(monkeypatch) -> None:
     monkeypatch.setattr(actions, "account_now", lambda: _dt.datetime(2026, 8, 30, 12, 0, 0))
@@ -154,9 +157,14 @@ def test_savings_by_month_drops_the_partial_current_month(monkeypatch) -> None:
             "VERIFIED_USD": [100.0, 200.0, 5.0],
         }
     )
-    out = actions.savings_by_month(ledger, months=12)
-    assert list(out["MONTH"]) == ["2026-06", "2026-07"], "current partial month must be excluded"
-    assert float(out["VERIFIED_USD"].sum()) == 300.0
+    out = actions.savings_month_calendar(ledger, months=12).set_index("MONTH")
+    complete = out[~out["PARTIAL"].astype(bool)]
+    assert float(complete.loc[["2026-06", "2026-07"], "VERIFIED_USD"].sum()) == 300.0
+    # the current month is the ONLY partial bucket, and it says so (MTD), so a small
+    # month-to-date figure can never read as a velocity collapse next to full months
+    assert list(out.index[out["PARTIAL"].astype(bool)]) == ["2026-08"]
+    assert out.loc["2026-08", "MONTH_LABEL"] == "Aug 2026 (MTD)"
+    assert not complete["MONTH_LABEL"].str.contains("MTD").any()
 
 
 # --------------------------------------------------------------------------- #
