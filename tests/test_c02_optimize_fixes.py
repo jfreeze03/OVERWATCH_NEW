@@ -17,7 +17,11 @@ paths the fixes must leave unchanged:
   R1-113  consolidation pairs only warehouses of the SAME company (the ALL scope paired ALFA with Trexis);
   R1-142  the repeat-query scan normalizes a calendar preset by its span (R1-038 is the same defect);
   R1-144  the repeat-query tiles are window totals, not sums of the LIMIT-100 frame (R1-050/R1-072);
-  R1-148  the storage-growth tile names the window the SQL serves (R1-048) and its totals are uncapped.
+  R1-148  the storage-growth tile names the window the SQL serves (R1-048) and its totals are uncapped;
+  R1-170  (twin, fix-up) Remediation's tighten guard, estimate and autobook decision, and the resize lever's
+          current size, read ONE warehouse's SHOW row on the live tier, never the 4 h 'jump_wh' cache;
+  R1-044  (fix-up) a long legal FQN (3 x 255 characters) keeps its whole match key;
+  R1-017  (sibling, fix-up) a failed experiments read is named on the proven-fix transfer panel.
 
 AppTests reuse the shaped page harness (tests/test_pages_shaped.py); nothing opens a Snowflake session."""
 
@@ -343,6 +347,16 @@ def test_table_tco_matches_the_quote_stripped_upper_case_name_and_never_raises()
     assert "'DB.S.QUOTED'" in insights_sql.table_tco("DB", "S", '"Quoted"', 30)
 
 
+def test_table_tco_keeps_the_whole_of_a_long_legal_name():
+    """Three 255-character identifiers make a legal 767-character FQN. The key was capped at 600 characters
+    (sql_literal truncates silently), so it never matched and the drill read 0 reads for a read table."""
+    parts = ("D" * 255, "S" * 255, "T" * 255)
+    fqn = ".".join(parts)
+    sql = insights_sql.table_tco(*parts, 30)
+    assert sql.count(f"= '{fqn}'") == 2                                  # pre-fix: a 600-character prefix
+    sqlglot.parse_one(sql, read="snowflake")
+
+
 def _waste_selected(monkeypatch):
     """Select row 0 of the storage-waste table (AppTest cannot click a grid row)."""
     import app.ui.components as components
@@ -655,3 +669,231 @@ def test_storage_tiles_read_the_uncapped_window_totals(monkeypatch):
     tiles = " ".join(str(m.value) for m in at.markdown)
     assert re.search(r"Current storage.{0,400}150\.0 TB", tiles, re.S)          # pre-fix: 2.0 TB
     assert re.search(r"Growth \(90d\).{0,400}12\.0 TB", tiles, re.S)            # pre-fix: 0.4 TB
+
+
+# ---- R1-170 (twin): Remediation & ledger reads the setting it is about to change LIVE ----------------------
+
+_REMED_IDLE = pd.DataFrame({"WAREHOUSE_NAME": ["WH_X"], "COMPANY": ["ALFA"], "METERED_HOURS": [300.0],
+                            "IDLE_HOURS": [200.0], "TOTAL_CREDITS": [300.0], "IDLE_CREDITS": [200.0]})
+
+
+def _tighten_page(monkeypatch, *, cached: float | None, live, executed: list, seen: list) -> AppTest:
+    """Remediation & ledger, 'Tighten auto-suspend to 60s' on WH_X, as an operator. ``cached`` is the AUTO_SUSPEND
+    the shared 4 h 'jump_wh' SHOW WAREHOUSES entry still holds; ``live`` is the one-warehouse SHOW LIKE read's
+    frame (or a failed QueryResult)."""
+    def hook(sql, kw):
+        if sql.startswith("SHOW WAREHOUSES LIKE"):
+            seen.append((sql, dict(kw)))
+            return live if isinstance(live, QueryResult) else _ok(live)
+        if sql.startswith("SHOW WAREHOUSES"):
+            return _ok(pd.DataFrame({"name": ["WH_X"], "size": ["X-Small"], "auto_suspend": [cached]}))
+        return None
+
+    def mart_hook(_mart, _live, kw):
+        return _ok(_REMED_IDLE) if str(kw.get("key", "")).startswith("remed_idle") else None
+
+    return _cost_page(monkeypatch, "Remediation & ledger", run_hook=hook, mart_hook=mart_hook, operator=True,
+                      executed=executed)
+
+
+def _execute_tighten(at) -> None:
+    at.text_input(key="remed_confirm").input("WH_X").run()
+    at.button(key="remed_btn").click().run()
+    assert not at.exception
+
+
+@_SKIP
+def test_tighten_guard_reads_the_timer_live_not_the_stale_cache(monkeypatch):
+    """The cache still says 600 s; a DBA has since set 30 s. Pre-fix the plan generated SET = 60 (raising the
+    timer) behind an Execute that logged a positive saving. The live row decides: no ALTER, nothing to execute.
+    LIKE 'WH_X' also returns WHAX (the '_' wildcard): only the exact-name row counts."""
+    executed: list[str] = []
+    seen: list = []
+    live = pd.DataFrame({"name": ["WHAX", "WH_X"], "auto_suspend": [600, 30]})
+    at = _tighten_page(monkeypatch, cached=600, live=live, executed=executed, seen=seen)
+    code = "\n".join(str(c.value) for c in at.code)
+    assert "SET AUTO_SUSPEND" not in code                               # pre-fix: SET AUTO_SUSPEND = 60
+    assert "WH_X is already at AUTO_SUSPEND=30s" in " ".join(str(i.value) for i in at.info)
+    assert not any(t.key == "remed_confirm" for t in at.text_input)
+    assert executed == []
+    # ONE warehouse, on the 30 s live tier, unlogged when absent (probe), every row (no row-cap rewrite)
+    assert seen, "no live SHOW WAREHOUSES LIKE read"
+    sql, kw = seen[-1]
+    assert sql == "SHOW WAREHOUSES LIKE 'WH_X'"
+    assert (kw.get("tier"), kw.get("key"), kw.get("max_rows"), kw.get("probe")) == (
+        "live", "remed_suspend_WH_X", 0, True)
+
+
+@_SKIP
+def test_a_failed_live_read_generates_no_alter_even_when_the_cache_says_600(monkeypatch):
+    executed: list[str] = []
+    at = _tighten_page(monkeypatch, cached=600, live=_failed("timeout"), executed=executed, seen=[])
+    assert "SET AUTO_SUSPEND" not in "\n".join(str(c.value) for c in at.code)
+    assert "Current AUTO_SUSPEND could not be verified" in " ".join(str(w.value) for w in at.warning)
+    assert not any(t.key == "remed_confirm" for t in at.text_input)
+    assert executed == []
+
+
+@_SKIP
+def test_a_live_600_tightens_where_the_stale_cache_said_30(monkeypatch):
+    """The other direction: the cache says 30 s, but the timer was loosened to 600 s since. The live value
+    generates the tighten (pre-fix: 'already at 30s', nothing offered), and 600 -> 60 is a downward change the
+    daily scan books, so the Execute logs it without a second ledger row."""
+    executed: list[str] = []
+    at = _tighten_page(monkeypatch, cached=30, live=pd.DataFrame({"name": ["WH_X"], "auto_suspend": [600]}),
+                       executed=executed, seen=[])
+    assert "ALTER WAREHOUSE WH_X SET AUTO_SUSPEND = 60;" in "\n".join(str(c.value) for c in at.code)
+    _execute_tighten(at)
+    assert executed[0] == "ALTER WAREHOUSE WH_X SET AUTO_SUSPEND = 60;"
+    assert any("REMEDIATION_LOG" in s for s in executed)
+    assert not any("SAVINGS_LEDGER" in s for s in executed)
+
+
+@_SKIP
+def test_a_live_never_suspend_timer_is_booked_by_the_app(monkeypatch):
+    """The cache says 600 s, the live timer is 0 (never suspend). The scan does not book enabling a timer, so the
+    app must: the autobook decision follows the live value (pre-fix: the cached 600 read as autobooked, and the
+    ESTIMATED ledger row was never booked)."""
+    executed: list[str] = []
+    at = _tighten_page(monkeypatch, cached=600, live=pd.DataFrame({"name": ["WH_X"], "auto_suspend": [0]}),
+                       executed=executed, seen=[])
+    _execute_tighten(at)
+    assert executed[0] == "ALTER WAREHOUSE WH_X SET AUTO_SUSPEND = 60;"
+    booked = [s for s in executed if s.startswith("INSERT INTO DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER")]
+    assert len(booked) == 1 and "'AUTO_SUSPEND', 'WH_X'" in booked[0]
+
+
+def test_exact_show_row_and_auto_suspend_parse():
+    from app.ui.pages.cost_parts.optimize import _auto_suspend_in_force, _exact_show_row
+
+    near = pd.DataFrame({"NAME": ["WHAX", "wh_x"], "AUTO_SUSPEND": [600, 45]})
+    assert _auto_suspend_in_force(_exact_show_row(near, "WH_X")) == (True, 45.0)
+    assert _exact_show_row(pd.DataFrame({"name": ["WHAX"], "auto_suspend": [600]}), "WH_X") is None
+    assert _exact_show_row(None, "WH_X") is None and _exact_show_row(pd.DataFrame(), "WH_X") is None
+    assert _exact_show_row(pd.DataFrame({"auto_suspend": [600]}), "WH_X") is None
+    assert _auto_suspend_in_force(None) == (False, None)
+    nulls = pd.DataFrame({"name": ["WH_X"], "auto_suspend": [None]})
+    assert _auto_suspend_in_force(_exact_show_row(nulls, "WH_X")) == (False, None)
+    assert _auto_suspend_in_force(_exact_show_row(pd.DataFrame({"name": ["WH_X"]}), "WH_X")) == (False, None)
+
+
+def test_warehouse_settings_live_builder_is_one_validated_warehouse():
+    assert insights_sql.warehouse_settings_live_sql("WH_ALFA_BI_PRD") == "SHOW WAREHOUSES LIKE 'WH_ALFA_BI_PRD'"
+    assert insights_sql.warehouse_settings_live_sql(" wh_x ") == "SHOW WAREHOUSES LIKE 'wh_x'"
+    for bad in ("", "WH; DROP TABLE X", "WH'X", None):
+        assert insights_sql.warehouse_settings_live_sql(bad) is None  # type: ignore[arg-type]
+
+
+@_SKIP
+def test_the_resize_estimate_uses_the_size_in_force_now(monkeypatch):
+    """The profile was mapped from the cached 'jump_wh' read (Large); a DBA has since resized to Medium. A pick
+    of SMALL is ONE step down, not two: the caption names the live size and says the cached one differed."""
+    from test_cluster_cap_shaped import _page, _pane, _pick
+
+    import app.ui.pages.cost_parts.optimize as opt
+
+    at, _seen = _page(monkeypatch, check=True, select="WH_LOW", size="Large")
+    cached_run = opt.run
+    live_reads: list[str] = []
+
+    def _run(*args, **kwargs):
+        sql = str(args[0] if args else kwargs.get("sql", ""))
+        if sql.startswith("SHOW WAREHOUSES LIKE"):
+            live_reads.append(sql)
+            return _ok(pd.DataFrame({"name": ["WH_LOW"], "size": ["Medium"], "auto_suspend": [300]}))
+        return cached_run(*args, **kwargs)
+
+    monkeypatch.setattr(opt, "run", _run)
+    _pick(at).select("SMALL").run()
+    assert not at.exception
+    _code, text = _pane(at)
+    assert "resizing LARGE → SMALL" not in text                         # pre-fix: priced two steps from LARGE
+    assert "resizing MEDIUM → SMALL" in text
+    assert ("SHOW WAREHOUSES now reports MEDIUM (the profile above read LARGE from a cached read): the estimate "
+            "below uses the size in force now.") in text
+    assert live_reads and set(live_reads) == {"SHOW WAREHOUSES LIKE 'WH_LOW'"}
+
+
+@_SKIP
+def test_a_failed_live_size_read_projects_and_books_no_resize_saving(monkeypatch):
+    from test_cluster_cap_shaped import _page, _pane, _pick, _recording_writes
+
+    import app.ui.pages.cost_parts.optimize as opt
+
+    at, _seen = _page(monkeypatch, check=True, select="WH_LOW", size="Large")
+    cached_run = opt.run
+
+    def _run(*args, **kwargs):
+        sql = str(args[0] if args else kwargs.get("sql", ""))
+        return _failed("timeout") if sql.startswith("SHOW WAREHOUSES LIKE") else cached_run(*args, **kwargs)
+
+    monkeypatch.setattr(opt, "run", _run)
+    writes = _recording_writes(monkeypatch)
+    _pick(at).select("SMALL").run()
+    assert not at.exception
+    _code, text = _pane(at)
+    assert "Projected saving" not in text                               # pre-fix: priced from the cached LARGE
+    assert "Current warehouse size unavailable (SHOW WAREHOUSES) — no saving booked automatically" in text
+    at.text_input(key="sizing_confirm").input("WH_LOW").run()
+    at.button(key="sizing_btn").click().run()
+    assert not at.exception
+    assert "ALTER WAREHOUSE WH_LOW SET WAREHOUSE_SIZE = 'SMALL';" in writes
+    logged = [w for w in writes if "REMEDIATION_LOG" in w]
+    assert len(logged) == 1 and "WAREHOUSE_SIZE = ''SMALL'';', 0.0, 'EXECUTED'" in logged[0]   # est 0
+    assert not any("SAVINGS_LEDGER" in w for w in writes)
+
+
+# ---- R1-017 (sibling): a failed experiments read is named on the proven-fix transfer panel ------------------
+
+def _transfer_page(monkeypatch, experiments: QueryResult) -> AppTest:
+    """Idle & sizing with one verified AUTO_SUSPEND win (WH_PROVEN) and one idle, settings-verified candidate
+    (WH_CAND, 600 s timer) the transfer panel suggests; the OPTIMIZATION_EXPERIMENTS read is ``experiments``."""
+    idle = pd.DataFrame({"WAREHOUSE_NAME": ["WH_CAND"], "COMPANY": ["ALFA"], "METERED_HOURS": [300.0],
+                         "IDLE_HOURS": [200.0], "TOTAL_CREDITS": [300.0], "IDLE_CREDITS": [200.0]})
+    wins = pd.DataFrame({"FIX_TYPE": ["AUTO_SUSPEND"], "TARGET_WAREHOUSE": ["WH_PROVEN"], "VERIFIED_USD": [50.0]})
+
+    def hook(sql, kw):
+        key = str(kw.get("key", ""))
+        if sql.startswith("SHOW WAREHOUSES"):
+            return _ok(pd.DataFrame({"name": ["WH_CAND"], "size": ["X-Small"], "auto_suspend": [600]}))
+        if key.startswith("opt_verified_wins"):
+            return _ok(wins)
+        if key.startswith("opt_experiments"):
+            return experiments
+        return None
+
+    def mart_hook(_mart, _live, kw):
+        return _ok(idle) if str(kw.get("key", "")).startswith("idle_") else None
+
+    return _cost_page(monkeypatch, "Idle & sizing", run_hook=hook, mart_hook=mart_hook)
+
+
+def _transfer_rows(at) -> pd.DataFrame:
+    for df in at.dataframe:
+        if isinstance(df.value, pd.DataFrame) and "CANDIDATE_WAREHOUSE" in df.value.columns:
+            return df.value
+    raise AssertionError("the proven-fix transfer table did not render")
+
+
+@_SKIP
+def test_failed_experiments_read_says_the_exclusion_was_not_checked(monkeypatch):
+    at = _transfer_page(monkeypatch, _failed("timeout"))
+    assert list(_transfer_rows(at)["CANDIDATE_WAREHOUSE"]) == ["WH_CAND"]
+    errors = " ".join(str(e.value) for e in at.error)
+    assert ("Open optimization experiments (OPTIMIZATION_EXPERIMENTS) could not be read, so a warehouse already "
+            "under experiment is not excluded from these suggestions") in errors       # pre-fix: silent
+
+
+@_SKIP
+def test_unreadable_experiments_table_is_a_setup_note(monkeypatch):
+    at = _transfer_page(monkeypatch, _failed("absent"))
+    assert list(_transfer_rows(at)["CANDIDATE_WAREHOUSE"]) == ["WH_CAND"]
+    assert "OPTIMIZATION_EXPERIMENTS) aren't readable by this app" in " ".join(str(i.value) for i in at.info)
+    assert "OPTIMIZATION_EXPERIMENTS) could not be read" not in " ".join(str(e.value) for e in at.error)
+
+
+@_SKIP
+def test_a_clean_experiments_read_adds_no_note(monkeypatch):
+    at = _transfer_page(monkeypatch, _ok(pd.DataFrame()))
+    assert list(_transfer_rows(at)["CANDIDATE_WAREHOUSE"]) == ["WH_CAND"]
+    assert "OPTIMIZATION_EXPERIMENTS)" not in _texts(at)
