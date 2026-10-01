@@ -348,7 +348,7 @@ def test_lock_waits_page_drops_the_post_limit_pandas_seam():
 def test_sla_finish_forecast_zero_nights_is_setup_not_clean(monkeypatch):
     # a misnamed ETL_CYCLE_START_WORKFLOW makes the all-time scan return zero rows; that used to render
     # the green verified-clean "Checked · Clear" row and tell the Tonight tile "no judged nights yet"
-    ops, fake, seen = _page(monkeypatch, {"etl_cycle_finish": _ok(pd.DataFrame(
+    ops, _fake, seen = _page(monkeypatch, {"etl_cycle_finish": _ok(pd.DataFrame(
         columns=["CYCLE_DATE", "CYCLE_START", "CYCLE_FINISH"]))},
         load_settings=lambda *_a, **_k: {"ETL_CONTROL_STATUS_FQN": "DB.SCH.CONTROL_STATUS",
                                          "ETL_CYCLE_START_WORKFLOW": "WF_TYPO_DOES_NOT_EXIST",
@@ -359,3 +359,60 @@ def test_sla_finish_forecast_zero_nights_is_setup_not_clean(monkeypatch):
     assert state == "needs_setup" and "WF_TYPO_DOES_NOT_EXIST" in msg and "ETL_CYCLE_START_WORKFLOW" in msg
     body = _fn(read(_OPS), "_sla_finish_forecast_panel")
     assert 'kind="clean"' not in body and 'empty_state("clean"' not in body
+
+
+# ------------------------------- R1-066 / R1-137: recon banners count the window, not the cap ----
+
+_RECON_SETTINGS = {"ETL_RECON_ERROR_FQN": "ALFA_EDW_PRD.DB_T_PROD_CORE.RECON_MTRC_ERROR"}
+
+
+def test_recon_scans_carry_pre_limit_window_totals():
+    import sqlglot
+
+    from app.data import etl_control_sql as etl
+    errs = etl.recon_errors_scan(_RECON_SETTINGS["ETL_RECON_ERROR_FQN"])
+    assert "COUNT(*) OVER () AS TOTAL_ERRORS, COUNT(DISTINCT MTRC) OVER () AS TOTAL_METRICS" in errs
+    rec = etl.recon_recurrence_scan(_RECON_SETTINGS["ETL_RECON_ERROR_FQN"])
+    assert "COUNT(*) OVER () AS TOTAL_CHECKS" in rec
+    assert "SUM(IFF(a.NEWEST_BROKEN_RN = 1, 1, 0)) OVER () AS ACTIVE_CHECKS_TOTAL" in rec
+    # still-breaking checks rank first, so the LIMIT evicts resolved ones before a latest-cycle break
+    assert "ORDER BY (a.NEWEST_BROKEN_RN = 1) DESC, RECURRENCE_PCT DESC" in rec
+    for sql in (errs, rec):
+        sqlglot.parse(sql, dialect="snowflake")
+
+
+def test_recon_error_headline_reads_the_window_totals(monkeypatch):
+    df = pd.DataFrame({"MTRC": [f"M{i % 25}" for i in range(500)], "LOAD_DTTM": ["2026-09-29"] * 500,
+                       "TOTAL_ERRORS": [760] * 500, "TOTAL_METRICS": [35] * 500})
+    ops, fake, seen = _page(monkeypatch, {"etl_recon_errors": _ok(df)},
+                            load_settings=lambda *_a, **_k: _RECON_SETTINGS, guard=lambda *_a, **_k: True)
+    ops._recon_error_panel(pf=None)
+    head = fake.text("error")
+    assert "760 reconciliation error(s) across 35 metric(s)" in head, head
+    assert "newest 500 of 760" in fake.text("caption")
+    ((shown,),) = [(t,) for t in seen["tables"]]
+    assert "TOTAL_ERRORS" not in shown.columns and "TOTAL_METRICS" not in shown.columns
+
+
+def test_recon_recurrence_banner_reads_the_active_total(monkeypatch):
+    # 300 resolved checks fill the capped frame while 5 checks broke in the latest cycle: the banner
+    # used to say "300 metric(s) ... none broke in the latest cycle"
+    n = 300
+    df = pd.DataFrame({"MTRC": [f"M{i}" for i in range(n)], "FRQCY": ["DAILY"] * n,
+                       "VALUE_TYPE": ["V"] * n, "RECON_MTRC_LAYER": ["L"] * n,
+                       "BROKEN_CYCLES": [40] * n, "TOTAL_ERROR_CYCLES": [90] * n,
+                       "RECURRENCE_PCT": [44] * n, "RECENT_BROKEN": [0] * n, "RECENT_WINDOW": [5] * n,
+                       "BROKE_LATEST_CYCLE": [False] * n, "ERROR_ROWS": [40] * n,
+                       "TOTAL_CHECKS": [405] * n, "ACTIVE_CHECKS_TOTAL": [5] * n})
+    ops, fake, _seen = _page(monkeypatch, {"etl_recon_recurrence_0": _ok(df)},
+                            load_settings=lambda *_a, **_k: _RECON_SETTINGS, guard=lambda *_a, **_k: True)
+    ops._recon_recurrence_panel(0, pf=None)
+    assert "5 metric(s) still breaking as of the latest cycle" in fake.text("error")
+    assert "none broke in the latest cycle" not in fake.text("warning")
+    assert "300 of 405 checks" in fake.text("caption")
+
+
+def test_ref_gap_headline_marks_a_capped_count():
+    body = _fn(read(_OPS), "_reference_gap_panel")
+    assert '_plus = "+" if res.truncated else ""' in body
+    assert "{n_codes:,}{_plus} new code(s) across {n_types}{_plus} code type(s)" in body

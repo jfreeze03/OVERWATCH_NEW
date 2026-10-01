@@ -1438,7 +1438,10 @@ def _reference_gap_panel(database: str = "") -> None:
         df = res.df.copy()
         n_codes = len(df)
         n_types = int(df["CHECK_NAME"].nunique()) if "CHECK_NAME" in df.columns else 0
-        st.error(f"🔴 {n_codes} new code(s) across {n_types} code type(s){_scope} have NO XLAT "
+        # PR-1 R1-066: past the MAX_CODES cap (a misconfiguration guard) the frame holds the first
+        # codes alphabetically, so both counts are floors -- say so rather than print the cap
+        _plus = "+" if res.truncated else ""
+        st.error(f"🔴 {n_codes:,}{_plus} new code(s) across {n_types}{_plus} code type(s){_scope} have NO XLAT "
                  "translation. Add the translation rows before the next cycle or the load "
                  "will fail on the missing code.")
         styled_table(df, height=280)
@@ -2087,14 +2090,21 @@ def _recon_error_panel(*, pf: dict | None = None) -> None:
              setup_hint="The app role needs SELECT on the RECON_MTRC_ERROR table "
                         "(GRANT SELECT ON <table> TO ROLE <app role>)."):
         df = res.df.copy()
-        n = len(df)
-        n_mtrc = int(df["MTRC"].nunique()) if "MTRC" in df.columns else 0
-        st.error(f"🔴 {n} reconciliation error(s) across {n_mtrc} metric(s) in the last {_days} days "
+        # PR-1 R1-066 / R1-137: the headline counts the WHOLE window -- the scan's pre-LIMIT window
+        # totals -- never the newest-MAX_RECON_ROWS frame (which read "500 errors" and dropped every
+        # metric whose errors fell past the cut). An old-shape frame falls back to the frame count.
+        n = (int(safe_float(df["TOTAL_ERRORS"].iloc[0])) if "TOTAL_ERRORS" in df.columns
+             else len(df))
+        n_mtrc = (int(safe_float(df["TOTAL_METRICS"].iloc[0])) if "TOTAL_METRICS" in df.columns
+                  else int(df["MTRC"].nunique()) if "MTRC" in df.columns else 0)
+        df = df.drop(columns=[c for c in ("TOTAL_ERRORS", "TOTAL_METRICS") if c in df.columns])
+        st.error(f"🔴 {n:,} reconciliation error(s) across {n_mtrc:,} metric(s) in the last {_days} days "
                  "— source and target layers disagree. Investigate before the numbers are trusted "
                  "downstream.")
         styled_table(df, height=320)
         st.caption(f"From RECON_MTRC_ERROR — each row is a metric whose SOURCE_LAYER and TARGET_LAYER "
-                   f"did not reconcile in the last {_days} days, newest first.")
+                   f"did not reconcile in the last {_days} days, newest first"
+                   + (f"; the table shows the newest {len(df):,} of {n:,}." if n > len(df) else "."))
         result_caption(res)
 
 
@@ -2129,7 +2139,15 @@ def _recon_recurrence_panel(days: int = 0, *, pf: dict | None = None) -> None:
             empty_state("clean", f"No reconciliation errors in the last {_win} days — every metric ties out.")
             return
         chronic = int((rec["TIER"] == "CHRONIC").sum())
-        active = int(rec["BROKE_LATEST_CYCLE"].astype(bool).sum())
+        # PR-1 R1-137: the still-breaking and total counts come from the scan's pre-LIMIT window
+        # totals -- counted from the capped frame, a latest-cycle break past row 300 read as "none
+        # broke in the latest cycle". The scan now ranks still-breaking checks first, so the chronic
+        # / new tiers (both require a latest-cycle break) are read from that head of the frame.
+        _raw = res.df
+        active = (int(safe_float(_raw["ACTIVE_CHECKS_TOTAL"].iloc[0])) if "ACTIVE_CHECKS_TOTAL" in _raw.columns
+                  else int(rec["BROKE_LATEST_CYCLE"].astype(bool).sum()))
+        _n_checks = (int(safe_float(_raw["TOTAL_CHECKS"].iloc[0])) if "TOTAL_CHECKS" in _raw.columns
+                     else len(rec))
         newb = int((rec["TIER"] == "NEW").sum())
         top = rec.iloc[0]
         _hop = f"{top.get('SOURCE_LAYER', '')}→{top.get('TARGET_LAYER', '')}"
@@ -2141,9 +2159,12 @@ def _recon_recurrence_panel(days: int = 0, *, pf: dict | None = None) -> None:
                      f"({safe_float(top.get('RECURRENCE_PCT')):.0f}%) at {_hop} — investigate the "
                      "source feed before the next cycle.")
         else:
-            st.warning(f"🟠 {len(rec)} metric(s) broke recon in this window, but all are isolated or "
+            st.warning(f"🟠 {_n_checks:,} metric(s) broke recon in this window, but all are isolated or "
                        "resolved — none broke in the latest cycle.")
         styled_table(rec, height=320)
+        if _n_checks > len(rec):
+            st.caption(f"The table shows {len(rec):,} of {_n_checks:,} checks — every still-breaking "
+                       "check first; the still-breaking count above covers all of them.")
         st.caption("Recurrence = distinct cycles THIS check broke ÷ distinct cycles ANY check of the "
                    "same frequency broke — a cycle = one night's recon batch (DATE(LOAD_DTTM)). This "
                    "table logs only failures, so cycles where everything reconciled are NOT counted: a "

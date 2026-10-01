@@ -645,7 +645,10 @@ def recon_errors_scan(
         return ""
     return (
         "SELECT MTRC, FRQCY, VALUE_TYPE, RECON_MTRC_LAYER,\n"
-        "       SOURCE_LAYER, TARGET_LAYER, SOURCE_ERROR, TARGET_ERROR, LOAD_DTTM\n"
+        "       SOURCE_LAYER, TARGET_LAYER, SOURCE_ERROR, TARGET_ERROR, LOAD_DTTM,\n"
+        # window totals run before the LIMIT, so the panel's headline counts every error row and
+        # metric in the window, not the newest max_rows (PR-1 R1-066 / R1-137, uncapped-aggregate)
+        "       COUNT(*) OVER () AS TOTAL_ERRORS, COUNT(DISTINCT MTRC) OVER () AS TOTAL_METRICS\n"
         f"  FROM {tbl}\n"
         f"  WHERE LOAD_DTTM >= DATEADD('day', -{int(days)}, CURRENT_TIMESTAMP())\n"
         "  ORDER BY LOAD_DTTM DESC, MTRC\n"
@@ -741,12 +744,19 @@ def recon_recurrence_scan(
         f"       a.RECENT_BROKEN, LEAST({_k}, f.TOTAL_ERROR_CYCLES) AS RECENT_WINDOW,\n"
         "       (a.NEWEST_BROKEN_RN = 1) AS BROKE_LATEST_CYCLE,\n"
         "       a.FIRST_BROKEN_ON, a.LAST_BROKEN_ON, x.ERROR_ROWS,\n"
-        "       x.SOURCE_LAYER, x.TARGET_LAYER, x.SOURCE_ERROR, x.TARGET_ERROR\n"
+        "       x.SOURCE_LAYER, x.TARGET_LAYER, x.SOURCE_ERROR, x.TARGET_ERROR,\n"
+        # pre-LIMIT totals for the banner (PR-1 R1-137): checks in the window, and how many broke in
+        # their frequency's latest cycle -- the 'still breaking' count must never come from the cap
+        "       COUNT(*) OVER () AS TOTAL_CHECKS,\n"
+        "       SUM(IFF(a.NEWEST_BROKEN_RN = 1, 1, 0)) OVER () AS ACTIVE_CHECKS_TOTAL\n"
         "  FROM agg a\n"
         "  JOIN freq f ON f.FRQCY = a.FRQCY\n"
         "  JOIN ctx  x ON x.MTRC = a.MTRC AND x.FRQCY = a.FRQCY\n"
         "               AND x.VALUE_TYPE = a.VALUE_TYPE AND x.RECON_MTRC_LAYER = a.RECON_MTRC_LAYER\n"
-        "  ORDER BY RECURRENCE_PCT DESC, a.RECENT_BROKEN DESC, a.BROKEN_CYCLES DESC, x.ERROR_ROWS DESC\n"
+        # still-breaking first (the Python tier ladder's order), so the cap evicts resolved checks
+        # before one that broke in the latest cycle -- a low-recurrence NEW break used to sort last
+        "  ORDER BY (a.NEWEST_BROKEN_RN = 1) DESC, RECURRENCE_PCT DESC, a.RECENT_BROKEN DESC,\n"
+        "           a.BROKEN_CYCLES DESC, x.ERROR_ROWS DESC\n"
         f"  LIMIT {int(max_rows)}"
     )
 
