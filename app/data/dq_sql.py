@@ -10,6 +10,15 @@ from __future__ import annotations
 
 from app.config import core_object
 
+# The row-volume monitor's bounds. The builder returns one row per (table, day), so its
+# largest possible result is DQ_MAX_TABLES x the window; DQ_MAX_ROWS is the transport cap its
+# callers must pass to run()/run_batch (R1-041: the default DEFAULT_MAX_ROWS=5,000 cut the
+# series at ~179 daily-loading tables, mid-table, far below the 600-table cap — dropping
+# alphabetically-late tables and scoring the boundary table on an old load).
+DQ_WINDOW_DAYS = 28
+DQ_MAX_TABLES = 600
+DQ_MAX_ROWS = DQ_MAX_TABLES * DQ_WINDOW_DAYS
+
 
 def product_row_volume(days: int = 28) -> str:
     """Daily rows-added per registered-product table over the window (excl. today).
@@ -60,7 +69,8 @@ WHERE COALESCE(om.DATA_PRODUCT, dm.DATA_PRODUCT) IS NOT NULL
 -- alphabetically-late tables out entirely and sliced boundary tables mid-window (wrong
 -- LATEST_DAY, and a silent clean all-clear for the dropped tables). DENSE_RANK on FQN keeps
 -- each table's COMPLETE series and only ever drops whole tables past a generous cap (bug-hunt
--- 2026-08-30). A DATABASE registration expanding to >600 tables is the only truncation case.
-QUALIFY DENSE_RANK() OVER (ORDER BY m.FQN) <= 600
+-- 2026-08-30). A DATABASE registration expanding to >{DQ_MAX_TABLES} tables is the only truncation
+-- case — PROVIDED the caller lifts run()'s row cap to DQ_MAX_ROWS (R1-041).
+QUALIFY DENSE_RANK() OVER (ORDER BY m.FQN) <= {DQ_MAX_TABLES}
 ORDER BY m.FQN, m.DAY
 """

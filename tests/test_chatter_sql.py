@@ -60,7 +60,10 @@ def test_bounds_window_and_padded_sessions():
 def test_families_for_application_shape_and_feeds_cs_driver():
     sql = chatter_sql.chatter_families_for_application("DBeaver")
     sqlglot.parse_one(sql, dialect="snowflake")
-    assert "COALESCE(s.APPLICATION, '(unknown)') = 'DBeaver'" in sql
+    # R1-055 (deliberate change): a statement with no SESSIONS row buckets as '(no session record)',
+    # not '(unknown)' (that label is _APP_EXPR's — a session that reports no client program), and
+    # the drill matches the same expression the by-application rollup groups on.
+    assert "COALESCE(s.APPLICATION, '(no session record)') = 'DBeaver'" in sql
     assert "q.QUERY_PARAMETERIZED_HASH IS NOT NULL" in sql
     # output columns are exactly what cs_driver.classify_families reads
     for col in ("SAMPLE_TEXT", "QUERY_TYPE", "RUNS", "AVG_COMPILE_S", "AVG_TOTAL_S", "COMPILE_PCT"):

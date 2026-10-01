@@ -1851,11 +1851,17 @@ ORDER BY 1
 
 def ml_forecast_daily() -> str:
     """Reader for the opt-in SNOWFLAKE.ML.FORECAST output table (see
-    snowflake/ml_forecast_option.sql). Absent = engine falls back."""
+    snowflake/ml_forecast_option.sql). Absent = engine falls back.
+
+    R1-230: INCLUDES today's row (>=, account clock per the TIMEZONE STANDARD).
+    Overview prorates today's own forecast row into the month-end projection
+    (#24) and then keeps only days strictly after today for the future sum; the
+    old strict ``>`` dropped that row here, so the today-remainder term was
+    always 0 while the basis still claimed it was prorated in."""
     return f"""
 SELECT TS::DATE AS DAY, FORECAST_CREDITS, LOWER_BOUND, UPPER_BOUND
 FROM {core_object("FORECAST_ML_DAILY")}
-WHERE TS::DATE > CURRENT_DATE()
+WHERE TS::DATE >= {account_today_sql()}
 ORDER BY DAY
 LIMIT 60
 """
@@ -2580,8 +2586,13 @@ def fact_warehouse_pressure(days: int, company: str = "ALL", *, bounds: tuple | 
     the live scan was a top fleet pain key at 17.8s p50). Queued seconds,
     spill and counts are exact sums of the hourly fact; P95_ELAPSED_SEC is
     the PEAK hourly-group p95 — the caller labels it. Live stays as the
-    labeled fallback for pre-fact windows."""
-    days = max(1, min(int(days or 7), 90))
+    labeled fallback for pre-fact windows.
+
+    R1-018: the mart leg honors the long window (MAX_MART_WINDOW_DAYS; the fact
+    is retained 400d) — the old hand-rolled 90-day clamp served a 180/365d
+    Warehouses window as 90 days under a section contract that says
+    "Contention uses Window". Only the LIVE fallback stays clamped to 90."""
+    days = bounded_days(days or 7, MAX_MART_WINDOW_DAYS)
     where = [scope_window_where("HOUR_TS", days, bounds=bounds),
              "WAREHOUSE_NAME IS NOT NULL"]
     if str(company).upper() != "ALL":
@@ -3101,9 +3112,14 @@ SELECT
     -- route_send_failed row per failing route PER RUN, with the route id + integration
     -- in CONTEXT; collapse to distinct (route, day) so a persistent outage counts as
     -- route-days, not runs (mirrors the undelivered_expired once-per-24h grain).
-    (SELECT COUNT(DISTINCT CONTEXT || '|' || TO_VARCHAR(DATE_TRUNC('day', LOGGED_AT)))
+    -- R1-019: key on the ROUTE ID (CONTEXT token 2, the same key last_delivery_health
+    -- parses), not the whole CONTEXT string: since V164 one route writes two different
+    -- CONTEXT suffixes (the drain's '- will retry next run ...' and the escalation's
+    -- '- escalation re-post ...'), and a mid-day integration rename changes the text too,
+    -- so the full-string key counted one route-day twice.
+    (SELECT COUNT(DISTINCT SPLIT_PART(CONTEXT, ' ', 2) || '|' || TO_VARCHAR(DATE_TRUNC('day', LOGGED_AT)))
        FROM {core_object("APP_ERROR_LOG")}
-      WHERE ERROR_TYPE = 'route_send_failed'
+      WHERE PAGE = 'NotifyWebhook' AND ERROR_TYPE = 'route_send_failed'
         AND LOGGED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())) AS ROUTE_FAILURES,
     -- rec19 (V064): the loud signal SP_NOTIFY_WEBHOOK itself raises when an OPEN
     -- eligible event ages past the 24h delivery window with no successful send.
