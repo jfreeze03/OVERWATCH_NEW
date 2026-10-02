@@ -244,7 +244,8 @@ _SCHEMAS = {
     "OBJECT_CHANGE_REGISTRY": "CHANGE_ID TEXT PRIMARY KEY, OBJECT_TYPE TEXT, DATABASE_NAME TEXT, SCHEMA_NAME TEXT, "
                               "OBJECT_NAME TEXT, COMPANY TEXT NOT NULL, CHANGE_SEEN_AT TEXT, BASELINE_FROM TEXT, "
                               "BASELINE_CALLS INT, BASELINE_FAILS INT, BASELINE_MEDIAN_MS REAL, BASELINE_P95_MS REAL, "
-                              "BASELINE_CREDITS_PER_CALL REAL, AFTER_CALLS INT, TRACKING_UNTIL TEXT",
+                              "BASELINE_CREDITS_PER_CALL REAL, AFTER_CALLS INT, TRACKING_UNTIL TEXT, "
+                              "ALERTED INT NOT NULL DEFAULT 0",
     "QUERY_HISTORY": "QUERY_ID TEXT, START_TIME TEXT, QUERY_TYPE TEXT, QUERY_TEXT TEXT, EXECUTION_STATUS TEXT, "
                      "TOTAL_ELAPSED_TIME REAL",
     "TASK_HISTORY": "QUERY_ID TEXT, DATABASE_NAME TEXT, SCHEMA_NAME TEXT, NAME TEXT, SCHEDULED_TIME TEXT, "
@@ -546,6 +547,97 @@ def test_repairs_rerun_before_the_version_row_is_harmless():
     first = _snapshot(con)
     _run_repairs(con)
     assert _snapshot(con) == first
+
+
+def _scan_freeze_legs() -> list[str]:
+    """The V172 scan's step 3 (PROCEDURE freeze, TASK freeze, idle-before zero freeze), from the migration text."""
+    head = ("    UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t\n"
+            "       SET BASELINE_FROM = DATEADD('day', -14, t.CHANGE_SEEN_AT),\n")
+    legs = [_between(_CI, head, ";\n", 0), _between(_CI, head, ";\n", 1),
+            _between(_CI, "    UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY\n"
+                          "       SET BASELINE_FROM = DATEADD('day', -14, CHANGE_SEEN_AT),\n", ";\n")]
+    assert "WHERE r.OBJECT_TYPE = 'PROCEDURE' AND r.BASELINE_FROM IS NULL" in legs[0]
+    assert "WHERE r.OBJECT_TYPE = 'TASK' AND r.BASELINE_FROM IS NULL" in legs[1]
+    assert legs[2].rstrip().endswith("WHERE BASELINE_FROM IS NULL")
+    return legs
+
+
+def _attempt_scan_retry(order: list[str], stop: int) -> tuple[tuple, tuple]:
+    """The first attempt commits order[:stop] and stops at order[stop] (a failed statement commits nothing); the new
+    body's scan runs before the retry (the 06:50 task, or Operations' Run scan now -- the CREATEs already landed);
+    the retry re-runs the file from the banner, and this time the version row lands. Returns r4's (BASELINE_FROM,
+    BASELINE_CALLS) after the scan and after the retry."""
+    con = _db({"MAPPED_DB": "Trexis"})
+    _repair_fixture(con)
+    for d in range(12, 20):              # r4's [CHANGE_SEEN_AT - 14d, CHANGE_SEEN_AT), inside the scan's -20d reach
+        con.execute("INSERT INTO QUERY_HISTORY VALUES (?, ?, 'CALL', 'CALL ALFA_EDW.S.SP_LOAD()', 'SUCCESS', 1000)",
+                    (f"L{d}", _t(days=-d)))
+        con.execute("INSERT INTO QUERY_HISTORY VALUES (?, ?, 'CALL', 'CALL OPS.S.RUN_SP_LOAD()', 'SUCCESS', 1000)",
+                    (f"W{d}", _t(days=-d, hours=1)))
+    for stmt in order[:stop]:
+        con.execute(_to_sqlite(stmt))
+    for leg in _scan_freeze_legs():
+        con.execute(_to_sqlite(leg))
+    q = "SELECT BASELINE_FROM, BASELINE_CALLS FROM OBJECT_CHANGE_REGISTRY WHERE CHANGE_ID = 'r4'"
+    scanned = con.execute(q).fetchone()
+    for stmt in order:
+        con.execute(_to_sqlite(stmt))
+    con.execute("INSERT INTO SCHEMA_VERSION VALUES (172)")
+    return scanned, con.execute(q).fetchone()
+
+
+def test_r3_runs_last_so_a_retry_never_re_nulls_a_baseline_a_scan_re_froze():
+    """Holistic #15. R3 nulls the suffix-collided PROCEDURE baselines once, gated on "no 172 row". With R4 (30 days
+    of TASK_HISTORY on a 300 s warehouse) between R3 and the version row, a file that stopped at R4 had already
+    committed R3's null; a scan in between re-froze r4 with the anchored match (8 SP_LOAD calls, RUN_SP_LOAD not
+    counted); the retry's R3 nulled it again, and each re-freeze reads a window one day shorter (the -20d reach)
+    until a thin one reads NO_BASELINE. R3 now runs LAST, so whatever statement stops the first attempt, R3 has
+    not committed: the scan finds the old frozen baseline (nothing to re-freeze) and the retry's null is the first.
+    The one statement after R3 is the version INSERT itself; no separate marker could close that gap either (no
+    column survives a scan's re-freeze, and any marker row would be its own statement after R3)."""
+    shipped = _repairs()
+    assert shipped[-1].startswith("-- R3 (R2-021)") and shipped[-2].startswith("-- R4 (R2-025)")
+    blended = (_t(days=-25), 30)                   # the V140 freeze: SP_LOAD + RUN_SP_LOAD calls blended
+    refrozen = (_t(days=-25), 8)                   # the V172 scan's anchored re-freeze
+    for stop in range(len(shipped)):
+        scanned, final = _attempt_scan_retry(shipped, stop)
+        assert scanned == blended, stop            # R3 had not committed: no null for the scan to re-freeze
+        assert final == (None, None), stop         # the retry's R3 is the FIRST null; the next scan re-freezes it
+    # the pre-fix order (R3 before R4): stopping at R4 kept R3's null, the scan re-froze it, the retry re-nulled it
+    pre_fix = [*shipped[:3], shipped[4], shipped[3]]
+    assert _attempt_scan_retry(pre_fix, 4) == (refrozen, (None, None))
+    # the residual stop point is the version INSERT itself, the statement right after R3
+    assert _attempt_scan_retry(shipped, len(shipped)) == (refrozen, (None, None))
+
+
+def test_rollback_null_lets_v140_refreeze_on_its_own_basis():
+    """Holistic #13. After a rollback to V140's body, V140 freezes a baseline only while BASELINE_FROM IS NULL and
+    counts every attempt. A TASK baseline R4 re-froze per scheduled run (14 runs, 0 failed) beside V140's attempt-
+    based AFTER leg (6 attempts, 2 failed: 33% >= 0% + 20 points) reads REGRESSED -- a false page. The ROLLBACK
+    note's UPDATE nulls it, and V140's own step 3 re-freezes it on V140's basis (21 attempts, 7 failed: 33% vs 33%).
+    ALERTED rows and rows whose tracking ended keep theirs."""
+    from tests.migrations.test_v172_detection_scans_company_and_accuracy import _rollback_null
+    con = _db()
+    seen = _t(days=-5)
+    v172_basis = {"BASELINE_FROM": _t(days=-19), "BASELINE_CALLS": 14, "BASELINE_FAILS": 0,
+                  "BASELINE_MEDIAN_MS": 540_000.0, "BASELINE_P95_MS": 540_000.0, "BASELINE_CREDITS_PER_CALL": 0.15}
+    _registry(con, "T1", "TASK", "DB1.S.TASK_A", seen, **v172_basis)
+    _registry(con, "T2", "TASK", "DB1.S.TASK_B", seen, ALERTED=1, **v172_basis)
+    _registry(con, "T3", "TASK", "DB1.S.TASK_C", "2026-08-01 10:00:00", **v172_basis)        # tracking ended
+    _registry(con, "P1", "PROCEDURE", "DB1.S.SP_LOAD", seen, **v172_basis)
+    _retry_fixture(con, "TASK_A", _NOW - timedelta(days=19, hours=-1), 14, {0, 2, 4, 6, 8, 10, 12})   # before
+    _retry_fixture(con, "TASK_A", _NOW - timedelta(days=4, hours=-1), 4, {0, 2})                      # after
+    binds = {"trk_lo": f"'{seen}'"}
+    base_leg, after_leg = _to_sqlite(_count_leg(_CI0, 0), binds), _to_sqlite(_count_leg(_CI0, 1), binds)
+    assert [r[:3] for r in con.execute(after_leg).fetchall()] == [("T1", 6, 2)]
+    assert con.execute(base_leg).fetchall() == []          # kept: V140 never re-freezes T1 (14 / 0 vs 6 / 2)
+    con.execute(_to_sqlite(_rollback_null()))
+    rows = {r[0]: r[1:] for r in con.execute(
+        "SELECT CHANGE_ID, BASELINE_FROM, BASELINE_CALLS, BASELINE_FAILS, BASELINE_CREDITS_PER_CALL "
+        "FROM OBJECT_CHANGE_REGISTRY")}
+    assert rows["T1"] == (None, None, None, None) and rows["P1"] == (None, None, None, None)
+    assert rows["T2"] == rows["T3"] == (_t(days=-19), 14, 0, 0.15)
+    assert [r[:3] for r in con.execute(base_leg).fetchall()] == [("T1", 21, 7)]      # V140's own (attempt) basis
 
 
 # ============================================================================================================

@@ -500,8 +500,79 @@ def test_v172_first_line_guard_and_version():
     assert _MIG.rstrip().endswith("WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION "
                                   "WHERE VERSION = 172);")
     header = _MIG[:_MIG.index("EXECUTE IMMEDIATE")]
-    for word in ("WHY:", "COST:", "FIRST RUN:", "ROLLBACK:", "Apply AFTER V171. Idempotent; safe to re-run."):
+    for word in ("WHY:", "COST:", "FIRST RUN:", "DELIVERY:", "ROLLBACK (order matters):",
+                 "Apply AFTER V171. Idempotent; safe to re-run."):
         assert word in header, word
+
+
+def _header() -> str:
+    return _MIG[:_MIG.index("EXECUTE IMMEDIATE")]
+
+
+def _flat(text: str) -> str:
+    return " ".join(ln.lstrip("- ") for ln in text.splitlines())
+
+
+def _rollback_null() -> str:
+    """The baseline null the ROLLBACK note tells the owner to run, un-commented."""
+    lines = _header()[_header().index("-- ROLLBACK"):].splitlines()
+    i = next(k for k, ln in enumerate(lines) if ln[2:].lstrip().startswith("UPDATE "))
+    pad = len(lines[i]) - len(lines[i][2:].lstrip()) - 2
+    out = []
+    for ln in lines[i:]:
+        assert ln.startswith("--" + " " * pad), ln
+        out.append(ln[2 + pad:])
+        if ln.rstrip().endswith(";"):
+            break
+    return "\n".join(out)
+
+
+def test_v172_rollback_nulls_the_baselines_v140_would_misread():
+    """Holistic #13: R4 and the V172 scan freeze TASK baselines per scheduled run and PROCEDURE baselines by the
+    anchored CALL match. V140's AFTER legs count every attempt and the bare suffix match, and V140 freezes only
+    while BASELINE_FROM / BASELINE_CREDITS_PER_CALL IS NULL -- so baselines kept across a rollback are read on the
+    other basis (a retried task: 14 runs / 0 failed before vs 21 / 7 after = REGRESSED, a false page). The note
+    names the null to run right after V140's CREATE; the harness executes it against V140's own step 3."""
+    head = _header()
+    rb = head[head.index("-- ROLLBACK (order matters):"):head.index("-- Apply AFTER V171.")]
+    assert "the re-frozen baselines stay" not in head
+    stmt = _rollback_null()
+    assert stmt == ("UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY\n"
+                    "   SET BASELINE_FROM = NULL, BASELINE_CALLS = NULL, BASELINE_FAILS = NULL,\n"
+                    "       BASELINE_MEDIAN_MS = NULL, BASELINE_P95_MS = NULL, BASELINE_CREDITS_PER_CALL = NULL\n"
+                    " WHERE OBJECT_TYPE IN ('TASK', 'PROCEDURE') AND CURRENT_DATE() <= TRACKING_UNTIL AND NOT ALERTED;")
+    assert set(re.findall(r"(\w+) = NULL", stmt)) == set(re.findall(r"(\w+) = NULL", _repair("-- R3 (R2-021)")))
+    v140 = _body(_CI0)                                       # the claim the note rests on: V140 re-freezes NULLs only
+    assert v140.count("r.BASELINE_FROM IS NULL\n") == 2 and v140.count("r.BASELINE_CREDITS_PER_CALL IS NULL") == 2
+    flat = _flat(rb)
+    for phrase in ("1. Re-run the base CREATEs", "The re-stamped COMPANY values stay",
+                   "2. Right after V140's CREATE, before the next change-impact scan", "14 runs / 0 failed",
+                   "21 / 7 after", "false PERF_CHANGE_REGRESSION", "false IMPROVED", "its own basis",
+                   "a change older than 6 days gets a shorter baseline", "An ALERTED row keeps",
+                   "raised between steps 1 and 2"):
+        assert phrase in flat, phrase
+    sqlglot = pytest.importorskip("sqlglot")
+    parsed = sqlglot.parse(stmt, dialect="snowflake")
+    assert len(parsed) == 1 and parsed[0] is not None and parsed[0].key == "update"
+
+
+def test_v172_header_names_the_webhook_delivery_effect():
+    """Holistic #12: "not re-raised" covers raising, not delivery. SP_NOTIFY_WEBHOOK (V164) picks events per route
+    by COMPANY_FILTER (V034 set every route to 'ALFA') and keeps a per-(EVENT_ID, ROUTE_ID) ledger, so the five
+    rules' UNKNOWN alerts stop reaching an ALFA-only route and a re-stamped live event can be delivered once to a
+    newly matching route. The header says so and how to keep them posting."""
+    head = _header()
+    delivery = _flat(head[head.index("-- DELIVERY:"):head.index("-- ROLLBACK")])
+    for phrase in ("SP_NOTIFY_WEBHOOK (V164)", "COMPANY_FILTER", "V034 set every existing route to 'ALFA'",
+                   "once per (EVENT_ID, ROUTE_ID) in ALERT_DELIVERIES", "PERF_CHANGE_REGRESSION, PIPE_DT_FAILURES,",
+                   "PIPE_VOLUME_DROP, DQ_BREACH and DQ_SCHEMA_DRIFT", "now UNKNOWN and stop posting to an ALFA-only route",
+                   "no undelivered_expired row", "Unmapped entities", "add an ALL or UNKNOWN route",
+                   "R1b / R2", "TASK_ALERT_NOTIFY", "24h; 7d for CRITICAL"):
+        assert phrase in delivery, phrase
+    v164 = read("snowflake/migrations/V164__notify_actionable_lines_escalation.sql")       # the facts it cites
+    assert "AND (:r_compfilter = 'ALL' OR e.COMPANY = :r_compfilter OR UPPER(e.COMPANY) = 'ALL')" in v164
+    assert "WHERE d.EVENT_ID = e.EVENT_ID AND d.ROUTE_ID = :r_route_id" in v164
+    assert "   SET COMPANY_FILTER = 'ALFA'\n" in read("snowflake/migrations/V034__route_company_filter.sql")
 
 
 def test_v172_file_order_and_statements():
@@ -513,7 +584,7 @@ def test_v172_file_order_and_statements():
         assert _MIG[mark:create].count("\n") == 1, name                   # the marker sits directly above
         order += [mark, create]
     order += [_MIG.index("-- R1 (R2-023)"), _MIG.index("-- R1b live PERF"), _MIG.index("-- R2 (R2-024)"),
-              _MIG.index("-- R3 (R2-021)"), _MIG.index("-- R4 (R2-025)"),
+              _MIG.index("-- R4 (R2-025)"), _MIG.index("-- R3 (R2-021)"),           # R3 LAST (holistic #15)
               _MIG.index("INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION")]
     assert order == sorted(order)
     kinds = [re.sub(r"^(?:--[^\n]*\n)+", "", s.strip()).split(None, 2)[:2] for s in _plain_statements(_MIG)]
@@ -875,6 +946,11 @@ def test_v172_baseline_null_is_first_apply_procedure_only():
     assert sets == {"BASELINE_FROM", "BASELINE_CALLS", "BASELINE_FAILS", "BASELINE_MEDIAN_MS", "BASELINE_P95_MS",
                     "BASELINE_CREDITS_PER_CALL"}
     assert "ALERT_EVENTS" not in r3
+    # Holistic #15: the first-apply gate is "no 172 row", so nothing that can stop the file may sit between R3's
+    # commit and that row. R3 is the LAST repair: the version row is the very next statement (the harness executes
+    # every stop point: test_r3_runs_last_so_a_retry_never_re_nulls_a_baseline_a_scan_re_froze).
+    assert _MIG[_MIG.index(r3) + len(r3):].startswith("\nINSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION")
+    assert "runs LAST" in r3 and "R4's 30-day TASK_HISTORY read" in r3
 
 
 def test_v172_task_refreeze_is_terminal_attempt_and_rescaled():
