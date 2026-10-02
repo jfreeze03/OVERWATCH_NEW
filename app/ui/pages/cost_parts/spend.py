@@ -159,6 +159,19 @@ def _coco_verified_zero(coco_res, cov: dict, window_start, window_last, today) -
             and reach <= window_start and ai_fact_fresh(cov.get("LOADED_ON"), window_last, today))
 
 
+def _coco_dash_help(v167: bool, note: str) -> str:
+    """holistic #17 (law 12): what the CoCo tile's '—' means. Once V167 is applied, an OK-empty read whose gate
+    reach covers the window and whose load is fresh is a measured $0.00 (_coco_verified_zero), so '—' means a short
+    reach, a stale load or a failed read, and `note` (ai_fact_note) names which. Before V167 -- or while
+    has_migration(167) still answers False -- every OK-empty read is '—' and the app cannot tell no usage from no
+    coverage, so the help claims neither, and there is no V167 reach to qualify it."""
+    if not v167:
+        return ("'—' when FACT_AI_USAGE_DAILY returned no Cortex Code rows for this window (no usage in it, or the "
+                "fact does not cover it; the app cannot tell which until V167 is applied) or could not be read.")
+    return ("'—' while FACT_AI_USAGE_DAILY does not reach back to this window's start or is not loaded through its "
+            "end (or could not be read)." + (f" {note}" if note else ""))
+
+
 def _spend_attribution_capability(df, rate: float, ai_rate: float,
                                   billed_usd: float, _wlab: str) -> None:
     """v4.461 P1 (audit-gated): the attribution-CAPABILITY meta-panels — cost-drill
@@ -457,6 +470,9 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
     # billed separately from metering). Rates still live in the "why totals
     # differ" expander below and on Admin.
     coco_usd = None
+    # holistic #17: the help's '—' meaning follows the same gate as the read (has_migration stashes its answer
+    # for the run, so this, the serial read below and the prefetch in _spend_attr_recent_jobs all agree).
+    _v167 = has_migration(167, _PAGE)
     if coco_res is None:
         coco_res = run(mart27_sql.ai_code_daily(days, "ALL", bounds=bounds,
                                                 stamped=has_migration(167, _PAGE)), page=_PAGE,
@@ -533,8 +549,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                  "inside the Credit-spend and Total-credits tiles — post-V079 CoCo bills as "
                  "SNOWFLAKE_COCO_SNOWSIGHT within METERING_DAILY_HISTORY. Shown here from the "
                  "near-real-time loader for freshness; do NOT add it to the totals on the left. "
-                 "'—' while FACT_AI_USAGE_DAILY does not reach back to this window's start or is not "
-                 "loaded through its end (or could not be read)." + (f" {_coco_note}" if _coco_note else "")},
+                 + _coco_dash_help(_v167, _coco_note)},
     ]
     hero_metric(_hero, _companions)
     st.caption("Account-wide by service (METERING_DAILY_HISTORY has no company grain; company split lives in Attribution)."
@@ -1414,11 +1429,8 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                     sort_label="measured $ desc")
                 st.caption(md_dollars(
                     "MEASURED warehouse compute + query acceleration, attributed to the client "
-                    "program and user; excludes idle, serverless, storage and AI. '(unknown)' = a "
-                    "session that reported no application, or whose session could not be found (opened "
-                    f"more than {app_cost_sql.SESSION_PAD_DAYS} days before the window began, or 7 on days "
-                    "the daily loader wrote before V166; or a system/task session with no SESSIONS row). A "
-                    "high line for one program is where to look for a misconfiguration. "
+                    "program and user; excludes idle, serverless, storage and AI. " + _unknown_app_note()
+                    + " A high line for one program is where to look for a misconfiguration. "
                     "The FACT_APP_COST_DAILY window fills in as the daily loader runs, so soon "
                     "after V077 is applied it may be shorter than the page window; the live "
                     "fallback (this toggle before V077 loads) covers up to 90 days."
@@ -1563,6 +1575,20 @@ _ANOM_CHANGE_LOOKBACK_DAYS = 32
 _APP_COST_ROW_CAP = 1000
 # ...and the loaded days each user/database is averaged over (the reader clamps to [7, 28]).
 _ANOM_BASELINE_DAYS = 14
+
+
+def _unknown_app_note() -> str:
+    """C10 / holistic #18: what '(unknown)' means on Cost by application, leg by leg. The mart resolves a query's
+    session relative to the QUERY'S OWN DAY: each day's last reload runs with lo = that day and keeps SESSIONS with
+    CREATED_ON >= DATEADD('day', -SESSION_PAD_DAYS, :lo) (V166 SP_LOAD_APP_COST; -7 in V077, and days the loader
+    wrote before V166 keep that). Only the live fallback (app_cost_sql.app_cost_live) pads from the page WINDOW's
+    start. Law 12: before V166 is applied every mart day used 7, so the mart leg says 7 and names no V166 rule."""
+    pad = app_cost_sql.SESSION_PAD_DAYS
+    mart = (f"{pad} days before the query's day (7 on days the daily loader wrote before V166)"
+            if has_migration(166, _PAGE) else "7 days before the query's day")
+    return ("'(unknown)' = a query whose session reported no application, or whose session could not be found: on "
+            f"the FACT_APP_COST_DAILY mart, one opened more than {mart}; on the live fallback, one opened more than "
+            f"{pad} days before the window began; or a system/task session with no SESSIONS row.")
 
 
 def _below_warehouse_drill(company: str, exp, flagged_wh: str, rate: float) -> None:

@@ -324,10 +324,23 @@ def test_r1_016_every_ai_fact_reader_passes_the_v167_gate(rel, calls):
 
 
 def test_r1_016_help_texts_say_what_the_dash_means():
-    spend = read("app/ui/pages/cost_parts/spend.py")
-    assert "'—' until the fact loads." not in spend
-    assert ("'—' while FACT_AI_USAGE_DAILY does not reach back to this window's start or is not "
-            "\"\n                 \"loaded through its end (or could not be read).") in spend
+    """holistic #17 (law 12): the CoCo '—' names reach / freshness only once V167 can turn a covered, fresh, empty
+    read into a measured $0.00 (_coco_verified_zero). Before V167 (or while has_migration(167) still answers False)
+    every OK-empty read is '—', and an empty read cannot tell 'no usage in the window' from 'not covered'."""
+    from app.ui.pages.cost_parts import spend
+    src = read("app/ui/pages/cost_parts/spend.py")
+    assert "'—' until the fact loads." not in src
+    after = spend._coco_dash_help(True, "")
+    assert after == ("'—' while FACT_AI_USAGE_DAILY does not reach back to this window's start or is not "
+                     "loaded through its end (or could not be read).")
+    assert spend._coco_dash_help(True, "The AI fact holds 9 days.") == f"{after} The AI fact holds 9 days."
+    before = spend._coco_dash_help(False, "")
+    assert before == ("'—' when FACT_AI_USAGE_DAILY returned no Cortex Code rows for this window (no usage in it, "
+                      "or the fact does not cover it; the app cannot tell which until V167 is applied) or could "
+                      "not be read.")
+    assert "reach back" not in before and "loaded through its end" not in before
+    assert spend._coco_dash_help(False, "The AI fact holds 9 days.") == before    # no V167 reach to qualify
+    assert "_v167 = has_migration(167, _PAGE)" in src and "_coco_dash_help(_v167, _coco_note)" in src
     uc = read("app/ui/pages/cost_parts/unit_costs.py")
     assert "was unavailable on this refresh" not in uc
     assert "does not cover this whole window (or could not be read)" in uc
@@ -475,9 +488,15 @@ def test_r1_016_coco_tile_before_v167_reads_nothing_new(monkeypatch):
     tile, keys = _render_coco_tile(monkeypatch, v167=False, cov=None)
     assert tile["value"] == "—" and "coco_ai_reach" not in keys
     assert "The AI fact" not in tile["help"]
+    # holistic #17 (law 12): before V167 the help claims no reach / freshness reason for the '—'
+    assert "reach back" not in tile["help"] and "loaded through its end" not in tile["help"]
+    assert "the app cannot tell which until V167 is applied" in tile["help"]
+    assert "NON-ADDITIVE subset" in tile["help"]                  # the rest of the help is unchanged
     # a failed coverage read after the apply claims nothing either
     tile, keys = _render_coco_tile(monkeypatch, v167=True, cov=None)
     assert tile["value"] == "—" and "coco_ai_reach" in keys and "The AI fact" not in tile["help"]
+    assert "does not reach back to this window's start" in tile["help"]
+    assert "cannot tell which" not in tile["help"]
 
 
 def test_coverage_helpers_parse_and_phrase():
@@ -640,13 +659,39 @@ def test_r2_014_task_graph_caption_claims_root_day_keying_only_after_v167():
     assert "on the mart a run counts on the day its root task started (V167)" not in src
 
 
-def test_c10_unknown_application_caption_names_the_30_day_session_pad():
-    """True on both paths: the live read pads SESSION_PAD_DAYS; mart days loaded before V166 used 7."""
+@pytest.mark.parametrize("v166", [False, True])
+def test_c10_unknown_application_note_states_each_legs_session_rule(monkeypatch, v166):
+    """holistic #18: the mart (FACT_APP_COST_DAILY) resolves a query's session relative to the QUERY'S OWN DAY --
+    each day's last reload runs with lo = that day and keeps SESSIONS with CREATED_ON >= DATEADD('day', -30, :lo)
+    (V166; -7 in V077) -- while only the live fallback pads SESSION_PAD_DAYS from the page WINDOW's start. Law 12:
+    before V166 is applied every mart day used 7, so the mart leg says 7 and names no V166 rule."""
+    from app.data import app_cost_sql
+    from app.ui.pages.cost_parts import spend
+    monkeypatch.setattr(spend, "has_migration", lambda n, _p: v166 and n <= 166)
+    pad = app_cost_sql.SESSION_PAD_DAYS
+    mart = (f"{pad} days before the query's day (7 on days the daily loader wrote before V166)" if v166
+            else "7 days before the query's day")
+    note = spend._unknown_app_note()
+    assert note == (
+        "'(unknown)' = a query whose session reported no application, or whose session could not be found: on "
+        f"the FACT_APP_COST_DAILY mart, one opened more than {mart}; on the live fallback, one opened more than "
+        f"{pad} days before the window began; or a system/task session with no SESSIONS row.")
+    assert ("V166" in note) is v166 and note.count("before the window began") == 1
+
+
+@pytest.mark.parametrize("v166", [False, True])
+def test_c10_unknown_application_caption_renders_the_gated_note(monkeypatch, v166):
+    """The rendered Cost-by-application caption carries the gated note, never the old window-start-only rule."""
+    from app.ui.pages.cost_parts import spend
+    from tests.test_cost_spend_honesty import _app_frame, _attribution, _captions
+    from tests.test_cost_spend_honesty import _ok as _qok
+    monkeypatch.setattr(spend, "has_migration", lambda n, _p: v166 and n <= 166)
+    at, _charts = _attribution(monkeypatch, daily=_qok(pd.DataFrame()), toggles=("spend_app_cost_load",),
+                               app=_qok(_app_frame()))
+    caps = _captions(at)
+    assert spend._unknown_app_note() in caps
+    assert "days before the window began, or 7 on days" not in caps
     src = read("app/ui/pages/cost_parts/spend.py")
-    assert ("session that reported no application, or whose session could not be found (opened "
-            "\"\n                    f\"more than {app_cost_sql.SESSION_PAD_DAYS} days before the window began, "
-            "or 7 on days \"\n                    \"the daily loader wrote before V166; or a system/task session "
-            "with no SESSIONS row)") in src
     assert "more than 30 days earlier" not in src
     assert "or could not be joined to a session" not in src
 
