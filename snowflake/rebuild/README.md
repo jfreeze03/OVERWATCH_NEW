@@ -25,24 +25,29 @@ Around the files (docs/FULL_REBUILD.md has the statements):
   and its resource_monitor (the replay detaches any monitor: if step 0 finds one
   other than OVERWATCH_RM, ask the owner before 02 whether it goes back).
 - **Between 01 and 02** (step 2): if you kept operator data, switch every
-  ALERT_ROUTES row off. 01 keeps the notification integrations, so with the
-  routes live the notifier 02 resumes would re-post the last 24 h of OPEN
-  events (7 days for a CRITICAL), the replay's own included.
+  ALERT_ROUTES row off and set SETTINGS ESCALATE_AFTER_MIN to 0. 01 keeps the
+  notification integrations, so with the routes live the notifier 02 resumes
+  would re-post the last 24 h of OPEN events (7 days for a CRITICAL), the
+  replay's own included, and the escalation email needs no route: it would
+  mail every OPEN, unacknowledged CRITICAL over 120 minutes old.
 - **02**: its generated header re-creates the retired roles V006, V007 and V008 grant
   to (03 drops them again). If Run All stops between V002 and V045, detach the
   OVERWATCH_RM resource monitor V002 attached before anything else (step 3).
 - **Between 02 and 03** (step 3b): if you kept operator data, restore SETTINGS,
   COMPANY_SCOPE, ALERT_CONFIG, ALERT_ROUTES, DEPARTMENT_MAP and SAVINGS_LEDGER
-  from the 00 clones (the replay re-ran one-time statements on them), close
-  the events the replay raised for rules that are off again, and switch every
-  restored route off again until step 7b. On every path, put
+  from the 00 clones (the replay re-ran one-time statements on them). In the
+  same block, set ESCALATE_AFTER_MIN back to 0 right after the SETTINGS restore
+  and switch every route off right after the ALERT_ROUTES restore (the clones
+  hold the live values; both stay off until step 7b), then close the events
+  the replay raised for rules that are off again. On every path, put
   the warehouse timeout back (and, on the owner's yes, the monitor step 0
   found), and if another role created the 02 shim's roles, drop them with it
   now: 03 opens by dropping them.
 - **After 05** (step 7b): re-create the opt-in objects 01 dropped (drill, ML
   forecast; the email alerts, notification integrations and secrets only if
   01's delivery gate was opened), resume the four email alerts 01 suspended,
-  and re-enable the routes step 0 listed.
+  re-enable the routes step 0 listed, and, once step 8 passes, put back the
+  ESCALATE_AFTER_MIN value step 0 recorded.
 <!-- end of generated replay notes -->
 
 These files are GENERATED and equality-locked against their sources

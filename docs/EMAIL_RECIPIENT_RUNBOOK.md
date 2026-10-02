@@ -262,3 +262,12 @@ The repo copy of `native_alert_templates.sql` ships a **placeholder** recipient
 redeploy to carry your real default, edit those lines locally (never commit them) — but that is
 cosmetic: it changes nothing about live delivery, which is governed entirely by
 the four requirements above.
+
+**Owner decision 2026-10-02:** the owner's default address is THE default
+recipient. It is set on OVERWATCH_EMAIL (`ALLOWED_RECIPIENTS` and
+`DEFAULT_RECIPIENTS`) by runbox `EMAIL_FIX_2026-10-02.sql`, which is where live
+delivery reads it. Committing it here and in the template in place of the
+placeholder is pending the owner (an agent session's PII check blocks it;
+`tests/test_native_alert_templates.py` pins the placeholder and changes with
+it). Until then the placeholder rule above stands for the repo only: never
+strip, UNSET or overwrite the live default to match the repo copy.

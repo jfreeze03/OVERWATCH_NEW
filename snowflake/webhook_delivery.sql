@@ -159,6 +159,9 @@ $$;
 -- ONCE in Snowsight (normally the same list as ALLOWED_RECIPIENTS), replacing
 -- the placeholder there, never here -- an address in this file lands in git:
 -- SET replaces the whole list: DESC first and keep every address it lists.
+-- OWNER DECISION 2026-10-02: the owner's default address is THE default; runbox
+-- EMAIL_FIX_2026-10-02.sql set it on OVERWATCH_EMAIL, and committing it to the
+-- repo is pending the owner. Never strip or overwrite that live default.
 -- ALTER NOTIFICATION INTEGRATION OVERWATCH_EMAIL SET
 --     DEFAULT_RECIPIENTS = ('<recipient>', <every address DESC listed, each in quotes>)
 --     DEFAULT_SUBJECT = 'OVERWATCH escalation';

@@ -573,11 +573,13 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > **V164 verify (actionable Teams lines + CRITICAL escalation — OWNER SMOKE TEST: the send, the ARRAY
 > handling and the nested cursor loop are runtime-only):**
 > 1. Before the apply: PREFLIGHT P164.1 must show `DEFAULT_RECIPIENTS_SET` and
->    `SNOW_ACCOUNTADMINS_CAN_USE` TRUE, or seed `('ESCALATE_EMAIL_INTEGRATION','')` for a Teams-only
->    escalation. P164.2 lists the first-run escalations of CRITICALs that already exist, and P162.4
+>    `SNOW_ACCOUNTADMINS_CAN_USE` TRUE: the email leg is the owner's choice (2026-10-02), with its
+>    default recipient set on OVERWATCH_EMAIL (runbox `EMAIL_FIX_2026-10-02.sql`). A blank
+>    `ESCALATE_EMAIL_INTEGRATION` is only a temporary mute of that leg, not an alternative to it.
+>    P164.2 lists the first-run escalations of CRITICALs that already exist, and P162.4
 >    the CRITICAL takeovers V162's first hourly scan raises (P164.2 cannot see those; they escalate
 >    about 2-3 hours after the apply too). Read both: acknowledge stale ones (the new takeovers within
->    2 hours of the first hourly scan) or seed `('ESCALATE_AFTER_MIN','0')` (both seeds survive the
+>    2 hours of the first hourly scan) or seed `('ESCALATE_AFTER_MIN','0')` (the seed survives the
 >    V164 MERGE, which is WHEN NOT MATCHED).
 > 2. After the next hourly chain: TASK_ALERT_NOTIFY SUCCEEDED (its RETURN_VALUE stays NULL: a task
 >    that CALLs a proc does not publish the proc's return string), no `escalation_failed` or

@@ -256,3 +256,43 @@ def test_runbook_escalation_retry_sentence_matches_v164():
     # runbook Step 2 DOES carry an ALLOWED_RECIPIENTS SET (run only when DESC lacks the address)
     assert "without touching ALLOWED_RECIPIENTS" not in fix_d
     assert "run its ALLOWED_RECIPIENTS SET only when DESC lacks the address" in fix_d
+
+
+# -- 7. every placeholder / never-commit rule names the owner's 2026-10-02 default decision --------------------
+
+# int6091 #3/#6: the owner chose the default address on 2026-10-02 and runbox EMAIL_FIX_2026-10-02.sql set it on
+# OVERWATCH_EMAIL; committing it was blocked by the agent session's PII check, so it is pending the owner. Each
+# site that states the placeholder rule says so beside it -- WITHOUT the address -- so no later reader takes the
+# repo placeholder for policy and strips the live default to match it.
+_PLACEHOLDER_RULE_SITES = {
+    "snowflake/native_alert_templates.sql": "PLACEHOLDER in all FOUR SYSTEM$SEND_EMAIL calls",
+    "docs/EMAIL_RECIPIENT_RUNBOOK.md": "ships a **placeholder** recipient",
+    "snowflake/webhook_delivery.sql": "replacing the placeholder there, never here",
+    "AGENTS.md": "**Never commit secrets**",
+}
+_DECISION_NOTE = ("2026-10-02", "THE default", "EMAIL_FIX_2026-10-02.sql", "pending the owner")
+
+
+def _decision_note_problems(texts: dict[str, str]) -> list[str]:
+    problems = []
+    for rel, rule in _PLACEHOLDER_RULE_SITES.items():
+        flat = " ".join(_uncomment(texts.get(rel, "")).split())
+        if rule not in flat:
+            problems.append(f"{rel}: the placeholder rule moved ({rule!r})")
+            continue
+        beside = flat[flat.index(rule):][:1200]                  # the note sits right after the rule
+        problems += [f"{rel}: no {needle!r} beside the placeholder rule" for needle in _DECISION_NOTE
+                     if needle not in beside]
+        problems += [f"{rel}: an address beside the rule: {addr}"
+                     for addr in re.findall(r"[\w.+-]+@[\w-]+\.[\w.]+", beside) if addr != "dba-team@example.com"]
+    return problems
+
+
+def test_placeholder_rules_name_the_owner_default_decision():
+    texts = _tracked_text()
+    assert _decision_note_problems(texts) == []
+    # the e54abf6e text stated each rule with no note of the decision
+    for rel in _PLACEHOLDER_RULE_SITES:
+        flat = " ".join(_uncomment(texts[rel]).split())
+        old = flat.replace("EMAIL_FIX_2026-10-02.sql", "").replace("THE default", "")
+        assert _decision_note_problems({**texts, rel: old}), rel

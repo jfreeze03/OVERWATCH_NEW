@@ -57,9 +57,16 @@ The third was V164's escalation email, which had no recipient; the owner sets th
   `EMAIL_FIX_2026-10-02.sql`). In the repo:
   - `snowflake/teardown.sql` keeps the account-level delivery objects. The four NATIVE_ALERT_* email alerts are only
     suspended, and the OVERWATCH_* notification integrations and the Teams / webhook secrets survive; their DROPs
-    sit in an opt-in DELIVERY GATE (`drop_delivery_objects` defaults to FALSE; Run All returns `kept: ...`). Because
-    the integrations are kept, FULL_REBUILD step 2 switches every ALERT_ROUTES row off before the replay and step 3b
-    switches every restored route off again, so the first notifier run cannot re-post every open event.
+    sit in an opt-in DELIVERY GATE (`drop_delivery_objects` defaults to FALSE; Run All returns `kept: ...`).
+  - Because the integrations are kept, a rebuild now keeps the notifier quiet itself. FULL_REBUILD step 2 switches
+    every ALERT_ROUTES row off before the replay and sets SETTINGS ESCALATE_AFTER_MIN to 0. The second is needed
+    because V164's escalation email needs no route: with OVERWATCH_EMAIL kept, the route-off alone would still let
+    every hourly run after the V164 replay email each OPEN, unacknowledged CRITICAL 120+ minutes old, the replay's
+    own SEC_CRED_EXPIRY events included. V164's seed MERGE is WHEN NOT MATCHED, so the replay keeps the 0. Step 3b
+    turns both off again inside its restore block, right after the SETTINGS and ALERT_ROUTES restores and before
+    its manual close, review and ACK (an hourly run can land in that pause). A factory reset does the same after its
+    restore. Step 0 records the escalation value, and step 7b(b) puts it back once step 8 passes. The rebuild
+    README notes and the teardown RESTORE header say the same.
   - Every recipient instruction (the email runbook, the webhook_delivery.sql recipe, FULL_REBUILD 7b) now says that
     SET ALLOWED_RECIPIENTS and SET DEFAULT_RECIPIENTS each replace the whole list, so DESC first and keep every
     address; a new recipient is added beside the existing ones, never instead of them. The runbook's new Step 5
@@ -69,12 +76,21 @@ The third was V164's escalation email, which had no recipient; the owner sets th
   - Alerts > Native delivery's escalation caption matches V164: an escalation is stamped once any channel delivers
     it, so only one where every channel failed retries hourly, within 7 days of being raised.
   - New locks fail CI on any UNSET of either recipient list, any CREATE OR REPLACE of OVERWATCH_EMAIL, any recipient
-    SET without the keep-every-address slot, and any delivery DROP outside the teardown gate.
+    SET without the keep-every-address slot, and any DROP that names a kept delivery object (an integration, a
+    webhook secret, a NATIVE_ALERT_* alert) in any tracked file, commented recipes included, except inside
+    teardown.sql's gate and its rebuild/01 copy. The rebuild locks pin the step-2, step-3b and factory-reset
+    route-off and escalation-off, their order, and the step-7b(b) restore.
   - Committing the owner's default address itself into the templates, runbooks and CLAUDE.md / AGENTS.md was blocked
-    by the session's PII permission check; those edits are listed for the owner in the PR.
-- **Docs.** CLAUDE.md names V173 as the current definer of both scans. RUNBOOK §12 has the V173 rollback, and the
-  V160 / V168 / V169 / wave-4 rollbacks say to roll V173 back first. Admin lists V173, and validate.sql expects
-  V001..V173. The rebuild bundle is regenerated.
+    by the session's PII permission check; those edits are listed for the owner in the PR. Every placeholder /
+    never-commit rule (the template header, the email runbook, the webhook recipe, AGENTS.md) now notes the owner
+    decision beside it, without the address: the owner's default is THE default, set on OVERWATCH_EMAIL by runbox
+    `EMAIL_FIX_2026-10-02.sql`, and committing it is pending the owner. A lock keeps the note there.
+- **Docs.** CLAUDE.md names V173 as the current definer of both scans. RUNBOOK §12 has the V173 rollback. The V160,
+  V163, V168 / V169 and wave-4 rollbacks roll back only the matching half of V173 (re-run only V168's SP_ALERT_SCAN
+  or only V169's SP_ALERT_SCAN_DAILY CREATE): the whole V173 rollback would also put the other scan back on its
+  failing body. DEPLOYMENT's V164 verify note no longer offers the Teams-only escalation seed: the email leg is the
+  owner's choice, and a blank ESCALATE_EMAIL_INTEGRATION is only a temporary mute. Admin lists V173, and
+  validate.sql expects V001..V173. The rebuild bundle is regenerated.
 
 ## 4.609.0 - Bug-hunt round 2, server side: seven migrations (V166-V172) for the loaders, marts, alerts, incidents and detection scans (2026-10-01)
 

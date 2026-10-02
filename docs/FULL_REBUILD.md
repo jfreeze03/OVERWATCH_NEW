@@ -48,10 +48,16 @@ owns the objects: SNOW_ACCOUNTADMINS here (DEPLOYMENT.md §1 and §2; step
                                                      -- its grants go with it (gate opened)
       SELECT ROUTE_ID, INTEGRATION_NAME FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES
        WHERE ENABLED;                               -- the routes live now (step 7b)
+      SELECT KEY, VALUE FROM DBA_MAINT_DB.OVERWATCH.SETTINGS
+       WHERE KEY IN ('ESCALATE_AFTER_MIN', 'ESCALATE_EMAIL_INTEGRATION');
+                                                     -- the escalation now (step 7b(b))
 
   If you will open the gate, keep the Teams Workflows URL to hand: its
   secret is dropped too. Keep the live ROUTE_IDs either way: step 7b
   re-enables exactly those (the step-1 ALERT_ROUTES clone holds them too).
+  Keep the ESCALATE_AFTER_MIN value too (no row means V164's default, 120):
+  steps 2 and 3b (on a factory reset, step 3) set it to 0 for the rebuild,
+  and step 7b(b) puts it back.
 - **WH_ALFA_ADMIN settings** (shared with the app and every loader): the
   replay changes two of them (step 3), and step 3b puts back what you record
   now:
@@ -115,17 +121,30 @@ so run the rest of the file, VERIFY included, by hand. The VERIFY query at
 the bottom should list ONLY operator-data tables afterward (or nothing,
 after a factory reset).
 
-Then, on the keep-operator-data path, switch every delivery route off
-before step 3. The kept integrations keep the kept routes live: the replay
-resumes TASK_ALERT_NOTIFY (V070 does when an enabled route names a live
-integration, V071 with the hourly tree), and with ALERT_DELIVERIES emptied
-its first hourly run would re-post every OPEN event of the last 24 hours
-(7 days for a CRITICAL) to Teams, the events the replay itself raises
-included, before step 3b can close or ACK them. Step 0 recorded the live
-ROUTE_IDs (the step-1 ALERT_ROUTES clone holds them too), and step 7b(a)
-re-enables exactly those:
+Then, on the keep-operator-data path, switch every delivery route off and
+turn V164's CRITICAL escalation off before step 3. The kept integrations
+keep the kept routes live: the replay resumes TASK_ALERT_NOTIFY (V070 does
+when an enabled route names a live integration, V071 with the hourly tree),
+and with ALERT_DELIVERIES emptied its first hourly run would re-post every
+OPEN event of the last 24 hours (7 days for a CRITICAL) to Teams, the events
+the replay itself raises included, before step 3b can close or ACK them.
+Switching the routes off is not enough, because the escalation email needs no
+route: once the replay re-creates SP_NOTIFY_WEBHOOK (V164), every hourly run
+emails each OPEN, unacknowledged CRITICAL of the last 7 days first notified
+(or, never notified, raised) ESCALATE_AFTER_MIN minutes ago to the kept
+OVERWATCH_EMAIL's DEFAULT_RECIPIENTS, the replay's own SEC_CRED_EXPIRY events
+included, and stamps it escalated. ESCALATE_AFTER_MIN '0' skips the whole
+escalation pass, and V164's seed MERGE (WHEN NOT MATCHED) keeps the 0 through
+the replay; the MERGE below also covers a deleted row, which the proc reads as
+120. Step 0 recorded the live ROUTE_IDs and the escalation value (the step-1
+clones hold both too); step 7b(a) re-enables exactly those routes, and step
+7b(b) puts the value back:
 
     UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES SET ENABLED = FALSE WHERE ENABLED;
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.SETTINGS t
+    USING (SELECT * FROM VALUES ('ESCALATE_AFTER_MIN', '0') AS s(KEY, VALUE)) s ON t.KEY = s.KEY
+    WHEN MATCHED THEN UPDATE SET VALUE = s.VALUE
+    WHEN NOT MATCHED THEN INSERT (KEY, VALUE) VALUES (s.KEY, s.VALUE);
 
 ## 3. Migrations, in order, one file at a time
 
@@ -188,7 +207,19 @@ now, but the rule stands for every file). Notes:
   from the step-1 clones, SETTINGS first, as the table-owner role (V001 re-seeds
   the SETTINGS/ALERT_CONFIG/COMPANY_SCOPE defaults):
       INSERT OVERWRITE INTO SETTINGS SELECT * FROM SETTINGS_BAK_<date>; -- etc.
-      (or UPDATE the handful you care about: rates, budgets, routes.)
+  (or UPDATE the handful you care about: rates, budgets, routes.)
+  Then, whatever you restored, switch every route off and turn the escalation
+  off until step 7b, the same two statements as step 2. The teardown kept the
+  integrations, so a restored live route (or a seeded one whose integration
+  exists) would post on the next hourly run, and the escalation email, which
+  needs no route, goes out once a replay-era CRITICAL is ESCALATE_AFTER_MIN
+  (120 as seeded) minutes old. If Run All stops anywhere after V164, run them
+  before you investigate:
+      UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES SET ENABLED = FALSE WHERE ENABLED;
+      MERGE INTO DBA_MAINT_DB.OVERWATCH.SETTINGS t
+      USING (SELECT * FROM VALUES ('ESCALATE_AFTER_MIN', '0') AS s(KEY, VALUE)) s ON t.KEY = s.KEY
+      WHEN MATCHED THEN UPDATE SET VALUE = s.VALUE
+      WHEN NOT MATCHED THEN INSERT (KEY, VALUE) VALUES (s.KEY, s.VALUE);
   There is no scheduled backup to fall back on since V161: the step-1 clones are
   the only copy.
 
@@ -208,7 +239,17 @@ your values are back: the hourly scan auto-clears only enabled rules, and
 the notifier posts an OPEN event whether or not its rule is enabled. So
 first keep two lists, in the same worksheet: the rules the replay
 re-seeded after you had deleted them, and every rule whose row the replay
-changed at all (re-seeded, switched on, threshold or auto-clear reset):
+changed at all (re-seeded, switched on, threshold or auto-clear reset).
+
+The restore puts back two things step 2 had switched off, so the same
+block switches them off again at once, before the manual close, review and
+ACK below, which an hourly notifier run can land in the middle of. Right
+after the SETTINGS restore, the escalation goes back to 0 (the clone holds
+your value, and the escalation email needs no route). And right after the
+ALERT_ROUTES restore, every route goes off again, whatever its integration:
+the clone holds each route's pre-teardown ENABLED flag, the teardown kept the
+OVERWATCH_* integrations unless you opened its delivery gate, and the replay
+resumed the notifier. Step 7b turns both back on:
 
     CREATE TEMPORARY TABLE OW_REPLAY_ONLY_RULES AS
       SELECT RULE_ID FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
@@ -217,9 +258,14 @@ changed at all (re-seeded, switched on, threshold or auto-clear reset):
       SELECT RULE_ID FROM (SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
                            MINUS SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG_BAK_<date>);
     INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.SETTINGS       SELECT * FROM DBA_MAINT_DB.OVERWATCH.SETTINGS_BAK_<date>;
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.SETTINGS t                -- escalation off again until step 7b(b)
+    USING (SELECT * FROM VALUES ('ESCALATE_AFTER_MIN', '0') AS s(KEY, VALUE)) s ON t.KEY = s.KEY
+    WHEN MATCHED THEN UPDATE SET VALUE = s.VALUE
+    WHEN NOT MATCHED THEN INSERT (KEY, VALUE) VALUES (s.KEY, s.VALUE);
     INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE  SELECT * FROM DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE_BAK_<date>;
     INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG   SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG_BAK_<date>;
     INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES   SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES_BAK_<date>;
+    UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES SET ENABLED = FALSE WHERE ENABLED;  -- off again until step 7b(a)
     INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.DEPARTMENT_MAP SELECT * FROM DBA_MAINT_DB.OVERWATCH.DEPARTMENT_MAP_BAK_<date>;
     INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER SELECT * FROM DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER_BAK_<date>;
 
@@ -241,7 +287,8 @@ A rule that is on again keeps its events, because your own threshold may
 raise the same ones. The replay may still have raised some under a
 threshold it had reset. List the events it raised for the rules it
 changed, and ACK each one your values would not have raised before step 7b
-re-enables the routes (the notifier posts only OPEN events):
+re-enables the routes and the escalation (the notifier posts, and the
+escalation emails, only OPEN events):
 
     SELECT EVENT_ID, RULE_ID, RAISED_AT, TITLE FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
      WHERE STATUS = 'OPEN'
@@ -250,15 +297,6 @@ re-enables the routes (the notifier posts only OPEN events):
     UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
        SET STATUS = 'ACK', ACK_BY = CURRENT_USER(), ACK_AT = CURRENT_TIMESTAMP()
      WHERE STATUS = 'OPEN' AND EVENT_ID IN ('<each EVENT_ID to keep quiet>');
-
-The restored ALERT_ROUTES has each route's pre-teardown ENABLED flag, and
-the replay resumed the notifier. The teardown keeps the OVERWATCH_*
-notification integrations unless you opened its delivery gate, so a route
-whose integration is kept would post on the next hourly run, before the
-ACKs above are done. Switch every route off once more, whatever its
-integration; step 7b(a) re-enables the routes step 0 recorded:
-
-    UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES SET ENABLED = FALSE WHERE ENABLED;
 
 On every path, put back the warehouse settings step 0 recorded: the timeout
 (V002 set it to 300), and the resource monitor only on the owner's yes in
@@ -420,9 +458,8 @@ INTEGRATIONS LIKE 'OVERWATCH%'` shows which delivery objects are gone):
     route still exists, and the INSERT would add a second one.
 
     The setup's own route INSERT adds nothing when a route already names the
-    integration. Steps 2 and 3b switched every route off (and on a factory
-    reset, replaying V070 disabled any seeded route whose integration was
-    gone). Re-enable
+    integration. Steps 2 and 3b switched every route off (on a factory reset,
+    step 3 switches them off after its restore). Re-enable
     exactly the routes step 0 recorded as live, never every row that names
     the integration: a duplicate route disabled on purpose would come back,
     and every alert, digest and escalation would post once per duplicate.
@@ -463,6 +500,18 @@ INTEGRATIONS LIKE 'OVERWATCH%'` shows which delivery objects are gone):
     delivery failure logged since the teardown. Run the pre-flight's query (2)
     over that window, not 24 hours, and resolve or ACK the replay-era rows and
     events first, or accept one catch-up email per alert.
+
+    Last, on every path (gate opened or not): once step 8 passes and the
+    replay-era CRITICALs are ACKed or resolved, put back the
+    ESCALATE_AFTER_MIN value step 0 recorded (`120`, V164's default, if step 0
+    found no row). Steps 2, 3 and 3b set it to 0 because the escalation email
+    needs no route. The first hourly run after this escalates every OPEN,
+    unacknowledged CRITICAL of the last 7 days first notified (or raised) that
+    many minutes ago: an email, and a re-post to each route that has
+    delivered it.
+
+        UPDATE DBA_MAINT_DB.OVERWATCH.SETTINGS SET VALUE = '<step-0 value>' WHERE KEY = 'ESCALATE_AFTER_MIN';
+
 (c) **Drill and ML forecast**: re-run snowflake/alert_drill.sql (it resumes
     its own task) and snowflake/ml_forecast_option.sql (it retrains and
     rewrites FORECAST_ML_DAILY; its weekly task is created suspended, so
