@@ -556,7 +556,9 @@ HEADER = f"""-- {NAME}
 -- posting, map the database (Cost Intelligence > Spend & Attribution > Unmapped entities) or add an ALL or
 -- UNKNOWN route. (b) An OPEN event the R1b / R2 re-stamps move to a company another enabled route carries becomes
 -- eligible there: the next TASK_ALERT_NOTIFY run sends it once if it is still inside the send window (24h; 7d
--- for CRITICAL); an older one raised within 7 days gets one undelivered_expired row for that route instead.
+-- for CRITICAL). An older one raised within 7 days is not sent there: V164's watchdog logs an undelivered_expired
+-- row for that route instead, then another every 24h (it skips a pair logged in the last 24h) while the event
+-- stays OPEN and undelivered there, until it is 7 days old.
 -- ROLLBACK (order matters): 1. Re-run the base CREATEs (V140 SP_CHANGE_IMPACT_SCAN, V109
 -- SP_WAREHOUSE_CHANGE_SCAN, V133 SP_SCAN_SCHEMA_DRIFT, V150 SP_SCAN_CLOUD_SVC_ANOMALY + SP_ANOMALY_SWEEP). The
 -- re-stamped COMPANY values stay (they are the corrected values). 2. Right after V140's CREATE, before the next

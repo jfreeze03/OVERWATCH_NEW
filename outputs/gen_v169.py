@@ -288,7 +288,8 @@ O22_DETAIL_OLD = (
 O22_DETAIL_NEW = (
     "               LEFT(IFF(x.RERAISED = 1,\n"
     "                        'The loader rolled back to its previous fill, logged this and re-raised: the run FAILED '\n"
-    "                        || '(TASK_HISTORY shows it) and readers keep the previous fill.',\n"
+    "                        || '(a scheduled run shows FAILED in TASK_HISTORY; a hand CALL raised the error to its '\n"
+    "                        || 'caller) and readers keep the previous fill.',\n"
     "                        'The loader logged this and returned normally, so its task still reads SUCCEEDED and '\n"
     "                        || 'readers keep the previous fill.')\n"
     "                   || ' Last at ' || TO_VARCHAR(x.LAST_AT, 'YYYY-MM-DD HH24:MI') || ': '\n")
@@ -410,9 +411,10 @@ HEADER = f"""-- {NAME}
 --       destination = the largest per-region total of that day; TITLE 'Egress N GB on <day> (14d avg ...)'.
 --     ~ [24]: a NULL snapshot timer reads as 0 (never suspends); [29]: GREATEST(COALESCE(THRESHOLD_NUM, 1), 1).
 --     ~ [22] OPS_PIPELINE_DEGRADED ERR leg: errs carries RERAISED (a PAGE 'AppCost' / 'StorageTruth' row, the V166
---       loaders that roll back, log and re-raise); the DETAIL says that run FAILED (TASK_HISTORY shows it), and
---       keeps 'returned normally, so its task still reads SUCCEEDED' for every other loader. Keys, sources and
---       windows unchanged; byte-identical to V168's hourly twin.
+--       loaders that roll back, log and re-raise); the DETAIL says that run FAILED (a scheduled run shows FAILED
+--       in TASK_HISTORY; a hand CALL raised the error to its caller), and keeps 'returned normally, so its task
+--       still reads SUCCEEDED' for every other loader. Keys, sources and windows unchanged; byte-identical to
+--       V168's hourly twin.
 --     ~ the RETURN label names V169; the 14-block tally is unchanged.
 --   ~ ALERT_CONFIG NAME of COST_EGRESS_SPIKE, only while it still equals the V043 seed text.
 --

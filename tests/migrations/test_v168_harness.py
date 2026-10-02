@@ -600,7 +600,8 @@ _ARM22_OLD = {"V162 hourly": _arm(_H162, *_A22_H),
               "V163 daily": _arm(_proc(_V163, "SP_ALERT_SCAN_DAILY()"), *_A22_D)}
 _ERR_TYPES = ("mart_load_failed", "fact_load_failed", "extract_load_failed", "cloud_svc_mart_failed",
               "object_cost_load_failed")
-_RERAISED = "The loader rolled back to its previous fill, logged this and re-raised: the run FAILED (TASK_HISTORY "
+_RERAISED = ("The loader rolled back to its previous fill, logged this and re-raised: the run FAILED (a scheduled run "
+             "shows FAILED in TASK_HISTORY; a hand CALL raised the error to its caller) ")
 _SWALLOWED = "The loader logged this and returned normally, so its task still reads SUCCEEDED and readers keep "
 
 
@@ -687,7 +688,8 @@ def test_arm22_err_detail_says_a_reraised_load_failed_and_a_swallowed_one_succee
                         "fact_load_failed: FACT_TASK_DAILY failed 1x on 2026-09-30"}
     app = got["fact_load_failed: FACT_APP_COST_DAILY failed 1x on 2026-09-30"]["DETAIL"]
     assert app == ("The loader rolled back to its previous fill, logged this and re-raised: the run FAILED "
-                   "(TASK_HISTORY shows it) and readers keep the previous fill. Last at 2026-09-30 06:55: Numeric "
+                   "(a scheduled run shows FAILED in TASK_HISTORY; a hand CALL raised the error to its caller) and "
+                   "readers keep the previous fill. Last at 2026-09-30 06:55: Numeric "
                    "value 'x' is not recognized. Admin > Errors & telemetry (persisted error log).")
     for title, row in got.items():
         reraised = "FACT_APP_COST_DAILY" in title or "FACT_STORAGE_ACCOUNT_DAILY" in title

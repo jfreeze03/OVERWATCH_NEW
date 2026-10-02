@@ -567,11 +567,28 @@ def test_v172_header_names_the_webhook_delivery_effect():
                    "once per (EVENT_ID, ROUTE_ID) in ALERT_DELIVERIES", "PERF_CHANGE_REGRESSION, PIPE_DT_FAILURES,",
                    "PIPE_VOLUME_DROP, DQ_BREACH and DQ_SCHEMA_DRIFT", "now UNKNOWN and stop posting to an ALFA-only route",
                    "no undelivered_expired row", "Unmapped entities", "add an ALL or UNKNOWN route",
-                   "R1b / R2", "TASK_ALERT_NOTIFY", "24h; 7d for CRITICAL"):
+                   "R1b / R2", "TASK_ALERT_NOTIFY", "24h; 7d for CRITICAL",
+                   # an older event is not logged ONCE: V164's watchdog re-logs the pair every 24h until it is 7d old
+                   "An older one raised within 7 days is not sent there: V164's watchdog logs an undelivered_expired "
+                   "row for that route instead, then another every 24h (it skips a pair logged in the last 24h) while "
+                   "the event stays OPEN and undelivered there, until it is 7 days old."):
         assert phrase in delivery, phrase
+    assert "gets one undelivered_expired row" not in delivery
     v164 = read("snowflake/migrations/V164__notify_actionable_lines_escalation.sql")       # the facts it cites
     assert "AND (:r_compfilter = 'ALL' OR e.COMPANY = :r_compfilter OR UPPER(e.COMPANY) = 'ALL')" in v164
     assert "WHERE d.EVENT_ID = e.EVENT_ID AND d.ROUTE_ID = :r_route_id" in v164
+    watchdog = v164[v164.index("    SELECT 'NotifyWebhook', 'undelivered_expired',"):v164.index("    expired := SQLROWCOUNT;")]
+    for fact in ("    WHERE e.STATUS = 'OPEN'\n",
+                 "      AND e.RAISED_AT < DATEADD('hour', -24, CURRENT_TIMESTAMP())\n",
+                 "      AND e.RAISED_AT >= DATEADD('day', -7, CURRENT_TIMESTAMP())\n",
+                 "                      WHERE d.EVENT_ID = e.EVENT_ID AND d.ROUTE_ID = r2.ROUTE_ID)\n",
+                 "                        AND a.LOGGED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP()));\n"):
+        assert watchdog.count(fact) == 1, fact
+    dep = " ".join(read("DEPLOYMENT.md").replace("\n>", "\n").split())       # the apply note carries the same fact
+    assert "logs one undelivered_expired row instead" not in dep
+    assert ("V164's watchdog logs an undelivered_expired row for that route instead, then another every 24 h (it "
+            "skips a pair logged in the last 24 h) while the event stays OPEN and undelivered there, until it is 7 "
+            "days old.") in dep
     assert "   SET COMPANY_FILTER = 'ALFA'\n" in read("snowflake/migrations/V034__route_company_filter.sql")
 
 

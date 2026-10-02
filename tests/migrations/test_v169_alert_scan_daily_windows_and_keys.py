@@ -208,7 +208,8 @@ _S22_DELTAS = [
      "                   || 'keep the previous fill. Last at ' ",
      "               LEFT(IFF(x.RERAISED = 1,\n"
      "                        'The loader rolled back to its previous fill, logged this and re-raised: the run FAILED '\n"
-     "                        || '(TASK_HISTORY shows it) and readers keep the previous fill.',\n"
+     "                        || '(a scheduled run shows FAILED in TASK_HISTORY; a hand CALL raised the error to its '\n"
+     "                        || 'caller) and readers keep the previous fill.',\n"
      "                        'The loader logged this and returned normally, so its task still reads SUCCEEDED and '\n"
      "                        || 'readers keep the previous fill.')\n"
      "                   || ' Last at ' ", _S22, 1),

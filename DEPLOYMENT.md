@@ -482,8 +482,9 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > (PREFLIGHT P168.4 second grid). Verify: PART B V168.1 / V168.2 and V169.1 / V169.2 right after the apply; V168.3 /
 > V168.4 after the next :07 Central hourly scan (WILL_AUTO_CLEAR -> 0); V169.3 and V169.4 the next morning (~07:00
 > Central; V169.4 flags a reconciliation error cycle that folded into an event raised before it loaded). Both scans'
-> [22] OPS_PIPELINE_DEGRADED ERR detail now says a V166 app-cost / storage-truth failure rolled back and FAILED
-> (TASK_HISTORY shows it); other loaders keep "returned normally, so its task still reads SUCCEEDED". Resolve in
+> [22] OPS_PIPELINE_DEGRADED ERR detail now says a V166 app-cost / storage-truth failure rolled back and FAILED (a
+> scheduled run shows FAILED in TASK_HISTORY; a hand CALL raised the error to its caller); other loaders keep
+> "returned normally, so its task still reads SUCCEEDED". Resolve in
 > Alerts: P169.1 day 2-5 COST_BUDGET_PACE (NOISE), P169.2 WOULD_RAISE_NEW = FALSE contract events (+ their
 > auto-declared incidents), P169.3 re-created-database storage surges (EXPECTED), P169.7 SEC_TRUST_REGRESSION
 > METRIC_VALUE < 1 (EXPECTED). P169.4 next-day DQ_RECON_ERROR twins: NOT in the Alerts UI (its RESOLVE radios offer
@@ -539,8 +540,10 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > PERF_CHANGE_REGRESSION, PIPE_DT_FAILURES and PIPE_VOLUME_DROP seed HIGH, and PIPE_DT_FAILURES is CRITICAL at 5+
 > failures. To keep them, map the database in Cost
 > Intelligence > Spend & Attribution > Unmapped entities, or add an ALL or UNKNOWN route. Re-stamped OPEN events that
-> now match another route's filter are delivered there once, inside their send window (24 h, 7 d for CRITICAL); an
-> older one raised within 7 days logs one undelivered_expired row instead (V164's per-(EVENT_ID, ROUTE_ID) ledger).
+> now match another route's filter are delivered there once, inside their send window (24 h, 7 d for CRITICAL). An
+> older one raised within 7 days is not sent there: V164's watchdog logs an undelivered_expired row for that route
+> instead, then another every 24 h (it skips a pair logged in the last 24 h) while the event stays OPEN and
+> undelivered there, until it is 7 days old.
 > Rollback (RUNBOOK §12, "Rolling back V172"; the exact text is in the V172 header) has two ordered steps: re-run the
 > base CREATEs, then, right after V140's CREATE and before the next change-impact scan, null the still-tracking TASK
 > and PROCEDURE baselines, or V140 reads V172's per-run baselines against its own every-attempt AFTER counts and

@@ -32,9 +32,10 @@
 --     - the dead budget_usd / ai_credit_price prologue reads (arm [17] keeps :credit_price; the daily scan keeps
 --       its own copies).
 --     ~ arm [22] OPS_PIPELINE_DEGRADED ERR leg: errs carries RERAISED (a PAGE 'AppCost' / 'StorageTruth' row, the
---       V166 loaders that roll back, log and re-raise); the DETAIL says that run FAILED (TASK_HISTORY shows it),
---       and keeps 'returned normally, so its task still reads SUCCEEDED' for every other loader. Keys, sources,
---       cadence gate and windows unchanged; byte-identical to V169's daily twin.
+--       V166 loaders that roll back, log and re-raise); the DETAIL says that run FAILED (a scheduled run shows
+--       FAILED in TASK_HISTORY; a hand CALL raised the error to its caller), and keeps 'returned normally, so its
+--       task still reads SUCCEEDED' for every other loader. Keys, sources, cadence gate and windows unchanged;
+--       byte-identical to V169's daily twin.
 --     ~ the RETURN label names V168; the 14-block tally is unchanged.
 --   ~ ALERT_CONFIG NAME of PIPE_COPY_FAILURES and SEC_NEW_ADMIN_NETWORK, only while it still equals the seed text.
 --
@@ -972,7 +973,8 @@ BEGIN
                LEFT(x.ERROR_TYPE || ': ' || x.SRC || ' failed ' || x.N || 'x on ' || TO_VARCHAR(x.ERR_DAY), 300),
                LEFT(IFF(x.RERAISED = 1,
                         'The loader rolled back to its previous fill, logged this and re-raised: the run FAILED '
-                        || '(TASK_HISTORY shows it) and readers keep the previous fill.',
+                        || '(a scheduled run shows FAILED in TASK_HISTORY; a hand CALL raised the error to its '
+                        || 'caller) and readers keep the previous fill.',
                         'The loader logged this and returned normally, so its task still reads SUCCEEDED and '
                         || 'readers keep the previous fill.')
                    || ' Last at ' || TO_VARCHAR(x.LAST_AT, 'YYYY-MM-DD HH24:MI') || ': '

@@ -182,7 +182,8 @@ _A22_DELTAS: list[tuple[str, str, tuple[str, str] | None]] = [
      "                   || 'keep the previous fill. Last at ' ",
      "               LEFT(IFF(x.RERAISED = 1,\n"
      "                        'The loader rolled back to its previous fill, logged this and re-raised: the run FAILED '\n"
-     "                        || '(TASK_HISTORY shows it) and readers keep the previous fill.',\n"
+     "                        || '(a scheduled run shows FAILED in TASK_HISTORY; a hand CALL raised the error to its '\n"
+     "                        || 'caller) and readers keep the previous fill.',\n"
      "                        'The loader logged this and returned normally, so its task still reads SUCCEEDED and '\n"
      "                        || 'readers keep the previous fill.')\n"
      "                   || ' Last at ' ", _A22),
@@ -488,6 +489,9 @@ def test_v168_arm22_err_detail_names_a_reraised_load_and_keeps_the_swallowed_wor
     assert a.count("MAX(IFF(PAGE IN ('AppCost', 'StorageTruth'), 1, 0)) AS RERAISED") == 1
     assert a.count("LEFT(IFF(x.RERAISED = 1,\n") == 1 and "RERAISED" not in _H.replace(a, "")
     assert a.count("'The loader rolled back to its previous fill, logged this and re-raised: the run FAILED '") == 1
+    # true of an owner hand CALL too (same APP_ERROR_LOG row, no task run): TASK_HISTORY only for a scheduled run
+    assert "(TASK_HISTORY shows it)" not in a
+    assert a.count("'(a scheduled run shows FAILED in TASK_HISTORY; a hand CALL raised the error to its '") == 1
     assert a.count("'The loader logged this and returned normally, so its task still reads SUCCEEDED and '") == 1
     assert "logged and swallowed\n" not in a and "V166's SP_LOAD_APP_COST and\n" in a      # the [22] header comment
     # keys, sources and windows unchanged: only the three declared deltas separate it from V162's arm
@@ -506,7 +510,8 @@ def test_v168_ops_pipeline_degraded_playbook_names_both_err_outcomes():
     assert "a loader logged a failure and carried on" not in means
     for phrase in ("often while its tasks still read SUCCEEDED", "most loaders carry on and their task reads SUCCEEDED",
                    "`SP_LOAD_APP_COST` and `SP_LOAD_STORAGE_TRUTH` roll back to their previous fill and re-raise",
-                   "so their task reads FAILED", "the alert DETAIL says which"):
+                   "so their task reads FAILED", "the alert DETAIL says which",
+                   "an owner hand CALL raises the error to its caller"):
         assert phrase in means, phrase
 
 

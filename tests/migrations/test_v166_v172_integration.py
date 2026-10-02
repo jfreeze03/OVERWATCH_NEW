@@ -373,6 +373,7 @@ def test_ops_pipeline_degraded_docs_name_both_err_outcomes():
     row = next(ln for ln in read("RUNBOOK.md").splitlines() if ln.startswith("| OPS_PIPELINE_DEGRADED |"))
     assert "logged and swallowed" not in row
     assert "roll back and re-raise, so their task reads FAILED" in row
+    assert "an owner hand CALL raises the error to its caller" in row                 # same log row, no task run
     readme = read("README.md").splitlines()
     for n in ("V168__", "V169__"):
         line = next(ln for ln in readme if ln.startswith(f"snowflake/migrations/{n}"))
