@@ -108,13 +108,18 @@ Around the files (docs/FULL_REBUILD.md has the statements):
   record WH_ALFA_ADMIN's STATEMENT_TIMEOUT_IN_SECONDS (V002 sets it back to 300)
   and its resource_monitor (the replay detaches any monitor: if step 0 finds one
   other than OVERWATCH_RM, ask the owner before 02 whether it goes back).
+- **Between 01 and 02** (step 2): if you kept operator data, switch every
+  ALERT_ROUTES row off. 01 keeps the notification integrations, so with the
+  routes live the notifier 02 resumes would re-post the last 24 h of OPEN
+  events (7 days for a CRITICAL), the replay's own included.
 - **02**: its generated header re-creates the retired roles {grantors} grant
   to (03 drops them again). If Run All stops between V002 and V045, detach the
   OVERWATCH_RM resource monitor V002 attached before anything else (step 3).
 - **Between 02 and 03** (step 3b): if you kept operator data, restore SETTINGS,
   COMPANY_SCOPE, ALERT_CONFIG, ALERT_ROUTES, DEPARTMENT_MAP and SAVINGS_LEDGER
-  from the 00 clones (the replay re-ran one-time statements on them) and close
-  the events the replay raised for rules that are off again. On every path, put
+  from the 00 clones (the replay re-ran one-time statements on them), close
+  the events the replay raised for rules that are off again, and switch every
+  restored route off again until step 7b. On every path, put
   the warehouse timeout back (and, on the owner's yes, the monitor step 0
   found), and if another role created the 02 shim's roles, drop them with it
   now: 03 opens by dropping them.

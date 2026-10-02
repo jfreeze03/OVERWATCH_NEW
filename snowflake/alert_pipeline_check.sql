@@ -152,9 +152,9 @@ SHOW RESOURCE MONITORS;  -- expect none since V045
 -- PAGE 'NotifyWebhook' because it runs inside the notifier; Teams is not at fault):
 --   escalation_email_failed -> the escalation email names no address: it goes ONLY
 --     to OVERWATCH_EMAIL's DEFAULT_RECIPIENTS. Look, then follow
---     docs/EMAIL_RECIPIENT_RUNBOOK.md requirement 4 (Step 2 sets DEFAULT_RECIPIENTS
---     without touching ALLOWED_RECIPIENTS -- SET replaces a whole list, so never
---     re-SET ALLOWED_RECIPIENTS without every address DESC shows):
+--     docs/EMAIL_RECIPIENT_RUNBOOK.md requirement 4 (Step 2 sets DEFAULT_RECIPIENTS;
+--     run its ALLOWED_RECIPIENTS SET only when DESC lacks the address, and since
+--     SET replaces a whole list, DEFAULT_RECIPIENTS too, keep every address DESC shows):
 -- DESC NOTIFICATION INTEGRATION OVERWATCH_EMAIL;     -- ENABLED true, DEFAULT_RECIPIENTS set?
 -- SHOW GRANTS ON INTEGRATION OVERWATCH_EMAIL;        -- USAGE to SNOW_ACCOUNTADMINS?
 --     After the fix, prove it: no new escalation_email_failed row after the next

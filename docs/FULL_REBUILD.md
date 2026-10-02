@@ -115,6 +115,18 @@ so run the rest of the file, VERIFY included, by hand. The VERIFY query at
 the bottom should list ONLY operator-data tables afterward (or nothing,
 after a factory reset).
 
+Then, on the keep-operator-data path, switch every delivery route off
+before step 3. The kept integrations keep the kept routes live: the replay
+resumes TASK_ALERT_NOTIFY (V070 does when an enabled route names a live
+integration, V071 with the hourly tree), and with ALERT_DELIVERIES emptied
+its first hourly run would re-post every OPEN event of the last 24 hours
+(7 days for a CRITICAL) to Teams, the events the replay itself raises
+included, before step 3b can close or ACK them. Step 0 recorded the live
+ROUTE_IDs (the step-1 ALERT_ROUTES clone holds them too), and step 7b(a)
+re-enables exactly those:
+
+    UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES SET ENABLED = FALSE WHERE ENABLED;
+
 ## 3. Migrations, in order, one file at a time
 
 V001 → the repo tip (every file in snowflake/migrations/, enumerated in
@@ -166,8 +178,8 @@ now, but the rule stands for every file). Notes:
   route's COMPANY_FILTER to 'ALFA'; V019/V020/V028 reset SEC_CRED_EXPIRY
   (enabled, threshold 10); V043/V045 re-enable PIPE_TASK_FAILURES; V091 and
   V157 turn AUTO_CLEAR_ENABLED on for five rules; V001 resets COMPANY_SCOPE
-  notes; V070 disables every enabled route whose integration is gone (none,
-  unless you opened the teardown's delivery gate); V118 and V145 re-run their one-time SAVINGS_LEDGER corrections
+  notes; V070 disables every enabled route whose integration is gone (none
+  are enabled: step 2 switched them all off); V118 and V145 re-run their one-time SAVINGS_LEDGER corrections
   (apply-time EXECUTE IMMEDIATE blocks, guarded so a re-run normally changes
   nothing); and the seed MERGEs put back the rules, routes, settings, scope and
   department rows you had deleted (V011 even re-adds two retired rules, which
@@ -239,17 +251,14 @@ re-enables the routes (the notifier posts only OPEN events):
        SET STATUS = 'ACK', ACK_BY = CURRENT_USER(), ACK_AT = CURRENT_TIMESTAMP()
      WHERE STATUS = 'OPEN' AND EVENT_ID IN ('<each EVENT_ID to keep quiet>');
 
-The restored ALERT_ROUTES has each route's pre-teardown ENABLED flag. The
-teardown keeps the OVERWATCH_* notification integrations unless you opened
-its delivery gate, but any integration that is gone (gate opened, or never
-installed) must not keep an enabled route. Keep every route whose
-integration is gone switched off until step 7b brings it back (run the two
-statements together; the UPDATE reads the SHOW's result):
+The restored ALERT_ROUTES has each route's pre-teardown ENABLED flag, and
+the replay resumed the notifier. The teardown keeps the OVERWATCH_*
+notification integrations unless you opened its delivery gate, so a route
+whose integration is kept would post on the next hourly run, before the
+ACKs above are done. Switch every route off once more, whatever its
+integration; step 7b(a) re-enables the routes step 0 recorded:
 
-    SHOW NOTIFICATION INTEGRATIONS;
-    UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES SET ENABLED = FALSE
-     WHERE ENABLED AND UPPER(INTEGRATION_NAME) NOT IN
-           (SELECT UPPER("name") FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+    UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES SET ENABLED = FALSE WHERE ENABLED;
 
 On every path, put back the warehouse settings step 0 recorded: the timeout
 (V002 set it to 300), and the resource monitor only on the owner's yes in
@@ -411,9 +420,9 @@ INTEGRATIONS LIKE 'OVERWATCH%'` shows which delivery objects are gone):
     route still exists, and the INSERT would add a second one.
 
     The setup's own route INSERT adds nothing when a route already names the
-    integration. If you kept operator data, replaying V070 in step 3 (and
-    step 3b after the restore) DISABLED every enabled route whose integration
-    was gone. Re-enable
+    integration. Steps 2 and 3b switched every route off (and on a factory
+    reset, replaying V070 disabled any seeded route whose integration was
+    gone). Re-enable
     exactly the routes step 0 recorded as live, never every row that names
     the integration: a duplicate route disabled on purpose would come back,
     and every alert, digest and escalation would post once per duplicate.
@@ -447,6 +456,13 @@ INTEGRATIONS LIKE 'OVERWATCH%'` shows which delivery objects are gone):
     native_alert_templates.sql with the real recipient in all four
     SYSTEM$SEND_EMAIL calls. Either way the alerts are suspended: resume
     all four only after step 8 passes and that runbook's pre-flight is clean.
+    A kept alert resumes with its last successful evaluation from before the
+    teardown, so its first evaluation covers the whole rebuild window:
+    NATIVE_ALERT_NEW_EVENTS mails once if any CRITICAL/HIGH raised since then
+    is still OPEN, and STALE_FACTS / DELIVERY_FAILING mail every loader or
+    delivery failure logged since the teardown. Run the pre-flight's query (2)
+    over that window, not 24 hours, and resolve or ACK the replay-era rows and
+    events first, or accept one catch-up email per alert.
 (c) **Drill and ML forecast**: re-run snowflake/alert_drill.sql (it resumes
     its own task) and snowflake/ml_forecast_option.sql (it retrains and
     rewrites FORECAST_ML_DAILY; its weekly task is created suspended, so

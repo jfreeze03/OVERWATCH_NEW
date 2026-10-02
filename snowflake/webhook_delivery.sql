@@ -158,8 +158,9 @@ $$;
 -- integration's DEFAULT_RECIPIENTS -- no address lives in OVERWATCH. Set it
 -- ONCE in Snowsight (normally the same list as ALLOWED_RECIPIENTS), replacing
 -- the placeholder there, never here -- an address in this file lands in git:
+-- SET replaces the whole list: DESC first and keep every address it lists.
 -- ALTER NOTIFICATION INTEGRATION OVERWATCH_EMAIL SET
---     DEFAULT_RECIPIENTS = ('<recipient>')
+--     DEFAULT_RECIPIENTS = ('<recipient>', <every address DESC listed, each in quotes>)
 --     DEFAULT_SUBJECT = 'OVERWATCH escalation';
 -- No email leg: Admin > Settings, ESCALATE_EMAIL_INTEGRATION blank.
 -- No escalation at all: Admin > Settings, ESCALATE_AFTER_MIN 0.

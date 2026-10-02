@@ -33,7 +33,10 @@
 --   0. Before this file: clone the operator tables (B0 below, or
 --      rebuild/00) and record WH_ALFA_ADMIN's STATEMENT_TIMEOUT_IN_SECONDS
 --      and resource monitor (docs/FULL_REBUILD.md steps 0-1).
---   1. Re-run every migration in snowflake/migrations/ in order (V001 through
+--   1. Keeping operator data? First switch every ALERT_ROUTES row off
+--      (docs/FULL_REBUILD.md step 2): the integrations survive this file, so
+--      the notifier the replay resumes would post with the kept routes live.
+--      Then re-run every migration in snowflake/migrations/ in order (V001 through
 --      the repo tip), then roles.sql. V006-V008 grant to the retired
 --      OVERWATCH_MONITOR / OVERWATCH_OPERATOR roles: create them first
 --      (rebuild/02's replay shim does; roles.sql drops them again).

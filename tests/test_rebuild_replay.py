@@ -702,13 +702,66 @@ def test_step_3b_closes_resurrected_rules_and_keeps_dead_routes_off():
     v045 = read("snowflake/migrations/V045__task_monitoring_restored.sql")
     assert (v045.index("SET ENABLED = TRUE\n WHERE RULE_ID = 'PIPE_TASK_FAILURES';")
             < v045.index("\nCALL DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN();"))
-    # a restored ENABLED route whose integration the teardown dropped goes back off until step 7b
-    routes = step3b.index("INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES")
-    show = step3b.index("SHOW NOTIFICATION INTEGRATIONS;")
-    assert routes < show < step3b.index("UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES SET ENABLED = FALSE")
-    assert 'NOT IN\n           (SELECT UPPER("name") FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));' in step3b
+    # every restored route goes back off until step 7b(a), whatever its integration: since 2026-10-02 the
+    # teardown KEEPS the integrations, so a "whose integration is gone" filter disables nothing and the
+    # notifier the replay resumed would post before the ACKs above (p6091 review)
+    routes = stmts.index("INSERT OVERWRITE INTO DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES "
+                         "SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES_BAK_<date>")
+    (off,) = [i for i, s in enumerate(stmts) if s.startswith("UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES")]
+    assert off > routes and off > review
+    assert stmts[off] == _ROUTES_ALL_OFF
+    assert "RESULT_SCAN" not in step3b and "SHOW NOTIFICATION INTEGRATIONS" not in step3b
     # step 7b still re-enables exactly the routes step 0 recorded
     assert re.search(r"SET ENABLED = TRUE\s+WHERE ROUTE_ID IN \(", _section(fr, "## 7b.", "## 8."))
+
+
+_ROUTES_ALL_OFF = "UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES SET ENABLED = FALSE WHERE ENABLED"
+
+
+def _pre_replay_route_problems(fr: str) -> list[str]:
+    """Step 2 (after the teardown, before the step-3 replay) must switch every route off on the keep path."""
+    step2 = _section(fr, "## 2. Teardown", "## 3. Migrations")
+    code = "\n".join(line.split("--", 1)[0] for line in step2.splitlines() if line.startswith("    "))
+    stmts = [" ".join(s.split()) for s in code.split(";") if s.strip()]
+    problems = []
+    if _ROUTES_ALL_OFF not in stmts:
+        problems.append("step 2 does not switch every ALERT_ROUTES row off before the replay")
+    prose = " ".join(step2.split())
+    problems += [f"step 2 lost: {needle}" for needle in ("keep-operator-data path",
+                                                          "step 7b(a) re-enables exactly those")
+                 if needle not in prose]
+    return problems
+
+
+def test_full_rebuild_switches_every_route_off_before_the_replay():
+    """p6091 review (DR regression): the teardown now KEEPS the notification integrations, so on the keep path
+    the kept ALERT_ROUTES stay enabled through the replay. V070 RESUMEs TASK_ALERT_NOTIFY when an enabled route
+    names a live integration (and V071 resumes it with the hourly tree), and the teardown emptied
+    ALERT_DELIVERIES, so the first hourly notifier run re-posted every OPEN event of the last 24h (7 days for a
+    CRITICAL), the replay's own events included, before step 3b could close or ACK them. Step 2 now switches
+    every route off; step 3b switches them off again after its restore; step 7b(a) re-enables step 0's."""
+    fr = read("docs/FULL_REBUILD.md")
+    assert _pre_replay_route_problems(fr) == []
+    # the reason still holds: the integrations are kept by default, and the replay resumes the notifier
+    td = read("snowflake/teardown.sql")
+    assert "drop_delivery_objects BOOLEAN DEFAULT FALSE;" in td
+    assert re.search(r"^DROP TABLE IF EXISTS DBA_MAINT_DB\.OVERWATCH\.ALERT_DELIVERIES;", td, re.M)
+    v070 = read("snowflake/migrations/V070__delivery_routing_teams_only.sql")
+    assert "ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_ALERT_NOTIFY RESUME;" in v070
+    v071 = read("snowflake/migrations/V071__task_graph_rechain_retry.sql")
+    assert re.search(r"^ALTER TASK IF EXISTS DBA_MAINT_DB\.OVERWATCH\.TASK_ALERT_NOTIFY RESUME;", v071, re.M)
+    # ...the order: off in step 2, restored + off again in step 3b, ACK before the 7b(a) re-enable
+    step3b = " ".join(_section(fr, "## 3b. Put back what the replay rewrote", "## 4. Grants").split())
+    assert "Switch every route off once more" in step3b
+    seven_a = " ".join(_section(fr, "(a) **Teams delivery**", "(b) **Email**").split())
+    assert "Steps 2 and 3b switched every route off" in seven_a
+    assert "ACK or resolve the stale events before the UPDATE" in seven_a
+    step3 = " ".join(_section(fr, "## 3. Migrations", "## 3b.").split())
+    assert "(none, unless you opened the teardown's delivery gate)" not in step3
+    # the check fails on the 850f15f text (no pre-replay disable)
+    old = ("## 2. Teardown\n\nRun snowflake/teardown.sql top to bottom.\n\n"
+           "## 3. Migrations, in order, one file at a time\n")
+    assert _pre_replay_route_problems(old)
 
 
 def _sqlite_dialect(stmt: str) -> list[str]:
@@ -740,9 +793,9 @@ def test_step_3b_sql_closes_what_the_replay_raised_for_rules_that_are_off_again(
     assert {"SETTINGS", "COMPANY_SCOPE", "ALERT_ROUTES", "DEPARTMENT_MAP"} <= set(plain), plain
     for table in plain:
         for name in (table, f"{table}_BAK_20261001"):
-            db.execute(f"CREATE TABLE {name} (K TEXT, V TEXT)")
-        db.execute(f"INSERT INTO {table}_BAK_20261001 VALUES ('k', 'owner')")
-        db.execute(f"INSERT INTO {table} VALUES ('k', 'replay')")
+            db.execute(f"CREATE TABLE {name} (K TEXT, V TEXT, ENABLED INTEGER)")
+        db.execute(f"INSERT INTO {table}_BAK_20261001 VALUES ('k', 'owner', 1)")   # a live route at step 1
+        db.execute(f"INSERT INTO {table} VALUES ('k', 'replay', 0)")
     for name in ("ALERT_CONFIG", "ALERT_CONFIG_BAK_20261001"):
         db.execute(f"CREATE TABLE {name} (RULE_ID TEXT, ENABLED INTEGER, THRESHOLD_NUM REAL)")
     owner = [("PIPE_TASK_FAILURES", 0, 1), ("SEC_CRED_EXPIRY", 1, 5), ("COST_RULE", 1, 100), ("OFF_RULE", 0, 3)]
@@ -774,7 +827,9 @@ def test_step_3b_sql_closes_what_the_replay_raised_for_rules_that_are_off_again(
     assert sorted(db.execute("SELECT * FROM ALERT_CONFIG").fetchall()) == sorted(owner)
     for table in plain:
         assert db.execute(f"SELECT V FROM {table}").fetchall() == [("owner",)], table
-    state = {row[0]: (row[1], row[2]) for row in db.execute("SELECT EVENT_ID, STATUS, RESOLUTION_KIND FROM ALERT_EVENTS")}
+    # ...but the restored live route is off again until step 7b(a) re-enables step 0's ROUTE_IDs
+    assert db.execute("SELECT ENABLED FROM ALERT_ROUTES").fetchall() == [(0,)]
+    state ={row[0]: (row[1], row[2]) for row in db.execute("SELECT EVENT_ID, STATUS, RESOLUTION_KIND FROM ALERT_EVENTS")}
     closed = ("RESOLVED", "EXPECTED")
     assert state["new_pipe"] == closed and state["new_pipe_snoozed"] == closed   # the review finding
     assert state["new_reseeded"] == closed and state["old_reseeded"] == closed   # replay-only rule, as before

@@ -112,6 +112,13 @@ Check these before you resume the dead-man alerts:
   each one only once, and only if it was logged after the alert's last successful
   evaluation; right after the CREATE OR REPLACE in Step 3 that means only rows from
   the last hour. Treat older rows as chronic failures to fix, not as hourly email.
+  An alert that was only SUSPENDed (a teardown or full rebuild keeps them) is
+  different: it resumes with its last successful evaluation from before the suspend,
+  so its first evaluation emails everything logged since the suspend, and
+  `NATIVE_ALERT_NEW_EVENTS` mails once if any CRITICAL/HIGH raised since then is still
+  OPEN. After a teardown, widen (2) to that window (the comment in it says how) and
+  resolve or ACK the replay-era rows and events first, or accept one catch-up email
+  per alert.
   `escalation_email_failed` and `escalation_failed` rows are never emailed by these
   alerts, so the query leaves them out.
 - **(3) must show** a SUCCEEDED `TASK_ALERT_SCAN` run in the last 3h, and a SUCCEEDED
@@ -130,6 +137,7 @@ SELECT SOURCE_NAME, LAST_LOAD_TS,
  ORDER BY 3 DESC;
 
 -- (2) Loader-failure / delivery-failure rows the alerts email, last 24h
+-- after a teardown or rebuild: replace 24 with the hours since the teardown suspended the alerts
 SELECT ERROR_TYPE, PAGE, COUNT(*) AS N_24H, MAX(LOGGED_AT) AS LAST_AT,
        ANY_VALUE(LEFT(ERROR_MESSAGE, 160)) AS SAMPLE_MSG
   FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
@@ -161,32 +169,39 @@ ALTER USER <username> SET EMAIL = '<recipient>';   -- or Snowsight: Admin > User
 
 ### Step 2 — allow it on the integration
 
-`SET ALLOWED_RECIPIENTS` **replaces the whole list**. Never run it with only the
-new address: `DESC` first and list every address it already shows, or a working
-recipient silently stops receiving. Skip that statement when `DESC` already lists
-the address.
+`SET ALLOWED_RECIPIENTS` and `SET DEFAULT_RECIPIENTS` each **replaces the whole list**.
+Never run either with only the new address: `DESC` first and list every address it
+already shows in that list, or a working recipient silently stops receiving (for
+`DEFAULT_RECIPIENTS`, the V164 escalation email). Skip a statement when `DESC`
+already lists the address in that list, and leave out the `<every address ...>` slot
+only when `DESC` shows that list empty.
 
 ```sql
-DESC NOTIFICATION INTEGRATION OVERWATCH_EMAIL;   -- note every ALLOWED_RECIPIENTS address
+DESC NOTIFICATION INTEGRATION OVERWATCH_EMAIL;   -- note every ALLOWED_RECIPIENTS and DEFAULT_RECIPIENTS address
 ALTER NOTIFICATION INTEGRATION OVERWATCH_EMAIL
       SET ALLOWED_RECIPIENTS = ('<recipient>', <every address DESC listed, each in quotes>);
 ALTER NOTIFICATION INTEGRATION OVERWATCH_EMAIL SET ENABLED = TRUE;
--- requirement 4 (V164 escalation): the default list the escalation email goes to
+-- requirement 4 (V164 escalation): the default list the escalation email goes to. It
+-- replaces the whole list too: keep every address DESC listed under DEFAULT_RECIPIENTS.
 ALTER NOTIFICATION INTEGRATION OVERWATCH_EMAIL
-      SET DEFAULT_RECIPIENTS = ('<recipient>')
+      SET DEFAULT_RECIPIENTS = ('<recipient>', <every address DESC listed, each in quotes>)
           DEFAULT_SUBJECT = 'OVERWATCH escalation';
 ```
 
 ### Step 3 — point all four alerts at it
 
 Re-run [`snowflake/native_alert_templates.sql`](../snowflake/native_alert_templates.sql)
-as **SNOW_ACCOUNTADMINS** (the app owner role, so the app can see the alerts), replacing
-the recipient in **all four** `SYSTEM$SEND_EMAIL(...)` calls:
+as **SNOW_ACCOUNTADMINS** (the app owner role, so the app can see the alerts). Each
+re-run CREATE OR REPLACEs the live alerts, so the recipient argument of **all four**
+`SYSTEM$SEND_EMAIL(...)` calls must name every address the live alerts mail now plus
+the new one, never only the new one (the argument takes a comma-separated list;
+`SHOW ALERTS IN SCHEMA DBA_MAINT_DB.OVERWATCH` shows each alert's current call in its
+`action` column):
 
 ```sql
     CALL SYSTEM$SEND_EMAIL(
         'OVERWATCH_EMAIL',
-        '<recipient>',             -- the destination address
+        '<every address the live alert mails now>, <recipient>',   -- add, never replace
         ... );
 ```
 
@@ -232,10 +247,13 @@ SELECT LOGGED_AT, ERROR_TYPE, LEFT(ERROR_MESSAGE, 200) AS MSG
  ORDER BY LOGGED_AT DESC LIMIT 20;
 ```
 
-Once `DEFAULT_RECIPIENTS` is set, the next hourly run also emails any still-OPEN,
-unacknowledged CRITICAL from the last 7 days that no Teams route delivered (an
-email-only event is not stamped until its email succeeds, so it is retried every
-hour). An escalation Teams already re-posted is stamped and is not re-emailed.
+Once `DEFAULT_RECIPIENTS` is set, the next hourly run also emails every still-OPEN,
+unacknowledged CRITICAL from the last 7 days that no escalation channel has delivered
+yet. V164 stamps an event only right after one of its channels succeeds, so an
+escalation where every channel failed is retried every hour: always the case for an
+email-only event (no route delivered it) while the email fails, and also for a
+route-delivered one whose Teams re-post failed too. An escalation any channel already
+delivered (a Teams re-post, say) is stamped and is not re-emailed.
 
 ## Keep the template in sync (optional)
 
