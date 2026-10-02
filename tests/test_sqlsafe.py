@@ -5,8 +5,6 @@ from app.core.sqlsafe import (
     clean_filter_text,
     contains_filter,
     in_list,
-    like_any,
-    not_in_list,
     safe_identifier,
     sql_literal,
     sql_number,
@@ -76,7 +74,3 @@ def test_assert_no_control_tokens_masks_literals():
 def test_list_builders():
     assert in_list("W", ["a", "b"]) == "UPPER(W) IN ('A', 'B')"
     assert in_list("W", []) == ""
-    assert not_in_list("W", ["a"]) == "(W IS NULL OR UPPER(W) NOT IN ('A'))"
-    assert not_in_list("W", ["a"], allow_null=False) == "UPPER(W) NOT IN ('A')"
-    mixed = like_any("D", ["EXACT", "PREF%"])
-    assert "UPPER(D) IN ('EXACT')" in mixed and "D ILIKE 'PREF%'" in mixed

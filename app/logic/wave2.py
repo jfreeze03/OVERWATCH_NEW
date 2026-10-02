@@ -14,8 +14,9 @@ import pandas as pd
 from app.logic.formulas import safe_float
 
 
-def _peer_ratio(values: pd.Series, *, positive_baseline: bool = False) -> pd.Series:
-    """Each value over the median of the OTHER rows (leave-one-out).
+def _peer_ratio(values: pd.Series) -> pd.Series:
+    """Each value over the median of the OTHER rows (leave-one-out), counting only the
+    positive ones: a zero / non-positive row is not a peer and never enters the baseline.
 
     A whole-population median includes the row being tested, so in a 1- or 2-user
     cohort the heaviest user's ratio to the midpoint is mathematically < 2 and the
@@ -29,8 +30,7 @@ def _peer_ratio(values: pd.Series, *, positive_baseline: bool = False) -> pd.Ser
     ratios = np.zeros(n, dtype=float)
     for i in range(n):
         others = np.delete(arr, i)
-        if positive_baseline:
-            others = others[others > 0]
+        others = others[others > 0]
         med = float(np.median(others)) if others.size else 0.0
         ratios[i] = (arr[i] / med) if med > 0 else 0.0
     return pd.Series(ratios, index=values.index)
@@ -205,10 +205,10 @@ def coco_efficiency(economics: pd.DataFrame | None, user_daily: pd.DataFrame | N
     # Leave-one-out medians: compare each user to the median of everyone ELSE, so a dominant user
     # in a 1-2 user company scope can actually clear the >=2 gate (a whole-population median that
     # includes the user makes the max/midpoint ratio structurally < 2, so the flag could never fire).
-    # positive_baseline on BOTH: a zero-credit / zero-CR user is not a spending peer, and letting
+    # Positive-only baseline on BOTH: a zero-credit / zero-CR user is not a spending peer, and letting
     # zeros into the baseline could drag its median to 0 and silently drop a heavy user's flag.
-    _peer = _peer_ratio(out["TOTAL_CREDITS"], positive_baseline=True)
-    _sess = _peer_ratio(out["CR_PER_REQ"], positive_baseline=True)
+    _peer = _peer_ratio(out["TOTAL_CREDITS"])
+    _sess = _peer_ratio(out["CR_PER_REQ"])
     out["PEER_MULT"] = _peer.round(1)
     out["SESSION_MULT"] = _sess.round(1)
 

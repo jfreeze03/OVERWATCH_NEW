@@ -62,10 +62,10 @@ ORDER BY DAY
 def _wh_company_scope(company: str) -> str:
     """Company scope for a live WAREHOUSE_METERING_HISTORY read via the COMPANY_SCOPE-aware
     UDF (COMPANY_FOR_WAREHOUSE) — the SAME axis the COMPANY label and the mart path use, and
-    the pattern ops_sql._query_scope (C10) established. The name-pattern warehouse_clause()
-    drops a COMPANY_SCOPE-mapped warehouse whose name doesn't match WH_ALFA_/the Trexis list
-    from its per-company view, so the live leg disagreed with the mart for a mapped warehouse
-    (round-11 MC-1). Empty for ALL (no filter)."""
+    the pattern ops_sql._query_scope (C10) established. The retired name-pattern
+    warehouse_clause() (removed in v4.607) dropped a COMPANY_SCOPE-mapped warehouse whose name
+    didn't match WH_ALFA_/the Trexis list from its per-company view, so the live leg disagreed
+    with the mart for a mapped warehouse (round-11 MC-1). Empty for ALL (no filter)."""
     return ("" if str(company or "ALL").upper() == "ALL"
             else f"{companies.company_case_sql('WAREHOUSE_NAME')} = {sql_literal(company)}")
 
@@ -103,7 +103,7 @@ def warehouse_window_vs_prior(days: int, company: str = "ALL", *,
     #17: the dollar POOL this builds (CREDITS_CURRENT) is multiplied by the live
     allocation shares (allocated_attribution), which resolve their window through
     resolve_effective_window — complete calendar days, today excluded. The old
-    form pooled on a ROLLING 24h-ago timestamp (lag_offset_start), so the pool
+    form pooled on a ROLLING 24h-ago timestamp (the since-removed lag_offset_start helper), so the pool
     window and the share window were shifted by up to a day (share = calendar
     [today-eff, today); pool = [now-24h-eff*24h, now-24h)) and per-entity dollars
     mis-attributed at the window edges. Both now anchor CURRENT_DATE() through the
@@ -179,7 +179,9 @@ def allocated_attribution(days: int, dimension: str, company: str = "ALL",
 
     Size note (F2, 2026-07-14): this LIVE builder shares by elapsed time, which
     is warehouse-size-blind (an XS second and a 4XL second count the same). It
-    is the fallback path; the normal path is mart27_sql.alloc_attribution, whose
+    is the fallback path (and the only path when a schema filter is set, since no
+    allocation mart has a schema grain); the normal path is
+    mart27_sql.alloc_xdim_attribution (FACT_COST_ALLOC_XDIM_DAILY), whose
     ALLOC_CREDITS share is weighted per warehouse-hour by real credits (size-
     aware). The elapsed-share form here is deliberate — the global-share law
     (below) was a bug-fix and is lock-tested — so the UI caption flags the live
@@ -454,59 +456,6 @@ WHERE {where}
 GROUP BY PROVIDER_NAME, LISTING_DISPLAY_NAME, DATABASE_NAME, CHARGE_TYPE, CURRENCY
 HAVING SUM(COALESCE(CHARGE, 0)) <> 0
 ORDER BY CHARGE DESC
-"""
-
-
-def storage_by_database(days: int, company: str = "ALL", database: str = "") -> str:
-    """Per-database storage on the BILLING basis: the average of daily bytes
-    over the window (F1, 2026-07-14). Snowflake bills storage on the monthly
-    average of daily on-disk bytes, so the r19 latest-day snapshot over/under-
-    stated any database that grew or shrank mid-window. FACT_STORAGE_DAILY
-    holds one row per day per database, each already that day's average bytes;
-    the page falls back to the _live variant while the fact is empty.
-    Mart-backed, so it honors the long window (v4.54)."""
-    days = bounded_days(days, 365)
-    where = and_where(
-        f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
-        companies.database_company_scope(company),
-        companies.database_equals_clause(database),
-    )
-    return f"""
-SELECT DATABASE_NAME,
-       AVG(COALESCE(DB_BYTES, 0))       AS DB_BYTES,
-       AVG(COALESCE(FAILSAFE_BYTES, 0)) AS FAILSAFE_BYTES,
-       COUNT(DISTINCT DAY)              AS DAYS_AVERAGED,
-       MAX(DAY)                         AS LATEST_DAY
-FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY
-WHERE {where}
-GROUP BY DATABASE_NAME
-HAVING AVG(COALESCE(DB_BYTES, 0)) + AVG(COALESCE(FAILSAFE_BYTES, 0)) > 0
-ORDER BY DB_BYTES DESC
-"""
-
-
-def storage_by_database_live(days: int, company: str = "ALL", database: str = "") -> str:
-    """Live fallback for storage_by_database (fact empty / not deployed):
-    average of daily AVERAGE_*_BYTES over the window per database — the same
-    monthly-average billing basis as the fact path (F1, 2026-07-14)."""
-    days = bounded_days(days)
-    where = and_where(
-        f"USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())",
-        companies.database_company_scope(company),
-        companies.database_equals_clause(database),
-    )
-    return f"""
-SELECT
-    DATABASE_NAME,
-    AVG(COALESCE(AVERAGE_DATABASE_BYTES, 0)) AS DB_BYTES,
-    AVG(COALESCE(AVERAGE_FAILSAFE_BYTES, 0)) AS FAILSAFE_BYTES,
-    COUNT(DISTINCT USAGE_DATE)               AS DAYS_AVERAGED,
-    MAX(USAGE_DATE)                          AS LATEST_DAY
-FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY
-WHERE {where}
-GROUP BY DATABASE_NAME
-HAVING AVG(COALESCE(AVERAGE_DATABASE_BYTES, 0)) + AVG(COALESCE(AVERAGE_FAILSAFE_BYTES, 0)) > 0
-ORDER BY DB_BYTES DESC
 """
 
 
@@ -1177,10 +1126,11 @@ def untagged_executions_for_user(user_name: str, days: int, company: str = "ALL"
     Reuses tag_coverage's EXACT predicate (WAREHOUSE_NAME IS NOT NULL,
     COALESCE(EXECUTION_TIME,0) > 0, NULLIF(QUERY_TAG,'') IS NULL) and the same
     company/db/schema scoping, plus an exact USER_NAME match, so it can't widen
-    scope. Grouped by QUERY_TYPE. NOTE: this is a LIVE scan capped at ~90d
-    (bounded_days); when the parent scoreboard is mart-served over a longer window
-    the summed UNTAGGED_EXEC_SEC is a recent-90d subset, not a full reconciliation
-    — the UI captions that."""
+    scope. Grouped by QUERY_TYPE. NOTE: for a TRAILING window this is a LIVE scan
+    capped at ~90d (bounded_days); when the parent scoreboard is mart-served over a
+    longer window the summed UNTAGGED_EXEC_SEC is a recent-90d subset, not a full
+    reconciliation — the UI captions that. A calendar ``bounds`` window is read in
+    full, the same span as the scoreboard."""
     from app.core.sqlsafe import contains_filter
     days = bounded_days(days)
     where = and_where(

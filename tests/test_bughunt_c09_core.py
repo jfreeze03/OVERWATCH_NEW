@@ -248,7 +248,7 @@ def test_warehouse_jump_carries_a_company_that_cannot_contradict_it(monkeypatch,
 
     navs: list[tuple] = []
     monkeypatch.setattr(m, "request_navigation", lambda *a, **k: navs.append((a, k)))
-    m._dispatch_jump(pick, ("Operations",))
+    m._dispatch_jump(pick)
     (args, _kw), = navs
     assert args[:2] == ("Operations", "Queries")
     assert args[2] == {"company": company, "warehouse_contains": pick.split(" · ", 1)[1]}

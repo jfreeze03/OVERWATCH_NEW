@@ -7,8 +7,7 @@ page, not in code.
 
 from __future__ import annotations
 
-APP_NAME = "OVERWATCH"
-APP_VERSION = "4.606.0"
+APP_VERSION = "4.607.0"
 
 # The build's load-bearing schema floor. main() reads the live max(SCHEMA_VERSION)
 # once per session and, if it is BELOW this, renders ONE actionable blocked state
@@ -73,8 +72,8 @@ DEFAULT_SETTINGS = {
     "COCO_DAILY_CAP_CREDITS": 15.0,  # per-user daily Cortex Code allowance the token-economics
     #                                  efficiency review measures against (30 for exception users)
     # V163 COST_AI_USER_RUNAWAY (Next-Fifty #37a): a user's AI day raises only when it is above the rule's
-    # THRESHOLD_NUM x COCO_DAILY_CAP_CREDITS AND at least this robust z above their own prior 90 active days
-    # (fewer than 5 such days = no baseline, the cap alone decides). The switch adds AI Functions spend, but
+    # THRESHOLD_NUM x COCO_DAILY_CAP_CREDITS AND at least this robust z above their own active days in the
+    # prior 90 days (fewer than 5 such days = no baseline, the cap alone decides). The switch adds AI Functions spend, but
     # only rows booked to a user count and the loader books Functions to the account today (inert).
     "AI_RUNAWAY_ROBUST_Z": 3.5,
     "AI_RUNAWAY_INCLUDE_FUNCTIONS": "FALSE",
@@ -232,8 +231,10 @@ THRESHOLDS = {
 ACCOUNT_USAGE_LAG_NOTE = "Account telemetry can lag up to ~45 min (metering-daily up to 24h)."
 
 # ---------------------------------------------------------------------------
-# Role -> navigation profile (page FILTERING only; Snowflake RBAC is the
-# actual security boundary under Streamlit-in-Snowflake).
+# Role -> navigation profile (page FILTERING only). The off-SiS fallback: under
+# owner's-rights Streamlit-in-Snowflake every viewer runs as the owner, so RBAC
+# only decides who can open the app; pages key on the viewer (VIEWER_PROFILES
+# below) and writes on OPERATOR_USERS, the app's authorization boundary.
 # ---------------------------------------------------------------------------
 ROLE_PROFILE_OVERRIDES = {
     # r27 #8: the SNOW_PRI_* viewer-role overrides were traces of roles

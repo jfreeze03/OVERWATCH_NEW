@@ -6,8 +6,9 @@ specs, hands the frames to the pure analyze(), and renders a grounded answer —
 or an honest refusal. Optional Cortex phrasing only ever *rewords* the already-
 grounded result; it is OFF by default and invents nothing.
 
-Revert: see the authoritative REVERT PATH in app/logic/ask/__init__.py (delete
-3 new paths — incl. this file — and revert the 3 marked "ASK-OVERWATCH" blocks).
+Revert: see the authoritative REVERT PATH in app/logic/ask/__init__.py (delete the
+package, this file and its two test files, then revert the main.py / config.py wiring
+and the tests it lists).
 """
 
 from __future__ import annotations

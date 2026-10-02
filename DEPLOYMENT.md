@@ -213,10 +213,13 @@ snowflake/validate.sql   -- read the output; every row should be OK
 >   `ALERT_DELIVERIES` row + `NOTIFIED_AT`, and (e) a second immediate `CALL` sends only
 >   the remaining backlog (no re-send of delivered events). If the oldest starve or an
 >   event double-sends, revert `SP_NOTIFY_WEBHOOK` to the V063 body and report back.
->   **Do not manually `CALL SP_NOTIFY_WEBHOOK()` while `TASK_ALERT_NOTIFY` may fire** —
->   the send precedes the ledger write, so two overlapping runs can double-send a batch.
->   The single scheduled task self-serializes, so scheduled delivery is unaffected; this
->   only bites a manual call racing the task.
+>   **Outside this clone smoke test, do not hand-CALL `SP_NOTIFY_WEBHOOK()`**: it pages,
+>   and since V164 it can also email (CRITICAL escalation). A manual call racing
+>   `TASK_ALERT_NOTIFY` cannot double-send: V064's sender lease (`OW_SENDER_LEASE`) refuses
+>   the overlapping run, which returns `skipped - another SP_NOTIFY_WEBHOOK run holds the
+>   sender lease`; a lease held for more than 1h is treated as abandoned and reclaimed. If
+>   you revert to the V063 body, which has no lease, two overlapping runs can double-send a
+>   batch again (the send precedes the ledger write).
 > - **⚠ rec7 per-source watermarks — SMOKE TEST.** In a clone, induce a failure in one
 >   per-table wrap (e.g. rename a `FACT_TASK_DAILY` column) and confirm only the
 >   `FACT_TASK_DAILY` watermark is held while `FACT_METERING/LOGIN/STORAGE_DAILY` advance,
@@ -449,19 +452,39 @@ OVERWATCH schema, warehouse usage) and actively retires the old
 OVERWATCH_MONITOR / OVERWATCH_OPERATOR layer.
 
 **OVERWATCH is an owner's-rights service.** Streamlit-in-Snowflake executes
-every query with the app owner's privileges, not the viewer's role — the
-viewer's role decides only which navigation profile they see. Two
+every query with the app owner's privileges, not the viewer's role. The
+viewer's identity (`st.user`, mapped through `config.VIEWER_PROFILES`; an
+unresolved viewer fails closed to the least-privilege profile) decides only
+which navigation profile they see and whether the operator gate opens. Two
 consequences the code accounts for:
 
 - Viewer identity comes from `st.user` (`app/core/identity.py`), because
   `CURRENT_USER()` returns the app owner inside the app. Preferences,
   usage telemetry, and audit actor stamps all ride `identity_sql()`.
-- The in-app execution gate (typed confirmation + admin profile) is a UX
-  guard, not a security boundary; the executor additionally enforces a
-  statement allow-list (OVERWATCH tables/procs and warehouse levers only).
+- The in-app execution gate is the `config.OPERATOR_USERS` viewer allowlist
+  (`session.is_operator()`), plus a typed confirmation for classifying or
+  account-touching writes. Because every viewer runs as the owner, that
+  allowlist is the app's authorization boundary. The executors run one
+  statement at a time from a fixed allow-list: DML (INSERT / UPDATE / DELETE /
+  MERGE) on DBA_MAINT_DB.OVERWATCH objects, CALLs of DBA_MAINT_DB.OVERWATCH
+  procs, and the Operations ▸ Emergency levers `ALTER WAREHOUSE`,
+  `ALTER PIPE`, `ALTER TASK`, `ALTER USER` and `ALTER ACCOUNT SET`. The
+  executor re-checks OPERATOR_USERS itself for those ALTER levers (and for
+  query cancel), so anyone on the list can, with the owner's rights, change
+  warehouse settings (size, suspend, timeouts, clusters), pause or resume
+  pipes, suspend or resume tasks, disable or re-enable users and set account
+  parameters.
 
-- Own the Streamlit app and the OVERWATCH objects with **SNOW_SYSADMINS** so
-  day-to-day operation never requires the break-glass role.
+- **The deployment role, SNOW_ACCOUNTADMINS (§1), owns the Streamlit app and
+  the OVERWATCH objects.** On this account it is a routine operating role,
+  not a break-glass one (V025 owner decision). The repo's owner-side grants
+  name it: the integration USAGE grant in docs/FULL_REBUILD.md step 7b(a)
+  (SP_NOTIFY_WEBHOOK runs as its owner), the PREREQS of
+  snowflake/native_alert_templates.sql (a file run as the app owner role, so
+  the app can see its alerts) and requirement 4 of
+  docs/EMAIL_RECIPIENT_RUNBOOK.md. If
+  you deploy as SNOW_SYSADMINS instead (§1 allows it), that role becomes the
+  owner: point each of those grants at it.
 - `ALERT_AUDIT` and `REMEDIATION_LOG` are append-only (UPDATE/DELETE
   explicitly revoked, even from the two admin roles). Admins can re-grant —
   the revokes block accidents, not adversaries; export on a schedule if an
@@ -495,7 +518,11 @@ Manual path (no CLI — SnowSQL or any PUT-capable client):
 PUT file://streamlit_app.py @DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE/app/ OVERWRITE=TRUE AUTO_COMPRESS=FALSE;
 PUT file://environment.yml  @DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE/app/ OVERWRITE=TRUE AUTO_COMPRESS=FALSE;
 PUT file://app/*            @DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE/app/app/ OVERWRITE=TRUE AUTO_COMPRESS=FALSE;
--- (repeat per subfolder: app/core, app/data, app/logic, app/ui, app/ui/pages)
+-- PUT does not recurse: repeat for EVERY subfolder, to the same relative stage path —
+--   app/assets, app/core, app/data, app/logic, app/logic/ask, app/ui, app/ui/pages,
+--   app/ui/pages/cost_parts, app/ui/pages/ops_parts
+--   e.g. PUT file://app/logic/ask/* @DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE/app/app/logic/ask/ OVERWRITE=TRUE AUTO_COMPRESS=FALSE;
+-- A missing package makes app/main.py's page imports fail, so the whole app won't start.
 -- the two templates Alerts > Native delivery reads (else it says "File not found in this deployment"):
 PUT file://snowflake/native_alert_templates.sql @DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE/app/snowflake/ OVERWRITE=TRUE AUTO_COMPRESS=FALSE;
 PUT file://snowflake/webhook_delivery.sql       @DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE/app/snowflake/ OVERWRITE=TRUE AUTO_COMPRESS=FALSE;
@@ -505,7 +532,12 @@ CREATE OR REPLACE STREAMLIT DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP
     MAIN_FILE = 'streamlit_app.py'
     QUERY_WAREHOUSE = WH_ALFA_ADMIN
     TITLE = 'OVERWATCH — Snowflake Command Center';
+-- CREATE OR REPLACE drops every grant on the app: re-run snowflake/roles.sql
+-- (its Streamlit-grants check must return 'Streamlit grants OK').
 ```
+
+The uploaded set must mirror `snowflake.yml`'s `artifacts`: if the app gains
+a subfolder or a runtime-read file, add it here too.
 
 `LIST @DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE` (or the directory table)
 shows what is deployed; re-running PUT with OVERWRITE replaces files and the
@@ -547,12 +579,23 @@ surgical by design — the schema is shared with the old app, so it never drops
 `DBA_MAINT_DB.OVERWATCH` itself, only named objects:
 
 - **Section A (live):** tasks, alerts, procs, functions, views, transient
-  facts/marts. Safe anytime — re-run the migrations in order (V001..V165) and the loaders repopulate.
-- **Section B (commented):** operator data — settings, company scope, alert
-  config/events/audit, action queue, savings ledger, error log,
-  schema_version. Uncomment only for a factory reset, and run the provided
-  `CLONE` backups first: since V161 retired the scheduled backups they are the
-  only copy outside Time Travel. `UNDROP TABLE ...` also works within Time Travel.
+  facts/marts. Re-run the migrations in order (V001 through the repo tip) and
+  the loaders repopulate — except the opt-in objects no migration creates:
+  the four NATIVE_ALERT_* email alerts, TASK_ALERT_DRILL and the ML forecast
+  objects. The opt-in tail at the end of Section B also runs live: it drops
+  the ML forecast model, the webhook secrets and the OVERWATCH_* notification
+  integrations (OVERWATCH_EMAIL, OVERWATCH_WEBHOOK_TEAMS, …). Re-create those
+  with their opt-in scripts afterwards (docs/FULL_REBUILD.md step 7b).
+- **Section B (commented, except two live parts):** operator data — settings,
+  company scope, alert config/events/audit, action queue, savings ledger,
+  error log, schema_version, OVERWATCH_STAGE. Uncomment only for a factory
+  reset, and run the provided `CLONE` backups first: since V161 retired the
+  scheduled backups they are the only copy outside Time Travel. `UNDROP TABLE
+  ...` also works within Time Travel. Two parts of Section B run live: the
+  three rebuildable tables APP_QUERY_TELEMETRY, ALERT_DELIVERIES and
+  OW_SENDER_LEASE (the migrations re-create them; the emptied delivery ledger
+  makes the first notifier run re-post the last 24 h of OPEN events, 7 days
+  for a CRITICAL — docs/FULL_REBUILD.md step 7b(a)), and the opt-in tail above.
 - **Section C (commented):** warehouse, Streamlit app
   object, roles — shared infrastructure, dropped only deliberately.
 
@@ -560,7 +603,8 @@ The verify query at the bottom lists any surviving OVERWATCH objects. A unit
 test (`tests/test_teardown_coverage.py`) fails CI if a migration creates an
 object the teardown does not cover, or if a destructive drop ever goes live.
 
-Restore = migrations in order -> roles.sql -> validate.sql (all rows OK).
+Restore = every migration in order (V001 through the repo tip) -> roles.sql ->
+validate.sql (all rows OK) -> docs/FULL_REBUILD.md step 7b for the opt-in objects.
 
 ## 6. Disaster recovery (summary — full detail in RUNBOOK.md)
 
@@ -603,22 +647,25 @@ Restore = migrations in order -> roles.sql -> validate.sql (all rows OK).
 
 ## 7. Release checklist
 
-1. `ruff check .` and `pytest -q` green (CI enforces).
+1. `ruff check .`, `mypy` and `pytest -q` green (CI enforces all three).
 2. New migration file if schema changed (never edit an applied `V00x` file).
 3. Run migrations, then `snowflake/validate.sql` — all rows OK. Then
    `snowflake/task_audit.sql` — every task reads OK with no `DRIFT` row (diffs
    live `SHOW TASKS` state/warehouse/schedule/predecessor against the expected
    set, catching a stale `CREATE TASK IF NOT EXISTS` whose updated definition
-   never re-applied).
+   never re-applied), except a "live task not in expected set" row for each
+   opt-in task you installed (alert_drill.sql's TASK_ALERT_DRILL,
+   ml_forecast_option.sql's TASK_REFRESH_ML_FORECAST).
 4. `snow streamlit deploy --replace`, from a clean, committed tree (§3).
 5. Check app settings → runtime = **Run on warehouse**. If save reports a
    retained `ARTIFACT_REPOSITORIES` setting, run
    `snowflake/warehouse_runtime_reset.sql` as the app-owning role (see §6).
-6. Open Admin → Migration status (no drift), Source freshness (all fresh),
-   Self-cost (task + app spend sane); no 'newer than this build' warning on
-   Admin; Migrations & freshness ▸ Task health shows no Suspended, Failing or
-   Not visible rows (TASK_ALERT_NOTIFY reads "Suspended (expected)" until a
-   delivery integration exists — that one is fine).
+6. Open Admin → Migrations & freshness (no missing or 'newer than this
+   build' migrations; Source freshness all fresh; Task health shows no
+   Suspended, Failing or Not visible rows) and Admin → App self-cost (task +
+   app spend sane). Task health grades a suspended TASK_ALERT_NOTIFY
+   "Suspended (expected)", but since V071 the migrations leave it started, so
+   it reads that only if someone suspended it.
 7. Tag the release; update `CHANGELOG.md`.
 
 

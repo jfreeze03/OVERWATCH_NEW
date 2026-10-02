@@ -11,6 +11,17 @@ def test_every_deep_link_rule_has_a_specific_playbook():
         assert text != playbooks.playbook_for("TOTALLY_UNKNOWN_RULE")
 
 
+def test_retired_and_weekly_rule_playbooks_say_so():
+    # SEC_BREAK_GLASS_USE: rule row deleted at V034 (owner ask 2026-07-10), scan arm [15] gone in V157;
+    # its playbook must not read as a live rule in an old event's drawer (V034 closed OPEN/ACK only).
+    bg = playbooks.PLAYBOOKS["SEC_BREAK_GLASS_USE"]
+    assert bg.startswith("**Retired (V034") and "**Means:**" not in bg and "snoozed" not in bg
+    # OPS_CANARY_FAIL: the canary runs weekly (Mondays 05:30 CT; the rule's window is 168h), so the
+    # first-step query must look back the week, not 1 day (zero rows by Tuesday read as "cleared").
+    canary = playbooks.PLAYBOOKS["OPS_CANARY_FAIL"]
+    assert "DATEADD('day', -1," not in canary and "DATEADD('day', -7, CURRENT_TIMESTAMP())" in canary
+
+
 def test_playbook_family_fallback():
     # v4.49: playbooks name exact pill labels, not the old "Cost > Spend" shorthand
     assert "Cost Intelligence > Spend & Attribution" in playbooks.playbook_for("COST_BRAND_NEW_RULE")

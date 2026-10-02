@@ -45,84 +45,6 @@ def _covered_days_scalar(where: str) -> str:
     )
 
 
-def warehouse_efficiency(days: int, company: str = "ALL") -> str:
-    days = bounded_days(days, 400)
-    where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
-                      _company_arm(company))
-    return f"""
-SELECT DAY, WAREHOUSE_NAME, COMPANY, CREDITS_TOTAL, CREDITS_COMPUTE, QUERIES, FAILS,
-       QUEUED_MIN, SPILL_GB, P95_S, EXEC_HOURS, BILLED_HOURS, ACTIVE_HOURS,
-       IDLE_PCT, CREDITS_PER_QUERY
-FROM {mart_object("MART_WAREHOUSE_EFFICIENCY_DAILY")}
-WHERE {where}
-ORDER BY DAY, CREDITS_TOTAL DESC
-LIMIT 5000
-"""
-
-
-def query_families(days: int, limit: int = 200) -> str:
-    days = bounded_days(days, 400)
-    limit = max(10, min(int(limit or 200), 2000))
-    return f"""
-SELECT DAY, QUERY_HASH, COMPANY, SAMPLE_TEXT, RUNS, FAILS, USERS, WAREHOUSES,
-       DATABASE_NAME, SCHEMA_NAME, TOTAL_EXEC_SEC, MEDIAN_S, P95_S,
-       COMPILE_MS_AVG, GB_SCANNED_AVG, CACHE_PCT_AVG, TAGGED_RUNS
-FROM {mart_object("MART_QUERY_FAMILY_DAILY")}
-WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
-ORDER BY TOTAL_EXEC_SEC DESC
-LIMIT {limit}
-"""
-
-
-def role_hourly(days: int, company: str = "ALL") -> str:
-    days = bounded_days(days, 400)
-    # rec#49: anchor on CURRENT_DATE (midnight-aligned) to match the live query
-    # summary (_query_scope), not CURRENT_TIMESTAMP — the rolling-24h vs day-aligned
-    # mismatch made the ops-diag windows disagree with the summary a DBA reads beside it.
-    where = and_where(f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())",
-                      _company_arm(company))
-    return f"""
-SELECT HOUR_TS, ROLE_NAME, WAREHOUSE_NAME, COMPANY, QUERIES, FAILS, EXEC_SEC
-FROM {mart_object("FACT_QUERY_ROLE_HOURLY")}
-WHERE {where}
-ORDER BY HOUR_TS
-LIMIT 20000
-"""
-
-
-def schema_hourly(days: int, company: str = "ALL", database: str = "") -> str:
-    days = bounded_days(days, 400)
-    parts = [f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())",   # rec#49: day-aligned, matches the summary
-             _company_arm(company)]
-    if str(database or "").strip():
-        parts.append(f"UPPER(DATABASE_NAME) = {sql_literal(str(database).upper())}")
-    return f"""
-SELECT HOUR_TS, DATABASE_NAME, SCHEMA_NAME, COMPANY, QUERIES, FAILS,
-       QUEUED_SEC, SPILL_GB, P95_S
-FROM {mart_object("FACT_QUERY_SCHEMA_HOURLY")}
-WHERE {and_where(*parts)}
-ORDER BY HOUR_TS
-LIMIT 20000
-"""
-
-
-def cost_allocation(days: int, dimension: str, company: str = "ALL") -> str:
-    days = bounded_days(days, 400)
-    dim = str(dimension or "USER").upper()
-    if dim not in ("USER", "DATABASE", "SCHEMA", "ROLE"):
-        raise ValueError(f"dimension must be USER/DATABASE/SCHEMA/ROLE, got {dimension!r}")
-    where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
-                      f"DIMENSION = {sql_literal(dim)}",
-                      _company_arm(company))
-    return f"""
-SELECT DAY, DIMENSION, KEY_NAME, COMPANY, ALLOC_CREDITS, EXEC_SEC
-FROM {mart_object("MART_COST_ALLOCATION_DAILY")}
-WHERE {where}
-ORDER BY ALLOC_CREDITS DESC
-LIMIT 5000
-"""
-
-
 def task_graphs(days: int, company: str = "ALL", database: str = "",
                 schema_contains: str = "", *, bounds: tuple | None = None) -> str:
     """Same filter surface as graph_sql.graph_daily_costs (wave 2 parity).
@@ -200,20 +122,6 @@ FROM {mart_object("MART_INCIDENT_TIMELINE")}
 WHERE {where}
 ORDER BY AT DESC
 LIMIT 2000
-"""
-
-
-def ai_usage(days: int, company: str = "ALL") -> str:
-    days = bounded_days(days, 400)
-    parts = [f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())"]
-    if str(company or "ALL").upper() != "ALL":
-        parts.append(f"DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(USER_NAME) = {sql_literal(company)}")
-    return f"""
-SELECT DAY, USER_NAME, SOURCE, MODEL_NAME, REQUESTS, TOKENS, CREDITS
-FROM {mart_object("FACT_AI_USAGE_DAILY")}
-WHERE {and_where(*parts)}
-ORDER BY DAY, CREDITS DESC
-LIMIT 5000
 """
 
 
@@ -327,43 +235,6 @@ ORDER BY SUM(f.COMPILE_MS_AVG * f.RUNS) DESC
 LIMIT 25
 """
 
-def family_repeat_fingerprints(days: int, company: str = "ALL", min_runs: int = 10,
-                               database: str = "", schema_contains: str = "") -> str:
-    """insights_sql.repeat_query_fingerprints contract from the family mart.
-    ELAPSED is wall-clock via TOTAL_ELAPSED_SEC (V060), matching the live twin;
-    COALESCE degrades pre-V060 rows to the exec basis (v4.70.1 — the verify
-    round caught this reader still on exec-time while the same-named metrics'
-    live twin used true elapsed, silently changing the materialization-candidate
-    gate by source). LAST_RUN degrades to the day grain. Qualified (f.) — see
-    family_compile_heavy for the alias-shadow lesson."""
-    days = bounded_days(days, 400)
-    min_runs = max(2, min(int(min_runs or 10), 1000))
-    parts = [f"f.DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
-             _company_arm(company, "f.COMPANY"),   # V082: exact company scope, not the DB heuristic
-             contains_filter("f.SCHEMA_NAME", schema_contains)]
-    if str(database or "").strip():
-        parts.append(f"UPPER(f.DATABASE_NAME) = {sql_literal(str(database).upper())}")
-    where = and_where(*parts)
-    return f"""
-SELECT
-    f.QUERY_HASH AS FINGERPRINT,
-    SUM(f.RUNS) AS RUNS,
-    MAX(f.USERS) AS USERS,
-    MAX(f.WAREHOUSES) AS WAREHOUSES,
-    ROUND(SUM(COALESCE(f.TOTAL_ELAPSED_SEC, f.TOTAL_EXEC_SEC)) / 3600.0, 2) AS TOTAL_ELAPSED_HOURS,
-    ROUND(SUM(COALESCE(f.TOTAL_ELAPSED_SEC, f.TOTAL_EXEC_SEC)) / NULLIF(SUM(f.RUNS), 0), 2) AS AVG_ELAPSED_SEC,
-    ROUND(SUM(COALESCE(f.GB_SCANNED_AVG, 0) * f.RUNS) / 1024, 4) AS TOTAL_TB_SCANNED,
-    ROUND(SUM(COALESCE(f.CACHE_PCT_AVG, 0) * f.RUNS) / NULLIF(SUM(f.RUNS), 0) * 100, 1) AS AVG_CACHE_PCT,
-    ANY_VALUE(f.SAMPLE_TEXT) AS QUERY_PREVIEW,
-    MAX(f.DAY) AS LAST_RUN
-FROM {mart_object("MART_QUERY_FAMILY_DAILY")} f
-WHERE {where}
-GROUP BY f.QUERY_HASH
-HAVING SUM(f.RUNS) >= {min_runs}
-ORDER BY TOTAL_ELAPSED_HOURS DESC
-LIMIT 50
-"""
-
 def role_share(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """chargeback_sql.role_share_within_warehouse contract from the role-hour
     fact. Attribution law (v4.34.1): the fact's COMPANY column scopes
@@ -416,45 +287,6 @@ FROM shared
 WHERE {vis}
 ORDER BY WAREHOUSE_NAME, ELAPSED_SEC DESC
 LIMIT 2000
-"""
-
-
-def alloc_attribution(days: int, dimension: str, company: str = "ALL") -> str:
-    """cost_sql.allocated_attribution contract (+ ALLOC_CREDITS, which the
-    live builder cannot offer): share still ships for the fallback-parity
-    path, but mart callers can dollarize ALLOC_CREDITS directly."""
-    days = bounded_days(days, 400)
-    dim = str(dimension or "USER").upper()
-    if dim not in ("USER", "DATABASE", "SCHEMA", "ROLE"):
-        raise ValueError(f"dimension must be USER/DATABASE/SCHEMA/ROLE, got {dimension!r}")
-    scope_where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
-                            f"DIMENSION = {sql_literal(dim)}",
-                            _company_arm(company))
-    # Same global-share law as the live builder (live math fix 2026-07-11):
-    # visibility rules pick which rows display; the share denominator is the
-    # company's WHOLE scoped activity. USER$ personal databases attribute to
-    # their owner's company; users attribute by role membership.
-    vis = ""
-    if dim == "DATABASE":
-        vis = companies.database_visibility_clause(company, "KEY_NAME")
-    elif dim == "USER":
-        vis = companies.user_clause(company, "KEY_NAME")
-    return f"""
-WITH scoped AS (
-    SELECT KEY_NAME, EXEC_SEC, ALLOC_CREDITS
-    FROM {mart_object("MART_COST_ALLOCATION_DAILY")}
-    WHERE {scope_where}
-)
-SELECT
-    COALESCE(KEY_NAME, 'NONE') AS DIMENSION,
-    ROUND(SUM(EXEC_SEC), 1) AS ELAPSED_SEC,
-    SUM(ALLOC_CREDITS) / NULLIF((SELECT SUM(ALLOC_CREDITS) FROM scoped), 0) AS ELAPSED_SHARE,
-    ROUND(SUM(ALLOC_CREDITS), 6) AS ALLOC_CREDITS
-FROM scoped
-WHERE {and_where(vis)}
-GROUP BY KEY_NAME
-ORDER BY ALLOC_CREDITS DESC
-LIMIT 100
 """
 
 
@@ -846,8 +678,9 @@ LIMIT 20"""
 
 def monthly_spend_by_warehouse(months: int = 12, company: str = "ALL") -> str:
     """Monthly credits by warehouse from the efficiency mart — the boss chart.
-    The mart accrues history going forward; the live WMH fallback carries the
-    13-month back view until then."""
+    The mart accrues history going forward; until it spans a year, the
+    fact_monthly_spend_by_warehouse fallback (FACT_WAREHOUSE_DAILY, 365-day
+    backfill) carries the back view."""
     m = max(2, min(int(months), 13))
     comp = ""
     if company and company != "ALL":
@@ -862,31 +695,6 @@ WHERE c.DAY >= DATEADD('month', -{m}, DATE_TRUNC('month', CURRENT_DATE()))
   AND UPPER(c.WAREHOUSE_NAME) <> 'CLOUD_SERVICES_ONLY'
 {comp}GROUP BY 1, 2
 ORDER BY 1, 2"""
-
-
-def live_monthly_spend_by_warehouse(months: int = 12, company: str = "ALL") -> str:
-    """13-month live fallback over WAREHOUSE_METERING_HISTORY; company via
-    COMPANY_FOR_WAREHOUSE outside the aggregation (V030 shape law)."""
-    m = max(2, min(int(months), 13))
-    comp = ""
-    if company and company != "ALL":
-        comp = (f"WHERE (w.COMPANY = {companies.sql_literal(company)}"
-                " OR UPPER(w.COMPANY) = 'ALL')\n")
-    return f"""SELECT w.MONTH, w.WAREHOUSE_NAME, w.CREDITS
-FROM (
-    SELECT g.MONTH, g.WAREHOUSE_NAME, g.CREDITS,
-           DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(g.WAREHOUSE_NAME) AS COMPANY
-    FROM (
-        SELECT TO_CHAR(DATE_TRUNC('month', START_TIME), 'YYYY-MM') AS MONTH,
-               WAREHOUSE_NAME,
-               SUM(CREDITS_USED) AS CREDITS
-        FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
-        WHERE START_TIME >= DATEADD('month', -{m}, DATE_TRUNC('month', CURRENT_DATE()))
-          AND WAREHOUSE_ID > 0
-        GROUP BY 1, 2
-    ) g
-) w
-{comp}ORDER BY w.MONTH, w.WAREHOUSE_NAME"""
 
 
 # v4.606 holistic review (reverts R1-015's 365-day widening): a TRAILING pattern read stays at 90 days.

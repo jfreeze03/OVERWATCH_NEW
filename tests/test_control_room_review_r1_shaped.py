@@ -1,6 +1,5 @@
-"""Control Room review round 1 (cluster c06) on the rendered page (AppTest over the shaped harness; the
-floor leg skips these like the rest of the section-switching AppTests -- the logic locks are in
-tests/test_control_room_review_r1.py).
+"""Control Room review round 1 (cluster c06) on the rendered page (AppTest over the shaped harness, both
+CI legs -- the logic locks are in tests/test_control_room_review_r1.py).
 
 R1-201  Pulse under a Schema filter rendered the page-error panel (`act` is None, `act.ok` raised).
 R1-202  yesterday's spend spike reaches the triage queue even when 10+ stronger historical spikes exist.
@@ -16,7 +15,6 @@ from datetime import timedelta
 import pandas as pd
 import pytest
 from test_pages_shaped import (  # noqa: F401 - _stub_shaped is the harness's autouse fixture
-    _APPTEST_BUTTONGROUP_OK,
     _entry,
     _nav_to,
     _shaped_batch,
@@ -29,8 +27,6 @@ from streamlit.testing.v1 import AppTest
 
 from app.core.result import QueryResult
 from app.logic.formulas import account_today
-
-_SKIP = pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 
 
 def _blob(at) -> str:
@@ -53,7 +49,6 @@ def _section(section: str, **state) -> AppTest:
     return at
 
 
-@_SKIP
 def test_pulse_renders_under_a_schema_filter():
     at = _section("Pulse", flt_schema_contains="RAW")
     assert "14-day trend hidden under a Schema filter" in _blob(at)
@@ -111,7 +106,6 @@ def _queue_frame(at) -> pd.DataFrame:
     return frames[0]
 
 
-@_SKIP
 def test_yesterdays_spike_reaches_the_triage_queue(monkeypatch):
     at = _triage_page(monkeypatch)
     q = _queue_frame(at)
@@ -119,7 +113,6 @@ def test_yesterdays_spike_reaches_the_triage_queue(monkeypatch):
     assert len(spend) == 1 and "WH_PROD" in str(spend.iloc[0]["TITLE"]), q[["KIND", "TITLE"]]
 
 
-@_SKIP
 def test_a_failed_alert_read_is_disclosed_under_a_non_empty_queue(monkeypatch):
     failed = QueryResult(ok=False, error="statement timed out", error_kind="timeout")
 
@@ -138,7 +131,6 @@ def test_a_failed_alert_read_is_disclosed_under_a_non_empty_queue(monkeypatch):
     assert "in the triage queue below" not in blob                  # the exception row stops promising it
 
 
-@_SKIP
 def test_full_pages_say_they_are_capped(monkeypatch):
     def _caps(specs):
         out = {}

@@ -89,7 +89,7 @@ def test_build_blast_radius_marks_unqueried_as_not_measured():
         "FQN": ["DB.SCH.B"], "QUERIES": [5], "USERS": [2],
         "LAST_TOUCH": ["2026-08-24 10:00:00"],
     })
-    br = lineage.build_blast_radius(_edges(), consumers, "DB.SCH.A", window_days=30)
+    br = lineage.build_blast_radius(_edges(), consumers, "DB.SCH.A")
     row_b = br[br["FQN"] == "DB.SCH.B"].iloc[0]
     row_c = br[br["FQN"] == "DB.SCH.C"].iloc[0]
     assert bool(row_b["MEASURED"]) is True and row_b["QUERIES"] == 5
@@ -100,7 +100,7 @@ def test_build_blast_radius_marks_unqueried_as_not_measured():
 
 
 def test_build_blast_radius_no_consumers_all_unmeasured():
-    br = lineage.build_blast_radius(_edges(), pd.DataFrame(), "DB.SCH.A", window_days=30)
+    br = lineage.build_blast_radius(_edges(), pd.DataFrame(), "DB.SCH.A")
     assert not br.empty and (~br["MEASURED"]).all()
     assert br["QUERIES"].isna().all()
 
@@ -109,7 +109,7 @@ def test_build_blast_radius_partial_consumers_frame_does_not_raise():
     # "never raises" contract: a consumers frame missing the QUERIES column (or USERS)
     # must degrade to NA, not raise (bare .get() -> scalar NaN -> zip() TypeError).
     partial = pd.DataFrame({"FQN": ["DB.SCH.B"], "USERS": [2]})   # no QUERIES column
-    br = lineage.build_blast_radius(_edges(), partial, "DB.SCH.A", window_days=30)
+    br = lineage.build_blast_radius(_edges(), partial, "DB.SCH.A")
     assert not br.empty
     row_b = br[br["FQN"] == "DB.SCH.B"].iloc[0]
     assert pd.isna(row_b["QUERIES"]) and bool(row_b["MEASURED"]) is False
@@ -118,17 +118,17 @@ def test_build_blast_radius_partial_consumers_frame_does_not_raise():
 def test_build_blast_radius_joins_consumers_case_insensitively():
     # a consumer row whose FQN is lower/mixed-case still joins to the uppercased dependent
     consumers = pd.DataFrame({"FQN": ["db.sch.b"], "QUERIES": [9], "USERS": [4]})
-    br = lineage.build_blast_radius(_edges(), consumers, "DB.SCH.A", window_days=30)
+    br = lineage.build_blast_radius(_edges(), consumers, "DB.SCH.A")
     row_b = br[br["FQN"] == "DB.SCH.B"].iloc[0]
     assert bool(row_b["MEASURED"]) is True and row_b["QUERIES"] == 9
 
 
 def test_blast_summary_counts_are_recorded_facts():
     consumers2 = pd.DataFrame({"FQN": ["DB.SCH.B"], "QUERIES": [7], "USERS": [3]})
-    s = lineage.blast_summary(_edges(), consumers2, "DB.SCH.A", window_days=30)
+    s = lineage.blast_summary(_edges(), consumers2, "DB.SCH.A")
     assert s["dependents"] == 2 and s["measured"] == 1 and s["unmeasured"] == 1
     assert s["observed_queries"] == 7 and s["deepest_level"] == 2
-    empty = lineage.blast_summary(pd.DataFrame(), pd.DataFrame(), "DB.SCH.A", window_days=30)
+    empty = lineage.blast_summary(pd.DataFrame(), pd.DataFrame(), "DB.SCH.A")
     assert empty["dependents"] == 0 and empty["deepest_level"] == 0
 
 

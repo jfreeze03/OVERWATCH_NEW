@@ -4,10 +4,10 @@ Every company-scope FILTER in the data builders now runs through the
 COMPANY_SCOPE-aware UDFs (COMPANY_FOR_WAREHOUSE / COMPANY_FOR_DATABASE) via the
 canonical ``companies.warehouse_company_scope`` / ``companies.database_company_scope``
 helpers — the SAME axis the marts FILTER by and the boards LABEL by. The
-name-pattern clauses (``warehouse_clause`` / ``database_clause``) test membership
-by NAME PATTERN and silently ignore an operator's COMPANY_SCOPE mapping, so a
-warehouse/database mapped in COMPANY_SCOPE but off the seeded name pattern used
-to scope one way on the mart/label side and a different way on any name-pattern
+retired name-pattern clauses (``warehouse_clause`` / ``database_clause``, removed
+in v4.607) tested membership by NAME PATTERN and silently ignored an operator's
+COMPANY_SCOPE mapping, so a warehouse/database mapped in COMPANY_SCOPE but off
+the seeded name pattern used to scope one way on the mart/label side and a different way on any name-pattern
 board (the MC-1 class: round 11 cost_sql, round 16 insights_sql, here the rest).
 
 ``role_clause`` is deliberately NOT converted: COMPANY_FOR_ROLE does not read
@@ -91,8 +91,6 @@ def test_converted_builders_carry_udf_axis_and_parse():
         ("ops.copy_load_failures", ops_sql.copy_load_failures(30, "ALFA"), db),
         ("chargeback.role_share_within_warehouse",
          chargeback_sql.role_share_within_warehouse(30, "Trexis"), wh),
-        ("chargeback.role_department_map_join",
-         chargeback_sql.role_department_map_join(30, "ALFA"), wh),
         ("security.recent_ddl_changes_fact",
          security_sql.recent_ddl_changes_fact(7, "ALFA"), db),
         ("security.untagged_objects", security_sql.untagged_objects("Trexis"), db),

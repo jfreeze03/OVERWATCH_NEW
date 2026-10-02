@@ -11,6 +11,7 @@ from pathlib import Path
 import pandas as pd
 
 from app.data import etl_control_sql as etl
+from app.logic import insights
 from app.logic.insights import etl_cycle_sla_forecast
 from app.ui.pages.brief import _nightly_cycle_kpi
 
@@ -76,7 +77,8 @@ def test_fit_window_is_the_newest_n_but_history_is_longer():
 def test_builder_returns_spike_history_and_fits_14():
     sql = etl.cycle_finish_history_scan("DB.S.CONTROL_STATUS", start_workflow="WF_A", end_workflow="WF_Z")
     assert f"QUALIFY ROW_NUMBER() OVER (ORDER BY s.CYCLE_DATE DESC) <= {etl.SLA_HISTORY_NIGHTS}" in sql
-    assert etl.SLA_HISTORY_NIGHTS == 100 and etl.SLA_BASELINE_RUNS == 14   # > a quarter of nights
+    # v4.607: the unread etl.SLA_BASELINE_RUNS mirror was deleted; pin the fit size the forecaster uses
+    assert etl.SLA_HISTORY_NIGHTS == 100 and insights.SLA_FORECAST_FIT_NIGHTS == 14   # > a quarter of nights
 
 
 def test_brief_on_track_tile_names_a_month_end_night():

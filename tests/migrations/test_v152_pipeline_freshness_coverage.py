@@ -199,8 +199,8 @@ def test_v152_description_is_escaped_and_fits():
     assert len(m.group(1).replace("''", "'")) <= 4000
 
 
-# The three lockstep checks below are pinned to the WAVE-2a TIP (V154). They are EXPECTED to fail on the
-# w2a-v152 slice branch until the integrator lands the shared validate/docs/admin edits for the wave.
+# Lockstep: this migration's DEPLOYMENT.md/README.md run-doc line and its admin _EXPECTED_MIGRATIONS entry
+# (landed by the wave-2a integrator); the validate tip is derived in tests/test_release_lockstep.py.
 def test_validate_and_docs_track_v152():
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert _NAME in _read(rel), rel

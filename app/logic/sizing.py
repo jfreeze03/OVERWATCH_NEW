@@ -12,7 +12,7 @@ from datetime import date
 
 import pandas as pd
 
-from .formulas import humanize_duration, safe_div, safe_float
+from .formulas import humanize_duration, safe_float
 
 QUEUE_UP_MIN_PER_DAY = 30.0    # sustained OVERLOAD queueing -> add a cluster (scale out) [#38]
 # D2 (audit 2026-07-31): every load signal is now PER DAY. The spill threshold
@@ -617,10 +617,6 @@ def sizing_summary(out: pd.DataFrame) -> dict:
         "potential_saving_high_usd": high_usd,
         "idle_saving_usd": idle_usd,
     }
-
-
-def _unused_guard() -> float:  # pragma: no cover - keeps safe_div imported for future ratios
-    return safe_div(1, 1)
 
 
 # ---------------------------------------------------------------------------

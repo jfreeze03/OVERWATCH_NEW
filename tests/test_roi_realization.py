@@ -4,12 +4,14 @@ derived from the SAVINGS_LEDGER the app already books."""
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 
+import app.logic.actions as actions_mod
 from app.data import mart_sql
-from app.logic.actions import savings_by_lever, savings_by_month
+from app.logic.actions import savings_by_lever, savings_month_calendar
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -23,7 +25,9 @@ def _ledger(rows):
     return pd.DataFrame(rows, columns=cols)
 
 
-def test_savings_by_month_run_rate_verified_only():
+def test_savings_by_month_run_rate_verified_only(monkeypatch):
+    # v4.607: the Proof bars' savings_month_calendar (savings_by_month had no caller left)
+    monkeypatch.setattr(actions_mod, "account_now", lambda: datetime(2026, 8, 10, 9, 0))
     df = _ledger([
         ("VERIFIED", 100.0, 90.0, "2026-06-15", "warehouse_idle"),
         ("VERIFIED", 50.0, 60.0, "2026-06-20", "retention"),
@@ -31,10 +35,11 @@ def test_savings_by_month_run_rate_verified_only():
         ("ESTIMATED", 999.0, None, None, "retention"),          # excluded (not verified)
         ("VERIFIED", 10.0, 12.0, None, "x"),                    # excluded (no VERIFIED_AT)
     ])
-    m = savings_by_month(df)
-    assert list(m["MONTH"]) == ["2026-06", "2026-07"]           # oldest-first, time-ordered
+    m = savings_month_calendar(df, 12)
+    assert list(m["MONTH"]) == sorted(m["MONTH"]) and m["MONTH"].iloc[-1] == "2026-08"  # oldest-first
     assert float(m[m["MONTH"] == "2026-06"]["VERIFIED_USD"].iloc[0]) == 150.0   # 90 + 60
     assert float(m[m["MONTH"] == "2026-07"]["VERIFIED_USD"].iloc[0]) == 180.0
+    assert float(m["VERIFIED_USD"].sum()) == 330.0              # ESTIMATED + no-VERIFIED_AT rows excluded
 
 
 def test_savings_by_lever_ranks_and_computes_realization():
@@ -54,8 +59,8 @@ def test_savings_by_lever_ranks_and_computes_realization():
 
 
 def test_month_and_lever_safe_on_empty():
-    assert savings_by_month(None).empty
-    assert savings_by_month(pd.DataFrame()).empty
+    assert savings_month_calendar(None).empty
+    assert savings_month_calendar(pd.DataFrame()).empty
     assert savings_by_lever(_ledger([("ESTIMATED", 5.0, None, None, "x")])).empty  # nothing verified
 
 

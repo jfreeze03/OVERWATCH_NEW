@@ -196,7 +196,10 @@ def _mtd_spend_usd(rate: float, ai_rate: float,
 
     c09 R1-193: also returns the result it read, so the MTD tile can tell a FAILED read (a timeout:
     'Unavailable') from a true absence or an empty fact ('Needs daily facts')."""
-    res = preloaded if preloaded is not None and preloaded.ok else daily_spend_wide(_PAGE)
+    # A failed preloaded read is NOT re-run: daily_spend_wide is the same SQL at the same tier and
+    # run() never caches a failure, so a fallback here only repeated the failed (often timed-out)
+    # read. The failed result flows back so the tile reads 'Unavailable' (c09 R1-193).
+    res = preloaded if preloaded is not None else daily_spend_wide(_PAGE)
     if not res.usable():
         return 0.0, "", res
     frame = res.df.copy()
@@ -309,7 +312,7 @@ def render() -> None:
 
     # ---- data loads (mart-first, labeled live fallback) --------------------
     # Deliberately NOT batched together (Codex #4): the board is filter-scoped
-    # while the 45d MTD fact is fixed — coupling them in one batch cache meant
+    # while the 150d MTD fact (daily_spend_wide) is fixed — coupling them in one batch cache meant
     # every company/days change cold-started the fixed read. Serial keeps each
     # on its own cache key, so filter changes only refetch the board.
     # The calendar presets (Last month / Current month / Current year) are BOUNDED windows
@@ -359,8 +362,7 @@ def render() -> None:
     # exact and column-independent (the `daily` frame here is only [DAY, USD], no credits col).
     _win_credits = safe_float(window_spend) / rate if rate > 0 else None
     # One 150d metering read serves MTD here AND the forecast backtest below
-    # (Codex r16 #17) — the separate 45d read survives only as the fallback
-    # inside _mtd_spend_usd when this one fails.
+    # (Codex r16 #17); a failed read is not re-run — MTD shows its unavailable state.
     _bt_hist = daily_spend_wide(_PAGE)   # PERF #46: the shared wide read (also serves MTD above)
     mtd_spend, mtd_source, _mtd_res = _mtd_spend_usd(rate, ai_rate, preloaded=_bt_hist)
     # c09 R1-193: "Needs daily facts" only for a true absence or a read that succeeded empty.
@@ -387,7 +389,7 @@ def render() -> None:
          "source": "ALERT_EVENTS (COUNT_IF by severity, uncapped)"},
         {"key": f"action_queue_{company}", "sql": mart_sql.action_queue(200, company),
          "source": "ACTION_QUEUE"},
-    ], page=_PAGE, tier="live") or {}
+    ], page=_PAGE, tier="live")
     alerts_res, critical_alerts, high_alerts = _open_alert_counts(
         company, prefetched=_live_pf.get(f"alert_counts_{company}"))
     engine = str(settings.get("FORECAST_ENGINE") or "linear").strip().lower()
@@ -495,7 +497,7 @@ def render() -> None:
         # below consumes it via preloaded= and only fires the live fallback on a mart miss.
         {"key": "score_inputs", "sql": mart27_sql.platform_score_inputs(30),
          "source": "FACT_PLATFORM_SCORE_DAILY (daily snapshot)"},
-    ], page=_PAGE, tier="hourly") or {}
+    ], page=_PAGE, tier="hourly")
     _thr = _score_pf.get(f"score_throughput_{company}") or run(
         _thr_sql, page=_PAGE, key=f"score_throughput_{company}", tier="hourly",
         source="FACT_QUERY_HOURLY (prev + current calendar day)")
@@ -633,9 +635,9 @@ def render() -> None:
         if not drivers.empty
         else pd.DataFrame(columns=["DIMENSION", "VALUE_USD"])
     )
-    # Last month has no board COST_DRIVER row (the board is mart-keyed by trailing days);
-    # derive top warehouse drivers from the SAME bounded warehouse frame the trend used,
-    # so the drivers reflect the exact previous month with no extra query.
+    # A bounded calendar window (Last month / Current month / Current year) skips the board
+    # (it is mart-keyed by trailing days); derive top warehouse drivers from the SAME bounded
+    # warehouse frame the trend used, so the drivers reflect that exact period with no extra query.
     if driver_view.empty and _ov_bounds is not None and trend_source.usable() \
             and "WAREHOUSE_NAME" in trend_source.df.columns:
         _wd = trend_source.df.copy()
@@ -904,8 +906,8 @@ def render() -> None:
         f,
         applies=(),
         partial=("company",),
-        note="MTD, forecast, freshness, and owner queue are account-wide; alerts and the score "
-             "use Company plus account-level events where applicable.",
+        note="MTD, forecast, and freshness are account-wide; alerts, the owner queue, and the score "
+             "use Company plus account-level items where applicable.",
     )
     panel_help(
         "Account-wide billing pace and operating risk. When the platform score is red (<70) or "
@@ -1121,7 +1123,8 @@ def render() -> None:
         mart_source=f"MART_WAREHOUSE_EFFICIENCY_DAILY ({company} + account-level, accruing)",
         live_source="FACT_WAREHOUSE_DAILY (365d backfill, monthly rollup)",
         # r11 #2: the eff mart accrues from deploy day — until it spans a
-        # year, the 13-month live view is the truer boss chart.
+        # year, the FACT_WAREHOUSE_DAILY 365d monthly rollup
+        # (fact_monthly_spend_by_warehouse) is the truer boss chart.
         mart_accept=lambda df: df["MONTH"].nunique() >= 12)
     if _mres.ok and not _mres.empty:
         _md = _mres.df.copy()
@@ -1282,21 +1285,26 @@ def render() -> None:
         with st.expander("Score trend — 30 days, retro-computed from facts (account-wide)"):
             charts.daily_metric_line(score_series, "DAY", "SCORE",
                                      title="Platform score (retro, account-wide)", unit="count")
-            # KEPT: "judge the trend, not the level" + "read the first few days as
-            # unreliable, not a real improvement" are interpretation/misread caveats, and
-            # the retro trend chart renders in operator mode too — so it stays visible.
+            # KEPT: "judge the trend, not the level" and the budget-basis / left-out
+            # partial-month notes are interpretation/misread caveats, and the retro trend
+            # chart renders in operator mode too — so it stays visible.
             st.caption(
                 "Live-score weights replayed over each day's facts. Stale-source and "
                 "open-action penalties aren't in the facts, so retro sits a few points "
-                "high — judge the trend, not the level. Weights calibrate on "
+                "high. With a monthly budget set, the retro budget penalty uses "
+                "cumulative month-to-date spend while the live score uses the projected "
+                "month-end, so in a month on pace to overrun retro can sit up to 20 "
+                "points higher, most of all early in the month — judge the trend, not "
+                "the level. Weights calibrate on "
                 "Admin → Settings. Note: the retro inputs (FACT_PLATFORM_SCORE_DAILY) "
                 "have no company grain, so this trend is account-wide even under a "
                 "company filter. The headline blends company-scoped 24h throughput/"
                 "pressure (same per-day basis as this line) with account-wide budget, "
                 "alerts, telemetry and owner-queue signals, so its level can differ. "
-                "Month-to-date spend restarts at the left edge of this window, so "
-                "the budget penalty is understated until the first whole month begins "
-                "— read the first few days as unreliable, not as a real improvement."
+                "With a budget set, the days before the first whole month in this "
+                "window are left out (their month-to-date spend would restart "
+                "mid-month and understate the budget penalty), so the line can start "
+                "later than 30 days back."
             )
 
     # ---- Daily AI digest ------------------------------------------------------

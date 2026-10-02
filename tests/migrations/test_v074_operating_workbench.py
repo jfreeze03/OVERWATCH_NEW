@@ -152,7 +152,6 @@ def test_v074_plain_sql_parses() -> None:
         ("related_savings", lambda: workbench_sql.related_savings("DB.S.T")),
         ("watchlist", lambda: workbench_sql.watchlist("joe@example.com")),
         ("experiments", lambda: workbench_sql.experiments("RUNNING", "TASK", "DB.S.T")),
-        ("slo_objectives", lambda: workbench_sql.slo_objectives(True, "TASK", "DB.S.T")),
     ),
 )
 def test_workbench_read_builders_parse_and_escape(name: str, builder) -> None:

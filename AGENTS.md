@@ -3,10 +3,11 @@
 This is a Streamlit-in-Snowflake cost/ops/security monitor for a shared
 ALFA+Trexis account. Owner: Joe (jfreeze03).
 
-**Read `CLAUDE.md` in the repo root and `docs/handoff/*.md` first, and follow
-them — they are the source of truth.** Trust `git log` over any snapshot
-numbers in docs. This file is the condensed version of the rules that break
-things most often; `CLAUDE.md` has the full house laws.
+**Read `CLAUDE.md` in the repo root first, and follow it — it is the source of
+truth.** For current state, trust `git log`, the top of `CHANGELOG.md` and
+`APP_VERSION` in `app/config.py` over any snapshot numbers in docs. This file
+is the condensed version of the rules that break things most often;
+`CLAUDE.md` has the full house laws.
 
 **Baseline: the last shipped release** (see `APP_VERSION` in `app/config.py` and the
 top of `CHANGELOG.md`). Work is reviewed as a diff against `origin/main`. Keep scopes
@@ -74,7 +75,8 @@ small and self-contained; don't restructure or "clean up" beyond the task you we
   fallback via `run_mart_first`. No `") or {}"` after `run_batch`.
 - **SiS's conda channel lags PyPI:** any newer-Streamlit widget feature needs a
   `hasattr(st, "...")` or `try/except` degrade whose fallback still delivers the
-  core value (see `clickable_bar_usd`, `section_toc`, `lazy_sections`).
+  core value (see `clickable_bar_usd` in `app/ui/charts.py` and
+  `lazy_sections` in `app/ui/components.py`).
 - **mypy is config-scoped** (`mypy.ini` `files =`): `app/logic`, `app/data`,
   `app/config.py`, `app/companies.py`, and `app/core/query.py` (the query engine,
   onboarded incrementally) — keep those clean and side-effect-free. `app/main.py`,

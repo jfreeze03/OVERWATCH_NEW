@@ -47,9 +47,11 @@ _TELEMETRY_KEY = "_ow_query_telemetry"
 _TELEMETRY_MAX = 200
 
 # A real row cap already present in the statement, not just the word "limit"
-# somewhere in a column name (RATE_LIMIT) or comment — those used to disable
-# the cap silently, leaving the query unbounded.
-_LIMIT_RE = re.compile(r"\bLIMIT\s+\d+", re.IGNORECASE)
+# somewhere in the text — that used to disable the cap silently, leaving the
+# query unbounded. \b keeps a column such as RATE_LIMIT from matching, and
+# requiring a number keeps prose such as "limits apply" from matching. A
+# statement whose trailing comment ends in "LIMIT <n>" would still be read as
+# a cap.
 # r10 #6: only a TRAILING limit bounds the OUTER result — a subquery's
 # LIMIT deep inside the text used to disable the cap and leave the outer
 # statement unbounded.
@@ -547,7 +549,8 @@ def _bump_refresh(sql: str) -> None:
 
 # r27 #10 (light): operator writes are app-constructed and confirmation-gated,
 # but the executor itself now refuses anything outside the action surface —
-# one statement, aimed at OVERWATCH objects or a warehouse lever.
+# one statement, aimed at OVERWATCH objects or an Emergency lever (ALTER WAREHOUSE / PIPE / TASK / USER,
+# ALTER ACCOUNT SET).
 _WRITE_PREFIXES = (
     "ALTER WAREHOUSE ",
     # Bug round 2 B1: the Emergency-tab levers (Operations) build these exact
@@ -614,7 +617,7 @@ def _statement_allowed(sql: str) -> tuple[bool, str]:
         return False, "multi-statement strings are not executed — one statement per call."
     if not body.upper().startswith(_WRITE_PREFIXES):
         return False, ("statement is outside the operator allow-list "
-                       "(OVERWATCH tables, OVERWATCH procs, warehouse levers): "
+                       "(OVERWATCH tables, OVERWATCH procs, Emergency levers): "
                        + body[:80])
     return True, ""
 
@@ -891,7 +894,7 @@ def _sql_hash16(sql: str) -> str:
     return hashlib.sha1(str(sql).encode()).hexdigest()[:16]
 
 
-def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | None:
+def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict:
     """Parallel fetch for multi-query sections: [{key, sql, source, max_rows?}].
 
     ALWAYS returns {key: QueryResult} with every key present (v4.20, Codex
@@ -899,7 +902,9 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
     failures are never cached — but when the parallel path fails, the
     fallback now runs PER KEY through run(): successes cache individually
     and one bad query no longer drags its siblings back to serial-cold.
-    Callers' `(_b or {}).get(k) or run(...)` pattern still works unchanged.
+    Every return path is a dict, so callers index it directly (never append
+    `or {}` to the call: the r8 lock); an older `(_b or {}).get(k)` guard is
+    harmless but unnecessary.
     """
     tier = tier if tier in _BATCH_FETCHERS else "recent"
     started = time.perf_counter()

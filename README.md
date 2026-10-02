@@ -2,7 +2,7 @@
 
 Snowflake usage, cost, and operations command center for the ALFA / Trexis shared
 Snowflake account. Streamlit app, mart-first data architecture, built for
-Streamlit-in-Snowflake with per-user roles.
+owner's-rights Streamlit-in-Snowflake (viewer identity from `st.user`).
 
 This is a ground-up rebuild of the original OVERWATCH repo. Every architectural
 decision here traces to a finding in the hostile panel review of the old app
@@ -13,14 +13,14 @@ decision here traces to a finding in the hostile panel review of the old app
 
 | Old-app finding | What this repo does instead |
 |---|---|
-| Fabricated exec trend line, hardcoded action rows, fictional $50k budget | No synthetic data anywhere. Charts render real series or an honest empty state. Budget comes from `DBA_MAINT_DB.OVERWATCH.SETTINGS` or the KPI says "not configured". |
+| Fabricated exec trend line, hardcoded action rows, fictional $50k budget | No synthetic data anywhere. Charts render real series or an honest empty state. The monthly budget (`SETTINGS.MONTHLY_BUDGET_USD`) is optional: when it is unset (0), no budget card or budget math appears (no invented budget). |
 | Wall of zeros on first paint | Overview loads the compact exec mart automatically (one cheap cached query). Live fallback is a bounded aggregate, not a blank page. |
 | Errors cached as empty data for up to 4h | Cached query functions raise on failure; Streamlit never caches exceptions. Failures surface as labeled errors, not silent empty frames. |
 | 461 silent `except Exception` sites | Central `safe_page` boundary + error ring buffer + optional Snowflake error sink. Ruff `BLE001` enforced in CI. |
 | 4 copies of SQL-safety primitives | One module: `app/core/sqlsafe.py`. |
 | 6,134-line setup SQL, no versioning | Numbered migrations in `snowflake/migrations/` + `SCHEMA_VERSION` table + status check on the Admin page. |
 | 92k lines, two apps, 30 zombie section modules | One app, 10 pages, pure-logic layer with tests. No dead routes. |
-| Anyone could change the $/credit execs see | Rates live in `DBA_MAINT_DB.OVERWATCH.SETTINGS` (seeded: **$3.68 compute, $2.20 Cortex**). Sidebar override is admin-gated and watermarked. |
+| Anyone could change the $/credit execs see | Rates live in `DBA_MAINT_DB.OVERWATCH.SETTINGS` (seeded: **$3.68 compute, $2.20 Cortex**). The only in-app editor is Admin ▸ Settings: in-app operators only (`config.OPERATOR_USERS`), type-to-confirm, and UPDATED_BY is stamped. There is no sidebar or per-session rate override. |
 | Cloud-services adjustment hardcoded to 0 | Billed dollars come from `METERING_DAILY_HISTORY` **with** `CREDITS_ADJUSTMENT_CLOUD_SERVICES` applied. |
 | Silent LIMIT injection | Row caps fetch `n+1`, set a `truncated` flag, and the UI shows a truncation banner. |
 | No deep links | Page navigation syncs to `?page=` query params where the runtime supports it. |
@@ -40,15 +40,18 @@ seed, with a unit test that keeps the two in sync).
 - Exception: user `KEBARR1` holds both ALFA and Trexis roles and is classified
   as **ALFA** by explicit override.
 
-This is a convenience scope for a shared account, not a security boundary; the
-security boundary is Snowflake roles under Streamlit-in-Snowflake.
+This is a convenience scope for a shared account, not a security boundary. Who
+can open the app is USAGE on the Streamlit object (SNOW_ACCOUNTADMINS +
+SNOW_SYSADMINS); inside it every query runs with the owner's rights, so page
+visibility (`config.VIEWER_PROFILES`; unmapped viewers = READER) and writes
+(`config.OPERATOR_USERS`) are keyed on the viewer.
 
 ## Pages
 
 | Page | Job |
 |---|---|
-| Brief | Default landing: compact operator status and the Case File — what changed since your last visit, in one screen. |
-| Overview | Exec glance: spend vs budget, month-end forecast, alerts, platform score, real top actions. |
+| Brief | Default landing (unless a saved default view or a `?page=` link applies): the headline numbers, open critical/high alerts (Fires), the top three actions (Asks), watched-entity movement, the morning digest, the Executive export and the operator Case File. |
+| Overview | Exec glance: MTD spend vs the same days last month (budget pace only when `MONTHLY_BUDGET_USD` is set), month-end forecast, contract runway, alerts, platform score, real top actions. |
 | Control Room | DBA morning triage: ranked issue queue, source freshness, 24h failures, spend movers; track task-failure / warehouse-spend triage rows into Action Center (Track as work item). |
 | Alerts | Alert rules, open events, ack/resolve workflow, generated native ALERT SQL. |
 | Cost Intelligence | Service/warehouse/user attribution (with the grain-coverage ratio: measured and user-allocated credits as a share of metered), contract pacing, Cortex + storage, savings ledger (estimated vs verified). |
@@ -232,7 +235,7 @@ snowflake/migrations/V159__loader_compile_diet.sql -- Loader compile diet (wave-
 snowflake/migrations/V160__sleep_polling_alert.sql -- COST_SLEEP_POLLING, the chronic SYSTEM$WAIT sleep-polling alert (the DB-side push of v4.595's Cost > Spend billed-family panel; V150's COST_CLOUD_SVC_ANOMALY never fires on a chronic poller, it is its own baseline). New transient SLEEP_POLLING_WEEKLY (weekly census: POLLER rows + an ACCOUNT receipt row = the panel group total) and SP_SCAN_SLEEP_POLLING(FORCE_RUN BOOLEAN): a poller is warehouse x user, or x task owner role for SYSTEM; billed like the panel over the 7 newest complete metering days (per day the smaller of the poller's credits and the account's billed cloud services, capped as one group, x CREDIT_PRICE_USD); sleep = the app's statement shape (system_wait.SLEEP_SQL_PATTERN). MEDIUM when active on 5+ of 7 days and billed >= THRESHOLD_NUM USD/week (25), HIGH at 5x; one event per poller per episode; CONDITION_ENDED self-clear once it stops. SP_ALERT_SCAN_DAILY re-derived from V157, byte-identical except the counting arm [25] (the proc works once per ISO week behind a receipt, retried daily) and tally 11 -> 12. No task change, no SETTINGS key, no tail CALL. Owner applies after V159.
 snowflake/migrations/V161__retire_operator_backups.sql -- Scheduled operator-data backups retired (owner decision 2026-09-28): drops TASK_BACKUP_OPERATOR, SP_BACKUP_OPERATOR_TABLES, the DBA_MAINT_DB.OVERWATCH_BAK schema with every V158 generation, OPERATOR_BACKUP_LOG and the 25 weekly *_BAK_LAST copies (moved into the schema so one DROP SCHEMA removes them; preflight and in-flight guards; existence-gated drops), deletes the BACKUP_KEEP_* settings and the OPERATOR_BACKUP_DAILY freshness row (closing its open stale event), and re-derives V_SECURITY_EXCEPTION_QUEUE from V158 without the backup-prune carve-out. Recovery is Time Travel plus manual clones. Owner applies after V160.
 snowflake/migrations/V162__security_takeover_admin_grant.sql -- Hourly identity alerts (Next-Fifty #39): SEC_LOGIN_TAKEOVER (arm [26]: >= THRESHOLD_NUM (5) failed logins by one user in 15 min, then a success within 60 min; CRITICAL 20:00-06:00 Central, weekends or a direct admin-tier role holder, else HIGH; one event per episode) and SEC_ADMIN_GRANT (arm [27]: one HIGH event per direct grant of ACCOUNTADMIN/SECURITYADMIN/SYSADMIN/USERADMIN/ORGADMIN/SNOW_ACCOUNTADMINS/SNOW_SYSADMINS to a user, revoked or not). Both company ALL, millisecond-timestamp keys. SP_INCIDENT_AUTODECLARE re-derived from V154 (crit CTE excludes both rules; [attach] links them only to an incident that already holds the same user) BEFORE SP_ALERT_SCAN re-derived from V157 (tally 12 -> 14). No task change, no SETTINGS key, no tail CALL. Owner applies after V161.
-snowflake/migrations/V163__ai_runaway_trust_regression.sql -- Per-user AI runaway, Trust Center regression and nightly failed-logins wording (Next-Fifty #37a, #44b, #39): SP_ALERT_SCAN_DAILY re-derived from V160 with counting arms [28] COST_AI_USER_RUNAWAY (credits > THRESHOLD_NUM (2) x COCO_DAILY_CAP_CREDITS AND robust z >= AI_RUNAWAY_ROBUST_Z (3.5) vs the user's own prior 90 active days; < 5 days = cap alone; Cortex Code only unless AI_RUNAWAY_INCLUDE_FUNCTIONS; last 3 complete days, one event per user-day; HIGH; company = the user's, ALL when UNKNOWN) and [29] SEC_TRUST_REGRESSION (CRITICAL/HIGH scanner at-risk count up >= THRESHOLD_NUM (1) vs its previous snapshot day, from SECURITY_TRUST_SNAPSHOT; one event per scanner per snapshot day, a further rise the same day not pushed again; HIGH, company ALL); [07] says whether the day had a success ('so far' on today's partial row) and points a burst that got in to SEC_LOGIN_TAKEOVER while that rule is enabled and to Account-takeover candidates either way; tally 12 -> 14. Seeds 2 rules + 2 settings WHEN NOT MATCHED. No new object, no task change, no apply-time run. Owner applies after V162.
+snowflake/migrations/V163__ai_runaway_trust_regression.sql -- Per-user AI runaway, Trust Center regression and nightly failed-logins wording (Next-Fifty #37a, #44b, #39): SP_ALERT_SCAN_DAILY re-derived from V160 with counting arms [28] COST_AI_USER_RUNAWAY (credits > THRESHOLD_NUM (2) x COCO_DAILY_CAP_CREDITS AND robust z >= AI_RUNAWAY_ROBUST_Z (3.5) vs the user's own active days in the prior 90 days; < 5 days = cap alone; Cortex Code only unless AI_RUNAWAY_INCLUDE_FUNCTIONS; last 3 complete days, one event per user-day; HIGH; company = the user's, ALL when UNKNOWN) and [29] SEC_TRUST_REGRESSION (CRITICAL/HIGH scanner at-risk count up >= THRESHOLD_NUM (1) vs its previous snapshot day, from SECURITY_TRUST_SNAPSHOT; one event per scanner per snapshot day, a further rise the same day not pushed again; HIGH, company ALL); [07] says whether the day had a success ('so far' on today's partial row) and points a burst that got in to SEC_LOGIN_TAKEOVER while that rule is enabled and to Account-takeover candidates either way; tally 12 -> 14. Seeds 2 rules + 2 settings WHEN NOT MATCHED. No new object, no task change, no apply-time run. Owner applies after V162.
 snowflake/migrations/V164__notify_actionable_lines_escalation.sql -- Actionable Teams lines + one-time CRITICAL escalation (Next-Fifty #40): SP_NOTIFY_WEBHOOK re-derived from V064; lines read '[SEV] title | company | detail | event <id>', identical in the 3000-char fit and the message (max_batches stays 6); an isolated escalation pass inside the sender lease re-posts an OPEN, unacknowledged, never-snoozed CRITICAL (a snooze V117 carried onto a re-raise counts; its incident not acked, mitigated or closed by a person after the alert joined it; its rule still configured) first notified ESCALATE_AFTER_MIN (120) minutes ago, once, to every enabled route that delivered it, and emails it via ESCALATE_EMAIL_INTEGRATION (OVERWATCH_EMAIL DEFAULT_RECIPIENTS; with the email leg blank only route-delivered events escalate; route-delivered events fill each 3000-char batch first); each channel stamps the new ALERT_EVENTS.ESCALATED_AT right after its send succeeds, then one ALERT_AUDIT ESCALATE row per event stamped. Seeds the 2 SETTINGS (WHEN NOT MATCHED). No task change, no CALL. Owner applies after V163.
 snowflake/migrations/V165__daily_digest_grounding.sql -- Morning digest grounding (Next-Fifty #24): DAILY_DIGEST + FACTS, GROUNDING_OK, FIGURES_CHECKED, UNGROUNDED, BODY_SOURCE, AI_BODY (nullable). SP_DAILY_DIGEST re-derived from V112: named facts (SPEND_USD and CREDITS separate; before, dollars were sent under CREDITS), COUNT_IF alert counts, a prompt that allows only FACT values, every draft figure checked against the facts (unit- and noun-bound, within half a step inclusive or 0.5%); on a mismatch or a Cortex failure (digest_ai_failed) a templated digest labelled not AI-written is written and sent, the draft kept in AI_BODY; the sent text is JSON-escaped like SP_NOTIFY_WEBHOOK. No task change, no SETTINGS key, no tail CALL. Owner applies after V164.
 snowflake/roles.sql                      -- direct grants to SNOW_ACCOUNTADMINS / SNOW_SYSADMINS (monitor/operator layer retired v4.42)
@@ -245,24 +248,28 @@ Streamlit-in-Snowflake: see `DEPLOYMENT.md` (uses `snowflake.yml`, `environment.
 
 Defaults seeded in `SETTINGS` and mirrored in `app/config.py`:
 compute **$3.68/credit**, Cortex **$2.20/credit**, storage **$23/TB/mo**.
-Change them in the Admin page (operator role) — not in code.
+Change them on Admin ▸ Settings (in-app operators only: `config.OPERATOR_USERS`), not in code.
 
 ## Development
+
+Python 3.11+ (the code uses `datetime.UTC`; mypy targets 3.11).
 
 ```bash
 pip install -r requirements-dev.txt
 ruff check .
+mypy
 pytest -q
 ```
 
-CI runs both on every push. The `app/logic/` and `app/data/` layers are
-Streamlit-free by design and fully unit-testable.
+Or run `make check`, which runs all three. CI runs all three on pushes to
+`main` and on pull requests, plus a floor-compat `pytest -q` leg on the minimum
+pins (streamlit 1.52.2, pandas 2.2.0, altair 5.5.0). The `app/logic/` and
+`app/data/` layers never import Streamlit directly and are unit-tested without
+a Snowflake connection (see the dependency rule in `ARCHITECTURE.md`).
 
 ## Docs
 
 - `FEATURES.md` — one-line map of every capability and where it lives (start here).
-
-- `REBUILD_PLAN.md` — the plan this rebuild follows, with status.
 - `ARCHITECTURE.md` — layers, data flow, caching, mart-first boundaries, security model.
 - `DEPLOYMENT.md` — SiS deploy, migrations, roles, validation.
 - `RUNBOOK.md` — the full operator manual: every metric, score, alert rule, AI engine, fallback, emergency lever, troubleshooting, DR.

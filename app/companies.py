@@ -12,8 +12,9 @@ hardcoded (owner decision, 2026-07). Rules:
 - ``KEBARR1`` holds both companies' roles and is classified as **ALFA** by
   explicit policy override.
 
-This scoping is a shared-account convenience filter, not a security boundary;
-Snowflake RBAC under Streamlit-in-Snowflake is the boundary. The same rules
+This scoping is a shared-account convenience filter, not a security boundary:
+under owner's-rights Streamlit-in-Snowflake, RBAC decides who can open the app
+and config.OPERATOR_USERS gates writes. The same rules
 are seeded into ``DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE`` by V001 and
 ``tests/test_companies.py`` keeps code and seed in sync.
 """
@@ -23,8 +24,6 @@ from __future__ import annotations
 from .core.sqlsafe import (
     assert_no_control_tokens,
     in_list,
-    like_any,
-    not_in_list,
     safe_identifier,
     sql_literal,
 )
@@ -70,9 +69,6 @@ ALFA_DATABASES = (
     "ALFA_EDW_SIT",
     "ADMIN",
 )
-ALFA_DATABASE_PATTERNS = ("ALFA%", "ADMIN", "DBA_MAINT_DB")  # DBA_MAINT_DB: app infra, ALFA (matches classify_database)
-
-ENVIRONMENTS = ("ALL", "PROD", "NONPROD")
 DEFAULT_ENVIRONMENT = "ALL"
 _PROD_DB_EXACT = ("ALFA_EDW_PRD", "ALFA_EDW_MGM")
 _PROD_DB_SUFFIX = ("_PRD",)
@@ -131,6 +127,9 @@ def classify_user(name: object) -> str:
 
 
 def classify_environment(database: object) -> str:
+    # The SP_ANOMALY_SWEEP PROD predicate (V023 onward) carries the comment "Same semantics as
+    # app environment_clause('PROD')"; that SQL clause builder is gone (v4.607, no caller), so
+    # read it as classify_environment(db) == 'PROD' (locked by tests/test_migration_v023.py).
     db = str(database or "").strip().upper()
     if db in _PROD_DB_EXACT or any(db.endswith(sfx) for sfx in _PROD_DB_SUFFIX):
         return "PROD"
@@ -140,37 +139,6 @@ def classify_environment(database: object) -> str:
 # ---------------------------------------------------------------------------
 # SQL clause builders (validated; return '' for the ALL scope)
 # ---------------------------------------------------------------------------
-
-def warehouse_clause(company: str, column: str = "WAREHOUSE_NAME") -> str:
-    company = str(company or DEFAULT_COMPANY)
-    if company == "Trexis":
-        clause = in_list(column, TREXIS_WAREHOUSES)
-    elif company == "ALFA":
-        clause = f"(UPPER(COALESCE({column}, '')) LIKE 'WH!_ALFA!_%' ESCAPE '!')"
-    elif company == "UNKNOWN":
-        exclude = not_in_list(column, TREXIS_WAREHOUSES)
-        clause = f"({exclude} AND UPPER(COALESCE({column}, '')) NOT LIKE 'WH!_ALFA!_%' ESCAPE '!')"
-    else:
-        clause = ""
-    return assert_no_control_tokens(clause)
-
-
-def database_clause(company: str, column: str = "DATABASE_NAME") -> str:
-    company = str(company or DEFAULT_COMPANY)
-    if company == "Trexis":
-        clause = like_any(column, (*TREXIS_DATABASES, "TRXS_%"))
-    elif company == "ALFA":
-        include = like_any(column, ALFA_DATABASE_PATTERNS)
-        exclude = not_in_list(column, TREXIS_DATABASES)
-        clause = f"({include} AND {exclude})" if include and exclude else include or exclude
-    elif company == "UNKNOWN":
-        clause = (f"(UPPER(COALESCE({column}, '')) NOT LIKE 'TRXS!_%' ESCAPE '!' "
-                  f"AND UPPER(COALESCE({column}, '')) NOT LIKE 'ALFA%' "
-                  f"AND UPPER(COALESCE({column}, '')) NOT IN ('ADMIN', 'DBA_MAINT_DB'))")
-    else:
-        clause = ""
-    return assert_no_control_tokens(clause)
-
 
 # The account's Trexis users have ordinary names (e.g. SSLONSKY) and
 # @trexis.com emails — they are NOT prefixed TRXS_. They are identified by
@@ -232,21 +200,6 @@ def user_scope_subquery(company: str, column: str = "USER_NAME", *,
     if company == "UNKNOWN":   # COMPANY_FOR_USER(NULL)='UNKNOWN' (V044): keep NULL-user rows exact
         clause = f"({clause} OR {outer} IS NULL)"
     return clause
-
-
-def environment_clause(environment: str, column: str = "DATABASE_NAME") -> str:
-    env = str(environment or DEFAULT_ENVIRONMENT).upper()
-    # '!' as the LIKE escape char keeps the underscore literal without
-    # backslash-escaping ambiguity across clients.
-    if env == "PROD":
-        exact = in_list(column, _PROD_DB_EXACT)
-        clause = f"({exact} OR UPPER({column}) LIKE '%!_PRD' ESCAPE '!')"
-    elif env == "NONPROD":
-        exact = not_in_list(column, _PROD_DB_EXACT, allow_null=False)
-        clause = f"({exact} AND UPPER({column}) NOT LIKE '%!_PRD' ESCAPE '!')"
-    else:
-        clause = ""
-    return assert_no_control_tokens(clause)
 
 
 def role_clause(company: str, column: str = "ROLE_NAME") -> str:
@@ -314,8 +267,8 @@ def databases_for(company: str, environment: str = "ALL") -> tuple[str, ...]:
 
     The picker offering DEV/SAN databases while the Environment filter said
     PROD was a live finding (2026-07-08): ALFA + PROD must be exactly
-    (ALFA_EDW_PRD, ALFA_EDW_MGM). Uses the same classify_environment rules
-    as the SQL environment_clause so the list and the filter cannot drift.
+    (ALFA_EDW_PRD, ALFA_EDW_MGM). Uses classify_environment, the same PROD rule
+    V023's SQL PROD predicate is locked to, so the list and the SQL cannot drift.
     """
     env = str(environment or DEFAULT_ENVIRONMENT).upper()
     dbs = database_options(company)
@@ -350,16 +303,16 @@ def company_case_sql(warehouse_col: str = "WAREHOUSE_NAME") -> str:
 # ---------------------------------------------------------------------------
 # Company-scope FILTER predicates via the COMPANY_SCOPE-aware UDFs.
 #
-# The MC-1 class (round 11, 16): the name-pattern clauses (warehouse_clause /
-# database_clause) test membership by NAME PATTERN, but COMPANY_FOR_WAREHOUSE /
-# COMPANY_FOR_DATABASE consult the operator-editable COMPANY_SCOPE table FIRST.
-# A warehouse/database mapped in COMPANY_SCOPE but off the name pattern is
-# INCLUDED by the UDF (used to LABEL every board and to FILTER the marts +
-# cost_sql + insights_sql) but DROPPED by the name-pattern clause — so a
-# name-pattern-scoped board silently disagreed with its UDF-scoped siblings on
-# which rows belong to the company. These two helpers are the canonical FILTER
-# form on the same UDF axis the marts/labels use; '' for ALL (no filter), the
-# same contract as warehouse_clause / database_clause so ALL is unchanged.
+# The MC-1 class (round 11, 16): the retired name-pattern clauses (warehouse_clause /
+# database_clause, removed in v4.607 once the MC-1 sweep left them no caller) tested
+# membership by NAME PATTERN, but COMPANY_FOR_WAREHOUSE / COMPANY_FOR_DATABASE consult
+# the operator-editable COMPANY_SCOPE table FIRST. A warehouse/database mapped in
+# COMPANY_SCOPE but off the name pattern was INCLUDED by the UDF (used to LABEL every
+# board and to FILTER the marts + cost_sql + insights_sql) but DROPPED by the
+# name-pattern clause — so a name-pattern-scoped board silently disagreed with its
+# UDF-scoped siblings on which rows belong to the company. These two helpers are the
+# canonical FILTER form on the same UDF axis the marts/labels use; '' for ALL (no
+# filter).
 # (COMPANY_FOR_ROLE does NOT read COMPANY_SCOPE — role has no operator mapping,
 # so role_clause is the authoritative role-grain axis and needs no UDF twin.)
 # ---------------------------------------------------------------------------
@@ -367,9 +320,8 @@ def company_case_sql(warehouse_col: str = "WAREHOUSE_NAME") -> str:
 def warehouse_company_scope(company: str, column: str = "WAREHOUSE_NAME") -> str:
     """FILTER a live warehouse read to ``company`` via COMPANY_FOR_WAREHOUSE —
     the COMPANY_SCOPE-aware axis the marts FILTER by and company_case_sql LABELS
-    by. Use instead of warehouse_clause wherever a sibling surface labels/scopes
-    warehouses by the UDF, so a COMPANY_SCOPE-mapped-but-off-pattern warehouse
-    scopes consistently. '' for the ALL scope."""
+    by, so a COMPANY_SCOPE-mapped-but-off-pattern warehouse scopes consistently on
+    every surface. '' for the ALL scope."""
     if str(company or "ALL").upper() == "ALL":
         return ""
     return f"{company_case_sql(column)} = {sql_literal(company)}"
@@ -378,9 +330,9 @@ def warehouse_company_scope(company: str, column: str = "WAREHOUSE_NAME") -> str
 def database_company_scope(company: str, column: str = "DATABASE_NAME") -> str:
     """FILTER a live database-grain read to ``company`` via COMPANY_FOR_DATABASE —
     the COMPANY_SCOPE-aware axis cost_sql (storage-movers), insights_sql and the
-    marts already LABEL/FILTER by. Use instead of database_clause so a
-    COMPANY_SCOPE-mapped-but-off-pattern database scopes the same on Ops/Security
-    as it does on Cost/Insights. '' for the ALL scope."""
+    marts already LABEL/FILTER by, so a COMPANY_SCOPE-mapped-but-off-pattern
+    database scopes the same on Ops/Security as it does on Cost/Insights. '' for
+    the ALL scope."""
     if str(company or "ALL").upper() == "ALL":
         return ""
     return f"{database_case_sql(column)} = {sql_literal(company)}"

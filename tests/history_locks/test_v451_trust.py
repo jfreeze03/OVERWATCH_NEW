@@ -403,6 +403,8 @@ def test_deploy_docs_track_the_migration_floor():
             f"{rel}: run-list trails the repo — add {latest} (the r27 #9 rewrite "
             "fixed narrative but the list drifted for 15 migrations)")
     assert "OVERWATCH_MONITOR" not in _read("README.md")  # retired-role reference stays dead
+    # the local-dev example must connect as a live role too (roles.sql drops the old layer)
+    assert "OVERWATCH_MONITOR" not in _read(".streamlit/secrets.toml.example")
 
 
 def test_validate_sql_floor_tracks_the_latest_migration():

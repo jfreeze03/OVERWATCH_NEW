@@ -338,33 +338,3 @@ def _concat_rows(parts: list[pd.DataFrame]) -> pd.DataFrame:
         out[col] = np.concatenate([part[col].to_numpy(dtype=dtype) if col in part.columns
                                    else np.full(len(part), "NaT", dtype=dtype) for part in parts])
     return out[order]
-
-
-def slo_summary(frame: pd.DataFrame | None) -> dict[str, float]:
-    if frame is None or frame.empty:
-        return {"total": 0.0, "met": 0.0, "breach": 0.0, "no_data": 0.0,
-                "stale": 0.0, "worst_burn": 0.0, "has_burn": 0.0}
-    status = frame.get("STATUS", pd.Series("NO_DATA", index=frame.index)).astype(str).str.upper()
-    raw_burn = pd.to_numeric(
-        frame.get("BURN_MULTIPLE", pd.Series(dtype="float64")), errors="coerce"
-    )
-    # #11: an objective evaluated off STALE (or NO_DATA) mart evidence is neither MET nor BREACHED —
-    # its verdict is deliberately withheld. But the cockpit SQL still emits its last-known
-    # BURN_MULTIPLE, so the worst-burn KPI and the reliability alarm must be scoped to the same
-    # evaluated set, or a stalled loader fires a red "error-budget breach" off evidence the panel
-    # elsewhere refuses to judge (ds-hunt 2026-08-30). Only MET/BREACH rows drive the burn signals.
-    _evaluated = status.isin(("MET", "BREACH"))
-    burn_eval = raw_burn.where(_evaluated)
-    return {
-        "total": float(len(frame)),
-        "met": float(status.eq("MET").sum()),
-        "breach": float(status.eq("BREACH").sum()),
-        "no_data": float(status.eq("NO_DATA").sum()),
-        # #11: objectives evaluated off stale mart evidence are neither met nor breached.
-        "stale": float(status.eq("STALE").sum()),
-        "worst_burn": round(float(burn_eval.fillna(0.0).max()), 2),
-        # #10: error-budget burn only applies to SUCCESS_PCT objectives (NULL for
-        # latency/P95). has_burn is False when no EVALUATED objective carries a burn, so the UI
-        # shows "n/a" instead of a misleading 0.00x or a stale-only alarm.
-        "has_burn": float(burn_eval.notna().any()),
-    }

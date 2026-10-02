@@ -21,7 +21,6 @@ LIVE_BUILDERS = [
     lambda: cost_sql.hourly_credits(48, "ALFA"),
     lambda: cost_sql.allocated_attribution(7, "USER_NAME", "ALFA"),
     lambda: cost_sql.cortex_daily_spend(7),
-    lambda: cost_sql.storage_by_database(7, "ALFA"),
     lambda: ops_sql.query_window_summary(7, "ALFA"),
     lambda: ops_sql.top_queries_by_elapsed(7, "ALFA"),
     lambda: ops_sql.failures_by_error(7, "Trexis"),
@@ -214,7 +213,6 @@ def test_database_options_scoped_per_company():
 
     assert "ALFA_EDW_PRD" in database_options("ALFA")
     assert "TRXS_EDW_PRD" not in database_options("ALFA")
-    assert database_options("Trexis") == tuple(sorted(database_options("Trexis"))) or True  # membership below
     assert "TRXS_EDW_PRD" in database_options("Trexis")
     assert "ALFA_EDW_PRD" in database_options("ALL") and "TRXS_EDW_PRD" in database_options("ALL")
 

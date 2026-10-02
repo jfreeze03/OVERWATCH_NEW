@@ -20,4 +20,3 @@ TABLE_H_LG = 460   # dense reference tables (Admin metrics)
 # Charts.
 CHART_H_SM = 220   # compact charts
 CHART_H_MD = 264   # default chart height (the app-wide baseline)
-CHART_H_LG = 300   # tall charts (heatmaps, stacked multi-series)

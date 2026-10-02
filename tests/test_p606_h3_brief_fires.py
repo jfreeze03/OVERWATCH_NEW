@@ -18,7 +18,6 @@ from streamlit.testing.v1 import AppTest  # noqa: E402
 
 from app.core.result import QueryResult  # noqa: E402
 from tests.test_pages_shaped import (  # noqa: E402, F401  (_stub_shaped: the harness's autouse stub fixture)
-    _APPTEST_BUTTONGROUP_OK,
     _entry,
     _nav_to,
     _shaped_batch,
@@ -27,7 +26,6 @@ from tests.test_pages_shaped import (  # noqa: E402, F401  (_stub_shaped: the ha
 )
 
 _ROOT = Path(__file__).resolve().parents[1]
-_SKIP = pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 
 
 def _fires() -> QueryResult:
@@ -38,7 +36,6 @@ def _fires() -> QueryResult:
         "METRIC_VALUE": [1.0, 1.0], "STATUS": ["OPEN", "OPEN"], "ACK_BY": [None, None], "ACK_AT": [None, None]}))
 
 
-@_SKIP
 def test_fires_row_reclick_after_back_opens_the_drawer_again(monkeypatch):
     from app.ui.pages import brief
 
@@ -86,7 +83,7 @@ def test_fires_row_reclick_after_back_opens_the_drawer_again(monkeypatch):
 
 
 def test_fires_sentinel_re_arms_before_the_change_check():
-    """Source-order lock (the floor leg's streamlit cannot run the AppTest above)."""
+    """Source-order lock: the re-arm sits before the change check (the AppTest above proves the behaviour)."""
     src = (_ROOT / "app" / "ui" / "pages" / "brief.py").read_text(encoding="utf-8")
     rearm = src.index('if _fire_sel is None:\n                # R1-215 re-arm')
     pop = src.index('st.session_state.pop("_brief_fire_sel_last", None)')

@@ -211,11 +211,6 @@ SNOOZE_PRESETS = {
 }
 
 
-def _lifecycle_sql(event_id: str, action: str, note: str, kind: str = "") -> str:
-    """Joined display form of _lifecycle_stmts (kept for the SQL preview + tests)."""
-    return "\n".join(_lifecycle_stmts(event_id, action, note, kind))
-
-
 def _lifecycle_stmts(event_id: str, action: str, note: str, kind: str = "") -> list[str]:
     """ACK/RESOLVE update + audit insert as a STRUCTURED statement list.
 
@@ -385,8 +380,8 @@ def _last_delivery_card() -> None:
     The owner hit exactly this on 2026-07-31: a full day of Teams silence with no way
     to tell a healthy quiet stretch from a dead pipe (the app HAD the timestamp, buried
     as a suffix on a banner). Silence alone is not a fault signal — the sender is a
-    per-key 24h digest, so a chronic condition raises once and quiet days are legitimately
-    empty. What decides it is whether anything is WAITING, so the card reports both.
+    per-key digest bounded to a send window (24h; 7d for CRITICAL), so a chronic condition
+    raises once and quiet days are legitimately empty. What decides it is whether anything is WAITING, so the card reports both.
 
     The builder now returns one row PER ENABLED ROUTE (Codex #29): a healthy route no
     longer masks a dead sibling and one dead route no longer reddens the whole card. We
@@ -453,7 +448,7 @@ def _last_delivery_card() -> None:
     elif not stuck.empty:
         # #14/#15: rank by TOTAL undelivered backlog (in-window eligible + expired/stranded),
         # not just the in-window count — a route stuck purely on events that aged past the
-        # sender's 24h window has ELIGIBLE_NOW = 0 yet is the one that is broken.
+        # sender's send window (24h; 7d for CRITICAL) has ELIGIBLE_NOW = 0 yet is the one that is broken.
         def _backlog(r) -> int:
             return int(safe_float(r.get("ELIGIBLE_NOW"))) + int(safe_float(r.get("EXPIRED_UNDELIVERED")))
         r0 = max((r for _, r in stuck.iterrows()), key=_backlog)
@@ -479,14 +474,15 @@ def _last_delivery_card() -> None:
          "delta_color": "off",
          "help": "Newest row in ALERT_DELIVERIES across all routes — a send Snowflake "
                  "confirmed, not a raise. Silence alone is not a fault signal: the sender "
-                 "is a 24h-windowed digest and dedupes per key, so a steady account is "
+                 "is a windowed digest (24h; 7d for CRITICAL) and dedupes per key, so a steady account is "
                  "legitimately quiet. The verdict below is the WORST route's state, not a "
                  "global average — one healthy route can't hide a dead sibling."},
         {"label": "Eligible to send now", "value": f"{waiting}",
          "severity": "warn" if not stuck.empty else "",
-         "help": "Open events inside the sender's 24h window that match an enabled route "
-                 "and are not yet in that route's delivery ledger — mirrors the sender's "
-                 "own predicate, summed across routes."},
+         "help": "Distinct open events inside the sender's send window (7d for CRITICAL, "
+                 "24h otherwise) that match at least one enabled route and are not yet in "
+                 "that route's delivery ledger — mirrors the sender's own predicate. An event "
+                 "matching several routes is counted once."},
         {"label": "Send failures (24h)", "value": f"{fails}",
          "severity": "bad" if not failing.empty else "ok",
          "help": "route_send_failed rows: the integration raised. Red only when a route's "
@@ -1087,7 +1083,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                              "source": "ALERT_EVENTS (90d, this rule)"},
                             {"key": "res", "sql": mart_sql.resolutions_for_rule(str(row["RULE_ID"])),
                              "source": "ALERT_EVENTS (resolved, this rule)"},
-                        ], page=_PAGE, tier="recent") or {}
+                        ], page=_PAGE, tier="recent")
                     rules_res = _dr.get("rules") or run(
                         mart_sql.alert_rules(), page=_PAGE, key="rules_for_drawer",
                         tier="recent", source="ALERT_CONFIG")
@@ -1263,7 +1259,8 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                         f"{str(row['TITLE'])[:80]} (event {event_id[:8]})" + _nxt_label)
                                     st.rerun()
                         else:
-                            st.caption("Executing requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS; the SQL is copyable for review.")
+                            st.caption("Running this in the app is limited to operators (config "
+                                       "OPERATOR_USERS); the SQL is copyable for review.")
                     st.markdown("**Supporting evidence**")
                     with st.expander("Playbook — what to do first", expanded=False):
                         st.markdown(playbook_for(str(row["RULE_ID"])))
@@ -1749,7 +1746,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                         st.session_state["_ow_alert_receipt"] = f"Un-snooze recorded — {_uns_txt}"
                         st.rerun()
             else:
-                st.caption("Un-snoozing requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
+                st.caption("Un-snoozing in the app is limited to operators (config OPERATOR_USERS).")
 
 
 @safe_page(_PAGE)
@@ -1972,9 +1969,12 @@ def render() -> None:
                         st.caption("No change from the rule's current threshold and Enabled — edit either "
                                    "to generate an UPDATE.")
                     st.caption("Rule changes are generate-only: review, then run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
-                    st.caption("WINDOW_HOURS is informational: each rule family's scan "
-                               "window is fixed in SP_ALERT_SCAN (see the runbook's rule "
-                               "catalogue) — editing the column does not change the scan.")
+                    st.caption("WINDOW_HOURS is informational for every rule except DQ_RECON_ERROR: "
+                               "scan windows are fixed per family in SP_ALERT_SCAN / "
+                               "SP_ALERT_SCAN_DAILY (see the runbook's rule catalogue), so editing "
+                               "the column does not change those scans. DQ_RECON_ERROR's "
+                               "WINDOW_HOURS is the reconciliation look-back SP_SCAN_RECON_ERRORS "
+                               "reads (default 48h), and its alert text states it.")
 
     elif section == "History":
         # Perf: the section's five UNCONDITIONAL 'recent' reads prefetch in one parallel batch

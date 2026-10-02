@@ -22,8 +22,9 @@ from app.logic.security import capped_window
 # --- Admin-role tiers (codified AS-IS per owner decision 2026-09-10; byte-identical to the
 # former inlined literals — one source of truth, no behaviour change). Two single-use sites
 # stay inline for byte-identity and are commented at their call sites: governance_counts uses
-# BREAK_GLASS on column ROLE inside a plain (non-f) SQL string, and role_access_paths applies
-# REACHES_ADMIN_ROLES as a genuine two-line SQL list. -------------------------------------
+# BREAK_GLASS on column ROLE inside a plain (non-f) SQL string, and effective_access applies
+# REACHES_ADMIN_ROLES as a genuine two-line SQL list (its parity with this constant is locked in
+# tests/migrations/test_v075_security_operating_model.py). ----------------------------------
 ADMIN_HOLDER_ROLES: tuple[str, ...] = ("SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS")
 BREAK_GLASS_ROLES: tuple[str, ...] = ("ACCOUNTADMIN", "SNOW_ACCOUNTADMINS")
 ELEVATED_ROLES: tuple[str, ...] = (
@@ -1332,9 +1333,10 @@ SELECT g.ROLE AS ADMIN_ROLE, g.GRANTEE_NAME AS USER_NAME,
        (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS p
          WHERE p.ROLE = g.ROLE AND p.GRANTEE_NAME = g.GRANTEE_NAME
            AND p.CREATED_ON < g.CREATED_ON) AS PRIOR_GRANTS,
-       -- Account-local (Chicago) so the off-hours/weekend flag grant_anomaly_flags
-       -- computes matches the operator's clock, not the SiS session tz (UTC/LA under
-       -- owner's-rights, where ALTER SESSION is a no-op). Mirrors unload_risk_events.
+       -- Account-local (Chicago), pinned explicitly so the off-hours/weekend flag
+       -- grant_anomaly_flags computes matches the operator's clock even if the session zone
+       -- (Central today only via the account default; ALTER SESSION is a no-op under
+       -- owner's-rights SiS) ever changes. Mirrors unload_risk_events.
        DAYOFWEEKISO(CONVERT_TIMEZONE('America/Chicago', g.CREATED_ON)) AS DOW_ISO,
        HOUR(CONVERT_TIMEZONE('America/Chicago', g.CREATED_ON)) AS HOUR_OF_DAY
 FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS g
@@ -1797,29 +1799,6 @@ LEFT JOIN roles r ON r.GRANTEE_NAME = w.USER_NAME
 WHERE w.GAP_DAYS >= {gap}
 ORDER BY w.GAP_DAYS DESC, ROLE_COUNT DESC
 LIMIT 200
-"""
-
-
-def egress_daily(days: int = 30) -> str:
-    """r25 #7a (owner pick): outbound bytes by day and destination — the
-    exfil canary and the surprise-transfer-bill canary are the same chart."""
-    days = bounded_days(days)
-    return f"""
-SELECT DATE(START_TIME) AS DAY,
-       COALESCE(TARGET_CLOUD, 'INTERNAL') AS TARGET_CLOUD,
-       COALESCE(TARGET_REGION, '(same region)') AS TARGET_REGION,
-       TRANSFER_TYPE,
-       ROUND(SUM(BYTES_TRANSFERRED) / POWER(1024, 3), 3) AS GB
-FROM SNOWFLAKE.ACCOUNT_USAGE.DATA_TRANSFER_HISTORY
-WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
-  -- true egress only: a same-region (TARGET_REGION NULL) and internal
-  -- (TARGET_CLOUD NULL) transfer is neither cross-region nor cross-cloud, so
-  -- excluding it keeps the KPI, 'Top destination', and the panel's
-  -- 'No cross-cloud or cross-region transfer' empty-state consistent.
-  AND (TARGET_REGION IS NOT NULL OR TARGET_CLOUD IS NOT NULL)
-GROUP BY 1, 2, 3, 4
-HAVING SUM(BYTES_TRANSFERRED) > 0
-ORDER BY DAY, GB DESC
 """
 
 
@@ -2390,29 +2369,6 @@ def recent_ddl_changes_rollup_fact(days: int, company: str = "ALL", database: st
 """
 
 
-def admin_role_activity_fact(days: int, company: str = "ALL") -> str:
-    """Daily CHANGE-statement volume under break-glass admin roles from FACT_SECURITY_CHANGE.
-
-    NOTE: FACT_SECURITY_CHANGE holds only DDL/DCL change statements, so this is the
-    change-statement count, NOT total statement volume — it does NOT see SELECT/COPY/CALL.
-    The "break-glass role activity (should hug zero)" panel therefore reads the LIVE
-    admin_role_activity (all statement types) instead; do not wire this change-only count
-    behind an all-statements panel (bug-hunt 2026-08-30)."""
-    days = bounded_days(days, maximum=90)
-    where = and_where(
-        f"EVENT_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
-        _admin_roles_in("ROLE_NAME", BREAK_GLASS_ROLES),
-        companies.user_clause(company, "USER_NAME"),
-    )
-    return f"""
-SELECT DAY, ROLE_NAME, COUNT(*) AS STATEMENTS, COUNT(DISTINCT USER_NAME) AS USERS
-FROM {core_object('FACT_SECURITY_CHANGE')}
-WHERE {where}
-GROUP BY 1, 2
-ORDER BY 1
-"""
-
-
 def effective_access(company: str = "ALL") -> str:
     user_filter = companies.user_scope_subquery(company, "g.GRANTEE_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS",
                                                 distinct_where="DELETED_ON IS NULL")
@@ -2519,7 +2475,7 @@ WITH periods AS (
                          BYTES_TRANSFERRED, 0)) / POWER(1024, 3), 3) AS PRIOR_GB
     FROM SNOWFLAKE.ACCOUNT_USAGE.DATA_TRANSFER_HISTORY
     WHERE {_outer_pred}
-      -- TRUE egress only, matching egress_daily: a same-region internal transfer (both
+      -- TRUE egress only: a same-region internal transfer (both
       -- TARGET_REGION and TARGET_CLOUD NULL) moves no data out of the account, so it must not
       -- be scored as a new/spiking outbound destination on this exfiltration lens (bug-hunt 2026-08-30).
       AND (TARGET_REGION IS NOT NULL OR TARGET_CLOUD IS NOT NULL)

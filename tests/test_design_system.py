@@ -30,12 +30,13 @@ def test_icons_are_svg_currentcolor_no_emoji():
     for name in ("brief", "cost", "alerts", "security", "target", "up", "down"):
         svg = icons.icon(name)
         assert svg.startswith("<svg") and "currentColor" in svg
-    # every page maps to a real icon, and none of them is an emoji glyph
-    for page in ("Brief", "Cost Intelligence", "Proof", "Alerts", "Admin"):
-        assert icons.page_icon(page).startswith("<svg")
-    # v4.597: Proof keeps Decision Studio's "target" glyph (not the unknown-page dot fallback)
-    assert icons.page_icon("Proof") == icons.icon("target")
-    assert icons.page_icon("Proof") != icons.icon("dot")
+    # v4.597: Proof keeps Decision Studio's "target" glyph (not the unknown-page dot fallback).
+    # v4.607: the unused page_icon map was deleted; page headers pass icon_name directly.
+    from pathlib import Path
+    ds = (Path(__file__).resolve().parents[1] / "app" / "ui" / "pages" / "decision_studio.py").read_text(
+        encoding="utf-8")
+    assert 'icon_name="target"' in ds
+    assert not hasattr(icons, "page_icon")
     assert icons.icon("nonexistent-name").startswith("<svg")   # safe fallback
 
 

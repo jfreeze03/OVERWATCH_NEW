@@ -10,7 +10,7 @@ from app import companies
 from app.core.query import _with_row_cap
 from app.data import chargeback_sql, insights_sql, mart27_sql
 
-# skip cleanly on the CI floor-compat job, which installs no sqlglot
+# local-dev convenience: skips this module if sqlglot is absent (both CI legs install it)
 sqlglot = pytest.importorskip("sqlglot")
 
 _ROOT = Path(__file__).resolve().parents[2]

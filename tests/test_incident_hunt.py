@@ -107,8 +107,8 @@ def test_incident_gantt_lanes_distinct_same_title_incidents(monkeypatch):
 
 def test_incident_gantt_reanchors_open_bar_to_account_now(monkeypatch):
     # v4.528 perf: the builder SQL is now-free (cache-stable) and COALESCEs an OPEN
-    # incident's ENDED to the server/UTC CURRENT_TIMESTAMP(), which overshoots account
-    # time by the server-vs-account offset. The chart re-anchors OPEN rows (IS_OPEN) to
+    # incident's ENDED to the session CURRENT_TIMESTAMP() (Central only via the account
+    # default TIMEZONE, so a changed zone would shift it). The chart re-anchors OPEN rows (IS_OPEN) to
     # the caller's account `now`, while RESOLVED rows keep their real measured ENDED.
     rendered = []
     monkeypatch.setattr(charts.st, "altair_chart", lambda c, **k: rendered.append(c))

@@ -494,7 +494,7 @@ def humanize_minutes_ago(minutes: object) -> str:
 
 def _spark_polyline(values, width: int = 240, height: int = 40, color: str = "#0891b2") -> str:
     """rec20: a self-contained inline-SVG sparkline for the HTML export — pure, no
-    Streamlit dependency, so `exec_summary_html` stays in the logic layer and the
+    Streamlit dependency, so `executive_summary_html` stays in the logic layer and the
     downloaded file needs no external assets."""
     pts = [safe_float(v) for v in (values or []) if v is not None]
     if len(pts) < 2:
@@ -626,41 +626,6 @@ def executive_summary_csv(view: ExecutiveSummaryView) -> str:
         writer.writerow(["Scope", "Method note", "", note])
     return output.getvalue()
 
-
-def exec_summary_html(*, company: str, days: int, generated: str, window_spend: str,
-                      mtd_line: str, forecast_line: str, alerts_line: str,
-                      score_line: str, drivers: list[tuple[str, str, str]],
-                      actions: list[str], spend_series: list | None = None) -> str:
-    """Styled, self-contained HTML executive summary (the .txt looked amateur).
-
-    Pure string builder — inputs arrive pre-formatted so this stays testable
-    and the page keeps owning data honesty. Every interpolated field is
-    HTML-escaped HERE, in the one tested place, so an object name carrying
-    '<', '&', or a stray tag can never break (or script) the exported file.
-    ``spend_series`` (optional daily USD) adds a trend sparkline and the export
-    carries a print stylesheet so it prints as a clean one-pager (rec20).
-    """
-    return executive_summary_html(ExecutiveSummaryView(
-        company=company,
-        days=days,
-        generated=generated,
-        cards=(
-            ("Window spend", window_spend),
-            ("Month to date", mtd_line),
-            ("Projected month-end", forecast_line),
-            ("Open alerts", alerts_line),
-            ("Platform score", score_line),
-        ),
-        drivers=tuple((driver, f"-{points}", evidence) for driver, points, evidence in drivers),
-        actions=tuple(actions),
-        spend_series=tuple(safe_float(value) for value in (spend_series or [])),
-        scope_notes=(
-            "MTD and projected are billed credits with the cloud-services adjustment applied "
-            "and are account-wide; window spend is warehouse metering and company-scoped.",
-            "All figures use account time; warehouse telemetry lags about 45 minutes and daily "
-            "metering can lag up to 24 hours. An Incomplete score means inputs did not load.",
-        ),
-    ))
 
 def mtd_pace_vs_prior_month(daily, today):
     """MTD spend paced against the SAME first-N-days of the prior month —

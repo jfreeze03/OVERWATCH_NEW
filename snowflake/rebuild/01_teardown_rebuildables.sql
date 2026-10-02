@@ -1,31 +1,46 @@
 -- 01_teardown_rebuildables.sql — BYTE-IDENTICAL copy of snowflake/
--- teardown.sql (locked by tests/test_rebuild_bundle.py). Section A runs;
--- Sections B/C stay commented — operator data survives.
+-- teardown.sql (locked by tests/test_rebuild_bundle.py). Section A runs, and
+-- so does Section B's live tail (three rebuildable tables, the ML forecast
+-- model, the webhook secrets and the notification integrations); the rest of
+-- B and all of C stay commented, so the operator data B lists survives.
 
 -- teardown.sql — drop OVERWATCH objects for a clean drop-and-restore cycle.
 --
 -- SAFETY MODEL
 --   * DBA_MAINT_DB.OVERWATCH is SHARED with the previous app's objects.
---     This script NEVER drops the schema or database — only the objects the
---     V001..V005 migrations create, each by fully qualified name.
---   * Section A (default): rebuildable objects only — tasks, procs, functions,
---     views, transient fact/mart tables. Re-running V001..V005 restores them
---     and the loaders repopulate from ACCOUNT_USAGE. No operator data is lost.
---   * Section B (commented out): OPERATOR DATA — settings, alert lifecycle,
---     action queue, savings ledger, audit/error logs. Only uncomment for a
---     true factory reset, and take the clone backups first.
---   * Section C (commented out): shared infrastructure — warehouse, resource
---     monitor, Streamlit app object, OVERWATCH_STAGE (app files live on
---     it — dropping it breaks the deployed app), roles.
+--     This script NEVER drops the schema or database — only OVERWATCH's own
+--     objects (from every migration and the opt-in scripts), each by fully
+--     qualified name.
+--   * Section A (default, live): rebuildable objects — tasks, alerts, procs,
+--     functions, views, transient fact/mart tables. Re-running every migration
+--     (V001 through the repo tip) restores them and the loaders repopulate from
+--     ACCOUNT_USAGE — except the opt-in objects no migration creates (the four
+--     NATIVE_ALERT_* email alerts, TASK_ALERT_DRILL, the ML forecast objects).
+--   * Section B: OPERATOR DATA — settings, alert lifecycle, action queue,
+--     savings ledger, audit/error logs, OVERWATCH_STAGE (app files live on
+--     it — dropping it breaks the deployed app). Commented out: only uncomment
+--     for a true factory reset, and take the B0 clone backups first. Two parts
+--     of Section B run LIVE: the three rebuildable tables (APP_QUERY_TELEMETRY,
+--     ALERT_DELIVERIES, OW_SENDER_LEASE) and the opt-in tail (the ML forecast
+--     model, the webhook secrets and the OVERWATCH_* notification
+--     integrations).
+--   * Section C (commented out): shared infrastructure — Streamlit app object,
+--     warehouse, resource monitor (already dropped by V045), retired roles.
 --
 -- RESTORE
---   1. Re-run snowflake/migrations/V001..V005 in order, then roles.sql.
+--   1. Re-run every migration in snowflake/migrations/ in order (V001 through
+--      the repo tip), then roles.sql.
 --   2. Run snowflake/validate.sql — every row should be OK.
---   3. Accidentally dropped a permanent table? Time Travel has your back:
+--   3. Re-create the opt-in objects (email alerts, Teams delivery and its
+--      grants, the drill, the ML forecast): docs/FULL_REBUILD.md step 7b. The
+--      emptied ALERT_DELIVERIES makes the first notifier run re-post the last
+--      24 h of OPEN events (7 days for a CRITICAL); step 7b(a) says how to
+--      avoid that burst.
+--   4. Accidentally dropped a permanent table? Time Travel has your back:
 --        UNDROP TABLE DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER;
 --      (works within the retention window; transient tables have 0-1 days).
 --
--- Run as the deployment role that owns the objects (see DEPLOYMENT.md).
+-- Run as the deployment role that owns the objects (see DEPLOYMENT.md §2).
 
 -- ===========================================================================
 -- 0. PREFLIGHT — stop all scheduled work before dropping anything
@@ -330,8 +345,8 @@ DROP SECRET IF EXISTS DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL;    -- recipe (
 -- ===========================================================================
 -- C. SHARED INFRASTRUCTURE — uncomment only if you really mean it.
 -- ===========================================================================
--- The warehouse also serves the Streamlit app; the resource monitor caps it;
--- roles may be granted into your role hierarchy.
+-- The warehouse also serves the Streamlit app (no resource monitor since V045 --
+-- owner decision: no hard cap on WH_ALFA_ADMIN).
 -- DROP STREAMLIT IF EXISTS DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP;
 -- ALTER WAREHOUSE IF EXISTS WH_ALFA_ADMIN SET RESOURCE_MONITOR = NULL;  -- already NULL: V045
 -- DROP WAREHOUSE IF EXISTS WH_ALFA_ADMIN;

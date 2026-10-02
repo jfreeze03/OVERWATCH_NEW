@@ -36,13 +36,6 @@ _PATHS = {
     "dot": '<circle cx="12" cy="12" r="4"/>',
 }
 
-_PAGE_ICON = {
-    "Brief": "brief", "Overview": "overview", "Control Room": "control",
-    "Cost Intelligence": "cost", "Operations": "operations", "Alerts": "alerts",
-    "Proof": "target", "Security & Governance": "security",
-    "Security": "security", "Admin": "admin",
-}
-
 
 def icon(name: str, size: int = 16, cls: str = "", stroke: float = 1.9) -> str:
     body = _PATHS.get(name, _PATHS["dot"])
@@ -51,7 +44,3 @@ def icon(name: str, size: int = 16, cls: str = "", stroke: float = 1.9) -> str:
             f'aria-hidden="true" focusable="false" '
             f'stroke="currentColor" stroke-width="{stroke}" stroke-linecap="round" '
             f'stroke-linejoin="round" style="vertical-align:-2px">{body}</svg>')
-
-
-def page_icon(page: str, size: int = 16) -> str:
-    return icon(_PAGE_ICON.get(page, "dot"), size=size)

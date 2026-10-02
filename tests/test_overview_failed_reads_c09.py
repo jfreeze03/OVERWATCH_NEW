@@ -26,7 +26,6 @@ from streamlit.testing.v1 import AppTest  # noqa: E402
 
 from app.core.result import QueryResult  # noqa: E402
 from tests.test_pages_shaped import (  # noqa: E402, F401  (_stub_shaped: the harness's autouse stub fixture)
-    _APPTEST_BUTTONGROUP_OK,
     _entry,
     _nav_to,
     _shaped_batch,
@@ -34,8 +33,6 @@ from tests.test_pages_shaped import (  # noqa: E402, F401  (_stub_shaped: the ha
     _shaped_run,
     _stub_shaped,
 )
-
-_SKIP = pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 
 
 def _failed(kind: str = "timeout") -> QueryResult:
@@ -110,7 +107,6 @@ def _card(view: dict, label: str) -> str:
 
 # ------------------------------------------------------------------------------------- R1-191 ----
 
-@_SKIP
 def test_failed_spend_reads_never_render_a_zero_hero(monkeypatch):
     got = _render(monkeypatch, fail={"exec_board_": _failed(), "live_wh_daily_": _failed()})
     hero = got["hero"][0]
@@ -122,7 +118,6 @@ def test_failed_spend_reads_never_render_a_zero_hero(monkeypatch):
     assert "$0.00" not in _card(got["views"][-1], "Window spend")
 
 
-@_SKIP
 def test_a_successful_empty_spend_read_still_reads_zero(monkeypatch):
     empty = QueryResult(ok=True, df=pd.DataFrame())
     got = _render(monkeypatch, fail={"exec_board_": empty, "live_wh_daily_": empty})
@@ -156,7 +151,6 @@ def test_spend_failure_help_names_only_the_reads_that_ran_and_failed():
     assert "the last fallback, the warehouse metering read, failed: read failed." in sourceless
 
 
-@_SKIP
 def test_an_empty_board_is_not_reported_as_a_failed_read(monkeypatch):
     got = _render(monkeypatch, fail={
         "exec_board_": QueryResult(ok=True, df=pd.DataFrame(), source="MART_EXEC_BOARD"),
@@ -169,7 +163,6 @@ def test_an_empty_board_is_not_reported_as_a_failed_read(monkeypatch):
 
 # ------------------------------------------------------------------------------------- R1-192 ----
 
-@_SKIP
 def test_failed_alert_counts_never_export_an_all_clear(monkeypatch):
     got = _render(monkeypatch, fail={"alert_counts_": _failed()})
     card = _card(got["views"][-1], "Open alerts")
@@ -180,7 +173,6 @@ def test_failed_alert_counts_never_export_an_all_clear(monkeypatch):
 
 # ------------------------------------------------------------------------------------- R1-193 ----
 
-@_SKIP
 @pytest.mark.parametrize("kind", ["timeout", "other", "missing_column"])
 def test_failed_reads_are_unavailable_not_not_installed(monkeypatch, kind):
     got = _render(monkeypatch, fail={"action_queue_": _failed(kind)}, daily_wide=_failed(kind))
@@ -192,7 +184,6 @@ def test_failed_reads_are_unavailable_not_not_installed(monkeypatch, kind):
     assert _card(got["views"][-1], "Month to date").startswith("unavailable (daily facts could not be read)")
 
 
-@_SKIP
 def test_absent_queue_and_facts_keep_the_setup_wording(monkeypatch):
     got = _render(monkeypatch, fail={"action_queue_": _failed("absent")}, daily_wide=_failed("absent"))
     assert "Action queue isn't installed yet." in [str(i.value) for i in got["at"].info]
@@ -202,7 +193,6 @@ def test_absent_queue_and_facts_keep_the_setup_wording(monkeypatch):
 
 # ------------------------------------------------------------------------------------- R1-195 ----
 
-@_SKIP
 def test_new_warehouse_mover_has_no_fabricated_zero_percent(monkeypatch):
     from app.ui.pages import overview as ov
 
@@ -239,7 +229,6 @@ def _render_ml(monkeypatch, ml: QueryResult) -> dict:
     return next(k for k in got["kpis"] if k.get("label") == "Projected month-end credit spend")
 
 
-@_SKIP
 def test_ml_horizon_short_of_month_end_falls_back_to_seasonal(monkeypatch):
     """A model trained once (last TS 08-31) forecasts 09-01..10-15; on 10-10 only 10-11..10-15 remain. That
     5-day partial sum used to be the month-end projection; it now falls back to the disclosed seasonal engine
@@ -249,7 +238,6 @@ def test_ml_horizon_short_of_month_end_falls_back_to_seasonal(monkeypatch):
     assert "The ML forecast table ends 2026-10-15, before month-end (2026-10-31)" in kpi["help"]
 
 
-@_SKIP
 def test_ml_horizon_covering_month_end_is_used(monkeypatch):
     kpi = _render_ml(monkeypatch, _ml_frame(datetime.date(2026, 10, 11), 40))
     assert "SNOWFLAKE.ML.FORECAST via FORECAST_ML_DAILY" in kpi["help"]
@@ -272,7 +260,6 @@ def _ml_table_as_read(today: datetime.date) -> QueryResult:
     return QueryResult(ok=True, source="stub", df=table[keep].reset_index(drop=True))
 
 
-@_SKIP
 def test_ml_projection_adds_todays_prorated_remainder(monkeypatch):
     """R1-229 follow-up: #24's today-remainder term reads TODAY's forecast row. A strictly-future reader never
     returned it, so the term was 0 every day; at 06:00 three quarters of today's 100 credits are still ahead."""

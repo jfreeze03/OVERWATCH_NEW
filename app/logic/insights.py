@@ -311,15 +311,6 @@ def idle_advisor(df: pd.DataFrame, credit_rate_usd: float, window_days: int) -> 
             .drop(columns="_ACTION_ORDER").reset_index(drop=True))
 
 
-def idle_suspend_sql(warehouse: str, seconds: int = 60) -> str:
-    """Generated (not executed) remediation for a flagged warehouse."""
-    from app.core.sqlsafe import safe_identifier
-
-    wh = safe_identifier(str(warehouse))
-    seconds = max(30, min(int(seconds), 3600))
-    return f"ALTER WAREHOUSE {wh} SET AUTO_SUSPEND = {seconds};"
-
-
 # ---- 2. Repeat-query candidates ---------------------------------------------
 
 # D3: the gate is "half an hour of compute PER 30 DAYS", not "half an hour in
@@ -1215,8 +1206,8 @@ def recon_recurrence(
 SLA_FORECAST_MIN_RUNS = 4          # complete nights needed before a trend is fitted
 SLA_FORECAST_HORIZON_RUNS = 7      # project the margin this many nights ahead
 SLA_FORECAST_MIN_SLOPE_SEC = 120.0  # < 2 min/night margin drift is noise, not a trend
-# Next-Fifty #18: the trend fits the newest N nights (mirrors etl_control_sql.SLA_BASELINE_RUNS — the
-# logic layer must not import the data layer); older returned nights feed only the month-end history.
+# Next-Fifty #18: the trend fits the newest N nights (the one source of the fit size; the data layer's
+# SLA_HISTORY_NIGHTS scan returns more); older returned nights feed only the month-end history.
 SLA_FORECAST_FIT_NIGHTS = 14
 
 

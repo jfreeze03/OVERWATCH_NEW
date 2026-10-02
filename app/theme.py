@@ -518,7 +518,8 @@ section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked)
 
 _COMPACT_CSS = """
 <style>
-/* Compact density (Views popover toggle): more rows per screen, same order.
+/* Compact density (a hydrated DENSITY pref; its Views popover editor went in v4.157.0):
+   more rows per screen, same order.
    Ops/DBA scanning mode — spacing shrinks, hierarchy and colors do not. */
 /* padding-top MUST stay at the base 2.6rem header clearance — the fixed
    stHeader overlaps the scroll container, so a smaller value re-clips the

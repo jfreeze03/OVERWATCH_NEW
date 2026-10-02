@@ -44,10 +44,10 @@ def test_needs_validation_counts_the_validate_lane() -> None:
 # Finding #2 -- Verified count/value read the uncapped aggregate, not the display frame
 # --------------------------------------------------------------------------- #
 def test_experiment_verified_totals_is_uncapped() -> None:
-    sql = workbench_sql.experiment_verified_totals()
-    assert "LIMIT" not in sql
-    assert "COUNT_IF(UPPER(STATUS) = 'VERIFIED')" in sql
-    assert "OPTIMIZATION_EXPERIMENTS" in sql
+    # v4.607: the uncapped aggregate behind the retired (v4.597) Experiments KPI board was deleted
+    # as canary-only; the uncapped-headline rule is locked on Proof by the next test. Lock that the
+    # retired reader does not come back.
+    assert not hasattr(workbench_sql, "experiment_verified_totals")
 
 
 def test_experiments_panel_uses_the_uncapped_totals() -> None:

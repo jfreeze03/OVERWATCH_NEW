@@ -8,8 +8,8 @@ task -- rendered the green 'fitted trends are flat' row over one run per task. A
 recurrence label called a since-the-1st read 'in the last N days' while the runtimes label said
 'since <first day>' for the same read.
 
-The panels run against recording fakes (the tests/test_ops_c01_p606.py pattern; AppTest is skipped
-on the floor CI leg, so these run everywhere).
+The panels run against recording fakes (the tests/test_ops_c01_p606.py pattern), so each caption is
+asserted directly rather than through a page render.
 """
 
 from __future__ import annotations

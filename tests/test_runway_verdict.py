@@ -82,7 +82,6 @@ def test_no_runway_is_quiet_when_read_and_watch_when_the_read_failed():
 # ----------------------------------------------------------------------------- the real pages ----
 st = pytest.importorskip("streamlit")
 from tests.test_pages_shaped import (  # noqa: E402,F401  (autouse fixture: shaped reads everywhere)
-    _APPTEST_BUTTONGROUP_OK,
     _entry,
     _nav_to,
     _stub_shaped,
@@ -129,7 +128,6 @@ def _drive(monkeypatch, page: str, row: dict | None) -> dict:
     return _VERDICTS[-1]
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 @pytest.mark.parametrize("page", ["Cost Intelligence", "Brief"])
 def test_pages_flag_an_overrun_contract(monkeypatch, page):
     v = _drive(monkeypatch, page, _OVERRUN)
@@ -137,14 +135,12 @@ def test_pages_flag_an_overrun_contract(monkeypatch, page):
     assert "exhausted" in v["body"] and "on track" not in v["body"] and "healthy" not in v["body"]
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 @pytest.mark.parametrize("page", ["Cost Intelligence", "Brief"])
 def test_pages_watch_an_uncomputable_burn(monkeypatch, page):
     v = _drive(monkeypatch, page, _NULL_BURN)
     assert v["label"] == "Watch" and "not computable" in v["body"], v
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 @pytest.mark.parametrize("page", ["Cost Intelligence", "Brief"])
 def test_pages_claim_nothing_about_an_unconfigured_contract(monkeypatch, page):
     v = _drive(monkeypatch, page, _NO_CONTRACT)
@@ -153,7 +149,6 @@ def test_pages_claim_nothing_about_an_unconfigured_contract(monkeypatch, page):
     assert "on track" not in v["body"] and "contract runway healthy" not in v["body"]
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 @pytest.mark.parametrize("page", ["Cost Intelligence", "Brief"])
 def test_pages_watch_a_failed_runway_read(monkeypatch, page):
     """Round 5 guarded this on Cost only; the shared helper gives the Brief the same Watch (it used to

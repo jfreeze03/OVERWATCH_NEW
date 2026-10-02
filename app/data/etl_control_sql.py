@@ -1052,7 +1052,7 @@ def run_cost_attribution_scan(
 # --- Phase 4b (Next-Fifty #14 Ph1): task evidence (CONTROL_STATUS x QUERY_HISTORY) ---
 # "Why did this ETL task fail or slow down?" — the task's own Snowflake CALL (status, error text) and
 # the statements that CALL ran (queued / compile / execution / spill), for ONE run. QUERY_HISTORY only:
-# QUERY_ATTRIBUTION_HISTORY lags ~6h and drops short or warehouse-less statements, so a morning read of
+# QUERY_ATTRIBUTION_HISTORY lags up to ~8h and drops short or warehouse-less statements, so a morning read of
 # last night's cycle would usually show no children there.
 MAX_EVIDENCE_ROWS = 50   # a task has a handful of CALL attempts; the one bounds-only row counts too
 EVIDENCE_SLACK_MIN = 5   # +/- minutes of Informatica-vs-Snowflake clock skew around the CONTROL_STATUS window
@@ -1096,7 +1096,7 @@ def run_task_evidence_scan(control_fqn: object, *, task: object, workflow: objec
     is in another database. A non-3-part FQN states no database, so no preference applies. The filter
     runs inside ``calls``, so the window totals cover only the kept CALLs.
 
-    CHILDREN: QUERY_HISTORY has no ROOT_QUERY_ID (only QUERY_ATTRIBUTION_HISTORY does, ~6h late), so a
+    CHILDREN: QUERY_HISTORY has no ROOT_QUERY_ID (only QUERY_ATTRIBUTION_HISTORY does, up to ~8h late), so a
     CALL's children are the other statements in the CALL's SESSION_ID that started between the CALL's
     start and end. A wrong linkage shows an empty breakdown, never wrong numbers; the status and error
     verdict does not depend on it. Failed CALLs are KEPT (no credits HAVING — a failed CALL bills ~0).
@@ -1290,8 +1290,8 @@ def run_task_evidence_scan(control_fqn: object, *, task: object, workflow: objec
 # night-keyed by DATE(TASK_START_DTTM - 12h) so the ~22:00 start and the ~02:47 finish belong to
 # the SAME cycle. All deadline / margin / trend math is Python (the clock times never touch SQL);
 # this builder is config-driven only by the two anchor WORKFLOW NAMES (escaped literals — data).
-SLA_BASELINE_RUNS = 14      # ~2 weeks of nightly cycles to fit the margin trend
-# Next-Fifty #18: nights RETURNED — the forecaster fits only the newest SLA_BASELINE_RUNS; the older
+# Next-Fifty #18: nights RETURNED — the forecaster fits only the newest
+# insights.SLA_FORECAST_FIT_NIGHTS (14, ~2 weeks of nightly cycles); the older
 # nights size the month/quarter-end history. > one quarter (~91 nights) so a quarter-end night is
 # always sized from a PREVIOUS quarter-end. days=0 already scans every row, so no extra scan.
 SLA_HISTORY_NIGHTS = 100

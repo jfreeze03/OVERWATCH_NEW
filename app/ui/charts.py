@@ -26,7 +26,6 @@ _HEIGHT = CHART_H_MD
 HEATMAP_MAX_ROWS = 20  # 24px/row; beyond this the heatmap became a scroll trap
 
 _ACCENT = palette.ACCENT
-_ACCENT2 = palette.ACCENT2
 _GRID = "rgba(148,163,184,0.14)"
 _LABEL = palette.LOW
 _TITLE = palette.INK_SOFT
@@ -1509,9 +1508,10 @@ def incident_gantt(df: pd.DataFrame, now: object = None) -> None:
     data["ENDED"] = pd.to_datetime(data["ENDED"], errors="coerce")
     # Re-anchor OPEN incidents' end to account-now (the caller's `now`). The builder's
     # SQL is intentionally now-free for cache stability and COALESCEs an open bar's ENDED
-    # to the server/UTC CURRENT_TIMESTAMP(), which overshoots account time by the server-
-    # vs-account offset (~5-6h). IS_OPEN (RESOLVED_AT IS NULL) marks the still-running
-    # bars; recompute their end + duration against account time here. With now=None (unit
+    # to the session CURRENT_TIMESTAMP() (Central today only via the account default
+    # TIMEZONE; a changed account or warehouse zone would shift an open bar by the offset).
+    # IS_OPEN (RESOLVED_AT IS NULL) marks the still-running bars; recompute their end +
+    # duration against account time here (defence in depth). With now=None (unit
     # tests) this is skipped and the SQL's non-null ENDED is used as-is.
     if now is not None and "IS_OPEN" in data.columns:
         _now_ts = pd.Timestamp(now)

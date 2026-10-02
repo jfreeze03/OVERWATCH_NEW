@@ -7,7 +7,7 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
-from app.data import cost_sql, mart_sql, workbench_sql
+from app.data import cost_sql, mart_sql
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -43,7 +43,6 @@ def test_ask_credit_share_is_a_percentage_matching_the_headline():
 
 
 def test_experiments_total_kpi_is_uncapped():
-    assert "TOTAL_COUNT" in workbench_sql.experiment_verified_totals()
     # v4.597 (Option C): the Experiments KPI board was retired (its verified $ now shows as Proof
     # evidence rows). The uncapped-headline rule carries over to Proof, whose headline figures are
     # SQL aggregates — never sums over the row-capped ledger frame.

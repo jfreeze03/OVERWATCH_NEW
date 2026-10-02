@@ -1,8 +1,7 @@
 """Next-Fifty #38 remainder, v4.604.0 review r1: the cluster-cap gate's RENDER paths without AppTest.
 
-tests/test_cluster_cap_shaped.py renders the real page, but AppTest is skipped on the floor CI leg
-(streamlit 1.52, _APPTEST_BUTTONGROUP_OK). These tests call the page's own _cluster_cap_check with a fake
-``st`` and a recording ``run`` instead, so every leg runs them:
+tests/test_cluster_cap_shaped.py renders the real page through AppTest. These tests call the page's own
+_cluster_cap_check with a fake ``st`` and a recording ``run`` instead, pinning the gate's own paths:
 
   * the toggle OFF reads nothing and says the cap was not checked;
   * R1-25 a FAILED read returns the frame unjudged: guard() shows the red line once, the failed caption

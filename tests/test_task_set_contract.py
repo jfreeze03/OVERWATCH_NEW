@@ -264,3 +264,71 @@ def test_replay_ignores_comments_and_strings_and_honours_if_not_exists():
                      "CREATE TASK IF NOT EXISTS DB.S.T_NEW WAREHOUSE = WH_A AS CALL N();")])
     msg = _diff_message("app/data/ops_sql.py OVERWATCH_TASKS", {"T_ROOT", "T_CHILD"}, set(live3))
     assert "add ['T_NEW']" in msg
+
+
+# --- the alert-pipeline runbook resumes every root that feeds ALERT_EVENTS (p607 cleanup review) -------
+_APC = _ROOT / "snowflake" / "alert_pipeline_check.sql"
+_PROC = re.compile(r"\bCREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+                   r"((?:[A-Za-z_][\w$]*\.){0,2}[A-Za-z_][\w$]*)\s*\(", re.I)
+_CALL = re.compile(r"\bCALL\s+((?:[A-Za-z_][\w$]*\.){0,2}[A-Za-z_][\w$]*)\s*\(", re.I)
+_RAISES = re.compile(r"\b(?:INSERT|MERGE)\s+INTO\s+(?:[A-Za-z_][\w$]*\.){0,2}ALERT_EVENTS\b", re.I)
+
+
+def _alert_raiser_roots() -> dict[str, set[str]]:
+    """{live task whose CALLed proc writes ALERT_EVENTS (directly or via a nested CALL): its graph roots}.
+    The proc body is the LATEST definition in the migrations; the task's CALL is read from the migration
+    the replay says left it live; comments and strings never count (``blank``)."""
+    live = replay()
+    texts = {p.name: p.read_text(encoding="utf-8") for p in _MIGRATIONS}
+    bodies: dict[str, str] = {}
+    for p in _MIGRATIONS:
+        text = texts[p.name]
+        for m in _PROC.finditer(blank(text)):
+            start = text.find("$$", m.end())
+            bodies[bare(m.group(1))] = blank(text[start:text.find("$$", start + 2)])
+
+    def raises(proc: str, seen: frozenset[str] = frozenset()) -> bool:
+        body = bodies.get(proc)
+        if body is None or proc in seen:
+            return False
+        return bool(_RAISES.search(body)) or any(raises(bare(c), seen | {proc}) for c in _CALL.findall(body))
+
+    def roots(name: str) -> set[str]:
+        parents = [p for p in live[name]["after"] if p in live]
+        return set().union(*(roots(p) for p in parents)) if parents else {name}
+
+    out: dict[str, set[str]] = {}
+    for name, task in live.items():
+        b = blank(texts[task["created_in"]])
+        create = [m for m in _CREATE.finditer(b) if bare(m.group(3)) == name][-1]
+        as_end = _AS.search(b, create.end()).end()
+        stmt_end = _STMT_END.search(b, as_end)
+        call = _CALL.search(b, as_end, stmt_end.start() if stmt_end else len(b))
+        if call and raises(bare(call.group(1))):
+            out[name] = roots(name)
+    return out
+
+
+def test_alert_pipeline_runbook_resumes_every_alert_raiser_root():
+    """snowflake/alert_pipeline_check.sql FIX A once said the pipeline had only two scans, and its resume
+    lines reached only the hourly and daily graphs, so an operator following it after "no alerts" left the
+    standalone raisers (TASK_ANOMALY_SWEEP, TASK_CANARY_SENTINEL, ...) suspended. Derived: every graph
+    root of a task that writes ALERT_EVENTS is resumed by FIX A and listed in STEP 2's TASK_HISTORY read;
+    a chained raiser's root must use SYSTEM$TASK_DEPENDENTS_ENABLE (a plain RESUME leaves children)."""
+    raisers = _alert_raiser_roots()
+    every_root = set().union(*raisers.values())
+    # not vacuous: both scan graphs and the standalone raisers are found
+    assert {"TASK_ALERT_SCAN", "TASK_ALERT_SCAN_DAILY", "TASK_ANOMALY_SWEEP",
+            "TASK_CANARY_SENTINEL"} <= set(raisers), sorted(raisers)
+    assert raisers["TASK_ALERT_SCAN"] == {"TASK_LOAD_HOURLY"}
+    assert raisers["TASK_ALERT_SCAN_DAILY"] == {"TASK_LOAD_DAILY"}
+    apc = _APC.read_text(encoding="utf-8")
+    fix_a = apc.split("-- FIX A", 1)[1].split("-- FIX B", 1)[0]
+    enabled = {bare(n) for n in re.findall(r"SYSTEM\$TASK_DEPENDENTS_ENABLE\('([\w$.]+)'\)", fix_a)}
+    resumed = {bare(n) for n in re.findall(r"ALTER TASK IF EXISTS ([\w$.]+) RESUME;", fix_a)}
+    missing = sorted(f"{root} (feeds {name})" for name, rts in raisers.items() for root in rts
+                     if root not in enabled and not (root == name and root in resumed))
+    assert not missing, f"alert_pipeline_check.sql FIX A does not resume: {missing}"
+    step2 = apc.split("-- STEP 2", 1)[1].split("-- STEP 3", 1)[0]
+    listed = set(re.findall(r"'(TASK_\w+)'", step2.split("WHERE NAME IN (", 1)[1].split(")", 1)[0]))
+    assert every_root <= listed, f"STEP 2 does not read TASK_HISTORY for {sorted(every_root - listed)}"

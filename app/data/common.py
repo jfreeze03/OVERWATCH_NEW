@@ -90,15 +90,6 @@ def account_today_sql() -> str:
     return f"CONVERT_TIMEZONE('{ACCOUNT_TIMEZONE}', CURRENT_TIMESTAMP())::DATE"
 
 
-def lag_offset_start(days: int, lag_hours: int = 24) -> str:
-    """Window start that ends before the ACCOUNT_USAGE completeness horizon.
-
-    Comparing a complete prior window to a still-filling current window is the
-    classic latency mistake; offsetting both windows by the lag avoids it.
-    """
-    return f"DATEADD('day', -{int(days)}, DATEADD('hour', -{int(lag_hours)}, CURRENT_TIMESTAMP()))"
-
-
 # ---------------------------------------------------------------------------
 # Window-anchoring convention (review #9: "N days" must mean one thing):
 # - Rolling live scans over event streams anchor CURRENT_TIMESTAMP() when

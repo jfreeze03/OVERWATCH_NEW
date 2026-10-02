@@ -19,8 +19,8 @@ steady-state weekday at 59 statements (135 on Sundays) and reproduces the untrim
 shape. Python mirrors (``_probe_emulated``, ``_loop_emulated``, ``_pruned_rows_batched``) prove the skip
 decisions and the batched rows; the mirrors are tied to the SQL by the exact-text locks.
 
-The wave-tip pins at the bottom (the DEPLOYMENT/README list lines and the admin _EXPECTED_MIGRATIONS[158]
-entry) are written by the wave integrator; they fail until then.
+The lockstep at the bottom (the DEPLOYMENT/README list lines and the admin _EXPECTED_MIGRATIONS[158]
+entry, written by the wave integrator) locks this migration's own run-doc line and admin entry, never the tip.
 """
 
 from __future__ import annotations
@@ -1098,7 +1098,8 @@ def test_v158_plain_sql_parses():
 
 
 # ---------------------------------------------------------------------------------------------
-# wave-tip pins -- written by the wave integrator (validate floor, DEPLOYMENT/README lists, admin)
+# lockstep -- written by the wave integrator (DEPLOYMENT/README lists, admin); the validate tip is
+# derived in tests/test_release_lockstep.py
 # ---------------------------------------------------------------------------------------------
 def test_validate_and_docs_track_v158():
     for rel in ("DEPLOYMENT.md", "README.md"):

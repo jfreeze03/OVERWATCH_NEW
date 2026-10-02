@@ -127,11 +127,13 @@ def test_v0601_repeat_fingerprints_use_elapsed_with_degrade():
     wall-clock basis — family_repeat_fingerprints' TOTAL_ELAPSED_HOURS /
     AVG_ELAPSED_SEC previously stayed on exec time while the live twin used true
     elapsed, silently changing the materialization-candidate gate (>=0.5h) and
-    the 'Compute in repeats' KPI depending on which source served."""
+    the 'Compute in repeats' KPI depending on which source served.
+
+    v4.607: the repeat panel went live-only in cost-hunt3 and the then canary-only
+    family_repeat_fingerprints reader was deleted, so the mart-side half has no
+    reader left to lock; the caller label lock below still holds."""
     from app.data import mart27_sql
-    sql = mart27_sql.family_repeat_fingerprints(30, "ALFA")
-    assert sql.count("COALESCE(f.TOTAL_ELAPSED_SEC, f.TOTAL_EXEC_SEC)") == 2   # HOURS + AVG
-    assert "SUM(f.TOTAL_EXEC_SEC) / 3600.0" not in sql                         # exec basis gone
+    assert not hasattr(mart27_sql, "family_repeat_fingerprints")
     op = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "optimize.py").read_text(encoding="utf-8")
     assert "exec-time grain" not in op                                          # caller label updated
 

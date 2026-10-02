@@ -544,5 +544,9 @@ def test_keyed_gaps_list_every_source_that_does_not_cover_the_span():
     scoped = _run(_synthetic_frame(only="UNKNOWN", coverage=cov), company="UNKNOWN")
     assert scoped["keyed_gaps"] == out["keyed_gaps"]
     assert _run(None)["keyed_gaps"] == []
-    # the public helper agrees: with no coverage rows at all, every keyed line is a gap
-    assert showback.keyed_gaps(out["summary"], {}) == [t for t, _, _ in showback._SOURCE_LINES]
+    # with no rows in any keyed fact, every keyed line is a gap, in line order (v4.607: checked through
+    # company_showback, the entry point production uses; the keyed_gaps() wrapper had no caller)
+    bare = dict(_COVERAGE)
+    for t, _, _ in showback._SOURCE_LINES:
+        bare[t] = (None, None)
+    assert _run(_synthetic_frame(coverage=bare))["keyed_gaps"] == [t for t, _, _ in showback._SOURCE_LINES]

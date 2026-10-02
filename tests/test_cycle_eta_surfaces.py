@@ -1,6 +1,6 @@
 """Next-Fifty #36 wiring locks (source): tonight's projected finish and the cycle timeline reuse the reads the
-morning surfaces already make. Runs on both CI legs (the shaped AppTests in tests/test_prc_c2_shaped.py skip on
-the streamlit 1.52.2 floor), so every wiring claim is locked here by source too."""
+morning surfaces already make. Runs on both CI legs beside the shaped AppTests in
+tests/test_prc_c2_shaped.py, so every wiring claim is locked by source as well as by render."""
 
 from __future__ import annotations
 

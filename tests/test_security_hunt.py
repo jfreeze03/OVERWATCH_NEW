@@ -66,8 +66,9 @@ def test_breakglass_panel_reads_live_all_statements():
     tab = _SEC.split('# This panel asks "ALL statement volume', 1)[1].split("\n@safe_page", 1)[0]
     assert "security_sql.admin_role_activity(days, company, bounds=bounds)" in tab
     assert "admin_role_activity_fact" not in tab
-    # the change-only fact builder now warns against reuse behind an all-statements panel
-    assert "does NOT see SELECT/COPY/CALL" in (
+    # the change-only fact builder warned against reuse behind an all-statements panel; v4.607
+    # deleted it (canary-only, never wired), so it can no longer be reused at all
+    assert "def admin_role_activity_fact" not in (
         _ROOT / "app" / "data" / "security_sql.py").read_text(encoding="utf-8")
 
 

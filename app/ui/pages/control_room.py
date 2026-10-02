@@ -223,8 +223,9 @@ def _incident_declare_call_sql(title: str, severity: str, company: str, proposal
 
 
 def _incident_close_sql(incident_id: str, kind: str, note: str) -> str:
-    """Forward-only close: only OPEN/MITIGATED rows move; reopen is a NEW
-    incident with REOPENED_FROM — history never rewrites.
+    """Forward-only close: only OPEN/MITIGATED rows move — history never rewrites.
+    The app has no reopen: a recurrence is a NEW incident (INCIDENTS.REOPENED_FROM
+    exists for a hand-written SQL link, but nothing in the app sets it).
 
     Next-Fifty #12a (owner decision O-6): a close is also a first human response, so it
     back-fills ACK_AT / OWNER only when they are still empty (COALESCE keeps an earlier
@@ -817,9 +818,9 @@ def _freshness_board() -> None:
     res = run_mart_first(
         mart_sql.source_freshness_state(), mart_sql.source_freshness(),
         page=_PAGE, key="freshness",
-        mart_source="SOURCE_FRESHNESS_STATE (10-min snapshot)",
+        mart_source="SOURCE_FRESHNESS_STATE (stamped by each loader)",
         live_source="MART_SOURCE_FRESHNESS (aggregate view, pre-V040 fallback)",
-        mart_tier="recent", live_tier="recent")   # state moves every 10 min (r14 #13)
+        mart_tier="recent", live_tier="recent")   # state moves on every loader run (r14 #13)
     section_header("Telemetry freshness")
     if not res.ok:
         # R1-204 (the v4.605 kind split): "not installed" only for a true absence; a timeout or
@@ -985,12 +986,12 @@ def render() -> None:
         # sparkline are two FACT_QUERY_HOURLY reads at tier='hourly' — co-schedule them in
         # ONE round trip (mirrors the Operations Queries _mart_pf batch). Each keeps its run()
         # fallback below, so a None/failed prefetch member just re-reads serially.
-        _pulse_pf = (run_batch([
+        _pulse_pf = run_batch([
             {"key": "pulse", "sql": mart_sql.fact_query_window_summary(1, company, "", "", f["database"]),
              "source": "FACT_QUERY_HOURLY (mart, loaded hourly)"},
             {"key": "act", "sql": mart_sql.fact_daily_activity(14, company, f["database"]),
              "source": "FACT_QUERY_HOURLY (daily)"},
-        ], page=_PAGE, tier="hourly") or {}) if not f["schema_contains"] else {}
+        ], page=_PAGE, tier="hourly") if not f["schema_contains"] else {}
         if not f["schema_contains"]:
             m_pulse = _pulse_pf.get("pulse") or run(mart_sql.fact_query_window_summary(1, company, "", "", f["database"]),
                           page=_PAGE, key=f"pulse_fact_{company}", tier="hourly",
@@ -1175,7 +1176,7 @@ def render() -> None:
                                   expanded=False)
                         if hasattr(st, "status") else contextlib.nullcontext())
         with _load_status:
-            _live_pf = run_batch(_live_specs, page=_PAGE, tier="live") or {}
+            _live_pf = run_batch(_live_specs, page=_PAGE, tier="live")
         # Codex-review rec20: relabel the auto-completed status to a done state.
         if hasattr(_load_status, "update"):
             _load_status.update(label="Control Room loaded", state="complete")
@@ -1233,8 +1234,8 @@ def render() -> None:
             _inc_health = "ok"
         section_header("Incidents", _inc_health)
         exception_summary(_exc, "No open criticals, open incidents, or stale sources.")
-        # v4.50: the 90d lifecycle medians (MTTA/MTTR, reopen, compression,
-        # change-correlated) moved to Alerts > History — retrospective process
+        # v4.50: the 90d lifecycle medians (MTTA/MTTR and compression; reopen and
+        # change-correlated have since been removed) moved to Alerts > History — retrospective process
         # health, not morning triage. Open incidents now surfaces once, via the
         # exception summary above (OPEN_NOW), so the standalone KPI is dropped.
         oi = _live_pf.get("oi") or run(mart_sql.open_incidents(50, company, lifecycle=True), page=_PAGE,
@@ -1400,14 +1401,14 @@ def render() -> None:
                             log_ui_event("incident_declare", page=_PAGE)
                     stamp_write(_exec_key, _ok_all)  # C48: single stamp, both paths
         # Next-Fifty #12b: the attach / auto-mitigate sentence is claimed only once V154 is applied
-        # (schema-gated like operations._operator_identity_grain_available) — a deploy can land first.
+        # (schema-gated via the shared has_migration) — a deploy can land first.
         _loop_txt = (" With auto-declare on, later CRITICALs of an already-open family attach to it, and "
                      "an OPEN incident whose member alerts have all been resolved for an hour moves to "
                      "MITIGATED — closing stays human." if _v154_applied() else "")
         # V162 (Next-Fifty #39): SP_INCIDENT_AUTODECLARE skips the two identity rules -- claimed only once applied.
         _id_txt = (" Account-takeover and admin-grant alerts never auto-declare; declare them by hand."
                    if has_migration(162, _PAGE) else "")
-        st.caption("DBA-gated, audited, forward-only (reopen = new incident with REOPENED_FROM). "
+        st.caption("DBA-gated, audited, forward-only (no reopen: a recurrence is a new incident). "
                    "CRITICALs auto-declare hourly — one incident per dedupe family per 24h — "
                    "unless INCIDENT_AUTO_DECLARE_CRITICAL is off in Settings." + _loop_txt + _id_txt)
 

@@ -76,11 +76,12 @@ def downstream_dependents(edges: pd.DataFrame | None, root_fqn: str,
 
 
 def build_blast_radius(edges: pd.DataFrame | None, consumers: pd.DataFrame | None,
-                       root_fqn: str, *, window_days: int) -> pd.DataFrame:
+                       root_fqn: str) -> pd.DataFrame:
     """Downstream dependents joined to their OBSERVED consumer counts. A dependent
     never seen in ACCESS_HISTORY is MEASURED=False with QUERIES/USERS as NA — never a
     measured 0. Attention-first: measured (queried) dependents before un-queried, then
-    by query volume, then by depth. Empty in -> empty out; never raises."""
+    by query volume, then by depth. Empty in -> empty out; never raises. Applies no time window:
+    the consumer counts arrive already windowed (graph_sql.object_blast_consumers)."""
     deps = downstream_dependents(edges, root_fqn)
     if deps.empty:
         return deps
@@ -110,11 +111,11 @@ def build_blast_radius(edges: pd.DataFrame | None, consumers: pd.DataFrame | Non
 
 
 def blast_summary(edges: pd.DataFrame | None, consumers: pd.DataFrame | None,
-                  root_fqn: str, *, window_days: int) -> dict:
+                  root_fqn: str) -> dict:
     """Headline counts for the blast radius — all counts of RECORDED/OBSERVED facts,
     never a prediction. ``measured`` = dependents seen in ACCESS_HISTORY;
     ``observed_queries`` = total observed queries across those dependents."""
-    br = build_blast_radius(edges, consumers, root_fqn, window_days=window_days)
+    br = build_blast_radius(edges, consumers, root_fqn)
     if br.empty:
         return {"dependents": 0, "measured": 0, "unmeasured": 0,
                 "observed_queries": 0, "deepest_level": 0}

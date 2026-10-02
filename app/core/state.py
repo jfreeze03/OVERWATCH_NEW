@@ -56,9 +56,13 @@ def filters() -> dict:
         "environment": str(st.session_state["flt_environment"]),
         "days": resolve_window_days(window),
         "window": window,
-        # (start, end_exclusive) dates for the bounded 'Last month' window, else None.
-        # Builders that support it pass this to resolve_effective_window(..., bounds=...)
-        # to emit an explicit calendar range instead of the trailing today-anchored one.
+        # (start, end_exclusive) account-clock dates for the three calendar presets, else None
+        # (trailing windows). Only LAST_MONTH is a complete prior calendar month; CURRENT_MONTH /
+        # CURRENT_YEAR are partial period-to-date windows (first of period .. tomorrow-exclusive).
+        # Gate any "vs prior calendar month" comparison on date_windows.is_prior_month_window(bounds),
+        # never on `bounds is not None`. Builders that support it pass this to
+        # resolve_effective_window(..., bounds=...) to emit an explicit calendar range instead of
+        # the trailing today-anchored one.
         "bounds": window_bounds(window),
         "window_label": window_scope_label(window),
         "warehouse_contains": str(st.session_state["flt_warehouse_contains"]),
@@ -150,11 +154,9 @@ def consume_pending_navigation() -> None:
     from app.logic.navigate import remap_legacy_target
     _lp, _ls = remap_legacy_target(str(pending.get("page") or ""), str(pending.get("section") or ""))
     pending = {**pending, "page": _lp, "section": _ls}
-    # B6: reset the jump box ONLY when we actually consumed a jump. The old
-    # unconditional clear ran every rerun and erased the user's pick on the very
-    # rerun that delivered it (before _global_jump could read _ow_jump and fire
-    # request_navigation) — the whole Jump-to box was a silent no-op.
-    st.session_state["_ow_jump"] = None
+    # B6 (bug round 2) used to reset a fixed `_ow_jump` key here, after the early return
+    # above. Since C3 (v4.313) the Jump-to box is keyed `_ow_jump_{nonce}` and clears itself
+    # by remounting under a bumped nonce (main._global_jump), so there is nothing to reset.
     from app.logic.navigate import PAGE_SECTION_KEYS
 
     page = str(pending.get("page") or "")
@@ -210,12 +212,13 @@ def pop_nav_origin() -> None:
     st.session_state.pop("_ow_nav_origin", None)
 
 
-def navigation_context(*, consume: bool = False) -> dict:
-    """Return page-local identity carried by the most recent cross-page jump."""
-    value = dict(st.session_state.get("_ow_nav_context") or {})
-    if consume:
-        st.session_state.pop("_ow_nav_context", None)
-    return value
+def navigation_context() -> dict:
+    """Return page-local identity carried by the most recent cross-page jump.
+
+    Read-only: a destination that spends one key (an alert drawer's event_id, a filter
+    note, a deep-link fingerprint) strips just that key itself, so the other drill
+    identities alongside it survive."""
+    return dict(st.session_state.get("_ow_nav_context") or {})
 
 
 def requested_page(valid_pages: tuple[str, ...]) -> str | None:

@@ -86,7 +86,8 @@ def test_env_all_matches_company_options():
 
 
 def test_databases_for_agrees_with_the_sql_classifier():
-    # The picker list and the SQL environment_clause must never drift.
+    # The picker list and classify_environment (the rule V023's SQL PROD predicate is
+    # locked to) must never drift.
     for company in ("ALFA", "Trexis", "ALL"):
         for env in ("PROD", "NONPROD"):
             for db in databases_for(company, env):

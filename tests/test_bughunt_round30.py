@@ -6,8 +6,9 @@ The scoring/governance/anomaly finders' candidates were all refuted (page_verdic
 never supplied; governance NaN can't occur; C8 present-but-NULL unreachable).
 
 #1 (MED): fact_daily_spend_year() anchored the calendar-year window on session-tz CURRENT_DATE()
-   (UTC under SiS), so on New Year's Eve evening (America/Chicago) it already read Jan 1 and the
-   YTD chart went empty for ~6 hours. Fixed: DATE_TRUNC('year', account_today_sql()) — matching
+   (believed UTC under SiS at the time; the 2026-09-21 audit verified the account default TIMEZONE
+   is America/Chicago, so this is a latent edge for any non-Central session zone), where on New
+   Year's Eve evening (America/Chicago) it would read Jan 1 and empty the YTD chart. Fixed: DATE_TRUNC('year', account_today_sql()) — matching
    the MTD/quarter sibling builders.
 #2 (MED): the CURRENT_MONTH / CURRENT_YEAR presets computed their day OFFSET on the account clock
    (resolve_window_days -> account_today) but window_bounds() returned None for them, so they fell

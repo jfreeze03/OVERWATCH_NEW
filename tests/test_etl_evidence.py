@@ -22,7 +22,6 @@ from app.logic.etl_evidence import (
 )
 
 _TODAY = date(2026, 9, 28)
-_GIB = 1024 ** 3
 
 
 def _row(**over) -> dict:

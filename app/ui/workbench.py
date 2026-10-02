@@ -994,8 +994,8 @@ def _object_blast_radius_panel(key: str) -> None:
     # measured-vs-unmeasured split would over-state "unmeasured". Surface it like Declared dependents
     # does for its truncation (incident-hunt 2026-08-30).
     _cons_capped = measured_half and len(consumers_df) >= _BLAST_CONS_LIMIT
-    summary = lineage.blast_summary(edges.df, consumers_df, key, window_days=_BLAST_WINDOW_DAYS)
-    radius = lineage.build_blast_radius(edges.df, consumers_df, key, window_days=_BLAST_WINDOW_DAYS)
+    summary = lineage.blast_summary(edges.df, consumers_df, key)
+    radius = lineage.build_blast_radius(edges.df, consumers_df, key)
     kpi_row([
         {"label": "Declared dependents",
          "value": f"{summary['dependents']}" + (" (lower bound)" if edges.truncated else ""),

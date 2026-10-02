@@ -6,7 +6,7 @@ from __future__ import annotations
 from app.core.query import should_persist_telemetry
 from app.data import cost_sql, insights_sql, mart_sql
 from app.logic.sizing import normalize_size, shifted_size, simulate_scenario
-from app.ui.pages.alerts import RESOLUTION_KINDS, _lifecycle_sql
+from app.ui.pages.alerts import RESOLUTION_KINDS, _lifecycle_stmts
 
 # ---------------------------------------------------------------------------
 # Right-size what-if simulator (pure)
@@ -140,20 +140,20 @@ def test_org_month_shape():
 
 
 def test_resolve_embeds_valid_kind():
-    sql = _lifecycle_sql("evt-1", "RESOLVE", "fixed it", "ACTIONED")
+    sql = "\n".join(_lifecycle_stmts("evt-1", "RESOLVE", "fixed it", "ACTIONED"))
     assert "RESOLUTION_KIND = 'ACTIONED'" in sql
     assert "[ACTIONED] fixed it" in sql  # audit note carries the kind too
     assert "STATUS IN ('OPEN', 'ACK')" in sql  # can't resolve a resolved event
 
 
 def test_resolve_drops_invalid_kind():
-    sql = _lifecycle_sql("evt-1", "RESOLVE", "n", "SHRUG'); DROP TABLE X;--")
+    sql = "\n".join(_lifecycle_stmts("evt-1", "RESOLVE", "n", "SHRUG'); DROP TABLE X;--"))
     assert "RESOLUTION_KIND" not in sql
     assert "DROP TABLE" not in sql.replace("''", "")
 
 
 def test_ack_ignores_kind_and_gates_on_open():
-    sql = _lifecycle_sql("evt-1", "ACK", "seen", "ACTIONED")
+    sql = "\n".join(_lifecycle_stmts("evt-1", "ACK", "seen", "ACTIONED"))
     assert "RESOLUTION_KIND" not in sql
     assert "STATUS = 'OPEN'" in sql
 

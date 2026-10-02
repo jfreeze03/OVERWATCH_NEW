@@ -51,9 +51,16 @@ def test_all_window_fed_mart_readers_honor_the_long_window():
 
 def test_alfa_database_scope_includes_dba_maint_db():
     """Audit #9: classify_database says DBA_MAINT_DB is ALFA, but the ALFA
-    database_clause allowlist omitted it, so ALFA storage dropped it."""
+    database_clause allowlist omitted it, so ALFA storage dropped it.
+
+    v4.607: database_clause is gone (no caller since the MC-1 sweep); ALFA database
+    scope is COMPANY_FOR_DATABASE, whose COMPANY_SCOPE seed maps DBA_MAINT_DB to ALFA."""
     assert companies.classify_database("DBA_MAINT_DB") == "ALFA"
-    assert "DBA_MAINT_DB" in companies.database_clause("ALFA")
+    assert companies.database_company_scope("ALFA") == (
+        "DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME) = 'ALFA'")
+    v044 = (__import__("pathlib").Path(__file__).resolve().parents[2] / "snowflake" / "migrations"
+            / "V044__unknown_classification.sql").read_text(encoding="utf-8")
+    assert "'DATABASE' AS SCOPE_TYPE, 'DBA_MAINT_DB' AS PATTERN, 'ALFA' AS COMPANY" in v044
 
 
 def test_cache_hit_rate_denominator_is_successful_queries():

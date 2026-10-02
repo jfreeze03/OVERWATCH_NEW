@@ -7,8 +7,9 @@ Throughout, `<recipient>` means the destination address you want, e.g.
 
 ## What actually sends these emails
 
-OVERWATCH's primary alert channel is the **Teams webhook** (`OVERWATCH_WEBHOOK`
-notification integration). Email is a **separate, opt-in** path defined in
+OVERWATCH's primary alert channel is the **Teams webhook** (the
+`OVERWATCH_WEBHOOK_TEAMS` notification integration, named by an `ALERT_ROUTES`
+row). Email is a **separate, opt-in** path defined in
 [`snowflake/native_alert_templates.sql`](../snowflake/native_alert_templates.sql):
 four native Snowflake `ALERT` objects that call `SYSTEM$SEND_EMAIL` through an
 email notification integration named **`OVERWATCH_EMAIL`**. Three of them are
@@ -74,9 +75,13 @@ the escalation email off, blank `ESCALATE_EMAIL_INTEGRATION` in **Admin > Settin
   proc owner lost `USAGE` on it — `APP_ERROR_LOG` shows `escalation_email_failed`
   (page `NotifyWebhook`) and Alerts > Native delivery warns. Or escalation was turned
   off: `ESCALATE_AFTER_MIN` 0, or `ESCALATE_EMAIL_INTEGRATION` blank.
+- A teardown or full rebuild ran: `teardown.sql` (and so `snowflake/rebuild/01`)
+  drops the four alerts **and** the `OVERWATCH_EMAIL` integration, and no
+  migration re-creates either. Re-create both (docs/FULL_REBUILD.md step 7b).
 
 Note: the alerts are `ALERT` objects, **not** tasks and **not** part of the
-numbered migrations — task-graph or migration changes do not affect them.
+numbered migrations — task-graph or migration changes do not affect them, but
+`teardown.sql` drops them (above).
 
 ## Diagnose
 
@@ -98,8 +103,18 @@ SELECT NAME, SCHEDULED_TIME, STATE, SQL_ERROR_MESSAGE
 
 ## Pre-flight before RESUME
 
-Any row these return will email **hourly** until it is fixed, so they must come back
-empty before you resume the dead-man alerts:
+Check these before you resume the dead-man alerts:
+
+- **(1) must come back empty**: every stale source re-emails hourly until it is fixed.
+- **(2)** lists loader and Teams/webhook failures from the last 24h. The alerts email
+  each one only once, and only if it was logged after the alert's last successful
+  evaluation; right after the CREATE OR REPLACE in Step 3 that means only rows from
+  the last hour. Treat older rows as chronic failures to fix, not as hourly email.
+  `escalation_email_failed` and `escalation_failed` rows are never emailed by these
+  alerts, so the query leaves them out.
+- **(3) must show** a SUCCEEDED `TASK_ALERT_SCAN` run in the last 3h, and a SUCCEEDED
+  `TASK_ALERT_NOTIFY` run too if any `ALERT_ROUTES` row is ENABLED; otherwise the
+  heartbeat alert emails hourly.
 
 ```sql
 -- (1) Sources that would email now
@@ -112,14 +127,15 @@ SELECT SOURCE_NAME, LAST_LOAD_TS,
        > IFF(SOURCE_NAME LIKE '%DAILY%' OR SOURCE_NAME LIKE '%METERING%', 30.0, 3.0)
  ORDER BY 3 DESC;
 
--- (2) Chronic loader-failure / delivery-failure types in the last 24h
+-- (2) Loader-failure / delivery-failure rows the alerts email, last 24h
 SELECT ERROR_TYPE, PAGE, COUNT(*) AS N_24H, MAX(LOGGED_AT) AS LAST_AT,
        ANY_VALUE(LEFT(ERROR_MESSAGE, 160)) AS SAMPLE_MSG
   FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
  WHERE LOGGED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
    AND (ERROR_TYPE IN ('mart_load_failed', 'fact_load_failed', 'extract_load_failed',
                        'cloud_svc_mart_failed', 'object_cost_load_failed')
-        OR PAGE = 'NotifyWebhook')
+        OR (PAGE = 'NotifyWebhook'
+            AND ERROR_TYPE IN ('route_send_failed', 'undelivered_expired', 'webhook_run_failed')))
  GROUP BY 1, 2 ORDER BY 3 DESC;
 
 -- (3) Heartbeat ground truth

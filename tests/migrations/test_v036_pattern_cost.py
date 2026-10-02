@@ -45,9 +45,11 @@ def test_monthly_boss_chart_mart_first_and_honest():
     m = mart27_sql.monthly_spend_by_warehouse(12, "ALFA")
     assert "MART_WAREHOUSE_EFFICIENCY_DAILY" in m
     assert "(c.COMPANY = 'ALFA' OR UPPER(c.COMPANY) = 'ALL')" in m
-    live = mart27_sql.live_monthly_spend_by_warehouse(12, "ALFA")
-    assert "WAREHOUSE_METERING_HISTORY" in live
-    assert "COMPANY_FOR_WAREHOUSE(g.WAREHOUSE_NAME)" in live     # UDF outside aggregation
+    # v4.607: the 13-month live WMH fallback (live_monthly_spend_by_warehouse) was replaced by
+    # the FACT_WAREHOUSE_DAILY rollup in r14 #5 and then deleted as canary-only.
+    assert not hasattr(mart27_sql, "live_monthly_spend_by_warehouse")
+    fact = mart27_sql.fact_monthly_spend_by_warehouse(12, "ALFA")
+    assert "FACT_WAREHOUSE_DAILY" in fact and "COMPANY = 'ALFA'" in fact
     ov = (_ROOT / "app" / "ui" / "pages" / "overview.py").read_text(encoding="utf-8")
     assert "Monthly spend by warehouse" in ov
     assert 'key=f"ov_monthly_{company}"' in ov
@@ -57,5 +59,5 @@ def test_monthly_boss_chart_mart_first_and_honest():
     # C38: the in-flight month dims via the shared provisional mark-grammar helper
     assert '_provisional_opacity("_PARTIAL")' in ch               # dimmed in-flight month
     canary = (_ROOT / "app" / "data" / "canary.py").read_text(encoding="utf-8")
-    for name in ("monthly_spend_by_warehouse", "live_monthly_spend_by_warehouse", "pattern_cost"):
+    for name in ("monthly_spend_by_warehouse", "fact_monthly_spend_by_warehouse", "pattern_cost"):
         assert f"mart27_sql.{name}" in canary, name

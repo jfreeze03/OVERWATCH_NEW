@@ -24,7 +24,9 @@
 -- read the alerts' state/history; if an alert already exists under another owner, DROP it
 -- as that owner first. Re-running CREATE OR REPLACE leaves every alert SUSPENDED — resume
 -- all four at the bottom. PRE-FLIGHT: run the pre-flight SELECTs in
--- docs/EMAIL_RECIPIENT_RUNBOOK.md first; any row they return will email hourly until fixed.
+-- docs/EMAIL_RECIPIENT_RUNBOOK.md first: a stale source or a lost scan heartbeat re-emails
+-- hourly until fixed, while a loader or delivery failure row emails once, at the first
+-- evaluation after it is logged.
 --
 -- The action blocks use Snowflake Scripting: Snowsight runs them as written; in SnowSQL wrap
 -- each THEN block in EXECUTE IMMEDIATE $$ ... $$. If an account rejects
@@ -106,7 +108,8 @@ IF (EXISTS (
            || COALESCE(' - ' || LEFT(h.LAST_ERROR, 240), '') || ')' AS DETAIL
     FROM (SELECT 'TASK_ALERT_SCAN' AS TASK_NAME
           UNION ALL
-          -- notify only runs when a delivery route exists (V018 leaves it suspended otherwise)
+          -- notify is resumed with the hourly tree since V071; it is only expected to
+          -- succeed (and only checked) when an ALERT_ROUTES row is enabled
           SELECT DISTINCT 'TASK_ALERT_NOTIFY' FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES WHERE ENABLED) t
     LEFT JOIN (
         SELECT NAME,

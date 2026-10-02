@@ -721,8 +721,8 @@ _EXPECTED_MIGRATIONS = {
          "from V154) never declares for either rule. Seeds the 2 rules. No task change, no apply-time run",
     163: "Per-user AI runaway and Trust Center regression alerts, nightly (SP_ALERT_SCAN_DAILY re-derived from "
          "V160): counting arms [28] COST_AI_USER_RUNAWAY (one user's AI credits on a complete day above 2x "
-         "COCO_DAILY_CAP_CREDITS and at least 3.5 robust-z above their own prior 90 active days; fewer than 5 "
-         "such days = the cap alone; HIGH) and [29] SEC_TRUST_REGRESSION (a CRITICAL or HIGH Trust Center "
+         "COCO_DAILY_CAP_CREDITS and at least 3.5 robust-z above their own active days in the prior 90 days; "
+         "fewer than 5 such days = the cap alone; HIGH) and [29] SEC_TRUST_REGRESSION (a CRITICAL or HIGH Trust Center "
          "scanner's at-risk count up against its previous snapshot day; HIGH); SEC_FAILED_LOGINS now says "
          "whether the day had a successful login; tally 12 -> 14. Seeds the 2 rules and the AI_RUNAWAY_ROBUST_Z "
          "/ AI_RUNAWAY_INCLUDE_FUNCTIONS settings. No task change, no apply-time run",
@@ -996,7 +996,8 @@ def _settings_tab(is_operator: bool) -> None:
             if ok:
                 st.caption("New value takes effect within one cache cycle (≤5 min) or after Refresh.")
     else:
-        st.caption("Executing requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS; anyone can copy the SQL for review.")
+        st.caption("Saving in the app is limited to operators (config OPERATOR_USERS); "
+                   "anyone can copy the SQL for review.")
 
 
 def _migrations_tab() -> None:
@@ -1069,9 +1070,9 @@ def _migrations_tab() -> None:
     fresh = run_mart_first(
         mart_sql.source_freshness_state(), mart_sql.source_freshness(),
         page=_PAGE, key="adm_freshness",
-        mart_source="SOURCE_FRESHNESS_STATE (10-min snapshot)",
+        mart_source="SOURCE_FRESHNESS_STATE (stamped by each loader)",
         live_source="MART_SOURCE_FRESHNESS (aggregate view, pre-V040 fallback)",
-        mart_tier="recent", live_tier="recent")   # state moves every 10 min (r14 #13)
+        mart_tier="recent", live_tier="recent")   # state moves on every loader run (r14 #13)
     if guard(fresh, "Freshness view empty — have the loader tasks run yet?",
              setup_hint="Tasks resume at the end of V004 — switch on Task health below to see which "
                         "are suspended or failing."):
@@ -1303,7 +1304,7 @@ def _self_cost_tab() -> None:
          "source": "QUERY_HISTORY (WH_ALFA_ADMIN; app vs tasks by tag/marker)"},
         {"key": "self_queue", "sql": mart_sql.app_warehouse_queue_by_hour(14),
          "source": "QUERY_HISTORY (WH_ALFA_ADMIN, QUEUED_OVERLOAD_TIME by hour)"},
-    ], page=_PAGE, tier="historical") or {}
+    ], page=_PAGE, tier="historical")
     section_header("App vs tasks on the shared warehouse (14d)", "", "cost")
     res = _pf.get("self_cost") or run(mart_sql.app_self_cost(14), page=_PAGE, key="self_cost", tier="historical",
                                       source="QUERY_HISTORY (WH_ALFA_ADMIN; app vs tasks by tag/marker)")
@@ -1928,7 +1929,10 @@ def _canary_tab() -> None:
         "ACCOUNT_USAGE column drift or missing OVERWATCH objects before a user does. "
         "Execute mode runs each statement with a 1-row cap; compile-only wraps each "
         "in EXPLAIN — same drift coverage for column/object errors, no data scanned. "
-        "Failures are logged to APP_ERROR_LOG."
+        "A timeout, privilege error or other failure is also logged to APP_ERROR_LOG. A missing "
+        "column, a missing object or an unknown function (the drift this canary catches) is not "
+        "logged: the ERROR column below is its only record, and it lasts only for this session, "
+        "so copy it."
     )
     panel_help(
         "Runs every registered SQL builder against the live account to catch ACCOUNT_USAGE "

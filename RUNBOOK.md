@@ -10,7 +10,7 @@ troubleshooting, and disaster recovery.
 that watches this Snowflake account's cost, performance, pipelines, and
 governance for the two companies sharing it (ALFA and Trexis). Hourly tasks
 copy ACCOUNT_USAGE telemetry into small fact tables; hourly and daily scans
-raise alert events against ~30 rules and push them to webhooks; the daily scans
+raise alert events against ~45 rules and push them to webhooks; the daily scans
 catch anomalies, regressions, and drift; the app renders it all with honest
 labels and generates (never silently executes) the SQL to fix what it finds.
 
@@ -19,24 +19,39 @@ labels and generates (never silently executes) the SQL to fix what it finds.
 ## 1. Ten-minute orientation
 
 - **Brief** is the one-scroll morning page (numbers, fires, asks); **Overview** loads the executive board (one cached mart
-  query): spend vs budget, month-end forecast, alerts, platform score, top
-  actions.
+  query): MTD spend vs last month, month-end forecast, alerts, platform
+  score, top actions.
 - **Control Room** is the DBA morning page: triage queue, freshness,
   incident timeline, spend movers.
-- The **sidebar health strip** (every page) shows open criticals, stalest
-  telemetry hours, and MTD credits.
-- The **top filter strip** scopes almost every panel: Company (ALFA default),
-  Environment, Window days, Database, and contains-filters for warehouse /
-  user / schema. Filters match literally (`WH_` = literal underscore).
+- The **status strip** at the top of Overview shows account-wide open
+  criticals, undelivered criticals, telemetry age (the stalest source) and
+  MTD credit spend. Brief renders the same signals in its body, with open
+  criticals scoped to the selected company plus account-level events; the
+  other pages do not repeat it (owner 2026-08-14).
+- The **top filter strip** scopes almost every panel: Company (ALFA
+  default), Date range, Database, and More (contains-filters for warehouse /
+  user / schema), plus Reset. Filters match literally (`WH_` = literal
+  underscore).
 - Pages use **section pills** (only the active section runs its queries) and
   every table has a CSV download. `?page=` and `?section=` are shareable.
-- **💾 Views** (in the filter strip) saves page+section+filters per user,
-  sets a default landing view, and a display timezone.
+- **Saved preferences:** a saved default landing view, density and display
+  timezone still hydrate at startup from USER_PREFS (the in-strip Views
+  editors were dropped in v4.157.0); the sidebar **Audit detail** toggle
+  saves the presentation mode.
 - Roles: access is **SNOW_ACCOUNTADMINS** and **SNOW_SYSADMINS**, nothing
   else (owner decision 2026-07-13; the old monitor/operator layer is
-  retired). Both map to the DBA navigation profile; in-app execution is
-  always behind a typed confirmation and always audited. The app itself
-  runs with owner's rights — see DEPLOYMENT.md §2.
+  retired). Under SiS the navigation profile follows the viewer (`st.user`
+  mapped through `config.VIEWER_PROFILES`; an unmapped viewer gets the
+  read-only READER profile). Operator actions (viewers on
+  `config.OPERATOR_USERS`; account-object ALTERs are re-checked in the
+  executor) always show the SQL first. Reversible saves to OVERWATCH's own
+  tables (alert ACK and snooze, action create/save, ownership and watchlist
+  edits) are one click; classifying or account-touching writes (alert
+  resolve and bulk actions, incident declare / mitigate / close, warehouse
+  and emergency levers, SETTINGS edits) need a typed confirmation. Alert
+  lifecycle actions write ALERT_AUDIT and levers write REMEDIATION_LOG (both
+  append-only). The app itself runs with owner's rights — see DEPLOYMENT.md
+  §2.
 
 ## 2. Architecture
 
@@ -49,30 +64,45 @@ pages read facts first and fall back to bounded live ACCOUNT_USAGE queries
 with the source always labeled under the table ("mart" vs "live fallback").
 
 **Query engine** (`app/core/query.py`):
-- Four cache tiers (TTL seconds / statement timeout seconds):
-  live 30/30 · recent 300/120 · historical 3600/180 · metadata 14400/30.
-- Cache key = SQL text + current role + refresh salt. Errors are never
-  cached (cached functions raise; Streamlit does not cache exceptions).
+- Five cache tiers (TTL seconds / statement timeout seconds):
+  live 30/30 · recent 300/120 · hourly 3600/120 · historical 3600/180 ·
+  metadata 14400/30.
+- Cache key = SQL text + role + refresh salt + the domain salts of the
+  tables the SQL reads (+ the viewer for USER_PREFS / CURRENT_USER() reads).
+  Errors are never cached (cached functions raise; Streamlit does not cache
+  exceptions).
 - Row caps fetch n+1 rows and banner truncation; nothing is silently cut.
 - `run_batch()` submits a section's queries server-side async in parallel;
   any failure falls back to serial per-query calls.
 - "Refresh data" (sidebar) bumps the salt = full cold reload for you only.
 
 **Company scoping** (`app/companies.py`, mirrored in the `COMPANY_SCOPE`
-table with a sync test): Trexis = the four `WH_TRXS_*` warehouses,
-`TRXS_*` databases, `TRXS_*` users; ALFA = everything else; user `KEBARR1`
+table with a sync test): Trexis = `COMPANY_SCOPE` mapping rows, the
+`WH_TRXS_*` warehouses / `TRXS_*` databases, and users holding `%TRXS%`
+roles. ALFA needs evidence too (V044): `WH_ALFA_*` warehouses,
+`ALFA%` / `ADMIN` (and the app's own `DBA_MAINT_DB`) databases, `%ALFA%` or
+DBA roles. Everything else classifies **UNKNOWN** (never NULL) and surfaces
+on Cost Intelligence → Spend & Attribution (Unmapped entities) until a
+`COMPANY_SCOPE` row maps it, so nothing silently bills ALFA. User `KEBARR1`
 holds both companies' roles and is classified **ALFA** by explicit
 override. This is a convenience scope on a shared account, not a security
-boundary — Snowflake roles are the security boundary.
+boundary. Who can open the app is USAGE on the Streamlit object
+(SNOW_ACCOUNTADMINS + SNOW_SYSADMINS); inside it every query runs with the
+owner's rights, so page visibility (`config.VIEWER_PROFILES`) and writes
+(`config.OPERATOR_USERS`) are keyed on the viewer.
 
 **Honesty contracts** enforced by tests: no synthetic data anywhere; empty
 states say why and what would fill them; estimated vs verified savings
 never mix; every AI output is grounded in rows shown to it; every panel
 labels its source and lag.
 
-**Streamlit-in-Snowflake specifics:** each viewer runs under their own
-role. `ALTER SESSION` is not available to the app (capability detected at
-connect). Streamlit-in-Snowflake stamps every statement the app runs with its own
+**Streamlit-in-Snowflake specifics:** OVERWATCH is an owner's-rights app:
+every query runs with the app owner's privileges (`CURRENT_USER()` /
+`CURRENT_ROLE()` are the owner's). The viewer's identity (`st.user`, mapped
+through `config.VIEWER_PROFILES`; an unresolved viewer fails closed to the
+least-privilege profile) selects only the navigation profile and the
+operator gate. `ALTER SESSION` is not available to the app (capability
+detected at connect). Streamlit-in-Snowflake stamps every statement the app runs with its own
 QUERY_TAG naming the app (`"StreamlitName":"DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP"`) and
 overrides any per-statement tag, so OVERWATCH's self-traffic filters key on that tag.
 Reads are bounded by the warehouse STATEMENT_TIMEOUT_IN_SECONDS; Cortex evaluations also
@@ -82,7 +112,10 @@ and all tasks run on the dedicated XSMALL warehouse **WH_ALFA_ADMIN**
 
 ## 3. Install / upgrade
 
-Run in order as a DBA role (SNOW_SYSADMINS unless noted):
+Run in order as the deployment role, **SNOW_ACCOUNTADMINS** (or
+SNOW_SYSADMINS only if it can create the warehouse and grants — and, on a
+fresh install, V002's OVERWATCH_RM resource monitor, which V045 drops; see
+DEPLOYMENT.md §1):
 
 | Migration | Creates |
 |---|---|
@@ -119,7 +152,9 @@ App files deploy to the dedicated stage
 see DEPLOYMENT.md for the manual PUT path). V017 also inaugurates the
 version guard: each migration refuses to run if its predecessor is missing.
 
-Then `roles.sql` (idempotent; re-run after every upgrade) and
+Then `roles.sql` as **SNOW_ACCOUNTADMINS** (GRANT IMPORTED PRIVILEGES on
+the SNOWFLAKE database needs ACCOUNTADMIN-tier; idempotent; re-run after
+every upgrade) and
 `validate.sql` (every row should read OK). Deploy the app with
 `snow streamlit deploy --replace`, from a clean, committed tree: it ships
 `snowflake.yml`'s artifacts as they are on disk, including the two
@@ -156,21 +191,46 @@ must both read 0. If the worksheet stops early (a timeout or Stop), run its
 
 ## 4. Scheduled automation (all times America/Chicago)
 
-| Task | Schedule | Calls | Writes |
+| Task | Schedule / predecessor | Calls | Writes |
 |---|---|---|---|
-| TASK_LOAD_HOURLY | :07 hourly | SP_LOAD_HOURLY_FACTS | FACT_QUERY_HOURLY + hourly-grain facts |
-| TASK_REFRESH_EXEC_BOARD | after hourly load | SP_REFRESH_EXEC_BOARD | MART_EXEC_BOARD |
-| TASK_ALERT_SCAN | after hourly load | SP_ALERT_SCAN (hourly rules) | ALERT_EVENTS |
-| TASK_ALERT_SCAN_DAILY | after daily load + reconcile | SP_ALERT_SCAN_DAILY (daily rules, split out V062) | ALERT_EVENTS |
-| TASK_ALERT_NOTIFY | after scan (opt-in resume) | SP_NOTIFY_WEBHOOK | webhook sends, NOTIFIED_AT; V164: CRITICAL escalations (ALERT_EVENTS.ESCALATED_AT + one ALERT_AUDIT ESCALATE row each; re-post + OVERWATCH_EMAIL email, §19) |
-| TASK_LOAD_DAILY | 06:45 daily | SP_LOAD_DAILY_FACTS | daily facts |
-| TASK_ANOMALY_SWEEP | 07:00 daily | SP_ANOMALY_SWEEP (v2) | anomaly + (Mon) drift events |
+| TASK_LOAD_HOURLY | :07 hourly (hourly root) | SP_LOAD_HOURLY_FACTS | FACT_WAREHOUSE_DAILY (warehouse metering) |
+| TASK_QH_EXTRACT | after TASK_LOAD_HOURLY | SP_LOAD_QH_EXTRACT(0) | OW_QH_EXTRACT (staged QUERY_HISTORY) + FACT_QUERY_HOURLY / FACT_QUERY_DAILY + MART_CLOUD_SVC_DAILY (via SP_LOAD_CLOUD_SVC_MART) |
+| TASK_REFRESH_EXEC_BOARD | after TASK_QH_EXTRACT (V071) | SP_REFRESH_EXEC_BOARD | MART_EXEC_BOARD |
+| TASK_ALERT_SCAN | after TASK_QH_EXTRACT (V071) | SP_ALERT_SCAN (hourly rules) | ALERT_EVENTS |
+| TASK_ALERT_NOTIFY | after TASK_ALERT_SCAN | SP_NOTIFY_WEBHOOK | webhook sends, NOTIFIED_AT; V164: CRITICAL escalations (ALERT_EVENTS.ESCALATED_AT + one ALERT_AUDIT ESCALATE row each; re-post + OVERWATCH_EMAIL email, §19) |
+| TASK_LOAD_MARTS_V27_HOURLY | after TASK_QH_EXTRACT | SP_LOAD_MARTS_V27('HOURLY', 2) | the V027+ mart family (query families, cost allocation, task graph, security posture, …; compile diet below) |
+| TASK_OPS_DIAG_HOURLY | after TASK_QH_EXTRACT | SP_LOAD_OPS_DIAG(2) | MART_OPS_DIAG_HOURLY |
+| TASK_LOAD_SECURITY_FACTS | after TASK_LOAD_MARTS_V27_HOURLY | SP_LOAD_SECURITY_FACTS(3) | FACT_SECURITY_LOGIN_DAILY, FACT_SECURITY_CHANGE, SECURITY_TRUST_SNAPSHOT |
+| TASK_SLO_BREACH_SCAN | after TASK_LOAD_MARTS_V27_HOURLY | SP_SLO_BREACH_SCAN | ALERT_EVENTS (PERF_SLO_BREACH, §12) |
+| TASK_INCIDENT_AUTODECLARE | after TASK_LOAD_HOURLY | SP_INCIDENT_AUTODECLARE | INCIDENTS + INCIDENT_MEMBERS (§21) |
+| TASK_CHANGE_ATTRIBUTION | after TASK_LOAD_HOURLY | SP_CHANGE_ATTRIBUTION | WAREHOUSE_CHANGE_REGISTRY.CHANGED_BY (CHANGE_SOURCE is derived from it on read, §21) |
+| TASK_LOAD_DAILY | 06:45 daily (daily root) | SP_LOAD_DAILY_FACTS | daily facts (metering, tasks, logins, storage) |
+| TASK_NIGHTLY_RECONCILE | after TASK_LOAD_DAILY | SP_NIGHTLY_RECONCILE | re-loads the last 3 days of facts and marts (late-arriving ACCOUNT_USAGE rows) |
+| TASK_LOAD_MARTS_V27_DAILY | after TASK_NIGHTLY_RECONCILE (V071) | SP_LOAD_MARTS_V27('DAILY', 3) | the daily-grain marts |
+| TASK_PLATFORM_SCORE_DAILY | after TASK_NIGHTLY_RECONCILE (V071) | SP_LOAD_PLATFORM_SCORE(30) | FACT_PLATFORM_SCORE_DAILY |
+| TASK_ALERT_SCAN_DAILY | after TASK_NIGHTLY_RECONCILE (V071) | SP_ALERT_SCAN_DAILY (daily rules, split out V062) | ALERT_EVENTS |
+| TASK_LOCK_WAIT_DAILY | after TASK_LOAD_DAILY | SP_LOAD_LOCK_WAIT_MART(3) | MART_LOCK_WAIT_DAILY |
+| TASK_PATTERN_COST_DAILY | after TASK_LOAD_DAILY | SP_LOAD_PATTERN_COST(3) | MART_PATTERN_COST_DAILY |
+| TASK_LOAD_STORAGE_TRUTH | 06:30 daily | SP_LOAD_STORAGE_TRUTH(3) | FACT_STORAGE_ACCOUNT_DAILY |
+| TASK_WAREHOUSE_CHANGE_SCAN | 06:40 daily | SP_WAREHOUSE_CHANGE_SCAN | WAREHOUSE_CONFIG_SNAPSHOT + WAREHOUSE_CHANGE_REGISTRY + WH_CHANGE_REGRESSION events |
+| TASK_LEDGER_AUTOBOOK | after TASK_WAREHOUSE_CHANGE_SCAN | SP_LEDGER_AUTOBOOK | SAVINGS_LEDGER (auto-booked warehouse changes, §9) |
+| TASK_LOAD_OBJECT_COST | 06:45 daily | SP_LOAD_OBJECT_COST(3) | FACT_OBJECT_COST_DAILY |
 | TASK_CHANGE_IMPACT_SCAN | 06:50 daily | SP_CHANGE_IMPACT_SCAN | OBJECT_CHANGE_REGISTRY + regression events |
+| TASK_LOAD_APP_COST | 06:55 daily | SP_LOAD_APP_COST(3) | FACT_APP_COST_DAILY |
+| TASK_ANOMALY_SWEEP | 07:00 daily | SP_ANOMALY_SWEEP (v3) | ALERT_EVENTS: COST_ANOMALY_SWEEP (Cortex-explained DETAIL), PIPE_DT_FAILURES, COST_ORG_ACCOUNT_CREEP, PIPE_VOLUME_DROP, DQ_BREACH, DQ_SCHEMA_DRIFT (via SP_SCAN_SCHEMA_DRIFT, + DQ_SCHEMA_SNAPSHOT) and COST_CLOUD_SVC_ANOMALY (via SP_SCAN_CLOUD_SVC_ANOMALY) + (Mon) PERF_FINGERPRINT_DRIFT |
+| TASK_LOAD_TABLE_STORAGE | 07:10 daily | SP_LOAD_TABLE_STORAGE_MART(14) | MART_TABLE_STORAGE_DAILY |
 | TASK_DAILY_DIGEST | 07:20 daily | SP_DAILY_DIGEST | DAILY_DIGEST (Cortex) |
+| TASK_LOAD_QUERY_OPERATOR_STATS | 07:20 daily | SP_LOAD_QUERY_OPERATOR_STATS(30) | FACT_QUERY_OPERATOR_STATS_DAILY |
 | TASK_VERIFY_SAVINGS | 07:40 1st of month | SP_VERIFY_IDLE_SAVINGS | SAVINGS_LEDGER verifications |
 | TASK_PURGE_FACTS | 05:20 1st of month | SP_PURGE_FACTS | deletes beyond retention |
+| TASK_PURGE_QUERY_TELEMETRY | 06:20 1st of month | inline DELETE (no proc) | APP_QUERY_TELEMETRY rows older than 90 days |
 | ~~TASK_BACKUP_OPERATOR~~ | retired V161 | ~~SP_BACKUP_OPERATOR_TABLES~~ | none: scheduled operator backups were removed (Time Travel + manual clones, §16) |
 | TASK_CANARY_SENTINEL | 05:30 Mondays | SP_CANARY_SENTINEL | CANARY_RESULTS + OPS_CANARY_FAIL |
+
+These are the 32 tasks the migrations leave live: `ops_sql.OVERWATCH_TASKS`,
+`snowflake/task_audit.sql`'s expected set and `tests/test_task_set_contract.py`
+are the machine-checked list. The opt-in scripts add TASK_ALERT_DRILL
+(`alert_drill.sql`) and TASK_REFRESH_ML_FORECAST (`ml_forecast_option.sql`).
 
 **Notes on the automation:** the Monday 05:30 sentinel deliberately leads
 the morning batch, so its warehouse resume is shared, not extra. Its
@@ -194,7 +254,11 @@ Tasks-on-cadence objective and Tasks ▸ SLA leave the retired task out (its
 TASK_HISTORY rows would otherwise read "silently stopped" for up to 90 days).
 
 `SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;` — every state should be
-`started` except TASK_ALERT_NOTIFY before its integration exists.
+`started`. Since V071 the migrations resume TASK_ALERT_NOTIFY with the rest
+of the hourly tree whether or not a delivery integration exists (it sends
+only through enabled ALERT_ROUTES rows), so a suspended notifier means
+someone suspended it; Admin ▸ Migrations & freshness ▸ Task health still
+grades it "Suspended (expected)" rather than failing.
 
 **Loader compile diet (V159):** two hourly procs skip work instead of
 recompiling a heavy ACCOUNT_USAGE statement every hour. The hourly
@@ -226,8 +290,15 @@ Admin → Settings, never in code.
 ### Overview
 - **Window spend** — billed credits in the filter window × rate. Source:
   FACT_METERING_DAILY; live fallback METERING_DAILY_HISTORY (lags ≤24h).
-- **MTD vs budget** — month-to-date billed $ vs `MONTHLY_BUDGET_USD`
-  (0 = "not configured"; the KPI never invents a denominator).
+- **MTD credit spend vs last month** — account-wide month-to-date billed $
+  (today included). The delta compares the same number of completed days
+  (today excluded) against the prior month; no configuration is needed
+  (owner 2026-07-13: no monthly-budget KPI). When the prior month has no
+  daily facts the card reads plain "MTD credit spend" with no delta. A set
+  `MONTHLY_BUDGET_USD` adds a "% of budget" note to this card's help, and a
+  separate **Pace vs budget calendar** card (signed variance vs the budget's
+  straight-line expected-to-date, completed days only) appears only when
+  `MONTHLY_BUDGET_USD` > 0.
 - **Projected month-end** — see §7 Forecast engines. Shown with its band
   and the engine named in the help text.
 - **Open alerts** — COUNT of OPEN `ALERT_EVENTS` by severity.
@@ -248,24 +319,40 @@ Admin → Settings, never in code.
   numbers above.
 
 ### Control Room
-- **Triage queue** — one ranked list built from open alerts + task
-  failures + spend anomalies; rank = severity weight then recency
-  (`logic/actions.triage_queue`). Failed tasks show their DATABASE.
-- **Telemetry freshness** — `MART_SOURCE_FRESHNESS`: hours since each fact
-  loaded; >26h is stale (daily facts legitimately lag up to ~24h + load).
-- **Incident correlation timeline** — 7 days of alerts + task failures +
-  DDL on one axis; click a row → everything ±30 minutes.
-- **Spend movers** — window vs prior window per warehouse
-  (`warehouse_window_vs_prior`, lag-offset so both windows are complete).
+Sections: Action Center · Pulse · Incidents & triage · Timeline & movers ·
+Freshness & replay · Entity 360.
+- **Triage queue** (Incidents & triage) — one ranked list built from open
+  alerts + task failures + spend anomalies; rank = severity weight then
+  recency (`logic/actions.triage_queue`). Failed tasks show their DATABASE.
+- **Telemetry freshness** (Freshness & replay) — reads
+  `SOURCE_FRESHNESS_STATE` (each loader stamps its own row on a successful
+  load; the `MART_SOURCE_FRESHNESS` view is the pre-V040 fallback). A source
+  is STALE past 30h when its name contains DAILY or METERING, and past 3h
+  otherwise (`THRESHOLDS`; the same rule as the status strip, Admin's
+  freshness list and OPS_PIPELINE_DEGRADED); a never-loaded source reads NOT
+  LOADED. The board shows the counts; the per-source hours table is on
+  Admin ▸ Migrations & freshness.
+- **Incident correlation timeline** (Timeline & movers) — 7 days of alerts +
+  task failures + DDL on one axis; click a row → everything ±30 minutes.
+- **Spend movers** (Timeline & movers) — window vs prior window per
+  warehouse (`warehouse_window_vs_prior`: the window vs the equal-length
+  calendar window before it; the trailing presets exclude today, so both
+  windows are complete).
 
 ### Cost Intelligence (sections)
-- **Spend** — daily billed by service category; KPIs: billed $, cloud-
+Sections: Spend & Attribution · Contract & Forecast · Chargeback & AI ·
+Unit costs · Compare · Optimization & Savings.
+- **Spend** (Spend & Attribution) — daily billed by service category; KPIs: billed $, cloud-
   services rebate (always shown separately), AI spend at the AI rate.
   **Cloud-services health**: per-warehouse ratio = cloud-services credits ÷
-  total credits (24h scan threshold 20%; >10% = WATCH). When ELEVATED, the
+  total credits (WATCH above 10%, ELEVATED above 20% — reading bands only:
+  the fixed-ratio COST_CLOUD_SVC_RATIO alert was retired in V157, and
+  COST_CLOUD_SVC_ANOMALY (V150, daily anomaly sweep) alerts when a
+  warehouse's cloud-services credits step outside its own prior-28-day
+  robust baseline). When ELEVATED, the
   compile-heavy families table explains why (families ≥20 runs averaging
   >0.5s compile).
-- **Attribution** — allocated spend by dimension. Warehouse metering is
+- **Attribution** (Spend & Attribution) — allocated spend by dimension. Warehouse metering is
   exact billing truth; per-user/database attribution allocates each
   warehouse-hour's credits by elapsed-time share and is labeled
   "allocated". Waterfall = top contributors + Other, cumulative.
@@ -277,7 +364,10 @@ Admin → Settings, never in code.
   Allocated is the owner-scoped MART_COST_ALLOCATION_DAILY, so per company it
   can exceed 100%; read it under Company = ALL. It is one extra mart read,
   inside the "Load company attribution" toggle only.
-- **Contract** — pacing: consumed share vs elapsed-time share of
+- **Storage** (Spend & Attribution, behind the "Load storage &
+  unmapped-entity detail" toggle, with the Unmapped entities worklist) —
+  storage GB by database × storage rate.
+- **Contract** (Contract & Forecast) — pacing: consumed share vs elapsed-time share of
   `CONTRACT_CREDITS` between `CONTRACT_START_DATE`/`END`; pace ratio >1 =
   burning faster than the clock. Consumed counts the term only, up to
   (not including) `CONTRACT_END_DATE`. Once the term is over the section
@@ -285,7 +375,11 @@ Admin → Settings, never in code.
   withholds pace, the projection and the steering levers until the new
   term's three settings are entered. **Renewal planner**: growth scenarios on
   trailing 30d burn; recommended commit = term consumption × (1+buffer).
-- **Chargeback** — department = warehouse owner (`DEPARTMENT_MAP`):
+  **Org accounts spend** (Contract & Forecast; moved from Admin in v4.48):
+  ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY billed currency by account and
+  service type, 30 days; without ORGANIZATION_USAGE_VIEWER it shows the
+  grant hint.
+- **Chargeback** (Chargeback & AI) — department = warehouse owner (`DEPARTMENT_MAP`):
   exact per-department billed credits; role-share within a warehouse as a
   secondary allocated lens; Unmapped bucket reconciles to the account
   total. Monthly statement export.
@@ -312,9 +406,9 @@ Admin → Settings, never in code.
   past mid-morning means that loader is behind (Admin → Migrations &
   freshness). With Company = UNKNOWN, an empty table reads verified-clean
   only when every keyed source covers the span in full.
-- **Cortex & Storage** — Cortex daily spend (token-based credits × $2.20),
-  storage GB by database × storage rate.
-- **AI Users** — per-user Cortex consumption, exceptions (users over the
+- **Cortex / AI spend** (Chargeback & AI) — Cortex daily spend
+  (token-based credits × $2.20).
+- **AI Users** (Chargeback & AI) — per-user Cortex consumption, exceptions (users over the
   per-user expectation), AI budget pacing when `AI_MONTHLY_BUDGET_USD` set.
   **Track top exceptions as work items** (v4.605, operators) writes the
   first 10 Exceptions rows through the same Track statement as Optimize and
@@ -339,7 +433,18 @@ Admin → Settings, never in code.
   open item at that severity is left as is. A Security work item on
   the same user does not block it. An item still open from an earlier
   month now blocks a new one; a done or dismissed item does not.
-- **Optimization** — idle advisor (warehouse-hours billed with zero
+- **Unit costs** — measured $ per query (QUERY_ATTRIBUTION_HISTORY credits,
+  ~8h lag, warehouse idle time excluded), the top 50 stored procedures by
+  measured spend with $/call, repeated patterns, AI $ by function/model
+  with $/1M tokens, ETL unit costs for tagged pipelines (on demand),
+  task-graph pipeline costs and serverless tasks.
+- **Compare** — period vs period from facts and marts: last full month
+  vs prior, or trailing 7d / 30d vs prior; warehouse movers, pattern
+  movers (measured $) and volume shape. Clicking a warehouse row scopes
+  the pattern movers to it with a live QUERY_HISTORY x
+  QUERY_ATTRIBUTION_HISTORY read, the section's one live scan.
+  Panel-local periods replace the global Window; only Company applies.
+- **Optimization** (Optimization & Savings) — idle advisor (warehouse-hours billed with zero
   queries = auto-suspend opportunity); right-sizing simulator (spill +
   queue profile → size suggestion; its **Check cluster use** toggle reads
   each multi-cluster warehouse's hourly peak cluster over ≥35 days, and a
@@ -360,7 +465,8 @@ Admin → Settings, never in code.
   STALE = no DML in 90d; tables nobody read in 90 days feed Addressable
   $/mo as storage waste); **guarded remediation** (§9); storage growth
   movers.
-- **Savings ledger** — every claimed saving with STATE: ESTIMATED (booked
+- **Savings ledger** (Optimization & Savings ▸ Remediation & ledger) —
+  every claimed saving with STATE: ESTIMATED (booked
   by remediation/advisor) → VERIFIED or REJECTED by the monthly verifier
   comparing actual before/after spend. The two are never summed together.
 
@@ -381,8 +487,10 @@ Admin → Settings, never in code.
   calls queueing "sustained", and ranks it above spend anomalies, only at
   peak queued ≥1 plus ~30 min/day of queued 5-minute intervals across its
   14-day read (84 intervals); a failed concurrency read shows "—", never a
-  green "nobody is queueing".
-- **Contention** — lock waits (LOCK_WAIT_HISTORY).
+  green "nobody is queueing". Below it, the **Contention** sub-panel (queue,
+  spill & lock waits; lock waits from MART_LOCK_WAIT_DAILY, live
+  LOCK_WAIT_HISTORY fallback) — Contention is part of Warehouses, not a
+  section of its own.
 - **Optimize** (v4.597, was Decision Studio ▸ Portfolio) — the
   recurring-query fix queue. Each measured query family gets its observed
   mart $, ONE diagnosis and a first fix: live profile > daily-mart advisor > portfolio
@@ -478,14 +586,19 @@ SOC. **Governance drift score** at top (§6). Sections:
   rule's recent history, first-response playbook, **Explain with AI** for
   COST_/PERF_ events (§8), Investigate→ (jumps to the owning page/section
   with filters applied), ack/resolve with note (audited). Bulk ack/resolve
-  below. **MTTA/MTTR** KPIs = mean minutes RAISED→ACK and RAISED→RESOLVED
-  over 90d.
+  below. The tiles above the queue are Open critical / high / total.
 - **Rules** — ALERT_CONFIG: enable/disable, thresholds (SQL generated,
   operator executes). The generator opens on the picked rule's current
   threshold and Enabled and its UPDATE sets only what you changed (toggling
   Enabled leaves THRESHOLD_NUM alone); a new threshold of 0 warns that most
   rules would then fire on every row.
-- **History** — events by day, colored by severity.
+- **History** — events by day (30d), colored by severity. **Response
+  performance**: alert-grain MTTA (RAISED→ACK) and MTTR (RAISED→RESOLVED),
+  event-weighted over the last 4 active weeks of a 90-day read, with
+  machine closes (SUPERSEDED / AUTO_CLEARED / SNOOZE_SUPPRESSED /
+  CONDITION_ENDED) left out of MTTR; then the incident-grain 90d medians
+  (Incident lifecycle, §21), delivery health (SLO), route backlog and alert
+  fatigue.
 - **Native delivery** — delivery status (TASK_ALERT_NOTIFY state from SHOW
   TASKS on the 5-minute tier; a failed or empty task read says the state is
   unknown, never "suspended"), ALERT_ROUTES viewer + add-route recipe,
@@ -500,10 +613,15 @@ Settings (edit any key the app reads — `config.DEFAULT_SETTINGS`, incl.
 flagged "no longer read (safe to delete)") ·
 Migrations & freshness (SCHEMA_VERSION vs the expected V001-to-tip set — admin.py
 `_EXPECTED_MIGRATIONS` — with a drift warning, and the on-demand Task health check) ·
-App self-cost (the app's own queries/failures on WH_ALFA_ADMIN) · Org
-spend (ORGANIZATION_USAGE currency by account) · Performance (slowest app
-statement families by parameterized hash + session cache-hit estimate) ·
+Setup progress (one onboarding checklist: migrations applied, marts
+loading, budget / contract / route settings) · Metrics (the cost metric
+registry: method, grain, source and lag of every cost number) ·
+App self-cost (the app's own queries/failures on WH_ALFA_ADMIN) ·
+Performance (slowest app statement families by parameterized hash +
+session cache-hit estimate) ·
 Canary (§13) · Errors & telemetry (session + persisted APP_ERROR_LOG).
+The org spend panel moved to Cost Intelligence ▸ Contract & Forecast in
+v4.48 (Org accounts spend, §5 Cost Intelligence ▸ Contract).
 
 ### Proof
 Renamed from Decision Studio in v4.597. It is read-only, and every profile
@@ -576,27 +694,44 @@ can open it, including EXECUTIVE. Old Decision Studio links, saved views and
 **Platform score** (`logic/scoring.py`) = 100 − Σ capped penalties; every
 deduction is listed with evidence. Signals → penalty per unit (SETTINGS
 key) [cap]:
-over-budget %-points ×`SCORE_PTS_BUDGET_PER_PCT` 0.5 [20] · critical
-alerts ×`SCORE_PTS_PER_CRITICAL` 6 [24] · high alerts ×2 [10] · query-fail
-% over 2% ×1.5 [12] · task-fail % over 1% ×2 [14] · queued minutes over 10
-×0.3 [10] · spill GB over 5 ×0.5 [8] · stale sources ×4 [12] · open high
-actions ×1.5 [9]. States: ≥85 Healthy, ≥70 Watch, else Act. Weights are
-**uncalibrated starting points** — tune them in Settings against your own
-incident history; caps are fixed so no single driver dominates.
+budget pace: % over budget of the PROJECTED month-end spend
+×`SCORE_PTS_BUDGET_PER_PCT` 0.5 [20] (MTD ÷ budget when no forecast is
+available) · critical alerts ×`SCORE_PTS_PER_CRITICAL` 6 [24] · high
+alerts ×2 [10] · query-fail % over 2% ×1.5 [12] · task-fail % over 1% ×2
+[14] · queued minutes per day over 10 ×0.3 [10] · spill GB per day over 5
+×0.5 [8] · stale sources ×4 [12] · open high actions ×1.5 [9]. States:
+≥85 Healthy, ≥70 Watch, ≥50 Degraded, else At risk. While any critical
+alert is open the score is capped at 84 and a "Critical veto" driver says
+so. If a required or degraded source fails to load the score reads
+**Incomplete** instead of a number (a failed read never improves it).
+Weights are **uncalibrated starting points** — tune them in Settings
+against your own incident history; caps are fixed so no single driver
+dominates.
 
 **Governance drift score** (`logic/governance.py`) = 100 − Σ capped:
 MFA-gap users ×5 [25] · expired credentials ×8 [24] · expiring ×2 [10] ·
-break-glass grants 30d ×6 [18] · warehouses without monitor ×4 [12] ·
-without auto-suspend ×3 [12]. ≥90 Healthy, ≥75 Watch, else Act. Weights
-fixed (drift items are countable facts).
+break-glass grants 30d ×6 [18] · warehouses without auto-suspend ×3 [12].
+≥90 Healthy, ≥75 Watch, else Act. Weights are the `GOV_PTS_*` SETTINGS
+(defaults shown, editable in Settings); caps are fixed. Resource monitors
+are not scored (retired 2026-07-13, owner decision).
 
 ## 7. Forecast engines (`FORECAST_ENGINE` setting)
 
-- **linear** (default): MTD actual + mean of last 28 daily values ×
-  remaining days; band = daily std × √remaining.
-- **seasonal**: each remaining calendar day projected with its
-  day-of-week mean (28d baseline); band from residuals vs weekday means;
-  auto-falls back to linear under 14 data points.
+- **linear** (default): complete-day MTD (today's partial actual stays in
+  the displayed MTD only) + a robust Theil-Sen daily trend fitted on
+  calendar-day offsets over the last 14 complete-day rows, projected over
+  today plus each remaining day (each day clamped at 0); the result is
+  floored at MTD. Band = residual std (vs that line) × √(today + remaining
+  days), widened for parameter uncertainty (√(1+1/n)) and within-week
+  autocorrelation (×1.25).
+- **seasonal**: today plus each remaining calendar day projected with its
+  day-of-week mean over the last 42 complete-day rows; band from residuals
+  vs the weekday means, with the same widening. Below 28 points it falls
+  back to linear.
+- Neither engine projects with fewer than 7 complete days of history (the
+  basis reads "Needs at least 7 days of history"). A missing completed day
+  this month (no fact row) is filled at the baseline mean when the
+  surrounding history is dense, never counted as $0.
 - **ml_forecast**: reads `FORECAST_ML_DAILY` (materialized by the opt-in
   `ml_forecast_option.sql`: `SP_REFRESH_ML_FORECAST` retrains the
   SNOWFLAKE.ML.FORECAST model on every complete day, then writes the 45 days
@@ -738,8 +873,10 @@ CREDIT_PRICE_USD 3.68 · AI_CREDIT_PRICE_USD 2.20 · STORAGE_USD_PER_TB_MONTH
 CONTRACT_CREDITS / CONTRACT_START_DATE / CONTRACT_END_DATE (ISO dates) ·
 CORTEX_MODEL llama3.1-8b · FORECAST_ENGINE linear|seasonal|ml_forecast ·
 SCORE_PTS_* (nine platform-score weights, §6) · FACT_RETENTION_DAYS_HOURLY
-400 (floor 90) · FACT_RETENTION_DAYS_DAILY 800 (floor 180) ·
-ERROR_LOG_RETENTION_DAYS 180 (floor 30) · INCIDENT_AUTO_DECLARE_CRITICAL
+400 (floor 90) · FACT_RETENTION_DAYS_DAILY 800 (floor 365, raised from 180
+in V054) · ERROR_LOG_RETENTION_DAYS 180 (floor 30) · APP_USAGE_RETENTION_DAYS
+365 (floor 90) (the floors are enforced in SP_PURGE_FACTS) ·
+INCIDENT_AUTO_DECLARE_CRITICAL
 TRUE (hourly auto-declare switch; the two V162 identity rules never
 auto-declare either way) · AI_RUNAWAY_ROBUST_Z 3.5 and
 AI_RUNAWAY_INCLUDE_FUNCTIONS FALSE (COST_AI_USER_RUNAWAY, V163; the cap
@@ -755,15 +892,24 @@ one cache cycle (≤5 min) or after Refresh.
 
 ## 12. Alert engine reference
 
-**Delivery (V018):** `TASK_ALERT_NOTIFY` is created in-chain (AFTER the
-scan) and auto-resumes when the `OVERWATCH_WEBHOOK` integration exists; the
-Alerts page shows a live status chip (integration / task / last send). The
-one-time integration setup — the only step that can't ship in git — is
-`snowflake/webhook_delivery.sql`; to resume manually:
-`ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_ALERT_NOTIFY RESUME;`. The morning
-digest also sends through the default route (guarded; absent integration =
-in-app only). **Storm view:** Open events has a group-by-rule toggle (5
-warehouses over budget = 1 row); dedupe semantics unchanged. **Closed loop:**
+**Delivery (V018 → V070 / V071 / V112 / V165):** `TASK_ALERT_NOTIFY` runs
+in-chain AFTER `TASK_ALERT_SCAN` and is resumed with the hourly tree (V071).
+V070 retired V018's `OVERWATCH_WEBHOOK`-only resume gate (it never fired on
+this Teams-only account) and disabled any enabled route whose integration
+does not exist. Delivery is live only when an ENABLED `ALERT_ROUTES` row
+names an integration that exists (on this account
+`OVERWATCH_WEBHOOK_TEAMS`); the Alerts page shows a live status chip (route
+integration / task / last send). The one-time integration setup — the only
+step that can't ship in git — is `snowflake/webhook_delivery.sql`; to
+resume manually: `ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_ALERT_NOTIFY
+RESUME;` (never re-run V018: its CREATE OR REPLACE would put back the
+retired digest body). The morning digest (SP_DAILY_DIGEST, V165) is written
+in-app first, then posted to every ENABLED route with DELIVER_DIGEST that is
+not CRITICAL-only (V070 / V112). A failed send logs `digest_send_failed` for
+that route, and `digest_undelivered` when no eligible route received it;
+with no eligible route the digest stays in-app only. **Storm view:** Open
+events has a group-by-rule toggle (5 warehouses over budget = 1 row); dedupe
+semantics unchanged. **Closed loop:**
 for warehouse-lever rules the drawer generates the fix inline — confirm,
 execute, REMEDIATION_LOG row, ESTIMATED ledger item — and the expander
 shows the ledger state of fixes already booked from that event
@@ -866,18 +1012,23 @@ The two ALERT_CONFIG rows can stay; disable them in Alerts > Rules if wanted.
 | COST_BUDGET_PACE | COST | MTD spend ahead of budget pace | daily |
 | COST_FORECAST_BREACH | COST | projected month-end over budget | daily |
 | ~~COST_CLOUD_SVC_RATIO~~ | COST | retired at V157 (wave-2b compile diet) — COST_CLOUD_SVC_ANOMALY (V150, daily: a warehouse's cloud-services credits step outside its own 28-day robust baseline) supersedes the fixed ratio; open, acknowledged and snoozed events were closed as EXPECTED; the WATCH/ELEVATED bands stay on Cost > Spend for reading | — |
+| COST_CLOUD_SVC_ANOMALY | COST | a warehouse's daily cloud-services credits (MART_CLOUD_SVC_DAILY, ≥1 credit/day) at a robust z ≥ threshold (3.5) against its own trailing 28-day median/MAD, a spike or a collapse, the last 3 complete days scored; MEDIUM, HIGH at ≥2x the threshold — SP_ANOMALY_SWEEP → SP_SCAN_CLOUD_SVC_ANOMALY, V150 | per warehouse per day |
 | COST_STORAGE_SURGE | COST | database grew > GB day-over-day | per DB per day |
 | COST_SERVERLESS_CREEP | COST | non-WH/non-AI service credits up > % WoW (≥5 cr) | weekly while creeping |
+| COST_AI_CREEP | COST | AI/Cortex credits (FACT_METERING_DAILY service types matching CORTEX / AI / INTELLIGENCE / COCO / COWORK) in the 7 newest complete days up > threshold % (50) vs the 7 before, with ≥5 credits this week, priced at AI_CREDIT_PRICE_USD (a brand-new AI workload reads 999%); MEDIUM, company ALL — daily [13b], V061 | weekly while creeping |
 | COST_ANOMALY_SWEEP | COST | robust z ≥ threshold vs 28d (warehouse & service series) | per series per day |
 | COST_CONTRACT_BREACH | COST | projected exhaustion ≤ threshold days (CRITICAL ≤14) | weekly |
 | COST_IDLE_OPPORTUNITY | COST | a settings-verified AUTO_SUSPEND tightening recovers ≥ threshold USD/month (net of the 60s resume tail, 14 complete days, ≥7 covered; HIGH at ≥5x) — daily scan, V157 | weekly per WH |
 | COST_SLEEP_POLLING | COST | a poller (warehouse x user, or task owner role) slept via SYSTEM$WAIT on ≥5 of the 7 newest complete days and billed ≥ threshold USD/week (Spend-panel billed basis; HIGH at ≥5x) — daily scan [25] → SP_SCAN_SLEEP_POLLING, once per ISO week, V160 | one event per poller per episode; CONDITION_ENDED when it stops |
 | COST_AI_USER_RUNAWAY | COST | one user's AI credits on one complete day > threshold x COCO_DAILY_CAP_CREDITS (2 x 15 by default) AND a robust z ≥ AI_RUNAWAY_ROBUST_Z (3.5) against their own active days in the prior 90 (fewer than 5 such days = no baseline: the cap alone decides); Cortex Code only unless AI_RUNAWAY_INCLUDE_FUNCTIONS (inert until Functions spend is booked to a user); HIGH; company = the user's, ALL when unmapped — daily [28], V163 | per user per day; the last 3 complete days re-checked each morning |
+| COST_EGRESS_SPIKE | COST | DATA_TRANSFER_HISTORY outbound ≥ threshold GB (100) in the last 24h (the event names the 14-day daily average and the top destination region); MEDIUM, company ALL — daily [19], V043 | daily key |
 | PERF_QUERY_FAIL_PCT | PERF | window fail % over threshold | daily |
 | PERF_QUEUED_MINUTES | PERF | queued minutes over threshold | daily |
 | PERF_SPILL_GB | PERF | remote spill GB over threshold | daily |
 | PERF_CHANGE_REGRESSION | PERF | changed proc/task worse than frozen baseline | once per change |
+| WH_CHANGE_REGRESSION | WAREHOUSE | a warehouse setting change regressed against its frozen pre-change baseline within its 14-day tracking window: credits/day up > threshold % (15) and ≥1 credit/day, or p95 up 25% and ≥30s, or failure rate up 5 points, or queueing up 50% and ≥10 min/day; HIGH, CRITICAL at 2x credits/day — SP_WAREHOUSE_CHANGE_SCAN (06:40 daily), V024 / V109 | once per warehouse, setting and change day |
 | PERF_FINGERPRINT_DRIFT | PERF | family p95 up > % (7d vs prior 28d), no change event; Mondays | weekly per hash |
+| PERF_SLO_BREACH | PERF | an existing ACTIVE SLO_OBJECTIVES row in BREACH (STALE / NO_DATA and samples under 5 observations excluded); HIGH, CRITICAL at ≥2x error-budget burn — SP_SLO_BREACH_SCAN (TASK_SLO_BREACH_SCAN, after the hourly mart load), V085 / V096 | per objective per day per burn band (a same-day HIGH→CRITICAL gets its own key) |
 | PIPE_TASK_FAILURES | PIPELINE | task failures in window over threshold | daily per task |
 | PIPE_COPY_FAILURES | PIPELINE | failed/partial file loads 24h (CRITICAL ≥10 files) | daily per table |
 | PIPE_DT_FAILURES | PIPELINE | dynamic-table refresh failures 24h (CRITICAL ≥5) | daily per DT |
@@ -889,11 +1040,17 @@ The two ALERT_CONFIG rows can stay; disable them in Alerts > Rules if wanted.
 | SEC_NEW_EXPOSURE | SECURITY | a new grant to PUBLIC (24h lookback) of ≥ threshold objects in one batch; checked every 4h since V157 (01, 05, 09, 13, 17, 21 Central); a grant revoked before the next check is never raised | once per grant batch (PRIVILEGE, GRANTED_ON, CREATED_ON); auto-clears as CONDITION_ENDED once the whole batch is revoked (V157) |
 | SEC_LOGIN_TAKEOVER | SECURITY | ≥ threshold (5) failed logins by one user within 15 min, then a successful login within 60 min of that burst (every failed login counts); CRITICAL when the login is off-hours (20:00-06:00 Central, or a weekend) or the user directly held ACCOUNTADMIN / SECURITYADMIN / SYSADMIN / USERADMIN / ORGADMIN / SNOW_ACCOUNTADMINS / SNOW_SYSADMINS at that moment, else HIGH; company ALL — hourly [26], V162; never auto-declares an incident (SP_INCIDENT_AUTODECLARE skips it: declare by hand) | one event per episode (key ends in the anchor login's UTC millisecond time); a later WARN→CRIT crossing supersedes the WARN, a CRIT is never re-minted as WARN; a snooze never carries to the next episode |
 | SEC_ADMIN_GRANT | SECURITY | a direct grant of one of those seven admin-tier roles to a user (GRANTS_TO_USERS, 26h lookback), raised even when already revoked; flat HIGH; the title flags off-hours and first-time grants; company ALL — hourly [27], V162; never auto-declares an incident | one event per grant (grantee, role, CREATED_ON) |
+| SEC_NEW_ADMIN_NETWORK | SECURITY | a user with a direct ACCOUNTADMIN / SNOW_ACCOUNTADMINS / SNOW_SYSADMINS grant logs in from a CLIENT_IP first seen in the last 24h of a 90-day window, with ≥ threshold (1) logins from it; HIGH, company ALL — hourly [18], V043 | once per user and IP |
+| `SEC_POSTURE_<METRIC>` | SECURITY | an operator-created posture monitor (Security's generate-upsert; not seeded; severity chosen when it is created): the newest MART_SECURITY_POSTURE_DAILY value of its METRIC_NAME is ≥ threshold and at most 2 days old — hourly [21], V087 | per rule, company and posture day |
 | ~~SEC_BREAK_GLASS_USE~~ | SECURITY | retired at V034 (muted since V025) — admin-role activity stays as evidence on Security -> Changes | — |
 | SEC_TRUST_REGRESSION | SECURITY | a CRITICAL or HIGH Trust Center scanner's at-risk count rose ≥ threshold (1) against its previous snapshot day (today's and yesterday's rows checked each morning; a scanner's first snapshot never raises; quiet without TRUST_CENTER_VIEWER); HIGH, company ALL — daily [29], V163 | per scanner per snapshot day (the counts of the scan that raised it; a further rise the same day is not pushed again); no self-clear |
 | COST_DEPT_BUDGET_PACE | COST | department MTD > budget pace by threshold % (DEPT_BUDGETS) | daily per dept |
 | COST_ORG_ACCOUNT_CREEP | COST | org account currency spend up threshold % WoW | weekly per account |
 | PIPE_VOLUME_DROP | PIPELINE | table rows-added down threshold % vs prior-7d avg (≥1k rows/day) | daily per table |
+| DQ_BREACH | PIPELINE | a registered table's latest rows-added load is a robust-z outlier (spike or drop, z ≥ threshold 3.5) against its own loads over 28 days — the same series as the Operations data-quality panel; MEDIUM — SP_ANOMALY_SWEEP, V132 | per table per load day |
+| DQ_SCHEMA_DRIFT | PIPELINE | a table registered as an OBJECT entity has columns added, removed or retyped since its latest prior daily snapshot (a first snapshot is the baseline and never alerts); MEDIUM — SP_SCAN_SCHEMA_DRIFT from the sweep, V133 | per table per day |
+| PIPE_REF_GAP | PIPELINE | ≥ threshold (1) source codes in one check missing from the XLAT reference table (SP_SCAN_REF_GAPS; the nightly load would fail on them); HIGH — daily add-on [17], not counted in the scan tally, V129 | per check per day |
+| DQ_RECON_ERROR | PIPELINE | RECON_MTRC_ERROR shows source-vs-target mismatches inside the rule's window (48h) on ≥ threshold (1) metrics; HIGH — daily add-on [18] (SP_SCAN_RECON_ERRORS), not counted, V137 | daily key |
 | OPS_CANARY_FAIL | PLATFORM | weekly source sentinel found failing dependency views | daily key |
 | OPS_SCAN_DEGRADED | PLATFORM | one or more rule blocks failed in the last scan (v7 isolation) | daily key |
 | OPS_PIPELINE_DEGRADED | PLATFORM | pipeline self-watch in BOTH scans (V157): a SOURCE_FRESHNESS_STATE row past its cadence (DAILY/METERING 30h, else 3h; incl. the ALERT_SCAN_HOURLY / ALERT_SCAN_DAILY heartbeats), a loader failure logged and swallowed, or the notifier idle 3h while a route is enabled; the hourly scan checks every 3h (02, 05, …, 23 Central), the daily scan every morning; a stale or idle episode that ends between checks is not raised | per source per last-load day; per failure type/source/day |
@@ -953,7 +1110,7 @@ Snowflake release note that mentions ACCOUNT_USAGE, and after migrations.
 | TASK_VERSIONS absent | Task change registration skipped; procedures still tracked |
 | DYNAMIC_TABLE_REFRESH_HISTORY absent | DT alert block logs and skips; cost sweep unaffected |
 | CREDENTIALS view absent | Credentials panel shows setup hint; scan block yields no rows |
-| ORGANIZATION_USAGE not granted | Org spend tab shows the grant hint, nothing else breaks |
+| ORGANIZATION_USAGE not granted | Cost Intelligence ▸ Contract & Forecast: the org balance and Org accounts spend panels show the grant hint; nothing else breaks |
 | TRUST_CENTER not granted | Trust Center section shows the grant hint |
 | Cortex/model unavailable | The morning digest sends the templated facts digest and logs `digest_ai_failed` (V165); AI panels surface the error; nothing else breaks |
 | FORECAST_ML_DAILY absent, empty from today on, or stops before month-end | Forecast engine uses seasonal, basis string says so (a table with days from today on that stops short: its last day + "retrain it with SP_REFRESH_ML_FORECAST"; a table with no day from today on: "no row for today or later" + the same retrain hint) |
@@ -987,7 +1144,8 @@ Route rows ENABLED with the right MIN_SEVERITY? APP_ERROR_LOG shows
 `route_send_failed` with the integration name when a single route breaks.
 
 **Canary failures.** Column drift in ACCOUNT_USAGE or a dropped object.
-The failing check names the builder; APP_ERROR_LOG has the SQL error.
+The failing check names the builder, and the ERROR column on the canary
+page has the SQL error (see the logging note below).
 One conditional exception: cortex.code_token_types also FAILs (its error
 names TOKENS_GRANULAR) on accounts whose Cortex Code views predate that
 optional column. That is expected only if the CoCo efficiency review has
@@ -999,6 +1157,10 @@ gaps: if the app's role cannot read that view they FAIL here while Security
 shows a calm needs_setup. IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE
 (snowflake/roles.sql) covers that view. A renamed column FAILs here too,
 and Security then shows a red "unavailable" with the error (v4.605).
+Logging: a drift or absence FAIL (invalid identifier, does not exist,
+unknown function) is not written to APP_ERROR_LOG, because the canary runs
+as probe reads; only timeouts, privilege errors and other failures are
+logged there. The results last only for the session: copy them.
 
 **A red "unavailable" on an optional panel** (v4.605). A probe read shows
 needs_setup only when the object is missing or not granted (or the function
@@ -1010,8 +1172,13 @@ and Admin → Setup progress marks the row Unknown with a re-apply-the-grants
 FIX. A missing column (schema drift), a timeout or any other
 failure shows "unavailable" with the error in its detail expander. A probe
 read does not write a missing column to APP_ERROR_LOG, so that expander is
-the only record: copy the error, then run Admin → Canary (a registered
-builder FAILs there on drift).
+the only record: copy the error, then run Admin → Canary. That helps only
+when the panel's builder is registered in app/data/canary.py (it then FAILs
+there on drift). Several probe readers are not registered, by design (the
+SHOW-based reads, which EXPLAIN cannot compile, and the Enterprise-only
+ACCESS_HISTORY reads) or not yet (e.g. the org_*, operator_* and email_*
+reads, query_insights_feed, object_tag_probe); for those the expander error
+is the only record.
 A timeout usually clears on a retry; drift does not (apply the missing
 migrations, or redeploy). Admin → Setup progress marks a checklist row
 Unknown (not Pending) when its read fails this way: FIX says Retry for a
@@ -1024,7 +1191,8 @@ Enterprise, so a timeout there says it timed out.
 **Numbers look wrong.** Check the source caption first (mart vs live +
 lag). ACCOUNT_USAGE lags ≤45 min (query history) to ≤24h (metering daily);
 never compare a half-filled current window to a complete prior one — the
-app's comparison queries lag-offset both windows for exactly this reason.
+app's comparison queries use complete calendar days (today excluded) for
+exactly this reason.
 
 **Arrow/serialization error on a table.** A mixed-type object column from
 a new source; wrap the offending column in TO_VARCHAR in its builder (the
@@ -1129,8 +1297,11 @@ acknowledged — a failed month or a month with no drill ends it).
 
 **Rule catalogue additions (§12).** `OPS_ALERT_DRILL` (PLATFORM, CRITICAL,
 ENABLED=FALSE — the drill task inserts events directly; the scan never
-fires it). `WINDOW_HOURS` on every rule is informational: scan windows are
-fixed per family in `SP_ALERT_SCAN`; edit thresholds, not windows.
+fires it). `WINDOW_HOURS` is informational for every rule except
+`DQ_RECON_ERROR`: scan windows are fixed per family in `SP_ALERT_SCAN` /
+`SP_ALERT_SCAN_DAILY`, so edit thresholds, not windows. `DQ_RECON_ERROR`'s
+`WINDOW_HOURS` is the reconciliation look-back `SP_SCAN_RECON_ERRORS` reads
+(default 48h, named in the alert text).
 
 **Alert lifecycle.** Resolutions carry a kind — ACTIONED / NOISE /
 EXPECTED. Kinds feed the per-rule precision score and the threshold
@@ -1282,9 +1453,14 @@ Idle cost is bounded by two existing controls, not by the statement timeout:
 Streamlit-in-Snowflake ends the app session after ~15 minutes without
 browser interaction (platform behavior, not configurable), and V002 set
 `AUTO_SUSPEND = 60` on WH_ALFA_ADMIN — so a forgotten tab costs at most
-~16 minutes of XS credits. Hard backstop if wanted: a resource monitor with
-a daily quota on WH_ALFA_ADMIN. The app's own queries stay bounded by
-window clamps and row caps regardless of the parent statement's ceiling.
+~16 minutes of XS credits. There is deliberately no hard cap on
+WH_ALFA_ADMIN (owner decision 2026-07-13; V045 dropped OVERWATCH_RM because
+its credit cap was suspending the app and task warehouse mid-use). The
+COST_* alert rules (e.g. COST_WH_DAILY_CREDITS) and Admin ▸ App self-cost
+are the guardrails; expect the Spend ceilings & resource monitors panel
+(Cost ▸ Optimization & Savings) to list it as uncapped, by design. The app's
+own queries stay bounded by window clamps and row caps regardless of the
+parent statement's ceiling.
 
 ## §21 Incidents — the operator SOP (V032)
 
@@ -1292,9 +1468,11 @@ One incident = one story: alerts, task failures, warehouse changes, DDL and
 fixes under a single key. Alert-grain panels stay; incidents answer the
 question storms obscure ("how many real problems, how fast did we recover").
 
-**Where:** Control Room -> Incidents (queue above triage; Brief shows the
-open count). All state changes are DBA-gated, generate-then-run, audited,
-forward-only — reopen is a NEW incident carrying REOPENED_FROM.
+**Where:** Control Room -> Incidents & triage (incident queue above triage;
+Brief shows the open count). All state changes are DBA-gated,
+generate-then-run, audited, forward-only — the app has no reopen; a
+recurrence is a new incident (INCIDENTS.REOPENED_FROM exists for a
+hand-written SQL link, but nothing in the app sets it).
 
 **Declaring.** Three paths, none silent:
 1. Proposals expander — open alert families (48h) with nearby warehouse

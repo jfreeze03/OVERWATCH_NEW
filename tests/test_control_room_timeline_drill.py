@@ -1,8 +1,8 @@
 """R2-057 behaviour lock: Control Room > Timeline & movers, with a timeline row selected, renders the
 +/-30 min drill. render() used to hold a branch-local `from datetime import timedelta` in the Pulse
 section, which made the name local to the whole function, so this drill (a different section) raised
-UnboundLocalError on every selection. AppTest over the shaped harness; the floor leg skips it like the
-other section-switching AppTests (the AST ratchet in tests/test_local_import_scope.py runs there)."""
+UnboundLocalError on every selection. AppTest over the shaped harness (both CI legs); the AST ratchet in
+tests/test_local_import_scope.py guards the whole class."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ import pytest
 
 pytest.importorskip("streamlit")
 from test_pages_shaped import (  # noqa: F401 - _stub_shaped is the harness's autouse fixture
-    _APPTEST_BUTTONGROUP_OK,
     _entry,
     _nav_to,
     _shaped_run,
@@ -35,7 +34,6 @@ def _timeline_frame() -> pd.DataFrame:
     })
 
 
-@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
 def test_selecting_a_timeline_row_opens_the_30_minute_drill(monkeypatch):
     """The Pulse branch (the one that held the local import) never runs in this section, which is
     the exact path that raised UnboundLocalError: `_activity_ready` is never even computed here."""
