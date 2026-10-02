@@ -87581,7 +87581,9 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 -- user|IP with no date, so a network quiet for 90+ days -- which the rule name, playbook and Security panel promise
 -- to re-flag -- never alerted again. (R2-039) the same arm counted failed attempts as logins and always said
 -- 'logged in', and a failures-only event blocked the success that followed it. (R2-091) SEC_NEW_EXPOSURE pointed
--- at Security -> Access, where no PUBLIC-grant panel exists. (R2-040) two dead prologue reads.
+-- at Security -> Access, where no PUBLIC-grant panel exists. (R2-040) two dead prologue reads. (Holistic #4/#9)
+-- the OPS_PIPELINE_DEGRADED ERR DETAIL told every logged loader failure 'its task still reads SUCCEEDED', but V166's
+-- SP_LOAD_APP_COST / SP_LOAD_STORAGE_TRUTH roll back and re-raise, so TASK_HISTORY shows those runs FAILED.
 --
 --   ~ SP_ALERT_SCAN re-derived from V162 (its current definer), byte-identical except:
 --     ~ arm [14] PIPE_COPY_FAILURES: keyed by the Central FAILURE day over whole Central days (yesterday + today,
@@ -87601,6 +87603,11 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --       the three -24h windows are unchanged).
 --     - the dead budget_usd / ai_credit_price prologue reads (arm [17] keeps :credit_price; the daily scan keeps
 --       its own copies).
+--     ~ arm [22] OPS_PIPELINE_DEGRADED ERR leg: errs carries RERAISED (a PAGE 'AppCost' / 'StorageTruth' row, the
+--       V166 loaders that roll back, log and re-raise); the DETAIL says that run FAILED (a scheduled run shows
+--       FAILED in TASK_HISTORY; a hand CALL raised the error to its caller), and keeps 'returned normally, so its
+--       task still reads SUCCEEDED' for every other loader. Keys, sources, cadence gate and windows unchanged;
+--       byte-identical to V169's daily twin.
 --     ~ the RETURN label names V168; the 14-block tally is unchanged.
 --   ~ ALERT_CONFIG NAME of PIPE_COPY_FAILURES and SEC_NEW_ADMIN_NETWORK, only while it still equals the seed text.
 --
@@ -87636,7 +87643,7 @@ BEGIN
 END;
 $$;
 
--- >>> derived:SP_ALERT_SCAN  (from V162; [14] failure-day key, [18] outcome + first-seen-day key + 48h episode guard, [20] pointer, V067 FAILED supersede, V091 sweep any raise day, dead prologue reads, V168)
+-- >>> derived:SP_ALERT_SCAN  (from V162; [14] failure-day key, [18] outcome + first-seen-day key + 48h episode guard, [20] pointer, V067 FAILED supersede, V091 sweep any raise day, dead prologue reads, [22] ERR re-raise wording, V168)
 CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN()
 RETURNS VARCHAR
 LANGUAGE SQL
@@ -88465,8 +88472,10 @@ BEGIN
     --      past the shared name-rule cadence (DAILY/METERING in the name 30h, else 3h -- the app health strip,
     --      Admin, Control Room and NATIVE_ALERT_STALE_FACTS judge it the same way), including the scans' own
     --      heartbeat rows ALERT_SCAN_HOURLY / ALERT_SCAN_DAILY -- at most one event per source per last-load
-    --      day (key = the stale LAST_LOAD_TS date, or NEVER). (b) ERR: a failure a loader logged and swallowed
-    --      (its task still reads SUCCEEDED) -- the same five ERROR_TYPEs as NATIVE_ALERT_STALE_FACTS -- one
+    --      day (key = the stale LAST_LOAD_TS date, or NEVER). (b) ERR: a failure a loader logged -- most
+    --      loaders swallow it (their task still reads SUCCEEDED); V166's SP_LOAD_APP_COST and
+    --      SP_LOAD_STORAGE_TRUTH roll back to the previous fill and re-raise (their task reads FAILED), and
+    --      the DETAIL says which (RERAISED, V168 + V169) -- the same five ERROR_TYPEs as NATIVE_ALERT_STALE_FACTS -- one
     --      event per (type, source, Central day). The three OPTIONAL SP_LOAD_MARTS_V27 arm sources (tag
     --      coverage, task node, AI usage) are left to the STALE leg, so a persistently failing optional arm
     --      raises once per episode instead of every day. (c) NOTIFY: SP_NOTIFY_WEBHOOK has not acquired its
@@ -88489,7 +88498,8 @@ BEGIN
         errs AS (
             SELECT ERROR_TYPE, SPLIT_PART(COALESCE(CONTEXT, ''), ' ', 1) AS SRC,
                    TO_DATE(LOGGED_AT) AS ERR_DAY, COUNT(*) AS N,
-                   MAX(LOGGED_AT) AS LAST_AT, MAX_BY(ERROR_MESSAGE, LOGGED_AT) AS LAST_MSG
+                   MAX(LOGGED_AT) AS LAST_AT, MAX_BY(ERROR_MESSAGE, LOGGED_AT) AS LAST_MSG,
+                   MAX(IFF(PAGE IN ('AppCost', 'StorageTruth'), 1, 0)) AS RERAISED   -- the V166 loads that roll back and re-raise
             FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
             WHERE ERROR_TYPE IN ('mart_load_failed', 'fact_load_failed', 'extract_load_failed',
                                  'cloud_svc_mart_failed', 'object_cost_load_failed')
@@ -88533,8 +88543,13 @@ BEGIN
         UNION ALL
         SELECT c.RULE_ID, 'ALL', c.SEVERITY,
                LEFT(x.ERROR_TYPE || ': ' || x.SRC || ' failed ' || x.N || 'x on ' || TO_VARCHAR(x.ERR_DAY), 300),
-               LEFT('The loader logged this and returned normally, so its task still reads SUCCEEDED and readers '
-                   || 'keep the previous fill. Last at ' || TO_VARCHAR(x.LAST_AT, 'YYYY-MM-DD HH24:MI') || ': '
+               LEFT(IFF(x.RERAISED = 1,
+                        'The loader rolled back to its previous fill, logged this and re-raised: the run FAILED '
+                        || '(a scheduled run shows FAILED in TASK_HISTORY; a hand CALL raised the error to its '
+                        || 'caller) and readers keep the previous fill.',
+                        'The loader logged this and returned normally, so its task still reads SUCCEEDED and '
+                        || 'readers keep the previous fill.')
+                   || ' Last at ' || TO_VARCHAR(x.LAST_AT, 'YYYY-MM-DD HH24:MI') || ': '
                    || COALESCE(LEFT(x.LAST_MSG, 600), '—') || '. Admin > Errors & telemetry (persisted error log).', 2000),
                x.N,
                c.RULE_ID || '|ERR|' || x.ERROR_TYPE || '|' || x.SRC || '|' || TO_VARCHAR(x.ERR_DAY)
@@ -88916,7 +88931,7 @@ UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 168 AS VERSION,
-       'Round-2 review, alerts cluster (R2-034, R2-035, R2-036, R2-039, R2-040, R2-091). SP_ALERT_SCAN re-derived from V162, byte-identical except: arm [14] PIPE_COPY_FAILURES keyed by the Central failure day over whole Central days (yesterday and today), TITLE names the day, band and trailing date kept; arm [18] SEC_NEW_ADMIN_NETWORK counts SUCCESSES, says logged in only when one succeeded (else N failed login attempts, 0 successful), keys on user, IP, FAILED for a failures-only pair, and the first-seen Central day (a network quiet 90 days alerts again), with a 48h same-episode guard on the exact date-stripped base; arm [20] SEC_NEW_EXPOSURE DETAIL points at Security, Changes; the V067 sweep supersedes a failures-only SEC_NEW_ADMIN_NETWORK event once the success event opens; the V091 auto-clear sweep re-checks every OPEN PERF event whatever its raise day; the dead budget and AI-price prologue reads are gone; RETURN names V168, tally 14 unchanged. ALERT_CONFIG NAME of PIPE_COPY_FAILURES and SEC_NEW_ADMIN_NETWORK refreshed only while it equals the seed text. No task change, no new object, no procedure run at apply time.' AS DESCRIPTION
+       'Round-2 review, alerts cluster (R2-034, R2-035, R2-036, R2-039, R2-040, R2-091). SP_ALERT_SCAN re-derived from V162, byte-identical except: arm [14] PIPE_COPY_FAILURES keyed by the Central failure day over whole Central days (yesterday and today), TITLE names the day, band and trailing date kept; arm [18] SEC_NEW_ADMIN_NETWORK counts SUCCESSES, says logged in only when one succeeded (else N failed login attempts, 0 successful), keys on user, IP, FAILED for a failures-only pair, and the first-seen Central day (a network quiet 90 days alerts again), with a 48h same-episode guard on the exact date-stripped base; arm [20] SEC_NEW_EXPOSURE DETAIL points at Security, Changes; the V067 sweep supersedes a failures-only SEC_NEW_ADMIN_NETWORK event once the success event opens; the V091 auto-clear sweep re-checks every OPEN PERF event whatever its raise day; the dead budget and AI-price prologue reads are gone; the OPS_PIPELINE_DEGRADED ERR detail says a run of the V166 app-cost or storage-truth loader rolled back and FAILED instead of claiming its task still reads SUCCEEDED; RETURN names V168, tally 14 unchanged. ALERT_CONFIG NAME of PIPE_COPY_FAILURES and SEC_NEW_ADMIN_NETWORK refreshed only while it equals the seed text. No task change, no new object, no procedure run at apply time.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 168);
 
 -- ===========================================================================
@@ -88937,7 +88952,9 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 -- COST_EGRESS_SPIKE named the destination of the largest single row in 14 days, counted same-region internal
 -- moves, and its rolling window never counted the ~2h before each scan. (R1-071) COST_IDLE_OPPORTUNITY skipped a
 -- never-suspend warehouse (SHOW reports a NULL timer). (R1-233) SEC_TRUST_REGRESSION fired on unchanged counts at
--- a threshold of 0.
+-- a threshold of 0. (Holistic #4/#9) the OPS_PIPELINE_DEGRADED ERR DETAIL told every logged loader failure 'its task
+-- still reads SUCCEEDED', but V166's SP_LOAD_APP_COST / SP_LOAD_STORAGE_TRUTH roll back and re-raise, so
+-- TASK_HISTORY shows those runs FAILED.
 --
 --   ~ SP_ALERT_SCAN_DAILY re-derived from V163 (its current definer), byte-identical except:
 --     ~ both mtd CTEs + MTD_COMPLETE_USD (DAY < today, the two-partition pricing): [08] pace and [09] forecast use
@@ -88950,6 +88967,11 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --     ~ [19]: the previous complete Central day of TRUE egress (TARGET_REGION or TARGET_CLOUD set), top
 --       destination = the largest per-region total of that day; TITLE 'Egress N GB on <day> (14d avg ...)'.
 --     ~ [24]: a NULL snapshot timer reads as 0 (never suspends); [29]: GREATEST(COALESCE(THRESHOLD_NUM, 1), 1).
+--     ~ [22] OPS_PIPELINE_DEGRADED ERR leg: errs carries RERAISED (a PAGE 'AppCost' / 'StorageTruth' row, the V166
+--       loaders that roll back, log and re-raise); the DETAIL says that run FAILED (a scheduled run shows FAILED
+--       in TASK_HISTORY; a hand CALL raised the error to its caller), and keeps 'returned normally, so its task
+--       still reads SUCCEEDED' for every other loader. Keys, sources and windows unchanged; byte-identical to
+--       V168's hourly twin.
 --     ~ the RETURN label names V169; the 14-block tally is unchanged.
 --   ~ ALERT_CONFIG NAME of COST_EGRESS_SPIKE, only while it still equals the V043 seed text.
 --
@@ -88984,7 +89006,7 @@ BEGIN
 END;
 $$;
 
--- >>> derived:SP_ALERT_SCAN_DAILY  (from V163; [08]/[09] complete-day MTD, [16] contract start gate + end bound, [12] live DATABASE_ID, [18] error-cycle-day key, [19] previous-day true egress, [24] NULL timer as 0, [29] threshold floor, V169)
+-- >>> derived:SP_ALERT_SCAN_DAILY  (from V163; [08]/[09] complete-day MTD, [16] contract start gate + end bound, [12] live DATABASE_ID, [18] error-cycle-day key, [19] previous-day true egress, [24] NULL timer as 0, [29] threshold floor, [22] ERR re-raise wording, V169)
 CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN_DAILY()
 RETURNS VARCHAR
 LANGUAGE SQL
@@ -89532,8 +89554,10 @@ BEGIN
     --      past the shared name-rule cadence (DAILY/METERING in the name 30h, else 3h -- the app health strip,
     --      Admin, Control Room and NATIVE_ALERT_STALE_FACTS judge it the same way), including the scans' own
     --      heartbeat rows ALERT_SCAN_HOURLY / ALERT_SCAN_DAILY -- at most one event per source per last-load
-    --      day (key = the stale LAST_LOAD_TS date, or NEVER). (b) ERR: a failure a loader logged and swallowed
-    --      (its task still reads SUCCEEDED) -- the same five ERROR_TYPEs as NATIVE_ALERT_STALE_FACTS -- one
+    --      day (key = the stale LAST_LOAD_TS date, or NEVER). (b) ERR: a failure a loader logged -- most
+    --      loaders swallow it (their task still reads SUCCEEDED); V166's SP_LOAD_APP_COST and
+    --      SP_LOAD_STORAGE_TRUTH roll back to the previous fill and re-raise (their task reads FAILED), and
+    --      the DETAIL says which (RERAISED, V168 + V169) -- the same five ERROR_TYPEs as NATIVE_ALERT_STALE_FACTS -- one
     --      event per (type, source, Central day). The three OPTIONAL SP_LOAD_MARTS_V27 arm sources (tag
     --      coverage, task node, AI usage) are left to the STALE leg, so a persistently failing optional arm
     --      raises once per episode instead of every day. (c) NOTIFY: SP_NOTIFY_WEBHOOK has not acquired its
@@ -89556,7 +89580,8 @@ BEGIN
         errs AS (
             SELECT ERROR_TYPE, SPLIT_PART(COALESCE(CONTEXT, ''), ' ', 1) AS SRC,
                    TO_DATE(LOGGED_AT) AS ERR_DAY, COUNT(*) AS N,
-                   MAX(LOGGED_AT) AS LAST_AT, MAX_BY(ERROR_MESSAGE, LOGGED_AT) AS LAST_MSG
+                   MAX(LOGGED_AT) AS LAST_AT, MAX_BY(ERROR_MESSAGE, LOGGED_AT) AS LAST_MSG,
+                   MAX(IFF(PAGE IN ('AppCost', 'StorageTruth'), 1, 0)) AS RERAISED   -- the V166 loads that roll back and re-raise
             FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
             WHERE ERROR_TYPE IN ('mart_load_failed', 'fact_load_failed', 'extract_load_failed',
                                  'cloud_svc_mart_failed', 'object_cost_load_failed')
@@ -89600,8 +89625,13 @@ BEGIN
         UNION ALL
         SELECT c.RULE_ID, 'ALL', c.SEVERITY,
                LEFT(x.ERROR_TYPE || ': ' || x.SRC || ' failed ' || x.N || 'x on ' || TO_VARCHAR(x.ERR_DAY), 300),
-               LEFT('The loader logged this and returned normally, so its task still reads SUCCEEDED and readers '
-                   || 'keep the previous fill. Last at ' || TO_VARCHAR(x.LAST_AT, 'YYYY-MM-DD HH24:MI') || ': '
+               LEFT(IFF(x.RERAISED = 1,
+                        'The loader rolled back to its previous fill, logged this and re-raised: the run FAILED '
+                        || '(a scheduled run shows FAILED in TASK_HISTORY; a hand CALL raised the error to its '
+                        || 'caller) and readers keep the previous fill.',
+                        'The loader logged this and returned normally, so its task still reads SUCCEEDED and '
+                        || 'readers keep the previous fill.')
+                   || ' Last at ' || TO_VARCHAR(x.LAST_AT, 'YYYY-MM-DD HH24:MI') || ': '
                    || COALESCE(LEFT(x.LAST_MSG, 600), '—') || '. Admin > Errors & telemetry (persisted error log).', 2000),
                x.N,
                c.RULE_ID || '|ERR|' || x.ERROR_TYPE || '|' || x.SRC || '|' || TO_VARCHAR(x.ERR_DAY)
@@ -90110,7 +90140,7 @@ UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 169 AS VERSION,
-       'Round-2 review, alerts cluster (R2-041, R2-042, R2-103, R2-044, R2-020, R2-043, R2-047, R1-071, R1-233). SP_ALERT_SCAN_DAILY re-derived from V163, byte-identical except: both mtd CTEs gain MTD_COMPLETE_USD (complete days only), which COST_BUDGET_PACE compares with the completed-days allowance and COST_FORECAST_BREACH projects with the remaining days including today; COST_CONTRACT_BREACH counts TOTAL only with a parsable CONTRACT_START_DATE, bounds CONSUMED by CONTRACT_END_DATE (exclusive) and raises nothing once the term is over or when the exhaustion falls on or after its end; COST_STORAGE_SURGE compares per live DATABASE_ID; DQ_RECON_ERROR keys on the newest error-cycle date; COST_EGRESS_SPIKE reads the previous complete Central day of true egress with the top destination by per-region total; COST_IDLE_OPPORTUNITY reads a NULL snapshot timer as never suspends; SEC_TRUST_REGRESSION floors its threshold at 1; RETURN names V169, tally 14 unchanged. ALERT_CONFIG NAME of COST_EGRESS_SPIKE refreshed only while it equals the seed text. No task change, no new object, no procedure run at apply time.' AS DESCRIPTION
+       'Round-2 review, alerts cluster (R2-041, R2-042, R2-103, R2-044, R2-020, R2-043, R2-047, R1-071, R1-233). SP_ALERT_SCAN_DAILY re-derived from V163, byte-identical except: both mtd CTEs gain MTD_COMPLETE_USD (complete days only), which COST_BUDGET_PACE compares with the completed-days allowance and COST_FORECAST_BREACH projects with the remaining days including today; COST_CONTRACT_BREACH counts TOTAL only with a parsable CONTRACT_START_DATE, bounds CONSUMED by CONTRACT_END_DATE (exclusive) and raises nothing once the term is over or when the exhaustion falls on or after its end; COST_STORAGE_SURGE compares per live DATABASE_ID; DQ_RECON_ERROR keys on the newest error-cycle date; COST_EGRESS_SPIKE reads the previous complete Central day of true egress with the top destination by per-region total; COST_IDLE_OPPORTUNITY reads a NULL snapshot timer as never suspends; SEC_TRUST_REGRESSION floors its threshold at 1; the OPS_PIPELINE_DEGRADED ERR detail says a run of the V166 app-cost or storage-truth loader rolled back and FAILED instead of claiming its task still reads SUCCEEDED; RETURN names V169, tally 14 unchanged. ALERT_CONFIG NAME of COST_EGRESS_SPIKE refreshed only while it equals the seed text. No task change, no new object, no procedure run at apply time.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 169);
 
 -- ===========================================================================
@@ -90133,21 +90163,28 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --   R2-093  INCIDENT_PROPOSALS (V072) knew only V072-era rules and band tokens. An EXH band (COST_CONTRACT_BREACH,
 --           PIPE_ETL_CYCLE_LATE) read as an entity called EXH, so the declare guard looked only for an incident
 --           holding an EXH member and opened a SECOND incident for the same late night; 'ALL' read as an entity
---           too. The user / warehouse / object rules added since V072 get their entity kind.
+--           too. Ten more rules whose key part 2 is a bare name get their entity kind: WAREHOUSE COST_IDLE_OPPORTUNITY,
+--           COST_SLEEP_POLLING; OBJECT PIPE_DT_FAILURES, PIPE_VOLUME_DROP, DQ_BREACH, DQ_SCHEMA_DRIFT; USER
+--           SEC_FAILED_LOGINS, SEC_LOGIN_TAKEOVER, SEC_ADMIN_GRANT, COST_AI_USER_RUNAWAY. Series-prefixed keys stay
+--           SCOPE, as in V072: COST_CLOUD_SVC_ANOMALY ('CLOUD SVC <WH>') and COST_ANOMALY_SWEEP ('WAREHOUSE <WH>').
+--           The declare matches the raw part 2, so ENTITY_NAME keeps the prefix and those proposals never match
+--           warehouse-change evidence (they cannot reach CONFIDENCE HIGH).
 --   R2-031  A PIPE_TASK_FAILURES proposal counted its OWN FACT_TASK_DAILY failures as corroboration, so every one
 --           read CONFIDENCE HIGH. They now reach HIGH only with a matching task change (MEDIUM on repeat days).
 --
 --   ~ SP_INCIDENT_DECLARE(VARCHAR x4) re-derived from V131 (its only definer): the 0-member rollback + OK verdict.
 --   + SP_INCIDENT_DECLARE(VARCHAR x5) derived from V131: the same body plus P_ACTOR -> DECLARED_BY / LINKED_BY.
 --     The 4-arg is KEPT so an app that is not redeployed yet still declares (it keeps crediting the owner). The
---     app CALLs the 5-arg only once has_migration(170); a later migration drops the 4-arg after that deploy.
+--     app CALLs the 5-arg once SCHEMA_VERSION holds 170: while its 4 h schema cache lacks 170 it re-reads the
+--     table on a 30 s tier, so the first declare after the apply already does. A later migration drops the 4-arg.
 --   ~ INCIDENT_PROPOSALS re-derived from V072 (its current definer): rule kinds, EXH/ALL band tokens, and the
 --     PIPE_TASK_FAILURES confidence + evidence label. Same columns, same order (the app reads SELECT *).
 --
 -- COST: none at apply (two proc swaps and one view swap). The view is computed at read time on the same tables;
 -- the declare proc gains one IF.
--- FIRST RUN: the next proposal read re-classifies every open proposal; the next manual declare from a 4.609.0
--- app writes the declaring DBA. Nothing runs at apply time. History is not rewritten: earlier manual declares
+-- FIRST RUN: the next proposal read re-classifies every open proposal; a manual declare from a 4.609.0 app made
+-- 30 s or more after the apply writes the declaring DBA (Control Room's SQL preview then ends with the viewer as a
+-- 5th argument). Nothing runs at apply time. History is not rewritten: earlier manual declares
 -- keep the app owner as Declared by (an optional, owner-run heuristic repair is staged separately).
 -- ROLLBACK: re-run V131's CREATE PROCEDURE and V072's CREATE VIEW. Remove the 5-arg overload (its teardown.sql
 -- line names the signature) only once no deployed app calls it: a 4.609.0 app on a V170 schema CALLs the 5-arg.
@@ -90510,7 +90547,7 @@ FROM evidence;
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 170 AS VERSION,
-       'Incident declare + proposals (R2-028, R2-030, R2-093, R2-031): SP_INCIDENT_DECLARE re-derived from V131 (4-arg kept) plus a NEW 5-arg overload with P_ACTOR that writes INCIDENTS.DECLARED_BY and INCIDENT_MEMBERS.LINKED_BY (the app passes the viewer once V170 is applied; CURRENT_USER() under the owner-rights app is the owner). Both overloads roll back a declare whose members INSERT linked 0 rows and return NOOP: no open alerts left to link, and the success verdict is OK: declared <id> with <n> member(s) linked. INCIDENT_PROPOSALS re-derived from V072: EXH and ALL band tokens classify ACCOUNT (an EXH band no longer opens a second incident for the same family), the user, warehouse and object rules added since V072 get their entity kind, and a PIPE_TASK_FAILURES proposal no longer counts its own task failures as corroboration (HIGH only with a matching task change; its evidence labels the count as the alert source). Same view columns. No data change, nothing runs at apply.' AS DESCRIPTION
+       'Incident declare + proposals (R2-028, R2-030, R2-093, R2-031): SP_INCIDENT_DECLARE re-derived from V131 (4-arg kept) plus a NEW 5-arg overload with P_ACTOR that writes INCIDENTS.DECLARED_BY and INCIDENT_MEMBERS.LINKED_BY (the app passes the viewer once V170 is applied; CURRENT_USER() under the owner-rights app is the owner). Both overloads roll back a declare whose members INSERT linked 0 rows and return NOOP: no open alerts left to link, and the success verdict is OK: declared <id> with <n> member(s) linked. INCIDENT_PROPOSALS re-derived from V072: EXH and ALL band tokens classify ACCOUNT (an EXH band no longer opens a second incident for the same family), ten more user, warehouse and object rules whose key carries a bare name get their entity kind (series-prefixed keys such as CLOUD SVC <WH> stay SCOPE), and a PIPE_TASK_FAILURES proposal no longer counts its own task failures as corroboration (HIGH only with a matching task change; its evidence labels the count as the alert source). Same view columns. No data change, nothing runs at apply.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 170);
 
 -- ===========================================================================
@@ -91224,9 +91261,34 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 -- TASK_CHANGE_IMPACT_SCAN (06:50) rewrite tracking rows' VERDICT_DETAIL and re-freeze the nulled PROCEDURE
 -- baselines; the next TASK_ANOMALY_SWEEP books with the new company. Verdicts on collision- or retry-affected
 -- objects change on that run (intended). Already-raised alerts are not re-raised (dedupe keys unchanged).
--- ROLLBACK: re-run the base CREATEs (V140 SP_CHANGE_IMPACT_SCAN, V109 SP_WAREHOUSE_CHANGE_SCAN, V133
--- SP_SCAN_SCHEMA_DRIFT, V150 SP_SCAN_CLOUD_SVC_ANOMALY + SP_ANOMALY_SWEEP). The re-stamped COMPANY values and
--- the re-frozen baselines stay (they are the corrected values).
+-- DELIVERY: re-raising is not delivery. SP_NOTIFY_WEBHOOK (V164) sends an OPEN event to a route only when the
+-- route's COMPANY_FILTER is ALL or the event's COMPANY, once per (EVENT_ID, ROUTE_ID) in ALERT_DELIVERIES, and
+-- V034 set every existing route to 'ALFA'. (a) On a database with no COMPANY_SCOPE row that is not TRXS_ / ALFA% /
+-- ADMIN, PERF_CHANGE_REGRESSION, PIPE_DT_FAILURES, PIPE_VOLUME_DROP, DQ_BREACH and DQ_SCHEMA_DRIFT alerts are
+-- now UNKNOWN and stop posting to an ALFA-only route (the first three seed HIGH, PIPE_DT_FAILURES is CRITICAL at
+-- 5+ failures), with no undelivered_expired row either (the watchdog reads the same filter). To keep them
+-- posting, map the database (Cost Intelligence > Spend & Attribution > Unmapped entities) or add an ALL or
+-- UNKNOWN route. (b) An OPEN event the R1b / R2 re-stamps move to a company another enabled route carries becomes
+-- eligible there: the next TASK_ALERT_NOTIFY run sends it once if it is still inside the send window (24h; 7d
+-- for CRITICAL). An older one raised within 7 days is not sent there: V164's watchdog logs an undelivered_expired
+-- row for that route instead, then another every 24h (it skips a pair logged in the last 24h) while the event
+-- stays OPEN and undelivered there, until it is 7 days old.
+-- ROLLBACK (order matters): 1. Re-run the base CREATEs (V140 SP_CHANGE_IMPACT_SCAN, V109
+-- SP_WAREHOUSE_CHANGE_SCAN, V133 SP_SCAN_SCHEMA_DRIFT, V150 SP_SCAN_CLOUD_SVC_ANOMALY + SP_ANOMALY_SWEEP). The
+-- re-stamped COMPANY values stay (they are the corrected values). 2. Right after V140's CREATE, before the next
+-- change-impact scan (06:50 Central, or Operations' Run change-impact scan now), null the still-tracking
+-- TASK and PROCEDURE baselines:
+--     UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY
+--        SET BASELINE_FROM = NULL, BASELINE_CALLS = NULL, BASELINE_FAILS = NULL,
+--            BASELINE_MEDIAN_MS = NULL, BASELINE_P95_MS = NULL, BASELINE_CREDITS_PER_CALL = NULL
+--      WHERE OBJECT_TYPE IN ('TASK', 'PROCEDURE') AND CURRENT_DATE() <= TRACKING_UNTIL AND NOT ALERTED;
+-- Why: R4 and the V172 scan froze them per scheduled run (terminal attempt) and by the anchored CALL match, but
+-- V140's AFTER legs count every attempt and the bare suffix match, and V140 re-freezes only a NULL baseline.
+-- Kept, a task with 7 of 14 runs retried once on both sides reads 14 runs / 0 failed before vs 21 / 7 after:
+-- REGRESSED, a false PERF_CHANGE_REGRESSION page; a rescaled credits/call reads a false IMPROVED. Nulled, V140's
+-- next scan re-freezes them on its own basis (over its 20-day reach: a change older than 6 days gets a shorter
+-- baseline). An ALERTED row keeps the baseline its alert was raised on (V140 alerts a row once). Check any
+-- PERF_CHANGE_REGRESSION raised between steps 1 and 2 before acting on it.
 -- Apply AFTER V171. Idempotent; safe to re-run.
 
 EXECUTE IMMEDIATE
@@ -92710,27 +92772,6 @@ UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS t
  WHERE t.EVENT_ID = s.EVENT_ID
    AND t.COMPANY IS DISTINCT FROM s.NEW_COMPANY;
 
--- R3 (R2-021) the suffix match froze baselines that blended a RUN_<name> / X_<name> wrapper's calls into <name>.
--- Frozen baselines never recompute, so null them -- only for still-tracking PROCEDURE rows whose short name is a
--- strict suffix of another procedure's name (deleted procedures included: their old calls are still in the
--- window), and only on the FIRST apply (a re-run must not undo the next scan's re-freeze). The next
--- TASK_CHANGE_IMPACT_SCAN re-freezes them with the anchored match (over the scan's own 20-day reach: a change
--- older than 6 days gets a shorter baseline, at least 6 days).
-UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
-   SET BASELINE_FROM = NULL, BASELINE_CALLS = NULL, BASELINE_FAILS = NULL,
-       BASELINE_MEDIAN_MS = NULL, BASELINE_P95_MS = NULL, BASELINE_CREDITS_PER_CALL = NULL
-  FROM (
-      SELECT DISTINCT r.CHANGE_ID
-      FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
-      JOIN SNOWFLAKE.ACCOUNT_USAGE.PROCEDURES p
-        ON ENDSWITH(UPPER(p.PROCEDURE_NAME), UPPER(SPLIT_PART(r.OBJECT_NAME, '.', 3)))
-       AND UPPER(p.PROCEDURE_NAME) <> UPPER(SPLIT_PART(r.OBJECT_NAME, '.', 3))
-      WHERE r.OBJECT_TYPE = 'PROCEDURE'
-        AND CURRENT_DATE() <= r.TRACKING_UNTIL
-        AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 172)
-  ) s
- WHERE t.CHANGE_ID = s.CHANGE_ID;
-
 -- R4 (R2-025) still-tracking TASK baselines were frozen on raw attempts. Re-freeze them on the terminal attempt per
 -- scheduled run over their own [CHANGE_SEEN_AT - 14d, CHANGE_SEEN_AT) window (30 days of TASK_HISTORY covers every
 -- tracking row; no now-20d clip). The frozen credits numerator summed every attempt and still does, so credits/call
@@ -92761,7 +92802,31 @@ UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
   ) s
  WHERE t.CHANGE_ID = s.CHANGE_ID;
 
+-- R3 (R2-021) the suffix match froze baselines that blended a RUN_<name> / X_<name> wrapper's calls into <name>.
+-- Frozen baselines never recompute, so null them -- only for still-tracking PROCEDURE rows whose short name is a
+-- strict suffix of another procedure's name (deleted procedures included: their old calls are still in the
+-- window), and only once: a re-run must not undo a scan's re-freeze (each re-null re-freezes over a shorter
+-- window). R3 runs LAST, directly before the version row, so a missing 172 row means R3 has not committed: every
+-- statement that can stop the file (the five CREATEs, R1-R2, R4's 30-day TASK_HISTORY read) runs before it, and a
+-- retry after any of them nulls these rows for the first time, even if a scan ran in between. The next
+-- TASK_CHANGE_IMPACT_SCAN re-freezes them with the anchored match (over the scan's own 20-day reach: a change
+-- older than 6 days gets a shorter baseline, at least 6 days).
+UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
+   SET BASELINE_FROM = NULL, BASELINE_CALLS = NULL, BASELINE_FAILS = NULL,
+       BASELINE_MEDIAN_MS = NULL, BASELINE_P95_MS = NULL, BASELINE_CREDITS_PER_CALL = NULL
+  FROM (
+      SELECT DISTINCT r.CHANGE_ID
+      FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
+      JOIN SNOWFLAKE.ACCOUNT_USAGE.PROCEDURES p
+        ON ENDSWITH(UPPER(p.PROCEDURE_NAME), UPPER(SPLIT_PART(r.OBJECT_NAME, '.', 3)))
+       AND UPPER(p.PROCEDURE_NAME) <> UPPER(SPLIT_PART(r.OBJECT_NAME, '.', 3))
+      WHERE r.OBJECT_TYPE = 'PROCEDURE'
+        AND CURRENT_DATE() <= r.TRACKING_UNTIL
+        AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 172)
+  ) s
+ WHERE t.CHANGE_ID = s.CHANGE_ID;
+
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 172 AS VERSION,
-       'Detection scans (V166-V172 wave, detection cluster). SP_CHANGE_IMPACT_SCAN re-derived from V140: COMPANY via COMPANY_FOR_DATABASE in both registration arms (R2-023; arm 1a through a grouped derived table, the V030 shape); procedure calls matched by CALL<name>( or .<name>( over a whitespace-class strip, the drill rule, so RUN_<name> no longer blends into <name> (R2-021); TASK runs, fails and p95 count the terminal attempt per scheduled run (R2-025); the AFTER credits/call counts settled runs (started more than 8h ago) only, LEFT JOIN plus HAVING, divided by distinct scheduled runs (R2-022); VERDICT_DETAIL p95 in Hr/Min/Sec (R1-124). SP_WAREHOUSE_CHANGE_SCAN re-derived from V109: VERDICT_DETAIL p95 and queue in Hr/Min/Sec (R1-124). SP_SCAN_SCHEMA_DRIFT re-derived from V133 and SP_ANOMALY_SWEEP from V150: PIPE_DT_FAILURES, PIPE_VOLUME_DROP, DQ_BREACH and DQ_SCHEMA_DRIFT COMPANY via COMPANY_FOR_DATABASE in a b wrapper (R2-024); the sweep also points COST_ORG_ACCOUNT_CREEP at Cost Intelligence > Contract & Forecast (R2-095), books COST_ANOMALY_SWEEP only while the rule is enabled (R1-227 rider, no early return) and reads CORTEX_MODEL normalized like the app (CORTEX-NULLIF); RETURN stays v3. SP_SCAN_CLOUD_SVC_ANOMALY re-derived from V150: the disabled-rule guard counts ENABLED rows (R1-227). One-time repairs: OBJECT_CHANGE_REGISTRY.COMPANY re-stamped, and live (OPEN, ACK, SNOOZED, not incident-linked) PERF_CHANGE_REGRESSION, DQ_SCHEMA_DRIFT, PIPE_DT_FAILURES, PIPE_VOLUME_DROP and DQ_BREACH events re-stamped from the database in their object FQN; first-apply null of suffix-collided tracking PROCEDURE baselines (re-frozen by the next scan); tracking TASK baselines re-frozen on the terminal-attempt basis with credits/call rescaled. No new object, no task change, no procedure run at apply time.' AS DESCRIPTION
+       'Detection scans (V166-V172 wave, detection cluster). SP_CHANGE_IMPACT_SCAN re-derived from V140: COMPANY via COMPANY_FOR_DATABASE in both registration arms (R2-023; arm 1a through a grouped derived table, the V030 shape); procedure calls matched by CALL<name>( or .<name>( over a whitespace-class strip, the drill rule, so RUN_<name> no longer blends into <name> (R2-021); TASK runs, fails and p95 count the terminal attempt per scheduled run (R2-025); the AFTER credits/call counts settled runs (started more than 8h ago) only, LEFT JOIN plus HAVING, divided by distinct scheduled runs (R2-022); VERDICT_DETAIL p95 in Hr/Min/Sec (R1-124). SP_WAREHOUSE_CHANGE_SCAN re-derived from V109: VERDICT_DETAIL p95 and queue in Hr/Min/Sec (R1-124). SP_SCAN_SCHEMA_DRIFT re-derived from V133 and SP_ANOMALY_SWEEP from V150: PIPE_DT_FAILURES, PIPE_VOLUME_DROP, DQ_BREACH and DQ_SCHEMA_DRIFT COMPANY via COMPANY_FOR_DATABASE in a b wrapper (R2-024); the sweep also points COST_ORG_ACCOUNT_CREEP at Cost Intelligence > Contract & Forecast (R2-095), books COST_ANOMALY_SWEEP only while the rule is enabled (R1-227 rider, no early return) and reads CORTEX_MODEL normalized like the app (CORTEX-NULLIF); RETURN stays v3. SP_SCAN_CLOUD_SVC_ANOMALY re-derived from V150: the disabled-rule guard counts ENABLED rows (R1-227). One-time repairs: OBJECT_CHANGE_REGISTRY.COMPANY re-stamped, and live (OPEN, ACK, SNOOZED, not incident-linked) PERF_CHANGE_REGRESSION, DQ_SCHEMA_DRIFT, PIPE_DT_FAILURES, PIPE_VOLUME_DROP and DQ_BREACH events re-stamped from the database in their object FQN; tracking TASK baselines re-frozen on the terminal-attempt basis with credits/call rescaled; last, right before this row, a first-apply null of suffix-collided tracking PROCEDURE baselines (re-frozen by the next scan). No new object, no task change, no procedure run at apply time.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 172);
