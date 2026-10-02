@@ -1,10 +1,11 @@
 # Changelog
 
-## 4.609.1 - Hotfix V173: the hourly new-admin-network alert compiles again, and the nightly idle alert no longer divides by zero (2026-10-02)
+## 4.609.1 - Hotfix: V173 (the hourly new-admin-network alert compiles again, the nightly idle alert no longer divides by zero) and the escalation email's delivery objects survive a teardown (2026-10-02)
 
-Two alert rules failed in production after the V162-V172 apply. Both fixes land when the owner applies **V173** (alone,
-any time, no repairs; DEPLOYMENT.md has the note). Until then the two arms keep failing as below. The app itself is
-unchanged.
+Three production failures after the V162-V172 apply. Two alert rules failed; both fixes land when the owner applies
+**V173** (alone, any time, no repairs; DEPLOYMENT.md has the note), and until then those two arms keep failing as below.
+The third was V164's escalation email, which had no recipient; the owner sets the default recipient on the integration
+(runbox `EMAIL_FIX_2026-10-02.sql`), and this release closes the repo paths that could undo it.
 
 - **SEC_NEW_ADMIN_NETWORK raised nothing from 2026-10-02 07:08.** Every hourly run of SP_ALERT_SCAN (V168) logged
   `rule_block_failed` "SQL compilation error: Unsupported subquery type cannot be evaluated" for arm [18], and the scan
@@ -49,6 +50,28 @@ unchanged.
     `NULLIF(x, 0)`, `GREATEST` with a positive floor, or an `IFF` / `CASE` that tests the same value. It covers the
     generated PREFLIGHT, PART B and repair scripts too. A filter elsewhere does not count. The P157 and P169.6 preview
     grids keep their shipped text as history, allowed only while the live arm is V173's guarded one.
+- **The escalation email had no recipient (2026-09-30 onward).** Nothing ever removed the owner's address: V164's
+  CRITICAL escalation email names no address, so it goes only to OVERWATCH_EMAIL's DEFAULT_RECIPIENTS, and that list
+  was empty, so every escalation email logged `escalation_email_failed` (the Teams posts were unaffected). The
+  default-on email leg should have waited for a recipient. The owner sets the default on the integration (runbox
+  `EMAIL_FIX_2026-10-02.sql`). In the repo:
+  - `snowflake/teardown.sql` keeps the account-level delivery objects. The four NATIVE_ALERT_* email alerts are only
+    suspended, and the OVERWATCH_* notification integrations and the Teams / webhook secrets survive; their DROPs
+    sit in an opt-in DELIVERY GATE (`drop_delivery_objects` defaults to FALSE; Run All returns `kept: ...`). Because
+    the integrations are kept, FULL_REBUILD step 2 switches every ALERT_ROUTES row off before the replay and step 3b
+    switches every restored route off again, so the first notifier run cannot re-post every open event.
+  - Every recipient instruction (the email runbook, the webhook_delivery.sql recipe, FULL_REBUILD 7b) now says that
+    SET ALLOWED_RECIPIENTS and SET DEFAULT_RECIPIENTS each replace the whole list, so DESC first and keep every
+    address; a new recipient is added beside the existing ones, never instead of them. The runbook's new Step 5
+    verifies with DESC, a test send, NOTIFICATION_HISTORY and APP_ERROR_LOG.
+  - `alert_pipeline_check.sql` STEP 4b routes `escalation_email_failed` / `escalation_*` rows to a new FIX D (the
+    integration's recipients and USAGE), never the Teams webhook fix.
+  - Alerts > Native delivery's escalation caption matches V164: an escalation is stamped once any channel delivers
+    it, so only one where every channel failed retries hourly, within 7 days of being raised.
+  - New locks fail CI on any UNSET of either recipient list, any CREATE OR REPLACE of OVERWATCH_EMAIL, any recipient
+    SET without the keep-every-address slot, and any delivery DROP outside the teardown gate.
+  - Committing the owner's default address itself into the templates, runbooks and CLAUDE.md / AGENTS.md was blocked
+    by the session's PII permission check; those edits are listed for the owner in the PR.
 - **Docs.** CLAUDE.md names V173 as the current definer of both scans. RUNBOOK §12 has the V173 rollback, and the
   V160 / V168 / V169 / wave-4 rollbacks say to roll V173 back first. Admin lists V173, and validate.sql expects
   V001..V173. The rebuild bundle is regenerated.
