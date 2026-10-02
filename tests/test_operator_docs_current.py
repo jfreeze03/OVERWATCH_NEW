@@ -201,3 +201,111 @@ def test_webhook_setup_names_the_digest_current_definer():
     assert len(re.findall(r"\(SP_DAILY_DIGEST, V\d+\)", wd)) == 1
     undone = "/".join(f"V{v:03d}" for v in versions if v > 18)
     assert f" and undoes {undone}." in wd.replace("\n-- ", " ")
+    # v4.609: RUNBOOK §12 names the same current definer (it still said V165 after V171 re-derived the digest)
+    rb = read("RUNBOOK.md")
+    assert f"(SP_DAILY_DIGEST, V{versions[-1]:03d})" in rb
+    assert len(re.findall(r"\(SP_DAILY_DIGEST, V\d+\)", rb)) == 1
+
+
+# -- v4.609 (V166-V172 wave): RUNBOOK and FULL_REBUILD say what the merged migrations and backfill do -----------
+
+def _rule_row(rb: str, rule: str) -> str:
+    return next(line for line in rb.splitlines() if line.startswith(f"| {rule} |"))
+
+
+def test_runbook_rule_rows_track_the_v168_v169_scans():
+    rb = read("RUNBOOK.md")
+    assert "once per table per failure day" in _rule_row(rb, "PIPE_COPY_FAILURES")
+    assert "stays suppressed until the next Central day" in _rule_row(rb, "PIPE_COPY_FAILURES")
+    net = _rule_row(rb, "SEC_NEW_ADMIN_NETWORK")
+    assert "first-seen Central day" in net and "V168" in net and "| once per user and IP |" not in net
+    assert "previous complete Central day" in _rule_row(rb, "COST_EGRESS_SPIKE")
+    recon = _rule_row(rb, "DQ_RECON_ERROR")
+    assert "newest error-cycle day key (V169)" in recon and "same-date" in recon
+    assert "CONTRACT_END_DATE" in _rule_row(rb, "COST_CONTRACT_BREACH")
+    for rule in ("PERF_QUERY_FAIL_PCT", "PERF_QUEUED_MINUTES", "PERF_SPILL_GB"):
+        assert "whatever its raise day (V168)" in _rule_row(rb, rule), rule
+    # the claims hold in the latest scan bodies
+    hourly, daily = _current_proc("SP_ALERT_SCAN"), _current_proc("SP_ALERT_SCAN_DAILY")
+    assert "TO_DATE(CONVERT_TIMEZONE('America/Chicago', LAST_LOAD_TIME)) AS FAIL_DAY" in hourly
+    assert "TO_DATE(CONVERT_TIMEZONE('America/Chicago', nn.FIRST_SEEN))" in hourly
+    assert "(TARGET_REGION IS NOT NULL OR TARGET_CLOUD IS NOT NULL)" in daily
+    assert "MAX(LATEST_LOAD) AS NEWEST_LOAD" in daily and "CONTRACT_END_DATE" in daily
+
+
+def test_runbook_rule_rows_track_the_v171_v172_scans():
+    rb = read("RUNBOOK.md")
+    assert "ref_gap_check_failed" in _rule_row(rb, "PIPE_REF_GAP")
+    assert "'ref_gap_check_failed'" in _current_proc("SP_SCAN_REF_GAPS")
+    assert "Hr/Min/Sec (V171)" in _rule_row(rb, "OPS_SLOW_RENDER")
+    perf = _rule_row(rb, "PERF_CHANGE_REGRESSION")
+    assert "scheduled runs" in perf and "older than 8h" in perf and "`CALL<name>(`" in perf
+    assert "stops the scan (V172" in _rule_row(rb, "COST_CLOUD_SVC_ANOMALY")
+    assert "only while the rule is enabled (V172)" in _rule_row(rb, "COST_ANOMALY_SWEEP")
+    assert "COMPANY_FOR_DATABASE; unmapped -> UNKNOWN, V172" in " ".join(rb.split())
+    impact = _current_proc("SP_CHANGE_IMPACT_SCAN")
+    assert "COMPANY_FOR_DATABASE" in impact and "'TRXS%'" not in impact
+
+
+def test_runbook_task_rows_name_the_v166_v167_loader_behaviour():
+    from app.data.app_cost_sql import SESSION_PAD_DAYS
+
+    assert "fact_load_failed" in _task_row("TASK_LOAD_STORAGE_TRUTH")
+    assert f"sessions resolved {SESSION_PAD_DAYS} days back" in _task_row("TASK_LOAD_APP_COST")
+    assert "COVERAGE_FROM" in _task_row("TASK_PATTERN_COST_DAILY")
+    assert "swept of rows the reload did not re-stamp" in _task_row("TASK_NIGHTLY_RECONCILE")
+    for proc in ("SP_LOAD_APP_COST", "SP_LOAD_STORAGE_TRUTH"):
+        body = _current_proc(proc)
+        assert "BEGIN TRANSACTION;" in body and "ROLLBACK;" in body and "'fact_load_failed'" in body, proc
+    assert f"WHERE CREATED_ON >= DATEADD('day', -{SESSION_PAD_DAYS}, :lo)" in _current_proc("SP_LOAD_APP_COST")
+    pattern = _current_proc("SP_LOAD_PATTERN_COST")
+    assert "COVERAGE_FROM" in pattern and "BEGIN TRANSACTION;" in pattern
+
+
+def test_runbook_settings_digest_and_incidents_follow_v170_v171():
+    rb = read("RUNBOOK.md")
+    flat = " ".join(rb.split())
+    assert "seeded FALSE by V171" in flat and "not seeded, and Admin never lists it" not in flat
+    assert any(re.search(r"\('CREDIT_PRICE_OVERRIDE',\s*'FALSE'\)", p.read_text(encoding="utf-8"))
+               for p in (ROOT / "snowflake" / "migrations").glob("V[0-9]*__*.sql"))
+    assert "Nothing declared" in rb and "Declared by and each member's Linked by are the DBA who typed" in rb
+    assert "Since V171 the facts cover the 7 complete days ending yesterday" in flat
+    assert "'WINDOW_DAYS=7; WAREHOUSE_SPEND_USD='" in _current_proc("SP_DAILY_DIGEST")
+
+
+def test_runbook_rollbacks_name_each_wave_procs_real_base():
+    """Every 'PROC from Vnnn' in the V166-V172 rollback paragraphs is the base the re-deriving migration's lineage
+    marker names, and every file the paragraphs cite exists."""
+    rb = read("RUNBOOK.md")
+    wave = _section(rb, "**Rolling back the V166-V172 wave.**", "| Rule | Family |")
+    for v in ("V166", "V167", "V170", "V171", "V172"):
+        assert f"**Rolling back {v}.**" in wave, v
+    assert "**Rolling back V168 / V169.**" in wave
+    migs = {p.name for p in (ROOT / "snowflake" / "migrations").glob("V[0-9]*__*.sql")}
+    for name in re.findall(r"V\d{3}__\w+\.sql", wave):
+        assert name in migs, name
+    markers = "\n".join((ROOT / "snowflake" / "migrations" / m).read_text(encoding="utf-8")
+                        for m in migs if 166 <= int(m[1:4]) <= 172)
+    claims = re.findall(r"\b(SP_[A-Z0-9_]+) from (V\d{3})(?!\d)", wave)
+    assert len(claims) >= 14, claims
+    for proc, base in claims:
+        assert f"-- >>> derived:{proc}  (from {base};" in markers, (proc, base)
+    # the shapes the regex does not read: V170's two bases, V168 / V169's
+    assert "V131's CREATE PROCEDURE (the 4-arg) and V072's CREATE VIEW" in wave
+    for obj, base in (("SP_INCIDENT_DECLARE", "V131"), ("INCIDENT_PROPOSALS", "V072"),
+                      ("SP_ALERT_SCAN", "V162"), ("SP_ALERT_SCAN_DAILY", "V163")):
+        assert f"-- >>> derived:{obj}  (from {base};" in markers, obj
+        assert f"{base}'s" in wave, base
+
+
+def test_full_rebuild_names_the_cs_mart_arm_and_the_object_cost_opt_in():
+    fr = " ".join(_section(read("docs/FULL_REBUILD.md"), "## 5. History backfill", "## 6. Validate").split())
+    assert "MART_CLOUD_SVC_DAILY" in fr and "back to 364 days" in fr and "narrow -364" in fr
+    assert "`SP_LOAD_OBJECT_COST(365)`" in fr and "14 days" in fr and "STATEMENT_TIMEOUT_IN_SECONDS" in fr
+    assert "SP_LOAD_PATTERN_COST(364)" in fr and "COVERAGE_FROM" in fr
+    bf = read("snowflake/backfill_365.sql")
+    assert "INSERT INTO DBA_MAINT_DB.OVERWATCH.MART_CLOUD_SVC_DAILY" in bf
+    assert ">= DATEADD('day', -364, CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE)" in bf
+    assert "\n--     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_OBJECT_COST(365);" in bf      # the opt-in stays commented
+    assert not re.search(r"^\s*CALL DBA_MAINT_DB\.OVERWATCH\.SP_LOAD_OBJECT_COST", bf, re.M)
+    assert "CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('DAILY', 365);" in bf

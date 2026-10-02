@@ -269,7 +269,12 @@ Run snowflake/backfill_365.sql: a year of daily facts, 90 days of the
 QUERY_HISTORY-derived marts (the extract fills first — V041), platform
 score inputs, and 180 days of security login/change facts (the loader's
 maximum: the new-network panel serves from the fact only when it holds the
-window plus a 90-day baseline). A few minutes. It suspends TASK_LOAD_HOURLY
+window plus a 90-day baseline). It also fills the cloud-services statement
+mart (MART_CLOUD_SVC_DAILY) for the days before its first load, back to 364
+days (Central days; it runs before the suspend window, since it reads
+QUERY_HISTORY, not the extract). That is the heaviest arm (a year of
+QUERY_HISTORY): if it hits the statement timeout nothing is committed, so
+narrow -364 and re-run it. The rest takes a few minutes. It suspends TASK_LOAD_HOURLY
 around the extract-fed loads; each load is guarded and keeps the loader's own verdict,
 so an error or a failure verdict (`MARTS WITH ERRORS`,
 `extract committed: false`) shows as a `FAILED:` row. The last pane must read 0 in both
@@ -279,6 +284,21 @@ worksheet stops before the end** (a timeout or Stop), run the
 `ALTER TASK ... RESUME` and `SYSTEM$TASK_DEPENDENTS_ENABLE` statements just
 above the file's final verify SELECT, or snowflake/loader_chain_check.sql
 step 0, or the hourly graph stays suspended.
+
+After a rebuild the object-cost ledger (FACT_OBJECT_COST_DAILY) holds only
+14 days: the commented `SP_LOAD_OBJECT_COST(365)` block after the RESUME pair
+reloads a year. Uncomment and run it once, off-peak, on a warehouse whose
+STATEMENT_TIMEOUT_IN_SECONDS allows it (a timeout rolls the reload back and
+the previous fill stays).
+
+The long-window AI and repeated-pattern reads gate on
+SOURCE_FRESHNESS_STATE.COVERAGE_FROM (V167), which fills on the loaders'
+first runs. The backfill's `SP_LOAD_MARTS_V27('DAILY', 365)` stamps the AI
+reach; the repeated-pattern panel reads past 90 days only after a
+`CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_PATTERN_COST(364);`. A rebuild also
+loses the Cortex Functions history before 2026-01-05 (it came from a frozen
+view no loader reads), so until 2027-01-05 a 365-day or Current-year Unit
+costs "AI spend" falls back to its labelled Functions-only read by design.
 
 ## 6. Validate
 
