@@ -773,8 +773,9 @@ _EXPECTED_MIGRATIONS = {
     170: "Incident declare + proposals: SP_INCIDENT_DECLARE re-derived from V131 (4-arg kept for an app not yet "
          "redeployed) plus a NEW 5-arg overload with P_ACTOR that writes DECLARED_BY / LINKED_BY (the app passes the "
          "viewer once V170 is applied); both roll back a declare that linked 0 alerts and return OK / NOOP verdicts "
-         "the app now reads. INCIDENT_PROPOSALS re-derived from V072: EXH / ALL band tokens are account-level, the "
-         "user / warehouse / object rules added since V072 get their entity kind, and a task-failure proposal no "
+         "the app now reads. INCIDENT_PROPOSALS re-derived from V072: EXH / ALL band tokens are account-level, ten "
+         "more user / warehouse / object rules keyed on a bare name get their entity kind (series-prefixed keys, "
+         "COST_CLOUD_SVC_ANOMALY and COST_ANOMALY_SWEEP, stay scope-level), and a task-failure proposal no "
          "longer counts its own failures as corroboration. No data change, no apply-time run",
     171: "Ops self-watch, digest window, ref-gap isolation: SETTINGS gains CREDIT_PRICE_OVERRIDE = FALSE (when "
          "not matched; validate.sql reads FALSE as no override); SP_CANARY_SENTINEL (re-derived from V017) no "
