@@ -1,3 +1,7 @@
+-- >>> 2026-10-02 08:30: DO NOT RE-RUN THIS FILE. Production shows V168 is applied (its SEC_NEW_ADMIN_NETWORK arm
+-- >>> fails with "Unsupported subquery type"), so this package already ran. Re-running it would put OLDER proc
+-- >>> versions back. Run snowflake/run/STATUS_2026-10-02.sql (read-only) and paste the grids back; the forward
+-- >>> fix (V173) will be staged as its own file.
 -- >>> FIRST (2026-10-02): run snowflake/run/EMAIL_FIX_2026-10-02.sql. It sets JDees@alfains.com as the
 -- >>> default recipient of OVERWATCH_EMAIL so V164's escalation email stops failing. It is independent of
 -- >>> everything below and safe to run now; this V162 -> V172 package still waits for app 4.609.0.
