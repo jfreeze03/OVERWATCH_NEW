@@ -797,6 +797,12 @@ _EXPECTED_MIGRATIONS = {
          "& Forecast. One-time: the change registry and the live, unlinked events of those five rules re-stamped; "
          "suffix-collided PROCEDURE baselines nulled for the next scan to re-freeze; tracking TASK baselines "
          "re-frozen per scheduled run. No task change, no apply-time run",
+    173: "Hotfix for two production failures of the V162-V172 apply: SP_ALERT_SCAN re-derived from V168 -- "
+         "SEC_NEW_ADMIN_NETWORK's dedupe guard was a subquery Snowflake cannot compile (the rule raised nothing "
+         "from 2026-10-02 07:08), now three AND-ed checks with the same outcomes; SP_ALERT_SCAN_DAILY re-derived "
+         "from V169 -- COST_IDLE_OPPORTUNITY's two divisions are NULLIF-guarded (Division by zero on a "
+         "zero-credit warehouse, 2026-10-01). Tallies and every other arm unchanged. No task change, no "
+         "apply-time run",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

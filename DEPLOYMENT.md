@@ -188,6 +188,7 @@ snowflake/migrations/V169__alert_scan_daily_windows_and_keys.sql
 snowflake/migrations/V170__incident_declare_actor_and_proposals.sql
 snowflake/migrations/V171__ops_selfwatch_digest_refgaps_seed.sql
 snowflake/migrations/V172__detection_scans_company_and_accuracy.sql
+snowflake/migrations/V173__alert_scan_supported_subquery_and_div0.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -550,6 +551,18 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > pages a false REGRESSED. Verify: PART B V172.1 / V172.2 right after the apply; V172.3 after the 06:40 / 06:50
 > scans; V172.4 after the next TASK_CHANGE_IMPACT_SCAN (06:50) and TASK_ANOMALY_SWEEP (07:00) runs (FAIL only for a
 > guarded arm that logged since the apply and was silent in the 14 days before).
+
+> **V173 (hotfix, 2026-10-02: SEC_NEW_ADMIN_NETWORK compiles again; COST_IDLE_OPPORTUNITY no longer divides by
+> zero):** apply V173 alone, any time (it guards on V172), from a worksheet pinned to Central; no repairs, no app
+> deploy needed (app 4.609.1 changes no read). It re-derives SP_ALERT_SCAN from V168 (only arm [18]'s dedupe guard) and
+> SP_ALERT_SCAN_DAILY from V169 (only arm [24]'s two divisions); nothing runs at apply time. Before it, the read-only
+> PREFLIGHT: P173.1 the failures since V168's apply (expect the two arms only), P173.2 / P173.5 what the next scans
+> raise, P173.4 the zero-credit warehouses, and PREFLIGHT P173.3 the admin user + IP pairs first seen while arm [18]
+> was failing -- the ones past its 24h window are never raised; review them in Security > Access. After it: PART B
+> V173.1 right away, V173.2 after the next :07 hourly scan (14/14, no SEC_NEW_ADMIN_NETWORK rule_block_failed since the
+> apply), V173.3 after the next 06:50 daily scan (14/14, no COST_IDLE_OPPORTUNITY rule_block_failed). Then resolve the
+> OPS_SCAN_DEGRADED events the failures raised. Rollback: RUNBOOK §12, "Rolling back V173" (it brings both failures
+> back).
 
 > **V164 verify (actionable Teams lines + CRITICAL escalation — OWNER SMOKE TEST: the send, the ARRAY
 > handling and the nested cursor loop are runtime-only):**

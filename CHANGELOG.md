@@ -1,5 +1,46 @@
 # Changelog
 
+## 4.609.1 - Hotfix V173: the hourly new-admin-network alert compiles again, and the nightly idle alert no longer divides by zero (2026-10-02)
+
+Two alert rules failed in production after the V162-V172 apply. Both fixes land when the owner applies **V173** (alone,
+any time, no repairs; DEPLOYMENT.md has the note). Until then the two arms keep failing as below. The app itself is
+unchanged.
+
+- **SEC_NEW_ADMIN_NETWORK raised nothing from 2026-10-02 07:08.** Every hourly run of SP_ALERT_SCAN (V168) logged
+  `rule_block_failed` "SQL compilation error: Unsupported subquery type cannot be evaluated" for arm [18], and the scan
+  ran 13 of 14 rules. V168 had given the arm's dedupe guard (R2-036 / R2-039) one correlated NOT EXISTS whose every
+  link to the outer row sat under an OR. Snowflake can only decorrelate a subquery that has a top-level equality to the
+  outer row. V173 re-derives SP_ALERT_SCAN from V168 and changes only that guard: a `recent` CTE (this rule's events of
+  the last 48h, the date-stripped head precomputed) and three AND-ed NOT EXISTS, each joined to the outer row by plain
+  equalities. They are the exact key, the pair's V162 undated key, and the same base and outcome on another first-seen
+  day. Splitting `NOT EXISTS (A OR B OR C)` into `NOT EXISTS (A) AND NOT EXISTS (B) AND NOT EXISTS (C)` keeps the same
+  rows, so every R2-036 / R2-039 outcome holds: a network quiet for 90 days alerts again, a failures-only key never
+  swallows the success, and one episode never raises twice. A pair first seen while the arm was failing, and more than
+  24 hours before the first scan after V173, is never raised: PREFLIGHT P173.3 lists those pairs for review in
+  Security > Access.
+- **COST_IDLE_OPPORTUNITY failed with "Division by zero" (2026-10-01 06:49, under V163; V169 kept the text).**
+  `IDLE_CREDITS / TOTAL_CREDITS` was guarded only by `HAVING SUM(CREDITS_TOTAL) > 0`, and the monthly figure's
+  `/ COVERED_DAYS` only by a WHERE. Snowflake does not promise to apply a filter before it computes a projection, and
+  MART_WAREHOUSE_EFFICIENCY_DAILY holds zero-credit rows (a warehouse with queries and no metering). V173 re-derives
+  SP_ALERT_SCAN_DAILY from V169 and wraps both divisors in `NULLIF(x, 0)`. The values of every surviving row are the
+  same, and a zero-credit warehouse is still dropped.
+- **Why CI missed both, and the new locks.** The executed harness runs the arms in an in-memory sqlite, which
+  evaluates any correlated subquery row by row and returns NULL for x / 0. It cannot see Snowflake's decorrelation
+  limits or its division error. Two static locks now run over the current definition of every procedure, function, view
+  and task:
+  - `tests/test_snowflake_supported_subqueries.py` parses each statement with sqlglot. Every correlated subquery (74
+    today) needs a top-level `inner column = outer expression` conjunct. Any other link to the outer row (an OR, a
+    range, a LIKE, an expression on both sides) is allowed only beside such a key, and only as a shape listed with its
+    production evidence (11 entries: arm [10], arm [26], the V067 supersede and V117 snooze sweeps, the V164 escalation
+    probe, the auto-declare family match). The lock fails on V168's arm [18].
+  - `tests/test_sql_division_guards.py` requires every division and modulo to guard its own divisor: a non-zero constant,
+    `NULLIF(x, 0)`, `GREATEST` with a positive floor, or an `IFF` / `CASE` that tests the same value. It covers the
+    generated PREFLIGHT, PART B and repair scripts too. A filter elsewhere does not count. The P157 and P169.6 preview
+    grids keep their shipped text as history, allowed only while the live arm is V173's guarded one.
+- **Docs.** CLAUDE.md names V173 as the current definer of both scans. RUNBOOK §12 has the V173 rollback, and the
+  V160 / V168 / V169 / wave-4 rollbacks say to roll V173 back first. Admin lists V173, and validate.sql expects
+  V001..V173. The rebuild bundle is regenerated.
+
 ## 4.609.0 - Bug-hunt round 2, server side: seven migrations (V166-V172) for the loaders, marts, alerts, incidents and detection scans (2026-10-01)
 
 Seven migrations, V166-V172, ship the server-side findings 4.608.0 queued, plus the app halves that read them. Four

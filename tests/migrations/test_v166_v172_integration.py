@@ -361,7 +361,8 @@ def test_runbook_wave4_rollbacks_name_the_cross_wave_order():
         sec = " ".join(rb[rb.index(head):rb.index("The two ALERT_CONFIG rows can stay")].split())
         assert f"On a {later} schema roll {later} back first" in sec, head
     v160 = " ".join(rb[rb.index("**Rolling back V160.**"):].split("\n\n", 1)[0].split())
-    assert "roll V169 and V163 back first" in v160
+    # V173 re-derives the daily scan from V169 (2026-10-02 hotfix): the current definer the V160 rollback must undo first
+    assert "current definer is V173, re-derived from V169), so roll V173, V169 and V163 back first, in that order" in v160
     wave = " ".join(rb[rb.index("**Rolling back the V166-V172 wave.**"):].split("\n\n", 1)[0].split())
     assert "go from V172 down to V162 in reverse apply order" in wave
 
