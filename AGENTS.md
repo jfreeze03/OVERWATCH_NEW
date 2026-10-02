@@ -30,7 +30,10 @@ small and self-contained; don't restructure or "clean up" beyond the task you we
    an already-applied migration (every committed `VNNN` is live). Never drop the shared
    schema/database.
 3. **Never commit secrets** (tokens, webhook URLs, emails) into tracked files —
-   a test fails on it. Leave placeholders for the owner to paste in Snowsight.
+   a test fails on tokens and webhook URLs. Leave placeholders for the owner to paste in Snowsight.
+   Owner decision 2026-10-02: the owner's default email address is THE default recipient; it is
+   set on OVERWATCH_EMAIL by runbox `EMAIL_FIX_2026-10-02.sql`, and committing it is pending the
+   owner. Never strip, UNSET or overwrite that live default to match a repo placeholder.
 
 ## Structure — put code where it already lives
 

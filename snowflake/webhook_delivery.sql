@@ -93,6 +93,10 @@ $$;
 -- ROTATION RUNBOOK -- the Teams URL was regenerated, or deliveries fail with
 -- webhook/HTTP errors (alert_pipeline_check.sql STEP 4 / FIX C). Change ONLY
 -- the secret, in a Snowsight worksheet (paste the new value there, never here):
+-- (NOT for APP_ERROR_LOG escalation_email_failed / escalation_failed rows: they
+-- log under PAGE 'NotifyWebhook' too, but they are V164's email leg -- the
+-- recipe at the end of this file, alert_pipeline_check.sql FIX D and
+-- docs/EMAIL_RECIPIENT_RUNBOOK.md requirement 4. A Teams rotation never fixes them.)
 --   ALTER SECRET DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL
 --       SET SECRET_STRING = '<everything after /workflows/ in the new URL>';
 -- The integration, its grants and ALERT_ROUTES stay as they are. Re-run the
@@ -145,15 +149,21 @@ $$;
 -- ENABLED, no deploy needed.
 
 -- ---------------------------------------------------------------------------
--- V164 CRITICAL escalation email (optional; Teams re-post works without it).
+-- V164 CRITICAL escalation email (ON by default: V164 seeds ESCALATE_EMAIL_INTEGRATION
+-- = OVERWATCH_EMAIL; the Teams re-post works without it). Its failures log as
+-- escalation_email_failed (alert_pipeline_check.sql STEP 4b routes them to FIX D).
 -- SP_NOTIFY_WEBHOOK emails an unacknowledged CRITICAL through the integration
 -- named in SETTINGS ESCALATE_EMAIL_INTEGRATION (default OVERWATCH_EMAIL, the
 -- email integration of docs/EMAIL_RECIPIENT_RUNBOOK.md). It sends to that
 -- integration's DEFAULT_RECIPIENTS -- no address lives in OVERWATCH. Set it
 -- ONCE in Snowsight (normally the same list as ALLOWED_RECIPIENTS), replacing
 -- the placeholder there, never here -- an address in this file lands in git:
+-- SET replaces the whole list: DESC first and keep every address it lists.
+-- OWNER DECISION 2026-10-02: the owner's default address is THE default; runbox
+-- EMAIL_FIX_2026-10-02.sql set it on OVERWATCH_EMAIL, and committing it to the
+-- repo is pending the owner. Never strip or overwrite that live default.
 -- ALTER NOTIFICATION INTEGRATION OVERWATCH_EMAIL SET
---     DEFAULT_RECIPIENTS = ('<recipient>')
+--     DEFAULT_RECIPIENTS = ('<recipient>', <every address DESC listed, each in quotes>)
 --     DEFAULT_SUBJECT = 'OVERWATCH escalation';
 -- No email leg: Admin > Settings, ESCALATE_EMAIL_INTEGRATION blank.
 -- No escalation at all: Admin > Settings, ESCALATE_AFTER_MIN 0.

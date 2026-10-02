@@ -7,6 +7,12 @@
 -- needs the integration + recipient approval first. The recipient below is a
 -- PLACEHOLDER in all FOUR SYSTEM$SEND_EMAIL calls — replace it locally, never commit
 -- a real address (the app renders this file to every viewer).
+-- OWNER DECISION 2026-10-02: the owner's default address is THE default recipient. It
+-- is set on OVERWATCH_EMAIL (ALLOWED_ / DEFAULT_RECIPIENTS) by runbox
+-- EMAIL_FIX_2026-10-02.sql, and live delivery reads it there. Committing it here in
+-- place of the placeholder is pending the owner (the agent session's PII check blocks
+-- it; tests/test_native_alert_templates.py pins the placeholder and changes with it).
+-- Until then, never strip or overwrite the live default to match this file.
 --
 -- Next-Fifty #4: besides new-event mail, three OUT-OF-BAND dead-man watchers email when
 -- OVERWATCH itself goes quiet — stale telemetry or a loader failure, a lost alert-scan /

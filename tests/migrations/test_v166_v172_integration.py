@@ -140,8 +140,8 @@ def _combined_note() -> str:
 
 
 def test_one_combined_apply_note_orders_the_whole_apply():
-    """Plan integration c: deploy the app first; V162 -> V172 in order, stop on the first error; V164 still needs
-    the escalation email; nothing CALLs at apply; the in-migration repairs are V166 / V167 / V172; then the
+    """Plan integration c: deploy the app first; V162 -> V172 in order, stop on the first error; V164's escalation
+    email needs OVERWATCH_EMAIL's DEFAULT_RECIPIENTS (owner decision 2026-10-02); nothing CALLs at apply; the in-migration repairs are V166 / V167 / V172; then the
     ordered owner-run repairs in a Central session."""
     dep = read("DEPLOYMENT.md")
     assert dep.count("> **V162-V172 (") == 1
@@ -153,7 +153,19 @@ def test_one_combined_apply_note_orders_the_whole_apply():
     assert deploy and "V172" in changelog_entry(deploy.group(1)) and "V166" in changelog_entry(deploy.group(1))
     assert "apply V162 → V172 in order" in note and "stop on the first error" in note
     assert "ALTER SESSION SET TIMEZONE = 'America/Chicago';" in note
-    assert "V164 still needs the escalation email" in note
+    # 2026-10-02 (owner decision): the email leg is chosen -- the note names where V164's escalation email goes and
+    # what P164.1 must show; the old "still needs the escalation email chosen" / Teams-only-seed choice is gone
+    assert "V164's escalation email goes to OVERWATCH_EMAIL's `DEFAULT_RECIPIENTS`" in note
+    assert "the owner chose the email leg and its default recipient on 2026-10-02" in note
+    assert "`DEFAULT_RECIPIENTS_SET` and `SNOW_ACCOUNTADMINS_CAN_USE` TRUE" in note
+    assert "`escalation_email_failed`" in note and "V164 still needs the escalation email" not in note
+    # int6091 #7: ...and nowhere else in DEPLOYMENT.md (the V164 verify note offered it as a live alternative)
+    flat_dep = " ".join(dep.replace("\n>", "\n").split())
+    assert "for a Teams-only escalation" not in flat_dep
+    v164 = flat_dep[flat_dep.index("**V164 verify (actionable Teams lines"):]
+    v164 = v164[:v164.index("2. After the next hourly chain")]
+    assert "the email leg is the owner's choice (2026-10-02)" in v164
+    assert "only a temporary mute" in v164
     assert "Nothing is CALLed at apply time." in note
     for repair in ("**V166** (a MERGE", "**V167** (a scan-free DELETE", "**V172** (the change registry"):
         assert repair in note, repair
@@ -361,9 +373,56 @@ def test_runbook_wave4_rollbacks_name_the_cross_wave_order():
         sec = " ".join(rb[rb.index(head):rb.index("The two ALERT_CONFIG rows can stay")].split())
         assert f"On a {later} schema roll {later} back first" in sec, head
     v160 = " ".join(rb[rb.index("**Rolling back V160.**"):].split("\n\n", 1)[0].split())
-    assert "roll V169 and V163 back first" in v160
+    # V173 re-derives the daily scan from V169 (2026-10-02 hotfix): the current definer the V160 rollback must undo
+    # first -- but only its daily half (int6091 #2): V173's rollback also re-runs V168's SP_ALERT_SCAN, which brings
+    # arm [18]'s 'Unsupported subquery type' failure back to the hourly scan a daily rollback never needed to touch
+    assert "current definer is V173, re-derived from V169), so roll the daily scan back through V173, V169 and V163" in v160
+    assert "roll V173, V169 and V163 back first" not in v160
     wave = " ".join(rb[rb.index("**Rolling back the V166-V172 wave.**"):].split("\n\n", 1)[0].split())
-    assert "go from V172 down to V162 in reverse apply order" in wave
+    # V173 (2026-10-02 hotfix) re-derives both scans from V168 / V169: on a V173 schema the reverse order starts there
+    assert "go from V173 (if applied) down to V162 in reverse apply order" in wave
+    assert "On a V173 schema start at V173" in wave
+
+
+# int6091 #2: V173's two halves are independent CREATEs (SP_ALERT_SCAN from V168, SP_ALERT_SCAN_DAILY from V169), so a
+# one-scan rollback re-runs only that proc's half; the whole two-proc V173 rollback brings the OTHER scan's
+# production failure back.
+_HALF = {"SP_ALERT_SCAN": "re-run only V168's SP_ALERT_SCAN CREATE",
+         "SP_ALERT_SCAN_DAILY": "re-run only V169's SP_ALERT_SCAN_DAILY CREATE"}
+
+
+def _single_scan_rollback_problems(rb: str) -> list[str]:
+    def para(head: str) -> str:
+        return " ".join(rb[rb.index(head):].split("\n\n", 1)[0].split())
+
+    problems = []
+    for head, proc in (("**Rolling back V160.**", "SP_ALERT_SCAN_DAILY"),
+                       ("**Rolling back V163.**", "SP_ALERT_SCAN_DAILY"),
+                       ("**Rolling back V168 / V169.**", None)):
+        sec = para(head)
+        problems += [f"{head} does not name V173's half: {need}"
+                     for need in ([_HALF[proc]] if proc else list(_HALF.values())) if need not in sec]
+        if "roll V173 back first" in sec or "roll V173 back before V169" in sec:
+            problems.append(f"{head} still rolls back all of V173")
+    wave4 = para("**Rolling back wave 4 (V162-V165).**")
+    if "roll V173 back before V168 or V169" in wave4 or not all(n in wave4 for n in _HALF.values()):
+        problems.append("the wave-4 paragraph does not name V173's per-proc halves")
+    whole = para("**Rolling back V173 (hotfix).**")
+    if "to undo one scan's fix only, re-run only that proc's CREATE" not in whole:
+        problems.append("the V173 paragraph does not say the halves roll back alone")
+    return problems
+
+
+def test_single_scan_rollbacks_roll_back_only_their_half_of_v173():
+    rb = read("RUNBOOK.md")
+    assert _single_scan_rollback_problems(rb) == []
+    v173 = _mig("V173")
+    for proc, base in (("SP_ALERT_SCAN", "V168"), ("SP_ALERT_SCAN_DAILY", "V169")):   # the reason: two lineages
+        assert f"-- >>> derived:{proc}  (from {base};" in v173, proc
+    assert v173.count("CREATE OR REPLACE PROCEDURE") == 2
+    # the d77ec31c wording rolled back the whole of V173 from every single-scan rollback
+    old = rb.replace(_HALF["SP_ALERT_SCAN"], "").replace(_HALF["SP_ALERT_SCAN_DAILY"], "")
+    assert len(_single_scan_rollback_problems(old)) >= 4
 
 
 def test_ops_pipeline_degraded_docs_name_both_err_outcomes():

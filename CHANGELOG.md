@@ -1,5 +1,97 @@
 # Changelog
 
+## 4.609.1 - Hotfix: V173 (the hourly new-admin-network alert compiles again, the nightly idle alert no longer divides by zero) and the escalation email's delivery objects survive a teardown (2026-10-02)
+
+Three production failures after the V162-V172 apply. Two alert rules failed; both fixes land when the owner applies
+**V173** (alone, any time, no repairs; DEPLOYMENT.md has the note), and until then those two arms keep failing as below.
+The third was V164's escalation email, which had no recipient; the owner sets the default recipient on the integration
+(runbox `EMAIL_FIX_2026-10-02.sql`), and this release closes the repo paths that could undo it.
+
+- **SEC_NEW_ADMIN_NETWORK raised nothing from 2026-10-02 07:08.** Every hourly run of SP_ALERT_SCAN (V168) logged
+  `rule_block_failed` "SQL compilation error: Unsupported subquery type cannot be evaluated" for arm [18], and the scan
+  ran 13 of 14 rules. V168 had given the arm's dedupe guard (R2-036 / R2-039) one correlated NOT EXISTS whose every
+  link to the outer row sat under an OR. Snowflake can only decorrelate a subquery that has a top-level equality to the
+  outer row. V173 re-derives SP_ALERT_SCAN from V168 and changes only that guard: a `recent` CTE (this rule's events of
+  the last 48h, the date-stripped head precomputed) and three AND-ed NOT EXISTS, each joined to the outer row by plain
+  equalities. They are the exact key, the pair's V162 undated key, and the same base and outcome on another first-seen
+  day. Splitting `NOT EXISTS (A OR B OR C)` into `NOT EXISTS (A) AND NOT EXISTS (B) AND NOT EXISTS (C)` keeps the same
+  rows, so every R2-036 / R2-039 outcome holds: a network quiet for 90 days alerts again, a failures-only key never
+  swallows the success, and one episode never raises twice. A pair first seen more than 24 hours before the first scan
+  after V173 is never raised by the arm unless V162's last run before V168's apply raised it, and LOGIN_HISTORY lands
+  up to 2 hours late, so that run missed the newest pairs. PREFLIGHT P173.3 previews the pairs first seen from 24
+  hours before V168's apply; once PART B V173.2 reads OK, PART B V173.4 lists exactly the ones no event covers, for
+  review in Security > Access.
+- **PART B reads only a scan that started after the apply.** CREATE OR REPLACE PROCEDURE leaves a running CALL alone,
+  so a scan already running at the apply finishes on the old body and can log arm [18]'s failure and a 13/14
+  heartbeat after APPLIED_AT. V173.2 / V173.3 count a heartbeat only from 55 minutes after the apply and failures
+  only from 30 minutes after it; a correct apply reads WAIT until such a scan has run, never FAIL. V173.2 also reads
+  `supersede_sweep_failed`: the V067 supersede sweep's OR took its current shape in V168 and has run only since then,
+  and its failures do not count toward the 14/14 heartbeat.
+- **COST_IDLE_OPPORTUNITY failed with "Division by zero" (2026-10-01 06:49, under V163; V169 kept the text).**
+  `IDLE_CREDITS / TOTAL_CREDITS` was guarded only by `HAVING SUM(CREDITS_TOTAL) > 0`, and the monthly figure's
+  `/ COVERED_DAYS` only by a WHERE. Snowflake does not promise to apply a filter before it computes a projection, and
+  MART_WAREHOUSE_EFFICIENCY_DAILY holds zero-credit rows (a warehouse with queries and no metering). V173 re-derives
+  SP_ALERT_SCAN_DAILY from V169 and wraps both divisors in `NULLIF(x, 0)`. The values of every surviving row are the
+  same, and a zero-credit warehouse is still dropped.
+- **Why CI missed both, and the new locks.** The executed harness runs the arms in an in-memory sqlite, which
+  evaluates any correlated subquery row by row and returns NULL for x / 0. It cannot see Snowflake's decorrelation
+  limits or its division error. Two static locks now run over the current definition of every procedure, function, view
+  and task:
+  - `tests/test_snowflake_supported_subqueries.py` parses each statement with sqlglot. Every correlated subquery (76
+    today) needs a top-level `inner column = outer expression` conjunct, and a correlated scalar subquery must also be
+    provably one row (an aggregate with no GROUP BY, LIMIT / TOP, ORDER BY or QUALIFY), Snowflake's other trigger of
+    the same error. Any other link to the outer row (an OR, a range, a LIKE, an expression on both sides) is allowed
+    only beside such a key, and only as a shape listed with its production evidence and the migration that first
+    shipped it (11 entries: arm [10], arm [26], the V067 supersede and V117 snooze sweeps, the V164 escalation probe,
+    the auto-declare family match). Queries sqlglot's scope walk skips (an UPDATE's FROM subquery, the source of an
+    INSERT ALL / INSERT FIRST) are walked on their own, and a statement no scope reaches fails the lock. It fails on
+    V168's arm [18].
+  - `tests/test_sql_division_guards.py` requires every division and modulo to guard its own divisor: a non-zero constant,
+    `NULLIF(x, 0)`, `GREATEST` with a positive floor, or an `IFF` / `CASE` that tests the same value. It covers the
+    generated PREFLIGHT, PART B and repair scripts too. A filter elsewhere does not count. The P157 and P169.6 preview
+    grids keep their shipped text as history, allowed only while the live arm is V173's guarded one.
+- **The escalation email had no recipient (2026-09-30 onward).** Nothing ever removed the owner's address: V164's
+  CRITICAL escalation email names no address, so it goes only to OVERWATCH_EMAIL's DEFAULT_RECIPIENTS, and that list
+  was empty, so every escalation email logged `escalation_email_failed` (the Teams posts were unaffected). The
+  default-on email leg should have waited for a recipient. The owner sets the default on the integration (runbox
+  `EMAIL_FIX_2026-10-02.sql`). In the repo:
+  - `snowflake/teardown.sql` keeps the account-level delivery objects. The four NATIVE_ALERT_* email alerts are only
+    suspended, and the OVERWATCH_* notification integrations and the Teams / webhook secrets survive; their DROPs
+    sit in an opt-in DELIVERY GATE (`drop_delivery_objects` defaults to FALSE; Run All returns `kept: ...`).
+  - Because the integrations are kept, a rebuild now keeps the notifier quiet itself. FULL_REBUILD step 2 switches
+    every ALERT_ROUTES row off before the replay and sets SETTINGS ESCALATE_AFTER_MIN to 0. The second is needed
+    because V164's escalation email needs no route: with OVERWATCH_EMAIL kept, the route-off alone would still let
+    every hourly run after the V164 replay email each OPEN, unacknowledged CRITICAL 120+ minutes old, the replay's
+    own SEC_CRED_EXPIRY events included. V164's seed MERGE is WHEN NOT MATCHED, so the replay keeps the 0. Step 3b
+    turns both off again inside its restore block, right after the SETTINGS and ALERT_ROUTES restores and before
+    its manual close, review and ACK (an hourly run can land in that pause). A factory reset does the same after its
+    restore. Step 0 records the escalation value, and step 7b(b) puts it back once step 8 passes. The rebuild
+    README notes and the teardown RESTORE header say the same.
+  - Every recipient instruction (the email runbook, the webhook_delivery.sql recipe, FULL_REBUILD 7b) now says that
+    SET ALLOWED_RECIPIENTS and SET DEFAULT_RECIPIENTS each replace the whole list, so DESC first and keep every
+    address; a new recipient is added beside the existing ones, never instead of them. The runbook's new Step 5
+    verifies with DESC, a test send, NOTIFICATION_HISTORY and APP_ERROR_LOG.
+  - `alert_pipeline_check.sql` STEP 4b routes `escalation_email_failed` / `escalation_*` rows to a new FIX D (the
+    integration's recipients and USAGE), never the Teams webhook fix.
+  - Alerts > Native delivery's escalation caption matches V164: an escalation is stamped once any channel delivers
+    it, so only one where every channel failed retries hourly, within 7 days of being raised.
+  - New locks fail CI on any UNSET of either recipient list, any CREATE OR REPLACE of OVERWATCH_EMAIL, any recipient
+    SET without the keep-every-address slot, and any DROP that names a kept delivery object (an integration, a
+    webhook secret, a NATIVE_ALERT_* alert) in any tracked file, commented recipes included, except inside
+    teardown.sql's gate and its rebuild/01 copy. The rebuild locks pin the step-2, step-3b and factory-reset
+    route-off and escalation-off, their order, and the step-7b(b) restore.
+  - Committing the owner's default address itself into the templates, runbooks and CLAUDE.md / AGENTS.md was blocked
+    by the session's PII permission check; those edits are listed for the owner in the PR. Every placeholder /
+    never-commit rule (the template header, the email runbook, the webhook recipe, AGENTS.md) now notes the owner
+    decision beside it, without the address: the owner's default is THE default, set on OVERWATCH_EMAIL by runbox
+    `EMAIL_FIX_2026-10-02.sql`, and committing it is pending the owner. A lock keeps the note there.
+- **Docs.** CLAUDE.md names V173 as the current definer of both scans. RUNBOOK §12 has the V173 rollback. The V160,
+  V163, V168 / V169 and wave-4 rollbacks roll back only the matching half of V173 (re-run only V168's SP_ALERT_SCAN
+  or only V169's SP_ALERT_SCAN_DAILY CREATE): the whole V173 rollback would also put the other scan back on its
+  failing body. DEPLOYMENT's V164 verify note no longer offers the Teams-only escalation seed: the email leg is the
+  owner's choice, and a blank ESCALATE_EMAIL_INTEGRATION is only a temporary mute. Admin lists V173, and
+  validate.sql expects V001..V173. The rebuild bundle is regenerated.
+
 ## 4.609.0 - Bug-hunt round 2, server side: seven migrations (V166-V172) for the loaders, marts, alerts, incidents and detection scans (2026-10-01)
 
 Seven migrations, V166-V172, ship the server-side findings 4.608.0 queued, plus the app halves that read them. Four

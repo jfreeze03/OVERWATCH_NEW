@@ -24,9 +24,11 @@ UNDERLINE = "-- ================================================================
 TEARDOWN_BANNER = (
     "-- 01_teardown_rebuildables.sql — BYTE-IDENTICAL copy of snowflake/\n"
     "-- teardown.sql (locked by tests/test_rebuild_bundle.py). Section A runs, and\n"
-    "-- so does Section B's live tail (three rebuildable tables, the ML forecast\n"
-    "-- model, the webhook secrets and the notification integrations); the rest of\n"
-    "-- B and all of C stay commented, so the operator data B lists survives."
+    "-- so does Section B's live tail (three rebuildable tables and the ML forecast\n"
+    "-- model); the rest of B and all of C stay commented, so the operator data B\n"
+    "-- lists survives. The delivery objects (email alerts, notification\n"
+    "-- integrations, webhook secrets) are KEPT: their drops run only inside the\n"
+    "-- DELIVERY GATE, with drop_delivery_objects set TRUE (owner decision 2026-10-02)."
 )
 # 03/04/05 are plain byte copies; their banner is generated too (holistic #14).
 COPY_BANNER = (
@@ -105,20 +107,33 @@ Around the files (docs/FULL_REBUILD.md has the statements):
 - **Before 00** (step 0): list the opt-in objects and the live ALERT_ROUTES, and
   record WH_ALFA_ADMIN's STATEMENT_TIMEOUT_IN_SECONDS (V002 sets it back to 300)
   and its resource_monitor (the replay detaches any monitor: if step 0 finds one
-  other than OVERWATCH_RM, ask the owner before 02 whether it goes back).
+  other than OVERWATCH_RM, ask the owner before 02 whether it goes back), and the
+  SETTINGS ESCALATE_AFTER_MIN / ESCALATE_EMAIL_INTEGRATION values (step 2 sets the
+  delay to 0 until 7b).
+- **Between 01 and 02** (step 2): if you kept operator data, switch every
+  ALERT_ROUTES row off and set SETTINGS ESCALATE_AFTER_MIN to 0. 01 keeps the
+  notification integrations, so with the routes live the notifier 02 resumes
+  would re-post the last 24 h of OPEN events (7 days for a CRITICAL), the
+  replay's own included, and the escalation email needs no route: it would
+  mail every OPEN, unacknowledged CRITICAL over 120 minutes old.
 - **02**: its generated header re-creates the retired roles {grantors} grant
   to (03 drops them again). If Run All stops between V002 and V045, detach the
   OVERWATCH_RM resource monitor V002 attached before anything else (step 3).
 - **Between 02 and 03** (step 3b): if you kept operator data, restore SETTINGS,
   COMPANY_SCOPE, ALERT_CONFIG, ALERT_ROUTES, DEPARTMENT_MAP and SAVINGS_LEDGER
-  from the 00 clones (the replay re-ran one-time statements on them) and close
-  the events the replay raised for rules that are off again. On every path, put
+  from the 00 clones (the replay re-ran one-time statements on them). In the
+  same block, set ESCALATE_AFTER_MIN back to 0 right after the SETTINGS restore
+  and switch every route off right after the ALERT_ROUTES restore (the clones
+  hold the live values; both stay off until step 7b), then close the events
+  the replay raised for rules that are off again. On every path, put
   the warehouse timeout back (and, on the owner's yes, the monitor step 0
   found), and if another role created the 02 shim's roles, drop them with it
   now: 03 opens by dropping them.
-- **After 05** (step 7b): re-create the opt-in objects 01 dropped (email alerts,
-  drill, ML forecast, notification integrations and secrets) and re-enable the
-  routes step 0 listed.
+- **After 05** (step 7b): re-create the opt-in objects 01 dropped (drill, ML
+  forecast; the email alerts, notification integrations and secrets only if
+  01's delivery gate was opened), resume the four email alerts 01 suspended,
+  re-enable the routes step 0 listed, and, once step 8 passes, put back the
+  ESCALATE_AFTER_MIN value step 0 recorded.
 {end}"""
 
 

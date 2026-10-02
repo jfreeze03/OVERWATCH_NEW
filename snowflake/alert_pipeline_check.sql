@@ -69,17 +69,33 @@ GROUP BY 1, 2 ORDER BY 1 DESC, 2;
 
 -- ---------------------------------------------------------------------------
 -- STEP 4b: sender-side failures and the expiry watchdog (these log to
--- APP_ERROR_LOG, not the deliveries table).
+-- APP_ERROR_LOG, not the deliveries table). ROUTE first lists which fix a
+-- row belongs to -- the V164 escalation email logs under PAGE 'NotifyWebhook'
+-- too, because it runs inside SP_NOTIFY_WEBHOOK, but it is NOT a Teams fault.
 -- 'undelivered_expired'   -> events aged past 24h with no successful send
 --                            (sender running but nothing eligible reached it
 --                            in time, or the send kept failing).
--- webhook/notification errors -> the Teams integration end (STEP 6, FIX C).
+-- 'escalation_email_failed' -> the V164 EMAIL leg: OVERWATCH_EMAIL has no
+--                            DEFAULT_RECIPIENTS, or the proc owner lost USAGE
+--                            on it -> FIX D. Rotating the Teams secret or
+--                            recreating the Teams integration never fixes it.
+-- 'escalation_failed' (any other 'escalation%' type) -> the escalation pass
+--                            itself; the run's deliveries still went -> FIX D
+--                            (read its ERROR_MESSAGE there), never FIX C.
+-- every other webhook/notification error -> the Teams integration end
+--                            (STEP 6, FIX C).
 -- ---------------------------------------------------------------------------
-SELECT DATE(LOGGED_AT) AS DAY, ERROR_TYPE, LEFT(ERROR_MESSAGE, 140) AS MSG, COUNT(*) AS N
+SELECT DATE(LOGGED_AT) AS DAY,
+       CASE WHEN ERROR_TYPE = 'escalation_email_failed'
+                 THEN 'FIX D: escalation email (OVERWATCH_EMAIL DEFAULT_RECIPIENTS / USAGE)'
+            WHEN ERROR_TYPE ILIKE 'escalation%'
+                 THEN 'FIX D: escalation pass (not Teams)'
+            ELSE 'FIX C: Teams integration' END AS ROUTE,
+       ERROR_TYPE, LEFT(ERROR_MESSAGE, 140) AS MSG, COUNT(*) AS N
 FROM APP_ERROR_LOG
 WHERE PAGE = 'NotifyWebhook'
   AND LOGGED_AT >= DATEADD('day', -14, CURRENT_TIMESTAMP())
-GROUP BY 1, 2, 3 ORDER BY 1 DESC, 2;
+GROUP BY 1, 2, 3, 4 ORDER BY 1 DESC, 2, 3;
 
 -- ---------------------------------------------------------------------------
 -- STEP 5: routes and rule config. Look for ENABLED = FALSE where you expect
@@ -130,4 +146,22 @@ SHOW RESOURCE MONITORS;  -- expect none since V045
 -- Do NOT re-run that whole file for a rotation: recreating the integration drops
 -- its grants. Re-run it only if the URL prefix or the Adaptive Card template
 -- changed (it is idempotent: it never adds a second route).
+-- NOT for STEP 4b's escalation_* rows (ROUTE 'FIX D'): the Teams fix never fixes them.
+--
+-- FIX D (STEP 4b ROUTE 'FIX D' -- the V164 CRITICAL escalation, which logs under
+-- PAGE 'NotifyWebhook' because it runs inside the notifier; Teams is not at fault):
+--   escalation_email_failed -> the escalation email names no address: it goes ONLY
+--     to OVERWATCH_EMAIL's DEFAULT_RECIPIENTS. Look, then follow
+--     docs/EMAIL_RECIPIENT_RUNBOOK.md requirement 4 (Step 2 sets DEFAULT_RECIPIENTS;
+--     run its ALLOWED_RECIPIENTS SET only when DESC lacks the address, and since
+--     SET replaces a whole list, DEFAULT_RECIPIENTS too, keep every address DESC shows):
+-- DESC NOTIFICATION INTEGRATION OVERWATCH_EMAIL;     -- ENABLED true, DEFAULT_RECIPIENTS set?
+-- SHOW GRANTS ON INTEGRATION OVERWATCH_EMAIL;        -- USAGE to SNOW_ACCOUNTADMINS?
+--     After the fix, prove it: no new escalation_email_failed row after the next
+--     hourly TASK_ALERT_NOTIFY run, and a SUCCESS row in
+--     INFORMATION_SCHEMA.NOTIFICATION_HISTORY for OVERWATCH_EMAIL once the next
+--     escalation sends (the runbook's Verify step).
+--   escalation_failed -> the escalation pass itself errored (the run's normal
+--     deliveries still went); send me the ERROR_MESSAGE text (as FIX B). RUNBOOK.md
+--     section 19 "Escalation symptoms" lists both.
 -- ============================================================================

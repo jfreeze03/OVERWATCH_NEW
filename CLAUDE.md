@@ -52,7 +52,12 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
 4. **Every SQL builder gets a canary** (`app/data/canary.py`, default args,
    sqlglot-parses) and **every created object a teardown mention**
    (`tests/test_teardown_coverage.py`). Teardown keeps ALL destructive lines
-   commented; operator data survives; never DROP SCHEMA/DATABASE.
+   commented; operator data survives; never DROP SCHEMA/DATABASE. The
+   account-level delivery objects (OVERWATCH_* notification integrations,
+   webhook secrets, the four NATIVE_ALERT_* email alerts) drop only inside its
+   DELIVERY GATE (`drop_delivery_objects` DEFAULT FALSE, owner decision
+   2026-10-02: the email default must never be overwritten again); the same
+   test locks it.
 5. **Migration guard + floor lockstep:** each V0XX opens with the not_ready
    guard and ends with the idempotent SCHEMA_VERSION insert; bump
    `snowflake/validate.sql` (both the `V001..V0XX applied` label and the
@@ -139,6 +144,17 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
     `tests/test_pages_shaped.py` and `tests/test_pages_apptest.py`;
     `tests/test_schema_gate.py` enforces the first two in full (and that the
     apptest harness stubs schema_gate and attention).
+13. **Snowflake-only failures (V173, 2026-10-02).** The executed sqlite harnesses
+    evaluate any correlated subquery row by row and return NULL for x / 0, so a
+    green harness proved neither V168's OR-correlated guard (Snowflake: "Unsupported
+    subquery type cannot be evaluated") nor V163's filter-guarded division
+    ("Division by zero"). Two static locks cover every current definer:
+    `tests/test_snowflake_supported_subqueries.py` (each correlated subquery needs a
+    top-level `inner column = outer expression` key; any other link to the outer
+    row only beside one, as a production-proven `_PROVEN` shape) and
+    `tests/test_sql_division_guards.py` (each divisor guards itself: NULLIF, a
+    non-zero constant, a positive GREATEST floor or an IFF / CASE test of the same
+    value; a WHERE / HAVING never counts).
 
 ## Owner decisions (do not relitigate)
 
@@ -175,8 +191,9 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
   MOD(ct_hour, 4) = 1, the hourly [22] only when MOD(ct_hour, 3) = 2; a gate wraps an UNCHANGED arm
   and a gated-off arm counts as ok. `app/logic/quotas.runaway_days` is the app twin of daily arm [28]:
   re-derive either side only with `tests/test_ai_runaway_parity.py` green (or change both together).
-- Current definers (re-derive forward from THESE): SP_ALERT_SCAN = V168, SP_ALERT_SCAN_DAILY = V169
-  (arm numbers unchanged; the next free is still [30]), SP_INCIDENT_AUTODECLARE = V162, SP_NOTIFY_WEBHOOK =
+- Current definers (re-derive forward from THESE): SP_ALERT_SCAN = V173, SP_ALERT_SCAN_DAILY = V173
+  (arm numbers unchanged; the next free is still [30]; V173 changed only hourly [18]'s dedupe guard and daily
+  [24]'s two divisions), SP_INCIDENT_AUTODECLARE = V162, SP_NOTIFY_WEBHOOK =
   V164 (its escalation SETTINGS expressions are pinned to `mart_sql.ESCALATE_*` by
   `tests/test_escalation_delivery.py`, and `last_delivery_health` still keys on the
   `route <id> integration <name>` CONTEXT), SP_DAILY_DIGEST = V171 (its grounding literals still live in

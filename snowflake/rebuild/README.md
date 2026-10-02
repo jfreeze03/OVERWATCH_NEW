@@ -9,7 +9,7 @@ before moving on:
 |---|------|------|--------|
 | 00 | 00_backup_operator_data.sql | date-stamped clones of all operator tables | SOURCE_ROWS == CLONE_ROWS every row |
 | 01 | 01_teardown_rebuildables.sql | drops every rebuildable OVERWATCH object (operator data survives) | VERIFY select lists ONLY operator tables |
-| 02 | 02_migrations_V001_V172.sql | all 172 migrations, in order | runs to the end; halts AT the failure if any |
+| 02 | 02_migrations_V001_V173.sql | all 173 migrations, in order | runs to the end; halts AT the failure if any |
 | 03 | 03_roles.sql | grants incl. the V041 objects | 'roles applied' |
 | 04 | 04_backfill_365.sql | year of dailies, 90d marts (extract first), 180d security facts, 364d cloud-services statement mart; opt-in (commented): 365d object-cost ledger reload, off-peak. THEN (required, even if 04 is skipped) the V167 AI reload-then-prune block in docs/FULL_REBUILD.md §5: the 02 replay's V078 first-fill keyed a year of Cortex Code rows on the stored offset, and the Central MERGE cannot remove them | last pane BACKFILL_CALLS_FAILED = 0 and LOADER_ARMS_FAILED = 0 (FAILURES names each one; if it stops early, run its `ALTER TASK ... TASK_LOAD_HOURLY RESUME` and `SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY')`, the two statements just above its final verify SELECT, or loader_chain_check.sql step 0) |
 | 05 | 05_validate.sql | post-install checks | every row OK |
@@ -23,20 +23,33 @@ Around the files (docs/FULL_REBUILD.md has the statements):
 - **Before 00** (step 0): list the opt-in objects and the live ALERT_ROUTES, and
   record WH_ALFA_ADMIN's STATEMENT_TIMEOUT_IN_SECONDS (V002 sets it back to 300)
   and its resource_monitor (the replay detaches any monitor: if step 0 finds one
-  other than OVERWATCH_RM, ask the owner before 02 whether it goes back).
+  other than OVERWATCH_RM, ask the owner before 02 whether it goes back), and the
+  SETTINGS ESCALATE_AFTER_MIN / ESCALATE_EMAIL_INTEGRATION values (step 2 sets the
+  delay to 0 until 7b).
+- **Between 01 and 02** (step 2): if you kept operator data, switch every
+  ALERT_ROUTES row off and set SETTINGS ESCALATE_AFTER_MIN to 0. 01 keeps the
+  notification integrations, so with the routes live the notifier 02 resumes
+  would re-post the last 24 h of OPEN events (7 days for a CRITICAL), the
+  replay's own included, and the escalation email needs no route: it would
+  mail every OPEN, unacknowledged CRITICAL over 120 minutes old.
 - **02**: its generated header re-creates the retired roles V006, V007 and V008 grant
   to (03 drops them again). If Run All stops between V002 and V045, detach the
   OVERWATCH_RM resource monitor V002 attached before anything else (step 3).
 - **Between 02 and 03** (step 3b): if you kept operator data, restore SETTINGS,
   COMPANY_SCOPE, ALERT_CONFIG, ALERT_ROUTES, DEPARTMENT_MAP and SAVINGS_LEDGER
-  from the 00 clones (the replay re-ran one-time statements on them) and close
-  the events the replay raised for rules that are off again. On every path, put
+  from the 00 clones (the replay re-ran one-time statements on them). In the
+  same block, set ESCALATE_AFTER_MIN back to 0 right after the SETTINGS restore
+  and switch every route off right after the ALERT_ROUTES restore (the clones
+  hold the live values; both stay off until step 7b), then close the events
+  the replay raised for rules that are off again. On every path, put
   the warehouse timeout back (and, on the owner's yes, the monitor step 0
   found), and if another role created the 02 shim's roles, drop them with it
   now: 03 opens by dropping them.
-- **After 05** (step 7b): re-create the opt-in objects 01 dropped (email alerts,
-  drill, ML forecast, notification integrations and secrets) and re-enable the
-  routes step 0 listed.
+- **After 05** (step 7b): re-create the opt-in objects 01 dropped (drill, ML
+  forecast; the email alerts, notification integrations and secrets only if
+  01's delivery gate was opened), resume the four email alerts 01 suspended,
+  re-enable the routes step 0 listed, and, once step 8 passes, put back the
+  ESCALATE_AFTER_MIN value step 0 recorded.
 <!-- end of generated replay notes -->
 
 These files are GENERATED and equality-locked against their sources

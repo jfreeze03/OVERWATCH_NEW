@@ -188,6 +188,7 @@ snowflake/migrations/V169__alert_scan_daily_windows_and_keys.sql
 snowflake/migrations/V170__incident_declare_actor_and_proposals.sql
 snowflake/migrations/V171__ops_selfwatch_digest_refgaps_seed.sql
 snowflake/migrations/V172__detection_scans_company_and_accuracy.sql
+snowflake/migrations/V173__alert_scan_supported_subquery_and_div0.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -361,9 +362,11 @@ snowflake/validate.sql   -- read the output; every row should be OK
 >    owner worksheet is otherwise UTC, and PART B V172.4 compares `SCHEMA_VERSION.APPLIED_AT` with Central task
 >    stamps). Each migration guards on the one before: stop on the first error, fix it, and re-run that file
 >    (every one is idempotent). Apply outside 06:30-07:30 CT so no daily loader straddles a procedure swap.
-> 2. **V164 still needs the escalation email chosen first** (PREFLIGHT P164.1: `DEFAULT_RECIPIENTS_SET` and
->    `SNOW_ACCOUNTADMINS_CAN_USE` TRUE, or seed `('ESCALATE_EMAIL_INTEGRATION','')` for a Teams-only escalation;
->    see the V164 verify note below). V165-V172 wait behind it: each guards on the one before.
+> 2. **V164's escalation email goes to OVERWATCH_EMAIL's `DEFAULT_RECIPIENTS`** — the owner chose the email leg
+>    and its default recipient on 2026-10-02 (docs/EMAIL_RECIPIENT_RUNBOOK.md requirement 4). PREFLIGHT P164.1
+>    must show `DEFAULT_RECIPIENTS_SET` and `SNOW_ACCOUNTADMINS_CAN_USE` TRUE; without the default list every
+>    escalation email fails with `escalation_email_failed` while the Teams re-post still goes (see the V164
+>    verify note below). V165-V172 wait behind V164: each guards on the one before.
 > 3. Every app read of a new column and every new caption is gated on its own migration
 >    (`app/ui/schema_gate.py`), so 4.609.0 is safe on either side of the apply; after it the gated text appears
 >    within 4 h (the metadata cache) or at once on Refresh (the V170 declare overload and its two Control Room
@@ -551,14 +554,32 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > scans; V172.4 after the next TASK_CHANGE_IMPACT_SCAN (06:50) and TASK_ANOMALY_SWEEP (07:00) runs (FAIL only for a
 > guarded arm that logged since the apply and was silent in the 14 days before).
 
+> **V173 (hotfix, 2026-10-02: SEC_NEW_ADMIN_NETWORK compiles again; COST_IDLE_OPPORTUNITY no longer divides by
+> zero):** apply V173 alone, any time (it guards on V172), from a worksheet pinned to Central; no repairs, no app
+> deploy needed (app 4.609.1 changes no read). It re-derives SP_ALERT_SCAN from V168 (only arm [18]'s dedupe guard) and
+> SP_ALERT_SCAN_DAILY from V169 (only arm [24]'s two divisions); nothing runs at apply time. Before it, the read-only
+> PREFLIGHT: P173.1 the failures since V168's apply (expect the two arms only), P173.2 / P173.5 what the next scans
+> raise, P173.4 the zero-credit warehouses, and PREFLIGHT P173.3 a preview of the admin user + IP pairs first seen
+> from 24h before V168's apply (LOGIN_HISTORY lands up to 2h late, so V162's last run before it missed the newest),
+> with whether an event exists. After it: PART B V173.1 right away; V173.2 after an hourly scan that started after the
+> apply (14/14, no SEC_NEW_ADMIN_NETWORK rule_block_failed, no supersede_sweep_failed); V173.3 after a 06:50 daily
+> scan that started after the apply (14/14, no COST_IDLE_OPPORTUNITY rule_block_failed). A scan already running at the
+> apply finishes on its old body, so both count only a heartbeat 55+ minutes after the apply: a WAIT means re-run
+> after the next scan (apply before about 05:50 to read V173.3 the same morning). Once V173.2 reads OK, PART B V173.4
+> lists the admin pairs arm [18] will never raise: review each by hand in Security > Access. Then resolve the
+> OPS_SCAN_DEGRADED events the failures raised. Rollback: RUNBOOK §12, "Rolling back V173" (it brings both failures
+> back).
+
 > **V164 verify (actionable Teams lines + CRITICAL escalation — OWNER SMOKE TEST: the send, the ARRAY
 > handling and the nested cursor loop are runtime-only):**
 > 1. Before the apply: PREFLIGHT P164.1 must show `DEFAULT_RECIPIENTS_SET` and
->    `SNOW_ACCOUNTADMINS_CAN_USE` TRUE, or seed `('ESCALATE_EMAIL_INTEGRATION','')` for a Teams-only
->    escalation. P164.2 lists the first-run escalations of CRITICALs that already exist, and P162.4
+>    `SNOW_ACCOUNTADMINS_CAN_USE` TRUE: the email leg is the owner's choice (2026-10-02), with its
+>    default recipient set on OVERWATCH_EMAIL (runbox `EMAIL_FIX_2026-10-02.sql`). A blank
+>    `ESCALATE_EMAIL_INTEGRATION` is only a temporary mute of that leg, not an alternative to it.
+>    P164.2 lists the first-run escalations of CRITICALs that already exist, and P162.4
 >    the CRITICAL takeovers V162's first hourly scan raises (P164.2 cannot see those; they escalate
 >    about 2-3 hours after the apply too). Read both: acknowledge stale ones (the new takeovers within
->    2 hours of the first hourly scan) or seed `('ESCALATE_AFTER_MIN','0')` (both seeds survive the
+>    2 hours of the first hourly scan) or seed `('ESCALATE_AFTER_MIN','0')` (the seed survives the
 >    V164 MERGE, which is WHEN NOT MATCHED).
 > 2. After the next hourly chain: TASK_ALERT_NOTIFY SUCCEEDED (its RETURN_VALUE stays NULL: a task
 >    that CALLs a proc does not publish the proc's return string), no `escalation_failed` or
@@ -768,14 +789,20 @@ no per-user access control. This is a dev path only.
 surgical by design — the schema is shared with the old app, so it never drops
 `DBA_MAINT_DB.OVERWATCH` itself, only named objects:
 
-- **Section A (live):** tasks, alerts, procs, functions, views, transient
+- **Section A (live):** tasks, procs, functions, views, transient
   facts/marts. Re-run the migrations in order (V001 through the repo tip) and
   the loaders repopulate — except the opt-in objects no migration creates:
-  the four NATIVE_ALERT_* email alerts, TASK_ALERT_DRILL and the ML forecast
-  objects. The opt-in tail at the end of Section B also runs live: it drops
-  the ML forecast model, the webhook secrets and the OVERWATCH_* notification
-  integrations (OVERWATCH_EMAIL, OVERWATCH_WEBHOOK_TEAMS, …). Re-create those
+  TASK_ALERT_DRILL and the ML forecast objects. The opt-in tail at the end of
+  Section B also runs live: it drops the ML forecast model. Re-create those
   with their opt-in scripts afterwards (docs/FULL_REBUILD.md step 7b).
+- **Delivery objects are KEPT** (owner decision 2026-10-02: the email default
+  must never be overwritten again): the four NATIVE_ALERT_* email alerts are
+  only suspended (step 7b resumes them), and the OVERWATCH_* notification
+  integrations (OVERWATCH_EMAIL with its ALLOWED_ / DEFAULT_RECIPIENTS,
+  OVERWATCH_WEBHOOK_TEAMS, …) and the webhook secrets survive. Their drops
+  sit inside the file's DELIVERY GATE, which runs only when
+  `drop_delivery_objects` is set TRUE in a Snowsight copy, as ACCOUNTADMIN,
+  for a true uninstall.
 - **Section B (commented, except two live parts):** operator data — settings,
   company scope, alert config/events/audit, action queue, savings ledger,
   error log, schema_version, OVERWATCH_STAGE. Uncomment only for a factory
