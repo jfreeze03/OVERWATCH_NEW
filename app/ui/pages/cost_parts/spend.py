@@ -283,7 +283,8 @@ _CS_BILLED_WHY = (
 def _cs_mart_coverage_note(df, span: int, covers: str) -> str:
     """R2-012: '' when MART_CLOUD_SVC_DAILY holds every day of the window, else one sentence naming how many it
     holds (the reader's COVERED_DAYS: distinct days in the window, account-wide). The statement mart is loaded
-    hourly and never backfilled, so a window that starts before its first load sums fewer days than its label.
+    hourly; snowflake/backfill_365.sql fills its history (HEAL-CS-MART), so until that has run a window that starts
+    before its first load sums fewer days than its label.
     ``covers`` names what the shortfall limits."""
     if df is None or getattr(df, "empty", True) or "COVERED_DAYS" not in df.columns:
         return ""
@@ -291,8 +292,8 @@ def _cs_mart_coverage_note(df, span: int, covers: str) -> str:
     span = max(1, int(span))
     if pd.isna(cov) or int(cov) >= span:
         return ""
-    return (f"The statement mart holds {int(cov)} of this window's {span} days (it is loaded hourly and never "
-            f"backfilled), so {covers} cover those days only.")
+    return (f"The statement mart holds {int(cov)} of this window's {span} days (it is loaded hourly; "
+            f"snowflake/backfill_365.sql fills its history), so {covers} cover those days only.")
 
 
 def _cs_billed_families_panel(company: str, days: int, rate: float, sel_wh: str, *,
@@ -1038,8 +1039,9 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 # reads pass bounds (stamped with the span) and the caption compares against
                 # the span -- `days` is only the day OFFSET there (272 for Current year on
                 # Sep 30, a 273-day range), and clamp_days(offset) falsely read "90d of 272d".
-                # R2-012: the MART leg can be short too -- MART_CLOUD_SVC_DAILY is never backfilled, so
-                # its COVERED_DAYS (which served_days takes) can be under the span; name that reason,
+                # R2-012: the MART leg can be short too -- MART_CLOUD_SVC_DAILY has no backfill unless
+                # snowflake/backfill_365.sql has run, so its COVERED_DAYS (which served_days takes) can be under
+                # the span; name that reason,
                 # never the live clamp, when the mart answered.
                 _cs_span = (bounds[1] - bounds[0]).days if bounds is not None else days
                 _cs_days = served_days(cs_types, _cs_span)
@@ -1050,7 +1052,8 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                               f" Scanned {_cs_days}d of the {_cs_span}d window (the live "
                               "fallback caps its scan)." if _cs_live else
                               f" The statement mart holds {_cs_days} of this window's {_cs_span} days (it is "
-                              "loaded hourly and never backfilled), so these totals cover those days only."))
+                              "loaded hourly; snowflake/backfill_365.sql fills its history), so these totals "
+                              "cover those days only."))
 
     # V055: shape/user drill-down from MART_CLOUD_SVC_DAILY — for ANY warehouse
     # (not only ELEVATED), no live QUERY_HISTORY scan. Names the exact query
@@ -1069,8 +1072,9 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                                  "not only ELEVATED. '(all warehouses)' includes the no-warehouse "
                                  "metadata bucket (WAREHOUSE_NAME resolves to NONE).")
         wh_arg = "" if pick == _ALL else pick
-        # R2-012: coverage=True adds COVERED_DAYS (the days the never-backfilled statement mart holds in
-        # the window), so a window older than the mart says how many days these rankings sum.
+        # R2-012: coverage=True adds COVERED_DAYS (the days the statement mart holds in the window; no backfill
+        # unless snowflake/backfill_365.sql has run), so a window older than the mart says how many days these
+        # rankings sum.
         shapes = run(mart_sql.cloud_svc_top_shapes(days, company, wh_arg, bounds=bounds, coverage=True),
                      page=_PAGE, key=f"cs_shapes_{company}_{days}_{pick}", tier="hourly",
                      source="MART_CLOUD_SVC_DAILY (per-query CS credits, loaded hourly)")

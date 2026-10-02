@@ -646,7 +646,7 @@ def test_ask_page_telemetry_wiring():
 
 
 # ============================ R2-012 at the Ask call site (v4.608 review) ===
-# MART_CLOUD_SVC_DAILY is never backfilled (it starts at its first load), so 'this year' (365d) or
+# MART_CLOUD_SVC_DAILY starts at its first load unless snowflake/backfill_365.sql has run, so 'this year' (365d) or
 # 'this quarter' (90d) summed ~67 days of statement history under a 365d / 90d label. The answer now
 # reads COVERED_DAYS (cloud_svc_top_shapes(coverage=True)) and names the covered days.
 
@@ -678,7 +678,7 @@ def test_cs_ask_headline_names_the_covered_days_not_the_asked_window():
     assert "over 365d" not in res.headline                        # never the full window over 67 days
     assert "the 67 days the statement mart holds of the last 365d" in res.headline
     assert "50.0 CS credits" in res.headline                      # the figure itself is unchanged
-    caveat = [b for b in res.bullets if "never backfilled" in b]
+    caveat = [b for b in res.bullets if "snowflake/backfill_365.sql fills its history" in b]
     assert len(caveat) == 1 and "holds 67 of this window's 365 days" in caveat[0]
     assert res.params["covered_days"] == 67
     assert res.params["days"] == 365                              # the ratio bullet keeps the asked window
@@ -700,5 +700,5 @@ def test_cs_ask_full_coverage_keeps_the_plain_window():
     for covered in (30, 31, None):                                # full (incl. today's partial day) or unknown
         res = _analyze_cs_by_query(AskParams(30, "ALL"), {"shapes": _cs_cov_shapes(covered)})
         assert "over 30d" in res.headline and "statement mart holds" not in res.headline
-        assert not any("never backfilled" in b for b in res.bullets)
+        assert not any("backfill_365" in b for b in res.bullets)
         assert "covered_days" not in res.params
