@@ -21,7 +21,9 @@ PLAYBOOKS: dict[str, str] = {
         "step-change against the warehouse's own 28 days, so a chronically chatty warehouse stays quiet."
     ),
     "COST_STORAGE_SURGE": (
-        "**Means:** a database grew more than the threshold in one day.\n\n"
+        "**Means:** a database grew more than the threshold in one day. Since V169 it compares each live "
+        "database id with its own previous day: a dropped predecessor under the same name is ignored, and a "
+        "re-created database is not compared on its first day.\n\n"
         "1. Cost Intelligence > Optimization & Savings → *Storage growth movers* for the table-level movers.\n"
         "2. Check for runaway CTAS/backup copies and missing retention on staging.\n"
         "3. If intentional (backfill, new feed), note it on the event and resolve."
@@ -45,13 +47,15 @@ PLAYBOOKS: dict[str, str] = {
         "4. Fix = quiet the chatty tool / cache metadata / cut reconnects / poll from the scheduler "
         "(credits shown are gross usage, before the account-level ~10% rebate); recurring on the same "
         "warehouse = raise the threshold on the rule. A chronic poller never trips this rule (it is its "
-        "own baseline); the billed ranking shows it, and COST_SLEEP_POLLING raises it weekly."
+        "own baseline); the billed ranking shows it, and COST_SLEEP_POLLING raises it weekly. Disabling the "
+        "rule (Alerts > Rules) stops the scan since V172 (before V172 a disabled rule still booked)."
     ),
     "COST_IDLE_OPPORTUNITY": (
         "**Means:** over the last 14 complete days this warehouse burned a large share of its credits "
         "in hours with zero queries; a tighter AUTO_SUSPEND recovers at least the rule threshold (USD "
         "per month, after the ~60s resume tail per active hour); and its current timer — read from the "
-        "daily SHOW WAREHOUSES snapshot — is disabled or above 60s. Weekly per warehouse; a mid-week "
+        "daily SHOW WAREHOUSES snapshot — is disabled (never suspends; SHOW reports it as NULL, read as 0 "
+        "since V169) or above 60s. Weekly per warehouse; a mid-week "
         "jump past 5x the threshold re-raises it as HIGH.\n\n"
         "1. Cost Intelligence > Optimization & Savings → *Idle & sizing* with a 14-day window: the same "
         "warehouse shows about the same actionable USD/month (the alert counts 14 complete days only).\n"
@@ -124,7 +128,10 @@ PLAYBOOKS: dict[str, str] = {
         "3. Recurring anomaly on the same series = raise the threshold or fix the workload."
     ),
     "PIPE_COPY_FAILURES": (
-        "**Means:** files failed to load in the last 24h; the target table is behind.\n\n"
+        "**Means:** files failed to load into this table; the target table is behind. Since V168 the event is "
+        "keyed by the Central day the files failed (the title ends \"on YYYY-MM-DD\"), counted over whole days, "
+        "so the same failures never raise again after midnight; a day that reaches 10 failed files is raised "
+        "once more as CRITICAL.\n\n"
         "1. Operations > Pipeline SLA → *File-load failures* for the sample error.\n"
         "2. Bad-file errors: inspect the stage file; permission/format errors: check the "
         "pipe/file-format definition.\n"
@@ -166,7 +173,10 @@ PLAYBOOKS: dict[str, str] = {
         "**Means:** a procedure/task runs worse after a change, vs its frozen baseline.\n\n"
         "1. Operations > Change impact: open the object's run history around the change line.\n"
         "2. Diff the DDL (CHANGE_DDL column) against the prior version; check the new query "
-        "profile for the regressed step.\n"
+        "profile for the regressed step. A task whose detail reads 'fails 0->0' while credits/call rose may "
+        "be retrying every run: since V172 a scheduled run counts once however many attempts it took, but "
+        "the retries' compute still counts toward credits/call (Operations > Tasks → *Runs* shows the "
+        "attempts).\n"
         "3. Fix forward or roll back; the tracker verdicts IMPROVED once p95/credits recover."
     ),
     # v4.597 (Option C): the in-app SLO editor is gone, so this names where objectives live now.
@@ -208,10 +218,13 @@ PLAYBOOKS: dict[str, str] = {
         "a failure the next daily scan redoes the week."
     ),
     "OPS_PIPELINE_DEGRADED": (
-        "**Means:** part of OVERWATCH's own pipeline stopped while its tasks still read SUCCEEDED: a "
-        "telemetry source is past its load cadence (hourly sources 3h, `DAILY`/`METERING` sources "
-        "30h), a loader logged a failure and carried on, or the alert notifier has not acquired its "
-        "sender lease in 3h while a delivery route is enabled. `ALERT_SCAN_HOURLY` / "
+        "**Means:** part of OVERWATCH's own pipeline stopped, often while its tasks still read SUCCEEDED: "
+        "a telemetry source is past its load cadence (hourly sources 3h, `DAILY`/`METERING` sources "
+        "30h), a loader logged a failure (most loaders carry on and their task reads SUCCEEDED; "
+        "since V166 `SP_LOAD_APP_COST` and `SP_LOAD_STORAGE_TRUTH` roll back to their previous fill and "
+        "re-raise, so their task reads FAILED and an owner hand CALL raises the error to its caller — the "
+        "alert DETAIL says which), or the alert notifier has "
+        "not acquired its sender lease in 3h while a delivery route is enabled. `ALERT_SCAN_HOURLY` / "
         "`ALERT_SCAN_DAILY` are the alert scans' own heartbeats: that scan stopped, or its heartbeat "
         "stamp keeps failing (`scan_heartbeat_failed`). Checked every 3 hours by the hourly scan (02, 05, "
         "08, 11, 14, 17, 20 and 23 Central) and once each morning by the daily scan, so a finding can "
@@ -240,7 +253,9 @@ PLAYBOOKS: dict[str, str] = {
         "DESC) = 1 AND STATUS = 'FAIL' ORDER BY RUN_AT DESC;`\n"
         "2. Admin > Canary: run the per-builder canary to see which app queries break. 'does not "
         "exist or not authorized' = a revoked grant (re-grant to the app owner role); 'invalid "
-        "identifier' = column drift after a Snowflake release (fix the builder).\n"
+        "identifier' = column drift after a Snowflake release (fix the builder). A sentinel FAIL is almost "
+        "always 'does not exist or not authorized' (its probe is `SELECT 1`, which names no column); "
+        "'invalid identifier' comes only from the Admin per-builder canary.\n"
         "3. `CALL DBA_MAINT_DB.OVERWATCH.SP_CANARY_SENTINEL();`, confirm every check PASS, resolve."
     ),
     "OPS_SLOW_RENDER": (
@@ -275,8 +290,12 @@ PLAYBOOKS: dict[str, str] = {
         "then *Reconciliation recurrence* for whether the same metric keeps breaking.\n"
         "2. Snowsight: `SELECT MTRC, N, LATEST_LOAD FROM DBA_MAINT_DB.OVERWATCH.ETL_RECON_RESULTS "
         "ORDER BY N DESC;` — trace the worst metric to the load that feeds it.\n"
-        "3. Fix and re-run that load, confirm the metric leaves the next scan, then resolve; hold "
-        "downstream reporting on those metrics until it does."
+        "3. Fix and re-run that load. Since V169 the alert pages once per failing reconciliation cycle "
+        "(keyed on the newest error-load date), so a fixed break does not re-page while its rows age out of "
+        "the WINDOW_HOURS look-back -- and a re-run that fails again on the SAME date folds into that date's "
+        "event without a new page, so before resolving check *Reconciliation errors* for a load newer than "
+        "this event. Resolve once the next cycle logs no newer RECON_MTRC_ERROR row for the metric (nothing "
+        "newer than the fix), and hold downstream reporting on those metrics until it does."
     ),
     "DQ_SCHEMA_DRIFT": (
         "**Means:** a table registered as an OBJECT data product changed shape vs its prior daily "
@@ -326,8 +345,14 @@ PLAYBOOKS: dict[str, str] = {
         "and treat as a security incident."
     ),
     "SEC_NEW_ADMIN_NETWORK": (
-        "**Means:** a user holding ACCOUNTADMIN / SNOW_ACCOUNTADMINS / SNOW_SYSADMINS logged in "
-        "from a client IP not seen for them in the prior 90 days.\n\n"
+        "**Means:** a user holding ACCOUNTADMIN / SNOW_ACCOUNTADMINS / SNOW_SYSADMINS had login attempts "
+        "from a client IP not seen for them in the prior 90 days. Since V168 the title says \"logged in\" only "
+        "when at least one attempt from that IP succeeded; `<USER>: N failed login attempt(s) from new "
+        "network <IP> (0 successful)` is a targeted try against an admin that never got in -- check Security "
+        "> Access → *Authentication* → *Account-takeover candidates*. A success from that IP inside its "
+        "first 24h raises its own event and closes the failed one as superseded. A network quiet for 90+ "
+        "days alerts again. Before V168 every title read \"logged in\": confirm with the IS_SUCCESS column "
+        "in step 2.\n\n"
         "1. Security > Access → *Authentication* → *New networks for privileged users (90-day "
         "baseline)*: user, IP, first seen, auth factor.\n"
         "2. Confirm with the user (travel, VPN egress change, new host). Snowsight: "
@@ -401,7 +426,8 @@ PLAYBOOKS: dict[str, str] = {
     # V163 (Next-Fifty #44b): Trust Center regression, daily scan arm [29].
     "SEC_TRUST_REGRESSION": (
         "**Means:** a CRITICAL or HIGH Trust Center scanner's at-risk entity count rose by at least the rule "
-        "threshold (1 by default) against that scanner's previous snapshot day. The daily scan checks today's "
+        "threshold (1 by default; a threshold below 1 reads as 1 since V169) against that scanner's previous "
+        "snapshot day. The daily scan checks today's "
         "and yesterday's snapshot each morning, so a rise that lands after the morning check shows up the next "
         "morning, unless that morning already raised for the same scanner and day: one event per scanner per "
         "snapshot day, carrying the counts of the scan that raised it, so a further rise later that day is not "
@@ -504,7 +530,11 @@ PLAYBOOKS: dict[str, str] = {
         "2. Snowsight: `SELECT CHECK_NAME, NEW_CODE, SCANNED_AT FROM "
         "DBA_MAINT_DB.OVERWATCH.ETL_REF_GAP_RESULTS ORDER BY CHECK_NAME, NEW_CODE;`\n"
         "3. Add the XLAT row(s) with the data owner (the mapping is a business call), "
-        "`CALL DBA_MAINT_DB.OVERWATCH.SP_SCAN_REF_GAPS();` to confirm the list is empty, resolve."
+        "`CALL DBA_MAINT_DB.OVERWATCH.SP_SCAN_REF_GAPS();` to confirm the list is empty, resolve.\n"
+        "4. A configured check that never alerts: Admin > Errors & telemetry → *Persisted error log*, PAGE "
+        "`AlertScan`, type `ref_gap_check_failed` (CONTEXT names the check: a missing SELECT grant, a renamed "
+        "table, or an over-long code or name); `ref_gap_scan_failed` means every check failed. Since V171 a "
+        "failing check no longer silences the others."
     ),
 }
 

@@ -23,6 +23,7 @@ from app.logic.formulas import (
     account_now,
     blended_billed_usd,
     contract_runway,
+    contract_term_ended,
     daily_spend_last_n,
     executive_slide_bullets,
     executive_summary_csv,
@@ -33,10 +34,10 @@ from app.logic.formulas import (
     safe_float,
 )
 from app.logic.verdict import (
-    NO_CONTRACT_RUNWAY,
     attention_bundle,
     attention_healthy,
     attention_signals,
+    contract_runway_clause,
     contract_runway_signal,
     page_verdict,
 )
@@ -315,7 +316,18 @@ def render() -> None:
     _best = contract_planner.best_runway(
         _bal.df if (_bal is not None and _bal.usable()) else None,
         contract_runway(exh.df.iloc[0]) if exh.usable() else None)
-    if _best is not None and _best["days_left"] >= 0:
+    if _best is not None and _best.get("outlasts_term"):
+        # R2-042: the credits last past CONTRACT_END_DATE (EXCLUSIVE): no countdown to a date the term never
+        # reaches -- the COST_CONTRACT_BREACH alert stays quiet for the same contract since V169
+        secondary.append({
+            "label": "Credit commitment",
+            "value": "Outlasts the term",
+            "delta": (f"term ends {_best.get('term_end')}; {_best['days_left']:,.0f} days of credits "
+                      "at current burn"),
+            "delta_color": "off",
+            "help": contract_planner.runway_basis_note(_best),
+        })
+    elif _best is not None and _best["days_left"] >= 0:
         secondary.append({
             "label": ("Contract balance exhausts" if _best["basis"] == "balance"
                       else "Credit commitment exhausts"),
@@ -463,7 +475,10 @@ def render() -> None:
     _rsig = contract_runway_signal(_best, read_ok=exh.usable())
     if _rsig is not None:
         _vsig.append(_rsig)
-    _rclause = "contract runway healthy" if _best is not None else NO_CONTRACT_RUNWAY
+    # review r1: a configured contract past its term (TOTAL withheld, TERM_OVER) names the ended term -- never
+    # "no contract runway configured" (the forgotten roll-forward case)
+    _rclause = ("contract runway healthy" if _best is not None else contract_runway_clause(
+        None, term_ended=contract_term_ended(exh.df.iloc[0]) if exh.usable() else None))
     page_verdict_line(page_verdict(
         _vsig, healthy=f"{attention_healthy(_attn)}; {_rclause}"))
     contract_runway_bar(_best)

@@ -41,10 +41,29 @@ def test_ai_recon_mirrors_the_loader():
         assert sqlglot.parse_one(s, read="snowflake").named_selects == _COLS
 
 
+def test_ai_recon_central_days_mirror_the_v167_loader():
+    """R2-052 (V167): behind has_migration(167) the recon's Cortex Code day key is the latest SP_LOAD_MARTS_V27
+    arm [9] key (alias aside); the Functions key (START_TIME is LTZ) and the unconverted default are unchanged."""
+    sqlglot = pytest.importorskip("sqlglot")
+    from tests.test_alert_rule_consistency import _latest_proc_bodies
+    sql = mart_sql.mart_vs_live_ai_recon(central_days=True)
+    key = "CONVERT_TIMEZONE('America/Chicago', USAGE_TIME)::DATE"
+    assert sql.count(key) == 2 and "USAGE_TIME::DATE" not in sql.replace(key, "")
+    assert sql.count("START_TIME::DATE") == 2                   # LTZ: the session (Central) day already
+    assert "CONVERT_TIMEZONE('America/Chicago', c.USAGE_TIME)::DATE AS DAY" in _latest_proc_bodies()["SP_LOAD_MARTS_V27"]
+    assert mart_sql.mart_vs_live_ai_recon(central_days=False) == mart_sql.mart_vs_live_ai_recon()
+    default = mart_sql.mart_vs_live_ai_recon()
+    assert default.count("USAGE_TIME::DATE") == 2 and key not in default          # the pre-V167 loader mirror
+    assert sqlglot.parse_one(sql, read="snowflake").named_selects == _COLS
+    # only the day keys move: the converted SQL is the default with the two keys swapped
+    assert sql.replace(key, "USAGE_TIME::DATE") == mart_sql.mart_vs_live_ai_recon()
+
+
 def test_admin_runs_ai_recon_behind_the_toggle():
     src = (_ROOT / "app/ui/pages/admin.py").read_text(encoding="utf-8")
     after = src.split('key="adm_recon_on"', 1)[1]
-    assert "mart_sql.mart_vs_live_ai_recon()" in after and 'key="mart_recon_ai"' in after
+    assert "mart_sql.mart_vs_live_ai_recon(central_days=has_migration(167, _PAGE))" in after
+    assert 'key="mart_recon_ai"' in after
     assert "probe=True" in after.split("mart_vs_live_ai_recon", 1)[1][:200]
     assert after.index('key="mart_recon"') < after.index("mart_vs_live_ai_recon")
 

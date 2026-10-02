@@ -244,8 +244,9 @@ _CS_NO_HASH = "N/A"
 
 def _cs_covered_days(shapes: pd.DataFrame, days: int) -> int | None:
     """R2-012 at the Ask call site: the days MART_CLOUD_SVC_DAILY holds in the asked window when that is
-    FEWER than the window, else None. The statement mart is loaded hourly and never backfilled, so a
-    'this quarter' / 'this year' question sums only the days since its first load. COVERED_DAYS
+    FEWER than the window, else None. The statement mart is loaded hourly; snowflake/backfill_365.sql fills its
+    history, so until that has run a 'this quarter' / 'this year' question sums only the days since its first
+    load. COVERED_DAYS
     (cloud_svc_top_shapes(coverage=True)) is a window-level, account-wide scalar on every row."""
     if "COVERED_DAYS" not in shapes.columns or shapes.empty:
         return None
@@ -260,7 +261,8 @@ def _needs_cs_by_query(params: AskParams) -> list[QuerySpec]:
         QuerySpec(
             key="shapes",
             # R2-012: coverage=True adds COVERED_DAYS so the answer can say how many of the asked days the
-            # never-backfilled statement mart actually holds (by-user reads the same mart and window).
+            # statement mart actually holds (no backfill unless snowflake/backfill_365.sql has run; by-user reads
+            # the same mart and window).
             sql=mart_sql.cloud_svc_top_shapes(params.days, params.company, params.warehouse, coverage=True),
             tier="recent",
         ),
@@ -368,8 +370,9 @@ def _analyze_cs_by_query(
     bullets: list[str] = []
     if cov_days is not None:
         bullets.append(
-            f"The statement mart holds {cov_days} of this window's {params.days} days (it is loaded hourly "
-            "and never backfilled), so the shape and user CS-credit figures cover those days only."
+            f"The statement mart holds {cov_days} of this window's {params.days} days (it is loaded hourly; "
+            "snowflake/backfill_365.sql fills its history), so the shape and user CS-credit figures cover those "
+            "days only."
         )
     for i in range(min(3, len(s))):
         r = s.iloc[i]

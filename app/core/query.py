@@ -524,8 +524,8 @@ _PROC_DOMAINS: dict[str, tuple[str, ...]] = {
     "SP_INCIDENT_DECLARE": ("incidents",),                       # V131: INCIDENTS, INCIDENT_MEMBERS
     "SP_ACTION_LIFECYCLE": ("queue",),                           # V092: ACTION_QUEUE, ACTION_ACTIVITY
     "SP_VERIFY_EXPERIMENT": ("experiments", "ledger", "queue"),  # V130: OPTIMIZATION_EXPERIMENTS, SAVINGS_LEDGER, ACTION_QUEUE, ACTION_ACTIVITY
-    "SP_CHANGE_IMPACT_SCAN": _GLOBAL_BUMP,                       # V140 scan
-    "SP_WAREHOUSE_CHANGE_SCAN": _GLOBAL_BUMP,                    # V109 scan
+    "SP_CHANGE_IMPACT_SCAN": _GLOBAL_BUMP,                       # V172 scan
+    "SP_WAREHOUSE_CHANGE_SCAN": _GLOBAL_BUMP,                    # V172 scan
 }
 _CALL_PROC_RE = re.compile(r'^\s*CALL\s+(?:[A-Za-z0-9_$"]+\.)*"?([A-Za-z0-9_$]+)"?\s*\(', re.IGNORECASE)
 

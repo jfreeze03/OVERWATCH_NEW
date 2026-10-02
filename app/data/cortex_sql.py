@@ -17,6 +17,11 @@ from __future__ import annotations
 from app import companies
 from app.data.common import and_where, bounded_days, resolve_effective_window, scope_window_where
 
+# R2-052 (v4.609): USAGE_TIME is TIMESTAMP_TZ, so a bare USAGE_TIME::DATE took the date in the value's OWN
+# stored offset, not the account (Central) day. Every day key below converts to Central first
+# (CONVERT_TIMEZONE('America/Chicago', C.USAGE_TIME)::DATE) -- correct for any stored offset, a no-op when the
+# views already stamp Central -- matching V167's SP_LOAD_MARTS_V27 arm [9] fact keys. Ungated: these are the
+# live legs. FIRST_TS / LAST_TS stay tz-aware (cortex._account_day / quotas._account_ts convert them).
 _COMBINED_CODE_USAGE = """
     SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'Snowsight' AS SOURCE
     FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY
@@ -52,7 +57,7 @@ user_daily AS (
         U.FIRST_NAME,
         U.LAST_NAME,
         C.SOURCE,
-        C.USAGE_TIME::DATE AS USAGE_DATE,
+        CONVERT_TIMEZONE('America/Chicago', C.USAGE_TIME)::DATE AS USAGE_DATE,
         COUNT(*) AS REQUESTS,
         SUM(COALESCE(C.TOKEN_CREDITS, 0)) AS CREDITS,
         SUM(COALESCE(C.TOKENS, 0)) AS TOKENS,
@@ -144,7 +149,7 @@ def cortex_code_daily(days: int, company: str = "ALL") -> str:
     return f"""
 WITH combined AS ({_COMBINED_CODE_USAGE.format(days=days)})
 SELECT
-    C.USAGE_TIME::DATE AS DAY,
+    CONVERT_TIMEZONE('America/Chicago', C.USAGE_TIME)::DATE AS DAY,
     C.SOURCE,
     COUNT(DISTINCT C.USER_ID) AS ACTIVE_USERS,
     COUNT(*) AS TOTAL_REQUESTS,
@@ -330,7 +335,7 @@ flat AS (
     -- cache_write_input). FLATTEN stays in its own CTE, LEFT JOIN USERS on it (a LATERAL
     -- cannot sit on the LEFT of a LEFT JOIN -- Snowflake 001072).
     SELECT C.USER_ID,
-           C.USAGE_TIME::DATE AS USAGE_DATE,
+           CONVERT_TIMEZONE('America/Chicago', C.USAGE_TIME)::DATE AS USAGE_DATE,
            LOWER(F.KEY::VARCHAR) AS TOKEN_TYPE,
            TRY_TO_NUMBER(TO_VARCHAR(F.VALUE)) AS TOKENS
     FROM combined C,

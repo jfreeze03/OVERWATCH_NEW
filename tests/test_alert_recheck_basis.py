@@ -17,15 +17,19 @@ from pathlib import Path
 import pytest
 
 from app.data import recheck_sql
+from tests.test_alert_rule_consistency import _latest_proc_bodies
 
 _ROOT = Path(__file__).resolve().parents[1]
-_V162 = (_ROOT / "snowflake" / "migrations" / "V162__security_takeover_admin_grant.sql").read_text(encoding="utf-8")
+# The CURRENT SP_ALERT_SCAN definer (last definition wins, as on the live account): V168 re-derived it from V162
+# (R2-034 dropped the sweep's 48h age bound), so the recheck-vs-scan basis lock tracks the live body, never a
+# pinned file a later re-derivation leaves behind.
+_SCAN = _latest_proc_bodies()["SP_ALERT_SCAN"]
 _ALERTS = (_ROOT / "app" / "ui" / "pages" / "alerts.py").read_text(encoding="utf-8")
 
 
 def _raise_arm(rule: str) -> str:
-    """The raise arm's candidate subquery for ``rule`` in the current SP_ALERT_SCAN definer (V162)."""
-    block = _V162.split(f"-- [0{'4' if rule == 'PERF_QUEUED_MINUTES' else '5'}] {rule}", 1)[1]
+    """The raise arm's candidate subquery for ``rule`` in the current SP_ALERT_SCAN definer."""
+    block = _SCAN.split(f"-- [0{'4' if rule == 'PERF_QUEUED_MINUTES' else '5'}] {rule}", 1)[1]
     return block.split("EXCEPTION", 1)[0]
 
 
@@ -59,7 +63,7 @@ def test_queued_and_spill_recheck_still_need_a_safe_warehouse() -> None:
 
 
 def test_the_auto_clear_sweep_uses_the_same_basis_the_recheck_reads() -> None:
-    sweep = _V162.split("V091 auto-clear", 1)[0].rsplit("UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS ev", 1)[1]
+    sweep = _SCAN.split("V091 auto-clear", 1)[0].rsplit("UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS ev", 1)[1]
     for value in ("SUM(QUEUED_SEC_SUM) / 60", "SUM(SPILL_REMOTE_GB)"):
         assert value in sweep
     assert sweep.count("HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())") == 3
@@ -83,7 +87,7 @@ def test_closed_day_never_applies_to_rolling_window_rules() -> None:
 
 
 def test_arm_02_titles_carry_the_day_the_helper_reads() -> None:
-    arm = _V162.split("-- [02] COST_WH_DAILY_CREDITS", 1)[1].split("EXCEPTION", 1)[0]
+    arm = _SCAN.split("-- [02] COST_WH_DAILY_CREDITS", 1)[1].split("EXCEPTION", 1)[0]
     assert "' credits on ' || f.DAY" in arm
     assert "f.DAY >= DATEADD('day', -1, CURRENT_DATE())" in arm      # yesterday or today
 

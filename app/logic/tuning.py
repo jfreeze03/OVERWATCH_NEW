@@ -55,12 +55,17 @@ NO_THRESHOLD_BASIS = NO_THRESHOLD_BASES["SEC_ADMIN_GRANT"]
 # values are no threshold at all (six NOISE budget-pace closes at $21k-$36k suggested 38,995 -- a pace multiple
 # that would never fire again). METRIC_VALUE alone cannot be converted (the budget and the elapsed share are not
 # on the event), so the suggestion is withheld, with the units named.
-#   COST_BUDGET_PACE      daily [08]: METRIC_VALUE = MTD dollars; fires on MTD > budget pace x THRESHOLD_NUM
-#   COST_FORECAST_BREACH  daily [09]: METRIC_VALUE = projected dollars; fires on projected > budget x THRESHOLD_NUM
+#   COST_BUDGET_PACE      daily [08]: METRIC_VALUE = MTD dollars through yesterday (complete days, V169 R2-041);
+#                         fires on that MTD > the completed-days budget pace x THRESHOLD_NUM
+#   COST_FORECAST_BREACH  daily [09]: METRIC_VALUE = projected dollars (complete-day MTD + rate x the remaining days
+#                         INCLUDING today, V169); fires on projected > budget x THRESHOLD_NUM
 #   DQ_RECON_ERROR        daily [18]: METRIC_VALUE = the error count; fires on (metrics in error) >= THRESHOLD_NUM
+# R2-045 (METRIC_VALUE in threshold units, then tunable) waits on the owner; until then the withhold stands.
+# The text is version-neutral (law 12): this pure module cannot schema-gate, the app deploys before V169 is
+# applied, and the NOISE / ACTIONED sample it describes holds pre-V169 events (MTD incl. today's partial day).
 METRIC_NOT_THRESHOLD_UNITS: dict[str, str] = {
-    "COST_BUDGET_PACE": ("Its metric value is month-to-date dollars, but the threshold is a multiple of the "
-                         "budget pace, so no threshold can be suggested from it."),
+    "COST_BUDGET_PACE": ("Its metric value is month-to-date dollars (through yesterday since V169), but the "
+                         "threshold is a multiple of the budget pace, so no threshold can be suggested from it."),
     "COST_FORECAST_BREACH": ("Its metric value is the projected month-end dollars, but the threshold is a "
                              "multiple of the monthly budget, so no threshold can be suggested from it."),
     "DQ_RECON_ERROR": ("Its metric value is the reconciliation error count, but the threshold counts the "

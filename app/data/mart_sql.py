@@ -486,9 +486,11 @@ def _cloud_svc_window(days: int, *, bounds: tuple | None = None, col: str = "DAY
 def _cloud_svc_covered_days(days: int, *, bounds: tuple | None = None) -> str:
     """R2-012: the DISTINCT days MART_CLOUD_SVC_DAILY actually holds in the page window, account-wide.
 
-    The statement mart has no backfill: SP_LOAD_CLOUD_SVC_MART (V055) merges only the last 2 days of the
-    72 h extract, so its history starts the day it was first loaded (and again after a rebuild drops it).
-    A 90/180/365-day or Current-year read therefore sums fewer days than its label. Window predicate ONLY
+    The statement mart has no backfill unless snowflake/backfill_365.sql has run: SP_LOAD_CLOUD_SVC_MART
+    (V055) merges only the last 2 days of the 72 h extract, so without that heal its history starts the day
+    it was first loaded (and again after a rebuild drops it). backfill_365.sql's MART_CLOUD_SVC_DAILY arm
+    (HEAL-CS-MART, v4.609) fills the 364 days before that; until it has run, a 90/180/365-day or
+    Current-year read sums fewer days than its label. Window predicate ONLY
     (no company / warehouse scope), so a quiet scope never reads as missing loader coverage (the R1-016
     lesson). components.served_days() takes it over the requested window (the r34 contract)."""
     return (f'(SELECT COUNT(DISTINCT c0.DAY) FROM {mart_object("MART_CLOUD_SVC_DAILY")} c0 '
@@ -592,8 +594,8 @@ def cloud_svc_billed_families(days: int, company: str = "ALL", warehouse: str = 
     (summing the per-family marginals would over-count once a day's billed CS is below their sum).
     Billing and the app hint are account facts, so those CTEs ignore the company / warehouse scope.
     R2-012: ``bill`` also starts at the statement mart's first day (MIN(DAY), account-wide and unscoped):
-    MART_CLOUD_SVC_DAILY has no backfill (SP_LOAD_CLOUD_SVC_MART merges 2 days per load), so on a window
-    older than the mart, metering for days with no statement history made 'N% of metered' and
+    MART_CLOUD_SVC_DAILY has no backfill unless snowflake/backfill_365.sql has run (SP_LOAD_CLOUD_SVC_MART
+    merges 2 days per load), so on a window older than the mart, metering for days with no statement history made 'N% of metered' and
     METERED_DAYS read the young mart as missing credits. COVERED_DAYS (_cloud_svc_covered_days) names
     the days the statement mart holds in the window, for the panel's coverage note.
     Window totals are SUM() OVER () in ``ranked``, BEFORE the top-N filter (never derived from the
@@ -745,8 +747,9 @@ def cs_by_query_type_mart(days: int, company: str = "ALL", warehouse: str = "",
 
     The served window: callers read it via components.served_days(), never the
     requested one. The live scan clamps a trailing window at 90; the mart's WHERE
-    allows MAX_MART_WINDOW_DAYS, but R2-012: the mart has no backfill (its history
-    starts at its first load), so it can hold FEWER days than the window. The row
+    allows MAX_MART_WINDOW_DAYS, but R2-012: the mart is loaded hourly and has no backfill
+    unless snowflake/backfill_365.sql has run (otherwise its history starts at its first load), so it
+    can hold FEWER days than the window. The row
     therefore carries COVERED_DAYS (_cloud_svc_covered_days, account-wide) beside the
     live twin's columns, wrapped around the shared projection so the twin tail stays
     byte-identical; served_days() takes it over the requested window.
@@ -2070,16 +2073,31 @@ def contract_exhaustion() -> str:
     so the Brief runway can't contradict the Contract page. The old form summed a
     31-date span that INCLUDED today's partial and divided by a literal 30, biasing
     burn low, overstating days-left, and potentially suppressing COST_CONTRACT_BREACH.
-    n/a until configured. The COST_CONTRACT_BREACH paging alert (SP_ALERT_SCAN_DAILY)
-    was aligned to THIS exact burn in V064 — SUM / NULLIF(COUNT(DISTINCT DAY), 0) over
-    DAY BETWEEN today-30 AND today-1 — so the alert and this KPI now byte-match and no
-    divergence remains (gap-audit rec #10; the earlier "align it in V065" note was
-    stale, and is why the audit re-flagged an already-fixed alert — no V081 needed)."""
+    n/a until configured.
+
+    The term (R2-042): CONSUMED counts [CONTRACT_START_DATE, CONTRACT_END_DATE) -- the end is
+    EXCLUSIVE, the app's contract_pace clock (forecast.py) -- and a blank end keeps it
+    unbounded. TERM_END is exposed so formulas.contract_runway reads a contract whose
+    projected exhaustion falls on or after the end as "outlasts the term", never a red
+    countdown; once the term is over (account today >= TERM_END) TOTAL reads 0 and the
+    always-on bars render nothing, like the Contract tab's term-ended panel. TERM_OVER is TRUE
+    for exactly that case on a CONFIGURED contract (the source TOTAL: start set, credits > 0),
+    so the page verdicts say the term ended instead of "no contract runway configured"
+    (formulas.contract_term_ended -> verdict.contract_runway_clause).
+
+    The COST_CONTRACT_BREACH paging arm (SP_ALERT_SCAN_DAILY) shares the burn since V064, and
+    since V169 also this start gate (r33 [3]; R2-103) and the end bound -- before V169 the
+    alert paged on a fabricated runway with no start date and past the term end. The parity is
+    locked against the CURRENT definer by tests/history_locks/test_contract_breach_start_gate_parity.py.
+    """
+    today = account_today_sql()
     return f"""
-SELECT TOTAL, CONSUMED, DAILY_BURN,
+SELECT IFF(TERM_END IS NOT NULL AND {today} >= TERM_END, 0, TOTAL) AS TOTAL,
+       CONSUMED, DAILY_BURN, TERM_END,
+       (src.TERM_END IS NOT NULL AND {today} >= src.TERM_END AND src.TOTAL > 0) AS TERM_OVER,
        CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)) AS DAYS_LEFT,
        DATEADD('day', CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)),
-               {account_today_sql()}) AS EXHAUST_DATE
+               {today}) AS EXHAUST_DATE
 FROM (
     SELECT
         -- r33: gate TOTAL on a CONFIGURED contract start. CONTRACT_CREDITS and
@@ -2091,13 +2109,19 @@ FROM (
         (SELECT IFF(TRY_TO_DATE(MAX(IFF(KEY = 'CONTRACT_START_DATE', VALUE, NULL))) IS NULL, 0,
                     COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CONTRACT_CREDITS', VALUE, NULL))), 0))
          FROM {core_object("SETTINGS")}) AS TOTAL,
+        -- R2-042: only the term's credits: [start, CONTRACT_END_DATE), the end EXCLUSIVE.
         (SELECT COALESCE(SUM(CREDITS_BILLED), 0) FROM {mart_object("FACT_METERING_DAILY")}
          WHERE DAY >= COALESCE((SELECT TRY_TO_DATE(MAX(IFF(KEY = 'CONTRACT_START_DATE', VALUE, NULL)))
-                                FROM {core_object("SETTINGS")}), {account_today_sql()})) AS CONSUMED,
+                                FROM {core_object("SETTINGS")}), {today})
+           AND DAY < COALESCE(
+               (SELECT TRY_TO_DATE(MAX(IFF(KEY = 'CONTRACT_END_DATE', VALUE, NULL)))
+                FROM {core_object("SETTINGS")}), '9999-12-31'::DATE)) AS CONSUMED,
+        (SELECT TRY_TO_DATE(MAX(IFF(KEY = 'CONTRACT_END_DATE', VALUE, NULL)))
+         FROM {core_object("SETTINGS")}) AS TERM_END,
         -- r33: the DAILY_BURN window stays session-tz CURRENT_DATE() ON PURPOSE — it must
-        -- byte-match the COST_CONTRACT_BREACH paging alert (V064 SP_ALERT_SCAN_DAILY) or the KPI
-        -- and the alert diverge (test_rec20_alert_matches_app_mart_window). Realigning both to the
-        -- account clock would take an owner-applied migration to alter the alert proc, deferred
+        -- byte-match the COST_CONTRACT_BREACH paging alert (the current SP_ALERT_SCAN_DAILY definer)
+        -- or the KPI and the alert diverge (test_contract_breach_start_gate_parity). Realigning both
+        -- to the account clock would take an owner-applied migration to alter the alert proc, deferred
         -- until then. Today both the app session and the alert task inherit the account's Central
         -- default TIMEZONE, so the window already matches the account clock; moving both onto
         -- explicit pins would only harden against a future zone change. (EXHAUST_DATE's anchor
@@ -2106,7 +2130,7 @@ FROM (
          FROM {mart_object("FACT_METERING_DAILY")}
          WHERE DAY BETWEEN DATEADD('day', -30, CURRENT_DATE())
                        AND DATEADD('day', -1, CURRENT_DATE())) AS DAILY_BURN
-)
+) src
 """
 
 
@@ -2515,14 +2539,23 @@ FROM f_q, l_q
 """
 
 
-def mart_vs_live_ai_recon() -> str:
+def mart_vs_live_ai_recon(central_days: bool = False) -> str:
     """Next-Fifty #25: FACT_AI_USAGE_DAILY vs the Cortex usage views it is loaded from, same 28d
     lag-safe window as mart_vs_live_recon (the DAILY task reloads only 3 days, so days older
-    than today-3 are final). Day keys MIRROR THE LOADER byte-for-byte (USAGE_TIME::DATE /
-    START_TIME::DATE, session tz = account tz) -- this checks loader fidelity, so it must not
-    re-key days differently from V146. The Functions live side is a PLAIN SUM(CREDITS) (one row
-    per source row, no FLATTEN): the independent answer the loader's FLATTEN + INDEX=0 dedupe
+    than today-3 are final). Day keys MIRROR THE DEPLOYED LOADER -- this checks loader fidelity,
+    so it must not re-key days differently from the loader it checks.
+
+    R2-052 (V167): the Cortex Code views' USAGE_TIME is TIMESTAMP_TZ, and a bare USAGE_TIME::DATE
+    reads the value's own stored offset, not the session zone. V167's loader (arm [9]) keys the
+    Code days as CONVERT_TIMEZONE('America/Chicago', USAGE_TIME)::DATE, so Admin passes
+    ``central_days=has_migration(167)``: True converts the two Code day keys to Central; False keeps
+    the pre-V167 loader's bare cast (byte-identical SQL; the one bare cast tests/test_timezone_standard
+    allow-lists). START_TIME (the Functions view) is TIMESTAMP_LTZ, so START_TIME::DATE is already the
+    session's (= account's Central) day on both paths. The Functions live side is a PLAIN SUM(CREDITS)
+    (one row per source row, no FLATTEN): the independent answer the loader's FLATTEN + INDEX=0 dedupe
     must equal. Same columns as mart_vs_live_recon so Admin can concat the frames."""
+    code_day = ("CONVERT_TIMEZONE('America/Chicago', USAGE_TIME)::DATE" if central_days
+                else "USAGE_TIME::DATE")
     return f"""
 WITH f_code AS (
     SELECT SUM(CREDITS) AS V
@@ -2542,8 +2575,8 @@ l_code AS (
         FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_CLI_USAGE_HISTORY
         WHERE USAGE_TIME >= DATEADD('day', -33, CURRENT_DATE())
     )
-    WHERE USAGE_TIME::DATE >= DATEADD('day', -31, CURRENT_DATE())
-      AND USAGE_TIME::DATE <  DATEADD('day', -3,  CURRENT_DATE())
+    WHERE {code_day} >= DATEADD('day', -31, CURRENT_DATE())
+      AND {code_day} <  DATEADD('day', -3,  CURRENT_DATE())
 ),
 f_fn AS (
     SELECT SUM(CREDITS) AS V

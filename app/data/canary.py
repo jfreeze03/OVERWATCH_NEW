@@ -313,6 +313,15 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("mart27.lock_wait_spikes", lambda: mart27_sql.lock_wait_spikes("ALL")),
     ("mart27.monthly_spend_by_warehouse", lambda: mart27_sql.monthly_spend_by_warehouse(2, "ALFA")),
     ("mart27.pattern_cost", lambda: mart27_sql.pattern_cost(2, "ALFA", 5)),
+    # R1-016 / PATTERN-RESTAMP (V167): SOURCE_FRESHNESS_STATE.COVERAGE_FROM, the loader-written loaded-from
+    # watermark the AI coverage gate and the pattern cap read behind has_migration(167). The column exists only
+    # once V167 is applied and the app deploys first, so the Admin runner SKIPS this entry until then
+    # (MIGRATION_GATED below) -- a missing column is drift (missing_column), never a declared gap, so
+    # EXPECTED_GAPS cannot cover the deploy-to-apply window. Core table: after V167 an absence FAILs.
+    ("mart27.fact_coverage_from", mart27_sql.fact_coverage_from),
+    # R1-016 (V167): the AI fact's gate reaches (the stamped coverage CTEs) + its last both-arm load day; reads the
+    # same V167 column, so the runner skips it until has_migration(167) too.
+    ("mart27.ai_fact_coverage", mart27_sql.ai_fact_coverage),
     ("insights.call_cost_lookup", lambda: insights_sql.call_cost_lookup("canary-probe", 1)),
     ("insights.call_children_costs", lambda: insights_sql.call_children_costs("canary-probe", 1)),
     ("insights.proc_cost_trend", lambda: insights_sql.proc_cost_trend("CANARY_PROBE", 1, "ALFA")),
@@ -426,6 +435,21 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("mart27.ops_diag_failures", lambda: mart27_sql.ops_diag_failures(1, "ALFA")),
     ("mart27.platform_score_inputs", lambda: mart27_sql.platform_score_inputs(7)),
 )
+
+# Entries that read a column or object a migration adds: the Admin canary runner skips each one until
+# schema_gate.has_migration(<version>, page) answers True (the app deploys before the owner applies), then
+# runs it like any other entry. canary.py stays pure -- the runner owns the gate (gated_out below).
+MIGRATION_GATED: dict[str, int] = {
+    "mart27.fact_coverage_from": 167,
+    "mart27.ai_fact_coverage": 167,
+}
+
+
+def gated_out(name: str, applied: set[int] | frozenset[int]) -> bool:
+    """True while the entry's migration is not applied yet (the runner skips it, it never FAILs then)."""
+    version = MIGRATION_GATED.get(name)
+    return version is not None and version not in applied
+
 
 # r11 #7: names whose ABSENCE is an account-feature state, not drift — only
 # these may report GAP. Anything else absent (a dropped core object, a

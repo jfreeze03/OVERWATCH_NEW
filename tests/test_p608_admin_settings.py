@@ -1,7 +1,8 @@
 """v4.608 round-2 fixes in Admin > Settings (cluster e6): the editors write only what the readers use.
 
 R2-105: CORTEX_MODEL is saved normalized (blank = the default), the one name both the app (normalize_model) and the
-scheduled digest / anomaly-sweep procs (which read the raw VALUE, defaulting only on NULL) run.
+scheduled digest / anomaly-sweep procs run; from V171 (digest) and V172 (anomaly sweep) both procs also normalize it
+server-side like normalize_model, so the editor's normalization is belt and braces.
 R2-106: the four retention editors start at SP_PURGE_FACTS's GREATEST floors, and say a change applies at the next
 monthly purge; COCO_DAILY_CAP_CREDITS says 0 means the default 15.
 R2-107: CREDIT_PRICE_OVERRIDE (read only by validate.sql) is editable and never flagged "safe to delete"; the
@@ -168,6 +169,7 @@ def test_credit_price_override_is_editable_and_never_safe_to_delete(monkeypatch)
     sql = _settings_tab(monkeypatch, rows, fake=fake)
     assert not [w for w in fake.texts("warning") if "CREDIT_PRICE_OVERRIDE" in w and "safe to delete" in w]
     assert "CREDIT_PRICE_OVERRIDE" in fake.options
+    assert fake.options.count("CREDIT_PRICE_OVERRIDE") == 1   # V171: in DEFAULT_SETTINGS, never listed twice
     # the enum editor opens on the stored TRUE, and the MERGE upserts the key (inserting it when absent)
     assert "'CREDIT_PRICE_OVERRIDE' AS KEY" in sql and "'TRUE' AS VALUE" in sql
 
@@ -197,17 +199,20 @@ def test_compute_rate_editor_refuses_zero():
 
 
 def test_every_settings_key_validate_reads_is_known_to_admin():
-    """Recurrence lock: a SETTINGS key the deploy gate reads must be a DEFAULT_SETTINGS key or a declared
-    deploy-gate setting, or Admin flags its row 'safe to delete' and offers no editor (the DEPLOY_ACTORS class)."""
+    """Recurrence lock: a SETTINGS key the deploy gate reads must be a DEFAULT_SETTINGS key, or Admin flags its row
+    'safe to delete' and offers no editor (the DEPLOY_ACTORS class). V171 seeds CREDIT_PRICE_OVERRIDE FALSE, so the
+    deploy-gate keys are DEFAULT_SETTINGS keys too; _DEPLOY_GATE_SETTINGS only picks the validate-run caption."""
     from app.ui.pages import admin
     read_keys: set[str] = set()
     for rel in ("snowflake/validate.sql", "snowflake/rebuild/05_validate.sql"):
         read_keys |= set(re.findall(r"\bKEY\s*=\s*'([A-Z0-9_]+)'", read(rel)))
     assert "CREDIT_PRICE_OVERRIDE" in read_keys
-    assert read_keys - set(DEFAULT_SETTINGS) - set(admin._DEPLOY_GATE_SETTINGS) == set()
+    assert read_keys - set(DEFAULT_SETTINGS) == set()
     # and every declared deploy-gate key is really read there (no stale allow-list entry)
     assert set(admin._DEPLOY_GATE_SETTINGS) <= read_keys
-    assert not set(admin._DEPLOY_GATE_SETTINGS) & set(DEFAULT_SETTINGS)
+    assert set(admin._DEPLOY_GATE_SETTINGS) <= set(DEFAULT_SETTINGS)
+    assert DEFAULT_SETTINGS["CREDIT_PRICE_OVERRIDE"] == "FALSE"          # the V171 seed value
+    assert not admin._override_on(DEFAULT_SETTINGS["CREDIT_PRICE_OVERRIDE"])
 
 
 # ------------------------------------------------------------------------------ R2-110 ----

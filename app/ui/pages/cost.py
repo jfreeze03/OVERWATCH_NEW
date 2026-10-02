@@ -19,7 +19,14 @@ from app.data import cost_sql, mart27_sql, mart_sql
 from app.logic import contract_planner
 from app.logic.date_windows import window_phrase
 from app.logic.directory import resolve_display
-from app.logic.formulas import contract_runway, format_usd, humanize_duration, md_dollars, safe_float
+from app.logic.formulas import (
+    contract_runway,
+    contract_term_ended,
+    format_usd,
+    humanize_duration,
+    md_dollars,
+    safe_float,
+)
 from app.logic.verdict import contract_runway_clause, contract_runway_signal, page_verdict
 from app.ui.components import (
     alarm_health,
@@ -43,6 +50,7 @@ from app.ui.components import (
     with_user_names,
     write_gate_open,
 )
+from app.ui.schema_gate import has_migration
 
 _PAGE = "Cost Intelligence"
 
@@ -73,7 +81,11 @@ def _unmapped_mapper(df, is_operator: bool) -> None:
     """Map an UNKNOWN-company entity to a company (owner ask: "map untapped users
     and backfill"). Builds the idempotent COMPANY_SCOPE upsert for the picked entity;
     an operator applies it in place, otherwise it's copy-paste for Snowsight. The
-    next loader pass re-stamps go-forward facts — history needs a backfill re-run."""
+    next loader pass re-stamps go-forward facts — history needs a backfill re-run.
+    Pattern costs (MART_PATTERN_COST_DAILY) are NOT reconciled nightly: their own daily
+    loader reloads its trailing 3 days, and only from V167 (R2-010) does a reload REPLACE
+    the window -- before V167 its COMPANY-keyed MERGE added a second row under the new
+    company instead, so the caption warns against re-running it until V167 is applied."""
     with st.expander("Map an entity to a company"):
         # R1-146: pick a ROW, not a name. The same name can be UNKNOWN under two grains (a FIVETRAN
         # user and a FIVETRAN database; an ANALYTICS warehouse and database): the old name picker
@@ -113,7 +125,14 @@ def _unmapped_mapper(df, is_operator: bool) -> None:
         st.caption(
             f"Maps **{pick}** ({scope_type}) → **{company_choice}**. Go-forward facts stamp "
             "immediately; the nightly reconcile re-stamps the trailing 3 days. Older history "
-            "keeps its original stamp until a full loader backfill re-run.")
+            "keeps its original stamp until a full loader backfill re-run. "
+            + ("Pattern costs are not part of the reconcile: their own daily loader re-stamps its "
+               "trailing 3 days, and older pattern history re-stamps with CALL "
+               "SP_LOAD_PATTERN_COST(N) (N up to 364)." if has_migration(167, _PAGE) else
+               "Pattern costs are not part of the reconcile: their daily loader keys on the company, "
+               "so it adds a second row under the new company for its trailing 3 days instead of "
+               "re-stamping — do not re-run SP_LOAD_PATTERN_COST before V167 is applied (it would "
+               "add one for its whole window)."))
         # the latch key and the receipt carry the grain too: a same-name mapping at another grain is a
         # genuinely different write (C48 scoped key), and the toast names which one ran
         if is_operator and st.button("Apply mapping", key="unmap_apply") and write_gate_open(
@@ -160,9 +179,12 @@ def render() -> None:
     _b = ("billing balance" if _best is not None and _best["basis"] == "balance"
           else "configured credits")
     _rsig = contract_runway_signal(_best, read_ok=_exh.usable(), basis=_b)
+    # review r1: a configured contract past its term (TOTAL withheld, TERM_OVER) names the ended term in the
+    # healthy clause instead of "no contract runway configured"
+    _term_over = contract_term_ended(_exh.df.iloc[0]) if _exh.usable() else None
     _vsig = [_rsig] if _rsig is not None else []
     page_verdict_line(page_verdict(
-        _vsig, healthy=f"{contract_runway_clause(_best)} — open a section for detail"))
+        _vsig, healthy=f"{contract_runway_clause(_best, term_ended=_term_over)} — open a section for detail"))
     # Cost3/C18: the "what changed since your last visit" opener, now the shared
     # component (severity-mapped line + one-hop jumps to Alerts/Action Center).
     since_last_visit_opener(_PAGE, f["company"])

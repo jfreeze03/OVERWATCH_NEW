@@ -2897,8 +2897,13 @@ def _pipeline_data_checks(is_operator: bool, company: str = "ALL", database: str
             styled_table(breaching[_fcols])
         with st.expander("All registered tables"):
             styled_table(df)
+        # R2-033: LAST_ALTERED moves on any DDL, on DML that changed no rows and on Snowflake's own metadata
+        # maintenance, so 'met' means touched -- say so (a per-table rows-loaded basis is an owner call).
         result_caption(res, note="Freshness from ACCOUNT_USAGE.TABLES.LAST_ALTERED (metadata lag "
-                                  "up to ~2h); refresh cadence from TABLE_DML_HISTORY over 14 days.")
+                                  "up to ~2h). Any DDL (ALTER, tag, comment), any DML even if it changed no "
+                                  "rows, or a Snowflake metadata operation counts, so 'met' means the table "
+                                  "was touched, not that rows were loaded. Refresh cadence from "
+                                  "TABLE_DML_HISTORY over 14 days.")
 
     # Registering only MERGEs OVERWATCH's own PIPELINE_SLA_CONFIG -- it does not depend on the
     # TABLE_DML_HISTORY read, so only a true absence of the SLA objects hides it (R1-046).
@@ -4420,6 +4425,22 @@ def _wh_change_block(company: str, is_operator: bool) -> None:
         st.caption("The warehouse scan runs daily at 06:40; admins can trigger it on demand.")
 
 
+def _change_impact_help(v172: bool) -> str:
+    """The Change-impact panel help. The V172 sentences describe how the re-derived SP_CHANGE_IMPACT_SCAN
+    measures, so they show only once V172 is applied (law 12; the caller passes has_migration(172))."""
+    text = ("When a stored procedure or task changes, the daily scan freezes a 14-day "
+            "pre-change baseline and compares the 14 days after: runs, p95 runtime, failure "
+            "rate, and measured credits/call (QUERY_ATTRIBUTION_HISTORY roll-up to the CALL). "
+            "REGRESSED rows raise PERF_CHANGE_REGRESSION alerts automatically.")
+    if v172:
+        text += (" Credits/call counts only runs that started more than 8h ago (the attribution lag), so the "
+                 "newest runs join it a day later. A task run is one scheduled run: an auto-retry collapses to "
+                 "its final attempt, and the retries' compute still counts toward credits/call. Company comes "
+                 "from the object's database; an unmapped database shows under UNKNOWN (map it in Spend & "
+                 "Attribution > Unmapped entities).")
+    return text
+
+
 def _change_impact_tab(company: str, database: str, schema_contains: str,
                        is_operator: bool) -> None:
     section_header("Procedure and task changes", "", "operations", anchor="ops-change-objects")
@@ -4427,12 +4448,7 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
     methodology_note(
         "Daily procedure/task diffs, ranked by before/after runtime, failures, and credits/call."
     )
-    panel_help(
-        "When a stored procedure or task changes, the daily scan freezes a 14-day "
-        "pre-change baseline and compares the 14 days after: runs, p95 runtime, failure "
-        "rate, and measured credits/call (QUERY_ATTRIBUTION_HISTORY roll-up to the CALL). "
-        "REGRESSED rows raise PERF_CHANGE_REGRESSION alerts automatically."
-    )
+    panel_help(_change_impact_help(has_migration(172, _PAGE)))
     res = run(change_impact_sql.change_registry(90, company, database, schema_contains),
               page=_PAGE, key=f"chg_reg_{company}_{database}_{schema_contains}",
               tier="recent", source="OBJECT_CHANGE_REGISTRY")

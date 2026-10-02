@@ -177,7 +177,11 @@ Teams needs the Workflows Adaptive-Card recipe in that file, see §19),
 `native_alert_templates.sql` (CREATE ALERT equivalents if you prefer
 native alerts), `ml_forecast_option.sql` (SNOWFLAKE.ML.FORECAST engine; its
 procedure retrains the model on every run — see §7), `backfill_365.sql`
-(one-time year of daily facts and 180 days of security facts — run before
+(one-time year of daily facts and 180 days of security facts; since v4.609
+also the cloud-services statement mart's history, MART_CLOUD_SVC_DAILY back
+to 364 days, its heaviest arm, and a commented opt-in
+`SP_LOAD_OBJECT_COST(365)` block that reloads a year of the object-cost
+ledger, run once off-peak — run before
 ACCOUNT_USAGE history ages out; it suspends the hourly task graph around its
 extract-fed loads, each load
 is guarded so an error becomes a `FAILED:` row and Run All still reaches the
@@ -205,18 +209,18 @@ must both read 0. If the worksheet stops early (a timeout or Stop), run its
 | TASK_INCIDENT_AUTODECLARE | after TASK_LOAD_HOURLY | SP_INCIDENT_AUTODECLARE | INCIDENTS + INCIDENT_MEMBERS (§21) |
 | TASK_CHANGE_ATTRIBUTION | after TASK_LOAD_HOURLY | SP_CHANGE_ATTRIBUTION | WAREHOUSE_CHANGE_REGISTRY.CHANGED_BY (CHANGE_SOURCE is derived from it on read, §21) |
 | TASK_LOAD_DAILY | 06:45 daily (daily root) | SP_LOAD_DAILY_FACTS | daily facts (metering, tasks, logins, storage) |
-| TASK_NIGHTLY_RECONCILE | after TASK_LOAD_DAILY | SP_NIGHTLY_RECONCILE | re-loads the last 3 days of facts and marts (late-arriving ACCOUNT_USAGE rows) |
+| TASK_NIGHTLY_RECONCILE | after TASK_LOAD_DAILY | SP_NIGHTLY_RECONCILE | re-loads the last 3 days of facts and marts (late-arriving ACCOUNT_USAGE rows); since V167 the four wide-edge marts (warehouse efficiency, task graphs, role-hour, schema-hour) are swept of rows the reload did not re-stamp, only when that arm loaded, instead of deleted first |
 | TASK_LOAD_MARTS_V27_DAILY | after TASK_NIGHTLY_RECONCILE (V071) | SP_LOAD_MARTS_V27('DAILY', 3) | the daily-grain marts |
 | TASK_PLATFORM_SCORE_DAILY | after TASK_NIGHTLY_RECONCILE (V071) | SP_LOAD_PLATFORM_SCORE(30) | FACT_PLATFORM_SCORE_DAILY |
 | TASK_ALERT_SCAN_DAILY | after TASK_NIGHTLY_RECONCILE (V071) | SP_ALERT_SCAN_DAILY (daily rules, split out V062) | ALERT_EVENTS |
 | TASK_LOCK_WAIT_DAILY | after TASK_LOAD_DAILY | SP_LOAD_LOCK_WAIT_MART(3) | MART_LOCK_WAIT_DAILY |
-| TASK_PATTERN_COST_DAILY | after TASK_LOAD_DAILY | SP_LOAD_PATTERN_COST(3) | MART_PATTERN_COST_DAILY |
-| TASK_LOAD_STORAGE_TRUTH | 06:30 daily | SP_LOAD_STORAGE_TRUTH(3) | FACT_STORAGE_ACCOUNT_DAILY |
+| TASK_PATTERN_COST_DAILY | after TASK_LOAD_DAILY | SP_LOAD_PATTERN_COST(3) | MART_PATTERN_COST_DAILY (V167: one-transaction window replace; stamps SOURCE_FRESHNESS_STATE.COVERAGE_FROM; a failure rolls back and the task FAILS) |
+| TASK_LOAD_STORAGE_TRUTH | 06:30 daily | SP_LOAD_STORAGE_TRUTH(3) | FACT_STORAGE_ACCOUNT_DAILY (V166: one transaction; a failure rolls back, logs fact_load_failed, task FAILED) |
 | TASK_WAREHOUSE_CHANGE_SCAN | 06:40 daily | SP_WAREHOUSE_CHANGE_SCAN | WAREHOUSE_CONFIG_SNAPSHOT + WAREHOUSE_CHANGE_REGISTRY + WH_CHANGE_REGRESSION events |
 | TASK_LEDGER_AUTOBOOK | after TASK_WAREHOUSE_CHANGE_SCAN | SP_LEDGER_AUTOBOOK | SAVINGS_LEDGER (auto-booked warehouse changes, §9) |
 | TASK_LOAD_OBJECT_COST | 06:45 daily | SP_LOAD_OBJECT_COST(3) | FACT_OBJECT_COST_DAILY |
 | TASK_CHANGE_IMPACT_SCAN | 06:50 daily | SP_CHANGE_IMPACT_SCAN | OBJECT_CHANGE_REGISTRY + regression events |
-| TASK_LOAD_APP_COST | 06:55 daily | SP_LOAD_APP_COST(3) | FACT_APP_COST_DAILY |
+| TASK_LOAD_APP_COST | 06:55 daily | SP_LOAD_APP_COST(3) | FACT_APP_COST_DAILY (V166: one transaction as above; sessions resolved 30 days back) |
 | TASK_ANOMALY_SWEEP | 07:00 daily | SP_ANOMALY_SWEEP (v3) | ALERT_EVENTS: COST_ANOMALY_SWEEP (Cortex-explained DETAIL), PIPE_DT_FAILURES, COST_ORG_ACCOUNT_CREEP, PIPE_VOLUME_DROP, DQ_BREACH, DQ_SCHEMA_DRIFT (via SP_SCAN_SCHEMA_DRIFT, + DQ_SCHEMA_SNAPSHOT) and COST_CLOUD_SVC_ANOMALY (via SP_SCAN_CLOUD_SVC_ANOMALY) + (Mon) PERF_FINGERPRINT_DRIFT |
 | TASK_LOAD_TABLE_STORAGE | 07:10 daily | SP_LOAD_TABLE_STORAGE_MART(14) | MART_TABLE_STORAGE_DAILY |
 | TASK_DAILY_DIGEST | 07:20 daily | SP_DAILY_DIGEST | DAILY_DIGEST (Cortex) |
@@ -774,6 +778,11 @@ required "inconclusive" escape, word limits.
   step of its shown precision, inclusive (1.25 shown as 1.3% or 1.2% passes), or
   0.5%. Until V165 is applied (and on the last pre-V165 row) the digest chip
   reads "Figures not checked" and the caption makes no checking claim.
+  Since V171 the facts cover the 7 complete days ending yesterday (today's
+  partial day left out) and the spend facts are WAREHOUSE_SPEND_USD /
+  WAREHOUSE_CREDITS: warehouse compute only (serverless, AI and storage not
+  included); CORTEX_MODEL is read like the app (blank or invalid =
+  llama3.1-8b).
 - **Evaluation panels** — button-gated "AI evaluation" on release compare,
   task failures, etc.; never auto-run.
 - **Pre-explained anomalies** — sweep v3 appends a grounded hypothesis to
@@ -819,8 +828,14 @@ required "inconclusive" escape, word limits.
   credits/call via QUERY_ATTRIBUTION_HISTORY roll-up by ROOT_QUERY_ID) and
   tracks 14 days after → verdicts REGRESSED / IMPROVED / NEUTRAL / PENDING
   / NO_BASELINE / INSUFFICIENT_AFTER; REGRESSED raises PERF_CHANGE_REGRESSION
-  (CRITICAL at 2× cost or 50% failure rate). DATABASE_NAME/SCHEMA_NAME are
-  first-class columns, so every change is attributable to its schema.
+  (CRITICAL at 2× cost or 50% failure rate). Company comes from the
+  object's database (COMPANY_FOR_DATABASE; unmapped -> UNKNOWN, V172).
+  Since V172 a task run is one scheduled run (an auto-retry is not a
+  failure; its compute still counts toward credits/call), the after-side
+  credits/call counts only runs older than 8h (attribution lag), and a
+  procedure call matches only as `CALL<name>(` or `.<name>(`.
+  DATABASE_NAME/SCHEMA_NAME are first-class columns, so every change is
+  attributable to its schema.
 
 ## 10. Emergency levers (Operations → Emergency; on Admin before v4.50)
 
@@ -900,7 +915,8 @@ DEPLOY_ACTORS '' (comma list of deploy service users whose warehouse changes
 read MANAGED; §21 Attribution — deleting a populated row flips them to
 MANUAL) · CREDIT_PRICE_OVERRIDE FALSE (read only by validate.sql: set TRUE to run a
 CREDIT_PRICE_USD other than 3.68 on purpose, else validate fails with -20013;
-not seeded, and Admin never lists it as safe to delete). Values
+seeded FALSE by V171: set it TRUE with an UPDATE or on Admin > Settings, never
+a second INSERT; Admin never lists it as safe to delete). Values
 are strings; bad numbers fall back to defaults. Changes take effect within
 one cache cycle (≤5 min) or after Refresh; a retention change applies at the next
 monthly purge (TASK_PURGE_FACTS).
@@ -918,7 +934,7 @@ integration / task / last send). The one-time integration setup — the only
 step that can't ship in git — is `snowflake/webhook_delivery.sql`; to
 resume manually: `ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_ALERT_NOTIFY
 RESUME;` (never re-run V018: its CREATE OR REPLACE would put back the
-retired digest body). The morning digest (SP_DAILY_DIGEST, V165) is written
+retired digest body). The morning digest (SP_DAILY_DIGEST, V171) is written
 in-app first, then posted to every ENABLED route with DELIVER_DIGEST that is
 not CRITICAL-only (V070 / V112). A failed send logs `digest_send_failed` for
 that route, and `digest_undelivered` when no eligible route received it;
@@ -989,21 +1005,21 @@ SEC_CRED_EXPIRY / SEC_NEW_EXPOSURE event as AUTO_CLEARED 1h after raise, and V14
 arms [10]/[20] never re-raise an auto-cleared key: expiring credentials and new
 PUBLIC grants silently leave the queue.
 
-**Rolling back V160.** Re-run V157's `CREATE OR REPLACE PROCEDURE ... SP_ALERT_SCAN_DAILY()` (the tally goes back to 11 and nothing calls SP_SCAN_SLEEP_POLLING any more). Optionally disable the rule (`UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG SET ENABLED = FALSE WHERE RULE_ID = 'COST_SLEEP_POLLING';`), close its lingering OPEN, ACK'd or SNOOZED events as EXPECTED, and drop the proc (and, if wanted, the transient SLEEP_POLLING_WEEKLY table) with the teardown.sql lines. The weekly scan never runs at apply time; to re-check a week by hand, `CALL DBA_MAINT_DB.OVERWATCH.SP_SCAN_SLEEP_POLLING(TRUE);` (it can raise events and email).
+**Rolling back V160.** Re-run V157's `CREATE OR REPLACE PROCEDURE ... SP_ALERT_SCAN_DAILY()` (the tally goes back to 11 and nothing calls SP_SCAN_SLEEP_POLLING any more). On a later schema that body also drops V163's [28] / [29] arms and every V169 fix (the daily scan's current definer is V169), so roll V169 and V163 back first, or disable COST_SLEEP_POLLING in Alerts > Rules instead of replacing the proc. Optionally disable the rule (`UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG SET ENABLED = FALSE WHERE RULE_ID = 'COST_SLEEP_POLLING';`), close its lingering OPEN, ACK'd or SNOOZED events as EXPECTED, and drop the proc (and, if wanted, the transient SLEEP_POLLING_WEEKLY table) with the teardown.sql lines. The weekly scan never runs at apply time; to re-check a week by hand, `CALL DBA_MAINT_DB.OVERWATCH.SP_SCAN_SLEEP_POLLING(TRUE);` (it can raise events and email).
 
 **Rolling back V161.** First, within the dropped schema's retention (at most 1 day for a transient schema; `SHOW PARAMETERS LIKE 'DATA_RETENTION_TIME_IN_DAYS' IN DATABASE DBA_MAINT_DB`), run `UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH_BAK;`. It must come before V158, whose `CREATE ... IF NOT EXISTS` would otherwise take the name (if it already did, `ALTER SCHEMA DBA_MAINT_DB.OVERWATCH_BAK RENAME TO OVERWATCH_BAK_NEW;` first). It brings back the generations, and also the ledger and the weekly copies, which V161 had moved INTO that schema: move them back before V158 creates empty ones, `ALTER TABLE DBA_MAINT_DB.OVERWATCH_BAK.<name> RENAME TO DBA_MAINT_DB.OVERWATCH.<name>;` for OPERATOR_BACKUP_LOG and each `<T>_BAK_LAST`. If the ledger's move had fallen back to a DROP (PART B V161.13 showed a fourth CRITICAL row), run `UNDROP TABLE DBA_MAINT_DB.OVERWATCH.OPERATOR_BACKUP_LOG;` instead. Then re-run V015's TASK_BACKUP_OPERATOR block (lines 61-67 only: the whole file would re-create the retired MART_SPEND_ROLLUP_DT) and V158 in full, which brings back the task, the proc, the BACKUP_KEEP_* settings and the view carve-out. Redeploy app 4.597.0 as well (`snow streamlit deploy --replace` from main commit `0c8afb7`): 4.598 hides the task from Tasks ▸ SLA, has no BACKUP_KEEP_* editors (it lists them as unread settings), and its validate.sql FAILs the restored objects. Past the retention window the dropped generations are gone for good.
 
-**Rolling back wave 4 (V162-V165).** Each migration re-derives its procs once and rolls back by re-running its base proc. V165, V164 and V163 each roll back on their own; V162 does not: roll V163 back before it (V163's [07] text points at the hourly SEC_LOGIN_TAKEOVER that V162 adds), and bringing V154's autodeclare back needs a 24-hour wait or a data step first (below). To undo the whole wave, go in reverse apply order (V165, V164, V163, V162). None of these rollbacks may run inside a migration. App 4.602.0 keeps working after any of them: every wave-4 read and caption is gated on its migration being in SCHEMA_VERSION, and the version rows stay, so a rolled-back proc can leave a caption that overclaims until the app is redeployed from an earlier tag.
+**Rolling back wave 4 (V162-V165).** Each migration re-derives its procs once and rolls back by re-running its base proc. On a schema that stops at V165, V165, V164 and V163 each roll back on their own; V162 does not: roll V163 back before it (V163's [07] text points at the hourly SEC_LOGIN_TAKEOVER that V162 adds), and bringing V154's autodeclare back needs a 24-hour wait or a data step first (below). To undo the whole wave, go in reverse apply order (V165, V164, V163, V162). Once V166-V172 are applied the wave-4 rollbacks are no longer independent: V168 re-derives SP_ALERT_SCAN from V162, V169 re-derives SP_ALERT_SCAN_DAILY from V163 and V171 re-derives SP_DAILY_DIGEST from V165, so re-running a wave-4 base replaces the whole proc and also reverts the later fix (each paragraph below names what). Roll back V171 before V165, V169 before V163 and V168 before V162, or undo V172 down to V162 in reverse apply order. To quiet one wave-4 rule only, disable it in Alerts > Rules rather than replacing the proc. None of these rollbacks may run inside a migration. App 4.602.0 keeps working after any of them: every wave-4 read and caption is gated on its migration being in SCHEMA_VERSION, and the version rows stay, so a rolled-back proc can leave a caption that overclaims until the app is redeployed from an earlier tag.
 
-**Rolling back V165.** Re-run V112's `CREATE OR REPLACE PROCEDURE ... SP_DAILY_DIGEST()` (V112__daily_digest_skips_paging_routes.sql, lines 26-143). The six DAILY_DIGEST columns can stay; new rows then carry NULLs, which the app shows as "Figures not checked". That also brings back the unescaped Teams send and the "Digest unavailable" body on a Cortex failure. Nothing runs at apply time; a hand `CALL DBA_MAINT_DB.OVERWATCH.SP_DAILY_DIGEST();` spends a Cortex call and posts to Teams.
+**Rolling back V165.** Re-run V112's `CREATE OR REPLACE PROCEDURE ... SP_DAILY_DIGEST()` (V112__daily_digest_skips_paging_routes.sql, lines 26-143). The six DAILY_DIGEST columns can stay; new rows then carry NULLs, which the app shows as "Figures not checked". That also brings back the unescaped Teams send and the "Digest unavailable" body on a Cortex failure. On a V171 schema roll V171 back first: V112's body also drops V171's 7-complete-day window, the warehouse-compute labels and the CORTEX_MODEL normalization. Nothing runs at apply time; a hand `CALL DBA_MAINT_DB.OVERWATCH.SP_DAILY_DIGEST();` spends a Cortex call and posts to Teams.
 
 **Rolling back V164.** Soft: Admin > Settings `ESCALATE_AFTER_MIN` = 0; the next hourly run skips the escalation pass (Alerts > Native delivery reads "Escalation is off"). Hard: re-run ONLY V064's SP_NOTIFY_WEBHOOK block (V064__webhook_drain_watermarks_alert_burn_telemetry.sql lines 74-351), never the whole file, which would also roll back SP_LOAD_DAILY_FACTS, SP_NIGHTLY_RECONCILE and SP_ALERT_SCAN_DAILY. That restores the old `[SEV] title` lines. `ALERT_EVENTS.ESCALATED_AT` and the two settings can stay; app 4.602 still works because its escalation line reads ALERT_AUDIT, not the column.
 
-**Rolling back V163.** Re-run V160's `CREATE OR REPLACE PROCEDURE ... SP_ALERT_SCAN_DAILY()` (the second procedure in V160__sleep_polling_alert.sql, lines 401-1263): the tally goes back to 12, the two arms stop raising and the old [07] text returns. Optionally disable the two rules in Alerts > Rules (or `UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG SET ENABLED = FALSE WHERE RULE_ID IN ('COST_AI_USER_RUNAWAY','SEC_TRUST_REGRESSION');`) and close their lingering events as EXPECTED. The two SETTINGS rows can stay.
+**Rolling back V163.** Re-run V160's `CREATE OR REPLACE PROCEDURE ... SP_ALERT_SCAN_DAILY()` (the second procedure in V160__sleep_polling_alert.sql, lines 401-1263): the tally goes back to 12, the two arms stop raising and the old [07] text returns. On a V169 schema roll V169 back first: V160's body also drops every V169 fix (the complete-day MTD for pace and forecast, so the false day 2-5 COST_BUDGET_PACE returns; the contract start / end gate, so a CRITICAL can page past the term; the per-DATABASE_ID storage surge; true egress; the recon cycle-day key; the NULL idle timer; the trust threshold floor). Optionally disable the two rules in Alerts > Rules (or `UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG SET ENABLED = FALSE WHERE RULE_ID IN ('COST_AI_USER_RUNAWAY','SEC_TRUST_REGRESSION');`) and close their lingering events as EXPECTED. The two SETTINGS rows can stay.
 
 **Rolling back V162 (order matters).** Roll V163 back first (or accept that its [07] text keeps pointing at SEC_LOGIN_TAKEOVER). Then:
 
-1. Re-run V157's `CREATE OR REPLACE PROCEDURE ... SP_ALERT_SCAN()` (V157__alert_scan_self_watch_idle_push.sql lines 121-1128, never the whole file, which would also put SP_ALERT_SCAN_DAILY back to V157's text and drop V160's and V163's daily arms): the tally goes back to 12 and SEC_LOGIN_TAKEOVER / SEC_ADMIN_GRANT stop raising. This is usually enough: V162's SP_INCIDENT_AUTODECLARE only narrows what it does for those two rules, so it can stay.
+1. Re-run V157's `CREATE OR REPLACE PROCEDURE ... SP_ALERT_SCAN()` (V157__alert_scan_self_watch_idle_push.sql lines 121-1128, never the whole file, which would also put SP_ALERT_SCAN_DAILY back to V157's text and drop V160's, V163's and V169's daily arms): the tally goes back to 12 and SEC_LOGIN_TAKEOVER / SEC_ADMIN_GRANT stop raising. On a V168 schema roll V168 back first: V157's body also drops V168's fixes, so PIPE_COPY_FAILURES goes back to scan-day keys (yesterday's failures page again after midnight), SEC_NEW_ADMIN_NETWORK goes back to the undated user|IP key (a pair raised under V168 in the last 24 h may raise once more), and the V091 PERF auto-clear sweep gets V096's 48 h RAISED_AT bound back. This is usually enough: V162's SP_INCIDENT_AUTODECLARE only narrows what it does for those two rules, so it can stay.
 2. Only if V154's `CREATE OR REPLACE PROCEDURE ... SP_INCIDENT_AUTODECLARE()` (lines 54-235) must come back too, clear the way FIRST. V154's crit CTE has no rule exclusion and reads every OPEN or ACK CRITICAL of the last 24 hours, so a CRITICAL takeover raised before step 1 and still open would be auto-declared by the next hourly TASK_INCIDENT_AUTODECLARE. Either wait at least 24 hours after step 1, or resolve the lingering events as EXPECTED (SNOOZED included: a snooze wakes to OPEN):
 
    ```sql
@@ -1020,32 +1036,60 @@ PUBLIC grants silently leave the queue.
 
 The two ALERT_CONFIG rows can stay; disable them in Alerts > Rules if wanted.
 
+**Rolling back the V166-V172 wave.** Each migration re-derives procs (V170 also a view) from a named base and rolls back by re-running that base's CREATE statement only, never the whole base file: most bases also define other objects, or carry a tail CALL or a data repair. None of these rollbacks may run inside a migration, and none undoes an in-migration data repair (those wrote corrected values); V172's also needs one data step (below). The version rows stay, so a gated caption can overclaim until the app is redeployed from an earlier tag. To undo both waves, go from V172 down to V162 in reverse apply order: V168, V169 and V171 re-derive procs whose base is a wave-4 migration, so a wave-4 rollback on this schema comes after them (see the wave-4 paragraph above).
+
+**Rolling back V166.** Re-run each base CREATE PROCEDURE: SP_LOAD_SECURITY_FACTS from V105 (V105__change_risk_create_or_replace_destructive.sql), SP_LOAD_DAILY_FACTS from V101 (V101__fact_task_daily_retry_collapse.sql), SP_LOAD_APP_COST from V077 (the CREATE PROCEDURE only, never the whole file: it CALLs the loader) and SP_LOAD_STORAGE_TRUTH from V046 (the CREATE PROCEDURE only, for the same reason). The repaired FACT_STORAGE_DAILY rows can stay (they are what Snowflake bills; the live twin shows the same), but a rolled-back SP_LOAD_DAILY_FACTS writes the trailing days as the AVG again. No procedure ran at apply time; the only apply-time data change was that storage repair MERGE.
+
+**Rolling back V167.** Re-run each base CREATE PROCEDURE only: SP_LOAD_MARTS_V27 from V159 (V159__loader_compile_diet.sql, which also defines SP_CHANGE_ATTRIBUTION), SP_NIGHTLY_RECONCILE from V064 (the file defines four procs: that CREATE only) and SP_LOAD_PATTERN_COST from V120 (the CREATE only, never its tail CALL). Leave SOURCE_FRESHNESS_STATE.COVERAGE_FROM: the older bodies never read it, and the app reads it only behind has_migration(167). The twin DELETE is recoverable by Time Travel (AT a timestamp before the apply) or a reload; do NOT re-run SP_LOAD_PATTERN_COST for more than its 3 days on the rolled-back V120 loader (it re-adds twins). Nothing runs at apply time.
+
+**Rolling back V168 / V169.** V168: re-run V162's SP_ALERT_SCAN (the second CREATE PROCEDURE in V162__security_takeover_admin_grant.sql); a SEC_NEW_ADMIN_NETWORK pair raised under V168 in the last 24h may raise once more under the undated key. V169: re-run V163's SP_ALERT_SCAN_DAILY (V163__ai_runaway_trust_regression.sql, the CREATE PROCEDURE). The refreshed rule NAME text can stay.
+
+**Rolling back V170.** Re-run V131's CREATE PROCEDURE (the 4-arg) and V072's CREATE VIEW. Leave the 5-arg SP_INCIDENT_DECLARE in place while any deployed app calls it (4.609.0 on a V170 schema does); remove it only with the teardown.sql line once no app does.
+
+**Rolling back V171.** Re-run each base CREATE PROCEDURE only: SP_CANARY_SENTINEL from V017__hardening_v7.sql (never the whole file: it also re-creates SP_ALERT_SCAN and SP_PURGE_FACTS), SP_DAILY_DIGEST from V165__daily_digest_grounding.sql, SP_SCAN_REF_GAPS from V129__pipe_ref_gap_alert.sql (never the whole file: it also re-creates SP_ALERT_SCAN_DAILY). The FALSE CREDIT_PRICE_OVERRIDE row can stay (validate reads it as no override). Nothing runs at apply time.
+
+**Rolling back V172.** Order matters (the exact text is in the V172 header):
+
+1. Re-run each base CREATE PROCEDURE only: SP_CHANGE_IMPACT_SCAN from V140 (never the whole file: it carries a data repair), SP_WAREHOUSE_CHANGE_SCAN from V109, SP_SCAN_SCHEMA_DRIFT from V133 (that CREATE only: the file also re-creates SP_ANOMALY_SWEEP and CALLs it), SP_SCAN_CLOUD_SVC_ANOMALY and SP_ANOMALY_SWEEP from V150 (the two CREATEs, never its tail CALL). The re-stamped COMPANY values stay (they are the corrected values).
+2. Right after V140's CREATE, before the next change-impact scan (06:50 Central, or Operations > "Run change-impact scan now"), null the still-tracking TASK and PROCEDURE baselines:
+
+   ```sql
+   UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY
+      SET BASELINE_FROM = NULL, BASELINE_CALLS = NULL, BASELINE_FAILS = NULL,
+          BASELINE_MEDIAN_MS = NULL, BASELINE_P95_MS = NULL, BASELINE_CREDITS_PER_CALL = NULL
+    WHERE OBJECT_TYPE IN ('TASK', 'PROCEDURE') AND CURRENT_DATE() <= TRACKING_UNTIL AND NOT ALERTED;
+   ```
+
+   Why: V172's R4 and its scan froze these baselines per scheduled run (the terminal attempt) and with the anchored CALL match. V140's AFTER legs count every attempt and use the bare suffix match, and V140 re-freezes only a NULL baseline. Kept, a task with 7 of 14 runs retried once reads 14 runs / 0 failed before against 21 / 7 after: REGRESSED, a false PERF_CHANGE_REGRESSION page; a rescaled credits/call reads a false IMPROVED. Nulled, V140's next scan re-freezes them on its own basis, over its 20-day reach (a change older than 6 days gets a shorter baseline). ALERTED rows keep the baseline their alert was raised on (V140 alerts a row once). Check any PERF_CHANGE_REGRESSION raised between steps 1 and 2 before acting on it.
+
+Nothing runs at apply time.
+
 | Rule | Family | Fires when (threshold = THRESHOLD_NUM, editable) | Recurrence |
 |---|---|---|---|
 | COST_DAILY_CREDITS | COST | account credits/day over threshold | daily key |
 | COST_WH_DAILY_CREDITS | COST | one warehouse's credits/day over threshold | daily per WH |
-| COST_BUDGET_PACE | COST | MTD spend ahead of budget pace | daily |
-| COST_FORECAST_BREACH | COST | projected month-end over budget | daily |
+| COST_BUDGET_PACE | COST | MTD spend through yesterday (complete days) ahead of the completed-days budget pace (V169) | daily |
+| COST_FORECAST_BREACH | COST | projected month-end (complete-day MTD + run-rate x the remaining days incl. today, V169) over budget | daily |
 | ~~COST_CLOUD_SVC_RATIO~~ | COST | retired at V157 (wave-2b compile diet) — COST_CLOUD_SVC_ANOMALY (V150, daily: a warehouse's cloud-services credits step outside its own 28-day robust baseline) supersedes the fixed ratio; open, acknowledged and snoozed events were closed as EXPECTED; the WATCH/ELEVATED bands stay on Cost > Spend for reading | — |
-| COST_CLOUD_SVC_ANOMALY | COST | a warehouse's daily cloud-services credits (MART_CLOUD_SVC_DAILY, ≥1 credit/day) at a robust z ≥ threshold (3.5) against its own trailing 28-day median/MAD, a spike or a collapse, the last 3 complete days scored; MEDIUM, HIGH at ≥2x the threshold — SP_ANOMALY_SWEEP → SP_SCAN_CLOUD_SVC_ANOMALY, V150 | per warehouse per day |
-| COST_STORAGE_SURGE | COST | database grew > GB day-over-day | per DB per day |
+| COST_CLOUD_SVC_ANOMALY | COST | a warehouse's daily cloud-services credits (MART_CLOUD_SVC_DAILY, ≥1 credit/day) at a robust z ≥ threshold (3.5) against its own trailing 28-day median/MAD, a spike or a collapse, the last 3 complete days scored; MEDIUM, HIGH at ≥2x the threshold — SP_ANOMALY_SWEEP → SP_SCAN_CLOUD_SVC_ANOMALY, V150; disabling the rule stops the scan (V172; before V172 a disabled rule still booked) | per warehouse per day |
+| COST_STORAGE_SURGE | COST | a live database (per DATABASE_ID, V169) grew > GB day-over-day | per DB per day |
 | COST_SERVERLESS_CREEP | COST | non-WH/non-AI service credits up > % WoW (≥5 cr) | weekly while creeping |
 | COST_AI_CREEP | COST | AI/Cortex credits (FACT_METERING_DAILY service types matching CORTEX / AI / INTELLIGENCE / COCO / COWORK) in the 7 newest complete days up > threshold % (50) vs the 7 before, with ≥5 credits this week, priced at AI_CREDIT_PRICE_USD (a brand-new AI workload reads 999%); MEDIUM, company ALL — daily [13b], V061 | weekly while creeping |
-| COST_ANOMALY_SWEEP | COST | robust z ≥ threshold vs 28d (warehouse & service series) | per series per day |
-| COST_CONTRACT_BREACH | COST | projected exhaustion ≤ threshold days (CRITICAL ≤14) | weekly |
-| COST_IDLE_OPPORTUNITY | COST | a settings-verified AUTO_SUSPEND tightening recovers ≥ threshold USD/month (net of the 60s resume tail, 14 complete days, ≥7 covered; HIGH at ≥5x) — daily scan, V157 | weekly per WH |
+| COST_ANOMALY_SWEEP | COST | robust z ≥ threshold vs 28d (warehouse & service series); books only while the rule is enabled (V172) | per series per day |
+| COST_CONTRACT_BREACH | COST | projected exhaustion ≤ threshold days (CRITICAL ≤14) inside the term: needs CONTRACT_START_DATE; consumed counts [start, CONTRACT_END_DATE), the end exclusive; quiet once the term is over or when the exhaustion falls on or after the end (V169) | weekly |
+| COST_IDLE_OPPORTUNITY | COST | a settings-verified AUTO_SUSPEND (a NULL timer = never suspends, V169) tightening recovers ≥ threshold USD/month (net of the 60s resume tail, 14 complete days, ≥7 covered; HIGH at ≥5x) — daily scan, V157 | weekly per WH |
 | COST_SLEEP_POLLING | COST | a poller (warehouse x user, or task owner role) slept via SYSTEM$WAIT on ≥5 of the 7 newest complete days and billed ≥ threshold USD/week (Spend-panel billed basis; HIGH at ≥5x) — daily scan [25] → SP_SCAN_SLEEP_POLLING, once per ISO week, V160 | one event per poller per episode; CONDITION_ENDED when it stops |
 | COST_AI_USER_RUNAWAY | COST | one user's AI credits on one complete day > threshold x COCO_DAILY_CAP_CREDITS (2 x 15 by default) AND a robust z ≥ AI_RUNAWAY_ROBUST_Z (3.5) against their own active days in the prior 90 (fewer than 5 such days = no baseline: the cap alone decides); Cortex Code only unless AI_RUNAWAY_INCLUDE_FUNCTIONS (inert until Functions spend is booked to a user); HIGH; company = the user's, ALL when unmapped — daily [28], V163 | per user per day; the last 3 complete days re-checked each morning |
-| COST_EGRESS_SPIKE | COST | DATA_TRANSFER_HISTORY outbound ≥ threshold GB (100) in the last 24h (the event names the 14-day daily average and the top destination region); MEDIUM, company ALL — daily [19], V043 | daily key |
-| PERF_QUERY_FAIL_PCT | PERF | window fail % over threshold | daily |
-| PERF_QUEUED_MINUTES | PERF | queued minutes over threshold | daily |
-| PERF_SPILL_GB | PERF | remote spill GB over threshold | daily |
-| PERF_CHANGE_REGRESSION | PERF | changed proc/task worse than frozen baseline | once per change |
+| COST_EGRESS_SPIKE | COST | true egress (TARGET_REGION or TARGET_CLOUD set) ≥ threshold GB (100) on the previous complete Central day (the event names that day, the 14-day daily average and the day's largest per-region destination); MEDIUM, company ALL — daily [19], V043 / V169 | daily key |
+| PERF_QUERY_FAIL_PCT | PERF | window fail % over threshold | daily; auto-clears below CLEAR whatever its raise day (V168) |
+| PERF_QUEUED_MINUTES | PERF | queued minutes over threshold | daily; auto-clears below CLEAR whatever its raise day (V168) |
+| PERF_SPILL_GB | PERF | remote spill GB over threshold | daily; auto-clears below CLEAR whatever its raise day (V168) |
+| PERF_CHANGE_REGRESSION | PERF | changed proc/task worse than frozen baseline (task runs = scheduled runs, an auto-retry is one run; AFTER credits/call over runs older than 8h; procedure calls matched as `CALL<name>(` or `.<name>(`, V172) | once per change |
 | WH_CHANGE_REGRESSION | WAREHOUSE | a warehouse setting change regressed against its frozen pre-change baseline within its 14-day tracking window: credits/day up > threshold % (15) and ≥1 credit/day, or p95 up 25% and ≥30s, or failure rate up 5 points, or queueing up 50% and ≥10 min/day; HIGH, CRITICAL at 2x credits/day — SP_WAREHOUSE_CHANGE_SCAN (06:40 daily), V024 / V109 | once per warehouse, setting and change day |
 | PERF_FINGERPRINT_DRIFT | PERF | family p95 up > % (7d vs prior 28d), no change event; Mondays | weekly per hash |
 | PERF_SLO_BREACH | PERF | an existing ACTIVE SLO_OBJECTIVES row in BREACH (STALE / NO_DATA and samples under 5 observations excluded); HIGH, CRITICAL at ≥2x error-budget burn — SP_SLO_BREACH_SCAN (TASK_SLO_BREACH_SCAN, after the hourly mart load), V085 / V096 | per objective per day per burn band (a same-day HIGH→CRITICAL gets its own key) |
 | PIPE_TASK_FAILURES | PIPELINE | task failures in window over threshold | daily per task |
-| PIPE_COPY_FAILURES | PIPELINE | failed/partial file loads 24h (CRITICAL ≥10 files) | daily per table |
+| PIPE_COPY_FAILURES | PIPELINE | failed/partial file loads per Central failure day, yesterday and today (CRITICAL ≥10 files on one day) | once per table per failure day (a same-day WARN→CRIT gets its own key; V168); a new failure after that day's event was resolved stays suppressed until the next Central day unless it crosses WARN→CRIT |
 | PIPE_DT_FAILURES | PIPELINE | dynamic-table refresh failures 24h (CRITICAL ≥5) | daily per DT |
 | PIPE_ETL_TASK_FAILED | PIPELINE | a workflow's tasks failed on their final attempt tonight (≥ threshold, never below 1; HIGH for the terminal workflow; auto-clears once every retried task has finished clean — a retry still running keeps it open) — V156, via the V157 scan arm in the cycle run window (Central hours of ETL_SLA_TARGET_HHMM − 10h through target + 3h, plus a 15:00 pass): a daytime re-run failure, or the auto-clear of its retry, lands at the 15:00 pass or the window start, up to ~6h later | per workflow per night |
 | PIPE_ETL_CYCLE_NOT_STARTED | PIPELINE | cycle starter silent past last week's same-night kickoff + threshold min (the Tonight *Cycle start: Overdue* test) — V156, via the V157 scan arm in the cycle run window (ETL_SLA_TARGET_HHMM − 10h through + 3h Central, plus 15:00) | per missed night |
@@ -1055,21 +1099,21 @@ The two ALERT_CONFIG rows can stay; disable them in Alerts > Rules if wanted.
 | SEC_NEW_EXPOSURE | SECURITY | a new grant to PUBLIC (24h lookback) of ≥ threshold objects in one batch; checked every 4h since V157 (01, 05, 09, 13, 17, 21 Central); a grant revoked before the next check is never raised | once per grant batch (PRIVILEGE, GRANTED_ON, CREATED_ON); auto-clears as CONDITION_ENDED once the whole batch is revoked (V157) |
 | SEC_LOGIN_TAKEOVER | SECURITY | ≥ threshold (5) failed logins by one user within 15 min, then a successful login within 60 min of that burst (every failed login counts); CRITICAL when the login is off-hours (20:00-06:00 Central, or a weekend) or the user directly held ACCOUNTADMIN / SECURITYADMIN / SYSADMIN / USERADMIN / ORGADMIN / SNOW_ACCOUNTADMINS / SNOW_SYSADMINS at that moment, else HIGH; company ALL — hourly [26], V162; never auto-declares an incident (SP_INCIDENT_AUTODECLARE skips it: declare by hand) | one event per episode (key ends in the anchor login's UTC millisecond time); a later WARN→CRIT crossing supersedes the WARN, a CRIT is never re-minted as WARN; a snooze never carries to the next episode |
 | SEC_ADMIN_GRANT | SECURITY | a direct grant of one of those seven admin-tier roles to a user (GRANTS_TO_USERS, 26h lookback), raised even when already revoked; flat HIGH; the title flags off-hours and first-time grants; company ALL — hourly [27], V162; never auto-declares an incident | one event per grant (grantee, role, CREATED_ON) |
-| SEC_NEW_ADMIN_NETWORK | SECURITY | a user with a direct ACCOUNTADMIN / SNOW_ACCOUNTADMINS / SNOW_SYSADMINS grant logs in from a CLIENT_IP first seen in the last 24h of a 90-day window, with ≥ threshold (1) logins from it; HIGH, company ALL — hourly [18], V043 | once per user and IP |
+| SEC_NEW_ADMIN_NETWORK | SECURITY | a user with a direct ACCOUNTADMIN / SNOW_ACCOUNTADMINS / SNOW_SYSADMINS grant has login attempts (successful or not) from a CLIENT_IP first seen in the last 24h of a 90-day window, with ≥ threshold (1) attempts from it; the title says 'logged in' only if one succeeded (failures-only keys carry FAILED); HIGH, company ALL — hourly [18], V043 / V168 | once per user, IP and first-seen Central day (a network quiet 90+ days alerts again); a failures-only pair that later succeeds raises once more and the failed event is superseded |
 | `SEC_POSTURE_<METRIC>` | SECURITY | an operator-created posture monitor (Security's generate-upsert; not seeded; severity chosen when it is created): the newest MART_SECURITY_POSTURE_DAILY value of its METRIC_NAME is ≥ threshold and at most 2 days old — hourly [21], V087 | per rule, company and posture day |
 | ~~SEC_BREAK_GLASS_USE~~ | SECURITY | retired at V034 (muted since V025) — admin-role activity stays as evidence on Security -> Changes | — |
-| SEC_TRUST_REGRESSION | SECURITY | a CRITICAL or HIGH Trust Center scanner's at-risk count rose ≥ threshold (1) against its previous snapshot day (today's and yesterday's rows checked each morning; a scanner's first snapshot never raises; quiet without TRUST_CENTER_VIEWER); HIGH, company ALL — daily [29], V163 | per scanner per snapshot day (the counts of the scan that raised it; a further rise the same day is not pushed again); no self-clear |
+| SEC_TRUST_REGRESSION | SECURITY | a CRITICAL or HIGH Trust Center scanner's at-risk count rose ≥ threshold (1; a threshold below 1 reads as 1, V169) against its previous snapshot day (today's and yesterday's rows checked each morning; a scanner's first snapshot never raises; quiet without TRUST_CENTER_VIEWER); HIGH, company ALL — daily [29], V163 | per scanner per snapshot day (the counts of the scan that raised it; a further rise the same day is not pushed again); no self-clear |
 | COST_DEPT_BUDGET_PACE | COST | department MTD > budget pace by threshold % (DEPT_BUDGETS) | daily per dept |
 | COST_ORG_ACCOUNT_CREEP | COST | org account currency spend up threshold % WoW | weekly per account |
 | PIPE_VOLUME_DROP | PIPELINE | table rows-added down threshold % vs prior-7d avg (≥1k rows/day) | daily per table |
 | DQ_BREACH | PIPELINE | a registered table's latest rows-added load is a robust-z outlier (spike or drop, z ≥ threshold 3.5) against its own loads over 28 days — the same series as the Operations data-quality panel; MEDIUM — SP_ANOMALY_SWEEP, V132 | per table per load day |
 | DQ_SCHEMA_DRIFT | PIPELINE | a table registered as an OBJECT entity has columns added, removed or retyped since its latest prior daily snapshot (a first snapshot is the baseline and never alerts); MEDIUM — SP_SCAN_SCHEMA_DRIFT from the sweep, V133 | per table per day |
-| PIPE_REF_GAP | PIPELINE | ≥ threshold (1) source codes in one check missing from the XLAT reference table (SP_SCAN_REF_GAPS; the nightly load would fail on them; a check whose name has a character other than letters, digits, spaces and - _ . : / is skipped, which the Operations panel warns about); HIGH — daily add-on [17], not counted in the scan tally, V129 | per check per day |
-| DQ_RECON_ERROR | PIPELINE | RECON_MTRC_ERROR shows source-vs-target mismatches inside the rule's window (48h) on ≥ threshold (1) metrics; HIGH — daily add-on [18] (SP_SCAN_RECON_ERRORS), not counted, V137 | daily key |
+| PIPE_REF_GAP | PIPELINE | ≥ threshold (1) source codes in one check missing from the XLAT reference table (SP_SCAN_REF_GAPS; the nightly load would fail on them; a check whose name has a character other than letters, digits, spaces and - _ . : / is skipped, which the Operations panel warns about); HIGH — daily add-on [17], not counted in the scan tally, V129; a failing check logs ref_gap_check_failed and the others still alert (V171) | per check per day |
+| DQ_RECON_ERROR | PIPELINE | RECON_MTRC_ERROR shows source-vs-target mismatches inside the rule's window (48h) on ≥ threshold (1) metrics; HIGH — daily add-on [18] (SP_SCAN_RECON_ERRORS), not counted, V137 | newest error-cycle day key (V169); a same-date failing re-run folds into that date's event |
 | OPS_CANARY_FAIL | PLATFORM | weekly source sentinel found failing dependency views | daily key |
 | OPS_SCAN_DEGRADED | PLATFORM | one or more rule blocks failed in the last scan (v7 isolation) | daily key |
-| OPS_PIPELINE_DEGRADED | PLATFORM | pipeline self-watch in BOTH scans (V157): a SOURCE_FRESHNESS_STATE row past its cadence (DAILY/METERING 30h, else 3h; incl. the ALERT_SCAN_HOURLY / ALERT_SCAN_DAILY heartbeats), a loader failure logged and swallowed, or the notifier idle 3h while a route is enabled; the hourly scan checks every 3h (02, 05, …, 23 Central), the daily scan every morning; a stale or idle episode that ends between checks is not raised | per source per last-load day; per failure type/source/day |
-| OPS_SLOW_RENDER | PLATFORM | page p95 first paint > threshold s (7d, from APP_USAGE.RENDER_MS) | weekly per page |
+| OPS_PIPELINE_DEGRADED | PLATFORM | pipeline self-watch in BOTH scans (V157): a SOURCE_FRESHNESS_STATE row past its cadence (DAILY/METERING 30h, else 3h; incl. the ALERT_SCAN_HOURLY / ALERT_SCAN_DAILY heartbeats), a loader failure logged (most loaders swallow it and their task reads SUCCEEDED; since V166 the app-cost / storage-truth loaders roll back and re-raise, so their task reads FAILED and an owner hand CALL raises the error to its caller, and the alert DETAIL says which, V168 / V169), or the notifier idle 3h while a route is enabled; the hourly scan checks every 3h (02, 05, …, 23 Central), the daily scan every morning; a stale or idle episode that ends between checks is not raised | per source per last-load day; per failure type/source/day |
+| OPS_SLOW_RENDER | PLATFORM | page p95 first paint > threshold s (7d, from APP_USAGE.RENDER_MS); the title shows the p95 in Hr/Min/Sec (V171) | weekly per page |
 
 Playbooks for each rule render in the alert drawer (`logic/playbooks.py`).
 
@@ -1324,7 +1368,10 @@ the same day.
       DEPARTMENT_MAP names; routes. ALERT_CONFIG thresholds re-seed with
       defaults automatically.
    3) roles.sql → validate.sql (all OK) → facts refill from the loaders
-      (history bounded by ACCOUNT_USAGE retention: 365d).
+      (history bounded by ACCOUNT_USAGE retention: 365d). Then run the V167 AI
+      reload-then-prune in docs/FULL_REBUILD.md step 5 (required): the replayed
+      V078 first-fill keyed a year of Cortex Code rows on the stored offset,
+      and the loader's Central MERGE never deletes them.
 5. **Bad deploy:** `snow streamlit deploy --replace` from the previous git
    tag. Migrations are additive; no schema rollback exists or is needed.
 6. **Verify after any recovery:** validate.sql all OK → Admin canary all
@@ -1547,6 +1594,12 @@ hand-written SQL link, but nothing in the app sets it).
 1. Proposals expander — open alert families (48h) with nearby warehouse
    changes counted; pick one, review the generated SQL, type DECLARE. The
    family's open alerts link as members automatically, never double-linked.
+   The receipt is the procedure's own verdict: "Incident declared — N
+   alert(s) linked", or "Nothing declared" when every proposal alert was
+   resolved or linked elsewhere since the list loaded (V170 rolls that
+   declare back instead of leaving an empty incident). From V170 the
+   incident's Declared by and each member's Linked by are the DBA who typed
+   DECLARE (before V170, and for older incidents, the app owner).
 2. Auto-declare — CRITICALs open an incident when their dedupe family has
    no open one: hourly, one per family per 24h. Toggle:
    Settings -> INCIDENT_AUTO_DECLARE_CRITICAL. Never for the two identity

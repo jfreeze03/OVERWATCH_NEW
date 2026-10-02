@@ -8,6 +8,10 @@ must fail here and force a forward re-derivation. Two layers:
     sqlite over tokens cut with the proc's own patterns, and agrees with check_digest on a corpus of passing and
     failing drafts. (Only REGEXP_SUBSTR_ALL / FLATTEN are replaced -- by Python re over the proc's literals -- the
     engine difference PREFLIGHT P165.2 / P165.3 check on the live account.)
+  * the facts window (V171 R1-228) -- the proc's OWN three fact reads run in sqlite over a board seeded the way
+    V148 writes it (DAILY_SPEND rows for every scope company x WINDOW_DAYS 7 / 14 / 30 x day, today included):
+    the facts are the 7 COMPLETE days ending yesterday, one row per day, warehouse compute only; the
+    WAREHOUSE_SPEND_USD / WAREHOUSE_CREDITS keys still bind through the _USD suffix and the CREDIT substring.
 Reads the latest body through tests.test_alert_rule_consistency._latest_proc_bodies (last definition wins).
 """
 
@@ -15,6 +19,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from datetime import date, timedelta
 
 import pytest
 
@@ -232,3 +237,150 @@ def test_sqlite_parity_has_teeth():
         (1, {"2 high"})
     assert _sql_check("Spend was $12,345.67.", "SPEND_USD=n/a") == (1, {"$12,345.67"})
     assert dg.check_digest("Spend was $12,345.67.", "SPEND_USD=n/a").ungrounded == ("$12,345.67",)
+
+
+# -- the facts window (V171 R1-228): the proc's OWN fact reads, run in sqlite ---------------------------------------
+
+_TODAY = date(2026, 10, 1)
+_RATE = 3.68
+# the three digest fact reads: SELECT <exprs> / INTO <binds> / FROM <table> / WHERE ... ;
+_FACT_READ_RE = re.compile(
+    r"^    SELECT (?P<sel>[^\n]+)\n      INTO (?P<into>[^\n]+)\n"
+    r"    FROM DBA_MAINT_DB\.OVERWATCH\.(?P<tbl>MART_EXEC_BOARD|FACT_QUERY_DAILY|FACT_TASK_DAILY)\n"
+    r"(?P<where>[^;]*);$", re.M)
+
+
+def fact_reads(body: str) -> dict[str, tuple[str, str]]:
+    """{table: (the read with its INTO dropped, the INTO bind list)} -- the digest's fact reads, as written."""
+    out: dict[str, tuple[str, str]] = {}
+    for m in _FACT_READ_RE.finditer(body):
+        assert m.group("tbl") not in out, m.group("tbl")
+        out[m.group("tbl")] = (f"SELECT {m.group('sel')}\nFROM {m.group('tbl')}\n{m.group('where')}", m.group("into"))
+    return out
+
+
+def _dateadd(unit: str, n: int, d: str) -> str:
+    assert unit == "day"
+    return (date.fromisoformat(d) + timedelta(days=int(n))).isoformat()
+
+
+def _company_credits(company: str, day: date, today: date) -> float:
+    off = (today - day).days
+    return {"ALFA": 10.0 + off, "Trexis": 3.0 + 0.5 * off, "UNKNOWN": 1.25}[company]
+
+
+def _seed(con: sqlite3.Connection, today: date) -> None:
+    """MART_EXEC_BOARD the way V148 writes it (DAILY_SPEND per scope company x WINDOW_DAYS x DAY, DAY >= today -
+    WINDOW_DAYS, today included; plus the today-inclusive KPI rows), and the two day facts, today included."""
+    con.execute("CREATE TABLE MART_EXEC_BOARD (COMPANY TEXT, WINDOW_DAYS INT, PANEL TEXT, METRIC TEXT, "
+                "DIMENSION TEXT, PERIOD_START TEXT, VALUE REAL, VALUE_USD REAL)")
+    con.execute("CREATE TABLE FACT_QUERY_DAILY (DAY TEXT, COMPANY TEXT, WAREHOUSE_NAME TEXT, QUERY_COUNT INT, "
+                "FAILED_COUNT INT, QUEUED_SEC_SUM REAL, SPILL_REMOTE_GB REAL)")
+    con.execute("CREATE TABLE FACT_TASK_DAILY (DAY TEXT, COMPANY TEXT, RUNS INT, FAILED INT)")
+    companies = ("ALFA", "Trexis", "UNKNOWN")
+    for window in (7, 14, 30):
+        for off in range(window + 1):
+            day = today - timedelta(days=off)
+            per = {c: _company_credits(c, day, today) for c in companies}
+            for scope, credits in (*per.items(), ("ALL", sum(per.values()))):
+                con.execute("INSERT INTO MART_EXEC_BOARD VALUES (?, ?, 'DAILY_SPEND', 'CREDITS', NULL, ?, ?, ?)",
+                            (scope, window, day.isoformat(), credits, round(credits * _RATE, 2)))
+        for scope in ("ALL", *companies):
+            con.execute("INSERT INTO MART_EXEC_BOARD VALUES (?, ?, 'KPI', 'CREDITS', NULL, NULL, 99999, 99999)",
+                        (scope, window))
+    for off in range(12):
+        day = (today - timedelta(days=off)).isoformat()
+        for company, wh in (("ALFA", "WH_A"), ("Trexis", "WH_T"), ("ALFA", "WH_B")):
+            con.execute("INSERT INTO FACT_QUERY_DAILY VALUES (?, ?, ?, ?, 2, 600.0, 0.25)",
+                        (day, company, wh, 100 + off))
+            con.execute("INSERT INTO FACT_TASK_DAILY VALUES (?, ?, 50, 1)", (day, company))
+
+
+def run_fact_reads(body: str, today: date = _TODAY) -> dict[str, tuple]:
+    """Each fact read of ``body`` run in sqlite against the seeded board and facts (CURRENT_DATE() = ``today``)."""
+    con = sqlite3.connect(":memory:")
+    con.create_function("DATEADD", 3, _dateadd)
+    _seed(con, today)
+    out = {}
+    for tbl, (sql, _into) in fact_reads(body).items():
+        assert sql.count("CURRENT_DATE()") == 2, sql
+        out[tbl] = con.execute(sql.replace("CURRENT_DATE()", f"'{today.isoformat()}'")).fetchone()
+    return out
+
+
+def _want(today: date = _TODAY) -> dict[str, tuple]:
+    days = [today - timedelta(days=k) for k in range(1, 8)]               # the 7 complete days ending yesterday
+    credits = [sum(_company_credits(c, d, today) for c in ("ALFA", "Trexis", "UNKNOWN")) for d in days]
+    usd = sum(round(c * _RATE, 2) for c in credits)
+    queries = sum(3 * (100 + (today - d).days) for d in days)              # three rows a day, 100 + offset each
+    return {"MART_EXEC_BOARD": (usd, sum(credits)),
+            "FACT_QUERY_DAILY": (queries, 7 * 3 * 2, round(7 * 3 * 600.0 / 60, 1), round(7 * 3 * 0.25, 2)),
+            "FACT_TASK_DAILY": (7 * 3 * 50, 7 * 3 * 1)}
+
+
+def _close(got: tuple, want: tuple) -> bool:
+    return len(got) == len(want) and all(g is not None and abs(float(g) - float(w)) < 1e-6
+                                         for g, w in zip(got, want, strict=True))
+
+
+def test_the_digest_facts_are_the_seven_complete_days_one_row_a_day():
+    """V171 R1-228: the latest digest's own reads give exactly the 7 complete days ending yesterday, from the ALL /
+    7-day DAILY_SPEND rows only (V148 writes one per scope company x WINDOW_DAYS 7 / 14 / 30 x day)."""
+    reads = fact_reads(_BODY)
+    assert list(reads) == ["MART_EXEC_BOARD", "FACT_QUERY_DAILY", "FACT_TASK_DAILY"]
+    assert [r[1] for r in reads.values()] == [":f_spend_usd, :f_credits",
+                                              ":f_queries, :f_failed_q, :f_queued_min, :f_spill_gb",
+                                              ":f_task_runs, :f_task_fail"]
+    got, want = run_fact_reads(_BODY), _want()
+    for tbl in want:
+        assert _close(got[tbl], want[tbl]), (tbl, got[tbl], want[tbl])
+    assert "PANEL = 'KPI'" not in _BODY
+
+
+@pytest.mark.parametrize("old, new", [
+    (" AND COMPANY = 'ALL'", ""),                                   # every scope company summed in
+    (" AND WINDOW_DAYS = 7", ""),                                   # the 7 / 14 / 30 windows: each day 3x
+    ("PERIOD_START < CURRENT_DATE()", "PERIOD_START <= CURRENT_DATE()"),   # today's partial back in
+    ("FACT_QUERY_DAILY\n    WHERE DAY >= DATEADD('day', -7,", "FACT_QUERY_DAILY\n    WHERE DAY >= DATEADD('day', -8,"),
+    ("AND DAY < CURRENT_DATE();\n    SELECT SUM(RUNS)", "AND DAY <= CURRENT_DATE();\n    SELECT SUM(RUNS)"),
+    ("FACT_TASK_DAILY\n    WHERE DAY >= DATEADD('day', -7,", "FACT_TASK_DAILY\n    WHERE DAY >= DATEADD('day', -9,"),
+])
+def test_the_facts_window_harness_has_teeth(old, new):
+    assert _BODY.count(old) == 1, old
+    got, want = run_fact_reads(_BODY.replace(old, new)), _want()
+    assert not all(_close(got[t], want[t]) for t in want), old
+
+
+def _latest_fact_keys() -> list[str]:
+    facts_rhs = _BODY[_BODY.index("    facts := 'WINDOW_DAYS=7"):_BODY.index("    alerts := ")]
+    return re.findall(r"([A-Z][A-Z0-9_]*)=", " ".join(re.findall(r"'([^']*)'", facts_rhs)))
+
+
+_WAREHOUSE_FACTS = FACTS.replace("SPEND_USD=", "WAREHOUSE_SPEND_USD=").replace("; CREDITS=", "; WAREHOUSE_CREDITS=")
+
+
+def test_the_spend_keys_say_warehouse_compute():
+    keys = _latest_fact_keys()
+    assert keys[:3] == ["WINDOW_DAYS", "WAREHOUSE_SPEND_USD", "WAREHOUSE_CREDITS"], keys
+    assert "SPEND_USD" not in keys and "CREDITS" not in keys
+    # the corpus facts carry exactly the latest body's keys, in order (the alert keys follow)
+    assert re.findall(r"([A-Z][A-Z0-9_]*)=", _WAREHOUSE_FACTS)[:len(keys)] == keys
+
+
+@pytest.mark.parametrize("body", [*_CORPUS,
+                                  "Warehouse compute spend was $12,345.67 (3,354.80 credits) over 7 days.",
+                                  "Warehouse compute: 3,354.8 credits, about $12.3K."])
+def test_the_warehouse_keys_bind_in_the_proc_and_in_check_digest(body):
+    checked, bad = _sql_check(body, _WAREHOUSE_FACTS)
+    res = dg.check_digest(body, _WAREHOUSE_FACTS)
+    assert (checked, bad) == (res.checked, set(res.ungrounded)), body
+    # renaming the keys changes nothing: the same drafts ground the same way against the V165 keys
+    assert (checked, bad) == _sql_check(body, FACTS), body
+
+
+def test_the_warehouse_keys_bind_by_unit_and_noun():
+    assert _sql_check("$12,345.67", _WAREHOUSE_FACTS) == (1, set())                  # $ -> WAREHOUSE_SPEND_USD
+    assert _sql_check("3,354.80 credits", _WAREHOUSE_FACTS) == (1, set())            # credits -> WAREHOUSE_CREDITS
+    assert _sql_check("12,345.67 credits", _WAREHOUSE_FACTS) == (1, {"12,345.67 credits"})
+    assert _sql_check("$3,354.80 overall", _WAREHOUSE_FACTS) == (1, {"$3,354.80 overall"})
+    assert _sql_check("$12,345.67", "WAREHOUSE_SPEND_USD=n/a") == (1, {"$12,345.67"})

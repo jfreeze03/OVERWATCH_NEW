@@ -54,6 +54,8 @@ from app.ui.components import (
     with_user_names,
     write_gate_open,
 )
+from app.ui.schema_gate import applied_versions as _gate_applied_versions
+from app.ui.schema_gate import has_migration
 from app.ui.sizing import TABLE_H_LG
 
 _PAGE = "Admin"
@@ -737,6 +739,64 @@ _EXPECTED_MIGRATIONS = {
          "against the exec-board facts and, on a mismatch or a Cortex failure, sends a templated digest labelled "
          "not AI-written (the draft is kept in AI_BODY); SPEND_USD and CREDITS are separate facts and the Teams "
          "text is JSON-escaped. No task change, no apply-time run",
+    166: "Fact loader window integrity: SP_LOAD_SECURITY_FACTS (re-derived from V105) deletes and re-reads the "
+         "hourly change window from one shared bound, so a swallowed extract failure, a backfill-wide extract or "
+         "a manual DAYS_BACK below 3 no longer drops rows for good; SP_LOAD_DAILY_FACTS (from V101) stores "
+         "FACT_STORAGE_DAILY as the SUM of a re-created database's per-ID rows, and one bounded repair rewrites "
+         "the name-days already averaged; SP_LOAD_APP_COST (from V077) and SP_LOAD_STORAGE_TRUTH (from V046) "
+         "reload in one transaction that rolls back, logs fact_load_failed and fails the task; app cost resolves "
+         "sessions 30 days back, not 7. No task change; no procedure run at apply time (the storage repair MERGE "
+         "runs in the migration)",
+    167: "Mart-loader window edges, AI coverage watermark and atomic pattern reload: SOURCE_FRESHNESS_STATE gains "
+         "COVERAGE_FROM; SP_LOAD_MARTS_V27 (re-derived from V159) pads the arm [1] query-span source a day back so idle "
+         "is not overstated at the window edge, reads arm [6] with a lead-in day and keeps only runs that start in the "
+         "window (no phantom pipeline rows), keys Cortex Code days in Central and stamps the AI fact loaded-from day; "
+         "SP_NIGHTLY_RECONCILE (re-derived from V064) sweeps the four wide-edge tables after the reload, only when that "
+         "arm loaded, instead of deleting them first; SP_LOAD_PATTERN_COST (re-derived from V120) replaces its window "
+         "in one transaction (no stale-company twins) and stamps its reach; one scan-free stale-twin delete on "
+         "MART_PATTERN_COST_DAILY. No task change, no apply-time run",
+    168: "Hourly alert keys and sweeps (SP_ALERT_SCAN re-derived from V162, tally 14 unchanged): "
+         "PIPE_COPY_FAILURES keyed by the Central failure day over whole days (no re-raise after midnight); "
+         "SEC_NEW_ADMIN_NETWORK counts successes, says logged in only when one got in, keys on user, IP, a FAILED "
+         "token and the first-seen Central day (a network quiet 90 days alerts again) with a 48h same-episode "
+         "guard, and a failures-only event is superseded once the success opens; SEC_NEW_EXPOSURE points at "
+         "Security, Changes; the PERF auto-clear sweep re-checks events of any raise day; dead prologue reads "
+         "gone. Two guarded rule NAME refreshes. No task change, no apply-time run",
+    169: "Nightly alert windows and keys (SP_ALERT_SCAN_DAILY re-derived from V163, tally 14 unchanged): "
+         "COST_BUDGET_PACE and COST_FORECAST_BREACH on month-to-date through yesterday (no false pace alert on "
+         "days 2-5; the forecast projects today); COST_CONTRACT_BREACH needs CONTRACT_START_DATE, counts only "
+         "the term up to CONTRACT_END_DATE (exclusive) and stays quiet after it or when the credits outlast it; "
+         "COST_STORAGE_SURGE per live database id; DQ_RECON_ERROR keyed on the newest error-cycle day; "
+         "COST_EGRESS_SPIKE on the previous complete Central day of true egress; COST_IDLE_OPPORTUNITY reads a "
+         "NULL timer as never suspends; SEC_TRUST_REGRESSION threshold floored at 1. One guarded rule NAME "
+         "refresh. No task change, no apply-time run",
+    170: "Incident declare + proposals: SP_INCIDENT_DECLARE re-derived from V131 (4-arg kept for an app not yet "
+         "redeployed) plus a NEW 5-arg overload with P_ACTOR that writes DECLARED_BY / LINKED_BY (the app passes the "
+         "viewer once V170 is applied); both roll back a declare that linked 0 alerts and return OK / NOOP verdicts "
+         "the app now reads. INCIDENT_PROPOSALS re-derived from V072: EXH / ALL band tokens are account-level, ten "
+         "more user / warehouse / object rules keyed on a bare name get their entity kind (series-prefixed keys, "
+         "COST_CLOUD_SVC_ANOMALY and COST_ANOMALY_SWEEP, stay scope-level), and a task-failure proposal no "
+         "longer counts its own failures as corroboration. No data change, no apply-time run",
+    171: "Ops self-watch, digest window, ref-gap isolation: SETTINGS gains CREDIT_PRICE_OVERRIDE = FALSE (when "
+         "not matched; validate.sql reads FALSE as no override); SP_CANARY_SENTINEL (re-derived from V017) no "
+         "longer blames column drift, logs the real render-SLA error and titles OPS_SLOW_RENDER in Hr/Min/Sec; "
+         "SP_DAILY_DIGEST (re-derived from V165) "
+         "reports the 7 complete days ending yesterday as warehouse compute spend (WAREHOUSE_SPEND_USD, "
+         "WAREHOUSE_CREDITS) and reads CORTEX_MODEL like the app; SP_SCAN_REF_GAPS (re-derived from V129) casts "
+         "both MINUS operands and runs each check in its own exception block (ref_gap_check_failed). No task "
+         "change, no apply-time run",
+    172: "Detection scans classify company by the V044 rule and measure what they claim: SP_CHANGE_IMPACT_SCAN "
+         "(re-derived from V140) stamps COMPANY with COMPANY_FOR_DATABASE, matches a procedure call only as "
+         "CALL<name>( or .<name>( (RUN_<name> no longer counts), counts a task run once per scheduled run (an "
+         "auto-retry is not a failure) and takes AFTER credits/call over runs older than 8h, per scheduled run; "
+         "both change scans write VERDICT_DETAIL durations in Hr/Min/Sec (SP_WAREHOUSE_CHANGE_SCAN from V109). "
+         "SP_ANOMALY_SWEEP (from V150) and SP_SCAN_SCHEMA_DRIFT (from V133) stamp PIPE_DT_FAILURES, "
+         "PIPE_VOLUME_DROP, DQ_BREACH and DQ_SCHEMA_DRIFT with COMPANY_FOR_DATABASE; a disabled "
+         "COST_CLOUD_SVC_ANOMALY (SP_SCAN_CLOUD_SVC_ANOMALY from V150) or COST_ANOMALY_SWEEP stops booking; the "
+         "sweep reads CORTEX_MODEL like the app and points COST_ORG_ACCOUNT_CREEP at Cost Intelligence > Contract "
+         "& Forecast. One-time: the change registry and the live, unlinked events of those five rules re-stamped; "
+         "suffix-collided PROCEDURE baselines nulled for the next scan to re-freeze; tracking TASK baselines "
+         "re-frozen per scheduled run. No task change, no apply-time run",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -841,13 +901,9 @@ _PURGE_FLOORS: dict[str, int] = {
     "APP_USAGE_RETENTION_DAYS": 90,
 }
 
-# R2-107: SETTINGS keys only the deploy gate reads (snowflake/validate.sql), never the app, so they are not in
-# DEFAULT_SETTINGS (no migration seeds them). Admin still edits them and never calls their row "no longer read
-# (safe to delete)": deleting CREDIT_PRICE_OVERRIDE='TRUE' brings back validate's -20013 for a contracted
-# non-3.68 rate. Default = the value validate assumes when the row is absent.
-_DEPLOY_GATE_SETTINGS: dict[str, str] = {
-    "CREDIT_PRICE_OVERRIDE": "FALSE",
-}
+# R2-107 / V171: DEFAULT_SETTINGS keys only the deploy gate (snowflake/validate.sql) reads. In DEFAULT_SETTINGS
+# and seeded FALSE by V171; this set only picks the "read by the next validate.sql run" caption after a save.
+_DEPLOY_GATE_SETTINGS: frozenset[str] = frozenset({"CREDIT_PRICE_OVERRIDE"})
 _VALIDATE_RATE = 3.68                       # validate.sql's e_rate_368 check: ABS(rate - 3.68) > 0.0001
 _OVERRIDE_TRUE = ("TRUE", "Y", "YES", "1")  # validate.sql: UPPER(COALESCE(VALUE, '')) IN (...)
 
@@ -862,8 +918,8 @@ _SETTING_EDITORS: dict[str, tuple[str, object]] = {
     "INCIDENT_AUTO_DECLARE_CRITICAL": ("enum", ["TRUE", "FALSE"]),
     "CONTRACT_START_DATE": ("date", None),
     "CONTRACT_END_DATE": ("date", None),
-    # R2-105: SP_DAILY_DIGEST (V165) and SP_ANOMALY_SWEEP (V150) read CORTEX_MODEL raw (defaulting only on NULL)
-    # while the app runs normalize_model(value): the editor writes the normalized name, the one both sides run.
+    # R2-105: from V171 (digest) and V172 (anomaly sweep) both procs read CORTEX_MODEL normalized like
+    # normalize_model; the editor's normalization is belt and braces (it writes the name both sides run).
     "CORTEX_MODEL": ("model", None),
     "CREDIT_PRICE_OVERRIDE": ("enum", ["FALSE", "TRUE"]),
     # Rates / prices ($ per unit). R2-107: CREDIT_PRICE_USD > 0 -- validate.sql RAISEs e_rate_pos on 0.
@@ -927,8 +983,6 @@ def _setting_value_input(key: str, current: dict[str, str]) -> str:
     cur = current.get(key, "")
     if cur in ("", None) and key in DEFAULT_SETTINGS:
         cur = str(DEFAULT_SETTINGS[key])
-    elif cur in ("", None) and key in _DEPLOY_GATE_SETTINGS:
-        cur = _DEPLOY_GATE_SETTINGS[key]
     editor = _SETTING_EDITORS.get(key)
     wkey = f"adm_setting_value::{key}"  # per-key so switching widget type never collides
     if editor is None:
@@ -1020,7 +1074,7 @@ def _settings_tab(is_operator: bool) -> None:
         # r27 H2: keys the app no longer reads (retired features leave rows
         # behind — SCORE_PTS_TASK_FAIL_PER_PCT after V043, for instance).
         try:
-            _known = {k for k in DEFAULT_SETTINGS if not k.startswith("_")} | set(_DEPLOY_GATE_SETTINGS)
+            _known = {k for k in DEFAULT_SETTINGS if not k.startswith("_")}
             _orphans = sorted(set(res.df["KEY"].astype(str)) - _known)
             if _orphans:
                 st.warning("Settings rows the app no longer reads (safe to delete): "
@@ -1038,7 +1092,7 @@ def _settings_tab(is_operator: bool) -> None:
                                strict=False))
         except (KeyError, TypeError):
             current = {}
-    editable = [k for k in DEFAULT_SETTINGS if not k.startswith("_")] + list(_DEPLOY_GATE_SETTINGS)
+    editable = [k for k in DEFAULT_SETTINGS if not k.startswith("_")]
     key = st.selectbox("Setting", editable, key="adm_setting_key")
     new_value = _setting_value_input(key, current)
     _validate_rate_note(key, new_value, current)
@@ -2017,7 +2071,7 @@ def _canary_tab() -> None:
         "reconciliation panel below flags mart totals that diverge past 5% from live and the "
         f"backfill to re-run. One known exception: {_TOKEN_TYPES_FAIL_NOTE}"
     )
-    from app.data.canary import CANARIES, EXPECTED_GAPS
+    from app.data.canary import CANARIES, EXPECTED_GAPS, gated_out
 
     if audit_mode():   # C19: methodology detail — audit mode only
         with st.expander("Object-cost ledger reconciliation (additive contract)"):
@@ -2045,7 +2099,17 @@ def _canary_tab() -> None:
     if st.button("Run canary now", key="adm_canary_run"):
         results = []
         progress = st.progress(0.0, text="Running canary...")
+        # V167 (correction 9): an entry that reads a column a pending migration adds is SKIPPED until that
+        # migration is applied (canary.MIGRATION_GATED) -- the app deploys first, and a missing column is drift
+        # (never a declared GAP), so running it in the deploy-to-apply window would FAIL. The fresh header read
+        # joins the startup gate's set, so a just-applied migration un-skips at once (as on the Migrations tab).
+        _applied = _gate_applied_versions(_PAGE) | _fresh_applied_versions()
         for idx, (name, builder) in enumerate(CANARIES):
+            if gated_out(name, _applied):
+                results.append({"CHECK": name, "STATUS": "SKIP", "ROWS": 0,
+                                "ERROR": "reads a column a pending migration adds (canary.MIGRATION_GATED)"})
+                progress.progress((idx + 1) / len(CANARIES), text=f"{name}")
+                continue
             _sql = builder()
             if compile_only:
                 _sql = "EXPLAIN USING TEXT\n" + _sql
@@ -2066,13 +2130,18 @@ def _canary_tab() -> None:
         frame = _pd.DataFrame(results)
         failed = frame[frame["STATUS"] == "FAIL"]
         gaps = frame[frame["STATUS"] == "GAP"]
+        skipped = frame[frame["STATUS"] == "SKIP"]
         if not gaps.empty:
             st.caption(f"{len(gaps)} GAP: declared account-feature absences (Cortex "
                        "subscription/region, SYSTEM$CLIENT_VERSION_INFO, the optional QUERY_INSIGHTS "
                        "view, ORGANIZATION_USAGE without the org-viewer grant) — absence, not drift. "
                        "Anything absent WITHOUT a declaration fails instead.")
+        if not skipped.empty:
+            st.caption(f"{len(skipped)} SKIP: they read a column a migration this build expects adds, and that "
+                       "migration is not applied yet (Admin > Migrations lists it). They run once it is.")
         if failed.empty:
-            empty_state("clean", f"All {len(frame) - len(gaps)} applicable canary statements passed.")
+            empty_state("clean", f"All {len(frame) - len(gaps) - len(skipped)} applicable canary statements "
+                                 "passed.")
         else:
             st.error(f"{len(failed)} of {len(frame)} canary statements failed — see errors below.")
             if "cortex.code_token_types" in set(failed["CHECK"]):
@@ -2084,7 +2153,8 @@ def _canary_tab() -> None:
         from app.ui.components import styled_table as _styled
 
         view = stored.copy()
-        view["STATUS"] = view["STATUS"].map({"PASS": "SUCCESS", "FAIL": "FAILED", "GAP": "GAP"})
+        view["STATUS"] = view["STATUS"].map({"PASS": "SUCCESS", "FAIL": "FAILED", "GAP": "GAP",
+                                             "SKIP": "SKIPPED"})
         view = view.rename(columns={"STATUS": "EXECUTION_STATUS"})
         _styled(view, height=420)
 
@@ -2104,7 +2174,10 @@ def _canary_tab() -> None:
     recon = run(mart_sql.mart_vs_live_recon(), page=_PAGE, key="mart_recon", tier="historical",
                 source="FACT_METERING/WAREHOUSE/QUERY facts vs METERING_DAILY_HISTORY / "
                        "WAREHOUSE_METERING_HISTORY / QUERY_HISTORY")
-    ai_recon = run(mart_sql.mart_vs_live_ai_recon(), page=_PAGE, key="mart_recon_ai",
+    # R2-052 (V167): the loader keys Cortex Code days in Central from V167, so the recon's live mirror does too
+    # once it is applied (before that it mirrors the pre-V167 loader's own-offset day key).
+    ai_recon = run(mart_sql.mart_vs_live_ai_recon(central_days=has_migration(167, _PAGE)), page=_PAGE,
+                   key="mart_recon_ai",
                    tier="historical", probe=True,
                    source="FACT_AI_USAGE_DAILY vs CORTEX_CODE_* / CORTEX_AI_FUNCTIONS_USAGE_HISTORY")
     if guard(recon, "Reconciliation needs the facts (V002) installed.",

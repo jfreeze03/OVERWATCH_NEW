@@ -7,7 +7,7 @@ page, not in code.
 
 from __future__ import annotations
 
-APP_VERSION = "4.608.0"
+APP_VERSION = "4.609.0"
 
 # The build's load-bearing schema floor. main() reads the live max(SCHEMA_VERSION)
 # once per session and, if it is BELOW this, renders ONE actionable blocked state
@@ -51,6 +51,9 @@ def mart_object(name: str) -> str:
 # ---------------------------------------------------------------------------
 DEFAULT_SETTINGS = {
     "CREDIT_PRICE_USD": 3.68,
+    # Deploy-gate switch read ONLY by snowflake/validate.sql (-20013): TRUE / Y / YES / 1 (any case) runs a
+    # CREDIT_PRICE_USD other than 3.68 on purpose. Seeded FALSE by V171; the app never reads it.
+    "CREDIT_PRICE_OVERRIDE": "FALSE",
     "AI_CREDIT_PRICE_USD": 2.20,
     "STORAGE_USD_PER_TB_MONTH": 23.00,   # standard table/stage/failsafe; TB = binary TiB (see formulas.py F3 note)
     # Storage tier rates (V046 storage-truth). Estimates from AWS US-East list

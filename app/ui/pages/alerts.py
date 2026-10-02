@@ -39,6 +39,7 @@ from app.logic.insights import auto_suspend_in_force
 from app.logic.navigate import fix_target, inline_fix_warehouse, investigation_target
 from app.logic.playbooks import playbook_for
 from app.logic.verdict import Signal, page_verdict
+from app.logic.wh_change import humanize_verdict_detail
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import (
@@ -188,6 +189,20 @@ def _recheck_value_text(rule_id: object, value: float) -> str:
     if str(rule_id or "").strip().upper() == "PERF_QUEUED_MINUTES":
         return humanize_duration(value, "min")
     return f"{value:,.2f}"
+
+
+_RAW_DURATION_DETAIL_RULES = frozenset({"WH_CHANGE_REGRESSION", "PERF_CHANGE_REGRESSION"})
+
+
+def _drawer_detail(rule_id: object, detail: str) -> str:
+    """R1-124: the event DETAIL the drawer shows. The two change scans copy their VERDICT_DETAIL into DETAIL with raw
+    seconds ('p95 1800.0s->2400.0s | queue 145.00->200.00 min/d'), so those two rules' DETAIL goes through the
+    same Hr/Min/Sec shim the change drills use (wh_change.humanize_verdict_detail). A scan that humanizes in SQL
+    leaves nothing for the shim to match, so old and new rows both read right; every other rule's DETAIL is
+    evidence text and is shown verbatim."""
+    if str(rule_id or "").strip().upper() in _RAW_DURATION_DETAIL_RULES:
+        return humanize_verdict_detail(detail)
+    return detail
 
 
 def _recheck_vs_text(rule_id: object, value: float, threshold: float) -> str:
@@ -1057,7 +1072,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                     st.markdown(md_dollars(f"**[{row['SEVERITY']}] {row['TITLE']}**"))
                     st.caption(f"{row['RAISED_AT']} · {row['COMPANY']} · rule {row['RULE_ID']} · "
                                f"event {event_id[:8]} · status {row['STATUS']}")
-                    detail_text = str(row.get("DETAIL") or "").strip()
+                    detail_text = _drawer_detail(str(row["RULE_ID"]), str(row.get("DETAIL") or "").strip())
                     if detail_text:
                         # Plain text on purpose: DETAIL originates in Snowflake data;
                         # rendering it as markdown let object names inject formatting.
@@ -1986,7 +2001,10 @@ def render() -> None:
                                "SP_ALERT_SCAN_DAILY (see the runbook's rule catalogue), so editing "
                                "the column does not change those scans. DQ_RECON_ERROR's "
                                "WINDOW_HOURS is the reconciliation look-back SP_SCAN_RECON_ERRORS "
-                               "reads (default 48h), and its alert text states it.")
+                               "reads (default 48h), and its alert text states it."
+                               # R2-020: V169 keys the event on the newest error-cycle day (schema-gated claim)
+                               + (" Since V169 its event is keyed by the newest error-cycle day, so widening the "
+                                  "look-back no longer re-pages old errors." if has_migration(169, _PAGE) else ""))
 
     elif section == "History":
         # Perf: the section's five UNCONDITIONAL 'recent' reads prefetch in one parallel batch

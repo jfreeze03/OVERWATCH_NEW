@@ -1496,9 +1496,10 @@ def _idle_app_side(days: int = 14) -> pd.DataFrame:
 
 # R1-071 (the deferred SQL half): the app reads a SHOW-listed NULL auto_suspend as the KNOWN never-suspend 0
 # (insights.show_auto_suspend), so WH_D is ACTIONABLE on Optimize ▸ Idle; this migration's [24] (carried
-# byte-identical by its later definers) still requires `w.AUTO_SUSPEND IS NOT NULL` and skips it. An EXPECTED,
-# tracked divergence: the re-derivation of [24] that reads a NULL snapshot timer as never-suspend owns closing
-# it, and its own parity test must assert the full set (no carve-out).
+# byte-identical by V160 and V163) still requires `w.AUTO_SUSPEND IS NOT NULL` and skips it. CLOSED by V169: its
+# [24] reads a NULL snapshot timer as never-suspend, and tests/migrations/test_v169_harness.py
+# (test_idle_arm_now_matches_the_app_actionable_set_exactly) asserts the full set with no carve-out. The
+# carve-out stays HERE because this test executes V157's immutable text, which still skips WH_D.
 _ARM24_NULL_TIMER_GAP = {"WH_D"}
 
 

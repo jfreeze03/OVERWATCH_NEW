@@ -178,8 +178,26 @@ def test_warehouse_vs_prior_uses_prior_calendar_month_for_last_month():
 def test_spend_tab_threads_bounds_to_cloud_services_and_coco():
     spend = _src("app/ui/pages/cost_parts/spend.py")
     assert "fact_cloud_services_ratio(days, company, bounds=bounds)" in spend
-    assert 'ai_code_daily(days, "ALL", bounds=bounds)' in spend
+    # R1-016 (V167): both CoCo reads (the prefetch and the serial fallback) also pass the coverage stamp gate
+    assert spend.count('ai_code_daily(days, "ALL", bounds=bounds,\n') == 2
+    assert spend.count("stamped=has_migration(167, _PAGE))") >= 2
     assert "cloud_services_ratio_by_warehouse(days, company, bounds=bounds)" in spend
+
+
+def test_ai_code_daily_stamped_gate_honors_last_month():
+    """R1-016: under a calendar preset the stamped gate still requires the loaded-from day to reach the window
+    START -- now the EARLIER of the fact's first Code day and the loader's COVERAGE_FROM stamp."""
+    from app.data import mart27_sql
+    lm = mart27_sql.ai_code_daily(31, "ALL", bounds=_AUG, stamped=True)
+    assert "DAY >= '2026-08-01' AND DAY < '2026-09-01'" in lm
+    assert "(SELECT FIRST_DAY FROM cov) <= '2026-08-01'" in lm
+    assert "LEAST(COALESCE(st.CF, f.FIRST_DAY), COALESCE(f.FIRST_DAY, st.CF)) AS FIRST_DAY" in lm
+    assert "WHERE s.SOURCE_NAME = 'FACT_AI_USAGE_DAILY'" in lm
+    # the unstamped preset is today's SQL
+    assert mart27_sql.ai_code_daily(31, "ALL", bounds=_AUG, stamped=False) == mart27_sql.ai_code_daily(
+        31, "ALL", bounds=_AUG)
+    model = mart27_sql.ai_costs_by_model(31, bounds=_AUG, stamped=True)
+    assert "a.DAY >= '2026-08-01' AND a.DAY < '2026-09-01'" in model and "<= '2026-08-01'" in model
 
 
 # ---------------------------------------------------------------------------

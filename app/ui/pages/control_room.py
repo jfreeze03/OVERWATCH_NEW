@@ -8,6 +8,7 @@ queue is visible on entry.
 from __future__ import annotations
 
 import contextlib
+import re
 from datetime import timedelta
 
 import pandas as pd
@@ -84,7 +85,7 @@ from app.ui.components import (
     with_user_names,
     write_gate_open,
 )
-from app.ui.schema_gate import has_migration
+from app.ui.schema_gate import has_migration, has_migration_fresh
 from app.ui.workbench import render_action_center, render_entity_360, render_watchlist
 
 _PAGE = "Control Room"
@@ -172,11 +173,16 @@ def _incident_declare_sql(title: str, severity: str, company: str, proposal_key:
     already covered fragments the lifecycle and double-counts OPEN_NOW): the INCIDENTS
     insert is a no-op when an OPEN/MITIGATED incident for the same (family, company)
     already holds a member alert, and the members insert only fires if its incident
-    row was actually created (else it would orphan members onto a non-existent id)."""
+    row was actually created (else it would orphan members onto a non-existent id).
+
+    R2-028 parity with the V170 proc: DECLARED_BY / LINKED_BY are the viewer (identity_sql()), never left
+    to their CURRENT_USER() default, which under owner's-rights SiS is the app owner."""
     import uuid
 
     from app.config import core_object
+    from app.core.identity import identity_sql
     from app.core.sqlsafe import sql_literal
+    actor = identity_sql()
     proposal_parts = str(proposal_key).split("|", 3)
     fam = sql_literal(proposal_parts[0])
     entity_filter = ""
@@ -206,15 +212,15 @@ def _incident_declare_sql(title: str, severity: str, company: str, proposal_key:
     )
     incidents_insert = (
         f"INSERT INTO {core_object('INCIDENTS')} "
-        "(INCIDENT_ID, TITLE, SEVERITY, STATUS, COMPANY, DETECTED_AT, ROOT_CAUSE_KIND) "
+        "(INCIDENT_ID, TITLE, SEVERITY, STATUS, COMPANY, DETECTED_AT, ROOT_CAUSE_KIND, DECLARED_BY) "
         f"SELECT {inc_id}, {sql_literal(str(title)[:300])}, {sql_literal(str(severity).upper())}, "
-        f"'OPEN', {sql_literal(str(company))}, CURRENT_TIMESTAMP(), 'UNKNOWN' "
+        f"'OPEN', {sql_literal(str(company))}, CURRENT_TIMESTAMP(), 'UNKNOWN', {actor} "
         f"{open_family_guard}"
     )
     members_insert = (
         f"INSERT INTO {core_object('INCIDENT_MEMBERS')} "
-        "(INCIDENT_ID, MEMBER_KIND, REF_ID, EVIDENCE_TS, AUTO_LINKED) "
-        f"SELECT {inc_id}, 'ALERT', e.EVENT_ID, e.RAISED_AT, FALSE "
+        "(INCIDENT_ID, MEMBER_KIND, REF_ID, EVIDENCE_TS, AUTO_LINKED, LINKED_BY) "
+        f"SELECT {inc_id}, 'ALERT', e.EVENT_ID, e.RAISED_AT, FALSE, {actor} "
         f"FROM {core_object('ALERT_EVENTS')} e "
         "WHERE e.STATUS IN ('OPEN', 'ACK') "
         "AND e.RAISED_AT >= DATEADD('day', -2, CURRENT_TIMESTAMP()) "
@@ -234,20 +240,73 @@ def _incident_declare_sql(title: str, severity: str, company: str, proposal_key:
     return [incidents_insert, members_insert]
 
 
-def _incident_declare_call_sql(title: str, severity: str, company: str, proposal_key: str) -> str:
+def _incident_declare_call_sql(title: str, severity: str, company: str, proposal_key: str,
+                               actor_sql: str | None = None) -> str:
     """R34: one ATOMIC declare via SP_INCIDENT_DECLARE (V131). The proc does the INCIDENTS +
     INCIDENT_MEMBERS inserts in a single transaction (they commit together or not at all),
     replacing the two separate execute_statement INSERTs that could half-apply a titled,
     member-less incident on a mid-failure. The proc reproduces this file's family-already-open
     guard + conditional entity filter server-side; ``_incident_declare_sql`` above stays as the
-    test-covered reference the proc mirrors. Params are bound (injection-safe)."""
+    test-covered reference the proc mirrors. Params are bound (injection-safe).
+
+    V170 (R2-028): ``actor_sql=identity_sql()`` selects the 5-arg overload, which stamps
+    DECLARED_BY / LINKED_BY with the viewer. The caller passes it only once has_migration_fresh(170)
+    (holistic #16: a live re-read when the 4 h stash lacks V170, so the first declare after the apply
+    already credits the DBA): before the apply that overload does not exist, and the kept 4-arg one
+    credits the app owner."""
     from app.config import core_object
     from app.core.sqlsafe import sql_literal
     return (
         f"CALL {core_object('SP_INCIDENT_DECLARE')}("
         f"{sql_literal(str(title)[:300])}, {sql_literal(str(severity).upper())}, "
-        f"{sql_literal(str(company))}, {sql_literal(str(proposal_key))})"
+        f"{sql_literal(str(company))}, {sql_literal(str(proposal_key))}"
+        + (f", {actor_sql})" if actor_sql else ")")
     )
+
+
+def _declare_verdict(msg: object) -> tuple[str, int | None]:
+    """R2-030: classify SP_INCIDENT_DECLARE's RETURN string into (kind, members linked).
+
+    Read from the TEXT only, never from execute_action's ok flag: its success allowlist is
+    OK / VERIFIED / DUPLICATE, so V131's 'DECLARED: n member(s) linked' comes back ok=False, and a
+    missing proc with no fallback comes back ok=True with '(pre-V051 legacy path) '.
+      declared     'OK: declared <id> with n member(s) linked' (V170) or 'DECLARED: n ...' (V131), n > 0
+      empty        V131 only: 'DECLARED: 0 member(s) linked' -- it committed a member-less incident
+      family_open  'NOOP: this family already has an open incident' (a race the pre-check missed)
+      no_alerts    'NOOP: no open alerts left to link ...' (V170 rolled the declare back)
+      failed       anything else (an error, INVALID, no verdict, the legacy marker)."""
+    s = str(msg or "").strip().upper()
+    m = re.search(r"(\d+) MEMBER\(S\) LINKED", s)
+    n = int(m.group(1)) if m else None
+    if s.startswith(("OK:", "DECLARED:")):
+        return ("empty" if n == 0 else "declared"), n
+    if s.startswith("NOOP:") and "ALREADY HAS AN OPEN INCIDENT" in s:
+        return "family_open", None
+    if s.startswith("NOOP:"):
+        return "no_alerts", None
+    return "failed", None
+
+
+def _declared_by_caption(v170_applied: bool, declared_by: object) -> str | None:
+    """R2-028 disclosure under the Open incidents table (its Declared by, and the members' Linked by).
+
+    Before V170 SP_INCIDENT_DECLARE writes neither column, so a manual declare takes the V032
+    CURRENT_USER() default -- the app owner under owner's-rights SiS. V170 credits the declaring DBA
+    from then on but never rewrites history, so an incident declared before the apply keeps the app
+    owner for as long as it stays open. After the apply the caption therefore stays while ANY listed
+    incident is a manual declare (``declared_by`` = the open-incident frame's DECLARED_BY column);
+    an all-auto-declared (or empty) list has nothing to explain."""
+    if not v170_applied:
+        return ("Declared by and Linked by on a manual declare show the app owner until the V170 "
+                "schema update is applied (auto-declared incidents show SP_INCIDENT_AUTODECLARE).")
+    if declared_by is None:
+        return None
+    names = pd.Series(declared_by, dtype=object).dropna().astype(str).str.strip().str.upper()
+    if not ((names != "") & (names != "SP_INCIDENT_AUTODECLARE")).any():
+        return None
+    return ("Manual declares made before the V170 schema update took effect still show the app owner as "
+            "Declared by and Linked by (history is not rewritten); declares since show the DBA who typed "
+            "DECLARE.")
 
 
 def _incident_close_sql(incident_id: str, kind: str, note: str) -> str:
@@ -1176,7 +1235,11 @@ def render() -> None:
         # ---- Incidents (V032) ------------------------------------------------------
         # deferred-item: the header is rendered below, AFTER the open-incident count
         # resolves, so its severity is data-driven (was a constant chrome title).
-        from app.core.query import execute_statement  # run_batch is module-level (used above at Pulse)
+        from app.core.identity import identity_sql
+        from app.core.query import (  # run_batch is module-level (used above at Pulse)
+            execute_action,
+            execute_statement,
+        )
         from app.core.session import is_operator
         from app.ui.components import log_ui_event, notify
         # correctness #3: entitle operator UI from the VIEWER identity, not
@@ -1274,6 +1337,10 @@ def render() -> None:
         oi = _live_pf.get("oi") or run(mart_sql.open_incidents(50, company, lifecycle=True), page=_PAGE,
                  key=f"open_incidents_{company}", tier="live",
                  source=f"INCIDENTS (open + mitigated, {company} + account-level)")
+        # Holistic #16: V170 changes the declare CALL's shape (the 5-arg overload credits the DBA, for good), so the
+        # CALL, its preview and the two V170 captions below share ONE fresh answer: the 4 h metadata stash, or a
+        # live-tier SCHEMA_VERSION re-read when that stash lacks 170 (none once it has turned over).
+        _v170 = has_migration_fresh(170, _PAGE)
         _incident_reset_panel(company, _open_now, _is_op)
         # Next-Fifty #12a: the ready-to-close count comes from the UNCAPPED incident_metrics row
         # (READY_TO_CLOSE_N), never len() of the LIMIT-50 open list below.
@@ -1290,6 +1357,12 @@ def render() -> None:
                     with_user_names(oi.df, _PAGE, user_col="DECLARED_BY", display_col="Declared by"),
                     _PAGE, user_col="OWNER", display_col="Owner"),
                 key="cr_inc_sel", height=190)
+            # R2-028: before V170 manual declares credit the app owner (claimed fixed only once applied); after
+            # it, earlier manual declares still do (no history rewrite), so the disclosure stays while one is listed.
+            _decl_cap = _declared_by_caption(_v170,
+                                             oi.df["DECLARED_BY"] if "DECLARED_BY" in oi.df.columns else None)
+            if _decl_cap:
+                st.caption(_decl_cap)
             requested_incident = str(
                 navigation_context().get("incident_id") or ""
             ).strip()
@@ -1397,12 +1470,25 @@ def render() -> None:
                 _confidence = str(_prow.get("CONFIDENCE", "legacy") or "legacy")
                 _evidence = str(_prow.get("EVIDENCE", "Alert-family correlation only.")
                                 or "Alert-family correlation only.")
+                # An ACCOUNT proposal covers the whole family (ENTITY_NAME is the placeholder 'ACCOUNT').
+                _scope = ("account-wide (the whole family)" if _entity_kind.upper() == "ACCOUNT"
+                          else f"{_entity_kind} {_entity_name}")
+                # R2-031 (V170): a task-failure proposal's own failures are its alert source, not corroboration.
+                # Claimed only once applied -- before that the V072 view still scores every one HIGH.
+                _task_txt = ""
+                if _v170:
+                    _task_txt = (" Task-failure proposals reach HIGH only with a matching task change; repeat "
+                                 "failing days rate MEDIUM.")
                 st.caption(
-                    f"Scope: {_entity_kind} {_entity_name} | confidence {_confidence}. "
-                    f"Evidence: {_evidence} Human confirmation is still required."
+                    f"Scope: {_scope} | confidence {_confidence}. "
+                    f"Evidence: {_evidence} Human confirmation is still required." + _task_txt
                 )
+                # V170 (R2-028): the 5-arg overload stamps the viewer as DECLARED_BY / LINKED_BY. Gated: before
+                # the apply only the V131 4-arg overload exists, and a 5-arg CALL would fail. The click is a fresh
+                # run, so the CALL it executes is this run's preview, decided from this run's _v170 (holistic #16).
                 _call = _incident_declare_call_sql(str(_prow["SUGGESTED_TITLE"]), str(_prow["SEVERITY"]),
-                                                   str(_prow["COMPANY"]), _pick)
+                                                   str(_prow["COMPANY"]), _pick,
+                                                   actor_sql=identity_sql() if _v170 else None)
                 st.code(_call + ";", language="sql")
                 # Scope the confirm/latch keys by the selected proposal so a typed DECLARE
                 # authorizes only THAT proposal — a fixed key let a confirmation typed for
@@ -1412,10 +1498,11 @@ def render() -> None:
                 if confirm_gate("DECLARE", "Declare incident + link alerts", key=_exec_key,
                                 prompt="Type DECLARE to confirm", type="primary"
                                 ) and write_gate_open(_exec_key):
-                    # INC-1: the guarded INSERT silently no-ops when this family already has
-                    # an open incident, and execute_statement can't see the 0 rowcount — so
-                    # check FIRST (same predicate as the guard) and report honestly, rather
-                    # than a phantom "declared" toast + an inflated incident_declare event.
+                    # INC-1: the guarded INSERT no-ops when this family already has an open
+                    # incident — so check FIRST (same predicate as the guard) and report honestly,
+                    # naming the blocking incident (R2-029), rather than a phantom "declared" toast
+                    # + an inflated incident_declare event. The proc's own NOOP verdict (read below
+                    # since R2-030) still catches a race this pre-check misses.
                     _open_chk = run(_incident_family_open_check_sql(str(_prow["COMPANY"]), _pick),
                                     page=_PAGE, key=f"inc_famopen_{_pick}", tier="live",
                                     source="INCIDENTS/INCIDENT_MEMBERS family-open check")
@@ -1429,11 +1516,33 @@ def render() -> None:
                         # R34: one ATOMIC CALL (SP_INCIDENT_DECLARE, V131) instead of two separate
                         # INSERTs — the incident and its member links commit together or not at all,
                         # so a mid-failure can no longer leave a titled, member-less incident behind.
-                        _ok_all, _m = execute_statement(_call + ";", page=_PAGE)
-                        notify(_ok_all, "Incident declared with members linked." if _ok_all
-                               else "Declare failed — see the error log.")
-                        if _ok_all:
+                        # R2-030: run through execute_action so the proc's RETURN verdict comes back
+                        # (execute_statement discards it), with NO fallback statements (the non-atomic
+                        # two-INSERT path V131 removed must never return). The verdict is classified from
+                        # the TEXT only: execute_action's ok flag is False for V131's 'DECLARED:' and True
+                        # for a missing proc's empty legacy path.
+                        _, _m = execute_action(_call + ";", [], page=_PAGE)
+                        _verdict, _n = _declare_verdict(_m)
+                        _ok_all = _verdict != "failed"   # a NOOP resolved the action; the latch closes cleanly
+                        if _verdict == "declared":
+                            notify(True, "Incident declared — " + (f"{_n} alert(s) linked." if _n is not None
+                                                                  else "members linked."))
                             log_ui_event("incident_declare", page=_PAGE)
+                        elif _verdict == "family_open":
+                            # a race the pre-check missed: another declare or the auto-declare got there first
+                            notify(False, _family_open_message(None, _prow.get("ALERTS")))
+                        elif _verdict == "no_alerts":
+                            notify(False, "Nothing declared — this proposal's alerts were resolved or linked to "
+                                          "another incident since the list loaded; the list refreshes on the "
+                                          "next run.")
+                        elif _verdict == "empty":
+                            notify(False, "An incident was opened but no open alerts were left to link — close "
+                                          "it from the open-incident list.")
+                        else:
+                            notify(False, "Declare failed — " + (
+                                "the declare procedure is not installed yet (an admin applies the pending "
+                                "schema update on Admin → Migrations & freshness)."
+                                if str(_m or "").startswith("(pre-V051") else (str(_m or "") or "see the error log.")))
                     stamp_write(_exec_key, _ok_all)  # C48: single stamp, both paths
         # Next-Fifty #12b: the attach / auto-mitigate sentence is claimed only once V154 is applied
         # (schema-gated via the shared has_migration) — a deploy can land first.

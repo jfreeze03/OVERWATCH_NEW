@@ -129,6 +129,22 @@ def test_storage_growth_exposes_a_regression_slope():
     assert "REGR_SLOPE(DB_BYTES" in sql and "DAYS_OBSERVED" in sql
 
 
+def test_storage_growth_sums_the_per_id_rows_of_a_name_day():
+    """V166 R2-009 sibling: DATABASE_STORAGE_USAGE_HISTORY has one row per DATABASE_ID per day, and a re-created or
+    clone-refreshed database keeps its dropped IDs (Time Travel / fail-safe bytes) under the same name. Each row is
+    already that ID's daily average, so the name-day's bytes are the SUM; the AVG divided them by the row count and
+    understated the growth slope, the endpoints and CURRENT_BYTES_WIN (the same basis as the loader and as
+    cost_sql.storage_by_database_calendar_live)."""
+    sql = insights_sql.storage_growth_by_database(30, "ALFA")
+    assert "SUM(COALESCE(AVERAGE_DATABASE_BYTES, 0)) AS DB_BYTES" in sql
+    assert "SUM(COALESCE(AVERAGE_FAILSAFE_BYTES, 0)) AS FAILSAFE_BYTES" in sql
+    assert "AVG(COALESCE(AVERAGE_" not in sql
+    daily = sql[sql.index("WITH daily AS ("):sql.index("\n)\n")]
+    assert daily.rstrip().endswith("GROUP BY 1, 2")             # one row per (DATABASE_NAME, USAGE_DATE)
+    import sqlglot
+    sqlglot.parse_one(sql, dialect="snowflake")
+
+
 def test_release_compare_validates_date():
     with pytest.raises(ValueError):
         insights_sql.release_query_compare("07/01/2026", 7)

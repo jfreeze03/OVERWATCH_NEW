@@ -790,8 +790,13 @@ def contract_runway_bar(runway: dict | None) -> None:
                     f'{label}</div></div>', unsafe_allow_html=True)
         return
     pct = max(0.0, min(float(pct_raw), 100.0))
-    label = html.escape(
-        f"{pct:.0f}% of contract consumed · {left} (exhausts {exhaust}{decide}){tail}")
+    if runway.get("outlasts_term"):
+        # R2-042: the credits last past CONTRACT_END_DATE -- no countdown to a date the term never reaches
+        label = html.escape(f"{pct:.0f}% of contract consumed · outlasts the term "
+                            f"(ends {runway.get('term_end') or '—'}{decide}){tail}")
+    else:
+        label = html.escape(
+            f"{pct:.0f}% of contract consumed · {left} (exhausts {exhaust}{decide}){tail}")
     st.markdown(
         f'<div class="ow-runway{cls}">'
         f'<div class="ow-runway__track">'

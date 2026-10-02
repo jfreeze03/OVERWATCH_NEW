@@ -185,7 +185,9 @@ def test_declare_incident_is_one_atomic_call():
     assert "ALREADY_OPEN" in block
     # the two-statement loop is gone; the declare is one atomic CALL to the proc
     assert "for _stmt in _dec:" not in block
-    assert "execute_statement(_call" in block          # single atomic CALL in the declare branch
+    # single atomic CALL in the declare branch -- through execute_action since V170 (R2-030), so the proc's
+    # verdict is read; no fallback statements (the two-INSERT path never returns)
+    assert 'execute_action(_call + ";", [], page=_PAGE)' in block
     assert "_incident_declare_call_sql" in src          # the CALL builder targets SP_INCIDENT_DECLARE
 
 

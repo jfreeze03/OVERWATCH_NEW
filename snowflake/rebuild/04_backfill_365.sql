@@ -8,7 +8,8 @@
 -- Idempotent by construction: each INSERT only takes days OLDER than what
 -- the fact already holds, so re-running inserts nothing. Aggregations are
 -- copies of the standing loaders' logic (SP_LOAD_DAILY_FACTS /
--- SP_LOAD_HOURLY_FACTS) — keep them in sync if a loader changes.
+-- SP_LOAD_HOURLY_FACTS / SP_LOAD_CLOUD_SVC_MART) — keep them in sync if a
+-- loader changes.
 -- FACT_QUERY_HOURLY is deliberately NOT backfilled: a year at hourly x
 -- warehouse x database x user grain is large and low-value vs the dailies.
 -- Run as a role that can read SNOWFLAKE.ACCOUNT_USAGE and write the schema.
@@ -92,14 +93,16 @@ WHERE EVENT_TIMESTAMP >= DATEADD('day', -365, CURRENT_DATE())
                                        CURRENT_DATE())
 GROUP BY 1, 2, 3;
 
+-- V166 (R2-009): SUM per name-day, like the loader. A re-created or clone-refreshed database keeps one
+-- row per DATABASE_ID under the same name, and each row is already that ID's daily average.
 INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY
     (DAY, DATABASE_NAME, COMPANY, DB_BYTES, FAILSAFE_BYTES)
 SELECT
     USAGE_DATE,
     DATABASE_NAME,
     DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME),
-    AVG(COALESCE(AVERAGE_DATABASE_BYTES, 0)),
-    AVG(COALESCE(AVERAGE_FAILSAFE_BYTES, 0))
+    SUM(COALESCE(AVERAGE_DATABASE_BYTES, 0)),
+    SUM(COALESCE(AVERAGE_FAILSAFE_BYTES, 0))
 FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY
 WHERE USAGE_DATE >= DATEADD('day', -365, CURRENT_DATE())
   AND USAGE_DATE < COALESCE((SELECT MIN(DAY) FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY),
@@ -151,6 +154,51 @@ FROM (
       AND START_TIME < COALESCE((SELECT MIN(DAY) FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_DAILY),
                                 CURRENT_DATE())::TIMESTAMP_LTZ
     GROUP BY 1, 2, 3, 4
+) g;
+
+-- V166 (HEAL-CS-MART, R2-012): MART_CLOUD_SVC_DAILY has no loader-owned history.
+-- SP_LOAD_CLOUD_SVC_MART merges only the last 2 days of the 72h extract, so the mart
+-- starts at its first load (and again after teardown drops it). Same only-older-days
+-- rule as above; the aggregation is a copy of that loader (V055) read straight from
+-- QUERY_HISTORY (the extract holds 72h): CS > 0, the same COALESCE keys, company via
+-- the UDF OUTSIDE the aggregation. DAY is pinned to the account clock
+-- (America/Chicago, the zone the hourly loader resolves DATE(START_TIME) in), so a
+-- worksheet on another zone cannot shift the seam. 364 days: the oldest QUERY_HISTORY
+-- day is partial. An empty mart stops short of the 3 days the loader merges. Outside
+-- the suspend window on purpose: it reads ACCOUNT_USAGE, not the extract. Heavier than
+-- the arms above (a year of QUERY_HISTORY including QUERY_TEXT): if it hits the
+-- statement timeout nothing is committed; narrow -364 (say to -200), run, restore.
+INSERT INTO DBA_MAINT_DB.OVERWATCH.MART_CLOUD_SVC_DAILY
+    (DAY, COMPANY, WAREHOUSE_NAME, USER_NAME, ROLE_NAME, QUERY_TYPE,
+     QUERY_PARAMETERIZED_HASH, SAMPLE_TEXT, RUNS, CS_CREDITS, EXEC_SEC_SUM,
+     COMPILE_SEC_SUM, CACHE_PCT_SUM)
+SELECT g.DAY,
+       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(g.WAREHOUSE_NAME) AS COMPANY,
+       g.WAREHOUSE_NAME, g.USER_NAME, g.ROLE_NAME, g.QUERY_TYPE,
+       g.QUERY_PARAMETERIZED_HASH, g.SAMPLE_TEXT, g.RUNS, g.CS_CREDITS,
+       g.EXEC_SEC_SUM, g.COMPILE_SEC_SUM, g.CACHE_PCT_SUM
+FROM (
+    SELECT CONVERT_TIMEZONE('America/Chicago', START_TIME)::DATE AS DAY,
+           COALESCE(WAREHOUSE_NAME, 'NONE') AS WAREHOUSE_NAME,
+           COALESCE(USER_NAME, 'UNKNOWN') AS USER_NAME,
+           COALESCE(ROLE_NAME, 'UNKNOWN') AS ROLE_NAME,
+           COALESCE(QUERY_TYPE, 'UNKNOWN') AS QUERY_TYPE,
+           COALESCE(QUERY_PARAMETERIZED_HASH, 'n/a') AS QUERY_PARAMETERIZED_HASH,
+           ANY_VALUE(LEFT(QUERY_TEXT, 160)) AS SAMPLE_TEXT,
+           COUNT(*) AS RUNS,
+           SUM(COALESCE(CREDITS_USED_CLOUD_SERVICES, 0)) AS CS_CREDITS,
+           SUM(COALESCE(EXECUTION_TIME, 0)) / 1000 AS EXEC_SEC_SUM,
+           SUM(COALESCE(COMPILATION_TIME, 0)) / 1000 AS COMPILE_SEC_SUM,
+           SUM(COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0)) AS CACHE_PCT_SUM
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE START_TIME >= DATEADD('day', -366, CURRENT_TIMESTAMP())
+      AND CONVERT_TIMEZONE('America/Chicago', START_TIME)::DATE
+          >= DATEADD('day', -364, CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE)
+      AND CONVERT_TIMEZONE('America/Chicago', START_TIME)::DATE
+          < COALESCE((SELECT MIN(m.DAY) FROM DBA_MAINT_DB.OVERWATCH.MART_CLOUD_SVC_DAILY m),
+                     DATEADD('day', -2, CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE))
+      AND COALESCE(CREDITS_USED_CLOUD_SERVICES, 0) > 0
+    GROUP BY 1, 2, 3, 4, 5, 6
 ) g;
 
 -- B12: suspend the hourly task graph before any extract-fed load. The root
@@ -320,6 +368,43 @@ $$;
 ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY RESUME;
 SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY');
 
+-- OPT-IN, OFF-PEAK (V166 HEAL-OBJ-COST, R2-013): a year of the object-cost ledger.
+-- FACT_OBJECT_COST_DAILY is first-filled with only 14 days (V048..V139; teardown drops it,
+-- so a rebuild restarts it there) and the daily TASK_LOAD_OBJECT_COST reloads 3, so
+-- Cost > Storage & waste says how few days of a 180/365-day or Current-year window it
+-- covers. SP_LOAD_OBJECT_COST(365) closes that. Unlike the loads above it is NOT
+-- older-days-only: it re-stages a year of ACCESS_HISTORY x QUERY_ATTRIBUTION_HISTORY and
+-- DELETE+reloads every day from 365 days back to today in ONE transaction (B34), so run
+-- it ONCE, off-peak and away from the 06:45 CT daily task, on a warehouse whose
+-- STATEMENT_TIMEOUT_IN_SECONDS allows it (V002 sets WH_ALFA_ADMIN to 300). A timeout,
+-- Stop or error rolls the reload back and the previous fill stays. It sits AFTER the
+-- hourly-graph RESUME on purpose: it is not extract-fed, so it must never hold that
+-- graph suspended. SP_PURGE_FACTS keeps daily facts at least 365 days, so the year stays.
+-- To run it, drop the leading "-- " from each line of the block below. Its pane reads the
+-- proc's own verdict (OK, or FAILED: ...); the real error is the APP_ERROR_LOG row with
+-- PAGE ObjectCost, which the verify pane below lists.
+-- EXECUTE IMMEDIATE $$
+-- DECLARE
+--     rv VARCHAR;
+--     emsg VARCHAR;
+-- BEGIN
+--     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_OBJECT_COST(365);
+--     SELECT $1 INTO :rv FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+--     IF (rv IS NULL OR rv <> 'OK') THEN
+--         INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+--         SELECT 'Backfill365', 'backfill_verdict_failed', LEFT(COALESCE(:rv, 'no verdict returned'), 2000), 'SP_LOAD_OBJECT_COST(365)', CURRENT_ROLE();
+--         RETURN 'FAILED: SP_LOAD_OBJECT_COST(365) -> ' || COALESCE(rv, 'no verdict returned');
+--     END IF;
+--     RETURN 'ok: SP_LOAD_OBJECT_COST(365) -> ' || rv;
+-- EXCEPTION
+--     WHEN OTHER THEN
+--         emsg := SQLERRM;
+--         INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+--         SELECT 'Backfill365', 'backfill_call_failed', LEFT(:emsg, 2000), 'SP_LOAD_OBJECT_COST(365)', CURRENT_ROLE();
+--         RETURN 'FAILED: SP_LOAD_OBJECT_COST(365) - ' || emsg;
+-- END;
+-- $$;
+
 -- Verify (the LAST result pane). Both counts 0 = every load in THIS run succeeded.
 --   BACKFILL_CALLS_FAILED: a guarded CALL above raised, or returned a failure
 --     verdict (its own pane shows which).
@@ -327,7 +412,8 @@ SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY');
 --     failing the CALL -- the optional mart arms, the query-fact and
 --     cloud-services arms of the extract load (PAGE ExtractLoader / MartLoader /
 --     SecurityLoader, ERROR_TYPE *_failed: the V064 reconcile's filter; a
---     skipped/unavailable note is not a failure). The daily task graph is not
+--     skipped/unavailable note is not a failure), and the opt-in object-cost
+--     reload's own rollback row (PAGE ObjectCost). The daily task graph is not
 --     suspended, so a loader failure it logs in the same minutes counts too --
 --     a real loader failure either way.
 -- FAILURES names each one -- fix the cause, then re-run this file
@@ -339,5 +425,5 @@ SELECT COUNT_IF(PAGE = 'Backfill365') AS BACKFILL_CALLS_FAILED,
 FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
 WHERE LOGGED_AT >= $backfill_started::TIMESTAMP_NTZ
   AND (PAGE = 'Backfill365'
-       OR (PAGE IN ('ExtractLoader', 'MartLoader', 'SecurityLoader')
+       OR (PAGE IN ('ExtractLoader', 'MartLoader', 'SecurityLoader', 'ObjectCost')
            AND ERROR_TYPE ILIKE '%_failed%'));

@@ -546,14 +546,18 @@ def test_repeated_patterns_label_names_the_window_the_panel_reads():
     widening to 365 days is reverted for TRAILING windows -- older MART_PATTERN_COST_DAILY rows predate
     V120's 90-day RUNS re-stamp -- so pattern_cost clamps to PATTERN_COST_MAX_DAYS (90) and the caption,
     clean state and page note name that window, never a 365d the mart cannot honestly serve. Still not
-    the live-scan label (_live_wlab): the two limits are separate constants that only happen to agree."""
+    the live-scan label (_live_wlab): the two limits are separate constants that only happen to agree.
+    V167 (PATTERN-RESTAMP): the cap is pattern_cost_cap(stamp) -- PATTERN_COST_MAX_DAYS until the pattern
+    mart's atomic re-stamp reaches further (MAX_MART_WINDOW_DAYS is its ceiling, never the default); the labels
+    name that same cap (tests/test_v167_app_marts.py renders both paths)."""
     src = read(_UC)
-    assert "MAX_MART_WINDOW_DAYS" not in src
-    assert "_pc_days = min(int(days), mart27_sql.PATTERN_COST_MAX_DAYS)" in src
+    assert ("_pc_cap = pattern_cost_cap(_pc_cov, floor=mart27_sql.PATTERN_COST_MAX_DAYS, "
+            "ceiling=MAX_MART_WINDOW_DAYS)") in src
+    assert "_pc_days = min(int(days), _pc_cap)" in src
     caption = src.split("**Repeated patterns", 1)[1].split("grouped by", 1)[0]
     assert "window_label(bounds, _pc_days)" in caption and "_live_wlab" not in caption
     note = src.split("the repeated-pattern panel reads at most the last", 1)
-    assert len(note) == 2 and "{mart27_sql.PATTERN_COST_MAX_DAYS} days from its mart" in note[1]
+    assert len(note) == 2 and "{_pc_cap} days from its mart" in note[1]
 
 
 class _PatternsRendered(Exception):

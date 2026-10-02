@@ -18,6 +18,13 @@ Unreadable, empty or junk -> an empty set, so ``has_migration`` is False and the
 pre-apply behaviour (the safe side). The metadata tier holds for 4 hours, so a freshly applied
 migration shows up after the cache turns over or on Refresh; Admin > Migrations reads fresher.
 
+``has_migration_fresh`` is for a WRITE whose statement changes shape at the apply (V170's 5-arg
+SP_INCIDENT_DECLARE, which credits the declaring DBA instead of the app owner, for good): a 4-hour lag
+there writes a wrong row that is never rewritten. It answers from the stash when the stash already holds
+the version (the steady state: no statement). Only when the stash lacks it does it re-read SCHEMA_VERSION
+on the live tier (30 s), once per full script run, stashed separately -- a failed read included -- so the
+first write after the apply takes the new shape within 30 s. Holistic review #16, v4.609.0.
+
 The stash is keyed by ``_ow_run_seq`` (bumped at the top of main(); fragment reruns keep it), the
 same per-run pattern as ``admin._read_fresh_applied``.
 """
@@ -35,6 +42,10 @@ STASH_KEY = "_ow_schema_versions"
 _READ_KEY = "schema_gate"
 # The startup gate's tier: the cache entry both reads share (tests/test_schema_gate.py pins the pair).
 TIER = "metadata"
+# has_migration_fresh: its own per-run stash, telemetry key and tier (30 s; query.CACHE_TTLS["live"]).
+FRESH_STASH_KEY = "_ow_schema_versions_fresh"
+_FRESH_READ_KEY = "schema_gate_fresh"
+FRESH_TIER = "live"
 
 
 def _parse(res: QueryResult | None) -> frozenset[int]:
@@ -51,17 +62,17 @@ def _run_state():
     return (state, seq) if seq is not None else (None, None)
 
 
-def _stash(versions: frozenset[int]) -> None:
+def _stash(versions: frozenset[int], key: str = STASH_KEY) -> None:
     state, seq = _run_state()
     if state is not None:
-        state[STASH_KEY] = (seq, versions)
+        state[key] = (seq, versions)
 
 
-def _stashed() -> frozenset[int] | None:
+def _stashed(key: str = STASH_KEY) -> frozenset[int] | None:
     state, seq = _run_state()
     if state is None:
         return None
-    stash = state.get(STASH_KEY)
+    stash = state.get(key)
     if isinstance(stash, tuple) and len(stash) == 2 and stash[0] == seq and isinstance(stash[1], frozenset):
         return stash[1]
     return None
@@ -87,3 +98,19 @@ def applied_versions(page: str) -> set[int]:
 def has_migration(v: int, page: str) -> bool:
     """True once V<v> is in the applied SCHEMA_VERSION set; False when it is not, or unreadable."""
     return int(v) in applied_versions(page)
+
+
+def has_migration_fresh(v: int, page: str) -> bool:
+    """``has_migration`` for a write whose SQL changes shape at the apply (see the module docstring).
+
+    The stash answers when it already holds V<v> (no statement). Otherwise SCHEMA_VERSION is re-read on the
+    live tier, once per full script run; False when that read is unreadable too (the pre-apply shape)."""
+    if has_migration(v, page):
+        return True
+    versions = _stashed(FRESH_STASH_KEY)
+    if versions is None:
+        res = run(mart_sql.schema_version(), page=page, key=_FRESH_READ_KEY, tier=FRESH_TIER,
+                  source="SCHEMA_VERSION", probe=True)
+        versions = _parse(res)
+        _stash(versions, FRESH_STASH_KEY)
+    return int(v) in versions
