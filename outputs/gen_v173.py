@@ -29,7 +29,7 @@ SP_ALERT_SCAN_DAILY, byte-identical to V169 except arm [24] COST_IDLE_OPPORTUNIT
 The RETURN labels and every other byte stay (the PART B GET_DDL checks read the V173 fragments instead).
 
 No CALL, DROP, task, data repair or ALERT_EVENTS write at apply time. With PREFLIGHT_OUT / PART_B_OUT set, also
-writes the read-only PREFLIGHT (P173.1-P173.5) and the RUN_NEXT PART B verify grids (V173.1-V173.3), built from the
+writes the read-only PREFLIGHT (P173.1-P173.5) and the RUN_NEXT PART B verify grids (V173.1-V173.4), built from the
 SAME derived arm text; both open with the Central session pin. The byte-identity test never sets them.
 
 Run: python outputs/gen_v173.py
@@ -208,9 +208,11 @@ HEADER = f"""-- {NAME}
 -- COST: one 48h ALERT_EVENTS read bounded by RULE_ID in arm [18] (V168 read the same rows under its OR); none in [24].
 -- LATENCY: hourly (:07 Central) and daily (06:50 Central), as before.
 -- FIRST RUN: the next hourly scan raises the admin new-network pairs first seen in its 24h window that have no event
--- (PREFLIGHT P173.2 lists them). A pair first seen while the arm was failing and more than 24h before that scan is
--- never raised by the arm: PREFLIGHT P173.3 lists every pair first seen since V168's apply, with whether an event
--- exists; review the unalerted ones in Security > Access. The next daily scan evaluates COST_IDLE_OPPORTUNITY again
+-- (PREFLIGHT P173.2 lists them). A pair first seen more than 24h before that scan that no run before V168's apply
+-- raised is never raised by the arm; LOGIN_HISTORY lands up to 2h late, so V162's last hourly run missed the pairs
+-- first seen in the 2h before it. PREFLIGHT P173.3 previews the pairs first seen from 24h before V168's apply,
+-- with whether an event exists; once PART B V173.2 reads OK, PART B V173.4 lists exactly the ones no event covers:
+-- review those in Security > Access. The next daily scan evaluates COST_IDLE_OPPORTUNITY again
 -- (PREFLIGHT P173.4 lists the zero-credit warehouses that hit the division, P173.5 what the arm would raise). The
 -- OPS_SCAN_DEGRADED events the failures raised are true history: resolve them in Alerts once PART B reads OK.
 -- ROLLBACK: re-run V168's SP_ALERT_SCAN (the CREATE PROCEDURE in V168__alert_scan_hourly_keys_and_sweeps.sql) and
@@ -303,11 +305,21 @@ assert not re.search(r"(?<![:\w]):[a-z_]+\b", STMT18 + STMT24.replace("HH24:MI",
 NN18 = _between(_a18, "            SELECT L.USER_NAME,", "        ) nn\n")
 HAVING18 = "            HAVING MIN(L.EVENT_TIMESTAMP) >= DATEADD('hour', -24, CURRENT_TIMESTAMP())\n"
 assert NN18.count(HAVING18) == 1
-NN_SINCE_168 = NN18.replace(HAVING18, f"            HAVING MIN(L.EVENT_TIMESTAMP) >= {APPLIED_168}\n")
+# From 24h before V168's apply: V162's last good run (:07 before the apply) could not see a pair LOGIN_HISTORY had
+# not landed yet (up to 2h), and those pairs are the first to leave the arm's 24h window unraised. The ev CTE below
+# matches V162's undated key and V168's dated one on user + IP, so the wider bound adds no false NOT_ALERTED row.
+NN_SINCE_168 = NN18.replace(
+    HAVING18, f"            HAVING MIN(L.EVENT_TIMESTAMP) >= DATEADD('hour', -24, {APPLIED_168})\n")
 WIN24 = _between(_a24, "        clk AS (\n", "        cov AS (\n").rstrip().rstrip(",")
 assert WIN24.count("win AS (") == 1 and WIN24.rstrip().endswith(")")
 WIN24 = "".join(ln[8:] + "\n" for ln in WIN24.splitlines()).rstrip("\n")
 _WATCH = ("supersede_sweep_failed", "ref_gap_scan_failed", "ref_gap_check_failed")
+EV18 = f"""ev AS (
+    SELECT DISTINCT SPLIT_PART(DEDUPE_KEY, '|', 2) AS USER_PART, SPLIT_PART(DEDUPE_KEY, '|', 3) AS IP_PART
+    FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+    WHERE RULE_ID = '{RULE18}'
+      AND RAISED_AT >= DATEADD('day', -2, {APPLIED_168})
+)"""
 
 PREFLIGHT = f"""\
 -- ====================================================================================================
@@ -335,19 +347,15 @@ ORDER BY 1, 2;
 --        included): admin pairs first seen in the last 24h that have no event yet.
 {STMT18};
 
--- P173.3 every admin user + IP pair first seen (against the 90-day baseline) since V168's apply, while arm [18] was
---        failing, and whether any {RULE18} event exists for it. NOT_ALERTED pairs with RAISED_BY_NEXT_SCAN = FALSE
---        are past the arm's 24h window: review them by hand in Security > Access (login history).
+-- P173.3 a preview: every admin user + IP pair first seen (against the 90-day baseline) from 24h before V168's apply
+--        (V162's last good run could not see the pairs LOGIN_HISTORY had not landed yet) and whether any
+--        {RULE18} event exists for it. IN_ARM_WINDOW_NOW is measured now, not at the first scan after the apply:
+--        the exact list to review by hand is PART B V173.4, once PART B V173.2 reads OK.
 WITH nn AS (
 {NN_SINCE_168}        ),
-ev AS (
-    SELECT DISTINCT SPLIT_PART(DEDUPE_KEY, '|', 2) AS USER_PART, SPLIT_PART(DEDUPE_KEY, '|', 3) AS IP_PART
-    FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
-    WHERE RULE_ID = '{RULE18}'
-      AND RAISED_AT >= DATEADD('day', -2, {APPLIED_168})
-)
+{EV18}
 SELECT nn.USER_NAME, nn.CLIENT_IP, nn.FIRST_SEEN, nn.LOGINS, nn.SUCCESSES,
-       nn.FIRST_SEEN >= DATEADD('hour', -24, CURRENT_TIMESTAMP()) AS RAISED_BY_NEXT_SCAN,
+       nn.FIRST_SEEN >= DATEADD('hour', -24, CURRENT_TIMESTAMP()) AS IN_ARM_WINDOW_NOW,
        ev.USER_PART IS NULL AS NOT_ALERTED
 FROM nn
 LEFT JOIN ev
@@ -403,21 +411,39 @@ for _src, _status, _rule, _ in HEARTBEAT.values():
     assert f"'rule {_rule} - other rules unaffected'" in (hourly if _rule == RULE18 else daily)
 assert hourly.count("'alert scan ' || (14 - :fails) || '/14 rule blocks ok'") == 2
 assert daily.count("'alert scan daily ' || (14 - :fails) || '/14 rule blocks ok (daily)'") == 2
+assert hourly.count("SELECT 'AlertScan', 'supersede_sweep_failed', :emsg,") == 1
+assert "supersede_sweep_failed" not in daily
+# A scan already running at the apply finishes on its OLD body (CREATE OR REPLACE PROCEDURE does not change a CALL in
+# flight) and can log arm [18]'s failure and stamp a 13/14 heartbeat AFTER the version row. So the checks read only a
+# scan that started after the apply: a heartbeat 55+ minutes after it, and failures logged from 30 minutes after it.
+# Both hold while a scan runs under 25 minutes (minutes in practice): an old-body run logs nothing past +30, and a
+# heartbeat past +55 comes from a run that began after +30.
+RUN_AFTER = f"DATEADD('minute', 55, {APPLIED_173})"
+LOG_AFTER = f"DATEADD('minute', 30, {APPLIED_173})"
 
 
 def _scan_grid(check: str) -> str:
     src, status, rule, kind = HEARTBEAT[check]
+    sweep = "" if kind != "hourly" else f"""
+UNION ALL
+SELECT '{check} no supersede_sweep_failed since the apply',
+       IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+             WHERE PAGE = 'AlertScan' AND ERROR_TYPE = 'supersede_sweep_failed'
+               AND LOGGED_AT >= {LOG_AFTER}) = 0,
+           'OK', 'FAIL: the V168 supersede sweep failed, see APP_ERROR_LOG ERROR_MESSAGE')"""
     return f"""\
-SELECT '{check} {kind} scan ran after the apply' AS CHECK_NAME,
+SELECT '{check} {kind} scan started after the apply' AS CHECK_NAME,
        CASE WHEN {APPLIED_173} IS NULL THEN 'FAIL: SCHEMA_VERSION has no 173 row'
-            ELSE COALESCE((SELECT IFF(MAX(LAST_LOAD_TS) >= {APPLIED_173}, 'OK',
-                                      'WAIT: no {kind} scan since the apply (last '
+            ELSE COALESCE((SELECT IFF(MAX(LAST_LOAD_TS) >= {RUN_AFTER}, 'OK',
+                                      'WAIT: no {kind} scan that started after the apply yet (last heartbeat '
                                       || TO_VARCHAR(MAX(LAST_LOAD_TS)) || ')')
                            FROM DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE WHERE SOURCE_NAME = '{src}'),
                           'FAIL: no {src} row') END AS RESULT
 UNION ALL
 SELECT '{check} {kind} heartbeat reads 14/14',
-       COALESCE((SELECT IFF(MAX(STATUS) = '{status}', 'OK', 'CHECK: ' || MAX(STATUS))
+       COALESCE((SELECT IFF(MAX(LAST_LOAD_TS) >= {RUN_AFTER},
+                            IFF(MAX(STATUS) = '{status}', 'OK', 'CHECK: ' || MAX(STATUS)),
+                            'WAIT: the heartbeat (' || TO_VARCHAR(MAX(LAST_LOAD_TS)) || ') is an older scan')
                  FROM DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE WHERE SOURCE_NAME = '{src}'),
                 'FAIL: no {src} row')
 UNION ALL
@@ -425,20 +451,22 @@ SELECT '{check} no {rule} rule_block_failed since the apply',
        IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
              WHERE PAGE = 'AlertScan' AND ERROR_TYPE = 'rule_block_failed'
                AND CONTEXT LIKE 'rule {rule} %'
-               AND LOGGED_AT >= {APPLIED_173}) = 0,
+               AND LOGGED_AT >= {LOG_AFTER}) = 0,
            'OK', 'FAIL: see APP_ERROR_LOG ERROR_MESSAGE')
 UNION ALL
 SELECT '{check} no rule_block_failed of any rule since the apply',
        (SELECT IFF(COUNT(*) = 0, 'OK', 'CHECK: ' || LISTAGG(DISTINCT CONTEXT, '; '))
         FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
-        WHERE PAGE = 'AlertScan' AND ERROR_TYPE = 'rule_block_failed' AND LOGGED_AT >= {APPLIED_173});"""
+        WHERE PAGE = 'AlertScan' AND ERROR_TYPE = 'rule_block_failed' AND LOGGED_AT >= {LOG_AFTER}){sweep};"""
 
 
 PART_B = f"""\
--- PART B -- V173 verify (READ-ONLY after the session pin). V173.1 right after the apply; V173.2 after the next :07
--- Central hourly scan; V173.3 after the next 06:50 Central daily scan. Every RESULT should read OK (a WAIT means that
--- scan has not run since the apply yet); paste the grids back. APPLIED_AT, LAST_LOAD_TS and LOGGED_AT are all Central
--- wall-clock, so the apply itself is the boundary.
+-- PART B -- V173 verify (READ-ONLY after the session pin). V173.1 right after the apply; V173.2 after the next hourly
+-- scan; V173.3 after the next 06:50 Central daily scan; V173.4 once V173.2 reads OK. Every RESULT should read OK (a
+-- WAIT means no scan that started after the apply has finished yet); paste the grids back. APPLIED_AT, LAST_LOAD_TS
+-- and LOGGED_AT are all Central wall-clock. A scan already running at the apply finishes on its old body, so V173.2
+-- and V173.3 count only a heartbeat 55+ minutes after the apply and failures logged from 30 minutes after it: a scan
+-- that started within about half an hour of the apply reads WAIT, so re-run the grid after the next one.
 {TZ_PIN}
 
 SELECT 'V173.1 SCHEMA_VERSION has 173' AS CHECK_NAME,
@@ -447,11 +475,34 @@ SELECT 'V173.1 SCHEMA_VERSION has 173' AS CHECK_NAME,
 UNION ALL
 {_ddl_union};
 
--- V173.2 after the next hourly scan (:07 Central): the scan ran, reads 14/14, and arm [18] logged no failure.
+-- V173.2 after the first hourly scan (graph from :07 Central) whose heartbeat lands 55+ minutes after the apply (within
+--        about two hours): it reads 14/14, arm [18] logged no failure, and the V168 supersede sweep (its OR shape has
+--        run only since V168's apply) logged no supersede_sweep_failed.
 {_scan_grid("V173.2")}
 
--- V173.3 after the next daily scan (06:50 Central): the scan ran, reads 14/14, and arm [24] logged no failure.
+-- V173.3 after the first daily scan (06:50 Central) whose heartbeat lands 55+ minutes after the apply (apply before
+--        about 05:50 to read it the same morning): it reads 14/14 and arm [24] logged no failure.
 {_scan_grid("V173.3")}
+
+-- V173.4 once V173.2 reads OK: the admin user + IP pairs arm [18] will never raise. First seen (against the 90-day
+--        baseline) from 24h before V168's apply, no {RULE18} event for the user + IP, at or over the rule's
+--        THRESHOLD_NUM with the rule enabled (the arm's own join), and now past its 24h window. Expect no rows;
+--        review any by hand in Security > Access (login history).
+WITH nn AS (
+{NN_SINCE_168}        ),
+{EV18}
+SELECT nn.USER_NAME, nn.CLIENT_IP, nn.FIRST_SEEN, nn.LOGINS, nn.SUCCESSES
+FROM nn
+JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+  ON c.RULE_ID = '{RULE18}'
+ AND c.ENABLED
+ AND nn.LOGINS >= c.THRESHOLD_NUM
+LEFT JOIN ev
+       ON ev.USER_PART = LEFT(nn.USER_NAME, 200)
+      AND ev.IP_PART = nn.CLIENT_IP
+WHERE ev.USER_PART IS NULL
+  AND nn.FIRST_SEEN < DATEADD('hour', -24, CURRENT_TIMESTAMP())
+ORDER BY nn.FIRST_SEEN;
 """
 
 for _name, _sql in (("PREFLIGHT", PREFLIGHT), ("PART B", PART_B)):

@@ -530,8 +530,9 @@ def _key(kind: str, name: str, sig_types: list[str] | None) -> str:
 
 
 @functools.cache
-def _latest_definers() -> tuple[tuple[str, tuple[int, str]], ...]:
-    """Replay every CREATE and DROP of a code object in (version, position) order; cached, read once per run."""
+def _code_events() -> tuple[tuple[int, int, str, str, str | None], ...]:
+    """Every CREATE and DROP of a code object, (version, position, 'create' | 'drop', key, CREATE text) in replay
+    order; cached, read once per run."""
     events: list[tuple[int, int, str, str, str | None]] = []
     for p in _MIG.glob("V*.sql"):
         v = int(re.match(r"V(\d+)", p.name).group(1))
@@ -555,8 +556,14 @@ def _latest_definers() -> tuple[tuple[str, tuple[int, str]], ...]:
             if kind in ("PROCEDURE", "FUNCTION"):
                 types = [_base_type(x.split()[0]) for x in (d.group(3) or "()")[1:-1].split(",") if x.strip()]
             events.append((v, d.start(), "drop", _key(kind, d.group(2), types), None))
+    return tuple(sorted(events, key=lambda e: (e[0], e[1])))
+
+
+@functools.cache
+def _latest_definers() -> tuple[tuple[str, tuple[int, str]], ...]:
+    """Replay every CREATE and DROP of a code object in (version, position) order."""
     defs: dict[str, tuple[int, str]] = {}
-    for v, _pos, what, key, body in sorted(events, key=lambda e: (e[0], e[1])):
+    for v, _pos, what, key, body in _code_events():
         if what == "create":
             assert body is not None
             defs[key] = (v, body)
@@ -568,6 +575,11 @@ def _latest_definers() -> tuple[tuple[str, tuple[int, str]], ...]:
 def latest_definers() -> dict[str, tuple[int, str]]:
     """{object key: (version, CREATE statement text)} for every object still defined at the migration tip."""
     return dict(_latest_definers())
+
+
+def definer_history(key: str) -> list[tuple[int, str]]:
+    """[(version, CREATE statement text)] of every definition of one object, oldest first."""
+    return [(v, body) for v, _pos, what, k, body in _code_events() if what == "create" and k == key and body]
 
 
 def _runbox_generators() -> dict[str, list[str]]:

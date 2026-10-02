@@ -21,13 +21,18 @@ tests/test_sql_division_guards.py), every statement parsed by sqlglot (Snowflake
       has at least one DECORRELATION KEY: a top-level AND-ed conjunct of its WHERE that is ``inner = outer`` with
       one side a bare column of the subquery's own sources and the other an expression of outer columns only. No
       waiver: a subquery without one is rewritten (split the OR into AND-ed NOT EXISTS, or precompute the inner side
-      in a CTE as V173 does).
+      in a CTE as V173 does). A correlated SCALAR subquery must also be provably one row (Snowflake's documented
+      limit, the same error): one select item holding an aggregate of its own SELECT (not a window), and no
+      GROUP BY, LIMIT / TOP / FETCH, ORDER BY or QUALIFY. ``(SELECT e.v ... ORDER BY e.t DESC LIMIT 1)`` is R1.
   R2  every OTHER conjunct, select item or join condition that reads the outer row -- a correlation under OR, a
       non-equality (<>, <, >, LIKE, ...), an outer-only filter, an equality with an expression on both sides or with
       inner and outer columns on one side -- is a RESIDUAL. Snowflake applies a residual as a join filter beside the
       key, and each shape below is proven in production; a new one is listed in _PROVEN with its evidence (and the
       count it occurs) or rewritten.
-  R3  every statement of a latest definer that contains SELECT parses; a waiver is a reasoned _UNPARSED entry.
+  R3  every statement of a latest definer that contains SELECT parses, and every query in it is scoped; a waiver is
+      a reasoned _UNPARSED entry. sqlglot's traverse_scope skips an UPDATE's FROM subquery (30.12) and the source of
+      an INSERT ALL / INSERT FIRST, so a query it misses is traversed as its own root (a FROM source cannot read the
+      outer row anyway); a tree no scope can reach (a Command fallback) is R3.
 
 A correlation is a QUALIFIED reference to an outer source (law 8 qualifies them all): without the tables' schemas the
 parser cannot tell an unqualified column's scope, so it is read as the subquery's own.
@@ -49,7 +54,7 @@ from typing import NamedTuple
 import pytest
 
 from tests._source import ROOT
-from tests.test_sql_division_guards import _close, latest_definers, mask
+from tests.test_sql_division_guards import _close, definer_history, latest_definers, mask
 
 sqlglot = pytest.importorskip("sqlglot")
 from sqlglot import exp  # noqa: E402
@@ -125,6 +130,7 @@ class Subquery(NamedTuple):
     text: str                       # the subquery as sqlglot renders it (for messages only)
     keys: tuple[str, ...]           # R1 decorrelation keys
     residuals: tuple[str, ...]      # R2 signatures
+    one_row: bool                   # R1: not a scalar subquery, or one Snowflake can prove returns one row
 
 
 _EXPR_PARENTS = (exp.Condition, exp.Alias, exp.Where, exp.Having, exp.Tuple)
@@ -140,6 +146,56 @@ def _is_expression_subquery(node: exp.Expression) -> bool:
     if not isinstance(p, exp.Subquery) or isinstance(p.parent, exp.From | exp.Join):
         return False
     return isinstance(p.parent, _EXPR_PARENTS) or (isinstance(p.parent, exp.Select) and p.arg_key == "expressions")
+
+
+def _is_scalar(node: exp.Expression) -> bool:
+    """A scalar subquery: a value in an expression, not the query of EXISTS / IN / ANY / ALL (which may return many
+    rows)."""
+    p = node.parent
+    return isinstance(p, exp.Subquery) and not isinstance(p.parent, exp.Exists | exp.In | exp.Any | exp.All)
+
+
+def _one_row(node: exp.Expression) -> bool:
+    """Snowflake runs a correlated scalar subquery only when it can show statically that one row comes back: an
+    aggregate query -- one select item holding an aggregate of THIS select (not a window's, not a nested query's)
+    -- with no GROUP BY, LIMIT / TOP / FETCH (all sqlglot's ``limit``), OFFSET, ORDER BY or QUALIFY."""
+    if not isinstance(node, exp.Select) or len(node.expressions) != 1:
+        return False
+    if any(node.args.get(k) for k in ("group", "limit", "offset", "order", "qualify")):
+        return False
+    return any(a.find_ancestor(exp.Window, exp.Select) is node for a in node.expressions[0].find_all(exp.AggFunc))
+
+
+class Unscoped(Exception):
+    """A parsed statement whose queries no scope reaches (R3)."""
+
+
+_SCOPED_ROOTS = (exp.Query, exp.Insert, exp.Update, exp.Delete, exp.Merge, exp.MultitableInserts, exp.Create)
+
+
+def scopes(tree: exp.Expression) -> list:
+    """Every scope of one parsed statement. traverse_scope first; then each SELECT / set operation it did not reach
+    (an UPDATE's FROM subquery under sqlglot 30.12, the source of an INSERT ALL / INSERT FIRST) as its own root.
+    Raises Unscoped for a root of another kind or a query still unreached."""
+    if not isinstance(tree, _SCOPED_ROOTS):
+        raise Unscoped(f"sqlglot parsed it as {type(tree).__name__}")
+    out: list = []
+    seen: set[int] = set()
+
+    def walk(root: exp.Expression) -> None:
+        for sc in traverse_scope(root):
+            if id(sc.expression) not in seen:
+                seen.add(id(sc.expression))
+                out.append(sc)
+
+    walk(tree)
+    for q in list(tree.find_all(exp.Select, exp.SetOperation)):
+        if id(q) not in seen:
+            walk(q)
+    missed = [q for q in tree.find_all(exp.Select, exp.SetOperation) if id(q) not in seen]
+    if missed:
+        raise Unscoped(f"{len(missed)} queries no scope reaches, the first {missed[0].sql()[:80]}")
+    return out
 
 
 def _conjuncts(node: exp.Expression) -> list[exp.Expression]:
@@ -179,7 +235,7 @@ def classify(sql: str) -> list[Subquery]:
     for tree in sqlglot.parse(_prep(sql), read="snowflake"):
         if tree is None:
             continue
-        for scope in traverse_scope(tree):
+        for scope in scopes(tree):
             node = scope.expression
             ext = [c for c in scope.external_columns if c.text("table")]
             if not ext or not _is_expression_subquery(node):
@@ -202,23 +258,27 @@ def classify(sql: str) -> list[Subquery]:
             rest = [c for c in ext if id(c) not in seen]
             if rest:
                 residuals.append("outside WHERE: outer " + ", ".join(sorted({_name(c) for c in rest})))
-            out.append(Subquery(node.sql()[:240], tuple(keys), tuple(residuals)))
+            out.append(Subquery(node.sql()[:240], tuple(keys), tuple(residuals),
+                                not _is_scalar(node) or _one_row(node)))
     return out
 
 
 @functools.cache
-def _scan_object(create: str) -> tuple[tuple[Subquery, ...], tuple[str, ...]]:
-    """(correlated subqueries, statements that failed to parse) of one CREATE text; cached by text."""
+def _scan_object(create: str) -> tuple[tuple[Subquery, ...], tuple[tuple[str, str], ...]]:
+    """(correlated subqueries, (why, statement) for each statement the lint cannot read) of one CREATE text; cached
+    by text."""
     subs: list[Subquery] = []
-    unparsed: list[str] = []
+    unread: list[tuple[str, str]] = []
     for stmt in statements(create):
         if not re.search(r"\bSELECT\b", mask(stmt), re.I):
             continue
         try:
             subs += classify(stmt)
         except sqlglot.errors.ParseError:
-            unparsed.append(" ".join(stmt.split())[:120])
-    return tuple(subs), tuple(unparsed)
+            unread.append(("does not parse", " ".join(stmt.split())[:120]))
+        except Unscoped as why:
+            unread.append((f"not scoped ({why})", " ".join(stmt.split())[:120]))
+    return tuple(subs), tuple(unread)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -243,9 +303,12 @@ _PROVEN: dict[tuple[str, str], Proven] = {
     (_SCAN, "NEQ: outer lo.DEDUPE_KEY | inner hi.DEDUPE_KEY"): Proven(
         1, 67, "the V067 #40 escalation supersede sweep (hourly since V067): key hi.RULE_ID = lo.RULE_ID"),
     (_SCAN, "Or: outer lo.DEDUPE_KEY, lo.RAISED_AT, lo.RULE_ID | inner hi.DEDUPE_KEY, hi.RAISED_AT"): Proven(
-        1, 67, "the same sweep's band-swap OR (six REPLACE equalities since V067 / V096). V168 added a seventh "
-               "disjunct (failures-only SEC_NEW_ADMIN_NETWORK, a LIKE and a 48h range on lo) inside the same "
-               "residual, beside the same key; its failure would log supersede_sweep_failed (P173.1 shows any)"),
+        1, 168, "the same sweep's band-swap OR, beside the same key hi.RULE_ID = lo.RULE_ID. Its six REPLACE "
+                "equalities ran from V067 / V096 as 'Or: outer lo.DEDUPE_KEY | inner hi.DEDUPE_KEY'; this exact "
+                "shape is V168's (a seventh disjunct, failures-only SEC_NEW_ADMIN_NETWORK: a LIKE and a 48h "
+                "RAISED_AT range on lo), live only since V168's apply (2026-10-02, hourly). A failure logs "
+                "supersede_sweep_failed, which the 14/14 heartbeat does not count: the evidence is PREFLIGHT P173.1 "
+                "(none since V168's apply) and PART B V173.2's supersede row after the apply"),
     (_SCAN, "EQ (not inner column = outer): outer s.DEDUPE_KEY | inner s2.DEDUPE_KEY"): Proven(
         1, 117, "the V117 snooze carry-forward sweep (hourly since V117): the date-stripped identity CASE = CASE "
                 "rides beside the key s2.RULE_ID = s.RULE_ID"),
@@ -266,7 +329,8 @@ _PROVEN: dict[tuple[str, str], Proven] = {
                       "c.FAMILY: hourly since V032 (the only correlation until V099 added the key i.COMPANY = "
                       "c.COMPANY), re-derived through V154 / V162"),
 }
-# A statement sqlglot cannot parse is a hole in the lint: list it here with why it holds no correlated subquery.
+# A statement sqlglot cannot parse or scope is a hole in the lint: list it here with why it holds no correlated
+# subquery.
 _UNPARSED: dict[tuple[str, str], str] = {}
 
 
@@ -276,12 +340,16 @@ def violations(objects: dict[str, str]) -> list[str]:
     out: list[str] = []
     used: Counter[tuple[str, str]] = Counter()
     for label, create in sorted(objects.items()):
-        subs, unparsed = _scan_object(create)
-        out.extend(f"{label}: R3 does not parse: {stmt}" for stmt in unparsed if (label, stmt) not in _UNPARSED)
+        subs, unread = _scan_object(create)
+        out.extend(f"{label}: R3 {why}: {stmt}" for why, stmt in unread if (label, stmt) not in _UNPARSED)
         for sub in subs:
             if not sub.keys:
                 out.append(f"{label}: R1 no decorrelation key (inner column = outer expression at the top of the "
                            f"WHERE): {sub.text}")
+                continue
+            if not sub.one_row:
+                out.append(f"{label}: R1 correlated scalar subquery not provably one row (one aggregate select "
+                           f"item; no GROUP BY, LIMIT / TOP, ORDER BY or QUALIFY): {sub.text}")
                 continue
             for sig in sub.residuals:
                 if (label, sig) in _PROVEN:
@@ -312,14 +380,15 @@ def test_every_correlated_subquery_has_a_decorrelation_key():
 
 
 def test_the_lint_has_reach():
-    """The scan sees the subqueries it must: 74 correlated expression subqueries in the latest definers at V173 (the
+    """The scan sees the subqueries it must: 76 correlated expression subqueries in the latest definers at V173 (the
     UNPIVOT and LATERAL FLATTEN sources sqlglot also scopes are not among them), the V173 legs, the V105 CTE
-    precedent and the V067 sweep inside an UPDATE."""
+    precedent, the V067 sweep inside an UPDATE and SP_LEDGER_AUTOBOOK's two EXISTS inside UPDATE ... FROM
+    subqueries (which sqlglot 30.12's traverse_scope does not walk)."""
     objs = _objects()
     total = Counter()
     for label, create in objs.items():
         total[label] = len(_scan_object(create)[0])
-    assert sum(total.values()) >= 70, sum(total.values())
+    assert sum(total.values()) >= 76, sum(total.values())
     assert total[_SCAN] >= 20 and total[_DAILY] >= 15 and total["SP_LOAD_SECURITY_FACTS(FLOAT)"] >= 1
     scan = list(_scan_object(objs[_SCAN])[0])
     legs = [s for s in scan if "FROM recent AS r" in s.text]
@@ -329,6 +398,10 @@ def test_the_lint_has_reach():
     assert len(sweep) == 1 and sweep[0].keys == ("hi.RULE_ID = lo.RULE_ID",)
     cte = [s for s in _scan_object(objs["SP_LOAD_SECURITY_FACTS(FLOAT)"])[0] if "current_findings" in s.text]
     assert cte and cte[0].keys == ("c.SCANNER_ID = p.SCANNER_ID",)
+    ledger = sorted(s.keys for s in _scan_object(objs["SP_LEDGER_AUTOBOOK()"])[0])
+    assert ledger == [("b.SOURCE_CHANGE_ID = r.CHANGE_ID",), ("l.SOURCE_CHANGE_ID = r.CHANGE_ID",),
+                      ("l2.SOURCE_CHANGE_ID = r.CHANGE_ID",)], ledger            # b and l2: inside UPDATE ... FROM
+    assert all(s.one_row for label in objs for s in _scan_object(objs[label])[0])   # every one an EXISTS today
     assert latest_definers()[_SCAN][0] >= 173 and latest_definers()[_DAILY][0] >= 173
 
 
@@ -338,6 +411,18 @@ def test_every_proven_entry_carries_evidence():
         assert entry.count >= 1 and entry.since < 173 and len(entry.evidence) > 60, (label, sig)
         assert re.fullmatch(r"(Or|NEQ|GT|GTE|LT|LTE|Like|ILike|EQ \(not inner column = outer\)): outer [^|]+ \| "
                             r"inner .+", sig), sig
+
+
+def test_every_proven_since_is_the_first_definer_that_ships_it():
+    """``since`` is the claim of how long Snowflake has run the shape: the first migration whose definition of the
+    object carries the residual (the V067 sweep's OR took its listed shape only in V168, which added the
+    failures-only SEC_NEW_ADMIN_NETWORK disjunct)."""
+    for (label, sig), entry in _PROVEN.items():
+        first = next((v for v, text in definer_history(label)
+                      if any(sig in s.residuals for s in _scan_object(text)[0])), None)
+        assert first == entry.since, (label, sig, first, entry.since)
+    sweep = _PROVEN[(_SCAN, "Or: outer lo.DEDUPE_KEY, lo.RAISED_AT, lo.RULE_ID | inner hi.DEDUPE_KEY, hi.RAISED_AT")]
+    assert sweep.since == 168 and "P173.1" in sweep.evidence and "V173.2" in sweep.evidence
 
 
 # -- teeth: the incident ---------------------------------------------------------------------------------------
@@ -398,6 +483,19 @@ def test_the_allow_list_counts_are_exact():
     ("SELECT 1 FROM b WHERE b.k IN (SELECT e.k FROM e WHERE e.ts > b.ts)", "R1"),
     ("SELECT (SELECT MAX(e.v) FROM e WHERE e.ts < b.ts) FROM b", "R1"),
     ("SELECT (SELECT MAX(e.v) FROM e WHERE e.k = b.k) FROM b", ""),
+    ("SELECT (SELECT COALESCE(MAX(e.v), 0) FROM e WHERE e.k = b.k) FROM b", ""),
+    # R1: a correlated SCALAR subquery must be provably one row (an aggregate, no GROUP BY / LIMIT / ORDER BY /
+    # QUALIFY), or Snowflake raises the same 'Unsupported subquery type' -- even with a key
+    ("SELECT (SELECT e.v FROM e WHERE e.k = b.k) FROM b", "R1"),
+    ("SELECT (SELECT MAX(e.v) FROM e WHERE e.k = b.k GROUP BY e.g) FROM b", "R1"),
+    ("SELECT (SELECT e.v FROM e WHERE e.k = b.k ORDER BY e.t DESC LIMIT 1) FROM b", "R1"),
+    ("SELECT (SELECT TOP 1 e.v FROM e WHERE e.k = b.k) FROM b", "R1"),
+    ("SELECT (SELECT e.v FROM e WHERE e.k = b.k QUALIFY ROW_NUMBER() OVER (ORDER BY e.t) = 1) FROM b", "R1"),
+    ("SELECT (SELECT MAX(e.v) OVER () FROM e WHERE e.k = b.k) FROM b", "R1"),
+    ("SELECT 1 FROM b WHERE b.v = (SELECT e.v FROM e WHERE e.k = b.k)", "R1"),
+    # ... while IN / ANY / EXISTS may return many rows
+    ("SELECT 1 FROM b WHERE b.v IN (SELECT e.v FROM e WHERE e.k = b.k)", ""),
+    ("SELECT 1 FROM b WHERE b.v = ANY (SELECT e.v FROM e WHERE e.k = b.k)", ""),
     # R2: a residual beside a key needs proof
     ("SELECT 1 FROM b WHERE NOT EXISTS (SELECT 1 FROM e WHERE e.k = b.k AND e.ts > b.ts)", "R2"),
     ("SELECT 1 FROM b WHERE NOT EXISTS (SELECT 1 FROM e WHERE e.k = b.k AND b.k LIKE '%x')", "R2"),
@@ -416,6 +514,39 @@ def test_the_allow_list_counts_are_exact():
 def test_the_rule(sql, want):
     found = violations({"X": "CREATE OR REPLACE VIEW X AS " + sql})
     assert [f.split(": ", 1)[1][:2] for f in found] == ([want] if want else []), found
+
+
+_PROC = "CREATE OR REPLACE PROCEDURE X() RETURNS VARCHAR LANGUAGE SQL AS\n$$\nBEGIN\n    {};\nEND;\n$$;"
+_OR_GUARD = "NOT EXISTS (SELECT 1 FROM e WHERE e.k = b.k OR e.j = b.j)"
+_AND_GUARD = "NOT EXISTS (SELECT 1 FROM e WHERE e.k = b.k) AND NOT EXISTS (SELECT 1 FROM e WHERE e.j = b.j)"
+
+
+@pytest.mark.parametrize(("sql", "want"), [
+    # INSERT ALL / INSERT FIRST parse as MultitableInserts, which sqlglot's traverse_scope yields no scope for
+    (f"INSERT ALL INTO t1 (a) VALUES (x) SELECT b.x FROM b WHERE {_OR_GUARD}", "R1"),
+    (f"INSERT FIRST WHEN x > 1 THEN INTO t1 (a) VALUES (x) SELECT b.x FROM b WHERE {_OR_GUARD}", "R1"),
+    (f"INSERT ALL INTO t1 (a) VALUES (x) SELECT b.x FROM b WHERE {_AND_GUARD}", ""),
+    # an UPDATE's FROM subquery (sqlglot 30.12 does not walk it; SP_LEDGER_AUTOBOOK has two EXISTS there)
+    (f"UPDATE t SET a = s.x FROM (SELECT b.k, b.x FROM b WHERE {_OR_GUARD}) s WHERE t.k = s.k", "R1"),
+    (f"UPDATE t SET a = s.x FROM (SELECT b.k, b.x FROM b WHERE {_AND_GUARD}) s WHERE t.k = s.k", ""),
+    # the plain DML shapes
+    (f"INSERT INTO t1 (a) SELECT b.x FROM b WHERE {_OR_GUARD}", "R1"),
+    (f"DELETE FROM b WHERE {_OR_GUARD}", "R1"),
+    (f"MERGE INTO t USING (SELECT b.k FROM b WHERE {_OR_GUARD}) s ON t.k = s.k WHEN MATCHED THEN DELETE", "R1"),
+    (f"UPDATE b SET x = 1 WHERE {_AND_GUARD}", ""),
+])
+def test_the_rule_reaches_every_dml_shape(sql, want):
+    found = violations({"X()": _PROC.format(sql)})
+    assert [f.split(": ", 1)[1][:2] for f in found] == ([want] if want else []), found
+
+
+def test_a_statement_no_scope_reaches_is_r3(monkeypatch):
+    """A tree sqlglot cannot scope (a Command fallback) is reported, never skipped silently."""
+    with pytest.raises(Unscoped, match="Command"):
+        scopes(exp.Command(this="SHOW"))
+    monkeypatch.setattr(sqlglot, "parse", lambda *_a, **_k: [exp.Command(this="SHOW")])
+    found = violations({"X": "CREATE OR REPLACE VIEW X AS SELECT 'the unscoped tooth' AS T"})
+    assert len(found) == 1 and found[0].startswith("X: R3 not scoped"), found
 
 
 def test_statement_extraction_reads_scripting():

@@ -186,7 +186,7 @@ def test_v173_preflight_and_part_b_are_read_only_and_parse(tmp_path, which):
     from sqlglot import exp
     body = sql.replace("ALTER SESSION SET TIMEZONE = 'America/Chicago';", "")
     parsed = [p for p in sqlglot.parse(body, dialect="snowflake") if p is not None]
-    assert len(parsed) == {"preflight": 5, "part_b": 3}[which]
+    assert len(parsed) == {"preflight": 5, "part_b": 4}[which]
     writes = (exp.Insert, exp.Update, exp.Delete, exp.Merge, exp.Create, exp.Drop, exp.Command)
     for tree in parsed:
         assert tree.key == "select" or isinstance(tree, exp.Union), tree.key
@@ -212,6 +212,13 @@ def test_v173_preflight_carries_the_arms_own_text(tmp_path):
                  "'supersede_sweep_failed'", "'ref_gap_scan_failed'", "'ref_gap_check_failed'",
                  "WHERE VERSION = 168"):
         assert frag in p1, frag
+    # P173.3 starts 24h before V168's apply: V162's last good run (06:07) could not see a pair LOGIN_HISTORY had not
+    # landed yet (up to 2h), so the pairs first seen just before the apply are the first to age out unraised. Its
+    # window column is "now", the PREFLIGHT's clock; the exact list is PART B V173.4, after the first good scan.
+    p3 = _between(pre, "-- P173.3 ", "-- P173.4 ")
+    assert ("HAVING MIN(L.EVENT_TIMESTAMP) >= DATEADD('hour', -24, (SELECT MAX(APPLIED_AT) FROM "
+            "DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 168))") in p3
+    assert "IN_ARM_WINDOW_NOW" in p3 and "RAISED_BY_NEXT_SCAN" not in pre and "PART B V173.4" in p3
 
 
 def test_v173_part_b_fragments_are_v173_only(tmp_path):
@@ -230,7 +237,26 @@ def test_v173_part_b_fragments_are_v173_only(tmp_path):
                   "'alert scan daily 14/14 rule blocks ok (daily)'", "CONTEXT LIKE 'rule SEC_NEW_ADMIN_NETWORK %'",
                   "CONTEXT LIKE 'rule COST_IDLE_OPPORTUNITY %'", "WHERE VERSION = 173"):
         assert check in part_b, check
-    assert part_b.count("'V173.2 ") == 4 and part_b.count("'V173.3 ") == 4
+    assert part_b.count("'V173.2 ") == 5 and part_b.count("'V173.3 ") == 4
+    # the V168 supersede sweep's OR shape (tests/test_snowflake_supported_subqueries.py _PROVEN, since V168) logs
+    # supersede_sweep_failed, which the 14/14 heartbeat does not count: V173.2 reads it
+    v2 = _between(part_b, "-- V173.2 ", "-- V173.3 ")
+    assert "'V173.2 no supersede_sweep_failed since the apply'" in v2 and "ERROR_TYPE = 'supersede_sweep_failed'" in v2
+    # a scan already running at the apply finishes on the OLD body (CREATE OR REPLACE PROCEDURE leaves a CALL in
+    # flight alone): V173.2 / V173.3 read only a heartbeat 55+ minutes after the apply and failures logged from
+    # 30 minutes after it -- never the bare APPLIED_AT
+    a173 = "(SELECT MAX(APPLIED_AT) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 173)"
+    for grid in (v2, _between(part_b, "-- V173.3 ", "-- V173.4 ")):
+        assert grid.count(f"MAX(LAST_LOAD_TS) >= DATEADD('minute', 55, {a173})") == 2, grid
+        assert grid.count(f"LOGGED_AT >= DATEADD('minute', 30, {a173})") == grid.count("LOGGED_AT >= ") >= 2
+        assert not re.search(r"(LAST_LOAD_TS\)|LOGGED_AT) >= \(SELECT MAX\(APPLIED_AT\)", grid)
+    # V173.4: the exact never-raised list, once V173.2 reads OK -- the arm's own pairs (threshold, enabled rule)
+    # first seen from 24h before V168's apply, no event, now past the 24h window
+    v4 = part_b[part_b.index("-- V173.4 "):]
+    for frag in ("DATEADD('hour', -24, (SELECT MAX(APPLIED_AT) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION "
+                 "WHERE VERSION = 168))", "nn.LOGINS >= c.THRESHOLD_NUM", "AND c.ENABLED",
+                 "WHERE ev.USER_PART IS NULL", "nn.FIRST_SEEN < DATEADD('hour', -24, CURRENT_TIMESTAMP())"):
+        assert frag in v4, frag
 
 
 # -- guard, order, shape -------------------------------------------------------------------------------------
@@ -249,6 +275,8 @@ def test_v173_first_line_guard_and_version():
     for word in ("WHY:", "COST:", "LATENCY:", "FIRST RUN:", "ROLLBACK:",
                  "Apply AFTER V172 (alone, any time; no repairs). Idempotent; safe to re-run."):
         assert word in header, word
+    flat = " ".join(ln.lstrip("- ") for ln in header.splitlines())
+    assert "24h before V168's apply" in flat and "PART B V173.4" in flat and "since V168's apply" not in flat
 
 
 def test_v173_file_order_and_nothing_runs_at_apply():
@@ -296,7 +324,8 @@ def test_v173_run_docs_list_it_with_a_short_apply_note():
     block = dep[dep.index("> **V173 (hotfix"):]
     block = block[:block.index("\n\n")]
     note = " ".join(" ".join(ln.lstrip("> ") for ln in block.splitlines()).split())
-    for phrase in ("V173 alone, any time", "no repairs", "PREFLIGHT P173.3", "PART B V173.1", "V173.2", "V173.3"):
+    for phrase in ("V173 alone, any time", "no repairs", "PREFLIGHT P173.3", "PART B V173.1", "V173.2", "V173.3",
+                   "V173.4", "24h before V168's apply", "started after the apply"):
         assert phrase in note, phrase
 
 

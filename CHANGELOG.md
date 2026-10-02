@@ -15,9 +15,17 @@ unchanged.
   equalities. They are the exact key, the pair's V162 undated key, and the same base and outcome on another first-seen
   day. Splitting `NOT EXISTS (A OR B OR C)` into `NOT EXISTS (A) AND NOT EXISTS (B) AND NOT EXISTS (C)` keeps the same
   rows, so every R2-036 / R2-039 outcome holds: a network quiet for 90 days alerts again, a failures-only key never
-  swallows the success, and one episode never raises twice. A pair first seen while the arm was failing, and more than
-  24 hours before the first scan after V173, is never raised: PREFLIGHT P173.3 lists those pairs for review in
-  Security > Access.
+  swallows the success, and one episode never raises twice. A pair first seen more than 24 hours before the first scan
+  after V173 is never raised by the arm unless V162's last run before V168's apply raised it, and LOGIN_HISTORY lands
+  up to 2 hours late, so that run missed the newest pairs. PREFLIGHT P173.3 previews the pairs first seen from 24
+  hours before V168's apply; once PART B V173.2 reads OK, PART B V173.4 lists exactly the ones no event covers, for
+  review in Security > Access.
+- **PART B reads only a scan that started after the apply.** CREATE OR REPLACE PROCEDURE leaves a running CALL alone,
+  so a scan already running at the apply finishes on the old body and can log arm [18]'s failure and a 13/14
+  heartbeat after APPLIED_AT. V173.2 / V173.3 count a heartbeat only from 55 minutes after the apply and failures
+  only from 30 minutes after it; a correct apply reads WAIT until such a scan has run, never FAIL. V173.2 also reads
+  `supersede_sweep_failed`: the V067 supersede sweep's OR took its current shape in V168 and has run only since then,
+  and its failures do not count toward the 14/14 heartbeat.
 - **COST_IDLE_OPPORTUNITY failed with "Division by zero" (2026-10-01 06:49, under V163; V169 kept the text).**
   `IDLE_CREDITS / TOTAL_CREDITS` was guarded only by `HAVING SUM(CREDITS_TOTAL) > 0`, and the monthly figure's
   `/ COVERED_DAYS` only by a WHERE. Snowflake does not promise to apply a filter before it computes a projection, and
@@ -28,11 +36,15 @@ unchanged.
   evaluates any correlated subquery row by row and returns NULL for x / 0. It cannot see Snowflake's decorrelation
   limits or its division error. Two static locks now run over the current definition of every procedure, function, view
   and task:
-  - `tests/test_snowflake_supported_subqueries.py` parses each statement with sqlglot. Every correlated subquery (74
-    today) needs a top-level `inner column = outer expression` conjunct. Any other link to the outer row (an OR, a
-    range, a LIKE, an expression on both sides) is allowed only beside such a key, and only as a shape listed with its
-    production evidence (11 entries: arm [10], arm [26], the V067 supersede and V117 snooze sweeps, the V164 escalation
-    probe, the auto-declare family match). The lock fails on V168's arm [18].
+  - `tests/test_snowflake_supported_subqueries.py` parses each statement with sqlglot. Every correlated subquery (76
+    today) needs a top-level `inner column = outer expression` conjunct, and a correlated scalar subquery must also be
+    provably one row (an aggregate with no GROUP BY, LIMIT / TOP, ORDER BY or QUALIFY), Snowflake's other trigger of
+    the same error. Any other link to the outer row (an OR, a range, a LIKE, an expression on both sides) is allowed
+    only beside such a key, and only as a shape listed with its production evidence and the migration that first
+    shipped it (11 entries: arm [10], arm [26], the V067 supersede and V117 snooze sweeps, the V164 escalation probe,
+    the auto-declare family match). Queries sqlglot's scope walk skips (an UPDATE's FROM subquery, the source of an
+    INSERT ALL / INSERT FIRST) are walked on their own, and a statement no scope reaches fails the lock. It fails on
+    V168's arm [18].
   - `tests/test_sql_division_guards.py` requires every division and modulo to guard its own divisor: a non-zero constant,
     `NULLIF(x, 0)`, `GREATEST` with a positive floor, or an `IFF` / `CASE` that tests the same value. It covers the
     generated PREFLIGHT, PART B and repair scripts too. A filter elsewhere does not count. The P157 and P169.6 preview

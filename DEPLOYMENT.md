@@ -557,10 +557,14 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > deploy needed (app 4.609.1 changes no read). It re-derives SP_ALERT_SCAN from V168 (only arm [18]'s dedupe guard) and
 > SP_ALERT_SCAN_DAILY from V169 (only arm [24]'s two divisions); nothing runs at apply time. Before it, the read-only
 > PREFLIGHT: P173.1 the failures since V168's apply (expect the two arms only), P173.2 / P173.5 what the next scans
-> raise, P173.4 the zero-credit warehouses, and PREFLIGHT P173.3 the admin user + IP pairs first seen while arm [18]
-> was failing -- the ones past its 24h window are never raised; review them in Security > Access. After it: PART B
-> V173.1 right away, V173.2 after the next :07 hourly scan (14/14, no SEC_NEW_ADMIN_NETWORK rule_block_failed since the
-> apply), V173.3 after the next 06:50 daily scan (14/14, no COST_IDLE_OPPORTUNITY rule_block_failed). Then resolve the
+> raise, P173.4 the zero-credit warehouses, and PREFLIGHT P173.3 a preview of the admin user + IP pairs first seen
+> from 24h before V168's apply (LOGIN_HISTORY lands up to 2h late, so V162's last run before it missed the newest),
+> with whether an event exists. After it: PART B V173.1 right away; V173.2 after an hourly scan that started after the
+> apply (14/14, no SEC_NEW_ADMIN_NETWORK rule_block_failed, no supersede_sweep_failed); V173.3 after a 06:50 daily
+> scan that started after the apply (14/14, no COST_IDLE_OPPORTUNITY rule_block_failed). A scan already running at the
+> apply finishes on its old body, so both count only a heartbeat 55+ minutes after the apply: a WAIT means re-run
+> after the next scan (apply before about 05:50 to read V173.3 the same morning). Once V173.2 reads OK, PART B V173.4
+> lists the admin pairs arm [18] will never raise: review each by hand in Security > Access. Then resolve the
 > OPS_SCAN_DEGRADED events the failures raised. Rollback: RUNBOOK §12, "Rolling back V173" (it brings both failures
 > back).
 

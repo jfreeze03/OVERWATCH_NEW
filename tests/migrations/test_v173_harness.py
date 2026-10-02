@@ -252,7 +252,8 @@ def test_the_differential_has_teeth():
 
 
 # ============================================================================================================
-# [18] PREFLIGHT: P173.2 is the arm's statement; P173.3 lists the pairs the failing arm never raised
+# [18] PREFLIGHT: P173.2 is the arm's statement; P173.3 previews the pairs the failing arm never raised, PART B
+#      V173.4 lists them once the first good scan has run
 # ============================================================================================================
 def _gen(tmp_path) -> tuple[str, str]:
     env = {k: v for k, v in os.environ.items() if k not in ("V173_OUT", "PREFLIGHT_OUT", "PART_B_OUT")}
@@ -283,28 +284,129 @@ def test_preflight_p173_2_raises_what_the_arm_raises(tmp_path):
     assert got == want
 
 
+_APPLIED_168 = _at(_SEP, 7, 0)                    # V168's apply; arm [18] fails on every run from then on
+
+
+def _outage_logins() -> list[dict]:
+    """Admin logins around the outage. V162's last good run is 06:07 on _SEP; LOGIN_HISTORY lands up to 2h late."""
+    return [_login("JDOE", _at(_SEP - timedelta(days=30), 8), True),                       # baseline: not new
+            _login("JDOE", _at(_SEP, 8), True),
+            _login("JDOE", _at(_SEP - timedelta(days=1), 5), True, ip="192.0.2.55"),       # before the window
+            _login("JDOE", _at(_SEP, 5), True, ip="192.0.2.44"),      # landed after 06:07: never seen by a good run
+            _login("JDOE", _at(_SEP, 6), True, ip="10.9.9.9"),         # V162 raised it at 06:07
+            _login("JDOE", _at(_SEP, 10), True, ip="198.51.100.7"),    # first seen while the arm failed
+            _login("first.last.name", _at(_SEP + timedelta(days=2), 1), False)]   # inside the next scan's window
+
+
+def _outage_scan(cfg: dict | None = None) -> _Scan:
+    s = _Scan([cfg or _cfg(_NET, 1)])
+    s.logins = _outage_logins()
+    _legacy(s, f"{_NET}|JDOE|10.9.9.9", _at(_SEP, 6, 7))       # V162's undated key
+    return s
+
+
+def _run_grid(s: _Scan, grid: str, now: datetime, versions: dict[int, datetime]) -> list[dict]:
+    con = s._con(now)
+    con.execute("CREATE TABLE SCHEMA_VERSION (VERSION, APPLIED_AT)")
+    for v, at in versions.items():
+        con.execute("INSERT INTO SCHEMA_VERSION VALUES (?, ?)", (v, v168h._ms(at)))
+    cur = con.execute(v168h._sq(grid))
+    cols = [c[0] for c in cur.description]
+    return [dict(zip(cols, x, strict=True)) for x in cur.fetchall()]
+
+
 def test_preflight_p173_3_lists_the_pairs_first_seen_while_the_arm_failed(tmp_path):
     pf, _ = _gen(tmp_path)
     grid = _grid(pf, "-- P173.3 ", "-- P173.4 ")
-    applied = _at(_SEP, 7, 0)                    # V168's apply; the arm fails from then on
     now = _at(_SEP + timedelta(days=2), 9, 0)
-    s = _Scan([_cfg(_NET, 1)])
-    s.logins = [_login("JDOE", _at(_SEP - timedelta(days=30), 8), True),                  # baseline: not new
-                _login("JDOE", _at(_SEP, 8), True),
-                _login("JDOE", _at(_SEP, 10), True, ip="198.51.100.7"),                    # missed: > 24h ago
-                _login("first.last.name", _at(_SEP + timedelta(days=2), 1), False),       # raised by next scan
-                _login("JDOE", _at(_SEP, 6), True, ip="10.9.9.9")]                         # before the apply
-    _legacy(s, _key18("JDOE", "10.9.9.9", _SEP), _at(_SEP, 6, 7))
-    con = s._con(now)
+    rows = {(r["USER_NAME"], r["CLIENT_IP"]): r
+            for r in _run_grid(_outage_scan(), grid, now, {168: _APPLIED_168})}
+    # from 24h before V168's apply: the 05:00 pair no good run saw is listed, the alerted 06:00 pair too (as alerted)
+    assert set(rows) == {("JDOE", "192.0.2.44"), ("JDOE", "10.9.9.9"), ("JDOE", "198.51.100.7"),
+                         ("first.last.name", "203.0.113.9")}
+    assert {k: (r["NOT_ALERTED"], r["IN_ARM_WINDOW_NOW"]) for k, r in rows.items()} == {
+        ("JDOE", "192.0.2.44"): (1, 0), ("JDOE", "10.9.9.9"): (0, 0), ("JDOE", "198.51.100.7"): (1, 0),
+        ("first.last.name", "203.0.113.9"): (1, 1)}
+    # the V173 text's old bound (V168's apply itself) lost the 05:00 pair
+    old = grid.replace("DATEADD('hour', -24, (SELECT MAX(APPLIED_AT)", "((SELECT MAX(APPLIED_AT)", 1)
+    assert old != grid
+    assert ("JDOE", "192.0.2.44") not in {(r["USER_NAME"], r["CLIENT_IP"])
+                                          for r in _run_grid(_outage_scan(), old, now, {168: _APPLIED_168})}
+
+
+def test_part_b_v173_4_lists_exactly_the_pairs_the_arm_never_raises(tmp_path):
+    """V173 applied at 08:30, the first good scan at 09:07 raises what is in its 24h window, V173.4 at 09:30 lists the
+    rest: every pair no event covers that is past the window -- the arm's own pairs (threshold, enabled)."""
+    _, pb = _gen(tmp_path)
+    grid = pb[pb.index("-- V173.4 "):]
+    grid = "\n".join(ln for ln in grid.splitlines() if not ln.startswith("--")).strip().rstrip(";")
+    day = _SEP + timedelta(days=2)
+    s = _outage_scan()
+    assert [e["DEDUPE_KEY"] for e in s.arm(_ARM18, _at(day, 9, 7))] == [_key18("first.last.name", "203.0.113.9",
+                                                                              day, failed=True)]
+    got = [(r["USER_NAME"], r["CLIENT_IP"]) for r in _run_grid(s, grid, _at(day, 9, 30), {168: _APPLIED_168})]
+    assert got == [("JDOE", "192.0.2.44"), ("JDOE", "198.51.100.7")]           # oldest first
+    # what the arm would skip anyway is not listed: under the threshold, or the rule disabled
+    for cfg in (_cfg(_NET, 2), _cfg(_NET, 1, enabled=0)):
+        assert _run_grid(_outage_scan(cfg), grid, _at(day, 9, 30), {168: _APPLIED_168}) == []
+
+
+# ============================================================================================================
+# PART B V173.2 / V173.3: only a scan that STARTED after the apply counts
+# ============================================================================================================
+_FRESH = {"V173.2": ("ALERT_SCAN_HOURLY", "alert scan 14/14 rule blocks ok", _NET),
+          "V173.3": ("ALERT_SCAN_DAILY", "alert scan daily 14/14 rule blocks ok (daily)", "COST_IDLE_OPPORTUNITY")}
+
+
+def _scan_checks(grid: str, *, applied: datetime, now: datetime, beat: tuple[datetime, str],
+                 errors: list[tuple[datetime, str, str]]) -> dict[str, str]:
+    con = v168h._connect({}, v168h._ms(now))
+    con.create_function("TO_VARCHAR", -1, lambda x, *_f: None if x is None else str(x))
     con.execute("CREATE TABLE SCHEMA_VERSION (VERSION, APPLIED_AT)")
-    con.execute("INSERT INTO SCHEMA_VERSION VALUES (168, ?)", (v168h._ms(applied),))
-    cur = con.execute(v168h._sq(grid))
-    cols = [c[0] for c in cur.description]
-    rows = {(r["USER_NAME"], r["CLIENT_IP"]): r for r in (dict(zip(cols, x, strict=True)) for x in cur.fetchall())}
-    assert set(rows) == {("JDOE", "198.51.100.7"), ("first.last.name", "203.0.113.9")}
-    assert (rows[("JDOE", "198.51.100.7")]["NOT_ALERTED"], rows[("JDOE", "198.51.100.7")]["RAISED_BY_NEXT_SCAN"]) \
-        == (1, 0)
-    assert rows[("first.last.name", "203.0.113.9")]["RAISED_BY_NEXT_SCAN"] == 1
+    con.execute("INSERT INTO SCHEMA_VERSION VALUES (173, ?)", (v168h._ms(applied),))
+    con.execute("CREATE TABLE SOURCE_FRESHNESS_STATE (SOURCE_NAME, LAST_LOAD_TS, STATUS)")
+    for src, _status, _rule in _FRESH.values():
+        con.execute("INSERT INTO SOURCE_FRESHNESS_STATE VALUES (?, ?, ?)", (src, v168h._ms(beat[0]), beat[1]))
+    con.execute("CREATE TABLE APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, LOGGED_AT)")
+    for at, etype, context in errors:
+        con.execute("INSERT INTO APP_ERROR_LOG VALUES ('AlertScan', ?, 'x', ?, ?)", (etype, context, v168h._ms(at)))
+    sql = v168h._sq(grid).replace("LISTAGG(DISTINCT CONTEXT, '; ')", "GROUP_CONCAT(DISTINCT CONTEXT)")
+    return dict(con.execute(sql).fetchall())
+
+
+@pytest.mark.parametrize("check", ["V173.2", "V173.3"])
+def test_part_b_scan_checks_read_only_a_scan_that_started_after_the_apply(tmp_path, check):
+    _, pb = _gen(tmp_path)
+    grid = _grid(pb, f"-- {check} ", {"V173.2": "-- V173.3 ", "V173.3": "-- V173.4 "}[check])
+    _src, ok_status, rule = _FRESH[check]
+    old_status = ok_status.replace("14/14", "13/14")
+    old_fail = (_at(_SEP, 10, 21), "rule_block_failed", f"rule {rule} - other rules unaffected")
+    applied = _at(_SEP, 10, 20)
+    # a scan that started at 10:15 runs the OLD body to the end: its failure (10:21) and its 13/14 heartbeat (10:22)
+    # land after the apply. A correct apply reads WAIT, never FAIL / CHECK.
+    got = _scan_checks(grid, applied=applied, now=_at(_SEP, 10, 30), beat=(_at(_SEP, 10, 22), old_status),
+                       errors=[old_fail])
+    assert set(got.values()) == {"OK"} | {v for v in got.values() if v.startswith("WAIT: ")}, got
+    assert sum(v.startswith("WAIT: ") for v in got.values()) == 2, got
+    # the old anchoring (the bare APPLIED_AT) reported that same correct apply as broken
+    bare = grid.replace("DATEADD('minute', 55, ", "DATEADD('minute', 0, ").replace(
+        "DATEADD('minute', 30, ", "DATEADD('minute', 0, ")
+    assert bare != grid
+    old = _scan_checks(bare, applied=applied, now=_at(_SEP, 10, 30), beat=(_at(_SEP, 10, 22), old_status),
+                       errors=[old_fail])
+    assert any(v.startswith(("FAIL", "CHECK")) for v in old.values()), old
+    # the next scan (11:15-11:18, the V173 body): everything OK
+    after = {"applied": applied, "now": _at(_SEP, 11, 30), "beat": (_at(_SEP, 11, 18), ok_status)}
+    assert set(_scan_checks(grid, errors=[old_fail], **after).values()) == {"OK"}
+    # ... and a failure of the V173 body itself is still caught
+    new_fail = (_at(_SEP, 11, 16), "rule_block_failed", f"rule {rule} - other rules unaffected")
+    got = _scan_checks(grid, errors=[old_fail, new_fail], **after)
+    assert got[f"{check} no {rule} rule_block_failed since the apply"].startswith("FAIL"), got
+    assert got[f"{check} no rule_block_failed of any rule since the apply"].startswith("CHECK"), got
+    if check == "V173.2":
+        sweep = (_at(_SEP, 11, 17), "supersede_sweep_failed", "V067 #40 escalation supersede - other rules unaffected")
+        got = _scan_checks(grid, errors=[sweep], **after)
+        assert got["V173.2 no supersede_sweep_failed since the apply"].startswith("FAIL"), got
 
 
 # ============================================================================================================

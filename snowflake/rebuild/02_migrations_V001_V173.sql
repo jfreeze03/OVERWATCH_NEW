@@ -92864,9 +92864,11 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 -- COST: one 48h ALERT_EVENTS read bounded by RULE_ID in arm [18] (V168 read the same rows under its OR); none in [24].
 -- LATENCY: hourly (:07 Central) and daily (06:50 Central), as before.
 -- FIRST RUN: the next hourly scan raises the admin new-network pairs first seen in its 24h window that have no event
--- (PREFLIGHT P173.2 lists them). A pair first seen while the arm was failing and more than 24h before that scan is
--- never raised by the arm: PREFLIGHT P173.3 lists every pair first seen since V168's apply, with whether an event
--- exists; review the unalerted ones in Security > Access. The next daily scan evaluates COST_IDLE_OPPORTUNITY again
+-- (PREFLIGHT P173.2 lists them). A pair first seen more than 24h before that scan that no run before V168's apply
+-- raised is never raised by the arm; LOGIN_HISTORY lands up to 2h late, so V162's last hourly run missed the pairs
+-- first seen in the 2h before it. PREFLIGHT P173.3 previews the pairs first seen from 24h before V168's apply,
+-- with whether an event exists; once PART B V173.2 reads OK, PART B V173.4 lists exactly the ones no event covers:
+-- review those in Security > Access. The next daily scan evaluates COST_IDLE_OPPORTUNITY again
 -- (PREFLIGHT P173.4 lists the zero-credit warehouses that hit the division, P173.5 what the arm would raise). The
 -- OPS_SCAN_DEGRADED events the failures raised are true history: resolve them in Alerts once PART B reads OK.
 -- ROLLBACK: re-run V168's SP_ALERT_SCAN (the CREATE PROCEDURE in V168__alert_scan_hourly_keys_and_sweeps.sql) and

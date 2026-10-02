@@ -364,7 +364,9 @@ def test_runbook_wave4_rollbacks_name_the_cross_wave_order():
     # V173 re-derives the daily scan from V169 (2026-10-02 hotfix): the current definer the V160 rollback must undo first
     assert "current definer is V173, re-derived from V169), so roll V173, V169 and V163 back first, in that order" in v160
     wave = " ".join(rb[rb.index("**Rolling back the V166-V172 wave.**"):].split("\n\n", 1)[0].split())
-    assert "go from V172 down to V162 in reverse apply order" in wave
+    # V173 (2026-10-02 hotfix) re-derives both scans from V168 / V169: on a V173 schema the reverse order starts there
+    assert "go from V173 (if applied) down to V162 in reverse apply order" in wave
+    assert "On a V173 schema start at V173" in wave
 
 
 def test_ops_pipeline_degraded_docs_name_both_err_outcomes():
